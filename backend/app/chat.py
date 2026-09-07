@@ -4855,6 +4855,28 @@ async def _run_chat_impl(
     db.close()
 
 
+def _should_enable_coordination_tools(
+  *,
+  chat_id: str,
+  delegated: bool,
+  project_id: str | None,
+  coordination_context: str,
+  alive_chat_ids: set[str],
+) -> bool:
+  """Offer peer tools only when this turn has a peer it can use them with.
+
+  Delegations and Projects retain their coordination surface even while peers
+  are temporarily idle. Ordinary isolated chats regain it automatically when
+  another agent is live or a durable peer event is injected.
+  """
+  return bool(
+    delegated
+    or project_id
+    or coordination_context
+    or (alive_chat_ids - {chat_id})
+  )
+
+
 async def _run_chat_impl_with_db(
   messages: list[schemas.ChatMessage],
   chat_id: str = "",
@@ -5092,6 +5114,26 @@ async def _run_chat_impl_with_db(
       user_message = f"{user_message}\n\n{block}"
     else:
       user_message = f"{block}\n\n{user_message}"
+
+  # Coordination is a peer-network context surface, not transcript history.
+  # Every durable child has its own chat address, so a peer note never has to
+  # impersonate an owner steer to reach another model.
+  coordination_context = ""
+  if chat_id and run_token:
+    from app.agent_coordination import build_coordination_context
+    coordination_context = build_coordination_context(db, chat_id, run_token)
+    if coordination_context:
+      if is_slash_command:
+        user_message = f"{user_message}\n\n{coordination_context}"
+      else:
+        user_message = f"{coordination_context}\n\n{user_message}"
+  coordination_tools_enabled = _should_enable_coordination_tools(
+    chat_id=chat_id,
+    delegated=run_policy is not None,
+    project_id=(chat_row.project_id if chat_row is not None else None),
+    coordination_context=coordination_context,
+    alive_chat_ids=registry.all_alive_chat_ids(),
+  )
 
   if not session_id and run_policy is None:
     compaction_brief = _latest_compaction_brief(chat_row)
@@ -5560,6 +5602,7 @@ async def _run_chat_impl_with_db(
         run_policy=run_policy,
         provider_id=provider_id,
         connector_plan=connector_turn_plan,
+        coordination_enabled=coordination_tools_enabled,
       )
       new_session_id = runner_result.get("session_id")
       err = runner_result.get("error")
@@ -5729,6 +5772,7 @@ async def _run_chat_impl_with_db(
         ),
         run_policy=run_policy,
         connector_plan=connector_turn_plan,
+        coordination_enabled=coordination_tools_enabled,
       )
       new_session_id = runner_result.get("session_id")
       err = runner_result.get("error")

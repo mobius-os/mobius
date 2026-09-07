@@ -27,6 +27,10 @@
     "0023_project_color": "aecbaff852f8640f86a9f0695bc26ff8b00e857b31d36a1d345440c301eca5ed",
     "0024_chat_goal_dismissal": "eb39716740f6dd2414db70b7d3d64443cc94583b778aca344398202adb591b96",
     "0025_attached_delegation_work": "45504079269294dcd1e52d55e581dd7322ed49f8c0b6304b6f1a5e161d057468",
-    "0026_chat_wait_condition_owner": "f6fc4684329468706ff2b92a4333005ca4a5eb708bbc81e20a57e73df5ff8143"
+    "0026_chat_wait_condition_owner": "f6fc4684329468706ff2b92a4333005ca4a5eb708bbc81e20a57e73df5ff8143",
+    "0027_chat_run_goal_identity_index": "213e23f55bfe5c17cfea96624ac797364508c0c2523407b1e798db9598e216e2",
+    "0028_agent_coordination_rooms": "23f936f3e9b0ff5580322c7d32b78393c253ad685ce27efbb9ba8886366b6d9c",
+    "0029_agent_coordination_send_identity": "5d6c0bf326820967914d2371d59de899fca25fbc9108a457ace4b1f107251fee",
+    "0030_agent_coordination_send_target": "3136ced66edcd905cedf8725bfe45e480090948cbd7a66402976277f2a07265d"
   }
 }

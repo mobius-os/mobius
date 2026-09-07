@@ -111,7 +111,12 @@ log = logging.getLogger(__name__)
 _CONTROL_MCP_READY_TIMEOUT_SECONDS = 10.0
 
 
-async def _await_control_mcp_ready(client, *, enabled: bool) -> str | None:
+async def _await_control_mcp_ready(
+  client,
+  *,
+  enabled: bool,
+  expected_tool_names: tuple[str, ...] | None = None,
+) -> str | None:
   """Wait for Claude's local control tool to be discoverable before query.
 
   ``ClaudeSDKClient.connect()`` establishes the SDK control channel, but stdio
@@ -132,6 +137,8 @@ async def _await_control_mcp_ready(client, *, enabled: bool) -> str | None:
     return None
 
   from app.platform_tools import CONTROL_SERVER_NAME, CONTROL_TOOL_NAMES
+
+  required_tools = expected_tool_names or CONTROL_TOOL_NAMES
 
   loop = asyncio.get_running_loop()
   deadline = loop.time() + _CONTROL_MCP_READY_TIMEOUT_SECONDS
@@ -160,7 +167,7 @@ async def _await_control_mcp_ready(client, *, enabled: bool) -> str | None:
       }
       if (
         status == "connected"
-        and set(CONTROL_TOOL_NAMES).issubset(available_tools)
+        and set(required_tools).issubset(available_tools)
       ):
         return None
       if status in {"failed", "needs-auth", "disabled"}:
@@ -988,6 +995,7 @@ async def run_claude_sdk_turn(
   skills_enabled: bool = False,
   run_policy=None,
   connector_plan=None,
+  coordination_enabled: bool = True,
 ) -> RunnerResult:
   """Runs one Claude SDK turn and translates SDK messages to Möbius events.
 
@@ -1016,6 +1024,10 @@ async def run_claude_sdk_turn(
   """
   current_session_id = session_id
   cost_usd: float | None = None
+  base_env = dict(base_env)
+  base_env["MOBIUS_COORDINATION_ENABLED"] = (
+    "1" if coordination_enabled else "0"
+  )
 
   # Canonical AskUserQuestion handling via can_use_tool, per
   # https://code.claude.com/docs/en/agent-sdk/user-input
@@ -1287,15 +1299,20 @@ async def run_claude_sdk_turn(
     # would let the argv-visible path alias an unrelated descriptor later.
     connector_config_stack = ExitStack()
     connector_config_handle = None
-    control_tools_enabled = run_policy is None
+    # Every ordinary live agent gets the same provider-neutral coordination
+    # tools, including durable delegated children.
+    control_server_enabled = True
     try:
       from app.connectors import claude_mcp_config_handle
-      from app.platform_tools import claude_control_servers
+      from app.platform_tools import (
+        claude_control_servers,
+        expected_control_tool_names,
+      )
       connector_config_handle = connector_config_stack.enter_context(
         claude_mcp_config_handle(
           connector_plan,
           extra_servers=claude_control_servers(
-            enabled=control_tools_enabled,
+            enabled=control_server_enabled,
           ),
         )
       )
@@ -1326,7 +1343,15 @@ async def run_claude_sdk_turn(
           control_ready_error = await _await_control_mcp_ready(
             client,
             enabled=(
-              control_tools_enabled and connector_config_handle is not None
+              control_server_enabled and connector_config_handle is not None
+            ),
+            expected_tool_names=(
+              expected_control_tool_names(
+                top_level=run_policy is None,
+                coordination_enabled=coordination_enabled,
+              )
+              if control_server_enabled and connector_config_handle is not None
+              else None
             ),
           )
           if control_ready_error:

@@ -1067,15 +1067,11 @@ def active_parent_context(
 def delegation_execution_token(
   db: Session, policy: RunPolicy, run_id: str,
 ) -> str:
-  """Return the narrowest bearer that can fulfill the child contract.
+  """Return an owner bearer bound to this delegated physical run.
 
-  A read delegation may still execute local inspection commands in the
-  provider sandbox. Giving that process a normal app bearer would let a
-  prompt-injected critic mutate app storage or call other app-owned write
-  routes over HTTP, bypassing the filesystem policy entirely. Read children
-  therefore receive a delegation-only bearer that can manage direct children
-  but cannot touch app storage. Write children retain the app-attributed
-  authority their contract promises.
+  Delegated agents inherit the parent's approved tool surface. The immutable
+  policy and active-run checks below remain authoritative, while delegation
+  claims let the delegation API preserve direct-child and read-to-write rules.
   """
   if policy.scope not in {"read", "write"}:
     raise RuntimeError(f"unknown delegation scope: {policy.scope}")
@@ -1107,21 +1103,14 @@ def delegation_execution_token(
   ).first()
   if physical is None:
     raise RuntimeError("delegation run is not active")
-  if policy.scope == "read":
-    return auth.create_delegation_token(
-      row.id, app.id, row.child_chat_id, run_id,
-      owner.username, owner.token_epoch,
-      expires_delta=timedelta(hours=2),
-    )
-  return auth.create_app_token(
-    app.id,
+  return auth.create_agent_token(
+    row.child_chat_id,
+    run_id,
     owner.username,
     owner.token_epoch,
-    app_nonce=app.token_nonce,
-    expires_delta=timedelta(hours=2),
+    expires_delta=auth.AGENT_RUN_TOKEN_TTL,
     delegation_id=policy.delegation_id,
     delegation_chat=row.child_chat_id,
-    delegation_run=run_id,
   )
 
 

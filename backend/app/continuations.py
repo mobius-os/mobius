@@ -30,6 +30,10 @@ PRODUCT_RESULT_MESSAGE_KINDS = frozenset({
   WAIT_RESULT_MESSAGE_KIND,
 })
 
+# A peer's direct request/blocker/handoff waking an idle chat with a paused
+# Goal travels the same slot and resumes under that Goal's identity.
+PEER_MESSAGE_WAKE_KIND = "peer_message"
+
 
 def pending_message_group_key(message: Mapping[str, Any]) -> tuple:
   """Return the causal turn boundary for one queued message."""
@@ -57,8 +61,6 @@ def product_result_run_token(
     or not isinstance(cid, str) or not cid
   ):
     return None
-  # A Wait's durable row id is embedded in its platform-owned cid. Legacy
-  # rows therefore keep one physical identity even without source attribution.
   if kind == WAIT_RESULT_MESSAGE_KIND and cid.startswith("wait-result-"):
     return f"wait-resume-{cid.removeprefix('wait-result-')}"
   if isinstance(explicit, str) and explicit:
@@ -72,13 +74,7 @@ def product_result_run_token(
 
 
 def continues_logical_root(message: Mapping[str, Any] | None) -> bool:
-  """Whether a product-generated message continues the current work identity.
-
-  Product results are not generic recovery markers—their context/redaction
-  rules remain distinct—but they must stay under the logical root that created
-  the delegated task or durable Wait. Otherwise a queued result can hide the
-  exact task-key attachments it is meant to resume.
-  """
+  """Whether a product-generated message continues its originating work."""
   return bool(
     isinstance(message, Mapping)
     and message.get("kind") in (

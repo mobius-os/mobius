@@ -12,6 +12,7 @@ import UserPlus from 'lucide-react/dist/esm/icons/user-plus.mjs'
 import X from 'lucide-react/dist/esm/icons/x.mjs'
 import { api, jsonOrThrow } from '../../api/client.js'
 import useDialogFocus from '../../hooks/useDialogFocus.js'
+import AgentCoordinationFeed from '../Agents/AgentCoordinationFeed.jsx'
 import ProjectIdentityIcon from './ProjectIdentityIcon.jsx'
 import './ProjectCollaborationPanel.css'
 
@@ -68,6 +69,15 @@ export default function ProjectCollaborationPanel({ project, onClose }) {
       return Array.isArray(rows) ? rows : []
     },
     refetchInterval: 10_000,
+  })
+  const coordinationQuery = useQuery({
+    queryKey: ['agent-coordination', 'project', project.id],
+    queryFn: async () => jsonOrThrow(
+      await api.agentCoordination.project(project.id), 'Agent network failed:',
+    ),
+    refetchInterval: 5_000,
+    staleTime: 1_500,
+    retry: 0,
   })
   const claimsQuery = useQuery({
     queryKey: ['projects', 'work-claims', project.id],
@@ -220,7 +230,13 @@ export default function ProjectCollaborationPanel({ project, onClose }) {
             {agentsQuery.isLoading ? <p className="project-collab__empty">Loading agent activity…</p> : agentsQuery.isError ? <button type="button" className="project-collab__retry" onClick={() => agentsQuery.refetch()}>Retry agent activity</button> : agents.length === 0 ? <p className="project-collab__empty">Start a project chat to give an agent this workspace.</p> : <div className="project-collab__agents">
               {agents.map(agent => { const state = agentState(agent.run); const claim = claimsByChat.get(String(agent.id)); return <div key={agent.id} className="project-collab__agent"><span className={`project-collab__agent-icon${state.active || claim ? ' is-active' : ''}`}><Sparkles size={14} /></span><span><strong>{agent.title || 'Project agent'}</strong><small>{claim?.summary || agent.run?.summary || agent.run?.provider || 'Ready for project work'}</small></span><i>{state.label}</i></div> })}
             </div>}
-            <p className="project-collab__agent-note">Agents see the current roster, work scopes, and project mailbox at the start of each turn.</p>
+            <AgentCoordinationFeed
+              snapshot={coordinationQuery.data}
+              loading={coordinationQuery.isLoading}
+              error={coordinationQuery.isError}
+              onRetry={() => coordinationQuery.refetch()}
+            />
+            <p className="project-collab__agent-note">Peer notes stay separate from your chats and remain visible here for review.</p>
           </section>
 
           <details className="project-collab__role-details">

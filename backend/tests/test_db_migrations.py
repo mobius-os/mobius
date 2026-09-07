@@ -1172,6 +1172,10 @@ def test_run_migrations_records_an_inspectable_append_only_history(tmp_path):
     "0024_chat_goal_dismissal",
     "0025_attached_delegation_work",
     "0026_chat_wait_condition_owner",
+    "0027_chat_run_goal_identity_index",
+    "0028_agent_coordination_rooms",
+    "0029_agent_coordination_send_identity",
+    "0030_agent_coordination_send_target",
   ]
   assert second == first
 
@@ -2244,6 +2248,120 @@ def test_chat_wait_condition_owner_migration_adds_nullable_column(tmp_path):
       "SELECT COUNT(*) FROM schema_migrations "
       "WHERE version = '0026_chat_wait_condition_owner'"
     )).scalar_one() == 1
+
+
+def test_goal_identity_index_repair_preserves_recorded_0015_data(tmp_path):
+  eng = create_engine(f"sqlite:///{tmp_path / 'goal-index-repair.db'}")
+  models.Base.metadata.create_all(eng)
+  with Session(eng) as session:
+    session.add(models.Chat(id="goal-chat", title="Goal", messages=[]))
+    session.add(models.ChatRun(
+      id="historical", root_run_id="historical", chat_id="goal-chat",
+      status="completed", provider="codex", goal_objective="Ship",
+      goal_id="preserve-existing-identity",
+      started_at=datetime(2026, 8, 19),
+    ))
+    session.commit()
+  with eng.begin() as conn:
+    conn.execute(text("DROP INDEX ix_chat_runs_goal_id"))
+    conn.execute(text(
+      "CREATE TABLE IF NOT EXISTS schema_migrations ("
+      "version VARCHAR(128) PRIMARY KEY, applied_at TIMESTAMP NOT NULL)"
+    ))
+    for version in _migration_versions_before(
+      "0027_chat_run_goal_identity_index",
+    ):
+      conn.execute(text(
+        "INSERT INTO schema_migrations (version, applied_at) VALUES (:v, :at)"
+      ), {"v": version, "at": datetime(2026, 8, 19)})
+
+  run_migrations(eng)
+  run_migrations(eng)
+
+  with eng.connect() as conn:
+    assert conn.execute(text(
+      "SELECT goal_id FROM chat_runs WHERE id = 'historical'"
+    )).scalar_one() == "preserve-existing-identity"
+    assert conn.execute(text(
+      "SELECT COUNT(*) FROM schema_migrations "
+      "WHERE version = '0027_chat_run_goal_identity_index'"
+    )).scalar_one() == 1
+  assert any(
+    index["name"] == "ix_chat_runs_goal_id"
+    for index in inspect(eng).get_indexes("chat_runs")
+  )
+
+def test_agent_coordination_migration_copies_legacy_project_mail_once(tmp_path):
+  eng = create_engine(f"sqlite:///{tmp_path / 'agent-coordination.db'}")
+  models.Base.metadata.create_all(eng)
+  with Session(eng) as session:
+    session.add(models.Project(
+      id="project-1", name="Project", project_type="blank",
+      root_path="projects/project-1", template_snapshot_json={},
+    ))
+    session.add_all([
+      models.Chat(id="sender", title="Sender", messages=[], project_id="project-1"),
+      models.Chat(id="receiver", title="Receiver", messages=[], project_id="project-1"),
+    ])
+    session.flush()
+    session.add(models.ProjectAgentMessage(
+      id="legacy-message", project_id="project-1", from_chat_id="sender",
+      to_chat_id="receiver", body="Preserve this note.",
+      created_at=datetime(2026, 8, 31),
+    ))
+    session.commit()
+  with eng.begin() as conn:
+    conn.execute(text("DROP TABLE agent_coordination_messages"))
+    conn.execute(text(
+      "CREATE TABLE IF NOT EXISTS schema_migrations ("
+      "version VARCHAR(128) PRIMARY KEY, applied_at TIMESTAMP NOT NULL)"
+    ))
+    for version in _migration_versions_before("0028_agent_coordination_rooms"):
+      conn.execute(text(
+        "INSERT INTO schema_migrations (version, applied_at) VALUES (:v, :at)"
+      ), {"v": version, "at": datetime(2026, 8, 31)})
+
+  run_migrations(eng)
+  run_migrations(eng)
+
+  assert {
+    "project_agent_messages", "agent_coordination_messages",
+  }.issubset(inspect(eng).get_table_names())
+  assert {"send_id", "send_target_key"}.issubset({
+    column["name"]
+    for column in inspect(eng).get_columns("agent_coordination_messages")
+  })
+  assert {
+    "ix_agent_coordination_room_created",
+    "ix_agent_coordination_messages_from_chat_id",
+    "ix_agent_coordination_messages_to_chat_id",
+  }.issubset({
+    index["name"]
+    for index in inspect(eng).get_indexes("agent_coordination_messages")
+  })
+  retry_index = next(
+    index
+    for index in inspect(eng).get_indexes("agent_coordination_messages")
+    if index["name"] == "uq_agent_coordination_run_send_target"
+  )
+  assert bool(retry_index["unique"]) is True
+  assert retry_index["column_names"] == [
+    "from_run_id", "send_id", "send_target_key",
+  ]
+  with eng.connect() as conn:
+    rows = conn.execute(text(
+      "SELECT id, room_kind, room_id, from_chat_id, to_chat_id, kind, body "
+      "FROM agent_coordination_messages"
+    )).mappings().all()
+  assert rows == [{
+    "id": "legacy-message",
+    "room_kind": "project",
+    "room_id": "project-1",
+    "from_chat_id": "sender",
+    "to_chat_id": "receiver",
+    "kind": "note",
+    "body": "Preserve this note.",
+  }]
 
 
 def test_failed_migration_is_not_recorded_and_can_retry(tmp_path, monkeypatch):

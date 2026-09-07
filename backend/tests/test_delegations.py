@@ -43,11 +43,11 @@ def _parent_with_run(client, owner_token, db):
   return chat_id
 
 
-def test_read_delegation_receives_only_a_delegation_scoped_bearer(
+def test_delegations_inherit_owner_tools_with_run_bound_identity(
   client, owner_token, db,
 ):
-  auth = {"Authorization": f"Bearer {owner_token}"}
-  app_id = create_local_app(client, auth, name="Read policy")['id']
+  headers = {"Authorization": f"Bearer {owner_token}"}
+  app_id = create_local_app(client, headers, name="Read policy")['id']
   db.add_all([
     models.Chat(id="parent", title="Parent", messages=[]),
     models.Chat(id="read-child", title="Child", messages=[], created_by_app_id=app_id),
@@ -97,6 +97,24 @@ def test_read_delegation_receives_only_a_delegation_scoped_bearer(
     "write-run",
   )
   assert read_token and write_token
+  read_claims = auth.decode_access_token(read_token)
+  write_claims = auth.decode_access_token(write_token)
+  assert read_claims is not None and write_claims is not None
+  for claims, child, run, policy in (
+    (read_claims, "read-child", "read-run", "read-policy"),
+    (write_claims, "write-child", "write-run", "write-policy"),
+  ):
+    assert claims.get("scope") is None
+    assert claims["agent_chat"] == child
+    assert claims["agent_run"] == run
+    assert claims["delegation_id"] == policy
+    assert claims["delegation_chat"] == child
+
+  owner_surface = client.get(
+    "/api/connect/hosts",
+    headers={"Authorization": f"Bearer {read_token}"},
+  )
+  assert owner_surface.status_code == 200, owner_surface.text
   active_write = client.get(
     "/api/delegations", headers={"Authorization": f"Bearer {write_token}"},
   )

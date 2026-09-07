@@ -66,7 +66,7 @@ from app import activity, models
 # uvicorn boot. See the
 # wrapped imports in lifespan() below.
 from app.routes import (
-  admin_router, apps_router, auth_router,
+  admin_router, agent_coordination_router, apps_router, auth_router,
   app_chat_router,
   chat_embed_router, chat_logs_router, chat_router, chats_router, chats_stream_router,
   secure_inputs_router,
@@ -823,6 +823,7 @@ app.include_router(chat_embed_router)
 app.include_router(chats_router)
 app.include_router(chats_stream_router)
 app.include_router(secure_inputs_router)
+app.include_router(agent_coordination_router)
 app.include_router(delegations_router)
 app.include_router(chat_waits_router)
 app.include_router(goal_plans_router)

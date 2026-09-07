@@ -666,6 +666,16 @@ export const api = {
     // broker appends the scoped token + versioned service-worker cache key.
     moduleUrl: (appId) => `${BASE}/api/apps/${appId}/module`,
   },
+  agentCoordination: {
+    chat: (chatId, options = {}) => apiFetch(
+      `/agent-coordination/chats/${encodeURIComponent(chatId)}`,
+      options,
+    ),
+    project: (projectId, options = {}) => apiFetch(
+      `/agent-coordination/projects/${encodeURIComponent(projectId)}`,
+      options,
+    ),
+  },
   projects: {
     list: () => apiFetch('/projects'),
     templates: () => apiFetch('/projects/templates'),

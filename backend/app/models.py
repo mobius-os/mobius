@@ -18,7 +18,7 @@ from datetime import UTC, datetime
 
 from sqlalchemy import (
   Boolean, CheckConstraint, Column, DateTime, Float, ForeignKey, Integer, JSON,
-  LargeBinary, String, Text, UniqueConstraint, event, false, or_, true,
+  Index, LargeBinary, String, Text, UniqueConstraint, event, false, or_, true,
 )
 
 from sqlalchemy.orm import column_property, validates
@@ -1032,11 +1032,11 @@ class ProjectDrawerState(Base):
 
 
 class ProjectAgentMessage(Base):
-  """A bounded project-local mailbox between project chat agents.
+  """Legacy project mailbox retained for baked-backend recovery.
 
-  ``to_chat_id`` is NULL for a project broadcast. Directed multi-recipient
-  sends create one row per recipient, which keeps reads and confinement simple.
-  This is a new table, so ``create_all`` installs it on the next boot.
+  New source writes ``AgentCoordinationMessage`` only. Keeping this mapping
+  makes fresh databases create the table an older baked backend expects if an
+  edited source checkout ever fails to boot.
   """
 
   __tablename__ = "project_agent_messages"
@@ -1054,6 +1054,48 @@ class ProjectAgentMessage(Base):
     String(64), ForeignKey("chats.id", ondelete="CASCADE"),
     nullable=True, index=True,
   )
+  body = Column(Text, nullable=False)
+  created_at = Column(DateTime, nullable=False, default=lambda: now_naive_utc())
+
+
+class AgentCoordinationMessage(Base):
+  """One durable provider-neutral peer note.
+
+  Broadcast rows remain scoped to a Project or delegation tree. Directed rows
+  use the owner-keyed workspace channel so topology never constrains delivery;
+  one row per recipient keeps inbox visibility and retention exact. ``send_id``
+  groups one multi-recipient send and lets callers safely reuse an explicit
+  retry identity within the same physical agent run.
+  """
+
+  __tablename__ = "agent_coordination_messages"
+  __table_args__ = (
+    Index(
+      "ix_agent_coordination_room_created",
+      "room_kind", "room_id", "created_at", "id",
+    ),
+    UniqueConstraint(
+      "from_run_id", "send_id", "send_target_key",
+      name="uq_agent_coordination_run_send_target",
+    ),
+  )
+
+  id = Column(String(64), primary_key=True)
+  room_kind = Column(String(16), nullable=False)
+  room_id = Column(String(64), nullable=False)
+  from_chat_id = Column(
+    String(64), ForeignKey("chats.id"), nullable=False, index=True,
+  )
+  from_run_id = Column(String(64), nullable=True)
+  send_id = Column(String(64), nullable=True, index=True)
+  # Null only for rows written before stable send identity existed. New rows
+  # use the recipient chat id or an empty string for a scope broadcast, which
+  # lets SQLite enforce retries even though SQL NULLs are not unique.
+  send_target_key = Column(String(64), nullable=True)
+  to_chat_id = Column(
+    String(64), ForeignKey("chats.id"), nullable=True, index=True,
+  )
+  kind = Column(String(16), nullable=False, default="note", server_default="note")
   body = Column(Text, nullable=False)
   created_at = Column(DateTime, nullable=False, default=lambda: now_naive_utc())
 

@@ -1518,6 +1518,23 @@ def test_control_mcp_readiness_waits_for_every_platform_tool():
   assert client.calls == 3
 
 
+def test_control_mcp_readiness_accepts_delegated_coordination_subset():
+  from app import claude_sdk_runner
+  from app.platform_tools import COORDINATION_TOOL_NAMES
+
+  class _Client:
+    async def get_mcp_status(self):
+      return {"mcpServers": [{
+        "name": "mobius_control",
+        "status": "connected",
+        "tools": [{"name": name} for name in COORDINATION_TOOL_NAMES],
+      }]}
+
+  assert asyncio.run(claude_sdk_runner._await_control_mcp_ready(
+    _Client(), enabled=True, expected_tool_names=COORDINATION_TOOL_NAMES,
+  )) is None
+
+
 def test_control_mcp_readiness_reports_terminal_failure_without_retrying():
   from app import claude_sdk_runner
 

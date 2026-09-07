@@ -694,6 +694,14 @@ def presented_goal(db: Session, chat_id: str) -> dict[str, Any] | None:
   return serialize_goal(db, *rows) if rows is not None else None
 
 
+def paused_goal_run(db: Session, chat_id: str) -> models.ChatRun | None:
+  """Return this chat's physical run when its Goal is paused."""
+  rows = presented_goal_rows(db, chat_id)
+  if rows is None or serialize_goal(db, *rows)["status"] != "paused":
+    return None
+  return rows[0]
+
+
 def replace_plan(
   db: Session,
   *,

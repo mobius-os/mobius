@@ -7,7 +7,12 @@ from types import SimpleNamespace
 
 import pytest
 
-from app import codex_sdk_runner, connectors as connector_core, models
+from app import (
+  codex_sdk_runner,
+  connectors as connector_core,
+  models,
+  platform_tools,
+)
 from app.agent_lifecycle import normalize_chat_event
 from app.database import SessionLocal
 from app.runner_registry import RunnerKind, registry
@@ -3527,6 +3532,13 @@ def test_codex_delegation_policy_reaches_the_provider_boundary(
 
   assert captured["thread"]["sandbox"] == expected_sandbox
   assert captured["thread"]["approval_mode"] == expected_approval
+  control = captured["thread"]["config"]["mcp_servers"]["mobius_control"]
+  assert control["tools"] == {
+    name: {"approval_mode": "approve"}
+    for name in platform_tools.expected_control_tool_names(
+      top_level=scope is None,
+    )
+  }
   assert result["error"] is None
 
 

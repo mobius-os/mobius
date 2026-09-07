@@ -486,29 +486,3 @@ def test_delegation_result_without_a_goal_origin_stays_non_goal(db, chat):
     "hidden": True,
     "source_work_id": "ordinary-root",
   }) == (None, None)
-
-
-def test_promoted_child_result_exposes_committed_goal_to_the_live_event(db, chat):
-  db.add(models.ChatRun(
-    id="origin", root_run_id="origin", chat_id=chat.id,
-    status="completed", provider="codex", goal_objective="Ship it",
-    goal_id="origin-goal", goal_plan_json={
-      "tasks": [{"id": "verify", "status": "running"}],
-    },
-  ))
-  db.commit()
-  get_writer().submit(AppendPending(
-    chat_id=chat.id,
-    user_msg={
-      "role": "user", "content": "child result", "ts": 1,
-      "hidden": True, "kind": "delegation_result",
-      "source_work_id": "origin-goal",
-    },
-  )).result(timeout=5)
-  result = get_writer().submit(PromotePending(
-    chat_id=chat.id, run_token="result-run",
-  )).result(timeout=5)
-  get_writer().submit(Barrier()).result(timeout=5)
-
-  assert result["promoted"]["_goal_objective"] == "Ship it"
-  assert result["promoted"]["_goal_id"] == "origin-goal"

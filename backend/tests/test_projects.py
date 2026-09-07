@@ -10,6 +10,7 @@ import pytest
 from sqlalchemy.orm.attributes import flag_modified
 
 from app import models
+from app.agent_coordination import build_coordination_context
 from app.chat_context import _build_app_context
 from app.chat_retention import purge_expired_chat_tombstones
 from app.chat_waits import declare_wait
@@ -823,6 +824,15 @@ def test_project_agents_have_a_confined_roster_mailbox_and_next_turn_context(
   assert [row["body"] for row in mailbox.json()] == [
     "I mapped the source; edit index.html first.",
   ]
+  room = client.get(
+    f"/api/agent-coordination/projects/{project['id']}", headers=auth,
+  )
+  assert room.status_code == 200, room.text
+  assert {row["id"] for row in room.json()["peers"]} == {planner["id"]}
+  assert [row["body"] for row in room.json()["messages"]] == [
+    "I mapped the source; edit index.html first.",
+    "I mapped the source; edit index.html first.",
+  ]
   claimed = client.put(
     f"/api/projects/{project['id']}/work-claim", headers=auth,
     json={
@@ -835,8 +845,9 @@ def test_project_agents_have_a_confined_roster_mailbox_and_next_turn_context(
   context, env = _build_app_context(
     db, builder["id"], os.environ["DATA_DIR"],
   )
+  context += build_coordination_context(db, builder["id"], None)
   assert env["PROJECT_ID"] == project["id"]
-  assert "<project_collaboration>" in context
+  assert "<agent_coordination>" in context
   assert "Map the file changes" in context
   assert "edit index.html first" in context
   assert "Mapping the release plan" in context
@@ -921,6 +932,7 @@ def test_project_agent_direct_notes_broadcasts_and_disconnect_state_stay_confine
   observer_context, _ = _build_app_context(
     db, observer["id"], os.environ["DATA_DIR"],
   )
+  observer_context += build_coordination_context(db, observer["id"], None)
   assert "keep generated artifacts out of commits" in observer_context
   assert "Builder owns the CSV editor" not in observer_context
   assert '"status":"completed"' in observer_context

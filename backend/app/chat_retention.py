@@ -67,6 +67,13 @@ def purge_expired_chat_tombstones(db: Session) -> list[str]:
     db.query(model).filter(
       model.chat_id.in_(expired_chat_ids),
     ).delete(synchronize_session=False)
+  # Peer notes are outside chat transcripts but share the chat lifecycle.
+  db.query(models.AgentCoordinationMessage).filter(
+    or_(
+      models.AgentCoordinationMessage.from_chat_id.in_(expired_chat_ids),
+      models.AgentCoordinationMessage.to_chat_id.in_(expired_chat_ids),
+    ),
+  ).delete(synchronize_session=False)
   # Project coordination rows are intentionally small, but their foreign keys
   # still make them part of the chat's durable lifecycle.  A project can stay
   # live after one of its chats is deleted, so waiting for project retention

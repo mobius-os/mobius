@@ -47,6 +47,7 @@ export function startToolLifecycle(prev, event) {
     output: '',
     status: 'running',
     ...(event?.recall ? { recall: event.recall } : {}),
+    ...(event?.peer_message ? { peer_message: event.peer_message } : {}),
     ...(event?.edit_preview ? { edit_preview: event.edit_preview } : {}),
     ...(event?.tool_use_id ? { tool_use_id: event.tool_use_id } : {}),
   }]
@@ -81,6 +82,7 @@ export function attachToolInput(prev, event) {
     ...updated[i],
     input: event?.input || '',
     ...(event?.recall ? { recall: event.recall } : {}),
+    ...(event?.peer_message ? { peer_message: event.peer_message } : {}),
     ...(event?.edit_preview ? { edit_preview: event.edit_preview } : {}),
     ...(event?.tool_use_id && !updated[i].tool_use_id
       ? { tool_use_id: event.tool_use_id }
@@ -461,6 +463,12 @@ export function attachToolOutput(prev, content, event = null) {
   // large-output carving.
   if (event?.recall) {
     block.recall = event.recall
+  }
+  // Peer-network results follow the same two-phase contract: a provider-
+  // neutral running marker arrives on start/input, then the sink stamps the
+  // bounded authoritative receipt onto the completed output.
+  if (event?.peer_message) {
+    block.peer_message = event.peer_message
   }
   if (event?.output_exit_code != null) {
     block.output_exit_code = event.output_exit_code

@@ -91,19 +91,10 @@ def _require_nondelegated_control(
 
 
 def _require_app_update_control(
-  body: schemas.AppUpdate,
   principal: Principal = Depends(get_principal),
 ) -> None:
-  """Require confirmation only when PATCH changes trust or publication state."""
-  owner_confirmed_fields = (
-    body.cross_app_access,
-    body.share_with_apps,
-    body.chat_log_access,
-    body.published_manifest_url,
-    body.manage_skills,
-  )
-  if any(value is not None for value in owner_confirmed_fields):
-    require_nondelegated_owner_control(principal)
+  """Keep delegated agents out of owner-managed app metadata."""
+  require_nondelegated_owner_control(principal)
 
 
 def _app_source_root(db: Session, app_id: int) -> tuple[models.App, Path]:

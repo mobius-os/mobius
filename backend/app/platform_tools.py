@@ -1,8 +1,8 @@
 """Provider-neutral tool configuration owned by the Möbius platform.
 
-Remote connectors are optional owner capabilities.  These local tools are a
-different class: small control-plane primitives that every ordinary top-level
-agent should see with the same name and contract, regardless of provider.
+Remote connectors are optional owner capabilities. These local tools are a
+different class: run-bound control primitives plus one provider-neutral peer
+network shared by top-level chats and durable delegated agents.
 """
 
 from __future__ import annotations
@@ -35,11 +35,19 @@ CONTROL_TOOL_NAMES = (
   QUESTION_TOOL_NAME,
   *COORDINATION_TOOL_NAMES,
 )
+OWNER_CONTROL_TOOL_NAMES = (
+  GOAL_TOOL_NAME,
+  WAIT_TOOL_NAME,
+  CANCEL_WAIT_TOOL_NAME,
+  APPROVAL_TOOL_NAME,
+  QUESTION_TOOL_NAME,
+)
 CONTROL_ENV_VARS = (
   "API_BASE_URL",
   "AGENT_TOKEN",
   "CHAT_ID",
   "MOBIUS_RUN_TOKEN",
+  "MOBIUS_COORDINATION_ENABLED",
 )
 
 
@@ -47,6 +55,17 @@ def _control_script() -> str:
   return str(
     Path(__file__).resolve().parents[1] / "scripts" / "mobius_control_mcp.py"
   )
+
+
+def expected_control_tool_names(
+  *, top_level: bool, coordination_enabled: bool = True,
+) -> tuple[str, ...]:
+  """Tools the local server advertises for this agent authority level."""
+  if not top_level:
+    return DELEGATED_CONTROL_TOOL_NAMES
+  if coordination_enabled:
+    return CONTROL_TOOL_NAMES
+  return OWNER_CONTROL_TOOL_NAMES
 
 
 def claude_control_servers(*, enabled: bool) -> dict[str, dict[str, Any]]:
@@ -66,6 +85,8 @@ def codex_turn_mcp_config(
   connector_plan: Any | None,
   *,
   control_enabled: bool,
+  top_level: bool = True,
+  coordination_enabled: bool = True,
 ) -> dict[str, Any] | None:
   """Merge local control tools with one detached Codex connector snapshot."""
   servers: dict[str, Any] = {}
@@ -74,9 +95,24 @@ def codex_turn_mcp_config(
     if isinstance(configured, dict):
       servers.update(configured)
   if control_enabled:
+    tool_names = expected_control_tool_names(
+      top_level=top_level,
+      coordination_enabled=coordination_enabled,
+    )
     servers[CONTROL_SERVER_NAME] = {
       "command": sys.executable,
       "args": [_control_script()],
+      # Delegated Codex turns deliberately use ApprovalMode.deny_all so a
+      # child can never escape its sandbox.  Codex applies that same policy to
+      # MCP calls unless the server config explicitly pre-approves them.  The
+      # control server is a platform-owned, run-bound capability whose own
+      # routes enforce exact chat/run authority, so approve only today's
+      # named primitives rather than setting a blanket server default that
+      # would silently bless a future tool.
+      "tools": {
+        name: {"approval_mode": "approve"}
+        for name in tool_names
+      },
       # Codex intentionally starts stdio MCP children with a minimal
       # environment. Forward only the run-bound names this trusted local
       # control needs; unlike an `env` mapping, `env_vars` keeps their values

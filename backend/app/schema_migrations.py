@@ -2156,6 +2156,147 @@ def _add_chat_wait_condition_owner(eng) -> None:
       "ALTER TABLE chat_waits ADD COLUMN condition_owner VARCHAR(200) NULL"
     ))
 
+
+def _repair_chat_run_goal_identity_index(eng) -> None:
+  """Converge the Goal lookup index without rewriting historical identity."""
+  from sqlalchemy import inspect as sa_inspect, text
+
+  inspector = sa_inspect(eng)
+  if "chat_runs" not in inspector.get_table_names():
+    return
+  columns = {column["name"] for column in inspector.get_columns("chat_runs")}
+  if "goal_id" not in columns:
+    return
+  with eng.begin() as conn:
+    conn.execute(text(
+      "CREATE INDEX IF NOT EXISTS ix_chat_runs_goal_id ON chat_runs (goal_id)"
+    ))
+
+def _migrate_project_agent_messages(eng) -> None:
+  """Copy the project-only mailbox into the provider-neutral room ledger.
+
+  The legacy table stays in place as a recovery compatibility surface for an
+  older baked backend. New code writes only the generalized table; id-based
+  insertion makes this migration safe to retry before its ledger row commits.
+  """
+  from sqlalchemy import inspect as sa_inspect, text
+
+  # Published migrations cannot import the mutable ORM: the table definition
+  # that upgrades an old checkout must remain the same even as current models
+  # evolve. These declarations mirror the initial coordination-room schema and
+  # use SQL understood by both supported databases.
+  with eng.begin() as conn:
+    conn.execute(text(
+      "CREATE TABLE IF NOT EXISTS agent_coordination_messages ("
+      "id VARCHAR(64) NOT NULL PRIMARY KEY, "
+      "room_kind VARCHAR(16) NOT NULL, "
+      "room_id VARCHAR(64) NOT NULL, "
+      "from_chat_id VARCHAR(64) NOT NULL REFERENCES chats(id), "
+      "from_run_id VARCHAR(64) NULL, "
+      "to_chat_id VARCHAR(64) NULL REFERENCES chats(id), "
+      "kind VARCHAR(16) NOT NULL DEFAULT 'note', "
+      "body TEXT NOT NULL, "
+      "created_at TIMESTAMP NOT NULL"
+      ")"
+    ))
+    conn.execute(text(
+      "CREATE INDEX IF NOT EXISTS ix_agent_coordination_room_created "
+      "ON agent_coordination_messages "
+      "(room_kind, room_id, created_at, id)"
+    ))
+    conn.execute(text(
+      "CREATE INDEX IF NOT EXISTS "
+      "ix_agent_coordination_messages_from_chat_id "
+      "ON agent_coordination_messages (from_chat_id)"
+    ))
+    conn.execute(text(
+      "CREATE INDEX IF NOT EXISTS "
+      "ix_agent_coordination_messages_to_chat_id "
+      "ON agent_coordination_messages (to_chat_id)"
+    ))
+  inspector = sa_inspect(eng)
+  if "project_agent_messages" not in inspector.get_table_names():
+    return
+  columns = {
+    column["name"]
+    for column in inspector.get_columns("project_agent_messages")
+  }
+  required = {
+    "id", "project_id", "from_chat_id", "to_chat_id", "body", "created_at",
+  }
+  if not required.issubset(columns):
+    return
+  with eng.begin() as conn:
+    conn.execute(text(
+      "INSERT INTO agent_coordination_messages "
+      "(id, room_kind, room_id, from_chat_id, from_run_id, to_chat_id, kind, "
+      "body, created_at) "
+      "SELECT legacy.id, 'project', legacy.project_id, legacy.from_chat_id, "
+      "NULL, legacy.to_chat_id, 'note', legacy.body, legacy.created_at "
+      "FROM project_agent_messages AS legacy "
+      "WHERE NOT EXISTS ("
+      "SELECT 1 FROM agent_coordination_messages AS current "
+      "WHERE current.id = legacy.id"
+      ")"
+    ))
+
+def _add_agent_coordination_send_identity(eng) -> None:
+  """Add stable multi-recipient send identity without rewriting old mail."""
+  from sqlalchemy import inspect as sa_inspect, text
+
+  inspector = sa_inspect(eng)
+  if "agent_coordination_messages" not in inspector.get_table_names():
+    return
+  columns = {
+    column["name"]
+    for column in inspector.get_columns("agent_coordination_messages")
+  }
+  if "send_id" not in columns:
+    with eng.begin() as conn:
+      conn.execute(text(
+        "ALTER TABLE agent_coordination_messages "
+        "ADD COLUMN send_id VARCHAR(64) NULL"
+      ))
+  with eng.begin() as conn:
+    conn.execute(text(
+      "CREATE INDEX IF NOT EXISTS "
+      "ix_agent_coordination_messages_send_id "
+      "ON agent_coordination_messages (send_id)"
+    ))
+    conn.execute(text(
+      "CREATE UNIQUE INDEX IF NOT EXISTS "
+      "uq_agent_coordination_run_send_target "
+      "ON agent_coordination_messages (from_run_id, send_id, to_chat_id)"
+    ))
+
+def _add_agent_coordination_send_target(eng) -> None:
+  """Make direct and broadcast retry identity enforceable under concurrency."""
+  from sqlalchemy import inspect as sa_inspect, text
+
+  inspector = sa_inspect(eng)
+  if "agent_coordination_messages" not in inspector.get_table_names():
+    return
+  columns = {
+    column["name"]
+    for column in inspector.get_columns("agent_coordination_messages")
+  }
+  if "send_target_key" not in columns:
+    with eng.begin() as conn:
+      conn.execute(text(
+        "ALTER TABLE agent_coordination_messages "
+        "ADD COLUMN send_target_key VARCHAR(64) NULL"
+      ))
+  with eng.begin() as conn:
+    conn.execute(text(
+      "DROP INDEX IF EXISTS uq_agent_coordination_run_send_target"
+    ))
+    conn.execute(text(
+      "CREATE UNIQUE INDEX IF NOT EXISTS "
+      "uq_agent_coordination_run_send_target "
+      "ON agent_coordination_messages "
+      "(from_run_id, send_id, send_target_key)"
+    ))
+
 _SCHEMA_MIGRATIONS = (
   ("0001_legacy_schema_convergence", _converge_legacy_schema),
   ("0002_chat_run_goal_objective", _add_chat_run_goal_objective),
@@ -2185,6 +2326,10 @@ _SCHEMA_MIGRATIONS = (
   ("0024_chat_goal_dismissal", _add_chat_goal_dismissal),
   ("0025_attached_delegation_work", _add_attached_delegation_work),
   ("0026_chat_wait_condition_owner", _add_chat_wait_condition_owner),
+  ("0027_chat_run_goal_identity_index", _repair_chat_run_goal_identity_index),
+  ("0028_agent_coordination_rooms", _migrate_project_agent_messages),
+  ("0029_agent_coordination_send_identity", _add_agent_coordination_send_identity),
+  ("0030_agent_coordination_send_target", _add_agent_coordination_send_target),
 )
 
 

@@ -732,6 +732,8 @@ def _process_tool_event(event: dict, assistant_blocks: list) -> bool:
       block["tool_use_id"] = tool_use_id
     if isinstance(event.get("recall"), dict):
       block["recall"] = event["recall"]
+    if isinstance(event.get("peer_message"), dict):
+      block["peer_message"] = event["peer_message"]
     if isinstance(event.get("edit_preview"), dict):
       block["edit_preview"] = event["edit_preview"]
     assistant_blocks.append(block)
@@ -749,6 +751,8 @@ def _process_tool_event(event: dict, assistant_blocks: list) -> bool:
       # that authorizes the later output phase to cite notes.
       if isinstance(event.get("recall"), dict):
         blk["recall"] = event["recall"]
+      if isinstance(event.get("peer_message"), dict):
+        blk["peer_message"] = event["peer_message"]
       if isinstance(event.get("edit_preview"), dict):
         blk["edit_preview"] = event["edit_preview"]
 
@@ -797,6 +801,10 @@ def _process_tool_event(event: dict, assistant_blocks: list) -> bool:
       # carving the sink performed before parsing.
       if isinstance(event.get("recall"), dict):
         blk["recall"] = event["recall"]
+      # Settle a peer-network exchange from "sending"/"reading" to what was
+      # actually said/received (see chat_event_sink._stamp_peer_message).
+      if isinstance(event.get("peer_message"), dict):
+        blk["peer_message"] = event["peer_message"]
       return True
     return False
 

@@ -23,7 +23,6 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy import or_
 from sqlalchemy.orm import Session, defer
 from sqlalchemy.orm.attributes import flag_modified
 
@@ -406,18 +405,6 @@ def _project_agent_response(db: Session, chat: models.Chat) -> dict[str, Any]:
       "started_at": run.started_at,
       "ended_at": run.ended_at,
     } if run is not None else None),
-  }
-
-
-def _project_agent_message_response(row: models.ProjectAgentMessage) -> dict[str, Any]:
-  return {
-    "id": row.id,
-    "project_id": row.project_id,
-    "sender_chat_id": row.from_chat_id,
-    "recipient_chat_id": row.to_chat_id,
-    "broadcast": row.to_chat_id is None,
-    "body": row.body,
-    "created_at": row.created_at,
   }
 
 
@@ -1682,15 +1669,20 @@ def list_project_agent_messages(
   ).first()
   if chat is None:
     raise HTTPException(404, "Project chat not found.")
-  rows = db.query(models.ProjectAgentMessage).filter(
-    models.ProjectAgentMessage.project_id == project.id,
-    or_(
-      models.ProjectAgentMessage.to_chat_id.is_(None),
-      models.ProjectAgentMessage.to_chat_id == chat.id,
-      models.ProjectAgentMessage.from_chat_id == chat.id,
-    ),
-  ).order_by(models.ProjectAgentMessage.created_at.desc()).limit(limit).all()
-  return [_project_agent_message_response(row) for row in reversed(rows)]
+  from app.agent_coordination import scope_for_project, visible_peer_messages
+  scope = scope_for_project(db, project.id, root_chat_id=chat.id)
+  rows = visible_peer_messages(
+    db, scope, chat_id=chat.id, limit=limit, inbox_only=False,
+  )
+  return [{
+    "id": row["id"],
+    "project_id": project.id,
+    "sender_chat_id": row["sender_chat_id"],
+    "recipient_chat_id": row["recipient_chat_id"],
+    "broadcast": row["broadcast"],
+    "body": row["body"],
+    "created_at": row["created_at"],
+  } for row in rows]
 
 
 @router.post(
@@ -1699,7 +1691,7 @@ def list_project_agent_messages(
 def send_project_agent_message(
   project_id: str,
   body: ProjectAgentMessageCreate,
-  _: models.Owner = Depends(get_current_owner_for_lifecycle_control),
+  owner: models.Owner = Depends(get_current_owner_for_lifecycle_control),
   db: Session = Depends(get_db),
 ):
   project = _live_project(db, project_id)
@@ -1715,30 +1707,23 @@ def send_project_agent_message(
     raise HTTPException(400, "Choose at least one recipient or broadcast to the project.")
   if any(chat_id not in project_chats for chat_id in recipients):
     raise HTTPException(404, "A recipient is not a live chat in this project.")
-  targets: list[str | None] = [None] if body.broadcast else recipients
-  rows = [
-    models.ProjectAgentMessage(
-      id=str(uuid.uuid4()),
-      project_id=project.id,
-      from_chat_id=body.sender_chat_id,
-      to_chat_id=target,
+  from app.agent_coordination import (
+    scope_for_project, send_owner_scope_message,
+  )
+  scope = scope_for_project(db, project.id, root_chat_id=body.sender_chat_id)
+  try:
+    sent = send_owner_scope_message(
+      db,
+      scope,
+      owner_id=owner.id,
+      sender_chat_id=body.sender_chat_id,
+      recipients=recipients,
+      broadcast=body.broadcast,
+      kind="note",
       body=body.body,
     )
-    for target in targets
-  ]
-  db.add_all(rows)
-  db.commit()
-  for row in rows:
-    db.refresh(row)
-  # The injected mailbox is deliberately a recent coordination surface, not
-  # a second transcript. Keep the durable project history bounded too.
-  stale_rows = db.query(models.ProjectAgentMessage).filter(
-    models.ProjectAgentMessage.project_id == project.id,
-  ).order_by(models.ProjectAgentMessage.created_at.desc()).offset(1000).all()
-  for stale in stale_rows:
-    db.delete(stale)
-  if stale_rows:
-    db.commit()
+  except ValueError as exc:
+    raise HTTPException(422, str(exc)) from exc
   get_system_broadcast().publish({
     "type": "project_agent_message",
     "projectId": project.id,
@@ -1746,7 +1731,15 @@ def send_project_agent_message(
     "recipientChatIds": recipients,
     "broadcast": body.broadcast,
   })
-  return [_project_agent_message_response(row) for row in rows]
+  return [{
+    "id": row["id"],
+    "project_id": project.id,
+    "sender_chat_id": row["sender_chat_id"],
+    "recipient_chat_id": row["recipient_chat_id"],
+    "broadcast": row["broadcast"],
+    "body": row["body"],
+    "created_at": row["created_at"],
+  } for row in sent]
 
 
 @router.post(

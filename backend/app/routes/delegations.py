@@ -120,20 +120,32 @@ class DelegationSubmit(BaseModel):
 def _require_submitter(
   db: Session, principal: Principal, body: DelegationSubmit,
 ) -> models.Delegation | None:
-  if principal.scope == "owner" and principal.app_id is None:
-    return None
-  if (
-    principal.scope not in {"app", "delegation"}
-    or principal.app_id != body.app_id
-    or principal.delegation_id is None
-  ):
+  if principal.delegation_id is None:
+    if principal.scope == "owner" and principal.app_id is None:
+      return None
+    if principal.scope != "app" or principal.app_id != body.app_id:
+      raise HTTPException(
+        status_code=403,
+        detail="Only the owner agent or an attached delegated agent may submit work.",
+      )
     raise HTTPException(
       status_code=403,
-      detail="Only the owner agent or an attached delegated agent may submit work.",
+      detail="Delegated work must stay under its parent child chat.",
+    )
+  if principal.chat_id != body.parent_chat_id:
+    raise HTTPException(
+      status_code=403,
+      detail="Delegation token may only create direct children.",
+    )
+  if principal.app_id != body.app_id:
+    raise HTTPException(
+      status_code=403,
+      detail="Delegated work must stay with its owning app.",
     )
   parent = db.query(models.Delegation).filter(
+    models.Delegation.id == principal.delegation_id,
     models.Delegation.child_chat_id == body.parent_chat_id,
-    models.Delegation.app_id == principal.app_id,
+    models.Delegation.app_id == body.app_id,
   ).first()
   if parent is None:
     raise HTTPException(status_code=403, detail="Delegated work must stay under its parent child chat.")
@@ -149,14 +161,6 @@ def _require_submitter(
     raise HTTPException(
       status_code=403,
       detail="A read-only delegated owner cannot create write-capable children.",
-    )
-  if principal.delegation_id is not None and (
-    principal.delegation_id != parent.id
-    or principal.chat_id != body.parent_chat_id
-  ):
-    raise HTTPException(
-      status_code=403,
-      detail="Delegation token may only create direct children.",
     )
   return parent
 
@@ -316,10 +320,20 @@ async def delegation_capabilities(
   db: Session = Depends(get_db),
 ):
   """Read-only Subagents configuration for a confined delegated owner."""
-  if principal.delegation_id is None or principal.app_id is None:
+  if (
+    principal.delegation_id is None
+    or principal.chat_id is None
+    or principal.app_id is None
+  ):
     raise HTTPException(status_code=403, detail="Delegated child token required.")
+  delegation = db.query(models.Delegation).filter(
+    models.Delegation.id == principal.delegation_id,
+    models.Delegation.child_chat_id == principal.chat_id,
+  ).first()
+  if delegation is None:
+    raise HTTPException(status_code=403, detail="Delegation token is stale.")
   app = db.query(models.App).filter(
-    models.App.id == principal.app_id,
+    models.App.id == delegation.app_id,
     models.App.deleted_at.is_(None),
   ).first()
   if app is None:

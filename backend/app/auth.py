@@ -90,15 +90,27 @@ def create_agent_token(
   owner_username: str,
   token_epoch: int,
   *,
+  delegation_id: str | None = None,
+  delegation_chat: str | None = None,
   expires_delta: timedelta = AGENT_RUN_TOKEN_TTL,
 ) -> str:
-  """Create the owner bearer bound to one ordinary interactive agent run."""
+  """Create the owner bearer bound to one physical interactive agent run."""
+  if (delegation_id is None) != (delegation_chat is None):
+    raise ValueError("delegation identity and chat must be supplied together")
+  if delegation_chat is not None and delegation_chat != chat_id:
+    raise ValueError("delegation chat must match the agent chat")
+  claims = {
+    "sub": owner_username,
+    "agent_chat": chat_id,
+    "agent_run": run_id,
+  }
+  if delegation_id is not None:
+    # A delegated agent keeps the ordinary owner tool surface while these
+    # claims let the delegation routes enforce direct-child and scope rules.
+    claims["delegation_id"] = delegation_id
+    claims["delegation_chat"] = delegation_chat
   return create_access_token(
-    {
-      "sub": owner_username,
-      "agent_chat": chat_id,
-      "agent_run": run_id,
-    },
+    claims,
     expires_delta=expires_delta,
     token_epoch=token_epoch,
   )

@@ -5252,7 +5252,7 @@ export default function ChatView({
           }
         : {}),
       ...(activeGoalPlan
-        ? { details: <GoalPlanDetails plan={activeGoalPlan} /> }
+        ? { details: <GoalPlanDetails plan={activeGoalPlan} chatId={chatId} /> }
         : {}),
     }
   })

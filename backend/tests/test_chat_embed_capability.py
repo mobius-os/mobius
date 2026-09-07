@@ -96,6 +96,50 @@ def test_bootstrap_is_one_use_and_session_is_exact_chat(client, owner_token):
   assert client.get(f"/api/chats/{chat_id}", headers=wrong_instance).status_code == 401
 
 
+def test_exact_chat_embed_never_receives_the_global_peer_roster(
+  client, owner_token, db,
+):
+  _, _, chat_id, _, session = _session(
+    client, owner_token, name="coordination-embed",
+  )
+  outsider = models.Chat(
+    id="coordination-outsider", title="Private outside peer", messages=[],
+    provider="claude",
+  )
+  db.add(outsider)
+  db.add_all([
+    models.ChatRun(
+      id="coordination-embed-run", root_run_id="coordination-embed-run",
+      chat_id=chat_id, status="running", provider="codex",
+    ),
+    models.ChatRun(
+      id="coordination-outsider-run", root_run_id="coordination-outsider-run",
+      chat_id=outsider.id, status="running", provider="claude",
+      goal_objective="This unrelated goal must remain private",
+    ),
+  ])
+  owner = db.query(models.Owner).one()
+  db.add(models.AgentCoordinationMessage(
+    id="coordination-visible-direct", send_id="embed-visible-send",
+    room_kind="workspace", room_id=str(owner.id),
+    from_chat_id=outsider.id, from_run_id="coordination-outsider-run",
+    to_chat_id=chat_id, kind="note", body="One visible direct handoff.",
+  ))
+  db.commit()
+
+  response = client.get(
+    f"/api/agent-coordination/chats/{chat_id}",
+    headers=_embed_headers(session),
+  )
+  assert response.status_code == 200, response.text
+  payload = response.json()
+  assert {peer["id"] for peer in payload["peers"]} == {chat_id}
+  assert "This unrelated goal must remain private" not in response.text
+  assert [row["body"] for row in payload["messages"]] == [
+    "One visible direct handoff.",
+  ]
+
+
 def test_app_cannot_mint_for_another_apps_chat(client, owner_token):
   _, app_a_token = _make_app(client, owner_token, "app-a")
   _, app_b_token = _make_app(client, owner_token, "app-b")

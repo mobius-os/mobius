@@ -1521,6 +1521,7 @@ async def run_codex_sdk_turn(
   connector_plan=None,
   provider_id: str = "codex",
   data_dir: str | None = None,
+  coordination_enabled: bool = True,
 ) -> RunnerResult:
   """Runs one Codex SDK turn and publishes Möbius-shaped events.
 
@@ -1612,6 +1613,9 @@ async def run_codex_sdk_turn(
         base_instructions = None
 
   env = dict(base_env)
+  env["MOBIUS_COORDINATION_ENABLED"] = (
+    "1" if coordination_enabled else "0"
+  )
   if data_dir is None:
     from app.config import get_settings as _get_settings
 
@@ -1635,7 +1639,11 @@ async def run_codex_sdk_turn(
   from app.platform_tools import codex_turn_mcp_config
   connector_thread_config = codex_turn_mcp_config(
     connector_plan,
-    control_enabled=not delegated,
+    # Every ordinary live agent shares the provider-neutral peer network,
+    # including durable delegated children.
+    control_enabled=True,
+    top_level=not delegated,
+    coordination_enabled=coordination_enabled,
   )
   needs_goal_control = _needs_native_goal_control(
     goal_mode=goal_mode,

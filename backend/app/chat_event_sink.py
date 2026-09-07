@@ -44,6 +44,9 @@ from app.events import (
 from app.memory_recall import (
   RecallBinding, recall_from_command, settle_recall,
 )
+from app.peer_message import (
+  peer_message_from_call, settle_peer_message,
+)
 from app.runtime_types import ChatEvent
 from app.secure_inputs import redact_reveal_markers
 from app.tool_edit_preview import edit_diff_sidecar_id
@@ -493,6 +496,45 @@ class ChatEventSink:
         pending, event.get("content"), event.get("output_exit_code"),
       )
 
+  def _peer_message_for_tool(self, tool_use_id) -> dict | None:
+    """Return the start-phase peer-network marker for this tool, if any."""
+    for blk in reversed(self.assistant_blocks):
+      if blk.get("type") != "tool":
+        continue
+      if tool_use_id:
+        if blk.get("tool_use_id") == tool_use_id:
+          pm = blk.get("peer_message")
+          return pm if isinstance(pm, dict) else None
+        continue
+      if blk.get("status") != "done":
+        pm = blk.get("peer_message")
+        return pm if isinstance(pm, dict) else None
+    return None
+
+  def _stamp_peer_message(self, event: ChatEvent) -> None:
+    """Name a Möbius peer-network exchange on the event, in two phases.
+
+    The tool NAME alone identifies the exchange, so the live turn can say it is
+    coordinating while the call runs. The output phase settles it from the
+    tool's own structured JSON (resolved peer names, kind, body) — the sole
+    authority, so a running marker can never prematurely claim what was said.
+    The output settle runs BEFORE reduction so the full result JSON is parsed.
+    """
+    if event.get("type") in ("tool_start", "tool_input"):
+      if self._peer_message_for_tool(event.get("tool_use_id")) is not None:
+        return
+      marker = peer_message_from_call(event.get("tool"))
+      if marker is not None:
+        event["peer_message"] = marker
+      return
+    pending = self._peer_message_for_tool(event.get("tool_use_id"))
+    if event.get("output_complete") and pending is not None:
+      event["peer_message"] = settle_peer_message(
+        pending,
+        event.get("content"),
+        event.get("output_exit_code"),
+      )
+
   def _reduce_tool_output(self, event: ChatEvent) -> bool:
     """Move a large tool_output's full text OFF the wire (contract rule 6).
 
@@ -662,6 +704,9 @@ class ChatEventSink:
       # but the marked envelope must not enter Möbius's live UI, transcript, or
       # chat-side logs. Normal sealed execution never emits these markers.
       event["content"] = redact_reveal_markers(event.get("content"))
+      # Settle a peer-network exchange from the FULL result JSON before it can be
+      # carved by reduction (the envelope is one object, not a tail-safe line).
+      self._stamp_peer_message(event)
       output_reduced = self._reduce_tool_output(event)
       if not output_reduced and event.get("output_exit_code") is None:
         exit_code = tool_output_exit_code(event.get("content"))
@@ -669,6 +714,8 @@ class ChatEventSink:
           event["output_exit_code"] = exit_code
     if event_type in ("tool_start", "tool_input", "tool_output"):
       self._stamp_memory_recall(event)
+    if event_type in ("tool_start", "tool_input"):
+      self._stamp_peer_message(event)
     if event_type == "thinking":
       self._prepare_thinking_event(event)
 

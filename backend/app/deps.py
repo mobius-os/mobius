@@ -674,8 +674,24 @@ def get_delegation_principal(
       owner=_owner, app_id=int(app_id), scope="delegation",
       chat_id=str(chat_id), delegation_id=str(delegation_id),
     )
-  # Any non-delegation token resolves through the generic principal path.
-  return get_principal(token, db)
+  # Owner-scoped delegated agents inherit ordinary owner tools, but the
+  # delegation control plane still needs their owning app identity to confine
+  # direct-child management and listings. Resolve that identity from the live
+  # immutable row rather than granting it through a generic owner dependency.
+  principal = get_principal(token, db)
+  if principal.delegation_id is None:
+    return principal
+  row = db.query(models.Delegation).filter(
+    models.Delegation.id == principal.delegation_id,
+    models.Delegation.child_chat_id == principal.chat_id,
+    models.Delegation.cancelled_at.is_(None),
+  ).first()
+  if row is None:
+    raise HTTPException(status_code=403, detail="Delegation token is stale.")
+  principal.app_id = row.app_id
+  return principal
+
+
 def require_nondelegated_owner_control(principal: Principal) -> None:
   """Keep delegated execution bearers out of owner-confirmed controls.
 

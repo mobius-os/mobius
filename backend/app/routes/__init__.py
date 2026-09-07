@@ -53,6 +53,7 @@ def require_all_routers_loaded() -> None:
 
 
 admin_router = _load("admin")
+agent_coordination_router = _load("agent_coordination")
 apps_router = _load("apps")
 auth_router = _load("auth")
 chat_router = _load("chat")
@@ -102,6 +103,7 @@ projects_router = _load("projects")
 
 __all__ = [
   "admin_router",
+  "agent_coordination_router",
   "auth_router",
   "apps_router",
   "storage_router",

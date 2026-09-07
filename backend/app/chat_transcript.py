@@ -11,6 +11,7 @@ from app.memory_recall import (
   recall_from_tool_block,
   settle_recall,
 )
+from app.peer_message import bounded_peer_message
 from app.tool_sources import normalize_tool_sources
 
 
@@ -264,6 +265,11 @@ def _distinctive_activity(block: dict, binding: RecallBinding) -> bool:
   # command + structured receipt.
   if recall_from_tool_block(block, binding) is not None:
     return True
+  # Agent coordination is product activity, not generic command plumbing. The
+  # bounded marker is all its dedicated card needs after raw MCP output is
+  # omitted from a compact chat read.
+  if bounded_peer_message(block.get("peer_message")) is not None:
+    return True
   if block.get("tool") != "Read":
     return False
   raw = block.get("input")
@@ -315,6 +321,9 @@ def _compact_activity_item(block: dict, binding: RecallBinding) -> dict:
   recall = recall_from_tool_block(block, binding)
   if recall is not None:
     tool["recall"] = recall
+  peer_message = bounded_peer_message(block.get("peer_message"))
+  if peer_message is not None:
+    tool["peer_message"] = peer_message
   return tool
 
 
@@ -479,7 +488,20 @@ def compact_messages_for_detail(
         run.append((raw_index, block))
         continue
       flush()
-      if recovered_recall is not None and not isinstance(block.get("recall"), dict):
+      peer_message = (
+        bounded_peer_message(block.get("peer_message"))
+        if activity and block.get("type") == "tool"
+        else None
+      )
+      if peer_message is not None:
+        # The dedicated card reads only this marker. Remove raw MCP input/output
+        # from the normal compact payload while the persisted source of truth
+        # remains unchanged for full-detail reads.
+        next_blocks.append(_compact_activity_item(
+          {**block, "peer_message": peer_message}, binding,
+        ))
+        changed = True
+      elif recovered_recall is not None and not isinstance(block.get("recall"), dict):
         next_blocks.append({**block, "recall": recovered_recall})
         changed = True
       else:
