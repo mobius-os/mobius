@@ -21,11 +21,12 @@ test('Goal and Wait keep different identity icons even when both complete', () =
  const wait = render(h(Wait, { summary: { description: 'Deployment ready', status: 'met' } }))
  assert.ok(icon(goal)); assert.ok(icon(wait))
  assert.notEqual(icon(goal), icon(wait))
- for (const html of [goal, wait]) assert.match(html, /class="chat__lifecycle-outcome"/)
+ for (const html of [goal, wait]) assert.doesNotMatch(html, /class="chat__lifecycle-outcome"/)
 })
 test('Waiting preserves its clock across completed, attention and stopped states', () => {
  const states = ['met', 'expired', 'failed', 'cancelled'].map(status => render(h(Wait, { summary: { description: 'Deployment ready', status } })))
  for (const html of states) assert.equal(icon(html), icon(states[0]))
+ for (const html of states.slice(1)) assert.match(html, /class="chat__lifecycle-outcome"/)
 })
 test('resume, pause and errors share icon geometry without sharing meaning', () => {
  const resumed = render(h(Resume, { msg: { continuation_reason: 'manual' } }))

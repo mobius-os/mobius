@@ -1,5 +1,5 @@
 /* LifecycleIcon keeps event identity separate from its outcome across chat notices. */
-import { Flag, Clock, Check, Warning, Stop } from '@openai/apps-sdk-ui/components/Icon'
+import { Flag, Clock, Warning, Stop } from '@openai/apps-sdk-ui/components/Icon'
 
 export default function LifecycleIcon({ kind, children }) {
   const Icon = kind === 'goal' ? Flag : Clock
@@ -9,6 +9,7 @@ export default function LifecycleIcon({ kind, children }) {
 }
 
 export function LifecycleOutcome({ tone }) {
-  const Icon = tone === 'completed' ? Check : tone === 'stopped' ? Stop : Warning
+  if (tone === 'completed') return null
+  const Icon = tone === 'stopped' ? Stop : Warning
   return <Icon className="chat__lifecycle-outcome" width={14} height={14} aria-hidden="true" />
 }
