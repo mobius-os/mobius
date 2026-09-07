@@ -11,7 +11,7 @@ export function platformUpdateRepairReason({ preview, platform, rebuild, error =
   }
   const level = (preview || platform)?.activation?.level
   if (requiresAgentActivation((preview || platform)?.activation) || errorCode === 'external_activation_required') {
-    return 'This update needs a deployment change. Möbius can help prepare it safely.'
+    return 'Möbius needs to check your deployment settings before this update can finish.'
   }
   const target = preview?.target_sha || platform?.contained_upstream_sha
   if (level === 'image_rebuild' && target && rebuild?.expected_sha === target

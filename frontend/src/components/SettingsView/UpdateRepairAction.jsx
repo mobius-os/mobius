@@ -16,8 +16,8 @@ export default function UpdateRepairAction({ preview, platform, rebuild, error, 
   })
   return <>
     <button ref={buttonRef} type="button" className={className} disabled={disabled || repairActive} onClick={repair}>
-      {repairActive ? 'Opening repair chat…' : 'Resolve with Möbius'}
+      {repairActive ? 'Opening chat…' : 'Ask Möbius'}
     </button>
-    {attempt?.phase === 'agent-failed' && <p role="status" className="platform-updates__description">Couldn’t open the repair chat. Try again; the same request will be reused.</p>}
+    {attempt?.phase === 'agent-failed' && <p role="status" className="platform-updates__description">Couldn’t open the chat. Try again; the same request will be reused.</p>}
   </>
 }

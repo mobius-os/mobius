@@ -28,16 +28,11 @@
 .urm__error { flex-shrink: 0; max-height: 25vh; overflow: auto; font-size: 13px; overflow-wrap: anywhere; }
 .urm__foot { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 10px; padding-top: 14px; border-top: 1px solid var(--border); flex-shrink: 0; }
 .urm__foot .platform-updates__description { flex-basis: 100%; margin: 0; }
-.urm__btn { min-height: 44px; border: 1px solid transparent; padding: 10px 16px; border-radius: 8px;
-  background: var(--accent); color: var(--accent-text, #fff); font: inherit; font-size: 14px; font-weight: 500; cursor: pointer; }
-.urm__btn--ghost { background: transparent; color: var(--text); border-color: var(--border); }
-.urm__btn:disabled, .urm__close:disabled { opacity: .55; cursor: not-allowed; }
-.urm__btn:focus-visible, .urm__close:focus-visible, .urm__technical summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.urm__close:disabled { opacity: .55; cursor: not-allowed; }
+.urm__close:focus-visible, .urm__technical summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
 @media (hover: hover) {
-  .urm__close:hover:not(:disabled), .urm__btn--ghost:hover:not(:disabled) { background: var(--surface2); }
-  .urm__btn:not(.urm__btn--ghost):hover:not(:disabled) { background: var(--accent-hover); }
+  .urm__close:hover:not(:disabled) { background: var(--surface2); }
 }
 @media (max-width: 420px) {
   .urm { padding: 16px; }
-  .urm__foot .urm__btn { flex: 1; }
 }

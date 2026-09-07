@@ -108,3 +108,18 @@ test('update repair reuses the shared lifecycle and keeps mobile failure text be
   assert.match(modalCss, /\.urm__foot \{[^}]*flex-wrap: wrap/)
   assert.match(modalCss, /\.urm__foot \.platform-updates__description \{[^}]*flex-basis: 100%/)
 })
+
+
+test('update review uses compact Settings controls without stretching mobile buttons', () => {
+  assert.match(modal, /settings__btn settings__btn--sm settings__btn--outline/)
+  assert.match(modal, /className="settings__btn settings__btn--sm"/)
+  assert.doesNotMatch(modalCss, /\.urm__btn|flex: 1(?:;|\s)/)
+})
+
+test('asking for help names one ordinary chat and explains the restart boundary', () => {
+  const repair = read('../../components/SettingsView/UpdateRepairAction.jsx')
+  assert.match(repair, /'Ask Möbius'/)
+  assert.match(modal, /Open a chat with the update details included/)
+  assert.match(modal, /asking before any restart/)
+  assert.doesNotMatch(modal + repair, /repair chat|recovery chat|help prepare it/)
+})

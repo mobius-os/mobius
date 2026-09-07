@@ -112,7 +112,7 @@ export default function UpdateReviewModal({
                       : 'Apply this reviewed version while keeping your local changes. If they overlap, the update stops for you to resolve them.')}</p>
                     <h3>What to expect</h3>
                     <p>{repairReason
-                      ? 'Open a repair chat with the update details attached. Möbius will investigate and help preserve your changes, then bring you back to review the update. Nothing is restarted by opening the chat.'
+                      ? 'Open a chat with the update details included. Möbius will check what’s needed and help finish the update, asking before any restart.'
                       : rebuildUpdate
                       ? 'This replaces the container and briefly takes Möbius offline. Active chats are paused; eligible chats resume after the update. The page reconnects automatically.'
                       : needsRestart
@@ -143,14 +143,14 @@ export default function UpdateReviewModal({
           ? <details><summary>Failure details</summary><p>{applyError}</p></details>
           : <Alert color="danger" variant="soft" description={applyError} />}</div>}
         <div className="urm__foot">
-          <button type="button" className="urm__btn urm__btn--ghost" onClick={requestClose} disabled={inFlight}>{observing ? 'Keep working' : 'Not now'}</button>
-          {repairReason ? <UpdateRepairAction preview={preview} platform={{ ...platform, state: resultState || platform?.state }} rebuild={rebuild} error={applyError} errorCode={applyErrorCode} disabled={busy || loading} buttonRef={resultActionRef} className="urm__btn" />
-          : hasResult ? <button ref={resultActionRef} type="button" className="urm__btn"
+          <button type="button" className="settings__btn settings__btn--sm settings__btn--outline" onClick={requestClose} disabled={inFlight}>{observing ? 'Keep working' : 'Not now'}</button>
+          {repairReason ? <UpdateRepairAction preview={preview} platform={{ ...platform, state: resultState || platform?.state }} rebuild={rebuild} error={applyError} errorCode={applyErrorCode} disabled={busy || loading} buttonRef={resultActionRef} className="settings__btn settings__btn--sm" />
+          : hasResult ? <button ref={resultActionRef} type="button" className="settings__btn settings__btn--sm"
             onClick={resultState === 'conflict' ? onResolve : requestClose} disabled={busy}>
             {resultState === 'conflict' ? (resolving ? 'Opening…' : 'Resolve in chat') : 'Done'}
-          </button> : (loadError || ['update_plan_stale', 'update_plan_invalid', 'activation_changed'].includes(applyErrorCode)) ? <button type="button" className="urm__btn" onClick={loadPreview} disabled={busy}>{loadError ? 'Try again' : 'Refresh review'}</button>
-            : <button type="button" className="urm__btn" onClick={handleApply} disabled={busy || loading || !actionable || !hasPlan}>
-              {busy ? 'Updating…' : rebuildUpdate ? 'Update container now' : 'Apply update'}
+          </button> : (loadError || ['update_plan_stale', 'update_plan_invalid', 'activation_changed'].includes(applyErrorCode)) ? <button type="button" className="settings__btn settings__btn--sm" onClick={loadPreview} disabled={busy}>{loadError ? 'Try again' : 'Refresh review'}</button>
+            : <button type="button" className="settings__btn settings__btn--sm" onClick={handleApply} disabled={busy || loading || !actionable || !hasPlan}>
+              {busy ? 'Updating…' : rebuildUpdate ? 'Update now' : 'Apply update'}
             </button>}
         </div>
       </div>

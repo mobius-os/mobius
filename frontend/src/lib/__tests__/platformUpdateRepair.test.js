@@ -24,7 +24,7 @@ test('routine activation and stale reviews stay with their UI actions', () => {
 
 test('external deployment work and failed validation earn agent help', () => {
   for (const level of ['proxy_reload', 'container_recreate', 'host_maintenance']) {
-    assert.match(platformUpdateRepairReason({ platform: { activation: { level, required_actions: level === 'live' ? [] : [level] } } }), /deployment change/)
+    assert.match(platformUpdateRepairReason({ platform: { activation: { level, required_actions: level === 'live' ? [] : [level] } } }), /deployment settings/)
   }
   assert.match(platformUpdateRepairReason({ platform: { state: 'rolled_back' } }), /attention/)
   assert.match(platformUpdateRepairReason({ error: 'controller failed' }), /attention/)
@@ -60,8 +60,8 @@ test('a failed unfinished replacement remains actionable after reopening Setting
 test('mixed activation remains agent work regardless of its display level', () => {
   for (const external of ['proxy_reload', 'container_recreate', 'host_maintenance']) {
     const preview = { activation: { level: 'image_rebuild', required_actions: ['image_rebuild', external] } }
-    assert.match(platformUpdateRepairReason({ preview }), /deployment change/)
+    assert.match(platformUpdateRepairReason({ preview }), /deployment settings/)
     assert.deepEqual(platformUpdateRepairEvidence({ preview }).activation.required_actions, ['image_rebuild', external])
   }
-  assert.match(platformUpdateRepairReason({ errorCode: 'external_activation_required' }), /deployment change/)
+  assert.match(platformUpdateRepairReason({ errorCode: 'external_activation_required' }), /deployment settings/)
 })
