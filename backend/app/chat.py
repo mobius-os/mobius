@@ -3232,14 +3232,6 @@ def _goal_handoff_is_owned(
   ):
     return True
 
-  # A competing chat that atomically won the same work claim is a real
-  # cross-chat owner only while it has its own visible next action. This keeps
-  # passive peer prose from masking abandonment without forcing every
-  # interested Goal to manufacture the same approval card.
-  from app.agent_work_claims import peer_claim_owns_goal_handoff
-  if peer_claim_owns_goal_handoff(db, chat_id=chat_id, goal_id=goal_id):
-    return True
-
   from app.chat_waits import armed_waits_for_chat
   wait_run_ids = {
     wait.created_by_run_id

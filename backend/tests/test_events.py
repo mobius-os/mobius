@@ -873,6 +873,26 @@ def test_question_event_creates_block():
   assert blocks == [{"type": "question", "questions": questions}]
 
 
+def test_approval_question_preserves_exact_action_identity():
+  blocks = []
+  questions = [{"question": "Restart?", "options": []}]
+  process_event({
+    "type": "question",
+    "question_id": "approval-1",
+    "response_mode": "continuation",
+    "action_key": "platform:abc123:restart",
+    "questions": questions,
+  }, blocks)
+
+  assert blocks == [{
+    "type": "question",
+    "questions": questions,
+    "action_key": "platform:abc123:restart",
+    "response_mode": "continuation",
+    "question_id": "approval-1",
+  }]
+
+
 def test_question_coalesces_partial_then_full():
   """Partial question followed by full question replaces, not appends."""
   blocks = []

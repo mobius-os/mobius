@@ -35,7 +35,7 @@ class ApprovalRequest(BaseModel):
   model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
   question: str = Field(min_length=1, max_length=2000)
   options: list[ApprovalOption] = Field(min_length=2, max_length=3)
-  work_key: str | None = Field(default=None, min_length=3, max_length=256)
+  work_key: str = Field(min_length=3, max_length=256)
 
   @model_validator(mode="after")
   def unique_options(self):
@@ -83,30 +83,30 @@ async def request_approval(
   db: Session = Depends(get_db),
 ):
   public_body = body.model_dump(exclude={"work_key"})
-  if body.work_key is not None:
-    try:
-      claim = claim_work(
-        db,
-        owner_id=principal.owner.id,
-        chat_id=principal.chat_id,
-        run_id=principal.run_id,
-        work_key=body.work_key,
-        summary=body.question[:500],
-      )
-    except ValueError as exc:
-      raise HTTPException(409, str(exc)) from exc
-    if claim["state"] == "completed":
-      raise HTTPException(
-        409, f"This exact work already completed: {claim.get('outcome') or body.work_key}",
-      )
-    if claim["owner_chat_id"] != principal.chat_id:
-      raise HTTPException(
-        409,
-        "This approval is already owned by "
-        f"{claim['owner_name']} ({claim['owner_chat_id']}); no duplicate card was created.",
-      )
+  try:
+    claim = claim_work(
+      db,
+      owner_id=principal.owner.id,
+      chat_id=principal.chat_id,
+      run_id=principal.run_id,
+      work_key=body.work_key,
+      summary=body.question[:500],
+    )
+  except ValueError as exc:
+    raise HTTPException(409, str(exc)) from exc
+  if claim["state"] == "completed":
+    raise HTTPException(
+      409, f"This exact work already completed: {claim.get('outcome') or body.work_key}",
+    )
+  if claim["owner_chat_id"] != principal.chat_id:
+    raise HTTPException(
+      409,
+      "This approval is already owned by "
+      f"{claim['owner_name']} ({claim['owner_chat_id']}); no duplicate card was created.",
+    )
   return await save_owner_question(chat_id, {
     "questions": [{"id": "approval", "header": "Approval", **public_body}],
+    "action_key": body.work_key,
   }, principal, db, identity_payload=body.model_dump())
 
 

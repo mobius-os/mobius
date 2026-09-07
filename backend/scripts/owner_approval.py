@@ -12,11 +12,9 @@ from urllib.request import Request, urlopen
 
 
 def request_approval(
-  question: str, options: list[dict], work_key: str | None = None,
+  question: str, options: list[dict], work_key: str,
 ) -> dict:
-  body = {"question": question, "options": options}
-  if work_key is not None:
-    body["work_key"] = work_key
+  body = {"question": question, "options": options, "work_key": work_key}
   return save_card("approval", body)
 
 
@@ -67,7 +65,9 @@ def main() -> None:
   parser.add_argument("--questions-json", help="JSON array for a saved ordinary question card")
   parser.add_argument("--option", action="append", nargs=2,
                       metavar=("LABEL", "DESCRIPTION"))
-  parser.add_argument("--work-key", help="stable shared-action ownership key")
+  parser.add_argument(
+    "--work-key", help="required stable identity for the action awaiting approval",
+  )
   args = parser.parse_args()
   if args.questions_json is not None:
     if args.question or args.option or args.work_key:
@@ -78,8 +78,8 @@ def main() -> None:
       parser.error("--questions-json must be a JSON array")
     print(json.dumps(request_question(questions)))
   else:
-    if not args.question or not args.option:
-      parser.error("approval needs a question and --option choices")
+    if not args.question or not args.option or not args.work_key:
+      parser.error("approval needs a question, --work-key, and --option choices")
     print(json.dumps(request_approval(args.question, [
       {"label": label, "description": description}
       for label, description in args.option

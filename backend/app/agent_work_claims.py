@@ -36,13 +36,13 @@ def _serialize(db: Session, row: models.AgentWorkClaim, state: str) -> dict:
   title = db.query(models.Chat.title).filter(
     models.Chat.id == row.owner_chat_id,
   ).scalar()
-  return {
+  result = {
     "id": row.id,
     "work_key": row.work_key,
     "summary": row.summary,
     "state": state,
     "owner_chat_id": row.owner_chat_id,
-    "owner_name": title or row.owner_chat_id,
+    "owner_name": title or row.owner_chat_id or "Deleted chat",
     "owner_goal_id": row.owner_goal_id,
     "revision": row.revision,
     "notification_pending": row.notification_revision < row.revision,
@@ -50,6 +50,14 @@ def _serialize(db: Session, row: models.AgentWorkClaim, state: str) -> dict:
     "completed_at": row.completed_at.isoformat() if row.completed_at else None,
     "outcome": row.outcome,
   }
+  if state == "held_by_peer":
+    result["next_action"] = (
+      "Do not duplicate this exact action. Reconcile your own Goal now: "
+      "continue any independent work and settle the overlapping plan task, "
+      "or explicitly transfer the broader outcome. Following this claim does "
+      "not transfer ownership of your whole Goal."
+    )
+  return result
 
 
 def _follow(
@@ -228,6 +236,57 @@ class FinishedClaim:
   interested_chat_ids: list[str]
 
 
+@dataclass(frozen=True)
+class ReleasedClaim:
+  """One unfinished exact action released by chat deletion."""
+
+  claim_id: str
+  work_key: str
+  revision: int
+  interested_chat_ids: list[str]
+
+
+def stage_release_claims_for_chat(
+  db: Session, chat_id: str,
+) -> list[ReleasedClaim]:
+  """Release a deleted chat's unfinished exact actions in the caller's txn.
+
+  A chat owns its promised Goal, but each workspace claim owns only one shared
+  action. Deleting the chat ends both responsibilities: followers may reclaim
+  the action, while completed claims remain untouched as idempotency history.
+  The caller commits the release atomically with the chat tombstone and then
+  delivers the returned follower notices.
+  """
+  now = now_naive_utc()
+  rows = db.query(models.AgentWorkClaim).filter(
+    models.AgentWorkClaim.owner_chat_id == chat_id,
+    models.AgentWorkClaim.completed_at.is_(None),
+    models.AgentWorkClaim.released_at.is_(None),
+  ).all()
+  released: list[ReleasedClaim] = []
+  for row in rows:
+    row.released_at = now
+    row.updated_at = now
+    row.outcome = "Owning chat was deleted before this action completed."
+    row.revision += 1
+    recipients = [
+      interest.chat_id
+      for interest in db.query(models.AgentWorkInterest).filter(
+        models.AgentWorkInterest.claim_id == row.id,
+        models.AgentWorkInterest.resolved_at.is_(None),
+        models.AgentWorkInterest.chat_id != chat_id,
+      ).all()
+    ]
+    released.append(ReleasedClaim(
+      claim_id=row.id,
+      work_key=row.work_key,
+      revision=row.revision,
+      interested_chat_ids=list(dict.fromkeys(recipients)),
+    ))
+  db.flush()
+  return released
+
+
 def finish_work(
   db: Session,
   *,
@@ -304,39 +363,3 @@ def acknowledge_notice(
       models.AgentWorkInterest.resolved_at.is_(None),
     ).update({models.AgentWorkInterest.resolved_at: now_naive_utc()})
   db.commit()
-
-
-def peer_claim_owns_goal_handoff(
-  db: Session, *, chat_id: str, goal_id: str,
-) -> bool:
-  """Whether an interested Goal has a peer claim with a visible next owner."""
-  rows = db.query(models.AgentWorkClaim).join(
-    models.AgentWorkInterest,
-    models.AgentWorkInterest.claim_id == models.AgentWorkClaim.id,
-  ).filter(
-    models.AgentWorkInterest.chat_id == chat_id,
-    models.AgentWorkInterest.goal_id == goal_id,
-    models.AgentWorkInterest.resolved_at.is_(None),
-    models.AgentWorkClaim.owner_chat_id != chat_id,
-    models.AgentWorkClaim.completed_at.is_(None),
-    models.AgentWorkClaim.released_at.is_(None),
-  ).all()
-  for row in rows:
-    owner_chat = db.get(models.Chat, row.owner_chat_id)
-    if owner_chat is None:
-      continue
-    if owner_chat.pending_question_id is not None:
-      return True
-    if owner_chat.pending_messages:
-      return True
-    if db.query(models.ChatRun.id).filter(
-      models.ChatRun.chat_id == row.owner_chat_id,
-      models.ChatRun.status.in_(models.NONTERMINAL_RUN_STATUSES),
-    ).first() is not None:
-      return True
-    if db.query(models.ChatWait.id).filter(
-      models.ChatWait.chat_id == row.owner_chat_id,
-      models.ChatWait.status == "armed",
-    ).first() is not None:
-      return True
-  return False

@@ -87,6 +87,93 @@ def test_run_migrations_drops_removed_image_generation_columns(tmp_path):
   assert "generated_images" not in chat_columns
 
 
+def test_agent_work_claim_history_survives_owning_chat_purge(tmp_path):
+  eng = create_engine(f"sqlite:///{tmp_path / 'claim-history.db'}")
+  with eng.begin() as conn:
+    conn.execute(text(
+      "CREATE TABLE owner (id INTEGER NOT NULL PRIMARY KEY)"
+    ))
+    conn.execute(text(
+      "CREATE TABLE chats (id VARCHAR(64) NOT NULL PRIMARY KEY, "
+      "deleted_at DATETIME NULL)"
+    ))
+    conn.execute(text(
+      "CREATE TABLE agent_work_claims ("
+      "id VARCHAR(64) NOT NULL PRIMARY KEY, owner_id INTEGER NOT NULL, "
+      "work_key VARCHAR(256) NOT NULL, summary VARCHAR(500) NOT NULL, "
+      "owner_chat_id VARCHAR(64) NOT NULL, owner_run_id VARCHAR(64) NOT NULL, "
+      "owner_goal_id VARCHAR(64), previous_owner_chat_id VARCHAR(64), "
+      "takeover_reason VARCHAR(1000), revision INTEGER NOT NULL DEFAULT '1', "
+      "notification_revision INTEGER NOT NULL DEFAULT '1', "
+      "claimed_at DATETIME NOT NULL, updated_at DATETIME NOT NULL, "
+      "released_at DATETIME, completed_at DATETIME, outcome VARCHAR(1000), "
+      "UNIQUE (owner_id, work_key), "
+      "FOREIGN KEY(owner_id) REFERENCES owner(id) ON DELETE CASCADE, "
+      "FOREIGN KEY(owner_chat_id) REFERENCES chats(id) ON DELETE CASCADE)"
+    ))
+    conn.execute(text(
+      "CREATE TABLE agent_work_interests ("
+      "id VARCHAR(64) NOT NULL PRIMARY KEY, claim_id VARCHAR(64) NOT NULL, "
+      "chat_id VARCHAR(64) NOT NULL, goal_id VARCHAR(64) NOT NULL, "
+      "created_at DATETIME NOT NULL, resolved_at DATETIME, "
+      "UNIQUE (claim_id, chat_id, goal_id), "
+      "FOREIGN KEY(claim_id) REFERENCES agent_work_claims(id) ON DELETE CASCADE, "
+      "FOREIGN KEY(chat_id) REFERENCES chats(id) ON DELETE CASCADE)"
+    ))
+    conn.execute(text("INSERT INTO owner (id) VALUES (1)"))
+    conn.execute(text(
+      "INSERT INTO chats (id, deleted_at) VALUES "
+      "('done-chat', '2026-09-01 00:00:00'), "
+      "('open-chat', '2026-09-01 00:00:00'), "
+      "('follower-chat', NULL)"
+    ))
+    values = (
+      "id, owner_id, work_key, summary, owner_chat_id, owner_run_id, "
+      "revision, notification_revision, claimed_at, updated_at, completed_at"
+    )
+    conn.execute(text(
+      f"INSERT INTO agent_work_claims ({values}) VALUES "
+      "('done', 1, 'test:done', 'Done', 'done-chat', 'run-1', 1, 1, "
+      "'2026-09-01', '2026-09-01', '2026-09-01'), "
+      "('open', 1, 'test:open', 'Open', 'open-chat', 'run-2', 1, 1, "
+      "'2026-09-01', '2026-09-01', NULL)"
+    ))
+    conn.execute(text(
+      "INSERT INTO agent_work_interests "
+      "(id, claim_id, chat_id, goal_id, created_at) VALUES "
+      "('interest', 'open', 'follower-chat', 'goal-1', '2026-09-01')"
+    ))
+
+  migrations._make_agent_work_claim_history_durable(eng)
+  inspector = inspect(eng)
+  owner_chat = next(
+    column for column in inspector.get_columns("agent_work_claims")
+    if column["name"] == "owner_chat_id"
+  )
+  owner_chat_fk = next(
+    item for item in inspector.get_foreign_keys("agent_work_claims")
+    if item["constrained_columns"] == ["owner_chat_id"]
+  )
+  assert owner_chat["nullable"] is True
+  assert owner_chat_fk["options"]["ondelete"] == "SET NULL"
+
+  with eng.begin() as conn:
+    released_at, outcome = conn.execute(text(
+      "SELECT released_at, outcome FROM agent_work_claims WHERE id='open'"
+    )).one()
+    assert released_at is not None
+    assert "deleted" in outcome
+    conn.execute(text("PRAGMA foreign_keys=ON"))
+    conn.execute(text("DELETE FROM chats WHERE id='done-chat'"))
+  with eng.connect() as conn:
+    assert conn.execute(text(
+      "SELECT owner_chat_id FROM agent_work_claims WHERE id='done'"
+    )).scalar_one() is None
+    assert conn.execute(text(
+      "SELECT count(*) FROM agent_work_interests WHERE id='interest'"
+    )).scalar_one() == 1
+
+
 def test_attached_delegation_work_migration_is_additive_and_idempotent(tmp_path):
   eng = create_engine(f"sqlite:///{tmp_path / 'attached-work.db'}")
   with eng.begin() as conn:
@@ -1221,8 +1308,9 @@ def test_run_migrations_records_an_inspectable_append_only_history(tmp_path):
     "0035_agent_coordination_rooms",
     "0036_agent_coordination_send_identity",
     "0037_agent_coordination_send_target",
-    "0038_chat_wait_condition_owner",
-  ]
+        "0038_chat_wait_condition_owner",
+        "0039_agent_work_claim_history",
+      ]
   assert second == first
 
 

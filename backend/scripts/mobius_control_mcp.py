@@ -330,10 +330,10 @@ def _call_promote_goal(arguments: dict[str, Any]) -> dict:
 
 
 def _call_request_approval(arguments: dict[str, Any]) -> dict:
-  if not {"question", "options"}.issubset(arguments) or not set(arguments).issubset(
+  if not {"question", "options", "work_key"}.issubset(arguments) or not set(arguments).issubset(
     {"question", "options", "work_key"}
   ):
-    raise ValueError("request_approval needs question and options; work_key is optional")
+    raise ValueError("request_approval needs question, options, and work_key")
   try:
     return _APPROVALS.request_approval(**arguments)
   except SystemExit as exc:
@@ -508,9 +508,9 @@ _TOOL_DEFINITIONS = {
         "work_key": {
           "type": "string", "minLength": 3, "maxLength": 256,
           "description": (
-            "Stable lowercase identity for a shared or external action. "
-            "Required for PR updates, merges, and any action another chat "
-            "could also reach; the first claimant owns the sole card."
+            "Canonical lowercase identity for the exact proposed action. "
+            "Every approval requires one so the first claimant owns the sole "
+            "card across chats."
           ),
         },
         "options": {
@@ -525,7 +525,7 @@ _TOOL_DEFINITIONS = {
           },
         },
       },
-      "required": ["question", "options"], "additionalProperties": False,
+      "required": ["question", "options", "work_key"], "additionalProperties": False,
     },
   },
   REQUEST_QUESTION_TOOL: {

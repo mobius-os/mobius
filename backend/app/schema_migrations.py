@@ -3344,6 +3344,157 @@ def _add_chat_wait_condition_owner(eng) -> None:
       ))
 
 
+def _make_agent_work_claim_history_durable(eng) -> None:
+  """Release tombstoned owners and preserve claim history after chat purge.
+
+  Exact-action completion is an idempotency fact owned by the workspace, not
+  by the chat that performed it. SQLite cannot alter a foreign key in place,
+  so rebuild the two small coordination tables while preserving every row.
+  """
+  from sqlalchemy import inspect as sa_inspect, text
+
+  inspector = sa_inspect(eng)
+  tables = set(inspector.get_table_names())
+  if "agent_work_claims" not in tables:
+    return
+
+  with eng.begin() as conn:
+    conn.execute(text(
+      "UPDATE agent_work_claims SET "
+      "released_at = COALESCE(released_at, CURRENT_TIMESTAMP), "
+      "updated_at = CURRENT_TIMESTAMP, "
+      "outcome = COALESCE(outcome, "
+      "'Owning chat was deleted before this action completed.'), "
+      "revision = revision + 1 "
+      "WHERE completed_at IS NULL AND released_at IS NULL "
+      "AND owner_chat_id IN (SELECT id FROM chats WHERE deleted_at IS NOT NULL)"
+    ))
+
+  foreign_keys = inspector.get_foreign_keys("agent_work_claims")
+  owner_chat_fk = next((
+    item for item in foreign_keys
+    if item.get("constrained_columns") == ["owner_chat_id"]
+  ), None)
+  columns = {
+    column["name"]: column
+    for column in inspector.get_columns("agent_work_claims")
+  }
+  already_current = (
+    columns.get("owner_chat_id", {}).get("nullable") is True
+    and owner_chat_fk is not None
+    and str(owner_chat_fk.get("options", {}).get("ondelete", "")).upper()
+    == "SET NULL"
+  )
+  if already_current:
+    return
+
+  if eng.dialect.name == "sqlite":
+    raw = eng.raw_connection()
+    try:
+      cursor = raw.cursor()
+      cursor.execute("PRAGMA foreign_keys=OFF")
+      cursor.execute("BEGIN IMMEDIATE")
+      has_interests = "agent_work_interests" in tables
+      if has_interests:
+        cursor.execute(
+          "ALTER TABLE agent_work_interests "
+          "RENAME TO agent_work_interests__pre_0039"
+        )
+      cursor.execute(
+        "ALTER TABLE agent_work_claims "
+        "RENAME TO agent_work_claims__pre_0039"
+      )
+      cursor.execute(
+        "CREATE TABLE agent_work_claims ("
+        "id VARCHAR(64) NOT NULL PRIMARY KEY, "
+        "owner_id INTEGER NOT NULL, "
+        "work_key VARCHAR(256) NOT NULL, summary VARCHAR(500) NOT NULL, "
+        "owner_chat_id VARCHAR(64) NULL, "
+        "owner_run_id VARCHAR(64) NOT NULL, owner_goal_id VARCHAR(64) NULL, "
+        "previous_owner_chat_id VARCHAR(64) NULL, "
+        "takeover_reason VARCHAR(1000) NULL, "
+        "revision INTEGER NOT NULL DEFAULT '1', "
+        "notification_revision INTEGER NOT NULL DEFAULT '1', "
+        "claimed_at DATETIME NOT NULL, updated_at DATETIME NOT NULL, "
+        "released_at DATETIME NULL, completed_at DATETIME NULL, "
+        "outcome VARCHAR(1000) NULL, "
+        "CONSTRAINT uq_agent_work_claim_key UNIQUE (owner_id, work_key), "
+        "FOREIGN KEY(owner_id) REFERENCES owner(id) ON DELETE CASCADE, "
+        "FOREIGN KEY(owner_chat_id) REFERENCES chats(id) ON DELETE SET NULL"
+        ")"
+      )
+      cursor.execute(
+        "INSERT INTO agent_work_claims SELECT * "
+        "FROM agent_work_claims__pre_0039"
+      )
+      if has_interests:
+        cursor.execute(
+          "CREATE TABLE agent_work_interests ("
+          "id VARCHAR(64) NOT NULL PRIMARY KEY, "
+          "claim_id VARCHAR(64) NOT NULL, chat_id VARCHAR(64) NOT NULL, "
+          "goal_id VARCHAR(64) NOT NULL, created_at DATETIME NOT NULL, "
+          "resolved_at DATETIME NULL, "
+          "CONSTRAINT uq_agent_work_interest_goal "
+          "UNIQUE (claim_id, chat_id, goal_id), "
+          "FOREIGN KEY(claim_id) REFERENCES agent_work_claims(id) ON DELETE CASCADE, "
+          "FOREIGN KEY(chat_id) REFERENCES chats(id) ON DELETE CASCADE)"
+        )
+        cursor.execute(
+          "INSERT INTO agent_work_interests SELECT * "
+          "FROM agent_work_interests__pre_0039"
+        )
+        cursor.execute("DROP TABLE agent_work_interests__pre_0039")
+      cursor.execute("DROP TABLE agent_work_claims__pre_0039")
+      cursor.execute(
+        "CREATE INDEX ix_agent_work_claims_owner_id "
+        "ON agent_work_claims (owner_id)"
+      )
+      cursor.execute(
+        "CREATE INDEX ix_agent_work_claims_owner_chat_id "
+        "ON agent_work_claims (owner_chat_id)"
+      )
+      cursor.execute(
+        "CREATE INDEX ix_agent_work_claims_owner_goal_id "
+        "ON agent_work_claims (owner_goal_id)"
+      )
+      if has_interests:
+        cursor.execute(
+          "CREATE INDEX ix_agent_work_interests_claim_id "
+          "ON agent_work_interests (claim_id)"
+        )
+        cursor.execute(
+          "CREATE INDEX ix_agent_work_interests_chat_id "
+          "ON agent_work_interests (chat_id)"
+        )
+        cursor.execute(
+          "CREATE INDEX ix_agent_work_interests_goal_id "
+          "ON agent_work_interests (goal_id)"
+        )
+      raw.commit()
+      cursor.execute("PRAGMA foreign_keys=ON")
+      cursor.close()
+    except Exception:
+      raw.rollback()
+      raise
+    finally:
+      raw.close()
+    return
+
+  if owner_chat_fk and owner_chat_fk.get("name"):
+    with eng.begin() as conn:
+      conn.execute(text(
+        f"ALTER TABLE agent_work_claims DROP CONSTRAINT "
+        f"{owner_chat_fk['name']}"
+      ))
+      conn.execute(text(
+        "ALTER TABLE agent_work_claims ALTER COLUMN owner_chat_id DROP NOT NULL"
+      ))
+      conn.execute(text(
+        "ALTER TABLE agent_work_claims ADD FOREIGN KEY (owner_chat_id) "
+        "REFERENCES chats(id) ON DELETE SET NULL"
+      ))
+
+
 _SCHEMA_MIGRATIONS = (
   ("0001_legacy_schema_convergence", _converge_legacy_schema),
   ("0002_chat_run_goal_objective", _add_chat_run_goal_objective),
@@ -3393,6 +3544,7 @@ _SCHEMA_MIGRATIONS = (
   ("0036_agent_coordination_send_identity", _add_agent_coordination_send_identity),
   ("0037_agent_coordination_send_target", _add_agent_coordination_send_target),
   ("0038_chat_wait_condition_owner", _add_chat_wait_condition_owner),
+  ("0039_agent_work_claim_history", _make_agent_work_claim_history_durable),
 )
 
 

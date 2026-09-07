@@ -167,7 +167,15 @@ mutation, or monitor. Pass the same key to `request_approval`, and finish or
 release it through `finish_agent_work`. Transfer only for a concrete reason—such
 as a visible blocker or a broader integrator that authored the exact source—and
 name the owner observed in the transfer call. Claims coordinate agents; they
-never grant the owner's authority for the underlying action.
+never grant the owner's authority for the underlying action, and following one
+exact action never transfers or pauses the follower's whole Goal. Every
+`request_approval` requires a stable action key, including chat-local and
+restart approvals, so approval ownership is never implicit in mutable prose.
+
+An in-turn fleet dies with the turn; a durable background delegation may
+outlive the turn only when an installed capability explicitly owns that
+lifecycle. A Goal remains with its chat unless that broader outcome is
+explicitly transferred—neither a helper nor an exact-action claim implies it.
 
 > **Carve-out for reports/digests from a background or morning run.** This live-chat rule is for an *interactive* turn with the partner present. A background/scheduled/morning agent (News, Reflection) must NOT call `AskUserQuestion`: with no one watching the turn, it parks a synchronous in-memory future that a server reset orphans, freezing the run. Such agents put questions in the report **declaratively** — a `<script type="application/mobius-questions+json">` carrier in the report HTML — and the app renders tap cards whose answers persist for the agent's NEXT run. Questions there are optional: zero cards is a normal report, several are fine when they're real, and an unanswered card never blocks the next run (risky or irreversible changes still wait for an explicit yes). Never a live `AskUserQuestion` from a background agent.
 

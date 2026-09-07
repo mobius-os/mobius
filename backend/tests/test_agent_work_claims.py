@@ -5,7 +5,7 @@ from app.agent_work_claims import (
   acknowledge_notice,
   claim_work,
   finish_work,
-  peer_claim_owns_goal_handoff,
+  stage_release_claims_for_chat,
 )
 
 
@@ -53,9 +53,7 @@ def test_first_claim_wins_and_loser_follows_without_duplicate_ownership(db):
   assert (interest.chat_id, interest.goal_id) == (
     second.id, "claim-goal-second",
   )
-  assert peer_claim_owns_goal_handoff(
-    db, chat_id=second.id, goal_id="claim-goal-second",
-  ) is True
+  assert "does not transfer ownership of your whole Goal" in lost["next_action"]
 
 
 def test_transfer_requires_current_owner_identity_and_records_reason(db):
@@ -101,9 +99,6 @@ def test_transfer_requires_current_owner_identity_and_records_reason(db):
   assert retried["state"] == "transferred"
   assert retried["previous_owner_chat_id"] == first.id
   assert retried["notification_pending"] is True
-  assert peer_claim_owns_goal_handoff(
-    db, chat_id=first.id, goal_id="claim-goal-first",
-  ) is True
 
 
 def test_completion_resolves_followers_and_same_key_cannot_be_reclaimed(db):
@@ -128,12 +123,58 @@ def test_completion_resolves_followers_and_same_key_cannot_be_reclaimed(db):
     db, claim_id=finished.claim["id"], revision=finished.claim["revision"],
     resolve_interests=True,
   )
-  assert peer_claim_owns_goal_handoff(
-    db, chat_id=second.id, goal_id="claim-goal-second",
-  ) is False
   later = claim_work(
     db, owner_id=owner.id, chat_id=second.id, run_id="claim-run-second",
     work_key=key, summary="Try the completed operation again",
   )
   assert later["state"] == "completed"
   assert later["owner_chat_id"] == first.id
+
+
+def test_exact_action_claim_never_masquerades_as_whole_goal_handoff(db):
+  from app.chat import _goal_handoff_is_owned
+
+  owner, first, second = _fixture(db)
+  first.pending_question_id = "approval-card"
+  db.commit()
+  key = "github:mobius-os/mobius:pr:1079:3134e050:merge"
+  claim_work(
+    db, owner_id=owner.id, chat_id=first.id, run_id="claim-run-first",
+    work_key=key, summary="Merge the reviewed PR",
+  )
+  claim_work(
+    db, owner_id=owner.id, chat_id=second.id, run_id="claim-run-second",
+    work_key=key, summary="Merge the same reviewed PR",
+  )
+
+  assert _goal_handoff_is_owned(
+    db, second.id, "claim-goal-second",
+  ) is False
+
+
+def test_deleting_owner_releases_only_unfinished_exact_action(db):
+  owner, first, second = _fixture(db)
+  key = "github:mobius-os/mobius:pr:1079:3134e050:merge"
+  claim_work(
+    db, owner_id=owner.id, chat_id=first.id, run_id="claim-run-first",
+    work_key=key, summary="Merge the reviewed PR",
+  )
+  claim_work(
+    db, owner_id=owner.id, chat_id=second.id, run_id="claim-run-second",
+    work_key=key, summary="Merge the same reviewed PR",
+  )
+
+  released = stage_release_claims_for_chat(db, first.id)
+  db.commit()
+
+  assert len(released) == 1
+  assert released[0].interested_chat_ids == [second.id]
+  row = db.query(models.AgentWorkClaim).one()
+  assert row.released_at is not None
+  assert "deleted" in row.outcome
+  reclaimed = claim_work(
+    db, owner_id=owner.id, chat_id=second.id, run_id="claim-run-second",
+    work_key=key, summary="Take over the released action",
+  )
+  assert reclaimed["state"] == "claimed"
+  assert reclaimed["owner_chat_id"] == second.id

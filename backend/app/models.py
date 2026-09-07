@@ -1449,8 +1449,8 @@ class AgentWorkClaim(Base):
   work_key = Column(String(256), nullable=False)
   summary = Column(String(500), nullable=False)
   owner_chat_id = Column(
-    String(64), ForeignKey("chats.id", ondelete="CASCADE"),
-    nullable=False, index=True,
+    String(64), ForeignKey("chats.id", ondelete="SET NULL"),
+    nullable=True, index=True,
   )
   owner_run_id = Column(String(64), nullable=False)
   owner_goal_id = Column(String(64), nullable=True, index=True)

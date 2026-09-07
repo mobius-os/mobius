@@ -210,6 +210,7 @@ the write-surface contract.
    ```bash
    python3 /data/platform/backend/scripts/owner_approval.py \
      'Restart to activate <tested change>? This interrupts <N> active turns and may take Möbius offline for tens of seconds.' \
+     --work-key 'platform:<tested-commit>:restart' \
      --option 'Not now' 'Leave the tested change pending without interruption.' \
      --option 'Restart now' 'Activate the tested change with the interruption described.'
    ```

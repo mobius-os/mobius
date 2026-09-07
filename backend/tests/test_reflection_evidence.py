@@ -122,16 +122,14 @@ class ReflectionEvidenceTests(unittest.TestCase):
       (run_dir / "failed-interview.txt").write_text("provider error\n")
       (run_dir / "memory-writer-review.md").write_text("review\n")
       output = io.StringIO()
-      with (
-        mock.patch.object(reflection_evidence, "REFLECTION_METRICS", str(metrics)),
-        mock.patch.object(
-          reflection_evidence,
-          "REFLECTION_RUNS",
-          str(root / "runs"),
-        ),
-        contextlib.redirect_stdout(output),
-      ):
-        reflection_evidence.section_reflection(5)
+      with contextlib.redirect_stdout(output):
+        reflection_evidence.section_reflection(5, {
+          "metrics": str(metrics),
+          "runs": str(root / "runs"),
+          "source_dir": str(root / "source"),
+          "storage_dir": str(root),
+          "tool_friction": str(root / "source" / "tool_friction.py"),
+        })
 
     rendered = output.getvalue()
     self.assertIn("2026-07-28", rendered)
@@ -139,6 +137,30 @@ class ReflectionEvidenceTests(unittest.TestCase):
     self.assertIn("memory-writer-review.md", rendered)
     self.assertNotIn("[interview:", rendered)
     self.assertNotIn("[no interview capture]", rendered)
+
+  def test_reflection_paths_keep_source_code_and_numeric_storage_separate(self):
+    with (
+      mock.patch.object(reflection_evidence, "DATA_DIR", "/srv/mobius"),
+      mock.patch.object(
+        reflection_evidence,
+        "installed_app",
+        return_value={
+          "id": 56,
+          "slug": "reflection",
+          "source_dir": "/srv/mobius/apps/reflection",
+        },
+      ),
+    ):
+      paths = reflection_evidence.reflection_paths()
+
+    self.assertEqual(paths["source_dir"], "/srv/mobius/apps/reflection")
+    self.assertEqual(paths["storage_dir"], "/srv/mobius/apps/56")
+    self.assertEqual(
+      paths["metrics"], "/srv/mobius/apps/56/reflection-run-metrics.jsonl",
+    )
+    self.assertEqual(
+      paths["tool_friction"], "/srv/mobius/apps/reflection/tool_friction.py",
+    )
 
   def test_writer_diff_is_limited_to_reported_memory_paths(self):
     with tempfile.TemporaryDirectory() as raw:

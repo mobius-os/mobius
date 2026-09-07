@@ -2204,6 +2204,7 @@ async def delete_chat(
   db: Session = Depends(get_db),
 ):
   """Soft-deletes a chat and stops any running agent for it."""
+  released_claims = []
   from app.gauntlets import active_gauntlet_ids_for_chat, stop_gauntlet
   for gauntlet_id in active_gauntlet_ids_for_chat(db, chat_id):
     stopped_gauntlet = await stop_gauntlet(gauntlet_id)
@@ -2281,7 +2282,9 @@ async def delete_chat(
       # wait cancellation atomic with the tombstone so recovery cannot revive
       # a promise the owner explicitly removed.
       from app.chat_waits import stage_cancel_waits_for_chat
+      from app.agent_work_claims import stage_release_claims_for_chat
       stage_cancel_waits_for_chat(db, chat_id)
+      released_claims = stage_release_claims_for_chat(db, chat_id)
       chat.deleted_at = now_naive_utc()
       db.commit()
       # Publish the committed tombstone before best-effort run cleanup. If that
@@ -2289,6 +2292,51 @@ async def delete_chat(
       # durable deletion rather than retain a stale drawer row.
       get_system_broadcast().publish(
         {"type": "chat_deleted", "chatId": str(chat_id)}
+      )
+  # The tombstone and releases are already durable. Notify/wake followers as a
+  # best-effort delivery layer; failure cannot roll back an owner-requested
+  # deletion, and the released claim itself remains reclaimable by exact key.
+  if released_claims:
+    from app.agent_coordination import (
+      send_work_claim_notice,
+      wake_idle_recipients,
+    )
+    from app.agent_work_claims import acknowledge_notice
+    wake_recipients: list[str] = []
+    for released in released_claims:
+      if not released.interested_chat_ids:
+        continue
+      try:
+        send_work_claim_notice(
+          db,
+          owner_id=_.id,
+          claim_id=released.claim_id,
+          revision=released.revision,
+          sender_chat_id=chat_id,
+          recipients=released.interested_chat_ids,
+          body=(
+            f"Work claim {released.work_key} was released because its owning "
+            "chat was deleted. Reconcile the exact action with your Goal."
+          ),
+        )
+        acknowledge_notice(
+          db,
+          claim_id=released.claim_id,
+          revision=released.revision,
+          resolve_interests=True,
+        )
+        wake_recipients.extend(released.interested_chat_ids)
+      except Exception:
+        log.exception(
+          "Chat %s was deleted but claim %s followers were not notified",
+          chat_id,
+          released.claim_id,
+        )
+    if wake_recipients:
+      await wake_idle_recipients(
+        recipients=list(dict.fromkeys(wake_recipients)),
+        kind="handoff",
+        sender_chat_id=chat_id,
       )
   # Flag the chat soft-deleted in the registry (NOT forget_chat, which resets
   # the generation counter to a reusable 0). mark_chat_deleted preserves the

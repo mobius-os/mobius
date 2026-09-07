@@ -36,6 +36,33 @@ def test_purge_after_seven_days(db, chat):
   assert gone is None, "Chat deleted 8 days ago must be purged"
 
 
+def test_hard_purge_preserves_completed_workspace_action_receipt(db, chat):
+  owner = db.query(models.Owner).first()
+  row = models.AgentWorkClaim(
+    id="completed-action-receipt",
+    owner_id=owner.id,
+    work_key="platform:test:completed-action",
+    summary="Complete exact action",
+    owner_chat_id=chat.id,
+    owner_run_id="historical-run",
+    completed_at=datetime.now(UTC).replace(tzinfo=None),
+    outcome="Done once",
+  )
+  db.add(row)
+  chat_id = chat.id
+  chat.deleted_at = datetime.now(UTC).replace(tzinfo=None) - timedelta(days=8)
+  db.commit()
+
+  purge_expired_chat_tombstones(db)
+
+  db.expire_all()
+  preserved = db.get(models.AgentWorkClaim, "completed-action-receipt")
+  assert db.get(models.Chat, chat_id) is None
+  assert preserved is not None
+  assert preserved.owner_chat_id is None
+  assert preserved.outcome == "Done once"
+
+
 def test_hard_purge_skips_chat_with_nonterminal_run(db, chat):
   """A tombstoned chat that still owns a running/parked/resumable run must not
   be purged — cleanup must never delete transcript/tool-output/session-link

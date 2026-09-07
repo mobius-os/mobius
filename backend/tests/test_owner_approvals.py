@@ -16,10 +16,14 @@ from app.routes import chats_stream
 
 PROMPT = {
   "question": "Restart to activate the tested change? This interrupts active turns.",
+  "work_key": "platform:test-revision:restart",
   "options": [
     {"label": "Not now", "description": "Leave the change pending."},
     {"label": "Restart now", "description": "Interrupt active turns to activate it."},
   ],
+}
+QUESTION_PROMPT = {
+  key: value for key, value in PROMPT.items() if key != "work_key"
 }
 
 
@@ -156,6 +160,7 @@ def test_approval_saves_before_receipt_without_a_waiting_future(
   assert questions.get(chat.id) is None
   block = messages[-1]["blocks"][-1]
   assert block["response_mode"] == "continuation"
+  assert block["action_key"] == PROMPT["work_key"]
   assert block["questions"][0]["options"] == PROMPT["options"]
   assert "answers" not in block
 
@@ -205,6 +210,17 @@ def test_shared_work_key_allows_only_the_first_chat_to_create_an_approval(
   assert "no duplicate card was created" in duplicate.text
   assert db.query(models.AgentWorkClaim).count() == 1
   assert _row(other.id)[0] is None
+
+
+def test_approval_without_action_identity_is_rejected_before_card_creation(
+  client, chat, approval_run,
+):
+  unowned = {key: value for key, value in PROMPT.items() if key != "work_key"}
+
+  response = _ask(client, chat, approval_run, unowned)
+
+  assert response.status_code == 422
+  assert _row(chat.id)[0] is None
 
 
 def test_creation_failure_has_no_receipt_or_orphan_card(
@@ -446,7 +462,7 @@ def test_saved_owner_cards_share_blocking_marker_and_terminal_receipt(
   client, chat, auth, approval_run, route,
 ):
   payload = PROMPT if route == "approval" else {"questions": [{
-    "id": "direction", "header": "Direction", **PROMPT,
+    "id": "direction", "header": "Direction", **QUESTION_PROMPT,
   }]}
   response = client.post(f"/api/chats/{chat.id}/{route}",
                          json=payload, headers=approval_run[1])
@@ -464,7 +480,7 @@ def test_saved_owner_cards_share_blocking_marker_and_terminal_receipt(
 
 def test_saved_questions_keep_multiple_choices_and_retry_identity(client, chat, approval_run):
   payload = {"questions": [
-    {"id": "direction", "header": "Direction", **PROMPT},
+    {"id": "direction", "header": "Direction", **QUESTION_PROMPT},
     {"id": "timing", "header": "Timing", "question": "When?", "options": []},
   ]}
   first = client.post(f"/api/chats/{chat.id}/question", json=payload, headers=approval_run[1])
@@ -482,7 +498,7 @@ def test_question_tool_saves_receipt_and_never_returns_a_default_answer(monkeypa
   monkeypatch.setattr(control._APPROVALS, "request_question", lambda questions: (
     captured.append(questions) or expected
   ))
-  payload = [{"id": "choice", "header": "Choice", **PROMPT}]
+  payload = [{"id": "choice", "header": "Choice", **QUESTION_PROMPT}]
   assert control._call_request_question({"questions": payload}) == expected
   assert captured == [payload]
   assert "answers" not in expected
