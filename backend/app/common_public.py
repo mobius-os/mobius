@@ -53,10 +53,12 @@ DIRECTORY_LIMIT = 2000
 # bound durable abuse instead: an operator can raise them after provisioning
 # more storage, while existing imported records remain readable at any size.
 BOARD_POST_LIMIT = 10_000
-# An accepted reaction retry is remembered for the full timestamp window.  At
-# the public ingress limit this maximum exceeds all possible live entries; if
-# configured limits ever diverge, fail closed instead of dropping a live token.
-REACTION_REPLAY_TTL_S = CLOCK_SKEW_S
+# Verification accepts timestamps up to one skew window in the future and
+# one in the past. Retain a token for both windows from first receipt, so it
+# cannot expire while that same signed envelope is still admissible.
+REACTION_REPLAY_TTL_S = 2 * CLOCK_SKEW_S
+# Bound per-post metadata; saturation rejects new reactions rather than
+# discarding live tokens and making earlier requests replayable.
 REACTION_REPLAY_LIMIT = 2048
 
 

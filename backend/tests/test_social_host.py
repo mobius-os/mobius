@@ -211,6 +211,34 @@ def test_same_directory_board_reply_reaction_contract(public_runtime):
   ).json() == {"status": "ok", "likes": 0, "liked": False}
 
 
+def test_future_dated_reaction_retry_is_idempotent_for_full_valid_window(
+  public_runtime, monkeypatch,
+):
+  from app.common_protocol import CLOCK_SKEW_S
+  now = time.time()
+  clock = [now]
+  monkeypatch.setattr(time, "time", lambda: clock[0])
+  private_key, public_key = _keypair()
+  _seed_actor(public_runtime.verifier, public_key)
+  post_id = str(uuid.uuid4())
+  public_runtime.store.store_post({
+    "id": post_id, "created_at": now, "text": "fixture", "replies": [],
+  })
+  reaction = _signed(private_key, {
+    "v": 0, "type": "board_react", "post_id": post_id,
+    "from": PEER_HOST, "sent_at": now + CLOCK_SKEW_S - 1,
+  })
+  for elapsed in (0, CLOCK_SKEW_S + 1, 2 * CLOCK_SKEW_S - 1):
+    clock[0] = now + elapsed
+    response = public_runtime.client.post("/api/common/board/react", json=reaction)
+    assert response.status_code == 200, response.text
+    assert response.json() == {"status": "ok", "likes": 1, "liked": True}
+  clock[0] = now + 2 * CLOCK_SKEW_S
+  assert public_runtime.client.post(
+    "/api/common/board/react", json=reaction,
+  ).status_code == 400
+
+
 def test_same_bad_signature_and_old_timestamp_contract(public_runtime):
   private_key, public_key = _keypair()
   _seed_actor(public_runtime.verifier, public_key)
