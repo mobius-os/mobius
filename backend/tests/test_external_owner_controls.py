@@ -437,3 +437,36 @@ def test_owner_top_level_agent_and_scoped_app_keep_scoped_connection_controls(
     "Workstation top_level",
     "Workstation app",
   ]
+
+
+def test_outbound_sharing_keeps_external_owner_control_boundary(
+  client, owner_token, db, monkeypatch,
+):
+  from app import connect_outbound
+
+  auths, _app_id = _external_control_auth(client, owner_token, db)
+  calls = []
+
+  async def create(label, command):
+    calls.append(("create", label))
+    return {"id": "o_0123456789abcdef"}
+
+  async def revoke(profile_id):
+    calls.append(("revoke", profile_id))
+
+  monkeypatch.setattr(connect_outbound, "create_profile", create)
+  monkeypatch.setattr(connect_outbound, "revoke_profile", revoke)
+  body = {"label": "Shared access", "command": "pairing-command-data"}
+  path = "/api/connect/outbound"
+  created = client.post(path, headers=auths["delegated"], json=body)
+  deleted = client.delete(path + "/o_0123456789abcdef", headers=auths["delegated"])
+  assert created.status_code == 403, created.text
+  assert deleted.status_code == 403, deleted.text
+  assert calls == []
+
+  for actor in ("owner", "top_level", "app"):
+    created = client.post(path, headers=auths[actor], json=body)
+    deleted = client.delete(path + "/o_0123456789abcdef", headers=auths[actor])
+    assert created.status_code == 200, (actor, created.text)
+    assert deleted.status_code == 200, (actor, deleted.text)
+  assert len(calls) == 6

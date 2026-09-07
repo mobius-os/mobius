@@ -19,6 +19,9 @@ remains visible to the owner with an in-place update command.
 
 Owner/app surface:
 
+  GET    /api/connect/outbound            list people this Möbius joined
+  POST   /api/connect/outbound            paste another Connect command
+  DELETE /api/connect/outbound/{id}       revoke that outbound access
   POST   /api/connect/hosts               create a host + pairing code
   GET    /api/connect/hosts               list hosts + live status
   PATCH  /api/connect/hosts/{id}          rename a host
@@ -56,13 +59,14 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 
-from app import models
+from app import connect_outbound, models
 from app.config import get_settings
 from app.deps import (
   get_owner_or_app_with_connect_manage,
   reject_cross_site,
   require_nondelegated_owner_or_app_control,
 )
+from app.storage_io import atomic_write
 
 router = APIRouter(
   prefix="/api/connect",
@@ -122,9 +126,7 @@ def _load_host(host_id: str) -> dict | None:
 
 def _save_host(host: dict) -> None:
   p = _host_path(host["id"])
-  tmp = p.with_suffix(".json.tmp")
-  tmp.write_text(json.dumps(host, indent=2), "utf-8")
-  tmp.replace(p)
+  atomic_write(p, json.dumps(host, indent=2), mode=0o600)
 
 
 def _list_hosts() -> list[dict]:
@@ -501,9 +503,60 @@ class RenameHostBody(BaseModel):
   name: str = Field(min_length=1, max_length=80)
 
 
+class CreateOutboundBody(BaseModel):
+  label: str = Field(min_length=1, max_length=80)
+  command: str = Field(min_length=1, max_length=4096)
+
+  @field_validator("label")
+  @classmethod
+  def normalize_label(cls, value: str) -> str:
+    label = value.strip()
+    if not label:
+      raise ValueError("Name who will have access.")
+    return label
+
+
 # --------------------------------------------------------------------------- #
 # Owner/app surface
 # --------------------------------------------------------------------------- #
+@router.get("/outbound")
+async def list_outbound_access(
+  _owner: models.Owner = Depends(get_owner_or_app_with_connect_manage),
+) -> dict:
+  return {"connections": connect_outbound.list_profiles()}
+
+
+@router.post(
+  "/outbound",
+  dependencies=[Depends(require_nondelegated_owner_or_app_control)],
+)
+async def create_outbound_access(
+  body: CreateOutboundBody,
+  _owner: models.Owner = Depends(get_owner_or_app_with_connect_manage),
+) -> dict:
+  try:
+    return await connect_outbound.create_profile(body.label, body.command)
+  except connect_outbound.OutboundConnectError as exc:
+    raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.delete(
+  "/outbound/{profile_id}",
+  dependencies=[Depends(require_nondelegated_owner_or_app_control)],
+)
+async def revoke_outbound_access(
+  profile_id: str,
+  _owner: models.Owner = Depends(get_owner_or_app_with_connect_manage),
+) -> dict:
+  try:
+    await connect_outbound.revoke_profile(profile_id)
+  except LookupError as exc:
+    raise HTTPException(status_code=404, detail="No such shared access.") from exc
+  except connect_outbound.OutboundConnectError as exc:
+    raise HTTPException(status_code=409, detail=str(exc)) from exc
+  return {"ok": True}
+
+
 def _base_url() -> str:
   return get_settings().frontend_origin.rstrip("/")
 

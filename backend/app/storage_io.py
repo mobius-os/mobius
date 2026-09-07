@@ -92,7 +92,9 @@ def etag_matches(token: str, if_match: str) -> bool:
   return False
 
 
-def atomic_write(file_path: Path, content: str | bytes) -> None:
+def atomic_write(
+  file_path: Path, content: str | bytes, *, mode: int = 0o644,
+) -> None:
   """Writes content to file_path atomically — no torn or interleaved reads.
 
   A reader (or the listing-based completion poll a mini-app runs after a job)
@@ -107,8 +109,9 @@ def atomic_write(file_path: Path, content: str | bytes) -> None:
   file_path.parent.mkdir(parents=True, exist_ok=True)
   data = content.encode("utf-8") if isinstance(content, str) else content
   # Unique temp name (mkstemp) so concurrent writers to the same path don't
-  # collide on the temp file itself. mkstemp creates 0600; chmod to 0644 so the
-  # file is readable the same way a normal umask-022 write would leave it.
+  # collide on the temp file itself. mkstemp creates 0600, so private callers
+  # never expose a secret before replacement; callers that need world-readable
+  # output keep the 0644 default.
   fd, tmp = tempfile.mkstemp(
     dir=file_path.parent, prefix=f".{file_path.name}.", suffix=".tmp"
   )
@@ -117,7 +120,7 @@ def atomic_write(file_path: Path, content: str | bytes) -> None:
       f.write(data)
       f.flush()
       os.fsync(f.fileno())
-    os.chmod(tmp, 0o644)
+    os.chmod(tmp, mode)
     os.replace(tmp, file_path)
   except BaseException:
     try:

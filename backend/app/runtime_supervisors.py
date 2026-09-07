@@ -57,6 +57,8 @@ class RuntimeSupervisors:
   async def start_process_services(self) -> None:
     """Start services that are safe without a serviceable database."""
     await self._start_frontend_watcher()
+    from app.connect_outbound import supervise_outbound_connects
+    self._spawn("connect-outbound", supervise_outbound_connects())
 
   async def start_database_services(self) -> None:
     """Start long-lived database work; individual wiring failures fail open."""
