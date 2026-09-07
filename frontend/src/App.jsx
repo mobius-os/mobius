@@ -3,7 +3,6 @@ import { PersistQueryClientProvider } from '@tanstack/react-query-persist-client
 import { QueryClientProvider, useIsRestoring } from '@tanstack/react-query'
 import ErrorBoundary from './components/ErrorBoundary/ErrorBoundary.jsx'
 import PlatformDegradedNotice from './components/ErrorBoundary/PlatformDegradedNotice.jsx'
-import ShellFreshnessNotice from './components/ErrorBoundary/ShellFreshnessNotice.jsx'
 import './components/ErrorBoundary/RecoveryPanel.css'
 import { api, beginEphemeralAuth, getToken, setToken, BASE } from './api/client.js'
 import * as setupSession from './lib/setupSession.js'
@@ -375,12 +374,7 @@ function AppRoot() {
     <Suspense fallback={<RouteLoading />}>
       {STANDALONE_APP
         ? <StandaloneApp initialApp={STANDALONE_APP} />
-        : (
-          <>
-            <Shell onInitialVisualReady={markShellVisualReady} />
-            <ShellFreshnessNotice version={servedVersionQuery.data} />
-          </>
-        )}
+        : <Shell onInitialVisualReady={markShellVisualReady} />}
     </Suspense>
   )
 }
