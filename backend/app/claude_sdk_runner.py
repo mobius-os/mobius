@@ -1521,8 +1521,17 @@ async def run_claude_sdk_turn(
             continue
           if (
             isinstance(sdk_msg, ResultMessage)
-            and sdk_msg.stop_reason == "interrupt"
             and active_client.interrupt_issued
+            and (
+              sdk_msg.stop_reason == "interrupt"
+              # A card commit interrupts WHILE the card tool is the last action,
+              # so the CLI's terminal carries stop_reason `tool_use`/null (its
+              # own `[ede_diagnostic]` names exactly this), not `interrupt`. We
+              # initiated this cut, so classify it by our own ownership flag
+              # rather than the provider's stop_reason, or the raw "Execution
+              # interrupted." error leaks as a red block after the card.
+              or active_client.owner_card_interrupt
+            )
           ):
             # Our own interrupt is not a failure (see `_interrupt_owner`). A
             # Stop writes its own pause note through the stop flow; a steer
@@ -1569,6 +1578,7 @@ async def run_claude_sdk_turn(
           if (
             session_id is not None            # a resume (non-first turn)
             and sdk_msg.stop_reason != "interrupt"  # a clean end, not our interrupt
+            and not active_client.owner_card_interrupt  # nor our card end (may be tool_use/null)
             and not active_client.interrupt_requested  # Stop is terminal
             and not terminal.get("error")     # clean terminal (is_error False)
             and terminal.get("api_error_status") != 429  # not a bare 429/park

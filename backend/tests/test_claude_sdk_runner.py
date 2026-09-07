@@ -457,10 +457,35 @@ async def test_steer_interrupt_racing_turn_end_is_a_resumable_pause(
   assert result["resume_incomplete"] is True
 
 
+def _tool_boundary_interrupt_result(
+  session_id: str = "sess-1", stop_reason: str | None = "tool_use",
+) -> ResultMessage:
+  """The terminal a soft interrupt produces when it lands WHILE a tool is the
+  last action — exactly the card-commit case. `_result_error_message` maps the
+  `error_during_execution` subtype to "Execution interrupted.", and the CLI
+  reports stop_reason `tool_use`/null here (its own `[ede_diagnostic]`), NOT
+  `interrupt` — so the defuse must key on our ownership, not stop_reason."""
+  return ResultMessage(
+    subtype="error_during_execution",
+    duration_ms=10,
+    duration_api_ms=5,
+    is_error=True,
+    num_turns=1,
+    session_id=session_id,
+    stop_reason=stop_reason,
+    total_cost_usd=0.01,
+    usage={"input_tokens": 1, "output_tokens": 2},
+  )
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("session_id", [None, "sess-1"])
+# The real-world card interrupt lands on a TOOL boundary, so its terminal
+# carries stop_reason `tool_use`/null — never `interrupt`. Include the
+# `interrupt` value too so the historic steer/stop shape stays covered.
+@pytest.mark.parametrize("stop_reason", ["tool_use", None, "interrupt"])
 async def test_owner_card_commit_ends_turn_as_clean_completion(
-  monkeypatch, session_id,
+  monkeypatch, session_id, stop_reason,
 ):
   """A committed continuation owner-input card ends the turn at its source.
 
@@ -468,10 +493,11 @@ async def test_owner_card_commit_ends_turn_as_clean_completion(
   SDK level stops the model from emitting trailing text or tools after the card.
   `finish_after_owner_card` fires the same soft interrupt `steer` uses, tagged
   `card`, so the interrupt terminal is classified as a CLEAN completion: no
-  requery (`pending_steer` is empty), no resumable "Paused" note, and the
-  pre-card text is the last thing in the turn. On a resume turn the `card` owner
-  must NOT masquerade as the synthetic-no-op auto-requery (which keys on an
-  interrupt-free clean end) and re-run the original prompt."""
+  requery (`pending_steer` is empty), no resumable "Paused" note, no leaked
+  "Execution interrupted." error block, and the pre-card text is the last thing
+  in the turn. On a resume turn the `card` owner must NOT masquerade as the
+  synthetic-no-op auto-requery (which keys on an interrupt-free clean end) and
+  re-run the original prompt."""
   class _Client(_FakeClient):
     async def receive_response(self):
       if len(self.queries) == 1:
@@ -479,7 +505,9 @@ async def test_owner_card_commit_ends_turn_as_clean_completion(
         handle = registry.get_handle("card-chat", RunnerKind.CLAUDE_SDK)
         await handle.finish_after_owner_card()
         assert handle.owner_card_interrupt is True
-        yield _interrupt_result(session_id=session_id or "sess-1")
+        yield _tool_boundary_interrupt_result(
+          session_id=session_id or "sess-1", stop_reason=stop_reason,
+        )
         return
       raise AssertionError("a card end must never requery")
 
@@ -498,7 +526,8 @@ async def test_owner_card_commit_ends_turn_as_clean_completion(
   assert client.disconnected is True
   assert client.queries == ["ask me a question"]
   # A continuation card is a clean completion, not a resumable pause: the raw
-  # "Execution interrupted." provider error is defused and no Resume is offered.
+  # "Execution interrupted." provider error is defused (regardless of the
+  # tool-boundary stop_reason) and no Resume is offered.
   assert result["error"] is None
   assert result["terminal_status"] == "completed"
   assert "resume_incomplete" not in result
