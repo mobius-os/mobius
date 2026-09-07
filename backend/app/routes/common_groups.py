@@ -2,10 +2,12 @@
 
 A group lives on its creator's instance, the **group host**. The host owns the
 authoritative membership record; members keep their own copy of every message,
-exactly like 1:1 conversations. Four signed envelope types extend the
+exactly like 1:1 conversations. Six signed envelope types extend the
 protocol, all delivered to `/api/common/groups/inbox`:
 
-- `group_added`  host → member    you were added; carries group metadata
+- `group_added`  host → invitee   invitation; carries group metadata
+- `group_accept` invitee → host   owner explicitly joins the group
+- `group_decline` invitee → host  owner dismisses the invitation
 - `group_post`   member → host    a member's message for the group
 - `group_message` host → member   the host's fan-out relay of a post
 - `group_deleted` host → member   the group is closed; retain local history
@@ -18,6 +20,8 @@ member's authorship. Nothing about a group ever touches a third instance.
 Owner surface (owner JWT or the Common app's scoped token):
   POST /api/common/groups                     create a group + invite members
   POST /api/common/groups/{gid}/send          send a message to the group
+  POST /api/common/groups/{gid}/accept        accept + join a remote group
+  POST /api/common/groups/{gid}/decline       decline a remote invitation
   POST /api/common/groups/{gid}/members       add a member (host only)
   DELETE /api/common/groups/{gid}             close a group (host only)
 
@@ -74,6 +78,7 @@ router = APIRouter(prefix="/api/common/groups", tags=["common"])
 
 MAX_GROUP_MEMBERS = 64
 _GID_RE = re.compile(r"^[a-f0-9-]{8,64}$")
+_REQUEST_STATES = {"pending", "accepted", "declined"}
 _group_locks: WeakValueDictionary[str, asyncio.Lock] = WeakValueDictionary()
 
 
@@ -138,29 +143,63 @@ async def _store_group_meta(app: models.App, gid: str, updates: dict) -> None:
 async def _store_group_message(
   app: models.App, gid: str, record: dict,
   attachment: tuple[dict, bytes] | None = None,
-) -> None:
+) -> bool:
   async with fs_locks.app_storage_lock(app.id):
     group = _group_dir(app, gid)
+    msgs = group / "msgs"
+    message_path = msgs / f"{record['id']}.json"
+    if message_path.is_file():
+      return False
     if attachment is not None:
       record["attachment"] = _write_app_attachment(
         group, record["id"], attachment
       )
-    msgs = group / "msgs"
     msgs.mkdir(parents=True, exist_ok=True)
-    atomic_write(msgs / f"{record['id']}.json", json.dumps(record))
+    atomic_write(message_path, json.dumps(record))
     meta_path = group / "meta.json"
-    meta = json.loads(meta_path.read_text()) if meta_path.is_file() else {}
+    had_meta = meta_path.is_file()
+    meta = json.loads(meta_path.read_text()) if had_meta else {}
+    request_state = meta.get("request_status")
+    if request_state not in _REQUEST_STATES:
+      # Every pre-request-migration group is an established conversation.
+      request_state = "accepted" if had_meta else "pending"
     meta.update(
       gid=gid,
       last_text=_message_preview(record["text"]),
       last_at=record["sent_at"],
       last_from_handle=record.get("author_handle") or record.get("author") or "",
       last_dir=record["dir"],
+      request_status=request_state,
     )
-    if record["dir"] == "in":
+    if record["dir"] == "in" and request_state == "accepted":
       meta["unread"] = int(meta.get("unread") or 0) + 1
+    elif record["dir"] == "in" and request_state == "pending":
+      meta["request_count"] = int(meta.get("request_count") or 0) + 1
+      meta["unread"] = 0
+    elif request_state != "accepted":
+      meta["unread"] = 0
     atomic_write(meta_path, json.dumps(meta))
     _bump_version(app)
+    return True
+
+
+def _group_request_state(meta: dict) -> str:
+  state = meta.get("request_status")
+  return state if state in _REQUEST_STATES else "accepted"
+
+
+def _host_member_active(member: dict) -> bool:
+  # Host records created before message requests have no status; they remain
+  # active rather than being silently demoted during upgrade.
+  return member.get("status") in (None, "active")
+
+
+def _require_accepted_group(meta: dict) -> None:
+  if _group_request_state(meta) != "accepted":
+    raise HTTPException(
+      status_code=409,
+      detail="Accept this group invitation before sending messages.",
+    )
 
 
 def _members_snapshot(group: dict) -> list[dict]:
@@ -168,6 +207,7 @@ def _members_snapshot(group: dict) -> list[dict]:
   return [
     {"host": h, "handle": str(m.get("handle") or "")[:MAX_NAME_CHARS]}
     for h, m in group["members"].items()
+    if m.get("status") != "declined"
   ]
 
 
@@ -201,13 +241,25 @@ async def _fan_out(group: dict, envelopes_by_host: dict[str, dict]) -> dict:
 
 
 def _added_envelope(identity: dict, group: dict, member: str) -> dict:
+  member_record = group["members"][member]
+  invitation_id = member_record.get("invitation_id")
+  if not isinstance(invitation_id, str) or not _GID_RE.fullmatch(invitation_id):
+    # Stable compatibility identity for a legacy active member receiving a
+    # roster refresh. New pending invitations always persist a random id.
+    invitation_id = str(uuid.uuid5(
+      uuid.NAMESPACE_URL, f"common-group:{group['id']}:{member}"
+    ))
+  invitation_version = member_record.get("invitation_version")
+  if not isinstance(invitation_version, int) or isinstance(invitation_version, bool):
+    invitation_version = 1
   return _signed({
     "v": 0,
     "type": "group_added",
-    "id": str(uuid.uuid4()),
+    "id": invitation_id,
     "from": _own_host(),
     "to": member,
     "gid": group["id"],
+    "invitation_version": invitation_version,
     "group_name": group["name"],
     "members": _members_snapshot(group),
     "sent_at": time.time(),
@@ -287,7 +339,10 @@ async def _host_accept_post(
       attachment=attachment, reply_to=reply_to,
     )
     for member in group["members"]
-    if member not in (_own_host(), author)
+    if (
+      member not in (_own_host(), author)
+      and _host_member_active(group["members"][member])
+    )
   }
   delivered = await _fan_out(group, relays)
   if author != _own_host():
@@ -329,6 +384,7 @@ async def group_inbox(request: Request, db: Session = Depends(get_db)):
   _validate_gid(gid)
   if envelope.get("type") not in (
     "group_added", "group_deleted", "group_post", "group_message",
+    "group_accept", "group_decline",
   ):
     raise HTTPException(status_code=400, detail="Unsupported envelope type.")
   app = _common_app(db)
@@ -344,6 +400,45 @@ async def _accept_group_envelope(
   gid = envelope["gid"]
   kind = envelope["type"]
   sender = envelope["from"]
+  if kind in ("group_accept", "group_decline"):
+    action_id = envelope.get("id")
+    if not isinstance(action_id, str) or not _GID_RE.fullmatch(action_id):
+      raise HTTPException(status_code=400, detail="Request id is invalid.")
+    group = _load_host_group(gid)
+    if group is None:
+      raise HTTPException(status_code=404, detail="Unknown group.")
+    _require_open(group)
+    member = group["members"].get(sender)
+    if member is None:
+      raise HTTPException(status_code=403, detail="No invitation exists for this group.")
+    status = member.get("status")
+    if status is None:
+      # A legacy member was already active before invitation requests existed.
+      return {"status": "accepted"}
+    if envelope.get("invitation_id") != member.get("invitation_id"):
+      raise HTTPException(status_code=409, detail="This invitation has been replaced.")
+    if kind == "group_accept":
+      if status == "active":
+        return {"status": "accepted"}
+      if status != "invited":
+        raise HTTPException(status_code=409, detail="This invitation is no longer pending.")
+      member.update(
+        status="active",
+        handle=str(actor.get("handle") or member.get("handle") or "")[:MAX_NAME_CHARS],
+        joined_at=time.time(),
+      )
+      atomic_write(_host_group_path(gid), json.dumps(group, indent=2))
+      await _store_group_meta(app, gid, {"members": _members_snapshot(group)})
+      return {"status": "accepted"}
+    if status == "declined":
+      return {"status": "declined"}
+    if status == "active":
+      raise HTTPException(status_code=409, detail="An active member cannot decline an invitation.")
+    member["status"] = "declined"
+    atomic_write(_host_group_path(gid), json.dumps(group, indent=2))
+    await _store_group_meta(app, gid, {"members": _members_snapshot(group)})
+    return {"status": "declined"}
+
   if kind in ("group_added", "group_deleted"):
     meta = _load_group_meta(app, gid)
     hosted = _load_host_group(gid)
@@ -356,14 +451,21 @@ async def _accept_group_envelope(
     if kind == "group_deleted":
       # A tombstone also precedes a delayed first invite; reordering must not
       # resurrect a closed group. Member-owned history is never erased.
+      prior_state = _group_request_state(meta) if meta else "declined"
       await _store_group_meta(app, gid, {
         "gid": gid, "host": sender, "name": (meta or {}).get("name") or name,
         "deleted_at": (meta or {}).get("deleted_at") or time.time(),
         "unread": 0,
+        "request_status": (
+          "accepted" if prior_state == "accepted" else "declined"
+        ),
       })
       return {"status": "deleted"}
     if meta:
       _require_open(meta)
+    invitation_id = envelope.get("id")
+    if not isinstance(invitation_id, str) or not _GID_RE.fullmatch(invitation_id):
+      raise HTTPException(status_code=400, detail="Invitation id is invalid.")
     members = envelope.get("members")
     if not isinstance(members, list) or len(members) > MAX_GROUP_MEMBERS:
       raise HTTPException(status_code=400, detail="Member list is invalid.")
@@ -375,23 +477,44 @@ async def _accept_group_envelope(
         "host": member["host"],
         "handle": str(member.get("handle") or "")[:MAX_NAME_CHARS],
       }
+    invitation_version = envelope.get("invitation_version", 1)
+    if (
+      not isinstance(invitation_version, int)
+      or isinstance(invitation_version, bool)
+      or invitation_version < 1
+    ):
+      raise HTTPException(status_code=400, detail="Invitation version is invalid.")
+    current_invitation_version = (meta or {}).get("invitation_version", 0)
+    if invitation_version < current_invitation_version:
+      return {"status": "stale"}
+    if (
+      meta
+      and invitation_version == current_invitation_version
+      and meta.get("invitation_id") not in (None, invitation_id)
+    ):
+      return {"status": "stale"}
+    request_state = _group_request_state(meta) if meta else "pending"
+    # A host can deliberately re-invite a previously declined member. Accepted
+    # groups treat group_added only as an authorized roster refresh.
+    if (
+      request_state == "declined"
+      and (meta or {}).get("invitation_id") != invitation_id
+    ):
+      request_state = "pending"
     await _store_group_meta(app, gid, {
-      "gid": gid, "name": name, "host": sender, "members": list(roster.values()),
+      "gid": gid, "name": name, "host": sender,
+      "members": list(roster.values()),
+      "invited_by_handle": str(actor.get("handle") or "")[:MAX_NAME_CHARS],
+      "invitation_id": invitation_id,
+      "invitation_version": invitation_version,
+      "request_status": request_state,
+      "request_count": (
+        max(1, int((meta or {}).get("request_count") or 0))
+        if request_state == "pending" else 0
+      ),
+      "unread": 0 if request_state == "pending" else int((meta or {}).get("unread") or 0),
     })
-    # Roster refresh and retry are not another invitation notification.
-    if meta is None:
-      adder = f"@{actor['handle']}" if actor.get("handle") else sender
-      owner = db.query(models.Owner).first()
-      if owner is not None:
-        try:
-          push.notify_owner(
-            db, owner.id, title=f"Added to {name}",
-            body=f"{adder} added you to a group.", source_type="app",
-            source_id=str(app.id), target=f"/shell/?app={app.id}",
-          )
-        except Exception:
-          pass  # invitation storage must survive push failure
-    return {"status": "added"}
+    return {"status": "pending" if request_state == "pending" else "updated"}
 
   message_id = envelope.get("id")
   if not isinstance(message_id, str) or not _GID_RE.fullmatch(message_id):
@@ -401,10 +524,10 @@ async def _accept_group_envelope(
     group = _load_host_group(gid)
     if group is None:
       raise HTTPException(status_code=404, detail="Unknown group.")
-    member = group["members"].get(sender)
-    if member is None:
-      raise HTTPException(status_code=403, detail="Not a member of this group.")
     _require_open(group)
+    member = group["members"].get(sender)
+    if member is None or not _host_member_active(member):
+      raise HTTPException(status_code=403, detail="Not a member of this group.")
     text = envelope.get("text")
     attachment = _validate_attachment(envelope.get("attachment"))
     _validate_text_or_attachment(text, attachment, "Message text is invalid.")
@@ -447,9 +570,6 @@ async def _accept_group_envelope(
   attachment = _validate_attachment(original.get("attachment"))
   _validate_text_or_attachment(text, attachment, "Message text is invalid.")
   reply_to = _validate_reply_to(original.get("reply_to"))
-  existing = _group_dir(app, gid) / "msgs" / f"{message_id}.json"
-  if existing.is_file():
-    return {"status": "duplicate"}
   author = original["from"]
   author_handle = str(original_actor.get("handle") or author)[:MAX_NAME_CHARS]
   record = {
@@ -459,9 +579,13 @@ async def _accept_group_envelope(
   }
   if reply_to is not None:
     record["reply_to"] = reply_to
-  await _store_group_message(app, gid, record, attachment)
-  _notify_group_message(db, app, meta.get("name") or "Group", author_handle, text)
-  return {"status": "delivered"}
+  created = await _store_group_message(app, gid, record, attachment)
+  if not created:
+    return {"status": "duplicate"}
+  if _group_request_state(meta) == "accepted":
+    _notify_group_message(db, app, meta.get("name") or "Group", author_handle, text)
+    return {"status": "delivered"}
+  return {"status": "pending"}
 
 
 # ── owner surface ───────────────────────────────────────────────────────────
@@ -480,6 +604,21 @@ class GroupSend(BaseModel):
 class AddMember(BaseModel):
   host: str
   handle: str | None = None
+
+
+def _membership_action_envelope(
+  identity: dict, gid: str, host: str, action: str, invitation_id: str,
+) -> dict:
+  return _signed({
+    "v": 0,
+    "type": action,
+    "id": str(uuid.uuid4()),
+    "from": _own_host(),
+    "to": host,
+    "gid": gid,
+    "invitation_id": invitation_id,
+    "sent_at": time.time(),
+  }, identity)
 
 
 @router.post("")
@@ -511,10 +650,15 @@ async def create_group(
   members = {
     _own_host(): {
       "handle": identity.get("handle") or "", "joined_at": time.time(),
+      "status": "active",
     },
   }
   for host in member_hosts:
-    entry = {"handle": "", "joined_at": time.time()}
+    entry = {
+      "handle": "", "invited_at": time.time(), "status": "invited",
+      "invitation_id": str(uuid.uuid4()),
+      "invitation_version": 1,
+    }
     try:
       actor = await _fetch_actor(host)
       entry["handle"] = actor.get("handle") or ""
@@ -532,11 +676,105 @@ async def create_group(
       "gid": gid, "name": name, "host": _own_host(),
       "members": _members_snapshot(group),
       "last_at": time.time(), "last_text": "", "unread": 0,
+      "request_status": "accepted",
     })
     invited = await _fan_out(group, {
       host: _added_envelope(identity, group, host) for host in member_hosts
     })
   return {"status": "created", "gid": gid, "invited": invited}
+
+
+@router.post("/{gid}/accept")
+async def accept_group_invitation(
+  gid: str,
+  db: Session = Depends(get_db),
+  principal: Principal = Depends(get_principal),
+):
+  """Join only after the owner explicitly accepts the host's invitation."""
+  require_nondelegated_owner_control(principal)
+  app = _require_owner_or_common_app(db, principal)
+  _validate_gid(gid)
+  identity = _load_identity()
+  if not identity.get("joined_at"):
+    raise HTTPException(status_code=409, detail="Join Social before accepting groups.")
+  async with _group_lock(gid):
+    meta = _load_group_meta(app, gid)
+    if meta is None:
+      raise HTTPException(status_code=404, detail="Group invitation not found.")
+    _require_open(meta)
+    state = _group_request_state(meta)
+    if state == "accepted":
+      return {"status": "accepted"}
+    if state != "pending":
+      raise HTTPException(status_code=409, detail="This invitation is no longer pending.")
+    host = meta.get("host")
+    if not _valid_host(host or "") or host == _own_host():
+      raise HTTPException(status_code=409, detail="Group host is invalid.")
+    invitation_id = meta.get("invitation_id")
+    if not isinstance(invitation_id, str) or not _GID_RE.fullmatch(invitation_id):
+      raise HTTPException(status_code=409, detail="Invitation identity is missing.")
+    envelope = _membership_action_envelope(
+      identity, gid, host, "group_accept", invitation_id
+    )
+
+  # Do not hold the lifecycle lock across a call to the same host that may be
+  # delivering a tombstone concurrently.
+  if not await _deliver(host, envelope):
+    raise HTTPException(status_code=502, detail="The group host could not be reached.")
+
+  async with _group_lock(gid):
+    current = _load_group_meta(app, gid)
+    if current is None or current.get("host") != host:
+      raise HTTPException(status_code=409, detail="Group invitation changed while accepting.")
+    _require_open(current)
+    if _group_request_state(current) == "accepted":
+      return {"status": "accepted"}
+    if _group_request_state(current) != "pending":
+      raise HTTPException(status_code=409, detail="This invitation is no longer pending.")
+    await _store_group_meta(app, gid, {
+      "request_status": "accepted", "request_count": 0, "unread": 0,
+    })
+  return {"status": "accepted"}
+
+
+@router.post("/{gid}/decline")
+async def decline_group_invitation(
+  gid: str,
+  db: Session = Depends(get_db),
+  principal: Principal = Depends(get_principal),
+):
+  """Dismiss an invitation locally without erasing its retained history."""
+  require_nondelegated_owner_control(principal)
+  app = _require_owner_or_common_app(db, principal)
+  _validate_gid(gid)
+  identity = _load_identity()
+  async with _group_lock(gid):
+    meta = _load_group_meta(app, gid)
+    if meta is None:
+      raise HTTPException(status_code=404, detail="Group invitation not found.")
+    _require_open(meta)
+    state = _group_request_state(meta)
+    if state == "declined":
+      return {"status": "declined", "host_notified": True}
+    if state != "pending":
+      raise HTTPException(status_code=409, detail="This invitation is no longer pending.")
+    host = meta.get("host")
+    if not _valid_host(host or "") or host == _own_host():
+      raise HTTPException(status_code=409, detail="Group host is invalid.")
+    await _store_group_meta(app, gid, {
+      "request_status": "declined", "request_count": 0, "unread": 0,
+    })
+    invitation_id = meta.get("invitation_id")
+    if not isinstance(invitation_id, str) or not _GID_RE.fullmatch(invitation_id):
+      raise HTTPException(status_code=409, detail="Invitation identity is missing.")
+    envelope = _membership_action_envelope(
+      identity, gid, host, "group_decline", invitation_id
+    )
+
+  # Declining is locally final even when the host is offline. It never grants
+  # membership, and the host can retry an invitation later.
+  notified = await _deliver(host, envelope)
+  return {"status": "declined", "host_notified": notified}
 
 
 @router.post("/{gid}/send")
@@ -578,6 +816,7 @@ async def send_group_message(
     if meta is None:
       raise HTTPException(status_code=404, detail="Unknown group.")
     _require_open(meta)
+    _require_accepted_group(meta)
     envelope = _post_envelope(
       identity, gid, meta["host"], message_id=message_id, text=text,
       sent_at=sent_at, attachment=attachment, reply_to=reply_to,
@@ -630,11 +869,15 @@ async def add_group_member(
       raise HTTPException(status_code=404, detail="Only the group's host can add members.")
     _require_open(group)
     already_member = host in group["members"]
+    reinvited = False
     if not already_member:
       if len(group["members"]) >= MAX_GROUP_MEMBERS:
         raise HTTPException(status_code=400, detail="The group is full.")
       entry = {
-        "handle": (body.handle or "")[:MAX_NAME_CHARS], "joined_at": time.time(),
+        "handle": (body.handle or "")[:MAX_NAME_CHARS],
+        "invited_at": time.time(), "status": "invited",
+        "invitation_id": str(uuid.uuid4()),
+        "invitation_version": 1,
       }
       try:
         actor = await _fetch_actor(host)
@@ -643,15 +886,28 @@ async def add_group_member(
         pass  # an unreachable member can still receive a deliberate retry
       group["members"][host] = entry
       atomic_write(_host_group_path(gid), json.dumps(group, indent=2))
+    elif group["members"][host].get("status") == "declined":
+      group["members"][host].update(
+        status="invited", invited_at=time.time(),
+        invitation_id=str(uuid.uuid4()),
+        invitation_version=int(
+          group["members"][host].get("invitation_version") or 1
+        ) + 1,
+      )
+      atomic_write(_host_group_path(gid), json.dumps(group, indent=2))
+      reinvited = True
     members = _members_snapshot(group)
     await _store_group_meta(app, gid, {"members": members})
     identity = _load_identity()
     delivered = await _fan_out(group, {
       member: _added_envelope(identity, group, member)
-      for member in group["members"] if member != _own_host()
+      for member, entry in group["members"].items()
+      if member != _own_host() and entry.get("status") != "declined"
     })
     return {
-      "status": "already_member" if already_member else "added",
+      "status": (
+        "reinvited" if reinvited else "already_member" if already_member else "added"
+      ),
       "members": members, "delivered": delivered,
     }
 
