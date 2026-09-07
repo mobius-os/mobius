@@ -5012,6 +5012,102 @@ def test_synthetic_app_with_accidental_origin_restores_ref_and_updates(
   ).returncode == 0
 
 
+def test_catalog_app_rebinds_equal_local_tree_from_synthetic_history(
+  client, auth, tmp_path, bypass_url_validation,
+):
+  """An installed catalog app may gain its real origin after a synthetic install.
+
+  When its complete local tree already equals the canonical origin tip, that
+  equality is sufficient to repair the unrelated installer lineage without
+  discarding a byte or falling back to another synthetic update.
+  """
+  base = (
+    "https://raw.githubusercontent.com/mobius-os/"
+    "app-catalog-rebind/main/"
+  )
+  manifest = {
+    "id": "catalog-rebind",
+    "name": "Catalog rebind",
+    "version": "1.0.0",
+    "description": "Catalog app with legacy installer history",
+    "entry": "index.jsx",
+    "source_files": ["cards.js"],
+    "permissions": {"cross_app_access": "none", "share_with_apps": "none"},
+  }
+  index_v1 = "import './cards.js'\nexport default () => <div>V1</div>\n"
+  cards_v1 = "export const card = 'V1'\n"
+  responses_v1 = {
+    base + "mobius.json": (200, json.dumps(manifest).encode()),
+    base + "index.jsx": (200, index_v1.encode()),
+    base + "cards.js": (200, cards_v1.encode()),
+  }
+  with patch(
+    "app.install.httpx.AsyncClient",
+    side_effect=_fake_async_client(responses_v1),
+  ), patch("app.install._derive_repo_ref", return_value=None):
+    installed = client.post(
+      "/api/apps/install", headers=auth,
+      json={"manifest_url": base + "mobius.json"},
+    )
+  assert installed.status_code == 201, installed.text
+
+  src = Path(get_settings().data_dir) / "apps" / "catalog-rebind"
+  synthetic_upstream = app_git.head_sha(src, app_git.UPSTREAM_BRANCH)
+  index_v2 = index_v1.replace("V1", "V2")
+  cards_v2 = cards_v1.replace("V1", "V2")
+  (src / "index.jsx").write_text(index_v2)
+  (src / "cards.js").write_text(cards_v2)
+  app_git.commit_local(src, "apply accepted source")
+
+  work, bare, real_head = _make_clone_fixture(
+    tmp_path, index_v2, cards_v2,
+  )
+  # Managed app repositories include the platform-owned ignore file. Mirror
+  # that complete tree in the real origin so this exercises the same exact-tree
+  # proof used to repair an installed catalog app's lineage.
+  (work / ".gitignore").write_bytes((src / ".gitignore").read_bytes())
+  real_head = _fixture_commit(work, "match managed app tree")
+  subprocess.run(
+    ["git", "-C", str(work), "push", "-q", str(bare), "main"],
+    check=True,
+    env=app_git._git_env(work),
+  )
+  app_git._run(src, "remote", "add", "origin", bare.as_uri())
+  responses_v2 = {
+    base + "mobius.json": (200, json.dumps({
+      **manifest, "version": "2.0.0",
+    }).encode()),
+    base + "index.jsx": (200, index_v2.encode()),
+    base + "cards.js": (200, cards_v2.encode()),
+  }
+  canonical_origin = (
+    "https://github.com/mobius-os/app-catalog-rebind.git"
+  )
+  with patch(
+    "app.install.httpx.AsyncClient",
+    side_effect=_fake_async_client(responses_v2),
+  ), patch(
+    "app.install._derive_repo_ref", return_value=(bare.as_uri(), "main"),
+  ), patch(
+    "app.install.app_git.origin_url", return_value=canonical_origin,
+  ):
+    updated = client.post(
+      "/api/apps/install", headers=auth,
+      json={"manifest_url": base + "mobius.json"},
+    )
+
+  assert updated.status_code == 201, updated.text
+  assert updated.json()["mode"] == "update"
+  assert (src / "index.jsx").read_text() == index_v2
+  assert (src / "cards.js").read_text() == cards_v2
+  assert app_git.head_sha(src, app_git.UPSTREAM_BRANCH) == real_head
+  assert real_head != synthetic_upstream
+  assert app_git._run(
+    src, "merge-base", "--is-ancestor", real_head, app_git.LOCAL_BRANCH,
+    check=False,
+  ).returncode == 0
+
+
 def test_multifile_install_writes_siblings_and_bundles(
   client, auth, bypass_url_validation,
 ):

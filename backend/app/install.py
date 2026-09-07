@@ -399,6 +399,14 @@ def _trusted_origin_catalog_identity_matches(
   """Whether a local identity-free row has the catalog package's Git origin."""
   if app.manifest_url is not None or app.slug != manifest_id:
     return False
+  return _trusted_catalog_origin_matches(app, source_url)
+
+
+def _trusted_catalog_origin_matches(
+  app: models.App,
+  source_url: str,
+) -> bool:
+  """Whether an app checkout has the canonical catalog repository origin."""
   expected_origin = _trusted_catalog_origin_url(source_url)
   if expected_origin is None:
     return False
@@ -1961,6 +1969,7 @@ class InstallTarget:
   mode: str
   adopting_previous_id: bool
   adopting_trusted_origin: bool
+  trusted_catalog_origin: bool
   canonical_manifest_url: str
   force_core_store_update: bool
 
@@ -2277,6 +2286,13 @@ def _select_install_target(
     adopting_previous_id=adopting_previous_id,
     adopting_trusted_origin=bool(
       existing is not None and existing.manifest_url is None
+    ),
+    trusted_catalog_origin=bool(
+      existing is not None
+      and _catalog_identity_matches(
+        existing.manifest_url, source_for_key, manifest_id,
+      )
+      and _trusted_catalog_origin_matches(existing, source_for_key)
     ),
     canonical_manifest_url=canonical_manifest_url,
     force_core_store_update=force_core_store_update,
@@ -3054,7 +3070,10 @@ async def install_from_manifest(
               app_git.fetch_upstream,
               git_source_dir,
               ref,
-              adopt_equal_local_tree=target.adopting_trusted_origin,
+              adopt_equal_local_tree=(
+                target.adopting_trusted_origin
+                or target.trusted_catalog_origin
+              ),
             )
             app.upstream_commit = fetched_upstream.sha
             allow_unrelated_histories = (
