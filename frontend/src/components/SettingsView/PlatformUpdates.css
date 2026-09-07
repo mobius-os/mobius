@@ -9,7 +9,7 @@
 .platform-updates__description { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.55; overflow-wrap: anywhere; }
 .platform-updates__description p { margin: 0 0 8px; }
 .platform-updates__actions { display: flex; gap: 10px; flex-wrap: wrap; }
-.platform-updates .settings__btn { min-height: 44px; margin: 0; font-size: 13px; padding: 10px 14px; white-space: nowrap; }
+.platform-updates .settings__btn { margin: 0; white-space: nowrap; }
 .platform-updates__confirmation { font-size: 13px; line-height: 1.55; }
 .platform-updates__confirmation p { margin: 0 0 12px; }
 .platform-updates__versions { display: grid; grid-template-columns: auto 1fr; gap: 4px 16px; margin: 0; color: var(--muted); font-size: 12px; line-height: 1.6; }

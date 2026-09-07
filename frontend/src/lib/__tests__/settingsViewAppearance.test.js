@@ -158,6 +158,8 @@ test('compact Updates pairs its status with actions without redundant success co
   assert.match(updates, /platform-updates__heading[\s\S]*role="status"/)
   assert.doesNotMatch(updates, /No action needed\./)
   assert.match(updates, /aria-label="Confirm restart"/)
+  assert.match(updates, /className={`settings__btn settings__btn--sm/)
+  assert.match(updates, /settings__btn--outline settings__btn--sm"[^>]*>Restart server<\/button>/)
 })
 
 

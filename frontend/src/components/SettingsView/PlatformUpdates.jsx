@@ -74,26 +74,26 @@ export default function PlatformUpdates({ active, refreshToken, onOpenChat }) {
         <div className="platform-updates__confirmation" role="group" aria-label="Confirm restart">
           <p>Restarting briefly interrupts active chats across Möbius. The page will reconnect automatically. This does not replace the container.</p>
           <div className="platform-updates__actions">
-            <button ref={actionRef} className="settings__btn" onClick={update.restart} disabled={busy}>
+            <button ref={actionRef} className="settings__btn settings__btn--sm" onClick={update.restart} disabled={busy}>
               {busy ? 'Restarting…' : 'Restart now'}
             </button>
-            <button className="settings__btn settings__btn--outline" disabled={busy} onClick={() => {
+            <button className="settings__btn settings__btn--outline settings__btn--sm" disabled={busy} onClick={() => {
               setConfirmRestart(false); restoreFocus.current = true
             }}>Not now</button>
           </div>
         </div>
       ) : (
         <div className="platform-updates__actions">
-          <button ref={actionRef} className={`settings__btn${!conflict && !available && !imageNeeded && !restartNeeded ? ' settings__btn--outline' : ''}`} disabled={busy || (conflict && !onOpenChat)} onClick={primary.act}>
+          <button ref={actionRef} className={`settings__btn settings__btn--sm${!conflict && !available && !imageNeeded && !restartNeeded ? ' settings__btn--outline' : ''}`} disabled={busy || (conflict && !onOpenChat)} onClick={primary.act}>
             {busy ? (phase === 'checking' ? 'Checking…' : 'Updating…') : primary.label}
           </button>
           {available && !conflict && (imageNeeded || restartNeeded) && (
-            <button className="settings__btn settings__btn--outline" disabled={busy} onClick={imageNeeded ? () => openReview('finish') : askRestart}>
+            <button className="settings__btn settings__btn--outline settings__btn--sm" disabled={busy} onClick={imageNeeded ? () => openReview('finish') : askRestart}>
               {imageNeeded ? 'Finish installed update' : 'Restart to finish'}
             </button>
           )}
           {conflict && platform?.newer_updates_available && (
-            <button className="settings__btn settings__btn--outline" disabled={busy} onClick={() => openReview()}>Review all updates</button>
+            <button className="settings__btn settings__btn--outline settings__btn--sm" disabled={busy} onClick={() => openReview()}>Review all updates</button>
           )}
         </div>
       )}
@@ -124,9 +124,9 @@ export default function PlatformUpdates({ active, refreshToken, onOpenChat }) {
       )}
       <div className="platform-updates__maintenance">
         {!available && !conflict && (restartNeeded || imageNeeded) && (
-          <button className="settings__btn settings__btn--outline" disabled={busy} onClick={check}>Check for more</button>
+          <button className="settings__btn settings__btn--outline settings__btn--sm" disabled={busy} onClick={check}>Check for more</button>
         )}
-        <button className="settings__btn settings__btn--outline" disabled={busy || confirmRestart} onClick={askRestart}>Restart server</button>
+        <button className="settings__btn settings__btn--outline settings__btn--sm" disabled={busy || confirmRestart} onClick={askRestart}>Restart server</button>
       </div>
       {review && (
         <UpdateReviewModal intent={review} onClose={closeReview}
