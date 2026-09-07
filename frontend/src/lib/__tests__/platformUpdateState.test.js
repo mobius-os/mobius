@@ -25,11 +25,11 @@ test('an unavailable release check cannot inherit a cached current claim', () =>
   )
 })
 
-test('host maintenance is presented as a plain next-step status', () => {
+test('host maintenance tells the owner where to finish the update', () => {
   assert.equal(platformUpdateStatusLabel({
     state: 'activation_needed',
     activation: { level: 'host_maintenance' },
-  }), 'One more step needed')
+  }), 'Finish this update on your server')
 })
 
 test('the deployment classifier stays as binary as the backend that emits it', () => {

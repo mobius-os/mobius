@@ -73,7 +73,7 @@ export function platformUpdateStatusLabel(platform) {
   if (activationLevel === 'proxy_reload') return 'Proxy reload required'
   if (activationLevel === 'container_recreate') return 'Deployment required'
   if (activationLevel === 'image_rebuild') return 'Image rebuild required'
-  if (activationLevel === 'host_maintenance') return 'One more step needed'
+  if (activationLevel === 'host_maintenance') return 'Finish this update on your server'
   if (available) return 'New update available'
   return 'Up to date'
 }
