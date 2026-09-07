@@ -101,10 +101,10 @@ test('only advertised global commands cross the mini-app boundary', () => {
   ])
 })
 
-test('disabled chords keep native browser behavior but stay reserved in an installed app', () => {
+test('disabled chords keep native browser behavior except commands that must not leak to it', () => {
   const commands = resolveShellCommands({ version: 1, actions: {} }).map(command => ({
     ...command,
-    enabled: command.id !== 'tab.close',
+    enabled: command.id !== 'tab.close' && command.id !== 'history.back',
   }))
 
   assert.equal(
@@ -116,9 +116,18 @@ test('disabled chords keep native browser behavior but stay reserved in an insta
       .some(item => item.actionId === 'tab.close'),
     true,
   )
+  assert.equal(
+    frameShortcutBindings(commands).some(item => item.actionId === 'history.back'),
+    true,
+    'Cmd/Ctrl+, must stay in Möbius when there is no Back destination',
+  )
   assert.equal(shouldReserveShellShortcut(false, false), false)
   assert.equal(shouldReserveShellShortcut(true, false), true)
   assert.equal(shouldReserveShellShortcut(false, true), true)
+  assert.equal(
+    shouldReserveShellShortcut(false, false, commands.find(command => command.id === 'history.back')),
+    true,
+  )
 })
 
 test('an owner-disabled chord never crosses the mini-app boundary', () => {

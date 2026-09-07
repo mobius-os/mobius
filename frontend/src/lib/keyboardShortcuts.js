@@ -112,6 +112,10 @@ export const SHELL_COMMAND_DEFINITIONS = Object.freeze([
     keywords: ['history previous'],
     bindings: [DEFAULT_BINDINGS.historyBack],
     captureInMiniApps: true,
+    // Chromium maps Cmd+, to Settings. Back is a shell command even when
+    // there is no destination to traverse, so never release this chord to the
+    // browser's unrelated command.
+    reserveWhenUnavailable: true,
   },
   {
     id: 'history.forward',
@@ -235,14 +239,14 @@ export function frameShortcutBindings(commands, { reserveUnavailable = false } =
   return (Array.isArray(commands) ? commands : []).flatMap(command => (
     command.captureInMiniApps
       && !command.shortcutDisabled
-      && (reserveUnavailable || command.enabled !== false)
+      && (reserveUnavailable || command.reserveWhenUnavailable === true || command.enabled !== false)
       ? command.bindings.map(binding => ({ actionId: command.id, binding }))
       : []
   ))
 }
 
-export function shouldReserveShellShortcut(handled, standalone) {
-  return handled === true || standalone === true
+export function shouldReserveShellShortcut(handled, standalone, command = null) {
+  return handled === true || standalone === true || command?.reserveWhenUnavailable === true
 }
 
 export function shortcutLockCodes(commands) {

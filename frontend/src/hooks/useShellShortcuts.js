@@ -46,7 +46,7 @@ export default function useShellShortcuts(actions) {
       // An unavailable chord is reserved only in an installed display, where
       // allowing Cmd/Ctrl+W through would close the whole app. In an ordinary
       // browser tab, preserve the browser/app default when Möbius did nothing.
-      if (!shouldReserveShellShortcut(handled, standalone)) return
+      if (!shouldReserveShellShortcut(handled, standalone, command)) return
       event.preventDefault()
       event.stopImmediatePropagation?.()
     }
