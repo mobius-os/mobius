@@ -65,22 +65,25 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app import models, push
+from app.common_protocol import (
+  OUTBOUND_TIMEOUT_S,
+  peer_base_url as _peer_base_url,
+  sign as _sign,
+  valid_host as _valid_host,
+)
+from app.common_public import CommonPublicStore
 from app.common_transport import federation_request
 from app.config import get_settings
 from app.database import get_db
 from app.deps import Principal, get_principal, require_nondelegated_owner_control
 from app.storage_io import atomic_write, read_capped_body
 from app.routes.common import (
-  CLOCK_SKEW_S,
-  OUTBOUND_TIMEOUT_S,
-  PROTOCOL,
   _load_identity,
   _own_host,
-  _peer_base_url,
-  _sign,
-  _valid_host,
   _verify_peer_envelope,
 )
+
+_public_store = CommonPublicStore(lambda: get_settings().data_dir)
 
 router = APIRouter(prefix="/api/common/objects", tags=["common-objects"])
 
@@ -428,14 +431,15 @@ async def _resolve_invitees(address: str, db: Session, owner_id: int) -> InviteR
     )
 
   # Unlinked local owners retain the opt-in Common directory fallback.
-  from app.routes.common import _load_identity as _ident, _directory_path
+  from app.routes.common import _load_identity as _ident
   identity = _ident()
   community = identity.get("community_host") or _own_host()
   entries = {}
   if community == _own_host():
-    path = _directory_path()
-    if path.is_file():
-      entries = json.loads(path.read_text())
+    entries = {
+      user["host"]: user
+      for user in _public_store.search_directory(raw)["users"]
+    }
   else:
     try:
       response = await federation_request(

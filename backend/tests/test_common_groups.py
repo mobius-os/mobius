@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 from app import models
+from app.common_protocol import verify
 from app.config import get_settings
 from app.deps import Principal
 from app.routes import common as common_routes
@@ -108,7 +109,7 @@ def test_create_group_invites_members(client, db, auth, sent):
   assert original["from"] == common_routes._own_host()
   assert original["to"] == common_routes._own_host()
   identity = common_routes._load_identity()
-  assert common_routes._verify(
+  assert verify(
     {k: v for k, v in original.items() if k != "sig"},
     original["sig"], identity["public_key_b64"],
   )

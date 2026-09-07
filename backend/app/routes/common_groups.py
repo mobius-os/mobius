@@ -42,13 +42,22 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app import fs_locks, models, push
+from app.common_protocol import (
+  MAX_ENVELOPE_BYTES,
+  MAX_NAME_CHARS,
+  OUTBOUND_TIMEOUT_S,
+  peer_base_url as _peer_base_url,
+  read_envelope as _read_envelope,
+  sign as _sign,
+  valid_host as _valid_host,
+  validate_attachment as _validate_attachment,
+  validate_reply_to as _validate_reply_to,
+  validate_text_or_attachment as _validate_text_or_attachment,
+)
 from app.common_transport import federation_request
 from app.database import get_db
 from app.deps import Principal, get_principal, require_nondelegated_owner_control
 from app.routes.common import (
-  MAX_ENVELOPE_BYTES,
-  MAX_NAME_CHARS,
-  OUTBOUND_TIMEOUT_S,
   _app_data_dir,
   _bump_version,
   _common_app,
@@ -57,14 +66,7 @@ from app.routes.common import (
   _load_identity,
   _message_preview,
   _own_host,
-  _peer_base_url,
-  _read_envelope,
   _require_owner_or_common_app,
-  _sign,
-  _valid_host,
-  _validate_attachment,
-  _validate_reply_to,
-  _validate_text_or_attachment,
   _verify_peer_envelope,
   _write_app_attachment,
 )

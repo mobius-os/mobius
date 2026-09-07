@@ -63,6 +63,21 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app import fs_locks, models, push
+from app.common_protocol import (
+  ATTACHMENT_MIME_EXT as _ATTACHMENT_MIME_EXT,
+  MAX_ATTACHMENT_BYTES, MAX_AVATAR_BYTES, MAX_BIO_CHARS,
+  MAX_ENVELOPE_BYTES, MAX_NAME_CHARS, MAX_REPLY_TEXT_CHARS,
+  OUTBOUND_TIMEOUT_S, PROTOCOL, ActorVerifier,
+  canonical as _canonical, peer_base_url as _peer_base_url,
+  read_envelope as _read_envelope, sign as _sign,
+  valid_host as _valid_host, valid_id as _valid_id,
+  validate_attachment as _validate_attachment,
+  validate_reply_to as _validate_reply_to,
+  validate_text_or_attachment as _validate_text_or_attachment,
+)
+from app.common_public import (
+  BOARD_PAGE_LIMIT, CommonPublicStore, create_public_router,
+)
 from app.common_transport import federation_request
 from app.config import get_settings
 from app.database import get_db
@@ -70,50 +85,36 @@ from app.deps import (
   Principal, get_principal, require_nondelegated_owner_control,
 )
 from app.routes import identity as identity_routes
-from app.storage_io import atomic_write, read_capped_body
+from app.storage_io import atomic_write
 
 router = APIRouter(prefix="/api/common", tags=["common"])
 
-PROTOCOL = "common/0"
 APP_SLUG = "common"
-MAX_TEXT_CHARS = 4000
-MAX_REPLY_TEXT_CHARS = 1000
-MAX_NAME_CHARS = 80
-MAX_BIO_CHARS = 400
-MAX_ENVELOPE_BYTES = 32_768
-MAX_ATTACHMENT_ENVELOPE_BYTES = 2 * 1024 * 1024
-MAX_ATTACHMENT_BYTES = 1024 * 1024
-MAX_ATTACHMENT_DIMENSION = 8192
-MAX_REPLY_AUTHOR_CHARS = 80
-MAX_REPLY_EXCERPT_CHARS = 140
-MAX_AVATAR_BYTES = 512 * 1024
-ACTOR_CACHE_TTL_S = 3600
 PEER_AVATAR_CACHE_TTL_S = 24 * 3600
 BOARD_MEDIA_CACHE_TTL_S = 24 * 3600
-CLOCK_SKEW_S = 600
-OUTBOUND_TIMEOUT_S = 10.0
-BOARD_PAGE_LIMIT = 50
-BOARD_REPLY_LIMIT = 200
-DIRECTORY_LIMIT = 2000
-
-_HOST_RE = re.compile(r"^[a-z0-9]([a-z0-9.-]{0,250})(:\d{1,5})?$")
-_ID_RE = re.compile(r"^[a-f0-9-]{8,64}$")
-_ATTACHMENT_MIME_EXT = {
-  "image/jpeg": "jpg",
-  "image/png": "png",
-  "image/webp": "webp",
-}
-_ATTACHMENT_ENVELOPE_TYPES = {
-  "message", "group_post", "group_message", "board_post",
-}
 
 
 # ── paths ────────────────────────────────────────────────────────────────────
 
-def _common_dir() -> Path:
-  d = Path(get_settings().data_dir) / "common"
-  d.mkdir(parents=True, exist_ok=True)
-  return d
+def _data_dir() -> str:
+  return get_settings().data_dir
+
+
+_public_store = CommonPublicStore(_data_dir)
+_actor_verifier = ActorVerifier(_data_dir)
+
+# Owner/personal code below shares the public service's canonical paths and
+# mutations instead of maintaining parallel storage logic.
+_common_dir = _public_store.common_dir
+_board_media_dir = _public_store.board_media_dir
+_find_image = _public_store.find_image
+_serve_image = _public_store.serve_image
+_read_board = _public_store.read_board
+_store_board_post = _public_store.store_post
+_toggle_board_like = _public_store.toggle_like
+_add_board_reply = _public_store.add_reply
+_fetch_actor = _actor_verifier.fetch_actor
+_verify_peer_envelope = _actor_verifier.verify_envelope
 
 
 def _identity_path() -> Path:
@@ -125,53 +126,29 @@ def _avatar_path() -> Path:
 
 
 def _peers_dir() -> Path:
-  d = _common_dir() / "peers"
-  d.mkdir(parents=True, exist_ok=True)
-  return d
+  return _actor_verifier.peers_dir()
 
 
 def _peer_avatar_path(host: str) -> Path:
   safe = re.sub(r"[^a-z0-9.-]", "_", host)
-  d = _peers_dir() / "avatars"
-  d.mkdir(parents=True, exist_ok=True)
-  return d / f"{safe}.png"
-
-
-def _directory_path() -> Path:
-  return _common_dir() / "directory.json"
-
-
-def _board_dir() -> Path:
-  d = _common_dir() / "board"
-  d.mkdir(parents=True, exist_ok=True)
-  return d
-
-
-def _board_media_dir() -> Path:
-  d = _common_dir() / "board-media"
-  d.mkdir(parents=True, exist_ok=True)
-  return d
+  path = _peers_dir() / "avatars"
+  path.mkdir(parents=True, exist_ok=True)
+  return path / f"{safe}.png"
 
 
 def _peer_board_media_dir() -> Path:
-  d = _peers_dir() / "board-media"
-  d.mkdir(parents=True, exist_ok=True)
-  return d
+  path = _peers_dir() / "board-media"
+  path.mkdir(parents=True, exist_ok=True)
+  return path
 
 
-# ── host + crypto primitives ────────────────────────────────────────────────
+def _peer_board_media_name(host: str, post_id: str) -> str:
+  safe_host = re.sub(r"[^a-z0-9.-]", "_", host)
+  return f"{safe_host}-{post_id}"
+
 
 def _own_host() -> str:
   return get_settings().domain
-
-
-def _valid_host(host: str) -> bool:
-  return isinstance(host, str) and bool(_HOST_RE.match(host))
-
-
-def _peer_base_url(host: str) -> str:
-  """Return the public HTTPS origin for a peer host."""
-  return f"https://{host}"
 
 
 async def _download_avatar(url: str) -> bytes:
@@ -205,26 +182,6 @@ async def _download_board_media(url: str) -> tuple[str, bytes]:
   if not response.content:
     raise ValueError("Board media response is empty.")
   return mime, response.content
-
-
-def _canonical(payload: dict) -> bytes:
-  return json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
-
-
-def _sign(payload: dict, private_key_b64: str) -> str:
-  from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-  key = Ed25519PrivateKey.from_private_bytes(base64.b64decode(private_key_b64))
-  return base64.b64encode(key.sign(_canonical(payload))).decode()
-
-
-def _verify(payload: dict, sig_b64: str, public_key_b64: str) -> bool:
-  from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
-  try:
-    key = Ed25519PublicKey.from_public_bytes(base64.b64decode(public_key_b64))
-    key.verify(base64.b64decode(sig_b64), _canonical(payload))
-    return True
-  except Exception:
-    return False
 
 
 def _dm_key(shared: bytes) -> bytes:
@@ -310,76 +267,6 @@ def _open_dm(message_id: str, enc: Any, private_key_b64: str) -> dict:
     raise HTTPException(
       status_code=400, detail="Message could not be decrypted."
     ) from exc
-
-
-def _validate_attachment(value: Any) -> tuple[dict, bytes] | None:
-  """Validate and decode the protocol's one supported attachment shape."""
-  if value is None:
-    return None
-  if (
-    not isinstance(value, dict)
-    or set(value) != {"mime", "data_b64", "w", "h"}
-  ):
-    raise HTTPException(status_code=400, detail="Attachment is invalid.")
-  mime = value.get("mime")
-  data_b64 = value.get("data_b64")
-  width = value.get("w")
-  height = value.get("h")
-  if (
-    not isinstance(mime, str)
-    or mime not in _ATTACHMENT_MIME_EXT
-    or not isinstance(data_b64, str)
-    or not isinstance(width, int) or isinstance(width, bool)
-    or not isinstance(height, int) or isinstance(height, bool)
-    or not 1 <= width <= MAX_ATTACHMENT_DIMENSION
-    or not 1 <= height <= MAX_ATTACHMENT_DIMENSION
-  ):
-    raise HTTPException(status_code=400, detail="Attachment is invalid.")
-  max_b64_chars = 4 * ((MAX_ATTACHMENT_BYTES + 2) // 3)
-  if len(data_b64) > max_b64_chars:
-    raise HTTPException(status_code=413, detail="Attachment is too large.")
-  try:
-    data = base64.b64decode(data_b64, validate=True)
-  except Exception as exc:
-    raise HTTPException(status_code=400, detail="Attachment data is invalid.") from exc
-  if len(data) > MAX_ATTACHMENT_BYTES:
-    raise HTTPException(status_code=413, detail="Attachment is too large.")
-  if not data:
-    raise HTTPException(status_code=400, detail="Attachment data is empty.")
-  return value, data
-
-
-def _validate_reply_to(value: Any) -> dict | None:
-  """Validate a self-contained quoted reply without resolving its target."""
-  if value is None:
-    return None
-  if not isinstance(value, dict) or set(value) != {
-    "id", "author_handle", "excerpt",
-  }:
-    raise HTTPException(status_code=400, detail="Quoted reply is invalid.")
-  message_id = value.get("id")
-  author_handle = value.get("author_handle")
-  excerpt = value.get("excerpt")
-  if (
-    not isinstance(message_id, str) or not _ID_RE.fullmatch(message_id)
-    or not isinstance(author_handle, str)
-    or len(author_handle) > MAX_REPLY_AUTHOR_CHARS
-    or not isinstance(excerpt, str)
-    or len(excerpt) > MAX_REPLY_EXCERPT_CHARS
-  ):
-    raise HTTPException(status_code=400, detail="Quoted reply is invalid.")
-  return value
-
-
-def _validate_text_or_attachment(
-  text: Any, attachment: tuple[dict, bytes] | None, detail: str
-) -> None:
-  if (
-    not isinstance(text, str)
-    or len(text) > MAX_TEXT_CHARS
-    or (not text.strip() and attachment is None)
-  ):
-    raise HTTPException(status_code=400, detail=detail)
 
 
 def _message_preview(text: str) -> str:
@@ -517,84 +404,6 @@ def _actor_doc(identity: dict, db: Session) -> dict:
 
 # ── peer actor cache ────────────────────────────────────────────────────────
 
-def _peer_cache_path(host: str) -> Path:
-  safe = re.sub(r"[^a-z0-9.-]", "_", host)
-  return _peers_dir() / f"{safe}.json"
-
-
-def _validate_actor_card(actor: Any, host: str) -> dict:
-  if (
-    not isinstance(actor, dict)
-    or actor.get("protocol") != PROTOCOL
-    or actor.get("host") != host
-  ):
-    raise HTTPException(status_code=502, detail="Peer returned an invalid actor card.")
-  public_key = actor.get("public_key")
-  key = public_key.get("key_b64") if isinstance(public_key, dict) else None
-  if not isinstance(key, str) or not key:
-    raise HTTPException(status_code=502, detail="Peer returned an invalid actor card.")
-  return actor
-
-
-async def _fetch_actor(host: str, *, force: bool = False) -> dict:
-  """Fetch a peer's actor card, with an on-disk TTL cache."""
-  if not _valid_host(host):
-    raise HTTPException(status_code=400, detail="Invalid peer host.")
-  cache = _peer_cache_path(host)
-  if not force and cache.is_file():
-    try:
-      cached = json.loads(cache.read_text())
-      if time.time() - cached.get("fetched_at", 0) < ACTOR_CACHE_TTL_S:
-        return _validate_actor_card(cached.get("actor"), host)
-    except Exception:
-      # A truncated or obsolete cache is not peer authority. Fetch it again
-      # through the same validated transport as an ordinary cache miss.
-      pass
-  url = f"{_peer_base_url(host)}/api/common/actor"
-  try:
-    response = await federation_request(
-      "GET", url, max_response_bytes=MAX_ENVELOPE_BYTES,
-      timeout_seconds=OUTBOUND_TIMEOUT_S,
-    )
-    response.raise_for_status()
-    actor = response.json()
-  except Exception as exc:
-    raise HTTPException(
-      status_code=502, detail="Peer could not be reached."
-    ) from exc
-  actor = _validate_actor_card(actor, host)
-  atomic_write(cache, json.dumps({"fetched_at": time.time(), "actor": actor}))
-  return actor
-
-
-async def _verify_peer_envelope(envelope: dict) -> dict:
-  """Verify a signed peer envelope; returns the sender's actor card."""
-  sender = envelope.get("from")
-  sig = envelope.get("sig")
-  if not _valid_host(sender or "") or not isinstance(sig, str):
-    raise HTTPException(status_code=400, detail="Malformed envelope.")
-  sent_at = envelope.get("sent_at")
-  if not isinstance(sent_at, (int, float)) or abs(time.time() - sent_at) > CLOCK_SKEW_S:
-    raise HTTPException(status_code=400, detail="Envelope timestamp out of range.")
-  payload = {k: v for k, v in envelope.items() if k != "sig"}
-  try:
-    actor = await _fetch_actor(sender)
-  except HTTPException as exc:
-    raise HTTPException(status_code=403, detail="Envelope signature is invalid.") from exc
-  if not _verify(payload, sig, actor["public_key"]["key_b64"]):
-    # The peer may have rotated keys; refetch once before rejecting. An
-    # unreachable peer during the refetch still means the envelope could not
-    # be validated — reject it as unsigned rather than surfacing a gateway
-    # error for what is, from the sender's perspective, a bad signature.
-    try:
-      actor = await _fetch_actor(sender, force=True)
-    except HTTPException:
-      raise HTTPException(status_code=403, detail="Envelope signature is invalid.")
-    if not _verify(payload, sig, actor["public_key"]["key_b64"]):
-      raise HTTPException(status_code=403, detail="Envelope signature is invalid.")
-  return actor
-
-
 # ── conversation storage (in the Common app's per-app storage) ──────────────
 
 def _common_app(db: Session) -> models.App:
@@ -681,25 +490,6 @@ def get_avatar():
   return _serve_avatar(_avatar_path())
 
 
-async def _read_envelope(request: Request) -> dict:
-  body = await read_capped_body(request, MAX_ATTACHMENT_ENVELOPE_BYTES)
-  try:
-    envelope = json.loads(body)
-  except Exception as exc:
-    raise HTTPException(status_code=400, detail="Envelope is not JSON.") from exc
-  if not isinstance(envelope, dict):
-    raise HTTPException(status_code=400, detail="Envelope is not an object.")
-  supports_large_payload = (
-    envelope.get("type") in _ATTACHMENT_ENVELOPE_TYPES
-    and envelope.get("attachment") is not None
-  ) or (
-    envelope.get("type") == "message" and envelope.get("enc") is not None
-  )
-  if len(body) > MAX_ENVELOPE_BYTES and not supports_large_payload:
-    raise HTTPException(status_code=413, detail="Envelope too large.")
-  return envelope
-
-
 @router.post("/inbox")
 async def receive_message(request: Request, db: Session = Depends(get_db)):
   """Accept one signed direct message from a peer instance."""
@@ -709,7 +499,7 @@ async def receive_message(request: Request, db: Session = Depends(get_db)):
   if envelope.get("to") != _own_host():
     raise HTTPException(status_code=400, detail="Envelope is addressed elsewhere.")
   message_id = envelope.get("id")
-  if not isinstance(message_id, str) or not _ID_RE.fullmatch(message_id):
+  if not isinstance(message_id, str) or not _valid_id(message_id):
     raise HTTPException(status_code=400, detail="Message id is invalid.")
   actor = await _verify_peer_envelope(envelope)
   encrypted = "enc" in envelope
@@ -763,244 +553,11 @@ async def receive_message(request: Request, db: Session = Depends(get_db)):
   return {"status": "delivered"}
 
 
-@router.get("/directory")
-def search_directory(q: str = ""):
-  """Search users registered with this community host. Public data."""
-  path = _directory_path()
-  entries = json.loads(path.read_text()) if path.is_file() else {}
-  needle = q.strip().lower()
-  results = []
-  for host, entry in entries.items():
-    haystack = f"{entry.get('handle', '')} {host} {entry.get('bio', '')}".lower()
-    if not needle or needle in haystack:
-      results.append({
-        "host": host,
-        **{k: entry[k] for k in ("handle", "bio") if k in entry},
-      })
-  results.sort(key=lambda e: (e.get("handle") or e["host"]).lower())
-  return {"users": results[:200]}
-
-
-@router.post("/directory")
-async def register_in_directory(request: Request):
-  """Accept a signed opt-in directory registration from a peer."""
-  envelope = await _read_envelope(request)
-  if envelope.get("v") != 0 or envelope.get("type") != "register":
-    raise HTTPException(status_code=400, detail="Unsupported envelope type.")
-  actor = await _verify_peer_envelope(envelope)
-  host = envelope["from"]
-  handle = str(envelope.get("handle") or actor.get("handle") or "")[:MAX_NAME_CHARS]
-  bio = str(envelope.get("bio") or "")[:MAX_BIO_CHARS]
-  path = _directory_path()
-  entries = json.loads(path.read_text()) if path.is_file() else {}
-  if host not in entries and len(entries) >= DIRECTORY_LIMIT:
-    raise HTTPException(status_code=507, detail="Directory is full.")
-  entries[host] = {"handle": handle, "bio": bio, "registered_at": time.time()}
-  atomic_write(path, json.dumps(entries, indent=2))
-  return {"status": "registered"}
-
-
-def _read_board(limit: int, before: float | None, viewer: str | None = None) -> list[dict]:
-  """Board posts, newest first. Like details stay host-side: the feed carries
-  only the count and whether the viewer liked it. Replies are read separately;
-  the feed carries only their count."""
-  posts = []
-  for file in _board_dir().glob("*.json"):
-    try:
-      post = json.loads(file.read_text())
-    except Exception:
-      continue
-    if before is not None and post.get("created_at", 0) >= before:
-      continue
-    likes = post.pop("likes", {})
-    post["like_count"] = len(likes)
-    if viewer is not None:
-      post["liked"] = viewer in likes
-    replies = post.pop("replies", [])
-    post["reply_count"] = len(replies)
-    posts.append(post)
-  posts.sort(key=lambda p: p.get("created_at", 0), reverse=True)
-  return posts[:limit]
-
-
-def _board_media_path(post_id: str, mime: str) -> Path:
-  return _board_media_dir() / f"{post_id}.{_ATTACHMENT_MIME_EXT[mime]}"
-
-
-def _peer_board_media_name(host: str, post_id: str) -> str:
-  safe_host = re.sub(r"[^a-z0-9.-]", "_", host)
-  return f"{safe_host}-{post_id}"
-
-
-def _find_image(directory: Path, stem: str) -> tuple[Path, str] | None:
-  for mime, ext in _ATTACHMENT_MIME_EXT.items():
-    path = directory / f"{stem}.{ext}"
-    if path.is_file():
-      return path, mime
-  return None
-
-
-def _serve_image(found: tuple[Path, str] | None) -> FileResponse:
-  if found is None:
-    raise HTTPException(status_code=404, detail="Board image not found.")
-  path, mime = found
-  return FileResponse(str(path), media_type=mime)
-
-
-def _store_board_post(
-  post: dict, attachment: tuple[dict, bytes] | None = None
-) -> bool:
-  """Store one hosted post and its image; return False for a duplicate id."""
-  path = _board_dir() / f"{post['id']}.json"
-  if path.is_file():
-    return False
-  if attachment is not None:
-    wire, data = attachment
-    atomic_write(_board_media_path(post["id"], wire["mime"]), data)
-    post["attachment"] = {
-      "mime": wire["mime"], "w": wire["w"], "h": wire["h"],
-    }
-  atomic_write(path, json.dumps(post))
-  return True
-
-
-@router.get("/board")
-def get_board(limit: int = 30, before: float | None = None, viewer: str | None = None):
-  """This host's public board feed, newest first. `viewer` (a peer host) marks
-  which posts that instance liked; like counts are public either way."""
-  if viewer is not None and not _valid_host(viewer):
-    viewer = None
-  return {"posts": _read_board(min(max(limit, 1), BOARD_PAGE_LIMIT), before, viewer)}
-
-
-@router.get("/board/media/{post_id}")
-def get_board_media(post_id: str):
-  """Serve one image hosted alongside this instance's public board."""
-  if not _ID_RE.fullmatch(post_id):
-    raise HTTPException(status_code=400, detail="Post id is invalid.")
-  return _serve_image(_find_image(_board_media_dir(), post_id))
-
-
-def _toggle_board_like(post_id: str, host: str) -> dict:
-  """Toggle one instance's like on a hosted board post."""
-  path = _board_dir() / f"{post_id}.json"
-  if not path.is_file():
-    raise HTTPException(status_code=404, detail="Unknown post.")
-  post = json.loads(path.read_text())
-  likes = post.setdefault("likes", {})
-  if host in likes:
-    del likes[host]
-  else:
-    likes[host] = time.time()
-  atomic_write(path, json.dumps(post))
-  return {"status": "ok", "likes": len(likes), "liked": host in likes}
-
-
-def _add_board_reply(
-  post_id: str, reply_id: str, host: str, handle: str, text: str, created_at: float
-) -> dict:
-  """Append one idempotent reply to a hosted board post."""
-  path = _board_dir() / f"{post_id}.json"
-  if not path.is_file():
-    raise HTTPException(status_code=404, detail="Unknown post.")
-  post = json.loads(path.read_text())
-  replies = post.get("replies")
-  if not isinstance(replies, list):
-    replies = []
-    post["replies"] = replies
-  if any(reply.get("id") == reply_id for reply in replies):
-    return {"status": "ok", "reply_count": len(replies)}
-  if len(replies) >= BOARD_REPLY_LIMIT:
-    raise HTTPException(status_code=507, detail="Post reply limit reached.")
-  replies.append({
-    "id": reply_id,
-    "host": host,
-    "handle": handle,
-    "text": text,
-    "created_at": created_at,
-  })
-  atomic_write(path, json.dumps(post))
-  return {"status": "ok", "reply_count": len(replies)}
-
-
-@router.get("/board/{post_id}/replies")
-def get_board_replies(post_id: str):
-  """A hosted post's public replies, oldest first."""
-  if not re.fullmatch(r"[a-f0-9-]{8,64}", post_id):
-    raise HTTPException(status_code=400, detail="Post id is invalid.")
-  path = _board_dir() / f"{post_id}.json"
-  if not path.is_file():
-    raise HTTPException(status_code=404, detail="Unknown post.")
-  post = json.loads(path.read_text())
-  replies = post.get("replies")
-  if not isinstance(replies, list):
-    replies = []
-  replies.sort(key=lambda reply: reply.get("created_at", 0))
-  return {"replies": replies}
-
-
-@router.post("/board/react")
-async def react_to_board(request: Request):
-  """Accept a signed like toggle from a peer for a post hosted here."""
-  envelope = await _read_envelope(request)
-  if envelope.get("v") != 0 or envelope.get("type") != "board_react":
-    raise HTTPException(status_code=400, detail="Unsupported envelope type.")
-  post_id = envelope.get("post_id")
-  if not isinstance(post_id, str) or not re.fullmatch(r"[a-f0-9-]{8,64}", post_id):
-    raise HTTPException(status_code=400, detail="Post id is invalid.")
-  await _verify_peer_envelope(envelope)
-  return _toggle_board_like(post_id, envelope["from"])
-
-
-@router.post("/board/reply")
-async def reply_to_board(request: Request):
-  """Accept one signed reply from a peer for a post hosted here."""
-  envelope = await _read_envelope(request)
-  if envelope.get("v") != 0 or envelope.get("type") != "board_reply":
-    raise HTTPException(status_code=400, detail="Unsupported envelope type.")
-  post_id = envelope.get("post_id")
-  if not isinstance(post_id, str) or not re.fullmatch(r"[a-f0-9-]{8,64}", post_id):
-    raise HTTPException(status_code=400, detail="Post id is invalid.")
-  reply_id = envelope.get("id")
-  if not isinstance(reply_id, str) or not re.fullmatch(r"[a-f0-9-]{8,64}", reply_id):
-    raise HTTPException(status_code=400, detail="Reply id is invalid.")
-  text = envelope.get("text")
-  if (
-    not isinstance(text, str)
-    or not text.strip()
-    or len(text) > MAX_REPLY_TEXT_CHARS
-  ):
-    raise HTTPException(status_code=400, detail="Reply text is invalid.")
-  actor = await _verify_peer_envelope(envelope)
-  return _add_board_reply(
-    post_id, reply_id, envelope["from"], actor.get("handle") or "",
-    text, envelope["sent_at"],
-  )
-
-
-@router.post("/board")
-async def post_to_board(request: Request):
-  """Accept a signed board post from a peer."""
-  envelope = await _read_envelope(request)
-  if envelope.get("v") != 0 or envelope.get("type") != "board_post":
-    raise HTTPException(status_code=400, detail="Unsupported envelope type.")
-  text = envelope.get("text")
-  attachment = _validate_attachment(envelope.get("attachment"))
-  _validate_text_or_attachment(text, attachment, "Post text is invalid.")
-  post_id = envelope.get("id")
-  if not isinstance(post_id, str) or not _ID_RE.fullmatch(post_id):
-    raise HTTPException(status_code=400, detail="Post id is invalid.")
-  actor = await _verify_peer_envelope(envelope)
-  post = {
-    "id": post_id,
-    "host": envelope["from"],
-    "handle": actor.get("handle") or "",
-    "text": text,
-    "created_at": envelope["sent_at"],
-    "replies": [],
-  }
-  _store_board_post(post, attachment)
-  return {"status": "posted"}
+# The directory and board peer surface is shared with the isolated host.
+_public_router, _public_write_limiter = create_public_router(
+  _public_store, _actor_verifier, prefix="",
+)
+router.include_router(_public_router)
 
 
 # ── owner surface ───────────────────────────────────────────────────────────
@@ -1140,13 +697,9 @@ async def _register_with_community_host(identity: dict) -> str:
   envelope["sig"] = _sign(envelope, identity["private_key_b64"])
   if host == _own_host():
     # Local shortcut: the community host is this very instance.
-    path = _directory_path()
-    entries = json.loads(path.read_text()) if path.is_file() else {}
-    entries[_own_host()] = {
-      "handle": envelope["handle"], "bio": envelope["bio"],
-      "registered_at": time.time(),
-    }
-    atomic_write(path, json.dumps(entries, indent=2))
+    _public_store.register(
+      _own_host(), envelope["handle"], envelope["bio"],
+    )
     return "registered"
   try:
     response = await federation_request(
@@ -1331,7 +884,7 @@ async def get_board_media_for_owner(
 ):
   """Serve a community-board image, caching remote hosts for 24 hours."""
   _require_owner_or_common_app(db, principal)
-  if not _ID_RE.fullmatch(post_id):
+  if not _valid_id(post_id):
     raise HTTPException(status_code=400, detail="Post id is invalid.")
   identity = _load_identity()
   host = identity.get("community_host") or _own_host()

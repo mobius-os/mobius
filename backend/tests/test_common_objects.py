@@ -45,7 +45,7 @@ def _make_peer_keypair():
 
 def _seed_peer_actor_cache(public_b64: str, host: str = PEER_HOST, handle: str = ""):
 
-  cache = common_routes._peer_cache_path(host)
+  cache = common_routes._actor_verifier.cache_path(host)
   cache.parent.mkdir(parents=True, exist_ok=True)
   cache.write_text(json.dumps({
     "fetched_at": time.time(),
@@ -473,7 +473,7 @@ def test_member_entries_carry_handles(client, auth):
   oid = _create_board(client, auth)
   private_b64, public_b64 = _make_peer_keypair()
   # Actor card with a handle, like the current Common identity publishes.
-  cache = common_routes._peer_cache_path(PEER_HOST)
+  cache = common_routes._actor_verifier.cache_path(PEER_HOST)
   cache.parent.mkdir(parents=True, exist_ok=True)
   cache.write_text(json.dumps({
     "fetched_at": time.time(),
@@ -509,7 +509,7 @@ async def test_verified_account_can_resolve_multiple_deployments_but_directory_c
     return None
   monkeypatch.setattr(identity_routes, "resolve_handle_hosts", unlinked)
   monkeypatch.setattr(common_routes, "_load_identity", lambda: {})
-  path = common_routes._directory_path()
+  path = objects_routes._public_store.directory_path()
   path.parent.mkdir(parents=True, exist_ok=True)
   path.write_text(json.dumps({h: {"handle": "ana"} for h in result.hosts}))
   with pytest.raises(HTTPException) as exc:

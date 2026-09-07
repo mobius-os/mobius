@@ -234,7 +234,7 @@ async def test_valid_public_actor_fetch_verifies_peer_signature(monkeypatch):
 
   _resolve_to(monkeypatch, _PUBLIC_IP)
   host = "signed-peer.example"
-  cache = common_routes._peer_cache_path(host)
+  cache = common_routes._actor_verifier.cache_path(host)
   cache.unlink(missing_ok=True)
   key = Ed25519PrivateKey.generate()
   public_b64 = base64.b64encode(

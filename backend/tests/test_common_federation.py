@@ -19,6 +19,7 @@ import httpx
 import pytest
 
 from app import models
+from app.common_protocol import verify
 from app.config import get_settings
 from app.routes import common as common_routes
 
@@ -95,7 +96,7 @@ def _seed_peer_actor_cache(
     actor["encryption_key"] = {
       "alg": "x25519", "key_b64": encryption_public_b64,
     }
-  cache = common_routes._peer_cache_path(host)
+  cache = common_routes._actor_verifier.cache_path(host)
   cache.parent.mkdir(parents=True, exist_ok=True)
   cache.write_text(json.dumps({
     "fetched_at": time.time(),
@@ -506,7 +507,7 @@ def test_owner_send_seals_for_peer_with_encryption_key(
   assert "attachment" not in captured
   assert "reply_to" not in captured
   identity = common_routes._load_identity()
-  assert common_routes._verify(
+  assert verify(
     {k: v for k, v in captured.items() if k != "sig"},
     captured["sig"], identity["public_key_b64"],
   )
