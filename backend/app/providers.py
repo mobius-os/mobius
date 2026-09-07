@@ -1193,18 +1193,15 @@ def _live_model_entries(
       continue
     live_by_id[raw["id"]] = raw
 
-  # The curated compatibility aliases are an owner-chosen product surface, not
-  # a mirror of one catalog response. Keep them available even when a provider
-  # temporarily omits an older-but-still-supported alias (Sonnet 4.6 / GPT-5.5)
-  # from discovery, then append every genuinely live extra in provider order.
-  if provider_id == "mobius":
-    ordered_ids = [mid for mid in KNOWN_MODELS["mobius"] if mid in live_by_id]
-  else:
-    preferred = DEFAULT_VISIBLE_MODEL_ORDER.get(provider_id, ())
-    ordered_ids = list(preferred)
-    ordered_ids.extend(
-      model_id for model_id in live_by_id if model_id not in preferred
-    )
+  # The live catalog is already ordered newest first by each provider. Keep
+  # that order intact so a just-released model is immediately the first choice
+  # in every picker. Older compatibility aliases remain available after the
+  # live catalog when discovery temporarily omits them.
+  ordered_ids = list(live_by_id)
+  ordered_ids.extend(
+    model_id for model_id in KNOWN_MODELS.get(provider_id, [])
+    if model_id not in live_by_id
+  )
   entries: list[dict[str, Any]] = []
   for model_id in ordered_ids:
     metadata = live_by_id.get(model_id, {})

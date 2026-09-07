@@ -35,18 +35,6 @@ import '../ui/StatusDot.css'
 import '../ui/ModelSheet.css'
 import './SettingsView.css'
 
-// Order a provider's models with the currently-selected one first,
-// then the rest in registry order (which the backend returns newest →
-// oldest / most → least capable). Floating the active model to the top
-// of its group is what makes scrolling the picker feel natural — the
-// choice you reach for is always the first thing under your thumb.
-function orderSelectedFirst(models, selectedId) {
-  if (!Array.isArray(models) || !selectedId) return models || []
-  const sel = models.find((m) => m.id === selectedId)
-  if (!sel) return models
-  return [sel, ...models.filter((m) => m.id !== selectedId)]
-}
-
 const PROVIDER_CHOICES = [
   { id: 'mobius', label: 'Möbius subscription' },
   { id: 'claude', label: 'Claude Code' },
@@ -177,7 +165,7 @@ function BackgroundProviderRow({
     key: row.provider,
     label: info?.label || row.provider,
     Logo,
-    models: configured ? orderSelectedFirst(models, enabled ? selectedModel : null) : [],
+    models: configured ? models : [],
   }]
   const triggerLabel = enabled
     ? (selectedRow?.label || selectedModel || 'Choose model')
