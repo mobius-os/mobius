@@ -1301,8 +1301,11 @@ message. Repeated steps are bounded by activity variety rather than raw call
 count. Only an explicit disclosure resolves that exact range through
 `GET /api/chats/{id}/activity-detail`; the live assistant stays self-contained.
 Mounted runtime reconciliation uses `GET /api/chats/{id}/runtime`, whose ORM
-projection raiseloads every unrequested field so polling can never silently
-decode `Chat.messages`. Both projections carry the row's `updated_at` as the
+projection raiseloads every unrequested field. Goal handoff classification
+reads only the pending-question identity in the ordinary no-question case;
+an open continuation card explicitly resolves its author from the transcript
+so an unrelated question cannot own that Goal. It must not reload the full
+Chat for each Goal status check. Both projections carry `updated_at` as the
 detail-snapshot version. On activation, a retained ChatView reads the runtime
 projection first and reuses its painted transcript only when those explicit
 versions match; a missing or changed version fails closed to the compact detail
@@ -1310,6 +1313,17 @@ read. Any local, streamed, or paginated message-cache mutation clears the
 cached version until a complete detail response proves it again. These are read
 projections, never a second persistence format: provider context, recovery,
 export, and writer commands continue to use the full transcript.
+
+Chat detail still reads the historical JSON once. Its usual recent/older page
+is bounded by message count; restoring a saved anchor intentionally includes
+one predecessor and the authoritative tail to preserve exact reading position
+and live-reply reconciliation. Historical Goal cards find their final answer
+in the full transcript metadata, then hydrate plans and handoffs only for the
+requested half-open message window. The displayed plan and Goal completion
+use the same serialized plan. Changes checks only chat identity before its
+writer barrier, then rechecks active-chat access and reads the transcript once
+after the barrier. `test_chat_entry_read_cost.py` protects these read budgets
+and ownership semantics without flaky wall-clock thresholds.
 
 - **Commit-before-ack (strict paths):** the caller's `await` on `QuestionCommit`/`Finalize`/`AnswerQuestion`/`Barrier`/`DrainAndStop` doesn't unblock until the commit succeeds; `PersistTranscript` and `PersistError` are fire-and-forget (submitted without awaiting the ack).
 - **Questions commit-before-broadcast:** a question row is durable before its SSE push fires, so a reconnect's catch-up burst always finds it.

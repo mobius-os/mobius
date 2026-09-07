@@ -8,7 +8,7 @@ import re
 from typing import Any
 
 from sqlalchemy import or_, update
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, load_only
 
 from app import models
 
@@ -470,7 +470,13 @@ def goal_handoff_owner_kind(
   identity check here prevents an unrelated question, Wait, or helper in the
   same chat from making unfinished Goal work look safely handed off.
   """
-  chat = db.query(models.Chat).filter(models.Chat.id == chat_id).first()
+  # Goal presentation is also read by the small runtime route and once per
+  # historical Goal. Do not decode the entire transcript for an absent card.
+  # An actual continuation card still lazily reads messages to prove its exact
+  # author; a detail read's already-loaded Chat is reused by the identity map.
+  chat = db.query(models.Chat).options(
+    load_only(models.Chat.pending_question_id),
+  ).filter(models.Chat.id == chat_id).first()
   pending_question_id = chat.pending_question_id if chat is not None else None
   if pending_question_id is not None:
     from app.questions import continuation_question_owner_run_id
@@ -528,6 +534,16 @@ def serialize_goal(
 ) -> dict[str, Any]:
   """Project durable Goal presentation independently of turn liveness."""
   plan = serialize_plan(db, physical, root)
+  return _goal_presentation(db, physical, root, plan)
+
+
+def _goal_presentation(
+  db: Session,
+  physical: models.ChatRun,
+  root: models.ChatRun,
+  plan: dict[str, Any] | None,
+) -> dict[str, Any]:
+  """Use the same plan snapshot for completion and the historical plan card."""
   wait_kind = goal_handoff_owner_kind(
     db, physical.chat_id, physical.goal_id or root.id,
   )
@@ -583,6 +599,9 @@ def terminal_goal_summaries_by_message_index(
   db: Session,
   chat_id: str,
   messages: list[dict[str, Any]],
+  *,
+  message_start: int = 0,
+  message_end: int | None = None,
 ) -> dict[int, list[dict[str, Any]]]:
   """Project completed/failed Goals beside their final assistant message.
 
@@ -592,10 +611,23 @@ def terminal_goal_summaries_by_message_index(
   durable owner while giving paginated chat history a stable place to render
   each terminal Goal. A summary travels only with the assistant row that
   concluded its final physical run, so ordinary message pagination naturally
-  paginates Goal cards too.
+  paginates Goal cards too. Find that row in the complete transcript before
+  filtering to the requested half-open window; searching only the page would
+  move a resumed Goal's card onto an earlier answer. Plans and handoffs for
+  off-page Goals are never hydrated.
   """
   goal_rows = (
     db.query(models.ChatRun)
+    .options(load_only(
+      models.ChatRun.id,
+      models.ChatRun.chat_id,
+      models.ChatRun.goal_id,
+      models.ChatRun.root_run_id,
+      models.ChatRun.goal_objective,
+      models.ChatRun.status,
+      models.ChatRun.started_at,
+      models.ChatRun.ended_at,
+    ))
     .filter(
       models.ChatRun.chat_id == chat_id,
       models.ChatRun.goal_objective.isnot(None),
@@ -628,10 +660,6 @@ def terminal_goal_summaries_by_message_index(
     latest = rows[-1]
     if latest.ended_at is None:
       continue
-    physical, root = _goal_rows_for_physical(db, latest)
-    presentation = serialize_goal(db, physical, root)
-    if presentation["status"] not in {"completed", "failed"}:
-      continue
     started_at = min(
       (row.started_at for row in rows if row.started_at is not None),
       default=None,
@@ -644,9 +672,17 @@ def terminal_goal_summaries_by_message_index(
       index for index, ts in reversed(assistant_rows)
       if started_ms - 1000 <= ts <= ended_ms + 1000
     ), None)
-    if candidate_index is None:
+    if (
+      candidate_index is None
+      or candidate_index < message_start
+      or (message_end is not None and candidate_index >= message_end)
+    ):
       continue
+    physical, root = _goal_rows_for_physical(db, latest)
     plan = serialize_plan(db, physical, root)
+    presentation = _goal_presentation(db, physical, root, plan)
+    if presentation["status"] not in {"completed", "failed"}:
+      continue
     projected.setdefault(candidate_index, []).append({
       **presentation,
       "id": identity,

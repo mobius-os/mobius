@@ -615,6 +615,8 @@ def _chat_detail_response(
   from app.goal_plans import terminal_goal_summaries_by_message_index
   summaries_by_index = terminal_goal_summaries_by_message_index(
     db, chat.id, all_msgs,
+    message_start=start,
+    message_end=start + len(page),
   )
   if summaries_by_index:
     next_page = list(page)
@@ -1844,7 +1846,9 @@ def get_chat_edit_diffs(
   """
   from app.chat_transcript import materialized_messages
 
-  chat = get_active_chat_or_404(db, chat_id)
+  # Only check existence before the writer fence. The authoritative transcript
+  # is read once below, after rollback has retired the pre-fence snapshot.
+  get_active_chat_or_404(db, chat_id, load_fields=(models.Chat.id,))
   _drain_writer_before_sidecar_read(db, chat_id, "chat changes")
   chat = get_active_chat_or_404(db, chat_id)
   messages = materialized_messages(chat)
