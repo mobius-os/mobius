@@ -61,13 +61,15 @@ test('Brain network summary opens a separate view and shows mailbox totals', asy
 test('network messages expose routing, broadcast audience and full safe text', async () => {
  const { NetworkMessage } = await vite.ssrLoadModule('/src/components/ChatView/ChatNetworkInspector.jsx')
  const html = render(h(NetworkMessage, { chatId: 'self', message: { id: '1', sender_chat_id: 'peer', sender_name: 'Scout', broadcast: true, room_kind: 'project', kind: 'blocker', body: '<script>private note</script>' } }))
- assert.match(html, /Broadcast received/)
+ assert.match(html, /Received from /)
+ assert.match(html, /Broadcast/)
+ assert.doesNotMatch(html, /<dl|<dt|<dd/)
  assert.match(html, /Scout/)
  assert.match(html, /Project group/)
  assert.match(html, /blocker/)
  assert.match(html, /&lt;script&gt;/)
  const sent = render(h(NetworkMessage, { chatId: 'self', message: { sender_chat_id: 'self', recipient_name: 'Builder', body: 'Ready', kind: 'handoff' } }))
- assert.match(sent, /This chat/); assert.match(sent, /Builder/); assert.match(sent, /Sent/)
+ assert.match(sent, /Sent to /); assert.match(sent, /Builder/); assert.doesNotMatch(sent, /This chat|<dl/)
 })
 
 test('expanded Goal tasks have no dependency on the agent network query', async () => {

@@ -9,8 +9,7 @@
 .cni-message__kind { text-transform: capitalize; font-weight: 600; color: var(--text); }
 .cni-message--blocker .cni-message__kind { color: var(--danger); }
 .cni-message--handoff .cni-message__kind, .cni-message--finding .cni-message__kind { color: var(--accent); }
-.cni-message__route { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 3px 10px; margin: 10px 0; font-size: 12px; line-height: 1.45; }
-.cni-message__route dt { color: var(--muted); }
-.cni-message__route dd { margin: 0; font-weight: 600; overflow-wrap: anywhere; }
-.cni-message__body { margin: 0; font-size: 13px; line-height: 1.65; white-space: pre-wrap; overflow-wrap: anywhere; }
+.cni-message__direction { min-width: 0; overflow-wrap: anywhere; }
+.cni-message__direction strong { color: var(--text); font-weight: 600; }
+.cni-message__body { margin: 9px 0 0; font-size: 13px; line-height: 1.65; white-space: pre-wrap; overflow-wrap: anywhere; }
 .cni .cui__close:disabled { opacity: .5; cursor: default; }

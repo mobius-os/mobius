@@ -22,13 +22,12 @@ export function NetworkMessage({ message, chatId }) {
   return <li className={`cni-message cni-message--${message.kind || 'note'}`}>
     <div className="cni-message__meta">
       <span className="cni-message__kind">{message.kind || 'note'}</span>
-      <span>{message.broadcast ? (sent ? 'Broadcast sent' : 'Broadcast received') : (sent ? 'Sent' : 'Received')}</span>
+      <span className="cni-message__direction">{sent ? 'Sent to ' : 'Received from '}
+        <strong>{sent ? audience : message.sender_name || 'Agent'}</strong>
+        {message.broadcast && <span> · Broadcast{!sent && ` to ${audience}`}</span>}
+      </span>
       <time dateTime={message.created_at}>{timestamp(message.created_at)}</time>
     </div>
-    <dl className="cni-message__route">
-      <dt>From</dt><dd>{sent ? 'This chat' : message.sender_name || 'Agent'}</dd>
-      <dt>To</dt><dd>{audience}</dd>
-    </dl>
     <p className="cni-message__body">{message.body}</p>
   </li>
 }
