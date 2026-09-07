@@ -196,4 +196,3 @@ async def test_psi_only_critical_memory_is_diagnostic_not_an_admission_veto():
       working_set_ratio=0.5,
     ),
   )
-
