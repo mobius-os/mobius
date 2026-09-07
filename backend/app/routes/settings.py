@@ -20,6 +20,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app import models, provider_usage, providers
@@ -290,6 +291,32 @@ async def get_provider_usage(
     provider_id,
     get_app_settings().data_dir,
   )
+
+
+class RedeemResetBody(BaseModel):
+  credit_id: str | None = None
+
+
+@settings_router.post(
+  "/provider-usage/codex/redeem-reset",
+  dependencies=[Depends(reject_cross_site)],
+)
+async def redeem_codex_reset(
+  body: RedeemResetBody | None = None,
+  _: models.Owner = Depends(get_current_owner_for_lifecycle_control),
+) -> dict:
+  """Redeem one banked Codex rate-limit reset. Immediate and irreversible."""
+  try:
+    return await provider_usage.redeem_codex_reset(
+      get_app_settings().data_dir,
+      credit_id=body.credit_id if body else None,
+    )
+  except Exception as exc:  # noqa: BLE001 — surface a clean 502 to the UI
+    logger.warning("codex reset redeem failed: %s", exc)
+    raise HTTPException(
+      status_code=502,
+      detail="Couldn't reach Codex to redeem the reset. Try again shortly.",
+    ) from exc
 
 
 @settings_router.post("", dependencies=[Depends(reject_cross_site)])

@@ -370,6 +370,20 @@ export default function SettingsView({
       && expandedUsage.codex
     ),
   })
+  const [codexRedeem, setCodexRedeem] = useState({ busy: false, result: null })
+  const handleRedeemCodexReset = useCallback(async (creditId = null) => {
+    setCodexRedeem({ busy: true, result: null })
+    try {
+      const res = await api.settings.redeemCodexReset(creditId)
+      if (!res.ok) throw new Error('redeem failed')
+      const data = await res.json()
+      setCodexRedeem({ busy: false, result: { outcome: data?.outcome } })
+      // Refetch so the window fills and the banked count both reflect the redeem.
+      settingsQueries.providerUsage.invalidate(queryClient, 'codex')
+    } catch {
+      setCodexRedeem({ busy: false, result: { error: true } })
+    }
+  }, [queryClient])
   const claudeUsageQuery = settingsQueries.providerUsage.useQuery('claude', {
     enabled: (
       active && providerReady && claudeAuthenticated
@@ -977,6 +991,9 @@ export default function SettingsView({
                       snapshot={codexUsageQuery.data}
                       loading={codexUsageQuery.isPending}
                       failed={codexUsageQuery.isError}
+                      onRedeemReset={handleRedeemCodexReset}
+                      redeeming={codexRedeem.busy}
+                      redeemResult={codexRedeem.result}
                     />
                   ) : null}
                   expanded={expandedAuth === 'codex'}

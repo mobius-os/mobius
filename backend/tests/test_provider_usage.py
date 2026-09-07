@@ -81,6 +81,52 @@ def test_normalize_codex_usage_reads_primary_secondary_and_credits():
   ]
   assert snapshot["windows"][1]["used_percent"] == 54
   assert snapshot["credit_balance"] == "18.50 credits"
+  assert snapshot["reset_credits"] is None
+
+
+def test_normalize_codex_usage_surfaces_redeemable_reset_credits():
+  from app.provider_usage import normalize_codex_usage
+
+  snapshot = normalize_codex_usage(
+    {
+      "rate_limits": {"primary": {"used_percent": 90, "resets_at": 1785430800}},
+      "rate_limit_reset_credits": {
+        "available_count": 2,
+        "credits": [
+          {
+            "id": "credit-a",
+            "title": "Weekly reset",
+            "status": "available",
+            "granted_at": 1785000000,
+            "expires_at": 1787592000,
+          },
+          # Already-redeemed rows must not become clickable offers.
+          {"id": "credit-b", "status": "redeemed", "expires_at": 1787592000},
+        ],
+      },
+    },
+    plan_type="plus",
+  )
+
+  resets = snapshot["reset_credits"]
+  assert resets["available_count"] == 2
+  assert [row["id"] for row in resets["credits"]] == ["credit-a"]
+  assert resets["credits"][0]["expires_at"] == "2026-08-24T17:20:00+00:00"
+
+
+def test_normalize_codex_usage_reset_credits_count_only_without_detail_rows():
+  from app.provider_usage import normalize_codex_usage
+
+  snapshot = normalize_codex_usage(
+    {
+      "rate_limits": {"primary": {"used_percent": 10, "resets_at": 1785430800}},
+      # availableCount known, detail rows not fetched (null) — still surfaced.
+      "rate_limit_reset_credits": {"available_count": 1, "credits": None},
+    },
+    plan_type="plus",
+  )
+
+  assert snapshot["reset_credits"] == {"available_count": 1, "credits": []}
 
 
 def test_normalize_mobius_usage_reads_api_credit_consumption():
@@ -154,6 +200,7 @@ def test_normalizers_report_unavailable_without_inventing_limits():
     "plan_label": "Team plan",
     "windows": [],
     "credit_balance": None,
+    "reset_credits": None,
   }
   assert normalize_mobius_usage({"balance": {"spendable_units": 500}}) == {
     "state": "unavailable",

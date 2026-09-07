@@ -1,4 +1,10 @@
-"""Read-only provider-plan usage snapshots for Settings and the chat brain."""
+"""Provider-plan usage snapshots for Settings and the chat brain.
+
+Reads are the common case. The one mutation here is redeeming a banked Codex
+rate-limit reset, which rides the same official Codex app-server client the
+usage read uses (`account/rateLimitResetCredit/consume`), never a hand-rolled
+HTTP call to an undocumented backend.
+"""
 
 from __future__ import annotations
 
@@ -10,6 +16,7 @@ import logging
 import os
 import shutil
 import time
+import uuid
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -247,7 +254,59 @@ def normalize_codex_usage(
     "plan_label": plan_label(plan),
     "windows": windows,
     "credit_balance": credit_balance,
+    "reset_credits": _codex_reset_credits(
+      source.get("rate_limit_reset_credits", source.get("rateLimitResetCredits"))
+    ),
   }
+
+
+def _epoch_to_iso(value: Any) -> str | None:
+  """Codex reports credit timestamps as Unix seconds; the UI wants ISO-8601."""
+  try:
+    seconds = int(value)
+  except (TypeError, ValueError):
+    return None
+  return datetime.fromtimestamp(seconds, tz=UTC).isoformat()
+
+
+def _codex_reset_credits(summary: Any) -> dict[str, Any] | None:
+  """Surface banked rate-limit resets for Settings.
+
+  The read RPC always carries ``available_count``; the ``credits`` detail rows
+  (with expiry) are present only when Codex's backend chooses to include them,
+  so callers must render gracefully from the count alone. Only rows the backend
+  still marks redeemable are forwarded — a ``redeemed``/``redeeming`` row would
+  invite a click that can only fail.
+  """
+  if not isinstance(summary, dict):
+    return None
+  available = summary.get("available_count", summary.get("availableCount"))
+  try:
+    available = int(available)
+  except (TypeError, ValueError):
+    return None
+  if available <= 0:
+    return None
+
+  rows: list[dict[str, Any]] = []
+  raw_rows = summary.get("credits")
+  if isinstance(raw_rows, list):
+    for raw in raw_rows:
+      if not isinstance(raw, dict):
+        continue
+      status = raw.get("status")
+      if status not in (None, "available", "unknown"):
+        continue
+      credit_id = raw.get("id")
+      rows.append({
+        "id": credit_id if isinstance(credit_id, str) else None,
+        "title": raw.get("title"),
+        "description": raw.get("description"),
+        "expires_at": _epoch_to_iso(raw.get("expires_at", raw.get("expiresAt"))),
+        "granted_at": _epoch_to_iso(raw.get("granted_at", raw.get("grantedAt"))),
+      })
+
+  return {"available_count": available, "credits": rows}
 
 
 def _units(raw: Any) -> float | None:
@@ -386,8 +445,15 @@ def _read_codex_client(client: Any) -> tuple[Any, Any]:
   return account, limits
 
 
-async def _fetch_codex_usage(data_dir: str) -> dict[str, Any]:
-  """Read Codex plan limits with a bounded, explicitly reaped app-server."""
+async def _run_on_codex_client(data_dir: str, work: Any, *, timeout_error: str) -> Any:
+  """Run one blocking Codex app-server interaction on a bounded, reaped client.
+
+  ``work`` is a sync callable that receives a started ``CodexClient`` and owns
+  the whole request; it runs on worker one while worker two stays free to close
+  the transport and unblock the read on timeout. Both the usage read and the
+  reset-credit redeem share this so the app-server is spun up, session-locked,
+  and reaped identically — there is one place that gets the lifecycle right.
+  """
   from openai_codex.client import CodexClient, CodexConfig
 
   codex_bin = shutil.which("codex")
@@ -407,8 +473,8 @@ async def _fetch_codex_usage(data_dir: str) -> dict[str, Any]:
   # Live Codex turns may each hold one default worker while waiting for a
   # notification; queuing start/read/close behind them made this probe leak an
   # app-server exactly when the system was busiest. Worker one owns the whole
-  # blocking read; worker two remains available to close the transport and
-  # unblock it on timeout.
+  # blocking interaction; worker two remains available to close the transport
+  # and unblock it on timeout.
   executor = _cf.ThreadPoolExecutor(
     max_workers=2,
     thread_name_prefix="mobius-codex-usage",
@@ -420,9 +486,9 @@ async def _fetch_codex_usage(data_dir: str) -> dict[str, Any]:
 
   from app.codex_session_lock import acquire_codex_session_activity_async
   ownership = await acquire_codex_session_activity_async(data_dir)
-  task = in_worker(_read_codex_client, client)
+  task = in_worker(work, client)
   try:
-    account, limits = await asyncio.wait_for(
+    return await asyncio.wait_for(
       asyncio.shield(task),
       timeout=_PROVIDER_TIMEOUT_SECONDS,
     )
@@ -430,7 +496,7 @@ async def _fetch_codex_usage(data_dir: str) -> dict[str, Any]:
     await in_worker(client.close)
     with suppress(Exception):
       await asyncio.wait_for(task, timeout=2.0)
-    raise RuntimeError("codex usage read timed out")
+    raise RuntimeError(timeout_error)
   finally:
     try:
       await in_worker(client.close)
@@ -438,8 +504,60 @@ async def _fetch_codex_usage(data_dir: str) -> dict[str, Any]:
       executor.shutdown(wait=False, cancel_futures=True)
       ownership.release()
 
+
+async def _fetch_codex_usage(data_dir: str) -> dict[str, Any]:
+  """Read Codex plan limits with a bounded, explicitly reaped app-server."""
+  account, limits = await _run_on_codex_client(
+    data_dir,
+    _read_codex_client,
+    timeout_error="codex usage read timed out",
+  )
   raw = limits.model_dump(mode="json", by_alias=False)
   return normalize_codex_usage(raw, plan_type=_codex_plan_type(account))
+
+
+def _consume_codex_reset(credit_id: str | None) -> Any:
+  """Build the worker that redeems one banked reset over the official RPC."""
+
+  def work(client: Any) -> dict[str, Any]:
+    from openai_codex.generated.v2_all import (
+      ConsumeAccountRateLimitResetCreditParams,
+      ConsumeAccountRateLimitResetCreditResponse,
+    )
+
+    client.start()
+    client.initialize()
+    params = ConsumeAccountRateLimitResetCreditParams(
+      credit_id=credit_id or None,
+      # One logical attempt per HTTP redeem; the UI confirms before sending, so
+      # a fresh key per call is correct and a user retry is a new attempt.
+      idempotency_key=str(uuid.uuid4()),
+    )
+    response = client.request(
+      "account/rateLimitResetCredit/consume",
+      params.model_dump(mode="json", by_alias=True, exclude_none=True),
+      response_model=ConsumeAccountRateLimitResetCreditResponse,
+    )
+    return {"outcome": response.outcome.value}
+
+  return work
+
+
+async def redeem_codex_reset(
+  data_dir: str,
+  credit_id: str | None = None,
+) -> dict[str, Any]:
+  """Redeem a banked Codex rate-limit reset via the official consume RPC.
+
+  Returns the backend outcome (``reset``, ``nothingToReset``, ``noCredit``,
+  ``alreadyRedeemed``). Redeeming is immediate and irreversible, so the caller
+  must have already confirmed intent.
+  """
+  return await _run_on_codex_client(
+    data_dir,
+    _consume_codex_reset(credit_id),
+    timeout_error="codex reset redeem timed out",
+  )
 
 
 async def _fetch_mobius_usage() -> dict[str, Any]:

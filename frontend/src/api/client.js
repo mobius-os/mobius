@@ -1010,6 +1010,13 @@ export const api = {
     providerUsage: (provider) => apiFetch(
       `/settings/provider-usage/${encodeURIComponent(provider)}`,
     ),
+    redeemCodexReset: (creditId = null) => apiFetch(
+      '/settings/provider-usage/codex/redeem-reset',
+      {
+        method: 'POST',
+        body: JSON.stringify({ credit_id: creditId }),
+      },
+    ),
     save: (payload) => apiFetch('/settings', {
       method: 'POST',
       body: JSON.stringify(payload),

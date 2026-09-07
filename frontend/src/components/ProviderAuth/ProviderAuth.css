@@ -565,6 +565,97 @@
   line-height: 1.35;
 }
 
+.provider-usage__resets {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: 6px;
+  margin-top: 4px;
+  padding-top: 7px;
+  border-top: 1px solid var(--border-light);
+}
+
+.provider-usage__resets-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.provider-usage__resets-count {
+  color: var(--text);
+  font-size: 11.5px;
+  font-weight: 500;
+}
+
+.provider-usage__resets-expiry {
+  color: var(--muted);
+  font-size: 10.5px;
+  white-space: nowrap;
+}
+
+.provider-usage__redeem {
+  justify-self: start;
+  padding: 4px 10px;
+  border: 1px solid var(--border-light);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 11.5px;
+  line-height: 1.2;
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease;
+}
+
+.provider-usage__redeem:hover:not(:disabled) {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+
+.provider-usage__redeem:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.provider-usage__redeem--go {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--on-accent, #fff);
+}
+
+.provider-usage__resets-confirm {
+  display: grid;
+  gap: 6px;
+}
+
+.provider-usage__resets-warn {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.provider-usage__resets-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.provider-usage__resets-msg {
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.provider-usage__resets-msg--success {
+  color: var(--accent);
+}
+
+.provider-usage__resets-msg--info {
+  color: var(--muted);
+}
+
+.provider-usage__resets-msg--error {
+  color: var(--danger, #d33);
+}
+
 /* Provider connected / disconnected indicator now renders via
    the shared <StatusDot> component
    (frontend/src/components/ui/StatusDot.jsx) — the bespoke
