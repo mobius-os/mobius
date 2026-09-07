@@ -3520,13 +3520,9 @@
   animation: progress-rail-in 0.22s ease both;
 }
 
-/* The compact rail can stay frosted, but an expanded todo list needs a solid
-   reading surface: several lines of chat showing through the list materially
-   reduces task-title and dependency-label contrast. */
+/* Expanded Goal and Waiting share the same translucent reading surface. */
 .chat__progress-rail:has(.chat__goal-plan) {
-  background: var(--surface);
-  backdrop-filter: none;
-  -webkit-backdrop-filter: none;
+  background: color-mix(in srgb, var(--surface) 88%, transparent);
 }
 
 @keyframes progress-rail-in {
@@ -4403,3 +4399,11 @@
 }
 
 .chat__progress-identity { display: inline-block; vertical-align: -2px; margin-right: 5px; flex-shrink: 0; }
+
+.composer-network__activity { padding: 0 10px 10px; }
+.composer-network__activity .agent-relay__head > strong,
+.composer-network__activity .agent-relay__message p { font-size: 12px; }
+.composer-network__activity .agent-relay__head > span:last-child,
+.composer-network__activity .agent-relay__message > div,
+.composer-network__activity .agent-relay__message > div strong,
+.composer-network__activity .agent-relay__empty { font-size: 11px; }

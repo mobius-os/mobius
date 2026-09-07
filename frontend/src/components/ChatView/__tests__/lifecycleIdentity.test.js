@@ -44,3 +44,20 @@ test('composer Waiting follows the compact Goal identity instead of a tile or ba
  assert.doesNotMatch(html, /chat__lifecycle-icon|chat__wait-tag/)
  assert.match(html, /aria-expanded="false"/)
 })
+
+test('Brain network stays available without a Goal and does not query while collapsed', async () => {
+ const Network = await load('ChatAgentNetwork')
+ // No QueryClientProvider: collapsed disclosure must not mount a polling query.
+ const html = render(h(Network, { chatId: 'standalone-chat' }))
+ assert.match(html, /Agent network/)
+ assert.match(html, /aria-expanded="false"/)
+ assert.doesNotMatch(html, /agent-relay/)
+ assert.equal(render(h(Network, { chatId: null })), '')
+})
+
+test('expanded Goal tasks have no dependency on the agent network query', async () => {
+ const Details = await load('GoalPlanDetails')
+ const html = render(h(Details, { plan: { tasks: [{ id: 'task', title: 'Verify deployment', status: 'running' }] } }))
+ assert.match(html, /Verify deployment/)
+ assert.doesNotMatch(html, /Agent network|agent-relay/)
+})

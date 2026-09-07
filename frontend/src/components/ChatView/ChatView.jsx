@@ -5290,7 +5290,7 @@ export default function ChatView({
         : {}),
       icon: <Flag width={14} height={14} aria-hidden="true" />,
       ...(activeGoalPlan
-        ? { details: <GoalPlanDetails plan={activeGoalPlan} chatId={chatId} /> }
+        ? { details: <GoalPlanDetails plan={activeGoalPlan} /> }
         : {}),
     }
   })

@@ -43,6 +43,7 @@ import {
   InfoCircle,
   Paperclip,
 } from '@openai/apps-sdk-ui/components/Icon'
+import ChatAgentNetwork from './ChatAgentNetwork.jsx'
 import BrainUsageIcon from './BrainUsageIcon.jsx'
 import AppIcon from '../AppIcon.jsx'
 import ChatSettingsPanel from './ChatSettingsPanel.jsx'
@@ -599,6 +600,7 @@ export default function ComposerPopover({
               />
             </div>
           )}
+          {!embedded && chatReady && chatId && <ChatAgentNetwork chatId={chatId} />}
           {!embedded && (onOpenUsage || onOpenSummary || onOpenInspector) && (
           <div className="composer-popover__section composer-popover__section--context">
             {onOpenUsage && (
