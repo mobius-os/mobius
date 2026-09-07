@@ -195,16 +195,8 @@ def _patch_claude_runner(monkeypatch, *, text="partial answer"):
   monkeypatch.setattr(csr, "run_claude_sdk_turn", fake_runner)
 
 
-@pytest.mark.parametrize("provider_id", ["claude", "codex"])
-@pytest.mark.parametrize("ack_failure", [False, True])
-def test_provider_entry_requires_durable_admission_ack(
-  monkeypatch, provider_id, ack_failure,
-):
-  """An ack failure must not invoke either provider, even with zero output."""
-  import importlib
-
+def _seed_provider_turn(monkeypatch, provider_id, cid, token):
   _seed_owner_and_creds()
-  cid, token = "provider-admission", "rt-provider-admission"
   _seed_chat(cid, messages=[{"role": "user", "content": "hi", "ts": 1}],
              running="running", run_token=token)
   with SessionLocal() as db:
@@ -214,13 +206,28 @@ def test_provider_entry_requires_durable_admission_ack(
       "model": "claude-sonnet-4-6" if provider_id == "claude" else "gpt-5.4",
     }
     db.commit()
-  provider = chat_mod.get_provider(provider_id)
-  monkeypatch.setattr(provider, "check_auth", lambda _data_dir: None)
+  # Provider objects are process singletons. Patch their class, not a bound
+  # instance method: restoring an instance override would shadow later tests'
+  # class patches after this test's teardown.
+  provider_type = type(chat_mod.get_provider(provider_id))
+  monkeypatch.setattr(provider_type, "check_auth", lambda self, _data_dir: None)
 
-  async def ready(_data_dir):
+  async def ready(self, _data_dir):
     pass
 
-  monkeypatch.setattr(provider, "ensure_auth", ready)
+  monkeypatch.setattr(provider_type, "ensure_auth", ready)
+
+
+@pytest.mark.parametrize("provider_id", ["claude", "codex"])
+@pytest.mark.parametrize("ack_failure", [False, True])
+def test_provider_entry_requires_durable_admission_ack(
+  monkeypatch, provider_id, ack_failure,
+):
+  """An ack failure must not invoke either provider, even with zero output."""
+  import importlib
+
+  cid, token = "provider-admission", "rt-provider-admission"
+  _seed_provider_turn(monkeypatch, provider_id, cid, token)
   entered = []
 
   async def runner(**_kwargs):
@@ -1890,40 +1897,102 @@ def test_stop_during_starting_does_not_spawn_superseded_turn(monkeypatch):
   assert state is not None and len(state["messages"]) == 1
 
 
-def test_stop_during_provider_setup_does_not_dispatch_runner(monkeypatch):
+@pytest.mark.parametrize(("provider_id", "stop_during"), [
+  ("claude", "ensure_auth"),
+  ("claude", "check_auth"),
+  ("codex", "check_auth"),
+  ("claude", "admission_ack"),
+  ("codex", "admission_ack"),
+  ("claude", "admission_ack_failure"),
+  ("codex", "admission_ack_failure"),
+])
+@pytest.mark.parametrize("successor_claims_sink", [False, True])
+def test_stop_during_provider_setup_does_not_dispatch_runner(
+  monkeypatch, provider_id, stop_during, successor_claims_sink,
+):
   """A Stop can land after run_chat's entry generation check but before the
   SDK handle is registered (for example during a preflight await). The turn
   must re-check the generation after that await; otherwise Stop returns
   success, clears the marker, and the now-untracked runner starts anyway."""
-  _seed_owner_and_creds()
-  cid = "setup-stop"
-  _seed_chat(
-    cid,
-    messages=[{"role": "user", "content": "hi", "ts": 1}],
-    pending=[],
-    running="running",
-  )
+  import importlib
+
+  cid, token = "setup-stop", "rt-setup-stop"
+  _seed_provider_turn(monkeypatch, provider_id, cid, token)
   gen = chat_mod.registry.bump_generation(cid)
-
-  import app.claude_sdk_runner as csr
-  import app.providers as providers
-
   dispatched = []
+  stops = []
+  successor_sink = object()
 
   async def fake_runner(*, bc, **kwargs):
     dispatched.append(kwargs)
     bc.publish({"type": "text", "content": "must not run"})
     return {"session_id": "sess", "cost_usd": 0.0}
 
-  async def stopping_ensure_auth(self, data_dir):
+  async def stop():
     stopped, _ = await chat_mod.stop_chat_for(cid)
     assert stopped is True
+    stops.append(stop_during)
+    if successor_claims_sink:
+      chat_mod.register_active_sink(cid, successor_sink)
 
-  monkeypatch.setattr(csr, "run_claude_sdk_turn", fake_runner)
-  monkeypatch.setattr(providers.ClaudeProvider, "ensure_auth", stopping_ensure_auth)
+  monkeypatch.setattr(
+    importlib.import_module(f"app.{provider_id}_sdk_runner"),
+    f"run_{provider_id}_sdk_turn", fake_runner,
+  )
+  if stop_during == "ensure_auth":
+    async def stopping_ensure_auth(self, data_dir):
+      await stop()
 
-  _run_real_chat(cid, run_token="rt-setup-stop", run_gen=gen)
-  _drain_actor()
+    monkeypatch.setattr(type(chat_mod.get_provider(provider_id)), "ensure_auth", stopping_ensure_auth)
+  elif stop_during == "check_auth":
+    real_in_threadpool = chat_mod.run_in_threadpool
+
+    async def stopping_check_auth(function, *args, **kwargs):
+      result = await real_in_threadpool(function, *args, **kwargs)
+      if getattr(function, "__self__", None) is chat_mod.get_provider(provider_id):
+        await stop()
+      return result
+
+    monkeypatch.setattr(chat_mod, "run_in_threadpool", stopping_check_auth)
+  else:
+    real_submit = chat_writer.ChatWriterActor.submit
+    admission_acks = set()
+    if stop_during == "admission_ack_failure":
+      def reject_admission(self, db, command):
+        raise chat_writer._PersistFailed("admission commit failed")
+
+      monkeypatch.setattr(
+        chat_writer.ChatWriterActor, "_admit_provider_execution", reject_admission,
+      )
+
+    def tracked_submit(self, command):
+      ack = real_submit(self, command)
+      if isinstance(command, chat_writer.AdmitProviderExecution):
+        admission_acks.add(ack)
+      return ack
+
+    real_await_ack = chat_mod._await_ack
+
+    async def stopping_admission_ack(ack):
+      try:
+        return await real_await_ack(ack)
+      finally:
+        if ack in admission_acks:
+          await stop()
+
+    monkeypatch.setattr(chat_writer.ChatWriterActor, "submit", tracked_submit)
+    monkeypatch.setattr(chat_mod, "_await_ack", stopping_admission_ack)
+
+  try:
+    published = []
+    _run_real_chat(cid, run_token=token, run_gen=gen, provider_id=provider_id,
+                   published=published)
+    _drain_actor()
+    assert stops == [stop_during], "the test must actually exercise Stop"
+    assert "error" not in published, "Stop is not a provider failure"
+    assert chat_mod.get_active_sink(cid) is (successor_sink if successor_claims_sink else None)
+  finally:
+    chat_mod.unregister_active_sink(cid, successor_sink)
 
   assert dispatched == [], (
     "a Stop during provider setup must prevent SDK dispatch before a handle "
@@ -1931,6 +2000,8 @@ def test_stop_during_provider_setup_does_not_dispatch_runner(monkeypatch):
   )
   state = _load(cid)
   assert state["running"] is False
+  with SessionLocal() as db:
+    assert db.get(models.ChatRun, token).provider_execution_admitted is (stop_during == "admission_ack")
 
 
 def test_normal_send_spawns_turn(monkeypatch):

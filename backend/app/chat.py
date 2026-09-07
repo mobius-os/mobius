@@ -2783,6 +2783,27 @@ def _run_generation_superseded(chat_id: str, run_gen: int | None) -> bool:
   return run_gen is not None and current_run_generation(chat_id) != run_gen
 
 
+async def _admit_provider_execution(
+  chat_id: str, run_token: str, run_gen: int | None,
+) -> bool:
+  """Cross provider entry only while this exact turn still owns execution.
+
+  Stop can win while the writer ack is in flight, including before the command
+  commits. In either case the caller must settle its own sink without emitting
+  a provider error or touching a replacement turn's ownership.
+  """
+  if _run_generation_superseded(chat_id, run_gen):
+    return False
+  try:
+    await _await_ack(get_writer().submit(AdmitProviderExecution(
+      chat_id=chat_id, run_token=run_token,
+    )))
+  except Exception:
+    if not _run_generation_superseded(chat_id, run_gen):
+      raise
+  return not _run_generation_superseded(chat_id, run_gen)
+
+
 def _log_superseded_run(chat_id: str, phase: str) -> None:
   _get_logger().info(
     "run_chat aborted: generation mismatch chat_id=%s phase=%s",
@@ -5717,6 +5738,9 @@ async def _run_chat_impl_with_db(
   # so run it off the event loop — a slow or hung broker must not stall this
   # single-worker ASGI loop and the other turns and SSE streams sharing it.
   auth_error = await run_in_threadpool(provider.check_auth, settings.data_dir)
+  if _run_generation_superseded(chat_id, run_gen):
+    _log_superseded_run(chat_id, "provider-check-auth")
+    return chat_queue.TerminalDisposition.STALE_NO_ACTION
   if auth_error:
     # A fresh install may intentionally finish setup without connecting an
     # agent; a returning owner's sole credential can also expire. When no
@@ -5812,11 +5836,11 @@ async def _run_chat_impl_with_db(
     db.close()
     try:
       from app.codex_sdk_runner import run_codex_sdk_turn
-      await _await_ack(get_writer().submit(AdmitProviderExecution(
-        chat_id=chat_id, run_token=run_token or "",
-      )))
-      if _run_generation_superseded(chat_id, run_gen):
-        return chat_queue.TerminalDisposition.STALE_NO_ACTION
+      if not await _admit_provider_execution(chat_id, run_token or "", run_gen):
+        return await _complete_turn(
+          bc=bc, sink=sink, db=db, chat_id=chat_id, run_gen=run_gen,
+          provider_id=provider_id, cost_usd=0, close_browser=False,
+        )
       runner_result = await run_codex_sdk_turn(
         user_message=user_message,
         session_id=session_id,
@@ -5992,11 +6016,11 @@ async def _run_chat_impl_with_db(
     db.close()
     try:
       from app.providers import skills_enabled as _skills_enabled
-      await _await_ack(get_writer().submit(AdmitProviderExecution(
-        chat_id=chat_id, run_token=run_token or "",
-      )))
-      if _run_generation_superseded(chat_id, run_gen):
-        return chat_queue.TerminalDisposition.STALE_NO_ACTION
+      if not await _admit_provider_execution(chat_id, run_token or "", run_gen):
+        return await _complete_turn(
+          bc=bc, sink=sink, db=db, chat_id=chat_id, run_gen=run_gen,
+          provider_id=provider_id, cost_usd=0, close_browser=False,
+        )
       runner_result = await run_claude_sdk_turn(
         user_message=user_message,
         session_id=claude_session_id,
