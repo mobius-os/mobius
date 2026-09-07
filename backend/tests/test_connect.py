@@ -299,6 +299,9 @@ def test_outbound_observed_remote_revocation_allows_local_profile_cleanup(
   connect_outbound._runner_path(profile_id).write_text("runner", encoding="utf-8")
   connect_outbound._write_pid(profile_id, 424242)
 
+  runner_pid = connect_outbound._runner_path(profile_id).with_name("runner.pid")
+  runner_pid.write_text("424242", encoding="ascii")
+
   class RemotelyRevoked:
     def poll(self):
       return 0
@@ -308,10 +311,11 @@ def test_outbound_observed_remote_revocation_allows_local_profile_cleanup(
   for artifact in (
     connect_outbound._runner_config_path(profile_id),
     connect_outbound._runner_path(profile_id),
-    connect_outbound._pid_path(profile_id),
+    runner_pid,
   ):
     artifact.unlink()
 
+  assert connect_outbound._pid_path(profile_id).exists()
   connect_outbound._reconcile_once()
 
   meta = json.loads(

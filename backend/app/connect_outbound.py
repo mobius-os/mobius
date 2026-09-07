@@ -488,7 +488,7 @@ def _reconcile_once() -> None:
           for artifact in (
             _runner_config_path(profile_id),
             _runner_path(profile_id),
-            _pid_path(profile_id),
+            _runner_path(profile_id).with_name("runner.pid"),
           )
         )
         if runner_uninstalled:
