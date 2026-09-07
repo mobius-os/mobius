@@ -532,16 +532,15 @@ def test_account_invite_fanout_partial_delivery_join_roles_and_group_revocation(
     return [PEER_HOST, second]
   monkeypatch.setattr(identity_routes, "resolve_handle_hosts", registry)
   deliveries = []
-  class Client:
-    async def __aenter__(self): return self
-    async def __aexit__(self, *_args): pass
-    async def post(self, url, *, json):
-      deliveries.append(json)
-      request = httpx.Request("POST", url)
-      if json["to"] == second:
-        raise httpx.ConnectError("offline", request=request)
-      return httpx.Response(200, json={"status": "delivered"}, request=request)
-  monkeypatch.setattr(objects_routes.httpx, "AsyncClient", lambda **_kwargs: Client())
+  async def request(_method, url, *, json, **_kwargs):
+    deliveries.append(json)
+    outbound = httpx.Request("POST", url)
+    if json["to"] == second:
+      raise httpx.ConnectError("offline", request=outbound)
+    return httpx.Response(
+      200, json={"status": "delivered"}, request=outbound
+    )
+  monkeypatch.setattr(objects_routes, "federation_request", request)
 
   invited = client.post(f"/api/common/objects/{oid}/invites", json={"address": "ana", "role": "viewer"}, headers=auth)
   assert invited.status_code == 200, invited.text
@@ -583,13 +582,10 @@ def test_reinvite_adds_current_deployment_without_changing_active_role(client, a
   async def registry(*_args): return hosts
   monkeypatch.setattr(identity_routes, "resolve_handle_hosts", registry)
   deliveries = []
-  class Client:
-    async def __aenter__(self): return self
-    async def __aexit__(self, *_args): pass
-    async def post(self, url, *, json):
-      deliveries.append(json["to"])
-      return httpx.Response(200, json={}, request=httpx.Request("POST", url))
-  monkeypatch.setattr(objects_routes.httpx, "AsyncClient", lambda **_kwargs: Client())
+  async def request(_method, url, *, json, **_kwargs):
+    deliveries.append(json["to"])
+    return httpx.Response(200, json={}, request=httpx.Request("POST", url))
+  monkeypatch.setattr(objects_routes, "federation_request", request)
   def invite(role="editor"):
     return client.post(f"/api/common/objects/{oid}/invites", json={"address": "ana", "role": role}, headers=auth)
   first = invite().json()

@@ -37,15 +37,16 @@ from pathlib import Path
 from typing import Any
 from weakref import WeakValueDictionary
 
-import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app import fs_locks, models, push
+from app.common_transport import federation_request
 from app.database import get_db
 from app.deps import Principal, get_principal, require_nondelegated_owner_control
 from app.routes.common import (
+  MAX_ENVELOPE_BYTES,
   MAX_NAME_CHARS,
   OUTBOUND_TIMEOUT_S,
   _app_data_dir,
@@ -174,11 +175,12 @@ def _members_snapshot(group: dict) -> list[dict]:
 
 async def _deliver(host: str, envelope: dict) -> bool:
   try:
-    async with httpx.AsyncClient(timeout=OUTBOUND_TIMEOUT_S) as client:
-      response = await client.post(
-        f"{_peer_base_url(host)}/api/common/groups/inbox", json=envelope
-      )
-      response.raise_for_status()
+    response = await federation_request(
+      "POST", f"{_peer_base_url(host)}/api/common/groups/inbox",
+      json=envelope, max_response_bytes=MAX_ENVELOPE_BYTES,
+      timeout_seconds=OUTBOUND_TIMEOUT_S,
+    )
+    response.raise_for_status()
     return True
   except Exception:
     return False

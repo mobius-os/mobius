@@ -430,16 +430,14 @@ def test_owner_send_inlines_and_stores_attachment_and_reply(
   _, signing_public = _make_peer_keypair()
   _seed_peer_actor_cache(signing_public)
   captured = {}
-  real_async_client = httpx.AsyncClient
 
-  def handler(request):
-    captured.update(json.loads(request.content))
-    return httpx.Response(200, json={"status": "delivered"})
+  async def request(_method, url, *, json, **_kwargs):
+    captured.update(json)
+    return httpx.Response(
+      200, json={"status": "delivered"}, request=httpx.Request("POST", url)
+    )
 
-  def client_factory(**kwargs):
-    return real_async_client(transport=httpx.MockTransport(handler), **kwargs)
-
-  monkeypatch.setattr(common_routes.httpx, "AsyncClient", client_factory)
+  monkeypatch.setattr(common_routes, "federation_request", request)
   image = b"\x89PNG\r\n\x1a\noutgoing"
   reply_to = {
     "id": str(uuid.uuid4()),
@@ -480,16 +478,14 @@ def test_owner_send_seals_for_peer_with_encryption_key(
     signing_public, encryption_public_b64=encryption_public
   )
   captured = {}
-  real_async_client = httpx.AsyncClient
 
-  def handler(request):
-    captured.update(json.loads(request.content))
-    return httpx.Response(200, json={"status": "delivered"})
+  async def request(_method, url, *, json, **_kwargs):
+    captured.update(json)
+    return httpx.Response(
+      200, json={"status": "delivered"}, request=httpx.Request("POST", url)
+    )
 
-  def client_factory(**kwargs):
-    return real_async_client(transport=httpx.MockTransport(handler), **kwargs)
-
-  monkeypatch.setattr(common_routes.httpx, "AsyncClient", client_factory)
+  monkeypatch.setattr(common_routes, "federation_request", request)
   image = b"\x89PNG\r\n\x1a\nencrypted outgoing"
   reply_to = {
     "id": str(uuid.uuid4()),

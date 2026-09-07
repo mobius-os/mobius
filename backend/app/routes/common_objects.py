@@ -60,12 +60,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from weakref import WeakValueDictionary
 
-import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app import models, push
+from app.common_transport import federation_request
 from app.config import get_settings
 from app.database import get_db
 from app.deps import Principal, get_principal, require_nondelegated_owner_control
@@ -438,17 +438,17 @@ async def _resolve_invitees(address: str, db: Session, owner_id: int) -> InviteR
       entries = json.loads(path.read_text())
   else:
     try:
-      async with httpx.AsyncClient(timeout=OUTBOUND_TIMEOUT_S) as client:
-        response = await client.get(
-          f"{_peer_base_url(community)}/api/common/directory", params={"q": raw}
-        )
-        response.raise_for_status()
-        entries = {
-          u["host"]: u for u in response.json().get("users", []) if u.get("host")
-        }
+      response = await federation_request(
+        "GET", f"{_peer_base_url(community)}/api/common/directory",
+        params={"q": raw}, timeout_seconds=OUTBOUND_TIMEOUT_S,
+      )
+      response.raise_for_status()
+      entries = {
+        u["host"]: u for u in response.json().get("users", []) if u.get("host")
+      }
     except Exception as exc:
       raise HTTPException(
-        status_code=502, detail=f"The directory at {community} could not be reached."
+        status_code=502, detail="The directory could not be reached."
       ) from exc
   matches = [
     host for host, entry in entries.items()
@@ -554,10 +554,11 @@ async def decline_invitation(
   }
   envelope["sig"] = _sign(envelope, identity["private_key_b64"])
   try:
-    async with httpx.AsyncClient(timeout=OUTBOUND_TIMEOUT_S) as client:
-      await client.post(
-        f"{_peer_base_url(host)}/api/common/objects/{oid}/peer", json=envelope
-      )
+    await federation_request(
+      "POST", f"{_peer_base_url(host)}/api/common/objects/{oid}/peer",
+      json=envelope, max_response_bytes=MAX_ENVELOPE_BYTES,
+      timeout_seconds=OUTBOUND_TIMEOUT_S,
+    )
   except Exception:
     pass  # the host prunes the pending member on next contact
   path.unlink(missing_ok=True)
@@ -699,21 +700,16 @@ async def join_object(
   }
   envelope["sig"] = _sign(envelope, identity["private_key_b64"])
   try:
-    async with httpx.AsyncClient(timeout=OUTBOUND_TIMEOUT_S) as client:
-      response = await client.post(
-        f"{_peer_base_url(host)}/api/common/objects/{oid}/peer", json=envelope
-      )
+    response = await federation_request(
+      "POST", f"{_peer_base_url(host)}/api/common/objects/{oid}/peer",
+      json=envelope, timeout_seconds=OUTBOUND_TIMEOUT_S,
+    )
   except Exception as exc:
     raise HTTPException(
-      status_code=502, detail=f"{host} could not be reached."
+      status_code=502, detail="The object host could not be reached."
     ) from exc
   if response.status_code != 200:
-    detail = "Join was refused."
-    try:
-      detail = response.json().get("detail") or detail
-    except Exception:
-      pass
-    raise HTTPException(status_code=response.status_code, detail=detail)
+    raise HTTPException(status_code=response.status_code, detail="Join was refused.")
   joined = response.json()
   remote_object = joined.get("object") or {}
   if remote_object.get("app") != body.app:
@@ -800,24 +796,25 @@ async def create_invite(
       public_members = _public_object(obj)["members"]
     identity = _load_identity()
     limit = asyncio.Semaphore(4)
-    async with httpx.AsyncClient(timeout=OUTBOUND_TIMEOUT_S) as client:
-      async def deliver(peer):
-        async with limit:
-          envelope = {
-            "v": 0, "type": "object_invitation", "from": _own_host(),
-            "to": peer, "object": meta, "sent_at": time.time(),
-          }
-          envelope["sig"] = _sign(envelope, identity["private_key_b64"])
-          try:
-            response = await client.post(
-              f"{_peer_base_url(peer)}/api/common/objects/invitations/deliver",
-              json=envelope,
-            )
-            response.raise_for_status()
-          except httpx.HTTPError:
-            return {"host": peer, "delivery": "unreachable"}
-          return {"host": peer, "delivery": "delivered"}
-      deliveries = await asyncio.gather(*(deliver(peer) for peer in pending_hosts))
+    async def deliver(peer):
+      async with limit:
+        envelope = {
+          "v": 0, "type": "object_invitation", "from": _own_host(),
+          "to": peer, "object": meta, "sent_at": time.time(),
+        }
+        envelope["sig"] = _sign(envelope, identity["private_key_b64"])
+        try:
+          response = await federation_request(
+            "POST",
+            f"{_peer_base_url(peer)}/api/common/objects/invitations/deliver",
+            json=envelope, max_response_bytes=MAX_ENVELOPE_BYTES,
+            timeout_seconds=OUTBOUND_TIMEOUT_S,
+          )
+          response.raise_for_status()
+        except Exception:
+          return {"host": peer, "delivery": "unreachable"}
+        return {"host": peer, "delivery": "delivered"}
+    deliveries = await asyncio.gather(*(deliver(peer) for peer in pending_hosts))
     delivered = sum(d["delivery"] == "delivered" for d in deliveries)
     delivery = "delivered" if delivered == len(deliveries) else "partial" if delivered else "unreachable"
     return {
@@ -948,10 +945,11 @@ async def leave_object(
   }
   envelope["sig"] = _sign(envelope, identity["private_key_b64"])
   try:
-    async with httpx.AsyncClient(timeout=OUTBOUND_TIMEOUT_S) as client:
-      await client.post(
-        f"{_peer_base_url(host)}/api/common/objects/{oid}/peer", json=envelope
-      )
+    await federation_request(
+      "POST", f"{_peer_base_url(host)}/api/common/objects/{oid}/peer",
+      json=envelope, max_response_bytes=MAX_ENVELOPE_BYTES,
+      timeout_seconds=OUTBOUND_TIMEOUT_S,
+    )
   except Exception:
     pass  # local leave still succeeds; the host prunes on next contact
   _remote_path(host, oid).unlink(missing_ok=True)
@@ -970,21 +968,18 @@ async def _proxied_state(host: str, oid: str, since_version: int) -> dict:
   }
   envelope["sig"] = _sign(envelope, identity["private_key_b64"])
   try:
-    async with httpx.AsyncClient(timeout=OUTBOUND_TIMEOUT_S) as client:
-      response = await client.post(
-        f"{_peer_base_url(host)}/api/common/objects/{oid}/peer", json=envelope
-      )
+    response = await federation_request(
+      "POST", f"{_peer_base_url(host)}/api/common/objects/{oid}/peer",
+      json=envelope, timeout_seconds=OUTBOUND_TIMEOUT_S,
+    )
   except Exception as exc:
     raise HTTPException(
-      status_code=502, detail=f"{host} could not be reached."
+      status_code=502, detail="The object host could not be reached."
     ) from exc
   if response.status_code != 200:
-    detail = "The host refused the request."
-    try:
-      detail = response.json().get("detail") or detail
-    except Exception:
-      pass
-    raise HTTPException(status_code=response.status_code, detail=detail)
+    raise HTTPException(
+      status_code=response.status_code, detail="The host refused the request."
+    )
   return response.json()
 
 
@@ -1065,19 +1060,16 @@ async def write_state(
   }
   envelope["sig"] = _sign(envelope, identity["private_key_b64"])
   try:
-    async with httpx.AsyncClient(timeout=OUTBOUND_TIMEOUT_S) as client:
-      response = await client.post(
-        f"{_peer_base_url(host)}/api/common/objects/{oid}/peer", json=envelope
-      )
+    response = await federation_request(
+      "POST", f"{_peer_base_url(host)}/api/common/objects/{oid}/peer",
+      json=envelope, timeout_seconds=OUTBOUND_TIMEOUT_S,
+    )
   except Exception as exc:
     raise HTTPException(
-      status_code=502, detail=f"{host} could not be reached."
+      status_code=502, detail="The object host could not be reached."
     ) from exc
   if response.status_code != 200:
-    detail = "The host refused the write."
-    try:
-      detail = response.json().get("detail") or detail
-    except Exception:
-      pass
-    raise HTTPException(status_code=response.status_code, detail=detail)
+    raise HTTPException(
+      status_code=response.status_code, detail="The host refused the write."
+    )
   return response.json()

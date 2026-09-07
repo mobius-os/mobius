@@ -63,6 +63,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app import fs_locks, models, push
+from app.common_transport import federation_request
 from app.config import get_settings
 from app.database import get_db
 from app.deps import (
@@ -168,60 +169,42 @@ def _valid_host(host: str) -> bool:
   return isinstance(host, str) and bool(_HOST_RE.match(host))
 
 
-def _is_local_host(host: str) -> bool:
-  bare = host.split(":", 1)[0]
-  return bare in ("localhost", "127.0.0.1")
-
-
 def _peer_base_url(host: str) -> str:
-  """HTTPS for real peers; plain HTTP only for loopback development hosts."""
-  scheme = "http" if _is_local_host(host) else "https"
-  return f"{scheme}://{host}"
+  """Return the public HTTPS origin for a peer host."""
+  return f"https://{host}"
 
 
 async def _download_avatar(url: str) -> bytes:
   """Fetch one image while bounding the response body before buffering it."""
-  async with httpx.AsyncClient(timeout=OUTBOUND_TIMEOUT_S) as client:
-    async with client.stream("GET", url) as response:
-      response.raise_for_status()
-      content_type = response.headers.get("content-type", "").split(";", 1)[0]
-      if not content_type.strip().lower().startswith("image/"):
-        raise ValueError("Avatar response is not an image.")
-      body = bytearray()
-      async for chunk in response.aiter_bytes():
-        room = MAX_AVATAR_BYTES + 1 - len(body)
-        if room <= 0:
-          break
-        body.extend(chunk[:room])
-        if len(body) > MAX_AVATAR_BYTES:
-          raise ValueError("Avatar response is too large.")
-  if not body:
+  response = await federation_request(
+    "GET", url, max_response_bytes=MAX_AVATAR_BYTES,
+    response_format="binary", timeout_seconds=OUTBOUND_TIMEOUT_S,
+  )
+  response.raise_for_status()
+  content_type = response.headers.get("content-type", "").split(";", 1)[0]
+  if not content_type.strip().lower().startswith("image/"):
+    raise ValueError("Avatar response is not an image.")
+  if not response.content:
     raise ValueError("Avatar response is empty.")
-  return bytes(body)
+  return response.content
 
 
 async def _download_board_media(url: str) -> tuple[str, bytes]:
   """Fetch one hosted board image without buffering more than the wire cap."""
-  async with httpx.AsyncClient(timeout=OUTBOUND_TIMEOUT_S) as client:
-    async with client.stream("GET", url) as response:
-      response.raise_for_status()
-      mime = (
-        response.headers.get("content-type", "")
-        .split(";", 1)[0].strip().lower()
-      )
-      if mime not in _ATTACHMENT_MIME_EXT:
-        raise ValueError("Board media response is not a supported image.")
-      body = bytearray()
-      async for chunk in response.aiter_bytes():
-        room = MAX_ATTACHMENT_BYTES + 1 - len(body)
-        if room <= 0:
-          break
-        body.extend(chunk[:room])
-        if len(body) > MAX_ATTACHMENT_BYTES:
-          raise ValueError("Board media response is too large.")
-  if not body:
+  response = await federation_request(
+    "GET", url, max_response_bytes=MAX_ATTACHMENT_BYTES,
+    response_format="binary", timeout_seconds=OUTBOUND_TIMEOUT_S,
+  )
+  response.raise_for_status()
+  mime = (
+    response.headers.get("content-type", "")
+    .split(";", 1)[0].strip().lower()
+  )
+  if mime not in _ATTACHMENT_MIME_EXT:
+    raise ValueError("Board media response is not a supported image.")
+  if not response.content:
     raise ValueError("Board media response is empty.")
-  return mime, bytes(body)
+  return mime, response.content
 
 
 def _canonical(payload: dict) -> bytes:
@@ -539,30 +522,47 @@ def _peer_cache_path(host: str) -> Path:
   return _peers_dir() / f"{safe}.json"
 
 
+def _validate_actor_card(actor: Any, host: str) -> dict:
+  if (
+    not isinstance(actor, dict)
+    or actor.get("protocol") != PROTOCOL
+    or actor.get("host") != host
+  ):
+    raise HTTPException(status_code=502, detail="Peer returned an invalid actor card.")
+  public_key = actor.get("public_key")
+  key = public_key.get("key_b64") if isinstance(public_key, dict) else None
+  if not isinstance(key, str) or not key:
+    raise HTTPException(status_code=502, detail="Peer returned an invalid actor card.")
+  return actor
+
+
 async def _fetch_actor(host: str, *, force: bool = False) -> dict:
   """Fetch a peer's actor card, with an on-disk TTL cache."""
   if not _valid_host(host):
     raise HTTPException(status_code=400, detail="Invalid peer host.")
   cache = _peer_cache_path(host)
   if not force and cache.is_file():
-    cached = json.loads(cache.read_text())
-    if time.time() - cached.get("fetched_at", 0) < ACTOR_CACHE_TTL_S:
-      return cached["actor"]
+    try:
+      cached = json.loads(cache.read_text())
+      if time.time() - cached.get("fetched_at", 0) < ACTOR_CACHE_TTL_S:
+        return _validate_actor_card(cached.get("actor"), host)
+    except Exception:
+      # A truncated or obsolete cache is not peer authority. Fetch it again
+      # through the same validated transport as an ordinary cache miss.
+      pass
   url = f"{_peer_base_url(host)}/api/common/actor"
   try:
-    async with httpx.AsyncClient(timeout=OUTBOUND_TIMEOUT_S) as client:
-      response = await client.get(url)
-      response.raise_for_status()
-      actor = response.json()
+    response = await federation_request(
+      "GET", url, max_response_bytes=MAX_ENVELOPE_BYTES,
+      timeout_seconds=OUTBOUND_TIMEOUT_S,
+    )
+    response.raise_for_status()
+    actor = response.json()
   except Exception as exc:
     raise HTTPException(
-      status_code=502, detail=f"Could not reach {host}: {exc}"
+      status_code=502, detail="Peer could not be reached."
     ) from exc
-  if actor.get("protocol") != PROTOCOL or actor.get("host") != host:
-    raise HTTPException(status_code=502, detail=f"{host} is not a valid Common peer.")
-  key = (actor.get("public_key") or {}).get("key_b64")
-  if not isinstance(key, str) or not key:
-    raise HTTPException(status_code=502, detail=f"{host} published no valid key.")
+  actor = _validate_actor_card(actor, host)
   atomic_write(cache, json.dumps({"fetched_at": time.time(), "actor": actor}))
   return actor
 
@@ -577,7 +577,10 @@ async def _verify_peer_envelope(envelope: dict) -> dict:
   if not isinstance(sent_at, (int, float)) or abs(time.time() - sent_at) > CLOCK_SKEW_S:
     raise HTTPException(status_code=400, detail="Envelope timestamp out of range.")
   payload = {k: v for k, v in envelope.items() if k != "sig"}
-  actor = await _fetch_actor(sender)
+  try:
+    actor = await _fetch_actor(sender)
+  except HTTPException as exc:
+    raise HTTPException(status_code=403, detail="Envelope signature is invalid.") from exc
   if not _verify(payload, sig, actor["public_key"]["key_b64"]):
     # The peer may have rotated keys; refetch once before rejecting. An
     # unreachable peer during the refetch still means the envelope could not
@@ -1146,11 +1149,12 @@ async def _register_with_community_host(identity: dict) -> str:
     atomic_write(path, json.dumps(entries, indent=2))
     return "registered"
   try:
-    async with httpx.AsyncClient(timeout=OUTBOUND_TIMEOUT_S) as client:
-      response = await client.post(
-        f"{_peer_base_url(host)}/api/common/directory", json=envelope
-      )
-      response.raise_for_status()
+    response = await federation_request(
+      "POST", f"{_peer_base_url(host)}/api/common/directory", json=envelope,
+      max_response_bytes=MAX_ENVELOPE_BYTES,
+      timeout_seconds=OUTBOUND_TIMEOUT_S,
+    )
+    response.raise_for_status()
     return "registered"
   except Exception:
     return "unreachable"
@@ -1239,20 +1243,18 @@ async def send_message(
   status = "delivered"
   detail = None
   try:
-    async with httpx.AsyncClient(timeout=OUTBOUND_TIMEOUT_S) as client:
-      response = await client.post(
-        f"{_peer_base_url(to_host)}/api/common/inbox", json=envelope
-      )
-      response.raise_for_status()
+    response = await federation_request(
+      "POST", f"{_peer_base_url(to_host)}/api/common/inbox", json=envelope,
+      max_response_bytes=MAX_ENVELOPE_BYTES,
+      timeout_seconds=OUTBOUND_TIMEOUT_S,
+    )
+    response.raise_for_status()
   except httpx.HTTPStatusError as exc:
     status = "failed"
-    try:
-      detail = exc.response.json().get("detail")
-    except Exception:
-      detail = f"{to_host} rejected the message ({exc.response.status_code})."
+    detail = f"The peer rejected the message ({exc.response.status_code})."
   except Exception:
     status = "failed"
-    detail = f"{to_host} could not be reached."
+    detail = "The peer could not be reached."
   record = {
     "id": envelope["id"],
     "dir": "out",
@@ -1308,15 +1310,16 @@ async def publish_post(
     _store_board_post(board_post, attachment)
     return {"status": "posted", "id": envelope["id"]}
   try:
-    async with httpx.AsyncClient(timeout=OUTBOUND_TIMEOUT_S) as client:
-      response = await client.post(
-        f"{_peer_base_url(host)}/api/common/board", json=envelope
-      )
-      response.raise_for_status()
+    response = await federation_request(
+      "POST", f"{_peer_base_url(host)}/api/common/board", json=envelope,
+      max_response_bytes=MAX_ENVELOPE_BYTES,
+      timeout_seconds=OUTBOUND_TIMEOUT_S,
+    )
+    response.raise_for_status()
     return {"status": "posted", "id": envelope["id"]}
   except Exception as exc:
     raise HTTPException(
-      status_code=502, detail=f"Community host {host} could not be reached."
+      status_code=502, detail="Community host could not be reached."
     ) from exc
 
 
@@ -1375,21 +1378,21 @@ async def get_feed(
     posts = _read_board(min(max(limit, 1), BOARD_PAGE_LIMIT), before, _own_host())
     return {"host": host, "posts": posts}
   try:
-    async with httpx.AsyncClient(timeout=OUTBOUND_TIMEOUT_S) as client:
-      response = await client.get(
-        f"{_peer_base_url(host)}/api/common/board",
-        params={
-          "limit": limit, "viewer": _own_host(),
-          **({"before": before} if before else {}),
-        },
-      )
-      response.raise_for_status()
-      return {"host": host, **response.json()}
+    response = await federation_request(
+      "GET", f"{_peer_base_url(host)}/api/common/board",
+      params={
+        "limit": limit, "viewer": _own_host(),
+        **({"before": before} if before else {}),
+      },
+      timeout_seconds=OUTBOUND_TIMEOUT_S,
+    )
+    response.raise_for_status()
+    return {"host": host, **response.json()}
   except HTTPException:
     raise
   except Exception as exc:
     raise HTTPException(
-      status_code=502, detail=f"Community host {host} could not be reached."
+      status_code=502, detail="Community host could not be reached."
     ) from exc
 
 
@@ -1427,15 +1430,16 @@ async def like_post(
   }
   envelope["sig"] = _sign(envelope, identity["private_key_b64"])
   try:
-    async with httpx.AsyncClient(timeout=OUTBOUND_TIMEOUT_S) as client:
-      response = await client.post(
-        f"{_peer_base_url(host)}/api/common/board/react", json=envelope
-      )
-      response.raise_for_status()
-      return response.json()
+    response = await federation_request(
+      "POST", f"{_peer_base_url(host)}/api/common/board/react", json=envelope,
+      max_response_bytes=MAX_ENVELOPE_BYTES,
+      timeout_seconds=OUTBOUND_TIMEOUT_S,
+    )
+    response.raise_for_status()
+    return response.json()
   except Exception as exc:
     raise HTTPException(
-      status_code=502, detail=f"Community host {host} could not be reached."
+      status_code=502, detail="Community host could not be reached."
     ) from exc
 
 
@@ -1474,15 +1478,16 @@ async def reply_to_post(
   }
   envelope["sig"] = _sign(envelope, identity["private_key_b64"])
   try:
-    async with httpx.AsyncClient(timeout=OUTBOUND_TIMEOUT_S) as client:
-      response = await client.post(
-        f"{_peer_base_url(host)}/api/common/board/reply", json=envelope
-      )
-      response.raise_for_status()
-      return response.json()
+    response = await federation_request(
+      "POST", f"{_peer_base_url(host)}/api/common/board/reply", json=envelope,
+      max_response_bytes=MAX_ENVELOPE_BYTES,
+      timeout_seconds=OUTBOUND_TIMEOUT_S,
+    )
+    response.raise_for_status()
+    return response.json()
   except Exception as exc:
     raise HTTPException(
-      status_code=502, detail=f"Community host {host} could not be reached."
+      status_code=502, detail="Community host could not be reached."
     ) from exc
 
 
@@ -1499,15 +1504,15 @@ async def search_people(
   if host == _own_host():
     return {"host": host, **search_directory(q)}
   try:
-    async with httpx.AsyncClient(timeout=OUTBOUND_TIMEOUT_S) as client:
-      response = await client.get(
-        f"{_peer_base_url(host)}/api/common/directory", params={"q": q}
-      )
-      response.raise_for_status()
-      return {"host": host, **response.json()}
+    response = await federation_request(
+      "GET", f"{_peer_base_url(host)}/api/common/directory", params={"q": q},
+      timeout_seconds=OUTBOUND_TIMEOUT_S,
+    )
+    response.raise_for_status()
+    return {"host": host, **response.json()}
   except Exception as exc:
     raise HTTPException(
-      status_code=502, detail=f"Community host {host} could not be reached."
+      status_code=502, detail="Community host could not be reached."
     ) from exc
 
 
