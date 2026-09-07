@@ -8,9 +8,9 @@ import json
 from pathlib import Path
 
 from fastapi import HTTPException
-from sqlalchemy import update
+from sqlalchemy import or_, update
 
-from app import models
+from app import agent_work_claims, models
 
 
 def key(item: dict) -> str:
@@ -118,6 +118,57 @@ def perform_merge(gh, cwd, target, repo):
   ).stdout)
 
 
+def merge_work_key(target):
+  return f"github:{target['repo'].lower()}:pr:{target['number']}:{target['head_sha']}:merge"
+
+
+def arm_merge(db, row, target, outcome, principal):
+  """Reserve one exact public attempt across grants as well as within a grant.
+
+  Work ownership never grants consent. Its existing unique row supplies the
+  cross-process write fence; the review outcome is the actual attempt receipt.
+  That receipt also prevents replay after a claim was released or transferred.
+  """
+  work_key = merge_work_key(target)
+  claim = agent_work_claims.claim_work(db, owner_id=row.owner_id,
+    chat_id=row.chat_id, run_id=principal.run_id, work_key=work_key,
+    summary=f"Review and merge {key(target)} at {target['head_sha'][:12]}.")
+  if claim["state"] in {"held_by_peer", "completed"}:
+    return {**outcome, "state": "needs_you", "review_chat_id": claim["owner_chat_id"],
+            "summary": "This exact merge already has an owning conversation. Open that conversation to follow its result."}
+  # Keep this write and save_outcome in one transaction. A second worker must
+  # wait for the first receipt before checking other overlapping batches.
+  fenced = db.execute(update(models.AgentWorkClaim).where(
+    models.AgentWorkClaim.id == claim["id"],
+    models.AgentWorkClaim.revision == claim["revision"],
+    models.AgentWorkClaim.owner_chat_id == row.chat_id,
+    models.AgentWorkClaim.completed_at.is_(None),
+    models.AgentWorkClaim.released_at.is_(None),
+  ).values(owner_run_id=principal.run_id))
+  if fenced.rowcount != 1:
+    db.rollback()
+    raise HTTPException(409, "Merge ownership changed. No new attempt was started.")
+  item_key = key(target)
+  previous = db.query(models.ContributionReviewRun).filter(
+    models.ContributionReviewRun.owner_id == row.owner_id,
+    models.ContributionReviewRun.outcomes_json[item_key]["head_sha"].as_string() == target["head_sha"],
+    or_(models.ContributionReviewRun.outcomes_json[item_key]["merge_attempted"].as_boolean().is_(True),
+        models.ContributionReviewRun.outcomes_json[item_key]["state"].as_string().in_(
+          ("merging", "merge_unknown", "queued", "merged"))),
+  ).populate_existing().first()
+  if previous is not None:
+    # Claim acquisition commits and refreshes ORM state. Recheck this row too:
+    # another worker may have armed it while this one awaited GitHub preflight.
+    result = {**previous.outcomes_json[item_key], "review_selection_id": previous.id} if previous.id == row.id else {
+              **outcome, "state": "needs_you", "review_chat_id": previous.chat_id,
+              "review_selection_id": previous.id,
+              "summary": "An earlier review already attempted this exact merge. Follow its saved result; no request was repeated."}
+    db.rollback()
+    return result
+  save_outcome(db, row, item_key, {**outcome, "state": "merging", "merge_attempted": True})
+  return None
+
+
 def save_outcome(db, row, item_key, outcome):
   revision = row.revision
   outcomes = {**row.outcomes_json, item_key: outcome}
@@ -142,7 +193,7 @@ def view(row):
   return {"id": row.id, "request_id": row.request_id, "mode": row.mode,
           "chat_id": row.chat_id, "state": state,
           "created_at": row.created_at.isoformat() + "Z",
-          "items": [{**t, **outcomes.get(key(t), {"state": "reviewing"})}
+          "items": [{**t, "work_key": merge_work_key(t), **outcomes.get(key(t), {"state": "reviewing"})}
                     for t in row.targets_json]}
 
 
@@ -172,4 +223,11 @@ For a queued result, you MUST use the installed waiting capability to own the
 GitHub merge/queue condition before ending, then re-call the same outcome endpoint
 read-only to reconcile queued/merged/blocked status when resumed. Do not call the
 cycle complete while queued. For pending checks use the same waiting capability; do not leave an in-memory poll running. Report every item.
+When your exact merge is confirmed merged, finish its existing work claim using
+finish_agent_work, or POST /api/agent-coordination/work-claims/finish with your
+run bearer and {{"work_key":"github:<repo-lowercase>:pr:<number>:<head_sha>:merge",
+"outcome":"Merged at <confirmed merge SHA>","release":false}}. This owning
+operation notifies followers; do not leave a completed merge claim unfinished.
+If the item points to another review_chat_id, follow that owner instead: never
+finish their claim or create another approval request for the same action.
 '''

@@ -124,6 +124,35 @@ def test_lost_merge_receipt_reconciles_exact_merged_head(setup, monkeypatch):
   assert report(setup)["run"]["items"][0]["merge_sha"] == "landed"
 
 
+def test_temporarily_changed_head_cannot_erase_an_ambiguous_attempt(setup, monkeypatch):
+  db, row, principal = setup
+  calls = []
+  def lose(*args):
+    calls.append(1)
+    raise TimeoutError()
+  monkeypatch.setattr(domain, "perform_merge", lose)
+  assert report(setup)["run"]["items"][0]["state"] == "merge_unknown"
+  def unavailable(*args):
+    raise HTTPException(409, "This head changed")
+  monkeypatch.setattr(domain, "current_pull", unavailable)
+  item = report(setup)["run"]["items"][0]
+  assert item["state"] == "needs_you"
+  assert item["merge_attempted"] is True
+  monkeypatch.setattr(domain, "current_pull", lambda *args: (REPO, PULL))
+  assert report(setup)["run"]["items"][0]["state"] == "merge_unknown"
+  # A second grant cannot resurrect the same attempt either, even if the
+  # visible first-row state was changed by temporary remote unavailability.
+  domain.save_outcome(db, row, domain.key(TARGET), {**item, "state": "needs_you"})
+  second = models.ContributionReviewRun(id="retry-grant", app_id=1, owner_id=principal.owner.id,
+    request_id="retry-request", mode="review_merge", targets_json=[TARGET],
+    outcomes_json={}, chat_id=row.chat_id, github_actor_id="42", app_nonce="nonce")
+  db.add(second)
+  db.commit()
+  result = report((db, second, principal))["run"]["items"][0]
+  assert result["review_selection_id"] == row.id
+  assert calls == [1]
+
+
 def test_queue_is_used_instead_of_direct_merge(setup, monkeypatch):
   monkeypatch.setattr(domain, "pull_checks", lambda *args: {**CHECKS, "isMergeQueueEnabled": True})
   monkeypatch.setattr(domain, "enqueue", lambda *args: {"id": "queue-1"})
@@ -233,12 +262,221 @@ def test_concurrent_outcome_cas_cannot_claim_second_public_action(setup):
   other.close()
 
 
-def test_agent_cannot_mint_its_own_merge_grant(setup):
+def test_agent_without_explicit_chat_consent_cannot_mint_merge_grant(setup):
   db, row, principal = setup
   body = routes.StartReviews(request_id="not-approved", mode="review_merge", items=[ITEM])
   with pytest.raises(HTTPException) as error:
     asyncio.run(routes.start_reviews(1, body, db, principal))
   assert error.value.status_code == 403
+
+
+def approved_body(request_id="chat-approved"):
+  return routes.StartReviews(request_id=request_id, mode="review_merge", items=[ITEM],
+    chat_approval={"context": "The owner said: review this exact PR and merge it if safe."})
+
+
+def test_explicit_chat_consent_stays_in_owning_chat_with_durable_provenance(setup, monkeypatch):
+  db, _, principal = setup
+  monkeypatch.setattr(domain, "inspect_target", lambda *args: TARGET)
+  async def forbidden(**kwargs):
+    pytest.fail("Approval must not create a second review conversation")
+  monkeypatch.setattr(routes, "start_programmatic_chat_turn", forbidden)
+  body = approved_body()
+  result = asyncio.run(routes.start_reviews(1, body, db, principal))
+  row = db.get(models.ContributionReviewRun, result["run"]["id"])
+  assert row.chat_id == principal.chat_id
+  assert row.targets_json[0]["approval"] == {
+    "source": "chat", "chat_id": principal.chat_id, "run_id": principal.run_id,
+    "context": body.chat_approval.context,
+  }
+  assert row.outcomes_json == {}
+  assert f"/{row.id}/outcomes" in result["brief"]
+  again = asyncio.run(routes.start_reviews(1, body, db, principal))
+  assert again["run"]["id"] == row.id
+  # An app confirmation of the very same request observes the existing owner;
+  # it neither requires chat provenance nor launches another review.
+  owner = Principal(owner=principal.owner, app_id=None)
+  app_body = body.model_copy(update={"chat_approval": None})
+  assert asyncio.run(routes.start_reviews(1, app_body, db, owner))["run"]["id"] == row.id
+
+
+@pytest.mark.parametrize("change", ["child", "wrong_app", "missing_chat", "missing_run", "stopped"])
+def test_chat_consent_requires_live_top_level_owner_run(setup, change):
+  db, _, principal = setup
+  if change == "child":
+    principal.delegation_id = "delegated-child"
+  elif change == "wrong_app":
+    principal.app_id = 2
+    principal.scope = "app"
+  elif change == "missing_chat":
+    principal.chat_id = None
+  elif change == "missing_run":
+    principal.run_id = None
+  else:
+    db.get(models.ChatRun, principal.run_id).status = "stopped"
+    db.commit()
+  with pytest.raises(HTTPException) as error:
+    asyncio.run(routes.start_reviews(1, approved_body(), db, principal))
+  assert error.value.status_code in {403, 409}
+  assert db.query(models.ContributionReviewRun).count() == 1
+
+
+@pytest.mark.parametrize("app_id", [None, 1])
+def test_owner_and_app_controls_cannot_forge_chat_provenance(setup, app_id):
+  db, _, principal = setup
+  principal = Principal(owner=principal.owner, app_id=app_id)
+  with pytest.raises(HTTPException) as error:
+    asyncio.run(routes.start_reviews(1, approved_body(), db, principal))
+  assert error.value.status_code == 403
+
+
+def test_blank_consent_attestation_is_not_approval():
+  from pydantic import ValidationError
+  with pytest.raises(ValidationError):
+    routes.ChatApproval(context="  ")
+
+
+def test_real_app_scope_guard_still_rejects_other_apps(setup, monkeypatch):
+  from app.github_contributions import _validate_submit_app
+  db, _, principal = setup
+  db.add(models.App(id=2, name="Other", slug="other", source_dir="test-other",
+                    github_access=True, token_nonce="other-nonce"))
+  db.commit()
+  monkeypatch.setattr(routes, "_validate_submit_app", _validate_submit_app)
+  principal = Principal(owner=principal.owner, app_id=2, scope="app", app_instance_id="other-nonce")
+  body = approved_body().model_copy(update={"chat_approval": None})
+  with pytest.raises(HTTPException) as error:
+    asyncio.run(routes.start_reviews(1, body, db, principal))
+  assert error.value.status_code == 403
+
+
+def test_http_admission_accepts_explicit_chat_consent_but_not_an_unapproved_agent(setup, monkeypatch):
+  from fastapi import FastAPI
+  from fastapi.testclient import TestClient
+  db, _, principal = setup
+  application = FastAPI()
+  application.include_router(routes.router)
+  application.dependency_overrides[routes.get_db] = lambda: db
+  application.dependency_overrides[routes.get_principal] = lambda: principal
+  monkeypatch.setattr(domain, "inspect_target", lambda *args: TARGET)
+  with TestClient(application) as client:
+    body = approved_body().model_dump()
+    response = client.post("/api/github/contributions/1/review-runs", json={**body, "chat_approval": None})
+    assert response.status_code == 403
+    response = client.post("/api/github/contributions/1/review-runs", json=body)
+    assert response.status_code == 200
+    assert response.json()["run"]["chat_id"] == principal.chat_id
+    principal.delegation_id = "child"
+    response = client.post("/api/github/contributions/1/review-runs", json=body)
+    assert response.status_code == 403
+
+
+def test_chat_cannot_rebind_an_existing_other_conversations_selection(setup):
+  db, row, principal = setup
+  db.add(models.Chat(id="other-chat", title="Other"))
+  db.add(models.ChatRun(id="other-run", chat_id="other-chat", status="running"))
+  db.commit()
+  principal.chat_id, principal.run_id = "other-chat", "other-run"
+  with pytest.raises(HTTPException) as error:
+    asyncio.run(routes.start_reviews(1, approved_body(row.request_id), db, principal))
+  assert error.value.status_code == 409
+  assert error.value.detail["chat_id"] == row.chat_id
+
+
+@pytest.mark.parametrize("revoke", ["stop", "capability", "nonce", "uninstall"])
+def test_chat_admission_rechecks_revocation_after_remote_inspection(setup, monkeypatch, revoke):
+  db, _, principal = setup
+  def inspect(*args):
+    if revoke == "stop":
+      db.get(models.ChatRun, principal.run_id).status = "stopped"
+    else:
+      app = db.get(models.App, 1)
+      if revoke == "capability":
+        app.github_access = False
+      elif revoke == "nonce":
+        app.token_nonce = "changed"
+      else:
+        from app.timeutil import now_naive_utc
+        app.deleted_at = now_naive_utc()
+    db.commit()
+    return TARGET
+  monkeypatch.setattr(domain, "inspect_target", inspect)
+  with pytest.raises(HTTPException) as error:
+    asyncio.run(routes.start_reviews(1, approved_body(), db, principal))
+  assert error.value.status_code == 409
+  assert db.query(models.ContributionReviewRun).count() == 1
+
+
+def test_peer_owns_exact_merge_so_review_links_to_it_without_public_action(setup, monkeypatch):
+  from app import agent_work_claims
+  db, _, principal = setup
+  db.add(models.Chat(id="peer-chat", title="Existing owner"))
+  db.add(models.ChatRun(id="peer-run", chat_id="peer-chat", status="running"))
+  db.commit()
+  agent_work_claims.claim_work(db, owner_id=principal.owner.id,
+    chat_id="peer-chat", run_id="peer-run", work_key=domain.merge_work_key(TARGET),
+    summary="Own this exact merge")
+  monkeypatch.setattr(domain, "perform_merge", lambda *args: pytest.fail("Another chat owns it"))
+  item = report(setup)["run"]["items"][0]
+  assert item["state"] == "needs_you"
+  assert item["review_chat_id"] == "peer-chat"
+
+
+@pytest.mark.parametrize("state", ["merging", "merge_unknown", "queued", "merged"])
+def test_overlapping_batches_in_same_chat_cannot_repeat_exact_public_attempt(setup, monkeypatch, state):
+  db, row, principal = setup
+  earlier = models.ContributionReviewRun(id="earlier-batch", app_id=1, owner_id=principal.owner.id,
+    request_id="earlier-request", mode="review_merge", targets_json=[TARGET],
+    outcomes_json={domain.key(TARGET): {"state": state, "head_sha": SHA}},
+    chat_id=row.chat_id, github_actor_id="42", app_nonce="nonce")
+  db.add(earlier)
+  db.commit()
+  monkeypatch.setattr(domain, "perform_merge", lambda *args: pytest.fail("Repeated exact public action"))
+  item = report(setup)["run"]["items"][0]
+  assert item["state"] == "needs_you"
+  assert item["review_selection_id"] == earlier.id
+  assert item["review_chat_id"] == earlier.chat_id
+
+
+def test_prior_attempt_of_different_head_does_not_consume_current_approval(setup, monkeypatch):
+  db, row, principal = setup
+  earlier = models.ContributionReviewRun(id="older-head", app_id=1, owner_id=principal.owner.id,
+    request_id="older-request", mode="review_merge", targets_json=[{**TARGET, "head_sha": "c" * 40}],
+    outcomes_json={domain.key(TARGET): {"state": "merged", "head_sha": "c" * 40}},
+    chat_id=row.chat_id, github_actor_id="42", app_nonce="nonce")
+  db.add(earlier)
+  db.commit()
+  monkeypatch.setattr(domain, "perform_merge", lambda *args: {"merged": True, "sha": "landed"})
+  assert report(setup)["run"]["items"][0]["state"] == "merged"
+
+
+@pytest.mark.parametrize("same_grant", [False, True])
+def test_concurrent_overlapping_grants_share_one_database_attempt_fence(setup, monkeypatch, same_grant):
+  from concurrent.futures import ThreadPoolExecutor
+  from threading import Barrier
+  from app import agent_work_claims
+  db, row, principal = setup
+  second = models.ContributionReviewRun(id="concurrent-batch", app_id=1, owner_id=principal.owner.id,
+    request_id="concurrent-request", mode="review_merge", targets_json=[TARGET],
+    outcomes_json={}, chat_id=row.chat_id, github_actor_id="42", app_nonce="nonce")
+  db.add(second)
+  db.commit()
+  real_claim = agent_work_claims.claim_work
+  ready = Barrier(2)
+  def claim(*args, **kwargs):
+    result = real_claim(*args, **kwargs)
+    ready.wait(timeout=10)
+    return result
+  monkeypatch.setattr(agent_work_claims, "claim_work", claim)
+  def arm(row_id):
+    with SessionLocal() as session:
+      current = session.get(models.ContributionReviewRun, row_id)
+      return domain.arm_merge(session, current, TARGET,
+        {"state": "all_clear", "head_sha": SHA}, principal)
+  with ThreadPoolExecutor(max_workers=2) as pool:
+    results = list(pool.map(arm, [row.id, row.id if same_grant else second.id]))
+  assert sum(result is None for result in results) == 1
+  assert sum(result is not None and result["state"] == ("merging" if same_grant else "needs_you") for result in results) == 1
 
 
 def test_reconnected_github_identity_cannot_spend_grant(setup, monkeypatch):
