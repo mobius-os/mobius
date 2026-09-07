@@ -3,6 +3,8 @@
 from datetime import timedelta
 from types import SimpleNamespace
 
+import pytest
+
 from app import auth as auth_mod, models
 from app.agent_coordination import (
   build_coordination_context,
@@ -811,8 +813,10 @@ def _park_goal(db, chat, run):
   db.commit()
 
 
+@pytest.mark.parametrize("quiet_kind", ["note", "finding"])
+@pytest.mark.parametrize("action_kind", ["request", "blocker", "handoff"])
 def test_a_direct_ask_wakes_an_idle_chat_with_unfinished_goal_work(
-  client, auth, db, monkeypatch,
+  client, auth, db, monkeypatch, quiet_kind, action_kind,
 ):
   """Inbox data alone strands a handoff when the recipient is idle and has no
   wait of its own; a request/blocker/handoff reuses the product wake path."""
@@ -836,10 +840,10 @@ def test_a_direct_ask_wakes_an_idle_chat_with_unfinished_goal_work(
   monkeypatch.setattr("app.chat_start.start_programmatic_chat_turn", fake_start)
   scout_auth = _delegated_auth(db, chats["scout"].id, "scout-run")
 
-  # A plain note is context for the next turn, never a turn.
+  # Informational kinds are context for the next turn, never a turn.
   quiet = client.post(
     "/api/agent-coordination/messages", headers=scout_auth,
-    json={"recipients": [builder.id], "kind": "note", "body": "fyi"},
+    json={"recipients": [builder.id], "kind": quiet_kind, "body": "fyi"},
   )
   assert quiet.status_code == 200, quiet.text
   assert quiet.json()["woken"] == []
@@ -847,7 +851,7 @@ def test_a_direct_ask_wakes_an_idle_chat_with_unfinished_goal_work(
 
   asked = client.post(
     "/api/agent-coordination/messages", headers=scout_auth,
-    json={"recipients": [builder.id], "kind": "handoff", "body": "Take over."},
+    json={"recipients": [builder.id], "kind": action_kind, "body": "Take over."},
   )
   assert asked.status_code == 200, asked.text
   assert asked.json()["woken"] == [builder.id]
@@ -858,7 +862,7 @@ def test_a_direct_ask_wakes_an_idle_chat_with_unfinished_goal_work(
   assert wake["message_kind"] == "peer_message"
   # The woken turn resumes under the paused Goal, like an owner's "continue".
   assert wake["source_work_id"] == "builder-goal-run"
-  assert "handoff" in wake["content"] and "Scout" in wake["content"]
+  assert action_kind in wake["content"] and "Scout" in wake["content"]
   assert "<agent_coordination>" in wake["content"]
 
   # A running recipient reads its inbox itself; no second turn is started.

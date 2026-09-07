@@ -161,6 +161,9 @@ def test_control_protocol_advertises_every_run_bound_tool(monkeypatch):
   assert "does not inherit turn-only API credentials" in (
     tools[platform_tools.WAIT_TOOL_NAME]["description"]
   )
+  wait_description = tools[platform_tools.WAIT_TOOL_NAME]["description"]
+  assert "Prefer a command when readiness is observable" in wait_description
+  assert "no safe read-only check is available" in wait_description
   cancel_schema = tools[platform_tools.CANCEL_WAIT_TOOL_NAME]["inputSchema"]
   assert cancel_schema["required"] == ["wait_id"]
   assert set(cancel_schema["properties"]) == {"wait_id"}
@@ -170,6 +173,10 @@ def test_control_protocol_advertises_every_run_bound_tool(monkeypatch):
   assert set(send_schema["properties"]["kind"]["enum"]) == {
     "note", "finding", "request", "blocker", "handoff",
   }
+  send_description = tools[platform_tools.SEND_MESSAGE_TOOL_NAME]["description"]
+  assert "note/finding informs the next turn without waking it" in send_description
+  assert "request/blocker/handoff can wake an eligible idle Goal" in send_description
+  assert "concrete next action now" in send_description
 
 
 def test_delegated_control_server_advertises_only_coordination(monkeypatch):

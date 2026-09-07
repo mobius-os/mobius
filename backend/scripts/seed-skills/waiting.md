@@ -34,6 +34,11 @@ When NOT to use it:
 
 ## Declaring
 
+Prefer a condition check when readiness is observable: it spends no model
+tokens until met, failed, or expired. Repeated timer wakes reload agent context
+just to discover that nothing changed. Use a timer when elapsed time is the
+condition or no safe read-only check is available.
+
 ```bash
 python3 /data/platform/backend/scripts/chat_wait.py declare \
   'the gate PR through the merge queue' \
@@ -67,7 +72,7 @@ Timer form — resume after a fixed delay, no command:
 
 ```bash
 python3 /data/platform/backend/scripts/chat_wait.py declare \
-  'check back on the long build' --in 1800
+  'review the agreed 30-minute observation window' --in 1800
 ```
 
 `list` shows this chat's armed waits; `cancel <id>` disarms one. The partner
