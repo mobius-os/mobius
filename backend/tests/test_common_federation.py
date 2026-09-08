@@ -1279,3 +1279,42 @@ def test_board_likes_toggle_and_feed_counts(client, db, auth):
   assert entry["like_count"] == 1
   assert entry["liked"] is True
   assert "likes" not in entry
+
+@pytest.mark.parametrize('legacy_member', [False, True])
+def test_public_browse_host_does_not_change_membership_and_proxies_replies(
+  client, db, auth, monkeypatch, legacy_member,
+):
+  _install_common_app(db)
+  identity_path = common_routes._identity_path()
+  if legacy_member:
+    identity = common_routes._load_identity()
+    identity.update(community_host='legacy.example.com', joined_at=123)
+    common_routes._save_identity(identity)
+    before = identity_path.read_bytes()
+  else:
+    identity_path.unlink(missing_ok=True)
+    before = None
+  calls = []
+  async def remote(method, url, **kwargs):
+    calls.append((method, url))
+    result = {'replies': [{'id': 'remote-reply', 'text': 'remote'}]}
+    if url.endswith('/board'): result = {'posts': []}
+    if url.endswith('/directory'): result = {'users': []}
+    return httpx.Response(200, json=result, request=httpx.Request(method, url))
+  monkeypatch.setattr(common_routes, 'federation_request', remote)
+  async def media(url):
+    calls.append(('GET', url))
+    return 'image/png', b'fixture'
+  monkeypatch.setattr(common_routes, '_download_board_media', media)
+  post_id = str(uuid.uuid4())
+  for path in ['feed', 'people', f'replies/{post_id}', f'board-media/{post_id}']:
+    response = client.get('/api/common/' + path,
+      params={'community_host': 'global.example.com'}, headers=auth)
+    assert response.status_code == 200, response.text
+  assert all(method == 'GET' and url.startswith('https://global.example.com/')
+    for method, url in calls)
+  assert ('GET', f'https://global.example.com/api/common/board/{post_id}/replies') in calls
+  assert (identity_path.read_bytes() if identity_path.exists() else None) == before
+  assert client.get('/api/common/replies/' + post_id,
+    params={'community_host': 'https://bad.example/path'}, headers=auth).status_code == 400
+  assert client.get('/api/common/replies/' + post_id).status_code in (401, 403)

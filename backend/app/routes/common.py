@@ -1030,9 +1030,54 @@ async def publish_post(
     ) from exc
 
 
+def _browse_community_host(requested: str | None) -> str:
+  """Choose a public read destination without changing membership or identity."""
+  if requested is not None:
+    host = requested.strip().lower()
+    if not _valid_host(host):
+      raise HTTPException(status_code=400, detail="Invalid community host.")
+    return host
+  path = _identity_path()
+  identity = json.loads(path.read_text()) if path.is_file() else {}
+  return identity.get("community_host") or _own_host()
+
+
+@router.get("/replies/{post_id}")
+async def get_replies_for_owner(
+  post_id: str,
+  community_host: str | None = None,
+  db: Session = Depends(get_db),
+  principal: Principal = Depends(get_principal),
+):
+  """Read the selected public board's replies through the safe peer transport."""
+  _require_owner_or_common_app(db, principal)
+  if not _valid_id(post_id):
+    raise HTTPException(status_code=400, detail="Post id is invalid.")
+  host = _browse_community_host(community_host)
+  if host == _own_host():
+    return _public_store.get_replies(post_id)
+  try:
+    response = await federation_request(
+      "GET", f"{_peer_base_url(host)}/api/common/board/{post_id}/replies",
+      timeout_seconds=OUTBOUND_TIMEOUT_S,
+    )
+    response.raise_for_status()
+    result = response.json()
+    if not isinstance(result.get("replies"), list):
+      raise ValueError("Invalid reply response")
+    return result
+  except HTTPException:
+    raise
+  except Exception as exc:
+    raise HTTPException(
+      status_code=502, detail="Community replies could not be reached."
+    ) from exc
+
+
 @router.get("/board-media/{post_id}")
 async def get_board_media_for_owner(
   post_id: str,
+  community_host: str | None = None,
   db: Session = Depends(get_db),
   principal: Principal = Depends(get_principal),
 ):
@@ -1040,8 +1085,7 @@ async def get_board_media_for_owner(
   _require_owner_or_common_app(db, principal)
   if not _valid_id(post_id):
     raise HTTPException(status_code=400, detail="Post id is invalid.")
-  identity = _load_identity()
-  host = identity.get("community_host") or _own_host()
+  host = _browse_community_host(community_host)
   if host == _own_host():
     return _serve_image(_find_image(_board_media_dir(), post_id))
 
@@ -1074,13 +1118,13 @@ async def get_board_media_for_owner(
 async def get_feed(
   limit: int = 30,
   before: float | None = None,
+  community_host: str | None = None,
   db: Session = Depends(get_db),
   principal: Principal = Depends(get_principal),
 ):
   """The community host's board, proxied for the app UI."""
   _require_owner_or_common_app(db, principal)
-  identity = _load_identity()
-  host = identity.get("community_host") or _own_host()
+  host = _browse_community_host(community_host)
   if host == _own_host():
     posts = _read_board(min(max(limit, 1), BOARD_PAGE_LIMIT), before, _own_host())
     return {"host": host, "posts": posts}
@@ -1201,13 +1245,13 @@ async def reply_to_post(
 @router.get("/people")
 async def search_people(
   q: str = "",
+  community_host: str | None = None,
   db: Session = Depends(get_db),
   principal: Principal = Depends(get_principal),
 ):
   """Search the community host's user directory, proxied for the app UI."""
   _require_owner_or_common_app(db, principal)
-  identity = _load_identity()
-  host = identity.get("community_host") or _own_host()
+  host = _browse_community_host(community_host)
   if host == _own_host():
     return {"host": host, **search_directory(q)}
   try:
