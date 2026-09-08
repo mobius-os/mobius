@@ -2260,7 +2260,7 @@ async def test_delegated_claude_keeps_parent_tools_without_hidden_budget(
   monkeypatch.setattr(claude_sdk_runner, "ClaudeAgentOptions", capture_options)
   _install_fake_client(monkeypatch)
 
-  policy = SimpleNamespace(scope="read", explicit_provider_budget_usd=None)
+  policy = SimpleNamespace(scope="read")
   await _run_turn(
     "delegated-tools", bc=_Bus(), prompt="review", cwd="/data",
     run_policy=policy,

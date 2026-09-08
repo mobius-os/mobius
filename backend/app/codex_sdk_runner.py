@@ -1615,7 +1615,6 @@ async def _run_codex_sdk_turn(
   fallback_goal_objective: str | None = None,
   run_policy=None,
   connector_plan=None,
-  gauntlet_writer: bool = False,
   provider_id: str = "codex",
   data_dir: str | None = None,
   coordination_enabled: bool = True,
@@ -1742,13 +1741,11 @@ async def _run_codex_sdk_turn(
   # Delegated children disable those optional tools at this provider-owned seam.
   codex_bin = shutil.which("codex")
   delegated = run_policy is not None
-  restricted = delegated or gauntlet_writer
+  restricted = delegated
   from app.platform_tools import codex_turn_mcp_config
   connector_thread_config = codex_turn_mcp_config(
     connector_plan,
-    # Durable helpers share the local peer network. Gauntlet writers do
-    # not: their independent evidence is an intentional isolation boundary.
-    control_enabled=not gauntlet_writer,
+    control_enabled=True,
     top_level=not delegated,
     coordination_enabled=coordination_enabled,
   )
@@ -1760,10 +1757,7 @@ async def _run_codex_sdk_turn(
   )
   config_overrides = _codex_config_overrides(
     allow_questions=not restricted,
-    # Delegated children may decompose work through the provider's native
-    # helpers just like their parent. Gauntlet writers remain single-purpose
-    # because the controller owns their fan-out and budget.
-    allow_multi_agent=not gauntlet_writer,
+    allow_multi_agent=True,
     allow_goals=not restricted and needs_goal_control,
     delegated_read_sandbox=(
       delegated and run_policy.scope == "read"

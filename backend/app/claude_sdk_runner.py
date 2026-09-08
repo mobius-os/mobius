@@ -1035,8 +1035,6 @@ async def run_claude_sdk_turn(
   skills_enabled: bool = False,
   run_policy=None,
   connector_plan=None,
-  gauntlet_writer: bool = False,
-  gauntlet_max_budget_usd: float | None = None,
   coordination_enabled: bool = True,
 ) -> RunnerResult:
   """Runs one Claude SDK turn and translates SDK messages to Möbius events.
@@ -1097,13 +1095,7 @@ async def run_claude_sdk_turn(
           "ends. A delegated child must return the condition to its parent."
         )
       )
-    if run_policy is not None or gauntlet_writer:
-      if gauntlet_writer and tool_name in {
-        "Task", "TaskOutput", "TaskStop", "Workflow", "Workflows", "Agent",
-      }:
-        return PermissionResultDeny(
-          message="The Gauntlet controller owns this writer's decomposition."
-        )
+    if run_policy is not None:
       top_level_controls = {
         "create_goal", "update_goal", "get_goal", "request_user_input",
       }
@@ -1255,9 +1247,7 @@ async def run_claude_sdk_turn(
   # The "ultracode" tier maps to xhigh effort for the SDK flag (which only
   # accepts low/medium/high/xhigh/max) and arms the Workflow-tool
   # orchestration via the keyword trigger appended to this turn's prompt.
-  _ultracode = (
-    _effort == "ultracode" and run_policy is None and not gauntlet_writer
-  )
+  _ultracode = _effort == "ultracode" and run_policy is None
   if _effort == "ultracode":
     _effort = "xhigh"
   turn_message = user_message + _ULTRACODE_REMINDER if _ultracode else user_message
@@ -1332,28 +1322,18 @@ async def run_claude_sdk_turn(
         ],
       },
     }
-    if run_policy is not None or gauntlet_writer:
+    if run_policy is not None:
       options_kwargs["disallowed_tools"].extend([
         "AskUserQuestion", "create_goal", "update_goal", "get_goal",
         "request_user_input",
       ])
       restricted_options = {}
-      if gauntlet_writer:
-        options_kwargs["disallowed_tools"].extend([
-          "Task", "TaskOutput", "TaskStop", "Workflow", "Workflows", "Agent",
-        ])
       if run_policy is not None:
         restricted_options.update({
         "permission_mode": (
           "plan" if run_policy.scope == "read" else "acceptEdits"
         ),
         })
-        if run_policy.explicit_provider_budget_usd is not None:
-          restricted_options["max_budget_usd"] = (
-            run_policy.explicit_provider_budget_usd
-          )
-      elif gauntlet_max_budget_usd is not None:
-        restricted_options["max_budget_usd"] = gauntlet_max_budget_usd
       options_kwargs.update(restricted_options)
     if skills_enabled:
       options_kwargs["skills"] = "all"
@@ -1382,9 +1362,8 @@ async def run_claude_sdk_turn(
     connector_config_stack = ExitStack()
     connector_config_handle = None
     # Durable delegated children need the same provider-neutral network tools as
-    # their parent. Gauntlet writers stay isolated because independent review
-    # is the controller's defining invariant.
-    control_server_enabled = not gauntlet_writer
+    # their parent.
+    control_server_enabled = True
     try:
       from app.connectors import claude_mcp_config_handle
       from app.platform_tools import (

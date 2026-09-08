@@ -78,7 +78,7 @@ from app.routes import (
   contribution_relay_router,
   contribution_reviews_router,
   chat_waits_router,
-  debug_router, delegations_router, fs_router, gauntlets_router, goal_plans_router, github_router,
+  debug_router, delegations_router, fs_router, goal_plans_router, github_router,
   identity_router,
   owner_approvals_router,
   media_router,
@@ -840,7 +840,6 @@ app.include_router(secure_inputs_router)
 app.include_router(agent_coordination_router)
 app.include_router(delegations_router)
 app.include_router(chat_waits_router)
-app.include_router(gauntlets_router)
 app.include_router(goal_plans_router)
 app.include_router(owner_approvals_router)
 app.include_router(chat_logs_router)

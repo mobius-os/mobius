@@ -1229,18 +1229,10 @@ async def update_chat(
   get_active_chat_or_404(db, chat_id)
   if body.messages is not None:
     from app.chat_queue import get_transition_lock
-    from app.gauntlets import active_controller_gauntlet
 
     async with get_transition_lock(chat_id):
       db.rollback()
       get_active_chat_or_404(db, chat_id)
-      if active_controller_gauntlet(db, chat_id) is not None:
-        raise HTTPException(
-          status_code=409,
-          detail=(
-            "The Gauntlet owns this controller transcript until it finishes."
-          ),
-        )
       ack = get_writer().submit(
         ReplaceTranscript(
           chat_id=chat_id,
@@ -1315,20 +1307,6 @@ async def patch_chat(
 
   async with get_transition_lock(chat_id):
     chat = get_active_chat_for_principal(db, chat_id, principal)
-    if (
-      body.provider is not None
-      or body.clear_agent_settings
-      or body.agent_settings_json is not None
-    ):
-      from app.gauntlets import active_controller_gauntlet
-      if active_controller_gauntlet(db, chat_id) is not None:
-        raise HTTPException(
-          status_code=409,
-          detail=(
-            "The Gauntlet has frozen this controller's provider and agent "
-            "settings until it finishes."
-          ),
-        )
     agent_settings_patch = (
       body.agent_settings_json.model_dump(exclude_unset=True)
       if body.agent_settings_json is not None else {}
@@ -2221,20 +2199,6 @@ async def delete_chat(
 ):
   """Soft-deletes a chat and stops any running agent for it."""
   released_claims = []
-  from app.gauntlets import active_gauntlet_ids_for_chat, stop_gauntlet
-  for gauntlet_id in active_gauntlet_ids_for_chat(db, chat_id):
-    stopped_gauntlet = await stop_gauntlet(gauntlet_id)
-    if (
-      stopped_gauntlet is not None
-      and stopped_gauntlet.get("status") == "stopping"
-    ):
-      raise HTTPException(
-        status_code=409,
-        detail=(
-          "Could not stop all Gauntlet work yet; retry chat deletion after "
-          "the active provider process exits."
-        ),
-      )
   from app.delegations import (
     active_delegation_ids_for_chat,
     cancel_delegation_execution,
@@ -2270,18 +2234,12 @@ async def delete_chat(
         detail="Could not stop active agent; retry",
       )
   # Create and delete share the controller transition lock. Recheck after all
-  # potentially blocking stop I/O: a Gauntlet that won the gap must prevent the
-  # tombstone, while a tombstone that wins here makes the creator's own locked
-  # active-chat recheck fail.
+  # potentially blocking stop I/O: a delegation that won the gap must prevent
+  # the tombstone, while a tombstone that wins here makes the creator's own
+  # locked active-chat recheck fail.
   from app import chat_queue
   async with chat_queue.get_transition_lock(chat_id):
     db.rollback()
-    late_gauntlets = active_gauntlet_ids_for_chat(db, chat_id)
-    if late_gauntlets:
-      raise HTTPException(
-        status_code=409,
-        detail="A Gauntlet started while deletion was waiting; retry deletion.",
-      )
     if active_delegation_ids_for_chat(db, chat_id):
       raise HTTPException(
         status_code=409,
@@ -3274,17 +3232,6 @@ async def patch_app_chat(
 
   async with get_transition_lock(chat_id):
     chat = get_active_chat_for_principal(db, chat_id, principal)
-    if any((body.system_prompt is not None, body.model is not None,
-            body.provider is not None)):
-      from app.gauntlets import active_controller_gauntlet
-      if active_controller_gauntlet(db, chat_id) is not None:
-        raise HTTPException(
-          status_code=409,
-          detail=(
-            "The Gauntlet has frozen this controller's provider, model, and "
-            "prompt until it finishes."
-          ),
-        )
     if body.system_prompt is not None:
       if (
         chat.system_prompt_snapshot_id

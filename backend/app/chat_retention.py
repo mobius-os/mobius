@@ -67,38 +67,16 @@ def purge_expired_chat_tombstones(db: Session) -> list[str]:
   if not chat_ids:
     return []
 
-  # A timed-out SDK stop deliberately keeps the Gauntlet and target lease in
-  # ``stopping``. Never hard-purge its controller/critic rows out from under a
-  # still-live execution; the next retention sweep retries after supervision
-  # proves quiescence.
-  blocked_ids = {row[0] for row in db.query(
-    models.GauntletRun.parent_chat_id,
-  ).filter(
-    models.GauntletRun.parent_chat_id.in_(chat_ids),
-    models.GauntletRun.status.in_(("running", "stopping")),
-  ).all()}
-  blocked_ids.update(row[0] for row in db.query(
-    models.Delegation.child_chat_id,
-  ).join(
-    models.GauntletTask,
-    models.GauntletTask.delegation_id == models.Delegation.id,
-  ).join(
-    models.GauntletRun,
-    models.GauntletRun.id == models.GauntletTask.gauntlet_run_id,
-  ).filter(
-    models.Delegation.child_chat_id.in_(chat_ids),
-    models.GauntletRun.status.in_(("running", "stopping")),
-  ).all())
-  # Standalone Delegations share the same physical ChatRun supervision as
-  # Gauntlet critics. The soft-delete boundary normally cancels them, but a
+  # Delegations share the same physical ChatRun supervision as their chats.
+  # The soft-delete boundary normally cancels them, but a
   # timed-out provider (or an older tombstone from before that rule) must keep
   # the entire parent/child graph recoverable until it is truly quiescent.
   from app.delegations import active_delegation_ids_for_chat
-  blocked_ids.update(
+  blocked_ids = {
     chat_id
     for chat_id in chat_ids
     if active_delegation_ids_for_chat(db, chat_id)
-  )
+  }
   # Defensive: never hard-purge a tombstoned chat that still owns a NONTERMINAL
   # run (running / parked / resume_pending). delete_chat normally stops runs and
   # cancels waits, but a timed-out provider stop — or a tombstone from before a
@@ -116,10 +94,10 @@ def purge_expired_chat_tombstones(db: Session) -> list[str]:
   if not chat_ids:
     return []
 
-  # Workflow-owned critic chats are part of their controller's durable
-  # lifecycle. Purging either side must first remove the coordinator/task/
-  # delegation control rows, and purging a controller also reclaims its hidden
-  # children rather than leaving inaccessible transcripts behind.
+  # Delegated child chats are part of their parent's durable lifecycle.
+  # Purging either side reclaims the complete parent/child graph. Legacy
+  # Gauntlet rows are included only so data created by older releases can be
+  # removed safely after the owning chat's recovery window expires.
   chat_id_set = set(chat_ids)
   delegation_rows = db.query(
     models.Delegation.id, models.Delegation.child_chat_id,

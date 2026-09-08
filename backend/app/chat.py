@@ -832,12 +832,8 @@ def reconcile_startup_chats(
           safe_startup_writer_orphan as safe_wait_startup_writer_orphan,
         )
         from app.delegations import safe_parent_wake_startup_writer_orphan
-        from app.gauntlets import (
-          safe_startup_writer_orphan as safe_gauntlet_startup_writer_orphan,
-        )
         if (
-          safe_gauntlet_startup_writer_orphan(db, chat, running_runs[0])
-          or safe_parent_wake_startup_writer_orphan(
+          safe_parent_wake_startup_writer_orphan(
             db, chat, running_runs[0],
           )
           or safe_wait_startup_writer_orphan(db, chat, running_runs[0])
@@ -1935,35 +1931,13 @@ def _auto_resume_recovery(
       successor_run_token=physical.id,
       initiated_by_app_id=park.initiated_by_app_id,
     )
-    from app.gauntlets import limit_resume_policy
-    gauntlet_policy = limit_resume_policy(
-      db,
-      child_chat_id=chat.id,
-      run_token=park.id,
-      initiated_by_app_id=park.initiated_by_app_id,
-    )
-    if (
-      delegation_app_id != park.initiated_by_app_id
-      and not (
-        gauntlet_policy is not None
-        and gauntlet_policy.allowed
-        and gauntlet_policy.initiated_by_app_id
-          == physical.initiated_by_app_id
-      )
-    ):
+    if delegation_app_id != park.initiated_by_app_id:
       return None
   else:
-    from app.gauntlets import limit_resume_policy
-    gauntlet_policy = limit_resume_policy(
-      db,
-      child_chat_id=chat.id,
-      run_token=park.id,
-      initiated_by_app_id=None,
-    )
     if (
       not chat.auto_resume_on_limit
-      and not (gauntlet_policy is not None and gauntlet_policy.allowed)
-    ) or physical.initiated_by_app_id is not None:
+      or physical.initiated_by_app_id is not None
+    ):
       return None
   return park, payload
 
@@ -2097,17 +2071,9 @@ async def _auto_resume_chat(
               and park.park_reason in RESOURCE_PARK_REASONS
             )
             delegation_resume_app_id = None
-            gauntlet_resume_policy = None
             if park is not None and not restart_park and not resource_park:
               from app.delegations import limit_resume_app_id
               delegation_resume_app_id = limit_resume_app_id(
-                check_db,
-                child_chat_id=chat_id,
-                run_token=park.id,
-                initiated_by_app_id=park.initiated_by_app_id,
-              )
-              from app.gauntlets import limit_resume_policy
-              gauntlet_resume_policy = limit_resume_policy(
                 check_db,
                 child_chat_id=chat_id,
                 run_token=park.id,
@@ -2126,9 +2092,7 @@ async def _auto_resume_chat(
                 and accepted_nonce == park.restart_nonce
               )
             policy_enabled = chat is not None and (
-              _park_continues_automatically(
-                chat, park, gauntlet_resume_policy,
-              )
+              _park_continues_automatically(chat, park)
               or delegation_resume_app_id is not None
             )
             if (
@@ -2139,10 +2103,6 @@ async def _auto_resume_chat(
               or _has_unanswered_question(chat)
               or park is None
               or park.status != "resume_pending"
-              or (
-                gauntlet_resume_policy is not None
-                and not gauntlet_resume_policy.allowed
-              )
               # Provider-limit retries remain owner-only. A planned restart
               # instead restores the exact authenticated turn and carries its
               # app attribution into the synthetic continuation below.
@@ -2151,7 +2111,6 @@ async def _auto_resume_chat(
                 and not restart_park
                 and not resource_park
                 and delegation_resume_app_id is None
-                and gauntlet_resume_policy is None
               )
               or latest_id != park.id
               or any(
@@ -2172,13 +2131,8 @@ async def _auto_resume_chat(
               # Recovery keeps the interrupted turn's authority. Queued
               # follow-ups acquire their own attribution only after it finishes.
               park.initiated_by_app_id
-              if restart_park or resource_park else (
-                delegation_resume_app_id
-                if delegation_resume_app_id is not None else (
-                  gauntlet_resume_policy.initiated_by_app_id
-                  if gauntlet_resume_policy is not None else None
-                )
-              )
+              if restart_park or resource_park
+              else delegation_resume_app_id
             )
           if not mark_starting(chat_id):
             return False
@@ -2397,8 +2351,6 @@ async def sweep_reset_parks(
   # concurrently through push.notify_owner_async (which keeps remote I/O off
   # the event loop).
   notification_requests: list[tuple[str, bool]] = []
-  gauntlet_boundary_parks: set[str] = set()
-  gauntlet_boundary_runs: set[str] = set()
 
   def queue_due_notification(chat_id: str, run: models.ChatRun) -> None:
     if run.park_reason in RESOURCE_PARK_REASONS:
@@ -2416,7 +2368,6 @@ async def sweep_reset_parks(
     restart_park = run.park_reason == "restart"
     resource_park = run.park_reason in RESOURCE_PARK_REASONS
     delegation_resume_app_id = None
-    gauntlet_resume_policy = None
     if not restart_park and not resource_park:
       from app.delegations import limit_resume_app_id
       delegation_resume_app_id = limit_resume_app_id(
@@ -2425,20 +2376,6 @@ async def sweep_reset_parks(
         run_token=run.id,
         initiated_by_app_id=run.initiated_by_app_id,
       )
-      from app.gauntlets import limit_resume_policy
-      gauntlet_resume_policy = limit_resume_policy(
-        db,
-        child_chat_id=run.chat_id,
-        run_token=run.id,
-        initiated_by_app_id=run.initiated_by_app_id,
-      )
-      if (
-        gauntlet_resume_policy is not None
-        and not gauntlet_resume_policy.allowed
-      ):
-        gauntlet_boundary_parks.add(run.id)
-        gauntlet_boundary_runs.add(gauntlet_resume_policy.run_id)
-        return "Gauntlet boundary reached"
     if app_work_queued:
       return "app-attributed work"
     if (
@@ -2446,14 +2383,14 @@ async def sweep_reset_parks(
       and not restart_park
       and not resource_park
       and delegation_resume_app_id is None
-      and gauntlet_resume_policy is None
     ):
       return "app-attributed work"
     if _has_unanswered_question(chat):
       return "waiting for an answer"
-    policy_enabled = _park_continues_automatically(
-      chat, run, gauntlet_resume_policy,
-    ) or delegation_resume_app_id is not None
+    policy_enabled = (
+      _park_continues_automatically(chat, run)
+      or delegation_resume_app_id is not None
+    )
     if not policy_enabled:
       return "policy disabled"
     if restart_park and not (
@@ -2521,11 +2458,6 @@ async def sweep_reset_parks(
       auto_resume = auto_resume and wants_auto_resume(chat, run)
 
       if not auto_resume:
-        if run.id in gauntlet_boundary_parks:
-          # The refreshed boundary check owns this park now. Keep the prepared
-          # resume_pending marker intact so the coordinator can close the exact
-          # physical run rather than turning it into a generic notification.
-          continue
         try:
           was_pending = await _await_ack(get_writer().submit(
             ResolvePark(chat_id=chat_id, run_token=run.id)
@@ -2587,13 +2519,6 @@ async def sweep_reset_parks(
           )
       continue
 
-    # An owned Gauntlet park whose boundary closed was latched into the
-    # coordinator above. Leave its physical marker intact for the coordinator's
-    # exact cancellation path instead of consuming it as a generic
-    # parked-notified turn (which would look like a failed critic).
-    if run.id in gauntlet_boundary_parks:
-      continue
-
     # Notify-only/app/deleted path: resolve before the best-effort push so a
     # crash cannot send it repeatedly. A previously prepared auto-resume has
     # already sent its notification, so only a raw `parked` row notifies here.
@@ -2613,17 +2538,6 @@ async def sweep_reset_parks(
     resolved.append(chat_id)
     if should_notify and not chat_gone:
       queue_due_notification(chat_id, run)
-  for gauntlet_run_id in sorted(gauntlet_boundary_runs):
-    try:
-      from app.gauntlets import reconcile_gauntlet
-      await reconcile_gauntlet(gauntlet_run_id)
-    except Exception:
-      log.warning(
-        "Gauntlet boundary cancellation deferred run=%s",
-        gauntlet_run_id,
-        exc_info=True,
-      )
-
   if notification_requests:
     try:
       owner_row = db.query(models.Owner.id).first()
@@ -3727,23 +3641,19 @@ def _parse_reset_text(text: str, now: datetime) -> datetime | None:
 RESOURCE_PARK_REASONS = frozenset({"memory", "storage"})
 
 
-def _park_continues_automatically(chat, park, gauntlet_policy=None) -> bool:
+def _park_continues_automatically(chat, park) -> bool:
   """The owner-facing rule for whether a due park relaunches on its own.
 
   Restart parks follow the restart latch; platform-resource parks always
-  continue; provider-limit parks need the paid-retry opt-in (or a Gauntlet
-  policy that allows it). Shared by the sweep and the resumed task so the two
-  checks cannot drift.
+  continue; provider-limit parks need the paid-retry opt-in. Shared by the
+  sweep and the resumed task so the two checks cannot drift.
   """
   reason = park.park_reason if park is not None else None
   if reason == "restart":
     return bool(chat.auto_resume_on_restart)
   if reason in RESOURCE_PARK_REASONS:
     return True
-  return bool(
-    chat.auto_resume_on_limit
-    or (gauntlet_policy is not None and gauntlet_policy.allowed)
-  )
+  return bool(chat.auto_resume_on_limit)
 
 
 MEMORY_KILL_MESSAGE = (
@@ -4624,16 +4534,6 @@ async def run_chat(
         "attached contribution reconcile skipped", exc_info=True,
       )
 
-    # A settled controller or critic may release a Gauntlet all-of barrier.
-    # The coordinator owns transitions; model-authored checkpoints/goals are
-    # display context only and cannot strand or duplicate the next phase.
-    try:
-      if chat_id and disposition in _DELEGATION_WAKE_DISPOSITIONS:
-        from app.gauntlets import reconcile_after_chat_settled
-        await reconcile_after_chat_settled(chat_id)
-    except Exception:
-      _get_logger().debug("gauntlet reconcile hook skipped", exc_info=True)
-
     # Turn-end chat-note guarantee: when the chat SETTLED (no pending
     # follow-up), the platform's sole publisher updates its three summary
     # granularities. Runs AFTER the reply is sent → no user-facing latency;
@@ -5115,10 +5015,9 @@ async def _run_chat_impl(
 def _should_inject_peer_context(
   chat_id: str | None,
   run_token: str | None,
-  gauntlet_writer_policy,
 ) -> bool:
-  """Keep independent Gauntlet writers outside the shared peer context."""
-  return bool(chat_id and run_token and gauntlet_writer_policy is None)
+  """Inject peer context only for a physical chat run."""
+  return bool(chat_id and run_token)
 
 
 def _should_enable_coordination_tools(
@@ -5232,14 +5131,6 @@ async def _run_chat_impl_with_db(
       )
   from app.delegations import policy_for_chat
   run_policy = policy_for_chat(db, chat_id) if chat_row is not None else None
-  gauntlet_writer_policy = None
-  if run_policy is None and chat_row is not None and run_token:
-    from app.gauntlets import writer_policy_for_run
-    gauntlet_writer_policy = writer_policy_for_run(
-      db, chat_id=chat_id, run_token=run_token,
-    )
-  if gauntlet_writer_policy is not None:
-    provider_id = gauntlet_writer_policy.provider
   provider = get_provider(provider_id)
   codex_native_skills_ready = False
   if provider.name == "Codex":
@@ -5265,20 +5156,6 @@ async def _run_chat_impl_with_db(
     historical_goal_mode = False
     goal_continue = False
     is_slash_command = False
-
-  if gauntlet_writer_policy is not None:
-    # The platform owns the barrier. Preserve the controller's owner token,
-    # provider/settings, prompt snapshot, and installed skills, while removing
-    # every interactive/nested control path for this physical writer turn.
-    goal_objective = None
-    clear_dismissed_provider_goal = False
-    goal_mode = False
-    goal_continue = False
-    is_slash_command = False
-    # The coordinator freezes the complete execution policy. The controller's
-    # picker may be changed for a later ordinary turn, but it cannot silently
-    # switch the model/provider under a reserved writer slot.
-    provider_id = gauntlet_writer_policy.provider
 
   # Chats created before native Codex goal handling have the /goal objective in
   # their durable transcript but no provider-side ThreadGoal yet.  Either the
@@ -5403,12 +5280,10 @@ async def _run_chat_impl_with_db(
       user_message = f"{block}\n\n{user_message}"
 
   # Coordination is a peer-network context surface, not transcript history.
-  # Every durable child has its own chat address. Gauntlet writers remain
-  # isolated from both tools and injected peer data so their evidence stays
-  # independent of concurrent agents.
+  # Every durable child has its own chat address.
   coordination_context = ""
   coordination_message_through = None
-  if _should_inject_peer_context(chat_id, run_token, gauntlet_writer_policy):
+  if _should_inject_peer_context(chat_id, run_token):
     from app.agent_coordination import build_coordination_context_delivery
     coordination_delivery = build_coordination_context_delivery(
       db, chat_id, run_token, chat=chat_row,
@@ -5461,7 +5336,7 @@ async def _run_chat_impl_with_db(
   # Only the top-level chat owns durable waits; delegated children return any
   # future condition to this parent instead. A result that lands after this
   # snapshot queues behind the live turn rather than mutating its request.
-  if run_policy is None and gauntlet_writer_policy is None and chat_id:
+  if run_policy is None and chat_id:
     from app.chat_waits import build_active_waits_context
     waits_context = build_active_waits_context(db, chat_id)
     if waits_context:
@@ -5599,11 +5474,6 @@ async def _run_chat_impl_with_db(
   agent_settings = (
     {"model": run_policy.model, "effort": run_policy.effort}
     if run_policy is not None
-    else {
-      "model": gauntlet_writer_policy.model,
-      "effort": gauntlet_writer_policy.effort,
-    }
-    if gauntlet_writer_policy is not None
     else effective_agent_settings(
       settings.data_dir, chat_overrides, provider=provider_id,
     )
@@ -5826,9 +5696,7 @@ async def _run_chat_impl_with_db(
     return disposition
   data_dir = Path(settings.data_dir)
   cwd = (
-    gauntlet_writer_policy.target_path
-    if gauntlet_writer_policy is not None
-    else run_policy.cwd
+    run_policy.cwd
     if run_policy is not None
     else str(data_dir) if data_dir.exists() else str(Path.cwd())
   )
@@ -5894,7 +5762,6 @@ async def _run_chat_impl_with_db(
         goal_continue=goal_continue,
         fallback_goal_objective=fallback_goal_objective,
         run_policy=run_policy,
-        gauntlet_writer=gauntlet_writer_policy is not None,
         provider_id=provider_id,
         connector_plan=connector_turn_plan,
         coordination_enabled=coordination_tools_enabled,
@@ -6079,11 +5946,6 @@ async def _run_chat_impl_with_db(
         agent_settings=runner_agent_settings,
         skills_enabled=_skills_enabled(settings.data_dir),
         run_policy=run_policy,
-        gauntlet_writer=gauntlet_writer_policy is not None,
-        gauntlet_max_budget_usd=(
-          gauntlet_writer_policy.max_budget_usd
-          if gauntlet_writer_policy is not None else None
-        ),
         connector_plan=connector_turn_plan,
         coordination_enabled=coordination_tools_enabled,
       )
