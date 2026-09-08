@@ -147,14 +147,20 @@ def _extract_provider_code_and_state(raw_code: str) -> tuple[str, str | None]:
 def setup_status(db: Session = Depends(get_db)):
   """Returns whether the owner account has been configured, and its login mode.
 
-  ``auth_mode`` is the durable owner-row value (default ``local`` when no owner
-  exists yet), so the login screen renders the password form or the
-  mobius.you button from the same authoritative source the login gate enforces.
+  Once configured, ``auth_mode`` comes from the durable owner row. Before an
+  owner exists, managed deployment configuration must still close the local
+  setup path and present the managed login rather than an attacker-creatable
+  password owner.
   """
+  settings = get_settings()
   owner = db.query(models.Owner).first()
   return schemas.SetupStatus(
     configured=owner is not None,
-    auth_mode=owner.auth_mode if owner else "local",
+    auth_mode=(
+      owner.auth_mode
+      if owner is not None
+      else ("mobius" if settings.mobius_sso_enabled else "local")
+    ),
   )
 
 
@@ -193,6 +199,11 @@ def setup(
   body: schemas.SetupRequest, db: Session = Depends(get_db)
 ):
   """Creates the owner account on first boot and returns a JWT."""
+  if get_settings().mobius_sso_enabled:
+    raise HTTPException(
+      status_code=403,
+      detail="Managed sign-in is enabled for this deployment.",
+    )
   if db.query(models.Owner).first():
     raise HTTPException(status_code=400, detail="Already configured.")
   owner = models.Owner(

@@ -11,6 +11,17 @@ import bcrypt
 from test_app_fixtures import create_local_app
 
 
+def configure_managed_sso(monkeypatch):
+  from app.config import get_settings
+
+  settings = get_settings()
+  monkeypatch.setattr(settings, "mobius_sso_issuer", "http://launcher.test")
+  monkeypatch.setattr(settings, "mobius_sso_instance_id", "mob_testinstance")
+  monkeypatch.setattr(settings, "mobius_sso_client_secret", "s" * 48)
+  monkeypatch.setattr(settings, "frontend_origin", "http://testserver")
+  return settings
+
+
 def _mobius_login_handoff(db, *, epoch=0):
   from app import auth as auth_service, models
   from app.timeutil import now_naive_utc
@@ -68,6 +79,20 @@ def test_self_hosted_setup_status_stays_local(client):
 
   assert status.status_code == 200
   assert status.json() == {"configured": False, "auth_mode": "local"}
+
+
+def test_managed_mode_closes_local_first_owner_setup(client, monkeypatch):
+  configure_managed_sso(monkeypatch)
+
+  status = client.get("/api/auth/setup/status")
+  setup = client.post("/api/auth/setup", json={
+    "username": "attacker",
+    "password": "not-the-owner",
+  })
+
+  assert status.json() == {"configured": False, "auth_mode": "mobius"}
+  assert setup.status_code == 403
+  assert "Managed sign-in" in setup.json()["detail"]
 
 
 def test_setup_rejects_duplicate(client):
