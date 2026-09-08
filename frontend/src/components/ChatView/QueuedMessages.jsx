@@ -33,8 +33,9 @@ const EDITOR_MAX_HEIGHT = 160
  * pending messages) but the items below are hidden. Expanded by default.
  *
  * Each queued message is itself a collapsible row showing a truncated
- * first line. Click the row to expand and see the full content. Click
- * the X to cancel (DELETE the pending message on the backend).
+ * first line. Click the row to expand and see the full content. The pencil
+ * opens an inline editor to revise the text before the current turn promotes
+ * it; the X cancels (DELETE the pending message on the backend).
  *
  * Visual model: a soft, slightly raised stack — distinct from the chat
  * transcript so it's clear these are "not yet sent" turns. Lives between
@@ -55,6 +56,7 @@ export default function QueuedMessages({
 
   if (!items || items.length === 0) return null
 
+  // The caption states the real reason these are waiting (see queuedHint).
   const hint = queuedHint({ turnActive, online, restarting })
 
   // Stable key: the row's `cid` (client-minted, or a `legacy-<ts>`
@@ -306,22 +308,12 @@ export default function QueuedMessages({
                         {isExpanded ? text : preview}
                       </span>
                     </MessageSurface>
-                    <button
-                      type="button"
-                      className="queued__action queued__edit"
-                      onPointerDown={(e) => e.preventDefault()}
-                      onClick={() => beginEdit(msg)}
-                      aria-label="Edit queued message"
-                      title="Edit"
-                      disabled={editSaving}
-                    >
-                      <Pencil width={16} height={16} aria-hidden="true" />
-                    </button>
                     {steerActive && (
                       // Per-row fast-forward (owner ask, 2026-07-17): the same
                       // double-chevron as the composer's steer button, in the
                       // queue action's compact neutral well — send exactly THIS
-                      // message into the running turn now.
+                      // message into the running turn now. Order is send · edit ·
+                      // cancel (owner ask, 2026-08-21).
                       // Render it with the optimistic row so the action well and
                       // cancel-X arrive together. An early tap waits for this
                       // row's queue write in ChatView before force-steering it.
@@ -341,6 +333,17 @@ export default function QueuedMessages({
                         <DoubleChevronRight width={16} height={16} aria-hidden="true" />
                       </button>
                     )}
+                    <button
+                      type="button"
+                      className="queued__action queued__edit"
+                      onPointerDown={(e) => e.preventDefault()}
+                      onClick={() => beginEdit(msg)}
+                      aria-label="Edit queued message"
+                      title="Edit"
+                      disabled={editSaving}
+                    >
+                      <Pencil width={16} height={16} aria-hidden="true" />
+                    </button>
                     <button
                       type="button"
                       className="queued__action queued__cancel"

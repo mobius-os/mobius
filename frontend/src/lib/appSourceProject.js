@@ -21,3 +21,17 @@ export function appSourceProject(app) {
     app,
   }
 }
+
+// Only explicitly linked Projects can apply changes to an installed app.
+// Legacy imported copies remain independent Projects with their own source.
+export function linkedProjectAppId(project) {
+  const imported = project?.template?.imported_from
+  if (imported?.management !== 'linked' || imported.kind !== 'app' || imported.id == null) return null
+  return String(imported.id) || null
+}
+
+export function projectImportSource(sources, kind, id) {
+  if (sources?.management !== 'linked') return null
+  const rows = kind === 'app' ? sources?.apps : kind === 'artifact' ? sources?.artifacts : []
+  return rows?.find(source => String(source.id) === String(id)) || null
+}

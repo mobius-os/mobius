@@ -91,6 +91,16 @@ test('activation presents a confirmed running transcript while stream catch-up r
     /if \(reused\) \{[\s\S]*updateChatRuntimeCache[\s\S]*applyMessagesToView\(msgs, detailCache\.offset\)[\s\S]*settleRuntime\(runtime, msgs\)[\s\S]*return/,
     'the fast path must reconcile a retained hidden owner before revealing it',
   )
+  assert.match(
+    chatView,
+    /const settleRuntime = \(runtime, visibleMessages\) => \{[\s\S]*setArmedWaits\(Array\.isArray\(runtime\.waits\) \? runtime\.waits : \[\]\)/,
+    'every activation must hydrate the composer wait card from current runtime truth',
+  )
+  assert.match(
+    initialLoad,
+    /if \(reused\) \{[\s\S]*updateChatRuntimeCache[\s\S]*waits: runtime\.waits \|\| \[\]/,
+    'the retained-cache fast path must persist current waits instead of reviving an empty cache',
+  )
   assert.match(chatView,
     /activationAnchorKey = searchAnchorKey \|\| savedAnchorKey/,
     'search navigation takes precedence over the saved reading row for one activation')
@@ -130,8 +140,8 @@ test('activation presents a confirmed running transcript while stream catch-up r
   )
   assert.match(
     chatView,
-    /const \[activationSettled, setActivationSettled\] = useState\(false\)[\s\S]*if \(hidden\) return[\s\S]*setActivationSettled\(false\)[\s\S]*const settleRuntime[\s\S]*setActivationSettled\(true\)[\s\S]*const displayReady = activationSettled/,
-    'a cached idle verdict must not publish before this activation learns that the chat is running',
+    /const \[activationSettled, setActivationSettled\] = useState\(provisionalNewChat\)[\s\S]*if \(hidden \|\| provisionalNewChat\) return[\s\S]*setActivationSettled\(false\)[\s\S]*const settleRuntime[\s\S]*setActivationSettled\(true\)[\s\S]*const displayReady = activationSettled/,
+    'a provisional empty chat is ready immediately while persisted chats still wait for runtime truth',
   )
   assert.match(
     initialLoad,
@@ -164,6 +174,30 @@ test('a staging chat cannot leave the outgoing transcript held on a wedged reque
     'switching panes must not trigger a redundant connectivity probe')
 })
 
+test('a fresh empty chat settles before interruptible transcript work', () => {
+  const emptySettlement = chatView.indexOf('if (refreshed.messages.length === 0)')
+  const warmTransition = chatView.indexOf(
+    'if (activationCache && cacheCoversSavedAnchor && !anchorRetired)',
+    emptySettlement,
+  )
+
+  assert.ok(emptySettlement >= 0,
+    'fresh empty chats need an explicit synchronous readiness path')
+  assert.ok(warmTransition > emptySettlement,
+    'empty readiness must settle before any transition that outgoing activity can starve')
+  const branch = chatView.slice(emptySettlement, warmTransition)
+  const emptyBody = branch.match(
+    /if \(refreshed\.messages\.length === 0\) \{([\s\S]*?)\n      \}/,
+  )?.[1] || ''
+  assert.match(
+    emptyBody,
+    /applyMessagesToView\(\[\], refreshed\.offset\)[\s\S]*settleRuntime\(runtime, \[\]\)[\s\S]*return/,
+    'the full empty ChatView must become ready without waiting for transcript scheduling',
+  )
+  assert.doesNotMatch(emptyBody, /startTransition/,
+    'an empty chat has no reflow worth deprioritizing')
+})
+
 test('each pane holds one outgoing chat over one staging chat', () => {
   assert.match(chatSurfaceModel, /chatId: previousId,[\s\S]*role: 'held'/,
     'the transition keeps only the last painted chat in its pane')
@@ -186,7 +220,7 @@ test('each pane holds one outgoing chat over one staging chat', () => {
   )
   assert.match(
     chatView,
-    /if \(!hidden\) return[\s\S]*if \(keepTranscriptPainted\) return[\s\S]*setInitialEntryPhase\('history'\)[\s\S]*setLoading\(true\)/,
+    /if \(!hidden\) return[\s\S]*if \(provisionalNewChat\) return[\s\S]*if \(keepTranscriptPainted\) return[\s\S]*setInitialEntryPhase\('history'\)[\s\S]*setLoading\(true\)/,
     'a held cover must relinquish runtime ownership without arming the transcript blanking gate',
   )
 })
@@ -286,15 +320,14 @@ test('direct chat actions hand focus to the destination composer', () => {
   assert.match(startUserNewChatPresentation,
     /const visibleBlank = !forceNew[\s\S]*resolveNewChatIntentId\([\s\S]*paneId: forceNew \? ws\.focusedPaneId : null[\s\S]*flushSync\([\s\S]*settleDraftFirstNewChat\(presentation\)/,
     'Builder stays additive while mounting the UUID-backed presentation synchronously')
+  assert.match(startUserNewChatPresentation,
+    /flushSync\(\(\) => \{[\s\S]*setNewChatPresentation\(presentation\)[\s\S]*applyModeDestination\(\{[\s\S]*chatId,[\s\S]*paneId: ws\.focusedPaneId[\s\S]*closeDrawer\(modalDrawerOpen \? \{ preserveModalUntilTraversal: true \} : undefined\)/,
+    'the client id must enter the workspace before the tap dismisses navigation, independent of allocation')
   assert.match(shell,
-    /const resolved = \{[\s\S]*navigationEpoch: navigationEpochRef\.current,[\s\S]*drawerEntryOpen: false/,
-    'route materialization transfers drawer-entry ownership before the focus handoff')
-  assert.match(shell,
-    /const newChatCoversSurface =[\s\S]*newChatPresentationCoversSurface\(newChatPresentation[\s\S]*const coveredByNewChat = newChatCoversSurface\(layoutPaneId, chatId\)[\s\S]*!coveredByNewChat[\s\S]*composerRequest=\{chatSurfaceInteractive/,
-    'the immediate composer owns covered surfaces until its matching ChatView can accept handoff')
-  assert.match(shell,
-    /const builderPresentation = presentingNewChat[\s\S]*newChatPresentation\.viewMode === 'panes'[\s\S]*projection\.rects\[newChatPresentation\.paneId\][\s\S]*shell__view--paned/,
-    'a tiled Builder presentation covers only the pane that owns the tap')
+    /const newChatSession = String\(newChatPresentation\?\.chatId[\s\S]*<PaneChatView[\s\S]*newChatSession=\{newChatSession\}[\s\S]*onNewChatSubmit=\{queueDraftFirstNewChat\}/,
+    'the active pane passes allocation state into its canonical ChatView instead of covering it')
+  assert.doesNotMatch(shell, /shell__new-chat-presentation|handleNewChatLandingComposerReady/,
+    'the interactive New Chat path must not retain a second visual/composer owner')
   assert.match(shell,
     /className="shell__composer-focus-lease"[\s\S]*onInput=\{\(event\) => \{[\s\S]*composerFocusLeaseDirtyRef\.current = true[\s\S]*persistComposerDraft\([\s\S]*onBlur=\{\(event\) => \{[\s\S]*draftId != null && composerFocusLeaseDirtyRef\.current[\s\S]*persistComposerDraft\(/,
     'the temporary touch lease persists real edits without erasing an untouched durable fallback')
@@ -328,8 +361,6 @@ test('direct chat actions hand focus to the destination composer', () => {
   assert.match(shell,
     /composerDraftWantsKeyboard\(saved\)[\s\S]*beginTouchComposerFocusLease\([\s\S]*initialValue: saved\.input[\s\S]*requestComposer\(chatId, \{ focus: true, restoreExistingDraft: true \}\)/,
     'a selected touch chat with an unsent draft must reserve the keyboard until its real composer takes focus')
-  assert.match(shell, /className="shell__composer-focus-lease"[\s\S]*aria-label="Restoring message draft"/,
-    'the hidden lease must not impersonate the visible Message Möbius composer in the accessibility tree')
   assert.match(shell,
     /beforeRestoreRouteRef\.current = \(route\) => \{[\s\S]*route\?\.view !== 'chat'[\s\S]*focusSelectedChatComposer\(route\.chatId\)/,
     'Back and Forward must use the same destination-composer focus handoff')

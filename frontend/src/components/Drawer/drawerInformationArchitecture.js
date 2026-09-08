@@ -18,6 +18,7 @@ function recentAt({ kind, item }) {
   if (kind === 'chat') {
     return item?.activity_at || item?.updated_at || item?.created_at || ''
   }
+  if (kind === 'artifact') return item?.last_opened_at || ''
   return item?.last_opened_at || item?.updated_at || item?.created_at || ''
 }
 
@@ -31,8 +32,10 @@ function newestRecentFirst(a, b) {
  * Pinned chats, apps, and projects share one stable section ordered
  * oldest-pin-first, so a
  * new pin appends at the bottom and manual drag-to-reorder owns the rest.
- * Unpinned chats and apps share one newest-first Recents section. Projects join
- * only after an explicit open; file changes alone never manufacture recency.
+ * Unpinned chats and apps share one newest-first Recents section. Projects and
+ * built artifacts join only after an explicit open; file changes and rebuilds
+ * alone never manufacture recency. An artifact row is its own destination and
+ * carries no project belonging; the composite id only addresses it.
  * Chat activity follows owner conversation activity; app activity follows
  * explicit opens, falling back to bundle update/creation time until the first
  * open. The searchable apps grid keeps its own stable ordering.
@@ -82,15 +85,15 @@ export function buildDrawerSections(chats = [], apps = [], projects = []) {
     ...projects.flatMap(project => (
       Array.isArray(project?.artifacts) ? project.artifacts : []
     )
-      .filter(artifact => artifact?.status === 'ok' && artifact?.has_output)
+      .filter(artifact => (
+        artifact?.status === 'ok' && artifact?.has_output && artifact?.last_opened_at
+      ))
       .map(artifact => ({
         kind: 'artifact',
         item: {
           ...artifact,
           id: `${project.id}:${artifact.id}`,
           artifact_id: artifact.id,
-          activity_at: artifact.updated_at || project.updated_at || '',
-          project: { id: project.id, name: project.name, color: project.color },
         },
       }))),
   ].sort(newestRecentFirst)

@@ -32,7 +32,6 @@
 
 import { useId } from 'react'
 import { Brain } from '@openai/apps-sdk-ui/components/Icon'
-import { visibleBrainFillBounds } from './brainUsage.js'
 
 const PROVIDER_COLOR = 'var(--accent)'
 const CONTEXT_COLOR = '#d97757'
@@ -66,12 +65,13 @@ const BOTTOM = 21.7
 // The mask removes FILL_INSET from the silhouette's edge. Percentages must map
 // to the remaining visible interior, not to the now-invisible outer contour;
 // otherwise the last ~8% paints above every visible lobe and looks identical.
+const VISIBLE_TOP = TOP + FILL_INSET
+const VISIBLE_BOTTOM = BOTTOM - FILL_INSET
+
 function HemisphereFill({ percent, side, color }) {
-  const { fillHeight, fillY } = visibleBrainFillBounds(percent, {
-    top: TOP,
-    bottom: BOTTOM,
-    inset: FILL_INSET,
-  })
+  const clamped = Math.min(100, Math.max(0, percent))
+  const fillHeight = ((VISIBLE_BOTTOM - VISIBLE_TOP) * clamped) / 100
+  const fillY = VISIBLE_BOTTOM - fillHeight
   const x = side === 'left' ? 0 : 12
 
   return (

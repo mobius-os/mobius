@@ -13,13 +13,15 @@ const vite = await createServer({
   // extensionless internal imports that native Node ESM does not resolve.
   ssr: { noExternal: ['@openai/apps-sdk-ui'] },
 })
+const { default: ArtifactWorkspace } = await vite.ssrLoadModule('/src/components/Projects/ArtifactWorkspace.jsx')
+const { projectQueries } = await vite.ssrLoadModule('/src/hooks/queries.js')
 const { default: ProjectWorkspace } = await vite.ssrLoadModule(
   '/src/components/Projects/ProjectWorkspace.jsx',
 )
 
 after(() => vite.close())
 
-function renderWorkspace() {
+function renderWorkspace(props = {}) {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   })
@@ -35,6 +37,7 @@ function renderWorkspace() {
       { client },
       React.createElement(ProjectWorkspace, {
         project,
+        ...props,
         onCreateChat() {},
         onDelete() {},
         onOpenArtifact() {},
@@ -45,11 +48,11 @@ function renderWorkspace() {
   )
 }
 
-test('Artifacts, Chats, and Files form one ordered project workspace without tabs', () => {
+test('Creations, Chats, and Files form one ordered project workspace without tabs', () => {
   const markup = renderWorkspace()
   assert.doesNotMatch(markup, /role="tablist"|role="tab"|role="tabpanel"/)
   assert.match(markup, /aria-label="Project overview"/)
-  const artifacts = markup.indexOf('>Artifacts</h2>')
+  const artifacts = markup.indexOf('>Creations</h2>')
   const chats = markup.indexOf('>Chats</h2>')
   const files = markup.indexOf('aria-label="Folder location"')
   assert.ok(artifacts >= 0 && artifacts < chats)
@@ -69,4 +72,60 @@ test('the file explorer owns filtering and creation while the workspace has no r
   assert.doesNotMatch(markup, /project-workspace__header/)
   assert.doesNotMatch(markup, /Actions for Research notes/)
   assert.doesNotMatch(markup, /project-build-button/)
+})
+
+
+test('the first build shows progress instead of requesting a nonexistent Creation', () => {
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  client.setQueryData(projectQueries.keys.artifacts('building-project'), [{
+    id: 'game', name: 'Game', builder: 'game', preview: 'html', status: 'building', has_output: false,
+  }])
+  const markup = renderToStaticMarkup(React.createElement(QueryClientProvider, {client},
+    React.createElement(ArtifactWorkspace, { projectId: 'building-project', artifactId: 'game' })))
+  assert.match(markup, /Building your Creation/)
+  assert.doesNotMatch(markup, /<iframe/)
+  assert.match(markup, /disabled=""/)
+})
+
+test('a failed rebuild keeps the previous Creation and explains what is shown', () => {
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  client.setQueryData(projectQueries.keys.artifacts('failed-project'), [{
+    id: 'game', name: 'Game', builder: 'game', preview: 'html', status: 'error', has_output: true,
+  }])
+  const markup = renderToStaticMarkup(React.createElement(QueryClientProvider, {client},
+    React.createElement(ArtifactWorkspace, { projectId: 'failed-project', artifactId: 'game' })))
+  assert.match(markup, /Showing the last successful Creation/)
+  assert.doesNotMatch(markup, /Nothing built yet/)
+})
+
+
+test('linked app Projects offer explicit Apply while ordinary Projects do not', () => {
+  const markup = renderWorkspace({ linkedApp: { id: 123, name: 'Clock', source_dir: '/data/apps/clock' } })
+  assert.match(markup, />Apply to app<\/button>/)
+  assert.match(markup, /Saves and builds update your draft preview/)
+  assert.match(markup, /Save your files first/)
+  assert.doesNotMatch(renderWorkspace(), />Apply to app<\/button>/)
+})
+
+test('managed View source advertises draft-only saves and an explicit Apply action', async () => {
+  const { default: AppSourceWorkspace } = await vite.ssrLoadModule('/src/components/Projects/AppSourceWorkspace.jsx')
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  const app = { id: 123, name: 'Clock', source_dir: '/data/apps/clock' }
+  const markup = renderToStaticMarkup(React.createElement(QueryClientProvider, { client },
+    React.createElement(AppSourceWorkspace, { app, requiresApply: true })))
+  assert.match(markup, />Apply to app<\/button>/)
+  assert.match(markup, /Saved source remains a draft until you apply it/)
+})
+
+
+test('legacy imported app copies keep the real Project workspace without installed-app Apply', () => {
+  const markup = renderWorkspace({ project: {
+    id: 'legacy-app-copy', name: 'Preserved copy', chats: [],
+    template: { imported_from: { kind: 'app', id: 123 } },
+  } })
+  assert.match(markup, /aria-label="Preserved copy project"/)
+  assert.match(markup, /aria-label="Project overview"/)
+  assert.match(markup, />Creations<\/h2>/)
+  assert.match(markup, />Collaborate<\/span>/)
+  assert.doesNotMatch(markup, /app-source-workspace|>Apply to app<\/button>/)
 })

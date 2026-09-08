@@ -470,6 +470,72 @@ test('question submission freezes the visible row before same-turn output resume
   )
 })
 
+test('question submission anchors the exact card inside a wrapped enormous turn', () => {
+  const row = {
+    offsetTop: 0,
+    offsetHeight: 1320,
+    dataset: { key: 'assistant-long-question' },
+  }
+  const before = { offsetTop: 0, offsetHeight: 1000, children: [] }
+  const card = {
+    offsetTop: 1040,
+    offsetHeight: 280,
+    children: [],
+    dataset: { scrollAnchorKey: 'question-anchor-q-follow' },
+    closest: () => row,
+  }
+  const questionBlock = {
+    offsetTop: 1000,
+    offsetHeight: 320,
+    children: [card],
+  }
+  const copySurface = {
+    offsetTop: 0,
+    offsetHeight: 0,
+    children: [before, questionBlock],
+    parentElement: row,
+  }
+  before.parentElement = copySurface
+  questionBlock.parentElement = copySurface
+  card.parentElement = questionBlock
+  row.children = [copySurface]
+  row.querySelectorAll = selector => (
+    selector === '[data-scroll-anchor-key]' ? [card] : []
+  )
+  const scrollEl = {
+    scrollHeight: 1800,
+    scrollTop: 660,
+    clientHeight: 600,
+    querySelectorAll(selector) {
+      return selector === '.chat__msg[data-key]' ? [row] : []
+    },
+    querySelector(selector) {
+      return selector.includes('assistant-long-question') ? row : null
+    },
+  }
+
+  const mode = modeForQuestionSubmission(
+    scrollEl, { kind: 'FOLLOW_BOTTOM' }, card,
+  )
+
+  assert.deepEqual(mode.part, [0, 1, 0])
+  assert.equal(mode.targetKey, 'question-anchor-q-follow')
+  assert.equal(mode.offset, 380,
+    'the hold is measured from the card, not the turn or viewport-top activity')
+
+  const reconciledActivity = {
+    offsetTop: 0,
+    offsetHeight: 140,
+    children: [],
+    parentElement: copySurface,
+  }
+  copySurface.children.unshift(reconciledActivity)
+  card.offsetTop = 900
+  applyMode(scrollEl, mode)
+  assert.equal(scrollEl.scrollTop, 520,
+    'source reconciliation finds the same card instead of the old sibling index')
+})
+
 test('question submission treats a settled pin at the physical tail as follow intent', () => {
   // A short intro + question card ends the stream before its reservation fills,
   // so the live mode settles to a PIN_USER_MSG with its automatic follow-arm
@@ -1282,6 +1348,7 @@ test('question-only viewport overlay is never restored as durable reader state',
     key: 'assistant-question',
     offset: 100,
     questionSubmitBaseMode: { kind: 'FOLLOW_BOTTOM' },
+    questionPrepareCancelMode: { kind: 'ANCHOR_AT', key: 'prior', offset: 20 },
   }
   const scrollEl = {
     clientHeight: 700,
@@ -1799,22 +1866,20 @@ test('question submission reserves the exact room that keeps its anchor reachabl
     _computeSpacerH(scrollEl, listEl, latestUser, mode),
     340,
   )
-  assert.equal(
-    _computeSpacerH(
-      scrollEl,
-      listEl,
-      latestUser,
-      mode,
-      { pinViewportHeight: 1000 },
-    ),
-    740,
-    'submit activation pre-reserves the known keyboard-closed viewport',
-  )
   scrollEl.clientHeight = 700
   assert.equal(
     _computeSpacerH(scrollEl, listEl, latestUser, mode),
     440,
     'the submission overlay keeps the exact anchor across responsive geometry',
+  )
+  scrollEl.clientHeight = 500
+  assert.equal(
+    _computeSpacerH(
+      scrollEl, listEl, latestUser, mode,
+      { pinViewportHeight: 700 },
+    ),
+    440,
+    'preparation reserves the already-observed full viewport before keyboard close',
   )
 })
 
@@ -2145,6 +2210,26 @@ test('a reading position inside one enormous turn addresses the part, not the tu
   assert.equal(mode.key, 'assistant-huge')
   assert.deepEqual(mode.part, [200],
     'the addressed part is the one under the viewport top')
+  assert.equal(mode.offset, 0)
+})
+
+test('an enormous assistant turn addresses content through a display-contents wrapper', () => {
+  const row = partedRow('assistant-wrapped', 0, Array(300).fill(240))
+  const parts = row.children
+  const copySurface = {
+    offsetTop: 0,
+    offsetHeight: 0,
+    children: parts,
+    parentElement: row,
+  }
+  for (const part of parts) part.parentElement = copySurface
+  row.children = [copySurface]
+  const scrollEl = partedScrollEl(row, { scrollTop: 48_000 })
+
+  const mode = anchorModeFromScroll(scrollEl)
+
+  assert.deepEqual(mode.part, [0, 200],
+    'the event-only copy surface must not collapse the address to the whole row')
   assert.equal(mode.offset, 0)
 })
 

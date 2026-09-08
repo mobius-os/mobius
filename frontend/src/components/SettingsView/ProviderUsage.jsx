@@ -1,17 +1,91 @@
 /* Compact plan and allowance detail rendered under a connected provider row. */
 
+import { useEffect, useState } from 'react'
+
 import {
+  bankedResetCredits,
   clampUsagePercent,
+  formatResetExpiry,
   formatUsagePercent,
   formatUsageReset,
+  redeemOutcomeMessage,
+  soonestResetExpiry,
   visibleUsageWindows,
 } from './providerUsage.js'
+
+function BankedResets({ resets, onRedeem, redeeming = false, result = null }) {
+  const [confirming, setConfirming] = useState(false)
+  // A finished redeem (success or handled error) always leaves the confirm step.
+  useEffect(() => {
+    if (result) setConfirming(false)
+  }, [result])
+  if (!resets) return null
+
+  const expiry = soonestResetExpiry(resets.credits)
+  const count = resets.availableCount
+  const detail = [
+    count === 1 ? '1 banked reset' : `${count} banked resets`,
+    expiry ? formatResetExpiry(expiry) : '',
+  ].filter(Boolean).join(' · ')
+  const message = result
+    ? redeemOutcomeMessage(result.error ? undefined : result.outcome)
+    : null
+
+  return (
+    <span className="provider-usage__resets">
+      <span className="provider-usage__resets-row">
+        <span className="provider-usage__resets-detail">
+          {confirming ? 'Spend one reset and clear usage now?' : detail}
+        </span>
+        {confirming ? (
+          <span className="provider-usage__resets-actions">
+            <button
+              type="button"
+              className="provider-usage__redeem"
+              disabled={redeeming}
+              onClick={() => onRedeem()}
+            >
+              {redeeming ? 'Redeeming…' : 'Confirm'}
+            </button>
+            <button
+              type="button"
+              className="provider-usage__redeem provider-usage__redeem--ghost"
+              disabled={redeeming}
+              onClick={() => setConfirming(false)}
+            >
+              Cancel
+            </button>
+          </span>
+        ) : (
+          <button
+            type="button"
+            className="provider-usage__redeem"
+            onClick={() => setConfirming(true)}
+          >
+            Use a reset
+          </button>
+        )}
+      </span>
+      {message && (
+        <span
+          className={`provider-usage__resets-msg provider-usage__resets-msg--${message.tone}`}
+          role="status"
+        >
+          {message.text}
+        </span>
+      )}
+    </span>
+  )
+}
 
 export default function ProviderUsage({
   id,
   snapshot,
   loading = false,
   failed = false,
+  onRedeemReset = null,
+  redeeming = false,
+  redeemResult = null,
 }) {
   if (loading && !snapshot) {
     return (
@@ -60,6 +134,14 @@ export default function ProviderUsage({
           )}
           {snapshot?.stale && (
             <span className="provider-usage__credit">Last available reading</span>
+          )}
+          {onRedeemReset && (
+            <BankedResets
+              resets={bankedResetCredits(snapshot)}
+              onRedeem={onRedeemReset}
+              redeeming={redeeming}
+              result={redeemResult}
+            />
           )}
         </span>
       ) : (

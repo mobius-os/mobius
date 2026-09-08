@@ -26,6 +26,7 @@ export default [
       'node_modules/**',
       'public/vendor/**',
       'public/mobius-runtime.js',
+      'public/mobius-public-host.js',
       // Vendored upstream build (SoundTouchJS, MPL-2.0) pinned by version and
       // digest in src/lib/speech/speechPitchAsset.js. It stays beside the other
       // speech assets rather than moving under public/vendor/ because /vendor/*

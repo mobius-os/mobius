@@ -10,23 +10,19 @@ import {
 } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import GlobalSearch, { GlobalSearchButton } from '../GlobalSearch/GlobalSearch.jsx'
+import KeyboardShortcutsDialog from '../KeyboardShortcuts/KeyboardShortcutsDialog.jsx'
 import NotificationsView from '../NotificationsView/NotificationsView.jsx'
 import NotificationBell from './NotificationBell.jsx'
 import useNotificationCenter from './useNotificationCenter.js'
 
 const NotificationCenter = forwardRef(function NotificationCenter(
-  {
-    commands,
-    onOpenTarget,
-    onRunCommand,
-    updateAvailable = false,
-    onUpdateNow,
-  },
+  { commands, onOpenTarget, updateAvailable = false, onUpdateNow },
   eventActionsRef,
 ) {
   const queryClient = useQueryClient()
   const searchButtonRef = useRef(null)
   const [searchOpen, setSearchOpen] = useState(false)
+  const [shortcutsOpen, setShortcutsOpen] = useState(false)
   const [updateNoticeSeen, setUpdateNoticeSeen] = useState(false)
   const {
     state: { open, unreadCount },
@@ -49,12 +45,20 @@ const NotificationCenter = forwardRef(function NotificationCenter(
   const openTarget = useCallback((target) => {
     close()
     setSearchOpen(false)
+    setShortcutsOpen(false)
     onOpenTarget?.(target)
   }, [close, onOpenTarget])
 
   const openSearch = useCallback(() => {
     close()
+    setShortcutsOpen(false)
     setSearchOpen(true)
+  }, [close])
+
+  const toggleShortcuts = useCallback(() => {
+    close()
+    setSearchOpen(false)
+    setShortcutsOpen(value => !value)
   }, [close])
 
   // System events and the shell command dispatcher stay narrow nudges while
@@ -63,15 +67,18 @@ const NotificationCenter = forwardRef(function NotificationCenter(
     reconcile,
     onCreated,
     openSearch,
-  }), [onCreated, openSearch, reconcile])
+    toggleShortcuts,
+  }), [onCreated, openSearch, reconcile, toggleShortcuts])
 
   const toggleSearch = useCallback(() => {
     close()
+    setShortcutsOpen(false)
     setSearchOpen(value => !value)
   }, [close])
 
   const toggleNotifications = useCallback(() => {
     setSearchOpen(false)
+    setShortcutsOpen(false)
     if (updateNoticeActive) setUpdateNoticeSeen(true)
     toggle()
   }, [toggle, updateNoticeActive])
@@ -113,10 +120,14 @@ const NotificationCenter = forwardRef(function NotificationCenter(
       )}
       {searchOpen && (
         <GlobalSearch
-          commands={commands}
           onClose={() => setSearchOpen(false)}
           onOpenTarget={openTarget}
-          onRunCommand={onRunCommand}
+        />
+      )}
+      {shortcutsOpen && (
+        <KeyboardShortcutsDialog
+          commands={commands}
+          onClose={() => setShortcutsOpen(false)}
         />
       )}
     </div>

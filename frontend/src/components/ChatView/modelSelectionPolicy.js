@@ -1,9 +1,5 @@
 /* Owns the model choice the interactive composer presents and sends. */
 
-function configuredModel(value) {
-  return typeof value === 'string' && value.trim() ? value : null
-}
-
 export function resolvedChatSettings(chatInfo) {
   const explicit = chatInfo?.agent_settings_json
   const effective = chatInfo?.effective
@@ -13,7 +9,7 @@ export function resolvedChatSettings(chatInfo) {
     // The explicit per-chat choice is durable truth. A retained browser cache
     // can briefly lack the derived `effective` projection after an upgrade;
     // never make that look like the owner lost their saved model.
-    model: configuredModel(effective?.model) ?? configuredModel(explicit?.model),
+    model: effective?.model ?? explicit?.model ?? null,
   }
 }
 

@@ -6,7 +6,10 @@ import { formatRelativeTime } from '../../lib/relativeTime.js'
 function artifactSubtitle(item, latest = false) {
   const relativeTime = formatRelativeTime(item.touchedAt)
   if (item.kind === 'app') {
-    return relativeTime ? `App · Updated ${relativeTime}` : 'App · Open preview'
+    if (item.unseen) {
+      return relativeTime ? `App · Updated ${relativeTime} · New` : 'App · New update'
+    }
+    return relativeTime ? `App · Updated ${relativeTime}` : 'App · Open app'
   }
   if (latest) {
     return relativeTime
@@ -40,38 +43,52 @@ export default function ArtifactPickerSection({
   disclosureIcon,
 }) {
   const otherCount = otherArtifacts.length
+  const totalCount = otherCount + 1
   return (
     <div className="composer-popover__section composer-popover__section--artifacts">
-      {otherCount > 0 ? (
+      <div className="composer-popover__artifact-heading">
+        <span className="composer-popover__eyebrow">Latest artifacts</span>
+        <span
+          className="composer-popover__artifact-count"
+          aria-label={`${totalCount} total ${totalCount === 1 ? 'artifact' : 'artifacts'}`}
+        >
+          {totalCount}
+        </span>
+      </div>
+      <div className="composer-popover__artifact-featured">
         <button
           type="button"
-          className={`composer-popover__artifact-heading${expanded ? ' composer-popover__artifact-heading--expanded' : ''}`}
-          aria-expanded={expanded}
-          aria-label={expanded
-            ? 'Hide other artifacts'
-            : `Show ${otherCount} more artifacts`}
-          onClick={onToggle}
+          className="composer-popover__row composer-popover__artifact-latest"
+          onClick={() => onOpenArtifact(latestArtifact)}
+          aria-label={latestArtifact.kind === 'app' && latestArtifact.unseen
+            ? `${latestArtifact.title}, new app update. Open app.`
+            : undefined}
         >
-          <span className="composer-popover__eyebrow">Latest artifacts</span>
-          <span className="composer-popover__artifact-count" aria-hidden="true">
-            {otherCount + 1}
+          <ArtifactIcon artifact={latestArtifact} documentIcon={documentIcon} />
+          <span className="composer-popover__row-main">
+            <span className="composer-popover__row-title">{latestArtifact.title}</span>
+            <span className="composer-popover__row-sub">{artifactSubtitle(latestArtifact, true)}</span>
           </span>
-          {disclosureIcon}
+          {latestArtifact.kind === 'app' && latestArtifact.unseen && (
+            <span className="composer-popover__artifact-update-dot" aria-hidden="true" />
+          )}
         </button>
-      ) : (
-        <span className="composer-popover__eyebrow">Latest artifacts</span>
-      )}
-      <button
-        type="button"
-        className="composer-popover__row composer-popover__artifact-latest"
-        onClick={() => onOpenArtifact(latestArtifact)}
-      >
-        <ArtifactIcon artifact={latestArtifact} documentIcon={documentIcon} />
-        <span className="composer-popover__row-main">
-          <span className="composer-popover__row-title">{latestArtifact.title}</span>
-          <span className="composer-popover__row-sub">{artifactSubtitle(latestArtifact, true)}</span>
-        </span>
-      </button>
+        {otherCount > 0 ? (
+          <button
+            type="button"
+            className={`composer-popover__artifact-disclosure${expanded ? ' composer-popover__artifact-disclosure--expanded' : ''}`}
+            aria-expanded={expanded}
+            aria-label={expanded
+              ? `Hide ${otherCount} older ${otherCount === 1 ? 'artifact' : 'artifacts'}; ${totalCount} total`
+              : `Show ${otherCount} more ${otherCount === 1 ? 'artifact' : 'artifacts'}; ${totalCount} total`}
+            onClick={onToggle}
+          >
+            {disclosureIcon}
+          </button>
+        ) : (
+          <span className="composer-popover__artifact-disclosure-slot" aria-hidden="true" />
+        )}
+      </div>
       {expanded && otherCount > 0 && (
         <div className="composer-popover__artifact-list">
           {otherArtifacts.map(artifact => (
@@ -80,12 +97,18 @@ export default function ArtifactPickerSection({
               type="button"
               className="composer-popover__row"
               onClick={() => onOpenArtifact(artifact)}
+              aria-label={artifact.kind === 'app' && artifact.unseen
+                ? `${artifact.title}, new app update. Open app.`
+                : undefined}
             >
               <ArtifactIcon artifact={artifact} documentIcon={documentIcon} />
               <span className="composer-popover__row-main">
                 <span className="composer-popover__row-title">{artifact.title}</span>
                 <span className="composer-popover__row-sub">{artifactSubtitle(artifact)}</span>
               </span>
+              {artifact.kind === 'app' && artifact.unseen && (
+                <span className="composer-popover__artifact-update-dot" aria-hidden="true" />
+              )}
             </button>
           ))}
         </div>

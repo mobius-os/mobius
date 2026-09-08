@@ -1,0 +1,15 @@
+/* Readable message routing and full bodies within the shared inspector frame. */
+.cni-toolbar { display: flex; align-items: center; gap: 12px; justify-content: space-between; }
+.cni-toolbar p, .cni-foot { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
+.cni-toolbar .cui__close { margin: 0; }
+.cni-messages { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; }
+.cni-message { padding: 18px 2px; border-top: 1px solid var(--border); min-width: 0; }
+.cni-message__meta { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 10px; color: var(--muted); font-size: 11px; }
+.cni-message__meta time { margin-left: auto; font-variant-numeric: tabular-nums; }
+.cni-message__kind { text-transform: capitalize; font-weight: 600; color: var(--text); }
+.cni-message--blocker .cni-message__kind { color: var(--danger); }
+.cni-message--handoff .cni-message__kind, .cni-message--finding .cni-message__kind { color: var(--accent); }
+.cni-message__direction { min-width: 0; overflow-wrap: anywhere; }
+.cni-message__direction strong { color: var(--text); font-weight: 600; }
+.cni-message__body { margin: 9px 0 0; font-size: 13px; line-height: 1.65; white-space: pre-wrap; overflow-wrap: anywhere; }
+.cni .cui__close:disabled { opacity: .5; cursor: default; }

@@ -59,6 +59,7 @@ import {
   withOpaqueFramePublicAssetCors,
   isCacheableAppAssetResponse,
   SHELL_DATA_CACHE,
+  SHELL_DOCUMENT_POLICY_REVISION,
   isImmutableAppAsset,
   isPackagedAppAsset,
   packagedAppAssetCacheKey,
@@ -170,7 +171,7 @@ self.addEventListener('install', (event) => {
   if (isFirstInstall) return
   event.waitUntil((async () => {
     const entries = await outgoingShellEntries
-    const freshDocument = await fetch('/index.html', {
+    const freshDocument = await fetch(`/index.html?policy=${SHELL_DOCUMENT_POLICY_REVISION}`, {
       cache: 'reload',
       credentials: 'same-origin',
     }).catch(() => null)

@@ -62,8 +62,6 @@ test('a cold long chat loads older edits from the authoritative route', async ()
     options: { signal: 'request-signal' },
   }])
   assert.equal(entries[0].id, 'older-than-loaded-window')
-  // A cold composer has no transcript entries in its mounted window. The
-  // route-owned edit still survives that empty live supplement.
   const coldEntries = mergeChatDiffEntries(entries, [])
   assert.equal(coldEntries.length, 1)
   assert.deepEqual(

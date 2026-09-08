@@ -17,6 +17,7 @@ import {
   reviewActionKey,
   reviewItems,
   sendBlocker,
+  stackPublicationRecords,
   stackSendBlocker,
 } from '../contributionReviewModel.js'
 
@@ -159,6 +160,47 @@ test('a complete stack from another source chat becomes one direct approval', ()
   assert.equal(publicationStackAction(partial[0]).count, 1)
 })
 
+test('a merged-parent successor confirmation enumerates both public mutations', () => {
+  const successor = {
+    id: 'child', status: 'prepared', action: 'pr_update', successor: true,
+    quality_review_ready: true, review: { state: 'ready' },
+  }
+  // It updates an already-open PR, so it wears the Update label.
+  assert.equal(isUpdateAction('pr_update'), true)
+  assert.deepEqual(publicationAction(successor), {
+    label: 'Update PR', busyLabel: 'Updating PR',
+  })
+  // The confirmation must visibly name BOTH the branch rewrite and the base
+  // retarget as two distinct public mutations.
+  const mutations = publicationMutations(successor)
+  assert.equal(mutations.length, 2)
+  assert.match(mutations[0], /[Ff]orce-update the pull request branch/)
+  assert.match(mutations[1], /[Rr]etarget the pull request base branch/)
+  // An ordinary update or send names exactly one mutation.
+  assert.equal(publicationMutations({ action: 'pr_update' }).length, 1)
+  assert.equal(publicationMutations({ action: 'pr' }).length, 1)
+  // Aggregated across the confirmation batch, the two successor mutations stay
+  // distinct and ordered.
+  assert.deepEqual(
+    publicationItemsMutations([{ kind: 'record', record: successor }]),
+    mutations,
+  )
+  assert.deepEqual(publicationAction({ ...successor, status: 'submitting' }), {
+    label: 'Resume update', busyLabel: 'Resuming update',
+  })
+  assert.equal(sendBlocker({ ...successor, status: 'submitting' }), null)
+  assert.equal(sendBlocker({
+    ...successor,
+    status: 'submitting',
+    last_submit_error: 'GitHub did not confirm the base retarget.',
+    last_submit_error_code: 'update_unconfirmed',
+  }), null)
+  assert.match(
+    sendBlocker({ ...successor, status: 'submitting', successor: false }),
+    /still being confirmed/,
+  )
+})
+
 test('confirmation copy counts exact pull requests rather than stack containers', () => {
   const stack = (id, action = 'pr') => ({
     kind: 'stack', id,
@@ -172,6 +214,70 @@ test('confirmation copy counts exact pull requests rather than stack containers'
     count: 2, updating: true,
     promptLabel: 'Update 2 reviewed pull requests?', confirmLabel: 'Update 2 PRs',
   })
+})
+
+test('an existing-PR prefix is one exact phase before unpublished children', () => {
+  const record = (id, position, action) => ({
+    id,
+    status: 'prepared',
+    action,
+    quality_review_ready: true,
+    review: { state: 'ready' },
+    stack: { id: 'phased', name: 'Phased stack', position, total: 3 },
+  })
+  const item = {
+    kind: 'stack',
+    stack: { id: 'phased', name: 'Phased stack', total: 3 },
+    records: [
+      record('parent', 1, 'pr_update'),
+      record('middle', 2, 'pr_update'),
+      record('child', 3, 'pr'),
+    ],
+  }
+
+  assert.equal(stackSendBlocker(item, { connected: true }), null)
+  assert.deepEqual(
+    stackPublicationRecords(item).map(row => row.id),
+    ['parent', 'middle'],
+  )
+  assert.deepEqual(publicationStackAction(item), {
+    label: 'Update stack', confirmLabel: 'Update PRs', count: 2, updating: true,
+  })
+  assert.deepEqual(publicationItemsAction([item]), {
+    count: 2,
+    updating: true,
+    promptLabel: 'Update 2 reviewed pull requests?',
+    confirmLabel: 'Update 2 PRs',
+  })
+  assert.deepEqual(publicationItemsMutations([item]), [
+    'Update the pull request branch with the reviewed commit',
+  ])
+
+  const nextPhase = {
+    ...item,
+    records: item.records.map(record => (
+      record.action === 'pr_update' ? { ...record, status: 'open' } : record
+    )),
+  }
+  assert.deepEqual(stackPublicationRecords(nextPhase).map(row => row.id), ['child'])
+  assert.deepEqual(publicationStackAction(nextPhase), {
+    label: 'Send stack', confirmLabel: 'Send PRs', count: 1, updating: false,
+  })
+  assert.match(clientSrc, /prepared\[0\]\?\.action === 'pr_update'/)
+  assert.match(changesSrc, /stackPublicationRecords\(item\)\.forEach\(consume\)/)
+
+  const reversed = {
+    ...item,
+    records: [
+      record('parent', 1, 'pr'),
+      record('child', 2, 'pr_update'),
+      { ...record('third', 3, 'pr'), stack: { ...item.records[2].stack } },
+    ],
+  }
+  assert.match(
+    stackSendBlocker(reversed, { connected: true }),
+    /cannot follow a new private stack layer/,
+  )
 })
 
 test('loaded older backends group canonical stack branches during hot reload', () => {
@@ -216,7 +322,7 @@ test('healthy sent records stay quiet while attention remains actionable in Chan
   )
 })
 
-test('helper progress and recovery stay inside Changes', () => {
+test('Changes keeps contribution progress compact instead of embedding helper cards', () => {
   const startHandlers = chatViewSrc.slice(
     chatViewSrc.indexOf('const handlePrepareChatChanges'),
     chatViewSrc.indexOf('const wasTurnActiveRef'),
@@ -228,38 +334,26 @@ test('helper progress and recovery stay inside Changes', () => {
   assert.match(changesSrc, /outcome\.kind === 'unavailable'/)
   assert.match(changesSrc, /outcome\.kind === 'blocked'/)
   assert.doesNotMatch(changesSrc, /requestHelperAndClose/)
-  assert.match(
-    changesSrc,
-    /primaryAction\.kind === 'prepare'[\s\S]*?await requestHelper\([\s\S]*?onPrepareChanges/,
-  )
-  assert.match(changesSrc, /Changes stays open while the background helper starts\./)
-  assert.match(changesSrc, /className=\{`chat-work__helper-request/)
-  assert.match(changesSrc, /role="status"/)
+  assert.match(changesSrc, /async function prepareContributionOutcome\(\)/)
+  assert.match(changesSrc, /await requestHelper\([\s\S]*?onPrepareChanges/)
   assert.match(changesSrc, /retryHelperRef\.current[\s\S]*Try again/)
   assert.match(changesSrc, /const retryingStart = state === 'active' && work\?\.status === 'retrying'/)
   assert.match(changesSrc, /retryingStart[\s\S]*?String\(work\?\.result \|\| ''\)\.trim\(\)/)
   assert.match(changesSrc, /It starts after the current reply, then continues in the background/)
-  assert.match(changesSrc, /className="is-secondary"[\s\S]*?'Stop'/)
+  assert.match(changesSrc, /className=\{`chat-work__primary-actions is-\$\{workState\}`\}/)
+  assert.match(changesSrc, /helperStopping \? 'Stopping…' : 'Stop'/)
   assert.match(clientSrc, /work\/stop/)
   assert.match(chatViewSrc, /const handleStopContributionWork = useCallback/)
-  assert.match(changesSrc, /onStop=\{stopHelper\}/)
-  assert.match(changesSrc, /work\?\.child_chat_id[\s\S]*?View helper/)
-  assert.match(changesSrc, /usage\?\.totals\?\.total_tokens/)
-  assert.match(changesSrc, /Preparation history/)
-  assert.match(changesSrc, /onLoadWorkHistory/)
-  assert.match(clientSrc, /work\/history/)
-  assert.match(chatViewSrc, /const handleLoadContributionWorkHistory = useCallback/)
-  assert.match(changesSrc, /rawTotal === null \|\| rawTotal === undefined/)
-  assert.match(chatViewSrc, /onOpenChat=\{\(childChatId\) => \{/)
+  assert.doesNotMatch(changesSrc, /View helper|Preparation history|total_tokens/)
+  assert.doesNotMatch(changesSrc, /chat-work__helper|chat-work__history/)
+  assert.doesNotMatch(chatViewSrc, /handleLoadContributionWorkHistory|onLoadWorkHistory/)
   assert.match(changesSrc, /const workContext = contributionWorkContext\(overview\)/)
-  assert.match(changesSrc, /action=\{primaryAction\?\.kind === 'publish-items' \? primaryAction : null\}/)
-  assert.match(changesSrc, /action && typeof onAction === 'function'[\s\S]*action\.label/)
-  assert.match(changesSrc, /state === 'attention'[\s\S]*Continue preparation/)
+  assert.match(changesSrc, /workState === 'attention'[\s\S]*Try again/)
   assert.doesNotMatch(chatViewSrc, /Continue the attached contribution work|handleContinueContributionWork/)
   assert.doesNotMatch(changesSrc, /Continue here|onContinueWork/)
 })
 
-test('durable submitting state is visible but never offers a duplicate action', () => {
+test('ordinary submitting state stays locked while a successor can resume', () => {
   assert.match(changesSrc, /const publicationPending = overview\.stages\.prepared\.some\(/)
   assert.match(changesSrc, /record => record\?\.status === 'submitting' && record\?\.successor !== true/)
   assert.match(changesSrc, /publicationPending \? \(/)
@@ -269,16 +363,16 @@ test('durable submitting state is visible but never offers a duplicate action', 
   )
 })
 
-test('the composer gets unsorted work from the complete chat owner without a persistent card', () => {
+test('the composer gets unsorted work from the complete chat owner and fails closed', () => {
   const composerSrc = readFileSync(new URL('../ComposerPopover.jsx', import.meta.url), 'utf8')
   const overviewSrc = readFileSync(new URL('../useChatChangesOverview.js', import.meta.url), 'utf8')
   const querySrc = readFileSync(new URL('../chatChangesQueries.js', import.meta.url), 'utf8')
   assert.match(composerSrc, /useChatChangesOverview\(chatId, initialChangeEntries/)
-  assert.match(composerSrc, /changesOverview\.needsAction/)
-  assert.match(composerSrc, /Changes need attention/)
+  assert.match(composerSrc, /changesOverview\.lifecycleAvailable/)
   assert.match(overviewSrc, /mergeChatDiffEntries\(diffs\.data \|\| \[\], initialEntries\)/)
   assert.match(querySrc, /loadChatDiffEntries\([\s\S]*?request: apiFetch/)
-  assert.match(changesSrc, /onPrepareProject[\s\S]*?&& overview\.lifecycleAvailable/)
+  assert.doesNotMatch(changesSrc, /onPrepareProject/)
+  assert.match(changesSrc, /aria-label="Contribution outcome"/)
 })
 
 test('Changes keeps direct publication and review on guarded routes', () => {
@@ -321,8 +415,7 @@ test('Changes batch publication refreshes before GitHub and recovers at most onc
     changesSrc,
     /if \(publishInFlightRef\.current \|\| helperInFlightRef\.current\) return[\s\S]*publishInFlightRef\.current = true/,
   )
-  assert.doesNotMatch(changesSrc, /beginConfirmation\(\[selectedPreparedItem\]\)/)
-  assert.match(changesSrc, /chat-work__dock[\s\S]*onClick=\{runPrimaryAction\}/)
+  assert.match(changesSrc, /beginConfirmation\(\[selectedPreparedItem\]\)/)
   assert.match(changesSrc, /if \(!refreshed\?\.data\)[\s\S]*nothing was sent/)
   assert.match(changesSrc, /refreshedReviewItems\(items, refreshed\.data\)/)
   assert.match(

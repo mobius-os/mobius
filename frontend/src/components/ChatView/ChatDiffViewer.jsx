@@ -1,13 +1,15 @@
 /* Complete chat-scoped contribution control surface. */
 
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { X } from '@openai/apps-sdk-ui/components/Icon'
+import useContextMenuOutsideDismiss from '../../hooks/useContextMenuOutsideDismiss.js'
 import useDialogFocus from '../../hooks/useDialogFocus.js'
 import { formatRelativeTime } from '../../lib/relativeTime.js'
 import FileDiffList from '../DiffView/FileDiffList.jsx'
 import ChatContributionDiff from './ChatContributionDiff.jsx'
 import {
+  chatContributionOutcomeActions,
   chatChangesPrimaryAction,
   contributionActionOutcome,
   contributionWorkContext,
@@ -26,9 +28,11 @@ import {
   publicationFailureOwner,
   publicationItemsAction,
   publicationItemsMutations,
+  publicationStackAction,
   reviewItems,
   refreshedReviewItems,
   sendBlocker,
+  stackPublicationRecords,
   stackSendBlocker,
 } from './contributionReviewModel.js'
 import { useChatChangesOverview } from './useChatChangesOverview.js'
@@ -117,13 +121,10 @@ function EmptyStage({ stage, hasRecordedEdits }) {
   )
 }
 
-function AttachedWorkPanel({
-  work, state, onStop, onContinue, onOpenChat, action = null, onAction,
-  busy = false, stopping = false,
-}) {
+function preparationStatusView(work, state) {
   const waitingForSource = state === 'active' && work?.status === 'accepted'
   const retryingStart = state === 'active' && work?.status === 'retrying'
-  const view = {
+  return {
     active: {
       title: retryingStart
         ? 'Retrying preparation'
@@ -143,161 +144,6 @@ function AttachedWorkPanel({
         || 'Choose the current contribution action below to try again against the latest source.',
     },
   }[state]
-  if (!view) return null
-  const usageLabel = tokenUsageLabel(work)
-  return (
-    <section className={`chat-work__helper is-${state}`} aria-live="polite">
-      <div className="chat-work__helper-copy">
-        <strong>{view.title}</strong>
-        <span>{view.copy}</span>
-        {usageLabel ? <small>{usageLabel}</small> : null}
-      </div>
-      <div className="chat-work__helper-actions">
-        {action && typeof onAction === 'function' ? (
-          <button type="button" className="is-primary" disabled={busy} onClick={onAction}>
-            {busy ? 'Starting…' : action.label}
-          </button>
-        ) : null}
-        {state === 'attention' && typeof onContinue === 'function' ? (
-          <button type="button" disabled={busy} onClick={onContinue}>
-            {busy ? 'Starting…' : 'Continue preparation'}
-          </button>
-        ) : null}
-        {work?.child_chat_id && typeof onOpenChat === 'function' ? (
-          <button type="button" className="is-secondary" onClick={() => onOpenChat(work.child_chat_id)}>
-            View helper
-          </button>
-        ) : null}
-        {state === 'active' && typeof onStop === 'function' ? (
-          <button type="button" className="is-secondary" disabled={busy || stopping} onClick={() => onStop(work)}>
-            {stopping ? 'Stopping…' : 'Stop'}
-          </button>
-        ) : null}
-      </div>
-    </section>
-  )
-}
-
-const WORK_INTENT_LABELS = {
-  prepare: 'Prepare changes',
-  finish: 'Prepare all changes',
-  project: 'Prepare project',
-  updates: 'Check updates',
-  followup: 'Review follow-up',
-}
-
-const WORK_STATUS_LABELS = {
-  accepted: 'Waiting',
-  queued: 'Waiting',
-  retrying: 'Retrying',
-  starting: 'Starting',
-  running: 'Working',
-  resuming: 'Resuming',
-  paused: 'Paused',
-  completed: 'Completed',
-  cancelled: 'Stopped',
-  stopped: 'Stopped',
-  failed: 'Needs attention',
-  interrupted: 'Needs attention',
-  needs_review: 'Needs attention',
-}
-
-function tokenUsageLabel(work) {
-  const rawTotal = work?.usage?.totals?.total_tokens
-  if (rawTotal === null || rawTotal === undefined || rawTotal === '') return ''
-  const totalTokens = Number(rawTotal)
-  if (!Number.isFinite(totalTokens) || totalTokens < 0) return ''
-  return `${new Intl.NumberFormat(undefined, {
-    notation: 'compact',
-    maximumFractionDigits: 1,
-  }).format(totalTokens)} tokens`
-}
-
-function PreparationHistory({
-  count = 0,
-  excludeWorkId = '',
-  onLoad,
-  onOpenChat,
-}) {
-  const visibleCount = Math.max(0, Number(count || 0) - (excludeWorkId ? 1 : 0))
-  const [phase, setPhase] = useState('idle')
-  const [items, setItems] = useState([])
-  const [error, setError] = useState('')
-  const [truncation, setTruncation] = useState(null)
-
-  if (visibleCount === 0 || typeof onLoad !== 'function') return null
-
-  const fetchHistory = async () => {
-    setPhase('loading')
-    setError('')
-    const outcome = await onLoad()
-    if (outcome?.kind === 'loaded') {
-      setItems((outcome.items || []).filter(item => item?.id !== excludeWorkId))
-      setTruncation(outcome.truncated === true ? {
-        shown: (outcome.items || []).length,
-        total: Number(outcome.total) || visibleCount,
-      } : null)
-      setPhase('ready')
-      return
-    }
-    setError(String(outcome?.message || '').trim()
-      || 'Preparation history could not be loaded. Close this section and try again.')
-    setPhase('error')
-  }
-
-  const loadHistory = event => {
-    if (!event.currentTarget.open || phase !== 'idle') return
-    void fetchHistory()
-  }
-
-  return (
-    <details className="chat-work__history" onToggle={loadHistory}>
-      <summary>
-        <span>Preparation history</span>
-        <small>{visibleCount}</small>
-      </summary>
-      <div className="chat-work__history-body">
-        {phase === 'loading' ? (
-          <div className="chat-work__history-state" role="status">Loading helpers…</div>
-        ) : null}
-        {phase === 'error' ? (
-          <div className="chat-work__history-state is-error" role="alert">
-            <span>{error}</span>
-            <button type="button" onClick={fetchHistory}>Try again</button>
-          </div>
-        ) : null}
-        {phase === 'ready' && items.length === 0 ? (
-          <div className="chat-work__history-state">No earlier helpers.</div>
-        ) : null}
-        {phase === 'ready' ? items.map(item => {
-          const status = WORK_STATUS_LABELS[item?.status] || 'Finished'
-          const usage = tokenUsageLabel(item)
-          return (
-            <div className="chat-work__history-row" key={item.id}>
-              <div className="chat-work__history-copy">
-                <strong>{WORK_INTENT_LABELS[item?.intent] || 'Contribution preparation'}</strong>
-                <small>
-                  <span className={`is-${String(item?.status || 'finished')}`}>{status}</span>
-                  {item?.created_at ? <span>{updateTime(item.created_at)}</span> : null}
-                  {usage ? <span>{usage}</span> : null}
-                </small>
-              </div>
-              {item?.child_chat_id && typeof onOpenChat === 'function' ? (
-                <button type="button" onClick={() => onOpenChat(item.child_chat_id)}>
-                  View
-                </button>
-              ) : null}
-            </div>
-          )
-        }) : null}
-        {phase === 'ready' && truncation ? (
-          <div className="chat-work__history-state">
-            Showing the newest {truncation.shown} of {truncation.total} helpers.
-          </div>
-        ) : null}
-      </div>
-    </details>
-  )
 }
 
 export default function ChatDiffViewer({
@@ -305,14 +151,11 @@ export default function ChatDiffViewer({
   initialEntries,
   onClose,
   onPrepareChanges,
-  onPrepareProject,
   onContributeAll,
   onCheckUpdates,
   onOpenApp,
-  onOpenChat,
   onContinueInChat,
   onStopWork,
-  onLoadWorkHistory,
   returnFocusRef,
 }) {
   const queryClient = useQueryClient()
@@ -326,6 +169,7 @@ export default function ChatDiffViewer({
   )
   const dialogRef = useRef(null)
   const closeRef = useRef(null)
+  const restoreFocusGuardRef = useRef(true)
   const expansionSequenceRef = useRef(0)
   const stageSeededRef = useRef(false)
   const [activeStage, setActiveStage] = useState('working')
@@ -344,11 +188,32 @@ export default function ChatDiffViewer({
   const helperStopInFlightRef = useRef(false)
   const publishInFlightRef = useRef(false)
 
+  const dismissFromOutside = useCallback(() => {
+    // The outside press belongs to the destination beneath this
+    // pointer-transparent panel. Do not pull focus back to the Changes trigger
+    // after that destination has already started taking ownership.
+    restoreFocusGuardRef.current = false
+    onClose?.()
+  }, [onClose])
+  const shouldRestoreFocus = useCallback(
+    () => restoreFocusGuardRef.current !== false,
+    [],
+  )
+
+  useContextMenuOutsideDismiss({
+    open: true,
+    menuRef: dialogRef,
+    onDismiss: dismissFromOutside,
+  })
+
   useDialogFocus({
     containerRef: dialogRef,
     initialFocusRef: closeRef,
     restoreFocusRef: returnFocusRef,
+    shouldRestoreFocus,
     onClose,
+    modal: false,
+    lockScroll: false,
   })
 
   useEffect(() => {
@@ -407,10 +272,24 @@ export default function ChatDiffViewer({
     : activeStage === 'done'
       ? doneRecords
       : []
+  // A completed prepare/finish that produced no private review and opened no
+  // pull request, while edits still wait unsorted, did not advance: its result
+  // is a decision the owner must act on (commonly an unshared dependency), not
+  // silent success. Surface that reason instead of silently re-offering the
+  // same outcome buttons.
+  const workDecisionResult = workState === 'completed'
+    ? String(work?.result || '').trim()
+    : ''
+  const workDecision = (
+    workDecisionResult
+    && overview.stages.prepared.length === 0
+    && overview.stages.open.length === 0
+    && (overview.counts.unsorted || 0) > 0
+  ) ? { result: workDecisionResult } : null
   const surfaceCounts = {
     working: overview.counts.unsorted + workingRecords.length,
     ready: readyRecords.length,
-    needs_you: attentionRecords.length,
+    needs_you: attentionRecords.length + (workDecision ? 1 : 0),
     done: doneRecords.length,
   }
   const [selectedPreparedKey, setSelectedPreparedKey] = useState('')
@@ -429,11 +308,8 @@ export default function ChatDiffViewer({
   const preparedPrimaryAction = preparedChangesPrimaryAction(visiblePreparedItems, {
     connected: overview.contributions?.connected !== false,
   })
-  const primaryAction = activeStage === 'ready'
-    ? preparedPrimaryAction
-    : lifecycleAction?.kind === 'review'
-      ? preparedPrimaryAction
-      : lifecycleAction
+  const outcomeActions = chatContributionOutcomeActions(overview, preparedPrimaryAction)
+  const preparationView = preparationStatusView(work, workState)
   const confirmingAction = confirming ? publicationItemsAction(confirming) : null
   const confirmingMutations = confirming ? publicationItemsMutations(confirming) : []
 
@@ -534,31 +410,51 @@ export default function ChatDiffViewer({
     }
   }
 
-  async function runPrimaryAction() {
-    if (!primaryAction) return
-    if (primaryAction.kind === 'prepare') {
+  function reviewContributionOutcome() {
+    setEveryDiffExpanded(false)
+    if (visiblePreparedItems.length > 0) setActiveStage('ready')
+    else if (attentionRecords.length > 0) setActiveStage('needs_you')
+    else setActiveStage('working')
+  }
+
+  async function prepareContributionOutcome() {
+    if (!outcomeActions || outcomeActions.prepare.disabled) return
+    if (lifecycleAction?.kind === 'prepare') {
       await requestHelper(
         () => onPrepareChanges?.(overview.unsortedRevision, workContext),
       )
       return
     }
-    if (primaryAction.kind === 'finish') {
+    if (lifecycleAction?.kind === 'updates') {
+      await requestHelper(
+        () => onCheckUpdates?.(overview.stages.open, workContext),
+      )
+      return
+    }
+    await requestHelper(
+      () => onContributeAll?.(overview.workflowRevision, workContext),
+    )
+  }
+
+  async function mergeContributionOutcome() {
+    if (!outcomeActions) return
+    if (lifecycleAction?.kind === 'prepare') {
+      await requestHelper(
+        () => onPrepareChanges?.(overview.unsortedRevision, workContext),
+      )
+      return
+    }
+    if (lifecycleAction?.kind === 'finish' || preparedPrimaryAction?.kind === 'fix-prepared') {
       await requestHelper(
         () => onContributeAll?.(overview.workflowRevision, workContext),
       )
       return
     }
-    if (primaryAction.kind === 'publish-items') {
-      beginConfirmation(primaryAction.items)
+    if (preparedPrimaryAction?.kind === 'publish-items') {
+      beginConfirmation(preparedPrimaryAction.items)
       return
     }
-    if (primaryAction.kind === 'fix-prepared') {
-      await requestHelper(
-        () => onContributeAll?.(overview.workflowRevision, workContext),
-      )
-      return
-    }
-    if (primaryAction.kind === 'updates') {
+    if (lifecycleAction?.kind === 'updates') {
       await requestHelper(
         () => onCheckUpdates?.(overview.stages.open, workContext),
       )
@@ -596,12 +492,14 @@ export default function ChatDiffViewer({
   }
 
   function consumeItem(item) {
-    if (item?.kind === 'stack') item.records.forEach(consume)
+    if (item?.kind === 'stack') stackPublicationRecords(item).forEach(consume)
     else if (item?.record) consume(item.record)
   }
 
   function releaseItem(item, failure) {
-    if (item?.kind === 'stack') item.records.forEach(record => release(record, failure))
+    if (item?.kind === 'stack') {
+      stackPublicationRecords(item).forEach(record => release(record, failure))
+    }
     else if (item?.record) release(item.record, failure)
   }
 
@@ -713,7 +611,10 @@ export default function ChatDiffViewer({
             <button
               type="button"
               className="is-primary"
-              disabled={helperStarting}
+              disabled={helperStarting || workActive}
+              title={workActive
+                ? 'A helper is already preparing this batch — it will repair this review.'
+                : undefined}
               onClick={() => continueInChat(record)}
             >
               {helperStarting ? 'Starting helper…' : 'Ask agent to fix'}
@@ -744,14 +645,12 @@ export default function ChatDiffViewer({
   }
 
   return (
-    <div className="chat-work__overlay" role="presentation" onClick={onClose}>
+    <div className="chat-work__overlay" role="presentation">
       <div
         ref={dialogRef}
         className="chat-work chat-work--lifecycle"
         role="dialog"
-        aria-modal="true"
         aria-labelledby="chat-work-diff-title"
-        onClick={event => event.stopPropagation()}
       >
         <header className="chat-work__head">
           <div>
@@ -819,7 +718,7 @@ export default function ChatDiffViewer({
                   <p className="chat-work__notice">Showing the changes already loaded in this chat.</p>
                 ) : null}
                 {shortenedCount > 0 ? <p className="chat-work__notice">{shortenedCount} older {shortenedCount === 1 ? 'update is' : 'updates are'} excerpt-only.</p> : null}
-                {unsortedGroups.map((group, groupIndex) => (
+                {unsortedGroups.map((group) => (
                   <section className="chat-work__update" key={group.id}>
                     <div className="chat-work__update-head">
                       <div>
@@ -828,26 +727,12 @@ export default function ChatDiffViewer({
                       </div>
                       <div className="chat-work__update-head-actions">
                         {latestUnsortedTime ? <span>{updateTime(latestUnsortedTime)}</span> : null}
-                        {unsortedGroups.length > 1
-                          && overview.lifecycleAvailable && onPrepareProject
-                          && !workActive && !publicationPending ? (
-                          <button
-                            type="button"
-                            disabled={helperStarting}
-                            onClick={() => requestHelper(
-                              () => onPrepareProject(group, overview.unsortedRevision, workContext),
-                            )}
-                          >
-                            {helperStarting ? 'Starting…' : 'Prepare'}
-                          </button>
-                        ) : null}
                       </div>
                     </div>
                     <FileDiffList
                       files={group.files}
                       diffTruncated={shortenedCount > 0}
                       expansionCommand={expansionCommand}
-                      initiallyOpenFirst={groupIndex === 0}
                     />
                   </section>
                 ))}
@@ -887,6 +772,9 @@ export default function ChatDiffViewer({
                 const blocker = stack
                   ? stackSendBlocker(selectedPreparedItem, { connected: overview.contributions?.connected !== false })
                   : sendBlocker(representative, { connected: overview.contributions?.connected !== false })
+                const action = stack
+                  ? publicationStackAction(selectedPreparedItem)
+                  : publicationAction(representative)
                 const pending = stack
                   ? selectedPreparedItem.records.some(record => record?.status === 'submitting')
                   : representative?.status === 'submitting'
@@ -906,6 +794,21 @@ export default function ChatDiffViewer({
                       <div className="chat-work__contribution-actions">
                         {pending ? (
                           <button type="button" className="is-primary" disabled>Confirming…</button>
+                        ) : !blocker && visiblePreparedItems.length > 1 ? (
+                          <button type="button" onClick={() => beginConfirmation([selectedPreparedItem])}>{action.label}</button>
+                        ) : blocker && visiblePreparedItems.length > 1 && onContributeAll ? (
+                          <button
+                            type="button"
+                            disabled={helperStarting || workActive}
+                            title={workActive
+                              ? 'A helper is already preparing this batch — it will repair this review.'
+                              : undefined}
+                            onClick={() => requestHelper(
+                              () => onContributeAll(overview.workflowRevision, workContext),
+                            )}
+                          >
+                            {helperStarting ? 'Starting helper…' : 'Fix and review'}
+                          </button>
                         ) : null}
                         <button type="button" onClick={() => openContribute(representative)}>Open workshop</button>
                       </div>
@@ -923,81 +826,134 @@ export default function ChatDiffViewer({
                 )
               })() : null}
             </div>
+          ) : activeStage === 'needs_you' && (workDecision || attentionRecords.length > 0) ? (
+            <div className="chat-work__contributions">
+              {workDecision ? (
+                <article className="chat-work__contribution needs-attention chat-work__work-decision" key="work-decision">
+                  <div className="chat-work__contribution-copy">
+                    <span className="chat-work__contribution-state">Needs your decision</span>
+                    <strong>Preparation finished without changes to send</strong>
+                    <small className="is-error">The last prepare made no private review and opened no pull request.</small>
+                    <details className="chat-work__work-decision-detail">
+                      <summary>Why this needs you</summary>
+                      <div>{workDecision.result}</div>
+                    </details>
+                  </div>
+                </article>
+              ) : null}
+              {attentionRecords.map(renderContributionRecord)}
+            </div>
           ) : visibleRecords.length > 0 ? (
             <div className="chat-work__contributions">
               {visibleRecords.map(renderContributionRecord)}
             </div>
           ) : <EmptyStage stage={activeStage} hasRecordedEdits={overview.counts.files > 0} />}
-          {activeStage === 'working' ? (
-            <div className="chat-work__history-slot">
-              <PreparationHistory
-                count={overview.workHistoryCount}
-                excludeWorkId={workState === 'active' || workState === 'attention' ? work?.id : ''}
-                onLoad={() => onLoadWorkHistory?.({ appId: overview.contributeAppId })}
-                onOpenChat={onOpenChat}
-              />
-            </div>
-          ) : null}
         </div>
 
         <footer className="chat-work__dock" aria-label="Contribution controls">
           <div className="chat-work__dock-main">
             {helperStopError ? (
-              <section className="chat-work__helper-request is-error" role="alert">
-                <strong>Preparation is still running</strong>
-                <span>{helperStopError}</span>
-              </section>
-            ) : helperStarting || helperStartError ? (
-              <section
-                className={`chat-work__helper-request${helperStartError ? ' is-attention' : ' is-starting'}`}
-                role="status"
-                aria-live="polite"
-              >
-                <strong>
-                  {helperStartError ? 'Preparation paused' : 'Starting preparation…'}
-                </strong>
-                <span>{helperStartError || 'Changes stays open while the background helper starts.'}</span>
-                {helperStartError && retryHelperRef.current ? (
-                  <button type="button" disabled={helperStarting} onClick={retryHelper}>
-                    {helperStarting ? 'Starting…' : 'Try again'}
+              <section className="chat-work__primary-actions is-attention" role="alert">
+                <div>
+                  <strong>Preparation is still running</strong>
+                  <span>{helperStopError}</span>
+                </div>
+                <div className="chat-work__primary-buttons">
+                  <button type="button" onClick={reviewContributionOutcome}>Review</button>
+                  <button type="button" disabled={helperStopping} onClick={() => stopHelper(work)}>
+                    {helperStopping ? 'Stopping…' : 'Try stop again'}
                   </button>
-                ) : null}
+                </div>
+              </section>
+            ) : helperStartError ? (
+              <section
+                className="chat-work__primary-actions is-attention"
+                role="alert"
+              >
+                <div>
+                  <strong>Preparation paused</strong>
+                  <span>{helperStartError}</span>
+                </div>
+                <div className="chat-work__primary-buttons">
+                  <button type="button" onClick={reviewContributionOutcome}>Review</button>
+                  {retryHelperRef.current ? (
+                    <button type="button" className="is-primary" disabled={helperStarting} onClick={retryHelper}>
+                      {helperStarting ? 'Starting…' : 'Try again'}
+                    </button>
+                  ) : null}
+                </div>
               </section>
             ) : workState === 'active' || workState === 'attention' ? (
-              <AttachedWorkPanel
-                work={work}
-                state={workState}
-                onStop={stopHelper}
-                onContinue={() => requestHelper(
-                  () => onContributeAll?.(overview.workflowRevision, workContext),
-                )}
-                onOpenChat={onOpenChat}
-                action={primaryAction?.kind === 'publish-items' ? primaryAction : null}
-                onAction={runPrimaryAction}
-                busy={helperStarting}
-                stopping={helperStopping}
-              />
-            ) : activeStage === 'needs_you'
-              || activeStage === 'done' ? null : (
-              <section className="chat-work__primary-actions" aria-label="Next contribution action">
+              <section className={`chat-work__primary-actions is-${workState}`} aria-live="polite">
                 <div>
-                  <strong>{primaryAction ? 'Next step' : 'This chat is settled'}</strong>
-                  <span>{primaryAction?.description || 'Public work and local decisions remain connected to this chat.'}</span>
+                  <strong>{preparationView?.title}</strong>
+                  <span>{preparationView?.copy}</span>
                 </div>
-                {primaryAction ? (
-                  <div className="chat-work__primary-buttons">
+                <div className="chat-work__primary-buttons">
+                  <button type="button" onClick={reviewContributionOutcome}>Review</button>
+                  {workState === 'attention' ? (
                     <button
                       type="button"
                       className="is-primary"
                       disabled={helperStarting}
-                      onClick={runPrimaryAction}
+                      onClick={() => requestHelper(
+                        () => onContributeAll?.(overview.workflowRevision, workContext),
+                      )}
                     >
-                      {helperStarting ? 'Starting…' : primaryAction.label}
+                      {helperStarting ? 'Starting…' : 'Try again'}
                     </button>
-                  </div>
-                ) : null}
+                  ) : (
+                    <button type="button" className="is-primary" disabled>Preparing…</button>
+                  )}
+                  {workState === 'active' && typeof onStopWork === 'function' ? (
+                    <button type="button" disabled={helperStopping} onClick={() => stopHelper(work)}>
+                      {helperStopping ? 'Stopping…' : 'Stop'}
+                    </button>
+                  ) : null}
+                </div>
               </section>
-            )}
+            ) : activeStage === 'done' ? null : outcomeActions ? (
+              <section className={`chat-work__primary-actions${workDecision ? ' is-attention' : ''}`} aria-label="Contribution outcome">
+                <div>
+                  <strong>{workDecision ? 'Preparation finished — needs your decision' : 'Choose an outcome'}</strong>
+                  <span>{workDecision
+                    ? 'The last prepare made no private review and opened no pull request. Here is why, before you retry.'
+                    : 'Review the work, prepare it privately, or keep the guarded merge cycle moving.'}</span>
+                  {workDecision ? (
+                    <details className="chat-work__work-decision-detail">
+                      <summary>Why this needs you</summary>
+                      <div>{workDecision.result}</div>
+                    </details>
+                  ) : null}
+                </div>
+                <div className="chat-work__primary-buttons">
+                  <button
+                    type="button"
+                    title={outcomeActions.review.description}
+                    onClick={reviewContributionOutcome}
+                  >
+                    {outcomeActions.review.label}
+                  </button>
+                  <button
+                    type="button"
+                    title={outcomeActions.prepare.description}
+                    disabled={helperStarting || outcomeActions.prepare.disabled}
+                    onClick={prepareContributionOutcome}
+                  >
+                    {helperStarting ? 'Starting…' : outcomeActions.prepare.label}
+                  </button>
+                  <button
+                    type="button"
+                    className="is-primary"
+                    title={outcomeActions.merge.description}
+                    disabled={helperStarting}
+                    onClick={mergeContributionOutcome}
+                  >
+                    {helperStarting ? 'Starting…' : outcomeActions.merge.label}
+                  </button>
+                </div>
+              </section>
+            ) : null}
           </div>
 
         </footer>
@@ -1007,11 +963,13 @@ export default function ChatDiffViewer({
             <div>
               <strong>{confirmingAction.promptLabel}</strong>
               <span className={confirmationNotice ? 'is-attention' : ''}>
-                {confirmationNotice || 'GitHub will receive only these exact reviewed heads. Nothing will be merged.'}
+                {confirmationNotice || 'This step opens or updates only these exact reviewed pull requests. Nothing merges yet.'}
               </span>
               {confirmingMutations.length > 1 ? (
                 <ul className="chat-work__confirm-mutations">
-                  {confirmingMutations.map(mutation => <li key={mutation}>{mutation}</li>)}
+                  {confirmingMutations.map(mutation => (
+                    <li key={mutation}>{mutation}</li>
+                  ))}
                 </ul>
               ) : null}
             </div>

@@ -31,7 +31,7 @@ test('shell intent callbacks keep identity while navTo changes per render', asyn
   let refreshedApps = []
   const navToRef = { current: (...args) => calls.push(['first', ...args]) }
   const params = {
-    appsRef: { current: [{ id: 42, slug: 'artifacts' }] },
+    appsRef: { current: [{ id: 42, slug: 'pages' }] },
     refreshApps: async () => refreshedApps,
     showToast: (...args) => calls.push(['toast', ...args]),
     setAppIntents: (update) => calls.push(['intent', update({})]),

@@ -22,6 +22,7 @@ function ProgressStep({ item, detailsExpanded, onDetailsToggle, onClear, onActio
   }`
   const label = (
     <span className="chat__progress-step-label">
+      {item.icon && <span className="chat__progress-identity" aria-hidden="true">{item.icon}</span>}
       {item.label}
     </span>
   )

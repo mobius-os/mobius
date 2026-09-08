@@ -60,13 +60,13 @@ test('the composer backdrop fills the safe area without moving controls into it'
   assert.match(embeddedBackdrop, /bottom:\s*0/)
 })
 
-test('the durable-wait cancel control can receive taps through the footer', () => {
+test('the durable-wait disclosure and cancel controls receive footer taps', () => {
   const foot = ruleBody('.chat__foot')
   assert.match(foot, /pointer-events:\s*none/)
   assert.match(
     css,
-    /\.chat__foot \.chat__wait-cancel,[\s\S]*?\{\s*pointer-events:\s*auto;\s*\}/,
-    'the pointer-transparent footer must opt its visible wait cancel button back in',
+    /\.chat__foot \.chat__wait-summary,[\s\S]*?\.chat__foot \.chat__wait-cancel,[\s\S]*?\{\s*pointer-events:\s*auto;\s*\}/,
+    'the pointer-transparent footer must opt both wait controls back in',
   )
 })
 

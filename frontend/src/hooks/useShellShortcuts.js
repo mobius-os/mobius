@@ -1,7 +1,10 @@
-import { useCallback, useEffect, useMemo, useRef } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
+  SHORTCUT_OVERRIDES_CHANGED_EVENT,
+  SHORTCUT_OVERRIDES_STORAGE_KEY,
   findShellShortcut,
   frameShortcutBindings,
+  readShortcutOverrides,
   resolveShellCommands,
   shouldReserveShellShortcut,
   shortcutLabel,
@@ -10,10 +13,24 @@ import {
 import { isStandaloneDisplay } from '../utils/installPlatform.js'
 
 export default function useShellShortcuts(actions) {
+  const [overrides, setOverrides] = useState(() => readShortcutOverrides())
   const actionsRef = useRef(actions)
   actionsRef.current = actions
 
-  const catalog = useMemo(() => resolveShellCommands(), [])
+  useEffect(() => {
+    const refresh = () => setOverrides(readShortcutOverrides())
+    const onStorage = (event) => {
+      if (event.key == null || event.key === SHORTCUT_OVERRIDES_STORAGE_KEY) refresh()
+    }
+    window.addEventListener('storage', onStorage)
+    window.addEventListener(SHORTCUT_OVERRIDES_CHANGED_EVENT, refresh)
+    return () => {
+      window.removeEventListener('storage', onStorage)
+      window.removeEventListener(SHORTCUT_OVERRIDES_CHANGED_EVENT, refresh)
+    }
+  }, [])
+
+  const catalog = useMemo(() => resolveShellCommands(overrides), [overrides])
   const standalone = isStandaloneDisplay()
   const runAction = useCallback((actionId) => {
     const action = actionsRef.current?.[actionId]
@@ -29,7 +46,7 @@ export default function useShellShortcuts(actions) {
       // An unavailable chord is reserved only in an installed display, where
       // allowing Cmd/Ctrl+W through would close the whole app. In an ordinary
       // browser tab, preserve the browser/app default when Möbius did nothing.
-      if (!shouldReserveShellShortcut(handled, standalone)) return
+      if (!shouldReserveShellShortcut(handled, standalone, command)) return
       event.preventDefault()
       event.stopImmediatePropagation?.()
     }

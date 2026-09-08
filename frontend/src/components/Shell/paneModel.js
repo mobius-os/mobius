@@ -754,6 +754,21 @@ export function visibleAppIds(ws, visibleLeaves) {
   return set
 }
 
+// The string chat ids that are the active tab of one of `visibleLeaves` (or
+// every leaf when omitted). Content visibility further narrows this structural
+// set when Standard mode, Settings, or an immersive app owns the painted box.
+export function visibleChatIds(ws, visibleLeaves) {
+  const set = new Set()
+  const leaves = visibleLeaves || leafIds(ws.layout)
+  for (const paneId of leaves) {
+    const pane = ws.panes[paneId]
+    if (!pane || !pane.activeTabKey) continue
+    const active = pane.tabs.find(t => tabModel.tabKey(t) === pane.activeTabKey)
+    if (active && active.kind === 'chat') set.add(String(active.id))
+  }
+  return set
+}
+
 // The tab key an in-memory restorable route points at, or null for a route with
 // no concrete workspace item (Settings, or a home-seed chat route).
 function routeItemKey(route) {

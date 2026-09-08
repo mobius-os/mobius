@@ -27,7 +27,8 @@ function ActiveAssistantSurface({
   dataKey,
   chatId,
   onAnswer,
-  onAnswerPrepare,
+  onPrepareAnswer,
+  onCancelAnswer,
   onResume,
   onInternalNav,
   autoResumeEnabled,
@@ -86,7 +87,8 @@ function ActiveAssistantSurface({
       dataKey={dataKey}
       chatId={chatId}
       onAnswer={onAnswer}
-      onAnswerPrepare={onAnswerPrepare}
+      onPrepareAnswer={onPrepareAnswer}
+      onCancelAnswer={onCancelAnswer}
       onResume={onResume}
       onInternalNav={onInternalNav}
       autoResumeEnabled={autoResumeEnabled}

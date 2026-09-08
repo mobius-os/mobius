@@ -2,9 +2,11 @@ import { readFile, readdir } from 'node:fs/promises'
 import { dirname, join, relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+
 const frontendRoot = join(dirname(fileURLToPath(import.meta.url)), '..')
 const sourceRoot = join(frontendRoot, 'src')
 const allowlistPath = join(frontendRoot, 'structural-test-allowlist.json')
+
 
 async function testFiles(directory) {
   const entries = await readdir(directory, { withFileTypes: true })
@@ -16,19 +18,21 @@ async function testFiles(directory) {
   return nested.flat()
 }
 
+
 async function structuralInventory() {
   const inventory = []
   for (const path of await testFiles(sourceRoot)) {
     const source = await readFile(path, 'utf8')
     const readsSource = (
-      /from\s+['"]node:fs(?:\/promises)?['"]/.test(source)
-      && /\breadFile(?:Sync)?\b/.test(source)
+      /from\s+['"]node:fs['"]/.test(source)
+      && /\breadFile(?:Sync)?\s*\(/.test(source)
     )
     if (!readsSource) continue
     inventory.push(relative(frontendRoot, path))
   }
   return inventory.sort()
 }
+
 
 const allowlist = JSON.parse(await readFile(allowlistPath, 'utf8'))
 const inventory = await structuralInventory()

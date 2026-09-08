@@ -8,18 +8,3 @@ export function compactionBrief(msg) {
   if (typeof content === 'string' && content.trim()) return content
   return ''
 }
-
-const PROVIDER_LABELS = {
-  claude: 'Claude Code',
-  codex: 'OpenAI Codex',
-  mobius: 'Möbius Evolve',
-}
-
-// Pull a readable provider name off new handoff rows while preserving old
-// rows and extension-provided provider labels verbatim.
-export function compactionProviderLabel(msg) {
-  const raw = msg?.to_provider || msg?.provider
-  if (typeof raw !== 'string' || !raw.trim()) return null
-  const normalized = raw.trim()
-  return PROVIDER_LABELS[normalized.toLowerCase()] || normalized
-}

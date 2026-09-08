@@ -12,6 +12,7 @@ import {
   shouldAutoRevealActiveChat,
   clearDrawerGestureStyles,
   drawerOpenBlockedByDrag,
+  settleDrawerSwipe,
 } from '../drawerLifecycle.js'
 
 test('drawer close restores only while the drawer still owns focus', () => {
@@ -66,6 +67,41 @@ test('closed drawer cleanup removes an interrupted swipe transform', () => {
 
 test('drawer cleanup is safe before the panel ref mounts', () => {
   assert.doesNotThrow(() => clearDrawerGestureStyles(null))
+})
+
+test('a swipe-close during a pending traversal leaves drawer state and panel consistent', () => {
+  // The owner (useNavigation.closeDrawer) answers false while its previous
+  // history traversal is still pending, so `open` stays true. The panel must
+  // then rest where an open drawer rests — never parked off-screen under a
+  // scrim that still guards it (the reported "stuck until I open and close").
+  const owner = { traversalPending: true, open: true }
+  owner.closeDrawer = () => {
+    if (owner.traversalPending) return false
+    owner.open = false
+    return true
+  }
+  const dragged = () => ({
+    classList: { remove: () => {} },
+    style: { transform: 'translateX(-200px)' },
+  })
+
+  const refused = dragged()
+  settleDrawerSwipe(refused, { closeAccepted: owner.closeDrawer() })
+  assert.equal(owner.open, true)
+  assert.equal(refused.style.transform, '', 'refused close snaps back like a cancel')
+
+  owner.traversalPending = false
+  const accepted = dragged()
+  settleDrawerSwipe(accepted, { closeAccepted: owner.closeDrawer() })
+  assert.equal(owner.open, false)
+  assert.equal(accepted.style.transform, 'translateX(-100%)',
+    'an accepted close parks the panel at the closed target it will read next render')
+
+  // No owner at all (mode transition, `onClose` undefined) can never accept.
+  const orphaned = dragged()
+  settleDrawerSwipe(orphaned, { closeAccepted: undefined })
+  assert.equal(orphaned.style.transform, '')
+  assert.doesNotThrow(() => settleDrawerSwipe(null, { closeAccepted: true }))
 })
 
 test('close watchdog follows the computed transform transition', () => {

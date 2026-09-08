@@ -2,6 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
+  chatContributionOutcomeActions,
   chatChangesPrimaryAction,
   preparedChangesPrimaryAction,
   contributionActionOutcome,
@@ -90,8 +91,29 @@ test('Changes exposes one context-aware primary action', () => {
   assert.equal(chatChangesPrimaryAction({ counts: { open: 2 } }).label, 'Check for updates')
   assert.equal(chatChangesPrimaryAction({ counts: { unsorted: 1, prepared: 1 } }).label, 'Prepare to submit')
   assert.equal(chatChangesPrimaryAction({ workState: 'active', counts: { unsorted: 4 } }), null)
+  assert.equal(chatChangesPrimaryAction({ lifecycleAvailable: false, counts: { unsorted: 4 } }), null)
   assert.equal(chatChangesPrimaryAction({ counts: { submitting: 1, prepared: 1 } }), null)
   assert.equal(chatChangesPrimaryAction({ counts: {} }), null)
+})
+
+test('Changes offers one Review, Prepare, Merge outcome set', () => {
+  const unsorted = chatContributionOutcomeActions({ counts: { unsorted: 4 } })
+  assert.equal(unsorted.review.label, 'Review')
+  assert.equal(unsorted.prepare.label, 'Prepare')
+  assert.equal(unsorted.prepare.disabled, false)
+  assert.equal(unsorted.merge.label, 'Merge')
+  assert.match(unsorted.merge.description, /exact approval checkpoint/)
+
+  const ready = chatContributionOutcomeActions(
+    { counts: { prepared: 2 } },
+    { kind: 'publish-items' },
+  )
+  assert.equal(ready.prepare.disabled, true)
+  assert.equal(ready.prepare.description, 'This exact work is already prepared.')
+  assert.equal(chatContributionOutcomeActions({ counts: {} }), null)
+  assert.equal(chatContributionOutcomeActions({ workState: 'active', counts: { unsorted: 1 } }), null)
+  assert.equal(chatContributionOutcomeActions({ lifecycleAvailable: false, counts: { unsorted: 1 } }), null)
+  assert.equal(chatContributionOutcomeActions({ counts: { submitting: 1, prepared: 1 } }), null)
 })
 
 test('prepared work resolves to one direct top action', () => {

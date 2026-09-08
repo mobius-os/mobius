@@ -1,8 +1,6 @@
 /* GoalPlanDetails renders the expanded dependency-aware todo list. */
 
-import { useQuery } from '@tanstack/react-query'
-import { api, jsonOrThrow } from '../../api/client.js'
-import AgentCoordinationFeed from '../Agents/AgentCoordinationFeed.jsx'
+import { Check } from '@openai/apps-sdk-ui/components/Icon'
 import { goalTaskDisplayStatus } from './goalProgress'
 
 function taskMeta(task, tasksById) {
@@ -58,7 +56,9 @@ function GoalPlanRow({ title, status, meta, depth, emphasized, children }) {
           emphasized ? ` chat__goal-task--${emphasized}` : ''
         }`}
       >
-        <span className="chat__goal-task-marker" aria-hidden="true" />
+        <span className="chat__goal-task-marker" aria-hidden="true">
+          {status === 'completed' && <Check width={12} height={12} />}
+        </span>
         <span className="chat__goal-task-copy">
           <span className="chat__goal-task-title">{title}</span>
           <span className="chat__goal-task-meta">{meta}</span>
@@ -69,28 +69,7 @@ function GoalPlanRow({ title, status, meta, depth, emphasized, children }) {
   )
 }
 
-function LiveAgentRelay({ chatId }) {
-  const query = useQuery({
-    queryKey: ['agent-coordination', 'chat', chatId],
-    enabled: !!chatId,
-    queryFn: async () => jsonOrThrow(
-      await api.agentCoordination.chat(chatId), 'Agent network failed:',
-    ),
-    refetchInterval: 5_000,
-    staleTime: 1_500,
-    retry: 0,
-  })
-  if (!chatId) return null
-  return <AgentCoordinationFeed
-    snapshot={query.data}
-    compact
-    loading={query.isLoading}
-    error={query.isError}
-    onRetry={() => query.refetch()}
-  />
-}
-
-export default function GoalPlanDetails({ plan, chatId = null }) {
+export default function GoalPlanDetails({ plan }) {
   const tasks = Array.isArray(plan?.tasks) ? plan.tasks : []
   if (!tasks.length) return null
   const tasksById = new Map(tasks.map(task => [task.id, task]))
@@ -150,7 +129,6 @@ export default function GoalPlanDetails({ plan, chatId = null }) {
           .filter(node => !tasksById.has(node.task_key))
           .map(node => renderDelegation(node))}
       </div>
-      {chatId && <LiveAgentRelay chatId={chatId} />}
     </div>
   )
 }

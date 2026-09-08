@@ -1,29 +1,16 @@
-import { resolveOnline } from './onlineStatus.js'
-
-// navigator.onLine is only a hint in the service-worker PWA: cached requests
-// can leave it stale in either direction. A no-store /api/health request is the
-// reachability verdict, while resolveOnline supplies the asymmetric hysteresis
-// that rejects one cold-radio failure and one stale-radio success. We always
-// probe—even when the flag says offline—so reconnect recovery cannot wedge.
+// One process-wide owner for server reachability.
 //
-// The monitor is process-wide because the shell retains multiple chats and an
-// app canvas at once. Giving each hook instance its own browser listeners and
-// 20-second poll made panes disagree and multiplied mobile radio wakeups. The
-// first subscriber starts this store; the last one tears every resource down.
+// Browser online/offline events are prompts, not verdicts. Any HTTP response
+// proves that the server is reachable; only a network failure can move the
+// state toward Offline. The public boolean deliberately maps Checking to
+// online so a cold radio or laptop wake does not disable the product.
 const HEALTH_URL = '/api/health'
-// A healthy server answers quickly, but a mobile radio waking from background
-// can need longer. The cap mainly bounds Android fetches that remain pending
-// after the network disappears; AppCanvas also waits on this verdict before it
-// chooses its offline-safe credential path.
+
 export const PROBE_TIMEOUT_MS = 3000
-// Treat an OS offline event as a prompt to verify after a handoff grace, never
-// as truth. Android can emit it transiently while moving between radios.
-export const OFFLINE_EVENT_GRACE_MS = 2500
-export const POLL_INTERVAL_MS = 20000
-// A browser hint that disagrees with the probe is ambiguous in either
-// direction. Confirm the first result quickly instead of leaving Send enabled
-// or a recovered PWA labelled offline until the regular poll.
-export const AMBIGUOUS_VERDICT_CONFIRM_MS = 1000
+export const FAILURE_GRACE_MS = 5000
+export const RECOVERY_RETRY_MIN_MS = 1000
+export const RECOVERY_RETRY_MAX_MS = 30000
+export const STALE_OFFLINE_SUCCESS_THRESHOLD = 2
 
 export const ReachabilityPhase = Object.freeze({
   ONLINE: 'online',
@@ -31,16 +18,78 @@ export const ReachabilityPhase = Object.freeze({
   OFFLINE: 'offline',
 })
 
-function reachabilityPhase(state) {
-  if (!state.online) return ReachabilityPhase.OFFLINE
-  if (state.failureStreak > 0) return ReachabilityPhase.CHECKING
-  return ReachabilityPhase.ONLINE
+export function publicOnline(state) {
+  return state.phase !== ReachabilityPhase.OFFLINE
 }
 
-/**
- * One reachability monitor shared by every shell consumer. The dependency
- * arguments keep the state machine directly testable without browser globals.
- */
+export function initialReachabilityState(navigatorOnline = true) {
+  return {
+    phase: navigatorOnline === false
+      ? ReachabilityPhase.OFFLINE
+      : ReachabilityPhase.ONLINE,
+    staleOfflineSuccesses: 0,
+    recoveryGeneration: 0,
+  }
+}
+
+/** Pure evidence reducer. Timers only decide when to supply `deadline`. */
+export function reduceReachability(state, evidence) {
+  if (evidence.type === 'reachable') {
+    const needsStaleFlagConfirmation = (
+      state.phase === ReachabilityPhase.OFFLINE
+      && evidence.strong !== true
+      && evidence.navigatorOnline === false
+    )
+    if (needsStaleFlagConfirmation) {
+      const streak = state.staleOfflineSuccesses + 1
+      if (streak < STALE_OFFLINE_SUCCESS_THRESHOLD) {
+        return { ...state, staleOfflineSuccesses: streak }
+      }
+    }
+    const recovered = state.phase !== ReachabilityPhase.ONLINE
+      || state.staleOfflineSuccesses > 0
+    return {
+      phase: ReachabilityPhase.ONLINE,
+      staleOfflineSuccesses: 0,
+      recoveryGeneration: state.recoveryGeneration + (recovered ? 1 : 0),
+    }
+  }
+
+  if (
+    evidence.type === 'checking'
+    && state.phase === ReachabilityPhase.ONLINE
+  ) {
+    return {
+      ...state,
+      phase: ReachabilityPhase.CHECKING,
+      staleOfflineSuccesses: 0,
+    }
+  }
+
+  if (evidence.type === 'failed') {
+    if (state.phase === ReachabilityPhase.OFFLINE) {
+      return { ...state, staleOfflineSuccesses: 0 }
+    }
+    return {
+      ...state,
+      phase: ReachabilityPhase.CHECKING,
+      staleOfflineSuccesses: 0,
+    }
+  }
+
+  if (evidence.type === 'deadline' && state.phase === ReachabilityPhase.CHECKING) {
+    return { ...state, phase: ReachabilityPhase.OFFLINE, staleOfflineSuccesses: 0 }
+  }
+
+  return state
+}
+
+function sameState(a, b) {
+  return a.phase === b.phase
+    && a.staleOfflineSuccesses === b.staleOfflineSuccesses
+    && a.recoveryGeneration === b.recoveryGeneration
+}
+
 export function createConnectivityStore({
   windowTarget = typeof window === 'undefined' ? null : window,
   documentTarget = typeof document === 'undefined' ? null : document,
@@ -49,43 +98,28 @@ export function createConnectivityStore({
   AbortControllerImpl = typeof AbortController === 'undefined' ? null : AbortController,
   setTimeoutFn = setTimeout,
   clearTimeoutFn = clearTimeout,
-  setIntervalFn = setInterval,
-  clearIntervalFn = clearInterval,
 } = {}) {
   const listeners = new Set()
-  let connectivityState = {
-    successStreak: 0,
-    failureStreak: 0,
-    online: navigatorTarget?.onLine !== false,
-  }
-  let phase = reachabilityPhase(connectivityState)
-  let recoveryGeneration = 0
+  let state = initialReachabilityState(navigatorTarget?.onLine !== false)
   let monitor = null
-  let verificationCheck = null
-  let authoritativeReachabilityRevision = 0
+  let standaloneCheck = null
+  let evidenceRevision = 0
 
-  function getSnapshot() {
-    return phase !== ReachabilityPhase.OFFLINE
-  }
+  function getSnapshot() { return publicOnline(state) }
+  function getPhaseSnapshot() { return state.phase }
+  function getRecoverySnapshot() { return state.recoveryGeneration }
+  function getState() { return state }
 
-  function getPhaseSnapshot() {
-    return phase
-  }
-
-  function getRecoverySnapshot() {
-    return recoveryGeneration
-  }
-
-  function publish(nextState, nextPhase = reachabilityPhase(nextState)) {
-    const recovered = (
-      nextPhase === ReachabilityPhase.ONLINE
-      && phase !== ReachabilityPhase.ONLINE
-    )
-    connectivityState = nextState
-    if (phase === nextPhase) return
-    if (recovered) recoveryGeneration += 1
-    phase = nextPhase
-    listeners.forEach((listener) => listener())
+  function publish(next) {
+    if (sameState(state, next)) return false
+    const previousPhase = state.phase
+    const previousRecovery = state.recoveryGeneration
+    state = next
+    if (
+      previousPhase !== next.phase
+      || previousRecovery !== next.recoveryGeneration
+    ) listeners.forEach(listener => listener())
+    return true
   }
 
   async function probeReachable() {
@@ -93,16 +127,12 @@ export function createConnectivityStore({
     let timer = null
     const controller = AbortControllerImpl ? new AbortControllerImpl() : null
     try {
-      if (controller) {
-        timer = setTimeoutFn(() => controller.abort(), PROBE_TIMEOUT_MS)
-      }
+      if (controller) timer = setTimeoutFn(() => controller.abort(), PROBE_TIMEOUT_MS)
+      // Any response is transport success. Authentication and server errors
+      // belong to the request owner and must never masquerade as Offline.
       await fetchImpl(HEALTH_URL, {
-        method: 'GET',
-        cache: 'no-store',
-        signal: controller?.signal,
+        method: 'GET', cache: 'no-store', signal: controller?.signal,
       })
-      // Any response proves transport reachability. Status handling belongs to
-      // the request owner and must not masquerade as an offline connection.
       return true
     } catch {
       return false
@@ -111,28 +141,12 @@ export function createConnectivityStore({
     }
   }
 
-  function applyProbe(reachable) {
-    const next = resolveOnline(
-      reachable,
-      navigatorTarget?.onLine !== false,
-      connectivityState,
-    )
-    publish(next)
-    return next
-  }
-
-  // An authenticated HTTP response is stronger evidence than navigator.onLine
-  // or a failed health probe: it could only have come from the live server.
-  // Let durable streams and owning write paths repair a stale offline verdict
-  // immediately instead of waiting for the next poll or `online` event.
   function reportReachable() {
-    authoritativeReachabilityRevision += 1
-    const next = {
-      successStreak: Math.max(1, connectivityState.successStreak),
-      failureStreak: 0,
-      online: true,
-    }
-    publish(next)
+    evidenceRevision += 1
+    publish(reduceReachability(state, {
+      type: 'reachable', strong: true, navigatorOnline: true,
+    }))
+    monitor?.settleRecovery()
   }
 
   function startMonitor() {
@@ -142,97 +156,126 @@ export function createConnectivityStore({
     let cancelled = false
     let activeCheck = null
     let rerun = false
-    let offlineTimer = null
-    let confirmTimer = null
-    let interval = null
+    let failureTimer = null
+    let retryTimer = null
+    let retryAttempt = 0
 
+    function visible() { return documentTarget.visibilityState !== 'hidden' }
+    function clearFailureDeadline() {
+      if (failureTimer !== null) clearTimeoutFn(failureTimer)
+      failureTimer = null
+    }
+    function clearRetry() {
+      if (retryTimer !== null) clearTimeoutFn(retryTimer)
+      retryTimer = null
+    }
+    function settleRecovery() {
+      clearFailureDeadline()
+      clearRetry()
+      retryAttempt = 0
+    }
+    function retryDelay() {
+      return Math.min(
+        RECOVERY_RETRY_MIN_MS * (2 ** retryAttempt),
+        RECOVERY_RETRY_MAX_MS,
+      )
+    }
+    function scheduleRetry() {
+      if (cancelled || !visible() || retryTimer !== null) return
+      const delay = retryDelay()
+      retryAttempt += 1
+      retryTimer = setTimeoutFn(() => {
+        retryTimer = null
+        void check()
+      }, delay)
+    }
+    function beginFailureWindow() {
+      if (failureTimer !== null || state.phase !== ReachabilityPhase.CHECKING) return
+      failureTimer = setTimeoutFn(() => {
+        failureTimer = null
+        publish(reduceReachability(state, { type: 'deadline' }))
+        scheduleRetry()
+      }, FAILURE_GRACE_MS)
+    }
+    function applyProbe(reachable, startedRevision) {
+      if (!reachable && startedRevision !== evidenceRevision) return true
+      if (reachable) {
+        const next = reduceReachability(state, {
+          type: 'reachable',
+          strong: false,
+          navigatorOnline: navigatorTarget?.onLine !== false,
+        })
+        publish(next)
+        if (next.phase === ReachabilityPhase.ONLINE) settleRecovery()
+        else {
+          // One real response while navigator.onLine is stale-false is useful
+          // progress. Confirm it promptly rather than inheriting an outage's
+          // potentially long exponential backoff.
+          clearRetry()
+          retryAttempt = 0
+          scheduleRetry()
+        }
+        return true
+      }
+      publish(reduceReachability(state, { type: 'failed' }))
+      beginFailureWindow()
+      scheduleRetry()
+      return false
+    }
     function check() {
       if (activeCheck) {
         rerun = true
         return activeCheck
       }
-      activeCheck = (async () => {
-        const startedRevision = authoritativeReachabilityRevision
-        const reachable = await probeReachable()
-        if (cancelled) return reachable
-        if (!reachable && startedRevision !== authoritativeReachabilityRevision) {
-          // A mutation response arrived after this probe began. Its live-server
-          // evidence is newer and stronger than the stale failed read.
-          return true
-        }
-        const next = applyProbe(reachable)
-        if (confirmTimer !== null) clearTimeoutFn(confirmTimer)
-        confirmTimer = null
-        // Either stale browser hint needs two matching probes. Run the second
-        // promptly in BOTH directions: otherwise a stale-false navigator flag
-        // leaves a genuinely reconnected PWA looking offline until the 20s
-        // interval, the exact resume-from-background failure this streak is
-        // meant to prevent.
-        const needsFailureConfirmation = (
-          !reachable && next.online && next.failureStreak === 1
-        )
-        const needsRecoveryConfirmation = (
-          reachable && !next.online && next.successStreak === 1
-        )
-        if (needsFailureConfirmation || needsRecoveryConfirmation) {
-          confirmTimer = setTimeoutFn(
-            () => { void check() },
-            AMBIGUOUS_VERDICT_CONFIRM_MS,
-          )
-        }
-        return reachable
-      })().finally(() => {
-        activeCheck = null
-        if (rerun && !cancelled) {
-          rerun = false
-          void check()
-        }
-      })
+      const startedRevision = evidenceRevision
+      activeCheck = probeReachable()
+        .then(reachable => cancelled
+          ? reachable
+          : applyProbe(reachable, startedRevision))
+        .finally(() => {
+          activeCheck = null
+          if (rerun && !cancelled) {
+            rerun = false
+            void check()
+          }
+        })
       return activeCheck
     }
-
-    const onOffline = () => {
-      if (offlineTimer !== null) clearTimeoutFn(offlineTimer)
-      if (confirmTimer !== null) clearTimeoutFn(confirmTimer)
-      confirmTimer = null
-      offlineTimer = setTimeoutFn(() => { void check() }, OFFLINE_EVENT_GRACE_MS)
-    }
-    const onOnline = () => {
-      if (offlineTimer !== null) clearTimeoutFn(offlineTimer)
-      if (confirmTimer !== null) clearTimeoutFn(confirmTimer)
-      offlineTimer = null
-      confirmTimer = null
+    function requestCheck() {
+      if (!visible()) return
       void check()
     }
-    const onVisible = () => {
-      if (documentTarget.visibilityState !== 'visible') return
-      if (offlineTimer !== null) clearTimeoutFn(offlineTimer)
-      offlineTimer = null
-      void check()
+    function onVisibilityChange() {
+      if (!visible()) {
+        clearRetry()
+        return
+      }
+      requestCheck()
     }
 
     const current = {
       check,
+      settleRecovery,
       stop() {
         if (cancelled) return
         cancelled = true
-        if (offlineTimer !== null) clearTimeoutFn(offlineTimer)
-        if (confirmTimer !== null) clearTimeoutFn(confirmTimer)
-        if (interval !== null) clearIntervalFn(interval)
-        windowTarget.removeEventListener('online', onOnline)
-        windowTarget.removeEventListener('offline', onOffline)
-        documentTarget.removeEventListener('visibilitychange', onVisible)
+        clearFailureDeadline()
+        clearRetry()
+        windowTarget.removeEventListener('online', requestCheck)
+        windowTarget.removeEventListener('offline', requestCheck)
+        windowTarget.removeEventListener('focus', requestCheck)
+        windowTarget.removeEventListener('pageshow', requestCheck)
+        documentTarget.removeEventListener('visibilitychange', onVisibilityChange)
         if (monitor === current) monitor = null
       },
     }
     monitor = current
-    windowTarget.addEventListener('online', onOnline)
-    windowTarget.addEventListener('offline', onOffline)
-    documentTarget.addEventListener('visibilitychange', onVisible)
-    interval = setIntervalFn(() => {
-      if (documentTarget.visibilityState === 'visible') void check()
-    }, POLL_INTERVAL_MS)
-    void check()
+    windowTarget.addEventListener('online', requestCheck)
+    windowTarget.addEventListener('offline', requestCheck)
+    windowTarget.addEventListener('focus', requestCheck)
+    windowTarget.addEventListener('pageshow', requestCheck)
+    documentTarget.addEventListener('visibilitychange', onVisibilityChange)
+    requestCheck()
     return current
   }
 
@@ -248,33 +291,34 @@ export function createConnectivityStore({
     }
   }
 
-  // A failed API request can request a fresh verdict. With mounted consumers,
-  // reuse their coalesced monitor. Without consumers, perform one bounded probe
-  // only—never create an ownerless polling interval.
   function verify() {
-    if (phase === ReachabilityPhase.ONLINE) {
-      publish(connectivityState, ReachabilityPhase.CHECKING)
-    }
+    // Callers invoke verification only after transport evidence such as a
+    // failed request or an unexpected stream close. Surface that uncertainty
+    // immediately; the bounded probe owns the final reachability verdict.
+    publish(reduceReachability(state, { type: 'checking' }))
     if (monitor) return monitor.check()
-    if (verificationCheck) return verificationCheck
-    const startedRevision = authoritativeReachabilityRevision
-    verificationCheck = probeReachable()
-      .then((reachable) => {
-        if (
-          !reachable
-          && startedRevision !== authoritativeReachabilityRevision
-        ) return true
-        applyProbe(reachable)
+    if (standaloneCheck) return standaloneCheck
+    const startedRevision = evidenceRevision
+    standaloneCheck = probeReachable()
+      .then(reachable => {
+        if (!reachable && startedRevision !== evidenceRevision) return true
+        publish(reduceReachability(state, reachable
+          ? {
+              type: 'reachable', strong: false,
+              navigatorOnline: navigatorTarget?.onLine !== false,
+            }
+          : { type: 'failed' }))
         return reachable
       })
-      .finally(() => { verificationCheck = null })
-    return verificationCheck
+      .finally(() => { standaloneCheck = null })
+    return standaloneCheck
   }
 
   return {
     getSnapshot,
     getPhaseSnapshot,
     getRecoverySnapshot,
+    getState,
     subscribe,
     verify,
     reportReachable,

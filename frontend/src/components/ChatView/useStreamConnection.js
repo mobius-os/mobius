@@ -40,7 +40,9 @@ import {
   retireIntent,
 } from './chatOutbox.js'
 import {
+  getRecoverySnapshot,
   reportNetworkReachable,
+  subscribeRecovery,
   verifyConnectivity,
 } from '../../lib/connectivityStore.js'
 import { sendWithAmbiguityRecovery } from './sendTransportRecovery.js'
@@ -825,6 +827,7 @@ export default function useStreamConnection(chatId, {
           signal: controller.signal,
         },
       )
+      reportNetworkReachable()
 
       // Stale-connection guard. Between scheduling this fetch and its
       // resolution, the connection we belong to may have been torn down
@@ -1460,6 +1463,7 @@ export default function useStreamConnection(chatId, {
       // fresh send) — the reattach window, if one is open, continues on
       // the successor connection, so the note is deliberately left alone.
       if (err.name === 'AbortError') return
+      void verifyConnectivity()
       flushBuffer()
       setIsStreaming(false)
       // Real failure: the connectionError states below own the
@@ -1519,6 +1523,30 @@ export default function useStreamConnection(chatId, {
 
   // Keep ref in sync so retry timeouts call the latest version.
   connectRef.current = connectToStream
+
+  // A retry cap only bounds one unavailable server generation. When the
+  // connectivity owner observes recovery after a restart, reopen any stream
+  // this pane still owns even if it had reached the terminal "disconnected"
+  // latch. This is deliberately a subscription to the shared store rather
+  // than another browser online listener or a local polling loop.
+  const recoveryReconnectRef = useRef(() => {})
+  recoveryReconnectRef.current = () => {
+    retryCount.current = 0
+    if (!wantsReconnectRef.current) return
+    setConnectionError(null)
+    clearReconnectingNote()
+    setIsStreaming(true)
+    connectRef.current?.(true)
+  }
+  useEffect(() => {
+    let observedRecoveryGeneration = getRecoverySnapshot()
+    return subscribeRecovery(() => {
+      const generation = getRecoverySnapshot()
+      if (generation === observedRecoveryGeneration) return
+      observedRecoveryGeneration = generation
+      recoveryReconnectRef.current()
+    })
+  }, [])
 
   const retry = useCallback(() => {
     retryCount.current = 0

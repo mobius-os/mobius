@@ -60,6 +60,7 @@ import { cidOf } from '../messageIdentity.js'
  *   pendingMessages: PendingMsg[],
  *   pendingMessagesRef: React.MutableRefObject<PendingMsg[]>,
  *   visiblePendingMessages: PendingMsg[],
+ *   steerReservedMessages: PendingMsg[],
  *   getVisiblePendingMessages: () => PendingMsg[],
  *   reserveForSteer: (cidList: string[]) => void,
  *   releaseSteerReservation: (cidList: string[]) => void,
@@ -177,6 +178,13 @@ export default function usePendingQueue(initialServerList = []) {
   )
   const visiblePendingMessages = pendingMessages.filter(
     msg => !msg.hidden && !steerReservedCids.has(cidOf(msg)),
+  )
+  // A reserved steer is no longer an actionable queue item, but it is still
+  // owner-authored content and must never disappear while the provider control
+  // call settles. ChatView renders these rows immediately after the active
+  // assistant surface, then the authoritative cut moves them into history.
+  const steerReservedMessages = pendingMessages.filter(
+    msg => !msg.hidden && steerReservedCids.has(cidOf(msg)),
   )
 
   // Internal helper: synchronously update both the ref and React state. Every
@@ -388,6 +396,7 @@ export default function usePendingQueue(initialServerList = []) {
     pendingMessages,
     pendingMessagesRef,
     visiblePendingMessages,
+    steerReservedMessages,
     getVisiblePendingMessages,
     reserveForSteer,
     releaseSteerReservation,

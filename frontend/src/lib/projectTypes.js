@@ -1,8 +1,3 @@
-const CREATION_KIND_ORDER = ['blank', 'mini-app', 'web', 'latex']
-const CREATION_KIND_RANK = new Map(
-  CREATION_KIND_ORDER.map((kind, index) => [kind, index]),
-)
-
 function semanticTypeKey(value) {
   const raw = String(value || '').toLowerCase()
   const separator = raw.indexOf(':')
@@ -27,6 +22,8 @@ function projectTypeWords(value) {
 }
 
 export function projectTypeKind(value) {
+  const declared = value && typeof value === 'object' ? (value.kind || value.template?.kind) : ''
+  if (declared) return declared
   const words = projectTypeWords(value)
   if (/github|repository|\brepo\b/.test(words)) return 'github'
   if (/latex|\.tex\b|paper/.test(words)) return 'latex'
@@ -41,26 +38,19 @@ export function projectTypeKind(value) {
 
 export function defaultProjectName(template) {
   const name = String(template?.name || '').trim()
-  if (!name || projectTypeKind(template) === 'blank') return 'Untitled project'
+  if (!name || template?.key === 'blank') return 'Untitled project'
   return `Untitled ${name.toLowerCase()}`
 }
 
-// Projects keeps one deliberately small global creation surface. Specialist
-// apps may still expose richer templates inside their own UI; an installed app
-// contributes Website, Mini-app, or LaTeX here simply by contributing a live
-// template of that kind. One row per kind keeps duplicate providers from
-// turning the global menu back into a template catalog.
+// Core templates and installed Project apps compose; names and glyph kinds do
+// not decide which providers are allowed into the picker.
 export function globalProjectTemplates(templates) {
-  const candidates = Array.isArray(templates) ? templates : []
-  const firstByKind = new Map()
-  for (const template of candidates) {
-    const kind = projectTypeKind(template)
-    if (!CREATION_KIND_RANK.has(kind) || firstByKind.has(kind)) continue
-    firstByKind.set(kind, template)
-  }
-  return CREATION_KIND_ORDER.flatMap(kind => (
-    firstByKind.has(kind) ? [firstByKind.get(kind)] : []
-  ))
+  const rows = (Array.isArray(templates) ? templates : []).filter(t => !t.retired)
+  return [...rows.filter(t => t.source_app_id == null), ...rows.filter(t => t.source_app_id != null)]
+}
+
+export function projectAppTemplates(templates) {
+  return globalProjectTemplates(templates).filter(t => t.source_app_id != null)
 }
 
 export function normalizeProjectColor(value) {
@@ -75,6 +65,6 @@ export function projectIdentityTone(value) {
   )
   return {
     kind: projectTypeKind(value),
-    accent: custom || 'var(--accent)',
+    accent: custom || 'var(--text)',
   }
 }

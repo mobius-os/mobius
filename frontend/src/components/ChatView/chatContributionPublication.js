@@ -103,7 +103,7 @@ export async function publishContribution({
   }
 }
 
-/** Execute one complete immutable stack action and reconcile partial/lost outcomes. */
+/** Execute one exact immutable stack phase and reconcile partial/lost outcomes. */
 export async function publishContributionStack({
   appId,
   item,

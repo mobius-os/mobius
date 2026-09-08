@@ -1,5 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 
 import {
   contextTokenCounts,
@@ -7,9 +8,11 @@ import {
   formatRoundedTokenCount,
   modelContextTokenCounts,
   resolvedContextTokenCounts,
-  visibleBrainFillBounds,
 } from '../brainUsage.js'
 import { chatQueries } from '../../../hooks/queries.js'
+
+const chatViewSource = readFileSync(new URL('../ChatView.jsx', import.meta.url), 'utf8')
+const brainIconSource = readFileSync(new URL('../BrainUsageIcon.jsx', import.meta.url), 'utf8')
 
 test('context gauge measures the latest model call against its context window', () => {
   assert.equal(contextUsedPercent({
@@ -94,23 +97,34 @@ test('context usage cache identity follows the exact provider session', () => {
   assert.notDeepEqual(first, second)
 })
 
-test('the final ten percent remains visibly linear inside the inset mask', () => {
-  const geometry = percent => visibleBrainFillBounds(percent, {
-    top: 2.3,
-    bottom: 21.7,
-    inset: 1.75,
-  })
-  const at90 = geometry(90)
-  const at95 = geometry(95)
-  const at100 = geometry(100)
+test('the brain reads the selected model through the durable chat policy', () => {
+  assert.match(chatViewSource, /model=\{selectedChatModel\(chatInfo\)\}/)
+  assert.doesNotMatch(
+    chatViewSource,
+    /model=\{chatInfo\?\.effective_agent_settings\?\.model\}/,
+  )
+})
 
-  assert.ok(at95.fillHeight > at90.fillHeight)
-  assert.ok(at100.fillHeight > at95.fillHeight)
-  assert.ok(Math.abs(
-    (at95.fillHeight - at90.fillHeight)
-    - (at100.fillHeight - at95.fillHeight),
-  ) < 1e-12)
-  assert.ok(Math.abs(at100.fillY - 4.05) < 1e-12)
-  assert.deepEqual(geometry(105), at100)
-  assert.equal(geometry(-5).fillHeight, 0)
+test('a settled turn publishes its new provider session to the open pane', () => {
+  assert.match(
+    chatViewSource,
+    /const refreshedChatInfo = chatDetailCacheValue\(data\)\.chatInfo/,
+  )
+  assert.match(
+    chatViewSource,
+    /updateChatRuntimeCache\([\s\S]*?chatInfo: refreshedChatInfo/,
+  )
+})
+
+test('the accepted brain treatment keeps both fills inside a 38px circular trigger', () => {
+  assert.match(brainIconSource, /const DEFAULT_SIZE = 38/)
+  assert.match(brainIconSource, /const OUTLINE_EROSION_RADIUS = 0\.25/)
+  assert.match(brainIconSource, /const FILL_INSET = NOMINAL_BOUNDARY_WIDTH - OUTLINE_EROSION_RADIUS/)
+  assert.match(brainIconSource, /const VISIBLE_TOP = TOP \+ FILL_INSET/)
+  assert.match(brainIconSource, /const VISIBLE_BOTTOM = BOTTOM - FILL_INSET/)
+  assert.match(brainIconSource, /const fillHeight = \(\(VISIBLE_BOTTOM - VISIBLE_TOP\) \* clamped\) \/ 100/)
+  assert.match(brainIconSource, /<mask[\s\S]*?id=\{fillMaskId\}[\s\S]*?maskUnits="userSpaceOnUse"/)
+  assert.match(brainIconSource, /strokeWidth=\{FILL_INSET \* 2\}/)
+  assert.match(brainIconSource, /<g mask=\{`url\(#\$\{fillMaskId\}\)`\}>/)
+  assert.doesNotMatch(brainIconSource, /clipPath=\{`url\(#\$\{silhouetteId\}\)`\}/)
 })

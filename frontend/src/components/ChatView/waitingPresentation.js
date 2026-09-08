@@ -1,3 +1,10 @@
+/* Presentation shared by active handoffs and settled wait history. */
+
+export function waitConditionLabel(description) {
+  // Sentence-case the instruction, not case-sensitive project names or refs.
+  return String(description || '').trim().replace(/^resume when\b/, 'Resume when')
+}
+
 function apiDate(value) {
   if (!value) return null
   const text = String(value)
@@ -29,12 +36,26 @@ function cadenceLabel(wait) {
   return `every ${hours} ${hours === 1 ? 'hour' : 'hours'}`
 }
 
-export function resourcePausePresentation(block, summary) {
+function helperTaskLabel(taskKey) {
+  return String(taskKey || '')
+    .replace(/[._-]+/g, ' ')
+    .replace(/^./, letter => letter.toUpperCase())
+}
+
+export const RESOURCE_PAUSE_KINDS = new Set(['memory', 'storage'])
+
+export function isResourcePause(block) {
+  return !!block && RESOURCE_PAUSE_KINDS.has(block.pause?.kind)
+}
+
+export function resourcePausePresentation(block) {
   const kind = block?.pause?.kind
   const next = clockLabel(block?.pause?.resets_at)
   const storage = kind === 'storage'
   return {
-    summary,
+    summary: storage
+      ? 'Waiting for storage headroom'
+      : 'Waiting for memory to settle',
     next: next ? `checks again ${next}` : 'checks again automatically',
     owner: 'Möbius resource monitor',
     pressure: storage
@@ -59,12 +80,26 @@ export function waitPresentation(wait) {
     : (next ? `next check ${next}` : cadence)
 
   return {
-    condition: String(wait.description || 'External condition'),
+    condition: waitConditionLabel(wait.description) || 'External condition',
     owner: wait.condition_owner || (wait.kind === 'timer' ? 'Time' : 'External system'),
     summary,
     checker: `Möbius · ${cadence}${wait.kind !== 'timer' && next ? ` · next at ${next}` : ''}`,
     activity,
     timeout: `This chat wakes to investigate at ${dateTimeLabel(wait.deadline_at)}`,
     usage: 'No model tokens while checking · one turn when it wakes',
+  }
+}
+
+export function helperPresentation(backgroundHelpers) {
+  const count = Number(backgroundHelpers?.count) || 0
+  const tasks = (backgroundHelpers?.items || [])
+    .map(item => helperTaskLabel(item?.task_key))
+    .filter(Boolean)
+  return {
+    count,
+    tasks,
+    summary: `Waiting on ${count} ${count === 1 ? 'helper' : 'helpers'}`,
+    owner: `${count} ${count === 1 ? 'helper agent' : 'helper agents'}`,
+    usage: 'Helpers use their own turns · no separate monitor is polling',
   }
 }

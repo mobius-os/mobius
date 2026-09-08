@@ -905,6 +905,25 @@ export function applyTaskEvent(items, event, now = Date.now()) {
         && it.tool_use_id === toolUseId
     )
   }
+
+  // A Memory lookup run as a background Bash task settles on its task_done:
+  // the backend stamps the recall on that event. The host is the Bash block
+  // that deferred, found by task_id (backend-persisted helper) or tool_use_id.
+  const recall = event.type === 'task_done' && event.recall
+    && typeof event.recall === 'object' ? event.recall : null
+  if (recall) {
+    const recallIdx = idx !== -1 ? idx : items.findIndex(
+      it => it.type === 'tool'
+        && it.tool_use_id === toolUseId
+        && it.recall && it.recall.task_id === taskId
+    )
+    if (recallIdx !== -1 && items[recallIdx].recall !== recall) {
+      const updated = [...items]
+      updated[recallIdx] = { ...items[recallIdx], recall }
+      if (idx === -1) return updated
+      items = updated
+    }
+  }
   if (idx === -1) return items
 
   const tool = items[idx]

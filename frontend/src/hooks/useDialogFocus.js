@@ -40,9 +40,11 @@ export default function useDialogFocus({
   containerRef,
   initialFocusRef,
   restoreFocusRef,
+  shouldRestoreFocus,
   onClose,
   closeOnEscape = true,
-  lockScroll = true,
+  modal = true,
+  lockScroll = modal,
 }) {
   const onCloseRef = useRef(onClose)
   onCloseRef.current = onClose
@@ -60,21 +62,25 @@ export default function useDialogFocus({
     const explicitRestoreTarget = restoreFocusRef?.current
     if (lockScroll) lockBodyScroll()
 
-    // The dialog is rendered in place rather than through a body portal. Inert
-    // sibling branches all the way to body so shell controls behind the modal
-    // cannot remain keyboard- or assistive-technology reachable.
+    // Modal dialogs are rendered in place rather than through a body portal.
+    // Inert sibling branches all the way to body so shell controls behind the
+    // modal cannot remain keyboard- or assistive-technology reachable. A
+    // modeless panel deliberately leaves those branches interactive so an
+    // outside press can dismiss it without stealing the intended destination.
     const siblings = []
-    let branch = container
-    while (branch.parentElement) {
-      const parent = branch.parentElement
-      for (const element of parent.children) {
-        if (element !== branch && !siblings.some(entry => entry.element === element)) {
-          siblings.push({ element, inert: element.inert })
-          element.inert = true
+    if (modal) {
+      let branch = container
+      while (branch.parentElement) {
+        const parent = branch.parentElement
+        for (const element of parent.children) {
+          if (element !== branch && !siblings.some(entry => entry.element === element)) {
+            siblings.push({ element, inert: element.inert })
+            element.inert = true
+          }
         }
+        if (parent === document.body) break
+        branch = parent
       }
-      if (parent === document.body) break
-      branch = parent
     }
 
     const focusInitial = () => {
@@ -100,7 +106,7 @@ export default function useDialogFocus({
         onCloseRef.current?.()
         return
       }
-      if (event.key !== 'Tab') return
+      if (event.key !== 'Tab' || !modal) return
       const focusable = dialogFocusableElements(container)
       if (focusable.length === 0) {
         event.preventDefault()
@@ -126,11 +132,12 @@ export default function useDialogFocus({
       if (stackIndex !== -1) dialogStack.splice(stackIndex, 1)
       siblings.forEach(({ element, inert }) => { element.inert = inert })
       if (lockScroll) unlockBodyScroll()
+      if (shouldRestoreFocus?.() === false) return
       if (explicitRestoreTarget) {
         explicitRestoreTarget.focus?.({ preventScroll: true })
       } else {
         previouslyFocused?.focus?.({ preventScroll: true })
       }
     }
-  }, [open, containerRef, initialFocusRef, restoreFocusRef, lockScroll])
+  }, [open, containerRef, initialFocusRef, restoreFocusRef, shouldRestoreFocus, lockScroll, modal])
 }

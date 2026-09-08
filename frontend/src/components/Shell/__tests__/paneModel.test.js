@@ -1069,6 +1069,16 @@ test('reducer APPLY_PLACEMENT applies a workspace-level resolver and is undoable
   assert.equal(applied.undo.ws, start.ws, 'placement snapshots the pre-placement workspace (undoable)')
 })
 
+test('a user-owned workspace placement can suppress the agent arrangement toast', () => {
+  const state = { ws: paneModel.seedFromFlatTabs([makeTab('chat', 'a')]), undo: null }
+  const next = paneModel.workspaceReducer(state, {
+    type: 'APPLY_PLACEMENT',
+    toast: null,
+    resolve: ws => paneModel.openTab(ws, makeTab('project', 'p1')),
+  })
+  assert.equal(next.undo.toast, null)
+})
+
 // ── Undo-slot IDENTITY binding (design §3.5) — the UI binds its toast to the
 // slot object, so each mutation must mint a NEW slot with the right toast text
 // so a stale toast's Undo can never revert a mutation it does not name.
@@ -1440,6 +1450,18 @@ test('visibleAppIds returns only apps that are the active tab of a visible leaf'
   assert.deepEqual([...paneModel.visibleAppIds(ws, ['p2'])], [])
 })
 
+test('visibleChatIds returns only chats that are the active tab of a visible leaf', () => {
+  let ws = paneModel.seedFromFlatTabs([makeTab('chat', '5')])
+  ws = paneModel.splitPaneWithTab(ws, makeTab('chat', '9'), {
+    paneId: ws.focusedPaneId, edge: 'right',
+  })
+  const leaves = paneModel.projectLayout(ws, 'wide', {
+    x: 0, y: 0, w: 1400, h: 900,
+  }).visibleLeaves
+  assert.deepEqual([...paneModel.visibleChatIds(ws, leaves)].sort(), ['5', '9'])
+  assert.deepEqual([...paneModel.visibleChatIds(ws, [leaves[0]])], ['5'])
+})
+
 test('projectLayout clamps a dragged ANCESTOR ratio against child SUBTREE minima', () => {
   // row(row(p1,p2), p3) at 1400x900. Dragging the root divider toward 0.1 must
   // NOT starve the inner leaves: the left subtree needs two MIN_PANE_W + a gap,
@@ -1660,4 +1682,36 @@ test('resolveInitialFocusedPaneView round-trips a real maximized 2-pane workspac
     paneModel.readFocusedPaneView(storage),
   )
   assert.equal(restored, bPane, 'a maximized pane survives a serialize→parse→resolve round-trip')
+})
+
+test('a project and one of its chats persist as two unique native workspace tabs', () => {
+  let ws = paneModel.seedFromFlatTabs([tabModel.projectTab('project-1')])
+  ws = paneModel.splitPaneWithTab(ws, tabModel.makeTab('chat', 'chat-1'), {
+    paneId: ws.focusedPaneId,
+    edge: 'right',
+    focus: false,
+  })
+  const restored = paneModel.parseWorkspace(paneModel.serializeWorkspace(ws))
+  assert.equal(paneModel.flatten(restored).filter(tab => tab.kind === 'project').length, 1)
+  assert.equal(paneModel.flatten(restored).filter(tab => tab.kind === 'chat').length, 1)
+  assert.ok(paneModel.paneOf(restored, 'project:project-1'))
+  assert.ok(paneModel.paneOf(restored, 'chat:chat-1'))
+  assert.notEqual(
+    paneModel.paneOf(restored, 'project:project-1').id,
+    paneModel.paneOf(restored, 'chat:chat-1').id,
+  )
+})
+
+test('project routes are derived from both builder focus and the single-screen slot', () => {
+  const builder = paneModel.seedFromFlatTabs([tabModel.projectTab('project-1')])
+  assert.deepEqual(paneModel.focusedContentRoute(builder), {
+    view: 'project', chatId: null, appId: null, projectId: 'project-1', paneId: 'p0',
+  })
+  const single = paneModel.setSingleScreen(
+    paneModel.setViewMode(builder, 'single'),
+    { kind: 'project', id: 'project-1' },
+  )
+  assert.deepEqual(paneModel.singleScreenRoute(single), {
+    view: 'project', chatId: null, appId: null, projectId: 'project-1', paneId: 'p0',
+  })
 })

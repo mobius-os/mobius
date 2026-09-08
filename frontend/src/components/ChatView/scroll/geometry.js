@@ -16,17 +16,25 @@ export function _topmostVisibleMsg(scrollEl, scrollTop = scrollEl.scrollTop) {
   const top = scrollTop
   const bottom = top + scrollEl.clientHeight
   for (const el of items) {
-    const itemBottom = el.offsetTop + el.offsetHeight
-    if (itemBottom > top && el.offsetTop < bottom) return el
+    const itemTop = el.offsetTop
+    if (itemTop + el.offsetHeight > top && itemTop < bottom) return el
   }
   return items[items.length - 1] || null
 }
 
 
+/** Container geometry captured ONCE per anchor pass and threaded through every
+ * `_scrollTopOf` in that pass. The nested-part descent probes dozens of
+ * children inside a 70k-px turn, and re-reading the container's scrollTop for
+ * each probe is a forced-reflow hazard on chat open (the browser must
+ * re-layout the whole unvirtualized transcript for any read that follows a
+ * layout write). Nothing writes scroll geometry between capture and use, so
+ * the captured value is exactly what each probe would have read. */
 function _captureScrollMeasurement(scrollEl) {
   return {
     space: captureLayoutSpace(scrollEl),
     borderClientTop: scrollEl.getBoundingClientRect().top,
+    scrollTop: scrollEl.scrollTop,
   }
 }
 
@@ -47,7 +55,7 @@ export function _scrollTopOf(scrollEl, el, measurement = null) {
     const captured = measurement || _captureScrollMeasurement(scrollEl)
     const clientTopDelta = el.getBoundingClientRect().top
       - captured.borderClientTop
-    return clientLengthToLayout(clientTopDelta, captured.space) + scrollEl.scrollTop
+    return clientLengthToLayout(clientTopDelta, captured.space) + captured.scrollTop
   }
   return el?.offsetTop || 0
 }
@@ -73,6 +81,40 @@ export function _scrollTopOf(scrollEl, el, measurement = null) {
  * The parts are already discrete, ordered DOM children, so addressing the Nth
  * one needs no extra markup and bounds the restore error by that part's own
  * height (tens of pixels for a worklog line) instead of the whole turn's. */
+function _firstIntersectingLayoutChild(
+  scrollEl,
+  node,
+  scrollTop,
+  bottom,
+  measurement,
+) {
+  for (let index = 0; index < (node?.children?.length || 0); index += 1) {
+    const kid = node.children[index]
+    const kidHeight = kid.offsetHeight || 0
+    // A zero-height child can never intersect, so its rect is not read at all;
+    // the shared `measurement` keeps every other probe to one rect read.
+    if (kidHeight > 0) {
+      const kidTop = _scrollTopOf(scrollEl, kid, measurement)
+      if (kidTop + kidHeight > scrollTop && kidTop < bottom) {
+        return { node: kid, path: [index] }
+      }
+    }
+    // `display: contents` is deliberately used by the assistant copy surface:
+    // it owns the copy event without creating a layout box. Its offsetHeight
+    // and rect are therefore both zero even though its children make up the
+    // entire visible turn. Walk through any such transparent wrapper instead
+    // of treating the enormous message row as the only addressable element.
+    if (kidHeight === 0 && kid.children?.length) {
+      const nested = _firstIntersectingLayoutChild(
+        scrollEl, kid, scrollTop, bottom, measurement,
+      )
+      if (nested) return { node: nested.node, path: [index, ...nested.path] }
+    }
+  }
+  return null
+}
+
+
 function _partPathAt(scrollEl, row, scrollTop, measurement) {
   const viewportH = scrollEl.clientHeight || 0
   const bottom = scrollTop + viewportH
@@ -83,26 +125,52 @@ function _partPathAt(scrollEl, row, scrollTop, measurement) {
   // of resolution is not enough to say where the reader was. Stop as soon as
   // the target fits, which is when its own height bounds the restore error.
   while (node?.children?.length && node.offsetHeight > viewportH) {
-    let next = null
-    for (let index = 0; index < node.children.length; index += 1) {
-      const kid = node.children[index]
-      const kidTop = _scrollTopOf(scrollEl, kid, measurement)
-      if (kidTop + (kid.offsetHeight || 0) > scrollTop && kidTop < bottom) {
-        path.push(index)
-        next = kid
-        break
-      }
-    }
+    const next = _firstIntersectingLayoutChild(
+      scrollEl, node, scrollTop, bottom, measurement,
+    )
     if (!next) break
-    node = next
+    path.push(...next.path)
+    node = next.node
   }
   return path.length ? path : null
 }
 
 
-/** The element a mode's `part` addresses within a row already in hand. */
+/** Child-index address of `target` within `row`, including layout-transparent
+ * wrappers. Unlike `_partPathAt`, this captures the semantic element supplied
+ * by the caller rather than whichever block happens to touch the viewport top. */
+function _partPathToElement(row, target) {
+  if (!row || !target || row === target) return null
+  const path = []
+  let node = target
+  while (node && node !== row) {
+    const parent = node.parentElement
+    if (!parent?.children) return null
+    const index = Array.prototype.indexOf.call(parent.children, node)
+    if (index < 0) return null
+    path.unshift(index)
+    node = parent
+  }
+  return node === row && path.length ? path : null
+}
+
+
+/** The element a mode addresses within a row already in hand: a semantic
+ * target when supplied, otherwise its structural `part` path. */
 function _rowPartTarget(row, mode) {
   if (!row) return null
+  const targetKey = mode?.targetKey
+  if (typeof targetKey === 'string' && targetKey) {
+    // A question card can move to a different sibling index while the active
+    // stream reconciles into its durable message row. Prefer its semantic DOM
+    // identity over the captured structural address: a still-resolving index
+    // path that now points at another block is worse than an unresolved hold.
+    const targets = row.querySelectorAll?.('[data-scroll-anchor-key]') || []
+    for (const target of targets) {
+      if (target.dataset?.scrollAnchorKey === targetKey) return target
+    }
+    return null
+  }
   const path = Array.isArray(mode?.part) ? mode.part : null
   if (!path?.length) return row
   let node = row
@@ -160,6 +228,28 @@ export function anchorModeFromScroll(scrollEl) {
 }
 
 
+/** Snapshot one exact rendered element as an ANCHOR_AT. The element must live
+ * inside a keyed message row so the ordinary row + nested-part resolver can
+ * follow it across the active/durable assistant surface handoff. */
+export function anchorModeForElement(scrollEl, target) {
+  const row = target?.closest?.('.chat__msg[data-key]')
+  const part = _partPathToElement(row, target)
+  if (!scrollEl || !row?.dataset?.key || !part) return null
+  const measurement = typeof scrollEl.getBoundingClientRect === 'function'
+    ? _captureScrollMeasurement(scrollEl)
+    : null
+  return {
+    kind: 'ANCHOR_AT',
+    key: row.dataset.key,
+    part,
+    ...(target.dataset?.scrollAnchorKey
+      ? { targetKey: target.dataset.scrollAnchorKey }
+      : {}),
+    offset: _scrollTopOf(scrollEl, target, measurement) - scrollEl.scrollTop,
+  }
+}
+
+
 /** Return the exact settled hold that makes a focused editor fully visible in
  * the usable chat viewport. The browser does not know that the composer is an
  * overlay, so its native caret reveal can stop underneath it. This derives the
@@ -212,22 +302,6 @@ export function modeForInlineEditorReveal({
     _topmostVisibleMsg(scrollEl, targetScrollTop),
     targetScrollTop,
   )
-}
-
-
-/** Lifecycle anchors must describe visible conversation content. Live scroll
- * handling may temporarily anchor reserved room, but foreground/chat restore
- * must never recreate that blank viewport. */
-function _contentAnchorModeFromScroll(scrollEl) {
-  if (!scrollEl) return null
-  const row = _topmostVisibleMsg(scrollEl)
-  const mode = _anchorModeForRow(scrollEl, row, scrollEl.scrollTop)
-  if (!mode) return null
-  // The row is already in hand — validate against it directly rather than
-  // re-resolving through the scroll container.
-  return _anchorModeIntersectsContent(
-    _rowPartTarget(row, mode), mode, scrollEl?.clientHeight,
-  ) ? mode : null
 }
 
 
@@ -316,21 +390,36 @@ export function topRevealAnchorMode(scrollEl, targetEl, topGap = 0) {
  * follow. Settle at the latest real-content tail; spacer is then recomputed
  * from whether the held viewport still shows the latest user row. */
 export function contentHoldModeFromScroll(scrollEl) {
-  const visibleAnchor = _contentAnchorModeFromScroll(scrollEl)
-  if (visibleAnchor) return visibleAnchor
+  if (!scrollEl) return null
+  // Lifecycle anchors must describe visible conversation content. Live scroll
+  // handling may temporarily anchor reserved room, but foreground/chat restore
+  // must never recreate that blank viewport.
+  //
+  // The row walk and the nested-part descent run exactly once here. This is
+  // the chat-exit path, synchronous on the switch tap, and the descent into a
+  // 70k-px turn is the bulk of that tap's geometry reads; the positional
+  // fallback below reuses this anchor rather than rebuilding it, since
+  // `anchorModeFromScroll` would perform the identical walk over identical,
+  // unwritten geometry and produce the identical mode.
+  const row = _topmostVisibleMsg(scrollEl)
+  const visibleAnchor = _anchorModeForRow(scrollEl, row, scrollEl.scrollTop)
+  // The row is already in hand — validate against it directly rather than
+  // re-resolving through the scroll container.
+  if (visibleAnchor && _anchorModeIntersectsContent(
+    _rowPartTarget(row, visibleAnchor), visibleAnchor, scrollEl.clientHeight,
+  )) return visibleAnchor
 
-  const spacerH = scrollEl?.querySelector?.('.spacer-dynamic')?.offsetHeight || 0
+  const spacerH = scrollEl.querySelector?.('.spacer-dynamic')?.offsetHeight || 0
   const realContentBottom = Math.max(
     0,
-    (scrollEl?.scrollHeight || 0) - spacerH - (scrollEl?.clientHeight || 0),
+    (scrollEl.scrollHeight || 0) - spacerH - (scrollEl.clientHeight || 0),
   )
   // A transient/unkeyed descendant can fill the viewport even though no
   // canonical row intersects it. While the reader is still inside real
   // content, preserve the exact scrollTop with the nearest keyed row's offset.
   // Only reserved blank space settles to the real-content tail.
-  if ((scrollEl?.scrollTop || 0) <= realContentBottom + 1) {
-    const positionalAnchor = anchorModeFromScroll(scrollEl)
-    if (positionalAnchor) return positionalAnchor
+  if ((scrollEl.scrollTop || 0) <= realContentBottom + 1) {
+    if (visibleAnchor) return visibleAnchor
   }
   return bottomAnchorModeFromScroll(scrollEl)
 }
@@ -448,6 +537,7 @@ export function _durableQuestionSubmissionMode(mode) {
   if (!isQuestionSubmissionMode(mode)) return mode
   const {
     questionSubmitBaseMode: _transientBaseMode,
+    questionPrepareCancelMode: _transientCancelMode,
     ...durable
   } = mode
   return durable
@@ -543,15 +633,14 @@ export function _anchorReapplyNeeded(scrollEl, mode, lastAnchorTop) {
  *  the pre-cushion behavior; a >0 value re-adds breathing room if the exact
  *  end-of-scroll rest ever feels cramped.)
  *
- *  PIN_USER_MSG and the transient question-submit hold may calculate that
- *  exact deficit against a larger, already observed same-width viewport so
+ *  PIN_USER_MSG and a prepared question submission calculate that exact
+ *  deficit against a larger, already observed same-width viewport so
  *  software-keyboard close cannot make the target unreachable for one paint.
  *  FOLLOW and ordinary anchors remain based on the active viewport.
  *
- *  A question-submit anchor still reserves only its exact reachability
- *  deficit. The same-width ceiling merely precomputes the imminent viewport;
- *  later changes recompute that deficit and reapply the same anchor, so
- *  submission remains visually fixed until response activity.
+ *  A question-submit anchor instead reserves only its exact reachability
+ *  deficit. Viewport changes recompute that deficit and reapply the same
+ *  anchor, so submission remains visually fixed until response activity.
  */
 export function _computeSpacerH(
   scrollEl,

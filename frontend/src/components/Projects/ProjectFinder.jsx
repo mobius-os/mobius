@@ -105,9 +105,10 @@ export default function ProjectFinder({
   projectName,
   artifactTypes,
   onBuildFile,
-  onSourceSaved,
+  onSourceChanged,
   overview,
   fileSource,
+  requestedFile,
 }) {
   const history = useHistoryDismissControls()
   const queryClient = useQueryClient()
@@ -198,6 +199,22 @@ export default function ProjectFinder({
       entryStackRef.current = []
     }
   }, [source.id, history])
+
+  // A project artifact's edit-source control can return directly to its editable
+  // source. This is a mount-time destination rather than another browsing
+  // step, so it does not manufacture a Back-stack sentinel.
+  useEffect(() => {
+    const requestedPath = typeof requestedFile === 'string'
+      ? requestedFile
+      : requestedFile?.path
+    if (!requestedPath) return
+    const parent = parentPath(requestedPath)
+    let next = initFinder()
+    if (parent) next = finderOpenFolder(next, parent).state
+    next = finderOpenFile(next, requestedPath).state
+    navRef.current = next
+    setNav(next)
+  }, [requestedFile, source.id])
 
   // ── Folder listing: keep the stale view while the next folder loads, and only
   // reveal a spinner if the scan stays silent past SLOW_SCAN_DELAY_MS.
@@ -589,6 +606,15 @@ export default function ProjectFinder({
     await source.invalidate(queryClient)
   }, [source, queryClient])
 
+  async function refreshOutputAfterSourceChange(changedPath) {
+    if (!onSourceChanged) return
+    try {
+      await onSourceChanged(changedPath)
+    } catch (cause) {
+      setError(cause?.message || 'The source changed, but its output could not update.')
+    }
+  }
+
   async function initializeVersioning() {
     if (!source.initGit || versionBusy) return
     setVersionBusy(true); setVersionError('')
@@ -628,13 +654,7 @@ export default function ProjectFinder({
       setBaseline(content); setEditing(false)
       setRevision(saved.revision || null); setRemoteChange(null)
       await refetchWorkspace()
-      if (onSourceSaved) {
-        try {
-          await onSourceSaved(selected)
-        } catch (cause) {
-          setError(cause?.message || 'The file was saved, but its live artifact could not rebuild.')
-        }
-      }
+      await refreshOutputAfterSourceChange(selected)
     } catch (cause) {
       if (cause?.code === 'file_revision_conflict') {
         setError('')
@@ -663,6 +683,7 @@ export default function ProjectFinder({
       )
       setRemoteChange(null)
       await refetchWorkspace()
+      await refreshOutputAfterSourceChange(target)
       openFileAt(target)
     } catch (cause) {
       setError(cause?.message || 'Could not preserve the draft as a copy.')
@@ -704,6 +725,7 @@ export default function ProjectFinder({
       await jsonOrThrow(await source.deleteFile(entryPath), 'File deletion failed:')
       if (selected === entryPath) goBack()
       await refetchWorkspace()
+      await refreshOutputAfterSourceChange(entryPath)
     } catch (cause) {
       setError(cause?.message || 'Could not delete that.')
     } finally { setBusy(false) }
@@ -722,6 +744,7 @@ export default function ProjectFinder({
         setNav(current => ({ ...current, current: { ...current.current, selected: target } }))
       }
       await refetchWorkspace()
+      await refreshOutputAfterSourceChange(target)
       return true
     } catch (cause) {
       setError(cause?.message || 'Could not move that.')
@@ -747,7 +770,10 @@ export default function ProjectFinder({
       }
       setCreation(null); setCreationName('')
       await refetchWorkspace()
-      if (creation === 'file') openFileAt(target)
+      if (creation === 'file') {
+        await refreshOutputAfterSourceChange(target)
+        openFileAt(target)
+      }
     } catch (cause) {
       setError(cause?.message || `Could not create that ${creation}.`)
     } finally { setBusy(false) }
@@ -765,6 +791,9 @@ export default function ProjectFinder({
         )
       }
       await refetchWorkspace()
+      await refreshOutputAfterSourceChange(
+        files.length ? joinPath(path, files[files.length - 1].name) : path,
+      )
     } catch (cause) {
       setError(cause?.message || 'Could not upload that file.')
     } finally { setBusy(false) }
@@ -933,7 +962,9 @@ export default function ProjectFinder({
                     onMove={(toDir) => moveEntry(entry.path, joinPath(toDir, entry.name))}
                     onDownload={() => downloadFile(entry.path)}
                     onDelete={() => deleteEntry(entry.path)}
-                    gitAnnotation={gitAnnotationForEntry(gitChanges, entry)}
+                    gitAnnotation={gitStatus?.repository_scope === 'project'
+                      ? gitAnnotationForEntry(gitChanges, entry)
+                      : null}
                     artifactType={artifactTypeForFile(entry.name, artifactTypes)}
                     onBuildAs={onBuildFile
                       ? (type) => onBuildFile(entry.path, type.id)
@@ -949,7 +980,7 @@ export default function ProjectFinder({
           {!inspecting ? (
             <div className="project-finder__placeholder" role="status">
               <File size={38} strokeWidth={1.3} aria-hidden="true" />
-              <p>Select a file to preview it here.</p>
+              <h2>Your workspace</h2><p>Select a file to read or edit it.<br />Open a Creation to see the built result, or start a project chat to make changes.</p>
             </div>
           ) : (
             <>

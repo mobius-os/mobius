@@ -6,7 +6,7 @@ import Users from 'lucide-react/dist/esm/icons/users.mjs'
 import {
   api, BASE, clearEphemeralAuthSession, jsonOrThrow, setEphemeralAuthSession,
 } from '../../api/client.js'
-import { queueArtifactBuildsAfterSourceSave } from '../../lib/projectArtifacts.js'
+import { queueArtifactBuildsAfterSourceChange } from '../../lib/projectArtifacts.js'
 import ArtifactWorkspace from './ArtifactWorkspace.jsx'
 import ProjectArtifacts from './ProjectArtifacts.jsx'
 import ProjectFinder from './ProjectFinder.jsx'
@@ -239,7 +239,7 @@ export default function ProjectShare() {
       await api.projects.artifacts(projectId),
       'Artifact refresh failed:',
     )
-    const outcomes = await queueArtifactBuildsAfterSourceSave(
+    const outcomes = await queueArtifactBuildsAfterSourceChange(
       artifacts,
       async artifactId => jsonOrThrow(
         await api.projects.buildArtifact(projectId, artifactId), 'Build failed:',
@@ -261,15 +261,15 @@ export default function ProjectShare() {
         <button type="button" onClick={leave}><LogOut size={16} /><span>Leave</span></button>
       </header>
       <div className="project-share__workspace">
-        {artifactId ? <ArtifactWorkspace projectId={projectId} artifactId={artifactId} projectName={project.name} readOnly={!canEdit} onOpenProject={() => setArtifactId('')} /> : <ProjectFinder
+        {artifactId ? <ArtifactWorkspace projectId={projectId} artifactId={artifactId} projectName={project.name} readOnly={!canEdit} canShareApp={false} onOpenProject={() => setArtifactId('')} /> : <ProjectFinder
           projectId={projectId}
           projectName={project.name}
           artifactTypes={project.template?.artifact_types}
           fileSource={fileSource}
           onBuildFile={canEdit ? buildFileAsArtifact : undefined}
-          onSourceSaved={canEdit ? rebuildRegisteredArtifacts : undefined}
+          onSourceChanged={canEdit ? rebuildRegisteredArtifacts : undefined}
           overview={<div className="project-share__overview">
-            <section><div className="project-share__section-head"><h2>Artifacts</h2></div><ProjectArtifacts projectId={projectId} onOpen={setArtifactId} /></section>
+            <section><div className="project-share__section-head"><h2>Artifacts</h2></div><ProjectArtifacts projectId={projectId} onOpen={setArtifactId} canBuild={canEdit} /></section>
             <section><div className="project-share__section-head"><h2>People</h2><span>{online} online</span></div><div className="project-share__people">{members.map(member => { const claim = claimsByActor.get(member.id === 'owner' ? 'owner' : `member:${member.id}`); return <div key={member.id}><span>{initials(member.display_name)}</span><strong>{member.you ? `${member.display_name} · You` : member.display_name}</strong><small>{claim?.summary || `${member.role}${member.online ? ' · online' : ''}`}</small></div> })}{claims.filter(claim => claim.actor_kind === 'agent').map(claim => <div key={claim.id}><span>AI</span><strong>{claim.display_name}</strong><small>{claim.summary}</small></div>)}</div></section>
           </div>}
         />}

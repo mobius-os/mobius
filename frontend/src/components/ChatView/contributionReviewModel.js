@@ -63,6 +63,13 @@ export function sendBlocker(record, { connected } = {}) {
     || 'Refresh this review in Contribute before sending.'
 }
 
+/** Match Contribute's default follow-up grant for a newly opened PR. */
+export function autopilotOnSend(payload) {
+  return payload?.autopilot_available === true
+    && payload.autopilot_default !== false
+}
+
+/** Whether a prepared action updates an already-open PR rather than opening one. */
 export function isUpdateAction(action) {
   return action === 'pr_update'
 }
@@ -77,6 +84,13 @@ export function publicationAction(record) {
     : { label: 'Send PR', busyLabel: 'Sending PR' }
 }
 
+/**
+ * The exact public mutations one prepared action performs, in order, so the
+ * confirmation can always enumerate them. A merged-parent successor visibly
+ * performs TWO — it force-updates the pull request branch to the reviewed
+ * successor commit and retargets the pull request base branch to the surviving
+ * branch — while every other action performs one.
+ */
 export function publicationMutations(record) {
   if (record?.successor === true) {
     return [
@@ -84,10 +98,26 @@ export function publicationMutations(record) {
       'Retarget the pull request base branch to the surviving branch',
     ]
   }
-  if (isUpdateAction(record?.action)) {
+  if (record?.action === 'pr_update') {
     return ['Update the pull request branch with the reviewed commit']
   }
   return ['Open a new pull request for the reviewed branch']
+}
+
+/**
+ * The next public phase of one ordered stack. Existing pull requests must be
+ * updated before a new child can be opened, so a reviewed stack may require
+ * two separately confirmed actions without becoming two unrelated stacks.
+ */
+export function stackPublicationRecords(item) {
+  const prepared = (item?.records || []).filter(
+    record => record?.status === 'prepared',
+  )
+  const action = prepared[0]?.action || 'pr'
+  const boundary = prepared.findIndex(
+    record => (record?.action || 'pr') !== action,
+  )
+  return boundary === -1 ? prepared : prepared.slice(0, boundary)
 }
 
 /** Why one complete reviewed stack cannot use its guarded public action yet. */
@@ -108,8 +138,17 @@ export function stackSendBlocker(item, { connected } = {}) {
   if (connected === false) return 'Connect GitHub in Contribute before sending.'
   const prepared = records.filter(record => record?.status === 'prepared')
   if (prepared.length === 0) return 'This contribution stack has no private action waiting.'
-  const actions = new Set(prepared.map(record => record?.action || 'pr'))
-  if (actions.size !== 1) return 'The linked set needs one consistent public action.'
+  let sawCreate = false
+  for (const record of prepared) {
+    const action = record?.action || 'pr'
+    if (action !== 'pr' && action !== 'pr_update') {
+      return 'The linked set needs a supported public action.'
+    }
+    if (action === 'pr') sawCreate = true
+    else if (sawCreate) {
+      return 'An existing pull-request update cannot follow a new private stack layer.'
+    }
+  }
   for (const record of prepared) {
     if (typeof record.last_submit_error === 'string' && record.last_submit_error.trim()) {
       return 'This contribution stack needs a fresh check before it can continue.'
@@ -125,9 +164,9 @@ export function stackSendBlocker(item, { connected } = {}) {
 }
 
 export function publicationStackAction(item) {
-  const prepared = (item?.records || []).filter(record => record?.status === 'prepared')
+  const prepared = stackPublicationRecords(item)
   const updating = prepared.length > 0
-    && prepared.every(record => record?.action === 'pr_update')
+    && prepared.every(record => isUpdateAction(record?.action))
   return {
     label: updating ? 'Update stack' : 'Send stack',
     confirmLabel: updating ? 'Update PRs' : 'Send PRs',
@@ -140,7 +179,7 @@ export function publicationStackAction(item) {
 export function publicationItemsAction(items) {
   const records = (Array.isArray(items) ? items : []).flatMap(item => (
     item?.kind === 'stack'
-      ? (item.records || []).filter(record => record?.status === 'prepared')
+      ? stackPublicationRecords(item)
       : [item?.record].filter(Boolean)
   ))
   const updating = records.length > 0
@@ -154,13 +193,29 @@ export function publicationItemsAction(items) {
   }
 }
 
+/**
+ * The distinct public mutations, in stable order, that one confirmation batch
+ * performs. A batch containing a merged-parent successor enumerates both its
+ * branch rewrite and its base retarget, so the confirmation can never hide the
+ * second public mutation behind the first.
+ */
 export function publicationItemsMutations(items) {
   const records = (Array.isArray(items) ? items : []).flatMap(item => (
     item?.kind === 'stack'
-      ? (item.records || []).filter(record => record?.status === 'prepared')
+      ? stackPublicationRecords(item)
       : [item?.record].filter(Boolean)
   ))
-  return [...new Set(records.flatMap(publicationMutations))]
+  const seen = new Set()
+  const mutations = []
+  for (const record of records) {
+    for (const mutation of publicationMutations(record)) {
+      if (!seen.has(mutation)) {
+        seen.add(mutation)
+        mutations.push(mutation)
+      }
+    }
+  }
+  return mutations
 }
 
 const RECORD_ID = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/

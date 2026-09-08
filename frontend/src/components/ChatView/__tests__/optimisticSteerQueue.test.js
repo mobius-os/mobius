@@ -4,7 +4,7 @@ import assert from 'node:assert/strict'
 
 const source = readFileSync(new URL('../ChatView.jsx', import.meta.url), 'utf8')
 
-test('accepted deferred steers stay hidden without removing durable queue rows', () => {
+test('accepted deferred steers leave the queue and appear inline immediately', () => {
   assert.match(
     source,
     /pendingQueue\.reserveForSteer\(consumePendingCids\)[\s\S]*?await streamSend/,
@@ -28,6 +28,23 @@ test('accepted deferred steers stay hidden without removing durable queue rows',
     source,
     /if \(result\?\.status !== 'steered'\)[\s\S]*?pendingQueue\.releaseSteerReservation\(consumePendingCids\)/,
     'a rejected steer must make the unchanged queue visible again',
+  )
+  assert.match(
+    source,
+    /pendingQueue\.steerReservedMessages\.map\(\(msg, i\) => \{/,
+    'reserved steering rows need an immediate inline presentation',
+  )
+  const activeSurfaceAt = source.indexOf('{showActiveAssistantSurface && (')
+  const pendingSteerAt = source.indexOf('{pendingQueue.steerReservedMessages.map')
+  const footerAt = source.indexOf('<div ref={footRef} className="chat__foot">')
+  assert.ok(
+    activeSurfaceAt >= 0 && pendingSteerAt > activeSurfaceAt && pendingSteerAt < footerAt,
+    'the provisional user row belongs after the active assistant and before the footer',
+  )
+  assert.match(
+    source,
+    /data-steer-pending="true"[\s\S]*?<MsgContent[\s\S]*?messageKey=\{dataKey\}/,
+    'the provisional row uses the ordinary user-message renderer and stable cid target',
   )
 })
 
@@ -72,16 +89,11 @@ test('a steer request disables sibling row actions until it settles', () => {
     'the queued tray should receive the in-flight state for its row buttons')
 })
 
-test('the modified-Enter submit uses one direct request and reveals only queue fallback', () => {
+test('the modified-Enter submit uses one direct request and presents it inline', () => {
   assert.match(
     source,
     /const directSteer = opts\.directSteer === true && queuesBehindActiveTurn/,
     'the send path must distinguish direct steering from ordinary queueing',
-  )
-  assert.match(
-    source,
-    /if \(!directSteer\) pendingQueue\.add\(queuedMsg, \{ inFlight: true \}\)/,
-    'a direct steer must not create an optimistic queued-tray row',
   )
   assert.match(
     source,
@@ -90,8 +102,8 @@ test('the modified-Enter submit uses one direct request and reveals only queue f
   )
   assert.match(
     source,
-    /if \(\s*directSteer\s*&& !pendingQueue\.pendingMessagesRef\.current\.some[\s\S]*?pendingQueue\.add\(/,
-    'the server-reserved row should appear only after a queued fallback response',
+    /if \(directSteer\) \{[\s\S]*?pendingQueue\.releaseSteerReservation\(\[cid\]\)/,
+    'a rejected direct steer moves the same durable row back to the queue',
   )
   assert.doesNotMatch(
     source,

@@ -59,9 +59,51 @@ export async function handleAppProjectsRequest({
     return rows
   }
 
+  // Pages can promote only its own eligible builder outputs. The owner API
+  // stays in the attributed host; no owner credential enters the app frame.
+  if (request.action === 'import-sources' || request.action === 'import-source') {
+    if (app.slug !== 'pages') throw new Error('Source import is unavailable to this app.')
+    const catalog = await readJson(await client.importSources(), 'Source discovery failed:')
+    if (catalog?.management !== 'linked') {
+      if (request.action === 'import-sources') return []
+      throw new Error('Add to Projects is waiting for the server update.')
+    }
+    const sources = requireRows(catalog.artifacts, 'Source discovery').filter(row => (
+      row.kind === 'artifact' && String(row.catalog_app_id) === String(app.id)
+    ))
+    if (request.action === 'import-sources') {
+      return sources.map(row => ({ id: String(row.id), name: String(row.name || '') }))
+    }
+    const source = sources.find(row => String(row.id) === request.sourceId)
+    if (!source) throw new Error('This page is already managed or is not an eligible builder output. Refresh and try again.')
+    const project = await readJson(await client.importSource({
+      kind: 'artifact', source_id: source.id,
+    }), 'Add to Projects failed:')
+    const imported = project?.template?.imported_from
+    if (imported?.management !== 'linked' || imported.kind !== 'artifact'
+      || String(imported.id) !== String(source.id)) {
+      throw new Error('The server did not return a linked Project for this page.')
+    }
+    await readProjects()
+    onProjectCreated(project)
+    openProject(project)
+    return appRuntimeProjectView(project)
+  }
+
   if (request.action === 'browse') {
     browseProjects()
     return { opened: true }
+  }
+
+  if (request.action === 'templates') {
+    const rows = await readRows(client.templates(), 'Project templates failed')
+    return rows.filter(row => String(row.source_app_id) === String(app.id)).map(row => ({
+      key: row.key,
+      id: row.id,
+      name: row.name,
+      description: row.description || '',
+      kind: row.kind || '',
+    }))
   }
 
   if (request.action === 'migrate') {

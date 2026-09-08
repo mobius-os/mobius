@@ -19,6 +19,7 @@ import { getEffectiveTheme } from '../../lib/themeService.js'
 import { readSafeAreaInsets, zeroInsets } from '../../lib/safeAreaInsets.js'
 import { createCapabilityHost } from '../../lib/capabilityHost.js'
 import { builtInCapabilityProviders } from '../../lib/capabilityProviders.js'
+import { clampCameraPreviewRect } from '../../lib/cameraPreview.js'
 import { requestAppCodeWarm } from '../../lib/appPrecache.js'
 import { appHostRequest } from '../../lib/appHostRequest.js'
 import {
@@ -171,14 +172,14 @@ function appFrameRequestUrl(appId, version, frameRev) {
 //      interactive frame. Exact source + focus gating prevents arbitrary
 //      keylogging or a hidden frame dispatching workspace behavior.
 //
-//  10. moebius:screen-control-command/result               bidirectional
-//      The owner-granted shell session may inspect or operate the visible app
+//  10. moebius:screen-control-command/result                bidirectional
+//      The owner-granted shell session may inspect or operate the VISIBLE app
 //      through the same closed semantic command set as shell controls. The
 //      frame never evaluates agent-authored script, never exposes credentials,
 //      masks sensitive fields, and rejects commands while shell interactivity
 //      is suspended by a modal surface.
 //
-//  11. moebius:account-link-*                              three-party broker
+//  11. moebius:account-link-*                               three-party broker
 //      The CSP-sandboxed app frame has an opaque origin, so an external OAuth
 //      completion page cannot safely target it by the shell's concrete origin.
 //      A live, visible frame with the reviewed identity_manage grant registers
@@ -251,6 +252,34 @@ function CanvasLoadingBrand({ appName }) {
   )
 }
 
+function CameraPreviewLayer({ preview }) {
+  const videoRef = useRef(null)
+
+  useLayoutEffect(() => {
+    const video = videoRef.current
+    const stream = preview?.stream
+    if (!video || !stream) return undefined
+    video.srcObject = stream
+    try { video.play()?.catch?.(() => {}) } catch {}
+    return () => {
+      if (video.srcObject === stream) video.srcObject = null
+    }
+  }, [preview?.stream])
+
+  if (!preview?.stream || !preview?.rect) return null
+  const { x, y, width, height } = preview.rect
+  return (
+    <div
+      className={`canvas-camera-preview${preview.facingMode === 'user'
+        ? ' canvas-camera-preview--mirrored' : ''}`}
+      style={{ left: x, top: y, width, height }}
+      aria-hidden="true"
+    >
+      <video ref={videoRef} muted playsInline autoPlay />
+    </div>
+  )
+}
+
 // `version` is bumped by Shell when an `app_updated` event arrives for this
 // app (a recompile advanced app.updated_at). Rather than remount the one iframe
 // on every bump — which blanked the running preview to a full-frame spinner and
@@ -315,6 +344,8 @@ const AppCanvas = forwardRef(function AppCanvas({
 }, hostRef) {
   const queryClient = useQueryClient()
   const [serviceSurface, setServiceSurface] = useState(null)
+  const [cameraPreview, setCameraPreview] = useState(null)
+  const canvasWrapRef = useRef(null)
   const serviceRequestRef = useRef(0)
   const serviceFrameRef = useRef(null)
   // Fresh app tokens are persisted for their remaining short lifetime so a
@@ -540,6 +571,21 @@ const AppCanvas = forwardRef(function AppCanvas({
     capabilityHostRef.current = createCapabilityHost({
       providers: builtInCapabilityProviders({
         deviceAssets: { appId },
+        deviceStorage: {
+          appId,
+          getIdentity: () => appTokenIdentity(hostTokenRef.current),
+        },
+        camera: {
+          onPreview(next) {
+            if (!next) {
+              setCameraPreview(null)
+              return
+            }
+            const bounds = canvasWrapRef.current?.getBoundingClientRect?.()
+            const rect = clampCameraPreviewRect(next.rect, bounds)
+            setCameraPreview(rect ? { ...next, rect } : null)
+          },
+        },
         screenControl: { appId },
       }),
       getDeclaration(capability) {
@@ -1587,7 +1633,7 @@ const AppCanvas = forwardRef(function AppCanvas({
   // incoming frame keeps the same key when promoted (only its className flips),
   // so it is NOT reloaded at the moment it becomes visible.
   return (
-    <div className="canvas-wrap">
+    <div className="canvas-wrap" ref={canvasWrapRef}>
       {frameVersions.map((v) => {
         const isLive = v === swap.liveVersion
         // The response CSP applies the opaque-origin sandbox. Keeping the
@@ -1615,6 +1661,7 @@ const AppCanvas = forwardRef(function AppCanvas({
           />
         )
       })}
+      <CameraPreviewLayer preview={cameraPreview} />
       {/* One-shot "updated" shimmer on a successful swap. Keyed on the SWAP
           COUNT — not the live version and not gated on liveLoaded — so it
           remounts (replays) exactly when a promotion lands, and a live-frame

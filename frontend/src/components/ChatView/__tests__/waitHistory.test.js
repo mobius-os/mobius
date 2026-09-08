@@ -22,6 +22,28 @@ const { waitHistoryViewModel } = await vite.ssrLoadModule(
 
 after(() => vite.close())
 
+test('Resume when is sentence-cased across active and every settled wait without rewriting identifiers', () => {
+  const description = '  resume when GitHub reaches a terminal state for exact peer-network PR #1083 head 018067bdac  '
+  const expected = description.trim().replace(/^resume/, 'Resume')
+  const wait = { id: 'copy-wait', kind: 'command', description }
+  for (const status of ['met', 'expired', 'failed', 'cancelled']) {
+    const summary = { ...wait, status }
+    assert.equal(waitHistoryViewModel(summary).condition, expected)
+    const html = renderToStaticMarkup(createElement(WaitHistoryCard, { summary }))
+    assert.ok(html.includes(expected))
+    assert.ok(!html.includes('resume when'))
+  }
+  const html = renderToStaticMarkup(createElement(WaitCard, {
+    wait, expanded: true, onToggle: () => {}, onCancel: () => {},
+  }))
+  assert.ok(html.includes(expected))
+  assert.ok(!html.includes('resume when'))
+  assert.equal(wait.description, description)
+  for (const original of ['gitHub/checks passes', 'Resume when ready', 'resume whenever ready']) {
+    assert.equal(waitHistoryViewModel({ description: original, status: 'met' }).condition, original)
+  }
+})
+
 test('settled waits leave a quiet trace with the full condition', () => {
   const condition = 'Wait until the exact reviewed deployment is serving every replica'
   const common = {

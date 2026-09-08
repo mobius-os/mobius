@@ -1,11 +1,15 @@
 /*
  * Shell keyboard commands have one declarative catalog. The shell dispatcher,
- * command palette, app-frame bridge, and labels all consume this same data
- * rather than growing parallel key listeners.
+ * command palette, app-frame bridge, labels, reference UI, and owner overrides
+ * all consume this same data rather than growing parallel key listeners.
  */
+
+export const SHORTCUT_OVERRIDES_STORAGE_KEY = 'mobius:shell-shortcuts:v1'
+export const SHORTCUT_OVERRIDES_CHANGED_EVENT = 'mobius:shell-shortcuts-changed'
 
 const DEFAULT_BINDINGS = Object.freeze({
   openSearch: Object.freeze({ key: 'k', code: 'KeyK', mod: true }),
+  openShortcutHelp: Object.freeze({ key: '/', code: 'Slash', mod: true }),
   newChat: Object.freeze({ key: 'n', code: 'KeyN', mod: true }),
   newTab: Object.freeze({ key: 't', code: 'KeyT', mod: true }),
   closeTab: Object.freeze({ key: 'w', code: 'KeyW', mod: true }),
@@ -22,6 +26,7 @@ const DEFAULT_BINDINGS = Object.freeze({
 // own interaction owner (workspace undo and the logo's Builder toggle).
 export const SHELL_SHORTCUTS = Object.freeze({
   openSearch: DEFAULT_BINDINGS.openSearch,
+  openShortcutHelp: DEFAULT_BINDINGS.openShortcutHelp,
   undoWorkspace: DEFAULT_BINDINGS.undoWorkspace,
   toggleBuilder: DEFAULT_BINDINGS.toggleBuilder,
 })
@@ -34,6 +39,15 @@ export const SHELL_COMMAND_DEFINITIONS = Object.freeze([
     category: 'Workspace',
     keywords: ['command palette', 'find', 'open'],
     bindings: [DEFAULT_BINDINGS.openSearch],
+    captureInMiniApps: true,
+  },
+  {
+    id: 'shortcuts.open',
+    title: 'Keyboard shortcuts',
+    description: 'Show the shell keyboard reference.',
+    category: 'Workspace',
+    keywords: ['keys', 'help', 'commands'],
+    bindings: [DEFAULT_BINDINGS.openShortcutHelp],
     captureInMiniApps: true,
   },
   {
@@ -98,6 +112,10 @@ export const SHELL_COMMAND_DEFINITIONS = Object.freeze([
     keywords: ['history previous'],
     bindings: [DEFAULT_BINDINGS.historyBack],
     captureInMiniApps: true,
+    // Chromium maps Cmd+, to Settings. Back is a shell command even when
+    // there is no destination to traverse, so never release this chord to the
+    // browser's unrelated command.
+    reserveWhenUnavailable: true,
   },
   {
     id: 'history.forward',
@@ -109,6 +127,10 @@ export const SHELL_COMMAND_DEFINITIONS = Object.freeze([
     captureInMiniApps: true,
   },
 ])
+
+function browserStorage() {
+  try { return globalThis.localStorage || null } catch { return null }
+}
 
 export function normalizeShortcutBinding(binding) {
   if (!binding || typeof binding !== 'object') return null
@@ -126,11 +148,70 @@ export function normalizeShortcutBinding(binding) {
   }
 }
 
-export function resolveShellCommands() {
-  return SHELL_COMMAND_DEFINITIONS.map(definition => ({
-    ...definition,
-    bindings: definition.bindings.map(normalizeShortcutBinding).filter(Boolean),
-  }))
+function normalizedOverrides(value) {
+  const source = value?.actions && typeof value.actions === 'object'
+    ? value.actions
+    : {}
+  const actions = {}
+  for (const [id, override] of Object.entries(source)) {
+    if (!/^[a-z][a-z0-9.-]{1,79}$/.test(id) || !override || typeof override !== 'object') continue
+    const bindings = Array.isArray(override.bindings)
+      ? override.bindings
+        .map(normalizeShortcutBinding)
+        // Shell commands are global, including inside app frames. Requiring
+        // Cmd/Ctrl prevents an override from stealing ordinary text input.
+        .filter(binding => binding?.mod)
+        .slice(0, 8)
+      : null
+    actions[id] = {
+      disabled: override.disabled === true,
+      ...(bindings ? { bindings } : {}),
+    }
+  }
+  return { version: 1, actions }
+}
+
+export function readShortcutOverrides(storage = browserStorage()) {
+  try {
+    return normalizedOverrides(JSON.parse(
+      storage?.getItem(SHORTCUT_OVERRIDES_STORAGE_KEY) || '{}',
+    ))
+  } catch {
+    return normalizedOverrides(null)
+  }
+}
+
+// This narrow write seam lets an owner-facing app change shortcuts without
+// coupling that app to shell rendering. Unknown action ids remain inert but
+// survive platform version skew until the corresponding action is available.
+export function writeShortcutOverrides(value, {
+  storage = browserStorage(),
+  target = typeof window !== 'undefined' ? window : null,
+} = {}) {
+  const normalized = normalizedOverrides(value)
+  if (!storage?.setItem) return null
+  try {
+    storage.setItem(SHORTCUT_OVERRIDES_STORAGE_KEY, JSON.stringify(normalized))
+  } catch {
+    return null
+  }
+  try { target?.dispatchEvent(new CustomEvent(SHORTCUT_OVERRIDES_CHANGED_EVENT)) } catch {}
+  return normalized
+}
+
+export function resolveShellCommands(overrides = readShortcutOverrides()) {
+  const actions = normalizedOverrides(overrides).actions
+  return SHELL_COMMAND_DEFINITIONS.map((definition) => {
+    const override = actions[definition.id]
+    const bindings = override?.disabled
+      ? []
+      : (override?.bindings || definition.bindings)
+    return {
+      ...definition,
+      bindings: bindings.map(normalizeShortcutBinding).filter(Boolean),
+      shortcutDisabled: override?.disabled === true,
+    }
+  })
 }
 
 export function shortcutMatches(event, binding) {
@@ -148,6 +229,7 @@ export function shortcutMatches(event, binding) {
 
 export function findShellShortcut(event, commands) {
   for (const command of Array.isArray(commands) ? commands : []) {
+    if (command.shortcutDisabled) continue
     if (command.bindings?.some(binding => shortcutMatches(event, binding))) return command
   }
   return null
@@ -155,20 +237,33 @@ export function findShellShortcut(event, commands) {
 
 export function frameShortcutBindings(commands, { reserveUnavailable = false } = {}) {
   return (Array.isArray(commands) ? commands : []).flatMap(command => (
-    command.captureInMiniApps && (reserveUnavailable || command.enabled !== false)
+    command.captureInMiniApps
+      && !command.shortcutDisabled
+      && (reserveUnavailable || command.reserveWhenUnavailable === true || command.enabled !== false)
       ? command.bindings.map(binding => ({ actionId: command.id, binding }))
       : []
   ))
 }
 
-export function shouldReserveShellShortcut(handled, standalone) {
-  return handled === true || standalone === true
+export function shouldReserveShellShortcut(handled, standalone, command = null) {
+  return handled === true || standalone === true || command?.reserveWhenUnavailable === true
 }
 
 export function shortcutLockCodes(commands) {
   return [...new Set(frameShortcutBindings(commands).map(({ binding }) => (
     binding.code || null
   )).filter(Boolean))]
+}
+
+export function shortcutReferenceGroups(commands) {
+  const groups = new Map()
+  for (const command of Array.isArray(commands) ? commands : []) {
+    if (!Array.isArray(command?.shortcutLabels) || command.shortcutLabels.length === 0) continue
+    const category = command.category || 'Other'
+    if (!groups.has(category)) groups.set(category, [])
+    groups.get(category).push(command)
+  }
+  return [...groups].map(([category, items]) => ({ category, items }))
 }
 
 function displayKey(key, apple) {

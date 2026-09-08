@@ -1,12 +1,11 @@
 import { Component } from 'react'
-import { api, BASE } from '../../api/client.js'
+import useAgentRepair from '../../hooks/useAgentRepair.js'
 import { redactDiagnosticText } from '../../lib/diagnosticRedaction.js'
 import { recordClientError } from '../../lib/errorLog.js'
 import {
   buildAgentRepairPrompt,
   errorRecoveryFingerprint,
   readErrorRecoveryAttempt,
-  runAgentRepair,
   writeRefreshedRecoveryAttempt,
 } from '../../lib/errorRecovery.js'
 import { reloadIfGenerationStale } from '../../lib/shellUpdate.js'
@@ -35,17 +34,45 @@ import './ErrorBoundary.css'
  *                 retained pane from clearing another pane's recovery attempt
  *   canAskAgent — false for restricted surfaces that cannot create owner chats
  */
+// The crash panel is a function component so the repair flow (ledger entry,
+// in-flight request, bfcache restore) lives in the shared hook; the class
+// above it only catches, self-heals a stale generation, and reloads.
+function CrashRecovery({ context, canAskAgent, diagnostic, headingRef, onRefresh }) {
+  const { attempt, repairActive, repair } = useAgentRepair({
+    surfaceKey: context.surfaceKey,
+    fingerprint: context.fingerprint,
+    prompt: buildAgentRepairPrompt({
+      surface: context.surfaceKey,
+      message: context.message,
+      componentStack: context.componentStack,
+      pathname: window.location.pathname,
+    }),
+  })
+  return (
+    <RecoveryPanel
+      variant="boundary"
+      className="errbound__card"
+      headingRef={headingRef}
+      title="Something broke"
+      subject="screen"
+      diagnostic={diagnostic}
+      attempt={attempt}
+      repairActive={repairActive}
+      canAskAgent={canAskAgent}
+      refreshLabel="Refresh screen"
+      onRefresh={() => { if (!repairActive) onRefresh() }}
+      onAgentRepair={repair}
+    />
+  )
+}
+
 export default class ErrorBoundary extends Component {
   state = {
     error: null,
-    attempt: null,
-    repairActive: false,
     selfHealing: false,
   }
 
   crashContext = null
-  repairController = null
-  pageShowListening = false
   headingRef = null
 
   static getDerivedStateFromError(error) {
@@ -67,22 +94,14 @@ export default class ErrorBoundary extends Component {
     const surfaceKey = this.surfaceKey()
     const componentStack = info?.componentStack || ''
     const fingerprint = errorRecoveryFingerprint(surfaceKey, message, componentStack)
-    const attempt = readErrorRecoveryAttempt({ surfaceKey, fingerprint })
-    this.crashContext = {
-      surfaceKey,
-      fingerprint,
-      message,
-      componentStack,
-      attempt,
-    }
-    this.listenForPageShow()
-    if (attempt) {
+    this.crashContext = { surfaceKey, fingerprint, message, componentStack }
+    if (readErrorRecoveryAttempt({ surfaceKey, fingerprint })) {
       // A recovery attempt for THIS exact crash is already on record — the
       // stale-generation self-heal (or a manual refresh) has already run once
       // and it still failed. Do not auto-reload again; show the recovery panel
       // so the escalation (refresh → ask agent) proceeds. This ledger is the
       // loop guard that keeps a genuine bug from reload-looping.
-      this.setState({ attempt, repairActive: false }, () => this.headingRef?.focus())
+      this.setState({ selfHealing: false }, () => this.headingRef?.focus())
     } else {
       // First occurrence: if a newer shell generation exists this is a
       // stale-bundle crash — silently reload onto the fixed generation.
@@ -112,10 +131,7 @@ export default class ErrorBoundary extends Component {
     // "updating" state and show the recovery panel (manual refresh + ask agent).
     // The identity guard skips this if a newer crash has since replaced context.
     if (!healing && this.crashContext === context) {
-      this.setState(
-        { selfHealing: false, attempt: context.attempt, repairActive: false },
-        () => this.headingRef?.focus(),
-      )
+      this.setState({ selfHealing: false }, () => this.headingRef?.focus())
     }
   }
 
@@ -133,78 +149,14 @@ export default class ErrorBoundary extends Component {
     window.location.reload()
   }
 
-  componentWillUnmount() {
-    const controller = this.repairController
-    this.repairController = null
-    controller?.abort()
-    if (this.pageShowListening) window.removeEventListener('pageshow', this.handlePageShow)
-  }
-
   surfaceKey = () => this.props.recoveryKey || this.props.label || 'app'
 
-  listenForPageShow = () => {
-    if (this.pageShowListening) return
-    window.addEventListener('pageshow', this.handlePageShow)
-    this.pageShowListening = true
-  }
-
-  handlePageShow = (event) => {
-    const context = this.crashContext
-    if (!event.persisted || !context) return
-    const controller = this.repairController
-    this.repairController = null
-    controller?.abort()
-    const attempt = readErrorRecoveryAttempt({
-      surfaceKey: context.surfaceKey,
-      fingerprint: context.fingerprint,
-    })
-    context.attempt = attempt
-    this.setState({ attempt, repairActive: false })
-  }
-
   handleRefresh = async () => {
-    if (this.repairController) return
     const context = this.crashContext
     // Escape a stale generation if one exists; otherwise honor the refresh with a
     // plain reload. A blind reload alone can be answered by the outgoing worker's
     // precache and land back on the same stale bundle.
     if (!(await this.recoverReload(context))) this.applyRecoveryReload(context)
-  }
-
-  handleAgentRepair = async () => {
-    const context = this.crashContext
-    if (!context || this.repairController || this.props.canAskAgent === false) return
-    const controller = new AbortController()
-    this.repairController = controller
-    this.setState({ repairActive: true })
-    try {
-      const result = await runAgentRepair({
-        client: api,
-        base: BASE,
-        surfaceKey: context.surfaceKey,
-        fingerprint: context.fingerprint,
-        previousAttempt: context.attempt,
-        signal: controller.signal,
-        onAttempt: (attempt) => {
-          context.attempt = attempt
-          this.setState({ attempt })
-        },
-        prompt: buildAgentRepairPrompt({
-          surface: context.surfaceKey,
-          message: context.message,
-          componentStack: context.componentStack,
-          pathname: window.location.pathname,
-        }),
-      })
-      window.location.assign(result.path)
-    } catch (error) {
-      if (error?.name === 'AbortError') return
-    } finally {
-      if (this.repairController === controller) {
-        this.repairController = null
-        this.setState({ repairActive: false })
-      }
-    }
   }
 
   render() {
@@ -227,22 +179,18 @@ export default class ErrorBoundary extends Component {
         </div>
       )
     }
-    const message = redactDiagnosticText(this.state.error?.message || this.state.error)
+    // The render React schedules from getDerivedStateFromError precedes
+    // componentDidCatch; that frame has no crash context yet and is never
+    // painted, because componentDidCatch's setState re-renders before paint.
+    if (!this.crashContext) return null
     return (
       <div className={cls}>
-        <RecoveryPanel
-          variant="boundary"
-          className="errbound__card"
-          headingRef={node => { this.headingRef = node }}
-          title="Something broke"
-          subject="screen"
-          diagnostic={message}
-          attempt={this.state.attempt}
-          repairActive={this.state.repairActive}
+        <CrashRecovery
+          context={this.crashContext}
           canAskAgent={this.props.canAskAgent !== false}
-          refreshLabel="Refresh screen"
+          diagnostic={redactDiagnosticText(this.state.error?.message || this.state.error)}
+          headingRef={node => { this.headingRef = node }}
           onRefresh={this.handleRefresh}
-          onAgentRepair={this.handleAgentRepair}
         />
       </div>
     )

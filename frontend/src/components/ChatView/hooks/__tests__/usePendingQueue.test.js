@@ -86,6 +86,29 @@ test('a steer reservation hides a row without removing its durable queue record'
     ['b'],
     'event handlers read the same synchronous visible queue as render',
   )
+  assert.deepEqual(
+    result.current.steerReservedMessages.map(m => m.cid),
+    ['a'],
+    'accepted steering stays visible inline while provider delivery settles',
+  )
+})
+
+test('a direct steer is created inline without flashing through the queue', () => {
+  const { result } = renderHook(usePendingQueue)
+
+  result.current.add(fixtureMsg({ cid: 'direct' }), { inFlight: true })
+  result.current.reserveForSteer(['direct'])
+
+  assert.deepEqual(result.current.visiblePendingMessages, [])
+  assert.deepEqual(
+    result.current.steerReservedMessages.map(m => m.cid),
+    ['direct'],
+  )
+  assert.deepEqual(
+    result.current.pendingMessagesRef.current.map(m => m.cid),
+    ['direct'],
+    'the safety reserve remains available to failure recovery',
+  )
 })
 
 test('hidden product events remain durable but never enter the owner queue tray', () => {
@@ -141,6 +164,7 @@ test('a rejected steer releases its unchanged row back to the tray', () => {
     result.current.visiblePendingMessages.map(m => m.cid),
     ['a'],
   )
+  assert.deepEqual(result.current.steerReservedMessages, [])
 })
 
 test('confirmQueued can replace optimistic content with the server canonical row', () => {
