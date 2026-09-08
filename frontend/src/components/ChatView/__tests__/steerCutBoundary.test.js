@@ -238,3 +238,56 @@ test('the fast-forward path keeps an accepted deferred row hidden until the cut'
     'only a rejected request should return the rows to the actionable tray',
   )
 })
+
+// Execute the mounted view's real cut callback with its side effects recorded.
+// This covers visibility and reading intent, not just the wire payload shape.
+function runSteerCut(messages) {
+  const state = { rows: [], pins: [], retired: [], activity: 0, seals: 0 }
+  const scope = {
+    cidOf: m => m?.cid ?? null,
+    takeSendIntent: () => null,
+    promoteStreamToMessages: () => { state.seals++ },
+    setActiveAssistantMessageId: id => { state.assistantId = id },
+    isFirstVisibleUserMessage: () => false,
+    landSentMessage: cid => state.pins.push(cid),
+    steerKeyboardDismissRequestRef: { current: null },
+    chatId: 'test-chat',
+    setCommittedSteerKeyboardDismiss: () => assert.fail('no keyboard dismissal requested'),
+    commitMessages: update => { state.rows = update(state.rows) },
+    insertMessageBatchByTs: (prev, rows) => [...prev, ...rows],
+    pendingQueue: { cancelByCid: cid => state.retired.push(cid) },
+    forgetSendIntent: () => {},
+    onOwnerActivityRef: { current: () => { state.activity++ } },
+  }
+  const callback = sliceBranch(
+    chatViewSource, 'onSteeredIntoTurn: ({', '\n    onSteerDeliveryFailed:',
+  ).replace('onSteeredIntoTurn: ', '').trim().replace(/,$/, '')
+  const execute = new Function(...Object.keys(scope), `return (${callback})`)(...Object.values(scope))
+  execute({ messages, nextAssistantMessageId: 'a2', sealedItems: [] })
+  return state
+}
+
+test('a hidden peer cut seals output without showing an owner row or moving the reader', () => {
+  const carrier = {
+    role: 'user', cid: 'peer-1', ts: 1, content: 'internal coordination',
+    hidden: true, kind: 'peer_message', peer_message_through: { id: 'note-1' },
+  }
+  const result = runSteerCut([carrier])
+  assert.deepEqual(result.rows, [{ ...carrier, steered: true }])
+  assert.equal(result.rows.filter(m => !m.hidden).length, 0)
+  assert.deepEqual(result.pins, [])
+  assert.equal(result.activity, 0)
+  assert.equal(result.seals, 1)
+  assert.equal(result.assistantId, 'a2')
+  assert.deepEqual(result.retired, ['peer-1'])
+})
+
+test('a mixed steer pins the first visible owner row, never its hidden carrier', () => {
+  const carrier = { cid: 'peer-1', ts: 1, hidden: true, content: 'peer data' }
+  const owner = { cid: 'owner-1', ts: 2, content: 'keep going', attachments: [{ name: 'image.png' }] }
+  const result = runSteerCut([carrier, owner])
+  assert.deepEqual(result.pins, ['owner-1'])
+  assert.equal(result.activity, 1)
+  assert.deepEqual(result.retired, ['peer-1', 'owner-1'])
+  assert.deepEqual(result.rows[1].attachments, owner.attachments)
+})

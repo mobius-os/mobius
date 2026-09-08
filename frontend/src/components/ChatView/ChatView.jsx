@@ -1823,15 +1823,18 @@ export default function ChatView({
         .map((m, i) => {
           const tsv = m?.ts ?? (ts != null ? ts + i : Date.now() + i)
           return {
+            ...m,
             role: 'user',
             content: m?.content || '',
             ts: tsv,
             cid: m?.cid ?? null,
             steered: true,
-            ...(m?.attachments ? { attachments: m.attachments } : {}),
           }
         })
-      const pinCid = cidOf(steeredMessages[0])
+      // Internal carriers still seal the stream, but are not owner sends and
+      // must not acquire a visible-row pin or advance drawer activity.
+      const visibleSteeredMessage = steeredMessages.find(m => !m.hidden)
+      const pinCid = cidOf(visibleSteeredMessage)
       const pinIntent = takeSendIntent(pinCid)
       promoteStreamToMessages({
         keepTurnOpen: true,
@@ -1848,11 +1851,13 @@ export default function ChatView({
       // callbacks are outside React's synthetic event layer, and query-cache
       // listeners can observe the transcript update immediately; setting the
       // mode first prevents a one-frame "row appears low, then snaps up" steer.
-      landSentMessage(pinCid, {
-        intent: pinIntent,
-        // Never infer a delayed pin from the reader's later position.
-        fallbackWillPin: steeredIsFirstUser,
-      })
+      if (visibleSteeredMessage) {
+        landSentMessage(pinCid, {
+          intent: pinIntent,
+          // Never infer a delayed pin from the reader's later position.
+          fallbackWillPin: steeredIsFirstUser,
+        })
+      }
       const keyboardDismissRequest = steerKeyboardDismissRequestRef.current
       if (keyboardDismissRequest
           && keyboardDismissRequest.chatId === String(chatId)
@@ -1879,7 +1884,7 @@ export default function ChatView({
       // This event is the backend's authoritative transcript commit. Refresh
       // the shell's chat list here so a deferred steer advances drawer recency
       // at the cut, rather than waiting for the entire agent turn to finish.
-      onOwnerActivityRef.current?.()
+      if (visibleSteeredMessage) onOwnerActivityRef.current?.()
     },
     onSteerDeliveryFailed: ({ consumePendingCids } = {}) => {
       const cids = Array.isArray(consumePendingCids)

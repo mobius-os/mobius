@@ -2094,3 +2094,24 @@ def test_stop_wins_steer_race_send_rechecks_idle(
   ]
   assert len(durable) == 1
   assert durable[0] in chat.messages
+
+
+def test_steer_cut_preserves_hidden_carrier_and_owner_row_metadata():
+  from app.chat_event_sink import steered_into_turn_event
+
+  carrier = {
+    "role": "user", "ts": 1, "cid": "peer-steer:note-1",
+    "content": "internal peer data", "hidden": True, "kind": "peer_message",
+    "peer_message_through": {"id": "note-1", "created_at": "2026-09-08"},
+  }
+  owner = {
+    "role": "user", "ts": 2, "cid": "owner-1", "content": "Please continue",
+    "attachments": [{"name": "example.png"}],
+  }
+  event = steered_into_turn_event([carrier, owner])
+  assert event["messages"] == [
+    {**carrier, "steered": True}, {**owner, "steered": True},
+  ]
+  event["messages"][0]["peer_message_through"]["id"] = "changed"
+  assert carrier["peer_message_through"]["id"] == "note-1"
+  assert event["content"] == owner["content"]

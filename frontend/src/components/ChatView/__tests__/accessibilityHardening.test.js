@@ -198,3 +198,12 @@ test('the Memory search is a collapsed disclosure with linked result summaries',
   assert.match(css, /@media\s*\(pointer:\s*coarse\)\s*\{\s*\.chat__memory-note\s*\{\s*min-height:\s*44px/s)
   assert.match(css, /\.chat__memory-note:focus-visible\s*\{[^}]*outline:\s*2px solid var\(--accent\)/s)
 })
+
+test('incidental message focus has no box while search and controls retain keyboard indicators', () => {
+  const css = read('../ChatView.css')
+  assert.match(css, /\.chat__msg:focus\s*\{\s*outline:\s*none;\s*\}/)
+  for (const selector of ['.chat__msg--search-reveal', '.chat__msg-copy', '.chat__tool-header']) {
+    const rule = css.slice(css.indexOf(`${selector}:focus-visible`)).split('}')[0]
+    assert.match(rule, /outline:\s*2px solid var\(--accent\)/)
+  }
+})

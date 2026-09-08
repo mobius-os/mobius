@@ -371,6 +371,12 @@
      inherently is not. */
 }
 
+/* Rows are programmatic search/scroll targets, not keyboard controls. A
+   pointer click can focus tabindex=-1; pressing Shift then reveals the UA
+   outline around the entire reply. Keep the explicit search-reveal indicator
+   below and each descendant control's own keyboard focus treatment. */
+.chat__msg:focus { outline: none; }
+
 .chat__msg--user { align-items: flex-end; }
 .chat__msg--marker { align-items: stretch; }
 .chat__msg--assistant {

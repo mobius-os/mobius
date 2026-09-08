@@ -209,12 +209,10 @@ def steered_into_turn_event(
     "type": "steered_into_turn",
     "messages": [
       {
+        **copy.deepcopy(msg),
         "role": "user",
-        "ts": msg.get("ts"),
         "cid": cid_of(msg),
-        "content": msg.get("content", ""),
         "steered": True,
-        **({"attachments": msg.get("attachments")} if msg.get("attachments") else {}),
       }
       for msg in stored_messages
     ],
