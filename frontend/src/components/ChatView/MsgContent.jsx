@@ -104,10 +104,11 @@ function MsgContentInner({
   onQuestionSubmitIntent,
   onQuestionSubmitCancel,
   // Resume a turn paused by a drain-gated restart (or interrupted by a crash):
-  // a stable send callback that re-sends a short "continue". Only the tail
+  // a stable lifecycle action, never an owner message. Only the tail
   // interrupt note (a resumable error block on the last message) shows the
   // button. Compared in the memo below, so pass a stable reference.
   onResume,
+  resumeState,
   onInternalNav,
   autoResumeEnabled,
   autoResumeAvailable,
@@ -418,19 +419,22 @@ function MsgContentInner({
               <button
                 type="button"
                 className="chat__resume chat__recovery-action"
-                onClick={() => onResume('continue', {
-                  continuation: 'manual',
-                  pin: false,
-                })}
-                disabled={submissionBlocked}
+                onClick={onResume}
+                disabled={submissionBlocked || resumeState?.pending}
+                aria-busy={resumeState?.pending || undefined}
                 title={submissionBlocked
                   ? 'Wait for the provider switch to finish.'
                   : undefined}
               >
-                {parked
+                {resumeState?.pending ? 'Resuming…' : parked
                   ? limitResetElapsed ? 'Continue now' : 'Try now'
                   : 'Resume'}
               </button>
+            )}
+            {recoveryOwner && resumeState?.error && (
+              <span className="chat__recovery-action-error" role="alert">
+                {resumeState.error}
+              </span>
             )}
           </ErrorCard>
         )
@@ -547,6 +551,7 @@ export default memo(MsgContentInner, (prev, next) => {
     && prev.onQuestionSubmitIntent === next.onQuestionSubmitIntent
     && prev.onQuestionSubmitCancel === next.onQuestionSubmitCancel
     && prev.onResume === next.onResume
+    && prev.resumeState === next.resumeState
     && prev.onInternalNav === next.onInternalNav
     && prev.autoResumeEnabled === next.autoResumeEnabled
     && prev.autoResumeAvailable === next.autoResumeAvailable

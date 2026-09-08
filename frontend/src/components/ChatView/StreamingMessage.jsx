@@ -16,6 +16,7 @@ export default function StreamingMessage({
   onPrepareAnswer,
   onCancelAnswer,
   onResume,
+  resumeState,
   onInternalNav,
   autoResumeEnabled,
   autoResumeAvailable,
@@ -43,6 +44,7 @@ export default function StreamingMessage({
         onQuestionSubmitIntent={onPrepareAnswer}
         onQuestionSubmitCancel={onCancelAnswer}
         onResume={onResume}
+        resumeState={resumeState}
         onInternalNav={onInternalNav}
         autoResumeEnabled={autoResumeEnabled}
         autoResumeAvailable={autoResumeAvailable}

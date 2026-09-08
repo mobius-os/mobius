@@ -370,7 +370,7 @@ def _future_auto_resuming_limit_park_for_chat(
   *,
   now: datetime | None = None,
 ) -> models.ChatRun | None:
-  """Return a not-yet-due limit park that will consume owner messages."""
+  """Return a not-yet-due limit park that owns the pending queue boundary."""
   run = _latest_continuation_park(db, chat_id)
   if (
     run is None
@@ -1522,9 +1522,8 @@ async def drain_all_for_restart(
 
   This is the DrainForRestart path from design §2.2 — distinct from
   `stop_chat_for`, which intentionally COLLAPSES the pending queue. A restart
-  must NEVER touch `pending_messages`: every queued send is preserved and
-  joins the same continuation when an exact planned-restart park commits, or
-  remains available for the owner's next action on the manual fallback path.
+  must NEVER touch `pending_messages`: every queued send waits while the exact
+  interrupted input resumes, then runs at the ordinary turn boundary.
 
   Sets the `draining` gate first (idempotent) so a send arriving mid-drain
   queues rather than starting, and both liveness sweeps stand down. Before any
@@ -2033,8 +2032,8 @@ async def _auto_resume_chat(
 ) -> bool:
   """Start one continuation for an eligible due park.
 
-  The writer atomically consumes the pending head group, appends the synthetic
-  continuation, completes the exact parked attempt, and inserts a deterministic
+  The writer preserves pending follow-ups, appends the synthetic continuation,
+  completes the exact parked attempt, and inserts a deterministic
   successor. A cancellation or owner send that wins the same transition first
   makes that compare-and-swap a no-op. If the process dies after the commit but
   before task creation, the persisted causal envelope reconstructs the exact
@@ -2169,11 +2168,10 @@ async def _auto_resume_chat(
               else "usage_limit"
             )
             resume_app_id = (
-              # A real owner follow-up already waiting behind an app-owned
-              # turn takes ownership of the resumed turn. This matches normal
-              # pending promotion, where the first queued row owns attribution.
+              # Recovery keeps the interrupted turn's authority. Queued
+              # follow-ups acquire their own attribution only after it finishes.
               park.initiated_by_app_id
-              if (restart_park or resource_park) and not pending else (
+              if restart_park or resource_park else (
                 delegation_resume_app_id
                 if delegation_resume_app_id is not None else (
                   gauntlet_resume_policy.initiated_by_app_id
@@ -2200,7 +2198,6 @@ async def _auto_resume_chat(
               reason=resume_reason,
               initiated_by_app_id=resume_app_id,
               supersedes_run_token=park.id,
-              consume_pending=True,
             )
           ))
           if isinstance(promoted, StartContinuationAttached):

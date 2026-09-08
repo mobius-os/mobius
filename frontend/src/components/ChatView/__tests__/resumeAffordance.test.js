@@ -6,7 +6,7 @@ import { ownsRecoveryAction } from '../recoveryCard.js'
 
 // The one-tap Resume affordance (design §2.2): a turn paused by a drain-gated
 // restart (or interrupted by a crash) persists a `resumable` error note; the
-// tail note renders a Resume button that re-sends a short "continue".
+// tail note renders an acknowledged lifecycle action, not an owner send.
 const msgContent = readFileSync(new URL('../MsgContent.jsx', import.meta.url), 'utf8')
 const chatView = readFileSync(new URL('../ChatView.jsx', import.meta.url), 'utf8')
 const css = readFileSync(new URL('../ChatView.css', import.meta.url), 'utf8')
@@ -115,8 +115,8 @@ test('MsgContent gates the Resume button on a resumable tail note', () => {
   }), false, 'an earlier resumable block cannot own a second action')
   assert.match(
     msgContent,
-    /className="chat__resume chat__recovery-action"[\s\S]*?onClick=\{\(\)\s*=>\s*onResume\('continue',\s*\{[\s\S]*?continuation:\s*'manual'[\s\S]*?pin:\s*false/,
-    'the Resume button must open a manual product-owned continuation',
+    /className="chat__resume chat__recovery-action"[\s\S]*?onClick=\{onResume\}/,
+    'the Resume control delegates an action without manufacturing message text',
   )
 })
 
@@ -125,10 +125,13 @@ test('MsgContent memo compares onResume so a stable ref skips re-render', () => 
     'the memo comparator must include onResume')
 })
 
-test('ChatView wires MsgContent.onResume to the normal send', () => {
-  assert.match(chatView, /<MsgContent[\s\S]*?onResume=\{doSend\}/,
-    'ChatView must pass its stable doSend as onResume so tapping Resume ' +
-      'uses the ordinary durable send boundary without a visible user row')
+test('ChatView wires both recovery surfaces to the separate Resume transaction', () => {
+  for (const tag of ['<MsgContent', '<ActiveAssistantSurface']) {
+    const element = sliceElement(chatView, tag)
+    assert.match(element, /onResume=\{[^}]*handleResume\}/)
+    assert.match(element, /resumeState=\{resumeState\}/)
+    assert.doesNotMatch(element, /onResume=\{[^}]*doSend/)
+  }
 })
 
 test('Resume button has styling', () => {

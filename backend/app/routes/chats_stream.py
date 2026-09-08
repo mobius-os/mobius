@@ -31,6 +31,7 @@ from app.chat_writer import (
   CancelPending,
   StartTurn,
   StartTurnBlockedByPendingQuestion,
+  StartTurnRecoveryChanged,
   UpdatePending,
   alloc_run_token,
   await_ack,
@@ -988,6 +989,16 @@ async def _send_message_locked(
         return {}
     return {}
 
+  # Resume is a control for the interrupted turn, never a new queued input.
+  # Refuse while another physical attempt owns the chat; retrying the same cid
+  # after a lost acknowledgement is handled by the duplicate gate above.
+  manual_resume = body.continuation == "manual"
+  if manual_resume and (is_draining() or is_chat_running(chat_id)):
+    raise HTTPException(409, detail={
+      "code": "recovery_changed",
+      "message": "This chat is already continuing or restarting. Refresh its state before resuming.",
+    })
+
   # Drain gate (design §2.2): while the worker is draining for a restart, never
   # start a new turn or promote the queue — append to pending and return
   # "queued". The send is preserved and self-heals on the owner's next action
@@ -1008,7 +1019,7 @@ async def _send_message_locked(
 
   # A provider-limit park has no live process, but it is still the chat's
   # exact unfinished run. Ordinary owner messages join its durable queue and
-  # are consumed when that run resumes; they do not implicitly spend a new
+  # wait until the resumed turn finishes; they do not implicitly spend a new
   # provider attempt or disable automatic recovery. The explicit recovery
   # control sends ``continuation=manual`` and deliberately bypasses this hold
   # after credits or an account reset restore availability.
@@ -1029,7 +1040,7 @@ async def _send_message_locked(
   # crashed mid-turn), we additionally spawn a run that drains the
   # queue from the head, so the queued messages actually get answered
   # rather than sitting forever.
-  if is_chat_running(chat_id) or chat.pending_messages:
+  if not manual_resume and (is_chat_running(chat_id) or chat.pending_messages):
     selected_force_pending = (
       _selected_force_steer_pending(chat, body)
       if body.force_steer else None
@@ -1124,16 +1135,7 @@ async def _send_message_locked(
     if body.force_steer:
       return _not_steered_response(chat_id)
 
-    # If real owner messages already wait behind a provider park, the explicit
-    # Try now action starts that queue directly. Persisting an extra hidden
-    # ``continue`` after visible rows would split by visibility and buy a
-    # second, content-free provider turn after the real work.
-    manual_pending_drain = (
-      body.continuation == "manual"
-      and not is_chat_running(chat_id)
-      and bool(chat.pending_messages)
-    )
-    new_msg = None if manual_pending_drain else await _append_to_pending(
+    new_msg = await _append_to_pending(
       chat, body, db, initiated_by_app_id=principal.app_id,
     )
     started_message = None
@@ -1152,9 +1154,6 @@ async def _send_message_locked(
               db,
               chat_id,
               drain_token,
-              continuation_reason=(
-                "manual" if manual_pending_drain else None
-              ),
             )
           )
           if next_user:
@@ -1189,11 +1188,6 @@ async def _send_message_locked(
     # copy so this read reflects the actor's committed write.
     db.expire(chat)
     remaining = list(chat.pending_messages or [])
-    if new_msg is None:
-      payload = {"status": "started"}
-      if started_message is not None:
-        payload["message"] = started_message
-      return JSONResponse(status_code=202, content=payload)
     try:
       position = [m.get("ts") for m in remaining].index(new_msg["ts"]) + 1
     except ValueError:
@@ -1214,6 +1208,11 @@ async def _send_message_locked(
     )
 
   if not mark_starting(chat_id):
+    if manual_resume:
+      raise HTTPException(409, detail={
+        "code": "recovery_changed",
+        "message": "The chat cannot resume while Möbius is restarting. Try again when it reconnects.",
+      })
     new_msg = await _append_to_pending(
       chat, body, db, initiated_by_app_id=principal.app_id,
     )
@@ -1260,6 +1259,7 @@ async def _send_message_locked(
         title_source=body.content,
         default_provider=default_provider,
         initiated_by_app_id=principal.app_id,
+        resume_run_id=body.resume_run_id,
       )
     )
     # StartTurn returns the agent history (schemas.ChatMessage list built
@@ -1271,6 +1271,11 @@ async def _send_message_locked(
       result = await await_ack(ack)
     except Exception as exc:
       raise _message_persist_unavailable(exc, chat_id=chat_id) from exc
+    if isinstance(result, StartTurnRecoveryChanged):
+      raise HTTPException(409, detail={
+        "code": "recovery_changed",
+        "message": "This interrupted turn has already been continued. Refresh the chat to see its current state.",
+      })
     if isinstance(result, StartTurnBlockedByPendingQuestion):
       # The question opened after the route's early check but before the
       # actor-owned transition. The outer cleanup releases this route's claim.

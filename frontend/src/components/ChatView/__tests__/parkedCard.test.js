@@ -205,8 +205,8 @@ test('continuations render as product markers, not user bubbles', () => {
   assert.match(continuationCard, /Resumed manually/)
   assert.match(continuationCard, /Server restarted — continuing automatically/)
   assert.match(continuationCard, /Usage available again — continuing automatically/)
-  assert.match(msgContent, /onResume\('continue', \{[\s\S]*continuation: 'manual',[\s\S]*pin: false/,
-    'Resume must mark its provider-facing prompt as a product action')
+  assert.match(msgContent, /onClick=\{onResume\}/,
+    'Resume delegates the lifecycle action instead of manufacturing owner text')
   assert.match(chatView, /chat__msg--\$\{continuationMarker \? 'marker' : msg\.role\}/,
     'the row shell must not inherit owner-user alignment')
   assert.match(chatView, /supersedeResumedPauseBlocks\(messages\)/,

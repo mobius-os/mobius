@@ -205,9 +205,12 @@ const BROADCAST_REGISTRATION_WINDOW_MS = 1500
  *   but must not treat this as a terminal run boundary.
  * @param {(event: object) => void} [callbacks.onSystemEvent]
  *   Fired for non-chat SSE events (theme/app/shell). Not buffered.
- * @param {(opts?: {force?: boolean}) => void|Promise<void>} [callbacks.onNeedsRefresh]
+ * @param {(opts?: object) => object|null|Promise<object|null>} [callbacks.onNeedsRefresh]
  *   Fired when the stream returns 204 outside the post-send race
- *   window — caller should refetch persisted DB state.
+ *   window — caller should refetch persisted DB state. A terminal refresh
+ *   supplies isCurrent and onReconciled: check ownership after each await,
+ *   then call onReconciled(runtime) in the same synchronous commit that
+ *   installs the authoritative transcript. Failed refreshes must not call it.
  * @param {() => void} [callbacks.onCatchUpSettled]
  *   Fired after subscribe-time replay commits, or after its terminal /
  *   disconnected fallback refresh settles.
@@ -801,11 +804,12 @@ export default function useStreamConnection(chatId, {
     abortRef.current = controller
     lastReadAtRef.current = 0
 
+    const isCurrent = () => streamCatchUpOwnerMatches(catchUpOwner, {
+      generation: connectionGenerationRef.current,
+      chatId: chatIdRef.current,
+    })
     const settleOwnedCatchUp = () => {
-      if (!streamCatchUpOwnerMatches(catchUpOwner, {
-        generation: connectionGenerationRef.current,
-        chatId: chatIdRef.current,
-      })) return
+      if (!isCurrent()) return
       onCatchUpSettledRef.current?.()
     }
 
@@ -861,36 +865,50 @@ export default function useStreamConnection(chatId, {
           return
         }
 
-        // No active stream — the broadcast is gone, which means either
-        // the agent never started on this chat or it already finalized
-        // and saved the response to the DB.  In both cases the right
-        // move is to DROP any stale partial items we may still hold
-        // from a previous connection.  Promoting them would duplicate
-        // whatever the DB fetch is about to return.  Null the
-        // controller so visibility/online handlers can fire future
-        // reconnections.
-        abortRef.current = null
-        setConnectionError(null)
-        clearReconnectingNote()
-        retryCount.current = 0
-        wantsReconnectRef.current = false
-        clearStoredStreamSnapshot(activeStreamChatIdRef.current)
-        lastGoodItemsRef.current = []
-        setStreamItems([])
-        setStreamAssistantMessageId(null)
-        textBufferRef.current = ''
-        textBufferItemIdRef.current = null
-        forceNewTextBlockRef.current = false
-        // The chat may have finished while we were offline — re-fetch
-        // messages from the DB so the component shows the final state.
-        // This path is terminal: there is no active broadcast left to
-        // clobber. Keep the teardown in one React batch so the UI does not
-        // show a one-frame "thinking" row between dropping stale streamItems
-        // and ChatView clearing its running state.
-        clearQuestionResponseTracking()
-        onStreamEndRef.current?.()
-        setIsStreaming(false)
-        refreshThenSettleCatchUp({ force: true, terminal204: true })
+        // No broadcast does not prove the logical turn completed: a restart
+        // may have parked it. Keep its last visible answer until detail owns
+        // the replacement. Retiring first collapses the transcript while the
+        // fetch is pending; calling onStreamEnd also fabricates completion.
+        let reconciled = false
+        try {
+          await onNeedsRefreshRef.current?.({
+            force: true,
+            terminal204: true,
+            authoritative: true,
+            isCurrent,
+            onReconciled: (runtime) => {
+              if (!isCurrent()) return
+              reconciled = true
+              abortRef.current = null
+              wantsReconnectRef.current = runtime.running && !runtime.pendingQuestionId
+              clearStoredStreamSnapshot(activeStreamChatIdRef.current)
+              lastGoodItemsRef.current = []
+              setStreamItems([])
+              setStreamAssistantMessageId(null)
+              clearQuestionResponseTracking()
+              answersByQuestionKeyRef.current.clear()
+              setConnectionError(null)
+              clearReconnectingNote()
+              retryCount.current = 0
+              setIsStreaming(false)
+              // The transcript and stream retirement share this synchronous
+              // commit; the existing scroll owner holds the reading position.
+              setCatchUpCommitSeq(seq => seq + 1)
+            },
+          })
+        } catch {
+          // Detail may reject or return null. Neither authorizes discarding
+          // the answer; the existing disconnected Retry owns recovery.
+        }
+        if (!isCurrent()) return
+        if (!reconciled) {
+          abortRef.current = null
+          wantsReconnectRef.current = true
+          setConnectionError('disconnected')
+          clearReconnectingNote()
+          setIsStreaming(false)
+        }
+        settleOwnedCatchUp()
         return
       }
 
@@ -984,6 +1002,7 @@ export default function useStreamConnection(chatId, {
 
       while (true) {
         const { done, value } = await reader.read()
+        if (!isCurrent()) return
         if (done) break
         lastReadAtRef.current = Date.now()
 
@@ -1462,7 +1481,7 @@ export default function useStreamConnection(chatId, {
       // An abort means this connection was REPLACED (wake handler, Stop,
       // fresh send) — the reattach window, if one is open, continues on
       // the successor connection, so the note is deliberately left alone.
-      if (err.name === 'AbortError') return
+      if (err.name === 'AbortError' || !isCurrent()) return
       void verifyConnectivity()
       flushBuffer()
       setIsStreaming(false)
@@ -1572,15 +1591,25 @@ export default function useStreamConnection(chatId, {
       answers = undefined,
       question_id = undefined,
       continuation = undefined,
+      resumeRunId = undefined,
     } = {},
   ) => {
-    activeStreamChatIdRef.current = chatIdRef.current
+    const requestOwner = {
+      chatId: chatIdRef.current,
+      generation: connectionGenerationRef.current,
+    }
+    const ownsPresentation = () => streamCatchUpOwnerMatches(requestOwner, {
+      chatId: chatIdRef.current,
+      generation: connectionGenerationRef.current,
+    })
+    activeStreamChatIdRef.current = requestOwner.chatId
     // Answer submissions usually ride the EXISTING turn: the runner is
     // paused on the AskUserQuestion future and resumes in place. Wiping
     // streamItems before the POST would erase the question card the user just
     // answered. If the backend reports `started` instead, it recovered a
     // restarted question as a fresh hidden continuation and we reset below.
     const isAnswerSubmission = !!answers
+    const isManualResume = continuation === 'manual'
     // force_steer and direct_steer inject into the LIVE turn — neither starts
     // a new turn on the expected path.
     // The fresh-send reset below (setStreamItems([]) + setIsStreaming +
@@ -1593,7 +1622,7 @@ export default function useStreamConnection(chatId, {
     // the existing SSE keeps streaming the post-steer continuation inline, so
     // there is no reconnect/replay to set up either. Skip the reset; the live
     // stream stays attached and the steered message renders inline.
-    if (!queueOnly && !isAnswerSubmission && !forceSteer && !directSteer) {
+    if (!queueOnly && !isAnswerSubmission && !isManualResume && !forceSteer && !directSteer) {
       wantsReconnectRef.current = true
       clearQuestionResponseTracking()
       justSentAtRef.current = Date.now()
@@ -1629,6 +1658,7 @@ export default function useStreamConnection(chatId, {
       if (answers) body.answers = answers
       if (question_id) body.question_id = question_id
       if (continuation) body.continuation = continuation
+      if (resumeRunId) body.resume_run_id = resumeRunId
       if (attachments && attachments.length > 0) {
         body.attachments = attachments
       }
@@ -1657,7 +1687,7 @@ export default function useStreamConnection(chatId, {
       outboxCid = (cid && !forceSteer && !directSteer) ? cid : null
       if (outboxCid) {
         outboxRetained = await enqueueIntent({
-          chatId: chatIdRef.current,
+          chatId: requestOwner.chatId,
           cid: outboxCid,
           type: answers ? 'answer' : 'message',
           body,
@@ -1679,7 +1709,7 @@ export default function useStreamConnection(chatId, {
         const sendTimer = setTimeout(() => sendCtrl.abort(), SEND_POST_TIMEOUT_MS)
         try {
           return await fetch(
-            `${BASE}/api/chats/${encodeURIComponent(String(chatIdRef.current))}/messages`,
+            `${BASE}/api/chats/${encodeURIComponent(String(requestOwner.chatId))}/messages`,
             {
               method: 'POST',
               headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
@@ -1711,7 +1741,7 @@ export default function useStreamConnection(chatId, {
         if (outboxCid && replayOutcome !== 'retry' && replayOutcome !== 'auth') {
           outboxRetained = await retireInteractiveIntent({
             cid: outboxCid,
-            chatId: chatIdRef.current,
+            chatId: requestOwner.chatId,
             outcome: replayOutcome,
             outboxRetained,
           })
@@ -1726,11 +1756,14 @@ export default function useStreamConnection(chatId, {
       if (outboxCid) {
         outboxRetained = await retireInteractiveIntent({
           cid: outboxCid,
-          chatId: chatIdRef.current,
+          chatId: requestOwner.chatId,
           outcome: 'delivered',
           outboxRetained,
         })
       }
+      // Acceptance still retires the original chat's durable intent, but an
+      // acknowledgement cannot attach or alter a replacement view/connection.
+      if (!ownsPresentation()) return data
       // Trust the backend's actual status, not the frontend's queueOnly
       // hint. The frontend's `sending` flag can be stale (turn finished
       // between the doSend check and the POST landing), so a request
@@ -1791,6 +1824,15 @@ export default function useStreamConnection(chatId, {
         setConnectionError(null)
         clearReconnectingNote()
       }
+      // Resume acknowledges an existing interrupted turn, not a new message.
+      // Retain its visible answer until the successor catch-up can replace it.
+      if (isManualResume && data.status === 'started') {
+        wantsReconnectRef.current = true
+        justSentAtRef.current = Date.now()
+        setIsStreaming(true)
+        setConnectionError(null)
+        clearReconnectingNote()
+      }
       // Started: ensure streaming state is set even if the caller
       // passed queueOnly:true expecting it would be queued.
       if (
@@ -1822,11 +1864,11 @@ export default function useStreamConnection(chatId, {
       // branch and then the POST itself failed mid-flight.
       //
       // EXCEPT requests that inject into an existing turn. force_steer,
-      // direct_steer, and AskUserQuestion answers do not start the live turn
+      // direct_steer, Resume, and AskUserQuestion answers do not start the live turn
       // they target, so their POST failures must not tear down that turn's
       // stream. The caller keeps the queued/direct-steer fallback or retryable
       // question intact while the existing connection remains authoritative.
-      if (!forceSteer && !directSteer && !isAnswerSubmission) {
+      if (ownsPresentation() && !forceSteer && !directSteer && !isAnswerSubmission && !isManualResume) {
         wantsReconnectRef.current = false
         setIsStreaming(false)
       }
@@ -1840,7 +1882,7 @@ export default function useStreamConnection(chatId, {
     // make can find it. (The previous 50ms wait was a patch around
     // a misdiagnosed race; verified deterministic by inspecting
     // backend/app/routes/chats_stream.py:121-131.)
-    connectRef.current?.(true)
+    if (ownsPresentation()) connectRef.current?.(true)
     return responseData || { status: 'started' }
   }, [
     clearQuestionResponseTracking,

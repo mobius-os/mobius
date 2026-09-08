@@ -700,6 +700,9 @@ class ChatProviderSwitch(BaseModel):
 
 class SendMessage(BaseModel):
   content: str
+  # Exact physical run shown by Resume; stale recovery controls cannot start
+  # a new continuation after automatic recovery has already advanced it.
+  resume_run_id: str | None = None
   attachments: list[dict] | None = None
   timezone: str | None = None
   viewport: dict | None = None

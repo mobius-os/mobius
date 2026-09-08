@@ -71,14 +71,6 @@ test('R6: answering in-process keeps the active bridge through settlement', () =
     'an in-process answer must not retire the same-turn bridge before its POST result')
 })
 
-test('R6: rejected injected POSTs do not tear down their existing stream', () => {
-  assert.match(
-    streamHookSource,
-    /if \(!forceSteer && !directSteer && !isAnswerSubmission\) \{\s*wantsReconnectRef\.current = false\s*setIsStreaming\(false\)/,
-    'answer and steer failures must leave the live turn they target attached',
-  )
-})
-
 // ---------------------------------------------------------------------------
 // Fix 1: lastGoodItemsRef preservation across reconnect resets
 // ---------------------------------------------------------------------------

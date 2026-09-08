@@ -30,6 +30,7 @@ function ActiveAssistantSurface({
   onPrepareAnswer,
   onCancelAnswer,
   onResume,
+  resumeState,
   onInternalNav,
   autoResumeEnabled,
   autoResumeAvailable,
@@ -90,6 +91,7 @@ function ActiveAssistantSurface({
       onPrepareAnswer={onPrepareAnswer}
       onCancelAnswer={onCancelAnswer}
       onResume={onResume}
+      resumeState={resumeState}
       onInternalNav={onInternalNav}
       autoResumeEnabled={autoResumeEnabled}
       autoResumeAvailable={autoResumeAvailable}

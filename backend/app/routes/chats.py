@@ -104,6 +104,16 @@ def _open_question_id_for(chat: models.Chat) -> str | None:
   return pending.question_id if pending is not None else None
 
 
+def _recovery_run_id(db: Session, chat_id: str) -> str | None:
+  """Name the exact idle physical attempt a rendered Resume may replace."""
+  if is_chat_running(chat_id):
+    return None
+  row = db.query(models.ChatRun.id).filter(
+    models.ChatRun.chat_id == chat_id,
+  ).order_by(models.ChatRun.started_at.desc(), models.ChatRun.id.desc()).first()
+  return row[0] if row is not None else None
+
+
 def _active_assistant_message_id(
   chat: models.Chat,
 ) -> str | None:
@@ -678,6 +688,7 @@ def _chat_detail_response(
     "offset": start,
     "running": running,
     "active_assistant_message_id": _active_assistant_message_id(chat),
+    "recovery_run_id": _recovery_run_id(db, chat.id),
     "active_goal_objective": active_goal_objective,
     "goal": goal,
     "pending_question_id": _open_question_id_for(chat),
@@ -1637,6 +1648,7 @@ def get_chat_runtime(
   return {
     "running": is_chat_running(chat.id),
     "active_assistant_message_id": _active_assistant_message_id(chat),
+    "recovery_run_id": _recovery_run_id(db, chat.id),
     "active_goal_objective": running_goal_objective(db, chat.id),
     "goal": presented_goal(db, chat.id),
     "pending_messages": list(chat.pending_messages or []),

@@ -18,8 +18,8 @@ Locks in the contracts of the limit-park feature:
       retries ignore unrelated live work and launch with a short stagger,
       while an accepted planned restart relaunches the exact previously-live
       set in prompt batches that do not wait for earlier turns to finish. Each
-      resumed turn combines its preserved queue + a "continue" into one
-      continuation.
+      resumed turn continues its interrupted input; preserved follow-ups wait
+      until that turn normally finishes.
   (f) The parks are observable: /api/debug/status lists parked runs.
   (g) A planned restart reuses the same exact-run state with a due-now time;
       crashes, unanswered questions, and app-owned work stay manual.
@@ -716,7 +716,7 @@ def test_notify_only_park_does_not_capture_an_owner_message(
   chat_mod.discard_starting(cid)
 
 
-def test_manual_try_now_drains_messages_queued_behind_future_limit_park(
+def test_manual_try_now_preserves_messages_queued_behind_future_limit_park(
   client, auth, monkeypatch,
 ):
   cid = "park-owner-try-now"
@@ -749,10 +749,10 @@ def test_manual_try_now_drains_messages_queued_behind_future_limit_park(
   )
   assert first.status_code == 202, first.text
   scheduled = []
-  monkeypatch.setattr(
-    "app.routes.chats_stream._schedule_continuation",
-    lambda **kwargs: scheduled.append(kwargs),
-  )
+  async def capture(messages, **kwargs):
+    scheduled.append({"messages": messages, **kwargs})
+
+  monkeypatch.setattr("app.routes.chats_stream.run_chat", capture)
   assert chat_mod.is_chat_running(cid) is False
 
   response = client.post(
@@ -767,11 +767,13 @@ def test_manual_try_now_drains_messages_queued_behind_future_limit_park(
   assert response.status_code == 202, response.text
   assert response.json()["status"] == "started"
   assert len(scheduled) == 1
-  assert "preserve this context" in scheduled[0]["next_user"]["content"]
-  assert scheduled[0]["next_user"]["kind"] == "continuation"
-  assert scheduled[0]["next_user"]["continuation_reason"] == "manual"
-  assert _run_row("rt-park-owner-try-now")["status"] == "completed"
-  assert _chat_row(cid)["pending"] == []
+  assert scheduled[0]["messages"][-1].content == "continue"
+  assert all("preserve this context" not in row.content for row in scheduled[0]["messages"])
+  marker = _chat_row(cid)["messages"][-1]
+  assert marker["kind"] == "continuation"
+  assert marker["continuation_reason"] == "manual"
+  assert _run_row("rt-park-owner-try-now")["status"] == "interrupted"
+  assert [row["cid"] for row in _chat_row(cid)["pending"]] == ["queued-context"]
   with SessionLocal() as db:
     successor = db.query(models.ChatRun).filter(
       models.ChatRun.id == scheduled[0]["run_token"],
@@ -788,7 +790,7 @@ def test_manual_try_now_drains_messages_queued_behind_future_limit_park(
     ("delegation_result", "delegation-result-manual-product"),
   ],
 )
-def test_manual_try_now_preserves_product_result_identity_and_claims_latch(
+def test_manual_resume_defers_product_receipt_until_original_turn_finishes(
   client, auth, monkeypatch, kind, result_cid,
 ):
   from app.broadcast import remove_broadcast
@@ -832,17 +834,10 @@ def test_manual_try_now_preserves_product_result_identity_and_claims_latch(
     lambda chat_id, next_user: claimed_wakes.append((chat_id, next_user)),
   )
 
-  def schedule(**kwargs):
-    from app.chat_waits import claim_scheduled_wait_result
-    from app.delegations import claim_scheduled_parent_wake
+  async def capture(*args, **kwargs):
+    pass
 
-    claim_scheduled_wait_result(cid, kwargs["next_user"])
-    claim_scheduled_parent_wake(cid, kwargs["next_user"])
-    return True
-
-  monkeypatch.setattr(
-    "app.routes.chats_stream._schedule_continuation", schedule,
-  )
+  monkeypatch.setattr("app.routes.chats_stream.run_chat", capture)
 
   response = client.post(
     f"/api/chats/{cid}/messages",
@@ -858,14 +853,34 @@ def test_manual_try_now_preserves_product_result_identity_and_claims_latch(
   assert response.status_code == 202, response.text
   assert response.json()["status"] == "started"
   with SessionLocal() as check_db:
-    successor = check_db.get(models.ChatRun, expected_run)
-    assert successor is not None
+    assert check_db.get(models.ChatRun, expected_run) is None
+  assert claimed_waits == []
+  assert claimed_wakes == []
+  assert _chat_row(cid)["pending"] == [result]
+
+  # The existing ordinary turn-end admission retains the receipt's exact
+  # identity and scheduling latch; Resume never claims it early.
+  promoted = get_writer().submit(PromotePending(
+    chat_id=cid, run_token="provisional-next-turn",
+  )).result(timeout=5)["promoted"]
+  assert promoted["kind"] == kind
+  assert promoted["_run_token"] == expected_run
+  assert _chat_row(cid)["pending"] == []
+  monkeypatch.setattr(chat_mod, "run_chat", capture)
+
+  async def schedule_result():
+    assert chat_mod._schedule_continuation(
+      chat_id=cid, messages=[], session_id="sess", provider_id="claude",
+      next_user=promoted, run_token=expected_run,
+    )
+    await asyncio.sleep(0)
+
+  asyncio.run(schedule_result())
   for claimed in (claimed_waits, claimed_wakes):
     assert len(claimed) == 1
     assert claimed[0][0] == cid
     assert claimed[0][1]["kind"] == kind
     assert claimed[0][1]["_run_token"] == expected_run
-  assert _chat_row(cid)["pending"] == []
   chat_mod.discard_starting(cid)
   remove_broadcast(cid)
 
@@ -1136,18 +1151,17 @@ def test_sweep_auto_resume_on_starts_one_staggered_continue(
     assert _run_row("rt-sweep-auto")["status"] == "completed"
     assert len(scheduled) == 1
     assert scheduled[0]["chat_id"] == "sweep-auto"
-    # The preserved queue + the synthetic "continue" were promoted into ONE
-    # continuation turn (no per-message limit storm), queue first.
+    # Recovery continues A without admitting the later queued ask.
     promoted = scheduled[0]["next_user"]
-    assert "queued ask" in promoted["content"]
+    assert "queued ask" not in promoted["content"]
     assert "continue" in promoted["content"]
     assert promoted["_messages"][-1]["kind"] == "continuation"
     assert promoted["_messages"][-1]["continuation_reason"] == "usage_limit"
     assert promoted["kind"] == "continuation"
     assert promoted["continuation_reason"] == "usage_limit"
     state = _chat_row("sweep-auto")
-    assert state["pending"] == []
-    assert state["running_status"] == "running"  # PromotePending set the marker
+    assert state["pending"] == queued
+    assert state["running_status"] == "running"
     with SessionLocal() as db:
       resumed = db.query(models.ChatRun).filter(
         models.ChatRun.chat_id == "sweep-auto",
@@ -1217,7 +1231,7 @@ def test_sweep_auto_resumes_an_active_delegation_under_its_app_identity(
 
 
 def test_limit_handoff_hidden_result_preserves_goal_root_and_app(monkeypatch):
-  """A hidden result is the resumed prompt; Continue stays transcript-only."""
+  """Recovery keeps its Goal/app identity without delivering a later result."""
   cid = "limit-hidden-result"
   token = f"rt-{cid}"
   goal_id = "goal-hidden-result"
@@ -1254,11 +1268,11 @@ def test_limit_handoff_hidden_result_preserves_goal_root_and_app(monkeypatch):
     assert asyncio.run(chat_mod._auto_resume_chat(cid, park_token=token))
     assert len(scheduled) == 2
     next_user = scheduled[-1]["next_user"]
-    assert next_user["content"] == hidden["content"]
-    assert next_user["kind"] == "delegation_result"
-    assert next_user["hidden"] is True
+    assert next_user["content"] == "continue"
+    assert next_user["kind"] == "continuation"
+    assert _chat_row(cid)["pending"] == [hidden]
     assert [row["cid"] for row in next_user["_messages"]] == [
-      hidden["cid"], f"limit-resume-{token}",
+      f"limit-resume-{token}",
     ]
     resumed = _run_row(scheduled[-1]["run_token"])
     assert resumed["initiated_by_app_id"] == app_id
@@ -1573,7 +1587,7 @@ def test_restart_park_auto_continues_with_product_marker(
     chat_mod.discard_starting(cid)
 
 
-def test_restart_consumes_a_hidden_owner_group_without_queueing_continue(
+def test_restart_preserves_a_hidden_owner_group_without_queueing_continue(
   owner_token, monkeypatch,
 ):
   del owner_token
@@ -1609,13 +1623,10 @@ def test_restart_consumes_a_hidden_owner_group_without_queueing_continue(
   try:
     assert _run_sweep() == [cid]
     assert len(scheduled) == 1
-    assert scheduled[0]["next_user"]["content"] == "hidden recovery payload"
-    assert scheduled[0]["next_user"]["hidden"] is True
+    assert scheduled[0]["next_user"]["content"] == "continue"
     state = _chat_row(cid)
-    assert state["pending"] == []
-    assert [row["cid"] for row in state["messages"][-2:]] == [
-      "hidden-recovery", f"restart-resume-{token}",
-    ]
+    assert [row["cid"] for row in state["pending"]] == ["hidden-recovery"]
+    assert state["messages"][-1]["cid"] == f"restart-resume-{token}"
   finally:
     chat_mod.discard_starting(cid)
 
@@ -1704,10 +1715,10 @@ def test_restart_does_not_absorb_newly_queued_app_work(
   assert notifications[0]["title"] == "Möbius restarted"
 
 
-def test_owner_message_queued_after_app_restart_takes_over_attribution(
+def test_owner_message_queued_after_app_restart_does_not_take_over_recovery(
   owner_token, monkeypatch,
 ):
-  """New owner input outranks the parked app when forming the next run."""
+  """A resumes with its original app authority; queued owner B stays separate."""
   del owner_token
   monkeypatch.setattr(
     "app.push.notify_owner_async", _async_notify(lambda *args, **kwargs: "notif-id"),
@@ -1741,8 +1752,9 @@ def test_owner_message_queued_after_app_restart_takes_over_attribution(
     assert _run_sweep() == [cid]
     assert len(scheduled) == 1
     resumed_run = _run_row(scheduled[0]["run_token"])
-    assert resumed_run["initiated_by_app_id"] is None
-    assert "owner follow-up" in scheduled[0]["next_user"]["content"]
+    assert resumed_run["initiated_by_app_id"] == 42
+    assert scheduled[0]["next_user"]["content"] == "continue"
+    assert _chat_row(cid)["pending"][0]["content"] == "owner follow-up"
   finally:
     chat_mod.discard_starting(cid)
 
@@ -2428,10 +2440,8 @@ def test_auto_resume_spawn_failure_reattaches_deterministic_successor_once(
   assert _run_row(resume_token)["status"] == "running"
   state = _chat_row(cid)
   assert state["running_status"] == "running"
-  assert state["pending"] == []
-  assert [
-    m.get("cid") for m in state["messages"][-2:]
-  ] == ["queued-before-limit", f"limit-resume-{park_token}"]
+  assert state["pending"] == [queued]
+  assert state["messages"][-1]["cid"] == f"limit-resume-{park_token}"
 
   # The cold-start reconciler recognizes this exact no-output writer orphan
   # and leaves the same physical run for the reset sweep to reschedule.
@@ -2453,7 +2463,8 @@ def test_auto_resume_spawn_failure_reattaches_deterministic_successor_once(
     assert _run_sweep() == [cid]
     assert len(scheduled) == 1
     assert len(notifications) == expected_notifications
-    assert "preserve me" in scheduled[0]["next_user"]["content"]
+    assert scheduled[0]["next_user"]["content"] == "continue"
+    assert _chat_row(cid)["pending"] == [queued]
     assert scheduled[0]["run_token"] == resume_token
     state = _chat_row(cid)
     assert [
@@ -2461,7 +2472,7 @@ def test_auto_resume_spawn_failure_reattaches_deterministic_successor_once(
       if m.get("cid") in {
         "queued-before-limit", f"limit-resume-{park_token}",
       }
-    ] == ["queued-before-limit", f"limit-resume-{park_token}"]
+    ] == [f"limit-resume-{park_token}"]
   finally:
     chat_mod.discard_starting(cid)
 

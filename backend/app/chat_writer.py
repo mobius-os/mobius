@@ -480,6 +480,13 @@ class StartTurn(_Command):
   title_source: str = ""
   default_provider: str = "claude"
   initiated_by_app_id: int | None = None
+  # The rendered recovery control names its exact interrupted physical run.
+  resume_run_id: str | None = None
+
+
+@dataclass(frozen=True)
+class StartTurnRecoveryChanged:
+  """The recovery target was superseded before this request committed."""
 
 
 @dataclass(frozen=True)
@@ -524,7 +531,6 @@ class StartContinuation(_Command):
   # A restart continuation atomically replaces its exact parked physical run.
   # Other programmatic continuations require an already-idle logical root.
   supersedes_run_token: str | None = None
-  consume_pending: bool = False
 
 
 def recover_start_continuation(
@@ -540,7 +546,9 @@ def recover_start_continuation(
   """Rebuild one exact committed-but-unscheduled continuation handoff.
 
   ``StartContinuation`` stores a small causal envelope on its synthetic tail
-  row when it atomically supersedes a parked run and consumes pending input.
+  row when it atomically supersedes a parked run. Older committed handoffs
+  could also consume pending input; the envelope preserves their exact rows
+  rather than reinterpreting an already-accepted prompt after an upgrade.
   That envelope identifies the exact transcript rows that formed the provider
   prompt.  A fresh process can therefore reconstruct the original provider
   handoff without duplicating user content or relying on an in-memory rollback
@@ -734,12 +742,6 @@ class PromotePending(_Command):
   # not turn-end handoffs and keep the clean default; drain_and_release passes
   # "failed" when the provider returned an error before queued work continues.
   ending_status: str = "completed"
-  # An explicit owner Resume may find real messages already queued behind a
-  # parked provider turn.  Those visible rows remain ordinary owner messages,
-  # but this private execution hint makes the single promoted provider turn a
-  # manual continuation instead of minting a new logical root.  The hint is
-  # actor-owned (never accepted as pending-row metadata from a client).
-  continuation_reason: str | None = None
 
 
 @dataclass
@@ -2470,7 +2472,7 @@ class ChatWriterActor:
 
   def _start_turn(
     self, db, cmd: StartTurn,
-  ) -> dict | StartTurnBlockedByPendingQuestion:
+  ) -> dict | StartTurnBlockedByPendingQuestion | StartTurnRecoveryChanged:
     """Append the initial user message, set title/provider, mark the run.
 
     Replicates the fresh-start branch of `send_message`: builds the agent
@@ -2504,9 +2506,8 @@ class ChatWriterActor:
             "session_id": chat.session_id,
             "provider": chat.provider,
           }
-      # Defensive symmetry with AppendPending. A normal route never calls
-      # StartTurn while pending rows exist, but keeping the actor gate complete
-      # prevents a future caller from turning a queued retry into a second run.
+      # Resume can start while follow-ups remain pending. The symmetric CID
+      # gate keeps that path from turning a queued retry into a second run.
       for row in pending:
         if cid_of(row) == incoming_cid:
           return {
@@ -2524,6 +2525,15 @@ class ChatWriterActor:
       question_id = chat.pending_question_id
       db.rollback()  # End the actor's read transaction on this non-write path.
       return StartTurnBlockedByPendingQuestion(question_id)
+    from app.continuations import continuation_reason
+    from app.run_state import latest_run
+    resuming = continuation_reason(cmd.user_msg) == "manual"
+    prior = latest_run(db, cmd.chat_id) if resuming else None
+    if cmd.resume_run_id is not None and (
+      not resuming or prior is None or prior.id != cmd.resume_run_id
+    ):
+      db.rollback()
+      return StartTurnRecoveryChanged()
     if not existing:
       chat.provider = cmd.default_provider or "claude"
     # Build the agent history as schemas.ChatMessage objects, exactly as the
@@ -2581,9 +2591,13 @@ class ChatWriterActor:
     self._close_nonterminal_runs(db, cmd.chat_id, "interrupted")
     db.add(ChatRun(
       id=cmd.run_token, chat_id=cmd.chat_id, status="running",
-      root_run_id=cmd.run_token,
+      root_run_id=(
+        (prior.root_run_id or prior.id) if prior is not None else cmd.run_token
+      ),
       provider=chat.provider, started_at=started_at,
-      initiated_by_app_id=cmd.initiated_by_app_id,
+      initiated_by_app_id=(
+        prior.initiated_by_app_id if prior is not None else cmd.initiated_by_app_id
+      ),
       goal_objective=goal_objective,
       goal_id=goal_id,
     ))
@@ -2606,8 +2620,8 @@ class ChatWriterActor:
     physical run. A deterministic ``cid`` also lets this command adopt its
     exact synthetic row from ``pending_messages`` after a busy/input-blocked
     wake or a crash before promotion. Ordinary coordinator calls reject foreign
-    pending work. Restart recovery may consume the current owner group while
-    preserving group order and every later group.
+    pending work. Recovery replaces the exact parked attempt without consuming
+    follow-ups: they belong to the next ordinary turn, not this continuation.
     """
     from datetime import UTC, datetime
 
@@ -2687,18 +2701,11 @@ class ChatWriterActor:
     if cmd.initiated_by_app_id is not None:
       source["_initiated_by_app_id"] = cmd.initiated_by_app_id
 
-    selected_pending: list[dict] = []
     remaining_pending: list[dict] = []
-    if cmd.consume_pending and pending:
-      from app.continuations import pending_message_group_key
-      head_group = pending_message_group_key(pending[0])
-      promote_count = 0
-      for row in pending:
-        if pending_message_group_key(row) != head_group:
-          break
-        promote_count += 1
-      selected_pending = pending[:promote_count]
-      remaining_pending = pending[promote_count:]
+    if cmd.supersedes_run_token is not None:
+      # A physical recovery continues the interrupted input. Later owner or
+      # product rows keep their original queue boundary and attribution.
+      remaining_pending = pending
     elif pending:
       # Recover only the exact row the retired AppendPending -> PromotePending
       # sequence could have stranded.  Never consume a real owner queue or an
@@ -2736,14 +2743,9 @@ class ChatWriterActor:
           break
 
     ensure_user_cid(source)
-    # Restart recovery consumes any already-queued owner group and writes its
-    # product continuation marker directly to history in the same commit. The
-    # marker is never a pending row. A hidden group stays hidden provider input;
-    # the visible restart marker remains transcript-only in that case.
-    provider_sources = list(selected_pending)
-    if not provider_sources or not bool(provider_sources[0].get("hidden")):
-      provider_sources.append(source)
-    if cmd.supersedes_run_token is not None and cmd.consume_pending:
+    # Recovery markers never enter the follow-up queue.
+    provider_sources = [source]
+    if cmd.supersedes_run_token is not None:
       # Persist the minimum causal envelope needed to reconstruct the exact
       # provider prompt after a crash between this commit and task creation.
       # The transcript rows remain the source of truth; this records only
@@ -2753,15 +2755,13 @@ class ChatWriterActor:
       source["_continuation_supersedes_run_token"] = (
         cmd.supersedes_run_token
       )
-      source["_continuation_consumed_cids"] = [
-        cid_of(row) for row in selected_pending if cid_of(row) is not None
-      ]
+      source["_continuation_consumed_cids"] = []
       source["_continuation_provider_cids"] = [
         cid_of(row) for row in provider_sources if cid_of(row) is not None
       ]
     agent_message = _combine_pending_messages(provider_sources)
     stored_rows = _pending_messages_for_transcript(
-      [*selected_pending, source], existing,
+      [source], existing,
     )
     try:
       history = [
@@ -2822,9 +2822,7 @@ class ChatWriterActor:
       "promoted": {
         **agent_message,
         "_messages": stored_rows,
-        "_consumed_cids": [
-          cid_of(row) for row in selected_pending if cid_of(row) is not None
-        ],
+        "_consumed_cids": [],
       },
       "session_id": chat.session_id,
       "provider": provider,
@@ -3338,7 +3336,6 @@ class ChatWriterActor:
       return {"history": [], "promoted": None, "session_id": chat.session_id}
     existing = list(chat.messages or [])
     from app.continuations import (
-      PRODUCT_RESULT_MESSAGE_KINDS,
       pending_message_group_key,
       product_result_run_token,
     )
@@ -3351,16 +3348,6 @@ class ChatWriterActor:
     promoted_group = pending[:promote_count]
     remaining_pending = pending[promote_count:]
     agent_pending = _combine_pending_messages(promoted_group)
-    if (
-      cmd.continuation_reason is not None
-      and agent_pending.get("kind") not in PRODUCT_RESULT_MESSAGE_KINDS
-    ):
-      # A manual Try-now owns ordinary queued context, but a Wait/delegation
-      # receipt already owns a stronger product identity. Re-labeling it here
-      # would discard its deterministic run token and prevent the scheduler
-      # from claiming the delivery latch after provider admission.
-      agent_pending["kind"] = "continuation"
-      agent_pending["continuation_reason"] = cmd.continuation_reason
     consumed_cids = agent_pending.pop("_consumed_cids", [])
     initiated_by_app_id = agent_pending.pop("_initiated_by_app_id", None)
     durable_run_token = (

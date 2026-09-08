@@ -50,6 +50,7 @@ import {
 } from './chatOutbox.js'
 import useSystemEventStream from '../../hooks/useSystemEventStream.js'
 import usePendingQueue from './hooks/usePendingQueue.js'
+import useResume from './hooks/useResume.js'
 import useBridgePartial from './hooks/useBridgePartial.js'
 import useTranscriptState from './hooks/useTranscriptState.js'
 import useComposerDraftState from './hooks/useComposerDraftState.js'
@@ -438,6 +439,7 @@ export default function ChatView({
   // back through the versioned activation handoff, so any miss self-heals on
   // the first authoritative detail read.
   const cached = queryClient.getQueryData(chatMessagesQueryKey(chatId))
+  const [recoveryRunId, setRecoveryRunId] = useState(cached?.recoveryRunId || null)
   const transcriptCacheKey = useMemo(() => chatMessagesQueryKey(chatId), [chatId])
   const {
     messages,
@@ -524,12 +526,12 @@ export default function ChatView({
   // does not fall back to Mic while a turn is still running with queued work.
   const [serverRunning, setServerRunning] = useState(() => !!cached?.running)
   const serverRunningRef = useRef(!!cached?.running)
-  function setServerRunningLocalState(v) {
+  const setServerRunningLocalState = useCallback((v) => {
     const running = !!v
     serverRunningRef.current = running
     setServerRunning(running)
-  }
-  function setServerRunningState(v) {
+  }, [])
+  const setServerRunningState = useCallback((v) => {
     const running = !!v
     setServerRunningLocalState(running)
     updateChatRuntimeCache(
@@ -537,7 +539,7 @@ export default function ChatView({
       chatMessagesQueryKey(chatId),
       { running },
     )
-  }
+  }, [chatId, queryClient, setServerRunningLocalState])
   // The server names the only assistant row allowed to own regenerable live
   // stream state. Keep a synchronous ref for terminal/promotion callbacks;
   // React state drives source selection for ordinary renders.
@@ -951,10 +953,6 @@ export default function ChatView({
   // snapshot while app context, settings, or the POST is still in flight;
   // that snapshot cannot retire this locally-owned start.
   const localStartRequestRef = useRef(null)
-  // A manual Resume has no composer draft owner. Keep its provisional
-  // confirmation notice under an exact token so an older check cannot clear a
-  // newer send failure or leave the internal `continue` action in the composer.
-  const continuationConfirmationRef = useRef(null)
   // Terminal drain events are a wake-up hint for one exact attempt, never a
   // replacement for inspecting the durable outbox. Retain the hint only while
   // its cid + draft identity still name the mounted composer owner.
@@ -1250,6 +1248,8 @@ export default function ChatView({
     force = false,
     terminal204 = false,
     authoritative = false,
+    isCurrent,
+    onReconciled,
     expectedFailedAttempt,
     failedAttemptTerminalOutcome = null,
   } = {}) => {
@@ -1262,7 +1262,7 @@ export default function ChatView({
       )
       if (!res.ok) throw new Error(`CHAT_FETCH_FAILED_${res.status}`)
       const data = await res.json()
-      if (chatIdStaleRef.current) return
+      if (chatIdStaleRef.current || isCurrent?.() === false) return
       // Discard if a Stop (or other clear) bumped gen while we waited.
       if (fetchGenRef.current !== gen) return
       let msgs = data.messages || []
@@ -1285,6 +1285,10 @@ export default function ChatView({
           : expectedFailedAttempt,
         expectedFetchGeneration: gen,
       })
+      // Outbox reconciliation is asynchronous too. A replaced stream or Stop
+      // must not install an older terminal snapshot over its successor.
+      if (chatIdStaleRef.current || fetchGenRef.current !== gen
+          || isCurrent?.() === false) return
       const preserveLocalTurn =
         !authoritative
         && force
@@ -1338,6 +1342,8 @@ export default function ChatView({
       // session identity is what unlocks the exact context-usage query.
       const refreshedChatInfo = chatDetailCacheValue(data).chatInfo
       setGoalPresentationLocalState(runtimeGoal)
+      setRecoveryRunId(data.recovery_run_id || null)
+      if (embedded) setEmbeddedRunActive(!!data.running)
       const adoptAssistantOwner = shouldAdoptRuntimeAssistantOwner({
         runtimeRunning: !!data.running,
         localAuthoritative: preserveLocalTurn,
@@ -1351,6 +1357,7 @@ export default function ChatView({
       setBackgroundHelpers(normalizeBackgroundHelpers(data.background_helpers))
       updateChatRuntimeCache(queryClient, chatMessagesQueryKey(chatId), {
         running: !!data.running,
+        recoveryRunId: data.recovery_run_id || null,
         goal: runtimeGoal,
         activeGoalObjective: runtimeGoal?.status === 'active'
           ? runtimeGoal.objective
@@ -1373,12 +1380,16 @@ export default function ChatView({
       if (!preserveLocalTurn) {
         pendingQueue.hydrate(data.pending_messages || [])
       }
-      return {
+      const runtime = {
         running: !!data.running,
         activeAssistantMessageId: data.active_assistant_message_id || null,
         pendingQuestionId: data.pending_question_id || null,
         pendingLimitResume: !!tailResumableBlock(msgs)?.pause?.resets_at,
       }
+      // Stream retirement and the authoritative replacement must be one
+      // commit, not two paints separated by the detail request.
+      onReconciled?.(runtime)
+      return runtime
     } catch {
       void reconcileFailedSendOutbox({
         authoritative: false,
@@ -1397,16 +1408,14 @@ export default function ChatView({
     chatId,
     commitMessages,
     pendingQueue.hydrate,
+    embedded,
     queryClient,
     reconcileFailedSendOutbox,
     setActiveAssistantMessageId,
     setGoalPresentationLocalState,
   ])
 
-  const settleAmbiguousSendConfirmation = useCallback((
-    failedAttempt,
-    continuationConfirmation = null,
-  ) => (
+  const settleAmbiguousSendConfirmation = useCallback((failedAttempt) => (
     settleFailedSendConfirmation(
       () => fetchMessages({ force: true, expectedFailedAttempt: failedAttempt }),
       options => reconcileFailedSendAttempt(
@@ -1414,21 +1423,12 @@ export default function ChatView({
         pendingQueue.pendingMessagesRef.current,
         { ...options, expectedAttempt: failedAttempt },
       ),
-      () => {
-        if (
-          !continuationConfirmation
-          || continuationConfirmationRef.current !== continuationConfirmation
-        ) return
-        continuationConfirmationRef.current = null
-        setSendFailure(null)
-      },
     )
   ), [
     fetchMessages,
     messagesRef,
     pendingQueue.pendingMessagesRef,
     reconcileFailedSendAttempt,
-    setSendFailure,
   ])
 
   // Active-turn runtime reconciliation. The SSE stream is authoritative for
@@ -1449,6 +1449,7 @@ export default function ChatView({
       const data = await jsonOrThrow(res, 'Runtime refresh failed')
       if (chatIdStaleRef.current) return null
       if (fetchGenRef.current !== gen) return null
+      setRecoveryRunId(data.recovery_run_id || null)
       const serverPending = data.pending_messages || []
       const runtime = {
         running: !!data.running,
@@ -1534,6 +1535,7 @@ export default function ChatView({
       setBackgroundHelpers(normalizeBackgroundHelpers(data.background_helpers))
       updateChatRuntimeCache(queryClient, chatMessagesQueryKey(chatId), {
         running: !!data.running,
+        recoveryRunId: data.recovery_run_id || null,
         goal: runtimeGoal,
         activeGoalObjective: runtimeGoal?.status === 'active'
           ? runtimeGoal.objective
@@ -1704,17 +1706,14 @@ export default function ChatView({
         setSending(false)
         sendingRef.current = false
         setServerRunningState(false)
-        // Physical completion settles the visible Goal instead of removing it.
-        // The authoritative refresh below corrects this optimistic terminal
-        // label to paused (unfinished plan) or failed when applicable.
+        // A physical stream ending is not proof that the Goal is complete:
+        // restart and other parks use this same transport boundary. Keep the
+        // last verdict until the durable runtime supplies its actual outcome.
         const endingGoal = goalPresentationRef.current
-        if (endingGoal) {
-          setGoalState({ ...endingGoal, status: 'completed' })
-        }
         // Goal status and pending rows both belong to durable server truth at
         // this boundary, so either condition earns one terminal reconcile.
         if (endingGoal || pendingQueue.pendingMessagesRef.current.length > 0) {
-          fetchMessages({ force: true })
+          fetchMessages({ force: true, authoritative: true })
         }
         setPinnedSettleSeq(seq => seq + 1)
       }
@@ -1939,6 +1938,9 @@ export default function ChatView({
   // transport without swallowing text entered after Send.
   const sendAfterSettingsSaved = useCallback(async (text, attachments, options) => {
     await settingsSaveTailRef.current
+    if (chatIdStaleRef.current) {
+      throw new Error('This chat is no longer open.')
+    }
     return streamSend(text, attachments, options)
   }, [streamSend])
 
@@ -2361,6 +2363,7 @@ export default function ChatView({
 
     const settleRuntime = (runtime, visibleMessages) => {
       const running = !!runtime.running
+      setRecoveryRunId(runtime.recovery_run_id || null)
       const attachesToStream = shouldAttachRunningStream({
         running,
         pendingQuestionId: runtime.pending_question_id,
@@ -2487,6 +2490,7 @@ export default function ChatView({
         )
         updateChatRuntimeCache(queryClient, queryKey, {
           running: !!runtime.running,
+          recoveryRunId: runtime.recovery_run_id || null,
           activeAssistantMessageId:
             runtime.active_assistant_message_id || null,
           goal: runtimeGoal,
@@ -2856,10 +2860,6 @@ export default function ChatView({
     if (!hasSendablePayload(text, attachments)) return false
 
     const pin = opts.pin !== false  // default true
-    const continuation = opts.continuation === 'manual' ? 'manual' : undefined
-    const hidden = opts.hidden === true
-    const preserveComposer = opts.preserveComposer === true
-    continuationConfirmationRef.current = null
     setSendFailure(null)
 
     // Stop voice recognition so a late onresult doesn't refill input
@@ -2917,13 +2917,7 @@ export default function ChatView({
       if (usesComposerFiles) releaseFiles(composerFileSnapshot)
     }
     function restoreComposerAfterFailedSend() {
-      // Resume is a product action whose provider-facing prompt never belonged
-      // in the composer. A failed request keeps the resumable card in place;
-      // restoring the internal word "continue" as a draft would misattribute
-      // it to the owner and make a retry look like ordinary prose.
-      if (!continuation && !preserveComposer) {
-        restoreComposerText(text, { preserveFailedAttempt: true })
-      }
+      restoreComposerText(text, { preserveFailedAttempt: true })
       if (usesComposerFiles) restoreFiles(composerFileSnapshot)
     }
 
@@ -2962,11 +2956,6 @@ export default function ChatView({
     // latest commit and dodge that.
     if (queuesBehindActiveTurn) {
       const queuedMsg = { role: 'user', content: text, ts: Date.now(), cid, queued: true }
-      if (continuation) {
-        queuedMsg.kind = 'continuation'
-        queuedMsg.continuation_reason = continuation
-      }
-      if (hidden) queuedMsg.hidden = true
       if (attachments.length > 0) queuedMsg.attachments = attachments
       // The shared send decision was captured AT SEND TIME, before blur or the
       // POST. If this queued send is promoted into the active turn (the backend
@@ -2990,9 +2979,9 @@ export default function ChatView({
         // its first presentation is the inline steering surface, never the tray.
         pendingQueue.reserveForSteer([cid])
       }
-      if (!preserveComposer) setComposerInput('')
+      setComposerInput('')
       clearComposerFilesForSend()
-      if (!preserveComposer && inputRef.current) {
+      if (inputRef.current) {
         resetComposerTextarea(inputRef.current)
         // Drop the multi-line `.chat__pill--tall` class so send/mic
         // re-center vertically. Without this, the pill stays in
@@ -3009,8 +2998,8 @@ export default function ChatView({
           text,
           attachments.length > 0 ? attachments : undefined,
           directSteer
-            ? { directSteer: true, cid, continuation, hidden }
-            : { queueOnly: true, cid, continuation, hidden },
+            ? { directSteer: true, cid }
+            : { queueOnly: true, cid },
         )
         if (!directSteer) queuedSendRequestsRef.current.set(cid, queueRequest)
         const result = await queueRequest
@@ -3223,7 +3212,7 @@ export default function ChatView({
           // the user's editable draft.
           pendingQueue.cancelByCid(queuedMsg.cid)
           forgetSendIntent({ cid: queuedMsg.cid })
-          failedAttempt = continuation ? null : {
+          failedAttempt = {
             cid,
             draftIdentity,
             text,
@@ -3237,9 +3226,7 @@ export default function ChatView({
           ? null
           : sendFailureMessage(err, { online: getOnlineSnapshot() }))
         if (!keepQueued && isAmbiguousSendFailure(err)) {
-          const confirmation = continuation ? {} : null
-          if (confirmation) continuationConfirmationRef.current = confirmation
-          void settleAmbiguousSendConfirmation(failedAttempt, confirmation)
+          void settleAmbiguousSendConfirmation(failedAttempt)
         }
         if (modelSelectionBlocked) {
           setModelSelectionRequest(request => request + 1)
@@ -3279,16 +3266,11 @@ export default function ChatView({
     const freshPinIntent = sendPinIntent
 
     const userMsg = { role: 'user', content: text, ts: Date.now(), cid, optimistic: true }
-    if (continuation) {
-      userMsg.kind = 'continuation'
-      userMsg.continuation_reason = continuation
-    }
-    if (hidden) userMsg.hidden = true
     if (attachments.length > 0) userMsg.attachments = attachments
     commitMessages(prev => [...prev, userMsg])
-    if (!preserveComposer) setComposerInput('')
+    setComposerInput('')
     clearComposerFilesForSend()
-    if (!preserveComposer && inputRef.current) {
+    if (inputRef.current) {
       resetComposerTextarea(inputRef.current)
       // Drop the multi-line `.chat__pill--tall` class — see queue-path
       // comment above for the full rationale.
@@ -3332,7 +3314,7 @@ export default function ChatView({
         // identity the optimistic row (and its pin) already use — without it
         // the server row derives legacy-<ts> and the strict data-cid pin
         // selector goes blind after the ack re-render.
-        { cid, continuation, hidden },
+        { cid },
       )
       clearFailedAttempt()
       releaseComposerFilesAfterAccepted()
@@ -3439,7 +3421,7 @@ export default function ChatView({
         releaseComposerFilesAfterAccepted()
         clearFailedAttempt()
       } else {
-        failedAttempt = continuation ? null : {
+        failedAttempt = {
           cid,
           draftIdentity,
           text,
@@ -3463,9 +3445,7 @@ export default function ChatView({
         ? null
         : sendFailureMessage(err, { online: getOnlineSnapshot() }))
       if (!keepQueued && isAmbiguousSendFailure(err)) {
-        const confirmation = continuation ? {} : null
-        if (confirmation) continuationConfirmationRef.current = confirmation
-        void settleAmbiguousSendConfirmation(failedAttempt, confirmation)
+        void settleAmbiguousSendConfirmation(failedAttempt)
       }
       if (modelSelectionBlocked) {
         setModelSelectionRequest(request => request + 1)
@@ -3847,14 +3827,35 @@ export default function ChatView({
     }
   }, [chatId, setGoalState])
 
+  const acceptResume = useCallback((result) => {
+    const rows = startedMessagesFromResponse(result)
+    if (rows) commitMessages(previous => appendMessageBatch(previous, rows))
+    if (result?.status === 'started' || result?.running === true) {
+      promotedRef.current = false
+      setSending(true)
+      sendingRef.current = true
+      setServerRunningState(true)
+      onMessageStartRef.current?.()
+    }
+  }, [commitMessages, setServerRunningState])
+  const refreshResume = useCallback(() => {
+    void fetchMessages({ force: true, authoritative: true })
+  }, [fetchMessages])
+  const resumeBlocked = useCallback(() => (
+    isProviderSwitchBlocking(chatId) || sendingRef.current || serverRunningRef.current
+  ), [chatId])
+  const { resume: handleResume, state: resumeState } = useResume({
+    chatId,
+    runId: recoveryRunId,
+    send: sendAfterSettingsSaved,
+    onAccepted: acceptResume,
+    onRefresh: refreshResume,
+    blocked: resumeBlocked,
+  })
   const handleResumeGoal = useCallback(() => {
     if (goalPresentation?.status !== 'paused') return
-    void doSend('continue', {
-      pin: false,
-      continuation: 'manual',
-      hidden: true,
-    })
-  }, [doSend, goalPresentation?.status])
+    void handleResume()
+  }, [handleResume, goalPresentation?.status])
 
   // Cancel one queued message via DELETE. Keep reconciliation scoped to that
   // CID: full queue snapshots can arrive out of order when two rows are
@@ -5290,8 +5291,10 @@ export default function ChatView({
             && !goalWaitState.monitoring
         ? {
             actionKind: 'resume',
-            actionLabel: 'Resume',
-            actionAriaLabel: `Resume goal: ${visibleGoalObjective}`,
+            actionLabel: resumeState.pending ? 'Resuming…' : 'Resume',
+            actionDisabled: resumeState.pending || providerSwitching,
+            actionError: resumeState.error,
+            actionAriaLabel: `${resumeState.pending ? 'Resuming' : 'Resume'} goal: ${visibleGoalObjective}`,
             actionIcon: <Play width={13} height={13} aria-hidden="true" />,
           }
         : {}),
@@ -5563,7 +5566,8 @@ export default function ChatView({
                 onQuestionAnswer={doSendSilent}
                 onQuestionSubmitIntent={prepareQuestionSubmission}
                 onQuestionSubmitCancel={cancelQuestionSubmission}
-                onResume={doSend}
+                onResume={handleResume}
+                resumeState={resumeState}
                 onInternalNav={internalNav}
                 autoResumeEnabled={
                   isLastMsg && autoResumeEnabled
@@ -5608,7 +5612,8 @@ export default function ChatView({
               onAnswer={doSendSilent}
               onPrepareAnswer={prepareQuestionSubmission}
               onCancelAnswer={cancelQuestionSubmission}
-              onResume={activeAssistantIsStreaming ? undefined : doSend}
+              onResume={activeAssistantIsStreaming ? undefined : handleResume}
+              resumeState={resumeState}
               onInternalNav={internalNav}
               autoResumeEnabled={autoResumeEnabled}
               autoResumeAvailable={showAutoResumeControl}

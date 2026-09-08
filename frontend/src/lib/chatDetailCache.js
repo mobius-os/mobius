@@ -178,6 +178,7 @@ export function chatDetailCacheValue(data = {}) {
       && data.offset + messages.length === data.total,
     updated_at: typeof data.updated_at === 'string' ? data.updated_at : null,
     activeAssistantMessageId: data.active_assistant_message_id || null,
+    recoveryRunId: data.recovery_run_id || null,
     messages,
     total,
     offset,

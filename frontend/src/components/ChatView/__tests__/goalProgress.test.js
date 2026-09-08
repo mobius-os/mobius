@@ -425,10 +425,15 @@ test('ChatView retains settled goals independently of transport liveness', () =>
     /if \(!turnActive\)[\s\S]{0,100}setActiveGoalState\(''\)/,
     'a transient loss of browser liveness must not retire a durable goal',
   )
+  assert.doesNotMatch(
+    chatView,
+    /setGoalState\(\{ \.\.\.endingGoal, status: 'completed' \}\)/,
+    'a physical stream ending must not claim Goal completion before server confirmation',
+  )
   assert.match(
     chatView,
-    /setServerRunningState\(false\)[\s\S]{0,500}const endingGoal = goalPresentationRef\.current[\s\S]{0,200}setGoalState\(\{ \.\.\.endingGoal, status: 'completed' \}\)/,
-    'a terminal stream boundary must settle rather than remove its goal',
+    /if \(endingGoal \|\| pendingQueue\.pendingMessagesRef\.current\.length > 0\) \{\s*fetchMessages\(\{ force: true, authoritative: true \}\)/,
+    'the existing authoritative refresh owns completed versus paused Goal status',
   )
   assert.match(
     chatView,
@@ -566,7 +571,7 @@ test('the goal rail confirms and clears directly, sourced domain-neutrally', () 
     'the armed clear control must turn into a confirm check')
   assert.match(progressRail, /item\.clearConfirmLabel \|\| 'Confirm clear'/,
     'the confirmation label must be item-supplied with a neutral fallback')
-  assert.match(chatView, /actionLabel: 'Resume'/,
+  assert.match(chatView, /actionLabel: resumeState\.pending \? 'Resuming…' : 'Resume'/,
     'a paused Goal should expose the one-tap resume action')
   assert.match(chatView, /actionIcon: <Play width=\{13\} height=\{13\}/,
     'the paused Goal action should spend only icon-sized visual space')
@@ -602,8 +607,8 @@ test('the goal rail confirms and clears directly, sourced domain-neutrally', () 
     'the whole goal label should expand naturally without a disclosure arrow')
   assert.match(
     chatView,
-    /handleResumeGoal[\s\S]{0,300}doSend\('continue', \{[\s\S]{0,160}continuation: 'manual',[\s\S]{0,80}hidden: true/,
-    'goal resume must reactivate through a hidden product continuation, not a visible continue message',
+    /handleResumeGoal[\s\S]{0,180}handleResume\(\)/,
+    'goal and recovery-card Resume share the acknowledged lifecycle action, not a composer send',
   )
 })
 
