@@ -149,12 +149,18 @@ def main() -> None:
       deadline_secs=args.deadline_secs,
     )
     print(json.dumps(result, indent=2))
+    if result.get('kind') == 'timer':
+      schedule = f"when the timer becomes due at {result.get('due_at')}"
+    else:
+      schedule = (
+        f"when the condition is met, its check fails, or its deadline is reached "
+        f"(probed now, then every {result.get('interval_secs')}s; "
+        f"deadline {result.get('deadline_at')})"
+      )
     print(
-      f"\nWait armed. This chat will resume on its own when the condition "
-      f"is met or its check fails (probed now, then every "
-      f"{result.get('interval_secs')}s; deadline "
-      f"{result.get('deadline_at')}). Safe to end the turn.",
-      file=sys.stderr,
+      f"\nWait armed. This chat will request a continuation {schedule}. "
+      "Open owner-input cards and recovery holds still take precedence. "
+      "Safe to end the turn.", file=sys.stderr,
     )
   elif args.action == "list":
     result = _call("GET", f"/api/chat-waits?chat_id={quote(chat_id)}")

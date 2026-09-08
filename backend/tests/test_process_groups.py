@@ -105,3 +105,30 @@ def test_terminate_process_group_has_sigkill_backstop(monkeypatch):
     (4321, signal.SIGTERM),
     (4321, signal.SIGKILL),
   ]
+
+
+def test_background_group_is_preferred_oom_victim(monkeypatch, tmp_path):
+  """An OOM event must cost the agent that grew, never the server."""
+  written = []
+  monkeypatch.setattr(process_groups.os, "getpgid", lambda pid: 4321)
+  monkeypatch.setattr(process_groups.os, "getpgrp", lambda: 9999)
+  monkeypatch.setattr(process_groups.os, "setpriority", lambda *_args: None)
+  monkeypatch.setattr(process_groups.os, "listdir", lambda _path: ["4321", "4322", "self"])
+
+  real_open = open
+
+  def fake_open(path, mode="r", *args, **kwargs):
+    if str(path).startswith("/proc/") and str(path).endswith("/oom_score_adj"):
+      written.append(str(path))
+      return real_open(tmp_path / "sink", "w")
+    return real_open(path, mode, *args, **kwargs)
+
+  monkeypatch.setattr("builtins.open", fake_open)
+
+  assert process_groups.lower_process_group_priority(
+    4321,
+    logger=logging.getLogger(__name__),
+    label="test",
+  ) is True
+  assert written == ["/proc/4321/oom_score_adj", "/proc/4322/oom_score_adj"]
+  assert process_groups.AGENT_OOM_SCORE_ADJ == 1000

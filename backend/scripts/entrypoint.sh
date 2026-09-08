@@ -177,9 +177,9 @@ _start_platform_restart_poller() {
         exit 0
       fi
       if [ -f /data/.managed-cutover-request.json ]; then
-        # Railway owns the eventual stop. This root-owned helper only opens
-        # and accepts the one-shot continuation intent; unlike an ordinary
-        # restart it must leave pid 1 alive until Railway performs cutover.
+        # Railway owns the eventual stop. This root-owned helper opens and
+        # accepts the one-shot continuation intent, then leaves pid 1 alive
+        # until the provider performs the cutover.
         if ! DATA_DIR=/data python3 -P /app/runtime/restart_ledger.py \
           managed-cutover "$MOBIUS_BOOT_ID"; then
           rm -f /data/.managed-cutover-request.json 2>/dev/null || true
@@ -242,7 +242,8 @@ _platform_import_probe_dir() {
   # Importing `app.main` is not by itself a sufficient verdict: the route
   # registry intentionally catches individual router failures so it can keep a
   # diagnostic process alive. Ask that registry for its explicit verdict too,
-  # otherwise a caught failure looks like a successful probe.
+  # otherwise a caught failure looks like a successful probe and the broken
+  # router's fallback can shadow the healthy API.
   #
   # `timeout 60` bounds the probe: a module-level infinite loop or blocking
   # network call in agent-edited code would otherwise wedge boot forever (before
@@ -284,12 +285,11 @@ _platform_bootstrap() {
   # /data/platform is a REAL git clone of the canonical repo. A baked real clone
   # (not a copied tree + `git init`) can seed first boot offline while preserving
   # common ancestry with origin/main; if that seed is missing/invalid, the
-  # network clone path below remains the update fallback. A fresh init has NO
+  # baked runtime remains the recovery fallback; startup never selects remote code. A fresh init has NO
   # common ancestor with origin/main, so a pushed branch would read as unrelated
   # histories. A clone shares ancestry, so `git diff origin/main` is exactly the
   # agent's edits and `git push` a branch is a clean PR. The whole repo lands
   # here and the agent edits it in place. One-time, first boot.
-  _origin="${MOBIUS_PLATFORM_ORIGIN:-https://github.com/mobius-os/mobius.git}"
   echo "Platform layer: bootstrapping /data/platform (first boot)."
   # F1 non-destructive migration. We are here because /data/platform/backend/app
   # is absent, but a REAL prod volume may still carry the OLD overlay shape
@@ -322,7 +322,7 @@ _platform_bootstrap() {
   # Primary first-boot path: seed the editable /data/platform clone from the
   # baked real clone in the image. Copy into a temp dir owned by mobius, validate
   # git + Python import there, then atomically rename into place. Any seed
-  # failure falls through to the network clone path; it never overwrites a
+  # failure serves the baked runtime without fetching; it never overwrites a
   # non-empty /data/platform.
   rm -rf /data/platform.seeding.* 2>/dev/null || true
   _seeding="/data/platform.seeding.$(date -u +%Y%m%dT%H%M%SZ).$$"
@@ -353,70 +353,18 @@ _platform_bootstrap() {
           echo "Platform layer: seed complete; serving /data/platform/backend."
           return 0
         fi
-        echo "PLATFORM LAYER WARNING: could not move baked seed into place; trying network clone." >&2
+        echo "PLATFORM LAYER WARNING: could not move baked seed into place; keeping the baked fallback." >&2
       else
-        echo "PLATFORM LAYER WARNING: baked platform seed failed validation; trying network clone." >&2
+        echo "PLATFORM LAYER WARNING: baked platform seed failed validation; keeping the baked fallback." >&2
       fi
     else
-      echo "PLATFORM LAYER WARNING: baked platform seed copy failed; trying network clone." >&2
+      echo "PLATFORM LAYER WARNING: baked platform seed copy failed; keeping the baked fallback." >&2
     fi
     rm -rf "$_seeding" 2>/dev/null || true
   fi
 
-  echo "Platform layer: cloning $_origin -> /data/platform (first boot fallback)."
-  # --depth 1: shallow is fine — a later PR fetches origin + unshallows only if
-  # it needs the merge base (same pattern as the app clone-update path).
-  #
-  # Clone into a TEMP dir and only move it into place on FULL success. A clone
-  # that dies mid-checkout (disk-full, smudge-filter, interrupt) must never leave
-  # a half-written /data/platform: a partial tree that still has backend/app would
-  # be served broken, and a partial tree WITHOUT backend/app would be re-quarantined
-  # as pre-clone data on every retry (accumulating). Build-then-atomic-move keeps
-  # /data/platform either absent or fully ready. MOBIUS_PLATFORM_ORIGIN goes
-  # through the ENV (not interpolated into the single-quoted su script) so a value
-  # with a quote / shell metacharacter can't break the quoting or inject shell;
-  # the temp path is ours (timestamp + pid) so it is safe to interpolate.
-  rm -rf /data/platform.cloning.* 2>/dev/null || true
-  _cloning="/data/platform.cloning.$(date -u +%Y%m%dT%H%M%SZ).$$"
-  mkdir -p "$_cloning"
-  chown mobius:mobius "$_cloning" 2>/dev/null || true
-  if ! MOBIUS_PLATFORM_ORIGIN="$_origin" _CLONING="$_cloning" su -s /bin/sh mobius -c '
-    git clone --depth 1 "$MOBIUS_PLATFORM_ORIGIN" "$_CLONING" &&
-    git -C "$_CLONING" config user.name "Mobius Agent" &&
-    git -C "$_CLONING" config user.email "agent@mobius" &&
-    git -C "$_CLONING" branch -f upstream HEAD
-  '; then
-    rm -rf "$_cloning" 2>/dev/null || true
-    return 1
-  fi
-  su -s /bin/sh mobius -c "
-    cd '$_cloning/frontend' 2>/dev/null || exit 0
-    [ -e node_modules ] || [ -L node_modules ] ||
-      ln -s /app/shell-src/node_modules node_modules || true
-    mkdir -p dist 2>/dev/null || true
-    cp -a /app/static/. dist/ 2>/dev/null || true
-  " || true
-  _build_sha=${BUILD_SHA:-unknown}
-  if [ "$_build_sha" != "unknown" ]; then
-    su -s /bin/sh mobius -c \
-      "git -C '$_cloning' tag baked-${_build_sha} HEAD 2>/dev/null || true"
-  fi
-  echo "$_build_sha" > "$_cloning/.baked-sha"
-  chown mobius:mobius "$_cloning/.baked-sha" 2>/dev/null || true
-  # /data/platform is absent here (the move-aside / empty-rm above handled it);
-  # this helper only removes an absent/empty target so the rename can't nest
-  # temp inside a stray dir. Same-filesystem rename = atomic swap-in of a
-  # fully-ready tree.
-  if ! _platform_clear_empty_target; then
-    rm -rf "$_cloning" 2>/dev/null || true
-    return 1
-  fi
-  if ! mv -T "$_cloning" /data/platform 2>/dev/null; then
-    echo "PLATFORM LAYER WARNING: could not move the fresh clone into place; retrying next boot." >&2
-    rm -rf "$_cloning" 2>/dev/null || true
-    return 1
-  fi
-  echo "Platform layer: clone complete; serving /data/platform/backend."
+  echo "PLATFORM LAYER WARNING: no valid image source seed; serving the baked fallback without fetching another release." >&2
+  return 1
 }
 
 _platform_seed_test_checkout() {
@@ -562,20 +510,11 @@ fi
 
 if [ "$_use_platform" -eq 1 ] && [ "${MOBIUS_TEST_RUNTIME:-0}" != "1" ]; then
   _platform_reconciler_backend=/data/platform/backend
-  # Deploy=merge reconcile. Fetch origin/main and merge it once with local
-  # edits before uvicorn imports the result, so the update goes live this
-  # boot with no restart. Runs as mobius (writes /data; root would poison /data
-  # ownership + hit git "dubious ownership"), cwd the served backend so `app`
-  # imports resolve from the clone, under the IDENTICAL GIT_*/PYTHONPATH scrub
-  # the import probe + uvicorn exec use. The function catches its own errors and
-  # `|| true` guards the shell, so a reconcile failure never bricks boot; a
-  # conflict/rollback leaves the pre-reconcile code on disk (aborted/reset) and
-  # sets a flag Settings surfaces. The outer `timeout` is a last-resort bound set
-  # ABOVE the reconcile's bounded operations: fetch 120 + unshallow 120 + merge
-  # 120 + probe 60 = 420, plus commit_local's own bounded git calls. Keep this
-  # comfortably higher so internal timeouts fire FIRST; the post-timeout guard
-  # below still cleans the tree if the outer kill ever wins.
-  echo "Platform layer: reconciling /data/platform with its configured release target..." >&2
+  # Startup runs installed source only. Recover an interrupted explicit update,
+  # retire completed activation, and refresh trusted local hooks; never fetch
+  # or select a release. The Python entrypoint name is shared with deployed
+  # images. Keep the separate fail-closed guard for interrupted preparation.
+  echo "Platform layer: preparing the installed /data/platform source..." >&2
   su -s /bin/sh mobius -c \
     "cd '$_platform_reconciler_backend' && $_env_scrub timeout 900 python3 -c \
      'from app import platform_update; print(platform_update.reconcile_clone_sync())'" \
@@ -591,15 +530,14 @@ if [ "$_use_platform" -eq 1 ] && [ "${MOBIUS_TEST_RUNTIME:-0}" != "1" ]; then
     echo "Platform layer: boot guard failed; refusing to serve the platform tree." >&2
     exit 1
   fi
-  # A successful reconcile may have advanced main. Report persistent HEAD.
+  # Recovery may have restored an interrupted update. Report persistent HEAD.
   if [ "$_use_platform" -eq 1 ]; then
     _served_sha=$(su -s /bin/sh mobius -c \
       'git -C /data/platform rev-parse HEAD' 2>/dev/null || echo "$_served_sha")
   fi
 fi
 
-# Write the markers only after the managed exact-release gate chooses the final
-# source. /api/version and diagnostics must never report the stale pre-gate tree.
+# Record the source selected after startup recovery, never its pre-recovery tip.
 printf '%s\n' "$_serve_source" > /tmp/serving-source
 printf '%s\n' "$_served_sha" > /tmp/serving-sha
 chmod 644 /tmp/serving-source /tmp/serving-sha 2>/dev/null || true
@@ -850,8 +788,10 @@ su -s /bin/sh mobius -c \
 #
 # Profiles are a cache and auth/session mirror for the agent's own browser --
 # never partner transcript data -- so a reaped profile costs at most a re-login
-# inside a chat nobody has touched in two weeks. The 14-day default lives in
-# the script, not here, so operators tune one place.
+# inside a chat nobody has touched in the horizon below. The script default is
+# a conservative 14 days for manual/report use; the nightly job opts into a
+# tighter 2-day horizon via --older-than-days because per-chat profiles
+# accumulate quickly. Tune the nightly aggressiveness here.
 PC_DIR=/data/apps/_profile-cleanup
 if [ ! -f "$PC_DIR/init-cron.sh" ]; then
   su -s /bin/sh mobius -c "mkdir -p $PC_DIR" 2>/dev/null || true
@@ -866,7 +806,7 @@ mkdir -p /data/cron-logs
 {
   echo "=== $(date -u +%Y-%m-%dT%H:%M:%SZ) profile-cleanup start ==="
   python3 /app/scripts/agent-browser-profile-cleanup.py \
-    --delete --include-existing-chats
+    --delete --include-existing-chats --older-than-days 2
   rc=$?
   echo "=== exit $rc ==="
   exit $rc
@@ -1008,23 +948,14 @@ fi
 ln -sf /data/.pm-commit /usr/local/bin/pm-commit
 
 
-# Install the codex-plugin-cc into the agent's CLAUDE_CONFIG_DIR if
-# not yet present. Source is baked into the image at /opt/codex-plugin-cc
-# (pinned in the Dockerfile via `git clone --branch v1.0.4`). The install
-# writes settings.json + plugins/ under /data/cli-auth/claude/, which
-# is volume-backed — so we re-install automatically if the volume is
-# wiped. Runs as mobius so all resulting files are mobius-owned and
-# the agent's CLI can update them if it ever runs `plugin update`.
-# A failure here is non-fatal: the agent still works without the
-# plugin, the user just doesn't get the /codex:* slash commands or
-# codex:codex-rescue subagent.
-if [ ! -f /data/cli-auth/claude/plugins/installed_plugins.json ]; then
-  mkdir -p /data/cli-auth/claude
-  chown mobius:mobius /data/cli-auth /data/cli-auth/claude 2>/dev/null || true
-  su -s /bin/sh mobius -c "CLAUDE_CONFIG_DIR=/data/cli-auth/claude claude plugin marketplace add /opt/codex-plugin-cc" \
-    && su -s /bin/sh mobius -c "CLAUDE_CONFIG_DIR=/data/cli-auth/claude claude plugin install codex@openai-codex" \
-    || echo "WARNING: codex-plugin-cc install failed (non-fatal)" >&2
-fi
+# The codex-plugin-cc (codex:codex-rescue subagent + /codex:* commands) is no
+# longer auto-installed. Codex delegation is owned by the installable Subagents
+# app (slug `codex`/`subagents`): its `subagents.py run --background` creates a
+# durable child chat that survives the turn and auto-wakes the parent when it
+# finishes. The in-CLI plugin path had no such wake — a backgrounded consult
+# silently died at turn end, which is exactly the "spawned Codex, never came
+# back" failure. Retiring the plugin leaves one coherent, waking Codex door.
+# (See the "unifying Claude and Codex into an optional Subagents app" work.)
 
 # Drop to non-root user and start the server.
 # umask 022: newly created files default to 644 (rw-r--r--) so the
@@ -1041,13 +972,15 @@ umask 022
 # the application receives only the explicitly allow-listed Unix-socket API,
 # and Codex receives only the loopback Responses proxy. The one-use Railway
 # bootstrap is inherited by this process and then removed before uvicorn starts.
+mkdir -p /data/identity-broker
+chown root:root /data/identity-broker
+chmod 700 /data/identity-broker
 DATA_DIR=/data python3 -P /app/runtime/identity_broker.py &
 _identity_broker_pid=$!
 unset MOBIUS_IDENTITY_BOOTSTRAP
-# Scrub the retired direct-compute credential. Managed deployments still use
-# MOBIUS_SSO_CLIENT_SECRET for the account/identity bridge, so it must remain
-# available to uvicorn until that separate contract is deliberately migrated.
-unset MOBIUS_COMPUTE_INSTANCE_TOKEN
+# Scrub credentials used by pre-capability prototypes/managed SSO revisions.
+# They are no longer accepted anywhere and must not reach the unprivileged app.
+unset MOBIUS_SSO_CLIENT_SECRET MOBIUS_COMPUTE_INSTANCE_TOKEN
 _identity_broker_ready=0
 for _broker_wait in $(seq 1 50); do
   if [ -S /run/mobius-identity-broker.sock ]; then
@@ -1060,12 +993,8 @@ for _broker_wait in $(seq 1 50); do
   sleep 0.1
 done
 if [ "$_identity_broker_ready" -ne 1 ]; then
-  # The broker is an optional subscription component. If it cannot start
-  # (missing dependency, /run not writable, or takes longer than 5 s),
-  # degrade the Möbius subscription to unavailable rather than blocking the
-  # whole instance. MobiusProvider.check_auth catches the connection error
-  # and returns a "not linked" status; all other providers are unaffected.
-  echo "WARNING: identity broker did not become ready; the Möbius subscription will be unavailable" >&2
+  echo "FATAL: identity broker did not become ready" >&2
+  exit 1
 fi
 
 # Root-owned half of the ordinary Settings restart handshake. The app publishes
@@ -1105,13 +1034,20 @@ _health_url="http://127.0.0.1:${_public_port}/api/health"
   exit 1
 ) &
 
-# Make the mapi helper callable by bare name in agent shells. The Bash tool's
-# shell snapshot hard-sets PATH (clobbering any exported prefix), but
-# /usr/local/bin is on it — so expose the helper there via a stable symlink.
-_mapi=/data/platform/backend/scripts/mapi
-[ -x "$_mapi" ] || _mapi=/app/scripts/mapi
-if [ -x "$_mapi" ]; then
-  ln -sfn "$_mapi" /usr/local/bin/mapi 2>/dev/null || true
+# Make agent helper scripts callable by bare name. The Bash tool's shell
+# snapshot hard-sets PATH (clobbering any prefix we could export), but
+# /usr/local/bin is on it — so symlink the executable helpers there. Skip name
+# clashes and this script itself.
+_scripts_dir=/data/platform/backend/scripts
+[ -d "$_scripts_dir" ] || _scripts_dir=/app/scripts
+if [ -d "$_scripts_dir" ]; then
+  for _helper in "$_scripts_dir"/*; do
+    [ -x "$_helper" ] || continue
+    _hname=$(basename "$_helper")
+    [ "$_hname" = entrypoint.sh ] && continue
+    [ -e "/usr/local/bin/$_hname" ] && continue
+    ln -sfn "$_helper" "/usr/local/bin/$_hname" 2>/dev/null || true
+  done
 fi
 
 # --timeout-graceful-shutdown bounds uvicorn's SIGTERM drain. Without it,

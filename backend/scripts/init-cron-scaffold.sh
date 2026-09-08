@@ -138,7 +138,9 @@ fi
 APP_BASE="${MOBIUS_APP_BASE:-/data/apps}"
 APP_DIR="${APP_BASE}/${SLUG}"
 JOB_PATH="${APP_DIR}/${JOB_NAME}"
-INIT_PATH="${APP_DIR}/init-cron.sh"
+# Backend-managed schedules are owner data, outside collaboratively edited code.
+INIT_DIR="${MOBIUS_APP_CRON_STATE_DIR:-$APP_DIR}"
+INIT_PATH="${INIT_DIR}/init-cron.sh"
 # The command cron runs. Managed apps enter through the same supervised wrapper
 # as the Run now API, giving uninstall one revocable process-group lease.
 # Cron starts jobs with a minimal environment, so the installer passes both the
@@ -166,7 +168,7 @@ fi
 # 1. Write a job stub (only if absent — never clobber agent or bundled
 #    work; a manifest-bundled job script is written by the installer
 #    before this runs, so this branch is skipped for it).
-if [ ! -f "$JOB_PATH" ]; then
+if [ ! -f "$JOB_PATH" ] && [ -z "${MOBIUS_APP_CRON_STATE_DIR:-}" ]; then
   cat > "$JOB_PATH" <<JOB
 #!/bin/bash
 # ${APP_DIR}/${JOB_NAME} — scheduled work for the "$SLUG" mini-app.
@@ -190,6 +192,7 @@ fi
 # 2. Write the complete durable declaration to a sibling, then atomically
 #    replace init-cron.sh before touching live cron. A failed temp write,
 #    chmod, or rename leaves both the old declaration and live behavior intact.
+mkdir -p "$INIT_DIR"
 INIT_TMP="$(mktemp "${INIT_PATH}.tmp.XXXXXX")"
 trap 'rm -f "$INIT_TMP"' EXIT
 cat > "$INIT_TMP" <<INIT

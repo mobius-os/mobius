@@ -45,6 +45,7 @@ Keep these boundaries always-on:
 
 - Frontend source rebuilds automatically; backend Python and this constitution require a server restart. Install task dependencies into the running container when safe; declarations make them reproducible after container replacement, while an immediate container rebuild is a last resort for changes that cannot activate live.
 - Mini-app source and shared data under `/data/apps/` and `/data/shared/` are editable. Never read or write `/data/cli-auth/` or `/data/.secret-key`.
+- When the owner needs to supply a live credential — an API key, token, or password — route it through the `secure-input` sealed card so the value never enters the transcript or the LLM API. Offer that path proactively the moment you know a credential will be needed, and never say "paste it here": a credential that has not leaked is the strongest case for keeping it out of chat, not a license to accept it. If the owner offers to paste one, redirect to the sealed card before they do.
 - A broken edited platform falls back visibly to the baked shell. Ask the partner to refresh, then use a repair chat to diagnose the preserved `/data/platform` tree.
 - All writes to `Chat.messages` or `Chat.pending_messages` MUST use `chat_writer.py` domain commands; never assign either JSON column directly. Read that module's docstring before changing chat persistence.
 - Commit platform changes inside `/data/platform`, staging only the intended source paths. The separate `/data` safety-net repository ignores `platform/`; never rely on a bare `/data` commit or sweep platform source with `git add -A`.
@@ -86,13 +87,6 @@ interaction early, then refine it while the partner can try it. The first slice
 is useful rather than a wireframe, but secondary features, packaging research,
 and exhaustive checks wait. The app helper owns safe workspace placement; do
 not also post `open_item`. Every app turn still runs its closeout.
-
-**An in-turn fleet dies with the turn.** A Workflow or subagent swarm launched
-inside the current agent process must finish before handoff; never promise a
-later report from it. A durable background delegation may outlive the turn only
-when an installed capability explicitly owns that lifecycle and its matching
-skill says how to reattach or wake the chat. Never detach an ordinary shell
-process and assume it will survive.
 
 ### 1. Triage the request
 
@@ -164,6 +158,24 @@ now** (or task-specific equivalents). The existing wait chip and question card
 are the owning UI; do not add another persistent status card. Never rely on a
 paused Goal, a prose promise, or “tell me when…” to communicate that the
 partner is expected to act.
+
+**Claim convergent work once.** Before a public action, shared integration, or
+other exact outcome that another chat can independently reach, call
+`claim_agent_work` with one canonical stable key. The first atomic claimant owns
+it; a losing caller follows that claim and must not duplicate its approval,
+mutation, or monitor. Pass the same key to `request_approval`, and finish or
+release it through `finish_agent_work`. Transfer only for a concrete reason—such
+as a visible blocker or a broader integrator that authored the exact source—and
+name the owner observed in the transfer call. Claims coordinate agents; they
+never grant the owner's authority for the underlying action, and following one
+exact action never transfers or pauses the follower's whole Goal. Every
+`request_approval` requires a stable action key, including chat-local and
+restart approvals, so approval ownership is never implicit in mutable prose.
+
+An in-turn fleet dies with the turn; a durable background delegation may
+outlive the turn only when an installed capability explicitly owns that
+lifecycle. A Goal remains with its chat unless that broader outcome is
+explicitly transferred—neither a helper nor an exact-action claim implies it.
 
 > **Carve-out for reports/digests from a background or morning run.** This live-chat rule is for an *interactive* turn with the partner present. A background/scheduled/morning agent (News, Reflection) must NOT call `AskUserQuestion`: with no one watching the turn, it parks a synchronous in-memory future that a server reset orphans, freezing the run. Such agents put questions in the report **declaratively** — a `<script type="application/mobius-questions+json">` carrier in the report HTML — and the app renders tap cards whose answers persist for the agent's NEXT run. Questions there are optional: zero cards is a normal report, several are fine when they're real, and an unanswered card never blocks the next run (risky or irreversible changes still wait for an explicit yes). Never a live `AskUserQuestion` from a background agent.
 

@@ -333,13 +333,7 @@ def recall_from_result(text: object, exit_code: object = None) -> dict:
   )
 
 
-def settle_recall(
-  pending: object,
-  text: object,
-  exit_code: object = None,
-) -> dict:
-  """Settle one command-identified lookup and retain its product context."""
-  settled = recall_from_result(text, exit_code)
+def _with_pending_context(pending: object, settled: dict) -> dict:
   if not isinstance(pending, dict):
     return settled
   app_slug = pending.get("app_slug")
@@ -353,6 +347,90 @@ def settle_recall(
       {**note, "app_slug": app_slug} for note in settled.get("notes", [])
     ]
   return settled
+
+
+def settle_recall(
+  pending: object,
+  text: object,
+  exit_code: object = None,
+) -> dict:
+  """Settle one command-identified lookup and retain its product context."""
+  return _with_pending_context(pending, recall_from_result(text, exit_code))
+
+
+# Claude Code answers a `run_in_background` Bash call with this fixed
+# placeholder instead of the command's stdout; the real output lands in the
+# named file and a task_done follows. The lookup is still in flight at that
+# moment, so the placeholder must never be read as Memory's (missing) result.
+_BACKGROUND_DISPATCH_RE = re.compile(
+  r"\ACommand running in background with ID: (?P<task_id>[A-Za-z0-9_-]{1,64})\."
+  r" Output is being written to: (?P<path>/[^\s]+?\.output)\."
+)
+_TASK_OUTPUT_TRAILER_RE = re.compile(r"\[exited with code (?P<code>-?\d+)\]\s*\Z")
+
+
+def background_dispatch_from_result(text: object) -> dict | None:
+  """Return ``{"task_id", "output_path"}`` when ``text`` is the background placeholder."""
+  if not isinstance(text, str) or len(text) > _MAX_COMMAND_SCAN_CHARS:
+    return None
+  match = _BACKGROUND_DISPATCH_RE.match(text.strip())
+  if not match:
+    return None
+  task_id = match.group("task_id")
+  path = match.group("path")
+  if PurePosixPath(path).name != f"{task_id}.output":
+    return None
+  return {"task_id": task_id, "output_path": path}
+
+
+def defer_recall_to_task(pending: object, dispatch: dict) -> dict:
+  """Keep a lookup `searching` while its background task owns the result."""
+  deferred = {"status": RECALL_SEARCHING, **dispatch}
+  return _with_pending_context(pending, deferred)
+
+
+def background_recall_path(pending: object, scratch_root: object) -> str | None:
+  """The task output file a deferred lookup may be settled from, or None.
+
+  The path was quoted back from tool output, so it is honored only when it is
+  this chat's own scratch task file. Anything else settles as failed rather
+  than reading an arbitrary file.
+  """
+  if not isinstance(pending, dict) or not isinstance(scratch_root, str):
+    return None
+  task_id = pending.get("task_id")
+  path = pending.get("output_path")
+  if not isinstance(task_id, str) or not isinstance(path, str):
+    return None
+  root = PurePosixPath(scratch_root)
+  candidate = PurePosixPath(path)
+  if not candidate.is_absolute() or ".." in candidate.parts:
+    return None
+  if candidate.name != f"{task_id}.output" or candidate.parent.name != "tasks":
+    return None
+  if not candidate.is_relative_to(root):
+    return None
+  return str(candidate)
+
+
+def settle_recall_from_task_output(
+  pending: object, text: object, task_status: object = None,
+) -> dict:
+  """Settle a deferred lookup from its background task's captured output.
+
+  Claude Code appends ``[exited with code N]`` to the file; that trailer is the
+  command's own exit status. Without it, a task that did not end ``done`` is
+  a failure and a completed one is judged on the structured result line.
+  """
+  exit_code: int | None = None
+  if isinstance(text, str):
+    trailer = _TASK_OUTPUT_TRAILER_RE.search(text[-64:])
+    if trailer:
+      exit_code = int(trailer.group("code"))
+  if exit_code is None and isinstance(task_status, str):
+    if task_status not in ("done", "completed"):
+      exit_code = 1
+  return settle_recall(pending, text, exit_code)
 
 
 def recall_from_tool_block(

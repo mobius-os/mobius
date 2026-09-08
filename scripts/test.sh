@@ -28,7 +28,7 @@ TEST_IMAGE="${MOBIUS_IMAGE:-mobius-test:ci}"
 FAST_TESTS=(
   "tests/test_readiness.py"
   "tests/test_db_migrations.py::test_previous_release_database_upgrades_to_current_orm"
-  "tests/test_db_migrations.py::test_published_schema_migration_history_is_unique_ordered_and_immutable"
+  "tests/test_schema_migration_history.py"
   "tests/test_auth_helpers.py"
   "tests/test_app_compile_contract.py"
   "tests/test_source_status.py"

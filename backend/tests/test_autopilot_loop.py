@@ -31,6 +31,7 @@ from app.routes.github import _limiter as _github_limiter
 
 # Reuse the proven submit-flow fakes + fixtures-worth of helpers.
 from tests.test_github_routes import (
+  _allow_synthetic_source_provenance,
   _app_token,
   _commit_metadata,
   _cp,
@@ -88,6 +89,17 @@ def _record(record_id, repo_path):
   }
 
 
+def _mark_reviewed_update(record):
+  """Model the exact public text witness produced by a refreshed PR review."""
+  plan = record["plan"]
+  plan["action"] = "pr_update"
+  plan["pr_metadata"] = {
+    "old_title": plan["title"],
+    "old_body": plan["body_draft"],
+  }
+  return record
+
+
 def _make_fakes(state):
   """A head-agnostic fake _git/_gh keyed on the mutable `state` (head/diff), so
   the same fakes serve the initial submit (head1/diff1) and the /update
@@ -137,21 +149,23 @@ def _make_fakes(state):
 
   def fake_gh(repo_path, *args, check=True):
     state["gh_calls"].append(args)
-    if args[:2] == ("repo", "fork"):
-      state["fork_ready"] = True
-      return _cp("")
     if args[:2] == ("api", "repos/mobius-os/app-demo/pulls/42"):
       return _cp(json.dumps({
         "state": "open",
         "draft": False,
+        "title": "Polish demo",
+        "body": "## What\n\nPolishes the demo.",
         "html_url": "https://github.com/mobius-os/app-demo/pull/42",
         "head": {
+          "repo": {"full_name": "octocat/app-demo-1"},
           "ref": _BRANCH,
           "sha": state["head"],
-          "repo": {"full_name": "octocat/app-demo-1"},
         },
         "base": {"ref": "main"},
       }))
+    if args[:2] == ("repo", "fork"):
+      state["fork_ready"] = True
+      return _cp("")
     if args[:2] == ("pr", "list"):
       if state.get("pr_open"):
         return _cp(json.dumps([{
@@ -208,6 +222,13 @@ def test_full_autopilot_loop_end_to_end(client, owner_token, monkeypatch):
     "git_calls": [], "gh_calls": [],
   }
   _install_fakes(monkeypatch, state)
+  # This end-to-end state-machine test uses synthetic commit ids and fake Git
+  # transport. Real installed-source rejection is covered by the route test.
+  _allow_synthetic_source_provenance(monkeypatch)
+  monkeypatch.setattr(
+    "app.github_contribution_git._authoritative_upstream_branch_sha",
+    lambda *_args, **_kwargs: state["head"],
+  )
   # No real agent turn — assert only claim/chat/mirror wiring.
   monkeypatch.setattr(autopilot, "spawn_round_turn", _fake_spawn)
   # /reply shells out to `gh` directly (not the monkeypatched _gh); stub the
@@ -218,8 +239,15 @@ def test_full_autopilot_loop_end_to_end(client, owner_token, monkeypatch):
     lambda *a, **k: {"ok": True},
   )
   monkeypatch.setattr(
-    github_routes, "_autopilot_live_target_error",
-    lambda *a, **k: None,
+    github_routes, "_autopilot_live_target",
+    lambda *a, **k: {
+      "error": None,
+      "head_sha": state["head"],
+      "base_branch": "main",
+      "base_sha": _BASE,
+      "title": "Polish demo",
+      "body": "## What\n\nPolishes the demo.",
+    },
   )
 
   # 1. Submit with autopilot → PR opened + grant stamped + mirror written.
@@ -267,6 +295,7 @@ def test_full_autopilot_loop_end_to_end(client, owner_token, monkeypatch):
   rec = _read(app_id, record_id)
   rec["plan"]["head_sha"] = _HEAD2
   rec["plan"]["diff_sha256"] = hashlib.sha256(_DIFF2.encode()).hexdigest()
+  _mark_reviewed_update(rec)
   rec["needs_attention"] = True
   rec["attention"] = attention
   _write_contribution(app_id, record_id, rec, _DIFF2)
@@ -314,6 +343,438 @@ def test_full_autopilot_loop_end_to_end(client, owner_token, monkeypatch):
   assert r.status_code == 409  # duplicate
 
 
+@pytest.mark.parametrize(
+  "death_phase", ["armed", "normalizing", "push_pending", "branch_published"],
+)
+def test_expired_new_round_resumes_exact_action_after_each_pre_settlement_death(
+  client, owner_token, monkeypatch, death_phase,
+):
+  """Lease expiry cannot strand an exact signed action at any durable phase."""
+  class HardDeath(BaseException):
+    pass
+
+  _write_token(login="octocat")
+  app_id, app_token = _app_token(client, owner_token, github_access=True)
+  app_headers = {"Authorization": f"Bearer {app_token}"}
+  agent_headers = {"Authorization": f"Bearer {owner_token}"}
+  record_id = f"rec-hard-death-{death_phase}"
+  repo = Path(get_settings().data_dir) / "contributions" / record_id / "repo"
+  (repo / ".git").mkdir(parents=True)
+  record = _record(record_id, repo)
+  record.update({
+    "status": "open",
+    "number": 42,
+    "url": "https://github.com/mobius-os/app-demo/pull/42",
+    "head_repository": "octocat/app-demo-1",
+  })
+  record["plan"]["head_sha"] = _HEAD2
+  record["plan"]["diff_sha256"] = hashlib.sha256(_DIFF2.encode()).hexdigest()
+  _mark_reviewed_update(record)
+  _write_contribution(app_id, record_id, record, _DIFF2)
+  state = {
+    "head": _HEAD2,
+    "diff_text": _DIFF2,
+    "fork_ready": True,
+    "git_calls": [],
+    "gh_calls": [],
+    "public_head": _HEAD1,
+  }
+  _install_fakes(monkeypatch, state)
+  _allow_synthetic_source_provenance(monkeypatch)
+  monkeypatch.setattr(
+    github_routes,
+    "_autopilot_live_target",
+    lambda *_args: {
+      "error": None,
+      "head_sha": state["public_head"],
+      "base_branch": "main",
+      "base_sha": _BASE,
+      "title": record["plan"]["title"],
+      "body": record["plan"]["body_draft"],
+    },
+  )
+
+  db = SessionLocal()
+  try:
+    autopilot.stamp_grant(
+      db,
+      app_id,
+      record_id,
+      head_sha=_HEAD1,
+      target_repo=record["repo"],
+      target_pr_number=42,
+      target_head_repository=record["head_repository"],
+      target_branch=record["branch"],
+      target_repo_path=str(repo.resolve()),
+    )
+    first = autopilot.claim_for_round(
+      db,
+      app_id,
+      record_id,
+      attention_key="hard-death:first",
+      event_at="2026-07-10T00:00:00Z",
+    )
+    first_run = first["run_id"]
+  finally:
+    db.close()
+
+  attempts = []
+
+  original_arm_claim = github_routes._PersonalAttemptOwner.arm_claim
+  die_during_arm = {"now": death_phase == "armed"}
+
+  def arm_then_die(self, *args, **kwargs):
+    original_arm_claim(self, *args, **kwargs)
+    if die_during_arm["now"]:
+      die_during_arm["now"] = False
+      raise HardDeath()
+
+  monkeypatch.setattr(
+    github_routes._PersonalAttemptOwner, "arm_claim", arm_then_die,
+  )
+
+  def die_after_publication(_record, _diff_path, **kwargs):
+    attempts.append("attempted")
+    patch = ({
+      "last_submit_stage": (
+        "push_pending" if death_phase == "push_pending" else "pushed"
+      ),
+      "last_submit_push_sha": _HEAD2,
+      "head_repository": record["head_repository"],
+    } if death_phase in {"push_pending", "branch_published"} else {})
+    kwargs["attempt_event"](
+      death_phase,
+      {
+        "action": death_phase,
+        "repo": record["repo"],
+        "head_repository": record["head_repository"],
+        "branch": record["branch"],
+        "head_sha": _HEAD2,
+        "base_branch": "main",
+        "expected_remote_sha": _HEAD1,
+      },
+      patch,
+    )
+    if death_phase == "branch_published":
+      state["public_head"] = _HEAD2
+    raise HardDeath()
+
+  if death_phase != "armed":
+    monkeypatch.setattr(
+      github_routes, "_submit_prepared_pr", die_after_publication,
+    )
+  request_body = {
+    "run_id": first_run,
+    "head_sha": _HEAD2,
+    "diff_sha256": record["plan"]["diff_sha256"],
+  }
+  with pytest.raises(HardDeath):
+    client.post(
+      f"/api/github/contributions/{app_id}/{record_id}/update",
+      json=request_body,
+      headers=agent_headers,
+    )
+  receipt = github_routes._read_personal_attempt(
+    _record_path(app_id, record_id), app_id=app_id, record_id=record_id,
+  )
+  assert receipt is not None and receipt["phase"] == death_phase
+
+  db = SessionLocal()
+  try:
+    row = autopilot.get_row(db, app_id, record_id)
+    row.lease_expires_at = now_naive_utc() - timedelta(minutes=1)
+    db.commit()
+  finally:
+    db.close()
+  second = client.post(
+    f"/api/github/contributions/{app_id}/{record_id}/respond",
+    json={
+      "attention": {
+        "key": "hard-death:second",
+        "event_at": "2026-07-11T00:00:00Z",
+      },
+    },
+    headers=app_headers,
+  )
+  assert second.status_code == 200, second.text
+  second_run = second.json()["run_id"]
+  assert second_run != first_run
+  def resume_exact_action(_record, _diff_path, **kwargs):
+    attempts.append("resumed")
+    assert kwargs["prior_attempt_phase"] == death_phase
+    assert kwargs["expected_existing_head_sha"] == state["public_head"]
+    return (
+      record["url"],
+      record["number"],
+      {
+        "last_submit_stage": "pushed",
+        "last_submit_push_sha": _HEAD2,
+        "head_repository": record["head_repository"],
+        "publication_stage": "draft",
+      },
+    )
+
+  monkeypatch.setattr(
+    github_routes, "_submit_prepared_pr", resume_exact_action,
+  )
+
+  recovered = client.post(
+    f"/api/github/contributions/{app_id}/{record_id}/update",
+    json={**request_body, "run_id": second_run},
+    headers=agent_headers,
+  )
+
+  assert recovered.status_code == 200, recovered.text
+  assert recovered.json()["number"] == 42
+  assert attempts == (
+    ["resumed"] if death_phase == "armed" else ["attempted", "resumed"]
+  )
+  assert not github_routes.contribution_runtime.personal_attempt_path(
+    app_id, record_id,
+  ).exists()
+  db = SessionLocal()
+  try:
+    row = autopilot.get_row(db, app_id, record_id)
+    assert row.run_id == second_run
+    assert row.round_action == "pushed"
+    assert row.round_head_sha == _HEAD2
+  finally:
+    db.close()
+
+
+@pytest.mark.parametrize(
+  ("record_failure", "remote_after_failure"),
+  [
+    ("false", "exact"),
+    ("exception", "exact"),
+    ("hard_death", "exact"),
+    ("hard_death", "reset"),
+  ],
+)
+def test_complete_update_receipt_survives_db_failure_and_new_round(
+  client, owner_token, monkeypatch, record_failure, remote_after_failure,
+):
+  """A terminal public receipt outlives DB failure and prevents a second push."""
+  class HardDeath(BaseException):
+    pass
+
+  _write_token(login="octocat")
+  app_id, app_token = _app_token(client, owner_token, github_access=True)
+  app_headers = {"Authorization": f"Bearer {app_token}"}
+  agent_headers = {"Authorization": f"Bearer {owner_token}"}
+  record_id = f"rec-complete-db-{record_failure}-{remote_after_failure}"
+  repo = Path(get_settings().data_dir) / "contributions" / record_id / "repo"
+  (repo / ".git").mkdir(parents=True)
+  record = _record(record_id, repo)
+  record.update({
+    "status": "open",
+    "number": 42,
+    "url": "https://github.com/mobius-os/app-demo/pull/42",
+    "head_repository": "octocat/app-demo-1",
+  })
+  record["plan"]["head_sha"] = _HEAD2
+  record["plan"]["diff_sha256"] = hashlib.sha256(_DIFF2.encode()).hexdigest()
+  _mark_reviewed_update(record)
+  _write_contribution(app_id, record_id, record, _DIFF2)
+  state = {
+    "head": _HEAD2,
+    "diff_text": _DIFF2,
+    "fork_ready": True,
+    "git_calls": [],
+    "gh_calls": [],
+    "public_head": _HEAD1,
+  }
+  _install_fakes(monkeypatch, state)
+  monkeypatch.setattr(autopilot, "spawn_round_turn", _fake_spawn)
+  monkeypatch.setattr(
+    github_routes,
+    "_autopilot_live_target",
+    lambda *_args: {
+      "error": None,
+      "head_sha": state["public_head"],
+      "base_branch": "main",
+      "base_sha": _BASE,
+      "title": record["plan"]["title"],
+      "body": record["plan"]["body_draft"],
+    },
+  )
+  source_checks = []
+  monkeypatch.setattr(
+    github_routes,
+    "_assert_personal_publication_source",
+    lambda *_args: source_checks.append("checked"),
+  )
+
+  async def record_equivalence(*_args, **_kwargs):
+    return None
+
+  monkeypatch.setattr(
+    github_routes, "_record_pending_equivalence_locked", record_equivalence,
+  )
+  publication_calls = []
+
+  def complete_publication(_record, _diff_path, **kwargs):
+    publication_calls.append("pushed")
+    state["public_head"] = _HEAD2
+    patch = {
+      "last_submit_stage": "pushed",
+      "last_submit_push_sha": _HEAD2,
+      "head_repository": record["head_repository"],
+      "publication_stage": "draft",
+    }
+    kwargs["attempt_event"]("complete", {
+      "action": "update_pr",
+      "repo": record["repo"],
+      "number": record["number"],
+      "url": record["url"],
+      "head_repository": record["head_repository"],
+      "branch": record["branch"],
+      "head_sha": _HEAD2,
+      "base_branch": "main",
+    }, patch)
+    return record["url"], record["number"], patch
+
+  monkeypatch.setattr(github_routes, "_submit_prepared_pr", complete_publication)
+  real_record_action = autopilot.record_action
+  first_record = {"pending": True}
+
+  def fail_record_action_once(*args, **kwargs):
+    if first_record.pop("pending", False):
+      if record_failure == "false":
+        return False
+      if record_failure == "exception":
+        raise RuntimeError("DB action write failed")
+      raise HardDeath()
+    return real_record_action(*args, **kwargs)
+
+  monkeypatch.setattr(autopilot, "record_action", fail_record_action_once)
+  db = SessionLocal()
+  try:
+    autopilot.stamp_grant(
+      db,
+      app_id,
+      record_id,
+      head_sha=_HEAD1,
+      target_repo=record["repo"],
+      target_pr_number=record["number"],
+      target_head_repository=record["head_repository"],
+      target_branch=record["branch"],
+      target_repo_path=str(repo.resolve()),
+    )
+    first = autopilot.claim_for_round(
+      db,
+      app_id,
+      record_id,
+      attention_key="complete-db:first",
+      event_at="2026-07-10T00:00:00Z",
+    )
+    first_run = first["run_id"]
+  finally:
+    db.close()
+
+  request_body = {
+    "run_id": first_run,
+    "head_sha": _HEAD2,
+    "diff_sha256": record["plan"]["diff_sha256"],
+  }
+  if record_failure == "false":
+    failed = client.post(
+      f"/api/github/contributions/{app_id}/{record_id}/update",
+      json=request_body,
+      headers=agent_headers,
+    )
+    assert failed.status_code == 409, failed.text
+  else:
+    failure = RuntimeError if record_failure == "exception" else HardDeath
+    with pytest.raises(failure):
+      client.post(
+        f"/api/github/contributions/{app_id}/{record_id}/update",
+        json=request_body,
+        headers=agent_headers,
+      )
+
+  receipt = github_routes._read_personal_attempt(
+    _record_path(app_id, record_id), app_id=app_id, record_id=record_id,
+  )
+  assert receipt is not None and receipt["phase"] == "complete"
+  assert _read(app_id, record_id)["last_submit_push_sha"] == _HEAD2
+  if remote_after_failure == "exact":
+    monkeypatch.setattr(
+      github_routes,
+      "_assert_personal_publication_source",
+      lambda *_args: pytest.fail(
+        "an exact complete receipt must not depend on the now-reverted source"
+      ),
+    )
+  else:
+    state["public_head"] = _HEAD1
+
+    def reject_reverted_source(*_args):
+      source_checks.append("rechecked")
+      raise github_routes.ContributionSubmitError(
+        "The installed source no longer proves this reset public head.",
+        status_code=409,
+      )
+
+    monkeypatch.setattr(
+      github_routes,
+      "_assert_personal_publication_source",
+      reject_reverted_source,
+    )
+
+  db = SessionLocal()
+  try:
+    row = autopilot.get_row(db, app_id, record_id)
+    row.lease_expires_at = now_naive_utc() - timedelta(minutes=1)
+    db.commit()
+  finally:
+    db.close()
+  second = client.post(
+    f"/api/github/contributions/{app_id}/{record_id}/respond",
+    json={
+      "attention": {
+        "key": "complete-db:second",
+        "event_at": "2026-07-11T00:00:00Z",
+      },
+    },
+    headers=app_headers,
+  )
+  assert second.status_code == 200, second.text
+  second_run = second.json()["run_id"]
+  assert second_run != first_run
+
+  recovered = client.post(
+    f"/api/github/contributions/{app_id}/{record_id}/update",
+    json={**request_body, "run_id": second_run},
+    headers=agent_headers,
+  )
+  receipt_path = github_routes.contribution_runtime.personal_attempt_path(
+    app_id, record_id,
+  )
+  if remote_after_failure == "reset":
+    assert recovered.status_code == 409, recovered.text
+    assert publication_calls == ["pushed"]
+    assert source_checks == ["checked", "rechecked"]
+    assert receipt_path.exists()
+  else:
+    assert recovered.status_code == 200, recovered.text
+    assert publication_calls == ["pushed"]
+    assert source_checks == ["checked"]
+    assert not receipt_path.exists()
+  db = SessionLocal()
+  try:
+    row = autopilot.get_row(db, app_id, record_id)
+    assert row.run_id == second_run
+    if remote_after_failure == "reset":
+      assert row.round_action is None
+      assert row.round_head_sha is None
+    else:
+      assert row.round_action == "pushed"
+      assert row.round_head_sha == _HEAD2
+  finally:
+    db.close()
+
+
 def test_injection_diff_outside_allowlist_is_rejected(
   client, owner_token, monkeypatch,
 ):
@@ -337,6 +798,7 @@ def test_injection_diff_outside_allowlist_is_rejected(
   )
   rec["plan"]["head_sha"] = _HEAD2
   rec["plan"]["diff_sha256"] = hashlib.sha256(evil_diff.encode()).hexdigest()
+  _mark_reviewed_update(rec)
   _write_contribution(app_id, record_id, rec, evil_diff)
   monkeypatch.setattr(
     github_routes, "_autopilot_changed_paths",
@@ -345,6 +807,17 @@ def test_injection_diff_outside_allowlist_is_rejected(
   monkeypatch.setattr(
     github_routes, "_resolve_reviewed_commit",
     lambda repo_path, value, label: str(value),
+  )
+  monkeypatch.setattr(
+    github_routes, "_autopilot_live_target",
+    lambda *_args: {
+      "error": None,
+      "head_sha": _HEAD1,
+      "base_branch": "main",
+      "base_sha": _BASE,
+      "title": rec["plan"]["title"],
+      "body": rec["plan"]["body_draft"],
+    },
   )
 
   db = SessionLocal()
@@ -369,6 +842,9 @@ def test_injection_diff_outside_allowlist_is_rejected(
     headers=agent_headers,
   )
   assert r.status_code == 422
+  assert not github_routes.contribution_runtime.personal_attempt_path(
+    app_id, record_id,
+  ).exists()
 
 
 def test_stale_lease_then_second_failure_escalates(

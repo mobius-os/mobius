@@ -250,11 +250,10 @@ def _subagent_lifecycle_event(
   item: Any, sdk: dict[str, Any], *, provider_session_id: str | None,
   occurred_at: Any = None, provider_activation_id: str | None = None,
 ) -> dict[str, Any] | None:
-  """Normalize a Codex subAgentActivity marker without inventing completion.
+  """Normalize a Codex subAgentActivity lifecycle marker.
 
-  The native marker currently exposes started/interacted/interrupted.  Started
-  opens a helper lane; interrupted closes it as stopped. Interacted is progress,
-  not a lifecycle boundary, and remains intentionally silent.
+  Started opens a helper lane; completed and interrupted close it. Interacted
+  is progress, not a lifecycle boundary, and remains intentionally silent.
   """
   cls = sdk.get("SubAgentActivityThreadItem")
   if cls is None or not isinstance(item, cls):
@@ -263,6 +262,8 @@ def _subagent_lifecycle_event(
   kind = kind or str(getattr(item, "kind", ""))
   if kind == "started":
     event_type, state = "agent_started", "running"
+  elif kind == "completed":
+    event_type, state = "agent_terminal", "done"
   elif kind == "interrupted":
     event_type, state = "agent_terminal", "stopped"
   else:
@@ -564,7 +565,7 @@ def _tool_start_event(item: Any, sdk: dict[str, Any]) -> dict[str, Any] | None:
   # Standalone dispatch keeps collab items as ordinary Task activity. The live
   # loop now groups all such items under one per-turn host and enriches it with
   # ThreadStarted/ThreadStatus task events, avoiding duplicate Task rows while
-  # retaining this safe fallback for isolated callers and older SDKs.
+  # retaining this explicit standalone representation for isolated callers.
   collab_cls = sdk.get("CollabAgentToolCallThreadItem")
   if collab_cls is not None and isinstance(item, collab_cls):
     return {

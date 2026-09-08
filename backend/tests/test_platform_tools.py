@@ -161,15 +161,26 @@ def test_control_protocol_advertises_every_run_bound_tool(monkeypatch):
   assert "does not inherit turn-only API credentials" in (
     tools[platform_tools.WAIT_TOOL_NAME]["description"]
   )
+  wait_description = tools[platform_tools.WAIT_TOOL_NAME]["description"]
+  assert "Prefer a command when readiness is observable" in wait_description
+  assert "no safe read-only check is available" in wait_description
   cancel_schema = tools[platform_tools.CANCEL_WAIT_TOOL_NAME]["inputSchema"]
   assert cancel_schema["required"] == ["wait_id"]
   assert set(cancel_schema["properties"]) == {"wait_id"}
   assert set(platform_tools.COORDINATION_TOOL_NAMES) <= set(tools)
+  assert "read_agent_messages" not in tools
   send_schema = tools[platform_tools.SEND_MESSAGE_TOOL_NAME]["inputSchema"]
   assert send_schema["required"] == ["body"]
   assert set(send_schema["properties"]["kind"]["enum"]) == {
     "note", "finding", "request", "blocker", "handoff",
   }
+  send_description = tools[platform_tools.SEND_MESSAGE_TOOL_NAME]["description"]
+  assert "note/finding is quiet context for the next natural turn" in send_description
+  assert "steers a live recipient" in send_description
+  assert "Broadcasts are always quiet" in send_description
+  assert "wakes an idle unfinished Goal" in send_description
+  assert "concrete next action now" in send_description
+  assert "instead of checking for replies" in send_description
 
 
 def test_delegated_control_server_advertises_only_coordination(monkeypatch):
@@ -357,15 +368,10 @@ def test_top_level_control_cancels_exact_wait_through_the_canonical_client(
   assert "non-empty" in invalid["content"][0]["text"]
 
 
-def test_coordination_tools_validate_and_reuse_the_in_process_cursor(monkeypatch):
+def test_coordination_tools_validate_discovery_and_send(monkeypatch):
   monkeypatch.delenv("MOBIUS_RUN_TOKEN", raising=False)
   control = _control_module()
   calls = []
-  inboxes = [
-    {"messages": [{"id": "message-1"}], "cursor": "message-1"},
-    {"messages": [{"id": "message-2"}], "cursor": "message-2"},
-  ]
-
   def fake_api(method, path, payload=None):
     calls.append((method, path, payload))
     if path == "/api/agent-coordination/room":
@@ -379,15 +385,13 @@ def test_coordination_tools_validate_and_reuse_the_in_process_cursor(monkeypatch
         "recipient_count": 1,
         "recipient_names": ["Peer"],
       }
-    return inboxes.pop(0)
+    raise AssertionError(f"unexpected coordination request: {method} {path}")
 
   monkeypatch.setattr(control, "_agent_api_call", fake_api)
   assert control._TOOL_DEFINITIONS[
     platform_tools.LIST_PEERS_TOOL_NAME
   ]["inputSchema"]["properties"] == {}
-  assert set(control._TOOL_DEFINITIONS[
-    platform_tools.READ_MESSAGES_TOOL_NAME
-  ]["inputSchema"]["properties"]) == {"wait_seconds"}
+  assert "read_agent_messages" not in control._TOOL_DEFINITIONS
   listed = control._call_list_agent_peers({})
   assert listed["scope"]["id"] == "goal-1"
   assert listed["peers"] == [{"id": "peer-1", "name": "Peer", "online": True}]
@@ -403,12 +407,6 @@ def test_coordination_tools_validate_and_reuse_the_in_process_cursor(monkeypatch
     "recipient_count": 1,
     "recipient_names": ["Peer"],
   }
-  first = control._call_read_agent_messages({})
-  second = control._call_read_agent_messages({})
-  assert first["cursor"] == "message-1"
-  assert second["cursor"] == "message-2"
-  assert calls[2][1].endswith("limit=100")
-  assert "after=message-1" in calls[-1][1]
   assert calls[0][1] == "/api/agent-coordination/room"
   assert calls[1] == (
     "POST",

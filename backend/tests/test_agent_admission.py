@@ -24,14 +24,13 @@ async def test_unpressured_storage_starts_without_sweeping():
     swept = True
     return {}
 
-  result = await require_agent_turn_admission(
+  await require_agent_turn_admission(
     "/data",
     status_reader=lambda _path: _status("normal", 2 * 1024 * 1024 * 1024),
     scratch_sweeper=sweep,
   )
 
   assert swept is False
-  assert result is None
 
 
 @pytest.mark.asyncio
@@ -43,7 +42,7 @@ async def test_unavailable_storage_telemetry_fails_open_without_sweeping():
     swept = True
     return {}
 
-  result = await require_agent_turn_admission(
+  await require_agent_turn_admission(
     "/data",
     status_reader=lambda _path: {
       "facts": {"disk": {"free_bytes": None}},
@@ -52,7 +51,6 @@ async def test_unavailable_storage_telemetry_fails_open_without_sweeping():
     scratch_sweeper=sweep,
   )
 
-  assert result is None
   assert swept is False
 
 
@@ -65,14 +63,13 @@ async def test_constrained_storage_starts_without_sweeping():
     swept = True
     return {}
 
-  result = await require_agent_turn_admission(
+  await require_agent_turn_admission(
     "/data",
     status_reader=lambda _path: _status("constrained", 1995 * 1024 * 1024),
     scratch_sweeper=sweep,
   )
 
   assert swept is False
-  assert result is None
 
 
 @pytest.mark.asyncio
@@ -88,14 +85,13 @@ async def test_idle_scratch_reclaim_can_restore_critical_admission():
     sweeps += 1
     return {"removed": 1, "bytes": 1024}
 
-  result = await require_agent_turn_admission(
+  await require_agent_turn_admission(
     "/data",
     status_reader=lambda _path: next(statuses),
     scratch_sweeper=sweep,
   )
 
   assert sweeps == 1
-  assert result is None
 
 
 @pytest.mark.asyncio
@@ -115,39 +111,19 @@ async def test_persistent_critical_pressure_defers_with_truthful_reason():
 
 
 @pytest.mark.asyncio
-async def test_normal_pressure_does_not_invent_per_turn_storage_claims():
+async def test_cleanup_error_still_returns_the_resource_deferral():
   async def sweep():
-    return {"removed": 0, "bytes": 0}
+    raise OSError("scratch disappeared during cleanup")
 
-  result = await require_agent_turn_admission(
-    "/data",
-    status_reader=lambda _path: _status("normal", 10_000 * 1024 * 1024),
-    scratch_sweeper=sweep,
-  )
-
-  assert result is None
-
-
-@pytest.mark.asyncio
-async def test_concurrent_turns_do_not_turn_healthy_disk_into_a_hidden_cap():
-  free = 10_000 * 1024 * 1024
-
-  async def sweep():
-    return {"removed": 0, "bytes": 0}
-
-  first = await require_agent_turn_admission(
-    "/data",
-    status_reader=lambda _path: _status("normal", free),
-    scratch_sweeper=sweep,
-  )
-  second = await require_agent_turn_admission(
-    "/data",
-    status_reader=lambda _path: _status("normal", free),
-    scratch_sweeper=sweep,
-  )
-
-  assert first is None
-  assert second is None
+  with pytest.raises(
+    AgentTurnDeferred,
+    match="512 MiB free; safety floor 1024 MiB",
+  ):
+    await require_agent_turn_admission(
+      "/data",
+      status_reader=lambda _path: _status("critical"),
+      scratch_sweeper=sweep,
+    )
 
 
 def _memory_status(
@@ -171,14 +147,13 @@ def _memory_status(
 
 @pytest.mark.asyncio
 async def test_constrained_memory_still_admits_new_turns():
-  result = await require_agent_turn_admission(
+  await require_agent_turn_admission(
     "/data",
     status_reader=lambda _path: _memory_status(
       "constrained", "PSI some avg60 1.8 >= 1.0",
     ),
     scratch_sweeper=None,
   )
-  assert result is None
 
 
 @pytest.mark.asyncio
@@ -201,10 +176,19 @@ async def test_critical_memory_defers_new_turns_and_names_the_signal():
       scratch_sweeper=sweep,
     )
 
+  with pytest.raises(AgentTurnDeferred, match="continue automatically"):
+    await require_agent_turn_admission(
+      "/data",
+      status_reader=lambda _path: _memory_status(
+        "critical", working_set_ratio=0.94,
+      ),
+      scratch_sweeper=sweep,
+    )
+
 
 @pytest.mark.asyncio
 async def test_psi_only_critical_memory_is_diagnostic_not_an_admission_veto():
-  result = await require_agent_turn_admission(
+  await require_agent_turn_admission(
     "/data",
     status_reader=lambda _path: _memory_status(
       "critical",
@@ -212,20 +196,3 @@ async def test_psi_only_critical_memory_is_diagnostic_not_an_admission_veto():
       working_set_ratio=0.5,
     ),
   )
-
-  assert result is None
-
-
-@pytest.mark.asyncio
-async def test_cleanup_error_does_not_replace_resource_wait():
-  async def sweep():
-    raise OSError("scratch vanished during cleanup")
-
-  with pytest.raises(AgentTurnDeferred, match="512 MiB free") as exc:
-    await require_agent_turn_admission(
-      "/data",
-      status_reader=lambda _path: _status("critical"),
-      scratch_sweeper=sweep,
-    )
-
-  assert exc.value.resource == "storage"

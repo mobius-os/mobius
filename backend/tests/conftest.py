@@ -28,6 +28,7 @@ _tmp = tempfile.mkdtemp()
 os.environ["SECRET_KEY"] = "test-secret-key-at-least-32-characters-long"
 os.environ["DATABASE_URL"] = f"sqlite:///{_tmp}/test.db"
 os.environ["DATA_DIR"] = _tmp
+os.environ["DOMAIN"] = "localhost"
 os.environ["FRONTEND_ORIGIN"] = "http://localhost:5173"
 os.environ["MOBIUS_TEST_RUNTIME"] = "1"
 # Fail closed when pytest is launched from inside a running production
@@ -232,7 +233,7 @@ def fresh_db():
   # Content-addressed app bundles no longer overwrite app-<id>.js between
   # tests. Clear compiled too, otherwise the per-test id reset leaves the next
   # test seeing an earlier test's immutable artifact for the same numeric id.
-  for _sub in ("apps", "app-secrets", "shared", "compiled", "cli-auth"):
+  for _sub in ("apps", "app-secrets", "app-runtime", "shared", "compiled", "cli-auth"):
     _shutil.rmtree(_os.path.join(_data_dir, _sub), ignore_errors=True)
 
   yield

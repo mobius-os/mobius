@@ -150,7 +150,7 @@ FastAPI app. `main.py` is the factory (CORS, rate limiting, routers, static serv
 | `frontend_watcher.py` | Polling watcher that auto-rebuilds the served frontend clone (`/data/platform/frontend`) on edit — debounced `vite build`, atomic `.dist-next`→`dist` swap |
 | `config.py` | `Settings` via pydantic-settings; reads `.env` |
 | `database.py` | SQLAlchemy engine, pool instrumentation, `SessionLocal`, `Base`, and `get_db`; contains no schema history |
-| `schema_migrations.py` | Append-only schema/data migrations, durable ledger primitives, and ORM/live-schema parity inspection; published functions are semantic-hash frozen |
+| `schema_migrations.py` | One append-only schema/data migration runner, its durable ledger, and mapped table/column inspection; published migration-owned code is target-branch frozen |
 | `startup.py` | Two-phase boot: process/database preflight first, then writer/reconciliation/database supervisors only after migrations and mapped-shape checks succeed |
 | `models.py` | ORM tables: `Owner`, `Chat`, `ChatRun`, `App`, `PushSubscription`, `Notification` |
 | `schemas.py` | Pydantic request/response models |
@@ -553,7 +553,7 @@ installing Möbius.
 
 ## Chat scroll + steer contract
 
-**Owner-authoritative contract — v1.24 (2026-08-24).** This section is the
+**Owner-authoritative contract — v1.25 (2026-08-24).** This section is the
 canonical source of truth for how a chat scrolls and steers. When implementation,
 comments, and this contract disagree, the implementation/comments are the bug:
 fix behavior to match this contract. If a real case is unspecified or the desired
@@ -576,8 +576,8 @@ and attaches their rule ids to new diagnostic chats. The Playwright lock-in spec
   room, or (d) restoration of the exact pre-submit `FOLLOW_BOTTOM` once both
   an accepted same-turn question answer and its first renderable post-answer
   activity have committed, with no newer reader scroll. Answer acceptance alone
-  never enters follow or moves through blank tail room. Only a send may create
-  `PIN_USER_MSG`. Reservation does not create
+  never enters follow or moves through blank tail room. Only
+  a send may create `PIN_USER_MSG`. Reservation does not create
   a second kind of bottom: when `FOLLOW_BOTTOM` is active, it follows the physical
   tail including any remaining room. Real output first consumes that room without
   advancing the tail; after the room reaches zero, the same tail advances with the
@@ -608,10 +608,10 @@ and attaches their rule ids to new diagnostic chats. The Playwright lock-in spec
   participates—an older user row never gets a separate reservation. Durable anchor
   validation still rejects locations wholly inside reserved blank space, so
   restoring a chat lands on real conversation content. R6's transient
-  question-submit hold is the sole calculation exception: it reserves only the
-  exact tail deficit required to keep the card at its submitted viewport offset.
-  Responsive geometry recomputes that deficit and reapplies the same transient
-  anchor; viewport size never releases it. The overlay is never persisted.
+  question-submit hold is the sole calculation exception: it may reserve only the
+  exact tail deficit required for a stable card handoff while the viewport size is
+  unchanged. It is never persisted and must release to the unanswered card's prior
+  mode before a keyboard or other viewport resize is laid out.
 - **R2 — One send rule everywhere.** The first visible user message always pins to
   the viewport top. Every subsequent direct, queued, promoted, or steered message
   pins only when its submit-time DOM snapshot is at the one physical
@@ -701,7 +701,7 @@ and attaches their rule ids to new diagnostic chats. The Playwright lock-in spec
   emits no scroll event; coordinate comparison is the per-move hot path and physical
   geometry is read at most once for that gesture. After a real scroll lands,
   reader ownership remains active through a short trailing-edge quiet window.
-  Physical touch contact is itself reader ownership (v1.24): from a touch
+  Physical touch contact is itself reader ownership (v1.23): from a touch
   pointer's first contact with the transcript until the last touch pointer
   lifts or cancels, the gesture cannot settle, the no-scroll dead-man cannot
   release, and no layout path may commit a direct or indirect scroll write — a
@@ -788,7 +788,7 @@ and attaches their rule ids to new diagnostic chats. The Playwright lock-in spec
   physical tail without moving through blank room. The only ordinary mode change
   is R3's existing armed-pin handoff when the responsive spacer reaches zero; a
   settled pin never gains follow from resize geometry. The R6 question-submission
-  anchor and focused native-caret rebase remain the two explicit editing rules,
+  release and focused native-caret rebase remain the two explicit editing rules,
   not a general keyboard heuristic. Open/close cycles therefore repeat the same
   idempotent operation every time. Browser clamps and controller writes may emit
   `scroll` while the box is changing, but only a gesture-owned scroll may change
@@ -798,24 +798,31 @@ and attaches their rule ids to new diagnostic chats. The Playwright lock-in spec
   separate answers. The answer response declares this ownership independently as
   `answer_turn: "same" | "new"`: an in-process question answer (`answer_delivered`)
   resumes that same row and turn, so answering must not retire its source bridge.
-  Submitting an in-message answer is also a deliberate reading action: before the
-  card enters its pending state or output resumes, the controller snapshots the
-  currently visible message and its exact viewport offset as a transient
-  `ANCHOR_AT`. This prevents the pending card reflow from moving the viewport while
-  the answer request is unresolved. When the same running turn accepts the answer,
+  Submitting an in-message answer is also a deliberate reading action. Pointer
+  activation commits the exact question-card address and its already-observed
+  full-height reservation before native focus can close the keyboard; the click
+  then confirms that same card—not merely its potentially enormous assistant
+  row—as a transient `ANCHOR_AT` together with the exact scroll write. The card
+  also carries a stable semantic locator, while layout-transparent event wrappers
+  remain in the structural fallback address, so active/durable source handoff or
+  preceding-block reconciliation cannot silently retarget the hold. This
+  prevents pending-card or earlier activity reflow from moving the question
+  while the answer request is unresolved. When the same running turn accepts the answer,
   that overlay remains in place. It releases back to `FOLLOW_BOTTOM` only once
   the first renderable post-answer activity also commits, follow owned the
   unanswered card, and no newer reader scroll or semantic location superseded
   it. If response activity races the answer request, neither boundary moves the
   card alone: the release waits until both commits exist. A card that
   began in hold remains held, and a recovered `answer_turn: "new"` continuation
-  never gains follow. Keyboard, toolbar, orientation, and pane changes recompute
-  reachability and reapply that same transient anchor; responsive geometry never
-  restores the pre-submit mode. Acceptance therefore adds no movement, and an
-  already-followed tail begins moving only with the visible response it is
-  following. The transient hold is stripped before persistence. A failed answer
-  keeps that settled reading anchor for the retryable card rather than
-  manufacturing follow intent again.
+  never gains follow. The exact temporary hold is scoped to the viewport where
+  Submit occurred. If the mobile keyboard changes the viewport first, the controller
+  restores the mode that owned the unanswered card before sizing the new geometry.
+  Acceptance therefore adds no movement; an already-followed tail begins moving
+  only with the response it is following. The keyboard still moves the card exactly
+  as it would have moved unanswered.
+  The transient hold is stripped before persistence. A failed answer keeps that
+  settled reading anchor for the retryable card rather than manufacturing follow
+  intent again.
   While the custom-answer field is focused, a visual-viewport change may rebase
   an ordinary `ANCHOR_AT` hold to the browser's current caret-visible position
   instead of reapplying its stale pre-edit offset. `PIN_USER_MSG`,
@@ -876,7 +883,7 @@ path means routing it through the same entries rather than inventing another rul
 | Viewport/keyboard changes | settled `PIN_USER_MSG` | same `PIN_USER_MSG` | Reapply the same pin; geometry never reclassifies it |
 | Viewport/keyboard changes | follow or anchor hold | same mode | Resize reservation to the visible scroll box, then reapply the physical tail or exact anchor; never create or retire follow |
 | Chat exits/backgrounds/returns | any | `ANCHOR_AT` | Restore exact saved anchor |
-| In-message question Submit begins | any | transient `ANCHOR_AT` over the prior mode | Hold the exact visible anchor through acceptance; only response activity may restore captured follow |
+| In-message question Submit begins | any | transient card-addressed `ANCHOR_AT` over the prior mode | Hold the exact submitted question until response activity or newer reader intent |
 | Same running turn accepts a question answer | transient question anchor over any prior mode | same transient anchor; same active assistant row | None; acceptance alone does not move through blank tail room |
 | First renderable activity after an accepted same-turn answer | transient question anchor over prior follow, with no newer reader scroll/location | prior `FOLLOW_BOTTOM`; same active assistant row | Resume the one physical live tail with the response commit |
 | First renderable activity after an accepted same-turn answer | transient question anchor over hold, or superseded submit intent | existing hold | None; resumed output grows below the reader |
@@ -1032,6 +1039,109 @@ itself, so it should just continue. The per-chat `auto_resume_on_restart`
 column remains only as an internal latch: it defaults on and is cleared solely
 by `delegations.mark_cancelled`, so a cancelled delegated child cannot
 resurrect itself when the boot sweep claims restart parks.
+
+### Goal handoff ownership is exact and singular
+
+A `ChatRun.goal_id` identifies one logical Goal across its physical turns;
+the root run owns the visible plan. Finishing a physical turn is not itself
+Goal completion: an unfinished plan must either have a durable next owner or
+receive a bounded corrective continuation.
+
+`goal_plans.goal_handoff_owner_kind` is the shared durable ownership query for
+both Goal presentation and turn settlement. It recognizes an owner question,
+armed Wait, or wake-enabled helper only when that actor belongs to the same
+`goal_id`; an unrelated question or background operation in the chat cannot
+hide an orphaned Goal. A question being composed by the ending turn is the one
+intentional transient exception and is read from that turn's event sink until
+its save-before-broadcast commit makes it durable. Explicit `/goal` starts keep
+their provider-owned continuation contract. Auto-promoted Goals receive one
+baseline correction plus one additional correction per newly settled plan task,
+then become visibly resumable rather than looping without progress.
+
+Workspace `AgentWorkClaim` rows are narrower: they serialize one shared action
+across otherwise independent chats. They do not replace a chat's Goal, a
+project path claim, or a contribution record; conflating those owners would
+make completing one action falsely complete a broader outcome.
+
+### Peer delivery is urgency-aware; agents never poll
+
+Every peer send first persists one durable mailbox row per recipient. Quiet
+direct kinds (`note` and `finding`) and every broadcast remain context for the
+next natural turn: `agent_context_snapshot` injects their bounded chronological
+window as one compact `<agent_coordination>` block. An overflow is explicit
+rather than silent; required work uses an `AgentWorkClaim`, whose ownership
+cannot be lost to message volume.
+
+Actionable direct kinds (`request`, `blocker`, and `handoff`) also trigger one
+delivery attempt. A live recipient receives a hidden, durable steer carrier
+containing the undelivered peer window in chronological order. The carrier is
+reserved in `pending_messages` before provider delivery and moves into the
+transcript only after provider acknowledgement, reusing the same exactly-once
+cut as owner steering. Its constant-size mailbox cursor is the delivery
+receipt, so the next turn does not repeat already-steered notes. The carrier labels the payload as
+untrusted peer data rather than owner authority. It never jumps ahead of an
+owner message, Wait result, or other product continuation already in the chat
+queue. If the bounded window overflows, the explicit overflow marker and its
+cursor form one cut: omitted older notes remain owner-visible history but never
+surface later behind newer notes and invert causal order.
+
+An idle recipient is woken only when it has an unfinished Goal. An armed
+external Wait remains active but no longer suppresses an actionable peer wake:
+the urgent turn can run now, and the independent condition still resumes the
+Goal if it later settles. Owner-input questions, usage parks, restart holds,
+and restart drain retain their stronger barriers. Broadcasts never fan out
+interruptions. The model-facing network exposes discovery and send operations,
+not an inbox read or short poll. A sender that needs a later result still hands
+off through Goal, Wait, or `AgentWorkClaim` ownership instead of keeping its
+current turn alive to check for replies.
+
+Historic transcript markers from the retired read tool remain displayable;
+that is data compatibility, not a second delivery mechanism.
+
+### Durable waits: observation and continuation are separate
+
+`chat_waits.py` owns command/timer rows and `runtime_supervisors` drives their
+30-second due sweep. Command results are explicit: exit 0 is met, silent exit 1
+(ignoring whitespace) is unmet, and other unsuccessful results or a 120-second
+timeout fail the check. At the deadline, the final check still runs: met wins,
+broken reports failed, and only still-unmet expires. Timer due means met.
+Cancellation applies to armed waits and creates no wake. Every committed check
+outcome emits `chat_wait_changed`, independently of continuation admission.
+
+The sweep bounds concurrent checks, delivers existing terminal receipts first,
+then admits newly terminal results as their checks finish. It serializes wake
+admission and owns/joins all check tasks on shutdown; a slow probe cannot hold
+ready receipts behind the entire check batch. Transient cancellation markers
+exist only while a check is being admitted or run. Durable armed state gates
+admission, and process-group cleanup uses the session leader PID even after the
+shell has exited while children still hold output pipes.
+
+A terminal result has one deterministic message/run identity. Its delivery
+latch advances only after provider-task admission or proven adoption by a later
+completed owner turn, never merely after queue persistence. Fresh programmatic
+continuations share `programmatic_start_blocked`: saved Q&A/sealed input, usage
+parks, and manual restart holds retain authority. Exact already-committed,
+empty continuations remain attachable; ambiguous partial execution is not
+blindly replayed. Legacy source-less Wait rows and stored `auto_continuation`
+names remain readable to preserve existing data, not as alternate schedulers.
+
+`Wait completed` means an observed condition is met, not that its follow-up or
+Goal completed. A warning means a failed check or unmet deadline, not necessarily
+failure of the external work. Goal recovery uses the declaring run and will not
+restore a stopped/dismissed Goal. The wait itself is independent: chat Stop ends
+a turn/questions/consumer but does not cancel armed monitors. Deletion cancels
+armed monitors. A remaining product decision is whether Stop should also dismiss
+terminal, queued wait results: currently their undelivered row can requeue a
+notice cleared by Stop, and the wait cancel action accepts only armed rows.
+Do not broaden Stop silently while cleaning up the implementation.
+
+History markers derive from durable wait rows, using assistant timestamps as
+temporary/final anchors; no duplicate outcomes are written into chat messages.
+This currently scans terminal history and can move a temporary marker to the
+wake's answer. Measure before changing that projection or adding a history index.
+
+Focused contracts live in `test_chat_waits.py`, `test_wait_check_processes.py`,
+`test_wait_recovery_admission.py`, and frontend `waitHistory.test.js`.
 
 ### Tool output rendering
 
@@ -1201,8 +1311,11 @@ message. Repeated steps are bounded by activity variety rather than raw call
 count. Only an explicit disclosure resolves that exact range through
 `GET /api/chats/{id}/activity-detail`; the live assistant stays self-contained.
 Mounted runtime reconciliation uses `GET /api/chats/{id}/runtime`, whose ORM
-projection raiseloads every unrequested field so polling can never silently
-decode `Chat.messages`. Both projections carry the row's `updated_at` as the
+projection raiseloads every unrequested field. Goal handoff classification
+reads only the pending-question identity in the ordinary no-question case;
+an open continuation card explicitly resolves its author from the transcript
+so an unrelated question cannot own that Goal. It must not reload the full
+Chat for each Goal status check. Both projections carry `updated_at` as the
 detail-snapshot version. On activation, a retained ChatView reads the runtime
 projection first and reuses its painted transcript only when those explicit
 versions match; a missing or changed version fails closed to the compact detail
@@ -1210,6 +1323,17 @@ read. Any local, streamed, or paginated message-cache mutation clears the
 cached version until a complete detail response proves it again. These are read
 projections, never a second persistence format: provider context, recovery,
 export, and writer commands continue to use the full transcript.
+
+Chat detail still reads the historical JSON once. Its usual recent/older page
+is bounded by message count; restoring a saved anchor intentionally includes
+one predecessor and the authoritative tail to preserve exact reading position
+and live-reply reconciliation. Historical Goal cards find their final answer
+in the full transcript metadata, then hydrate plans and handoffs only for the
+requested half-open message window. The displayed plan and Goal completion
+use the same serialized plan. Changes checks only chat identity before its
+writer barrier, then rechecks active-chat access and reads the transcript once
+after the barrier. `test_chat_entry_read_cost.py` protects these read budgets
+and ownership semantics without flaky wall-clock thresholds.
 
 - **Commit-before-ack (strict paths):** the caller's `await` on `QuestionCommit`/`Finalize`/`AnswerQuestion`/`Barrier`/`DrainAndStop` doesn't unblock until the commit succeeds; `PersistTranscript` and `PersistError` are fire-and-forget (submitted without awaiting the ack).
 - **Questions commit-before-broadcast:** a question row is durable before its SSE push fires, so a reconnect's catch-up burst always finds it.

@@ -237,6 +237,40 @@ def debug_status(
   return result
 
 
+@router.get("/capacity")
+def debug_capacity(
+  _owner: models.Owner = Depends(get_current_owner),
+  refresh: bool = Query(default=False),
+):
+  """Operator capacity view: per-domain attribution + forecast + alert tier.
+
+  During the 2026-09-01 incident an operator had no line-item view of WHICH
+  domain filled /data (the culprit — an inactive Codex telemetry DB under
+  cli-auth — was structurally un-attributable through the file-explorer du,
+  which deny-lists cli-auth). This is that view: mount headroom for host / and
+  /data, size-only per-domain attribution (cli-auth by byte totals only), the
+  8/5/2 GiB alert tier, and the time-to-exhaustion forecast.
+
+  Reads the snapshot cached by the periodic monitor so the probe stays cheap
+  (no synchronous subtree walk). ``refresh=1`` forces a fresh domain-aware
+  sample on demand (an explicit, bounded operator opt-in).
+  """
+  from app.capacity import capacity_snapshot, latest_snapshot, set_latest_snapshot
+  from app.capacity_history import forecast, load_samples
+
+  data_dir = get_settings().data_dir
+  if refresh:
+    snapshot = capacity_snapshot(data_dir, include_domains=True)
+    snapshot["forecast"] = forecast(load_samples(data_dir, limit=1000))
+    set_latest_snapshot(snapshot)
+    return snapshot
+  cached = latest_snapshot()
+  if cached is not None:
+    return cached
+  # The periodic monitor has not run yet (fresh boot): a cheap mount-only view.
+  return capacity_snapshot(data_dir, include_domains=False)
+
+
 @router.get("/memory")
 def debug_memory(
   _owner: models.Owner = Depends(get_current_owner),

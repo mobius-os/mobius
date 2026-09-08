@@ -217,6 +217,48 @@ def _pressure_fields(text: str | None) -> dict[str, dict[str, float | int]]:
   return result
 
 
+def cgroup_oom_kill_count(
+  *,
+  proc_root: Path = Path("/proc"),
+  cgroup_root: Path = Path("/sys/fs/cgroup"),
+) -> int | None:
+  """Kernel count of processes this cgroup lost to the OOM killer.
+
+  ``memory.events`` is the kernel's own record; a rising ``oom_kill`` is the
+  only trustworthy proof that a provider process died for memory rather than
+  for any other reason. ``None`` outside a cgroup-v2 runtime.
+  """
+  root = _cgroup_dir(proc_root=proc_root, cgroup_root=cgroup_root)
+  for line in (_read_text(root / "memory.events") or "").splitlines():
+    key, separator, raw = line.partition(" ")
+    if separator and key == "oom_kill":
+      try:
+        return int(raw)
+      except ValueError:
+        return None
+  return None
+
+
+_oom_kills_attributed: int | None = None
+
+
+def claim_oom_kill() -> bool:
+  """Whether the cgroup lost a process to the OOM killer since the last claim.
+
+  The counter only rises, so each failing provider exit may claim at most one
+  kill above the mark; the first call after boot only establishes the mark.
+  """
+  global _oom_kills_attributed
+  count = cgroup_oom_kill_count()
+  if count is None:
+    return False
+  if _oom_kills_attributed is None or count <= _oom_kills_attributed:
+    _oom_kills_attributed = count
+    return False
+  _oom_kills_attributed += 1
+  return True
+
+
 def cgroup_memory_snapshot(
   *,
   proc_root: Path = Path("/proc"),

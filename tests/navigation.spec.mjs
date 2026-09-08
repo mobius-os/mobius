@@ -161,12 +161,14 @@ async function setup(
   await page.route(/\/api\/chats\/([0-9a-f-]+)(?:\?.*)?$/, route => {
     if (route.request().method() !== 'GET') return route.fallback()
     const id = new URL(route.request().url()).pathname.split('/').pop()
+    // Capture the body when the request begins. A delayed cold read represents
+    // that older server snapshot; later reads may observe a message accepted
+    // while it was in flight without rewriting history inside the fixture.
+    const detail = detailForChat ? detailForChat(id) : navChatDetail(id, assistantContent)
     const fulfill = () => route.fulfill({
       status: 200,
       contentType: 'application/json',
-      body: JSON.stringify(
-        detailForChat ? detailForChat(id) : navChatDetail(id, assistantContent),
-      ),
+      body: JSON.stringify(detail),
     })
     return chatDetailGate?.id === id
       ? chatDetailGate.wait.then(fulfill)
@@ -363,6 +365,8 @@ test.describe('Navigation basics', () => {
   test('a first send retires the cold activation gate it supersedes', async ({ page }) => {
     let releaseChatDetail
     const wait = new Promise(resolve => { releaseChatDetail = resolve })
+    let runtimeRunning = false
+    let acceptedMessage = null
     const blank = {
       ...NAV_CHATS[0],
       title: 'Cold empty chat',
@@ -371,16 +375,49 @@ test.describe('Navigation basics', () => {
 
     await setup(page, undefined, {
       chats: [blank],
-      detailForChat: emptyChatDetail,
+      detailForChat: () => ({
+        ...emptyChatDetail(),
+        messages: acceptedMessage ? [acceptedMessage] : [],
+        total: acceptedMessage ? 1 : 0,
+        running: runtimeRunning,
+      }),
       chatDetailGate: { id: blank.id, wait },
     })
 
     let releaseStream
     const streamWait = new Promise(resolve => { releaseStream = resolve })
     let sendRequests = 0
+    await page.route(/\/api\/chats\/[0-9a-f-]+\/runtime(?:\?.*)?$/, route => {
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          running: runtimeRunning,
+          active_goal_objective: null,
+          pending_messages: [],
+          pending_question_id: null,
+          updated_at: null,
+        }),
+      })
+    })
     await page.route(/\/api\/chats\/[0-9a-f-]+\/messages$/, route => {
       sendRequests += 1
-      return route.fulfill({ status: 202, body: '{}' })
+      runtimeRunning = true
+      const request = route.request().postDataJSON()
+      acceptedMessage = {
+        role: 'user',
+        content: request.content,
+        ts: Date.now(),
+        cid: request.cid,
+      }
+      return route.fulfill({
+        status: 202,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          status: 'started',
+          message: acceptedMessage,
+        }),
+      })
     })
     await page.route(/\/api\/chats\/[0-9a-f-]+\/stream$/, async route => {
       await streamWait
@@ -388,7 +425,10 @@ test.describe('Navigation basics', () => {
     })
 
     try {
-      const composer = page.locator('#main-content')
+      const painted = page.locator(
+        `[data-chat-surface="painted"][data-chat-id="${blank.id}"]`,
+      )
+      const composer = painted
         .getByRole('textbox', { name: 'Message Möbius…' })
       await expect(composer).toBeVisible()
       await composer.fill('Visible after superseding the cold read')
@@ -397,9 +437,6 @@ test.describe('Navigation basics', () => {
       await expect.poll(() => sendRequests).toBe(1)
       releaseChatDetail()
 
-      const painted = page.locator(
-        `[data-chat-surface="painted"][data-chat-id="${blank.id}"]`,
-      )
       const userRow = painted.locator('.chat__msg--user')
       await expect(userRow).toContainText('Visible after superseding the cold read')
       await expect(userRow).toBeVisible()
@@ -530,6 +567,43 @@ test.describe('Navigation basics', () => {
     }
     // If no apps exist, the test passes vacuously.
   })
+})
+
+test('held chat cover suppresses stale floating actions while the destination settles', async ({ page }) => {
+  let releaseChatDetail
+  const wait = new Promise(resolve => { releaseChatDetail = resolve })
+  await setup(page, { width: 1512, height: 861 }, {
+    assistantContent: `Long outgoing answer. ${'Conversation content. '.repeat(900)}`,
+    chatDetailGate: { id: NAV_CHATS[1].id, wait },
+  })
+
+  const painted = page.locator('[data-chat-surface="painted"]')
+  const jump = painted.locator('.chat__jump-latest')
+  await painted.locator('.chat__scroll').evaluate(scroll => {
+    scroll.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }))
+    scroll.scrollTop = 0
+    scroll.dispatchEvent(new Event('scroll', { bubbles: true }))
+  })
+  await expect(jump).toBeVisible({ timeout: 3000 })
+
+  const navigation = page.getByRole('navigation', { name: 'Primary navigation' })
+  await navigation.getByRole('button', { name: NAV_CHATS[1].title, exact: true }).click()
+  await expect.poll(() => page.evaluate(() => ({
+    held: document.querySelector('.shell__chat-view--held')?.dataset.chatId,
+    staging: document.querySelector('.shell__chat-view--staging')?.dataset.chatId,
+  }))).toEqual({
+    held: NAV_CHATS[0].id,
+    staging: NAV_CHATS[1].id,
+  })
+
+  const heldTransient = page.locator('.shell__chat-view--held .chat__floating-transients')
+  await expect(heldTransient).toHaveCount(1)
+  await expect(heldTransient).toBeHidden()
+  await expect(page.locator('.shell__chat-view--held .chat__jump-latest')).toHaveCount(1)
+
+  releaseChatDetail()
+  await expect(page.locator('[data-chat-surface="painted"]'))
+    .toHaveAttribute('data-chat-id', NAV_CHATS[1].id)
 })
 
 test.describe('Touch navigation', () => {
@@ -1016,7 +1090,7 @@ test.describe('Touch navigation', () => {
     await expect(presentation.getByText("What's on your mind?", { exact: true })).toBeVisible()
     await expect(pendingOptions).toBeVisible()
     await expect(pendingOptions).toBeDisabled()
-    await expect(pendingOptions.locator(':scope > svg')).toBeVisible()
+    await expect(pendingOptions.locator('svg')).toBeVisible()
     const pendingOptionsBox = await pendingOptions.boundingBox()
     await expect(immediateComposer).toBeFocused()
     await page.keyboard.type('Typed while opening')
@@ -1507,7 +1581,7 @@ test.describe('Drawer touch lifecycle', () => {
       selectionChanged: true,
     })
     const serializedTrace = JSON.stringify(trace)
-    for (const { id, title } of NAV_CHATS) {
+    for (const [id, title] of NAV_CHATS) {
       expect(serializedTrace).not.toContain(id)
       expect(serializedTrace).not.toContain(title)
     }

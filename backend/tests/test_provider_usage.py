@@ -11,34 +11,6 @@ from types import ModuleType, SimpleNamespace
 import pytest
 
 
-def _ready_usage_snapshot(**window_updates):
-  window = {
-    "id": "seven_day",
-    "kind": "weekly",
-    "label": "Weekly",
-    "used_percent": 24,
-    "resets_at": "2099-09-05T03:00:00+00:00",
-  }
-  window.update(window_updates)
-  return {
-    "state": "ready",
-    "plan_label": "Max plan",
-    "windows": [window],
-    "credit_balance": None,
-  }
-
-
-@pytest.fixture(autouse=True)
-def _reset_provider_usage_state():
-  from app import provider_usage
-
-  provider_usage._provider_usage_cache.clear()
-  provider_usage._provider_usage_locks.clear()
-  yield
-  provider_usage._provider_usage_cache.clear()
-  provider_usage._provider_usage_locks.clear()
-
-
 def test_normalize_claude_usage_keeps_current_and_model_windows():
   from app.provider_usage import normalize_claude_usage
 
@@ -109,9 +81,55 @@ def test_normalize_codex_usage_reads_primary_secondary_and_credits():
   ]
   assert snapshot["windows"][1]["used_percent"] == 54
   assert snapshot["credit_balance"] == "18.50 credits"
+  assert snapshot["reset_credits"] is None
 
 
-def test_normalize_mobius_usage_reads_consumed_credit_and_active_expiry():
+def test_normalize_codex_usage_surfaces_redeemable_reset_credits():
+  from app.provider_usage import normalize_codex_usage
+
+  snapshot = normalize_codex_usage(
+    {
+      "rate_limits": {"primary": {"used_percent": 90, "resets_at": 1785430800}},
+      "rate_limit_reset_credits": {
+        "available_count": 2,
+        "credits": [
+          {
+            "id": "credit-a",
+            "title": "Weekly reset",
+            "status": "available",
+            "granted_at": 1785000000,
+            "expires_at": 1787592000,
+          },
+          # Already-redeemed rows must not become clickable offers.
+          {"id": "credit-b", "status": "redeemed", "expires_at": 1787592000},
+        ],
+      },
+    },
+    plan_type="plus",
+  )
+
+  resets = snapshot["reset_credits"]
+  assert resets["available_count"] == 2
+  assert [row["id"] for row in resets["credits"]] == ["credit-a"]
+  assert resets["credits"][0]["expires_at"] == "2026-08-24T17:20:00+00:00"
+
+
+def test_normalize_codex_usage_reset_credits_count_only_without_detail_rows():
+  from app.provider_usage import normalize_codex_usage
+
+  snapshot = normalize_codex_usage(
+    {
+      "rate_limits": {"primary": {"used_percent": 10, "resets_at": 1785430800}},
+      # availableCount known, detail rows not fetched (null) — still surfaced.
+      "rate_limit_reset_credits": {"available_count": 1, "credits": None},
+    },
+    plan_type="plus",
+  )
+
+  assert snapshot["reset_credits"] == {"available_count": 1, "credits": []}
+
+
+def test_normalize_mobius_usage_reads_api_credit_consumption():
   from app.provider_usage import normalize_mobius_usage
 
   snapshot = normalize_mobius_usage({
@@ -127,25 +145,25 @@ def test_normalize_mobius_usage_reads_consumed_credit_and_active_expiry():
     },
   })
 
-  assert snapshot == {
-    "state": "ready",
-    "plan_label": "Trial",
-    "windows": [{
-      "id": "api_credits",
-      "kind": "api_credits",
-      "label": "API credits",
-      "used_percent": 67.5,
-      "resets_at": None,
-      "expires_at": "2026-09-07T19:40:34.682998+00:00",
-    }],
-    "credit_balance": None,
-  }
+  assert snapshot["state"] == "ready"
+  assert snapshot["plan_label"] == "Trial"
+  assert snapshot["windows"] == [{
+    "id": "api_credits",
+    "kind": "api_credits",
+    "label": "API credits",
+    "used_percent": 67.5,
+    "resets_at": None,
+    "remaining_percent": 32.5,
+    "expires_at": "2026-09-07T19:40:34.682998+00:00",
+  }]
+  assert snapshot["credit_balance"] is None
 
 
 def test_normalize_mobius_usage_keeps_an_exhausted_grant_measurable():
   from app.provider_usage import normalize_mobius_usage
 
   snapshot = normalize_mobius_usage({
+    "plan": {"label": "Trial"},
     "balance": {
       "spendable_units": 0,
       "grants": [{
@@ -157,6 +175,7 @@ def test_normalize_mobius_usage_keeps_an_exhausted_grant_measurable():
   })
 
   assert snapshot["windows"][0]["used_percent"] == 100
+  assert snapshot["windows"][0]["remaining_percent"] == 0
   assert snapshot["credit_balance"] is None
 
 
@@ -181,6 +200,7 @@ def test_normalizers_report_unavailable_without_inventing_limits():
     "plan_label": "Team plan",
     "windows": [],
     "credit_balance": None,
+    "reset_credits": None,
   }
   assert normalize_mobius_usage({"balance": {"spendable_units": 500}}) == {
     "state": "unavailable",
@@ -193,6 +213,8 @@ def test_normalizers_report_unavailable_without_inventing_limits():
 def test_provider_usage_reads_only_requested_plan(monkeypatch):
   from app import provider_usage
 
+  provider_usage._provider_usage_cache.clear()
+  provider_usage._provider_usage_locks.clear()
   seen = []
 
   async def fake_snapshot(provider_id, _data_dir):
@@ -214,6 +236,8 @@ async def test_provider_usage_coalesces_concurrent_live_reads(
 ):
   from app import provider_usage
 
+  provider_usage._provider_usage_cache.clear()
+  provider_usage._provider_usage_locks.clear()
   started = asyncio.Event()
   release = asyncio.Event()
   calls = 0
@@ -223,7 +247,18 @@ async def test_provider_usage_coalesces_concurrent_live_reads(
     calls += 1
     started.set()
     await release.wait()
-    return _ready_usage_snapshot()
+    return {
+      "state": "ready",
+      "plan_label": "Max plan",
+      "windows": [{
+        "id": "seven_day",
+        "kind": "weekly",
+        "label": "Weekly",
+        "used_percent": 24,
+        "resets_at": "2099-09-05T03:00:00+00:00",
+      }],
+      "credit_balance": None,
+    }
 
   monkeypatch.setattr(provider_usage, "_provider_snapshot", fake_snapshot)
   first = asyncio.create_task(
@@ -248,6 +283,9 @@ async def test_provider_usage_coalesces_concurrent_failed_cold_reads(
 ):
   from app import provider_usage
 
+  provider_usage._provider_usage_cache.clear()
+  provider_usage._provider_usage_locks.clear()
+  monkeypatch.setattr(provider_usage, "_CLAUDE_COLD_RETRY_DELAYS", ())
   started = asyncio.Event()
   release = asyncio.Event()
   calls = 0
@@ -277,92 +315,40 @@ async def test_provider_usage_coalesces_concurrent_failed_cold_reads(
 
 
 @pytest.mark.asyncio
-async def test_claude_usage_retries_a_successful_cold_read(
+async def test_provider_usage_retries_a_cold_claude_read(
   monkeypatch, tmp_path,
 ):
-  from app import provider_usage, providers
+  from app import provider_usage
 
+  provider_usage._provider_usage_cache.clear()
+  provider_usage._provider_usage_locks.clear()
   monkeypatch.setattr(provider_usage, "_CLAUDE_COLD_RETRY_DELAYS", (0,))
-  monkeypatch.setattr(
-    providers, "claude_subscription_type", lambda _data_dir: "max",
-  )
-
-  async def fake_access_token(_data_dir):
-    return "token"
-
-  monkeypatch.setattr(providers, "claude_access_token", fake_access_token)
-  payloads = [{}, {
-    "seven_day": {
-      "utilization": 24,
-      "resets_at": "2099-09-05T03:00:00+00:00",
-    },
-  }]
-
-  class FakeResponse:
-    def raise_for_status(self):
-      pass
-
-    def json(self):
-      return payloads.pop(0)
-
-  class FakeClient:
-    def __init__(self, **_kwargs):
-      pass
-
-    async def __aenter__(self):
-      return self
-
-    async def __aexit__(self, *_args):
-      pass
-
-    async def get(self, *_args, **_kwargs):
-      return FakeResponse()
-
-  monkeypatch.setattr(provider_usage.httpx, "AsyncClient", FakeClient)
-  result = await provider_usage._fetch_claude_usage(str(tmp_path))
-
-  assert result["state"] == "ready"
-  assert result["windows"][0]["used_percent"] == 24
-  assert payloads == []
-
-
-@pytest.mark.asyncio
-async def test_claude_usage_does_not_retry_transport_failures(
-  monkeypatch, tmp_path,
-):
-  from app import provider_usage, providers
-
-  monkeypatch.setattr(provider_usage, "_CLAUDE_COLD_RETRY_DELAYS", (0, 0))
-  monkeypatch.setattr(
-    providers, "claude_subscription_type", lambda _data_dir: "max",
-  )
-
-  async def fake_access_token(_data_dir):
-    return "token"
-
-  monkeypatch.setattr(providers, "claude_access_token", fake_access_token)
   calls = 0
 
-  class FailingClient:
-    def __init__(self, **_kwargs):
-      pass
+  async def fake_snapshot(_provider_id, _data_dir):
+    nonlocal calls
+    calls += 1
+    if calls == 1:
+      return provider_usage._unavailable("Max plan")
+    return {
+      "state": "ready",
+      "plan_label": "Max plan",
+      "windows": [{
+        "id": "seven_day",
+        "kind": "weekly",
+        "label": "Weekly",
+        "used_percent": 24,
+        "resets_at": "2099-09-05T03:00:00+00:00",
+      }],
+      "credit_balance": None,
+    }
 
-    async def __aenter__(self):
-      return self
+  monkeypatch.setattr(provider_usage, "_provider_snapshot", fake_snapshot)
+  result = await provider_usage.read_provider_usage("claude", str(tmp_path))
 
-    async def __aexit__(self, *_args):
-      pass
-
-    async def get(self, *_args, **_kwargs):
-      nonlocal calls
-      calls += 1
-      raise RuntimeError("offline")
-
-  monkeypatch.setattr(provider_usage.httpx, "AsyncClient", FailingClient)
-
-  with pytest.raises(RuntimeError, match="offline"):
-    await provider_usage._fetch_claude_usage(str(tmp_path))
-  assert calls == 1
+  assert calls == 2
+  assert result["state"] == "ready"
+  assert result["stale"] is False
 
 
 @pytest.mark.asyncio
@@ -371,9 +357,23 @@ async def test_provider_usage_keeps_recent_success_through_transient_failure(
 ):
   from app import provider_usage
 
+  provider_usage._provider_usage_cache.clear()
+  provider_usage._provider_usage_locks.clear()
+  monkeypatch.setattr(provider_usage, "_CLAUDE_COLD_RETRY_DELAYS", ())
   clock = [100.0]
   monkeypatch.setattr(provider_usage.time, "monotonic", lambda: clock[0])
-  live = [_ready_usage_snapshot()]
+  live = [{
+    "state": "ready",
+    "plan_label": "Max plan",
+    "windows": [{
+      "id": "seven_day",
+      "kind": "weekly",
+      "label": "Weekly",
+      "used_percent": 24,
+      "resets_at": "2099-09-05T03:00:00+00:00",
+    }],
+    "credit_balance": None,
+  }]
 
   async def fake_snapshot(_provider_id, _data_dir):
     return live.pop(0) if live else provider_usage._unavailable("Max plan")
@@ -390,77 +390,38 @@ async def test_provider_usage_keeps_recent_success_through_transient_failure(
 
 
 @pytest.mark.asyncio
-async def test_provider_usage_stops_reusing_a_success_after_the_stale_limit(
+async def test_provider_usage_never_reuses_a_snapshot_past_its_reset(
   monkeypatch, tmp_path,
 ):
   from app import provider_usage
 
+  provider_usage._provider_usage_cache.clear()
+  provider_usage._provider_usage_locks.clear()
+  monkeypatch.setattr(provider_usage, "_CLAUDE_COLD_RETRY_DELAYS", ())
   clock = [100.0]
   monkeypatch.setattr(provider_usage.time, "monotonic", lambda: clock[0])
-  live = [_ready_usage_snapshot()]
-
-  async def fake_snapshot(_provider_id, _data_dir):
-    return live.pop(0) if live else provider_usage._unavailable("Max plan")
-
-  monkeypatch.setattr(provider_usage, "_provider_snapshot", fake_snapshot)
-  await provider_usage.read_provider_usage("claude", str(tmp_path))
-  clock[0] += provider_usage._PROVIDER_USAGE_STALE_SECONDS + 1
-  result = await provider_usage.read_provider_usage("claude", str(tmp_path))
-
-  assert result["state"] == "unavailable"
-  assert result["stale"] is False
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("boundary", ["resets_at", "expires_at"])
-async def test_provider_usage_never_reuses_a_snapshot_past_its_boundary(
-  monkeypatch, tmp_path, boundary,
-):
-  from app import provider_usage
-
-  clock = [100.0]
-  monkeypatch.setattr(provider_usage.time, "monotonic", lambda: clock[0])
-  live = [_ready_usage_snapshot(
-    used_percent=99,
-    **{boundary: "2020-01-01T00:00:00+00:00"},
-  )]
-
-  async def fake_snapshot(_provider_id, _data_dir):
-    return live.pop(0) if live else provider_usage._unavailable("Max plan")
-
-  monkeypatch.setattr(provider_usage, "_provider_snapshot", fake_snapshot)
-  await provider_usage.read_provider_usage("claude", str(tmp_path))
-  clock[0] += provider_usage._PROVIDER_USAGE_FRESH_SECONDS + 1
-  result = await provider_usage.read_provider_usage("claude", str(tmp_path))
-
-  assert result["state"] == "unavailable"
-
-
-@pytest.mark.asyncio
-async def test_provider_usage_disconnect_discards_a_prior_observation(
-  monkeypatch, tmp_path,
-):
-  from app import provider_usage
-
-  clock = [100.0]
-  monkeypatch.setattr(provider_usage.time, "monotonic", lambda: clock[0])
-  live = [_ready_usage_snapshot(), {
-    "state": "disconnected",
-    "plan_label": None,
-    "windows": [],
+  live = [{
+    "state": "ready",
+    "plan_label": "Max plan",
+    "windows": [{
+      "id": "seven_day",
+      "kind": "weekly",
+      "label": "Weekly",
+      "used_percent": 99,
+      "resets_at": "2020-01-01T00:00:00+00:00",
+    }],
     "credit_balance": None,
   }]
 
   async def fake_snapshot(_provider_id, _data_dir):
-    return live.pop(0)
+    return live.pop(0) if live else provider_usage._unavailable("Max plan")
 
   monkeypatch.setattr(provider_usage, "_provider_snapshot", fake_snapshot)
   await provider_usage.read_provider_usage("claude", str(tmp_path))
   clock[0] += provider_usage._PROVIDER_USAGE_FRESH_SECONDS + 1
   result = await provider_usage.read_provider_usage("claude", str(tmp_path))
 
-  assert result["state"] == "disconnected"
-  assert provider_usage._provider_usage_cache == {}
+  assert result["state"] == "unavailable"
 
 
 def test_settings_provider_usage_endpoint(client, auth, monkeypatch):

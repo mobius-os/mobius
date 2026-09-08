@@ -8,6 +8,7 @@ could observe it torn.
 
 import json
 import os
+import re
 import shutil
 import stat
 import tempfile
@@ -31,6 +32,17 @@ MAX_STORAGE_BYTES = 50 * 1024 * 1024
 # a backstop, not a wall: the owner's agent can raise it in code if a real app
 # needs more headroom.
 MAX_APP_STORAGE_BYTES = 1024 * 1024 * 1024
+
+# ``tempfile.mkstemp`` uses eight characters from this alphabet for the random
+# portion of names created by ``atomic_write``. Keep recognition beside the
+# writer so readers can reserve only its exact crash-artifact namespace rather
+# than broadly hiding dotfiles or every ``*.tmp`` owner path.
+_ATOMIC_WRITE_TEMP_RE = re.compile(r"^\..+\.[a-z0-9_]{8}\.tmp$")
+
+
+def is_atomic_write_temp_name(name: str) -> bool:
+  """Whether ``name`` is an internal same-directory atomic-write artifact."""
+  return _ATOMIC_WRITE_TEMP_RE.fullmatch(name) is not None
 
 
 def rmtree_strict(path: Path) -> None:
@@ -130,15 +142,21 @@ def atomic_write(
     raise
 
 
-async def read_capped_body(request: Request, cap: int = MAX_STORAGE_BYTES) -> bytes:
+async def read_capped_body(
+  request: Request,
+  cap: int = MAX_STORAGE_BYTES,
+  *,
+  too_large: str = "Request body too large.",
+) -> bytes:
   """Reads a request body, refusing once it crosses `cap` bytes.
 
   A declared Content-Length over the cap is rejected before a byte is read;
   then the body is streamed chunk-by-chunk and aborted the instant the running
   total exceeds the cap. So a runaway (or lying-Content-Length) upload can't
   buffer an unbounded body into memory and OOM the tight host (Codex review
-  round-8 #3, round-9 #4). Shared by the storage PUT and the icon upload — any
-  route that reads a raw body should use this instead of `request.body()`.
+  round-8 #3, round-9 #4). Shared by the storage PUT, the icon upload, and
+  workspace file saves — any route that reads a raw body should use this
+  instead of `request.body()`.
   """
   cl = request.headers.get("content-length")
   if cl is not None:
@@ -147,13 +165,13 @@ async def read_capped_body(request: Request, cap: int = MAX_STORAGE_BYTES) -> by
     except ValueError:
       declared = None
     if declared is not None and declared > cap:
-      raise HTTPException(status_code=413, detail="Request body too large.")
+      raise HTTPException(status_code=413, detail=too_large)
   chunks: list[bytes] = []
   total = 0
   async for chunk in request.stream():
     total += len(chunk)
     if total > cap:
-      raise HTTPException(status_code=413, detail="Request body too large.")
+      raise HTTPException(status_code=413, detail=too_large)
     chunks.append(chunk)
   return b"".join(chunks)
 

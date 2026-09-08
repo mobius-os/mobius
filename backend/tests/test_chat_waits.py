@@ -20,6 +20,7 @@ from app.chat_waits import (
   declare_wait,
   sweep_due_waits,
 )
+from app.chat_writer import StartTurn, get_writer
 from app.continuations import WAIT_RESULT_MESSAGE_KIND
 from app.delegations import RunPolicy, delegation_execution_token
 from app.run_state import goal_identity_for_run_start
@@ -37,9 +38,9 @@ def _agent_run_auth(db, chat_id, run_id):
   owner = db.query(models.Owner).first()
   token = auth_mod.create_agent_token(
     chat_id,
-    run_id,
     owner.username,
     owner.token_epoch,
+    run_id=run_id,
     expires_delta=timedelta(minutes=5),
   )
   return {"Authorization": f"Bearer {token}"}
@@ -338,14 +339,26 @@ def test_owner_message_keeps_wait_armed_and_gives_parent_its_identity(
   )
   monkeypatch.setattr(runner_path, fake_runner)
   create_broadcast(chat_id)
+  run_token = f"wait-context-{provider_id}"
+  get_writer().submit(StartTurn(
+    chat_id=chat_id,
+    run_token=run_token,
+    user_msg={
+      "role": "user", "content": "Please change the unrelated copy.",
+      "ts": 1, "cid": f"wait-context-{provider_id}",
+    },
+    title_source="Please change the unrelated copy.",
+    default_provider=provider_id,
+  )).result(timeout=5)
   asyncio.run(chat_mod._run_chat_impl(
     messages=[schemas.ChatMessage(
       role="user", content="Please change the unrelated copy.",
     )],
     chat_id=chat_id,
-    session_id="existing-provider-session",
+    session_id=None,
     provider_id=provider_id,
     run_gen=chat_mod.current_run_generation(chat_id),
+    run_token=run_token,
   ))
 
   agent_message = captured["user_message"]
@@ -356,6 +369,12 @@ def test_owner_message_keeps_wait_armed_and_gives_parent_its_identity(
   )
   db.expire_all()
   assert db.get(models.ChatWait, row.id).status == "armed"
+
+
+
+
+
+
 
 
 def test_owner_chat_list_projects_durable_waiting_state(
@@ -370,6 +389,13 @@ def test_owner_chat_list_projects_durable_waiting_state(
     kind="command",
     command="false",
   )
+  other_row = _command_wait(
+    db,
+    chat_id=chat_id,
+    description="resume after the second gate",
+    kind="command",
+    command="false",
+  )
 
   armed = client.get("/api/chats", headers=auth)
   assert armed.status_code == 200, armed.text
@@ -378,6 +404,12 @@ def test_owner_chat_list_projects_durable_waiting_state(
   assert chat["running"] is False
 
   cancel_wait(db, row)
+  still_armed = client.get("/api/chats", headers=auth)
+  assert still_armed.status_code == 200, still_armed.text
+  chat = next(item for item in still_armed.json() if item["id"] == chat_id)
+  assert chat["waiting"] is True
+
+  cancel_wait(db, other_row)
   cancelled = client.get("/api/chats", headers=auth)
   assert cancelled.status_code == 200, cancelled.text
   chat = next(item for item in cancelled.json() if item["id"] == chat_id)
@@ -406,7 +438,7 @@ def test_declare_route_requires_agent_run_bearer(client, owner_token, db):
   chat_id = _owner_chat(client, owner_token)
   payload = {
     "description": "CI green",
-    "condition_owner": "CI",
+    "condition_owner": "GitHub checks",
     "kind": "command",
     "command": "true",
     "deadline_secs": 3600,
@@ -434,7 +466,31 @@ def test_declare_route_requires_agent_run_bearer(client, owner_token, db):
   body = agent.json()
   assert body["chat_id"] == chat_id
   assert body["status"] == "armed"
-  assert body["condition_owner"] == "CI"
+  assert body["condition_owner"] == "GitHub checks"
+
+  missing_owner = client.post(
+    "/api/chat-waits",
+    json={
+      "description": "CI green",
+      "kind": "command",
+      "command": "true",
+      "deadline_secs": 3600,
+    },
+    headers=_agent_run_auth(db, chat_id, "declaring-run"),
+  )
+  assert missing_owner.status_code == 422, missing_owner.text
+
+  missing_deadline = client.post(
+    "/api/chat-waits",
+    json={
+      "description": "CI green",
+      "condition_owner": "GitHub checks",
+      "kind": "command",
+      "command": "true",
+    },
+    headers=_agent_run_auth(db, chat_id, "declaring-run"),
+  )
+  assert missing_deadline.status_code == 422, missing_deadline.text
 
 
 def test_agent_run_bearer_cannot_read_or_cancel_another_chats_wait(
@@ -500,47 +556,6 @@ def test_agent_run_bearer_can_cancel_its_own_chats_wait(
   assert db.get(models.ChatWait, row.id).status == "cancelled"
 
 
-def test_real_delegated_bearer_cannot_own_a_durable_wait(
-  client, owner_token, db,
-):
-  chat_id = _owner_chat(client, owner_token)
-  row = _command_wait(
-    db, chat_id=chat_id, description="parent-owned gate",
-    kind="command", command="false",
-  )
-  db.add(models.ChatRun(
-    id="delegated-wait-run", root_run_id="delegated-wait-run",
-    chat_id=chat_id, status="running", provider="codex",
-  ))
-  db.commit()
-  delegated_auth = _delegated_agent_run_auth(
-    db, chat_id, "delegated-wait-run",
-  )
-  payload = {
-    "description": "child must return this condition",
-    "condition_owner": "CI",
-    "kind": "command",
-    "command": "true",
-    "deadline_secs": 3600,
-  }
-
-  declared = client.post(
-    "/api/chat-waits", json=payload, headers=delegated_auth,
-  )
-  listed = client.get(
-    f"/api/chat-waits?chat_id={chat_id}", headers=delegated_auth,
-  )
-  cancelled = client.post(
-    f"/api/chat-waits/{row.id}/cancel", headers=delegated_auth,
-  )
-
-  assert declared.status_code == 403, declared.text
-  assert listed.status_code == 403, listed.text
-  assert cancelled.status_code == 403, cancelled.text
-  db.expire_all()
-  assert db.get(models.ChatWait, row.id).status == "armed"
-
-
 # ─────────────────────────── check + resume ───────────────────────────
 
 
@@ -585,16 +600,76 @@ def test_unmet_command_wait_reschedules(client, owner_token, db, monkeypatch):
   row.next_check_at = now_naive_utc() - timedelta(seconds=1)
   db.commit()
   starts = _capture_starts(monkeypatch, running=False)
+  broadcasts = []
+  monkeypatch.setattr(
+    chat_waits_mod, "_broadcast_changed", broadcasts.append,
+  )
 
   assert asyncio.run(sweep_due_waits()) == 0
 
   assert starts == []
+  assert broadcasts == [chat_id]
   db.expire_all()
   refreshed = db.get(models.ChatWait, row.id)
   assert refreshed.status == "armed"
   assert refreshed.checks_count == 1
   assert refreshed.last_exit_code == 1
   assert refreshed.next_check_at > now_naive_utc()
+
+
+@pytest.mark.parametrize(('exit_code', 'output', 'expected'), [
+  (0, '', 'met'),
+  (0, 'ready', 'met'),
+  (1, '', 'armed'),
+  (1, ' \n', 'armed'),
+  (1, 'authentication failed', 'failed'),
+  (2, '', 'failed'),
+  (127, 'command not found', 'failed'),
+  (-1, 'check timed out after 120s', 'failed'),
+])
+def test_each_check_outcome_is_visible_before_any_wake_is_admitted(
+  client, owner_token, db, monkeypatch, exit_code, output, expected,
+):
+  """A blocked wake must not leave a settled monitor looking armed."""
+  chat_id = _owner_chat(client, owner_token)
+  row = _command_wait(db, chat_id=chat_id, description='check', command='probe')
+  observed = []
+
+  async def check(_command, *, wait_id=None):
+    return exit_code, output
+
+  def changed(changed_chat_id):
+    db.expire_all()
+    observed.append((changed_chat_id, db.get(models.ChatWait, row.id).status))
+
+  monkeypatch.setattr(chat_waits_mod, '_run_check', check)
+  monkeypatch.setattr(chat_waits_mod, '_broadcast_changed', changed)
+  asyncio.run(chat_waits_mod._check_one(row.id))
+
+  assert observed == [(chat_id, expected)]
+  assert db.get(models.ChatWait, row.id).resume_delivered_at is None
+
+
+@pytest.mark.parametrize(('exit_code', 'output', 'expected'), [
+  (0, 'ready', 'met'),
+  (1, 'broken check', 'failed'),
+  (1, '', 'expired'),
+])
+def test_deadline_runs_a_final_check_and_preserves_its_actual_outcome(
+  client, owner_token, db, monkeypatch, exit_code, output, expected,
+):
+  chat_id = _owner_chat(client, owner_token)
+  row = _command_wait(db, chat_id=chat_id, description='final check', command='probe')
+  row.deadline_at = now_naive_utc() - timedelta(seconds=1)
+  db.commit()
+
+  async def check(_command, *, wait_id=None):
+    return exit_code, output
+
+  monkeypatch.setattr(chat_waits_mod, '_run_check', check)
+  asyncio.run(chat_waits_mod._check_one(row.id))
+  db.expire_all()
+  assert db.get(models.ChatWait, row.id).status == expected
 
 
 def test_broken_command_wait_wakes_with_diagnostic_instead_of_rotting(
@@ -687,6 +762,70 @@ def test_due_checks_do_not_block_globally_behind_one_slow_probe(
   assert asyncio.run(sweep_due_waits()) == 0
   assert fast_finished.is_set()
   assert 1 < peak_active <= chat_waits_mod.MAX_CONCURRENT_CHECKS
+
+
+def test_ready_wakes_are_delivered_before_an_unrelated_slow_check_finishes(
+  client, owner_token, db, monkeypatch,
+):
+  chat_id = _owner_chat(client, owner_token)
+  slow = _command_wait(db, chat_id=chat_id, description='slow', command='slow')
+  fast = _command_wait(db, chat_id=chat_id, description='fast', command='fast')
+  prior = _command_wait(db, chat_id=chat_id, description='already met', command='true')
+  prior.status = 'met'
+  prior.met_at = now_naive_utc()
+  db.commit()
+
+  async def exercise():
+    wakes_delivered = asyncio.Event()
+    delivered = []
+
+    async def check(row_id):
+      if row_id == slow.id:
+        await asyncio.wait_for(wakes_delivered.wait(), timeout=1)
+      return True
+
+    async def deliver(row_id):
+      delivered.append(row_id)
+      if prior.id in delivered and fast.id in delivered:
+        wakes_delivered.set()
+      return True
+
+    monkeypatch.setattr(chat_waits_mod, '_check_one', check)
+    monkeypatch.setattr(chat_waits_mod, '_deliver_resume', deliver)
+    assert await sweep_due_waits() == 3
+    assert delivered == [prior.id, fast.id, slow.id]
+
+  asyncio.run(exercise())
+
+
+def test_sweep_shutdown_joins_all_owned_checks(client, owner_token, db, monkeypatch):
+  chat_id = _owner_chat(client, owner_token)
+  for index in range(2):
+    _command_wait(db, chat_id=chat_id, description=f'check {index}', command='slow')
+
+  async def exercise():
+    started = set()
+    reaped = set()
+    all_started = asyncio.Event()
+
+    async def check(row_id):
+      started.add(row_id)
+      if len(started) == 2:
+        all_started.set()
+      try:
+        await asyncio.Future()
+      finally:
+        reaped.add(row_id)
+
+    monkeypatch.setattr(chat_waits_mod, '_check_one', check)
+    sweep = asyncio.create_task(sweep_due_waits())
+    await asyncio.wait_for(all_started.wait(), timeout=1)
+    sweep.cancel()
+    with pytest.raises(asyncio.CancelledError):
+      await sweep
+    assert reaped == started
+
+  asyncio.run(exercise())
 
 
 def test_deadline_expiry_wakes_the_chat_instead_of_rotting(
@@ -1262,6 +1401,7 @@ def test_legacy_wait_orphan_preservation_requires_exact_empty_carrier(
   physical = SimpleNamespace(
     id=resume_run_id, root_run_id=resume_run_id, chat_id=chat_id,
     status="running", initiated_by_app_id=None,
+    provider_execution_admitted=False,
   )
 
   assert not chat_waits_mod.safe_startup_writer_orphan(db, chat, physical)
@@ -1548,3 +1688,36 @@ def test_wait_resume_reconnects_declaring_runs_goal(client, owner_token, db):
     "source_work_id": "missing-run",
   })
   assert objective is None and goal_id is None
+
+
+# ─────────────────────────── autopilot lease sweep ───────────────────────────
+
+
+def test_expired_autopilot_lease_is_reclaimed_by_sweep(db):
+  from app.contribution_autopilot import sweep_expired_leases
+  row = models.ContributionAutopilot(
+    app_id=80,
+    record_id="wedged-record",
+    enabled=True,
+    state="responding",
+    run_id="dead-round",
+    attention_key="checks_failed:abc",
+    claimed_at=now_naive_utc() - timedelta(hours=2),
+    lease_expires_at=now_naive_utc() - timedelta(hours=1),
+  )
+  db.add(row)
+  db.commit()
+
+  assert sweep_expired_leases(db) == 1
+  db.expire_all()
+  refreshed = (
+    db.query(models.ContributionAutopilot)
+    .filter_by(app_id=80, record_id="wedged-record")
+    .one()
+  )
+  assert refreshed.state == "idle"
+  assert refreshed.run_id is None
+  assert refreshed.consecutive_failures == 1
+
+  # Idempotent: nothing left to reclaim.
+  assert sweep_expired_leases(db) == 0

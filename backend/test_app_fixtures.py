@@ -9,6 +9,18 @@ from app.config import get_settings
 
 DEFAULT_JSX = "export default function App() { return <div>test</div> }\n"
 
+_PUBLIC_HOST_SLOT = re.compile(
+  r'<script type="application/json" id="mobius-public-host">(.*?)</script>',
+  re.S,
+)
+
+
+def public_host_config(html: str) -> dict:
+  """The configuration an anonymous host page hands its static script."""
+  match = _PUBLIC_HOST_SLOT.search(html)
+  assert match, html[:1000]
+  return json.loads(match.group(1))
+
 
 def write_local_source(
   root: str | Path,

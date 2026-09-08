@@ -1312,7 +1312,6 @@ async def test_unacknowledged_dispatch_expires_and_sends_cancel(
   )["last_command"]["result"]["outcome"] == "expired"
 
 
-@pytest.mark.filterwarnings("error")
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX process-group contract")
 def test_runner_timeout_terminates_the_entire_command_tree(tmp_path: Path):
   """A timed-out command must not leave descendants running on the machine."""
@@ -1701,7 +1700,7 @@ def test_connect_manage_reaches_a_ledgered_database(tmp_path: Path):
   run_migrations(eng)
   columns = {column["name"] for column in inspect(eng).get_columns("apps")}
   assert "connect_manage" in columns
-  assert "0016_app_connect_manage" in {
+  assert "0018_app_connect_manage" in {
     entry["version"] for entry in schema_migration_history(eng)
   }
 

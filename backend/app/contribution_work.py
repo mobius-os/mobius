@@ -318,6 +318,33 @@ def envelope(
   }
 
 
+def deferred_envelope(
+  chat_id: str, body: ContributionWorkBody,
+) -> dict:
+  """Persist only the selector until the active source turn becomes stable.
+
+  The paths visible during a tap are a useful preview, not the execution
+  boundary: the source agent can still be committing the same turn. Binding
+  that preview as immutable made ordinary in-flight edits look like a stale
+  conflict and guaranteed that the accepted helper never started.
+  """
+  roots = (
+    [body.project_root]
+    if body.intent == "project" and body.project_root
+    else []
+  )
+  return {
+    "v": 1,
+    "intent": body.intent,
+    "source_chat_id": chat_id,
+    "edit_revision": "",
+    "paths": [],
+    "record_ids": sorted(set(body.record_ids)),
+    "project_roots": roots,
+    "bind_after_source": True,
+  }
+
+
 def body_from_row(row: models.Delegation) -> ContributionWorkBody:
   value = row.source_work_envelope or {}
   roots = value.get("project_roots")
@@ -341,6 +368,18 @@ def mark_needs_review(db: Session, row: models.Delegation, detail: str) -> None:
   row.startup_prompt = None
   db.commit()
   publish_source_work_changed(row, "needs_review")
+
+
+def mark_completed_without_start(
+  db: Session, row: models.Delegation, detail: str,
+) -> None:
+  """Settle a deferred request whose final source view needs no helper."""
+  row.source_work_status = "completed"
+  row.source_work_result = detail[:3000]
+  row.source_work_active_chat_id = None
+  row.startup_prompt = None
+  db.commit()
+  publish_source_work_changed(row, "completed")
 
 
 def record_prestart_failure(db: Session, row: models.Delegation) -> None:
@@ -403,32 +442,59 @@ async def start_attached(
         )
         record_prestart_failure(db, row)
         return False
-      candidate = envelope(chat_id, body, snapshot)
-      if (
-        revision(snapshot, body) != body.expected_revision
-        or not records_exist(snapshot, body)
-        or candidate != (row.source_work_envelope or {})
-        or not (candidate["paths"] or candidate["record_ids"])
-      ):
-        mark_needs_review(
-          db,
-          row,
-          "The source changed while this work was waiting. Refresh Changes and choose the current action.",
-        )
-        return False
+      stored_envelope = row.source_work_envelope or {}
+      if stored_envelope.get("bind_after_source") is True:
+        stable_body = body.model_copy(update={
+          "expected_revision": revision(snapshot, body),
+        })
+        if not records_exist(snapshot, stable_body):
+          mark_needs_review(
+            db,
+            row,
+            "The requested contribution records changed while this work was waiting. Refresh Changes and choose the current action.",
+          )
+          return False
+        candidate = envelope(chat_id, stable_body, snapshot)
+        if not (candidate["paths"] or candidate["record_ids"]):
+          mark_completed_without_start(
+            db,
+            row,
+            "The current source no longer has private contribution work to prepare.",
+          )
+          return False
+        rebound_prompt = prompt(candidate)
+        row.source_work_envelope = candidate
+        row.startup_prompt = rebound_prompt
+        row.prompt_sha256 = hashlib.sha256(
+          rebound_prompt.encode("utf-8")
+        ).hexdigest()
+        row.source_work_result = None
+        db.commit()
+      else:
+        candidate = envelope(chat_id, body, snapshot)
+        if (
+          revision(snapshot, body) != body.expected_revision
+          or not records_exist(snapshot, body)
+          or candidate != stored_envelope
+          or not (candidate["paths"] or candidate["record_ids"])
+        ):
+          mark_needs_review(
+            db,
+            row,
+            "The source changed while this work was waiting. Refresh Changes and choose the current action.",
+          )
+          return False
       try:
-        started = await ensure_started(db, row)
+        await ensure_started(db, row)
       except Exception:
         log.warning(
           "attached contribution startup failed id=%s",
           delegation_id,
           exc_info=True,
         )
-        started = False
-      if not started:
         # The child StartTurn commits through another session. Re-read before
-        # counting a false/failed admission as pre-start failure: if its ChatRun
-        # exists, ordinary run reconciliation owns that durable start.
+        # counting a provider/admission exception as pre-start failure: if its
+        # ChatRun exists, ordinary run reconciliation owns that durable start.
         db.rollback()
         db.expire_all()
         row = db.query(models.Delegation).filter(

@@ -107,9 +107,9 @@ def _delegated_and_top_level_auth(client, owner_token, db):
   )
   top_level_token = auth_mod.create_agent_token(
     chat_ids["top-level"],
-    "lifecycle-boundary-top-run",
     owner.username,
     owner.token_epoch,
+    run_id="lifecycle-boundary-top-run",
   )
   return (
     chat_ids,
@@ -334,10 +334,6 @@ def test_delegated_bearer_cannot_enter_host_or_platform_lifecycle(
     calls.append(("prepare-cutover", cutover_id))
     return {"status": "prepared"}
 
-  async def rebuild():
-    calls.append(("rebuild",))
-    return {"state": "queued"}
-
   async def reviewed_rebuild(**kwargs):
     calls.append(("reviewed-rebuild", kwargs))
     return {"state": "queued"}
@@ -349,7 +345,6 @@ def test_delegated_bearer_cannot_enter_host_or_platform_lifecycle(
   monkeypatch.setattr(admin_routes, "restart_this_worker", restart)
   monkeypatch.setattr(admin_routes, "prepare_container_cutover", prepare)
   monkeypatch.setattr(platform_routes, "restart_this_worker", restart)
-  monkeypatch.setattr(deployment_control, "request_rebuild", rebuild)
   monkeypatch.setattr(
     deployment_control, "request_reviewed_rebuild", reviewed_rebuild,
   )
@@ -379,7 +374,6 @@ def test_delegated_bearer_cannot_enter_host_or_platform_lifecycle(
       json={"cutover_id": "cutover-12345678"},
       headers=delegated_auth,
     ),
-    client.post("/api/admin/rebuild", headers=delegated_auth),
     client.post(
       "/api/admin/rebuild/prepare",
       json={"operation_id": "operation-12345678"},

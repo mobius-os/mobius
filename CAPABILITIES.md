@@ -77,6 +77,23 @@ Runtime capabilities live in the root `capabilities` object:
 }
 ```
 
+A bounded rear-camera recording declares both time and in-memory byte ceilings:
+
+```json
+{
+  "capabilities": {
+    "media.camera.capture": {
+      "version": 1,
+      "reason": "Record a room walkthrough for a private 3D scene.",
+      "limits": {
+        "max_duration_ms": 180000,
+        "max_bytes": 201326592
+      }
+    }
+  }
+}
+```
+
 - The key is the stable capability id.
 - `version` is required and exact. The platform can host v1 and v2 together
   during a future migration without a global API-version flag.
@@ -116,6 +133,50 @@ const result = await session.finish()
 
 session.cancel()
 ```
+
+Camera recording uses the same session API:
+
+```js
+const session = caps.open('media.camera.capture', {
+  facingMode: 'environment',
+  maxDurationMs: 180000,
+  audio: false,
+})
+
+session.on('progress', ({ durationMs, bytes }) => updateCaptureProgress({
+  durationMs,
+  bytes,
+}))
+
+const ready = await session.ready
+// ready: { mimeType, width, height, audio }
+
+// Optional: ask the trusted shell to paint its live preview over this app's
+// viewfinder. Send again after the viewfinder moves or resizes.
+const rect = viewfinder.getBoundingClientRect()
+session.control('preview-rect', {
+  x: rect.left, y: rect.top, width: rect.width, height: rect.height,
+})
+
+const recording = await session.finish()
+// recording: { mimeType, durationMs, width, height, bytes: ArrayBuffer }
+const video = new Blob([recording.bytes], { type: recording.mimeType })
+```
+
+Camera v1 accepts `environment` (the default) or `user` facing mode, a positive
+`maxDurationMs`, and an `audio` boolean that defaults to `false`. The requested
+duration is clamped to the reviewed manifest ceiling. The provider requests the
+preferred facing camera from the browser, records through `MediaRecorder`, and
+returns only the final bytes and metadata—not a `MediaStream`, track, or DOM
+handle. `progress` reports the current `{durationMs, bytes}` retained in memory.
+An app can send `control('preview-rect', {x, y, width, height})` to position an
+optional host-owned live preview inside its canvas. The shell validates and
+clips that rectangle, paints a non-interactive video layer, and removes it when
+capture releases the camera. The stream itself never crosses into the opaque
+app frame.
+The reviewed `max_bytes` ceiling is always enforced, including the recorder's
+final chunk. Manifests default to 60 seconds and 128 MiB; v1 accepts reviewed
+ceilings from 100 milliseconds to 5 minutes and from 64 KiB to 256 MiB.
 
 Every `open()` returns the same `CapabilitySession` shape:
 
@@ -231,6 +292,13 @@ changing the app API. The effective grant is always the intersection of:
 manifest request ∩ installed review ∩ owner grant ∩ host support ∩ live context
 ```
 
+For `media.camera.capture` v1, cancellation or frame teardown settles the app
+session immediately even while a browser permission prompt is pending. Browsers
+do not expose a way to dismiss that prompt programmatically; if it later grants
+access, the provider stops the newly returned tracks without starting a
+recorder. Finish before readiness fails rather than manufacturing an empty or
+invalid video. Finish after readiness returns the useful partial recording.
+
 ## Stable error codes
 
 Providers may use DOM-style names for familiar browser handling, but app logic
@@ -246,6 +314,7 @@ should branch on stable codes:
 | `invalid_request` | Input failed provider or transport validation |
 | `denied` | Owner or browser denied access |
 | `aborted` | App, host lifecycle, or teardown cancelled it |
+| `limit_exceeded` | A reviewed byte ceiling was exceeded |
 | `provider_error` | Unexpected provider failure |
 
 Errors must say what the user can do next when there is an action. They must not
@@ -256,7 +325,7 @@ expose shell tokens, paths, browser internals, or another app's activity.
 Add primitives only after a real app needs them. Likely families are:
 
 - `media.microphone.capture`, `media.camera.capture`
-- `device.asset-cache`
+- `device.storage`, `device.asset-cache`
 - `files.open`, `files.save`
 - `clipboard.read`, `clipboard.write`
 - `location.current`, `location.watch`
@@ -279,6 +348,32 @@ methods; wildcard access can remain possible through explicit owner approval.
 Moving credential possession into a generic host request transport would not
 change that authorization model. Likewise, app storage and cross-app access are
 durable server capabilities, not browser-session providers.
+
+### Small device-local app state
+
+`device.storage` lets an opaque mini-app remember a small JSON value in the
+current browser profile without inventing an app-specific `postMessage`
+protocol. The shell partitions values by both app id and installation nonce,
+so uninstall/reinstall or id reuse cannot expose a previous installation's
+state. A public hosted app uses the same capability messages and the same
+partition identity as its signed-in view.
+
+Declare a reviewed `max_bytes` ceiling, then use one-shot operations:
+
+```js
+await window.mobius.capabilities.invoke('device.storage', {
+  operation: 'set', key: 'visitor-bookings', value: bookings,
+})
+const bookings = await window.mobius.capabilities.invoke('device.storage', {
+  operation: 'get', key: 'visitor-bookings',
+})
+```
+
+Supported operations are `get`, `set`, `remove`, and `list`. Keys are short
+app-owned identifiers; values must be JSON. This storage is best-effort and
+device-local: clearing site data removes it, it is not synchronized, and it is
+not a substitute for `window.mobius.storage` when data belongs to the owner or
+must be shared between visitors.
 
 ### Large public assets stored on one device
 

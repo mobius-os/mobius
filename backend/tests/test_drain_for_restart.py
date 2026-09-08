@@ -209,7 +209,7 @@ def test_drain_pause_survives_claude_interrupt_terminal(monkeypatch):
     handle.stop_calls += 1
     # This is the terminal result Claude emits after the drain has already
     # published the authoritative, resumable restart pause.
-    chat_mod._limit_exit(sink, {}, "Execution interrupted.")
+    chat_mod._park_exit(sink, {}, "Execution interrupted.")
     registry.unregister(cid, handle.kind)
     return True
 

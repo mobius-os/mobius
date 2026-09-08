@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import hashlib
 import os
-import stat
 from pathlib import Path
 from typing import Literal, TypedDict
 
@@ -43,24 +42,9 @@ def _ignored(relative: Path) -> bool:
   return "__pycache__" in relative.parts or relative.suffix in {".pyc", ".pyo"}
 
 
-def _hash_regular_file(path: Path) -> str:
-  """Hash one final regular file without following a last-component link."""
-  flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-  fd = os.open(path, flags)
-  try:
-    if not stat.S_ISREG(os.fstat(fd).st_mode):
-      raise OSError(f"not a regular file: {path}")
-    digest = hashlib.sha256()
-    while chunk := os.read(fd, 1024 * 1024):
-      digest.update(chunk)
-    return digest.hexdigest()
-  finally:
-    os.close(fd)
-
-
 def _snapshot(root: Path) -> _TreeSnapshot:
   """Hash a tree without following links or including Python bytecode."""
-  if root.is_symlink() or not root.is_dir():
+  if not root.is_dir():
     raise FileNotFoundError(root)
 
   files: dict[str, str] = {}
@@ -78,7 +62,7 @@ def _snapshot(root: Path) -> _TreeSnapshot:
     if not path.is_file():
       invalid.append(name)
       continue
-    files[name] = _hash_regular_file(path)
+    files[name] = hashlib.sha256(path.read_bytes()).hexdigest()
 
   tree = hashlib.sha256()
   for name, digest in sorted(files.items()):

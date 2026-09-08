@@ -9,7 +9,7 @@ surfaces (the chat UI's waiting card and its cancel affordance).
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from sqlalchemy.orm import Session
 
 from app import models
@@ -37,12 +37,22 @@ def _require_owner(principal: Principal) -> None:
 
 class WaitDeclare(BaseModel):
   description: str = Field(min_length=1, max_length=500)
-  condition_owner: str | None = Field(default=None, max_length=200)
+  condition_owner: str | None = Field(default=None, max_length=160)
   kind: str = Field(pattern="^(command|timer)$")
   command: str | None = Field(default=None, max_length=4000)
   delay_secs: int | None = Field(default=None, gt=0)
   interval_secs: int | None = Field(default=None, gt=0)
   deadline_secs: int | None = Field(default=None, gt=0)
+
+  @model_validator(mode="after")
+  def require_bounded_command_owner(self) -> "WaitDeclare":
+    if self.kind != "command":
+      return self
+    if not (self.condition_owner or "").strip():
+      raise ValueError("command waits need a condition_owner")
+    if self.deadline_secs is None:
+      raise ValueError("command waits need an explicit deadline_secs")
+    return self
 
 
 @router.post("")

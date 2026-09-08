@@ -82,9 +82,9 @@ def _owner_control_context(client, owner_token, db):
   )
   top_level = auth_mod.create_agent_token(
     top_level_id,
-    "owner-control-followup-top-run",
     owner.username,
     owner.token_epoch,
+    run_id="owner-control-followup-top-run",
   )
   app_token = auth_mod.create_app_token(
     app.id,

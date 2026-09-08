@@ -20,7 +20,7 @@ from app import models
 from app.chat_writer import (
   AppendPending, Barrier, FinishRun, PromotePending, StartContinuation,
   StartContinuationAttached, StartContinuationBlocked, StartTurn,
-  RecordRunMetrics, alloc_run_token, get_writer,
+  ReconcileStartupChat, RecordRunMetrics, alloc_run_token, get_writer,
 )
 from app.database import SessionLocal
 
@@ -79,6 +79,21 @@ def _active_status(chat_id):
       if run is not None and run.status in models.NONTERMINAL_RUN_STATUSES
       else None
     )
+  finally:
+    db.close()
+
+
+def _failure_activity(chat_id):
+  db = SessionLocal()
+  try:
+    row = db.get(models.ChatFailureActivity, chat_id)
+    if row is None:
+      return None
+    return {
+      "run_id": row.run_id,
+      "version": row.activity_version,
+      "unseen": row.unseen,
+    }
   finally:
     db.close()
 
@@ -424,6 +439,55 @@ def test_finish_run_preserves_failed_outcome():
   _drain()
   assert _runs("r2-failed")["rt-2-failed"] == ("failed", True)
   assert _active_status("r2-failed") is None
+  assert _failure_activity("r2-failed") == {
+    "run_id": "rt-2-failed",
+    "version": 1,
+    "unseen": True,
+  }
+
+
+def test_failure_activity_is_idempotent_per_run_and_versions_new_failures():
+  _seed_chat("r2-failure-version")
+  _start("r2-failure-version", "rt-failure-1")
+  command = FinishRun(
+    chat_id="r2-failure-version",
+    run_token="rt-failure-1",
+    terminal_status="failed",
+  )
+  get_writer().submit(command).result(timeout=5)
+  get_writer().submit(command).result(timeout=5)
+  assert _failure_activity("r2-failure-version") == {
+    "run_id": "rt-failure-1",
+    "version": 1,
+    "unseen": True,
+  }
+
+  _start("r2-failure-version", "rt-failure-2")
+  get_writer().submit(FinishRun(
+    chat_id="r2-failure-version",
+    run_token="rt-failure-2",
+    terminal_status="failed",
+  )).result(timeout=5)
+  assert _failure_activity("r2-failure-version") == {
+    "run_id": "rt-failure-2",
+    "version": 2,
+    "unseen": True,
+  }
+
+
+def test_clean_and_deliberately_interrupted_runs_do_not_raise_failure_attention():
+  _seed_chat("r2-neutral")
+  _start("r2-neutral", "rt-complete")
+  get_writer().submit(FinishRun(
+    chat_id="r2-neutral", run_token="rt-complete",
+  )).result(timeout=5)
+  _start("r2-neutral", "rt-interrupted")
+  get_writer().submit(FinishRun(
+    chat_id="r2-neutral",
+    run_token="rt-interrupted",
+    terminal_status="interrupted",
+  )).result(timeout=5)
+  assert _failure_activity("r2-neutral") is None
 
 
 def test_record_run_metrics_updates_exact_run_without_touching_transcript():
@@ -543,6 +607,11 @@ def test_error_handoff_marks_prior_run_failed_before_continuation():
   assert runs["rt-3-failed-a"] == ("failed", True)
   assert runs["rt-3-failed-b"] == ("running", False)
   assert _active_status("r3-failed") == "running"
+  assert _failure_activity("r3-failed") == {
+    "run_id": "rt-3-failed-a",
+    "version": 1,
+    "unseen": True,
+  }
 
 
 # -- identity-keyed dying-run clear ---------------------------------------
@@ -591,6 +660,40 @@ def test_reconcile_marks_interrupted_run_record():
   assert "r6" in reconciled
   assert _runs("r6")["rt-6"][0] == "interrupted"
   assert _active_status("r6") is None
+
+
+def test_startup_reconciliation_marks_unplanned_loss_but_not_planned_restart():
+  recovered_at = datetime.now(UTC)
+  _seed_chat("r6-unplanned", messages=[{
+    "role": "user", "content": "keep going", "ts": 1,
+  }])
+  _seed_run("rt-unplanned", "r6-unplanned")
+  get_writer().submit(ReconcileStartupChat(
+    chat_id="r6-unplanned",
+    messages=[{"role": "user", "content": "keep going", "ts": 1}],
+    running_run_ids=("rt-unplanned",),
+    recovered_at=recovered_at,
+  )).result(timeout=5)
+  assert _runs("r6-unplanned")["rt-unplanned"] == ("interrupted", True)
+  assert _failure_activity("r6-unplanned") == {
+    "run_id": "rt-unplanned",
+    "version": 1,
+    "unseen": True,
+  }
+
+  _seed_chat("r6-restart", messages=[{
+    "role": "user", "content": "restart safely", "ts": 1,
+  }])
+  _seed_run("rt-restart", "r6-restart")
+  get_writer().submit(ReconcileStartupChat(
+    chat_id="r6-restart",
+    messages=[{"role": "user", "content": "restart safely", "ts": 1}],
+    running_run_ids=("rt-restart",),
+    restart_run_id="rt-restart",
+    recovered_at=recovered_at,
+  )).result(timeout=5)
+  assert _runs("r6-restart")["rt-restart"] == ("parked", False)
+  assert _failure_activity("r6-restart") is None
 
 
 def test_reconcile_uses_running_row_as_the_recovery_authority():

@@ -137,6 +137,7 @@ def _git(
     ["git", "-C", str(data_dir), *args],
     input=input_bytes,
     capture_output=True,
+    timeout=60,
     env=env,
   )
   if process.returncode != 0:

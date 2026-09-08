@@ -9,6 +9,7 @@ working tree.
 """
 
 import hashlib
+import json
 import os
 import stat
 import subprocess
@@ -30,6 +31,10 @@ def test_git_env_disables_every_interactive_credential_prompt(
   monkeypatch.setenv("GCM_INTERACTIVE", "Always")
   monkeypatch.setenv("GIT_ASKPASS", "/tmp/inherited-git-askpass")
   monkeypatch.setenv("SSH_ASKPASS", "/tmp/inherited-ssh-askpass")
+  monkeypatch.setenv(
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES", "/tmp/inherited-git-objects",
+  )
+  monkeypatch.setenv("GIT_OPTIONAL_LOCKS", "0")
 
   env = app_git._git_env(tmp_path / "app")
 
@@ -37,6 +42,11 @@ def test_git_env_disables_every_interactive_credential_prompt(
   assert env["GCM_INTERACTIVE"] == "Never"
   assert env["GIT_ASKPASS"] == "/bin/false"
   assert env["SSH_ASKPASS"] == "/bin/false"
+  assert "GIT_ALTERNATE_OBJECT_DIRECTORIES" not in env
+  assert "GIT_OPTIONAL_LOCKS" not in env
+  assert app_git._git_env(
+    tmp_path / "app", read_only=True,
+  )["GIT_OPTIONAL_LOCKS"] == "0"
 
 
 def test_worktree_snapshot_uses_git_inventory_without_mutating_real_index(
@@ -1040,6 +1050,150 @@ def _review_digest(repo: Path, base: str, head: str) -> str:
   return hashlib.sha256(reviewed).hexdigest()
 
 
+def _publication_projection() -> app_git.PublicationSourceProjection:
+  return app_git.publication_source_projection({
+    "adapter": "github_app_manifest_identity_v1",
+    "path": "mobius.json",
+    "fields": {
+      "author": "mobius-os",
+      "homepage": "https://github.com/mobius-os/app-kanban",
+    },
+  }, repo_slug="mobius-os/app-kanban")
+
+
+def _publication_manifest(
+  *, author: str, homepage: str, version: str = "0.4.1",
+) -> str:
+  return json.dumps({
+    "id": "kanban",
+    "name": "Kanban",
+    "version": version,
+    "author": author,
+    "homepage": homepage,
+    "entry": "index.jsx",
+    "source_files": ["index.jsx", "operations.js"],
+  }, indent=2) + "\n"
+
+
+def _publication_history(tmp_path: Path) -> tuple[Path, str, str, str, str]:
+  """Kanban-shaped public review and personalized installed source."""
+  repo = tmp_path / "kanban"
+  _install(repo, b"export const board = 'starter'\n")
+  (repo / "mobius.json").write_text(_publication_manifest(
+    author="starter", homepage="https://example.invalid/starter", version="0.3.0",
+  ))
+  (repo / "operations.js").write_text("export const sync = false\n")
+  base = _commit_all(repo, "public starter")
+
+  _write(repo, "export const board = 'reviewed'\n")
+  (repo / "mobius.json").write_text(_publication_manifest(
+    author="mobius-os",
+    homepage="https://github.com/mobius-os/app-kanban",
+  ))
+  (repo / "operations.js").write_text("export const sync = true\n")
+  reviewed = _commit_all(repo, "reviewed public package")
+  digest = _review_digest(repo, base, reviewed)
+
+  app_git._run(repo, "checkout", "-q", "-b", "installed-source", base)
+  _write(repo, "export const board = 'reviewed'\n")
+  # The installed manifest intentionally has owner-local identity and no final
+  # newline, matching the current Kanban source writer.
+  (repo / "mobius.json").write_text(_publication_manifest(
+    author="local-owner",
+    homepage="https://github.com/local-owner/app-kanban",
+  ).rstrip("\n"))
+  (repo / "operations.js").write_text("export const sync = true\n")
+  (repo / "later.js").write_text("export const retry = true\n")
+  source = _commit_all(repo, "installed package plus later refinement")
+  return repo, base, reviewed, source, digest
+
+
+def _read_only_storage_snapshot(repo: Path) -> dict[str, object]:
+  """Durable Git state a read-only status/proof must leave byte-identical."""
+  refs = app_git._run(
+    repo, "for-each-ref", "--format=%(refname) %(objectname)",
+  ).stdout
+  paths = app_git._run(
+    repo, "rev-parse", "--path-format=absolute", "--git-dir",
+    "--git-common-dir", "--git-path", "index",
+  ).stdout.splitlines()
+  assert len(paths) == 3
+  git_dir, common_dir, index = map(Path, paths)
+  objects = common_dir / "objects"
+  object_files = {
+    str(path.relative_to(objects)): hashlib.sha256(path.read_bytes()).hexdigest()
+    for path in objects.rglob("*")
+    if path.is_file()
+  }
+  index_stat = index.stat()
+  lock_files = sorted({
+    str(path)
+    for root in {git_dir, common_dir}
+    for path in root.rglob("*.lock")
+  })
+  return {
+    "refs": refs,
+    "objects": object_files,
+    "index_bytes": index.read_bytes(),
+    "index_metadata": (
+      index_stat.st_mode,
+      index_stat.st_ino,
+      index_stat.st_size,
+      index_stat.st_mtime_ns,
+      index_stat.st_ctime_ns,
+    ),
+    "lock_files": lock_files,
+  }
+
+
+def _forbid_history_imports(monkeypatch):
+  real_run = app_git._run
+  commands: list[tuple[tuple[str, ...], bool]] = []
+
+  def recording_run(repo, *args, **kwargs):
+    commands.append((args, kwargs.get("read_only") is True))
+    return real_run(repo, *args, **kwargs)
+
+  def reject_copy(*_args, **_kwargs):
+    raise AssertionError("equivalence preview must not copy durable history")
+
+  monkeypatch.setattr(app_git, "_run", recording_run)
+  for name in ("copy", "copy2", "copyfile", "copytree"):
+    monkeypatch.setattr(app_git.shutil, name, reject_copy)
+  return commands
+
+
+@pytest.mark.parametrize("dirty", [False, True])
+def test_worktree_dirty_preserves_index_and_lock_state(
+  tmp_path, monkeypatch, dirty,
+):
+  repo = tmp_path / "app"
+  _install(repo, b"base\n")
+  entry = repo / "index.jsx"
+  if dirty:
+    entry.write_text("draft\n")
+  else:
+    current = entry.stat()
+    os.utime(
+      entry,
+      ns=(current.st_atime_ns, current.st_mtime_ns + 5_000_000_000),
+    )
+
+  before = _read_only_storage_snapshot(repo)
+  assert before["lock_files"] == []
+  real_run = app_git._run
+  read_only_modes: list[bool] = []
+
+  def recording_run(repo, *args, **kwargs):
+    read_only_modes.append(kwargs.get("read_only") is True)
+    return real_run(repo, *args, **kwargs)
+
+  monkeypatch.setattr(app_git, "_run", recording_run)
+  assert app_git.worktree_dirty(repo) is dirty
+  assert read_only_modes == [True]
+  assert _read_only_storage_snapshot(repo) == before
+
+
 def test_primary_worktree_path_distinguishes_linked_from_standalone(tmp_path):
   repo = tmp_path / "app"
   _install(repo, b"base\n")
@@ -1048,6 +1202,495 @@ def test_primary_worktree_path_distinguishes_linked_from_standalone(tmp_path):
 
   assert app_git.primary_worktree_path(repo) is None
   assert app_git.primary_worktree_path(linked) == repo.resolve()
+
+
+def test_equivalence_preview_success_uses_read_only_object_alternates(
+  tmp_path, monkeypatch,
+):
+  """A successful standalone proof imports no history or durable state."""
+  review = tmp_path / "review"
+  _install(review, b"base\n")
+  base = app_git.head_sha(review, app_git.LOCAL_BRANCH)
+  _write(review, "reviewed\n")
+  reviewed = app_git.commit_local(review, "reviewed change")
+  assert reviewed
+  digest = _review_digest(review, base, reviewed)
+
+  source = tmp_path / "source"
+  subprocess.run(
+    ["git", "clone", "-q", str(review), str(source)],
+    check=True,
+    env=app_git._git_env(source),
+  )
+  (source / "source-only.js").write_text("preserved\n")
+  source_sha = _commit_all(source, "later source change")
+
+  before = {
+    review: _read_only_storage_snapshot(review),
+    source: _read_only_storage_snapshot(source),
+  }
+  commands = _forbid_history_imports(monkeypatch)
+
+  assert app_git.preview_pending_equivalent_change(
+    source,
+    base_sha=base,
+    head_sha=reviewed,
+    source_sha=source_sha,
+    diff_sha256=digest,
+    review_source_dir=review,
+  ) == "exact_tree"
+
+  assert not any(
+    args and args[0] in {"clone", "fetch"} for args, _mode in commands
+  )
+  assert all(read_only for _args, read_only in commands)
+  assert _read_only_storage_snapshot(review) == before[review]
+  assert _read_only_storage_snapshot(source) == before[source]
+
+
+def test_equivalence_preview_failure_uses_read_only_object_alternates(
+  tmp_path, monkeypatch,
+):
+  """A failed linked proof is as read-only as a successful one."""
+  repo = tmp_path / "app"
+  _install(repo, b"base\n")
+  base = app_git.head_sha(repo, app_git.LOCAL_BRANCH)
+
+  _write(repo, "reviewed\n")
+  reviewed = app_git.commit_local(repo, "reviewed change")
+  assert reviewed
+  digest = _review_digest(repo, base, reviewed)
+
+  # Build a source tip from the same base that lacks the reviewed bytes and
+  # changes another path, so exact-tree proof cannot accept it.
+  app_git._run(repo, "checkout", "-q", "-b", "source-mismatch", base)
+  (repo / "other.js").write_text("different source\n")
+  source = _commit_all(repo, "source mismatch")
+
+  before = _read_only_storage_snapshot(repo)
+  assert before["lock_files"] == []
+  commands = _forbid_history_imports(monkeypatch)
+
+  assert app_git.preview_pending_equivalent_change(
+    repo,
+    base_sha=base,
+    head_sha=reviewed,
+    source_sha=source,
+    diff_sha256=digest,
+    review_source_dir=repo,
+  ) is None
+
+  assert not any(
+    args and args[0] in {"clone", "fetch"} for args, _mode in commands
+  )
+  assert all(read_only for _args, read_only in commands)
+  assert _read_only_storage_snapshot(repo) == before
+
+
+def test_publication_manifest_projection_proves_kanban_without_source_rewrite(
+  tmp_path,
+):
+  repo, base, reviewed, source, digest = _publication_history(tmp_path)
+  source_before = app_git._run(repo, "show", f"{source}:mobius.json").stdout
+  projection = _publication_projection()
+
+  assert app_git.preview_pending_equivalent_change(
+    repo,
+    base_sha=base,
+    head_sha=reviewed,
+    source_sha=source,
+    diff_sha256=digest,
+  ) is None
+  assert app_git.preview_pending_equivalent_change(
+    repo,
+    base_sha=base,
+    head_sha=reviewed,
+    source_sha=source,
+    diff_sha256=digest,
+    source_projection=projection,
+  ) == "github_app_manifest_identity_v1"
+  assert app_git._run(repo, "show", f"{source}:mobius.json").stdout == source_before
+  assert app_git.head_sha(repo, "HEAD") == source
+  assert not app_git.worktree_dirty(repo)
+
+  ref = app_git.record_pending_equivalent_change(
+    repo,
+    base_sha=base,
+    head_sha=reviewed,
+    source_sha=source,
+    diff_sha256=digest,
+    contribution_id="app-kanban-board-experience",
+    source_projection=projection,
+  )
+  assert ref
+  witness = app_git._read_equivalent_change(repo, ref)
+  assert witness is not None
+  assert witness.source_sha == source
+  assert witness.proof_mode == "github_app_manifest_identity_v1"
+  assert witness.source_projection == projection
+
+
+@pytest.mark.parametrize("drift", ["manifest-field", "reviewed-source"])
+def test_publication_manifest_projection_rejects_unreviewed_drift(
+  tmp_path, drift,
+):
+  repo, base, reviewed, source, digest = _publication_history(tmp_path)
+  if drift == "manifest-field":
+    (repo / "mobius.json").write_text(_publication_manifest(
+      author="local-owner",
+      homepage="https://github.com/local-owner/app-kanban",
+      version="9.9.9",
+    ))
+  else:
+    _write(repo, "export const board = 'different behavior'\n")
+  source = _commit_all(repo, f"unreviewed {drift}")
+
+  assert app_git.preview_pending_equivalent_change(
+    repo,
+    base_sha=base,
+    head_sha=reviewed,
+    source_sha=source,
+    diff_sha256=digest,
+    source_projection=_publication_projection(),
+  ) is None
+
+
+def test_publication_manifest_projection_is_fixed_to_canonical_repo_identity():
+  with pytest.raises(ValueError, match="does not match repository"):
+    app_git.publication_source_projection({
+      "adapter": "github_app_manifest_identity_v1",
+      "path": "mobius.json",
+      "fields": {
+        "author": "someone-else",
+        "homepage": "https://github.com/someone-else/app-kanban",
+      },
+    }, repo_slug="mobius-os/app-kanban")
+
+  with pytest.raises(ValueError, match="invalid publication source projection"):
+    app_git.publication_source_projection({
+      "adapter": "github_app_manifest_identity_v1",
+      "path": "index.jsx",
+      "fields": {
+        "author": "mobius-os",
+        "homepage": "https://github.com/mobius-os/app-kanban",
+      },
+    }, repo_slug="mobius-os/app-kanban")
+
+
+def test_publication_manifest_projection_remains_bound_through_continuity(
+  tmp_path,
+):
+  repo, base, reviewed, source, digest = _publication_history(tmp_path)
+  projection = _publication_projection()
+  (repo / "operations.js").write_text("export const sync = 'hardened'\n")
+  reviewed_through = _commit_all(repo, "reviewed sync hardening")
+  identity = "a" * 64
+
+  ref = app_git.record_prepublication_source_continuity(
+    repo,
+    base_sha=base,
+    head_sha=reviewed,
+    source_sha=source,
+    reviewed_through_sha=reviewed_through,
+    diff_sha256=digest,
+    contribution_id="app-kanban-board-experience",
+    review_identity_sha256=identity,
+    source_projection=projection,
+  )
+  assert ref
+  before = _read_only_storage_snapshot(repo)
+  witness = app_git.prepublication_source_continuity(
+    repo,
+    base_sha=base,
+    head_sha=reviewed,
+    source_sha=source,
+    current_source_sha=reviewed_through,
+    diff_sha256=digest,
+    contribution_id="app-kanban-board-experience",
+    review_identity_sha256=identity,
+    source_projection=projection,
+  )
+  assert witness is not None
+  assert witness.source_projection == projection
+  assert app_git.prepublication_source_continuity(
+    repo,
+    base_sha=base,
+    head_sha=reviewed,
+    source_sha=source,
+    current_source_sha=reviewed_through,
+    diff_sha256=digest,
+    contribution_id="app-kanban-board-experience",
+    review_identity_sha256=identity,
+  ) is None
+  assert _read_only_storage_snapshot(repo) == before
+
+def test_reviewed_source_continuity_accepts_only_the_agent_reviewed_advance(
+  tmp_path,
+):
+  """A private witness bridges overlap, then tolerates unrelated commits."""
+  repo = tmp_path / "app"
+  _install(repo, b'mode = "base"\n')
+  base = app_git.head_sha(repo, app_git.LOCAL_BRANCH)
+  _write(repo, 'mode = "reviewed"\n')
+  reviewed = app_git.commit_local(repo, "reviewed contribution")
+  assert reviewed
+  digest = _review_digest(repo, base, reviewed)
+
+  _write(repo, 'mode = "reviewed and improved"\n')
+  reviewed_through = app_git.commit_local(repo, "later reviewed refinement")
+  assert reviewed_through
+  identity = "1" * 64
+  witness_ref = app_git.record_prepublication_source_continuity(
+    repo,
+    base_sha=base,
+    head_sha=reviewed,
+    source_sha=reviewed,
+    reviewed_through_sha=reviewed_through,
+    diff_sha256=digest,
+    contribution_id="overlapping-review",
+    review_identity_sha256=identity,
+  )
+
+  assert witness_ref
+  assert app_git.record_prepublication_source_continuity(
+    repo,
+    base_sha=base,
+    head_sha=reviewed,
+    source_sha=reviewed,
+    reviewed_through_sha=reviewed_through,
+    diff_sha256=digest,
+    contribution_id="overlapping-review",
+    review_identity_sha256=identity,
+  ) == witness_ref, "an exact restart retry is idempotent"
+  witness = app_git.prepublication_source_continuity(
+    repo,
+    base_sha=base,
+    head_sha=reviewed,
+    source_sha=reviewed,
+    current_source_sha=reviewed_through,
+    diff_sha256=digest,
+    contribution_id="overlapping-review",
+    review_identity_sha256=identity,
+  )
+  assert witness is not None
+  assert witness.source_sha == reviewed
+  assert witness.reviewed_through_sha == reviewed_through
+
+  (repo / "unrelated.js").write_text("export const later = true\n")
+  unrelated = _commit_all(repo, "unrelated followup")
+  assert app_git.prepublication_source_continuity(
+    repo,
+    base_sha=base,
+    head_sha=reviewed,
+    source_sha=reviewed,
+    current_source_sha=unrelated,
+    diff_sha256=digest,
+    contribution_id="overlapping-review",
+    review_identity_sha256=identity,
+  ) is not None
+
+
+def test_reviewed_source_continuity_rejects_a_later_revert_or_rewind(tmp_path):
+  """A continuity witness never outlives another reviewed-path mutation."""
+  repo = tmp_path / "app"
+  _install(repo, b"base\n")
+  base = app_git.head_sha(repo, app_git.LOCAL_BRANCH)
+  _write(repo, "reviewed\n")
+  reviewed = app_git.commit_local(repo, "reviewed contribution")
+  assert reviewed
+  digest = _review_digest(repo, base, reviewed)
+  _write(repo, "reviewed followup\n")
+  reviewed_through = app_git.commit_local(repo, "reviewed followup")
+  assert reviewed_through
+  identity = "2" * 64
+  assert app_git.record_prepublication_source_continuity(
+    repo,
+    base_sha=base,
+    head_sha=reviewed,
+    source_sha=reviewed,
+    reviewed_through_sha=reviewed_through,
+    diff_sha256=digest,
+    contribution_id="revert-guard",
+    review_identity_sha256=identity,
+  )
+
+  _write(repo, "base\n")
+  reverted = app_git.commit_local(repo, "revert reviewed behavior")
+  assert reverted
+  assert app_git.prepublication_source_continuity(
+    repo,
+    base_sha=base,
+    head_sha=reviewed,
+    source_sha=reviewed,
+    current_source_sha=reverted,
+    diff_sha256=digest,
+    contribution_id="revert-guard",
+    review_identity_sha256=identity,
+  ) is None
+  assert app_git.prepublication_source_continuity(
+    repo,
+    base_sha=base,
+    head_sha=reviewed,
+    source_sha=reviewed,
+    current_source_sha=reviewed,
+    diff_sha256=digest,
+    contribution_id="revert-guard",
+    review_identity_sha256=identity,
+  ) is None, "rewinding behind reviewed-through loses the ancestry proof"
+
+
+def test_reviewed_source_continuity_is_bound_to_the_exact_review_identity(
+  tmp_path,
+):
+  """App-writable record drift cannot replay a host-created witness."""
+  repo = tmp_path / "app"
+  _install(repo, b"base\n")
+  base = app_git.head_sha(repo, app_git.LOCAL_BRANCH)
+  _write(repo, "reviewed\n")
+  reviewed = app_git.commit_local(repo, "reviewed contribution")
+  assert reviewed
+  digest = _review_digest(repo, base, reviewed)
+  _write(repo, "reviewed followup\n")
+  reviewed_through = app_git.commit_local(repo, "reviewed followup")
+  assert reviewed_through
+  assert app_git.record_prepublication_source_continuity(
+    repo,
+    base_sha=base,
+    head_sha=reviewed,
+    source_sha=reviewed,
+    reviewed_through_sha=reviewed_through,
+    diff_sha256=digest,
+    contribution_id="identity-bound",
+    review_identity_sha256="3" * 64,
+  )
+
+  assert app_git.prepublication_source_continuity(
+    repo,
+    base_sha=base,
+    head_sha=reviewed,
+    source_sha=reviewed,
+    current_source_sha=reviewed_through,
+    diff_sha256=digest,
+    contribution_id="identity-bound",
+    review_identity_sha256="4" * 64,
+  ) is None
+
+
+def test_reviewed_source_continuity_rejects_revert_then_reapply_history(
+  tmp_path,
+):
+  """Every later commit edge matters even when the endpoint tree matches."""
+  repo = tmp_path / "app"
+  _install(repo, b"base\n")
+  base = app_git.head_sha(repo, app_git.LOCAL_BRANCH)
+  _write(repo, "reviewed\n")
+  reviewed = app_git.commit_local(repo, "reviewed contribution")
+  assert reviewed
+  digest = _review_digest(repo, base, reviewed)
+  _write(repo, "reviewed refinement\n")
+  reviewed_through = app_git.commit_local(repo, "reviewed refinement")
+  assert reviewed_through
+  identity = "5" * 64
+  assert app_git.record_prepublication_source_continuity(
+    repo,
+    base_sha=base,
+    head_sha=reviewed,
+    source_sha=reviewed,
+    reviewed_through_sha=reviewed_through,
+    diff_sha256=digest,
+    contribution_id="reapply-guard",
+    review_identity_sha256=identity,
+  )
+
+  _write(repo, "reviewed\n")
+  assert app_git.commit_local(repo, "revert refinement")
+  _write(repo, "reviewed refinement\n")
+  reapplied = app_git.commit_local(repo, "reapply refinement")
+  assert reapplied
+  assert app_git.endpoint_diff_paths(
+    repo, reviewed_through, reapplied,
+  ) == set(), "the endpoint-only check deliberately cannot see this history"
+  assert app_git.prepublication_source_continuity(
+    repo,
+    base_sha=base,
+    head_sha=reviewed,
+    source_sha=reviewed,
+    current_source_sha=reapplied,
+    diff_sha256=digest,
+    contribution_id="reapply-guard",
+    review_identity_sha256=identity,
+  ) is None
+
+
+def test_reviewed_source_continuity_rejects_reviewed_path_on_merge_parent(
+  tmp_path,
+):
+  """A merge cannot hide a guarded path changed against either parent."""
+  repo = tmp_path / "app"
+  _install(repo, b"base\n")
+  base = app_git.head_sha(repo, app_git.LOCAL_BRANCH)
+  _write(repo, "reviewed\n")
+  reviewed = app_git.commit_local(repo, "reviewed contribution")
+  assert reviewed
+  digest = _review_digest(repo, base, reviewed)
+  _write(repo, "reviewed refinement\n")
+  reviewed_through = app_git.commit_local(repo, "reviewed refinement")
+  assert reviewed_through
+  identity = "6" * 64
+  assert app_git.record_prepublication_source_continuity(
+    repo,
+    base_sha=base,
+    head_sha=reviewed,
+    source_sha=reviewed,
+    reviewed_through_sha=reviewed_through,
+    diff_sha256=digest,
+    contribution_id="merge-parent-guard",
+    review_identity_sha256=identity,
+  )
+
+  reviewed_tree = subprocess.check_output(
+    ["git", "rev-parse", f"{reviewed_through}^{{tree}}"],
+    cwd=repo,
+    text=True,
+  ).strip()
+  subprocess.run(
+    ["git", "config", "user.name", "Test Owner"], cwd=repo, check=True,
+  )
+  subprocess.run(
+    ["git", "config", "user.email", "owner@example.com"],
+    cwd=repo,
+    check=True,
+  )
+  merged = subprocess.check_output(
+    [
+      "git", "commit-tree", reviewed_tree,
+      "-p", reviewed_through,
+      "-p", base,
+      "-m", "merge unchanged first parent",
+    ],
+    cwd=repo,
+    text=True,
+  ).strip()
+  subprocess.run(
+    ["git", "update-ref", f"refs/heads/{app_git.LOCAL_BRANCH}", merged],
+    cwd=repo,
+    check=True,
+  )
+  subprocess.run(["git", "reset", "--hard", merged], cwd=repo, check=True,
+                 capture_output=True)
+  assert app_git.endpoint_diff_paths(
+    repo, reviewed_through, merged,
+  ) == set(), "the merge tree is identical to its first parent"
+  assert app_git.prepublication_source_continuity(
+    repo,
+    base_sha=base,
+    head_sha=reviewed,
+    source_sha=reviewed,
+    current_source_sha=merged,
+    diff_sha256=digest,
+    contribution_id="merge-parent-guard",
+    review_identity_sha256=identity,
+  ) is None
 
 
 def test_landed_equivalent_change_rebases_later_local_edit_without_agent(
@@ -1291,38 +1934,56 @@ def test_explicit_base_materializes_delete_modify_conflict(tmp_path):
   assert not (repo / "retired.js").exists()
 
 
-def test_agent_resolved_local_projection_becomes_a_durable_shared_base(
+def test_clean_local_projection_uses_exact_tree_as_durable_shared_base(
   tmp_path,
 ):
-  """A reviewed PR projected from a busier local base is recognized later."""
+  """A clean reviewed projection from a busier local base is recognized."""
   repo = tmp_path / "app"
   app_git.ensure_repo(repo)
   app_git.record_upstream(
     repo,
-    {"index.jsx": b"base\n", "helper.js": b"helper base\n"},
+    {
+      "index.jsx": (
+        b'context = "base"\nkeep_a = true\nkeep_b = true\nkeep_c = true\n'
+        b'behavior = "base"\n'
+      ),
+      "helper.js": b"helper base\n",
+    },
     "https://x/mobius.json", "1.0.0",
   )
   app_git.align_local_to_upstream(repo)
   base = app_git.head_sha(repo, app_git.UPSTREAM_BRANCH)
 
   # The clean review projection on current upstream changes these two paths.
-  _write(repo, "reviewed\n")
+  _write(
+    repo,
+    'context = "base"\nkeep_a = true\nkeep_b = true\nkeep_c = true\n'
+    'behavior = "reviewed"\n',
+  )
   (repo / "helper.js").write_text("helper reviewed\n")
   reviewed = app_git.commit_local(repo, "review projection")
   assert reviewed
   digest = _review_digest(repo, base, reviewed)
 
-  # Live source had a conflicting local context first. Its integration commit
-  # changes the same reviewed path set, matches Git's automatic result on every
-  # non-conflict entry, and owns the two explicit conflict resolutions.
+  # Live source had disjoint local context first. Its integration commit changes
+  # exactly the reviewed path set and equals Git's clean projection byte for
+  # byte; no ambiguous conflict resolution is inferred.
   app_git._run(repo, "reset", "--hard", base)
-  _write(repo, "local context\n")
+  _write(
+    repo,
+    'context = "local"\nkeep_a = true\nkeep_b = true\nkeep_c = true\n'
+    'behavior = "base"\n',
+  )
   assert app_git.commit_local(repo, "pre-existing local context")
-  _write(repo, "local context + reviewed behavior\n")
+  _write(
+    repo,
+    'context = "local"\nkeep_a = true\nkeep_b = true\nkeep_c = true\n'
+    'behavior = "reviewed"\n',
+  )
   (repo / "helper.js").write_text("helper reviewed\n")
   source = app_git.commit_local(repo, "integrate reviewed behavior locally")
   assert source
-  assert not app_git._change_is_subsumed(repo, base, reviewed, source)
+  assert app_git._change_is_subsumed(repo, base, reviewed, source)
 
   pending = app_git.record_pending_equivalent_change(
     repo,
@@ -1330,17 +1991,20 @@ def test_agent_resolved_local_projection_becomes_a_durable_shared_base(
     head_sha=reviewed,
     source_sha=source,
     diff_sha256=digest,
-    contribution_id="resolved-local-projection",
+    contribution_id="clean-local-projection",
   )
   assert pending
   recorded = app_git._read_equivalent_change(repo, pending)
   assert recorded is not None
-  assert recorded.proof_mode == "resolved_projection"
+  assert recorded.proof_mode == "exact_tree"
 
   upstream = app_git.record_upstream(
     repo,
     {
-      "index.jsx": b"reviewed\n",
+      "index.jsx": (
+        b'context = "base"\nkeep_a = true\nkeep_b = true\nkeep_c = true\n'
+        b'behavior = "reviewed"\n'
+      ),
       "helper.js": b"helper reviewed\n",
       "upstream.js": b"release\n",
     },
@@ -1353,7 +2017,10 @@ def test_agent_resolved_local_projection_becomes_a_durable_shared_base(
 
   assert result.status == "clean"
   tree = app_git.read_merged_tree(repo, result.merged_tree_oid)
-  assert tree["index.jsx"] == b"local context + reviewed behavior\n"
+  assert tree["index.jsx"] == (
+    b'context = "local"\nkeep_a = true\nkeep_b = true\nkeep_c = true\n'
+    b'behavior = "reviewed"\n'
+  )
   assert tree["helper.js"] == b"helper reviewed\n"
   assert tree["upstream.js"] == b"release\n"
 
@@ -1382,6 +2049,71 @@ def test_all_conflict_projection_is_too_ambiguous_to_record(tmp_path):
     source_sha=source,
     diff_sha256=digest,
     contribution_id="all-conflict-is-ambiguous",
+  ) is None
+
+
+def test_legacy_resolved_projection_receipt_is_not_trusted(tmp_path):
+  """An old ambiguous proof label cannot bypass current byte verification."""
+  repo = tmp_path / "app"
+  _install(repo, b"base\n")
+  base = app_git.head_sha(repo, app_git.UPSTREAM_BRANCH)
+  _write(repo, "reviewed\n")
+  reviewed = app_git.commit_local(repo, "review projection")
+  assert reviewed
+  digest = _review_digest(repo, base, reviewed)
+
+  ref = app_git._write_equivalence_anchor(
+    repo,
+    prefix=app_git._EQUIVALENCE_PENDING_PREFIX,
+    base_sha=base,
+    head_sha=reviewed,
+    source_sha=reviewed,
+    diff_sha256=digest,
+    contribution_id="legacy-ambiguous-proof",
+    upstream_sha=None,
+    proof_mode="resolved_projection",
+  )
+
+  assert app_git._read_equivalent_change(repo, ref) is None
+
+
+def test_matching_trivial_path_cannot_hide_dropped_conflicting_review(tmp_path):
+  """Every reviewed path needs byte proof; one easy match cannot bless loss."""
+  repo = tmp_path / "app"
+  app_git.ensure_repo(repo)
+  app_git.record_upstream(
+    repo,
+    {
+      "critical.js": b'mode = "base"\n',
+      "trivial.js": b'flag = "base"\n',
+    },
+    "https://x/mobius.json", "1.0.0",
+  )
+  app_git.align_local_to_upstream(repo)
+  base = app_git.head_sha(repo, app_git.UPSTREAM_BRANCH)
+
+  (repo / "critical.js").write_text('mode = "reviewed safety"\n')
+  (repo / "trivial.js").write_text('flag = "reviewed"\n')
+  reviewed = app_git.commit_local(repo, "review both paths")
+  assert reviewed
+  digest = _review_digest(repo, base, reviewed)
+
+  app_git._run(repo, "reset", "--hard", base)
+  (repo / "critical.js").write_text('mode = "local context"\n')
+  assert app_git.commit_local(repo, "pre-existing critical context")
+  (repo / "critical.js").write_text('mode = "local only; review dropped"\n')
+  (repo / "trivial.js").write_text('flag = "reviewed"\n')
+  source = app_git.commit_local(repo, "claim incomplete local projection")
+  assert source
+  assert not app_git._change_is_subsumed(repo, base, reviewed, source)
+
+  assert app_git.record_pending_equivalent_change(
+    repo,
+    base_sha=base,
+    head_sha=reviewed,
+    source_sha=source,
+    diff_sha256=digest,
+    contribution_id="critical-review-was-dropped",
   ) is None
 
 
@@ -2818,3 +3550,591 @@ def test_adjacent_disjoint_source_edit_bails_safely(tmp_path):
   merge = app_git.merge_upstream(repo)
   assert merge.status == "conflict"
   assert app_git.resolve_version_only_conflict(repo, merge.conflict_paths) is None
+
+
+# ── Linear overlay: trailers, units, and the invariant projection ─────────────
+
+def test_overlay_commits_read_trailers_and_group_units(tmp_path):
+  repo = tmp_path / "app"
+  _install(repo, b"line A\nline B\n")
+  base = app_git.head_sha(repo, app_git.UPSTREAM_BRANCH)
+  _write(repo, "line A LOCAL\nline B\n")
+  app_git.commit_local(repo, app_git.overlay_message(
+    "keep line A local", unit="line-a", disposition="local-only",
+  ))
+  _write(repo, "line A LOCAL\nline B PENDING\n")
+  app_git.commit_local(repo, app_git.overlay_message(
+    "send line B upstream", unit="line-b", disposition="pending",
+    record_id="line-b-20260903", body="Reviewed in Contribute.",
+  ))
+  _write(repo, "line A LOCAL\nline B PENDING\nline C\n")
+  app_git.commit_local(repo, "an untagged edit")
+
+  commits = app_git.overlay_commits(repo, base, app_git.LOCAL_BRANCH)
+
+  assert [(c.subject, c.unit, c.disposition, c.record_id) for c in commits] == [
+    ("keep line A local", "line-a", "local-only", None),
+    ("send line B upstream", "line-b", "pending", "line-b-20260903"),
+    ("an untagged edit", app_git.OVERLAY_UNSORTED_UNIT, "wip", None),
+  ]
+  units = app_git.overlay_units(commits)
+  assert [(u.id, u.disposition, u.record_id, len(u.commits)) for u in units] == [
+    ("line-a", "local-only", None, 1),
+    ("line-b", "pending", "line-b-20260903", 1),
+    (app_git.OVERLAY_UNSORTED_UNIT, "wip", None, 1),
+  ]
+  described = app_git.describe_overlay(repo, base, app_git.LOCAL_BRANCH)
+  assert described["linear"] is True
+  assert described["commits"] == 3
+  assert described["unsorted_commits"] == 1
+  assert described["units"][0] == {
+    "id": "line-a", "disposition": "local-only", "record_id": None,
+    "commits": 1, "subject": "keep line A local",
+  }
+
+
+def test_overlay_rejects_merge_commits_and_bad_trailers(tmp_path):
+  repo = tmp_path / "app"
+  _install(repo, b"line A\n")
+  base = app_git.head_sha(repo, app_git.UPSTREAM_BRANCH)
+  _write(repo, "line A LOCAL\n")
+  app_git.commit_local(repo, "local")
+  app_git._run(repo, "branch", "side", base)
+  side_tree = app_git._run(repo, "rev-parse", f"{base}^{{tree}}").stdout.strip()
+  side = app_git._run(
+    repo, "commit-tree", side_tree, "-p", base, "-m", "side",
+  ).stdout.strip()
+  app_git._run(repo, "merge", "--no-ff", "-q", "-m", "merge side", side)
+
+  with pytest.raises(app_git.OverlayNotLinear):
+    app_git.overlay_commits(repo, base, app_git.LOCAL_BRANCH)
+  assert app_git.describe_overlay(repo, base, app_git.LOCAL_BRANCH)["linear"] is False
+  with pytest.raises(ValueError):
+    app_git.overlay_trailers("bad unit!", "local-only")
+  with pytest.raises(ValueError):
+    app_git.overlay_trailers("unit", "maybe")
+  # A pending unit must name its Contribute record; nothing else may.
+  with pytest.raises(ValueError):
+    app_git.overlay_trailers("unit", "pending")
+  with pytest.raises(ValueError):
+    app_git.overlay_trailers("unit", "local-only", record_id="rec-1")
+  assert "Mobius-Record: rec-1" in app_git.overlay_trailers(
+    "unit", "pending", record_id="rec-1",
+  )
+
+
+def test_overlay_parse_downgrades_a_pending_commit_without_a_record(tmp_path):
+  repo = tmp_path / "app"
+  _install(repo, b"line A\n")
+  base = app_git.head_sha(repo, app_git.UPSTREAM_BRANCH)
+  _write(repo, "line A LOCAL\n")
+  app_git.commit_local(
+    repo,
+    "hand-written\n\nMobius-Overlay-Unit: unit-x\nMobius-Disposition: pending\n",
+  )
+  _write(repo, "line A LOCAL\nline B\n")
+  app_git.commit_local(
+    repo,
+    "hand-written too\n\nMobius-Overlay-Unit: unit-y\n"
+    "Mobius-Disposition: local-only\nMobius-Record: stray\n",
+  )
+
+  commits = app_git.overlay_commits(repo, base, app_git.LOCAL_BRANCH)
+
+  assert [(c.unit, c.disposition, c.record_id) for c in commits] == [
+    ("unit-x", "wip", None),
+    ("unit-y", "local-only", None),
+  ]
+
+
+def _source_resolution_history(tmp_path):
+  repo = tmp_path / "source-resolution"
+  _install(repo, b"mode = 'base'\n")
+  base = app_git.head_sha(repo, app_git.LOCAL_BRANCH)
+  app_git._run(repo, "checkout", "-q", "-b", "review", base)
+  _write(repo, "mode = 'published form'\n")
+  (repo / "shared.js").write_text("reviewed nonconflicting addition\n")
+  head = _commit_all(repo, "reviewed publication")
+  digest = _review_digest(repo, base, head)
+  app_git._run(repo, "checkout", "-q", app_git.LOCAL_BRANCH)
+  _write(repo, "mode = 'local adapted form'\n")
+  (repo / "shared.js").write_text("reviewed nonconflicting addition\n")
+  (repo / "local-only.js").write_text("unrelated local feature\n")
+  source = _commit_all(repo, "local adaptation and unrelated feature")
+  return repo, base, head, source, digest
+
+
+def _record_source_resolution(repo, base, head, source, digest, **overrides):
+  resolution = app_git.preview_source_resolution(
+    repo, base_sha=base, head_sha=head, source_sha=source, diff_sha256=digest,
+  )
+  assert resolution is not None
+  arguments = dict(
+    base_sha=base, head_sha=head, source_sha=source,
+    reviewed_through_sha=source, diff_sha256=digest,
+    contribution_id="adapted-review", review_identity_sha256="a" * 64,
+    source_resolution_sha256=resolution.diff_sha256,
+  )
+  arguments.update(overrides)
+  return app_git.record_prepublication_source_continuity(repo, **arguments)
+
+
+def _read_source_resolution(repo, base, head, source, digest, **overrides):
+  arguments = dict(
+    base_sha=base, head_sha=head, source_sha=source,
+    current_source_sha="HEAD", diff_sha256=digest,
+    contribution_id="adapted-review", review_identity_sha256="a" * 64,
+  )
+  arguments.update(overrides)
+  return app_git.prepublication_source_continuity(repo, **arguments)
+
+
+def test_source_resolution_preview_is_explicit_complete_and_read_only(
+  tmp_path, monkeypatch,
+):
+  repo, base, head, source, digest = _source_resolution_history(tmp_path)
+  before = _read_only_storage_snapshot(repo)
+  commands = _forbid_history_imports(monkeypatch)
+  assert app_git.preview_pending_equivalent_change(
+    repo, base_sha=base, head_sha=head, source_sha=source, diff_sha256=digest,
+  ) is None
+  resolution = app_git.preview_source_resolution(
+    repo, base_sha=base, head_sha=head, source_sha=source, diff_sha256=digest,
+  )
+  assert resolution is not None
+  assert resolution.conflict_paths == ("index.jsx",)
+  assert b"local adapted form" in resolution.diff
+  assert b"published form" in resolution.diff
+  assert b"local-only.js" not in resolution.diff
+  assert hashlib.sha256(resolution.diff).hexdigest() == resolution.diff_sha256
+  assert all(read_only for _args, read_only in commands)
+  assert _read_only_storage_snapshot(repo) == before
+  # Displaying evidence never writes a source witness or bypasses exact mode.
+  assert app_git.record_pending_equivalent_change(
+    repo, base_sha=base, head_sha=head, source_sha=source, diff_sha256=digest,
+    contribution_id="adapted-review",
+  ) is None
+
+
+def test_source_resolution_preview_separate_review_uses_read_only_alternates(
+  tmp_path, monkeypatch,
+):
+  repo, base, head, source, digest = _source_resolution_history(tmp_path)
+  review = tmp_path / "separate-review"
+  subprocess.run(
+    ["git", "clone", "-q", str(repo), str(review)], check=True,
+    env=app_git._git_env(review),
+  )
+  before = {path: _read_only_storage_snapshot(path) for path in (repo, review)}
+  commands = _forbid_history_imports(monkeypatch)
+  assert app_git.preview_source_resolution(
+    repo, base_sha=base, head_sha=head, source_sha=source,
+    diff_sha256=digest, review_source_dir=review,
+  ) is not None
+  assert all(read_only for _args, read_only in commands)
+  assert {path: _read_only_storage_snapshot(path) for path in (repo, review)} == before
+
+
+@pytest.mark.parametrize("failure", ["missing-nonconflict", "bad-diff", "no-conflict"])
+def test_source_resolution_requires_real_conflicts_and_all_other_reviewed_bytes(
+  tmp_path, failure,
+):
+  repo, base, head, source, digest = _source_resolution_history(tmp_path)
+  if failure == "missing-nonconflict":
+    (repo / "shared.js").unlink()
+    source = _commit_all(repo, "missing reviewed addition")
+  elif failure == "bad-diff":
+    digest = "0" * 64
+  else:
+    source = head
+  assert app_git.preview_source_resolution(
+    repo, base_sha=base, head_sha=head, source_sha=source, diff_sha256=digest,
+  ) is None
+
+
+@pytest.mark.parametrize("override", [
+  {"source_resolution_sha256": "0" * 64},
+  {"source_resolution_sha256": "not-a-digest"},
+  {"source_resolution_sha256": None},
+  {"diff_sha256": "0" * 64},
+])
+def test_source_resolution_witness_rejects_unreviewed_or_forged_evidence(tmp_path, override):
+  repo, base, head, source, digest = _source_resolution_history(tmp_path)
+  assert _record_source_resolution(repo, base, head, source, digest, **override) is None
+
+
+def test_source_resolution_cannot_be_combined_with_manifest_projection(tmp_path):
+  repo, base, head, source, digest = _source_resolution_history(tmp_path)
+  assert _record_source_resolution(
+    repo, base, head, source, digest, source_projection=_publication_projection(),
+  ) is None
+
+
+def test_source_resolution_witness_survives_pack_refs_and_unrelated_advance(tmp_path):
+  repo, base, head, source, digest = _source_resolution_history(tmp_path)
+  ref = _record_source_resolution(repo, base, head, source, digest)
+  assert ref is not None
+  assert _record_source_resolution(repo, base, head, source, digest) == ref
+  app_git._run(repo, "pack-refs", "--all", "--prune")
+  (repo / "local-only.js").write_text("later unrelated feature\n")
+  _commit_all(repo, "unrelated source advance")
+  before = _read_only_storage_snapshot(repo)
+  witness = _read_source_resolution(repo, base, head, source, digest)
+  assert witness is not None
+  assert witness.source_resolution_sha256 is not None
+  assert witness.source_sha == witness.reviewed_through_sha == source
+  assert _read_only_storage_snapshot(repo) == before
+  assert _read_source_resolution(
+    repo, base, head, source, digest, review_identity_sha256="b" * 64,
+  ) is None
+
+
+@pytest.mark.parametrize("later", ["edit", "revert-reapply", "merge-parent"])
+def test_source_resolution_later_reviewed_path_history_invalidates_publication(
+  tmp_path, later,
+):
+  repo, base, head, source, digest = _source_resolution_history(tmp_path)
+  assert _record_source_resolution(repo, base, head, source, digest)
+  witness = _read_source_resolution(repo, base, head, source, digest)
+  assert witness is not None
+  if later == "merge-parent":
+    app_git._run(repo, "checkout", "-q", "-b", "side-review", source)
+    _write(repo, "mode = 'side edit'\n")
+    side = _commit_all(repo, "side parent changed reviewed path")
+    app_git._run(repo, "checkout", "-q", app_git.LOCAL_BRANCH)
+    # Even a merge whose result restores the accepted tree is a new review edge.
+    tree = app_git._tree_oid(repo, source)
+    merged = app_git._run(
+      repo, "commit-tree", tree, "-p", source, "-p", side,
+      "-m", "merge with resolved reviewed path",
+    ).stdout.strip()
+    app_git._run(repo, "reset", "--hard", merged)
+  else:
+    _write(repo, "mode = 'later edit'\n")
+    _commit_all(repo, "later edit")
+    if later == "revert-reapply":
+      _write(repo, "mode = 'local adapted form'\n")
+      _commit_all(repo, "reapply reviewed state")
+  assert _read_source_resolution(repo, base, head, source, digest) is None
+  assert app_git.record_reviewed_source_equivalence(repo, witness=witness) is None
+
+
+def test_source_resolution_revalidates_immutable_witness_payload(tmp_path):
+  repo, base, head, source, digest = _source_resolution_history(tmp_path)
+  ref = _record_source_resolution(repo, base, head, source, digest)
+  assert ref
+  metadata = json.loads(app_git._run(repo, "show", "-s", "--format=%B", ref).stdout)
+  metadata["source_resolution_sha256"] = "0" * 64
+  forged = app_git._run(
+    repo, "commit-tree", app_git._tree_oid(repo, head), "-p", base,
+    "-m", json.dumps(metadata),
+  ).stdout.strip()
+  app_git._run(repo, "update-ref", ref, forged)
+  assert _read_source_resolution(repo, base, head, source, digest) is None
+
+
+@pytest.mark.parametrize("later", ["none", "edit", "revert", "revert-reapply"])
+def test_landed_source_resolution_preserves_adapted_overlay_and_later_intent(
+  tmp_path, later,
+):
+  repo, base, head, source, digest = _source_resolution_history(tmp_path)
+  assert _record_source_resolution(repo, base, head, source, digest)
+  witness = _read_source_resolution(repo, base, head, source, digest)
+  pending = app_git.record_reviewed_source_equivalence(repo, witness=witness)
+  assert pending
+  evidence = app_git._read_equivalent_change(repo, pending)
+  assert evidence.proof_mode == "reviewed_source_resolution"
+  assert evidence.source_sha == source
+  assert evidence.source_resolution_sha256 == witness.source_resolution_sha256
+  # Continuity cleanup must not destroy publication evidence.
+  app_git.discard_prepublication_source_continuity(repo, "adapted-review")
+  expected = b"mode = 'local adapted form'\n"
+  if later != "none":
+    expected = b"mode = 'later intent'\n" if later == "edit" else b"mode = 'base'\n"
+    _write(repo, expected.decode())
+    _commit_all(repo, "later local intent")
+    if later == "revert-reapply":
+      expected = b"mode = 'local adapted form'\n"
+      _write(repo, expected.decode())
+      _commit_all(repo, "restore adapted intent")
+  upstream = app_git.record_upstream(
+    repo, {
+      "index.jsx": b"mode = 'published form'\n",
+      "shared.js": b"reviewed nonconflicting addition\n",
+      "upstream-only.js": b"new upstream feature\n",
+    }, "https://x/mobius.json", "2.0.0",
+  )
+  assert app_git.merge_with_equivalent_changes(repo, "main", "upstream") is None
+  landed = app_git.mark_equivalent_change_landed(repo, digest, upstream_sha=upstream)
+  assert landed
+  evidence = app_git._read_equivalent_change(repo, landed)
+  assert evidence.source_resolution_sha256 == witness.source_resolution_sha256
+  assert evidence.proof_mode == "reviewed_source_resolution"
+  result = app_git.merge_with_equivalent_changes(repo, "main", "upstream")
+  assert result is not None and result.status == "clean"
+  tree = app_git.read_merged_tree(repo, result.merged_tree_oid)
+  assert tree["index.jsx"] == expected
+  assert tree["local-only.js"] == b"unrelated local feature\n"
+  assert tree["upstream-only.js"] == b"new upstream feature\n"
+  assert tree["shared.js"] == b"reviewed nonconflicting addition\n"
+
+
+def test_overlay_replay_consumes_only_reviewed_source_resolution_continuation(
+  tmp_path,
+):
+  """A reviewed continuation after an adaptation must not force a resolver.
+
+  Contribute can finish reviewing the source after another commit completes
+  the accepted adaptation. The witness then names that later tip, while the
+  local remainder still belongs to the earlier overlay commit. The semantic
+  replay consumes only that reviewed-path continuation, not unrelated units.
+  """
+  repo, base, head, adapted, digest = _source_resolution_history(tmp_path)
+  (repo / "shared.js").write_text(
+    "reviewed nonconflicting addition\nlocal retained detail\n",
+  )
+  later = _commit_all(repo, "complete reviewed adaptation")
+  later_resolution = app_git.preview_source_resolution(
+    repo, base_sha=base, head_sha=head, source_sha=later,
+    diff_sha256=digest,
+  )
+  assert later_resolution is not None
+  assert app_git.record_prepublication_source_continuity(
+    repo,
+    base_sha=base,
+    head_sha=head,
+    source_sha=adapted,
+    reviewed_through_sha=later,
+    diff_sha256=digest,
+    contribution_id="adapted-review",
+    review_identity_sha256="a" * 64,
+    source_resolution_sha256=later_resolution.diff_sha256,
+  )
+  witness = app_git.prepublication_source_continuity(
+    repo,
+    base_sha=base,
+    head_sha=head,
+    source_sha=adapted,
+    current_source_sha=later,
+    diff_sha256=digest,
+    contribution_id="adapted-review",
+    review_identity_sha256="a" * 64,
+  )
+  assert witness is not None
+  assert app_git.record_reviewed_source_equivalence(repo, witness=witness)
+  upstream = app_git.record_upstream(
+    repo,
+    {
+      "index.jsx": b"mode = 'published form'\n",
+      "shared.js": b"reviewed nonconflicting addition\n",
+      "upstream-only.js": b"new upstream feature\n",
+    },
+    "https://x/mobius.json",
+    "2.0.0",
+  )
+  assert app_git.mark_equivalent_change_landed(
+    repo, digest, upstream_sha=upstream,
+  )
+
+  commits = app_git.overlay_commits(repo, base, later)
+  replay = app_git.replay_overlay(
+    repo,
+    commits=commits,
+    onto=upstream,
+    worktree=tmp_path / "replay",
+  )
+
+  assert replay.status == "clean"
+  assert [old for old, _new in replay.replayed] == [adapted]
+  assert replay.dropped == (later,)
+  tree = app_git.read_merged_tree(repo, replay.tip)
+  assert tree["index.jsx"] == b"mode = 'local adapted form'\n"
+  assert tree["shared.js"] == (
+    b"reviewed nonconflicting addition\nlocal retained detail\n"
+  )
+  assert tree["local-only.js"] == b"unrelated local feature\n"
+  assert tree["upstream-only.js"] == b"new upstream feature\n"
+  assert app_git._run(
+    repo, "log", "--format=%s", "--reverse", f"{upstream}..{replay.tip}",
+  ).stdout.splitlines() == [
+    "local adaptation and unrelated feature",
+  ]
+
+
+@pytest.mark.parametrize("field,value", [
+  ("source_resolution_sha256", "0" * 64),
+  ("source_resolution_captured_sha", "0" * 40),
+  ("proof_mode", "exact_tree"),
+])
+def test_source_resolution_pending_evidence_is_revalidated_before_landing(
+  tmp_path, field, value,
+):
+  repo, base, head, source, digest = _source_resolution_history(tmp_path)
+  assert _record_source_resolution(repo, base, head, source, digest)
+  witness = _read_source_resolution(repo, base, head, source, digest)
+  pending = app_git.record_reviewed_source_equivalence(repo, witness=witness)
+  assert pending
+  metadata = json.loads(app_git._run(repo, "show", "-s", "--format=%B", pending).stdout)
+  metadata[field] = value
+  forged = app_git._run(
+    repo, "commit-tree", app_git._tree_oid(repo, head), "-p", base,
+    "-m", json.dumps(metadata),
+  ).stdout.strip()
+  app_git._run(repo, "update-ref", pending, forged)
+  assert app_git._read_equivalent_change(repo, pending) is None
+  assert app_git.mark_equivalent_change_landed(repo, digest) is None
+
+
+def test_source_resolution_rewind_and_replay_require_a_fresh_source_review(tmp_path):
+  repo, base, head, source, digest = _source_resolution_history(tmp_path)
+  assert _record_source_resolution(repo, base, head, source, digest)
+  witness = _read_source_resolution(repo, base, head, source, digest)
+  assert app_git.record_reviewed_source_equivalence(repo, witness=witness)
+  # A replay can preserve all bytes while dropping the attested source ancestry.
+  replay = app_git._run(
+    repo, "commit-tree", app_git._tree_oid(repo, source), "-p", base,
+    "-m", "source replay with rewritten ancestry",
+  ).stdout.strip()
+  assert app_git.carry_equivalent_change_sources(repo, source, replay) == 0
+  app_git._run(repo, "reset", "--hard", replay)
+  assert _read_source_resolution(repo, base, head, source, digest) is None
+  assert app_git.record_reviewed_source_equivalence(repo, witness=witness) is None
+
+
+def test_source_resolution_binds_the_reviewed_advance_not_the_old_source_snapshot(tmp_path):
+  repo, base, head, source, digest = _source_resolution_history(tmp_path)
+  assert _record_source_resolution(
+    repo, base, head, source, digest, source_sha=base,
+  )
+  witness = _read_source_resolution(repo, base, head, base, digest)
+  assert witness is not None
+  assert witness.source_sha == base
+  assert witness.reviewed_through_sha == source
+  pending = app_git.record_reviewed_source_equivalence(repo, witness=witness)
+  assert pending
+  assert app_git._read_equivalent_change(repo, pending).source_sha == source
+
+
+def test_source_resolution_conflict_paths_preserve_whitespace_and_newlines(tmp_path):
+  repo = tmp_path / "unusual-path"
+  _install(repo, b"unchanged\n")
+  path = " file\twith\nspaces.jsx "
+  (repo / path).write_text("base\n")
+  base = _commit_all(repo, "base with unusual path")
+  app_git._run(repo, "checkout", "-q", "-b", "review-unusual", base)
+  (repo / path).write_text("reviewed form\n")
+  head = _commit_all(repo, "reviewed unusual path")
+  app_git._run(repo, "checkout", "-q", app_git.LOCAL_BRANCH)
+  (repo / path).write_text("adapted form\n")
+  source = _commit_all(repo, "local unusual path")
+  resolution = app_git.preview_source_resolution(
+    repo, base_sha=base, head_sha=head, source_sha=source,
+    diff_sha256=_review_digest(repo, base, head),
+  )
+  assert resolution is not None
+  assert resolution.conflict_paths == (path,)
+
+
+def test_landed_source_resolution_survives_review_commit_garbage_collection(tmp_path):
+  repo, base, head, source, digest = _source_resolution_history(tmp_path)
+  assert _record_source_resolution(repo, base, head, source, digest)
+  witness = _read_source_resolution(repo, base, head, source, digest)
+  pending = app_git.record_reviewed_source_equivalence(repo, witness=witness)
+  assert pending
+  app_git.discard_prepublication_source_continuity(repo, "adapted-review")
+  app_git._run(repo, "branch", "-D", "review")
+  app_git._run(repo, "reflog", "expire", "--expire=now", "--all")
+  app_git._run(repo, "gc", "--prune=now")
+  assert app_git._resolve_commit(repo, head) is None
+  # The publication anchor's tree owns every byte needed for the proof.
+  assert app_git._read_equivalent_change(repo, pending) is not None
+  upstream = app_git.record_upstream(
+    repo, {
+      "index.jsx": b"mode = 'published form'\n",
+      "shared.js": b"reviewed nonconflicting addition\n",
+    }, "https://x/mobius.json", "2.0.0",
+  )
+  assert app_git.mark_equivalent_change_landed(repo, digest, upstream_sha=upstream)
+  result = app_git.merge_with_equivalent_changes(repo, "main", "upstream")
+  assert result is not None and result.status == "clean"
+  assert app_git.read_merged_tree(repo, result.merged_tree_oid)["index.jsx"] == (
+    b"mode = 'local adapted form'\n"
+  )
+
+
+def test_landed_source_resolution_handoff_binds_captured_and_reviewed_source(tmp_path):
+  repo, base, head, source, digest = _source_resolution_history(tmp_path)
+  assert _record_source_resolution(repo, base, head, source, digest, source_sha=base)
+  witness = _read_source_resolution(repo, base, head, base, digest)
+  assert app_git.record_reviewed_source_equivalence(repo, witness=witness)
+  upstream = app_git.record_upstream(
+    repo, {
+      "index.jsx": b"mode = 'published form'\n",
+      "shared.js": b"reviewed nonconflicting addition\n",
+    }, "https://x/mobius.json", "2.0.0",
+  )
+  assert app_git.mark_equivalent_change_landed(repo, digest, upstream_sha=upstream)
+  arguments = dict(
+    diff_sha256=digest, contribution_id="adapted-review", base_sha=base,
+    head_sha=head, source_sha=base, upstream_sha=upstream,
+  )
+  assert app_git.verify_landed_equivalent_change(repo, **arguments)
+  # Neither the reviewed source itself nor another ancestor impersonates the
+  # distinct source snapshot captured by the contribution's original review.
+  arguments["source_sha"] = source
+  assert not app_git.verify_landed_equivalent_change(repo, **arguments)
+  app_git._run(repo, "reset", "--hard", base)
+  arguments["source_sha"] = base
+  assert not app_git.verify_landed_equivalent_change(repo, **arguments)
+
+
+def test_source_resolution_new_review_identity_can_attest_the_same_source(tmp_path):
+  repo, base, head, source, digest = _source_resolution_history(tmp_path)
+  old_ref = _record_source_resolution(repo, base, head, source, digest)
+  assert old_ref
+  old_witness = _read_source_resolution(repo, base, head, source, digest)
+  assert old_witness
+  assert _read_source_resolution(
+    repo, base, head, source, digest, review_identity_sha256="b" * 64,
+  ) is None
+  new_ref = _record_source_resolution(
+    repo, base, head, source, digest, review_identity_sha256="b" * 64,
+  )
+  assert new_ref and new_ref != old_ref
+  assert _record_source_resolution(
+    repo, base, head, source, digest, review_identity_sha256="b" * 64,
+  ) == new_ref
+  assert _read_source_resolution(
+    repo, base, head, source, digest, review_identity_sha256="b" * 64,
+  ) is not None
+  assert _read_source_resolution(repo, base, head, source, digest) is None
+  assert app_git.record_reviewed_source_equivalence(repo, witness=old_witness) is None
+
+
+def test_legacy_continuity_witness_remains_readable_and_allows_a_fresh_identity(tmp_path):
+  repo = tmp_path / "legacy-continuity"
+  _install(repo, b"base\n")
+  base = app_git.head_sha(repo, "HEAD")
+  _write(repo, "reviewed\n")
+  head = _commit_all(repo, "reviewed source")
+  digest = _review_digest(repo, base, head)
+  _write(repo, "reviewed followup\n")
+  through = _commit_all(repo, "reviewed overlapping advance")
+  arguments = dict(
+    base_sha=base, head_sha=head, source_sha=head, reviewed_through_sha=through,
+    diff_sha256=digest, contribution_id="legacy-review", review_identity_sha256="a" * 64,
+  )
+  ref = app_git.record_prepublication_source_continuity(repo, **arguments)
+  assert ref
+  anchor = app_git._resolve_commit(repo, ref)
+  legacy_ref = app_git._reviewed_source_ref(digest, "legacy-review", through)
+  app_git._run(repo, "update-ref", legacy_ref, anchor)
+  app_git._run(repo, "update-ref", "-d", ref)
+  app_git._run(repo, "pack-refs", "--all", "--prune")
+  witness = app_git._read_prepublication_source_continuity(repo, legacy_ref)
+  assert witness is not None and witness.review_identity_sha256 == "a" * 64
+  arguments["review_identity_sha256"] = "b" * 64
+  replacement = app_git.record_prepublication_source_continuity(repo, **arguments)
+  assert replacement and replacement != legacy_ref
+  assert app_git._read_prepublication_source_continuity(repo, replacement) is not None
+  assert app_git._resolve_commit(repo, legacy_ref) is None

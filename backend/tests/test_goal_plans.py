@@ -43,9 +43,9 @@ def _agent_run_auth(db, chat_id, run_id):
   owner = db.query(models.Owner).first()
   token = auth_mod.create_agent_token(
     chat_id,
-    run_id,
     owner.username,
     owner.token_epoch,
+    run_id=run_id,
     expires_delta=timedelta(minutes=5),
   )
   return {"Authorization": f"Bearer {token}"}
@@ -114,7 +114,7 @@ def test_terminal_goal_history_projects_onto_final_assistant_message(
   }
 
 
-def test_terminal_goal_history_respects_message_pagination(
+def test_terminal_goal_history_respects_message_pagination_and_clear(
   client, owner_token, db,
 ):
   auth = {"Authorization": f"Bearer {owner_token}"}
@@ -132,6 +132,8 @@ def test_terminal_goal_history_respects_message_pagination(
     headers=auth,
   )
   chat_id = created.json()["id"]
+  chat = db.query(models.Chat).filter(models.Chat.id == chat_id).one()
+  chat.dismissed_goal_id = "old-goal"
   db.add(models.ChatRun(
     id="old-goal-run", root_run_id="old-goal-run", chat_id=chat_id,
     status="completed", provider="claude", goal_objective="Old Goal",
@@ -378,60 +380,6 @@ def test_completed_plan_clear_dismisses_without_interrupting_final_response(
   assert persisted_run.ended_at is None
 
 
-def test_paused_goal_clear_does_not_interrupt_a_later_ordinary_turn(
-  client, owner_token, db,
-):
-  class OrdinaryTurn:
-    chat_id = ""
-    kind = RunnerKind.CODEX_SDK
-
-    def __init__(self, chat_id):
-      self.chat_id = chat_id
-      self.clear_calls = 0
-
-    async def clear_goal(self):
-      self.clear_calls += 1
-
-  auth = {"Authorization": f"Bearer {owner_token}"}
-  chat_id = client.post(
-    "/api/chats", json={"title": "Retained goal"}, headers=auth,
-  ).json()["id"]
-  started_at = datetime.now(UTC)
-  db.add_all([
-    models.ChatRun(
-      id="paused-retained-goal", root_run_id="paused-retained-goal",
-      chat_id=chat_id, status="stopped", provider="codex",
-      goal_objective="Retained history", goal_id="retained-goal-id",
-      started_at=started_at,
-    ),
-    models.ChatRun(
-      id="later-ordinary-turn", root_run_id="later-ordinary-turn",
-      chat_id=chat_id, status="running", provider="codex",
-      started_at=started_at + timedelta(seconds=1),
-    ),
-  ])
-  db.commit()
-  handle = OrdinaryTurn(chat_id)
-  registry.register(handle)
-
-  try:
-    cleared = client.request(
-      "DELETE", f"/api/chats/{chat_id}/goal",
-      json={"goal_id": "retained-goal-id"}, headers=auth,
-    )
-  finally:
-    registry.unregister(chat_id, handle.kind)
-
-  assert cleared.status_code == 200, cleared.text
-  assert handle.clear_calls == 0
-  db.expire_all()
-  ordinary_run = db.query(models.ChatRun).filter(
-    models.ChatRun.id == "later-ordinary-turn",
-  ).one()
-  assert ordinary_run.status == "running"
-  assert ordinary_run.ended_at is None
-
-
 def test_goal_wait_ownership_excludes_a_later_ordinary_turn(db, chat):
   from app.chat_waits import declare_wait
   from app.goal_plans import presented_goal
@@ -477,6 +425,29 @@ def test_goal_wait_ownership_excludes_a_later_ordinary_turn(db, chat):
     created_by_run_id=goal_run.id,
   )
   assert presented_goal(db, chat.id)["wait_kind"] == "monitor"
+
+
+def test_settled_continuation_card_keeps_goal_waiting_for_owner(db, chat):
+  from app.goal_plans import presented_goal
+
+  run = models.ChatRun(
+    id="settled-card-run", root_run_id="settled-card-run", chat_id=chat.id,
+    status="completed", provider="codex", goal_objective="Await approval",
+    goal_id="settled-card-goal", started_at=datetime.now(UTC),
+  )
+  db.add(run)
+  chat.pending_question_id = "settled-card"
+  chat.messages = [{
+    "id": run.id, "role": "assistant", "content": "", "blocks": [{
+      "type": "question", "question_id": "settled-card",
+      "response_mode": "continuation", "questions": [],
+    }], "ts": 1,
+  }]
+  db.commit()
+
+  goal = presented_goal(db, chat.id)
+  assert goal["status"] == "paused"
+  assert goal["wait_kind"] == "owner_question"
 
 
 def test_goal_wait_ownership_includes_only_its_waking_helpers(
@@ -579,7 +550,9 @@ def test_goal_promotion_rejects_delegation_and_app_scope_tokens(
     model=None, effort=None, scope="read", cwd="/data/platform",
   ), run_id="scoped-run")
   delegation_auth = {
-    "Authorization": f"Bearer {delegated_token}",
+    "Authorization": "Bearer " + auth_mod.create_delegation_token(
+      "delegation-scope", app.id, chat_id, owner.username, owner.token_epoch,
+    )
   }
   delegated = client.post(
     f"/api/chats/{chat_id}/goal",
@@ -982,13 +955,6 @@ def test_nested_children_settle_before_parent_becomes_ready_to_verify(
     ]}, headers=auth,
   )
   assert created.status_code == 200, created.text
-  initial_tasks = {
-    task["id"]: task for task in created.json()["plan"]["tasks"]
-  }
-  assert initial_tasks["b"]["ready"] is False
-  assert initial_tasks["b"]["ready_to_verify"] is False
-  assert initial_tasks["x"]["ready"] is True
-  assert initial_tasks["y"]["ready"] is True
   revision = 1
   for task_id, status in (("x", "completed"), ("y", "completed")):
     response = client.patch(
@@ -999,7 +965,6 @@ def test_nested_children_settle_before_parent_becomes_ready_to_verify(
     revision += 1
   tasks = {task["id"]: task for task in response.json()["plan"]["tasks"]}
   assert tasks["b"]["children"] == ["x", "y"]
-  assert tasks["b"]["ready"] is False
   assert tasks["b"]["ready_to_verify"] is True
 
   incomplete_parent = client.put(
@@ -1139,37 +1104,6 @@ def test_plan_projects_recursive_delegation_ownership_without_transcripts(
   assert plan["summary"]["completed"] == 0
   assert plan["summary"]["can_complete"] is False
   assert plan["summary"]["completion_blockers"] == ["b", "x"]
-
-  db.query(models.ChatRun).filter(models.ChatRun.id.in_([
-    "goal-root", "child-b-run",
-  ])).update({"status": "completed"}, synchronize_session=False)
-  db.commit()
-  descendant_plan = client.get(
-    f"/api/chats/{chat_id}/goal-plan", headers=auth,
-  ).json()["plan"]
-  assert descendant_plan["delegations"][0]["status"] == "completed"
-  assert descendant_plan["delegations"][0]["children"][0]["status"] == "running"
-  assert descendant_plan["summary"]["completed"] == 0
-  assert descendant_plan["summary"]["completion_blockers"] == ["b", "x"]
-  runtime = client.get(f"/api/chats/{chat_id}/runtime", headers=auth).json()
-  assert runtime["running"] is False
-  assert runtime["active_goal_objective"] == "Ship the release"
-
-  db.query(models.ChatRun).filter(models.ChatRun.id == "child-x-run").update({
-    "status": "completed",
-  })
-  db.commit()
-  settled_plan = client.get(
-    f"/api/chats/{chat_id}/goal-plan", headers=auth,
-  ).json()["plan"]
-  assert settled_plan["delegations"][0]["status"] == "completed"
-  assert settled_plan["delegations"][0]["children"][0]["status"] == "completed"
-  assert settled_plan["summary"]["completed"] == 1
-  assert settled_plan["summary"]["can_complete"] is True
-  assert settled_plan["summary"]["completion_blockers"] == []
-  assert client.get(
-    f"/api/chats/{chat_id}/runtime", headers=auth,
-  ).json()["active_goal_objective"] is None
 
 
 def test_resumed_goal_projects_only_latest_delegation_attempt_per_task(

@@ -103,7 +103,9 @@ Review the exact changed paths and use the smallest matching action:
 | `frontend/src/` and other frontend build inputs | The watcher rebuilds the served shell, then `shell_apply_now` applies it. A normal save triggers this automatically; source arriving through Git needs a changed frontend file touched. No server restart. |
 | `backend/app/*.py` | After compile checks, tests, and commit, one server restart loads the settled backend revision. |
 | `skill/core.md` | A server restart refreshes the cached constitution for new agent sessions only; existing sessions keep their immutable prompt snapshot. Unless new sessions need the rule immediately, leave it pending for the next separately approved restart. |
-| `backend/scripts/`, tests, docs, and shared skill content | Takes effect on its next invocation or read. No server restart. An agent that already read old instructions cannot be rewritten in place. |
+| `backend/scripts/entrypoint.sh`, the exact `/app/scripts/*` bootstrap files it invokes, `backend/scripts/seed-skills/`, or `backend/runtime/` | Image-owned. Batch and test the change, then leave one image replacement pending; never rebuild between iterations. `platform_activation.py` is the source of truth for the exact bootstrap allowlist. |
+| `backend/scripts/pm-commit` | One server restart refreshes the installed launcher from the served checkout; no image rebuild. |
+| Other `backend/scripts/`, tests, docs, and shared skill content | Takes effect on its next invocation or read. No server restart or image rebuild. An agent that already read old instructions cannot be rewritten in place. |
 | A package needed by the current task | Install it into the running container first when safe. A new process can use it immediately; restart only when the already-running backend must load it. |
 | `backend/requirements.txt`, lockfiles, `frontend/package.json`, or `Dockerfile` | These declarations make a live install reproducible after container replacement; they do not activate it and do not require an immediate rebuild. |
 
@@ -173,9 +175,9 @@ because `/data/platform` is the persistent served clone. The baked
 - A bad import keeps the edited tree from serving. Boot import-probes the
   persistent clone and falls back to the baked backend, leaving the local tree
   intact for repair. Always run `python3 -m py_compile <file>` before a restart.
-- A local fix is persistent but not upstream. Boot preserves committed local
-  changes and reconciles them over newer `origin/main`; a future reconcile can
-  still conflict, and another installation will not receive the fix. Ask
+- A local fix is persistent but not upstream. Startup preserves installed source and local changes without fetching newer
+  code. Explicit updates reconcile local changes onto the reviewed release;
+  they can still conflict, and another installation will not receive a local fix. Ask
   whether it is a local overlay or needs a separate upstream handoff. Do not
   push or manage external repository workflow from inside Möbius.
 
@@ -208,6 +210,7 @@ the write-surface contract.
    ```bash
    python3 /data/platform/backend/scripts/owner_approval.py \
      'Restart to activate <tested change>? This interrupts <N> active turns and may take Möbius offline for tens of seconds.' \
+     --work-key 'platform:<tested-commit>:restart' \
      --option 'Not now' 'Leave the tested change pending without interruption.' \
      --option 'Restart now' 'Activate the tested change with the interruption described.'
    ```

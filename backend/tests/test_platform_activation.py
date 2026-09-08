@@ -1,9 +1,6 @@
 """Activation classification is one ordered contract across deployments."""
 
-import json
 import re
-import subprocess
-import sys
 from pathlib import Path
 
 from app import platform_activation as activation
@@ -142,14 +139,41 @@ def test_only_image_owned_bootstrap_scripts_require_a_rebuild():
     "backend/scripts/rebuild_shell.sh",
   ])["level"] == "live"
   assert activation.classify_activation([
-    "backend/scripts/mapi",
-  ])["level"] == "live"
-  assert activation.classify_activation([
     "backend/scripts/pm-commit",
   ])["level"] == "server_restart"
   assert activation.classify_activation([
     "scripts/mobius-rebuild-host.py",
   ])["level"] == "host_maintenance"
+
+
+def test_optional_deploy_command_does_not_gate_in_product_updates():
+  for deployment in ("self_hosted", "railway"):
+    assert activation.classify_activation(
+      ["scripts/deploy-prod.sh"], deployment=deployment,
+    )["level"] == "live"
+    for path, expected in (
+      ("frontend/src/App.jsx", "live"),
+      ("backend/app/main.py", "server_restart"),
+      ("Dockerfile", "image_rebuild"),
+    ):
+      impact = activation.classify_activation(
+        ["scripts/deploy-prod.sh", path], deployment=deployment,
+      )
+      assert impact["level"] == expected
+
+
+def test_installed_host_helper_and_topology_keep_their_activation_boundaries():
+  for path, expected in (
+    ("scripts/install-rebuild-helper.sh", "host_maintenance"),
+    ("scripts/mobius-rebuild-host.py", "host_maintenance"),
+    ("docker-compose.yml", "container_recreate"),
+    ("Caddyfile", "proxy_reload"),
+  ):
+    impact = activation.classify_activation([path], deployment="self_hosted")
+    assert impact["level"] == expected
+    if expected == "host_maintenance":
+      assert "sudo scripts/install-rebuild-helper.sh" in " ".join(impact["guidance"])
+      assert "deploy-prod.sh" not in " ".join(impact["guidance"])
 
 
 def test_bootstrap_allowlist_covers_entrypoint_app_script_references():
@@ -163,14 +187,12 @@ def test_bootstrap_allowlist_covers_entrypoint_app_script_references():
   ))
   # pm-commit is seeded from the image, then deliberately refreshed from the
   # live checkout by FastAPI startup; it needs one server restart, not an image.
-  # mapi is an image fallback only: the installed symlink already targets the
-  # live checkout, so changing that target takes effect immediately.
   image_names = {Path(path).name for path in activation.IMAGE_BOOTSTRAP_SCRIPTS}
-  assert referenced == (image_names - {"entrypoint.sh"}) | {"pm-commit", "mapi"}
+  assert referenced == (image_names - {"entrypoint.sh"}) | {"pm-commit"}
   assert activation.classify_activation([
     "backend/scripts/entrypoint.sh",
   ])["level"] == "image_rebuild"
-  for name in referenced - {"pm-commit", "mapi"}:
+  for name in referenced - {"pm-commit"}:
     assert activation.classify_activation([
       f"backend/scripts/{name}",
     ])["level"] == "image_rebuild", name
@@ -202,17 +224,28 @@ def test_image_inputs_cover_dependency_and_baked_runtime_paths(tmp_path):
     }
 
 
-def test_image_input_hashes_cli_matches_the_library_contract(tmp_path):
-  (tmp_path / "backend" / "runtime").mkdir(parents=True)
-  (tmp_path / "Dockerfile").write_text("FROM scratch\n")
-  (tmp_path / "backend" / "runtime" / "broker.py").write_text("x = 1\n")
+def test_image_work_never_subsumes_independent_deployment_actions():
+  cases = [
+    ('self_hosted', 'Caddyfile', 'proxy_reload'),
+    ('self_hosted', 'docker-compose.yml', 'container_recreate'),
+    ('self_hosted', 'scripts/mobius-rebuild-host.py', 'host_maintenance'),
+    ('railway', 'railway.toml', 'container_recreate'),
+  ]
+  for deployment, path, external in cases:
+    impact = activation.classify_activation(['Dockerfile', path], deployment=deployment)
+    assert set(impact['required_actions']) == {'image_rebuild', external}
+    assert activation.requires_agent_activation(impact)
+  for deployment in ('self_hosted', 'railway'):
+    ordinary = activation.classify_activation(
+      ['Dockerfile', 'backend/app/main.py', 'backend/requirements.lock'], deployment=deployment,
+    )
+    assert set(ordinary['required_actions']) == {'image_rebuild', 'server_restart', 'dependency_sync'}
+    assert not activation.requires_agent_activation(ordinary)
+    assert activation.classify_activation([], deployment=deployment)['required_actions'] == []
 
-  module = Path(activation.__file__)
-  completed = subprocess.run(
-    [sys.executable, str(module), "--hashes", str(tmp_path)],
-    check=True,
-    capture_output=True,
-    text=True,
-  )
 
-  assert json.loads(completed.stdout) == activation.image_input_hashes(tmp_path)
+def test_irrelevant_deployment_inputs_never_enter_required_actions():
+  for deployment, ignored in [('railway', 'Caddyfile'), ('self_hosted', 'railway.toml')]:
+    impact = activation.classify_activation(['Dockerfile', ignored], deployment=deployment)
+    assert impact['required_actions'] == ['image_rebuild']
+    assert not activation.requires_agent_activation(impact)

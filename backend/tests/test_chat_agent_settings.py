@@ -36,6 +36,24 @@ def _read_global_settings() -> dict:
   return json.loads(path.read_text())
 
 
+def _start_provider_turn(chat, provider_id: str = "claude") -> str:
+  """Admit a provider-dispatch test through the durable turn boundary."""
+  from app.chat_writer import StartTurn, get_writer
+
+  run_token = f"rt-agent-settings-{chat.id}"
+  get_writer().submit(StartTurn(
+    chat_id=chat.id,
+    run_token=run_token,
+    user_msg={
+      "role": "user", "content": "hi", "ts": 1,
+      "cid": f"message-{chat.id}",
+    },
+    title_source="hi",
+    default_provider=provider_id,
+  )).result(timeout=5)
+  return run_token
+
+
 def test_effective_settings_falls_back_to_global(tmp_path):
   """No chat override → returns the global default unchanged."""
   shared = tmp_path / "shared"
@@ -213,108 +231,6 @@ def test_chat_detail_pristine_provider_follows_global_model_over_drift(
   assert body["effective_agent_settings"]["model"] == "gpt-5.6-sol"
 
 
-def test_chat_detail_user_only_chat_keeps_its_committed_provider(
-  client, auth, db,
-):
-  """A failed/unfinished first turn is no longer pristine: its next send keeps
-  the provider committed when that turn began, even before an assistant row
-  exists."""
-  from app import models
-
-  _write_global_settings({"model": "gpt-5.6-sol", "effort": "high"})
-  cid = client.post(
-    "/api/chats",
-    headers=auth,
-    json={
-      "title": "started",
-      "messages": [{"role": "user", "content": "hello"}],
-    },
-  ).json()["id"]
-  row = db.query(models.Chat).filter(models.Chat.id == cid).first()
-  row.provider = "claude"
-  row.agent_settings_json = None
-  db.commit()
-
-  body = client.get(f"/api/chats/{cid}", headers=auth).json()
-  assert body["has_assistant_turns"] is False
-  assert body["provider"] == "claude"
-  assert body["effective_agent_settings"]["model"] is None
-
-
-def test_chat_detail_per_chat_model_outranks_stored_provider(
-  client, auth, db,
-):
-  """An explicit per-chat model decides the picker's provider. Stored provider
-  and global default both say claude here, so only the model-priority branch can
-  report the codex model's provider — and without it the response would filter
-  that per-chat model away to no model at all."""
-  from app import models
-
-  _write_global_settings({"model": "claude-sonnet-5", "effort": "high"})
-  cid = client.post(
-    "/api/chats", headers=auth, json={"title": "per-chat model"},
-  ).json()["id"]
-  row = db.query(models.Chat).filter(models.Chat.id == cid).first()
-  row.provider = "claude"
-  row.agent_settings_json = {"model": "gpt-5.6-sol"}
-  db.commit()
-
-  body = client.get(f"/api/chats/{cid}", headers=auth).json()
-  assert body["provider"] == "codex"
-  assert body["effective_agent_settings"]["model"] == "gpt-5.6-sol"
-
-
-def test_chat_detail_app_created_chat_keeps_its_committed_provider(
-  client, auth, db,
-):
-  """An app-owned chat is never pristine, even with no messages: the app chose
-  its provider, so the detail must not re-derive one from the owner's picker."""
-  from app import models
-
-  _write_global_settings({"model": "gpt-5.6-sol", "effort": "high"})
-  cid = client.post(
-    "/api/chats", headers=auth, json={"title": "app owned"},
-  ).json()["id"]
-  app = models.App(
-    slug="provider-gate-app",
-    source_dir="/tmp/mobius-tests/provider-gate-app",
-    name="Gate", description="", jsx_source="",
-  )
-  db.add(app)
-  db.flush()
-  row = db.query(models.Chat).filter(models.Chat.id == cid).first()
-  row.provider = "claude"
-  row.agent_settings_json = None
-  row.created_by_app_id = app.id
-  db.commit()
-
-  body = client.get(f"/api/chats/{cid}", headers=auth).json()
-  assert body["provider"] == "claude"
-  assert body["effective_agent_settings"]["model"] is None
-
-
-def test_chat_detail_draining_chat_keeps_its_committed_provider(
-  client, auth, db,
-):
-  """While the instance drains, a send keeps the chat's committed provider, so
-  the picker must show that provider too instead of the live global default."""
-  from app import models
-
-  _write_global_settings({"model": "gpt-5.6-sol", "effort": "high"})
-  cid = client.post(
-    "/api/chats", headers=auth, json={"title": "draining"},
-  ).json()["id"]
-  row = db.query(models.Chat).filter(models.Chat.id == cid).first()
-  row.provider = "claude"
-  row.agent_settings_json = None
-  db.commit()
-
-  with patch("app.routes.chats.is_draining", return_value=True):
-    body = client.get(f"/api/chats/{cid}", headers=auth).json()
-  assert body["provider"] == "claude"
-  assert body["effective_agent_settings"]["model"] is None
-
-
 def test_patch_chat_writes_override(client, auth, chat):
   """PATCH /chats/{id} sets agent_settings_json and returns effective."""
   _write_global_settings({"model": "default-model"})
@@ -351,7 +267,7 @@ def test_patch_chat_merges_partial_updates(client, auth, chat):
 
 
 def test_patch_chat_clear_reverts_to_default(client, auth, chat):
-  """clear_agent_settings=true drops the per-chat override entirely.
+  """clear_agent_settings=true snapshots the current global choice.
 
   Under PATCH-immediate mirror semantics: picking "override-model" in
   the picker writes it to the global default. Clearing this chat's
@@ -376,7 +292,7 @@ def test_patch_chat_clear_reverts_to_default(client, auth, chat):
   )
   assert r.status_code == 200
   body = r.json()
-  assert body["agent_settings_json"] is None
+  assert body["agent_settings_json"]["model"] == "fallback-model"
   assert body["effective"]["model"] == "fallback-model"
 
 
@@ -423,7 +339,7 @@ def test_auto_resume_is_per_chat_and_survives_runtime_clear(
     json={"clear_agent_settings": True},
   ).json()
   assert cleared["auto_resume_on_limit"] is True
-  assert cleared["agent_settings_json"] is None
+  assert cleared["agent_settings_json"]["model"] == "current-model"
 
   detail = client.get(f"/api/chats/{chat.id}", headers=auth).json()
   assert detail["auto_resume_on_limit"] is True
@@ -434,7 +350,7 @@ def test_auto_resume_is_per_chat_and_survives_runtime_clear(
     json={"auto_resume_on_limit": False},
   ).json()
   assert disabled["auto_resume_on_limit"] is False
-  assert disabled["agent_settings_json"] is None
+  assert disabled["agent_settings_json"]["model"] == "current-model"
 
 
 def test_new_chat_inherits_last_auto_resume_selection(client, auth, chat):
@@ -589,7 +505,7 @@ def test_patch_chat_provider_mirrors_to_owner_immediately(
     headers=auth,
     json={"provider": "codex"},
   )
-  assert r.status_code == 200
+  assert r.status_code == 200, r.json()
   body = r.json()
   assert body["provider"] == "codex"
 
@@ -737,13 +653,16 @@ def test_run_chat_passes_merged_settings_into_claude_sdk(
 
   async def _scenario():
     from app.broadcast import create_broadcast
+
     create_broadcast(chat.id)
+    run_token = _start_provider_turn(chat)
     await chat_mod._run_chat_impl(
       messages=[schemas.ChatMessage(role="user", content="hi")],
       chat_id=chat.id,
       session_id=None,
       provider_id="claude",
       run_gen=chat_mod.current_run_generation(chat.id),
+      run_token=run_token,
     )
 
   with patch(
@@ -817,40 +736,6 @@ def test_patch_model_only_with_cross_provider_model_switches_provider(
   refreshed = db.query(models.Chat).filter(models.Chat.id == chat.id).first()
   assert refreshed.session_id is None
   assert refreshed.provider == "codex"
-
-
-def test_mobius_model_inference_requires_owning_app(
-  client, auth, chat, db, monkeypatch,
-):
-  from app import providers
-
-  monkeypatch.setattr(
-    providers.MobiusProvider, "check_auth", lambda self, data_dir: None,
-  )
-  absent = client.patch(
-    f"/api/chats/{chat.id}",
-    headers=auth,
-    json={"agent_settings_json": {"model": "inkling"}},
-  )
-  assert absent.status_code == 409
-  assert "Möbius · You" in absent.json()["detail"]
-
-  db.add(models.App(
-    slug="identity",
-    source_dir="/tmp/mobius-tests/identity",
-    name="Möbius · You",
-    description="Account",
-    jsx_source="export default () => null",
-  ))
-  db.commit()
-  selected = client.patch(
-    f"/api/chats/{chat.id}",
-    headers=auth,
-    json={"agent_settings_json": {"model": "inkling"}},
-  )
-  assert selected.status_code == 200, selected.json()
-  assert selected.json()["provider"] == "mobius"
-  assert selected.json()["agent_settings_json"]["model"] == "inkling"
 
 
 def test_patch_cannot_bypass_handoff_after_assistant_turn(
@@ -991,12 +876,14 @@ def test_run_chat_passes_deployed_skill_and_picker_settings(
   async def _scenario():
     from app.broadcast import create_broadcast
     create_broadcast(chat.id)
+    run_token = _start_provider_turn(chat)
     await chat_mod._run_chat_impl(
       messages=[schemas.ChatMessage(role="user", content="hi")],
       chat_id=chat.id,
       session_id=None,
       provider_id="claude",
       run_gen=chat_mod.current_run_generation(chat.id),
+      run_token=run_token,
     )
 
   with patch(

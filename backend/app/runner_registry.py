@@ -45,6 +45,10 @@ class RunnerRegistry:
     # once a restart closes admission.
     self._admission_lock = threading.Lock()
     self._admission_closed = False
+    # Short-lived maintenance owners use distinct leases. Releasing one lease
+    # must never reopen a concurrent restart drain or another maintenance
+    # boundary.
+    self._admission_leases: set[object] = set()
     # Chats soft-deleted while a run was in flight. `current_generation`
     # returns +inf for these so a run holding any finite pre-delete run_gen
     # computes `we_own_gen=False` and skips finalize onto the dead row — the
@@ -56,7 +60,11 @@ class RunnerRegistry:
   def mark_starting(self, chat_id: str) -> bool:
     """Reserves a spawn slot for a chat if it is currently idle."""
     with self._admission_lock:
-      if self._admission_closed or chat_id in self._starting:
+      if (
+        self._admission_closed
+        or self._admission_leases
+        or chat_id in self._starting
+      ):
         return False
       if any(cid == chat_id for cid, _ in self._handles):
         return False
@@ -80,6 +88,20 @@ class RunnerRegistry:
     """Allow future runner reservations after an idle drain is cancelled."""
     with self._admission_lock:
       self._admission_closed = False
+
+  def acquire_idle_admission_lease(self) -> object | None:
+    """Close admission for one owner only when the registry is fully idle."""
+    with self._admission_lock:
+      if self._admission_closed or self._starting or self._handles:
+        return None
+      lease = object()
+      self._admission_leases.add(lease)
+      return lease
+
+  def release_admission_lease(self, lease: object) -> None:
+    """Release exactly one maintenance owner's admission closure."""
+    with self._admission_lock:
+      self._admission_leases.discard(lease)
 
   def discard_starting(self, chat_id: str) -> None:
     """Clears a chat's starting reservation."""

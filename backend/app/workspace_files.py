@@ -1,15 +1,30 @@
-"""Confined, bounded reads shared by Project and app-source workspaces."""
+"""Confined, bounded reads and revisioned writes shared by Project and
+app-source workspaces.
+
+The write side raises the HTTP contract directly (428 revision required, 409
+revision conflict, 413 too large) because both routers serve the same client
+save protocol; a router only supplies confinement, locking, and its own
+bookkeeping around these helpers.
+"""
 
 from __future__ import annotations
 
 import hashlib
 import mimetypes
+import re
 from collections import deque
 from datetime import datetime
 from pathlib import Path
 
+from fastapi import HTTPException, Request
+
+from app import storage_io
+
 
 READ_MAX = 10 * 1024 * 1024
+WRITE_MAX = 10 * 1024 * 1024
+WRITE_TOO_LARGE = "File is too large to save in this workspace."
+REVISION_RE = re.compile(r"[0-9a-f]{64}")
 LIST_LIMIT = 1000
 # Directory contents are owner data and can be adversarially large.  Bound the
 # number of filesystem entries one request will inspect as well as the number
@@ -211,3 +226,106 @@ def file_revision(target: Path) -> str | None:
     for chunk in iter(lambda: handle.read(128 * 1024), b""):
       digest.update(chunk)
   return digest.hexdigest()
+
+
+def parse_revision(value: str) -> str | None:
+  """Normalize a client-sent revision (optionally ETag-quoted) or ``None``."""
+  candidate = value.strip().strip('"').lower()
+  return candidate if REVISION_RE.fullmatch(candidate) else None
+
+
+def revision_required(path: str) -> HTTPException:
+  """The 428 a save gets when it names no revision at all.
+
+  A save must say which revision it replaces (or ``None`` for create-only);
+  silently treating "unspecified" as "overwrite" is how drafts get lost.
+  """
+  return HTTPException(status_code=428, detail={
+    "code": "file_revision_required",
+    "message": "Open the latest file revision before saving.",
+    "path": path,
+  })
+
+
+def require_revision(
+  target: Path, path: str, expected_revision: str | None,
+) -> None:
+  """Compare-and-set guard: the file on disk must be the revision the client
+  opened (``None`` meaning absent). Callers hold the workspace mutation lock so
+  the check and the following write are one step."""
+  current_revision = file_revision(target)
+  if current_revision == expected_revision:
+    return
+  raise HTTPException(status_code=409, detail={
+    "code": "file_revision_conflict",
+    "message": "This file changed elsewhere. Your draft was not overwritten.",
+    "path": path,
+    "expected_revision": expected_revision,
+    "current_revision": current_revision,
+  })
+
+
+def revision_precondition(request: Request) -> tuple[bool, str | None]:
+  """Decode a raw-body save's revision headers as ``(named, expected)``.
+
+  ``If-None-Match: *`` is create-only (expected ``None``); ``If-Match`` carries
+  the revision being replaced. ``named`` is False when neither is present so
+  the caller can decide between 428 and an owner force save.
+  """
+  if request.headers.get("if-none-match") == "*":
+    return True, None
+  if request.headers.get("if-match"):
+    expected = parse_revision(request.headers["if-match"])
+    if expected is None:
+      raise HTTPException(400, "If-Match must contain a file revision.")
+    return True, expected
+  return False, None
+
+
+def encoded_text(content: str) -> bytes:
+  """UTF-8 bytes of a text save, bounded by ``WRITE_MAX`` (a request model's
+  character limit under-counts multi-byte text)."""
+  encoded = content.encode("utf-8")
+  if len(encoded) > WRITE_MAX:
+    raise HTTPException(413, WRITE_TOO_LARGE)
+  return encoded
+
+
+async def read_write_body(request: Request) -> bytes:
+  """Buffer a raw-body save, refusing anything over ``WRITE_MAX``."""
+  length = request.headers.get("content-length")
+  if length:
+    try:
+      declared = int(length)
+    except ValueError as exc:
+      raise HTTPException(400, "Invalid Content-Length header.") from exc
+    if declared < 0:
+      raise HTTPException(400, "Invalid Content-Length header.")
+  return await storage_io.read_capped_body(
+    request, WRITE_MAX, too_large=WRITE_TOO_LARGE,
+  )
+
+
+def write_file(
+  root: Path,
+  target: Path,
+  content: bytes,
+  expected_revision: str | None,
+  *,
+  force: bool = False,
+) -> dict:
+  """Replace one confined file atomically after its revision check.
+
+  ``target`` is already confined under ``root`` and the caller holds the
+  workspace mutation lock. ``force`` skips the compare-and-set for owner
+  automation that means to discard a concurrent revision.
+  """
+  path = target.relative_to(root).as_posix()
+  if not force:
+    require_revision(target, path, expected_revision)
+  storage_io.atomic_write(target, content)
+  return {
+    "ok": True,
+    "path": path,
+    "revision": hashlib.sha256(content).hexdigest(),
+  }

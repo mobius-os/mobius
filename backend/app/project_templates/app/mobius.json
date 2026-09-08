@@ -1,0 +1,8 @@
+{
+  "id": "untitled-mini-app",
+  "name": "Untitled mini-app",
+  "version": "0.1.0",
+  "entry": "index.jsx",
+  "runtime": { "imports": ["react"] },
+  "source_files": []
+}

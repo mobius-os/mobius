@@ -27,6 +27,16 @@ resume.
 the type can be shared without dragging this module's globals into
 the runners. This file owns the registry + lifecycle on top of that
 dataclass.
+
+Design note — two ways to pause. `AskUserQuestion` above is an IN-TURN wait:
+the turn's process stays alive, suspended on the future, and the wait is lost
+on restart. A saved owner-input card (request_question / request_approval /
+secure-input) is instead a DURABLE wait — the card and `pending_question_id`
+persist, the turn ENDS so the process is released, and the answer route
+resumes a fresh turn (restart-safe). Because the card's receipt returns to the
+model immediately, the runner interrupts the live turn the moment such a card
+commits, so nothing follows the card; see `ChatEventSink.publish_question` and
+each runner's `finish_after_owner_card`.
 """
 
 from __future__ import annotations
@@ -57,6 +67,25 @@ def open_continuation_question(chat, question_id: str | None) -> dict | None:
           and block.get("response_mode") == "continuation"
           and not block.get("answers")):
         return block
+  return None
+
+
+def continuation_question_owner_run_id(
+  chat, question_id: str | None,
+) -> str | None:
+  """Return the run identity that durably authored an open continuation card."""
+  if not question_id or chat.pending_question_id != question_id:
+    return None
+  for message in reversed(chat.messages or []):
+    if not isinstance(message, dict):
+      continue
+    for block in message.get("blocks") or []:
+      if (block.get("type") == "question"
+          and block.get("question_id") == question_id
+          and block.get("response_mode") == "continuation"
+          and not block.get("answers")):
+        owner = message.get("id")
+        return owner if isinstance(owner, str) and owner else None
   return None
 
 

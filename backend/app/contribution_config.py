@@ -9,9 +9,9 @@ never a container recreate: baking it into container environment
 point the relay at a test fork, which stranded the running turn mid-recreate.
 
 Each value resolves from the ``/data`` override file first, then the process
-environment (the compose-provided default). A missing override uses the
-environment. A present but unreadable or malformed override stops publication
-rather than silently falling back to a different repository.
+environment (the compose-provided default). A missing, unreadable, or malformed
+override degrades to the environment rather than breaking a submission, and the
+override file mirrors the environment's string format for each key.
 """
 
 from __future__ import annotations
@@ -28,49 +28,43 @@ TEST_REPOSITORIES_ENV = "MOBIUS_CONTRIBUTION_RELAY_TEST_REPOSITORIES"
 _OVERRIDE_RELPATH = "shared/contribution-relay.json"
 
 
-class ContributionConfigError(RuntimeError):
-  """The owner-authored runtime override exists but cannot be trusted."""
-
-
 def _override_path() -> Path:
   return Path(get_settings().data_dir) / _OVERRIDE_RELPATH
 
 
 def _override(key: str) -> str | None:
-  """Return an owner-set value, or None when that key/file is absent."""
+  """Return the owner-set runtime value for ``key``, or None to defer to env.
+
+  A present non-blank string wins. Anything else degrades to None so the caller
+  falls through to the environment rather than breaking or blocking a
+  submission on a bad edit: a missing or unreadable file, non-UTF-8 bytes,
+  malformed or non-object JSON, an absent key, a non-string value (a number,
+  bool, list, or null), or a blank string.
+  """
   try:
     raw = _override_path().read_text(encoding="utf-8")
-  except FileNotFoundError:
+  except (OSError, ValueError):
+    # OSError: missing / unreadable file. ValueError: non-UTF-8 bytes
+    # (UnicodeDecodeError is a ValueError).
     return None
-  except (OSError, ValueError) as exc:
-    raise ContributionConfigError(
-      "the contribution relay override could not be read"
-    ) from exc
   try:
     data = json.loads(raw)
-  except ValueError as exc:
-    raise ContributionConfigError(
-      "the contribution relay override is not valid JSON"
-    ) from exc
-  if not isinstance(data, dict):
-    raise ContributionConfigError(
-      "the contribution relay override must be a JSON object"
-    )
-  if key not in data:
+  except ValueError:
     return None
-  value = data[key]
+  if not isinstance(data, dict):
+    return None
+  value = data.get(key)
   if not isinstance(value, str):
-    raise ContributionConfigError(
-      f"the contribution relay override field {key!r} must be a string"
-    )
-  return value.strip()
+    return None
+  return value.strip() or None
 
 
 def target_repo() -> str:
   """The GitHub repository reviewed contributions are opened against.
 
-  Resolved live so the owner can retarget or deliberately clear the relay
-  target without recreating the container.
+  Resolved live so the owner can retarget the relay without recreating the
+  container. Returns the empty string when nothing is configured in either the
+  override or the environment; the caller treats that as "no target chosen".
   """
   override = _override("target_repo")
   if override is not None:

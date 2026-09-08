@@ -591,6 +591,32 @@ cleans sessions up on navigation. Never probe or fall back to the blocked
 browser API from the opaque frame. The complete contract lives in the platform
 `CAPABILITIES.md`.
 
+For a small JSON value that should stay only in this browser profile, declare
+`device.storage` rather than adding a custom parent-message bridge:
+
+```json
+"capabilities": {
+  "device.storage": {
+    "version": 1,
+    "reason": "Remember this visitor's choices on this device.",
+    "limits": { "max_bytes": 65536 }
+  }
+}
+```
+
+```js
+await window.mobius.capabilities.invoke('device.storage', {
+  operation: 'set', key: 'preferences', value: preferences,
+})
+const preferences = await window.mobius.capabilities.invoke('device.storage', {
+  operation: 'get', key: 'preferences',
+})
+```
+
+The same capability works in the signed-in shell and in a hosted public app.
+It is device-local, best-effort, and partitioned by app installation; use
+`window.mobius.storage` for durable owner data or public server-side state.
+
 ## Local zoom surfaces
 
 The Möbius shell keeps its toolbar, drawer, chat, and app frame at one stable

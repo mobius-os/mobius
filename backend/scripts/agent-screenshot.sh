@@ -588,16 +588,10 @@ fi
 # otherwise responsive. The authoritative checks below retry narrowly instead.
 sleep 0.3
 
-# Dismiss the PWA install banner if it surfaces — it covers the bottom
-# of the view and would distract from the actual page.
-BROWSER_PHASE="target preparation"
-browser_command 2 find text "Not now" click >/dev/null || true
-sleep 0.3
-
 # Token presence alone is not proof of authentication: App mounts Shell from
 # localStorage immediately, then a later protected request can reject the token,
 # clear it, and reload onto LoginForm. Verify the token with a protected request
-# at the FINAL capture boundary, after the settle/banner work above. The token is
+# at the FINAL capture boundary, after the initial paint above. The token is
 # read inside the page and never appears in argv or output.
 BROWSER_PHASE="authentication verification"
 AUTH_OK="$(browser_eval_retry \
@@ -679,7 +673,7 @@ PY
     # publishes one stable visual-readiness contract; automation must not learn
     # its private handoff classes or compositor attributes. Once the owner says
     # settled, give style/layout two frames to commit.
-    SHELL_SETTLED_EXPR="document.querySelector('.shell[data-workspace-visual-state=\"settled\"]') !== null && performance.getEntriesByName('first-contentful-paint').length > 0"
+    SHELL_SETTLED_EXPR="(document.querySelector('.shell[data-workspace-visual-state=\"settled\"]') !== null || document.querySelector('[data-mobius-visual-state=\"settled\"]') !== null) && performance.getEntriesByName('first-contentful-paint').length > 0"
     BROWSER_PHASE="shell visual readiness"
     if ! browser_wait --fn "$SHELL_SETTLED_EXPR" >/dev/null; then
       die "shell did not reach a settled visual state before capture"

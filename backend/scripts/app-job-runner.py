@@ -208,6 +208,26 @@ def _job_matches_context(resolved: Path, context: dict) -> bool:
   return expected == resolved.parent
 
 
+def _runtime_job(app_id: int, locator: Path, context: dict) -> Path | None:
+  """Resolve the stable cron locator to one accepted tree for this entire run."""
+  if not _job_matches_context(locator, context):
+    return None
+  runtime = context.get("runtime_dir")
+  if not isinstance(runtime, str) or not runtime:
+    return None
+  try:
+    root = Path(runtime).resolve(strict=True)
+    expected_parent = (DATA_DIR / "app-runtime" / str(app_id)).resolve()
+    if root.parent != expected_parent or not re.fullmatch(r"[0-9a-f]{64}", root.name):
+      return None
+    job = root / locator.name
+    if job.is_symlink() or not job.is_file():
+      return None
+    return job
+  except (OSError, RuntimeError):
+    return None
+
+
 def _mint_app_token(app_id: int) -> str | None:
   """Exchange the owner service credential for one short-lived app token."""
   try:
@@ -328,14 +348,19 @@ def _execute_job(
     if context is None:
       _log(app_id, "failed: job-context fetch")
       return 4
-    if not _job_matches_context(resolved, context):
-      _log(app_id, f"rejected: job does not belong to app: {resolved}")
+    runtime_job = _runtime_job(app_id, resolved, context)
+    if runtime_job is None:
+      _log(app_id, f"rejected: no accepted job belongs to app: {resolved}")
       return 4
+    # Pin the path once. A later Apply cannot redirect this job's cwd or its
+    # relative imports into a newer revision part way through execution.
+    lease_value["runtime_dir"] = str(runtime_job.parent)
+    _atomic_json(lease, lease_value)
     child_env = _job_env(app_token)
     job_state = DATA_DIR / "apps" / str(app_id) / "job-state"
     job_state.mkdir(parents=True, exist_ok=True)
     child_env["APP_JOB_STATE_DIR"] = str(job_state)
-    command = ["bash", str(resolved), str(app_id)]
+    command = ["bash", str(runtime_job), str(app_id)]
     # Uninstall sends TERM to this entire process group. Keep the supervisor
     # alive to retain its lease while a TERM-ignoring child needs the existing
     # KILL fallback; exec resets the child's caught handler to the default.
@@ -344,7 +369,7 @@ def _execute_job(
       started = time.monotonic()
       child = subprocess.Popen(
         command,
-        cwd=str(resolved.parent),
+        cwd=str(runtime_job.parent),
         env=child_env,
         # If the supervisor crashes, the actual job keeps the single-flight
         # lock until it and any inheriting descendants exit.
@@ -392,13 +417,13 @@ def run() -> int:
     return 2
   try:
     apps_root = (DATA_DIR / "apps").resolve(strict=True)
-    resolved = job.resolve(strict=True)
+    resolved = job.parent.resolve(strict=True) / job.name
   except (OSError, RuntimeError):
     _log(app_id, f"rejected: unresolvable job {job}")
     return 2
   if (
     resolved.parent.parent != apps_root
-    or not resolved.is_file()
+    or job.name in ("", ".", "..")
   ):
     _log(app_id, f"rejected: job outside apps root {resolved}")
     return 2

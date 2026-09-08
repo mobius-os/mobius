@@ -18,6 +18,7 @@ _SCRIPT = (
   / "scripts"
   / "agent-browser-profile-cleanup.py"
 )
+_ENTRYPOINT = _SCRIPT.parent / "entrypoint.sh"
 
 
 def _load_module():
@@ -31,6 +32,14 @@ def _load_module():
 
 
 cleanup = _load_module()
+
+
+def test_nightly_cleanup_uses_two_day_existing_chat_horizon():
+  source = _ENTRYPOINT.read_text(encoding="utf-8")
+  assert (
+    "--delete --include-existing-chats --older-than-days 2"
+    in source
+  )
 
 
 def _chats_db(path, *, rows=(), running_chat_ids=()):

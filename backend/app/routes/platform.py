@@ -9,17 +9,16 @@ and merge it with local edits, or record a conflict),
 ``GET /update-progress`` (the active Apply phase),
 ``POST /conflict-resolver-chat`` (owner-clicked resolver chat), and
 ``POST /restart`` (owner-confirmed self-restart, same SIGTERM pattern as the
-normal Settings restart). Apply/rebuild/conflict resolution/restart additionally
-exclude delegated execution bearers. The status/check routes are wrapped so a
-transient git error can never break the Settings page. Conflict resolution is a
-separate owner-clicked endpoint so applying an update never silently starts an
-agent turn.
+normal Settings restart). Read failures are explicit so Settings cannot mistake
+an unavailable update source for an up-to-date installation. Conflict resolution
+is a separate owner-clicked endpoint so applying an update never silently starts an agent turn.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import JSONResponse
@@ -94,7 +93,7 @@ async def get_platform_status(
   """Read-only update availability for Settings. Railway resolves its published
   GHCR release identity; self-hosting remains a cheap local read. A managed
   release lookup failure is explicit so Settings never calls an unknown release
-  current. Local Git diagnostics still degrade without breaking the page.
+  current. Local Git diagnostic failures are equally explicit.
 
   Does NOT clear the restart flag here: a restart-needed set by an owner Apply
   must persist (the running uvicorn still has the old code) until an actual boot
@@ -115,17 +114,13 @@ async def get_platform_status(
     ) from exc
   except Exception as exc:
     log.warning("platform status failed: %r", exc)
-    return PlatformStatus(
-      state=platform_update.PlatformUpdateState.UP_TO_DATE.value,
-      available=False, needs_restart=False,
-      activation=platform_activation.classify_activation([]),
-      current_build_sha=None,
-      recorded_upstream_sha=None, contained_upstream_sha=None,
-      contained_upstream_committed_at=None, upstream_checked_at=None,
-      seed_required=False, conflict_paths=[],
-      conflict_chat_id=None, newer_updates_available=False,
-      rollback_target_sha=None, rollback_error=None,
-    )
+    raise HTTPException(
+      status_code=503,
+      detail={
+        "code": "platform_status_unavailable",
+        "message": "Could not check update status. Try again.",
+      },
+    ) from exc
 
 
 @router.post("/check", dependencies=[Depends(reject_cross_site)])
@@ -161,14 +156,30 @@ async def check_platform_updates(
 
 @router.get("/update-preview")
 async def get_platform_update_preview(
+  intent: Literal["update", "finish"] = "update",
   _: models.Owner = Depends(get_current_owner),
 ) -> PlatformUpdatePreview:
   """Read-only preview of the incoming platform update, for the Settings review
   step the owner sees before Apply. Railway may fetch the exact source object
   named by GHCR, but never mutates the served branch or working tree. Missing
-  managed release source is explicit; generic self-hosted read failures still
-  degrade to an empty preview rather than breaking Settings."""
+  release source and local read failures are explicit; neither means that
+  there is nothing to update."""
   try:
+    if intent == "finish":
+      target_sha = await asyncio.to_thread(deployment_control.applied_release_sha)
+      image_digest = None
+      if platform_activation.deployment_kind() == "railway":
+        image_digest = await deployment_control.applied_release_digest(target_sha)
+      preview = await asyncio.to_thread(
+        platform_update.platform_update_preview,
+        target_sha=target_sha,
+        image_digest=image_digest,
+      )
+      # Source can change while a managed digest is being looked up. Finish
+      # must still be completion-only in the immutable preview's own snapshot.
+      if preview["available"]:
+        raise platform_update.PlatformUpdateError("update_plan_stale")
+      return preview
     if platform_activation.deployment_kind() == "railway":
       release = await deployment_control.latest_official_release()
       return await asyncio.to_thread(
@@ -186,7 +197,13 @@ async def get_platform_update_preview(
     raise HTTPException(status_code=503, detail=_plan_error_detail(exc)) from exc
   except Exception as exc:
     log.warning("platform update-preview failed: %r", exc)
-    return platform_update.empty_platform_update_preview()
+    raise HTTPException(
+      status_code=503,
+      detail={
+        "code": "platform_preview_unavailable",
+        "message": "Could not prepare the update review. Try again.",
+      },
+    ) from exc
 
 
 @router.get("/update-progress")
@@ -233,7 +250,10 @@ async def rebuild_reviewed_platform_update(
   Railway pins the exact GHCR image (digest required); self-hosted applies the
   reviewed source in place, then rebuilds the matching ``sha-<target>`` image.
   Per-deployment preconditions (including Railway's digest) are enforced in
-  ``deployment_control.request_reviewed_rebuild``.
+  ``deployment_control.request_reviewed_rebuild``. The body is that function's
+  return: a ``RebuildStatus`` once the replacement is queued/started, or the
+  ``PlatformApplyResult`` (``state`` conflict/rolled_back) when the in-place
+  source apply stopped short and nothing was rebuilt.
   """
   try:
     return await deployment_control.request_reviewed_rebuild(

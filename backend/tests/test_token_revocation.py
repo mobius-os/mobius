@@ -158,7 +158,7 @@ def test_agent_token_is_valid_only_while_its_exact_run_is_running(
   ))
   db.commit()
   token = auth.create_agent_token(
-    chat_id, "agent-run", owner.username, owner.token_epoch,
+    chat_id, owner.username, owner.token_epoch, run_id="agent-run",
   )
   agent_auth = {"Authorization": f"Bearer {token}"}
 

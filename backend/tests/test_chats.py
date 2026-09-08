@@ -177,6 +177,47 @@ def test_chat_reads_keep_goal_identity_after_a_mid_turn_question(
   assert runtime.json()["goal"] == detail.json()["goal"]
 
 
+def test_usage_limit_waiting_marks_only_latest_usage_park(chat, db):
+  from app.chat import usage_limit_waiting_chat_ids
+
+  base = datetime.now(UTC)
+  # Latest run is a usage-limit park awaiting resume → chat is "waiting".
+  db.add(models.ChatRun(
+    id="usage-park", chat_id=chat.id, status="parked",
+    provider="claude", park_reason="usage_limit", started_at=base,
+  ))
+  db.commit()
+  assert usage_limit_waiting_chat_ids(db, [chat.id]) == {chat.id}
+
+  # resume_pending is still awaiting resume and counts.
+  db.query(models.ChatRun).filter_by(id="usage-park").update(
+    {"status": "resume_pending"}
+  )
+  db.commit()
+  assert usage_limit_waiting_chat_ids(db, [chat.id]) == {chat.id}
+
+  # A newer running row supersedes the park (latest-run-wins) → not waiting.
+  db.add(models.ChatRun(
+    id="fresh-run", chat_id=chat.id, status="running",
+    provider="claude", started_at=base + timedelta(seconds=1),
+  ))
+  db.commit()
+  assert usage_limit_waiting_chat_ids(db, [chat.id]) == set()
+
+
+def test_usage_limit_waiting_ignores_non_usage_parks(chat, db):
+  from app.chat import usage_limit_waiting_chat_ids
+
+  # A restart/resource park auto-continues and must not earn the usage-limit
+  # waiting mark.
+  db.add(models.ChatRun(
+    id="restart-park", chat_id=chat.id, status="parked",
+    provider="claude", park_reason="restart", started_at=datetime.now(UTC),
+  ))
+  db.commit()
+  assert usage_limit_waiting_chat_ids(db, [chat.id]) == set()
+
+
 def test_chat_reads_retain_completed_and_paused_goals(client, auth, chat, db):
   completed_at = datetime.now(UTC)
   db.add_all([
@@ -261,15 +302,6 @@ def test_chat_usage_reports_totals_and_historic_coverage(
   assert measured["provider_session_id"] == "thread-1"
   assert measured["model_context_window"] == 200_000
   assert measured["usage"]["calculation"] == "thread_delta"
-
-  summary_response = client.get(
-    f"/api/chats/{chat.id}/usage?include_runs=false", headers=auth,
-  )
-  assert summary_response.status_code == 200
-  summary = summary_response.json()
-  assert summary["coverage"] == payload["coverage"]
-  assert summary["totals"] == payload["totals"]
-  assert summary["runs"] == []
 
 
 def test_current_chat_usage_is_bounded_to_selected_provider_session(
@@ -451,6 +483,71 @@ def test_create_chat_returns_canonical_owner_drawer_summary(client, auth):
   assert detail.status_code == 200
   detail_body = detail.json()
   assert body["detail"] == detail_body
+
+
+def test_chat_failure_attention_is_listed_and_acknowledged_by_version(
+  client, auth, db,
+):
+  created = client.post(
+    "/api/chats", json={"title": "Failed in background"}, headers=auth,
+  )
+  assert created.status_code == 200
+  chat_id = created.json()["id"]
+  db.add(models.ChatFailureActivity(
+    chat_id=chat_id,
+    run_id="failed-run-1",
+    failed_at=datetime.now(UTC),
+    activity_version=1,
+    unseen=True,
+  ))
+  db.commit()
+
+  listed = client.get("/api/chats", headers=auth)
+  row = next(item for item in listed.json() if item["id"] == chat_id)
+  assert row["has_unseen_failure"] is True
+  assert row["unseen_failure_version"] == 1
+
+  # A newer failure that lands before an old acknowledgement must remain red.
+  state = db.get(models.ChatFailureActivity, chat_id)
+  state.run_id = "failed-run-2"
+  state.activity_version = 2
+  state.unseen = True
+  db.commit()
+  stale = client.post(
+    f"/api/chats/{chat_id}/failure-activity/seen",
+    json={"activity_version": 1},
+    headers=auth,
+  )
+  assert stale.status_code == 204
+  db.refresh(state)
+  assert state.unseen is True
+
+  current = client.post(
+    f"/api/chats/{chat_id}/failure-activity/seen",
+    json={"activity_version": 2},
+    headers=auth,
+  )
+  assert current.status_code == 204
+  db.refresh(state)
+  assert state.unseen is False
+  listed = client.get("/api/chats", headers=auth)
+  row = next(item for item in listed.json() if item["id"] == chat_id)
+  assert row["has_unseen_failure"] is False
+  assert row["unseen_failure_version"] is None
+
+
+def test_chat_failure_acknowledgement_rejects_cross_site_request(
+  client, auth,
+):
+  created = client.post(
+    "/api/chats", json={"title": "Cross-site failure"}, headers=auth,
+  )
+  response = client.post(
+    f"/api/chats/{created.json()['id']}/failure-activity/seen",
+    json={"activity_version": 1},
+    headers={**auth, "Sec-Fetch-Site": "cross-site"},
+  )
+  assert response.status_code == 403
 
 
 def test_create_chat_honors_client_uuid_and_retries_idempotently(
@@ -707,6 +804,22 @@ def test_send_message_rejects_cross_site_request(client, auth, chat):
   assert cross.status_code == 403
 
 
+def test_goal_clear_text_command_is_retired_before_queueing(
+  client, auth, chat, db,
+):
+  response = client.post(
+    f"/api/chats/{chat.id}/messages",
+    json={"content": "/goal clear"},
+    headers=auth,
+  )
+
+  assert response.status_code == 409, response.text
+  assert response.json()["detail"]["code"] == "goal_clear_retired"
+  db.refresh(chat)
+  assert chat.messages == []
+  assert chat.pending_messages == []
+
+
 def test_send_requires_explicit_model_before_any_durable_side_effect(
   client, auth, chat, db,
 ):
@@ -771,6 +884,7 @@ def test_fresh_send_response_includes_stored_user_message(
 
   db.refresh(chat)
   assert chat.messages == [body["message"]]
+  assert chat.provider == "claude"
 
 
 def test_uploaded_file_can_start_a_turn_without_typed_text(

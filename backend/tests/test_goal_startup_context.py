@@ -40,6 +40,14 @@ def test_goal_receives_startup_context_only_through_system_prompt(
   monkeypatch.setattr(
     "app.claude_sdk_runner.run_claude_sdk_turn", _runner,
   )
+  # Direct runner entry still requires the durable admission record normally
+  # created by the send lifecycle; do not bypass the duplicate-execution gate.
+  run_token = "goal-prompt-routing-run"
+  db.add(models.ChatRun(
+    id=run_token, root_run_id=run_token, chat_id=chat_id,
+    status="running", provider="claude", provider_execution_admitted=False,
+  ))
+  db.commit()
   create_broadcast(chat_id)
   asyncio.run(chat_mod._run_chat_impl(
     messages=[schemas.ChatMessage(
@@ -48,6 +56,7 @@ def test_goal_receives_startup_context_only_through_system_prompt(
     chat_id=chat_id,
     session_id=None,
     provider_id="claude",
+    run_token=run_token,
     run_gen=chat_mod.current_run_generation(chat_id),
   ))
 

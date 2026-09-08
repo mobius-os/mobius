@@ -18,15 +18,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from slowapi import Limiter
 from sqlalchemy.orm import Session
 
-from app import fs_locks
-from app.artifact_data import (
-  ArtifactDataError,
-  artifact_dir_path,
-  artifact_file_path,
-  list_artifact_keys,
-  read_json_file,
-  validate_artifact_key,
-)
+from app.artifact_data import validate_artifact_key
 from app.config import get_settings
 from app.database import SessionLocal, get_db
 from app.publication import (
@@ -36,6 +28,7 @@ from app.publication import (
   read_publication_record,
   resolve_active_publication,
 )
+from app.routes.public_storage import list_public_values, read_public_value
 
 published_router = APIRouter(tags=["published"])
 
@@ -134,36 +127,6 @@ def _serve(token: str, path: str, db: Session | None = None):
   return resp
 
 
-async def _published_artifact_json(token: str, db: Session, operation):
-  """Run ``operation(settings, record)`` for a live published artifact.
-
-  Both public artifact-data reads share this exact envelope: reject a malformed
-  token, resolve the ACTIVE generation-bound record (project-scoped), take the
-  bound app's storage lock, re-resolve under the lock so a revoke/delete/wipe
-  that landed in between wins the race, then run the one filesystem operation
-  and stamp the same no-sniff/no-cache headers. Any ArtifactDataError inside the
-  lock collapses to a uniform 404 so nothing about the stored layout leaks.
-  """
-  if not _TOKEN_RE.fullmatch(token or ""):
-    raise _not_found()
-  settings = get_settings()
-  record = resolve_active_publication(db, settings, token)
-  if record is None or record.project_id is None:
-    raise _not_found()
-  async with fs_locks.app_storage_lock(record.app_id):
-    current = resolve_active_publication(db, settings, token)
-    if current is None or current.binding() != record.binding():
-      raise _not_found()
-    try:
-      payload = operation(settings, current)
-    except ArtifactDataError:
-      raise _not_found()
-  response = JSONResponse(payload)
-  response.headers["X-Content-Type-Options"] = "nosniff"
-  response.headers["Cache-Control"] = "no-cache"
-  return response
-
-
 @published_router.get(
   "/api/published-sites/{token}/data",
   include_in_schema=False,
@@ -174,16 +137,23 @@ async def list_published_artifact_data(
   request: Request,
   db: Session = Depends(get_db),
 ):
-  """List the published artifact's keys through the same public capability.
-
-  Enumeration is server-derived from the directory so a published page never
-  depends on a client-maintained index that concurrent writers could desync.
-  """
-  return await _published_artifact_json(token, db, lambda settings, record: {
-    "keys": list_artifact_keys(
-      artifact_dir_path(settings, record.app_id, record.project_id),
-    ),
-  })
+  """Compatibility alias for Pages published before public-storage unified."""
+  del db  # dependency retained so the route's public contract stays unchanged
+  try:
+    listing = await list_public_values(token)
+  except HTTPException:
+    raise _not_found()
+  keys = sorted(
+    entry["name"][:-5]
+    for entry in listing["entries"]
+    if entry.get("type") == "file"
+    and isinstance(entry.get("name"), str)
+    and entry["name"].endswith(".json")
+  )
+  response = JSONResponse({"keys": keys})
+  response.headers["X-Content-Type-Options"] = "nosniff"
+  response.headers["Cache-Control"] = "no-cache"
+  return response
 
 
 @published_router.get(
@@ -197,20 +167,16 @@ async def read_published_artifact_data(
   request: Request,
   db: Session = Depends(get_db),
 ):
-  """Return one JSON value through a generation-bound public capability."""
-  # Reject a malformed key before any DB/filesystem work; the token is checked
-  # inside the shared envelope. This route is unauthenticated, so cheap rejects
-  # stay off the hot path.
+  """Compatibility alias for Pages published before public-storage unified."""
+  del db
   if not validate_artifact_key(key):
     raise _not_found()
-
-  def _read(settings, record):
-    _artifact_root, file_path = artifact_file_path(
-      settings, record.app_id, record.project_id, key,
-    )
-    return read_json_file(file_path)
-
-  return await _published_artifact_json(token, db, _read)
+  try:
+    response = await read_public_value(token, f"{key}.json")
+  except HTTPException:
+    raise _not_found()
+  response.headers["Cache-Control"] = "no-cache"
+  return response
 
 @published_router.get("/sites/{token}/{path:path}", include_in_schema=False)
 def serve_published(

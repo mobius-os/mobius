@@ -2,11 +2,13 @@
 
 import os
 import subprocess
+import pytest
 from pathlib import Path
 
 
+@pytest.mark.parametrize("managed", [False, True])
 def test_init_cron_scaffold_does_not_splice_existing_crontab_into_comments(
-  tmp_path,
+  tmp_path, managed,
 ):
   """A generated init script must not execute command substitutions in
   comments while it is being authored.
@@ -48,6 +50,9 @@ def test_init_cron_scaffold_does_not_splice_existing_crontab_into_comments(
     "API_BASE_URL": "http://jobs.example.test:8123",
     "MOBIUS_APP_JOB_RUNNER": "/live/scripts/app-job-runner.py",
   }
+  init_dir = app_base / "46" / "schedule" if managed else app_dir
+  if managed:
+    env["MOBIUS_APP_CRON_STATE_DIR"] = str(init_dir)
   script = Path(__file__).parents[1] / "scripts" / "init-cron-scaffold.sh"
 
   result = subprocess.run(
@@ -59,7 +64,10 @@ def test_init_cron_scaffold_does_not_splice_existing_crontab_into_comments(
   )
 
   assert result.returncode == 0, result.stderr
-  init_text = (app_dir / "init-cron.sh").read_text()
+  init_text = (init_dir / "init-cron.sh").read_text()
+  if managed:
+    assert not (app_dir / "init-cron.sh").exists()
+    assert not (app_dir / "fetch.sh").exists()
   assert existing.strip() not in init_text
   assert "ENTRY=\"0 6 * * *" in init_text
   assert "API_BASE_URL=http://jobs.example.test:8123" in init_text

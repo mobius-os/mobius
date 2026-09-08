@@ -51,6 +51,7 @@ _model_registry_log = logging.getLogger(f"{__name__}.models")
 # source of truth for newly released IDs.
 KNOWN_MODELS = {
   "claude": [
+    "claude-fable-5-1",
     "claude-fable-5",
     "claude-sonnet-5",
     # Anthropic switched to dateless pinned IDs starting with 4.6;
@@ -79,6 +80,7 @@ KNOWN_MODELS = {
 }
 
 MODEL_LABELS = {
+  "claude-fable-5-1": "Claude Fable 5.1",
   "spark": "Spark",
   # Public product name. Keep the stable wire id so existing chats and the
   # signed compute contract survive a display-name change without migration.
@@ -107,6 +109,7 @@ MODEL_EFFORT_LEVELS: dict[str, list[str]] = {
 # honest when discovery is offline. Claude's model endpoint does not publish a
 # context field, so its documented per-model limits live at this adapter seam.
 MODEL_CONTEXT_WINDOWS: dict[str, int] = {
+  "claude-fable-5-1": 1_000_000,
   "claude-fable-5": 1_000_000,
   "claude-opus-5": 1_000_000,
   "claude-opus-4-8": 1_000_000,
@@ -130,8 +133,8 @@ MODEL_CONTEXT_WINDOWS: dict[str, int] = {
 }
 
 # Runtime recovery defaults are intentionally independent of picker order.
-# A stale or mismatched saved value must not silently opt an unattended retry
-# into subscription usage.
+# Fable is presented first in the interactive picker, but a stale/mismatched
+# saved value must not silently opt an unattended retry into usage credits.
 DEFAULT_MODELS = {
   "claude": "claude-opus-4-8",
   "codex": "gpt-5.6-sol",
@@ -144,6 +147,7 @@ DEFAULT_MODELS = {
 # an explicit empty hidden list) always wins over this starter set.
 DEFAULT_VISIBLE_MODEL_ORDER: dict[str, tuple[str, ...]] = {
   "claude": (
+    "claude-fable-5-1",
     "claude-fable-5",
     "claude-sonnet-5",
     "claude-opus-4-8",
@@ -214,23 +218,16 @@ def remove_legacy_global_auto_resume_setting(data_dir: str) -> bool:
     return write_agent_settings(data_dir, settings)
 
 
-def _known_model_provider(model: str) -> str | None:
-  """Return the unique registered provider that owns a known model id."""
-  owners = [
-    provider_id for provider_id, models in KNOWN_MODELS.items()
-    if model in models
-  ]
-  return owners[0] if len(owners) == 1 else None
-
-
 def _model_belongs_to_other_provider(model: str, provider: str) -> bool:
   """True when `model` is a KNOWN model for some OTHER provider.
   Use this to reject cross-provider mismatches without blocking
   unknown / future model names — the SDK is the authority on what
   it accepts; we only intercept the specific failure mode of
-  sending one provider's model to another."""
-  owner = _known_model_provider(model)
-  return owner is not None and owner != provider
+  sending a Codex model to Claude or vice versa."""
+  for p, models in KNOWN_MODELS.items():
+    if p != provider and model in models:
+      return True
+  return False
 
 
 def _load_agent_settings(data_dir: str) -> dict:
@@ -382,6 +379,57 @@ def effective_agent_settings(
         continue
       merged[k] = v
   return merged
+
+
+def snapshot_chat_agent_settings(
+  data_dir: str,
+  provider: str,
+  *,
+  model: str | None = None,
+  effort: str | None = None,
+  fallback_model: str | None = None,
+) -> dict | None:
+  """Freeze one coherent, explicit runtime choice onto a new chat.
+
+  Chat rows must not depend indefinitely on the mutable owner-settings file:
+  once a model has been selected, creation snapshots that model and the effort
+  fields beside it. ``None`` is returned only when neither an explicit/global
+  choice nor the caller's deliberate fallback exists — the narrow first-install
+  state where the owner's first chat must show the picker.
+
+  A provider-specific creator (app chat, delegation, unattended follow-up)
+  supplies its own fallback model so it can never manufacture a model-less
+  chat. Unknown future model ids remain valid for their declared provider, just
+  as they do in ``effective_agent_settings``; known cross-provider ids fail
+  instead of being silently rewritten.
+  """
+  if provider not in PROVIDERS:
+    raise ValueError(f"unknown provider: {provider}")
+  chosen_model = model.strip() if isinstance(model, str) and model.strip() else None
+  if chosen_model and _model_belongs_to_other_provider(chosen_model, provider):
+    raise ValueError("The selected model does not belong to that provider.")
+
+  overrides: dict[str, Any] = {}
+  if chosen_model is not None:
+    overrides["model"] = chosen_model
+  if isinstance(effort, str) and effort.strip():
+    overrides["effort"] = effort.strip()
+  effective = effective_agent_settings(
+    data_dir, overrides or None, provider=provider,
+  )
+  chosen_model = effective.get("model") or fallback_model
+  if not isinstance(chosen_model, str) or not chosen_model.strip():
+    return None
+  chosen_model = chosen_model.strip()
+  if _model_belongs_to_other_provider(chosen_model, provider):
+    raise ValueError("The selected model does not belong to that provider.")
+
+  snapshot = {"model": chosen_model}
+  for key in ("effort", "effort_by_provider"):
+    value = effective.get(key)
+    if value is not None:
+      snapshot[key] = value
+  return snapshot
 
 
 def _background_default_choice(
@@ -577,10 +625,6 @@ class BaseProvider:
   # Subdirectory under /data/cli-auth/ where credentials are stored.
   auth_dir: str = ""
   runtime_kind: Literal["claude_sdk", "codex_sdk"] | None = None
-  # App-owned providers stay unavailable unless their owning app is installed.
-  # None keeps ordinary credential-backed providers independent of app state.
-  required_app_slug: str | None = None
-  required_app_label: str | None = None
 
   def check_auth(self, data_dir: str) -> str | None:
     """Returns an error message if not authenticated, None if ok."""
@@ -798,8 +842,6 @@ class MobiusProvider(BaseProvider):
   cli_cmd = "codex"
   auth_dir = "mobius"
   runtime_kind = "codex_sdk"
-  required_app_slug = "identity"
-  required_app_label = "Möbius · You"
 
   @staticmethod
   def _socket_path() -> str:
@@ -919,7 +961,7 @@ DEFAULT_PROVIDER = "claude"
 # authenticated, prefer a connected provider over showing a dead default.
 # Codex is first because the setup wizard leads with it for new installs.
 # The app-owned subscription never silently replaces a user's connected coding
-# provider. It becomes selectable after Möbius · You is installed and linked.
+# provider. It remains selectable whenever its own credential preflight passes.
 CONNECTED_DEFAULT_ORDER = ("codex", "claude")
 
 
@@ -940,26 +982,6 @@ def provider_runtime_kind(
   return None
 
 
-def provider_requirement_error(
-  provider: str | BaseProvider | None,
-  db: Any,
-) -> str | None:
-  """Return the unmet app-ownership requirement for one provider, if any."""
-  instance = PROVIDERS.get(provider) if isinstance(provider, str) else provider
-  slug = getattr(instance, "required_app_slug", None)
-  if not slug:
-    return None
-  from app import models
-  installed = db.query(models.App.id).filter(
-    models.App.slug == slug,
-    models.App.deleted_at.is_(None),
-  ).first() is not None
-  if installed:
-    return None
-  label = getattr(instance, "required_app_label", None) or slug
-  return f"Install {label} to use {getattr(instance, 'name', 'this provider')}."
-
-
 def authenticated_provider_ids(data_dir: str) -> list[str]:
   """Return provider ids whose credential preflight currently passes."""
   ids: list[str] = []
@@ -968,6 +990,24 @@ def authenticated_provider_ids(data_dir: str) -> list[str]:
     if provider and provider.check_auth(data_dir) is None:
       ids.append(provider_id)
   return ids
+
+
+def provider_auth_report(data_dir: str) -> dict[str, str | None]:
+  """Return non-secret auth results for cheap connected-provider preflights.
+
+  The app-owned subscription depends on authenticated identity state and is
+  deliberately outside this unauthenticated hot-probe path.
+  """
+  report: dict[str, str | None] = {}
+  for provider_id in CONNECTED_DEFAULT_ORDER:
+    provider = PROVIDERS.get(provider_id)
+    if provider is None:
+      continue
+    try:
+      report[provider_id] = provider.check_auth(data_dir)
+    except Exception as exc:  # a provider preflight must never crash the probe
+      report[provider_id] = f"auth preflight error: {type(exc).__name__}"
+  return report
 
 
 def resolve_default_provider(
@@ -1153,18 +1193,15 @@ def _live_model_entries(
       continue
     live_by_id[raw["id"]] = raw
 
-  # The curated compatibility aliases are an owner-chosen product surface, not
-  # a mirror of one catalog response. Keep them available even when a provider
-  # temporarily omits an older-but-still-supported alias (Sonnet 4.6 / GPT-5.5)
-  # from discovery, then append every genuinely live extra in provider order.
-  if provider_id == "mobius":
-    ordered_ids = [mid for mid in KNOWN_MODELS["mobius"] if mid in live_by_id]
-  else:
-    preferred = DEFAULT_VISIBLE_MODEL_ORDER.get(provider_id, ())
-    ordered_ids = list(preferred)
-    ordered_ids.extend(
-      model_id for model_id in live_by_id if model_id not in preferred
-    )
+  # The live catalog is already ordered newest first by each provider. Keep
+  # that order intact so a just-released model is immediately the first choice
+  # in every picker. Older compatibility aliases remain available after the
+  # live catalog when discovery temporarily omits them.
+  ordered_ids = list(live_by_id)
+  ordered_ids.extend(
+    model_id for model_id in KNOWN_MODELS.get(provider_id, [])
+    if model_id not in live_by_id
+  )
   entries: list[dict[str, Any]] = []
   for model_id in ordered_ids:
     metadata = live_by_id.get(model_id, {})
@@ -1233,8 +1270,8 @@ def _read_claude_oauth(data_dir: str) -> tuple[Path, dict]:
   return creds_path, oauth
 
 
-def _write_claude_oauth(creds_path: Path, oauth: dict) -> None:
-  """Persists a refreshed claudeAiOauth block back to the credentials file
+def _write_claude_oauth(creds_path: Path, oauth: dict | None) -> None:
+  """Persist a claudeAiOauth block, or remove it when oauth is None,
   in the CLI's expected shape (atomic tmp+rename so a crash mid-write can't
   leave a truncated file the chat path then reads).
 
@@ -1253,10 +1290,15 @@ def _write_claude_oauth(creds_path: Path, oauth: dict) -> None:
   try:
     raw = json.loads(creds_path.read_text())
     if not isinstance(raw, dict):
-      raw = {}
+      raise ValueError("Claude credentials are not an object")
   except (OSError, ValueError):
+    if oauth is None:
+      raise  # Disconnect must not discard unrelated, unreadable credentials.
     raw = {}
-  raw["claudeAiOauth"] = oauth
+  if oauth is None:
+    raw.pop("claudeAiOauth", None)
+  else:
+    raw["claudeAiOauth"] = oauth
   try:
     mode = stat.S_IMODE(creds_path.stat().st_mode)
   except OSError:
@@ -1270,6 +1312,24 @@ def _write_claude_oauth(creds_path: Path, oauth: dict) -> None:
   except Exception:
     tmp.unlink(missing_ok=True)
     raise
+
+
+async def disconnect_provider(data_dir: str, provider_id: str) -> None:
+  """Remove only the local provider sign-in, not configuration or MCP access.
+
+  Already-running SDKs may retain their session; this is not remote token
+  revocation. Login cancellation belongs to the auth route. The Claude lock
+  prevents an in-flight model-registry refresh from restoring removed tokens.
+  """
+  if provider_id == "claude":
+    async with _claude_refresh_lock:
+      path = Path(data_dir) / "cli-auth" / "claude" / ".credentials.json"
+      if path.exists():
+        _write_claude_oauth(path, None)
+  elif provider_id == "codex":
+    (Path(data_dir) / "cli-auth" / "codex" / "auth.json").unlink(missing_ok=True)
+  else:
+    raise ValueError("This provider's connection is managed elsewhere")
 
 
 async def _refresh_claude_access_token(oauth: dict) -> dict:
@@ -1618,7 +1678,10 @@ async def _fetch_provider_models(
         ),
       }
       for row in rows
-      if isinstance(row, dict) and row.get("id") in KNOWN_MODELS["mobius"]
+      if (
+        isinstance(row, dict)
+        and row.get("id") in KNOWN_MODELS["mobius"]
+      )
     ]
   return []
 

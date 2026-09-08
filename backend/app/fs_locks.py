@@ -110,7 +110,22 @@ def app_storage_lock(app_id: int) -> asyncio.Lock:
 
 
 def project_build_lock(project_id: str) -> asyncio.Lock:
-  """Serialize artifact builds within one project to one build at a time."""
+  """Serialize artifact builds within one project to one build at a time.
+
+  A Möbius user pays for the CPU/RAM a build consumes on their own instance, so
+  each project runs at most one build (heavy tectonic/website builds) at once.
+  Held by ``project_builders.run_build`` across the whole build, so a second
+  build of any artifact in the same project waits rather than running
+  concurrently. This lock does NOT serialize the artifact-registry read-update-
+  commit against it: those writes stay short and are ordered by the single
+  event loop (all artifact-registry writers run on the loop with no await inside
+  their read-update-commit), which is why the registry cannot lose an update
+  even while a build holds this lock across its subprocess ``await``.
+
+  Follows the per-app-lock pattern: a ``WeakValueDictionary`` so an idle lock
+  garbage-collects itself, and the get-or-create is atomic from the event
+  loop's point of view (no ``await`` between the lookup and the insert).
+  """
   lock = _project_build_locks.get(project_id)
   if lock is None:
     lock = asyncio.Lock()

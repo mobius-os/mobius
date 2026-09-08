@@ -469,3 +469,138 @@ def test_a_real_legacy_process_error_remains_visible_without_stdout():
 def test_a_run_with_no_lookup_carries_no_recall_key():
   blocks = [(0, {"type": "tool", "tool": "Bash", "status": "done"})]
   assert "recall" not in _compact_activity_run(blocks, message_index=0, binding=BINDING)
+
+
+# --- a lookup run as a background task settles on its task_done --------------
+
+from app.memory_recall import (  # noqa: E402
+  background_dispatch_from_result,
+  background_recall_path,
+  defer_recall_to_task,
+  settle_recall_from_task_output,
+)
+
+BACKGROUND_PLACEHOLDER = (
+  "Command running in background with ID: bb6qfjun8. Output is being written "
+  "to: /data/agent-scratch/chat-1/claude-1000/-data/sess/tasks/bb6qfjun8.output. "
+  "You will be notified when it completes. To check interim output, use Read "
+  "on that file path."
+)
+
+
+def test_the_background_placeholder_is_recognized_and_bound_to_its_task():
+  assert background_dispatch_from_result(BACKGROUND_PLACEHOLDER) == {
+    "task_id": "bb6qfjun8",
+    "output_path": "/data/agent-scratch/chat-1/claude-1000/-data/sess/tasks/bb6qfjun8.output",
+  }
+  assert background_dispatch_from_result(HIT_OUTPUT) is None
+  assert background_dispatch_from_result("") is None
+  # The file must be named for the task it reports; anything else is not the
+  # host's placeholder.
+  assert background_dispatch_from_result(
+    BACKGROUND_PLACEHOLDER.replace("tasks/bb6qfjun8.output", "tasks/other.output"),
+  ) is None
+
+
+def test_the_placeholder_defers_the_lookup_instead_of_failing_it():
+  sink = object.__new__(_ChatEventSink)
+  sink.assistant_blocks = []
+  sink._recall_binding = BINDING
+  start = {"type": "tool_start", "tool": "Bash", "input": MEMORY_CMD,
+           "tool_use_id": "t1"}
+  sink._stamp_memory_recall(start)
+  process_event(start, sink.assistant_blocks)
+  out = {"type": "tool_output", "tool_use_id": "t1",
+         "content": BACKGROUND_PLACEHOLDER, "output_complete": True}
+  sink._stamp_memory_recall(out)
+  process_event(out, sink.assistant_blocks)
+  recall = sink.assistant_blocks[0]["recall"]
+  assert recall["status"] == RECALL_SEARCHING
+  assert recall["task_id"] == "bb6qfjun8"
+  assert recall["query"] == "what does he prefer"
+  assert recall["app_slug"] == "memory"
+
+
+def test_only_the_chats_own_scratch_task_file_may_settle_a_deferred_lookup():
+  pending = defer_recall_to_task({"app_slug": "memory"}, {
+    "task_id": "abc", "output_path": "/data/agent-scratch/chat-1/x/tasks/abc.output",
+  })
+  assert background_recall_path(pending, "/data/agent-scratch/chat-1") == (
+    "/data/agent-scratch/chat-1/x/tasks/abc.output"
+  )
+  assert background_recall_path(pending, "/data/agent-scratch/chat-2") is None
+  hostile = {**pending, "output_path": "/data/agent-scratch/chat-1/../chat-2/tasks/abc.output"}
+  assert background_recall_path(hostile, "/data/agent-scratch/chat-1") is None
+  wrong_name = {**pending, "output_path": "/data/agent-scratch/chat-1/x/tasks/zzz.output"}
+  assert background_recall_path(wrong_name, "/data/agent-scratch/chat-1") is None
+
+
+def test_task_output_settles_from_the_structured_line_and_exit_trailer():
+  pending = {"app_slug": "memory", "query": "q", "task_id": "abc"}
+  hit = settle_recall_from_task_output(pending, HIT_OUTPUT + "\n\n[exited with code 0]\n", "done")
+  assert hit["status"] == RECALL_HIT
+  assert hit["notes"][0]["app_slug"] == "memory"
+  crashed = settle_recall_from_task_output(pending, HIT_OUTPUT + "\n[exited with code 2]", "done")
+  assert crashed["status"] == RECALL_FAILED
+  # No trailer yet and the task did not finish cleanly: failed, not a hit.
+  killed = settle_recall_from_task_output(pending, HIT_OUTPUT, "killed")
+  assert killed["status"] == RECALL_FAILED
+  assert settle_recall_from_task_output(pending, None, "done")["status"] == RECALL_FAILED
+
+
+def test_task_done_settles_the_deferred_lookup_on_its_block(tmp_path, monkeypatch):
+  import app.chat_event_sink as sink_mod
+  monkeypatch.setattr(sink_mod, "agent_scratch_root", lambda: tmp_path)
+  task_dir = tmp_path / "chat-1" / "claude-1000" / "-data" / "sess" / "tasks"
+  task_dir.mkdir(parents=True)
+  (task_dir / "bb6qfjun8.output").write_text(HIT_OUTPUT + "\n\n[exited with code 0]\n")
+  placeholder = BACKGROUND_PLACEHOLDER.replace(
+    "/data/agent-scratch/chat-1", str(tmp_path / "chat-1"),
+  )
+
+  sink = object.__new__(_ChatEventSink)
+  sink.assistant_blocks = []
+  sink._recall_binding = BINDING
+  sink.chat_id = "chat-1"
+  events = [
+    {"type": "tool_start", "tool": "Bash", "input": MEMORY_CMD, "tool_use_id": "t1"},
+    {"type": "tool_output", "tool_use_id": "t1", "content": placeholder,
+     "output_complete": True},
+    {"type": "task_start", "task_id": "bb6qfjun8", "tool_use_id": "t1",
+     "description": "Memory lookup", "task_type": "local_bash"},
+  ]
+  for event in events:
+    sink._stamp_memory_recall(event)
+    process_event(event, sink.assistant_blocks)
+  assert sink.assistant_blocks[0]["recall"]["status"] == RECALL_SEARCHING
+
+  done = {"type": "task_done", "task_id": "bb6qfjun8", "tool_use_id": None,
+          "status": "completed", "summary": "done"}
+  sink._stamp_deferred_recall_done(done)
+  process_event(done, sink.assistant_blocks)
+  recall = sink.assistant_blocks[0]["recall"]
+  assert recall["status"] == RECALL_HIT
+  assert recall["query"] == "what does he prefer"
+  assert [n["id"] for n in recall["notes"]] == [
+    "apps-render-in-a-sandboxed-frame", "theme-variables-are-shared",
+  ]
+  assert done["recall"] == recall, "the live wire carries the same settled recall"
+
+
+def test_a_deferred_lookup_never_persists_as_searching_after_finalize(tmp_path, monkeypatch):
+  import app.chat_event_sink as sink_mod
+  monkeypatch.setattr(sink_mod, "agent_scratch_root", lambda: tmp_path)
+  sink = object.__new__(_ChatEventSink)
+  sink.assistant_blocks = [{
+    "type": "tool", "tool": "Bash", "status": "done", "tool_use_id": "t1",
+    "recall": {"status": RECALL_SEARCHING, "task_id": "zzz",
+               "output_path": str(tmp_path / "chat-1" / "tasks" / "zzz.output"),
+               "app_slug": "memory", "query": "q"},
+  }]
+  sink.chat_id = "chat-1"
+  # The task's file never appeared: the lookup is reported failed, not left
+  # spinning in the transcript.
+  for blk in sink._deferred_recall_blocks():
+    blk["recall"] = sink._settle_deferred_recall(blk["recall"], None)
+  assert sink.assistant_blocks[0]["recall"]["status"] == RECALL_FAILED
+  assert sink.assistant_blocks[0]["recall"]["query"] == "q"

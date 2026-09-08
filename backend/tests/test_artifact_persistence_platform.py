@@ -1095,11 +1095,25 @@ def test_published_page_lists_keys_through_its_own_capability(client, auth, db):
   assert listing.status_code == 200, listing.text
   assert listing.json()["keys"] == ["config", "score"]
 
+  # New Pages generations use the shared public-storage capability. The old
+  # published-sites route above is only a compatibility alias over this same
+  # generation-bound namespace.
+  bearer = {"Authorization": f"Bearer {token}"}
+  canonical = client.get("/api/public-storage", headers=bearer)
+  assert canonical.status_code == 200, canonical.text
+  assert [entry["name"] for entry in canonical.json()["entries"]] == [
+    "config.json", "score.json",
+  ]
+  assert client.get(
+    "/api/public-storage/score.json", headers=bearer,
+  ).json() == {"k": "score"}
+
   # Revoking the publication takes the listing down with it.
   assert client.delete(
     f"/api/apps/{app_id}/publish?project_id=shared-deck", headers=auth,
   ).status_code in (200, 204)
   assert client.get(f"/api/published-sites/{token}/data").status_code == 404
+  assert client.get("/api/public-storage", headers=bearer).status_code == 401
 
 
 def test_published_listing_is_read_only_and_unknown_tokens_404(client, auth):

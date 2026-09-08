@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from app import auth as token_auth, models
+from app import auth as token_auth, contribution_runtime, models
 from app.config import get_settings
 
 
@@ -240,3 +240,76 @@ def test_db_sidecars_denied(client, auth, fsroot):
     assert client.put("/api/fs/write", params={"path": f"db/{name}"},
                       content="x",
                       headers={**auth, "Content-Type": "text/plain"}).status_code == 403
+
+
+def test_contribution_runtime_is_denied_to_privileged_filesystem_api(
+  client, auth, owner_token, db, fsroot,
+):
+  root, work, made = fsroot
+  app_auth, app = _app_auth(db, filesystem_access=True)
+  private_file = contribution_runtime.personal_attempt_path(
+    app.id, "fs-private-review", create_parent=True,
+  )
+  private_file.write_text("server-owned receipt", encoding="utf-8")
+  runtime_root = root / ".contribution-runtime"
+  made.append(runtime_root)
+  alias = work / "runtime-alias"
+  alias.symlink_to(runtime_root, target_is_directory=True)
+
+  direct_file = private_file.relative_to(root).as_posix()
+  direct_dir = private_file.parent.relative_to(root).as_posix()
+  alias_file = (
+    alias.relative_to(root) / private_file.relative_to(runtime_root)
+  ).as_posix()
+  alias_dir = str(Path(alias_file).parent)
+
+  # Direct backend access remains available to the owning publication helpers.
+  assert private_file.read_text(encoding="utf-8") == "server-owned receipt"
+
+  for headers in (auth, app_auth):
+    root_tree = client.get("/api/fs/tree", headers=headers)
+    assert root_tree.status_code == 200, root_tree.text
+    assert ".contribution-runtime" not in {
+      entry["name"] for entry in root_tree.json()["entries"]
+    }
+    assert ".contribution-runtime" in root_tree.json()["redacted"]
+
+    for private_dir in (
+      direct_dir,
+      f"/{direct_dir}",
+      f"./{direct_dir}",
+      alias_dir,
+    ):
+      assert client.get(
+        "/api/fs/tree", params={"path": private_dir}, headers=headers,
+      ).status_code == 403
+      assert client.get(
+        "/api/fs/du", params={"path": private_dir}, headers=headers,
+      ).status_code == 403
+      assert client.get(
+        "/api/fs/git", params={"path": private_dir}, headers=headers,
+      ).status_code == 403
+
+    for private_path in (direct_file, f"/{direct_file}", alias_file):
+      assert client.get(
+        "/api/fs/read", params={"path": private_path}, headers=headers,
+      ).status_code == 403
+      assert client.put(
+        "/api/fs/write",
+        params={"path": private_path},
+        content="app-writable replacement",
+        headers={**headers, "Content-Type": "text/plain"},
+      ).status_code == 403
+      assert client.delete(
+        "/api/fs/delete", params={"path": private_path}, headers=headers,
+      ).status_code == 403
+      assert private_file.read_text(encoding="utf-8") == "server-owned receipt"
+
+    new_private_path = f"{direct_dir}/new-receipt.json"
+    assert client.put(
+      "/api/fs/write",
+      params={"path": new_private_path},
+      content="new capability",
+      headers={**headers, "Content-Type": "text/plain"},
+    ).status_code == 403
+    assert not (private_file.parent / "new-receipt.json").exists()

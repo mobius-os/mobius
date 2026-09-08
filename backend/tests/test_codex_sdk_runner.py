@@ -325,6 +325,7 @@ def _fake_sdk(async_codex_cls):
     none = "none"
 
   return {
+    "AccountRateLimitsUpdatedNotification": _Dummy,
     "AgentMessageDeltaNotification": _Dummy,
     "AgentMessageThreadItem": _Dummy,
     "ApprovalMode": _FakeApprovalMode,
@@ -334,6 +335,7 @@ def _fake_sdk(async_codex_cls):
     "CodexRpcError": _FakeCodexRpcError,
     "CommandExecutionOutputDeltaNotification": _Dummy,
     "CommandExecutionThreadItem": _Dummy,
+    "CollabAgentToolCallThreadItem": _Dummy,
     "ContextCompactedNotification": _Dummy,
     "ContextCompactionThreadItem": _Dummy,
     "DynamicToolCallThreadItem": _Dummy,
@@ -347,6 +349,9 @@ def _fake_sdk(async_codex_cls):
     "ReasoningEffort": _FakeReasoningEffort(),
     "ReasoningSummary": _FakeReasoningSummary(),
     "Sandbox": _FakeSandbox,
+    "SubAgentActivityThreadItem": _Dummy,
+    "ThreadStartedNotification": _Dummy,
+    "ThreadStatusChangedNotification": _Dummy,
     "ItemCompletedNotification": _Dummy,
     "ItemGuardianApprovalReviewCompletedNotification": _Dummy,
     "ItemGuardianApprovalReviewStartedNotification": _Dummy,
@@ -796,6 +801,51 @@ def test_active_codex_turn_interrupt_waits_for_runner_finish():
     assert task.done() is False
     active_turn.mark_finished()
     await asyncio.wait_for(task, timeout=1)
+
+  asyncio.run(_scenario())
+
+
+def test_active_codex_turn_owner_card_finish_is_a_clean_non_stop_end():
+  """A continuation owner-input card ends the turn on our initiative, so the
+  resulting TurnStatus.interrupted must read as a clean completion — but it is
+  NOT Stop. It marks only `owner_card_requested` (never `interrupt_requested`),
+  so Stop's queue-clear / generation-bump never runs and the chat resumes from
+  the owner's saved answer. Signal-only: it interrupts the live turn without
+  waiting for drain, and does not re-fire if the card path is entered twice."""
+  async def _scenario() -> None:
+    turn = _FakeTurnHandle()
+    active = codex_sdk_runner.ActiveCodexTurn(
+      object(), turn, chat_id="chat-owner-card",
+    )
+    assert active.owner_card_requested is False
+    assert active.is_steerable is True
+
+    await active.finish_after_owner_card()
+    assert turn.interrupt_calls == 1
+    assert active.owner_card_requested is True
+    # A card end is ours, but not a Stop.
+    assert active.interrupt_requested is False
+    # Once the card owns the end, the turn is no longer steerable.
+    assert active.is_steerable is False
+    # Idempotent — a second entry does not double-interrupt.
+    await active.finish_after_owner_card()
+    assert turn.interrupt_calls == 1
+
+  asyncio.run(_scenario())
+
+
+def test_active_codex_turn_owner_card_finish_defers_to_stop():
+  """When a Stop already owns the turn, a racing card commit must not interrupt
+  again or claim card ownership — Stop's teardown wins."""
+  async def _scenario() -> None:
+    turn = _FakeTurnHandle()
+    active = codex_sdk_runner.ActiveCodexTurn(
+      object(), turn, chat_id="chat-card-vs-stop",
+    )
+    active._interrupt_requested = True  # Stop owns the turn.
+    await active.finish_after_owner_card()
+    assert turn.interrupt_calls == 0
+    assert active.owner_card_requested is False
 
   asyncio.run(_scenario())
 
@@ -1678,6 +1728,14 @@ def test_subagent_activity_item_dispatch_stays_out_of_tool_stream():
   assert started["occurred_at"] == 123_000
   assert started["provider_activation_id"] == "activation-1"
 
+  item.kind = "completed"
+  completed = codex_sdk_runner._subagent_lifecycle_event(
+    item, sdk, provider_session_id="root-thread", occurred_at=124_000,
+    provider_activation_id="activation-1",
+  )
+  assert completed["event_type"] == "agent_terminal"
+  assert completed["state"] == "done"
+
   item.kind = "interrupted"
   assert codex_sdk_runner._subagent_lifecycle_event(
     item, sdk, provider_session_id="root-thread",
@@ -2423,21 +2481,30 @@ def test_run_codex_sdk_turn_self_requested_kill_still_reports_usage(
 
 
 def test_run_codex_sdk_turn_unrequested_transport_death_stays_an_error(
-  monkeypatch,
+  monkeypatch, caplog,
 ):
   """The same transport death with no stop pending is still a real failure.
 
-  Only a teardown we asked for may be reclassified, so a provider-side
-  crash keeps its error.
+  Only a teardown we asked for may be reclassified, so a provider-side crash
+  stays an error. Its owner-facing text is the clean, copyable message rather
+  than the raw "closed stdout. stderr_tail=..." dump; the full dying words are
+  preserved in the server log for forensics.
   """
   result, _bc = _run_turn_whose_stream_dies(
     monkeypatch,
-    _KilledTransportError("Codex process closed stdout. stderr_tail="),
+    _KilledTransportError("Codex process closed stdout. stderr_tail=boom"),
   )
 
-  assert result["error"] == "Codex process closed stdout. stderr_tail="
+  assert result["error"] == codex_sdk_runner._TRANSPORT_DEATH_MESSAGE
+  assert "stderr_tail" not in result["error"]
   assert result.get("terminal_status") is None
   assert registry.get_handle("chat-1", RunnerKind.CODEX_SDK) is None
+  assert any(
+    record.levelname == "ERROR"
+    and "closed unexpectedly" in record.message
+    and "stderr_tail=boom" in record.message
+    for record in caplog.records
+  )
 
 
 def test_run_codex_sdk_turn_non_transport_failure_during_stop_stays_an_error(
@@ -3310,22 +3377,6 @@ def test_tool_completed_events_collab_wait_is_ordinary_tool_end():
   assert all(not event["type"].startswith("task_") for event in events)
 
 
-def test_collab_branch_skipped_when_sdk_lacks_type():
-  # An SDK/build without the collab type registers None; the builders must fall
-  # through to their tool branches, never raise on isinstance(item, None).
-  sdk = {
-    "CollabAgentToolCallThreadItem": None,
-    "CommandExecutionThreadItem": type("CommandExecutionThreadItem", (), {}),
-    "FileChangeThreadItem": type("FileChangeThreadItem", (), {}),
-    "McpToolCallThreadItem": type("McpToolCallThreadItem", (), {}),
-    "DynamicToolCallThreadItem": type("DynamicToolCallThreadItem", (), {}),
-    "WebSearchThreadItem": type("WebSearchThreadItem", (), {}),
-    "AgentMessageThreadItem": type("AgentMessageThreadItem", (), {}),
-  }
-  assert codex_sdk_runner._tool_start_event(_FakeCollabItem(), sdk) is None
-  assert codex_sdk_runner._tool_completed_events(_FakeCollabItem(), sdk) == []
-
-
 def test_record_collab_child_links_attributes_spawned_children(db):
   # Locks the DEFENSIVE path: on codex 0.144.5 receiver_thread_ids is always
   # empty so this never fires in production, but a future SDK that populates it
@@ -3465,12 +3516,92 @@ def test_ordinary_codex_turns_do_not_expose_provider_private_goal_tools():
   ) is True
 
 
+def test_read_delegation_config_selects_container_safe_landlock():
+  ordinary = codex_sdk_runner._codex_config_overrides(
+    allow_questions=False, allow_multi_agent=False, allow_goals=False,
+  )
+  delegated = codex_sdk_runner._codex_config_overrides(
+    allow_questions=False,
+    allow_multi_agent=False,
+    allow_goals=False,
+    delegated_read_sandbox=True,
+  )
+
+  assert "features.use_legacy_landlock=true" not in ordinary
+  assert "features.use_legacy_landlock=true" in delegated
+  assert "features.network_proxy.enabled=true" not in ordinary
+  assert "features.network_proxy.enabled=true" in delegated
+  assert any(
+    "localhost" in override and '"127.0.0.1" = "allow"' in override
+    for override in delegated
+  )
+
+
+def test_read_delegation_turn_keeps_files_read_only_and_allows_proxy_network():
+  from openai_codex import ApprovalMode
+
+  captured = {}
+
+  class FakeClient:
+    async def turn_start(self, thread_id, wire_input, *, params):
+      captured.update(
+        thread_id=thread_id,
+        wire_input=wire_input,
+        params=params,
+      )
+      return SimpleNamespace(turn=SimpleNamespace(id="turn-read-network"))
+
+  class FakeCodex:
+    def __init__(self):
+      self._client = FakeClient()
+
+    async def _ensure_initialized(self):
+      captured["initialized"] = True
+
+  thread = SimpleNamespace(id="thread-read-network", _codex=FakeCodex())
+
+  handle = asyncio.run(codex_sdk_runner._start_codex_turn(
+    thread,
+    "delegate through localhost",
+    cwd="/data",
+    model=None,
+    effort=None,
+    summary=None,
+    delegated_read=True,
+    approval_mode=ApprovalMode.deny_all,
+  ))
+
+  policy = captured["params"].sandbox_policy.root
+  assert captured["initialized"] is True
+  assert handle.id == "turn-read-network"
+  assert policy.type == "readOnly"
+  assert policy.network_access is True
+  assert captured["params"].approval_policy.root.value == "never"
+
+
+def test_delegated_codex_approval_guard_fails_closed():
+  sync = SimpleNamespace(_approval_handler=None)
+  codex = SimpleNamespace(_client=SimpleNamespace(_sync=sync))
+
+  codex_sdk_runner._install_delegated_approval_handler(
+    codex, chat_id="delegated-child",
+  )
+
+  assert sync._approval_handler(
+    "item/commandExecution/requestApproval", {"command": ["touch", "x"]},
+  ) == {"decision": "decline"}
+  assert sync._approval_handler(
+    "item/fileChange/requestApproval", {"reason": "edit"},
+  ) == {"decision": "decline"}
+  assert sync._approval_handler("unknown/method", {}) == {}
+
+
 @pytest.mark.parametrize(
-  "scope, expected_sandbox, expected_approval",
+  "scope, expected_sandbox, expected_approval, expects_landlock",
   [
-    (None, "full-access", "auto_review"),
-    ("read", "read-only", "deny_all"),
-    ("write", "full-access", "deny_all"),
+    (None, "full-access", "auto_review", False),
+    ("read", "read-only", "deny_all", True),
+    ("write", "full-access", "deny_all", False),
   ],
 )
 @pytest.mark.parametrize("session_id", [None, "thread-policy"])
@@ -3479,6 +3610,7 @@ def test_codex_delegation_policy_reaches_the_provider_boundary(
   scope,
   expected_sandbox,
   expected_approval,
+  expects_landlock,
   session_id,
 ):
   completed = SimpleNamespace(id="turn-policy", usage=None, error=None)
@@ -3513,10 +3645,14 @@ def test_codex_delegation_policy_reaches_the_provider_boundary(
   monkeypatch.setattr(
     codex_sdk_runner, "_sdk_imports", lambda: _fake_sdk(FakeAsyncCodex),
   )
-  policy = None if scope is None else SimpleNamespace(
-    scope=scope,
-    allow_session_reseed=False,
-  )
+  if scope == "read":
+    async def fake_start_turn(thread, user_message, **_kwargs):
+      return await thread.turn(user_message)
+
+    monkeypatch.setattr(
+      codex_sdk_runner, "_start_codex_turn", fake_start_turn,
+    )
+  policy = None if scope is None else SimpleNamespace(scope=scope)
 
   result = asyncio.run(codex_sdk_runner.run_codex_sdk_turn(
     user_message="inspect",
@@ -3530,6 +3666,7 @@ def test_codex_delegation_policy_reaches_the_provider_boundary(
     run_policy=policy,
   ))
 
+  overrides = captured["config"].kwargs["config_overrides"]
   assert captured["thread"]["sandbox"] == expected_sandbox
   assert captured["thread"]["approval_mode"] == expected_approval
   control = captured["thread"]["config"]["mcp_servers"]["mobius_control"]
@@ -3539,6 +3676,9 @@ def test_codex_delegation_policy_reaches_the_provider_boundary(
       top_level=scope is None,
     )
   }
+  assert (
+    "features.use_legacy_landlock=true" in overrides
+  ) is expects_landlock
   assert result["error"] is None
 
 
@@ -4285,6 +4425,57 @@ def test_extract_rate_limit_reset_handles_empty_and_none():
     primary=None, secondary=None, rate_limit_reached_type=None
   )
   assert codex_sdk_runner._extract_rate_limit_reset(empty) == (None, False)
+
+
+def test_explicit_data_dir_keeps_out_of_band_runner_off_server_settings(
+  monkeypatch, tmp_path,
+):
+  """Scheduled callers need the SDK runner without the server secret config."""
+  from app import codex_session_lock, config
+
+  class _Ownership:
+    def release(self):
+      return None
+
+  captured = {}
+
+  async def fake_acquire(data_dir):
+    captured["lock_data_dir"] = data_dir
+    return _Ownership()
+
+  async def fake_inner(*args, **kwargs):
+    captured["inner_data_dir"] = kwargs.get("data_dir")
+    return {"session_id": None, "cost_usd": None, "error": None}
+
+  monkeypatch.setattr(
+    codex_session_lock,
+    "acquire_codex_session_activity_async",
+    fake_acquire,
+  )
+  monkeypatch.setattr(codex_sdk_runner, "_run_codex_sdk_turn", fake_inner)
+  monkeypatch.setattr(
+    config,
+    "get_settings",
+    lambda: pytest.fail("explicit data_dir must not load server settings"),
+  )
+
+  result = asyncio.run(codex_sdk_runner.run_codex_sdk_turn(
+    user_message="nightly",
+    session_id=None,
+    base_env={},
+    cwd=str(tmp_path),
+    chat_id="reflection-nightly",
+    bc=_FakeBroadcast(),
+    pending_questions={},
+    db=None,
+    data_dir=str(tmp_path),
+  ))
+
+  assert result["error"] is None
+  assert captured == {
+    "lock_data_dir": str(tmp_path),
+    "inner_data_dir": str(tmp_path),
+  }
 
 
 def test_run_codex_sdk_turn_reseeds_lost_session_and_records_event(monkeypatch):

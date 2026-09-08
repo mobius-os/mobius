@@ -79,6 +79,9 @@ def test_production_startup_plan_has_explicit_unique_order():
 
   assert len(names) == len(set(names))
   assert startup.PROCESS_STARTUP_TASKS[-1].name == "initialize database"
+  assert names.index("sweep Codex provider sessions") < names.index(
+    "configure Claude provider retention"
+  ) < names.index("initialize database")
   assert startup.DATABASE_STARTUP_TASKS[0].name == "start chat writer"
   assert names.index("initialize database") < names.index("start chat writer")
   assert names.index("start chat writer") < names.index(
@@ -89,10 +92,58 @@ def test_production_startup_plan_has_explicit_unique_order():
   )
   assert names.index("start chat writer") < names.index("fix forward chat media")
   assert names.index("start chat writer") < names.index("reconcile startup chats")
+  assert names.index("freeze legacy app runtimes") < names.index("reconcile startup chats")
+  assert names.index("freeze legacy app runtimes") < names.index("reconcile app cron supervision")
   assert names.index("initialize push") < names.index("notify reconciled chats")
   assert names.index("install bootstrap apps") < names.index(
     "reconcile app cron supervision"
   )
+
+
+@pytest.mark.asyncio
+async def test_claude_config_failure_cannot_suppress_pre_db_codex_reclaim(
+  monkeypatch,
+):
+  import app.provider_session_retention as retention
+
+  events = []
+
+  def sweep(_data_dir):
+    events.append("codex-swept")
+    return {
+      "status": "completed",
+      "reclaimed_bytes": 0,
+      "removed_files": 0,
+      "errors": 0,
+    }
+
+  def fail_claude(_data_dir):
+    events.append("claude-failed")
+    raise OSError("settings disk full")
+
+  monkeypatch.setattr(retention, "sweep_stale_provider_sessions", sweep)
+  monkeypatch.setattr(retention, "ensure_claude_retention_default", fail_claude)
+  tasks = tuple(
+    task for task in startup.PROCESS_STARTUP_TASKS
+    if task.name in {
+      "sweep Codex provider sessions",
+      "configure Claude provider retention",
+    }
+  )
+
+  ctx = context()
+  await run_startup_tasks(ctx, tasks)
+
+  assert events == ["codex-swept", "claude-failed"]
+  assert ctx.failed_tasks == ["configure Claude provider retention"]
+
+
+def test_active_assistant_backfill_command_is_available_to_startup():
+  """Keep the startup task and its writer-owned command in one release."""
+  from app.chat_writer import BackfillAssistantIdentity
+
+  command = BackfillAssistantIdentity(chat_id="legacy-chat")
+  assert command.chat_id == "legacy-chat"
 
 
 @pytest.mark.asyncio

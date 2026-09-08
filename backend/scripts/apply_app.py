@@ -36,6 +36,12 @@ def _receipt(result: dict) -> dict:
 
 def main() -> None:
   args = sys.argv[1:]
+  if args in (["-h"], ["--help"]):
+    print(
+      "Usage: apply_app.py [--accept-local-package] <source-dir>\n"
+      "Validate first: python3 /data/platform/backend/scripts/validate-app.py <source-dir>"
+    )
+    return
   accept_local_package = False
   if "--accept-local-package" in args:
     accept_local_package = True
@@ -60,8 +66,13 @@ def main() -> None:
   payload = {
     "source_dir": source_dir,
     "chat_id": os.environ.get("CHAT_ID") or None,
-    "accept_local_package": accept_local_package,
   }
+  # Older running backends predate the opt-in package-authority field and
+  # correctly reject unknown input. Omit the default rather than sending a
+  # meaningless false, so source-only app applies remain rolling-compatible;
+  # the explicit flag still requires a backend that understands the contract.
+  if accept_local_package:
+    payload["accept_local_package"] = True
   request = urllib.request.Request(
     f"{base}/api/apps/apply",
     data=json.dumps(payload).encode(),

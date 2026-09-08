@@ -5,10 +5,6 @@ from urllib.parse import unquote, urlparse
 import re
 
 REQUIRED_STRING_FIELDS = ("id", "name", "version", "description", "entry")
-# Capability permissions this Möbius build recognizes. An app MAY list any of
-# these in `requires` to demand the platform actually provides them; requiring a
-# name absent here fails the install loudly instead of granting nothing in
-# silence. Extending a capability (e.g. the identity bridge) adds its name here.
 RECOGNIZED_CAPABILITIES = (
   "manage_apps",
   "manage_skills",
@@ -258,7 +254,9 @@ def validate_manifest_contract(manifest) -> None:
       seen_template_ids.add(template_id)
       if not isinstance(template.get("name"), str) or not template["name"].strip():
         _fail(f"Manifest `{field}.name` must be a non-empty string.")
-      for text_field in ("description", "guidance"):
+      if "retired" in template and not isinstance(template["retired"], bool):
+        _fail(f"Manifest `{field}.retired` must be a boolean.")
+      for text_field in ("description", "guidance", "kind"):
         value = template.get(text_field)
         if value is not None and not isinstance(value, str):
           _fail(f"Manifest `{field}.{text_field}` must be a string.")
@@ -382,10 +380,8 @@ def validate_manifest_contract(manifest) -> None:
         )
         validate_repo_relative_path(rendered_output, f"{artifact_field}.output")
 
-  # An app declares the platform capabilities it cannot function without. A name
-  # this build does not recognize means the running Möbius predates the feature
-  # the app needs, so refuse the install loudly here rather than let it land in a
-  # permanently broken state where the capability is silently ungranted.
+  # Required platform capabilities fail loudly on older Möbius builds rather
+  # than installing an app whose essential grant can never become effective.
   requires = manifest.get("requires", [])
   if not isinstance(requires, list) or not all(
     isinstance(name, str) for name in requires

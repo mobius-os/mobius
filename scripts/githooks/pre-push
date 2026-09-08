@@ -114,9 +114,8 @@ changed_list()  { echo "$CHANGED" | grep -E "$1" || true; }
 resolve_frontend_node_modules() {
   local worktree_modules="$ROOT/frontend/node_modules"
   local shared_modules="$MAIN/frontend/node_modules"
-  if [ -d "$worktree_modules" ] \
-      && (cd "$ROOT/frontend" && npm ls --depth=0 >/dev/null 2>&1); then
-    printf '%s\n' "$worktree_modules"
+  if MOBIUS_FRONTEND_STATUS="$(mobius_frontend_deps_status "$ROOT/frontend")"; then
+    readlink -f "$worktree_modules"
     return 0
   fi
   if [ "$ROOT" != "$MAIN" ] \
@@ -128,6 +127,20 @@ resolve_frontend_node_modules() {
   fi
   return 1
 }
+
+# The installed hook is shared by linked worktrees, including reviews based on
+# an older commit that predates this helper. The main checkout owns the hook's
+# runtime support while the helper still validates the review checkout passed
+# to it.
+# shellcheck source=../../scripts/frontend-deps.sh
+source "$MAIN/scripts/frontend-deps.sh"
+MOBIUS_FRONTEND_STATUS="$(mobius_frontend_deps_status "$ROOT/frontend" 2>/dev/null || true)"
+if [ "$MOBIUS_FRONTEND_STATUS" = "lock-mismatch" ] \
+    && changed_match '^frontend/'; then
+  err "frontend/node_modules does not match this package-lock.json"
+  err "  replace a borrowed symlink or run: (cd frontend && npm ci)"
+  fail_check frontend-deps-lock
+fi
 
 # Seed-skill Markdown is shipped content, not executable backend code. Treating
 # it as a backend change made a direct main push run ten minutes of pytest
@@ -221,8 +234,9 @@ fi
 # runner approval, and create_all-based tests can mask a missing upgrade. Any
 # change to the ORM or migration owner must prove that published functions are
 # untouched and version numbers are append-only before it leaves the machine.
-if changed_match '^(backend/app/models\.py|backend/app/schema_migrations\.py|backend/scripts/check-schema-migrations\.py|backend/tests/fixtures/(migration_history\.json|schema_[0-9]+\.sql))$'; then
-  if python3 backend/scripts/check-schema-migrations.py >"$PP_TMP/schema" 2>&1; then
+if changed_match '^(backend/app/models\.py|backend/app/schema_migrations\.py|backend/scripts/check-schema-migrations\.py|backend/tests/fixtures/schema_[0-9]+\.sql)$'; then
+  if python3 backend/scripts/check-schema-migrations.py --against origin/main \
+      >"$PP_TMP/schema" 2>&1; then
     ok "schema migration history is append-only"
   else
     err "schema migration history FAILED:"
@@ -251,14 +265,15 @@ fi
 # 4. Frontend-unit — only when frontend changed (~6s). Mirrors the CI
 #    frontend-unit job, so a logic regression is caught here in seconds.
 if changed_match '^frontend/'; then
-  if command -v npm >/dev/null 2>&1 \
-      && (cd frontend && npm ls --depth=0 >/dev/null 2>&1); then
+  if [ "$MOBIUS_FRONTEND_STATUS" = "ready" ]; then
     warn "running frontend-unit…"
     if (cd frontend && npm test >"$PP_TMP/fe" 2>&1); then
       ok "frontend-unit passed"
     else
       err "frontend-unit FAILED:"; tail -n 30 "$PP_TMP/fe" | sed 's/^/    /' >&2; fail_check frontend-unit
     fi
+  elif [ "$MOBIUS_FRONTEND_STATUS" = "lock-mismatch" ]; then
+    : # The provenance failure above already owns the actionable diagnostic.
   elif ! command -v npm >/dev/null 2>&1; then
     warn "frontend changed, npm not found — skipping frontend-unit (CI runs it)."
   else

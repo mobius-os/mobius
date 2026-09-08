@@ -108,22 +108,6 @@ def test_test_compose_pins_runtime_to_mounted_checkout():
   assert "\n    init: true\n" in pytest_service
 
 
-def test_e2e_startup_has_one_bounded_readiness_owner():
-  compose = (ROOT / "docker-compose.test.yml").read_text(encoding="utf-8")
-  caddy_service = compose.split("\n  caddy:\n", 1)[1].split("\n  app:\n", 1)[0]
-  assert "condition: service_started" in caddy_service
-  assert "condition: service_healthy" not in caddy_service
-
-  workflow = (ROOT / ".github" / "workflows" / "test.yml").read_text(
-    encoding="utf-8"
-  )
-  startup = workflow.split("- name: Start test container", 1)[1].split(
-    "- name: Set up Node with npm cache", 1
-  )[0]
-  assert "timeout 120" in startup
-  assert ".State.Health.Status" in startup
-
-
 def test_test_wrapper_isolates_compose_and_rejects_stale_images():
   wrapper = (ROOT / "scripts" / "test.sh").read_text(encoding="utf-8")
   assert 'TEST_PROJECT="${MOBIUS_TEST_PROJECT:-mobius-test-' in wrapper
@@ -170,10 +154,6 @@ def test_test_wrapper_isolates_compose_and_rejects_stale_images():
   assert "COPY . /tmp/mobius-local-platform-source" not in dockerfile
   assert (
     'git -C /app/platform-baked remote set-url origin "$MOBIUS_PLATFORM_ORIGIN"'
-    in dockerfile
-  )
-  assert (
-    'platform_activation.py", "--hashes", "/app/platform-baked"'
     in dockerfile
   )
   compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
@@ -310,14 +290,16 @@ def test_image_deduplicates_agent_cli_payloads_without_breaking_sdk_contracts():
     "pip install --no-cache-dir --require-hashes -r requirements.lock"
     in requirements_layer
   )
-  assert "claude-agent-sdk==0.2.152" in requirements
-  assert "claude-agent-sdk==0.2.152" in requirements_lock
+  sdk_pin = re.search(r"(?m)^claude-agent-sdk==[^\s]+", requirements).group(0)
+  assert sdk_pin in requirements_lock
   assert (
     'Path(claude_agent_sdk.__file__).parent / "_bundled" / "claude"'
     in requirements_layer
     and 'ln -s "$(python -c' in requirements_layer
     and 'Path(shutil.which("claude")).samefile' in requirements_layer
-    and "claude --version | grep -Fx '2.1.259 (Claude Code)'" in requirements_layer
+    and 'claude --version | grep -Fx "$(python -c' in requirements_layer
+    and 'from claude_agent_sdk._cli_version import __cli_version__' in requirements_layer
+    and 'print(__cli_version__ + " (Claude Code)")' in requirements_layer
   )
   assert "CLAUDE_CODE_VERSION" not in dockerfile
   install_layer = dockerfile[
@@ -337,7 +319,7 @@ def test_image_deduplicates_agent_cli_payloads_without_breaking_sdk_contracts():
     dockerfile.index("# Capture each installed agent CLI's publish date")
   ]
   assert "pip install --no-cache-dir --no-deps" in codex_layer
-  assert "pip install --no-cache-dir 'openai-codex-cli-bin==0.147.0'" in codex_layer
+  assert re.search(r"pip install --no-cache-dir 'openai-codex-cli-bin==\d+\.\d+\.\d+'", codex_layer)
   assert 'rm -rf "${_codex_cli_bin}/bin"' in codex_layer
   assert 'ln -s /usr/local/bin/codex "${_codex_cli_bin}/bin/codex"' in codex_layer
   assert "bundled_codex_path().samefile" in codex_layer

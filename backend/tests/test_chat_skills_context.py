@@ -231,10 +231,22 @@ def test_goal_waits_always_name_a_durable_owner_interaction():
   assert "create exactly one owning interaction" in planning_normalized
   assert "keeps the Goal marked **Waiting for you**" in planning_normalized
   assert "Do not end with “tell me when…”" in planning_normalized
-  assert "durable owner holds it" in waiting_normalized
+  assert "# Waiting visibly — durable monitors or explicit owner actions" in waiting
   assert "`--owner` is required for command waits" in waiting_normalized
   assert "exit **0 exactly when the condition is met**" in waiting_normalized
   assert "A wait declared inside a Goal resumes under the same Goal" in waiting_normalized
+
+
+def test_core_requires_one_claim_for_convergent_cross_chat_work():
+  repo = Path(__file__).resolve().parents[2]
+  core = " ".join((repo / "skill" / "core.md").read_text(
+    encoding="utf-8",
+  ).split())
+
+  assert "**Claim convergent work once.**" in core
+  assert "The first atomic claimant owns it" in core
+  assert "must not duplicate its approval, mutation, or monitor" in core
+  assert "Claims coordinate agents; they never grant the owner's authority" in core
 
 
 def test_core_prompt_distinguishes_durable_delegation_and_owner_led_contribution():
@@ -431,9 +443,15 @@ def test_agent_coaching_is_the_single_neutral_coaching_skill():
   assert "What is the most general lesson" in coaching
   assert "platform primitive" in coaching
   assert "exact_session_fork" in coaching
+  assert "transcript_reseed" not in coaching
+  assert "reconstructive coaching" not in coaching
+  assert "evidence-only fallback" not in coaching
+  assert "<claude|codex> <session_id>" in coaching
   assert "`/data/shared/skills/agent-coaching.md` completely" in reflection
   assert "what should Reflection itself change" in reflection
   assert "/data/platform/backend/scripts/reflection-evidence.py" in reflection
+  assert "same-provider transcript reseed" not in reflection
+  assert "exact-session coaching was unavailable" in reflection
 
 
 def test_image_skill_returns_tool_result_without_touching_protected_storage():
