@@ -175,10 +175,12 @@ def test_control_protocol_advertises_every_run_bound_tool(monkeypatch):
     "note", "finding", "request", "blocker", "handoff",
   }
   send_description = tools[platform_tools.SEND_MESSAGE_TOOL_NAME]["description"]
-  assert "note/finding informs the next turn without waking it" in send_description
-  assert "request/blocker/handoff can wake an eligible idle Goal" in send_description
+  assert "note/finding is quiet context for the next natural turn" in send_description
+  assert "steers a live recipient" in send_description
+  assert "Broadcasts are always quiet" in send_description
+  assert "wakes an idle unfinished Goal" in send_description
   assert "concrete next action now" in send_description
-  assert "Replies arrive in a later turn" in send_description
+  assert "instead of checking for replies" in send_description
 
 
 def test_delegated_control_server_advertises_only_coordination(monkeypatch):

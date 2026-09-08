@@ -2308,8 +2308,8 @@ async def delete_chat(
   # deletion, and the released claim itself remains reclaimable by exact key.
   if released_claims:
     from app.agent_coordination import (
+      deliver_actionable_recipients,
       send_work_claim_notice,
-      wake_idle_recipients,
     )
     from app.agent_work_claims import acknowledge_notice
     wake_recipients: list[str] = []
@@ -2343,7 +2343,7 @@ async def delete_chat(
           released.claim_id,
         )
     if wake_recipients:
-      await wake_idle_recipients(
+      await deliver_actionable_recipients(
         recipients=list(dict.fromkeys(wake_recipients)),
         kind="handoff",
         sender_chat_id=chat_id,

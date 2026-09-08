@@ -38,7 +38,10 @@ from app.chat_writer import (
   ensure_user_cid,
   get_writer,
 )
-from app import claude_sdk_runner, codex_sdk_runner
+from app.chat_steering import (
+  has_live_steerable_turn,
+  steer_into_active_turn,
+)
 from app.chat_visibility import coerce_agent_settings
 from app.providers import (
   _load_agent_settings,
@@ -46,7 +49,6 @@ from app.providers import (
   owner_default_provider,
   provider_of_model,
 )
-from app.runner_registry import RunnerKind, registry
 from app.config import get_settings
 from app.database import get_db
 from app.memory_observability import record_memory_checkpoint_once
@@ -494,48 +496,6 @@ def _steer_enabled(chat: models.Chat) -> bool:
   if isinstance(raw, dict):
     merged.update(raw)  # per-chat override wins over the global file
   return bool(merged.get("steer_enabled"))
-
-
-def _has_live_steerable_turn(chat_id: str, provider: str) -> bool:
-  """True when a steerable provider handle is registered for this chat.
-
-  Codex exposes a true turn/steer primitive. Claude has no wire-level
-  mid-turn inject, so its registered client steers by interrupting the
-  live response and re-prompting on the same SDK client.
-  """
-  if provider == "claude":
-    return isinstance(
-      registry.get_handle(chat_id, RunnerKind.CLAUDE_SDK),
-      claude_sdk_runner.ActiveClaudeClient,
-    )
-  handle = registry.get_handle(chat_id, RunnerKind.CODEX_SDK)
-  return (
-    isinstance(handle, codex_sdk_runner.ActiveCodexTurn)
-    and handle.is_steerable
-  )
-
-
-async def _steer_into_active_turn(
-  provider: str,
-  chat_id: str,
-  content: str,
-  user_msgs: list[dict] | None = None,
-  consume_pending_cids: list[str] | None = None,
-) -> bool:
-  """Admit a steer to the live handle without awaiting provider I/O.
-
-  Both provider handles buffer the durable rows and own the eventual
-  acknowledgement + transcript cut. The HTTP route stays only the atomic
-  durability/admission boundary, so a wedged provider control call cannot hold
-  the per-chat queue lock or its database checkout.
-  """
-  if provider == "claude":
-    return await claude_sdk_runner.steer_into_active_turn(
-      chat_id, content, user_msgs, consume_pending_cids,
-    )
-  return await codex_sdk_runner.steer_into_active_turn(
-    chat_id, content, user_msgs, consume_pending_cids,
-  )
 
 
 def _steered_response(
@@ -1102,7 +1062,7 @@ async def _send_message_locked(
         or body.direct_steer
         or not chat.pending_messages
       )
-      and _has_live_steerable_turn(chat_id, provider)
+      and has_live_steerable_turn(chat_id, provider)
     ):
       # Every provider delivery names a row already durable in pending.
       user_msg = _user_message_from_body(chat, body)
@@ -1129,7 +1089,7 @@ async def _send_message_locked(
         steered = False
       else:
         try:
-          steered = await _steer_into_active_turn(
+          steered = await steer_into_active_turn(
             provider, chat_id, steer_content,
             user_msgs, consume_cids,
           )

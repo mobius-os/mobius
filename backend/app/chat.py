@@ -5378,7 +5378,9 @@ async def _run_chat_impl_with_db(
   coordination_context = ""
   if _should_inject_peer_context(chat_id, run_token, gauntlet_writer_policy):
     from app.agent_coordination import build_coordination_context
-    coordination_context = build_coordination_context(db, chat_id, run_token)
+    coordination_context = build_coordination_context(
+      db, chat_id, run_token, chat=chat_row,
+    )
     if coordination_context:
       if is_slash_command:
         user_message = f"{user_message}\n\n{coordination_context}"

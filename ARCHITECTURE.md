@@ -1063,27 +1063,37 @@ across otherwise independent chats. They do not replace a chat's Goal, a
 project path claim, or a contribution record; conflating those owners would
 make completing one action falsely complete a broader outcome.
 
-### Peer messages cross turn boundaries; agents never poll
+### Peer delivery is urgency-aware; agents never poll
 
-An agent turn's provider prompt is immutable after admission. Peer sends
-therefore persist one bounded note per recipient, and `agent_context_snapshot`
-injects a bounded window of inbound notes created during the preceding
-physical turn into the recipient's next turn as one compact
-`<agent_coordination>` block. Notes that arrive after the current turn starts
-are deliberately excluded until that next boundary, so delivery neither races
-the live prompt nor repeats old backlog. An overflow is explicit rather than
-silent; required work uses an `AgentWorkClaim`, whose ownership cannot be lost
-to message volume.
+Every peer send first persists one durable mailbox row per recipient. Quiet
+direct kinds (`note` and `finding`) and every broadcast remain context for the
+next natural turn: `agent_context_snapshot` injects their bounded chronological
+window as one compact `<agent_coordination>` block. An overflow is explicit
+rather than silent; required work uses an `AgentWorkClaim`, whose ownership
+cannot be lost to message volume.
 
-Actionable direct messages (`request`, `blocker`, and `handoff`) may start one
-hidden turn only when the recipient is already idle, has an unfinished Goal,
-and no question, Wait, park, restart hold, or queued owner work owns its next
-move. A running recipient is never given a competing turn; its ordinary Goal
-settlement supplies the successor when work remains. Plain notes and findings
-wait for the next independently owned turn. The model-facing network exposes
-discovery and send operations, not an inbox read or short poll. A sender that
-needs a later result must hand off through Goal, Wait, or `AgentWorkClaim`
-ownership instead of keeping its current turn alive to check for replies.
+Actionable direct kinds (`request`, `blocker`, and `handoff`) also trigger one
+delivery attempt. A live recipient receives a hidden, durable steer carrier
+containing the undelivered peer window in chronological order. The carrier is
+reserved in `pending_messages` before provider delivery and moves into the
+transcript only after provider acknowledgement, reusing the same exactly-once
+cut as owner steering. Its constant-size mailbox cursor is the delivery
+receipt, so the next turn does not repeat already-steered notes. The carrier labels the payload as
+untrusted peer data rather than owner authority. It never jumps ahead of an
+owner message, Wait result, or other product continuation already in the chat
+queue. If the bounded window overflows, the explicit overflow marker and its
+cursor form one cut: omitted older notes remain owner-visible history but never
+surface later behind newer notes and invert causal order.
+
+An idle recipient is woken only when it has an unfinished Goal. An armed
+external Wait remains active but no longer suppresses an actionable peer wake:
+the urgent turn can run now, and the independent condition still resumes the
+Goal if it later settles. Owner-input questions, usage parks, restart holds,
+and restart drain retain their stronger barriers. Broadcasts never fan out
+interruptions. The model-facing network exposes discovery and send operations,
+not an inbox read or short poll. A sender that needs a later result still hands
+off through Goal, Wait, or `AgentWorkClaim` ownership instead of keeping its
+current turn alive to check for replies.
 
 Historic transcript markers from the retired read tool remain displayable;
 that is data compatibility, not a second delivery mechanism.

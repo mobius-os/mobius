@@ -394,7 +394,7 @@ async def test_steer_requeries_on_interrupt_terminal(monkeypatch):
   assert client.disconnected is True
   assert client.queries[0] == "start task"
   assert client.queries[1].startswith(
-    "The user added this while you were working."
+    "New context arrived while you were working."
   )
   assert "use blue" in client.queries[1]
   assert result["error"] is None
@@ -450,7 +450,7 @@ async def test_steer_interrupt_racing_turn_end_is_a_resumable_pause(
   client = clients[0]
   assert client.queries.count("start task") == 1
   assert len(client.queries) == 2
-  assert client.queries[1].startswith("The user added this while you were working.")
+  assert client.queries[1].startswith("New context arrived while you were working.")
   # The raw provider error never surfaces; the turn is a resumable interrupt.
   assert result["error"] is None
   assert result["terminal_status"] == "interrupted"
@@ -1057,7 +1057,7 @@ async def test_steer_interrupts_immediately_not_deferred_to_boundary(
   assert client.queries[0] == "start task"
   assert len(client.queries) == 2
   assert client.queries[1].startswith(
-    "The user added this while you were working."
+    "New context arrived while you were working."
   )
   assert "use blue" in client.queries[1]
   assert result["error"] is None

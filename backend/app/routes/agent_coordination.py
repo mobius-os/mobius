@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from app.agent_coordination import (
   MAX_PEERS,
   chat_message_history,
+  deliver_actionable_recipients,
   MESSAGE_KINDS,
   agent_network_snapshot,
   embedded_chat_snapshot,
@@ -19,7 +20,6 @@ from app.agent_coordination import (
   send_agent_message,
   send_work_claim_notice,
   visible_peer_messages,
-  wake_idle_recipients,
 )
 from app.agent_work_claims import acknowledge_notice, claim_work, finish_work
 from app.database import get_db
@@ -127,10 +127,13 @@ async def claim_current_work(
       resolve_interests=False,
     )
     result["notification_pending"] = False
-    result["woken"] = await wake_idle_recipients(
+    delivery = await deliver_actionable_recipients(
       recipients=[previous], kind="handoff",
       sender_chat_id=principal.chat_id,
     )
+    result["steered"] = delivery.steered
+    result["woken"] = delivery.woken
+    result["queued"] = delivery.queued
   return result
 
 
@@ -152,6 +155,7 @@ async def finish_current_work(
   except ValueError as exc:
     raise HTTPException(409, str(exc)) from exc
   recipients = finished.interested_chat_ids
+  delivery = None
   woken: list[str] = []
   if recipients:
     send_work_claim_notice(
@@ -166,17 +170,19 @@ async def finish_current_work(
         f"{finished.claim['state']}: {finished.claim.get('outcome') or ''}"
       ),
     )
-    woken = await wake_idle_recipients(
+    delivery = await deliver_actionable_recipients(
       recipients=recipients, kind="handoff",
       sender_chat_id=principal.chat_id,
     )
+    woken = delivery.woken
   acknowledge_notice(
     db, claim_id=finished.claim["id"], revision=finished.claim["revision"],
     resolve_interests=True,
   )
   return {
     **finished.claim, "notification_pending": False,
-    "notified": recipients, "woken": woken,
+    "notified": recipients, "steered": delivery.steered if recipients else [],
+    "woken": woken, "queued": delivery.queued if recipients else [],
   }
 
 
@@ -224,12 +230,15 @@ async def send_current_message(
     )
   except ValueError as exc:
     raise HTTPException(422, str(exc)) from exc
-  # The note is durable either way; a direct ask additionally wakes an idle
-  # recipient with unfinished Goal work so the handoff does not wait for the
-  # owner to notice. Broadcasts and plain notes never start a turn.
-  woken = [] if body.broadcast else await wake_idle_recipients(
-    recipients=body.recipients, kind=body.kind,
-    sender_chat_id=principal.chat_id,
+  # Quiet mail waits for the next natural turn. A direct actionable message
+  # steers a live recipient or wakes its idle unfinished Goal; broadcasts stay
+  # quiet so one broad note cannot manufacture a wave of model work.
+  delivery = (
+    await deliver_actionable_recipients(
+      recipients=body.recipients, kind=body.kind,
+      sender_chat_id=principal.chat_id,
+    )
+    if not body.broadcast else None
   )
   # One row is stored per recipient inbox. The sender already knows the note,
   # so return one canonical row plus the exact recipient count and names the
@@ -241,7 +250,9 @@ async def send_current_message(
       name for name in dict.fromkeys(row["recipient_name"] for row in rows)
       if name
     ],
-    "woken": woken,
+    "steered": delivery.steered if delivery else [],
+    "woken": delivery.woken if delivery else [],
+    "queued": delivery.queued if delivery else [],
   }
 
 

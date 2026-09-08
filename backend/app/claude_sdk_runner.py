@@ -698,10 +698,10 @@ class ActiveClaudeClient:
 
 
 def _steer_redirect_message(text: str) -> str:
-  """Frames a Claude steer as a redirect on the still-connected client."""
+  """Frame owner or product context on the still-connected client."""
   return (
-    "The user added this while you were working. Incorporate it and "
-    "continue the same task:\n\n"
+    "New context arrived while you were working. Incorporate it according "
+    "to its stated authority and continue the same task:\n\n"
     f"{text}"
   )
 
