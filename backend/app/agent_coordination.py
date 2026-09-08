@@ -1594,6 +1594,7 @@ def _interrupt_peer_carrier(
   run_cursor_row = db.query(
     models.ChatRun.peer_message_through_created_at,
     models.ChatRun.peer_message_through_id,
+    models.ChatRun.peer_message_delivery_pending,
   ).filter(
     models.ChatRun.id == physical_run_id,
     models.ChatRun.chat_id == chat_id,
@@ -1671,6 +1672,14 @@ def _interrupt_peer_carrier(
   )
   carrier_contiguous = (
     prior_carriers_contiguous
+    # A running provider may already own an oldest-first startup page that has
+    # not reached its success acknowledgement yet. Its lack of a cursor is not
+    # proof that the pre-turn inbox is empty: treating a later urgent carrier
+    # as contiguous would let the carrier jump over any overflow in that page.
+    and (
+      run_cursor_row is None
+      or run_cursor_row.peer_message_delivery_pending is not True
+    )
     and len(message_window) <= MAX_CONTEXT_MESSAGES
   )
   return {

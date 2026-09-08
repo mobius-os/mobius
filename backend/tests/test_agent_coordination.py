@@ -595,6 +595,99 @@ def test_interrupt_overflow_marks_one_ordered_cut_without_late_reordering(
   assert "act-now" not in successor
 
 
+@pytest.mark.parametrize("provider_succeeded", [True, False])
+def test_mid_turn_interrupt_cannot_skip_pre_turn_overflow(
+  client, auth, db, monkeypatch, provider_succeeded,
+):
+  """An urgent tail cannot certify that an admitted startup page drained."""
+  from app.chat_event_sink import commit_steer_cut
+
+  chats, runs = _network_fixture(db)
+  builder = chats["builder"]
+  run = runs["builder"]
+  monkeypatch.setattr(
+    "app.agent_coordination.MAX_CONTEXT_MESSAGES", 2,
+  )
+  monkeypatch.setattr(
+    "app.chat_steering.has_live_steerable_turn", lambda *_args: True,
+  )
+  pre_turn = [
+    models.AgentCoordinationMessage(
+      id=f"pre-turn-overflow-{index}",
+      room_kind="workspace",
+      room_id="1",
+      from_chat_id=chats["scout"].id,
+      from_run_id="scout-run",
+      send_id=f"pre-turn-overflow-send-{index}",
+      send_target_key=builder.id,
+      to_chat_id=builder.id,
+      kind="finding",
+      body=f"Pre-turn quiet {index}",
+      created_at=run.started_at - timedelta(seconds=3 - index),
+    )
+    for index in range(3)
+  ]
+  db.add_all(pre_turn)
+  db.commit()
+
+  startup = build_coordination_context_delivery(db, builder.id, run.id)
+  assert startup.text.index("Pre-turn quiet 0") < startup.text.index(
+    "Pre-turn quiet 1"
+  )
+  assert "Pre-turn quiet 2" not in startup.text
+  assert "Earlier peer notes exceeded" in startup.text
+  run.provider_execution_admitted = True
+  run.peer_message_delivery_pending = True
+  db.commit()
+
+  carriers = []
+
+  async def fake_steer(_provider, chat_id, _content, user_msgs, cids):
+    carriers.extend(user_msgs)
+    await commit_steer_cut(chat_id, user_msgs, cids)
+    return True
+
+  monkeypatch.setattr("app.chat_steering.steer_into_active_turn", fake_steer)
+  response = client.post(
+    "/api/agent-coordination/messages",
+    headers=_delegated_auth(db, chats["scout"].id, "scout-run"),
+    json={
+      "recipients": [builder.id],
+      "kind": "blocker",
+      "delivery": "interrupt",
+      "body": "Urgent after startup overflow",
+    },
+  )
+  assert response.status_code == 200, response.text
+  assert response.json()["steered"] == [builder.id]
+  assert len(carriers) == 1
+  assert carriers[0]["peer_message_contiguous"] is False
+
+  if provider_succeeded:
+    assert startup.delivered_through is not None
+    run.peer_message_through_created_at = startup.delivered_through.created_at
+    run.peer_message_through_id = startup.delivered_through.message_id
+    run.peer_message_delivery_pending = False
+  else:
+    run.status = "interrupted"
+  db.commit()
+
+  successor = _next_turn_context(
+    db,
+    builder,
+    f"builder-after-pre-turn-overflow-{provider_succeeded}",
+  )
+  if provider_succeeded:
+    assert "Pre-turn quiet 0" not in successor
+    assert "Pre-turn quiet 1" not in successor
+    assert "Pre-turn quiet 2" in successor
+    assert "Urgent after startup overflow" in successor
+  else:
+    assert "Pre-turn quiet 0" in successor
+    assert "Pre-turn quiet 1" in successor
+    assert "Pre-turn quiet 2" not in successor
+
+
 def test_rapid_interrupts_keep_distinct_ordered_reservations(
   client, auth, db, monkeypatch,
 ):
