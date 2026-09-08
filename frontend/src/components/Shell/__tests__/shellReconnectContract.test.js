@@ -3,14 +3,15 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { QueryClient } from '@tanstack/react-query'
 import { api } from '../../../api/client.js'
-import { fetchFreshChatList } from '../chatListReconciliation.js'
+import { fetchFreshShellList } from '../shellListReconciliation.js'
+import { chatQueries, appQueries } from '../../../hooks/queries.js'
 
-function freshReader(t, queryClient, fetch) {
-  t.mock.method(api.chats, 'list', async options => ({
+function freshReader(t, queryClient, fetch, kind = 'chats') {
+  t.mock.method(api[kind], 'list', async options => ({
     ok: true,
     json: async () => fetch(options),
   }))
-  return options => fetchFreshChatList(queryClient, { timeoutMs: 5000, ...options })
+  return options => fetchFreshShellList(queryClient, kind === 'chats' ? chatQueries : appQueries, { timeoutMs: 5000, ...options })
 }
 
 test('fresh chat reconciliation requests live-only truth and replaces the old cached row', async t => {
@@ -60,3 +61,31 @@ test('abort during query cancellation cannot start an obsolete replacement read'
   controller.abort(); finishCancel(); await rejected
   assert.equal(fetches, 0)
 })
+
+for (const kind of ['chats', 'apps']) {
+  test(`${kind}: a fresh read replaces an in-flight pre-transition snapshot`, async t => {
+    const client = new QueryClient()
+    let releaseOld
+    const old = client.fetchQuery({ queryKey: [kind], queryFn: () => new Promise(resolve => { releaseOld = resolve }) })
+    const cancelled = assert.rejects(old)
+    const fresh = freshReader(t, client, options => {
+      assert.equal(options.cache, 'no-store')
+      return [{ id: 'newly-created' }]
+    }, kind)
+    try {
+      assert.deepEqual(await fresh(), [{ id: 'newly-created' }])
+      releaseOld([{ id: 'obsolete' }]); await cancelled
+      assert.deepEqual(client.getQueryData([kind]), [{ id: 'newly-created' }])
+    } finally { client.clear() }
+  })
+
+  test(`${kind}: failure is not reported as successful fresh truth`, async t => {
+    const client = new QueryClient()
+    client.setQueryData([kind], [{ id: 'offline-copy' }])
+    const fresh = freshReader(t, client, () => { throw new Error('unreachable') }, kind)
+    try {
+      await assert.rejects(fresh(), /unreachable/)
+      assert.deepEqual(client.getQueryData([kind]), [{ id: 'offline-copy' }])
+    } finally { client.clear() }
+  })
+}

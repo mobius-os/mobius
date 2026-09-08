@@ -120,8 +120,8 @@ function useSettingsQuery() {
   })
 }
 
-async function fetchApps({ signal, timeoutMs } = {}) {
-  const res = await api.apps.list({ signal, timeoutMs })
+async function fetchApps({ signal, timeoutMs, cache } = {}) {
+  const res = await api.apps.list({ signal, timeoutMs, cache })
   const data = await jsonOrThrow(res, 'apps fetch failed:')
   return Array.isArray(data) ? data : []
 }
@@ -144,8 +144,8 @@ function useChatAppArtifactsQuery(chatId, { enabled = true } = {}) {
 function useAppsQuery({ reconcile, enabled = true } = {}) {
   return useQuery({
     queryKey: appsKey,
-    queryFn: async () => {
-      const rows = await fetchApps()
+    queryFn: async (context) => {
+      const rows = await fetchApps(context)
       return reconcile ? reconcile(rows) : rows
     },
     enabled,

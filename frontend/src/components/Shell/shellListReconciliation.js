@@ -1,7 +1,6 @@
-// Own the cancellable, live-only drawer read used at committed state boundaries.
-import { chatQueries } from '../../hooks/queries.js'
+// Own cancellable, live-required drawer reads for both chats and installed apps.
 
-export async function fetchFreshChatList(queryClient, {
+export async function fetchFreshShellList(queryClient, queries, {
   signal,
   timeoutMs,
   reconcile = rows => rows,
@@ -9,13 +8,13 @@ export async function fetchFreshChatList(queryClient, {
   signal?.throwIfAborted()
   // Do not join a pre-transition request and let its old snapshot overwrite a
   // committed question answer or run event. Cancellation is part of the read.
-  await queryClient.cancelQueries({ queryKey: chatQueries.keys.all })
+  await queryClient.cancelQueries({ queryKey: queries.keys.all })
   signal?.throwIfAborted()
   const data = await queryClient.fetchQuery({
-    queryKey: chatQueries.keys.all,
+    queryKey: queries.keys.all,
     queryFn: async ({ signal: querySignal }) => {
       const requestSignal = signal ? AbortSignal.any([signal, querySignal]) : querySignal
-      const rows = await chatQueries.list.fetch({
+      const rows = await queries.list.fetch({
         timeoutMs, signal: requestSignal, cache: 'no-store',
       })
       // A replaced reconnect may finish decoding late. Its result must never

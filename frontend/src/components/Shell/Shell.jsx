@@ -1,4 +1,4 @@
-import { fetchFreshChatList } from './chatListReconciliation.js'
+import { fetchFreshShellList } from './shellListReconciliation.js'
 import { requestChatChanges } from '../../lib/chatChangesNavigation.js'
 import { lazy, Suspense, useState, useEffect, useLayoutEffect, useCallback, useMemo, useReducer, useRef } from 'react'
 import { flushSync } from 'react-dom'
@@ -2373,34 +2373,16 @@ export default function Shell({ onInitialVisualReady }) {
 
   usePushSubscription()
 
-  // Stable refresh callbacks. Earlier versions used
-  // `appsQuery.refetch` directly, but React Query returns a new
-  // QueryObserverResult ref on every subscription tick — that made
-  // these `useCallback`s recreate identity each render and made every
-  // effect/caller that consumes them vulnerable to duplicate fetches.
-  // Driving the refetch via the query client's stable
-  // `refetchQueries` keeps the callback identity steady.
-  const refreshApps = useCallback(({ timeoutMs } = {}) => {
-    // Force a genuinely fresh fetch and return THAT fetch's result.
-    // refetchQueries alone can coalesce with an initial mount fetch that's
-    // still in flight (React Query dedups), then resolve against the stale
-    // in-flight value — so a moebius:open-app that arrives while the apps
-    // list is mid-load would read the pre-install list and wrongly conclude
-    // the just-installed app "is not installed yet". cancelQueries aborts any
-    // in-flight fetch first; fetchQuery(staleTime:0) then guarantees a new
-    // request and returns its data directly (not a getQueryData re-read,
-    // which can still observe the canceled fetch's stale snapshot).
-    return queryClient.cancelQueries({ queryKey: appQueries.keys.all })
-      .then(() => queryClient.fetchQuery({
-        queryKey: appQueries.keys.all,
-        queryFn: async () => reconcileApps(await appQueries.list.fetch({ timeoutMs })),
-        staleTime: 0,
-      }))
-      .then(data => data || [])
-      .catch(() => queryClient.getQueryData(appQueries.keys.all) || [])
+  // Share live-required reads without coupling callback identity to query updates.
+  // Best-effort callers retain their current UI on failure; reconnecting chats
+  // use the rejecting read below so stale data cannot complete their barrier.
+  const refreshApps = useCallback(({ timeoutMs, signal } = {}) => {
+    return fetchFreshShellList(queryClient, appQueries, {
+      timeoutMs, signal, reconcile: reconcileApps,
+    }).catch(() => queryClient.getQueryData(appQueries.keys.all) || [])
   }, [queryClient, reconcileApps])
   const fetchFreshChats = useCallback(({ timeoutMs = SYSTEM_RECONNECT_LIST_TIMEOUT_MS, signal } = {}) => {
-    return fetchFreshChatList(queryClient, {
+    return fetchFreshShellList(queryClient, chatQueries, {
       timeoutMs, signal, reconcile: reconcileCreatedChats,
     })
   }, [queryClient, reconcileCreatedChats])
@@ -3248,7 +3230,7 @@ export default function Shell({ onInitialVisualReady }) {
       chatAppArtifactQueries.invalidateAll(queryClient),
       queryClient.invalidateQueries({ queryKey: ['projects', 'files'] }),
       queryClient.invalidateQueries({ queryKey: ['projects', 'git'] }),
-      reconcileDeletedAppIdentities().then(() => refreshApps({ timeoutMs: SYSTEM_RECONNECT_LIST_TIMEOUT_MS })),
+      reconcileDeletedAppIdentities().then(() => refreshApps({ timeoutMs: SYSTEM_RECONNECT_LIST_TIMEOUT_MS, signal })),
     ])
     await reconcileDeletedChatIdentities()
     signal?.throwIfAborted()
