@@ -28,6 +28,7 @@ from app.chat_writer import writer_memory_diagnostics
 from app.config import get_settings
 from app.database import database_pool_snapshot, get_db
 from app.deps import get_current_owner
+from app.text_util import elide
 from app.memory_observability import (
   allocation_report,
   gc_diagnostics,
@@ -286,7 +287,9 @@ def debug_logs(
   if chat_id:
     all_lines = [l for l in all_lines if chat_id in l]
 
-  result = all_lines[-lines:]
+  # Bound each entry independently so one serialized payload cannot dominate
+  # an otherwise line-bounded diagnostic response.
+  result = [elide(line, 4000)[0] for line in all_lines[-lines:]]
   return {"lines": result, "total_size": total_size}
 
 

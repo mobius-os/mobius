@@ -38,6 +38,15 @@ test('deep links preserve slug, numeric identity, and intent', () => {
   }), { view: 'canvas', app: 'artifacts', appId: null, intent: null })
 })
 
+test('deep links can open the Projects directory or one project', () => {
+  assert.deepEqual(parseShellDeepLink({
+    pathname: '/shell/', search: '?projects=1',
+  }), { view: 'projects' })
+  assert.deepEqual(parseShellDeepLink({
+    pathname: '/shell/', search: '?project=project-7',
+  }), { view: 'project', projectId: 'project-7' })
+})
+
 test('return-view is consumed once', () => {
   const store = storage({ 'mobius:return-view': 'settings' })
   assert.deepEqual(consumeReturnView(store), { view: 'settings' })

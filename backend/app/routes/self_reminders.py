@@ -29,7 +29,10 @@ from sqlalchemy.orm import Session
 
 from app import models, schemas, self_reminders
 from app.database import get_db
-from app.deps import Principal, get_current_owner, reject_cross_site
+from app.deps import (
+  Principal, get_current_owner, get_current_owner_for_lifecycle_control,
+  reject_cross_site,
+)
 from app.resource_access import get_active_chat_or_404
 
 router = APIRouter(prefix="/api/self-reminders", tags=["self-reminders"])
@@ -71,7 +74,7 @@ def _reminder_out(record: dict) -> dict:
 @router.post("", status_code=201)
 def create_reminder(
   body: EnqueueReminder,
-  _owner: models.Owner = Depends(get_current_owner),
+  _owner: models.Owner = Depends(get_current_owner_for_lifecycle_control),
   _csrf: None = Depends(reject_cross_site),
   db: Session = Depends(get_db),
 ):
@@ -117,7 +120,7 @@ def list_reminders(
 @router.delete("/{reminder_id}", status_code=200)
 def cancel_reminder(
   reminder_id: str,
-  _owner: models.Owner = Depends(get_current_owner),
+  _owner: models.Owner = Depends(get_current_owner_for_lifecycle_control),
   _csrf: None = Depends(reject_cross_site),
 ):
   """Cancels one pending reminder so it never fires.

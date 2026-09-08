@@ -27,6 +27,7 @@ from app.config import get_settings as get_app_settings
 from app.database import get_db
 from app.deps import (
   get_current_owner,
+  get_current_owner_for_lifecycle_control,
   get_current_owner_or_app,
   get_owner_app_or_chat_embed_for_models,
   reject_cross_site,
@@ -294,10 +295,14 @@ async def get_provider_usage(
 @settings_router.post("", dependencies=[Depends(reject_cross_site)])
 def update_settings(
   body: SettingsUpdate,
-  owner: models.Owner = Depends(get_current_owner),
+  owner: models.Owner = Depends(get_current_owner_for_lifecycle_control),
   db: Session = Depends(get_db),
 ) -> dict:
-  """Saves updated settings."""
+  """Save owner-wide provider, model, skills, and background-agent settings.
+
+  Delegated children retain the read surface but cannot rewrite the execution
+  environment that owns their parent and future top-level runs.
+  """
   if body.provider is not None:
     owner.provider = body.provider
   # `skills_enabled` lives in the shared agent-settings.json (the

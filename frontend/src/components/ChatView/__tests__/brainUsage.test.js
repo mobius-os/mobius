@@ -21,13 +21,21 @@ test('context gauge measures the latest model call against its context window', 
   assert.equal(contextUsedPercent({ input_tokens: 100, context_window: 0 }), null)
 })
 
-test('context legend rounds current and maximum token counts to 1k', () => {
+test('context legend keeps token counts to three digits and a unit symbol', () => {
   assert.deepEqual(contextTokenCounts({
     input_tokens: 44_063,
     context_window: 258_400,
   }), { used: 44_063, maximum: 258_400 })
   assert.equal(formatRoundedTokenCount(66_648), '67k')
   assert.equal(formatRoundedTokenCount(258_400), '258k')
+  // Step up a unit instead of spilling into four-plus digits with a comma.
+  assert.equal(formatRoundedTokenCount(1_000_000), '1M')
+  assert.equal(formatRoundedTokenCount(1_400_000), '1.4M')
+  assert.equal(formatRoundedTokenCount(1_030_000_000), '1G')
+  // A value just under a threshold rounds up into the next unit rather than
+  // spilling to four digits (999_999 → "1M", not "1000k").
+  assert.equal(formatRoundedTokenCount(999_999), '1M')
+  assert.equal(formatRoundedTokenCount(999_999_999), '1G')
   assert.equal(formatRoundedTokenCount(0), '0')
   assert.equal(contextTokenCounts({ input_tokens: null, context_window: 258_400 }), null)
 })

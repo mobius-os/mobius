@@ -188,10 +188,17 @@ def test_goal_routing_rechecks_phase_transitions_and_prefers_platform_tool():
   planning_normalized = " ".join(planning.split())
 
   assert "Before the first material tool call" in core_normalized
-  assert "labels such as “synthetic,” “fixture,” or “test”" in core_normalized
-  assert "after an owner choice resolves" in core_normalized
-  assert "not merely at the next user message" in core_normalized
-  assert "`promote_goal` tool when available" in core_normalized
+  assert "read the complete `goal-planning` skill" in core_normalized
+  assert "planning, parallel-execution, handoff, and completion loop" in core_normalized
+  assert "## The execution loop — read this first" in planning
+  assert "This read is a serial gate" in planning_normalized
+  assert "Do not run them concurrently" in planning_normalized
+  assert len(planning.encode("utf-8")) < 4_000
+  assert "A Goal is durable intent, not an executor" in planning_normalized
+  assert "Inspect ready leaves" in planning_normalized
+  assert "Goal-plan revisions, and the final integrator" in planning_normalized
+  assert "Delegated children return future conditions" in planning_normalized
+  assert "goal_plan.py check-complete" in planning_normalized
   assert "### Recheck when the work changes phase" in planning
   assert "before the first material action" in planning_normalized
   assert "for **every** ordinary top-level delegated outcome" in planning_normalized
@@ -217,14 +224,15 @@ def test_goal_waits_always_name_a_durable_owner_interaction():
 
   assert "**Never leave an invisible wait.**" in core
   assert "declare a durable monitor" in core_normalized
-  assert "call the clarifying-question tool" in core_normalized
+  assert "use the saved owner-input card as the final action" in core_normalized
   assert "Done**, **Need help**, and **Not now" in core_normalized
   assert "Never rely on a paused Goal" in core_normalized
   assert "### Make every unfinished wait explicit" in planning
   assert "create exactly one owning interaction" in planning_normalized
   assert "keeps the Goal marked **Waiting for you**" in planning_normalized
   assert "Do not end with “tell me when…”" in planning_normalized
-  assert "Every wait must have one visible owner" in waiting_normalized
+  assert "durable owner holds it" in waiting_normalized
+  assert "`--owner` is required for command waits" in waiting_normalized
   assert "exit **0 exactly when the condition is met**" in waiting_normalized
   assert "A wait declared inside a Goal resumes under the same Goal" in waiting_normalized
 
@@ -255,7 +263,13 @@ def test_restart_guidance_requires_activation_proof_and_fresh_approval():
   assert "If no changed runtime owner requires a restart, do not offer one" in (
     normalized_core
   )
-  assert "immediately before each restart" in normalized_core
+  assert "ALWAYS ask through Möbius's `request_approval` tool for the exact restart" in (
+    normalized_core
+  )
+  assert "End the turn after its saved receipt and act only" in normalized_core
+  assert "on the owner's explicit **Restart now** answer in the continuation" in (
+    normalized_core
+  )
   assert "authorizes one restart call only" in normalized_core
   assert "## Choose the smallest activation action" in maintenance
   assert "No shell rebuild or server restart" in maintenance
@@ -279,6 +293,9 @@ def test_restart_guidance_requires_activation_proof_and_fresh_approval():
   assert "For a constitution-only change, default to leaving it pending" in (
     normalized_maintenance
   )
+  assert "Its receipt confirms only that the card was saved" in normalized_maintenance
+  assert "It does not grant approval: end the turn" in normalized_maintenance
+  assert "let the owner's answer resume the chat" in normalized_maintenance
   assert (
     "A **Restart now** answer authorizes exactly one safe restart call"
     in maintenance

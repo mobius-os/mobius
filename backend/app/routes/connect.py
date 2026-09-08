@@ -19,6 +19,9 @@ remains visible to the owner with an in-place update command.
 
 Owner/app surface:
 
+  GET    /api/connect/outbound            list people this Möbius joined
+  POST   /api/connect/outbound            paste another Connect command
+  DELETE /api/connect/outbound/{id}       revoke that outbound access
   POST   /api/connect/hosts               create a host + pairing code
   GET    /api/connect/hosts               list hosts + live status
   PATCH  /api/connect/hosts/{id}          rename a host
@@ -56,9 +59,14 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 
-from app import models
+from app import connect_outbound, models
 from app.config import get_settings
-from app.deps import get_owner_or_app_with_connect_manage, reject_cross_site
+from app.deps import (
+  get_owner_or_app_with_connect_manage,
+  reject_cross_site,
+  require_nondelegated_owner_or_app_control,
+)
+from app.storage_io import atomic_write
 
 router = APIRouter(
   prefix="/api/connect",
@@ -118,9 +126,7 @@ def _load_host(host_id: str) -> dict | None:
 
 def _save_host(host: dict) -> None:
   p = _host_path(host["id"])
-  tmp = p.with_suffix(".json.tmp")
-  tmp.write_text(json.dumps(host, indent=2), "utf-8")
-  tmp.replace(p)
+  atomic_write(p, json.dumps(host, indent=2), mode=0o600)
 
 
 def _list_hosts() -> list[dict]:
@@ -137,11 +143,25 @@ def _new_id() -> str:
   return "h_" + secrets.token_hex(8)
 
 
+# Human-friendly, unambiguous alphabet (no 0/O/1/I), grouped for readability.
+_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+
+
 def _new_code() -> str:
-  # Human-friendly, unambiguous alphabet (no 0/O/1/I), grouped for readability.
-  alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
-  raw = "".join(secrets.choice(alphabet) for _ in range(8))
+  raw = "".join(secrets.choice(_CODE_ALPHABET) for _ in range(8))
   return f"{raw[:4]}-{raw[4:]}"
+
+
+def _normalize_code(raw: str) -> str | None:
+  """Return the canonical XXXX-XXXX code, or None if it is not well-formed.
+
+  The result only ever contains characters from `_CODE_ALPHABET` and a single
+  hyphen, so it is safe to interpolate into the install shell script below.
+  """
+  body = (raw or "").strip().upper().replace("-", "")
+  if len(body) != 8 or any(ch not in _CODE_ALPHABET for ch in body):
+    return None
+  return f"{body[:4]}-{body[4:]}"
 
 
 def _hash(token: str) -> str:
@@ -483,20 +503,70 @@ class RenameHostBody(BaseModel):
   name: str = Field(min_length=1, max_length=80)
 
 
+class CreateOutboundBody(BaseModel):
+  label: str = Field(min_length=1, max_length=80)
+  command: str = Field(min_length=1, max_length=4096)
+
+  @field_validator("label")
+  @classmethod
+  def normalize_label(cls, value: str) -> str:
+    label = value.strip()
+    if not label:
+      raise ValueError("Name who will have access.")
+    return label
+
+
 # --------------------------------------------------------------------------- #
 # Owner/app surface
 # --------------------------------------------------------------------------- #
+@router.get("/outbound")
+async def list_outbound_access(
+  _owner: models.Owner = Depends(get_owner_or_app_with_connect_manage),
+) -> dict:
+  return {"connections": connect_outbound.list_profiles()}
+
+
+@router.post(
+  "/outbound",
+  dependencies=[Depends(require_nondelegated_owner_or_app_control)],
+)
+async def create_outbound_access(
+  body: CreateOutboundBody,
+  _owner: models.Owner = Depends(get_owner_or_app_with_connect_manage),
+) -> dict:
+  try:
+    return await connect_outbound.create_profile(body.label, body.command)
+  except connect_outbound.OutboundConnectError as exc:
+    raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.delete(
+  "/outbound/{profile_id}",
+  dependencies=[Depends(require_nondelegated_owner_or_app_control)],
+)
+async def revoke_outbound_access(
+  profile_id: str,
+  _owner: models.Owner = Depends(get_owner_or_app_with_connect_manage),
+) -> dict:
+  try:
+    await connect_outbound.revoke_profile(profile_id)
+  except LookupError as exc:
+    raise HTTPException(status_code=404, detail="No such shared access.") from exc
+  except connect_outbound.OutboundConnectError as exc:
+    raise HTTPException(status_code=409, detail=str(exc)) from exc
+  return {"ok": True}
+
+
 def _base_url() -> str:
   return get_settings().frontend_origin.rstrip("/")
 
 
 def _install_command(base: str, code: str) -> str:
-  # --install sets up a service that survives reboot; drop it to run in the
-  # foreground for a quick try.
-  return (
-    f'curl -fsSL "{base}/api/connect/runner" | python3 - '
-    f'--pair {code} --url "{base}" --install'
-  )
+  # One fetch with the code + instance URL baked into the path. No pipe-into-
+  # python arguments and no quotes, so nothing gets corrupted when the command
+  # is copied and pasted into a terminal. The served script pairs and installs
+  # a service that survives reboot (see `install_script`).
+  return f"curl -fsSL {base}/api/connect/i/{code} | sh"
 
 
 def _update_command(base: str) -> str:
@@ -640,7 +710,10 @@ async def _await_command_result(
     raise HTTPException(status_code=504, detail=detail)
 
 
-@router.post("/hosts")
+@router.post(
+  "/hosts",
+  dependencies=[Depends(require_nondelegated_owner_or_app_control)],
+)
 async def create_host(
   body: CreateHostBody,
   _owner: models.Owner = Depends(get_owner_or_app_with_connect_manage),
@@ -698,7 +771,10 @@ async def rename_host(
   return _public_host(host)
 
 
-@router.get("/hosts/{host_id}/pairing")
+@router.get(
+  "/hosts/{host_id}/pairing",
+  dependencies=[Depends(require_nondelegated_owner_or_app_control)],
+)
 async def host_pairing(
   host_id: str,
   _owner: models.Owner = Depends(get_owner_or_app_with_connect_manage),
@@ -724,7 +800,10 @@ async def host_pairing(
   }
 
 
-@router.delete("/hosts/{host_id}")
+@router.delete(
+  "/hosts/{host_id}",
+  dependencies=[Depends(require_nondelegated_owner_or_app_control)],
+)
 async def delete_host(
   host_id: str,
   force: bool = False,
@@ -1110,3 +1189,36 @@ async def runner_script() -> PlainTextResponse:
   return PlainTextResponse(
     _RUNNER_PATH.read_text("utf-8"), media_type="text/x-python",
   )
+
+
+# A POSIX shell bootstrap with the pairing code + instance URL baked in. It
+# fetches the Python runner and hands it the same flags the pipe form uses, so
+# the single-line install command carries no arguments or quotes of its own.
+_INSTALL_SCRIPT_TEMPLATE = """\
+#!/bin/sh
+# Mobius Connect installer -- pairs this machine and installs the background
+# runner. It only makes outbound HTTPS requests and runs commands as you.
+set -eu
+base="{base}"
+code="{code}"
+runner="$(mktemp)"
+trap 'rm -f "$runner"' EXIT INT TERM
+curl -fsSL "$base/api/connect/runner" -o "$runner"
+python3 "$runner" --pair "$code" --url "$base" --install
+"""
+
+
+@router.get("/i/{code}")
+async def install_script(code: str) -> PlainTextResponse:
+  """Serve the single-line install bootstrap: `curl .../i/<code> | sh`.
+
+  Collapsing the fetch, pipe, and flags into one URL removes the quotes and
+  arguments that get mangled when the command is copied and pasted. The code is
+  normalized to its shell-safe canonical form before it is interpolated; an
+  unredeemed or expired code still fails clearly at the runner's pairing step.
+  """
+  normalized = _normalize_code(code)
+  if normalized is None:
+    raise HTTPException(status_code=404, detail="Unknown pairing code.")
+  script = _INSTALL_SCRIPT_TEMPLATE.format(base=_base_url(), code=normalized)
+  return PlainTextResponse(script, media_type="text/x-shellscript")

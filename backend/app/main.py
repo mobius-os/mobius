@@ -66,7 +66,7 @@ from app import activity, models
 # uvicorn boot. See the
 # wrapped imports in lifespan() below.
 from app.routes import (
-  admin_router, apps_router, auth_router,
+  admin_router, agent_coordination_router, apps_router, auth_router,
   app_chat_router,
   chat_embed_router, chat_logs_router, chat_router, chats_router, chats_stream_router,
   secure_inputs_router,
@@ -74,6 +74,7 @@ from app.routes import (
   chat_waits_router,
   debug_router, delegations_router, fs_router, goal_plans_router, github_router, media_router,
   identity_router,
+  owner_approvals_router,
   local_services_router, notifications_router, notify_router, proxy_router, push_router,
   screen_control_router,
   public_apps_router,
@@ -241,6 +242,8 @@ async def lifespan(app):
   record_memory_checkpoint("startup_frontend_watcher_started")
   if database_boot.serviceable:
     await supervisors.start_database_services()
+    from app.saved_secure_inputs import recover_interrupted
+    await recover_interrupted()
     record_memory_checkpoint("startup_ready")
   try:
     yield
@@ -254,6 +257,8 @@ async def lifespan(app):
     # Preserve the final partial request-error windows across graceful restarts.
     # This is one bounded batch append, not one write per response.
     activity.flush_request_errors()
+    from app.saved_secure_inputs import shutdown as stop_sealed_consumers
+    await stop_sealed_consumers()
     # Supervisors stop before the persistence actor they monitor.
     await supervisors.stop()
     # Drain + join the chat-writer actor so any in-flight persistence
@@ -429,6 +434,20 @@ def _loopback_delivery_origin(scope) -> str | None:
   return origin
 
 
+def _static_embed_csp_for_scope(scope) -> str:
+  """Allow packaged games to run on the loopback origin that served them.
+
+  Production documents remain pinned to ``frontend_origin``. Local operator
+  tools and the authenticated screenshot harness deliberately reach uvicorn
+  over loopback; an opaque sandbox cannot use CSP ``'self'`` for its own
+  modules, so name that loopback delivery origin for this response only.
+  """
+  delivery_origin = _loopback_delivery_origin(scope)
+  if delivery_origin is None:
+    return _STATIC_EMBED_CSP
+  return static_embed_csp(settings.frontend_origin, delivery_origin)
+
+
 def _app_frame_csp_for_scope(scope) -> str:
   """Let the loopback test harness exercise the real opaque app frame."""
   delivery_origin = _loopback_delivery_origin(scope)
@@ -516,7 +535,7 @@ class _SecurityHeadersMiddleware:
       ]
     if not service_surface:
       if opaque_static_embed:
-        csp = _STATIC_EMBED_CSP
+        csp = _static_embed_csp_for_scope(scope)
       elif published_site:
         csp = _PUBLISHED_SITE_CSP
       elif chat_embed:
@@ -804,9 +823,11 @@ app.include_router(chat_embed_router)
 app.include_router(chats_router)
 app.include_router(chats_stream_router)
 app.include_router(secure_inputs_router)
+app.include_router(agent_coordination_router)
 app.include_router(delegations_router)
 app.include_router(chat_waits_router)
 app.include_router(goal_plans_router)
+app.include_router(owner_approvals_router)
 app.include_router(chat_logs_router)
 app.include_router(connectors_router)
 app.include_router(connectors_public_router)
@@ -948,7 +969,10 @@ def ready(response: Response):
   return {"ready": False, "reason": reason}
 
 
-def _served_platform_identity(data_dir: str) -> dict:
+def _served_platform_identity(
+  data_dir: str,
+  image_build_sha: str = "unknown",
+) -> dict:
   """The ACTUALLY-SERVED backend identity, distinct from the image ``build_sha``.
 
   The served backend is normally ``/data/platform/app``, which persists across
@@ -962,7 +986,8 @@ def _served_platform_identity(data_dir: str) -> dict:
   import subprocess
 
   out = {"serving_source": "unknown", "served_sha": None, "platform_sha": None,
-         "platform_dirty": None, "baked_sha": None}
+         "platform_dirty": None, "applied_upstream_sha": None,
+         "image_build_applied": False, "baked_sha": None}
   try:
     sentinel = Path(
       os.environ.get("MOBIUS_SERVING_SOURCE_FILE", "/tmp/serving-source")
@@ -996,6 +1021,17 @@ def _served_platform_identity(data_dir: str) -> dict:
         head = _git("rev-parse", "HEAD")
         if head.returncode == 0:
           out["platform_sha"] = head.stdout.strip() or None
+      upstream = _git("rev-parse", "refs/heads/upstream")
+      if upstream.returncode == 0:
+        value = upstream.stdout.strip()
+        if re.fullmatch(r"[0-9a-f]{40}", value):
+          out["applied_upstream_sha"] = value
+          normalized_build = str(image_build_sha or "").strip().lower()
+          if re.fullmatch(r"[0-9a-f]{40}", normalized_build):
+            contains_build = _git(
+              "merge-base", "--is-ancestor", normalized_build, value,
+            )
+            out["image_build_applied"] = contains_build.returncode == 0
       # dirty filters .baked-sha churn + untracked dotfiles, mirroring step-3b.
       st = _git("-c", "core.fileMode=false", "status", "--porcelain")
       if st.returncode == 0:
@@ -1069,7 +1105,7 @@ def version():
           # can parse one stable scalar without reimplementing JSON traversal.
           "protected_runtime_state": protected_runtime["state"],
           "protected_runtime": protected_runtime,
-          **_served_platform_identity(settings.data_dir),
+          **_served_platform_identity(settings.data_dir, settings.build_sha),
           **_served_frontend_identity()}
 
 

@@ -43,7 +43,8 @@ def _make_peer_keypair():
   return private_b64, public_b64
 
 
-def _seed_peer_actor_cache(public_b64: str, host: str = PEER_HOST):
+def _seed_peer_actor_cache(public_b64: str, host: str = PEER_HOST, handle: str = ""):
+
   cache = common_routes._peer_cache_path(host)
   cache.parent.mkdir(parents=True, exist_ok=True)
   cache.write_text(json.dumps({
@@ -52,6 +53,7 @@ def _seed_peer_actor_cache(public_b64: str, host: str = PEER_HOST):
       "protocol": common_routes.PROTOCOL,
       "host": host,
       "name": "Peer Person",
+      "handle": handle,
       "bio": "",
       "public_key": {"alg": "ed25519", "key_b64": public_b64},
       "inbox": "/api/common/inbox",
@@ -59,10 +61,10 @@ def _seed_peer_actor_cache(public_b64: str, host: str = PEER_HOST):
   }))
 
 
-def _signed(private_b64: str, envelope: dict) -> dict:
+def _signed(private_b64: str, envelope: dict, host: str = PEER_HOST) -> dict:
   envelope = {
     "v": 0,
-    "from": PEER_HOST,
+    "from": host,
     "to": common_routes._own_host(),
     "sent_at": time.time(),
     **envelope,
@@ -99,6 +101,7 @@ def test_create_and_local_state_roundtrip(client, auth):
   body = read.json()
   assert body["version"] == 1
   assert body["doc"]["title"] == "Roadmap"
+  assert body["object"]["members"][common_routes._own_host()]["active"] is True
 
   write = client.put(
     f"/api/common/objects/{host}/{oid}/state",
@@ -152,7 +155,82 @@ def test_join_requires_valid_invite_and_signature(client, auth):
   body = joined.json()
   assert body["status"] == "joined"
   assert body["object"]["members"][PEER_HOST]["role"] == "editor"
+  assert body["object"]["members"][PEER_HOST]["active"] is True
   assert body["doc"]["title"] == "Board"
+
+
+def test_presence_is_ephemeral_and_expires():
+  oid = "fe" * 16
+  objects_routes._mark_present(oid, PEER_HOST, now=100.0)
+  assert objects_routes._member_is_active(oid, PEER_HOST, now=111.9) is True
+  assert objects_routes._member_is_active(oid, PEER_HOST, now=112.1) is False
+  objects_routes._object_presence.pop((oid, PEER_HOST), None)
+
+
+def test_capability_invite_is_consumed_by_first_distinct_peer(client, auth):
+  oid = _create_board(client, auth)
+  first_private, first_public = _make_peer_keypair()
+  _seed_peer_actor_cache(first_public)
+  secret = _invite(client, auth, oid)
+
+  first = client.post(
+    f"/api/common/objects/{oid}/peer",
+    json=_signed(first_private, {"type": "object_join", "invite": secret}),
+  )
+  assert first.status_code == 200, first.text
+
+  second_host = "second.example.com"
+  second_private, second_public = _make_peer_keypair()
+  _seed_peer_actor_cache(second_public, second_host)
+  reused = client.post(
+    f"/api/common/objects/{oid}/peer",
+    json=_signed(
+      second_private,
+      {"type": "object_join", "invite": secret},
+      second_host,
+    ),
+  )
+  assert reused.status_code == 403
+  assert reused.json()["detail"] == "Invite is invalid or expired."
+
+
+def test_capability_invite_mutation_holds_the_object_lock(
+  client, auth, monkeypatch,
+):
+  oid = _create_board(client, auth)
+  held = False
+  original_load = objects_routes._load_object
+  original_save = objects_routes._save_object
+
+  class TrackedLock:
+    async def __aenter__(self):
+      nonlocal held
+      assert not held
+      held = True
+
+    async def __aexit__(self, *_args):
+      nonlocal held
+      held = False
+
+  def load_while_locked(object_id):
+    assert held
+    return original_load(object_id)
+
+  def save_while_locked(obj):
+    assert held
+    original_save(obj)
+
+  monkeypatch.setattr(objects_routes, "_object_lock", lambda _oid: TrackedLock())
+  monkeypatch.setattr(objects_routes, "_load_object", load_while_locked)
+  monkeypatch.setattr(objects_routes, "_save_object", save_while_locked)
+
+  created = client.post(
+    f"/api/common/objects/{oid}/invites",
+    json={"role": "editor"},
+    headers=auth,
+  )
+  assert created.status_code == 200, created.text
+  assert held is False
 
 
 def test_peer_cas_write_and_viewer_confinement(client, auth):
@@ -301,6 +379,7 @@ def test_handle_invite_preauthorizes_member_and_join_needs_no_code(client, auth)
   )
   assert joined.status_code == 200, joined.text
   assert joined.json()["object"]["members"][PEER_HOST].get("pending") is None
+  assert joined.json()["object"]["members"][PEER_HOST]["handle"] == "ana"
 
   # Re-inviting an active member is rejected.
   again = client.post(
@@ -320,7 +399,7 @@ async def test_bare_handle_uses_account_registry_without_social_install(monkeypa
 
   monkeypatch.setattr(identity_routes, "resolve_handle_hosts", resolve)
 
-  assert await objects_routes._resolve_invitee("@Collaborator", object(), 7) == PEER_HOST
+  assert await objects_routes._resolve_invitees("@Collaborator", object(), 7) == objects_routes.InviteRecipient([PEER_HOST], "collaborator")
 
 
 @pytest.mark.asyncio
@@ -331,7 +410,7 @@ async def test_known_handle_without_routable_mobius_is_distinct_from_missing(mon
   monkeypatch.setattr(identity_routes, "resolve_handle_hosts", resolve)
 
   with pytest.raises(HTTPException) as exc:
-    await objects_routes._resolve_invitee("collaborator", object(), 7)
+    await objects_routes._resolve_invitees("collaborator", object(), 7)
   assert exc.value.status_code == 409
   assert "exists" in exc.value.detail
 
@@ -415,3 +494,121 @@ def test_member_entries_carry_handles(client, auth):
   assert member["handle"] == "ana"
   members = client.get(f"/api/common/objects/{oid}/members", headers=auth).json()
   assert members["members"][PEER_HOST]["handle"] == "ana"
+
+
+@pytest.mark.asyncio
+async def test_verified_account_can_resolve_multiple_deployments_but_directory_cannot(monkeypatch):
+  async def registry(*_args):
+    return [PEER_HOST, "second.example.com", PEER_HOST]
+  monkeypatch.setattr(identity_routes, "resolve_handle_hosts", registry)
+  result = await objects_routes._resolve_invitees("@Ana", object(), 7)
+  assert result.hosts == [PEER_HOST, "second.example.com"]
+  assert result.account_handle == "ana"
+
+  async def unlinked(*_args):
+    return None
+  monkeypatch.setattr(identity_routes, "resolve_handle_hosts", unlinked)
+  monkeypatch.setattr(common_routes, "_load_identity", lambda: {})
+  path = common_routes._directory_path()
+  path.parent.mkdir(parents=True, exist_ok=True)
+  path.write_text(json.dumps({h: {"handle": "ana"} for h in result.hosts}))
+  with pytest.raises(HTTPException) as exc:
+    await objects_routes._resolve_invitees("ana", object(), 7)
+  assert exc.value.status_code == 409
+
+
+def test_account_invite_fanout_partial_delivery_join_roles_and_group_revocation(client, auth, monkeypatch):
+  import httpx
+  second = "second.example.com"
+  outsider = "outsider.example.com"
+  oid = _create_board(client, auth)
+  keys = {}
+  for host in (PEER_HOST, second, outsider):
+    private, public = _make_peer_keypair()
+    keys[host] = private
+    _seed_peer_actor_cache(public, host, handle="ana")
+
+  async def registry(*_args):
+    return [PEER_HOST, second]
+  monkeypatch.setattr(identity_routes, "resolve_handle_hosts", registry)
+  deliveries = []
+  class Client:
+    async def __aenter__(self): return self
+    async def __aexit__(self, *_args): pass
+    async def post(self, url, *, json):
+      deliveries.append(json)
+      request = httpx.Request("POST", url)
+      if json["to"] == second:
+        raise httpx.ConnectError("offline", request=request)
+      return httpx.Response(200, json={"status": "delivered"}, request=request)
+  monkeypatch.setattr(objects_routes.httpx, "AsyncClient", lambda **_kwargs: Client())
+
+  invited = client.post(f"/api/common/objects/{oid}/invites", json={"address": "ana", "role": "viewer"}, headers=auth)
+  assert invited.status_code == 200, invited.text
+  result = invited.json()
+  assert result["delivery"] == "partial"
+  assert {d["to"] for d in deliveries} == {PEER_HOST, second}
+  assert all(d.get("sig") and d["object"]["role"] == "viewer" for d in deliveries)
+  assert result["recipients"] == [{"host": PEER_HOST, "delivery": "delivered"}, {"host": second, "delivery": "unreachable"}]
+  group = result["members"][PEER_HOST]["collaborator_id"]
+  assert result["members"][second]["collaborator_id"] == group
+
+  # An actor claiming the same display handle gets no authority.
+  denied = client.post(f"/api/common/objects/{oid}/peer", json=_signed(keys[outsider], {"type": "object_join", "handle": "ana"}, outsider))
+  assert denied.status_code == 403
+  # Even the deployment offline at delivery can later join with its signature.
+  for host in (PEER_HOST, second):
+    joined = client.post(f"/api/common/objects/{oid}/peer", json=_signed(keys[host], {"type": "object_join"}, host))
+    assert joined.status_code == 200, joined.text
+    member = joined.json()["object"]["members"][host]
+    assert member["collaborator_id"] == group
+    assert not member.get("pending")
+    write = client.post(f"/api/common/objects/{oid}/peer", json=_signed(keys[host], {"type": "object_write", "doc": {}, "expected_version": 1}, host))
+    assert write.status_code == 403
+
+  revoked = client.delete(f"/api/common/objects/{oid}/members/{PEER_HOST}?all_deployments=true", headers=auth)
+  assert revoked.status_code == 200
+  assert set(revoked.json()["hosts"]) == {PEER_HOST, second}
+  for host in (PEER_HOST, second):
+    denied = client.post(f"/api/common/objects/{oid}/peer", json=_signed(keys[host], {"type": "object_state"}, host))
+    assert denied.status_code == 403
+
+
+def test_reinvite_adds_current_deployment_without_changing_active_role(client, auth, monkeypatch):
+  import httpx
+  oid = _create_board(client, auth)
+  private, public = _make_peer_keypair()
+  _seed_peer_actor_cache(public)
+  hosts = [PEER_HOST]
+  async def registry(*_args): return hosts
+  monkeypatch.setattr(identity_routes, "resolve_handle_hosts", registry)
+  deliveries = []
+  class Client:
+    async def __aenter__(self): return self
+    async def __aexit__(self, *_args): pass
+    async def post(self, url, *, json):
+      deliveries.append(json["to"])
+      return httpx.Response(200, json={}, request=httpx.Request("POST", url))
+  monkeypatch.setattr(objects_routes.httpx, "AsyncClient", lambda **_kwargs: Client())
+  def invite(role="editor"):
+    return client.post(f"/api/common/objects/{oid}/invites", json={"address": "ana", "role": role}, headers=auth)
+  first = invite().json()
+  group = first["members"][PEER_HOST]["collaborator_id"]
+  # Retrying an invitation keeps the same group and no duplicate membership.
+  assert invite().json()["members"][PEER_HOST]["collaborator_id"] == group
+  assert client.post(f"/api/common/objects/{oid}/peer", json=_signed(private, {"type": "object_join"})).status_code == 200
+  hosts.append("new.example.com")
+  assert invite("viewer").status_code == 409
+  unchanged = client.get(f"/api/common/objects/{oid}/members", headers=auth).json()["members"]
+  assert "new.example.com" not in unchanged
+  assert unchanged[PEER_HOST]["role"] == "editor"
+  deliveries.clear()
+  updated = invite()
+  assert updated.status_code == 200
+  assert deliveries == ["new.example.com"]
+  assert updated.json()["members"]["new.example.com"]["collaborator_id"] == group
+  # Existing member-delete callers still remove just the explicit deployment.
+  revoked = client.delete(f"/api/common/objects/{oid}/members/{PEER_HOST}", headers=auth)
+  assert revoked.json()["hosts"] == [PEER_HOST]
+  remaining = client.get(f"/api/common/objects/{oid}/members", headers=auth).json()["members"]
+  assert "new.example.com" in remaining

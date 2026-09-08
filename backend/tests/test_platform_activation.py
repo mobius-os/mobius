@@ -1,6 +1,9 @@
 """Activation classification is one ordered contract across deployments."""
 
+import json
 import re
+import subprocess
+import sys
 from pathlib import Path
 
 from app import platform_activation as activation
@@ -32,14 +35,24 @@ def test_deployment_specific_inputs_share_contract_without_fake_commands():
   assert railway_on_self_hosted["reasons"] == []
 
 
+def test_railway_config_guidance_does_not_promise_an_image_rebuild():
+  impact = activation.classify_activation(
+    ["railway.toml"], deployment="railway",
+  )
+
+  assert impact["level"] == "container_recreate"
+  guidance = " ".join(impact["guidance"])
+  assert "finish this change in Railway" in guidance
+  assert "Möbius will rebuild Railway" not in guidance
+
+
 def test_dependency_and_baked_runtime_never_degrade_to_restart_only():
   # Python deps now apply in place (a rebuild is no longer forced), but they are
-  # still MORE than a bare restart. Frontend deps and baked-runtime inputs still
-  # require a new image.
+  # still MORE than a bare restart. Baked-runtime inputs still require a new
+  # image. (Frontend deps now apply in place too — see the dedicated test.)
   expected = {
     "backend/requirements.txt": "dependency_sync",
     "backend/requirements.lock": "dependency_sync",
-    "frontend/package-lock.json": "image_rebuild",
     "backend/scripts/entrypoint.sh": "image_rebuild",
     "backend/scripts/init_skills.py": "image_rebuild",
     "backend/scripts/seed-skills/platform-maintenance.md": "image_rebuild",
@@ -51,6 +64,34 @@ def test_dependency_and_baked_runtime_never_degrade_to_restart_only():
     impact = activation.classify_activation([path], deployment="self_hosted")
     assert impact["level"] == level, path
     assert impact["level"] not in {"live", "server_restart"}, path
+
+
+def test_frontend_dependencies_apply_in_place_not_via_rebuild():
+  # A frontend dependency bump is installed in place during Apply (npm ci) and
+  # the shell is rebuilt live — it no longer forces a container/image rebuild,
+  # mirroring the Python dependency precedent.
+  for path in ("frontend/package.json", "frontend/package-lock.json"):
+    for deployment in ("self_hosted", "railway"):
+      impact = activation.classify_activation([path], deployment=deployment)
+      assert impact["level"] == "live", (path, deployment)
+
+  # It still contributes to the image dependency fingerprint (node_modules are
+  # baked at image-build time), so a rebuild's image content stays reproducible.
+  root = Path(__file__).resolve().parents[2]
+  fingerprint = activation.dependency_fingerprint_paths(root)
+  assert "frontend/package.json" in fingerprint
+  assert "frontend/package-lock.json" in fingerprint
+
+  # A frontend dep bump does not trigger the backend import probe.
+  assert not activation.backend_import_probe_required(
+    ["frontend/package-lock.json"],
+  )
+
+  # But a Dockerfile change in the same update still forces a rebuild.
+  with_dockerfile = activation.classify_activation(
+    ["frontend/package-lock.json", "Dockerfile"], deployment="self_hosted",
+  )
+  assert with_dockerfile["level"] == "image_rebuild"
 
 
 def test_dependency_fingerprint_comes_from_the_image_rules():
@@ -133,3 +174,45 @@ def test_bootstrap_allowlist_covers_entrypoint_app_script_references():
     assert activation.classify_activation([
       f"backend/scripts/{name}",
     ])["level"] == "image_rebuild", name
+
+
+def test_image_inputs_cover_dependency_and_baked_runtime_paths(tmp_path):
+  (tmp_path / "backend" / "runtime").mkdir(parents=True)
+  (tmp_path / "backend" / "app").mkdir(parents=True)
+  (tmp_path / "Dockerfile").write_text("FROM scratch\n")
+  (tmp_path / "backend" / "requirements.lock").write_text("a==1\n")
+  (tmp_path / "backend" / "runtime" / "broker.py").write_text("x = 1\n")
+  (tmp_path / "backend" / "app" / "main.py").write_text("y = 2\n")
+
+  paths = activation.image_input_paths(tmp_path)
+
+  # Only existing files; the served backend app is not an image input.
+  assert paths == [
+    "Dockerfile", "backend/requirements.lock", "backend/runtime/broker.py",
+  ]
+  hashes = activation.image_input_hashes(tmp_path)
+  assert set(hashes) == set(paths)
+  assert all(len(value) == 64 for value in hashes.values())
+  # Every input is a path the classifier already treats as image-owned.
+  for path in paths:
+    level = activation.classify_activation([path])["level"]
+    assert level in {
+      activation.ActivationLevel.IMAGE_REBUILD.value,
+      activation.ActivationLevel.DEPENDENCY_SYNC.value,
+    }
+
+
+def test_image_input_hashes_cli_matches_the_library_contract(tmp_path):
+  (tmp_path / "backend" / "runtime").mkdir(parents=True)
+  (tmp_path / "Dockerfile").write_text("FROM scratch\n")
+  (tmp_path / "backend" / "runtime" / "broker.py").write_text("x = 1\n")
+
+  module = Path(activation.__file__)
+  completed = subprocess.run(
+    [sys.executable, str(module), "--hashes", str(tmp_path)],
+    check=True,
+    capture_output=True,
+    text=True,
+  )
+
+  assert json.loads(completed.stdout) == activation.image_input_hashes(tmp_path)

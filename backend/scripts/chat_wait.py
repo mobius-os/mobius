@@ -8,6 +8,7 @@ Command checks must be silent on an ordinary unmet exit 1. Exit 0 is met; any
 other exit or diagnostic output wakes the chat immediately as ``check_failed``.
 
   chat_wait.py declare 'gate PR #851 merged' \
+    --owner 'GitHub merge queue' \
     --command 'gh pr view 851 --repo owner/repo --json state -q .state | grep -qx MERGED' \
     --interval 300 --deadline 86400
   chat_wait.py declare 'check back on the build in 20 minutes' --in 1200
@@ -67,6 +68,7 @@ def declare_wait(
   description: str,
   *,
   command: str | None = None,
+  condition_owner: str | None = None,
   delay_secs: int | None = None,
   interval_secs: int | None = None,
   deadline_secs: int | None = None,
@@ -74,8 +76,13 @@ def declare_wait(
   """Arm one command or timer wait through the chat-bound platform API."""
   if bool(command) == bool(delay_secs):
     raise SystemExit("declare needs exactly one of command or delay_secs")
+  if command and not (condition_owner or "").strip():
+    raise SystemExit("command waits need --owner")
+  if command and deadline_secs is None:
+    raise SystemExit("command waits need --deadline")
   return _call("POST", "/api/chat-waits", {
     "description": description,
+    "condition_owner": condition_owner,
     "kind": "command" if command else "timer",
     "command": command,
     "delay_secs": delay_secs,
@@ -84,12 +91,21 @@ def declare_wait(
   })
 
 
+def cancel_wait(wait_id: str) -> dict:
+  """Cancel one exact wait through the same chat-bound platform API."""
+  return _call("POST", f"/api/chat-waits/{quote(wait_id)}/cancel")
+
+
 def main() -> None:
   parser = argparse.ArgumentParser(description=__doc__)
   sub = parser.add_subparsers(dest="action", required=True)
 
   declare = sub.add_parser("declare", help="arm one durable wait")
   declare.add_argument("description", help="what this wait is for, in plain words")
+  declare.add_argument(
+    "--owner", dest="condition_owner",
+    help="who or what is expected to make the condition true",
+  )
   declare.add_argument(
     "--command",
     help=(
@@ -108,7 +124,7 @@ def main() -> None:
   declare.add_argument(
     "--deadline", dest="deadline_secs", type=int, default=None,
     help="seconds until the wait expires and wakes the chat anyway "
-         "(default 86400, max 604800)",
+         "(required for command waits, max 604800)",
   )
 
   sub.add_parser("list", help="list this chat's armed waits")
@@ -120,9 +136,14 @@ def main() -> None:
   _, _, chat_id = _settings()
 
   if args.action == "declare":
+    if args.command and not args.condition_owner:
+      parser.error("command waits require --owner")
+    if args.command and args.deadline_secs is None:
+      parser.error("command waits require an explicit --deadline")
     result = declare_wait(
       args.description,
       command=args.command,
+      condition_owner=args.condition_owner,
       delay_secs=args.delay_secs,
       interval_secs=args.interval_secs,
       deadline_secs=args.deadline_secs,
@@ -139,7 +160,7 @@ def main() -> None:
     result = _call("GET", f"/api/chat-waits?chat_id={quote(chat_id)}")
     print(json.dumps(result, indent=2))
   else:
-    result = _call("POST", f"/api/chat-waits/{quote(args.wait_id)}/cancel")
+    result = cancel_wait(args.wait_id)
     print(json.dumps(result, indent=2))
 
 

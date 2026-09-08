@@ -108,6 +108,32 @@ def test_an_unrecognized_refusal_is_attributed_to_github_not_to_us():
   assert "403" in error.detail
 
 
+def test_moved_remote_ref_routes_supported_git_rejections_to_a_fresh_review():
+  for reason in ("non-fast-forward", "fetch first", "stale info"):
+    error = push_rejected(
+      f" ! [rejected] HEAD -> feat/existing-review ({reason})\n"
+      "error: failed to push some refs\n"
+    )
+
+    assert error.code == "review_refresh_needed"
+    assert error.message == (
+      "GitHub's copy of this branch changed after it was reviewed. Nothing was "
+      "pushed. Ask the agent to refresh and review it against the current branch."
+    )
+    assert reason in error.detail
+
+
+def test_check_output_that_mentions_fetch_first_remains_a_check_failure():
+  error = push_rejected(
+    "[pre-push] frontend-unit FAILED:\n"
+    "    ! [rejected] HEAD -> test-fixture (fetch first)\n"
+    "[pre-push] verdict=blocked cause=checks checks=frontend-unit\n"
+  )
+
+  assert error.code is None
+  assert "(frontend-unit)" in error.message
+
+
 def test_gate_output_without_a_verdict_is_not_claimed_as_a_local_failure():
   # An older installed hook, or a push refused before the gate ran, has no
   # verdict line. Reporting it as a local check failure would send the owner

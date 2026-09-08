@@ -662,6 +662,21 @@ def _cleanup_terminal_staging_checkout(record: dict) -> bool:
       "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR", "GIT_NAMESPACE",
     ):
       env.pop(name, None)
+    # Prepared reviews are durable owner work, so the contribution workflow
+    # locks linked worktrees against an unrelated `git worktree prune`. Once a
+    # record is terminal and the reciprocal admin pointer above proves this is
+    # the exact disposable checkout, release that lock before removal.
+    subprocess.run(
+      [
+        "git", f"--git-dir={common_dir}",
+        "worktree", "unlock", str(repo),
+      ],
+      cwd=str(data_dir),
+      capture_output=True,
+      text=True,
+      check=False,
+      env=env,
+    )
     removed = subprocess.run(
       [
         "git", f"--git-dir={common_dir}",

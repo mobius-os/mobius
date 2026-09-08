@@ -1,5 +1,6 @@
 import { forwardRef } from 'react'
 import {
+  Agent,
   Dot,
   EditPencil,
   FileDocument,
@@ -24,6 +25,7 @@ const ACTIVITY_ICONS = {
   plan: Tasks,
   image: ImageSquare,
   skill: Sparkle,
+  agents: Agent,
 }
 
 export function ActivityTypeIcon({ kind }) {

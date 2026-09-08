@@ -18,6 +18,26 @@ def is_goal_continue(text: str) -> bool:
   return strip_upload_augmentation(text or "").strip().lower() == "continue"
 
 
+def is_natural_goal_resume(text: str) -> bool:
+  """Whether the whole owner message is an unambiguous resume request.
+
+  This deliberately is not a fuzzy intent classifier.  A Goal may have been
+  stopped on purpose, and an unrelated later question must not silently
+  inherit it.  These short complete utterances are the conversational spelling
+  of the visible Continue control; longer messages stay ordinary turns.
+  """
+  normalized = strip_upload_augmentation(text or "").strip().lower()
+  normalized = re.sub(r"[.!]+$", "", normalized).strip()
+  normalized = re.sub(r"\s+", " ", normalized)
+  return normalized in {
+    "continue please",
+    "keep going",
+    "keep going please",
+    "please continue",
+    "please keep going",
+  }
+
+
 def is_goal_command(text: str) -> bool:
   """Whether ``text`` is a complete owner-authored native Goal command."""
   return _goal_match(text) is not None

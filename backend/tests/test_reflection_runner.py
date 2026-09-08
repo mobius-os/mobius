@@ -572,6 +572,34 @@ def test_codex_import_resolves_from_a_foreign_cwd(tmp_path):
   assert "IMPORT_OK" in r.stdout, f"stdout={r.stdout!r} stderr={r.stderr!r}"
 
 
+@pytest.mark.asyncio
+async def test_codex_session_supplies_the_scheduled_data_root(tmp_path, monkeypatch):
+  import types
+
+  captured = {}
+  fake_runner = types.ModuleType("app.codex_sdk_runner")
+
+  async def run_codex_sdk_turn(**kwargs):
+    captured.update(kwargs)
+    return {"session_id": None, "cost_usd": None, "error": None}
+
+  fake_runner.run_codex_sdk_turn = run_codex_sdk_turn
+  monkeypatch.setitem(sys.modules, "app.codex_sdk_runner", fake_runner)
+  monkeypatch.setattr(dr, "DATA_DIR", tmp_path)
+
+  rc = await dr._run_codex_session(
+    goal="nightly",
+    skill_text="reflection",
+    env={},
+    model=None,
+    effort=None,
+    log_fh=None,
+  )
+
+  assert rc == 0
+  assert captured["data_dir"] == str(tmp_path)
+
+
 # ---------------------------------------------------------------------------
 # Guaranteed-brief fallback — orchestration
 # ---------------------------------------------------------------------------

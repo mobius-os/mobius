@@ -1,7 +1,12 @@
+# syntax=docker/dockerfile:1
 # Single-container Möbius image.
 #
 # Builds the frontend, installs the backend + CLI tools, and serves
 # everything from one FastAPI process.  Works on VPS, Railway, PikaPods.
+
+# An ordinary Dockerfile build has no local source input. Compose may override
+# this named stage with a dedicated context containing one reviewed Git bundle.
+FROM scratch AS mobius-local-platform-source
 
 # Keep the Node runtime source independent of the frontend build. Copying Node
 # from the completed frontend stage made every UI edit invalidate the backend's
@@ -24,7 +29,7 @@ FROM python:3.12-slim-trixie
 
 # Copy Node.js binary from the frontend stage instead of installing via
 # apt.  The debian nodejs/npm packages pull in ~200MB of system node
-# packages we don't need — only the claude CLI and npm globals need Node.
+# packages we don't need — only npm globals need Node.
 COPY --from=node-runtime /usr/local/bin/node /usr/local/bin/node
 COPY --from=node-runtime /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/npm
 RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
@@ -42,8 +47,7 @@ RUN useradd -m -s /bin/bash mobius
 # agent-browser looks by default).
 # Discard npm's download cache in each layer: installed packages are the
 # runtime artifact; registry tarballs only make the production image larger.
-ARG CLAUDE_CODE_VERSION=2.1.258
-ARG CODEX_VERSION=0.152.1
+ARG CODEX_VERSION=0.153.4
 ARG AGENT_BROWSER_VERSION=0.35.1
 RUN apt-get update && apt-get install -y --no-install-recommends \
     age ca-certificates cron curl git jq procps ripgrep sqlite3 sudo unzip util-linux \
@@ -52,8 +56,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxfixes3 libxrandr2 libgbm1 libpango-1.0-0 libcairo2 libasound2t64 \
     fonts-liberation fonts-noto-color-emoji \
     && npm install -g --engine-strict --strict-allow-scripts \
-      --allow-scripts="@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION},@openai/codex@${CODEX_VERSION},agent-browser@${AGENT_BROWSER_VERSION}" \
-      "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
+      --allow-scripts="@openai/codex@${CODEX_VERSION},agent-browser@${AGENT_BROWSER_VERSION}" \
       "@openai/codex@${CODEX_VERSION}" \
       "agent-browser@${AGENT_BROWSER_VERSION}" \
     && agent-browser install \
@@ -135,7 +138,11 @@ WORKDIR /app
 COPY backend/requirements.txt backend/requirements.lock ./
 RUN pip install --no-cache-dir --require-hashes -r requirements.lock \
     && python -c \
-      'from pathlib import Path; import claude_agent_sdk; p = Path(claude_agent_sdk.__file__).parent / "_bundled" / "claude"; p.unlink(missing_ok=True); assert not p.exists()'
+      'from pathlib import Path; import claude_agent_sdk; p = Path(claude_agent_sdk.__file__).parent / "_bundled" / "claude"; assert p.is_file() and p.stat().st_mode & 0o111' \
+    && ln -s "$(python -c 'from pathlib import Path; import claude_agent_sdk; print(Path(claude_agent_sdk.__file__).parent / "_bundled" / "claude")')" /usr/local/bin/claude \
+    && python -c \
+      'from pathlib import Path; import shutil, claude_agent_sdk; assert Path(shutil.which("claude")).samefile(Path(claude_agent_sdk.__file__).parent / "_bundled" / "claude")' \
+    && claude --version | grep -Fx '2.1.259 (Claude Code)'
 
 # openai-codex Python SDK: its upstream pyproject pins a second, older
 # openai-codex-cli-bin payload. Keep that declared package so `pip check` and
@@ -143,24 +150,10 @@ RUN pip install --no-cache-dir --require-hashes -r requirements.lock \
 # replace its private payload in the SAME image layer with a link to Möbius's
 # lockstep npm CLI. This preserves the external SDK contract without storing a
 # second ~350 MB runtime or running a second protocol version.
-# Pinned to commit SHA (not tag) for full reproducibility — tags are
-# mutable on GitHub. SHA corresponds to refs/tags/rust-v0.152.1
-# as of 2026-09-01, and is kept in lockstep with the npm @openai/codex
-# binary above (the SDK spawns it via codex_bin=shutil.which("codex")).
-# We moved from rust-v0.144.5 to this tag because the 0.144.x generated
-# ReasoningEffort enum was strict (none/minimal/low/medium/high/xhigh)
-# and rejected efforts the running CLI advertises for newer models, so
-# codex.models() and ThreadResumeResponse validation failed and broke a
-# real chat resume. alpha.13 turned ReasoningEffort into a forgiving
-# `str, Enum` with a `_missing_` hook that accepts any effort string;
-# 0.152.1 is the latest stable tag published to BOTH the git repo and npm, so
-# binary and schema stay matched. The SDK exposes the request bridge as a
-# public `approval_handler` constructor argument on
-# `openai_codex.client.CodexClient`; `AsyncCodex` still does not forward
-# it, so codex_sdk_runner.py installs the handler on the wrapped sync
-# client's `_approval_handler`.
+# Pin the SDK to the immutable commit for the npm CLI's release. Production
+# SDK contract tests verify the protocol and approval bridge before image merge.
 RUN pip install --no-cache-dir --no-deps \
-      'openai-codex @ git+https://github.com/openai/codex.git@5adb68a49933ae446bf11935662c83dba55a0804#subdirectory=sdk/python' \
+      'openai-codex @ git+https://github.com/openai/codex.git@3d2ee51ca2d5db578f328aa75e20aa22c0197c9a#subdirectory=sdk/python' \
     && pip install --no-cache-dir 'openai-codex-cli-bin==0.147.0' \
     && _codex_cli_bin="$(python -c \
       'from pathlib import Path; import codex_cli_bin; print(Path(codex_cli_bin.__file__).parent)')" \
@@ -173,18 +166,19 @@ RUN pip install --no-cache-dir --no-deps \
       'from pathlib import Path; import openai_codex; from codex_cli_bin import bundled_codex_path; assert bundled_codex_path().samefile(Path("/usr/local/bin/codex"))' \
     && pip check
 
-# Capture each installed agent CLI's npm publish date into a small JSON the
+# Capture each installed agent CLI's publish date into a small JSON the
 # Settings row reads (routes/settings._cli_release_dates), keyed by the
-# version actually installed above. Done at build time so a CLI pin bump
+# version reported by its actual executable. Done at build time so a CLI bump
 # refreshes the date automatically — no hand-maintained map, no test to
 # satisfy. Best effort: if the npm registry is unreachable the file is left
 # empty and the Settings row simply shows the bare version, never an error.
 RUN if ! node -e "const cp=require('child_process'),fs=require('fs');\
-const want=['@anthropic-ai/claude-code','@openai/codex'];\
 let installed={};\
 try{installed=(JSON.parse(cp.execSync('npm ls -g --depth=0 --json',{stdio:['ignore','pipe','ignore']}).toString()).dependencies)||{};}catch(e){}\
+const claude=(cp.execSync('claude --version').toString().match(/^(\\S+)/)||[])[1];\
+const want={'@anthropic-ai/claude-code':claude,'@openai/codex':installed['@openai/codex']&&installed['@openai/codex'].version};\
 const out={};\
-for(const name of want){const v=installed[name]&&installed[name].version;if(!v)continue;\
+for(const [name,v] of Object.entries(want)){if(!v)continue;\
 try{const t=JSON.parse(cp.execSync('npm view '+name+'@'+v+' time --json',{stdio:['ignore','pipe','ignore']}).toString());if(t&&t[v])out[v]=String(t[v]).slice(0,10);}catch(e){}}\
 fs.writeFileSync('/app/cli-release-dates.json',JSON.stringify(out));\
 console.log('cli-release-dates.json:',JSON.stringify(out));"; then \
@@ -279,9 +273,16 @@ ARG BUILD_DATE=unknown
 ARG RAILWAY_GIT_COMMIT_SHA=unknown
 ARG RAILWAY_DEPLOYMENT_ID=unknown
 ARG MOBIUS_ALLOW_UNKNOWN_BUILD_SHA=0
+ARG MOBIUS_USE_LOCAL_PLATFORM_SOURCE=0
+ARG MOBIUS_LOCAL_PLATFORM_SHA=unknown
+ARG MOBIUS_LOCAL_PLATFORM_BASE_SHA=unknown
+ARG MOBIUS_LOCAL_PLATFORM_DATE=unknown
 RUN set -eux; \
     _build_sha="${BUILD_SHA:-unknown}"; \
     _railway_sha="${RAILWAY_GIT_COMMIT_SHA:-unknown}"; \
+    case "${MOBIUS_USE_LOCAL_PLATFORM_SOURCE:-0}" in 0|1) ;; *) \
+      echo "FATAL: MOBIUS_USE_LOCAL_PLATFORM_SOURCE must be 0 or 1" >&2; exit 1;; \
+    esac; \
     if [ "$_build_sha" = "unknown" ] && [ "$_railway_sha" != "unknown" ] && [ -n "$_railway_sha" ]; then \
       _build_sha="$_railway_sha"; \
     fi; \
@@ -298,8 +299,9 @@ RUN set -eux; \
     if [ "$_build_date" = "unknown" ] || [ -z "$_build_date" ]; then \
       _build_date="$(date -u +%Y-%m-%d)"; \
     fi; \
-    if printf '%s' "$_build_sha" | grep -Eq '^[0-9a-fA-F]{40}$'; then \
-      if git -C /app/platform-baked fetch --depth 1 origin "$_build_sha" \
+    if [ "${MOBIUS_USE_LOCAL_PLATFORM_SOURCE:-0}" != "1" ] \
+       && printf '%s' "$_build_sha" | grep -Eq '^[0-9a-fA-F]{40}$'; then \
+      if git -C /app/platform-baked fetch --depth 1 "$MOBIUS_PLATFORM_ORIGIN" "$_build_sha" \
          && git -C /app/platform-baked checkout "$_build_sha"; then \
         :; \
       else \
@@ -329,6 +331,70 @@ RUN set -eux; \
       > /app/build-info.json; \
     chown -R root:root /app/platform-baked; \
     chmod -R a+rX,go-w /app/platform-baked
+
+# `railway up` uploads a working tree rather than a Git source deployment, so
+# Railway cannot provide RAILWAY_GIT_COMMIT_SHA. Review deployments may still
+# need the exact unpushed checkout to seed /data/platform. Keep that exception
+# explicit and provenance-bound: normal builds mount an empty context, while
+# the opt-in path mounts only a temporary bundle of committed Git objects.
+# Nothing from this read-only mount is retained in an image layer.
+RUN --mount=type=bind,from=mobius-local-platform-source,source=/,target=/tmp/mobius-local-platform-source,ro \
+    set -eux; \
+    case "${MOBIUS_USE_LOCAL_PLATFORM_SOURCE:-0}" in 0|1) ;; *) \
+      echo "FATAL: MOBIUS_USE_LOCAL_PLATFORM_SOURCE must be 0 or 1" >&2; exit 1;; \
+    esac; \
+    if [ "${MOBIUS_USE_LOCAL_PLATFORM_SOURCE:-0}" = "1" ]; then \
+      printf '%s' "${MOBIUS_LOCAL_PLATFORM_SHA:-unknown}" \
+        | grep -Eq '^[0-9a-fA-F]{40}$' \
+        || { echo "FATAL: local platform source requires its exact Git SHA" >&2; exit 1; }; \
+      printf '%s' "${MOBIUS_LOCAL_PLATFORM_BASE_SHA:-unknown}" \
+        | grep -Eq '^[0-9a-fA-F]{40}$' \
+        || { echo "FATAL: local platform source requires its public base SHA" >&2; exit 1; }; \
+      _bundle=/tmp/mobius-local-platform-source/platform.bundle; \
+      [ -f "$_bundle" ] \
+        || { echo "FATAL: local platform source bundle is missing" >&2; exit 1; }; \
+      git -C /app/platform-baked fetch --depth 1 "$MOBIUS_PLATFORM_ORIGIN" \
+        "${MOBIUS_LOCAL_PLATFORM_BASE_SHA}"; \
+      git -C /app/platform-baked fetch --no-tags "$_bundle" HEAD; \
+      [ "$(git -C /app/platform-baked rev-parse FETCH_HEAD)" = \
+        "${MOBIUS_LOCAL_PLATFORM_SHA}" ] \
+        || { echo "FATAL: local platform source bundle does not match its declared SHA" >&2; exit 1; }; \
+      git -C /app/platform-baked checkout --detach \
+        "${MOBIUS_LOCAL_PLATFORM_SHA}"; \
+      git -C /app/platform-baked checkout -B main HEAD; \
+      git -C /app/platform-baked branch -f upstream HEAD; \
+      git -C /app/platform-baked update-ref refs/remotes/origin/main HEAD; \
+      if [ -d /app/platform-baked/frontend ]; then \
+        cd /app/platform-baked/frontend; \
+        [ -e node_modules ] || [ -L node_modules ] \
+          || ln -s /app/shell-src/node_modules node_modules; \
+        mkdir -p dist; \
+        cp -a /app/static/. dist/; \
+      fi; \
+      git -C /app/platform-baked rev-parse HEAD > /app/platform-baked/.baked-sha; \
+      printf '{"sha":"%s","build_date":"%s","railway_deployment_id":"%s","source":"local-overlay"}\n' \
+        "${MOBIUS_LOCAL_PLATFORM_SHA}" \
+        "${MOBIUS_LOCAL_PLATFORM_DATE:-unknown}" \
+        "${RAILWAY_DEPLOYMENT_ID:-unknown}" > /app/build-info.json; \
+      chown -R root:root /app/platform-baked; \
+      chmod -R a+rX,go-w /app/platform-baked; \
+    fi
+
+# What this image actually contains, so a running container can compare itself
+# with the source it serves instead of remembering which update touched what:
+# the hash of every image input at the baked checkout (build-info.json
+# `image_inputs`), and the package inventories the layers above installed. A
+# later `pip`/`apt` install made live in a container shows up as a difference
+# from these lists, which is exactly what a replacement would drop.
+RUN set -eux; \
+    python3 -c 'import json, subprocess, pathlib; \
+info = pathlib.Path("/app/build-info.json"); data = json.loads(info.read_text()); \
+data["image_inputs"] = json.loads(subprocess.run(["python3", "/app/platform-baked/backend/app/platform_activation.py", "--hashes", "/app/platform-baked"], check=True, capture_output=True, text=True).stdout); \
+info.write_text(json.dumps(data, sort_keys=True) + "\n")'; \
+    mkdir -p /app/image-inventory; \
+    pip freeze --disable-pip-version-check 2>/dev/null | sort > /app/image-inventory/pip.txt; \
+    dpkg-query -W -f '${Package}=${Version}\n' | sort > /app/image-inventory/apt.txt; \
+    chmod -R a+rX /app/image-inventory /app/build-info.json
 
 # Initialize the runtime volume paths for the non-root agent user.
 RUN mkdir -p /data/db /data/apps /data/compiled /data/shared \

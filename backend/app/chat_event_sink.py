@@ -44,6 +44,9 @@ from app.events import (
 from app.memory_recall import (
   RecallBinding, recall_from_command, settle_recall,
 )
+from app.peer_message import (
+  peer_message_from_call, settle_peer_message,
+)
 from app.runtime_types import ChatEvent
 from app.secure_inputs import redact_reveal_markers
 from app.tool_edit_preview import edit_diff_sidecar_id
@@ -493,6 +496,45 @@ class ChatEventSink:
         pending, event.get("content"), event.get("output_exit_code"),
       )
 
+  def _peer_message_for_tool(self, tool_use_id) -> dict | None:
+    """Return the start-phase peer-network marker for this tool, if any."""
+    for blk in reversed(self.assistant_blocks):
+      if blk.get("type") != "tool":
+        continue
+      if tool_use_id:
+        if blk.get("tool_use_id") == tool_use_id:
+          pm = blk.get("peer_message")
+          return pm if isinstance(pm, dict) else None
+        continue
+      if blk.get("status") != "done":
+        pm = blk.get("peer_message")
+        return pm if isinstance(pm, dict) else None
+    return None
+
+  def _stamp_peer_message(self, event: ChatEvent) -> None:
+    """Name a Möbius peer-network exchange on the event, in two phases.
+
+    The tool NAME alone identifies the exchange, so the live turn can say it is
+    coordinating while the call runs. The output phase settles it from the
+    tool's own structured JSON (resolved peer names, kind, body) — the sole
+    authority, so a running marker can never prematurely claim what was said.
+    The output settle runs BEFORE reduction so the full result JSON is parsed.
+    """
+    if event.get("type") in ("tool_start", "tool_input"):
+      if self._peer_message_for_tool(event.get("tool_use_id")) is not None:
+        return
+      marker = peer_message_from_call(event.get("tool"))
+      if marker is not None:
+        event["peer_message"] = marker
+      return
+    pending = self._peer_message_for_tool(event.get("tool_use_id"))
+    if event.get("output_complete") and pending is not None:
+      event["peer_message"] = settle_peer_message(
+        pending,
+        event.get("content"),
+        event.get("output_exit_code"),
+      )
+
   def _reduce_tool_output(self, event: ChatEvent) -> bool:
     """Move a large tool_output's full text OFF the wire (contract rule 6).
 
@@ -662,6 +704,9 @@ class ChatEventSink:
       # but the marked envelope must not enter Möbius's live UI, transcript, or
       # chat-side logs. Normal sealed execution never emits these markers.
       event["content"] = redact_reveal_markers(event.get("content"))
+      # Settle a peer-network exchange from the FULL result JSON before it can be
+      # carved by reduction (the envelope is one object, not a tail-safe line).
+      self._stamp_peer_message(event)
       output_reduced = self._reduce_tool_output(event)
       if not output_reduced and event.get("output_exit_code") is None:
         exit_code = tool_output_exit_code(event.get("content"))
@@ -669,6 +714,8 @@ class ChatEventSink:
           event["output_exit_code"] = exit_code
     if event_type in ("tool_start", "tool_input", "tool_output"):
       self._stamp_memory_recall(event)
+    if event_type in ("tool_start", "tool_input"):
+      self._stamp_peer_message(event)
     if event_type == "thinking":
       self._prepare_thinking_event(event)
 
@@ -946,7 +993,9 @@ class ChatEventSink:
       )
     return stored_result
 
-  async def publish_question(self, event: ChatEvent) -> None:
+  async def publish_question(
+    self, event: ChatEvent, *, secure_request: dict | None = None,
+  ) -> None:
     """Save-before-broadcast for an AskUserQuestion card.
 
     A question is a protocol barrier: its `question_id` MUST be durably
@@ -973,6 +1022,18 @@ class ChatEventSink:
       "publish_question only accepts question events; ordinary events go "
       "through publish()"
     )
+    # A continuation card and a native provider question share one owner-input
+    # slot. Claim it synchronously in the reducer before awaiting persistence,
+    # so concurrently dispatched tools cannot publish competing cards.
+    if any(
+      block.get("type") == "question"
+      and not block.get("answers")
+      and block.get("question_id") != event.get("question_id")
+      and (block.get("response_mode") == "continuation"
+           or event.get("response_mode") == "continuation")
+      for block in self.assistant_blocks
+    ):
+      raise RuntimeError("Another unanswered question owns this chat.")
     # Capture EXACTLY what process_event will do to assistant_blocks BEFORE
     # it runs, so a failed commit can be reverted by identity (not the old
     # tail-slice, which was wrong when process_event COALESCED into an
@@ -988,6 +1049,7 @@ class ChatEventSink:
       QuestionCommit(
         chat_id=self.chat_id, run_token=self.run_token or "", snapshot=snapshot,
         thinking_stashes=stashes,
+        **({"secure_request": secure_request} if secure_request is not None else {}),
       )
     )
     try:

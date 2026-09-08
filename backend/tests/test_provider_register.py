@@ -34,6 +34,12 @@ def test_register_protects_required_behaviors():
     assert required in reg, f"register dropped protection for: {required!r}"
 
 
+def test_register_does_not_duplicate_waiting_policy():
+  reg = claude_sdk_runner._CONCISE_REGISTER
+  assert "Monitor" not in reg
+  assert "declare_wait" not in reg
+
+
 def test_empty_register_is_behavior_neutral(monkeypatch):
   monkeypatch.setattr(claude_sdk_runner, "_CONCISE_REGISTER", "   ")
   assert claude_sdk_runner._system_prompt_with_register("BASE") == "BASE"

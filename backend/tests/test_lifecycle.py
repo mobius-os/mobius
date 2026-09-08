@@ -59,6 +59,32 @@ def test_hard_purge_removes_durable_waits(db, chat):
   assert db.get(models.ChatWait, "wait-for-purged-chat") is None
 
 
+def test_hard_purge_removes_peer_mail_on_both_sides(db, chat):
+  """A deleted peer cannot leave dangling incoming or outgoing mail."""
+  peer = models.Chat(id="retained-peer", title="Peer", messages=[])
+  db.add(peer)
+  db.flush()
+  db.add_all([
+    models.AgentCoordinationMessage(
+      id="outgoing-peer-note", room_kind="workspace", room_id="1",
+      from_chat_id=chat.id, to_chat_id=peer.id, kind="note", body="out",
+    ),
+    models.AgentCoordinationMessage(
+      id="incoming-peer-note", room_kind="workspace", room_id="1",
+      from_chat_id=peer.id, to_chat_id=chat.id, kind="note", body="in",
+    ),
+  ])
+  chat_id = chat.id
+  chat.deleted_at = datetime.now(UTC).replace(tzinfo=None) - timedelta(days=8)
+  db.commit()
+
+  purge_expired_chat_tombstones(db)
+
+  assert db.get(models.Chat, chat_id) is None
+  assert db.get(models.Chat, peer.id) is not None
+  assert db.query(models.AgentCoordinationMessage).count() == 0
+
+
 def test_hard_purge_removes_derived_search_transcript_without_later_search(
   db, chat,
 ):

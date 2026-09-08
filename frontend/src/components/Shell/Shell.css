@@ -8,7 +8,7 @@
    to rgba(..., <1) will leak whatever sits behind through every
    surface that paints it. */
 .shell {
-  --desktop-sidebar-width: 320px;
+  --desktop-sidebar-width: 360px;
   /* Shared geometry contract for fixed shell-level overlays. The notice rail
      reads this instead of guessing at chrome height from the root font size.
      Shell publishes --shell-tabstrip-height from paneModel.STRIP_H. */
@@ -909,7 +909,9 @@
     padding: 8px 12px;
     flex-direction: row;
     align-items: center;
-    border-right: 0;
+    /* Continue the drawer's right edge through its desktop header so the
+       brand and quick actions belong to one visually bounded column. */
+    border-right: 1px solid var(--border-light);
     border-bottom: 0;
   }
 

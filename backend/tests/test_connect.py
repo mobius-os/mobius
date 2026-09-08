@@ -2,7 +2,9 @@
 
 import asyncio
 import json
+import stat
 import shlex
+import signal
 import sys
 import threading
 import time
@@ -14,7 +16,7 @@ import pytest
 from sqlalchemy import create_engine, inspect, text
 from starlette.requests import Request
 
-from app import connect_runner, models
+from app import connect_outbound, connect_runner, models
 from app.connect_runner import _run_command
 from app.database import SessionLocal
 from app.manifest_contract import ManifestContractError, validate_manifest_contract
@@ -64,6 +66,519 @@ def _paired_host(client, auth, name="Workstation"):
   )
   assert paired.status_code == 200, paired.text
   return pairing, paired.json()["token"]
+
+
+def test_install_command_is_single_fetch_and_serves_shell_bootstrap(client, auth):
+  created = client.post(
+    "/api/connect/hosts", headers=auth, json={"name": "Laptop"},
+  )
+  assert created.status_code == 200, created.text
+  pairing = created.json()
+  code = pairing["pairing_code"]
+
+  # The copyable command is one fetch with the code in the path -- no pipe-into-
+  # python arguments and no quotes to be corrupted when it is pasted.
+  command = pairing["install_command"]
+  assert command.startswith("curl -fsSL ")
+  assert command.endswith(f"/api/connect/i/{code} | sh")
+  assert '"' not in command
+
+  script = client.get(f"/api/connect/i/{code}")
+  assert script.status_code == 200, script.text
+  body = script.text
+  assert body.startswith("#!/bin/sh")
+  # The bootstrap fetches the runner and hands it the same flags the pipe form
+  # used, so a machine ends up paired and installed as a service.
+  assert "/api/connect/runner" in body
+  assert f'code="{code}"' in body
+  assert "--pair" in body and "--install" in body
+
+  # A malformed code never reaches the shell template.
+  assert client.get("/api/connect/i/nope").status_code == 404
+  # A lowercased/ungrouped code is normalized back to canonical form.
+  loose = client.get(f"/api/connect/i/{code.replace('-', '').lower()}")
+  assert loose.status_code == 200, loose.text
+  assert f'code="{code}"' in loose.text
+
+
+def test_outbound_command_is_parsed_as_data_not_shell():
+  base, code = connect_outbound.parse_pairing_command(
+    "curl -fsSL https://friend.example/api/connect/i/ABCD-EFGH | sh",
+  )
+  assert base == "https://friend.example"
+  assert code == "ABCD-EFGH"
+
+  for unsafe in (
+    "curl -fsSL https://friend.example/api/connect/i/ABCD-EFGH | sh; id",
+    "curl -fsSL https://friend.example/anything | sh",
+    "echo hello",
+  ):
+    with pytest.raises(connect_outbound.OutboundConnectError):
+      connect_outbound.parse_pairing_command(unsafe)
+
+  with pytest.raises(connect_outbound.OutboundConnectError, match="HTTPS"):
+    connect_outbound.parse_pairing_command(
+      "curl -fsSL http://friend.example/api/connect/i/ABCD-EFGH | sh",
+    )
+
+
+def test_outbound_json_replaces_an_existing_public_mode_with_private_storage(
+  tmp_path,
+):
+  path = tmp_path / "config.json"
+  path.write_text("stale", encoding="utf-8")
+  path.chmod(0o644)
+
+  connect_outbound._atomic_json(path, {"token": "remote-secret"})
+
+  assert json.loads(path.read_text(encoding="utf-8")) == {
+    "token": "remote-secret",
+  }
+  assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+def test_inbound_host_registry_is_private(tmp_path, monkeypatch):
+  monkeypatch.setattr(connect_routes, "_hosts_dir", lambda: tmp_path)
+
+  connect_routes._save_host({"id": "h_example", "pairing_code": "ABCD-EFGH"})
+
+  path = tmp_path / "h_example.json"
+  assert json.loads(path.read_text(encoding="utf-8"))["pairing_code"] == "ABCD-EFGH"
+  assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+@pytest.mark.asyncio
+async def test_outbound_profile_keeps_pairing_code_out_of_saved_record(
+  tmp_path, monkeypatch,
+):
+  profiles = tmp_path / "outbound"
+  monkeypatch.setattr(connect_outbound, "_profiles_dir", lambda: profiles)
+  monkeypatch.setattr(
+    connect_outbound,
+    "_download_runner",
+    lambda _base: b"#!/usr/bin/env python3\n# Mobius Connect runner\n",
+  )
+
+  class Running:
+    pid = 424242
+
+    def poll(self):
+      return None
+
+  launched = []
+
+  def launch(profile_id, *args):
+    launched.append(args)
+    connect_outbound._atomic_json(
+      connect_outbound._runner_config_path(profile_id),
+      {
+        "url": "https://friend.example",
+        "host_id": "h_remote",
+        "token": "remote-secret",
+      },
+    )
+    return Running()
+
+  monkeypatch.setattr(connect_outbound, "_launch", launch)
+  monkeypatch.setattr(connect_outbound, "_process_alive", lambda _id: True)
+  created = await connect_outbound.create_profile(
+    "Alex",
+    "curl -fsSL https://friend.example/api/connect/i/ABCD-EFGH | sh",
+  )
+
+  # The one-time code reaches the runner only as argv, never the saved record.
+  assert launched == [("--pair", "ABCD-EFGH", "--url", "https://friend.example")]
+  meta = json.loads(
+    connect_outbound._meta_path(created["id"]).read_text(encoding="utf-8"),
+  )
+  assert meta["base_url"] == "https://friend.example"
+  assert "ABCD-EFGH" not in json.dumps(meta)
+  assert "remote-secret" not in json.dumps(meta)
+  assert created["status"] == "active"
+  assert "remote-secret" not in json.dumps(created)
+
+
+def test_outbound_reconcile_records_exits_and_relaunches_orphans(
+  tmp_path, monkeypatch,
+):
+  profiles = tmp_path / "outbound"
+  monkeypatch.setattr(connect_outbound, "_profiles_dir", lambda: profiles)
+  ended, failed, running, adopted, orphan, finished = (
+    f"o_{digit * 16}" for digit in "123456"
+  )
+  for profile_id in (ended, failed, running, adopted, orphan):
+    connect_outbound._atomic_json(connect_outbound._meta_path(profile_id), {
+      "id": profile_id, "base_url": "https://friend.example", "status": "active",
+    })
+  connect_outbound._atomic_json(connect_outbound._meta_path(finished), {
+    "id": finished, "base_url": "https://friend.example", "status": "ended",
+  })
+  connect_outbound._runner_path(ended).parent.mkdir(parents=True, exist_ok=True)
+  connect_outbound._runner_path(ended).write_text("runner", encoding="utf-8")
+
+  class Owned:
+    def __init__(self, result):
+      self.result = result
+
+    def poll(self):
+      return self.result
+
+  owned = {ended: Owned(0), failed: Owned(1), running: Owned(None)}
+  monkeypatch.setattr(connect_outbound, "_owned_processes", owned)
+  monkeypatch.setattr(
+    connect_outbound, "_process_alive", lambda profile_id: profile_id == adopted,
+  )
+  launched = []
+  monkeypatch.setattr(
+    connect_outbound, "_launch",
+    lambda profile_id, *args: launched.append((profile_id, args)),
+  )
+
+  connect_outbound._reconcile_once()
+
+  def status(profile_id):
+    return json.loads(
+      connect_outbound._meta_path(profile_id).read_text(encoding="utf-8"),
+    )["status"]
+
+  assert status(ended) == "ended"
+  assert status(failed) == "error"
+  assert status(running) == "active"
+  # An orphaned active profile is relaunched without a pairing code; a runner
+  # found alive by pid, or one that already exited on its own, is left alone.
+  assert launched == [(orphan, ())]
+  assert set(owned) == {running}
+
+
+@pytest.mark.asyncio
+async def test_outbound_revoke_fails_closed_until_remote_confirms(
+  tmp_path, monkeypatch,
+):
+  profiles = tmp_path / "outbound"
+  monkeypatch.setattr(connect_outbound, "_profiles_dir", lambda: profiles)
+  profile_id = "o_0123456789abcdef"
+  connect_outbound._atomic_json(connect_outbound._meta_path(profile_id), {
+    "id": profile_id,
+    "label": "Alex",
+    "base_url": "https://friend.example",
+    "created_at": 1,
+    "status": "active",
+  })
+  connect_outbound._atomic_json(
+    connect_outbound._runner_config_path(profile_id),
+    {"url": "https://friend.example", "host_id": "h_remote", "token": "secret"},
+  )
+  def keep_access(_config):
+    raise connect_outbound.OutboundConnectError("access was kept")
+
+  monkeypatch.setattr(connect_outbound, "_disconnect_remote", keep_access)
+  stopped = []
+  monkeypatch.setattr(connect_outbound, "_stop_process_tree", stopped.append)
+
+  with pytest.raises(connect_outbound.OutboundConnectError, match="kept"):
+    await connect_outbound.revoke_profile(profile_id)
+  assert connect_outbound._profile_dir(profile_id).is_dir()
+  assert stopped == []
+
+
+def test_outbound_observed_remote_revocation_allows_local_profile_cleanup(
+  tmp_path, monkeypatch,
+):
+  profiles = tmp_path / "outbound"
+  monkeypatch.setattr(connect_outbound, "_profiles_dir", lambda: profiles)
+  profile_id = "o_0123456789abcdef"
+  connect_outbound._atomic_json(connect_outbound._meta_path(profile_id), {
+    "id": profile_id,
+    "base_url": "https://friend.example",
+    "status": "active",
+  })
+  connect_outbound._atomic_json(
+    connect_outbound._runner_config_path(profile_id),
+    {"url": "https://friend.example", "host_id": "h_remote", "token": "secret"},
+  )
+  connect_outbound._runner_path(profile_id).write_text("runner", encoding="utf-8")
+  connect_outbound._write_pid(profile_id, 424242)
+
+  runner_pid = connect_outbound._runner_path(profile_id).with_name("runner.pid")
+  runner_pid.write_text("424242", encoding="ascii")
+
+  class RemotelyRevoked:
+    def poll(self):
+      return 0
+
+  owned = {profile_id: RemotelyRevoked()}
+  monkeypatch.setattr(connect_outbound, "_owned_processes", owned)
+  for artifact in (
+    connect_outbound._runner_config_path(profile_id),
+    connect_outbound._runner_path(profile_id),
+    runner_pid,
+  ):
+    artifact.unlink()
+
+  assert connect_outbound._pid_path(profile_id).exists()
+  connect_outbound._reconcile_once()
+
+  meta = json.loads(
+    connect_outbound._meta_path(profile_id).read_text(encoding="utf-8"),
+  )
+  assert meta["status"] == "revoked"
+  assert owned == {}
+  monkeypatch.setattr(
+    connect_outbound,
+    "_disconnect_remote",
+    lambda _config: pytest.fail("revoked credentials must not be required"),
+  )
+  connect_outbound._revoke_profile(profile_id)
+  assert not connect_outbound._profile_dir(profile_id).exists()
+
+
+@pytest.mark.parametrize(
+  "config_text",
+  [
+    None,
+    "{not-json",
+    json.dumps({"url": "https://friend.example", "host_id": "h_remote"}),
+  ],
+  ids=["missing-config", "corrupt-config", "missing-credential"],
+)
+def test_outbound_revoke_keeps_ambiguous_unreadable_credentials(
+  tmp_path, monkeypatch, config_text,
+):
+  profiles = tmp_path / "outbound"
+  monkeypatch.setattr(connect_outbound, "_profiles_dir", lambda: profiles)
+  profile_id = "o_0123456789abcdef"
+  connect_outbound._atomic_json(connect_outbound._meta_path(profile_id), {
+    "id": profile_id,
+    "base_url": "https://friend.example",
+    "status": "ended",
+  })
+  if config_text is not None:
+    connect_outbound._runner_config_path(profile_id).parent.mkdir(
+      parents=True, exist_ok=True,
+    )
+    connect_outbound._runner_config_path(profile_id).write_text(
+      config_text, encoding="utf-8",
+    )
+  stopped = []
+  monkeypatch.setattr(connect_outbound, "_stop_process_tree", stopped.append)
+
+  with pytest.raises(connect_outbound.OutboundConnectError, match="kept"):
+    connect_outbound._revoke_profile(profile_id)
+
+  assert connect_outbound._profile_dir(profile_id).is_dir()
+  assert stopped == []
+
+
+def test_outbound_revoke_does_not_signal_a_reused_runner_pid(monkeypatch):
+  profile_id = "o_0123456789abcdef"
+  monkeypatch.setattr(connect_outbound, "_read_pid", lambda _id: 424242)
+  monkeypatch.setattr(connect_outbound, "_process_alive", lambda _id: False)
+  monkeypatch.setattr(connect_outbound, "_process_identity", lambda _pid: (1, 100))
+  opened = []
+  monkeypatch.setattr(connect_outbound, "os", SimpleNamespace(pidfd_open=opened.append))
+
+  connect_outbound._stop_process_tree(profile_id)
+
+  assert opened == []
+
+
+def test_outbound_teardown_pins_processes_before_term_and_kill(monkeypatch):
+  profile_id = "o_0123456789abcdef"
+  monkeypatch.setattr(connect_outbound, "_read_pid", lambda _id: 424242)
+  monkeypatch.setattr(connect_outbound, "_process_alive", lambda _id: True)
+  monkeypatch.setattr(connect_outbound, "_process_identity", lambda _pid: (1, 100))
+  monkeypatch.setattr(connect_outbound, "_descendant_processes", lambda _pid: {424243: (424242, 101)})
+  opened, closed, signals = [], [], []
+
+  def open_pid(pid):
+    opened.append(pid)
+    return pid + 10
+
+  monkeypatch.setattr(connect_outbound, "os", SimpleNamespace(pidfd_open=open_pid, close=closed.append))
+  monkeypatch.setattr(connect_outbound.signal, "pidfd_send_signal", lambda *args: signals.append(args))
+  # No process has exited before the deadline. SIGKILL must reuse the pinned
+  # handle, never look up a numeric PID again after SIGTERM.
+  clock = iter((0, 4))
+  monkeypatch.setattr(connect_outbound, "time", SimpleNamespace(monotonic=lambda: next(clock)))
+
+  connect_outbound._stop_process_tree(profile_id)
+
+  assert opened == [424243, 424242]
+  assert signals == [(424252, signal.SIGTERM), (424252, signal.SIGKILL)]
+  assert closed == [424253, 424252]  # Reused descendant was rejected before signaling.
+
+
+def test_outbound_reused_root_does_not_signal_replacement_descendants(monkeypatch):
+  profile_id = "o_0123456789abcdef"
+  root = 424242
+  monkeypatch.setattr(connect_outbound, "_read_pid", lambda _id: root)
+  monkeypatch.setattr(connect_outbound, "_process_alive", lambda _id: True)
+  root_versions = iter(((1, 100), (1, 200)))
+  monkeypatch.setattr(
+    connect_outbound, "_process_identity",
+    lambda pid: next(root_versions) if pid == root else (root, 300),
+  )
+  monkeypatch.setattr(connect_outbound, "_descendant_processes", lambda _pid: {root + 1: (root, 300)})
+  closed, signals = [], []
+  monkeypatch.setattr(connect_outbound, "os", SimpleNamespace(pidfd_open=lambda pid: pid + 10, close=closed.append))
+  monkeypatch.setattr(connect_outbound.signal, "pidfd_send_signal", lambda *args: signals.append(args))
+
+  connect_outbound._stop_process_tree(profile_id)
+
+  assert signals == []
+  assert set(closed) == {root + 10, root + 11}
+
+
+@pytest.mark.parametrize("failure_stage", ["launch", "pairing"])
+def test_outbound_creation_failure_cleans_profile_and_runner(
+  tmp_path, monkeypatch, failure_stage,
+):
+  profiles = tmp_path / "outbound"
+  monkeypatch.setattr(connect_outbound, "_profiles_dir", lambda: profiles)
+  monkeypatch.setattr(connect_outbound, "_download_runner", lambda _url: b"runner")
+  stopped = []
+  monkeypatch.setattr(connect_outbound, "_stop_process_tree", stopped.append)
+
+  def fail(*_args):
+    raise OSError("setup failed")
+
+  monkeypatch.setattr(connect_outbound, "_launch", fail if failure_stage == "launch" else lambda *_args: object())
+  monkeypatch.setattr(connect_outbound, "_await_pairing", fail)
+
+  with pytest.raises(OSError, match="setup failed"):
+    connect_outbound._create_profile(
+      "Shared access",
+      "curl -fsSL https://friend.example/api/connect/i/ABCD-EFGH | sh",
+    )
+
+  assert len(stopped) == 1
+  assert list(profiles.iterdir()) == []
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux pidfd process ownership")
+def test_outbound_pid_write_failure_stops_and_reaps_started_runner(
+  tmp_path, monkeypatch,
+):
+  profiles = tmp_path / "outbound"
+  monkeypatch.setattr(connect_outbound, "_profiles_dir", lambda: profiles)
+  monkeypatch.setattr(connect_outbound, "_download_runner", lambda _url: b"import time\ntime.sleep(60)\n")
+  owned = {}
+  monkeypatch.setattr(connect_outbound, "_owned_processes", owned)
+  started = []
+
+  def fail_pid_write(profile_id, _pid):
+    started.append(owned[profile_id])
+    raise OSError("pid write failed")
+
+  monkeypatch.setattr(connect_outbound, "_write_pid", fail_pid_write)
+  try:
+    with pytest.raises(OSError, match="pid write failed"):
+      connect_outbound._create_profile(
+        "Shared access",
+        "curl -fsSL https://friend.example/api/connect/i/ABCD-EFGH | sh",
+      )
+    assert len(started) == 1
+    assert started[0].poll() is not None
+    assert owned == {}
+    assert list(profiles.iterdir()) == []
+  finally:
+    for process in started:
+      if process.poll() is None:
+        process.kill()
+      process.wait(timeout=5)
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux pidfd process ownership")
+def test_outbound_reconcile_pid_write_failure_stops_started_runner_and_marks_error(
+  tmp_path, monkeypatch,
+):
+  profiles = tmp_path / "outbound"
+  monkeypatch.setattr(connect_outbound, "_profiles_dir", lambda: profiles)
+  profile_id = "o_0123456789abcdef"
+  connect_outbound._atomic_json(connect_outbound._meta_path(profile_id), {
+    "id": profile_id,
+    "base_url": "https://friend.example",
+    "status": "active",
+  })
+  runner = connect_outbound._runner_path(profile_id)
+  runner.parent.mkdir(parents=True, exist_ok=True)
+  runner.write_text("import time\ntime.sleep(60)\n", encoding="utf-8")
+  owned = {}
+  monkeypatch.setattr(connect_outbound, "_owned_processes", owned)
+  started = []
+
+  def fail_pid_write(profile_id, _pid):
+    started.append(owned[profile_id])
+    raise OSError("pid write failed")
+
+  monkeypatch.setattr(connect_outbound, "_write_pid", fail_pid_write)
+  try:
+    connect_outbound._reconcile_once()
+
+    assert len(started) == 1
+    assert started[0].poll() is not None
+    assert owned == {}
+    assert not connect_outbound._pid_path(profile_id).exists()
+    meta = json.loads(
+      connect_outbound._meta_path(profile_id).read_text(encoding="utf-8"),
+    )
+    assert meta["status"] == "error"
+  finally:
+    for process in started:
+      if process.poll() is None:
+        process.kill()
+      process.wait(timeout=5)
+
+
+def test_outbound_routes_use_connect_manage_capability(
+  client, auth, monkeypatch,
+):
+  public = {
+    "id": "o_0123456789abcdef",
+    "label": "Alex",
+    "target": "friend.example",
+    "status": "active",
+    "online": True,
+    "created_at": 1,
+  }
+  monkeypatch.setattr(connect_outbound, "list_profiles", lambda: [public])
+
+  denied = _app_auth(client, auth, granted=False)
+  assert client.get("/api/connect/outbound", headers=denied).status_code == 403
+  granted = _app_auth(client, auth, granted=True)
+  assert client.get("/api/connect/outbound", headers=granted).json() == {
+    "connections": [public],
+  }
+
+
+def test_outbound_mutations_require_permission_and_report_domain_failures(
+  client, auth, monkeypatch,
+):
+  denied = _app_auth(client, auth, granted=False)
+  body = {
+    "label": "Shared access",
+    "command": "curl -fsSL https://friend.example/api/connect/i/ABCD-EFGH | sh",
+  }
+  path = "/api/connect/outbound"
+  assert client.post(path, headers=denied, json=body).status_code == 403
+  assert client.delete(path + "/o_0123456789abcdef", headers=denied).status_code == 403
+  granted = _app_auth(client, auth, granted=True)
+  assert client.post(path, headers=granted, json={**body, "label": "  "}).status_code == 422
+
+  async def rejected_pairing(_label, _command):
+    raise connect_outbound.OutboundConnectError("Pairing was rejected.")
+
+  async def rejected_revocation(_profile_id):
+    raise connect_outbound.OutboundConnectError("Access was kept.")
+
+  monkeypatch.setattr(connect_outbound, "create_profile", rejected_pairing)
+  monkeypatch.setattr(connect_outbound, "revoke_profile", rejected_revocation)
+  response = client.post(path, headers=granted, json=body)
+  assert response.status_code == 400
+  assert response.json()["detail"] == "Pairing was rejected."
+  response = client.delete(path + "/o_0123456789abcdef", headers=granted)
+  assert response.status_code == 409
+  assert response.json()["detail"] == "Access was kept."
 
 
 def test_pairing_code_exchange_is_rate_limited(client):

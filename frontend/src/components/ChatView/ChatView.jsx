@@ -97,6 +97,7 @@ import MessageMetaRow from './MessageMetaRow.jsx'
 import ActivityLineHeader from './ActivityLineHeader.jsx'
 import { messageCopyText } from './messageCopy.js'
 import { formatResetTime } from './resetTime.js'
+import { isResourcePause } from './resourcePause.js'
 import {
   resetDeadlineDelay,
   resetDeadlineState,
@@ -190,6 +191,7 @@ import {
   stopConfirmedIdle,
   stopRequestSucceeded,
   serverSnapshotBehindLocal,
+  serverSnapshotMissingAcceptedCid,
   shouldFreezeStreamingReturn,
   startedMessagesFromResponse,
   stripInternalUserMessageFields,
@@ -326,6 +328,17 @@ function tailResumableBlock(messages) {
     if (message.role !== 'assistant' || !message.blocks?.length) return null
     const tail = message.blocks[message.blocks.length - 1]
     return tail.type === 'error' && tail.resumable ? tail : null
+  }
+  return null
+}
+
+function tailResourcePauseBlock(messages) {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i].hidden) continue
+    const message = messages[i]
+    if (message.role !== 'assistant' || !message.blocks?.length) return null
+    const tail = message.blocks[message.blocks.length - 1]
+    return tail.type === 'error' && isResourcePause(tail) ? tail : null
   }
   return null
 }
@@ -1246,6 +1259,7 @@ export default function ChatView({
     authoritative = false,
     expectedFailedAttempt,
     failedAttemptTerminalOutcome = null,
+    preserveAcceptedCid = null,
   } = {}) => {
     if (sendingRef.current && !force) return
     const gen = fetchGenRef.current
@@ -1279,10 +1293,19 @@ export default function ChatView({
           : expectedFailedAttempt,
         expectedFetchGeneration: gen,
       })
+      const preserveAcceptedTurn = serverSnapshotMissingAcceptedCid(
+        msgs,
+        preserveAcceptedCid,
+      )
       const preserveLocalTurn =
         !authoritative
         && force
-        && (sendingRef.current || isStreamingRef.current || serverRunningRef.current)
+        && (
+          preserveAcceptedTurn
+          || sendingRef.current
+          || isStreamingRef.current
+          || serverRunningRef.current
+        )
       const staleSnapshot =
         !terminal204
         && !preserveLocalTurn
@@ -3288,6 +3311,11 @@ export default function ChatView({
       // comment above for the full rationale.
     }
     setSending(true)
+    // Close the synchronous re-entry window before React publishes the state
+    // update. Transcript reconciliation waits for the POST acknowledgement
+    // below: before that boundary an idle compact snapshot can still predate
+    // this turn and must never retire its optimistic row.
+    sendingRef.current = true
     // Pin per the R2 send rule via the funnel: it arms the reservation spacer
     // on every send and, when not pinning, retires any stale PIN to the
     // reader's anchor so their viewport stays fixed. The row carries its final
@@ -3409,6 +3437,12 @@ export default function ChatView({
           return replaceOptimisticWithBatch(prev, cid, startedMessages)
         })
       }
+      // The accepted row is now durable, so the compact read may safely hand
+      // the preceding live assistant projection over to its settled source.
+      // Keep this after the acknowledgement and canonical-row commit: doing
+      // it at optimistic-send time lets an idle pre-ack snapshot erase the
+      // entire visible turn.
+      void fetchMessages({ force: true, preserveAcceptedCid: cid })
       return true
     } catch (err) {
       const pendingQuestionBlocked = isPendingQuestionSendFailure(err)
@@ -3528,7 +3562,9 @@ export default function ChatView({
   // POST /question-answers that could race with the GET on a mid-
   // stream remount, causing answers to disappear on first return
   // and reappear on the second.
-  const doSendSilent = useCallback(async (text, resolvedAnswers, questionId) => {
+  const doSendSilent = useCallback(async (
+    text, resolvedAnswers, questionId, preparedQuestionSubmission = null,
+  ) => {
     // Synchronous re-entrancy guard: flip BEFORE any other logic so a
     // second concurrent call (fast double-tap) bails immediately. This
     // is separate from sendingRef because answer submissions are
@@ -3559,7 +3595,7 @@ export default function ChatView({
     // output. Acceptance alone keeps this hold: the scroll owner may restore
     // prior follow only when the first post-answer activity actually renders.
     const questionSubmission = resolvedAnswers
-      ? freezeQuestionSubmission()
+      ? (preparedQuestionSubmission || freezeQuestionSubmission())
       : null
     const responseQuestionKey = resolvedAnswers
       ? (questionId
@@ -4937,10 +4973,15 @@ export default function ChatView({
   // nudge + SR status can name the recovery. A pause is terminal (the turn has
   // ended), so it only ever lives in `messages`, never in a live stream item.
   const pendingResumeBlock = tailResumableBlock(messages)
-  // An open question is the single blocker: answering it IS the continuation,
-  // so don't surface a competing Resume (which the backend would now refuse).
-  const hasPendingResume = !!pendingResumeBlock && !hasPendingQuestion
-  const pendingLimitResetAt = pendingResumeBlock?.pause?.resets_at || null
+  const resourcePause = tailResourcePauseBlock(messages)
+  // Resource parks retry themselves and use the standard Waiting indicator;
+  // presenting Resume would offer an action admission must reject.
+  const hasPendingResume = !!pendingResumeBlock
+    && !resourcePause
+    && !hasPendingQuestion
+  const pendingLimitResetAt = resourcePause
+    ? null
+    : pendingResumeBlock?.pause?.resets_at || null
   useEffect(() => {
     if (!embedded || !autoResumeEnabled || !pendingLimitResetAt) {
       if (!pendingLimitResetAt) armedEmbeddedResetRef.current = null
@@ -5111,6 +5152,11 @@ export default function ChatView({
   // ready, it's waiting on the owner), and a screen-reader user has no visual
   // Resume card to fall back on.
   const resumeStatus = (() => {
+    if (resourcePause) {
+      return resourcePause.pause?.kind === 'memory'
+        ? 'Waiting for memory headroom. Möbius will continue automatically.'
+        : 'Waiting for storage headroom. Möbius will continue automatically.'
+    }
     if (!pendingResumeBlock) return null
     if (pendingResumeBlock.pause?.resets_at) {
       const label = formatResetTime(pendingResumeBlock.pause.resets_at)
@@ -5206,7 +5252,7 @@ export default function ChatView({
           }
         : {}),
       ...(activeGoalPlan
-        ? { details: <GoalPlanDetails plan={activeGoalPlan} /> }
+        ? { details: <GoalPlanDetails plan={activeGoalPlan} chatId={chatId} /> }
         : {}),
     }
   })
@@ -5459,6 +5505,7 @@ export default function ChatView({
                 chatId={chatId}
                 messageKey={dataKey}
                 onQuestionAnswer={doSendSilent}
+                onQuestionAnswerPrepare={freezeQuestionSubmission}
                 onResume={doSend}
                 onInternalNav={internalNav}
                 autoResumeEnabled={
@@ -5502,6 +5549,7 @@ export default function ChatView({
               dataKey={streamingDataKey}
               chatId={chatId}
               onAnswer={doSendSilent}
+              onAnswerPrepare={freezeQuestionSubmission}
               onResume={activeAssistantIsStreaming ? undefined : doSend}
               onInternalNav={internalNav}
               autoResumeEnabled={autoResumeEnabled}
@@ -5653,8 +5701,12 @@ export default function ChatView({
           onActionItem={handleGoalRailAction}
         />
         {draftGoal !== null && <GoalDraftChip objective={draftGoal} />}
-        {!turnActive && armedWaits.length > 0 && (
-          <WaitingChip waits={armedWaits} onCancel={handleCancelWait} />
+        {!turnActive && (armedWaits.length > 0 || resourcePause) && (
+          <WaitingChip
+            waits={armedWaits}
+            resourcePause={resourcePause}
+            onCancel={handleCancelWait}
+          />
         )}
         <ConnectionStatus
           error={connectionError}

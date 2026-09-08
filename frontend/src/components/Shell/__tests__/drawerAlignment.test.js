@@ -39,6 +39,15 @@ test('collapsed and expanded drawer actions share one vertical rhythm', () => {
   )
 })
 
+test('the expanded desktop drawer edge continues through its header', () => {
+  const desktopDrawerHeader = ruleBody(shellCss, '.shell--drawer-docked .shell__bar')
+
+  assert.match(
+    desktopDrawerHeader,
+    /border-right:\s*1px solid var\(--border-light\);/,
+  )
+})
+
 test('phone drawer increases row type without changing the section-title scale', () => {
   const drawerItem = ruleBody(drawerCss, '.drawer__item')
   const drawerLabel = ruleBody(drawerCss, '.drawer__label')

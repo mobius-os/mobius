@@ -6,6 +6,7 @@
 import { groupActivityRuns } from './activityGrouping.js'
 import { hasPendingQuestionMessage } from '../../lib/chatDetailCache.js'
 import { shouldShowOpenAppCta } from './openAppCtaState.js'
+import { cidOf } from './messageIdentity.js'
 
 export { shouldShowOpenAppCta }
 
@@ -78,6 +79,17 @@ export function serverSnapshotBehindLocal(serverMsgs, localMsgs) {
   })
 }
 
+/** An accepted fresh send may be acknowledged before the compact transcript
+ * projection contains its durable row. Keep the mounted turn authoritative
+ * until the server snapshot proves that exact cid is present; timing or a
+ * transient `running` flag is not sufficient evidence for this handoff. */
+export function serverSnapshotMissingAcceptedCid(serverMsgs, acceptedCid) {
+  if (acceptedCid == null || !Array.isArray(serverMsgs)) return false
+  return !serverMsgs.some(message => (
+    message?.role === 'user' && cidOf(message) === acceptedCid
+  ))
+}
+
 /** The floating jump-to-latest control (contract R5a) shows only while the
  * reader holds a position away from the physical tail, and yields to any
  * visible attention nudge — a nudge navigates to the same tail with strictly
@@ -122,12 +134,17 @@ export function shouldFreezeStreamingReturn({
 // next stream promotion.
 export function answerTurnDisposition(response) {
   if (response?.answer_turn === 'same') return 'same'
+  if (response?.answer_turn === 'queued') return 'queued'
   if (response?.answer_turn === 'new') return 'new'
   return 'unknown'
 }
 
 export function answerKeepsCurrentTurn(response) {
-  return answerTurnDisposition(response) === 'same'
+  // A fast approval answer queues a subsequent turn. Preserve the current
+  // streamed row until the ordinary queued-turn promotion seals it; do not
+  // append its hidden answer or retire the bridge before that boundary.
+  const disposition = answerTurnDisposition(response)
+  return disposition === 'same' || disposition === 'queued'
 }
 
 /**

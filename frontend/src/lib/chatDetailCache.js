@@ -259,6 +259,13 @@ export function mergeRecentMessagesIntoLoadedWindow({
   if (!Array.isArray(loadedMessages) || loadedMessages.length === 0) {
     return { ...fallback, verified: true }
   }
+  if (preserveLocalSuffix && recent.length === 0) {
+    return {
+      messages: loadedMessages,
+      offset: loadedOffset,
+      verified: true,
+    }
+  }
   if (!Number.isInteger(loadedOffset) || !Number.isInteger(recentOffset)) return fallback
 
   const prefixLength = recentOffset - loadedOffset

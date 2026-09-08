@@ -57,11 +57,39 @@ export function resolvedContextTokenCounts(snapshot, registry, provider, model) 
     : null
 }
 
+// Descending unit steps so a count keeps at most three digits before its
+// symbol: thousands (k), millions (M), billions (G).
+const TOKEN_UNITS = [
+  { limit: 1_000_000_000, symbol: 'G' },
+  { limit: 1_000_000, symbol: 'M' },
+  { limit: 1_000, symbol: 'k' },
+]
+
+// One decimal below ten (1.4M) keeps three significant digits, whole numbers
+// above; drop a bare ".0" so a round magnitude reads as "1M" not "1.0M".
+function _scaledText(value, limit) {
+  const scaled = value / limit
+  return scaled.toFixed(Math.abs(scaled) < 10 ? 1 : 0)
+}
+
 export function formatRoundedTokenCount(value) {
   if (typeof value !== 'number' || !Number.isFinite(value)) return ''
   if (Math.abs(value) < 500) return '0'
-  const thousands = Math.round(value / 1_000)
-  return `${new Intl.NumberFormat(undefined, { maximumFractionDigits: 0 }).format(thousands)}k`
+  for (let i = 0; i < TOKEN_UNITS.length; i++) {
+    if (Math.abs(value) < TOKEN_UNITS[i].limit) continue
+    let { symbol } = TOKEN_UNITS[i]
+    let text = _scaledText(value, TOKEN_UNITS[i].limit)
+    // Rounding a value just under the next threshold (999_999) can carry the
+    // scaled count to four digits ("1000k"); that magnitude reads as one unit
+    // up ("1M"). The carry is at most a single step, so promote once.
+    if (i > 0 && Math.abs(Number(text)) >= 1_000) {
+      symbol = TOKEN_UNITS[i - 1].symbol
+      text = _scaledText(value, TOKEN_UNITS[i - 1].limit)
+    }
+    return `${text.replace(/\.0$/, '')}${symbol}`
+  }
+  // 500–999 rounds up into the smallest unit instead of showing bare digits.
+  return `${Math.round(value / 1_000)}k`
 }
 
 export function contextUsedPercent(snapshot) {

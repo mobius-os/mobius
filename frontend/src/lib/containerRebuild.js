@@ -16,6 +16,19 @@ export function rebuildPollShouldContinue(status) {
   return status === null || rebuildIsActive(status)
 }
 
+export function rebuildRequestOutcome(status, { reviewedUpdate = false } = {}) {
+  const state = typeof status?.state === 'string' ? status.state : ''
+  const cutoverAccepted = rebuildIsActive(status) || state === 'succeeded'
+  const alreadyCurrent = reviewedUpdate && state === 'no_change'
+  return {
+    state,
+    accepted: cutoverAccepted || alreadyCurrent,
+    cutoverAccepted,
+    alreadyCurrent,
+    terminalFailure: ['failed', 'rolled_back', 'needs_recovery'].includes(state),
+  }
+}
+
 export function rebuildProgressMessage(status) {
   if (rebuildNeedsBootstrap(status)) {
     switch (status?.state) {
@@ -47,7 +60,9 @@ export function rebuildProgressMessage(status) {
     case 'succeeded':
       return 'Container rebuilt successfully.'
     case 'no_change':
-      return 'This container is already current.'
+      return status?.release_source === 'latest_ghcr'
+        ? 'This container already matches the latest official image.'
+        : 'This container already matches the applied Möbius version.'
     case 'rolled_back':
       return 'The rebuild failed, so the previous container was restored.'
     case 'needs_recovery':

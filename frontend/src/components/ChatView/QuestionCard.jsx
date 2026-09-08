@@ -105,6 +105,7 @@ export default function QuestionCard({
   questionId,
   answeredMap,
   onAnswer,
+  onAnswerPrepare,
   disabled,
   // Callback ref that publishes this card's node to the "Möbius asked you
   // something — tap to answer" offscreen observer. Set only by the surface
@@ -126,6 +127,7 @@ export default function QuestionCard({
   const [submitted, setSubmitted] = useState(false)
   const [submitError, setSubmitError] = useState('')
   const pointerSelectionRef = useRef(null)
+  const preparedSubmissionRef = useRef(null)
 
   const answered = submitted || !!answeredMap
   const displayAnswers = answeredMap || {}
@@ -201,7 +203,14 @@ export default function QuestionCard({
     })
   }
 
+  function prepareSubmit() {
+    if (!allAnswered || answered || disabled || submitting) return
+    preparedSubmissionRef.current = onAnswerPrepare?.() || null
+  }
+
   async function handleSubmit() {
+    const preparedSubmission = preparedSubmissionRef.current
+    preparedSubmissionRef.current = null
     if (!allAnswered || answered || disabled || submitting) return
     const resolved = {}
     const lines = questions.map(q => {
@@ -212,7 +221,9 @@ export default function QuestionCard({
     setSubmitError('')
     setSubmitting(true)
     try {
-      const accepted = await onAnswer?.(lines.join('\n'), resolved, questionId)
+      const accepted = await onAnswer?.(
+        lines.join('\n'), resolved, questionId, preparedSubmission,
+      )
       // Only settle (and therefore clear the durable per-tab draft) after the
       // answer endpoint confirms that the transcript write committed.
       if (accepted !== false) setSubmitted(true)
@@ -386,6 +397,9 @@ export default function QuestionCard({
           <button
             type="button"
             className="qcard__submit"
+            onPointerDownCapture={(event) => {
+              if (event.button === 0 && event.isPrimary !== false) prepareSubmit()
+            }}
             onClick={handleSubmit}
             disabled={!allAnswered || disabled || answered || submitting}
           >

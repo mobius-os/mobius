@@ -676,12 +676,24 @@ def _tool_completed_events(item: Any, sdk: dict[str, Any]) -> list[dict[str, Any
     return events
 
   if isinstance(item, sdk["McpToolCallThreadItem"]):
-    events: list[dict[str, Any]] = []
-    result = _format_json(item.result)
-    if result:
-      events.append({"type": "tool_output", "content": result})
-    events.append({"type": "tool_end"})
-    return events
+    # Unlike command items, the Codex MCP adapter previously omitted both the
+    # completion marker and failure status. The sink therefore left every
+    # peer-network receipt in its provisional "reading"/"sending" state even
+    # after the tool had closed. Emit one authoritative final output for every
+    # MCP completion, including an empty result or explicit provider error.
+    status = _enum_wire_value(getattr(item, "status", None))
+    error = _format_json(getattr(item, "error", None))
+    failed = status == "failed" or bool(error)
+    content = error if failed else _format_json(getattr(item, "result", None))
+    return [
+      {
+        "type": "tool_output",
+        "content": content,
+        "output_complete": True,
+        "output_exit_code": 1 if failed else 0,
+      },
+      {"type": "tool_end"},
+    ]
 
   if isinstance(item, sdk["DynamicToolCallThreadItem"]):
     events: list[dict[str, Any]] = []

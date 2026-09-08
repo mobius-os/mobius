@@ -14,6 +14,13 @@ _GATE_VERDICT = re.compile(
   r"^\[pre-push\] verdict=blocked cause=(\w+) checks=(\S*)\s*$",
   re.MULTILINE,
 )
+# Git puts ref races in this structured summary. Matching the whole line avoids
+# mistaking the same words inside a failed pre-push test transcript for a race.
+_MOVED_REMOTE_REF = re.compile(
+  r"^\s*!\s+\[rejected\]\s+.+"
+  r"\((?:non-fast-forward|fetch first|stale info)\)\s*$",
+  re.IGNORECASE | re.MULTILINE,
+)
 
 
 class ContributionSubmitError(Exception):
@@ -56,19 +63,32 @@ def push_rejected(
   detail = readable_output(raw)
   verdict = _GATE_VERDICT.search(detail)
 
-  if verdict is None:
-    message = "GitHub would not accept this branch, so nothing was published."
-  elif verdict.group(1) == "privacy":
+  code = None
+  if verdict is not None and verdict.group(1) == "privacy":
     message = (
       "Möbius's privacy gate stopped this push: the branch still contains "
       "private workspace paths. Nothing was published."
     )
-  else:
+  elif verdict is not None:
     checks = verdict.group(2).replace(",", ", ")
     named = f" ({checks})" if checks else ""
     message = (
       f"This did not pass the checks Möbius runs before publishing{named}. "
       "Nothing was published — fix it locally, then send again."
     )
+  elif _MOVED_REMOTE_REF.search(detail):
+    message = (
+      "GitHub's copy of this branch changed after it was reviewed. Nothing "
+      "was pushed. Ask the agent to refresh and review it against the current "
+      "branch."
+    )
+    code = "review_refresh_needed"
+  else:
+    message = "GitHub would not accept this branch, so nothing was published."
 
-  return ContributionSubmitError(message, record_patch=record_patch, detail=detail)
+  return ContributionSubmitError(
+    message,
+    record_patch=record_patch,
+    code=code,
+    detail=detail,
+  )

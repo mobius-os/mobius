@@ -1,8 +1,11 @@
 """Project invitations enforce revocable, role-scoped human access."""
 
+from datetime import timedelta
+
 from urllib.parse import urlsplit
 
 from app import models
+from app.timeutil import now_naive_utc
 
 
 def _project(client, auth, name="Shared workspace"):
@@ -193,3 +196,24 @@ def test_human_and_agent_work_claims_are_project_scoped(client, auth):
       "chat_id": chat["id"], "summary": "Impersonate an agent",
     },
   ).status_code == 403
+
+
+def test_expired_work_claim_can_be_refreshed(client, auth, db):
+  project = _project(client, auth)
+  created = client.put(
+    f"/api/projects/{project['id']}/work-claim", headers=auth,
+    json={"path": "notes.md", "summary": "Editing notes.md"},
+  )
+  assert created.status_code == 200, created.text
+
+  claim = db.get(models.ProjectWorkClaim, created.json()["id"])
+  claim.expires_at = now_naive_utc() - timedelta(seconds=1)
+  db.commit()
+
+  refreshed = client.put(
+    f"/api/projects/{project['id']}/work-claim", headers=auth,
+    json={"path": "done.md", "summary": "Editing done.md"},
+  )
+  assert refreshed.status_code == 200, refreshed.text
+  assert refreshed.json()["id"] == created.json()["id"]
+  assert refreshed.json()["path"] == "done.md"

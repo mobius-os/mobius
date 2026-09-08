@@ -18,7 +18,7 @@ from datetime import UTC, datetime
 
 from sqlalchemy import (
   Boolean, CheckConstraint, Column, DateTime, Float, ForeignKey, Integer, JSON,
-  LargeBinary, String, Text, UniqueConstraint, event, false, or_, true,
+  Index, LargeBinary, String, Text, UniqueConstraint, event, false, or_, true,
 )
 
 from sqlalchemy.orm import column_property, validates
@@ -129,6 +129,25 @@ class SystemPromptSnapshot(Base):
   id = Column(String(64), primary_key=True)
   content = Column(Text, nullable=False)
   created_at = Column(DateTime, default=lambda: datetime.now(UTC))
+
+
+class SavedSecureInput(Base):
+  """Private execution receipt; submitted field values have no durable column.
+
+  The public prompt is an ordinary continuation question. This row owns only
+  its pre-authored local operation and the irreversible execution claim.
+  """
+
+  __tablename__ = "saved_secure_inputs"
+
+  request_id = Column(String(64), primary_key=True)
+  chat_id = Column(String(64), ForeignKey("chats.id", ondelete="CASCADE"), nullable=False, index=True)
+  command_json = Column(JSON, nullable=False)
+  cwd = Column(Text, nullable=False)
+  action = Column(String(32), nullable=False)
+  status = Column(String(24), nullable=False, default="pending", index=True)
+  outcome = Column(String(320), nullable=True)
+  created_at = Column(DateTime, nullable=False, default=now_naive_utc)
 
 
 class Chat(Base):
@@ -411,8 +430,9 @@ class Delegation(Base):
     Boolean, nullable=False, default=False
   )
   # Retry latch for the parent wake, stamped after the completion notice starts
-  # or queues. Delivery is intentionally at-least-once across a crash between
-  # those two transactions so a child result is never silently lost.
+  # or queues. If a crash lands between those transactions, recovery recognizes
+  # the exact durable hidden envelope before either retrying or yielding its
+  # observation claim to a blocking attachment.
   parent_woken_at = Column(DateTime, nullable=True, default=None)
   # A source-attached job (currently contribution preparation) belongs to the
   # owner-facing source chat without fabricating a ChatRun there. The stable
@@ -446,8 +466,9 @@ class ChatWait(Base):
   programmatic-turn boundary when the condition passes or the deadline expires.
   Restart-immune by construction — no live process owns the wait.
 
-  A purely new table: ``create_all`` builds it on the next boot, so no
-  schema-migration entry is needed for existing databases.
+  The table itself was introduced additively through ``create_all``. Later
+  fields still need numbered migrations because ``create_all`` does not alter
+  an existing table; ``condition_owner`` is added by migration 0026.
   """
 
   __tablename__ = "chat_waits"
@@ -458,6 +479,7 @@ class ChatWait(Base):
   )
   created_by_run_id = Column(String(64), nullable=True, default=None)
   description = Column(String(500), nullable=False)
+  condition_owner = Column(String(200), nullable=True, default=None)
   kind = Column(String(16), nullable=False)
   command = Column(Text, nullable=True, default=None)
   due_at = Column(DateTime, nullable=True, default=None)
@@ -474,8 +496,9 @@ class ChatWait(Base):
   last_checked_at = Column(DateTime, nullable=True, default=None)
   met_at = Column(DateTime, nullable=True, default=None)
   cancelled_at = Column(DateTime, nullable=True, default=None)
-  # Delivery is at-least-once across a crash between starting the continuation
-  # and stamping this latch, preferring a repeated wake to a silently lost one.
+  # Retry latch for the resume, stamped only after a deterministic wake turn
+  # starts/attaches or its stable cid is durably queued.  The wait-derived run
+  # and message ids make a crash retry reattach rather than minting a twin.
   resume_delivered_at = Column(DateTime, nullable=True, default=None)
   created_at = Column(DateTime, nullable=False, default=lambda: now_naive_utc())
 
@@ -1009,11 +1032,11 @@ class ProjectDrawerState(Base):
 
 
 class ProjectAgentMessage(Base):
-  """A bounded project-local mailbox between project chat agents.
+  """Legacy project mailbox retained for baked-backend recovery.
 
-  ``to_chat_id`` is NULL for a project broadcast. Directed multi-recipient
-  sends create one row per recipient, which keeps reads and confinement simple.
-  This is a new table, so ``create_all`` installs it on the next boot.
+  New source writes ``AgentCoordinationMessage`` only. Keeping this mapping
+  makes fresh databases create the table an older baked backend expects if an
+  edited source checkout ever fails to boot.
   """
 
   __tablename__ = "project_agent_messages"
@@ -1031,6 +1054,48 @@ class ProjectAgentMessage(Base):
     String(64), ForeignKey("chats.id", ondelete="CASCADE"),
     nullable=True, index=True,
   )
+  body = Column(Text, nullable=False)
+  created_at = Column(DateTime, nullable=False, default=lambda: now_naive_utc())
+
+
+class AgentCoordinationMessage(Base):
+  """One durable provider-neutral peer note.
+
+  Broadcast rows remain scoped to a Project or delegation tree. Directed rows
+  use the owner-keyed workspace channel so topology never constrains delivery;
+  one row per recipient keeps inbox visibility and retention exact. ``send_id``
+  groups one multi-recipient send and lets callers safely reuse an explicit
+  retry identity within the same physical agent run.
+  """
+
+  __tablename__ = "agent_coordination_messages"
+  __table_args__ = (
+    Index(
+      "ix_agent_coordination_room_created",
+      "room_kind", "room_id", "created_at", "id",
+    ),
+    UniqueConstraint(
+      "from_run_id", "send_id", "send_target_key",
+      name="uq_agent_coordination_run_send_target",
+    ),
+  )
+
+  id = Column(String(64), primary_key=True)
+  room_kind = Column(String(16), nullable=False)
+  room_id = Column(String(64), nullable=False)
+  from_chat_id = Column(
+    String(64), ForeignKey("chats.id"), nullable=False, index=True,
+  )
+  from_run_id = Column(String(64), nullable=True)
+  send_id = Column(String(64), nullable=True, index=True)
+  # Null only for rows written before stable send identity existed. New rows
+  # use the recipient chat id or an empty string for a scope broadcast, which
+  # lets SQLite enforce retries even though SQL NULLs are not unique.
+  send_target_key = Column(String(64), nullable=True)
+  to_chat_id = Column(
+    String(64), ForeignKey("chats.id"), nullable=True, index=True,
+  )
+  kind = Column(String(16), nullable=False, default="note", server_default="note")
   body = Column(Text, nullable=False)
   created_at = Column(DateTime, nullable=False, default=lambda: now_naive_utc())
 

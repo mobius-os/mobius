@@ -941,37 +941,44 @@ const AppCanvas = forwardRef(function AppCanvas({
       // request, so no host needs to rediscover iframe identity.
       const hostRequest = appHostRequest(msg)
       if (hostRequest && onHostRequest) {
-        if (hostRequest.type !== 'moebius:chat-control') {
-          onHostRequest(appId, hostRequest)
-          return
-        }
         const responseTarget = e.source
         const responseOrigin = e.origin === 'null' ? '*' : e.origin
         const respond = (payload) => {
           try { responseTarget?.postMessage(payload, responseOrigin) } catch { /* retired frame */ }
         }
+        const responseType = hostRequest.type === 'moebius:chat-control'
+          ? 'moebius:chat-control-result'
+          : 'moebius:projects-result'
+        const fallbackError = hostRequest.type === 'moebius:chat-control'
+          ? 'Chat control failed.'
+          : 'Projects request failed.'
         try {
-          Promise.resolve(onHostRequest(appId, hostRequest)).then(
-            result => respond({
-              type: 'moebius:chat-control-result',
-              requestId: hostRequest.requestId,
-              ok: true,
-              result: result ?? null,
-            }),
-            error => respond({
-              type: 'moebius:chat-control-result',
+          const outcome = onHostRequest(appId, hostRequest)
+          if (hostRequest.requestId) {
+            Promise.resolve(outcome).then(
+              result => respond({
+                type: responseType,
+                requestId: hostRequest.requestId,
+                ok: true,
+                result: result ?? null,
+              }),
+              error => respond({
+                type: responseType,
+                requestId: hostRequest.requestId,
+                ok: false,
+                error: error?.message || fallbackError,
+              }),
+            )
+          }
+        } catch (error) {
+          if (hostRequest.requestId) {
+            respond({
+              type: responseType,
               requestId: hostRequest.requestId,
               ok: false,
-              error: error?.message || 'Chat control failed.',
-            }),
-          )
-        } catch (error) {
-          respond({
-            type: 'moebius:chat-control-result',
-            requestId: hostRequest.requestId,
-            ok: false,
-            error: error?.message || 'Chat control failed.',
-          })
+              error: error?.message || fallbackError,
+            })
+          }
         }
         return
       }

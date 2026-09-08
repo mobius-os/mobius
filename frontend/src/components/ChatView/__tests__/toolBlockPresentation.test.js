@@ -73,6 +73,17 @@ test('edit detail hands vertical scrolling to the transcript', () => {
   assert.doesNotMatch(editRule, /overflow-y:\s*(?:auto|scroll)/)
 })
 
+test('successful edit disclosures are the file names and diffs, without duplicate IO', () => {
+  assert.match(toolBlock,
+    /const showGenericInput = !!\(open && t\.input && !isImageTool && !editPreview\)/,
+    'the diff file header already owns every edited path')
+  assert.match(toolBlock,
+    /open && !editPreview && \(r \|\| t\.output_truncated \|\| isImageTool\)/,
+    'provider success output is hidden only when a usable edit preview replaces it')
+  assert.match(toolBlock, /\{showGenericInput && \(/)
+  assert.match(toolBlock, /\{showGenericResult && \(/)
+})
+
 test('technical command failures stay behind the top-level disclosure', () => {
   assert.doesNotMatch(activityHeader, /exitCode|chat__activity-chip|displayState === 'error'/,
     'a collapsed activity overview must not present a command exit as a turn-level alarm')

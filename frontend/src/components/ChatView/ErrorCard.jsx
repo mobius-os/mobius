@@ -1,5 +1,6 @@
 import { StandardMarkdown } from './markdown/BlockRenderer.jsx'
 import { formatResetTime } from './resetTime.js'
+import { isResourcePause } from './resourcePause.js'
 import { ChevronRight } from '@openai/apps-sdk-ui/components/Icon'
 
 // The single renderer for the error/pause/park card family. MsgContent consumes
@@ -16,13 +17,14 @@ import { ChevronRight } from '@openai/apps-sdk-ui/components/Icon'
 // danger-red "Error" card is reserved for genuine failures (no `pause`). Old
 // persisted blocks predate `pause` and fall back to the error rendering.
 export function errorCardViewModel(block) {
-  const parked = !!block.pause?.resets_at
+  const resourceWait = isResourcePause(block)
+  const parked = !!block.pause?.resets_at && !resourceWait
   const benign = !!block.pause
   return {
     parked,
     benign,
     className: `chat__text--error${benign ? ' chat__text--parked' : ''}`,
-    label: parked ? 'Rate limit' : (block.pause ? 'Paused' : 'Error'),
+    label: resourceWait ? 'Waiting' : parked ? 'Rate limit' : (block.pause ? 'Paused' : 'Error'),
     resetLabel: parked ? formatResetTime(block.pause.resets_at) : null,
   }
 }
@@ -49,10 +51,10 @@ export default function ErrorCard({
     : null
   const recoveryCopy = vm.parked
     ? autoResume
-      ? 'Your work is safe. Möbius will continue automatically here and at future usage limits in this chat.'
+      ? 'Your work is safe. Möbius will continue automatically at the reset. Added credits or reset usage? You can try now.'
       : resetElapsed
         ? 'Your work is safe. Continue when you’re ready.'
-        : 'Your work is safe. Turn on auto-continue for this and future usage limits in this chat.'
+        : 'Your work is safe. Turn on auto-continue, or try now after adding credits or resetting usage.'
     : null
   return (
     <div className={vm.className} ref={cardRef}>

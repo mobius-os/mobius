@@ -18,6 +18,7 @@ import {
   makeChat,
   makeCapabilities,
   makeNav,
+  makeProjects,
   makeSignal,
   overlayPending,
   sanitizeEmbedGuidance,
@@ -345,6 +346,55 @@ test('nav helper waits for ack before owning a back entry', async () => {
     window.emit({ type: 'moebius:nav-back' })
     assert.equal(backed, true)
     assert.equal(parent.messages.some((msg) => msg.data.type === 'moebius:nav-pop'), false)
+  })
+})
+
+test('projects runtime sends bounded requests and accepts only its parent response', async () => {
+  await withFakeWindow(async ({ window, parent }) => {
+    const projects = makeProjects()
+    const pending = projects.create({
+      templateId: 'webstudio:web-app',
+      name: `  ${'A'.repeat(300)}  `,
+    })
+    const message = parent.messages.at(-1)
+    assert.equal(message.origin, 'https://mobius.test')
+    assert.equal(message.data.type, 'moebius:projects')
+    assert.equal(message.data.action, 'create')
+    assert.equal(message.data.templateId, 'webstudio:web-app')
+    assert.equal(message.data.name.length, 256)
+
+    window.emit({
+      type: 'moebius:projects-result',
+      requestId: message.data.requestId,
+      ok: true,
+      result: { id: 'project-1' },
+    }, { origin: 'https://attacker.test' })
+    window.emit({
+      type: 'moebius:projects-result',
+      requestId: message.data.requestId,
+      ok: true,
+      result: { id: 'project-1' },
+    })
+    assert.deepEqual(await pending, { id: 'project-1' })
+    projects._destroy()
+  })
+})
+
+test('projects runtime exposes the owner-mediated legacy migration action', async () => {
+  await withFakeWindow(async ({ window, parent }) => {
+    const projects = makeProjects()
+    const pending = projects.migrate()
+    const message = parent.messages.at(-1)
+    assert.equal(message.data.type, 'moebius:projects')
+    assert.equal(message.data.action, 'migrate')
+    window.emit({
+      type: 'moebius:projects-result',
+      requestId: message.data.requestId,
+      ok: true,
+      result: [{ id: 'legacy-project' }],
+    })
+    assert.deepEqual(await pending, [{ id: 'legacy-project' }])
+    projects._destroy()
   })
 })
 

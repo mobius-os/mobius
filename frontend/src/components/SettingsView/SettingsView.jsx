@@ -12,12 +12,13 @@ import {
 import { formatUpstreamCommitDate } from '../../lib/platformProvenance.js'
 import {
   rebuildIsActive,
-  rebuildNeedsBootstrap,
   rebuildPollShouldContinue,
   rebuildProgressMessage,
+  rebuildRequestOutcome,
 } from '../../lib/containerRebuild.js'
 import {
   platformStatusFromApply,
+  platformStatusUnavailable,
   platformUpdateStatusLabel,
 } from '../../lib/platformUpdateState.js'
 import { settleBackgroundAgentSave } from '../../lib/backgroundAgentSave.js'
@@ -447,7 +448,6 @@ export default function SettingsView({
   // A manual restart interrupts any live chat, so it's a deliberate two-step:
   // the first tap arms the confirm, the second actually restarts.
   const [restartConfirm, setRestartConfirm] = useState(false)
-  const [rebuildConfirm, setRebuildConfirm] = useState(false)
   const [rebuildStatus, setRebuildStatus] = useState(null)
   const [rebuildError, setRebuildError] = useState('')
   const [rebuildRequesting, setRebuildRequesting] = useState(false)
@@ -456,6 +456,7 @@ export default function SettingsView({
   const rebuildPreviousBootIdRef = useRef('')
   const rebuildInitiatedHereRef = useRef(false)
   const rebuildReconnectStartedRef = useRef(false)
+  const rebuildReviewedUpdateRef = useRef(false)
   const [signOutConfirm, setSignOutConfirm] = useState(false)
   const [signingOut, setSigningOut] = useState(false)
   // Platform self-update (backend, frontend, and libraries as one release).
@@ -1134,49 +1135,100 @@ export default function SettingsView({
   useEffect(() => {
     const state = rebuildStatus?.state
     if (!['failed', 'rolled_back', 'needs_recovery'].includes(state)) return
-    setRebuildConfirm(false)
-    if (state === 'failed') {
-      setRebuildError(
-        rebuildStatus?.message || 'The container could not be rebuilt.',
-      )
-    }
-  }, [rebuildStatus?.state, rebuildStatus?.message])
+    // The controller keeps its last terminal result for diagnosis. That is not
+    // a current Settings error: after the standalone rebuild action was
+    // removed, only a rebuild started by this mounted update flow owns visible
+    // progress or failure UI. Otherwise an old failed attempt survives every
+    // reload indefinitely and looks like an action the owner still needs to
+    // take even when no image update is pending.
+    if (
+      !rebuildInitiatedHereRef.current
+      && !rebuildReviewedUpdateRef.current
+    ) return
+    const message = rebuildStatus?.error
+      || rebuildStatus?.message
+      || (state === 'needs_recovery'
+        ? 'The previous container could not be restored. Use your deployment’s Recovery action.'
+        : 'The container could not be rebuilt.')
+    if (rebuildReviewedUpdateRef.current) setPlatformError(message)
+    else setRebuildError(message)
+    rebuildReviewedUpdateRef.current = false
+  }, [rebuildStatus?.state, rebuildStatus?.error, rebuildStatus?.message])
 
-  async function rebuildContainer() {
+  async function startContainerRebuild(request, { reviewedUpdate = false } = {}) {
     if (
       rebuildRequesting
       || rebuildIsActive(rebuildStatus)
       || restartPhase === 'restarting'
-    ) return
+      || (reviewedUpdate && platformPhase !== 'idle')
+    ) return { ok: false }
     setRebuildRequesting(true)
+    if (reviewedUpdate) setPlatformPhase('rebuilding')
     setRebuildError('')
+    if (reviewedUpdate) setPlatformError('')
     setRebuildStartedHere(false)
     rebuildInitiatedHereRef.current = false
     rebuildReconnectStartedRef.current = false
+    rebuildReviewedUpdateRef.current = reviewedUpdate
     rebuildPreviousBootIdRef.current = await readRestartBootId()
     try {
-      const response = await api.admin.rebuild()
+      const response = await request()
       let body = null
       try { body = await response.json() } catch {}
       if (!response.ok) {
         const detail = body?.detail
         throw new Error(
-          detail?.message || detail || `Replacement failed (${response.status})`,
+          body?.error || detail?.message || detail
+            || body?.message || `Replacement failed (${response.status})`,
         )
       }
-      rebuildInitiatedHereRef.current = true
-      setRebuildStartedHere(true)
+      const outcome = rebuildRequestOutcome(body, { reviewedUpdate })
+      const state = outcome.state
+      rebuildInitiatedHereRef.current = outcome.cutoverAccepted
+      setRebuildStartedHere(outcome.cutoverAccepted)
       setRebuildStatus(body)
-      setRebuildConfirm(false)
-      returnToSettingsAfterReload()
+      if (outcome.cutoverAccepted) returnToSettingsAfterReload()
+      if (outcome.alreadyCurrent) {
+        rebuildReviewedUpdateRef.current = false
+        await refreshPlatform()
+      } else if (reviewedUpdate && outcome.terminalFailure) {
+        const message = body?.error || body?.message
+          || 'The reviewed image could not be started.'
+        setPlatformError(message)
+      }
+      return {
+        ok: outcome.accepted,
+        state,
+        message: body?.error || body?.message || '',
+      }
     } catch (err) {
-      setRebuildError(err?.message || 'The container could not be rebuilt.')
+      const message = err?.message || 'The container could not be rebuilt.'
+      if (reviewedUpdate) setPlatformError(message)
+      else setRebuildError(message)
+      rebuildReviewedUpdateRef.current = false
+      return { ok: false, message }
     } finally {
       setRebuildRequesting(false)
+      if (reviewedUpdate) setPlatformPhase('idle')
     }
   }
 
-  const rebuildBootstrap = rebuildNeedsBootstrap(rebuildStatus)
+  async function rebuildPlatformUpdate(plan) {
+    // Railway pins an immutable GHCR digest; self-hosted anchors on the
+    // sha-<target> tag and has no digest, so the digest is not required here.
+    if (
+      !plan?.plan_id
+      || !plan?.current_sha
+      || !plan?.target_sha
+    ) {
+      setPlatformError('The update plan is incomplete. Refresh the preview and try again.')
+      return { ok: false }
+    }
+    return startContainerRebuild(
+      () => api.platform.rebuild(plan),
+      { reviewedUpdate: true },
+    )
+  }
 
   async function signOut() {
     if (signingOut) return
@@ -1219,13 +1271,18 @@ export default function SettingsView({
       }
     })()
     const platformP = (async () => {
-      const res = await api.platform.check()
-      // An HTTP failure must REJECT, not resolve: allSettled treats a
-      // resolved probe as success, so a swallowed !ok let updateCheckOutcome
-      // report "No updates found" on a real 500 (feature 20).
-      if (!res.ok) throw new Error(`platform check failed: ${res.status}`)
-      freshPlatform = await res.json()
-      setPlatform(freshPlatform)
+      try {
+        const res = await api.platform.check()
+        // An HTTP failure must REJECT, not resolve: allSettled treats a
+        // resolved probe as success, so a swallowed !ok let updateCheckOutcome
+        // report "No updates found" on a real 500 (feature 20).
+        if (!res.ok) throw new Error(`platform check failed: ${res.status}`)
+        freshPlatform = await res.json()
+        setPlatform(freshPlatform)
+      } catch (error) {
+        setPlatform(current => platformStatusUnavailable(current))
+        throw error
+      }
     })()
     const results = await Promise.allSettled([frontendP, platformP])
     setUpdatePhase(updateCheckOutcome(results))
@@ -1259,12 +1316,26 @@ export default function SettingsView({
   // agent-authored platform work settled. Settings can remain mounted beside a
   // resolver chat, so mount-only fetching leaves a cleared conflict looking
   // blocked until a full page reload.
-  const refreshPlatform = useCallback(async () => {
+  const refreshPlatform = useCallback(async ({
+    preserveCurrentOnFailure = false,
+  } = {}) => {
     try {
       const res = await api.platform.status()
-      if (res.ok) setPlatform(await res.json())
+      if (!res.ok) throw new Error(`platform status failed: ${res.status}`)
+      const body = await res.json()
+      setPlatform(body)
+      if (body?.state === 'rolled_back' && body?.rollback_error) {
+        setPlatformError(body.rollback_error)
+      }
     } catch {
-      // A status hiccup just leaves the section hidden — never blocks Settings.
+      // A successful mutation response is itself authoritative for the state
+      // it just produced. Its best-effort follow-up read must not erase that
+      // known result merely because the status endpoint is temporarily down.
+      if (!preserveCurrentOnFailure) {
+        // Ordinary reads still fail closed: never let an unavailable release
+        // authority inherit a cached “current” or update-available claim.
+        setPlatform(current => platformStatusUnavailable(current))
+      }
     }
   }, [])
   useEffect(() => {
@@ -1342,12 +1413,14 @@ export default function SettingsView({
       try { body = await res.json() } catch {}
       if (!res.ok) {
         const detail = body?.detail || ''
+        const detailCode = typeof detail === 'object' ? detail?.code : detail
+        const detailMessage = typeof detail === 'object' ? detail?.message : detail
         await refreshPlatform()
         setPlatformError(
-          detail === 'update_plan_stale'
+          detailCode === 'update_plan_stale'
             ? 'Möbius changed since this preview. Close it and review the refreshed update before applying.'
-            : detail
-              ? `Update stopped: ${detail}`
+            : detailMessage
+              ? `Update stopped: ${detailMessage}`
               : 'Update stopped before completion. Check the current status before trying again.',
         )
         return { ok: false }
@@ -1356,11 +1429,14 @@ export default function SettingsView({
       if (PLATFORM_APPLY_STATES.has(state)) {
         setPlatform(current => platformStatusFromApply(current, body))
       }
-      await refreshPlatform()
+      await refreshPlatform({ preserveCurrentOnFailure: true })
       if (state === 'restart_needed' || state === 'activation_needed' || state === 'up_to_date') {
         return { ok: true, state }
       }
       if (state === 'conflict' || state === 'rolled_back') {
+        if (state === 'rolled_back' && body?.error) {
+          setPlatformError(body.error)
+        }
         return { ok: false, state }
       }
       setPlatformError(
@@ -1572,7 +1648,9 @@ export default function SettingsView({
   )
   const updateAvailable = !!platform?.available
   const mobiusUpdating =
-    platformPhase === 'applying' || updatePhase === 'checking'
+    ['applying', 'rebuilding'].includes(platformPhase)
+    || rebuildIsActive(rebuildStatus)
+    || updatePhase === 'checking'
   const checkUpdatesLabel = updateCheckLabel(updatePhase)
   const effectiveBackgroundDraft = backgroundDraft ||
     normalizeBackgroundAgents(
@@ -2090,8 +2168,10 @@ export default function SettingsView({
           <UpdateReviewModal
             onClose={closeUpdateReview}
             onApply={applyPlatformUpdate}
+            onRebuild={rebuildPlatformUpdate}
             onResolve={resolvePlatformConflict}
             applying={platformPhase === 'applying'}
+            rebuilding={platformPhase === 'rebuilding'}
             resolving={platformPhase === 'resolving'}
             applyError={platformError}
             applyProgress={platformProgress}
@@ -2163,78 +2243,13 @@ export default function SettingsView({
               description={restartError}
             />
           )}
-          <div className="settings__row">
-            <SettingsInfoLabel
-              label={rebuildBootstrap ? 'Container updates' : 'Rebuild container'}
-              infoId="settings-rebuild-info"
-              expanded={serverInfo === 'rebuild'}
-              onToggle={() => setServerInfo((value) => (
-                value === 'rebuild' ? null : 'rebuild'
-              ))}
-              onDismiss={() => setServerInfo(null)}
-            >
-              {rebuildBootstrap
-                ? 'Enables safe container rebuilds on this Railway deployment with one managed upgrade.'
-                : 'Creates a fresh container from the newest official image for your applied update, while keeping your chats, apps, settings, and other saved data.'}
-            </SettingsInfoLabel>
-            {rebuildConfirm ? (
-              <div className="settings__confirm">
-                <button
-                  className="settings__btn settings__btn--outline settings__btn--sm"
-                  type="button"
-                  onClick={() => setRebuildConfirm(false)}
-                  disabled={rebuildRequesting || rebuildIsActive(rebuildStatus)}
-                >
-                  Cancel
-                </button>
-                <button
-                  className="settings__btn settings__btn--sm settings__btn--nowrap"
-                  type="button"
-                  onClick={rebuildContainer}
-                  disabled={rebuildRequesting || rebuildIsActive(rebuildStatus)}
-                >
-                  {rebuildRequesting || rebuildIsActive(rebuildStatus)
-                    ? (rebuildBootstrap ? 'Enabling…' : 'Rebuilding…')
-                    : (rebuildBootstrap ? 'Enable now' : 'Rebuild now')}
-                </button>
-              </div>
-            ) : (
-              <button
-                className="settings__btn settings__btn--outline settings__btn--sm"
-                type="button"
-                onClick={() => { setRebuildError(''); setRebuildConfirm(true) }}
-                disabled={
-                  restartPhase === 'restarting'
-                  || rebuildRequesting
-                  || rebuildIsActive(rebuildStatus)
-                  || (rebuildStatus?.supported === false && !rebuildBootstrap)
-                }
-              >
-                {rebuildBootstrap
-                  ? 'Enable'
-                  : (rebuildStatus?.supported === false ? 'Not set up' : 'Rebuild')}
-              </button>
-            )}
-          </div>
-          {rebuildConfirm && !rebuildIsActive(rebuildStatus) && (
-            <p className="settings__subtext settings__subtext--tight">
-              {rebuildBootstrap ? (
-                <>Performs one managed Railway redeploy, then verifies the safe
-                update controller. Finish active responses first; Railway restores
-                the previous container if the upgrade is unhealthy.</>
-              ) : (
-                <>Rebuilds the container from the official image for your applied
-                update. Local-only runtime changes recorded by Möbius block the
-                rebuild; undeclared
-                container changes are lost. Active chats continue afterward.</>
-              )}
-            </p>
-          )}
-          {rebuildStatus?.supported === false && (
-            <p className="settings__subtext settings__subtext--tight">
-              {rebuildStatus.message || 'Container rebuilds are not set up on this installation.'}
-            </p>
-          )}
+          {/* The container rebuild is no longer a separate manual action: an
+              image-level update drives it on confirmation from the "Möbius"
+              update review above (Railway pins the GHCR image; self-hosted
+              applies the reviewed source in place, then rebuilds the matching
+              image). Only the in-progress status and any failure remain here so
+              a rebuild started from the update flow stays visible after the
+              review sheet closes and the shell reloads. */}
           {(rebuildIsActive(rebuildStatus) || (rebuildStartedHere && [
             'succeeded', 'no_change', 'rolled_back', 'needs_recovery',
           ].includes(rebuildStatus?.state))) && (

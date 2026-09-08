@@ -15,6 +15,12 @@ export function groupActivityRuns(entries) {
 
   for (const entry of entries) {
     const type = entry?.item?.type
+    // Some providers persist empty separator text blocks between reasoning and
+    // tool events. They have no visible content, so treating them as prose
+    // splits one coherent activity into repeated disclosure rows. Meaningful
+    // prose remains a boundary; only a truly transparent separator disappears.
+    const content = entry?.item?.content
+    if (type === 'text' && typeof content === 'string' && !content.trim()) continue
     if (isDistinctiveActivityTool(entry?.item)) {
       flush()
       nodes.push({ group: [entry] })

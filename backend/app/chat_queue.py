@@ -213,6 +213,7 @@ async def promote_pending_messages_locked(
   chat_id: str,
   run_token: str,
   ending_status: str = "completed",
+  continuation_reason: str | None = None,
 ) -> tuple[list[schemas.ChatMessage], dict | None, str | None]:
   """Inner promote logic. PRECONDITION: caller holds the per-chat
   queue lock.
@@ -229,6 +230,10 @@ async def promote_pending_messages_locked(
 
   `db` is unused now (the actor owns the write through its own session)
   but kept in the signature so the two callers' shape is unchanged.
+  ``continuation_reason`` is a trusted caller-only execution hint for the
+  explicit manual Resume path when visible owner context is already queued;
+  the actor keeps those transcript rows ordinary while binding the promoted
+  provider turn to the paused logical root.
 
   Returns (next_messages, promoted_message, session_id) on success.
   Returns ([], None, session_id) when the pending queue is empty. Raises
@@ -255,6 +260,7 @@ async def promote_pending_messages_locked(
       chat_id=chat_id,
       run_token=run_token,
       ending_status=ending_status,
+      continuation_reason=continuation_reason,
     )
   )
   result = await await_ack(ack)

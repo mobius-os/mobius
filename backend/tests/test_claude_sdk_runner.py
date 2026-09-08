@@ -21,6 +21,8 @@ import pytest
 from claude_agent_sdk import ProcessError
 from claude_agent_sdk.types import (
   AssistantMessage,
+  PermissionResultAllow,
+  PermissionResultDeny,
   RateLimitEvent,
   RateLimitInfo,
   ResultMessage,
@@ -407,6 +409,166 @@ async def test_steer_requeries_on_interrupt_terminal(monkeypatch):
   ]
 
 
+@pytest.mark.asyncio
+async def test_steer_interrupt_racing_turn_end_does_not_leak_execution_interrupted(
+  monkeypatch,
+):
+  """A steer whose soft interrupt lands AT natural turn-end must not surface
+  the raw "Execution interrupted." provider error.
+
+  This reproduces the owner-reported bug. The turn finishes on its own exactly
+  as the steer arrives: the steer buffers its text and fires interrupt(), but
+  the CLEAN end_turn terminal wins the race, so the runner re-queries the steer
+  text (draining pending_steer) and the stray interrupt() then aborts the
+  RE-QUERY turn — whose terminal arrives with pending_steer already empty and
+  interrupt_requested False (a steer never sets it). The old code left that
+  terminal's provider error ("Execution interrupted.") intact and returned it,
+  painting a red error block and dropping the steered answer. The fix defuses
+  the error (stop_reason=="interrupt" is always OUR interrupt) and marks the
+  turn resume_incomplete so the finalize seam renders a calm resumable note."""
+  from app import claude_sdk_runner
+
+  class _FakeClient:
+    def __init__(self, options):
+      del options
+      self.queries: list[str] = []
+      self.interrupts = 0
+      self.disconnected = False
+
+    async def connect(self):
+      return None
+
+    async def query(self, message):
+      self.queries.append(message)
+
+    async def interrupt(self):
+      self.interrupts += 1
+
+    async def disconnect(self):
+      self.disconnected = True
+
+    async def receive_response(self):
+      if len(self.queries) == 1:
+        # First turn: the steer arrives just as the model finishes. It buffers
+        # its text and fires the soft interrupt, but the CLEAN terminal wins.
+        yield _stream_delta("text_delta", text="working")
+        assert await steer_into_active_turn("steer-race-chat", "use blue") is True
+        yield _success_result()
+        return
+      # Re-query turn: the stray interrupt() from the first turn now aborts it,
+      # and pending_steer was already drained by the re-query above.
+      yield _interrupt_result()
+
+  clients = []
+
+  def _client_factory(options):
+    client = _FakeClient(options)
+    clients.append(client)
+    return client
+
+  monkeypatch.setattr(claude_sdk_runner, "ClaudeSDKClient", _client_factory)
+
+  result = await run_claude_sdk_turn(
+    "start task",
+    session_id=None,
+    base_env={},
+    cwd="/tmp",
+    chat_id="steer-race-chat",
+    skill_text="system",
+    bc=_ChatBus(),
+    pending_questions={},
+    db=None,
+  )
+
+  # The raw provider error must never surface; the turn is a resumable interrupt.
+  assert result["error"] is None
+  assert result["terminal_status"] == "interrupted"
+  assert result["resume_incomplete"] is True
+
+
+@pytest.mark.asyncio
+async def test_steer_interrupt_on_resume_turn_does_not_auto_requery_original(
+  monkeypatch,
+):
+  """The steer-interrupt race on a RESUME turn (session_id set) must NOT be
+  mistaken for a synthetic-no-op and silently re-run the ORIGINAL prompt.
+
+  Real steers happen mid-conversation, so session_id is set. Defusing the
+  interrupt terminal's error to None unlocks the synthetic-no-op auto-requery
+  guard (`not terminal.get("error")`), and `_seal_steer_split` resets
+  `assistant_blocks` to [] on the requery — so without the explicit
+  `stop_reason != "interrupt"` guard the runner would re-query the original
+  turn prompt, re-executing its side effects and dropping the resumable Paused
+  note. This is the resume-turn coverage the first repro (session_id=None)
+  could not exercise."""
+  from app import claude_sdk_runner
+
+  class _FakeClient:
+    def __init__(self, options):
+      del options
+      self.queries: list[str] = []
+      self.interrupts = 0
+      self.disconnected = False
+
+    async def connect(self):
+      return None
+
+    async def query(self, message):
+      self.queries.append(message)
+
+    async def interrupt(self):
+      self.interrupts += 1
+
+    async def disconnect(self):
+      self.disconnected = True
+
+    async def receive_response(self):
+      if len(self.queries) == 1:
+        yield _stream_delta("text_delta", text="working")
+        assert await steer_into_active_turn("steer-resume-chat", "use blue") is True
+        yield _success_result()   # natural turn-end wins the race
+        return
+      # Re-query turn: the stray interrupt aborts it with zero accrued blocks.
+      yield _interrupt_result()
+
+  clients = []
+
+  def _client_factory(options):
+    client = _FakeClient(options)
+    clients.append(client)
+    return client
+
+  monkeypatch.setattr(claude_sdk_runner, "ClaudeSDKClient", _client_factory)
+
+  bus = _ChatBus()
+  # The runner reads the sink's accrued blocks; the synthetic-no-op guard keys
+  # on it being empty. Mirror the sink surface so this resume path is exercised.
+  bus.assistant_blocks = []
+
+  result = await run_claude_sdk_turn(
+    "start task",
+    session_id="sess-1",   # a resume turn — the production steer condition
+    base_env={},
+    cwd="/tmp",
+    chat_id="steer-resume-chat",
+    skill_text="system",
+    bc=bus,
+    pending_questions={},
+    db=None,
+  )
+
+  client = clients[0]
+  # The original prompt is queried exactly once, then only the steer redirect —
+  # never re-asked. A regression would append a second "start task".
+  assert client.queries.count("start task") == 1
+  assert len(client.queries) == 2
+  assert client.queries[1].startswith("The user added this while you were working.")
+  # And the turn is a resumable interrupt, not a re-run or a red error.
+  assert result["error"] is None
+  assert result["terminal_status"] == "interrupted"
+  assert result["resume_incomplete"] is True
+
+
 def _assistant_text(text: str, session_id: str = "sess-1") -> AssistantMessage:
   """A completed assistant TEXT block — the clean boundary the runner
   cuts a buffered steer on. (TextBlock is the snapshot of streamed
@@ -437,7 +599,7 @@ def _success_result(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-  "mode", ["agent-running", "agent-settled", "finite-monitor"],
+  "mode", ["agent-running", "agent-settled"],
 )
 async def test_native_work_drains_through_clean_parent_synthesis(
   monkeypatch, mode,
@@ -466,51 +628,27 @@ async def test_native_work_drains_through_clean_parent_synthesis(
       session_id="root-session", tool_use_id="spawn-1",
     ),
   ]
-  if mode == "finite-monitor":
-    first_messages = [
-      AssistantMessage(
-        content=[ToolUseBlock(
-          id="monitor-1", name="Monitor",
-          input={"command": "sleep 1; echo READY", "persistent": False},
-        )],
-        model="claude-sonnet", session_id="root-session",
-      ),
-      TaskStartedMessage(
-        subtype="task_started", data={}, task_id="monitor-task",
-        description="wait for READY", uuid="monitor-start",
-        session_id="root-session", tool_use_id="monitor-1",
-        task_type="local_bash",
-      ),
-    ]
-    followup_messages = [TaskNotificationMessage(
-      subtype="task_notification", data={}, task_id="monitor-task",
-      status="completed", output_file="/tmp/monitor-task",
-      summary="READY", uuid="monitor-done", session_id="root-session",
-      tool_use_id="monitor-1",
-    )]
-    expected_text = "The monitored command is ready."
-  else:
-    first_messages = [
-      AssistantMessage(
-        content=[ToolUseBlock(
-          id="spawn-1", name="Agent",
-          input={"description": "inspect the implementation"},
-        )],
-        model="claude-sonnet", session_id="root-session",
-      ),
-      TaskStartedMessage(
-        subtype="task_started", data={}, task_id="agent-1",
-        description="inspect the implementation", uuid="task-start-1",
-        session_id="root-session", tool_use_id="spawn-1",
-        task_type="local_agent",
-      ),
-    ]
-    followup_messages = child_frames if mode == "agent-running" else []
-    if mode == "agent-settled":
-      # This is the intermittent ordering a plain in-flight set misses: the
-      # task is already absent when its spawning ResultMessage arrives.
-      first_messages.extend(child_frames)
-    expected_text = "Parent synthesized the result."
+  first_messages = [
+    AssistantMessage(
+      content=[ToolUseBlock(
+        id="spawn-1", name="Agent",
+        input={"description": "inspect the implementation"},
+      )],
+      model="claude-sonnet", session_id="root-session",
+    ),
+    TaskStartedMessage(
+      subtype="task_started", data={}, task_id="agent-1",
+      description="inspect the implementation", uuid="task-start-1",
+      session_id="root-session", tool_use_id="spawn-1",
+      task_type="local_agent",
+    ),
+  ]
+  followup_messages = child_frames if mode == "agent-running" else []
+  if mode == "agent-settled":
+    # This is the intermittent ordering a plain in-flight set misses: the
+    # task is already absent when its spawning ResultMessage arrives.
+    first_messages.extend(child_frames)
+  expected_text = "Parent synthesized the result."
   first_messages.append(_success_result("root-session", cost=0.01))
   followup_messages.extend([
     AssistantMessage(
@@ -825,11 +963,20 @@ async def test_owner_stop_turns_claude_interrupt_result_into_clean_terminal(
 
 
 @pytest.mark.asyncio
-async def test_unrequested_claude_interrupt_result_stays_an_error(monkeypatch):
+async def test_interrupt_result_we_never_issued_stays_an_error(monkeypatch):
+  # The defuse is gated on us having ACTUALLY issued the interrupt (an owner
+  # Stop sets `interrupt_requested`; a steer sets `_interrupt_issued`). This
+  # helper sets neither — a `stop_reason == "interrupt"` terminal we did not
+  # cause (a hypothetical CLI/provider-side abort mapped to the same envelope).
+  # The invariant is ENFORCED, not assumed: with no interrupt of ours in
+  # flight, a genuine failure must stay a visible error, never be masked as a
+  # calm resumable "Paused" note. (Our real interrupts are covered by the two
+  # steer-race tests and the owner-Stop test.)
   result = await _run_claude_stop_outcome(monkeypatch, "terminal", owned=False)
 
   assert result["error"] == "Execution interrupted."
   assert result.get("terminal_status") is None
+  assert result.get("resume_incomplete") is None
 
 
 @pytest.mark.asyncio
@@ -1338,6 +1485,7 @@ def test_dispatch_thinking_delta_emits_thinking(monkeypatch):
 
 def test_control_mcp_readiness_waits_for_every_platform_tool():
   from app import claude_sdk_runner
+  from app.platform_tools import CONTROL_TOOL_NAMES
 
   class _Client:
     def __init__(self):
@@ -1356,10 +1504,11 @@ def test_control_mcp_readiness_waits_for_every_platform_tool():
           "status": "connected",
           "tools": [{"name": "promote_goal"}],
         }]}
+      from app.platform_tools import CONTROL_TOOL_NAMES
       return {"mcpServers": [{
         "name": "mobius_control",
         "status": "connected",
-        "tools": [{"name": "promote_goal"}, {"name": "declare_wait"}],
+        "tools": [{"name": name} for name in CONTROL_TOOL_NAMES],
       }]}
 
   client = _Client()
@@ -1367,6 +1516,23 @@ def test_control_mcp_readiness_waits_for_every_platform_tool():
     claude_sdk_runner._await_control_mcp_ready(client, enabled=True)
   ) is None
   assert client.calls == 3
+
+
+def test_control_mcp_readiness_accepts_delegated_coordination_subset():
+  from app import claude_sdk_runner
+  from app.platform_tools import COORDINATION_TOOL_NAMES
+
+  class _Client:
+    async def get_mcp_status(self):
+      return {"mcpServers": [{
+        "name": "mobius_control",
+        "status": "connected",
+        "tools": [{"name": name} for name in COORDINATION_TOOL_NAMES],
+      }]}
+
+  assert asyncio.run(claude_sdk_runner._await_control_mcp_ready(
+    _Client(), enabled=True, expected_tool_names=COORDINATION_TOOL_NAMES,
+  )) is None
 
 
 def test_control_mcp_readiness_reports_terminal_failure_without_retrying():
@@ -1474,6 +1640,9 @@ async def test_run_claude_sdk_turn_requests_summarized_thinking(monkeypatch):
   assert captured["options"].system_prompt.startswith("system")
   assert "# Concise register" in captured["options"].system_prompt
   assert captured["options"].max_buffer_size == 10 * 1024 * 1024
+  assert set(claude_sdk_runner._CLAUDE_NATIVE_SCHEDULING_TOOLS) <= set(
+    captured["options"].disallowed_tools
+  )
   assert captured["options"].thinking == {
     "type": "adaptive",
     "display": "summarized",
@@ -2389,7 +2558,9 @@ async def test_delegated_claude_has_no_hidden_budget_and_keeps_guards(
 
   def capture_options(**kwargs):
     captured["kwargs"] = dict(kwargs)
-    return real_options(**kwargs)
+    options = real_options(**kwargs)
+    captured["options"] = options
+    return options
 
   class _FakeClient:
     def __init__(self, options):
@@ -2437,9 +2608,29 @@ async def test_delegated_claude_has_no_hidden_budget_and_keeps_guards(
   kwargs = captured["kwargs"]
   assert "max_budget_usd" not in kwargs
   assert kwargs["agents"] == {}
-  assert {
-    "AskUserQuestion", "Task", "Workflow", "Agent",
-  }.issubset(set(kwargs["disallowed_tools"]))
+  disallowed = set(kwargs["disallowed_tools"])
+  assert "AskUserQuestion" in disallowed
+  assert {"Task", "Workflow", "Agent"} <= disallowed
+  assert set(claude_sdk_runner._CLAUDE_NATIVE_SCHEDULING_TOOLS) <= disallowed
+  can_use_tool = captured["options"].can_use_tool
+  guarded = await can_use_tool(
+    "Bash",
+    {"command": "python3 /data/apps/subagents/subagents.py run "
+      "--provider codex --name bounded --scope read --prompt bounded"},
+    None,
+  )
+  assert isinstance(guarded, PermissionResultAllow)
+  for tool_name in ("Task", "Workflow", "Agent", "Bash"):
+    result = await can_use_tool(tool_name, {}, None)
+    assert isinstance(result, PermissionResultDeny)
+  assert isinstance(
+    await can_use_tool("AskUserQuestion", {"questions": []}, None),
+    PermissionResultDeny,
+  )
+  for tool_name in claude_sdk_runner._CLAUDE_NATIVE_SCHEDULING_TOOLS:
+    assert isinstance(
+      await can_use_tool(tool_name, {}, None), PermissionResultDeny,
+    )
 
 
 @pytest.mark.asyncio

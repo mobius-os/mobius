@@ -20,6 +20,7 @@ export function platformStatusFromApply(previous, result) {
   return {
     ...(previous || {}),
     state,
+    status_unavailable: false,
     // A clean apply consumed the exact reviewed target. Do not briefly carry
     // the OLD `available:true` through the render before the status refresh:
     // the batched-update UI would otherwise offer the update that just applied.
@@ -42,6 +43,15 @@ export function platformStatusFromApply(previous, result) {
   }
 }
 
+export function platformStatusUnavailable(previous) {
+  return {
+    ...(previous || {}),
+    state: 'unavailable',
+    available: false,
+    status_unavailable: true,
+  }
+}
+
 export function platformUpdateStatusLabel(platform) {
   const state = platform?.state
   const needsRestart = !!platform?.needs_restart
@@ -50,6 +60,9 @@ export function platformUpdateStatusLabel(platform) {
     needsRestart ? 'server_restart' : 'live'
   )
 
+  if (platform?.status_unavailable || state === 'unavailable') {
+    return 'Update status unavailable'
+  }
   if (state === 'conflict') return 'Update blocked'
   if (state === 'rolled_back') return 'Update needs repair'
   if (activationLevel !== 'live' && available) return 'More updates available'
@@ -82,6 +95,29 @@ export function deploymentKind(activation) {
 
 export function deploymentKindLabel(activation) {
   return deploymentKind(activation) === 'railway' ? 'Railway' : 'Self-hosted'
+}
+
+/**
+ * An image-level update is finished by rebuilding the container, on both
+ * deployments. Railway cuts over to the pinned GHCR image; self-hosted applies
+ * the reviewed source in place and then rebuilds the matching sha-<target>
+ * image via the host helper. Either way the single reviewed-update confirmation
+ * drives the rebuild — there is no separate manual rebuild step.
+ */
+export function reviewedUpdateUsesContainerRebuild(preview) {
+  return preview?.activation?.level === 'image_rebuild'
+}
+
+/**
+ * Only Railway pins the rebuild to an immutable GHCR image digest. Self-hosted
+ * anchors on the sha-<target> tag, so its reviewed rebuild has no digest and
+ * must not be blocked on one.
+ */
+export function reviewedRebuildNeedsDigest(preview) {
+  return (
+    reviewedUpdateUsesContainerRebuild(preview)
+    && deploymentKind(preview?.activation) === 'railway'
+  )
 }
 
 export function platformActivationLabel(activation) {

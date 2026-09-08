@@ -596,9 +596,16 @@ export const api = {
     ),
   },
   secureInputs: {
+    savedState: (chatId, requestId) => apiFetch(
+      `/secure-inputs/${encodeURIComponent(chatId)}/${encodeURIComponent(requestId)}/saved-state`,
+    ),
     submit: (chatId, requestId, payload) => apiFetch(
       `/secure-inputs/${encodeURIComponent(chatId)}/${encodeURIComponent(requestId)}/submit`,
       { method: 'POST', body: JSON.stringify(payload) },
+    ),
+    cancel: (chatId, requestId) => apiFetch(
+      `/secure-inputs/${encodeURIComponent(chatId)}/${encodeURIComponent(requestId)}/cancel`,
+      { method: 'POST', body: JSON.stringify({}) },
     ),
   },
   apps: {
@@ -658,6 +665,16 @@ export const api = {
     // transfers it to the opaque frame. Keep the stable base URL here; the
     // broker appends the scoped token + versioned service-worker cache key.
     moduleUrl: (appId) => `${BASE}/api/apps/${appId}/module`,
+  },
+  agentCoordination: {
+    chat: (chatId, options = {}) => apiFetch(
+      `/agent-coordination/chats/${encodeURIComponent(chatId)}`,
+      options,
+    ),
+    project: (projectId, options = {}) => apiFetch(
+      `/agent-coordination/projects/${encodeURIComponent(projectId)}`,
+      options,
+    ),
   },
   projects: {
     list: () => apiFetch('/projects'),
@@ -982,6 +999,10 @@ export const api = {
     updatePreview: () => apiFetch('/platform/update-preview'),
     updateProgress: () => apiFetch('/platform/update-progress'),
     apply: (plan) => apiFetch('/platform/apply', {
+      method: 'POST',
+      body: JSON.stringify(plan),
+    }),
+    rebuild: (plan) => apiFetch('/platform/rebuild', {
       method: 'POST',
       body: JSON.stringify(plan),
     }),

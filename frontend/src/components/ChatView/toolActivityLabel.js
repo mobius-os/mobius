@@ -1,4 +1,5 @@
 import { imagePathFromInput } from './toolImageResult.js'
+import { peerMessageCardModel } from './peerMessageCard.js'
 
 // Owner-facing activity labels for raw tool names. Collapsed summary lines
 // (the activity-group header, a running tool's header) speak in activities —
@@ -107,6 +108,7 @@ const ACTIVITY_ICONS = new Map([
   ['Skill', 'skill'],
   ['ViewImage', 'image'],
   ['MemoryRecall', 'search'],
+  ['PeerMessage', 'agents'],
 ])
 
 // An unknown tool falls back to its raw name (then the generic 'Tool' for a
@@ -164,6 +166,7 @@ export function toolCallLabel(tool) {
   // glance. "Nothing relevant" is stated explicitly, because a silent recall
   // is indistinguishable from never having looked.
   if (name === 'MemoryRecall') return memoryRecallLabel(tool)
+  if (name === 'PeerMessage') return peerMessageLabel(tool)
   if (name === 'Skill') {
     const skills = Array.isArray(tool?.skills)
       ? tool.skills.filter(skill => typeof skill === 'string' && skill.trim())
@@ -210,6 +213,11 @@ export function effectiveToolName(tool) {
   // point for both runners, and it keeps working after transcript compaction
   // strips the command string from a settled activity block.
   if (tool?.recall && typeof tool.recall === 'object') return 'MemoryRecall'
+  // Classify as a peer card ONLY when the marker projects to a real model;
+  // a malformed or future-version marker falls through to the generic tool
+  // block instead of selecting a card that would render nothing.
+  if (tool?.peer_message && typeof tool.peer_message === 'object'
+      && peerMessageCardModel(tool.peer_message)) return 'PeerMessage'
   if (Array.isArray(tool?.skills) && tool.skills.length > 0) return 'Skill'
   if (IMAGE_TOOL_NAMES.has(name)) return 'ViewImage'
   if (name === 'Read') {
@@ -232,7 +240,71 @@ export function effectiveToolName(tool) {
 // so scanning the transcript tells the story. Skill reads are housekeeping too:
 // effectiveToolName still gives them an honest label and expandable details,
 // while the ordinary activity stretch folds them beside reads and commands.
-const DISTINCTIVE_ACTIVITIES = new Set(['ViewImage', 'MemoryRecall'])
+const DISTINCTIVE_ACTIVITIES = new Set(['ViewImage', 'MemoryRecall', 'PeerMessage'])
+
+// The one-line story of a peer-network exchange: who the agent messaged or
+// heard from, and what kind of note it was. Provider-neutral — the same card
+// renders whether a Claude or Codex agent sits on either end. A name the
+// backend already resolved (recipient/sender) beats the raw chat id.
+const PEER_KIND_VERB = new Map([
+  ['request', 'a request'],
+  ['handoff', 'a handoff'],
+  ['finding', 'a finding'],
+  ['blocker', 'a blocker'],
+  ['note', 'a note'],
+])
+
+function peerKindPhrase(kind) {
+  return PEER_KIND_VERB.get(kind) || 'a note'
+}
+
+function peerNamesPhrase(peers, total = null) {
+  const names = Array.isArray(peers) ? peers.filter(Boolean) : []
+  const count = Number.isInteger(total) && total >= names.length
+    ? total
+    : names.length
+  if (names.length === 0) {
+    return count > 0 ? `${count} agents` : null
+  }
+  if (count === 1) return names[0]
+  if (count === 2 && names.length >= 2) return `${names[0]} and ${names[1]}`
+  const others = Math.max(1, count - 1)
+  return `${names[0]} and ${others} ${others === 1 ? 'other' : 'others'}`
+}
+
+export function peerMessageLabel(tool) {
+  const pm = tool?.peer_message
+  const running = tool?.status === 'running'
+  if (!pm || typeof pm !== 'object') {
+    return running ? 'Coordinating with agents' : 'Coordinated with agents'
+  }
+  if (pm.status === 'sending' || pm.status === 'reading') {
+    // Liveness follows the TOOL, never the provisional marker: an interrupted
+    // call leaves the marker unsettled, but the tool is no longer running, so
+    // a historical block must not claim to be in progress.
+    if (!running) return 'Agent message interrupted'
+    return pm.status === 'sending' ? 'Messaging an agent' : 'Checking agent messages'
+  }
+  if (running && pm.direction === 'send') return 'Messaging an agent'
+  if (running && pm.direction === 'read') return 'Checking agent messages'
+  if (pm.status === 'sent') {
+    const who = pm.broadcast ? 'the team' : peerNamesPhrase(pm.peers, pm.count)
+    return who
+      ? `Sent ${who} ${peerKindPhrase(pm.kind)}`
+      : `Sent ${peerKindPhrase(pm.kind)}`
+  }
+  if (pm.status === 'received') {
+    const notes = Array.isArray(pm.notes) ? pm.notes : []
+    const count = typeof pm.count === 'number' ? pm.count : notes.length
+    if (count === 1 && notes.length === 1 && notes[0]?.sender) {
+      return `${notes[0].sender} sent ${peerKindPhrase(notes[0]?.kind)}`
+    }
+    return `Received ${count} agent message${count === 1 ? '' : 's'}`
+  }
+  if (pm.status === 'empty') return 'Checked agent messages — none new'
+  if (pm.status === 'failed') return 'Agent message failed'
+  return running ? 'Coordinating with agents' : 'Coordinated with agents'
+}
 
 // The one-line story of a memory lookup, including honest operational failure.
 // Reading the count from the result set the backend already parsed keeps the

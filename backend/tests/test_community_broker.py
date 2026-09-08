@@ -82,6 +82,81 @@ async def test_read_preserves_bounded_query_for_broker_binding():
 
 
 @pytest.mark.asyncio
+async def test_unlinked_public_app_reads_fall_back_without_authorization():
+  seen = []
+
+  async def handler(request: httpx.Request) -> httpx.Response:
+    seen.append((request.method, str(request.url), dict(request.headers)))
+    if request.url.host == "mobius-identity-broker":
+      return httpx.Response(
+        401, json={"error": "a mobius.you account must be linked"},
+      )
+    return httpx.Response(
+      200,
+      headers={"ETag": '"catalog-1"'},
+      json={"apps": [{"id": "app_12345678"}]},
+    )
+
+  client = CommunityBrokerClient(transport=httpx.MockTransport(handler))
+  payload, status, headers = await client.request(
+    "GET", "/v1/community/apps",
+    params={"limit": 25, "offset": 0, "q": "social"},
+  )
+
+  assert status == 200
+  assert payload == {"apps": [{"id": "app_12345678"}]}
+  assert headers == {"etag": '"catalog-1"'}
+  assert [item[1] for item in seen] == [
+    "http://mobius-identity-broker/v1/community/apps?limit=25&offset=0&q=social",
+    "https://www.mobius.you/api/store/v1/apps?limit=25&offset=0&q=social",
+  ]
+  assert "authorization" not in seen[-1][2]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", [
+  "/v1/community/apps/app_12345678",
+  "/v1/community/apps/app_12345678/revisions/rev_12345678",
+  "/v1/community/editorial/spotlight",
+])
+async def test_unlinked_public_detail_reads_use_the_matching_public_path(path):
+  seen = []
+
+  async def handler(request: httpx.Request) -> httpx.Response:
+    seen.append(str(request.url))
+    if request.url.host == "mobius-identity-broker":
+      return httpx.Response(
+        401, json={"error": "a mobius.you account must be linked"},
+      )
+    return httpx.Response(200, json={"ok": True})
+
+  client = CommunityBrokerClient(transport=httpx.MockTransport(handler))
+  await client.request("GET", path)
+
+  assert seen[-1] == "https://www.mobius.you/api/store/v1" + path.removeprefix(
+    "/v1/community"
+  )
+
+
+@pytest.mark.asyncio
+async def test_unlinked_private_reads_stay_account_gated():
+  seen = []
+
+  async def handler(request: httpx.Request) -> httpx.Response:
+    seen.append(str(request.url))
+    return httpx.Response(
+      401, json={"error": "a mobius.you account must be linked"},
+    )
+
+  client = CommunityBrokerClient(transport=httpx.MockTransport(handler))
+  with pytest.raises(CommunityBrokerError) as raised:
+    await client.request("GET", "/v1/community/publications")
+
+  assert raised.value.status_code == 401
+  assert len(seen) == 1
+
+
+@pytest.mark.asyncio
 async def test_mutation_requires_idempotency_before_socket_call():
   called = False
 

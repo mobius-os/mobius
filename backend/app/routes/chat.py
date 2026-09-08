@@ -8,7 +8,7 @@ from app.chat import stop_chat
 from app.database import get_db
 from app.deps import (
   Principal, get_owner_or_chat_embed_principal, reject_cross_site,
-  require_chat_embed_operation,
+  require_chat_embed_operation, require_nondelegated_owner_control,
 )
 from app.resource_access import require_active_chat_access
 
@@ -28,6 +28,7 @@ async def chat_stop(
   turn-end drain already promoted into a continuation isn't double-sent
   (PM 115).
   """
+  require_nondelegated_owner_control(principal)
   if principal.scope == "app":
     raise HTTPException(status_code=403, detail="App token is not valid here.")
   require_chat_embed_operation(principal, "chat:stop")

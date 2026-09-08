@@ -1,18 +1,18 @@
 ---
 name: claude
-description: Read before handing a task to Claude Code from a Codex turn. Use the connected Claude CLI non-interactively, preserve the owner's requested model and effort, give it a bounded outcome-first prompt, wait for the result inside this turn, and report which provider did what.
+description: Compatibility pointer for handing bounded work to Claude from a Codex turn. Prefer the installed Subagents capability; use the direct connected Claude CLI only when that app is absent.
 ---
 
 # Delegating to Claude
 
-Use this when the partner explicitly asks Codex to consult or delegate to
-Claude, or when an independent Claude pass would materially improve an
-authorized task. Möbius exposes `CLAUDE_CONFIG_DIR` to Codex only when Claude is
-connected, so first confirm that variable exists and the `claude` executable is
-available. If either is absent, say Claude is not connected rather than trying
-another credential path.
+When the **Subagents** app is installed, read the complete `subagents` skill and
+use its guarded helper. It owns provider enablement, configured model/effort,
+durable identity, restart recovery, nested work, and parent wake-up. Do not run
+`claude -p` alongside that mechanism.
 
-Run Claude non-interactively and wait for it in the current turn:
+Only when the app is genuinely absent may you use the connected CLI fallback.
+Confirm `CLAUDE_CONFIG_DIR` and the `claude` executable exist, preserve any
+owner-requested model/effort, and wait for the result inside this turn:
 
 ```bash
 claude -p --output-format text --model <model-or-alias> --effort <level> "<prompt>"
@@ -22,7 +22,7 @@ claude -p --output-format text --model <model-or-alias> --effort <level> "<promp
   is the honest default.
 - Effort values are `low`, `medium`, `high`, `xhigh`, and `max`. Omit the flag
   when there is no reason to override the default.
-- Do not use `--background`: a Möbius helper must finish before this turn ends.
+- Do not use `--background`: this fallback must finish before the turn ends.
 - Match the current task's authority. For code changes, tell Claude exactly what
   it may edit and how to verify the result. For review or investigation, state
   that it is read-only.
@@ -39,6 +39,6 @@ Done when: <tests, evidence, or decision the response must contain>
 ```
 
 Keep the prompt lean and point to real files instead of pasting large context.
-After Claude returns, assess its work yourself, run the relevant verification,
-and tell the partner which part came from Claude. Claude's response is evidence
-or a candidate change, not a substitute for your own review.
+After Claude returns, assess its work, verify any edits, and tell the partner
+which provider did what. Its response is evidence or a candidate change, not a
+substitute for your own review.

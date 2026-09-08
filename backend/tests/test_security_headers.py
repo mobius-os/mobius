@@ -203,6 +203,22 @@ def test_static_embed_policy_authoritatively_replaces_route_headers(monkeypatch)
   assert "x-frame-options" not in response.headers
 
 
+def test_static_embed_names_loopback_delivery_origin_for_local_tools():
+  # Starlette's in-process TestClient identifies its peer as ``testclient``;
+  # production grants this exception only when BOTH the peer and Host are
+  # loopback. Exercise that owning predicate directly rather than weakening it
+  # to trust a spoofable Host header for the sake of the adapter fixture.
+  policy = main._static_embed_csp_for_scope({
+    "scheme": "http",
+    "headers": [(b"host", b"127.0.0.1:8123")],
+    "client": ("127.0.0.1", 49152),
+  })
+
+  assert "http://127.0.0.1:8123" in policy
+  assert main.settings.frontend_origin.rstrip("/") in policy
+  assert "allow-same-origin" not in policy
+
+
 def test_static_embed_policy_survives_unhandled_route_exception(monkeypatch):
   def _raise(*_args, **_kwargs):
     raise RuntimeError("static asset failure")

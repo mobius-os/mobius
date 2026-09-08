@@ -190,12 +190,32 @@ the write-surface contract.
 2. Commit only the exact paths you own with `PM_COMMIT_ROOT=/data/platform
    pm-commit --from <starting-sha> '<what and why>' -- <paths>`.
 3. Run the activation preflight. Only if it proves that the settled backend
-   change is not live, stop and ask through the clarifying-question tool
-   immediately before restarting. Explain that the restart interrupts every
+   change is not live, ask through Möbius's `request_approval` tool for this exact restart,
+   then end the turn after the saved receipt. Explain that the restart interrupts every
    active agent turn, name the current number of running turns when known, and
    warn that service may be unavailable for tens of seconds. Offer **Restart
    now** and **Not now**. Approval of the task, a broad “go ahead” or “fix it,”
    or delegation of the complete backend-fix loop does not approve a restart.
+
+   Use `request_approval` with a question naming the change and impact, and
+   two options: **Not now** and **Restart now**, each with a short description.
+   Its receipt confirms only that the card was saved. It does not grant
+   approval: end the turn, and let the owner's answer resume the chat. Do not
+   use Codex's `request_user_input` for permission or approval requests.
+
+   If the tool is absent, the same saved-card operation is available through:
+
+   ```bash
+   python3 /data/platform/backend/scripts/owner_approval.py \
+     'Restart to activate <tested change>? This interrupts <N> active turns and may take Möbius offline for tens of seconds.' \
+     --option 'Not now' 'Leave the tested change pending without interruption.' \
+     --option 'Restart now' 'Activate the tested change with the interruption described.'
+   ```
+
+   A failed save is not a waiting card and not consent. Retry only the
+   identical request to recover its receipt. If the running backend predates
+   this operation, ask plainly and leave activation pending; never fabricate
+   a card or park a process waiting for an answer.
 
    A **Restart now** answer authorizes exactly one safe restart call:
 

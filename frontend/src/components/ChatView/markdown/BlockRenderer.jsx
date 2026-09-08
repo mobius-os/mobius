@@ -79,8 +79,10 @@ export function ProgressiveMarkdown({
             />
           )
         })}
+        {isStreaming && (
+          <span className="chat__cursor" aria-hidden="true" />
+        )}
       </div>
-      {isStreaming && <span className="chat__cursor" />}
     </>
   )
 }

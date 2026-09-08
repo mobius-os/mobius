@@ -1128,12 +1128,64 @@ The generation bump is the key invariant. A dying `_run_chat_impl` rechecks owne
 
 ## AskUserQuestion interception
 
-AskUserQuestion is a shared pending-future lifecycle plus a shared `question` stream event; Claude and Codex differ only at the SDK boundary. `backend/app/pending_questions.py:PendingQuestion` carries `question_id`, `questions`, `future`, and optional `run_token`; `backend/app/questions.py` owns the module-level `_pending` registry (`get`, `claim_if`, `cancel`). Claude registers the pending question in `claude_sdk_runner.py:can_use_tool` for the `AskUserQuestion` tool, persists the card via `_ChatEventSink.publish_question()`, awaits the future, and returns `PermissionResultAllow(updated_input={questions, answers})`. Codex installs `_install_request_user_input_handler()` on `codex._client._sync._approval_handler`, enables `features.default_mode_request_user_input=true`, handles `item/tool/requestUserInput`, marshals from the SDK worker thread into the loop with `run_coroutine_threadsafe` (a ~420s bridge timeout), and translates Möbius's text-keyed answers into Codex's id-keyed `{answers:{qid:{answers:[...]}}}` shape.
+AskUserQuestion is a shared pending-future lifecycle plus a shared `question` stream event; Claude and Codex differ only at the SDK boundary. `backend/app/pending_questions.py:PendingQuestion` carries `question_id`, `questions`, `future`, and optional `run_token`; `backend/app/questions.py` owns the module-level `_pending` registry (`get`, `claim_if`, `cancel`). Claude registers the pending question in `claude_sdk_runner.py:can_use_tool` for the `AskUserQuestion` tool, persists the card via `_ChatEventSink.publish_question()`, awaits the future, and returns `PermissionResultAllow(updated_input={questions, answers})`. Codex installs `_install_request_user_input_handler()` on `codex._client._sync._approval_handler`, enables `features.default_mode_request_user_input=true`, handles `item/tool/requestUserInput`, marshals from the SDK worker thread into the loop with `run_coroutine_threadsafe` (no user-answer timeout), and translates Möbius's text-keyed answers into Codex's id-keyed `{answers:{qid:{answers:[...]}}}` shape.
 
 The answer POST is intercepted before normal send handling in `backend/app/routes/chats_stream.py:send_message` whenever `body.answers` is truthy. The route waits ~500ms for a just-broadcast pending entry, checks `question_id` identity when supplied, persists the answer FIRST through the writer actor's `AnswerQuestion`, then `questions.claim_if(chat_id, pending)` before resolving the future. That ordering is load-bearing: a concurrent Stop can cancel and pop the pending entry while the answer write awaits its ack, and resolving a cancelled/superseded future would feed the answer to the wrong SDK call. On success the route publishes `answers_applied` and returns `status:"answer_delivered"` plus `answer_turn:"same"`, which `useStreamConnection.js:sendMessage` treats as terminal for the POST without reconnecting the SSE. Durable-question recovery instead returns `status:"started"` plus `answer_turn:"new"`. The dedicated `answer_turn` field owns frontend row/bridge semantics; the status fallback exists only for rolling compatibility with older backends. A stale/missing pending question returns `410` rather than falling through and sending the answer as a new user turn.
 **Question settlement invariant:** live stream items, a persisted partial, and the settled transcript are alternate sources for one active assistant row. An in-process answer resumes that same row; the live-to-durable handoff preserves the question, its answer, and all pre/post-answer thinking, tool, and text blocks in event order without hiding, duplicating, or reordering them. Only a recovered answer with `answer_turn:"new"` creates a separate hidden continuation. Unknown future modes fail closed to a separate boundary so an existing question row is never overwritten.
 
 Three frontend gates must stay aligned. `StreamingMessage.jsx` renders live question events with `QuestionCard` and NO disabled prop (the runner is paused while `sending`/`isStreaming` can still be true); `QuestionCard.jsx` does accept a `disabled` prop, but only `MsgContent.jsx` passes it, for non-answerable persisted cards. `ChatView.jsx:doSendSilent` allows submissions carrying `resolvedAnswers` through both `sendingRef` and `isStreamingRef`, uses `sendSilentInFlightRef` as the synchronous double-submit guard, optimistically patches message + stream question answers, and sends a hidden message with `answers` + `question_id`. Persistence identity lives in `chat_writer.py`: `apply_answers_to_last_question()` writes by exact `question_id` when present, and both the live-snapshot and final-merge paths carry existing answers forward by `events.question_block_key()` so later streaming snapshots don't wipe them. Do not key answer carry by block position, do not resolve the pending future before the writer ack, and do not make live cards inherit global send/stream disabled state.
+
+### Saved owner-input pauses
+
+Ordinary choices use `mobius_control.request_question` and
+`POST /api/chats/{id}/question`; approvals use `mobius_control.request_approval`
+and `POST /api/chats/{id}/approval`. Both tools share
+`backend/scripts/owner_approval.py` and `save_owner_question`.
+This is an application decision, not the provider's sandbox-permission or
+clarifying-question protocol. The route uses the active `ChatEventSink` and
+`QuestionCommit` to save an ordinary question with
+`response_mode: "continuation"` before returning a receipt. No SDK future,
+held HTTP request, or new approval table is involved. A same-run, same-payload
+retry has the same question identity; a different open question conflicts.
+The receipt is neither an answer nor consent. Agent guidance makes publishing
+the card the final action: all explanation, preparation and closeout precede
+it; no text or tools follow. The saved marker blocks normal sends and queue
+promotion until owner response or Stop, with no human timeout or idle agent.
+
+`Finalize` preserves the exact still-open continuation marker.
+`FinishRun` also preserves it except on explicit Stop; neither resurrects a
+marker cleared by an early answer. Normal question recovery resumes an idle
+chat from the saved card. A fast answer while the publishing turn is still
+active instead atomically saves the answer and queues a hidden continuation
+through `AppendPending`; ordinary terminal draining starts it exactly once.
+Its `answer_turn: "queued"` tells the client to preserve the current streamed
+row until that queue promotion (unlike `"new"`, which has already started).
+Both answer paths use `answers_applied` and identity-keyed answer carry.
+Native question futures retain their existing answer/cancel behavior and
+share the same open-card slot as a compatibility path for existing sessions.
+
+Sealed inputs use the same continuation question, with safe `secure_input`
+metadata rendered by `SecureInputCard`. `QuestionCommit` atomically creates a
+private `SavedSecureInput` row containing only command/cwd/action/status, never
+values or a saved agent environment. The helper returns the saved receipt.
+`ClaimSecureInput` commits pending → consuming before backend-owned execution;
+values travel solely through RAM/stdin, output is discarded, and execution is
+limited to two minutes. `SettleSecureInput` commits a fixed safe result, answer
+and one hidden continuation together. Plaintext answer routes cannot settle
+sealed cards. Shared `start_queued_owner_continuation` and the ordinary terminal
+drain own waking, not a separate agent scheduler.
+
+Stop cancels owned process groups and suppresses continuation. Startup and the
+existing recovery cadence settle orphan execution claims as outcome-unknown;
+neither ever repeats the consumer. Pending cards survive restart indefinitely;
+submitted values do not. Existing transient requests and explicitly approved
+reveal preserve their live one-use behavior, not a persisted secret path.
+
+Regression coverage: `test_owner_approvals.py` drives the actual control-tool
+dispatch, helper, authenticated route, writer, answer queue, and terminal
+transition. It covers creation retries, save/broadcast failures, immediate
+and late answers, duplicate submissions, stopped/interrupted/failed runs,
+foreign run authority, and native-question overlap.
 
 ## Chat persistence — single-writer actor
 

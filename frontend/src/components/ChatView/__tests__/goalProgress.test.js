@@ -3,12 +3,17 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 
 import {
+  compactGoalObjective,
   draftGoalObjective,
+  goalObjectiveAtRunStart,
   goalObjectiveFromText,
   goalMessageObjectiveFromText,
+  goalPresentationAtRunStart,
+  goalPresentationFromRuntime,
   goalTaskDisplayStatus,
   latestGoalObjective,
   newestGoalPlan,
+  normalizeGoalPresentation,
   progressRailViewModel,
   visibleGoalTasks,
 } from '../goalProgress.js'
@@ -85,6 +90,131 @@ test('latestGoalObjective recovers only the current visible owner turn', () => {
     { role: 'user', content: 'hidden answer', hidden: true },
     { role: 'assistant', content: 'Working', partial: true },
   ]), 'build the indicator')
+})
+
+test('compact Goal objectives are canonical before the first paint', () => {
+  assert.equal(
+    compactGoalObjective('Review every issue\nthen verify the result'),
+    'Review every issue then verify the result',
+  )
+  assert.equal(compactGoalObjective(null), '')
+})
+
+test('a resumable continue keeps the same goal through live start and cold attach', () => {
+  const interruptedGoal = [
+    { role: 'user', content: '/goal finish the migration' },
+    {
+      role: 'assistant',
+      content: 'Partly done',
+      blocks: [{
+        type: 'error',
+        message: 'Interrupted',
+        resumable: true,
+      }],
+    },
+  ]
+  assert.equal(
+    goalObjectiveAtRunStart('continue', interruptedGoal),
+    'finish the migration',
+  )
+  assert.equal(
+    latestGoalObjective([
+      ...interruptedGoal,
+      { role: 'user', content: 'continue' },
+      { role: 'assistant', content: 'Working', partial: true },
+    ]),
+    'finish the migration',
+  )
+})
+
+test('continuation recovery preserves only an active goal', () => {
+  assert.equal(goalObjectiveAtRunStart('continue', [
+    { role: 'user', content: '/goal old objective' },
+    { role: 'assistant', content: 'Done' },
+  ]), '')
+  assert.equal(latestGoalObjective([
+    { role: 'user', content: '/goal old objective' },
+    { role: 'assistant', blocks: [{ type: 'error', resumable: true }] },
+    { role: 'user', content: '/goal clear' },
+    { role: 'assistant', blocks: [{ type: 'error', resumable: true }] },
+    { role: 'user', content: 'continue' },
+  ]), '')
+  assert.equal(latestGoalObjective([
+    { role: 'user', content: '/goal old objective' },
+    { role: 'assistant', blocks: [{ type: 'error', resumable: true }] },
+    { role: 'user', content: 'new subject' },
+    { role: 'assistant', blocks: [{ type: 'error', resumable: true }] },
+    { role: 'user', content: 'continue' },
+  ]), '')
+})
+
+test('durable Goal presentation survives terminal runtime states', () => {
+  const paused = {
+    id: 'goal-1', objective: 'Finish the migration', status: 'paused',
+    resumable: true,
+  }
+  assert.deepEqual(goalPresentationFromRuntime({
+    running: false,
+    goal: paused,
+  }), paused)
+  assert.deepEqual(goalPresentationFromRuntime({
+    running: false,
+    goal: {
+      id: 'goal-1', objective: 'Finish the migration', status: 'completed',
+    },
+  }), {
+    id: 'goal-1', objective: 'Finish the migration', status: 'completed',
+    resumable: false,
+  })
+  assert.equal(goalPresentationFromRuntime({ running: false, goal: null }), null)
+})
+
+test('durable Goal presentation preserves only exact server-owned waits', () => {
+  assert.deepEqual(normalizeGoalPresentation({
+    id: 'goal-1', objective: 'Finish the review', status: 'paused',
+    wait_kind: 'monitor',
+  }), {
+    id: 'goal-1', objective: 'Finish the review', status: 'paused',
+    resumable: true, waitKind: 'monitor',
+  })
+  assert.deepEqual(normalizeGoalPresentation({
+    id: 'goal-1', objective: 'Finish the review', status: 'paused',
+    wait_kind: 'unrelated-browser-state',
+  }), {
+    id: 'goal-1', objective: 'Finish the review', status: 'paused',
+    resumable: true,
+  })
+  assert.match(
+    chatView,
+    /ownerActionRequired: goalPresentation\?\.waitKind === 'owner_question'/,
+  )
+  assert.match(
+    chatView,
+    /monitoring: goalPresentation\?\.waitKind === 'monitor'/,
+  )
+})
+
+test('ordinary turns retain settled Goals while Resume reactivates a pause', () => {
+  const paused = {
+    id: 'goal-1', objective: 'Finish the migration', status: 'paused',
+  }
+  assert.deepEqual(
+    goalPresentationAtRunStart('ordinary question', [], paused),
+    { ...paused, resumable: true },
+  )
+  assert.deepEqual(
+    goalPresentationAtRunStart('continue', [], paused),
+    { ...paused, status: 'active', resumable: false },
+  )
+  assert.deepEqual(
+    goalPresentationAtRunStart('/goal Start another', [], paused),
+    { id: null, objective: 'Start another', status: 'active', resumable: false },
+  )
+  assert.deepEqual(
+    goalPresentationAtRunStart('/goal clear', [], paused),
+    { ...paused, resumable: true },
+    'the retired text command must not optimistically hide a durable Goal',
+  )
 })
 
 test('the goal reuses the progress rail and stays as context for build phases', () => {

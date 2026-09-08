@@ -39,9 +39,8 @@ except ImportError:
   TaskUpdatedMessage = None
 
 # The SDK's generic task ledger admits only finite delegated-agent work. Mirror
-# that exact private constant here. A finite Monitor is tracked separately from
-# its explicit tool call; arbitrary background shells and persistent monitors
-# remain excluded because they may never emit a terminal frame.
+# that exact private constant here. Arbitrary background shells are excluded
+# because they may never emit a terminal frame.
 try:
   from claude_agent_sdk._internal.query import DEFERRING_TASK_TYPES
 except ImportError:
@@ -77,24 +76,17 @@ class NativeContinuationTracker:
   message after completion proves the parent already reacted and closes the
   provisional deferral.
 
-  Monitor is admitted only when its tool call is finite. Ordinary background
-  shells and persistent monitors can run forever, so they never own turn
+  Ordinary background shells can run forever, so they never own turn
   completion here.
   """
 
   _active_tasks: set[str] = field(default_factory=set)
   _tasks_seen_at_result: set[str] = field(default_factory=set)
-  _pending_monitors: set[str] = field(default_factory=set)
-  _monitors_seen_at_result: set[str] = field(default_factory=set)
   _settled_before_result: bool = False
 
   @property
   def pending_count(self) -> int:
-    return (
-      len(self._active_tasks)
-      + len(self._pending_monitors)
-      + int(self._settled_before_result)
-    )
+    return len(self._active_tasks) + int(self._settled_before_result)
 
   def task_started(
     self,
@@ -106,14 +98,6 @@ class NativeContinuationTracker:
       return
     if task_type in DEFERRING_TASK_TYPES:
       self._active_tasks.add(task_id)
-      return
-    if task_type != "local_bash" or tool_use_id not in self._pending_monitors:
-      return
-    self._pending_monitors.discard(tool_use_id)
-    self._active_tasks.add(task_id)
-    if tool_use_id in self._monitors_seen_at_result:
-      self._tasks_seen_at_result.add(task_id)
-    self._monitors_seen_at_result.discard(tool_use_id)
 
   def task_finished(self, task_id: str | None) -> None:
     if not task_id or task_id not in self._active_tasks:
@@ -122,18 +106,6 @@ class NativeContinuationTracker:
     if task_id not in self._tasks_seen_at_result:
       self._settled_before_result = True
     self._tasks_seen_at_result.discard(task_id)
-
-  def monitor_started(self, tool_use_id: str, tool_input: Any) -> None:
-    if (
-      tool_use_id
-      and isinstance(tool_input, dict)
-      and tool_input.get("persistent") is not True
-    ):
-      self._pending_monitors.add(tool_use_id)
-
-  def monitor_failed(self, tool_use_id: str) -> None:
-    self._pending_monitors.discard(tool_use_id)
-    self._monitors_seen_at_result.discard(tool_use_id)
 
   def root_continuation_observed(self) -> None:
     """Mark a pre-result completion as already consumed by its parent.
@@ -147,9 +119,8 @@ class NativeContinuationTracker:
 
   def observe_result(self) -> bool:
     """Record one result; return whether it is not yet the run boundary."""
-    if self._active_tasks or self._pending_monitors:
+    if self._active_tasks:
       self._tasks_seen_at_result.update(self._active_tasks)
-      self._monitors_seen_at_result.update(self._pending_monitors)
       # This result also covers any task that settled just before it. Other
       # active work already keeps the connection open for the same follow-up.
       self._settled_before_result = False
@@ -347,9 +318,9 @@ def dispatch_sdk_message(
   type the caller updates ``current_session_id`` from the first
   return value and keeps reading.
 
-  When ``native_work`` is passed, the same branches that classify task and
-  Monitor messages also maintain the provider-native continuation boundary.
-  The runner can then keep the live client through Claude's parent follow-up
+  When ``native_work`` is passed, the same branches that classify native tasks
+  maintain the continuation boundary. The runner can then keep the live client
+  through Claude's parent follow-up
   without treating an unrelated long-running shell as turn-owned work.
 
   ``usage_state`` carries the latest root AssistantMessage usage to the
@@ -547,8 +518,6 @@ def dispatch_sdk_message(
           "input": "",
           "tool_use_id": block.id,
         })
-        if native_work is not None and block.name == "Monitor":
-          native_work.monitor_started(block.id, block.input)
         summary = summarize_tool_input(block.name, block.input)
         edit_preview = claude_edit_preview(block.name, block.input)
         if summary or edit_preview:
@@ -654,8 +623,6 @@ def dispatch_sdk_message(
     for block in content:
       if isinstance(block, ToolResultBlock):
         output = _format_tool_output(block.content)
-        if native_work is not None and block.is_error:
-          native_work.monitor_failed(block.tool_use_id)
         # Carry the tool_use_id (matches the ToolUseBlock's .id) so the sink can
         # key a stash of the full output and the block can fetch it by id.
         bc.publish({

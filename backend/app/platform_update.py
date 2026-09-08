@@ -247,6 +247,8 @@ class PlatformStatus(TypedDict):
   # backlog is reviewed once and resolved once, instead of one resolve per
   # release. Fetch-free like the rest of status: reflects the last fetch.
   newer_updates_available: bool
+  rollback_target_sha: str | None
+  rollback_error: str | None
 
 
 class PlatformApplyResult(TypedDict):
@@ -261,6 +263,21 @@ class PlatformApplyResult(TypedDict):
   chat_id: str | None
   phase: str
   reconciliation: dict[str, list[str]]
+  error: str | None
+
+
+class PlatformReviewedRebuild(TypedDict):
+  """Validated exact target for a reviewed Railway image cutover."""
+
+  target_sha: str
+  image_digest: str
+  local_base_sha: str
+  activation: PlatformActivationImpact
+  blockers: list[str]
+  # Packages installed live in this container that the running image does not
+  # carry (``pip``/``apt`` entries as ``name==version`` / ``name=version``).
+  # A replacement drops them; the owner decides whether that matters.
+  live_installs: dict[str, list[str]]
 
 
 class _ActivationMarker(TypedDict):
@@ -323,6 +340,10 @@ class PlatformUpdatePreview(TypedDict):
   # and rejects a changed local tip or substituted target instead of silently
   # installing bytes other than the ones represented by this preview.
   plan_id: str | None
+  # Present for a Railway image-owned release. The review binds both the
+  # source revision and the immutable GHCR manifest, so a moving `main` tag can
+  # never substitute different bytes after the owner reviews the diff.
+  image_digest: str | None
   activation: PlatformActivationImpact
   total_commits: int
   commits_truncated: bool
@@ -428,9 +449,18 @@ def _set_update_progress(
     )
 
 
-def _update_plan_id(current_sha: str, target_sha: str) -> str:
+def _update_plan_id(
+  current_sha: str,
+  target_sha: str,
+  image_digest: str | None = None,
+) -> str:
   """Deterministic identity for the exact local tip + reviewed release pair."""
-  material = f"mobius-platform-update-v1\0{current_sha}\0{target_sha}".encode()
+  if image_digest:
+    material = (
+      f"mobius-platform-update-v2\0{current_sha}\0{target_sha}\0{image_digest}"
+    ).encode()
+  else:
+    material = f"mobius-platform-update-v1\0{current_sha}\0{target_sha}".encode()
   return hashlib.sha256(material).hexdigest()
 
 
@@ -440,13 +470,16 @@ def _validate_update_plan(
   plan_id: str,
   current_sha: str,
   target_sha: str,
+  image_digest: str | None = None,
 ) -> None:
   """Reject a stale or substituted preview before reconcile mutates the tree."""
   if not re.fullmatch(r"[0-9a-f]{40,64}", current_sha or ""):
     raise PlatformUpdateError("update_plan_invalid")
   if not re.fullmatch(r"[0-9a-f]{40,64}", target_sha or ""):
     raise PlatformUpdateError("update_plan_invalid")
-  if plan_id != _update_plan_id(current_sha, target_sha):
+  if image_digest is not None and not re.fullmatch(r"sha256:[0-9a-f]{64}", image_digest):
+    raise PlatformUpdateError("update_plan_invalid")
+  if plan_id != _update_plan_id(current_sha, target_sha, image_digest):
     raise PlatformUpdateError("update_plan_invalid")
 
   local = _local_branch(repo)
@@ -970,6 +1003,7 @@ def container_replacement_blockers(
   repo: Path = PLATFORM_REPO,
   *,
   preserve_active_runtime: bool = False,
+  local_change_base: str | None = None,
 ) -> list[str]:
   """Return local image/runtime changes absent from the official target.
 
@@ -1011,8 +1045,13 @@ def container_replacement_blockers(
     else:
       pending.extend(runtime_provenance.activation_paths(runtime))
     if head:
+      # A reviewed target may be ahead of the applied tree. Diffing target to
+      # head would mislabel the incoming official Dockerfile/runtime changes as
+      # local drift. The reviewed path supplies the proven merge base so only
+      # the local side is considered; ordinary rebuilds keep expected..head.
+      drift_base = local_change_base or expected_sha
       drift = _git(
-        "diff", "--name-only", "--no-renames", expected_sha, head,
+        "diff", "--name-only", "--no-renames", drift_base, head,
         repo=repo, check=False,
       )
       if drift.returncode == 0:
@@ -1036,14 +1075,102 @@ def container_replacement_blockers(
       image_pending.append(path)
 
   # Actual content parity with the target is authoritative whenever both
-  # revisions are known; a marker's recorded coverage must not excuse a path
-  # that drifted after the marker was written.  Without a verifiable head the
-  # marker's own upstream coverage remains the fallback.
+  # revisions are known. A newer official image may legitimately advance a
+  # marker-covered path, though, so preserve that coverage when the current
+  # local bytes still match the marker's official upstream and the replacement
+  # target descends from it. This distinguishes incoming official changes from
+  # real local drift without letting stale marker coverage excuse either an
+  # unrelated release or unverifiable runtime bytes.
   if expected_sha and head:
-    covered = set(_paths_matching_upstream(
+    exact_target_coverage = set(_paths_matching_upstream(
       repo, head, expected_sha, image_pending,
-    )) - unverifiable
+    ))
+    marker_upstream = marker["upstream_sha"] if marker else None
+    carried_marker_coverage: set[str] = set()
+    if marker_upstream and _is_ancestor(repo, marker_upstream, expected_sha):
+      carried_marker_coverage.update(_paths_matching_upstream(
+        repo,
+        head,
+        marker_upstream,
+        [path for path in image_pending if path in covered],
+      ))
+    covered = (
+      exact_target_coverage | carried_marker_coverage
+    ) - unverifiable
   return sorted(path for path in image_pending if path not in covered)
+
+
+def reviewed_container_rebuild_plan(
+  *,
+  plan_id: str,
+  current_sha: str,
+  target_sha: str,
+  image_digest: str,
+  repo: Path = PLATFORM_REPO,
+) -> PlatformReviewedRebuild:
+  """Validate an immutable image review without mutating the served checkout."""
+  with _reconcile_flock():
+    _validate_update_plan(
+      repo,
+      plan_id=plan_id,
+      current_sha=current_sha,
+      target_sha=target_sha,
+      image_digest=image_digest,
+    )
+    base = _git(
+      "merge-base", current_sha, target_sha, repo=repo, check=False,
+    ).stdout.strip() or current_sha
+    paths = _activation_paths_between(repo, base, target_sha)
+    activation = platform_activation.classify_activation(paths)
+    blockers = container_replacement_blockers(
+      target_sha,
+      repo,
+      preserve_active_runtime=True,
+      local_change_base=base,
+    )
+    return PlatformReviewedRebuild(
+      target_sha=target_sha,
+      image_digest=image_digest,
+      local_base_sha=base,
+      activation=activation,
+      blockers=blockers,
+      live_installs=live_install_drift(),
+    )
+
+
+def official_image_rebuild_blockers(
+  target_sha: str,
+  repo: Path = PLATFORM_REPO,
+) -> list[str]:
+  """Fetch and compare local image drift against one GHCR release revision.
+
+  GHCR is authoritative for what can be deployed, while Git supplies the trees
+  needed to prove local edits will not be lost. A newly published image may be
+  ahead of this checkout's last fetch, so refresh the canonical ref before
+  computing the local side from the merge base.
+  """
+  if not re.fullmatch(r"[0-9a-f]{40}", target_sha or ""):
+    raise PlatformUpdateError("image_release_invalid")
+  with _reconcile_flock():
+    if _rev(repo, target_sha) != target_sha:
+      if not _has_origin(repo) or not _fetch(
+        repo, refspec=OWNER_UPDATE_FETCH_REFSPEC,
+      ):
+        raise PlatformUpdateError("image_release_source_unavailable")
+    if _rev(repo, target_sha) != target_sha:
+      raise PlatformUpdateError("image_release_source_unavailable")
+    current = _rev(repo, _local_branch(repo))
+    base = _git(
+      "merge-base", current, target_sha, repo=repo, check=False,
+    ).stdout.strip()
+    if not current or not base:
+      raise PlatformUpdateError("image_release_source_unavailable")
+    return container_replacement_blockers(
+      target_sha,
+      repo,
+      preserve_active_runtime=True,
+      local_change_base=base,
+    )
 
 
 def _write_activation_marker(
@@ -1162,7 +1289,95 @@ def _pending_activation_paths(repo: Path = PLATFORM_REPO) -> list[str]:
     except Exception:
       head = None
     paths.extend(_activation_paths_between(repo, served, head))
+  paths.extend(image_input_drift(repo) or [])
   return sorted({str(path) for path in paths if str(path)})
+
+
+def _build_info() -> dict:
+  path = Path(os.environ.get("MOBIUS_BUILD_INFO_PATH", "/app/build-info.json"))
+  try:
+    data = json.loads(path.read_text(encoding="utf-8"))
+  except Exception:
+    return {}
+  return data if isinstance(data, dict) else {}
+
+
+def image_input_drift(repo: Path = PLATFORM_REPO) -> list[str] | None:
+  """Image inputs whose served source no longer matches the running image.
+
+  The image records the hash of every input it was built from
+  (``build-info.json`` ``image_inputs``). Comparing those with the same paths
+  in the served checkout says, from state alone, whether this container still
+  matches its source — no marker to remember, no ancestry to prove. The
+  classifier then turns each differing path into its activation level
+  (Python requirements install in place; anything else needs a new image).
+  Returns None when the running image predates the record.
+  """
+  baked = _build_info().get("image_inputs")
+  if not isinstance(baked, dict) or not baked:
+    return None
+  try:
+    current = platform_activation.image_input_hashes(repo)
+  except OSError:
+    return None
+  return sorted(
+    path for path in set(baked) | set(current)
+    if baked.get(path) != current.get(path)
+  )
+
+
+def _inventory_drift(
+  baked_path: Path, current: list[str],
+) -> list[str] | None:
+  try:
+    baked = set(
+      line.strip() for line in baked_path.read_text(encoding="utf-8").splitlines()
+    )
+  except OSError:
+    return None
+  return sorted(
+    line.strip() for line in current
+    if line.strip() and line.strip() not in baked
+  )
+
+
+def live_install_drift(
+  inventory_dir: Path | None = None,
+  *,
+  run: Callable[..., subprocess.CompletedProcess] = subprocess.run,
+) -> dict[str, list[str]]:
+  """Packages present in this container that its image did not install.
+
+  Agents may ``pip``/``apt`` install into the running container; that is the
+  cheap, restart-free path and it survives a process restart, but a container
+  replacement rebuilds from the image and silently drops it. The image bakes
+  its own ``pip freeze`` and ``dpkg-query`` inventories; anything the current
+  container has beyond them is what a replacement would lose. An image
+  without inventories reports nothing rather than guessing.
+  """
+  root = inventory_dir or Path(
+    os.environ.get("MOBIUS_IMAGE_INVENTORY_DIR", "/app/image-inventory"),
+  )
+  commands = {
+    "pip": [sys.executable or "python3", "-m", "pip", "freeze",
+            "--disable-pip-version-check"],
+    "apt": ["dpkg-query", "-W", "-f", "${Package}=${Version}\n"],
+  }
+  drift: dict[str, list[str]] = {}
+  for kind, command in commands.items():
+    baked_path = root / f"{kind}.txt"
+    if not baked_path.is_file():
+      continue
+    try:
+      proc = run(command, capture_output=True, text=True, timeout=60, check=False)
+    except (OSError, subprocess.SubprocessError):
+      continue
+    if proc.returncode != 0:
+      continue
+    extras = _inventory_drift(baked_path, proc.stdout.splitlines())
+    if extras:
+      drift[kind] = extras
+  return drift
 
 
 def _platform_activation_impact(
@@ -1290,6 +1505,44 @@ def _sync_python_dependencies(repo: Path) -> tuple[bool, str]:
     return False, repr(exc)[-500:]
   if proc.returncode != 0:
     detail = (proc.stderr or proc.stdout or "pip install failed").strip()
+    return False, detail[-500:]
+  return True, ""
+
+
+def _frontend_deps_changed(
+  repo: Path, before: str | None, after: str | None
+) -> bool:
+  """Whether the locked frontend dependency inputs changed between two commits."""
+  return any(
+    path in ("frontend/package.json", "frontend/package-lock.json")
+    for path in (_changed_paths(repo, before, after) or [])
+  )
+
+
+def _sync_frontend_dependencies(repo: Path) -> tuple[bool, str]:
+  """Install the locked frontend deps in place — the SAME command the image build
+  runs (``npm ci --ignore-scripts``) — so an owner Apply lands a frontend
+  dependency bump and rebuilds the shell without a container rebuild. This is the
+  frontend twin of :func:`_sync_python_dependencies`; the caller runs it just
+  before the frontend rebuild so the build sees the new ``node_modules``.
+
+  Returns ``(ok, error_tail)`` and never raises for an operational failure.
+  """
+  frontend = repo / "frontend"
+  if not (frontend / "package-lock.json").is_file():
+    return True, ""
+  try:
+    proc = subprocess.run(
+      ["npm", "ci", "--ignore-scripts"],
+      cwd=str(frontend),
+      capture_output=True,
+      text=True,
+      timeout=_DEP_SYNC_TIMEOUT,
+    )
+  except (subprocess.TimeoutExpired, OSError) as exc:
+    return False, repr(exc)[-500:]
+  if proc.returncode != 0:
+    detail = (proc.stderr or proc.stdout or "npm ci failed").strip()
     return False, detail[-500:]
   return True, ""
 
@@ -1784,6 +2037,7 @@ def _reconcile_under_lock(
   target_ref: str = DEFAULT_TARGET_REF,
   plan_id: str | None = None,
   current_sha: str | None = None,
+  image_digest: str | None = None,
   progress: Callable[[PlatformUpdatePhase], None] | None = None,
   prepare_frontend: bool = False,
 ) -> ReconcileResult:
@@ -1804,6 +2058,7 @@ def _reconcile_under_lock(
         plan_id=plan_id,
         current_sha=current_sha,
         target_sha=target_ref,
+        image_digest=image_digest,
       )
     previous_upstream_sha = _rev(repo, UPSTREAM_BRANCH) or None
     reconcile_kwargs = {
@@ -1824,6 +2079,14 @@ def _reconcile_under_lock(
       if progress:
         progress(PlatformUpdatePhase.BUILDING)
       try:
+        # Install the newly locked frontend deps in place before the build, the
+        # same way an owner Apply syncs Python deps — so a frontend dependency
+        # bump lands live and no longer forces a container rebuild. The build
+        # below would otherwise compile against stale node_modules.
+        if _frontend_deps_changed(repo, result.pre_sha, result.new_sha):
+          deps_ok, deps_err = _sync_frontend_dependencies(repo)
+          if not deps_ok:
+            raise RuntimeError(f"frontend dependency install failed: {deps_err}")
         _rebuild_frontend_after_update_if_needed(repo, result)
       except Exception as exc:
         log.warning(
@@ -1936,16 +2199,24 @@ def boot_guard_sync() -> str:
     return boot_guard_clean_served_tree(PLATFORM_REPO)
 
 
-def platform_status(repo: Path = PLATFORM_REPO) -> PlatformStatus:
+def platform_status(
+  repo: Path = PLATFORM_REPO,
+  *,
+  target_sha: str | None = None,
+) -> PlatformStatus:
   """Compute update availability on demand (no daemon, no polling, no fetch).
 
-  Availability is an EXACT ancestry check against ``origin/main``. Conflict and
-  rolled-back states take precedence over a bare "available".
+  Availability is an EXACT ancestry check against the selected release. Generic
+  self-hosted callers use ``origin/main``; managed deployments pass the exact
+  GHCR release SHA so Settings never advertises a Git commit that has no
+  deployable image. Conflict and rolled-back states take precedence over a bare
+  "available".
   """
   image_sha = current_build_sha()
   upstream_sha = recorded_upstream_sha(repo)
   conflict = CONFLICT_FLAG.exists() or _reconcile_in_progress(repo)
   rolled_back = ROLLED_BACK_FLAG.exists()
+  rollback = _read_rolled_back_flag() if rolled_back else None
   activation = _platform_activation_impact(repo)
   activation_state = _state_for_activation(activation)
   restart_needed = activation["level"] in {
@@ -1953,7 +2224,7 @@ def platform_status(repo: Path = PLATFORM_REPO) -> PlatformStatus:
     platform_activation.ActivationLevel.DEPENDENCY_SYNC.value,
   }
   local = _local_branch(repo)
-  target = _rev(repo, DEFAULT_TARGET_REF)
+  target = _rev(repo, target_sha or DEFAULT_TARGET_REF)
   target_contained = bool(target) and _is_ancestor(repo, target, local)
   contained_upstream_sha = target if target_contained else upstream_sha
   contained_upstream_committed_at = _commit_timestamp(
@@ -1983,9 +2254,14 @@ def platform_status(repo: Path = PLATFORM_REPO) -> PlatformStatus:
       seed_required=False,
       conflict_paths=paths, conflict_chat_id=flag.get("chat_id"),
       newer_updates_available=newer_available,
+      rollback_target_sha=None, rollback_error=None,
     )
 
-  available = bool(target) and not target_contained
+  # A freshly published GHCR revision may not yet be in this clone's object
+  # store. Its immutable SHA is still authoritative evidence that a different
+  # release exists; the preview/check path fetches and proves the source object
+  # before it creates an actionable plan.
+  available = bool(target_sha or target) and not target_contained
 
   if rolled_back:
     # An update is available but its last apply failed the import probe.
@@ -2007,10 +2283,16 @@ def platform_status(repo: Path = PLATFORM_REPO) -> PlatformStatus:
     upstream_checked_at=upstream_checked_at,
     seed_required=False, conflict_paths=[], conflict_chat_id=None,
     newer_updates_available=False,
+    rollback_target_sha=(rollback or {}).get("target"),
+    rollback_error=(rollback or {}).get("error"),
   )
 
 
-def check_for_updates(repo: Path = PLATFORM_REPO) -> PlatformStatus:
+def check_for_updates(
+  repo: Path = PLATFORM_REPO,
+  *,
+  target_sha: str | None = None,
+) -> PlatformStatus:
   """Owner-triggered "Check for updates": fetch origin, THEN report availability.
 
   :func:`platform_status` is deliberately fetch-free — it reads
@@ -2032,15 +2314,18 @@ def check_for_updates(repo: Path = PLATFORM_REPO) -> PlatformStatus:
     # have a configured refspec that cannot advance origin/main.
     if not _fetch(repo, refspec=OWNER_UPDATE_FETCH_REFSPEC):
       raise PlatformUpdateError("platform_fetch_failed")
+    if target_sha and _rev(repo, target_sha) != target_sha:
+      raise PlatformUpdateError("image_release_source_unavailable")
     target = _rev(repo, DEFAULT_TARGET_REF)
     local = _local_branch(repo)
     if target and _is_ancestor(repo, target, local):
       _set_upstream(repo, target)
-  return platform_status(repo)
+  return platform_status(repo, target_sha=target_sha)
 
 
 def empty_platform_update_preview(
   *, current_sha: str | None = None, target_sha: str | None = None,
+  image_digest: str | None = None,
 ) -> PlatformUpdatePreview:
   """A preview carrying no incoming changes — the up-to-date / unreadable case.
   The review sheet reads ``available``/``files`` and shows "nothing to review"
@@ -2048,6 +2333,7 @@ def empty_platform_update_preview(
   return PlatformUpdatePreview(
     state=PlatformUpdateState.UP_TO_DATE.value, available=False,
     current_sha=current_sha, target_sha=target_sha, plan_id=None,
+    image_digest=image_digest,
     activation=platform_activation.classify_activation([]),
     total_commits=0, commits_truncated=False,
     commits=[], files=[], diff=None, diff_truncated=False, conflict_paths=[],
@@ -2142,38 +2428,69 @@ def _preview_diff(repo: Path, base: str, target: str) -> tuple[str | None, bool]
   return (text or None), False
 
 
-def platform_update_preview(repo: Path = PLATFORM_REPO) -> PlatformUpdatePreview:
+def platform_update_preview(
+  repo: Path = PLATFORM_REPO,
+  *,
+  target_sha: str | None = None,
+  image_digest: str | None = None,
+) -> PlatformUpdatePreview:
   """Read-only preview of the incoming platform update, for the Settings review
-  step before Apply (fetch-free, never mutates the tree).
+  step before Apply. Generic previews remain fetch-free. When a managed
+  deployment supplies an exact GHCR target, this function may refresh the
+  canonical remote ref solely to obtain and verify that immutable source tree;
+  it never mutates the served branch or working tree.
 
   Shows the upstream-side changes ``origin/main`` brings since the shared merge
   base — local edits are excluded, so the owner reviews exactly what a clean Apply
   would pull. Availability is the same ancestry check :func:`platform_status`
-  uses; an up-to-date instance returns an empty preview. Degrades to an empty
-  preview (never raises) when the clone or ancestry can't be read, so it can never
-  break Settings."""
+  uses; an up-to-date instance returns an empty preview. Generic self-hosted
+  reads degrade to an empty preview when the clone or ancestry cannot be read.
+  An explicit managed-image target instead fails closed when its source tree
+  cannot be verified, so "unavailable" can never masquerade as "up to date."""
   # A missing/non-clone tree has no source snapshot to protect. Return before
   # touching the durable /data lock so read-only diagnostics and recovery
   # surfaces still degrade cleanly when DATA_DIR itself is unavailable.
   # Actual clones take the lock below; the unlocked builder repeats this check
   # after acquisition, which closes a removal/reseed race.
   if not (repo / ".git").exists():
+    if target_sha:
+      raise PlatformUpdateError("image_release_source_unavailable")
     return empty_platform_update_preview()
   with _reconcile_flock():
-    return _platform_update_preview_unlocked(repo)
+    return _platform_update_preview_unlocked(
+      repo,
+      target_sha=target_sha,
+      image_digest=image_digest,
+    )
 
 
-def _platform_update_preview_unlocked(repo: Path) -> PlatformUpdatePreview:
+def _platform_update_preview_unlocked(
+  repo: Path,
+  *,
+  target_sha: str | None = None,
+  image_digest: str | None = None,
+) -> PlatformUpdatePreview:
   """Build one preview while the reconcile lock holds its source snapshot."""
   if not (repo / ".git").exists() or not _has_origin(repo):
+    if target_sha:
+      raise PlatformUpdateError("image_release_source_unavailable")
     return empty_platform_update_preview()
+  if target_sha:
+    if not re.fullmatch(r"[0-9a-f]{40}", target_sha):
+      raise PlatformUpdateError("image_release_invalid")
+    if _rev(repo, target_sha) != target_sha:
+      if not _fetch(repo, refspec=OWNER_UPDATE_FETCH_REFSPEC):
+        raise PlatformUpdateError("image_release_source_unavailable")
+    if _rev(repo, target_sha) != target_sha:
+      raise PlatformUpdateError("image_release_source_unavailable")
   local = _local_branch(repo)
   local_sha = _rev(repo, local) or None
-  target = _rev(repo, DEFAULT_TARGET_REF) or None
+  target = _rev(repo, target_sha or DEFAULT_TARGET_REF) or None
   available = bool(target) and not _is_ancestor(repo, target, local)
   if not target or not available:
     return empty_platform_update_preview(
       current_sha=local_sha, target_sha=target,
+      image_digest=image_digest,
     )
   base = _git(
     "merge-base", local, target, repo=repo, check=False,
@@ -2184,7 +2501,10 @@ def _platform_update_preview_unlocked(repo: Path) -> PlatformUpdatePreview:
     return PlatformUpdatePreview(
       state=PlatformUpdateState.AVAILABLE.value, available=True,
       current_sha=local_sha, target_sha=target,
-      plan_id=_update_plan_id(local_sha, target) if local_sha else None,
+      plan_id=(
+        _update_plan_id(local_sha, target, image_digest) if local_sha else None
+      ),
+      image_digest=image_digest,
       activation=platform_activation.classify_activation(["backend/app"]),
       total_commits=0, commits_truncated=False, commits=[], files=[],
       diff=None, diff_truncated=False, conflict_paths=[],
@@ -2197,7 +2517,10 @@ def _platform_update_preview_unlocked(repo: Path) -> PlatformUpdatePreview:
   return PlatformUpdatePreview(
     state=PlatformUpdateState.AVAILABLE.value, available=True,
     current_sha=local_sha, target_sha=target,
-    plan_id=_update_plan_id(local_sha, target) if local_sha else None,
+    plan_id=(
+      _update_plan_id(local_sha, target, image_digest) if local_sha else None
+    ),
+    image_digest=image_digest,
     activation=platform_activation.classify_activation(activation_paths),
     total_commits=total_commits,
     commits_truncated=total_commits > len(commits),
@@ -2214,6 +2537,7 @@ async def apply_platform_update(
   plan_id: str,
   current_sha: str,
   target_sha: str,
+  image_digest: str | None = None,
   repo: Path = PLATFORM_REPO,
 ) -> PlatformApplyResult:
   """Owner-triggered reconcile with an explicit activation remainder.
@@ -2248,6 +2572,7 @@ async def apply_platform_update(
         target_ref=target_sha,
         plan_id=plan_id,
         current_sha=current_sha,
+        image_digest=image_digest,
         progress=publish_progress,
         prepare_frontend=True,
       )
@@ -2340,6 +2665,7 @@ async def apply_platform_update(
         chat_id=chat_id,
         phase=final_phase.value,
         reconciliation=res.reconciliation.as_dict(),
+        error=res.error if state is PlatformUpdateState.ROLLED_BACK else None,
       )
     except Exception as exc:
       _set_update_progress(

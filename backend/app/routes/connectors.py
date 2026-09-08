@@ -24,6 +24,7 @@ from app import models
 from app.database import get_db
 from app.deps import (
   get_owner_or_app_with_connections_manage,
+  require_nondelegated_owner_or_app_control,
   reject_cross_site,
 )
 from app.timeutil import now_naive_utc
@@ -547,7 +548,11 @@ async def list_connectors(
   }
 
 
-@router.post("", status_code=201)
+@router.post(
+  "",
+  status_code=201,
+  dependencies=[Depends(require_nondelegated_owner_or_app_control)],
+)
 async def add_connector(
   body: ConnectorCreate,
   _owner: models.Owner = Depends(get_owner_or_app_with_connections_manage),
@@ -651,7 +656,10 @@ async def add_connector(
   return _public(row, _oauth_row(db, row.id))
 
 
-@router.patch("/{connector_id}")
+@router.patch(
+  "/{connector_id}",
+  dependencies=[Depends(require_nondelegated_owner_or_app_control)],
+)
 async def patch_connector(
   connector_id: int,
   body: ConnectorPatch,
@@ -962,7 +970,10 @@ async def refresh_connector(
   return _public(row)
 
 
-@router.delete("/{connector_id}")
+@router.delete(
+  "/{connector_id}",
+  dependencies=[Depends(require_nondelegated_owner_or_app_control)],
+)
 async def delete_connector(
   connector_id: int,
   generation: str = Depends(_require_generation),
@@ -1004,7 +1015,10 @@ async def oauth_client_metadata():
   return connector_oauth.client_metadata_document()
 
 
-@router.post("/{connector_id}/oauth/start")
+@router.post(
+  "/{connector_id}/oauth/start",
+  dependencies=[Depends(require_nondelegated_owner_or_app_control)],
+)
 async def oauth_start(
   connector_id: int,
   generation: str = Depends(_require_generation),
@@ -1114,7 +1128,10 @@ async def _resolve_gcloud_project(
   return chosen, projects
 
 
-@router.post("/{connector_id}/oauth/gcloud/start")
+@router.post(
+  "/{connector_id}/oauth/gcloud/start",
+  dependencies=[Depends(require_nondelegated_owner_or_app_control)],
+)
 async def oauth_gcloud_start(
   connector_id: int,
   generation: str = Depends(_require_generation),
@@ -1152,7 +1169,10 @@ class GcloudCompleteBody(BaseModel):
   project_id: str = Field(default="", max_length=256)
 
 
-@router.post("/{connector_id}/oauth/gcloud/complete")
+@router.post(
+  "/{connector_id}/oauth/gcloud/complete",
+  dependencies=[Depends(require_nondelegated_owner_or_app_control)],
+)
 async def oauth_gcloud_complete(
   connector_id: int,
   body: GcloudCompleteBody,
@@ -1290,7 +1310,10 @@ class GcloudProjectBody(BaseModel):
   project_id: str = Field(min_length=1, max_length=256)
 
 
-@router.post("/{connector_id}/oauth/gcloud/project")
+@router.post(
+  "/{connector_id}/oauth/gcloud/project",
+  dependencies=[Depends(require_nondelegated_owner_or_app_control)],
+)
 async def oauth_gcloud_set_project(
   connector_id: int,
   body: GcloudProjectBody,
@@ -1419,7 +1442,10 @@ class GcloudReuseBody(BaseModel):
   project_id: str = Field(default="", max_length=256)
 
 
-@router.post("/{connector_id}/oauth/gcloud/reuse")
+@router.post(
+  "/{connector_id}/oauth/gcloud/reuse",
+  dependencies=[Depends(require_nondelegated_owner_or_app_control)],
+)
 async def oauth_gcloud_reuse(
   connector_id: int,
   body: GcloudReuseBody,
@@ -1598,7 +1624,10 @@ class OAuthClientBody(BaseModel):
   client_secret: object = ""
 
 
-@router.post("/{connector_id}/oauth/client")
+@router.post(
+  "/{connector_id}/oauth/client",
+  dependencies=[Depends(require_nondelegated_owner_or_app_control)],
+)
 async def oauth_set_client(
   connector_id: int,
   body: OAuthClientBody,
@@ -1649,7 +1678,10 @@ async def oauth_set_client(
   return _public(_get_row(db, connector_id, generation), _oauth_row(db, connector_id))
 
 
-@router.delete("/{connector_id}/oauth/client")
+@router.delete(
+  "/{connector_id}/oauth/client",
+  dependencies=[Depends(require_nondelegated_owner_or_app_control)],
+)
 async def oauth_clear_client(
   connector_id: int,
   generation: str = Depends(_require_generation),
@@ -1755,7 +1787,10 @@ async def oauth_callback(
   return _oauth_result_page(ok=True)
 
 
-@router.post("/{connector_id}/oauth/disconnect")
+@router.post(
+  "/{connector_id}/oauth/disconnect",
+  dependencies=[Depends(require_nondelegated_owner_or_app_control)],
+)
 async def oauth_disconnect(
   connector_id: int,
   generation: str = Depends(_require_generation),

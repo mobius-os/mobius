@@ -72,6 +72,7 @@ EventType = Literal[
   "task_progress",
   "task_done",
   "question",
+  "answers_applied",
   "secure_input_request",
   "secure_input_filled",
   "secure_input_consuming",
@@ -502,6 +503,12 @@ def _process_question_event(event: dict, assistant_blocks: list) -> bool:
     questions = event.get("questions", [])
     question_id = event.get("question_id")
     new_block = {"type": "question", "questions": questions}
+    # Answer delivery is fixed when the card is created, not by later partial
+    # updates. Continuation cards have no provider future to keep alive.
+    if event.get("response_mode") == "continuation":
+      new_block["response_mode"] = "continuation"
+      if isinstance(event.get("secure_input"), dict):
+        new_block["secure_input"] = copy.deepcopy(event["secure_input"])
     if question_id:
       new_block["question_id"] = question_id
     key = question_block_key(new_block)
@@ -725,6 +732,8 @@ def _process_tool_event(event: dict, assistant_blocks: list) -> bool:
       block["tool_use_id"] = tool_use_id
     if isinstance(event.get("recall"), dict):
       block["recall"] = event["recall"]
+    if isinstance(event.get("peer_message"), dict):
+      block["peer_message"] = event["peer_message"]
     if isinstance(event.get("edit_preview"), dict):
       block["edit_preview"] = event["edit_preview"]
     assistant_blocks.append(block)
@@ -742,6 +751,8 @@ def _process_tool_event(event: dict, assistant_blocks: list) -> bool:
       # that authorizes the later output phase to cite notes.
       if isinstance(event.get("recall"), dict):
         blk["recall"] = event["recall"]
+      if isinstance(event.get("peer_message"), dict):
+        blk["peer_message"] = event["peer_message"]
       if isinstance(event.get("edit_preview"), dict):
         blk["edit_preview"] = event["edit_preview"]
 
@@ -790,6 +801,10 @@ def _process_tool_event(event: dict, assistant_blocks: list) -> bool:
       # carving the sink performed before parsing.
       if isinstance(event.get("recall"), dict):
         blk["recall"] = event["recall"]
+      # Settle a peer-network exchange from "sending"/"reading" to what was
+      # actually said/received (see chat_event_sink._stamp_peer_message).
+      if isinstance(event.get("peer_message"), dict):
+        blk["peer_message"] = event["peer_message"]
       return True
     return False
 
@@ -881,6 +896,14 @@ def process_event(event: dict, assistant_blocks: list) -> bool:
   blocks changed and a DB save may be warranted.
   """
   event_type = event.get("type")
+
+  if event_type == "answers_applied":
+    for block in assistant_blocks:
+      if (block.get("type") == "question"
+          and block.get("question_id") == event.get("question_id")):
+        block["answers"] = event["answers"]
+        return True
+    return False
 
   # Only a NEW visible content block ends a thinking run. Closing on transparent
   # bookkeeping events (unknown_sdk_event/ping/signature_delta, usage, done, …)

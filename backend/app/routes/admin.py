@@ -3,9 +3,9 @@
 This module exposes activity-log read endpoints for introspective
 mini-apps (the curated `app-reflection` cron agent in particular),
 plus state-changing admin POST routes for emitting activity, signing
-out everywhere, and restarting the worker. Keep them all behind
-`get_current_owner`, which rejects app-scoped JWTs so a compromised
-mini-app can't pivot to owner-only admin surfaces.
+out everywhere, and restarting the worker. Read/telemetry surfaces stay behind
+`get_current_owner`; owner-confirmed lifecycle operations additionally reject
+delegated execution bearers so a child cannot stop or replace the host.
 
 The service-token at /data/service-token.txt is a 90-day owner JWT
 minted at setup time, so authenticating with it passes the same
@@ -27,7 +27,10 @@ from sqlalchemy.orm import Session
 
 from app import activity, deployment_control, models
 from app.database import get_db
-from app.deps import get_current_owner, reject_cross_site
+from app.deps import (
+  get_current_owner, get_current_owner_for_lifecycle_control,
+  reject_cross_site,
+)
 from app.restart_util import prepare_container_cutover, restart_this_worker
 
 # Event names the admin emit endpoint will accept. This is intentionally not
@@ -193,7 +196,7 @@ def emit_activity_event(
 @router.post("/sign-out-everywhere", status_code=204)
 def sign_out_everywhere(
   _: None = Depends(reject_cross_site),
-  owner: models.Owner = Depends(get_current_owner),
+  owner: models.Owner = Depends(get_current_owner_for_lifecycle_control),
   db: Session = Depends(get_db),
 ):
   """Revokes every outstanding token for the owner in one step.
@@ -224,7 +227,7 @@ def sign_out_everywhere(
   dependencies=[Depends(reject_cross_site)],
 )
 def restart_server(
-  _: models.Owner = Depends(get_current_owner),
+  _: models.Owner = Depends(get_current_owner_for_lifecycle_control),
 ):
   """Soft restart for the normal Settings surface.
 
@@ -243,7 +246,7 @@ def restart_server(
 )
 async def prepare_external_container_cutover(
   body: ContainerCutoverPrepare,
-  _: models.Owner = Depends(get_current_owner),
+  _: models.Owner = Depends(get_current_owner_for_lifecycle_control),
 ):
   """Park exact live runs for a root-opened Host replacement.
 
@@ -291,7 +294,7 @@ async def rebuild_status(
   status_code=202,
 )
 async def rebuild_container(
-  _: models.Owner = Depends(get_current_owner),
+  _: models.Owner = Depends(get_current_owner_for_lifecycle_control),
 ):
   """Request replacement of this installation's fixed app container.
 
@@ -314,7 +317,7 @@ async def rebuild_container(
 )
 def prepare_container_replacement(
   body: ContainerReplacementPrepare,
-  _: models.Owner = Depends(get_current_owner),
+  _: models.Owner = Depends(get_current_owner_for_lifecycle_control),
 ):
   """Drain active turns before the root-owned host job cuts over.
 

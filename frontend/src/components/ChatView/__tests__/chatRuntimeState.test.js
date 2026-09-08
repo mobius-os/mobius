@@ -18,6 +18,7 @@ import {
   previewUpdatedAnnouncement,
   runtimeStreamAttachAction,
   serverSnapshotBehindLocal,
+  serverSnapshotMissingAcceptedCid,
   shouldAttachRunningStream,
   shouldAdoptRuntimeAssistantOwner,
   shouldRetireRestoredQuestionSnapshot,
@@ -114,7 +115,7 @@ test('an in-process question answer keeps ownership of the active assistant turn
   }), true)
 })
 
-test('only a recovered question answer starts a new hidden turn', () => {
+test('a recovered question answer starts a new hidden turn', () => {
   assert.equal(answerTurnDisposition({
     status: 'started',
     answer_turn: 'new',
@@ -124,6 +125,12 @@ test('only a recovered question answer starts a new hidden turn', () => {
     answer_turn: 'new',
   }), false)
   assert.equal(answerKeepsCurrentTurn(null), false)
+})
+
+test('an early approval answer preserves the current row until queue promotion', () => {
+  const response = { status: 'queued', answer_turn: 'queued' }
+  assert.equal(answerTurnDisposition(response), 'queued')
+  assert.equal(answerKeepsCurrentTurn(response), true)
 })
 
 test('answer turn ownership requires the explicit semantic field', () => {
@@ -423,6 +430,25 @@ test('a local turn refreshes completed history while preserving its optimistic s
   ])
 })
 
+test('an empty pre-publication snapshot cannot erase an accepted local turn', () => {
+  const loaded = [
+    { role: 'user', cid: 'accepted-cid', ts: 3, content: 'Accepted turn' },
+  ]
+  const refreshed = mergeRecentMessagesIntoLoadedWindow({
+    loadedMessages: loaded,
+    loadedOffset: 0,
+    recentMessages: [],
+    recentOffset: 0,
+    preserveLocalSuffix: true,
+  })
+
+  assert.deepEqual(refreshed, {
+    messages: loaded,
+    offset: 0,
+    verified: true,
+  })
+})
+
 test('stripInternalUserMessageFields KEEPS cid and drops the envelope fields', () => {
   const kept = stripInternalUserMessageFields({
     role: 'user', content: 'hi', ts: 7, cid: 'keep-me',
@@ -612,6 +638,21 @@ test('serverSnapshotBehindLocal only preserves explicit unsaved local rows', () 
     ...server,
     { role: 'user', content: 'waiting for canonical ts', ts: 6, serverTs: false },
   ]), true)
+})
+
+test('accepted fresh send remains local until the compact snapshot contains its cid', () => {
+  const oldSnapshot = [
+    { role: 'user', content: 'Earlier turn', cid: 'old-cid', ts: 1 },
+  ]
+  assert.equal(
+    serverSnapshotMissingAcceptedCid(oldSnapshot, 'accepted-cid'),
+    true,
+  )
+  assert.equal(serverSnapshotMissingAcceptedCid([
+    ...oldSnapshot,
+    { role: 'user', content: 'Accepted turn', cid: 'accepted-cid', ts: 2 },
+  ], 'accepted-cid'), false)
+  assert.equal(serverSnapshotMissingAcceptedCid(oldSnapshot, null), false)
 })
 
 test('stopRequestSucceeded requires a confirmed backend stop', () => {

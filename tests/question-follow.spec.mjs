@@ -13,7 +13,7 @@ const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
 attachCleanup()
 test.use({ serviceWorkers: 'block' })
 
-async function installQuestionStream(page, questionBlock) {
+async function installQuestionStream(page, questionBlock, { longTurn = false } = {}) {
   await page.addInitScript(({ question, prefix, suffix }) => {
     const realFetch = window.fetch.bind(window)
     window.fetch = (input, init) => {
@@ -61,21 +61,38 @@ async function installQuestionStream(page, questionBlock) {
     // Keep meaningful reserved tail beneath the card. The regression only
     // appears when an acceptance-time FOLLOW handoff can consume that blank
     // room before any continuation is visible.
-    prefix: `${'Question follow line.\n\n'.repeat(2)}READY_FOR_QUESTION`,
+    // A real agentic turn can be tens of viewport-heights inside one assistant
+    // row. The long variant also exercises the production display:contents
+    // copy wrapper that unit fixtures used to omit.
+    prefix: `${'Question follow line.\n\n'.repeat(longTurn ? 140 : 2)}READY_FOR_QUESTION`,
     suffix: `${'Continued answer line.\n\n'.repeat(24)}AFTER_QUESTION_END`,
   })
 }
 
 const questionFollowScenarios = [
   {
-    name: 'accepted same-turn answer waits for response activity before following',
+    name: 'followed question holds its reserved tail through acceptance',
     readerScrollBeforeSubmit: false,
     expectedMode: 'FOLLOW_BOTTOM',
     viewport: {
       width: 412,
       initialHeight: 520,
-      expandedHeight: 915,
-      postSubmitHeight: 1015,
+      expandedHeight: 861,
+      postSubmitHeight: 915,
+    },
+  },
+  {
+    name: 'long wrapped question stays fixed from activation until response activity',
+    readerScrollBeforeSubmit: false,
+    expectedMode: 'FOLLOW_BOTTOM',
+    longTurn: true,
+    viewport: {
+      width: 412,
+      // Model the actual keyboard cycle: the controller has seen the full
+      // viewport, the keyboard reduces it, then Submit dismisses the keyboard.
+      initialHeight: 1015,
+      expandedHeight: 520,
+      preClickHeight: 1015,
     },
   },
   {
@@ -100,7 +117,7 @@ for (const scenario of questionFollowScenarios) test(scenario.name, async ({ pag
       ],
     }],
   }
-  await installQuestionStream(page, questionBlock)
+  await installQuestionStream(page, questionBlock, scenario)
 
   let turnStarted = false
   let pendingQuestionId = null
@@ -130,9 +147,10 @@ for (const scenario of questionFollowScenarios) test(scenario.name, async ({ pag
     route.fulfill({ status: 200, body: '{}' })
   ))
 
-  // Begin at a keyboard-sized height so this short question can consume the
-  // initial reservation and enter FOLLOW. Expanding the viewport afterward
-  // recreates the real blank-tail condition without changing reader intent.
+  // Each scenario begins at the geometry needed to establish its original
+  // mode, then changes to the submit-time geometry without reader intent. The
+  // long case starts full-height and shrinks first so the controller knows the
+  // real keyboard-closed height before Submit restores it.
   await page.setViewportSize({
     width: scenario.viewport.width,
     height: scenario.viewport.initialHeight,
@@ -202,12 +220,12 @@ for (const scenario of questionFollowScenarios) test(scenario.name, async ({ pag
     width: scenario.viewport.width,
     height: scenario.viewport.expandedHeight,
   })
-  await page.waitForFunction(() => {
+  await page.waitForFunction(({ longTurn }) => {
     const scroll = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
     const spacer = document.querySelector('[data-chat-surface="painted"] .spacer-dynamic')
     return scroll?.dataset.scrollMode === 'FOLLOW_BOTTOM'
-      && (spacer?.offsetHeight || 0) >= 80
-  }, undefined, { timeout: 5000 })
+      && (longTurn || (spacer?.offsetHeight || 0) >= 80)
+  }, scenario, { timeout: 5000 })
 
   await card.getByRole('radio', { name: 'Yes' }).click()
   const submit = card.getByRole('button', { name: 'Submit' })
@@ -247,12 +265,65 @@ for (const scenario of questionFollowScenarios) test(scenario.name, async ({ pag
     cardTopBeforeSubmit = await card.evaluate(
       element => element.getBoundingClientRect().top,
     )
-    await submit.click()
+    if (scenario.viewport.preClickHeight) {
+      // Capture the real pointerdown boundary first, then model native
+      // keyboard-close geometry before click dispatch. The click must commit
+      // the prepared card coordinate rather than capturing the browser's
+      // intermediate clamp.
+      await page.evaluate(() => {
+        const cardElement = document.querySelector(
+          '[data-chat-surface="painted"] .qcard',
+        )
+        window.__questionActivationTops = []
+        window.__sampleQuestionActivation = true
+        const sample = () => {
+          if (!window.__sampleQuestionActivation) return
+          window.__questionActivationTops.push(
+            cardElement.getBoundingClientRect().top,
+          )
+          requestAnimationFrame(sample)
+        }
+        sample()
+      })
+      await submit.hover()
+      await page.mouse.down()
+      const preparedReservation = await surface.locator('.spacer-dynamic')
+        .evaluate(element => element.offsetHeight)
+      expect(preparedReservation).toBeGreaterThanOrEqual(
+        scenario.viewport.preClickHeight - scenario.viewport.expandedHeight - 5,
+      )
+      await page.setViewportSize({
+        width: scenario.viewport.width,
+        height: scenario.viewport.preClickHeight,
+      })
+      await page.evaluate(() => new Promise(resolve => (
+        requestAnimationFrame(() => requestAnimationFrame(resolve))
+      )))
+      const cardTopDuringActivation = await card.evaluate(
+        element => element.getBoundingClientRect().top,
+      )
+      expect(cardTopDuringActivation).toBeCloseTo(cardTopBeforeSubmit, 0)
+      await page.mouse.up()
+    } else {
+      await submit.click()
+    }
   }
   await expect(card.locator('.qcard__submit')).toHaveText('Submitted')
   await expect.poll(() => surface.locator('.chat__scroll').getAttribute(
     'data-scroll-mode',
   )).toBe('ANCHOR_AT')
+  if (scenario.viewport.preClickHeight) {
+    const activationTops = await page.evaluate(() => new Promise(resolve => {
+      requestAnimationFrame(() => {
+        window.__sampleQuestionActivation = false
+        resolve(window.__questionActivationTops || [])
+      })
+    }))
+    expect(activationTops.length).toBeGreaterThan(1)
+    expect(Math.max(...activationTops.map(top => (
+      Math.abs(top - activationTops[0])
+    )))).toBeLessThanOrEqual(1)
+  }
   const cardTopAfterAcceptance = await card.evaluate(
     element => element.getBoundingClientRect().top,
   )

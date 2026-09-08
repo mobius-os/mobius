@@ -88,6 +88,11 @@ def main() -> int:
     print("Goal promotion verified: this turn already owns the Goal.")
   else:
     print("Goal promotion verified: this turn now owns the Goal.")
+  print(
+    "Next: if this outcome has multiple verifiable stages or branches, "
+    "publish its Goal plan now. The Goal record does not execute a prose "
+    "checklist."
+  )
   return 0
 
 

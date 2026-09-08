@@ -15,16 +15,45 @@
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { QueryClient } from '@tanstack/react-query'
+import { dehydrate, QueryClient } from '@tanstack/react-query'
+import { persistQueryClientRestore } from '@tanstack/react-query-persist-client'
 import { indexedDB } from 'fake-indexeddb'
 import { get } from 'idb-keyval'
 import {
   awaitCacheFlushBeforeReload,
   compactPersistedChatDetails,
   flushPersistedQueryCache,
+  persistOptions,
   restorePersistedClient,
   shouldPersistQueryKey,
 } from '../../queryClient.js'
+
+test('last-known shell state remains restorable after a long offline stretch', async () => {
+  const source = new QueryClient()
+  source.setQueryData(['chats'], [{ id: 'chat-1', title: 'Kept offline' }])
+  const persisted = {
+    buster: 'v1',
+    timestamp: Date.now() - 30 * 24 * 60 * 60 * 1000,
+    clientState: dehydrate(source),
+  }
+  let removed = false
+  const restored = new QueryClient()
+
+  await persistQueryClientRestore({
+    ...persistOptions,
+    queryClient: restored,
+    persister: {
+      restoreClient: async () => persisted,
+      removeClient: async () => { removed = true },
+    },
+  })
+
+  assert.equal(removed, false)
+  assert.deepEqual(
+    restored.getQueryData(['chats']),
+    [{ id: 'chat-1', title: 'Kept offline' }],
+  )
+})
 
 test('background persistence bounds inactive chat history to the cold page', () => {
   const messages = Array.from({ length: 30 }, (_, index) => ({ content: `line-${index}` }))

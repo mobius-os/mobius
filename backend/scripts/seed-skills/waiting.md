@@ -1,17 +1,12 @@
 # Waiting visibly — durable monitors or explicit owner actions
 
-Read this before ending any unfinished Goal turn or promising to continue when
-something outside the chat finishes. Every wait must have one visible owner:
-a durable monitor for an observable condition, or a real question card for an
-action only the partner can complete. A paused Goal and prose such as “tell me
-when…” own neither lifecycle and must not be used as the handoff.
-
-For a CI run, merge queue, PR review, submission, or other external event,
-saying "I'll continue once X lands" in prose records NOTHING: every watcher,
-poll loop, or background shell process you started dies with the turn's process
-group, and the platform has no idea anyone is waiting. Declare a wait instead —
-the platform runs your check on an interval and resumes THIS chat when the
-condition is met, surviving server restarts.
+core.md's invariant stands: nothing you start outlives the turn unless a
+durable owner holds it, and a poll loop or background shell process you started
+dies with the turn's process group with no record anyone is waiting. This file
+is the mechanics for the observable/timed owner — `declare_wait`, which runs a
+read-only check on an interval and resumes THIS chat when the condition is met,
+surviving server restarts. (Owner actions go to the clarifying-question tool;
+recurring work is a cron app.)
 
 ## When to declare a wait
 
@@ -30,7 +25,10 @@ When NOT to use it:
   an owner question already parks the turn durably and keeps the action visible.
   For an outside-chat action, use concrete choices such as **Done**, **Need
   help**, and **Not now**, adapted to the task. Do not end with only “tell me
-  when…”. Open-ended or destructive confirmations still follow core policy.
+  when…”. A private review, prepared record, or deployment cannot change by
+  itself when nobody has been asked to approve or start it; do not monitor that
+  inert state. Open-ended or destructive confirmations still follow core
+  policy.
 - **Recurring scheduled work** — that's a cron app (`cron.md`), not a wait.
   A wait fires once.
 
@@ -39,18 +37,27 @@ When NOT to use it:
 ```bash
 python3 /data/platform/backend/scripts/chat_wait.py declare \
   'the gate PR through the merge queue' \
+  --owner 'GitHub merge queue' \
   --command 'gh pr view 123 --repo owner/repo --json state -q .state | grep -qx MERGED' \
-  --interval 300
+  --interval 300 --deadline 1800
 ```
 
 - The check command must be **read-only** and exit **0 exactly when the
   condition is met**, non-zero otherwise. It runs from `/data` as the backend
-  user with the same `gh` auth you have.
+  user with the same `gh` auth you have, but it does not inherit the live
+  turn's short-lived `AGENT_TOKEN`, `API_BASE_URL`, or other process-local
+  environment. Do not query the live application database directly; use the
+  stable owning interface or a purpose-built read-only helper instead.
 - `--interval` (seconds, default 300, min 60): match it to how fast the state
   actually changes — a ~10-minute merge queue deserves ~300s, not 60s.
-- `--deadline` (seconds, default 86400 = 24h, max 7 days): if the condition
-  never holds, the chat is woken anyway with `deadline_expired` so nothing
-  silently rots. Size it generously above the expected wait.
+- `--owner` is required for command waits: name the system, person, or durable
+  agent expected to make the condition true. A monitor proves only that someone
+  will check; it never proves that work is happening. For internal work, do not
+  declare the wait until that executor has explicitly accepted the handoff.
+- `--deadline` is required for command waits (max 7 days): use roughly 2–3× the
+  expected duration. At the deadline, the same chat wakes to inspect the owner
+  and real state before deciding whether safe takeover, reassignment, a longer
+  wait, or a blocker report is correct.
 
 Timer form — resume after a fixed delay, no command:
 
@@ -82,5 +89,8 @@ resumes under the same Goal.
   when checks happen — the partner should never have to babysit.
 - Never declare a wait whose check has side effects (posting, merging,
   notifying). The check observes; the resumed turn acts.
+- Never run an agent/model command or paid external operation from a check.
+  Ordinary polling executes no model and spends no model tokens; only the one
+  continuation started when the wait is met, broken, or expired does.
 - A wait is not a lock: the partner can keep chatting while it's armed, and
   it stays armed until met, expired, or cancelled.

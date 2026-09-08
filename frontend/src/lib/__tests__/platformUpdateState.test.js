@@ -5,8 +5,26 @@ import {
   deploymentKindLabel,
   platformActivationLabel,
   platformStatusFromApply,
+  platformStatusUnavailable,
   platformUpdateStatusLabel,
+  reviewedUpdateUsesContainerRebuild,
+  reviewedRebuildNeedsDigest,
 } from '../platformUpdateState.js'
+
+test('an unavailable release check cannot inherit a cached current claim', () => {
+  const unavailable = platformStatusUnavailable({
+    state: 'up_to_date',
+    available: true,
+    contained_upstream_sha: 'a'.repeat(40),
+  })
+
+  assert.equal(unavailable.state, 'unavailable')
+  assert.equal(unavailable.available, false)
+  assert.equal(unavailable.status_unavailable, true)
+  assert.equal(
+    platformUpdateStatusLabel(unavailable), 'Update status unavailable',
+  )
+})
 
 test('the deployment classifier stays as binary as the backend that emits it', () => {
   assert.equal(deploymentKind({ deployment: 'railway' }), 'railway')
@@ -24,11 +42,41 @@ test('the deployment badge names an unresolved deployment self-hosted', () => {
   assert.equal(deploymentKindLabel(null), 'Self-hosted')
 })
 
+test('reviewed image updates rebuild directly on both deployments', () => {
+  assert.equal(reviewedUpdateUsesContainerRebuild({
+    activation: { deployment: 'railway', level: 'image_rebuild' },
+  }), true)
+  // Self-hosted image updates now also drive the rebuild from the update flow.
+  assert.equal(reviewedUpdateUsesContainerRebuild({
+    activation: { deployment: 'self_hosted', level: 'image_rebuild' },
+  }), true)
+  assert.equal(reviewedUpdateUsesContainerRebuild({
+    activation: { deployment: 'railway', level: 'server_restart' },
+  }), false)
+  assert.equal(reviewedUpdateUsesContainerRebuild(null), false)
+})
+
+test('only Railway image rebuilds require a pinned GHCR digest', () => {
+  assert.equal(reviewedRebuildNeedsDigest({
+    activation: { deployment: 'railway', level: 'image_rebuild' },
+  }), true)
+  // Self-hosted anchors on the sha-<target> tag, so no digest is required.
+  assert.equal(reviewedRebuildNeedsDigest({
+    activation: { deployment: 'self_hosted', level: 'image_rebuild' },
+  }), false)
+  // A non-rebuild update never needs a digest.
+  assert.equal(reviewedRebuildNeedsDigest({
+    activation: { deployment: 'railway', level: 'live' },
+  }), false)
+  assert.equal(reviewedRebuildNeedsDigest(null), false)
+})
+
 test('a clean apply consumes the reviewed target but preserves restart readiness', () => {
   const projected = platformStatusFromApply(
     {
       state: 'available',
       available: true,
+      status_unavailable: true,
       needs_restart: false,
       current_build_sha: 'served',
       contained_upstream_sha: 'before',
@@ -41,6 +89,7 @@ test('a clean apply consumes the reviewed target but preserves restart readiness
   )
 
   assert.equal(projected.available, false)
+  assert.equal(projected.status_unavailable, false)
   assert.equal(projected.needs_restart, true)
   assert.equal(projected.contained_upstream_sha, 'applied')
 })

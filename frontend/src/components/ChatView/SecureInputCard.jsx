@@ -8,6 +8,7 @@ import './SecureInputCard.css'
 function settledLabel(status) {
   if (status === 'filled') return 'Provided'
   if (status === 'consuming') return 'Using securely…'
+  if (status === 'interrupted') return 'Outcome unknown'
   if (status === 'completed') return 'Provided securely'
   // A failed consumer has already received the values. "Not used" would
   // incorrectly describe the input lifecycle rather than the operation.
@@ -48,6 +49,7 @@ export default function SecureInputCard({ block, chatId, interactive = false }) 
   const formRef = useRef(null)
   const [localStatus, setLocalStatus] = useState(block.status || 'pending')
   const [submitting, setSubmitting] = useState(false)
+  const [cancelling, setCancelling] = useState(false)
   const [error, setError] = useState('')
   const reveal = block.mode === 'reveal'
   const blockStatus = block.status || 'pending'
@@ -60,6 +62,22 @@ export default function SecureInputCard({ block, chatId, interactive = false }) 
       setLocalStatus(block.status)
     }
   }, [block.status])
+
+  useEffect(() => {
+    if (!block.saved || !interactive) return
+    let active = true
+    api.secureInputs.savedState(chatId, block.request_id)
+      .then(response => jsonOrThrow(response, 'Could not check secure input'))
+      .then(result => {
+        if (active && result.status && result.status !== 'pending') {
+          setLocalStatus(result.status)
+        }
+      })
+      .catch(() => {
+        if (active) setError('Could not check this request. Reopen the chat before submitting again.')
+      })
+    return () => { active = false }
+  }, [block.saved, block.request_id, chatId, interactive])
 
   async function submit(event) {
     event.preventDefault()
@@ -78,14 +96,14 @@ export default function SecureInputCard({ block, chatId, interactive = false }) 
     setError('')
     setSubmitting(true)
     try {
-      await jsonOrThrow(
+      const result = await jsonOrThrow(
         await api.secureInputs.submit(chatId, block.request_id, {
           fields,
           reveal_confirmed: revealConfirmed,
         }),
         'Secure input failed',
       )
-      setLocalStatus('filled')
+      setLocalStatus(result.status || 'filled')
     } catch (submitError) {
       setError(
         submitError?.message
@@ -95,6 +113,23 @@ export default function SecureInputCard({ block, chatId, interactive = false }) 
       // Submitted fields are ordinary JS memory and become unreachable here.
       for (const key of Object.keys(fields)) fields[key] = ''
       setSubmitting(false)
+    }
+  }
+
+  async function cancel() {
+    if (!open || submitting || cancelling) return
+    setError('')
+    setCancelling(true)
+    try {
+      await jsonOrThrow(
+        await api.secureInputs.cancel(chatId, block.request_id),
+        'Could not cancel',
+      )
+      setLocalStatus('cancelled')
+    } catch (cancelError) {
+      setError(cancelError?.message || 'Could not cancel this input.')
+    } finally {
+      setCancelling(false)
     }
   }
 
@@ -165,11 +200,21 @@ export default function SecureInputCard({ block, chatId, interactive = false }) 
           )}
 
           {error && <p className="secure-card__error" role="alert">{error}</p>}
-          <button className="secure-card__submit" type="submit" disabled={submitting}>
-            {submitting
-              ? 'Entering…'
-              : reveal ? 'Reveal for this turn' : 'Enter securely'}
-          </button>
+          <div className="secure-card__actions">
+            <button
+              className="secure-card__cancel"
+              type="button"
+              onClick={cancel}
+              disabled={submitting || cancelling}
+            >
+              {cancelling ? 'Cancelling…' : 'Cancel'}
+            </button>
+            <button className="secure-card__submit" type="submit" disabled={submitting || cancelling}>
+              {submitting
+                ? 'Entering…'
+                : reveal ? 'Reveal for this turn' : 'Enter securely'}
+            </button>
+          </div>
         </form>
       ) : (
         <div className="secure-card__receipts" role="status">
@@ -185,6 +230,7 @@ export default function SecureInputCard({ block, chatId, interactive = false }) 
         </div>
       )}
 
+      {block.outcome && <p className="secure-card__description" role="status">{block.outcome}</p>}
       <p className="secure-card__foot">
         {reveal
           ? (open

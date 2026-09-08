@@ -53,6 +53,7 @@ def require_all_routers_loaded() -> None:
 
 
 admin_router = _load("admin")
+agent_coordination_router = _load("agent_coordination")
 apps_router = _load("apps")
 auth_router = _load("auth")
 chat_router = _load("chat")
@@ -83,6 +84,7 @@ debug_router = _load("debug")
 delegations_router = _load("delegations")
 chat_waits_router = _load("chat_waits")
 goal_plans_router = _load("goal_plans")
+owner_approvals_router = _load("owner_approvals")
 theme_router = _load("theme")
 self_reminders_router = _load("self_reminders")
 skills_router = _load("skills")
@@ -101,6 +103,7 @@ projects_router = _load("projects")
 
 __all__ = [
   "admin_router",
+  "agent_coordination_router",
   "auth_router",
   "apps_router",
   "storage_router",
@@ -131,6 +134,7 @@ __all__ = [
   "delegations_router",
   "chat_waits_router",
   "goal_plans_router",
+  "owner_approvals_router",
   "theme_router",
   "self_reminders_router",
   "skills_router",

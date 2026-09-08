@@ -1,0 +1,141 @@
+.agent-relay {
+  min-width: 0;
+  padding: 11px 3px 2px;
+  border-top: 1px solid var(--border-light);
+}
+
+.agent-relay__head {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 7px 16px auto minmax(0, 1fr);
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+}
+
+.agent-relay__head > svg { color: var(--muted); }
+.agent-relay__head > strong {
+  color: var(--text);
+  font-size: 10px;
+  letter-spacing: -.01em;
+}
+.agent-relay__head > span:last-child {
+  overflow: hidden;
+  font-size: 9px;
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-relay__signal {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--border-light);
+}
+.agent-relay__signal.is-live {
+  background: var(--green, #2f8b58);
+  box-shadow: 0 1px 3px color-mix(in srgb, var(--green, #2f8b58) 34%, transparent);
+}
+
+.agent-relay__messages {
+  display: grid;
+  gap: 1px;
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+}
+.agent-relay__message {
+  min-width: 0;
+  padding: 7px 8px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--surface) 76%, transparent);
+}
+.agent-relay__message > div {
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  color: var(--muted);
+  font-size: 8px;
+}
+.agent-relay__message > div strong {
+  overflow: hidden;
+  max-width: 34%;
+  color: var(--text);
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.agent-relay__message > div time {
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+}
+.agent-relay__message p {
+  overflow-wrap: anywhere;
+  margin: 3px 0 0;
+  color: var(--text);
+  font-size: 10px;
+  line-height: 1.38;
+}
+.agent-relay__message--blocker {
+  background: color-mix(in srgb, var(--danger, #b34040) 7%, var(--surface));
+}
+.agent-relay__message--finding,
+.agent-relay__message--handoff {
+  background: color-mix(in srgb, var(--accent) 6%, var(--surface));
+}
+
+.agent-relay__empty {
+  margin: 8px 0 0;
+  color: var(--muted);
+  font-size: 9px;
+  line-height: 1.45;
+}
+.agent-relay__retry {
+  min-height: 36px;
+  margin-top: 8px;
+  padding: 7px 10px;
+  border: 1px solid var(--border-light);
+  border-radius: 8px;
+  color: var(--text);
+  background: var(--surface);
+  font: inherit;
+  font-size: 10px;
+  font-weight: 650;
+  cursor: pointer;
+}
+.agent-relay__retry:hover { background: var(--surface-strong, var(--surface)); }
+.agent-relay__retry:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+.agent-relay__skeleton {
+  display: grid;
+  gap: 5px;
+  margin-top: 8px;
+}
+.agent-relay__skeleton i {
+  width: 100%;
+  height: 31px;
+  border-radius: 8px;
+  background: var(--surface);
+  animation: agent-relay-pulse 1.4s ease-in-out infinite alternate;
+}
+.agent-relay__skeleton i:last-child { width: 78%; }
+
+.agent-relay--compact { margin-top: 8px; padding-inline: 4px; }
+.agent-relay--compact .agent-relay__message { padding-block: 6px; }
+.agent-relay--compact .agent-relay__message p {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+@keyframes agent-relay-pulse {
+  from { opacity: .48; }
+  to { opacity: .82; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .agent-relay__skeleton i { animation: none; }
+}

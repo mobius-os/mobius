@@ -63,7 +63,7 @@ test('missing or unparsable previews remain an ordinary absent detail', () => {
   assert.equal(toolEditPreview({ diff: 'not a unified diff' }), null)
 })
 
-test('expanded preview renders changed lines and provider result metadata', () => {
+test('expanded preview renders changed lines and diff metadata', () => {
   const preview = toolEditPreview({
     diff: [
       'diff --git a/app.js b/app.js',
@@ -83,4 +83,52 @@ test('expanded preview renders changed lines and provider result metadata', () =
   assert.match(html, />after</)
   assert.match(html, />\+1</)
   assert.match(html, /Diff preview truncated\./)
+})
+
+test('saved Codex raw add and delete bodies become visible diffs', () => {
+  const preview = toolEditPreview({
+    diff: [
+      'diff --git a/new.py b/new.py',
+      'new file mode 100644',
+      '--- /dev/null',
+      '+++ b/new.py',
+      'import os',
+      '',
+      'print(os.getcwd())',
+      'diff --git a/gone.txt b/gone.txt',
+      'deleted file mode 100644',
+      '--- a/gone.txt',
+      '+++ /dev/null',
+      'first',
+      'second',
+    ].join('\n'),
+  })
+
+  assert.deepEqual(
+    preview.files.map(file => [file.path, file.insertions, file.deletions]),
+    [['new.py', 3, 0], ['gone.txt', 0, 2]],
+  )
+  assert.deepEqual(
+    preview.files[0].hunks[0].lines.map(line => [line.type, line.text]),
+    [['add', 'import os'], ['add', ''], ['add', 'print(os.getcwd())']],
+  )
+  assert.deepEqual(
+    preview.files[1].hunks[0].lines.map(line => [line.type, line.text]),
+    [['del', 'first'], ['del', 'second']],
+  )
+})
+
+test('a genuinely empty added file remains an honest metadata-only change', () => {
+  const preview = toolEditPreview({
+    diff: [
+      'diff --git a/empty.txt b/empty.txt',
+      'new file mode 100644',
+      '--- /dev/null',
+      '+++ b/empty.txt',
+    ].join('\n'),
+  })
+
+  assert.equal(preview.files[0].status, 'A')
+  assert.equal(preview.files[0].insertions, 0)
+  assert.deepEqual(preview.files[0].hunks, [])
 })

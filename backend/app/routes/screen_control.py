@@ -15,9 +15,9 @@ from app import models
 from app.database import get_db
 from app.deps import (
   Principal,
-  authorize_current_owner_detached,
+  authorize_current_owner_input_detached,
   get_agent_run_principal,
-  get_current_owner,
+  get_current_owner_for_owner_input,
   reject_cross_site,
 )
 from app.screen_control import registry
@@ -149,7 +149,7 @@ def _session_wire(session) -> dict[str, Any]:
 @router.post("/sessions", dependencies=[Depends(reject_cross_site)])
 async def start_session(
   body: SessionStartBody,
-  owner: models.Owner = Depends(get_current_owner),
+  owner: models.Owner = Depends(get_current_owner_for_owner_input),
   db: Session = Depends(get_db),
 ):
   chat = db.query(models.Chat).filter(
@@ -175,7 +175,7 @@ async def start_session(
 async def browser_events(
   session_id: str,
   request: Request,
-  owner_username: str = Depends(authorize_current_owner_detached),
+  owner_username: str = Depends(authorize_current_owner_input_detached),
 ):
   # One-owner product today. Authentication is detached before streaming so a
   # live screen does not pin a database connection for its whole 15-minute
@@ -221,7 +221,7 @@ async def browser_events(
 async def browser_response(
   session_id: str,
   body: BrowserResponseBody,
-  owner: models.Owner = Depends(get_current_owner),
+  owner: models.Owner = Depends(get_current_owner_for_owner_input),
 ):
   session = await registry.get_for_browser(session_id, owner.username)
   if session is None:
@@ -246,7 +246,7 @@ async def browser_response(
 )
 async def stop_browser_session(
   session_id: str,
-  owner: models.Owner = Depends(get_current_owner),
+  owner: models.Owner = Depends(get_current_owner_for_owner_input),
 ):
   session = await registry.get_for_browser(session_id, owner.username)
   if session is not None:

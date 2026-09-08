@@ -55,6 +55,13 @@ test('deep-link to a specific chat → NO seed (a chat view is never trapped)', 
   assert.equal(r.seedHome, false)
 })
 
+test('deep-link to Projects keeps home beneath the workspace', () => {
+  assert.equal(resolveInitialNav({ deepLink: { view: 'projects' } }).seedHome, true)
+  assert.equal(resolveInitialNav({ deepLink: {
+    view: 'project', projectId: 'project-7',
+  } }).seedHome, true)
+})
+
 test('deep-link to the same chat as home → no seed', () => {
   const r = resolveInitialNav({ deepLink: { view: 'chat', chatId: 'chat-home' }, storedChatId: 'chat-home' })
   assert.equal(r.view, 'chat')

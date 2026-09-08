@@ -28,6 +28,7 @@ from app.continuations import (
   continuation_actor_label,
   is_continuation_message,
 )
+from app.peer_message import peer_message_compaction_lines
 
 log = logging.getLogger("moebius.chat")
 
@@ -121,9 +122,16 @@ def build_transcript_text(
     else:
       role = (m.get("role") or "user").upper()
     content = m.get("content") or ""
-    if not content.strip():
-      continue
-    lines.append(f"{role}: {content}")
+    if content.strip():
+      lines.append(f"{role}: {content}")
+    # Raw tool I/O remains excluded, but peer notes are collaboration state a
+    # replacement provider may need to continue safely. Preserve only the
+    # bounded marker already approved for the owner-facing transcript.
+    blocks = m.get("blocks") if isinstance(m.get("blocks"), list) else []
+    for block in blocks:
+      if not isinstance(block, dict) or block.get("type") != "tool":
+        continue
+      lines.extend(peer_message_compaction_lines(block.get("peer_message")))
   text = "\n\n".join(lines)
   if max_chars is not None and len(text) > max_chars:
     text = text[-max_chars:]

@@ -79,7 +79,11 @@ class GoalTaskUpdate(BaseModel):
 
 
 def _require_owner(principal: Principal) -> None:
-  if principal.scope != "owner" or principal.app_id is not None:
+  if (
+    principal.scope != "owner"
+    or principal.app_id is not None
+    or principal.delegation_id is not None
+  ):
     raise HTTPException(
       status_code=403, detail="Only the owner agent may update a Goal plan."
     )
@@ -124,6 +128,7 @@ async def promote_current_run_to_goal(
   db: Session = Depends(get_db),
 ):
   """Attach the caller's exact running turn to a platform-owned Goal."""
+  _require_owner(principal)
   if principal.chat_id != chat_id:
     raise HTTPException(status_code=403, detail="Agent run belongs to another chat.")
   get_active_chat_for_principal(db, chat_id, principal)
@@ -174,6 +179,10 @@ async def clear_presented_goal(
   db: Session = Depends(get_db),
 ):
   """Dismiss one exact Goal; stop execution only while work is unfinished."""
+  if principal.delegation_id is not None:
+    raise HTTPException(
+      status_code=403, detail="A delegated child cannot clear a Goal."
+    )
   require_chat_embed_operation(principal, "chat:stop")
   get_active_chat_for_principal(db, chat_id, principal)
   from app.chat import clear_goal_for

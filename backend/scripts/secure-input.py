@@ -7,36 +7,20 @@ import argparse
 import json
 import os
 from pathlib import Path
-import subprocess
 import sys
 import urllib.error
 import urllib.request
 
 
 BACKEND_ROOT = Path(__file__).resolve().parent.parent
-CONSUMER_TIMEOUT_SECONDS = 120
-OWNER_CREDENTIAL_OUTCOMES = {
-  0: (True, 0, "Credentials changed. Sign in again with the new details."),
-  2: (False, 2, "Credential input was invalid."),
-  3: (False, 1, "Owner account was not found."),
-  4: (False, 1, "This instance uses managed sign-in."),
-  5: (False, 1, "Current password is incorrect."),
-  6: (False, 1, "Username must be 1–64 characters."),
-  7: (False, 1, "Password cannot be blank or longer than 1024 characters."),
-  8: (False, 1, "New passwords do not match."),
-  9: (False, 1, "Credentials could not be changed."),
-  10: (
-    True,
-    0,
-    "Credentials changed. Sign in again, then restart Möbius to refresh "
-    "background access.",
-  ),
-}
 if str(BACKEND_ROOT) not in sys.path:
   sys.path.insert(0, str(BACKEND_ROOT))
 
 
-def _post(url: str, payload: dict, token: str | None = None) -> tuple[int, dict]:
+def _post(
+  url: str, payload: dict, token: str | None = None, *,
+  timeout: float | None = 35,
+) -> tuple[int, dict]:
   headers = {"Content-Type": "application/json"}
   if token:
     headers["Authorization"] = f"Bearer {token}"
@@ -47,7 +31,7 @@ def _post(url: str, payload: dict, token: str | None = None) -> tuple[int, dict]
     method="POST",
   )
   try:
-    with urllib.request.urlopen(request, timeout=35) as response:
+    with urllib.request.urlopen(request, timeout=timeout) as response:
       return response.status, json.loads(response.read() or b"{}")
   except urllib.error.HTTPError as exc:
     try:
@@ -72,6 +56,27 @@ def _field(value: str) -> dict:
   return {"name": name, "type": input_type, "label": label}
 
 
+def _request_saved(spec: dict, command: list[str], action: str) -> dict:
+  """Commit a sealed request, without retaining a waiting helper or values."""
+  base = os.environ.get("API_BASE_URL", "").rstrip("/")
+  token = os.environ.get("AGENT_TOKEN", "")
+  chat_id = os.environ.get("CHAT_ID", "")
+  if not base or not token or not chat_id:
+    raise RuntimeError("Secure input is unavailable: chat environment is incomplete.")
+  if not command:
+    raise RuntimeError("A sealed consumer command is required.")
+  status, receipt = _post(
+    f"{base}/api/secure-inputs/{chat_id}/saved",
+    {**spec, "command": command, "cwd": os.getcwd(), "action": action}, token,
+  )
+  if status >= 300:
+    raise RuntimeError("Could not save secure input; no values were requested. Retry the identical request.")
+  if (receipt.get("state") not in {"waiting_for_owner", "answered"}
+      or not receipt.get("question_id") or not receipt.get("next_action")):
+    raise RuntimeError("Secure input save was not confirmed. Retry the identical request.")
+  return receipt
+
+
 def _request_and_consume(spec: dict) -> tuple[str, str, dict[str, str]]:
   base = os.environ.get("API_BASE_URL", "").rstrip("/")
   token = os.environ.get("AGENT_TOKEN", "")
@@ -90,20 +95,18 @@ def _request_and_consume(spec: dict) -> tuple[str, str, dict[str, str]]:
     raise RuntimeError("Could not open secure input: invalid server response.")
 
   try:
-    while True:
-      status, state = _post(
-        f"{base}/api/secure-inputs/{request_id}/wait",
-        {"capability": capability},
-      )
-      if status >= 300:
-        raise RuntimeError("Secure input became unavailable.")
-      state_status = state.get("status")
-      if state_status == "pending":
-        continue
-      if state_status != "filled":
-        result = state.get("result") or {}
-        raise RuntimeError(result.get("message") or "Secure input closed.")
-      break
+    # The local server parks this call until the owner submits or cancels.
+    # Keep ordinary transport deadlines for machine work, never human input.
+    status, state = _post(
+      f"{base}/api/secure-inputs/{request_id}/wait",
+      {"capability": capability},
+      timeout=None,
+    )
+    if status >= 300:
+      raise RuntimeError("Secure input became unavailable.")
+    if state.get("status") != "filled":
+      result = state.get("result") or {}
+      raise RuntimeError(result.get("message") or "Secure input closed.")
     status, consumed = _post(
       f"{base}/api/secure-inputs/{request_id}/consume",
       {"capability": capability},
@@ -129,40 +132,6 @@ def _settle(request_id: str, capability: str, *, ok: bool, message: str) -> None
   _post(
     f"{base}/api/secure-inputs/{request_id}/settle",
     {"capability": capability, "ok": ok, "message": message[:240]},
-  )
-
-
-def _run_consumer(command: list[str], values: dict[str, str]) -> int:
-  if not command:
-    raise RuntimeError("A sealed consumer command is required.")
-  payload = json.dumps(values, ensure_ascii=False).encode("utf-8")
-  try:
-    completed = subprocess.run(
-      command,
-      input=payload,
-      stdout=subprocess.DEVNULL,
-      stderr=subprocess.DEVNULL,
-      check=False,
-      timeout=CONSUMER_TIMEOUT_SECONDS,
-    )
-  except subprocess.TimeoutExpired:
-    return 124
-  return completed.returncode
-
-
-def _consumer_outcome(action: str, returncode: int) -> tuple[bool, int, str]:
-  """Map process state to trusted copy without reading consumer output."""
-  if action == "owner-credentials":
-    return OWNER_CREDENTIAL_OUTCOMES.get(
-      returncode,
-      (False, 1, "Credentials could not be changed."),
-    )
-  if returncode == 0:
-    return True, 0, "Secure input was consumed without exposing its values."
-  if returncode == 124:
-    return False, 124, "Sealed consumer timed out; submitted values were discarded."
-  return False, returncode or 1, (
-    "The sealed consumer failed; submitted values were discarded."
   )
 
 
@@ -223,22 +192,23 @@ def main() -> int:
     "description": args.description,
     "fields": args.fields,
   }
+  if args.action != "reveal":
+    try:
+      print(json.dumps(_request_saved(spec, args.command, args.action)))
+      return 0
+    except Exception:
+      print("Secure input save was not confirmed. Retry the identical request; do not continue as if values were provided.")
+      return 1
+
   request_id = capability = None
   values: dict[str, str] = {}
   try:
     request_id, capability, values = _request_and_consume(spec)
-    if args.action == "reveal":
-      from app.secure_inputs import build_reveal_envelope
-      print(build_reveal_envelope(json.dumps(values, ensure_ascii=False)))
-      rc = 0
-      ok = True
-      message = "Secure values were revealed to the model for this turn only."
-    else:
-      ok, rc, message = _consumer_outcome(
-        args.action,
-        _run_consumer(args.command, values),
-      )
-      print(message)
+    from app.secure_inputs import build_reveal_envelope
+    print(build_reveal_envelope(json.dumps(values, ensure_ascii=False)))
+    rc = 0
+    ok = True
+    message = "Secure values were revealed to the model for this turn only."
     _settle(request_id, capability, ok=ok, message=message)
     return rc
   except (KeyboardInterrupt, EOFError):

@@ -137,7 +137,7 @@ jobs:
     runs-on: ubuntu-latest
     # A cold hosted runner may spend several minutes provisioning Node and the
     # npm cache before this bounded unit suite starts.
-    timeout-minutes: 8
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
       - name: Set up Node with npm cache
@@ -155,10 +155,34 @@ jobs:
         # and the whole test suite fails on ERR_MODULE_NOT_FOUND.
         working-directory: frontend
         run: npm ci
+      - name: Audit frontend runtime dependencies
+        working-directory: frontend
+        run: |
+          for attempt in 1 2 3; do
+            set +e
+            audit_output="$(npm audit --omit=dev --audit-level=low 2>&1)"
+            audit_status=$?
+            set -e
+            printf '%s\n' "$audit_output"
+
+            if [ "$audit_status" -eq 0 ]; then
+              break
+            fi
+
+            if ! grep -Eqi '^npm (error|ERR!)( .*)?(audit endpoint returned an error|EAI_AGAIN|ECONNRESET|ETIMEDOUT|ENOTFOUND|Service Unavailable)' <<<"$audit_output"; then
+              exit "$audit_status"
+            fi
+
+            if [ "$attempt" -eq 3 ]; then
+              echo '::warning::npm audit was unavailable after 3 attempts; vulnerability findings still fail closed when the service responds.'
+              break
+            fi
+
+            sleep $((attempt * 5))
+          done
       - name: Run frontend unit tests
         working-directory: frontend
         run: |
-          npm audit --omit=dev --audit-level=low
           npm run lint
           npm run test:coverage
       - name: Run static app packager tests

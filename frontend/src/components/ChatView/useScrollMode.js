@@ -315,6 +315,7 @@ export default function useScrollMode({
   // the gesture's dirty state lives inside the layout effect. This bridge reads
   // the exact hold only on that rare semantic boundary, never in the hot scroll
   // path.
+  const questionSubmissionLayoutRef = useRef(null)
   // Monotonic generation for actual reader scroll intent. Send/steer snapshots
   // and every deferred/automatic geometry commit use this same authority:
   // once a newer gesture lands, older work can never regain ownership merely
@@ -708,6 +709,13 @@ export default function useScrollMode({
       nextMode,
       'send:question-freeze',
     )
+    // Pointer activation can dismiss the mobile keyboard before React commits
+    // the card's pending state. Reserve the held anchor against that imminent
+    // viewport growth in this same task so the browser never gets one paint in
+    // which it can clamp the question away from its submitted position.
+    questionSubmissionLayoutRef.current?.(
+      readerIntentVersionRef.current,
+    )
     return {
       mode,
       readerIntentVersion: readerIntentVersionRef.current,
@@ -1093,6 +1101,8 @@ export default function useScrollMode({
         persistMode()
       }
     }
+
+    questionSubmissionLayoutRef.current = sizeSpacer
 
     function rememberAppliedMode() {
       const mode = modeRef.current
@@ -1589,11 +1599,9 @@ export default function useScrollMode({
         // the physical tail instead enters FOLLOW_BOTTOM, including while
         // latest-turn reservation remains.
         const holdMode = anchorModeFromScroll(scrollEl)
-        const wasFollowing = modeRef.current.kind === 'FOLLOW_BOTTOM'
         const settledMode = modeAfterReaderGesture({
           escaped: settledEscaped,
           reachedNearBottom: settledReachedNearBottom,
-          wasFollowing,
           holdMode,
         })
         transitionMode(
@@ -1720,11 +1728,11 @@ export default function useScrollMode({
         performance.now(),
         touchContactActive(),
       )
-      // Escape latch (use-stick-to-bottom): a fresh gesture starts un-escaped,
-      // then this input's own vertical direction sets it (scroll up) or clears
-      // it (scroll down). Read straight from the event so a single wheel tick or
-      // arrow press flips follow immediately, at zero layout cost. Disclosure
-      // taps carry no scroll direction and must not disturb the latch.
+      // A fresh gesture starts un-escaped, then this input's own vertical
+      // direction sets it (scroll up) or clears the directional marker (scroll
+      // down). Clearing that marker does NOT re-enter follow: the scroll event's
+      // physical-tail geometry is the sole follow authority. Disclosure taps
+      // carry no scroll direction and must not disturb the marker.
       if (!activatesDisclosure) {
         if (!readerAlreadyOwns) gesture.escaped = false
         // Every input is a fresh pre-scroll sample. This is redundant for
@@ -1851,10 +1859,10 @@ export default function useScrollMode({
       // semantic action (send, nudge) while this finger stayed on the glass.
       if (gestureWindowUntilRef.current !== Number.POSITIVE_INFINITY
           && !gesture.dirty) onUserInput(event)
-      // Touch escape latch: a finger moving UP drags content toward the tail —
-      // that is scrolling DOWN, which re-engages follow; a finger moving down is
-      // scrolling UP and escapes. Applied last so the stationary-touch re-arm
-      // above (a fresh onUserInput claim) cannot clobber the direction.
+      // A finger moving UP drags content toward the tail; a finger moving down
+      // scrolls toward older content and escapes. Direction alone never enters
+      // follow — the owned scroll event must still prove physical-tail arrival.
+      // Applied last so the stationary-touch re-arm above cannot clobber it.
       if (touchDirection === 'down') gesture.escaped = false
       else if (touchDirection === 'up') gesture.escaped = true
     }
@@ -2023,6 +2031,7 @@ export default function useScrollMode({
         claimedSequence: gesture.claimedSequence,
         version: readerIntentVersionRef.current,
         reachedBottom: gesture.reachedBottom,
+        movementDirection: scrollEscapeDir,
         // Follow-stick band, not the pixel-exact clamp: reaching within 70px of
         // the tail during the gesture counts as "reached the bottom" so a fast
         // stream can't shake the reader out of engaging follow.
@@ -2078,6 +2087,9 @@ export default function useScrollMode({
       clearTimeout(deferredGestureLayoutTimer)
       if (resumeLayoutAfterGestureRef.current === resumeLayoutAfterGesture) {
         resumeLayoutAfterGestureRef.current = null
+      }
+      if (questionSubmissionLayoutRef.current === sizeSpacer) {
+        questionSubmissionLayoutRef.current = null
       }
       mountMutationObserver?.disconnect()
       scrollEl.removeEventListener('load', requestRevealOnQuiet, true)

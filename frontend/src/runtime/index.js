@@ -55,6 +55,11 @@
 //   window.mobius.capabilities.open(name, input)  -> capability session
 //     session.ready, session.result, session.on(event, cb), finish(), cancel()
 //   window.mobius.capabilities.invoke(name, input, {signal?}) -> one-shot result
+//   window.mobius.projects.list()                    -> projects created by this app
+//   window.mobius.projects.migrate()                 -> import this app's legacy projects
+//   window.mobius.projects.create({templateId,name}) -> create and open a native project
+//   window.mobius.projects.open(projectId)           -> open one of this app's projects
+//   window.mobius.projects.browse()                  -> open the Projects directory
 //
 // "No walls": this runtime is the easy DEFAULT, not a cage. In the default
 // shell mount the app has an opaque origin, so IndexedDB/OPFS/SQLite-wasm are
@@ -82,6 +87,7 @@ import { makeNav, makeSplit } from './navigation.js'
 import { makeCapabilities } from './capabilities.js'
 import { makeImmersive } from './immersive.js'
 import { makeClipboard } from './clipboard.js'
+import { makeProjects } from './projects.js'
 import { tokenMatchesRuntime } from './token.js'
 
 export * from './storage.js'
@@ -90,6 +96,7 @@ export * from './chat.js'
 export * from './navigation.js'
 export * from './capabilities.js'
 export * from './immersive.js'
+export * from './projects.js'
 
 
 // ── P1-A: probed-online reactive backing ─────────────────────────────────────
@@ -103,6 +110,13 @@ export * from './immersive.js'
 // ─────────────────────────────────────────────────────────────────────────────
 let _online = typeof navigator !== 'undefined' ? navigator.onLine : true
 const _onlineListeners = new Set()
+// After AppCanvas posts its first probed verdict (on iframe load, then on every
+// change) the /api/health probe is the SOLE authority for connectivity. The raw
+// navigator online/offline events are only a pre-probe seed: navigator.onLine
+// reads 'true' on captive portals and dead LANs, so letting it keep driving
+// _online after a probe verdict has landed would let a false 'online' override a
+// correct offline verdict (and the reverse) — the two drivers silently contradict.
+let _probedVerdictReceived = false
 
 function _setOnline(next) {
   if (next === _online) return
@@ -112,6 +126,12 @@ function _setOnline(next) {
   }
 }
 
+// Seed connectivity from raw browser events ONLY until the first probed verdict.
+function _seedOnline(next) {
+  if (_probedVerdictReceived) return
+  _setOnline(next)
+}
+
 // Listen for the probed verdict from AppCanvas.
 if (typeof window !== 'undefined') {
   window.addEventListener('message', (e) => {
@@ -119,12 +139,13 @@ if (typeof window !== 'undefined') {
     const msg = e.data
     if (!msg || typeof msg !== 'object') return
     if (msg.type === 'moebius:online-status' && typeof msg.online === 'boolean') {
+      _probedVerdictReceived = true
       _setOnline(msg.online)
     }
   })
-  // Keep the seed roughly current before AppCanvas's first probed verdict.
-  window.addEventListener('online', () => _setOnline(true))
-  window.addEventListener('offline', () => _setOnline(false))
+  // Pre-probe seed only (see _seedOnline): inert once a probed verdict lands.
+  window.addEventListener('online', () => _seedOnline(true))
+  window.addEventListener('offline', () => _seedOnline(false))
 }
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -147,6 +168,7 @@ let _runtimeContext = null
 // should keep its legacy fallback.
 export const runtimeFeatures = Object.freeze({
   idleDocument: true,
+  projects: true,
 })
 
 export function init({ appId, appInstanceId = null, getToken, capabilityContract = null }) {
@@ -162,6 +184,7 @@ export function init({ appId, appInstanceId = null, getToken, capabilityContract
     _runtimeContext.signal?._destroy?.()
     _runtimeContext.storage?._destroy?.()
     _runtimeContext.capabilities?._destroy?.()
+    _runtimeContext.projects?._destroy?.()
     _runtimeContext.chat?._destroy?.()
   }
 
@@ -178,6 +201,7 @@ export function init({ appId, appInstanceId = null, getToken, capabilityContract
   })
   const signal = makeSignal(appId, storage, appInstanceId)
   const capabilities = makeCapabilities({ declarations: capabilityContract?.runtime || {} })
+  const projects = makeProjects()
   const chat = makeChat({ appId, getToken: scopedToken, storage })
   const api = {
     appId,
@@ -212,9 +236,10 @@ export function init({ appId, appInstanceId = null, getToken, capabilityContract
     split: makeSplit(),
     immersive: makeImmersive({ appId }),
     clipboard: makeClipboard(),
+    projects,
   }
   window.mobius = api
-  _runtimeContext = { identityKey, tokenRef, storage, signal, capabilities, chat, api }
+  _runtimeContext = { identityKey, tokenRef, storage, signal, capabilities, projects, chat, api }
   storage._drain()    // flush anything left from a previous offline session
   storage._drainSignals() // independently flush retained telemetry
   // Ask for durable storage so the offline mirror + queued blob writes survive

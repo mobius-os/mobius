@@ -49,7 +49,7 @@ test('streaming deltas are flags on the shared active markdown tree', () => {
   assert.match(msgContentSource, /<ProgressiveMarkdown[\s\S]*isStreaming=\{isStreaming/,
     'active DB and live text must keep ProgressiveMarkdown mounted')
   assert.match(blockRendererSource, /data-is-streaming=\{isStreaming \? 'true' : undefined\}/)
-  assert.match(blockRendererSource, /\{isStreaming && <span className="chat__cursor" \/>\}/,
+  assert.match(blockRendererSource, /\{isStreaming && \([\s\S]*<span className="chat__cursor" aria-hidden="true" \/>/,
     'cursor insertion must toggle behind isStreaming instead of selecting another renderer')
 })
 

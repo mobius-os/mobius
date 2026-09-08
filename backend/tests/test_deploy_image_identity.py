@@ -175,6 +175,35 @@ def test_scratch_preflight_runs_the_compose_image_not_the_old_reference():
 
   assert '"$IMAGE_TAG" >/dev/null' in preflight
   assert "RUNNING_IMAGE_REF" not in preflight
+  assert 'container_version_field "$PREFLIGHT_CONTAINER" protected_runtime_state' in preflight
+  assert "preflight protected runtime: current" in preflight
+
+
+def test_version_field_parser_reads_the_top_level_scalar_not_nested_text():
+  function = _function_source(
+    "container_version_field", "# The HTTP status",
+  )
+  harness = textwrap.dedent("""\
+    docker() {
+      printf '%s\n' '{"protected_runtime_state":"stale","protected_runtime":{"state":"current"}}'
+    }
+    INTERNAL_BASE=http://127.0.0.1:8000
+    CONTAINER=mobius
+  """) + function + "served_version_field protected_runtime_state\n"
+
+  result = subprocess.run(
+    ["bash", "-c", harness], capture_output=True, text=True,
+  )
+
+  assert result.returncode == 0, result.stderr
+  assert result.stdout == "stale\n"
+
+
+def test_final_verification_fails_closed_on_protected_runtime_drift():
+  source = _read()
+  assert 'protected_runtime_state=$(served_version_field protected_runtime_state)' in source
+  assert 'if [ "$protected_runtime_state" = "current" ]' in source
+  assert "Do not report this deployment complete" in source
 
 
 def _recreation_harness(assertions: str, *, desired_hash: str | None) -> str:

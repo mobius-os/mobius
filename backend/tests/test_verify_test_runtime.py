@@ -14,13 +14,6 @@ SHA = "a" * 40
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def test_starlette_test_client_uses_supported_httpx2_transport():
-  import httpx2
-  from starlette.testclient import TestClient
-
-  assert issubclass(TestClient, httpx2.Client)
-
-
 def _version(**overrides):
   value = {
     "test_runtime": True,
@@ -115,6 +108,22 @@ def test_test_compose_pins_runtime_to_mounted_checkout():
   assert "\n    init: true\n" in pytest_service
 
 
+def test_e2e_startup_has_one_bounded_readiness_owner():
+  compose = (ROOT / "docker-compose.test.yml").read_text(encoding="utf-8")
+  caddy_service = compose.split("\n  caddy:\n", 1)[1].split("\n  app:\n", 1)[0]
+  assert "condition: service_started" in caddy_service
+  assert "condition: service_healthy" not in caddy_service
+
+  workflow = (ROOT / ".github" / "workflows" / "test.yml").read_text(
+    encoding="utf-8"
+  )
+  startup = workflow.split("- name: Start test container", 1)[1].split(
+    "- name: Set up Node with npm cache", 1
+  )[0]
+  assert "timeout 120" in startup
+  assert ".State.Health.Status" in startup
+
+
 def test_test_wrapper_isolates_compose_and_rejects_stale_images():
   wrapper = (ROOT / "scripts" / "test.sh").read_text(encoding="utf-8")
   assert 'TEST_PROJECT="${MOBIUS_TEST_PROJECT:-mobius-test-' in wrapper
@@ -133,7 +142,9 @@ def test_test_wrapper_isolates_compose_and_rejects_stale_images():
   )
   backend_source = "COPY backend/app ./app/"
   backend_scripts = "COPY backend/scripts ./scripts/"
-  platform_seed = 'git clone --depth 1 "$MOBIUS_PLATFORM_ORIGIN" /app/platform-baked'
+  platform_seed = (
+    'git clone --depth 1 "$MOBIUS_PLATFORM_ORIGIN" /app/platform-baked'
+  )
   frontend_source = "COPY frontend/ ./shell-src/"
   assert dockerfile.count(backend_source) == 1
   assert dockerfile.count(backend_scripts) == 1
@@ -142,6 +153,97 @@ def test_test_wrapper_isolates_compose_and_rejects_stale_images():
     assert dockerfile.index(asset_stage) < dockerfile.index(frontend_source)
   assert dockerfile.index(frontend_source) < dockerfile.index(platform_seed)
   assert dockerfile.index(platform_seed) < dockerfile.index(backend_source)
+  assert (
+    '[ "${MOBIUS_USE_LOCAL_PLATFORM_SOURCE:-0}" != "1" ]'
+    in dockerfile
+  )
+  assert 'ARG MOBIUS_LOCAL_PLATFORM_BASE_SHA=unknown' in dockerfile
+  assert "FROM scratch AS mobius-local-platform-source" in dockerfile
+  assert dockerfile.startswith("# syntax=docker/dockerfile:1\n")
+  assert (
+    "RUN --mount=type=bind,from=mobius-local-platform-source"
+    in dockerfile
+  )
+  assert "/tmp/mobius-local-platform-source/platform.bundle" in dockerfile
+  assert 'git -C /app/platform-baked fetch --no-tags "$_bundle" HEAD' in dockerfile
+  assert 'git -C /app/platform-baked checkout --detach' in dockerfile
+  assert "COPY . /tmp/mobius-local-platform-source" not in dockerfile
+  assert (
+    'git -C /app/platform-baked remote set-url origin "$MOBIUS_PLATFORM_ORIGIN"'
+    in dockerfile
+  )
+  assert (
+    'platform_activation.py", "--hashes", "/app/platform-baked"'
+    in dockerfile
+  )
+  compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+  assert "additional_contexts:" in compose
+  assert "mobius-local-platform-source:" in compose
+  assert "MOBIUS_LOCAL_PLATFORM_CONTEXT:-./.docker/empty-context" in compose
+  assert "MOBIUS_USE_LOCAL_PLATFORM_SOURCE:" in compose
+  assert "MOBIUS_LOCAL_PLATFORM_SHA:" in compose
+  assert "MOBIUS_LOCAL_PLATFORM_BASE_SHA:" in compose
+  assert "MOBIUS_LOCAL_PLATFORM_DATE:" in compose
+  deploy = (ROOT / "scripts" / "deploy-prod.sh").read_text(encoding="utf-8")
+  assert "MOBIUS_USE_LOCAL_PLATFORM_SOURCE=1 requires a clean" in deploy
+  assert 'export MOBIUS_LOCAL_PLATFORM_SHA="$_sha"' in deploy
+  assert 'bundle create "$LOCAL_SOURCE_CONTEXT/platform.bundle"' in deploy
+  assert 'export MOBIUS_LOCAL_PLATFORM_CONTEXT="$LOCAL_SOURCE_CONTEXT"' in deploy
+
+
+def test_local_platform_bundle_preserves_source_deletions(tmp_path):
+  def git(repo, *args):
+    return subprocess.run(
+      ["git", "-C", str(repo), *args],
+      check=True,
+      capture_output=True,
+      text=True,
+    ).stdout.strip()
+
+  public = tmp_path / "public"
+  public.mkdir()
+  git(public, "init", "-b", "main")
+  git(public, "config", "user.name", "Test")
+  git(public, "config", "user.email", "test@example.com")
+  (public / "kept.txt").write_text("base\n", encoding="utf-8")
+  (public / "deleted.txt").write_text("remove me\n", encoding="utf-8")
+  git(public, "add", ".")
+  git(public, "commit", "-m", "base")
+  base_sha = git(public, "rev-parse", "HEAD")
+
+  local = tmp_path / "local"
+  subprocess.run(
+    ["git", "clone", str(public), str(local)],
+    check=True,
+    capture_output=True,
+    text=True,
+  )
+  git(local, "config", "user.name", "Test")
+  git(local, "config", "user.email", "test@example.com")
+  (local / "deleted.txt").unlink()
+  (local / "kept.txt").write_text("local\n", encoding="utf-8")
+  git(local, "add", "-A")
+  git(local, "commit", "-m", "local change")
+  local_sha = git(local, "rev-parse", "HEAD")
+  local_tree = git(local, "rev-parse", "HEAD^{tree}")
+  bundle = tmp_path / "local.bundle"
+  git(local, "bundle", "create", str(bundle), "HEAD", f"^{base_sha}")
+
+  baked = tmp_path / "baked"
+  subprocess.run(
+    ["git", "clone", "--depth", "1", f"file://{public}", str(baked)],
+    check=True,
+    capture_output=True,
+    text=True,
+  )
+  git(baked, "fetch", "--depth", "1", str(public), base_sha)
+  git(baked, "fetch", "--no-tags", str(bundle), "HEAD")
+  assert git(baked, "rev-parse", "FETCH_HEAD") == local_sha
+  git(baked, "checkout", "--detach", local_sha)
+
+  assert not (baked / "deleted.txt").exists()
+  assert (baked / "kept.txt").read_text(encoding="utf-8") == "local\n"
+  assert git(baked, "rev-parse", "HEAD^{tree}") == local_tree
 
 
 def test_node_runtime_satisfies_the_pinned_agent_browser_engine():
@@ -149,7 +251,6 @@ def test_node_runtime_satisfies_the_pinned_agent_browser_engine():
   preship = (ROOT / "scripts" / "preship-gate.sh").read_text(encoding="utf-8")
   assert "FROM node:24-trixie-slim AS node-runtime" in dockerfile
   pinned_script_packages = {
-    "@anthropic-ai/claude-code": "CLAUDE_CODE_VERSION",
     "@openai/codex": "CODEX_VERSION",
     "agent-browser": "AGENT_BROWSER_VERSION",
   }
@@ -209,18 +310,31 @@ def test_image_deduplicates_agent_cli_payloads_without_breaking_sdk_contracts():
     "pip install --no-cache-dir --require-hashes -r requirements.lock"
     in requirements_layer
   )
-  assert "claude-agent-sdk==0.2.148" in requirements
-  assert "claude-agent-sdk==0.2.148" in requirements_lock
+  assert "claude-agent-sdk==0.2.152" in requirements
+  assert "claude-agent-sdk==0.2.152" in requirements_lock
   assert (
     'Path(claude_agent_sdk.__file__).parent / "_bundled" / "claude"'
     in requirements_layer
-    and "unlink(missing_ok=True)" in requirements_layer
-    and "assert not p.exists()" in requirements_layer
+    and 'ln -s "$(python -c' in requirements_layer
+    and 'Path(shutil.which("claude")).samefile' in requirements_layer
+    and "claude --version | grep -Fx '2.1.259 (Claude Code)'" in requirements_layer
   )
+  assert "CLAUDE_CODE_VERSION" not in dockerfile
+  install_layer = dockerfile[
+    dockerfile.index("RUN apt-get update"):
+    dockerfile.index("# Capture each installed agent CLI's publish date")
+  ]
+  assert "@anthropic-ai/claude-code" not in install_layer
+  release_dates_layer = dockerfile[
+    dockerfile.index("# Capture each installed agent CLI's publish date"):
+    dockerfile.index("# Install the shell and mini-app compiler dependency tree")
+  ]
+  assert "cp.execSync('claude --version')" in release_dates_layer
+  assert "'@anthropic-ai/claude-code':claude" in release_dates_layer
 
   codex_layer = dockerfile[
     dockerfile.index("# openai-codex Python SDK:"):
-    dockerfile.index("# Capture each installed agent CLI")
+    dockerfile.index("# Capture each installed agent CLI's publish date")
   ]
   assert "pip install --no-cache-dir --no-deps" in codex_layer
   assert "pip install --no-cache-dir 'openai-codex-cli-bin==0.147.0'" in codex_layer

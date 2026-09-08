@@ -16,6 +16,7 @@ from app.deps import (
   get_current_owner,
   get_principal,
   reject_cross_site,
+  require_nondelegated_owner_or_app_control,
 )
 from app.push import notify_owner
 from app.schemas import NotificationOut, NotificationSendRequest
@@ -27,7 +28,13 @@ router = APIRouter(prefix="/api/notifications", tags=["notifications"])
 limiter = Limiter(key_func=get_remote_address)
 
 
-@router.post("/send", dependencies=[Depends(reject_cross_site)])
+@router.post(
+  "/send",
+  dependencies=[
+    Depends(reject_cross_site),
+    Depends(require_nondelegated_owner_or_app_control),
+  ],
+)
 @limiter.limit("10/minute")
 def send_notification(
   request: Request,
@@ -79,7 +86,13 @@ def unread_count(
   return {"count": int(n or 0)}
 
 
-@router.post("/read-all", dependencies=[Depends(reject_cross_site)])
+@router.post(
+  "/read-all",
+  dependencies=[
+    Depends(reject_cross_site),
+    Depends(require_nondelegated_owner_or_app_control),
+  ],
+)
 def read_all(
   owner: models.Owner = Depends(get_current_owner),
   db: Session = Depends(get_db),
@@ -104,7 +117,13 @@ def read_all(
   return {"updated": int(updated)}
 
 
-@router.delete("", dependencies=[Depends(reject_cross_site)])
+@router.delete(
+  "",
+  dependencies=[
+    Depends(reject_cross_site),
+    Depends(require_nondelegated_owner_or_app_control),
+  ],
+)
 def clear_notifications(
   owner: models.Owner = Depends(get_current_owner),
   db: Session = Depends(get_db),

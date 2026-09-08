@@ -185,6 +185,7 @@ def test_current_turn_promotes_atomically_without_a_goal_message(
     db.expire_all()
     run = db.query(models.ChatRun).filter(models.ChatRun.id == "ordinary-run").one()
     assert run.goal_objective == "Repair every defect and verify the suite"
+    assert run.goal_id == "ordinary-run"
     chat = db.query(models.Chat).filter(models.Chat.id == chat_id).one()
     assert all(
       "/goal" not in str(message.get("content", ""))
@@ -198,6 +199,14 @@ def test_current_turn_promotes_atomically_without_a_goal_message(
     )
     assert retry.status_code == 200
     assert retry.json()["state"] == "active"
+    db.expire_all()
+    assert (
+      db.query(models.ChatRun)
+      .filter(models.ChatRun.id == "ordinary-run")
+      .one()
+      .goal_id
+      == "ordinary-run"
+    )
     assert [
       event["type"] for event in broadcast.event_log
     ] == ["goal_activated"]
@@ -470,6 +479,38 @@ def test_goal_wait_ownership_excludes_a_later_ordinary_turn(db, chat):
   assert presented_goal(db, chat.id)["wait_kind"] == "monitor"
 
 
+def test_goal_wait_ownership_includes_only_its_waking_helpers(
+  db, chat, monkeypatch,
+):
+  from app.goal_plans import presented_goal
+
+  goal_run = models.ChatRun(
+    id="helper-goal-run", root_run_id="helper-goal-run", chat_id=chat.id,
+    status="completed", provider="codex", goal_objective="Wait on helper",
+    goal_id="helper-goal-id", started_at=datetime.now(UTC),
+  )
+  db.add(goal_run)
+  db.commit()
+
+  monkeypatch.setattr(
+    "app.delegations.background_helper_goal_ids",
+    lambda _db, _chat_id: {"different-goal"},
+  )
+  unrelated = presented_goal(db, chat.id)
+  assert unrelated["status"] == "completed"
+  assert unrelated["resumable"] is False
+  assert "wait_kind" not in unrelated
+
+  monkeypatch.setattr(
+    "app.delegations.background_helper_goal_ids",
+    lambda _db, _chat_id: {"helper-goal-id"},
+  )
+  owned = presented_goal(db, chat.id)
+  assert owned["status"] == "paused"
+  assert owned["resumable"] is True
+  assert owned["wait_kind"] == "monitor"
+
+
 def test_legacy_queued_goal_clear_is_retired_without_opening_a_turn(db, chat):
   from app.chat_writer import PromotePending, get_writer
 
@@ -514,14 +555,31 @@ def test_goal_promotion_rejects_delegation_and_app_scope_tokens(
   db.refresh(app)
 
   owner = db.query(models.Owner).first()
-  # (a) A delegated child holds a delegation-scope token; the promotion route
-  # requires the owner-scope agent-run bearer, so the server boundary refuses
-  # it before any writer work.
+  # (a) A real delegated execution bearer deliberately remains owner-scoped so
+  # ordinary tools are inherited. Its delegation claim is therefore the
+  # parent-only boundary Goal promotion must enforce explicitly.
+  from app.delegations import RunPolicy, delegation_execution_token
+
+  parent = models.Chat(
+    id="goal-scope-parent", title="Parent", messages=[],
+    pending_messages=[], provider="codex",
+  )
+  delegation_id = "goal-scope-delegation"
+  db.add(parent)
+  db.add(models.Delegation(
+    id=delegation_id, app_id=app.id, parent_chat_id=parent.id,
+    parent_root_run_id=parent.id, task_key="goal-boundary",
+    child_chat_id=chat_id, provider="codex", model=None, effort=None,
+    scope="read", cwd="/data/platform",
+    prompt_sha256=hashlib.sha256(b"check goal boundary").hexdigest(),
+  ))
+  db.commit()
+  delegated_token = delegation_execution_token(db, RunPolicy(
+    delegation_id=delegation_id, app_id=app.id, provider="codex",
+    model=None, effort=None, scope="read", cwd="/data/platform",
+  ), run_id="scoped-run")
   delegation_auth = {
-    "Authorization": "Bearer " + auth_mod.create_delegation_token(
-      "delegation-scope", app.id, chat_id, "scoped-run",
-      owner.username, owner.token_epoch,
-    )
+    "Authorization": f"Bearer {delegated_token}",
   }
   delegated = client.post(
     f"/api/chats/{chat_id}/goal",
@@ -541,6 +599,87 @@ def test_goal_promotion_rejects_delegation_and_app_scope_tokens(
     json={"objective": "App cannot promote"}, headers=app_auth,
   )
   assert app_scoped.status_code in (401, 403), app_scoped.text
+
+
+def test_delegated_execution_bearer_cannot_mutate_or_clear_any_goal(
+  client, owner_token, db,
+):
+  owner_auth = {"Authorization": f"Bearer {owner_token}"}
+  child_id = client.post(
+    "/api/chats", json={"title": "Delegated child"}, headers=owner_auth,
+  ).json()["id"]
+  parent_id = client.post(
+    "/api/chats", json={"title": "Delegation parent"}, headers=owner_auth,
+  ).json()["id"]
+  foreign_id = client.post(
+    "/api/chats", json={"title": "Unrelated chat"}, headers=owner_auth,
+  ).json()["id"]
+  app = models.App(
+    name="Goal boundary", description="", slug="goal-boundary-app",
+    source_dir="/tmp/mobius-tests/goal-boundary-app",
+    jsx_source="export default () => null", token_nonce="goal-boundary-nonce",
+  )
+  db.add(app)
+  db.flush()
+  delegation_id = "goal-mutation-delegation"
+  db.add(models.Delegation(
+    id=delegation_id, app_id=app.id, parent_chat_id=parent_id,
+    parent_root_run_id=parent_id, task_key="goal-mutation-boundary",
+    child_chat_id=child_id, provider="codex", model=None, effort=None,
+    scope="read", cwd="/data/platform",
+    prompt_sha256=hashlib.sha256(b"check every goal route").hexdigest(),
+  ))
+  db.add(models.ChatRun(
+    id="goal-mutation-run", root_run_id="goal-mutation-run",
+    chat_id=child_id, status="running", provider="codex",
+  ))
+  db.add(models.ChatRun(
+    id="parent-goal-run", root_run_id="parent-goal-run",
+    chat_id=parent_id, status="running", provider="claude",
+    goal_objective="Owner Goal", goal_id="owner-goal-id",
+    goal_plan_json={
+      "revision": 4,
+      "tasks": [{"id": "ship", "title": "Ship", "status": "running"}],
+    },
+  ))
+  db.commit()
+
+  from app.delegations import RunPolicy, delegation_execution_token
+
+  token = delegation_execution_token(db, RunPolicy(
+    delegation_id=delegation_id, app_id=app.id, provider="codex",
+    model=None, effort=None, scope="read", cwd="/data/platform",
+  ), run_id="goal-mutation-run")
+  auth = {"Authorization": f"Bearer {token}"}
+
+  for target_id in (child_id, parent_id, foreign_id):
+    promoted = client.post(
+      f"/api/chats/{target_id}/goal",
+      json={"objective": "Delegated Goal"}, headers=auth,
+    )
+    replaced = client.put(
+      f"/api/chats/{target_id}/goal-plan",
+      json={"expected_revision": 0, "tasks": []}, headers=auth,
+    )
+    patched = client.patch(
+      f"/api/chats/{target_id}/goal-plan/tasks/anything",
+      json={"expected_revision": 0, "status": "completed"}, headers=auth,
+    )
+    cleared = client.request(
+      "DELETE", f"/api/chats/{target_id}/goal",
+      json={"goal_id": "delegated-goal"}, headers=auth,
+    )
+
+    assert promoted.status_code == 403, promoted.text
+    assert replaced.status_code == 403, replaced.text
+    assert patched.status_code == 403, patched.text
+    assert cleared.status_code == 403, cleared.text
+
+  db.expire_all()
+  parent_goal = db.get(models.ChatRun, "parent-goal-run")
+  assert parent_goal.status == "running"
+  assert parent_goal.goal_id == "owner-goal-id"
+  assert parent_goal.goal_plan_json["revision"] == 4
 
 
 def test_promote_run_to_goal_rejects_a_terminal_run(client, owner_token, db):
