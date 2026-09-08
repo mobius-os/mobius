@@ -21,10 +21,11 @@ const { default: ProjectWorkspace } = await vite.ssrLoadModule(
 
 after(() => vite.close())
 
-function renderWorkspace(props = {}) {
+function renderWorkspace(props = {}, status) {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   })
+  if (status) client.setQueryData(['projects', 'git', 'project-1', 'status'], status)
   const project = {
     id: 'project-1',
     name: 'Research notes',
@@ -165,5 +166,24 @@ test('theme belongs beside Files, and collaboration and activity remain distinct
   assert.ok(markup.indexOf('Inherited Möbius theme') > markup.indexOf('aria-label="Folder location"'))
   assert.match(markup, /aria-label="Collaborate"/)
   assert.match(markup, /aria-label="Project activity"/)
-  assert.match(markup, /Checking local changes/)
+  assert.doesNotMatch(markup, /No uncommitted changes|Checking local changes/)
+})
+
+
+test('source control uses aggregate and per-file line counts, not prose status', () => {
+  const markup = renderWorkspace({}, {
+    available: true, branch: 'main', repository_scope: 'project',
+    line_stats: { available: true, additions: 12, deletions: 3 },
+    changes: [{ path: 'index.jsx', status: 'modified', additions: 12, deletions: 3 }],
+    counts: { modified: 1 },
+  })
+  assert.match(markup, /12 additions and 3 deletions/)
+  assert.match(markup, /project-change-diff/)
+  assert.doesNotMatch(markup, /uncommitted|Saved source matches/)
+})
+
+test('a clean working tree shows zero line changes', () => {
+  const markup = renderWorkspace({}, { available: true, branch: 'main', repository_scope: 'project', changes: [], counts: {} })
+  assert.match(markup, /0 additions and 0 deletions/)
+  assert.doesNotMatch(markup, /Commit changes/)
 })

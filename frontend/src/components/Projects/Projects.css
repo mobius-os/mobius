@@ -680,7 +680,7 @@
   border-bottom: 1px solid var(--border-light);
   color: var(--muted);
 }
-.project-finder__changes summary {
+.project-finder__changes > summary {
   min-height: 34px;
   display: flex;
   align-items: center;
@@ -692,8 +692,8 @@
   font-size: 11px;
   font-weight: 620;
 }
-.project-finder__changes summary::-webkit-details-marker { display: none; }
-.project-finder__changes summary > span { display: inline-flex; align-items: center; gap: 7px; }
+.project-finder__changes > summary::-webkit-details-marker { display: none; }
+.project-finder__changes > summary > span { display: inline-flex; align-items: center; gap: 7px; }
 .project-finder__commit-action { display: flex; justify-content: flex-end; padding: 7px 10px 0; }
 .project-finder__commit-action > button {
   min-height: 28px; display: inline-flex; align-items: center; gap: 5px; padding: 3px 8px;
@@ -707,18 +707,7 @@
 .project-finder__commit input { min-width: 0; flex: 1; min-height: 38px; padding: 7px 9px; border: 1px solid var(--border-light); border-radius: 8px; color: var(--text); background: var(--bg); font: inherit; }
 .project-finder__commit button { min-height: 38px; padding: 7px 10px; border: 0; border-radius: 8px; color: var(--accent-fg, #fff); background: var(--accent); font: inherit; font-size: 11px; font-weight: 700; }
 .project-finder__commit small { color: var(--muted); font-size: 10px; }
-.project-finder__changes summary b {
-  min-width: 20px;
-  height: 18px;
-  display: grid;
-  place-items: center;
-  padding: 0 5px;
-  border-radius: 9px;
-  color: var(--text);
-  background: var(--surface);
-  font-size: 10px;
-}
-.project-finder__changes[open] summary { color: var(--text); background: var(--surface); }
+.project-finder__changes[open] > summary { color: var(--text); background: var(--surface); }
 .project-finder__change-list {
   max-height: 216px;
   overflow-y: auto;
@@ -915,7 +904,7 @@ button.project-finder__change:hover { color: var(--text); background: var(--surf
 .project-finder__pane-head strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
 .project-finder__pane-head small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 10px; }
 .project-finder__diff-total { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 5px; font: 600 10px/1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
-.project-finder__diff-total b { color: #188653; font: inherit; }
+.project-finder__diff-total b { color: var(--green, #188653); font: inherit; }
 .project-finder__diff-total i { color: var(--danger, #c43d3d); font: inherit; font-style: normal; }
 .project-finder__pane-actions { flex: 0 0 auto; display: flex; align-items: center; gap: 7px; }
 .project-finder__pane-actions button {
@@ -1375,6 +1364,11 @@ button.project-finder__change:hover { color: var(--text); background: var(--surf
 }
 
 /* Source resources and status belong to Files, not the output overview. */
-.project-finder__source-status { padding: 8px 14px; color: var(--muted); font-size: 12px; line-height: 1.5; }
-.project-finder__source-status > span { display: block; color: var(--text); }
 .project-finder__explorer-scroll > .project-theme-resource { margin: 0; padding: 10px 14px; }
+
+.project-change-diff { min-width: 0; border-top: 1px solid var(--border-light); }
+.project-change-diff > summary { display: flex; align-items: center; gap: 8px; padding: 9px 3px; cursor: pointer; }
+.project-change-diff > summary > span:first-child { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.project-change-diff small { color: var(--muted); font-size: 11px; }
+.project-change-diff > p { margin: 8px 3px; font-size: 12px; }
+.project-change-diff .diff-view { max-height: 420px; overflow: auto; }

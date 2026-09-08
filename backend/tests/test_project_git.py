@@ -98,8 +98,8 @@ def test_shared_repository_is_scoped_to_project_and_exposes_changed_lines(
   assert body["repository_scope"] == "shared"
   assert body["counts"] == {"modified": 1, "untracked": 1}
   assert body["changes"] == [
-    {"path": "main.py", "status": "modified", "staged": False},
-    {"path": "notes.txt", "status": "untracked", "staged": False},
+    {"path": "main.py", "status": "modified", "staged": False, "additions": 2, "deletions": 1, "binary": False},
+    {"path": "notes.txt", "status": "untracked", "staged": False, "additions": 2, "deletions": 0, "binary": False},
   ]
 
   diff = client.get(
@@ -141,7 +141,7 @@ def test_project_owned_repository_takes_precedence(client, auth, db):
   assert body["repository_scope"] == "project"
   assert body["branch"] == "project-main"
   assert body["changes"] == [
-    {"path": "main.py", "status": "modified", "staged": False},
+    {"path": "main.py", "status": "modified", "staged": False, "additions": 1, "deletions": 1, "binary": False},
   ]
 
 
@@ -306,3 +306,50 @@ def test_applied_source_status_distinguishes_clean_commits_from_deployment(tmp_p
   assert state() == 'pending'
   assert project_git.applied_source_status(root, None, project_git.project_status(root)) == {'state': 'unknown'}
   assert project_git.applied_source_status(root, 'a' * 40, project_git.project_status(root)) == {'state': 'unknown'}
+
+
+def test_status_line_counts_and_unified_patches_include_new_deleted_and_binary_files(tmp_path):
+  root = tmp_path
+  _git(root, 'init', '-b', 'main')
+  (root / 'old.txt').write_text('old\n')
+  (root / 'edit.txt').write_text('before\ncontext\n')
+  _git(root, 'add', '.')
+  _git(root, 'commit', '-m', 'Baseline')
+  (root / 'old.txt').unlink()
+  (root / 'edit.txt').write_text('+++literal\ncontext\n')
+  (root / 'new.txt').write_text('one\ntwo\n')
+  (root / 'image.bin').write_bytes(b'\0binary')
+  status = project_git.project_status(root)
+  assert status['line_stats'] == {'available': True, 'additions': 3, 'deletions': 2, 'truncated': False}
+  assert next(row for row in status['changes'] if row['path'] == 'image.bin')['binary']
+  deleted = project_git.project_file_diff(root, root / 'old.txt')
+  assert deleted['deletions'] == 1 and '-old' in deleted['patch']
+  changed = project_git.project_file_diff(root, root / 'edit.txt')
+  assert changed['additions'] == 1 and changed['changed_lines'] == [1]
+  assert ' context' in changed['patch']
+  new = project_git.project_file_diff(root, root / 'new.txt')
+  assert '+one\n+two\n' in new['patch']
+
+
+def test_deleted_project_file_has_a_diff_but_unknown_paths_remain_404(client, auth, db):
+  project = client.post('/api/projects', headers=auth, json={'name': 'Diffs', 'template_id': 'blank'}).json()
+  root = _project_root(db, project)
+  (root / 'old.txt').write_text('removed\n')
+  _git(root, 'init', '-b', 'main')
+  _git(root, 'add', '.')
+  _git(root, 'commit', '-m', 'Baseline')
+  (root / 'old.txt').unlink()
+  response = client.get(f"/api/projects/{project['id']}/git/diff?path=old.txt", headers=auth)
+  assert response.status_code == 200
+  assert '-removed' in response.json()['patch']
+  assert client.get(f"/api/projects/{project['id']}/git/diff?path=missing.txt", headers=auth).status_code == 404
+
+
+def test_new_file_stat_reads_are_bounded_and_report_partial_counts(tmp_path, monkeypatch):
+  _git(tmp_path, 'init', '-b', 'main')
+  (tmp_path / 'base').write_text('base')
+  _git(tmp_path, 'add', '.')
+  _git(tmp_path, 'commit', '-m', 'Baseline')
+  (tmp_path / 'large').write_text('a\n' * 100)
+  monkeypatch.setattr(project_git, '_DIFF_OUTPUT_MAX', 10)
+  assert project_git.project_status(tmp_path)['line_stats']['truncated'] is True

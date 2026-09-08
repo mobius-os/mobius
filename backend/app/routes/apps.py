@@ -345,7 +345,11 @@ def get_app_source_git_diff(
   _app, root = _app_source_root(db, app_id)
   target = _resolve_app_source_path(root, path)
   if not target.is_file():
-    raise HTTPException(404, "File not found.")
+    relative = target.relative_to(root).as_posix()
+    deleted = any(row["path"] == relative and row["status"] == "deleted"
+                  for row in project_git.project_status(root)["changes"])
+    if not deleted:
+      raise HTTPException(404, "File not found.")
   return project_git.project_file_diff(
     root, target, hidden_dirs=_APP_SOURCE_HIDDEN_DIRS,
   )

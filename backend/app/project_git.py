@@ -8,6 +8,7 @@ repository root, so an owner action can never stage unrelated Möbius files.
 from __future__ import annotations
 
 import os
+import json
 import re
 import selectors
 import subprocess
@@ -536,7 +537,9 @@ def project_status(
       truncated = True
   changes.sort(key=lambda row: row["path"].lower())
   branch, head = _branch_and_head(context)
+  line_stats = _status_line_stats(context, changes, hidden_dirs)
   return {
+    "line_stats": line_stats,
     "available": True,
     "branch": branch,
     "head": head,
@@ -547,27 +550,37 @@ def project_status(
   }
 
 
-def _untracked_diff(target: Path, status: str) -> dict:
+def _untracked_diff(target: Path, status: str, *, limit: int = _DIFF_OUTPUT_MAX) -> dict:
+  read_failed = False
   try:
-    content = target.read_bytes()
+    if target.is_symlink():
+      content = os.readlink(target).encode()
+    else:
+      with target.open("rb") as stream:
+        content = stream.read(limit + 1)
   except OSError:
     content = b""
-  truncated = len(content) > _DIFF_OUTPUT_MAX
-  content = content[:_DIFF_OUTPUT_MAX]
+    read_failed = True
+  truncated = read_failed or len(content) > limit
+  content = content[:limit]
   try:
     text = content.decode("utf-8")
   except UnicodeDecodeError:
+    text = None
+  if text is None or b"\0" in content:
     return {
       "status": status,
       "additions": 0,
       "deletions": 0,
       "changed_lines": [],
       "binary": True,
+      "patch": "",
       "truncated": truncated,
     }
   count = 0 if not text else len(text.splitlines())
   return {
     "status": status,
+    "patch_lines": text.splitlines(),
     "additions": count,
     "deletions": 0,
     "changed_lines": list(range(1, min(count, _LINE_LIMIT) + 1)),
@@ -614,11 +627,16 @@ def project_file_diff(
     }
   status = status_row["status"]
   if status == "untracked":
-    return {"available": True, **_untracked_diff(target, status)}
+    diff = _untracked_diff(target, status)
+    lines = diff.pop("patch_lines", [])
+    old_name, new_name = json.dumps("a/" + relative), json.dumps("b/" + relative)
+    diff["patch"] = (f"diff --git {old_name} {new_name}\nnew file mode 100644\n--- /dev/null\n+++ {new_name}\n@@ -0,0 +1,{len(lines)} @@\n"
+                     + "".join("+" + line + "\n" for line in lines)) if lines else ""
+    return {"available": True, **diff}
 
   code, output, truncated = _run_git(
     context.repo,
-    "diff", "--no-ext-diff", "--no-color", "--unified=0", "HEAD",
+    "diff", "--no-ext-diff", "--no-color", "--unified=3", "HEAD",
     "--", _context_path(context, target),
     limit=_DIFF_OUTPUT_MAX,
   )
@@ -634,29 +652,28 @@ def project_file_diff(
     }
   text = output.decode("utf-8", "replace")
   binary = "Binary files " in text or "GIT binary patch" in text
-  additions = sum(
-    1 for line in text.splitlines()
-    if line.startswith("+") and not line.startswith("+++")
-  )
-  deletions = sum(
-    1 for line in text.splitlines()
-    if line.startswith("-") and not line.startswith("---")
-  )
+  additions = deletions = 0
   changed_lines: list[int] = []
+  number = None
   for line in text.splitlines():
     match = _HUNK_RE.match(line)
-    if match is None:
-      continue
-    start = int(match.group("new_start"))
-    count = int(match.group("new_count") or "1")
-    for number in range(start, start + count):
-      if len(changed_lines) >= _LINE_LIMIT:
+    if match:
+      number = int(match.group("new_start"))
+    elif number is not None and line.startswith("+"):
+      additions += 1
+      if len(changed_lines) < _LINE_LIMIT:
+        changed_lines.append(number)
+      else:
         truncated = True
-        break
-      changed_lines.append(number)
+      number += 1
+    elif number is not None and line.startswith("-"):
+      deletions += 1
+    elif number is not None and line.startswith(" "):
+      number += 1
   return {
     "available": True,
     "status": status,
+    "patch": text,
     "additions": additions,
     "deletions": deletions,
     "changed_lines": sorted(set(changed_lines)),
@@ -690,3 +707,41 @@ def applied_source_status(root: Path, accepted_commit: str | None, status: dict)
   # already includes them and applies the Project's source visibility boundary.
   added = any(row["status"] == "untracked" for row in status.get("changes", []))
   return {"state": "pending" if changed or added else "current"}
+
+
+def _status_line_stats(context, changes, hidden_dirs) -> dict:
+  """One bounded numstat read plus a shared read budget for untracked text."""
+  code, output, truncated = _run_git(
+    context.repo, "diff", "--numstat", "-z", "--no-renames", "--no-ext-diff", "HEAD", "--", context.scope,
+  )
+  by_path = {}
+  for record in output.split(b"\0"):
+    fields = record.split(b"\t", 2)
+    if len(fields) != 3:
+      continue
+    path = _project_relative(context, fields[2].decode("utf-8", "replace"), hidden_dirs)
+    if path is None:
+      continue
+    binary = fields[0] == b"-"
+    if not binary and not (fields[0].isdigit() and fields[1].isdigit()):
+      truncated = True
+      continue
+    by_path[path] = {"additions": 0 if binary else int(fields[0]), "deletions": 0 if binary else int(fields[1]), "binary": binary}
+  budget = _DIFF_OUTPUT_MAX
+  for row in changes:
+    if row["status"] == "untracked":
+      target = context.root / row["path"]
+      if budget <= 0 or not target.resolve().is_relative_to(context.root):
+        truncated = True
+        continue
+      diff = _untracked_diff(target, "untracked", limit=budget)
+      try:
+        budget -= min(target.lstat().st_size, budget)
+      except OSError:
+        truncated = True
+      truncated = truncated or diff["truncated"]
+      by_path[row["path"]] = {key: diff[key] for key in ("additions", "deletions", "binary")}
+    if row["path"] in by_path:
+      row.update(by_path[row["path"]])
+  return {"available": code == 0, "additions": sum(row["additions"] for row in by_path.values()),
+          "deletions": sum(row["deletions"] for row in by_path.values()), "truncated": truncated}

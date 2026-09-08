@@ -2535,7 +2535,11 @@ def get_project_git_diff(
   project = _project_for(db, project_id, principal, "viewer")
   root, target = _resolve_project_path(project, path)
   if not target.is_file():
-    raise HTTPException(404, "File not found.")
+    relative = target.relative_to(root).as_posix()
+    deleted = any(row["path"] == relative and row["status"] == "deleted"
+                  for row in project_git.project_status(root)["changes"])
+    if not deleted:
+      raise HTTPException(404, "File not found.")
   return project_git.project_file_diff(root, target)
 
 

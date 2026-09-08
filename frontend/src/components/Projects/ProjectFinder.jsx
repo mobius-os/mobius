@@ -21,6 +21,7 @@ import Plus from 'lucide-react/dist/esm/icons/plus.mjs'
 import Search from 'lucide-react/dist/esm/icons/search.mjs'
 import Upload from 'lucide-react/dist/esm/icons/upload.mjs'
 import Trash2 from 'lucide-react/dist/esm/icons/trash-2.mjs'
+import ProjectChangeDiff, { ChangeLineCounts } from './ProjectChangeDiff.jsx'
 import { api, jsonOrThrow } from '../../api/client.js'
 import { assembleProjectHtmlPreview } from '../../lib/projectPreview.js'
 import { artifactTypeForFile } from '../../lib/projectArtifacts.js'
@@ -887,33 +888,22 @@ export default function ProjectFinder({
             </div>
 
             {resources}
-            <div className="project-finder__source-status" role="status">
-              {gitQuery.isLoading ? 'Checking local changes…' : gitQuery.isError || !gitStatus?.available ? 'Local change status unavailable' : gitTotal ? `${gitTotal} uncommitted ${gitTotal === 1 ? 'file' : 'files'}` : 'No uncommitted changes'}
-              {gitStatus?.app_build && <span>{gitStatus.app_build.state === 'current' ? 'Saved source matches last app build' : gitStatus.app_build.state === 'pending' ? 'Saved source differs from running app · Build & update when ready' : 'Build status unavailable · last applied source could not be compared'}</span>}
-            </div>
-            {gitTotal > 0 && gitStatus?.repository_scope === 'project' && (
+            {gitQuery.isError && <button type="button" onClick={() => gitQuery.refetch()}>Retry changes</button>}
+            {gitStatus?.available && (
               <details className="project-finder__changes">
                 <summary>
                   <span><GitBranch size={14} aria-hidden="true" /> Changes</span>
-                  <b>{gitTotal}</b>
+                  <ChangeLineCounts {...(gitStatus.line_stats?.available ? gitStatus.line_stats : gitTotal === 0 ? { additions: 0, deletions: 0 } : {})} />
                 </summary>
-                {!readOnly && gitStatus?.repository_scope === 'project' && source.commitGit && <div className="project-finder__commit-action"><button type="button" onClick={() => { setCommitOpen(current => !current); setVersionError('') }} aria-expanded={commitOpen}><GitCommitHorizontal size={13} /> Commit changes</button></div>}
+                {gitTotal > 0 && !readOnly && gitStatus?.repository_scope === 'project' && source.commitGit && <div className="project-finder__commit-action"><button type="button" onClick={() => { setCommitOpen(current => !current); setVersionError('') }} aria-expanded={commitOpen}><GitCommitHorizontal size={13} /> Commit changes</button></div>}
                 {commitOpen && <form className="project-finder__commit" onSubmit={commitChanges}>
                   <label htmlFor={`project-commit-${projectId}`}>Describe this snapshot</label>
                   <div><input id={`project-commit-${projectId}`} autoFocus value={commitMessage} maxLength={500} placeholder="What changed?" disabled={versionBusy} onChange={event => setCommitMessage(event.target.value)} /><button type="submit" disabled={versionBusy || !commitMessage.trim()}>{versionBusy ? 'Committing…' : 'Commit locally'}</button></div>
                   <small>The owner controls publishing separately.</small>
                 </form>}
                 <div className="project-finder__change-list">
-                  {gitChanges.slice(0, 12).map(change => {
-                    const presentation = gitStatusPresentation(change.status)
-                    const contents = <><i aria-hidden="true">{presentation.code}</i><span>{change.path}</span></>
-                    return change.status === 'deleted' ? (
-                      <div key={change.path} className="project-finder__change" title={presentation.label}>{contents}</div>
-                    ) : (
-                      <button key={change.path} type="button" className="project-finder__change" title={`${presentation.label}: ${change.path}`} onClick={() => openFileAt(change.path)}>{contents}</button>
-                    )
-                  })}
-                  {gitChanges.length > 12 && <small>+{gitChanges.length - 12} more</small>}
+                  {gitChanges.map(change => <ProjectChangeDiff key={change.path} source={source} change={change} onOpenFile={openFileAt} />)}
+                  {gitStatus.truncated && <small>Showing a partial change list.</small>}
                 </div>
               </details>
             )}
