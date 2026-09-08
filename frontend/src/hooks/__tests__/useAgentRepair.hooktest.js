@@ -1,7 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { renderHook } from '../../components/ChatView/hooks/__tests__/react-hook-shim.mjs'
-import { api } from '../../api/client.js'
 import {
   errorRecoveryFingerprint,
   writeErrorRecoveryAttempt,
@@ -25,8 +24,8 @@ function installBrowser(t) {
   const previous = {
     window: globalThis.window,
     sessionStorage: globalThis.sessionStorage,
-    chats: api.chats,
   }
+  const client = { chats: {} }
   globalThis.sessionStorage = memoryStorage()
   globalThis.window = {
     addEventListener: (type, fn) => listeners.set(type, fn),
@@ -36,13 +35,13 @@ function installBrowser(t) {
   t.after(() => {
     globalThis.window = previous.window
     globalThis.sessionStorage = previous.sessionStorage
-    api.chats = previous.chats
   })
   return {
+    client,
     listeners,
     assigned,
     storage: globalThis.sessionStorage,
-    stubChats(chats) { api.chats = chats },
+    stubChats(chats) { client.chats = chats },
   }
 }
 
@@ -55,6 +54,7 @@ test('a surface with nothing to repair has no attempt and no repair', async (t) 
 
   const { result } = renderHook(useAgentRepair, {
     surfaceKey: SURFACE, fingerprint: null, prompt: 'fix',
+    repairTransport: () => ({ client: browser.client, base: '' }),
   })
 
   assert.equal(result.current.attempt, null)
@@ -71,6 +71,7 @@ test('a new failure re-reads the ledger for its own fingerprint', (t) => {
 
   const { result, rerender } = renderHook(useAgentRepair, {
     surfaceKey: SURFACE, fingerprint: first, prompt: 'fix',
+    repairTransport: () => ({ client: browser.client, base: '' }),
   })
   assert.equal(result.current.attempt, null)
 
@@ -80,9 +81,15 @@ test('a new failure re-reads the ledger for its own fingerprint', (t) => {
     storage: browser.storage, surfaceKey: SURFACE, fingerprint: second,
     phase: 'refreshed', now: Date.now(),
   })
-  rerender({ surfaceKey: SURFACE, fingerprint: first, prompt: 'fix' })
+  rerender({
+    surfaceKey: SURFACE, fingerprint: first, prompt: 'fix',
+    repairTransport: () => ({ client: browser.client, base: '' }),
+  })
   assert.equal(result.current.attempt, null, 'the same failure keeps its read')
-  rerender({ surfaceKey: SURFACE, fingerprint: second, prompt: 'fix' })
+  rerender({
+    surfaceKey: SURFACE, fingerprint: second, prompt: 'fix',
+    repairTransport: () => ({ client: browser.client, base: '' }),
+  })
   assert.equal(result.current.attempt?.phase, 'refreshed')
 })
 
@@ -104,6 +111,7 @@ test('one repair runs at a time; a bfcache restore drops it and re-reads the led
 
   const { result } = renderHook(useAgentRepair, {
     surfaceKey: SURFACE, fingerprint, prompt: 'fix',
+    repairTransport: () => ({ client: browser.client, base: '' }),
   })
   const firstRun = result.current.repair()
   const secondRun = result.current.repair()
