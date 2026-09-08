@@ -172,6 +172,11 @@ def _build_app_context(
       "dependencies": template.get("dependencies") or [],
       "guidance": template.get("guidance") or "",
       "legacy_source": project.legacy_source_json,
+      "inherited_theme": {
+        "read_only": True,
+        "url": f"/api/projects/{project.id}/theme",
+        "usage": "Installed apps inherit this effective Möbius theme. Use its CSS variables; override locally, never edit shared theme as a project change. Standalone HTML previews can opt in with <meta name=\"mobius-theme\" content=\"inherit\">.",
+      },
     }, ensure_ascii=False, separators=(",", ":"))
     block = "\n".join([
       "The <project_context> block is private context for this project chat.",

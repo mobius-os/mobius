@@ -2,6 +2,25 @@
 from pathlib import Path
 
 TEMPLATE_ROOT = Path(__file__).with_suffix('')
+LINKED_APP_GUIDANCE = (
+  "This Project edits the installed app's existing source folder, not a copy. "
+  "Saving source never updates the running app. The owner's explicit Build & update app "
+  "action uses the ordinary app apply workflow; a failed build keeps the last working app. "
+  "Open the installed app for its real runtime, theme and data; do not create a duplicate "
+  "App Creation or standalone app preview. Collaborators edit the same linked files, "
+  "but project membership does not grant app runtime, private data or update authority."
+)
+
+
+def linked_app_id(template):
+  """Identify explicit linked-app ownership, excluding historical imported copies."""
+  imported = template.get("imported_from", {}) if isinstance(template, dict) else {}
+  if not isinstance(imported, dict) or imported.get("management") != "linked" or imported.get("kind") != "app":
+    return None
+  value = imported.get("id")
+  return str(value) if value is not None and str(value) else None
+
+
 CORE_TEMPLATES = [
   {
     "id": "blank", "name": "Blank project", "kind": "blank",

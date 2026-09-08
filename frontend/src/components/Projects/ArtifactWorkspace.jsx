@@ -14,6 +14,7 @@ import {
   normalizeArtifacts,
 } from '../../lib/projectArtifacts.js'
 import ProjectPdfPreview from './ProjectPdfPreview.jsx'
+import { linkedProjectAppId } from '../../lib/appSourceProject.js'
 import { assembleProjectHtmlPreview } from '../../lib/projectPreview.js'
 import ArtifactIdentityIcon from './ArtifactIdentityIcon.jsx'
 import ProjectPreviewFrame from './ProjectPreviewFrame.jsx'
@@ -25,7 +26,7 @@ import './Projects.css'
 // object URL. The preview hot-swaps when a build finishes. In the shell the
 // pane tab is the only chrome; the collaborator route, which has no tabs,
 // passes `onOpenProject` and gets one compact back bar.
-export default function ArtifactWorkspace({ projectId, artifactId, projectName, onOpenProject, readOnly = false }) {
+export default function ArtifactWorkspace({ projectId, project, onOpenApp, artifactId, projectName, onOpenProject, readOnly = false }) {
   const artifactsQuery = useQuery({
     queryKey: projectQueries.keys.artifacts(projectId),
     queryFn: async ({ signal }) => normalizeArtifacts(await jsonOrThrow(
@@ -77,6 +78,13 @@ export default function ArtifactWorkspace({ projectId, artifactId, projectName, 
   const entryPath = artifact ? artifactEntryPath(artifact) : null
   const name = artifact?.name || artifactId
 
+  if (!artifactsQuery.isLoading && !artifact && linkedProjectAppId(project) && project.template?.retired_app_previews?.includes(artifactId)) {
+    return <section className="artifact-workspace"><div className="projects-empty">
+      <p>This Project now opens the installed app, not a separate preview.</p>
+      {onOpenApp && <button type="button" onClick={() => onOpenApp(linkedProjectAppId(project))}>Open app</button>}
+      {onOpenProject && <button type="button" onClick={onOpenProject}>Back to project</button>}
+    </div></section>
+  }
   if (artifactsQuery.isLoading) {
     return <section className="artifact-workspace" aria-busy="true"><p className="projects-empty" role="status">Loading Creation…</p></section>
   }

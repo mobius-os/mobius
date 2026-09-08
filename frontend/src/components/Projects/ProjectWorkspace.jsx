@@ -5,6 +5,8 @@ import { api, jsonOrThrow } from '../../api/client.js'
 import { projectQueries } from '../../hooks/queries.js'
 import { queueArtifactBuildsAfterSourceChange } from '../../lib/projectArtifacts.js'
 import ApplyAppSourceButton from './ApplyAppSourceButton.jsx'
+import ProjectThemeResource from './ProjectThemeResource.jsx'
+import { linkedProjectAppId } from '../../lib/appSourceProject.js'
 import ProjectArtifacts from './ProjectArtifacts.jsx'
 import ProjectFinder from './ProjectFinder.jsx'
 import ProjectIdentityIcon from './ProjectIdentityIcon.jsx'
@@ -18,6 +20,7 @@ import './Projects.css'
 export default function ProjectWorkspace({
   project,
   linkedApp,
+  onOpenApp,
   onOpenChat,
   onCreateChat,
   onOpenArtifact,
@@ -25,6 +28,7 @@ export default function ProjectWorkspace({
   onRename,
   onRenameEnd,
 }) {
+  const isAppProject = !!(linkedApp || linkedProjectAppId(project))
   const [error, setError] = useState('')
   const [renaming, setRenaming] = useState(false)
   const [renameValue, setRenameValue] = useState(project.name)
@@ -193,6 +197,7 @@ export default function ProjectWorkspace({
         </div>
 
         <div className="project-workspace__actions">
+          {linkedApp && <button type="button" className="project-workspace__collaborate" onClick={onOpenApp}>Open app</button>}
           {linkedApp && <ApplyAppSourceButton app={linkedApp} onError={setError} />}
 
           <button type="button" className="project-workspace__collaborate" aria-label="Review publishing" title="Review publishing" aria-expanded={gitOpen} onClick={() => setGitOpen(true)}><Github width={17} height={17} aria-hidden="true" /><span>Publish</span></button>
@@ -201,7 +206,9 @@ export default function ProjectWorkspace({
 
       </div>
 
-      {linkedApp && <p className="projects-empty">Saves and builds update your draft preview. Apply to app updates the running app.</p>}
+      {isAppProject && <p className="project-source-notice">{linkedApp
+        ? 'Editing the app’s linked source. Saved changes require Build & update app.'
+        : 'The linked app is unavailable. Source files are preserved; updating is unavailable.'}</p>}
       {error && <p className="projects-error" role="alert">{error}</p>}
 
       <div className="project-workspace__view">
@@ -210,11 +217,13 @@ export default function ProjectWorkspace({
           projectName={project.name}
           artifactTypes={project.template?.artifact_types}
           onBuildFile={buildFileAsArtifact}
-          onSourceChanged={rebuildRegisteredArtifacts}
+          excludedBuilders={isAppProject ? ['app'] : []}
+          sourceDescription={isAppProject ? 'Open app to use the running version. Save edits here, then Build & update app when ready.' : undefined}
+          onSourceChanged={isAppProject ? undefined : rebuildRegisteredArtifacts}
           requestedFile={requestedFile}
           overview={(
             <div className="project-overview" aria-label="Project overview">
-              <section className="project-overview__section" aria-labelledby={`project-artifacts-heading-${project.id}`}>
+              {(!isAppProject || project.artifacts?.some(item => item.builder !== 'app')) && <section className="project-overview__section" aria-labelledby={`project-artifacts-heading-${project.id}`}>
                 <header className="project-overview__heading">
                   <h2 id={`project-artifacts-heading-${project.id}`}>Creations</h2>
                 </header>
@@ -223,7 +232,8 @@ export default function ProjectWorkspace({
                   onOpen={artifactId => onOpenArtifact?.(artifactId)}
                   onEditSource={path => setRequestedFile({ path, key: Date.now() })}
                 />
-              </section>
+              </section>}
+              <ProjectThemeResource projectId={project.id} linkedApp={isAppProject} />
 
               <section className="project-overview__section" aria-labelledby={`project-chats-heading-${project.id}`}>
                 <header className="project-overview__heading">

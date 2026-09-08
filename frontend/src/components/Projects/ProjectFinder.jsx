@@ -104,6 +104,8 @@ export default function ProjectFinder({
   projectId,
   projectName,
   artifactTypes,
+  excludedBuilders = [],
+  sourceDescription,
   onBuildFile,
   onSourceChanged,
   overview,
@@ -965,7 +967,7 @@ export default function ProjectFinder({
                     gitAnnotation={gitStatus?.repository_scope === 'project'
                       ? gitAnnotationForEntry(gitChanges, entry)
                       : null}
-                    artifactType={artifactTypeForFile(entry.name, artifactTypes)}
+                    artifactType={artifactTypeForFile(entry.name, artifactTypes, excludedBuilders)}
                     onBuildAs={onBuildFile
                       ? (type) => onBuildFile(entry.path, type.id)
                       : null}
@@ -980,7 +982,7 @@ export default function ProjectFinder({
           {!inspecting ? (
             <div className="project-finder__placeholder" role="status">
               <File size={38} strokeWidth={1.3} aria-hidden="true" />
-              <h2>Your workspace</h2><p>Select a file to read or edit it.<br />Open a Creation to see the built result, or start a project chat to make changes.</p>
+              <h2>Your workspace</h2><p>Select a file to read or edit it.<br />{sourceDescription || 'Open a Creation to see the built result, or start a project chat to make changes.'}</p>
             </div>
           ) : (
             <>

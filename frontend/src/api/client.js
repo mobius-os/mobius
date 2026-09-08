@@ -747,6 +747,7 @@ export const api = {
     legacy: () => apiFetch('/projects/legacy'),
     importSources: () => apiFetch('/projects/import-sources'),
     detail: (projectId) => apiFetch(`/projects/${encodeURIComponent(projectId)}`),
+    theme: (projectId, options = {}) => apiFetch(`/projects/${encodeURIComponent(projectId)}/theme`, options),
     markOpened: (projectId) => apiFetch(
       `/projects/${encodeURIComponent(projectId)}/opened`, { method: 'POST' },
     ),

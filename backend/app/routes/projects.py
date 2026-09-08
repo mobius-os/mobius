@@ -45,6 +45,8 @@ from app.deps import (
 )
 from app.path_utils import validate_path_within_base
 from app.project_activity import append_project_change, project_change_view
+from app.project_templates import LINKED_APP_GUIDANCE, linked_app_id
+from app.theme import theme_data
 from app.project_retention import PROJECT_LIFECYCLE_LOCK
 from app.timeutil import now_naive_utc, SOFT_DELETE_TTL
 
@@ -1475,10 +1477,8 @@ def _import_project_source(body: ProjectImport, db: Session):
       root = _linked_app_root(source_app)
       template_app = None
       snapshot = _generic_app_template()
-      snapshot["guidance"] += (
-        " This Project manages the installed app's existing source. Edits are "
-        "drafts until the owner explicitly applies them; keep runtime data separate."
-      )
+      snapshot["guidance"] = LINKED_APP_GUIDANCE
+      snapshot["previews"] = []
       imported_from = {
         "kind": "app", "id": str(source_app.id), "slug": source_app.slug,
         "name": source_app.name, "management": "linked",
@@ -2774,6 +2774,17 @@ async def move_project_path(
   }
 
 
+@router.get("/{project_id}/theme")
+def get_project_theme(
+  project_id: str,
+  principal: ProjectPrincipal = Depends(get_project_principal),
+  db: Session = Depends(get_db),
+):
+  """Expose only the inherited theme to members, never shared storage or write access."""
+  _project_for(db, project_id, principal, "viewer")
+  return theme_data(get_settings().data_dir)
+
+
 @router.get("/{project_id}/artifacts")
 def list_project_artifacts(
   project_id: str,
@@ -2834,6 +2845,8 @@ async def create_project_artifact(
   """
   project = _project_for(db, project_id, principal, "editor")
   root = _project_root(project)
+  if body.builder == "app" and linked_app_id(project.template_snapshot_json):
+    raise HTTPException(409, "This Project builds the installed app. The owner can use Build & update app.")
   artifact_type = project_builders.resolve_artifact_type(project, body.builder)
   if artifact_type is None:
     raise HTTPException(422, "Unknown builder.")
@@ -2976,6 +2989,9 @@ def serve_project_artifact_output(
   root = _project_root(project)
   if not project_builders.ARTIFACT_ID_RE.match(artifact_id):
     raise HTTPException(400, "Invalid artifact id.")
+  if (artifact_id in (project.template_snapshot_json or {}).get("retired_app_previews", [])
+      and not any(entry.get("id") == artifact_id for entry in project_builders.read_artifacts(project))):
+    raise HTTPException(410, "This preview was replaced by the installed app. Open the app from its Project.")
   output_root = (root / "artifacts" / artifact_id / "output")
   rel = (path or "").lstrip("/")
   if "\x00" in rel:

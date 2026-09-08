@@ -57,12 +57,13 @@ export default function AppSourceWorkspace({ app, onOpenApp, requiresApply = fal
           Open app <ArrowUpRight size={14} aria-hidden="true" />
         </button>
       </header>
-      {requiresApply && <p className="projects-empty">Saved source remains a draft until you apply it to the app.</p>}
+      {requiresApply && <p className="project-source-notice">Saved changes require Build & update app.</p>}
       {error && <p className="projects-error" role="alert">{error}</p>}
       <div className="project-workspace__view">
         <ProjectFinder
           projectId={fileSource.id}
           projectName={`${app.name} source`}
+          sourceDescription="Open app to use the running version."
           fileSource={fileSource}
           onSourceChanged={requiresApply ? undefined : applySourceChange}
         />

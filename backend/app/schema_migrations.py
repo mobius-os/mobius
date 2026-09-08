@@ -3523,6 +3523,51 @@ def _add_app_runtime_revision(eng) -> None:
       conn.execute(text("ALTER TABLE apps ADD COLUMN runtime_revision VARCHAR(64) NULL"))
 
 
+def _link_app_project_runtime(eng):
+  """Retire duplicate app previews without deleting source, outputs or history."""
+  from sqlalchemy import inspect as sa_inspect, text
+
+  if "projects" not in sa_inspect(eng).get_table_names():
+    return
+  with eng.begin() as conn:
+    rows = conn.execute(text(
+      "SELECT id, template_snapshot_json, artifacts_json FROM projects"
+    )).all()
+    for project_id, raw_template, raw_artifacts in rows:
+      try:
+        template = json.loads(raw_template) if isinstance(raw_template, str) else raw_template
+        artifacts = json.loads(raw_artifacts) if isinstance(raw_artifacts, str) else raw_artifacts
+      except (TypeError, ValueError):
+        # Preserve malformed agent-authored metadata rather than blocking startup.
+        continue
+      if not isinstance(template, dict):
+        continue
+      imported = template.get("imported_from")
+      if not isinstance(imported, dict) or imported.get("kind") != "app" or imported.get("management") != "linked":
+        continue
+      entries = artifacts if isinstance(artifacts, list) else []
+      retired = [entry["id"] for entry in entries
+                 if isinstance(entry, dict) and entry.get("builder") == "app" and isinstance(entry.get("id"), str)]
+      remaining = [entry for entry in entries
+                   if not isinstance(entry, dict) or entry.get("builder") != "app"]
+      template = dict(template)
+      template["previews"] = []
+      previous = template.get("retired_app_previews")
+      previous = [value for value in previous if isinstance(value, str)] if isinstance(previous, list) else []
+      template["retired_app_previews"] = list(dict.fromkeys([*previous, *retired]))
+      template["guidance"] = (
+        "This Project edits the installed app's existing source folder, not a copy. "
+        "Saving source never updates the running app. The owner's explicit Build & update app "
+        "action uses the ordinary app apply workflow; a failed build keeps the last working app. "
+        "Open the installed app for its real runtime, theme and data; do not create a duplicate "
+        "App Creation or standalone app preview. Collaborators edit the same linked files, "
+        "but project membership does not grant app runtime, private data or update authority."
+      )
+      conn.execute(text(
+        "UPDATE projects SET template_snapshot_json = :template, artifacts_json = :artifacts WHERE id = :id"
+      ), {"id": project_id, "template": json.dumps(template), "artifacts": json.dumps(remaining)})
+
+
 _SCHEMA_MIGRATIONS = (
   ("0001_legacy_schema_convergence", _converge_legacy_schema),
   ("0002_chat_run_goal_objective", _add_chat_run_goal_objective),
@@ -3575,6 +3620,7 @@ _SCHEMA_MIGRATIONS = (
   ("0039_agent_work_claim_history", _make_agent_work_claim_history_durable),
   ("0040_provider_execution_admission", _add_provider_execution_admission),
   ("0041_app_runtime_revision", _add_app_runtime_revision),
+  ("0042_linked_app_project_runtime", _link_app_project_runtime),
 )
 
 

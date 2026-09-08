@@ -36,6 +36,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from app import workspace_files
+from app.project_templates import linked_app_id
 from app.timeutil import now_naive_utc
 
 log = logging.getLogger(__name__)
@@ -165,6 +166,9 @@ def template_artifact_types(template: Any) -> list[dict[str, Any]]:
 
 def resolve_artifact_type(project, builder: str) -> dict[str, Any] | None:
   """Resolve one project-owned builder id to its snapshotted provider contract."""
+  if builder == "app" and linked_app_id(getattr(project, "template_snapshot_json", None)):
+    # Installed app revisions have one owner: app_apply, never the HTML builder.
+    return None
   for artifact_type in template_artifact_types(
     getattr(project, "template_snapshot_json", None),
   ):

@@ -67,13 +67,13 @@ export function normalizeArtifactTypes(value) {
   }))
 }
 
-export function artifactTypeForFile(path, declaredTypes) {
+export function artifactTypeForFile(path, declaredTypes, excludedBuilders = []) {
   const extension = String(path ?? '').split('.').pop()?.toLowerCase() || ''
   const types = [
     ...normalizeArtifactTypes(declaredTypes),
     ...BUILTIN_ARTIFACT_TYPES,
   ]
-  return types.find(type => type.extensions.includes(extension)) || null
+  return types.find(type => !excludedBuilders.includes(type.id) && type.extensions.includes(extension)) || null
 }
 
 export function artifactTypeName(artifact) {

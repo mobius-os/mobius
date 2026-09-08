@@ -121,3 +121,38 @@ test('project HTML preview without a data loader keeps local images as-is', asyn
   )
   assert.match(result, /<img src="\.\/logo.png">/)
 })
+
+test('inherited theme updates as text from the parent without widening preview permissions', async () => {
+  const { runInNewContext } = await import('node:vm')
+  const html = safeProjectHtmlDocument('<meta name="mobius-theme" content="inherit">')
+  const script = html.match(/<script data-mobius-project-preview-runtime>([\s\S]*?)<\/script>/)[1]
+  const parent = {}
+  const listeners = new Map()
+  const elements = new Map()
+  const document = {
+    getElementById: id => elements.get(id),
+    createElement: () => ({}),
+    head: { prepend: style => elements.set(style.id, style) },
+    documentElement: { dataset: {}, style: {} },
+  }
+  const window = {}
+  runInNewContext(script, {
+    parent, document, window, Map, Promise, setTimeout, clearTimeout,
+    addEventListener: (type, fn) => listeners.set(type, fn),
+    dispatchEvent() {}, CustomEvent: class {},
+  })
+  const css = ':root { --bg: #eee; } /* </style><script>untrusted</script> */'
+  const message = { type: 'mobius:project-theme', theme: { css, mode: 'light' } }
+  listeners.get('message')({ source: {}, data: message })
+  assert.equal(elements.size, 0)
+  listeners.get('message')({ source: parent, data: message })
+  assert.equal(elements.size, 1)
+  assert.ok(elements.get('mobius-inherited-project-theme').textContent.startsWith(css))
+  assert.equal(document.documentElement.dataset.theme, 'light')
+  listeners.get('message')({ source: parent, data: { ...message, theme: { css: ':root { --bg: #111; }', mode: 'dark' } } })
+  assert.equal(elements.size, 1)
+  assert.equal(document.documentElement.style.colorScheme, 'dark')
+  assert.equal(window.mobius.signal, undefined)
+  assert.equal(projectPreviewSandbox(), 'allow-scripts')
+  assert.match(html, /default-src 'none'/)
+})

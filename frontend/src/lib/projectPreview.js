@@ -34,6 +34,19 @@ function projectPreviewRuntime(dataScope = 'personal') {
   addEventListener('message', event => {
     if (event.source !== parent || !event.data) return;
     const message = event.data;
+    if (message.type === 'mobius:project-theme' && typeof message.theme?.css === 'string') {
+      let style = document.getElementById('mobius-inherited-project-theme');
+      if (!style) {
+        style = document.createElement('style');
+        style.id = 'mobius-inherited-project-theme';
+        document.head.prepend(style);
+      }
+      // Data, not HTML: even a closing style tag in CSS cannot inject markup.
+      style.textContent = message.theme.css + '\\nbody { margin: 0; background: var(--bg); color: var(--text); font-family: var(--font, system-ui); } button, input, textarea, select { font: inherit; }';
+      document.documentElement.dataset.theme = message.theme.mode === 'light' ? 'light' : 'dark';
+      document.documentElement.style.colorScheme = document.documentElement.dataset.theme;
+      return;
+    }
     if (message.type === 'mobius:project-preview-storage-connected') {
       connected = true;
       for (const request of pending.values()) parent.postMessage(request.message, '*');

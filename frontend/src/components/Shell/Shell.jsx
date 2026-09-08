@@ -5103,6 +5103,7 @@ export default function Shell({ onInitialVisualReady }) {
                 <ProjectWorkspace
                   project={project}
                   linkedApp={appById.get(linkedProjectAppId(project))}
+                  onOpenApp={() => navTo('canvas', { appId: linkedProjectAppId(project) })}
                   onOpenChat={chat => openProjectChat(project, chat)}
                   onCreateChat={options => createProjectChat(project, options)}
                   onOpenArtifact={artifactId => openArtifact(project, artifactId)}
@@ -5161,6 +5162,8 @@ export default function Shell({ onInitialVisualReady }) {
               ) : (
                 <ArtifactWorkspace
                   projectId={parsed.projectId}
+                  project={projectById.get(parsed.projectId)}
+                  onOpenApp={appId => navTo('canvas', { appId })}
                   artifactId={parsed.artifactId}
                 />
               )}

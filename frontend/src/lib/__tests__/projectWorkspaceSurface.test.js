@@ -99,12 +99,16 @@ test('a failed rebuild keeps the previous Creation and explains what is shown', 
 })
 
 
-test('linked app Projects offer explicit Apply while ordinary Projects do not', () => {
+test('linked app Projects open and explicitly build the real app without a duplicate Creation', () => {
   const markup = renderWorkspace({ linkedApp: { id: 123, name: 'Clock', source_dir: '/data/apps/clock' } })
-  assert.match(markup, />Apply to app<\/button>/)
-  assert.match(markup, /Saves and builds update your draft preview/)
+  assert.match(markup, />Build &amp; update app<\/button>/)
+  assert.match(markup, /Saved changes require Build &amp; update app/)
   assert.match(markup, /Save your files first/)
-  assert.doesNotMatch(renderWorkspace(), />Apply to app<\/button>/)
+  assert.match(markup, />Open app<\/button>/)
+  assert.doesNotMatch(markup, />Creations<\/h2>|draft preview/)
+  assert.match(markup, /Inherited Möbius theme/)
+  assert.match(markup, /class="project-source-notice"/)
+  assert.doesNotMatch(renderWorkspace(), />Build &amp; update app<\/button>/)
 })
 
 test('managed View source advertises draft-only saves and an explicit Apply action', async () => {
@@ -113,8 +117,8 @@ test('managed View source advertises draft-only saves and an explicit Apply acti
   const app = { id: 123, name: 'Clock', source_dir: '/data/apps/clock' }
   const markup = renderToStaticMarkup(React.createElement(QueryClientProvider, { client },
     React.createElement(AppSourceWorkspace, { app, requiresApply: true })))
-  assert.match(markup, />Apply to app<\/button>/)
-  assert.match(markup, /Saved source remains a draft until you apply it/)
+  assert.match(markup, />Build &amp; update app<\/button>/)
+  assert.match(markup, /Saved changes require Build &amp; update app/)
 })
 
 
@@ -127,5 +131,28 @@ test('legacy imported app copies keep the real Project workspace without install
   assert.match(markup, /aria-label="Project overview"/)
   assert.match(markup, />Creations<\/h2>/)
   assert.match(markup, />Collaborate<\/span>/)
-  assert.doesNotMatch(markup, /app-source-workspace|>Apply to app<\/button>/)
+  assert.doesNotMatch(markup, /app-source-workspace|>Build &amp; update app<\/button>/)
+})
+
+test('unavailable linked apps keep source accessible without falling back to duplicate previews', () => {
+  const markup = renderWorkspace({ project: {
+    id: 'missing-app', name: 'Clock', chats: [],
+    template: { imported_from: { kind: 'app', id: '12', management: 'linked' } },
+  } })
+  assert.match(markup, /linked app is unavailable/)
+  assert.match(markup, /aria-label="File actions"/)
+  assert.doesNotMatch(markup, />Creations<\/h2>|>Build &amp; update app<\/button>/)
+})
+
+test('old duplicate preview links lead to the installed app rather than an inert HTML copy', () => {
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  client.setQueryData(projectQueries.keys.artifacts('clock'), [])
+  const project = { template: {
+    imported_from: { kind: 'app', management: 'linked', id: '12' },
+    retired_app_previews: ['app'],
+  } }
+  const markup = renderToStaticMarkup(React.createElement(QueryClientProvider, { client },
+    React.createElement(ArtifactWorkspace, { projectId: 'clock', project, artifactId: 'app', onOpenApp() {} })))
+  assert.match(markup, />Open app<\/button>/)
+  assert.doesNotMatch(markup, /<iframe/)
 })
