@@ -514,9 +514,9 @@ test('new-chat creation cancels stale list reads through a real AbortSignal', ()
     'the stale drawer read must be cancelled before the create request')
   assert.match(
     queriesSource,
-    /async function fetchChats\(\{ signal, timeoutMs \} = \{\}\)/,
+    /async function fetchChats\(\{ signal, timeoutMs, cache \} = \{\}\)/,
   )
-  assert.match(queriesSource, /api\.chats\.list\(\{ signal, timeoutMs \}\)/)
+  assert.match(queriesSource, /api\.chats\.list\(\{ signal, timeoutMs, cache \}\)/)
   assert.match(clientSource, /list: \(options = \{\}\) => apiFetch\('\/chats', options\)/)
 })
 

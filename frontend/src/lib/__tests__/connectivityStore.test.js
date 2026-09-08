@@ -245,7 +245,7 @@ test('both durable streams feed recovery and an exhausted chat observes it', () 
   assert.match(chat, /catch \(err\) \{[\s\S]*?void verifyConnectivity\(\)/)
   assert.match(
     system,
-    /if \(!cancelled\) \{[\s\S]*?void verifyConnectivity\(\)[\s\S]*?setTimeout/,
+    /if \(!stopped\) \{[\s\S]*?void verifyConnectivity\(\)[\s\S]*?scheduleRetry\(\)/,
     'an unexpected system-stream close must enter shared reachability recovery',
   )
   assert.match(system, /const res = await fetch\([\s\S]*?reportNetworkReachable\(\)/)

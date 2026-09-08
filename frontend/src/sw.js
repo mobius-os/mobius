@@ -59,6 +59,7 @@ import {
   withOpaqueFramePublicAssetCors,
   isCacheableAppAssetResponse,
   SHELL_DATA_CACHE,
+  requiresLiveShellList,
   SHELL_DOCUMENT_POLICY_REVISION,
   isImmutableAppAsset,
   isPackagedAppAsset,
@@ -611,6 +612,13 @@ registerRoute(
     url.origin === self.location.origin &&
     url.pathname === '/api/theme',
   new StaleWhileRevalidate({ cacheName: SHELL_DATA_CACHE }),
+)
+
+// A causal catch-up read opts out of both browser and offline fallback caches.
+// Keep this before the ordinary NetworkFirst route; offline viewing is unchanged.
+registerRoute(
+  ({ url, request }) => url.origin === self.location.origin && requiresLiveShellList(request),
+  new NetworkOnly(),
 )
 
 // `/api/chats` — same cache bucket as above (one logical

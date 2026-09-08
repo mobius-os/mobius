@@ -1,3 +1,4 @@
+import { fetchFreshChatList } from './chatListReconciliation.js'
 import { requestChatChanges } from '../../lib/chatChangesNavigation.js'
 import { lazy, Suspense, useState, useEffect, useLayoutEffect, useCallback, useMemo, useReducer, useRef } from 'react'
 import { flushSync } from 'react-dom'
@@ -2398,21 +2399,10 @@ export default function Shell({ onInitialVisualReady }) {
       .then(data => data || [])
       .catch(() => queryClient.getQueryData(appQueries.keys.all) || [])
   }, [queryClient, reconcileApps])
-  const fetchFreshChats = useCallback(({ timeoutMs } = {}) => {
-    // Shell-level chat state (running, waiting for owner input, activity) is
-    // durable and must win over a transient event that may have been missed
-    // while the page was suspended or the server restarted. Cancel first so
-    // this reconciliation cannot coalesce with an older in-flight list read
-    // and then overwrite a newer event projection with its stale response.
-    return queryClient.cancelQueries({ queryKey: chatQueries.keys.all })
-      .then(() => queryClient.fetchQuery({
-        queryKey: chatQueries.keys.all,
-        queryFn: async () => reconcileCreatedChats(
-          await chatQueries.list.fetch({ timeoutMs }),
-        ),
-        staleTime: 0,
-      }))
-      .then(data => data || [])
+  const fetchFreshChats = useCallback(({ timeoutMs = SYSTEM_RECONNECT_LIST_TIMEOUT_MS, signal } = {}) => {
+    return fetchFreshChatList(queryClient, {
+      timeoutMs, signal, reconcile: reconcileCreatedChats,
+    })
   }, [queryClient, reconcileCreatedChats])
   const refreshChats = useCallback(() => {
     return fetchFreshChats()
@@ -3245,69 +3235,61 @@ export default function Shell({ onInitialVisualReady }) {
   // the durable app list after every initial connection/reconnect; after the
   // first list establishes the session baseline, fresh chat-owned rows flow
   // through the same idempotent placement resolver as live app_preview_ready events.
-  const reconcileSystemStateOnOpen = useCallback(async () => {
+  const reconcileSystemStateOnOpen = useCallback(async ({ signal } = {}) => {
     // First successful (re)connect to the system stream is the authoritative
     // "we're back" signal — server_ready is almost always dropped (published
     // before any client resubscribes), so the reconnect itself clears the dot.
     clearRestartPending()
     reconcileNotifications()
-    try {
-      await Promise.all([
-        invalidateShellListCache('apps'),
-        invalidateShellListCache('chats'),
-        appSourceQueries.invalidate(queryClient),
-        chatAppArtifactQueries.invalidateAll(queryClient),
-        queryClient.invalidateQueries({ queryKey: ['projects', 'files'] }),
-        queryClient.invalidateQueries({ queryKey: ['projects', 'git'] }),
-        reconcileDeletedAppIdentities(),
-        reconcileDeletedChatIdentities(),
-      ])
-      const [, refreshedChats] = await Promise.all([
-        refreshApps({ timeoutMs: SYSTEM_RECONNECT_LIST_TIMEOUT_MS }),
-        // Unlike ordinary best-effort refreshes, reconnect must not use a stale
-        // cached fallback to retire an optimistic active-work marker.
-        fetchFreshChats({ timeoutMs: SYSTEM_RECONNECT_LIST_TIMEOUT_MS }),
-      ])
-      const localIds = localStreamingChatIdsRef.current
-      for (const chat of refreshedChats) {
-        const chatId = String(chat.id)
-        if (chat.running && localIds.has(chatId)) {
-          acknowledgedLocalChatRunIdsRef.current.add(chatId)
+    // App/project refreshes own different state. They must not hold the chat
+    // catch-up barrier open when an editor request or offline cache is stalled.
+    void Promise.allSettled([
+      appSourceQueries.invalidate(queryClient),
+      chatAppArtifactQueries.invalidateAll(queryClient),
+      queryClient.invalidateQueries({ queryKey: ['projects', 'files'] }),
+      queryClient.invalidateQueries({ queryKey: ['projects', 'git'] }),
+      reconcileDeletedAppIdentities().then(() => refreshApps({ timeoutMs: SYSTEM_RECONNECT_LIST_TIMEOUT_MS })),
+    ])
+    await reconcileDeletedChatIdentities()
+    signal?.throwIfAborted()
+    const refreshedChats = await fetchFreshChats({ timeoutMs: SYSTEM_RECONNECT_LIST_TIMEOUT_MS, signal })
+    signal?.throwIfAborted()
+    const localIds = localStreamingChatIdsRef.current
+    for (const chat of refreshedChats) {
+      const chatId = String(chat.id)
+      if (chat.running && localIds.has(chatId)) {
+        acknowledgedLocalChatRunIdsRef.current.add(chatId)
+      }
+    }
+    const reconciledLocalIds = withoutSettledLocalChatRuns(
+      localIds,
+      refreshedChats,
+      {
+        acknowledgedIds: acknowledgedLocalChatRunIdsRef.current,
+        protectedIds: visibleChatIdsRef.current,
+      },
+    )
+    if (reconciledLocalIds !== localIds) {
+      for (const chatId of localIds) {
+        if (!reconciledLocalIds.has(chatId)) {
+          acknowledgedLocalChatRunIdsRef.current.delete(String(chatId))
         }
       }
-      const reconciledLocalIds = withoutSettledLocalChatRuns(
-        localIds,
-        refreshedChats,
-        {
-          acknowledgedIds: acknowledgedLocalChatRunIdsRef.current,
-          protectedIds: visibleChatIdsRef.current,
-        },
-      )
-      if (reconciledLocalIds !== localIds) {
-        for (const chatId of localIds) {
-          if (!reconciledLocalIds.has(chatId)) {
-            acknowledgedLocalChatRunIdsRef.current.delete(String(chatId))
-          }
-        }
-        localStreamingChatIdsRef.current = reconciledLocalIds
-        setLocalStreamingChatIds(reconciledLocalIds)
+      localStreamingChatIdsRef.current = reconciledLocalIds
+      setLocalStreamingChatIds(reconciledLocalIds)
+    }
+    for (const chat of refreshedChats) {
+      const chatId = String(chat.id)
+      // The mounted stream owns a local start until it reaches a boundary.
+      // Re-reading its detail here would let the same temporarily-idle row
+      // retire an unacknowledged send through a second reconciliation path.
+      if (reconciledLocalIds.has(chatId)) continue
+      if (
+        chat.running
+        || visibleChatIdsRef.current.has(chatId)
+      ) {
+        markChatRunReconcile(chatId)
       }
-      for (const chat of refreshedChats) {
-        const chatId = String(chat.id)
-        // The mounted stream owns a local start until it reaches a boundary.
-        // Re-reading its detail here would let the same temporarily-idle row
-        // retire an unacknowledged send through a second reconciliation path.
-        if (reconciledLocalIds.has(chatId)) continue
-        if (
-          chat.running
-          || visibleChatIdsRef.current.has(chatId)
-        ) {
-          markChatRunReconcile(chatId)
-        }
-      }
-    } catch {
-      // Reconciliation is best-effort. The open stream remains useful, and a
-      // later reconnect gets another authoritative pass.
     }
   }, [
     fetchFreshChats,

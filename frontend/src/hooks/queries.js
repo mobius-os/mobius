@@ -182,8 +182,8 @@ function useLegacyProjectsQuery({ enabled = true } = {}) {
   return useQuery({ queryKey: legacyProjectsKey, queryFn: fetchLegacyProjects, enabled })
 }
 
-async function fetchChats({ signal, timeoutMs } = {}) {
-  const res = await api.chats.list({ signal, timeoutMs })
+async function fetchChats({ signal, timeoutMs, cache } = {}) {
+  const res = await api.chats.list({ signal, timeoutMs, cache })
   const data = await jsonOrThrow(res, 'chats fetch failed:')
   return Array.isArray(data) ? data : []
 }

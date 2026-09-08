@@ -415,3 +415,11 @@ export function entriesToTrim(existingKeys, max) {
   if (!(max > 0) || keys.length <= max) return []
   return keys.slice(0, keys.length - max)
 }
+
+// Authoritative shell reconciliation must never mistake an offline snapshot
+// for live truth. Ordinary list reads keep their NetworkFirst offline fallback.
+export function requiresLiveShellList(request) {
+  const { pathname } = new URL(request.url)
+  return request.cache === 'no-store'
+    && (pathname === '/api/chats' || pathname === '/api/apps/')
+}

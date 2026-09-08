@@ -363,3 +363,14 @@ test('APP_ASSETS_MAX_ENTRIES is a sane positive cap', () => {
   assert.equal(typeof APP_ASSETS_MAX_ENTRIES, 'number')
   assert.ok(APP_ASSETS_MAX_ENTRIES > 0)
 })
+
+
+test('authoritative shell reads bypass offline fallback while ordinary reads keep it', async () => {
+  const { requiresLiveShellList } = await import('../../sw-cache-policy.js')
+  for (const path of ['/api/chats', '/api/apps/']) {
+    const url = `https://mobius.test${path}`
+    assert.equal(requiresLiveShellList(new Request(url)), false)
+    assert.equal(requiresLiveShellList(new Request(url, { cache: 'no-store' })), true)
+  }
+  assert.equal(requiresLiveShellList(new Request('https://mobius.test/api/theme', { cache: 'no-store' })), false)
+})
