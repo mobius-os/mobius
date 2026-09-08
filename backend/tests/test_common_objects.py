@@ -608,3 +608,87 @@ def test_reinvite_adds_current_deployment_without_changing_active_role(client, a
   assert revoked.json()["hosts"] == [PEER_HOST]
   remaining = client.get(f"/api/common/objects/{oid}/members", headers=auth).json()["members"]
   assert "new.example.com" in remaining
+
+
+@pytest.fixture
+def isolated_invitations(tmp_path, monkeypatch):
+  monkeypatch.setattr(objects_routes, "_invitations_dir", lambda: tmp_path)
+
+
+def test_invitation_requests_are_quiet_and_retries_preserve_first_delivery(client, auth, monkeypatch, isolated_invitations):
+  from app import push
+  notifications = []
+  monkeypatch.setattr(push, "notify_owner", lambda *a, **kw: notifications.append(kw))
+  objects_routes._invitation_limiter.reset()
+  private, public = _make_peer_keypair()
+  _seed_peer_actor_cache(public)
+  oid = "ef" * 16
+  envelope = _signed(private, {"type": "object_invitation", "object": {
+    "id": oid, "app": "kanban", "label": "Quiet board", "role": "editor",
+  }})
+  url = "/api/common/objects/invitations/deliver"
+  assert client.post(url, json=envelope).status_code == 200
+  path = objects_routes._invitation_path(PEER_HOST, oid)
+  original = path.read_bytes()
+  assert client.post(url, json=envelope).status_code == 200
+  assert path.read_bytes() == original
+  assert notifications == []
+  assert objects_routes._load_remote(PEER_HOST, oid) is None
+  assert client.post(f"/api/common/objects/invitations/{PEER_HOST}/{oid}/decline", headers=auth).status_code == 200
+  declined = path.read_bytes()
+  assert client.post(url, json=envelope).status_code == 200
+  assert path.read_bytes() == declined
+  assert client.get("/api/common/objects/invitations", headers=auth).json()["invitations"] == []
+
+
+@pytest.mark.parametrize("bound", ["MAX_RECEIVED_INVITATIONS", "MAX_SENDER_INVITATIONS"])
+def test_invitation_capacity_rejects_new_requests_without_removing_history(client, monkeypatch, bound, isolated_invitations):
+  objects_routes._invitation_limiter.reset()
+  monkeypatch.setattr(objects_routes, bound, 1)
+  private, public = _make_peer_keypair()
+  _seed_peer_actor_cache(public)
+  url = "/api/common/objects/invitations/deliver"
+  def delivery(oid):
+    return client.post(url, json=_signed(private, {"type": "object_invitation", "object": {
+      "id": oid, "app": "kanban", "role": "viewer",
+    }}))
+  assert delivery("ab" * 16).status_code == 200
+  original = objects_routes._invitation_path(PEER_HOST, "ab" * 16).read_bytes()
+  assert delivery("cd" * 16).status_code == 429
+  assert delivery("ab" * 16).status_code == 200
+  assert objects_routes._invitation_path(PEER_HOST, "ab" * 16).read_bytes() == original
+
+
+def test_invitation_ingress_is_limited_before_peer_discovery(client, monkeypatch):
+  objects_routes._invitation_limiter.reset()
+  calls = []
+  async def verify(envelope):
+    calls.append(envelope)
+    raise HTTPException(status_code=403)
+  monkeypatch.setattr(objects_routes, "_verify_peer_envelope", verify)
+  statuses = [client.post("/api/common/objects/invitations/deliver", json={
+    "v": 0, "to": common_routes._own_host(), "type": "object_invitation",
+  }).status_code for _ in range(31)]
+  assert statuses[:30] == [403] * 30
+  assert statuses[30] == 429
+  assert len(calls) == 30
+  objects_routes._invitation_limiter.reset()
+
+
+def test_expired_decline_tombstone_frees_capacity_but_pending_history_remains(client, monkeypatch, isolated_invitations):
+  objects_routes._invitation_limiter.reset()
+  monkeypatch.setattr(objects_routes, "MAX_RECEIVED_INVITATIONS", 2)
+  old = objects_routes._invitation_path(PEER_HOST, "11" * 16)
+  old.write_text(json.dumps({"host": PEER_HOST, "status": "declined",
+    "declined_at": time.time() - 2 * objects_routes.CLOCK_SKEW_S - 1}))
+  pending = objects_routes._invitation_path(PEER_HOST, "22" * 16)
+  pending.write_text(json.dumps({"host": PEER_HOST, "label": "Preserved legacy request"}))
+  history = pending.read_bytes()
+  private, public = _make_peer_keypair()
+  _seed_peer_actor_cache(public)
+  response = client.post("/api/common/objects/invitations/deliver", json=_signed(private, {
+    "type": "object_invitation", "object": {"id": "33" * 16, "app": "kanban"},
+  }))
+  assert response.status_code == 200
+  assert not old.exists()
+  assert pending.read_bytes() == history

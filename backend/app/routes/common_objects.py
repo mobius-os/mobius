@@ -63,9 +63,12 @@ from weakref import WeakValueDictionary
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
+from slowapi import Limiter
+from slowapi.util import get_remote_address
 
-from app import models, push
+from app import models
 from app.common_protocol import (
+  CLOCK_SKEW_S,
   OUTBOUND_TIMEOUT_S,
   peer_base_url as _peer_base_url,
   sign as _sign,
@@ -91,6 +94,10 @@ MAX_DOC_BYTES = 256 * 1024
 MAX_ENVELOPE_BYTES = MAX_DOC_BYTES + 8 * 1024
 MAX_KIND_CHARS = 40
 MAX_LABEL_CHARS = 120
+MAX_RECEIVED_INVITATIONS = 1000
+MAX_SENDER_INVITATIONS = 50
+_invitation_limiter = Limiter(key_func=get_remote_address)
+
 INVITE_TTL_S = 7 * 24 * 3600
 PRESENCE_TTL_S = 12
 PRESENCE_RETENTION_S = 5 * 60
@@ -383,7 +390,7 @@ async def peer_operation(oid: str, request: Request):
 # A handle invitation authorizes a member by WHO THEY ARE instead of by a
 # code they carry: the host adds the invitee's instance as a pending member
 # and delivers a signed invitation envelope to that instance, which stores it
-# and notifies its owner. Accepting is an ordinary join — no secret needed,
+# as a quiet request. Accepting is an ordinary join — no secret needed,
 # because the sender's verified signature is the credential.
 
 def _invitations_dir() -> Path:
@@ -472,7 +479,8 @@ async def _resolve_invitees(address: str, db: Session, owner_id: int) -> InviteR
 
 
 @router.post("/invitations/deliver")
-async def receive_invitation(request: Request, db: Session = Depends(get_db)):
+@_invitation_limiter.limit("30/minute")
+async def receive_invitation(request: Request):
   """Accept one signed board/object invitation from the hosting instance."""
   envelope = await _read_object_envelope(request)
   if envelope.get("type") != "object_invitation":
@@ -492,25 +500,33 @@ async def receive_invitation(request: Request, db: Session = Depends(get_db)):
     "from_name": str(actor.get("name") or "")[:MAX_LABEL_CHARS],
     "received_at": time.time(),
   }
-  atomic_write(_invitation_path(sender, meta["id"]), json.dumps(invitation, indent=2))
-  owner = db.query(models.Owner).first()
-  if owner is not None:
-    app_row = (
-      db.query(models.App).filter(models.App.slug == invitation["app"]).first()
-      if invitation["app"] else None
-    )
-    try:
-      push.notify_owner(
-        db,
-        owner.id,
-        title=f"{invitation['from_name'] or sender} invited you",
-        body=invitation["label"] or f"A shared {invitation['kind'] or 'item'}",
-        source_type="app" if app_row else "agent",
-        source_id=str(app_row.id) if app_row else None,
-        target=f"/shell/?app={app_row.id}" if app_row else "/",
-      )
-    except Exception:
-      pass  # storing the invitation must not fail on push problems
+  # No await between admission and write: the single-worker event loop owns
+  # this transaction. Retries cannot refresh requests or undo a decline.
+  path = _invitation_path(sender, meta["id"])
+  previous = json.loads(path.read_text()) if path.is_file() else None
+  if _load_remote(sender, meta["id"]):
+    return {"status": "delivered"}
+  if previous and (
+    previous.get("status", "pending") == "pending"
+    or envelope["sent_at"] <= previous.get("sent_at", 0)
+  ):
+    return {"status": "delivered"}
+  if previous is None:
+    records = []
+    sender_count = 0
+    for record in _invitations_dir().glob("*.json"):
+      stored = json.loads(record.read_text())
+      # Only tombstones expire; pending requests and existing history remain.
+      if (stored.get("status") == "declined"
+          and stored.get("declined_at", time.time()) + 2 * CLOCK_SKEW_S < time.time()):
+        record.unlink()
+        continue
+      records.append(record)
+      sender_count += stored.get("host") == sender
+    if len(records) >= MAX_RECEIVED_INVITATIONS or sender_count >= MAX_SENDER_INVITATIONS:
+      raise HTTPException(status_code=429, detail="Invitation requests are full.")
+  invitation.update(status="pending", sent_at=envelope["sent_at"])
+  atomic_write(path, json.dumps(invitation, indent=2))
   return {"status": "delivered"}
 
 
@@ -527,6 +543,8 @@ def list_invitations(
     try:
       inv = json.loads(record.read_text())
     except Exception:
+      continue
+    if inv.get("status", "pending") != "pending":
       continue
     if wanted and inv.get("app") != wanted:
       continue
@@ -548,6 +566,10 @@ async def decline_invitation(
     raise HTTPException(status_code=404, detail="No such invitation.")
   inv = json.loads(path.read_text())
   _require_app_match(caller, inv.get("app") or "")
+  # Preserve the signed timestamp so redelivery cannot resurrect this request.
+  inv["status"] = "declined"
+  inv["declined_at"] = time.time()
+  atomic_write(path, json.dumps(inv, indent=2))
   identity = _load_identity()
   envelope = {
     "v": 0,
@@ -565,7 +587,6 @@ async def decline_invitation(
     )
   except Exception:
     pass  # the host prunes the pending member on next contact
-  path.unlink(missing_ok=True)
   return {"status": "declined"}
 
 
