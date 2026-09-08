@@ -77,6 +77,14 @@ class PeerMessageCursor:
   message_id: str
 
 
+@dataclass(frozen=True)
+class CoordinationContextDelivery:
+  """Rendered peer context plus the exact inbox boundary it contains."""
+
+  text: str
+  delivered_through: PeerMessageCursor | None
+
+
 def _latest_runs(
   db: Session, chat_ids: list[str] | set[str],
 ) -> dict[str, Any]:
@@ -581,6 +589,16 @@ def _recent_message_rows(
   ).limit(max(1, min(int(limit), 100))).all()))
 
 
+def _oldest_message_rows(
+  query, *, limit: int,
+) -> list[models.AgentCoordinationMessage]:
+  """Return the next bounded chronological page without skipping backlog."""
+  return query.order_by(
+    models.AgentCoordinationMessage.created_at.asc(),
+    models.AgentCoordinationMessage.id.asc(),
+  ).limit(max(1, min(int(limit), 100))).all()
+
+
 def _message_names(
   db: Session, rows: list[models.AgentCoordinationMessage],
 ) -> dict[str, str]:
@@ -655,6 +673,7 @@ def visible_peer_messages(
   created_after: datetime | None = None,
   created_through: datetime | None = None,
   created_after_cursor: PeerMessageCursor | None = None,
+  oldest_first: bool = False,
 ) -> list[dict[str, Any]]:
   """Return one chat's global direct mail plus current-scope broadcasts."""
   direct_visible = models.AgentCoordinationMessage.to_chat_id == chat_id
@@ -700,12 +719,19 @@ def visible_peer_messages(
         models.AgentCoordinationMessage.id > created_after_cursor.message_id,
       ),
     ))
-  rows = _recent_message_rows(query, limit=limit)
+  rows = (
+    _oldest_message_rows(query, limit=limit)
+    if oldest_first else _recent_message_rows(query, limit=limit)
+  )
   return serialize_messages(db, rows)
 
 
 def _peer_carrier_cursor(
-  db: Session, chat_id: str, *, chat: models.Chat | None = None,
+  db: Session,
+  chat_id: str,
+  *,
+  chat: models.Chat | None = None,
+  contiguous_only: bool = False,
 ) -> PeerMessageCursor | None:
   """Latest mailbox boundary reserved in a hidden steer carrier.
 
@@ -729,6 +755,8 @@ def _peer_carrier_cursor(
       continue
     value = item.get(PEER_MESSAGE_CURSOR_FIELD)
     if not isinstance(value, dict):
+      continue
+    if contiguous_only and item.get("peer_message_contiguous") is not True:
       continue
     raw_created_at = value.get("created_at")
     message_id = value.get("id")
@@ -793,20 +821,76 @@ def _context_message_window(
   db: Session,
   chat_id: str,
   physical_run_id: str | None,
-) -> tuple[datetime | None, datetime | None]:
-  """Notes that arrived between the previous turn's start and this one's.
+) -> tuple[datetime | None, datetime | None, PeerMessageCursor | None]:
+  """Return the safe lower/upper boundaries for one provider admission.
 
   A note that arrives mid-turn belongs to the next turn, so startup context
-  never races the live inbox or repeats the same backlog.
+  never races the live inbox. Once a new backend has admitted one page, the
+  persisted cursor—not physical-turn starts—continues the oldest unseen page.
+  The legacy start-time fallback applies only when no cursor-bearing admission
+  exists yet; a never-admitted newer run cannot advance that fallback.
   """
   current_started = run_started_at(db, chat_id, physical_run_id)
   if current_started is None:
-    return None, None
-  previous_started = db.query(func.max(models.ChatRun.started_at)).filter(
+    return None, None, None
+
+  admitted_cursor = db.query(
+    models.ChatRun.peer_message_through_created_at,
+    models.ChatRun.peer_message_through_id,
+  ).filter(
     models.ChatRun.chat_id == chat_id,
     models.ChatRun.started_at < current_started,
-  ).scalar()
-  return previous_started, current_started
+    models.ChatRun.provider_execution_admitted.is_(True),
+    models.ChatRun.peer_message_through_created_at.isnot(None),
+    models.ChatRun.peer_message_through_id.isnot(None),
+  ).order_by(
+    models.ChatRun.peer_message_through_created_at.desc(),
+    models.ChatRun.peer_message_through_id.desc(),
+  ).first()
+  if admitted_cursor is not None:
+    return None, current_started, PeerMessageCursor(
+      created_at=admitted_cursor.peer_message_through_created_at,
+      message_id=str(admitted_cursor.peer_message_through_id),
+    )
+
+  admitted = db.query(models.ChatRun.started_at).filter(
+    models.ChatRun.chat_id == chat_id,
+    models.ChatRun.started_at < current_started,
+    models.ChatRun.provider_execution_admitted.is_(True),
+    or_(
+      models.ChatRun.peer_message_delivery_pending.is_(False),
+      models.ChatRun.peer_message_delivery_pending.is_(None),
+    ),
+  ).order_by(
+    models.ChatRun.started_at.desc(), models.ChatRun.id.desc(),
+  ).first()
+  if admitted is not None:
+    return admitted.started_at, current_started, None
+
+  previous = db.query(
+    models.ChatRun.started_at,
+    models.ChatRun.provider_execution_admitted,
+    models.ChatRun.peer_message_delivery_pending,
+  ).filter(
+    models.ChatRun.chat_id == chat_id,
+    models.ChatRun.started_at < current_started,
+  ).order_by(
+    models.ChatRun.started_at.desc(), models.ChatRun.id.desc(),
+  ).first()
+  if previous is None:
+    return None, current_started, None
+  # False is a post-ledger proof that the prior run never reached its provider;
+  # do not let its start time acknowledge anything. NULL identifies pre-ledger
+  # history, where the previous physical start remains the only safe baseline.
+  legacy_after = (
+    None
+    if (
+      previous.provider_execution_admitted is False
+      or previous.peer_message_delivery_pending is True
+    )
+    else previous.started_at
+  )
+  return legacy_after, current_started, None
 
 
 def _delegation_scope_has_children(
@@ -840,10 +924,21 @@ def agent_context_snapshot(
     for peer in participants
     if not peer["is_current"] and (scope.kind == "project" or peer["online"])
   ]
-  created_after, created_through = _context_message_window(
+  created_after, created_through, admitted_through = _context_message_window(
     db, chat_id, physical_run_id,
   )
-  carried_through = _peer_carrier_cursor(db, chat_id, chat=chat)
+  # Only a steer carrier that explicitly proves it covered one contiguous
+  # prefix can advance ordinary next-turn delivery. A latest-first urgent
+  # carrier may have skipped older quiet mail and must never acknowledge that
+  # gap merely because the provider saw the urgent tail.
+  carried_through = _peer_carrier_cursor(
+    db, chat_id, chat=chat, contiguous_only=True,
+  )
+  cursor_candidates = [
+    cursor for cursor in (admitted_through, carried_through)
+    if cursor is not None
+  ]
+  delivered_through = max(cursor_candidates) if cursor_candidates else None
   message_window = visible_peer_messages(
     db,
     scope,
@@ -852,15 +947,22 @@ def agent_context_snapshot(
     inbox_only=True,
     created_after=created_after,
     created_through=created_through,
-    created_after_cursor=carried_through,
+    created_after_cursor=delivered_through,
+    oldest_first=True,
   )
-  messages = message_window[-MAX_CONTEXT_MESSAGES:]
+  delivered_rows = message_window[:MAX_CONTEXT_MESSAGES]
+  messages = [model_message(message) for message in delivered_rows]
   snapshot = {
     "scope": {"kind": scope.kind, "id": scope.id},
     "self_chat_id": chat_id,
     "collaborators": collaborators[:MAX_CONTEXT_PEERS],
-    "messages": [model_message(message) for message in messages],
+    "messages": messages,
   }
+  if delivered_rows:
+    snapshot["_peer_message_through"] = {
+      "created_at": delivered_rows[-1]["created_at"],
+      "id": delivered_rows[-1]["id"],
+    }
   if len(collaborators) > MAX_CONTEXT_PEERS:
     snapshot["collaborators_truncated"] = True
   if len(message_window) > MAX_CONTEXT_MESSAGES:
@@ -1486,15 +1588,45 @@ def _interrupt_peer_carrier(
   if scope is None or started_at is None:
     return None
   carried_through = _peer_carrier_cursor(db, chat_id, chat=chat)
+  contiguous_through = _peer_carrier_cursor(
+    db, chat_id, chat=chat, contiguous_only=True,
+  )
+  run_cursor_row = db.query(
+    models.ChatRun.peer_message_through_created_at,
+    models.ChatRun.peer_message_through_id,
+  ).filter(
+    models.ChatRun.id == physical_run_id,
+    models.ChatRun.chat_id == chat_id,
+  ).first()
+  run_cursor = None
+  if (
+    run_cursor_row is not None
+    and run_cursor_row.peer_message_through_created_at is not None
+    and run_cursor_row.peer_message_through_id is not None
+  ):
+    run_cursor = PeerMessageCursor(
+      created_at=run_cursor_row.peer_message_through_created_at,
+      message_id=str(run_cursor_row.peer_message_through_id),
+    )
+  reserved_candidates = [
+    cursor for cursor in (carried_through, run_cursor)
+    if cursor is not None
+  ]
+  reserved_through = max(reserved_candidates) if reserved_candidates else None
   message_window = visible_peer_messages(
     db,
     scope,
     chat_id=chat_id,
     limit=MAX_CONTEXT_MESSAGES + 1,
     inbox_only=True,
-    created_after=started_at,
-    created_after_cursor=carried_through,
+    created_after=started_at if reserved_through is None else None,
+    created_after_cursor=reserved_through,
   )
+  # An explicit interrupt stays urgent even when quiet next-turn notes fill the
+  # bounded backlog. This path deliberately prefers the latest page. When that
+  # leaves a hole, the carrier is only a reservation for further live steers;
+  # ordinary turn admission replays the omitted oldest page and owns the
+  # durable no-skip cursor.
   messages = message_window[-MAX_CONTEXT_MESSAGES:]
   if not messages:
     return None
@@ -1534,6 +1666,13 @@ def _interrupt_peer_carrier(
   through = messages[-1]
   through_id = str(through["id"])
   through_created_at = str(through["created_at"])
+  prior_carriers_contiguous = (
+    carried_through is None or carried_through == contiguous_through
+  )
+  carrier_contiguous = (
+    prior_carriers_contiguous
+    and len(message_window) <= MAX_CONTEXT_MESSAGES
+  )
   return {
     "role": "user",
     "content": content,
@@ -1545,6 +1684,7 @@ def _interrupt_peer_carrier(
       "created_at": through_created_at,
       "id": through_id,
     },
+    "peer_message_contiguous": carrier_contiguous,
     "source_work_id": physical_run_id,
   }
 
@@ -1706,19 +1846,33 @@ async def deliver_peer_recipients(
   return PeerDeliveryResult(steered=steered, woken=woken, queued=queued)
 
 
-def build_coordination_context(
+def build_coordination_context_delivery(
   db: Session,
   chat_id: str,
   physical_run_id: str | None,
   *,
   chat: models.Chat | None = None,
-) -> str:
-  """Inject new peer events and relevant in-scope collaborators."""
+) -> CoordinationContextDelivery:
+  """Build peer context and retain its boundary for provider admission."""
   snapshot = agent_context_snapshot(
     db, chat_id, physical_run_id, chat=chat,
   )
   if snapshot is None:
-    return ""
+    return CoordinationContextDelivery(text="", delivered_through=None)
+  raw_through = snapshot.pop("_peer_message_through", None)
+  delivered_through = None
+  if isinstance(raw_through, dict):
+    raw_created_at = raw_through.get("created_at")
+    message_id = raw_through.get("id")
+    if isinstance(raw_created_at, str) and isinstance(message_id, str):
+      parsed_created_at = datetime.fromisoformat(raw_created_at)
+      if parsed_created_at.tzinfo is not None:
+        parsed_created_at = parsed_created_at.astimezone(UTC).replace(
+          tzinfo=None,
+        )
+      delivered_through = PeerMessageCursor(
+        created_at=parsed_created_at, message_id=message_id,
+      )
   claims: list[dict[str, Any]] = []
   scope = snapshot["scope"]
   if scope["kind"] == "project":
@@ -1749,7 +1903,9 @@ def build_coordination_context(
     and not snapshot["messages"]
     and not claims
   ):
-    return ""
+    return CoordinationContextDelivery(
+      text="", delivered_through=delivered_through,
+    )
   compact = json.dumps(
     snapshot, ensure_ascii=False, separators=(",", ":"),
   ).replace("<", "\\u003c").replace(">", "\\u003e")
@@ -1779,9 +1935,25 @@ def build_coordination_context(
       "with chat_id when done. Claims coordinate work but never override files "
       "or owner instructions."
     )
-  return "\n".join([
+  text = "\n".join([
     *instructions,
     "<agent_coordination>",
     compact,
     "</agent_coordination>",
   ])
+  return CoordinationContextDelivery(
+    text=text, delivered_through=delivered_through,
+  )
+
+
+def build_coordination_context(
+  db: Session,
+  chat_id: str,
+  physical_run_id: str | None,
+  *,
+  chat: models.Chat | None = None,
+) -> str:
+  """Inject new peer events and relevant in-scope collaborators."""
+  return build_coordination_context_delivery(
+    db, chat_id, physical_run_id, chat=chat,
+  ).text

@@ -83,6 +83,7 @@ from app.chat_titles import apply_generated_title, renamed_event
 from app.goal_commands import is_goal_continue
 from app.memory_observability import claim_oom_kill
 from app.chat_writer import (
+  AcknowledgePeerContextDelivery,
   AdmitProviderExecution,
   AppendPending,
   Barrier,
@@ -2781,7 +2782,11 @@ def _run_generation_superseded(chat_id: str, run_gen: int | None) -> bool:
 
 
 async def _admit_provider_execution(
-  chat_id: str, run_token: str, run_gen: int | None,
+  chat_id: str,
+  run_token: str,
+  run_gen: int | None,
+  *,
+  has_peer_context_delivery: bool = False,
 ) -> bool:
   """Cross provider entry only while this exact turn still owns execution.
 
@@ -2793,7 +2798,9 @@ async def _admit_provider_execution(
     return False
   try:
     await _await_ack(get_writer().submit(AdmitProviderExecution(
-      chat_id=chat_id, run_token=run_token,
+      chat_id=chat_id,
+      run_token=run_token,
+      has_peer_context_delivery=has_peer_context_delivery,
     )))
   except Exception:
     if not _run_generation_superseded(chat_id, run_gen):
@@ -4826,6 +4833,33 @@ async def _sync_generated_chat_title(chat_id: str, title: str) -> bool:
   return True
 
 
+async def _acknowledge_peer_context_delivery(
+  *, chat_id: str, run_token: str, delivered_through,
+) -> None:
+  """Best-effort at-least-once peer delivery acknowledgement.
+
+  A failed acknowledgement only repeats an already-seen note on a later turn;
+  it never consumes one before the provider call has returned successfully.
+  """
+  if not chat_id or not run_token or delivered_through is None:
+    return
+  try:
+    await _await_ack(get_writer().submit(AcknowledgePeerContextDelivery(
+      chat_id=chat_id,
+      run_token=run_token,
+      peer_message_through_created_at=delivered_through.created_at,
+      peer_message_through_id=delivered_through.message_id,
+    )))
+  except Exception:
+    _get_logger().warning(
+      "peer context acknowledgement failed; delivery will repeat "
+      "chat_id=%s run_token=%s",
+      chat_id,
+      run_token,
+      exc_info=True,
+    )
+
+
 async def _sync_chat_title(data_dir: str, chat_id: str) -> None:
   """Compatibility helper: sync a chat title from an existing note's gist.
 
@@ -5373,11 +5407,14 @@ async def _run_chat_impl_with_db(
   # isolated from both tools and injected peer data so their evidence stays
   # independent of concurrent agents.
   coordination_context = ""
+  coordination_message_through = None
   if _should_inject_peer_context(chat_id, run_token, gauntlet_writer_policy):
-    from app.agent_coordination import build_coordination_context
-    coordination_context = build_coordination_context(
+    from app.agent_coordination import build_coordination_context_delivery
+    coordination_delivery = build_coordination_context_delivery(
       db, chat_id, run_token, chat=chat_row,
     )
+    coordination_context = coordination_delivery.text
+    coordination_message_through = coordination_delivery.delivered_through
     if coordination_context:
       if is_slash_command:
         user_message = f"{user_message}\n\n{coordination_context}"
@@ -5828,7 +5865,12 @@ async def _run_chat_impl_with_db(
     db.close()
     try:
       from app.codex_sdk_runner import run_codex_sdk_turn
-      if not await _admit_provider_execution(chat_id, run_token or "", run_gen):
+      if not await _admit_provider_execution(
+        chat_id,
+        run_token or "",
+        run_gen,
+        has_peer_context_delivery=coordination_message_through is not None,
+      ):
         return await _complete_turn(
           bc=bc, sink=sink, db=db, chat_id=chat_id, run_gen=run_gen,
           provider_id=provider_id, cost_usd=0, close_browser=False,
@@ -5859,6 +5901,12 @@ async def _run_chat_impl_with_db(
       )
       new_session_id = runner_result.get("session_id")
       err = runner_result.get("error")
+      if not err:
+        await _acknowledge_peer_context_delivery(
+          chat_id=chat_id,
+          run_token=run_token or "",
+          delivered_through=coordination_message_through,
+        )
       usage_metrics = runner_result.get("usage_metrics")
       await _record_run_metrics(
         chat_id=chat_id,
@@ -6008,7 +6056,12 @@ async def _run_chat_impl_with_db(
     db.close()
     try:
       from app.providers import skills_enabled as _skills_enabled
-      if not await _admit_provider_execution(chat_id, run_token or "", run_gen):
+      if not await _admit_provider_execution(
+        chat_id,
+        run_token or "",
+        run_gen,
+        has_peer_context_delivery=coordination_message_through is not None,
+      ):
         return await _complete_turn(
           bc=bc, sink=sink, db=db, chat_id=chat_id, run_gen=run_gen,
           provider_id=provider_id, cost_usd=0, close_browser=False,
@@ -6036,6 +6089,12 @@ async def _run_chat_impl_with_db(
       )
       new_session_id = runner_result.get("session_id")
       err = runner_result.get("error")
+      if not err:
+        await _acknowledge_peer_context_delivery(
+          chat_id=chat_id,
+          run_token=run_token or "",
+          delivered_through=coordination_message_through,
+        )
       usage_metrics = runner_result.get("usage_metrics")
       await _record_run_metrics(
         chat_id=chat_id,

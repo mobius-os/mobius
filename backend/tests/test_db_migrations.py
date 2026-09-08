@@ -1342,6 +1342,40 @@ def test_fresh_agent_coordination_delivery_defaults_to_next_turn():
   assert column.server_default.arg == "next_turn"
 
 
+def test_peer_context_delivery_cursor_upgrade_preserves_existing_runs(tmp_path):
+  eng = create_engine(f"sqlite:///{tmp_path / 'peer-context-cursor.db'}")
+  with eng.begin() as conn:
+    conn.execute(text(
+      "CREATE TABLE chat_runs (id VARCHAR(64) PRIMARY KEY)"
+    ))
+    conn.execute(text("INSERT INTO chat_runs (id) VALUES ('existing-run')"))
+
+  migrations._add_peer_context_delivery_cursor(eng)
+  migrations._add_peer_context_delivery_cursor(eng)
+
+  columns = {
+    column["name"]: column
+    for column in inspect(eng).get_columns("chat_runs")
+  }
+  assert columns["peer_message_through_created_at"]["nullable"] is True
+  assert columns["peer_message_through_id"]["nullable"] is True
+  assert columns["peer_message_delivery_pending"]["nullable"] is True
+  with eng.connect() as conn:
+    row = conn.execute(text(
+      "SELECT peer_message_through_created_at, peer_message_through_id, "
+      "peer_message_delivery_pending "
+      "FROM chat_runs WHERE id = 'existing-run'"
+    )).one()
+  assert tuple(row) == (None, None, None)
+
+
+def test_fresh_chat_run_has_nullable_peer_context_delivery_cursor():
+  columns = models.ChatRun.__table__.c
+  assert columns.peer_message_through_created_at.nullable is True
+  assert columns.peer_message_through_id.nullable is True
+  assert columns.peer_message_delivery_pending.nullable is True
+
+
 def test_run_migrations_adds_read_at_and_backfills_notifications(tmp_path):
   """Pre-feature notification history must not arrive as a full unread badge.
 
@@ -1442,6 +1476,7 @@ def test_run_migrations_records_an_inspectable_append_only_history(tmp_path):
     "0041_app_runtime_revision",
     "0042_linked_app_project_runtime",
     "0043_agent_coordination_delivery",
+    "0044_peer_context_delivery_cursor",
   ]
   assert second == first
 

@@ -327,6 +327,17 @@ class ChatRun(Base):
   # ambiguous even with no transcript output. NULL preserves that ambiguity
   # for pre-admission-ledger runs upgraded from an older backend.
   provider_execution_admitted = Column(Boolean, nullable=True, default=False)
+  # Inclusive boundary of the peer-message page injected into this provider
+  # admission. Both fields are NULL when no peer message was delivered. The
+  # pair advances only after the provider call returns successfully. Admission
+  # alone is intentionally insufficient: a launch exception must redeliver the
+  # same oldest unseen page instead of losing it.
+  peer_message_through_created_at = Column(DateTime, nullable=True, default=None)
+  peer_message_through_id = Column(String(64), nullable=True, default=None)
+  # NULL is pre-migration history. New provider admissions write False when no
+  # peer context was present and True while an injected page still awaits a
+  # successful provider return; only the latter blocks the start-time fallback.
+  peer_message_delivery_pending = Column(Boolean, nullable=True, default=None)
   provider = Column(String(32), nullable=True, default=None)
   # Objective shown by the shell while this exact run owns a native goal.
   # This belongs to the run rather than the transcript tail: mid-turn owner

@@ -290,6 +290,22 @@ class AdmitProviderExecution(_Command):
 
   chat_id: str = ""
   run_token: str = ""
+  has_peer_context_delivery: bool = False
+
+
+@dataclass
+class AcknowledgePeerContextDelivery(_Command):
+  """Advance the peer inbox only after a provider call returns successfully.
+
+  Provider admission is intentionally earlier: it prevents ambiguous replay
+  of an execution attempt. It is not proof that the provider accepted the
+  prompt, so peer delivery has its own later, monotonic acknowledgement.
+  """
+
+  chat_id: str = ""
+  run_token: str = ""
+  peer_message_through_created_at: datetime | None = None
+  peer_message_through_id: str | None = None
 
 
 @dataclass
@@ -1750,6 +1766,8 @@ class ChatWriterActor:
       return self._record_run_metrics(db, cmd)
     if isinstance(cmd, AdmitProviderExecution):
       return self._admit_provider_execution(db, cmd)
+    if isinstance(cmd, AcknowledgePeerContextDelivery):
+      return self._acknowledge_peer_context_delivery(db, cmd)
     if isinstance(cmd, RecordAgentLifecycle):
       from app.agent_lifecycle import record_event
       return record_event(db, cmd.values)
@@ -2020,8 +2038,48 @@ class ChatWriterActor:
     ):
       raise _PersistFailed("AdmitProviderExecution: run is not eligible")
     run.provider_execution_admitted = True
+    run.peer_message_delivery_pending = bool(cmd.has_peer_context_delivery)
     if not _commit_or_rollback(db):
       raise _PersistFailed("AdmitProviderExecution did not persist")
+
+  def _acknowledge_peer_context_delivery(
+    self, db, cmd: AcknowledgePeerContextDelivery,
+  ) -> None:
+    """Advance one exact run's peer boundary after provider success."""
+    from app.models import ChatRun
+
+    delivered_at = cmd.peer_message_through_created_at
+    delivered_id = cmd.peer_message_through_id
+    if delivered_at is None or not delivered_id:
+      raise _PersistFailed(
+        "AcknowledgePeerContextDelivery: peer-message cursor is incomplete"
+      )
+    run = db.query(ChatRun).filter(
+      ChatRun.id == cmd.run_token,
+      ChatRun.chat_id == cmd.chat_id,
+      ChatRun.provider_execution_admitted.is_(True),
+    ).first()
+    if run is None:
+      raise _PersistFailed(
+        "AcknowledgePeerContextDelivery: admitted run not found"
+      )
+    current = None
+    if (
+      run.peer_message_through_created_at is not None
+      and run.peer_message_through_id is not None
+    ):
+      current = (
+        run.peer_message_through_created_at,
+        str(run.peer_message_through_id),
+      )
+    candidate = (delivered_at, delivered_id)
+    if current is not None and candidate <= current:
+      return
+    run.peer_message_through_created_at = delivered_at
+    run.peer_message_through_id = delivered_id
+    run.peer_message_delivery_pending = False
+    if not _commit_or_rollback(db):
+      raise _PersistFailed("AcknowledgePeerContextDelivery did not persist")
 
   def _record_run_metrics(self, db, cmd: RecordRunMetrics) -> bool:
     """Attach provider usage/cost to the exact durable run row."""

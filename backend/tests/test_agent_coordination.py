@@ -10,6 +10,7 @@ from app.agent_coordination import (
   MAX_CONTEXT_MESSAGES,
   agent_context_snapshot,
   build_coordination_context,
+  build_coordination_context_delivery,
   model_peer,
   scope_for_chat,
 )
@@ -547,6 +548,9 @@ def test_interrupt_overflow_marks_one_ordered_cut_without_late_reordering(
 
   chats, _ = _network_fixture(db)
   builder = chats["builder"]
+  builder_run = db.get(models.ChatRun, "builder-run")
+  builder_run.provider_execution_admitted = True
+  db.commit()
   monkeypatch.setattr(coordination, "MAX_CONTEXT_MESSAGES", 2)
   monkeypatch.setattr(
     "app.chat_steering.has_live_steerable_turn", lambda *_args: True,
@@ -582,10 +586,11 @@ def test_interrupt_overflow_marks_one_ordered_cut_without_late_reordering(
   )
   assert "quiet-1" not in carriers[0]["content"]
   assert "quiet-2" not in carriers[0]["content"]
+  assert carriers[0]["peer_message_contiguous"] is False
 
   successor = _next_turn_context(db, builder, "builder-after-overflow-steer")
-  assert "quiet-1" not in successor
-  assert "quiet-2" not in successor
+  assert "quiet-1" in successor
+  assert "quiet-2" in successor
   assert "quiet-3" not in successor
   assert "act-now" not in successor
 
@@ -1021,6 +1026,7 @@ def test_context_delivers_only_new_inbound_notes_on_the_next_turn(
 ):
   chats, runs = _network_fixture(db)
   previous_started = runs["scout"].started_at
+  runs["scout"].provider_execution_admitted = True
   current_started = previous_started + timedelta(seconds=10)
   current = models.ChatRun(
     id="scout-next-run", root_run_id="scout-next-run",
@@ -1074,6 +1080,13 @@ def test_context_delivers_only_new_inbound_notes_on_the_next_turn(
   assert "Arrived while the model is working" not in context
   assert "Also arrived during the same turn" not in context
 
+  # Provider admission acknowledges exactly the page above. The next turn
+  # continues after its last peer row rather than using a lossy time window.
+  current.provider_execution_admitted = True
+  current.peer_message_through_created_at = rows[1].created_at
+  current.peer_message_through_id = rows[1].id
+  db.commit()
+
   later = models.ChatRun(
     id="scout-later-run", root_run_id="scout-later-run",
     chat_id=chats["scout"].id, status="running", provider="claude",
@@ -1089,9 +1102,10 @@ def test_context_delivers_only_new_inbound_notes_on_the_next_turn(
   assert "New inbound for this turn" not in later_context
 
 
-def test_next_turn_context_marks_overflow_and_keeps_latest_notes(db):
+def test_next_turn_context_marks_overflow_and_keeps_oldest_unseen_notes(db):
   chats, runs = _network_fixture(db)
   previous_started = runs["scout"].started_at
+  runs["scout"].provider_execution_admitted = True
   current = models.ChatRun(
     id="scout-overflow-run", root_run_id="scout-overflow-run",
     chat_id=chats["scout"].id, status="running", provider="claude",
@@ -1116,11 +1130,122 @@ def test_next_turn_context_marks_overflow_and_keeps_latest_notes(db):
   assert snapshot["messages_truncated"] is True
   assert len(snapshot["messages"]) == MAX_CONTEXT_MESSAGES
   bodies = [message["body"] for message in snapshot["messages"]]
-  assert bodies[0] == "Overflow note 01"
-  assert bodies[-1] == f"Overflow note {MAX_CONTEXT_MESSAGES:02d}"
+  assert bodies[0] == "Overflow note 00"
+  assert bodies[-1] == f"Overflow note {MAX_CONTEXT_MESSAGES - 1:02d}"
   context = build_coordination_context(db, chats["scout"].id, current.id)
   assert "Earlier peer notes exceeded" in context
   assert "AgentWorkClaim" in context
+
+  current.provider_execution_admitted = True
+  current.peer_message_through_created_at = messages[MAX_CONTEXT_MESSAGES - 1].created_at
+  current.peer_message_through_id = messages[MAX_CONTEXT_MESSAGES - 1].id
+  later = models.ChatRun(
+    id="scout-overflow-later", root_run_id="scout-overflow-later",
+    chat_id=chats["scout"].id, status="running", provider="claude",
+    started_at=current.started_at + timedelta(seconds=100),
+  )
+  db.add(later)
+  db.commit()
+
+  later_snapshot = agent_context_snapshot(db, chats["scout"].id, later.id)
+  assert later_snapshot is not None
+  assert [message["body"] for message in later_snapshot["messages"]] == [
+    f"Overflow note {MAX_CONTEXT_MESSAGES:02d}",
+  ]
+  assert "messages_truncated" not in later_snapshot
+
+
+def test_unadmitted_turn_does_not_consume_peer_context(db):
+  chats, runs = _network_fixture(db)
+  previous_started = runs["scout"].started_at
+  runs["scout"].provider_execution_admitted = True
+  first = models.ChatRun(
+    id="scout-crash-before-admission",
+    root_run_id="scout-crash-before-admission",
+    chat_id=chats["scout"].id,
+    status="running",
+    provider="claude",
+    started_at=previous_started + timedelta(seconds=10),
+  )
+  note = models.AgentCoordinationMessage(
+    id="redeliver-after-crash", room_kind="workspace", room_id="1",
+    from_chat_id=chats["outsider"].id, from_run_id="outside-run",
+    send_id="redeliver-after-crash-send",
+    send_target_key=chats["scout"].id, to_chat_id=chats["scout"].id,
+    kind="finding", body="Do not lose me before provider admission",
+    created_at=previous_started + timedelta(seconds=1),
+  )
+  db.add_all([first, note])
+  db.commit()
+
+  assert "Do not lose me" in build_coordination_context(
+    db, chats["scout"].id, first.id,
+  )
+  first.status = "interrupted"
+  successor = models.ChatRun(
+    id="scout-after-unadmitted-crash",
+    root_run_id="scout-after-unadmitted-crash",
+    chat_id=chats["scout"].id,
+    status="running",
+    provider="claude",
+    started_at=first.started_at + timedelta(seconds=10),
+  )
+  db.add(successor)
+  db.commit()
+
+  assert "Do not lose me" in build_coordination_context(
+    db, chats["scout"].id, successor.id,
+  )
+
+
+def test_admitted_turn_without_provider_ack_does_not_consume_peer_context(db):
+  chats, runs = _network_fixture(db)
+  previous_started = runs["scout"].started_at
+  runs["scout"].provider_execution_admitted = True
+  failed_launch = models.ChatRun(
+    id="scout-provider-launch-failed",
+    root_run_id="scout-provider-launch-failed",
+    chat_id=chats["scout"].id,
+    status="running",
+    provider="claude",
+    provider_execution_admitted=True,
+    peer_message_delivery_pending=True,
+    started_at=previous_started + timedelta(seconds=10),
+  )
+  note = models.AgentCoordinationMessage(
+    id="redeliver-after-provider-launch-failure",
+    room_kind="workspace", room_id="1",
+    from_chat_id=chats["outsider"].id, from_run_id="outside-run",
+    send_id="provider-launch-failure-send",
+    send_target_key=chats["scout"].id, to_chat_id=chats["scout"].id,
+    kind="blocker", body="Replay me after provider launch failure",
+    created_at=previous_started + timedelta(seconds=1),
+  )
+  db.add_all([failed_launch, note])
+  db.commit()
+
+  first_delivery = build_coordination_context_delivery(
+    db, chats["scout"].id, failed_launch.id,
+  )
+  assert "Replay me" in first_delivery.text
+  assert first_delivery.delivered_through is not None
+  # Simulate an exception after admission but before the provider runner
+  # returns: no AcknowledgePeerContextDelivery command was committed.
+  failed_launch.status = "interrupted"
+  successor = models.ChatRun(
+    id="scout-after-provider-launch-failure",
+    root_run_id="scout-after-provider-launch-failure",
+    chat_id=chats["scout"].id,
+    status="running",
+    provider="claude",
+    started_at=failed_launch.started_at + timedelta(seconds=10),
+  )
+  db.add(successor)
+  db.commit()
+
+  assert "Replay me after provider launch failure" in (
+    build_coordination_context(db, chats["scout"].id, successor.id)
+  )
 
 
 def test_context_omits_unrelated_global_agents_when_nothing_arrived(db):

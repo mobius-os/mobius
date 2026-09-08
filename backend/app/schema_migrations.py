@@ -3325,6 +3325,32 @@ def _add_agent_coordination_delivery(eng) -> None:
       ))
 
 
+def _add_peer_context_delivery_cursor(eng) -> None:
+  """Persist the exact peer inbox boundary admitted to each provider turn."""
+  from sqlalchemy import inspect as sa_inspect, text
+
+  inspector = sa_inspect(eng)
+  if "chat_runs" not in inspector.get_table_names():
+    return
+  columns = {column["name"] for column in inspector.get_columns("chat_runs")}
+  with eng.begin() as conn:
+    if "peer_message_through_created_at" not in columns:
+      conn.execute(text(
+        "ALTER TABLE chat_runs "
+        "ADD COLUMN peer_message_through_created_at DATETIME NULL"
+      ))
+    if "peer_message_through_id" not in columns:
+      conn.execute(text(
+        "ALTER TABLE chat_runs "
+        "ADD COLUMN peer_message_through_id VARCHAR(64) NULL"
+      ))
+    if "peer_message_delivery_pending" not in columns:
+      conn.execute(text(
+        "ALTER TABLE chat_runs "
+        "ADD COLUMN peer_message_delivery_pending BOOLEAN NULL"
+      ))
+
+
 def _add_chat_wait_condition_owner(eng) -> None:
   """Persist the executor named by each observable command wait."""
   from sqlalchemy import inspect as sa_inspect, text
@@ -3611,6 +3637,7 @@ _SCHEMA_MIGRATIONS = (
   ("0041_app_runtime_revision", _add_app_runtime_revision),
   ("0042_linked_app_project_runtime", _link_app_project_runtime),
   ("0043_agent_coordination_delivery", _add_agent_coordination_delivery),
+  ("0044_peer_context_delivery_cursor", _add_peer_context_delivery_cursor),
 )
 
 
