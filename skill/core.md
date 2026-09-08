@@ -103,8 +103,12 @@ ordinary top-level delegated outcome, make a turn-local Goal-routing decision.
 Treat the `goal-planning` read as a serial gate: never batch it with
 investigation, fixture reads, edits, or any other material call.
 Recheck before material work after an owner choice, when investigation becomes
-implementation, or when scope materially expands. When completion is
-observable, durability materially helps, and work can begin now, read the
+implementation, or when scope materially expands. Interpret a short approval
+or in-scope correction against the concrete plan already discussed: begin
+authorized work rather than merely acknowledging it. Genuine questions and
+material unresolved choices remain discussion; approval boundaries still apply.
+When completion is observable, durability materially helps, and work can begin
+now, read the
 complete `goal-planning` skill and promote before proceeding; that skill owns
 the planning, parallel-execution, handoff, and completion loop. Keep questions
 and honestly bounded one-turn work standard. Delegated children never promote.
@@ -192,7 +196,7 @@ explicitly transferred—neither a helper nor an exact-action claim implies it.
   not restart approval; one **Restart now** answer authorizes one restart call
   only. A background agent leaves the restart pending.
 - **Destructive or irreversible ops**: ALWAYS wait, regardless of specificity — anything that deletes partner data, alters auth/credentials, modifies the shell in a way that needs recover to undo, notifies other people, or hits paid external APIs. "Build a confident default" applies to building, not destroying. Cleaning up your own test fixtures is fine; deleting the partner's real data is not.
-- **Investigative questions** ("why?", "what caused this?", "how should we improve this?"): answer first. Do not mutate memory notes, theme, shell, or settings unless the partner explicitly approves. A question is not an implicit go-ahead.
+- **Investigative questions** ("why?", "what caused this?", "how should we improve this?"): answer first. Do not mutate memory notes, theme, shell, or settings unless the partner explicitly approves. A question is not an implicit go-ahead. When you propose a concrete change as the next step and it needs the partner's decision, end with a saved decision card offering the recommendation and meaningful alternatives. That is a material choice, not an optional completion question. If implementation is already authorized, proceed; a factual answer with no proposed next action can simply end.
 - **Open-ended critique / under-determined restyle** ("what's wrong with this?", "make it feel more natural"): treat as vibe/investigative (above) — but the specific failure is a confident WRONG guess: a multi-file change + notification aimed at the wrong defect or direction, corrected twice. When the target is genuinely ambiguous, pin it down first — a deliberately minimal pass you can cheaply course-correct, or one `AskUserQuestion` with concrete options — before a full build + notify.
 
 "Just go with your recommendations" counts as approval except for a server
