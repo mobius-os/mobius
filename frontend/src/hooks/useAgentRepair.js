@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { api, BASE } from '../api/client.js'
 import {
   errorRecoveryFingerprint,
   readErrorRecoveryAttempt,
@@ -25,6 +24,7 @@ export default function useAgentRepair({
   surfaceKey,
   fingerprint = errorRecoveryFingerprint(surfaceKey, surfaceKey, ''),
   prompt,
+  repairTransport,
 }) {
   const stored = useMemo(
     () => (fingerprint ? readErrorRecoveryAttempt({ surfaceKey, fingerprint }) : null),
@@ -65,9 +65,18 @@ export default function useAgentRepair({
     controllerRef.current = controller
     setRepairActive(true)
     try {
+      let client
+      let base
+      if (repairTransport) {
+        ({ client, base } = repairTransport())
+      } else {
+        const module = await import('../api/client.js')
+        client = module.api
+        base = module.BASE
+      }
       const result = await runAgentRepair({
-        client: api,
-        base: BASE,
+        client,
+        base,
         surfaceKey,
         fingerprint,
         previousAttempt: attempt,
@@ -85,7 +94,7 @@ export default function useAgentRepair({
         setRepairActive(false)
       }
     }
-  }, [attempt, fingerprint, prompt, surfaceKey])
+  }, [attempt, fingerprint, prompt, repairTransport, surfaceKey])
 
   const markRefreshed = useCallback(() => {
     if (fingerprint) writeRefreshedRecoveryAttempt({ surfaceKey, fingerprint })
