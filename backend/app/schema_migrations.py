@@ -3572,6 +3572,62 @@ _SCHEMA_MIGRATIONS = (
 )
 
 
+# These migrations were published by the local release train before its
+# history was reconciled with the upstream sequence.  Their bodies are the
+# same migrations now registered under the canonical versions above.  A
+# database carrying either name has already completed that migration and must
+# never run it again: migration bodies are immutable, one-shot data changes,
+# not boot-time convergence hooks.
+_SCHEMA_MIGRATION_ALIASES = {
+  "0016_app_connect_manage": frozenset({"0018_app_connect_manage"}),
+  "0017_retire_restart_resume_toggle": frozenset({
+    "0023_retire_restart_resume_toggle",
+  }),
+  "0018_explicit_legacy_chat_models": frozenset({
+    "0019_explicit_legacy_chat_models",
+  }),
+  "0019_chat_active_assistant_identity": frozenset({
+    "0025_chat_active_assistant_identity",
+  }),
+  "0023_project_color": frozenset({"0026_project_color"}),
+  "0024_chat_goal_dismissal": frozenset({"0017_chat_goal_dismissal"}),
+  "0025_attached_delegation_work": frozenset({
+    "0030_attached_delegation_work",
+  }),
+  "0026_chat_wait_condition_owner": frozenset({
+    "0038_chat_wait_condition_owner",
+  }),
+  "0027_chat_run_goal_identity_index": frozenset({
+    "0034_chat_run_goal_identity_index",
+  }),
+  "0028_agent_coordination_rooms": frozenset({
+    "0035_agent_coordination_rooms",
+  }),
+  "0029_agent_coordination_send_identity": frozenset({
+    "0036_agent_coordination_send_identity",
+  }),
+  "0030_agent_coordination_send_target": frozenset({
+    "0037_agent_coordination_send_target",
+  }),
+  "0031_chat_retention_orphan_repair": frozenset({
+    "0016_chat_retention_orphan_repair",
+  }),
+  "0032_owner_auth_mode": frozenset({"0024_owner_auth_mode"}),
+  "0033_shared_app_retention": frozenset({"0027_shared_app_retention"}),
+  "0034_shared_app_path_state": frozenset({"0028_shared_app_path_state"}),
+  "0035_project_artifact_drawer_state": frozenset({
+    "0029_project_artifact_drawer_state",
+  }),
+  "0036_chat_app_artifacts": frozenset({"0031_chat_app_artifacts"}),
+  "0037_explicit_active_chat_models": frozenset({
+    "0032_explicit_active_chat_models",
+  }),
+  "0038_repair_active_chat_model_gaps": frozenset({
+    "0033_repair_post_0032_model_gaps",
+  }),
+}
+
+
 def schema_migration_history(eng) -> list[dict]:
   """Return the durable migration ledger in application order."""
   from sqlalchemy import inspect as sa_inspect, text
@@ -3650,7 +3706,8 @@ def run_migrations(eng) -> None:
   _ensure_migration_ledger(eng)
   applied = _applied_migrations(eng)
   for version, migration in _SCHEMA_MIGRATIONS:
-    if version in applied:
+    equivalent_versions = _SCHEMA_MIGRATION_ALIASES.get(version, ())
+    if version in applied or applied.intersection(equivalent_versions):
       continue
     migration(eng)
     _record_migration(eng, version)

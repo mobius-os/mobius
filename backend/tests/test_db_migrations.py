@@ -1410,6 +1410,95 @@ def test_run_migrations_records_an_inspectable_append_only_history(tmp_path):
   assert second == first
 
 
+def test_run_migrations_respects_published_local_history_aliases(tmp_path):
+  """A reconciled registry must not replay already-published migrations.
+
+  The local release train originally published several migration bodies under
+  different version names.  Replaying the chat-retention repair is especially
+  dangerous: its final global foreign-key audit can reject unrelated legacy
+  orphans even though that repair itself completed long ago.
+  """
+  eng = create_engine(f"sqlite:///{tmp_path / 'published-local-history.db'}")
+  models.Base.metadata.create_all(eng)
+  published_local_versions = (
+    "0001_legacy_schema_convergence",
+    "0002_chat_run_goal_objective",
+    "0003_chat_run_root_identity",
+    "0004_app_identity_required",
+    "0005_connectors",
+    "0006_connector_capability_identity",
+    "0007_chat_has_messages",
+    "0008_chat_search_documents",
+    "0009_app_connections_manage",
+    "0010_chat_pending_question_id",
+    "0011_delegation_parent_wake",
+    "0012_connector_oauth_gcloud",
+    "0013_app_hosted_publication",
+    "0014_chat_run_goal_plan",
+    "0015_chat_run_goal_identity",
+    "0016_chat_retention_orphan_repair",
+    "0017_chat_goal_dismissal",
+    "0018_app_connect_manage",
+    "0019_explicit_legacy_chat_models",
+    "0020_app_project_templates",
+    "0021_project_chat_collection",
+    "0022_project_artifacts",
+    "0023_retire_restart_resume_toggle",
+    "0024_owner_auth_mode",
+    "0025_chat_active_assistant_identity",
+    "0026_project_color",
+    "0027_shared_app_retention",
+    "0028_shared_app_path_state",
+    "0029_project_artifact_drawer_state",
+    "0030_attached_delegation_work",
+    "0031_chat_app_artifacts",
+    "0032_explicit_active_chat_models",
+    "0033_repair_post_0032_model_gaps",
+    "0034_chat_run_goal_identity_index",
+    "0035_agent_coordination_rooms",
+    "0036_agent_coordination_send_identity",
+    "0037_agent_coordination_send_target",
+    "0038_chat_wait_condition_owner",
+    "0039_agent_work_claim_history",
+    "0040_provider_execution_admission",
+    "0041_app_runtime_revision",
+  )
+  with eng.begin() as conn:
+    conn.execute(text(
+      "CREATE TABLE schema_migrations ("
+      "version VARCHAR(128) PRIMARY KEY, applied_at TIMESTAMP NOT NULL)"
+    ))
+    for version in published_local_versions:
+      conn.execute(text(
+        "INSERT INTO schema_migrations (version, applied_at) "
+        "VALUES (:version, '2026-09-07 00:00:00')"
+      ), {"version": version})
+
+    # This orphan is unrelated to chat retention.  It proves that the aliased
+    # retention migration is skipped rather than merely replayed successfully.
+    conn.exec_driver_sql("PRAGMA foreign_keys=OFF")
+    conn.execute(text(
+      "INSERT INTO project_drawer_state (project_id) "
+      "VALUES ('already-deleted-project')"
+    ))
+
+  run_migrations(eng)
+  run_migrations(eng)
+
+  history = {
+    row["version"] for row in schema_migration_history(eng)
+  }
+  assert history == {
+    *published_local_versions,
+    "0042_linked_app_project_runtime",
+  }
+  with eng.connect() as conn:
+    assert conn.execute(text(
+      "SELECT count(*) FROM project_drawer_state "
+      "WHERE project_id = 'already-deleted-project'"
+    )).scalar_one() == 1
+
+
 def test_chat_retention_repair_reclaims_broken_workflow_graph(
   tmp_path, monkeypatch,
 ):
