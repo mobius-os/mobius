@@ -51,11 +51,14 @@ def purge_expired_chat_tombstones(db: Session) -> list[str]:
     models.Chat.deleted_at.isnot(None),
     models.Chat.deleted_at < cutoff,
     # A project tombstone keeps its root + chat collection recoverable together.
-    # Once the project row is purged, its expired chats become ordinary cleanup
-    # candidates (including on upgraded SQLite databases without an added FK).
+    # A live project may still outlive one independently deleted chat, so only
+    # a recoverable *deleted* project blocks that chat here. Once the expired
+    # project row is purged above, its chats become ordinary cleanup candidates.
     or_(
       models.Chat.project_id.is_(None),
-      ~models.Chat.project_id.in_(select(models.Project.id)),
+      ~models.Chat.project_id.in_(
+        select(models.Project.id).where(models.Project.deleted_at.isnot(None))
+      ),
     ),
   )
   chat_ids = [
@@ -190,6 +193,12 @@ def purge_expired_chat_tombstones(db: Session) -> list[str]:
   db.query(models.ProjectAgentMessage).filter(
     (models.ProjectAgentMessage.from_chat_id.in_(chat_ids))
     | (models.ProjectAgentMessage.to_chat_id.in_(chat_ids))
+  ).delete(synchronize_session=False)
+  # A Project may outlive one of its chats. Remove that chat's short-lived
+  # collaboration claims explicitly before deleting the Chat row; SQLite
+  # deployments cannot rely on foreign-key cascades being enabled here.
+  db.query(models.ProjectWorkClaim).filter(
+    models.ProjectWorkClaim.chat_id.in_(chat_ids),
   ).delete(synchronize_session=False)
   db.query(models.ContributionAutopilot).filter(
     models.ContributionAutopilot.followup_chat_id.in_(chat_ids),
