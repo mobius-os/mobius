@@ -281,3 +281,28 @@ def test_project_remote_routes_keep_network_actions_owner_confirmed(
   )
   assert unavailable.status_code == 409
   assert "Connect GitHub" in unavailable.json()["detail"]
+
+
+def test_applied_source_status_distinguishes_clean_commits_from_deployment(tmp_path):
+  root = tmp_path / 'app'
+  root.mkdir()
+  _git(root, 'init', '-b', 'main')
+  (root / 'index.jsx').write_text('accepted')
+  _git(root, 'add', '.')
+  _git(root, 'commit', '-m', 'Accepted')
+  accepted = _git(root, 'rev-parse', 'HEAD')
+  def state():
+    return project_git.applied_source_status(root, accepted, project_git.project_status(root))['state']
+  assert state() == 'current'
+  (root / 'index.jsx').write_text('draft')
+  assert state() == 'pending'
+  _git(root, 'add', '.')
+  _git(root, 'commit', '-m', 'Saved locally, not applied')
+  assert project_git.project_status(root)['changes'] == []
+  assert state() == 'pending'
+  (root / 'index.jsx').write_text('accepted')
+  assert state() == 'current'
+  (root / 'new.js').write_text('new input')
+  assert state() == 'pending'
+  assert project_git.applied_source_status(root, None, project_git.project_status(root)) == {'state': 'unknown'}
+  assert project_git.applied_source_status(root, 'a' * 40, project_git.project_status(root)) == {'state': 'unknown'}

@@ -2477,7 +2477,17 @@ def get_project_git_status(
   db: Session = Depends(get_db),
 ):
   project = _project_for(db, project_id, principal, "viewer")
-  return project_git.project_status(_project_root(project))
+  root = _project_root(project)
+  status = project_git.project_status(root)
+  app_id = linked_app_id(project.template_snapshot_json)
+  if app_id:
+    app = db.get(models.App, app_id)
+    status["app_build"] = (
+      project_git.applied_source_status(root, app.source_commit, status)
+      if app and Path(app.source_dir).resolve() == root.resolve()
+      else {"state": "unknown"}
+    )
+  return status
 
 
 @router.post(

@@ -19,7 +19,7 @@ import './Projects.css'
 // you — a templated project comes with one predefined, and any file can be
 // built into one from its menu in the finder — so there is no manual "new
 // artifact" form here.
-export default function ProjectArtifacts({ projectId, onOpen, onEditSource, canBuild = true }) {
+export default function ProjectArtifacts({ projectId, onOpen, onEditSource, canBuild = true, linkedApp, onOpenApp }) {
   const queryClient = useQueryClient()
   const [error, setError] = useState('')
   const [busyId, setBusyId] = useState('')
@@ -51,12 +51,13 @@ export default function ProjectArtifacts({ projectId, onOpen, onEditSource, canB
   return (
     <div className="project-artifacts">
       {error && <p className="projects-error" role="alert">{error}</p>}
+      {linkedApp && <div className="project-artifacts__row"><button type="button" className="project-artifacts__main" aria-label={`Open running ${linkedApp.name}`} onClick={onOpenApp}><span className="project-artifacts__copy"><strong>{linkedApp.name}</strong><small>Installed app · shared source</small></span><span className="artifact-pill">Open app</span><ChevronRight width={16} height={16} aria-hidden="true" /></button></div>}
       {artifactsQuery.isLoading ? (
-        <p className="projects-empty" role="status">Loading Creations…</p>
+        <p className="projects-empty" role="status">Loading artifacts…</p>
       ) : artifactsQuery.isError ? (
-        <div className="projects-empty" role="alert"><p>Creations are unavailable.</p><button type="button" onClick={() => artifactsQuery.refetch()}>Try again</button></div>
+        <div className="projects-empty" role="alert"><p>Artifacts are unavailable.</p><button type="button" onClick={() => artifactsQuery.refetch()}>Try again</button></div>
       ) : artifacts.length === 0 ? (
-        <p className="projects-empty project-artifacts__empty">Build a supported file from its actions, or ask a project chat to create something.</p>
+        !linkedApp && <p className="projects-empty project-artifacts__empty">Build a supported file from its actions, or ask a project chat to create something.</p>
       ) : (
         <div className="project-artifacts__list">
           {artifacts.map(artifact => {

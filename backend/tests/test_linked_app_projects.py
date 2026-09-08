@@ -92,3 +92,21 @@ def test_theme_is_effective_read_only_and_confined_to_active_project_members(cli
   assert client.get(f"/api/projects/{other['id']}/theme", headers=guest).status_code == 404
   assert client.delete(f"/api/projects/{project['id']}/members/{session['member_id']}", headers=auth).status_code == 204
   assert client.get(url, headers=guest).status_code in (401, 403)
+
+
+def test_linked_project_build_status_compares_the_app_accepted_source(client, auth, db, linked):
+  from tests.test_project_git import _git
+  app, project, source = linked
+  _git(source, 'init', '-b', 'main')
+  _git(source, 'add', '.')
+  _git(source, 'commit', '-m', 'Accepted')
+  app.source_commit = _git(source, 'rev-parse', 'HEAD')
+  db.commit()
+  url = f"/api/projects/{project['id']}/git/status"
+  assert client.get(url, headers=auth).json()['app_build'] == {'state': 'current'}
+  (source / 'index.jsx').write_text('// saved, not running')
+  _git(source, 'add', '.')
+  _git(source, 'commit', '-m', 'Draft')
+  status = client.get(url, headers=auth).json()
+  assert status['changes'] == []
+  assert status['app_build'] == {'state': 'pending'}

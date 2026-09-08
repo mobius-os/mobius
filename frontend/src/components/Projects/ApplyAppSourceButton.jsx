@@ -4,7 +4,7 @@ import { useQueryClient } from '@tanstack/react-query'
 import { api, jsonOrThrow } from '../../api/client.js'
 import { appQueries, appSourceQueries } from '../../hooks/queries.js'
 
-export default function ApplyAppSourceButton({ app, onError, className = 'project-workspace__collaborate' }) {
+export default function ApplyAppSourceButton({ app, projectId, onError, className = 'project-workspace__collaborate' }) {
   const [applying, setApplying] = useState(false)
   const [updated, setUpdated] = useState(false)
   const activeRequest = useRef(false)
@@ -22,6 +22,7 @@ export default function ApplyAppSourceButton({ app, onError, className = 'projec
       await Promise.all([
         appQueries.list.invalidate(queryClient),
         appSourceQueries.invalidate(queryClient, app.id),
+        ...(projectId ? [queryClient.invalidateQueries({ queryKey: ['projects', 'git', projectId] })] : []),
       ])
     } catch (error) {
       onError?.(error?.message || 'Could not apply this app. Your saved source is unchanged.')

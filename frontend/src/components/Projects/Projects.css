@@ -1373,3 +1373,8 @@ button.project-finder__change:hover { color: var(--text); background: var(--surf
   white-space: pre-wrap;
   tab-size: 2;
 }
+
+/* Source resources and status belong to Files, not the output overview. */
+.project-finder__source-status { padding: 8px 14px; color: var(--muted); font-size: 12px; line-height: 1.5; }
+.project-finder__source-status > span { display: block; color: var(--text); }
+.project-finder__explorer-scroll > .project-theme-resource { margin: 0; padding: 10px 14px; }

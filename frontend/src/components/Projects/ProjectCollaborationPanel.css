@@ -41,7 +41,7 @@
   line-height: 1.25;
   letter-spacing: -.015em;
 }
-.project-collab__head span {
+.project-collab__head > div > span {
   display: block;
   overflow: hidden;
   margin-top: 2px;
@@ -288,21 +288,6 @@
   background: var(--surface);
 }
 .project-collab__agent-note { margin: 8px 3px 0; color: var(--muted); font-size: 10px; line-height: 1.45; }
-
-.project-collab__role-details { border-top: 1px solid var(--border-light); }
-.project-collab__role-details summary {
-  padding: 14px 1px;
-  color: var(--muted);
-  font-size: 10px;
-  font-weight: 650;
-  cursor: pointer;
-}
-.project-collab__roles { display: grid; gap: 2px; padding-bottom: 15px; }
-.project-collab__role { min-width: 0; display: grid; grid-template-columns: 22px minmax(0, 1fr); align-items: start; gap: 5px; padding: 5px 3px; }
-.project-collab__role > svg { color: var(--muted); }
-.project-collab__role > span { min-width: 0; display: flex; gap: 5px; }
-.project-collab__role strong { font-size: 10px; }
-.project-collab__role small { color: var(--muted); font-size: 9px; }
 
 .project-collab :is(button, input, summary):focus-visible {
   outline: 2px solid var(--accent);

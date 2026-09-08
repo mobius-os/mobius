@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Chat as MessageSquare, ChatCompose as MessageSquarePlus, Folder as Github, Members as Users } from '@openai/apps-sdk-ui/components/Icon'
 import { api, jsonOrThrow } from '../../api/client.js'
+import { useHistoryDismiss } from '../../hooks/useHistoryDismiss.jsx'
 import { projectQueries } from '../../hooks/queries.js'
 import { queueArtifactBuildsAfterSourceChange } from '../../lib/projectArtifacts.js'
 import ApplyAppSourceButton from './ApplyAppSourceButton.jsx'
@@ -11,6 +12,7 @@ import ProjectArtifacts from './ProjectArtifacts.jsx'
 import ProjectFinder from './ProjectFinder.jsx'
 import ProjectIdentityIcon from './ProjectIdentityIcon.jsx'
 import ProjectCollaborationPanel from './ProjectCollaborationPanel.jsx'
+import ProjectActivityPanel from './ProjectActivityPanel.jsx'
 import ProjectGitPanel from './ProjectGitPanel.jsx'
 import './Projects.css'
 
@@ -35,6 +37,9 @@ export default function ProjectWorkspace({
   const [renameBusy, setRenameBusy] = useState(false)
   const [creatingChat, setCreatingChat] = useState(false)
   const [collaborationOpen, setCollaborationOpen] = useState(false)
+  const [activityOpen, setActivityOpen] = useState(false)
+  const collaborationHistory = useHistoryDismiss(() => setCollaborationOpen(false))
+  const activityHistory = useHistoryDismiss(() => setActivityOpen(false))
   const [gitOpen, setGitOpen] = useState(false)
   const [requestedFile, setRequestedFile] = useState(null)
   const renameInputRef = useRef(null)
@@ -198,10 +203,11 @@ export default function ProjectWorkspace({
 
         <div className="project-workspace__actions">
           {linkedApp && <button type="button" className="project-workspace__collaborate" onClick={onOpenApp}>Open app</button>}
-          {linkedApp && <ApplyAppSourceButton app={linkedApp} onError={setError} />}
+          {linkedApp && <ApplyAppSourceButton projectId={project.id} app={linkedApp} onError={setError} />}
 
           <button type="button" className="project-workspace__collaborate" aria-label="Review publishing" title="Review publishing" aria-expanded={gitOpen} onClick={() => setGitOpen(true)}><Github width={17} height={17} aria-hidden="true" /><span>Publish</span></button>
-          <button type="button" className="project-workspace__collaborate" aria-label={activeWorkCount ? `Share and collaborate, ${activeWorkCount} active` : 'Share and collaborate'} title={activeWorkCount ? `${activeWorkCount} active in this project` : 'Share and collaborate'} aria-expanded={collaborationOpen} onClick={() => setCollaborationOpen(true)}><Users width={17} height={17} aria-hidden="true" /><span>{activeWorkCount ? `${activeWorkCount} active` : 'Collaborate'}</span></button>
+          <button type="button" className="project-workspace__collaborate" aria-label="Collaborate" aria-expanded={collaborationOpen} onClick={() => { collaborationHistory.open(); setCollaborationOpen(true) }}><Users width={17} height={17} aria-hidden="true" /><span>Collaborate</span></button>
+          <button type="button" className="project-workspace__collaborate" aria-label="Project activity" aria-expanded={activityOpen} onClick={() => { activityHistory.open(); setActivityOpen(true) }}><span>Activity{activeWorkCount ? ` · ${activeWorkCount}` : ''}</span></button>
         </div>
 
       </div>
@@ -221,19 +227,21 @@ export default function ProjectWorkspace({
           sourceDescription={isAppProject ? 'Open app to use the running version. Save edits here, then Build & update app when ready.' : undefined}
           onSourceChanged={isAppProject ? undefined : rebuildRegisteredArtifacts}
           requestedFile={requestedFile}
+          resources={<ProjectThemeResource projectId={project.id} linkedApp={isAppProject} />}
           overview={(
             <div className="project-overview" aria-label="Project overview">
-              {(!isAppProject || project.artifacts?.some(item => item.builder !== 'app')) && <section className="project-overview__section" aria-labelledby={`project-artifacts-heading-${project.id}`}>
+              <section className="project-overview__section" aria-labelledby={`project-artifacts-heading-${project.id}`}>
                 <header className="project-overview__heading">
-                  <h2 id={`project-artifacts-heading-${project.id}`}>Creations</h2>
+                  <h2 id={`project-artifacts-heading-${project.id}`}>Artifacts</h2>
                 </header>
                 <ProjectArtifacts
                   projectId={project.id}
+                  linkedApp={linkedApp}
+                  onOpenApp={onOpenApp}
                   onOpen={artifactId => onOpenArtifact?.(artifactId)}
                   onEditSource={path => setRequestedFile({ path, key: Date.now() })}
                 />
-              </section>}
-              <ProjectThemeResource projectId={project.id} linkedApp={isAppProject} />
+              </section>
 
               <section className="project-overview__section" aria-labelledby={`project-chats-heading-${project.id}`}>
                 <header className="project-overview__heading">
@@ -273,7 +281,8 @@ export default function ProjectWorkspace({
           )}
         />
       </div>
-      {collaborationOpen && <ProjectCollaborationPanel project={project} onClose={() => setCollaborationOpen(false)} />}
+      {collaborationOpen && <ProjectCollaborationPanel project={project} onClose={collaborationHistory.close} />}
+      {activityOpen && <ProjectActivityPanel project={project} onClose={activityHistory.close} />}
       {gitOpen && <ProjectGitPanel project={project} onClose={() => setGitOpen(false)} />}
     </section>
   )

@@ -663,3 +663,30 @@ def project_file_diff(
     "binary": binary,
     "truncated": truncated,
   }
+
+
+def applied_source_status(root: Path, accepted_commit: str | None, status: dict) -> dict:
+  """Compare saved source with the accepted build, not merely with local HEAD.
+
+  A local commit is not a deployment. Unknown baselines and bounded read failures
+  must remain unknown, never report a clean working tree as a current build.
+  """
+  unknown = {"state": "unknown"}
+  if not status.get("available") or status.get("truncated"):
+    return unknown
+  if not isinstance(accepted_commit, str) or not re.fullmatch(r"[0-9a-f]{40}", accepted_commit):
+    return unknown
+  context = _discover(root)
+  if context is None or context.repo != context.root:
+    return unknown
+  code, output, truncated = _run_git(
+    root, "diff", "--name-only", "-z", "--no-ext-diff", accepted_commit, "--", ".",
+  )
+  if code != 0 or truncated:
+    return unknown
+  changed = any(_project_relative(context, path.decode("utf-8", "replace"), frozenset({"artifacts"}))
+                for path in output.split(b"\0") if path)
+  # Git diff omits new, untracked source files. The existing bounded status read
+  # already includes them and applies the Project's source visibility boundary.
+  added = any(row["status"] == "untracked" for row in status.get("changes", []))
+  return {"state": "pending" if changed or added else "current"}

@@ -6,13 +6,12 @@ import Crown from 'lucide-react/dist/esm/icons/crown.mjs'
 import Eye from 'lucide-react/dist/esm/icons/eye.mjs'
 import Pencil from 'lucide-react/dist/esm/icons/pencil.mjs'
 import ShieldCheck from 'lucide-react/dist/esm/icons/shield-check.mjs'
-import Sparkles from 'lucide-react/dist/esm/icons/sparkles.mjs'
 import Trash2 from 'lucide-react/dist/esm/icons/trash-2.mjs'
 import UserPlus from 'lucide-react/dist/esm/icons/user-plus.mjs'
 import X from 'lucide-react/dist/esm/icons/x.mjs'
 import { api, jsonOrThrow } from '../../api/client.js'
 import useDialogFocus from '../../hooks/useDialogFocus.js'
-import AgentCoordinationFeed from '../Agents/AgentCoordinationFeed.jsx'
+import { linkedProjectAppId } from '../../lib/appSourceProject.js'
 import ProjectIdentityIcon from './ProjectIdentityIcon.jsx'
 import './ProjectCollaborationPanel.css'
 
@@ -23,16 +22,6 @@ const ROLES = [
   { name: 'Viewer', Icon: Eye, copy: 'Files and built outputs' },
 ]
 const SHARE_ROLES = ROLES.filter(role => role.name !== 'Owner')
-
-function agentState(run) {
-  if (!run) return { label: 'Ready', active: false }
-  if (run.status === 'running' || run.status === 'resume_pending') return { label: 'Working', active: true }
-  if (run.status === 'parked' || run.status === 'parked_notified') return { label: 'Waiting', active: false }
-  if (run.status === 'failed' || run.status === 'interrupted') return { label: 'Needs attention', active: false }
-  if (run.status === 'stopped') return { label: 'Stopped', active: false }
-  if (run.status === 'completed') return { label: 'Finished', active: false }
-  return { label: 'Ready', active: false }
-}
 
 function initials(name) {
   return String(name || '?').trim().split(/\s+/).slice(0, 2).map(part => part[0]).join('').toUpperCase()
@@ -62,30 +51,6 @@ export default function ProjectCollaborationPanel({ project, onClose }) {
     ),
     refetchInterval: 10_000,
   })
-  const agentsQuery = useQuery({
-    queryKey: ['projects', 'agents', project.id],
-    queryFn: async () => {
-      const rows = await jsonOrThrow(await api.projects.agents(project.id), 'Agent activity failed:')
-      return Array.isArray(rows) ? rows : []
-    },
-    refetchInterval: 10_000,
-  })
-  const coordinationQuery = useQuery({
-    queryKey: ['agent-coordination', 'project', project.id],
-    queryFn: async () => jsonOrThrow(
-      await api.agentCoordination.project(project.id), 'Agent network failed:',
-    ),
-    refetchInterval: 5_000,
-    staleTime: 1_500,
-    retry: 0,
-  })
-  const claimsQuery = useQuery({
-    queryKey: ['projects', 'work-claims', project.id],
-    queryFn: async () => jsonOrThrow(
-      await api.projects.workClaims(project.id), 'Active work failed:',
-    ),
-    refetchInterval: 5_000,
-  })
   useEffect(() => {
     let active = true
     const beat = async () => {
@@ -102,16 +67,6 @@ export default function ProjectCollaborationPanel({ project, onClose }) {
   const collaboration = collaborationQuery.data || {}
   const members = collaboration.members || []
   const invites = collaboration.invites || []
-  const agents = agentsQuery.data || []
-  const claims = claimsQuery.data?.claims || []
-  const humanClaims = claims.filter(claim => claim.actor_kind !== 'agent')
-  const claimsByChat = new Map(
-    claims.filter(claim => claim.chat_id).map(claim => [String(claim.chat_id), claim]),
-  )
-  const working = agents.filter(agent => (
-    agentState(agent.run).active || claimsByChat.has(String(agent.id))
-  )).length
-
   async function createInvite(event) {
     event.preventDefault()
     if (busy) return
@@ -183,12 +138,13 @@ export default function ProjectCollaborationPanel({ project, onClose }) {
         </header>
 
         <div className="project-collab__body">
+          {linkedProjectAppId(project) && <p className="project-collab__empty">Share the app’s source files here. Only the owner can update the installed app; access to its data is separate.</p>}
           <section aria-labelledby="project-people-heading">
             <div className="project-collab__section-head"><h3 id="project-people-heading">People</h3><span>Private · {members.length} {members.length === 1 ? 'person' : 'people'}</span></div>
-            {collaborationQuery.isLoading ? <p className="project-collab__empty">Loading people…</p> : members.map(member => (
+            {collaborationQuery.isError ? <button type="button" onClick={() => collaborationQuery.refetch()}>Retry people</button> : collaborationQuery.isLoading ? <p className="project-collab__empty">Loading people…</p> : members.map(member => (
               <div className="project-collab__person" key={member.id}>
                 <span className="project-collab__avatar">{initials(member.display_name)}</span>
-                <span><strong>{member.you ? `${member.display_name} · You` : member.display_name}</strong><small>{member.role}</small></span>
+                <span><strong>{member.you ? `${member.display_name} · You` : member.display_name}</strong><small>{member.role} · {ROLES.find(role => role.name.toLowerCase() === member.role)?.copy}</small></span>
                 {member.id === 'owner' ? <span className={member.online ? 'project-collab__online' : 'project-collab__offline'}>{member.online ? 'Online' : 'Away'}</span> : <div className="project-collab__member-actions">
                   <select className="project-collab__role-picker" aria-label={`Role for ${member.display_name}`} value={member.role} disabled={busy === member.id} onChange={event => void changeRole(member.id, event.target.value)}>
                     {SHARE_ROLES.map(({ name }) => <option key={name} value={name.toLowerCase()}>{name}</option>)}
@@ -214,37 +170,6 @@ export default function ProjectCollaborationPanel({ project, onClose }) {
             {invites.length > 0 && <div className="project-collab__pending"><small>Pending invitations</small>{invites.map(invite => <div key={invite.id}><span><strong>{invite.invitee_name || 'Invitation link'}</strong><small>{invite.role}</small></span><button type="button" aria-label={`Revoke invitation for ${invite.invitee_name || 'collaborator'}`} disabled={busy === invite.id} onClick={() => void revokeInvite(invite.id)}><X size={14} /></button></div>)}</div>}
           </section>
 
-          {humanClaims.length > 0 && <section aria-labelledby="project-active-work-heading">
-            <div className="project-collab__section-head"><h3 id="project-active-work-heading">Active work</h3><span>Live scopes</span></div>
-            <div className="project-collab__claims">
-              {humanClaims.map(claim => <div key={claim.id} className="project-collab__claim">
-                <span className="project-collab__avatar">{initials(claim.display_name)}</span>
-                <span><strong>{claim.display_name}</strong><small>{claim.summary}</small></span>
-                {claim.path && <i title={claim.path}>{claim.path.split('/').pop()}</i>}
-              </div>)}
-            </div>
-          </section>}
-
-          <section aria-labelledby="project-agents-heading">
-            <div className="project-collab__section-head"><h3 id="project-agents-heading">Agents</h3><span>{working ? `${working} working` : 'Project-aware'}</span></div>
-            {agentsQuery.isLoading ? <p className="project-collab__empty">Loading agent activity…</p> : agentsQuery.isError ? <button type="button" className="project-collab__retry" onClick={() => agentsQuery.refetch()}>Retry agent activity</button> : agents.length === 0 ? <p className="project-collab__empty">Start a project chat to give an agent this workspace.</p> : <div className="project-collab__agents">
-              {agents.map(agent => { const state = agentState(agent.run); const claim = claimsByChat.get(String(agent.id)); return <div key={agent.id} className="project-collab__agent"><span className={`project-collab__agent-icon${state.active || claim ? ' is-active' : ''}`}><Sparkles size={14} /></span><span><strong>{agent.title || 'Project agent'}</strong><small>{claim?.summary || agent.run?.summary || agent.run?.provider || 'Ready for project work'}</small></span><i>{state.label}</i></div> })}
-            </div>}
-            <AgentCoordinationFeed
-              snapshot={coordinationQuery.data}
-              loading={coordinationQuery.isLoading}
-              error={coordinationQuery.isError}
-              onRetry={() => coordinationQuery.refetch()}
-            />
-            <p className="project-collab__agent-note">Peer notes stay separate from your chats and remain visible here for review.</p>
-          </section>
-
-          <details className="project-collab__role-details">
-            <summary>What each role can do</summary>
-            <div className="project-collab__roles">
-              {ROLES.map(({ name, Icon, copy }) => <div key={name} className="project-collab__role"><Icon size={15} /><span><strong>{name}</strong><small>{copy}</small></span></div>)}
-            </div>
-          </details>
           {error && <p className="projects-error" role="alert">{error}</p>}
         </div>
       </aside>

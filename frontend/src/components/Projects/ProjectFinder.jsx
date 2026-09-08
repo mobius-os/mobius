@@ -109,6 +109,7 @@ export default function ProjectFinder({
   onBuildFile,
   onSourceChanged,
   overview,
+  resources,
   fileSource,
   requestedFile,
 }) {
@@ -152,6 +153,7 @@ export default function ProjectFinder({
   // Parallel stack of history entry ids, one per forward step, popped LIFO by
   // Back or by the in-UI back controls so history and nav stay in sync.
   const entryStackRef = useRef([])
+  const retainedEntryIdsRef = useRef(new Set())
   const navRef = useRef(nav)
   navRef.current = nav
 
@@ -174,8 +176,17 @@ export default function ProjectFinder({
     navRef.current = state
     setNav(state)
     if (history?.open) {
-      const id = history.open(onHistoryPop)
-      if (id) entryStackRef.current.push(id)
+      // Retain this destination for Forward; ordinary dismissible dialogs do
+      // not have reconstruction semantics. Release every retained entry on unmount.
+      const id = history.open(onHistoryPop, () => {
+        navRef.current = state
+        setNav(state)
+        entryStackRef.current.push(id)
+      })
+      if (id) {
+        entryStackRef.current.push(id)
+        retainedEntryIdsRef.current.add(id)
+      }
     }
   }, [history, onHistoryPop])
 
@@ -196,8 +207,10 @@ export default function ProjectFinder({
   useEffect(() => {
     navRef.current = initFinder()
     setNav(initFinder())
+    const retained = retainedEntryIdsRef.current
     return () => {
-      for (const id of entryStackRef.current) history?.unregister?.(id)
+      for (const id of retained) history?.unregister?.(id)
+      retained.clear()
       entryStackRef.current = []
     }
   }, [source.id, history])
@@ -836,7 +849,7 @@ export default function ProjectFinder({
                 >
                   <GitBranch size={13} aria-hidden="true" />
                   <span>{gitIdentityLabel(gitStatus)}</span>
-                  <b>{gitTotal || 'Clean'}</b>
+
                 </div>
               )}
 
@@ -873,6 +886,11 @@ export default function ProjectFinder({
               </div>}
             </div>
 
+            {resources}
+            <div className="project-finder__source-status" role="status">
+              {gitQuery.isLoading ? 'Checking local changes…' : gitQuery.isError || !gitStatus?.available ? 'Local change status unavailable' : gitTotal ? `${gitTotal} uncommitted ${gitTotal === 1 ? 'file' : 'files'}` : 'No uncommitted changes'}
+              {gitStatus?.app_build && <span>{gitStatus.app_build.state === 'current' ? 'Saved source matches last app build' : gitStatus.app_build.state === 'pending' ? 'Saved source differs from running app · Build & update when ready' : 'Build status unavailable · last applied source could not be compared'}</span>}
+            </div>
             {gitTotal > 0 && gitStatus?.repository_scope === 'project' && (
               <details className="project-finder__changes">
                 <summary>

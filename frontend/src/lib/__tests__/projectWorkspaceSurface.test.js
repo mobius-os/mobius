@@ -48,11 +48,11 @@ function renderWorkspace(props = {}) {
   )
 }
 
-test('Creations, Chats, and Files form one ordered project workspace without tabs', () => {
+test('Artifacts, Chats, and Files form one ordered project workspace without tabs', () => {
   const markup = renderWorkspace()
   assert.doesNotMatch(markup, /role="tablist"|role="tab"|role="tabpanel"/)
   assert.match(markup, /aria-label="Project overview"/)
-  const artifacts = markup.indexOf('>Creations</h2>')
+  const artifacts = markup.indexOf('>Artifacts</h2>')
   const chats = markup.indexOf('>Chats</h2>')
   const files = markup.indexOf('aria-label="Folder location"')
   assert.ok(artifacts >= 0 && artifacts < chats)
@@ -105,7 +105,9 @@ test('linked app Projects open and explicitly build the real app without a dupli
   assert.match(markup, /Saved changes require Build &amp; update app/)
   assert.match(markup, /Save your files first/)
   assert.match(markup, />Open app<\/button>/)
-  assert.doesNotMatch(markup, />Creations<\/h2>|draft preview/)
+  assert.match(markup, />Artifacts<\/h2>/)
+  assert.match(markup, /Open running Clock/)
+  assert.doesNotMatch(markup, /draft preview/)
   assert.match(markup, /Inherited Möbius theme/)
   assert.match(markup, /class="project-source-notice"/)
   assert.doesNotMatch(renderWorkspace(), />Build &amp; update app<\/button>/)
@@ -129,7 +131,7 @@ test('legacy imported app copies keep the real Project workspace without install
   } })
   assert.match(markup, /aria-label="Preserved copy project"/)
   assert.match(markup, /aria-label="Project overview"/)
-  assert.match(markup, />Creations<\/h2>/)
+  assert.match(markup, />Artifacts<\/h2>/)
   assert.match(markup, />Collaborate<\/span>/)
   assert.doesNotMatch(markup, /app-source-workspace|>Build &amp; update app<\/button>/)
 })
@@ -141,7 +143,7 @@ test('unavailable linked apps keep source accessible without falling back to dup
   } })
   assert.match(markup, /linked app is unavailable/)
   assert.match(markup, /aria-label="File actions"/)
-  assert.doesNotMatch(markup, />Creations<\/h2>|>Build &amp; update app<\/button>/)
+  assert.doesNotMatch(markup, />Build &amp; update app<\/button>/)
 })
 
 test('old duplicate preview links lead to the installed app rather than an inert HTML copy', () => {
@@ -155,4 +157,13 @@ test('old duplicate preview links lead to the installed app rather than an inert
     React.createElement(ArtifactWorkspace, { projectId: 'clock', project, artifactId: 'app', onOpenApp() {} })))
   assert.match(markup, />Open app<\/button>/)
   assert.doesNotMatch(markup, /<iframe/)
+})
+
+
+test('theme belongs beside Files, and collaboration and activity remain distinct actions', () => {
+  const markup = renderWorkspace()
+  assert.ok(markup.indexOf('Inherited Möbius theme') > markup.indexOf('aria-label="Folder location"'))
+  assert.match(markup, /aria-label="Collaborate"/)
+  assert.match(markup, /aria-label="Project activity"/)
+  assert.match(markup, /Checking local changes/)
 })

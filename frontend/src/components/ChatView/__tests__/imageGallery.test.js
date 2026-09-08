@@ -126,7 +126,7 @@ test('lightbox dismissal is owned by the shell Back stack', () => {
   assert.match(navigationSource, /pushShellEntry\('dismissible'/)
   assert.match(
     navigationSource,
-    /if \(source\?\.kind === 'dismissible'\) \{[\s\S]{0,300}?dismissal\?\.onDismiss\(\)/,
+    /if \(source\?\.kind === 'dismissible'\) \{[\s\S]{0,450}?dismissal\.onDismiss\(\)/,
   )
 })
 
