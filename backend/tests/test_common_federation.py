@@ -1318,3 +1318,12 @@ def test_public_browse_host_does_not_change_membership_and_proxies_replies(
   assert client.get('/api/common/replies/' + post_id,
     params={'community_host': 'https://bad.example/path'}, headers=auth).status_code == 400
   assert client.get('/api/common/replies/' + post_id).status_code in (401, 403)
+
+
+def test_local_people_uses_shared_directory_store(client, auth, db):
+  _install_common_app(db)
+  response = client.get("/api/common/people", params={
+    "community_host": common_routes._own_host(), "q": "nobody-matches-this-query",
+  }, headers=auth)
+  assert response.status_code == 200, response.text
+  assert response.json() == {"host": common_routes._own_host(), "users": []}

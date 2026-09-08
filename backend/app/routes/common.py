@@ -1253,7 +1253,7 @@ async def search_people(
   _require_owner_or_common_app(db, principal)
   host = _browse_community_host(community_host)
   if host == _own_host():
-    return {"host": host, **search_directory(q)}
+    return {"host": host, **_public_store.search_directory(q)}
   try:
     response = await federation_request(
       "GET", f"{_peer_base_url(host)}/api/common/directory", params={"q": q},
