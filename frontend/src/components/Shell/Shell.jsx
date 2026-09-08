@@ -69,6 +69,7 @@ import { invalidateChatChangesQueries } from '../ChatView/chatChangesQueries.js'
 import { clearAppFrameStorage, clearCachedAppToken } from '../../lib/appFrameStorage.js'
 import * as tabModel from './tabModel.js'
 import * as paneModel from './paneModel.js'
+import { releaseFocusFromHiddenAppFrame } from './appFrameFocus.js'
 import {
   attentionForRequest,
   resolveWorkspaceRequests,
@@ -444,6 +445,13 @@ export default function Shell({ onInitialVisualReady }) {
     multiPane, single, focusedActiveKey, fullBleedKey,
     visibleAppIds, visibleChatIds,
   } = contentVisibility
+  // Cached app frames stay mounted, and browsers keep keyboard focus in an
+  // outgoing iframe even after its shell wrapper becomes hidden. Release only
+  // that stale cross-document focus owner; visible companion panes and ordinary
+  // shell controls retain focus exactly where the owner left it.
+  useLayoutEffect(() => {
+    releaseFocusFromHiddenAppFrame({ focusTarget: contentElRef.current })
+  })
   // ChatView keeps its transcript hidden during the first scroll/stream
   // settlement frame. Chat-to-chat transitions retain the old ChatView's
   // geometry; an app has no ChatView to retain, so keep its wrapper until the
@@ -4763,6 +4771,7 @@ export default function Shell({ onInitialVisualReady }) {
           return (
           <div
             key={id}
+            data-app-frame-owner=""
             id={paned ? panePanelDomId(paned.paneId, tabKey) : undefined}
             role={paned ? 'tabpanel' : undefined}
             aria-labelledby={paned ? paneTabDomId(paned.paneId, tabKey) : undefined}
