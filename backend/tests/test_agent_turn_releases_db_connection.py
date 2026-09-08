@@ -136,7 +136,7 @@ async def test_agent_turn_closes_preflight_session_before_provider_wait(
   )
   from app import providers
   monkeypatch.setattr(
-    providers.PROVIDERS["codex"], "check_auth", lambda _data_dir: None,
+    providers.CodexProvider, "check_auth", lambda self, _data_dir: None,
   )
   monkeypatch.setattr(chat_mod, "_complete_turn", fake_complete)
 

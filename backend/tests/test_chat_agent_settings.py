@@ -36,6 +36,24 @@ def _read_global_settings() -> dict:
   return json.loads(path.read_text())
 
 
+def _start_provider_turn(chat, provider_id: str = "claude") -> str:
+  """Admit a provider-dispatch test through the durable turn boundary."""
+  from app.chat_writer import StartTurn, get_writer
+
+  run_token = f"rt-agent-settings-{chat.id}"
+  get_writer().submit(StartTurn(
+    chat_id=chat.id,
+    run_token=run_token,
+    user_msg={
+      "role": "user", "content": "hi", "ts": 1,
+      "cid": f"message-{chat.id}",
+    },
+    title_source="hi",
+    default_provider=provider_id,
+  )).result(timeout=5)
+  return run_token
+
+
 def test_effective_settings_falls_back_to_global(tmp_path):
   """No chat override → returns the global default unchanged."""
   shared = tmp_path / "shared"
@@ -487,7 +505,7 @@ def test_patch_chat_provider_mirrors_to_owner_immediately(
     headers=auth,
     json={"provider": "codex"},
   )
-  assert r.status_code == 200
+  assert r.status_code == 200, r.json()
   body = r.json()
   assert body["provider"] == "codex"
 
@@ -635,13 +653,16 @@ def test_run_chat_passes_merged_settings_into_claude_sdk(
 
   async def _scenario():
     from app.broadcast import create_broadcast
+
     create_broadcast(chat.id)
+    run_token = _start_provider_turn(chat)
     await chat_mod._run_chat_impl(
       messages=[schemas.ChatMessage(role="user", content="hi")],
       chat_id=chat.id,
       session_id=None,
       provider_id="claude",
       run_gen=chat_mod.current_run_generation(chat.id),
+      run_token=run_token,
     )
 
   with patch(
@@ -855,12 +876,14 @@ def test_run_chat_passes_deployed_skill_and_picker_settings(
   async def _scenario():
     from app.broadcast import create_broadcast
     create_broadcast(chat.id)
+    run_token = _start_provider_turn(chat)
     await chat_mod._run_chat_impl(
       messages=[schemas.ChatMessage(role="user", content="hi")],
       chat_id=chat.id,
       session_id=None,
       provider_id="claude",
       run_gen=chat_mod.current_run_generation(chat.id),
+      run_token=run_token,
     )
 
   with patch(

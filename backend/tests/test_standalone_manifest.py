@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from app import models
+from app import app_git, models
 from app.config import get_settings
 from app.database import SessionLocal
 from app.install import _manifest_display
@@ -237,7 +237,7 @@ def test_top_level_index_html_does_not_alias_to_standalone(
   assert r.headers.get("location") != "/apps/cuberun/"
 
 
-def test_app_owned_static_assets_are_served_from_source_dir(
+def test_app_owned_static_assets_are_served_from_accepted_runtime(
   client, owner_token,
 ):
   app = _create_app(client, owner_token, "CubeRun")
@@ -254,6 +254,12 @@ def test_app_owned_static_assets_are_served_from_source_dir(
       "console.log('cuberun')",
       encoding="utf-8",
     )
+    app_git._run(Path(row.source_dir), "add", "-f", str(static))
+    app_git.commit_local(row.source_dir, "accept fixture static assets")
+    row.source_commit = app_git.head_sha(row.source_dir, app_git.LOCAL_BRANCH)
+    from app.applied_app_runtime import prepare_runtime, publish_runtime
+    publish_runtime(row, prepare_runtime(Path(row.source_dir), row.source_commit))
+    db.commit()
   finally:
     db.close()
 

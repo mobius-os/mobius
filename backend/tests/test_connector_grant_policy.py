@@ -8,6 +8,7 @@ import pytest
 from app import chat as chat_mod
 from app import chat_queue, models, schemas
 from app.broadcast import create_broadcast, remove_broadcast
+from app.chat_writer import StartTurn, alloc_run_token, get_writer
 
 
 def _app_row(db, marker):
@@ -52,6 +53,17 @@ async def _drive_turn(chat_id, monkeypatch, *, expected_include):
   monkeypatch.setattr(chat_mod, "_complete_turn", fake_complete)
 
   create_broadcast(chat_id)
+  run_token = alloc_run_token()
+  get_writer().submit(StartTurn(
+    chat_id=chat_id,
+    run_token=run_token,
+    user_msg={
+      "role": "user", "content": "hi", "ts": 1,
+      "cid": f"message-{chat_id}",
+    },
+    title_source="hi",
+    default_provider="codex",
+  )).result(timeout=5)
   try:
     await asyncio.wait_for(chat_mod._run_chat_impl(
       messages=[schemas.ChatMessage(role="user", content="hi")],
@@ -59,6 +71,7 @@ async def _drive_turn(chat_id, monkeypatch, *, expected_include):
       session_id="existing-session",
       provider_id="codex",
       run_gen=chat_mod.current_run_generation(chat_id),
+      run_token=run_token,
     ), timeout=5)
   finally:
     remove_broadcast(chat_id)

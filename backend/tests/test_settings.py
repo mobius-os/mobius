@@ -990,36 +990,32 @@ def test_model_prefs_clear(client, auth, db):
 
 
 def test_live_model_entries_keep_curated_aliases_plus_live_extras():
-  """The requested compatibility aliases survive a sparse live catalog."""
-  from app.providers import _live_model_entries
+  """Live order leads while omitted compatibility aliases remain available."""
+  from app.providers import KNOWN_MODELS, _live_model_entries
   merged = _live_model_entries(
     "claude", ["claude-future-model", "claude-opus-4-8"],
   )
-  assert [row["id"] for row in merged] == [
-    "claude-fable-5-1",
-    "claude-fable-5",
-    "claude-sonnet-5",
-    "claude-opus-4-8",
-    "claude-sonnet-4-6",
-    "claude-future-model",
+  ids = [row["id"] for row in merged]
+  assert ids[:2] == ["claude-future-model", "claude-opus-4-8"]
+  assert ids[2:] == [
+    model_id for model_id in KNOWN_MODELS["claude"]
+    if model_id != "claude-opus-4-8"
   ]
-  assert "claude-haiku-4-5-20251001" not in [m["id"] for m in merged]
 
 
 def test_live_model_entries_float_curated_defaults_in_requested_order():
   from app import providers
 
+  live = [
+    "claude-sonnet-5", "claude-future-model",
+    "claude-fable-5", "claude-opus-4-8",
+  ]
   entries = providers._live_model_entries(
-    "claude",
-    ["claude-sonnet-5", "claude-future-model", "claude-fable-5", "claude-opus-4-8"],
+    "claude", live,
   )
-  assert [entry["id"] for entry in entries] == [
-    "claude-fable-5-1",
-    "claude-fable-5",
-    "claude-sonnet-5",
-    "claude-opus-4-8",
-    "claude-sonnet-4-6",
-    "claude-future-model",
+  assert [entry["id"] for entry in entries] == live + [
+    model_id for model_id in providers.KNOWN_MODELS["claude"]
+    if model_id not in live
   ]
 
 
