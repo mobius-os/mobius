@@ -751,6 +751,84 @@ def test_unknown_deleted_and_never_started_recipients_fail_atomically(
   assert db.query(models.AgentCoordinationMessage).count() == 0
 
 
+def test_work_claim_transfer_acknowledges_only_after_delivery(
+  client, auth, db, monkeypatch,
+):
+  """A delivery crash leaves the exact transfer wake safely retryable."""
+  chats, _ = _network_fixture(db)
+  root_auth = _top_level_auth(db, chats["root"].id, "root-run")
+  outside_auth = _top_level_auth(db, chats["outsider"].id, "outside-run")
+  work_key = "platform:test:retry-safe-transfer"
+  first = client.post(
+    "/api/agent-coordination/work-claims",
+    headers=root_auth,
+    json={"work_key": work_key, "summary": "Own the exact repair"},
+  )
+  assert first.status_code == 200, first.text
+
+  observed = client.post(
+    "/api/agent-coordination/work-claims",
+    headers=outside_auth,
+    json={"work_key": work_key, "summary": "Follow the exact repair"},
+  )
+  assert observed.status_code == 200, observed.text
+  assert observed.json()["state"] == "held_by_peer"
+
+  async def fail_delivery(**_kwargs):
+    raise RuntimeError("delivery interrupted before acknowledgement")
+
+  monkeypatch.setattr(
+    "app.routes.agent_coordination.deliver_peer_recipients", fail_delivery,
+  )
+  transfer_body = {
+    "work_key": work_key,
+    "summary": "Take over the exact repair",
+    "takeover_reason": "The original owner explicitly handed it over.",
+    "expected_owner_chat_id": chats["root"].id,
+  }
+  with pytest.raises(RuntimeError, match="before acknowledgement"):
+    client.post(
+      "/api/agent-coordination/work-claims",
+      headers=outside_auth,
+      json=transfer_body,
+    )
+
+  db.expire_all()
+  claim = db.query(models.AgentWorkClaim).filter(
+    models.AgentWorkClaim.work_key == work_key,
+  ).one()
+  assert claim.owner_chat_id == chats["outsider"].id
+  assert claim.notification_revision < claim.revision
+  assert db.query(models.AgentCoordinationMessage).filter(
+    models.AgentCoordinationMessage.from_run_id == f"work-claim:{claim.id}",
+  ).count() == 1
+
+  async def deliver_on_retry(**_kwargs):
+    return SimpleNamespace(
+      steered=[chats["root"].id], woken=[], queued=[],
+    )
+
+  monkeypatch.setattr(
+    "app.routes.agent_coordination.deliver_peer_recipients", deliver_on_retry,
+  )
+  retried = client.post(
+    "/api/agent-coordination/work-claims",
+    headers=outside_auth,
+    json=transfer_body,
+  )
+  assert retried.status_code == 200, retried.text
+  assert retried.json()["state"] == "transferred"
+  assert retried.json()["notification_pending"] is False
+  assert retried.json()["steered"] == [chats["root"].id]
+  db.expire_all()
+  assert db.get(models.AgentWorkClaim, claim.id).notification_revision == (
+    claim.revision
+  )
+  assert db.query(models.AgentCoordinationMessage).filter(
+    models.AgentCoordinationMessage.from_run_id == f"work-claim:{claim.id}",
+  ).count() == 1
+
+
 def test_owner_observes_only_directs_involving_the_selected_scope(
   client, auth, db,
 ):

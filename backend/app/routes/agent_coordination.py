@@ -133,15 +133,19 @@ async def claim_current_work(
         f"{result.get('takeover_reason') or 'ownership changed'}"
       ),
     )
+    delivery = await deliver_peer_recipients(
+      recipients=[previous], delivery=DELIVERY_INTERRUPT, kind="handoff",
+      sender_chat_id=principal.chat_id,
+    )
+    # Persist the retry latch only after the durable notice has also reached
+    # its requested live/wake/queue delivery path. A crash or delivery error
+    # before this point leaves notification_pending true, so the exact same
+    # transfer request retries idempotently instead of losing the wake.
     acknowledge_notice(
       db, claim_id=result["id"], revision=result["revision"],
       resolve_interests=False,
     )
     result["notification_pending"] = False
-    delivery = await deliver_peer_recipients(
-      recipients=[previous], delivery=DELIVERY_INTERRUPT, kind="handoff",
-      sender_chat_id=principal.chat_id,
-    )
     result["steered"] = delivery.steered
     result["woken"] = delivery.woken
     result["queued"] = delivery.queued
