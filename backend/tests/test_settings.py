@@ -320,10 +320,12 @@ def test_get_settings_prefers_connected_codex_over_unconnected_default(
   # The test process may run inside a linked Möbius container. Model the
   # contract under test explicitly instead of inheriting host availability.
   monkeypatch.setattr(
-    providers.PROVIDERS["mobius"], "check_auth", lambda _data_dir: "not linked",
+    providers.MobiusProvider, "check_auth",
+    lambda self, _data_dir: "not linked",
   )
   monkeypatch.setattr(
-    providers.PROVIDERS["claude"], "check_auth", lambda _data_dir: "not linked",
+    providers.ClaudeProvider, "check_auth",
+    lambda self, _data_dir: "not linked",
   )
 
   codex_auth = Path(_gs().data_dir) / "cli-auth" / "codex" / "auth.json"
@@ -351,10 +353,12 @@ def test_new_chat_prefers_connected_codex_over_unconnected_default(
   from app.config import get_settings as _gs
 
   monkeypatch.setattr(
-    providers.PROVIDERS["mobius"], "check_auth", lambda _data_dir: "not linked",
+    providers.MobiusProvider, "check_auth",
+    lambda self, _data_dir: "not linked",
   )
   monkeypatch.setattr(
-    providers.PROVIDERS["claude"], "check_auth", lambda _data_dir: "not linked",
+    providers.ClaudeProvider, "check_auth",
+    lambda self, _data_dir: "not linked",
   )
 
   codex_auth = Path(_gs().data_dir) / "cli-auth" / "codex" / "auth.json"
