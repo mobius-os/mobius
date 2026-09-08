@@ -1795,6 +1795,12 @@ def _repair_chat_retention_orphans(eng) -> None:
 
   reclaimed_chat_ids: set[str] = set()
   with eng.begin() as conn:
+    # SQLite's driver does not begin on SELECT. Hold one write transaction
+    # across the baseline and cleanup so concurrent writes cannot change debt.
+    before_violations = set()
+    if eng.dialect.name == "sqlite":
+      conn.exec_driver_sql("BEGIN IMMEDIATE")
+      before_violations = set(conn.exec_driver_sql("PRAGMA foreign_key_check"))
     chat_ids = {str(row[0]) for row in _rows(conn, "chats", "id")}
     delegations = {
       str(row[0]): (str(row[1]), str(row[2]))
@@ -1936,11 +1942,27 @@ def _repair_chat_retention_orphans(eng) -> None:
       _delete_ids(conn, "chats", "id", reclaimed_chat_ids)
 
     if eng.dialect.name == "sqlite":
-      violations = conn.exec_driver_sql("PRAGMA foreign_key_check").fetchall()
+      after_violations = set(conn.exec_driver_sql("PRAGMA foreign_key_check"))
+      # Validate the edges this repair owns, not every FK on these tables
+      # (for example their independent app references). Also reject new debt
+      # anywhere: equal counts must not conceal a different orphan. This
+      # migration only deletes/updates rows, so row identities stay stable.
+      owned_edges = {
+        ("delegations", "chats"),
+        ("gauntlet_runs", "chats"),
+        ("gauntlet_tasks", "gauntlet_runs"),
+        ("gauntlet_tasks", "delegations"),
+        ("contribution_autopilot", "chats"),
+        ("agent_lifecycle_events", "chats"),
+        ("agent_lifecycle_events", "chat_runs"),
+      }
+      violations = (after_violations - before_violations) | {
+        row for row in after_violations if (row[0], row[2]) in owned_edges
+      }
       if violations:
         kinds = sorted({f"{row[0]}->{row[2]}" for row in violations})
         raise RuntimeError(
-          "chat-retention repair left foreign-key violations: "
+          "chat-retention repair left owned or introduced foreign-key violations: "
           + ", ".join(kinds)
         )
 
@@ -3544,8 +3566,8 @@ def _link_app_project_runtime(eng):
 
 
 _SCHEMA_MIGRATIONS = (
-  # Published history is immutable. New work from the local release train is
-  # appended after the exact upstream prefix instead of renumbering it.
+  # Full IDs are permanent identities, not sequence positions. Append new
+  # work in execution order; never renumber a shipped ID to reconcile sources.
   ("0001_legacy_schema_convergence", _converge_legacy_schema),
   ("0002_chat_run_goal_objective", _add_chat_run_goal_objective),
   ("0003_chat_run_root_identity", _add_chat_run_root_identity),
@@ -3590,62 +3612,6 @@ _SCHEMA_MIGRATIONS = (
   ("0042_linked_app_project_runtime", _link_app_project_runtime),
   ("0043_agent_coordination_delivery", _add_agent_coordination_delivery),
 )
-
-
-# These migrations were published by the local release train before its
-# history was reconciled with the upstream sequence.  Their bodies are the
-# same migrations now registered under the canonical versions above.  A
-# database carrying either name has already completed that migration and must
-# never run it again: migration bodies are immutable, one-shot data changes,
-# not boot-time convergence hooks.
-_SCHEMA_MIGRATION_ALIASES = {
-  "0016_app_connect_manage": frozenset({"0018_app_connect_manage"}),
-  "0017_retire_restart_resume_toggle": frozenset({
-    "0023_retire_restart_resume_toggle",
-  }),
-  "0018_explicit_legacy_chat_models": frozenset({
-    "0019_explicit_legacy_chat_models",
-  }),
-  "0019_chat_active_assistant_identity": frozenset({
-    "0025_chat_active_assistant_identity",
-  }),
-  "0023_project_color": frozenset({"0026_project_color"}),
-  "0024_chat_goal_dismissal": frozenset({"0017_chat_goal_dismissal"}),
-  "0025_attached_delegation_work": frozenset({
-    "0030_attached_delegation_work",
-  }),
-  "0026_chat_wait_condition_owner": frozenset({
-    "0038_chat_wait_condition_owner",
-  }),
-  "0027_chat_run_goal_identity_index": frozenset({
-    "0034_chat_run_goal_identity_index",
-  }),
-  "0028_agent_coordination_rooms": frozenset({
-    "0035_agent_coordination_rooms",
-  }),
-  "0029_agent_coordination_send_identity": frozenset({
-    "0036_agent_coordination_send_identity",
-  }),
-  "0030_agent_coordination_send_target": frozenset({
-    "0037_agent_coordination_send_target",
-  }),
-  "0031_chat_retention_orphan_repair": frozenset({
-    "0016_chat_retention_orphan_repair",
-  }),
-  "0032_owner_auth_mode": frozenset({"0024_owner_auth_mode"}),
-  "0033_shared_app_retention": frozenset({"0027_shared_app_retention"}),
-  "0034_shared_app_path_state": frozenset({"0028_shared_app_path_state"}),
-  "0035_project_artifact_drawer_state": frozenset({
-    "0029_project_artifact_drawer_state",
-  }),
-  "0036_chat_app_artifacts": frozenset({"0031_chat_app_artifacts"}),
-  "0037_explicit_active_chat_models": frozenset({
-    "0032_explicit_active_chat_models",
-  }),
-  "0038_repair_active_chat_model_gaps": frozenset({
-    "0033_repair_post_0032_model_gaps",
-  }),
-}
 
 
 def schema_migration_history(eng) -> list[dict]:
@@ -3705,7 +3671,7 @@ def _record_migration(eng, version: str) -> None:
 
 
 def run_migrations(eng) -> None:
-  """Apply each unapplied, append-only schema migration exactly once.
+  """Apply pending migrations without replaying recorded completions.
 
   The first migration freezes the historical inspector-based convergence path.
   Existing installs run it once and record the outcome; fresh installs record
@@ -3715,6 +3681,10 @@ def run_migrations(eng) -> None:
   Each migration remains internally idempotent so a crash before its ledger
   insert safely retries it. The ledger row is committed only after the migration
   returns successfully.
+
+  Before upgrading a pre-cutover local database or restoring its backup, run
+  scripts/normalize-migration-ledger-20260908.py explicitly (see
+  scripts/MIGRATION-CUTOVER.md). Startup does not infer historical equivalence.
 
   One runner owns the ledger: it reads the applied set once, executes pending
   entries in registry order, and records each success before continuing.
@@ -3726,8 +3696,7 @@ def run_migrations(eng) -> None:
   _ensure_migration_ledger(eng)
   applied = _applied_migrations(eng)
   for version, migration in _SCHEMA_MIGRATIONS:
-    equivalent_versions = _SCHEMA_MIGRATION_ALIASES.get(version, ())
-    if version in applied or applied.intersection(equivalent_versions):
+    if version in applied:
       continue
     migration(eng)
     _record_migration(eng, version)

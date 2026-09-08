@@ -152,14 +152,10 @@ def inspect_history(raw: str, *, source: str) -> dict[str, tuple[str, str]]:
   entries = _registry(module)
   versions = [version for version, _name in entries]
   function_names = [name for _version, name in entries]
-  try:
-    numbers = [int(version.split("_", 1)[0]) for version in versions]
-  except ValueError:
-    fail("every migration version must start with a numeric sequence")
+  # Registry order owns execution; a shipped full ID is never renumbered
+  # merely because another release train used the same numeric prefix.
   if len(versions) != len(set(versions)):
     fail("migration versions must be unique")
-  if numbers != sorted(set(numbers)):
-    fail("migration numbers must strictly increase; rebase and renumber")
   if len(function_names) != len(set(function_names)):
     fail("one migration function cannot own multiple ledger entries")
 
