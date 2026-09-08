@@ -174,12 +174,15 @@ def test_control_protocol_advertises_every_run_bound_tool(monkeypatch):
   assert set(send_schema["properties"]["kind"]["enum"]) == {
     "note", "finding", "request", "blocker", "handoff",
   }
+  assert set(send_schema["properties"]["delivery"]["enum"]) == {
+    "next_turn", "interrupt",
+  }
+  assert send_schema["properties"]["delivery"]["default"] == "next_turn"
   send_description = tools[platform_tools.SEND_MESSAGE_TOOL_NAME]["description"]
-  assert "note/finding is quiet context for the next natural turn" in send_description
-  assert "steers a live recipient" in send_description
-  assert "Broadcasts are always quiet" in send_description
-  assert "wakes an idle unfinished Goal" in send_description
-  assert "concrete next action now" in send_description
+  assert "kind states what the message means" in send_description
+  assert "next_turn is the default" in send_description
+  assert "Use interrupt only when" in send_description
+  assert "Broadcasts are always next_turn" in send_description
   assert "instead of checking for replies" in send_description
 
 
@@ -415,6 +418,7 @@ def test_coordination_tools_validate_discovery_and_send(monkeypatch):
       "recipients": ["peer-1"],
       "broadcast": False,
       "kind": "finding",
+      "delivery": "next_turn",
       "body": "The fixture requires UTF-8.",
       "send_id": "fixture-send-1",
     },
@@ -426,6 +430,15 @@ def test_coordination_tools_validate_discovery_and_send(monkeypatch):
   })
   assert invalid["isError"] is True
   assert "exactly one" in invalid["content"][0]["text"]
+
+  invalid_broadcast = control._call_tool({
+    "name": platform_tools.SEND_MESSAGE_TOOL_NAME,
+    "arguments": {
+      "broadcast": True, "delivery": "interrupt", "body": "too broad",
+    },
+  })
+  assert invalid_broadcast["isError"] is True
+  assert "cannot interrupt" in invalid_broadcast["content"][0]["text"]
 
 
 def test_mcp_send_passes_through_backend_compact_receipt(monkeypatch):
@@ -449,7 +462,8 @@ def test_mcp_send_passes_through_backend_compact_receipt(monkeypatch):
 
   receipt = control._call_send_agent_message({
     "recipients": [f"peer-{index}" for index in range(24)],
-    "kind": "handoff", "body": body, "send_id": "one-send",
+    "kind": "handoff", "delivery": "interrupt",
+    "body": body, "send_id": "one-send",
   })
 
   assert receipt is compact

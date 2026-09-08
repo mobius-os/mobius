@@ -30,7 +30,7 @@ PRODUCT_RESULT_MESSAGE_KINDS = frozenset({
   WAIT_RESULT_MESSAGE_KIND,
 })
 
-# A peer's direct request/blocker/handoff waking an idle chat with a paused
+# A peer's direct delivery=interrupt waking an idle chat with a paused
 # Goal travels the same slot and resumes under that Goal's identity.
 PEER_MESSAGE_WAKE_KIND = "peer_message"
 

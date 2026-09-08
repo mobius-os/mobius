@@ -101,13 +101,13 @@ LIST_AGENT_PEERS_DESCRIPTION = (
 SEND_AGENT_MESSAGE_DESCRIPTION = (
   "Send one durable direct note or current-scope broadcast. Use only for a "
   "decision-changing finding, request, blocker, or handoff—not progress. "
-  "note/finding is quiet context for the next natural turn. A direct "
-  "request/blocker/handoff is actionable: it steers a live recipient or wakes "
-  "an idle unfinished Goal, including one with an armed external wait. It never "
-  "bypasses owner input, usage/restart holds, or older owner-queued work. "
-  "Broadcasts are always quiet. Use an actionable kind only when that recipient "
-  "has a concrete next action now, not merely to acknowledge news. Batch "
-  "recipients needing the same note and delivery behavior. "
+  "kind states what the message means; delivery states when it should arrive. "
+  "next_turn is the default and never starts or interrupts model work. Use "
+  "interrupt only when the recipient must change, stop, or unblock its work "
+  "before the current turn finishes, or must wake now despite an external Wait. "
+  "An interrupt never bypasses owner input, usage/restart holds, or older "
+  "owner-queued work. Broadcasts are always next_turn. Batch recipients needing "
+  "the same message and delivery behavior. "
   "State the changed fact, evidence, and any requested action; omit repeated "
   "background. Continue independent work or leave a durable handoff instead "
   "of checking for replies. "
@@ -380,7 +380,9 @@ def _call_list_agent_peers(arguments: dict[str, Any]) -> dict:
 
 
 def _call_send_agent_message(arguments: dict[str, Any]) -> dict:
-  allowed = {"recipients", "broadcast", "kind", "body", "send_id"}
+  allowed = {
+    "recipients", "broadcast", "kind", "delivery", "body", "send_id",
+  }
   if not set(arguments).issubset(allowed):
     raise ValueError("send_agent_message received unknown arguments")
   recipients = arguments.get("recipients", [])
@@ -401,6 +403,11 @@ def _call_send_agent_message(arguments: dict[str, Any]) -> dict:
     or kind not in {"note", "finding", "request", "blocker", "handoff"}
   ):
     raise ValueError("kind must be note, finding, request, blocker, or handoff")
+  delivery = arguments.get("delivery", "next_turn")
+  if delivery not in {"next_turn", "interrupt"}:
+    raise ValueError("delivery must be next_turn or interrupt")
+  if broadcast and delivery == "interrupt":
+    raise ValueError("broadcast peer messages cannot interrupt agent turns")
   body = arguments.get("body")
   if not isinstance(body, str) or not body.strip():
     raise ValueError("body must be a non-empty string")
@@ -420,6 +427,7 @@ def _call_send_agent_message(arguments: dict[str, Any]) -> dict:
     "recipients": list(dict.fromkeys(recipients)),
     "broadcast": broadcast,
     "kind": kind,
+    "delivery": delivery,
     "body": body.strip(),
     "send_id": send_id.strip() if send_id is not None else str(uuid.uuid4()),
   })
@@ -621,9 +629,15 @@ _TOOL_DEFINITIONS = {
         "kind": {
           "type": "string",
           "enum": ["note", "finding", "request", "blocker", "handoff"],
+          "description": "Semantic intent of the peer message.",
+        },
+        "delivery": {
+          "type": "string",
+          "enum": ["next_turn", "interrupt"],
+          "default": "next_turn",
           "description": (
-            "Delivery intent: note/finding is quiet; a direct request, "
-            "blocker, or handoff is actionable."
+            "next_turn (default) is quiet; interrupt is direct-only and asks "
+            "the recipient to change or unblock work before its turn ends."
           ),
         },
         "body": {

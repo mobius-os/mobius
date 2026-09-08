@@ -1322,6 +1322,9 @@ class AgentCoordinationMessage(Base):
     String(64), ForeignKey("chats.id"), nullable=True, index=True,
   )
   kind = Column(String(16), nullable=False, default="note", server_default="note")
+  delivery = Column(
+    String(16), nullable=False, default="next_turn", server_default="next_turn",
+  )
   body = Column(Text, nullable=False)
   created_at = Column(DateTime, nullable=False, default=lambda: now_naive_utc())
 

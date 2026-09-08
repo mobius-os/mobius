@@ -1065,14 +1065,15 @@ make completing one action falsely complete a broader outcome.
 
 ### Peer delivery is urgency-aware; agents never poll
 
-Every peer send first persists one durable mailbox row per recipient. Quiet
-direct kinds (`note` and `finding`) and every broadcast remain context for the
-next natural turn: `agent_context_snapshot` injects their bounded chronological
-window as one compact `<agent_coordination>` block. An overflow is explicit
-rather than silent; required work uses an `AgentWorkClaim`, whose ownership
-cannot be lost to message volume.
+Every peer send first persists one durable mailbox row per recipient. Message
+meaning (`note`, `finding`, `request`, `blocker`, or `handoff`) is independent
+from delivery (`next_turn` or `interrupt`). `next_turn` is the default for every
+kind, and every broadcast is `next_turn`: `agent_context_snapshot` injects the
+bounded chronological window as one compact `<agent_coordination>` block. An
+overflow is explicit rather than silent; required work uses an
+`AgentWorkClaim`, whose ownership cannot be lost to message volume.
 
-Actionable direct kinds (`request`, `blocker`, and `handoff`) also trigger one
+A direct message explicitly sent with `delivery=interrupt` also triggers one
 delivery attempt. A live recipient receives a hidden, durable steer carrier
 containing the undelivered peer window in chronological order. The carrier is
 reserved in `pending_messages` before provider delivery and moves into the
@@ -1086,14 +1087,16 @@ cursor form one cut: omitted older notes remain owner-visible history but never
 surface later behind newer notes and invert causal order.
 
 An idle recipient is woken only when it has an unfinished Goal. An armed
-external Wait remains active but no longer suppresses an actionable peer wake:
-the urgent turn can run now, and the independent condition still resumes the
-Goal if it later settles. Owner-input questions, usage parks, restart holds,
-and restart drain retain their stronger barriers. Broadcasts never fan out
-interruptions. The model-facing network exposes discovery and send operations,
-not an inbox read or short poll. A sender that needs a later result still hands
-off through Goal, Wait, or `AgentWorkClaim` ownership instead of keeping its
-current turn alive to check for replies.
+external Wait remains active but no longer suppresses an explicitly
+interrupting peer message: the urgent turn can run now, and the independent
+condition still resumes the Goal if it later settles. Owner-input questions,
+usage parks, restart holds, and restart drain retain their stronger barriers.
+Broadcasts never fan out interruptions. The model-facing network exposes
+discovery and send operations, not an inbox read or short poll. A sender that
+needs a later result still hands off through Goal, Wait, or `AgentWorkClaim`
+ownership instead of keeping its current turn alive to check for replies.
+Work-claim transfer and completion notices are the only built-in messages that
+select `interrupt` automatically, because they change active ownership.
 
 Historic transcript markers from the retired read tool remain displayable;
 that is data compatibility, not a second delivery mechanism.

@@ -3284,6 +3284,25 @@ def _add_agent_coordination_send_target(eng) -> None:
     ))
 
 
+def _add_agent_coordination_delivery(eng) -> None:
+  """Persist peer delivery intent independently from semantic message kind."""
+  from sqlalchemy import inspect as sa_inspect, text
+
+  inspector = sa_inspect(eng)
+  if "agent_coordination_messages" not in inspector.get_table_names():
+    return
+  columns = {
+    column["name"]
+    for column in inspector.get_columns("agent_coordination_messages")
+  }
+  if "delivery" not in columns:
+    with eng.begin() as conn:
+      conn.execute(text(
+        "ALTER TABLE agent_coordination_messages "
+        "ADD COLUMN delivery VARCHAR(16) NOT NULL DEFAULT 'next_turn'"
+      ))
+
+
 def _add_chat_wait_condition_owner(eng) -> None:
   """Persist the executor named by each observable command wait."""
   from sqlalchemy import inspect as sa_inspect, text
@@ -3569,6 +3588,7 @@ _SCHEMA_MIGRATIONS = (
   ("0040_provider_execution_admission", _add_provider_execution_admission),
   ("0041_app_runtime_revision", _add_app_runtime_revision),
   ("0042_linked_app_project_runtime", _link_app_project_runtime),
+  ("0043_agent_coordination_delivery", _add_agent_coordination_delivery),
 )
 
 

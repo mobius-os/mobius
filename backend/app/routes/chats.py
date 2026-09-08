@@ -2308,7 +2308,8 @@ async def delete_chat(
   # deletion, and the released claim itself remains reclaimable by exact key.
   if released_claims:
     from app.agent_coordination import (
-      deliver_actionable_recipients,
+      DELIVERY_INTERRUPT,
+      deliver_peer_recipients,
       send_work_claim_notice,
     )
     from app.agent_work_claims import acknowledge_notice
@@ -2343,9 +2344,9 @@ async def delete_chat(
           released.claim_id,
         )
     if wake_recipients:
-      await deliver_actionable_recipients(
+      await deliver_peer_recipients(
         recipients=list(dict.fromkeys(wake_recipients)),
-        kind="handoff",
+        delivery=DELIVERY_INTERRUPT, kind="handoff",
         sender_chat_id=chat_id,
       )
   # Flag the chat soft-deleted in the registry (NOT forget_chat, which resets

@@ -7,9 +7,11 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy.orm import Session
 
 from app.agent_coordination import (
+  DELIVERY_INTERRUPT,
   MAX_PEERS,
+  MESSAGE_DELIVERIES,
   chat_message_history,
-  deliver_actionable_recipients,
+  deliver_peer_recipients,
   MESSAGE_KINDS,
   agent_network_snapshot,
   embedded_chat_snapshot,
@@ -44,6 +46,7 @@ class AgentMessageCreate(BaseModel):
   recipients: list[str] = Field(default_factory=list, max_length=24)
   broadcast: bool = False
   kind: str = "note"
+  delivery: str = "next_turn"
   body: str = Field(min_length=1, max_length=4000)
   send_id: str | None = Field(default=None, min_length=1, max_length=64)
 
@@ -61,6 +64,14 @@ class AgentMessageCreate(BaseModel):
     value = value.strip().lower()
     if value not in MESSAGE_KINDS:
       raise ValueError(f"kind must be one of: {', '.join(sorted(MESSAGE_KINDS))}")
+    return value
+
+  @field_validator("delivery")
+  @classmethod
+  def valid_delivery(cls, value: str) -> str:
+    value = value.strip().lower()
+    if value not in MESSAGE_DELIVERIES:
+      raise ValueError("delivery must be next_turn or interrupt")
     return value
 
 
@@ -127,8 +138,8 @@ async def claim_current_work(
       resolve_interests=False,
     )
     result["notification_pending"] = False
-    delivery = await deliver_actionable_recipients(
-      recipients=[previous], kind="handoff",
+    delivery = await deliver_peer_recipients(
+      recipients=[previous], delivery=DELIVERY_INTERRUPT, kind="handoff",
       sender_chat_id=principal.chat_id,
     )
     result["steered"] = delivery.steered
@@ -170,8 +181,8 @@ async def finish_current_work(
         f"{finished.claim['state']}: {finished.claim.get('outcome') or ''}"
       ),
     )
-    delivery = await deliver_actionable_recipients(
-      recipients=recipients, kind="handoff",
+    delivery = await deliver_peer_recipients(
+      recipients=recipients, delivery=DELIVERY_INTERRUPT, kind="handoff",
       sender_chat_id=principal.chat_id,
     )
     woken = delivery.woken
@@ -225,17 +236,18 @@ async def send_current_message(
       recipients=body.recipients,
       broadcast=body.broadcast,
       kind=body.kind,
+      delivery=body.delivery,
       body=body.body,
       send_id=body.send_id,
     )
   except ValueError as exc:
     raise HTTPException(422, str(exc)) from exc
-  # Quiet mail waits for the next natural turn. A direct actionable message
-  # steers a live recipient or wakes its idle unfinished Goal; broadcasts stay
-  # quiet so one broad note cannot manufacture a wave of model work.
+  # Meaning and delivery are independent. A direct interrupt steers a live
+  # recipient or wakes its idle unfinished Goal; next_turn and every broadcast
+  # stay quiet so one broad note cannot manufacture a wave of model work.
   delivery = (
-    await deliver_actionable_recipients(
-      recipients=body.recipients, kind=body.kind,
+    await deliver_peer_recipients(
+      recipients=body.recipients, delivery=body.delivery, kind=body.kind,
       sender_chat_id=principal.chat_id,
     )
     if not body.broadcast else None

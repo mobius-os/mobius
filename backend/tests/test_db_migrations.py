@@ -1307,6 +1307,41 @@ def test_fresh_owner_schema_has_auto_resume_default():
   assert not hasattr(models.Owner.__table__.c, "auto_resume_on_restart_default")
 
 
+def test_agent_coordination_delivery_upgrade_backfills_next_turn(tmp_path):
+  """Existing peer history remains quiet when delivery becomes explicit."""
+  eng = create_engine(f"sqlite:///{tmp_path / 'peer-delivery.db'}")
+  with eng.begin() as conn:
+    conn.execute(text(
+      "CREATE TABLE agent_coordination_messages ("
+      "id VARCHAR(64) PRIMARY KEY, body TEXT NOT NULL)"
+    ))
+    conn.execute(text(
+      "INSERT INTO agent_coordination_messages (id, body) "
+      "VALUES ('old-note', 'Preserve me')"
+    ))
+
+  migrations._add_agent_coordination_delivery(eng)
+  migrations._add_agent_coordination_delivery(eng)
+
+  columns = {
+    column["name"]: column
+    for column in inspect(eng).get_columns("agent_coordination_messages")
+  }
+  assert columns["delivery"]["nullable"] is False
+  with eng.connect() as conn:
+    assert conn.execute(text(
+      "SELECT delivery FROM agent_coordination_messages "
+      "WHERE id = 'old-note'"
+    )).scalar_one() == "next_turn"
+
+
+def test_fresh_agent_coordination_delivery_defaults_to_next_turn():
+  column = models.AgentCoordinationMessage.__table__.c.delivery
+  assert column.nullable is False
+  assert column.default.arg == "next_turn"
+  assert column.server_default.arg == "next_turn"
+
+
 def test_run_migrations_adds_read_at_and_backfills_notifications(tmp_path):
   """Pre-feature notification history must not arrive as a full unread badge.
 
@@ -1406,6 +1441,7 @@ def test_run_migrations_records_an_inspectable_append_only_history(tmp_path):
     "0040_provider_execution_admission",
     "0041_app_runtime_revision",
     "0042_linked_app_project_runtime",
+    "0043_agent_coordination_delivery",
   ]
   assert second == first
 
@@ -1491,6 +1527,7 @@ def test_run_migrations_respects_published_local_history_aliases(tmp_path):
   assert history == {
     *published_local_versions,
     "0042_linked_app_project_runtime",
+    "0043_agent_coordination_delivery",
   }
   with eng.connect() as conn:
     assert conn.execute(text(

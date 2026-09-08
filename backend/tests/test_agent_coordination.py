@@ -307,6 +307,7 @@ def test_mixed_scope_direct_send_is_atomic_grouped_and_idempotent(
     models.AgentCoordinationMessage.send_id == "mixed-scope-handoff",
   ).all()
   assert len(stored) == 2
+  assert {row.delivery for row in stored} == {"next_turn"}
   assert {row.room_kind for row in stored} == {"workspace"}
   assert {row.send_target_key for row in stored} == {
     chats["builder"].id, chats["outsider"].id,
@@ -319,6 +320,14 @@ def test_mixed_scope_direct_send_is_atomic_grouped_and_idempotent(
   )
   assert conflict.status_code == 422
   assert "different" in conflict.json()["detail"]
+
+  delivery_conflict = client.post(
+    "/api/agent-coordination/messages",
+    headers=scout_auth,
+    json={**payload, "delivery": "interrupt"},
+  )
+  assert delivery_conflict.status_code == 422
+  assert "different" in delivery_conflict.json()["detail"]
 
 
 def test_scope_broadcast_never_reaches_an_unrelated_peer(client, auth, db):
@@ -355,6 +364,20 @@ def test_scope_broadcast_never_reaches_an_unrelated_peer(client, auth, db):
   ).one()
   assert persisted.room_kind == "delegation"
   assert persisted.send_target_key == ""
+  assert persisted.delivery == "next_turn"
+
+  interrupting_broadcast = client.post(
+    "/api/agent-coordination/messages",
+    headers=scout_auth,
+    json={
+      "broadcast": True,
+      "kind": "finding",
+      "delivery": "interrupt",
+      "body": "A broadcast must not manufacture many interruptions.",
+    },
+  )
+  assert interrupting_broadcast.status_code == 422
+  assert "cannot interrupt" in interrupting_broadcast.json()["detail"]
 
   assert row["body"] in _next_turn_context(
     db, chats["builder"], "builder-broadcast-next",
@@ -422,7 +445,7 @@ def test_direct_mail_never_mutates_owner_transcripts_or_pending_messages(
 
 
 @pytest.mark.parametrize("provider", ["codex", "claude"])
-def test_actionable_direct_message_steers_ordered_backlog_once(
+def test_interrupt_delivery_steers_ordered_backlog_once(
   client, auth, db, monkeypatch, provider,
 ):
   """A live peer receives quiet backlog + the triggering request in order.
@@ -468,18 +491,21 @@ def test_actionable_direct_message_steers_ordered_backlog_once(
   assert quiet.status_code == 200, quiet.text
   assert quiet.json()["steered"] == []
   assert quiet.json()["queued"] == [builder.id]
+  assert quiet.json()["messages"][0]["delivery"] == "next_turn"
 
-  actionable = client.post(
+  interrupting = client.post(
     "/api/agent-coordination/messages", headers=scout_auth,
     json={
-      "recipients": [builder.id], "kind": "request",
+      "recipients": [builder.id], "kind": "finding",
+      "delivery": "interrupt",
       "body": "Now re-check the exact build.",
     },
   )
-  assert actionable.status_code == 200, actionable.text
-  assert actionable.json()["steered"] == [builder.id]
-  assert actionable.json()["woken"] == []
-  assert actionable.json()["queued"] == []
+  assert interrupting.status_code == 200, interrupting.text
+  assert interrupting.json()["steered"] == [builder.id]
+  assert interrupting.json()["woken"] == []
+  assert interrupting.json()["queued"] == []
+  assert interrupting.json()["messages"][0]["delivery"] == "interrupt"
 
   assert len(steers) == 1
   steer = steers[0]
@@ -512,7 +538,7 @@ def test_actionable_direct_message_steers_ordered_backlog_once(
   assert "Now re-check the exact build." not in successor_context
 
 
-def test_actionable_overflow_marks_one_ordered_cut_without_late_reordering(
+def test_interrupt_overflow_marks_one_ordered_cut_without_late_reordering(
   client, auth, db, monkeypatch,
 ):
   """A bounded steer never leaks its omitted older prefix after newer mail."""
@@ -543,7 +569,8 @@ def test_actionable_overflow_marks_one_ordered_cut_without_late_reordering(
   urgent = client.post(
     "/api/agent-coordination/messages", headers=headers,
     json={
-      "recipients": [builder.id], "kind": "request", "body": "act-now",
+      "recipients": [builder.id], "kind": "note",
+      "delivery": "interrupt", "body": "act-now",
     },
   )
   assert urgent.status_code == 200, urgent.text
@@ -563,7 +590,7 @@ def test_actionable_overflow_marks_one_ordered_cut_without_late_reordering(
   assert "act-now" not in successor
 
 
-def test_rapid_actionable_messages_keep_distinct_ordered_reservations(
+def test_rapid_interrupts_keep_distinct_ordered_reservations(
   client, auth, db, monkeypatch,
 ):
   """A provider busy with the first steer leaves the second safely queued."""
@@ -583,13 +610,15 @@ def test_rapid_actionable_messages_keep_distinct_ordered_reservations(
   first = client.post(
     "/api/agent-coordination/messages", headers=headers,
     json={
-      "recipients": [builder.id], "kind": "request", "body": "first-ask",
+      "recipients": [builder.id], "kind": "request",
+      "delivery": "interrupt", "body": "first-ask",
     },
   )
   second = client.post(
     "/api/agent-coordination/messages", headers=headers,
     json={
-      "recipients": [builder.id], "kind": "blocker", "body": "second-ask",
+      "recipients": [builder.id], "kind": "blocker",
+      "delivery": "interrupt", "body": "second-ask",
     },
   )
   assert first.json()["steered"] == [builder.id]
@@ -608,7 +637,7 @@ def test_rapid_actionable_messages_keep_distinct_ordered_reservations(
   )
 
 
-def test_actionable_peer_never_jumps_a_queued_owner_message(
+def test_interrupting_peer_never_jumps_a_queued_owner_message(
   client, auth, db, monkeypatch,
 ):
   chats, _ = _network_fixture(db)
@@ -633,6 +662,7 @@ def test_actionable_peer_never_jumps_a_queued_owner_message(
     headers=_delegated_auth(db, chats["scout"].id, "scout-run"),
     json={
       "recipients": [builder.id], "kind": "blocker",
+      "delivery": "interrupt",
       "body": "Urgent peer blocker.",
     },
   )
@@ -648,7 +678,7 @@ def test_actionable_peer_never_jumps_a_queued_owner_message(
 
 
 @pytest.mark.parametrize("barrier", ["owner_question", "restart_drain"])
-def test_actionable_peer_respects_live_product_barriers(
+def test_interrupting_peer_respects_live_product_barriers(
   client, auth, db, monkeypatch, barrier,
 ):
   """Peer urgency cannot override owner input or a planned restart drain."""
@@ -677,6 +707,7 @@ def test_actionable_peer_respects_live_product_barriers(
     headers=_delegated_auth(db, chats["scout"].id, "scout-run"),
     json={
       "recipients": [builder.id], "kind": "request",
+      "delivery": "interrupt",
       "body": "Act after the stronger lifecycle barrier.",
     },
   )
@@ -775,7 +806,7 @@ def test_legacy_scope_direct_row_remains_visible_to_its_recipient(
   )
 
 
-def test_quiet_note_waits_but_actionable_peer_wakes_without_cancelling_wait(
+def test_delivery_intent_controls_wait_wake_without_cancelling_wait(
   client, auth, db, monkeypatch,
 ):
   """An external Wait remains armed while an urgent peer wakes the Goal."""
@@ -809,7 +840,7 @@ def test_quiet_note_waits_but_actionable_peer_wakes_without_cancelling_wait(
     headers=scout_auth,
     json={
       "recipients": [builder.id],
-      "kind": "finding",
+      "kind": "blocker",
       "body": "Queue this note until the existing wait resolves.",
     },
   )
@@ -825,16 +856,17 @@ def test_quiet_note_waits_but_actionable_peer_wakes_without_cancelling_wait(
   ).count() == run_count
   assert registry.is_alive(builder.id) is False
 
-  actionable = client.post(
+  interrupting = client.post(
     "/api/agent-coordination/messages",
     headers=scout_auth,
     json={
-      "recipients": [builder.id], "kind": "request",
+      "recipients": [builder.id], "kind": "finding",
+      "delivery": "interrupt",
       "body": "Please reconcile this now.",
     },
   )
-  assert actionable.status_code == 200, actionable.text
-  assert actionable.json()["woken"] == [builder.id]
+  assert interrupting.status_code == 200, interrupting.text
+  assert interrupting.json()["woken"] == [builder.id]
   assert len(starts) == 1
   db.expire_all()
   assert db.get(models.ChatWait, wait.id).status == "armed"
@@ -902,7 +934,7 @@ def test_context_is_bounded_carrier_safe_and_hides_unrelated_goals(db):
   assert "collaborators" in context
   assert "outside-builder" not in context
   assert "before finalizing" not in context
-  assert "actionable direct message may arrive as an in-turn steer" in context
+  assert "delivery=interrupt may arrive as an in-turn steer" in context
   assert "Never poll for either" in context
 
 
@@ -1093,13 +1125,13 @@ def _park_goal(db, chat, run):
   db.commit()
 
 
-@pytest.mark.parametrize("quiet_kind", ["note", "finding"])
-@pytest.mark.parametrize("action_kind", ["request", "blocker", "handoff"])
-def test_a_direct_ask_wakes_an_idle_chat_with_unfinished_goal_work(
-  client, auth, db, monkeypatch, quiet_kind, action_kind,
+@pytest.mark.parametrize(
+  "kind", ["note", "finding", "request", "blocker", "handoff"],
+)
+def test_interrupt_delivery_wakes_an_idle_unfinished_goal_for_every_kind(
+  client, auth, db, monkeypatch, kind,
 ):
-  """Inbox data alone strands a handoff when the recipient is idle and has no
-  wait of its own; a request/blocker/handoff reuses the product wake path."""
+  """Meaning never chooses whether a message starts model work."""
   import app.agent_coordination as coordination
 
   chats, runs = _network_fixture(db)
@@ -1120,21 +1152,24 @@ def test_a_direct_ask_wakes_an_idle_chat_with_unfinished_goal_work(
   monkeypatch.setattr("app.chat_start.start_programmatic_chat_turn", fake_start)
   scout_auth = _delegated_auth(db, chats["scout"].id, "scout-run")
 
-  # Informational kinds are context for the next turn, never a turn.
+  # Every semantic kind defaults to quiet next-turn delivery.
   quiet = client.post(
     "/api/agent-coordination/messages", headers=scout_auth,
-    json={"recipients": [builder.id], "kind": quiet_kind, "body": "fyi"},
+    json={"recipients": [builder.id], "kind": kind, "body": "fyi"},
   )
   assert quiet.status_code == 200, quiet.text
   assert quiet.json()["woken"] == []
   assert started == []
 
-  asked = client.post(
+  interrupted = client.post(
     "/api/agent-coordination/messages", headers=scout_auth,
-    json={"recipients": [builder.id], "kind": action_kind, "body": "Take over."},
+    json={
+      "recipients": [builder.id], "kind": kind,
+      "delivery": "interrupt", "body": "Take over.",
+    },
   )
-  assert asked.status_code == 200, asked.text
-  assert asked.json()["woken"] == [builder.id]
+  assert interrupted.status_code == 200, interrupted.text
+  assert interrupted.json()["woken"] == [builder.id]
   assert len(started) == 1
   wake = started[0]
   assert wake["chat_id"] == builder.id
@@ -1142,7 +1177,7 @@ def test_a_direct_ask_wakes_an_idle_chat_with_unfinished_goal_work(
   assert wake["message_kind"] == "peer_message"
   # The woken turn resumes under the paused Goal, like an owner's "continue".
   assert wake["source_work_id"] == "builder-goal-run"
-  assert action_kind in wake["content"] and "Scout" in wake["content"]
+  assert kind in wake["content"] and "Scout" in wake["content"]
   assert "<agent_coordination>" in wake["content"]
 
   # A running prompt is immutable, so no competing turn is started. The note
@@ -1157,7 +1192,10 @@ def test_a_direct_ask_wakes_an_idle_chat_with_unfinished_goal_work(
   db.commit()
   again = client.post(
     "/api/agent-coordination/messages", headers=scout_auth,
-    json={"recipients": [builder.id], "kind": "request", "body": "Again."},
+    json={
+      "recipients": [builder.id], "kind": "request",
+      "delivery": "next_turn", "body": "Again.",
+    },
   )
   assert again.status_code == 200, again.text
   assert again.json()["woken"] == []
@@ -1178,7 +1216,7 @@ def test_a_direct_ask_wakes_an_idle_chat_with_unfinished_goal_work(
   assert "Again." in successor_context
 
 
-def test_a_direct_ask_does_not_wake_a_chat_without_unfinished_goal_work(
+def test_interrupt_does_not_wake_a_chat_without_unfinished_goal_work(
   client, auth, db, monkeypatch,
 ):
   chats, runs = _network_fixture(db)
@@ -1200,7 +1238,10 @@ def test_a_direct_ask_does_not_wake_a_chat_without_unfinished_goal_work(
   response = client.post(
     "/api/agent-coordination/messages",
     headers=_delegated_auth(db, chats["scout"].id, "scout-run"),
-    json={"recipients": [outsider.id], "kind": "blocker", "body": "Look."},
+    json={
+      "recipients": [outsider.id], "kind": "blocker",
+      "delivery": "interrupt", "body": "Look.",
+    },
   )
 
   assert response.status_code == 200, response.text
