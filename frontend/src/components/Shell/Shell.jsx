@@ -4572,6 +4572,7 @@ export default function Shell({ onInitialVisualReady }) {
         }}
         onProjectsOpen={() => navTo('projects')}
         onProjectCreate={createProjectFromTemplate}
+        onProjectImportGithub={importProjectFromGithub}
         onProjectImportSource={importProjectSource}
         chats={chats}
         chatsStatus={chatsStatus}

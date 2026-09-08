@@ -105,6 +105,7 @@ export default function Drawer({
   onArtifact,
   onProjectsOpen,
   onProjectCreate,
+  onProjectImportGithub,
   // Same import path the Projects screen offers, so a page or local app can
   // become an editable project from either + menu.
   onProjectImportSource,
@@ -1188,6 +1189,7 @@ export default function Drawer({
                 <ProjectCreateMenu
                   templates={projectTemplates}
                   onCreate={onProjectCreate}
+                  onImportGithub={onProjectImportGithub}
                   onImportSource={onProjectImportSource}
                   className="drawer__projects-add"
                   align="end"
