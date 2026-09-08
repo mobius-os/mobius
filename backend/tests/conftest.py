@@ -78,11 +78,13 @@ from app.main import app
 from app.routes import auth as auth_module
 from app.routes.auth import _limiter as auth_limiter
 from app.routes.notifications import limiter as notifications_limiter
+from app.routes.common import _public_write_limiter as common_public_write_limiter
 
 # Disable rate limiters during tests.
 app.state.limiter.enabled = False
 auth_limiter.enabled = False
 notifications_limiter.enabled = False
+common_public_write_limiter.enabled = False
 
 
 @pytest.fixture(autouse=True)

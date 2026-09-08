@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 from app import models
+from app.common_protocol import verify
 from app.config import get_settings
 from app.deps import Principal
 from app.routes import common as common_routes
@@ -66,10 +67,21 @@ def _signed_group_envelope(private_b64, host=PEER_HOST, **fields):
   return envelope
 
 
+def _accept_host_member(client, private_b64, gid, host=PEER_HOST):
+  invitation_id = groups_routes._load_host_group(gid)["members"][host]["invitation_id"]
+  envelope = _signed_group_envelope(
+    private_b64, host=host, type="group_accept", id=str(uuid.uuid4()),
+    to=common_routes._own_host(), gid=gid, invitation_id=invitation_id,
+  )
+  response = client.post("/api/common/groups/inbox", json=envelope)
+  assert response.status_code == 200, response.text
+  assert response.json()["status"] == "accepted"
+
+
 def test_create_group_invites_members(client, db, auth, sent):
   app = _install_common_app(db)
   _join_locally()
-  _, public_b64 = _make_peer_keypair()
+  private_b64, public_b64 = _make_peer_keypair()
   _seed_peer_actor_cache(public_b64)
 
   response = client.post(
@@ -93,6 +105,8 @@ def test_create_group_invites_members(client, db, auth, sent):
     (groups_routes._group_dir(app, gid) / "meta.json").read_text()
   )
   assert meta["name"] == "Weekend plans"
+  assert meta["request_status"] == "accepted"
+  assert host_record["members"][PEER_HOST]["status"] == "invited"
 
   sent.clear()
   response = client.post(
@@ -100,6 +114,14 @@ def test_create_group_invites_members(client, db, auth, sent):
     json={"text": "host-authored message"}, headers=auth,
   )
   assert response.status_code == 200, response.text
+  assert sent == [], "pending invitees are not active fan-out recipients"
+
+  _accept_host_member(client, private_b64, gid)
+  sent.clear()
+  response = client.post(
+    f"/api/common/groups/{gid}/send",
+    json={"text": "after acceptance"}, headers=auth,
+  )
   relay_host, relay = sent[0]
   assert relay_host == PEER_HOST
   original = relay["original"]
@@ -108,7 +130,7 @@ def test_create_group_invites_members(client, db, auth, sent):
   assert original["from"] == common_routes._own_host()
   assert original["to"] == common_routes._own_host()
   identity = common_routes._load_identity()
-  assert common_routes._verify(
+  assert verify(
     {k: v for k, v in original.items() if k != "sig"},
     original["sig"], identity["public_key_b64"],
   )
@@ -125,6 +147,8 @@ def test_host_accepts_member_post_and_relays(client, db, auth, sent):
     headers=auth,
   ).json()
   gid = created["gid"]
+  sent.clear()
+  _accept_host_member(client, private_b64, gid)
   sent.clear()
 
   envelope = _signed_group_envelope(
@@ -162,6 +186,9 @@ def test_group_attachment_and_reply_are_stored_and_relayed(
     headers=auth,
   ).json()
   gid = created["gid"]
+  sent.clear()
+  _accept_host_member(client, private_b64, gid)
+  _accept_host_member(client, private_b64, gid, host="other.example.com")
   sent.clear()
   image = b"\x89PNG\r\n\x1a\nrelay"
   reply_to = {
@@ -304,6 +331,92 @@ def test_member_requires_author_signed_original_in_host_relay(
   ).status_code == 403
 
 
+def test_group_invitation_and_pending_messages_stay_quiet_until_acceptance(
+  client, db, auth, sent, monkeypatch,
+):
+  app = _install_common_app(db)
+  _join_locally()
+  private_b64, public_b64 = _make_peer_keypair()
+  _seed_peer_actor_cache(public_b64)
+  # An accepted DM is intentionally irrelevant to group participation.
+  convo = common_routes._conversation_dir(app, PEER_HOST)
+  convo.mkdir(parents=True)
+  (convo / "meta.json").write_text(json.dumps({
+    "peer": PEER_HOST, "request_status": "accepted",
+  }))
+  notified = []
+  monkeypatch.setattr(
+    groups_routes.push, "notify_owner", lambda *_args, **_kwargs: notified.append(True)
+  )
+
+  gid = str(uuid.uuid4())
+  added = _signed_group_envelope(
+    private_b64, type="group_added", id=str(uuid.uuid4()),
+    to=common_routes._own_host(), gid=gid, group_name="Quiet plans",
+    members=[
+      {"host": PEER_HOST, "handle": "peer"},
+      {"host": common_routes._own_host(), "handle": "alex"},
+    ],
+  )
+  first = client.post("/api/common/groups/inbox", json=added)
+  assert first.json() == {"status": "pending"}
+  assert client.post("/api/common/groups/inbox", json=added).json() == {
+    "status": "pending",
+  }
+  meta_path = groups_routes._group_dir(app, gid) / "meta.json"
+  assert json.loads(meta_path.read_text())["request_status"] == "pending"
+  assert notified == []
+
+  original = _signed_group_envelope(
+    private_b64, type="group_post", id=str(uuid.uuid4()), to=PEER_HOST,
+    gid=gid, text="A message before acceptance",
+  )
+  relay = _signed_group_envelope(
+    private_b64, type="group_message", id=original["id"],
+    to=common_routes._own_host(), gid=gid, group_name="Quiet plans",
+    author=PEER_HOST, author_handle="peer", text=original["text"],
+    original=original,
+  )
+  assert client.post("/api/common/groups/inbox", json=relay).json() == {
+    "status": "pending",
+  }
+  assert client.post("/api/common/groups/inbox", json=relay).json() == {
+    "status": "duplicate",
+  }
+  pending = json.loads(meta_path.read_text())
+  assert pending["request_status"] == "pending"
+  assert pending["request_count"] == 2  # invitation plus one retained message
+  assert pending["unread"] == 0
+  assert notified == []
+
+  accepted = client.post(f"/api/common/groups/{gid}/accept", headers=auth)
+  assert accepted.json() == {"status": "accepted"}
+  action_count = len(sent)
+  assert sent[-1][1]["type"] == "group_accept"
+  assert client.post(f"/api/common/groups/{gid}/accept", headers=auth).json() == {
+    "status": "accepted",
+  }
+  assert len(sent) == action_count
+  assert json.loads(meta_path.read_text())["request_status"] == "accepted"
+
+  followup_original = _signed_group_envelope(
+    private_b64, type="group_post", id=str(uuid.uuid4()), to=PEER_HOST,
+    gid=gid, text="After acceptance",
+  )
+  followup = _signed_group_envelope(
+    private_b64, type="group_message", id=followup_original["id"],
+    to=common_routes._own_host(), gid=gid, group_name="Quiet plans",
+    author=PEER_HOST, author_handle="peer", text=followup_original["text"],
+    original=followup_original,
+  )
+  assert client.post("/api/common/groups/inbox", json=followup).json() == {
+    "status": "delivered",
+  }
+  final = json.loads(meta_path.read_text())
+  assert final["unread"] == 1
+  assert notified == [True]
+
+
 def test_member_send_posts_to_group_host(client, db, auth, sent):
   app = _install_common_app(db)
   _join_locally()
@@ -317,6 +430,14 @@ def test_member_send_posts_to_group_host(client, db, auth, sent):
     members=[{"host": PEER_HOST, "handle": "peer"}],
   )
   assert client.post("/api/common/groups/inbox", json=added).status_code == 200
+  pending_send = client.post(
+    f"/api/common/groups/{gid}/send", json={"text": "too soon"}, headers=auth,
+  )
+  assert pending_send.status_code == 409
+  accepted = client.post(f"/api/common/groups/{gid}/accept", headers=auth)
+  assert accepted.status_code == 200, accepted.text
+  assert accepted.json() == {"status": "accepted"}
+  sent.clear()
 
   image = b"\x89PNG\r\n\x1a\nmember"
   reply_to = {
@@ -378,6 +499,76 @@ def test_add_member_returns_safe_roster_and_retry_results_without_history(client
   assert client.post('/api/common/groups/not-a-group/members', json={'host': PEER_HOST}, headers=auth).status_code == 400
 
 
+def test_declined_host_invitation_requires_deliberate_reinvite(
+  client, db, auth, sent,
+):
+  _install_common_app(db)
+  _join_locally()
+  private_b64, public_b64 = _make_peer_keypair()
+  _seed_peer_actor_cache(public_b64)
+  gid = client.post(
+    "/api/common/groups",
+    json={"name": "Maybe", "members": [PEER_HOST]}, headers=auth,
+  ).json()["gid"]
+  decline = _signed_group_envelope(
+    private_b64, type="group_decline", id=str(uuid.uuid4()),
+    to=common_routes._own_host(), gid=gid,
+    invitation_id=groups_routes._load_host_group(gid)["members"][PEER_HOST]["invitation_id"],
+  )
+  assert client.post("/api/common/groups/inbox", json=decline).json() == {
+    "status": "declined",
+  }
+  assert groups_routes._load_host_group(gid)["members"][PEER_HOST]["status"] == "declined"
+  sent.clear()
+  # Messages are not fanned out to a declined invitation.
+  assert client.post(
+    f"/api/common/groups/{gid}/send", json={"text": "quiet"}, headers=auth,
+  ).json()["failed_members"] == []
+  assert sent == []
+  reinvite = client.post(
+    f"/api/common/groups/{gid}/members", json={"host": PEER_HOST}, headers=auth,
+  )
+  assert reinvite.json()["status"] == "reinvited"
+  assert groups_routes._load_host_group(gid)["members"][PEER_HOST]["status"] == "invited"
+  assert sent[-1][1]["type"] == "group_added"
+
+
+def test_member_reinvite_version_reopens_once_and_rejects_delayed_invite(
+  client, db, auth, sent,
+):
+  app = _install_common_app(db)
+  _join_locally()
+  private_b64, public_b64 = _make_peer_keypair()
+  _seed_peer_actor_cache(public_b64)
+  gid = str(uuid.uuid4())
+  first = _signed_group_envelope(
+    private_b64, type="group_added", id=str(uuid.uuid4()),
+    invitation_version=1, to=common_routes._own_host(), gid=gid,
+    group_name="Versioned", members=[],
+  )
+  assert client.post("/api/common/groups/inbox", json=first).json() == {
+    "status": "pending",
+  }
+  assert client.post(f"/api/common/groups/{gid}/decline", headers=auth).json()[
+    "status"
+  ] == "declined"
+  second = _signed_group_envelope(
+    private_b64, type="group_added", id=str(uuid.uuid4()),
+    invitation_version=2, to=common_routes._own_host(), gid=gid,
+    group_name="Versioned", members=[],
+  )
+  assert client.post("/api/common/groups/inbox", json=second).json() == {
+    "status": "pending",
+  }
+  assert groups_routes._load_group_meta(app, gid)["invitation_id"] == second["id"]
+  assert client.post("/api/common/groups/inbox", json=first).json() == {
+    "status": "stale",
+  }
+  meta = groups_routes._load_group_meta(app, gid)
+  assert meta["invitation_id"] == second["id"]
+  assert meta["request_status"] == "pending"
+
+
 def test_host_deletion_is_idempotent_preserves_history_and_stops_all_writes(client, db, auth, sent, monkeypatch):
   app = _install_common_app(db)
   _join_locally()
@@ -427,8 +618,14 @@ def test_group_lifecycle_owner_surface_rejects_other_apps_and_remote_members(cli
 
   private, public = _make_peer_keypair(); _seed_peer_actor_cache(public)
   remote_gid = str(uuid.uuid4())
-  added = _signed_group_envelope(private, type='group_added', to=common_routes._own_host(), gid=remote_gid, members=[], group_name='Remote')
+  added = _signed_group_envelope(private, type='group_added', id=str(uuid.uuid4()), to=common_routes._own_host(), gid=remote_gid, members=[], group_name='Remote')
   assert client.post('/api/common/groups/inbox', json=added).status_code == 200
+  assert client.post(f'/api/common/groups/{remote_gid}/accept').status_code == 401
+  assert client.post(f'/api/common/groups/{remote_gid}/accept', headers=other_auth).status_code == 403
+  assert client.post(
+    f'/api/common/groups/{remote_gid}/accept',
+    headers={'Authorization': f'Bearer {token}'},
+  ).json() == {'status': 'accepted'}
   assert client.delete(f'/api/common/groups/{remote_gid}', headers=auth).status_code == 404
   assert client.post(f'/api/common/groups/{remote_gid}/members', json={'host': 'new.example.com'}, headers=auth).status_code == 404
 
@@ -440,13 +637,16 @@ def test_known_host_cannot_be_replaced_and_deleted_group_cannot_be_revived(clien
   attacker_private, attacker_public = _make_peer_keypair()
   attacker = 'attacker.example.com'; _seed_peer_actor_cache(attacker_public, host=attacker)
   gid = str(uuid.uuid4())
-  fields = {'type': 'group_added', 'to': common_routes._own_host(), 'gid': gid, 'members': [], 'group_name': 'Original'}
+  fields = {'type': 'group_added', 'id': str(uuid.uuid4()), 'to': common_routes._own_host(), 'gid': gid, 'members': [], 'group_name': 'Original'}
   added = _signed_group_envelope(private, **fields)
   assert client.post('/api/common/groups/inbox', json=added).status_code == 200
   assert client.post('/api/common/groups/inbox', json=_signed_group_envelope(attacker_private, host=attacker, **fields)).status_code == 403
   closure = {**fields, 'type': 'group_deleted'}
   assert client.post('/api/common/groups/inbox', json=_signed_group_envelope(attacker_private, host=attacker, **closure)).status_code == 403
   assert groups_routes._load_group_meta(app, gid)['host'] == PEER_HOST
+  assert client.post(f'/api/common/groups/{gid}/send', json={'text': 'Too soon'}, headers=auth).status_code == 409
+  assert client.post(f'/api/common/groups/{gid}/accept', headers=auth).status_code == 200
+  sent.clear()
   sent_message = client.post(f'/api/common/groups/{gid}/send', json={'text': 'Local history'}, headers=auth).json()
   history = groups_routes._group_dir(app, gid) / 'msgs' / f"{sent_message['id']}.json"
   before = history.read_bytes()
@@ -500,6 +700,10 @@ async def test_host_delete_serializes_with_inflight_group_operation(db, sent, mo
     principal,
   )
   gid = created['gid']
+  group = groups_routes._load_host_group(gid)
+  for member in (PEER_HOST, second):
+    group['members'][member]['status'] = 'active'
+  groups_routes._host_group_path(gid).write_text(json.dumps(group))
   entered, release = asyncio.Event(), asyncio.Event()
   order = []
 
