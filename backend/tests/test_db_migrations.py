@@ -7,7 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from sqlalchemy import String, create_engine, inspect, text
+from sqlalchemy import String, create_engine, event, inspect, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -237,6 +237,33 @@ def test_chat_wait_condition_owner_migration_is_additive_and_idempotent(tmp_path
     column["name"] for column in inspect(eng).get_columns("chat_waits")
   }
   assert "condition_owner" in columns
+
+
+def test_chat_wait_condition_owner_migration_adds_nullable_column(tmp_path):
+  eng = create_engine(f"sqlite:///{tmp_path / 'wait-condition-owner.db'}")
+  models.Base.metadata.create_all(eng)
+  with eng.begin() as conn:
+    conn.execute(text("ALTER TABLE chat_waits DROP COLUMN condition_owner"))
+    conn.execute(text(
+      "CREATE TABLE IF NOT EXISTS schema_migrations ("
+      "version VARCHAR(128) PRIMARY KEY, applied_at TIMESTAMP NOT NULL)"
+    ))
+    for version in _migration_versions_before("0026_chat_wait_condition_owner"):
+      conn.execute(text(
+        "INSERT INTO schema_migrations (version, applied_at) VALUES (:v, :at)"
+      ), {"v": version, "at": datetime(2026, 9, 4)})
+
+  run_migrations(eng)
+
+  columns = {
+    column["name"] for column in inspect(eng).get_columns("chat_waits")
+  }
+  assert "condition_owner" in columns
+  with eng.connect() as conn:
+    assert conn.execute(text(
+      "SELECT COUNT(*) FROM schema_migrations "
+      "WHERE version = '0026_chat_wait_condition_owner'"
+    )).scalar_one() == 1
 
 
 def test_chat_app_artifact_migration_preserves_prior_preview_acknowledgement(
@@ -1174,7 +1201,7 @@ def test_retire_restart_resume_toggle_lifts_stranded_chats(tmp_path):
   """The one-time retirement drops the owner seed column and lifts every chat a
   prior toggle latched off, while preserving a cancelled delegation child's
   internal do-not-resurrect latch."""
-  from app.schema_migrations import _retire_restart_resume_toggle_v2
+  from app.schema_migrations import _retire_restart_resume_toggle
 
   db_path = tmp_path / "retire.db"
   eng = create_engine(f"sqlite:///{db_path}")
@@ -1204,9 +1231,9 @@ def test_retire_restart_resume_toggle_lifts_stranded_chats(tmp_path):
       "('d2', 'active-child', NULL)"
     ))
 
-  _retire_restart_resume_toggle_v2(eng)
+  _retire_restart_resume_toggle(eng)
   # Idempotent: the dropped seed column means a second pass is a clean no-op.
-  _retire_restart_resume_toggle_v2(eng)
+  _retire_restart_resume_toggle(eng)
 
   assert "auto_resume_on_restart_default" not in {
     c["name"] for c in inspect(eng).get_columns("owner")
@@ -1220,6 +1247,53 @@ def test_retire_restart_resume_toggle_lifts_stranded_chats(tmp_path):
   assert rows["active-child"] in (True, 1)
   # The cancelled delegation child keeps its internal latch.
   assert rows["cancelled-child"] in (False, 0)
+
+
+def test_retire_restart_resume_toggle_retries_as_one_transaction(tmp_path):
+  """A failed schema retirement must not hide a half-applied migration."""
+  from app.schema_migrations import _retire_restart_resume_toggle
+
+  eng = create_engine(f"sqlite:///{tmp_path / 'retire-retry.db'}")
+  with eng.begin() as conn:
+    conn.execute(text(
+      "CREATE TABLE owner (id INTEGER PRIMARY KEY, "
+      "auto_resume_on_restart_default BOOLEAN NOT NULL DEFAULT TRUE)"
+    ))
+    conn.execute(text(
+      "CREATE TABLE chats (id VARCHAR PRIMARY KEY, "
+      "auto_resume_on_restart BOOLEAN NOT NULL DEFAULT TRUE)"
+    ))
+    conn.execute(text(
+      "INSERT INTO chats (id, auto_resume_on_restart) VALUES ('stranded', 0)"
+    ))
+
+  def refuse_drop(_conn, _cursor, statement, _parameters, _context, _many):
+    if statement.startswith("ALTER TABLE owner DROP COLUMN"):
+      raise RuntimeError("simulated locked schema")
+
+  event.listen(eng, "before_cursor_execute", refuse_drop)
+  try:
+    with pytest.raises(RuntimeError, match="simulated locked schema"):
+      _retire_restart_resume_toggle(eng)
+  finally:
+    event.remove(eng, "before_cursor_execute", refuse_drop)
+
+  assert "auto_resume_on_restart_default" in {
+    c["name"] for c in inspect(eng).get_columns("owner")
+  }
+  with eng.connect() as conn:
+    assert conn.execute(text(
+      "SELECT auto_resume_on_restart FROM chats WHERE id = 'stranded'"
+    )).scalar_one() in (False, 0)
+
+  _retire_restart_resume_toggle(eng)
+  assert "auto_resume_on_restart_default" not in {
+    c["name"] for c in inspect(eng).get_columns("owner")
+  }
+  with eng.connect() as conn:
+    assert conn.execute(text(
+      "SELECT auto_resume_on_restart FROM chats WHERE id = 'stranded'"
+    )).scalar_one() in (True, 1)
 
 
 def test_fresh_owner_schema_has_auto_resume_default():
@@ -1305,40 +1379,41 @@ def test_run_migrations_records_an_inspectable_append_only_history(tmp_path):
     "0013_app_hosted_publication",
     "0014_chat_run_goal_plan",
     "0015_chat_run_goal_identity",
-    "0016_chat_retention_orphan_repair",
-    "0017_chat_goal_dismissal",
-    "0018_app_connect_manage",
-    "0019_explicit_legacy_chat_models",
+    "0016_app_connect_manage",
+    "0017_retire_restart_resume_toggle",
+    "0018_explicit_legacy_chat_models",
+    "0019_chat_active_assistant_identity",
     "0020_app_project_templates",
     "0021_project_chat_collection",
     "0022_project_artifacts",
-    "0023_retire_restart_resume_toggle",
-    "0024_owner_auth_mode",
-    "0025_chat_active_assistant_identity",
-    "0026_project_color",
-    "0027_shared_app_retention",
-    "0028_shared_app_path_state",
-    "0029_project_artifact_drawer_state",
-    "0030_attached_delegation_work",
-    "0031_chat_app_artifacts",
-    "0032_explicit_active_chat_models",
-    "0033_repair_post_0032_model_gaps",
-    "0034_chat_run_goal_identity_index",
-    "0035_agent_coordination_rooms",
-    "0036_agent_coordination_send_identity",
-    "0037_agent_coordination_send_target",
-        "0038_chat_wait_condition_owner",
-        "0039_agent_work_claim_history",
-        "0040_provider_execution_admission",
-        "0041_app_runtime_revision",
-      ]
+    "0023_project_color",
+    "0024_chat_goal_dismissal",
+    "0025_attached_delegation_work",
+    "0026_chat_wait_condition_owner",
+    "0027_chat_run_goal_identity_index",
+    "0028_agent_coordination_rooms",
+    "0029_agent_coordination_send_identity",
+    "0030_agent_coordination_send_target",
+    "0031_chat_retention_orphan_repair",
+    "0032_owner_auth_mode",
+    "0033_shared_app_retention",
+    "0034_shared_app_path_state",
+    "0035_project_artifact_drawer_state",
+    "0036_chat_app_artifacts",
+    "0037_explicit_active_chat_models",
+    "0038_repair_active_chat_model_gaps",
+    "0039_agent_work_claim_history",
+    "0040_provider_execution_admission",
+    "0041_app_runtime_revision",
+    "0042_linked_app_project_runtime",
+  ]
   assert second == first
 
 
 def test_chat_retention_repair_reclaims_broken_workflow_graph(
   tmp_path, monkeypatch,
 ):
-  """0016 repairs old hard-purges and preserves unrelated durable state."""
+  """0031 repairs old hard-purges and preserves unrelated durable state."""
   data_dir = tmp_path / "data"
   monkeypatch.setattr(get_settings(), "data_dir", str(data_dir))
   monkeypatch.setenv("DATA_DIR", str(data_dir))
@@ -1458,7 +1533,7 @@ def test_chat_retention_repair_reclaims_broken_workflow_graph(
   assert not (data_dir / "chats" / child_id).exists()
   assert not (data_dir / "chats" / nested_id).exists()
   assert (data_dir / "chats" / survivor_id).exists()
-  assert "0016_chat_retention_orphan_repair" in {
+  assert "0031_chat_retention_orphan_repair" in {
     row["version"] for row in schema_migration_history(eng)
   }
 
@@ -1777,7 +1852,7 @@ def test_active_assistant_identity_migration_backfills_live_and_parked_rows(
   assert owners == {
     "deleted": None,
     "historical-only": None,
-    "idless": "assistant-question-q-idless",
+    "idless": None,
     "live": "assistant-live",
     "missing-question": None,
     "parked": "assistant-current",
@@ -1789,7 +1864,7 @@ def test_active_assistant_identity_migration_backfills_live_and_parked_rows(
     if isinstance(idless["messages"], str)
     else idless["messages"]
   )
-  assert idless_messages[-1]["id"] == "assistant-question-q-idless"
+  assert "id" not in idless_messages[-1]
 
 
 def test_connections_manage_reaches_a_ledgered_database(tmp_path):
@@ -1847,7 +1922,7 @@ def test_connect_manage_reaches_a_fully_ledgered_database(tmp_path):
       "CREATE TABLE schema_migrations ("
       "version VARCHAR(128) PRIMARY KEY, applied_at TIMESTAMP NOT NULL)"
     ))
-    for version in _migration_versions_before("0018_app_connect_manage"):
+    for version in _migration_versions_before("0016_app_connect_manage"):
       conn.execute(text(
         "INSERT INTO schema_migrations (version, applied_at) "
         "VALUES (:version, '2026-08-23 00:00:00')"
@@ -1857,7 +1932,7 @@ def test_connect_manage_reaches_a_fully_ledgered_database(tmp_path):
   columns = {column["name"] for column in inspect(eng).get_columns("apps")}
   assert "connect_manage" in columns
   run_migrations(eng)
-  assert "0018_app_connect_manage" in {
+  assert "0016_app_connect_manage" in {
     entry["version"] for entry in schema_migration_history(eng)
   }
 
@@ -1865,7 +1940,7 @@ def test_connect_manage_reaches_a_fully_ledgered_database(tmp_path):
 def test_legacy_chat_models_pin_only_established_unselected_chats(
   tmp_path, monkeypatch,
 ):
-  """0019 repairs invisible defaults without creating a new default path."""
+  """0018 repairs invisible defaults without creating a new default path."""
   data_dir = tmp_path / "data"
   shared = data_dir / "shared"
   shared.mkdir(parents=True)
@@ -1885,6 +1960,9 @@ def test_legacy_chat_models_pin_only_established_unselected_chats(
       username="owner",
       hashed_password="hash",
       provider="codex",
+    ))
+    session.add(models.App(
+      id=99, name="Test app", slug="test-app", source_dir="test-app",
     ))
     rows = [
       models.Chat(
@@ -1943,7 +2021,7 @@ def test_legacy_chat_models_pin_only_established_unselected_chats(
       "version VARCHAR(128) PRIMARY KEY, applied_at TIMESTAMP NOT NULL)"
     ))
     for version in _migration_versions_before(
-      "0019_explicit_legacy_chat_models",
+      "0018_explicit_legacy_chat_models",
     ):
       conn.execute(text(
         "INSERT INTO schema_migrations (version, applied_at) "
@@ -1977,7 +2055,7 @@ def test_legacy_chat_models_pin_only_established_unselected_chats(
   with eng.begin() as conn:
     conn.execute(text(
       "DELETE FROM schema_migrations "
-      "WHERE version = '0019_explicit_legacy_chat_models'"
+      "WHERE version = '0018_explicit_legacy_chat_models'"
     ))
   run_migrations(eng)
   with Session(eng) as session:
@@ -2675,7 +2753,7 @@ def test_goal_identity_index_repair_preserves_recorded_0015_data(tmp_path):
       "version VARCHAR(128) PRIMARY KEY, applied_at TIMESTAMP NOT NULL)"
     ))
     for version in _migration_versions_before(
-      "0034_chat_run_goal_identity_index",
+      "0027_chat_run_goal_identity_index",
     ):
       conn.execute(text(
         "INSERT INTO schema_migrations (version, applied_at) VALUES (:v, :at)"
@@ -2690,7 +2768,7 @@ def test_goal_identity_index_repair_preserves_recorded_0015_data(tmp_path):
     )).scalar_one() == "preserve-existing-identity"
     assert conn.execute(text(
       "SELECT COUNT(*) FROM schema_migrations "
-      "WHERE version = '0034_chat_run_goal_identity_index'"
+      "WHERE version = '0027_chat_run_goal_identity_index'"
     )).scalar_one() == 1
   assert any(
     index["name"] == "ix_chat_runs_goal_id"
@@ -2723,7 +2801,7 @@ def test_agent_coordination_migration_copies_legacy_project_mail_once(tmp_path):
       "CREATE TABLE IF NOT EXISTS schema_migrations ("
       "version VARCHAR(128) PRIMARY KEY, applied_at TIMESTAMP NOT NULL)"
     ))
-    for version in _migration_versions_before("0035_agent_coordination_rooms"):
+    for version in _migration_versions_before("0028_agent_coordination_rooms"):
       conn.execute(text(
         "INSERT INTO schema_migrations (version, applied_at) VALUES (:v, :at)"
       ), {"v": version, "at": datetime(2026, 8, 31)})
@@ -2780,7 +2858,7 @@ def test_goal_dismissal_migration_adds_nullable_chat_pointer(tmp_path):
       "CREATE TABLE IF NOT EXISTS schema_migrations ("
       "version VARCHAR(128) PRIMARY KEY, applied_at TIMESTAMP NOT NULL)"
     ))
-    for version in _migration_versions_before("0017_chat_goal_dismissal"):
+    for version in _migration_versions_before("0024_chat_goal_dismissal"):
       conn.execute(text(
         "INSERT INTO schema_migrations (version, applied_at) VALUES (:v, :at)"
       ), {"v": version, "at": datetime(2026, 8, 22)})
@@ -2792,7 +2870,7 @@ def test_goal_dismissal_migration_adds_nullable_chat_pointer(tmp_path):
   with eng.connect() as conn:
     assert conn.execute(text(
       "SELECT COUNT(*) FROM schema_migrations "
-      "WHERE version = '0017_chat_goal_dismissal'"
+      "WHERE version = '0024_chat_goal_dismissal'"
     )).scalar_one() == 1
 
 
@@ -2805,7 +2883,7 @@ def test_project_color_migration_adds_nullable_column_once(tmp_path):
       "CREATE TABLE IF NOT EXISTS schema_migrations ("
       "version VARCHAR(128) PRIMARY KEY, applied_at TIMESTAMP NOT NULL)"
     ))
-    for version in _migration_versions_before("0026_project_color"):
+    for version in _migration_versions_before("0023_project_color"):
       conn.execute(text(
         "INSERT INTO schema_migrations (version, applied_at) VALUES (:v, :at)"
       ), {"v": version, "at": datetime(2026, 8, 25)})
@@ -2818,7 +2896,7 @@ def test_project_color_migration_adds_nullable_column_once(tmp_path):
   with eng.connect() as conn:
     assert conn.execute(text(
       "SELECT COUNT(*) FROM schema_migrations "
-      "WHERE version = '0026_project_color'"
+      "WHERE version = '0023_project_color'"
     )).scalar_one() == 1
 
 
@@ -2928,7 +3006,7 @@ def test_active_chat_model_migrations_pin_lazy_drafts_and_scoped_rows(
       "CREATE TABLE schema_migrations ("
       "version VARCHAR(128) PRIMARY KEY, applied_at TIMESTAMP NOT NULL)"
     ))
-    for version in _migration_versions_before("0032_explicit_active_chat_models"):
+    for version in _migration_versions_before("0037_explicit_active_chat_models"):
       conn.execute(text(
         "INSERT INTO schema_migrations (version, applied_at) VALUES (:v, :at)"
       ), {"v": version, "at": datetime(2026, 8, 29)})
@@ -2997,7 +3075,7 @@ def test_active_chat_model_migrations_pin_lazy_drafts_and_scoped_rows(
   with eng.begin() as conn:
     conn.execute(text(
       "DELETE FROM schema_migrations "
-      "WHERE version = '0032_explicit_active_chat_models'"
+      "WHERE version = '0037_explicit_active_chat_models'"
     ))
   run_migrations(eng)
   with Session(eng) as session:
@@ -3046,7 +3124,7 @@ def test_active_chat_model_migration_never_reassigns_queued_provider_state(
       "CREATE TABLE schema_migrations ("
       "version VARCHAR(128) PRIMARY KEY, applied_at TIMESTAMP NOT NULL)"
     ))
-    for version in _migration_versions_before("0032_explicit_active_chat_models"):
+    for version in _migration_versions_before("0037_explicit_active_chat_models"):
       conn.execute(text(
         "INSERT INTO schema_migrations (version, applied_at) VALUES (:v, :at)"
       ), {"v": version, "at": datetime(2026, 8, 29)})
@@ -3086,7 +3164,7 @@ def test_active_chat_model_migration_honors_unknown_picker_model_provider_pair(
       "CREATE TABLE schema_migrations ("
       "version VARCHAR(128) PRIMARY KEY, applied_at TIMESTAMP NOT NULL)"
     ))
-    for version in _migration_versions_before("0032_explicit_active_chat_models"):
+    for version in _migration_versions_before("0037_explicit_active_chat_models"):
       conn.execute(text(
         "INSERT INTO schema_migrations (version, applied_at) VALUES (:v, :at)"
       ), {"v": version, "at": datetime(2026, 8, 29)})
@@ -3099,7 +3177,7 @@ def test_active_chat_model_migration_honors_unknown_picker_model_provider_pair(
     assert chat.agent_settings_json == {"model": "future-catalog-model"}
 
 
-def test_post_0032_model_repair_pins_all_later_gaps_without_provider_handoff(
+def test_post_explicit_model_repair_pins_all_later_gaps_without_provider_handoff(
   tmp_path, monkeypatch,
 ):
   data_dir = tmp_path / "data"
@@ -3108,7 +3186,7 @@ def test_post_0032_model_repair_pins_all_later_gaps_without_provider_handoff(
     "model": "gpt-5.6-sol", "provider": "codex",
   }))
   monkeypatch.setenv("DATA_DIR", str(data_dir))
-  eng = create_engine(f"sqlite:///{tmp_path / 'post-0032-gaps.db'}")
+  eng = create_engine(f"sqlite:///{tmp_path / 'post-explicit-model-gaps.db'}")
   models.Base.metadata.create_all(eng)
   with Session(eng) as session:
     session.add(models.Owner(
@@ -3163,7 +3241,7 @@ def test_post_0032_model_repair_pins_all_later_gaps_without_provider_handoff(
       "CREATE TABLE schema_migrations ("
       "version VARCHAR(128) PRIMARY KEY, applied_at TIMESTAMP NOT NULL)"
     ))
-    for version in _migration_versions_before("0033_repair_post_0032_model_gaps"):
+    for version in _migration_versions_before("0038_repair_active_chat_model_gaps"):
       conn.execute(text(
         "INSERT INTO schema_migrations (version, applied_at) VALUES (:v, :at)"
       ), {"v": version, "at": datetime(2026, 8, 29)})
@@ -3212,18 +3290,18 @@ def test_post_0032_model_repair_pins_all_later_gaps_without_provider_handoff(
   with eng.connect() as conn:
     assert conn.execute(text(
       "SELECT COUNT(*) FROM schema_migrations "
-      "WHERE version = '0033_repair_post_0032_model_gaps'"
+      "WHERE version = '0038_repair_active_chat_model_gaps'"
     )).scalar_one() == 1
 
 
-def test_post_0032_model_repair_preserves_only_genuine_first_install_chat(
+def test_post_explicit_model_repair_preserves_only_genuine_first_install_chat(
   tmp_path, monkeypatch,
 ):
   data_dir = tmp_path / "data"
   (data_dir / "shared").mkdir(parents=True)
   (data_dir / "shared" / "agent-settings.json").write_text("{}")
   monkeypatch.setenv("DATA_DIR", str(data_dir))
-  eng = create_engine(f"sqlite:///{tmp_path / 'post-0032-first-chat.db'}")
+  eng = create_engine(f"sqlite:///{tmp_path / 'post-explicit-model-first-chat.db'}")
   models.Base.metadata.create_all(eng)
   with Session(eng) as session:
     session.add(models.Owner(
@@ -3239,7 +3317,7 @@ def test_post_0032_model_repair_preserves_only_genuine_first_install_chat(
       "CREATE TABLE schema_migrations ("
       "version VARCHAR(128) PRIMARY KEY, applied_at TIMESTAMP NOT NULL)"
     ))
-    for version in _migration_versions_before("0033_repair_post_0032_model_gaps"):
+    for version in _migration_versions_before("0038_repair_active_chat_model_gaps"):
       conn.execute(text(
         "INSERT INTO schema_migrations (version, applied_at) VALUES (:v, :at)"
       ), {"v": version, "at": datetime(2026, 8, 29)})

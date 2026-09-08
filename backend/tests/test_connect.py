@@ -1700,7 +1700,7 @@ def test_connect_manage_reaches_a_ledgered_database(tmp_path: Path):
   run_migrations(eng)
   columns = {column["name"] for column in inspect(eng).get_columns("apps")}
   assert "connect_manage" in columns
-  assert "0018_app_connect_manage" in {
+  assert "0016_app_connect_manage" in {
     entry["version"] for entry in schema_migration_history(eng)
   }
 

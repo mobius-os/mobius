@@ -1474,11 +1474,12 @@ def _add_chat_active_assistant_identity(eng) -> None:
 
   A pending question is the stronger protocol boundary, so locate the exact
   unanswered card it names first. Otherwise backfill from the bounded live
-  snapshot. This also repairs a stale pre-upgrade live value instead of letting
-  it outrank a committed owner decision. Everything is self-contained because
-  migration history is immutable after publication.
+  snapshot. Rows whose exact parked-question owner predates assistant message
+  ids stay null here: startup repairs that transcript through the chat-writer
+  actor, then stores both identities in one serialized transaction. Schema
+  migrations never rewrite ``Chat.messages``.
   """
-  from sqlalchemy import JSON as SAJSON, bindparam, inspect as sa_inspect, text
+  from sqlalchemy import inspect as sa_inspect, text
 
   inspector = sa_inspect(eng)
   if "chats" not in inspector.get_table_names():
@@ -1520,10 +1521,6 @@ def _add_chat_active_assistant_identity(eng) -> None:
     def bounded_id(value):
       return value if isinstance(value, str) and 0 < len(value) <= 128 else None
 
-    update_messages = text(
-      "UPDATE chats SET messages = :messages WHERE id = :chat_id"
-    ).bindparams(bindparam("messages", type_=SAJSON))
-
     for row in rows:
       owner_id = None
       pending_question_id = row.get("pending_question_id")
@@ -1548,22 +1545,6 @@ def _add_chat_active_assistant_identity(eng) -> None:
             )
             if matching_question:
               owner_id = bounded_id(message.get("id"))
-              if owner_id is None:
-                # Pre-identity assistant rows still have one unambiguous owner:
-                # the exact unanswered card named by the durable marker. Give
-                # only that row a deterministic id and persist the same value in
-                # the scalar; inventing an id without updating the transcript
-                # would point the browser at a row that does not exist.
-                generated = f"assistant-question-{pending_question_id}"
-                owner_id = bounded_id(generated)
-                if owner_id is not None:
-                  repaired = dict(message)
-                  repaired["id"] = owner_id
-                  messages[index] = repaired
-                  conn.execute(update_messages, {
-                    "chat_id": row["id"],
-                    "messages": messages,
-                  })
               break
       if owner_id is None:
         live = decoded(row.get("live_assistant"))
@@ -2069,7 +2050,7 @@ def _add_project_chat_collection(eng) -> None:
         cursor = raw.cursor()
         cursor.execute("PRAGMA foreign_keys=OFF")
         cursor.execute("BEGIN IMMEDIATE")
-        cursor.execute("ALTER TABLE projects RENAME TO projects__pre_0014")
+        cursor.execute("ALTER TABLE projects RENAME TO projects__pre_0021")
         cursor.execute(
           "CREATE TABLE projects ("
           "id VARCHAR(64) NOT NULL PRIMARY KEY, "
@@ -2091,9 +2072,9 @@ def _add_project_chat_collection(eng) -> None:
           "template_snapshot_json, legacy_source_json, deleted_at, created_at, updated_at) "
           "SELECT id, name, project_type, root_path, chat_id, source_app_id, "
           "template_snapshot_json, legacy_source_json, deleted_at, created_at, updated_at "
-          "FROM projects__pre_0014"
+          "FROM projects__pre_0021"
         )
-        cursor.execute("DROP TABLE projects__pre_0014")
+        cursor.execute("DROP TABLE projects__pre_0021")
         cursor.execute("CREATE INDEX ix_projects_chat_id ON projects (chat_id)")
         cursor.execute("CREATE INDEX ix_projects_source_app_id ON projects (source_app_id)")
         raw.commit()
@@ -2151,7 +2132,7 @@ def _add_chat_goal_dismissal(eng) -> None:
     ))
 
 
-def _retire_restart_resume_toggle_v2(eng) -> None:
+def _retire_restart_resume_toggle(eng) -> None:
   """Retire the owner restart-resume seed and lift chats a toggle latched off.
 
   Restart continuation is now always on with no owner toggle. Earlier installs
@@ -2235,9 +2216,11 @@ def _pin_established_legacy_chat_models(eng) -> None:
       return "claude"
     if normalized.startswith("gpt-"):
       return "codex"
+    if normalized == "inkling":
+      return "mobius"
     return None
 
-  provider_ids = {"claude", "codex"}
+  provider_ids = {"claude", "codex", "mobius"}
   selected_models = {}
 
   # The shared file contains the latest picker choice. Associate a future or
@@ -2280,12 +2263,7 @@ def _pin_established_legacy_chat_models(eng) -> None:
   select_columns = [
     "id", "provider", "messages", "agent_settings_json", *optional_columns,
   ]
-  source_filters = []
-  if "deleted_at" in columns:
-    source_filters.append("deleted_at IS NULL")
-  source_where = (
-    " WHERE " + " AND ".join(source_filters) if source_filters else ""
-  )
+  source_where = " WHERE deleted_at IS NULL" if "deleted_at" in columns else ""
   order_columns = [
     name for name in ("activity_at", "updated_at", "created_at")
     if name in columns
@@ -2334,8 +2312,6 @@ def _pin_established_legacy_chat_models(eng) -> None:
       provider = row["provider"]
       selected_model = selected_models.get(provider)
       if selected_model is None:
-        continue
-      if "deleted_at" in columns and row.get("deleted_at") is not None:
         continue
       settings = decoded_json(row["agent_settings_json"])
       if settings is invalid_json:
@@ -2624,14 +2600,15 @@ def _pin_all_active_chat_models(eng) -> None:
       })
 
 
-def _repair_post_0032_model_gaps(eng) -> None:
+def _repair_post_explicit_active_chat_models(eng) -> None:
   """Pin model-less rows left by deployments that kept owner drafts lazy.
 
-  Some installations applied 0032 while ordinary shell chat creation still
-  allowed any number of empty rows to defer their model choice. Repair those
-  post-0032 gaps without moving a chat to another provider or disturbing its
-  queued/session state. The only nullable exception is one genuinely untouched
-  first-install owner chat when no model has ever been selected.
+  Some installations applied the first active-model migration while ordinary
+  shell chat creation still allowed any number of empty rows to defer their
+  model choice. Repair those gaps without moving a chat to another provider or
+  disturbing its queued/session state. The only nullable exception is one
+  genuinely untouched first-install owner chat when no model has ever been
+  selected.
 
   This is a frozen migration: provider classification, defaults, and the
   first-install predicate are deliberately self-contained.
@@ -3077,40 +3054,21 @@ def _add_attached_delegation_work(eng) -> None:
     column["name"] for column in inspector.get_columns("delegations")
   }
   with eng.begin() as conn:
-    if "startup_prompt" not in columns:
-      conn.execute(text(
-        "ALTER TABLE delegations ADD COLUMN startup_prompt TEXT NULL"
-      ))
-    if "source_work_id" not in columns:
-      conn.execute(text(
-        "ALTER TABLE delegations ADD COLUMN source_work_id VARCHAR(64) NULL"
-      ))
-    if "source_work_intent" not in columns:
-      conn.execute(text(
-        "ALTER TABLE delegations ADD COLUMN source_work_intent VARCHAR(32) NULL"
-      ))
-    if "source_work_context_app_id" not in columns:
-      conn.execute(text(
-        "ALTER TABLE delegations ADD COLUMN "
-        "source_work_context_app_id INTEGER NULL"
-      ))
-    if "source_work_envelope" not in columns:
-      conn.execute(text(
-        "ALTER TABLE delegations ADD COLUMN source_work_envelope JSON NULL"
-      ))
-    if "source_work_status" not in columns:
-      conn.execute(text(
-        "ALTER TABLE delegations ADD COLUMN source_work_status VARCHAR(32) NULL"
-      ))
-    if "source_work_result" not in columns:
-      conn.execute(text(
-        "ALTER TABLE delegations ADD COLUMN source_work_result TEXT NULL"
-      ))
-    if "source_work_active_chat_id" not in columns:
-      conn.execute(text(
-        "ALTER TABLE delegations ADD COLUMN "
-        "source_work_active_chat_id VARCHAR(64) NULL"
-      ))
+    additions = {
+      "startup_prompt": "TEXT NULL",
+      "source_work_id": "VARCHAR(64) NULL",
+      "source_work_intent": "VARCHAR(32) NULL",
+      "source_work_context_app_id": "INTEGER NULL",
+      "source_work_envelope": "JSON NULL",
+      "source_work_status": "VARCHAR(32) NULL",
+      "source_work_result": "TEXT NULL",
+      "source_work_active_chat_id": "VARCHAR(64) NULL",
+    }
+    for name, declaration in additions.items():
+      if name not in columns:
+        conn.execute(text(
+          f"ALTER TABLE delegations ADD COLUMN {name} {declaration}"
+        ))
     conn.execute(text(
       "CREATE UNIQUE INDEX IF NOT EXISTS ix_delegations_source_work_id "
       "ON delegations (source_work_id)"
@@ -3327,21 +3285,19 @@ def _add_agent_coordination_send_target(eng) -> None:
 
 
 def _add_chat_wait_condition_owner(eng) -> None:
-  """Name the executor/system that can satisfy each durable wait."""
+  """Persist the executor named by each observable command wait."""
   from sqlalchemy import inspect as sa_inspect, text
 
   inspector = sa_inspect(eng)
   if "chat_waits" not in inspector.get_table_names():
     return
-  columns = {
-    column["name"] for column in inspector.get_columns("chat_waits")
-  }
-  if "condition_owner" not in columns:
-    with eng.begin() as conn:
-      conn.execute(text(
-        "ALTER TABLE chat_waits "
-        "ADD COLUMN condition_owner VARCHAR(160) NULL"
-      ))
+  columns = {column["name"] for column in inspector.get_columns("chat_waits")}
+  if "condition_owner" in columns:
+    return
+  with eng.begin() as conn:
+    conn.execute(text(
+      "ALTER TABLE chat_waits ADD COLUMN condition_owner VARCHAR(200) NULL"
+    ))
 
 
 def _make_agent_work_claim_history_durable(eng) -> None:
@@ -3569,6 +3525,8 @@ def _link_app_project_runtime(eng):
 
 
 _SCHEMA_MIGRATIONS = (
+  # Published history is immutable. New work from the local release train is
+  # appended after the exact upstream prefix instead of renumbering it.
   ("0001_legacy_schema_convergence", _converge_legacy_schema),
   ("0002_chat_run_goal_objective", _add_chat_run_goal_objective),
   ("0003_chat_run_root_identity", _add_chat_run_root_identity),
@@ -3584,39 +3542,29 @@ _SCHEMA_MIGRATIONS = (
   ("0013_app_hosted_publication", _add_app_hosted_publication),
   ("0014_chat_run_goal_plan", _add_chat_run_goal_plan),
   ("0015_chat_run_goal_identity", _add_chat_run_goal_identity),
-  ("0016_chat_retention_orphan_repair", _repair_chat_retention_orphans),
-  ("0017_chat_goal_dismissal", _add_chat_goal_dismissal),
-  ("0018_app_connect_manage", _add_app_connect_manage),
-  ("0019_explicit_legacy_chat_models", _pin_established_legacy_chat_models),
-  # Projects redesign migrations, renumbered to 0020-0022 so they follow main's
-  # 0017-0019 without colliding: both lines had independently claimed 0017/0018/
-  # 0019. The runner applies entries in tuple order and keys the ledger on the
-  # full version string, so distinct numbers keep the append-only ledger clean.
-  # Each is inspector-gated and idempotent; their relative order is preserved
-  # because _add_project_chat_collection rebuilds the projects table and must
-  # run before _add_project_artifacts adds the artifacts column.
+  ("0016_app_connect_manage", _add_app_connect_manage),
+  ("0017_retire_restart_resume_toggle", _retire_restart_resume_toggle),
+  ("0018_explicit_legacy_chat_models", _pin_established_legacy_chat_models),
+  ("0019_chat_active_assistant_identity", _add_chat_active_assistant_identity),
   ("0020_app_project_templates", _add_app_project_templates),
   ("0021_project_chat_collection", _add_project_chat_collection),
   ("0022_project_artifacts", _add_project_artifacts),
-  # This instance had already published 0019-0022 before the upstream
-  # always-on restart migration arrived. Preserve that immutable ledger and
-  # append the new behavior under the next unused version.
-  ("0023_retire_restart_resume_toggle", _retire_restart_resume_toggle_v2),
-  ("0024_owner_auth_mode", _add_owner_auth_mode),
-  ("0025_chat_active_assistant_identity", _add_chat_active_assistant_identity),
-  ("0026_project_color", _add_project_color),
-  ("0027_shared_app_retention", _add_shared_app_retention),
-  ("0028_shared_app_path_state", _migrate_shared_app_state_files),
-  ("0029_project_artifact_drawer_state", _add_project_artifact_drawer_state),
-  ("0030_attached_delegation_work", _add_attached_delegation_work),
-  ("0031_chat_app_artifacts", _backfill_chat_app_artifacts),
-  ("0032_explicit_active_chat_models", _pin_all_active_chat_models),
-  ("0033_repair_post_0032_model_gaps", _repair_post_0032_model_gaps),
-  ("0034_chat_run_goal_identity_index", _repair_chat_run_goal_identity_index),
-  ("0035_agent_coordination_rooms", _migrate_project_agent_messages),
-  ("0036_agent_coordination_send_identity", _add_agent_coordination_send_identity),
-  ("0037_agent_coordination_send_target", _add_agent_coordination_send_target),
-  ("0038_chat_wait_condition_owner", _add_chat_wait_condition_owner),
+  ("0023_project_color", _add_project_color),
+  ("0024_chat_goal_dismissal", _add_chat_goal_dismissal),
+  ("0025_attached_delegation_work", _add_attached_delegation_work),
+  ("0026_chat_wait_condition_owner", _add_chat_wait_condition_owner),
+  ("0027_chat_run_goal_identity_index", _repair_chat_run_goal_identity_index),
+  ("0028_agent_coordination_rooms", _migrate_project_agent_messages),
+  ("0029_agent_coordination_send_identity", _add_agent_coordination_send_identity),
+  ("0030_agent_coordination_send_target", _add_agent_coordination_send_target),
+  ("0031_chat_retention_orphan_repair", _repair_chat_retention_orphans),
+  ("0032_owner_auth_mode", _add_owner_auth_mode),
+  ("0033_shared_app_retention", _add_shared_app_retention),
+  ("0034_shared_app_path_state", _migrate_shared_app_state_files),
+  ("0035_project_artifact_drawer_state", _add_project_artifact_drawer_state),
+  ("0036_chat_app_artifacts", _backfill_chat_app_artifacts),
+  ("0037_explicit_active_chat_models", _pin_all_active_chat_models),
+  ("0038_repair_active_chat_model_gaps", _repair_post_explicit_active_chat_models),
   ("0039_agent_work_claim_history", _make_agent_work_claim_history_durable),
   ("0040_provider_execution_admission", _add_provider_execution_admission),
   ("0041_app_runtime_revision", _add_app_runtime_revision),
