@@ -1,7 +1,7 @@
 /* Copy links carry access only in fragments and never select an existing project. */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { projectCopyDestination, readProjectCopyRequest, clearProjectCopyRequest, copyByteLabel, copyDate, projectCopyRequest, readPublicProjectCopy, rememberProjectCopyRequest, consumeProjectCopyRequest } from '../projectCopies.js'
+import { selectedCopyPaths, projectCopyDestination, readProjectCopyRequest, clearProjectCopyRequest, copyByteLabel, copyDate, projectCopyRequest, readPublicProjectCopy, rememberProjectCopyRequest, consumeProjectCopyRequest } from '../projectCopies.js'
 
 test('copy destination keeps source capability out of query strings and preserves deployment prefix', () => {
   const source = 'https://sender.example/project-copy#secret-token'
@@ -84,4 +84,13 @@ test('new copy intent wins over remembered intent and storage failures retain lo
   assert.equal(rememberProjectCopyRequest(incoming, unavailable), current)
   assert.equal(consumeProjectCopyRequest(incoming, unavailable), current)
   assert.equal(consumeProjectCopyRequest('https://recipient.example/shell/', undefined), '')
+})
+
+test('copy selection is empty while loading and never carries choices into a different reviewed snapshot', () => {
+  assert.deepEqual(selectedCopyPaths(null, undefined), [])
+  const preview = { digest: 'new', files: [{path: 'README.md', selected: true}, {path: 'other.bin', selected: false}] }
+  assert.deepEqual(selectedCopyPaths(null, preview), ['README.md'])
+  assert.deepEqual(selectedCopyPaths({digest:'old', paths:['other.bin']}, preview), ['README.md'])
+  assert.deepEqual(selectedCopyPaths({digest:'new', paths:[]}, preview), [])
+  assert.deepEqual(selectedCopyPaths({digest:'new', paths:['other.bin']}, preview), ['other.bin'])
 })

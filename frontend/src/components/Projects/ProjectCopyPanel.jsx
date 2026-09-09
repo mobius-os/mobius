@@ -2,7 +2,7 @@
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Copy } from '@openai/apps-sdk-ui/components/Icon'
-import { copyByteLabel, copyDate, projectCopyRequest } from '../../lib/projectCopies.js'
+import { copyByteLabel, copyDate, projectCopyRequest, selectedCopyPaths } from '../../lib/projectCopies.js'
 import './ProjectCopy.css'
 
 export default function ProjectCopyPanel({ project }) {
@@ -16,7 +16,7 @@ export default function ProjectCopyPanel({ project }) {
   const preview = useQuery({ queryKey: ['project-copy', project.id, 'preview'], queryFn: ({ signal }) => projectCopyRequest(`${prefix}/preview`, { signal }), retry: false })
   const shares = useQuery({ queryKey: ['project-copy', project.id, 'shares'], queryFn: ({ signal }) => projectCopyRequest(`${prefix}/shares`, { signal }), retry: false })
   const files = preview.data?.files || []
-  const selected = selection?.digest === preview.data?.digest ? selection.paths : files.filter(file => file.selected).map(file => file.path)
+  const selected = selectedCopyPaths(selection, preview.data)
   const selectedBytes = files.filter(file => selected.includes(file.path)).reduce((sum, file) => sum + file.size, 0)
 
   function toggle(path) {

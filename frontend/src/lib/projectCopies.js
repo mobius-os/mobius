@@ -72,3 +72,9 @@ export function consumeProjectCopyRequest(href, session) {
   try { remembered = session.getItem(PENDING_COPY_KEY) || ''; session.removeItem(PENDING_COPY_KEY) } catch { /* unavailable tab storage leaves the incoming fragment usable */ }
   return incoming || remembered
 }
+
+/** Selections belong to one reviewed snapshot; loading and replacement snapshots use their own defaults. */
+export function selectedCopyPaths(selection, preview) {
+  if (selection && preview && selection.digest === preview.digest) return selection.paths
+  return (preview?.files || []).filter(file => file.selected).map(file => file.path)
+}
