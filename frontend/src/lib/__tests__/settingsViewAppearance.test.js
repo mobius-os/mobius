@@ -42,7 +42,7 @@ test('restart explains its container effect on demand', () => {
   assert.match(view, /settings__info-bubble[\s\S]*role="tooltip"/)
   assert.match(view, /dismissOnOutsidePress[\s\S]*dismissOnEscape/)
   assert.match(view, /label="Restart"[\s\S]*settings-restart-info/)
-  assert.match(view, /does not[\s\S]*install a newer container image/)
+  assert.match(view, /does not install an update/)
   // The standalone manual container-rebuild control was removed: an image-level
   // update now drives the rebuild on confirmation from the update review flow.
   assert.doesNotMatch(view, /label=\{rebuildBootstrap \? 'Container updates' : 'Rebuild container'\}/)

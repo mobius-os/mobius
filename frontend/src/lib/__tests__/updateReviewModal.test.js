@@ -44,8 +44,8 @@ test('image reviews rebuild the container instead of applying in place, on both 
   // Only Railway pins a GHCR digest; self-hosted has none, so the plan is
   // complete without one.
   assert.match(modal, /!reviewedRebuildNeedsDigest\(preview\) \|\| preview\?\.image_digest/)
-  assert.match(modal, /Rebuild to update/)
-  assert.match(modal, /Starting the exact reviewed official image…/)
+  assert.match(modal, /Update now/)
+  assert.match(modal, /Starting the reviewed update…/)
   assert.match(settingsView, /api\.platform\.rebuild\(plan\)/)
   assert.match(settingsView, /\{ reviewedUpdate: true \}/)
   assert.match(settingsView, /\|\| rebuildIsActive\(rebuildStatus\)/)
@@ -59,6 +59,10 @@ test('an exact no-change completes a reviewed rebuild while failures remain visi
   assert.match(settingsView, /if \(outcome\.alreadyCurrent\) \{[\s\S]*await refreshPlatform\(\)/)
   assert.doesNotMatch(settingsView, /reviewed image is already running, but this update is still pending/)
   assert.match(settingsView, /rebuildReviewedUpdateRef\.current = false[\s\S]*return \{ ok: false, message \}/)
+  assert.match(
+    settingsView,
+    /setPlatformErrorCode\(detail\?\.code \|\| ''\)[\s\S]*refreshPlatform\(\{ preserveCurrentOnFailure: true \}\)/,
+  )
 })
 
 test('the apply response is a truthful fallback when status refresh fails', () => {
@@ -114,4 +118,13 @@ test('DiffView stays generic, semantic, and keyboard-scrollable', () => {
   assert.doesNotMatch(diffStyles, /width: max-content/)
   assert.match(diffStyles, /var\(--green, #16a34a\)/)
   assert.match(diffStyles, /var\(--danger, #ef4444\)/)
+})
+
+test('update help and confirmation use compact shared Settings controls', () => {
+  assert.doesNotMatch(modalCss, /\.urm__btn/)
+  assert.match(modal, /settings__btn settings__btn--sm/)
+  assert.match(modal, /<UpdateRepairAction/)
+  assert.match(modal, /<details className="urm__technical">/)
+  assert.match(modal, /platformUpdateRepairReason/)
+  assert.match(modal, /reviewAgain \? 'Review again'/)
 })

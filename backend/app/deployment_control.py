@@ -167,23 +167,6 @@ def _schedule_ambiguous_start_reconciliation(
   task.add_done_callback(_managed_recovery_tasks.discard)
 
 
-def _expected_upstream_sha() -> str | None:
-  """Return the upstream revision represented by the served platform tree."""
-  try:
-    status = platform_update.platform_status()
-  except Exception:
-    return None
-  for raw in (
-    status.get("contained_upstream_sha"),
-    status.get("recorded_upstream_sha"),
-    status.get("current_build_sha"),
-  ):
-    value = str(raw or "").strip().lower()
-    if _SHA_RE.fullmatch(value):
-      return value
-  return None
-
-
 def _control_dir() -> Path:
   return Path(get_settings().data_dir) / "mobius-rebuild"
 
@@ -542,84 +525,68 @@ async def read_rebuild_status() -> RebuildStatus:
   return _normalize_status(raw)
 
 
-async def request_rebuild() -> RebuildStatus:
-  deployment = platform_activation.deployment_kind()
-  if deployment != "railway":
-    if not _configured():
-      raise DeploymentControlError(
-        "not_configured",
-        "Finish the one-time host setup by running sudo "
-        "scripts/install-rebuild-helper.sh from the trusted Möbius checkout.",
-        status_code=409,
-      )
-    host_status = await asyncio.to_thread(_read_host_status)
-    if not _current_handoff(host_status):
-      raise DeploymentControlError(
-        "controller_upgrade_required",
-        _UPGRADE_MESSAGE,
-        status_code=409,
-      )
-    current = _normalize_status(host_status)
-    if current["state"] in _ACTIVE_STATES:
-      raise DeploymentControlError(
-        "already_running",
-        "A container rebuild is already running.",
-        status_code=409,
-      )
-  release: OfficialImageRelease | None = None
-  if deployment == "railway":
-    # Railway's deployable release authority is GHCR, not the persisted source
-    # checkout. `main` is used only to discover a verified commit+digest pair;
-    # prepare below pins the immutable SHA tag and that exact digest.
-    release = await latest_official_release()
-    expected_sha = release["build_sha"]
-  else:
-    expected_sha = _expected_upstream_sha()
-  if not expected_sha:
+def _ensure_host_rebuild_ready(status: RebuildStatus) -> None:
+  if not status.get("supported"):
     raise DeploymentControlError(
-      "target_unavailable",
-      "Möbius cannot identify the official version to deploy.",
+      status.get("code") or "not_configured",
+      status.get("message") or "Container rebuilds are not available on this host yet.",
       status_code=409,
     )
-  def validate_image_inputs() -> None:
-    try:
-      blockers = (
-        platform_update.official_image_rebuild_blockers(expected_sha)
-        if deployment == "railway"
-        else platform_update.container_replacement_blockers(
-          expected_sha,
-          preserve_active_runtime=True,
-        )
-      )
-    except platform_update.PlatformUpdateError as exc:
-      raise DeploymentControlError(
-        "target_unavailable",
-        "Möbius found the latest official image but could not verify its source revision.",
-        status_code=409,
-      ) from exc
-    if blockers:
-      _raise_local_runtime_blockers(blockers)
-
-  # Railway verification may fetch the target revision from Git. Keep that
-  # bounded network/filesystem work off the backend event loop.
-  await asyncio.to_thread(validate_image_inputs)
-  if deployment == "railway":
-    assert release is not None
-    if not managed_cutover_ready():
-      return await _request_managed_bootstrap(
-        expected_sha, release["image_digest"],
-      )
-    return await _request_managed_rebuild(
-      expected_sha,
-      release["image_digest"],
-      final_check=validate_image_inputs,
+  if status.get("state") in _ACTIVE_STATES:
+    raise DeploymentControlError(
+      "already_running", "A container rebuild is already running.", status_code=409,
     )
+
+
+async def _request_self_hosted_rebuild(
+  *, expected_sha: str, final_check: Callable[[], None],
+) -> RebuildStatus:
+  """Dispatch only the exact reviewed target, never rediscover a newer release."""
+  if not _SHA_RE.fullmatch(expected_sha):
+    raise DeploymentControlError(
+      "target_unavailable", "Möbius cannot identify the official version to deploy.",
+      status_code=409,
+    )
+  _ensure_host_rebuild_ready(await read_rebuild_status())
+  await asyncio.to_thread(final_check)
   await asyncio.to_thread(_write_request, expected_sha)
   return _normalize_status({
-    "state": "queued",
-    "expected_sha": expected_sha,
+    "state": "queued", "expected_sha": expected_sha,
     "message": "Container rebuild queued.",
   }, expected_sha=expected_sha)
+
+
+def _validate_reviewed_rebuild(
+  *, plan_id: str, current_sha: str, target_sha: str,
+  image_digest: str | None,
+) -> platform_update.PlatformReviewedRebuild:
+  try:
+    reviewed = platform_update.reviewed_container_rebuild_plan(
+      plan_id=plan_id, current_sha=current_sha, target_sha=target_sha,
+      image_digest=image_digest,
+    )
+  except platform_update.PlatformUpdateError as exc:
+    raise DeploymentControlError(
+      str(exc), "This update could not be verified. Refresh the review and try again.",
+      status_code=409,
+    ) from exc
+  if reviewed["blockers"]:
+    _raise_local_runtime_blockers(reviewed["blockers"])
+  return reviewed
+
+
+def _require_routine_image_update(activation: platform_activation.PlatformActivationImpact) -> None:
+  if platform_activation.requires_agent_activation(activation):
+    raise DeploymentControlError(
+      "external_activation_required",
+      "This update also needs deployment changes. Ask Möbius to help finish it.",
+      status_code=409,
+    )
+  if platform_activation.ActivationLevel.IMAGE_REBUILD.value not in activation["required_actions"]:
+    raise DeploymentControlError(
+      "activation_changed", "This update no longer requires a container rebuild. Refresh the review.",
+      status_code=409,
+    )
 
 
 async def request_reviewed_rebuild(
@@ -654,50 +621,18 @@ async def request_reviewed_rebuild(
       status_code=409,
     )
   def validate_reviewed_release() -> None:
-    try:
-      reviewed = platform_update.reviewed_container_rebuild_plan(
-        plan_id=plan_id,
-        current_sha=current_sha,
-        target_sha=target_sha,
-        image_digest=image_digest,
-      )
-    except platform_update.PlatformUpdateError as exc:
-      code = str(exc)
-      messages = {
-        "update_plan_stale": (
-          "Möbius changed since this preview. Refresh and review the update again."
-        ),
-        "update_plan_invalid": (
-          "This update review is no longer valid. Refresh it and try again."
-        ),
-        "update_plan_target_missing": (
-          "The reviewed release source is unavailable. Refresh and try again shortly."
-        ),
-      }
-      raise DeploymentControlError(
-        code,
-        messages.get(
-          code,
-          "This update could not be verified. Refresh it and try again.",
-        ),
-        status_code=409,
-      ) from exc
-    if reviewed["activation"]["level"] != (
-      platform_activation.ActivationLevel.IMAGE_REBUILD.value
-    ):
-      raise DeploymentControlError(
-        "activation_changed",
-        "This update no longer requires a container rebuild. Refresh the review.",
-        status_code=409,
-      )
-    if reviewed["blockers"]:
-      _raise_local_runtime_blockers(reviewed["blockers"])
+    reviewed = _validate_reviewed_rebuild(
+      plan_id=plan_id, current_sha=current_sha, target_sha=target_sha,
+      image_digest=image_digest,
+    )
+    _require_routine_image_update(reviewed["activation"])
 
   await asyncio.to_thread(validate_reviewed_release)
   # The SHA tag and digest are immutable. A newer `main` publication must not
   # invalidate an already reviewed release, so prepare proves this exact pair
   # rather than consulting the moving discovery tag again.
-  return await _request_managed_rebuild(
+  request = _request_managed_rebuild if managed_cutover_ready() else _request_managed_bootstrap
+  return await request(
     target_sha,
     image_digest,
     final_check=validate_reviewed_release,
@@ -712,32 +647,18 @@ async def _request_self_hosted_reviewed_rebuild(
   target_sha: str,
   image_digest: str | None,
 ) -> RebuildStatus | dict[str, Any]:
-  """Apply a reviewed self-hosted image update, then queue the host rebuild.
+  """Apply reviewed source first, then revalidate that exact applied tree at dispatch.
 
-  The host image ``sha-<target>`` carries the target's baked runtime, while the
-  served source lives in the persistent ``/data/platform`` checkout. Applying
-  the reviewed plan first lands every live-activatable part and advances the
-  upstream marker to the target, so the subsequent host rebuild pins the exact
-  matching image and boots onto source already at the target. ``request_rebuild``
-  re-derives the expected SHA from the advanced marker and keeps its own
-  local-image-input blocker guard, so a local-only image change still fails
-  closed there rather than being silently dropped by the official image.
+  Applying source is essential: the official image boots the persistent checkout.
+  The post-apply plan pins the resulting merge, not a moving upstream marker.
   """
-  # Fail before mutating any source if the host helper cannot rebuild.
-  status = await read_rebuild_status()
-  if not status.get("supported"):
-    raise DeploymentControlError(
-      status.get("code") or "not_configured",
-      status.get("message")
-      or "Container rebuilds are not available on this host yet.",
-      status_code=409,
-    )
-  if status.get("state") in _ACTIVE_STATES:
-    raise DeploymentControlError(
-      "already_running",
-      "A container rebuild is already running.",
-      status_code=409,
-    )
+  _ensure_host_rebuild_ready(await read_rebuild_status())
+  reviewed = await asyncio.to_thread(
+    _validate_reviewed_rebuild,
+    plan_id=plan_id, current_sha=current_sha, target_sha=target_sha,
+    image_digest=image_digest,
+  )
+  _require_routine_image_update(reviewed["activation"])
 
   apply_result = await platform_update.apply_platform_update(
     db,
@@ -755,8 +676,44 @@ async def _request_self_hosted_reviewed_rebuild(
     # render its conflict / rolled-back result instead of a rebuild.
     return apply_result
 
-  # Source is now at the reviewed target. Queue the host rebuild bound to it.
-  return await request_rebuild()
+  # Apply owns this transition. Bind dispatch to its returned merge so a later
+  # local commit cannot silently change what this owner confirmation activates.
+  applied_sha = apply_result.get("merge_commit") or current_sha
+  applied_plan_id = platform_update._update_plan_id(applied_sha, target_sha, image_digest)
+
+  def validate_applied_release() -> None:
+    _validate_reviewed_rebuild(
+      plan_id=applied_plan_id, current_sha=applied_sha, target_sha=target_sha,
+      image_digest=image_digest,
+    )
+    if platform_activation.requires_agent_activation(apply_result["activation"]):
+      raise DeploymentControlError(
+        "external_activation_required",
+        "This update also needs deployment changes. Ask Möbius to help finish it.",
+        status_code=409,
+      )
+
+  try:
+    return await _request_self_hosted_rebuild(
+      expected_sha=target_sha, final_check=validate_applied_release,
+    )
+  except DeploymentControlError as exc:
+    if exc.code not in {
+      "update_plan_stale", "update_plan_invalid", "activation_changed",
+    }:
+      raise
+    # Source application already succeeded. A moving local checkout can make
+    # the final dispatch plan stale, but that is no longer the mutation-free
+    # "review again" outcome used before Apply. Preserve this partial success
+    # as a distinct boundary so Settings can offer recovery after a reload
+    # instead of stranding an image-level update with no available plan.
+    raise DeploymentControlError(
+      "update_applied_rebuild_pending",
+      "The reviewed source was applied, but the container rebuild was not "
+      "queued because the source changed again. Ask Möbius to inspect the "
+      "current update state and help finish it.",
+      status_code=409,
+    ) from exc
 
 
 def _raise_local_runtime_blockers(blockers: list[str]) -> None:
@@ -885,6 +842,7 @@ async def _request_managed_rebuild(
 async def _request_managed_bootstrap(
   expected_sha: str,
   expected_digest: str,
+  *, final_check: Callable[[], None] | None = None,
 ) -> RebuildStatus:
   """Move one legacy Railway image onto the root-owned handoff protocol.
 
@@ -918,6 +876,8 @@ async def _request_managed_bootstrap(
 
   provider_start_attempted = False
   try:
+    if final_check is not None:
+      await asyncio.to_thread(final_check)
     provider_start_attempted = True
     started = await asyncio.to_thread(
       _managed_request,

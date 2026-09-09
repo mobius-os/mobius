@@ -70,10 +70,8 @@ export function platformUpdateStatusLabel(platform) {
     activationLevel === 'server_restart'
     || activationLevel === 'dependency_sync'
   ) return 'Ready to restart'
-  if (activationLevel === 'proxy_reload') return 'Proxy reload required'
-  if (activationLevel === 'container_recreate') return 'Deployment required'
-  if (activationLevel === 'image_rebuild') return 'Image rebuild required'
-  if (activationLevel === 'host_maintenance') return 'Host maintenance required'
+  if (requiresAgentActivation(platform?.activation)) return 'Update needs attention'
+  if (activationLevel === 'image_rebuild') return 'Ready to finish update'
   if (available) return 'New update available'
   return 'Up to date'
 }
@@ -105,7 +103,7 @@ export function deploymentKindLabel(activation) {
  * drives the rebuild — there is no separate manual rebuild step.
  */
 export function reviewedUpdateUsesContainerRebuild(preview) {
-  return preview?.activation?.level === 'image_rebuild'
+  return preview?.activation?.level === 'image_rebuild' && !requiresAgentActivation(preview.activation)
 }
 
 /**
@@ -122,13 +120,19 @@ export function reviewedRebuildNeedsDigest(preview) {
 
 export function platformActivationLabel(activation) {
   const labels = {
-    live: 'Live refresh',
-    server_restart: 'Server restart',
-    dependency_sync: 'Dependency update',
-    proxy_reload: 'Proxy reload',
-    container_recreate: 'Container recreation',
-    image_rebuild: 'Image rebuild',
-    host_maintenance: 'Host maintenance',
+    live: 'Ready to update',
+    server_restart: 'Restart to finish',
+    dependency_sync: 'Restart to finish',
+    proxy_reload: 'Update needs attention',
+    container_recreate: 'Update needs attention',
+    image_rebuild: 'Update and restart',
+    host_maintenance: 'Update needs attention',
   }
   return labels[activation?.level] || 'Activation details'
+}
+
+/** External deployment work cannot be completed by an image-only operation. */
+export function requiresAgentActivation(activation) {
+  const actions = activation?.required_actions || [activation?.level]
+  return actions.some(action => ['proxy_reload', 'container_recreate', 'host_maintenance'].includes(action))
 }

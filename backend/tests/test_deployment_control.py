@@ -28,8 +28,14 @@ def _install_latest_release(monkeypatch, sha="a" * 40):
   monkeypatch.setattr(dc, "latest_official_release", latest)
   monkeypatch.setattr(
     dc.platform_update,
-    "official_image_rebuild_blockers",
-    lambda *_args, **_kwargs: [],
+    "reviewed_container_rebuild_plan",
+    lambda **plan: {"activation": dc.platform_activation.classify_activation(["Dockerfile"], deployment="railway"), "blockers": []},
+  )
+
+async def _request_reviewed_test_release():
+  return await dc.request_reviewed_rebuild(
+    db=None, plan_id="a" * 64, current_sha="1" * 40,
+    target_sha="a" * 40, image_digest=_TEST_DIGEST,
   )
 
 
@@ -208,7 +214,7 @@ async def test_reviewed_rebuild_uses_exact_plan_target_and_digest(monkeypatch):
       "image_digest": plan["image_digest"],
       "local_base_sha": plan["current_sha"],
       "activation": {
-        "level": "image_rebuild", "deployment": "railway",
+        "level": "image_rebuild", "required_actions": ["image_rebuild"], "deployment": "railway",
         "reasons": [], "guidance": [],
       },
       "blockers": [],
@@ -220,6 +226,7 @@ async def test_reviewed_rebuild_uses_exact_plan_target_and_digest(monkeypatch):
     final_check()
     return {"state": "queued"}
 
+  monkeypatch.setattr(dc, "managed_cutover_ready", lambda: True)
   monkeypatch.setattr(dc, "_request_managed_rebuild", start)
 
   status = await dc.request_reviewed_rebuild(
@@ -256,7 +263,7 @@ async def test_reviewed_immutable_plan_does_not_reconsult_moving_ghcr_main(
       "image_digest": plan["image_digest"],
       "local_base_sha": plan["current_sha"],
       "activation": {
-        "level": "image_rebuild", "deployment": "railway",
+        "level": "image_rebuild", "required_actions": ["image_rebuild"], "deployment": "railway",
         "reasons": [], "guidance": [],
       },
       "blockers": [],
@@ -270,6 +277,7 @@ async def test_reviewed_immutable_plan_does_not_reconsult_moving_ghcr_main(
       "image_digest": expected_digest,
     }
 
+  monkeypatch.setattr(dc, "managed_cutover_ready", lambda: True)
   monkeypatch.setattr(dc, "_request_managed_rebuild", start)
 
   result = await dc.request_reviewed_rebuild(
@@ -302,21 +310,25 @@ async def test_self_hosted_reviewed_rebuild_applies_then_queues_host_rebuild(
     return {"supported": True, "state": "idle"}
 
   monkeypatch.setattr(dc, "read_rebuild_status", ready_status)
+  monkeypatch.setattr(dc.platform_update, "reviewed_container_rebuild_plan", lambda **plan: {
+    "activation": dc.platform_activation.classify_activation(["Dockerfile"], deployment="self_hosted"),
+    "blockers": [],
+  })
 
   async def fake_apply(db, **plan):
     calls.append(("apply", plan))
     return {
       "state": dc.platform_update.PlatformUpdateState.ACTIVATION_NEEDED.value,
-      "activation": {"level": "image_rebuild", "deployment": "self_hosted"},
+      "activation": {"level": "image_rebuild", "required_actions": ["image_rebuild"], "deployment": "self_hosted"},
     }
 
   monkeypatch.setattr(dc.platform_update, "apply_platform_update", fake_apply)
 
-  async def fake_request_rebuild():
+  async def fake_request_rebuild(**_kwargs):
     calls.append(("rebuild", None))
     return {"state": "queued", "expected_sha": target, "supported": True}
 
-  monkeypatch.setattr(dc, "request_rebuild", fake_request_rebuild)
+  monkeypatch.setattr(dc, "_request_self_hosted_rebuild", fake_request_rebuild)
 
   result = await dc.request_reviewed_rebuild(
     db=SimpleNamespace(),
@@ -345,6 +357,10 @@ async def test_self_hosted_reviewed_rebuild_surfaces_apply_conflict(monkeypatch)
     return {"supported": True, "state": "idle"}
 
   monkeypatch.setattr(dc, "read_rebuild_status", ready_status)
+  monkeypatch.setattr(dc.platform_update, "reviewed_container_rebuild_plan", lambda **plan: {
+    "activation": dc.platform_activation.classify_activation(["Dockerfile"], deployment="self_hosted"),
+    "blockers": [],
+  })
 
   async def fake_apply(db, **plan):
     return {
@@ -354,10 +370,10 @@ async def test_self_hosted_reviewed_rebuild_surfaces_apply_conflict(monkeypatch)
 
   monkeypatch.setattr(dc.platform_update, "apply_platform_update", fake_apply)
 
-  async def must_not_rebuild():
+  async def must_not_rebuild(**_kwargs):
     raise AssertionError("a conflicted apply must not queue a rebuild")
 
-  monkeypatch.setattr(dc, "request_rebuild", must_not_rebuild)
+  monkeypatch.setattr(dc, "_request_self_hosted_rebuild", must_not_rebuild)
 
   result = await dc.request_reviewed_rebuild(
     db=SimpleNamespace(),
@@ -571,7 +587,7 @@ async def test_legacy_railway_image_offers_managed_bootstrap(tmp_path, monkeypat
   assert status["bootstrap_available"] is True
   assert status["code"] == "controller_upgrade_required"
 
-  started = await dc.request_rebuild()
+  started = await _request_reviewed_test_release()
   assert started["state"] == "queued"
   assert started["bootstrap_available"] is True
   assert began == [True]
@@ -688,7 +704,7 @@ async def test_legacy_railway_bootstrap_waits_for_idle_chats(tmp_path, monkeypat
   )
 
   with pytest.raises(dc.DeploymentControlError) as exc:
-    await dc.request_rebuild()
+    await _request_reviewed_test_release()
 
   assert exc.value.code == "active_chats"
   assert began == [True]
@@ -760,10 +776,10 @@ async def test_request_rebuild_selects_managed_railway_handoff(tmp_path, monkeyp
 
   def blockers(*_args, **_kwargs):
     blocker_threads.append(threading.get_ident())
-    return []
+    return {"activation": dc.platform_activation.classify_activation(["Dockerfile"], deployment="railway"), "blockers": []}
 
   monkeypatch.setattr(
-    dc.platform_update, "official_image_rebuild_blockers", blockers,
+    dc.platform_update, "reviewed_container_rebuild_plan", blockers,
   )
   calls = []
 
@@ -792,7 +808,7 @@ async def test_request_rebuild_selects_managed_railway_handoff(tmp_path, monkeyp
   monkeypatch.setattr(restart_ledger, "accepted_cutover_receipt", lambda _id: True)
   monkeypatch.setattr(restart_util, "prepare_managed_container_cutover", prepare)
 
-  status = await dc.request_rebuild()
+  status = await _request_reviewed_test_release()
 
   assert status["deployment"] == "railway"
   assert status["state"] == "queued"
@@ -859,7 +875,7 @@ async def test_managed_start_failure_restarts_only_after_definitive_rejection(
   )
 
   with pytest.raises(dc.DeploymentControlError) as exc:
-    await dc.request_rebuild()
+    await _request_reviewed_test_release()
   await asyncio.sleep(0)
 
   assert exc.value.code == error_code
@@ -1019,7 +1035,7 @@ async def test_pre_start_receipt_timeout_recovers_the_drained_worker(
   monkeypatch.setattr(restart_util, "restart_this_worker", restart)
 
   with pytest.raises(dc.DeploymentControlError) as exc:
-    await dc.request_rebuild()
+    await _request_reviewed_test_release()
   await asyncio.sleep(0)
 
   assert exc.value.code == "controller_unavailable"
@@ -1075,7 +1091,7 @@ async def test_definitive_rejection_owns_recovery_until_restart_settles(
   monkeypatch.setattr(restart_util, "restart_this_worker", restart)
 
   with pytest.raises(dc.DeploymentControlError, match="rejected"):
-    await dc.request_rebuild()
+    await _request_reviewed_test_release()
   await started.wait()
 
   assert len(owned) == 1
@@ -1089,31 +1105,18 @@ async def test_definitive_rejection_owns_recovery_until_restart_settles(
 
 
 @pytest.mark.asyncio
-async def test_request_writes_only_the_derived_sha(tmp_path, monkeypatch):
+async def test_request_writes_only_the_reviewed_sha_after_final_check(tmp_path, monkeypatch):
   _control, inbox = _install_control(tmp_path, monkeypatch)
   monkeypatch.setattr(dc.platform_activation, "deployment_kind", lambda: "self_hosted")
-  monkeypatch.setattr(dc, "_expected_upstream_sha", lambda: "c" * 40)
-  seen = {}
-
-  def blockers(expected, *, preserve_active_runtime):
-    seen["expected"] = expected
-    seen["preserve_active_runtime"] = preserve_active_runtime
-    return []
-
-  monkeypatch.setattr(
-    dc.platform_update, "container_replacement_blockers", blockers,
+  seen = []
+  status = await dc._request_self_hosted_rebuild(
+    expected_sha="c" * 40, final_check=lambda: seen.append("checked"),
   )
-
-  status = await dc.request_rebuild()
-
   assert status["state"] == "queued"
   assert json.loads((inbox / "request.json").read_text()) == {
     "version": 1, "expected_sha": "c" * 40,
   }
-  assert seen == {
-    "expected": "c" * 40,
-    "preserve_active_runtime": True,
-  }
+  assert seen == ["checked"]
 
 
 @pytest.mark.asyncio
@@ -1136,31 +1139,27 @@ async def test_queued_request_masks_the_previous_terminal_status(tmp_path, monke
 
 
 @pytest.mark.asyncio
-async def test_request_refuses_local_runtime_changes(tmp_path, monkeypatch):
+async def test_dispatch_revalidates_after_controller_readiness(tmp_path, monkeypatch):
   _control, inbox = _install_control(tmp_path, monkeypatch)
-  monkeypatch.setattr(dc.platform_activation, "deployment_kind", lambda: "self_hosted")
-  monkeypatch.setattr(dc, "_expected_upstream_sha", lambda: "d" * 40)
-  monkeypatch.setattr(
-    dc.platform_update,
-    "container_replacement_blockers",
-    lambda _expected, *, preserve_active_runtime: ["Dockerfile"],
-  )
-
-  with pytest.raises(dc.DeploymentControlError) as exc:
-    await dc.request_rebuild()
-
-  assert exc.value.code == "local_runtime_changes"
+  checked = []
+  async def ready():
+    checked.append("ready")
+    return {"supported": True, "state": "idle"}
+  def changed():
+    checked.append("recheck")
+    raise dc.DeploymentControlError("update_plan_stale", "source changed")
+  monkeypatch.setattr(dc, "read_rebuild_status", ready)
+  with pytest.raises(dc.DeploymentControlError, match="source changed"):
+    await dc._request_self_hosted_rebuild(expected_sha="d" * 40, final_check=changed)
+  assert checked == ["ready", "recheck"]
   assert not (inbox / "request.json").exists()
 
 
 @pytest.mark.asyncio
 async def test_request_refuses_unknown_target(tmp_path, monkeypatch):
   _install_control(tmp_path, monkeypatch)
-  monkeypatch.setattr(dc.platform_activation, "deployment_kind", lambda: "self_hosted")
-  monkeypatch.setattr(dc, "_expected_upstream_sha", lambda: None)
-
   with pytest.raises(dc.DeploymentControlError) as exc:
-    await dc.request_rebuild()
+    await dc._request_self_hosted_rebuild(expected_sha="", final_check=lambda: None)
   assert exc.value.code == "target_unavailable"
 
 
@@ -1188,7 +1187,7 @@ async def test_legacy_host_helper_is_visible_but_cannot_queue_replacement(
   assert status["supported"] is False
   assert status["code"] == "controller_upgrade_required"
   with pytest.raises(dc.DeploymentControlError) as exc:
-    await dc.request_rebuild()
+    await dc._request_self_hosted_rebuild(expected_sha="a" * 40, final_check=lambda: None)
   assert exc.value.code == "controller_upgrade_required"
   assert not (inbox / "request.json").exists()
 
@@ -1204,3 +1203,75 @@ def test_prepare_path_requires_matching_root_owned_operation(tmp_path, monkeypat
     control / "inbox" / f"ready-{operation}"
   with pytest.raises(dc.DeploymentControlError):
     dc.replacement_ready_path("b" * 32)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('deployment, external', [
+  ('railway', 'railway.toml'), ('self_hosted', 'docker-compose.yml'),
+  ('self_hosted', 'Caddyfile'), ('self_hosted', 'scripts/mobius-rebuild-host.py'),
+])
+async def test_mixed_image_update_rejected_before_apply_or_dispatch(monkeypatch, deployment, external):
+  monkeypatch.setattr(dc.platform_activation, 'deployment_kind', lambda: deployment)
+  monkeypatch.setattr(dc.platform_update, 'reviewed_container_rebuild_plan', lambda **plan: {
+    'activation': dc.platform_activation.classify_activation(['Dockerfile', external], deployment=deployment),
+    'blockers': [],
+  })
+  async def ready():
+    return {'supported': True, 'state': 'idle'}
+  async def forbidden(*_args, **_kwargs):
+    raise AssertionError('mixed update must not apply source or replace container')
+  monkeypatch.setattr(dc, 'read_rebuild_status', ready)
+  monkeypatch.setattr(dc.platform_update, 'apply_platform_update', forbidden)
+  monkeypatch.setattr(dc, '_request_managed_rebuild', forbidden)
+  monkeypatch.setattr(dc, '_request_managed_bootstrap', forbidden)
+  monkeypatch.setattr(dc, '_request_self_hosted_rebuild', forbidden)
+  with pytest.raises(dc.DeploymentControlError) as error:
+    await _request_reviewed_test_release()
+  assert error.value.code == 'external_activation_required'
+
+
+@pytest.mark.asyncio
+async def test_self_hosted_dispatch_binds_the_apply_result_not_a_new_source_tip(tmp_path, monkeypatch):
+  _control, inbox = _install_control(tmp_path, monkeypatch)
+  monkeypatch.setattr(dc.platform_activation, 'deployment_kind', lambda: 'self_hosted')
+  plans = []
+  original, target, merged = '1' * 40, 'a' * 40, 'b' * 40
+  def reviewed(**plan):
+    plans.append(plan)
+    if len(plans) == 2:
+      raise dc.platform_update.PlatformUpdateError('update_plan_stale')
+    return {'activation': dc.platform_activation.classify_activation(['Dockerfile'], deployment='self_hosted'), 'blockers': []}
+  async def apply(_db, **_plan):
+    return {'state': 'activation_needed', 'merge_commit': merged,
+            'activation': dc.platform_activation.classify_activation(['Dockerfile'], deployment='self_hosted')}
+  monkeypatch.setattr(dc.platform_update, 'reviewed_container_rebuild_plan', reviewed)
+  monkeypatch.setattr(dc.platform_update, 'apply_platform_update', apply)
+  with pytest.raises(dc.DeploymentControlError) as error:
+    await _request_reviewed_test_release()
+  assert error.value.code == 'update_applied_rebuild_pending'
+  assert 'reviewed source was applied' in error.value.message
+  assert [p['current_sha'] for p in plans] == [original, merged]
+  assert plans[-1]['plan_id'] == dc.platform_update._update_plan_id(merged, target, _TEST_DIGEST)
+  assert plans[-1]['target_sha'] == target
+  assert not (inbox / 'request.json').exists()
+
+
+@pytest.mark.asyncio
+async def test_legacy_bootstrap_rechecks_review_before_consuming_nonce(monkeypatch):
+  from app import chat
+  calls = []
+  def request(_method, suffix, _payload):
+    calls.append(suffix)
+    return {'expected_sha': 'a' * 40, 'image_digest': _TEST_DIGEST,
+            'operation_id': 'replace_12345678', 'handoff_nonce': 'nonce'}
+  def stale():
+    raise dc.DeploymentControlError('update_plan_stale', 'source changed')
+  monkeypatch.setattr(dc, '_managed_request', request)
+  monkeypatch.setattr(chat, 'begin_idle_drain', lambda: True)
+  reopened = []
+  monkeypatch.setattr(chat, 'cancel_idle_drain', lambda: reopened.append(True))
+  with pytest.raises(dc.DeploymentControlError) as error:
+    await dc._request_managed_bootstrap('a' * 40, _TEST_DIGEST, final_check=stale)
+  assert error.value.code == 'update_plan_stale'
+  assert calls == ['bootstrap/prepare']
+  assert reopened == [True]

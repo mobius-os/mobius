@@ -290,43 +290,14 @@
   gap: 10px;
 }
 
-.urm__btn {
-  background: var(--accent);
-  color: var(--accent-fg);
-  border: none;
-  border-radius: 8px;
-  padding: 9px 18px;
-  font-size: 14px;
-  font-weight: 500;
-  cursor: pointer;
-  transition: background 0.15s;
-}
-
-@media (hover: hover) and (pointer: fine) {
-  .urm__btn:hover:not(:disabled) {
-    background: var(--accent-hover);
-  }
-}
-
-.urm__btn:disabled {
-  opacity: 0.6;
-  cursor: not-allowed;
-}
-
-.urm__btn--ghost {
-  background: transparent;
-  color: var(--text);
-  border: 1px solid var(--border);
-}
-
-@media (hover: hover) and (pointer: fine) {
-  .urm__btn--ghost:hover:not(:disabled) {
-    background: var(--surface2);
-  }
-}
-
-.urm__btn:focus-visible,
 .urm__close:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
+
+/* Evidence stays available without dominating the routine confirmation. */
+.urm__technical { margin-top: 12px; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+.urm__technical summary { cursor: pointer; color: var(--text); }
+.urm__technical p { margin: 8px 0; }
+.urm__technical ul { padding-left: 20px; }
+.urm__foot .settings__update-help-error { flex-basis: 100%; margin: 0; }

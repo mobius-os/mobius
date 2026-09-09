@@ -45,9 +45,10 @@ class ActivationReason(TypedDict):
 
 
 class PlatformActivationImpact(TypedDict):
-  """Owner-readable and machine-ordered activation result."""
+  """Independent activation requirements plus an ordered summary, not coverage proof."""
 
   level: str
+  required_actions: list[str]
   deployment: DeploymentKind
   reasons: list[ActivationReason]
   guidance: list[str]
@@ -96,12 +97,13 @@ IMAGE_BOOTSTRAP_SCRIPTS = (
 # backend runtime rule.  A path may require only one owning activation boundary;
 # mixed updates still report every distinct rule they touch.
 _RULES = (
+  # deploy-prod.sh is an optional, on-demand host deployment path, not an
+  # installed controller. Its source updates do not gate Settings updates.
   _Rule(
     "host_operator_tooling",
     ActivationLevel.HOST_MAINTENANCE,
     "Host-operated deployment tooling changed.",
     exact=(
-      "scripts/deploy-prod.sh",
       "scripts/install-rebuild-helper.sh",
       "scripts/mobius-rebuild-host.py",
     ),
@@ -291,7 +293,11 @@ def _guidance(level: ActivationLevel, deployment: DeploymentKind) -> str:
         "docker build/compose against the live instance."
       )
     if level is ActivationLevel.HOST_MAINTENANCE:
-      return "Update the host-operated tooling and complete its maintenance outside the container."
+      return (
+        "Update the Möbius checkout on your host, then run "
+        "sudo scripts/install-rebuild-helper.sh there to update the installed "
+        "Settings update helper. Restarting Möbius does not update that helper."
+      )
   return "Complete this deployment action outside Möbius; an in-product restart is insufficient."
 
 
@@ -341,10 +347,21 @@ def classify_activation(
 
   return PlatformActivationImpact(
     level=required_level.value,
+    required_actions=[action.value for action in ordered_actions],
     deployment=active_deployment,
     reasons=reasons,
     guidance=guidance,
   )
+
+
+def requires_agent_activation(impact: PlatformActivationImpact) -> bool:
+  """Image replacement cannot apply external topology or proxy/controller work."""
+  routine = {
+    ActivationLevel.SERVER_RESTART.value,
+    ActivationLevel.DEPENDENCY_SYNC.value,
+    ActivationLevel.IMAGE_REBUILD.value,
+  }
+  return any(action not in routine for action in impact["required_actions"])
 
 
 def dependency_fingerprint_paths(root: Path) -> list[str]:

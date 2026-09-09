@@ -30,11 +30,12 @@ import {
   isTrivialUpdate,
 } from '../../lib/platformUpdatePreview.js'
 import {
-  deploymentKindLabel,
   platformActivationLabel,
   reviewedUpdateUsesContainerRebuild,
   reviewedRebuildNeedsDigest,
 } from '../../lib/platformUpdateState.js'
+import { platformUpdateRepairReason } from '../../lib/platformUpdateRepair.js'
+import UpdateRepairAction from './UpdateRepairAction.jsx'
 import UnifiedDiff from '../DiffView/UnifiedDiff.jsx'
 import './UpdateReviewModal.css'
 
@@ -48,11 +49,11 @@ function commitCountLabel(count) {
 
 const UPDATE_PHASE_LABELS = {
   preparing: 'Preparing update…',
-  fetching: 'Fetching the reviewed release…',
-  reconciling: 'Reconciling local changes…',
-  validating: 'Validating the backend…',
-  building: 'Building the frontend…',
-  finalizing: 'Finalizing the update…',
+  fetching: 'Downloading the update…',
+  reconciling: 'Preserving your changes…',
+  validating: 'Checking the updated version…',
+  building: 'Preparing the interface…',
+  finalizing: 'Finishing the update…',
 }
 
 export default function UpdateReviewModal({
@@ -64,6 +65,8 @@ export default function UpdateReviewModal({
   rebuilding,
   resolving,
   applyError,
+  applyErrorCode,
+  onClearError,
   applyProgress,
 }) {
   const [preview, setPreview] = useState(null)
@@ -77,6 +80,8 @@ export default function UpdateReviewModal({
   const loadPreview = useCallback(async () => {
     setLoading(true)
     setLoadError('')
+    setPreview(null)
+    onClearError?.()
     try {
       const res = await api.platform.updatePreview()
       let body = null
@@ -96,7 +101,7 @@ export default function UpdateReviewModal({
     } finally {
       setLoading(false)
     }
-  }, [])
+  }, [onClearError])
 
   useEffect(() => { loadPreview() }, [loadPreview])
 
@@ -114,6 +119,7 @@ export default function UpdateReviewModal({
   })
 
   const handleApply = useCallback(async () => {
+    if (platformUpdateRepairReason({ preview, error: applyError, errorCode: applyErrorCode })) return
     const plan = {
       plan_id: preview?.plan_id,
       current_sha: preview?.current_sha,
@@ -145,14 +151,7 @@ export default function UpdateReviewModal({
         ))
       )
     ) onClose()
-  }, [onApply, onClose, onRebuild, preview])
-
-  // Applying replaces the focused Apply button with a result surface. Focus a
-  // real action in that surface so both Tab directions remain inside the
-  // dialog; the result notice announces the outcome through role=status.
-  useEffect(() => {
-    if (resultState) resultActionRef.current?.focus({ preventScroll: true })
-  }, [resultState])
+  }, [onApply, onClose, onRebuild, preview, applyError, applyErrorCode])
 
   const summary = summarizePreview(preview)
   const trivial = preview && isTrivialUpdate(preview)
@@ -164,6 +163,8 @@ export default function UpdateReviewModal({
   const activationGuidance = Array.isArray(activation?.guidance)
     ? activation.guidance
     : []
+  const repairReason = platformUpdateRepairReason({ preview, error: applyError, errorCode: applyErrorCode })
+  const reviewAgain = ['update_plan_stale', 'update_plan_invalid', 'activation_changed'].includes(applyErrorCode)
   const activationReasons = Array.isArray(activation?.reasons)
     ? activation.reasons
     : []
@@ -178,7 +179,7 @@ export default function UpdateReviewModal({
     && (!reviewedRebuildNeedsDigest(preview) || preview?.image_digest)
   )
   const progressLabel = rebuildUpdate && rebuilding
-    ? 'Starting the exact reviewed official image…'
+    ? 'Starting the reviewed update…'
     : (
         applyProgress?.plan_id === preview?.plan_id
           ? UPDATE_PHASE_LABELS[applyProgress?.phase]
@@ -187,6 +188,11 @@ export default function UpdateReviewModal({
   const resultTitle = resultState === 'rolled_back'
     ? 'Update rolled back'
     : 'Update not applied'
+
+  // A blocked attempt replaces Apply with help or a fresh-review action.
+  useEffect(() => {
+    if (resultState || applyError) resultActionRef.current?.focus({ preventScroll: true })
+  }, [resultState, applyError, repairReason])
 
   const summaryBits = []
   if (summary.commitCount) summaryBits.push(commitCountLabel(summary.commitCount))
@@ -252,7 +258,7 @@ export default function UpdateReviewModal({
 
           {!hasResult && !loading && loadError && (
             <div className="urm__notice" role="status">
-              {loadError} Try again to create a fresh, immutable update plan.
+              {loadError} Try again to review the update.
             </div>
           )}
 
@@ -267,24 +273,26 @@ export default function UpdateReviewModal({
               className={`urm__activation urm__activation--${activation.level || 'live'}`}
               aria-labelledby="urm-activation-title"
             >
-              <div className="urm__activation-head">
-                <h3 id="urm-activation-title" className="urm__activation-title">
-                  {platformActivationLabel(activation)}
-                </h3>
-                <span className="urm__activation-deployment">
-                  {deploymentKindLabel(activation)}
-                </span>
-              </div>
-              {activationGuidance.map((line) => (
-                <p key={line} className="urm__activation-guidance">{line}</p>
-              ))}
-              {activationReasons.length > 0 && (
-                <ul className="urm__activation-reasons">
-                  {activationReasons.map((reason) => (
-                    <li key={reason.code}>{reason.summary}</li>
-                  ))}
-                </ul>
-              )}
+              <h3 id="urm-activation-title" className="urm__activation-title">
+                {repairReason || platformActivationLabel(activation)}
+              </h3>
+              <p className="urm__activation-guidance">
+                {repairReason
+                  ? 'Open a chat with the update details included. Möbius will check what’s needed and help finish the update, asking before any restart.'
+                  : rebuildUpdate
+                    ? 'Möbius will update and restart. Active responses will pause, and it may be unavailable briefly. Your saved data stays in place.'
+                    : 'Möbius will preserve your local changes. If a restart is needed, you’ll confirm it separately.'}
+              </p>
+              <details className="urm__technical">
+                <summary>Technical details</summary>
+                {activationGuidance.map(line => <p key={line}>{line}</p>)}
+                {activationReasons.length > 0 && <ul className="urm__activation-reasons">
+                  {activationReasons.map(reason => <li key={reason.code}>{reason.summary}</li>)}
+                </ul>}
+                {preview?.blocking_paths?.length > 0 && <ul>
+                  {preview.blocking_paths.map(path => <li key={path}><code>{path}</code></li>)}
+                </ul>}
+              </details>
             </section>
           )}
 
@@ -342,57 +350,52 @@ export default function UpdateReviewModal({
         )}
 
         <div className="urm__foot">
-          {resultState !== 'rolled_back' && (
-            <button
+          <button
               type="button"
-              className="urm__btn urm__btn--ghost"
+              className="settings__btn settings__btn--outline settings__btn--sm"
               onClick={requestClose}
               disabled={applying || rebuilding || resolving}
             >
               Not now
-            </button>
-          )}
+          </button>
           {resultState === 'conflict' ? (
             <button
               ref={resultActionRef}
               type="button"
-              className="urm__btn"
+              className="settings__btn settings__btn--sm"
               onClick={onResolve}
               disabled={applying || resolving}
             >
               {resolving ? 'Opening…' : 'Resolve in chat'}
             </button>
-          ) : resultState === 'rolled_back' ? (
+          ) : repairReason || resultState === 'rolled_back' ? (
+            <UpdateRepairAction
+              preview={preview} error={applyError || resultTitle} errorCode={applyErrorCode}
+              buttonRef={resultActionRef} disabled={applying || rebuilding || resolving || loading}
+            />
+          ) : loadError || reviewAgain ? (
             <button
+              type="button"
+              className="settings__btn settings__btn--sm"
               ref={resultActionRef}
-              type="button"
-              className="urm__btn"
-              onClick={requestClose}
-            >
-              Done
-            </button>
-          ) : loadError ? (
-            <button
-              type="button"
-              className="urm__btn"
               onClick={loadPreview}
               disabled={applying || rebuilding}
             >
-              Try again
+              {reviewAgain ? 'Review again' : 'Try again'}
             </button>
           ) : (
             <button
               type="button"
-              className="urm__btn"
+              className="settings__btn settings__btn--sm"
               onClick={handleApply}
               disabled={applying || rebuilding || loading || notAvailable || !hasPlan}
             >
               {rebuilding
-                ? 'Starting rebuild…'
+                ? 'Starting update…'
                 : applying
                   ? 'Applying…'
                   : rebuildUpdate
-                    ? 'Rebuild to update'
+                    ? 'Update now'
                     : 'Apply update'}
             </button>
           )}

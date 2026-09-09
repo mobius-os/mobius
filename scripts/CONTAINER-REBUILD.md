@@ -1,9 +1,14 @@
 # Container replacement controller
 
-Settings can replace an app container with the official image for the upstream
-revision already applied inside Möbius. The browser never chooses an image,
-path, Compose project, or Docker argument. Self-hosted installations use the
-host helper below; linked Railway deployments use the Möbius account service.
+Settings reviews one exact source revision before replacement. Railway also
+pins its official image digest; self-hosted installations apply the reviewed
+source before requesting the matching image from the host helper. The browser
+never chooses a path, Compose project, or Docker argument. Replacement repeats
+source and local-input checks immediately before dispatch.
+
+Image replacement does not apply proxy, topology, or installed host-controller
+changes. Reviews containing those independent requirements offer **Ask Möbius**
+instead. There is no unreviewed admin replacement action.
 
 ## Install
 
@@ -65,8 +70,7 @@ the refusal happens before chat admission is closed or an image is touched.
 A Railway deployment can serve a current `/data/platform` checkout while its
 baked image still predates the managed cutover supervisor. Settings reports
 that state as **Enable container updates** instead of leaving a dead disabled
-control. The action still derives the exact official image from the applied
-upstream revision; the browser cannot select an image or provider resource.
+control. The reviewed action pins the exact official image; the browser cannot select an image or provider resource.
 
 The account service verifies the current deployment and rollback point, issues
 a one-use upgrade handoff, and owns the Railway deployment. Möbius starts the

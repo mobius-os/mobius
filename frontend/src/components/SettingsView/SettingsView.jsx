@@ -46,6 +46,8 @@ import StatusDot from '../ui/StatusDot.jsx'
 import ModelSheet from '../ui/ModelSheet.jsx'
 import { modelEfforts, validEffort } from '../ui/modelEfforts.js'
 import ManageModelsModal from '../ChatView/ManageModelsModal.jsx'
+import UpdateRepairAction from './UpdateRepairAction.jsx'
+import { platformUpdateRepairReason } from '../../lib/platformUpdateRepair.js'
 import UpdateReviewModal from './UpdateReviewModal.jsx'
 import ProviderUsage from './ProviderUsage.jsx'
 import {
@@ -465,6 +467,8 @@ export default function SettingsView({
   const [platformPhase, setPlatformPhase] = useState('idle')
   const [platformProgress, setPlatformProgress] = useState(null)
   const [platformError, setPlatformError] = useState('')
+  const [platformErrorCode, setPlatformErrorCode] = useState('')
+  const clearPlatformError = useCallback(() => { setPlatformError(''); setPlatformErrorCode('') }, [])
   const [platformRestartSlow, setPlatformRestartSlow] = useState(false)
   // Whether the update-review sheet is open. The "Update" button routes through
   // it so the owner reviews the incoming changes before applying, rather than
@@ -1165,7 +1169,7 @@ export default function SettingsView({
     setRebuildRequesting(true)
     if (reviewedUpdate) setPlatformPhase('rebuilding')
     setRebuildError('')
-    if (reviewedUpdate) setPlatformError('')
+    if (reviewedUpdate) clearPlatformError()
     setRebuildStartedHere(false)
     rebuildInitiatedHereRef.current = false
     rebuildReconnectStartedRef.current = false
@@ -1177,6 +1181,10 @@ export default function SettingsView({
       try { body = await response.json() } catch {}
       if (!response.ok) {
         const detail = body?.detail
+        if (reviewedUpdate) {
+          setPlatformErrorCode(detail?.code || '')
+          await refreshPlatform({ preserveCurrentOnFailure: true })
+        }
         throw new Error(
           body?.error || detail?.message || detail
             || body?.message || `Replacement failed (${response.status})`,
@@ -1404,7 +1412,7 @@ export default function SettingsView({
       setPlatformError('The update plan is incomplete. Refresh the preview and try again.')
       return { ok: false }
     }
-    setPlatformError('')
+    clearPlatformError()
     setPlatformProgress(null)
     setPlatformPhase('applying')
     try {
@@ -1415,6 +1423,7 @@ export default function SettingsView({
         const detail = body?.detail || ''
         const detailCode = typeof detail === 'object' ? detail?.code : detail
         const detailMessage = typeof detail === 'object' ? detail?.message : detail
+        setPlatformErrorCode(detailCode || '')
         await refreshPlatform()
         setPlatformError(
           detailCode === 'update_plan_stale'
@@ -1456,7 +1465,7 @@ export default function SettingsView({
 
   async function resolvePlatformConflict() {
     if (platformPhase !== 'idle' || !onOpenChat) return
-    setPlatformError('')
+    clearPlatformError()
 
     if (platform?.conflict_chat_id) {
       onOpenChat(platform.conflict_chat_id)
@@ -1494,7 +1503,7 @@ export default function SettingsView({
       platformPhase !== 'idle'
       || !(platform?.available || platform?.newer_updates_available)
     ) return
-    setPlatformError('')
+    clearPlatformError()
     setReviewOpen(true)
   }
 
@@ -1583,7 +1592,7 @@ export default function SettingsView({
   // this IS the confirm — nothing restarts on its own.
   async function restartToFinish() {
     if (platformPhase === 'restarting') return
-    setPlatformError('')
+    clearPlatformError()
     setPlatformPhase('restarting')
     setPlatformRestartSlow(false)
     try {
@@ -1642,10 +1651,11 @@ export default function SettingsView({
   const platformActivationLevel = platform?.activation?.level || (
     platform?.needs_restart ? 'server_restart' : 'live'
   )
-  const platformRestart = platformActivationLevel === 'server_restart'
-  const platformExternalActivation = !['live', 'server_restart'].includes(
+  const platformRestart = ['server_restart', 'dependency_sync'].includes(platformActivationLevel)
+  const platformExternalActivation = !['live', 'server_restart', 'dependency_sync'].includes(
     platformActivationLevel,
   )
+  const updateHelp = platformUpdateRepairReason({ platform, rebuild: rebuildStatus, error: platformError, errorCode: platformErrorCode })
   const updateAvailable = !!platform?.available
   const mobiusUpdating =
     ['applying', 'rebuilding'].includes(platformPhase)
@@ -2144,12 +2154,12 @@ export default function SettingsView({
                 : 'Restart signal sent. The page will reload shortly.'}
             </div>
           )}
-          {platformExternalActivation && (
-            <div className="settings__notice settings__notice--stacked" role="status">
-              {(platform?.activation?.guidance || []).map((line) => (
-                <span key={line}>{line}</span>
-              ))}
-              <span>A server restart alone will not complete this update.</span>
+          {!reviewOpen && updateHelp && !platformConflict && (
+            <div className="settings__notice settings__notice--stacked">
+              <p>{updateHelp} Open a chat to check what’s needed, with the update details included.</p>
+              <UpdateRepairAction platform={platform} rebuild={rebuildStatus}
+                error={platformError} errorCode={platformErrorCode}
+                disabled={platformPhase !== 'idle' || rebuildIsActive(rebuildStatus)} />
             </div>
           )}
           {platformConflict && platform?.newer_updates_available && (
@@ -2174,6 +2184,8 @@ export default function SettingsView({
             rebuilding={platformPhase === 'rebuilding'}
             resolving={platformPhase === 'resolving'}
             applyError={platformError}
+            applyErrorCode={platformErrorCode}
+            onClearError={clearPlatformError}
             applyProgress={platformProgress}
           />
         )}
@@ -2190,9 +2202,8 @@ export default function SettingsView({
               ))}
               onDismiss={() => setServerInfo(null)}
             >
-              Restarts Möbius inside the current container. This reloads server
-              changes and briefly interrupts active responses, but does not
-              install a newer container image.
+              Briefly pauses active responses and reloads Möbius.
+              This does not install an update.
             </SettingsInfoLabel>
             {restartConfirm ? (
               <div className="settings__confirm">
@@ -2220,7 +2231,7 @@ export default function SettingsView({
                 onClick={() => { setRestartError(''); setRestartConfirm(true) }}
                 disabled={rebuildIsActive(rebuildStatus)}
               >
-                Restart
+                Restart server
               </button>
             )}
           </div>

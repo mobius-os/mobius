@@ -112,8 +112,8 @@ test('an image-required apply projects the external activation contract', () => 
   assert.equal(projected.available, false)
   assert.equal(projected.needs_restart, false)
   assert.equal(projected.activation, activation)
-  assert.equal(platformActivationLabel(projected.activation), 'Image rebuild')
-  assert.equal(platformUpdateStatusLabel(projected), 'Image rebuild required')
+  assert.equal(platformActivationLabel(projected.activation), 'Update and restart')
+  assert.equal(platformUpdateStatusLabel(projected), 'Ready to finish update')
 })
 
 test('a dependency apply projects an in-place restart, not a rebuild', () => {
@@ -137,7 +137,7 @@ test('a dependency apply projects an in-place restart, not a rebuild', () => {
   assert.equal(projected.needs_restart, true)
   assert.equal(projected.activation, activation)
   assert.equal(
-    platformActivationLabel(projected.activation), 'Dependency update',
+    platformActivationLabel(projected.activation), 'Restart to finish',
   )
   assert.equal(platformUpdateStatusLabel(projected), 'Ready to restart')
 })
@@ -219,7 +219,7 @@ test('update-row copy represents restart and availability independently', () => 
       activation: { level: 'proxy_reload' },
       available: false,
     }),
-    'Proxy reload required',
+    'Update needs attention',
   )
 })
 
@@ -252,3 +252,15 @@ test('a legacy deployment flag does not hide an available in-app update', () => 
     'New update available',
   )
 })
+
+for (const deployment of ['railway', 'self_hosted']) {
+  test(`${deployment} mixed external requirements never become an image-only action`, () => {
+    for (const external of ['proxy_reload', 'container_recreate', 'host_maintenance']) {
+      const activation = { level: 'image_rebuild', deployment, required_actions: ['image_rebuild', external] }
+      assert.equal(reviewedUpdateUsesContainerRebuild({ activation }), false)
+    }
+    assert.equal(reviewedUpdateUsesContainerRebuild({ activation: {
+      level: 'image_rebuild', deployment, required_actions: ['image_rebuild'],
+    } }), true)
+  })
+}
