@@ -1367,8 +1367,7 @@ def claim_inline_delegation_observation(
     if isinstance(ids, list) and row.id in ids:
       if (
         status == "completed"
-        and envelope.get("delivery_contract")
-        != ACTIVITY_DELIVERY_FINALIZE_ATOMIC
+        and envelope.get("delivery_contract") is None
       ):
         # Compatibility: older runs acknowledged outside Finalize and could
         # leave this latch open after their run status committed. Atomic
@@ -1812,8 +1811,7 @@ def repair_completed_activity_deliveries(
     )
     if (
       not isinstance(raw_ids, list)
-      or envelope.get("delivery_contract")
-        == ACTIVITY_DELIVERY_FINALIZE_ATOMIC
+      or envelope.get("delivery_contract") is not None
     ):
       continue
     repaired.update(

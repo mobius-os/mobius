@@ -1680,7 +1680,10 @@ def test_pre_atomic_completed_delivery_repair_remains_supported(db):
   assert db.get(models.Delegation, delegation_id).parent_woken_at is not None
 
 
-def test_atomic_completed_envelope_alone_never_repairs_activity_delivery(db):
+@pytest.mark.parametrize("contract", [
+  delegations_mod.ACTIVITY_DELIVERY_FINALIZE_ATOMIC, "unknown-contract",
+])
+def test_atomic_completed_envelope_alone_never_repairs_activity_delivery(db, contract):
   """New run status is not a substitute for the atomic Finalize commit."""
   parent_id, _child_id, delegation_id = _seed_delegation(
     db,
@@ -1696,7 +1699,7 @@ def test_atomic_completed_envelope_alone_never_repairs_activity_delivery(db):
     provider_execution_admitted=True,
     activity_delivery_json={
       "delegation_ids": [delegation_id],
-      "delivery_contract": delegations_mod.ACTIVITY_DELIVERY_FINALIZE_ATOMIC,
+      "delivery_contract": contract,
     },
     started_at=now_naive_utc(),
     ended_at=now_naive_utc(),

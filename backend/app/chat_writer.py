@@ -1997,7 +1997,7 @@ class ChatWriterActor:
       self._stage_thinking_stashes(db, thinking_stashes)
     terminal_snapshot = copy.deepcopy(snapshot)
     if not isinstance(terminal_snapshot, dict):
-      return _WriteOutcome.NOOP
+      raise _PersistFailed("Finalize did not persist (invalid snapshot)")
     # Current sinks stamp the exact assistant-segment identity. Setup-time
     # failures can finalize before a sink exists, so fall back to the physical
     # run identity there. Never rebuild a terminal message from blocks: doing
