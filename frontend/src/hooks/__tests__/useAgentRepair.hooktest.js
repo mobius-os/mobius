@@ -129,3 +129,36 @@ test('one repair runs at a time; a bfcache restore drops it and re-reads the led
   assert.equal(result.current.repairActive, false)
   assert.deepEqual(browser.assigned, [], 'an aborted repair navigates nowhere')
 })
+
+test('a client startup failure is visible even before a request is recorded', async t => {
+  installBrowser(t)
+  const { result } = renderHook(useAgentRepair, {
+    surfaceKey: SURFACE, prompt: 'help',
+    repairTransport: () => { throw new Error('client load failed') },
+  })
+  await result.current.repair()
+  assert.equal(result.current.repairActive, false)
+  assert.match(result.current.error, /Couldn’t open the chat/)
+})
+
+test('a restored page cannot navigate from a response that settled just before cancellation', async t => {
+  const browser = installBrowser(t)
+  let finishSend
+  browser.stubChats({
+    create: async () => ({ ok: true, json: async () => ({ id: 'chat-one' }) }),
+    send: () => new Promise(resolve => { finishSend = resolve }),
+  })
+  const { result } = renderHook(useAgentRepair, {
+    surfaceKey: SURFACE, prompt: 'help',
+    repairTransport: () => ({ client: browser.client, base: '' }),
+  })
+  const running = result.current.repair()
+  // Settle the already-started asynchronous create without depending on timing.
+  for (let i = 0; i < 8 && !finishSend; i += 1) await Promise.resolve()
+  assert.equal(typeof finishSend, 'function')
+  finishSend({ ok: true })
+  browser.listeners.get('pageshow')({ persisted: true })
+  await running
+  assert.deepEqual(browser.assigned, [])
+  assert.equal(result.current.repairActive, false)
+})

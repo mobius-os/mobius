@@ -35,6 +35,7 @@ export default function useAgentRepair({
   const [live, setLive] = useState(null)
   const attempt = live?.fingerprint === fingerprint ? live.attempt : stored
   const [repairActive, setRepairActive] = useState(false)
+  const [startupError, setStartupError] = useState(null)
   const controllerRef = useRef(null)
 
   const cancel = useCallback(() => {
@@ -64,6 +65,7 @@ export default function useAgentRepair({
     const controller = new AbortController()
     controllerRef.current = controller
     setRepairActive(true)
+    setStartupError(null)
     try {
       let client
       let base
@@ -81,13 +83,19 @@ export default function useAgentRepair({
         fingerprint,
         previousAttempt: attempt,
         signal: controller.signal,
-        onAttempt: next => setLive({ fingerprint, attempt: next }),
+        onAttempt: next => {
+          if (controllerRef.current === controller) setLive({ fingerprint, attempt: next })
+        },
         prompt,
       })
-      window.location.assign(result.path)
-    } catch {
-      // runAgentRepair already persisted a failed attempt for the panel to
-      // show; an abort has nothing to show.
+      if (controllerRef.current === controller && !controller.signal.aborted) {
+        window.location.assign(result.path)
+      }
+    } catch (error) {
+      // Loading the client can fail before the shared runner records an attempt.
+      if (controllerRef.current === controller && !controller.signal.aborted && error?.name !== 'AbortError') {
+        setStartupError({ fingerprint, message: 'Couldn’t open the chat. Try again.' })
+      }
     } finally {
       if (controllerRef.current === controller) {
         controllerRef.current = null
@@ -100,5 +108,5 @@ export default function useAgentRepair({
     if (fingerprint) writeRefreshedRecoveryAttempt({ surfaceKey, fingerprint })
   }, [fingerprint, surfaceKey])
 
-  return { attempt, repairActive, repair, markRefreshed }
+  return { attempt, repairActive, repair, markRefreshed, error: startupError?.fingerprint === fingerprint ? startupError.message : '' }
 }
