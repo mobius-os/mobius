@@ -1,11 +1,11 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { renderHook } from '../../ChatView/hooks/__tests__/react-hook-shim.mjs'
+import { renderHook } from '../../components/ChatView/hooks/__tests__/react-hook-shim.mjs'
 import {
   errorRecoveryFingerprint,
   writeErrorRecoveryAttempt,
-} from '../../../lib/errorRecovery.js'
-import useAgentRepair from '../../../hooks/useAgentRepair.js'
+} from '../../lib/errorRecovery.js'
+import useAgentRepair from '../useAgentRepair.js'
 
 function memoryStorage() {
   const values = new Map()
