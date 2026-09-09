@@ -21,7 +21,7 @@ from sqlalchemy import (
   Index, LargeBinary, String, Text, UniqueConstraint, event, false, or_, true,
 )
 
-from sqlalchemy.orm import column_property, validates
+from sqlalchemy.orm import column_property, relationship, validates
 
 from app.database import Base
 from app.shell_install_pass import ShellInstallPassGrant
@@ -161,6 +161,17 @@ class SavedSecureInput(Base):
   created_at = Column(DateTime, nullable=False, default=now_naive_utc)
 
 
+class ChatLiveAssistant(Base):
+  """One bounded live snapshot, physically separate from historical chat bytes."""
+
+  __tablename__ = "chat_live_assistants"
+
+  chat_id = Column(
+    String(64), ForeignKey("chats.id", ondelete="CASCADE"), primary_key=True,
+  )
+  snapshot = Column(JSON, nullable=True)
+
+
 class Chat(Base):
   """A chat conversation with the agent."""
 
@@ -181,10 +192,26 @@ class Chat(Base):
   has_messages = Column(
     Boolean, nullable=False, default=False, server_default=false()
   )
-  # Current in-flight assistant state is separate from immutable history so a
-  # streaming update never rewrites every prior message. Finalize and startup
-  # recovery merge this bounded value into `messages`.
-  live_assistant = Column(JSON, nullable=True, default=None)
+  # A separate COLUMN still rewrites SQLite's entire overflow row on every
+  # update. Keep streaming bytes in a separate ROW so saving a small snapshot
+  # has constant cost as history grows. The writer still owns both atomically.
+  live_snapshot = relationship(
+    "ChatLiveAssistant", uselist=False, cascade="all, delete-orphan",
+  )
+
+  @property
+  def live_assistant(self):
+    return self.live_snapshot.snapshot if self.live_snapshot is not None else None
+
+  @live_assistant.setter
+  def live_assistant(self, value):
+    if value is None:
+      self.live_snapshot = None
+    elif self.live_snapshot is None:
+      self.live_snapshot = ChatLiveAssistant(snapshot=value)
+    else:
+      self.live_snapshot.snapshot = value
+
   # The one assistant transcript row allowed to own regenerable browser state.
   # Unlike `live_assistant`, this identity deliberately survives QuestionCommit:
   # a parked unanswered card is durable history but can still be preceded by a

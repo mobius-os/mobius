@@ -63,7 +63,7 @@ from pydantic import BaseModel, Field
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 from sqlalchemy import Text, cast, or_
-from sqlalchemy.orm import Session, load_only
+from sqlalchemy.orm import Session, load_only, selectinload
 
 from app import (
   app_git,
@@ -2566,11 +2566,12 @@ def _source_chat_metadata(app_id: int, source_root: str) -> list[dict]:
     # without edit previews; streaming bounds Python's transcript working set.
     # Full sidecars remain authoritative even when a preview omitted a path.
     candidates = db.query(models.Chat).options(load_only(
-      models.Chat.id, models.Chat.messages, models.Chat.live_assistant,
-    )).filter(
+      models.Chat.id, models.Chat.messages,
+    ), selectinload(models.Chat.live_snapshot)).filter(
       models.Chat.deleted_at.is_(None),
       or_(cast(models.Chat.messages, Text).contains('"edit_preview"'),
-          cast(models.Chat.live_assistant, Text).contains('"edit_preview"')),
+          models.Chat.live_snapshot.has(
+            cast(models.ChatLiveAssistant.snapshot, Text).contains('"edit_preview"'))),
     ).yield_per(20)
     for chat in candidates:
       for entry in _recorded_chat_edits_from_chat(db, chat):

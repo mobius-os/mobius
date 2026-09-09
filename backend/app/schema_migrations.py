@@ -3591,6 +3591,43 @@ def _link_app_project_runtime(eng):
       ), {"id": project_id, "template": json.dumps(template), "artifacts": json.dumps(remaining)})
 
 
+def _separate_chat_live_assistants(eng):
+  """Move live bytes off SQLite's historical overflow row without losing a turn."""
+  from sqlalchemy import inspect as sa_inspect, text
+
+  inspector = sa_inspect(eng)
+  if "chats" not in inspector.get_table_names():
+    return
+  with eng.begin() as conn:
+    conn.execute(text(
+      "CREATE TABLE IF NOT EXISTS chat_live_assistants ("
+      "chat_id VARCHAR(64) PRIMARY KEY REFERENCES chats(id) ON DELETE CASCADE, "
+      "snapshot JSON NULL)"
+    ))
+    if "live_assistant" not in {
+      column["name"] for column in inspector.get_columns("chats")
+    }:
+      return
+    # Old workers are drained before migration. Copy with SQL, not Python, so
+    # upgrade memory does not scale with chat history or all live snapshots.
+    # A retry after a completed migration sees no old column and does nothing.
+    conflicts = conn.execute(text(
+      "SELECT c.id FROM chats c JOIN chat_live_assistants s ON s.chat_id = c.id "
+      "WHERE c.live_assistant IS NOT NULL AND "
+      "(s.snapshot IS NULL OR CAST(s.snapshot AS TEXT) <> CAST(c.live_assistant AS TEXT)) "
+      "LIMIT 1"
+    )).first()
+    if conflicts is not None:
+      raise RuntimeError("Conflicting live snapshot during chat migration; both copies preserved")
+    conn.execute(text(
+      "INSERT INTO chat_live_assistants (chat_id, snapshot) "
+      "SELECT id, live_assistant FROM chats "
+      "WHERE live_assistant IS NOT NULL "
+      "AND NOT EXISTS (SELECT 1 FROM chat_live_assistants s WHERE s.chat_id = chats.id)"
+    ))
+    conn.execute(text("ALTER TABLE chats DROP COLUMN live_assistant"))
+
+
 _SCHEMA_MIGRATIONS = (
   # Full IDs are permanent identities, not sequence positions. Append new
   # work in execution order; never renumber a shipped ID to reconcile sources.
@@ -3638,6 +3675,7 @@ _SCHEMA_MIGRATIONS = (
   ("0042_linked_app_project_runtime", _link_app_project_runtime),
   ("0043_agent_coordination_delivery", _add_agent_coordination_delivery),
   ("0044_peer_context_delivery_cursor", _add_peer_context_delivery_cursor),
+  ("0045_chat_live_assistants", _separate_chat_live_assistants),
 )
 
 

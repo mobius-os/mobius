@@ -147,5 +147,16 @@ def test_discovery_does_not_hydrate_unrelated_chat_payloads(client, db, setup):
   finally:
     event.remove(engine, "before_cursor_execute", capture)
   assert len(selected) == 1
-  assert "LIKE" in selected[0] and "chats.live_assistant" in selected[0]
+  assert "LIKE" in selected[0] and "chat_live_assistants.snapshot" in selected[0]
   assert "chats.pending_messages" not in selected[0]
+
+
+def test_discovery_includes_live_edit_without_historical_preview(client, db, setup):
+  from app.chat_writer import update_live_assistant
+  row = chat(db, "live-only")
+  assert update_live_assistant(db, row.id, {
+    "id": "live-edit", "role": "assistant", "ts": 1770000000000,
+    "blocks": [{"type": "tool", "tool_use_id": "live-tool",
+                "edit_preview": {"diff": patch("/data/apps/garden/live.js")}}],
+  })
+  assert [c["chat_id"] for c in read(client, setup()).json()["chats"]] == ["live-only"]

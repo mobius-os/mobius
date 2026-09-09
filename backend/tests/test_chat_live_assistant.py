@@ -304,3 +304,120 @@ def test_codex_path_wrappers_are_normalized_before_json_storage(db):
   db.refresh(chat)
   assert outcome.value == "applied"
   assert chat.messages[-1]["blocks"][0]["cwd"] == "/data"
+
+
+def test_repeated_snapshots_never_update_the_historical_chat_row(db):
+  from sqlalchemy import event
+
+  chat, history = _chat(db)
+  chat.active_assistant_message_id = 'assistant-live'
+  chat.live_assistant = {
+    'id': 'assistant-live', 'role': 'assistant', 'blocks': [], 'ts': 4,
+  }
+  db.commit()
+  statements = []
+  def record(_conn, _cursor, statement, _parameters, _context, _many):
+    statements.append(statement.lower())
+  engine = db.get_bind()
+  chat_id = chat.id
+  event.listen(engine, 'before_cursor_execute', record)
+  try:
+    for content in ('one', 'two', 'three'):
+      assert update_live_assistant(db, chat_id, {
+        'id': 'assistant-live', 'role': 'assistant',
+        'blocks': [{'type': 'text', 'content': content}],
+      })
+  finally:
+    event.remove(engine, 'before_cursor_execute', record)
+  assert any('update chat_live_assistants' in sql for sql in statements)
+  assert not any('update chats ' in sql for sql in statements)
+  assert not any('chats.messages' in sql for sql in statements)
+  db.refresh(chat)
+  assert chat.messages == history
+  assert chat.live_assistant['blocks'][0]['content'] == 'three'
+
+
+def test_live_snapshot_wal_bytes_do_not_scale_with_history(tmp_path):
+  from sqlalchemy import create_engine, text
+  from sqlalchemy.orm import Session
+
+  engine = create_engine(f'sqlite:///{tmp_path / "live-wal.db"}')
+  models.Base.metadata.create_all(engine)
+  with engine.connect() as connection:
+    connection.execute(text('PRAGMA journal_mode=WAL'))
+    connection.execute(text('PRAGMA wal_autocheckpoint=0'))
+    with Session(bind=connection) as session:
+      chat = models.Chat(
+        id='large-history', messages=[{'role': 'user', 'content': 'x' * 2_000_000}],
+        active_assistant_message_id='live',
+        live_assistant={'id': 'live', 'role': 'assistant', 'blocks': [], 'ts': 2},
+      )
+      session.add(chat)
+      session.commit()
+      connection.commit()
+      connection.execute(text('PRAGMA wal_checkpoint(TRUNCATE)'))
+      connection.commit()
+      for size in (1000, 2000, 4000):
+        assert update_live_assistant(session, 'large-history', {
+          'id': 'live', 'role': 'assistant',
+          'blocks': [{'type': 'text', 'content': 'y' * size}],
+        })
+        connection.commit()
+      wal_bytes = (tmp_path / 'live-wal.db-wal').stat().st_size
+      assert 0 < wal_bytes < 100_000, wal_bytes
+  engine.dispose()
+
+
+def test_live_snapshot_is_deleted_with_chat(db):
+  chat, _ = _chat(db)
+  assert db.get(models.ChatLiveAssistant, chat.id) is not None
+  chat_id = chat.id
+  db.delete(chat)
+  db.commit()
+  assert db.get(models.ChatLiveAssistant, chat_id) is None
+
+
+def test_retention_reclaims_live_row_only_after_chat_recovery_window(db):
+  from datetime import datetime, timedelta
+  from app.chat_retention import purge_expired_chat_tombstones
+
+  chat, _ = _chat(db)
+  chat_id = chat.id
+  chat.deleted_at = datetime.now() - timedelta(days=6)
+  db.commit()
+  purge_expired_chat_tombstones(db)
+  assert db.get(models.ChatLiveAssistant, chat_id) is not None
+  chat.deleted_at = datetime.now() - timedelta(days=8)
+  db.commit()
+  purge_expired_chat_tombstones(db)
+  db.expire_all()
+  assert db.get(models.ChatLiveAssistant, chat_id) is None
+
+
+def test_deleted_chat_between_snapshot_read_and_write_cannot_leave_orphan(db):
+  from sqlalchemy import event, text
+
+  chat, _ = _chat(db)
+  chat_id = chat.id
+  # Simulate the external lifecycle winner at the last boundary before the
+  # snapshot write. This intentionally exercises SQLite with FK checks off.
+  engine = db.get_bind()
+  deleted = False
+  def remove_chat(connection, _cursor, statement, _parameters, _context, _many):
+    nonlocal deleted
+    if statement.lower().startswith('update chat_live_assistants') and not deleted:
+      deleted = True
+      connection.execute(text('DELETE FROM chat_live_assistants WHERE chat_id=:id'), {'id': chat_id})
+      connection.execute(text('DELETE FROM chats WHERE id=:id'), {'id': chat_id})
+  event.listen(engine, 'before_cursor_execute', remove_chat)
+  try:
+    assert update_live_assistant(db, chat_id, {
+      'id': 'live', 'role': 'assistant', 'blocks': [], 'ts': 2,
+    }, require_row=True) is None
+  finally:
+    event.remove(engine, 'before_cursor_execute', remove_chat)
+  assert deleted
+  # The failed must-persist path rolls back the complete transaction.
+  db.expire_all()
+  assert db.get(models.Chat, chat_id) is not None
+  assert db.get(models.ChatLiveAssistant, chat_id).snapshot['blocks'] == []

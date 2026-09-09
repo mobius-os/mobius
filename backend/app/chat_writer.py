@@ -2286,7 +2286,7 @@ class ChatWriterActor:
     self, db, cmd: "ReconcileStartupChat",
   ) -> bool:
     """Commit one boot recovery plan without bypassing transcript ownership."""
-    from app.models import Chat, ChatRun
+    from app.models import Chat, ChatRun, ChatLiveAssistant
 
     if not cmd.chat_id or cmd.recovered_at is None:
       return False
@@ -2299,7 +2299,6 @@ class ChatWriterActor:
       .values(
         messages=cmd.messages,
         has_messages=bool(cmd.messages),
-        live_assistant=None,
         # Startup repair owns the durable transcript after a process loss.
         # Rebuild the protocol barrier from that repaired source instead of
         # preserving a marker that Finalize may have cleared just before the
@@ -2311,6 +2310,7 @@ class ChatWriterActor:
     if chat_update.rowcount != 1:
       db.rollback()
       return False
+    db.query(ChatLiveAssistant).filter_by(chat_id=cmd.chat_id).delete()
     interrupted_ids = tuple(
       run_id for run_id in cmd.running_run_ids
       if run_id != cmd.restart_run_id
@@ -4923,17 +4923,19 @@ def update_live_assistant(
   """Persist the current assistant snapshot without rewriting history."""
   if not chat_id:
     return True
-  from app.models import Chat
+  from app.models import Chat, ChatLiveAssistant
 
   row = db.execute(
-    select(Chat.live_assistant, Chat.active_assistant_message_id).where(
-      Chat.id == chat_id,
-      Chat.deleted_at.is_(None),
-    )
+    select(ChatLiveAssistant, Chat.active_assistant_message_id)
+    .select_from(Chat)
+    .outerjoin(ChatLiveAssistant, ChatLiveAssistant.chat_id == Chat.id)
+    .where(Chat.id == chat_id, Chat.deleted_at.is_(None))
   ).first()
   if row is None:
     return None if require_row else True
-  existing = row[0] if isinstance(row[0], dict) else None
+  live_row = row[0]
+  existing = live_row.snapshot if live_row is not None else None
+  existing = existing if isinstance(existing, dict) else None
   existing_owner_id = row[1] if isinstance(row[1], str) else None
   snapshot = json_safe(copy.deepcopy(message))
   if not isinstance(snapshot, dict):
@@ -4986,19 +4988,36 @@ def update_live_assistant(
     snapshot["ts"] = next_message_ts(
       list(state[0] or []) + list(state[1] or [])
     )
-  db.execute(
-    update(Chat)
-    .where(Chat.id == chat_id, Chat.deleted_at.is_(None))
-    # The stream is authoritative while this value changes. Bypass
-    # updated_at's onupdate default so retained history remains reusable.
-    .values(
-      live_assistant=snapshot,
-      active_assistant_message_id=(
-        _assistant_message_id(snapshot) or existing_owner_id
-      ),
-      updated_at=Chat.updated_at,
+  # Keep the active-chat predicate on the WRITE too: retention can delete a
+  # chat after the read, and SQLite installs do not rely on FK enforcement.
+  from sqlalchemy import JSON, bindparam, insert
+  active_chat = select(Chat.id).where(Chat.id == chat_id, Chat.deleted_at.is_(None))
+  if live_row is None:
+    result = db.execute(
+      insert(ChatLiveAssistant).from_select(
+        ["chat_id", "snapshot"],
+        select(Chat.id, bindparam("snapshot", snapshot, type_=JSON))
+        .where(Chat.id == chat_id, Chat.deleted_at.is_(None)),
+      )
     )
-  )
+  else:
+    result = db.execute(
+      update(ChatLiveAssistant)
+      .where(ChatLiveAssistant.chat_id == chat_id, active_chat.exists())
+      .values(snapshot=snapshot)
+    )
+  if result.rowcount != 1:
+    db.rollback()
+    return None if require_row else True
+  owner_id = _assistant_message_id(snapshot) or existing_owner_id
+  if owner_id != existing_owner_id:
+    # Identity changes are turn boundaries, not per-token writes. Never touch
+    # the large history row merely to reaffirm the already-current owner.
+    db.execute(
+      update(Chat)
+      .where(Chat.id == chat_id, Chat.deleted_at.is_(None))
+      .values(active_assistant_message_id=owner_id, updated_at=Chat.updated_at)
+    )
   return _commit_or_rollback(db)
 
 
@@ -5058,7 +5077,6 @@ def apply_answers_to_last_question(
         continue
       block["answers"] = answers
       chat.live_assistant = live
-      flag_modified(chat, "live_assistant")
       return True
     return False
 

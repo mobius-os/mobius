@@ -1147,7 +1147,8 @@ def test_run_migrations_adds_bounded_live_assistant_snapshot(tmp_path):
   run_migrations(eng)
 
   cols = {c["name"] for c in inspect(eng).get_columns("chats")}
-  assert "live_assistant" in cols
+  assert "live_assistant" not in cols
+  assert "chat_live_assistants" in inspect(eng).get_table_names()
 
 
 def test_fresh_chat_schema_has_database_auto_resume_default():
@@ -1477,6 +1478,7 @@ def test_run_migrations_records_an_inspectable_append_only_history(tmp_path):
     "0042_linked_app_project_runtime",
     "0043_agent_coordination_delivery",
     "0044_peer_context_delivery_cursor",
+    "0045_chat_live_assistants",
   ]
   assert second == first
 
