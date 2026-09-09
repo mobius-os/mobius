@@ -33,12 +33,15 @@ def seed_ledger(path, rows):
 
 
 @pytest.mark.parametrize('before_incident', [True, False])
+@pytest.mark.parametrize('append_future', [False, True])
 def test_exact_deployed_ledger_normalizes_without_replaying_any_completed_body(
-  tmp_path, monkeypatch, before_incident,
+  tmp_path, monkeypatch, before_incident, append_future,
 ):
   path = tmp_path / 'ledger.db'
   original = deployed_rows(before_incident)
   seed_ledger(path, original)
+  historical = set(json.loads(FIXTURE.read_text())['canonical_completed_before_incident'])
+  completed = historical | set(dict(original))
   with sqlite3.connect(path) as conn:
     expected = cutover.pending_completions(conn)
     assert len(expected) == (20 if before_incident else 8)
@@ -46,24 +49,29 @@ def test_exact_deployed_ledger_normalizes_without_replaying_any_completed_body(
     assert cutover.normalize_ledger(conn) == []
     normalized = dict(conn.execute('SELECT version,applied_at FROM schema_migrations'))
   assert normalized == dict(original + expected)
+  assert set(normalized) == completed
 
+  # Historical completion is fixed evidence. The pending suffix is allowed
+  # to grow, and follows registry order rather than numeric or lexical order.
+  versions = [version for version, _ in migrations._SCHEMA_MIGRATIONS]
+  assert historical <= set(versions)
+  if append_future:
+    versions += ['future_z', 'future_a']
+  pending = [version for version in versions if version not in completed]
   calls = []
-  pending = {'0043_agent_coordination_delivery'}
-  if before_incident:
-    pending.add('0042_linked_app_project_runtime')
 
   def body(version):
     def invoke(eng):
-      assert version in pending, f'Replayed completed migration {version}'
+      assert version not in completed, f'Replayed completed migration {version}'
       calls.append(version)
     return invoke
 
   monkeypatch.setattr(migrations, '_SCHEMA_MIGRATIONS', tuple(
-    (version, body(version)) for version, _ in migrations._SCHEMA_MIGRATIONS
+    (version, body(version)) for version in versions
   ))
   eng = create_engine(f'sqlite:///{path}')
   migrations.run_migrations(eng)
-  assert calls == sorted(pending)
+  assert calls == pending
   calls.clear()
   migrations.run_migrations(eng)
   assert calls == []

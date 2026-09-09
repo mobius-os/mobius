@@ -1,12 +1,8 @@
 # Migration identity cutover — 2026-09-08
 
-## Contract
-
-The full published ID identifies completed work; tuple order determines execution.
-Never rename a shipped ID to reconcile source history or numeric prefixes. Append
-new behavior under a new unique ID. Bodies remain retry-safe because body commits
-and ledger inserts are separate; the runner promises not to replay **recorded**
-completion, not crash-proof exactly-once effects. One startup runner owns execution.
+This is a dated recovery procedure, not the ongoing migration policy. See
+[Permanent migration contract](MIGRATIONS.md) for new development and tests.
+The converter is intentionally frozen; do not add future history translations.
 
 `124d46f08f` renumbered published local work. `35ef5a4197` temporarily recognized
 its historical IDs. The finite translation now belongs to an explicit cutover,
@@ -39,16 +35,16 @@ currently healthy alias-aware revision running until this cutover is approved.
    completion rows with the historical timestamp, in one transaction. Original
    rows, canonical timestamps, unknown ledger entries, and application data
    are retained. A second normalization must add nothing.
-4. Compare the complete application-table contents and schema before/after;
-   only the expected ledger additions are allowed for this cutover. With every
-   migration body replaced by a failing sentinel, run startup's create_all,
-   run_migrations, and mapped_schema_gaps checks. For the recovered production
-   ledger at 0042, only the subsequently added 0043 delivery migration may run;
-   every recorded body must remain a failing sentinel and no schema gaps may
-   remain. Separate its expected new column/default from normalization-only
-   comparisons, which must leave all application data and schema unchanged. Run the real
-   runner twice as well; require no additional ledger entries or FK violations.
-   For the pre-incident fixture, only genuinely new 0042 and 0043 are allowed once.
+4. Compare application contents and schema before/after normalization; only
+   the expected completion rows may change. Then inspect the target registry's
+   pending migrations against the normalized ledger. Replace completed bodies
+   with failing sentinels; require pending bodies to run once in registry order
+   and a second pass to do nothing. Run the real clone upgrade and schema-gap
+   checks, allowing only the changes owned by those pending migrations.
+
+   At the original cutover revision, the recovered snapshot needed only 0043;
+   the pre-incident snapshot also needed 0042. Those are historical results,
+   not an allowlist to extend each time a future migration is appended.
 5. Obtain explicit owner approval to normalize the live ledger. Refresh and
    validate the backup if deployment has been delayed; verify the live ledger
    still matches the reviewed additions. Run the same `--apply` command against
@@ -95,8 +91,10 @@ old-base append-only check passes. Run Contribute's **Run GitHub checks** before
   timestamp rather than generated from the current registry.
 - Normalization is additive, timestamp-preserving, repeatable, and rolls back
   fully on failure; the CLI is read-only by default.
-- Every recorded body is a failing sentinel; only new 0042/0043 may run on the older
-  fixture, once (the recovered fixture permits only 0043). Retain fresh/previous-release database upgrade coverage.
+- Fixed canonical completion identities are independent of the converter.
+  Every completed body is a failing sentinel; any pending suffix runs once in
+  registry order, including synthetic future appends in non-lexical order.
+  Retain fresh/previous-release database upgrade coverage.
 - Scoped cleanup succeeds alongside unrelated debt; new debt fails even at equal
   total counts; unchanged owned debt still fails. Failed cleanup rolls back.
 - Duplicate full IDs fail; equal or non-increasing numeric prefixes do not force
