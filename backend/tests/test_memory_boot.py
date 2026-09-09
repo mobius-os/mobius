@@ -162,6 +162,9 @@ def test_waiting_predecessor_migrates_but_owner_edits_remain(
 def test_controlled_skills_have_fix_forward_migrations():
   module = _load("init_skills")
 
+  assert module._UNMODIFIED_MIGRATIONS["agent-coaching.md"] == {
+    "1730bcf614f0689f2c6459396c342f4090c1374eeb62450e21a81463fe0098bd",
+  }
   assert module._UNMODIFIED_MIGRATIONS["platform-maintenance.md"] == {
     "bcc617354747c49ddad7fa1f419cf921fd7280909358096323cdbc427ad063c3",
     "b591d15e335c72c0acf394ca7ce4b0daa633e124a487df7a713847cafc13ab6d",

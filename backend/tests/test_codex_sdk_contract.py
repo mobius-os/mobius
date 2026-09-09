@@ -180,9 +180,26 @@ def test_subagent_activity_is_natively_modeled_and_fallback_removed():
   )
   assert "subAgentActivity" in schema
 
-  # The runner imports the native item and hands it to dispatch as a non-None
-  # entry (defensive block, so a predates-it SDK still boots).
-  assert codex_sdk_runner._sdk_imports()["SubAgentActivityThreadItem"] is not None
+  # The runner imports the native item and admits only the completion value
+  # emitted by the matching app-server but omitted from the generated enum.
+  sdk = codex_sdk_runner._sdk_imports()
+  assert sdk["SubAgentActivityThreadItem"] is not None
+  completed = v2_all.SubAgentActivityThreadItem.model_validate({
+    "type": "subAgentActivity",
+    "id": "activity-1",
+    "kind": "completed",
+    "agentThreadId": "thread-1",
+    "agentPath": "/root/reviewer",
+  })
+  assert completed.kind.value == "completed"
+  with pytest.raises(ValueError):
+    v2_all.SubAgentActivityThreadItem.model_validate({
+      "type": "subAgentActivity",
+      "id": "activity-2",
+      "kind": "unknown-future-kind",
+      "agentThreadId": "thread-2",
+      "agentPath": "/root/reviewer",
+    })
 
   # The item is classified explicitly at the dispatch sites, not dropped by
   # fall-through.

@@ -61,6 +61,11 @@ RETIRED_SKILLS = DATA_DIR / "shared" / "retired-skills"
 # touched. A set preserves every known unmodified predecessor when one skill
 # needs more than one fix-forward migration over its lifetime.
 _UNMODIFIED_MIGRATIONS = {
+  "agent-coaching.md": {
+    # First shared coaching seed, before Codex gained an exact thread-fork API
+    # and transcript reseeding was removed from the coaching contract.
+    "1730bcf614f0689f2c6459396c342f4090c1374eeb62450e21a81463fe0098bd",
+  },
   "platform-maintenance.md": {
     # Baked copies before the container-boundary guidance. Both hashes are
     # released, untouched generations; owner-edited copies remain protected.

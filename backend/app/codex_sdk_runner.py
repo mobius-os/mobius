@@ -1080,11 +1080,13 @@ def _sdk_imports() -> dict[str, Any]:
   try:
     from openai_codex.generated.v2_all import (
       CollabAgentToolCallThreadItem,
+      SubAgentActivityKind,
       SubAgentActivityThreadItem,
       ThreadStartedNotification,
     )
   except ImportError:
     CollabAgentToolCallThreadItem = None
+    SubAgentActivityKind = None
     SubAgentActivityThreadItem = None
     ThreadStartedNotification = None
   try:
@@ -1100,6 +1102,11 @@ def _sdk_imports() -> dict[str, Any]:
     # guards on non-None before its isinstance check, so absence just falls
     # back to error-text limit detection.
     AccountRateLimitsUpdatedNotification = None
+
+  if SubAgentActivityKind is not None:
+    _enable_completed_subagent_activity(
+      activity_kind_type=SubAgentActivityKind,
+    )
 
   return {
     "CollabAgentToolCallThreadItem": CollabAgentToolCallThreadItem,
@@ -1156,6 +1163,29 @@ def _sdk_imports() -> dict[str, Any]:
     "TurnStatus": TurnStatus,
     "WebSearchThreadItem": WebSearchThreadItem,
   }
+
+
+def _enable_completed_subagent_activity(*, activity_kind_type: Any) -> None:
+  """Accept the known completion value omitted by the generated SDK enum."""
+  try:
+    activity_kind_type("completed")
+    return
+  except ValueError:
+    pass
+
+  previous_missing = getattr(activity_kind_type, "_missing_", None)
+
+  def _missing(cls: Any, value: Any) -> Any | None:
+    if value == "completed":
+      member = object.__new__(cls)
+      member._name_ = "completed"
+      member._value_ = value
+      return member
+    if previous_missing is not None:
+      return previous_missing(value)
+    return None
+
+  activity_kind_type._missing_ = classmethod(_missing)
 
 
 def _enable_web_search_results_passthrough(
