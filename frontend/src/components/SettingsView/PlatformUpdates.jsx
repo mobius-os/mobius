@@ -100,7 +100,7 @@ export default function PlatformUpdates({ active, refreshToken, onOpenChat }) {
           {!available && !conflict && (restartNeeded || imageNeeded) && (
             <button className="settings__btn settings__btn--outline settings__btn--sm" disabled={busy} onClick={check}>Check for more</button>
           )}
-          <button className="settings__btn settings__btn--outline settings__btn--sm" disabled={busy || confirmRestart} onClick={askRestart}>Restart server</button>
+          <button className="settings__btn settings__btn--outline settings__btn--sm platform-updates__restart" disabled={busy || confirmRestart} onClick={askRestart}>Restart server</button>
         </div>
       )}
       <dl className="platform-updates__versions">

@@ -2,6 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
+  bankedResetCredits,
   providerAllowance,
   providerAllowanceSummary,
 } from '../../components/SettingsView/providerUsage.js'
@@ -81,4 +82,13 @@ test('plan allowance copy identifies a recent fallback reading', () => {
     providerAllowanceSummary('claude', allowance),
     '24% weekly usage · last available',
   )
+})
+
+test('banked reset count preserves an explicit zero while rejecting missing data', () => {
+  assert.deepEqual(bankedResetCredits({ reset_credits: { available_count: 0, credits: [] } }), {
+    availableCount: 0,
+    credits: [],
+  })
+  assert.deepEqual(bankedResetCredits({}), { availableCount: 0, credits: [] })
+  assert.equal(bankedResetCredits(null), null)
 })

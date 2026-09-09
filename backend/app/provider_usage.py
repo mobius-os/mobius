@@ -285,7 +285,7 @@ def _codex_reset_credits(summary: Any) -> dict[str, Any] | None:
     available = int(available)
   except (TypeError, ValueError):
     return None
-  if available <= 0:
+  if available < 0:
     return None
 
   rows: list[dict[str, Any]] = []

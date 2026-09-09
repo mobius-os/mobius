@@ -47,8 +47,10 @@ export function formatUsageReset(value, now = new Date()) {
 
 export function bankedResetCredits(snapshot) {
   const summary = snapshot?.reset_credits
+  if (!snapshot) return null
+  if (!summary || typeof summary !== 'object') return { availableCount: 0, credits: [] }
   const count = Number(summary?.available_count)
-  if (!Number.isFinite(count) || count <= 0) return null
+  if (!Number.isFinite(count) || count < 0) return null
   const credits = Array.isArray(summary.credits) ? summary.credits : []
   return { availableCount: count, credits }
 }
