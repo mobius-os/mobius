@@ -19,21 +19,19 @@ export default function ProjectGithubSharing({ project, onOpenGithub }) {
     catch { setCopyError('Select the link below and copy it manually.') }
   }
   return <section className="project-sharing__github" aria-label="GitHub collaboration">
-    <p>Work on separate versions, then suggest changes for each other to review. Everyone needs a GitHub account.</p>
+    <p>Separate versions, reviewed changes. GitHub accounts needed.</p>
     {statusQuery.isLoading ? <p role="status">Checking the GitHub connection…</p>
       : statusQuery.isError ? <><p role="alert">Could not check the GitHub connection.</p><button type="button" onClick={() => statusQuery.refetch()}>Try again</button></>
         : !link ? <>
-          <p>Connect this project to GitHub and publish the files you want to share first. Nothing will be uploaded just by opening these settings.</p>
+          <p>Publish this project on GitHub first.</p>
           <button type="button" onClick={onOpenGithub}>Set up GitHub sharing</button>
         </> : <>
-          <p>This link lets people make their own version on GitHub. It shares only what’s already on GitHub—not unpublished changes here.</p>
-          {(status.dirty || status.ahead > 0) && <p role="status">You have changes here that may not be on GitHub yet. Review publishing if you want to include them.</p>}
+          <p>Only files already on GitHub are shared.</p>
+          {(status.dirty || status.ahead > 0) && <p role="status">Some local changes aren’t published yet.</p>}
           <label>GitHub collaboration link<input readOnly value={link} onFocus={event => event.currentTarget.select()} /></label>
           <button type="button" onClick={copyLink}>{copied ? 'Link copied' : 'Copy GitHub link'}</button>
-          {copied && <p role="status">Ready to send.</p>}
           {copyError && <p role="alert">{copyError}</p>}
-          <p>For a private GitHub project, people also need access and permission to make their own version.</p>
-          <details><summary>What happens when someone opens the link?</summary>
+          <details><summary>How it works</summary><p>Private projects require access and permission to fork.</p>
             <ol><li>They make their own version on GitHub, called a fork.</li><li>In their Möbius, they open Projects → New project → Import from GitHub and bring in that version.</li><li>They can send their changes back through GitHub for you to review. Your project stays unchanged until you accept them.</li></ol>
             <a href="https://docs.github.com/en/pull-requests/how-tos/work-with-forks/fork-a-repo" target="_blank" rel="noopener noreferrer">GitHub’s guide to working this way</a>
           </details>

@@ -49,35 +49,31 @@ export default function ProjectCopyPanel({ project }) {
     finally { setBusy('') }
   }
   return <div className="project-copy">
-    <p>Give someone their own editable copy. Your project stays separate, and later changes aren’t shared. No GitHub needed.</p>
+    <p>An independent copy. No GitHub needed.</p>
     <section>
-      <h3>Choose what goes in the copy</h3>
-      <p>Only selected project files are shared—not project access, connected accounts or private chats. Check the files themselves for passwords or personal information.</p>
       {preview.isPending && <p role="status">Loading project files…</p>}
       {preview.isError && <div role="alert"><p>{preview.error.message}</p><button onClick={() => preview.refetch()}>Try again</button></div>}
       {preview.data && <>
-        {preview.data.warning && <p className="project-copy__warning">{preview.data.warning}</p>}
-        {files.length ? <details><summary>Review {files.length} files · {selected.length} selected</summary>
+        {files.length ? <details><summary>Files · {selected.length} selected · {copyByteLabel(selectedBytes)}</summary>
           <div className="project-copy__files">{files.map(file => <label key={file.path}><input type="checkbox" checked={selected.includes(file.path)} disabled={!!busy} onChange={() => toggle(file.path)} /><span>{file.path}</span><small>{copyByteLabel(file.size)}</small></label>)}</div>
         </details> : <p>There are no files available to share.</p>}
-        <p className="project-copy__boundary">Anyone with the link can save a copy. The link expires after 7 days; you can stop it sooner. Saved copies can’t be taken back.</p>
+        <p className="project-copy__boundary">Anyone with the link can keep a copy. Check files for private information.</p>
         <button className="project-copy__primary" disabled={!!busy || !selected.length} onClick={create}>{busy === 'create' ? 'Creating link…' : 'Create copy link'}</button>
-        <small>{selected.length} files · {copyByteLabel(selectedBytes)}</small>
+        <small>Files only—no chats or app data. Link expires in 7 days.</small>
       </>}
     </section>
     {created && <section className="project-copy__result"><h3>Your copy link</h3><p>Expires {copyDate(created.expires_at).toLocaleString()}.</p><label htmlFor="project-copy-link">Share this link</label><input id="project-copy-link" readOnly value={created.copy_url} onFocus={event => event.target.select()} /><button onClick={copy}><Copy width={16} height={16} /> Copy link</button></section>}
     {error && <p className="project-copy__error" role="alert">{error}</p>}
     {notice && <p role="status">{notice}</p>}
-    <section><h3>Copy links</h3>
+    {(shares.isPending || shares.isError || shares.data?.length > 0) && <section><h3>Copy links</h3>
       {shares.isPending && <p role="status">Loading links…</p>}
       {shares.isError && <div role="alert"><p>{shares.error.message}</p><button onClick={() => shares.refetch()}>Try again</button></div>}
-      {shares.data?.length === 0 && <p>No copy links yet.</p>}
       {(shares.data || []).map(share => {
         const ended = share.revoked_at || copyDate(share.expires_at).getTime() <= Date.now()
         return <div key={share.id} className="project-copy__share"><div><strong>Created {copyDate(share.created_at).toLocaleString()}</strong><small>{share.revoked_at ? 'Stopped' : ended ? 'Expired' : `Expires ${copyDate(share.expires_at).toLocaleString()}`}</small></div>
           {!ended && (confirmStop === share.id ? <div><p>Stop new copies from this link? Existing copies won’t change.</p><button disabled={!!busy} onClick={() => stop(share.id)}>Stop link</button><button disabled={!!busy} onClick={() => setConfirmStop('')}>Keep link</button></div> : <button disabled={!!busy} onClick={() => setConfirmStop(share.id)}>Stop sharing</button>)}
         </div>
       })}
-    </section>
+    </section>}
   </div>
 }

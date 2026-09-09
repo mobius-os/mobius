@@ -187,7 +187,7 @@ export default function ProjectCollaborationPanel({ project, onClose, onOpenGith
               <h3 id="project-share-copy-heading">Give someone a copy</h3>
               <button type="button" className="project-sharing__choice" onClick={() => setMode('copy')}>
                 <strong>Share a copy</strong>
-                <span>Send a link so someone can make this their own. Their changes won’t affect yours.</span>
+                <span>A separate, editable copy.</span>
                 <small>No GitHub needed</small>
               </button>
             </section>
@@ -195,12 +195,12 @@ export default function ProjectCollaborationPanel({ project, onClose, onOpenGith
               <h3 id="project-share-together-heading">Work together</h3>
               <button type="button" className="project-sharing__choice" onClick={() => setMode('live')}>
                 <strong>Work together live</strong>
-                <span>Invite people to edit the same project with you.</span>
+                <span>Edit the same project.</span>
                 <small>No GitHub needed</small>
               </button>
               <button type="button" className="project-sharing__choice" onClick={() => setMode('github')}>
                 <strong>Work together with GitHub</strong>
-                <span>Work on your own versions and suggest changes for each other to review.</span>
+                <span>Separate versions, reviewed changes.</span>
                 <small>GitHub accounts needed</small>
               </button>
             </section>
