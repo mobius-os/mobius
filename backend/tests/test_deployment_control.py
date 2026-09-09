@@ -1186,7 +1186,13 @@ async def test_self_hosted_revalidates_full_review_after_controller_readiness(
       target_sha="d" * 40, image_digest=None,
     )
 
-  assert exc.value.code == failure
+  assert exc.value.code == (
+    "update_applied_rebuild_pending"
+    if failure == "update_plan_stale"
+    else failure
+  )
+  if failure == "update_plan_stale":
+    assert "reviewed source was applied" in exc.value.message
   assert len(readiness_reads) == 2
   assert reviews == ["1" * 40, "e" * 40, "e" * 40]
   assert not (inbox / "request.json").exists()
@@ -1418,7 +1424,8 @@ async def test_managed_update_refuses_source_moving_after_its_apply(monkeypatch)
   monkeypatch.setattr(dc, "_request_managed_bootstrap", must_not_start)
   with pytest.raises(dc.DeploymentControlError) as error:
     await dc.request_reviewed_rebuild(db=None, plan_id="a" * 64, current_sha="1" * 40, target_sha="2" * 40, image_digest=_TEST_DIGEST)
-  assert error.value.code == "update_plan_stale"
+  assert error.value.code == "update_applied_rebuild_pending"
+  assert "reviewed source was applied" in error.value.message
 
 
 @pytest.mark.asyncio

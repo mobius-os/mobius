@@ -6,6 +6,9 @@ const REVIEW_AGAIN = new Set(['update_plan_stale', 'update_plan_invalid', 'activ
 
 export function platformUpdateRepairReason({ preview, platform, rebuild, error = '', errorCode = '' } = {}) {
   if (REVIEW_AGAIN.has(errorCode)) return null
+  if (errorCode === 'update_applied_rebuild_pending') {
+    return 'The update was applied, but Möbius needs help finishing the container replacement.'
+  }
   if (preview?.blocking_paths?.length || errorCode === 'local_runtime_changes') {
     return 'This update needs help preserving your local changes.'
   }
@@ -17,6 +20,16 @@ export function platformUpdateRepairReason({ preview, platform, rebuild, error =
   if (level === 'image_rebuild' && target && rebuild?.expected_sha === target
     && ['failed', 'rolled_back', 'needs_recovery'].includes(rebuild.state)) {
     return 'The last attempt to finish this update needs attention.'
+  }
+  const matchingReplacement = rebuild?.expected_sha === target ? rebuild : null
+  if (
+    platform
+    && platform.available === false
+    && level === 'image_rebuild'
+    && !['queued', 'preparing', 'replacing', 'verifying', 'succeeded', 'no_change']
+      .includes(matchingReplacement?.state)
+  ) {
+    return 'The update is applied, but Möbius needs help finishing the container replacement.'
   }
   if (error || platform?.state === 'rolled_back') {
     return 'The update needs attention before you try again.'

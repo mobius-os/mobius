@@ -247,7 +247,10 @@ export default function usePlatformUpdates({ active, refreshToken, onOpenChat })
       if (!cause.definitive) {
         setReconnect({ kind, plan, bootId: before?.bootId || '', requestedAt, previousOperationId })
         setError('The connection was interrupted. Checking whether your update started; no second request will be sent.')
-      } else await Promise.all([refreshPlatform(), refreshRebuild()])
+      } else await Promise.all([
+        refreshPlatform({ preserveCurrentOnFailure: true }),
+        refreshRebuild(),
+      ])
       return { ok: false }
     } finally {
       pending.current = false

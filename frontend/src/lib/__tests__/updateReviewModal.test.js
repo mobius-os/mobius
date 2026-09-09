@@ -56,6 +56,13 @@ test('unfinished activation can be reviewed independently of incoming source', (
   assert.doesNotMatch(modal, /disabled=\{[^}]*!preview\?\.available/)
 })
 
+test('a definitive rebuild failure refreshes status without erasing the reviewed state', () => {
+  assert.match(
+    requests,
+    /setErrorCode\(cause\.code \|\| ''\)[\s\S]*refreshPlatform\(\{ preserveCurrentOnFailure: true \}\)/,
+  )
+})
+
 test('successful apply projection survives an unavailable follow-up status read', () => {
   assert.match(updateState, /function platformStatusFromApply\(previous, result\)/)
   assert.match(updateState, /available: state === 'rolled_back'/)

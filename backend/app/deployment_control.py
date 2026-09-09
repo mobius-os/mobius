@@ -707,16 +707,35 @@ async def request_reviewed_rebuild(
   # to that exact result, not an arbitrary new snapshot after a concurrent edit.
   current_sha = apply_result.get("merge_commit") or current_sha
   plan_id = platform_update._update_plan_id(current_sha, target_sha, image_digest)
-  await asyncio.to_thread(validate_reviewed_release)
-  if deployment != "railway":
-    return await _request_self_hosted_rebuild(
-      expected_sha=target_sha, final_check=validate_reviewed_release,
+  try:
+    await asyncio.to_thread(validate_reviewed_release)
+    if deployment != "railway":
+      return await _request_self_hosted_rebuild(
+        expected_sha=target_sha, final_check=validate_reviewed_release,
+      )
+    request = (
+      _request_managed_rebuild if managed_cutover_ready()
+      else _request_managed_bootstrap
     )
-  request = (
-    _request_managed_rebuild if managed_cutover_ready()
-    else _request_managed_bootstrap
-  )
-  return await request(target_sha, image_digest, final_check=validate_reviewed_release)
+    return await request(
+      target_sha, image_digest, final_check=validate_reviewed_release,
+    )
+  except DeploymentControlError as exc:
+    if exc.code not in {
+      "update_plan_stale", "update_plan_invalid", "activation_changed",
+    }:
+      raise
+    # Apply already installed the reviewed source. A later edit can invalidate
+    # the final dispatch plan, but this is no longer the mutation-free
+    # "review again" outcome used before Apply. Keep the partial success
+    # distinct so Settings can recover after reloading authoritative status.
+    raise DeploymentControlError(
+      "update_applied_rebuild_pending",
+      "The reviewed source was applied, but the container rebuild was not "
+      "queued because the source changed again. Ask Möbius to inspect the "
+      "current update state and help finish it.",
+      status_code=409,
+    ) from exc
 
 
 def _raise_local_runtime_blockers(blockers: list[str]) -> None:
