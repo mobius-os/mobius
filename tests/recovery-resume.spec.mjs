@@ -6,10 +6,22 @@ import { test as base, expect, chromium } from '@playwright/test'
 const test = process.env.MOBIUS_RECOVERY_CDP ? base.extend({
   page: async ({}, use) => {
     const browser = await chromium.connectOverCDP(process.env.MOBIUS_RECOVERY_CDP)
-    const page = browser.contexts()[0].pages()[0]
-    await use(page)
-    await page.unrouteAll({ behavior: 'ignoreErrors' })
-    await browser.close()
+    // Reuse the helper's authenticated identity, not its retained workspace,
+    // service worker, in-flight requests, or prior fixture outbox.
+    const authPage = browser.contexts()[0].pages()[0]
+    const token = await authPage.evaluate(() => localStorage.getItem('token'))
+    if (!token) throw new Error('Run the authenticated screenshot helper first')
+    const context = await browser.newContext({
+      serviceWorkers: 'block',
+      storageState: { cookies: [], origins: [{
+        origin: new URL(authPage.url()).origin, localStorage: [{ name: 'token', value: token }],
+      }] },
+    })
+    const page = await context.newPage()
+    try { await use(page) } finally {
+      await context.close()
+      await browser.close()
+    }
   },
 }) : base
 test.use({ serviceWorkers: 'block' })
@@ -30,14 +42,18 @@ function deferred() {
   return { promise, resolve }
 }
 
-async function mount(page, { rejectFirst = false } = {}) {
-  await page.setViewportSize({ width: 1512, height: 911 })
+async function mount(page, { rejectFirst = false, loseFirstAck = false } = {}) {
+  await page.setViewportSize({
+    width: Number(process.env.MOBIUS_RECOVERY_WIDTH || 1512),
+    height: Number(process.env.MOBIUS_RECOVERY_HEIGHT || 911),
+  })
   let resumed = false
   const requested = deferred()
   const accepted = deferred()
   const detailRequested = deferred()
   const detailAccepted = deferred()
   let holdDetail = false
+  let rejectDetail = false
   const attempts = []
   const unexpected = []
   const messages = [{ role: 'user', content: 'Original question A', cid: 'original-a', ts: 1788800000100 }, partial]
@@ -59,10 +75,15 @@ async function mount(page, { rejectFirst = false } = {}) {
       requested.resolve()
       if (rejectFirst && attempts.length === 1) return route.fulfill({ status: 409, json: { detail: 'Recovery state changed; retry with current details.' } })
       await accepted.promise
+      if (resumed) return route.fulfill({ status: 200, json: {
+        status: 'duplicate', running: true,
+        message: messages.find(message => message.cid === attempts.at(-1).cid),
+      } })
       resumed = true
       const message = { role: 'user', kind: 'continuation', continuation_reason: 'manual',
         content: 'continue', cid: attempts.at(-1).cid, ts: 1788800000600 }
       messages.push(message)
+      if (loseFirstAck && attempts.length === 1) return route.abort('connectionreset')
       return route.fulfill({ status: 202, json: { status: 'started', message, run_id: 'resumed-a' } })
     }
     if (req.method() !== 'GET' && req.method() !== 'HEAD') {
@@ -75,6 +96,7 @@ async function mount(page, { rejectFirst = false } = {}) {
     }
     if (url.pathname === path || url.pathname === `${path}/runtime`) {
       if (holdDetail) { detailRequested.resolve(); await detailAccepted.promise }
+      if (rejectDetail) return route.fulfill({ status: 503, json: { detail: 'Fixture transcript unavailable' } })
       return route.fulfill({ json: detail() })
     }
     if (url.pathname === `${path}/stream`) return route.fulfill({ status: 204, body: '' })
@@ -82,6 +104,7 @@ async function mount(page, { rejectFirst = false } = {}) {
     return route.continue()
   })
   await page.addInitScript(({chatPath}) => {
+    sessionStorage.setItem('mobius:visual-content-only', '1')
     const realFetch = window.fetch.bind(window)
     window.fetch = (input, init) => {
       const url = new URL(String(input?.url || input), location.href)
@@ -111,7 +134,9 @@ async function mount(page, { rejectFirst = false } = {}) {
   }, CHAT)).toBe(1)
   return { surface, composer, attachment, requested, accepted, attempts, unexpected,
     detailRequested, detailAccepted,
-    parkWithDetail(text) {
+    allowDetail() { rejectDetail = false },
+    parkWithDetail(text, { reject = false } = {}) {
+      rejectDetail = reject
       resumed = false
       holdDetail = true
       messages.push({ id: 'assistant-resumed-a', role: 'assistant', ts: 1788800000700,
@@ -132,7 +157,7 @@ async function sampleGeometry(page, prefix = 'Paragraph 28:') {
 test('Resume waits for acknowledgement without changing draft, attachment, queue, or reading position', async ({ page }) => {
   const state = await mount(page)
   const resume = state.surface.getByRole('button', { name: 'Resume', exact: true })
-  await resume.scrollIntoViewIfNeeded()
+  await resume.evaluate(element => element.scrollIntoView({ block: 'center', behavior: 'instant' }))
   await state.surface.locator('.chat__scroll').hover()
   await page.mouse.wheel(0, -40)
   await page.evaluate(() => new Promise(resolve => {
@@ -267,4 +292,54 @@ test('a delayed no-stream reconciliation keeps the partial answer painted until 
   await expect(state.surface.getByText('Queued B stays behind A', { exact: true })).toBeVisible()
   const after = await sampleGeometry(page, 'Recovered paragraph 28:')
   expect(Math.abs(after.anchor - before.anchor)).toBeLessThanOrEqual(1)
+})
+
+
+test('a lost Resume acknowledgement retries the same control without exposing continue or consuming B', async ({ page }) => {
+  const state = await mount(page, { loseFirstAck: true })
+  await state.surface.getByRole('button', { name: 'Resume', exact: true }).click()
+  await state.requested.promise
+  state.accepted.resolve()
+  await expect.poll(() => state.attempts.length).toBeGreaterThanOrEqual(2)
+  expect(state.attempts.every(attempt => JSON.stringify(attempt) === JSON.stringify(state.attempts[0]))).toBe(true)
+  await expect(state.surface.getByText('Resumed manually', { exact: true })).toHaveCount(1)
+  await expect(state.surface.getByText('continue', { exact: true })).toHaveCount(0)
+  await expect(state.composer).toHaveValue(draft)
+  await expect(state.attachment).toBeVisible()
+  await expect(state.surface.getByText('Queued B stays behind A', { exact: true })).toBeVisible()
+})
+
+
+test('failed transcript replacement retains the answer and a successful Retry reconciles it once', async ({ page }) => {
+  const state = await mount(page)
+  await state.surface.getByRole('button', { name: 'Resume', exact: true }).click()
+  await state.requested.promise
+  state.accepted.resolve()
+  await expect(state.surface.getByText('Resumed manually', { exact: true })).toBeVisible()
+  const liveText = answer.replaceAll('Paragraph', 'Recovered paragraph')
+  await page.waitForFunction(() => !!window.__recoveryStream)
+  await page.evaluate(content => {
+    window.__recoveryStream.enqueue(new TextEncoder().encode(
+      `data: ${JSON.stringify({ type: 'text_final', content, text_item_id: 'resumed-text' })}\n\n`,
+    ))
+  }, liveText)
+  await expect(state.surface.getByText(/^Recovered paragraph 28:/)).toBeVisible()
+  state.parkWithDetail(liveText, { reject: true })
+  await page.evaluate(() => {
+    window.__recoveryNoStream = true
+    window.__recoveryStream.close()
+  })
+  await state.detailRequested.promise
+  state.detailAccepted.resolve()
+  const retry = state.surface.getByRole('button', { name: 'Retry', exact: true })
+  await expect(retry).toBeVisible()
+  await expect(state.surface.getByText(/^Recovered paragraph 28:/)).toHaveCount(1)
+  await expect(state.composer).toHaveValue(draft)
+  await expect(state.attachment).toBeVisible()
+  state.allowDetail()
+  await retry.click()
+  await expect(state.surface.getByRole('button', { name: 'Resume', exact: true })).toBeVisible()
+  await expect(state.surface.getByText(/^Recovered paragraph 28:/)).toHaveCount(1)
+  await expect(state.surface.getByText('Queued B stays behind A', { exact: true })).toBeVisible()
+  await expect(retry).toHaveCount(0)
 })

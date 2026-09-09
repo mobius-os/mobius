@@ -7,7 +7,7 @@ export default function useResume({ chatId, runId, send, onAccepted, onRefresh, 
   const scopeRef = useRef(null)
 
   useEffect(() => {
-    const scope = {}
+    const scope = { chatId }
     scopeRef.current = scope
     attemptRef.current = null
     setState({ pending: false, error: '' })
@@ -60,9 +60,12 @@ export default function useResume({ chatId, runId, send, onAccepted, onRefresh, 
       })
       return false
     } finally {
-      if (scopeRef.current === scope) onRefresh()
+      // Runtime may observe the successor before this acknowledgement. The
+      // old action cannot update presentation, but the same mounted chat must
+      // still reconcile its durable marker; a chat switch/unmount must not.
+      if (scopeRef.current?.chatId === chatId) onRefresh()
     }
-  }, [runId, send, onAccepted, onRefresh, blocked])
+  }, [chatId, runId, send, onAccepted, onRefresh, blocked])
 
   return { resume, state }
 }

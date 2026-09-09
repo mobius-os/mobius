@@ -127,3 +127,23 @@ test('a newer recovery target retires the previous ambiguous action instead of r
   assert.equal(requests[1][2].resumeRunId, 'new-interrupted-b')
   assert.equal(requests[0][2].resumeRunId, 'interrupted-a')
 })
+
+for (const outcome of ['accepted', 'network-error']) {
+  test(`runtime advance during ${outcome} still refreshes this chat without applying an obsolete Resume result`, async () => {
+    const response = deferred()
+    const h = fixture(() => response.promise)
+    const pending = h.result.current.resume()
+    // Runtime can observe the successor before the POST acknowledgement (or
+    // its idempotent retry) arrives. The exact Resume action is now obsolete,
+    // but its durable transcript still needs reconciling in the same chat.
+    h.props.runId = null
+    h.rerender()
+    if (outcome === 'accepted') response.resolve({ status: 'duplicate', running: true })
+    else response.reject(new Error('lost acknowledgement'))
+    assert.equal(await pending, false)
+    assert.deepEqual(h.accepted, [])
+    assert.equal(h.refreshes.length, 1)
+    assert.equal(h.result.current.state.error, '')
+    h.unmount()
+  })
+}
