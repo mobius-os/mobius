@@ -305,7 +305,7 @@ test('a blocked apply stays open, focuses its result, and shows resolver failure
   await expect(page.getByRole('button', { name: 'Resolve in chat' })).toBeFocused()
 })
 
-test('a rolled-back apply stays open with an explicit repair result', async ({ page }) => {
+test('a rolled-back apply stays open with an explicit repair action', async ({ page }) => {
   const state = { current: 'available' }
   await mockPlatform(page, state)
   await page.route('**/api/platform/apply', route => {
@@ -330,9 +330,8 @@ test('a rolled-back apply stays open with an explicit repair result', async ({ p
   const result = page.getByRole('dialog', { name: 'Update rolled back' })
   await expect(result).toBeVisible()
   await expect(result.getByText('Your previous working version was restored.')).toBeVisible()
-  const done = result.getByRole('button', { name: 'Done', exact: true })
-  await expect(done).toBeFocused()
-  await done.click()
+  await expect(result.getByRole('button', { name: 'Ask Möbius' })).toBeFocused()
+  await result.getByRole('button', { name: 'Not now' }).click()
   await expect(result).toHaveCount(0)
   await expect(page.getByText('Update needs repair', { exact: true })).toBeVisible()
   await expect(page.getByRole('button', { name: 'Review update', exact: true })).toBeFocused()
@@ -397,7 +396,7 @@ test('a conflict result closes to truthful repair state when status reads fail',
   await expect(page.getByRole('button', { name: 'Resolve in chat' })).toBeFocused()
 })
 
-test('a rollback result closes to truthful retry state when status reads fail', async ({ page }) => {
+test('a rollback result keeps an explicit repair action when status reads fail', async ({ page }) => {
   const state = { current: 'available', failStatus: false }
   await mockPlatform(page, state)
   await page.route('**/api/platform/apply', route => {
@@ -421,55 +420,38 @@ test('a rollback result closes to truthful retry state when status reads fail', 
 
   const result = page.getByRole('dialog', { name: 'Update rolled back' })
   await expect(result).toBeVisible()
-  await result.getByRole('button', { name: 'Done', exact: true }).click()
+  await expect(result.getByRole('button', { name: 'Ask Möbius' })).toBeFocused()
+  await result.getByRole('button', { name: 'Not now' }).click()
   await expect(result).toHaveCount(0)
   await expect(page.getByText('Update needs repair', { exact: true })).toBeVisible()
   await expect(page.getByRole('button', { name: 'Review update', exact: true })).toBeFocused()
 })
 
-test('malformed, missing, and unknown successful states fail open and can retry', async ({ page }) => {
-  const state = { current: 'available' }
-  await mockPlatform(page, state)
-  let attempts = 0
-  await page.route('**/api/platform/apply', route => {
-    attempts += 1
-    if (attempts === 1) {
-      return route.fulfill({ status: 200, contentType: 'application/json', body: '{' })
-    }
-    if (attempts === 2) {
-      return route.fulfill({ status: 200, contentType: 'application/json', body: '{}' })
-    }
-    if (attempts === 3) {
-      return route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        body: JSON.stringify({ state: 'future_state' }),
-      })
-    }
-    state.current = 'restart_needed'
-    return route.fulfill({
+for (const [label, body] of [
+  ['malformed', '{'],
+  ['missing state', '{}'],
+  ['unknown state', JSON.stringify({ state: 'future_state' })],
+]) {
+  test(`${label} successful apply results fail open and route to repair`, async ({ page }) => {
+    const state = { current: 'available' }
+    await mockPlatform(page, state)
+    await page.route('**/api/platform/apply', route => route.fulfill({
       status: 200,
       contentType: 'application/json',
-      body: JSON.stringify({ state: 'restart_needed', needs_restart: true }),
-    })
-  })
+      body,
+    }))
 
-  const review = await openUpdateReview(page)
-  const apply = review.getByRole('button', { name: 'Apply update' })
-  for (let attempt = 1; attempt <= 3; attempt += 1) {
-    await apply.click()
+    const review = await openUpdateReview(page)
+    await review.getByRole('button', { name: 'Apply update' }).click()
     await expect(review).toBeVisible()
     await expect(review.locator('.urm__error').getByRole('alert')).toContainText(
       'The update returned an unexpected result.',
     )
     await expect(review.getByRole('alert')).toHaveCount(1)
-    await expect(apply).toBeEnabled()
-  }
-
-  await apply.click()
-  await expect(review).toHaveCount(0)
-  await expect(page.getByRole('button', { name: 'Restart to finish' })).toBeFocused()
-})
+    await expect(review.getByRole('button', { name: 'Ask Möbius' })).toBeFocused()
+    await expect(review.getByRole('button', { name: 'Apply update' })).toHaveCount(0)
+  })
+}
 
 test('Escape and dismissal stay gated while Apply is pending', async ({ page }) => {
   const state = { current: 'available' }
@@ -495,7 +477,7 @@ test('Escape and dismissal stay gated while Apply is pending', async ({ page }) 
   const dialog = await openUpdateReview(page)
   await dialog.getByRole('button', { name: 'Apply update' }).click()
   await expect(dialog.getByRole('button', { name: 'Applying…' })).toBeDisabled()
-  await expect(dialog.getByText('Building the frontend…')).toBeVisible()
+  await expect(dialog.getByText('Preparing the interface…')).toBeVisible()
   await expect(dialog.getByRole('button', { name: 'Not now' })).toBeDisabled()
   await expect(dialog.getByRole('button', { name: 'Close' })).toBeDisabled()
 
