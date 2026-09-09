@@ -45,7 +45,7 @@ def _make_peer_keypair():
 
 def _seed_peer_actor_cache(public_b64: str, host: str = PEER_HOST, handle: str = ""):
 
-  cache = common_routes._peer_cache_path(host)
+  cache = common_routes._actor_verifier.cache_path(host)
   cache.parent.mkdir(parents=True, exist_ok=True)
   cache.write_text(json.dumps({
     "fetched_at": time.time(),
@@ -473,7 +473,7 @@ def test_member_entries_carry_handles(client, auth):
   oid = _create_board(client, auth)
   private_b64, public_b64 = _make_peer_keypair()
   # Actor card with a handle, like the current Common identity publishes.
-  cache = common_routes._peer_cache_path(PEER_HOST)
+  cache = common_routes._actor_verifier.cache_path(PEER_HOST)
   cache.parent.mkdir(parents=True, exist_ok=True)
   cache.write_text(json.dumps({
     "fetched_at": time.time(),
@@ -509,7 +509,7 @@ async def test_verified_account_can_resolve_multiple_deployments_but_directory_c
     return None
   monkeypatch.setattr(identity_routes, "resolve_handle_hosts", unlinked)
   monkeypatch.setattr(common_routes, "_load_identity", lambda: {})
-  path = common_routes._directory_path()
+  path = objects_routes._public_store.directory_path()
   path.parent.mkdir(parents=True, exist_ok=True)
   path.write_text(json.dumps({h: {"handle": "ana"} for h in result.hosts}))
   with pytest.raises(HTTPException) as exc:
@@ -532,16 +532,15 @@ def test_account_invite_fanout_partial_delivery_join_roles_and_group_revocation(
     return [PEER_HOST, second]
   monkeypatch.setattr(identity_routes, "resolve_handle_hosts", registry)
   deliveries = []
-  class Client:
-    async def __aenter__(self): return self
-    async def __aexit__(self, *_args): pass
-    async def post(self, url, *, json):
-      deliveries.append(json)
-      request = httpx.Request("POST", url)
-      if json["to"] == second:
-        raise httpx.ConnectError("offline", request=request)
-      return httpx.Response(200, json={"status": "delivered"}, request=request)
-  monkeypatch.setattr(objects_routes.httpx, "AsyncClient", lambda **_kwargs: Client())
+  async def request(_method, url, *, json, **_kwargs):
+    deliveries.append(json)
+    outbound = httpx.Request("POST", url)
+    if json["to"] == second:
+      raise httpx.ConnectError("offline", request=outbound)
+    return httpx.Response(
+      200, json={"status": "delivered"}, request=outbound
+    )
+  monkeypatch.setattr(objects_routes, "federation_request", request)
 
   invited = client.post(f"/api/common/objects/{oid}/invites", json={"address": "ana", "role": "viewer"}, headers=auth)
   assert invited.status_code == 200, invited.text
@@ -583,13 +582,10 @@ def test_reinvite_adds_current_deployment_without_changing_active_role(client, a
   async def registry(*_args): return hosts
   monkeypatch.setattr(identity_routes, "resolve_handle_hosts", registry)
   deliveries = []
-  class Client:
-    async def __aenter__(self): return self
-    async def __aexit__(self, *_args): pass
-    async def post(self, url, *, json):
-      deliveries.append(json["to"])
-      return httpx.Response(200, json={}, request=httpx.Request("POST", url))
-  monkeypatch.setattr(objects_routes.httpx, "AsyncClient", lambda **_kwargs: Client())
+  async def request(_method, url, *, json, **_kwargs):
+    deliveries.append(json["to"])
+    return httpx.Response(200, json={}, request=httpx.Request("POST", url))
+  monkeypatch.setattr(objects_routes, "federation_request", request)
   def invite(role="editor"):
     return client.post(f"/api/common/objects/{oid}/invites", json={"address": "ana", "role": role}, headers=auth)
   first = invite().json()
@@ -612,3 +608,87 @@ def test_reinvite_adds_current_deployment_without_changing_active_role(client, a
   assert revoked.json()["hosts"] == [PEER_HOST]
   remaining = client.get(f"/api/common/objects/{oid}/members", headers=auth).json()["members"]
   assert "new.example.com" in remaining
+
+
+@pytest.fixture
+def isolated_invitations(tmp_path, monkeypatch):
+  monkeypatch.setattr(objects_routes, "_invitations_dir", lambda: tmp_path)
+
+
+def test_invitation_requests_are_quiet_and_retries_preserve_first_delivery(client, auth, monkeypatch, isolated_invitations):
+  from app import push
+  notifications = []
+  monkeypatch.setattr(push, "notify_owner", lambda *a, **kw: notifications.append(kw))
+  objects_routes._invitation_limiter.reset()
+  private, public = _make_peer_keypair()
+  _seed_peer_actor_cache(public)
+  oid = "ef" * 16
+  envelope = _signed(private, {"type": "object_invitation", "object": {
+    "id": oid, "app": "kanban", "label": "Quiet board", "role": "editor",
+  }})
+  url = "/api/common/objects/invitations/deliver"
+  assert client.post(url, json=envelope).status_code == 200
+  path = objects_routes._invitation_path(PEER_HOST, oid)
+  original = path.read_bytes()
+  assert client.post(url, json=envelope).status_code == 200
+  assert path.read_bytes() == original
+  assert notifications == []
+  assert objects_routes._load_remote(PEER_HOST, oid) is None
+  assert client.post(f"/api/common/objects/invitations/{PEER_HOST}/{oid}/decline", headers=auth).status_code == 200
+  declined = path.read_bytes()
+  assert client.post(url, json=envelope).status_code == 200
+  assert path.read_bytes() == declined
+  assert client.get("/api/common/objects/invitations", headers=auth).json()["invitations"] == []
+
+
+@pytest.mark.parametrize("bound", ["MAX_RECEIVED_INVITATIONS", "MAX_SENDER_INVITATIONS"])
+def test_invitation_capacity_rejects_new_requests_without_removing_history(client, monkeypatch, bound, isolated_invitations):
+  objects_routes._invitation_limiter.reset()
+  monkeypatch.setattr(objects_routes, bound, 1)
+  private, public = _make_peer_keypair()
+  _seed_peer_actor_cache(public)
+  url = "/api/common/objects/invitations/deliver"
+  def delivery(oid):
+    return client.post(url, json=_signed(private, {"type": "object_invitation", "object": {
+      "id": oid, "app": "kanban", "role": "viewer",
+    }}))
+  assert delivery("ab" * 16).status_code == 200
+  original = objects_routes._invitation_path(PEER_HOST, "ab" * 16).read_bytes()
+  assert delivery("cd" * 16).status_code == 429
+  assert delivery("ab" * 16).status_code == 200
+  assert objects_routes._invitation_path(PEER_HOST, "ab" * 16).read_bytes() == original
+
+
+def test_invitation_ingress_is_limited_before_peer_discovery(client, monkeypatch):
+  objects_routes._invitation_limiter.reset()
+  calls = []
+  async def verify(envelope):
+    calls.append(envelope)
+    raise HTTPException(status_code=403)
+  monkeypatch.setattr(objects_routes, "_verify_peer_envelope", verify)
+  statuses = [client.post("/api/common/objects/invitations/deliver", json={
+    "v": 0, "to": common_routes._own_host(), "type": "object_invitation",
+  }).status_code for _ in range(31)]
+  assert statuses[:30] == [403] * 30
+  assert statuses[30] == 429
+  assert len(calls) == 30
+  objects_routes._invitation_limiter.reset()
+
+
+def test_expired_decline_tombstone_frees_capacity_but_pending_history_remains(client, monkeypatch, isolated_invitations):
+  objects_routes._invitation_limiter.reset()
+  monkeypatch.setattr(objects_routes, "MAX_RECEIVED_INVITATIONS", 2)
+  old = objects_routes._invitation_path(PEER_HOST, "11" * 16)
+  old.write_text(json.dumps({"host": PEER_HOST, "status": "declined",
+    "declined_at": time.time() - 2 * objects_routes.CLOCK_SKEW_S - 1}))
+  pending = objects_routes._invitation_path(PEER_HOST, "22" * 16)
+  pending.write_text(json.dumps({"host": PEER_HOST, "label": "Preserved legacy request"}))
+  history = pending.read_bytes()
+  private, public = _make_peer_keypair()
+  _seed_peer_actor_cache(public)
+  response = client.post("/api/common/objects/invitations/deliver", json=_signed(private, {
+    "type": "object_invitation", "object": {"id": "33" * 16, "app": "kanban"},
+  }))
+  assert response.status_code == 200
+  assert not old.exists()
+  assert pending.read_bytes() == history

@@ -391,3 +391,13 @@ test('effectiveToolName classifies image reads from the STRING wire input', () =
   assert.equal(isDistinctiveActivityTool(T('Read', '/x.png')), true)
   assert.equal(isDistinctiveActivityTool(T('Read', '/x.js')), false)
 })
+
+test('sent and received peer notes share the ordinary command stretch', () => {
+  const entries = [
+    { item: { type: 'tool', tool: 'Bash' }, idx: 0 },
+    { item: { type: 'tool', tool: 'PeerMessage', peer_message: { direction: 'send', status: 'sent', body: 'Note' } }, idx: 1 },
+    { item: { type: 'tool', tool: 'PeerMessage', peer_message: { direction: 'read', status: 'received', notes: [{ body: 'Reply' }] } }, idx: 2 },
+  ]
+  assert.equal(groupActivityRuns(entries).length, 1)
+  assert.equal(groupActivityRuns(entries)[0].group.length, 3)
+})

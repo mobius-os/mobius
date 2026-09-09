@@ -77,10 +77,15 @@ def test_startup_task_app_imports_all_resolve():
 
 def test_reconcile_and_backfill_startup_commands_are_importable():
   """The specific commands startup depends on, checked by name as a tripwire."""
-  from app.chat_writer import BackfillAssistantIdentity, ReconcileStartupChat
+  from app.chat_writer import (
+    BackfillAssistantIdentity,
+    ReconcileStartupChat,
+    RetireLegacyGauntletExecution,
+  )
 
   assert BackfillAssistantIdentity(chat_id="c").chat_id == "c"
   assert ReconcileStartupChat is not None
+  assert RetireLegacyGauntletExecution is not None
 
 
 def _context():

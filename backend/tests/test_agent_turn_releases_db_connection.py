@@ -9,13 +9,29 @@ from sqlalchemy.pool import NullPool
 from app import chat as chat_mod
 from app import chat_queue, database, models, schemas
 from app.broadcast import create_broadcast, remove_broadcast
+from app.chat_writer import StartTurn, get_writer
 from app.database import SessionLocal, checked_out_connections, engine
 
 
 def _wait_for_writer_connection():
   """Stabilize the async writer startup before taking pool baselines."""
-  from app.chat_writer import get_writer
   assert get_writer()._session_ready.wait(timeout=2)
+
+
+def _start_turn(chat_id: str, provider_id: str, content: str) -> str:
+  """Enter provider tests through the same durable admission owner as runtime."""
+  run_token = f"rt-{chat_id}"
+  get_writer().submit(StartTurn(
+    chat_id=chat_id,
+    run_token=run_token,
+    user_msg={
+      "role": "user", "content": content, "ts": 1,
+      "cid": f"message-{chat_id}",
+    },
+    title_source=content,
+    default_provider=provider_id,
+  )).result(timeout=5)
+  return run_token
 
 
 def test_sqlite_does_not_have_a_fixed_connection_pool_ceiling():
@@ -118,19 +134,21 @@ async def test_agent_turn_closes_preflight_session_before_provider_wait(
     "app.codex_sdk_runner.run_codex_sdk_turn",
     fake_runner,
   )
+  from app import providers
   monkeypatch.setattr(
-    "app.providers.CodexProvider.check_auth",
-    lambda self, _data_dir: None,
+    providers.CodexProvider, "check_auth", lambda self, _data_dir: None,
   )
   monkeypatch.setattr(chat_mod, "_complete_turn", fake_complete)
 
   create_broadcast(chat.id)
+  run_token = _start_turn(chat.id, "codex", "hi")
   task = asyncio.create_task(chat_mod._run_chat_impl(
     messages=[schemas.ChatMessage(role="user", content="hi")],
     chat_id=chat.id,
     session_id="existing-session",
     provider_id="codex",
     run_gen=chat_mod.current_run_generation(chat.id),
+    run_token=run_token,
   ))
   try:
     await asyncio.wait_for(runner_started.wait(), timeout=2)
@@ -188,9 +206,8 @@ async def test_agent_turn_returns_connection_while_provider_is_running(
     chat_mod, "get_provider", lambda _provider_id: _Provider(provider_name),
   )
   monkeypatch.setattr(chat_mod, "_complete_turn", fake_complete_turn)
-  # This test intentionally bypasses the normal durable run claim. Isolate
-  # its connection-ownership assertion from the post-provider accounting
-  # write, which is covered by the chat-run metrics tests.
+  # Isolate the connection-ownership assertion from the post-provider
+  # accounting write, which is covered by the chat-run metrics tests.
   async def fake_record_run_metrics(**_kwargs):
     return None
 
@@ -204,11 +221,13 @@ async def test_agent_turn_returns_connection_while_provider_is_running(
     monkeypatch.setattr(claude_sdk_runner, "_resumable", lambda *_a, **_k: True)
 
   create_broadcast(chat_id)
+  run_token = _start_turn(chat_id, provider_id, "hello")
   result = await chat_mod._run_chat_impl(
     messages=[schemas.ChatMessage(role="user", content="hello")],
     chat_id=chat_id,
     session_id="existing-session",
     provider_id=provider_id,
+    run_token=run_token,
   )
 
   assert result is chat_queue.TerminalDisposition.EMPTY_TERMINAL_CLEARED
@@ -262,6 +281,7 @@ async def test_superseded_runner_cannot_overwrite_successor_session(
     monkeypatch.setattr(claude_sdk_runner, "_resumable", lambda *_a, **_k: True)
 
   create_broadcast(chat.id)
+  run_token = _start_turn(chat.id, provider_id, "hello")
   try:
     result = await chat_mod._run_chat_impl(
       messages=[schemas.ChatMessage(role="user", content="hello")],
@@ -269,6 +289,7 @@ async def test_superseded_runner_cannot_overwrite_successor_session(
       session_id="successor-session",
       provider_id=provider_id,
       run_gen=run_gen,
+      run_token=run_token,
     )
   finally:
     remove_broadcast(chat.id)
@@ -356,11 +377,13 @@ async def test_provider_exception_requests_owned_browser_cleanup(
     monkeypatch.setattr(claude_sdk_runner, "_resumable", lambda *_a, **_k: True)
 
   create_broadcast(chat_id)
+  run_token = _start_turn(chat_id, provider_id, "hello")
   result = await chat_mod._run_chat_impl(
     messages=[schemas.ChatMessage(role="user", content="hello")],
     chat_id=chat_id,
     session_id="existing-session",
     provider_id=provider_id,
+    run_token=run_token,
   )
 
   assert result is chat_queue.TerminalDisposition.EMPTY_TERMINAL_CLEARED

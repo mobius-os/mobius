@@ -22,6 +22,7 @@ function ProgressStep({ item, detailsExpanded, onDetailsToggle, onClear, onActio
   }`
   const label = (
     <span className="chat__progress-step-label">
+      {item.icon && <span className="chat__progress-identity" aria-hidden="true">{item.icon}</span>}
       {item.label}
     </span>
   )
@@ -72,6 +73,8 @@ function ProgressStep({ item, detailsExpanded, onDetailsToggle, onClear, onActio
           className="chat__progress-action"
           onPointerDown={(event) => event.preventDefault()}
           onClick={() => onAction(item)}
+          disabled={item.actionDisabled}
+          aria-busy={item.actionDisabled || undefined}
           aria-label={item.actionAriaLabel || item.actionLabel}
           title={item.actionAriaLabel || item.actionLabel}
         >
@@ -114,7 +117,7 @@ export default function ProgressRail({
   useEffect(() => setDetailsKey(null), [resetKey])
   if (!items.length) return null
   const detailItem = items.find(item => item.key === detailsKey && item.details)
-  const errorItem = items.find(item => item.clearError)
+  const errorItem = items.find(item => item.clearError || item.actionError)
   return (
     <div className="chat__progress-rail" role="group" aria-label={ariaLabel}>
       {items.map(item => (
@@ -132,7 +135,7 @@ export default function ProgressRail({
       {detailItem && detailItem.details}
       {errorItem && (
         <div className="chat__progress-error" role="alert">
-          {errorItem.clearError}
+          {errorItem.clearError || errorItem.actionError}
         </div>
       )}
     </div>

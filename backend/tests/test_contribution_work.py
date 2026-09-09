@@ -1,6 +1,7 @@
 """Contracts for chat-attached, token-minimal contribution helpers."""
 
 import asyncio
+import hashlib
 
 import pytest
 
@@ -112,7 +113,7 @@ def test_active_source_accepts_exact_work_and_retry_attaches(
   assert second.status_code == 202, second.text
   assert second.json()["attached"] is True
   assert second.json()["work"] == first_work
-  assert snapshots == [(app_id, source.id)]
+  assert snapshots == []
   assert starts == []
 
   db.expire_all()
@@ -127,12 +128,11 @@ def test_active_source_accepts_exact_work_and_retry_attaches(
   assert row.source_work_active_chat_id == source.id
   assert set(row.source_work_envelope) == {
     "v", "intent", "source_chat_id", "edit_revision", "paths",
-    "record_ids", "project_roots",
+    "record_ids", "project_roots", "bind_after_source",
   }
-  assert row.source_work_envelope["paths"] == [{
-    "path": "/data/platform/backend/app/demo.py",
-    "reviewed_through": 1770000000000,
-  }]
+  assert row.source_work_envelope["edit_revision"] == ""
+  assert row.source_work_envelope["bind_after_source"] is True
+  assert row.source_work_envelope["paths"] == []
   assert "/data/apps/contribute/attached-work.md" in row.startup_prompt
   assert "TOP SECRET TRANSCRIPT SENTINEL" not in row.startup_prompt
   assert "diff --git" not in row.startup_prompt
@@ -182,8 +182,6 @@ def test_active_source_accepts_exact_work_and_retry_attaches(
   assert history.status_code == 200, history.text
   assert [item["id"] for item in history.json()["items"]] == [first_work["id"]]
   assert history.json()["items"][0]["usage"]["totals"]["total_tokens"] is None
-  assert history.json()["total"] == 1
-  assert history.json()["truncated"] is False
 
 
 def test_accepted_work_starts_once_after_source_settles(
@@ -232,13 +230,12 @@ def test_accepted_work_starts_once_after_source_settles(
   assert accepted.json()["work"]["status"] == "accepted"
   assert starts == []
 
-  # Empty client revisions are canonicalized under the source lock and their
-  # retry attaches to that same live selector.
+  # The accepted selector remains unbound until the source turn is stable;
+  # retries attach to that same live selector.
   db.expire_all()
   row = db.query(models.Delegation).one()
-  assert row.source_work_envelope["edit_revision"] == (
-    "edit-1:/data/platform/backend/app/demo.py"
-  )
+  assert row.source_work_envelope["edit_revision"] == ""
+  assert row.source_work_envelope["bind_after_source"] is True
   retry = client.post(
     f"/api/github/contributions/{app_id}/for-chat/{source.id}/work",
     headers=auth,
@@ -271,7 +268,7 @@ def test_accepted_work_starts_once_after_source_settles(
   ).count() == 1
 
 
-def test_deferred_work_with_changed_revision_needs_review_without_start(
+def test_deferred_work_binds_to_final_source_revision_and_starts(
   client, owner_token, db, monkeypatch,
 ):
   auth = _auth(owner_token)
@@ -292,12 +289,28 @@ def test_deferred_work_with_changed_revision_needs_review_without_start(
 
   starts = []
 
-  async def forbidden_start(*_args, **_kwargs):
-    starts.append(True)
-    raise AssertionError("stale source work must not start")
+  async def start_final_source(start_db, row):
+    starts.append({
+      "id": row.id,
+      "envelope": dict(row.source_work_envelope),
+      "prompt": row.startup_prompt,
+      "prompt_sha256": row.prompt_sha256,
+    })
+    start_db.add(models.ChatRun(
+      id="child-final-source",
+      root_run_id="child-final-source",
+      chat_id=row.child_chat_id,
+      status="running",
+      provider=row.provider,
+    ))
+    row.startup_prompt = None
+    row.source_work_status = None
+    row.source_work_result = None
+    start_db.commit()
+    return True
 
   monkeypatch.setattr(github_routes, "_contribution_work_snapshot", fake_snapshot)
-  monkeypatch.setattr(github_routes, "ensure_delegation_started", forbidden_start)
+  monkeypatch.setattr(github_routes, "ensure_delegation_started", start_final_source)
   accepted = client.post(
     f"/api/github/contributions/{app_id}/for-chat/{source.id}/work",
     headers=auth,
@@ -312,19 +325,103 @@ def test_deferred_work_with_changed_revision_needs_review_without_start(
     "edit-2:/data/platform/backend/app/demo.py"
   )
   current["snapshot"]["unsorted_entries"][0]["id"] = "edit-2"
+  retry = client.post(
+    f"/api/github/contributions/{app_id}/for-chat/{source.id}/work",
+    headers=auth,
+    json={
+      "intent": "prepare",
+      "expected_revision": "edit-2:/data/platform/backend/app/demo.py",
+      "record_ids": [],
+    },
+  )
+  assert retry.status_code == 202, retry.text
+  assert retry.json()["attached"] is True
+  assert retry.json()["work"]["id"] == accepted.json()["work"]["id"]
+  source_run.status = "completed"
+  db.commit()
+
+  assert asyncio.run(
+    github_routes.reconcile_attached_contribution_work(source.id)
+  ) == 1
+  assert len(starts) == 1
+  final = starts[0]
+  assert final["envelope"]["edit_revision"] == (
+    "edit-2:/data/platform/backend/app/demo.py"
+  )
+  assert "bind_after_source" not in final["envelope"]
+  assert "edit-2:/data/platform/backend/app/demo.py" in final["prompt"]
+  assert final["prompt_sha256"] == hashlib.sha256(
+    final["prompt"].encode("utf-8")
+  ).hexdigest()
+  db.expire_all()
+  row = db.query(models.Delegation).one()
+  assert row.source_work_status is None
+  assert row.source_work_active_chat_id == source.id
+  assert row.startup_prompt is None
+  assert db.query(models.ChatRun).filter(
+    models.ChatRun.chat_id == row.child_chat_id,
+  ).count() == 1
+
+  projected = client.get(
+    f"/api/github/contributions/{app_id}/for-chat/{source.id}", headers=auth,
+  )
+  assert projected.status_code == 200, projected.text
+  assert projected.json()["work"]["status"] == "running"
+
+
+def test_deferred_work_completes_quietly_when_final_source_has_nothing_left(
+  client, owner_token, db, monkeypatch,
+):
+  auth = _auth(owner_token)
+  app_id, _subagents_id, source = _apps_and_source(client, auth, db)
+  source_run = models.ChatRun(
+    id="source-run",
+    root_run_id="source-run",
+    chat_id=source.id,
+    status="running",
+    provider="codex",
+  )
+  db.add(source_run)
+  db.commit()
+  current = {"snapshot": _snapshot()}
+
+  async def fake_snapshot(_db, _app_id, _chat_id):
+    return current["snapshot"]
+
+  async def forbidden_start(*_args, **_kwargs):
+    raise AssertionError("settled no-op work must not spend a helper turn")
+
+  monkeypatch.setattr(github_routes, "_contribution_work_snapshot", fake_snapshot)
+  monkeypatch.setattr(github_routes, "ensure_delegation_started", forbidden_start)
+  accepted = client.post(
+    f"/api/github/contributions/{app_id}/for-chat/{source.id}/work",
+    headers=auth,
+    json={
+      "intent": "prepare",
+      "expected_revision": "edit-1:/data/platform/backend/app/demo.py",
+      "record_ids": [],
+    },
+  )
+  assert accepted.status_code == 202, accepted.text
+
+  current["snapshot"] = {
+    "unsorted_entries": [],
+    "unsorted_revision": "",
+    "workflow_revision": "",
+    "record_views": [],
+  }
   source_run.status = "completed"
   db.commit()
 
   assert asyncio.run(
     github_routes.reconcile_attached_contribution_work(source.id)
   ) == 0
-  assert starts == []
   db.expire_all()
   row = db.query(models.Delegation).one()
-  assert row.source_work_status == "needs_review"
+  assert row.source_work_status == "completed"
   assert row.source_work_active_chat_id is None
   assert row.startup_prompt is None
-  assert "source changed" in row.source_work_result.lower()
+  assert "no longer has private contribution work" in row.source_work_result
   assert db.query(models.ChatRun).filter(
     models.ChatRun.chat_id == row.child_chat_id,
   ).count() == 0
@@ -333,7 +430,7 @@ def test_deferred_work_with_changed_revision_needs_review_without_start(
     f"/api/github/contributions/{app_id}/for-chat/{source.id}", headers=auth,
   )
   assert projected.status_code == 200, projected.text
-  assert projected.json()["work"]["status"] == "needs_review"
+  assert projected.json()["work"]["status"] == "completed"
 
 
 def test_idle_stale_private_revision_binds_to_current_source_once(
@@ -609,68 +706,6 @@ def test_repeated_prestart_admission_failures_become_actionable_attention(
   }]
 
 
-def test_false_start_without_child_run_counts_as_prestart_failure(
-  client, owner_token, db, monkeypatch,
-):
-  auth = _auth(owner_token)
-  app_id, _subagents_id, source = _apps_and_source(client, auth, db)
-  source_run = models.ChatRun(
-    id="source-run",
-    root_run_id="source-run",
-    chat_id=source.id,
-    status="running",
-    provider="codex",
-  )
-  db.add(source_run)
-  db.commit()
-
-  async def fake_snapshot(_db, _app_id, _chat_id):
-    return _snapshot()
-
-  attempts = []
-
-  async def declined_start(_start_db, row):
-    attempts.append(row.id)
-    return False
-
-  monkeypatch.setattr(github_routes, "_contribution_work_snapshot", fake_snapshot)
-  monkeypatch.setattr(github_routes, "ensure_delegation_started", declined_start)
-  accepted = client.post(
-    f"/api/github/contributions/{app_id}/for-chat/{source.id}/work",
-    headers=auth,
-    json={
-      "intent": "prepare",
-      "expected_revision": "edit-1:/data/platform/backend/app/demo.py",
-      "record_ids": [],
-    },
-  )
-  assert accepted.status_code == 202, accepted.text
-
-  source_run.status = "completed"
-  db.commit()
-  assert asyncio.run(
-    github_routes.reconcile_attached_contribution_work(source.id)
-  ) == 0
-  db.expire_all()
-  row = db.query(models.Delegation).one()
-  assert attempts == [row.id]
-  assert row.source_work_status == "retrying"
-  assert row.source_work_active_chat_id == source.id
-  assert db.query(models.ChatRun).filter(
-    models.ChatRun.chat_id == row.child_chat_id,
-  ).count() == 0
-
-  assert asyncio.run(
-    github_routes.reconcile_attached_contribution_work(source.id)
-  ) == 0
-  db.expire_all()
-  row = db.query(models.Delegation).one()
-  assert attempts == [row.id, row.id]
-  assert row.source_work_status == "needs_review"
-  assert row.source_work_active_chat_id is None
-  assert row.startup_prompt is None
-
-
 def test_reconcile_isolates_one_failed_start_from_other_source_chats(
   client, owner_token, db, monkeypatch,
 ):
@@ -858,13 +893,15 @@ def test_source_work_policy_allows_its_one_required_workflow_skill(
   row = db.query(models.Delegation).one()
   policy = delegations.policy_for_chat(db, row.child_chat_id)
   assert policy is not None
-  assert policy.allowed_skill_paths == (
+  assert policy.required_skill_paths == (
     "/data/apps/contribute/attached-work.md",
   )
   assembled = f"{policy.system_prompt}\n\n{row.startup_prompt}"
   assert "read the complete required playbook" in assembled
   assert "Read and follow /data/apps/contribute/attached-work.md" in assembled
-  assert "Do not inspect unrelated chats, Memory, skills" in assembled
+  assert "single filtered offline snapshot" in assembled
+  assert "never enumerate Contribute storage" in assembled
+  assert "Do not inspect unrelated chats or Memory" in assembled
 
 
 def test_owner_can_stop_prestart_contribution_work_and_release_its_lease(
@@ -957,6 +994,7 @@ def test_hidden_source_work_terminal_persists_one_owner_notification(
   row = db.query(models.Delegation).one()
   notifications = db.query(models.Notification).all()
   assert row.parent_woken_at is not None
+  assert row.result_incorporated_at is None
   assert row.source_work_active_chat_id is None
   assert len(notifications) == 1
   assert notifications[0].source_type == "agent"
@@ -965,3 +1003,7 @@ def test_hidden_source_work_terminal_persists_one_owner_notification(
   assert (
     "finished" if terminal == "completed" else "needs attention"
   ) in notifications[0].title.lower()
+  from app.chat_activity import chat_activity_page
+  activity = chat_activity_page(db, source.id)["events"]
+  assert activity[0]["delegation_id"] == row.id
+  assert activity[0]["consumption"] == "notified"

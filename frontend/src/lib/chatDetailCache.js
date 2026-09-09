@@ -178,6 +178,7 @@ export function chatDetailCacheValue(data = {}) {
       && data.offset + messages.length === data.total,
     updated_at: typeof data.updated_at === 'string' ? data.updated_at : null,
     activeAssistantMessageId: data.active_assistant_message_id || null,
+    recoveryRunId: data.recovery_run_id || null,
     messages,
     total,
     offset,
@@ -190,6 +191,11 @@ export function chatDetailCacheValue(data = {}) {
       ? data.pending_messages
       : [],
     pending_question_id: data.pending_question_id || null,
+    waits: Array.isArray(data.waits) ? data.waits : [],
+    background_helpers: data.background_helpers
+      && typeof data.background_helpers === 'object'
+      ? data.background_helpers
+      : { count: 0, items: [] },
     chatInfo: {
       provider: data.provider || 'claude',
       session_id: data.session_id || null,
@@ -198,6 +204,9 @@ export function chatDetailCacheValue(data = {}) {
       effective: data.effective_agent_settings || {},
       has_assistant_turns: !!data.has_assistant_turns,
       auto_resume_on_limit: !!data.auto_resume_on_limit,
+      // {id, name, root_path} when the chat belongs to a live project — the
+      // composer's @-mention of project files activates on this.
+      project: data.project || null,
     },
   }
 }
@@ -258,13 +267,6 @@ export function mergeRecentMessagesIntoLoadedWindow({
   }
   if (!Array.isArray(loadedMessages) || loadedMessages.length === 0) {
     return { ...fallback, verified: true }
-  }
-  if (preserveLocalSuffix && recent.length === 0) {
-    return {
-      messages: loadedMessages,
-      offset: loadedOffset,
-      verified: true,
-    }
   }
   if (!Number.isInteger(loadedOffset) || !Number.isInteger(recentOffset)) return fallback
 

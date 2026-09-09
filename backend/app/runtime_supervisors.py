@@ -21,13 +21,42 @@ from app.database import SessionLocal
 
 RESTART_BACKLOG_DRAIN_INTERVAL_SECS = 2.0
 CHAT_WAIT_SWEEP_INTERVAL_SECS = 30.0
+DELEGATION_STARTUP_RECOVERY_INTERVAL_SECS = 60.0
 DELEGATION_WAKE_RECOVERY_INTERVAL_SECS = 60.0
 AUTOPILOT_LEASE_RECOVERY_INTERVAL_SECS = 60.0
-DELEGATION_START_RECOVERY_INTERVAL_SECS = 60.0
+# Capacity monitor: sample /data headroom every tick; recompute the (more
+# expensive) per-domain attribution walk only every Nth tick unless pressure is
+# present, so the monitor never amplifies the disk pressure it watches.
+CAPACITY_MONITOR_INTERVAL_SECS = 300.0
+CAPACITY_MONITOR_DOMAIN_EVERY_N_TICKS = 6
+PROVIDER_SESSION_RETENTION_INTERVAL_SECS = 6 * 60 * 60
 
 
 class RuntimeSettings(Protocol):
   data_dir: str
+
+
+async def sweep_provider_sessions_if_idle(
+  data_dir: str,
+  *,
+  sweep=None,
+  runner_registry=None,
+) -> dict:
+  """Run filesystem retention behind an atomic idle-runner boundary."""
+  if sweep is None:
+    from app.provider_session_retention import sweep_stale_provider_sessions
+    sweep = sweep_stale_provider_sessions
+  if runner_registry is None:
+    from app.runner_registry import registry
+    runner_registry = registry
+  lease = runner_registry.acquire_idle_admission_lease()
+  if lease is None:
+    return {"status": "skipped_active"}
+  try:
+    result = await asyncio.to_thread(sweep, data_dir)
+    return {"status": "completed", **result}
+  finally:
+    runner_registry.release_admission_lease(lease)
 
 
 class RuntimeSupervisors:
@@ -197,6 +226,9 @@ class RuntimeSupervisors:
           )
 
     async def chat_wait_loop():
+      # Durable declared waits: run due checks and resume their chats. The
+      # rows are the promise; this loop restarting with the server is what
+      # makes a declared wait restart-immune.
       from app.chat_waits import sweep_due_waits
       while True:
         await asyncio.sleep(CHAT_WAIT_SWEEP_INTERVAL_SECS)
@@ -206,6 +238,26 @@ class RuntimeSupervisors:
           raise
         except Exception as exc:
           self.log.error("chat-wait sweep failed: %s", exc, exc_info=True)
+
+    async def delegation_startup_recovery_loop():
+      # Startup admission and source-attached work have their own repair path;
+      # neither can be delayed by a stalled parent wake or SQLite lease sweep.
+      from app.delegations import (
+        reconcile_unstarted_delegations,
+      )
+      from app.routes.github import reconcile_attached_contribution_work
+
+      while True:
+        await asyncio.sleep(DELEGATION_STARTUP_RECOVERY_INTERVAL_SECS)
+        try:
+          await reconcile_unstarted_delegations()
+          await reconcile_attached_contribution_work()
+        except asyncio.CancelledError:
+          raise
+        except Exception as exc:
+          self.log.error(
+            "delegation startup recovery failed: %s", exc, exc_info=True,
+          )
 
     async def delegation_wake_recovery_loop():
       # Live completion hooks own the prompt path. This bounded cursor pass
@@ -277,22 +329,6 @@ class RuntimeSupervisors:
           )
         await asyncio.sleep(sweep_seconds)
 
-    async def delegation_start_recovery_loop():
-      while True:
-        await asyncio.sleep(DELEGATION_START_RECOVERY_INTERVAL_SECS)
-        try:
-          from app.delegations import reconcile_unstarted_delegations
-          from app.routes.github import reconcile_attached_contribution_work
-
-          await reconcile_unstarted_delegations()
-          await reconcile_attached_contribution_work()
-        except asyncio.CancelledError:
-          raise
-        except Exception as exc:
-          self.log.error(
-            "delegation startup recovery failed: %s", exc, exc_info=True,
-          )
-
     async def agent_scratch_loop():
       # Exact physical-completion hints own the normal path. The deadline is
       # independent of event traffic so the broad sweep still repairs missed
@@ -343,9 +379,101 @@ class RuntimeSupervisors:
       finally:
         system_broadcast.unsubscribe(events)
 
+    async def capacity_monitor_loop():
+      # Outcome #7: see a full /data COMING, not just when admission refuses
+      # turns. Each tick samples headroom, records the bounded history ring,
+      # forecasts time-to-exhaustion, and pushes ONE owner alert per tier
+      # escalation (storm-suppressed). The blocking snapshot/tick runs off the
+      # event loop; only the async push runs here.
+      from app import models, push
+      from app.capacity_monitor import (
+        record_alert_delivery,
+        run_capacity_tick,
+      )
+      from app.config import get_settings
+
+      data_dir = get_settings().data_dir
+      tick = 0
+      while True:
+        try:
+          include_domains = tick % CAPACITY_MONITOR_DOMAIN_EVERY_N_TICKS == 0
+          result = await asyncio.to_thread(
+            run_capacity_tick, data_dir,
+            notify=None, include_domains=include_domains,
+          )
+          if result["alerted"] and result["notification_id"]:
+            notification_id = result["notification_id"]
+            with SessionLocal() as notification_db:
+              owner_row = notification_db.query(models.Owner.id).first()
+              if owner_row is not None:
+                await push.notify_owner_async(
+                  notification_db,
+                  owner_row[0],
+                  title="Storage capacity alert",
+                  body=result["body"],
+                  source_type="capacity",
+                  notification_id=notification_id,
+                )
+            # notify_owner_async deliberately fails open. Suppress this tier
+            # only after its durable bell row exists; otherwise retry next tick
+            # with the same idempotent notification id.
+            with SessionLocal() as verification_db:
+              delivered = verification_db.query(models.Notification.id).filter(
+                models.Notification.id == notification_id,
+              ).first() is not None
+            if delivered:
+              await asyncio.to_thread(
+                record_alert_delivery, data_dir, result["tier"],
+              )
+              self.log.warning(
+                "capacity alert tier=%s free=%s", result["tier"],
+                (result["snapshot"] or {}).get("data_free_bytes"),
+              )
+        except asyncio.CancelledError:
+          raise
+        except Exception as exc:
+          self.log.error("capacity monitor failed: %s", exc, exc_info=True)
+        tick += 1
+        await asyncio.sleep(CAPACITY_MONITOR_INTERVAL_SECS)
+
+    async def provider_session_retention_loop():
+      # Codex rollout JSONL is resumable context, not permanent owner data.
+      # Startup owns the immediate, pre-DB sweep. Periodic cleanup may run only
+      # while runner admission is atomically closed on an idle registry; mtime
+      # alone cannot protect a rollout racing with thread_resume on Unix.
+      while True:
+        await asyncio.sleep(PROVIDER_SESSION_RETENTION_INTERVAL_SECS)
+        try:
+          result = await sweep_provider_sessions_if_idle(
+            self.settings.data_dir,
+          )
+          if result["status"] == "skipped_active":
+            self.log.info(
+              "provider session retention skipped while agents are active",
+            )
+            continue
+          if result["reclaimed_bytes"]:
+            self.log.info(
+              "provider session retention reclaimed %d bytes from %d files",
+              result["reclaimed_bytes"], result["removed_files"],
+            )
+          if result["errors"]:
+            self.log.warning(
+              "provider session retention skipped %d file(s)", result["errors"],
+            )
+        except asyncio.CancelledError:
+          raise
+        except Exception as exc:
+          self.log.error(
+            "provider session retention failed: %s", exc, exc_info=True,
+          )
+
     self._spawn("wedged-marker-sweep", wedged_marker_loop())
     self._spawn("reset-park-sweep", reset_park_loop())
     self._spawn("chat-wait-sweep", chat_wait_loop())
+    self._spawn(
+      "delegation-startup-recovery", delegation_startup_recovery_loop(),
+    )
     self._spawn(
       "delegation-wake-recovery", delegation_wake_recovery_loop(),
     )
@@ -354,9 +482,10 @@ class RuntimeSupervisors:
     )
     self._spawn("writer-supervisor", writer_supervisor_loop())
     self._spawn("browser-profile-quota", browser_profile_loop())
-    self._spawn("delegation-start-recovery", delegation_start_recovery_loop())
     self._spawn("agent-scratch-retention", agent_scratch_loop())
     self._spawn("legacy-tool-output-compression", compress_legacy_tool_outputs())
+    self._spawn("provider-session-retention", provider_session_retention_loop())
+    self._spawn("capacity-monitor", capacity_monitor_loop())
 
   async def stop(self) -> None:
     """Cancel and observe every task, then stop external watcher resources."""

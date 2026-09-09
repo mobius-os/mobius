@@ -80,9 +80,9 @@ def _authorization_context(client, owner_token, db, tmp_path):
   )
   top_level_token = auth_mod.create_agent_token(
     chat_ids["top-level"],
-    "destructive-control-top-run",
     owner.username,
     owner.token_epoch,
+    run_id="destructive-control-top-run",
   )
   app_token = auth_mod.create_access_token({
     "sub": owner.username,
@@ -204,6 +204,7 @@ def test_real_delegated_bearer_is_rejected_across_owner_control_surface(
     ("POST", "/api/common/reply", {"post_id": "invalid", "text": "Reply"}, None),
     ("POST", "/api/common/groups", {"name": "", "members": []}, None),
     ("POST", "/api/common/groups/invalid/send", {"text": "Hello"}, None),
+    ("DELETE", "/api/common/groups/invalid", None, None),
     (
       "POST",
       "/api/common/groups/invalid/members",

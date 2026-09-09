@@ -12,12 +12,15 @@ import X from 'lucide-react/dist/esm/icons/x.mjs'
 import { api, jsonOrThrow } from '../../api/client.js'
 import useDialogFocus from '../../hooks/useDialogFocus.js'
 import { remoteSyncActions, remoteSyncPresentation } from '../../lib/projectGit.js'
+import { prepareProjectContribution } from '../../lib/projectContribution.js'
+import { linkedProjectAppId } from '../../lib/appSourceProject.js'
 import ProjectIdentityIcon from './ProjectIdentityIcon.jsx'
 import './ProjectGitPanel.css'
 
-export default function ProjectGitPanel({ project, onClose }) {
+export default function ProjectGitPanel({ project, onClose, onOpenChat }) {
   const cardRef = useRef(null)
   const closeRef = useRef(null)
+  const preparationIntent = useRef(null)
   const queryClient = useQueryClient()
   const [repository, setRepository] = useState('')
   const [busy, setBusy] = useState('')
@@ -37,6 +40,21 @@ export default function ProjectGitPanel({ project, onClose }) {
   const summary = remoteSyncPresentation(status)
   const actions = remoteSyncActions(status)
   useEffect(() => { setPushReview(false) }, [status?.head, status?.ahead, status?.behind, status?.dirty])
+
+  async function prepare() {
+    if (busy) return
+    setBusy('prepare'); setError(''); setNotice('')
+    try {
+      // Keep this exact intent across a failed response; remounting starts a new request.
+      preparationIntent.current ||= crypto.randomUUID()
+      const chat = await prepareProjectContribution(api, project, preparationIntent.current)
+      await queryClient.invalidateQueries({ queryKey: ['chats'] })
+      onOpenChat?.(chat)
+      onClose?.()
+    } catch (cause) {
+      setError(cause?.message || 'Could not prepare this Project privately.')
+    } finally { setBusy('') }
+  }
 
   async function connect(event) {
     event.preventDefault()
@@ -99,7 +117,7 @@ export default function ProjectGitPanel({ project, onClose }) {
       <aside ref={cardRef} className="project-git" role="dialog" aria-modal="true" aria-labelledby="project-git-title" tabIndex={-1}>
         <header className="project-git__head">
           <ProjectIdentityIcon project={project} size={38} />
-          <div><p>Version control</p><h2 id="project-git-title">Publish {project.name}</h2></div>
+          <div><p>Version control</p><h2 id="project-git-title">GitHub · {project.name}</h2></div>
           <button ref={closeRef} type="button" aria-label="Close GitHub panel" onClick={onClose}><X size={18} /></button>
         </header>
 
@@ -119,6 +137,11 @@ export default function ProjectGitPanel({ project, onClose }) {
               </form>
               {!status.github_connected && <p className="project-git__boundary">GitHub sign-in is not connected yet. You can attach the repository now, but Fetch and Push stay locked until you connect GitHub in Contribute.</p>}
             </section> : <>
+              <section className="project-git__guidance">
+                <h3>Propose changes</h3>
+                <p>Prepare a private review in Contribute. Nothing is sent to GitHub until you approve the exact PR.</p>
+                {linkedProjectAppId(project) ? <button type="button" className="is-primary" disabled={!!busy || !onOpenChat} onClick={() => void prepare()}>{busy === 'prepare' ? 'Starting preparation…' : 'Prepare PR'}</button> : <p>Private PR preparation currently supports Projects linked to an installed app.</p>}
+              </section>
               <section>
                 <div className="project-git__repo">
                   <span><Github size={17} /></span><div><strong>{status.repository}</strong><small><GitBranch size={12} /> {status.branch || 'Detached'}{status.head ? ` · ${status.head}` : ''}</small></div>
@@ -128,21 +151,23 @@ export default function ProjectGitPanel({ project, onClose }) {
                   <span><ArrowUp size={14} /><strong>{status.ahead || 0}</strong><small>outgoing</small></span>
                   <span><ArrowDown size={14} /><strong>{status.behind || 0}</strong><small>incoming</small></span>
                 </div>
+                <details><summary>Direct branch sync</summary>
                 <div className="project-git__actions">
                   <button type="button" disabled={!!busy || !actions.fetch} onClick={() => void run('fetch')}><RefreshCw size={14} className={busy === 'fetch' ? 'is-spinning' : ''} />{busy === 'fetch' ? 'Fetching…' : 'Fetch'}</button>
                   <button type="button" disabled={!!busy || !actions.pull} onClick={() => void run('pull')}><ArrowDown size={14} />{busy === 'pull' ? 'Pulling…' : 'Pull'}</button>
                   <button type="button" className="is-primary" disabled={!!busy || !actions.push} aria-expanded={pushReview} onClick={() => setPushReview(true)}><ArrowUp size={14} />{busy === 'push' ? 'Pushing…' : 'Review & push'}</button>
                 </div>
                 {pushReview && <div className="project-git__push-review" role="group" aria-label="Confirm GitHub push">
-                  <div><strong>Publish {status.ahead} {status.ahead === 1 ? 'commit' : 'commits'}?</strong><p>Destination: <code>{status.repository}:{status.branch}</code>. Uncommitted files and generated artifacts stay local.</p></div>
+                  <div><strong>Publish {status.ahead} {status.ahead === 1 ? 'commit' : 'commits'}?</strong><p>Destination: <code>{status.repository}:{status.branch}</code>. Uncommitted files and generated build output stay local.</p></div>
                   <div><button type="button" disabled={!!busy} onClick={() => setPushReview(false)}>Cancel</button><button type="button" className="is-primary" disabled={!!busy} onClick={() => void run('push')}>{busy === 'push' ? 'Pushing…' : `Push ${status.ahead}`}</button></div>
                 </div>}
+                </details>
               </section>
 
               {status.commits?.length > 0 && <section>
                 <div className="project-git__section-head"><h3>Outgoing commits</h3><span>{status.commits.length}{status.ahead > status.commits.length ? ` of ${status.ahead}` : ''}</span></div>
                 <div className="project-git__commits">{status.commits.map(commit => <div key={commit.id}><code>{commit.id}</code><span>{commit.subject}</span></div>)}</div>
-                <p className="project-git__review-note">Only these committed snapshots are published. Uncommitted files and generated artifacts are never included.</p>
+                <p className="project-git__review-note">Only these committed snapshots are published. Uncommitted files and generated build output are never included.</p>
               </section>}
             </>}
           </>}

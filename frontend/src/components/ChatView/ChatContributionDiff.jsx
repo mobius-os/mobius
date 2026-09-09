@@ -49,5 +49,5 @@ export default function ChatContributionDiff({ appId, record }) {
       </div>
     )
   }
-  return <UnifiedDiff diff={state.diff} initiallyOpenFirst />
+  return <UnifiedDiff diff={state.diff} />
 }

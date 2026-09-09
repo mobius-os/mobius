@@ -4,6 +4,7 @@ import importlib.util
 import json
 import os
 import signal
+import shutil
 import subprocess
 import sys
 import time
@@ -17,6 +18,12 @@ import jwt
 
 from app import app_cron, app_jobs, models
 from app.config import get_settings
+
+
+def _accepted_context(source, app_id=57):
+  runtime = source.parent.parent / "app-runtime" / str(app_id) / ("a" * 64)
+  shutil.copytree(source, runtime, dirs_exist_ok=True)
+  return {"source_dir": str(source), "runtime_dir": str(runtime)}
 
 
 def test_cron_parser_resolves_supervised_command_to_real_job():
@@ -259,10 +266,7 @@ def test_initialization_uses_the_token_returned_by_readiness(
   )
   monkeypatch.setattr(runner, "_app_is_live", lambda *_args: True)
   monkeypatch.setattr(
-    runner, "_job_context", lambda *_args: {
-      "source_dir": str(source),
-      "capability_contract": None,
-    },
+    runner, "_job_context", lambda *_args: _accepted_context(source),
   )
   monkeypatch.setattr(
     runner.subprocess, "Popen", lambda *_args, **_kwargs: types.SimpleNamespace(wait=lambda: 0),
@@ -373,10 +377,7 @@ def test_wrapper_runs_job_only_after_live_check(tmp_path, monkeypatch):
   monkeypatch.setattr(
     runner,
     "_job_context",
-    lambda app_id, token: {
-      "source_dir": str(source),
-      "capability_contract": None,
-    },
+    lambda app_id, token: _accepted_context(source),
   )
   popen = types.SimpleNamespace(wait=lambda: 0)
   calls = []
@@ -402,7 +403,7 @@ def test_wrapper_runs_job_only_after_live_check(tmp_path, monkeypatch):
   ])
 
   assert runner.run() == 0
-  assert calls[0][0][0] == ["bash", str(job.resolve()), "57"]
+  assert calls[0][0][0] == ["bash", str(Path(_accepted_context(source)["runtime_dir"]) / job.name), "57"]
   child_env = calls[0][1]["env"]
   assert child_env["APP_TOKEN"] == "app-token"
   assert child_env["APP_JOB_STATE_DIR"].endswith("/apps/57/job-state")
@@ -429,7 +430,7 @@ def test_scheduled_job_emits_owner_authenticated_outcome_after_child_exit(
   monkeypatch.setattr(runner, "_mint_app_token", lambda _app_id: "app-token")
   monkeypatch.setattr(runner, "_app_is_live", lambda *_args: True)
   monkeypatch.setattr(
-    runner, "_job_context", lambda *_args: {"source_dir": str(source)},
+    runner, "_job_context", lambda *_args: _accepted_context(source),
   )
   monkeypatch.setattr(runner.os, "getsid", lambda _pid: os.getpid())
   lifecycle = []
@@ -607,3 +608,36 @@ def test_job_token_is_app_scoped_and_expires_within_two_hours(
   assert claims["scope"] == "app"
   assert claims["app_id"] == app.id
   assert 0 < claims["exp"] - time.time() <= 2 * 60 * 60 + 5
+
+
+def test_job_executes_accepted_script_and_siblings_even_when_draft_job_is_deleted(tmp_path, monkeypatch):
+  runner = _load_runner()
+  data = tmp_path / "data"
+  source = data / "apps" / "memory"
+  source.mkdir(parents=True)
+  job = source / "fetch.sh"
+  job.write_text('#!/bin/sh\ncat sibling.txt > "$APP_JOB_STATE_DIR/result"\n')
+  (source / "sibling.txt").write_text("accepted sibling")
+  context = _accepted_context(source)
+  job.unlink()
+  (source / "sibling.txt").write_text("unapplied sibling")
+  monkeypatch.setattr(runner, "DATA_DIR", data)
+  monkeypatch.setattr(runner, "_mint_app_token", lambda *_: "app-token")
+  monkeypatch.setattr(runner, "_app_is_live", lambda *_: True)
+  monkeypatch.setattr(runner, "_job_context", lambda *_: context)
+  monkeypatch.setattr(runner.os, "getsid", lambda _: os.getpid())
+  monkeypatch.setattr(runner.sys, "argv", ["app-job-runner.py", "57", str(job)])
+  assert runner.run() == 0
+  assert (data / "apps" / "57" / "job-state" / "result").read_text() == "accepted sibling"
+
+
+def test_missing_runtime_context_never_executes_editable_source(tmp_path, monkeypatch):
+  runner = _load_runner()
+  source = tmp_path / "apps" / "draft"
+  source.mkdir(parents=True)
+  job = source / "job.sh"
+  job.write_text("unapplied script")
+  monkeypatch.setattr(runner, "DATA_DIR", tmp_path)
+  context = {"source_dir": str(source)}
+  assert runner._runtime_job(7, job, context) is None
+  assert runner._runtime_job(7, job, {**context, "runtime_dir": None}) is None

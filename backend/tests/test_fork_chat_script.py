@@ -123,8 +123,12 @@ def test_claude_fails_closed_without_a_valid_exact_fork(payload, expected):
     _fork_claude("source", "/data", "coach", runner=runner)
 
 
-def test_codex_uses_sdk_thread_fork_and_read_only_turn(monkeypatch):
+def test_codex_uses_sdk_thread_fork_and_read_only_turn(tmp_path, monkeypatch):
+  from app.codex_session_lock import try_acquire_codex_session_sweep
+
   calls = {}
+  data_dir = tmp_path
+  monkeypatch.setenv("CODEX_HOME", str(data_dir / "cli-auth" / "codex"))
   for name in ("API_BASE_URL", "AGENT_TOKEN", "CHAT_ID", "MOBIUS_RUN_TOKEN"):
     monkeypatch.setenv(name, f"secret-{name}")
 
@@ -168,6 +172,7 @@ def test_codex_uses_sdk_thread_fork_and_read_only_turn(monkeypatch):
       self._client = FakeClient()
 
     async def __aenter__(self):
+      calls["exclusive_during_fork"] = try_acquire_codex_session_sweep(data_dir)
       return self
 
     async def __aexit__(self, *args):
@@ -229,6 +234,10 @@ def test_codex_uses_sdk_thread_fork_and_read_only_turn(monkeypatch):
   )]
   assert calls["mcp_inventory"][0] == ["codex", "mcp", "list", "--json"]
   assert calls["mcp_inventory"][1]["cwd"] == "/data"
+  assert calls["exclusive_during_fork"] is None
+  after = try_acquire_codex_session_sweep(data_dir)
+  assert after is not None
+  after.release()
 
 
 def test_codex_mcp_inventory_is_encoded_as_one_exact_disable_map():

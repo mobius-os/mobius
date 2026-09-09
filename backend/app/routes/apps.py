@@ -17,12 +17,12 @@ from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse, StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session, defer
 
 from app import (
   activity, app_activity, app_apply, app_capability_acceptance, app_git,
-  app_jobs, app_preview, app_recency, fs_locks, icon_cache,
+  app_jobs, app_recency, chat_app_artifacts, chat_queue, fs_locks, icon_cache,
   models, project_git, providers, schemas,
   source_dirs, workspace_files,
 )
@@ -97,6 +97,30 @@ def _require_app_update_control(
   require_nondelegated_owner_control(principal)
 
 
+class AppSourceFileWrite(BaseModel):
+  """One optimistic-concurrency text save in an installed app worktree."""
+
+  model_config = ConfigDict(extra="forbid")
+
+  content: str = Field(max_length=workspace_files.WRITE_MAX)
+  expected_revision: str | None = Field(
+    default=None, pattern=f"^{workspace_files.REVISION_RE.pattern}$",
+  )
+
+
+class AppSourceFolderCreate(BaseModel):
+  model_config = ConfigDict(extra="forbid")
+
+  path: str = Field(min_length=1, max_length=2048)
+
+
+class AppSourcePathMove(BaseModel):
+  model_config = ConfigDict(extra="forbid")
+
+  from_path: str = Field(min_length=1, max_length=2048)
+  to_path: str = Field(min_length=1, max_length=2048)
+
+
 def _app_source_root(db: Session, app_id: int) -> tuple[models.App, Path]:
   app = live_app_or_404(db, app_id)
   if source_dirs.source_dir_kind(app.source_dir, get_settings().data_dir) != "app":
@@ -116,6 +140,22 @@ def _resolve_app_source_path(root: Path, path: str) -> Path:
     raise HTTPException(400, "Invalid app source path.") from exc
   except workspace_files.UnavailableWorkspacePath as exc:
     raise HTTPException(403, str(exc)) from exc
+
+
+async def _write_app_source_file(
+  db: Session,
+  app_id: int,
+  path: str,
+  content: bytes,
+  expected_revision: str | None,
+) -> dict:
+  app, _root = _app_source_root(db, app_id)
+  async with fs_locks.source_dir_lock(app.source_dir):
+    _app, root = _app_source_root(db, app_id)
+    target = _resolve_app_source_path(root, path)
+    if target == root:
+      raise HTTPException(400, "An app source root is not a file.")
+    return workspace_files.write_file(root, target, content, expected_revision)
 
 
 @router.get("/{app_id}/source/files")
@@ -166,6 +206,125 @@ def read_app_source_file(
   )
 
 
+@router.put(
+  "/{app_id}/source/file", dependencies=[Depends(reject_cross_site)],
+)
+async def write_app_source_file(
+  app_id: int,
+  body: AppSourceFileWrite,
+  path: str = Query(min_length=1, max_length=2048),
+  _: models.Owner = Depends(get_current_owner),
+  db: Session = Depends(get_db),
+):
+  """Save one installed-app source file without creating a Project copy."""
+  if "expected_revision" not in body.model_fields_set:
+    raise workspace_files.revision_required(path)
+  return await _write_app_source_file(
+    db, app_id, path,
+    workspace_files.encoded_text(body.content), body.expected_revision,
+  )
+
+
+@router.put(
+  "/{app_id}/source/file-bytes", dependencies=[Depends(reject_cross_site)],
+)
+async def write_app_source_file_bytes(
+  app_id: int,
+  request: Request,
+  path: str = Query(min_length=1, max_length=2048),
+  _: models.Owner = Depends(get_current_owner),
+  db: Session = Depends(get_db),
+):
+  """Save one binary app asset with the same revision guard as text saves."""
+  content = await workspace_files.read_write_body(request)
+  named, expected_revision = workspace_files.revision_precondition(request)
+  if not named:
+    raise workspace_files.revision_required(path)
+  return await _write_app_source_file(
+    db, app_id, path, content, expected_revision,
+  )
+
+
+@router.post(
+  "/{app_id}/source/folder", dependencies=[Depends(reject_cross_site)],
+)
+async def create_app_source_folder(
+  app_id: int,
+  body: AppSourceFolderCreate,
+  _: models.Owner = Depends(get_current_owner),
+  db: Session = Depends(get_db),
+):
+  app, _root = _app_source_root(db, app_id)
+  async with fs_locks.source_dir_lock(app.source_dir):
+    _app, root = _app_source_root(db, app_id)
+    target = _resolve_app_source_path(root, body.path)
+    if target == root:
+      raise HTTPException(400, "The app source root already exists.")
+    try:
+      target.mkdir(parents=True, exist_ok=False)
+    except FileExistsError as exc:
+      raise HTTPException(409, "A file or folder already uses that path.") from exc
+    return {"ok": True, "path": target.relative_to(root).as_posix()}
+
+
+@router.delete(
+  "/{app_id}/source/file", dependencies=[Depends(reject_cross_site)],
+)
+async def delete_app_source_path(
+  app_id: int,
+  path: str = Query(min_length=1, max_length=2048),
+  _: models.Owner = Depends(get_current_owner),
+  db: Session = Depends(get_db),
+):
+  app, _root = _app_source_root(db, app_id)
+  async with fs_locks.source_dir_lock(app.source_dir):
+    _app, root = _app_source_root(db, app_id)
+    target = _resolve_app_source_path(root, path)
+    if target == root:
+      raise HTTPException(400, "The app source root cannot be deleted.")
+    if target.is_dir():
+      shutil.rmtree(target)
+    elif target.is_file():
+      target.unlink()
+    else:
+      raise HTTPException(404, "File not found.")
+    return {"ok": True}
+
+
+@router.post(
+  "/{app_id}/source/move", dependencies=[Depends(reject_cross_site)],
+)
+async def move_app_source_path(
+  app_id: int,
+  body: AppSourcePathMove,
+  _: models.Owner = Depends(get_current_owner),
+  db: Session = Depends(get_db),
+):
+  app, _root = _app_source_root(db, app_id)
+  async with fs_locks.source_dir_lock(app.source_dir):
+    _app, root = _app_source_root(db, app_id)
+    source = _resolve_app_source_path(root, body.from_path)
+    destination = _resolve_app_source_path(root, body.to_path)
+    if source == root or destination == root:
+      raise HTTPException(400, "The app source root cannot be moved.")
+    if destination == source or destination.is_relative_to(source):
+      raise HTTPException(400, "Cannot move a path into itself or a descendant.")
+    if not source.exists():
+      raise HTTPException(404, "Source path not found.")
+    if destination.exists():
+      raise HTTPException(409, "A file or folder already uses the destination.")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    try:
+      os.replace(source, destination)
+    except OSError as exc:
+      raise HTTPException(409, "Could not move the path.") from exc
+    return {
+      "ok": True,
+      "from": source.relative_to(root).as_posix(),
+      "to": destination.relative_to(root).as_posix(),
+    }
+
+
 @router.get("/{app_id}/source/git/status")
 def get_app_source_git_status(
   app_id: int,
@@ -186,7 +345,11 @@ def get_app_source_git_diff(
   _app, root = _app_source_root(db, app_id)
   target = _resolve_app_source_path(root, path)
   if not target.is_file():
-    raise HTTPException(404, "File not found.")
+    relative = target.relative_to(root).as_posix()
+    deleted = any(row["path"] == relative and row["status"] == "deleted"
+                  for row in project_git.project_status(root)["changes"])
+    if not deleted:
+      raise HTTPException(404, "File not found.")
   return project_git.project_file_diff(
     root, target, hidden_dirs=_APP_SOURCE_HIDDEN_DIRS,
   )
@@ -314,13 +477,18 @@ async def _hard_delete_app(db: Session, app: models.App) -> None:
   deleted_app_id = app.id
   settings = get_settings()
 
-  legacy_project = db.query(models.Project.id).filter(
-    models.Project.source_app_id == deleted_app_id,
-    models.Project.legacy_source_json.isnot(None),
-  ).first()
-  if legacy_project is not None:
+  from app.delegations import active_delegation_ids_for_app
+  if active_delegation_ids_for_app(db, deleted_app_id):
     raise RuntimeError(
-      f"app {deleted_app_id} still owns imported project {legacy_project.id}"
+      "active delegated work must quiesce before permanent app deletion"
+    )
+  # Project recovery includes linked source, not only legacy imports. Provider
+  # metadata alone is not ownership: native projects can detach safely.
+  from app.project_retention import projects_using_app_files
+  dependent_projects = projects_using_app_files(db, app)
+  if dependent_projects:
+    raise RuntimeError(
+      f"app {deleted_app_id} still owns project {dependent_projects[0].id} files"
     )
 
   # Registry state is the revocation boundary; physical cleanup may fail.
@@ -344,6 +512,8 @@ async def _hard_delete_app(db: Session, app: models.App) -> None:
   purge_app_bundles(deleted_app_id)
   await asyncio.to_thread(_rmtree_strict, storage_dir)
   await asyncio.to_thread(_rmtree_strict, secrets_dir)
+  from app.applied_app_runtime import runtime_parent
+  await asyncio.to_thread(_rmtree_strict, runtime_parent(deleted_app_id))
 
   # Storage is gone; only now free the row and its reusable id. A partial
   # cleanup of the slug-keyed source tree below leaves harmless orphans — those
@@ -351,15 +521,75 @@ async def _hard_delete_app(db: Session, app: models.App) -> None:
   # missing files (a 404) is the acceptable failure, not data exposure.
   # The activity marker is id-keyed too; remove it before the reusable app id
   # is freed so a future unrelated app never inherits the old app's dot.
+  delegation_ids = [row[0] for row in db.query(models.Delegation.id).filter(
+    models.Delegation.app_id == deleted_app_id,
+  ).all()]
+  critic_chat_ids = [row[0] for row in db.query(
+    models.Delegation.child_chat_id,
+  ).filter(models.Delegation.app_id == deleted_app_id).all()]
+  gauntlet_ids = {row[0] for row in db.query(models.GauntletRun.id).filter(
+    models.GauntletRun.app_id == deleted_app_id,
+  ).all()}
+  if delegation_ids:
+    gauntlet_ids.update(row[0] for row in db.query(
+      models.GauntletTask.gauntlet_run_id,
+    ).filter(
+      models.GauntletTask.delegation_id.in_(delegation_ids),
+    ).all())
+  task_query = db.query(models.GauntletTask)
+  task_filters = []
+  if gauntlet_ids:
+    task_filters.append(models.GauntletTask.gauntlet_run_id.in_(gauntlet_ids))
+  if delegation_ids:
+    task_filters.append(models.GauntletTask.delegation_id.in_(delegation_ids))
+  if task_filters:
+    from sqlalchemy import or_
+    task_query.filter(or_(*task_filters)).delete(synchronize_session=False)
+  if gauntlet_ids:
+    db.query(models.GauntletRun).filter(
+      models.GauntletRun.id.in_(gauntlet_ids),
+    ).delete(synchronize_session=False)
+  if delegation_ids:
+    db.query(models.Delegation).filter(
+      models.Delegation.id.in_(delegation_ids),
+    ).delete(synchronize_session=False)
+
+  # Delegated chats are implementation-owned and have no value after their
+  # app's seven-day recovery window closes. Hand them to the ordinary hard-purge
+  # lifecycle; preserve other app-created chats as owner history by removing
+  # only their now-invalid app attribution.
+  if critic_chat_ids:
+    db.query(models.Chat).filter(
+      models.Chat.id.in_(critic_chat_ids),
+    ).update({models.Chat.deleted_at: app.deleted_at}, synchronize_session=False)
+    from app.chat_retention import purge_expired_chat_tombstones
+    purge_expired_chat_tombstones(db)
+  db.query(models.Chat).filter(
+    models.Chat.created_by_app_id == deleted_app_id,
+  ).update({models.Chat.created_by_app_id: None}, synchronize_session=False)
+  db.query(models.ChatRun).filter(
+    models.ChatRun.initiated_by_app_id == deleted_app_id,
+  ).update({models.ChatRun.initiated_by_app_id: None}, synchronize_session=False)
+  db.query(models.ChatEmbedGrant).filter(
+    models.ChatEmbedGrant.app_id == deleted_app_id,
+  ).delete(synchronize_session=False)
+  db.query(models.InstallPassGrant).filter(
+    models.InstallPassGrant.app_id == deleted_app_id,
+  ).delete(synchronize_session=False)
+  db.query(models.ContributionAutopilot).filter(
+    models.ContributionAutopilot.app_id == deleted_app_id,
+  ).delete(synchronize_session=False)
   db.query(models.AppActivityState).filter(
     models.AppActivityState.app_id == deleted_app_id,
   ).delete(synchronize_session=False)
   db.query(models.AppRecencyState).filter(
     models.AppRecencyState.app_id == deleted_app_id,
   ).delete(synchronize_session=False)
-  db.query(models.AppPreviewState).filter(
-    models.AppPreviewState.app_id == deleted_app_id,
+  db.query(models.ChatAppArtifact).filter(
+    models.ChatAppArtifact.app_id == deleted_app_id,
   ).delete(synchronize_session=False)
+  # Native Projects snapshot their provider metadata and own a separate root;
+  # uninstalling the provider must not delete or invalidate those projects.
   db.query(models.Project).filter(
     models.Project.source_app_id == deleted_app_id,
   ).update({models.Project.source_app_id: None}, synchronize_session=False)
@@ -454,6 +684,7 @@ async def list_apps(
       defer(models.App.jsx_source),
       defer(models.App.icon_png),
       defer(models.App.icon_override_png),
+      defer(models.App.project_templates_json),
     )
     .filter(models.App.deleted_at.is_(None))
     .order_by(
@@ -464,10 +695,61 @@ async def list_apps(
     .all()
   )
   return app_recency.annotate_apps(
-    db, app_preview.annotate_apps(
-      db, app_activity.annotate_apps(db, apps)
-    )
+    db, app_activity.annotate_apps(db, apps)
   )
+
+
+@router.get(
+  "/chat-artifacts/{chat_id}",
+  response_model=list[schemas.ChatAppArtifactOut],
+)
+def list_chat_app_artifacts(
+  chat_id: str,
+  db: Session = Depends(get_db),
+  _: models.Owner = Depends(get_current_owner),
+):
+  """Return the live apps this chat successfully created or updated."""
+  chat_exists = db.query(models.Chat.id).filter(
+    models.Chat.id == chat_id,
+    models.Chat.deleted_at.is_(None),
+  ).first()
+  if chat_exists is None:
+    raise HTTPException(status_code=404, detail="Chat not found")
+  return [
+    schemas.ChatAppArtifactOut(
+      app=app,
+      touched_at=artifact.touched_at,
+      seen_at=artifact.seen_at,
+    )
+    for artifact, app in chat_app_artifacts.list_for_chat(db, chat_id)
+  ]
+
+
+@router.post(
+  "/chat-artifacts/{chat_id}/seen",
+  status_code=204,
+  dependencies=[Depends(reject_cross_site)],
+)
+def mark_chat_app_artifacts_seen(
+  chat_id: str,
+  body: schemas.ChatAppArtifactsSeenRequest,
+  db: Session = Depends(get_db),
+  _: models.Owner = Depends(get_current_owner),
+):
+  """Acknowledge the exact app updates visible when this Brain was opened."""
+  chat_exists = db.query(models.Chat.id).filter(
+    models.Chat.id == chat_id,
+    models.Chat.deleted_at.is_(None),
+  ).first()
+  if chat_exists is None:
+    raise HTTPException(status_code=404, detail="Chat not found")
+  chat_app_artifacts.mark_chat_touches_seen(
+    db,
+    chat_id=chat_id,
+    touches=[(touch.app_id, touch.touched_at) for touch in body.touches],
+  )
+  db.commit()
+  return Response(status_code=204)
 
 
 @router.post(
@@ -1504,12 +1786,18 @@ async def create_conflict_resolver_chat(
     provider = providers.owner_default_provider(
       get_settings().data_dir, owner.provider if owner else None,
     )
+    agent_settings = providers.snapshot_chat_agent_settings(
+      get_settings().data_dir,
+      provider,
+      fallback_model=providers.DEFAULT_MODELS.get(provider),
+    )
     chat = models.Chat(
       id=str(uuid.uuid4()),
       title=title,
       messages=[],
       pending_messages=[],
       provider=provider,
+      agent_settings_json=agent_settings,
       created_by_app_id=None,
     )
     db.add(chat)
@@ -1658,7 +1946,9 @@ async def apply_app_source(
         "chatId": str(body.chat_id),
       })
   return schemas.AppApplyOut(
-    mode=result.mode, app=result.app, warnings=list(result.warnings)
+    mode=result.mode,
+    app=result.app,
+    warnings=list(result.warnings),
   )
 
 
@@ -2157,9 +2447,7 @@ def get_app(
   """Returns a single mini-app by ID (404 for a tombstoned one)."""
   app = live_app_or_404(db, app_id)
   return app_recency.annotate_apps(
-    db, app_preview.annotate_apps(
-      db, app_activity.annotate_apps(db, [app])
-    )
+    db, app_activity.annotate_apps(db, [app])
   )[0]
 
 
@@ -2173,7 +2461,7 @@ def mark_app_opened(
   db: Session = Depends(get_db),
   _: models.Owner = Depends(get_current_owner),
 ):
-  """Record owner navigation recency without changing the app bundle version."""
+  """Record navigation recency without changing app-update attention."""
   live_app_or_404(db, app_id)
   app_recency.mark_opened(db, app_id)
   db.commit()
@@ -2202,43 +2490,6 @@ def mark_app_activity_seen(
   return Response(status_code=204)
 
 
-class AppPreviewSeenRequest(BaseModel):
-  updated_at: datetime
-  final: bool = False
-
-
-@router.post(
-  "/{app_id}/preview/seen",
-  status_code=204,
-  dependencies=[Depends(reject_cross_site)],
-)
-def mark_app_preview_seen(
-  app_id: int,
-  body: AppPreviewSeenRequest,
-  db: Session = Depends(get_db),
-  _: models.Owner = Depends(get_current_owner),
-):
-  """Acknowledge the exact app build opened from its owning chat.
-
-  The client sends the version it rendered, not merely the app id. If a newer
-  compile races this request, the older acknowledgement remains older and the
-  new build's CTA stays visible.
-  """
-  app = live_app_or_404(db, app_id)
-  observed = app_preview.naive_utc(body.updated_at)
-  current = app_preview.naive_utc(app.updated_at)
-  if observed > current:
-    raise HTTPException(
-      status_code=409,
-      detail="Cannot acknowledge a preview newer than the installed app.",
-    )
-  app_preview.mark_seen(
-    db, app_id, observed, seen_as_final=body.final,
-  )
-  db.commit()
-  return Response(status_code=204)
-
-
 @router.patch(
   "/{app_id}",
   response_model=schemas.AppOut,
@@ -2251,7 +2502,7 @@ async def update_app(
   app_id: int,
   body: schemas.AppUpdate,
   db: Session = Depends(get_db),
-  _: models.Owner = Depends(get_current_owner),
+  _: models.Owner = Depends(get_current_owner_for_lifecycle_control),
 ):
   """Update owner-controlled app metadata and narrow permission grants."""
   from app import install
@@ -2389,10 +2640,8 @@ async def update_app(
       get_system_broadcast().publish(
         {"type": "app_updated", "appId": str(app.id)}
       )
-    # The in-chat "Open <App>" CTA is DERIVED on the frontend from the apps
-    # query's chat_id + updated_at, so app_updated alone surfaces it in the
-    # owning chat. A metadata-only PATCH still bumps updated_at; the wire carries
-    # no source-only version key to gate on.
+    # Metadata-only PATCHes do not advance chat artifacts. That relationship is
+    # owned by a successful source apply carrying an explicit requesting chat.
   return app
 
 
@@ -2692,9 +2941,7 @@ async def delete_app(
   tombstone against a concurrent install of the same app, and the per-app
   storage lock matches the order the purge (which DOES rmtree) takes them.
   """
-  from app import chat_queue
   async with (
-    chat_queue.get_transition_lock(f"app-lifecycle:{app_id}"),
     fs_locks.install_uninstall_lock(),
     fs_locks.app_storage_lock(app_id),
   ):
@@ -2706,18 +2953,18 @@ async def delete_app(
     if not app:
       raise HTTPException(status_code=404, detail="App not found.")
 
-    imported_project = db.query(models.Project.id, models.Project.name).filter(
-      models.Project.source_app_id == app_id,
-      models.Project.legacy_source_json.isnot(None),
-      models.Project.deleted_at.is_(None),
-    ).first()
+    from app.project_retention import projects_using_app_files
+    imported_project = next((
+      project for project in projects_using_app_files(db, app)
+      if project.deleted_at is None
+    ), None)
     if imported_project is not None:
       raise HTTPException(
         status_code=409,
         detail={
           "code": "app_has_imported_project",
           "message": (
-            f"Project “{imported_project.name}” still uses this app's legacy "
+            f"Project “{imported_project.name}” still uses this app's "
             "files. Delete that project before uninstalling the app."
           ),
           "project_id": imported_project.id,
@@ -2732,37 +2979,48 @@ async def delete_app(
       active_delegation_ids_for_app,
       cancel_delegation_execution,
     )
+    db.rollback()
     for delegation_id in active_delegation_ids_for_app(db, app_id):
       if not await cancel_delegation_execution(delegation_id):
         raise HTTPException(
           status_code=409,
-          detail="Could not stop active delegated work; retry",
+          detail=(
+            "Could not stop all delegated work yet; retry app deletion after "
+            "the active provider process exits."
+          ),
         )
-    db.rollback()
-    app = (
-      db.query(models.App)
-      .filter(models.App.id == app_id, models.App.deleted_at.is_(None))
-      .first()
-    )
-    if app is None:
-      raise HTTPException(status_code=404, detail="App not found.")
+    async with chat_queue.get_transition_lock(f"app-lifecycle:{app_id}"):
+      db.rollback()
+      if active_delegation_ids_for_app(db, app_id):
+        raise HTTPException(
+          status_code=409,
+          detail=(
+            "Delegated work started while deletion was waiting; retry deletion."
+          ),
+        )
+      app = db.query(models.App).filter(
+        models.App.id == app_id,
+        models.App.deleted_at.is_(None),
+      ).first()
+      if app is None:
+        raise HTTPException(status_code=404, detail="App not found.")
 
-    await _revoke_app_publish_tokens(
-      settings=get_settings(), app_id=app_id, app_gen=app.token_nonce,
-    )
+      await _revoke_app_publish_tokens(
+        settings=get_settings(), app_id=app_id, app_gen=app.token_nonce,
+      )
 
-    # Naive UTC to match SQLite's naive storage + the naive TTL comparison in
-    # list_apps / recover_app (same contract chats.py documents). Avoids a
-    # platform-dependent aware/naive round-trip mismatch.
-    app.deleted_at = now_naive_utc()
-    # Tombstoning is a permanent credential boundary, even if the same row is
-    # later recovered. Without this rotation, an app token rejected while the
-    # row is deleted becomes valid again as soon as recovery clears deleted_at.
-    app.token_nonce = secrets.token_hex(16)
-    app_name = app.name
-    app_slug = app.slug
-    app_source_dir = app.source_dir
-    db.commit()
+      # Naive UTC to match SQLite's naive storage + the naive TTL comparison in
+      # list_apps / recover_app (same contract chats.py documents). Avoids a
+      # platform-dependent aware/naive round-trip mismatch.
+      app.deleted_at = now_naive_utc()
+      # Tombstoning is a permanent credential boundary, even if the same row is
+      # later recovered. Without this rotation, an app token rejected while the
+      # row is deleted becomes valid again as soon as recovery clears deleted_at.
+      app.token_nonce = secrets.token_hex(16)
+      app_name = app.name
+      app_slug = app.slug
+      app_source_dir = app.source_dir
+      db.commit()
     # Publish the durable tombstone before best-effort job/skill/cron cleanup.
     # Cleanup errors must not leave live shells projecting a row the database
     # has already removed from the drawer.
@@ -2854,6 +3112,30 @@ async def delete_app_data(
     # preserves /data/apps/<id>, so a stale live row must not authorize this wipe.
     db.expire_all()
     app = live_app_or_404(db, app_id)
+    # Pages builder sources can be managed in-place by Projects. Clearing
+    # runtime data must not silently destroy that separate workspace contract,
+    # including a Project still inside its recovery window. Source-only app
+    # Projects do not depend on numeric runtime storage and must not block it.
+    from app.project_retention import projects_using_app_files
+    storage_root = (apps_root / str(app.id)).resolve()
+    data_root = Path(data_dir).resolve()
+    for project in projects_using_app_files(db, app):
+      stored = Path(project.root_path)
+      root = (stored if stored.is_absolute() else data_root / stored).resolve()
+      if root.is_relative_to(storage_root):
+        raise HTTPException(
+          status_code=409,
+          detail={
+            "code": "app_data_has_project_source",
+            "message": (
+              f"Project “{project.name}” uses this app's saved files. "
+              "Recover it if deleted, then move its source out of this app "
+              "before clearing data, or remove the Project and wait until "
+              "its recovery period ends."
+            ),
+            "project_id": str(project.id),
+          },
+        )
     await _revoke_app_publish_tokens(
       settings, app.id, app.token_nonce,
     )

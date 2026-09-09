@@ -59,7 +59,7 @@ test('R6: answering in-process keeps the active bridge through settlement', () =
   const answerPath = chatViewSource.slice(start, end)
   const sendIndex = answerPath.indexOf('const response = await streamSend')
   const ownershipIndex = answerPath.indexOf(
-    'const keepsCurrentTurn = answerKeepsCurrentTurn(response)',
+    'const keepsCurrentTurn = noAnswerTurn || answerKeepsCurrentTurn(response)',
   )
   const retireIndex = answerPath.indexOf('if (!keepsCurrentTurn)', ownershipIndex)
   const markIndex = answerPath.indexOf('bridgeHook.markBridged()', retireIndex)
@@ -69,14 +69,6 @@ test('R6: answering in-process keeps the active bridge through settlement', () =
     'the bridge may retire only after the backend says recovery started a new turn')
   assert.doesNotMatch(answerPath.slice(0, sendIndex), /bridgeHook\.markBridged\(\)/,
     'an in-process answer must not retire the same-turn bridge before its POST result')
-})
-
-test('R6: rejected injected POSTs do not tear down their existing stream', () => {
-  assert.match(
-    streamHookSource,
-    /if \(!forceSteer && !directSteer && !isAnswerSubmission\) \{\s*wantsReconnectRef\.current = false\s*setIsStreaming\(false\)/,
-    'answer and steer failures must leave the live turn they target attached',
-  )
 })
 
 // ---------------------------------------------------------------------------

@@ -232,6 +232,36 @@ def _write_source_stamp(signature: str) -> None:
   _source_stamp_path().write_text(signature + "\n", encoding="utf-8")
 
 
+def _dist_freshness() -> tuple[str | None, str, bool]:
+  """Why the served dist may not match source: ``(reason, signature, seed)``.
+
+  ``reason`` is None when dist matches source: either a demand build left the
+  exact cheap signature, or a complete dist is newer than every source input
+  (``seed`` then says that signature may be recorded). ``incomplete_build``
+  means the live dist cannot be served at all (the baked floor is), and
+  ``source_newer`` means a source input changed after the served build —
+  the state a git checkout, a merge, or a crashed watcher leaves behind.
+  """
+  signature, newest_source_ns = _source_snapshot()
+  if not _complete_build(_DIST_DIR):
+    return "incomplete_build", signature, False
+  try:
+    if _source_stamp_path().read_text(encoding="utf-8").strip() == signature:
+      return None, signature, False
+  except OSError:
+    pass
+  try:
+    oldest_completion_ns = min(
+      (_DIST_DIR / "index.html").stat().st_mtime_ns,
+      (_DIST_DIR / "sw.js").stat().st_mtime_ns,
+    )
+  except OSError:
+    oldest_completion_ns = 0
+  if newest_source_ns <= oldest_completion_ns:
+    return None, signature, True
+  return "source_newer", signature, False
+
+
 def _startup_build_needed() -> bool:
   """Avoid a full Vite build when served output already matches source.
 
@@ -240,29 +270,38 @@ def _startup_build_needed() -> bool:
   input. A missing/stale dist or any newer source edit still gets the normal
   boot-time recovery build.
   """
-  signature, newest_source_ns = _source_snapshot()
-  dist_complete = _complete_build(_DIST_DIR)
-  if dist_complete:
+  reason, signature, seed = _dist_freshness()
+  if reason is not None:
+    return True
+  if seed:
     try:
-      if _source_stamp_path().read_text(encoding="utf-8").strip() == signature:
-        return False
+      _write_source_stamp(signature)
     except OSError:
-      pass
-  if dist_complete:
-    try:
-      oldest_completion_ns = min(
-        (_DIST_DIR / "index.html").stat().st_mtime_ns,
-        (_DIST_DIR / "sw.js").stat().st_mtime_ns,
-      )
-    except OSError:
-      oldest_completion_ns = 0
-    if newest_source_ns <= oldest_completion_ns:
-      try:
-        _write_source_stamp(signature)
-      except OSError:
-        log.warning("could not seed frontend source signature")
-      return False
-  return True
+      log.warning("could not seed frontend source signature")
+  return False
+
+
+def served_frontend_freshness() -> dict:
+  """Whether the shell being served matches the frontend source on disk.
+
+  This read-only diagnostic distinguishes source that advanced beyond its
+  served bundle from an incomplete live build using the image-baked shell.
+  Watcher health adds whether a rebuild is running or why its last attempt
+  failed. The diagnostic never raises.
+  """
+  try:
+    reason, _signature, _seed = _dist_freshness()
+  except Exception:
+    log.warning("could not compare served frontend with source", exc_info=True)
+    reason = None
+  health = watcher_health()
+  return {
+    "stale": reason is not None,
+    "reason": reason,
+    "building": bool(health.get("building")),
+    "watcher_running": bool(health.get("running")),
+    "build_error": health.get("last_error") or None,
+  }
 
 
 class _StagingChangedDuringPublish(RuntimeError):

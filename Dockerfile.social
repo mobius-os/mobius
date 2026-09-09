@@ -1,0 +1,39 @@
+# syntax=docker/dockerfile:1
+FROM python:3.12-slim-trixie
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    SOCIAL_DATA_DIR=/data
+
+# Match the personal image's ordinary mobius uid so an existing /data/common
+# mount remains writable without a recursive ownership rewrite at cutover.
+RUN groupadd --gid 1000 social \
+    && useradd --uid 1000 --gid 1000 --no-create-home \
+       --shell /usr/sbin/nologin social \
+    && mkdir -p /data \
+    && chown 1000:1000 /data
+
+COPY backend/requirements-social.lock /tmp/requirements-social.lock
+RUN pip install --no-cache-dir -r /tmp/requirements-social.lock \
+    && rm /tmp/requirements-social.lock
+
+WORKDIR /srv
+RUN mkdir -p /srv/app && printf '%s\n' '"""Möbius Social service package."""' > /srv/app/__init__.py
+COPY backend/app/common_protocol.py \
+     backend/app/common_public.py backend/app/common_transport.py \
+     backend/app/net_utils.py backend/app/storage_io.py \
+     backend/app/social_host.py backend/app/SOCIAL_SOURCE_SHA /srv/app/
+
+# Required build input.  It becomes a root-owned image file beside the ASGI
+# module and cannot be replaced with an environment variable at runtime.
+ARG SOURCE_SHA
+RUN printf '%s\n' "$SOURCE_SHA" | grep -Eq '^[0-9a-f]{40}$' \
+    || { echo 'SOURCE_SHA must be exactly 40 lowercase hexadecimal characters' >&2; exit 1; }; \
+    printf '%s\n' "$SOURCE_SHA" > /srv/app/SOCIAL_SOURCE_SHA \
+    && chown -R root:root /srv \
+    && chmod -R a-w /srv
+
+USER 1000:1000
+EXPOSE 8080
+
+CMD ["uvicorn", "app.social_host:app", "--host", "0.0.0.0", "--port", "8080", "--workers", "1"]

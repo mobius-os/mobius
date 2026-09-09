@@ -13,12 +13,13 @@ from __future__ import annotations
 import asyncio
 import os
 import tempfile
+from collections import deque
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
-from claude_agent_sdk import ProcessError
+from claude_agent_sdk import ProcessError, ResultError
 from claude_agent_sdk.types import (
   AssistantMessage,
   PermissionResultAllow,
@@ -76,14 +77,84 @@ class _ChatBus(_Bus):
   run_token = "run-1"
 
 
+class _FakeClient:
+  """Stand-in for `ClaudeSDKClient` that records what the runner did to it.
+
+  Subclasses override `receive_response` to script the SDK stream; everything
+  else (connect / query / interrupt / disconnect bookkeeping) is shared.
+  """
+
+  def __init__(self, options):
+    self.options = options
+    self.queries: list = []
+    self.interrupts = 0
+    self.disconnected = False
+
+  async def connect(self):
+    return None
+
+  async def query(self, message):
+    self.queries.append(message)
+
+  async def interrupt(self):
+    self.interrupts += 1
+
+  async def disconnect(self):
+    self.disconnected = True
+
+  async def receive_response(self):
+    yield _success_result()
+
+
+def _install_fake_client(monkeypatch, client_cls=_FakeClient) -> list:
+  """Patch the runner's client class; returns the list of created clients."""
+  clients: list = []
+
+  def _factory(options):
+    client = client_cls(options)
+    clients.append(client)
+    return client
+
+  monkeypatch.setattr(claude_sdk_runner, "ClaudeSDKClient", _factory)
+  return clients
+
+
+async def _run_turn(
+  chat_id: str,
+  *,
+  bc=None,
+  prompt: str = "hello",
+  session_id: str | None = None,
+  cwd: str = "/tmp",
+  db=None,
+  **kwargs,
+) -> dict:
+  return await run_claude_sdk_turn(
+    prompt,
+    session_id=session_id,
+    base_env={},
+    cwd=cwd,
+    chat_id=chat_id,
+    skill_text="system",
+    bc=_ChatBus() if bc is None else bc,
+    pending_questions={},
+    db=db,
+    **kwargs,
+  )
+
+
 @pytest.mark.asyncio
-async def test_claude_connection_secret_is_retired_after_connect_without_fd_reuse(
+async def test_claude_mcp_set_stays_strict_with_native_skills_and_fd_retirement(
   monkeypatch,
 ):
   observed = {}
 
-  class _FakeClient:
+  class _Client(_FakeClient):
     def __init__(self, options):
+      super().__init__(options)
+      assert options.strict_mcp_config is True
+      assert options.setting_sources == ["user", "project"]
+      assert options.skills == "all"
       observed["path"] = str(options.mcp_servers)
       assert observed["path"].startswith(f"/proc/{os.getpid()}/fd/")
       assert "private-key" not in observed["path"]
@@ -107,13 +178,7 @@ async def test_claude_connection_secret_is_retired_after_connect_without_fd_reus
         with open(observed["path"], "rb") as retired_file:
           assert retired_file.read() == b""
 
-    async def receive_response(self):
-      yield _success_result()
-
-    async def disconnect(self):
-      return None
-
-  monkeypatch.setattr(claude_sdk_runner, "ClaudeSDKClient", _FakeClient)
+  _install_fake_client(monkeypatch, _Client)
   plan = connector_core.ConnectorTurnPlan(claude_servers={
     "private": {
       "type": "http",
@@ -122,17 +187,8 @@ async def test_claude_connection_secret_is_retired_after_connect_without_fd_reus
     },
   })
 
-  result = await run_claude_sdk_turn(
-    "hello",
-    session_id=None,
-    base_env={},
-    cwd="/tmp",
-    chat_id="claude-mcp-config",
-    skill_text="system",
-    bc=_ChatBus(),
-    pending_questions={},
-    db=None,
-    connector_plan=plan,
+  result = await _run_turn(
+    "claude-mcp-config", connector_plan=plan, skills_enabled=True,
   )
 
   assert "private-key" in observed["config"]
@@ -317,79 +373,19 @@ async def test_steer_requeries_on_interrupt_terminal(monkeypatch):
   == 1), even though no completed content block preceded the terminal; the
   pending_steer -> requery path on the terminal result then delivers the
   steer text on the same session."""
-  from app import claude_sdk_runner
-
-  class _FakeClient:
-    def __init__(self, options):
-      del options
-      self.queries = []
-      self.interrupts = 0
-      self.disconnected = False
-
-    async def connect(self):
-      return None
-
-    async def query(self, message):
-      self.queries.append(message)
-
-    async def interrupt(self):
-      self.interrupts += 1
-
-    async def disconnect(self):
-      self.disconnected = True
-
+  class _Client(_FakeClient):
     async def receive_response(self):
       if len(self.queries) == 1:
         yield _stream_delta("text_delta", text="working")
         assert await steer_into_active_turn("loop-chat", "use blue") is True
-        yield ResultMessage(
-          subtype="error_during_execution",
-          duration_ms=10,
-          duration_api_ms=5,
-          is_error=True,
-          num_turns=1,
-          session_id="sess-1",
-          stop_reason="interrupt",
-          total_cost_usd=0.01,
-          usage={"input_tokens": 1, "output_tokens": 2},
-        )
+        yield _interrupt_result()
         return
       yield _stream_delta("text_delta", text="blue done")
-      yield ResultMessage(
-        subtype="success",
-        duration_ms=20,
-        duration_api_ms=15,
-        is_error=False,
-        num_turns=1,
-        session_id="sess-1",
-        stop_reason="end_turn",
-        total_cost_usd=0.02,
-        usage={"input_tokens": 3, "output_tokens": 4},
-      )
+      yield _success_result()
 
-  clients = []
-
-  def _client_factory(options):
-    client = _FakeClient(options)
-    clients.append(client)
-    return client
-
-  monkeypatch.setattr(
-    claude_sdk_runner, "ClaudeSDKClient", _client_factory,
-  )
-
+  clients = _install_fake_client(monkeypatch, _Client)
   bus = _ChatBus()
-  result = await run_claude_sdk_turn(
-    "start task",
-    session_id=None,
-    base_env={},
-    cwd="/tmp",
-    chat_id="loop-chat",
-    skill_text="system",
-    bc=bus,
-    pending_questions={},
-    db=None,
-  )
+  result = await _run_turn("loop-chat", bc=bus, prompt="start task")
 
   client = clients[0]
   # The steer fired its interrupt immediately when requested; the terminal
@@ -398,7 +394,7 @@ async def test_steer_requeries_on_interrupt_terminal(monkeypatch):
   assert client.disconnected is True
   assert client.queries[0] == "start task"
   assert client.queries[1].startswith(
-    "The user added this while you were working."
+    "New context arrived while you were working."
   )
   assert "use blue" in client.queries[1]
   assert result["error"] is None
@@ -410,163 +406,157 @@ async def test_steer_requeries_on_interrupt_terminal(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_steer_interrupt_racing_turn_end_does_not_leak_execution_interrupted(
-  monkeypatch,
+@pytest.mark.parametrize("session_id", [None, "sess-1"])
+async def test_steer_interrupt_racing_turn_end_is_a_resumable_pause(
+  monkeypatch, session_id,
 ):
   """A steer whose soft interrupt lands AT natural turn-end must not surface
-  the raw "Execution interrupted." provider error.
+  the raw "Execution interrupted." provider error, nor re-run the prompt.
 
-  This reproduces the owner-reported bug. The turn finishes on its own exactly
-  as the steer arrives: the steer buffers its text and fires interrupt(), but
-  the CLEAN end_turn terminal wins the race, so the runner re-queries the steer
-  text (draining pending_steer) and the stray interrupt() then aborts the
-  RE-QUERY turn — whose terminal arrives with pending_steer already empty and
-  interrupt_requested False (a steer never sets it). The old code left that
-  terminal's provider error ("Execution interrupted.") intact and returned it,
-  painting a red error block and dropping the steered answer. The fix defuses
-  the error (stop_reason=="interrupt" is always OUR interrupt) and marks the
-  turn resume_incomplete so the finalize seam renders a calm resumable note."""
-  from app import claude_sdk_runner
+  The turn finishes on its own exactly as the steer arrives: the steer buffers
+  its text and fires interrupt(), but the CLEAN end_turn terminal wins the race,
+  so the runner re-queries the steer text (draining pending_steer) and the stray
+  interrupt() then aborts the RE-QUERY turn — whose terminal arrives with
+  pending_steer already empty and no Stop in flight. The runner defuses the
+  error (the interrupt was ours) and marks the turn resume_incomplete so the
+  finalize seam renders a calm resumable note.
 
-  class _FakeClient:
-    def __init__(self, options):
-      del options
-      self.queries: list[str] = []
-      self.interrupts = 0
-      self.disconnected = False
+  On a RESUME turn (session_id set — the production steer condition) the
+  defused error would also unlock the synthetic-no-op auto-requery guard
+  (`_seal_steer_split` resets `assistant_blocks` to []); the explicit
+  `stop_reason != "interrupt"` guard keeps the runner from silently re-running
+  the ORIGINAL prompt and re-executing its side effects."""
 
-    async def connect(self):
-      return None
-
-    async def query(self, message):
-      self.queries.append(message)
-
-    async def interrupt(self):
-      self.interrupts += 1
-
-    async def disconnect(self):
-      self.disconnected = True
-
+  class _Client(_FakeClient):
     async def receive_response(self):
       if len(self.queries) == 1:
-        # First turn: the steer arrives just as the model finishes. It buffers
-        # its text and fires the soft interrupt, but the CLEAN terminal wins.
         yield _stream_delta("text_delta", text="working")
         assert await steer_into_active_turn("steer-race-chat", "use blue") is True
-        yield _success_result()
-        return
-      # Re-query turn: the stray interrupt() from the first turn now aborts it,
-      # and pending_steer was already drained by the re-query above.
-      yield _interrupt_result()
-
-  clients = []
-
-  def _client_factory(options):
-    client = _FakeClient(options)
-    clients.append(client)
-    return client
-
-  monkeypatch.setattr(claude_sdk_runner, "ClaudeSDKClient", _client_factory)
-
-  result = await run_claude_sdk_turn(
-    "start task",
-    session_id=None,
-    base_env={},
-    cwd="/tmp",
-    chat_id="steer-race-chat",
-    skill_text="system",
-    bc=_ChatBus(),
-    pending_questions={},
-    db=None,
-  )
-
-  # The raw provider error must never surface; the turn is a resumable interrupt.
-  assert result["error"] is None
-  assert result["terminal_status"] == "interrupted"
-  assert result["resume_incomplete"] is True
-
-
-@pytest.mark.asyncio
-async def test_steer_interrupt_on_resume_turn_does_not_auto_requery_original(
-  monkeypatch,
-):
-  """The steer-interrupt race on a RESUME turn (session_id set) must NOT be
-  mistaken for a synthetic-no-op and silently re-run the ORIGINAL prompt.
-
-  Real steers happen mid-conversation, so session_id is set. Defusing the
-  interrupt terminal's error to None unlocks the synthetic-no-op auto-requery
-  guard (`not terminal.get("error")`), and `_seal_steer_split` resets
-  `assistant_blocks` to [] on the requery — so without the explicit
-  `stop_reason != "interrupt"` guard the runner would re-query the original
-  turn prompt, re-executing its side effects and dropping the resumable Paused
-  note. This is the resume-turn coverage the first repro (session_id=None)
-  could not exercise."""
-  from app import claude_sdk_runner
-
-  class _FakeClient:
-    def __init__(self, options):
-      del options
-      self.queries: list[str] = []
-      self.interrupts = 0
-      self.disconnected = False
-
-    async def connect(self):
-      return None
-
-    async def query(self, message):
-      self.queries.append(message)
-
-    async def interrupt(self):
-      self.interrupts += 1
-
-    async def disconnect(self):
-      self.disconnected = True
-
-    async def receive_response(self):
-      if len(self.queries) == 1:
-        yield _stream_delta("text_delta", text="working")
-        assert await steer_into_active_turn("steer-resume-chat", "use blue") is True
         yield _success_result()   # natural turn-end wins the race
         return
       # Re-query turn: the stray interrupt aborts it with zero accrued blocks.
       yield _interrupt_result()
 
-  clients = []
-
-  def _client_factory(options):
-    client = _FakeClient(options)
-    clients.append(client)
-    return client
-
-  monkeypatch.setattr(claude_sdk_runner, "ClaudeSDKClient", _client_factory)
-
+  clients = _install_fake_client(monkeypatch, _Client)
   bus = _ChatBus()
-  # The runner reads the sink's accrued blocks; the synthetic-no-op guard keys
-  # on it being empty. Mirror the sink surface so this resume path is exercised.
+  # The synthetic-no-op guard keys on the sink's accrued blocks being empty.
   bus.assistant_blocks = []
 
-  result = await run_claude_sdk_turn(
-    "start task",
-    session_id="sess-1",   # a resume turn — the production steer condition
-    base_env={},
-    cwd="/tmp",
-    chat_id="steer-resume-chat",
-    skill_text="system",
-    bc=bus,
-    pending_questions={},
-    db=None,
+  result = await _run_turn(
+    "steer-race-chat", bc=bus, prompt="start task", session_id=session_id,
   )
 
+  # The original prompt is queried exactly once, then only the steer redirect.
   client = clients[0]
-  # The original prompt is queried exactly once, then only the steer redirect —
-  # never re-asked. A regression would append a second "start task".
   assert client.queries.count("start task") == 1
   assert len(client.queries) == 2
-  assert client.queries[1].startswith("The user added this while you were working.")
-  # And the turn is a resumable interrupt, not a re-run or a red error.
+  assert client.queries[1].startswith("New context arrived while you were working.")
+  # The raw provider error never surfaces; the turn is a resumable interrupt.
   assert result["error"] is None
   assert result["terminal_status"] == "interrupted"
   assert result["resume_incomplete"] is True
+
+
+def _tool_boundary_interrupt_result(
+  session_id: str = "sess-1", stop_reason: str | None = "tool_use",
+) -> ResultMessage:
+  """The terminal a soft interrupt produces when it lands WHILE a tool is the
+  last action — exactly the card-commit case. `_result_error_message` maps the
+  `error_during_execution` subtype to "Execution interrupted.", and the CLI
+  reports stop_reason `tool_use`/null here (its own `[ede_diagnostic]`), NOT
+  `interrupt` — so the defuse must key on our ownership, not stop_reason."""
+  return ResultMessage(
+    subtype="error_during_execution",
+    duration_ms=10,
+    duration_api_ms=5,
+    is_error=True,
+    num_turns=1,
+    session_id=session_id,
+    stop_reason=stop_reason,
+    total_cost_usd=0.01,
+    usage={"input_tokens": 1, "output_tokens": 2},
+  )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("session_id", [None, "sess-1"])
+# The real-world card interrupt lands on a TOOL boundary, so its terminal
+# carries stop_reason `tool_use`/null — never `interrupt`. Include the
+# `interrupt` value too so the historic steer/stop shape stays covered.
+@pytest.mark.parametrize("stop_reason", ["tool_use", None, "interrupt"])
+async def test_owner_card_commit_ends_turn_as_clean_completion(
+  monkeypatch, session_id, stop_reason,
+):
+  """A committed continuation owner-input card ends the turn at its source.
+
+  The card path returns its receipt to the model immediately, so nothing at the
+  SDK level stops the model from emitting trailing text or tools after the card.
+  `finish_after_owner_card` fires the same soft interrupt `steer` uses, tagged
+  `card`, so the interrupt terminal is classified as a CLEAN completion: no
+  requery (`pending_steer` is empty), no resumable "Paused" note, no leaked
+  "Execution interrupted." error block, and the pre-card text is the last thing
+  in the turn. On a resume turn the `card` owner must NOT masquerade as the
+  synthetic-no-op auto-requery (which keys on an interrupt-free clean end) and
+  re-run the original prompt."""
+  class _Client(_FakeClient):
+    async def receive_response(self):
+      if len(self.queries) == 1:
+        yield _stream_delta("text_delta", text="here are your options")
+        handle = registry.get_handle("card-chat", RunnerKind.CLAUDE_SDK)
+        await handle.finish_after_owner_card()
+        assert handle.owner_card_interrupt is True
+        yield _tool_boundary_interrupt_result(
+          session_id=session_id or "sess-1", stop_reason=stop_reason,
+        )
+        return
+      raise AssertionError("a card end must never requery")
+
+  clients = _install_fake_client(monkeypatch, _Client)
+  bus = _ChatBus()
+  bus.assistant_blocks = []
+
+  result = await _run_turn(
+    "card-chat", bc=bus, prompt="ask me a question", session_id=session_id,
+  )
+
+  client = clients[0]
+  # One interrupt (the card end); the original prompt is the ONLY query — the
+  # card end never requeries.
+  assert client.interrupts == 1
+  assert client.disconnected is True
+  assert client.queries == ["ask me a question"]
+  # A continuation card is a clean completion, not a resumable pause: the raw
+  # "Execution interrupted." provider error is defused (regardless of the
+  # tool-boundary stop_reason) and no Resume is offered.
+  assert result["error"] is None
+  assert result["terminal_status"] == "completed"
+  assert "resume_incomplete" not in result
+  # The pre-card text streamed; nothing followed the card.
+  assert [e for e in bus.events if e["type"] == "text"] == [
+    {"type": "text", "content": "here are your options"},
+  ]
+
+
+@pytest.mark.asyncio
+async def test_owner_card_finish_defers_to_an_owner_that_already_interrupted():
+  """A Stop or steer that already owns this turn's interrupt keeps its
+  semantics: a later card commit must not override the owner or fire a second
+  interrupt."""
+  class _Client:
+    def __init__(self):
+      self.interrupts = 0
+
+    async def interrupt(self):
+      self.interrupts += 1
+
+  client = _Client()
+  handle = ActiveClaudeClient(client, chat_id="card-defers")
+  # A Stop already owns the cut.
+  handle._interrupt_owner = "stop"
+  await handle.finish_after_owner_card()
+  assert client.interrupts == 0
+  assert handle._interrupt_owner == "stop"
+  assert handle.owner_card_interrupt is False
 
 
 def _assistant_text(text: str, session_id: str = "sess-1") -> AssistantMessage:
@@ -598,170 +588,183 @@ def _success_result(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-  "mode", ["agent-running", "agent-settled"],
-)
-async def test_native_work_drains_through_clean_parent_synthesis(
-  monkeypatch, mode,
+@pytest.mark.parametrize("settles_before_result", [False, True])
+async def test_native_agent_completion_is_drained_through_parent_followup(
+  monkeypatch, settles_before_result,
 ):
+  """Claude's parent follow-up survives either task/result ordering."""
+
   async def _ignore_session_persistence(*_args):
     return None
 
-  child_frames = [
-    StreamEvent(
-      uuid="child-delta", session_id="child-session",
-      parent_tool_use_id="spawn-1",
-      event={
-        "type": "content_block_delta", "index": 0,
-        "delta": {"type": "text_delta", "text": "Child raw report."},
-      },
-    ),
-    AssistantMessage(
-      content=[TextBlock(text="Child raw report.")],
-      model="claude-sonnet", parent_tool_use_id="spawn-1",
-      session_id="child-session",
-    ),
-    TaskNotificationMessage(
-      subtype="task_notification", data={}, task_id="agent-1",
-      status="completed", output_file="/tmp/agent-1",
-      summary="inspection complete", uuid="task-done-1",
-      session_id="root-session", tool_use_id="spawn-1",
-    ),
-  ]
-  first_messages = [
-    AssistantMessage(
-      content=[ToolUseBlock(
-        id="spawn-1", name="Agent",
-        input={"description": "inspect the implementation"},
-      )],
-      model="claude-sonnet", session_id="root-session",
-    ),
-    TaskStartedMessage(
-      subtype="task_started", data={}, task_id="agent-1",
-      description="inspect the implementation", uuid="task-start-1",
-      session_id="root-session", tool_use_id="spawn-1",
-      task_type="local_agent",
-    ),
-  ]
-  followup_messages = child_frames if mode == "agent-running" else []
-  if mode == "agent-settled":
-    # This is the intermittent ordering a plain in-flight set misses: the
-    # task is already absent when its spawning ResultMessage arrives.
-    first_messages.extend(child_frames)
-  expected_text = "Parent synthesized the result."
-  first_messages.append(_success_result("root-session", cost=0.01))
-  followup_messages.extend([
-    AssistantMessage(
-      content=[TextBlock(text=expected_text)],
-      model="claude-sonnet", session_id="root-session",
-    ),
-    _success_result("root-session", cost=0.03),
-  ])
-
-  class _FakeClient:
-    def __init__(self, _options):
-      pass
-
-    async def connect(self):
-      return None
-
-    async def query(self, _message):
-      return None
-
-    async def disconnect(self):
-      return None
+  class _Client(_FakeClient):
+    def __init__(self, options):
+      super().__init__(options)
+      self.drained: list[object] = []
 
     async def receive_response(self):
-      for message in first_messages:
-        yield message
+      yield TaskStartedMessage(
+        subtype="task_started",
+        data={},
+        task_id="agent-1",
+        description="inspect the implementation",
+        uuid="task-start-1",
+        session_id="sess-native",
+        tool_use_id="spawn-1",
+        task_type="local_agent",
+      )
+      if settles_before_result:
+        yield StreamEvent(
+          uuid="child-delta-1",
+          session_id="child-session",
+          parent_tool_use_id="spawn-1",
+          event={
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "text_delta", "text": "Child raw report."},
+          },
+        )
+        yield AssistantMessage(
+          content=[TextBlock(text="Child raw report.")],
+          model="claude-sonnet",
+          parent_tool_use_id="spawn-1",
+          session_id="child-session",
+        )
+        yield TaskNotificationMessage(
+          subtype="task_notification",
+          data={},
+          task_id="agent-1",
+          status="completed",
+          output_file="/tmp/agent-1",
+          summary="inspection complete",
+          uuid="task-done-1",
+          session_id="sess-native",
+          tool_use_id="spawn-1",
+        )
+      yield _success_result("sess-native", cost=0.01)
 
     async def receive_messages(self):
-      for message in followup_messages:
+      messages = [] if settles_before_result else [
+        # Native child-sidechain frames share the connection but do not own
+        # the root chat row. Only their Task lifecycle and the later parent
+        # synthesis should be visible.
+        StreamEvent(
+          uuid="child-delta-1",
+          session_id="child-session",
+          parent_tool_use_id="spawn-1",
+          event={
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "text_delta", "text": "Child raw report."},
+          },
+        ),
+        AssistantMessage(
+          content=[TextBlock(text="Child raw report.")],
+          model="claude-sonnet",
+          parent_tool_use_id="spawn-1",
+          session_id="child-session",
+        ),
+        TaskNotificationMessage(
+          subtype="task_notification",
+          data={},
+          task_id="agent-1",
+          status="completed",
+          output_file="/tmp/agent-1",
+          summary="inspection complete",
+          uuid="task-done-1",
+          session_id="sess-native",
+          tool_use_id="spawn-1",
+        ),
+      ]
+      messages.extend([
+        AssistantMessage(
+          content=[TextBlock(text="Parent synthesized the native result.")],
+          model="claude-sonnet",
+          session_id="sess-native",
+        ),
+        _success_result("sess-native", cost=0.03),
+      ])
+      for message in messages:
+        self.drained.append(message)
         yield message
 
-  monkeypatch.setattr(claude_sdk_runner, "ClaudeSDKClient", _FakeClient)
+  clients = _install_fake_client(monkeypatch, _Client)
   monkeypatch.setattr(
     claude_sdk_runner, "_persist_session_id", _ignore_session_persistence,
   )
   bus = _Bus()
-  result = await run_claude_sdk_turn(
-    "wait for native work",
-    session_id=None,
-    base_env={},
-    cwd="/data",
-    chat_id=f"native-followup-{mode}",
-    skill_text="system",
-    bc=bus,
-    pending_questions={},
-    db=None,
+
+  result = await _run_turn(
+    "native-followup", bc=bus, prompt="delegate this inspection", cwd="/data",
   )
 
   assert result["cost_usd"] == 0.03
-  assert next(
+  assert len(clients[0].drained) == (
+    2 if settles_before_result else 5
+  )
+  event_types = [event["type"] for event in bus.events]
+  assert event_types.index("task_done") < event_types.index("text_final")
+  text_final = next(
     event for event in bus.events if event["type"] == "text_final"
-  )["content"] == expected_text
-  assert "Child raw report" not in str(bus.events)
+  )
+  assert text_final["content"] == "Parent synthesized the native result."
+  assert all(
+    "Child raw report" not in str(event) for event in bus.events
+  )
 
 
 @pytest.mark.asyncio
-async def test_completed_native_work_already_synthesized_uses_current_result(
+async def test_native_agent_completion_already_synthesized_uses_current_result(
   monkeypatch,
 ):
+  """A root response after task completion is already the parent follow-up."""
+
   async def _ignore_session_persistence(*_args):
     return None
 
-  class _FakeClient:
-    def __init__(self, _options):
-      pass
-
-    async def connect(self):
-      return None
-
-    async def query(self, _message):
-      return None
-
-    async def disconnect(self):
-      return None
-
+  class _Client(_FakeClient):
     async def receive_response(self):
       yield TaskStartedMessage(
-        subtype="task_started", data={}, task_id="agent-covered",
-        description="inspect the implementation", uuid="task-start-covered",
-        session_id="root-session", tool_use_id="spawn-covered",
+        subtype="task_started",
+        data={},
+        task_id="agent-covered",
+        description="inspect the implementation",
+        uuid="task-start-covered",
+        session_id="sess-covered",
+        tool_use_id="spawn-covered",
         task_type="local_agent",
       )
       yield TaskNotificationMessage(
-        subtype="task_notification", data={}, task_id="agent-covered",
-        status="completed", output_file="/tmp/agent-covered",
-        summary="inspection complete", uuid="task-done-covered",
-        session_id="root-session", tool_use_id="spawn-covered",
+        subtype="task_notification",
+        data={},
+        task_id="agent-covered",
+        status="completed",
+        output_file="/tmp/agent-covered",
+        summary="inspection complete",
+        uuid="task-done-covered",
+        session_id="sess-covered",
+        tool_use_id="spawn-covered",
       )
       yield AssistantMessage(
         content=[TextBlock(text="Parent already synthesized the result.")],
-        model="claude-sonnet", session_id="root-session",
+        model="claude-sonnet",
+        session_id="sess-covered",
       )
-      yield _success_result("root-session", cost=0.02)
+      yield _success_result("sess-covered", cost=0.02)
 
     async def receive_messages(self):
       raise AssertionError("an already-synthesized result must not drain")
       yield  # pragma: no cover - keep this an async generator
 
-  monkeypatch.setattr(claude_sdk_runner, "ClaudeSDKClient", _FakeClient)
+  _install_fake_client(monkeypatch, _Client)
   monkeypatch.setattr(
     claude_sdk_runner, "_persist_session_id", _ignore_session_persistence,
   )
   bus = _Bus()
 
-  result = await run_claude_sdk_turn(
-    "inspect and report",
-    session_id=None,
-    base_env={},
-    cwd="/data",
-    chat_id="native-followup-already-synthesized",
-    skill_text="system",
-    bc=bus,
-    pending_questions={},
-    db=None,
+  result = await _run_turn(
+    "native-followup-already-synthesized", bc=bus,
+    prompt="inspect and report", cwd="/data",
   )
 
   assert result["cost_usd"] == 0.02
@@ -770,7 +773,7 @@ async def test_completed_native_work_already_synthesized_uses_current_result(
   )["content"] == "Parent already synthesized the result."
 
 
-def test_native_continuation_tracker_defers_only_the_uncovered_result():
+def test_native_continuation_defers_only_a_result_not_seen_while_active():
   fast = claude_events.NativeContinuationTracker()
   fast.task_started("fast", "local_agent", "spawn-fast")
   fast.task_finished("fast")
@@ -790,57 +793,6 @@ def test_native_continuation_tracker_defers_only_the_uncovered_result():
   assert slow.observe_result() is False
 
 
-def test_long_running_shells_do_not_own_native_turn_completion():
-  tracker = claude_events.NativeContinuationTracker()
-  bus = _Bus()
-  for block in (
-    ToolUseBlock(
-      id="server-1", name="Bash",
-      input={"command": "npm run dev", "run_in_background": True},
-    ),
-    ToolUseBlock(
-      id="monitor-persistent", name="Monitor",
-      input={"command": "tail -f server.log", "persistent": True},
-    ),
-  ):
-    dispatch_sdk_message(
-      AssistantMessage(content=[block], model="claude-sonnet"),
-      bus,
-      None,
-      native_work=tracker,
-    )
-  assert tracker.pending_count == 0
-  assert tracker.observe_result() is False
-
-
-def test_failed_finite_monitor_does_not_leave_an_unreachable_followup():
-  tracker = claude_events.NativeContinuationTracker()
-  bus = _Bus()
-  dispatch_sdk_message(
-    AssistantMessage(
-      content=[ToolUseBlock(
-        id="monitor-failed", name="Monitor",
-        input={"command": "echo READY", "persistent": False},
-      )],
-      model="claude-sonnet",
-    ),
-    bus,
-    None,
-    native_work=tracker,
-  )
-  dispatch_sdk_message(
-    UserMessage(content=[ToolResultBlock(
-      tool_use_id="monitor-failed", content="Monitor is unavailable",
-      is_error=True,
-    )]),
-    bus,
-    None,
-    native_work=tracker,
-  )
-  assert tracker.pending_count == 0
-  assert tracker.observe_result() is False
-
-
 def _interrupt_result(session_id: str = "sess-1") -> ResultMessage:
   """The terminal an SDK interrupt produces — error_during_execution."""
   return ResultMessage(
@@ -857,61 +809,48 @@ def _interrupt_result(session_id: str = "sess-1") -> ResultMessage:
 
 
 async def _run_claude_stop_outcome(monkeypatch, mode: str, *, owned: bool):
-  """Run one fake response stream with an optional owner Stop in flight."""
+  """Run one fake response stream, with an owner Stop in flight when `owned`.
+
+  The Stop goes through the public `interrupt()`: it records ownership before
+  its first await, signals the client, then waits for the runner to finish —
+  so the stream resumes once the client has seen the interrupt and the Stop
+  task is collected after the turn resolves `_finished`.
+  """
   process_error = ProcessError(
     f"Command failed with exit code {'1' if mode == 'process_failure' else '-15'}",
     exit_code=1 if mode == "process_failure" else -15,
     stderr="Check stderr output for details",
   )
+  stops: list[asyncio.Task] = []
 
-  class _Transport:
-    _process = None
-    _exit_error = process_error if mode in ("process_error", "process_failure") else None
-
-  class _FakeClient:
+  class _Client(_FakeClient):
     def __init__(self, options):
-      del options
-      self._transport = _Transport()
-
-    async def connect(self):
-      return None
-
-    async def query(self, message):
-      del message
-
-    async def interrupt(self):
-      return None
-
-    async def disconnect(self):
-      return None
+      super().__init__(options)
+      self._transport = type("Transport", (), {"_process": None})()
 
     async def receive_response(self):
-      handle = registry.get_handle("claude-stop-shape", RunnerKind.CLAUDE_SDK)
-      assert handle is not None
-      handle._interrupt_requested = owned
+      if owned:
+        handle = registry.get_handle("claude-stop-shape", RunnerKind.CLAUDE_SDK)
+        assert handle is not None
+        stops.append(asyncio.create_task(handle.interrupt()))
+        while not self.interrupts:
+          await asyncio.sleep(0)
       if mode == "terminal":
         yield _interrupt_result()
         return
       if mode == "resultless":
         return
       if mode in ("process_error", "process_failure"):
-        raise Exception(str(process_error))
+        raise process_error
       if mode == "other_error":
         raise ValueError("unexpected notification payload")
       raise AssertionError(mode)
 
-  monkeypatch.setattr(claude_sdk_runner, "ClaudeSDKClient", _FakeClient)
-  return await run_claude_sdk_turn(
-    "hello",
-    session_id=None,
-    base_env={},
-    cwd="/tmp",
-    chat_id="claude-stop-shape",
-    skill_text="system",
-    bc=_ChatBus(),
-    pending_questions={},
-    db=None,
-  )
+  _install_fake_client(monkeypatch, _Client)
+  result = await _run_turn("claude-stop-shape")
+  for stop in stops:
+    await stop
+  return result
 
 
 @pytest.mark.asyncio
@@ -932,22 +871,40 @@ async def test_claude_interrupt_marks_owner_request_before_sdk_await():
   assert observed == [True]
 
 
-def test_claude_force_stop_check_uses_the_sdk_type_not_its_name():
-  impostor = type("ProcessError", (Exception,), {})
+def test_claude_force_stop_check_uses_public_process_exit_codes():
+  assert claude_sdk_runner._claude_process_was_force_stopped(
+    ProcessError("CLI terminated", exit_code=-15)
+  ) is True
+  assert claude_sdk_runner._claude_process_was_force_stopped(
+    ProcessError("CLI killed", exit_code=-9)
+  ) is True
+  assert claude_sdk_runner._claude_process_was_force_stopped(
+    ProcessError("CLI failed", exit_code=1)
+  ) is False
 
-  class _Client:
-    _transport = type("Transport", (), {"_exit_error": impostor("boom")})()
 
-  assert claude_sdk_runner._claude_process_was_force_stopped(_Client()) is False
+def test_structured_result_error_is_not_rewritten_with_stderr_tail():
+  error = ResultError(
+    "Claude returned a structured API failure",
+    data={"result": "API Error: overloaded"},
+    exit_code=1,
+  )
+  assert claude_sdk_runner._process_error_with_stderr_tail(
+    error,
+    deque(["unrelated local stderr"]),
+  ) == str(error)
 
 
-def test_claude_force_stop_check_rejects_other_typed_process_failures():
-  class _Client:
-    _transport = type("Transport", (), {
-      "_exit_error": ProcessError("CLI failed", exit_code=1),
-    })()
-
-  assert claude_sdk_runner._claude_process_was_force_stopped(_Client()) is False
+def test_unstructured_process_error_gets_only_the_bounded_stderr_tail():
+  error = ProcessError(
+    "Command failed with exit code 1",
+    exit_code=1,
+    stderr="Check stderr output for details",
+  )
+  assert claude_sdk_runner._process_error_with_stderr_tail(
+    error,
+    deque(["first", "last"], maxlen=2),
+  ).endswith("stderr (tail):\nfirst\nlast")
 
 
 @pytest.mark.asyncio
@@ -964,14 +921,9 @@ async def test_owner_stop_turns_claude_interrupt_result_into_clean_terminal(
 
 @pytest.mark.asyncio
 async def test_interrupt_result_we_never_issued_stays_an_error(monkeypatch):
-  # The defuse is gated on us having ACTUALLY issued the interrupt (an owner
-  # Stop sets `interrupt_requested`; a steer sets `_interrupt_issued`). This
-  # helper sets neither — a `stop_reason == "interrupt"` terminal we did not
-  # cause (a hypothetical CLI/provider-side abort mapped to the same envelope).
-  # The invariant is ENFORCED, not assumed: with no interrupt of ours in
-  # flight, a genuine failure must stay a visible error, never be masked as a
-  # calm resumable "Paused" note. (Our real interrupts are covered by the two
-  # steer-race tests and the owner-Stop test.)
+  # No steer or Stop of ours issued an interrupt, so a `stop_reason ==
+  # "interrupt"` terminal (a CLI/provider-side abort mapped to the same
+  # envelope) must stay a visible error, never a calm resumable "Paused" note.
   result = await _run_claude_stop_outcome(monkeypatch, "terminal", owned=False)
 
   assert result["error"] == "Execution interrupted."
@@ -1061,30 +1013,10 @@ async def test_steer_interrupts_immediately_not_deferred_to_boundary(
   The fake stream records the interrupt-call count at the moment each
   message is dispatched, so the test can assert the interrupt fired the
   instant the steer arrived (mid-delta), not at a later boundary."""
-  from app import claude_sdk_runner
-
   # (message_label, interrupts_observed_when_this_message_was_yielded)
   interrupt_trace: list[tuple[str, int]] = []
 
-  class _FakeClient:
-    def __init__(self, options):
-      del options
-      self.queries: list[str] = []
-      self.interrupts = 0
-      self.disconnected = False
-
-    async def connect(self):
-      return None
-
-    async def query(self, message):
-      self.queries.append(message)
-
-    async def interrupt(self):
-      self.interrupts += 1
-
-    async def disconnect(self):
-      self.disconnected = True
-
+  class _Client(_FakeClient):
     async def receive_response(self):
       if len(self.queries) == 1:
         # First turn: deltas stream, the user steers mid-block — the
@@ -1108,27 +1040,9 @@ async def test_steer_interrupts_immediately_not_deferred_to_boundary(
       yield _stream_delta("text_delta", text="blue done")
       yield _success_result()
 
-  clients: list[_FakeClient] = []
-
-  def _factory(options):
-    c = _FakeClient(options)
-    clients.append(c)
-    return c
-
-  monkeypatch.setattr(claude_sdk_runner, "ClaudeSDKClient", _factory)
-
+  clients = _install_fake_client(monkeypatch, _Client)
   bus = _ChatBus()
-  result = await run_claude_sdk_turn(
-    "start task",
-    session_id=None,
-    base_env={},
-    cwd="/tmp",
-    chat_id="boundary-chat",
-    skill_text="system",
-    bc=bus,
-    pending_questions={},
-    db=None,
-  )
+  result = await _run_turn("boundary-chat", bc=bus, prompt="start task")
 
   client = clients[0]
   trace = dict(interrupt_trace)
@@ -1143,7 +1057,7 @@ async def test_steer_interrupts_immediately_not_deferred_to_boundary(
   assert client.queries[0] == "start task"
   assert len(client.queries) == 2
   assert client.queries[1].startswith(
-    "The user added this while you were working."
+    "New context arrived while you were working."
   )
   assert "use blue" in client.queries[1]
   assert result["error"] is None
@@ -1163,27 +1077,7 @@ async def test_steer_interrupts_once_despite_two_rapid_steers(monkeypatch):
   fire only ONE interrupt — `_interrupt_in_flight` guards the single cut —
   and both buffered steers ride the single requery (FIFO, exactly once).
   Later completed blocks arriving in the drain window must not re-interrupt."""
-  from app import claude_sdk_runner
-
-  class _FakeClient:
-    def __init__(self, options):
-      del options
-      self.queries: list[str] = []
-      self.interrupts = 0
-      self.disconnected = False
-
-    async def connect(self):
-      return None
-
-    async def query(self, message):
-      self.queries.append(message)
-
-    async def interrupt(self):
-      self.interrupts += 1
-
-    async def disconnect(self):
-      self.disconnected = True
-
+  class _Client(_FakeClient):
     async def receive_response(self):
       if len(self.queries) == 1:
         # Two rapid steers: the first fires the interrupt, the second is
@@ -1200,27 +1094,8 @@ async def test_steer_interrupts_once_despite_two_rapid_steers(monkeypatch):
       yield _stream_delta("text_delta", text="done")
       yield _success_result()
 
-  clients: list[_FakeClient] = []
-
-  def _factory(options):
-    c = _FakeClient(options)
-    clients.append(c)
-    return c
-
-  monkeypatch.setattr(claude_sdk_runner, "ClaudeSDKClient", _factory)
-
-  bus = _ChatBus()
-  result = await run_claude_sdk_turn(
-    "start task",
-    session_id=None,
-    base_env={},
-    cwd="/tmp",
-    chat_id="multi-chat",
-    skill_text="system",
-    bc=bus,
-    pending_questions={},
-    db=None,
-  )
+  clients = _install_fake_client(monkeypatch, _Client)
+  result = await _run_turn("multi-chat", prompt="start task")
 
   client = clients[0]
   # Exactly one interrupt despite two steers and two completed blocks in the
@@ -1240,27 +1115,7 @@ async def test_steer_interrupts_once_despite_two_rapid_steers(monkeypatch):
 async def test_steer_after_content_already_streamed(monkeypatch):
   """A steer requested after some content has already streamed still
   interrupts immediately and re-queries once on the same client."""
-  from app import claude_sdk_runner
-
-  class _FakeClient:
-    def __init__(self, options):
-      del options
-      self.queries: list[str] = []
-      self.interrupts = 0
-      self.disconnected = False
-
-    async def connect(self):
-      return None
-
-    async def query(self, message):
-      self.queries.append(message)
-
-    async def interrupt(self):
-      self.interrupts += 1
-
-    async def disconnect(self):
-      self.disconnected = True
-
+  class _Client(_FakeClient):
     async def receive_response(self):
       if len(self.queries) == 1:
         yield _assistant_text("first block")
@@ -1273,27 +1128,8 @@ async def test_steer_after_content_already_streamed(monkeypatch):
       yield _stream_delta("text_delta", text="pivoted")
       yield _success_result()
 
-  clients: list[_FakeClient] = []
-
-  def _factory(options):
-    c = _FakeClient(options)
-    clients.append(c)
-    return c
-
-  monkeypatch.setattr(claude_sdk_runner, "ClaudeSDKClient", _factory)
-
-  bus = _ChatBus()
-  result = await run_claude_sdk_turn(
-    "start task",
-    session_id=None,
-    base_env={},
-    cwd="/tmp",
-    chat_id="late-chat",
-    skill_text="system",
-    bc=bus,
-    pending_questions={},
-    db=None,
-  )
+  clients = _install_fake_client(monkeypatch, _Client)
+  result = await _run_turn("late-chat", prompt="start task")
 
   client = clients[0]
   assert client.interrupts == 1
@@ -1378,22 +1214,7 @@ def test_run_claude_sdk_turn_persists_session_id_before_terminal_result(
   monkeypatch,
 ):
   """Claude session ids are durable as soon as the stream reveals them."""
-  from app import claude_sdk_runner
-
-  class _FakeClient:
-    def __init__(self, options):
-      del options
-      self.disconnected = False
-
-    async def connect(self):
-      return None
-
-    async def query(self, message):
-      del message
-
-    async def disconnect(self):
-      self.disconnected = True
-
+  class _Client(_FakeClient):
     async def receive_response(self):
       yield StreamEvent(
         uuid="evt-session",
@@ -1403,19 +1224,9 @@ def test_run_claude_sdk_turn_persists_session_id_before_terminal_result(
           "delta": {"type": "text_delta", "text": "still running"},
         },
       )
-      yield ResultMessage(
-        subtype="success",
-        duration_ms=20,
-        duration_api_ms=15,
-        is_error=False,
-        num_turns=1,
-        session_id="sess-early",
-        stop_reason="end_turn",
-        total_cost_usd=0.02,
-        usage={"input_tokens": 3, "output_tokens": 4},
-      )
+      yield _success_result("sess-early")
 
-  monkeypatch.setattr(claude_sdk_runner, "ClaudeSDKClient", _FakeClient)
+  _install_fake_client(monkeypatch, _Client)
 
   db = SessionLocal()
   try:
@@ -1429,19 +1240,7 @@ def test_run_claude_sdk_turn_persists_session_id_before_terminal_result(
     ))
     db.commit()
 
-    result = asyncio.run(
-      run_claude_sdk_turn(
-        "hello",
-        session_id=None,
-        base_env={},
-        cwd="/tmp",
-        chat_id="claude-early",
-        skill_text="system",
-        bc=_ChatBus(),
-        pending_questions={},
-        db=db,
-      )
-    )
+    result = asyncio.run(_run_turn("claude-early", db=db))
 
     assert result["session_id"] == "sess-early"
     db.expire_all()
@@ -1586,64 +1385,29 @@ def test_claude_thinking_config_requests_summarized_adaptive_thinking():
 
 @pytest.mark.asyncio
 async def test_run_claude_sdk_turn_requests_summarized_thinking(monkeypatch):
-  captured: dict = {}
+  clients = _install_fake_client(monkeypatch)
 
-  class _FakeClient:
-    def __init__(self, options):
-      captured["options"] = options
-
-    async def connect(self):
-      return None
-
-    async def query(self, message):
-      del message
-
-    async def disconnect(self):
-      return None
-
-    async def receive_response(self):
-      yield ResultMessage(
-        subtype="success",
-        duration_ms=10,
-        duration_api_ms=5,
-        is_error=False,
-        num_turns=1,
-        session_id="sess-thinking",
-        stop_reason="end_turn",
-        total_cost_usd=0.01,
-        usage={"input_tokens": 1, "output_tokens": 1},
-      )
-
-  monkeypatch.setattr(claude_sdk_runner, "ClaudeSDKClient", _FakeClient)
-
-  await run_claude_sdk_turn(
-    "hello",
-    session_id=None,
-    base_env={},
-    cwd="/data",
-    chat_id="chat-thinking",
-    skill_text="system",
-    bc=_Bus(),
-    pending_questions={},
-    db=None,
+  await _run_turn(
+    "chat-thinking", bc=_Bus(), cwd="/data",
     agent_settings={"model": "claude-opus-4-8", "effort": "high"},
   )
 
-  assert captured["options"].model == "claude-opus-4-8"
-  assert captured["options"].effort == "high"
+  options = clients[0].options
+  assert options.model == "claude-opus-4-8"
+  assert options.effort == "high"
   # The Claude runner appends its provider-authored concise register on top of
   # the shared base (documented amendment to system_prompts.py's contract): the
   # shared base is preserved verbatim, with the register appended after it.
-  assert captured["options"].system_prompt == (
+  assert options.system_prompt == (
     claude_sdk_runner._system_prompt_with_register("system")
   )
-  assert captured["options"].system_prompt.startswith("system")
-  assert "# Concise register" in captured["options"].system_prompt
-  assert captured["options"].max_buffer_size == 10 * 1024 * 1024
+  assert options.system_prompt.startswith("system")
+  assert "# Concise register" in options.system_prompt
+  assert options.max_buffer_size == 10 * 1024 * 1024
   assert set(claude_sdk_runner._CLAUDE_NATIVE_SCHEDULING_TOOLS) <= set(
-    captured["options"].disallowed_tools
+    options.disallowed_tools
   )
-  assert captured["options"].thinking == {
+  assert options.thinking == {
     "type": "adaptive",
     "display": "summarized",
   }
@@ -1651,49 +1415,11 @@ async def test_run_claude_sdk_turn_requests_summarized_thinking(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_precompact_hook_publishes_context_compaction_marker(monkeypatch):
-  captured: dict = {}
-
-  class _FakeClient:
-    def __init__(self, options):
-      captured["options"] = options
-
-    async def connect(self):
-      return None
-
-    async def query(self, message):
-      del message
-
-    async def disconnect(self):
-      return None
-
-    async def receive_response(self):
-      yield ResultMessage(
-        subtype="success",
-        duration_ms=10,
-        duration_api_ms=5,
-        is_error=False,
-        num_turns=1,
-        session_id="sess-compaction",
-        stop_reason="end_turn",
-        total_cost_usd=0.01,
-        usage={"input_tokens": 1, "output_tokens": 1},
-      )
-
-  monkeypatch.setattr(claude_sdk_runner, "ClaudeSDKClient", _FakeClient)
+  clients = _install_fake_client(monkeypatch)
   bus = _Bus()
-  await run_claude_sdk_turn(
-    "hello",
-    session_id=None,
-    base_env={},
-    cwd="/data",
-    chat_id="chat-compaction",
-    skill_text="system",
-    bc=bus,
-    pending_questions={},
-    db=None,
-  )
+  await _run_turn("chat-compaction", bc=bus, cwd="/data")
 
-  matcher = captured["options"].hooks["PreCompact"][0]
+  matcher = clients[0].options.hooks["PreCompact"][0]
   result = await matcher.hooks[0]({"trigger": "manual"}, None, {})
 
   assert result == {"continue_": True}
@@ -1746,6 +1472,12 @@ def test_dispatch_assistant_tool_use_emits_tool_start():
 
 
 def test_child_sidechain_messages_never_enter_the_owner_assistant_row():
+  """parent_tool_use_id is Claude's root-vs-child ownership boundary.
+
+  Child deltas, completed messages, tools, and tool results share the SDK
+  connection but must not emit root events, replace the root message identity,
+  or advance its resumable session.
+  """
   bus = _Bus()
   bus.current_message_id = "root-message"
   current_session_id = "root-session"
@@ -2483,50 +2215,11 @@ async def test_can_use_tool_read_of_skill_file_emits_skill_loaded(
     lambda chat_id, skill, ts=None: logged.append((chat_id, skill)),
   )
 
-  captured: dict = {}
-
-  class _FakeClient:
-    def __init__(self, options):
-      captured["options"] = options
-
-    async def connect(self):
-      return None
-
-    async def query(self, message):
-      del message
-
-    async def disconnect(self):
-      return None
-
-    async def receive_response(self):
-      yield ResultMessage(
-        subtype="success",
-        duration_ms=10,
-        duration_api_ms=5,
-        is_error=False,
-        num_turns=1,
-        session_id="sess-skill",
-        stop_reason="end_turn",
-        total_cost_usd=0.01,
-        usage={"input_tokens": 1, "output_tokens": 1},
-      )
-
-  monkeypatch.setattr(claude_sdk_runner, "ClaudeSDKClient", _FakeClient)
-
+  clients = _install_fake_client(monkeypatch)
   bus = _ChatBus()
-  await run_claude_sdk_turn(
-    "hello",
-    session_id=None,
-    base_env={},
-    cwd="/data",
-    chat_id="chat-42",
-    skill_text="system",
-    bc=bus,
-    pending_questions={},
-    db=None,
-  )
+  await _run_turn("chat-42", bc=bus, cwd="/data")
 
-  can_use_tool = captured["options"].can_use_tool
+  can_use_tool = clients[0].options.can_use_tool
   path = os.path.join(_skills_dir(), "notifications.md")
   input_data = {"file_path": path}
   context = SimpleNamespace(tool_use_id="read-skill-1")
@@ -2550,9 +2243,11 @@ async def test_can_use_tool_read_of_skill_file_emits_skill_loaded(
 
 
 @pytest.mark.asyncio
-async def test_delegated_claude_has_no_hidden_budget_and_keeps_guards(
+async def test_delegated_claude_keeps_parent_tools_without_hidden_budget(
   monkeypatch,
 ):
+  from claude_agent_sdk.types import PermissionResultAllow, PermissionResultDeny
+
   captured: dict = {}
   real_options = claude_sdk_runner.ClaudeAgentOptions
 
@@ -2562,67 +2257,32 @@ async def test_delegated_claude_has_no_hidden_budget_and_keeps_guards(
     captured["options"] = options
     return options
 
-  class _FakeClient:
-    def __init__(self, options):
-      del options
-
-    async def connect(self):
-      return None
-
-    async def query(self, message):
-      del message
-
-    async def disconnect(self):
-      return None
-
-    async def receive_response(self):
-      yield ResultMessage(
-        subtype="success",
-        duration_ms=10,
-        duration_api_ms=5,
-        is_error=False,
-        num_turns=1,
-        session_id="sess-delegated-budget",
-        stop_reason="end_turn",
-        total_cost_usd=0.01,
-        usage={"input_tokens": 1, "output_tokens": 1},
-      )
-
   monkeypatch.setattr(claude_sdk_runner, "ClaudeAgentOptions", capture_options)
-  monkeypatch.setattr(claude_sdk_runner, "ClaudeSDKClient", _FakeClient)
+  _install_fake_client(monkeypatch)
 
   policy = SimpleNamespace(scope="read")
-  await run_claude_sdk_turn(
-    "review",
-    session_id=None,
-    base_env={},
-    cwd="/data",
-    chat_id="delegated-budget",
-    skill_text="system",
-    bc=_Bus(),
-    pending_questions={},
-    db=None,
+  await _run_turn(
+    "delegated-tools", bc=_Bus(), prompt="review", cwd="/data",
     run_policy=policy,
   )
 
   kwargs = captured["kwargs"]
   assert "max_budget_usd" not in kwargs
-  assert kwargs["agents"] == {}
+  assert "agents" not in kwargs
   disallowed = set(kwargs["disallowed_tools"])
   assert "AskUserQuestion" in disallowed
-  assert {"Task", "Workflow", "Agent"} <= disallowed
+  assert "create_goal" in disallowed
   assert set(claude_sdk_runner._CLAUDE_NATIVE_SCHEDULING_TOOLS) <= disallowed
+  finite_tools = {
+    "Bash", "Task", "TaskOutput", "TaskStop", "Workflow", "Workflows",
+    "Agent",
+  }
+  assert not disallowed.intersection(finite_tools)
+
   can_use_tool = captured["options"].can_use_tool
-  guarded = await can_use_tool(
-    "Bash",
-    {"command": "python3 /data/apps/subagents/subagents.py run "
-      "--provider codex --name bounded --scope read --prompt bounded"},
-    None,
-  )
-  assert isinstance(guarded, PermissionResultAllow)
-  for tool_name in ("Task", "Workflow", "Agent", "Bash"):
+  for tool_name in finite_tools:
     result = await can_use_tool(tool_name, {}, None)
-    assert isinstance(result, PermissionResultDeny)
+    assert isinstance(result, PermissionResultAllow)
   assert isinstance(
     await can_use_tool("AskUserQuestion", {"questions": []}, None),
     PermissionResultDeny,
@@ -2640,27 +2300,9 @@ async def test_rate_limit_resets_at_rides_the_terminal_result(monkeypatch):
   rate-limit event carries no such key and completes cleanly — the
   regression here was an unbound attempt-scope local that error'd every
   ordinary turn."""
-  from app import claude_sdk_runner
-
   epoch = 1783813200  # any fixed unix-seconds reset time
 
-  class _FakeClient:
-    def __init__(self, options):
-      del options
-      self.queries = []
-
-    async def connect(self):
-      return None
-
-    async def query(self, message):
-      self.queries.append(message)
-
-    async def interrupt(self):
-      return None
-
-    async def disconnect(self):
-      return None
-
+  class _Client(_FakeClient):
     async def receive_response(self):
       yield _stream_delta("text_delta", text="working")
       yield RateLimitEvent(
@@ -2672,20 +2314,8 @@ async def test_rate_limit_resets_at_rides_the_terminal_result(monkeypatch):
       )
       yield _success_result()
 
-  monkeypatch.setattr(claude_sdk_runner, "ClaudeSDKClient", _FakeClient)
-
-  bus = _ChatBus()
-  result = await run_claude_sdk_turn(
-    "hello",
-    session_id=None,
-    base_env={},
-    cwd="/tmp",
-    chat_id="chat-42",
-    skill_text="system",
-    bc=bus,
-    pending_questions={},
-    db=None,
-  )
+  _install_fake_client(monkeypatch, _Client)
+  result = await _run_turn("chat-42")
 
   assert result["error"] is None
   assert result["rate_limit_resets_at"] == epoch
@@ -2693,42 +2323,8 @@ async def test_rate_limit_resets_at_rides_the_terminal_result(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_turn_without_rate_limit_event_has_no_resets_key(monkeypatch):
-  from app import claude_sdk_runner
-
-  class _FakeClient:
-    def __init__(self, options):
-      del options
-
-    async def connect(self):
-      return None
-
-    async def query(self, message):
-      return None
-
-    async def interrupt(self):
-      return None
-
-    async def disconnect(self):
-      return None
-
-    async def receive_response(self):
-      yield _stream_delta("text_delta", text="fine")
-      yield _success_result()
-
-  monkeypatch.setattr(claude_sdk_runner, "ClaudeSDKClient", _FakeClient)
-
-  bus = _ChatBus()
-  result = await run_claude_sdk_turn(
-    "hello",
-    session_id=None,
-    base_env={},
-    cwd="/tmp",
-    chat_id="chat-42",
-    skill_text="system",
-    bc=bus,
-    pending_questions={},
-    db=None,
-  )
+  _install_fake_client(monkeypatch)
+  result = await _run_turn("chat-42")
 
   assert result["error"] is None
   assert "rate_limit_resets_at" not in result

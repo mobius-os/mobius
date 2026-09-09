@@ -26,14 +26,22 @@ COMMUNITY_BASE_URL = os.environ.get(
 ).rstrip("/")
 MAX_RESPONSE_BYTES = 10_000_000
 _IDEMPOTENCY_KEY = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{15,127}$")
-_PUBLIC_APP_READS = (
+# Discovery and Spotlight are public Store data: owners should not need to
+# link a mobius.you account to browse. The privileged broker route is still
+# tried first so linked instances get personalized viewer fields.
+_PUBLIC_READS = (
   re.compile(r"/v1/community/apps"),
   re.compile(r"/v1/community/apps/[A-Za-z0-9_:-]{8,200}"),
   re.compile(
     r"/v1/community/apps/[A-Za-z0-9_:-]{8,200}/revisions/"
     r"[A-Za-z0-9_:-]{8,200}"
   ),
+  re.compile(r"/v1/community/editorial/spotlight"),
 )
+# The root broker's exact unlinked message. It forwards upstream statuses
+# verbatim, so a bare 401 may also be the registry rejecting a *linked*
+# instance's capability, which must surface rather than degrade to public data.
+_UNLINKED_ERROR = "a mobius.you account must be linked"
 
 
 @dataclass(frozen=True)
@@ -61,14 +69,18 @@ def bound_request_id(
   return "community:" + hashlib.sha256(material).hexdigest()
 
 
-def _public_read_target(method: str, path: str, target: str) -> str | None:
-  if method != "GET":
-    return None
-  if path == "/v1/community/editorial/spotlight" or any(
-    pattern.fullmatch(path) for pattern in _PUBLIC_APP_READS
-  ):
-    return "/api/store/v1" + target.removeprefix(COMMUNITY_PREFIX)
-  return None
+def _public_read(method: str, path: str) -> bool:
+  return method == "GET" and any(
+    pattern.fullmatch(path) for pattern in _PUBLIC_READS
+  )
+
+
+def _client(
+  transport: httpx.AsyncBaseTransport | None, base_url: str,
+) -> httpx.AsyncClient:
+  return httpx.AsyncClient(
+    transport=transport, base_url=base_url, timeout=45.0, follow_redirects=False,
+  )
 
 
 def _decode_response(response: httpx.Response) -> tuple[Any, dict[str, str]]:
@@ -139,29 +151,19 @@ class CommunityBrokerClient:
       uds=self.socket_path,
     )
     try:
-      async with httpx.AsyncClient(
-        transport=broker_transport,
-        base_url="http://mobius-identity-broker",
-        timeout=45.0,
-        follow_redirects=False,
-      ) as client:
+      async with _client(broker_transport, "http://mobius-identity-broker") as client:
         response = await client.request(
           method, target, content=encoded if encoded else None, headers=headers,
         )
       payload, response_headers = _decode_response(response)
-      public_target = _public_read_target(method, path, target)
       if (
         response.status_code == 401
         and isinstance(payload, dict)
-        and payload.get("error") == "a mobius.you account must be linked"
-        and public_target is not None
+        and payload.get("error") == _UNLINKED_ERROR
+        and _public_read(method, path)
       ):
-        async with httpx.AsyncClient(
-          transport=self.transport,
-          base_url=COMMUNITY_BASE_URL,
-          timeout=45.0,
-          follow_redirects=False,
-        ) as client:
+        public_target = "/api/store/v1" + target.removeprefix(COMMUNITY_PREFIX)
+        async with _client(self.transport, COMMUNITY_BASE_URL) as client:
           response = await client.request("GET", public_target, headers=headers)
         payload, response_headers = _decode_response(response)
     except httpx.HTTPError as exc:

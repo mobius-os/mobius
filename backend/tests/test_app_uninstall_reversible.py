@@ -299,6 +299,41 @@ def test_purge_after_ttl_hard_deletes(client, auth, db, bypass_url_validation):
   assert not secret_dir.exists()
 
 
+def test_provider_app_purge_detaches_but_preserves_native_project(
+  client, auth, db, bypass_url_validation,
+):
+  app_id = _install(client, auth)["id"]
+  data_root = Path(get_settings().data_dir)
+  project_id = "81d0f51c-cf79-4e82-b0f2-110864cf914e"
+  chat_id = "e85ab07c-4b40-4883-9ae7-ff18cfd0c8a8"
+  project_root = data_root / "projects" / project_id
+  project_root.mkdir(parents=True)
+  (project_root / "keep.txt").write_text("snapshot-owned")
+  db.add(models.Chat(id=chat_id, title="Native project", messages=[]))
+  db.add(models.Project(
+    id=project_id,
+    name="Native project",
+    project_type="provider:template",
+    root_path=f"projects/{project_id}",
+    chat_id=chat_id,
+    source_app_id=app_id,
+    template_snapshot_json={"name": "Snapshot"},
+  ))
+  db.commit()
+
+  assert client.delete(f"/api/apps/{app_id}", headers=auth).status_code == 204
+  app = db.get(models.App, app_id)
+  app.deleted_at = datetime.now(UTC).replace(tzinfo=None) - timedelta(days=8)
+  db.commit()
+  assert client.get("/api/apps/", headers=auth).status_code == 200
+
+  db.expire_all()
+  project = db.get(models.Project, project_id)
+  assert project is not None
+  assert project.source_app_id is None
+  assert (project_root / "keep.txt").read_text() == "snapshot-owned"
+
+
 def test_purge_keeps_the_row_when_id_keyed_storage_survives(
   client, auth, db, bypass_url_validation, monkeypatch,
 ):
@@ -429,17 +464,19 @@ def test_tombstoned_app_no_slug_redirect_or_static(
   """The /<slug> alias redirect and /app-assets static resolver both treat a
   tombstoned app as absent (feature 110)."""
   from app.main import (
-    _top_level_app_slug_alias, _app_source_dir_for_static_asset,
+    _top_level_app_slug_alias, _open_app_runtime_for_static_asset,
   )
   app = _install(client, auth)
   app_id, slug = app["id"], app["slug"]
   assert _top_level_app_slug_alias(slug) == slug
-  assert _app_source_dir_for_static_asset(slug=slug) is not None
+  runtime, pin = _open_app_runtime_for_static_asset(slug=slug)
+  assert runtime is not None
+  pin.close()
 
   assert client.delete(f"/api/apps/{app_id}", headers=auth).status_code == 204
   assert _top_level_app_slug_alias(slug) is None
-  assert _app_source_dir_for_static_asset(slug=slug) is None
-  assert _app_source_dir_for_static_asset(app_id=app_id) is None
+  assert _open_app_runtime_for_static_asset(slug=slug) == (None, None)
+  assert _open_app_runtime_for_static_asset(app_id=app_id) == (None, None)
 
 
 # --- delete app data (wipe storage, keep app installed) ---
@@ -702,6 +739,14 @@ def test_recover_migrates_preserved_direct_cron_without_executing_it(
     f'ENTRY="15 4 * * * {job} {app_id}"\n', encoding="utf-8",
   )
 
+  from app import app_git, applied_app_runtime
+  row = db.get(models.App, app_id)
+  app_git.commit_local(source_dir, "accept fixture job")
+  row.source_commit = app_git.head_sha(source_dir, app_git.LOCAL_BRANCH)
+  row.runtime_revision = None
+  db.commit()
+  assert applied_app_runtime.bootstrap_legacy_runtimes(db) == (1, [])
+
   assert client.delete(f"/api/apps/{app_id}", headers=auth).status_code == 204
 
   with patch("app.app_cron.register_cron") as register, \
@@ -723,3 +768,50 @@ def test_recover_migrates_preserved_direct_cron_without_executing_it(
     if "init-cron.sh" in str(call.args[0] if call.args else call)
   ]
   assert executed == [], f"replay script was executed: {executed}"
+
+
+@pytest.mark.parametrize("location", ["source", "storage"])
+@pytest.mark.parametrize("project_deleted", [False, True])
+def test_linked_project_files_survive_app_uninstall_and_purge(
+  client, auth, db, bypass_url_validation, location, project_deleted,
+):
+  """Source ownership, not template provider, protects live and recoverable work."""
+  import uuid
+
+  app_id = _install(client, auth)["id"]
+  app = db.get(models.App, app_id)
+  data_root = Path(get_settings().data_dir)
+  root = (
+    Path(app.source_dir) if location == "source"
+    else data_root / "apps" / str(app_id) / "sources" / "standalone"
+  )
+  root.mkdir(parents=True, exist_ok=True)
+  source = root / "keep.txt"
+  source.write_text("existing builder work")
+  project_id = str(uuid.uuid4())
+  project = models.Project(
+    id=project_id,
+    name="Linked builder work",
+    project_type="builder:template",
+    root_path=str(root.relative_to(data_root)),
+    # Deliberately no provider FK: the source-owning app is not necessarily
+    # the app that contributed this project's template.
+    template_snapshot_json={"imported_from": {"management": "linked"}},
+    deleted_at=datetime.now(UTC).replace(tzinfo=None) if project_deleted else None,
+  )
+  db.add(project)
+  db.commit()
+
+  response = client.delete(f"/api/apps/{app_id}", headers=auth)
+  assert response.status_code == (204 if project_deleted else 409)
+  if not project_deleted:
+    assert response.json()["detail"]["project_id"] == project_id
+
+  # Simulate an app tombstone predating import as well as an ordinary uninstall.
+  app.deleted_at = datetime.now(UTC).replace(tzinfo=None) - timedelta(days=8)
+  db.commit()
+  assert client.get("/api/apps/", headers=auth).status_code == 200
+  db.expire_all()
+  assert db.get(models.App, app_id) is not None
+  assert db.get(models.Project, project_id) is not None
+  assert source.read_text() == "existing builder work"

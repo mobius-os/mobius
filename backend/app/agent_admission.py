@@ -39,11 +39,11 @@ def _memory_deferral(status: dict[str, Any]) -> str | None:
   memory = _section(status, "pressure", "memory")
   ratio = memory.get("working_set_ratio")
   critical_at = memory.get("critical_at_ratio")
-  if not isinstance(ratio, (int, float)):
-    return None
-  if not isinstance(critical_at, (int, float)):
-    critical_at = 0.90
-  if ratio < critical_at:
+  if (
+    not isinstance(ratio, (int, float))
+    or not isinstance(critical_at, (int, float))
+    or ratio < critical_at
+  ):
     return None
   return (
     "memory headroom because unreclaimable footprint is "
@@ -64,45 +64,35 @@ def _storage_deferral(status: dict[str, Any]) -> str | None:
   disk = _section(status, "pressure", "disk")
   if disk.get("state") != "critical":
     return None
-  free = _section(status, "facts", "disk").get("free_bytes")
-  threshold = disk.get("critical_below_bytes")
-  if not isinstance(free, int):
-    return "critically low shared storage"
-  if isinstance(threshold, int):
-    return (
-      f"critically low shared storage ({free // MIB} MiB free; "
-      f"safety floor {threshold // MIB} MiB)"
-    )
-  return f"critically low shared storage ({free // MIB} MiB free)"
+  # A critical disk assessment always carries the parsed free bytes and the
+  # floor it was compared against (resource_pressure._disk_pressure).
+  free = _section(status, "facts", "disk")["free_bytes"]
+  threshold = disk["critical_below_bytes"]
+  return (
+    f"critically low shared storage ({free // MIB} MiB free; "
+    f"safety floor {threshold // MIB} MiB)"
+  )
 
 
-class _Blocked(Exception):
-  """One admission attempt found a resource short; carries the deferral."""
-
-  def __init__(self, deferral: AgentTurnDeferred) -> None:
-    self.deferral = deferral
-
-
-def _admit(status: dict[str, Any]) -> None:
-  """One attempt: defer only for measured critical memory or storage.
-
-  Unknown telemetry fails open. Raises ``_Blocked`` with the owner-facing
-  deferral when the shared pressure snapshot says a resource is critical.
-  """
+def _deferral(status: dict[str, Any]) -> AgentTurnDeferred | None:
+  """One attempt: the owner-facing deferral for measured critical memory or
+  storage, or ``None`` when the turn may start. Unknown telemetry fails open."""
   memory_reason = _memory_deferral(status)
   if memory_reason is not None:
-    raise _Blocked(AgentTurnDeferred(
-      f"This turn is waiting for {memory_reason}. It will continue "
-      "automatically when enough memory is available.",
+    return AgentTurnDeferred(
+      f"This turn is waiting for {memory_reason}. Finish or stop other agent "
+      "work if you want to free headroom sooner; it will continue "
+      "automatically when memory settles.",
       resource="memory",
-    ))
+    )
   storage_reason = _storage_deferral(status)
   if storage_reason is not None:
-    raise _Blocked(AgentTurnDeferred(
+    return AgentTurnDeferred(
       f"This turn is waiting because Möbius has {storage_reason}. It will "
       "continue automatically after cleanup frees space.",
       resource="storage",
-    ))
+    )
+  return None
 
 
 async def require_agent_turn_admission(
@@ -117,19 +107,19 @@ async def require_agent_turn_admission(
   critical boundary. Unknown telemetry fails open for developer hosts and
   unusual self-hosted runtimes.
   """
-  try:
-    return _admit(status_reader(data_dir))
-  except _Blocked:
-    pass
+  if _deferral(status_reader(data_dir)) is None:
+    return
   if scratch_sweeper is None:
     from app.agent_scratch import sweep_idle_scratch
     scratch_sweeper = sweep_idle_scratch
   try:
     await scratch_sweeper()
   except OSError:
-    # Cleanup is best-effort; the fresh snapshot below still owns admission.
+    # Cleanup is an opportunistic last chance, not the admission decision.
+    # A filesystem race or permission issue must not turn a truthful resource
+    # wait into an unrelated setup failure; the fresh measurement below still
+    # owns whether the turn may start.
     pass
-  try:
-    return _admit(status_reader(data_dir))
-  except _Blocked as blocked:
-    raise blocked.deferral from None
+  deferral = _deferral(status_reader(data_dir))
+  if deferral is not None:
+    raise deferral

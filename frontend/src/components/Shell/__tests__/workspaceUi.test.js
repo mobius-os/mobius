@@ -19,6 +19,7 @@ const workspaceSession = readFileSync(
 )
 const shellBrand = readFileSync(new URL('../ShellBrand.jsx', import.meta.url), 'utf8')
 const newChatLanding = readFileSync(new URL('../NewChatLanding.jsx', import.meta.url), 'utf8')
+const chatView = readFileSync(new URL('../../ChatView/ChatView.jsx', import.meta.url), 'utf8')
 const chatInputBar = readFileSync(new URL('../../ChatView/ChatInputBar.jsx', import.meta.url), 'utf8')
 const composerPopover = readFileSync(new URL('../../ChatView/ComposerPopover.jsx', import.meta.url), 'utf8')
 const workspaceViewSrc = readFileSync(new URL('../workspaceView.js', import.meta.url), 'utf8')
@@ -176,6 +177,19 @@ test('reduced motion makes the drop preview instant', () => {
 test('the retired first-use drag hint cannot reappear in the shell', () => {
   assert.doesNotMatch(shell, /workspaceCoachmarkVisible|Drag a tab to move or split it/)
   assert.doesNotMatch(css, /\.workspace__coachmark/)
+})
+
+test('genuine hidden failures have durable red drawer attention while restart parks stay neutral', () => {
+  assert.match(shell, /failedChatIds\(chats, visibleChatIds\)/)
+  assert.match(shell, /invalidateShellListCache\('chats'\)\.then\(refreshChats\)/)
+  assert.match(shell, /api\.chats\.markFailureSeen/)
+  assert.match(drawer, /needsOwnerInput[\s\S]*streaming[\s\S]*waiting[\s\S]*failed[\s\S]*building/)
+  assert.match(drawer, /className="drawer__failure-dot"/)
+  assert.match(drawer, /aria-label="Latest run failed"/)
+  const failureRule = drawerCss.match(/\.drawer__failure-dot\s*\{[\s\S]*?\}/)?.[0] || ''
+  assert.match(failureRule, /border-radius:\s*50%/)
+  assert.match(failureRule, /background:\s*var\(--danger\)/)
+  assert.doesNotMatch(failureRule, /transform:/)
 })
 
 test('post-drag click suppression is source-scoped and expires on fresh input', () => {
@@ -369,15 +383,15 @@ test('workspace mutations update the undo slot silently, with no toast', () => {
   assert.match(shell, /dispatchWorkspace\(\{ type: 'UNDO_LAST' \}\)/)
 })
 
-test('the focused pane carries no always-on ring, only an active-tab signal', () => {
+test('pane chrome carries no always-on focus ring or underline', () => {
   // No persistent ring element or its stylesheet rule.
   assert.doesNotMatch(chrome, /data-focus-ring/)
   assert.doesNotMatch(chrome, /workspace__focus-ring/)
   assert.doesNotMatch(css, /\.workspace__focus-ring\s*\{/)
-  // Which tab is open per pane, and which pane has focus, read from the active
-  // pill: the focused strip's active pill gets a 2px accent underline; unfocused
-  // strips' active pills soften instead.
-  assert.match(css, /\.workspace__strip--focused \.shell__tab--active\s*\{[\s\S]*?inset 0 -2px 0/)
+  // Active tabs retain their pill tint and border treatment, but focused panes
+  // do not add a persistent accent mark.
+  assert.doesNotMatch(css, /\.workspace__strip--focused \.shell__tab--active\s*\{[^}]*box-shadow:/)
+  assert.match(css, /\.workspace__strip--focused \.shell__tab--active/)
   assert.match(css, /\.workspace__strip:not\(\.workspace__strip--focused\) \.shell__tab--active/)
 })
 
@@ -828,14 +842,6 @@ test('the pane focus action stays compact at the far edge and reachable on overf
     'the control should not compensate for padding owned by its strip')
 })
 
-test('overflowing strips keep native pan and add a no-chrome wheel path', () => {
-  assert.match(paneStrip, /export function scrollStripWheel\(e\)/)
-  assert.match(paneStrip, /Math\.abs\(e\.deltaX\) >= Math\.abs\(e\.deltaY\)/)
-  assert.match(paneStrip, /strip\.scrollLeft \+= e\.deltaY \* scale/)
-  assert.match(paneStrip, /onWheel=\{scrollStripWheel\}/)
-  assert.match(shell, /onWheel=\{scrollStripWheel\}/)
-})
-
 test('navigation surfaces keep the brand close path while the workspace is inert', () => {
   const header = shell.match(/<header className="shell__bar"[^>]*>/)?.[0] || ''
   assert.doesNotMatch(header, /inert=/)
@@ -870,10 +876,11 @@ test('opening navigation is presentation-only and never refetches whole lists', 
   )
   assert.match(chatLifecycle, /markChatRunState\(ev\.chatId, true\)/)
   assert.match(chatLifecycle, /markChatRunState\(chatId, false\)/)
-  assert.doesNotMatch(chatLifecycle, /refreshChats\(\)/,
-    'one run-state change must not parse and reconcile the complete chat list')
-  assert.match(shell, /running \? withChatOwnerActivity\(rows, chatId, at\) : rows/,
-    'a run started in another live client must still advance drawer recency')
+  assert.match(chatLifecycle,
+    /ev\.type === 'chat_run_started'[\s\S]*?invalidateShellListCache\('chats'\)\.then\(refreshChats\)/,
+    'a start reconciles durable owner activity instead of guessing from a run')
+  assert.match(shell, /projectChatList\(rows => withChatRunState\(rows, chatId, running\)\)/,
+    'a waiting or background run changes its indicator without changing Recents order')
 })
 
 test('chat drawer indicators distinguish owner input, active work, waiting, and unseen completion', () => {
@@ -891,6 +898,11 @@ test('chat drawer indicators distinguish owner input, active work, waiting, and 
     shell,
     /ev\.type === 'chat_run_started'[\s\S]*?markStreamingAcknowledged\(ev\.chatId\)/,
     'a started run must raise and acknowledge the active-work dot',
+  )
+  assert.match(
+    shell,
+    /const markStreamingStart = useCallback\(\(chatId\) => \{[\s\S]*?streamingChatIdsRef\.current = next[\s\S]*?setLocalStreamingChatIds/,
+    'a send must publish activity before same-task placement decisions run',
   )
   assert.match(
     shell,
@@ -917,11 +929,18 @@ test('chat drawer indicators distinguish owner input, active work, waiting, and 
     /needsOwnerInput \? \([\s\S]*?drawer__owner-input-dot[\s\S]*?: streaming \? \([\s\S]*?drawer__streaming-dot[\s\S]*?: waiting \? \([\s\S]*?drawer__waiting-icon[\s\S]*?: attention \? \([\s\S]*?drawer__attention-dot/,
     'owner input and active work must precede durable waiting and unseen completion',
   )
-  assert.match(drawerCss, /\.drawer__owner-input-dot\s*\{[\s\S]*?transform:\s*rotate\(45deg\)/)
+  assert.match(drawer, /drawer__attention-diamond drawer__owner-input-dot/)
+  assert.doesNotMatch(
+    drawer,
+    /drawer__contribution-pending|chatFlags|pendingContribution/,
+    'chat rows carry no persistent not-upstream-yet marker',
+  )
+  assert.match(drawerCss, /\.drawer__attention-diamond\s*\{[\s\S]*?transform:\s*rotate\(45deg\)/)
   assert.match(drawerCss, /\.drawer__owner-input-dot\s*\{[\s\S]*?var\(--owner-input, #f59e0b\)/)
   assert.match(drawerCss, /\.drawer__streaming-dot\s*\{[\s\S]*?background:\s*var\(--accent\)/)
   assert.match(drawerCss, /\.drawer__waiting-icon\s*\{[\s\S]*?color:\s*var\(--accent\)/)
   assert.match(drawerCss, /\.drawer__attention-dot\s*\{[\s\S]*?border:\s*1\.5px solid var\(--green\)/)
+  assert.doesNotMatch(drawerCss, /\.drawer__contribution-pending/)
 })
 
 test('live preview reveal keeps the workspace controller distinct from device mode', () => {
@@ -955,7 +974,6 @@ test('successful project artifacts render as direct Recents destinations', () =>
   assert.match(drawer, /actions\.select\('artifact', item\.id\)/)
   assert.match(shell, /activeArtifactRef=\{activeArtifactRef\}/)
   assert.match(shell, /parseArtifactTabId\(artifactRef\)[\s\S]*?openArtifact\(project, parsed\.artifactId\)/)
-  assert.match(shell, /activeView === 'artifact' \|\| activeProjectChatProjectId/)
 })
 
 test('artifact previews keep recovery actions visible without a build-log drawer', () => {
@@ -972,8 +990,9 @@ test('artifact previews keep recovery actions visible without a build-log drawer
   assert.doesNotMatch(projectsCss, /artifact-log/)
 })
 
-test('a selected project-owned Recent includes its project chip in one row surface', () => {
-  assert.match(drawer, /drawer__row--artifact drawer__row--project-owned/)
+test('a selected project-owned chat Recent includes its project chip in one row surface, while an artifact row stands alone', () => {
+  assert.doesNotMatch(drawer, /drawer__row--artifact drawer__row--project-owned/,
+    'a built artifact is its own destination and carries no project belonging')
   assert.match(drawer, /projectChip \? ' drawer__row--project-owned'/)
   assert.match(
     drawerCss,
@@ -1183,8 +1202,11 @@ test('a manual platform reconcile refreshes the persistent Settings surface', ()
   assert.match(shell, /refreshToken=\{settingsRefreshToken\}/)
   assert.match(settingsView, /active = true,\s*refreshToken = 0,/)
   assert.match(
-    settingsView,
-    /useEffect\(\(\) => \{\s*if \(active\) refreshPlatform\(\)\s*\}, \[active, refreshPlatform, refreshToken\]\)/,
+    settingsView, /<PlatformUpdates active=\{active\} refreshToken=\{refreshToken\}/,
+  )
+  const updateOwner = readFileSync(new URL('../../SettingsView/usePlatformUpdates.js', import.meta.url), 'utf8')
+  assert.match(
+    updateOwner, /useEffect\(\(\) => \{\s*if \(!active\) return\s*refreshPlatform\(\)\s*refreshRebuild\(\)\s*\}, \[active, refreshToken, refreshPlatform, refreshRebuild\]\)/,
   )
 })
 
@@ -1226,7 +1248,7 @@ test('Shell threads the (drag-preview) viewMode into the content derivation and 
   // reconcile — no separate SET_VIEW_MODE on commit.
   assert.match(shell, /dragPreviewIdRef\.current = mode\.dragArm\(/)
   assert.match(shell, /mode\.dragCancel\(dragPreviewIdRef\.current\)/)
-  assert.match(shell, /const \{ multiPane, single, focusedActiveKey, fullBleedKey, visibleAppIds \}/)
+  assert.match(shell, /multiPane, single, focusedActiveKey, fullBleedKey,[\s\S]*visibleAppIds, visibleChatIds/)
   // Each retained owner paints only in its own world. Standard and Builder can
   // retain the same chat without sharing geometry or activating both runtimes.
   assert.match(shell, /const standardOwner = world === STANDARD_CHAT_WORLD/)
@@ -1292,10 +1314,10 @@ test('the builder preview cannot outlive its drag session past one visibility bo
 })
 
 test('workspace focus, drag label, and cancel visuals remain coherent', () => {
-  // V4: the FOCUSED pane's active pill softens the base full-accent border so the 2px
-  // underline is what carries focus (the border used to mask it).
+  // The focused pane keeps a quieter active-pill border without restoring the
+  // persistent underline that previously appeared beneath the tab.
   const focused = css.match(/\.workspace__strip--focused \.shell__tab--active \{[\s\S]*?\n\}/)?.[0] || ''
-  assert.match(focused, /box-shadow: inset 0 -2px 0 0 var\(--accent\)/)
+  assert.doesNotMatch(focused, /box-shadow:/)
   assert.match(focused, /border-color: color-mix\(in srgb, var\(--accent\) 45%, var\(--border-light\)\)/)
   // Fixed drag chrome remains clamped inside the viewport edge.
   assert.match(dragBinding, /const viewportWidth = viewport\.width \|\| window\.innerWidth/)
@@ -1365,41 +1387,34 @@ test('deletion-evidence contract: probeDeletion classifies 404 vs exists vs unkn
   assert.match(shell, /probeDeletion\(`\/chats\//)
 })
 
-test('round4-3: the New Chat landing renders for a null slot and reuses ChatView empty visuals', () => {
-  // The presentation key + its wiring.
+test('round4-3: the null-slot landing is passive and interactive New Chat uses ChatView', () => {
   assert.match(workspaceViewSrc, /export const EMPTY_SINGLE_SURFACE_KEY = 'home:new-chat'/)
-  assert.match(shell, /const newChatSurface = fullBleedKey === EMPTY_SINGLE_SURFACE_KEY/)
-  assert.match(shell, /<NewChatLanding/)
-  assert.match(shell, /chatId=\{presentingNewChat \? newChatPresentation\.chatId : null\}/)
-  assert.match(shell, /chatInfo=\{newChatPresentation\?\.chatInfo \?\? null\}/)
+  assert.match(shell,
+    /fullBleedKey === EMPTY_SINGLE_SURFACE_KEY && \([\s\S]*<NewChatLanding[\s\S]*failure=\{newChatLandingFailure\}/)
+  assert.match(shell,
+    /setNewChatPresentation\(presentation\)[\s\S]*applyModeDestination\(\{[\s\S]*chatId,[\s\S]*paneId: ws\.focusedPaneId/,
+    'the final client id must mount in the workspace immediately')
+  assert.match(shell,
+    /<PaneChatView[\s\S]*newChatSession=\{newChatSession\}[\s\S]*onNewChatSubmit=\{queueDraftFirstNewChat\}/)
   assert.match(shell,
     /materialized: true,[\s\S]*chatInfo: createdChatDetailCache\(result\.chat\)\?\.chatInfo \?\? null/,
     'the accepted create response must unlock the model picker without another read')
   assert.match(shell, /retryDraftFirstNewChat/)
-  assert.match(newChatLanding, /submissionBlocked[\s\S]*attachmentsDisabled/)
-  assert.match(newChatLanding,
-    /focusComposerElement\(inputRef\.current\)[\s\S]*placeCaretAtTextEnd\(inputRef\.current\)/,
-    'the provisional draft resumes at its text end without changing generic focus policy')
-  assert.match(newChatLanding,
-    /leftButtons=\{liveChatInfo \? \([\s\S]*<BrainUsageButton[\s\S]*<ComposerPopover[\s\S]*chatInfo=\{liveChatInfo\}[\s\S]*embedded[\s\S]*\) : <ComposerPopover pending \/>\}/,
-    'the provisional composer must unlock the canonical model picker once its chat row exists')
-  assert.match(newChatLanding,
-    /async function submitDraft[\s\S]*await settingsSaveTailRef\.current[\s\S]*onSubmit\?\.\(draft\)/,
-    'a first send must follow any model choice the owner just made')
+  assert.match(chatView,
+    /const provisionalNewChat = !!newChatSession[\s\S]*onSubmit=\{provisionalNewChat \? handleProvisionalNewChatSubmit : handleSubmit\}/,
+    'the canonical composer owns both pre-allocation and ordinary Send')
+  assert.match(chatView,
+    /pendingFiles=\{pendingFiles\}[\s\S]*onAddFiles=\{handleComposerAddFiles\}[\s\S]*onAttachClick=\{\(\) => attachTriggerRef\.current\?\.\(\)\}/,
+    'the canonical draft/file owner is available before allocation')
   assert.match(composerPopover, /\{onAttachClick && \(/,
-    'a model-only New Chat Brain must not expose a dead attachment action')
+    'the canonical New Chat Brain exposes Attach files')
   assert.match(composerPopover, /\{!embedded && onOpenChanges && \(/,
-    'a model-only New Chat Brain must not expose a dead Changes action')
-  assert.match(composerPopover, /\{!embedded && \(onOpenUsage \|\| onOpenSummary \|\| onOpenInspector\) && \(/,
-    'a model-only New Chat Brain must not expose dead continuity actions')
-  assert.doesNotMatch(newChatLanding, /attachTriggerRef/,
-    'the pre-allocation surface must not expose server-bound attachment behavior')
-  assert.match(chatInputBar,
-    /const files = attachmentsDisabled \? \[\] : pastedFiles\(e\.clipboardData\)/,
-    'disabled attachments must suppress only pasted files, not text handling')
-  assert.match(chatInputBar, /\{!attachmentsDisabled && \(\s*<input/,
-    'disabled attachments must not mount a hidden file picker')
-  // Seamless swap: the landing reuses ChatView's exact empty treatment.
+    'the canonical New Chat Brain exposes Changes')
+  assert.match(composerPopover,
+    /\{!embedded && \(onOpenUsage \|\| onOpenSummary \|\| onOpenInspector\) && \(/,
+    'the full canonical option set cannot be stranded behind a temporary composer')
+  assert.doesNotMatch(newChatLanding, /ChatInputBar|ComposerPopover|inputRef/,
+    'the passive landing must never become a second interactive owner')
   assert.match(newChatLanding, /className="chat chat--empty"/)
   assert.match(newChatLanding, /className="chat__empty-wrap"/)
   assert.match(newChatLanding, /className="chat__empty-glyph"/)

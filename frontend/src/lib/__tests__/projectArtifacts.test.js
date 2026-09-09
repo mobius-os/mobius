@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import {
   artifactEntryPath,
   artifactPreviewKind,
+  artifactPreviewRevision,
   artifactStatus,
   artifactStatusPill,
   artifactVisualKind,
@@ -13,8 +14,7 @@ import {
   isArtifactBuildEvent,
   isBuilding,
   normalizeArtifacts,
-  queueArtifactBuildsAfterSourceSave,
-  shouldHotSwapPreview,
+  queueArtifactBuildsAfterSourceChange,
 } from '../projectArtifacts.js'
 
 test('normalizeArtifacts reads a bare array or an envelope, and drops malformed rows', () => {
@@ -25,9 +25,9 @@ test('normalizeArtifacts reads a bare array or an envelope, and drops malformed 
   assert.deepEqual(normalizeArtifacts(undefined), [])
 })
 
-test('source Save queues one idle envelope artifact and preserves build filters', async () => {
+test('a source change queues one idle envelope artifact and preserves build filters', async () => {
   const queued = []
-  const outcomes = await queueArtifactBuildsAfterSourceSave({
+  const outcomes = await queueArtifactBuildsAfterSourceChange({
     artifacts: [
       { id: 'site', status: 'idle' },
       { id: 'busy', status: 'building' },
@@ -109,13 +109,19 @@ test('HTML-backed formats retain distinct artifact icon identities', () => {
   assert.equal(artifactVisualKind({ builder: 'website', source: 'index.html', preview: 'html' }), 'html')
 })
 
-test('shouldHotSwapPreview fires only when a build reaches ok freshly', () => {
-  assert.equal(shouldHotSwapPreview('building', 'ok'), true) // build finished
-  assert.equal(shouldHotSwapPreview('', 'ok'), true)         // tab opened after a build
-  assert.equal(shouldHotSwapPreview('idle', 'ok'), true)
-  assert.equal(shouldHotSwapPreview('ok', 'ok'), false)       // already showing this build
-  assert.equal(shouldHotSwapPreview('idle', 'building'), false)
-  assert.equal(shouldHotSwapPreview('building', 'error'), false)
+test('artifactPreviewRevision tracks successful output rather than transient status', () => {
+  const first = {
+    status: 'ok', has_output: true, updated_at: '2026-09-04T18:12:51.680864',
+  }
+  const rebuilt = {
+    ...first, updated_at: '2026-09-04T18:12:52.010222',
+  }
+  assert.equal(artifactPreviewRevision(first), first.updated_at)
+  assert.equal(artifactPreviewRevision(rebuilt), rebuilt.updated_at)
+  assert.notEqual(artifactPreviewRevision(first), artifactPreviewRevision(rebuilt))
+  assert.equal(artifactPreviewRevision({ ...rebuilt, status: 'building' }), '')
+  assert.equal(artifactPreviewRevision({ ...rebuilt, has_output: false }), '')
+  assert.equal(artifactPreviewRevision({ status: 'ok', has_output: true }), 'built-output')
 })
 
 test('build-status event detection reads plausible id field names leniently', () => {

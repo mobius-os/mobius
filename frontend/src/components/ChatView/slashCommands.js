@@ -20,7 +20,7 @@
  *
  * `providers` records where a command actually does something. Both current
  * runners expose Möbius's durable goal controls, so `/goal` is available in
- * Claude, Codex, and Evolve chats. The picker
+ * Claude and Codex chats. The picker
  * still shows commands that are unavailable in the current chat, with a clear
  * explanation, so typing "/" never looks broken merely because the provider
  * changed. Availability is enforced separately from matching so an
@@ -32,7 +32,7 @@ export const SLASH_COMMANDS = [
     args: '<what to keep working toward>',
     summary: 'Keep pursuing a goal across turns',
     detail: 'Runs until the goal holds. Clear it from the Goal rail.',
-    providers: ['claude', 'codex', 'mobius'],
+    providers: ['claude', 'codex'],
   },
 ]
 

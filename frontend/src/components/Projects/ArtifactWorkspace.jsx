@@ -1,30 +1,32 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import ArrowLeft from 'lucide-react/dist/esm/icons/arrow-left.mjs'
-import Hammer from 'lucide-react/dist/esm/icons/hammer.mjs'
+import { ArrowLeft, SettingsWrench as Hammer } from '@openai/apps-sdk-ui/components/Icon'
 import { api, jsonOrThrow } from '../../api/client.js'
 import { projectQueries } from '../../hooks/queries.js'
 import {
   artifactEntryPath,
+  artifactPreviewRevision,
   artifactPreviewKind,
   artifactStatus,
   artifactStatusPill,
   artifactTypeName,
   isBuilding,
   normalizeArtifacts,
-  shouldHotSwapPreview,
 } from '../../lib/projectArtifacts.js'
 import ProjectPdfPreview from './ProjectPdfPreview.jsx'
+import { linkedProjectAppId } from '../../lib/appSourceProject.js'
 import { assembleProjectHtmlPreview } from '../../lib/projectPreview.js'
 import ArtifactIdentityIcon from './ArtifactIdentityIcon.jsx'
 import ProjectPreviewFrame from './ProjectPreviewFrame.jsx'
 import './Projects.css'
 
-// The artifact tab: a Build/Rebuild control + status pill over a live preview.
-// HTML renders in a sandboxed iframe with NO
-// allow-same-origin (its JS can never read the parent token); PDFs render
-// through pdfjs; images use a private object URL. The preview hot-swaps.
-export default function ArtifactWorkspace({ projectId, artifactId, projectName, onOpenProject, readOnly = false }) {
+// The independent artifact viewer: the built result and nothing else. HTML
+// renders in a sandboxed iframe with NO allow-same-origin (its JS can never
+// read the parent token); PDFs render through pdfjs; images use a private
+// object URL. The preview hot-swaps when a build finishes. In the shell the
+// pane tab is the only chrome; the collaborator route, which has no tabs,
+// passes `onOpenProject` and gets one compact back bar.
+export default function ArtifactWorkspace({ projectId, project, onOpenApp, artifactId, projectName, onOpenProject, readOnly = false }) {
   const artifactsQuery = useQuery({
     queryKey: projectQueries.keys.artifacts(projectId),
     queryFn: async ({ signal }) => normalizeArtifacts(await jsonOrThrow(
@@ -52,25 +54,21 @@ export default function ArtifactWorkspace({ projectId, artifactId, projectName, 
 
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
-  const [previewVersion, setPreviewVersion] = useState(0)
-
-  // Hot-swap the preview when a build finishes (building -> ok, or a fresh ok
-  // first seen). The status is owned by the query, refreshed by the build-status
-  // system event Shell forwards into the artifacts cache.
-  const prevStatusRef = useRef(status)
-  useEffect(() => {
-    const prev = prevStatusRef.current
-    prevStatusRef.current = status
-    if (shouldHotSwapPreview(prev, status)) setPreviewVersion(v => v + 1)
-  }, [status])
+  const successfulPreviewRevision = artifactPreviewRevision(artifact)
+  const previewVersionRef = useRef('')
+  // Keep the last successful output mounted while its replacement builds.
+  // The next durable completion revision replaces it even if the transient
+  // building state was coalesced out of the query stream.
+  if (successfulPreviewRevision) {
+    previewVersionRef.current = successfulPreviewRevision
+  }
+  const previewVersion = previewVersionRef.current
 
   async function build() {
     if (busy || isBuilding(artifact)) return
     setBusy(true); setError('')
     try {
       await jsonOrThrow(await api.projects.buildArtifact(projectId, artifactId), 'Build failed:')
-      // Optimistically flip to building; the system event + refetch reconcile the
-      // terminal state and drive the preview hot-swap.
       await artifactsQuery.refetch()
     } catch (cause) {
       setError(cause?.message || 'Could not start the build.')
@@ -78,15 +76,23 @@ export default function ArtifactWorkspace({ projectId, artifactId, projectName, 
   }
 
   const entryPath = artifact ? artifactEntryPath(artifact) : null
+  const name = artifact?.name || artifactId
 
+  if (!artifactsQuery.isLoading && !artifact && linkedProjectAppId(project) && project.template?.retired_app_previews?.includes(artifactId)) {
+    return <section className="artifact-workspace"><div className="projects-empty">
+      <p>This Project now opens the installed app, not a separate preview.</p>
+      {onOpenApp && <button type="button" onClick={() => onOpenApp(linkedProjectAppId(project))}>Open app</button>}
+      {onOpenProject && <button type="button" onClick={onOpenProject}>Back to project</button>}
+    </div></section>
+  }
   if (artifactsQuery.isLoading) {
-    return <section className="artifact-workspace" aria-busy="true"><p className="projects-empty" role="status">Loading artifact…</p></section>
+    return <section className="artifact-workspace" aria-busy="true"><p className="projects-empty" role="status">Loading Creation…</p></section>
   }
   if (!artifact) {
     return (
       <section className="artifact-workspace">
         <div className="projects-empty" role="alert">
-          <p>This artifact is no longer available.</p>
+          <p>This Creation is no longer available.</p>
           {onOpenProject && <button type="button" onClick={onOpenProject}>Back to project</button>}
         </div>
       </section>
@@ -94,44 +100,34 @@ export default function ArtifactWorkspace({ projectId, artifactId, projectName, 
   }
 
   return (
-    <section className="artifact-workspace" aria-label={`${artifact.name || artifactId} artifact`}>
-      <header className="artifact-workspace__header">
-        {onOpenProject && (
-          <button type="button" className="project-icon-button" aria-label="Back to project" title={projectName ? `Back to ${projectName}` : 'Back to project'} onClick={onOpenProject}><ArrowLeft size={18} /></button>
-        )}
+    <section className="artifact-workspace" aria-label={`${name} Creation`}>
+      {onOpenProject && <header className="artifact-workspace__header">
+        <button type="button" className="project-icon-button" aria-label="Back to project" title={projectName ? `Back to ${projectName}` : 'Back to project'} onClick={onOpenProject}><ArrowLeft width={18} height={18} /></button>
         <ArtifactIdentityIcon artifact={artifact} size={34} />
         <div className="artifact-workspace__identity">
-          <strong>{artifact.name || artifactId}</strong>
-          <small>{artifactTypeName(artifact)}{projectName ? ` · ${projectName}` : ''}</small>
+          <strong>{name}</strong>
+          <small>{artifactTypeName(artifact)}</small>
         </div>
         <span className={`artifact-pill artifact-pill--${pill.variant}`} role="status">{pill.label}</span>
-        {!readOnly && <button
-          type="button"
-          className="project-build-button"
-          disabled={busy || isBuilding(artifact)}
-          onClick={build}
-        >
-          <Hammer size={16} aria-hidden="true" />
-          <span>{isBuilding(artifact) ? 'Building…' : hasOutput ? 'Rebuild' : 'Build'}</span>
-        </button>}
-      </header>
+      </header>}
 
       {error && <p className="projects-error" role="alert">{error}</p>}
 
+      {hasOutput && status === 'error' && <p className="projects-error" role="status">The latest build failed. Showing the last successful Creation.</p>}
       <div className="artifact-workspace__surface">
-        {!hasOutput && status !== 'building' ? (
+        {!hasOutput ? (
           <div className="project-document__empty" role="status">
-            <Hammer size={42} strokeWidth={1.3} aria-hidden="true" />
-            <h2>Nothing built yet</h2>
-            <p>{status === 'error' ? 'The last build failed. Fix the source and build again.' : 'Build this artifact to preview it here.'}</p>
-            {!readOnly && <button type="button" className="project-build-button" disabled={busy} onClick={build}><Hammer size={16} aria-hidden="true" /><span>Build</span></button>}
+            <Hammer width={42} height={42} aria-hidden="true" />
+            <h2>{status === 'building' ? 'Building your Creation…' : 'Nothing built yet'}</h2>
+            <p>{status === 'building' ? 'The preview will appear here when it is ready.' : status === 'error' ? 'The last build failed. Fix the source and build again.' : 'Build this Creation to see it here.'}</p>
+            {!readOnly && <button type="button" className="project-build-button" disabled={busy || status === 'building'} onClick={build}><Hammer width={16} height={16} aria-hidden="true" /><span>Build</span></button>}
           </div>
         ) : preview === 'pdf' ? (
           <PdfPreview projectId={projectId} artifactId={artifactId} entryPath={entryPath} version={previewVersion} />
         ) : preview === 'image' ? (
-          <ImagePreview projectId={projectId} artifactId={artifactId} entryPath={entryPath} version={previewVersion} name={artifact.name || artifactId} />
+          <ImagePreview projectId={projectId} artifactId={artifactId} entryPath={entryPath} version={previewVersion} name={name} />
         ) : (
-          <WebsitePreview projectId={projectId} artifactId={artifactId} sourcePath={artifact.source || entryPath} entryPath={entryPath} version={previewVersion} name={artifact.name || artifactId} />
+          <WebsitePreview projectId={projectId} artifactId={artifactId} sourcePath={artifact.source || entryPath} entryPath={entryPath} version={previewVersion} name={name} />
         )}
       </div>
     </section>
@@ -159,7 +155,7 @@ function WebsitePreview({ projectId, artifactId, sourcePath, entryPath, version,
       try {
         const res = await api.projects.artifactOutput(projectId, artifactId, entry, { signal: controller.signal })
         if (!active) return
-        if (!res.ok) throw new Error(`The site could not be loaded (${res.status}).`)
+        if (!res.ok) throw new Error(`The Creation could not be loaded (${res.status}).`)
         const html = await res.text()
         const loadText = async (path) => {
           const dep = await api.projects.artifactOutput(projectId, artifactId, path, { signal: controller.signal })
@@ -182,7 +178,7 @@ function WebsitePreview({ projectId, artifactId, sourcePath, entryPath, version,
         const assembled = await assembleProjectHtmlPreview(html, entry, loadText, loadDataUri)
         if (active) setDoc(assembled)
       } catch (cause) {
-        if (active && cause?.name !== 'AbortError') setError(cause?.message || 'The site could not be loaded.')
+        if (active && cause?.name !== 'AbortError') setError(cause?.message || 'The Creation could not be loaded.')
       } finally {
         if (active) setLoading(false)
       }
@@ -190,8 +186,8 @@ function WebsitePreview({ projectId, artifactId, sourcePath, entryPath, version,
     return () => { active = false; controller.abort() }
   }, [projectId, artifactId, entry, version])
 
-  if (error) return <div className="project-document__empty" role="alert"><h2>Couldn’t load the site</h2><p>{error}</p></div>
-  if (loading && !doc) return <div className="project-document__empty" role="status"><p>Loading site…</p></div>
+  if (error) return <div className="project-document__empty" role="alert"><h2>Couldn’t load this Creation</h2><p>{error}</p></div>
+  if (loading && !doc) return <div className="project-document__empty" role="status"><p>Loading Creation…</p></div>
   return (
     <div className="artifact-preview">
       <ProjectPreviewFrame
@@ -235,7 +231,7 @@ function PdfPreview({ projectId, artifactId, entryPath, version }) {
 
   if (error) return <div className="project-document__empty" role="alert"><h2>Couldn’t load the document</h2><p>{error}</p></div>
   if (loading && !data) return <div className="project-document__empty" role="status"><p>Rendering document…</p></div>
-  return <ProjectPdfPreview data={data} title="Artifact document" />
+  return <ProjectPdfPreview data={data} title="Creation document" />
 }
 
 function ImagePreview({ projectId, artifactId, entryPath, version, name }) {

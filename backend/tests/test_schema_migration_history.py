@@ -139,3 +139,23 @@ def test_migration_hash_includes_migration_owned_helpers():
   )
 
   assert first["0016_new"] != second["0016_new"]
+
+
+def test_full_identity_not_numeric_prefix_owns_a_shipped_migration():
+  guard = _migration_guard()
+  history = guard.inspect_history(
+    'def first(db):\n  return db\n'
+    'def second(db):\n  return db\n'
+    'def third(db):\n  return db\n'
+    '_SCHEMA_MIGRATIONS = (("0042_first", first), '
+    '("0042_second", second), ("0016_third", third))\n',
+    source='reconciled.py',
+  )
+  assert list(history) == ['0042_first', '0042_second', '0016_third']
+  with pytest.raises(SystemExit):
+    guard.inspect_history(
+      'def first(db):\n  return db\n'
+      'def second(db):\n  return db\n'
+      '_SCHEMA_MIGRATIONS = (("0042_same", first), ("0042_same", second))\n',
+      source='duplicate.py',
+    )

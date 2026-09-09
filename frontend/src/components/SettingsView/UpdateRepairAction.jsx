@@ -10,7 +10,7 @@ export default function UpdateRepairAction({ preview, platform, rebuild, error, 
     paths: evidence.blocking_paths, actions: evidence.activation?.required_actions,
     code: evidence.error_code, error: evidence.error,
   }))
-  const { repair, repairActive, attempt, error: repairError } = useAgentRepair({
+  const { repair, repairActive, attempt } = useAgentRepair({
     surfaceKey: 'platform-update', fingerprint,
     prompt: buildPlatformUpdateRepairPrompt(evidence),
   })
@@ -18,6 +18,6 @@ export default function UpdateRepairAction({ preview, platform, rebuild, error, 
     <button ref={buttonRef} type="button" className={className} disabled={disabled || repairActive} onClick={repair}>
       {repairActive ? 'Opening chat…' : 'Ask Möbius'}
     </button>
-    {(repairError || attempt?.phase === 'agent-failed') && <p role="status" className="settings__subtext settings__update-help-error">Couldn’t open the chat. Try again; the same request will be reused.</p>}
+    {attempt?.phase === 'agent-failed' && <p role="status" className="platform-updates__description">Couldn’t open the chat. Try again; the same request will be reused.</p>}
   </>
 }

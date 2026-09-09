@@ -1,14 +1,12 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { Search } from '@openai/apps-sdk-ui/components/Icon'
 import ProjectCreateMenu from './ProjectCreateMenu.jsx'
 import ProjectActions from './ProjectActions.jsx'
 import ProjectIdentityIcon from './ProjectIdentityIcon.jsx'
 import ProjectTypeIcon from './ProjectTypeIcon.jsx'
 import './Projects.css'
 
-// The Projects launcher: one clean list of the owner's projects plus the create
-// menu. The icon/list view toggle and the legacy "Existing app projects" import
-// section were removed — a single readable list is the one good default, and
-// legacy app-projects are no longer surfaced here.
+// The Projects launcher: one readable list plus the focused creation menu.
 export default function ProjectsDirectory({
   projects,
   templates,
@@ -17,20 +15,26 @@ export default function ProjectsDirectory({
   onOpen,
   onCreate,
   onImportGithub,
+  onImportSource,
   onRename,
   onColor,
   onDelete,
 }) {
+  const [query, setQuery] = useState('')
+  const visible = useMemo(() => projects.filter(project =>
+    [project.name, project.template?.name, project.template?.source_app_name].filter(Boolean)
+      .join(' ').toLocaleLowerCase().includes(query.trim().toLocaleLowerCase())), [projects, query])
   return (
     <section className="projects-directory" aria-label="Projects">
       <header className="projects-directory__header">
         <div>
-          <h1>Projects</h1>
+          <h1>Projects</h1><p>Your files, chats and Creations.</p>
         </div>
         <div className="projects-directory__actions">
-          <ProjectCreateMenu templates={templates} onCreate={onCreate} onImportGithub={onImportGithub} className="projects-add-menu" />
+          <ProjectCreateMenu showLabel templates={templates} onCreate={onCreate} onImportGithub={onImportGithub} onImportSource={onImportSource} className="projects-add-menu" />
         </div>
       </header>
+      {projects.length > 0 && <label className="projects-directory__search"><Search width={18} height={18} aria-hidden="true" /><input type="search" aria-label="Find a project" placeholder="Find a project" value={query} onChange={event => setQuery(event.target.value)} /></label>}
       <div className="projects-directory__scroll">
         {status === 'loading' ? (
           <p className="projects-empty" role="status">Loading projects…</p>
@@ -42,12 +46,14 @@ export default function ProjectsDirectory({
         ) : projects.length === 0 ? (
           <div className="projects-empty">
             <ProjectTypeIcon value="blank" size={42} strokeWidth={1.4} aria-hidden="true" />
-            <p>No projects yet.</p>
+            <h2>A place to make something.</h2><p>Start with a template, then use project chats to shape it. Files and Creations stay together.</p>
             <button type="button" onClick={() => onCreate?.(templates[0] || { key: 'blank', name: 'Blank project' })}>Create a project</button>
           </div>
+        ) : visible.length === 0 ? (
+          <div className="projects-empty"><p>No projects match “{query}”.</p><button type="button" onClick={() => setQuery('')}>Clear search</button></div>
         ) : (
           <div className="projects-collection projects-collection--list">
-            {projects.map(project => (
+            {visible.map(project => (
               <ProjectDirectoryRow
                 key={project.id}
                 project={project}
@@ -125,7 +131,7 @@ function ProjectDirectoryRow({ project, onOpen, onRename, onColor, onDelete }) {
           <ProjectIdentityIcon project={project} size={36} />
           <span className="projects-collection__copy">
             <strong>{project.name}</strong>
-            <small>{project.template?.name || project.project_type}</small>
+            <small>{project.template?.name || 'Project'}{project.updated_at && ` · ${new Date(project.updated_at).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}`}</small>
           </span>
         </button>
       )}

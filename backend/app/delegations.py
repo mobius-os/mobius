@@ -36,7 +36,6 @@ TERMINAL_DELEGATION_STATUSES = frozenset({
   "interrupted",
 })
 REVIEW_REQUIRED_MARKER = "DELEGATION_WRITE_REVIEW_REQUIRED"
-MAX_DELEGATION_DEPTH = 4
 CONTRIBUTION_WORKFLOW_SKILL = "/data/apps/contribute/attached-work.md"
 
 
@@ -52,7 +51,7 @@ class RunPolicy:
   scope: str
   cwd: str
   depth: int = 1
-  allowed_skill_paths: tuple[str, ...] = ()
+  required_skill_paths: tuple[str, ...] = ()
 
   @property
   def delegated(self) -> bool:
@@ -75,54 +74,32 @@ class RunPolicy:
         "durable change that completes the bounded task."
       )
     )
-    child_work_rule = (
-      (
-        "You may use Möbius's installed Subagents capability for bounded "
-        "child work when parallelism or local decomposition materially helps; "
-        "you remain responsible for checking your own completion condition "
-        "after those children settle. Its guarded helper is "
-        "$MOBIUS_SUBAGENT_HELPER. Use: python3 "
-        "/data/apps/subagents/subagents.py run --provider claude|codex --name "
-        "stable-key --scope read|write --prompt 'one bounded contract'. A "
-        "read-only owner may create only read-only children. Use stable task "
-        "keys. Do not use any other agent CLI or recursive mechanism. "
-      )
-      if self.provider == "claude"
-      else (
-        "Nested delegated work is not available in this Codex child. Do not "
-        "launch, invoke, or delegate to another agent, provider, workflow, or "
-        "agent CLI. Complete the bounded task yourself. "
-      )
-    )
-    skill_rule = (
-      "Do not inspect unrelated chats, Memory, skills, or installed-app "
-      "instructions. For this bounded contribution workflow, read the complete "
-      f"required playbook {self.allowed_skill_paths[0]}; that exact path is "
-      "permitted by this delegated scope. "
-      if len(self.allowed_skill_paths) == 1
-      else (
-        "Do not inspect unrelated chats, Memory, skills, or installed-app "
-        "instructions. "
-      )
+    required_skills = "".join(
+      "For this bounded contribution workflow, read the complete required "
+      f"playbook {path}; that exact path is permitted by this delegated scope. "
+      for path in self.required_skill_paths
     )
     return (
       "You are a delegated subagent running as a durable child task inside "
       "Möbius. Complete only the bounded user task in this child conversation "
-      f"and return a clear result to the parent. {child_work_rule}"
+      "and return a clear result to the parent. You may use Möbius's installed "
+      "Subagents capability for bounded child work when parallelism or local "
+      "decomposition materially helps; you remain responsible for checking "
+      "your own completion condition after those children settle. Its guarded "
+      "helper is $MOBIUS_SUBAGENT_HELPER. Use: python3 "
+      "/data/apps/subagents/subagents.py run --provider claude|codex --name "
+      "stable-key --scope read|write --prompt 'one bounded contract'. A "
+      "read-only owner may create only read-only children. Use stable task "
+      "keys. Do not use "
+      "a provider CLI directly; provider-native helper tools and the guarded "
+      "Subagents helper are available for bounded decomposition. "
       "Do not ask the owner an interactive question; if a required decision or "
       "credential is missing, stop and state the blocker precisely. Do not "
       "schedule work or wait after this child turn ends. If completion depends "
       "on a future external condition, return that condition and its owner to "
       "the parent; the top-level parent owns any durable Möbius Wait. Do not "
-      "use a shell or provider tool's background/detach option: every process, "
-      "test, or immediate child you start must finish or be cancelled before "
-      "you reply. A progress update, private next-items list, or promise to "
-      "finalize later is not a completed delegated result; return only after "
-      "you have checked the task's stated Done condition, or report the exact "
-      "blocker now. Do not "
-      "inspect unrelated chats or Memory. "
-      f"{skill_rule}"
-      "Owner-managed MCP connections are not available in this run. "
+      "inspect unrelated chats or Memory. Load only skills and connected tools "
+      f"that are relevant to this bounded task. {required_skills}"
       "Never read or write /data/cli-auth or /data/.secret-key. "
       f"Working directory: {self.cwd}. {scope_rule}"
     )
@@ -130,7 +107,7 @@ class RunPolicy:
 
 @dataclass(frozen=True)
 class DelegationIntent:
-  """Validated immutable fields needed to create or attach one child task."""
+  """Validated task identity plus its requested parent-notification policy."""
 
   app_id: int
   parent_chat_id: str
@@ -173,6 +150,28 @@ def same_delegation_intent(
   ))
 
 
+def _attach_existing_delegation(
+  db: Session,
+  row: models.Delegation,
+  intent: DelegationIntent,
+) -> tuple[models.Delegation, bool]:
+  """Attach to the persisted row for this exact intent.
+
+  Parent notification is lifecycle ownership, not part of the work identity.
+  Reattachment may add that ownership but never silently remove it.
+  """
+  if not same_delegation_intent(row, intent):
+    raise ValueError(
+      "task key is already attached to different immutable work"
+    )
+  # Notification is an observation owner, not task identity. Reattachment
+  # must not add a second observer: the submit route may transfer an
+  # undelivered background wake to a blocking caller under the parent's
+  # transition lock, but a later background attachment never steals an
+  # existing inline result owner.
+  return row, True
+
+
 def create_or_attach_delegation(
   db: Session, intent: DelegationIntent,
 ) -> tuple[models.Delegation, bool]:
@@ -188,16 +187,7 @@ def create_or_attach_delegation(
     models.Delegation.task_key == intent.task_key,
   ).first()
   if row is not None:
-    if not same_delegation_intent(row, intent):
-      raise ValueError(
-        "task key is already attached to different immutable work"
-      )
-    # Notification is an observation owner, not task identity. Reattachment
-    # must not add a second observer: the submit route may transfer an
-    # undelivered background wake to a blocking caller under the parent's
-    # transition lock, but a later background attachment never steals an
-    # existing inline result owner.
-    return row, True
+    return _attach_existing_delegation(db, row, intent)
 
   child_id = str(uuid.uuid4())
   row = models.Delegation(
@@ -213,10 +203,6 @@ def create_or_attach_delegation(
     scope=intent.scope,
     cwd=intent.cwd,
     prompt_sha256=hashlib.sha256(intent.prompt.encode("utf-8")).hexdigest(),
-    # Older rows may retain the retired ordinary delegated-run budget. New
-    # work deliberately leaves it unset; provider/account limits remain the
-    # observable boundary instead of a hidden local spending ceiling.
-    max_budget_usd=None,
     startup_prompt=intent.prompt,
     notify_parent_on_complete=intent.notify_parent_on_complete,
     source_work_id=intent.source_work_id,
@@ -254,11 +240,9 @@ def create_or_attach_delegation(
       models.Delegation.parent_root_run_id == intent.parent_root_run_id,
       models.Delegation.task_key == intent.task_key,
     ).first()
-    if row is None or not same_delegation_intent(row, intent):
-      raise ValueError(
-        "different delegation claimed the task key"
-      )
-    return row, True
+    if row is None:
+      raise ValueError("different delegation claimed the task key")
+    return _attach_existing_delegation(db, row, intent)
   return row, False
 
 
@@ -391,7 +375,7 @@ async def retry_limit_park(
 
 
 async def reconcile_unstarted_delegations() -> int:
-  """Start persisted ordinary child intents left before their first ChatRun.
+  """Start persisted child intents left before their first ChatRun.
 
   The same pass also clears source-work leases whose child settled without the
   live completion hook. It is safe at boot and as a periodic runtime repair.
@@ -429,6 +413,9 @@ async def reconcile_unstarted_delegations() -> int:
         started = await ensure_delegation_started(db, row)
         if started:
           started_count += 1
+        if row.source_work_id is not None:
+          status, _run, _result = derived_status(db, row, load_result=False)
+          publish_source_work_changed(row, status)
     except Exception:
       logging.getLogger("moebius.delegations").warning(
         "unstarted delegation recovery failed id=%s", row_id, exc_info=True,
@@ -486,7 +473,7 @@ def policy_for_chat(db: Session, chat_id: str) -> RunPolicy | None:
     scope=row.scope,
     cwd=row.cwd,
     depth=depth,
-    allowed_skill_paths=(
+    required_skill_paths=(
       (CONTRIBUTION_WORKFLOW_SKILL,)
       if row.source_work_id is not None
       and row.source_work_intent in {
@@ -545,17 +532,7 @@ def parent_root_run_id(
       run = query.order_by(
         models.ChatRun.started_at.desc(), models.ChatRun.id.desc()
       ).first()
-  if run is None:
-    return None
-  # A delegated owner is one durable unit of work even when child-result wakes
-  # open fresh physical turns in its private chat. Key its direct children to
-  # that delegation, not to whichever physical attempt happened to spawn them.
-  owner = db.query(models.Delegation.id).filter(
-    models.Delegation.child_chat_id == parent_chat_id,
-  ).first()
-  if owner is not None:
-    return str(owner[0])
-  return str(run.goal_id or run.root_run_id or run.id)
+  return (run.goal_id or run.root_run_id or run.id) if run is not None else None
 
 
 def _assistant_result(chat: models.Chat) -> str:
@@ -595,7 +572,7 @@ def derived_status(
   if row.cancelled_at is not None:
     return "cancelled", run, result
   if run is None and row.source_work_status in {
-    "accepted", "retrying", "needs_review",
+    "accepted", "retrying", "needs_review", "completed",
   }:
     return (
       row.source_work_status,
@@ -987,11 +964,10 @@ def publish_source_work_changed(
   if status not in WAKE_ELIGIBLE_STATUSES:
     return
 
-  # Source-attached work deliberately does not wake the source agent or write
-  # its transcript. The same parent_woken_at latch records that the owner has
-  # instead received the durable notification which survives a hidden pane,
-  # SSE disconnect, or restart reconciliation. The conditional update and
-  # notification insert commit together inside notify_owner.
+  # Source-attached work never wakes the source agent or writes its transcript.
+  # Claim the ordinary parent-wake latch instead, then persist one owner-facing
+  # notification so a hidden pane, disconnect, or restart cannot lose terminal
+  # attention. The conditional claim and notification insert share a session.
   from app.database import SessionLocal
   from app.push import notify_owner
 
@@ -1065,13 +1041,18 @@ def active_parent_context(
 
 
 def delegation_execution_token(
-  db: Session, policy: RunPolicy, run_id: str,
-) -> str:
-  """Return an owner bearer bound to this delegated physical run.
+  db: Session,
+  policy: RunPolicy,
+  *,
+  run_id: str | None = None,
+) -> str | None:
+  """Return an owner agent bearer bound to this delegated physical run.
 
-  Delegated agents inherit the parent's approved tool surface. The immutable
-  policy and active-run checks below remain authoritative, while delegation
-  claims let the delegation API preserve direct-child and read-to-write rules.
+  Tool inheritance should be automatic rather than a route-by-route grant
+  list: a delegated agent gets the same owner-approved API tools as its parent.
+  The delegation claims remain attached so /api/delegations can still enforce
+  direct-child ownership and read-to-write escalation. The immutable
+  scope prompt and each provider's native execution policy still apply.
   """
   if policy.scope not in {"read", "write"}:
     raise RuntimeError(f"unknown delegation scope: {policy.scope}")
@@ -1085,29 +1066,13 @@ def delegation_execution_token(
   row = db.query(models.Delegation).filter(
     models.Delegation.id == policy.delegation_id,
   ).first()
-  if row is None or row.cancelled_at is not None:
+  if row is None:
     raise RuntimeError("delegation is unavailable")
-  if any((
-    row.app_id != policy.app_id,
-    row.provider != policy.provider,
-    row.model != policy.model,
-    row.effort != policy.effort,
-    row.scope != policy.scope,
-    row.cwd != policy.cwd,
-  )):
-    raise RuntimeError("delegation policy no longer matches immutable intent")
-  physical = db.query(models.ChatRun.id).filter(
-    models.ChatRun.id == run_id,
-    models.ChatRun.chat_id == row.child_chat_id,
-    models.ChatRun.status == "running",
-  ).first()
-  if physical is None:
-    raise RuntimeError("delegation run is not active")
   return auth.create_agent_token(
     row.child_chat_id,
-    run_id,
     owner.username,
     owner.token_epoch,
+    run_id=run_id,
     expires_delta=auth.AGENT_RUN_TOKEN_TTL,
     delegation_id=policy.delegation_id,
     delegation_chat=row.child_chat_id,
@@ -1259,12 +1224,12 @@ async def _cancel_delegation_execution_locked(
     return True
 
 
-# --- Parent auto-wake on child completion ------------------------------------
+# --- Parent activity delivery on child completion ---------------------------
 #
-# When a delegation child settles at a real terminal, wake its parent chat with
-# the result so durable subagents "just work" without the owner re-attaching.
-# Only these statuses wake: `stopped`/`cancelled` are user-initiated and
-# `interrupted`/`resuming` auto-resume, so waking on them would be wrong.
+# A helper result stays on its Delegation/child records. An explicitly waiting,
+# idle parent may open one non-message ChatRun checkpoint; busy or fenced parents
+# consume it through a later ordinary provider context. Historical hidden wake
+# carriers are parsed only so already-stored work remains recoverable.
 
 WAKE_ELIGIBLE_STATUSES = frozenset({"completed", "failed", "needs_review"})
 WAKE_ELIGIBLE_RUN_STATUSES = frozenset({"completed", "failed"})
@@ -1273,9 +1238,43 @@ WAKE_RECOVERY_BATCH_SIZE = 16
 WAKE_NOTICE_DELEGATION_LIMIT = 16
 BACKGROUND_HELPER_ITEM_LIMIT = 16
 WAKE_PARENT_DELIVERY_TIMEOUT_SECS = 40.0
+ACTIVITY_DELIVERY_FINALIZE_ATOMIC = "finalize_atomic_v1"
 _LOG = logging.getLogger("moebius.delegations")
 _WAKE_RESULTS_OPEN = "<delegation_results>"
 _WAKE_RESULTS_CLOSE = "</delegation_results>"
+_ACTIVITY_RUN_PREFIX = "helper-activity-"
+
+
+@dataclass(frozen=True)
+class DelegationResultContextDelivery:
+  """Provider context plus exact durable helper identities it contains."""
+
+  text: str
+  delegation_ids: tuple[str, ...]
+
+
+def activity_continuation_source(
+  *, run_token: str, source_work_id: str,
+) -> dict:
+  """Ephemeral provider protocol input for a non-message activity run."""
+  return {
+    "role": "user",
+    "content": (
+      "Continue the unfinished owner work using the newly available durable "
+      "activity context."
+    ),
+    "kind": "activity_checkpoint",
+    "hidden": True,
+    "source_work_id": source_work_id,
+    "_run_token": run_token,
+  }
+
+
+def _activity_continuation_run_id(row: models.Delegation) -> str:
+  """Stable physical identity for the first available helper completion."""
+  basis = f"{row.parent_chat_id}\0{row.id}"
+  digest = hashlib.sha256(basis.encode("utf-8")).hexdigest()
+  return f"{_ACTIVITY_RUN_PREFIX}{digest[:48]}"
 
 
 def _wake_message_delegation_ids(message: object) -> set[str]:
@@ -1354,6 +1353,33 @@ def claim_inline_delegation_observation(
     return "inline"
   if row.parent_woken_at is not None:
     return "parent_wake"
+  for (status, envelope) in db.query(
+    models.ChatRun.status, models.ChatRun.activity_delivery_json,
+  ).filter(
+    models.ChatRun.chat_id == row.parent_chat_id,
+    models.ChatRun.status.in_(("running", "completed")),
+    models.ChatRun.activity_delivery_json.is_not(None),
+  ).all():
+    ids = (
+      envelope.get("delegation_ids")
+      if isinstance(envelope, dict) else None
+    )
+    if isinstance(ids, list) and row.id in ids:
+      if (
+        status == "completed"
+        and envelope.get("delivery_contract") is None
+      ):
+        # Compatibility: older runs acknowledged outside Finalize and could
+        # leave this latch open after their run status committed. Atomic
+        # envelopes never need that repair and must not let a stopped result
+        # be inferred from completed status alone.
+        row.parent_woken_at = now_naive_utc()
+        db.commit()
+        return "parent_wake"
+      if status == "running":
+        # A running admission still owns its result through Finalize. Do not
+        # let a concurrent blocking attachment claim a second delivery path.
+        return "parent_wake"
   if row.id in _recorded_parent_wake_ids(db, row.parent_chat_id):
     if row.id not in _repairable_parent_wake_ids(db, row.parent_chat_id):
       # The deterministic wake owns observation, but its commit-before-spawn
@@ -1408,9 +1434,7 @@ def _self_resuming_helper_rows(
   if not parent_chat_ids:
     return []
   candidate_run_statuses = tuple(
-    set(models.NONTERMINAL_RUN_STATUSES)
-    | WAKE_ELIGIBLE_RUN_STATUSES
-    | {"parked_notified"}
+    set(models.NONTERMINAL_RUN_STATUSES) | WAKE_ELIGIBLE_RUN_STATUSES
   )
   rows = (
     db.query(models.Delegation)
@@ -1489,6 +1513,21 @@ def publish_parent_waiting_changed(parent_chat_id: str) -> None:
     })
   except Exception:
     _LOG.debug("background helper wait broadcast failed", exc_info=True)
+
+
+def publish_chat_activity_changed(parent_chat_id: str) -> None:
+  """Hint that the exact-chat activity page has durable changes to refetch."""
+  if not parent_chat_id:
+    return
+  try:
+    from app.broadcast import get_system_broadcast
+
+    get_system_broadcast().publish({
+      "type": "chat_activity_changed",
+      "chatId": parent_chat_id,
+    })
+  except Exception:
+    _LOG.debug("chat activity broadcast failed", exc_info=True)
 
 
 @dataclass(frozen=True)
@@ -1648,6 +1687,150 @@ def _compose_wake_notice(db: Session, rows: list[models.Delegation]) -> str:
   )
 
 
+def available_delegation_results(
+  db: Session,
+  parent_chat_id: str,
+  *,
+  source_work_id: str | None = None,
+  limit: int = WAKE_NOTICE_DELEGATION_LIMIT,
+) -> list[models.Delegation]:
+  """Oldest terminal helper results available to this context checkpoint.
+
+  Ordinary owner turns intentionally use the chat-wide default. Automatic
+  activity continuations pass their exact source-work identity so a wake for
+  one logical root cannot observe or consume a sibling root's result.
+  """
+  if limit < 1:
+    return []
+  query = (
+    db.query(models.Delegation)
+    .join(models.ChatRun, models.ChatRun.id == _latest_child_run_id())
+    .filter(
+      models.Delegation.parent_chat_id == parent_chat_id,
+      models.Delegation.notify_parent_on_complete.is_(True),
+      models.Delegation.cancelled_at.is_(None),
+      models.Delegation.parent_woken_at.is_(None),
+      models.ChatRun.status.in_(WAKE_ELIGIBLE_RUN_STATUSES),
+    )
+  )
+  if source_work_id is not None:
+    query = query.filter(
+      models.Delegation.parent_root_run_id == source_work_id,
+    )
+  return query.order_by(
+    models.Delegation.created_at.asc(), models.Delegation.id.asc(),
+  ).limit(min(limit, 100)).all()
+
+
+def activity_continuation_delivery_source_work_id(
+  db: Session, parent_chat_id: str, run_token: str,
+) -> str | None:
+  """Return the exact source-work scope for an automatic activity run.
+
+  ``None`` denotes an ordinary owner turn, whose result context is deliberately
+  chat-wide. New activity starts persist their scope in the existing delivery
+  envelope before scheduling. The deterministic-identity fallback recognizes
+  a pre-fix, never-admitted orphan after restart. An unrecognized token in the
+  platform-owned activity namespace returns ``""`` so it fails closed instead
+  of acquiring ordinary-turn breadth.
+  """
+  if not run_token.startswith(_ACTIVITY_RUN_PREFIX):
+    return None
+  run = db.query(models.ChatRun).filter(
+    models.ChatRun.id == run_token,
+    models.ChatRun.chat_id == parent_chat_id,
+  ).first()
+  if run is None:
+    return ""
+  envelope = run.activity_delivery_json
+  source_work_id = (
+    envelope.get("source_work_id")
+    if isinstance(envelope, dict) else None
+  )
+  if isinstance(source_work_id, str) and source_work_id:
+    root_run_id = _parent_wake_continuation_root(
+      db, parent_chat_id, source_work_id,
+    )
+    return (
+      source_work_id
+      if root_run_id is not None
+      and (run.root_run_id or run.id) == root_run_id
+      else ""
+    )
+  rows = db.query(models.Delegation).filter(
+    models.Delegation.parent_chat_id == parent_chat_id,
+  ).all()
+  for row in rows:
+    if _activity_continuation_run_id(row) != run_token:
+      continue
+    root_run_id = _parent_wake_continuation_root(
+      db, parent_chat_id, row.parent_root_run_id,
+    )
+    if root_run_id is not None and (
+      run.root_run_id or run.id
+    ) == root_run_id:
+      return row.parent_root_run_id
+  return ""
+
+
+def build_delegation_result_context(
+  db: Session, parent_chat_id: str, *, source_work_id: str | None = None,
+) -> DelegationResultContextDelivery:
+  """Render available helper results from their owning durable records."""
+  rows = available_delegation_results(
+    db, parent_chat_id, source_work_id=source_work_id,
+  )
+  if not rows:
+    return DelegationResultContextDelivery(text="", delegation_ids=())
+  return DelegationResultContextDelivery(
+    text=_compose_wake_notice(db, rows),
+    delegation_ids=tuple(row.id for row in rows),
+  )
+
+
+def repair_completed_activity_deliveries(
+  db: Session, parent_chat_id: str,
+) -> set[str]:
+  """Close only pre-atomic acknowledgement gaps in completed run data.
+
+  Atomic Finalize envelopes commit ``parent_woken_at`` with the assistant
+  response and are deliberately excluded. Unversioned envelopes preserve the
+  historical repair contract for runs completed by older platform versions.
+  """
+  repaired: set[str] = set()
+  runs = db.query(models.ChatRun.activity_delivery_json).filter(
+    models.ChatRun.chat_id == parent_chat_id,
+    models.ChatRun.status == "completed",
+    models.ChatRun.provider_execution_admitted.is_(True),
+    models.ChatRun.activity_delivery_json.is_not(None),
+  ).all()
+  for (envelope,) in runs:
+    raw_ids = (
+      envelope.get("delegation_ids")
+      if isinstance(envelope, dict) else None
+    )
+    if (
+      not isinstance(raw_ids, list)
+      or envelope.get("delivery_contract") is not None
+    ):
+      continue
+    repaired.update(
+      item for item in raw_ids if isinstance(item, str) and item
+    )
+  if not repaired:
+    return set()
+  db.query(models.Delegation).filter(
+    models.Delegation.parent_chat_id == parent_chat_id,
+    models.Delegation.id.in_(repaired),
+    models.Delegation.parent_woken_at.is_(None),
+  ).update(
+    {models.Delegation.parent_woken_at: now_naive_utc()},
+    synchronize_session=False,
+  )
+  db.commit()
+  return repaired
+
+
 def _parent_wake_delivery_identity(
   rows: list[models.Delegation],
 ) -> tuple[str, str]:
@@ -1762,6 +1945,8 @@ def safe_parent_wake_startup_writer_orphan(
   task creation. Only the exact no-output shape remains retryable; partial or
   mismatched work falls through to ordinary conservative interruption.
   """
+  if safe_parent_activity_startup_writer_orphan(db, chat, physical):
+    return True
   messages = list(chat.messages or [])
   continuation = messages[-1] if messages else None
   committed = _committed_parent_wake(db, chat, continuation)
@@ -1769,9 +1954,49 @@ def safe_parent_wake_startup_writer_orphan(
     committed is not None
     and committed[0].id == physical.id
     and physical.status == "running"
+    and physical.provider_execution_admitted is False
     and (chat.live_assistant or {}).get("id") == physical.id
     and not ((chat.live_assistant or {}).get("blocks") or [])
   )
+
+
+def safe_parent_activity_startup_writer_orphan(
+  db: Session, chat: models.Chat | None, physical: models.ChatRun,
+) -> bool:
+  """Whether one exact non-message helper checkpoint may be rescheduled."""
+  if (
+    chat is None
+    or physical.status != "running"
+    or physical.provider_execution_admitted is not False
+    or chat.pending_question_id is not None
+    or bool(chat.pending_messages)
+    or (chat.live_assistant or {}).get("id") != physical.id
+    or bool((chat.live_assistant or {}).get("blocks") or [])
+  ):
+    return False
+  candidates = db.query(models.Delegation).filter(
+    models.Delegation.parent_chat_id == chat.id,
+    models.Delegation.notify_parent_on_complete.is_(True),
+    models.Delegation.parent_woken_at.is_(None),
+    models.Delegation.cancelled_at.is_(None),
+  ).all()
+  for row in candidates:
+    if _activity_continuation_run_id(row) != physical.id:
+      continue
+    if (
+      derived_status(db, row, load_result=False)[0]
+      not in WAKE_ELIGIBLE_STATUSES
+    ):
+      return False
+    root = _parent_wake_continuation_root(
+      db, chat.id, row.parent_root_run_id,
+    )
+    return bool(
+      root is not None
+      and (physical.root_run_id or physical.id) == root
+      and physical.initiated_by_app_id is None
+    )
+  return False
 
 
 def _committed_parent_wake_is_unowned(
@@ -1836,59 +2061,28 @@ async def _append_wake_pending(
   parent_chat_id: str,
   source_work_id: str,
 ) -> bool:
-  """Queue the notice behind the parent's running turn (caller holds the lock)."""
-  import time
-
-  from app.chat_writer import AppendPending, await_ack, get_writer
-  from app.continuations import DELEGATION_RESULT_MESSAGE_KIND
+  """Recognize an already-stored legacy carrier without creating a new one."""
   from app.database import SessionLocal
 
-  recorded_ids = _wake_message_delegation_ids({
-    "role": "user",
-    "content": content,
-    "hidden": True,
-    "kind": DELEGATION_RESULT_MESSAGE_KIND,
-  })
   with SessionLocal() as db:
-    rows = db.query(models.Delegation).filter(
-      models.Delegation.id.in_(recorded_ids),
-    ).order_by(
-      models.Delegation.created_at.asc(), models.Delegation.id.asc(),
-    ).all()
-    if {row.id for row in rows} != recorded_ids or not rows:
+    chat = db.query(models.Chat).filter(
+      models.Chat.id == parent_chat_id,
+    ).first()
+    if chat is None:
       return False
-    run_token, continuation_id = _parent_wake_delivery_identity(rows)
-
-  ack = get_writer().submit(AppendPending(
-    chat_id=parent_chat_id,
-    run_token="",
-    user_msg={
-      "role": "user",
-      "content": content,
-      "ts": int(time.time() * 1000),
-      "cid": continuation_id,
-      "_product_run_token": run_token,
-      "hidden": True,
-      "kind": DELEGATION_RESULT_MESSAGE_KIND,
-      "source_work_id": source_work_id,
-    },
-    initiated_by_app_id=None,
-  ))
-  try:
-    await await_ack(ack)
-    return True
-  except Exception:
-    _LOG.warning(
-      "delegation wake pending-append failed parent=%s",
-      parent_chat_id, exc_info=True,
+    return any(
+      isinstance(message, dict)
+      and message.get("content") == content
+      and message.get("source_work_id") == source_work_id
+      and bool(_wake_message_delegation_ids(message))
+      for message in [*(chat.messages or []), *(chat.pending_messages or [])]
     )
-    return False
 
 
 async def _deliver_parent_wake(
   parent_chat_id: str, source_work_id: str,
 ) -> bool:
-  """Deliver one bounded parent notice; timeout leaves its latch retryable."""
+  """Try one bounded activity checkpoint; timeout keeps results available."""
   async with asyncio.timeout(WAKE_PARENT_DELIVERY_TIMEOUT_SECS):
     return await _deliver_parent_wake_once(parent_chat_id, source_work_id)
 
@@ -1896,21 +2090,19 @@ async def _deliver_parent_wake(
 async def _deliver_parent_wake_once(
   parent_chat_id: str, source_work_id: str,
 ) -> bool:
-  """Coalesce every wake-eligible child for one parent into a single notice and
-  deliver it under the parent's transition and queue locks.
+  """Start one non-message checkpoint only for the exact waiting parent.
 
-  Idle parent -> try a deterministic continuation of the work that launched
-  the children; running parent -> queue the notice. If the actor rejects the
-  continuation (including for an open owner question), queue it so the
-  parent's next turn promotes it. Blocking attachment uses the same transition
-  lock, so exactly one path owns the result. A restart also repairs a hidden
-  result committed before its latch transaction rather than delivering it to
-  both the parent and a newly attached blocking caller.
+  Busy, owner-question, parked, stopped, and superseded parents retain the
+  durable result without queueing machine-authored input. A normal later turn
+  receives it from provider context. Existing hidden carriers remain eligible
+  only for their exact pre-upgrade recovery path.
   """
   import app.chat_queue as chat_queue
-  from app.chat import is_chat_running, programmatic_start_blocked
-  from app.chat_start import start_programmatic_chat_continuation
-  from app.continuations import DELEGATION_RESULT_MESSAGE_KIND
+  from app.chat import is_chat_running
+  from app.chat_start import (
+    start_programmatic_activity_continuation,
+    start_programmatic_chat_continuation,
+  )
   from app.database import SessionLocal
 
   async with chat_queue.get_transition_lock(parent_chat_id):
@@ -1922,9 +2114,10 @@ async def _deliver_parent_wake_once(
       )
       if parent_chat is None:
         return False
-      # Prefer an earlier exact commit whose task creation failed. Newer
-      # siblings must not change that batch's deterministic identity and
-      # abandon its no-output run; they remain eligible for the next pass.
+      repair_completed_activity_deliveries(db, parent_chat_id)
+
+      # Compatibility only: an old hidden carrier already committed with its
+      # deterministic ChatRun still owns its pre-upgrade recovery attempt.
       committed = next((
         candidate
         for message in reversed(list(parent_chat.messages or []))
@@ -1936,19 +2129,16 @@ async def _deliver_parent_wake_once(
         )
       ), None)
       if committed is not None:
-        _physical, rows = committed
+        physical, rows = committed
+        content = _compose_wake_notice(db, rows)
+        effective_source = rows[0].parent_root_run_id
+        root_run_id = _parent_wake_continuation_root(
+          db, parent_chat_id, effective_source,
+        )
+        _run_id, wake_cid = _parent_wake_delivery_identity(rows)
       else:
-        # A queued receipt owns observation without claiming delivery. Exclude
-        # its rows before coalescing a newly eligible sibling; otherwise A
-        # followed by B becomes queue [A], [A+B] and the provider sees A twice.
-        pending_ids: set[str] = set()
-        for message in parent_chat.pending_messages or []:
-          pending_ids.update(_wake_message_delegation_ids(message))
         rows = _wake_eligible_rows_for_parent(
-          db,
-          parent_chat_id,
-          source_work_id,
-          pending_ids=pending_ids,
+          db, parent_chat_id, source_work_id,
         )
         if not rows:
           return False
@@ -1957,87 +2147,44 @@ async def _deliver_parent_wake_once(
         if not rows:
           publish_parent_waiting_changed(parent_chat_id)
           return True
-      # A sweep cursor names the group that happened to trigger this pass.
-      # Recovery may instead select an older exact no-output commit from a
-      # different logical root. From here onward that committed row set owns
-      # every causal field; retaining the cursor's source would try to attach
-      # the old physical run under unrelated work and strand both groups.
-      effective_source_work_id = rows[0].parent_root_run_id
-      ids = [row.id for row in rows]
-      content = _compose_wake_notice(db, rows)
-      root_run_id = _parent_wake_continuation_root(
-        db, parent_chat_id, effective_source_work_id,
-      )
-      wake_run_id, wake_cid = _parent_wake_delivery_identity(rows)
-      # A limit-parked/restart-held parent reads as not-running, but a fresh
-      # StartTurn would supersede the park as if the owner resumed it. Machine
-      # wakes queue instead; the park's own resume promotes them later.
-      start_blocked = programmatic_start_blocked(db, parent_chat_id)
-
-    delivered = False
-    queued = False
-    if (
-      root_run_id is None
-      or start_blocked
-      or is_chat_running(parent_chat_id)
-    ):
-      async with chat_queue.get_lock(parent_chat_id):
-        delivered = await _append_wake_pending(
-          content, parent_chat_id, effective_source_work_id,
+        recorded_ids = _recorded_parent_wake_ids(db, parent_chat_id)
+        rows = [row for row in rows if row.id not in recorded_ids]
+        if not rows:
+          return False
+        trigger = rows[0]
+        effective_source = trigger.parent_root_run_id
+        root_run_id = _parent_wake_continuation_root(
+          db, parent_chat_id, effective_source,
         )
-        queued = delivered
-    else:
-      delivered = await start_programmatic_chat_continuation(
+        physical = None
+        wake_cid = None
+
+      if root_run_id is None or is_chat_running(parent_chat_id):
+        return False
+
+    if committed is not None:
+      return await start_programmatic_chat_continuation(
         chat_id=parent_chat_id,
         root_run_id=root_run_id,
-        run_token=wake_run_id,
+        run_token=physical.id,
         content=content,
         continuation_id=wake_cid,
         reason="delegation_result",
         initiated_by_app_id=None,
-        message_kind=DELEGATION_RESULT_MESSAGE_KIND,
-        source_work_id=effective_source_work_id,
+        message_kind="delegation_result",
+        source_work_id=effective_source,
         hidden=True,
         _transition_lock_held=True,
       )
-      if not delivered:
-        # A failed task-creation attempt already owns the stable transcript
-        # row and ChatRun. Leave its latch open so restart/runtime recovery
-        # reschedules that exact physical turn rather than queueing a duplicate.
-        with SessionLocal() as db:
-          existing_wake = db.query(models.ChatRun.id).filter(
-            models.ChatRun.id == wake_run_id,
-            models.ChatRun.chat_id == parent_chat_id,
-          ).first()
-        if existing_wake is not None:
-          return False
-        # The actor instead yielded to owner work or a question. Queue one
-        # durable result behind it; the queue owns deduplication, while actual
-        # provider admission owns the delivery latch.
-        async with chat_queue.get_lock(parent_chat_id):
-          delivered = await _append_wake_pending(
-            content, parent_chat_id, effective_source_work_id,
-          )
-          queued = delivered
 
-    if not delivered:
-      return False
-    if queued:
-      # Queue persistence is not provider delivery. Keep the latch open until
-      # deterministic promotion is actually scheduled; cid dedup owns retries.
-      return False
-    with SessionLocal() as db:
-      claimed = db.query(models.Delegation).filter(
-        models.Delegation.id.in_(ids),
-        models.Delegation.parent_woken_at.is_(None),
-      ).update(
-        {models.Delegation.parent_woken_at: now_naive_utc()},
-        synchronize_session=False,
-      )
-      db.commit()
-    if claimed:
-      publish_parent_waiting_changed(parent_chat_id)
-    return True
+    return await start_programmatic_activity_continuation(
+      chat_id=parent_chat_id,
+      root_run_id=root_run_id,
+      run_token=_activity_continuation_run_id(trigger),
+      source_work_id=effective_source,
+      activity_id=trigger.id,
+      _transition_lock_held=True,
+    )
 
 
 def claim_scheduled_parent_wake(chat_id: str, message: object) -> bool:
@@ -2096,25 +2243,36 @@ async def wake_parent_after_child_settled(child_chat_id: str) -> None:
         .filter(models.Delegation.child_chat_id == child_chat_id)
         .first()
       )
+      if (
+        row is not None
+        and derived_status(db, row, load_result=False)[0] in TERMINAL_DELEGATION_STATUSES
+      ):
+        from app.activity_position import record_activity_position
+        record_activity_position(db, row.parent_chat_id, f"delegation:{row.id}:completed")
+        db.commit()
       if row is not None and row.source_work_id is not None:
         status, _, _ = derived_status(db, row)
         if status in TERMINAL_DELEGATION_STATUSES:
           row.source_work_active_chat_id = None
         _record_lifecycle(db, row, status)
         db.commit()
+        publish_chat_activity_changed(row.parent_chat_id)
         publish_source_work_changed(row, status)
         return
-      if row is not None:
-        from app.goal_plans import publish_plan_for_delegation
-        publish_plan_for_delegation(db, row)
+      if row is None:
+        return
+      from app.goal_plans import publish_plan_for_delegation
+      publish_plan_for_delegation(db, row)
+      publish_parent_waiting_changed(row.parent_chat_id)
+      status, _, _ = derived_status(db, row)
+      if status in TERMINAL_DELEGATION_STATUSES:
+        publish_chat_activity_changed(row.parent_chat_id)
       if (
-        row is None
-        or not row.notify_parent_on_complete
+        not row.notify_parent_on_complete
         or row.cancelled_at is not None
         or row.parent_woken_at is not None
       ):
         return
-      status, _, _ = derived_status(db, row)
       if status not in WAKE_ELIGIBLE_STATUSES:
         return
       parent_chat_id = row.parent_chat_id

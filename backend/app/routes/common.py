@@ -4,20 +4,23 @@ Every Möbius instance is one user's server. This router gives an instance
 three federated capabilities, all instance-to-instance over HTTPS with
 Ed25519-signed envelopes and no third-party storage:
 
-1. **Identity** — a public actor card (`GET /actor`) naming the owner and
-   publishing the instance's Ed25519 public key. Peers verify every envelope
-   against the claimed sender's fetched (and cached) actor card.
+1. **Identity** — an actor card (`GET /actor`) publishing federation keys.
+   Private participants expose only those keys; joining the community also
+   publishes the owner's profile card. Peers verify every envelope against
+   the claimed sender's fetched (and cached) actor card.
 2. **Direct messages** — a signed envelope POSTed straight to the recipient
-   instance's `/inbox`. Each side stores only its own copy (in the Common
-   mini-app's per-app storage), so a conversation lives exclusively on the
-   two participants' servers.
+   instance's `/inbox`. A first inbound conversation is stored as a quiet
+   message request until its owner accepts; an explicit first outbound message
+   establishes consent. Each side stores only its own copy (in the Common
+   mini-app's per-app storage), so a conversation lives exclusively on the two
+   participants' servers.
 3. **Community host role** — any instance can host the shared, public parts:
    an opt-in user directory (search) and a message board. Peers register and
    post with the same signed-envelope scheme. Which host to use is the
    owner's choice (default: their own instance).
 
 Public peer surface (no owner auth; envelope signatures are the authority):
-  GET  /api/common/actor        instance identity card
+  GET  /api/common/actor        federation keys; joined public profile card
   GET  /api/common/avatar       instance profile avatar
   POST /api/common/inbox        deliver a signed DM to this instance's owner
   GET  /api/common/directory    search users registered with this host
@@ -32,6 +35,7 @@ Owner surface (owner JWT or the Common app's scoped token):
   GET  /api/common/me           own profile (creates the keypair lazily)
   PUT  /api/common/me           update profile; re-registers with community host
   POST /api/common/send         sign + deliver a DM; store own copy
+  POST /api/common/requests/dm/{host}/{decision}  accept/decline/block request
   POST /api/common/publish      sign + submit a board post to the community host
   GET  /api/common/board-media/{post_id}  local/cached community board image
   POST /api/common/reply        sign + submit a board reply to the community host
@@ -63,60 +67,65 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app import fs_locks, models, push
+from app.common_protocol import (
+  ATTACHMENT_MIME_EXT as _ATTACHMENT_MIME_EXT,
+  MAX_ATTACHMENT_BYTES, MAX_AVATAR_BYTES, MAX_BIO_CHARS,
+  MAX_ENVELOPE_BYTES, MAX_NAME_CHARS, MAX_REPLY_TEXT_CHARS,
+  OUTBOUND_TIMEOUT_S, PROTOCOL, ActorVerifier,
+  canonical as _canonical, peer_base_url as _peer_base_url,
+  read_envelope as _read_envelope, sign as _sign,
+  valid_host as _valid_host, valid_id as _valid_id,
+  validate_attachment as _validate_attachment,
+  validate_reply_to as _validate_reply_to,
+  validate_text_or_attachment as _validate_text_or_attachment,
+)
+from app.common_public import (
+  BOARD_PAGE_LIMIT, CommonPublicStore, create_public_router,
+)
+from app.common_transport import federation_request
 from app.config import get_settings
 from app.database import get_db
 from app.deps import (
   Principal, get_principal, require_nondelegated_owner_control,
 )
 from app.routes import identity as identity_routes
-from app.storage_io import atomic_write, read_capped_body
+from app.storage_io import atomic_write
 
 router = APIRouter(prefix="/api/common", tags=["common"])
 
-PROTOCOL = "common/0"
 APP_SLUG = "common"
-MAX_TEXT_CHARS = 4000
-MAX_REPLY_TEXT_CHARS = 1000
-MAX_NAME_CHARS = 80
-MAX_BIO_CHARS = 400
-MAX_ENVELOPE_BYTES = 32_768
-MAX_ATTACHMENT_ENVELOPE_BYTES = 2 * 1024 * 1024
-MAX_ATTACHMENT_BYTES = 1024 * 1024
-MAX_ATTACHMENT_DIMENSION = 8192
-MAX_REPLY_AUTHOR_CHARS = 80
-MAX_REPLY_EXCERPT_CHARS = 140
-MAX_AVATAR_BYTES = 512 * 1024
-ACTOR_CACHE_TTL_S = 3600
 PEER_AVATAR_CACHE_TTL_S = 24 * 3600
 BOARD_MEDIA_CACHE_TTL_S = 24 * 3600
-CLOCK_SKEW_S = 600
-OUTBOUND_TIMEOUT_S = 10.0
-BOARD_PAGE_LIMIT = 50
-BOARD_REPLY_LIMIT = 200
-DIRECTORY_LIMIT = 2000
-
-_HOST_RE = re.compile(r"^[a-z0-9]([a-z0-9.-]{0,250})(:\d{1,5})?$")
-_ID_RE = re.compile(r"^[a-f0-9-]{8,64}$")
-_ATTACHMENT_MIME_EXT = {
-  "image/jpeg": "jpg",
-  "image/png": "png",
-  "image/webp": "webp",
-}
-_ATTACHMENT_ENVELOPE_TYPES = {
-  "message", "group_post", "group_message", "board_post",
-}
+REQUEST_STATES = {"pending", "accepted", "declined", "blocked"}
 
 
 # ── paths ────────────────────────────────────────────────────────────────────
 
-def _common_dir() -> Path:
-  d = Path(get_settings().data_dir) / "common"
-  d.mkdir(parents=True, exist_ok=True)
-  return d
+def _data_dir() -> str:
+  return get_settings().data_dir
+
+
+_public_store = CommonPublicStore(_data_dir)
+_actor_verifier = ActorVerifier(_data_dir)
+
+# Owner/personal code below shares the public service's canonical paths and
+# mutations instead of maintaining parallel storage logic.
+_common_dir = _public_store.common_dir
+_board_media_dir = _public_store.board_media_dir
+_find_image = _public_store.find_image
+_serve_image = _public_store.serve_image
+_read_board = _public_store.read_board
+_store_board_post = _public_store.store_post
+_toggle_board_like = _public_store.toggle_like
+_add_board_reply = _public_store.add_reply
+_fetch_actor = _actor_verifier.fetch_actor
+_verify_peer_envelope = _actor_verifier.verify_envelope
 
 
 def _identity_path() -> Path:
-  return _common_dir() / "identity.json"
+  # Unlike the other Common paths, callers use this to distinguish an
+  # untouched installation. Merely probing /actor must not materialize state.
+  return Path(get_settings().data_dir) / "common" / "identity.json"
 
 
 def _avatar_path() -> Path:
@@ -124,124 +133,62 @@ def _avatar_path() -> Path:
 
 
 def _peers_dir() -> Path:
-  d = _common_dir() / "peers"
-  d.mkdir(parents=True, exist_ok=True)
-  return d
+  return _actor_verifier.peers_dir()
 
 
 def _peer_avatar_path(host: str) -> Path:
   safe = re.sub(r"[^a-z0-9.-]", "_", host)
-  d = _peers_dir() / "avatars"
-  d.mkdir(parents=True, exist_ok=True)
-  return d / f"{safe}.png"
-
-
-def _directory_path() -> Path:
-  return _common_dir() / "directory.json"
-
-
-def _board_dir() -> Path:
-  d = _common_dir() / "board"
-  d.mkdir(parents=True, exist_ok=True)
-  return d
-
-
-def _board_media_dir() -> Path:
-  d = _common_dir() / "board-media"
-  d.mkdir(parents=True, exist_ok=True)
-  return d
+  path = _peers_dir() / "avatars"
+  path.mkdir(parents=True, exist_ok=True)
+  return path / f"{safe}.png"
 
 
 def _peer_board_media_dir() -> Path:
-  d = _peers_dir() / "board-media"
-  d.mkdir(parents=True, exist_ok=True)
-  return d
+  path = _peers_dir() / "board-media"
+  path.mkdir(parents=True, exist_ok=True)
+  return path
 
 
-# ── host + crypto primitives ────────────────────────────────────────────────
+def _peer_board_media_name(host: str, post_id: str) -> str:
+  safe_host = re.sub(r"[^a-z0-9.-]", "_", host)
+  return f"{safe_host}-{post_id}"
+
 
 def _own_host() -> str:
   return get_settings().domain
 
 
-def _valid_host(host: str) -> bool:
-  return isinstance(host, str) and bool(_HOST_RE.match(host))
-
-
-def _is_local_host(host: str) -> bool:
-  bare = host.split(":", 1)[0]
-  return bare in ("localhost", "127.0.0.1")
-
-
-def _peer_base_url(host: str) -> str:
-  """HTTPS for real peers; plain HTTP only for loopback development hosts."""
-  scheme = "http" if _is_local_host(host) else "https"
-  return f"{scheme}://{host}"
-
-
 async def _download_avatar(url: str) -> bytes:
   """Fetch one image while bounding the response body before buffering it."""
-  async with httpx.AsyncClient(timeout=OUTBOUND_TIMEOUT_S) as client:
-    async with client.stream("GET", url) as response:
-      response.raise_for_status()
-      content_type = response.headers.get("content-type", "").split(";", 1)[0]
-      if not content_type.strip().lower().startswith("image/"):
-        raise ValueError("Avatar response is not an image.")
-      body = bytearray()
-      async for chunk in response.aiter_bytes():
-        room = MAX_AVATAR_BYTES + 1 - len(body)
-        if room <= 0:
-          break
-        body.extend(chunk[:room])
-        if len(body) > MAX_AVATAR_BYTES:
-          raise ValueError("Avatar response is too large.")
-  if not body:
+  response = await federation_request(
+    "GET", url, max_response_bytes=MAX_AVATAR_BYTES,
+    response_format="binary", timeout_seconds=OUTBOUND_TIMEOUT_S,
+  )
+  response.raise_for_status()
+  content_type = response.headers.get("content-type", "").split(";", 1)[0]
+  if not content_type.strip().lower().startswith("image/"):
+    raise ValueError("Avatar response is not an image.")
+  if not response.content:
     raise ValueError("Avatar response is empty.")
-  return bytes(body)
+  return response.content
 
 
 async def _download_board_media(url: str) -> tuple[str, bytes]:
   """Fetch one hosted board image without buffering more than the wire cap."""
-  async with httpx.AsyncClient(timeout=OUTBOUND_TIMEOUT_S) as client:
-    async with client.stream("GET", url) as response:
-      response.raise_for_status()
-      mime = (
-        response.headers.get("content-type", "")
-        .split(";", 1)[0].strip().lower()
-      )
-      if mime not in _ATTACHMENT_MIME_EXT:
-        raise ValueError("Board media response is not a supported image.")
-      body = bytearray()
-      async for chunk in response.aiter_bytes():
-        room = MAX_ATTACHMENT_BYTES + 1 - len(body)
-        if room <= 0:
-          break
-        body.extend(chunk[:room])
-        if len(body) > MAX_ATTACHMENT_BYTES:
-          raise ValueError("Board media response is too large.")
-  if not body:
+  response = await federation_request(
+    "GET", url, max_response_bytes=MAX_ATTACHMENT_BYTES,
+    response_format="binary", timeout_seconds=OUTBOUND_TIMEOUT_S,
+  )
+  response.raise_for_status()
+  mime = (
+    response.headers.get("content-type", "")
+    .split(";", 1)[0].strip().lower()
+  )
+  if mime not in _ATTACHMENT_MIME_EXT:
+    raise ValueError("Board media response is not a supported image.")
+  if not response.content:
     raise ValueError("Board media response is empty.")
-  return mime, bytes(body)
-
-
-def _canonical(payload: dict) -> bytes:
-  return json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
-
-
-def _sign(payload: dict, private_key_b64: str) -> str:
-  from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-  key = Ed25519PrivateKey.from_private_bytes(base64.b64decode(private_key_b64))
-  return base64.b64encode(key.sign(_canonical(payload))).decode()
-
-
-def _verify(payload: dict, sig_b64: str, public_key_b64: str) -> bool:
-  from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
-  try:
-    key = Ed25519PublicKey.from_public_bytes(base64.b64decode(public_key_b64))
-    key.verify(base64.b64decode(sig_b64), _canonical(payload))
-    return True
-  except Exception:
-    return False
+  return mime, response.content
 
 
 def _dm_key(shared: bytes) -> bytes:
@@ -327,76 +274,6 @@ def _open_dm(message_id: str, enc: Any, private_key_b64: str) -> dict:
     raise HTTPException(
       status_code=400, detail="Message could not be decrypted."
     ) from exc
-
-
-def _validate_attachment(value: Any) -> tuple[dict, bytes] | None:
-  """Validate and decode the protocol's one supported attachment shape."""
-  if value is None:
-    return None
-  if (
-    not isinstance(value, dict)
-    or set(value) != {"mime", "data_b64", "w", "h"}
-  ):
-    raise HTTPException(status_code=400, detail="Attachment is invalid.")
-  mime = value.get("mime")
-  data_b64 = value.get("data_b64")
-  width = value.get("w")
-  height = value.get("h")
-  if (
-    not isinstance(mime, str)
-    or mime not in _ATTACHMENT_MIME_EXT
-    or not isinstance(data_b64, str)
-    or not isinstance(width, int) or isinstance(width, bool)
-    or not isinstance(height, int) or isinstance(height, bool)
-    or not 1 <= width <= MAX_ATTACHMENT_DIMENSION
-    or not 1 <= height <= MAX_ATTACHMENT_DIMENSION
-  ):
-    raise HTTPException(status_code=400, detail="Attachment is invalid.")
-  max_b64_chars = 4 * ((MAX_ATTACHMENT_BYTES + 2) // 3)
-  if len(data_b64) > max_b64_chars:
-    raise HTTPException(status_code=413, detail="Attachment is too large.")
-  try:
-    data = base64.b64decode(data_b64, validate=True)
-  except Exception as exc:
-    raise HTTPException(status_code=400, detail="Attachment data is invalid.") from exc
-  if len(data) > MAX_ATTACHMENT_BYTES:
-    raise HTTPException(status_code=413, detail="Attachment is too large.")
-  if not data:
-    raise HTTPException(status_code=400, detail="Attachment data is empty.")
-  return value, data
-
-
-def _validate_reply_to(value: Any) -> dict | None:
-  """Validate a self-contained quoted reply without resolving its target."""
-  if value is None:
-    return None
-  if not isinstance(value, dict) or set(value) != {
-    "id", "author_handle", "excerpt",
-  }:
-    raise HTTPException(status_code=400, detail="Quoted reply is invalid.")
-  message_id = value.get("id")
-  author_handle = value.get("author_handle")
-  excerpt = value.get("excerpt")
-  if (
-    not isinstance(message_id, str) or not _ID_RE.fullmatch(message_id)
-    or not isinstance(author_handle, str)
-    or len(author_handle) > MAX_REPLY_AUTHOR_CHARS
-    or not isinstance(excerpt, str)
-    or len(excerpt) > MAX_REPLY_EXCERPT_CHARS
-  ):
-    raise HTTPException(status_code=400, detail="Quoted reply is invalid.")
-  return value
-
-
-def _validate_text_or_attachment(
-  text: Any, attachment: tuple[dict, bytes] | None, detail: str
-) -> None:
-  if (
-    not isinstance(text, str)
-    or len(text) > MAX_TEXT_CHARS
-    or (not text.strip() and attachment is None)
-  ):
-    raise HTTPException(status_code=400, detail=detail)
 
 
 def _message_preview(text: str) -> str:
@@ -492,9 +369,21 @@ def _save_identity(identity: dict) -> None:
   path.chmod(0o600)
 
 
+def _key_actor_doc(identity: dict) -> dict:
+  """The key-only actor card used by private federation peers."""
+  return {
+    "protocol": PROTOCOL,
+    "host": _own_host(),
+    "public_key": {"alg": "ed25519", "key_b64": identity["public_key_b64"]},
+    "encryption_key": {
+      "alg": "x25519", "key_b64": identity["enc_public_key_b64"],
+    },
+    "inbox": "/api/common/inbox",
+  }
+
+
 def _actor_doc(identity: dict, db: Session) -> dict:
-  """The public identity card. Privacy contract: only the handle is public —
-  the owner's display name never leaves their instance."""
+  """The joined public profile card; the display name remains local."""
   host = _own_host()
   owner = db.query(models.Owner).first()
   member_since = (
@@ -512,85 +401,21 @@ def _actor_doc(identity: dict, db: Session) -> dict:
     .all()
   )
   return {
-    "protocol": PROTOCOL,
-    "host": host,
+    **_key_actor_doc(identity),
     "address": f"{identity.get('handle') or 'someone'}@{host}",
     "handle": identity.get("handle") or "",
     "bio": identity.get("bio") or "",
     "avatar": _avatar_path().is_file(),
-    "public_key": {"alg": "ed25519", "key_b64": identity["public_key_b64"]},
-    "encryption_key": {
-      "alg": "x25519", "key_b64": identity["enc_public_key_b64"],
-    },
     "joined_at": identity.get("joined_at") or None,
     "member_since": member_since,
     "apps": [
       {"name": app.name, "description": (app.description or "")[:140]}
       for app in public_apps
     ],
-    "inbox": "/api/common/inbox",
   }
 
 
 # ── peer actor cache ────────────────────────────────────────────────────────
-
-def _peer_cache_path(host: str) -> Path:
-  safe = re.sub(r"[^a-z0-9.-]", "_", host)
-  return _peers_dir() / f"{safe}.json"
-
-
-async def _fetch_actor(host: str, *, force: bool = False) -> dict:
-  """Fetch a peer's actor card, with an on-disk TTL cache."""
-  if not _valid_host(host):
-    raise HTTPException(status_code=400, detail="Invalid peer host.")
-  cache = _peer_cache_path(host)
-  if not force and cache.is_file():
-    cached = json.loads(cache.read_text())
-    if time.time() - cached.get("fetched_at", 0) < ACTOR_CACHE_TTL_S:
-      return cached["actor"]
-  url = f"{_peer_base_url(host)}/api/common/actor"
-  try:
-    async with httpx.AsyncClient(timeout=OUTBOUND_TIMEOUT_S) as client:
-      response = await client.get(url)
-      response.raise_for_status()
-      actor = response.json()
-  except Exception as exc:
-    raise HTTPException(
-      status_code=502, detail=f"Could not reach {host}: {exc}"
-    ) from exc
-  if actor.get("protocol") != PROTOCOL or actor.get("host") != host:
-    raise HTTPException(status_code=502, detail=f"{host} is not a valid Common peer.")
-  key = (actor.get("public_key") or {}).get("key_b64")
-  if not isinstance(key, str) or not key:
-    raise HTTPException(status_code=502, detail=f"{host} published no valid key.")
-  atomic_write(cache, json.dumps({"fetched_at": time.time(), "actor": actor}))
-  return actor
-
-
-async def _verify_peer_envelope(envelope: dict) -> dict:
-  """Verify a signed peer envelope; returns the sender's actor card."""
-  sender = envelope.get("from")
-  sig = envelope.get("sig")
-  if not _valid_host(sender or "") or not isinstance(sig, str):
-    raise HTTPException(status_code=400, detail="Malformed envelope.")
-  sent_at = envelope.get("sent_at")
-  if not isinstance(sent_at, (int, float)) or abs(time.time() - sent_at) > CLOCK_SKEW_S:
-    raise HTTPException(status_code=400, detail="Envelope timestamp out of range.")
-  payload = {k: v for k, v in envelope.items() if k != "sig"}
-  actor = await _fetch_actor(sender)
-  if not _verify(payload, sig, actor["public_key"]["key_b64"]):
-    # The peer may have rotated keys; refetch once before rejecting. An
-    # unreachable peer during the refetch still means the envelope could not
-    # be validated — reject it as unsigned rather than surfacing a gateway
-    # error for what is, from the sender's perspective, a bad signature.
-    try:
-      actor = await _fetch_actor(sender, force=True)
-    except HTTPException:
-      raise HTTPException(status_code=403, detail="Envelope signature is invalid.")
-    if not _verify(payload, sig, actor["public_key"]["key_b64"]):
-      raise HTTPException(status_code=403, detail="Envelope signature is invalid.")
-  return actor
-
 
 # ── conversation storage (in the Common app's per-app storage) ──────────────
 
@@ -631,39 +456,120 @@ def _bump_version(app: models.App) -> None:
 async def _store_message(
   db: Session, app: models.App, peer_host: str, record: dict,
   attachment: tuple[dict, bytes] | None = None,
-) -> None:
-  """Store one message record and bump the app's change counter."""
+) -> tuple[bool, str]:
+  """Store one message atomically and return ``(created, request_state)``.
+
+  A metadata record written by an older Social version is an established
+  conversation.  Only a genuinely new inbound conversation becomes a quiet
+  request.  Keeping the duplicate check under the app-storage lock also makes
+  concurrent federation retries unable to double-count unread/request state.
+  """
   async with fs_locks.app_storage_lock(app.id):
     convo = _conversation_dir(app, peer_host)
+    meta_path = convo / "meta.json"
+    had_meta = meta_path.is_file()
+    meta = json.loads(meta_path.read_text()) if had_meta else {}
+    state = meta.get("request_status")
+    if state not in REQUEST_STATES:
+      state = "accepted" if had_meta or record["dir"] == "out" else "pending"
+    # Blocking is a receive-time discard policy, not merely a notification
+    # preference.  Decide it under the same lock as owner request decisions
+    # and before materializing either the message or its attachment.
+    if state == "blocked" and record["dir"] == "in":
+      return False, state
+    msgs = convo / "msgs"
+    message_path = msgs / f"{record['id']}.json"
+    if message_path.is_file():
+      return False, state
     if attachment is not None:
       record["attachment"] = _write_app_attachment(
         convo, record["id"], attachment
       )
-    msgs = convo / "msgs"
     msgs.mkdir(parents=True, exist_ok=True)
-    atomic_write(msgs / f"{record['id']}.json", json.dumps(record))
-    meta_path = convo / "meta.json"
-    meta = json.loads(meta_path.read_text()) if meta_path.is_file() else {}
+    atomic_write(message_path, json.dumps(record))
     meta.update(
       peer=peer_host,
       last_text=_message_preview(record["text"]),
       last_at=record["sent_at"],
       last_dir=record["dir"],
+      request_status=state,
     )
     if record.get("peer_handle"):
       meta["peer_handle"] = record["peer_handle"]
-    if record["dir"] == "in":
+    if record["dir"] == "in" and state == "accepted":
       meta["unread"] = int(meta.get("unread") or 0) + 1
+    elif record["dir"] == "in" and state == "pending":
+      meta["request_count"] = int(meta.get("request_count") or 0) + 1
+      meta["unread"] = 0
+    elif state != "accepted":
+      meta["unread"] = 0
     atomic_write(meta_path, json.dumps(meta))
     _bump_version(app)
+    return True, state
+
+
+async def _prepare_outgoing_conversation(
+  app: models.App, peer_host: str,
+) -> None:
+  """Persist consent for a new owner-initiated DM, or reject a request reply."""
+  async with fs_locks.app_storage_lock(app.id):
+    convo = _conversation_dir(app, peer_host)
+    meta_path = convo / "meta.json"
+    if meta_path.is_file():
+      meta = json.loads(meta_path.read_text())
+      state = meta.get("request_status")
+      if state in {"pending", "declined", "blocked"}:
+        raise HTTPException(
+          status_code=409,
+          detail="Accept this message request before replying.",
+        )
+      # Missing state is the backwards-compatible accepted interpretation.
+      return
+    meta_path.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write(meta_path, json.dumps({
+      "peer": peer_host,
+      "request_status": "accepted",
+      "unread": 0,
+    }))
+    _bump_version(app)
+
+
+async def _set_dm_request_state(
+  app: models.App, peer_host: str, state: str,
+) -> str:
+  """Apply one owner decision without deleting the retained conversation."""
+  async with fs_locks.app_storage_lock(app.id):
+    meta_path = _conversation_dir(app, peer_host) / "meta.json"
+    if not meta_path.is_file():
+      raise HTTPException(status_code=404, detail="Message request not found.")
+    meta = json.loads(meta_path.read_text())
+    current = meta.get("request_status")
+    if current not in REQUEST_STATES:
+      current = "accepted"
+    if state == "accepted" and current == "accepted":
+      return "accepted"
+    if current != "pending":
+      raise HTTPException(status_code=409, detail="Message request is no longer pending.")
+    meta.update(request_status=state, request_count=0, unread=0)
+    atomic_write(meta_path, json.dumps(meta))
+    _bump_version(app)
+    return state
 
 
 # ── public peer surface ─────────────────────────────────────────────────────
 
 @router.get("/actor")
 def get_actor(db: Session = Depends(get_db)):
-  """This instance's public identity card. Public by design."""
-  return _actor_doc(_load_identity(), db)
+  """Publish keys for private federation, and profile data only after join."""
+  # An unauthenticated probe must not lazily create an identity on an
+  # untouched installation. Authenticated owner use and established
+  # federation operations create this file before peers need its keys.
+  if not _identity_path().is_file():
+    raise HTTPException(status_code=404, detail="Social profile not found.")
+  identity = _load_identity()
+  if not identity.get("joined_at"):
+    return _key_actor_doc(identity)
+  return _actor_doc(identity, db)
 
 
 def _serve_avatar(path: Path) -> FileResponse:
@@ -675,26 +581,11 @@ def _serve_avatar(path: Path) -> FileResponse:
 @router.get("/avatar")
 def get_avatar():
   """This instance's public profile avatar. Public by design."""
+  if not _identity_path().is_file():
+    raise HTTPException(status_code=404, detail="Social profile not found.")
+  if not _load_identity().get("joined_at"):
+    raise HTTPException(status_code=404, detail="Social profile not found.")
   return _serve_avatar(_avatar_path())
-
-
-async def _read_envelope(request: Request) -> dict:
-  body = await read_capped_body(request, MAX_ATTACHMENT_ENVELOPE_BYTES)
-  try:
-    envelope = json.loads(body)
-  except Exception as exc:
-    raise HTTPException(status_code=400, detail="Envelope is not JSON.") from exc
-  if not isinstance(envelope, dict):
-    raise HTTPException(status_code=400, detail="Envelope is not an object.")
-  supports_large_payload = (
-    envelope.get("type") in _ATTACHMENT_ENVELOPE_TYPES
-    and envelope.get("attachment") is not None
-  ) or (
-    envelope.get("type") == "message" and envelope.get("enc") is not None
-  )
-  if len(body) > MAX_ENVELOPE_BYTES and not supports_large_payload:
-    raise HTTPException(status_code=413, detail="Envelope too large.")
-  return envelope
 
 
 @router.post("/inbox")
@@ -706,7 +597,7 @@ async def receive_message(request: Request, db: Session = Depends(get_db)):
   if envelope.get("to") != _own_host():
     raise HTTPException(status_code=400, detail="Envelope is addressed elsewhere.")
   message_id = envelope.get("id")
-  if not isinstance(message_id, str) or not _ID_RE.fullmatch(message_id):
+  if not isinstance(message_id, str) or not _valid_id(message_id):
     raise HTTPException(status_code=400, detail="Message id is invalid.")
   actor = await _verify_peer_envelope(envelope)
   encrypted = "enc" in envelope
@@ -724,10 +615,6 @@ async def receive_message(request: Request, db: Session = Depends(get_db)):
   _validate_text_or_attachment(text, attachment, "Message text is invalid.")
   sender = envelope["from"]
   app = _common_app(db)
-  # Idempotent delivery: a redelivered envelope id is acknowledged, not duplicated.
-  existing = _conversation_dir(app, sender) / "msgs" / f"{message_id}.json"
-  if existing.is_file():
-    return {"status": "duplicate"}
   sender_label = f"@{actor['handle']}" if actor.get("handle") else sender
   record = {
     "id": message_id,
@@ -742,9 +629,17 @@ async def receive_message(request: Request, db: Session = Depends(get_db)):
     record["encrypted"] = True
   if reply_to is not None:
     record["reply_to"] = reply_to
-  await _store_message(db, app, sender, record, attachment)
+  created, request_state = await _store_message(
+    db, app, sender, record, attachment
+  )
+  if not created:
+    # A blocked sender gets the same successful receipt as ordinary delivery;
+    # the discard policy is local owner state, not federation metadata.
+    if request_state == "blocked":
+      return {"status": "delivered"}
+    return {"status": "duplicate"}
   owner = db.query(models.Owner).first()
-  if owner is not None:
+  if owner is not None and request_state == "accepted":
     try:
       push.notify_owner(
         db,
@@ -757,247 +652,16 @@ async def receive_message(request: Request, db: Session = Depends(get_db)):
       )
     except Exception:
       pass  # delivery of the message itself must not fail on push problems
-  return {"status": "delivered"}
-
-
-@router.get("/directory")
-def search_directory(q: str = ""):
-  """Search users registered with this community host. Public data."""
-  path = _directory_path()
-  entries = json.loads(path.read_text()) if path.is_file() else {}
-  needle = q.strip().lower()
-  results = []
-  for host, entry in entries.items():
-    haystack = f"{entry.get('handle', '')} {host} {entry.get('bio', '')}".lower()
-    if not needle or needle in haystack:
-      results.append({
-        "host": host,
-        **{k: entry[k] for k in ("handle", "bio") if k in entry},
-      })
-  results.sort(key=lambda e: (e.get("handle") or e["host"]).lower())
-  return {"users": results[:200]}
-
-
-@router.post("/directory")
-async def register_in_directory(request: Request):
-  """Accept a signed opt-in directory registration from a peer."""
-  envelope = await _read_envelope(request)
-  if envelope.get("v") != 0 or envelope.get("type") != "register":
-    raise HTTPException(status_code=400, detail="Unsupported envelope type.")
-  actor = await _verify_peer_envelope(envelope)
-  host = envelope["from"]
-  handle = str(envelope.get("handle") or actor.get("handle") or "")[:MAX_NAME_CHARS]
-  bio = str(envelope.get("bio") or "")[:MAX_BIO_CHARS]
-  path = _directory_path()
-  entries = json.loads(path.read_text()) if path.is_file() else {}
-  if host not in entries and len(entries) >= DIRECTORY_LIMIT:
-    raise HTTPException(status_code=507, detail="Directory is full.")
-  entries[host] = {"handle": handle, "bio": bio, "registered_at": time.time()}
-  atomic_write(path, json.dumps(entries, indent=2))
-  return {"status": "registered"}
-
-
-def _read_board(limit: int, before: float | None, viewer: str | None = None) -> list[dict]:
-  """Board posts, newest first. Like details stay host-side: the feed carries
-  only the count and whether the viewer liked it. Replies are read separately;
-  the feed carries only their count."""
-  posts = []
-  for file in _board_dir().glob("*.json"):
-    try:
-      post = json.loads(file.read_text())
-    except Exception:
-      continue
-    if before is not None and post.get("created_at", 0) >= before:
-      continue
-    likes = post.pop("likes", {})
-    post["like_count"] = len(likes)
-    if viewer is not None:
-      post["liked"] = viewer in likes
-    replies = post.pop("replies", [])
-    post["reply_count"] = len(replies)
-    posts.append(post)
-  posts.sort(key=lambda p: p.get("created_at", 0), reverse=True)
-  return posts[:limit]
-
-
-def _board_media_path(post_id: str, mime: str) -> Path:
-  return _board_media_dir() / f"{post_id}.{_ATTACHMENT_MIME_EXT[mime]}"
-
-
-def _peer_board_media_name(host: str, post_id: str) -> str:
-  safe_host = re.sub(r"[^a-z0-9.-]", "_", host)
-  return f"{safe_host}-{post_id}"
-
-
-def _find_image(directory: Path, stem: str) -> tuple[Path, str] | None:
-  for mime, ext in _ATTACHMENT_MIME_EXT.items():
-    path = directory / f"{stem}.{ext}"
-    if path.is_file():
-      return path, mime
-  return None
-
-
-def _serve_image(found: tuple[Path, str] | None) -> FileResponse:
-  if found is None:
-    raise HTTPException(status_code=404, detail="Board image not found.")
-  path, mime = found
-  return FileResponse(str(path), media_type=mime)
-
-
-def _store_board_post(
-  post: dict, attachment: tuple[dict, bytes] | None = None
-) -> bool:
-  """Store one hosted post and its image; return False for a duplicate id."""
-  path = _board_dir() / f"{post['id']}.json"
-  if path.is_file():
-    return False
-  if attachment is not None:
-    wire, data = attachment
-    atomic_write(_board_media_path(post["id"], wire["mime"]), data)
-    post["attachment"] = {
-      "mime": wire["mime"], "w": wire["w"], "h": wire["h"],
-    }
-  atomic_write(path, json.dumps(post))
-  return True
-
-
-@router.get("/board")
-def get_board(limit: int = 30, before: float | None = None, viewer: str | None = None):
-  """This host's public board feed, newest first. `viewer` (a peer host) marks
-  which posts that instance liked; like counts are public either way."""
-  if viewer is not None and not _valid_host(viewer):
-    viewer = None
-  return {"posts": _read_board(min(max(limit, 1), BOARD_PAGE_LIMIT), before, viewer)}
-
-
-@router.get("/board/media/{post_id}")
-def get_board_media(post_id: str):
-  """Serve one image hosted alongside this instance's public board."""
-  if not _ID_RE.fullmatch(post_id):
-    raise HTTPException(status_code=400, detail="Post id is invalid.")
-  return _serve_image(_find_image(_board_media_dir(), post_id))
-
-
-def _toggle_board_like(post_id: str, host: str) -> dict:
-  """Toggle one instance's like on a hosted board post."""
-  path = _board_dir() / f"{post_id}.json"
-  if not path.is_file():
-    raise HTTPException(status_code=404, detail="Unknown post.")
-  post = json.loads(path.read_text())
-  likes = post.setdefault("likes", {})
-  if host in likes:
-    del likes[host]
-  else:
-    likes[host] = time.time()
-  atomic_write(path, json.dumps(post))
-  return {"status": "ok", "likes": len(likes), "liked": host in likes}
-
-
-def _add_board_reply(
-  post_id: str, reply_id: str, host: str, handle: str, text: str, created_at: float
-) -> dict:
-  """Append one idempotent reply to a hosted board post."""
-  path = _board_dir() / f"{post_id}.json"
-  if not path.is_file():
-    raise HTTPException(status_code=404, detail="Unknown post.")
-  post = json.loads(path.read_text())
-  replies = post.get("replies")
-  if not isinstance(replies, list):
-    replies = []
-    post["replies"] = replies
-  if any(reply.get("id") == reply_id for reply in replies):
-    return {"status": "ok", "reply_count": len(replies)}
-  if len(replies) >= BOARD_REPLY_LIMIT:
-    raise HTTPException(status_code=507, detail="Post reply limit reached.")
-  replies.append({
-    "id": reply_id,
-    "host": host,
-    "handle": handle,
-    "text": text,
-    "created_at": created_at,
-  })
-  atomic_write(path, json.dumps(post))
-  return {"status": "ok", "reply_count": len(replies)}
-
-
-@router.get("/board/{post_id}/replies")
-def get_board_replies(post_id: str):
-  """A hosted post's public replies, oldest first."""
-  if not re.fullmatch(r"[a-f0-9-]{8,64}", post_id):
-    raise HTTPException(status_code=400, detail="Post id is invalid.")
-  path = _board_dir() / f"{post_id}.json"
-  if not path.is_file():
-    raise HTTPException(status_code=404, detail="Unknown post.")
-  post = json.loads(path.read_text())
-  replies = post.get("replies")
-  if not isinstance(replies, list):
-    replies = []
-  replies.sort(key=lambda reply: reply.get("created_at", 0))
-  return {"replies": replies}
-
-
-@router.post("/board/react")
-async def react_to_board(request: Request):
-  """Accept a signed like toggle from a peer for a post hosted here."""
-  envelope = await _read_envelope(request)
-  if envelope.get("v") != 0 or envelope.get("type") != "board_react":
-    raise HTTPException(status_code=400, detail="Unsupported envelope type.")
-  post_id = envelope.get("post_id")
-  if not isinstance(post_id, str) or not re.fullmatch(r"[a-f0-9-]{8,64}", post_id):
-    raise HTTPException(status_code=400, detail="Post id is invalid.")
-  await _verify_peer_envelope(envelope)
-  return _toggle_board_like(post_id, envelope["from"])
-
-
-@router.post("/board/reply")
-async def reply_to_board(request: Request):
-  """Accept one signed reply from a peer for a post hosted here."""
-  envelope = await _read_envelope(request)
-  if envelope.get("v") != 0 or envelope.get("type") != "board_reply":
-    raise HTTPException(status_code=400, detail="Unsupported envelope type.")
-  post_id = envelope.get("post_id")
-  if not isinstance(post_id, str) or not re.fullmatch(r"[a-f0-9-]{8,64}", post_id):
-    raise HTTPException(status_code=400, detail="Post id is invalid.")
-  reply_id = envelope.get("id")
-  if not isinstance(reply_id, str) or not re.fullmatch(r"[a-f0-9-]{8,64}", reply_id):
-    raise HTTPException(status_code=400, detail="Reply id is invalid.")
-  text = envelope.get("text")
-  if (
-    not isinstance(text, str)
-    or not text.strip()
-    or len(text) > MAX_REPLY_TEXT_CHARS
-  ):
-    raise HTTPException(status_code=400, detail="Reply text is invalid.")
-  actor = await _verify_peer_envelope(envelope)
-  return _add_board_reply(
-    post_id, reply_id, envelope["from"], actor.get("handle") or "",
-    text, envelope["sent_at"],
-  )
-
-
-@router.post("/board")
-async def post_to_board(request: Request):
-  """Accept a signed board post from a peer."""
-  envelope = await _read_envelope(request)
-  if envelope.get("v") != 0 or envelope.get("type") != "board_post":
-    raise HTTPException(status_code=400, detail="Unsupported envelope type.")
-  text = envelope.get("text")
-  attachment = _validate_attachment(envelope.get("attachment"))
-  _validate_text_or_attachment(text, attachment, "Post text is invalid.")
-  post_id = envelope.get("id")
-  if not isinstance(post_id, str) or not _ID_RE.fullmatch(post_id):
-    raise HTTPException(status_code=400, detail="Post id is invalid.")
-  actor = await _verify_peer_envelope(envelope)
-  post = {
-    "id": post_id,
-    "host": envelope["from"],
-    "handle": actor.get("handle") or "",
-    "text": text,
-    "created_at": envelope["sent_at"],
-    "replies": [],
+  return {
+    "status": "delivered" if request_state == "accepted" else "pending",
   }
-  _store_board_post(post, attachment)
-  return {"status": "posted"}
+
+
+# The directory and board peer surface is shared with the isolated host.
+_public_router, _public_write_limiter = create_public_router(
+  _public_store, _actor_verifier, prefix="",
+)
+router.include_router(_public_router)
 
 
 # ── owner surface ───────────────────────────────────────────────────────────
@@ -1023,6 +687,13 @@ class SendMessage(BaseModel):
   peer_handle: str | None = None
   attachment: Any = None
   reply_to: Any = None
+
+
+def _request_peer(peer_host: str) -> str:
+  host = peer_host.strip().lower()
+  if not _valid_host(host):
+    raise HTTPException(status_code=400, detail="Invalid peer host.")
+  return host
 
 
 class PublishPost(BaseModel):
@@ -1137,20 +808,17 @@ async def _register_with_community_host(identity: dict) -> str:
   envelope["sig"] = _sign(envelope, identity["private_key_b64"])
   if host == _own_host():
     # Local shortcut: the community host is this very instance.
-    path = _directory_path()
-    entries = json.loads(path.read_text()) if path.is_file() else {}
-    entries[_own_host()] = {
-      "handle": envelope["handle"], "bio": envelope["bio"],
-      "registered_at": time.time(),
-    }
-    atomic_write(path, json.dumps(entries, indent=2))
+    _public_store.register(
+      _own_host(), envelope["handle"], envelope["bio"],
+    )
     return "registered"
   try:
-    async with httpx.AsyncClient(timeout=OUTBOUND_TIMEOUT_S) as client:
-      response = await client.post(
-        f"{_peer_base_url(host)}/api/common/directory", json=envelope
-      )
-      response.raise_for_status()
+    response = await federation_request(
+      "POST", f"{_peer_base_url(host)}/api/common/directory", json=envelope,
+      max_response_bytes=MAX_ENVELOPE_BYTES,
+      timeout_seconds=OUTBOUND_TIMEOUT_S,
+    )
+    response.raise_for_status()
     return "registered"
   except Exception:
     return "unreachable"
@@ -1180,6 +848,46 @@ async def update_me(
   return {"status": "saved", "directory": status}
 
 
+@router.post("/requests/dm/{peer_host}/accept")
+async def accept_message_request(
+  peer_host: str,
+  db: Session = Depends(get_db),
+  principal: Principal = Depends(get_principal),
+):
+  require_nondelegated_owner_control(principal)
+  app = _require_owner_or_common_app(db, principal)
+  # Acceptance may be the first authenticated federation action on a legacy
+  # plaintext request. Create keys now so the accepted peer can verify and
+  # encrypt the owner's reply without requiring a public-directory join.
+  _load_identity()
+  state = await _set_dm_request_state(app, _request_peer(peer_host), "accepted")
+  return {"status": state}
+
+
+@router.post("/requests/dm/{peer_host}/decline")
+async def decline_message_request(
+  peer_host: str,
+  db: Session = Depends(get_db),
+  principal: Principal = Depends(get_principal),
+):
+  require_nondelegated_owner_control(principal)
+  app = _require_owner_or_common_app(db, principal)
+  state = await _set_dm_request_state(app, _request_peer(peer_host), "declined")
+  return {"status": state}
+
+
+@router.post("/requests/dm/{peer_host}/block")
+async def block_message_request(
+  peer_host: str,
+  db: Session = Depends(get_db),
+  principal: Principal = Depends(get_principal),
+):
+  require_nondelegated_owner_control(principal)
+  app = _require_owner_or_common_app(db, principal)
+  state = await _set_dm_request_state(app, _request_peer(peer_host), "blocked")
+  return {"status": state}
+
+
 @router.post("/send")
 async def send_message(
   message: SendMessage,
@@ -1198,6 +906,9 @@ async def send_message(
   _validate_text_or_attachment(text, attachment, "Message text is invalid.")
   identity = _load_identity()
   actor = await _fetch_actor(to_host)
+  # The first deliberate outgoing message establishes consent. A reply to an
+  # inbound request must instead go through the explicit acceptance action.
+  await _prepare_outgoing_conversation(app, to_host)
   message_id = str(uuid.uuid4())
   envelope = {
     "v": 0,
@@ -1239,20 +950,18 @@ async def send_message(
   status = "delivered"
   detail = None
   try:
-    async with httpx.AsyncClient(timeout=OUTBOUND_TIMEOUT_S) as client:
-      response = await client.post(
-        f"{_peer_base_url(to_host)}/api/common/inbox", json=envelope
-      )
-      response.raise_for_status()
+    response = await federation_request(
+      "POST", f"{_peer_base_url(to_host)}/api/common/inbox", json=envelope,
+      max_response_bytes=MAX_ENVELOPE_BYTES,
+      timeout_seconds=OUTBOUND_TIMEOUT_S,
+    )
+    response.raise_for_status()
   except httpx.HTTPStatusError as exc:
     status = "failed"
-    try:
-      detail = exc.response.json().get("detail")
-    except Exception:
-      detail = f"{to_host} rejected the message ({exc.response.status_code})."
+    detail = f"The peer rejected the message ({exc.response.status_code})."
   except Exception:
     status = "failed"
-    detail = f"{to_host} could not be reached."
+    detail = "The peer could not be reached."
   record = {
     "id": envelope["id"],
     "dir": "out",
@@ -1308,30 +1017,75 @@ async def publish_post(
     _store_board_post(board_post, attachment)
     return {"status": "posted", "id": envelope["id"]}
   try:
-    async with httpx.AsyncClient(timeout=OUTBOUND_TIMEOUT_S) as client:
-      response = await client.post(
-        f"{_peer_base_url(host)}/api/common/board", json=envelope
-      )
-      response.raise_for_status()
+    response = await federation_request(
+      "POST", f"{_peer_base_url(host)}/api/common/board", json=envelope,
+      max_response_bytes=MAX_ENVELOPE_BYTES,
+      timeout_seconds=OUTBOUND_TIMEOUT_S,
+    )
+    response.raise_for_status()
     return {"status": "posted", "id": envelope["id"]}
   except Exception as exc:
     raise HTTPException(
-      status_code=502, detail=f"Community host {host} could not be reached."
+      status_code=502, detail="Community host could not be reached."
+    ) from exc
+
+
+def _browse_community_host(requested: str | None) -> str:
+  """Choose a public read destination without changing membership or identity."""
+  if requested is not None:
+    host = requested.strip().lower()
+    if not _valid_host(host):
+      raise HTTPException(status_code=400, detail="Invalid community host.")
+    return host
+  path = _identity_path()
+  identity = json.loads(path.read_text()) if path.is_file() else {}
+  return identity.get("community_host") or _own_host()
+
+
+@router.get("/replies/{post_id}")
+async def get_replies_for_owner(
+  post_id: str,
+  community_host: str | None = None,
+  db: Session = Depends(get_db),
+  principal: Principal = Depends(get_principal),
+):
+  """Read the selected public board's replies through the safe peer transport."""
+  _require_owner_or_common_app(db, principal)
+  if not _valid_id(post_id):
+    raise HTTPException(status_code=400, detail="Post id is invalid.")
+  host = _browse_community_host(community_host)
+  if host == _own_host():
+    return _public_store.get_replies(post_id)
+  try:
+    response = await federation_request(
+      "GET", f"{_peer_base_url(host)}/api/common/board/{post_id}/replies",
+      timeout_seconds=OUTBOUND_TIMEOUT_S,
+    )
+    response.raise_for_status()
+    result = response.json()
+    if not isinstance(result.get("replies"), list):
+      raise ValueError("Invalid reply response")
+    return result
+  except HTTPException:
+    raise
+  except Exception as exc:
+    raise HTTPException(
+      status_code=502, detail="Community replies could not be reached."
     ) from exc
 
 
 @router.get("/board-media/{post_id}")
 async def get_board_media_for_owner(
   post_id: str,
+  community_host: str | None = None,
   db: Session = Depends(get_db),
   principal: Principal = Depends(get_principal),
 ):
   """Serve a community-board image, caching remote hosts for 24 hours."""
   _require_owner_or_common_app(db, principal)
-  if not _ID_RE.fullmatch(post_id):
+  if not _valid_id(post_id):
     raise HTTPException(status_code=400, detail="Post id is invalid.")
-  identity = _load_identity()
-  host = identity.get("community_host") or _own_host()
+  host = _browse_community_host(community_host)
   if host == _own_host():
     return _serve_image(_find_image(_board_media_dir(), post_id))
 
@@ -1364,32 +1118,32 @@ async def get_board_media_for_owner(
 async def get_feed(
   limit: int = 30,
   before: float | None = None,
+  community_host: str | None = None,
   db: Session = Depends(get_db),
   principal: Principal = Depends(get_principal),
 ):
   """The community host's board, proxied for the app UI."""
   _require_owner_or_common_app(db, principal)
-  identity = _load_identity()
-  host = identity.get("community_host") or _own_host()
+  host = _browse_community_host(community_host)
   if host == _own_host():
     posts = _read_board(min(max(limit, 1), BOARD_PAGE_LIMIT), before, _own_host())
     return {"host": host, "posts": posts}
   try:
-    async with httpx.AsyncClient(timeout=OUTBOUND_TIMEOUT_S) as client:
-      response = await client.get(
-        f"{_peer_base_url(host)}/api/common/board",
-        params={
-          "limit": limit, "viewer": _own_host(),
-          **({"before": before} if before else {}),
-        },
-      )
-      response.raise_for_status()
-      return {"host": host, **response.json()}
+    response = await federation_request(
+      "GET", f"{_peer_base_url(host)}/api/common/board",
+      params={
+        "limit": limit, "viewer": _own_host(),
+        **({"before": before} if before else {}),
+      },
+      timeout_seconds=OUTBOUND_TIMEOUT_S,
+    )
+    response.raise_for_status()
+    return {"host": host, **response.json()}
   except HTTPException:
     raise
   except Exception as exc:
     raise HTTPException(
-      status_code=502, detail=f"Community host {host} could not be reached."
+      status_code=502, detail="Community host could not be reached."
     ) from exc
 
 
@@ -1427,15 +1181,16 @@ async def like_post(
   }
   envelope["sig"] = _sign(envelope, identity["private_key_b64"])
   try:
-    async with httpx.AsyncClient(timeout=OUTBOUND_TIMEOUT_S) as client:
-      response = await client.post(
-        f"{_peer_base_url(host)}/api/common/board/react", json=envelope
-      )
-      response.raise_for_status()
-      return response.json()
+    response = await federation_request(
+      "POST", f"{_peer_base_url(host)}/api/common/board/react", json=envelope,
+      max_response_bytes=MAX_ENVELOPE_BYTES,
+      timeout_seconds=OUTBOUND_TIMEOUT_S,
+    )
+    response.raise_for_status()
+    return response.json()
   except Exception as exc:
     raise HTTPException(
-      status_code=502, detail=f"Community host {host} could not be reached."
+      status_code=502, detail="Community host could not be reached."
     ) from exc
 
 
@@ -1474,40 +1229,41 @@ async def reply_to_post(
   }
   envelope["sig"] = _sign(envelope, identity["private_key_b64"])
   try:
-    async with httpx.AsyncClient(timeout=OUTBOUND_TIMEOUT_S) as client:
-      response = await client.post(
-        f"{_peer_base_url(host)}/api/common/board/reply", json=envelope
-      )
-      response.raise_for_status()
-      return response.json()
+    response = await federation_request(
+      "POST", f"{_peer_base_url(host)}/api/common/board/reply", json=envelope,
+      max_response_bytes=MAX_ENVELOPE_BYTES,
+      timeout_seconds=OUTBOUND_TIMEOUT_S,
+    )
+    response.raise_for_status()
+    return response.json()
   except Exception as exc:
     raise HTTPException(
-      status_code=502, detail=f"Community host {host} could not be reached."
+      status_code=502, detail="Community host could not be reached."
     ) from exc
 
 
 @router.get("/people")
 async def search_people(
   q: str = "",
+  community_host: str | None = None,
   db: Session = Depends(get_db),
   principal: Principal = Depends(get_principal),
 ):
   """Search the community host's user directory, proxied for the app UI."""
   _require_owner_or_common_app(db, principal)
-  identity = _load_identity()
-  host = identity.get("community_host") or _own_host()
+  host = _browse_community_host(community_host)
   if host == _own_host():
-    return {"host": host, **search_directory(q)}
+    return {"host": host, **_public_store.search_directory(q)}
   try:
-    async with httpx.AsyncClient(timeout=OUTBOUND_TIMEOUT_S) as client:
-      response = await client.get(
-        f"{_peer_base_url(host)}/api/common/directory", params={"q": q}
-      )
-      response.raise_for_status()
-      return {"host": host, **response.json()}
+    response = await federation_request(
+      "GET", f"{_peer_base_url(host)}/api/common/directory", params={"q": q},
+      timeout_seconds=OUTBOUND_TIMEOUT_S,
+    )
+    response.raise_for_status()
+    return {"host": host, **response.json()}
   except Exception as exc:
     raise HTTPException(
-      status_code=502, detail=f"Community host {host} could not be reached."
+      status_code=502, detail="Community host could not be reached."
     ) from exc
 
 

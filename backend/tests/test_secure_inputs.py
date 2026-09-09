@@ -694,3 +694,45 @@ def test_owner_credentials_consumer_changes_login_without_printing_values(
   assert owner.token_epoch == 1
   assert auth.verify_password(new_password, owner.hashed_password)
   assert not auth.verify_password("testpassword123", owner.hashed_password)
+
+
+def test_owner_can_cancel_pending_card_without_capability(client, auth, chat):
+  """The owner dismisses their own card even if the local helper's capability
+  is gone; this frees the one-per-chat slot for a fresh request."""
+  from app import secure_inputs
+
+  _bc, created = _create_request(client, auth, chat)
+  request_id = created["request_id"]
+
+  # A second create is blocked while the first is open.
+  blocked = client.post(
+    f"/api/secure-inputs/{chat.id}",
+    headers=auth,
+    json={
+      "mode": "sealed",
+      "title": "Second",
+      "description": "x",
+      "fields": [{"name": "k", "label": "K", "type": "text"}],
+    },
+  )
+  assert blocked.status_code == 409
+
+  # Owner cancel — no capability required, unlike the helper's cancel route.
+  cancelled = client.post(
+    f"/api/secure-inputs/{chat.id}/{request_id}/cancel",
+    headers=auth,
+  )
+  assert cancelled.status_code == 200
+  assert cancelled.json()["status"] == "cancelled"
+  assert secure_inputs.get_request(request_id).status == "cancelled"
+
+  # Slot is free again.
+  again = _create_request(client, auth, chat)
+  assert again[1]["request_id"] != request_id
+
+  # Cancelling an already-settled request is a conflict, not a crash.
+  twice = client.post(
+    f"/api/secure-inputs/{chat.id}/{request_id}/cancel",
+    headers=auth,
+  )
+  assert twice.status_code == 409

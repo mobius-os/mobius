@@ -175,7 +175,7 @@ test('durable Goal presentation preserves only exact server-owned waits', () => 
     wait_kind: 'monitor',
   }), {
     id: 'goal-1', objective: 'Finish the review', status: 'paused',
-    resumable: true, waitKind: 'monitor',
+    resumable: true, wait_kind: 'monitor',
   })
   assert.deepEqual(normalizeGoalPresentation({
     id: 'goal-1', objective: 'Finish the review', status: 'paused',
@@ -186,11 +186,11 @@ test('durable Goal presentation preserves only exact server-owned waits', () => 
   })
   assert.match(
     chatView,
-    /ownerActionRequired: goalPresentation\?\.waitKind === 'owner_question'/,
+    /ownerActionRequired: goalPresentation\?\.wait_kind === 'owner_question'/,
   )
   assert.match(
     chatView,
-    /monitoring: goalPresentation\?\.waitKind === 'monitor'/,
+    /monitoring: goalPresentation\?\.wait_kind === 'monitor'/,
   )
 })
 
@@ -247,7 +247,7 @@ test('the goal reuses the progress rail and stays as context for build phases', 
   )
 })
 
-test('paused and completed Goals are visibly distinct', () => {
+test('only actionable Goals remain in the composer progress rail', () => {
   const plan = {
     summary: { completed: 2, total: 3 },
     tasks: [{ id: 'verify', title: 'Verify', status: 'running' }],
@@ -255,12 +255,15 @@ test('paused and completed Goals are visibly distinct', () => {
   assert.equal(progressRailViewModel({
     objective: 'Ship it', status: 'paused',
   }, [], plan)[0].label, 'Goal · Paused · 2/3 · Verify')
-  assert.equal(progressRailViewModel({
+  assert.deepEqual(progressRailViewModel({
     objective: 'Ship it', status: 'completed',
   }, [], {
     ...plan,
     summary: { completed: 3, total: 3 },
-  })[0].label, 'Goal · Completed · 3/3')
+  }), [])
+  assert.deepEqual(progressRailViewModel({
+    objective: 'Ship it', status: 'failed',
+  }, [], plan), [])
 })
 
 test('the Goal rail names who owns an unfinished wait', () => {
@@ -351,41 +354,6 @@ test('the deepest live delegated owners replace their parent in the collapsed la
   )
 })
 
-test('delegated leaves stay beside independent local running work', () => {
-  const plan = {
-    tasks: [
-      { id: 'a', title: 'Delegated A', status: 'running' },
-      { id: 'b', title: 'Local B', status: 'running' },
-    ],
-    delegations: [{
-      id: 'delegation-a', task_key: 'a', status: 'running', children: [
-        { id: 'delegation-x', task_key: 'x', status: 'running', children: [] },
-      ],
-    }],
-  }
-  assert.deepEqual(
-    visibleGoalTasks(plan).map(task => task.title),
-    ['Local B', 'X'],
-  )
-  const completedAncestors = {
-    tasks: [
-      { id: 'audit', title: 'Audit', status: 'running' },
-      { id: 'other', title: 'Other', status: 'running' },
-    ],
-    delegations: [{
-      id: 'delegation-audit', task_key: 'audit', status: 'completed', children: [{
-        id: 'delegation-detail', task_key: 'detail', status: 'completed', children: [{
-          id: 'delegation-leaf', task_key: 'leaf-check', status: 'running', children: [],
-        }],
-      }],
-    }],
-  }
-  assert.deepEqual(
-    visibleGoalTasks(completedAncestors).map(task => task.title),
-    ['Other', 'Leaf check'],
-  )
-})
-
 test('the deepest running plan nodes replace coordinating parents', () => {
   const plan = {
     tasks: [
@@ -431,7 +399,7 @@ test('live delegated execution outranks a stale completed task presentation', ()
 
 test('ChatView retains settled goals independently of transport liveness', () => {
   const runtimePoll = chatView.match(
-    /const reconcileRuntimeState = useCallback[\s\S]*?const handleCompactionStored/,
+    /const refreshRuntimeState = useCallback[\s\S]*?const reconcileRuntimeState/,
   )?.[0] || ''
   assert.doesNotMatch(
     runtimePoll,
@@ -448,7 +416,7 @@ test('ChatView retains settled goals independently of transport liveness', () =>
   for (const suffix of runStarts) {
     assert.match(
       suffix.slice(0, 380),
-      /setGoalAtRunStart\(|setGoalState\(goalPresentationForQueuedStart\(/,
+      /setGoalAtRunStart\(/,
       'goal and build progress must reconcile together at each run boundary',
     )
   }
@@ -457,10 +425,15 @@ test('ChatView retains settled goals independently of transport liveness', () =>
     /if \(!turnActive\)[\s\S]{0,100}setActiveGoalState\(''\)/,
     'a transient loss of browser liveness must not retire a durable goal',
   )
+  assert.doesNotMatch(
+    chatView,
+    /setGoalState\(\{ \.\.\.endingGoal, status: 'completed' \}\)/,
+    'a physical stream ending must not claim Goal completion before server confirmation',
+  )
   assert.match(
     chatView,
-    /setServerRunningState\(false\)[\s\S]{0,500}const endingGoal = goalPresentationRef\.current[\s\S]{0,200}setGoalState\(\{ \.\.\.endingGoal, status: 'completed' \}\)/,
-    'a terminal stream boundary must settle rather than remove its goal',
+    /if \(endingGoal \|\| pendingQueue\.pendingMessagesRef\.current\.length > 0\) \{\s*fetchMessages\(\{ force: true, authoritative: true \}\)/,
+    'the existing authoritative refresh owns completed versus paused Goal status',
   )
   assert.match(
     chatView,
@@ -524,6 +497,11 @@ test('ChatView retains settled goals independently of transport liveness', () =>
     /\.chat__foot \.chat__progress-step--toggle[\s\S]*?\{ pointer-events: auto; \}/,
     'an expandable step must opt back into pointer input inside the transparent footer',
   )
+  assert.match(
+    chatCss,
+    /\.chat__foot \.chat__progress-step--toggle,[\s\S]*?\.chat__foot \.chat__progress-action,[\s\S]*?\.chat__foot \.chat__progress-clear,[\s\S]*?\{ pointer-events: auto; \}/,
+    'the Goal action siblings must opt back into pointer input with the expandable step',
+  )
   assert.doesNotMatch(progressRail, /goal|build/i,
     'the shared rail should not encode one producer’s domain')
   assert.match(
@@ -542,6 +520,7 @@ test('ChatView retains settled goals independently of transport liveness', () =>
     'live delegated execution should own the row presentation state',
   )
 })
+
 test('draftGoalObjective keeps the goal visual open while typing the objective', () => {
   // Requires the whitespace that dismisses the slash menu, so the chip takes
   // over exactly as the picker closes — a bare `/goal` still belongs to it.
@@ -579,7 +558,7 @@ test('the goal rail confirms and clears directly, sourced domain-neutrally', () 
     /doSend\('\/goal clear'/,
     'the Goal rail must never fabricate a /goal clear chat message',
   )
-  assert.match(chatView, /clearable:\s*!!goalPresentation\?\.id/,
+  assert.match(chatView, /clearable:\s*!!actionableGoalPresentation\?\.id/,
     'only an identified durable Goal may expose clearing')
   assert.match(chatView, /onClearItem=\{handleClearGoal\}/,
     'ChatView must wire the clear handler into the rail')
@@ -592,20 +571,18 @@ test('the goal rail confirms and clears directly, sourced domain-neutrally', () 
     'the armed clear control must turn into a confirm check')
   assert.match(progressRail, /item\.clearConfirmLabel \|\| 'Confirm clear'/,
     'the confirmation label must be item-supplied with a neutral fallback')
-  assert.match(chatView, /actionLabel: 'Resume'/,
+  assert.match(chatView, /actionLabel: resumeState\.pending \? 'Resuming…' : 'Resume'/,
     'a paused Goal should expose the one-tap resume action')
   assert.match(chatView, /actionIcon: <Play width=\{13\} height=\{13\}/,
     'the paused Goal action should spend only icon-sized visual space')
-  assert.match(chatView, /ownerActionRequired: goalPresentation\?\.waitKind === 'owner_question'/,
-    'only a question attributed to this exact Goal may own its wait state')
-  assert.match(chatView, /monitoring: goalPresentation\?\.waitKind === 'monitor'/,
-    'only a monitor attributed to this exact Goal may own its wait state')
+  assert.match(chatView, /ownerActionRequired: goalPresentation\?\.wait_kind === 'owner_question'/,
+    'the server-owned Goal question must own the Goal wait state')
+  assert.match(chatView, /monitoring: goalPresentation\?\.wait_kind === 'monitor'/,
+    'the server-owned Goal wait must own the automatic monitoring state')
   assert.match(chatView, /actionableGoalPresentation\?\.status === 'paused'[\s\S]{0,80}&& !goalWaitState\.monitoring/,
     'a monitored Goal must not expose a competing manual Resume action')
   assert.match(chatView, /actionKind: 'owner-question'[\s\S]*?actionLabel: 'View question'/,
     'an owner-required Goal should expose the existing question surface')
-  assert.match(chatView, /actionableGoalPresentation && goalWaitState\.ownerActionRequired/,
-    'an unrelated chat-wide question must not become this Goal\'s action')
   assert.match(chatView, /revealPendingQuestion\(pendingQuestionEl\)/,
     'the Goal question action must reveal the real pending question card')
   assert.match(chatView, /const ariaStatus = goalWaitState\.ownerActionRequired && goalAriaStatus/,
@@ -616,12 +593,22 @@ test('the goal rail confirms and clears directly, sourced domain-neutrally', () 
     'the shared rail must render item-supplied actions without encoding Goal semantics')
   assert.match(progressRail, /item\.actionIcon \|\| item\.actionLabel/,
     'an accessible action label may render as a compact supplied icon')
+  assert.match(
+    chatCss,
+    /\.chat__progress-action\s*\{[\s\S]*?color: var\(--muted\)/,
+    'the paused Goal action should stay visually neutral',
+  )
+  assert.match(
+    chatCss,
+    /\.chat__progress-step--completed\s*\{\s*color: var\(--muted\)/,
+    'completed Goal status should stay visually neutral',
+  )
   assert.doesNotMatch(progressRail, /chat__progress-toggle-mark/,
     'the whole goal label should expand naturally without a disclosure arrow')
   assert.match(
     chatView,
-    /handleResumeGoal[\s\S]{0,300}doSend\('continue', \{[\s\S]{0,160}continuation: 'manual',[\s\S]{0,80}hidden: true/,
-    'goal resume must reactivate through a hidden product continuation, not a visible continue message',
+    /handleResumeGoal[\s\S]{0,180}handleResume\(\)/,
+    'goal and recovery-card Resume share the acknowledged lifecycle action, not a composer send',
   )
 })
 
@@ -634,9 +621,4 @@ test('a /goal draft renders the composer goal chip', () => {
     'the draft chip needs its frosted-card styling')
   assert.match(chatCss, /\.chat__progress-clear\s*\{/,
     'the clear X needs its button styling')
-  assert.match(
-    chatCss,
-    /@media \(pointer: coarse\)[\s\S]*?\.chat__progress-action,[\s\S]*?\.chat__progress-clear[\s\S]*?width: 44px;[\s\S]*?height: 44px;/,
-    'touch pointers need separate 44px Goal action targets',
-  )
 })

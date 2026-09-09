@@ -10,17 +10,17 @@ import hashlib
 import json
 import logging
 import os
-import re
 import secrets
 import time
-from base64 import urlsafe_b64encode
+from base64 import urlsafe_b64decode, urlsafe_b64encode
 from datetime import UTC, datetime, timedelta
 from urllib.parse import parse_qs, urlencode, urlparse
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.responses import JSONResponse, RedirectResponse, Response
 from fastapi.security import OAuth2PasswordRequestForm
+from starlette.concurrency import run_in_threadpool
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
@@ -145,12 +145,22 @@ def _extract_provider_code_and_state(raw_code: str) -> tuple[str, str | None]:
 
 @router.get("/setup/status", response_model=schemas.SetupStatus)
 def setup_status(db: Session = Depends(get_db)):
-  """Returns whether the owner account has been configured."""
+  """Returns whether the owner account has been configured, and its login mode.
+
+  Once configured, ``auth_mode`` comes from the durable owner row. Before an
+  owner exists, managed deployment configuration must still close the local
+  setup path and present the managed login rather than an attacker-creatable
+  password owner.
+  """
   settings = get_settings()
-  configured = db.query(models.Owner).first() is not None
+  owner = db.query(models.Owner).first()
   return schemas.SetupStatus(
-    configured=configured,
-    auth_mode="mobius_sso" if settings.mobius_sso_enabled else "local",
+    configured=owner is not None,
+    auth_mode=(
+      owner.auth_mode
+      if owner is not None
+      else ("mobius" if settings.mobius_sso_enabled else "local")
+    ),
   )
 
 
@@ -217,210 +227,6 @@ def setup(
   return schemas.TokenResponse(access_token=token)
 
 
-def _safe_sso_return_path(raw: str | None) -> str:
-  """Keep the post-login destination on this exact instance origin."""
-  value = (raw or "/").strip()
-  if (
-    not value.startswith("/")
-    or value.startswith("//")
-    or "\\" in value
-    or "%5c" in value.lower()
-  ):
-    return "/"
-  parsed = urlparse(value)
-  if parsed.scheme or parsed.netloc:
-    return "/"
-  return parsed.path + (
-    ("?" + parsed.query) if parsed.query else ""
-  ) + (("#" + parsed.fragment) if parsed.fragment else "")
-
-
-def _sso_cookie_secure() -> bool:
-  return get_settings().frontend_origin.startswith("https://")
-
-
-def _sso_error_redirect():
-  response = RedirectResponse(url="/shell/?mobius_sso_error=1", status_code=303)
-  response.headers["Cache-Control"] = "no-store"
-  response.headers["Referrer-Policy"] = "no-referrer"
-  response.delete_cookie("mobius_sso_state", path="/api/auth/sso/callback")
-  return response
-
-
-@router.get("/sso/start")
-def start_managed_sso(return_path: str = "/"):
-  settings = get_settings()
-  if not settings.mobius_sso_enabled:
-    raise HTTPException(status_code=404, detail="Managed sign-in is not configured.")
-  state = secrets.token_urlsafe(32)
-  verifier, challenge = _generate_pkce()
-  redirect_uri = settings.frontend_origin.rstrip("/") + "/api/auth/sso/callback"
-  context = auth.create_access_token(
-    {
-      "scope": "mobius_sso_state",
-      "state": state,
-      "code_verifier": verifier,
-      "redirect_uri": redirect_uri,
-      "return_path": _safe_sso_return_path(return_path),
-    },
-    expires_delta=timedelta(minutes=10),
-  )
-  authorize_url = settings.mobius_sso_issuer + "/sso/authorize?" + urlencode(
-    {
-      "instance_id": settings.mobius_sso_instance_id,
-      "state": state,
-      "redirect_uri": redirect_uri,
-      "code_challenge": challenge,
-    }
-  )
-  response = RedirectResponse(url=authorize_url, status_code=303)
-  response.set_cookie(
-    "mobius_sso_state",
-    context,
-    httponly=True,
-    secure=_sso_cookie_secure(),
-    samesite="lax",
-    max_age=10 * 60,
-    path="/api/auth/sso/callback",
-  )
-  response.headers["Cache-Control"] = "no-store"
-  response.headers["Referrer-Policy"] = "no-referrer"
-  return response
-
-
-@router.get("/sso/callback")
-async def complete_managed_sso(
-  request: Request,
-  code: str = "",
-  state: str = "",
-  db: Session = Depends(get_db),
-):
-  settings = get_settings()
-  if not settings.mobius_sso_enabled:
-    raise HTTPException(status_code=404, detail="Managed sign-in is not configured.")
-  context_token = request.cookies.get("mobius_sso_state", "")
-  context = auth.decode_access_token(context_token) if context_token else None
-  if (
-    not context
-    or context.get("scope") != "mobius_sso_state"
-    or not code
-    or not state
-    or not secrets.compare_digest(str(context.get("state") or ""), state)
-  ):
-    return _sso_error_redirect()
-
-  redirect_uri = str(context.get("redirect_uri") or "")
-  code_verifier = str(context.get("code_verifier") or "")
-  try:
-    async with httpx.AsyncClient(timeout=10.0, follow_redirects=False) as client:
-      exchange = await client.post(
-        settings.mobius_sso_issuer + "/sso/token",
-        json={
-          "instance_id": settings.mobius_sso_instance_id,
-          "client_secret": settings.mobius_sso_client_secret,
-          "code": code,
-          "code_verifier": code_verifier,
-          "redirect_uri": redirect_uri,
-        },
-        headers={"Accept": "application/json"},
-      )
-    if exchange.status_code != 200:
-      return _sso_error_redirect()
-    identity = exchange.json()
-  except (httpx.HTTPError, ValueError):
-    return _sso_error_redirect()
-
-  subject = str(identity.get("sub") or "").strip()
-  email = str(identity.get("email") or "").strip().lower()
-  display_name = str(identity.get("name") or "").strip()
-  if (
-    not re.fullmatch(r"user_[A-Za-z0-9_-]{3,80}", subject)
-    or not email
-    or len(email) > 320
-  ):
-    return _sso_error_redirect()
-
-  owner = db.query(models.Owner).first()
-  created_owner = owner is None
-  if owner is None:
-    username = (display_name or email.split("@", 1)[0] or "Owner").strip()[:64]
-    if not username:
-      username = "Owner"
-    owner = models.Owner(
-      username=username,
-      # Managed accounts have no default local password. A random unreachable
-      # hash keeps the legacy non-null schema and password endpoint inert until
-      # an explicit local-login credential is added in Settings.
-      hashed_password=auth.hash_password(secrets.token_urlsafe(64)),
-      sso_subject=subject,
-      sso_email=email,
-    )
-    db.add(owner)
-  elif owner.sso_subject and not secrets.compare_digest(owner.sso_subject, subject):
-    return _sso_error_redirect()
-  else:
-    owner.sso_subject = subject
-    owner.sso_email = email
-
-  try:
-    db.commit()
-  except (IntegrityError, SQLAlchemyError):
-    db.rollback()
-    return _sso_error_redirect()
-  db.refresh(owner)
-  if created_owner:
-    try:
-      _write_service_token(owner.username, owner.token_epoch)
-    except OSError as exc:
-      log.warning("Could not write service token: %s", exc)
-
-  access_token = auth.create_access_token(
-    {"sub": owner.username}, token_epoch=owner.token_epoch
-  )
-  handoff = auth.create_access_token(
-    {
-      "scope": "mobius_sso_handoff",
-      "access_token": access_token,
-      "new_owner": created_owner,
-      "return_path": _safe_sso_return_path(context.get("return_path")),
-    },
-    expires_delta=timedelta(seconds=60),
-  )
-  response = RedirectResponse(url="/shell/?mobius_sso=1", status_code=303)
-  response.set_cookie(
-    "mobius_sso_handoff",
-    handoff,
-    httponly=True,
-    secure=_sso_cookie_secure(),
-    samesite="lax",
-    max_age=60,
-    path="/api/auth/sso/session",
-  )
-  response.delete_cookie("mobius_sso_state", path="/api/auth/sso/callback")
-  response.headers["Cache-Control"] = "no-store"
-  response.headers["Referrer-Policy"] = "no-referrer"
-  return response
-
-
-@router.post("/sso/session", dependencies=[Depends(reject_cross_site)])
-def consume_managed_sso_session(request: Request):
-  handoff = request.cookies.get("mobius_sso_handoff", "")
-  payload = auth.decode_access_token(handoff) if handoff else None
-  if not payload or payload.get("scope") != "mobius_sso_handoff":
-    raise HTTPException(status_code=401, detail="Managed sign-in expired.")
-  response = JSONResponse(
-    {
-      "access_token": payload.get("access_token"),
-      "token_type": "bearer",
-      "new_owner": payload.get("new_owner") is True,
-      "return_path": _safe_sso_return_path(payload.get("return_path")),
-    }
-  )
-  response.delete_cookie("mobius_sso_handoff", path="/api/auth/sso/session")
-  response.headers["Cache-Control"] = "no-store"
-  return response
-
-
 # One-time install passes. iOS seals every Home Screen web app inside its own
 # storage container, so an app installed from a signed-in Safari session
 # launches signed out. The URL carries only a random opaque reference; no JWT
@@ -432,8 +238,6 @@ _INSTALL_PASS_TTL = timedelta(minutes=30)
 # credential would merely defer the same per-app login until half an hour after
 # installation, with no security benefit once the pass has left the URL.
 _INSTALL_SESSION_TTL = timedelta(days=30)
-
-
 def _install_pass_hash(secret: str) -> str:
   return hashlib.sha256(secret.encode("utf-8")).hexdigest()
 
@@ -566,6 +370,16 @@ def login(
   db: Session = Depends(get_db),
 ):
   """Authenticates the owner and returns a JWT access token."""
+  # Either/or gate: when the singleton owner is in mobius.you mode, local
+  # password login is disabled entirely. Checked before any username lookup,
+  # bcrypt work, or cooldown bookkeeping so no password-login side effect (a
+  # timing signal, a failure count, a rehash) runs while the mode forbids it.
+  singleton_owner = db.query(models.Owner).first()
+  if singleton_owner is not None and singleton_owner.auth_mode != "local":
+    raise HTTPException(
+      status_code=403,
+      detail="Local password login is disabled; sign in with mobius.you.",
+    )
   _check_login_cooldown(form.username)
   owner = (
     db.query(models.Owner)
@@ -591,7 +405,6 @@ def login(
   # forced password reset. A failed best-effort write must not lock the owner
   # out after their credential already proved valid.
   owner_username = owner.username
-  owner_token_epoch = owner.token_epoch
   if auth.password_needs_rehash(owner.hashed_password):
     try:
       owner.hashed_password = auth.hash_password(form.password)
@@ -600,8 +413,17 @@ def login(
       db.rollback()
       log.warning("Could not upgrade legacy owner password hash: %s", exc)
   _reset_login_failures(form.username)
+  # TOCTOU guard: re-check the mode immediately before minting. A host-side flip
+  # to mobius after the gate but before the credential verified must not still
+  # issue a local session.
+  db.refresh(owner)
+  if owner.auth_mode != "local":
+    raise HTTPException(
+      status_code=403,
+      detail="Local password login is disabled; sign in with mobius.you.",
+    )
   token = auth.create_access_token(
-    {"sub": owner_username}, token_epoch=owner_token_epoch
+    {"sub": owner_username}, token_epoch=owner.token_epoch
   )
   return schemas.TokenResponse(access_token=token)
 
@@ -695,6 +517,9 @@ _PKCE_TIMEOUT = 300  # 5 minutes
 
 # In-flight PKCE state — only one auth flow at a time (single-owner app).
 _active_pkce: dict | None = None
+# Serialize login/exchange/disconnect so an older sign-in cannot finish after
+# the owner's disconnect and silently restore the connection.
+_provider_login_locks = {"claude": asyncio.Lock(), "codex": asyncio.Lock()}
 
 
 def _cli_env() -> tuple[dict, str]:
@@ -750,6 +575,11 @@ async def provider_login(
   _: models.Owner = Depends(get_current_owner_for_lifecycle_control),
 ):
   """Generates PKCE params and returns the OAuth URL."""
+  async with _provider_login_locks["claude"]:
+    return _start_claude_login()
+
+
+def _start_claude_login():
   global _active_pkce
   verifier, challenge = _generate_pkce()
   state = secrets.token_urlsafe(32)
@@ -776,6 +606,11 @@ async def provider_code(
   _: models.Owner = Depends(get_current_owner_for_lifecycle_control),
 ):
   """Exchanges the authorization code for tokens via the token endpoint."""
+  async with _provider_login_locks["claude"]:
+    return await _exchange_claude_code(body)
+
+
+async def _exchange_claude_code(body: schemas.ProviderCodeRequest):
   global _active_pkce
   if not _active_pkce:
     raise HTTPException(
@@ -827,7 +662,9 @@ async def provider_code(
         detail="Token exchange failed. Try starting the auth flow again.",
       )
 
-    _write_credentials(r.json())
+    from app.providers import _claude_refresh_lock
+    async with _claude_refresh_lock:
+      _write_credentials(r.json())
     return {"ok": True}
   except httpx.TimeoutException:
     raise HTTPException(
@@ -843,7 +680,6 @@ async def provider_code(
 @router.get("/provider/status")
 async def provider_status(
   owner: models.Owner = Depends(get_current_owner),
-  db: Session = Depends(get_db),
 ):
   """Checks whether the active provider has local credentials configured.
 
@@ -851,19 +687,12 @@ async def provider_status(
   for any registered provider, not just Claude. `authenticated` remains as a
   compatibility alias; neither field performs a remote token probe.
   """
-  from starlette.concurrency import run_in_threadpool
-  from app.providers import (
-    get_provider,
-    owner_default_provider,
-    provider_requirement_error,
-  )
+  from app.providers import get_provider, owner_default_provider
   # The active provider is the one the last-selected model implies (the single
   # source of truth), so this status matches the provider chats will actually use.
   provider_id = owner_default_provider(get_settings().data_dir, owner.provider)
   provider = get_provider(provider_id)
-  error = provider_requirement_error(provider, db)
-  if error is None:
-    error = await run_in_threadpool(provider.check_auth, get_settings().data_dir)
+  error = await run_in_threadpool(provider.check_auth, get_settings().data_dir)
   return {
     "provider": provider_id,
     "provider_name": provider.name,
@@ -893,30 +722,33 @@ async def providers_status(
   """
   require_chat_embed_operation(principal, "models:read")
   is_owner_caller = principal.app_id is None and principal.scope == "owner"
-  from starlette.concurrency import run_in_threadpool
-  from app.providers import PROVIDERS, provider_requirement_error
+  from app.providers import PROVIDERS
   data_dir = get_settings().data_dir
+  identity_app_installed = db.query(models.App.id).filter(
+    models.App.slug == "identity",
+    models.App.deleted_at.is_(None),
+  ).first() is not None
   out = {}
   for pid, provider in PROVIDERS.items():
-    requirement_error = provider_requirement_error(provider, db)
-    # check_auth may perform blocking I/O (e.g. MobiusProvider probes the
-    # local broker over a Unix socket). Run it off the event loop so a slow
-    # broker or central service cannot stall the ASGI worker for other callers.
-    error = requirement_error or await run_in_threadpool(provider.check_auth, data_dir)
+    error = await run_in_threadpool(provider.check_auth, data_dir)
     out[pid] = {
       "name": provider.name,
       "configured": error is None,
       "authenticated": error is None,
       "error": error,
     }
-    if provider.required_app_slug:
-      out[pid]["available"] = requirement_error is None
-    if pid == "mobius" and requirement_error is None and is_owner_caller:
-      if error is None:
-        try:
-          out[pid]["trial"] = await run_in_threadpool(provider.trial_status)
-        except Exception:
-          out[pid]["trial"] = None
+    if pid == "mobius":
+      out[pid]["available"] = identity_app_installed
+      if not identity_app_installed:
+        out[pid]["configured"] = False
+        out[pid]["authenticated"] = False
+        out[pid]["error"] = "Install Möbius · You to use your Möbius subscription."
+        continue
+    if pid == "mobius" and error is None and is_owner_caller:
+      try:
+        out[pid]["trial"] = await run_in_threadpool(provider.trial_status)
+      except Exception:
+        out[pid]["trial"] = None
   return out
 
 
@@ -995,9 +827,483 @@ async def providers_models(
 from pathlib import Path
 
 from app.codex_login_parse import banner_has_code, parse_login_banner
+from app.runtime_identity import broker_request as _mobius_broker_request
 
 _codex_login_procs: dict[str, asyncio.subprocess.Process] = {}
 _codex_login_status: dict[str, str] = {}  # "complete" | "failed"
+_MOBIUS_IDENTITY_ISSUER = "https://www.mobius.you"
+_MOBIUS_RECEIPT_AUDIENCE = "mobius-runtime-enroll"
+_MOBIUS_CALLBACK_PATH = "/api/auth/provider/mobius/callback"
+_MOBIUS_SESSION_PATH = "/api/auth/mobius/login/session"
+_MOBIUS_OAUTH_TTL_SECONDS = 600
+_MOBIUS_HANDOFF_TTL_SECONDS = 60
+
+
+async def _begin_mobius_pkce(
+  identity: dict, owner_username: str,
+) -> tuple[str, str]:
+  """Register a broker PKCE pending for `identity`; return (authorization_url, state)."""
+  state = secrets.token_urlsafe(32)
+  verifier = secrets.token_urlsafe(48)
+  challenge = urlsafe_b64encode(
+    hashlib.sha256(verifier.encode("ascii")).digest()
+  ).decode("ascii").rstrip("=")
+  redirect_uri = (
+    get_settings().frontend_origin.rstrip("/") + _MOBIUS_CALLBACK_PATH
+  )
+  pending = {
+    "state": state,
+    "owner": owner_username,
+    "verifier": verifier,
+    "instance_id": identity["instance_id"],
+    "public_key_jwk": identity["public_key_jwk"],
+    "redirect_uri": redirect_uri,
+    "expires_at": time.time() + _MOBIUS_OAUTH_TTL_SECONDS,
+  }
+  await _mobius_broker_request("POST", "/identity/oauth/start", pending)
+  authorization_url = (
+    _mobius_authorization_issuer()
+    + "/identity/authorize?"
+    + urlencode({
+      "instance_id": identity["instance_id"],
+      "state": state,
+      "redirect_uri": redirect_uri,
+      "code_challenge": challenge,
+      "key_thumbprint": identity["key_thumbprint"],
+    })
+  )
+  return authorization_url, state
+
+
+async def _consume_mobius_pending(state: str) -> dict:
+  """Consume one broker pending and reject missing or expired state."""
+  consumed = await _mobius_broker_request(
+    "POST", "/identity/oauth/consume", {"state": state}
+  )
+  pending = consumed.get("pending") if isinstance(consumed, dict) else None
+  if not isinstance(pending, dict):
+    raise ValueError("OAuth state is missing or expired")
+  try:
+    expired = pending["expires_at"] <= time.time()
+  except (KeyError, TypeError) as exc:
+    raise ValueError("OAuth state is missing or expired") from exc
+  if expired:
+    raise ValueError("OAuth state is missing or expired")
+  return pending
+
+
+@router.post(
+  "/provider/mobius/login", dependencies=[Depends(reject_cross_site)],
+)
+@_limiter.limit("3/minute")
+async def mobius_login_start(
+  request: Request,
+  owner: models.Owner = Depends(get_current_owner),
+):
+  """Start public-client PKCE linking; no central secret enters the runtime."""
+  identity = await _mobius_broker_request("GET", "/identity")
+  if identity.get("linked") is True:
+    return {"linked": True}
+  url, state = await _begin_mobius_pkce(identity, owner.username)
+  return {
+    "linked": False,
+    "authorization_url": url,
+  }
+
+
+@router.get(
+  _MOBIUS_CALLBACK_PATH.removeprefix(router.prefix),
+  name="mobius_login_callback",
+)
+@_limiter.limit("5/minute")
+async def mobius_login_callback(
+  request: Request,
+  code: str = "",
+  state: str = "",
+  db: Session = Depends(get_db),
+):
+  # A web login (unauthenticated owner sign-in) rides this same callback
+  # because mobius.you accepts only this redirect path; the one-use
+  # browser-binding cookie, set solely by /mobius/login/start, tells the
+  # two apart before the state is consumed.
+  bound = request.cookies.get("mobius_login_state", "")
+  is_login = bool(
+    bound and state and secrets.compare_digest(bound, state)
+  )
+  complete = (
+    _complete_mobius_web_login
+    if is_login
+    else _complete_mobius_enrollment
+  )
+  on_error = (
+    _mobius_login_error_redirect
+    if is_login
+    else _mobius_enroll_error_redirect
+  )
+  try:
+    pending = await _consume_mobius_pending(state)
+    return await complete(db, pending, code)
+  except Exception:
+    try:
+      db.rollback()
+    except Exception:
+      pass
+    log.warning("mobius callback failed", exc_info=True)
+    return on_error()
+
+
+# -- mobius.you OAuth completion and owner login (either/or with local) -----
+#
+# When the singleton owner is in ``auth_mode == "mobius"``, the login screen
+# offers one "Sign in with mobius.you" button that navigates to
+# ``/mobius/login/start``. Trust comes entirely from the TLS + PKCE receipt the
+# callback fetches itself from mobius.you ``/identity/token`` (mirroring the
+# account-link callback above): the app holds no SaaS secret and verifies no
+# signature. This is login only — the owner row and its bound ``sso_subject``
+# already exist; the host-side binding step created them.
+
+
+def _mobius_authorization_issuer() -> str:
+  """Return the browser-facing issuer, with an override for test redirects."""
+  return os.environ.get(
+    "MOBIUS_IDENTITY_ISSUER", _MOBIUS_IDENTITY_ISSUER
+  ).rstrip("/")
+
+
+def _browser_cookie_secure() -> bool:
+  """Mark browser handoff cookies Secure whenever this instance uses TLS."""
+  return get_settings().frontend_origin.startswith("https://")
+
+
+def _mobius_login_error_redirect() -> RedirectResponse:
+  """Fail closed to the shell with no detail and drop the browser binding."""
+  response = RedirectResponse(url="/shell/?mobius_login_error=1", status_code=303)
+  response.headers["Cache-Control"] = "no-store"
+  response.headers["Referrer-Policy"] = "no-referrer"
+  response.delete_cookie(
+    "mobius_login_state", path=_MOBIUS_CALLBACK_PATH
+  )
+  return response
+
+
+def _mobius_enroll_error_redirect() -> RedirectResponse:
+  """Fail closed to provider settings without exposing failure details."""
+  response = RedirectResponse(
+    url="/settings?section=ai-providers&mobius_enroll_error=1",
+    status_code=303,
+  )
+  response.headers["Cache-Control"] = "no-store"
+  response.headers["Referrer-Policy"] = "no-referrer"
+  return response
+
+
+def _decode_receipt_claims(receipt) -> dict:
+  """Read the claims of an ``a.b.c`` enrollment receipt.
+
+  The signature is deliberately NOT verified: trust already comes from the TLS +
+  PKCE exchange that produced the receipt, which arrived over TLS from
+  mobius.you in direct response to this flow's one-use code and code_verifier.
+  This only base64url-decodes the middle segment as JSON claims.
+  """
+  if not isinstance(receipt, str):
+    raise ValueError("receipt is not a string")
+  segments = receipt.split(".")
+  if len(segments) != 3:
+    raise ValueError("receipt is not a three-segment token")
+  middle = segments[1]
+  padded = middle + "=" * (-len(middle) % 4)
+  claims = json.loads(urlsafe_b64decode(padded.encode("ascii")))
+  if not isinstance(claims, dict):
+    raise ValueError("receipt claims are not an object")
+  return claims
+
+
+def _validate_mobius_receipt_claims(receipt: str, pending: dict) -> dict:
+  """Decode a receipt and enforce the claims shared by both OAuth flows."""
+  claims = _decode_receipt_claims(receipt)
+  # A receipt is usable only for the canonical authority, runtime-enrollment
+  # audience, and exact instance that owns the pending PKCE verifier.
+  try:
+    subject = claims["sub"]
+    instance_id = claims["instance_id"]
+    valid = (
+      isinstance(subject, str)
+      and bool(subject)
+      and isinstance(instance_id, str)
+      and isinstance(pending["instance_id"], str)
+      and secrets.compare_digest(instance_id, pending["instance_id"])
+      and isinstance(claims["iss"], str)
+      and secrets.compare_digest(claims["iss"], _MOBIUS_IDENTITY_ISSUER)
+      and claims["aud"] == _MOBIUS_RECEIPT_AUDIENCE
+      and float(claims["exp"]) > time.time()
+    )
+  except (KeyError, TypeError, ValueError):
+    valid = False
+  if not valid:
+    raise ValueError("receipt claims are invalid")
+  return claims
+
+
+async def _exchange_mobius_receipt(
+  pending: dict, code: str,
+) -> tuple[str, dict]:
+  """Exchange a one-use code at the pinned issuer and validate its receipt."""
+  if not code:
+    raise ValueError("authorization code is missing")
+  # The verifier is sent only to the canonical issuer, so an environment
+  # mistake cannot redirect this bearer-equivalent secret to another origin.
+  async with httpx.AsyncClient(timeout=15.0, follow_redirects=False) as client:
+    exchange = await client.post(
+      _MOBIUS_IDENTITY_ISSUER + "/identity/token",
+      json={
+        "instance_id": pending["instance_id"],
+        "code": code,
+        "code_verifier": pending["verifier"],
+        "redirect_uri": pending["redirect_uri"],
+        "public_key_jwk": pending["public_key_jwk"],
+      },
+    )
+    exchange.raise_for_status()
+  body = exchange.json()
+  receipt = body.get("enrollment_receipt") if isinstance(body, dict) else None
+  if not isinstance(receipt, str):
+    raise ValueError("enrollment receipt is missing")
+  return receipt, _validate_mobius_receipt_claims(receipt, pending)
+
+
+async def _complete_mobius_enrollment(
+  db: Session, pending: dict, code: str,
+) -> RedirectResponse:
+  """Complete owner-initiated linking and persist its immutable subject."""
+  receipt, claims = await _exchange_mobius_receipt(pending, code)
+  subject = claims["sub"]
+  owner = db.query(models.Owner).filter(
+    models.Owner.username == pending["owner"]
+  ).first()
+  if owner is None:
+    raise ValueError("OAuth owner does not exist")
+  # An enrollment may initialize or confirm the binding, but this
+  # unauthenticated callback can never rebind an owner to another account.
+  if owner.sso_subject and not secrets.compare_digest(
+    owner.sso_subject, subject
+  ):
+    return _mobius_enroll_error_redirect()
+
+  await _mobius_broker_request(
+    "POST", "/identity/enroll", {"receipt": receipt}
+  )
+  # The conditional update preserves the same no-rebind invariant if the
+  # owner row changes while the external enrollment request is in flight.
+  updated = db.query(models.Owner).filter(
+    models.Owner.id == owner.id,
+    (
+      models.Owner.sso_subject.is_(None)
+      | (models.Owner.sso_subject == "")
+      | (models.Owner.sso_subject == subject)
+    ),
+  ).update(
+    {models.Owner.sso_subject: subject}, synchronize_session=False
+  )
+  if updated != 1:
+    db.rollback()
+    return _mobius_enroll_error_redirect()
+  db.commit()
+  return RedirectResponse(url="/settings?section=ai-providers", status_code=303)
+
+
+@router.get("/mobius/login/start")
+@_limiter.limit("5/minute")
+async def mobius_web_login_start(
+  request: Request, db: Session = Depends(get_db),
+):
+  """Begin the owner's mobius.you login as a plain top-level navigation.
+
+  Unauthenticated by design: a browser navigation carries no bearer, and the
+  flow only completes for the browser that also proves possession of the
+  owner's mobius.you account — the PKCE receipt whose subject must equal the
+  stored ``sso_subject``. A 303 to the authorization URL keeps the login button
+  a plain link.
+  """
+  owner = db.query(models.Owner).first()
+  if owner is None or owner.auth_mode != "mobius" or not owner.sso_subject:
+    raise HTTPException(
+      status_code=404, detail="mobius.you sign-in is not enabled."
+    )
+  identity = await _mobius_broker_request("GET", "/identity")
+  # mobius.you only accepts the account-link callback path as the
+  # redirect_uri (_valid_identity_redirect hardcodes it), so the login
+  # rides the shared /provider/mobius/callback and is told apart there by
+  # the browser-binding cookie.
+  url, state = await _begin_mobius_pkce(identity, owner.username)
+  response = RedirectResponse(url=url, status_code=303)
+  # One-use browser binding: the callback requires this cookie to equal the
+  # echoed state, so a callback link opened in a different browser cannot
+  # complete the owner's login. Path-scoped to the callback and short-lived.
+  response.set_cookie(
+    "mobius_login_state",
+    state,
+    httponly=True,
+    secure=_browser_cookie_secure(),
+    samesite="lax",
+    max_age=_MOBIUS_OAUTH_TTL_SECONDS,
+    path=_MOBIUS_CALLBACK_PATH,
+  )
+  response.headers["Cache-Control"] = "no-store"
+  response.headers["Referrer-Policy"] = "no-referrer"
+  return response
+
+
+async def _complete_mobius_web_login(
+  db: Session,
+  pending: dict,
+  code: str,
+):
+  """Complete the owner's mobius.you login and hand a session to the browser.
+
+  Reached from the shared /provider/mobius/callback once the browser-binding
+  cookie proved this is the initiating browser. Trust comes from the TLS +
+  PKCE exchange at mobius.you ``/identity/token``: the receipt binds this
+  exact ``instance_id`` and the owner's mobius.you ``subject``. No token,
+  code, or receipt is placed in a URL; every failure fails closed to
+  ``/shell/?mobius_login_error=1`` with no detail.
+  """
+  owner = db.query(models.Owner).first()
+  if owner is None or owner.auth_mode != "mobius" or not owner.sso_subject:
+    return _mobius_login_error_redirect()
+
+  _, claims = await _exchange_mobius_receipt(pending, code)
+  same_subject = secrets.compare_digest(
+    claims["sub"], owner.sso_subject
+  )
+  # Common receipt validation binds the issuer, audience, instance, and expiry;
+  # this load-bearing check additionally binds login to the stored owner.
+  if not same_subject:
+    return _mobius_login_error_redirect()
+
+  # Re-load and re-check the current row before minting any credential: a
+  # host-side flip back to local (or a subject change) between the first check
+  # and here must abort rather than issue a session.
+  db.expire_all()
+  owner = db.query(models.Owner).first()
+  if (
+    owner is None
+    or owner.auth_mode != "mobius"
+    or not owner.sso_subject
+    or not secrets.compare_digest(str(claims["sub"]), owner.sso_subject)
+  ):
+    return _mobius_login_error_redirect()
+
+  # The handoff PROVES a completed mobius.you login for this owner; it does not
+  # carry the session token. A signed JWT is integrity-protected, not encrypted,
+  # so an embedded token would be readable by anyone who captured the cookie.
+  # /session mints the token fresh after a one-use check, so a captured or
+  # replayed handoff cannot yield a durable session and a mode flip is honored.
+  jti = secrets.token_urlsafe(24)
+  now = now_naive_utc()
+  db.query(models.MobiusLoginHandoffGrant).filter(
+    models.MobiusLoginHandoffGrant.expires_at <= now,
+  ).delete(synchronize_session=False)
+  db.add(models.MobiusLoginHandoffGrant(
+    token_hash=hashlib.sha256(jti.encode("utf-8")).hexdigest(),
+    owner_id=owner.id,
+    owner_epoch=owner.token_epoch,
+    expires_at=now + timedelta(seconds=_MOBIUS_HANDOFF_TTL_SECONDS),
+  ))
+  db.commit()
+
+  handoff = auth.create_access_token(
+    {
+      "scope": "mobius_login_handoff",
+      "sub": owner.username,
+      "jti": jti,
+    },
+    expires_delta=timedelta(seconds=_MOBIUS_HANDOFF_TTL_SECONDS),
+  )
+  response = RedirectResponse(url="/shell/?mobius_login=1", status_code=303)
+  response.set_cookie(
+    "mobius_login_handoff",
+    handoff,
+    httponly=True,
+    secure=_browser_cookie_secure(),
+    samesite="lax",
+    max_age=_MOBIUS_HANDOFF_TTL_SECONDS,
+    path=_MOBIUS_SESSION_PATH,
+  )
+  response.delete_cookie(
+    "mobius_login_state", path=_MOBIUS_CALLBACK_PATH
+  )
+  response.headers["Cache-Control"] = "no-store"
+  response.headers["Referrer-Policy"] = "no-referrer"
+  return response
+
+
+@router.post(
+  _MOBIUS_SESSION_PATH.removeprefix(router.prefix),
+  dependencies=[Depends(reject_cross_site)],
+)
+def consume_mobius_web_login_session(
+  request: Request,
+  db: Session = Depends(get_db),
+):
+  """Exchange the one-use handoff cookie for the owner session JWT.
+
+  The token never travels in a URL; the SPA reads it from this same-site POST
+  after the 303 landed it on ``/shell/?mobius_login=1``. The mode is re-checked
+  so a host-side flip back to local between callback and consume denies it.
+  """
+  handoff = request.cookies.get("mobius_login_handoff", "")
+  payload = auth.decode_access_token(handoff) if handoff else None
+  jti = payload.get("jti") if payload else None
+  if (
+    not payload
+    or payload.get("scope") != "mobius_login_handoff"
+    or not jti
+  ):
+    raise HTTPException(status_code=401, detail="mobius.you sign-in expired.")
+  now = now_naive_utc()
+  token_hash = hashlib.sha256(jti.encode("utf-8")).hexdigest()
+  grant = db.query(models.MobiusLoginHandoffGrant).filter(
+    models.MobiusLoginHandoffGrant.token_hash == token_hash,
+  ).first()
+  if grant is None or grant.consumed_at is not None or grant.expires_at <= now:
+    raise HTTPException(status_code=401, detail="mobius.you sign-in expired.")
+  owner = (
+    db.query(models.Owner)
+    .filter(models.Owner.id == grant.owner_id)
+    .first()
+  )
+  if (
+    owner is None
+    or owner.auth_mode != "mobius"
+    or owner.token_epoch != grant.owner_epoch
+    or not secrets.compare_digest(owner.username, str(payload.get("sub") or ""))
+  ):
+    raise HTTPException(status_code=401, detail="mobius.you sign-in expired.")
+  # The conditional UPDATE is the one-use boundary. Two workers may both read
+  # the row above, but only one can transition consumed_at from NULL.
+  consumed = db.query(models.MobiusLoginHandoffGrant).filter(
+    models.MobiusLoginHandoffGrant.id == grant.id,
+    models.MobiusLoginHandoffGrant.consumed_at.is_(None),
+    models.MobiusLoginHandoffGrant.expires_at > now,
+  ).update(
+    {models.MobiusLoginHandoffGrant.consumed_at: now},
+    synchronize_session=False,
+  )
+  if consumed != 1:
+    db.rollback()
+    raise HTTPException(status_code=401, detail="mobius.you sign-in expired.")
+  db.commit()
+  access_token = auth.create_access_token(
+    {"sub": owner.username}, token_epoch=owner.token_epoch
+  )
+  response = JSONResponse(
+    {"access_token": access_token, "token_type": "bearer"}
+  )
+  response.delete_cookie(
+    "mobius_login_handoff", path=_MOBIUS_SESSION_PATH
+  )
+  response.headers["Cache-Control"] = "no-store"
+  return response
 
 
 async def _watch_codex_login(proc):
@@ -1019,6 +1325,11 @@ async def codex_login_start(
   _: models.Owner = Depends(get_current_owner_for_lifecycle_control),
 ):
   """Starts codex login --device-auth and returns the URL + code."""
+  async with _provider_login_locks["codex"]:
+    return await _start_codex_login()
+
+
+async def _start_codex_login():
   # Kill any existing login process before starting a new one.
   old_proc = _codex_login_procs.pop("active", None)
   if old_proc and old_proc.returncode is None:
@@ -1094,3 +1405,37 @@ async def codex_login_status_view(
       return {"status": result}
     return {"status": "none"}
   return {"status": "pending"}
+
+
+@router.post(
+  "/provider/{provider_id}/disconnect", dependencies=[Depends(reject_cross_site)],
+)
+async def provider_disconnect(
+  provider_id: str,
+  _: models.Owner = Depends(get_current_owner),
+):
+  """Sign out locally; never remove chats, provider settings, or other accounts."""
+  from app.providers import disconnect_provider
+
+  if provider_id not in _provider_login_locks:
+    raise HTTPException(400, "Manage this connection in its owning app.")
+  async with _provider_login_locks[provider_id]:
+    if provider_id == "claude":
+      global _active_pkce
+      _active_pkce = None
+    else:
+      proc = _codex_login_procs.get("active")
+      if proc and proc.returncode is None:
+        proc.kill()
+        try:
+          await asyncio.wait_for(proc.wait(), timeout=2.0)
+        except asyncio.TimeoutError:
+          raise HTTPException(409, "Sign-in is still stopping. Try disconnecting again.")
+      _codex_login_procs.pop("active", None)
+      _codex_login_status.clear()
+    try:
+      await disconnect_provider(get_settings().data_dir, provider_id)
+    except (OSError, ValueError):
+      log.exception("Could not remove %s provider sign-in", provider_id)
+      raise HTTPException(500, "Could not disconnect. Your connection has not been confirmed removed.")
+  return {"ok": True}

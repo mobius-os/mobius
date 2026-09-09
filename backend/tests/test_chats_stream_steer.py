@@ -539,6 +539,13 @@ def test_steer_drops_empty_pre_steer_partial(client, auth, monkeypatch):
   run_token = "run-empty"
   # Only a whitespace token streamed before the steer landed.
   sink = _register_sink_with_partial(chat_id, run_token, " ")
+  from app.activity_position import record_activity_position
+  from app.chat_event_sink import active_sink_activity_position
+  sink._publish_activity_frontier()
+  assert active_sink_activity_position(chat_id) is None
+  with SessionLocal() as position_db:
+    record_activity_position(position_db, chat_id, "peer:early-steer")
+    position_db.commit()
 
   async def _fake_steer(cid, message, *_durable):
     return True
@@ -552,6 +559,13 @@ def test_steer_drops_empty_pre_steer_partial(client, auth, monkeypatch):
   )
   assert res.status_code == 202, res.text
   assert res.json()["status"] == "steered"
+
+  # Neither the discarded A1 nor empty replacement A2 is an anchor target.
+  assert active_sink_activity_position(chat_id) is None
+  with SessionLocal() as position_db:
+    assert position_db.get(
+      models.ChatActivityPosition, (chat_id, "peer:early-steer"),
+    ).position is None
 
   # No stray empty assistant row was sealed between Q1 and Q2.
   chat = _read_chat(chat_id)
@@ -2094,3 +2108,24 @@ def test_stop_wins_steer_race_send_rechecks_idle(
   ]
   assert len(durable) == 1
   assert durable[0] in chat.messages
+
+
+def test_steer_cut_preserves_hidden_carrier_and_owner_row_metadata():
+  from app.chat_event_sink import steered_into_turn_event
+
+  carrier = {
+    "role": "user", "ts": 1, "cid": "peer-steer:note-1",
+    "content": "internal peer data", "hidden": True, "kind": "peer_message",
+    "peer_message_through": {"id": "note-1", "created_at": "2026-09-08"},
+  }
+  owner = {
+    "role": "user", "ts": 2, "cid": "owner-1", "content": "Please continue",
+    "attachments": [{"name": "example.png"}],
+  }
+  event = steered_into_turn_event([carrier, owner])
+  assert event["messages"] == [
+    {**carrier, "steered": True}, {**owner, "steered": True},
+  ]
+  event["messages"][0]["peer_message_through"]["id"] = "changed"
+  assert carrier["peer_message_through"]["id"] == "note-1"
+  assert event["content"] == owner["content"]

@@ -377,6 +377,9 @@ export function upsertQuestionItem(prev, incoming) {
       merged.secure_input = { ...incoming.secure_input, ...existing.secure_input }
     }
     if (existing.response_mode) merged.response_mode = existing.response_mode
+    if (existing.platform_action && !merged.platform_action) {
+      merged.platform_action = existing.platform_action
+    }
     if (existing.answers && !merged.answers) merged.answers = existing.answers
     if (existing.absorbedTool) merged.absorbedTool = existing.absorbedTool
     if (existing.absorbedToolUseId) {
@@ -904,6 +907,25 @@ export function applyTaskEvent(items, event, now = Date.now()) {
         && SUBAGENT_TOOLS.has(it.tool)
         && it.tool_use_id === toolUseId
     )
+  }
+
+  // A Memory lookup run as a background Bash task settles on its task_done:
+  // the backend stamps the recall on that event. The host is the Bash block
+  // that deferred, found by task_id (backend-persisted helper) or tool_use_id.
+  const recall = event.type === 'task_done' && event.recall
+    && typeof event.recall === 'object' ? event.recall : null
+  if (recall) {
+    const recallIdx = idx !== -1 ? idx : items.findIndex(
+      it => it.type === 'tool'
+        && it.tool_use_id === toolUseId
+        && it.recall && it.recall.task_id === taskId
+    )
+    if (recallIdx !== -1 && items[recallIdx].recall !== recall) {
+      const updated = [...items]
+      updated[recallIdx] = { ...items[recallIdx], recall }
+      if (idx === -1) return updated
+      items = updated
+    }
   }
   if (idx === -1) return items
 

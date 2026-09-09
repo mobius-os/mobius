@@ -371,6 +371,12 @@
      inherently is not. */
 }
 
+/* Rows are programmatic search/scroll targets, not keyboard controls. A
+   pointer click can focus tabindex=-1; pressing Shift then reveals the UA
+   outline around the entire reply. Keep the explicit search-reveal indicator
+   below and each descendant control's own keyboard focus treatment. */
+.chat__msg:focus { outline: none; }
+
 .chat__msg--user { align-items: flex-end; }
 .chat__msg--marker { align-items: stretch; }
 .chat__msg--assistant {
@@ -621,9 +627,13 @@
    bubble background, red bar + label so users can tell at a glance
    that the agent didn't say this — the system did. */
 .chat__text--error {
+  --lifecycle-tone: var(--danger);
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr);
+  gap: 0 10px;
   background: color-mix(in srgb, var(--danger) 10%, transparent);
   border: 1px solid color-mix(in srgb, var(--danger) 32%, var(--border-light));
-  border-radius: 10px;
+  border-radius: 12px;
   padding: 10px 12px;
   color: var(--text);
   font-size: 13px;
@@ -634,13 +644,20 @@
      read as standalone, not as something the agent typed. */
   max-width: none;
 }
+.chat__text--error > :not(.chat__lifecycle-icon) { grid-column: 2; }
+.chat__error-status { min-width: 0; }
+
+.chat__error-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 4px;
+}
 .chat__error-label {
   display: block;
-  margin-bottom: 4px;
-  font-size: 11px;
+  font-size: 13px;
   font-weight: 600;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
   color: var(--danger);
 }
 /* Provider-limit park (design §2.4): a rate-limit note is a WAIT state, not a
@@ -648,14 +665,15 @@
    reset time + Resume-now button carry the card. Declared after
    .chat__text--error so the override wins (the element carries both classes). */
 .chat__text--parked {
+  --lifecycle-tone: var(--accent);
   background: color-mix(in srgb, var(--accent) 8%, transparent);
   border-color: color-mix(in srgb, var(--accent) 32%, var(--border-light));
 }
 .chat__recovery-title {
   color: var(--text);
-  font-size: 14px;
-  font-weight: 650;
-  line-height: 1.35;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.4;
 }
 .chat__recovery-title--paused {
   color: var(--accent);
@@ -671,11 +689,6 @@
   color: var(--muted);
   font-size: 12px;
 }
-/* The chevron is the only disclosure indicator. Blink and Gecko drop the native
-   marker once summary stops being display: list-item; older WebKit keeps
-   painting ::-webkit-details-marker regardless of display, so it needs its own
-   reset. Matches the other custom summaries (ChatUsageInspector,
-   ContributionReviewCard, AgentContextInspector). */
 .chat__recovery-details summary {
   display: flex;
   align-items: center;
@@ -683,10 +696,6 @@
   width: fit-content;
   min-height: 44px;
   cursor: pointer;
-  list-style: none;
-}
-.chat__recovery-details summary::-webkit-details-marker {
-  display: none;
 }
 .chat__recovery-details-chevron {
   flex: 0 0 auto;
@@ -775,47 +784,38 @@
 .chat-policy-switch button[role="switch"][data-disabled][data-state="checked"] {
   background: var(--switch-track-color-checked-disabled);
 }
-/* One-tap Resume on a turn paused by a drain-gated restart, or Continue after
-   an elapsed provider reset (design §2.2/§2.4).
-   Rendered only on the tail resumable interrupt note; re-sends "continue".
-   This is the single most important recovery gesture, so it clears the 44px
-   touch floor (an inline-flex box, not a 31px text pill) and carries an
-   accent-tinted fill so it reads as the PRIMARY next action, not a muted
-   secondary. */
+/* Resume uses the same action primitive as every other recovery option.
+   Grid items stretch by default; keep this action compact, not full-width. */
 .chat__resume {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-height: 44px;
+  justify-self: start;
+  max-width: 100%;
   margin-top: 8px;
-  padding: 8px 18px;
-  border: 1px solid color-mix(in srgb, var(--accent) 55%, var(--border-light));
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--accent) 16%, var(--surface));
-  color: var(--accent);
-  font-size: 14px;
-  font-weight: 600;
-  cursor: pointer;
-  transition: background 0.15s, border-color 0.15s, transform 0.08s;
 }
-.chat__resume:hover {
-  background: color-mix(in srgb, var(--accent) 26%, var(--surface));
-  border-color: color-mix(in srgb, var(--accent) 65%, var(--border-light));
-}
-.chat__resume:active { transform: scale(0.97); }
 
 /* ── Reasoning lane (reused by the activity stretch) ── */
 
 .chat__cursor {
+  /* The live marker sits in the existing inter-message gap rather than
+     creating a trailing line box. Removing it at terminal promotion must not
+     change scrollHeight or make a followed conversation bounce downward. */
   position: absolute;
-  display: inline-block;
+  inset-inline-start: 4px;
+  bottom: -16px;
   width: 6px;
   height: 6px;
   background: var(--accent); /* CONTRACT: vivid opaque accent fill */
   border-radius: 50%;
-  margin-left: 4px;
-  vertical-align: middle;
+  pointer-events: none;
   animation: cursorPulse 1.5s ease-in-out infinite;
+}
+
+.progressive-markdown[data-is-streaming="true"] {
+  position: relative;
+}
+
+@keyframes cursorPulse {
+  0%, 100% { opacity: 0.3; }
+  50% { opacity: 1; }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -823,11 +823,6 @@
     animation: none;
     opacity: 0.65;
   }
-}
-
-@keyframes cursorPulse {
-  0%, 100% { opacity: 0.3; }
-  50% { opacity: 1; }
 }
 
 /* ── Spacer ──────────────────────────────────────── */
@@ -1052,6 +1047,10 @@
   box-sizing: border-box;
   gap: 10px;
   max-height: min(340px, 52vh);
+  border: 0;
+  border-inline-start: 1px solid var(--border);
+  border-radius: 0;
+  background: none;
   color: var(--text);
   font: 400 12.5px/1.45 var(--font, system-ui, sans-serif);
 }
@@ -1111,11 +1110,17 @@
 .chat__peer-body {
   margin: 0;
   color: var(--text);
-  font-size: 12px;
-  line-height: 1.4;
+  font-size: 13px;
+  line-height: 1.6;
   overflow-wrap: anywhere;
-  white-space: pre-wrap;
+  white-space: normal;
 }
+
+/* Message prose uses the regular markdown renderer inside a tool disclosure. */
+.chat__peer-body .md-paragraph,
+.chat__peer-body .md-heading { padding-inline: 0; }
+.chat__peer-body .md-blocks { gap: 0.6rem; }
+.chat__peer-reason { white-space: pre-wrap; }
 
 .chat__peer-meta {
   margin: 0;
@@ -2131,7 +2136,7 @@
    from the old `.chat__compaction*` selectors (compaction is the first
    marker, so its look is the default). */
 .chat__marker {
-  border-radius: 10px;
+  border-radius: 12px;
   border: 1px solid color-mix(in srgb, var(--accent) 22%, var(--border-light)); /* CONTRACT: accent-tinted hairline framing the marker card */
   background: color-mix(in srgb, var(--accent) 4%, transparent); /* CONTRACT: faint accent tint — sits on the opaque message-list fill beneath, not a standalone surface */
   overflow: hidden;
@@ -2140,9 +2145,9 @@
 .chat__marker-header {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
   width: 100%;
-  padding: 8px 12px;
+  padding: 10px 12px;
   background: none;
   border: 0;
   text-align: left;
@@ -2159,18 +2164,6 @@
 .chat__marker-header:focus-visible {
   outline: 2px solid var(--accent); /* CONTRACT: vivid accent ring for keyboard focus */
   outline-offset: -2px;
-}
-
-.chat__marker-icon {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-  width: 22px;
-  height: 22px;
-  border-radius: 7px;
-  color: var(--accent); /* CONTRACT: vivid accent — the glyph stroke color */
-  background: color-mix(in srgb, var(--accent) 14%, transparent); /* CONTRACT: faint accent tint behind the glyph */
 }
 
 .chat__marker-label {
@@ -2193,8 +2186,7 @@
   color: var(--muted); /* CONTRACT: low-contrast context line on opaque fill */
   line-height: 1.3;
   overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
 }
 
 .chat__marker-toggle {
@@ -2297,6 +2289,10 @@
 .chat__foot .chat__resume-nudge,
 .chat__foot .chat__jump-latest,
 .chat__foot .chat__progress-step--toggle,
+.chat__foot .chat__progress-action,
+.chat__foot .chat__progress-clear,
+.chat__foot .chat__goal-plan,
+.chat__foot .chat__wait-summary,
 .chat__foot .chat__wait-cancel,
 .chat__foot .slash-menu,
 .chat__foot .chat__pill,
@@ -2624,7 +2620,7 @@
    AskUserQuestion card sits outside the viewport, so the frozen turn
    doesn't read as a hang. A tap scrolls the card into view (user-initiated
    — the no-auto-scroll contract stays intact). Same frosted accent chip
-   recipe as .chat__open-app-btn: it must read as a card over the chat
+   recipe uses a translucent surface floor so it reads as a card over the chat
    scrolling behind the transparent foot. Centered, because it speaks for
    the whole conversation rather than the queued tray. Its parent stack owns
    the absolute position; this lane only orders nearby floating controls. */
@@ -2750,7 +2746,64 @@
   align-self: flex-end;
 }
 
-.composer-plus__attention-dot {
+/* Unread app icons wait above the Brain one at a time, then fall into the
+   control. Each icon is a direct route to its app. Animationend advances the
+   queue, so the cue needs no timer or extra layout surface. */
+.composer-plus__icon-drop {
+  position: absolute;
+  z-index: 3;
+  left: 50%;
+  bottom: calc(100% + 8px);
+  width: 40px;
+  height: 40px;
+  padding: 0;
+  border: 0;
+  border-radius: 12px;
+  background: none;
+  color: inherit;
+  cursor: pointer;
+  touch-action: manipulation;
+  animation: composer-icon-drop 2.4s linear forwards;
+}
+
+.composer-plus__icon-drop .app-icon {
+  width: 40px;
+  height: 40px;
+  border-radius: 12px;
+  font-size: 12px;
+}
+
+.composer-plus__icon-drop .app-icon:not(.is-image) {
+  box-shadow: 0 8px 22px color-mix(in srgb, var(--text) 20%, transparent);
+}
+
+.composer-plus__icon-drop:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+
+@keyframes composer-icon-drop {
+  0% {
+    opacity: 0;
+    transform: translate(-50%, -9px) scale(0.9);
+    animation-timing-function: cubic-bezier(0.16, 1, 0.3, 1);
+  }
+  8% {
+    opacity: 1;
+    transform: translate(-50%, 0) scale(1);
+  }
+  82% {
+    opacity: 1;
+    transform: translate(-50%, 0) scale(1);
+    animation-timing-function: cubic-bezier(0.4, 0, 1, 1);
+  }
+  100% {
+    opacity: 0;
+    transform: translate(-50%, 52px) scale(0.3);
+  }
+}
+
+.composer-plus__activity-dot {
   position: absolute;
   top: 4px;
   right: 3px;
@@ -2760,6 +2813,24 @@
   background: var(--accent);
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--surface) 90%, transparent);
   pointer-events: none;
+}
+
+
+@keyframes composer-icon-presence-reduced {
+  0%, 92% {
+    opacity: 1;
+    transform: translate(-50%, 0) scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: translate(-50%, 0) scale(1);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .composer-plus__icon-drop {
+    animation-name: composer-icon-presence-reduced;
+  }
 }
 
 /* Brain button: 48×48, matched 1:1 to the pill's min-height — same
@@ -2785,17 +2856,6 @@
 .chat__plus:hover {
   background: color-mix(in srgb, var(--surface2) 70%, transparent);
   color: var(--text); /* CONTRACT: high-contrast text on opaque fill */
-}
-
-/* A New Chat already has the same final composer geometry, even during its
-   very short allocation handoff. The options button stays deliberately inert
-   until the row exists, but it must not pop into the layout afterwards. */
-.chat__plus--pending:disabled {
-  cursor: default;
-}
-.chat__plus--pending:disabled:hover {
-  background: color-mix(in srgb, var(--surface) 70%, transparent);
-  color: var(--muted);
 }
 
 /* Keyboard-only focus ring on the brain button. No :focus rule (pointer
@@ -2828,7 +2888,6 @@
    selected surface and the existing accent border for open state. */
 .chat__brain-usage {
   align-self: flex-end;
-  position: relative;
 }
 .chat__brain-usage:focus { outline: none; }
 .chat__brain-usage:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
@@ -2874,25 +2933,26 @@
   overscroll-behavior: contain;
 }
 
-/* Shell scrollbars stay hidden by default (see index.css) — normally gated
-   back on with `(hover: hover) and (pointer: fine)` for pointer-accurate
-   clients only (see .chat__tool-diff-scroll). This panel opts in
-   unconditionally instead: the model list can run well past the popover's
-   capped height (two providers, several models each, plus the effort
-   stepper and automation toggles), and a hidden, discovery-only scrollbar
-   left that overflow with no visible affordance at all on a touch client,
-   which is exactly the environment the hover/pointer gate was written for. */
+/* Opts into a scrollbar unconditionally, not behind .chat__tool-diff-scroll's
+   hover/pointer gate: the model list overflows on touch clients too.
+   Keep the gutter stable, but reveal its thumb only during scrolling.
+   Opening the Brain must not flash a scrollbar before any movement. */
 .composer-popover {
   --shell-scrollbar-width: thin;
   --shell-scrollbar-display: block;
-  scrollbar-color: color-mix(in srgb, var(--muted) 32%, transparent) transparent;
+  --composer-scrollbar-thumb: transparent;
+  scrollbar-color: var(--composer-scrollbar-thumb) transparent;
+}
+
+.composer-popover[data-scrolling] {
+  --composer-scrollbar-thumb: color-mix(in srgb, var(--muted) 32%, transparent);
 }
 
 .composer-popover::-webkit-scrollbar { width: 10px; }
 .composer-popover::-webkit-scrollbar-thumb {
   border: 3px solid transparent;
   border-radius: 999px;
-  background: color-mix(in srgb, var(--muted) 32%, transparent);
+  background: var(--composer-scrollbar-thumb);
   background-clip: padding-box;
 }
 
@@ -2970,11 +3030,53 @@
   color: var(--text); /* CONTRACT: high-contrast text on opaque fill */
 }
 
+.composer-popover__row-title-line {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+
+.composer-popover__row-attention {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex-shrink: 0;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1.4;
+  color: var(--warning, #d8922f);
+}
+
 .composer-popover__row-sub {
   font-size: 12px;     /* --font-text-xs */
   font-weight: 400;
   color: var(--muted); /* CONTRACT: low-contrast text on opaque fill */
   line-height: 1.4;
+}
+
+@media (max-width: 480px) {
+  .composer-popover {
+    width: min(296px, calc(100vw - 18px));
+    padding: 4px;
+  }
+
+  .composer-popover__section--picker,
+  .composer-popover__section--context {
+    margin-top: 3px;
+    padding-top: 3px;
+  }
+
+  .composer-popover__row {
+    min-height: 44px;
+    gap: 10px;
+    padding: 7px 8px;
+  }
+
+  .composer-popover__row-icon {
+    width: 28px;
+    height: 28px;
+  }
 }
 
 /* ── File chips: attach cards inside the pill ────────────────
@@ -3374,7 +3476,7 @@
   white-space: nowrap;
 }
 
-/* ── Open app CTA ──────────────────────────────────── */
+/* ── Shared chat-foot entrance ─────────────────────── */
 
 /* Chat-foot entrance: opacity + translateY ONLY. The foot is absolutely
    positioned and its ResizeObserver publishes --composer-h to size the
@@ -3385,97 +3487,10 @@
   to   { opacity: 1; transform: translateY(0); }
 }
 
-/* One accent ring that expands and fades — box-shadow only, so it never
-   affects layout. Reused for the CTA's first-plant welcome and the recompile
-   confirmation so "your change landed" rhymes with the app's arrival. */
-@keyframes chat-cta-ring {
-  from { box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 55%, transparent); }
-  to   { box-shadow: 0 0 0 7px transparent; }
-}
-
-.chat__open-app {
-  width: min(100%, 720px);
-  margin: 0 auto;
-  display: flex;
-  /* One CTA row per built app, stacked and right-aligned (most recent last). */
-  flex-direction: column;
-  align-items: flex-end;
-  gap: 6px;
-  padding: 0 4px;
-  pointer-events: none;
-}
-
-.chat__open-app > * {
-  pointer-events: auto;
-}
-
-.chat__open-app-btn {
-  /* Frosted accent card: an accent-tinted translucent SURFACE floor (so it
-     reads as a card over any chat content) plus a backdrop-blur that softens
-     the chat behind it — the same frosted-glass technique as the composer
-     pill (.chat__pill). The old `var(--accent-dim)` alone had no surface and
-     no blur, so live chat showed through it SHARP and it read as a stray
-     transparent overlay floating on the messages. */
-  background: color-mix(in srgb, var(--accent) 16%, color-mix(in srgb, var(--surface) 78%, transparent));
-  backdrop-filter: blur(16px) saturate(140%);
-  -webkit-backdrop-filter: blur(16px) saturate(140%);
-  border: 1px solid var(--accent); /* CONTRACT: vivid accent line */
-  color: var(--accent); /* CONTRACT: vivid accent text */
-  border-radius: 8px;
-  padding: 8px 16px;
-  max-width: min(100%, 360px);
-  position: relative; /* anchors the recompile-pulse ring pseudo-element */
-  overflow: hidden; /* long app names ellipsis; an element's OWN box-shadow
-                       (the plant ring below) is not clipped by its overflow */
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 13px;
-  font-weight: 500;
-  cursor: pointer;
-  /* Entrance on plant: rise in, then one subtle accent ring (the button's own
-     box-shadow, so overflow:hidden doesn't clip it). Both run once on mount
-     and never replay — the recompile pulse rides a pseudo-element, not this
-     list, so toggling that class can't restart these. NO fill mode on the
-     rise: a filled animation's transform keeps applying after it ends and —
-     animations outrank author rules in the cascade — would beat the :active
-     press scale below forever. With no delay there is no pre-play gap for
-     fill to cover, and the `to` keyframe equals the natural styles, so the
-     end of the animation is seamless. */
-  animation:
-    chat-foot-rise 0.22s var(--ease-out-soft, ease-out),
-    chat-cta-ring 0.9s ease-out 0.12s;
-  transition: background 0.15s, transform 0.08s;
-}
-
-.chat__open-app-btn:hover {
-  background: var(--accent); /* CONTRACT: vivid opaque accent fill */
-  color: var(--bg); /* CONTRACT: paint app-bg color on the accent fill — needs --bg solid to stay readable */
-}
-
-.chat__open-app-btn:active { transform: scale(0.97); }
-
-/* Recompile confirmation: a one-shot INSET accent ring on a pseudo-element. It
-   plays whenever the --pulse class toggles without disturbing the button's own
-   one-time entrance animation, and an inset ring stays inside overflow:hidden
-   (a descendant's box-shadow would otherwise be clipped). Label swap is in JSX. */
-.chat__open-app-btn--pulse::after {
-  content: '';
-  position: absolute;
-  inset: 0;
-  border-radius: inherit;
-  pointer-events: none;
-  animation: chat-cta-flash 0.9s ease-out;
-}
-
-@keyframes chat-cta-flash {
-  from { box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--accent) 75%, transparent); }
-  to   { box-shadow: inset 0 0 0 2px transparent; }
-}
-
 /* ── Goal/build progress rail ──────────────────────── */
 /* A slim progress rail in the foot, directly above the composer:
    the active goal (when present) followed by each build milestone emitted this
-   turn. Attention, connection, queue, and open-app notices deliberately stack
+   turn. Attention, connection, and queue notices deliberately stack
    ABOVE this rail so nothing interrupts its relationship to the chat controls.
    Frosted so it reads as a card over the chat scrolling behind the transparent
    foot, muted so it stays quiet next to the composer. The most recent phase is
@@ -3500,13 +3515,9 @@
   animation: progress-rail-in 0.22s ease both;
 }
 
-/* The compact rail can stay frosted, but an expanded todo list needs a solid
-   reading surface: several lines of chat showing through the list materially
-   reduces task-title and dependency-label contrast. */
+/* Expanded Goal and Waiting share the same translucent reading surface. */
 .chat__progress-rail:has(.chat__goal-plan) {
-  background: var(--surface);
-  backdrop-filter: none;
-  -webkit-backdrop-filter: none;
+  background: color-mix(in srgb, var(--surface) 88%, transparent);
 }
 
 @keyframes progress-rail-in {
@@ -3581,7 +3592,7 @@
 }
 
 .chat__progress-step--completed {
-  color: var(--green);
+  color: var(--muted);
 }
 
 .chat__progress-step--paused {
@@ -3640,19 +3651,21 @@
   border: 0;
   border-radius: 6px;
   background: transparent;
-  color: var(--accent);
+  color: var(--muted);
   cursor: pointer;
   -webkit-tap-highlight-color: transparent;
+  transition: color 0.14s ease, background 0.14s ease;
 }
 
 @media (hover: hover) and (pointer: fine) {
   .chat__progress-action:hover {
-    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    background: color-mix(in srgb, var(--text) 8%, transparent);
+    color: var(--text);
   }
 }
 
 .chat__progress-action:focus-visible {
-  outline: 2px solid var(--accent);
+  outline: 2px solid var(--text);
   outline-offset: 2px;
 }
 
@@ -3666,19 +3679,6 @@
 .chat__progress-clear:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
-}
-
-/* Keep compact desktop controls while giving touch users distinct, reliable
-   targets. The row may grow on coarse pointers; avoiding overlapping hit-slop
-   is more important than preserving its desktop height. */
-@media (pointer: coarse) {
-  .chat__progress-action,
-  .chat__progress-clear {
-    width: 44px;
-    height: 44px;
-    margin: 0;
-    border-radius: 10px;
-  }
 }
 
 .chat__progress-clear--confirm {
@@ -3762,12 +3762,15 @@
 }
 
 .chat__wait-summary {
+  font: inherit;
+  font-size: var(--chat-status-font-size);
+  line-height: 1.3;
   width: 100%;
   display: flex;
   align-items: center;
   gap: 9px;
   min-width: 0;
-  padding: 7px 10px 7px 12px;
+  padding: 7px 12px;
   border: 0;
   background: transparent;
   color: inherit;
@@ -3784,39 +3787,6 @@
 .chat__wait-summary:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: -2px;
-}
-
-.chat__wait-tag {
-  flex: 0 0 auto;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 1px 8px;
-  border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--accent) 15%, transparent);
-  color: var(--accent);
-  font-size: 10px;
-  font-weight: 750;
-  letter-spacing: 0.055em;
-  text-transform: uppercase;
-}
-
-.chat__wait-pulse {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--accent);
-  animation: chat-wait-pulse 2.4s ease-in-out infinite;
-}
-
-@keyframes chat-wait-pulse {
-  0%, 100% { opacity: 1; transform: scale(1); }
-  50% { opacity: 0.35; transform: scale(0.72); }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .chat__wait-pulse { animation: none; }
 }
 
 .chat__wait-text {
@@ -3937,7 +3907,6 @@
     align-self: flex-start;
   }
 }
-
 .chat__goal-plan {
   flex: 1 0 100%;
   display: flex;
@@ -3958,134 +3927,39 @@
 }
 
 .chat__goal-history {
+  --lifecycle-tone: var(--green);
   display: grid;
-  grid-template-columns: 22px minmax(0, 1fr);
+  grid-template-columns: 28px minmax(0, 1fr);
   gap: 10px;
-  margin-top: 14px;
-  padding: 12px 14px;
-  border: 1px solid color-mix(in srgb, var(--green) 30%, var(--border-light));
-  border-radius: 12px;
-  background: color-mix(in srgb, var(--green) 6%, var(--surface));
-}
-
-.chat__goal-history--failed {
-  border-color: color-mix(in srgb, var(--danger) 28%, var(--border-light));
-  background: color-mix(in srgb, var(--danger) 5%, var(--surface));
-}
-
-.chat__goal-history-marker {
-  position: relative;
-  width: 18px;
-  height: 18px;
-  margin-top: 1px;
-  border-radius: 50%;
-  background: var(--green);
-}
-
-.chat__goal-history-marker::after {
-  content: '';
-  position: absolute;
-  left: 6px;
-  top: 3px;
-  width: 4px;
-  height: 8px;
-  border-right: 2px solid var(--bg);
-  border-bottom: 2px solid var(--bg);
-  transform: rotate(45deg);
-}
-
-.chat__goal-history--failed .chat__goal-history-marker {
-  background: var(--danger);
-}
-
-.chat__goal-history--failed .chat__goal-history-marker::after {
-  content: '!';
-  inset: 0;
-  width: auto;
-  height: auto;
-  border: 0;
-  color: white;
-  font-size: 12px;
-  font-weight: 800;
-  line-height: 18px;
-  text-align: center;
-  transform: none;
-}
-
-.chat__wait-history {
-  grid-template-columns: 18px minmax(0, 1fr);
-  gap: 9px;
   margin-top: 10px;
   padding: 10px 12px;
-  border-radius: 11px;
+  border: 1px solid color-mix(in srgb, var(--lifecycle-tone) 22%, var(--border-light));
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--lifecycle-tone) 4%, transparent);
 }
 
-.chat__wait-history--attention {
-  border-color: color-mix(in srgb, var(--warning, #d8922f) 28%, var(--border-light));
-  background: color-mix(in srgb, var(--warning, #d8922f) 5%, var(--surface));
-}
+.chat__goal-history--failed { --lifecycle-tone: var(--danger); }
+.chat__wait-history { --lifecycle-tone: var(--accent); }
+.chat__wait-history--attention { --lifecycle-tone: var(--warning, #d8922f); }
+.chat__wait-history--stopped { --lifecycle-tone: var(--muted); }
 
-.chat__wait-history--stopped {
-  border-color: var(--border-light);
-  background: color-mix(in srgb, var(--text) 2%, var(--surface));
+.chat__lifecycle-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 28px;
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  color: var(--lifecycle-tone, var(--accent));
+  background: color-mix(in srgb, var(--lifecycle-tone, var(--accent)) 12%, transparent);
 }
-
-.chat__wait-history-marker {
-  width: 15px;
-  height: 15px;
-  margin-top: 2px;
+.chat__lifecycle-icon svg,
+.chat__lifecycle-outcome {
+  display: block;
+  flex-shrink: 0;
 }
-
-.chat__wait-history-marker::after {
-  left: 5px;
-  top: 2px;
-  width: 3px;
-  height: 6px;
-}
-
-.chat__wait-history--attention .chat__wait-history-marker {
-  background: var(--warning, #d8922f);
-}
-
-.chat__wait-history--attention .chat__wait-history-marker::after {
-  content: '!';
-  inset: -2px;
-  width: auto;
-  height: auto;
-  border: 0;
-  color: white;
-  font-size: 10px;
-  font-weight: 800;
-  line-height: 15px;
-  text-align: center;
-  transform: none;
-}
-
-.chat__wait-history--stopped .chat__wait-history-marker {
-  background: var(--text-muted);
-}
-
-.chat__wait-history--stopped .chat__wait-history-marker::after {
-  left: 2px;
-  top: 5px;
-  width: 7px;
-  height: 0;
-  border: 0;
-  border-top: 2px solid var(--surface);
-  transform: none;
-}
-
-.chat__wait-history-kicker {
-  letter-spacing: 0.035em;
-}
-
-.chat__wait-history--attention .chat__wait-history-kicker {
-  color: var(--warning, #d8922f);
-}
-
-.chat__wait-history--stopped .chat__wait-history-kicker {
-  color: var(--text-muted);
-}
+.chat__lifecycle-outcome { color: var(--lifecycle-tone, var(--accent)); }
 
 .chat__goal-history-copy {
   min-width: 0;
@@ -4095,14 +3969,14 @@
 }
 
 .chat__goal-history-kicker {
-  color: var(--green);
-  font-size: 11px;
-  font-weight: 750;
-  letter-spacing: 0.055em;
-  text-transform: uppercase;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.4;
 }
-
-.chat__goal-history--failed .chat__goal-history-kicker { color: var(--danger); }
 
 .chat__goal-history-objective {
   color: var(--text);
@@ -4149,7 +4023,9 @@
 }
 
 .chat__goal-task-marker {
-  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   width: 12px;
   height: 12px;
   margin-top: 1px;
@@ -4174,20 +4050,8 @@
 }
 
 .chat__goal-task--completed .chat__goal-task-marker {
-  border-color: var(--green);
-  background: var(--green);
-}
-
-.chat__goal-task--completed .chat__goal-task-marker::after {
-  content: '';
-  position: absolute;
-  left: 3px;
-  top: 1px;
-  width: 3px;
-  height: 6px;
-  border-right: 1.5px solid var(--bg);
-  border-bottom: 1.5px solid var(--bg);
-  transform: rotate(45deg);
+  border-color: transparent;
+  color: var(--green);
 }
 
 .chat__goal-task--failed .chat__goal-task-marker,
@@ -4440,67 +4304,41 @@
   line-height: 1.3;
 }
 
+/* Compact, evenly spaced send / edit / cancel wells. The button IS the visible
+   well now (no oversized transparent target or per-button nudges), so the row
+   of actions takes less of the queued message's width and spaces uniformly. */
 .queued__action {
-  --queued-action-visual-shift: 0px;
   flex-shrink: 0;
-  width: 44px;
-  height: 44px;
-  margin: 0;
+  width: 30px;
+  height: 30px;
+  /* Sit the well against the first line of queued text. */
+  margin-top: 3px;
   display: flex;
   align-items: center;
   justify-content: center;
-  position: relative;
-  isolation: isolate;
-  background: transparent;
-  border: none;
+  background: var(--surface2); /* CONTRACT: neutral compact well on opaque fill */
+  border: 1px solid var(--border-light); /* CONTRACT: subtle hairline around the well */
   border-radius: 8px;
   color: var(--muted); /* CONTRACT: low-contrast icon on opaque fill */
   cursor: pointer;
-  transition: color 0.15s;
+  transition: color 0.15s, background-color 0.15s, border-color 0.15s, transform 0.08s;
 }
 
-.queued__action::before {
-  content: "";
-  position: absolute;
-  z-index: -1;
-  width: 30px;
-  height: 30px;
-  border: 1px solid var(--border-light); /* CONTRACT: subtle hairline around the visible action well */
-  border-radius: 9px;
-  background: var(--surface2); /* CONTRACT: neutral compact well inside the full 44px target */
-  transform: translateX(var(--queued-action-visual-shift));
-  transition:
-    background-color 0.15s,
-    border-color 0.15s,
-    box-shadow 0.15s,
-    transform 0.08s;
+/* One consistent, tight gap between every action. */
+.queued__action + .queued__action {
+  margin-left: 3px;
 }
 
 .queued__action svg {
   display: block;
-  position: relative;
-  z-index: 1;
-  transform: translateX(var(--queued-action-visual-shift));
-  transition: transform 0.08s;
 }
 
-.queued__steer {
-  --queued-action-visual-shift: 3px;
-}
-
-.queued__cancel {
-  --queued-action-visual-shift: -3px;
-}
-
-.queued__action:hover::before {
-  transform: translate(var(--queued-action-visual-shift), -1px);
+.queued__action:not(:disabled):hover {
+  color: var(--text);
 }
 
 .queued__steer:not(:disabled):hover {
   color: var(--accent); /* CONTRACT: forwarding stays neutral at rest and reveals its meaning on interaction */
-}
-
-.queued__steer:not(:disabled):hover::before {
   background: color-mix(in srgb, var(--accent) 9%, var(--surface));
   border-color: color-mix(in srgb, var(--accent) 32%, var(--border-light));
 }
@@ -4508,17 +4346,12 @@
 .queued__cancel:not(:disabled):hover,
 .queued__cancel:not(:disabled):active {
   color: var(--danger); /* CONTRACT: removal becomes destructive only at interaction */
-}
-
-.queued__cancel:not(:disabled):hover::before,
-.queued__cancel:not(:disabled):active::before {
   background: color-mix(in srgb, var(--danger) 9%, var(--surface));
   border-color: color-mix(in srgb, var(--danger) 32%, var(--border-light));
 }
 
-.queued__action:active::before,
-.queued__action:active svg {
-  transform: translateX(var(--queued-action-visual-shift)) scale(0.9);
+.queued__action:not(:disabled):active {
+  transform: scale(0.9);
 }
 
 .queued__action:disabled {
@@ -4526,26 +4359,14 @@
   cursor: default;
 }
 
-.queued__action:disabled:hover::before {
-  transform: translateX(var(--queued-action-visual-shift));
-}
-
 @media (prefers-reduced-motion: reduce) {
-  .queued__action::before,
-  .queued__action svg { transition: none; }
-  .queued__action:hover::before,
-  .queued__action:active::before,
-  .queued__action:active svg {
-    transform: translateX(var(--queued-action-visual-shift));
-  }
+  .queued__action { transition: color 0.15s, background-color 0.15s, border-color 0.15s; }
+  .queued__action:not(:disabled):active { transform: none; }
 }
 
 .queued__action:focus-visible {
   outline: none;
-}
-
-.queued__action:focus-visible::before {
-  box-shadow: 0 0 0 2px var(--accent); /* CONTRACT: focus follows the visible 30px well, not its transparent 44px target */
+  box-shadow: 0 0 0 2px var(--accent); /* CONTRACT: focus ring on the visible well */
 }
 
 /* ── Screen-reader-only utility ─────────────────────────────────────────── */
@@ -4571,3 +4392,21 @@
   /* chat__attach-card-remove is 20×20; expand to 40px on each axis */
   inset: -10px;
 }
+
+.chat__progress-identity { display: inline-block; vertical-align: -2px; margin-right: 5px; flex-shrink: 0; }
+
+/* Tool-only continuation rows share one activity rhythm across message boundaries. */
+.chat__msg:has(> .chat__tools:last-child, > .chat__assistant-copy-surface > .chat__tools:last-child)
+  + .chat__msg:has(> .chat__tools:first-child, > .chat__assistant-copy-surface > .chat__tools:first-child) {
+  margin-block-start: calc(var(--activity-row-gap, 4px) - 24px);
+}
+.chat__msg--peer .chat__tools { width: 100%; }
+.chat__peer-tool { width: 100%; font-family: var(--font); }
+.chat__peer-tool .chat__tool-header { width: 100%; }
+.chat__peer-tool .chat__tool-name { flex: 0 1 auto; min-width: 0; }
+.chat__peer-time { flex: none; font: 400 11px/1.4 var(--font); color: var(--muted); font-variant-numeric: tabular-nums; }
+.chat__peer-delivery { margin: 0; color: var(--muted); font-size: 12px; }
+.chat__peer-links { display: flex; flex-wrap: wrap; gap: 8px; }
+.chat__peer-links a { color: var(--accent); text-underline-offset: 3px; overflow-wrap: anywhere; }
+.chat__peer-load-error { font-size: 12px; color: var(--muted); }
+.chat__peer-load-error button { font: inherit; color: var(--accent); background: none; border: 0; cursor: pointer; }

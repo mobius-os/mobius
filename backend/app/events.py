@@ -503,6 +503,12 @@ def _process_question_event(event: dict, assistant_blocks: list) -> bool:
     questions = event.get("questions", [])
     question_id = event.get("question_id")
     new_block = {"type": "question", "questions": questions}
+    action_key = event.get("action_key")
+    if isinstance(action_key, str) and action_key:
+      new_block["action_key"] = action_key
+    platform_action = event.get("platform_action")
+    if isinstance(platform_action, dict):
+      new_block["platform_action"] = copy.deepcopy(platform_action)
     # Answer delivery is fixed when the card is created, not by later partial
     # updates. Continuation cards have no provider future to keep alive.
     if event.get("response_mode") == "continuation":
@@ -518,6 +524,10 @@ def _process_question_event(event: dict, assistant_blocks: list) -> bool:
         existing["questions"] = questions
         if question_id:
           existing["question_id"] = question_id
+        if isinstance(action_key, str) and action_key:
+          existing["action_key"] = action_key
+        if isinstance(platform_action, dict):
+          existing["platform_action"] = copy.deepcopy(platform_action)
         return True
     assistant_blocks.append(new_block)
     return True
@@ -679,6 +689,11 @@ def _process_subagent_event(event: dict, assistant_blocks: list) -> bool:
           break
     if target is None:
       return False
+    # A background Memory lookup settles on its task's terminal event: the
+    # sink stamps the recall onto the task_done, and it lands on the same tool
+    # block the placeholder result deferred from.
+    if event_type == "task_done" and isinstance(event.get("recall"), dict):
+      target["recall"] = event["recall"]
     subagent = target.setdefault("subagent", {})
     entry = subagent.setdefault(task_key, {
       "description": "",
@@ -901,7 +916,9 @@ def process_event(event: dict, assistant_blocks: list) -> bool:
     for block in assistant_blocks:
       if (block.get("type") == "question"
           and block.get("question_id") == event.get("question_id")):
-        block["answers"] = event["answers"]
+        for key in ("answers", "answer_turn", "selected_options", "platform_action"):
+          if key in event:
+            block[key] = copy.deepcopy(event[key])
         return True
     return False
 
@@ -1170,8 +1187,8 @@ class QuestionScrubReceipt:
     (`target_ref`), so prior + later blocks survive.
   - `kind == "coalesced"`: the event will mutate the pre-existing
     `target_ref` block in place. `undo_question_scrub` restores ONLY the
-    fields this event touched (`questions`, and `question_id` when the
-    event carried one), and ONLY when the field's current value still
+    fields this event touched (`questions`, `question_id`, and the optional
+    exact `action_key`), and ONLY when the field's current value still
     EQUALS what this event wrote — so a later same-loop event that mutated
     the same block again is not clobbered by the revert.
   """
@@ -1182,6 +1199,7 @@ class QuestionScrubReceipt:
   # before restoring) — only meaningful for the coalesced kind.
   wrote_questions: list | None = None
   wrote_question_id: str | None = None
+  wrote_action_key: str | None = None
   # The pre-event values to restore on the coalesced target, with presence
   # flags so a field the block did NOT have before is removed (not set to
   # None) on revert.
@@ -1189,6 +1207,8 @@ class QuestionScrubReceipt:
   prev_questions: list | None = None
   had_question_id: bool = False
   prev_question_id: str | None = None
+  had_action_key: bool = False
+  prev_action_key: str | None = None
 
 
 def capture_question_scrub(
@@ -1202,8 +1222,8 @@ def capture_question_scrub(
   question block with the same key.
 
   - A match → COALESCED: capture the target block by identity plus a deep
-    copy of the fields the event will overwrite (`questions`, and
-    `question_id` when present) with presence flags.
+    copy of the fields the event will overwrite (`questions`, `question_id`,
+    and `action_key` when present) with presence flags.
   - No match → APPENDED: the receipt's `target_ref` is filled in by
     `commit_question_scrub` after `process_event` appends the new object.
 
@@ -1213,8 +1233,11 @@ def capture_question_scrub(
   questions = event.get("questions", [])
   question_id = event.get("question_id")
   candidate = {"type": "question", "questions": questions}
+  action_key = event.get("action_key")
   if question_id:
     candidate["question_id"] = question_id
+  if isinstance(action_key, str) and action_key:
+    candidate["action_key"] = action_key
   key = question_block_key(candidate)
   for existing in assistant_blocks:
     if (
@@ -1226,10 +1249,15 @@ def capture_question_scrub(
         target_ref=existing,
         wrote_questions=questions,
         wrote_question_id=question_id if question_id else None,
+        wrote_action_key=(
+          action_key if isinstance(action_key, str) and action_key else None
+        ),
         had_questions="questions" in existing,
         prev_questions=copy.deepcopy(existing.get("questions")),
         had_question_id="question_id" in existing,
         prev_question_id=existing.get("question_id"),
+        had_action_key="action_key" in existing,
+        prev_action_key=existing.get("action_key"),
       )
   return QuestionScrubReceipt(kind="appended")
 
@@ -1281,6 +1309,12 @@ def undo_question_scrub(
         target["question_id"] = receipt.prev_question_id
       else:
         target.pop("question_id", None)
+  if receipt.wrote_action_key is not None:
+    if target.get("action_key") == receipt.wrote_action_key:
+      if receipt.had_action_key:
+        target["action_key"] = receipt.prev_action_key
+      else:
+        target.pop("action_key", None)
 
 
 def build_assistant_message(

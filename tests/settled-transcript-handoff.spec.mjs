@@ -1,6 +1,5 @@
 import { test, expect } from '@playwright/test'
 import { createTaggedChat, attachCleanup } from './_chatTracker.mjs'
-import { testChatAgentSettings } from './_chatTestPrerequisites.mjs'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8000'
 
@@ -140,7 +139,6 @@ async function mountScenario(page) {
         pending_messages: [],
         pending_question_id: null,
         provider: 'codex',
-        ...testChatAgentSettings(),
       }),
     })
   })

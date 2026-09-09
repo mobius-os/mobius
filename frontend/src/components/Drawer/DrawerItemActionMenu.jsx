@@ -25,6 +25,8 @@ export default function DrawerItemActionMenu({
   pinned,
   canInstall,
   canShare,
+  projectActionLabel,
+  onProjectAction,
   placement,
   focusFirstAction = false,
   restoreFocusRef,
@@ -108,7 +110,7 @@ export default function DrawerItemActionMenu({
         height: menuRect.offsetHeight,
       },
     }))
-  }, [open, placement, confirmation])
+  }, [open, placement, confirmation, projectActionLabel])
 
   useLayoutEffect(() => {
     if (!open || !position || !menuRef.current) return
@@ -331,6 +333,16 @@ export default function DrawerItemActionMenu({
                   onClick={() => run(onShare, { restoreFocus: false })}
                 >
                   Share app
+                </button>
+              )}
+              {projectActionLabel && (
+                <button
+                  type="button"
+                  role="menuitem"
+                  className="drawer__item-action-item"
+                  onClick={() => run(onProjectAction, { restoreFocus: false })}
+                >
+                  {projectActionLabel}
                 </button>
               )}
               <div className="drawer__item-action-separator" role="separator" />

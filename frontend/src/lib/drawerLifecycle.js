@@ -153,3 +153,21 @@ export function clearDrawerGestureStyles(element) {
   element.classList?.remove?.('drawer--dragging')
   if (element.style) element.style.transform = ''
 }
+
+/**
+ * Settle the panel after a swipe release, once the owner has answered.
+ *
+ * The panel commits to closed geometry only when the owner accepted the close.
+ * Writing translateX(-100%) explicitly (rather than clearing the inline value
+ * and letting the closed class take over) keeps the eased transition running
+ * from the finger position; the open-state layout effect clears it once the
+ * closed class, with the same target, commits. A refused close (the owner's
+ * previous traversal is still pending) snaps back exactly like a cancel, so
+ * `open` and the panel never disagree.
+ */
+export function settleDrawerSwipe(element, { closeAccepted }) {
+  clearDrawerGestureStyles(element)
+  if (closeAccepted === true && element?.style) {
+    element.style.transform = 'translateX(-100%)'
+  }
+}

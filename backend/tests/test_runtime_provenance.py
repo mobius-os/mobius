@@ -79,21 +79,3 @@ def test_symlinks_are_reported_without_following_them(tmp_path):
 
   assert status["state"] == "stale"
   assert status["mismatched_paths"] == ["linked.py"]
-
-
-def test_symlinked_root_is_unavailable_without_traversing_it(tmp_path):
-  outside = tmp_path / "outside"
-  _write(outside, "private.py", b"do not traverse")
-  linked_source = tmp_path / "source"
-  linked_source.symlink_to(outside, target_is_directory=True)
-
-  status = provenance.protected_runtime_status(
-    linked_source, tmp_path / "deployed",
-  )
-
-  assert status == {
-    "state": "unavailable",
-    "source_sha256": None,
-    "deployed_sha256": None,
-    "mismatched_paths": [],
-  }

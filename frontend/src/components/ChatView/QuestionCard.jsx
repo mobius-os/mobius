@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import './QuestionCard.css'
 import {
   clearQuestionDraft,
@@ -14,6 +14,13 @@ import {
   pointerSelectionChangedWithin,
   textSelectionSnapshot,
 } from '../../lib/selectableTextControl.js'
+import { getOnlineSnapshot } from '../../lib/connectivityStore.js'
+import { questionOptionSubmission } from './questionSubmission.js'
+import {
+  isRestartCardAction,
+  restartCardSelectedOptions,
+  restartCardStatusLabel,
+} from './restartCard.js'
 
 
 function resolveAnswer(answer, otherText) {
@@ -91,7 +98,7 @@ function CustomAnswerArea({
         if (!canSubmit) return
         if (isInlineEditorSubmit(e, { isTouchPrimary: isTouchPrimary() })) {
           e.preventDefault()
-          onSubmitShortcut()
+          onSubmitShortcut(e.currentTarget.closest('.qcard'))
         }
       }}
     />
@@ -104,8 +111,10 @@ export default function QuestionCard({
   questions,
   questionId,
   answeredMap,
+  platformAction,
   onAnswer,
-  onAnswerPrepare,
+  onPrepareAnswer,
+  onCancelAnswer,
   disabled,
   // Callback ref that publishes this card's node to the "Möbius asked you
   // something — tap to answer" offscreen observer. Set only by the surface
@@ -129,9 +138,12 @@ export default function QuestionCard({
   const pointerSelectionRef = useRef(null)
   const preparedSubmissionRef = useRef(null)
 
-  const answered = submitted || !!answeredMap
+  const actionStatusLabel = restartCardStatusLabel(platformAction)
+  const completedAction = Boolean(actionStatusLabel)
+  const answered = submitted || !!answeredMap || completedAction
   const displayAnswers = answeredMap || {}
   const grouped = questions.length > 1
+  const restartAction = isRestartCardAction(platformAction)
 
   // ChatView is keyed by chat, so switching away remounts this card. Keep an
   // unsubmitted selection in the same per-tab cache as composer drafts; the
@@ -159,6 +171,12 @@ export default function QuestionCard({
     if (a === '__other__') return !!otherTexts[q.question]?.trim()
     return true
   })
+  const selectedOptions = restartCardSelectedOptions(
+    platformAction,
+    questions,
+    answers,
+  )
+  const canSubmit = allAnswered && (!restartAction || selectedOptions !== null)
 
   function selectOption(question, label) {
     if (answered || disabled) return
@@ -203,15 +221,27 @@ export default function QuestionCard({
     })
   }
 
-  function prepareSubmit() {
-    if (!allAnswered || answered || disabled || submitting) return
-    preparedSubmissionRef.current = onAnswerPrepare?.() || null
-  }
-
-  async function handleSubmit() {
-    const preparedSubmission = preparedSubmissionRef.current
+  const cancelPreparedSubmission = useCallback(() => {
+    const prepared = preparedSubmissionRef.current
     preparedSubmissionRef.current = null
-    if (!allAnswered || answered || disabled || submitting) return
+    if (prepared) onCancelAnswer?.(prepared)
+  }, [onCancelAnswer])
+
+  useEffect(() => () => cancelPreparedSubmission(), [cancelPreparedSubmission])
+
+  useEffect(() => {
+    // A remote answer, source replacement, or competing submission can make
+    // the button inactive between press and click. Retire the provisional hold
+    // immediately; there will be no answer handoff to release it later.
+    if (answered || disabled || submitting) cancelPreparedSubmission()
+  }, [answered, cancelPreparedSubmission, disabled, submitting])
+
+  async function handleSubmit(questionCard = null, preparedSubmission = null) {
+    if (!canSubmit || answered || disabled || submitting) {
+      if (preparedSubmission) onCancelAnswer?.(preparedSubmission)
+      return
+    }
+    preparedSubmissionRef.current = null
     const resolved = {}
     const lines = questions.map(q => {
       const val = resolveAnswer(answers[q.question], otherTexts[q.question])
@@ -222,20 +252,27 @@ export default function QuestionCard({
     setSubmitting(true)
     try {
       const accepted = await onAnswer?.(
-        lines.join('\n'), resolved, questionId, preparedSubmission,
+        lines.join('\n'),
+        resolved,
+        questionId,
+        { questionCard, preparedSubmission, ...questionOptionSubmission(questions, answers) },
       )
       // Only settle (and therefore clear the durable per-tab draft) after the
       // answer endpoint confirms that the transcript write committed.
-      if (accepted !== false) setSubmitted(true)
-    } catch {
+      if (accepted === false) {
+        if (preparedSubmission) onCancelAnswer?.(preparedSubmission)
+      } else {
+        setSubmitted(true)
+      }
+    } catch (error) {
       // Keep the choices and custom text intact so a transient failure is
       // immediately retryable. Keep the notice on the card too: adding an
       // assistant-looking error row after it makes the question cease to be
       // the transcript tail and disables the very retry the owner needs.
       setSubmitError(
-        typeof navigator !== 'undefined' && navigator.onLine === false
+        !getOnlineSnapshot()
           ? 'You’re offline. Your choice is saved — submit it when you’re back online.'
-          : 'That answer didn’t save. Your choice is still here — please try again.',
+          : (error?.detail || 'That answer didn’t save. Your choice is still here — please try again.'),
       )
     } finally {
       setSubmitting(false)
@@ -245,10 +282,16 @@ export default function QuestionCard({
   return (
     <div
       className={`qcard${grouped ? ' qcard--grouped' : ''}${answered ? ' qcard--answered' : ''}`}
+      data-scroll-anchor-key={draftKey}
       ref={answered ? null : pendingCardRef}
       aria-disabled={disabled && !answered ? true : undefined}
       aria-label={grouped ? `${questions.length} decisions` : undefined}
     >
+      {actionStatusLabel && (
+        <div className="qcard__action-status" role="status">
+          {actionStatusLabel}
+        </div>
+      )}
       {grouped && (
         <div className="qcard__group-head">
           <div>
@@ -371,20 +414,22 @@ export default function QuestionCard({
                 })
               })()}
             </div>
-            <CustomAnswerArea
-              active={isOtherSelected || answeredWithOther}
-              answered={answered}
-              canSubmit={allAnswered}
-              disabled={inactive}
-              onChange={text => setOtherText(q.question, text)}
-              onSubmitShortcut={() => {
-                if (allAnswered) handleSubmit()
-              }}
-              question={q.question}
-              value={answered
-                ? unmatchedAnswers.join(', ')
-                : (otherTexts[q.question] || '')}
-            />
+            {!restartAction && (
+              <CustomAnswerArea
+                active={isOtherSelected || answeredWithOther}
+                answered={answered}
+                canSubmit={allAnswered}
+                disabled={inactive}
+                onChange={text => setOtherText(q.question, text)}
+                onSubmitShortcut={(questionCard) => {
+                  if (allAnswered) handleSubmit(questionCard, null)
+                }}
+                question={q.question}
+                value={answered
+                  ? unmatchedAnswers.join(', ')
+                  : (otherTexts[q.question] || '')}
+              />
+            )}
           </div>
         )
         })}
@@ -397,13 +442,24 @@ export default function QuestionCard({
           <button
             type="button"
             className="qcard__submit"
-            onPointerDownCapture={(event) => {
-              if (event.button === 0 && event.isPrimary !== false) prepareSubmit()
+            onPointerDown={(event) => {
+              if (event.button !== 0 || event.isPrimary === false) return
+              const questionCard = event.currentTarget.closest('.qcard')
+              preparedSubmissionRef.current = onPrepareAnswer?.(questionCard) || null
             }}
-            onClick={handleSubmit}
-            disabled={!allAnswered || disabled || answered || submitting}
+            onPointerCancel={cancelPreparedSubmission}
+            onBlur={cancelPreparedSubmission}
+            onPointerLeave={(event) => {
+              if (event.buttons !== 0) cancelPreparedSubmission()
+            }}
+            onClick={(event) => {
+              const prepared = preparedSubmissionRef.current
+              preparedSubmissionRef.current = null
+              handleSubmit(event.currentTarget.closest('.qcard'), prepared)
+            }}
+            disabled={!canSubmit || disabled || answered || submitting}
           >
-            {submitting ? 'Submitting…' : (answered ? 'Submitted' : 'Submit')}
+            {submitting ? 'Submitting…' : (completedAction ? actionStatusLabel : answered ? 'Submitted' : 'Submit')}
           </button>
         </>
       )}

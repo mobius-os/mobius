@@ -19,6 +19,11 @@ const settingsKey = ['settings']
 const providerUsageRootKey = ['settings', 'provider-usage']
 const providerUsageKey = (provider) => [...providerUsageRootKey, provider]
 const appsKey = ['apps']
+const chatAppArtifactsRootKey = ['chat-app-artifacts']
+const chatAppArtifactsKey = chatId => [
+  ...chatAppArtifactsRootKey,
+  String(chatId || ''),
+]
 const projectsKey = ['projects']
 const projectTemplatesKey = ['projects', 'templates']
 const legacyProjectsKey = ['projects', 'legacy']
@@ -115,17 +120,32 @@ function useSettingsQuery() {
   })
 }
 
-async function fetchApps({ signal, timeoutMs } = {}) {
-  const res = await api.apps.list({ signal, timeoutMs })
+async function fetchApps({ signal, timeoutMs, cache } = {}) {
+  const res = await api.apps.list({ signal, timeoutMs, cache })
   const data = await jsonOrThrow(res, 'apps fetch failed:')
   return Array.isArray(data) ? data : []
+}
+
+async function fetchChatAppArtifacts(chatId, { signal } = {}) {
+  const res = await api.apps.chatArtifacts(chatId, { signal })
+  const data = await jsonOrThrow(res, 'chat app artifacts fetch failed:')
+  return Array.isArray(data) ? data : []
+}
+
+function useChatAppArtifactsQuery(chatId, { enabled = true } = {}) {
+  return useQuery({
+    queryKey: chatAppArtifactsKey(chatId),
+    queryFn: ({ signal }) => fetchChatAppArtifacts(chatId, { signal }),
+    enabled: Boolean(enabled && chatId),
+    staleTime: 0,
+  })
 }
 
 function useAppsQuery({ reconcile, enabled = true } = {}) {
   return useQuery({
     queryKey: appsKey,
-    queryFn: async () => {
-      const rows = await fetchApps()
+    queryFn: async (context) => {
+      const rows = await fetchApps(context)
       return reconcile ? reconcile(rows) : rows
     },
     enabled,
@@ -162,8 +182,8 @@ function useLegacyProjectsQuery({ enabled = true } = {}) {
   return useQuery({ queryKey: legacyProjectsKey, queryFn: fetchLegacyProjects, enabled })
 }
 
-async function fetchChats({ signal, timeoutMs } = {}) {
-  const res = await api.chats.list({ signal, timeoutMs })
+async function fetchChats({ signal, timeoutMs, cache } = {}) {
+  const res = await api.chats.list({ signal, timeoutMs, cache })
   const data = await jsonOrThrow(res, 'chats fetch failed:')
   return Array.isArray(data) ? data : []
 }
@@ -191,6 +211,21 @@ async function fetchChatCurrentUsage(
     signal,
   })
   return jsonOrThrow(res, 'current chat usage fetch failed:')
+}
+
+async function fetchChatUsage(chatId, { signal } = {}) {
+  const res = await api.chats.usage(chatId, { signal })
+  return jsonOrThrow(res, 'chat usage fetch failed:')
+}
+
+function useChatUsageQuery(chatId, { enabled = true } = {}) {
+  return useQuery({
+    queryKey: chatUsageKey(chatId),
+    queryFn: context => fetchChatUsage(chatId, context),
+    enabled: enabled && Boolean(chatId),
+    staleTime: 60_000,
+    retry: 0,
+  })
 }
 
 function useChatCurrentUsageQuery(
@@ -454,19 +489,21 @@ export const appQueries = {
   },
 }
 
-async function fetchChatUsage(chatId, { signal } = {}) {
-  const res = await api.chats.usage(chatId, { signal })
-  return jsonOrThrow(res, 'chat usage fetch failed:')
-}
-
-function useChatUsageQuery(chatId, { enabled = true } = {}) {
-  return useQuery({
-    queryKey: chatUsageKey(chatId),
-    queryFn: context => fetchChatUsage(chatId, context),
-    enabled: enabled && Boolean(chatId),
-    staleTime: 60_000,
-    retry: 0,
-  })
+export const chatAppArtifactQueries = {
+  keys: {
+    all: chatAppArtifactsRootKey,
+    detail: chatAppArtifactsKey,
+  },
+  detail: {
+    fetch: fetchChatAppArtifacts,
+    useQuery: useChatAppArtifactsQuery,
+    invalidate: (queryClient, chatId) => queryClient.invalidateQueries({
+      queryKey: chatAppArtifactsKey(chatId),
+    }),
+  },
+  invalidateAll: queryClient => queryClient.invalidateQueries({
+    queryKey: chatAppArtifactsRootKey,
+  }),
 }
 
 export const appSourceQueries = {
@@ -485,6 +522,7 @@ export const projectQueries = {
   keys: {
     all: projectsKey,
     templates: projectTemplatesKey,
+    importSources: ['projects', 'import-sources'],
     legacy: legacyProjectsKey,
     detail: (projectId) => ['projects', 'detail', projectId],
     chats: (projectId) => ['projects', 'chats', projectId],
@@ -501,6 +539,15 @@ export const projectQueries = {
     fetch: fetchProjects,
     useQuery: useProjectsQuery,
     invalidate: (queryClient) => queryClient.invalidateQueries({ queryKey: projectsKey }),
+  },
+  importSources: {
+    useQuery: (enabled = false) => useQuery({
+      queryKey: ['projects', 'import-sources'],
+      queryFn: async () => jsonOrThrow(await api.projects.importSources(), 'Existing work failed:'),
+      enabled,
+      staleTime: 0,
+    }),
+    invalidate: queryClient => queryClient.invalidateQueries({ queryKey: ['projects', 'import-sources'] }),
   },
   templates: {
     key: projectTemplatesKey,
@@ -546,6 +593,14 @@ export const chatQueries = {
     fetch: fetchChatMessages,
     remove: (queryClient, chatId) => queryClient.removeQueries({ queryKey: ['chat-messages', chatId] }),
   },
+  usage: {
+    key: chatUsageKey,
+    fetch: fetchChatUsage,
+    useQuery: useChatUsageQuery,
+    invalidate: (queryClient, chatId) => queryClient.invalidateQueries({
+      queryKey: chatId ? chatUsageKey(chatId) : chatUsageRootKey,
+    }),
+  },
   currentUsage: {
     key: chatCurrentUsageKey,
     fetch: fetchChatCurrentUsage,
@@ -554,14 +609,6 @@ export const chatQueries = {
       queryKey: chatId
         ? [...chatCurrentUsageRootKey, chatId]
         : chatCurrentUsageRootKey,
-    }),
-  },
-  usage: {
-    key: chatUsageKey,
-    fetch: fetchChatUsage,
-    useQuery: useChatUsageQuery,
-    invalidate: (queryClient, chatId) => queryClient.invalidateQueries({
-      queryKey: chatId ? chatUsageKey(chatId) : chatUsageRootKey,
     }),
   },
 }

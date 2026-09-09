@@ -531,7 +531,7 @@ export default function useNavigation({
     return state
   }, [])
 
-  const openHistoryDismiss = useCallback((onDismiss) => {
+  const openHistoryDismiss = useCallback((onDismiss, onRestore) => {
     if (typeof onDismiss !== 'function') return null
     // The classic store can land on an untagged iframe phantom beneath this
     // sentinel. Capture the shell cursor BEFORE pushing so either history path
@@ -546,7 +546,7 @@ export default function useNavigation({
     }
     const entryId = navEntryId(state)
     if (!entryId) return null
-    historyDismissalsRef.current.set(entryId, { onDismiss, returnState })
+    historyDismissalsRef.current.set(entryId, { onDismiss, onRestore, returnState, active: true })
     return entryId
   }, [pushShellEntry, snapshotRoute])
 
@@ -562,10 +562,11 @@ export default function useNavigation({
   const closeHistoryDismiss = useCallback((entryId) => {
     const dismissal = historyDismissalsRef.current.get(entryId)
     if (!dismissal) return false
-    historyDismissalsRef.current.delete(entryId)
+    if (!dismissal.onRestore) historyDismissalsRef.current.delete(entryId)
     const current = currentNavStateRef.current
     // Close the surface before touching session history. A throwing or lost
     // traversal must never strand the UI open again.
+    dismissal.active = false
     dismissal.onDismiss()
     if (current?.kind === 'dismissible' && navEntryId(current) === entryId) {
       const pending = { entryId, returnState: dismissal.returnState }
@@ -678,11 +679,14 @@ export default function useNavigation({
     setDrawerVisible(true)
   }
 
+  // Returns true when this call owns the close (the drawer WILL read closed),
+  // false when it is refused. The refusal is what lets a swipe-close snap back
+  // instead of parking the panel off-screen under a still-open `open` prop.
   function closeDrawer({ preserveModalUntilTraversal = false } = {}) {
     // A modal close owns one serialized traversal. Escape, overlay, toggle, and
     // breakpoint cleanup can arrive in the same frame; a second back() would
     // skip past the drawer's sentinel before the first traversal settles.
-    if (!drawerOpenRef.current || drawerClosePendingRef.current) return
+    if (!drawerOpenRef.current || drawerClosePendingRef.current) return false
     if (drawerPushedRef.current) {
       beforeRestoreRouteRef?.current?.(snapshotRoute())
       const closeTraversal = drawerCloseTraversalRef.current
@@ -699,7 +703,7 @@ export default function useNavigation({
         drawerPushedRef.current = false
         drawerOpenRef.current = false
         setDrawerVisible(false)
-        return
+        return true
       }
       clearDrawerOpenAfterClose()
       drawerClosePendingRef.current = true
@@ -725,6 +729,7 @@ export default function useNavigation({
       drawerCloseTraversalRef.current = null
       setDrawerVisible(false)
     }
+    return true
   }
 
   /**
@@ -1422,7 +1427,17 @@ export default function useNavigation({
       // resource may have streamed away or its owner may have unmounted. Keep
       // this physical entry as a no-op sentinel so the next Back consumes only
       // the duplicate history position rather than a real shell route.
-      if (destination?.kind === 'dismissible') return
+      if (destination?.kind === 'dismissible') {
+        const entry = historyDismissalsRef.current.get(navEntryId(destination))
+        // File navigation opts into reconstruction while its owner is mounted;
+        // transient dialogs keep the deliberately one-way dismissal contract.
+        if (entry?.onRestore) {
+          restoreRoute(destination.route)
+          entry.active = true
+          entry.onRestore()
+        }
+        return
+      }
       const route = destination?.route
       // A nav entry represents a shell-level transition. Back destructively
       // removed its source from navStack, so Forward rebuilds that one edge.
@@ -1679,12 +1694,15 @@ export default function useNavigation({
         }
       }
       // (1) A transient dismissible consumes Back before any shell route. The
-      // callback is removed first because dismissing unmounts its owner.
+      // callback is consumed once; only reconstructable file entries are retained.
       if (source?.kind === 'dismissible') {
         const entryId = navEntryId(source)
         const dismissal = entryId ? historyDismissalsRef.current.get(entryId) : null
-        if (entryId) historyDismissalsRef.current.delete(entryId)
-        dismissal?.onDismiss()
+        if (entryId && !dismissal?.onRestore) historyDismissalsRef.current.delete(entryId)
+        if (dismissal?.active) {
+          dismissal.active = false
+          dismissal.onDismiss()
+        }
         return
       }
       // (2) Drawer-first: a back that consumes the drawer's own sentinel closes

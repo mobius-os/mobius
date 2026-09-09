@@ -717,7 +717,9 @@ def test_uninstall_snapshots_the_owned_directory_before_removal(
   )
   data_dir = skills_dir.parents[1]
   git_dir = data_dir / ".git"
-  git_dir.mkdir()
+  created_git_dir = not git_dir.is_dir()
+  if created_git_dir:
+    git_dir.mkdir()
   calls = []
 
   def snapshot(data_dir_, relative_path, commit_message):
@@ -728,7 +730,8 @@ def test_uninstall_snapshots_the_owned_directory_before_removal(
   try:
     r = client.delete("/api/skills/tips", headers=auth)
   finally:
-    git_dir.rmdir()
+    if created_git_dir:
+      git_dir.rmdir()
 
   assert r.status_code == 200, r.text
   assert calls == [(

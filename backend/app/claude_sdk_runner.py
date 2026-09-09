@@ -63,17 +63,17 @@ import logging
 import os
 import signal
 import shutil
-import shlex
 import re
 from collections import deque
 from contextlib import ExitStack
-from typing import Any
+from typing import Any, Literal
 
 from claude_agent_sdk import (
   ClaudeAgentOptions,
   ClaudeSDKClient,
   HookMatcher,
   ProcessError,
+  ResultError,
 )
 from claude_agent_sdk.types import (
   AssistantMessage,
@@ -92,7 +92,7 @@ from app.claude_events import (
   dispatch_sdk_message,
   is_root_conversation_message,
 )
-from app.claude_sdk_contract import transport_exit_error, transport_process_pid
+from app.claude_sdk_contract import transport_process_pid
 from app.process_groups import (
   isolated_process_group_id,
   lower_process_group_priority,
@@ -196,6 +196,16 @@ _CLAUDE_NATIVE_SCHEDULING_TOOLS = (
 )
 
 
+# Cross-turn scheduling has one owner in Möbius: the durable Waiting lifecycle.
+# Provider-native schedulers cannot render its card, survive the same restart
+# boundary, or reliably wake a top-level parent from a delegated child.
+_CLAUDE_NATIVE_SCHEDULING_TOOLS = (
+  "Monitor",
+  "ScheduleWakeup",
+  "CronCreate",
+)
+
+
 def _system_prompt_with_register(skill_text: str) -> str:
   """Append this runner's provider-authored register to the shared constitution.
 
@@ -212,74 +222,6 @@ def _system_prompt_with_register(skill_text: str) -> str:
 
 _CLAUDE_CLI = "/usr/local/bin/claude"
 _ISOLATED_CLAUDE_CLI = "/app/scripts/claude-isolated"
-
-
-def _guarded_subagent_bash(
-  input_data: dict[str, Any],
-) -> dict[str, Any] | None:
-  """Return one canonical shell-safe durable-child invocation, or deny it."""
-  command = input_data.get("command")
-  if not isinstance(command, str) or len(command) > 24_000:
-    return None
-  try:
-    args = shlex.split(command, posix=True)
-  except ValueError:
-    return None
-  if len(args) < 9 or args[0] not in {"python", "python3"}:
-    return None
-  if args[1:3] != ["/data/apps/subagents/subagents.py", "run"]:
-    return None
-  valued = {
-    "--provider", "--name", "--scope", "--model", "--effort", "--cwd",
-    "--prompt",
-  }
-  # A delegated owner may choose blocking vs durable background execution,
-  # but it cannot claim the owner's explicit-provider override. A provider
-  # paused in Subagents remains paused for every descendant.
-  flags = {"--background"}
-  parsed: dict[str, str] = {}
-  index = 3
-  while index < len(args):
-    option = args[index]
-    if option in flags:
-      if option in parsed:
-        return None
-      parsed[option] = "true"
-      index += 1
-      continue
-    if option not in valued or option in parsed or index + 1 >= len(args):
-      return None
-    parsed[option] = args[index + 1]
-    index += 2
-  valid = bool(
-    parsed.get("--provider") in {"claude", "codex"}
-    and parsed.get("--scope") == "read"
-    and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", parsed.get("--name", ""))
-    and 0 < len(parsed.get("--prompt", "")) <= 20_000
-    and "\x00" not in parsed.get("--prompt", "")
-    and (
-      "--cwd" not in parsed
-      or (
-        (
-          parsed["--cwd"] == "/data"
-          or parsed["--cwd"].startswith("/data/")
-        )
-        and "\x00" not in parsed["--cwd"]
-      )
-    )
-    and all(
-      re.fullmatch(r"[A-Za-z0-9._:/+-]{1,256}", parsed[option])
-      for option in ("--model", "--effort") if option in parsed
-    )
-  )
-  if not valid:
-    return None
-  # Never execute the model-authored quoting. Rebuild the already-validated
-  # argv so command substitutions, redirects, and separators can only remain
-  # literal prompt/cwd text passed to the helper.
-  return {**input_data, "command": shlex.join(args)}
-
-
 def _claude_cli_path() -> str:
   """Use the baked process-group wrapper when its runtime is available."""
   if (
@@ -294,14 +236,18 @@ def _claude_cli_path() -> str:
 async def _drain_background_tasks(
   client, bc, native_work, session_id, chat_id, usage_state,
 ):
-  """Carry Claude's native background wake through its parent follow-up.
+  """Carry Claude's native background wake through its follow-up result.
 
   The main agent's terminal ResultMessage ends the TURN, not the background
-  work it spawned. Claude completes a native child, wakes its parent, and emits
-  another ResultMessage after the parent synthesizes the result. A task_done
-  notification is therefore not the drain boundary; keep the client connected
-  until that parent result arrives. Stop still cancels the surrounding task,
-  and a stream error fails safe into the ordinary reap.
+  work it spawned. Claude Code completes a native child, wakes the parent
+  itself, and emits a later ResultMessage for that follow-up turn. Keep the
+  same client open until that later result; a
+  task_done notification alone is too early because reaping there discards the
+  parent's synthesis.
+
+  There is no timer or second scheduler: the provider's real follow-up result is
+  the boundary. Stop/restart still interrupts the existing process normally. A
+  stream error fails safe into the ordinary reap.
   """
   try:
     async for sdk_msg in client.receive_messages():
@@ -335,22 +281,45 @@ def _claude_process_group_id(client: ClaudeSDKClient) -> int | None:
   return pgid
 
 
-def _claude_process_was_force_stopped(client: ClaudeSDKClient) -> bool:
-  """Whether the SDK transport recorded one of Möbius's stop signals.
+def _claude_process_was_force_stopped(error: ProcessError) -> bool:
+  """Whether a public SDK process error is from Möbius's force-stop signals.
 
-  The SDK's background reader converts ``ProcessError`` into a plain
-  ``Exception`` before it reaches ``receive_response()``. Keep this predicate
-  narrow by reading the still-typed transport outcome and accepting only the
-  TERM/KILL return codes ``terminate_process_group`` can cause. A different
-  typed process failure that merely races a Stop must remain visible to the
-  owner. The transport is already an intentional private SDK seam here
-  (``_claude_process_group_id`` reads its child pid); if the SDK changes shape,
-  this fails closed and the error remains visible.
+  claude-agent-sdk 0.2.152 preserves ``ProcessError`` (and its structured
+  ``ResultError`` subclass) through ``receive_response()``. Classifying the
+  public exit code removes the old dependency on transport ``_exit_error``;
+  only the TERM/KILL signals sent by ``terminate_process_group`` are hidden.
   """
-  exit_error = transport_exit_error(client)
   return (
-    isinstance(exit_error, ProcessError)
-    and exit_error.exit_code in (-signal.SIGTERM, -signal.SIGKILL)
+    error.exit_code in (-signal.SIGTERM, -signal.SIGKILL)
+  )
+
+
+_UNSTRUCTURED_PROCESS_STDERR = "Check stderr output for details"
+
+
+def _process_error_with_stderr_tail(
+  error: ProcessError,
+  stderr_tail: deque[str],
+) -> str:
+  """Enrich only a public, pre-result process failure with bounded stderr.
+
+  ``ResultError`` carries the CLI's structured terminal result and is therefore
+  already actionable. A bare ``ProcessError`` with the SDK's documented stderr
+  placeholder is the early-start/crash path where the captured tail is the
+  only additional diagnostic available to the owner.
+  """
+  message = str(error)
+  if (
+    isinstance(error, ResultError)
+    or error.stderr != _UNSTRUCTURED_PROCESS_STDERR
+  ):
+    return message
+  tail = "\n".join(stderr_tail).strip()
+  if tail:
+    return f"{message}\nstderr (tail):\n{tail}"
+  return (
+    f"{message}\n(no stderr captured — the CLI was likely killed "
+    "before writing output, e.g. OOM or timeout)"
   )
 
 
@@ -485,11 +454,13 @@ class ActiveClaudeClient:
     # Never signal a retained PGID twice; the kernel can eventually reuse it
     # after the first hard stop.
     self._force_stop_started = False
-    # Set synchronously before interrupt()'s first await. Claude reports both a
-    # Möbius-requested Stop and an unexpected provider interruption as an
-    # error-shaped ResultMessage, so the runner needs this local ownership fact
-    # to keep a deliberate Stop from overwriting its resumable pause note.
-    self._interrupt_requested = False
+    # Who issued `client.interrupt()` this turn, set synchronously before the
+    # first await and sticky until the handle finishes: Claude wraps our own
+    # interrupt and a provider abort in the same error-shaped terminal, so the
+    # runner defuses `stop_reason == "interrupt"` only when an owner is set (an
+    # unrequested abort stays a visible error), and only a "stop" owner keeps
+    # the deliberate Stop's own pause note. Stop always wins over a steer.
+    self._interrupt_owner: Literal["steer", "stop", "card"] | None = None
     # FIFO of mid-turn steer texts: two rapid sends must both reach Claude
     # (both are already persisted to the transcript), so a single slot would
     # silently drop the first. The runner drains the whole list on interrupt.
@@ -511,14 +482,6 @@ class ActiveClaudeClient:
     # text together. Stop's hard `interrupt()` does not consult this — Stop
     # always cuts immediately.
     self._interrupt_in_flight = False
-    # Sticky, per-turn: True once WE (a steer OR an owner Stop) have actually
-    # called `client.interrupt()` this turn. The runner only defuses a
-    # `stop_reason == "interrupt"` terminal into a benign resumable interrupt
-    # when this is set — so the "an interrupt terminal is always our own
-    # interrupt" invariant is ENFORCED, not merely assumed. A CLI/provider
-    # abort we never initiated leaves this False, so a genuine failure still
-    # surfaces as an error instead of being silently masked as "Paused".
-    self._interrupt_issued = False
     self._finished: asyncio.Future[None] = (
       asyncio.get_running_loop().create_future()
     )
@@ -596,9 +559,40 @@ class ActiveClaudeClient:
     # guard no-ops rather than interrupting a torn-down client.
     if not self._interrupt_in_flight and not self._finished.done():
       self._interrupt_in_flight = True
-      self._interrupt_issued = True
+      self._interrupt_owner = self._interrupt_owner or "steer"
       await self._client.interrupt()
     return True
+
+  async def finish_after_owner_card(self) -> None:
+    """End the turn right after a continuation owner-input card commits.
+
+    A saved question / approval / secure-input card is the terminal action of
+    the turn: the owner's answer resumes the chat in a LATER turn, so the model
+    must not emit any more text or tools after the card. That path returns a
+    receipt to the model immediately (unlike native `AskUserQuestion`, which
+    parks in `can_use_tool`), so nothing at the SDK level stops the model from
+    continuing — this fires the same soft interrupt `steer` uses to cut the
+    in-flight generation at its source.
+
+    Signal-only, exactly like `steer`: it never awaits `_finished` (the turn
+    cannot end until the in-flight card tool returns the receipt that triggered
+    this call, so awaiting drain here would deadlock). Tagged `card` so the
+    terminal branch classifies the result as a clean completion — no steer
+    requery (`pending_steer` stays empty) and no resumable "Paused" note; the
+    chat's durable pending-question marker already owns resumption. Defers to a
+    Stop or steer that already owns this turn's interrupt so their semantics
+    win.
+    """
+    if self._finished.done():
+      return
+    if self._interrupt_owner is not None:
+      return
+    self._interrupt_owner = "card"
+    # Collapse a steer that races the card-commit drain window into this cut
+    # rather than firing a second interrupt (mirrors `steer`); the terminal
+    # branch clears the flag.
+    self._interrupt_in_flight = True
+    await self._client.interrupt()
 
   async def interrupt(self) -> None:
     """Interrupts the live run and waits for runner-side drain.
@@ -625,8 +619,7 @@ class ActiveClaudeClient:
     dropping them here: they were never in the transcript, and Stop's own
     clear-and-resend path is what preserves them.
     """
-    self._interrupt_requested = True
-    self._interrupt_issued = True
+    self._interrupt_owner = "stop"
     self.pending_steer = []
     self._steer_user_msgs = []
     self._steer_consume_cids = []
@@ -642,7 +635,18 @@ class ActiveClaudeClient:
 
   @property
   def interrupt_requested(self) -> bool:
-    return self._interrupt_requested
+    """Whether an owner Stop owns this turn's interrupt."""
+    return self._interrupt_owner == "stop"
+
+  @property
+  def interrupt_issued(self) -> bool:
+    """Whether we (a steer or a Stop) issued `client.interrupt()` this turn."""
+    return self._interrupt_owner is not None
+
+  @property
+  def owner_card_interrupt(self) -> bool:
+    """Whether this turn's interrupt is a continuation owner-input card end."""
+    return self._interrupt_owner == "card"
 
   async def stop(self, timeout: float = 2.0) -> bool:
     """Interrupts the SDK run and waits up to `timeout` seconds."""
@@ -694,10 +698,10 @@ class ActiveClaudeClient:
 
 
 def _steer_redirect_message(text: str) -> str:
-  """Frames a Claude steer as a redirect on the still-connected client."""
+  """Frame owner or product context on the still-connected client."""
   return (
-    "The user added this while you were working. Incorporate it and "
-    "continue the same task:\n\n"
+    "New context arrived while you were working. Incorporate it according "
+    "to its stated authority and continue the same task:\n\n"
     f"{text}"
   )
 
@@ -937,35 +941,71 @@ def observe_skill_file_read(
 # turn the owner never opted into (the observed "$32 for a restaurant question").
 # We disable the keyword trigger and drive ultracode purely by the flag, so this
 # reminder carries only behavioural guidance and deliberately contains NO arming
-# keyword. Möbius's turn is one-shot (no post-turn re-invoke), so the agent must
-# await its Workflow within the turn or the fleet's work is lost when the turn ends.
+# keyword. Claude's own background completion wakes the parent inside this same
+# provider session; the runner preserves that follow-up result before teardown.
 _ULTRACODE_REMINDER = (
   "\n\n<system-reminder>You have the Workflow tool for dynamic multi-agent "
   "orchestration this turn. Use it for substantial multi-step work; answer "
-  "trivial turns directly.\n\n"
-  "This runtime gives you exactly ONE turn per message and CANNOT wake you "
-  "after it ends — there is no background notification and no follow-up turn. "
-  "So any Workflow (or background task) you launch must be fully awaited AND its "
-  "result delivered WITHIN this same turn, or the work is lost and the partner "
-  "is left with a dead turn. Concretely: right after launching a Workflow, block "
-  "on it here — call TaskOutput(task_id=..., block=True, timeout=600000) (run "
-  "ToolSearch \"select:TaskOutput\" first if it is not loaded). If that returns "
-  "retrieval_status: timeout while the workflow is still running, call it again "
-  "and keep re-blocking until it finishes — verifying between checks that it is "
-  "still making progress (if it is genuinely stuck, say so and deliver what you "
-  "have rather than silently abandoning it). Then synthesize the result and give "
-  "the full answer in this turn.\n\n"
-  "All of this waiting is invisible harness mechanics. Never tell the partner "
-  "you are waiting, blocking, or polling, and never mention Workflow, "
-  "TaskOutput, subagents, or background tasks in chat. Before you first block, "
-  "write ONE partner-facing sentence about what is being worked on (e.g. "
-  "\"Reviewing all 13 apps now — this takes a few minutes.\"). While blocked, "
-  "write nothing; when TaskOutput returns retrieval_status: timeout, call it "
-  "again immediately with no text in between. Add prose only when you have a new "
-  "finding to report — phrased as progress, not mechanism. NEVER let your final "
-  "output be \"I'll let you know when it's done\" or \"waiting for the workflow "
-  "to finish\" — you will not get another turn to finish.</system-reminder>"
+  "trivial turns directly. Claude's native completion notification returns you "
+  "to this conversation after background work settles; synthesize that result "
+  "before finishing. Native Workflow and Agent work is turn-local: do not "
+  "finish until it has settled and you have synthesized it.</system-reminder>"
 )
+
+# The built-in WebSearch tool appends a standalone "REMINDER: You MUST include
+# the sources above ..." line to every result, telling the model to end its
+# answer with a hand-written "Sources:" list. Möbius already renders each
+# result's links as source pills once per turn
+# (tool_sources.sources_from_websearch_text -> MessageSources), so that list only
+# duplicates them. Both this reminder and the tool's description are compiled
+# into the Claude Code CLI and cannot be edited through the SDK — but the
+# reminder rides in the tool OUTPUT, so a PostToolUse hook can drop it at the
+# source with updatedToolOutput rather than layering a counter-instruction on top
+# of it. (The description's softer nudge cannot be reached this way; if it ever
+# leaks a Sources list on its own we can revisit.)
+_WEBSEARCH_SOURCES_NAG_MARKER = "REMINDER:"
+
+
+def _strip_websearch_sources_nag(tool_response: Any) -> tuple[Any, bool]:
+  """Return ``(new_response, changed)`` with the trailing sources REMINDER gone.
+
+  Only the reminder line is removed; the "Web search results for query" prefix
+  and the ``Links:[...]`` array pill extraction parses are left intact, so the
+  results and their pills are unaffected. The response SHAPE is mirrored (str in
+  -> str out, list in -> list out) so the CLI accepts the replacement instead of
+  rejecting a schema mismatch and silently keeping the original.
+  """
+
+  def _strip_text(text: str) -> tuple[str, bool]:
+    if not isinstance(text, str):
+      return text, False
+    idx = text.rfind("\n" + _WEBSEARCH_SOURCES_NAG_MARKER)
+    if idx == -1 and text.startswith(_WEBSEARCH_SOURCES_NAG_MARKER):
+      idx = 0
+    if idx == -1 or "source" not in text[idx:].lower():
+      return text, False
+    return text[:idx].rstrip(), True
+
+  if isinstance(tool_response, str):
+    return _strip_text(tool_response)
+  if isinstance(tool_response, list):
+    new_items: list[Any] = []
+    changed = False
+    for item in tool_response:
+      if isinstance(item, str):
+        new_text, item_changed = _strip_text(item)
+        new_items.append(new_text)
+        changed = changed or item_changed
+      elif isinstance(item, dict) and isinstance(item.get("text"), str):
+        new_text, item_changed = _strip_text(item["text"])
+        if item_changed:
+          item = {**item, "text": new_text}
+          changed = True
+        new_items.append(item)
+      else:
+        new_items.append(item)
+    return new_items, changed
+  return tool_response, False
 
 
 def _precompact_log_trigger(hook_input: object) -> str | None:
@@ -1056,12 +1096,12 @@ async def run_claude_sdk_turn(
         )
       )
     if run_policy is not None:
-      nested_tools = {
-        "Task", "TaskOutput", "TaskStop", "Workflow", "Workflows", "Agent",
+      top_level_controls = {
+        "create_goal", "update_goal", "get_goal", "request_user_input",
       }
-      if tool_name in nested_tools:
+      if tool_name in top_level_controls:
         return PermissionResultDeny(
-          message="Delegated child tasks cannot launch or manage other agents."
+          message="Delegated child tasks cannot manage the parent Goal."
         )
       if tool_name == "AskUserQuestion":
         return PermissionResultDeny(
@@ -1069,17 +1109,6 @@ async def run_claude_sdk_turn(
             "Delegated child tasks cannot park on an owner question; return the "
             "blocker to the parent instead."
           )
-        )
-      if run_policy.scope == "read" and tool_name in {
-        "Bash", "Write", "Edit", "MultiEdit", "NotebookEdit",
-      }:
-        guarded = (
-          _guarded_subagent_bash(input_data) if tool_name == "Bash" else None
-        )
-        if guarded is not None:
-          return PermissionResultAllow(updated_input=guarded)
-        return PermissionResultDeny(
-          message="This delegated task is read-only."
         )
       return PermissionResultAllow(updated_input=input_data)
     # Auto-approve every tool except AskUserQuestion — this preserves
@@ -1184,6 +1213,30 @@ async def run_claude_sdk_turn(
       )
     return {"continue_": True}
 
+  # Fires after every WebSearch result. Strips the CLI's appended
+  # "REMINDER: ... sources ..." line at the source (see
+  # _strip_websearch_sources_nag) so the model is not told to append a duplicate
+  # hand-written "Sources:" list on top of the shell's pills. No-ops — leaving
+  # the original output untouched — when there is nothing to strip.
+  async def websearch_sources_hook(
+    hook_input: dict[str, Any],
+    tool_use_id: str | None,
+    context: dict[str, Any],
+  ) -> dict[str, Any]:
+    del tool_use_id, context
+    new_response, changed = _strip_websearch_sources_nag(
+      hook_input.get("tool_response")
+    )
+    if not changed:
+      return {"continue_": True}
+    return {
+      "continue_": True,
+      "hookSpecificOutput": {
+        "hookEventName": "PostToolUse",
+        "updatedToolOutput": new_response,
+      },
+    }
+
   # Per-chat model/effort overrides flow in via `agent_settings`
   # (merged in chat.py from global defaults + Chat.agent_settings_json).
   # Both are session-wide on the SDK but Möbius spawns one `query()`
@@ -1243,6 +1296,11 @@ async def run_claude_sdk_turn(
       "resume": session_id if session_id is not None else None,
       "cwd": cwd,
       "env": base_env,
+      # Skills may intentionally load user/project settings, but MCP servers
+      # remain platform-owned. Keep the two concerns independent so enabling
+      # native skills cannot silently add an unreviewed server beside the
+      # explicit Möbius control and connector set below.
+      "strict_mcp_config": True,
       "setting_sources": (
         ["user", "project"] if skills_enabled else None
       ),
@@ -1256,23 +1314,27 @@ async def run_claude_sdk_turn(
         "PreToolUse": [
           HookMatcher(matcher=None, hooks=[keepalive_hook]),
         ],
+        "PostToolUse": [
+          HookMatcher(matcher="WebSearch", hooks=[websearch_sources_hook]),
+        ],
         "PreCompact": [
           HookMatcher(matcher=None, hooks=[precompact_hook]),
         ],
       },
     }
     if run_policy is not None:
-      options_kwargs.update({
+      options_kwargs["disallowed_tools"].extend([
+        "AskUserQuestion", "create_goal", "update_goal", "get_goal",
+        "request_user_input",
+      ])
+      restricted_options = {}
+      if run_policy is not None:
+        restricted_options.update({
         "permission_mode": (
           "plan" if run_policy.scope == "read" else "acceptEdits"
         ),
-        "disallowed_tools": [
-          "AskUserQuestion", "Task", "TaskOutput", "TaskStop",
-          "Workflow", "Workflows", "Agent",
-          *_CLAUDE_NATIVE_SCHEDULING_TOOLS,
-        ],
-        "agents": {},
-      })
+        })
+      options_kwargs.update(restricted_options)
     if skills_enabled:
       options_kwargs["skills"] = "all"
     if model_override:
@@ -1299,8 +1361,8 @@ async def run_claude_sdk_turn(
     # would let the argv-visible path alias an unrelated descriptor later.
     connector_config_stack = ExitStack()
     connector_config_handle = None
-    # Every ordinary live agent gets the same provider-neutral coordination
-    # tools, including durable delegated children.
+    # Durable delegated children need the same provider-neutral network tools as
+    # their parent.
     control_server_enabled = True
     try:
       from app.connectors import claude_mcp_config_handle
@@ -1433,44 +1495,39 @@ async def run_claude_sdk_turn(
             usage_state=usage_state,
           )
           if terminal is None:
-            # A steer fires its interrupt synchronously in
-            # ActiveClaudeClient.steer() (a soft interrupt on the same
-            # connected client), so there is no boundary cut to make here — a
-            # steer during a long-running tool call would otherwise sit
-            # buffered until the tool returned. The interrupt's terminal
-            # ResultMessage is handled below, where the drain-then-requery
-            # path seals A1 and re-asks with the buffered steer text.
+            # No boundary cut here: a steer already interrupted in `steer()`;
+            # its terminal ResultMessage drives the requery below.
             continue
           if (
             isinstance(sdk_msg, ResultMessage)
-            and sdk_msg.stop_reason == "interrupt"
+            and active_client.interrupt_issued
             and (
-              active_client._interrupt_issued
-              or active_client.interrupt_requested
+              sdk_msg.stop_reason == "interrupt"
+              # A card commit interrupts WHILE the card tool is the last action,
+              # so the CLI's terminal carries stop_reason `tool_use`/null (its
+              # own `[ede_diagnostic]` names exactly this), not `interrupt`. We
+              # initiated this cut, so classify it by our own ownership flag
+              # rather than the provider's stop_reason, or the raw "Execution
+              # interrupted." error leaks as a red block after the card.
+              or active_client.owner_card_interrupt
             )
           ):
-            # A `stop_reason == "interrupt"` terminal we caused is ONLY ever an
-            # interrupt() WE issued — an owner Stop (`interrupt_requested`) OR a
-            # steer's soft interrupt (`_interrupt_issued`). Either proves we
-            # initiated it; a CLI/provider abort we never issued leaves BOTH
-            # False and keeps its error visible. The SDK wraps both of our cases
-            # in the same error_during_execution envelope ("Execution
-            # interrupted."), so that provider error is never a genuine failure
-            # to surface. Defuse it in every case and preserve usage/cost:
-            #   - a steer with buffered text discards this terminal at the
-            #     requery below, so clearing here is a harmless belt;
-            #   - an owner Stop keeps writing its own resumable note through the
-            #     stop flow (interrupt_requested), so it needs no finalize note;
-            #   - a steer whose interrupt raced turn-end (its text already
-            #     re-queried and drained pending_steer) OR an unexpected CLI
-            #     interrupt ends the turn HERE with nothing left to requery.
-            #     That is not an error — mark it resume_incomplete so the
-            #     finalize seam renders a calm, resumable "Paused" note instead
-            #     of a red "Execution interrupted." error block.
+            # Our own interrupt is not a failure (see `_interrupt_owner`). A
+            # Stop writes its own pause note through the stop flow; a steer
+            # whose interrupt raced turn-end (text already re-queried, nothing
+            # left to requery) ends the turn here as a resumable "Paused".
             terminal["error"] = None
-            terminal["terminal_status"] = "interrupted"
-            if not active_client.interrupt_requested:
-              terminal["resume_incomplete"] = True
+            if active_client.owner_card_interrupt:
+              # A continuation owner-input card is the turn's NATURAL terminal:
+              # the owner's saved answer resumes the chat, so this is a clean
+              # completion — never a resumable "Paused" (which would auto-offer
+              # Resume and race the pending-question wait) and never a steer
+              # requery (`pending_steer` is empty on this path).
+              terminal["terminal_status"] = "completed"
+            else:
+              terminal["terminal_status"] = "interrupted"
+              if not active_client.interrupt_requested:
+                terminal["resume_incomplete"] = True
           # Terminal result: the interrupt cycle (if any) is closed, so a
           # fresh boundary cut may fire on a later turn.
           active_client._interrupt_in_flight = False
@@ -1500,6 +1557,7 @@ async def run_claude_sdk_turn(
           if (
             session_id is not None            # a resume (non-first turn)
             and sdk_msg.stop_reason != "interrupt"  # a clean end, not our interrupt
+            and not active_client.owner_card_interrupt  # nor our card end (may be tool_use/null)
             and not active_client.interrupt_requested  # Stop is terminal
             and not terminal.get("error")     # clean terminal (is_error False)
             and terminal.get("api_error_status") != 429  # not a bare 429/park
@@ -1591,18 +1649,15 @@ async def run_claude_sdk_turn(
           "(the agent stopped without returning a result). Please try again."
         ),
       }
-    except Exception as exc:
-      msg = str(exc)
+    except ProcessError as exc:
       if (
         active_client.interrupt_requested
-        and _claude_process_was_force_stopped(client)
+        and _claude_process_was_force_stopped(exc)
       ):
         # force_stop() SIGTERMs the verified private CLI process group when a
-        # graceful interrupt times out. The SDK's reader converts the typed
-        # ProcessError into a plain Exception before it reaches us, so consult
-        # the still-typed transport outcome rather than matching message text.
-        # WARNING is deliberate: the owner sees a clean interrupted turn, but
-        # operators retain the only evidence a coincident CLI crash leaves.
+        # graceful interrupt times out. Keep the classification constrained to
+        # the public TERM/KILL exit codes; an unrelated failure that races Stop
+        # remains visible to the owner.
         log.warning(
           "Claude process exited during our own stop chat_id=%s: %s",
           chat_id,
@@ -1615,26 +1670,18 @@ async def run_claude_sdk_turn(
           "error": None,
           "terminal_status": "interrupted",
         }
-      # The SDK raises this generic placeholder when the CLI dies before a
-      # structured result (early resume failure, auth, crash, OOM/SIGTERM
-      # kill). Splice in the captured stderr tail ONLY then — gating on the
-      # placeholder keeps _should_retry_without_model's text matching intact
-      # for real structured errors. Empty tail means the process was killed
-      # before writing stderr (the OOM/timeout case).
-      if "Check stderr output for details" in msg:
-        tail = "\n".join(stderr_tail).strip()
-        if tail:
-          msg = f"{msg}\nstderr (tail):\n{tail}"
-        else:
-          msg = (
-            f"{msg}\n(no stderr captured — the CLI was likely killed "
-            "before writing output, e.g. OOM or timeout)"
-          )
       return {
         "session_id": current_session_id,
         "cost_usd": None,
         "usage": None,
-        "error": msg,
+        "error": _process_error_with_stderr_tail(exc, stderr_tail),
+      }
+    except Exception as exc:
+      return {
+        "session_id": current_session_id,
+        "cost_usd": None,
+        "usage": None,
+        "error": str(exc),
       }
     finally:
       # Durability catch-all: persist any steer that was buffered but never

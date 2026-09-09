@@ -34,7 +34,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import and_, update
 from sqlalchemy.orm import Session
 
-from app import fs_locks, models
+from app import fs_locks, models, providers
 from app.chat_start import start_programmatic_chat_turn
 from app.config import get_settings
 from app.contribution_records import (
@@ -267,23 +267,25 @@ def _reclaim_expired(
 
 
 def sweep_expired_leases(db: Session) -> int:
-  """Reclaim expired round leases even when no newer event arrives.
+  """Reclaim every expired round lease, not just the one a fresh claim hits.
 
-  ``claim_for_round`` reclaims lazily when another GitHub event reaches the
-  same record. A round that crashes after the final event would otherwise stay
-  in ``responding`` forever. The runtime supervisor calls this idempotent sweep
-  so the poller's durable attention can be retried. Returns rows reclaimed.
+  ``claim_for_round`` reclaims lazily, which only fires when a *new* GitHub
+  event arrives for the same record. A round that crashed after its claim —
+  where the triggering event was the last one — otherwise wedges the record in
+  ``responding`` forever, returning 409 to every future respond. This periodic
+  sweep (called from ``runtime_supervisors``) frees such rows so the poller's
+  retry latch can re-fire the durable attention. Returns rows reclaimed.
   """
   rows = (
     db.query(models.ContributionAutopilot)
     .filter(
+      # `enabled` mirrors the CAS in `_claim_match`: a disabled row can never
+      # be reclaimed by it, so including one here would retry forever.
       models.ContributionAutopilot.enabled.is_(True),
       models.ContributionAutopilot.state == "responding",
       models.ContributionAutopilot.lease_expires_at.isnot(None),
       models.ContributionAutopilot.lease_expires_at <= now_naive_utc(),
     )
-    .order_by(models.ContributionAutopilot.lease_expires_at.asc())
-    .limit(100)
     .all()
   )
   reclaimed = 0
@@ -788,18 +790,37 @@ def stage_followup_drawer_hidden(
 
 
 def ensure_followup_chat(
-  db: Session, app_id: int, record_id: str, *, title: str, provider: str,
+  db: Session,
+  app_id: int,
+  record_id: str,
+  *,
+  title: str,
+  provider: str,
+  model: str,
+  effort: str | None,
 ) -> str | None:
   """Return the record's dedicated autopilot chat id, creating it once.
 
-  Reuses the stored chat when it still exists; otherwise creates a fresh chat and
-  persists its id on the DB row. The chat is an ordinary owner chat kept out of
-  the drawer (``drawer_hidden``) until an escalation surfaces it. Returns None if
-  there is no autopilot row (should not happen on the claimed path).
+  Reuse preserves one provider/model conversation identity. A changed provider
+  or model starts a fresh hidden chat instead of mutating a transcript or
+  provider session in place. Effort is deliberately a per-turn policy inside
+  one provider/model identity, so a same-model background-setting change is
+  applied to the idle reusable chat. Returns None if there is no autopilot row
+  (which should not happen on the claimed path).
   """
   row = get_row(db, app_id, record_id)
   if row is None:
     return None
+  selection = providers.snapshot_chat_agent_settings(
+    get_settings().data_dir,
+    provider,
+    model=model,
+    effort=effort,
+    fallback_model=providers.DEFAULT_BACKGROUND_MODELS.get(provider),
+  )
+  if selection is None:
+    raise RuntimeError("Autopilot resolved no explicit model for its follow-up chat")
+
   if row.followup_chat_id:
     existing = (
       db.query(models.Chat)
@@ -811,10 +832,30 @@ def ensure_followup_chat(
       .first()
     )
     if existing is not None:
-      if existing.provider != provider:
-        existing.provider = provider
-        db.commit()
-      return existing.id
+      settings = dict(existing.agent_settings_json or {})
+      identity_changed = (
+        existing.provider != provider
+        or settings.get("model") != selection["model"]
+      )
+      if not identity_changed:
+        # Effort is not provider-session identity. Apply the owner's current
+        # same-model background policy while retaining visibility metadata and
+        # the accumulated transcript.
+        for key in ("effort", "effort_by_provider"):
+          if key in selection:
+            settings[key] = selection[key]
+          else:
+            settings.pop(key, None)
+        if settings != (existing.agent_settings_json or {}):
+          existing.agent_settings_json = settings
+          db.commit()
+        return existing.id
+
+      # The previous conversation remains durable history but must not surface
+      # as an orphaned escalation after the record moves to a new identity.
+      settings["drawer_hidden"] = True
+      existing.agent_settings_json = settings
+
   chat = models.Chat(
     id=str(uuid.uuid4()),
     title=title,
@@ -822,31 +863,46 @@ def ensure_followup_chat(
     pending_messages=[],
     provider=provider,
     created_by_app_id=None,
-    agent_settings_json={"drawer_hidden": True},
+    agent_settings_json={**selection, "drawer_hidden": True},
   )
   db.add(chat)
-  db.commit()
-  db.refresh(chat)
   row.followup_chat_id = chat.id
   row.updated_at = now_naive_utc()
   db.commit()
+  db.refresh(chat)
   return chat.id
 
 
-def resolve_round_provider(db: Session) -> str:
-  """Which provider runs follow-up rounds — the owner's background choice."""
-  from app import providers
+def resolve_round_choice(db: Session) -> dict:
+  """Concrete provider/model/effort for unattended follow-up rounds."""
   from app.background_agents import resolve_background_agents
 
   data_dir = get_settings().data_dir
   choices = resolve_background_agents(data_dir)
   primary = choices.get("primary") if isinstance(choices, dict) else None
   if isinstance(primary, dict) and primary.get("provider"):
-    return str(primary["provider"])
+    provider = str(primary["provider"])
+    selection = providers.snapshot_chat_agent_settings(
+      data_dir,
+      provider,
+      model=primary.get("model"),
+      effort=primary.get("effort"),
+      fallback_model=providers.DEFAULT_BACKGROUND_MODELS.get(provider),
+    )
+    if selection is not None:
+      return {"provider": provider, **selection}
   owner = db.query(models.Owner).first()
-  return providers.resolve_default_provider(
+  provider = providers.owner_default_provider(
     data_dir, owner.provider if owner else None,
   )
+  selection = providers.snapshot_chat_agent_settings(
+    data_dir,
+    provider,
+    fallback_model=providers.DEFAULT_BACKGROUND_MODELS.get(provider),
+  )
+  if selection is None:
+    raise RuntimeError("Autopilot resolved no explicit background model")
+  return {"provider": provider, **selection}
 
 
 async def spawn_round_turn(

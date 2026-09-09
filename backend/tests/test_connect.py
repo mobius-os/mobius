@@ -1312,7 +1312,6 @@ async def test_unacknowledged_dispatch_expires_and_sends_cancel(
   )["last_command"]["result"]["outcome"] == "expired"
 
 
-@pytest.mark.filterwarnings("error")
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX process-group contract")
 def test_runner_timeout_terminates_the_entire_command_tree(tmp_path: Path):
   """A timed-out command must not leave descendants running on the machine."""

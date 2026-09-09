@@ -107,9 +107,9 @@ def _delegated_and_top_level_auth(client, owner_token, db):
   )
   top_level_token = auth_mod.create_agent_token(
     chat_ids["top-level"],
-    "lifecycle-boundary-top-run",
     owner.username,
     owner.token_epoch,
+    run_id="lifecycle-boundary-top-run",
   )
   return (
     chat_ids,

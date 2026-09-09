@@ -30,6 +30,11 @@ def _install_start_fakes(
   scheduled = []
   run_calls = []
 
+  monkeypatch.setattr(
+    chat_start,
+    "require_programmatic_chat_model",
+    lambda _chat_id, _provider: "explicit-model",
+  )
   monkeypatch.setattr(chat_start, "mark_starting", lambda _chat_id: True)
   monkeypatch.setattr(
     chat_start,
@@ -139,6 +144,11 @@ async def test_programmatic_start_owns_writer_fence_broadcast_and_spawn(
 
 @pytest.mark.asyncio
 async def test_programmatic_start_does_nothing_when_claim_is_busy(monkeypatch):
+  monkeypatch.setattr(
+    chat_start,
+    "require_programmatic_chat_model",
+    lambda _chat_id, _provider: "explicit-model",
+  )
   monkeypatch.setattr(chat_start, "mark_starting", lambda _chat_id: False)
   monkeypatch.setattr(
     chat_start,

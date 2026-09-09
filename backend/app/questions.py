@@ -27,6 +27,16 @@ resume.
 the type can be shared without dragging this module's globals into
 the runners. This file owns the registry + lifecycle on top of that
 dataclass.
+
+Design note — two ways to pause. `AskUserQuestion` above is an IN-TURN wait:
+the turn's process stays alive, suspended on the future, and the wait is lost
+on restart. A saved owner-input card (request_question / request_approval /
+secure-input) is instead a DURABLE wait — the card and `pending_question_id`
+persist, the turn ENDS so the process is released, and the answer route
+resumes a fresh turn (restart-safe). Because the card's receipt returns to the
+model immediately, the runner interrupts the live turn the moment such a card
+commits, so nothing follows the card; see `ChatEventSink.publish_question` and
+each runner's `finish_after_owner_card`.
 """
 
 from __future__ import annotations
@@ -40,6 +50,88 @@ from app.pending_questions import PendingQuestion
 # import `app.questions` and call `get` / `claim_if` / `cancel` / etc.
 _pending: dict[str, PendingQuestion] = {}
 _cancelled: dict[str, str | None] = {}
+
+
+def accepts_saved_answer(
+  chat,
+  question_id: str | None,
+) -> bool:
+  """Whether an answer to `question_id` should be accepted for this chat.
+
+  Primary signal is the durable `pending_question_id` marker, so an answer
+  lands even when parallel tool/subagent output or a terminal error trails the
+  card, and across a restart. Fallback: a *targeted* answer (a specific
+  question_id) is still honored when the marker has cleared but that exact card
+  is unanswered in the latest turn — answering the card after a Stop is a fresh
+  continuation request, not a stale race. Position-independent; a later user
+  turn (the decision was superseded) is not eligible.
+  """
+  open_id = chat.pending_question_id
+  if open_id is not None:
+    return question_id is None or question_id == open_id
+  if not question_id:
+    return False
+  for msg in reversed(chat.messages or []):
+    if msg.get("hidden"):
+      continue
+    if msg.get("role") != "assistant":
+      return False
+    return any(
+      block.get("type") == "question"
+      and block.get("question_id") == question_id
+      and not block.get("answers")
+      for block in (msg.get("blocks") or [])
+    )
+  return False
+
+
+def saved_question(chat, question_id: str | None) -> dict | None:
+  """Find one exact durable card, including an already acknowledged answer."""
+  if not question_id:
+    return None
+  for message in reversed(chat.messages or []):
+    for block in message.get("blocks") or []:
+      if block.get("type") == "question" and block.get("question_id") == question_id:
+        return block
+  return None
+
+
+def has_quiet_options(card: dict) -> bool:
+  return any(
+    option.get("on_answer") == "close"
+    for question in card.get("questions", [])
+    for option in question.get("options", [])
+  )
+
+
+class AnswerConflict(ValueError):
+  """A saved answer needs an owner-visible correction, not an automatic retry."""
+
+
+def closes_without_reply(card: dict, answers: dict, selections: dict | None) -> bool:
+  """Resolve explicit selections against immutable card options, not prose.
+
+  A mixed answer or free text keeps the normal continuation. Invalid supplied
+  identities are conflicts rather than silently becoming a different action.
+  """
+  if card.get("response_mode") != "continuation" or not selections:
+    return False
+  specs = {question["id"]: question for question in card.get("questions", [])}
+  if not set(selections).issubset(specs):
+    raise AnswerConflict("The selected options do not belong to this question.")
+  quiet = set(selections) == set(specs)
+  for key, selected in selections.items():
+    spec = specs[key]
+    options = {option.get("id"): option for option in spec.get("options", [])}
+    if (not selected or len(set(selected)) != len(selected)
+        or any(identity not in options for identity in selected)):
+      raise AnswerConflict("The selected option is no longer available.")
+    if answers.get(spec["question"]) != ", ".join(options[identity]["label"] for identity in selected):
+      raise AnswerConflict("Your answer does not match the selected options.")
+    quiet = quiet and all(options[identity].get("on_answer") == "close" for identity in selected)
+  if quiet and set(answers) != {spec["question"] for spec in specs.values()}:
+    raise AnswerConflict("The answer does not match this question card.")
+  return quiet
 
 
 def open_continuation_question(chat, question_id: str | None) -> dict | None:
@@ -57,6 +149,32 @@ def open_continuation_question(chat, question_id: str | None) -> dict | None:
           and block.get("response_mode") == "continuation"
           and not block.get("answers")):
         return block
+  return None
+
+
+def continuation_question_owner_run_id(
+  chat, question_id: str | None,
+) -> str | None:
+  """Return the run identity that durably authored an open continuation card."""
+  if not question_id or chat.pending_question_id != question_id:
+    return None
+  return saved_question_owner_run_id(chat, question_id)
+
+
+def saved_question_owner_run_id(chat, question_id: str | None) -> str | None:
+  """Resolve the exact author even after its card has been stopped or closed."""
+  if not question_id:
+    return None
+  for message in reversed(chat.messages or []):
+    if not isinstance(message, dict):
+      continue
+    for block in message.get("blocks") or []:
+      if (block.get("type") == "question"
+          and block.get("question_id") == question_id
+          and block.get("response_mode") == "continuation"
+          and not block.get("answers")):
+        owner = message.get("id")
+        return owner if isinstance(owner, str) and owner else None
   return None
 
 

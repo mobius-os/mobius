@@ -1,0 +1,284 @@
+{
+  "description": "Read-only snapshot 2026-09-08 after incident recovery. Before-incident fixture selects original applied_at < 2026-09-08; later rows include partial failed-startup completions. Ledger metadata only.",
+  "rows": [
+    {
+      "version": "0001_legacy_schema_convergence",
+      "applied_at": "2026-07-31 14:59:04.056841"
+    },
+    {
+      "version": "0002_chat_run_goal_objective",
+      "applied_at": "2026-07-31 14:59:04.084480"
+    },
+    {
+      "version": "0003_chat_run_root_identity",
+      "applied_at": "2026-08-01 22:30:54.734463"
+    },
+    {
+      "version": "data_0001_legacy_platform_apps",
+      "applied_at": "2026-08-01 22:31:06.155407"
+    },
+    {
+      "version": "0004_app_identity_required",
+      "applied_at": "2026-08-02 22:00:27.927664"
+    },
+    {
+      "version": "0005_connectors",
+      "applied_at": "2026-08-04 00:48:49.854331"
+    },
+    {
+      "version": "0006_chat_has_messages",
+      "applied_at": "2026-08-04 00:48:53.301875"
+    },
+    {
+      "version": "0006_connector_capability_identity",
+      "applied_at": "2026-08-04 08:07:51.522803"
+    },
+    {
+      "version": "0007_chat_has_messages",
+      "applied_at": "2026-08-04 08:07:51.541746"
+    },
+    {
+      "version": "0008_converge_interim_connector_schema",
+      "applied_at": "2026-08-04 11:27:41.164160"
+    },
+    {
+      "version": "0009_chat_search_documents",
+      "applied_at": "2026-08-04 11:27:41.727861"
+    },
+    {
+      "version": "0008_chat_search_documents",
+      "applied_at": "2026-08-05 01:50:03.302825"
+    },
+    {
+      "version": "0009_app_connections_manage",
+      "applied_at": "2026-08-05 01:50:03.347755"
+    },
+    {
+      "version": "0010_chat_pending_question_id",
+      "applied_at": "2026-08-05 22:52:11.864160"
+    },
+    {
+      "version": "0011_delegation_parent_wake",
+      "applied_at": "2026-08-05 22:52:11.895594"
+    },
+    {
+      "version": "0012_connector_oauth_gcloud",
+      "applied_at": "2026-08-08 14:05:34.376934"
+    },
+    {
+      "version": "0013_app_public_runtime",
+      "applied_at": "2026-08-15 21:43:56.632838"
+    },
+    {
+      "version": "0013_app_hosted_publication",
+      "applied_at": "2026-08-18 12:32:07.117022"
+    },
+    {
+      "version": "0014_chat_run_goal_plan",
+      "applied_at": "2026-08-18 13:48:11.757929"
+    },
+    {
+      "version": "0015_chat_run_goal_identity",
+      "applied_at": "2026-08-19 00:45:12.723993"
+    },
+    {
+      "version": "0016_chat_retention_orphan_repair",
+      "applied_at": "2026-08-20 03:34:16.228197"
+    },
+    {
+      "version": "0017_chat_goal_dismissal",
+      "applied_at": "2026-08-22 21:20:00.413595"
+    },
+    {
+      "version": "0018_app_connect_manage",
+      "applied_at": "2026-08-23 10:07:39.008245"
+    },
+    {
+      "version": "0019_explicit_legacy_chat_models",
+      "applied_at": "2026-08-23 13:53:46.012642"
+    },
+    {
+      "version": "0020_app_project_templates",
+      "applied_at": "2026-08-23 17:46:51.116480"
+    },
+    {
+      "version": "0021_project_chat_collection",
+      "applied_at": "2026-08-23 17:46:51.170193"
+    },
+    {
+      "version": "0022_project_artifacts",
+      "applied_at": "2026-08-23 17:46:51.188084"
+    },
+    {
+      "version": "0023_retire_restart_resume_toggle",
+      "applied_at": "2026-08-23 22:36:48.796766"
+    },
+    {
+      "version": "0024_owner_auth_mode",
+      "applied_at": "2026-08-25 01:20:30.325517"
+    },
+    {
+      "version": "0025_chat_active_assistant_identity",
+      "applied_at": "2026-08-25 16:58:52.790472"
+    },
+    {
+      "version": "0026_project_color",
+      "applied_at": "2026-08-25 16:58:52.817407"
+    },
+    {
+      "version": "0027_shared_app_retention",
+      "applied_at": "2026-08-28 09:52:51.988664"
+    },
+    {
+      "version": "0028_shared_app_path_state",
+      "applied_at": "2026-08-28 09:52:52.017214"
+    },
+    {
+      "version": "0029_project_artifact_drawer_state",
+      "applied_at": "2026-08-28 09:52:52.029619"
+    },
+    {
+      "version": "0030_attached_delegation_work",
+      "applied_at": "2026-08-29 12:31:05.925995"
+    },
+    {
+      "version": "0031_chat_app_artifacts",
+      "applied_at": "2026-08-29 14:18:27.248223"
+    },
+    {
+      "version": "0032_explicit_active_chat_models",
+      "applied_at": "2026-08-29 18:43:45.109288"
+    },
+    {
+      "version": "0033_repair_post_0032_model_gaps",
+      "applied_at": "2026-08-29 21:06:00.231852"
+    },
+    {
+      "version": "0034_chat_run_goal_identity_index",
+      "applied_at": "2026-08-30 12:41:06.627635"
+    },
+    {
+      "version": "0035_agent_coordination_rooms",
+      "applied_at": "2026-09-01 07:52:38.491968"
+    },
+    {
+      "version": "0036_agent_coordination_send_identity",
+      "applied_at": "2026-09-01 20:35:05.975414"
+    },
+    {
+      "version": "0037_agent_coordination_send_target",
+      "applied_at": "2026-09-01 20:35:06.021148"
+    },
+    {
+      "version": "0038_chat_wait_condition_owner",
+      "applied_at": "2026-09-02 23:15:59.143167"
+    },
+    {
+      "version": "0039_agent_work_claim_history",
+      "applied_at": "2026-09-07 20:21:54.842688"
+    },
+    {
+      "version": "0040_provider_execution_admission",
+      "applied_at": "2026-09-07 22:22:21.442863"
+    },
+    {
+      "version": "0041_app_runtime_revision",
+      "applied_at": "2026-09-07 22:22:21.476764"
+    },
+    {
+      "version": "0016_app_connect_manage",
+      "applied_at": "2026-09-08 11:41:25.734194"
+    },
+    {
+      "version": "0017_retire_restart_resume_toggle",
+      "applied_at": "2026-09-08 11:41:25.759376"
+    },
+    {
+      "version": "0018_explicit_legacy_chat_models",
+      "applied_at": "2026-09-08 11:41:29.793528"
+    },
+    {
+      "version": "0019_chat_active_assistant_identity",
+      "applied_at": "2026-09-08 11:41:30.077382"
+    },
+    {
+      "version": "0023_project_color",
+      "applied_at": "2026-09-08 11:41:30.104582"
+    },
+    {
+      "version": "0024_chat_goal_dismissal",
+      "applied_at": "2026-09-08 11:41:30.141961"
+    },
+    {
+      "version": "0025_attached_delegation_work",
+      "applied_at": "2026-09-08 11:41:30.236063"
+    },
+    {
+      "version": "0026_chat_wait_condition_owner",
+      "applied_at": "2026-09-08 11:41:30.256796"
+    },
+    {
+      "version": "0027_chat_run_goal_identity_index",
+      "applied_at": "2026-09-08 11:41:30.285694"
+    },
+    {
+      "version": "0028_agent_coordination_rooms",
+      "applied_at": "2026-09-08 11:41:30.318610"
+    },
+    {
+      "version": "0029_agent_coordination_send_identity",
+      "applied_at": "2026-09-08 11:41:30.339638"
+    },
+    {
+      "version": "0030_agent_coordination_send_target",
+      "applied_at": "2026-09-08 11:41:30.390729"
+    },
+    {
+      "version": "0042_linked_app_project_runtime",
+      "applied_at": "2026-09-08 12:35:31.220039"
+    }
+  ],
+  "canonical_completed_before_incident": [
+    "0001_legacy_schema_convergence",
+    "0002_chat_run_goal_objective",
+    "0003_chat_run_root_identity",
+    "0004_app_identity_required",
+    "0005_connectors",
+    "0006_connector_capability_identity",
+    "0007_chat_has_messages",
+    "0008_chat_search_documents",
+    "0009_app_connections_manage",
+    "0010_chat_pending_question_id",
+    "0011_delegation_parent_wake",
+    "0012_connector_oauth_gcloud",
+    "0013_app_hosted_publication",
+    "0014_chat_run_goal_plan",
+    "0015_chat_run_goal_identity",
+    "0016_app_connect_manage",
+    "0017_retire_restart_resume_toggle",
+    "0018_explicit_legacy_chat_models",
+    "0019_chat_active_assistant_identity",
+    "0020_app_project_templates",
+    "0021_project_chat_collection",
+    "0022_project_artifacts",
+    "0023_project_color",
+    "0024_chat_goal_dismissal",
+    "0025_attached_delegation_work",
+    "0026_chat_wait_condition_owner",
+    "0027_chat_run_goal_identity_index",
+    "0028_agent_coordination_rooms",
+    "0029_agent_coordination_send_identity",
+    "0030_agent_coordination_send_target",
+    "0031_chat_retention_orphan_repair",
+    "0032_owner_auth_mode",
+    "0033_shared_app_retention",
+    "0034_shared_app_path_state",
+    "0035_project_artifact_drawer_state",
+    "0036_chat_app_artifacts",
+    "0037_explicit_active_chat_models",
+    "0038_repair_active_chat_model_gaps",
+    "0039_agent_work_claim_history",
+    "0040_provider_execution_admission",
+    "0041_app_runtime_revision"
+  ]
+}

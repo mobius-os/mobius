@@ -258,12 +258,26 @@ def test_next_real_runner_uses_target_fresh_session_and_handoff(
   )
   monkeypatch.setattr(runner_path, _runner)
   create_broadcast(chat_id)
+  run_token = alloc_run_token()
+  get_writer().submit(StartTurn(
+    chat_id=chat_id,
+    run_token=run_token,
+    user_msg={
+      "role": "user",
+      "content": "ACTUAL NEXT REQUEST",
+      "ts": 1,
+      "cid": f"message-{chat_id}",
+    },
+    title_source="ACTUAL NEXT REQUEST",
+    default_provider=target_provider,
+  )).result(timeout=5)
   asyncio.run(chat_mod._run_chat_impl(
     messages=[schemas.ChatMessage(role="user", content="ACTUAL NEXT REQUEST")],
     chat_id=chat_id,
     session_id=None,
     provider_id=target_provider,
     run_gen=chat_mod.current_run_generation(chat_id),
+    run_token=run_token,
   ))
 
   assert captured["session_id"] is None

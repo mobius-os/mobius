@@ -15,7 +15,6 @@ import json
 import os
 import subprocess
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import patch, AsyncMock, MagicMock
 from urllib.parse import urlparse
 
@@ -72,32 +71,6 @@ def _make_response(status: int, body: bytes, headers: dict | None = None):
   r.headers = headers or {}
   r.json = lambda: json.loads(body.decode("utf-8"))
   return r
-
-
-def test_manifest_metadata_updates_project_templates():
-  """The shared metadata owner retains app-declared project templates."""
-  from app.install import _apply_manifest_metadata
-
-  app = SimpleNamespace(
-    cross_app_access="none",
-    share_with_apps="none",
-    chat_log_access="none",
-    project_templates_json=[{"id": "old-template"}],
-  )
-  templates = [{"id": "new-template", "name": "New template"}]
-
-  _apply_manifest_metadata(
-    app,
-    manifest={
-      "version": "2.0.0",
-      "project_templates": templates,
-    },
-    canonical_manifest_url="https://example.test/mobius.json",
-    capability_contract={},
-    entry_source=JSX,
-  )
-
-  assert app.project_templates_json == templates
 
 
 class _StreamCtx:
@@ -3896,21 +3869,14 @@ def test_verified_publication_handoff_connects_identity_across_source_conflict(
   assert result.mode == "conflict"
   assert result.app.id == app_id
   assert entry.read_text() == local
-  assert result.app.version == "1.0.0"
+  assert result.app.version == "2.0.0"
   assert result.app.manifest_url == (
     base.rstrip("/") + "#manifest-id=publication-conflict"
   )
-  assert result.app.manage_apps is False
-  assert result.app.connect_manage is False
-  assert result.app.cross_app_access == "none"
-  assert result.app.share_with_apps == "none"
-  receipt = install.read_pending_conflict_update_receipt(
-    source,
-    app_id=app_id,
-    upstream_commit=result.app.upstream_commit,
-  )
-  assert receipt is not None
-  assert receipt["conflict_paths"] == ["index.jsx"]
+  assert result.app.manage_apps is True
+  assert result.app.connect_manage is True
+  assert result.app.cross_app_access == "read"
+  assert result.app.share_with_apps == "read"
 
 
 def test_core_app_store_self_update_overwrites_local_conflict(
@@ -5046,6 +5012,102 @@ def test_synthetic_app_with_accidental_origin_restores_ref_and_updates(
   ).returncode == 0
 
 
+def test_catalog_app_rebinds_equal_local_tree_from_synthetic_history(
+  client, auth, tmp_path, bypass_url_validation,
+):
+  """An installed catalog app may gain its real origin after a synthetic install.
+
+  When its complete local tree already equals the canonical origin tip, that
+  equality is sufficient to repair the unrelated installer lineage without
+  discarding a byte or falling back to another synthetic update.
+  """
+  base = (
+    "https://raw.githubusercontent.com/mobius-os/"
+    "app-catalog-rebind/main/"
+  )
+  manifest = {
+    "id": "catalog-rebind",
+    "name": "Catalog rebind",
+    "version": "1.0.0",
+    "description": "Catalog app with legacy installer history",
+    "entry": "index.jsx",
+    "source_files": ["cards.js"],
+    "permissions": {"cross_app_access": "none", "share_with_apps": "none"},
+  }
+  index_v1 = "import './cards.js'\nexport default () => <div>V1</div>\n"
+  cards_v1 = "export const card = 'V1'\n"
+  responses_v1 = {
+    base + "mobius.json": (200, json.dumps(manifest).encode()),
+    base + "index.jsx": (200, index_v1.encode()),
+    base + "cards.js": (200, cards_v1.encode()),
+  }
+  with patch(
+    "app.install.httpx.AsyncClient",
+    side_effect=_fake_async_client(responses_v1),
+  ), patch("app.install._derive_repo_ref", return_value=None):
+    installed = client.post(
+      "/api/apps/install", headers=auth,
+      json={"manifest_url": base + "mobius.json"},
+    )
+  assert installed.status_code == 201, installed.text
+
+  src = Path(get_settings().data_dir) / "apps" / "catalog-rebind"
+  synthetic_upstream = app_git.head_sha(src, app_git.UPSTREAM_BRANCH)
+  index_v2 = index_v1.replace("V1", "V2")
+  cards_v2 = cards_v1.replace("V1", "V2")
+  (src / "index.jsx").write_text(index_v2)
+  (src / "cards.js").write_text(cards_v2)
+  app_git.commit_local(src, "apply accepted source")
+
+  work, bare, real_head = _make_clone_fixture(
+    tmp_path, index_v2, cards_v2,
+  )
+  # Managed app repositories include the platform-owned ignore file. Mirror
+  # that complete tree in the real origin so this exercises the same exact-tree
+  # proof used to repair an installed catalog app's lineage.
+  (work / ".gitignore").write_bytes((src / ".gitignore").read_bytes())
+  real_head = _fixture_commit(work, "match managed app tree")
+  subprocess.run(
+    ["git", "-C", str(work), "push", "-q", str(bare), "main"],
+    check=True,
+    env=app_git._git_env(work),
+  )
+  app_git._run(src, "remote", "add", "origin", bare.as_uri())
+  responses_v2 = {
+    base + "mobius.json": (200, json.dumps({
+      **manifest, "version": "2.0.0",
+    }).encode()),
+    base + "index.jsx": (200, index_v2.encode()),
+    base + "cards.js": (200, cards_v2.encode()),
+  }
+  canonical_origin = (
+    "https://github.com/mobius-os/app-catalog-rebind.git"
+  )
+  with patch(
+    "app.install.httpx.AsyncClient",
+    side_effect=_fake_async_client(responses_v2),
+  ), patch(
+    "app.install._derive_repo_ref", return_value=(bare.as_uri(), "main"),
+  ), patch(
+    "app.install.app_git.origin_url", return_value=canonical_origin,
+  ):
+    updated = client.post(
+      "/api/apps/install", headers=auth,
+      json={"manifest_url": base + "mobius.json"},
+    )
+
+  assert updated.status_code == 201, updated.text
+  assert updated.json()["mode"] == "update"
+  assert (src / "index.jsx").read_text() == index_v2
+  assert (src / "cards.js").read_text() == cards_v2
+  assert app_git.head_sha(src, app_git.UPSTREAM_BRANCH) == real_head
+  assert real_head != synthetic_upstream
+  assert app_git._run(
+    src, "merge-base", "--is-ancestor", real_head, app_git.LOCAL_BRANCH,
+    check=False,
+  ).returncode == 0
+
+
 def test_multifile_install_writes_siblings_and_bundles(
   client, auth, bypass_url_validation,
 ):
@@ -5781,3 +5843,71 @@ def test_update_check_accepts_app_token_with_manage_apps_for_other_app(
   payload = res.json()
   assert payload["update_available"] is False
   assert payload["upstream_version"] == "1.0.0"
+
+
+def test_static_only_store_reinstall_publishes_a_distinct_runtime(client, auth, db, bypass_url_validation):
+  """Generated assets have their own publication identity, not the source SHA."""
+  from app.applied_app_runtime import runtime_root
+
+  base = "https://raw.githubusercontent.com/x/runtime-static/main/"
+  manifest = {
+    "id": "runtime-static", "name": "Runtime static", "version": "1.0.0",
+    "description": "Generated assets", "entry": "index.jsx", "permissions": {},
+    "static_assets": {"asset.txt": "build/asset.txt"},
+  }
+
+  def install(content):
+    responses = {
+      base + "mobius.json": (200, json.dumps(manifest).encode()),
+      base + "index.jsx": (200, JSX.encode()),
+      base + "build/asset.txt": (200, content),
+    }
+    with patch("app.install.httpx.AsyncClient", side_effect=_fake_async_client(responses)):
+      result = client.post("/api/apps/install", headers=auth,
+                           json={"manifest_url": base + "mobius.json"})
+    assert result.status_code == 201, result.text
+    return result.json()["id"]
+
+  app_id = install(b"first assets")
+  row = db.get(models.App, app_id)
+  first_runtime = runtime_root(row)
+  first_source_tree = app_git.read_ref_tree(row.source_dir, row.source_commit)
+  install(b"second assets")
+  db.refresh(row)
+  assert app_git.read_ref_tree(row.source_dir, row.source_commit) == first_source_tree
+  assert runtime_root(row) != first_runtime
+  assert (first_runtime / "static" / "asset.txt").read_bytes() == b"first assets"
+  response = client.get(f"/app-assets/by-id/{app_id}/asset.txt")
+  assert response.status_code == 200
+  assert response.content == b"second assets"
+
+
+def test_ordinary_store_source_apply_preserves_package_assets_and_runtime_manifest(client, auth, db, bypass_url_validation):
+  from app.applied_app_runtime import runtime_root
+
+  base = "https://raw.githubusercontent.com/x/runtime-store-apply/main/"
+  manifest = {
+    "id": "runtime-store-apply", "name": "Runtime store apply", "version": "1.0.0",
+    "description": "Generated assets", "entry": "index.jsx", "permissions": {},
+    "static_assets": {"asset.txt": "build/asset.txt"},
+  }
+  responses = {
+    base + "mobius.json": (200, json.dumps(manifest).encode()),
+    base + "index.jsx": (200, JSX.encode()),
+    base + "build/asset.txt": (200, b"accepted static"),
+  }
+  with patch("app.install.httpx.AsyncClient", side_effect=_fake_async_client(responses)):
+    installed = client.post("/api/apps/install", headers=auth,
+                            json={"manifest_url": base + "mobius.json"})
+  assert installed.status_code == 201, installed.text
+  row = db.get(models.App, installed.json()["id"])
+  old_manifest = (runtime_root(row) / "mobius.json").read_bytes()
+  source = Path(row.source_dir)
+  (source / "index.jsx").write_text("export default () => <div>new code</div>")
+  (source / "mobius.json").write_text(json.dumps({**manifest, "name": "Unaccepted metadata"}))
+  (source / "static" / "asset.txt").write_text("draft static output")
+  applied = client.post("/api/apps/apply", headers=auth, json={"source_dir": str(source)})
+  assert applied.status_code == 200, applied.text
+  db.refresh(row)
+  assert (runtime_root(row) / "mobius.json").read_bytes() == old_manifest
+  assert client.get(f"/app-assets/by-id/{row.id}/asset.txt").content == b"accepted static"

@@ -23,6 +23,7 @@ import urllib.parse
 import urllib.request
 
 DB_PATH = "/data/db/ultimate.db"
+DATA_DIR = "/data"
 MEM_STATE = "/data/shared/memory/app-state"
 MEM_RUN_STATUS = os.path.join(MEM_STATE, "run-status.json")
 MEM_RUN_LOG = os.path.join(MEM_STATE, "run-log")
@@ -33,10 +34,6 @@ MEM_RECALL_AUDIT = os.path.join(MEM_STATE, "recall-audit")
 MEM_REPOSITORY = "/data/shared/memory/repository"
 MEMORY_SKILL = "/data/shared/skills/memory.md"
 MEMORY_RUNNER = "/data/apps/memory/memory_runner.py"
-REFLECTION_DIR = "/data/apps/reflection"
-REFLECTION_METRICS = os.path.join(REFLECTION_DIR, "reflection-run-metrics.jsonl")
-REFLECTION_RUNS = os.path.join(REFLECTION_DIR, "runs")
-TOOL_FRICTION = os.path.join(REFLECTION_DIR, "tool_friction.py")
 
 def now_utc():
     return dt.datetime.now(dt.timezone.utc)
@@ -61,15 +58,62 @@ def api_json(path):
 
 def installed_app(slug):
     apps = api_json("/api/apps/")
-    if not isinstance(apps, list):
-        return None
-    return next(
+    if isinstance(apps, list):
+        match = next(
         (
             app for app in apps
             if isinstance(app, dict) and app.get("slug") == slug
         ),
         None,
-    )
+        )
+        if match is not None:
+            return match
+    con = open_db()
+    if con is None:
+        return None
+    try:
+        row = con.execute(
+            "select id, slug, name, source_dir from apps "
+            "where slug=? and deleted_at is null",
+            (slug,),
+        ).fetchone()
+        if row is None:
+            return None
+        return {
+            "id": row[0], "slug": row[1], "name": row[2],
+            "source_dir": row[3],
+        }
+    except sqlite3.Error:
+        return None
+    finally:
+        con.close()
+
+
+def reflection_paths():
+    """Resolve source-owned code and numeric-id-owned run data separately."""
+    app = installed_app("reflection")
+    if not isinstance(app, dict):
+        return None
+    app_id = app.get("id")
+    if isinstance(app_id, bool):
+        return None
+    try:
+        app_id = int(app_id)
+    except (TypeError, ValueError):
+        return None
+    if app_id <= 0:
+        return None
+    source_dir = app.get("source_dir")
+    if not isinstance(source_dir, str) or not os.path.isabs(source_dir):
+        return None
+    storage_dir = os.path.join(DATA_DIR, "apps", str(app_id))
+    return {
+        "source_dir": source_dir,
+        "storage_dir": storage_dir,
+        "metrics": os.path.join(storage_dir, "reflection-run-metrics.jsonl"),
+        "runs": os.path.join(storage_dir, "runs"),
+        "tool_friction": os.path.join(source_dir, "tool_friction.py"),
+    }
 
 
 def latest_cron_outcome(app_id, hours=168):
@@ -448,13 +492,18 @@ def section_memory_writer_packet():
 # --------------------------------------------------------------------------- #
 # Section: Reflection nightly agent
 # --------------------------------------------------------------------------- #
-def section_reflection(limit):
+def section_reflection(limit, paths=None):
     sub("REFLECTION — nightly run agent")
+
+    paths = reflection_paths() if paths is None else paths
+    if paths is None:
+        print("  (Reflection app is not installed)")
+        return
 
     runs = []
     recent = []
     try:
-        with open(REFLECTION_METRICS) as fh:
+        with open(paths["metrics"]) as fh:
             for line in fh:
                 line = line.strip()
                 if line:
@@ -488,27 +537,29 @@ def section_reflection(limit):
         for row in recent
         if len(str(row.get("started_at") or "")) >= 10
     ))
-    if not run_days and os.path.isdir(REFLECTION_RUNS):
+    if not run_days and os.path.isdir(paths["runs"]):
         run_days = sorted(
-            day for day in os.listdir(REFLECTION_RUNS)
-            if os.path.isdir(os.path.join(REFLECTION_RUNS, day))
+            day for day in os.listdir(paths["runs"])
+            if os.path.isdir(os.path.join(paths["runs"], day))
         )[-limit:]
     print(f"  artifacts for recent runs ({len(run_days)} days):")
     for day in run_days:
-        directory = os.path.join(REFLECTION_RUNS, day)
+        directory = os.path.join(paths["runs"], day)
         files = sorted(os.listdir(directory)) if os.path.isdir(directory) else []
         print(f"    {day}: {', '.join(files) if files else '(empty)'}")
 
 
-def section_tool_friction(hours):
+def section_tool_friction(hours, paths=None):
     """Print the shared mechanical-friction baseline without re-scanning here."""
     sub(f"TOOL FRICTION — recurring mechanical work (last {hours}h)")
-    if not os.path.isfile(TOOL_FRICTION):
+    paths = reflection_paths() if paths is None else paths
+    tool_friction = paths.get("tool_friction") if paths is not None else None
+    if not tool_friction or not os.path.isfile(tool_friction):
         print("  (tool-friction collector not installed)")
         return
     try:
         result = subprocess.run(
-            ["python3", TOOL_FRICTION, "--hours", str(hours)],
+            ["python3", tool_friction, "--hours", str(hours)],
             capture_output=True,
             text=True,
             timeout=30,
@@ -617,7 +668,7 @@ def section_skill_loads(hours):
 # --------------------------------------------------------------------------- #
 # Section: optional focus chat
 # --------------------------------------------------------------------------- #
-def section_focus_chat(con, chat_id):
+def section_focus_chat(con, chat_id, paths=None):
     sub(f"FOCUS CHAT — {chat_id}")
     if not con:
         print("  (chat DB unavailable)")
@@ -658,8 +709,10 @@ def section_focus_chat(con, chat_id):
         print("  memory recall: no read-trace for this chat")
 
     fork = "fork-chat.sh" if not session else "fork-session.sh"
-    print(f"  coach with: /data/apps/reflection/{fork} "
-          f"{chat_id if fork == 'fork-chat.sh' else session + ' <cwd>'} \"<coaching-prompt>\"")
+    target = chat_id if fork == "fork-chat.sh" else f"{provider or 'claude'} {session} <cwd>"
+    source_dir = (paths or {}).get("source_dir") or "/data/apps/reflection"
+    print(f"  coach with: {source_dir}/{fork} "
+          f"{target} \"<coaching-prompt>\"")
 
 
 def main():
@@ -684,12 +737,13 @@ def main():
     section_memory(args.limit)
     if args.memory_writer_packet:
         section_memory_writer_packet()
-    section_reflection(args.limit)
-    section_tool_friction(args.hours)
+    paths = reflection_paths()
+    section_reflection(args.limit, paths)
+    section_tool_friction(args.hours, paths)
     section_read_traces(con, args.hours, args.traces)
     section_skill_loads(args.hours)
     if args.chat_id:
-        section_focus_chat(con, args.chat_id)
+        section_focus_chat(con, args.chat_id, paths)
 
     if con:
         con.close()

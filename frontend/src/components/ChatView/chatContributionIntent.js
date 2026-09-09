@@ -115,6 +115,7 @@ export function contributionStartFailureOutcome({
 
 export function chatChangesPrimaryAction(overview) {
   if (overview?.workState === 'active') return null
+  if (overview?.lifecycleAvailable === false) return null
   const counts = overview?.counts || {}
   if (counts.submitting > 0) return null
   const kinds = [
@@ -143,6 +144,45 @@ export function chatChangesPrimaryAction(overview) {
     description: 'Refresh open pull requests and prepare any newer work that belongs with them.',
   }
   return null
+}
+
+/**
+ * One outcome chooser owns the chat-level journey. Review is always local
+ * inspection, Prepare spends only when private work remains, and Merge names
+ * the desired end state while retaining the existing exact public gates.
+ */
+export function chatContributionOutcomeActions(overview, preparedAction = null) {
+  if (overview?.workState === 'active') return null
+  if (overview?.lifecycleAvailable === false) return null
+  const counts = overview?.counts || {}
+  if (Number(counts.submitting || 0) > 0) return null
+  const pending = ['unsorted', 'prepared', 'open', 'attention']
+    .some(key => Number(counts[key] || 0) > 0)
+  if (!pending) return null
+  const preparationNeeded = Number(counts.unsorted || 0) > 0
+    || Number(counts.attention || 0) > 0
+    || Number(counts.open || 0) > 0
+    || preparedAction?.kind === 'fix-prepared'
+  return {
+    review: {
+      kind: 'review-outcome',
+      label: 'Review',
+      description: 'Inspect the exact diffs. Nothing changes.',
+    },
+    prepare: {
+      kind: 'prepare-outcome',
+      label: 'Prepare',
+      disabled: !preparationNeeded,
+      description: preparationNeeded
+        ? 'Refresh upstream and ready the work privately.'
+        : 'This exact work is already prepared.',
+    },
+    merge: {
+      kind: 'merge-outcome',
+      label: 'Merge',
+      description: 'Take the full cycle through each exact approval checkpoint.',
+    },
+  }
 }
 
 export function preparedChangesPrimaryAction(values, { connected } = {}) {

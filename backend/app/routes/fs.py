@@ -85,9 +85,12 @@ _GIT_LIST_CAP = 200  # per-category status list cap; counts stay exact
 # `.storage-meta` is the one non-secret entry — it's the storage layer's
 # internal MIME-sidecar tree (routes/storage.py), kept out of the owner's
 # File Explorer so it can't be mistaken for app data or hand-edited (the card
-# 085 contract that sidecars never leak into listings or agent edits). The DB
-# stays *listable* (size visible) but not raw-readable — the host-side backup
-# flow is the right channel for a consistent copy.
+# 085 contract that sidecars never leak into listings or agent edits).
+# `.contribution-runtime` contains server-owned publication receipts and
+# retained retry requests. Those capabilities deliberately live outside app
+# storage and must not become app-writable again through this privileged API.
+# The DB stays *listable* (size visible) but not raw-readable — the host-side
+# backup flow is the right channel for a consistent copy.
 _DENY_RELPATHS = (
   "cli-auth",
   "service-token.txt",
@@ -97,6 +100,7 @@ _DENY_RELPATHS = (
   ".env",
   "db/ultimate.db",
   ".storage-meta",
+  ".contribution-runtime",
 )
 # Defense in depth: a secret-shaped filename anywhere in the tree is denied,
 # in case one is copied outside its canonical home. The two `.recovery-*`
@@ -133,8 +137,27 @@ def _rel_to_root(resolved: Path, root: Path) -> str:
     return ""
 
 
+def _contribution_runtime_roots() -> tuple[Path, ...]:
+  """Literal and canonical private-runtime roots, without creating either.
+
+  The literal path keeps root listings redacted. The canonical path also
+  catches a request made through an in-root symlink alias, and keeps the deny
+  boundary correct if ``fs_view_root`` is ever widened above ``data_dir``.
+  """
+  data_root = Path(get_settings().data_dir).resolve()
+  literal = data_root / ".contribution-runtime"
+  try:
+    canonical = literal.resolve()
+  except (OSError, RuntimeError):
+    canonical = literal
+  return (literal,) if canonical == literal else (literal, canonical)
+
+
 def _is_denied(resolved: Path, root: Path) -> bool:
   """True when the resolved path is a secret we never expose."""
+  for private_root in _contribution_runtime_roots():
+    if resolved == private_root or private_root in resolved.parents:
+      return True
   rel = _rel_to_root(resolved, root)
   if rel == "":
     return False  # the root itself

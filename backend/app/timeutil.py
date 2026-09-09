@@ -2,9 +2,9 @@
 
 from datetime import datetime, timedelta, UTC
 
-# Single source of truth for the soft-delete recovery window. Both App
-# (routes/apps.py) and Chat (routes/chats.py) tombstones are hard-purged this
-# long after deletion, so the two recovery windows can't silently drift apart.
+# Single source of truth for the soft-delete recovery window. App, Chat, and
+# Project tombstones are hard-purged this long after deletion, so the linked
+# recovery windows cannot silently drift apart.
 # See feature 110 (app uninstall) + the chat soft-delete it mirrors.
 SOFT_DELETE_TTL = timedelta(days=7)
 
@@ -12,7 +12,8 @@ SOFT_DELETE_TTL = timedelta(days=7)
 def now_naive_utc() -> datetime:
   """Returns the current UTC time as a NAIVE datetime.
 
-  The soft-delete columns (`App.deleted_at`, `Chat.deleted_at`) are plain
+  The soft-delete columns (`App.deleted_at`, `Chat.deleted_at`, and
+  `Project.deleted_at`) are plain
   `Column(DateTime)`, so SQLite stores and returns naive values. Writing the
   current time as `datetime.now(UTC).replace(tzinfo=None)` keeps the in-process
   value consistent with what comes back from the DB and dodges the py3.11+

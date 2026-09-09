@@ -83,3 +83,8 @@ python3 /data/platform/backend/scripts/goal_plan.py check-complete
 ```
 
 It rejects unfinished work/delegations but never replaces verifying reality.
+After it succeeds, finish the current turn normally; the platform derives the
+Goal's completed presentation from that settled turn and complete plan. Do not
+call a provider-private Goal tool or search for a second completion endpoint.
+On a resumed continuation, inspect the existing Goal instead of promoting a
+paraphrased replacement.

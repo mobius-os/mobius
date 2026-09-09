@@ -6,7 +6,10 @@ from types import SimpleNamespace
 import pytest
 
 from app.broadcast import SystemBroadcast
-from app.runtime_supervisors import RuntimeSupervisors
+from app.runtime_supervisors import (
+  RuntimeSupervisors,
+  sweep_provider_sessions_if_idle,
+)
 
 
 def _supervisors():
@@ -24,6 +27,59 @@ class _EmptySession:
 
   def __exit__(self, *_args):
     return False
+
+
+class _RetentionRegistry:
+  def __init__(self, idle=True):
+    self.idle = idle
+    self.closed = False
+    self.reopened = False
+    self.lease = None
+
+  def acquire_idle_admission_lease(self):
+    if not self.idle:
+      return None
+    self.closed = True
+    self.lease = object()
+    return self.lease
+
+  def release_admission_lease(self, lease):
+    assert lease is self.lease
+    self.reopened = True
+    self.closed = False
+
+
+@pytest.mark.asyncio
+async def test_provider_retention_skips_while_a_runner_is_active():
+  called = False
+
+  def sweep(_data_dir):
+    nonlocal called
+    called = True
+    return {}
+
+  result = await sweep_provider_sessions_if_idle(
+    "/data", sweep=sweep, runner_registry=_RetentionRegistry(idle=False),
+  )
+
+  assert result == {"status": "skipped_active"}
+  assert called is False
+
+
+@pytest.mark.asyncio
+async def test_provider_retention_reopens_admission_after_failure():
+  registry = _RetentionRegistry()
+
+  def fail(_data_dir):
+    raise RuntimeError("sweep failed")
+
+  with pytest.raises(RuntimeError, match="sweep failed"):
+    await sweep_provider_sessions_if_idle(
+      "/data", sweep=fail, runner_registry=registry,
+    )
+
+  assert registry.reopened is True
+  assert registry.closed is False
 
 
 @pytest.mark.asyncio
@@ -231,17 +287,20 @@ async def test_malformed_scratch_release_event_is_ignored(
 
 
 @pytest.mark.asyncio
-async def test_stalled_delegation_wake_cannot_block_off_loop_lease_recovery(
+async def test_stalled_delegation_wake_cannot_block_other_recovery(
   monkeypatch,
 ):
   import app.broadcast as broadcast_module
   import app.chat as chat_module
   import app.contribution_autopilot as autopilot_module
   import app.delegations as delegations_module
+  import app.routes.github as github_module
   import app.runtime_supervisors as supervisors_module
 
   broadcast = SystemBroadcast()
-  recovered = asyncio.Event()
+  startup_recovered = asyncio.Event()
+  attached_recovered = asyncio.Event()
+  lease_recovered = asyncio.Event()
   wake_started = asyncio.Event()
   block_wake = asyncio.Event()
   main_thread = threading.get_ident()
@@ -260,6 +319,12 @@ async def test_stalled_delegation_wake_cannot_block_off_loop_lease_recovery(
   async def no_chats(*_args, **_kwargs):
     return chat_module.ContinuationSweepResult()
 
+  async def recover_unstarted():
+    startup_recovered.set()
+
+  async def recover_attached(*_args, **_kwargs):
+    attached_recovered.set()
+
   async def wake_parents(**_kwargs):
     wake_started.set()
     await block_wake.wait()
@@ -267,11 +332,14 @@ async def test_stalled_delegation_wake_cannot_block_off_loop_lease_recovery(
   def sweep(db):
     assert db.created_on == threading.get_ident()
     assert db.created_on != main_thread
-    loop.call_soon_threadsafe(recovered.set)
+    loop.call_soon_threadsafe(lease_recovered.set)
     return 0
 
   monkeypatch.setattr(broadcast_module, "get_system_broadcast", lambda: broadcast)
   monkeypatch.setattr(supervisors_module, "SessionLocal", session_factory)
+  monkeypatch.setattr(
+    supervisors_module, "DELEGATION_STARTUP_RECOVERY_INTERVAL_SECS", 0,
+  )
   monkeypatch.setattr(
     supervisors_module, "DELEGATION_WAKE_RECOVERY_INTERVAL_SECS", 0,
   )
@@ -280,6 +348,12 @@ async def test_stalled_delegation_wake_cannot_block_off_loop_lease_recovery(
   )
   monkeypatch.setattr(chat_module, "sweep_reset_parks", no_chats)
   monkeypatch.setattr(
+    delegations_module, "reconcile_unstarted_delegations", recover_unstarted,
+  )
+  monkeypatch.setattr(
+    github_module, "reconcile_attached_contribution_work", recover_attached,
+  )
+  monkeypatch.setattr(
     delegations_module, "wake_parents_for_completed_delegations", wake_parents,
   )
   monkeypatch.setattr(autopilot_module, "sweep_expired_leases", sweep)
@@ -287,9 +361,12 @@ async def test_stalled_delegation_wake_cannot_block_off_loop_lease_recovery(
   supervisors = _supervisors()
   await supervisors._start_chat_supervisors()
   await asyncio.wait_for(wake_started.wait(), timeout=1)
-  await asyncio.wait_for(recovered.wait(), timeout=1)
+  await asyncio.wait_for(startup_recovered.wait(), timeout=1)
+  await asyncio.wait_for(attached_recovered.wait(), timeout=1)
+  await asyncio.wait_for(lease_recovered.wait(), timeout=1)
 
   assert not block_wake.is_set()
+  assert "delegation-startup-recovery" in supervisors._tasks
   assert "delegation-wake-recovery" in supervisors._tasks
   assert "autopilot-lease-recovery" in supervisors._tasks
   await supervisors.stop()

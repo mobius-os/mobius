@@ -148,7 +148,6 @@ export function createScreenControlProvider({
         current.expiresAt = session.expiresAt
         client = makeClient({
           sessionId: session.sessionId,
-          expiresAt: session.expiresAt,
           capture,
           onConnected() {
             if (hostStore().current !== current) return
@@ -163,7 +162,7 @@ export function createScreenControlProvider({
           onEnded(reason, error) {
             if (hostStore().current !== current) return
             void finish(
-              reason === 'disconnected' ? 'disconnected' : reason,
+              reason === 'disconnected' ? 'disconnected' : 'stopped',
               reason === 'disconnected'
                 ? (error || capabilityError(
                   'NetworkError', 'Agent control disconnected. Start a new session to continue.',

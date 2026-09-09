@@ -104,9 +104,9 @@ function sessionHistory({ wedged = false, navigationApi = true } = {}) {
     },
   } : null
 
-  function commitOneTraversal() {
-    if (index <= 0) return
-    const target = index - 1
+  function commitOneTraversal(direction = -1) {
+    const target = index + direction
+    if (target < 0 || target >= entries.length) return
     if (navigationApi) {
       // `navigate` fires while the cursor is still on the source entry;
       // intercept() commits the traversal and then runs the handler, so a
@@ -150,6 +150,7 @@ function sessionHistory({ wedged = false, navigationApi = true } = {}) {
     },
     /** A real Back gesture: the engine traverses on its own. */
     userBack() { commitOneTraversal() },
+    userForward() { commitOneTraversal(1) },
     /** An untagged entry a sandboxed app/preview iframe pushed. */
     pushIframeEntry() {
       entries.length = index + 1
@@ -291,4 +292,44 @@ test('a back gesture on a healthy engine dismisses exactly once', async () => {
 
   assert.deepEqual(dismissals, ['gesture'])
   assert.equal(engine.currentKind, 'base')
+})
+
+for (const navigationApi of [true, false]) {
+  test(`retained file navigation reconstructs Forward without changing transient dialogs (${navigationApi})`, async () => {
+    const engine = sessionHistory({ navigationApi })
+    const { result } = await mountNavigation(engine)
+    const calls = []
+    const id = result.current.openHistoryDismiss(() => calls.push('back'), () => calls.push('forward'))
+    engine.userBack()
+    engine.userForward()
+    engine.userBack()
+    assert.deepEqual(calls, ['back', 'forward', 'back'])
+    result.current.unregisterHistoryDismiss(id)
+    engine.userForward()
+    assert.deepEqual(calls, ['back', 'forward', 'back'], 'unmounted owners cannot resurrect files')
+  })
+}
+
+test('ordinary transient dialogs remain one-way on Forward', async () => {
+  const engine = sessionHistory()
+  const { result } = await mountNavigation(engine)
+  let calls = 0
+  result.current.openHistoryDismiss(() => calls++)
+  engine.userBack()
+  engine.userForward()
+  engine.userBack()
+  assert.equal(calls, 1)
+})
+
+test('explicit file close remains synchronous and can be reversed once', async () => {
+  const engine = sessionHistory()
+  const { result } = await mountNavigation(engine)
+  const calls = []
+  const id = result.current.openHistoryDismiss(() => calls.push('close'), () => calls.push('restore'))
+  result.current.closeHistoryDismiss(id)
+  assert.deepEqual(calls, ['close'])
+  engine.settle()
+  assert.deepEqual(calls, ['close'])
+  engine.userForward()
+  assert.deepEqual(calls, ['close', 'restore'])
 })

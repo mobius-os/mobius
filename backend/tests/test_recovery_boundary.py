@@ -5,7 +5,16 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 def test_mobius_has_no_recovery_runtime_or_boot_mode():
-  assert not (ROOT / "backend/recovery_target").exists()
+  recovery_target = ROOT / "backend/recovery_target"
+  # An old checkout can leave ignored __pycache__ residue behind after source
+  # removal. It is neither importable without its source nor included in the
+  # Docker context; reject actual files rather than making local cache cleanup
+  # part of the architectural contract.
+  shipped_recovery_files = [
+    path for path in recovery_target.rglob("*")
+    if path.is_file() and "__pycache__" not in path.parts
+  ]
+  assert shipped_recovery_files == []
   assert not (ROOT / "scripts/mobiusctl").exists()
   assert not (ROOT / "scripts/external_recovery_release.py").exists()
   assert not (ROOT / "scripts/core_digest_release.py").exists()

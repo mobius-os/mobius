@@ -414,9 +414,7 @@ def test_owner_endpoint_rejects_app_token(client, owner_token):
 def test_stale_chat_hard_purge_removes_lifecycle_before_run(db):
   from app.chat_retention import purge_expired_chat_tombstones
 
-  _, run = _chat_run(db, "chat-stale", "run-stale", deleted=True)
-  run.status = "completed"
-  db.commit()
+  _chat, run = _chat_run(db, "chat-stale", "run-stale", deleted=True)
   values = normalize_chat_event(
     chat_id="chat-stale",
     chat_run_id="run-stale",
@@ -428,6 +426,11 @@ def test_stale_chat_hard_purge_removes_lifecycle_before_run(db):
     },
   )
   assert record_event(db, values) is True
+
+  # Hard retention deliberately leaves a tombstoned chat intact while any
+  # resumable run is still live. This case exercises the terminal cleanup path.
+  run.status = "completed"
+  db.commit()
 
   purge_expired_chat_tombstones(db)
   db.expire_all()

@@ -25,6 +25,7 @@ import pytest
 from app import chat as chat_mod
 from app import chat_queue, chat_writer, models
 from app.broadcast import ChatBroadcast, create_broadcast
+from app.chat_transcript import materialized_messages
 from app.chat_writer import Barrier, get_writer
 from app.database import SessionLocal
 from app.deps import Principal
@@ -62,14 +63,6 @@ def _seed_owner_and_creds():
       "expiresAt": int(time.time() * 1000) + 3_600_000,
     },
   }), encoding="utf-8")
-
-
-def _disconnect_all_providers(monkeypatch):
-  """Pin the no-provider precondition at the registered adapter boundary."""
-  for provider in chat_mod.PROVIDERS.values():
-    monkeypatch.setattr(
-      provider, "check_auth", lambda _data_dir: "not connected",
-    )
 
 
 def _seed_chat(chat_id, messages=None, pending=None, running=None,
@@ -200,6 +193,68 @@ def _patch_claude_runner(monkeypatch, *, text="partial answer"):
 
   import app.claude_sdk_runner as csr
   monkeypatch.setattr(csr, "run_claude_sdk_turn", fake_runner)
+
+
+def _seed_provider_turn(monkeypatch, provider_id, cid, token):
+  _seed_owner_and_creds()
+  _seed_chat(cid, messages=[{"role": "user", "content": "hi", "ts": 1}],
+             running="running", run_token=token)
+  with SessionLocal() as db:
+    row = db.get(models.Chat, cid)
+    row.provider = provider_id
+    row.agent_settings_json = {
+      "model": "claude-sonnet-4-6" if provider_id == "claude" else "gpt-5.4",
+    }
+    db.commit()
+  # Provider objects are process singletons. Patch their class, not a bound
+  # instance method: restoring an instance override would shadow later tests'
+  # class patches after this test's teardown.
+  provider_type = type(chat_mod.get_provider(provider_id))
+  monkeypatch.setattr(provider_type, "check_auth", lambda self, _data_dir: None)
+
+  async def ready(self, _data_dir):
+    pass
+
+  monkeypatch.setattr(provider_type, "ensure_auth", ready)
+
+
+@pytest.mark.parametrize("provider_id", ["claude", "codex"])
+@pytest.mark.parametrize("ack_failure", [False, True])
+def test_provider_entry_requires_durable_admission_ack(
+  monkeypatch, provider_id, ack_failure,
+):
+  """An ack failure must not invoke either provider, even with zero output."""
+  import importlib
+
+  cid, token = "provider-admission", "rt-provider-admission"
+  _seed_provider_turn(monkeypatch, provider_id, cid, token)
+  entered = []
+
+  async def runner(**_kwargs):
+    with SessionLocal() as db:
+      assert db.get(models.ChatRun, token).provider_execution_admitted is True
+    entered.append(token)
+    return {"cost_usd": 0.0}
+
+  monkeypatch.setattr(
+    importlib.import_module(f"app.{provider_id}_sdk_runner"),
+    f"run_{provider_id}_sdk_turn", runner,
+  )
+  attempted = []
+  admit = chat_writer.ChatWriterActor._admit_provider_execution
+
+  def admission(self, db, cmd):
+    attempted.append(cmd.run_token)
+    if ack_failure:
+      raise chat_writer._PersistFailed("admission commit failed")
+    return admit(self, db, cmd)
+
+  monkeypatch.setattr(chat_writer.ChatWriterActor, "_admit_provider_execution", admission)
+  chat_mod.mark_starting(cid)
+  _run_real_chat(cid, run_token=token,
+                 run_gen=chat_mod.current_run_generation(cid), provider_id=provider_id)
+  assert attempted == [token]
+  assert entered == ([] if ack_failure else [token])
 
 
 # -- 1. empty-queue final continuation CLEARS the marker -----------------
@@ -385,7 +440,7 @@ def test_terminal_finalize_failure_leaves_marker_then_reconcile_repairs(
   )
   _patch_claude_runner(monkeypatch)
 
-  def _boom(db_, chat_id, blocks):
+  def _boom(db_, chat_id, blocks, *, commit=True):
     from app.chat_writer import _PersistFailed
     raise _PersistFailed("forced finalize failure")
 
@@ -402,6 +457,17 @@ def test_terminal_finalize_failure_leaves_marker_then_reconcile_repairs(
   assert "queued_turn_starting" not in published
   assert state["running"] is True, "failed terminal must LEAVE marker"
   assert len(state["pending_messages"]) == 1, "queue not consumed"
+  db = SessionLocal()
+  try:
+    row = db.query(models.Chat).filter(models.Chat.id == "t2").one()
+    unsaved_blocks = materialized_messages(row)[-1]["blocks"]
+  finally:
+    db.close()
+  assert any(
+    block.get("type") == "error"
+    and "could not be saved" in block.get("message", "")
+    for block in unsaved_blocks
+  ), "the finalize failure must submit a durable PersistError snapshot"
 
   # Reconcile-after-restart: the registry is empty (the run finished), so
   # reconcile sees the stranded marker and repairs it.
@@ -418,7 +484,71 @@ def test_terminal_finalize_failure_leaves_marker_then_reconcile_repairs(
     "reconcile PRESERVES the queue (bug #2); it drains on the next send"
   )
   err = [b for b in state["messages"][-1]["blocks"] if b["type"] == "error"]
-  assert err and "paused" in err[0]["message"].lower()
+  assert any("paused" in block["message"].lower() for block in err)
+
+
+def test_terminal_failure_does_not_overwrite_a_fresh_turn(monkeypatch):
+  """A run disowned during its failed finalize may still notify its old
+  broadcast, but must not persist its stale snapshot over the fresh owner."""
+  _seed_owner_and_creds()
+  _seed_chat(
+    "t2-fresh", messages=[{"role": "user", "content": "hi", "ts": 1}],
+    pending=[], running="running", run_token="rt-2-stale",
+  )
+  _patch_claude_runner(monkeypatch)
+
+  chat_mod.mark_starting("t2-fresh")
+  gen = chat_mod.current_run_generation("t2-fresh")
+
+  def _fail_after_reclaim(db_, chat_id, blocks, *, commit=True):
+    from app.chat_writer import StartTurn, _PersistFailed
+    chat_mod.bump_run_generation(chat_id)
+    writer = get_writer()
+    # This hook already runs on the actor thread. Use its domain handlers to
+    # land the successor inside the Finalize ack window without writing the
+    # chat JSON columns directly or deadlocking on another queued command.
+    writer._start_turn(db_, StartTurn(
+      chat_id=chat_id,
+      run_token="rt-2-successor",
+      user_msg={"role": "user", "content": "fresh question", "ts": 9},
+    ))
+    writer._persist_live_message(db_, chat_id, {
+      "id": "rt-2-successor",
+      "role": "assistant",
+      "blocks": [{"type": "text", "content": "fresh answer"}],
+    })
+    raise _PersistFailed("fresh turn reclaimed the chat")
+
+  monkeypatch.setattr(
+    chat_writer, "finalize_response_outcome", _fail_after_reclaim,
+  )
+
+  published = []
+  _run_real_chat(
+    "t2-fresh", run_token="rt-2-stale", run_gen=gen,
+    published=published,
+  )
+  _drain_actor()
+
+  assert "error" in published
+  db = SessionLocal()
+  try:
+    row = db.query(models.Chat).filter(models.Chat.id == "t2-fresh").one()
+    messages = materialized_messages(row)
+    active_assistant_message_id = row.active_assistant_message_id
+  finally:
+    db.close()
+  assert active_assistant_message_id == "rt-2-successor"
+  assert messages[-1]["blocks"] == [
+    {"type": "text", "content": "fresh answer"}
+  ]
+  assert not any(
+    block.get("type") == "error"
+    and "could not be saved" in block.get("message", "")
+    for message in messages
+    if message.get("role") == "assistant"
+    for block in message.get("blocks", [])
+  ), "a disowned run must not replace the fresh owner's live snapshot"
 
 
 # -- 3. await_ack boundary trips mid-promote (small-timeout seam) --------
@@ -1172,7 +1302,9 @@ def test_no_connected_agent_streams_and_persists_guidance(
   # The container's identity broker can expose a host-connected provider even
   # when this test removes local credential files. Pin the product precondition
   # instead of inheriting the developer machine's live connection state.
-  _disconnect_all_providers(monkeypatch)
+  monkeypatch.setattr(
+    chat_mod, "authenticated_provider_ids", lambda _data_dir: [],
+  )
 
   creds = (
     pathlib.Path(os.environ["DATA_DIR"]) / "cli-auth" / "claude"
@@ -1247,7 +1379,9 @@ def test_no_connected_agent_promotes_queued_message(monkeypatch):
   the guidance finalizes first, then the queued row gets a fresh run token."""
   from app import auth as auth_mod
 
-  _disconnect_all_providers(monkeypatch)
+  monkeypatch.setattr(
+    chat_mod, "authenticated_provider_ids", lambda _data_dir: [],
+  )
 
   for creds in (
     pathlib.Path(os.environ["DATA_DIR"]) / "cli-auth" / "claude"
@@ -1314,7 +1448,9 @@ def test_no_connected_agent_stopped_during_metrics_preserves_successor_sink(
   """
   from app import auth as auth_mod
 
-  _disconnect_all_providers(monkeypatch)
+  monkeypatch.setattr(
+    chat_mod, "authenticated_provider_ids", lambda _data_dir: [],
+  )
 
   for creds in (
     pathlib.Path(os.environ["DATA_DIR"]) / "cli-auth" / "claude"
@@ -1396,7 +1532,7 @@ def test_auth_error_cleanup_when_another_provider_is_connected(monkeypatch):
   )
   _seed_run("rt-12-auth", "t12-auth-error")
   monkeypatch.setattr(
-    chat_mod.PROVIDERS["codex"], "check_auth", lambda _data_dir: None,
+    chat_mod, "authenticated_provider_ids", lambda _data_dir: ["codex"],
   )
 
   chat_mod.mark_starting("t12-auth-error")
@@ -1761,40 +1897,102 @@ def test_stop_during_starting_does_not_spawn_superseded_turn(monkeypatch):
   assert state is not None and len(state["messages"]) == 1
 
 
-def test_stop_during_provider_setup_does_not_dispatch_runner(monkeypatch):
+@pytest.mark.parametrize(("provider_id", "stop_during"), [
+  ("claude", "ensure_auth"),
+  ("claude", "check_auth"),
+  ("codex", "check_auth"),
+  ("claude", "admission_ack"),
+  ("codex", "admission_ack"),
+  ("claude", "admission_ack_failure"),
+  ("codex", "admission_ack_failure"),
+])
+@pytest.mark.parametrize("successor_claims_sink", [False, True])
+def test_stop_during_provider_setup_does_not_dispatch_runner(
+  monkeypatch, provider_id, stop_during, successor_claims_sink,
+):
   """A Stop can land after run_chat's entry generation check but before the
   SDK handle is registered (for example during a preflight await). The turn
   must re-check the generation after that await; otherwise Stop returns
   success, clears the marker, and the now-untracked runner starts anyway."""
-  _seed_owner_and_creds()
-  cid = "setup-stop"
-  _seed_chat(
-    cid,
-    messages=[{"role": "user", "content": "hi", "ts": 1}],
-    pending=[],
-    running="running",
-  )
+  import importlib
+
+  cid, token = "setup-stop", "rt-setup-stop"
+  _seed_provider_turn(monkeypatch, provider_id, cid, token)
   gen = chat_mod.registry.bump_generation(cid)
-
-  import app.claude_sdk_runner as csr
-  import app.providers as providers
-
   dispatched = []
+  stops = []
+  successor_sink = object()
 
   async def fake_runner(*, bc, **kwargs):
     dispatched.append(kwargs)
     bc.publish({"type": "text", "content": "must not run"})
     return {"session_id": "sess", "cost_usd": 0.0}
 
-  async def stopping_ensure_auth(self, data_dir):
+  async def stop():
     stopped, _ = await chat_mod.stop_chat_for(cid)
     assert stopped is True
+    stops.append(stop_during)
+    if successor_claims_sink:
+      chat_mod.register_active_sink(cid, successor_sink)
 
-  monkeypatch.setattr(csr, "run_claude_sdk_turn", fake_runner)
-  monkeypatch.setattr(providers.ClaudeProvider, "ensure_auth", stopping_ensure_auth)
+  monkeypatch.setattr(
+    importlib.import_module(f"app.{provider_id}_sdk_runner"),
+    f"run_{provider_id}_sdk_turn", fake_runner,
+  )
+  if stop_during == "ensure_auth":
+    async def stopping_ensure_auth(self, data_dir):
+      await stop()
 
-  _run_real_chat(cid, run_token="rt-setup-stop", run_gen=gen)
-  _drain_actor()
+    monkeypatch.setattr(type(chat_mod.get_provider(provider_id)), "ensure_auth", stopping_ensure_auth)
+  elif stop_during == "check_auth":
+    real_in_threadpool = chat_mod.run_in_threadpool
+
+    async def stopping_check_auth(function, *args, **kwargs):
+      result = await real_in_threadpool(function, *args, **kwargs)
+      if getattr(function, "__self__", None) is chat_mod.get_provider(provider_id):
+        await stop()
+      return result
+
+    monkeypatch.setattr(chat_mod, "run_in_threadpool", stopping_check_auth)
+  else:
+    real_submit = chat_writer.ChatWriterActor.submit
+    admission_acks = set()
+    if stop_during == "admission_ack_failure":
+      def reject_admission(self, db, command):
+        raise chat_writer._PersistFailed("admission commit failed")
+
+      monkeypatch.setattr(
+        chat_writer.ChatWriterActor, "_admit_provider_execution", reject_admission,
+      )
+
+    def tracked_submit(self, command):
+      ack = real_submit(self, command)
+      if isinstance(command, chat_writer.AdmitProviderExecution):
+        admission_acks.add(ack)
+      return ack
+
+    real_await_ack = chat_mod._await_ack
+
+    async def stopping_admission_ack(ack):
+      try:
+        return await real_await_ack(ack)
+      finally:
+        if ack in admission_acks:
+          await stop()
+
+    monkeypatch.setattr(chat_writer.ChatWriterActor, "submit", tracked_submit)
+    monkeypatch.setattr(chat_mod, "_await_ack", stopping_admission_ack)
+
+  try:
+    published = []
+    _run_real_chat(cid, run_token=token, run_gen=gen, provider_id=provider_id,
+                   published=published)
+    _drain_actor()
+    assert stops == [stop_during], "the test must actually exercise Stop"
+    assert "error" not in published, "Stop is not a provider failure"
+    assert chat_mod.get_active_sink(cid) is (successor_sink if successor_claims_sink else None)
+  finally:
+    chat_mod.unregister_active_sink(cid, successor_sink)
 
   assert dispatched == [], (
     "a Stop during provider setup must prevent SDK dispatch before a handle "
@@ -1802,6 +2000,8 @@ def test_stop_during_provider_setup_does_not_dispatch_runner(monkeypatch):
   )
   state = _load(cid)
   assert state["running"] is False
+  with SessionLocal() as db:
+    assert db.get(models.ChatRun, token).provider_execution_admitted is (stop_during == "admission_ack")
 
 
 def test_normal_send_spawns_turn(monkeypatch):
@@ -1877,9 +2077,9 @@ def test_stop_during_finalize_makes_drain_bow_out_under_lock(monkeypatch):
   # delegate to the real handler so the terminal write still persists.
   real_finalize = chat_writer.finalize_response_outcome
 
-  def bumping_finalize(db_, chat_id, blocks):
+  def bumping_finalize(db_, chat_id, blocks, *, commit=True):
     chat_mod.bump_run_generation(chat_id)
-    return real_finalize(db_, chat_id, blocks)
+    return real_finalize(db_, chat_id, blocks, commit=commit)
 
   monkeypatch.setattr(chat_writer, "finalize_response_outcome", bumping_finalize)
 

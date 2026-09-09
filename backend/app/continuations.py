@@ -25,12 +25,18 @@ DELEGATION_RESULT_MESSAGE_KIND = "delegation_result"
 # user-message slot: product-owned, never owner speech.
 WAIT_RESULT_MESSAGE_KIND = "wait_result"
 
+# Exact loaded-source activation resumes the logical work that declared the
+# typed Restart card. It is separate from generic command/timer waits because
+# its writer admission may pass only its own linked owner-input barrier.
+PLATFORM_ACTIVATION_RESULT_MESSAGE_KIND = "platform_activation_result"
+
 PRODUCT_RESULT_MESSAGE_KINDS = frozenset({
   DELEGATION_RESULT_MESSAGE_KIND,
   WAIT_RESULT_MESSAGE_KIND,
+  PLATFORM_ACTIVATION_RESULT_MESSAGE_KIND,
 })
 
-# A peer's direct request/blocker/handoff waking an idle chat with a paused
+# A peer's direct delivery=interrupt waking an idle chat with a paused
 # Goal travels the same slot and resumes under that Goal's identity.
 PEER_MESSAGE_WAKE_KIND = "peer_message"
 
@@ -81,6 +87,7 @@ def continues_logical_root(message: Mapping[str, Any] | None) -> bool:
       *CONTINUATION_MESSAGE_KINDS,
       DELEGATION_RESULT_MESSAGE_KIND,
       WAIT_RESULT_MESSAGE_KIND,
+      PLATFORM_ACTIVATION_RESULT_MESSAGE_KIND,
     )
   )
 

@@ -17,7 +17,8 @@
  *       is queued AND server-confirmed during streaming,
  *   (b) pressing it POSTs force_steer:true with the right
  *       consume_pending_cids + the exact "\n\n"-joined content,
- *   (c) the queued tray clears on a {status:"steered"} response.
+ *   (c) the queued row moves inline immediately while provider delivery is
+ *       still settling, without losing its durable fallback.
  *
  * Run: scripts/playwright-local.sh --allow-local-e2e tests/steer-queued.spec.mjs
  */
@@ -87,12 +88,14 @@ test.use({ serviceWorkers: 'block' })
 attachCleanup()
 
 test.describe('Steer queued messages (fast-forward into the live turn)', () => {
-  test('fast-forward button appears, POSTs force_steer with the right payload, and clears the tray', async ({ page }) => {
+  test('fast-forward posts the exact payload and presents the row inline immediately', async ({ page }) => {
     // The server-assigned ts the queueOnly POST hands back. The steer's
     // consume_pending_cids must equal [queued cid] and its content must equal
     // the queued message's trimmed content (single message → no join).
     const QUEUE_TS = 777001
     const QUEUED_TEXT = 'queued message to steer'
+    let releaseSteer
+    const steerGate = new Promise(resolve => { releaseSteer = resolve })
 
     // Capture every POST /messages so we can assert the steer payload.
     const messagePosts = []
@@ -107,6 +110,7 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
       // Respond exactly as the backend does on success — 202 with
       // {status:"steered"} and the remaining (now empty) server queue.
       if (body.force_steer) {
+        await steerGate
         return route.fulfill({
           status: 202,
           contentType: 'application/json',
@@ -188,6 +192,15 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
       { timeout: 5000 },
     ).toBe(1)
 
+    // The provider acknowledgement is deliberately still blocked. Owner text
+    // must already occupy its eventual position after the active assistant,
+    // while the actionable queue row has disappeared.
+    const pendingSteer = page.locator(
+      '[data-chat-surface="painted"] [data-steer-pending="true"]',
+    )
+    await expect(pendingSteer).toContainText(QUEUED_TEXT)
+    await expect(page.locator('[data-chat-surface="painted"] .queued__row')).toHaveCount(0)
+
     const steerPost = messagePosts.find(b => b.force_steer)
     expect(steerPost.force_steer).toBe(true)
     // consume_pending_cids is exactly the queued row's stable cid (minted
@@ -198,16 +211,19 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
     // content is the queued message's trimmed content (single msg, no join).
     expect(steerPost.content).toBe(QUEUED_TEXT)
 
-    // (c) The tray clears on {status:"steered"} (steered rows now render
-    // inline via the steered_into_turn event; tray drops them).
+    // (c) Releasing the route acknowledges admission. The provider cut is
+    // still deferred in this fixture, so the same inline provisional row stays
+    // visible until a later steered_into_turn event would settle it.
+    releaseSteer()
     await page.waitForFunction(
       () => document.querySelectorAll('[data-chat-surface="painted"] .queued__row').length === 0,
       { timeout: 5000 },
     )
     expect(await page.locator('[data-chat-surface="painted"] .queued__row').count()).toBe(0)
+    await expect(pendingSteer).toContainText(QUEUED_TEXT)
   })
 
-  test('Ctrl+Enter sends one direct-steer request without rendering a queue row', async ({ page }) => {
+  test('Ctrl+Enter sends one direct-steer request and renders it inline, never queued', async ({ page }) => {
     const STEER_TEXT = 'change course immediately'
     const messagePosts = []
     let releaseDirectSteer
@@ -294,6 +310,10 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
       body.direct_steer && body.content === STEER_TEXT
     )).length).toBe(1)
     await expect(page.locator('[data-chat-surface="painted"] .queued__row')).toHaveCount(0)
+    const pendingSteer = page.locator(
+      '[data-chat-surface="painted"] [data-steer-pending="true"]',
+    )
+    await expect(pendingSteer).toContainText(STEER_TEXT)
 
     await page.keyboard.press('Control+Enter')
     await page.waitForTimeout(100)
@@ -312,6 +332,7 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
       body.content === STEER_TEXT
     ))).toHaveLength(1)
     await expect(page.locator('[data-chat-surface="painted"] .queued__row')).toHaveCount(0, { timeout: 5000 })
+    await expect(pendingSteer).toContainText(STEER_TEXT)
   })
 
   test('two queued messages steer with the exact "\\n\\n"-joined content', async ({ page }) => {

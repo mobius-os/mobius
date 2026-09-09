@@ -64,6 +64,7 @@ test('multi-pane, no overlay: chrome on, no full-bleed, both actives visible', (
   // Each active tab is positioned into its pane rect, so nothing is full-bleed.
   assert.equal(v.fullBleedKey, null)
   assert.deepEqual([...v.visibleAppIds], ['42'])
+  assert.deepEqual([...v.visibleChatIds], ['5'])
   assert.equal(v.chatPanesVisible, true)
 })
 
@@ -87,6 +88,7 @@ test('focused pane view is a reversible presentation projection, not a tree rewr
   assert.equal(v.chromeActive, true, 'the selected pane keeps its own tab strip')
   assert.equal(v.fullBleedKey, null, 'content stays below that strip instead of covering it')
   assert.deepEqual([...v.visibleAppIds], ['42'], 'hidden sibling panes stop painting')
+  assert.deepEqual([...v.visibleChatIds], [], 'hidden sibling chats stop owning attention')
 })
 
 test('focused pane projection falls back safely after its pane disappears', () => {
@@ -112,6 +114,7 @@ test('multi-pane immersive solos the holder over the whole workspace', () => {
   // Only the holder stays frame-visible; the sibling chat pane hides so it
   // stops painting.
   assert.deepEqual([...v.visibleAppIds], ['42'])
+  assert.deepEqual([...v.visibleChatIds], [])
   assert.equal(v.chatPanesVisible, false)
 })
 
@@ -141,6 +144,7 @@ test('Settings overlay (single mode) hides every pane and frame', () => {
   assert.equal(v.chromeActive, false)
   assert.equal(v.focusedActiveKey, null)
   assert.equal(v.visibleAppIds.size, 0)
+  assert.equal(v.visibleChatIds.size, 0)
   assert.equal(v.chatPanesVisible, false)
 })
 
@@ -207,6 +211,7 @@ test('builder Settings tab does NOT suppress sibling panes', () => {
   assert.equal(v.multiPane, true)
   assert.equal(v.chromeActive, true, 'panes are NOT hidden behind the Settings tab')
   assert.equal(v.chatPanesVisible, true, 'the sibling chat pane keeps painting')
+  assert.deepEqual([...v.visibleChatIds], ['5'])
   // The focused active key is the Settings tab (its wrapper fills that pane rect).
   assert.equal(v.focusedActiveKey, tabModel.SETTINGS_TAB_KEY)
   // Settings is not an app, so it adds no id; a sibling app pane (if active) would
@@ -268,6 +273,7 @@ test('single-mode with a CHAT slot paints the chat and hides the sibling app fra
   assert.equal(v.fullBleedKey, 'chat:5', 'the slot chat is the full-bleed surface')
   // The sibling app 42 is NOT the slot, so its frame goes visibility:false.
   assert.deepEqual([...v.visibleAppIds], [])
+  assert.deepEqual([...v.visibleChatIds], ['5'], 'the painted slot chat is visible')
 })
 
 test('single-mode preserves the tree: a panes -> single -> panes round-trip restores identical flags', () => {
@@ -303,6 +309,7 @@ test('single-mode yields to Settings: the overlay governs and single is inert', 
   assert.equal(v.chromeActive, false)
   assert.equal(v.focusedActiveKey, null)
   assert.equal(v.visibleAppIds.size, 0)
+  assert.equal(v.visibleChatIds.size, 0)
   assert.equal(v.chatPanesVisible, false)
 })
 
@@ -317,6 +324,7 @@ test('single-mode yields to immersive: the holder solo governs and single is ine
   assert.equal(v.chromeActive, false)
   assert.equal(v.fullBleedKey, tabKey(makeTab('app', '42')))
   assert.deepEqual([...v.visibleAppIds], ['42'])
+  assert.equal(v.visibleChatIds.size, 0)
   assert.equal(v.chatPanesVisible, false)
 })
 
@@ -415,6 +423,7 @@ test('single mode with a CHAT slot paints no app frame', () => {
   const v = singleView(ws)
   assert.equal(v.fullBleedKey, 'chat:7')
   assert.deepEqual([...v.visibleAppIds], [], 'a chat slot paints no app')
+  assert.deepEqual([...v.visibleChatIds], ['7'], 'the slot chat owns visible attention')
   assert.equal(v.chatPanesVisible, true)
 })
 

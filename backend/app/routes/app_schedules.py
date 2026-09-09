@@ -23,8 +23,8 @@ router = APIRouter()
 log = logging.getLogger(__name__)
 
 
-def _cron_replay_dirs_for_app(app: models.App, source_dir: Path) -> list[Path]:
-  return [source_dir]
+def _cron_replay_dirs_for_app(app: models.App, runtime_dir: Path) -> list[Path]:
+  return [app_cron.schedule_state_dir(app.id), runtime_dir]
 
 
 def _read_init_cron_text(replay_dir: Path) -> str:
@@ -91,7 +91,7 @@ def _manifest_schedule(source_dir: Path) -> tuple[str, str] | None:
 
 
 def _schedule_from_crontab_text(
-  source_dir: Path, text: str,
+  source_dir: Path, text: str, runtime_dir: Path,
 ) -> tuple[str, str] | None:
   needle = f"{str(source_dir).rstrip('/')}/"
   for line in text.splitlines():
@@ -120,24 +120,24 @@ def _schedule_from_crontab_text(
     # Skipping debris lets discovery fall through to the durable init-cron.sh
     # declaration and then the manifest — both of which state real intent.
     # Legacy unsupervised entries still migrate: their script exists.
-    if not Path(command_path).exists():
+    if not (runtime_dir / Path(command_path).name).is_file():
       continue
     return cron, Path(command_path).name
   return None
 
 
-def _app_schedule(app: models.App, live_crontab: str) -> tuple[str, str] | None:
+def _app_schedule(app: models.App, live_crontab: str, runtime_dir: Path) -> tuple[str, str] | None:
   source_dir = Path(app.source_dir)
-  live = _schedule_from_crontab_text(source_dir, live_crontab)
+  live = _schedule_from_crontab_text(source_dir, live_crontab, runtime_dir)
   if live is not None:
     return live
-  for replay_dir in _cron_replay_dirs_for_app(app, source_dir):
+  for replay_dir in _cron_replay_dirs_for_app(app, runtime_dir):
     schedule = _schedule_from_crontab_text(
-      source_dir, _read_init_cron_text(replay_dir),
+      source_dir, _read_init_cron_text(replay_dir), runtime_dir,
     )
     if schedule is not None:
       return schedule
-  return _manifest_schedule(source_dir)
+  return _manifest_schedule(runtime_dir)
 
 
 def _app_zone_declaration(app: models.App) -> tuple[str, str] | None:
@@ -148,8 +148,8 @@ def _app_zone_declaration(app: models.App) -> tuple[str, str] | None:
   """
   from app import cron_tz
 
-  source_dir = Path(app.source_dir)
-  for replay_dir in _cron_replay_dirs_for_app(app, source_dir):
+  from app.applied_app_runtime import runtime_root
+  for replay_dir in _cron_replay_dirs_for_app(app, runtime_root(app)):
     declaration = cron_tz.parse_zone_declaration(
       _read_init_cron_text(replay_dir),
     )
@@ -158,7 +158,7 @@ def _app_zone_declaration(app: models.App) -> tuple[str, str] | None:
   return None
 
 
-def _is_orphaned_supervised_entry(line: str, apps_root: Path) -> bool:
+def _is_orphaned_supervised_entry(line: str, apps_root: Path, runtime_roots: dict[Path, Path] | None = None) -> bool:
   """True when `line` is a supervised app entry whose job script is gone.
 
   Deliberately narrow. Only a platform-supervised entry (one routed through
@@ -179,10 +179,11 @@ def _is_orphaned_supervised_entry(line: str, apps_root: Path) -> bool:
       return False
   except (OSError, ValueError):
     return False
-  return not job.exists()
+  runtime = (runtime_roots or {}).get(job.parent)
+  return not (runtime / job.name).is_file() if runtime is not None else not job.exists()
 
 
-def _prune_orphaned_supervised_entries(apps_root: Path) -> list[str]:
+def _prune_orphaned_supervised_entries(apps_root: Path, runtime_roots: dict[Path, Path] | None = None) -> list[str]:
   """Drop live supervised entries whose job script no longer exists.
 
   Registration converges the entry for the job path it installs, but nothing
@@ -203,7 +204,7 @@ def _prune_orphaned_supervised_entries(apps_root: Path) -> list[str]:
     return []
   kept, dropped = [], []
   for line in current.splitlines():
-    if _is_orphaned_supervised_entry(line, apps_root):
+    if _is_orphaned_supervised_entry(line, apps_root, runtime_roots or {}):
       dropped.append(line)
     else:
       kept.append(line)
@@ -240,9 +241,17 @@ def reconcile_app_cron_supervision(db: Session) -> tuple[int, list[str]]:
   live_crontab = _read_live_crontab()
   reconciled = 0
   warnings: list[str] = []
+  from app.applied_app_runtime import runtime_root, AppliedRuntimeUnavailable
+  runtime_roots = {}
   apps = db.query(models.App).filter(models.App.deleted_at.is_(None)).all()
   for app in apps:
-    schedule = _app_schedule(app, live_crontab)
+    try:
+      accepted_root = runtime_root(app)
+    except AppliedRuntimeUnavailable as exc:
+      warnings.append(f"app {app.id}: {exc}")
+      continue
+    runtime_roots[Path(app.source_dir).resolve()] = accepted_root
+    schedule = _app_schedule(app, live_crontab, accepted_root)
     if schedule is None:
       continue
     source_dir = Path(app.source_dir)
@@ -258,7 +267,7 @@ def reconcile_app_cron_supervision(db: Session) -> tuple[int, list[str]]:
     cron, job_name = schedule
     job_path = resolved_source / job_name
     try:
-      if job_path.is_symlink() or not job_path.is_file():
+      if not (accepted_root / job_name).is_file():
         raise ValueError(f"job is missing or a symlink: {job_name}")
       declaration = _app_zone_declaration(app)
       if declaration is not None:
@@ -281,7 +290,7 @@ def reconcile_app_cron_supervision(db: Session) -> tuple[int, list[str]]:
   # declaration claims any more. Pruning last means a job path this pass just
   # registered is present in the crontab we read, so it can never be mistaken
   # for debris.
-  for line in _prune_orphaned_supervised_entries(resolved_root):
+  for line in _prune_orphaned_supervised_entries(resolved_root, runtime_roots):
     log.info("retired orphaned cron entry (job script gone): %s", line.strip())
   return reconciled, warnings
 
@@ -303,8 +312,13 @@ def list_app_schedules(
     .order_by(models.App.name, models.App.id)
     .all()
   )
+  from app.applied_app_runtime import runtime_root, AppliedRuntimeUnavailable
   for app in apps:
-    schedule = _app_schedule(app, live_crontab)
+    try:
+      accepted_root = runtime_root(app)
+    except AppliedRuntimeUnavailable:
+      continue
+    schedule = _app_schedule(app, live_crontab, accepted_root)
     if schedule is None:
       continue
     cron, job = schedule
@@ -407,6 +421,11 @@ def run_app_job(
       detail="App token can only run its own job.",
     )
   app = live_app_or_404(db, app_id)
+  from app.applied_app_runtime import runtime_root, AppliedRuntimeUnavailable
+  try:
+    accepted_root = runtime_root(app)
+  except AppliedRuntimeUnavailable as exc:
+    raise HTTPException(409, str(exc)) from exc
   source_dir = Path(app.source_dir)
   # The manifest's schedule.job wins. The legacy probe (fetch.sh
   # app-news convention, job.sh install-from-manifest default,
@@ -414,13 +433,13 @@ def run_app_job(
   # before the manifest convention solidified — first hit wins, in
   # priority order.
   job_path = None
-  manifest_job = _manifest_job_name(source_dir)
+  manifest_job = _manifest_job_name(accepted_root)
   if manifest_job is not None:
     job_path = source_dir / manifest_job
   else:
     for candidate in ("fetch.sh", "job.sh", "build.sh"):
       p = source_dir / candidate
-      if p.is_file():
+      if (accepted_root / candidate).is_file():
         job_path = p
         break
   if job_path is None:
@@ -458,12 +477,18 @@ def get_app_job_context(
   # No override: this is the owner's system default, which the job then layers
   # its own declared pick on top of.
   choices = resolve_background_agents(get_settings().data_dir)
+  from app.applied_app_runtime import runtime_root, AppliedRuntimeUnavailable
+  try:
+    accepted_root = str(runtime_root(app))
+  except AppliedRuntimeUnavailable:
+    accepted_root = None
   return {
     "app_id": app_id,
     # The supervisor binds the scheduled script to this exact app before
     # granting its token. This is non-secret durable identity, not owner
     # configuration or a filesystem grant.
     "source_dir": app.source_dir,
+    "runtime_dir": accepted_root,
     "primary": choices.get("primary"),
     "fallback": choices.get("fallback"),
     # This is the same normalized, non-secret receipt the owner reviewed.
@@ -523,8 +548,13 @@ def update_app_schedule(
   if "/" in job_name or "\\" in job_name or not job_name.strip():
     raise HTTPException(status_code=400, detail="Invalid job filename.")
   job_path = source_dir / job_name
-  if not job_path.is_file():
-    raise HTTPException(status_code=400, detail="Job script not found.")
+  from app.applied_app_runtime import runtime_root, AppliedRuntimeUnavailable
+  try:
+    accepted_root = runtime_root(app)
+  except AppliedRuntimeUnavailable as exc:
+    raise HTTPException(409, str(exc)) from exc
+  if not (accepted_root / job_name).is_file():
+    raise HTTPException(status_code=400, detail="Job script not found in the applied revision.")
   slug = app.slug
   if timezone is not None:
     materialized = cron_tz.materialize_zone_cron(body.cron, timezone)

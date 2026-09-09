@@ -6,7 +6,7 @@ import { ownsRecoveryAction } from '../recoveryCard.js'
 
 // The one-tap Resume affordance (design §2.2): a turn paused by a drain-gated
 // restart (or interrupted by a crash) persists a `resumable` error note; the
-// tail note renders a Resume button that re-sends a short "continue".
+// tail note renders an acknowledged lifecycle action, not an owner send.
 const msgContent = readFileSync(new URL('../MsgContent.jsx', import.meta.url), 'utf8')
 const chatView = readFileSync(new URL('../ChatView.jsx', import.meta.url), 'utf8')
 const css = readFileSync(new URL('../ChatView.css', import.meta.url), 'utf8')
@@ -115,8 +115,8 @@ test('MsgContent gates the Resume button on a resumable tail note', () => {
   }), false, 'an earlier resumable block cannot own a second action')
   assert.match(
     msgContent,
-    /className="chat__resume"[\s\S]*?onClick=\{\(\)\s*=>\s*onResume\('continue',\s*\{[\s\S]*?continuation:\s*'manual'[\s\S]*?pin:\s*false/,
-    'the Resume button must open a manual product-owned continuation',
+    /className="chat__resume chat__recovery-action"[\s\S]*?onClick=\{onResume\}/,
+    'the Resume control delegates an action without manufacturing message text',
   )
 })
 
@@ -125,10 +125,13 @@ test('MsgContent memo compares onResume so a stable ref skips re-render', () => 
     'the memo comparator must include onResume')
 })
 
-test('ChatView wires MsgContent.onResume to the normal send', () => {
-  assert.match(chatView, /<MsgContent[\s\S]*?onResume=\{doSend\}/,
-    'ChatView must pass its stable doSend as onResume so tapping Resume ' +
-      'uses the ordinary durable send boundary without a visible user row')
+test('ChatView wires both recovery surfaces to the separate Resume transaction', () => {
+  for (const tag of ['<MsgContent', '<ActiveAssistantSurface']) {
+    const element = sliceElement(chatView, tag)
+    assert.match(element, /onResume=\{[^}]*handleResume\}/)
+    assert.match(element, /resumeState=\{resumeState\}/)
+    assert.doesNotMatch(element, /onResume=\{[^}]*doSend/)
+  }
 })
 
 test('Resume button has styling', () => {
@@ -137,12 +140,12 @@ test('Resume button has styling', () => {
 })
 
 test('Resume button clears the 44px touch floor with press feedback', () => {
-  const block = css.match(/\.chat__resume\s*\{[\s\S]*?\}/)?.[0] ?? ''
+  const block = css.match(/\.chat__recovery-action\s*\{[\s\S]*?\}/)?.[0] ?? ''
   assert.match(block, /min-height:\s*44px/,
     'the Resume button must be at least 44px tall (touch floor)')
   assert.match(block, /var\(--accent\)/,
     'Resume carries an accent-tinted fill so it reads as the primary action')
-  assert.match(css, /\.chat__resume:active\s*\{\s*transform:\s*scale\(0\.97\)/,
+  assert.match(css, /\.chat__recovery-action:active:not\(:disabled\)\s*\{\s*transform:\s*scale\(0\.97\)/,
     'the Resume button has :active press feedback')
 })
 
@@ -161,8 +164,8 @@ test('ChatView routes both offscreen attention nudges through the controller', (
     'an elapsed manual park names its now-available action')
   assert.match(
     chatView,
-    /className="chat__question-nudge"\s+onClick=\{revealConversationTail\}/,
-    'the question nudge routes through the scroll controller',
+    /className="chat__question-nudge"\s+onClick=\{\(\) => revealPendingQuestion\(pendingQuestionEl\)\}/,
+    'the question nudge reveals the card from its top through the scroll controller',
   )
   assert.match(
     chatView,
@@ -298,4 +301,12 @@ test('message equality compares the error-card fields (stale-red-card guard)', (
     }],
   }]
   assert.equal(sameMessageList(oldRows, recoveredRows), false)
+})
+
+
+test('Resume keeps the shared recovery action compact inside the status grid', () => {
+  assert.match(msgContent, /className="chat__resume chat__recovery-action"/)
+  const layout = css.match(/\.chat__resume\s*\{[\s\S]*?\}/)?.[0] ?? ''
+  assert.match(layout, /justify-self:\s*start/)
+  assert.match(layout, /max-width:\s*100%/)
 })

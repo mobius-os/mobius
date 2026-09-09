@@ -373,7 +373,7 @@ def test_finalize_failure_via_run_chat_leaves_marker_for_reconciliation(
   # land — exactly the persistence-unavailable case.
   from app import chat_writer as cw
 
-  def _boom(db_, chat_id, blocks):
+  def _boom(db_, chat_id, blocks, *, commit=True):
     from app.chat_writer import _PersistFailed
     raise _PersistFailed("forced finalize failure")
 
@@ -532,11 +532,11 @@ def test_failed_question_commit_scrubs_orphan_block(monkeypatch):
   fail = {"on": True}
   real_apply = cw._apply_last_assistant_message
 
-  def _maybe_boom(db_, chat_id, snapshot):
+  def _maybe_boom(db_, chat_id, snapshot, *, commit=True):
     if fail["on"]:
       from app.chat_writer import _PersistFailed
       raise _PersistFailed("forced question-commit failure")
-    return real_apply(db_, chat_id, snapshot)
+    return real_apply(db_, chat_id, snapshot, commit=commit)
 
   monkeypatch.setattr(cw, "_apply_last_assistant_message", _maybe_boom)
 

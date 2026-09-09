@@ -7,7 +7,6 @@ export function isSteeredUserMessage(message) {
   return !!(
     message
     && message.role === 'user'
-    && !message.hidden
     && message.steered === true
   )
 }
@@ -92,7 +91,11 @@ export function projectSteerContinuationMessage(
     const projected = projectedText(prefix, text, { active })
     if (projected == null) return continuationMessage
     const nextBlocks = blocks.slice()
-    nextBlocks[textIndex] = { ...blocks[textIndex], content: projected }
+    nextBlocks[textIndex] = {
+      ...blocks[textIndex], content: projected,
+      // Activity offsets refer to persisted text, before this display-only cut.
+      source_text_offset: (blocks[textIndex].source_text_offset || 0) + text.length - projected.length,
+    }
     return {
       ...continuationMessage,
       content: projected,

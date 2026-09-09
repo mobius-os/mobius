@@ -1,4 +1,10 @@
-"""Read-only provider-plan usage snapshots for Settings and the chat brain."""
+"""Provider-plan usage snapshots for Settings and the chat brain.
+
+Reads are the common case. The one mutation here is redeeming a banked Codex
+rate-limit reset, which rides the same official Codex app-server client the
+usage read uses (`account/rateLimitResetCredit/consume`), never a hand-rolled
+HTTP call to an undocumented backend.
+"""
 
 from __future__ import annotations
 
@@ -10,6 +16,7 @@ import logging
 import os
 import shutil
 import time
+import uuid
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -95,7 +102,7 @@ def plan_label(raw: Any) -> str | None:
   return f"{value.replace('_', ' ').title()} plan"
 
 
-def _used_percent(raw: Any) -> float | int | None:
+def _percent(raw: Any, *, precision: int = 1) -> float | int | None:
   if isinstance(raw, bool):
     return None
   try:
@@ -104,7 +111,7 @@ def _used_percent(raw: Any) -> float | int | None:
     return None
   if not 0 <= value <= 100:
     return None
-  rounded = round(value, 1)
+  rounded = round(value, precision)
   return int(rounded) if rounded.is_integer() else rounded
 
 
@@ -142,7 +149,7 @@ def _window(
   used_percent: Any,
   resets_at: Any,
 ) -> dict[str, Any] | None:
-  used = _used_percent(used_percent)
+  used = _percent(used_percent)
   if used is None:
     return None
   return {
@@ -247,7 +254,59 @@ def normalize_codex_usage(
     "plan_label": plan_label(plan),
     "windows": windows,
     "credit_balance": credit_balance,
+    "reset_credits": _codex_reset_credits(
+      source.get("rate_limit_reset_credits", source.get("rateLimitResetCredits"))
+    ),
   }
+
+
+def _epoch_to_iso(value: Any) -> str | None:
+  """Codex reports credit timestamps as Unix seconds; the UI wants ISO-8601."""
+  try:
+    seconds = int(value)
+  except (TypeError, ValueError):
+    return None
+  return datetime.fromtimestamp(seconds, tz=UTC).isoformat()
+
+
+def _codex_reset_credits(summary: Any) -> dict[str, Any] | None:
+  """Surface banked rate-limit resets for Settings.
+
+  The read RPC always carries ``available_count``; the ``credits`` detail rows
+  (with expiry) are present only when Codex's backend chooses to include them,
+  so callers must render gracefully from the count alone. Only rows the backend
+  still marks redeemable are forwarded — a ``redeemed``/``redeeming`` row would
+  invite a click that can only fail.
+  """
+  if not isinstance(summary, dict):
+    return None
+  available = summary.get("available_count", summary.get("availableCount"))
+  try:
+    available = int(available)
+  except (TypeError, ValueError):
+    return None
+  if available <= 0:
+    return None
+
+  rows: list[dict[str, Any]] = []
+  raw_rows = summary.get("credits")
+  if isinstance(raw_rows, list):
+    for raw in raw_rows:
+      if not isinstance(raw, dict):
+        continue
+      status = raw.get("status")
+      if status not in (None, "available", "unknown"):
+        continue
+      credit_id = raw.get("id")
+      rows.append({
+        "id": credit_id if isinstance(credit_id, str) else None,
+        "title": raw.get("title"),
+        "description": raw.get("description"),
+        "expires_at": _epoch_to_iso(raw.get("expires_at", raw.get("expiresAt"))),
+        "granted_at": _epoch_to_iso(raw.get("granted_at", raw.get("grantedAt"))),
+      })
+
+  return {"available_count": available, "credits": rows}
 
 
 def _units(raw: Any) -> float | None:
@@ -269,7 +328,7 @@ def _first_units(source: dict[str, Any], keys: tuple[str, ...]) -> float | None:
 
 
 def normalize_mobius_usage(payload: Any) -> dict[str, Any]:
-  """Normalize the subscription's balance into a used-credit gauge."""
+  """Normalize the subscription's API-credit balance into one gauge."""
   source = payload if isinstance(payload, dict) else {}
   balance = source.get("balance")
   balance = balance if isinstance(balance, dict) else source
@@ -282,6 +341,13 @@ def normalize_mobius_usage(payload: Any) -> dict[str, Any]:
     else "Möbius subscription"
   )
 
+  used_percent = _percent(
+    balance.get("used_percent", balance.get("usedPercent"))
+  )
+  remaining_percent = _percent(
+    balance.get("remaining_percent", balance.get("remainingPercent")),
+    precision=2,
+  )
   remaining = _first_units(balance, ("spendable_units", "remaining_units"))
   used = _first_units(balance, ("used_units", "spent_units", "consumed_units"))
   total = _first_units(
@@ -292,7 +358,12 @@ def normalize_mobius_usage(payload: Any) -> dict[str, Any]:
   grants = grants if isinstance(grants, list) else []
   eligible_grants = [
     grant for grant in grants
-    if isinstance(grant, dict) and grant.get("revoked") is not True
+    if isinstance(grant, dict)
+    and grant.get("revoked") is not True
+  ]
+  active_grants = [
+    grant for grant in eligible_grants
+    if (_first_units(grant, ("available_units",)) or 0) > 0
   ]
   if total is None:
     grant_totals = [
@@ -309,22 +380,18 @@ def normalize_mobius_usage(payload: Any) -> dict[str, Any]:
     total = used + remaining
   if used is None and total is not None and remaining is not None:
     used = max(0, total - remaining)
-
-  used_percent = _used_percent(
-    balance.get("used_percent", balance.get("usedPercent"))
-  )
-  if used_percent is None and used is not None and total is not None and total > 0:
-    used_percent = _used_percent((used / total) * 100)
+  if remaining_percent is None and remaining is not None and total and total > 0:
+    remaining_percent = _percent((remaining / total) * 100, precision=2)
+  if used_percent is None:
+    if used is not None and total is not None and total > 0:
+      used_percent = _percent((used / total) * 100)
 
   window = (
     _window("api_credits", "api_credits", "API credits", used_percent, None)
     if used_percent is not None else None
   )
   if window is not None:
-    active_grants = [
-      grant for grant in eligible_grants
-      if (_first_units(grant, ("available_units",)) or 0) > 0
-    ]
+    window["remaining_percent"] = remaining_percent
     expiries = [
       normalized
       for grant in active_grants
@@ -349,18 +416,12 @@ async def _fetch_claude_usage(data_dir: str) -> dict[str, Any]:
     "Content-Type": "application/json",
   }
   async with httpx.AsyncClient(timeout=5.0) as client:
-    for delay in (0.0, *_CLAUDE_COLD_RETRY_DELAYS):
-      if delay:
-        await asyncio.sleep(delay)
-      response = await client.get(_CLAUDE_USAGE_URL, headers=headers)
-      response.raise_for_status()
-      snapshot = normalize_claude_usage(
-        response.json(),
-        subscription_type=subscription_type,
-      )
-      if snapshot["state"] != "unavailable":
-        return snapshot
-  return snapshot
+    response = await client.get(_CLAUDE_USAGE_URL, headers=headers)
+    response.raise_for_status()
+    return normalize_claude_usage(
+      response.json(),
+      subscription_type=subscription_type,
+    )
 
 
 def _codex_plan_type(account_response: Any) -> Any:
@@ -382,6 +443,61 @@ def _read_codex_client(client: Any) -> tuple[Any, Any]:
     response_model=GetAccountRateLimitsResponse,
   )
   return account, limits
+
+
+async def _run_on_codex_client(data_dir: str, work: Any, *, timeout_error: str) -> Any:
+  """Run one blocking Codex app-server interaction on a bounded, reaped client.
+
+  ``work`` is a sync callable that receives a started ``CodexClient`` and owns
+  the whole request; it runs on worker one while worker two stays free to close
+  the transport and unblock the interaction on timeout.
+  """
+  from openai_codex.client import CodexClient, CodexConfig
+
+  codex_bin = shutil.which("codex")
+  if not codex_bin:
+    raise RuntimeError("codex CLI not found")
+  env = dict(os.environ)
+  env["CODEX_HOME"] = str(Path(data_dir) / "cli-auth" / "codex")
+  client = CodexClient(CodexConfig(
+    codex_bin=codex_bin,
+    cwd=data_dir,
+    env=env,
+    client_name="mobius_settings",
+    client_title="Möbius Settings",
+  ))
+
+  # Keep Settings' short-lived client off the process-wide default executor.
+  # Live Codex turns may each hold one default worker while waiting for a
+  # notification; queuing start/read/close behind them made this probe leak an
+  # app-server exactly when the system was busiest. Worker one owns the whole
+  # blocking interaction; worker two remains available to close the transport
+  # and unblock it on timeout.
+  executor = _cf.ThreadPoolExecutor(
+    max_workers=2,
+    thread_name_prefix="mobius-codex-usage",
+  )
+  loop = asyncio.get_running_loop()
+
+  def in_worker(fn, /, *args):
+    return loop.run_in_executor(executor, functools.partial(fn, *args))
+
+  task = in_worker(work, client)
+  try:
+    return await asyncio.wait_for(
+      asyncio.shield(task),
+      timeout=_PROVIDER_TIMEOUT_SECONDS,
+    )
+  except TimeoutError:
+    await in_worker(client.close)
+    with suppress(Exception):
+      await asyncio.wait_for(task, timeout=2.0)
+    raise RuntimeError(timeout_error)
+  finally:
+    try:
+      await in_worker(client.close)
+    finally:
+      executor.shutdown(wait=False, cancel_futures=True)
 
 
 async def _fetch_codex_usage(data_dir: str) -> dict[str, Any]:
@@ -416,6 +532,8 @@ async def _fetch_codex_usage(data_dir: str) -> dict[str, Any]:
   def in_worker(fn, /, *args):
     return loop.run_in_executor(executor, functools.partial(fn, *args))
 
+  from app.codex_session_lock import acquire_codex_session_activity_async
+  ownership = await acquire_codex_session_activity_async(data_dir)
   task = in_worker(_read_codex_client, client)
   try:
     account, limits = await asyncio.wait_for(
@@ -432,9 +550,54 @@ async def _fetch_codex_usage(data_dir: str) -> dict[str, Any]:
       await in_worker(client.close)
     finally:
       executor.shutdown(wait=False, cancel_futures=True)
+      ownership.release()
 
   raw = limits.model_dump(mode="json", by_alias=False)
   return normalize_codex_usage(raw, plan_type=_codex_plan_type(account))
+
+
+def _consume_codex_reset(credit_id: str | None) -> Any:
+  """Build the worker that redeems one banked reset over the official RPC."""
+
+  def work(client: Any) -> dict[str, Any]:
+    from openai_codex.generated.v2_all import (
+      ConsumeAccountRateLimitResetCreditParams,
+      ConsumeAccountRateLimitResetCreditResponse,
+    )
+
+    client.start()
+    client.initialize()
+    params = ConsumeAccountRateLimitResetCreditParams(
+      credit_id=credit_id or None,
+      # One logical attempt per HTTP redeem; the UI confirms before sending, so
+      # a fresh key per call is correct and a user retry is a new attempt.
+      idempotency_key=str(uuid.uuid4()),
+    )
+    response = client.request(
+      "account/rateLimitResetCredit/consume",
+      params.model_dump(mode="json", by_alias=True, exclude_none=True),
+      response_model=ConsumeAccountRateLimitResetCreditResponse,
+    )
+    return {"outcome": response.outcome.value}
+
+  return work
+
+
+async def redeem_codex_reset(
+  data_dir: str,
+  credit_id: str | None = None,
+) -> dict[str, Any]:
+  """Redeem a banked Codex rate-limit reset via the official consume RPC.
+
+  Returns the backend outcome (``reset``, ``nothingToReset``, ``noCredit``,
+  ``alreadyRedeemed``). Redeeming is immediate and irreversible, so the caller
+  must have already confirmed intent.
+  """
+  return await _run_on_codex_client(
+    data_dir,
+    _consume_codex_reset(credit_id),
+    timeout_error="codex reset redeem timed out",
+  )
 
 
 async def _fetch_mobius_usage() -> dict[str, Any]:
@@ -470,24 +633,36 @@ def _cached_usage(
   return snapshot
 
 
-def _snapshot_boundaries_are_current(
+def _snapshot_resets_are_current(
   snapshot: dict[str, Any],
   *,
   now: datetime | None = None,
 ) -> bool:
-  """Never carry an observation across an allowance reset or expiry."""
+  """Never carry an observation across a provider allowance reset."""
   current = now or datetime.now(UTC)
   for window in snapshot.get("windows", []):
     if not isinstance(window, dict):
       continue
-    for field in ("resets_at", "expires_at"):
-      normalized = _reset_iso(window.get(field))
-      if (
-        normalized is not None
-        and datetime.fromisoformat(normalized) <= current
-      ):
-        return False
+    normalized = _reset_iso(window.get("resets_at"))
+    if normalized is None:
+      continue
+    if datetime.fromisoformat(normalized) <= current:
+      return False
   return True
+
+
+async def _fresh_provider_snapshot(
+  provider_id: str,
+  data_dir: str,
+) -> dict[str, Any]:
+  delays = _CLAUDE_COLD_RETRY_DELAYS if provider_id == "claude" else ()
+  snapshot = await _provider_snapshot(provider_id, data_dir)
+  for delay in delays:
+    if snapshot.get("state") != "unavailable":
+      break
+    await asyncio.sleep(delay)
+    snapshot = await _provider_snapshot(provider_id, data_dir)
+  return snapshot
 
 
 async def _provider_snapshot(provider_id: str, data_dir: str) -> dict[str, Any]:
@@ -558,9 +733,10 @@ async def read_provider_usage(
     if cached is not None:
       return cached
 
-    snapshot = await _provider_snapshot(provider_id, data_dir)
+    snapshot = await _fresh_provider_snapshot(provider_id, data_dir)
     if snapshot.get("state") == "ready":
       ready = copy.deepcopy(snapshot)
+      ready["observed_at"] = datetime.now(UTC).isoformat()
       ready["stale"] = False
       checked_at = time.monotonic()
       _provider_usage_cache[key] = _CachedProviderUsage(
@@ -580,7 +756,7 @@ async def read_provider_usage(
       prior is not None
       and prior.snapshot.get("state") == "ready"
       and now - prior.observed_at <= _PROVIDER_USAGE_STALE_SECONDS
-      and _snapshot_boundaries_are_current(prior.snapshot)
+      and _snapshot_resets_are_current(prior.snapshot)
     ):
       # Suppress a second browser waiting on the same failed live probe while
       # preserving the original observation age for the stale ceiling.

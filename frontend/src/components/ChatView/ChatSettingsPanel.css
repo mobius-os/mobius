@@ -55,13 +55,9 @@
 .csp__usage-key-line--context { background: #d97757; }
 
 .csp__automation {
-  margin-top: 8px;
-  padding-top: 8px;
+  margin-top: 6px;
+  padding-top: 6px;
   border-top: 1px solid var(--border-light);
-}
-
-.csp__label--automation {
-  padding-bottom: 3px;
 }
 
 .csp__automation-row {
@@ -69,8 +65,8 @@
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
   gap: 12px;
-  min-height: 48px;
-  padding: 6px 10px;
+  min-height: 44px;
+  padding: 4px 10px;
 }
 
 .csp__automation-copy {
@@ -341,6 +337,41 @@
   flex-direction: column;
   gap: 6px;
   padding: 8px 10px 0;
+}
+
+@media (max-width: 480px) {
+  .csp__heading {
+    padding: 2px 8px 4px;
+  }
+
+  .csp__usage-key {
+    margin-top: 3px;
+  }
+
+  .csp-row {
+    min-height: 44px;
+    gap: 10px;
+    padding: 7px 8px;
+  }
+
+  .csp-row__icon {
+    width: 28px;
+    height: 28px;
+  }
+
+  .csp-effort-indent {
+    margin: 3px 10px 5px 46px;
+  }
+
+  .csp__automation {
+    margin-top: 3px;
+    padding-top: 3px;
+  }
+
+  .csp__foot {
+    gap: 4px;
+    padding: 5px 8px 0;
+  }
 }
 
 .csp__note {

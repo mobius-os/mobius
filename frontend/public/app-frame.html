@@ -603,6 +603,39 @@
     let screenControlRefs = new Map();
     let latestOwnerScreenInputAt = 0;
 
+    function setShellShortcuts(value) {
+      shellShortcuts = (Array.isArray(value) ? value : []).slice(0, 64).filter(function (item) {
+        return item && typeof item.actionId === 'string'
+          && item.binding && typeof item.binding.key === 'string';
+      });
+    }
+
+    function frameShortcutMatches(event, binding) {
+      if (!event || !binding || event.isComposing || event.repeat) return false;
+      const eventKey = typeof event.key === 'string' ? event.key.toLocaleLowerCase() : '';
+      const bindingKey = String(binding.key || '').toLocaleLowerCase();
+      if (!bindingKey || eventKey !== bindingKey) return false;
+      if (Boolean(event.metaKey || event.ctrlKey) !== Boolean(binding.mod)) return false;
+      if (Boolean(event.shiftKey) !== Boolean(binding.shift)) return false;
+      if (Boolean(event.altKey) !== Boolean(binding.alt)) return false;
+      return true;
+    }
+
+    // App code retains every ordinary/editor shortcut. Only the exact global
+    // chords advertised by the shell are captured and forwarded as named
+    // actions; raw keystrokes never cross the iframe boundary.
+    document.addEventListener('keydown', function (event) {
+      const shortcut = shellShortcuts.find(function (item) {
+        return frameShortcutMatches(event, item.binding);
+      });
+      if (!shortcut) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      window.parent.postMessage({
+        type: 'moebius:shell-shortcut', actionId: shortcut.actionId
+      }, window.location.origin);
+    }, true);
+
     ['pointerdown', 'keydown', 'input', 'wheel', 'touchstart'].forEach(function (type) {
       document.addEventListener(type, function (event) {
         if (event.isTrusted) latestOwnerScreenInputAt = Date.now();
@@ -713,7 +746,6 @@
 
     function screenType(element, text, replace) {
       if (!element) throw new Error('No field is focused.');
-      if (element.closest && element.closest('[inert]')) throw new Error('That field is not interactive.');
       if (screenSensitive(element)) throw new Error('Sensitive fields stay under your control.');
       const tag = element.tagName.toLowerCase();
       if (tag === 'input' || tag === 'textarea') {
@@ -776,7 +808,6 @@
       if (command.action === 'click') {
         const target = command.ref ? screenControlRefs.get(command.ref) : screenActionTarget(point);
         if (!target || !screenVisible(target)) throw new Error('That control is no longer available.');
-        if (target.closest && target.closest('[inert]')) throw new Error('That control is not interactive.');
         if (target.disabled || target.getAttribute('aria-disabled') === 'true') {
           throw new Error('That control is disabled.');
         }
@@ -802,39 +833,6 @@
       }
       throw new Error('Unsupported screen-control action.');
     }
-
-    function setShellShortcuts(value) {
-      shellShortcuts = (Array.isArray(value) ? value : []).slice(0, 64).filter(function (item) {
-        return item && typeof item.actionId === 'string'
-          && item.binding && typeof item.binding.key === 'string';
-      });
-    }
-
-    function frameShortcutMatches(event, binding) {
-      if (!event || !binding || event.isComposing || event.repeat) return false;
-      const eventKey = typeof event.key === 'string' ? event.key.toLocaleLowerCase() : '';
-      const bindingKey = String(binding.key || '').toLocaleLowerCase();
-      if (!bindingKey || eventKey !== bindingKey) return false;
-      if (Boolean(event.metaKey || event.ctrlKey) !== Boolean(binding.mod)) return false;
-      if (Boolean(event.shiftKey) !== Boolean(binding.shift)) return false;
-      if (Boolean(event.altKey) !== Boolean(binding.alt)) return false;
-      return true;
-    }
-
-    // App code retains every ordinary/editor shortcut. Only the exact global
-    // chords advertised by the shell are captured and forwarded as named
-    // actions; raw keystrokes never cross the iframe boundary.
-    document.addEventListener('keydown', function (event) {
-      const shortcut = shellShortcuts.find(function (item) {
-        return frameShortcutMatches(event, item.binding);
-      });
-      if (!shortcut) return;
-      event.preventDefault();
-      event.stopImmediatePropagation();
-      window.parent.postMessage({
-        type: 'moebius:shell-shortcut', actionId: shortcut.actionId
-      }, window.location.origin);
-    }, true);
 
     // App intent listeners live in app code, alongside this runtime listener.
     // The parent keeps an opaque cover over the frame until we acknowledge.

@@ -1,3 +1,4 @@
+/* Settings uses the original rounded cards and spacious, two-line model rows. */
 .settings {
   height: 100%;
   overflow-y: auto;
@@ -62,66 +63,6 @@
   display: flex;
   align-items: center;
   gap: 8px;
-}
-
-.settings__info-button {
-  display: inline-grid;
-  place-items: center;
-  width: 32px;
-  height: 32px;
-  margin: -7px 0;
-  padding: 0;
-  border: 0;
-  border-radius: 50%;
-  background: transparent;
-  color: var(--muted);
-  cursor: pointer;
-}
-
-.settings__info-anchor {
-  position: relative;
-}
-
-.settings__info-bubble {
-  position: absolute;
-  z-index: 20;
-  bottom: calc(100% + 10px);
-  left: 0;
-  width: min(320px, calc(100vw - 40px));
-  padding: 10px 12px;
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  background: var(--surface);
-  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.24);
-  color: var(--text);
-  font-size: 13px;
-  font-weight: 400;
-  line-height: 1.45;
-}
-
-.settings__info-bubble::after {
-  content: '';
-  position: absolute;
-  top: 100%;
-  left: calc(100% - 26px);
-  width: 10px;
-  height: 10px;
-  border-right: 1px solid var(--border);
-  border-bottom: 1px solid var(--border);
-  background: var(--surface);
-  transform: translateY(-5px) rotate(45deg);
-}
-
-.settings__info-button:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 1px;
-}
-
-@media (hover: hover) and (pointer: fine) {
-  .settings__info-button:hover {
-    color: var(--text);
-    background: var(--surface2);
-  }
 }
 
 /* "Configured" indicator now uses the shared <StatusDot> component
@@ -228,13 +169,6 @@
   justify-content: space-between;
   gap: 14px;
   min-width: 0;
-}
-
-/* Top-align a row whose label spans two lines (label + subtext), so the
-   trailing button sits level with the first line rather than centered
-   against the taller text block (e.g. the Shell version row). */
-.settings__row--top {
-  align-items: flex-start;
 }
 
 .settings__appearance {
@@ -349,49 +283,6 @@
   font-weight: 650;
   letter-spacing: 0;
   color: var(--text);
-}
-
-/* Möbius update cluster: the status line stacks ABOVE the build identity, so a
-   short status ("Up to date") never shares a flex row with the build string and
-   wraps mid-phrase. A vertical stack reads as one calm unit; the trailing action
-   button (top-aligned via .settings__row--top) sits level with the status line. */
-.settings__update {
-  display: flex;
-  flex-direction: column;
-  gap: 5px;
-  min-width: 0;
-}
-
-/* A staged update is not a dead end: the owner can check/review another release
-   and still restart once. Keep both choices together, with the batching action
-   first when another release exists and the restart action visually primary
-   when there is nothing else waiting. */
-.settings__update-actions {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-  flex-wrap: wrap;
-  justify-content: flex-end;
-  gap: 8px;
-  flex-shrink: 0;
-}
-
-/* The build sha as a quiet, monospaced identity line — tabular glyphs make a
-   hex sha read AS a build id rather than stray text. */
-.settings__build {
-  margin: 0;
-  font-family: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, monospace;
-  font-size: 12px;
-  letter-spacing: 0;
-  color: var(--muted);
-}
-
-.settings__build-kind {
-  display: inline-block;
-  min-width: 70px;
-  margin-right: 8px;
-  color: var(--muted);
-  font-family: var(--font);
 }
 
 .settings__btn--nowrap { white-space: nowrap; }
@@ -599,77 +490,14 @@
     gap: 8px;
   }
 
-  .settings__update-actions {
-    align-items: flex-start;
-  }
+
 }
 
-/* Cancel + confirm pair for a deliberate two-step action (e.g. the manual
-   server restart, which interrupts any live chat). */
+/* Account actions keep their explicit confirmation together. */
 .settings__confirm {
   display: inline-flex;
   gap: 8px;
 }
 
-/* Server controls stack with an explicit gap so Restart, transient notices,
-   and errors keep stable spacing in every confirmation state. */
-.settings__section--server {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-
-.settings__section--server .settings__section-title,
-.settings__section--server .settings__notice {
-  margin: 0;
-}
-
-.settings__section--server .settings__subtext--tight {
-  margin: -10px 0 0;
-}
-
-/* ── Provider-neutral MCP connections ──────────────────────────────── */
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-@media (hover: hover) and (pointer: fine) {
-
-}
-
-
-
-
-
-
-
-
-@media (hover: hover) and (pointer: fine) {
-}
-
-
-
-
-
-
-
-
-
-
-
-
-@container settings (max-width: 480px) {
-
-
-}
+/* Keep full action labels intact without changing the shared provider layout. */
+.settings .provider-row__action { white-space: nowrap; }

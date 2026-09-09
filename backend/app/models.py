@@ -21,7 +21,7 @@ from sqlalchemy import (
   Index, LargeBinary, String, Text, UniqueConstraint, event, false, or_, true,
 )
 
-from sqlalchemy.orm import column_property, validates
+from sqlalchemy.orm import column_property, relationship, validates
 
 from app.database import Base
 from app.shell_install_pass import ShellInstallPassGrant
@@ -46,6 +46,17 @@ class Owner(Base):
   # The email is informational and never used as an authorization key.
   sso_subject = Column(String(128), nullable=True)
   sso_email = Column(String(320), nullable=True)
+  # Durable owner login mode, mutually exclusive by construction:
+  #   'local'  — the username/password form is the only way in.
+  #   'mobius' — local password login is refused (403) and the owner signs in
+  #              through their mobius.you account, verified against sso_subject.
+  # A self-hosted owner is 'local' until an operator flips them host-side; the
+  # host operator restores 'local' through a direct DB update or the
+  # update-owner-credentials.py script. Non-null with a 'local' default so every
+  # existing row reads as password-login without a backfill.
+  auth_mode = Column(
+    String(16), nullable=False, default="local", server_default="local"
+  )
   # Must stay in sync with providers.PROVIDER_NAMES.
   provider = Column(String(32), nullable=False, default="claude")
   # Default provider-limit recovery policy for newly-created chats. Each chat
@@ -150,6 +161,17 @@ class SavedSecureInput(Base):
   created_at = Column(DateTime, nullable=False, default=now_naive_utc)
 
 
+class ChatLiveAssistant(Base):
+  """One bounded live snapshot, physically separate from historical chat bytes."""
+
+  __tablename__ = "chat_live_assistants"
+
+  chat_id = Column(
+    String(64), ForeignKey("chats.id", ondelete="CASCADE"), primary_key=True,
+  )
+  snapshot = Column(JSON, nullable=True)
+
+
 class Chat(Base):
   """A chat conversation with the agent."""
 
@@ -170,10 +192,26 @@ class Chat(Base):
   has_messages = Column(
     Boolean, nullable=False, default=False, server_default=false()
   )
-  # Current in-flight assistant state is separate from immutable history so a
-  # streaming update never rewrites every prior message. Finalize and startup
-  # recovery merge this bounded value into `messages`.
-  live_assistant = Column(JSON, nullable=True, default=None)
+  # A separate COLUMN still rewrites SQLite's entire overflow row on every
+  # update. Keep streaming bytes in a separate ROW so saving a small snapshot
+  # has constant cost as history grows. The writer still owns both atomically.
+  live_snapshot = relationship(
+    "ChatLiveAssistant", uselist=False, cascade="all, delete-orphan",
+  )
+
+  @property
+  def live_assistant(self):
+    return self.live_snapshot.snapshot if self.live_snapshot is not None else None
+
+  @live_assistant.setter
+  def live_assistant(self, value):
+    if value is None:
+      self.live_snapshot = None
+    elif self.live_snapshot is None:
+      self.live_snapshot = ChatLiveAssistant(snapshot=value)
+    else:
+      self.live_snapshot.snapshot = value
+
   # The one assistant transcript row allowed to own regenerable browser state.
   # Unlike `live_assistant`, this identity deliberately survives QuestionCommit:
   # a parked unanswered card is durable history but can still be preceded by a
@@ -311,6 +349,27 @@ class ChatRun(Base):
   # A successfully drained planned restart reuses that retry path with
   # park_reason="restart"; an unplanned crash remains "interrupted".
   status = Column(String(16), nullable=False, default="running", index=True)
+  # False proves this physical run has not crossed provider entry. The writer
+  # commits True before invoking either runner; a crash after that commit is
+  # ambiguous even with no transcript output. NULL preserves that ambiguity
+  # for pre-admission-ledger runs upgraded from an older backend.
+  provider_execution_admitted = Column(Boolean, nullable=True, default=False)
+  # Inclusive boundary of the peer-message page injected into this provider
+  # admission. Both fields are NULL when no peer message was delivered. The
+  # pair advances only after the provider call returns successfully. Admission
+  # alone is intentionally insufficient: a launch exception must redeliver the
+  # same oldest unseen page instead of losing it.
+  peer_message_through_created_at = Column(DateTime, nullable=True, default=None)
+  peer_message_through_id = Column(String(64), nullable=True, default=None)
+  # NULL is pre-migration history. New provider admissions write False when no
+  # peer context was present and True while an injected page still awaits a
+  # successful provider return; only the latter blocks the start-time fallback.
+  peer_message_delivery_pending = Column(Boolean, nullable=True, default=None)
+  # Exact durable activity records included in this provider admission. The
+  # provider-success acknowledgement uses these identities to mark helper
+  # results incorporated without adding a synthetic user transcript row. It
+  # remains populated after acknowledgement as the restart/idempotency audit.
+  activity_delivery_json = Column(JSON, nullable=True, default=None)
   provider = Column(String(32), nullable=True, default=None)
   # Objective shown by the shell while this exact run owns a native goal.
   # This belongs to the run rather than the transcript tail: mid-turn owner
@@ -377,6 +436,27 @@ class ChatRun(Base):
   restart_nonce = Column(String(128), nullable=True, default=None)
 
 
+class ChatFailureActivity(Base):
+  """Latest unacknowledged terminal failure for one owner-visible chat.
+
+  The monotonic version makes opening a chat race-safe: acknowledging failure
+  N can never hide a newer failure N+1 that lands while the request is in
+  flight. Planned restart parks never enter this table.
+  """
+
+  __tablename__ = "chat_failure_activity"
+
+  chat_id = Column(
+    String(64), ForeignKey("chats.id", ondelete="CASCADE"), primary_key=True,
+  )
+  run_id = Column(String(64), nullable=False)
+  failed_at = Column(DateTime, nullable=False, default=now_naive_utc)
+  activity_version = Column(
+    Integer, nullable=False, default=1, server_default="1",
+  )
+  unseen = Column(Boolean, nullable=False, default=True, server_default=true())
+
+
 class Delegation(Base):
   """Immutable control plane for one durable delegated task.
 
@@ -420,20 +500,27 @@ class Delegation(Base):
   # above and child transcript are sufficient and this transient recovery copy
   # is cleared.
   startup_prompt = Column(Text, nullable=True, default=None)
+  # Retained for historical Gauntlet task budgets. Ordinary Delegations do not
+  # acquire or enforce a provider budget through this column.
   max_budget_usd = Column(Float, nullable=True)
   created_at = Column(DateTime, nullable=False, default=lambda: now_naive_utc())
   cancelled_at = Column(DateTime, nullable=True, default=None)
-  # Opt-in: wake the parent chat with the result when this child settles. Off by
-  # default so pre-existing rows and any pure-poll submitter never get a surprise
-  # turn; the chat-agent subagent path sets it True at submit.
+  # Opt-in: the parent explicitly waits for this result and may receive one
+  # non-message activity checkpoint after the child settles. Off by default so
+  # pre-existing rows and pure-poll submitters never get a surprise turn.
   notify_parent_on_complete = Column(
     Boolean, nullable=False, default=False
   )
-  # Retry latch for the parent wake, stamped after the completion notice starts
-  # or queues. If a crash lands between those transactions, recovery recognizes
-  # the exact durable hidden envelope before either retrying or yielding its
-  # observation claim to a blocking attachment.
+  # Delivery-channel latch. Depending on the workflow, this may mean provider
+  # admission, an owner notification, or a historical terminal delivery; it is
+  # not universal proof that an agent incorporated the result. Until set, the
+  # owning Delegation/child result remains available to a later real context
+  # checkpoint even when Stop fences automatic continuation.
   parent_woken_at = Column(DateTime, nullable=True, default=None)
+  # Exact acceptance evidence. Only terminal Finalize stamps this in the same
+  # commit as the assistant response which incorporated the admitted helper
+  # envelope. Historical delivery latches deliberately remain NULL/unknown.
+  result_incorporated_at = Column(DateTime, nullable=True, default=None)
   # A source-attached job (currently contribution preparation) belongs to the
   # owner-facing source chat without fabricating a ChatRun there. The stable
   # work id makes retries attach; the explicit intent supports a small durable
@@ -477,13 +564,36 @@ class ChatWait(Base):
   chat_id = Column(
     String(64), ForeignKey("chats.id"), nullable=False, index=True
   )
+  # The physical run that declared the wait; audit only, kept FK-free so the
+  # wait survives unusual run-row repair.
   created_by_run_id = Column(String(64), nullable=True, default=None)
   description = Column(String(500), nullable=False)
-  condition_owner = Column(String(200), nullable=True, default=None)
-  kind = Column(String(16), nullable=False)
+  # The system/person expected to make the condition true. This is distinct
+  # from the durable checker (always Möbius) and makes an internal handoff
+  # honest: a monitor must name an acknowledged executor before it can imply
+  # that work is happening elsewhere. Nullable only for pre-migration rows.
+  condition_owner = Column(String(160), nullable=True, default=None)
+  # `command`: met when the read-only check command exits 0.
+  # `timer`: met when `due_at` passes.
+  kind = Column(String(32), nullable=False)
   command = Column(Text, nullable=True, default=None)
+  # Typed product waits keep their bounded, server-authored condition here.
+  # Command/timer rows leave it NULL.  Platform activation deliberately stores
+  # expected committed bytes rather than a shell predicate or Git ancestry.
+  condition_json = Column(JSON, nullable=True, default=None)
+  # The declaring physical/logical execution identities are captured at
+  # declaration time.  A later Goal dismissal or physical retry therefore
+  # cannot make a shared activation wake attach to the wrong work.
+  root_run_id = Column(String(64), nullable=True, default=None, index=True)
+  goal_id = Column(String(64), nullable=True, default=None, index=True)
+  linked_question_id = Column(
+    String(64), nullable=True, default=None, unique=True, index=True,
+  )
+  action_approved_at = Column(DateTime, nullable=True, default=None)
   due_at = Column(DateTime, nullable=True, default=None)
   interval_secs = Column(Integer, nullable=False, default=300)
+  # A wait never rots silently: on deadline the chat is woken with
+  # `deadline_expired` so the agent decides what to do next.
   deadline_at = Column(DateTime, nullable=False)
   # armed -> met | expired | failed | cancelled. `failed` means the check
   # itself broke (distinct from a valid silent exit-1 "not yet"). Terminal
@@ -496,11 +606,200 @@ class ChatWait(Base):
   last_checked_at = Column(DateTime, nullable=True, default=None)
   met_at = Column(DateTime, nullable=True, default=None)
   cancelled_at = Column(DateTime, nullable=True, default=None)
-  # Retry latch for the resume, stamped only after a deterministic wake turn
-  # starts/attaches or its stable cid is durably queued.  The wait-derived run
-  # and message ids make a crash retry reattach rather than minting a twin.
+  # Retry latch for the resume, stamped after the wake turn starts or queues.
+  # At-least-once across a crash between transactions, matching delegations:
+  # a redelivered result beats a silently lost one.
   resume_delivered_at = Column(DateTime, nullable=True, default=None)
   created_at = Column(DateTime, nullable=False, default=lambda: now_naive_utc())
+
+
+class PlatformBootSnapshot(Base):
+  """Immutable proof of restart-loaded source after DB/writer readiness.
+
+  Only paths named by activation waits are hashed.  The serving sentinel says
+  which committed tree uvicorn imported; persisting the relevant tree bytes at
+  the end of startup lets every matching waiter share one cheap proof without
+  polling a shell command or mistaking a baked fallback for activation.
+  """
+
+  __tablename__ = "platform_boot_snapshots"
+
+  boot_id = Column(String(160), primary_key=True)
+  source_kind = Column(String(32), nullable=False)
+  source_sha = Column(String(64), nullable=True, default=None)
+  loaded_files_json = Column(JSON, nullable=False, default=dict)
+  service_ready = Column(Boolean, nullable=False, default=False)
+  captured_at = Column(DateTime, nullable=False, default=lambda: now_naive_utc())
+
+
+class PlatformRestartExecution(Base):
+  """At-most-once claim for one exact platform Restart action.
+
+  The claim commits before the process side effect is admitted.  If the
+  process dies in that gap the row is reconciled from boot evidence; it is
+  never replayed merely because an HTTP acknowledgement was lost.
+  """
+
+  __tablename__ = "platform_restart_executions"
+
+  action_id = Column(String(96), primary_key=True)
+  question_id = Column(String(64), nullable=False, unique=True, index=True)
+  chat_id = Column(
+    String(64), ForeignKey("chats.id"), nullable=False, index=True,
+  )
+  wait_id = Column(String(64), nullable=False, unique=True, index=True)
+  source_boot_id = Column(String(160), nullable=False)
+  requirement_json = Column(JSON, nullable=False)
+  status = Column(String(24), nullable=False, default="claimed", index=True)
+  claimed_at = Column(DateTime, nullable=False, default=lambda: now_naive_utc())
+  admitted_at = Column(DateTime, nullable=True, default=None)
+  activated_boot_id = Column(String(160), nullable=True, default=None)
+  settled_at = Column(DateTime, nullable=True, default=None)
+
+
+class GauntletRun(Base):
+  """Legacy workflow history retained for non-destructive lifecycle cleanup.
+
+  Current code never creates or advances these rows. The cold-start retirement
+  cutover makes old execution graphs terminal before generic ChatRun or
+  Delegation recovery, while the normal chat/app hard-purge paths retain this
+  model so historical data can be removed with its owner.
+  """
+
+  __tablename__ = "gauntlet_runs"
+  __table_args__ = (
+    CheckConstraint(
+      "status IN "
+      "('running','stopping','completed','budget_exhausted','failed','stopped')",
+      name="ck_gauntlet_runs_status",
+    ),
+    CheckConstraint(
+      "phase IN ('baseline','integrate','evaluate','terminal')",
+      name="ck_gauntlet_runs_phase",
+    ),
+    CheckConstraint("current_round >= 0", name="ck_gauntlet_runs_round"),
+    CheckConstraint("max_rounds >= 1", name="ck_gauntlet_runs_max_rounds"),
+    CheckConstraint(
+      "(status IN ('running','stopping') AND active_target_key IS NOT NULL) OR "
+      "(status NOT IN ('running','stopping') AND active_target_key IS NULL)",
+      name="ck_gauntlet_runs_active_target",
+    ),
+    CheckConstraint(
+      "(status = 'stopping' AND requested_terminal_status IN "
+      "('stopped','budget_exhausted','failed')) OR "
+      "(status != 'stopping' AND requested_terminal_status IS NULL)",
+      name="ck_gauntlet_runs_requested_terminal",
+    ),
+  )
+
+  # Caller-provided stable identity is also POST idempotency.
+  id = Column(String(64), primary_key=True)
+  app_id = Column(Integer, ForeignKey("apps.id"), nullable=False, index=True)
+  parent_chat_id = Column(
+    String(64), ForeignKey("chats.id"), nullable=False, index=True
+  )
+  # The controller's original logical run.  Like Delegation's parent root,
+  # this intentionally has no FK so audit state survives unusual run repair.
+  parent_root_run_id = Column(String(64), nullable=False, index=True)
+  target_path = Column(String(1024), nullable=False)
+  # A nullable unique lease: exactly one running coordinator may own a target,
+  # while terminal historical rows all release it to NULL. The value is the
+  # normalized path's SHA-256 digest, keeping the unique index bounded even on
+  # databases with tight index-key byte limits.
+  active_target_key = Column(
+    String(64), nullable=True, unique=True, index=True
+  )
+  contract_json = Column(JSON, nullable=False)
+  contract_sha256 = Column(String(64), nullable=False)
+  provider = Column(String(32), nullable=False)
+  model = Column(String(256), nullable=True)
+  effort = Column(String(32), nullable=True)
+  status = Column(String(24), nullable=False, default="running", index=True)
+  phase = Column(String(16), nullable=False, default="baseline")
+  current_round = Column(Integer, nullable=False, default=0)
+  max_rounds = Column(Integer, nullable=False)
+  max_budget_usd = Column(Float, nullable=True)
+  deadline_at = Column(DateTime, nullable=True)
+  stop_requested_at = Column(DateTime, nullable=True, default=None)
+  requested_terminal_status = Column(String(24), nullable=True, default=None)
+  terminal_reason = Column(Text, nullable=True, default=None)
+  revision = Column(Integer, nullable=False, default=0)
+  created_at = Column(DateTime, nullable=False, default=now_naive_utc)
+  updated_at = Column(DateTime, nullable=False, default=now_naive_utc)
+  ended_at = Column(DateTime, nullable=True, default=None)
+
+
+LEGACY_GAUNTLET_RETIREMENT_MARKER_ID = -1
+
+
+class GauntletTargetMutex(Base):
+  """Legacy workflow-owned singleton state retained after removal.
+
+  Historical writers used row ``1`` as the target-lease mutex.  The retirement
+  cutover reserves ``LEGACY_GAUNTLET_RETIREMENT_MARKER_ID`` as its atomic
+  completion marker. Keeping both in this already-owned table avoids a new
+  general migration service while making later boots an indexed marker lookup
+  rather than another history scan.
+  """
+
+  __tablename__ = "gauntlet_target_mutex"
+
+  id = Column(Integer, primary_key=True)
+  revision = Column(Integer, nullable=False, default=0)
+
+
+class GauntletTask(Base):
+  """Legacy execution-slot history retained with a Gauntlet record.
+
+  The links remain mapped so startup can retire old controller/delegation work
+  exactly and retention can purge the graph after its owner expires. No
+  current runtime schedules these slots.
+  """
+
+  __tablename__ = "gauntlet_tasks"
+  __table_args__ = (
+    UniqueConstraint(
+      "gauntlet_run_id", "phase", "round", "ordinal",
+      name="uq_gauntlet_tasks_phase_slot",
+    ),
+    CheckConstraint(
+      "(scope = 'read' AND phase IN ('baseline','evaluate') "
+      "AND delegation_id IS NOT NULL AND chat_run_id IS NULL) OR "
+      "(scope = 'write' AND phase = 'integrate' AND ordinal = 0 "
+      "AND delegation_id IS NULL AND chat_run_id IS NOT NULL)",
+      name="ck_gauntlet_tasks_execution_shape",
+    ),
+    CheckConstraint("round >= 0", name="ck_gauntlet_tasks_round"),
+    CheckConstraint("ordinal >= 0", name="ck_gauntlet_tasks_ordinal"),
+    CheckConstraint(
+      "retry_count >= 0 AND retry_count <= 1",
+      name="ck_gauntlet_tasks_retry_count",
+    ),
+    CheckConstraint(
+      "max_budget_usd IS NULL OR max_budget_usd > 0",
+      name="ck_gauntlet_tasks_budget",
+    ),
+  )
+
+  id = Column(String(64), primary_key=True)
+  gauntlet_run_id = Column(
+    String(64), ForeignKey("gauntlet_runs.id"), nullable=False, index=True
+  )
+  phase = Column(String(16), nullable=False)
+  round = Column(Integer, nullable=False)
+  ordinal = Column(Integer, nullable=False)
+  role = Column(String(128), nullable=False)
+  scope = Column(String(16), nullable=False)
+  delegation_id = Column(
+    String(64), ForeignKey("delegations.id"), nullable=True, unique=True
+  )
+  chat_run_id = Column(String(64), nullable=True, unique=True)
+  # One deterministic execution reservation. Claude enforces this on the
+  # provider turn; Codex reports only observed spend, surfaced by the API.
+  max_budget_usd = Column(Float, nullable=True)
+  retry_count = Column(Integer, nullable=False, default=0)
+  prompt_sha256 = Column(String(64), nullable=False)
+  created_at = Column(DateTime, nullable=False, default=now_naive_utc)
 
 
 class ChatSessionLink(Base):
@@ -702,6 +1001,28 @@ class InstallPassGrant(Base):
   id = Column(Integer, primary_key=True, autoincrement=True)
   token_hash = Column(String(64), nullable=False, unique=True, index=True)
   app_id = Column(Integer, ForeignKey("apps.id"), nullable=False, index=True)
+  owner_epoch = Column(Integer, nullable=False)
+  created_at = Column(DateTime, nullable=False, default=now_naive_utc)
+  expires_at = Column(DateTime, nullable=False, index=True)
+  consumed_at = Column(DateTime, nullable=True, default=None, index=True)
+
+
+class MobiusLoginHandoffGrant(Base):
+  """Durable one-use boundary for the mobius.you browser handoff.
+
+  The short-lived signed cookie carries a random ``jti``; only its SHA-256
+  digest is stored. Consumption is an atomic NULL-to-timestamp transition, so
+  neither a backend restart nor concurrent workers can make one handoff mint
+  more than one owner session.
+
+  This is a new table, so ``create_all`` adds it to existing installations.
+  """
+
+  __tablename__ = "mobius_login_handoff_grants"
+
+  id = Column(Integer, primary_key=True, autoincrement=True)
+  token_hash = Column(String(64), nullable=False, unique=True, index=True)
+  owner_id = Column(Integer, ForeignKey("owner.id"), nullable=False, index=True)
   owner_epoch = Column(Integer, nullable=False)
   created_at = Column(DateTime, nullable=False, default=now_naive_utc)
   expires_at = Column(DateTime, nullable=False, index=True)
@@ -926,6 +1247,9 @@ class App(Base):
   # the editable worktree. Null for legacy rows until their next successful
   # install or explicit apply.
   source_commit = Column(String(64), nullable=True, default=None)
+  # Full deployed file tree, including install-managed static assets omitted
+  # from source Git history. Published atomically with the accepted App row.
+  runtime_revision = Column(String(64), nullable=True, default=None)
   # Owner-visible update-conflict resolver chats are keyed on upstream_commit.
   conflict_resolver_chat_id = Column(String(64), nullable=True, default=None)
   conflict_resolver_upstream_commit = Column(
@@ -1012,7 +1336,6 @@ class Project(Base):
   )
 
 
-
 class ProjectDrawerState(Base):
   """Shell navigation state for one project.
 
@@ -1031,6 +1354,18 @@ class ProjectDrawerState(Base):
   pinned_at = Column(DateTime, nullable=True, default=None)
 
 
+class ProjectArtifactDrawerState(Base):
+  """Open recency for one built Project result, separate from content dates."""
+
+  __tablename__ = "project_artifact_drawer_state"
+
+  project_id = Column(
+    String(64), ForeignKey("projects.id", ondelete="CASCADE"), primary_key=True,
+  )
+  artifact_id = Column(String(64), primary_key=True)
+  last_opened_at = Column(DateTime, nullable=False, default=now_naive_utc)
+
+
 class ProjectAgentMessage(Base):
   """Legacy project mailbox retained for baked-backend recovery.
 
@@ -1043,16 +1378,13 @@ class ProjectAgentMessage(Base):
 
   id = Column(String(64), primary_key=True)
   project_id = Column(
-    String(64), ForeignKey("projects.id", ondelete="CASCADE"),
-    nullable=False, index=True,
+    String(64), ForeignKey("projects.id"), nullable=False, index=True,
   )
   from_chat_id = Column(
-    String(64), ForeignKey("chats.id", ondelete="CASCADE"),
-    nullable=False, index=True,
+    String(64), ForeignKey("chats.id"), nullable=False, index=True,
   )
   to_chat_id = Column(
-    String(64), ForeignKey("chats.id", ondelete="CASCADE"),
-    nullable=True, index=True,
+    String(64), ForeignKey("chats.id"), nullable=True, index=True,
   )
   body = Column(Text, nullable=False)
   created_at = Column(DateTime, nullable=False, default=lambda: now_naive_utc())
@@ -1096,6 +1428,9 @@ class AgentCoordinationMessage(Base):
     String(64), ForeignKey("chats.id"), nullable=True, index=True,
   )
   kind = Column(String(16), nullable=False, default="note", server_default="note")
+  delivery = Column(
+    String(16), nullable=False, default="next_turn", server_default="next_turn",
+  )
   body = Column(Text, nullable=False)
   created_at = Column(DateTime, nullable=False, default=lambda: now_naive_utc())
 
@@ -1140,6 +1475,139 @@ class ProjectInvite(Base):
   )
 
 
+class SharedAppInstance(Base):
+  """A pinned project build with its own members and shared runtime data."""
+
+  __tablename__ = "shared_app_instances"
+
+  id = Column(String(64), primary_key=True)
+  project_id = Column(String(64), ForeignKey("projects.id"), nullable=False, index=True)
+  artifact_id = Column(String(64), nullable=False)
+  name = Column(String(256), nullable=False)
+  entry_path = Column(String(2048), nullable=False)
+  snapshot_path = Column(String(2048), nullable=False, unique=True)
+  created_at = Column(DateTime, nullable=False, default=now_naive_utc)
+  updated_at = Column(DateTime, nullable=False, default=now_naive_utc)
+  deleted_at = Column(DateTime, nullable=True, default=None, index=True)
+
+
+class SharedAppMember(Base):
+  """One revocable person confined to one shared app instance."""
+
+  __tablename__ = "shared_app_members"
+
+  id = Column(String(64), primary_key=True)
+  instance_id = Column(
+    String(64), ForeignKey("shared_app_instances.id", ondelete="CASCADE"),
+    nullable=False, index=True,
+  )
+  display_name = Column(String(128), nullable=False)
+  role = Column(String(16), nullable=False, default="editor")
+  token_epoch = Column(Integer, nullable=False, default=0, server_default="0")
+  joined_at = Column(DateTime, nullable=False, default=now_naive_utc)
+  revoked_at = Column(DateTime, nullable=True, default=None, index=True)
+
+
+class SharedAppInvite(Base):
+  """A one-use invitation to an app instance, never to its source Project."""
+
+  __tablename__ = "shared_app_invites"
+
+  id = Column(String(64), primary_key=True)
+  instance_id = Column(
+    String(64), ForeignKey("shared_app_instances.id", ondelete="CASCADE"),
+    nullable=False, index=True,
+  )
+  token_hash = Column(String(64), nullable=False, unique=True, index=True)
+  invitee_name = Column(String(128), nullable=True)
+  role = Column(String(16), nullable=False, default="editor")
+  created_at = Column(DateTime, nullable=False, default=now_naive_utc)
+  expires_at = Column(DateTime, nullable=False, index=True)
+  consumed_at = Column(DateTime, nullable=True, default=None)
+  revoked_at = Column(DateTime, nullable=True, default=None)
+  accepted_member_id = Column(
+    String(64), ForeignKey("shared_app_members.id", ondelete="SET NULL"), nullable=True,
+  )
+
+
+class SharedAppChange(Base):
+  """Bounded path-change cursor for one shared app's data namespace."""
+
+  __tablename__ = "shared_app_changes"
+
+  id = Column(Integer, primary_key=True, autoincrement=True)
+  instance_id = Column(
+    String(64), ForeignKey("shared_app_instances.id", ondelete="CASCADE"),
+    nullable=False, index=True,
+  )
+  kind = Column(String(16), nullable=False)
+  path = Column(String(200), nullable=False)
+  version = Column(String(128), nullable=True)
+  actor_key = Column(String(72), nullable=False)
+  display_name = Column(String(256), nullable=False)
+  created_at = Column(DateTime, nullable=False, default=now_naive_utc, index=True)
+
+
+class AgentWorkClaim(Base):
+  """One workspace-wide owner for a stable unit of agent work.
+
+  The unique owner/work key is the concurrency boundary. Claims coordinate
+  agents; they never grant owner authority for the claimed action.
+  """
+
+  __tablename__ = "agent_work_claims"
+  __table_args__ = (
+    UniqueConstraint("owner_id", "work_key", name="uq_agent_work_claim_key"),
+  )
+
+  id = Column(String(64), primary_key=True)
+  owner_id = Column(Integer, ForeignKey("owner.id", ondelete="CASCADE"),
+                    nullable=False, index=True)
+  work_key = Column(String(256), nullable=False)
+  summary = Column(String(500), nullable=False)
+  owner_chat_id = Column(
+    String(64), ForeignKey("chats.id", ondelete="SET NULL"),
+    nullable=True, index=True,
+  )
+  owner_run_id = Column(String(64), nullable=False)
+  owner_goal_id = Column(String(64), nullable=True, index=True)
+  previous_owner_chat_id = Column(String(64), nullable=True)
+  takeover_reason = Column(String(1000), nullable=True)
+  revision = Column(Integer, nullable=False, default=1, server_default="1")
+  notification_revision = Column(
+    Integer, nullable=False, default=1, server_default="1"
+  )
+  claimed_at = Column(DateTime, nullable=False, default=now_naive_utc)
+  updated_at = Column(DateTime, nullable=False, default=now_naive_utc)
+  released_at = Column(DateTime, nullable=True)
+  completed_at = Column(DateTime, nullable=True)
+  outcome = Column(String(1000), nullable=True)
+
+
+class AgentWorkInterest(Base):
+  """A Goal following work that another chat currently owns."""
+
+  __tablename__ = "agent_work_interests"
+  __table_args__ = (
+    UniqueConstraint(
+      "claim_id", "chat_id", "goal_id", name="uq_agent_work_interest_goal",
+    ),
+  )
+
+  id = Column(String(64), primary_key=True)
+  claim_id = Column(
+    String(64), ForeignKey("agent_work_claims.id", ondelete="CASCADE"),
+    nullable=False, index=True,
+  )
+  chat_id = Column(
+    String(64), ForeignKey("chats.id", ondelete="CASCADE"),
+    nullable=False, index=True,
+  )
+  goal_id = Column(String(64), nullable=False, index=True)
+  created_at = Column(DateTime, nullable=False, default=now_naive_utc)
+  resolved_at = Column(DateTime, nullable=True)
+
+
 class ProjectPresence(Base):
   """Latest heartbeat for one owner or collaborator in one Project."""
 
@@ -1181,10 +1649,7 @@ class ProjectWorkClaim(Base):
   actor_key = Column(String(72), nullable=False)
   actor_kind = Column(String(16), nullable=False)
   display_name = Column(String(256), nullable=False)
-  chat_id = Column(
-    String(64), ForeignKey("chats.id", ondelete="CASCADE"),
-    nullable=True, index=True,
-  )
+  chat_id = Column(String(64), ForeignKey("chats.id"), nullable=True, index=True)
   path = Column(String(2048), nullable=True)
   summary = Column(String(300), nullable=False)
   updated_at = Column(DateTime, nullable=False, default=now_naive_utc)
@@ -1247,23 +1712,27 @@ class AppRecencyState(Base):
   )
 
 
-class AppPreviewState(Base):
-  """Durable acknowledgement of the exact app build opened from its chat CTA.
+class ChatAppArtifact(Base):
+  """One app this chat created or updated, plus its acknowledgement cursor.
 
-  This is separate from ``apps`` so acknowledging a preview never advances
-  ``App.updated_at`` — the executable-bundle version the acknowledgement is
-  meant to record. ``seen_as_final`` distinguishes opening a live preview from
-  opening the settled result: finishing the turn may surface the same build one
-  last time even when no final source write was needed.
+  The composite key is the durable many-to-many relationship: an app may be
+  refined by several chats without disappearing from the earlier chats'
+  artifact pickers. ``touched_at`` advances only with a successful app apply;
+  opening that chat's Brain advances ``seen_at`` without rotating the
+  executable bundle version on ``apps.updated_at``.
   """
 
-  __tablename__ = "app_preview_state"
+  __tablename__ = "chat_app_artifacts"
 
-  app_id = Column(Integer, ForeignKey("apps.id"), primary_key=True)
-  seen_updated_at = Column(DateTime, nullable=False)
-  seen_as_final = Column(
-    Boolean, nullable=False, default=False, server_default=false()
+  chat_id = Column(
+    String(64), ForeignKey("chats.id", ondelete="CASCADE"), primary_key=True,
   )
+  app_id = Column(
+    Integer, ForeignKey("apps.id", ondelete="CASCADE"), primary_key=True,
+    index=True,
+  )
+  touched_at = Column(DateTime, nullable=False, default=now_naive_utc)
+  seen_at = Column(DateTime, nullable=True, default=None)
 
 
 class PushSubscription(Base):
@@ -1529,3 +1998,51 @@ class ContributionAutopilot(Base):
   rounds_json = Column(JSON, nullable=True, default=None)
   created_at = Column(DateTime, default=lambda: now_naive_utc())
   updated_at = Column(DateTime, default=lambda: now_naive_utc())
+
+
+class ContributionReviewRun(Base):
+  """Exact owner-approved public PR selection; never sourced from app storage.
+
+  This new table is created by normal startup metadata.create_all. Targets are
+  immutable; outcomes are private review evidence and public action receipts.
+  """
+  __tablename__ = "contribution_review_runs"
+  id = Column(String(64), primary_key=True)
+  app_id = Column(Integer, ForeignKey("apps.id"), nullable=False, index=True)
+  owner_id = Column(Integer, ForeignKey("owner.id"), nullable=False)
+  request_id = Column(String(64), nullable=False)
+  mode = Column(String(24), nullable=False)
+  github_actor_id = Column(String(64), nullable=False)
+  app_nonce = Column(String(64), nullable=False)
+  targets_json = Column(JSON, nullable=False)
+  outcomes_json = Column(JSON, nullable=False, default=dict)
+  chat_id = Column(String(64), ForeignKey("chats.id"), nullable=False)
+  revision = Column(Integer, nullable=False, default=0)
+  created_at = Column(DateTime, default=lambda: now_naive_utc())
+  __table_args__ = (UniqueConstraint("app_id", "request_id"),)
+
+
+class ProjectSourceCopy(Base):
+  """An immutable reviewed source package, separate from live membership."""
+  __tablename__ = 'project_source_copies'
+  id = Column(String(64), primary_key=True)
+  project_id = Column(String(64), ForeignKey('projects.id', ondelete='CASCADE'), nullable=False, index=True)
+  token_hash = Column(String(64), nullable=False, unique=True, index=True)
+  package_json = Column(JSON(none_as_null=True), nullable=True)
+  created_at = Column(DateTime, nullable=False, default=now_naive_utc)
+  expires_at = Column(DateTime, nullable=False, index=True)
+  revoked_at = Column(DateTime, nullable=True)
+
+
+class ChatActivityPosition(Base):
+  """A display frontier observed when an event became available in one chat.
+
+  Not a delivery receipt. Separate chat keys prevent a broadcast from exposing
+  another recipient's transcript identity. Missing historical positions stay
+  missing rather than being reconstructed from today's streaming tail.
+  """
+
+  __tablename__ = "chat_activity_positions"
+  chat_id = Column(String(64), ForeignKey("chats.id", ondelete="CASCADE"), primary_key=True)
+  event_id = Column(String(128), primary_key=True)
+  position = Column(JSON, nullable=True)

@@ -103,7 +103,9 @@ Review the exact changed paths and use the smallest matching action:
 | `frontend/src/` and other frontend build inputs | The watcher rebuilds the served shell, then `shell_apply_now` applies it. A normal save triggers this automatically; source arriving through Git needs a changed frontend file touched. No server restart. |
 | `backend/app/*.py` | After compile checks, tests, and commit, one server restart loads the settled backend revision. |
 | `skill/core.md` | A server restart refreshes the cached constitution for new agent sessions only; existing sessions keep their immutable prompt snapshot. Unless new sessions need the rule immediately, leave it pending for the next separately approved restart. |
-| `backend/scripts/`, tests, docs, and shared skill content | Takes effect on its next invocation or read. No server restart. An agent that already read old instructions cannot be rewritten in place. |
+| `backend/scripts/entrypoint.sh`, the exact `/app/scripts/*` bootstrap files it invokes, `backend/scripts/seed-skills/`, or `backend/runtime/` | Image-owned. Batch and test the change, then leave one image replacement pending; never rebuild between iterations. `platform_activation.py` is the source of truth for the exact bootstrap allowlist. |
+| `backend/scripts/pm-commit` | One server restart refreshes the installed launcher from the served checkout; no image rebuild. |
+| Other `backend/scripts/`, tests, docs, and shared skill content | Takes effect on its next invocation or read. No server restart or image rebuild. An agent that already read old instructions cannot be rewritten in place. |
 | A package needed by the current task | Install it into the running container first when safe. A new process can use it immediately; restart only when the already-running backend must load it. |
 | `backend/requirements.txt`, lockfiles, `frontend/package.json`, or `Dockerfile` | These declarations make a live install reproducible after container replacement; they do not activate it and do not require an immediate rebuild. |
 
@@ -173,9 +175,9 @@ because `/data/platform` is the persistent served clone. The baked
 - A bad import keeps the edited tree from serving. Boot import-probes the
   persistent clone and falls back to the baked backend, leaving the local tree
   intact for repair. Always run `python3 -m py_compile <file>` before a restart.
-- A local fix is persistent but not upstream. Boot preserves committed local
-  changes and reconciles them over newer `origin/main`; a future reconcile can
-  still conflict, and another installation will not receive the fix. Ask
+- A local fix is persistent but not upstream. Startup preserves installed source and local changes without fetching newer
+  code. Explicit updates reconcile local changes onto the reviewed release;
+  they can still conflict, and another installation will not receive a local fix. Ask
   whether it is a local overlay or needs a separate upstream handoff. Do not
   push or manage external repository workflow from inside Möbius.
 
@@ -190,26 +192,25 @@ the write-surface contract.
 2. Commit only the exact paths you own with `PM_COMMIT_ROOT=/data/platform
    pm-commit --from <starting-sha> '<what and why>' -- <paths>`.
 3. Run the activation preflight. Only if it proves that the settled backend
-   change is not live, ask through Möbius's `request_approval` tool for this exact restart,
-   then end the turn after the saved receipt. Explain that the restart interrupts every
-   active agent turn, name the current number of running turns when known, and
-   warn that service may be unavailable for tens of seconds. Offer **Restart
-   now** and **Not now**. Approval of the task, a broad “go ahead” or “fix it,”
-   or delegation of the complete backend-fix loop does not approve a restart.
+   change is not live, explain that the restart interrupts every active agent
+   turn, name the current number of running turns when known, warn that service
+   may be unavailable for tens of seconds, then call Möbius's
+   `request_restart` tool as the final action. Approval of the task, a broad
+   “go ahead” or “fix it,” or delegation of the complete backend-fix loop does
+   not approve a restart.
 
-   Use `request_approval` with a question naming the change and impact, and
-   two options: **Not now** and **Restart now**, each with a short description.
-   Its receipt confirms only that the card was saved. It does not grant
-   approval: end the turn, and let the owner's answer resume the chat. Do not
-   use Codex's `request_user_input` for permission or approval requests.
+   `request_restart` takes no action arguments. The platform derives the exact
+   committed, restart-loadable source and saves its own **Restart now** / **Not
+   now** card. Its receipt confirms only that the card was saved, not approval:
+   end the turn with no further text or tools. The owner's **Restart now** click
+   is dispatched by the platform without waking an agent to forge an answer or
+   issue a shell command. Do not use `request_approval` or Codex's
+   `request_user_input` for platform restart permission.
 
    If the tool is absent, the same saved-card operation is available through:
 
    ```bash
-   python3 /data/platform/backend/scripts/owner_approval.py \
-     'Restart to activate <tested change>? This interrupts <N> active turns and may take Möbius offline for tens of seconds.' \
-     --option 'Not now' 'Leave the tested change pending without interruption.' \
-     --option 'Restart now' 'Activate the tested change with the interruption described.'
+   python3 /data/platform/backend/scripts/owner_approval.py --restart
    ```
 
    A failed save is not a waiting card and not consent. Retry only the
@@ -217,18 +218,13 @@ the write-surface contract.
    this operation, ask plainly and leave activation pending; never fabricate
    a card or park a process waiting for an answer.
 
-   A **Restart now** answer authorizes exactly one safe restart call:
-
-   ```bash
-   curl -fsS -X POST "$API_BASE_URL/api/admin/restart" \
-     -H "Authorization: Bearer $AGENT_TOKEN" \
-     -H "Content-Type: application/json"
-   ```
-
-   The current tool call ends as the worker exits and Möbius resumes the turn.
-   A second restart, or an ambiguous outcome where you cannot prove whether the
-   call reached the server, requires a new question. A scheduled/background
-   agent cannot ask live, so it leaves the restart pending for the partner.
+   The card owns at-most-once admission for its exact action. A lost response,
+   duplicate click, or ambiguous process death must never cause an agent to
+   replay the restart. Möbius confirms loaded-source readiness after boot and
+   resumes each matching waiting chat independently; unrelated waits and
+   queued work keep their existing barriers. An uncertain outcome needs fresh,
+   specific approval rather than an automatic retry. A scheduled/background
+   agent cannot ask live, so it leaves activation pending for the partner.
 4. If the edited tree fails to import, the baked shell stays available. Refresh
    and repair `/data/platform` there, or use external Recovery if the interface
    itself is unavailable.

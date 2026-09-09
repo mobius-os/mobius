@@ -21,6 +21,7 @@ import Plus from 'lucide-react/dist/esm/icons/plus.mjs'
 import Search from 'lucide-react/dist/esm/icons/search.mjs'
 import Upload from 'lucide-react/dist/esm/icons/upload.mjs'
 import Trash2 from 'lucide-react/dist/esm/icons/trash-2.mjs'
+import ProjectChangeDiff, { ChangeLineCounts, ProjectFileDiff } from './ProjectChangeDiff.jsx'
 import { api, jsonOrThrow } from '../../api/client.js'
 import { assembleProjectHtmlPreview } from '../../lib/projectPreview.js'
 import { artifactTypeForFile } from '../../lib/projectArtifacts.js'
@@ -104,10 +105,15 @@ export default function ProjectFinder({
   projectId,
   projectName,
   artifactTypes,
+  excludedBuilders = [],
+  sourceDescription,
   onBuildFile,
-  onSourceSaved,
+  onSourceChanged,
   overview,
+  resources,
   fileSource,
+  requestedFile,
+  onOpenGit,
 }) {
   const history = useHistoryDismissControls()
   const queryClient = useQueryClient()
@@ -149,6 +155,7 @@ export default function ProjectFinder({
   // Parallel stack of history entry ids, one per forward step, popped LIFO by
   // Back or by the in-UI back controls so history and nav stay in sync.
   const entryStackRef = useRef([])
+  const retainedEntryIdsRef = useRef(new Set())
   const navRef = useRef(nav)
   navRef.current = nav
 
@@ -171,8 +178,17 @@ export default function ProjectFinder({
     navRef.current = state
     setNav(state)
     if (history?.open) {
-      const id = history.open(onHistoryPop)
-      if (id) entryStackRef.current.push(id)
+      // Retain this destination for Forward; ordinary dismissible dialogs do
+      // not have reconstruction semantics. Release every retained entry on unmount.
+      const id = history.open(onHistoryPop, () => {
+        navRef.current = state
+        setNav(state)
+        entryStackRef.current.push(id)
+      })
+      if (id) {
+        entryStackRef.current.push(id)
+        retainedEntryIdsRef.current.add(id)
+      }
     }
   }, [history, onHistoryPop])
 
@@ -193,11 +209,29 @@ export default function ProjectFinder({
   useEffect(() => {
     navRef.current = initFinder()
     setNav(initFinder())
+    const retained = retainedEntryIdsRef.current
     return () => {
-      for (const id of entryStackRef.current) history?.unregister?.(id)
+      for (const id of retained) history?.unregister?.(id)
+      retained.clear()
       entryStackRef.current = []
     }
   }, [source.id, history])
+
+  // A project artifact's edit-source control can return directly to its editable
+  // source. This is a mount-time destination rather than another browsing
+  // step, so it does not manufacture a Back-stack sentinel.
+  useEffect(() => {
+    const requestedPath = typeof requestedFile === 'string'
+      ? requestedFile
+      : requestedFile?.path
+    if (!requestedPath) return
+    const parent = parentPath(requestedPath)
+    let next = initFinder()
+    if (parent) next = finderOpenFolder(next, parent).state
+    next = finderOpenFile(next, requestedPath).state
+    navRef.current = next
+    setNav(next)
+  }, [requestedFile, source.id])
 
   // ── Folder listing: keep the stale view while the next folder loads, and only
   // reveal a spinner if the scan stays silent past SLOW_SCAN_DELAY_MS.
@@ -262,6 +296,7 @@ export default function ProjectFinder({
   const [fileError, setFileError] = useState('')
   const [fileLoading, setFileLoading] = useState(false)
   const [editing, setEditing] = useState(false)
+  const [viewSelection, setViewSelection] = useState(null)
   const [highlighted, setHighlighted] = useState(null)
   const [lightboxOpen, setLightboxOpen] = useState(false)
   const [busy, setBusy] = useState(false)
@@ -307,9 +342,18 @@ export default function ProjectFinder({
       await source.gitDiff(selected, { signal }),
       'File changes failed:',
     ),
-    enabled: !!selected && !!selectedGitChange && selectedGitChange.status !== 'deleted',
+    enabled: !!selected && !!selectedGitChange,
     staleTime: 5_000,
   })
+  const previewable = (fileKind === 'text' && (markdownLike || htmlLike || csvLike)) || ['image', 'pdf', 'binary'].includes(fileKind)
+  const fileView = viewSelection?.sourceId === source.id && viewSelection.path === selected ? viewSelection.mode : selectedGitChange?.status === 'deleted' ? 'changes' : previewable ? 'preview' : 'code'
+  function selectView(mode) { setViewSelection({ sourceId: source.id, path: selected, mode }) }
+  function openChange(filePath) {
+    setViewSelection({ sourceId: source.id, path: filePath, mode: 'changes' })
+    openFileAt(filePath)
+  }
+  const selectedChangeRef = useRef(null)
+  selectedChangeRef.current = selectedGitChange
   const gitDiff = gitDiffQuery.data
   const changedLines = useMemo(
     () => new Set(gitDiff?.changed_lines || []),
@@ -334,6 +378,11 @@ export default function ProjectFinder({
       try {
         const res = await source.readFile(selected, { signal: controller.signal })
         if (!active) return
+        if (res.status === 404 && selectedChangeRef.current?.status === 'deleted') {
+          setFileKind('deleted'); setContent(''); setBaseline(''); setRevision(null); setRemoteChange(null)
+          setPdfData(null); replaceObjectUrl(null)
+          return
+        }
         const type = res.headers.get('content-type') || ''
         if (type.includes('application/json')) {
           const data = await jsonOrThrow(res, 'File open failed:')
@@ -589,6 +638,15 @@ export default function ProjectFinder({
     await source.invalidate(queryClient)
   }, [source, queryClient])
 
+  async function refreshOutputAfterSourceChange(changedPath) {
+    if (!onSourceChanged) return
+    try {
+      await onSourceChanged(changedPath)
+    } catch (cause) {
+      setError(cause?.message || 'The source changed, but its output could not update.')
+    }
+  }
+
   async function initializeVersioning() {
     if (!source.initGit || versionBusy) return
     setVersionBusy(true); setVersionError('')
@@ -628,13 +686,7 @@ export default function ProjectFinder({
       setBaseline(content); setEditing(false)
       setRevision(saved.revision || null); setRemoteChange(null)
       await refetchWorkspace()
-      if (onSourceSaved) {
-        try {
-          await onSourceSaved(selected)
-        } catch (cause) {
-          setError(cause?.message || 'The file was saved, but its live artifact could not rebuild.')
-        }
-      }
+      await refreshOutputAfterSourceChange(selected)
     } catch (cause) {
       if (cause?.code === 'file_revision_conflict') {
         setError('')
@@ -663,6 +715,7 @@ export default function ProjectFinder({
       )
       setRemoteChange(null)
       await refetchWorkspace()
+      await refreshOutputAfterSourceChange(target)
       openFileAt(target)
     } catch (cause) {
       setError(cause?.message || 'Could not preserve the draft as a copy.')
@@ -704,6 +757,7 @@ export default function ProjectFinder({
       await jsonOrThrow(await source.deleteFile(entryPath), 'File deletion failed:')
       if (selected === entryPath) goBack()
       await refetchWorkspace()
+      await refreshOutputAfterSourceChange(entryPath)
     } catch (cause) {
       setError(cause?.message || 'Could not delete that.')
     } finally { setBusy(false) }
@@ -722,6 +776,7 @@ export default function ProjectFinder({
         setNav(current => ({ ...current, current: { ...current.current, selected: target } }))
       }
       await refetchWorkspace()
+      await refreshOutputAfterSourceChange(target)
       return true
     } catch (cause) {
       setError(cause?.message || 'Could not move that.')
@@ -747,7 +802,10 @@ export default function ProjectFinder({
       }
       setCreation(null); setCreationName('')
       await refetchWorkspace()
-      if (creation === 'file') openFileAt(target)
+      if (creation === 'file') {
+        await refreshOutputAfterSourceChange(target)
+        openFileAt(target)
+      }
     } catch (cause) {
       setError(cause?.message || `Could not create that ${creation}.`)
     } finally { setBusy(false) }
@@ -765,6 +823,9 @@ export default function ProjectFinder({
         )
       }
       await refetchWorkspace()
+      await refreshOutputAfterSourceChange(
+        files.length ? joinPath(path, files[files.length - 1].name) : path,
+      )
     } catch (cause) {
       setError(cause?.message || 'Could not upload that file.')
     } finally { setBusy(false) }
@@ -797,30 +858,6 @@ export default function ProjectFinder({
                 {slowScan && <span className="project-finder__scan" role="status">Loading…</span>}
               </nav>
 
-              {gitStatus?.available && !canInitializeProjectGit(gitStatus) && (
-                <div
-                  className="project-finder__git-summary"
-                  title={`${gitStatus.repository_scope === 'project' ? 'Project repository' : 'Shared Möbius repository, scoped to this project'}${gitStatus.head ? ` · ${gitStatus.head}` : ''}`}
-                  aria-label={`${gitIdentityLabel(gitStatus)} ${gitStatus.branch ? 'branch' : 'revision'}, ${gitTotal ? `${gitTotal} changed ${gitTotal === 1 ? 'file' : 'files'}` : 'clean'}`}
-                >
-                  <GitBranch size={13} aria-hidden="true" />
-                  <span>{gitIdentityLabel(gitStatus)}</span>
-                  <b>{gitTotal || 'Clean'}</b>
-                </div>
-              )}
-
-              {!readOnly && gitQuery.isSuccess && canInitializeProjectGit(gitStatus) && source.initGit && (
-                <button
-                  type="button"
-                  className="project-finder__version-action"
-                  disabled={versionBusy}
-                  title={gitStatus?.repository_scope === 'shared' ? 'Create an independent repository for this project' : undefined}
-                  onClick={initializeVersioning}
-                >
-                  <GitBranch size={13} aria-hidden="true" /> {versionBusy ? 'Starting…' : 'Start versioning'}
-                </button>
-              )}
-
               {(path || !readOnly) && <div className="project-finder__toolbar" role="toolbar" aria-label="File actions">
                 {path && (
                   <button type="button" className="project-finder__tool" aria-label="Up one folder" title="Up one folder" onClick={goBack}>
@@ -842,29 +879,50 @@ export default function ProjectFinder({
               </div>}
             </div>
 
-            {gitTotal > 0 && gitStatus?.repository_scope === 'project' && (
+            {resources}
+            {gitQuery.isError && <button type="button" onClick={() => gitQuery.refetch()}>Retry changes</button>}
+            {(gitStatus?.available || (!readOnly && gitQuery.isSuccess && canInitializeProjectGit(gitStatus))) && (
               <details className="project-finder__changes">
                 <summary>
                   <span><GitBranch size={14} aria-hidden="true" /> Changes</span>
-                  <b>{gitTotal}</b>
+                  <ChangeLineCounts {...(gitStatus.line_stats?.available ? gitStatus.line_stats : gitTotal === 0 ? { additions: 0, deletions: 0 } : {})} />
                 </summary>
-                {!readOnly && gitStatus?.repository_scope === 'project' && source.commitGit && <div className="project-finder__commit-action"><button type="button" onClick={() => { setCommitOpen(current => !current); setVersionError('') }} aria-expanded={commitOpen}><GitCommitHorizontal size={13} /> Commit changes</button></div>}
+                <div className="project-finder__git-controls">
+                  {gitStatus?.available && !canInitializeProjectGit(gitStatus) && (
+                    <div
+                      className="project-finder__git-summary"
+                      title={`${gitStatus.repository_scope === 'project' ? 'Project repository' : 'Shared Möbius repository, scoped to this project'}${gitStatus.head ? ` · ${gitStatus.head}` : ''}`}
+                      aria-label={`${gitIdentityLabel(gitStatus)} ${gitStatus.branch ? 'branch' : 'revision'}, ${gitTotal ? `${gitTotal} changed ${gitTotal === 1 ? 'file' : 'files'}` : 'clean'}`}
+                    >
+                      <GitBranch size={13} aria-hidden="true" />
+                      <span>{gitIdentityLabel(gitStatus)}</span>
+
+                    </div>
+                  )}
+
+                  {!readOnly && gitQuery.isSuccess && canInitializeProjectGit(gitStatus) && source.initGit && (
+                    <button
+                      type="button"
+                      className="project-finder__version-action"
+                      disabled={versionBusy}
+                      title={gitStatus?.repository_scope === 'shared' ? 'Create an independent repository for this project' : undefined}
+                      onClick={initializeVersioning}
+                    >
+                      <GitBranch size={13} aria-hidden="true" /> {versionBusy ? 'Starting…' : 'Start versioning'}
+                    </button>
+                  )}
+
+                  {onOpenGit && <button type="button" className="project-finder__version-action" onClick={onOpenGit}>GitHub</button>}
+                </div>
+                {gitTotal > 0 && !readOnly && gitStatus?.repository_scope === 'project' && source.commitGit && <div className="project-finder__commit-action"><button type="button" onClick={() => { setCommitOpen(current => !current); setVersionError('') }} aria-expanded={commitOpen}><GitCommitHorizontal size={13} /> Commit changes</button></div>}
                 {commitOpen && <form className="project-finder__commit" onSubmit={commitChanges}>
                   <label htmlFor={`project-commit-${projectId}`}>Describe this snapshot</label>
                   <div><input id={`project-commit-${projectId}`} autoFocus value={commitMessage} maxLength={500} placeholder="What changed?" disabled={versionBusy} onChange={event => setCommitMessage(event.target.value)} /><button type="submit" disabled={versionBusy || !commitMessage.trim()}>{versionBusy ? 'Committing…' : 'Commit locally'}</button></div>
                   <small>The owner controls publishing separately.</small>
                 </form>}
                 <div className="project-finder__change-list">
-                  {gitChanges.slice(0, 12).map(change => {
-                    const presentation = gitStatusPresentation(change.status)
-                    const contents = <><i aria-hidden="true">{presentation.code}</i><span>{change.path}</span></>
-                    return change.status === 'deleted' ? (
-                      <div key={change.path} className="project-finder__change" title={presentation.label}>{contents}</div>
-                    ) : (
-                      <button key={change.path} type="button" className="project-finder__change" title={`${presentation.label}: ${change.path}`} onClick={() => openFileAt(change.path)}>{contents}</button>
-                    )
-                  })}
-                  {gitChanges.length > 12 && <small>+{gitChanges.length - 12} more</small>}
+                  {gitChanges.map(change => <ProjectChangeDiff key={change.path} change={change} onOpenFile={openChange} />)}
+                  {gitStatus.truncated && <small>Showing a partial change list.</small>}
                 </div>
               </details>
             )}
@@ -933,8 +991,10 @@ export default function ProjectFinder({
                     onMove={(toDir) => moveEntry(entry.path, joinPath(toDir, entry.name))}
                     onDownload={() => downloadFile(entry.path)}
                     onDelete={() => deleteEntry(entry.path)}
-                    gitAnnotation={gitAnnotationForEntry(gitChanges, entry)}
-                    artifactType={artifactTypeForFile(entry.name, artifactTypes)}
+                    gitAnnotation={gitStatus?.repository_scope === 'project'
+                      ? gitAnnotationForEntry(gitChanges, entry)
+                      : null}
+                    artifactType={artifactTypeForFile(entry.name, artifactTypes, excludedBuilders)}
                     onBuildAs={onBuildFile
                       ? (type) => onBuildFile(entry.path, type.id)
                       : null}
@@ -949,7 +1009,7 @@ export default function ProjectFinder({
           {!inspecting ? (
             <div className="project-finder__placeholder" role="status">
               <File size={38} strokeWidth={1.3} aria-hidden="true" />
-              <p>Select a file to preview it here.</p>
+              <h2>Your workspace</h2><p>Select a file to read or edit it.<br />{sourceDescription || 'Open a Creation to see the built result, or start a project chat to make changes.'}</p>
             </div>
           ) : (
             <>
@@ -969,13 +1029,18 @@ export default function ProjectFinder({
                     <button type="button" onClick={() => downloadFile()}>Download</button>
                   )}
                   {!readOnly && fileKind === 'text' && !windowed && !editing && (
-                    <button type="button" onClick={() => setEditing(true)}><Pencil size={14} aria-hidden="true" /> Edit</button>
+                    <button type="button" onClick={() => { setEditing(true); selectView('code') }}><Pencil size={14} aria-hidden="true" /> Edit</button>
                   )}
                   {fileKind === 'text' && editing && (
                     <button type="button" disabled={!dirty || busy} onClick={saveFile}>{busy ? 'Saving…' : 'Save'}</button>
                   )}
                 </div>
               </header>
+              <div className="project-finder__view-switch" role="group" aria-label="File view">
+                {previewable && <button type="button" aria-pressed={fileView === 'preview'} onClick={() => selectView('preview')}>Preview</button>}
+                {fileKind === 'text' && <button type="button" aria-pressed={fileView === 'code'} onClick={() => selectView('code')}>Code{dirty ? ' •' : ''}</button>}
+                {gitStatus?.available && <button type="button" aria-pressed={fileView === 'changes'} onClick={() => selectView('changes')}>Changes</button>}
+              </div>
               {fileError && <p className="projects-error" role="alert">{fileError}</p>}
               {remoteChange && (
                 <div className="project-finder__conflict" role="alert">
@@ -1018,10 +1083,10 @@ export default function ProjectFinder({
                 </div>
               )}
               <div className="project-finder__surface">
-                {fileLoading && fileKind === 'none' ? (
+                {fileView === 'changes' ? <ProjectFileDiff query={gitDiffQuery} changed={!!selectedGitChange} dirty={dirty} /> : fileLoading && fileKind === 'none' ? (
                   <div className="project-document__empty" role="status"><p>Opening file…</p></div>
                 ) : fileKind === 'text' ? (
-                  csvLike && !windowed ? (
+                  csvLike && fileView === 'preview' && !windowed ? (
                     <div className="project-sheet" data-editing={editing || undefined}>
                       {editing && <div className="project-sheet__toolbar" role="toolbar" aria-label="Spreadsheet actions">
                         <button type="button" onClick={appendCsvRow}><Plus size={14} aria-hidden="true" /> Row</button>
@@ -1035,7 +1100,7 @@ export default function ProjectFinder({
                         </table>
                       </div>
                     </div>
-                  ) : markdownLike && editing && !windowed ? (
+                  ) : markdownLike && fileView === 'preview' && editing && !windowed ? (
                     <div className="project-finder__live-edit">
                       <section className="project-finder__live-code" aria-label="Markdown editor">
                         <span>Markdown</span>
@@ -1052,9 +1117,9 @@ export default function ProjectFinder({
                         <article className="project-markdown" dangerouslySetInnerHTML={{ __html: markdownPreview }} />
                       </section>
                     </div>
-                  ) : markdownLike ? (
+                  ) : markdownLike && fileView === 'preview' ? (
                     <div className="project-markdown__scroll"><article className="project-markdown" dangerouslySetInnerHTML={{ __html: markdownPreview }} /></div>
-                  ) : htmlLike && editing && !windowed ? (
+                  ) : htmlLike && fileView === 'preview' && editing && !windowed ? (
                     <div className="project-finder__live-edit">
                       <section className="project-finder__live-code" aria-label="Source editor">
                         <span>Source</span>
@@ -1073,9 +1138,9 @@ export default function ProjectFinder({
                           : <ProjectPreviewFrame projectId={projectId} sourcePath={selected} title={`${selected} live preview`} srcDoc={htmlPreview} />}
                       </section>
                     </div>
-                  ) : htmlLike ? (
+                  ) : htmlLike && fileView === 'preview' ? (
                     <div className="project-preview">
-                      <p>Isolated preview · edit to see source and preview together.</p>
+                      <p>Isolated preview</p>
                       {htmlPreviewError
                         ? <div className="project-document__empty" role="alert"><p>{htmlPreviewError}</p></div>
                         : <ProjectPreviewFrame projectId={projectId} sourcePath={selected} title={`${selected} preview`} srcDoc={htmlPreview} />}

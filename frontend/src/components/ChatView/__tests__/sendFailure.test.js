@@ -6,6 +6,7 @@ import {
   isModelSelectionRequiredFailure,
   isPendingQuestionSendFailure,
   sendFailureMessage,
+  shouldKeepQueuedAfterSendFailure,
 } from '../sendFailure.js'
 import {
   ChatHttpError,
@@ -65,7 +66,7 @@ test('known offline state wins over the transport error shape', () => {
   )
 })
 
-test('either the send attempt or the current snapshot can prove the owner is offline', () => {
+test('the send attempt verdict outranks a connection snapshot that changed later', () => {
   const offline = new ChatTransportError(new TypeError('Failed to fetch'))
   offline.outboxRetained = true
   offline.sendReachability = 'offline'
@@ -79,7 +80,7 @@ test('either the send attempt or the current snapshot can prove the owner is off
   online.sendReachability = 'online'
   assert.equal(
     sendFailureMessage(online, { online: false }),
-    'You’re offline. Your message is queued and will send when you reconnect.',
+    'Möbius couldn’t confirm the send. Your message is queued and will retry automatically.',
   )
 })
 
@@ -96,6 +97,23 @@ test('automatic replay is promised only when the durable write succeeded', () =>
   assert.match(
     sendFailureMessage({ status: 401, outboxRetained: true }),
     /queued for this owner and will resume afterward/,
+  )
+})
+
+test('only an outbox-retained failure stays with the durable queue', () => {
+  assert.equal(shouldKeepQueuedAfterSendFailure({ outboxRetained: true }), true)
+  // A restart gap or offline state without a retained write has nothing that
+  // will replay the message, so it must return to the composer.
+  assert.equal(shouldKeepQueuedAfterSendFailure({}), false)
+  assert.equal(shouldKeepQueuedAfterSendFailure({ outboxRetained: false }), false)
+  const retained = Object.assign(new Error('restart gap'), { outboxRetained: true })
+  assert.match(
+    sendFailureMessage(retained),
+    /queued and will retry automatically/,
+  )
+  assert.match(
+    sendFailureMessage(new Error('restart gap')),
+    /back in the composer/,
   )
 })
 

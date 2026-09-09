@@ -11,6 +11,7 @@ from contextlib import asynccontextmanager
 
 import httpx
 from fastapi import HTTPException, Request
+from pydantic import BaseModel
 
 from app import github_auth, models
 from app.config import get_settings
@@ -21,9 +22,19 @@ _API_BASE = "https://api.github.com"
 _GITHUB_LOGIN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]{0,38}$")
 _CONNECTION_LOCK_TIMEOUT = 70.0
 _device_flow_poll_lock = asyncio.Lock()
+# Every reviewed contribution targets a PUBLIC Möbius repo, so the default
+# connection requests the narrowest scope that still publishes any reviewed PR
+# shape: public_repo + workflow. An owner who needs to push to a PRIVATE repo
+# (a personal instance backup, say) can opt into the broader `repo` scope, which
+# is a strict superset — it covers the public flow too, so we request it alone.
 _FULL_PR_SCOPES = ("public_repo", "workflow")
+_PRIVATE_PR_SCOPES = ("repo", "workflow")
 
 log = logging.getLogger("moebius.github")
+
+
+class GithubTokenRequest(BaseModel):
+  token: str
 
 
 def has_full_pr_access(scopes: object) -> bool:
@@ -35,6 +46,16 @@ def has_full_pr_access(scopes: object) -> bool:
     "workflow" in granted
     and ("public_repo" in granted or "repo" in granted)
   )
+
+
+def has_private_repo_access(scopes: object) -> bool:
+  """Return whether one credential can push to the owner's PRIVATE repos.
+
+  Only GitHub's full `repo` scope grants private write; `public_repo` does not.
+  """
+  if not isinstance(scopes, (list, tuple, set, frozenset)):
+    return False
+  return "repo" in {str(scope) for scope in scopes}
 
 
 def _bounded_provider_int(
@@ -114,8 +135,15 @@ async def _github_user(token: str) -> tuple[int, str, int | None, list[str]]:
 
 async def _start_device_attempt(
   request: Request,
+  *,
+  scope_set: tuple[str, ...] = _FULL_PR_SCOPES,
 ) -> dict:
-  """Request and persist one device code while the connection lock is held."""
+  """Request and persist one device code while the connection lock is held.
+
+  ``scope_set`` selects which OAuth scopes GitHub is asked to grant. It defaults
+  to the public-contribution set; the private-repo opt-in passes the broader
+  ``_PRIVATE_PR_SCOPES``.
+  """
   if await request.is_disconnected():
     raise HTTPException(status_code=499, detail="GitHub sign-in was cancelled.")
   client_id = get_settings().github_oauth_client_id
@@ -129,7 +157,7 @@ async def _start_device_attempt(
       ),
     )
   try:
-    scopes = " ".join(_FULL_PR_SCOPES)
+    scopes = " ".join(scope_set)
     async with httpx.AsyncClient(timeout=15.0) as client:
       r = await client.post(
         _DEVICE_CODE_URL,

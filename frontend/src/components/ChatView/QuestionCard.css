@@ -12,6 +12,13 @@
      are disabled, while the Submit slot remains visible as "Submitted". */
 }
 
+.qcard__action-status {
+  margin-bottom: 10px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
 .qcard--grouped {
   padding: 0;
   overflow: hidden;

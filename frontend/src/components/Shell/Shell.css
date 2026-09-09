@@ -156,6 +156,12 @@
 }
 
 @media (max-width: 620px) {
+  /* Keep the 44px touch targets, but trim the empty row around them so the
+     visible toolbar sits closer to the phone's safe-area boundary. */
+  .shell {
+    --shell-bar-height: 46px;
+  }
+
   .screen-control-button {
     top: max(8px, env(safe-area-inset-top));
     max-width: calc(100vw - 24px);
@@ -164,13 +170,6 @@
 
 @media (prefers-reduced-motion: reduce) {
   .screen-control-button__live { animation: none; }
-}
-
-@media (max-width: 620px) {
-  /* Keep 44px touch targets while trimming the unused row around them. */
-  .shell {
-    --shell-bar-height: 46px;
-  }
 }
 
 /* Desktop-only quick actions. Declare the closed state outside the media query
@@ -455,35 +454,6 @@
   letter-spacing: 0.01em;
 }
 
-/* While New chat is allocating, the ordinary landing covers the outgoing
-   ChatView and its z:2 handoff cover. */
-.shell__new-chat-presentation {
-  z-index: 3;
-}
-
-/* The resolved ChatView is already painted underneath. Fade the complete,
-   opaque welcome surface rather than unmounting one logo and asking the next
-   image node to replace it on the same frame; matching pixels stay visually
-   stable while the real composer arrives softly. */
-.shell__new-chat-presentation--releasing {
-  pointer-events: none;
-  will-change: opacity;
-  animation: shell-new-chat-release 180ms ease-out both;
-}
-
-@keyframes shell-new-chat-release {
-  from { opacity: 1; }
-  to { opacity: 0; }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  /* Keep animationend as the state-machine completion signal without exposing
-     a visible transition to owners who prefer reduced motion. */
-  .shell__new-chat-presentation--releasing {
-    animation-duration: 1ms;
-  }
-}
-
 /* ── Tab strip: pinned chats/apps to swap between ─────────────────── */
 .shell__tabstrip {
   flex-shrink: 0;
@@ -496,7 +466,13 @@
   padding: 4px 8px;
   border-bottom: 1px solid var(--border-light);
   background: var(--bg);
+  /* Keep the tab row pannable without exposing the browser's transient native
+     horizontal-scroll thumb as a stray mark beneath the first tab. These
+     declarations live on the owning scroller rather than relying on the
+     global scrollbar custom properties, which Safari may not carry into its
+     overlay-scrollbar painting path. */
   scrollbar-width: none;
+  scrollbar-color: transparent transparent;
   /* Empty strip space retains native horizontal panning; an actual draggable tab
      opts out below so Pointer Events can reorder it in either direction on touch. */
   touch-action: pan-x pinch-zoom;
@@ -513,7 +489,18 @@
   left: 0;
   right: 0;
 }
-.shell__tabstrip::-webkit-scrollbar { height: 0; width: 0; }
+.shell__tabstrip::-webkit-scrollbar {
+  display: none;
+  width: 0;
+  height: 0;
+  background: transparent;
+  -webkit-appearance: none;
+}
+.shell__tabstrip::-webkit-scrollbar-track,
+.shell__tabstrip::-webkit-scrollbar-thumb {
+  background: transparent;
+  border: 0;
+}
 
 .shell__tab {
   display: flex;
@@ -652,6 +639,12 @@
 .shell__apps-view {
   background: var(--bg);
   container: apps-directory / inline-size;
+}
+
+.shell__projects-view,
+.shell__project-view {
+  background: var(--bg);
+  container: projects / inline-size;
 }
 
 .shell__apps-host {

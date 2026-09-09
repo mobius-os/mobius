@@ -81,7 +81,10 @@ def test_preview_returns_server_derived_contract_and_digest(
   }
   assert body["capability_contract"]["schema"] == 5
   assert body["capability_contract"]["runtime"] == {}
-  assert body["capability_contract"]["public"] == {"network": []}
+  assert body["capability_contract"]["public"] == {
+    "network": [],
+    "storage": {"read": False, "write_prefix": None},
+  }
 
 
 def test_runtime_capability_is_independently_versioned_and_bounded():
@@ -105,6 +108,73 @@ def test_runtime_capability_is_independently_versioned_and_bounded():
       "limits": {"max_duration_ms": 8_000},
     },
   }
+
+
+def test_camera_capture_has_reviewed_duration_and_byte_ceilings():
+  manifest = _manifest(capabilities={
+    "media.camera.capture": {
+      "version": 1,
+      "reason": "Capture a room walkthrough for a private 3D scene.",
+      "limits": {
+        "max_duration_ms": 180_000,
+        "max_bytes": 192 * 1024 * 1024,
+      },
+    },
+  })
+
+  runtime = normalize_runtime_capabilities(manifest)
+
+  assert runtime == {
+    "media.camera.capture": {
+      "version": 1,
+      "kind": "session",
+      "title": "Record video",
+      "description": (
+        "Use a device camera, and optionally its microphone, while this app is visible."
+      ),
+      "risk": "device",
+      "lifecycle": "active_frame",
+      "reason": "Capture a room walkthrough for a private 3D scene.",
+      "limits": {
+        "max_duration_ms": 180_000,
+        "max_bytes": 192 * 1024 * 1024,
+      },
+    },
+  }
+
+
+def test_camera_capture_limits_are_validated_and_bound_into_the_digest():
+  base = {
+    "media.camera.capture": {
+      "version": 1,
+      "reason": "Record a short video.",
+      "limits": {
+        "max_duration_ms": 30_000,
+        "max_bytes": 8 * 1024 * 1024,
+      },
+    },
+  }
+  _contract, digest = contract_and_digest(_manifest(capabilities=base))
+  changed = json.loads(json.dumps(base))
+  changed["media.camera.capture"]["limits"]["max_bytes"] += 1
+  _changed_contract, changed_digest = contract_and_digest(
+    _manifest(capabilities=changed),
+  )
+
+  assert digest != changed_digest
+
+  for limits in (
+    {"max_duration_ms": 300_001, "max_bytes": 8 * 1024 * 1024},
+    {"max_duration_ms": 30_000, "max_bytes": 256 * 1024 * 1024 + 1},
+  ):
+    with pytest.raises(ValueError, match="must be between"):
+      normalize_runtime_capabilities(_manifest(capabilities={
+        "media.camera.capture": {
+          "version": 1,
+          "reason": "Record a short video.",
+          "limits": limits,
+        },
+      }))
 
 
 def test_screen_control_is_reviewed_as_an_app_owned_background_session():
@@ -150,6 +220,22 @@ def test_device_asset_cache_is_client_only_and_reviewed_by_size():
     "Download verified app assets into this browser's private storage."
   )
   assert device_cache["limits"]["max_bytes"] == 256 * 1024 * 1024
+
+
+def test_device_storage_is_a_small_reviewed_invoke_capability():
+  runtime = normalize_runtime_capabilities(_manifest(capabilities={
+    "device.storage": {
+      "version": 1,
+      "reason": "Remember this visitor's bookings in this browser.",
+      "limits": {"max_bytes": 32 * 1024},
+    },
+  }))
+
+  storage = runtime["device.storage"]
+  assert storage["kind"] == "invoke"
+  assert storage["risk"] == "storage"
+  assert storage["lifecycle"] == "active_frame"
+  assert storage["limits"] == {"max_bytes": 32 * 1024}
 
 
 def test_speech_capabilities_separate_model_management_from_generation():

@@ -15,8 +15,10 @@ limited to the Contribute submit endpoints. A standalone Send consumes one
 prepared record, rechecks its reviewed branch/diff, pushes to the owner's
 fork, and creates the pull request. An explicitly enumerated stack Send
 validates every parent link and diff before publishing dedicated upstream
-stack branches in order; a matching stack Update fast-forwards already-open
-layers parent-first without bypassing the same complete-chain review boundary.
+stack branches in order; a matching stack Update advances already-open layers
+parent-first without bypassing the same complete-chain review boundary. Roots
+remain fast-forward-only, while a reviewed child may be restacked only under
+exact public-head and reviewed-parent leases.
 Both are available only when the connected owner can push there. A second
 explicitly confirmed stack action can atomically land a fully green chain on
 an unchanged, unprotected app branch; protected refs are never bypassed. An
@@ -36,6 +38,7 @@ The token itself never appears in any response or log line (INV1).
 
 import asyncio
 import hashlib
+import hmac
 import json
 import logging
 import os
@@ -45,6 +48,7 @@ import shutil
 import subprocess
 import tempfile
 import time
+from collections.abc import Callable
 from contextlib import AsyncExitStack, asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -55,13 +59,16 @@ from weakref import WeakValueDictionary
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import Response
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from slowapi import Limiter
 from slowapi.util import get_remote_address
-from sqlalchemy.orm import Session
+from sqlalchemy import Text, cast, or_
+from sqlalchemy.orm import Session, load_only, selectinload
 
 from app import (
   app_git,
+  contribution_assignments,
+  contribution_runtime,
   contribution_work,
   fs_locks,
   github_auth,
@@ -80,8 +87,8 @@ from app.contribution_records import (
 )
 from app.database import SessionLocal, get_db
 from app.delegations import (
-  DelegationIntent,
   ACTIVE_DELEGATION_STATUSES,
+  DelegationIntent,
   cancel_delegation_execution,
   create_or_attach_delegation,
   derived_status,
@@ -94,10 +101,13 @@ from app.delegations import (
 from app.github_connection import (
   _ACCESS_TOKEN_URL,
   _API_BASE,
+  _FULL_PR_SCOPES,
   _GITHUB_LOGIN,
+  _PRIVATE_PR_SCOPES,
   _bounded_provider_int,
   _github_connection_transaction,
   has_full_pr_access,
+  has_private_repo_access,
   _github_user,
   _start_device_attempt,
   _device_attempt_result,
@@ -110,6 +120,8 @@ from app.github_checks import (
   _pr_ref,
   _active_pr_records,
   _build_pr_checks_query,
+  _build_repository_heads_query,
+  _repository_default_head,
   _normalize_context,
   _parse_rollup,
   _classify_jobs,
@@ -157,10 +169,19 @@ from app.github_contributions import (
   _safe_repo_path,
   _safe_equivalence_source_path,
   _equivalence_source_repo,
+  _assert_pending_equivalence_preflight,
+  _assert_pending_equivalence_before_publication,
+  _record_prepublication_source_continuity,
+  _reviewed_source_identity,
+  _personal_publication_input,
+  _personal_publication_input_sha256,
   _record_pending_equivalence,
   _record_pending_equivalence_locked,
   _merged_upstream_sha,
   _settle_equivalence,
+  PublicationHandoffIdentity,
+  PublicationHandoffSpec,
+  publication_handoff_identity,
   publication_handoff_spec,
   _cleanup_terminal_staging_checkout,
   _claim_record,
@@ -176,6 +197,7 @@ from app.github_contributions import (
   _mark_submit_success,
   _mark_existing_pr_update_success,
   _note_submit_unconfirmed,
+  _assert_reviewed_existing_pr_metadata,
   _claim_personal_pr_ready,
   _inspect_personal_pr_ready_target,
   _mark_personal_pr_ready,
@@ -187,6 +209,7 @@ from app.github_contributions import (
   _parse_pr_number,
   _reviewed_pr_labels,
   _apply_reviewed_pr_labels,
+  _authoritative_public_reconciliation,
   _find_existing_pr,
   _existing_branch_pr,
   _is_transient_push_error,
@@ -204,6 +227,7 @@ from app.github_contributions import (
 )
 from app.deps import (
   Principal,
+  get_agent_run_principal,
   get_principal,
   get_owner_or_app_with_github_access,
   get_owner_or_app_with_github_connect,
@@ -217,6 +241,529 @@ from app.resource_access import get_active_chat_or_404
 router = APIRouter(prefix="/api/github", tags=["github"])
 _limiter = Limiter(key_func=get_remote_address)
 log = logging.getLogger("moebius.github")
+
+
+def _signed_personal_attempt(envelope: dict) -> dict:
+  unsigned = {key: value for key, value in envelope.items() if key != "hmac_sha256"}
+  material = json.dumps(
+    unsigned, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+  ).encode("utf-8")
+  return {
+    **unsigned,
+    "hmac_sha256": hmac.new(
+      get_settings().secret_key.encode("utf-8"),
+      material,
+      hashlib.sha256,
+    ).hexdigest(),
+  }
+
+
+def _read_personal_attempt(
+  record_path: Path, *, app_id: int, record_id: str,
+) -> dict | None:
+  try:
+    path = contribution_runtime.personal_attempt_path(app_id, record_id)
+    raw = json.loads(path.read_text(encoding="utf-8"))
+  except (OSError, ValueError):
+    return None
+  if not isinstance(raw, dict):
+    return None
+  signature = str(raw.get("hmac_sha256") or "")
+  expected = _signed_personal_attempt(raw).get("hmac_sha256")
+  if (
+    raw.get("version") != 1
+    or raw.get("app_id") != app_id
+    or raw.get("record_id") != record_id
+    or not isinstance(expected, str)
+    or not hmac.compare_digest(signature, expected)
+  ):
+    return None
+  return raw
+
+
+def _remove_personal_attempt(app_id: int, record_id: str) -> None:
+  try:
+    contribution_runtime.personal_attempt_path(app_id, record_id).unlink()
+  except FileNotFoundError:
+    pass
+  finally:
+    contribution_runtime.cleanup_empty_runtime_dirs(app_id, record_id)
+
+
+def _cleanup_durable_complete_attempt(
+  record_path: Path, *, app_id: int, record_id: str,
+) -> bool:
+  receipt = _read_personal_attempt(
+    record_path, app_id=app_id, record_id=record_id,
+  )
+  if not receipt or receipt.get("phase") != "complete":
+    return False
+  patch = receipt.get("record_patch")
+  if not isinstance(patch, dict):
+    return False
+  allowed = {
+    "url", "number", "head_repository", "publication_stage", "plan", "head_sha",
+    "last_submit_push_sha", "last_submit_stage", "last_submit_base_branch",
+    "last_submit_upstream_branch", "last_submit_upstream_sha", "last_pushed_branch",
+  }
+  compared = [key for key in patch if key in allowed]
+  if not compared:
+    return False
+  current = _read_record(record_path)
+  if not all(current.get(key) == patch.get(key) for key in compared):
+    return False
+  try:
+    _remove_personal_attempt(app_id, record_id)
+  except OSError:
+    return False
+  return True
+
+
+def _personal_action_identity_matches(prior: object, current: dict) -> bool:
+  """Match v11 actions and narrowly migrate v10 Autopilot run identities."""
+  if prior == current:
+    return True
+  if (
+    current.get("action") != "autopilot_update"
+    or not isinstance(prior, dict)
+    or prior.get("action") != "autopilot_update"
+    or not str(prior.get("run_id") or "")
+  ):
+    return False
+  return {key: value for key, value in prior.items() if key != "run_id"} == current
+
+
+class _PersonalAttemptOwner:
+  """Signed durable owner for one unlocked personal GitHub attempt."""
+
+  def __init__(
+    self,
+    *,
+    app_id: int,
+    record_id: str,
+    record_path: Path,
+    claimed: dict,
+    action_input: dict,
+    preclaim_record: dict | None = None,
+  ) -> None:
+    self.app_id = app_id
+    self.record_id = record_id
+    self.record_path = record_path
+    self.claim_input = _personal_publication_input(claimed)
+    self.claim_sha256 = _personal_publication_input_sha256(claimed)
+    if str(claimed.get("personal_submit_input_sha256") or "") not in {
+      "", self.claim_sha256,
+    }:
+      raise ContributionSubmitError(
+        "This contribution's publication claim no longer matches its reviewed inputs."
+      )
+    self.action_input = action_input
+    self.preclaim_input = (
+      _personal_publication_input(preclaim_record)
+      if isinstance(preclaim_record, dict) else None
+    )
+
+  def _current_matches(self) -> bool:
+    try:
+      current = _read_record(self.record_path)
+    except HTTPException:
+      return False
+    return _personal_publication_input_sha256(current) == self.claim_sha256
+
+  def assert_current(self) -> None:
+    if not self._current_matches():
+      raise ContributionSubmitError(
+        "This contribution changed after its public action was claimed. "
+        "The signed attempt was retained for exact reconciliation.",
+        status_code=409,
+        code="publication_claim_changed",
+      )
+
+  def event(
+    self, phase: str, effective_request: dict, record_patch: dict | None,
+    *, preclaim: bool = False,
+  ) -> None:
+    if phase not in {
+      "armed", "normalizing", "push_pending", "push_ambiguous", "branch_published",
+      "pr_ambiguous", "complete",
+    }:
+      raise ContributionSubmitError("The publication attempt entered an invalid phase.")
+    # Before the first public mutation, drift aborts without creating a receipt.
+    # Afterwards, persist the exact outcome first so a changed ledger can never
+    # erase the evidence needed to reconcile that owner-approved action.
+    if phase == "armed" and not preclaim:
+      self.assert_current()
+    envelope = _signed_personal_attempt({
+      "version": 1,
+      "app_id": self.app_id,
+      "record_id": self.record_id,
+      "claim_sha256": self.claim_sha256,
+      "claim_input": self.claim_input,
+      "preclaim_input": self.preclaim_input,
+      "action_input": self.action_input,
+      "phase": phase,
+      "effective_request": effective_request,
+      "record_patch": record_patch or {},
+      "updated_at": _now_iso(),
+    })
+    atomic_write(
+      contribution_runtime.personal_attempt_path(
+        self.app_id, self.record_id, create_parent=True,
+      ),
+      json.dumps(envelope, ensure_ascii=False, separators=(",", ":")),
+    )
+    if phase != "armed" and not self._current_matches():
+      raise ContributionSubmitError(
+        "The reviewed public action completed or became ambiguous after the "
+        "contribution record changed. Its signed recovery receipt was retained.",
+        status_code=409,
+        code="publication_claim_changed",
+        record_patch=record_patch or {},
+      )
+
+  def permits_exact_replay(self) -> bool:
+    receipt = _read_personal_attempt(
+      self.record_path, app_id=self.app_id, record_id=self.record_id,
+    )
+    if (
+      not receipt
+      or not _personal_action_identity_matches(
+        receipt.get("action_input"), self.action_input,
+      )
+      or receipt.get("phase") not in {
+        "armed", "normalizing", "push_pending", "push_ambiguous", "branch_published",
+        "pr_ambiguous", "complete",
+      }
+    ):
+      return False
+    receipt_input = receipt.get("claim_input")
+    receipt_patch = receipt.get("record_patch")
+    if not isinstance(receipt_input, dict) or not isinstance(receipt_patch, dict):
+      return False
+    candidates = {
+      str(receipt.get("claim_sha256") or ""),
+      _personal_publication_input_sha256({**receipt_input, **receipt_patch}),
+    }
+    return self.claim_sha256 in candidates
+
+  def receipt(self) -> dict | None:
+    """Return the exact validated receipt for this claimed action."""
+    if not self.permits_exact_replay():
+      return None
+    return _read_personal_attempt(
+      self.record_path, app_id=self.app_id, record_id=self.record_id,
+    )
+
+  def recovery_record(self, record: dict) -> dict:
+    """Rehydrate only signed, publication-derived fields for reconciliation.
+
+    The app-writable ledger remains the claim owner. A receipt can nominate
+    immutable GitHub facts for an authoritative read, but cannot introduce a
+    different reviewed repo/action or itself prove that a mutation happened.
+    """
+    receipt = self.receipt()
+    if receipt is None:
+      return record
+    patch = receipt.get("record_patch")
+    if not isinstance(patch, dict):
+      return record
+    allowed = {
+      "plan", "head_sha", "head_repository", "publication_stage", "url",
+      "number", "last_submit_stage", "last_submit_push_sha",
+      "last_submit_base_branch", "last_submit_upstream_branch",
+      "last_submit_upstream_sha", "last_pushed_branch",
+      "last_submit_error_code", "last_submit_error_detail",
+    }
+    derived = {key: value for key, value in patch.items() if key in allowed}
+    candidate = {**record, **derived}
+    original = receipt.get("claim_input")
+    if not isinstance(original, dict):
+      raise ContributionSubmitError(
+        "The signed publication receipt is incomplete.", status_code=409,
+      )
+    # Never let a derived patch change the public action's immutable target.
+    for key in ("id", "type", "repo"):
+      if candidate.get(key) != original.get(key):
+        raise ContributionSubmitError(
+          "The signed publication receipt changed its reviewed target.",
+          status_code=409,
+        )
+    old_plan = original.get("plan") if isinstance(original.get("plan"), dict) else {}
+    new_plan = candidate.get("plan") if isinstance(candidate.get("plan"), dict) else {}
+    for key in ("action", "repo", "base_branch"):
+      if new_plan.get(key) != old_plan.get(key):
+        raise ContributionSubmitError(
+          "The signed publication receipt changed its reviewed action.",
+          status_code=409,
+        )
+    return candidate
+
+  def arm_claim(
+    self, *, require_existing: bool = False, preclaim: bool = False,
+  ) -> None:
+    """Durably own a claim before its app lock is released."""
+    receipt_path = contribution_runtime.personal_attempt_path(
+      self.app_id, self.record_id,
+    )
+    receipt = self.receipt()
+    if receipt is not None:
+      return
+    # A matching complete receipt remains this exact action's durable public
+    # proof until its caller finishes every owning outcome write. Retire only
+    # an unrelated terminal action before arming a new one.
+    _cleanup_durable_complete_attempt(
+      self.record_path, app_id=self.app_id, record_id=self.record_id,
+    )
+    receipt = self.receipt()
+    if receipt is not None:
+      return
+    if require_existing or receipt_path.exists():
+      raise ContributionSubmitError(
+        "This submitting contribution has no valid matching recovery receipt.",
+        status_code=409,
+        code="invalid_publication_receipt",
+      )
+    self.event("armed", {
+      "action": "claim", "endpoint_action": self.action_input,
+      "claim_sha256": self.claim_sha256,
+    }, {}, preclaim=preclaim)
+
+  def replay_phase(self) -> str | None:
+    if not self.permits_exact_replay():
+      return None
+    receipt = _read_personal_attempt(
+      self.record_path, app_id=self.app_id, record_id=self.record_id,
+    )
+    return str(receipt.get("phase") or "") if receipt else None
+
+  def settle(self) -> None:
+    _remove_personal_attempt(self.app_id, self.record_id)
+
+
+def _personal_claim_owners(
+  *, app_id: int, action_input: dict,
+) -> tuple[
+  dict[str, _PersonalAttemptOwner],
+  Callable[[dict, Path, bool, dict], None],
+]:
+  """Build the one claim callback shared by single and stacked publications."""
+  owners: dict[str, _PersonalAttemptOwner] = {}
+
+  def own_claim(
+    claim: dict, path: Path, resumed: bool, preclaim: dict,
+  ) -> None:
+    record_id = str(claim.get("id") or "")
+    owner = _PersonalAttemptOwner(
+      app_id=app_id, record_id=record_id, record_path=path,
+      claimed=claim, action_input=action_input, preclaim_record=preclaim,
+    )
+    try:
+      owner.arm_claim(require_existing=resumed, preclaim=not resumed)
+    except ContributionSubmitError as exc:
+      raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
+    owners[record_id] = owner
+
+  return owners, own_claim
+
+
+def _assert_personal_publication_source(
+  record: dict, owner: _PersonalAttemptOwner,
+) -> str:
+  owner.assert_current()
+  # A receipt proves the server's request, not GitHub's state. The eventual
+  # recovery path may skip this only after an authoritative exact branch/PR
+  # read; no receipt phase by itself is source provenance.
+  if owner.replay_phase() in {
+    "push_pending", "push_ambiguous", "branch_published", "pr_ambiguous",
+    "complete",
+  }:
+    return _assert_pending_equivalence_before_publication(record)
+  # An armed receipt proves only that the owner approved these private inputs.
+  # App-writable last_submit_* fields and an unrelated pre-existing public
+  # branch cannot turn that fresh approval into source provenance. Only a
+  # signed post-mutation phase may enter authoritative public recovery.
+  return _assert_pending_equivalence_preflight(record)
+
+
+def _personal_resume_allowed(
+  *, app_id: int, record_id: str, record_path: Path, action_input: dict,
+) -> bool:
+  """Validate the server-owned receipt before a submitting claim resumes."""
+  receipt_path = contribution_runtime.personal_attempt_path(app_id, record_id)
+  receipt = _read_personal_attempt(
+    record_path, app_id=app_id, record_id=record_id,
+  )
+  if receipt_path.exists() and receipt is None:
+    raise HTTPException(
+      status_code=409,
+      detail="This publication recovery receipt is invalid; nothing was sent.",
+    )
+  if receipt is None:
+    current = _read_record(record_path)
+    plan = current.get("plan") if isinstance(current.get("plan"), dict) else {}
+    if (
+      current.get("status") == "submitting"
+      and current.get("type") == "pr"
+      and plan.get("action") in _PREPARED_PR_ACTIONS
+      and current.get("submission_mode") != "mobius-bot"
+    ):
+      # A pre-v7 row can carry a truthful already-public candidate but no
+      # server-owned receipt. Let GitHub's exact PR identity upgrade only that
+      # terminal fact into a signed recovery claim. The app journal merely
+      # nominates the read; absent an exact open PR, it authorizes nothing.
+      try:
+        recovery = _authoritative_public_reconciliation(
+          current,
+          expected_pr_number=(
+            int(current["number"])
+            if plan.get("action") == "pr_update" and current.get("number")
+            else None
+          ),
+          expected_head_repository=(
+            str(current.get("head_repository") or "") or None
+          ),
+        )
+      except (
+        ContributionSubmitError, OSError, subprocess.TimeoutExpired,
+        TypeError, ValueError,
+      ):
+        recovery = None
+      # Legacy migration may settle an exact effect, never authorize a new
+      # one. Nonempty reviewed labels still need a fresh approval, and a PR
+      # update is terminal only when its desired text is already public.
+      if recovery is not None:
+        try:
+          has_pending_labels = bool(_reviewed_pr_labels(plan))
+        except ContributionSubmitError:
+          has_pending_labels = True
+        if has_pending_labels:
+          recovery = None
+      if (
+        recovery is not None
+        and recovery.pr_url is not None
+        and plan.get("action") == "pr_update"
+      ):
+        target: dict = {}
+        try:
+          target = _autopilot_live_target(
+            str(plan.get("repo") or current.get("repo") or ""),
+            int(recovery.pr_number),
+            recovery.head_repository,
+            str(plan.get("branch") or current.get("branch") or ""),
+          )
+          metadata_state = _assert_reviewed_existing_pr_metadata(
+            current,
+            live_title=target.get("title"),
+            live_body=target.get("body"),
+          )
+        except (ContributionSubmitError, TypeError, ValueError):
+          metadata_state = ""
+        if target.get("error") or metadata_state != "desired":
+          recovery = None
+      if recovery is not None and recovery.pr_url is not None:
+        reviewed_head = str(plan.get("head_sha") or "").lower()
+        recovery_patch = {
+          "url": recovery.pr_url,
+          "number": recovery.pr_number,
+          "head_repository": recovery.head_repository,
+          "publication_stage": recovery.publication_stage,
+          "last_submit_stage": "pushed",
+          "last_submit_push_sha": reviewed_head,
+        }
+        try:
+          owner = _PersonalAttemptOwner(
+            app_id=app_id,
+            record_id=record_id,
+            record_path=record_path,
+            claimed=current,
+            action_input=action_input,
+          )
+          owner.event("pr_ambiguous", {
+            "action": "reconcile_legacy_pr",
+            "repo": plan.get("repo") or current.get("repo"),
+            "number": recovery.pr_number,
+            "url": recovery.pr_url,
+            "head_repository": recovery.head_repository,
+            "branch": plan.get("branch") or current.get("branch"),
+            "head_sha": reviewed_head,
+          }, recovery_patch)
+        except ContributionSubmitError:
+          # A stale app-writable claim hash is not a server trust anchor. Fall
+          # through to the conservative fresh-approval migration below.
+          pass
+        else:
+          return True
+      # Rows created before signed attempt ownership cannot safely resume from
+      # app-writable journals. Reopen the exact reviewed card for this fresh
+      # approval; the normal source proof and GitHub read will reconcile an
+      # already-public exact outcome before any new mutation.
+      restored = {**current, "status": "prepared", "updated_at": _now_iso()}
+      for key in (
+        "personal_submit_input_sha256", "submit_started_at", "submitter",
+      ):
+        restored.pop(key, None)
+      _write_record(record_path, restored)
+    return False
+  if _cleanup_durable_complete_attempt(
+    record_path, app_id=app_id, record_id=record_id,
+  ):
+    return False
+  current = _read_record(record_path)
+  patch = receipt.get("record_patch")
+  if receipt.get("action_input") != action_input:
+    raise HTTPException(
+      status_code=409,
+      detail="Another exact publication attempt still needs reconciliation.",
+    )
+  if current.get("status") == "prepared" and isinstance(patch, dict):
+    claim_input = receipt.get("claim_input")
+    if not isinstance(claim_input, dict):
+      raise HTTPException(status_code=409, detail="The recovery receipt is incomplete.")
+    preclaim_input = receipt.get("preclaim_input")
+    expected_candidates = [{**claim_input, **patch, "status": "prepared"}]
+    if isinstance(preclaim_input, dict):
+      expected_candidates.append(preclaim_input)
+    current_sha = _personal_publication_input_sha256(current)
+    if current_sha not in {
+      _personal_publication_input_sha256(candidate)
+      for candidate in expected_candidates
+    }:
+      raise HTTPException(
+        status_code=409,
+        detail="The contribution changed after its public attempt was recorded.",
+      )
+    restored = {
+      **current,
+      **patch,
+      "status": "submitting",
+      "submitter": claim_input.get("submitter"),
+      "personal_submit_input_sha256": str(receipt.get("claim_sha256") or ""),
+      "updated_at": _now_iso(),
+    }
+    _write_record(record_path, restored)
+    return True
+  if current.get("status") != "submitting":
+    raise HTTPException(
+      status_code=409,
+      detail=(
+        "An earlier exact publication attempt still needs authoritative "
+        "reconciliation; a fresh claim cannot replace its signed receipt."
+      ),
+    )
+  return True
+
+
+def _assert_active_stack_attempts_current(
+  attempt_owners: dict[str, _PersonalAttemptOwner],
+) -> None:
+  for owner in attempt_owners.values():
+    try:
+      current = _read_record(owner.record_path)
+    except HTTPException:
+      owner.assert_current()
+      continue
+    if current.get("status") == "submitting":
+      owner.assert_current()
 
 # Response cap + timeout mirror routes/proxy.py: GitHub payloads the
 # dashboard needs are small; anything bigger is truncated, not buffered.
@@ -247,6 +794,16 @@ _SUBMIT_TIMEOUT = 90
 _PUSH_RETRIES = 3
 _PUSH_RETRY_BASE_SECONDS = 0.5
 _PREPARED_PR_ACTIONS = frozenset(("pr", "pr_update"))
+
+class GithubConnectStartRequest(BaseModel):
+  # `workflow` is legacy: older Contribute builds sent it to pick a partial
+  # connection, and it is intentionally ignored — workflow is always requested.
+  # `private_repos` is the opt-in that widens the request to GitHub's full
+  # `repo` scope so the owner can push to their PRIVATE repos. Default false
+  # keeps the least-privilege public-contribution connection.
+  workflow: bool = True
+  private_repos: bool = False
+
 
 class GithubConnectAttemptRequest(BaseModel):
   attempt_id: str
@@ -280,6 +837,30 @@ class ContributionSubmitBody(BaseModel):
   publication_stage: Literal["draft", "ready"] = "draft"
 
 
+class ContributionSourceContinuityBody(BaseModel):
+  """Exact source/review identity an active agent has just re-read.
+
+  ``review_identity_sha256`` is the SHA-256 of the canonical versioned
+  envelope documented by ``_reviewed_source_identity``. The source chat reads
+  that same locked record plus the complete committed source advance, then
+  sends both digests. The host independently recomputes every value before it
+  creates a private Git witness; these client-supplied strings never authorize
+  publication on their own.
+  """
+
+  base_sha: str
+  head_sha: str
+  source_sha: str
+  diff_sha256: str
+  reviewed_through_sha: str
+  source_advance_diff_sha256: str
+  review_identity_sha256: str
+  # Explicitly reviewed conflict resolution; never inferred from a failed proof.
+  source_resolution_sha256: str | None = Field(
+    default=None, pattern=r"^[0-9a-f]{64}$",
+  )
+
+
 class ContributionCoverageBody(BaseModel):
   paths: list[str]
 
@@ -305,6 +886,8 @@ ContributionWorkBody = contribution_work.ContributionWorkBody
 class ContributionAssignReviewBody(BaseModel):
   repo: str
   number: int
+  assignee: str | None = None
+  expected_head_sha: str | None = None
 
 
 class AutopilotRespondBody(BaseModel):
@@ -397,14 +980,24 @@ async def _serialize_ready_action(app_id: int, record_id: str):
 @_limiter.limit("3/minute")
 async def connect_start(
   request: Request,
+  body: GithubConnectStartRequest | None = None,
   _: models.Owner = Depends(get_owner_or_app_with_github_connect),
 ):
-  """Starts exactly one GitHub device flow and returns its user code."""
+  """Starts exactly one GitHub device flow and returns its user code.
+
+  The default connection requests the least-privilege public-contribution
+  scopes. When the owner opts into private-repository access, the flow requests
+  the broader `repo` scope so pushes to their private repos succeed; the
+  credential store and `/status` then reflect whatever GitHub actually granted.
+  """
+  scope_set = (
+    _PRIVATE_PR_SCOPES if (body and body.private_repos) else _FULL_PR_SCOPES
+  )
   # All credential/attempt mutations share this lock. In particular, a start
   # cannot publish a ghost attempt after its client timed out behind an older
   # poll or Disconnect.
   async with _github_connection_transaction():
-    return await _start_device_attempt(request)
+    return await _start_device_attempt(request, scope_set=scope_set)
 
 
 
@@ -598,6 +1191,9 @@ async def github_status(
     "connected": connected,
     "login": state.get("login") if connected else None,
     "scopes": (state.get("scopes") or []) if connected else [],
+    "can_push_private": (
+      has_private_repo_access(state.get("scopes")) if connected else False
+    ),
     "token_source": state.get("token_source") if connected else None,
     "device_flow_available": bool(get_settings().github_oauth_client_id),
     "gh_version": github_auth.gh_version(),
@@ -799,7 +1395,26 @@ _REVIEW_STATUS_MESSAGES = {
   "invalid_plan": "This older card needs a fresh agent review before it can send.",
   "missing_checkout": "The staged checkout is no longer available.",
   "invalid_checkout": "The staged checkout can no longer be verified safely.",
+  "missing_source_provenance": (
+    "This review is no longer linked to the installed source it came from."
+  ),
+  "source_provenance_mismatch": (
+    "The installed source no longer proves that it contains this reviewed change."
+  ),
   "review_unavailable": "This review could not be verified locally.",
+}
+
+_PUBLICATION_STATUS_MESSAGES = {
+  "ready": "The target repository still has the reviewed default-branch head.",
+  "outdated_default_head": (
+    "The target repository advanced after this review was prepared."
+  ),
+  "target_repository_missing": (
+    "The target repository no longer exists or is not accessible."
+  ),
+  "publication_unavailable": (
+    "GitHub freshness could not be checked right now."
+  ),
 }
 
 
@@ -817,6 +1432,93 @@ def _review_status_problem(
       code,
       detail or _REVIEW_STATUS_MESSAGES["review_unavailable"],
     ),
+  }
+
+
+def _recent_contribution_record_paths(
+  contribution_dir: Path,
+  *,
+  limit: int = 500,
+) -> list[Path]:
+  """Return the bounded ledger window most likely to contain active work.
+
+  Contribution ids are descriptive, not chronological. Selecting a bounded
+  window by filename can split a freshly prepared stack merely because one
+  layer sorts after the cutoff. Modification time keeps independently named
+  records from the same recent review in the same inspection window.
+  """
+  paths_with_mtime = []
+  for path in contribution_dir.glob("*.json"):
+    # Private attempt/request journals share this directory on older installs.
+    # Exclude them before even consulting metadata: otherwise a burst of newer
+    # dotfiles can consume the bounded window and hide active reviewed work.
+    if path.name.startswith("."):
+      continue
+    try:
+      paths_with_mtime.append((path.stat().st_mtime_ns, path.name, path))
+    except OSError:
+      continue
+  paths_with_mtime.sort(reverse=True)
+  return [path for _mtime, _name, path in paths_with_mtime[:limit]]
+
+
+def _publication_status(
+  record: dict,
+  expected_head: str,
+  *,
+  remote_data: dict | None,
+  repo_nodes: dict[str, object],
+) -> dict:
+  """Return the additive remote publication verdict for one review."""
+  try:
+    repo = _validate_repo_slug(
+      str((record.get("plan") or {}).get("repo") or record.get("repo") or "")
+    )
+  except ContributionSubmitError:
+    repo = ""
+  if remote_data is None or not repo:
+    return {
+      "state": "unavailable",
+      "code": "publication_unavailable",
+      "message": _PUBLICATION_STATUS_MESSAGES["publication_unavailable"],
+    }
+
+  repo_key = repo.casefold()
+  if repo_key not in repo_nodes:
+    return {
+      "state": "unavailable",
+      "code": "publication_unavailable",
+      "message": _PUBLICATION_STATUS_MESSAGES["publication_unavailable"],
+    }
+  node = repo_nodes[repo_key]
+  if node is None:
+    return {
+      "state": "needs_refresh",
+      "code": "target_repository_missing",
+      "message": _PUBLICATION_STATUS_MESSAGES["target_repository_missing"],
+    }
+  default_head = _repository_default_head(node)
+  if default_head is None or not re.fullmatch(r"[0-9a-fA-F]{40}", expected_head):
+    return {
+      "state": "unavailable",
+      "code": "publication_unavailable",
+      "message": _PUBLICATION_STATUS_MESSAGES["publication_unavailable"],
+    }
+  default_branch, head_sha = default_head
+  if head_sha != expected_head.lower():
+    return {
+      "state": "needs_refresh",
+      "code": "outdated_default_head",
+      "message": _PUBLICATION_STATUS_MESSAGES["outdated_default_head"],
+      "default_branch": default_branch,
+      "head_sha": head_sha,
+    }
+  return {
+    "state": "ready",
+    "code": "ready",
+    "message": _PUBLICATION_STATUS_MESSAGES["ready"],
+    "default_branch": default_branch,
+    "head_sha": head_sha,
   }
 
 
@@ -845,38 +1547,150 @@ def _inspect_prepared_review(
     branch = _validate_branch(plan.get("branch") or record.get("branch"))
     if not (repo / ".git").exists():
       return _review_status_problem(record_id, code="missing_checkout")
-    _assert_clean_worktree(repo)
-    _assert_fresh(record, diff_path, repo, branch)
-    _assert_coauthor_trailer(repo, branch)
+    status = app_git._run(
+      repo, "status", "--porcelain", read_only=True,
+    ).stdout.strip()
+    if status:
+      raise ContributionSubmitError(
+        "This staged branch has uncommitted source changes.",
+        code="working_changes",
+      )
+    plan_base = str(plan.get("base_sha") or "")
+    plan_head = str(plan.get("head_sha") or record.get("head_sha") or "")
+    base_oid = app_git._resolve_commit(repo, plan_base, read_only=True)
+    head_oid = app_git._resolve_commit(repo, plan_head, read_only=True)
+    if base_oid is None or head_oid is None:
+      raise ContributionSubmitError(
+        "The reviewed commits are no longer available locally.",
+        code="review_unavailable",
+      )
+    ancestry = app_git._run(
+      repo, "merge-base", "--is-ancestor", base_oid, head_oid,
+      check=False, read_only=True,
+    )
+    if ancestry.returncode != 0:
+      raise ContributionSubmitError(
+        "The reviewed branch is no longer based on its recorded parent.",
+        code="invalid_ancestry",
+      )
+    actual_head = app_git._run(
+      repo, "rev-parse", branch, read_only=True,
+    ).stdout.strip()
+    if actual_head != head_oid:
+      raise ContributionSubmitError(
+        "This branch changed after review.", code="branch_moved",
+      )
+    expected_diff = str(plan.get("diff_sha256") or "")
+    try:
+      stored_diff = diff_path.read_bytes()
+    except OSError as exc:
+      raise ContributionSubmitError(
+        "The reviewed diff is missing.", code="missing_diff",
+      ) from exc
+    if hashlib.sha256(stored_diff).hexdigest() != expected_diff:
+      raise ContributionSubmitError(
+        "The reviewed diff changed.", code="review_changed",
+      )
+    branch_diff = app_git._canonical_diff(
+      repo, base_oid, head_oid, read_only=True,
+    )
+    if branch_diff is None or hashlib.sha256(branch_diff).hexdigest() != expected_diff:
+      raise ContributionSubmitError(
+        "The reviewed diff does not match the branch.", code="diff_mismatch",
+      )
+    body = app_git._run(
+      repo, "log", "-1", "--format=%B", branch, read_only=True,
+    ).stdout
+    if _COAUTHOR_TRAILER not in body:
+      raise ContributionSubmitError(
+        "This staged commit is missing its required co-author trailer.",
+        code="missing_coauthor",
+      )
+    # Review is a local, read-only projection. Authoritative public recovery
+    # belongs only to an owner-approved Send/Update path; never hold source
+    # locks across GitHub reads just to render a status card.
+    _assert_pending_equivalence_preflight(record)
 
     stack = plan.get("stack") if isinstance(plan.get("stack"), dict) else None
     login = str(github_state.get("login") or "")
     if stack and login and _GITHUB_LOGIN.match(login):
       author_name, author_email = _connected_git_identity(github_state, login)
-      _assert_head_attribution(
-        repo,
-        branch,
-        author_name=author_name,
-        author_email=author_email,
-      )
+      attribution = app_git._run(
+        repo, "show", "-s", "--format=%an%x00%ae%x00%cn%x00%ce", branch,
+        read_only=True,
+      ).stdout.rstrip("\n").split("\x00")
+      if attribution != [author_name, author_email, author_name, author_email]:
+        raise ContributionSubmitError(
+          "This PR stack was prepared with a different commit identity."
+        )
     # Last, because it is the only verdict here that is not about the staged
     # checkout: the source can match its review exactly and still be
     # unmergeable. A dirty or moved checkout is the more urgent thing to say,
     # so those are reported first.
-    if _conflicts_with_recorded_upstream(record, repo, branch):
-      return _review_status_problem(record_id, code="upstream_conflict")
+    upstream_sha = str(record.get("last_submit_upstream_sha") or "")
+    if _GIT_SHA.match(upstream_sha):
+      merge_preview = app_git.preview_merge_refs(repo, upstream_sha, branch)
+      if merge_preview is None:
+        raise ContributionSubmitError(
+          "The recorded upstream merge could not be checked locally.",
+          code="review_unavailable",
+        )
+      if merge_preview.status == "conflict":
+        return _review_status_problem(record_id, code="upstream_conflict")
   except ContributionSubmitError as exc:
     return _review_status_problem(
       record_id,
       code=exc.code or "review_unavailable",
       detail=exc.message,
     )
+  except (
+    OSError, subprocess.SubprocessError, RuntimeError, ValueError, UnicodeError,
+  ):
+    return _review_status_problem(record_id, code="review_unavailable")
   return {
     "id": record_id,
     "state": "ready",
     "code": "ready",
     "message": "Still matches the exact source you reviewed.",
   }
+
+
+async def _inspect_prepared_review_locked(
+  record: dict,
+  diff_path: Path,
+  github_state: dict,
+) -> dict:
+  """Inspect one review while holding every repository its proof reads."""
+  record_id = str(record.get("id") or "")
+  plan = record.get("plan") if isinstance(record.get("plan"), dict) else {}
+  try:
+    review_repo = _safe_repo_path(plan.get("repo_path"))
+    repos = await asyncio.to_thread(_equivalence_source_repo, record)
+  except ContributionSubmitError as exc:
+    return _review_status_problem(
+      record_id,
+      code=exc.code or "invalid_checkout",
+      detail=exc.message,
+    )
+  except (
+    OSError, subprocess.SubprocessError, RuntimeError, ValueError, UnicodeError,
+  ):
+    return _review_status_problem(record_id, code="review_unavailable")
+  lock_paths = {str(review_repo)}
+  if repos is not None:
+    source_repo, provenance_review_repo = repos
+    lock_paths.update((str(source_repo), str(provenance_review_repo)))
+  async with AsyncExitStack() as source_locks:
+    for lock_path in sorted(lock_paths):
+      await source_locks.enter_async_context(
+        fs_locks.source_dir_lock(lock_path)
+      )
+    return await asyncio.to_thread(
+      _inspect_prepared_review,
+      record,
+      diff_path,
+      github_state,
+    )
 
 
 @router.get("/contributions/{app_id}/review-status")
@@ -887,13 +1701,14 @@ async def contribution_review_status(
   db: Session = Depends(get_db),
   principal: Principal = Depends(get_principal),
 ):
-  """Return one read-only local validity verdict per prepared review.
+  """Return local validity plus remote publication truth per prepared review.
 
-  The route never fetches GitHub, checks out a branch, writes a ledger record,
-  or weakens submit-time validation. It snapshots the app's contribution
-  ledger under its storage lock, validates stack shape as one unit, then takes
-  the same per-repository locks used by submit while comparing each prepared
-  branch and stored diff.
+  The route never checks out a branch, writes a ledger record, or weakens
+  submit-time validation. It snapshots the ledger under its storage lock,
+  validates stack shape as one unit, then takes the same per-repository locks
+  used by submit while comparing each prepared branch and stored diff. Only
+  after every local lock and DB lease is released does it make one read-only,
+  de-duplicated GitHub request for current default-branch heads.
   """
   _validate_submit_app(app_id, principal, db)
   # Authorization is complete. Ledger and git inspection may queue behind app
@@ -903,19 +1718,27 @@ async def contribution_review_status(
   async with fs_locks.app_storage_lock(app_id):
     records = []
     if contribution_dir.exists():
-      for path in sorted(contribution_dir.glob("*.json"))[:500]:
+      for path in _recent_contribution_record_paths(contribution_dir):
+
         record = _read_record_tolerant(path)
         if record is not None and record.get("id"):
           records.append(record)
 
-  # Include malformed/legacy prepared rows as well: the inspector below owns
-  # the invalid-plan verdict, and silently omitting one would strand its review
-  # card without an actionable explanation.
-  prepared = [record for record in records if record.get("status") == "prepared"]
+  # Include malformed/legacy PR rows as well: the inspector below owns the
+  # invalid-plan verdict, and silently omitting one would strand its review
+  # card without an actionable explanation. Prepared issues and comments have
+  # no staged checkout by design, so presenting them as broken PR reviews is a
+  # false alarm.
+  prepared = [
+    record for record in records
+    if record.get("status") == "prepared"
+    and record.get("type") in (None, "pr")
+  ]
   # The credential metadata is a file-backed resource shared by every review;
   # snapshot it once instead of reopening it for each prepared stack layer.
   github_state = github_auth.read_state() or {}
   structural_problems: dict[str, dict] = {}
+  publication_bases: dict[str, str] = {}
   stack_ids = {
     str(((record.get("plan") or {}).get("stack") or {}).get("id") or "")
     for record in prepared
@@ -929,9 +1752,16 @@ async def contribution_review_status(
       == stack_id
     ]
     try:
-      validated = _validate_stack_records(stack_records)
+      validated = _validate_stack_records(
+        stack_records,
+        allowed_actions=_PREPARED_PR_ACTIONS,
+      )
+      root_plan = validated[0]["record"].get("plan") or {}
+      root_base = str(root_plan.get("base_sha") or "")
       for index, item in enumerate(validated):
         record = item["record"]
+        if record.get("status") == "prepared":
+          publication_bases[str(record.get("id") or "")] = root_base
         if (
           index > 0
           and record.get("status") == "prepared"
@@ -958,30 +1788,227 @@ async def contribution_review_status(
     if record_id in structural_problems:
       results.append(structural_problems[record_id])
       continue
-    plan = record.get("plan") if isinstance(record.get("plan"), dict) else {}
-    try:
-      repo = _safe_repo_path(plan.get("repo_path"))
-    except ContributionSubmitError as exc:
-      results.append(_review_status_problem(
-        record_id,
-        code=exc.code or "invalid_checkout",
-        detail=exc.message,
-      ))
-      continue
     _, diff_path = _record_paths(app_id, record_id)
-    async with fs_locks.source_dir_lock(str(repo)):
-      results.append(await asyncio.to_thread(
-        _inspect_prepared_review,
-        record,
-        diff_path,
-        github_state,
-      ))
+    results.append(await _inspect_prepared_review_locked(
+      record,
+      diff_path,
+      github_state,
+    ))
+
+  # Local validity is deliberately complete before this remote read. No DB,
+  # app-storage, or source-tree lock crosses the network boundary. One query
+  # field per distinct target repository is enough even when several prepared
+  # reviews (or stack layers) share it; the app's open-PR lifecycle refresh is
+  # a separate query with a separate purpose.
+  repos: list[str] = []
+  for record in prepared:
+    plan = record.get("plan") if isinstance(record.get("plan"), dict) else {}
+    repo = str(plan.get("repo") or record.get("repo") or "")
+    repos.append(repo)
+    publication_bases.setdefault(
+      str(record.get("id") or ""), str(plan.get("base_sha") or ""),
+    )
+  query, variables, aliases = _build_repository_heads_query(repos)
+  token = github_auth.get_token()
+  remote_data = (
+    await _github_graphql_json(token, query, variables)
+    if token and query
+    else None
+  )
+  repo_nodes = {
+    repo.casefold(): remote_data[alias]
+    for alias, repo in aliases.items()
+    if alias in remote_data
+  } if remote_data is not None else {}
+  prepared_by_id = {
+    str(record.get("id") or ""): record for record in prepared
+  }
+  for result in results:
+    record_id = str(result.get("id") or "")
+    record = prepared_by_id.get(record_id) or {}
+    result["publication"] = _publication_status(
+      record,
+      publication_bases.get(record_id, ""),
+      remote_data=remote_data,
+      repo_nodes=repo_nodes,
+    )
 
   return {
     "generated_at": _now_iso(),
     "records": results,
     "ready": sum(item["state"] == "ready" for item in results),
     "needs_refresh": sum(item["state"] == "needs_refresh" for item in results),
+    "publication": {
+      "ready": sum(
+        item["publication"]["state"] == "ready" for item in results
+      ),
+      "needs_refresh": sum(
+        item["publication"]["state"] == "needs_refresh" for item in results
+      ),
+      "unavailable": sum(
+        item["publication"]["state"] == "unavailable" for item in results
+      ),
+    },
+  }
+
+
+@router.post(
+  "/contributions/{app_id}/{record_id}/source-continuity",
+  dependencies=[Depends(reject_cross_site)],
+)
+@_limiter.limit("10/minute")
+async def attest_contribution_source_continuity(
+  request: Request,
+  app_id: int,
+  record_id: str,
+  body: ContributionSourceContinuityBody,
+  db: Session = Depends(get_db),
+  principal: Principal = Depends(get_agent_run_principal),
+):
+  """Freeze one agent-reviewed bridge from a prepared diff to live source.
+
+  This is private preparation, not publication. The app-writable record only
+  selects the candidate: the route re-verifies its exact branch/diff/review,
+  current clean installed source, and source-chat ownership before writing an
+  immutable Git witness under the installed repository's private ref space.
+  """
+  _validate_submit_app(app_id, principal, db)
+  if not _CONTRIBUTION_ID.fullmatch(record_id):
+    raise HTTPException(status_code=422, detail="Invalid contribution id.")
+  db.close()
+  record_path, diff_path = _record_paths(app_id, record_id)
+  async with fs_locks.app_storage_lock(app_id):
+    record = _read_record(record_path)
+    plan = record.get("plan") if isinstance(record.get("plan"), dict) else {}
+    quality = (
+      record.get("quality_review")
+      if isinstance(record.get("quality_review"), dict)
+      else {}
+    )
+    raw_chat_ids = record.get("chat_ids")
+    source_chat_values = [record.get("chat_id")]
+    if isinstance(raw_chat_ids, list):
+      source_chat_values.extend(raw_chat_ids)
+    source_chats = {
+      str(value)
+      for value in source_chat_values
+      if isinstance(value, str) and value
+    }
+    if principal.chat_id not in source_chats:
+      raise HTTPException(
+        status_code=403,
+        detail="Only this contribution's source chat can attest continuity.",
+      )
+    if (
+      record.get("id") != record_id
+      or record.get("type") != "pr"
+      or record.get("status") != "prepared"
+      or plan.get("action") not in _PREPARED_PR_ACTIONS
+      or quality.get("state") != "all_clear"
+      or quality.get("reviewed_head_sha") != plan.get("head_sha")
+    ):
+      raise HTTPException(
+        status_code=409,
+        detail="This contribution does not have one current all-clear review.",
+      )
+    expected = {
+      "base_sha": plan.get("base_sha"),
+      "head_sha": plan.get("head_sha"),
+      "source_sha": plan.get("source_sha"),
+      "diff_sha256": plan.get("diff_sha256"),
+      "review_identity_sha256": _reviewed_source_identity(record),
+    }
+    supplied = {
+      "base_sha": body.base_sha,
+      "head_sha": body.head_sha,
+      "source_sha": body.source_sha,
+      "diff_sha256": body.diff_sha256,
+      "review_identity_sha256": body.review_identity_sha256,
+    }
+    if supplied != expected:
+      raise HTTPException(
+        status_code=409,
+        detail="The reviewed contribution changed before continuity was recorded.",
+      )
+    try:
+      review_repo = _safe_repo_path(plan.get("repo_path"))
+      source_repos = _equivalence_source_repo(record)
+      if source_repos is None:
+        raise ContributionSubmitError(
+          "This review is missing its installed source provenance."
+        )
+      source_repo, provenance_review_repo = source_repos
+      lock_paths = sorted({
+        str(review_repo), str(source_repo), str(provenance_review_repo),
+      })
+      async with AsyncExitStack() as source_locks:
+        for lock_path in lock_paths:
+          await source_locks.enter_async_context(
+            fs_locks.source_dir_lock(lock_path)
+          )
+        branch = _validate_branch(plan.get("branch") or record.get("branch"))
+        await asyncio.to_thread(
+          _assert_fresh, record, diff_path, review_repo, branch,
+        )
+        if await asyncio.to_thread(app_git.worktree_dirty, source_repo):
+          raise ContributionSubmitError(
+            "The installed source has uncommitted changes."
+          )
+        current_source = await asyncio.to_thread(
+          app_git.head_sha, source_repo, "HEAD",
+        )
+        if current_source != body.reviewed_through_sha:
+          raise ContributionSubmitError(
+            "The installed source changed during continuity review."
+          )
+        source_advance = await asyncio.to_thread(
+          app_git._canonical_diff,
+          source_repo,
+          body.source_sha,
+          current_source,
+          read_only=True,
+        )
+        if (
+          source_advance is None
+          or hashlib.sha256(source_advance).hexdigest()
+             != body.source_advance_diff_sha256
+        ):
+          raise ContributionSubmitError(
+            "The local source advance differs from what the agent reviewed."
+          )
+        witness = await asyncio.to_thread(
+          _record_prepublication_source_continuity,
+          record,
+          reviewed_through_sha=current_source,
+          source_resolution_sha256=body.source_resolution_sha256,
+        )
+        if witness is None:
+          raise ContributionSubmitError(
+            "The reviewed source continuity could not be proven safely."
+          )
+    except ContributionSubmitError as exc:
+      raise HTTPException(
+        status_code=409,
+        detail={
+          "message": exc.message,
+          **({"code": exc.code} if exc.code else {}),
+        },
+      ) from exc
+    except (
+      OSError, subprocess.SubprocessError, RuntimeError, ValueError,
+      UnicodeError,
+    ) as exc:
+      raise HTTPException(
+        status_code=409,
+        detail={
+          "message": "The reviewed source continuity could not be proven safely.",
+          "code": "source_continuity_unavailable",
+        },
+      ) from exc
+  return {
+    "status": "recorded",
+    "record_id": record_id,
+    "reviewed_through_sha": body.reviewed_through_sha,
   }
 
 
@@ -1283,9 +2310,13 @@ def _chat_action_key(record: dict, review: object) -> str:
     "url": record.get("url"),
     "head_repository": record.get("head_repository") or plan.get("head_repository"),
     "branch": plan.get("branch") or record.get("branch"),
+    "base_branch": plan.get("base_branch"),
     "base": plan.get("base_sha"),
     "successor": plan.get("successor"),
     "head": plan.get("head_sha"),
+    "title": plan.get("title") or record.get("title"),
+    "body": plan.get("body_draft"),
+    "pr_metadata": plan.get("pr_metadata"),
     "attention": attention.get("key"),
     "needs_attention": record.get("needs_attention") is True,
     "submit_error": record.get("last_submit_error_code") or record.get("last_submit_error"),
@@ -1301,21 +2332,19 @@ def _contribution_chat_ids(record: dict) -> tuple[str, ...]:
   ``chat_id`` remains the creation/provenance owner. ``chat_ids`` is additive:
   an agent appends to it when a later chat refines the same review instead of
   creating a duplicate contribution. Keeping the primary id in the projection
-  preserves old records and expresses the real many-to-one relationship
-  without moving ownership away from the original conversation.
+  preserves old records and lets a bounded list express the real many-to-one
+  relationship without moving ownership away from the original conversation.
   """
   values: list[object] = [record.get("chat_id")]
   linked = record.get("chat_ids")
   if isinstance(linked, list):
-    values.extend(linked)
+    values.extend(linked[:32])
   chat_ids: list[str] = []
-  seen: set[str] = set()
   for value in values:
     if not isinstance(value, str):
       continue
     normalized = value.strip()
-    if normalized and normalized not in seen:
-      seen.add(normalized)
+    if normalized and normalized not in chat_ids:
       chat_ids.append(normalized)
   return tuple(chat_ids)
 
@@ -1344,7 +2373,10 @@ async def _chat_contribution_documents(
   settlement_path = _chat_settlement_path(app_id, chat_id)
   async with fs_locks.app_storage_lock(app_id):
     contribution_paths = (
-      tuple(contribution_dir.glob("*.json"))
+      tuple(
+        path for path in contribution_dir.glob("*.json")
+        if not path.name.startswith(".")
+      )
       if contribution_dir.exists()
       else ()
     )
@@ -1444,23 +2476,26 @@ def _chat_edit_instant_ms(value: object) -> int | None:
   return int(parsed.timestamp() * 1000)
 
 
-async def _recorded_chat_edits(db: Session, chat_id: str) -> list[dict]:
-  """Fence chat writes and return edit identity/path/timestamps, never bodies."""
-  from app.chat_transcript import materialized_messages
+async def _fence_chat_writes() -> None:
+  """Wait until the chat actor has committed every write accepted so far."""
   from app.chat_writer import ACK_TIMEOUT_SECS, Barrier, get_writer
 
-  get_active_chat_or_404(db, chat_id)
   try:
     await asyncio.to_thread(
       lambda: get_writer().submit(Barrier()).result(timeout=ACK_TIMEOUT_SECS)
     )
   except Exception as exc:
-    log.warning("contribution work barrier failed for chat %s: %s", chat_id, exc)
+    log.warning("contribution work barrier failed: %s", exc)
     raise HTTPException(
       status_code=503, detail="Chat changes are temporarily unavailable.",
     ) from exc
-  db.rollback()
-  chat = get_active_chat_or_404(db, chat_id)
+
+
+def _recorded_chat_edits_from_chat(db: Session, chat: models.Chat) -> list[dict]:
+  """Return edit identity/path/timestamps from one already-fenced chat."""
+  from app.chat_transcript import materialized_messages
+
+  chat_id = chat.id
   candidates: list[tuple[str, object, str, str | None]] = []
   full_ids: set[str] = set()
   for message_index, message in enumerate(materialized_messages(chat)):
@@ -1503,6 +2538,98 @@ async def _recorded_chat_edits(db: Session, chat_id: str) -> list[dict]:
   return entries
 
 
+def _source_chat_metadata(app_id: int, source_root: str) -> list[dict]:
+  """Discover source homes lazily without hydrating the general chat index."""
+  with SessionLocal() as db:
+    parents = dict(db.query(
+      models.Delegation.child_chat_id, models.Delegation.parent_chat_id,
+    ).filter(models.Delegation.child_chat_id.isnot(None)).all())
+
+    def source_home(chat_id: str) -> str:
+      seen = set()
+      while chat_id in parents and chat_id not in seen:
+        seen.add(chat_id)
+        chat_id = parents[chat_id]
+      return chat_id
+
+    latest = {}
+    # Server-derived source-work provenance survives a compacted transcript.
+    # The app-editable ledger cannot nominate unrelated chat titles to read.
+    work = db.query(
+      models.Delegation.parent_chat_id, models.Delegation.source_work_envelope,
+    ).filter(models.Delegation.source_work_context_app_id == app_id).yield_per(20)
+    for row in work:
+      envelope = row.source_work_envelope or {}
+      if source_root in envelope.get("project_roots", []):
+        latest.setdefault(source_home(row.parent_chat_id), None)
+    # The explicit picker is the expansion boundary. SQL first skips chats
+    # without edit previews; streaming bounds Python's transcript working set.
+    # Full sidecars remain authoritative even when a preview omitted a path.
+    candidates = db.query(models.Chat).options(load_only(
+      models.Chat.id, models.Chat.messages,
+    ), selectinload(models.Chat.live_snapshot)).filter(
+      models.Chat.deleted_at.is_(None),
+      or_(cast(models.Chat.messages, Text).contains('"edit_preview"'),
+          models.Chat.live_snapshot.has(
+            cast(models.ChatLiveAssistant.snapshot, Text).contains('"edit_preview"'))),
+    ).yield_per(20)
+    for chat in candidates:
+      for entry in _recorded_chat_edits_from_chat(db, chat):
+        if not any(contribution_work.project_root(path) == source_root
+                   for path in entry["paths"]):
+          continue
+        home = source_home(chat.id)
+        instant = _chat_edit_instant_ms(entry["ts"])
+        previous = latest.get(home)
+        latest[home] = max(previous or 0, instant or 0) or None
+    if not latest:
+      return []
+    rows = db.query(models.Chat.id, models.Chat.title).filter(
+      models.Chat.id.in_(latest), models.Chat.deleted_at.is_(None),
+    ).all()
+    rows.sort(key=lambda row: (-(latest[row.id] or 0), row.title.casefold(), row.id))
+    return [{
+      "chat_id": row.id, "title": row.title,
+      "last_edit_at": (datetime.fromtimestamp(latest[row.id] / 1000, UTC)
+                       .isoformat().replace("+00:00", "Z")) if latest[row.id] else None,
+    } for row in rows]
+
+
+@router.get("/contributions/{app_id}/source-chats")
+@_limiter.limit("20/minute")
+async def contribution_source_chats(
+  request: Request,
+  app_id: int,
+  project_key: str,
+  db: Session = Depends(get_db),
+  principal: Principal = Depends(get_principal),
+):
+  """Project-bound source chat names, never transcript, diff, or caller paths."""
+  _validate_submit_app(app_id, principal, db)
+  if project_key == "platform":
+    source_root = "/data/platform"
+  else:
+    match = re.fullmatch(r"app:([1-9][0-9]*)", project_key)
+    source = db.query(models.App).filter(
+      models.App.id == int(match.group(1)), models.App.deleted_at.is_(None),
+    ).first() if match else None
+    source_root = contribution_work.project_root(source.source_dir) if source else ""
+    if not source_root or source_root != source.source_dir.rstrip("/"):
+      raise HTTPException(404, "Source project not found.")
+  db.close()
+  await _fence_chat_writes()
+  return {"chats": await asyncio.to_thread(_source_chat_metadata, app_id, source_root)}
+
+
+async def _recorded_chat_edits(db: Session, chat_id: str) -> list[dict]:
+  """Fence chat writes and return edit identity/path/timestamps, never bodies."""
+  get_active_chat_or_404(db, chat_id)
+  await _fence_chat_writes()
+  db.rollback()
+  chat = get_active_chat_or_404(db, chat_id)
+  return _recorded_chat_edits_from_chat(db, chat)
+
+
 async def _chat_work_record_views(
   app_id: int, records: list[dict], github_state: dict,
 ) -> list[dict]:
@@ -1522,21 +2649,10 @@ async def _chat_work_record_views(
     if (
       record.get("status") == "prepared" or resumable_successor
     ) and not view["is_stack"]:
-      plan = record.get("plan") if isinstance(record.get("plan"), dict) else {}
       _, diff_path = _record_paths(app_id, str(record.get("id") or ""))
-      try:
-        repo = _safe_repo_path(plan.get("repo_path"))
-      except ContributionSubmitError as exc:
-        review = _review_status_problem(
-          str(record.get("id") or ""),
-          code=exc.code or "invalid_checkout",
-          detail=exc.message,
-        )
-      else:
-        async with fs_locks.source_dir_lock(str(repo)):
-          review = await asyncio.to_thread(
-            _inspect_prepared_review, record, diff_path, github_state,
-          )
+      review = await _inspect_prepared_review_locked(
+        record, diff_path, github_state,
+      )
     view["review"] = review
     view["action_key"] = _chat_action_key(record, review)
     views.append(view)
@@ -1679,8 +2795,6 @@ async def start_contribution_work(
     release_finished_source_work_slots(db, chat_id)
     source_active = _source_chat_is_active(db, chat_id)
 
-    # A retry names the exact terminal helper it supersedes. Validate that
-    # lineage before resolving the current matching selector below.
     if body.retry_of:
       previous = db.query(models.Delegation).filter(
         models.Delegation.source_work_id == body.retry_of,
@@ -1730,15 +2844,14 @@ async def start_contribution_work(
     # to the accepted intent rather than compete for another source lease.
     existing = None
     canonical_body = body
-    if not body.expected_revision:
-      active_row = db.query(models.Delegation).filter(
-        models.Delegation.parent_chat_id == chat_id,
-        models.Delegation.source_work_context_app_id == app_id,
-        models.Delegation.source_work_active_chat_id == chat_id,
-      ).first()
-      if active_row is not None and _unrevisioned_request_matches(active_row, body):
-        existing = active_row
-    else:
+    active_row = db.query(models.Delegation).filter(
+      models.Delegation.parent_chat_id == chat_id,
+      models.Delegation.source_work_context_app_id == app_id,
+      models.Delegation.source_work_active_chat_id == chat_id,
+    ).first()
+    if active_row is not None and _unrevisioned_request_matches(active_row, body):
+      existing = active_row
+    elif body.expected_revision:
       work_id = _contribution_work_request_id(app_id, chat_id, body)
       existing = db.query(models.Delegation).filter(
         models.Delegation.source_work_id == work_id,
@@ -1748,8 +2861,12 @@ async def start_contribution_work(
 
     snapshot = None
     if existing is None:
-      snapshot = await _contribution_work_snapshot(db, app_id, chat_id)
-      if not body.expected_revision:
+      # A visible revision already identifies the tap. While the source is
+      # active, do not make acceptance depend on a mutable source/ledger read;
+      # the durable selector binds once under the stable transition lock.
+      if not source_active or not body.expected_revision:
+        snapshot = await _contribution_work_snapshot(db, app_id, chat_id)
+      if not body.expected_revision and snapshot is not None:
         canonical_body = body.model_copy(update={
           "expected_revision": _work_revision(snapshot, body),
         })
@@ -1789,8 +2906,11 @@ async def start_contribution_work(
           status_code=409,
           detail="The Subagents app is required for background contribution work.",
         )
-      assert snapshot is not None
-      envelope = _work_envelope(chat_id, canonical_body, snapshot)
+      envelope = contribution_work.deferred_envelope(
+        chat_id, canonical_body,
+      ) if source_active else _work_envelope(
+        chat_id, canonical_body, snapshot,
+      )
       if not source_active and not _work_records_exist(snapshot, canonical_body):
         raise HTTPException(
           status_code=409,
@@ -1806,6 +2926,18 @@ async def start_contribution_work(
         source_chat.agent_settings_json,
         provider=provider,
       )
+      selection = providers.snapshot_chat_agent_settings(
+        get_settings().data_dir,
+        provider,
+        model=effective.get("model") or providers.DEFAULT_MODELS.get(provider),
+        effort=effective.get("effort") or providers.DEFAULT_EFFORT,
+        fallback_model=providers.DEFAULT_MODELS.get(provider),
+      )
+      if selection is None:
+        raise HTTPException(
+          status_code=409,
+          detail="Select a model for this chat before starting contribution work.",
+        )
       prompt = _contribution_work_prompt(envelope)
       intent = DelegationIntent(
         app_id=subagents_app.id,
@@ -1815,8 +2947,8 @@ async def start_contribution_work(
         task_key=f"contribution-{canonical_body.intent}-{work_id[:12]}",
         prompt=prompt,
         provider=provider,
-        model=effective.get("model"),
-        effort=effective.get("effort"),
+        model=selection["model"],
+        effort=selection.get("effort"),
         scope="write",
         cwd="/data",
         notify_parent_on_complete=False,
@@ -1874,7 +3006,7 @@ async def stop_contribution_work(
   db: Session = Depends(get_db),
   principal: Principal = Depends(get_principal),
 ):
-  """Stop the one active source-owned helper and release its source lease."""
+  """Stop the active source-owned helper and release its source lease."""
   _validate_submit_app(app_id, principal, db)
   if principal.app_id is not None:
     raise HTTPException(status_code=403, detail="Owner authority is required.")
@@ -1921,20 +3053,14 @@ def contribution_work_history(
   """All compact source-attached helper outcomes for one chat, newest first."""
   _validate_submit_app(app_id, principal, db)
   get_active_chat_or_404(db, chat_id)
-  query = db.query(models.Delegation).filter(
+  rows = db.query(models.Delegation).filter(
     models.Delegation.parent_chat_id == chat_id,
     models.Delegation.source_work_context_app_id == app_id,
     models.Delegation.source_work_id.is_not(None),
-  )
-  total = query.count()
-  rows = query.order_by(
+  ).order_by(
     models.Delegation.created_at.desc(), models.Delegation.id.desc(),
-  ).limit(100).all()
-  return {
-    "items": [serialize_source_work(db, row) for row in rows],
-    "total": total,
-    "truncated": total > len(rows),
-  }
+  ).all()
+  return {"items": [serialize_source_work(db, row) for row in rows]}
 
 
 @router.get("/contributions/{app_id}/for-chat/{chat_id}")
@@ -2007,21 +3133,10 @@ async def contributions_for_chat(
         if structural_problem is not None:
           review = {**structural_problem, "id": member_id}
         else:
-          plan = member.get("plan") if isinstance(member.get("plan"), dict) else {}
           _, diff_path = _record_paths(app_id, member_id)
-          try:
-            repo_path = _safe_repo_path(plan.get("repo_path"))
-          except ContributionSubmitError as exc:
-            review = _review_status_problem(
-              member_id,
-              code=exc.code or "invalid_checkout",
-              detail=exc.message,
-            )
-          else:
-            async with fs_locks.source_dir_lock(str(repo_path)):
-              review = await asyncio.to_thread(
-                _inspect_prepared_review, member, diff_path, github_state,
-              )
+          review = await _inspect_prepared_review_locked(
+            member, diff_path, github_state,
+          )
       view = _chat_review_projection(member, app_id)
       view["review"] = review
       view["action_key"] = _chat_action_key(member, review)
@@ -2047,21 +3162,10 @@ async def contributions_for_chat(
     if (
       record.get("status") == "prepared" or resumable_successor
     ) and not view["is_stack"]:
-      plan = record.get("plan") if isinstance(record.get("plan"), dict) else {}
       _, diff_path = _record_paths(app_id, str(record.get("id") or ""))
-      try:
-        repo = _safe_repo_path(plan.get("repo_path"))
-      except ContributionSubmitError as exc:
-        review = _review_status_problem(
-          str(record.get("id") or ""),
-          code=exc.code or "invalid_checkout",
-          detail=exc.message,
-        )
-      else:
-        async with fs_locks.source_dir_lock(str(repo)):
-          review = await asyncio.to_thread(
-            _inspect_prepared_review, record, diff_path, github_state,
-          )
+      review = await _inspect_prepared_review_locked(
+        record, diff_path, github_state,
+      )
     view["review"] = review
     view["action_key"] = _chat_action_key(record, review)
     projections.append(view)
@@ -2107,12 +3211,7 @@ async def contribution_coverage_for_chat(
   db: Session = Depends(get_db),
   principal: Principal = Depends(get_principal),
 ):
-  """Return exact coverage only for owner-supplied chat edit paths.
-
-  Lifecycle projections remain a 40-file display preview. This separate
-  bounded membership query reads every canonical diff path, but echoes no
-  record identity or source path the owner did not already request.
-  """
+  """Return exact record coverage for only owner-supplied chat edit paths."""
   _validate_submit_app(app_id, principal, db)
   if principal.scope != "owner":
     raise HTTPException(status_code=403, detail="Owner access required.")
@@ -2272,45 +3371,72 @@ async def submit_contribution(
   # connection. The nonce is rechecked inside the lock before the claim.
   db.close()
   async with fs_locks.app_storage_lock(app_id):
+    action_input = {
+      "action": "submit",
+      "publication_stage": (
+        body.publication_stage if body is not None else "draft"
+      ),
+      "autopilot": bool(body.autopilot) if body is not None else False,
+    }
+    existing_record_path, _ = _record_paths(app_id, record_id)
+    allow_resume = _personal_resume_allowed(
+      app_id=app_id, record_id=record_id, record_path=existing_record_path,
+      action_input=action_input,
+    )
+    attempt_owners, own_claim = _personal_claim_owners(
+      app_id=app_id, action_input=action_input,
+    )
+
     claimed, record_path, diff_path = _claim_record(
       app_id=app_id,
       record_id=record_id,
       db=db,
       expected_nonce=expected_nonce,
       submitter=body.submitter if body is not None else "contribute-button",
+      allow_personal_resume=allow_resume,
+      before_claim_write=own_claim,
     )
+    attempt_owner = attempt_owners[record_id]
+    publication_record = attempt_owner.recovery_record(claimed)
   # The durable claim is complete. Git/fork/GitHub work below can take tens of
   # seconds; return the checkout now and let each short nonce recheck lazily
   # acquire its own connection after the slow boundary.
   db.close()
 
   try:
-    plan = claimed.get("plan") or {}
+    plan = publication_record.get("plan") or {}
     repo_path = _safe_repo_path(plan.get("repo_path"))
     lock_paths = {str(repo_path)}
-    try:
-      equivalence_repos = _equivalence_source_repo(claimed)
-      if equivalence_repos is not None:
-        lock_paths.add(str(equivalence_repos[0]))
-    except Exception:
-      # An absent/legacy provenance destination must not block the reviewed PR.
-      pass
+    equivalence_repos = _equivalence_source_repo(publication_record)
+    if equivalence_repos is not None:
+      lock_paths.add(str(equivalence_repos[0]))
     async with AsyncExitStack() as source_locks:
       for lock_path in sorted(lock_paths):
         await source_locks.enter_async_context(
           fs_locks.source_dir_lock(lock_path)
         )
+      # Review status is advisory; the source can move after that GET. Repeat
+      # its exact proof under the same locks that cover the first public
+      # mutation so Send cannot publish a change absent from installed source.
+      await asyncio.to_thread(
+        _assert_personal_publication_source,
+        publication_record,
+        attempt_owner,
+      )
       pr_url, number, record_patch = await asyncio.to_thread(
         _submit_prepared_pr,
-        claimed,
+        publication_record,
         diff_path,
         publication_stage=(
           body.publication_stage if body is not None else "draft"
         ),
+        attempt_event=attempt_owner.event,
+        prior_attempt_phase=attempt_owner.replay_phase(),
+        prior_attempt_receipt=attempt_owner.receipt(),
       )
       try:
         await _record_pending_equivalence_locked(
-          {**claimed, **record_patch},
+          {**publication_record, **record_patch},
           already_locked=frozenset(lock_paths),
         )
       except Exception:
@@ -2326,6 +3452,18 @@ async def submit_contribution(
     async with fs_locks.app_storage_lock(app_id):
       _recheck_submit_app(db, app_id, expected_nonce)
       db.close()
+      try:
+        attempt_owner.assert_current()
+      except ContributionSubmitError:
+        current = _read_record(record_path)
+        raise HTTPException(
+          status_code=409,
+          detail={
+            "message": "This contribution changed during publication.",
+            "record": current,
+            "code": "publication_claim_changed",
+          },
+        ) from None
       record = _mark_submit_failure(
         app_id=app_id,
         record_path=record_path,
@@ -2334,6 +3472,8 @@ async def submit_contribution(
         code=exc.code or "",
         detail=exc.detail,
       )
+      if attempt_owner.replay_phase() == "armed":
+        attempt_owner.settle()
     raise HTTPException(
       status_code=exc.status_code,
       detail={
@@ -2349,9 +3489,23 @@ async def submit_contribution(
     async with fs_locks.app_storage_lock(app_id):
       _recheck_submit_app(db, app_id, expected_nonce)
       db.close()
+      try:
+        attempt_owner.assert_current()
+      except ContributionSubmitError:
+        current = _read_record(record_path)
+        raise HTTPException(
+          status_code=409,
+          detail={
+            "message": "This contribution changed during publication.",
+            "record": current,
+            "code": "publication_claim_changed",
+          },
+        ) from None
       record = _mark_submit_failure(
         app_id=app_id, record_path=record_path, message=message,
       )
+      if attempt_owner.replay_phase() == "armed":
+        attempt_owner.settle()
     raise HTTPException(
       status_code=500,
       detail={"message": message, "record": record},
@@ -2361,6 +3515,13 @@ async def submit_contribution(
     _recheck_submit_app(db, app_id, expected_nonce)
     db.close()
     current = _read_record(record_path)
+    try:
+      attempt_owner.assert_current()
+    except ContributionSubmitError:
+      raise HTTPException(
+        status_code=409,
+        detail="This contribution changed while the PR was being created; its signed recovery receipt was retained.",
+      ) from None
     if current.get("status") != "submitting":
       raise HTTPException(
         status_code=409,
@@ -2373,6 +3534,7 @@ async def submit_contribution(
       number=number,
       record_patch=record_patch,
     )
+    attempt_owner.settle()
 
   # Stamp the autopilot grant AFTER the PR is durably open. The grant is the
   # trust anchor for the background loop and lives in the DB (never the
@@ -2647,6 +3809,16 @@ async def update_existing_contribution(
     )
   db.close()
   async with fs_locks.app_storage_lock(app_id):
+    action_input = {"action": "update_existing"}
+    existing_record_path, _ = _record_paths(app_id, record_id)
+    allow_resume = _personal_resume_allowed(
+      app_id=app_id, record_id=record_id, record_path=existing_record_path,
+      action_input=action_input,
+    )
+    attempt_owners, own_claim = _personal_claim_owners(
+      app_id=app_id, action_input=action_input,
+    )
+
     claimed, record_path, diff_path = _claim_record(
       app_id=app_id,
       record_id=record_id,
@@ -2654,11 +3826,21 @@ async def update_existing_contribution(
       expected_nonce=expected_nonce,
       submitter="contribute-update-button",
       expected_action="pr_update",
+      allow_personal_resume=allow_resume,
+      before_claim_write=own_claim,
+    )
+    attempt_owner = attempt_owners[record_id]
+    publication_record = attempt_owner.recovery_record(claimed)
+    successor = isinstance(
+      (claimed.get("plan") or {}).get("successor"), dict,
     )
   db.close()
 
   try:
-    repo, number, head_repository, branch = _prepared_existing_pr_target(claimed)
+    attempt_owner.assert_current()
+    repo, number, head_repository, branch = _prepared_existing_pr_target(
+      publication_record
+    )
     live_target = await asyncio.to_thread(
       _autopilot_live_target,
       repo,
@@ -2670,32 +3852,50 @@ async def update_existing_contribution(
     if target_error:
       raise ContributionSubmitError(
         "The open pull request changed since this update was prepared. Nothing was pushed.",
+        code="review_refresh_needed",
         detail=target_error,
       )
+    _assert_reviewed_existing_pr_metadata(
+      publication_record,
+      live_title=live_target.get("title"),
+      live_body=live_target.get("body"),
+    )
 
-    plan = claimed.get("plan") or {}
+    plan = publication_record.get("plan") or {}
     repo_path = _safe_repo_path(plan.get("repo_path"))
     lock_paths = {str(repo_path)}
-    try:
-      equivalence_repos = _equivalence_source_repo(claimed)
-      if equivalence_repos is not None:
-        lock_paths.add(str(equivalence_repos[0]))
-    except Exception:
-      pass
+    equivalence_repos = _equivalence_source_repo(publication_record)
+    if equivalence_repos is not None:
+      lock_paths.add(str(equivalence_repos[0]))
     async with AsyncExitStack() as source_locks:
       for lock_path in sorted(lock_paths):
         await source_locks.enter_async_context(
           fs_locks.source_dir_lock(lock_path)
         )
+      await asyncio.to_thread(
+        _assert_personal_publication_source,
+        publication_record,
+        attempt_owner,
+      )
       if isinstance(plan.get("successor"), dict):
+        successor_request = {
+          "action": "advance_successor",
+          "repo": repo,
+          "number": number,
+          "head_repository": head_repository,
+          "branch": branch,
+          "head_sha": str(plan.get("head_sha") or ""),
+          "successor": plan.get("successor"),
+        }
         pr_url, returned_number, record_patch = await asyncio.to_thread(
           _advance_merged_parent_successor,
-          claimed,
+          publication_record,
           diff_path,
           expected_number=number,
           expected_head_repository=head_repository,
           live_head_sha=str(live_target.get("head_sha") or ""),
           live_base_branch=str(live_target.get("base_branch") or ""),
+          attempt_event=attempt_owner.event,
         )
         # The state machine owns both public mutations, but the route must not
         # settle its durable claim from a returned success alone. Re-read the
@@ -2745,6 +3945,8 @@ async def update_existing_contribution(
             ),
             record_patch=unconfirmed_patch,
           )
+        attempt_owner.event("complete", successor_request, record_patch)
+
       else:
         _assert_reviewed_update_contains_live_head(
           repo_path,
@@ -2753,11 +3955,15 @@ async def update_existing_contribution(
         )
         pr_url, returned_number, record_patch = await asyncio.to_thread(
           _submit_prepared_pr,
-          claimed,
+          publication_record,
           diff_path,
           direct_base_branch=str(live_target.get("base_branch") or ""),
           expected_existing_pr_number=number,
           expected_existing_head_repository=head_repository,
+          expected_existing_head_sha=str(live_target.get("head_sha") or ""),
+          attempt_event=attempt_owner.event,
+          prior_attempt_phase=attempt_owner.replay_phase(),
+          prior_attempt_receipt=attempt_owner.receipt(),
         )
       if returned_number != number:
         raise ContributionSubmitError(
@@ -2765,7 +3971,7 @@ async def update_existing_contribution(
         )
       try:
         await _record_pending_equivalence_locked(
-          {**claimed, **(record_patch or {})},
+          {**publication_record, **(record_patch or {})},
           already_locked=frozenset(lock_paths),
         )
       except Exception:
@@ -2776,9 +3982,33 @@ async def update_existing_contribution(
           exc_info=True,
         )
   except ContributionSubmitError as exc:
+    if (
+      isinstance((claimed.get("plan") or {}).get("successor"), dict)
+      and exc.code in {"update_unconfirmed", "landing_unconfirmed"}
+    ):
+      try:
+        attempt_owner.event(
+          "pr_ambiguous",
+          locals().get("successor_request", {"action": "advance_successor"}),
+          exc.record_patch,
+        )
+      except ContributionSubmitError:
+        pass
     async with fs_locks.app_storage_lock(app_id):
       _recheck_submit_app(db, app_id, expected_nonce)
       db.close()
+      try:
+        attempt_owner.assert_current()
+      except ContributionSubmitError:
+        current = _read_record(record_path)
+        raise HTTPException(
+          status_code=409,
+          detail={
+            "message": "This contribution changed during its PR update.",
+            "record": current,
+            "code": "publication_claim_changed",
+          },
+        ) from None
       successor = isinstance((claimed.get("plan") or {}).get("successor"), dict)
       if (
         successor
@@ -2801,6 +4031,8 @@ async def update_existing_contribution(
           code=exc.code or "",
           detail=exc.detail,
         )
+        if attempt_owner.replay_phase() == "armed":
+          attempt_owner.settle()
     raise HTTPException(
       status_code=exc.status_code,
       detail={
@@ -2812,7 +4044,6 @@ async def update_existing_contribution(
     )
   except Exception as exc:
     log.exception("Contribution update failed for %s/%s", app_id, record_id)
-    successor = isinstance((claimed.get("plan") or {}).get("successor"), dict)
     message = (
       "GitHub did not confirm whether this reviewed successor update completed."
       if successor else
@@ -2821,6 +4052,18 @@ async def update_existing_contribution(
     async with fs_locks.app_storage_lock(app_id):
       _recheck_submit_app(db, app_id, expected_nonce)
       db.close()
+      try:
+        attempt_owner.assert_current()
+      except ContributionSubmitError:
+        current = _read_record(record_path)
+        raise HTTPException(
+          status_code=409,
+          detail={
+            "message": "This contribution changed during its PR update.",
+            "record": current,
+            "code": "publication_claim_changed",
+          },
+        ) from None
       record = (
         _note_submit_unconfirmed(
           record_path=record_path,
@@ -2835,6 +4078,7 @@ async def update_existing_contribution(
           record_path=record_path,
           message=message,
         )
+
       )
     raise HTTPException(
       status_code=500,
@@ -2845,6 +4089,13 @@ async def update_existing_contribution(
     _recheck_submit_app(db, app_id, expected_nonce)
     db.close()
     current = _read_record(record_path)
+    try:
+      attempt_owner.assert_current()
+    except ContributionSubmitError:
+      raise HTTPException(
+        status_code=409,
+        detail="This contribution changed while its PR was updating; the signed recovery receipt was retained.",
+      ) from None
     if current.get("status") != "submitting":
       raise HTTPException(
         status_code=409,
@@ -2857,6 +4108,7 @@ async def update_existing_contribution(
       number=number,
       record_patch=record_patch,
     )
+    attempt_owner.settle()
 
   pushed_head = str(
     (record_patch or {}).get("last_submit_push_sha")
@@ -2887,6 +4139,111 @@ async def update_existing_contribution(
   return {"record": updated, "url": pr_url, "number": number}
 
 
+def _stack_publication_lock_paths(rows: list[dict]) -> list[str]:
+  """Canonical review/source locks needed by the stack's private layers."""
+  paths: set[str] = set()
+  for row in rows:
+    record = row["record"]
+    if record.get("status") != "submitting":
+      continue
+    plan = record.get("plan") or {}
+    paths.add(str(_safe_repo_path(plan.get("repo_path"))))
+    repos = _equivalence_source_repo(record)
+    if repos is not None:
+      paths.add(str(repos[0]))
+  return sorted(paths)
+
+
+@asynccontextmanager
+async def _stack_publication_source_locks(rows: list[dict]):
+  """Hold stack source locks without ever nesting the app-storage lock."""
+  async with AsyncExitStack() as locks:
+    for path in _stack_publication_lock_paths(rows):
+      await locks.enter_async_context(fs_locks.source_dir_lock(path))
+    yield
+
+
+@router.get("/contributions/{app_id}/assignees")
+async def contribution_assignees(
+  app_id: int, repo: str, page: int = 1,
+  db: Session = Depends(get_db),
+  principal: Principal = Depends(get_principal),
+):
+  """Read repository-owned assignment choices and the viewer's authority."""
+  _validate_submit_app(app_id, principal, db)
+  db.close()
+  try:
+    repo = _validate_repo_slug(repo)
+  except ContributionSubmitError as exc:
+    raise HTTPException(status_code=422, detail=exc.message) from exc
+  if page < 1:
+    raise HTTPException(status_code=422, detail="Choose a valid page.")
+  if not (github_auth.read_state() or {}).get("token"):
+    raise HTTPException(status_code=409, detail="Connect GitHub first.")
+  try:
+    return await asyncio.to_thread(
+      contribution_assignments.list_assignees, _gh,
+      Path(get_settings().data_dir) / "platform", repo, page,
+    )
+  except ContributionSubmitError as exc:
+    raise HTTPException(status_code=409, detail=exc.message) from exc
+  except Exception as exc:
+    log.warning("Could not load assignment choices for %s", repo, exc_info=True)
+    raise HTTPException(status_code=502, detail="GitHub could not load repository access. Try again.") from exc
+
+
+@router.post(
+  "/contributions/{app_id}/assign-review",
+  dependencies=[Depends(reject_cross_site)],
+)
+@_limiter.limit("10/minute")
+async def assign_contribution_review(
+  request: Request,
+  app_id: int,
+  body: ContributionAssignReviewBody,
+  db: Session = Depends(get_db),
+  principal: Principal = Depends(get_principal),
+):
+  """Add one GitHub-eligible assignee to an open PR, defaulting to self."""
+  expected_nonce = _validate_submit_app(app_id, principal, db)
+  db.close()
+  try:
+    repo = _validate_repo_slug(body.repo)
+  except ContributionSubmitError as exc:
+    raise HTTPException(status_code=422, detail=exc.message) from exc
+  if body.number < 1:
+    raise HTTPException(status_code=422, detail="Choose a valid pull request.")
+  state = github_auth.read_state() or {}
+  login = str(state.get("login") or "").strip()
+  if not state.get("token") or not login:
+    raise HTTPException(status_code=409, detail="Connect GitHub first.")
+  def recheck_authority():
+    with SessionLocal() as write_db:
+      _recheck_submit_app(write_db, app_id, expected_nonce)
+      _require_github_access_principal(principal, write_db)
+
+  try:
+    result = await asyncio.to_thread(
+      contribution_assignments.assign_pull_request, _gh,
+      Path(get_settings().data_dir) / "platform", repo, body.number,
+      body.assignee if body.assignee is not None else login, body.expected_head_sha,
+      recheck_authority,
+    )
+  except HTTPException:
+    raise
+  except contribution_assignments.AssignmentError as exc:
+    raise HTTPException(status_code=exc.status, detail=exc.message) from exc
+  except ContributionSubmitError as exc:
+    raise HTTPException(status_code=409, detail=exc.message) from exc
+  except Exception as exc:
+    log.warning("Could not assign review %s#%s", repo, body.number, exc_info=True)
+    raise HTTPException(
+      status_code=502,
+      detail="GitHub could not assign this review. Check your repository access.",
+    ) from exc
+  return result
+
+
 @router.post(
   "/contributions/{app_id}/update-stack",
   dependencies=[
@@ -2902,13 +4259,15 @@ async def update_contribution_stack(
   db: Session = Depends(get_db),
   principal: Principal = Depends(get_principal),
 ):
-  """Fast-forward one complete, reviewed chain of already-open PRs.
+  """Advance one complete, reviewed chain of already-open PRs.
 
   Stack members cannot use the standalone update route because advancing a
   parent changes the commit exposed through every child's base branch. Claim
   the immutable chain once, then update parent-first so each child is verified
-  against the parent GitHub now exposes. Successful parents remain durable if
-  a later layer fails; every untouched child returns to prepared review.
+  against the parent GitHub now exposes. Roots remain fast-forward-only; a
+  reviewed child may restack only while exact public-head and parent leases
+  still hold. Successful parents remain durable if a later layer fails; every
+  untouched child returns to prepared review.
   """
   expected_nonce = _validate_submit_app(app_id, principal, db)
   from app import contribution_autopilot as autopilot
@@ -2928,6 +4287,20 @@ async def update_contribution_stack(
       )
   db.close()
   async with fs_locks.app_storage_lock(app_id):
+    action_input = {"action": "update_stack", "record_ids": body.record_ids}
+    for cleanup_id in body.record_ids:
+      cleanup_path, _ = _record_paths(app_id, cleanup_id)
+      _cleanup_durable_complete_attempt(
+        cleanup_path, app_id=app_id, record_id=cleanup_id,
+      )
+      _personal_resume_allowed(
+        app_id=app_id, record_id=cleanup_id, record_path=cleanup_path,
+        action_input=action_input,
+      )
+    attempt_owners, own_stack_claim = _personal_claim_owners(
+      app_id=app_id, action_input=action_input,
+    )
+
     rows = _claim_stack_records(
       app_id=app_id,
       record_ids=body.record_ids,
@@ -2938,38 +4311,46 @@ async def update_contribution_stack(
       # explicitly reviewed `pr_update`.
       allowed_actions=_PREPARED_PR_ACTIONS,
       prepared_actions=frozenset({"pr_update"}),
+      deferred_prepared_actions=frozenset({"pr"}),
       submitter="contribute-stack-update-button",
       already_detail="Every PR in this stack already has the reviewed update.",
+      before_claim_write=own_stack_claim,
     )
+    for row in rows:
+      if row["record"].get("status") == "submitting":
+        row["record"] = attempt_owners[
+          str(row["record"].get("id") or "")
+        ].recovery_record(row["record"])
   db.close()
   updated_rows = []
 
   try:
-    lock_paths = {
-      str(_safe_repo_path((row["record"].get("plan") or {}).get("repo_path")))
-      for row in rows
-      if row["record"].get("status") == "submitting"
-    }
-    for row in rows:
-      try:
-        repos = _equivalence_source_repo(row["record"])
-        if repos is not None:
-          lock_paths.add(str(repos[0]))
-      except Exception:
-        pass
-    repo_paths = sorted(lock_paths)
-    async with AsyncExitStack() as source_locks:
-      for repo_path in repo_paths:
-        await source_locks.enter_async_context(
-          fs_locks.source_dir_lock(repo_path)
-        )
-      await asyncio.to_thread(_preflight_prepared_stack, rows)
+    # Prove the complete chain before its first mutation, then release every
+    # source lock before any durable ledger write. Each layer repeats its own
+    # proof while holding its source through the public mutation; this preserves
+    # partial parent success without reversing app -> source lock order.
+    async with _stack_publication_source_locks(rows):
+      await asyncio.to_thread(
+        _preflight_prepared_stack,
+        rows,
+        source_preflight=lambda record: _assert_personal_publication_source(
+          record, attempt_owners[str(record.get("id") or "")],
+        ),
+      )
 
-      for row in rows:
-        record = row["record"]
-        if record.get("status") != "submitting":
-          continue
-        try:
+    for row in rows:
+      record = row["record"]
+      if record.get("status") != "submitting":
+        continue
+      try:
+        attempt_owner = attempt_owners[str(record.get("id") or "")]
+        row_lock_paths = _stack_publication_lock_paths([row])
+        async with _stack_publication_source_locks([row]):
+          await asyncio.to_thread(
+            _assert_personal_publication_source,
+            record,
+            attempt_owner,
+          )
           repo, number, head_repository, branch = _prepared_existing_pr_target(record)
           live_target = await asyncio.to_thread(
             _autopilot_live_target,
@@ -2986,9 +4367,34 @@ async def update_contribution_stack(
               code="review_refresh_needed",
               detail=target_error,
             )
+          _assert_reviewed_existing_pr_metadata(
+            record,
+            live_title=live_target.get("title"),
+            live_body=live_target.get("body"),
+          )
           plan = record.get("plan") or {}
           repo_path = _safe_repo_path(plan.get("repo_path"))
-          _assert_reviewed_update_contains_live_head(
+          live_base_branch = str(live_target.get("base_branch") or "")
+          live_base_sha = ""
+          if int(row["stack"].get("position") or 0) > 1:
+            try:
+              live_base_sha = str(
+                _upstream_branch_sha(repo_path, repo, live_base_branch) or ""
+              )
+            except (ContributionSubmitError, subprocess.TimeoutExpired, OSError):
+              live_base_sha = ""
+            if not live_base_sha:
+              raise ContributionSubmitError(
+                "GitHub could not verify the current stack base. Nothing was "
+                "pushed for this layer.",
+                code="review_refresh_needed",
+                detail="The current base branch tip could not be verified.",
+              )
+          branch_lease_sha = _reviewed_stack_update_lease(
+            record,
+            row["stack"],
+            live_base_branch,
+            live_base_sha,
             repo_path,
             str(live_target.get("head_sha") or ""),
             str(plan.get("head_sha") or ""),
@@ -2997,9 +4403,20 @@ async def update_contribution_stack(
             _submit_prepared_pr,
             record,
             row["diff_path"],
-            direct_base_branch=str(live_target.get("base_branch") or ""),
+            direct_base_branch=live_base_branch,
             expected_existing_pr_number=number,
             expected_existing_head_repository=head_repository,
+            expected_existing_head_sha=str(live_target.get("head_sha") or ""),
+            expected_existing_base_sha=(
+              str(plan.get("base_sha") or "")
+              if int(row["stack"].get("position") or 0) > 1
+              else None
+            ),
+            existing_branch_lease_sha=branch_lease_sha,
+            attempt_event=attempt_owner.event,
+            prior_attempt_phase=attempt_owner.replay_phase(),
+            prior_attempt_receipt=attempt_owner.receipt(),
+
           )
           if returned_number != number:
             raise ContributionSubmitError(
@@ -3008,7 +4425,7 @@ async def update_contribution_stack(
           try:
             await _record_pending_equivalence_locked(
               {**record, **(record_patch or {})},
-              already_locked=frozenset(repo_paths),
+              already_locked=frozenset(row_lock_paths),
             )
           except Exception:
             log.warning(
@@ -3017,79 +4434,104 @@ async def update_contribution_stack(
               record.get("id"),
               exc_info=True,
             )
-        except ContributionSubmitError as exc:
-          async with fs_locks.app_storage_lock(app_id):
-            _recheck_submit_app(db, app_id, expected_nonce)
-            db.close()
-            snapshots = _mark_stack_submit_failure(
-              rows,
-              exc.message,
-              failed_id=str(record.get("id") or ""),
-              record_patch=exc.record_patch,
-              code=exc.code or "",
-              detail=exc.detail,
-            )
-          raise HTTPException(
-            status_code=exc.status_code,
-            detail={
-              "message": exc.message,
-              "detail": exc.detail,
-              "records": snapshots,
-              "updated": updated_rows,
-              **({"code": exc.code} if exc.code else {}),
-            },
-          ) from exc
-
+      except ContributionSubmitError as exc:
         async with fs_locks.app_storage_lock(app_id):
           _recheck_submit_app(db, app_id, expected_nonce)
           db.close()
-          current = _read_record(row["record_path"])
-          if current.get("status") != "submitting":
-            raise ContributionSubmitError(
-              "This PR stack changed while it was being updated."
-            )
-          updated = _mark_existing_pr_update_success(
-            record_path=row["record_path"],
-            record=current,
-            pr_url=pr_url,
-            number=number,
-            record_patch=record_patch,
-          )
-        updated_rows.append({
-          "id": updated.get("id"),
-          "url": pr_url,
-          "number": number,
-        })
-        pushed_head = str(
-          (record_patch or {}).get("last_submit_push_sha")
-          or ((updated.get("plan") or {}).get("head_sha"))
-          or ""
-        )
-        if pushed_head:
           try:
-            if autopilot.refresh_granted_head(
-              db,
+            attempt_owner.assert_current()
+          except ContributionSubmitError:
+            current = _read_record(row["record_path"])
+            raise HTTPException(
+              status_code=409,
+              detail={
+                "message": "A PR stack record changed during publication.",
+                "record": current,
+                "code": "publication_claim_changed",
+              },
+            ) from None
+          _assert_active_stack_attempts_current(attempt_owners)
+          snapshots = _mark_stack_submit_failure(
+            rows,
+            exc.message,
+            failed_id=str(record.get("id") or ""),
+            record_patch=exc.record_patch,
+            code=exc.code or "",
+            detail=exc.detail,
+          )
+          for active_owner in attempt_owners.values():
+            if active_owner.replay_phase() == "armed":
+              active_owner.settle()
+        raise HTTPException(
+          status_code=exc.status_code,
+          detail={
+            "message": exc.message,
+            "detail": exc.detail,
+            "records": snapshots,
+            "updated": updated_rows,
+            **({"code": exc.code} if exc.code else {}),
+          },
+        ) from exc
+
+      async with fs_locks.app_storage_lock(app_id):
+        _recheck_submit_app(db, app_id, expected_nonce)
+        db.close()
+        current = _read_record(row["record_path"])
+        try:
+          attempt_owner.assert_current()
+        except ContributionSubmitError:
+          raise HTTPException(
+            status_code=409,
+            detail="A PR stack record changed; its signed recovery receipt was retained.",
+          ) from None
+        if current.get("status") != "submitting":
+          raise ContributionSubmitError(
+            "This PR stack changed while it was being updated."
+          )
+        updated = _mark_existing_pr_update_success(
+          record_path=row["record_path"],
+          record=current,
+          pr_url=pr_url,
+          number=number,
+          record_patch=record_patch,
+        )
+        attempt_owner.settle()
+      updated_rows.append({
+        "id": updated.get("id"),
+        "url": pr_url,
+        "number": number,
+      })
+      pushed_head = str(
+        (record_patch or {}).get("last_submit_push_sha")
+        or ((updated.get("plan") or {}).get("head_sha"))
+        or ""
+      )
+      if pushed_head:
+        try:
+          if autopilot.refresh_granted_head(
+            db,
+            app_id,
+            str(updated.get("id") or ""),
+            head_sha=pushed_head,
+          ):
+            await autopilot.mirror_to_ledger(
               app_id,
               str(updated.get("id") or ""),
-              head_sha=pushed_head,
-            ):
-              await autopilot.mirror_to_ledger(
-                app_id,
-                str(updated.get("id") or ""),
-              )
-          except Exception:
-            log.warning(
-              "autopilot grant refresh failed after stack update %s/%s",
-              app_id,
-              updated.get("id"),
-              exc_info=True,
             )
+        except Exception:
+          log.warning(
+            "autopilot grant refresh failed after stack update %s/%s",
+            app_id,
+            updated.get("id"),
+            exc_info=True,
+          )
   except HTTPException:
     raise
   except ContributionSubmitError as exc:
     async with fs_locks.app_storage_lock(app_id):
       _recheck_submit_app(db, app_id, expected_nonce)
       db.close()
+      _assert_active_stack_attempts_current(attempt_owners)
       snapshots = _mark_stack_submit_failure(
         rows,
         exc.message,
@@ -3097,6 +4539,9 @@ async def update_contribution_stack(
         code=exc.code or "",
         detail=exc.detail,
       )
+      for active_owner in attempt_owners.values():
+        if active_owner.replay_phase() == "armed":
+          active_owner.settle()
     raise HTTPException(
       status_code=exc.status_code,
       detail={
@@ -3113,6 +4558,7 @@ async def update_contribution_stack(
     async with fs_locks.app_storage_lock(app_id):
       _recheck_submit_app(db, app_id, expected_nonce)
       db.close()
+      _assert_active_stack_attempts_current(attempt_owners)
       snapshots = _mark_stack_submit_failure(rows, message)
     raise HTTPException(
       status_code=500,
@@ -3152,109 +4598,159 @@ async def submit_contribution_stack(
   expected_nonce = _validate_submit_app(app_id, principal, db)
   db.close()
   async with fs_locks.app_storage_lock(app_id):
+    action_input = {
+      "action": "submit_stack", "record_ids": body.record_ids,
+      "publication_stage": body.publication_stage,
+    }
+    for cleanup_id in body.record_ids:
+      cleanup_path, _ = _record_paths(app_id, cleanup_id)
+      _cleanup_durable_complete_attempt(
+        cleanup_path, app_id=app_id, record_id=cleanup_id,
+      )
+      _personal_resume_allowed(
+        app_id=app_id, record_id=cleanup_id, record_path=cleanup_path,
+        action_input=action_input,
+      )
+    attempt_owners, own_stack_claim = _personal_claim_owners(
+      app_id=app_id, action_input=action_input,
+    )
+
     rows = _claim_stack_records(
       app_id=app_id,
       record_ids=body.record_ids,
       db=db,
       expected_nonce=expected_nonce,
+      allowed_actions=_PREPARED_PR_ACTIONS,
+      prepared_actions=frozenset({"pr"}),
+      before_claim_write=own_stack_claim,
     )
+    for row in rows:
+      if row["record"].get("status") == "submitting":
+        row["record"] = attempt_owners[
+          str(row["record"].get("id") or "")
+        ].recovery_record(row["record"])
   # Every private layer now has a durable `submitting` claim. The remaining
   # preflight and GitHub operations are slow and own no database state.
   db.close()
 
   try:
-    lock_paths = {
-      str(_safe_repo_path((row["record"].get("plan") or {}).get("repo_path")))
-      for row in rows
-      if row["record"].get("status") == "submitting"
-    }
-    for row in rows:
-      try:
-        repos = _equivalence_source_repo(row["record"])
-        if repos is not None:
-          lock_paths.add(str(repos[0]))
-      except Exception:
-        pass
-    repo_paths = sorted(lock_paths)
-    async with AsyncExitStack() as source_locks:
-      for repo_path in repo_paths:
-        await source_locks.enter_async_context(
-          fs_locks.source_dir_lock(repo_path)
-        )
-      await asyncio.to_thread(_preflight_prepared_stack, rows)
+    async with _stack_publication_source_locks(rows):
+      await asyncio.to_thread(
+        _preflight_prepared_stack,
+        rows,
+        source_preflight=lambda record: _assert_personal_publication_source(
+          record, attempt_owners[str(record.get("id") or "")],
+        ),
+      )
 
-      submitted_urls = []
-      for row in rows:
-        record = row["record"]
-        if record.get("status") != "submitting":
-          continue
-        try:
+    submitted_urls = []
+    for row in rows:
+      record = row["record"]
+      if record.get("status") != "submitting":
+        continue
+      try:
+        attempt_owner = attempt_owners[str(record.get("id") or "")]
+        row_lock_paths = _stack_publication_lock_paths([row])
+        async with _stack_publication_source_locks([row]):
+          await asyncio.to_thread(
+            _assert_personal_publication_source,
+            record,
+            attempt_owner,
+          )
           pr_url, number, record_patch = await asyncio.to_thread(
             _submit_prepared_pr,
             record,
             row["diff_path"],
             direct_base_branch=row["stack"]["base_branch"],
             publication_stage=body.publication_stage,
+            attempt_event=attempt_owner.event,
+            prior_attempt_phase=attempt_owner.replay_phase(),
+            prior_attempt_receipt=attempt_owner.receipt(),
           )
           try:
             await _record_pending_equivalence_locked(
               {**record, **record_patch},
-              already_locked=frozenset(repo_paths),
+              already_locked=frozenset(row_lock_paths),
             )
           except Exception:
             log.warning(
               "stack contribution equivalence witness failed %s/%s",
               app_id, record.get("id"), exc_info=True,
             )
-        except ContributionSubmitError as exc:
-          async with fs_locks.app_storage_lock(app_id):
-            _recheck_submit_app(db, app_id, expected_nonce)
-            db.close()
-            snapshots = _mark_stack_submit_failure(
-              rows,
-              exc.message,
-              failed_id=str(record.get("id") or ""),
-              record_patch=exc.record_patch,
-              code=exc.code or "",
-              detail=exc.detail,
-            )
-          raise HTTPException(
-            status_code=exc.status_code,
-            detail={
-              "message": exc.message,
-              "detail": exc.detail,
-              "records": snapshots,
-              "submitted": submitted_urls,
-              **({"code": exc.code} if exc.code else {}),
-            },
-          ) from exc
-
+      except ContributionSubmitError as exc:
         async with fs_locks.app_storage_lock(app_id):
           _recheck_submit_app(db, app_id, expected_nonce)
           db.close()
-          current = _read_record(row["record_path"])
-          if current.get("status") != "submitting":
-            raise ContributionSubmitError(
-              "This PR stack changed while it was being published."
-            )
-          opened = _mark_submit_success(
-            record_path=row["record_path"],
-            record=current,
-            pr_url=pr_url,
-            number=number,
-            record_patch=record_patch,
+          try:
+            attempt_owner.assert_current()
+          except ContributionSubmitError:
+            current = _read_record(row["record_path"])
+            raise HTTPException(
+              status_code=409,
+              detail={
+                "message": "A PR stack record changed during publication.",
+                "record": current,
+                "code": "publication_claim_changed",
+              },
+            ) from None
+          _assert_active_stack_attempts_current(attempt_owners)
+          snapshots = _mark_stack_submit_failure(
+            rows,
+            exc.message,
+            failed_id=str(record.get("id") or ""),
+            record_patch=exc.record_patch,
+            code=exc.code or "",
+            detail=exc.detail,
           )
-        submitted_urls.append({
-          "id": opened.get("id"),
-          "url": pr_url,
-          "number": number,
-        })
+          for active_owner in attempt_owners.values():
+            if active_owner.replay_phase() == "armed":
+              active_owner.settle()
+        raise HTTPException(
+          status_code=exc.status_code,
+          detail={
+            "message": exc.message,
+            "detail": exc.detail,
+            "records": snapshots,
+            "submitted": submitted_urls,
+            **({"code": exc.code} if exc.code else {}),
+          },
+        ) from exc
+
+      async with fs_locks.app_storage_lock(app_id):
+        _recheck_submit_app(db, app_id, expected_nonce)
+        db.close()
+        current = _read_record(row["record_path"])
+        try:
+          attempt_owner.assert_current()
+        except ContributionSubmitError:
+          raise HTTPException(
+            status_code=409,
+            detail="A PR stack record changed; its signed recovery receipt was retained.",
+          ) from None
+        if current.get("status") != "submitting":
+          raise ContributionSubmitError(
+            "This PR stack changed while it was being published."
+          )
+        opened = _mark_submit_success(
+          record_path=row["record_path"],
+          record=current,
+          pr_url=pr_url,
+          number=number,
+          record_patch=record_patch,
+        )
+        attempt_owner.settle()
+      submitted_urls.append({
+        "id": opened.get("id"),
+        "url": pr_url,
+        "number": number,
+      })
   except HTTPException:
     raise
   except ContributionSubmitError as exc:
     async with fs_locks.app_storage_lock(app_id):
       _recheck_submit_app(db, app_id, expected_nonce)
       db.close()
+      _assert_active_stack_attempts_current(attempt_owners)
       snapshots = _mark_stack_submit_failure(
         rows,
         exc.message,
@@ -3262,6 +4758,9 @@ async def submit_contribution_stack(
         code=exc.code or "",
         detail=exc.detail,
       )
+      for active_owner in attempt_owners.values():
+        if active_owner.replay_phase() == "armed":
+          active_owner.settle()
     raise HTTPException(
       status_code=exc.status_code,
       detail={
@@ -3277,6 +4776,7 @@ async def submit_contribution_stack(
     async with fs_locks.app_storage_lock(app_id):
       _recheck_submit_app(db, app_id, expected_nonce)
       db.close()
+      _assert_active_stack_attempts_current(attempt_owners)
       snapshots = _mark_stack_submit_failure(rows, message)
     raise HTTPException(
       status_code=500,
@@ -3329,12 +4829,9 @@ async def land_contribution_stack(
       for row in rows
     }
     for row in rows:
-      try:
-        repos = _equivalence_source_repo(row["record"])
-        if repos is not None:
-          lock_paths.add(str(repos[0]))
-      except Exception:
-        pass
+      repos = _equivalence_source_repo(row["record"])
+      if repos is not None:
+        lock_paths.add(str(repos[0]))
     repo_paths = sorted(lock_paths)
     async with AsyncExitStack() as source_locks:
       for repo_path in repo_paths:
@@ -3349,6 +4846,14 @@ async def land_contribution_stack(
           _reconcile_stack_landing, rows,
         )
       else:
+        # Landing is the final code mutation. A source revert after Send must
+        # not reintroduce reviewed behavior that the installed source no longer
+        # contains, so repeat the exact proof under the same complete lock set.
+        for row in rows:
+          await asyncio.to_thread(
+            _assert_pending_equivalence_preflight,
+            row["record"],
+          )
         target_branch, landed_sha = await asyncio.to_thread(
           _land_reviewed_stack, rows,
         )
@@ -3425,6 +4930,66 @@ async def land_contribution_stack(
   }
 
 
+def _relay_merge_authority(
+  app_id: int, record_id: str, record: dict,
+) -> tuple[bool, str | None, str | None]:
+  """Return a relay record's signed terminal state and merge identity."""
+  relay_record = (
+    record.get("submission_mode") == "mobius-bot"
+    or record.get("public_identity") == "anonymous"
+    or any(str(key).startswith("relay_") for key in record)
+  )
+  if not relay_record:
+    return False, None, None
+  merge_commit_sha = str(record.get("merge_commit_sha") or "")
+  terminal_status = str(record.get("relay_terminal_status") or "")
+  if not terminal_status and not merge_commit_sha:
+    return True, None, None
+  # Imported lazily because the relay route reuses GitHub contribution
+  # primitives during its own module initialization.
+  from app.routes.contribution_relay import (
+    _CONTRIBUTION_ID,
+    _relay_input_fingerprint,
+    _signed_attempt_is_valid,
+  )
+
+  if (
+    terminal_status not in {"closed", "merged", "withdrawn"}
+    or (
+      terminal_status == "merged"
+      and not re.fullmatch(r"[0-9a-f]{40}", merge_commit_sha)
+    )
+    or (terminal_status != "merged" and bool(merge_commit_sha))
+    or not _CONTRIBUTION_ID.fullmatch(
+      str(record.get("relay_contribution_id") or "")
+    )
+    or not hmac.compare_digest(
+      str(record.get("relay_attempt_input_sha256") or ""),
+      _relay_input_fingerprint(record),
+    )
+    or not _signed_attempt_is_valid(app_id, record_id, record)
+  ):
+    raise HTTPException(
+      409,
+      "The saved Möbius relay merge result is invalid. Refresh its status "
+      "before using this commit.",
+    )
+  return True, terminal_status, merge_commit_sha or None
+
+
+def _personal_merge_commit(record: dict, repo: Path) -> str | None:
+  """Resolve personal publication state without trusting ledger SHA fields."""
+  candidate = {
+    **record,
+    "last_land_head_sha": None,
+    "merge_commit_sha": None,
+  }
+  checks = record.get("checks")
+  if isinstance(checks, dict):
+    candidate["checks"] = {**checks, "merge_commit_sha": None}
+  return _merged_upstream_sha(candidate, repo)
+
+
 @router.post(
   "/contributions/{app_id}/{record_id}/cleanup-staging",
   dependencies=[Depends(reject_cross_site)],
@@ -3444,11 +5009,35 @@ async def cleanup_contribution_staging(
     db.close()
     record_path, _ = _record_paths(app_id, record_id)
     record = _read_record(record_path)
+    relay_record, relay_terminal_status, relay_merge_sha = (
+      _relay_merge_authority(
+        app_id, record_id, record,
+      )
+    )
+    if relay_record and relay_terminal_status is None:
+      raise HTTPException(
+        409,
+        "The Möbius relay has not confirmed a terminal contribution state.",
+      )
+    settled_record = (
+      {
+        **record,
+        "status": (
+          "merged" if relay_terminal_status == "merged" else "closed"
+        ),
+        "relay_status": relay_terminal_status,
+      }
+      if relay_record else record
+    )
   plan = record.get("plan") if isinstance(record.get("plan"), dict) else {}
+  if record.get("type") != "pr" and not plan.get("repo_path"):
+    # Issues and comments never own a review checkout. Treat their terminal
+    # cleanup as the same idempotent no-op as an already-removed PR worktree.
+    return {"cleaned": False}
   repo = _safe_repo_path(plan.get("repo_path"))
   try:
     equivalence_repos = await asyncio.to_thread(
-      _equivalence_source_repo, record,
+      _equivalence_source_repo, settled_record,
     )
   except Exception:
     # Provenance is best-effort at this terminal boundary. A stale installed
@@ -3464,23 +5053,33 @@ async def cleanup_contribution_staging(
   else:
     lock_repo = equivalence_repos[0] if equivalence_repos else repo
   upstream_sha = None
-  if record.get("status") == "merged":
-    try:
-      upstream_sha = await asyncio.to_thread(_merged_upstream_sha, record, repo)
-    except Exception:
-      log.warning(
-        "terminal contribution upstream lookup failed %s/%s",
-        app_id, record_id, exc_info=True,
-      )
+  if settled_record.get("status") == "merged":
+    if relay_record:
+      upstream_sha = relay_merge_sha
+    else:
+      try:
+        upstream_sha = await asyncio.to_thread(
+          _personal_merge_commit, settled_record, repo,
+        )
+      except Exception:
+        log.warning(
+          "terminal contribution upstream lookup failed %s/%s",
+          app_id, record_id, exc_info=True,
+        )
   async with fs_locks.source_dir_lock(str(lock_repo)):
-    try:
-      await asyncio.to_thread(_settle_equivalence, record, upstream_sha)
-    except Exception:
-      log.warning(
-        "terminal contribution equivalence settlement failed %s/%s",
-        app_id, record_id, exc_info=True,
-      )
-    cleaned = await asyncio.to_thread(_cleanup_terminal_staging_checkout, record)
+    if settled_record.get("status") != "merged" or upstream_sha is not None:
+      try:
+        await asyncio.to_thread(
+          _settle_equivalence, settled_record, upstream_sha,
+        )
+      except Exception:
+        log.warning(
+          "terminal contribution equivalence settlement failed %s/%s",
+          app_id, record_id, exc_info=True,
+        )
+    cleaned = await asyncio.to_thread(
+      _cleanup_terminal_staging_checkout, settled_record,
+    )
   # Terminal cleanup also ends autopilot: the PR merged/closed, so release any
   # claim and disable the grant (symmetric with the submit-time grant stamp).
   try:
@@ -3491,6 +5090,83 @@ async def cleanup_contribution_staging(
     log.debug("autopilot close_out failed %s/%s", app_id, record_id,
               exc_info=True)
   return {"cleaned": cleaned}
+
+
+def _reread_unchanged_record(
+  db: Session,
+  app_id: int,
+  record_id: str,
+  record_path: Path,
+  expected_nonce: str | None,
+  *,
+  relay_record: bool,
+  relay_merge_sha: str | None,
+  handoff: PublicationHandoffIdentity,
+) -> dict:
+  """Re-read the ledger under its storage lock and reject drift from ``handoff``.
+
+  The re-read must clear the same proof the caller validated: a full spec is
+  re-proven against the live row and Git objects, an identity only routes.
+  """
+  changed = HTTPException(
+    409, "This contribution changed while the app was being connected.",
+  )
+  _recheck_submit_app(db, app_id, expected_nonce)
+  current_record = _read_record(record_path)
+  current_relay, current_terminal, current_merge_sha = (
+    _relay_merge_authority(app_id, record_id, current_record)
+  )
+  if current_relay != relay_record or (
+    relay_record
+    and (current_terminal != "merged" or current_merge_sha != relay_merge_sha)
+  ):
+    raise changed
+  current_reviewed_record = (
+    {**current_record, "status": "merged", "relay_status": "merged"}
+    if current_relay else current_record
+  )
+  try:
+    current_handoff = (
+      publication_handoff_spec(current_reviewed_record, db)
+      if isinstance(handoff, PublicationHandoffSpec)
+      else publication_handoff_identity(current_reviewed_record)
+    )
+  except ContributionSubmitError as exc:
+    raise changed from exc
+  if current_handoff != handoff:
+    raise changed
+  return current_record
+
+
+def _write_publication_connection(
+  record_path: Path,
+  record: dict,
+  *,
+  status: str,
+  app: models.App,
+  conflict_paths: list[str],
+) -> tuple[dict, dict]:
+  prior = (
+    record.get("publication_connection")
+    if isinstance(record.get("publication_connection"), dict)
+    else {}
+  )
+  connection = {
+    **prior,
+    "status": status,
+    "app_id": app.id,
+    "manifest_url": app.manifest_url,
+    "version": app.version,
+    "connected_at": prior.get("connected_at") or _now_iso(),
+    "conflict_paths": conflict_paths,
+  }
+  record = {
+    **record,
+    "publication_connection": connection,
+    "updated_at": _now_iso(),
+  }
+  _write_record(record_path, record)
+  return record, connection
 
 
 @router.post(
@@ -3524,64 +5200,92 @@ async def connect_published_app(
     _recheck_submit_app(db, app_id, expected_nonce)
     record_path, _ = _record_paths(app_id, record_id)
     record = _read_record(record_path)
+    relay_record, relay_terminal_status, relay_merge_sha = (
+      _relay_merge_authority(app_id, record_id, record)
+    )
+    if relay_record and relay_terminal_status != "merged":
+      raise HTTPException(
+        409,
+        "The Möbius relay has not confirmed this app publication as merged.",
+      )
+    reviewed_record = (
+      {**record, "status": "merged", "relay_status": "merged"}
+      if relay_record else record
+    )
     try:
-      spec = publication_handoff_spec(record, db)
+      spec = publication_handoff_spec(reviewed_record, db)
+      spec_error = None
+    except ContributionSubmitError as exc:
+      spec = None
+      spec_error = exc
+    try:
+      handoff = spec or publication_handoff_identity(reviewed_record)
     except ContributionSubmitError as exc:
       raise HTTPException(exc.status_code, exc.message) from exc
-    target = (
-      db.query(models.App)
-      .populate_existing()
-      .filter(models.App.id == spec.target_app_id)
-      .one()
-    )
-    already_connected = install._catalog_identity_matches(
-      target.manifest_url, spec.manifest_url, spec.manifest_id,
-    )
-
-    # A lost successful response is an ordinary idempotent retry: recover the
-    # record mirror without reinstalling or touching the app source again.
-    if already_connected:
-      prior = (
-        record.get("publication_connection")
-        if isinstance(record.get("publication_connection"), dict)
-        else {}
-      )
-      pending_conflict = install.read_pending_conflict_update_receipt(
-        target.source_dir,
-        app_id=target.id,
-        upstream_commit=target.upstream_commit,
-      )
-      connection = {
-        **prior,
-        "status": (
-          "connected_conflict" if pending_conflict is not None else "connected"
-        ),
-        "app_id": spec.target_app_id,
-        "manifest_url": target.manifest_url,
-        "version": target.version,
-        "connected_at": prior.get("connected_at") or _now_iso(),
-        "conflict_paths": (
-          pending_conflict.get("conflict_paths", [])
-          if pending_conflict is not None else []
-        ),
-      }
-      record = {
-        **record,
-        "publication_connection": connection,
-        "updated_at": _now_iso(),
-      }
-      _write_record(record_path, record)
-      return {"record": record, "connection": connection}
   db.close()
 
-  merge_sha = await asyncio.to_thread(
-    _merged_upstream_sha, record, spec.source_repo,
-  )
-  if not merge_sha:
-    raise HTTPException(
-      409,
-      "GitHub has not confirmed this reviewed app publication as merged.",
+  merge_sha = None
+  if spec is not None:
+    merge_sha = (
+      relay_merge_sha
+      if relay_record
+      else await asyncio.to_thread(
+        _personal_merge_commit, record, spec.source_repo,
+      )
     )
+    if not merge_sha:
+      raise HTTPException(
+        409,
+        "GitHub has not confirmed this reviewed app publication as merged.",
+      )
+
+  # A later install may supersede this exact package while keeping the same
+  # canonical app identity; settling the private ledger for it is not an app
+  # mutation. Installs record GitHub's merge commit, which only equals the
+  # reviewed head on a fast-forward landing, so an install sitting on any of
+  # this publication's commits came from it (or from a review that drifted
+  # under it) and must re-prove through the full path below.
+  async with fs_locks.install_uninstall_lock():
+    current = (
+      db.query(models.App)
+      .populate_existing()
+      .filter(
+        models.App.id == handoff.target_app_id,
+        models.App.deleted_at.is_(None),
+      )
+      .first()
+    )
+    already_connected = (
+      current is not None
+      and (
+        spec is None
+        or current.upstream_commit not in {
+          merge_sha, spec.reviewed_head_sha, spec.reviewed_source_sha,
+        }
+      )
+      and install._catalog_identity_matches(
+        current.manifest_url, handoff.manifest_url, handoff.manifest_id,
+      )
+    )
+    if already_connected:
+      async with fs_locks.app_storage_lock(app_id):
+        current_record = _reread_unchanged_record(
+          db, app_id, record_id, record_path, expected_nonce,
+          relay_record=relay_record,
+          relay_merge_sha=relay_merge_sha,
+          handoff=handoff,
+        )
+        current_record, connection = _write_publication_connection(
+          record_path, current_record,
+          status="connected", app=current, conflict_paths=[],
+        )
+      return {"record": current_record, "connection": connection}
+
+  if spec is None:
+    raise HTTPException(
+      spec_error.status_code, spec_error.message,
+    ) from spec_error
+
   pinned_manifest_url = spec.pinned_manifest_url(merge_sha)
 
   # Verify the complete immutable package before the installer is allowed to
@@ -3639,8 +5343,56 @@ async def connect_published_app(
     if install._catalog_identity_matches(
       current.manifest_url, spec.manifest_url, spec.manifest_id,
     ):
+      from app.app_capabilities import capability_digest
+
+      try:
+        installed_capability_digest = capability_digest(
+          current.capability_contract,
+        )
+      except (TypeError, ValueError):
+        installed_capability_digest = ""
+      if (
+        current.upstream_commit != merge_sha
+        or installed_capability_digest != spec.capability_digest
+      ):
+        raise HTTPException(
+          409,
+          "The installed app no longer matches this reviewed publication.",
+        )
+
+      # A conflict commits its reviewed upstream + identity but deliberately
+      # leaves the served source alone. Its private receipt is therefore the
+      # package-level proof for a lost-response retry; accept it only when all
+      # fetched candidate inputs still match this exact reviewed merge.
+      pending_conflict = install.read_pending_conflict_update_receipt(
+        current.source_dir,
+        app_id=current.id,
+        upstream_commit=current.upstream_commit,
+      )
+      if (
+        pending_conflict is None
+        and install.pending_conflict_update_receipt_present(current.source_dir)
+      ):
+        raise HTTPException(
+          409,
+          "The installed app has an invalid pending update receipt.",
+        )
+      if pending_conflict is not None and (
+        not install.pending_conflict_update_matches_app(
+          current, pending_conflict,
+        )
+        or pending_conflict.get("manifest") != candidate.manifest
+        or pending_conflict.get("raw_base") != candidate.raw_base
+        or pending_conflict.get("capability_digest") != spec.capability_digest
+        or pending_conflict.get("candidate_digest")
+        != candidate.candidate_digest
+      ):
+        raise HTTPException(
+          409,
+          "The installed app no longer matches this reviewed publication.",
+        )
       connected_app = current
-      mode = "update"
+      mode = "conflict" if pending_conflict is not None else "update"
       conflict_paths: list[str] = []
     else:
       result = await install.install_from_manifest(
@@ -3656,32 +5408,21 @@ async def connect_published_app(
       mode = result.mode
       conflict_paths = result.conflict_paths
 
-  connection = {
-    "status": "connected_conflict" if mode == "conflict" else "connected",
-    "app_id": connected_app.id,
-    "manifest_url": connected_app.manifest_url,
-    "version": connected_app.version,
-    "connected_at": _now_iso(),
-    "conflict_paths": conflict_paths,
-  }
-  async with fs_locks.app_storage_lock(app_id):
-    _recheck_submit_app(db, app_id, expected_nonce)
-    current_record = _read_record(record_path)
-    try:
-      current_spec = publication_handoff_spec(current_record, db)
-    except ContributionSubmitError as exc:
-      raise HTTPException(exc.status_code, exc.message) from exc
-    if current_spec != spec:
-      raise HTTPException(
-        409,
-        "This contribution changed while the app was being connected.",
+    # Keep the lifecycle lease until the reviewed ledger mirror is written.
+    # Otherwise a second installer could advance this app after the proof
+    # above but before the connection record becomes durable.
+    async with fs_locks.app_storage_lock(app_id):
+      current_record = _reread_unchanged_record(
+        db, app_id, record_id, record_path, expected_nonce,
+        relay_record=relay_record,
+        relay_merge_sha=relay_merge_sha,
+        handoff=spec,
       )
-    current_record = {
-      **current_record,
-      "publication_connection": connection,
-      "updated_at": _now_iso(),
-    }
-    _write_record(record_path, current_record)
+      current_record, connection = _write_publication_connection(
+        record_path, current_record,
+        status="connected_conflict" if mode == "conflict" else "connected",
+        app=connected_app, conflict_paths=conflict_paths,
+      )
 
   get_system_broadcast().publish(
     {"type": "app_updated", "appId": str(connected_app.id)}
@@ -4015,7 +5756,8 @@ async def autopilot_respond(
 
   # Use the owner's existing background-agent choice; no Contribute-specific
   # resource policy lives here.
-  provider = autopilot.resolve_round_provider(db)
+  round_choice = autopilot.resolve_round_choice(db)
+  provider = round_choice["provider"]
 
   verdict = autopilot.claim_for_round(
     db, app_id, record_id, attention_key=attention_key, event_at=event_at,
@@ -4043,7 +5785,13 @@ async def autopilot_respond(
     record = _read_record(record_path)
     title = str(record.get("title") or "contribution")[:80]
     chat_id = autopilot.ensure_followup_chat(
-      db, app_id, record_id, title=f"Autopilot: {title}", provider=provider,
+      db,
+      app_id,
+      record_id,
+      title=f"Autopilot: {title}",
+      provider=provider,
+      model=round_choice["model"],
+      effort=round_choice.get("effort"),
     )
     if not chat_id:
       autopilot.release_for_retry(
@@ -4225,6 +5973,8 @@ def _autopilot_live_target(
     live_head_repository = head_repo.get("full_name")
     live_branch = head.get("ref")
     live_head_sha = str(head.get("sha") or "")
+    live_title = live.get("title")
+    live_body = live.get("body")
     live_base_repository = base_repo.get("full_name")
     live_base_sha = str(base.get("sha") or "")
     try:
@@ -4239,6 +5989,8 @@ def _autopilot_live_target(
       or live_base_repository != repo
       or not live_base_branch
       or not _GIT_SHA.fullmatch(live_base_sha)
+      or not isinstance(live_title, str)
+      or (live_body is not None and not isinstance(live_body, str))
     ):
       return {
         "error": "The live pull request no longer matches the approved target.",
@@ -4251,16 +6003,9 @@ def _autopilot_live_target(
     "head_sha": live_head_sha,
     "base_branch": live_base_branch,
     "base_sha": live_base_sha,
+    "title": live_title,
+    "body": live_body or "",
   }
-
-
-def _autopilot_live_target_error(
-  repo: str, number: int, head_repository: str, branch: str,
-) -> str | None:
-  """Compatibility view for callers that only need target identity drift."""
-  return _autopilot_live_target(
-    repo, number, head_repository, branch,
-  ).get("error")
 
 
 def _assert_reviewed_update_contains_live_head(
@@ -4285,22 +6030,107 @@ def _assert_reviewed_update_contains_live_head(
     reviewed_head_sha,
     check=False,
   )
-  if ancestry.returncode != 0:
+  if ancestry.returncode == 0:
+    return
+  if ancestry.returncode == 1:
     raise ContributionSubmitError(
       "This pull request changed after the update was reviewed. Nothing was pushed. "
       "Ask the agent to refresh and review it against the current pull request.",
       code="review_refresh_needed",
       detail="The reviewed branch does not contain the pull request's current head.",
     )
+  raise ContributionSubmitError(
+    "Git could not verify this pull request update against the reviewed branch. "
+    "Nothing was pushed.",
+    code="review_refresh_needed",
+    detail="The local review checkout could not compare the public and reviewed commits.",
+  )
+
+
+def _reviewed_stack_update_lease(
+  record: dict,
+  stack: dict,
+  live_base_branch: str,
+  live_base_sha: str,
+  repo_path: Path,
+  live_head_sha: str,
+  reviewed_head_sha: str,
+) -> str | None:
+  """Return the exact lease for an intentional reviewed child restack.
+
+  A standalone or root PR update must remain a fast-forward. A reviewed child
+  may legitimately stop containing its old public commit when its parent was
+  rebuilt first. In that one complete-stack case, preserve the no-overwrite
+  invariant by requiring the recorded public child head and using it as an
+  exact force-with-lease compare-and-swap.
+  """
+  expected_base_branch = str(stack.get("base_branch") or "")
+  if live_base_branch != expected_base_branch:
+    raise ContributionSubmitError(
+      "This pull request changed after the stack update was reviewed. Nothing "
+      "was pushed for this layer.",
+      code="review_refresh_needed",
+      detail="The pull request now targets a different base branch.",
+    )
+  if int(stack.get("position") or 0) > 1:
+    reviewed_base_sha = str((record.get("plan") or {}).get("base_sha") or "")
+    if (
+      not _GIT_SHA.fullmatch(reviewed_base_sha)
+      or live_base_sha != reviewed_base_sha
+    ):
+      raise ContributionSubmitError(
+        "This pull request changed after the stack update was reviewed. Nothing "
+        "was pushed for this layer.",
+        code="review_refresh_needed",
+        detail="The pull request's base branch moved from the reviewed parent commit.",
+      )
+  if not (
+    _GIT_SHA.fullmatch(live_head_sha)
+    and _GIT_SHA.fullmatch(reviewed_head_sha)
+  ):
+    _assert_reviewed_update_contains_live_head(
+      repo_path,
+      live_head_sha,
+      reviewed_head_sha,
+    )
+  try:
+    _assert_reviewed_update_contains_live_head(
+      repo_path,
+      live_head_sha,
+      reviewed_head_sha,
+    )
+    return None
+  except ContributionSubmitError as exc:
+    if (
+      exc.code != "review_refresh_needed"
+      or exc.detail
+      != "The reviewed branch does not contain the pull request's current head."
+    ):
+      raise
+  expected_public_head = str(record.get("last_submit_push_sha") or "")
+  if (
+    int(stack.get("position") or 0) > 1
+    and str(stack.get("parent_record_id") or "")
+    and _GIT_SHA.fullmatch(expected_public_head)
+    and live_head_sha == expected_public_head
+  ):
+    return expected_public_head
+  raise ContributionSubmitError(
+    "This pull request changed after the update was reviewed. Nothing was pushed. "
+    "Ask the agent to refresh and review it against the current pull request.",
+    code="review_refresh_needed",
+    detail="The reviewed branch does not contain the pull request's current head.",
+  )
 
 
 def _autopilot_post_reply(
   repo: str, number: int, text: str, in_reply_to: int | None,
   head_repository: str, branch: str,
 ) -> dict:
-  target_error = _autopilot_live_target_error(
+  live_target = _autopilot_live_target(
     repo, number, head_repository, branch,
   )
+  target_error = live_target.get("error")
   if target_error:
     return {"ok": False, "error": target_error}
   token = github_auth.get_token()
@@ -4450,6 +6280,72 @@ def _autopilot_changed_paths(
   ]
 
 
+def _autopilot_update_action_input(row, body: AutopilotUpdateBody) -> dict:
+  """Bind publication to immutable content/target, not an ephemeral lease."""
+  return {
+    "action": "autopilot_update",
+    "head_sha": body.head_sha,
+    "diff_sha256": body.diff_sha256,
+    "target_repo": str(row.target_repo),
+    "target_pr_number": int(row.target_pr_number),
+    "target_head_repository": str(row.target_head_repository),
+    "target_branch": str(row.target_branch),
+  }
+
+
+def _completed_autopilot_update_result(
+  owner: _PersonalAttemptOwner,
+  live_target: dict,
+) -> tuple[str, int, dict] | None:
+  """Recover one signed terminal update without repeating publication."""
+  receipt = owner.receipt()
+  if receipt is None or receipt.get("phase") != "complete":
+    return None
+  request = receipt.get("effective_request")
+  patch = receipt.get("record_patch")
+  action = owner.action_input
+  if not isinstance(request, dict) or not isinstance(patch, dict):
+    raise ContributionSubmitError(
+      "The completed Autopilot publication receipt is incomplete.",
+      status_code=409,
+    )
+  try:
+    number = int(request.get("number"))
+  except (TypeError, ValueError) as exc:
+    raise ContributionSubmitError(
+      "The completed Autopilot publication receipt is incomplete.",
+      status_code=409,
+    ) from exc
+  repo = str(action.get("target_repo") or "")
+  expected_url = f"https://github.com/{repo}/pull/{number}"
+  pushed_sha = str(patch.get("last_submit_push_sha") or "")
+  if (
+    request.get("action") not in {"update_pr", "reconcile_pr"}
+    or request.get("repo") != repo
+    or number != action.get("target_pr_number")
+    or request.get("url") != expected_url
+    or request.get("head_repository") != action.get("target_head_repository")
+    or request.get("branch") != action.get("target_branch")
+    or patch.get("head_repository") != action.get("target_head_repository")
+    or not _GIT_SHA.fullmatch(pushed_sha)
+    or pushed_sha != pushed_sha.lower()
+    or request.get("head_sha") != pushed_sha
+  ):
+    raise ContributionSubmitError(
+      "The completed Autopilot publication receipt no longer matches its target.",
+      status_code=409,
+    )
+  if (
+    live_target.get("head_sha") != pushed_sha
+    or live_target.get("base_branch") != request.get("base_branch")
+  ):
+    # The receipt proves the earlier effect, not today's public ref. Re-enter
+    # the normal path, which requires fresh source proof and a new authoritative
+    # remote lease before it may restore a reset/deleted branch.
+    return None
+  return expected_url, number, patch
+
+
 @router.post(
   "/contributions/{app_id}/{record_id}/update",
   dependencies=[
@@ -4487,12 +6383,30 @@ async def autopilot_update(
     raise HTTPException(status_code=409, detail="No live round with this run_id.")
 
   record_path, diff_path = _record_paths(app_id, record_id)
-  record = _read_record(record_path)
-  _autopilot_assert_bound_target(row, record)
-  if record.get("type") != "pr" or record.get("status") not in ("open", "draft"):
-    raise HTTPException(
-      status_code=409, detail="Autopilot updates apply to open PRs only.",
+  action_input = _autopilot_update_action_input(row, body)
+  db.close()
+  async with fs_locks.app_storage_lock(app_id):
+    _recheck_submit_app(db, app_id, expected_nonce)
+    db.close()
+    record = _read_record(record_path)
+    _autopilot_assert_bound_target(row, record)
+    if record.get("type") != "pr" or record.get("status") not in ("open", "draft"):
+      raise HTTPException(
+        status_code=409, detail="Autopilot updates apply to open PRs only.",
+      )
+    # v7 could leave a pre-publication receipt behind after a deterministic
+    # local rejection. It represents no public effect and is safe to retire
+    # before re-running validation for this exact action.
+    prior = _read_personal_attempt(
+      record_path, app_id=app_id, record_id=record_id,
     )
+    if (
+      prior is not None
+      and prior.get("phase") == "armed"
+      and prior.get("action_input") == action_input
+    ):
+      _remove_personal_attempt(app_id, record_id)
+    validation_sha = _personal_publication_input_sha256(record)
   plan = record.get("plan") if isinstance(record.get("plan"), dict) else {}
   # Bind this call to the exact reviewed state the agent recorded. If the record
   # drifted (a concurrent writer), the hashes won't match and we refuse rather
@@ -4528,29 +6442,162 @@ async def autopilot_update(
       status_code=422,
       detail="This update touches paths outside the source allowlist.",
     )
-  target_error = await asyncio.to_thread(
-    _autopilot_live_target_error,
+  live_target = await asyncio.to_thread(
+    _autopilot_live_target,
     str(row.target_repo),
     int(row.target_pr_number),
     str(row.target_head_repository),
     str(row.target_branch),
   )
+  target_error = live_target.get("error")
   if target_error:
     raise HTTPException(status_code=409, detail=target_error)
-
-  db.close()
   try:
-    async with fs_locks.source_dir_lock(str(repo_path)):
-      pr_url, number, record_patch = await asyncio.to_thread(
-        _submit_prepared_pr, record, diff_path,
-        expected_existing_pr_number=int(row.target_pr_number),
-        expected_existing_head_repository=str(row.target_head_repository),
-      )
+    _assert_reviewed_existing_pr_metadata(
+      record,
+      live_title=live_target.get("title"),
+      live_body=live_target.get("body"),
+    )
+
   except ContributionSubmitError as exc:
     raise HTTPException(
       status_code=exc.status_code,
-      detail={"message": exc.message},
+      detail={
+        "message": exc.message,
+        **({"code": exc.code} if exc.code else {}),
+      },
+    ) from exc
+
+  # Only now, after every deterministic local and live-target rejection, arm
+  # the signed attempt. Re-read the app ledger under lock so validation cannot
+  # race a changed review into this owner.
+  async with fs_locks.app_storage_lock(app_id):
+    _recheck_submit_app(db, app_id, expected_nonce)
+    fresh_row = autopilot.get_row(db, app_id, record_id)
+    if not autopilot.verify_claim(fresh_row, body.run_id):
+      raise HTTPException(status_code=409, detail="No live round with this run_id.")
+    fresh_action_input = _autopilot_update_action_input(fresh_row, body)
+    if fresh_action_input != action_input:
+      raise HTTPException(
+        status_code=409,
+        detail="The autopilot target changed during update validation.",
+      )
+    current = _read_record(record_path)
+    _autopilot_assert_bound_target(fresh_row, current)
+    if (
+      current.get("type") != "pr"
+      or current.get("status") not in ("open", "draft")
+      or _personal_publication_input_sha256(current) != validation_sha
+    ):
+      raise HTTPException(
+        status_code=409,
+        detail="The reviewed autopilot update changed during validation.",
+      )
+    claimed_sha = _personal_publication_input_sha256(current)
+    record = {**current, "personal_submit_input_sha256": claimed_sha}
+    _write_record(record_path, record)
+    attempt_owner = _PersonalAttemptOwner(
+      app_id=app_id,
+      record_id=record_id,
+      record_path=record_path,
+      claimed=record,
+      action_input=action_input,
     )
+    attempt_owner.arm_claim()
+    record = attempt_owner.recovery_record(record)
+    completed_result = _completed_autopilot_update_result(
+      attempt_owner, live_target,
+    )
+    db.close()
+
+  if completed_result is not None:
+    pr_url, number, record_patch = completed_result
+  else:
+    try:
+      lock_paths = {str(repo_path)}
+      equivalence_repos = _equivalence_source_repo(record)
+      if equivalence_repos is not None:
+        lock_paths.add(str(equivalence_repos[0]))
+      async with AsyncExitStack() as source_locks:
+        for lock_path in sorted(lock_paths):
+          await source_locks.enter_async_context(
+            fs_locks.source_dir_lock(lock_path)
+          )
+        _assert_reviewed_update_contains_live_head(
+          repo_path,
+          str(live_target.get("head_sha") or ""),
+          str(plan.get("head_sha") or ""),
+        )
+        await asyncio.to_thread(
+          _assert_personal_publication_source,
+          record,
+          attempt_owner,
+        )
+        pr_url, number, record_patch = await asyncio.to_thread(
+          _submit_prepared_pr, record, diff_path,
+          direct_base_branch=str(live_target.get("base_branch") or ""),
+          expected_existing_pr_number=int(row.target_pr_number),
+          expected_existing_head_repository=str(row.target_head_repository),
+          expected_existing_head_sha=str(live_target.get("head_sha") or ""),
+          attempt_event=attempt_owner.event,
+          prior_attempt_phase=attempt_owner.replay_phase(),
+          prior_attempt_receipt=attempt_owner.receipt(),
+        )
+        try:
+          await _record_pending_equivalence_locked(
+            {**record, **(record_patch or {})},
+            already_locked=frozenset(lock_paths),
+          )
+        except Exception:
+          # The public update already exists; preserve its truthful outcome and
+          # leave the conservative resolver path in place if witness persistence
+          # itself fails.
+          log.warning(
+            "autopilot equivalence witness failed %s/%s",
+            app_id,
+            record_id,
+            exc_info=True,
+          )
+    except ContributionSubmitError as exc:
+      # A lost response can follow an accepted branch push. Preserve its exact
+      # head witness before returning so the same run reconciles that public
+      # action instead of demanding a new live-source proof or pushing blindly.
+      if exc.record_patch:
+        async with fs_locks.app_storage_lock(app_id):
+          _recheck_submit_app(db, app_id, expected_nonce)
+          db.close()
+          current = _read_record(record_path)
+          try:
+            attempt_owner.assert_current()
+          except ContributionSubmitError:
+            raise HTTPException(
+              status_code=409,
+              detail="The autopilot record changed; its signed recovery receipt was retained.",
+            ) from None
+          current_plan = (
+            current.get("plan")
+            if isinstance(current.get("plan"), dict)
+            else {}
+          )
+          if (
+            current.get("status") in {"open", "draft"}
+            and str(current_plan.get("head_sha") or "") == body.head_sha
+            and str(current_plan.get("diff_sha256") or "") == body.diff_sha256
+          ):
+            _write_record(record_path, {
+              **current,
+              **exc.record_patch,
+              "updated_at": _now_iso(),
+            })
+      if attempt_owner.replay_phase() == "armed":
+        attempt_owner.settle()
+      raise HTTPException(
+        status_code=exc.status_code,
+        detail={
+          "message": exc.message,
+          **({"code": exc.code} if exc.code else {}),
+        },
+      )
 
   # Persist the pushed head onto the record (CAS-free: the endpoint holds the
   # round claim, and the mirror keeps the ledger's display block in step).
@@ -4558,6 +6605,13 @@ async def autopilot_update(
     _recheck_submit_app(db, app_id, expected_nonce)
     db.close()
     current = _read_record(record_path)
+    try:
+      attempt_owner.assert_current()
+    except ContributionSubmitError:
+      raise HTTPException(
+        status_code=409,
+        detail="The autopilot record changed; its signed recovery receipt was retained.",
+      ) from None
     updated = {
       **current, **(record_patch or {}),
       "url": pr_url, "updated_at": _now_iso(),
@@ -4573,6 +6627,9 @@ async def autopilot_update(
       status_code=409,
       detail="The branch was pushed, but this autopilot round has expired.",
     )
+  async with fs_locks.app_storage_lock(app_id):
+    if attempt_owner.receipt() is not None:
+      attempt_owner.settle()
   return {"status": "ok", "url": pr_url, "number": number}
 
 

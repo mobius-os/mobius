@@ -14,6 +14,7 @@ import hmac
 import re
 import secrets
 from datetime import timedelta
+from typing import Literal
 from urllib.parse import quote, urlencode, urlparse
 
 import httpx
@@ -57,6 +58,14 @@ _LINK_TTL = timedelta(minutes=10)
 _AVATAR_MAX_BYTES = 5 * 1024 * 1024
 _AVATAR_TYPES = {"image/jpeg", "image/png", "image/webp"}
 _HANDLE_RE = re.compile(r"^[a-z0-9_]{3,30}$")
+# Account-service client errors the owner can act on. Any other non-success
+# status is an integration failure and surfaces as a 502.
+_REMOTE_CLIENT_ERRORS = {
+  409: "That handle is already taken.",
+  413: "Profile pictures must be 5 MB or smaller.",
+  415: "Choose a JPEG, PNG, or WebP image.",
+  422: "The Möbius account service rejected that request.",
+}
 
 
 class ProfilePatch(BaseModel):
@@ -79,6 +88,7 @@ class RailwayCreate(BaseModel):
   cpu: int | None = None
   memory_mb: int | None = None
   volume_mb: int | None = None
+  update_policy: Literal["automatic", "manual"] | None = None
 
 
 class RailwayCompute(BaseModel):
@@ -88,6 +98,15 @@ class RailwayCompute(BaseModel):
 
 class RailwayStorage(BaseModel):
   volume_mb: int
+
+
+class RailwayUpdates(BaseModel):
+  update_policy: Literal["automatic", "manual"]
+
+
+class RailwayConfirmAbsent(BaseModel):
+  model_config = {"extra": "forbid"}
+  confirmed_absent: bool
 
 
 class RailwaySelectWorkspace(BaseModel):
@@ -243,6 +262,25 @@ async def _avatar_bytes(url: str) -> tuple[bytes, str]:
   return b"".join(chunks), content_type
 
 
+def _remote_error_detail(response: httpx.Response, fallback: str) -> str:
+  try:
+    detail = response.json().get("detail")
+  except (AttributeError, ValueError):
+    return fallback
+  if not isinstance(detail, str) or not detail.strip() or len(detail) > 500:
+    return fallback
+  return detail
+
+
+def _raise_remote_request_error(response: httpx.Response) -> None:
+  if response.status_code in (200, 201):
+    return
+  fallback = _REMOTE_CLIENT_ERRORS.get(response.status_code)
+  if fallback is None:
+    raise HTTPException(502, "The Möbius account service could not complete that request.")
+  raise HTTPException(response.status_code, _remote_error_detail(response, fallback))
+
+
 async def _managed_remote(method: str, suffix: str = "", **kwargs) -> dict:
   settings = get_settings()
   if not settings.mobius_sso_enabled:
@@ -257,15 +295,7 @@ async def _managed_remote(method: str, suffix: str = "", **kwargs) -> dict:
       )
   except httpx.HTTPError:
     raise HTTPException(502, "The Möbius account service could not be reached.")
-  if response.status_code == 409:
-    detail = "That handle is already taken."
-    try:
-      detail = response.json().get("detail") or detail
-    except ValueError:
-      pass
-    raise HTTPException(409, detail)
-  if response.status_code not in (200, 201):
-    raise HTTPException(502, "The Möbius account service could not complete that request.")
+  _raise_remote_request_error(response)
   try:
     payload = response.json()
   except ValueError:
@@ -280,11 +310,7 @@ def _linked_row(db: Session, owner_id: int) -> models.IdentityAccountLink | None
 
 
 async def _linked_remote(
-  db: Session,
-  owner_id: int,
-  method: str,
-  suffix: str = "",
-  **kwargs,
+  db: Session, owner_id: int, method: str, suffix: str = "", **kwargs,
 ) -> dict | None:
   link = _linked_row(db, owner_id)
   if link is None:
@@ -311,15 +337,7 @@ async def _linked_remote(
     db.delete(link)
     db.commit()
     return None
-  if response.status_code == 409:
-    detail = "That handle is already taken."
-    try:
-      detail = response.json().get("detail") or detail
-    except ValueError:
-      pass
-    raise HTTPException(409, detail)
-  if response.status_code not in (200, 201):
-    raise HTTPException(502, "The Möbius account service could not complete that request.")
+  _raise_remote_request_error(response)
   try:
     payload = response.json()
   except ValueError:
@@ -558,10 +576,10 @@ async def update_avatar(
 ):
   content_type = (avatar.content_type or "").lower()
   if content_type not in _AVATAR_TYPES:
-    raise HTTPException(415, "Choose a JPEG, PNG, or WebP image.")
+    raise HTTPException(415, _REMOTE_CLIENT_ERRORS[415])
   content = await avatar.read(_AVATAR_MAX_BYTES + 1)
   if not content or len(content) > _AVATAR_MAX_BYTES:
-    raise HTTPException(413, "Profile pictures must be 5 MB or smaller.")
+    raise HTTPException(413, _REMOTE_CLIENT_ERRORS[413])
   files = {"avatar": (avatar.filename or "avatar", content, content_type)}
   if get_settings().mobius_sso_enabled:
     remote = await _managed_remote("POST", "/avatar", files=files)
@@ -805,6 +823,24 @@ def _railway_metrics_contract(payload: object) -> dict:
   return payload
 
 
+def _railway_deletion_contract(payload: object) -> dict:
+  invalid = HTTPException(502, "The Möbius account service returned invalid deletion state.")
+  if not isinstance(payload, dict) or set(payload) != {
+    "state", "message", "can_confirm_absent"
+  }:
+    raise invalid
+  if (
+    payload.get("state") not in {
+      "present", "missing", "missing_unconfirmed", "authorization", "unknown"
+    }
+    or not isinstance(payload.get("message"), str)
+    or not 1 <= len(payload["message"]) <= 360
+    or not isinstance(payload.get("can_confirm_absent"), bool)
+  ):
+    raise invalid
+  return payload
+
+
 def _railway_recovery_status_contract(payload: object) -> dict:
   invalid = HTTPException(502, "The Möbius account service returned invalid Recovery state.")
   if not isinstance(payload, dict) or set(payload) - {"state", "message", "error", "open_url"}:
@@ -891,33 +927,23 @@ async def create_railway_deployment(
   name = body.name.strip()
   if not name or len(name) > 80:
     raise HTTPException(422, "Use a deployment name between 1 and 80 characters.")
+  settings = {
+    "name": name,
+    "managed_auth": body.managed_auth,
+    "cpu": body.cpu,
+    "memory_mb": body.memory_mb,
+    "volume_mb": body.volume_mb,
+  }
+  # Omit the extension for older account-service deployments. The identity app
+  # only sends it after the inventory advertises update-policy support.
+  if body.update_policy is not None:
+    settings["update_policy"] = body.update_policy
   return await _railway_mutation(
     db,
     owner.id,
     "POST",
     "/instances",
-    json={
-      "name": name,
-      "managed_auth": body.managed_auth,
-      "cpu": body.cpu,
-      "memory_mb": body.memory_mb,
-      "volume_mb": body.volume_mb,
-    },
-  )
-
-
-@router.post("/railway/deployments/adopt-current", status_code=202)
-async def adopt_current_railway_deployment(
-  owner: models.Owner = Depends(get_owner_or_app_with_railway_manage),
-  db: Session = Depends(get_db),
-):
-  # The account host derives the deployment address from the signed link grant.
-  # Deliberately accept no browser-supplied Railway ids or domain here.
-  return await _railway_mutation(
-    db,
-    owner.id,
-    "POST",
-    "/instances/adopt-current",
+    json=settings,
   )
 
 
@@ -1000,11 +1026,38 @@ async def read_railway_metrics(
   )
 
 
-@router.post(
-  "/railway/deployments/{instance_id}/recovery",
-  status_code=202,
-  dependencies=[Depends(require_nondelegated_owner_or_app_control)],
-)
+@router.get("/railway/deployments/{instance_id}/deletion")
+async def read_railway_deletion_state(
+  instance_id: str,
+  owner: models.Owner = Depends(get_owner_or_app_with_railway_manage),
+  db: Session = Depends(get_db),
+):
+  return _railway_deletion_contract(
+    await _railway_proxy(
+      db, owner.id, "GET", f"/instances/{_railway_instance_id(instance_id)}/deletion"
+    )
+  )
+
+
+@router.post("/railway/deployments/{instance_id}/confirm-absent")
+async def confirm_railway_deletion_absent(
+  instance_id: str,
+  body: RailwayConfirmAbsent,
+  owner: models.Owner = Depends(get_owner_or_app_with_railway_manage),
+  db: Session = Depends(get_db),
+):
+  if body.confirmed_absent is not True:
+    raise HTTPException(422, "Confirm that the Railway project is no longer there.")
+  return await _railway_mutation(
+    db,
+    owner.id,
+    "POST",
+    f"/instances/{_railway_instance_id(instance_id)}/confirm-absent",
+    json={"confirmed_absent": True},
+  )
+
+
+@router.post("/railway/deployments/{instance_id}/recovery", status_code=202)
 async def open_railway_recovery(
   instance_id: str,
   owner: models.Owner = Depends(get_owner_or_app_with_railway_manage),
@@ -1079,6 +1132,26 @@ async def update_railway_storage(
     "PATCH",
     f"/instances/{_railway_instance_id(instance_id)}/storage",
     json={"volume_mb": body.volume_mb},
+  )
+
+
+@router.patch(
+  "/railway/deployments/{instance_id}/updates",
+  status_code=202,
+  dependencies=[Depends(require_nondelegated_owner_or_app_control)],
+)
+async def update_railway_image_policy(
+  instance_id: str,
+  body: RailwayUpdates,
+  owner: models.Owner = Depends(get_owner_or_app_with_railway_manage),
+  db: Session = Depends(get_db),
+):
+  return await _railway_mutation(
+    db,
+    owner.id,
+    "PATCH",
+    f"/instances/{_railway_instance_id(instance_id)}/updates",
+    json={"update_policy": body.update_policy},
   )
 
 
@@ -1310,23 +1383,10 @@ async def delete_link(
     db.commit()
     return Response(status_code=204)
   try:
-    runtime_identity = await runtime_identity_broker_request("GET", "/identity")
-  except (httpx.HTTPError, OSError, ValueError) as exc:
-    raise HTTPException(
-      502, "The local trial identity could not be reached; your link was kept."
-    ) from exc
-  runtime_request = None
-  if runtime_identity.get("linked") is True:
-    runtime_request = {
-      "instance_id": runtime_identity.get("instance_id"),
-      "key_thumbprint": runtime_identity.get("key_thumbprint"),
-    }
-  try:
     async with httpx.AsyncClient(timeout=15.0, follow_redirects=False) as client:
       response = await client.post(
         get_settings().mobius_account_origin + "/api/account-links/revoke",
         headers={"Authorization": f"Bearer {token}"},
-        json={"runtime_identity": runtime_request} if runtime_request else {},
       )
   except httpx.HTTPError:
     raise HTTPException(
@@ -1334,21 +1394,6 @@ async def delete_link(
     )
   if response.status_code not in (204, 401):
     raise HTTPException(502, "The Möbius account service could not revoke this link.")
-  if runtime_request:
-    try:
-      unlinked = await runtime_identity_broker_request(
-        "POST",
-        "/identity/unlink",
-        {"expected_subject": runtime_identity.get("subject")},
-      )
-    except (httpx.HTTPError, OSError, ValueError) as exc:
-      raise HTTPException(
-        502, "The account was revoked, but local sign-out did not finish. Try again."
-      ) from exc
-    if unlinked.get("linked") is not False:
-      raise HTTPException(
-        502, "The account was revoked, but local sign-out did not finish. Try again."
-      )
   db.delete(link)
   db.commit()
   return Response(status_code=204)

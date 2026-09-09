@@ -4,9 +4,8 @@ import assert from 'node:assert/strict'
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { createServer } from 'vite'
-import { ownsRecoveryAction } from '../recoveryCard.js'
 import { upsertTerminalErrorItem } from '../streamReducers.js'
-import { isResourcePause, resourcePauseLabel } from '../resourcePause.js'
+import { ownsRecoveryAction } from '../recoveryCard.js'
 
 const vite = await createServer({
   appType: 'custom',
@@ -29,14 +28,11 @@ after(() => vite.close())
 const msgContent = readFileSync(new URL('../MsgContent.jsx', import.meta.url), 'utf8')
 const streamingMessage = readFileSync(new URL('../StreamingMessage.jsx', import.meta.url), 'utf8')
 const errorCard = readFileSync(new URL('../ErrorCard.jsx', import.meta.url), 'utf8')
-const waitingChip = readFileSync(new URL('../WaitingChip.jsx', import.meta.url), 'utf8')
 const resetTime = readFileSync(new URL('../resetTime.js', import.meta.url), 'utf8')
 const promotion = readFileSync(new URL('../streamPromotion.js', import.meta.url), 'utf8')
 const css = readFileSync(new URL('../ChatView.css', import.meta.url), 'utf8')
 const chatView = readFileSync(new URL('../ChatView.jsx', import.meta.url), 'utf8')
 const shell = readFileSync(new URL('../../Shell/Shell.jsx', import.meta.url), 'utf8')
-const paneChatView = readFileSync(new URL('../../Shell/PaneChatView.jsx', import.meta.url), 'utf8')
-const chatEmbed = readFileSync(new URL('../../ChatEmbed/ChatEmbed.jsx', import.meta.url), 'utf8')
 const chatSettingsPanel = readFileSync(new URL('../ChatSettingsPanel.jsx', import.meta.url), 'utf8')
 const continuationCard = readFileSync(
   new URL('../ContinuationCard.jsx', import.meta.url), 'utf8',
@@ -44,6 +40,7 @@ const continuationCard = readFileSync(
 const settingsView = readFileSync(
   new URL('../../SettingsView/SettingsView.jsx', import.meta.url), 'utf8',
 )
+const waitingChip = readFileSync(new URL('../WaitingChip.jsx', import.meta.url), 'utf8')
 
 test('ErrorCard renders a parked card for a block whose pause has a reset time', () => {
   assert.match(errorCard, /block\.pause\?\.resets_at/,
@@ -90,7 +87,7 @@ test('the one block renderer owns ErrorCard for both active sources', () => {
   // The live/catch-up surface once hardcoded a red "Error" card, so a benign
   // pause flashed red until promotion. StreamingMessage is now only the stable
   // <li> shell and delegates all blocks to MsgContent.
-  assert.match(msgContent, /import ErrorCard from '\.\/ErrorCard\.jsx'/,
+  assert.match(msgContent, /import ErrorCard(?:, \{[^}]*\})? from '\.\/ErrorCard\.jsx'/,
     'MsgContent must consume the shared ErrorCard')
   assert.match(streamingMessage, /import MsgContent from '\.\/MsgContent\.jsx'/,
     'the active row shell must delegate both DB and live payloads to MsgContent')
@@ -208,10 +205,12 @@ test('continuations render as product markers, not user bubbles', () => {
   assert.match(continuationCard, /Resumed manually/)
   assert.match(continuationCard, /Server restarted — continuing automatically/)
   assert.match(continuationCard, /Usage available again — continuing automatically/)
-  assert.match(msgContent, /onResume\('continue', \{[\s\S]*continuation: 'manual',[\s\S]*pin: false/,
-    'Resume must mark its provider-facing prompt as a product action')
+  assert.match(msgContent, /onClick=\{onResume\}/,
+    'Resume delegates the lifecycle action instead of manufacturing owner text')
   assert.match(chatView, /chat__msg--\$\{continuationMarker \? 'marker' : msg\.role\}/,
     'the row shell must not inherit owner-user alignment')
+  assert.match(chatView, /supersedeResumedPauseBlocks\(messages\)/,
+    'a completed continuation replaces its stale actionable pause in the render projection')
 })
 
 test('an enabled policy stays cancellable after the viewer clock reaches reset', () => {
@@ -234,22 +233,6 @@ test('a system-announced auto-resume reconnects the mounted chat surface', () =>
     'the replacement run-signal Map must not cross every pane memo boundary')
   assert.match(shell, /openAppWithIntent=\{openAppWithIntent\}/,
     'the stable app-intent navigator must not defeat the pane memo boundary')
-  assert.match(paneChatView, /externalRunSignal=\{externalRunSignal\}/,
-    'PaneChatView must forward per-chat monotonic run activity to its ChatView')
-  assert.match(chatView, /fetchMessages\(\{[\s\S]*force: true,[\s\S]*authoritative: true/,
-    'the mounted chat must refresh the promoted continuation row')
-  assert.match(chatView, /Promise\.resolve\(connectToStream\(true\)\)/,
-    'the mounted chat must attach to the automatically started stream')
-  assert.match(streamingMessage, /autoResumeAvailable=\{autoResumeAvailable\}/,
-    'the active assistant surface must receive the same policy control props')
-  assert.match(chatView, /useSystemEventStream\(handleEmbeddedRunEvent/,
-    'an eligible parked embed must observe automatic runs without Shell')
-  assert.match(chatView, /onExternalRunEventRef\.current\?\.\('auto_resume_waiting'\)/,
-    'the durable park arms parent completion before system events can be missed')
-  assert.match(chatView, /processedExternalSignalRef[\s\S]*externalReconcileInFlightRef/,
-    'external activity must drain through one queued reconciliation')
-  assert.match(chatEmbed, /onExternalRunEvent=\{handleExternalRunEvent\}/,
-    'the embed must receive structured start and finish events')
   assert.doesNotMatch(chatView, /onStreamEndRef\.current\?\.\(\)/,
     'system finish reconciliation must not duplicate the stream completion callback')
 })
@@ -268,10 +251,7 @@ test('a benign pause (no reset time) renders the calm "Paused" family, not red E
     'the Paused heading uses the exact same accent token as Resume')
   assert.match(errorCard, /Möbius will continue automatically when the restart is complete\./,
     'the restart pause briefly states its expected automatic outcome')
-  assert.match(errorCard, /restartAutoContinue[\s\S]*?This response is paused\./,
-    'only an owned restart continuation may promise an automatic outcome')
-  assert.match(msgContent,
-    /restartAutoContinue=\{recoveryOwner && block\.pause\?\.kind === 'restart'\}/,
+  assert.match(errorCard, /block\.resumable[\s\S]*?This response is paused\./,
     'a question-held restart cannot promise continuation before the owner answers')
   assert.match(chatView, /Response paused for restart\. Möbius will continue automatically\./,
     'the screen-reader status matches the visible automatic continuation promise')
@@ -281,6 +261,23 @@ test('a benign pause (no reset time) renders the calm "Paused" family, not red E
     'the global live region announces waits; only genuine failures alert here')
   assert.match(errorCard, /className="chat__error-status"[\s\S]*<\/div>\s*\{children\}/,
     'interactive recovery controls must remain separate from the error body')
+})
+
+test('resource parks appear in the standard Waiting surface', () => {
+  assert.match(chatView, /const resourcePause = isResourcePause\(pendingResumeBlock\)/,
+    'the durable tail pause must drive the live waiting presentation')
+  assert.match(chatView, /chatHasSelfResumingHandoff\(\{[\s\S]*resourcePause,[\s\S]*\}\)/,
+    'resource waits must share the self-resuming handoff visibility rule')
+  assert.match(chatView, /<WaitingChip[\s\S]*resourcePause=\{resourcePause\}/,
+    'the standard Waiting component must receive the resource handoff')
+  assert.match(waitingChip, /function ResourceCard/,
+    'the shared Waiting surface should explain resource ownership and wake-up')
+  assert.match(chatView, /const hasPendingResume = !!pendingResumeBlock[\s\S]*&& !resourcePause/,
+    'an automatically managed resource wait must not advertise a manual resume nudge')
+  assert.match(msgContent, /manualResumeAvailable = recoveryOwner && !resourceWait/,
+    'an automatically managed resource wait must not offer a retry that simply re-parks')
+  assert.match(chatView, /Waiting for storage headroom\. This chat will resume automatically\./,
+    'the screen-reader status must describe the actual automatic handoff')
 })
 
 test('the park card keeps provider mechanics behind progressive disclosure', () => {
@@ -299,19 +296,31 @@ test('the park card keeps provider mechanics behind progressive disclosure', () 
 })
 
 
-test('platform resource pauses use Waiting and never expose manual Resume', () => {
-  const storage = { pause: { kind: 'storage', resets_at: '2026-09-04T20:00:00Z' } }
-  const memory = { pause: { kind: 'memory' } }
-  assert.equal(isResourcePause(storage), true)
-  assert.equal(isResourcePause(memory), true)
-  assert.equal(isResourcePause({ pause: { kind: 'rate_limit' } }), false)
-  assert.equal(resourcePauseLabel(storage), 'Waiting for storage headroom')
-  assert.equal(resourcePauseLabel(memory), 'Waiting for memory headroom')
-  assert.match(msgContent, /manualResumeAvailable = recoveryOwner && !resourceWait/)
-  assert.match(chatView, /const pendingLimitResetAt = resourcePause[\s\S]*\? null/)
-  assert.match(chatView, /armedWaits.length > 0 \|\| resourcePause/)
-  assert.match(chatView, /const resumeStatus = \(\(\) => \{[\s\S]*if \(resourcePause\)[\s\S]*if \(!pendingResumeBlock\) return null/)
-  assert.match(waitingChip, /resourcePause && \(/)
-  assert.match(waitingChip, /Waiting for storage headroom/)
-  assert.doesNotMatch(waitingChip, /onCancel\?\.\(resourcePause/)
+test('Goal handoff pauses use calm actionable copy, including saved legacy notes', () => {
+  for (const block of [
+    { type: 'error', resumable: true, pause: { kind: 'goal_handoff' } },
+    { type: 'error', resumable: true, message: 'This Goal paused repeatedly without a visible owner for the next action. Resume it to continue; before pausing again, use a question card, a durable wait, or a wake-enabled helper.' },
+  ]) {
+    const html = renderToStaticMarkup(createElement(ErrorCard, { block }))
+    assert.match(html, /chat__text--parked/)
+    assert.match(html, /Goal paused/)
+    assert.match(html, /Your progress is saved/)
+    assert.match(html, /Resume to continue this Goal/)
+    assert.doesNotMatch(html, /wake-enabled|visible owner|role="alert"|continue automatically/)
+  }
+})
+
+test('a genuine resumable failure remains an error, not a Goal pause', (t) => {
+  const previousWindow = globalThis.window
+  globalThis.window = { location: { href: 'https://mobius.test/' } }
+  t.after(() => {
+    if (previousWindow === undefined) delete globalThis.window
+    else globalThis.window = previousWindow
+  })
+  const html = renderToStaticMarkup(createElement(ErrorCard, {
+    block: { type: 'error', resumable: true, message: 'Connection failed' },
+  }))
+  assert.match(html, /role="alert"/)
+  assert.match(html, /Connection failed/)
+  assert.doesNotMatch(html, /chat__text--parked|Goal paused/)
 })

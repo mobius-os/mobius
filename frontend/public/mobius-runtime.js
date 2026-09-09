@@ -3943,7 +3943,8 @@ function cleanText(value, maximum = 256) {
 /** Host-mediated Projects access for opaque mini-app frames.
 *
 * The shell attributes every request to the exact AppCanvas window and only
-* exposes projects created from that app's own installed templates. Apps never
+* exposes projects created from that app's own installed templates. Pages can
+* additionally add its own eligible builder output through the attributed host. Apps never
 * receive the owner's bearer token or arbitrary project filesystem access.
 */
 function makeProjects() {
@@ -3978,12 +3979,14 @@ function makeProjects() {
 				requestId,
 				action,
 				projectId: cleanText(payload.projectId, 128),
+				sourceId: cleanText(payload.sourceId, 128),
 				templateId: cleanText(payload.templateId, 128),
 				name: cleanText(payload.name)
 			}, window.location.origin);
 		});
 	}
 	return {
+		templates: () => request("templates"),
 		list: () => request("list"),
 		migrate: () => request("migrate"),
 		create: ({ templateId, name } = {}) => request("create", {
@@ -3992,6 +3995,8 @@ function makeProjects() {
 		}),
 		open: (projectId) => request("open", { projectId }),
 		browse: () => request("browse"),
+		importSources: () => request("import-sources"),
+		importSource: (sourceId) => request("import-source", { sourceId }),
 		_destroy() {
 			window.removeEventListener("message", onMessage);
 			for (const value of pending.values()) {

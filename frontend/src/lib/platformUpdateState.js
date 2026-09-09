@@ -65,13 +65,16 @@ export function platformUpdateStatusLabel(platform) {
   }
   if (state === 'conflict') return 'Update blocked'
   if (state === 'rolled_back') return 'Update needs repair'
+  if (requiresAgentActivation(platform?.activation)) return 'Update needs help'
   if (activationLevel !== 'live' && available) return 'More updates available'
   if (
     activationLevel === 'server_restart'
     || activationLevel === 'dependency_sync'
   ) return 'Ready to restart'
-  if (requiresAgentActivation(platform?.activation)) return 'Update needs attention'
-  if (activationLevel === 'image_rebuild') return 'Ready to finish update'
+  if (activationLevel === 'proxy_reload') return 'Proxy reload required'
+  if (activationLevel === 'container_recreate') return 'Deployment required'
+  if (activationLevel === 'image_rebuild') return 'Image rebuild required'
+  if (activationLevel === 'host_maintenance') return 'Finish this update on your server'
   if (available) return 'New update available'
   return 'Up to date'
 }
@@ -95,44 +98,32 @@ export function deploymentKindLabel(activation) {
   return deploymentKind(activation) === 'railway' ? 'Railway' : 'Self-hosted'
 }
 
-/**
- * An image-level update is finished by rebuilding the container, on both
- * deployments. Railway cuts over to the pinned GHCR image; self-hosted applies
- * the reviewed source in place and then rebuilds the matching sha-<target>
- * image via the host helper. Either way the single reviewed-update confirmation
- * drives the rebuild — there is no separate manual rebuild step.
- */
-export function reviewedUpdateUsesContainerRebuild(preview) {
-  return preview?.activation?.level === 'image_rebuild' && !requiresAgentActivation(preview.activation)
+/** External actions remain independent even when a release also needs an image. */
+export function requiresAgentActivation(activation) {
+  const routine = new Set(['server_restart', 'dependency_sync', 'image_rebuild'])
+  return activation?.required_actions?.some(action => !routine.has(action)) || false
 }
 
-/**
- * Only Railway pins the rebuild to an immutable GHCR image digest. Self-hosted
- * anchors on the sha-<target> tag, so its reviewed rebuild has no digest and
- * must not be blocked on one.
- */
-export function reviewedRebuildNeedsDigest(preview) {
-  return (
-    reviewedUpdateUsesContainerRebuild(preview)
-    && deploymentKind(preview?.activation) === 'railway'
-  )
+/** Replacement handles image and in-container work, never external configuration. */
+export function reviewedUpdateUsesContainerRebuild(preview) {
+  const activation = preview?.activation
+  return !!activation?.required_actions?.includes('image_rebuild') && !requiresAgentActivation(activation)
 }
 
 export function platformActivationLabel(activation) {
   const labels = {
-    live: 'Ready to update',
-    server_restart: 'Restart to finish',
-    dependency_sync: 'Restart to finish',
-    proxy_reload: 'Update needs attention',
-    container_recreate: 'Update needs attention',
-    image_rebuild: 'Update and restart',
-    host_maintenance: 'Update needs attention',
+    live: 'Live refresh',
+    server_restart: 'Server restart',
+    dependency_sync: 'Dependency update',
+    proxy_reload: 'Proxy reload',
+    container_recreate: 'Container recreation',
+    image_rebuild: 'Image rebuild',
+    host_maintenance: 'Host maintenance',
   }
   return labels[activation?.level] || 'Activation details'
 }
 
-/** External deployment work cannot be completed by an image-only operation. */
-export function requiresAgentActivation(activation) {
-  const actions = activation?.required_actions || [activation?.level]
-  return actions.some(action => ['proxy_reload', 'container_recreate', 'host_maintenance'].includes(action))
+/** The activation level is independent of whether a newer release exists. */
+export function platformActivationLevel(platform) {
+  return platform?.activation?.level || (platform?.needs_restart ? 'server_restart' : 'live')
 }

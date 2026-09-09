@@ -7,6 +7,7 @@ failure and durably fails the run.
 """
 
 import asyncio
+from concurrent.futures import Future
 
 import pytest
 
@@ -56,9 +57,16 @@ async def test_setup_exception_publishes_error_and_fails_run(chat, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_setup_cancellation_still_propagates(chat, monkeypatch):
+  admitted = False
+
+  async def admit(_data_dir):
+    nonlocal admitted
+    admitted = True
+
   async def cancelled_impl(*_args, **_kwargs):
     raise asyncio.CancelledError()
 
+  monkeypatch.setattr(chat_mod, "require_agent_turn_admission", admit)
   monkeypatch.setattr(chat_mod, "_run_chat_impl", cancelled_impl)
   create_broadcast(chat.id)
   try:
@@ -69,13 +77,16 @@ async def test_setup_cancellation_still_propagates(chat, monkeypatch):
       )
   finally:
     remove_broadcast(chat.id)
+  assert admitted is True
 
 
 @pytest.mark.asyncio
-async def test_disk_admission_deferral_parks_for_automatic_retry(
+async def test_disk_admission_deferral_persists_resumable_pause(
   chat, monkeypatch, caplog,
 ):
-  """Disk pressure becomes a truthful automatic wait, not a dead Resume."""
+  """The incident case: a disk-pressure deferral must leave a DURABLE, RESUMABLE
+  pause card (so a reopen shows the reason + Resume affordance), not a transient
+  broadcast that reloads as a saved user message with an empty assistant reply."""
   async def defer(_data_dir):
     raise AgentTurnDeferred(
       "This turn is waiting for storage headroom because only 512 MiB remains.",
@@ -88,19 +99,16 @@ async def test_disk_admission_deferral_parks_for_automatic_retry(
   monkeypatch.setattr(chat_mod, "require_agent_turn_admission", defer)
   monkeypatch.setattr(chat_mod, "_run_chat_impl", must_not_start)
 
-  recovered = []
+  submitted = []
 
-  async def record_recover(
-    chat_id, run_token, *, message="", kind=None, resumable=True,
-    parked_until=None, park_reason=None,
-  ):
-    recovered.append({
-      "chat_id": chat_id, "run_token": run_token,
-      "message": message, "kind": kind, "resumable": resumable,
-      "parked_until": parked_until, "park_reason": park_reason,
-    })
+  class Writer:
+    def submit(self, command):
+      submitted.append(command)
+      ack = Future()
+      ack.set_result(True)
+      return ack
 
-  monkeypatch.setattr(chat_mod, "_recover_wedged_run_strict", record_recover)
+  monkeypatch.setattr(chat_mod, "get_writer", lambda: Writer())
 
   finished = []
 
@@ -125,21 +133,21 @@ async def test_disk_admission_deferral_parks_for_automatic_retry(
   finally:
     remove_broadcast(chat.id)
 
-  # Recovery persists the pause instead of finishing with an empty reply.
-  assert len(recovered) == 1
-  assert recovered[0]["run_token"] == "tok-disk"
-  assert "only 512 MiB remains" in recovered[0]["message"]
-  assert recovered[0]["message"].endswith("Your message is saved.")
-  assert recovered[0]["resumable"] is False
-  assert recovered[0]["kind"] == "storage"
-  assert recovered[0]["park_reason"] == "storage"
-  assert recovered[0]["parked_until"] is not None
-  # Recovery persisted, so the failed-finish fallback is not taken.
+  # A durable, resumable pause was persisted for THIS run — not a bare failed
+  # finish that would reload as an empty assistant bubble.
+  assert len(submitted) == 1
+  recovered = submitted[0]
+  assert recovered.run_token == "tok-disk"
+  block = recovered.interruption_block
+  assert "only 512 MiB remains" in block["message"]
+  assert block["message"].endswith("Your message is saved.")
+  assert block["resumable"] is True
+  assert block["pause"]["kind"] == "storage"
+  # Recovery persisted, so the failed-finish fallback is NOT taken.
   assert finished == []
-  # The live viewer gets the same automatic resource wait and terminal event.
+  # The live viewer still gets a RESUMABLE error card + terminal done.
   err = next(event for event in events if event.get("type") == "error")
-  assert err["pause"]["kind"] == "storage"
-  assert "resumable" not in err
+  assert err["resumable"] is True
   assert err["message"].endswith("Your message is saved.")
   assert [event.get("type") for event in events][-1] == "done"
   # One concise breadcrumb, no traceback allocated while disk is constrained.
@@ -149,75 +157,3 @@ async def test_disk_admission_deferral_parks_for_automatic_retry(
   ]
   assert len(deferral_logs) == 1
   assert deferral_logs[0].exc_info is None
-
-
-@pytest.mark.asyncio
-async def test_disk_admission_recovery_failure_falls_back_to_failed_run(
-  chat, monkeypatch,
-):
-  async def defer(_data_dir):
-    raise AgentTurnDeferred("Storage headroom is still constrained.", resource="storage")
-
-  async def fail_recovery(*_args, **_kwargs):
-    raise RuntimeError("writer unavailable")
-
-  finished = []
-
-  async def record_finish(chat_id, run_token="", terminal_status="completed"):
-    finished.append((chat_id, run_token, terminal_status))
-
-  monkeypatch.setattr(chat_mod, "require_agent_turn_admission", defer)
-  monkeypatch.setattr(chat_mod, "_recover_wedged_run_strict", fail_recovery)
-  monkeypatch.setattr(chat_mod, "_finish_run_strict", record_finish)
-  bc = create_broadcast(chat.id)
-  try:
-    await chat_mod.run_chat(
-      [], chat_id=chat.id, session_id=None, provider_id="codex",
-      run_gen=chat_mod.current_run_generation(chat.id), run_token="tok-fallback",
-    )
-  finally:
-    remove_broadcast(chat.id)
-
-  assert finished == [(chat.id, "tok-fallback", "failed")]
-
-
-@pytest.mark.asyncio
-async def test_stale_disk_deferral_does_not_close_successor_broadcast(
-  chat, monkeypatch,
-):
-  start_gen = chat_mod.current_run_generation(chat.id)
-
-  async def defer_after_successor_started(_data_dir):
-    chat_mod.bump_run_generation(chat.id)
-    raise AgentTurnDeferred(
-      "Storage headroom is still constrained.", resource="storage",
-    )
-
-  async def recover_stale_run(*_args, **_kwargs):
-    return None
-
-  finished = []
-  monkeypatch.setattr(
-    chat_mod, "require_agent_turn_admission", defer_after_successor_started,
-  )
-  monkeypatch.setattr(
-    chat_mod, "_recover_wedged_run_strict", recover_stale_run,
-  )
-  monkeypatch.setattr(
-    chat_mod, "_publish_chat_run_finished", finished.append,
-  )
-  bc = create_broadcast(chat.id)
-  events = []
-  monkeypatch.setattr(bc, "publish", events.append)
-  try:
-    await chat_mod.run_chat(
-      [], chat_id=chat.id, session_id=None, provider_id="codex",
-      run_gen=start_gen, run_token="tok-stale",
-    )
-  finally:
-    remove_broadcast(chat.id)
-
-  assert events == []
-  assert finished == []
-  assert bc.running is True
-  assert bc.completed_at is None

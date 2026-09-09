@@ -5,6 +5,8 @@ import assert from 'node:assert/strict'
 const indexCss = readFileSync(new URL('../../../index.css', import.meta.url), 'utf8')
 const chatCss = readFileSync(new URL('../ChatView.css', import.meta.url), 'utf8')
 const chatInputBar = readFileSync(new URL('../ChatInputBar.jsx', import.meta.url), 'utf8')
+const composerPopover = readFileSync(new URL('../ComposerPopover.jsx', import.meta.url), 'utf8')
+const composerMicIcon = readFileSync(new URL('../ComposerMicIcon.jsx', import.meta.url), 'utf8')
 const chatView = readFileSync(new URL('../ChatView.jsx', import.meta.url), 'utf8')
 const queuedMessages = readFileSync(new URL('../QueuedMessages.jsx', import.meta.url), 'utf8')
 
@@ -30,6 +32,33 @@ test('theme transition does not animate every descendant or expensive shadows', 
     'theme toggles should not animate box-shadow across chat surfaces')
 })
 
+test('Icon Drop shadows fallback tiles without outlining transparent artwork', () => {
+  const iconRule = chatCss.match(
+    /\.composer-plus__icon-drop \.app-icon\s*\{[^}]*\}/,
+  )?.[0] || ''
+  const fallbackRule = chatCss.match(
+    /\.composer-plus__icon-drop \.app-icon:not\(\.is-image\)\s*\{[^}]*\}/,
+  )?.[0] || ''
+
+  assert.doesNotMatch(iconRule, /box-shadow/,
+    'transparent image icons must not inherit a rectangular cast shadow')
+  assert.match(fallbackRule, /box-shadow/,
+    'initials fallbacks still need separation from the chat behind them')
+})
+
+test('Icon Drop waits until a retained chat is visibly observed', () => {
+  assert.match(
+    chatView,
+    /appArtifactsReady=\{builtAppsReady && !hidden\}/,
+    'a hidden retained chat must not present its unread app update',
+  )
+  assert.match(
+    composerPopover,
+    /if \(!appArtifactsReady\) \{[\s\S]*?artifactTouchesRef\.current = null[\s\S]*?setIconDropQueue\(\[\]\)/,
+    'hiding the chat must reset the cue so the next visible observation replays it',
+  )
+})
+
 test('restored chat rows and tool blocks do not replay entrance animation', () => {
   const css = stripComments(indexCss)
 
@@ -37,6 +66,14 @@ test('restored chat rows and tool blocks do not replay entrance animation', () =
     'message rows should stay still when a chat is restored')
   assert.doesNotMatch(css, /\.chat__tool\s*\{[^}]*animation\s*:/,
     'tool blocks should not flicker on streaming/remount updates')
+})
+
+test('the live response cursor stays visible without pulsing for reduced motion', () => {
+  const css = stripComments(chatCss)
+
+  assert.match(css,
+    /@media\s*\(prefers-reduced-motion:\s*reduce\)[\s\S]*?\.chat__cursor\s*\{[^}]*animation:\s*none[^}]*opacity:\s*0\.65/,
+    'reduced-motion users should get a static live marker instead of an indefinite pulse')
 })
 
 test('stop action has no visible circular shell', () => {
@@ -63,6 +100,46 @@ test('primary actions reuse one mounted glyph stack', () => {
   for (const action of ['steer', 'stop', 'send']) {
     assert.match(chatInputBar, new RegExp(`<PrimaryActionGlyphs action="${action}" />`))
   }
+  assert.match(
+    chatInputBar,
+    /<ArrowUp className="chat__action-glyph chat__action-glyph--send" width=\{24\} height=\{24\} \/>/,
+    'Send keeps its established 24px SDK glyph scale',
+  )
+  assert.match(
+    chatInputBar,
+    /<ComposerMicIcon \/>/,
+    'the idle composer action uses its optically matched microphone wrapper',
+  )
+  assert.match(
+    composerMicIcon,
+    /import \{ Mic \} from '@openai\/apps-sdk-ui\/components\/Icon'/,
+    'the microphone remains sourced from the OpenAI Apps SDK',
+  )
+  assert.match(
+    composerMicIcon,
+    /const SIZE = 22/,
+    'the microphone keeps the artifact-approved 22px scale',
+  )
+  assert.match(
+    composerMicIcon,
+    /const EROSION_RADIUS = 0\.1/,
+    'the microphone keeps the artifact-approved 1.8-unit optical weight',
+  )
+  assert.match(
+    composerMicIcon,
+    /useId\(\)/,
+    'each mounted composer owns a unique SVG filter id',
+  )
+  assert.match(
+    composerMicIcon,
+    /<feMorphology[\s\S]*radius=\{EROSION_RADIUS\}/,
+    'the SDK glyph is optically lightened without redrawing it',
+  )
+  assert.match(
+    chatCss,
+    /\.chat__action-glyph--send path\s*\{[^}]*stroke:\s*currentColor[^}]*stroke-width:\s*0\.24/,
+    'Send receives the small optical weight correction owned by its SDK path',
+  )
   assert.match(
     chatInputBar,
     /<Stop className="chat__action-glyph chat__action-glyph--stop" width=\{28\} height=\{28\} \/>/,
@@ -181,46 +258,58 @@ test('running activity uses a masked solid-text sweep, not gradient-clipped text
     'the base or sweep text must never depend on transparent text fill')
 })
 
-test('queued row actions share full touch targets with compact visible wells', () => {
+test('queued row actions are compact and evenly spaced in send · edit · cancel order', () => {
   const css = stripComments(chatCss)
   const trayRule = css.match(/\.queued\s*\{[^}]*\}/)?.[0] || ''
   const rowRule = css.match(/\.queued__row\s*\{[^}]*\}/)?.[0] || ''
   const toggleRule = css.match(/\.queued__toggle\s*\{[^}]*\}/)?.[0] || ''
   const actionRule = css.match(/\.queued__action\s*\{[^}]*\}/)?.[0] || ''
-  const wellRule = css.match(/\.queued__action::before\s*\{[^}]*\}/)?.[0] || ''
-  const iconRule = css.match(/\.queued__action svg\s*\{[^}]*\}/)?.[0] || ''
-  const steerRule = css.match(/\.queued__steer\s*\{[^}]*\}/)?.[0] || ''
-  const cancelRule = css.match(/\.queued__cancel\s*\{[^}]*\}/)?.[0] || ''
-  const focusWellRule = css.match(/\.queued__action:focus-visible::before\s*\{[^}]*\}/)?.[0] || ''
+  const gapRule = css.match(/\.queued__action \+ \.queued__action\s*\{[^}]*\}/)?.[0] || ''
+  const focusRule = css.match(/\.queued__action:focus-visible\s*\{[^}]*\}/)?.[0] || ''
 
   assert.match(trayRule, /width:\s*100%/,
     'the flex-item tray must shrink with the composer instead of resolving to its 720px maximum')
   assert.match(trayRule, /max-width:\s*720px/)
   assert.match(rowRule, /gap:\s*0/,
-    'adjacent action targets should not carry an extra flex gap')
+    'even action spacing is owned by the actions, not a row gap')
   assert.match(toggleRule, /margin-right:\s*4px/,
-    'text keeps its breathing room independently of the adjacent action pair')
-  assert.match(actionRule, /width:\s*44px/)
-  assert.match(actionRule, /height:\s*44px/)
-  assert.match(wellRule, /width:\s*30px/)
-  assert.match(wellRule, /height:\s*30px/)
-  assert.match(wellRule, /transform:\s*translateX\(var\(--queued-action-visual-shift\)\)/)
-  assert.match(iconRule, /transform:\s*translateX\(var\(--queued-action-visual-shift\)\)/,
-    'the well and icon should move together inside the stationary touch target')
-  assert.match(steerRule, /--queued-action-visual-shift:\s*3px/)
-  assert.match(cancelRule, /--queued-action-visual-shift:\s*-3px/,
-    'the two 30px visuals move inward while their 44px targets remain adjacent')
-  assert.doesNotMatch(steerRule, /\bcolor:|\bbackground:/,
-    'fast-forward should inherit the neutral action treatment at rest')
-  assert.doesNotMatch(css, /\.queued__steer::before\s*\{/,
-    'fast-forward should inherit the neutral action well at rest')
+    'text keeps its breathing room independently of the adjacent action row')
+
+  // Compact wells: the button IS the 30px visible well now — no oversized
+  // transparent target eating the queued message's width.
+  assert.match(actionRule, /width:\s*30px/)
+  assert.match(actionRule, /height:\s*30px/)
+  assert.doesNotMatch(actionRule, /width:\s*44px/,
+    'the actions should no longer reserve an oversized transparent target')
+
+  // One uniform, tight gap between every action.
+  assert.match(gapRule, /margin-left:\s*3px/,
+    'adjacent actions share a single consistent gap')
+
+  // The per-button nudge hack and the separate visible well are retired.
+  assert.doesNotMatch(css, /--queued-action-visual-shift/,
+    'even spacing must not depend on per-button visual shifts')
+  assert.doesNotMatch(css, /\.queued__action::before/,
+    'the action button is its own visible well now')
+
+  assert.match(focusRule, /box-shadow:\s*0 0 0 2px var\(--accent\)/,
+    'keyboard focus rings the visible well')
   assert.match(css, /\.queued__steer:not\(:disabled\):hover/,
-    'disabled fast-forward controls should not pick up hover emphasis')
-  assert.match(focusWellRule, /box-shadow:\s*0 0 0 2px var\(--accent\)/,
-    'keyboard focus should follow the visible well inside the full touch target')
+    'fast-forward reveals accent emphasis only on interaction')
+  assert.match(css, /\.queued__cancel:not\(:disabled\):hover/,
+    'cancel reveals destructive emphasis only on interaction')
+
+  // Icons present and ordered send (steer) · edit · cancel in the DOM.
   assert.match(queuedMessages, /className="queued__action queued__steer"/)
+  assert.match(queuedMessages, /className="queued__action queued__edit"/)
   assert.match(queuedMessages, /className="queued__action queued__cancel"/)
+  assert.match(
+    queuedMessages,
+    /queued__steer[\s\S]*?queued__edit[\s\S]*?queued__cancel/,
+    'DOM order is send · edit · cancel',
+  )
   assert.match(queuedMessages, /<DoubleChevronRight width=\{16\} height=\{16\}/)
+  assert.match(queuedMessages, /<Pencil width=\{16\} height=\{16\}/)
   assert.match(queuedMessages, /<X width=\{16\} height=\{16\}/)
 })
 

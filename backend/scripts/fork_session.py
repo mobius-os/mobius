@@ -319,6 +319,11 @@ async def _fork_codex_async(
 
   env = _coaching_env()
   env.setdefault("CODEX_HOME", "/data/cli-auth/codex")
+  codex_home = Path(env["CODEX_HOME"]).resolve()
+  try:
+    data_dir = codex_home.parents[1]
+  except IndexError as exc:
+    raise ForkError("Codex home cannot resolve its storage owner") from exc
   config_overrides = _codex_mcp_isolation_overrides(
     cwd,
     env,
@@ -331,20 +336,26 @@ async def _fork_codex_async(
     client_name="mobius_agent_coaching",
     client_title="Möbius Agent Coaching",
   )
-  async with AsyncCodex(config) as codex:
-    thread = await codex.thread_fork(
-      source_session_id,
-      approval_mode=ApprovalMode.deny_all,
-      cwd=cwd,
-      sandbox=Sandbox.read_only,
-    )
-    await _assert_codex_mcp_isolated(codex, str(thread.id or ""))
-    result = await thread.run(
-      prompt,
-      approval_mode=ApprovalMode.deny_all,
-      cwd=cwd,
-      sandbox=Sandbox.read_only,
-    )
+  from app.codex_session_lock import acquire_codex_session_activity_async
+
+  ownership = await acquire_codex_session_activity_async(data_dir)
+  try:
+    async with AsyncCodex(config) as codex:
+      thread = await codex.thread_fork(
+        source_session_id,
+        approval_mode=ApprovalMode.deny_all,
+        cwd=cwd,
+        sandbox=Sandbox.read_only,
+      )
+      await _assert_codex_mcp_isolated(codex, str(thread.id or ""))
+      result = await thread.run(
+        prompt,
+        approval_mode=ApprovalMode.deny_all,
+        cwd=cwd,
+        sandbox=Sandbox.read_only,
+      )
+  finally:
+    ownership.release()
 
   if result.error is not None:
     raise ForkError(f"Codex exact-session fork turn failed: {result.error}")

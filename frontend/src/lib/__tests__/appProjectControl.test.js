@@ -202,3 +202,75 @@ test('legacy migration imports only this app and returns narrow refreshed projec
   }]])
   assert.deepEqual(result, [runtimeView(own)])
 })
+
+ test('template discovery exposes only this installed app and no private contract fields', async () => {
+  const h = harness({ templates: [
+    { key: 'renamed:game', id: 'game', source_app_id: 7, name: 'Canvas game', kind: 'game', description: 'Play', guidance: 'private', files: { secret: 'path' } },
+    { key: 'foreign:game', id: 'game', source_app_id: 8, name: 'Other' },
+  ] })
+  assert.deepEqual(await handleAppProjectsRequest(h.options, { action: 'templates' }), [
+    { key: 'renamed:game', id: 'game', name: 'Canvas game', kind: 'game', description: 'Play' },
+  ])
+  assert.deepEqual(h.opened, [])
+})
+
+test('Pages discovers only its own linked eligible sources, without source paths or app inventory', async () => {
+  const h = harness()
+  h.options.app = { id: 9, slug: 'pages' }
+  h.options.client.importSources = async () => response({ management: 'linked', apps: [{ id: 'secret' }], artifacts: [
+    { id: 'site', name: 'Site', kind: 'artifact', catalog_app_id: 9, private: 'omit' },
+    { id: 'foreign', name: 'Foreign', kind: 'artifact', catalog_app_id: 8 },
+  ] })
+  assert.deepEqual(await handleAppProjectsRequest(h.options, { action: 'import-sources' }), [{ id: 'site', name: 'Site' }])
+})
+
+test('other apps cannot discover or import Pages sources even with a forged source id', async () => {
+  const h = harness()
+  h.options.client.importSources = () => { throw new Error('must not fetch') }
+  for (const action of ['import-sources', 'import-source']) {
+    await assert.rejects(handleAppProjectsRequest(h.options, { action, sourceId: 'site' }), /unavailable to this app/)
+  }
+})
+
+test('an old copy-import server exposes no eligible sources and cannot be invoked', async () => {
+  const h = harness()
+  h.options.app = { id: 9, slug: 'pages' }
+  h.options.client.importSources = async () => response({ artifacts: [{ id: 'site', kind: 'artifact', catalog_app_id: 9 }] })
+  h.options.client.importSource = () => { throw new Error('must not import') }
+  assert.deepEqual(await handleAppProjectsRequest(h.options, { action: 'import-sources' }), [])
+  await assert.rejects(handleAppProjectsRequest(h.options, { action: 'import-source', sourceId: 'site' }), /server update/)
+})
+
+test('Pages imports its eligible source and opens the linked Project, exposing only the narrow result', async () => {
+  const linked = project({ id: 'linked', template: { id: 'website', imported_from: { management: 'linked', kind: 'artifact', id: 'site' } } })
+  const h = harness({ projects: [linked] })
+  h.options.app = { id: 9, slug: 'pages' }
+  h.options.client.importSources = async () => response({ management: 'linked', artifacts: [{ id: 'site', kind: 'artifact', catalog_app_id: 9 }] })
+  h.options.client.importSource = async body => { h.calls.push(body); return response(linked) }
+  assert.deepEqual(await handleAppProjectsRequest(h.options, { action: 'import-source', sourceId: 'site', kind: 'app' }), runtimeView(linked))
+  assert.deepEqual(h.calls, [{ kind: 'artifact', source_id: 'site' }])
+  assert.deepEqual(h.opened, [linked])
+})
+
+test('already-managed or foreign sources are hidden and stale import actions cannot mutate', async () => {
+  const h = harness()
+  h.options.app = { id: 9, slug: 'pages' }
+  h.options.client.importSources = async () => response({ management: 'linked', artifacts: [{ id: 'foreign', kind: 'artifact', catalog_app_id: 8 }] })
+  h.options.client.importSource = () => { throw new Error('must not import') }
+  assert.deepEqual(await handleAppProjectsRequest(h.options, { action: 'import-sources' }), [])
+  for (const sourceId of ['managed', 'foreign', '../escape']) {
+    await assert.rejects(handleAppProjectsRequest(h.options, { action: 'import-source', sourceId }), /already managed/)
+  }
+  assert.deepEqual(h.opened, [])
+})
+
+test('Pages never opens a copied or mismatched import result', async () => {
+  for (const imported_from of [{ kind: 'artifact', id: 'site' }, { management: 'linked', kind: 'app', id: 'site' }]) {
+    const h = harness()
+    h.options.app = { id: 9, slug: 'pages' }
+    h.options.client.importSources = async () => response({ management: 'linked', artifacts: [{ id: 'site', kind: 'artifact', catalog_app_id: 9 }] })
+    h.options.client.importSource = async () => response(project({ id: 'wrong', template: { id: 'website', imported_from } }))
+    await assert.rejects(handleAppProjectsRequest(h.options, { action: 'import-source', sourceId: 'site' }), /did not return a linked/)
+    assert.deepEqual(h.opened, [])
+  }
+})

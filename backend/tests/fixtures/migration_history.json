@@ -31,6 +31,25 @@
     "0027_chat_run_goal_identity_index": "213e23f55bfe5c17cfea96624ac797364508c0c2523407b1e798db9598e216e2",
     "0028_agent_coordination_rooms": "23f936f3e9b0ff5580322c7d32b78393c253ad685ce27efbb9ba8886366b6d9c",
     "0029_agent_coordination_send_identity": "5d6c0bf326820967914d2371d59de899fca25fbc9108a457ace4b1f107251fee",
-    "0030_agent_coordination_send_target": "3136ced66edcd905cedf8725bfe45e480090948cbd7a66402976277f2a07265d"
+    "0030_agent_coordination_send_target": "3136ced66edcd905cedf8725bfe45e480090948cbd7a66402976277f2a07265d",
+    "0031_chat_retention_orphan_repair": "20b010b0fe43c56d2edd3902d26161bf914a168d0d06e4a072880058e415dac5",
+    "0032_owner_auth_mode": "106840d814ce9d7c89a6e54af08434c5fa3cafeff898f7bb4fb11e8b15877af5",
+    "0033_shared_app_retention": "44d4501813e2c71e654ae3301f8f6fdd5ff588664196e3e82f2c89e27d12731f",
+    "0034_shared_app_path_state": "72f7efdf7900bd6df9692a6e8234221f8283dacf13792495ec955ea34d278b65",
+    "0035_project_artifact_drawer_state": "261563d75110d69ed79599c1a6753f1b8121db68b3da5407f42224fa874278a3",
+    "0036_chat_app_artifacts": "066e3c07a91e370c321f4593bd79a37971035943e2d16d5247031f4c2f5b0d91",
+    "0037_explicit_active_chat_models": "e66b0bbd54beb9a42658b2f8063bfe50084ba46104615830f7a309bdde79f356",
+    "0038_repair_active_chat_model_gaps": "7860fb1d0da1d2bc3b2c48e63a4cc5b9c533de9d046575a03651c1c5f313f240",
+    "0039_agent_work_claim_history": "651fb5a456274507c45f403235b431f760f79065c98c21403ca603a334e6e961",
+    "0040_provider_execution_admission": "f77a6f2c0149235520bfc00e63c6cd0adbb45f43a85ff41ff835d41a2f06c047",
+    "0041_app_runtime_revision": "10fc03a93b289f247831bd5a25eacc5821d40e638d13579e3534eac405ad179e",
+    "0042_linked_app_project_runtime": "910a426e80717c247c1388b8606137ad779ec8cd8c91cfd776fd57fbb41ec4e7",
+    "0043_agent_coordination_delivery": "0b094ca4e24fc60c74594b2780e9be50ffa56ed589ac4e5378980f070359f54b",
+    "0044_peer_context_delivery_cursor": "32c34245bda61b0ebde7ab0713508cbf0b3085f8a8a47e61ddef87834c6ee2cd",
+    "0045_chat_live_assistants": "bf382c9fbdb0e220e8e4988e0d0051b57530bbde2822f05f9acbda9c2063a656",
+    "0046_chat_run_activity_delivery": "d4a2ac353a1fc957385165fca65083264bd142eba9c92033b847d990586704ac",
+    "0047_chat_activity_positions": "cab5468cf8eac1a0a6fb5ee2405b07cd157af9241a8e04b98ff1e042242b2b8e",
+    "0048_delegation_result_incorporation": "7721d64f39e079ce89efdbe6e7ffec07b79918601a82e2c195c3ef28691562e6",
+    "0048_typed_platform_activation_waits": "527554848dd071bcc9040eb08e23373c240d79b5eae650cb5d32138b97de5c4d"
   }
 }

@@ -191,14 +191,26 @@ class Settings(BaseSettings):
         client_origin, "MOBIUS_ACCOUNT_CLIENT_ORIGIN",
       )
     else:
-      try:
-        self.mobius_account_client_origin = _validated_origin(
-          self.frontend_origin, "FRONTEND_ORIGIN",
+      # Derive the cross-origin account origin without any manual setup. Prefer
+      # the frontend origin (which already reflects a custom DOMAIN or the
+      # Railway domain when DOMAIN was left at its default), then fall back to
+      # Railway's injected public domain directly so a fresh Railway deploy can
+      # link an identity even when the frontend origin was left non-HTTPS.
+      # Non-loopback HTTP remains supported for an entirely local Möbius, but it
+      # cannot be entrusted with a cross-origin account grant, so it resolves to
+      # empty rather than being silently trusted.
+      candidates = [(self.frontend_origin, "FRONTEND_ORIGIN")]
+      if railway_domain:
+        candidates.append(
+          (f"https://{railway_domain}", "RAILWAY_PUBLIC_DOMAIN"),
         )
-      except ValueError:
-        # Non-loopback HTTP remains supported for an entirely local Möbius,
-        # but it cannot be entrusted with a cross-origin account grant.
-        self.mobius_account_client_origin = ""
+      self.mobius_account_client_origin = ""
+      for candidate, label in candidates:
+        try:
+          self.mobius_account_client_origin = _validated_origin(candidate, label)
+          break
+        except ValueError:
+          continue
     return self
 
   @property

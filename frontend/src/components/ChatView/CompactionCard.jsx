@@ -1,9 +1,7 @@
+import { Collapse } from '@openai/apps-sdk-ui/components/Icon'
 import { StandardMarkdown } from './markdown/BlockRenderer.jsx'
 import MarkerCard from './MarkerCard.jsx'
-import {
-  compactionBrief,
-  compactionProviderLabel,
-} from './compactionToolBlock.js'
+import { compactionBrief } from './compactionToolBlock.js'
 
 // A compaction message is a product moment, not a tool call: the chat's
 // earlier context was condensed into a portable briefing (so work can
@@ -20,21 +18,24 @@ export default function CompactionCard({ msg }) {
   const brief = compactionBrief(msg)
   // Atomic provider handoffs attach `to_provider`; older compaction rows have
   // neither field and degrade to the plain label.
-  const provider = compactionProviderLabel(msg)
+  const provider = providerLabel(msg)
   const subtitle = provider ? `before switching to ${provider}` : null
 
   // Renders through the shared MarkerCard shell. When `brief` is empty the
   // shell drops the chevron and stays a static labeled divider on its own.
   return (
     <MarkerCard title="Conversation summarized" subtitle={subtitle} icon={
-      /* Two arrows converging into one line — "context condensed". */
-      <svg viewBox="0 0 16 16" width="14" height="14" fill="none"
-        stroke="currentColor" strokeWidth="1.4" strokeLinecap="round"
-        strokeLinejoin="round">
-        <path d="M2 4h12M4 8h8M6 12h4" />
-      </svg>
+      <Collapse width={18} height={18} aria-hidden="true" />
     }>
       {brief ? <StandardMarkdown text={brief} /> : null}
     </MarkerCard>
   )
+}
+
+// Pull a readable provider name off new handoff rows while preserving old rows.
+function providerLabel(msg) {
+  const raw = msg?.to_provider || msg?.provider
+  if (typeof raw !== 'string' || !raw.trim()) return null
+  const known = { claude: 'Claude Code', codex: 'OpenAI Codex' }
+  return known[raw.trim().toLowerCase()] || raw.trim()
 }

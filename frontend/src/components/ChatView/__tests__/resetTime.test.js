@@ -21,9 +21,9 @@ test('null / unparseable input degrades to null (card shows just the message)', 
   assert.equal(formatResetTime('not-a-date'), null)
 })
 
-test('a same-day reset reads "at <time>" — splices to "Resets at …"', () => {
+test('a same-day reset names today explicitly', () => {
   const label = formatResetTime(localNoon(0))
-  assert.match(label, /^at \d/, label)
+  assert.match(label, /^today at \d/, label)
   assert.doesNotMatch(label, /tomorrow|Mon|Tue|Wed|Thu|Fri|Sat|Sun/, label)
 })
 
@@ -32,9 +32,15 @@ test('a next-day reset reads "tomorrow at <time>"', () => {
   assert.match(label, /^tomorrow at \d/, label)
 })
 
-test('a reset several days out reads "<weekday> at <time>"', () => {
-  const label = formatResetTime(localNoon(3))
-  assert.match(label, /^(Mon|Tue|Wed|Thu|Fri|Sat|Sun) at \d/, label)
+test('a reset several days out names its weekday and date', () => {
+  const reset = localNoon(3)
+  const label = formatResetTime(reset)
+  const date = new Date(reset).toLocaleDateString([], {
+    weekday: 'short',
+    month: 'short',
+    day: 'numeric',
+  })
+  assert.match(label, new RegExp(`^${date} at \\d`), label)
 })
 
 test('the label reads naturally after "Resets"', () => {

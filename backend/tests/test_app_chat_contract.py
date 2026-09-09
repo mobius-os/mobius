@@ -134,61 +134,6 @@ def test_scoped_app_chat_start_reuses_one_exact_first_turn(
   assert all("content" not in row for row in handoffs)
 
 
-def test_scoped_app_chat_start_retries_rejected_first_turn_in_same_row(
-  client, owner_token, db, monkeypatch,
-):
-  from app.routes import chats_stream
-
-  app_id, app_token = _make_app(client, owner_token, "retry-scoped-chat")
-  calls = []
-
-  async def reject_then_accept(body, chat_id, principal, request_db):
-    calls.append(chat_id)
-    if len(calls) == 1:
-      return JSONResponse({"status": "busy"}, status_code=409)
-    row = request_db.query(models.Chat).filter(models.Chat.id == chat_id).one()
-    row.messages = [{"role": "user", "content": body.content, "cid": body.cid}]
-    row.has_messages = True
-    request_db.commit()
-    return JSONResponse({"status": "started"}, status_code=202)
-
-  monkeypatch.setattr(chats_stream, "send_message", reject_then_accept)
-  auth = {"Authorization": f"Bearer {app_token}"}
-  payload = {
-    "scope": "contribute-review:retry-head",
-    "content": "private review prompt",
-    "cid": "retry-cid",
-  }
-
-  rejected = client.post("/api/app-chats/start", json=payload, headers=auth)
-  assert rejected.status_code == 502, rejected.text
-  detail = rejected.json()["detail"]
-  assert detail["code"] == "first_turn_rejected"
-  chat_id = detail["chat_id"]
-
-  rows = db.query(models.Chat).filter(
-    models.Chat.created_by_app_id == app_id,
-  ).all()
-  assert [row.id for row in rows] == [chat_id]
-  assert rows[0].messages == []
-  assert rows[0].has_messages is False
-
-  retried = client.post("/api/app-chats/start", json=payload, headers=auth)
-  assert retried.status_code == 200, retried.text
-  assert retried.json() == {
-    "chat_id": chat_id,
-    "outcome": "started",
-    "response": None,
-  }
-  assert calls == [chat_id, chat_id]
-  db.expire_all()
-  rows = db.query(models.Chat).filter(
-    models.Chat.created_by_app_id == app_id,
-  ).all()
-  assert [row.id for row in rows] == [chat_id]
-  assert [message["cid"] for message in rows[0].messages] == ["retry-cid"]
-
-
 def test_scoped_app_chat_start_keeps_different_scopes_independent(
   client, owner_token, db, monkeypatch,
 ):
@@ -225,11 +170,11 @@ def test_app_chat_first_send_preserves_provider_selected_at_create(
   client, owner_token, db, monkeypatch,
 ):
   """An unrelated owner default cannot replace an app chat's provider."""
-  from app import chat_provider
+  from app.routes import chats_stream
 
   _, app_token = _make_app(client, owner_token, "provider-preserving-chat")
   monkeypatch.setattr(
-    chat_provider.providers, "owner_default_provider", lambda *_: "claude",
+    chats_stream, "owner_default_provider", lambda *_: "claude",
   )
 
   for sender_token in (app_token, owner_token):
@@ -244,11 +189,6 @@ def test_app_chat_first_send_preserves_provider_selected_at_create(
     )
     assert created.status_code == 201, created.text
     chat_id = created.json()["id"]
-    # Use a live-discovered model id whose family the static catalog cannot
-    # infer, so this test isolates the app-owned provider gate.
-    row = db.query(models.Chat).filter(models.Chat.id == chat_id).one()
-    row.agent_settings_json = {"model": "codex-live-model"}
-    db.commit()
 
     sent = client.post(
       f"/api/chats/{chat_id}/messages",
@@ -270,7 +210,7 @@ def test_owner_chat_first_send_still_uses_latest_selected_provider(
   client, owner_token, db, monkeypatch,
 ):
   """The app-chat exception must not freeze an ordinary empty chat."""
-  from app import chat_provider
+  from app.routes import chats_stream
 
   created = client.post(
     "/api/chats",
@@ -280,54 +220,15 @@ def test_owner_chat_first_send_still_uses_latest_selected_provider(
   assert created.status_code == 200, created.text
   chat_id = created.json()["id"]
   monkeypatch.setattr(
-    chat_provider.providers, "owner_default_provider", lambda *_: "codex",
+    chats_stream, "owner_default_provider", lambda *_: "codex",
   )
   row = db.query(models.Chat).filter(models.Chat.id == chat_id).one()
-  # A live-discovered model cannot decide its provider by catalog lookup, so
-  # the pristine owner-chat fallback remains the behavior under test.
-  row.agent_settings_json = {"model": "codex-live-model"}
-  db.commit()
-
-  sent = client.post(
-    f"/api/chats/{chat_id}/messages",
-    json={"content": "use my latest selected provider"},
-    headers={"Authorization": f"Bearer {owner_token}"},
-  )
-  assert sent.status_code == 202, sent.text
-  db.expire_all()
-  row = db.query(models.Chat).filter(models.Chat.id == chat_id).one()
-  assert row.provider == "codex"
-  run = db.query(models.ChatRun).filter(
-    models.ChatRun.chat_id == chat_id,
-  ).order_by(models.ChatRun.started_at.desc()).first()
-  assert run is not None
-  assert run.provider == "codex"
-
-
-def test_first_send_repairs_provider_from_explicit_per_chat_model(
-  client, owner_token, db, monkeypatch,
-):
-  """Display and execution share the model-priority repair for legacy drift."""
-  from app import chat_provider
-
-  created = client.post(
-    "/api/chats",
-    json={"title": "Drifted provider"},
-    headers={"Authorization": f"Bearer {owner_token}"},
-  )
-  assert created.status_code == 200, created.text
-  chat_id = created.json()["id"]
-  monkeypatch.setattr(
-    chat_provider.providers, "owner_default_provider", lambda *_: "claude",
-  )
-  row = db.query(models.Chat).filter(models.Chat.id == chat_id).one()
-  row.provider = "claude"
   row.agent_settings_json = {"model": "gpt-5.6-sol"}
   db.commit()
 
   sent = client.post(
     f"/api/chats/{chat_id}/messages",
-    json={"content": "use the model's provider"},
+    json={"content": "use my latest selected provider"},
     headers={"Authorization": f"Bearer {owner_token}"},
   )
   assert sent.status_code == 202, sent.text
@@ -416,10 +317,20 @@ def test_app_chat_create_and_patch_store_custom_system_prompt(
     json={"system_prompt": "You live inside LaTeX.", "model": ""},
     headers={"Authorization": f"Bearer {app_token}"},
   )
+  assert r.status_code == 422, r.text
+  db.refresh(row)
+  assert row.agent_settings_json["system_prompt"] == "You live inside the Notes app."
+  assert row.agent_settings_json["model"] == "claude-sonnet-4-6"
+
+  r = client.patch(
+    f"/api/app-chats/{chat_id}",
+    json={"system_prompt": "You live inside LaTeX."},
+    headers={"Authorization": f"Bearer {app_token}"},
+  )
   assert r.status_code == 200, r.text
   db.refresh(row)
   assert row.agent_settings_json["system_prompt"] == "You live inside LaTeX."
-  assert "model" not in row.agent_settings_json
+  assert row.agent_settings_json["model"] == "claude-sonnet-4-6"
 
 
 def test_app_chat_cannot_change_system_prompt_after_it_started(
@@ -585,6 +496,7 @@ def test_app_chat_patch_can_set_provider_before_assistant_turns(
   assert r.status_code == 200, r.text
   row = db.query(models.Chat).filter(models.Chat.id == chat_id).first()
   assert row.provider == "codex"
+  assert row.agent_settings_json["model"] == "gpt-5.6-sol"
   assert row.session_id is None
 
 

@@ -66,6 +66,17 @@ fragment prChecks on PullRequest {
 }
 """.strip()
 
+_REPOSITORY_HEAD_FRAGMENT = """
+fragment repositoryHead on Repository {
+  defaultBranchRef {
+    name
+    target {
+      ... on Commit { oid }
+    }
+  }
+}
+""".strip()
+
 
 def _contributions_dir(app_id: int) -> Path:
   return Path(get_settings().data_dir) / "apps" / str(app_id) / "contributions"
@@ -154,6 +165,71 @@ def _build_pr_checks_query(
     + _PR_CHECKS_FRAGMENT
   )
   return query, variables
+
+
+def _build_repository_heads_query(
+  repos: list[str],
+) -> tuple[str, dict, dict[str, str]]:
+  """Build one variables-only query for distinct repository default heads.
+
+  Repository names are case-insensitive on GitHub. Stable, first-seen
+  de-duplication prevents two prepared records for the same target from
+  spending two GraphQL fields while retaining the reviewed spelling in the
+  returned alias map.
+  """
+  distinct: list[str] = []
+  seen: set[str] = set()
+  for repo in repos:
+    normalized = str(repo or "").strip()
+    if not _GITHUB_REPO.fullmatch(normalized):
+      continue
+    key = normalized.casefold()
+    if key in seen:
+      continue
+    seen.add(key)
+    distinct.append(normalized)
+
+  var_decls: list[str] = []
+  selections: list[str] = []
+  variables: dict = {}
+  aliases: dict[str, str] = {}
+  for index, repo in enumerate(distinct):
+    alias = f"repo{index}"
+    owner, name = repo.split("/", 1)
+    var_decls.append(f"${alias}o: String!, ${alias}n: String!")
+    variables[f"{alias}o"] = owner
+    variables[f"{alias}n"] = name
+    aliases[alias] = repo
+    selections.append(
+      f"  {alias}: repository(owner: ${alias}o, name: ${alias}n) "
+      "{ ...repositoryHead }"
+    )
+  if not selections:
+    return "", {}, {}
+  query = (
+    "query(" + ", ".join(var_decls) + ") {\n"
+    + "\n".join(selections)
+    + "\n}\n\n"
+    + _REPOSITORY_HEAD_FRAGMENT
+  )
+  return query, variables, aliases
+
+
+def _repository_default_head(node: object) -> tuple[str, str] | None:
+  """Return one repository's (default branch, head SHA), if resolvable."""
+  if not isinstance(node, dict):
+    return None
+  default_ref = node.get("defaultBranchRef")
+  if not isinstance(default_ref, dict):
+    return None
+  target = default_ref.get("target")
+  if not isinstance(target, dict):
+    return None
+  branch = str(default_ref.get("name") or "")
+  head_sha = str(target.get("oid") or "")
+  if not branch or not re.fullmatch(r"[0-9a-fA-F]{40}", head_sha):
+    return None
+  return branch, head_sha.lower()
 
 
 def _normalize_context(ctx: dict) -> dict | None:

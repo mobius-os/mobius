@@ -28,7 +28,7 @@ test('internal artifact and map links become app preview cards', () => {
     appLinkCardFromParagraph(
       paragraph('/shell/?app=artifacts&intent=artifact:tip-calculator', 'Open "Tip Calculator" →'),
     )?.kind,
-    'Artifact',
+    'Page',
   )
   assert.equal(
     appLinkCardFromParagraph(paragraph('/shell/?app=maps&intent=map:future-native-map'))?.appName,

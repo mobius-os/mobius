@@ -40,14 +40,18 @@ test('chat context actions follow model selection and continuation policy', () =
 })
 
 
-test('Changes owns contribution attention without adding a composer card', () => {
+test('the Brain surfaces only work that needs the owner, never a not-upstream-yet nag', () => {
   assert.match(
     composerSource,
-    /useChatChangesOverview\(chatId, initialChangeEntries,[\s\S]*?enabled: Boolean\(!embedded && chatId\)/,
+    /useChatChangesOverview\(chatId, initialChangeEntries,[\s\S]*?enabled: Boolean\(!embedded && chatReady && chatId\)/,
   )
-  assert.match(composerSource, /changesOverview\.needsAction \|\| changesOverview\.workState === 'attention'/)
-  assert.match(composerSource, /composer-plus__attention-dot/)
-  assert.match(composerSource, /Changes need attention\./)
+  assert.doesNotMatch(composerSource, /hasPendingUpstreamWork|pendingUpstreamWork/)
+  assert.doesNotMatch(composerSource, /composer-plus__upstream-warning|composer-plus__attention-diamond/)
+  assert.doesNotMatch(composerSource, /TriangleExclamationErrorWarning/)
+  assert.doesNotMatch(composerSource, /not upstream yet/i)
+  assert.match(composerSource, /composer-plus__activity-dot/)
+  assert.match(composerSource, /changesNeedOwner && \([\s\S]*?composer-popover__row-attention[\s\S]*?Needs you/)
+  assert.doesNotMatch(composerSource, /composer-plus__attention-dot/)
   assert.match(chatViewSource, /initialChangeEntries=\{chatDiffEntries\}/)
   assert.doesNotMatch(chatViewSource, /ContributionReviewCard|contrib-card-stack/)
 })

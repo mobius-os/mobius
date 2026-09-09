@@ -115,7 +115,7 @@ from app.question_bridge import (
   park_question,
 )
 from app.runtime_types import RunnerResult
-from app.usage_metrics import normalize_codex_usage
+from app.usage_metrics import codex_cost_usd, normalize_codex_usage
 from app.runner_registry import RunnerKind, registry
 from app.memory_observability import record_memory_checkpoint_once
 
@@ -170,6 +170,7 @@ def _codex_config_overrides(
   allow_questions: bool = True,
   allow_multi_agent: bool = True,
   allow_goals: bool = True,
+  delegated_read_sandbox: bool = False,
 ) -> list[str]:
   """Assemble the Codex ``CodexConfig.config_overrides`` for a turn.
 
@@ -213,6 +214,19 @@ def _codex_config_overrides(
       "features.multi_agent_v2.tool_namespace=agents",
       "suppress_unstable_features_warning=true",
     ]
+  if delegated_read_sandbox:
+    # The production container blocks the user/mount namespaces required by
+    # Codex's default bubblewrap backend. Read Delegations still need a real
+    # filesystem boundary, so use Codex's own Landlock backend rather than
+    # retrying a failed command outside the sandbox. Do not use this legacy
+    # backend for workspace-write policies: the pinned CLI rejects that
+    # combination instead of enforcing it.
+    overrides += [
+      "features.use_legacy_landlock=true",
+      "features.network_proxy.enabled=true",
+      'features.network_proxy.domains={ "localhost" = "allow", '
+      '"127.0.0.1" = "allow", "::1" = "allow" }',
+    ]
   return overrides
 
 
@@ -228,6 +242,78 @@ def _needs_native_goal_control(
     goal_mode or goal_objective is not None or clear_dismissed_goal
     or fallback_goal_objective is not None
   )
+
+
+async def _start_codex_turn(
+  thread: Any,
+  user_message: str,
+  *,
+  cwd: str,
+  model: str | None,
+  effort: Any,
+  summary: Any,
+  delegated_read: bool,
+  approval_mode: Any,
+) -> Any:
+  """Start one turn, admitting only loopback network for read Delegations.
+
+  The public Python SDK's ``Sandbox.read_only`` preset fixes
+  ``networkAccess`` to false. Recursive Delegations need one narrower thing:
+  access to Möbius's loopback-only delegation API. The app-server network
+  proxy above allowlists only localhost; this turn-level policy enables that
+  already-filtered path without adding filesystem writes or permitting an
+  unsandboxed retry.
+
+  This uses the SDK's generated protocol seam until its public sandbox preset
+  can express read-only plus network. `_sdk_imports` already contract-tests
+  generated symbols for the same reason.
+  """
+  if not delegated_read:
+    return await thread.turn(
+      user_message,
+      cwd=cwd,
+      model=model,
+      effort=effort,
+      summary=summary,
+    )
+
+  from openai_codex.api import (
+    AsyncTurnHandle,
+    _approval_mode_override_settings,
+    _normalize_run_input,
+    _to_wire_input,
+  )
+  from openai_codex.generated.v2_all import (
+    ReadOnlySandboxPolicy,
+    SandboxPolicy,
+    TurnStartParams,
+  )
+
+  await thread._codex._ensure_initialized()
+  wire_input = _to_wire_input(_normalize_run_input(user_message))
+  approval_policy, approvals_reviewer = (
+    _approval_mode_override_settings(approval_mode)
+  )
+  params = TurnStartParams(
+    thread_id=thread.id,
+    input=wire_input,
+    approval_policy=approval_policy,
+    approvals_reviewer=approvals_reviewer,
+    cwd=cwd,
+    effort=effort,
+    model=model,
+    sandbox_policy=SandboxPolicy(root=ReadOnlySandboxPolicy(
+      type="readOnly",
+      network_access=True,
+    )),
+    summary=summary,
+  )
+  started = await thread._codex._client.turn_start(
+    thread.id,
+    wire_input,
+    params=params,
+  )
+  return AsyncTurnHandle(thread._codex, thread.id, started.turn.id)
 
 
 def _codex_app_server_launch_args(
@@ -626,6 +712,13 @@ class ActiveCodexTurn:
     # validation distinguish them without treating a deliberate Stop as an
     # error.
     self._interrupt_requested = False
+    # Set synchronously before finish_after_owner_card()'s first await. A
+    # continuation owner-input card ends the turn on our initiative — like Stop,
+    # terminal validation must read it as "we did this to ourselves" (a clean
+    # TurnStatus.interrupted, not a provider failure) — but it is NOT Stop: it
+    # never clears the pending queue or bumps the chat generation, because the
+    # chat is meant to resume from the owner's answer.
+    self._owner_card_requested = False
     self._finished: asyncio.Future[None] = (
       asyncio.get_running_loop().create_future()
     )
@@ -641,11 +734,44 @@ class ActiveCodexTurn:
       self.turn is not None
       and not self._finished.done()
       and not self._interrupt_requested
+      and not self._owner_card_requested
     )
 
   @property
   def interrupt_requested(self) -> bool:
     return self._interrupt_requested
+
+  @property
+  def owner_card_requested(self) -> bool:
+    """Whether a continuation owner-input card ended this turn on our side."""
+    return self._owner_card_requested
+
+  async def finish_after_owner_card(self) -> None:
+    """End the turn right after a continuation owner-input card commits.
+
+    The card path returns its receipt to the model immediately (unlike native
+    AskUserQuestion, which parks), so nothing stops the model from emitting more
+    text or tools after the card. Interrupt the live turn now so the card is the
+    turn's last action. Distinct from Stop: it marks only `_owner_card_requested`
+    (folded into `stop_requested()` so terminal validation treats the resulting
+    TurnStatus.interrupted as a clean, error-free completion) and never runs
+    Stop's queue-clear / generation-bump, so the owner's saved answer resumes the
+    chat normally. Signal-only — it does not await turn drain, which cannot
+    complete until the in-flight card tool returns the receipt that triggered
+    this call.
+    """
+    if (
+      self._finished.done()
+      or self._interrupt_requested
+      or self._owner_card_requested
+      or self.turn is None
+    ):
+      return
+    self._owner_card_requested = True
+    try:
+      await self.turn.interrupt()
+    except Exception as exc:
+      log.warning("codex owner-card interrupt raised: %s", exc)
 
   async def interrupt(self) -> None:
     """Signals the live turn and waits for runner-side drain."""
@@ -1023,6 +1149,7 @@ def _sdk_imports() -> dict[str, Any]:
     AgentMessageThreadItem,
     CommandExecutionOutputDeltaNotification,
     CommandExecutionThreadItem,
+    CollabAgentToolCallThreadItem,
     ContextCompactedNotification,
     ContextCompactionThreadItem,
     DynamicToolCallThreadItem,
@@ -1036,77 +1163,28 @@ def _sdk_imports() -> dict[str, Any]:
     ItemStartedNotification,
     MessagePhase,
     McpToolCallThreadItem,
+    AccountRateLimitsUpdatedNotification,
     ReasoningSummaryTextDeltaNotification,
     ReasoningTextDeltaNotification,
+    SubAgentActivityKind,
+    SubAgentActivityThreadItem,
+    ThreadStartedNotification,
+    ThreadStatusChangedNotification,
     ThreadTokenUsageUpdatedNotification,
     ThreadGoalGetResponse,
     ThreadGoalStatus,
-    ThreadItem,
-    ThreadTokenUsage,
-    TokenUsageBreakdown,
     TurnCompletedNotification,
     TurnStatus,
     WebSearchThreadItem,
   )
-
-  _enable_web_search_results_passthrough(
-    web_search_type=WebSearchThreadItem,
-    thread_item_type=ThreadItem,
-    started_notification_type=ItemStartedNotification,
-    completed_notification_type=ItemCompletedNotification,
+  # The exact rust-v0.153.3 SDK pin includes the complete collab, sub-agent,
+  # status, and rate-limit surface above. Import it as one contract: accepting
+  # an older partial SDK here would only defer an image mismatch into missing
+  # lifecycle events at runtime. test_codex_sdk_contract locks the symbols and
+  # fields that this runner consumes.
+  _enable_completed_subagent_activity(
+    activity_kind_type=SubAgentActivityKind,
   )
-
-  _enable_cache_write_usage_passthrough(
-    breakdown_type=TokenUsageBreakdown,
-    thread_usage_type=ThreadTokenUsage,
-    notification_type=ThreadTokenUsageUpdatedNotification,
-  )
-  # Multi-agent (collab) types exist only on multi-agent-capable SDKs (the
-  # openai-codex multi_agent_v2 line). Import them defensively in their own
-  # block so an SDK that predates them still boots — a missing type here must
-  # not break the whole runner import. A None entry means "this SDK cannot emit
-  # collab items / spawned-child thread notifications", and every dispatch
-  # branch guards on non-None before its isinstance check. ThreadStartedNotification
-  # rides the same block because the only stream occurrence we act on is a
-  # spawned child announcing itself, which only happens once collab exists.
-  # SubAgentActivityThreadItem (the sub-agent lifecycle marker Codex persists in
-  # the parent thread's item history) landed natively in openai-codex
-  # rust-v0.145.0-alpha.13; importing it here replaces the earlier resume-time
-  # validation-error fallback that reconstructed the thread handle when the SDK
-  # could not parse this variant. Its dispatch is a documented no-op (see
-  # _tool_start_event / _tool_completed_events). test_codex_sdk_contract asserts
-  # this symbol stays importable so a future SDK that renames/drops it fails
-  # loudly instead of silently reintroducing the resume gap.
-  try:
-    from openai_codex.generated.v2_all import (
-      CollabAgentToolCallThreadItem,
-      SubAgentActivityKind,
-      SubAgentActivityThreadItem,
-      ThreadStartedNotification,
-    )
-  except ImportError:
-    CollabAgentToolCallThreadItem = None
-    SubAgentActivityKind = None
-    SubAgentActivityThreadItem = None
-    ThreadStartedNotification = None
-  try:
-    from openai_codex.generated.v2_all import ThreadStatusChangedNotification
-  except ImportError:
-    ThreadStatusChangedNotification = None
-  try:
-    from openai_codex.generated.v2_all import (
-      AccountRateLimitsUpdatedNotification,
-    )
-  except ImportError:
-    # Older Codex SDKs predate structured rate-limit push; the dispatch loop
-    # guards on non-None before its isinstance check, so absence just falls
-    # back to error-text limit detection.
-    AccountRateLimitsUpdatedNotification = None
-
-  if SubAgentActivityKind is not None:
-    _enable_completed_subagent_activity(
-      activity_kind_type=SubAgentActivityKind,
-    )
 
   return {
     "CollabAgentToolCallThreadItem": CollabAgentToolCallThreadItem,
@@ -1166,7 +1244,17 @@ def _sdk_imports() -> dict[str, Any]:
 
 
 def _enable_completed_subagent_activity(*, activity_kind_type: Any) -> None:
-  """Accept the known completion value omitted by the generated SDK enum."""
+  """Accept the completion marker emitted by the matching Codex app-server.
+
+  Codex 0.153.3 persists ``subAgentActivity(kind=completed)`` but the Python
+  models generated from that same tag omit ``completed`` from the enum. That
+  makes ``thread/resume`` fail while parsing otherwise valid history. Keep the
+  compatibility seam at the provider boundary and limited to this known wire
+  value; arbitrary future values must still fail loudly. Once the generated
+  enum includes ``completed`` natively this becomes a no-op.
+  """
+  if activity_kind_type is None:
+    return
   try:
     activity_kind_type("completed")
     return
@@ -1188,59 +1276,14 @@ def _enable_completed_subagent_activity(*, activity_kind_type: Any) -> None:
   activity_kind_type._missing_ = classmethod(_missing)
 
 
-def _enable_web_search_results_passthrough(
-  *,
-  web_search_type: Any,
-  thread_item_type: Any,
-  started_notification_type: Any,
-  completed_notification_type: Any,
-) -> None:
-  """Preserve structured search results during temporary SDK schema drift.
-
-  Codex app-server 0.145 emits ``webSearch.results`` and its Rust protocol plus
-  public app-server documentation declare the field. The generated Python SDK
-  at the same release still omits it and Pydantic silently drops the unknown
-  value before Möbius can turn URLs into source pills.
-
-  Keep extra fields only on this one leaf item, then rebuild the discriminated
-  union and its two notification envelopes. Once the generated type gains a
-  real ``results`` field this is a no-op and normal typed parsing takes over.
-  """
-  if "results" in getattr(web_search_type, "model_fields", {}):
-    return
-  if getattr(web_search_type, "model_config", {}).get("extra") == "allow":
-    return
-  from pydantic import ConfigDict
-
-  config = dict(getattr(web_search_type, "model_config", {}))
-  config["extra"] = "allow"
-  web_search_type.model_config = ConfigDict(**config)
-  web_search_type.model_rebuild(force=True)
-  thread_item_type.model_rebuild(force=True)
-  started_notification_type.model_rebuild(force=True)
-  completed_notification_type.model_rebuild(force=True)
-
-
-def _enable_cache_write_usage_passthrough(
-  *,
-  breakdown_type: Any,
-  thread_usage_type: Any,
-  notification_type: Any,
-) -> None:
-  """Preserve Codex's cache-write counter across generated SDK schema lag."""
-  field = "cache_write_input_tokens"
-  if field in getattr(breakdown_type, "model_fields", {}):
-    return
-  if getattr(breakdown_type, "model_config", {}).get("extra") == "allow":
-    return
-  from pydantic import ConfigDict
-
-  config = dict(getattr(breakdown_type, "model_config", {}))
-  config["extra"] = "allow"
-  breakdown_type.model_config = ConfigDict(**config)
-  breakdown_type.model_rebuild(force=True)
-  thread_usage_type.model_rebuild(force=True)
-  notification_type.model_rebuild(force=True)
+# Owner-facing wording for an unexpected session death. The exception's
+# stderr_tail (Rust logs, apply_patch diagnostics, sandbox warnings) is
+# developer forensics, not owner content — it is preserved in the server log,
+# never leaked into the transcript as an uncopyable wall of internals.
+_TRANSPORT_DEATH_MESSAGE = (
+  "The agent’s session ended unexpectedly and this turn stopped. Your work so "
+  "far is saved — send a message to continue where it left off."
+)
 
 
 def _is_transport_death(exc: BaseException) -> bool:
@@ -1509,15 +1552,38 @@ def _install_request_user_input_handler(
   )
 
 
-def _publish_codex_context_compaction(
-  bc: Any, chat_id: str, provider_id: str = "codex",
-) -> None:
+def _install_delegated_approval_handler(codex: Any, *, chat_id: str) -> None:
+  """Decline any sandbox-bypass request from a delegated child.
+
+  Delegations use ``ApprovalMode.deny_all``, so the app-server should resolve
+  escalation internally without calling its client. Keep this handler as the
+  fail-closed side of that contract: the Python SDK's default callback accepts
+  both request types, which would turn a future wire regression into an
+  unsandboxed child.
+  """
+  def handler(method: str, _params: dict | None) -> dict:
+    if method in {
+      "item/commandExecution/requestApproval",
+      "item/fileChange/requestApproval",
+    }:
+      return {"decision": "decline"}
+    return {}
+
+  if not install_approval_handler(codex, handler):
+    log.warning(
+      "Codex SDK has no _client._sync chain — delegated approval guard "
+      "NOT installed for chat_id=%s (likely a unit-test fake).",
+      chat_id,
+    )
+
+
+def _publish_codex_context_compaction(bc: Any, chat_id: str) -> None:
   """Make provider-native compaction visible without affecting the turn."""
   log.info("Codex context compacted for chat %s", chat_id)
   try:
     bc.publish({
       "type": "context_compacted",
-      "provider": provider_id,
+      "provider": "codex",
     })
   except Exception:
     # Visibility must never interfere with the provider's own compaction or
@@ -1529,7 +1595,7 @@ def _publish_codex_context_compaction(
     )
 
 
-async def run_codex_sdk_turn(
+async def _run_codex_sdk_turn(
   user_message: str,
   session_id: str | None,
   base_env: dict[str, str],
@@ -1592,7 +1658,10 @@ async def run_codex_sdk_turn(
   model = agent_settings.get("model")
   # Admission and effective settings normally reject a cross-provider model
   # before this boundary. Stay strict for legacy/corrupt callers too: silently
-  # substituting a provider model makes the picker contract untruthful.
+  # substituting a provider model makes the picker contract untruthful. This
+  # runner also serves the mobius provider (provider_runtime_kind == codex_sdk),
+  # so validate against the active provider_id rather than a hardcoded 'codex' —
+  # otherwise a legitimate mobius model would be rejected as cross-provider.
   from app.providers import _model_belongs_to_other_provider, get_provider
   if model and _model_belongs_to_other_provider(model, provider_id):
     raise ValueError(
@@ -1646,11 +1715,17 @@ async def run_codex_sdk_turn(
   env["MOBIUS_COORDINATION_ENABLED"] = (
     "1" if coordination_enabled else "0"
   )
+  # Derive the CODEX_HOME fallback from the configured data_dir rather than a
+  # hardcoded /data literal (the only CODEX_HOME site that was not
+  # DATA_DIR-derived — a relocated DATA_DIR would otherwise split provider
+  # telemetry/auth). In practice CodexProvider.build_env already sets this; the
+  # setdefault only matters when base_env omits it.
   if data_dir is None:
     from app.config import get_settings as _get_settings
 
     data_dir = _get_settings().data_dir
-  _ensure_codex_home(env, data_dir)
+  runtime_data_dir = data_dir
+  _ensure_codex_home(env, runtime_data_dir)
 
   # Remote MCP connections are materialized in chat.py while its DB session is
   # still live. Secrets use Codex's env indirection rather than thread config or
@@ -1666,11 +1741,10 @@ async def run_codex_sdk_turn(
   # Delegated children disable those optional tools at this provider-owned seam.
   codex_bin = shutil.which("codex")
   delegated = run_policy is not None
+  restricted = delegated
   from app.platform_tools import codex_turn_mcp_config
   connector_thread_config = codex_turn_mcp_config(
     connector_plan,
-    # Every ordinary live agent shares the provider-neutral peer network,
-    # including durable delegated children.
     control_enabled=True,
     top_level=not delegated,
     coordination_enabled=coordination_enabled,
@@ -1682,9 +1756,12 @@ async def run_codex_sdk_turn(
     fallback_goal_objective=fallback_goal_objective,
   )
   config_overrides = _codex_config_overrides(
-    allow_questions=not delegated,
-    allow_multi_agent=not delegated,
-    allow_goals=not delegated and needs_goal_control,
+    allow_questions=not restricted,
+    allow_multi_agent=True,
+    allow_goals=not restricted and needs_goal_control,
+    delegated_read_sandbox=(
+      delegated and run_policy.scope == "read"
+    ),
   )
   config_overrides.extend(get_provider(provider_id).codex_config_overrides())
   launch_args = _codex_app_server_launch_args(codex_bin, config_overrides)
@@ -1745,9 +1822,16 @@ async def run_codex_sdk_turn(
     chat is still Möbius ending this one. That leg can be true before
     `active_turn` exists, which is deliberate — a teardown during startup is
     no more the provider's fault than one mid-stream.
+
+    Also includes a continuation owner-input card ending the turn: that too is
+    Möbius, not the provider, ending the turn, so its TurnStatus.interrupted is
+    a clean completion rather than a failure. Unlike Stop, the card path does
+    not clear the pending queue or bump the generation — the chat resumes from
+    the owner's saved answer.
     """
     return bool(
       (active_turn is not None and active_turn.interrupt_requested)
+      or (active_turn is not None and active_turn.owner_card_requested)
       or abort_requested()
     )
 
@@ -1759,9 +1843,14 @@ async def run_codex_sdk_turn(
         first_token_usage,
         final_token_usage,
         call_token_usages,
-        model=model,
       )
       result["usage_metrics"] = metrics
+      # Codex reports tokens but no dollar cost; derive it from the rate card so
+      # a Codex chat records real spend like a Claude chat instead of always
+      # $0. Only overrides the caller's None when a priced model + usage exist.
+      cost = codex_cost_usd(model, metrics)
+      if cost is not None:
+        result["cost_usd"] = cost
     return result
 
   def aborted_result() -> RunnerResult:
@@ -1819,7 +1908,9 @@ async def run_codex_sdk_turn(
       # resulting concurrent.futures.Future. That keeps the JSON-RPC
       # round-trip blocked (correct — the app-server is waiting for our
       # response) while letting asyncio handle the user's answer POST.
-      if not delegated:
+      if delegated:
+        _install_delegated_approval_handler(codex, chat_id=chat_id)
+      elif not restricted:
         _install_request_user_input_handler(
           codex,
           loop=asyncio.get_running_loop(),
@@ -1831,10 +1922,12 @@ async def run_codex_sdk_turn(
 
       # Ordinary owner turns use the SDK's `ApprovalMode.auto_review`, which
       # maps to `approvalPolicy=on_request` with an automatic reviewer.
-      # Delegations deny provider-side escalation. Read helpers retain the
-      # SDK's read-only boundary; write helpers deliberately use the container
-      # boundary below because their workspace is /data and bwrap cannot start
-      # under the normal container seccomp policy.
+      # Delegations deny provider-side escalation. Read-only app-servers use
+      # the Landlock override above, so inspection stays mechanically bounded.
+      # Write delegations deliberately use the container boundary below: their
+      # workspace is /data, so workspace_write would not narrow the partner's
+      # data surface, while its bwrap backend cannot start under the normal
+      # container seccomp policy and would make every write helper a no-op.
       approval_mode = (
         sdk["ApprovalMode"].deny_all
         if delegated
@@ -1855,7 +1948,7 @@ async def run_codex_sdk_turn(
       # Möbius's design philosophy
       # ("trust the agent; container is the sandbox") is consistent. The
       # delegated prompt and tool policy still carry the exact project scope;
-      # this only avoids a second write sandbox that cannot function in-container.
+      # this only avoids a second sandbox that cannot function in-container.
       _sandbox = (
         sdk["Sandbox"].read_only
         if delegated and run_policy.scope == "read"
@@ -2055,12 +2148,17 @@ async def run_codex_sdk_turn(
           # "continue" carries no extra content and is intentionally omitted.
           goal_steer_message = user_message
       else:
-        turn = await thread.turn(
+        turn = await _start_codex_turn(
+          thread,
           user_message,
           cwd=cwd,
           model=model,
           effort=effort,
           summary=reasoning_summary,
+          delegated_read=(
+            delegated and run_policy.scope == "read"
+          ),
+          approval_mode=approval_mode,
         )
       if abort_requested():
         try:
@@ -2202,8 +2300,7 @@ async def run_codex_sdk_turn(
           if isinstance(item, sdk["AgentMessageThreadItem"]):
             bc.publish({"type": "text_boundary"})
             continue
-          collab_cls = sdk.get("CollabAgentToolCallThreadItem")
-          if collab_cls is not None and isinstance(item, collab_cls):
+          if isinstance(item, sdk["CollabAgentToolCallThreadItem"]):
             # One provider-neutral Task block hosts every helper activation in
             # this turn. Codex may announce ThreadStarted before or after its
             # collab item, so opening it here is a fallback while the lifecycle
@@ -2274,12 +2371,11 @@ async def run_codex_sdk_turn(
         if isinstance(payload, sdk["ItemCompletedNotification"]):
           item = payload.item.root if hasattr(payload.item, "root") else payload.item
           if isinstance(item, sdk["ContextCompactionThreadItem"]):
-            _publish_codex_context_compaction(bc, chat_id, provider_id)
+            _publish_codex_context_compaction(bc, chat_id)
             continue
           if isinstance(item, sdk["AgentMessageThreadItem"]):
             completed_message_phases.append(_agent_message_phase(item, sdk))
-          collab_cls = sdk.get("CollabAgentToolCallThreadItem")
-          if collab_cls is None or not isinstance(item, collab_cls):
+          if not isinstance(item, sdk["CollabAgentToolCallThreadItem"]):
             for event in _tool_completed_events(item, sdk):
               _stamp_tool_use_id(event, item)
               bc.publish(event)
@@ -2328,11 +2424,10 @@ async def run_codex_sdk_turn(
         if isinstance(payload, sdk["ContextCompactedNotification"]):
           # Compatibility for older app-server releases. Current v2 servers
           # expose compaction as a ContextCompactionThreadItem instead.
-          _publish_codex_context_compaction(bc, chat_id, provider_id)
+          _publish_codex_context_compaction(bc, chat_id)
           continue
 
-        ratelimit_cls = sdk.get("AccountRateLimitsUpdatedNotification")
-        if ratelimit_cls is not None and isinstance(payload, ratelimit_cls):
+        if isinstance(payload, sdk["AccountRateLimitsUpdatedNotification"]):
           _reset, _reached = _extract_rate_limit_reset(
             getattr(payload, "rate_limits", None)
           )
@@ -2342,9 +2437,7 @@ async def run_codex_sdk_turn(
             rate_limit_reached = True
           continue
 
-        if sdk.get("ThreadStartedNotification") is not None and isinstance(
-          payload, sdk["ThreadStartedNotification"]
-        ):
+        if isinstance(payload, sdk["ThreadStartedNotification"]):
           # Never emit session_init (that would repoint the chat to the child),
           # but preserve the child thread's exact spawn time + immediate parent
           # as a normalized lifecycle fact for Workflows.
@@ -2369,8 +2462,7 @@ async def run_codex_sdk_turn(
             record_task_lifecycle(lifecycle)
           continue
 
-        status_cls = sdk.get("ThreadStatusChangedNotification")
-        if status_cls is not None and isinstance(payload, status_cls):
+        if isinstance(payload, sdk["ThreadStatusChangedNotification"]):
           record_task_lifecycle(_thread_status_lifecycle_event(
             payload, root_thread_id=current_session_id,
             active=active_activation_by_child, known=known_child_ids,
@@ -2435,25 +2527,38 @@ async def run_codex_sdk_turn(
         result.setdefault("rate_limit_resets_at", rate_limit_resets_at)
       return result
   except Exception as exc:
-    if _is_transport_death(exc) and stop_requested():
-      # Our own teardown, seen from the inside. A stop interrupts the turn;
-      # when that times out the escalation SIGTERMs the turn's private
-      # process group, so the transport dies mid-stream instead of
-      # delivering turn/completed. That is our requested interruption, not a
-      # provider failure, so it must stay out of the owner-facing transcript.
-      #
-      # Usually expected after escalation, but WARNING is deliberate: a real
-      # app-server crash can coincide with a requested stop and has the same
-      # transport shape. The dying words are the only forensic evidence left
-      # once the owner-facing error is suppressed.
-      log.warning(
-        "Codex transport closed by our own stop chat_id=%s: %s", chat_id, exc,
+    if _is_transport_death(exc):
+      if stop_requested():
+        # Our own teardown, seen from the inside. A stop interrupts the turn;
+        # when that times out the escalation SIGTERMs the turn's private
+        # process group, so the transport dies mid-stream instead of
+        # delivering turn/completed. That is our requested interruption, not a
+        # provider failure, so it must stay out of the owner-facing transcript.
+        #
+        # Usually expected after escalation, but WARNING is deliberate: a real
+        # app-server crash can coincide with a requested stop and has the same
+        # transport shape. The dying words are the only forensic evidence left
+        # once the owner-facing error is suppressed.
+        log.warning(
+          "Codex transport closed by our own stop chat_id=%s: %s", chat_id, exc,
+        )
+        return with_usage({
+          "session_id": current_session_id,
+          "cost_usd": None,
+          "error": None,
+          "terminal_status": _enum_wire_value(sdk["TurnStatus"].interrupted),
+        })
+      # An unexpected death with no stop pending is still a real failure, but
+      # str(exc) is the raw "closed stdout. stderr_tail=..." dump. Log it in
+      # full here (the caller logs the owner-facing string, which is now the
+      # clean message) and hand the owner one honest, copyable line.
+      log.error(
+        "Codex transport closed unexpectedly chat_id=%s: %s", chat_id, exc,
       )
       return with_usage({
         "session_id": current_session_id,
         "cost_usd": None,
-        "error": None,
-        "terminal_status": _enum_wire_value(sdk["TurnStatus"].interrupted),
+        "error": _TRANSPORT_DEATH_MESSAGE,
       })
     return with_usage({
       "session_id": current_session_id,
@@ -2547,6 +2652,27 @@ async def run_codex_sdk_turn(
       codex_call_executor.close()
     if deferred_cancel is not None:
       raise deferred_cancel
+
+
+@functools.wraps(_run_codex_sdk_turn)
+async def run_codex_sdk_turn(*args, **kwargs) -> RunnerResult:
+  """Hold cross-process rollout ownership around the complete Codex runner."""
+  from app.codex_session_lock import acquire_codex_session_activity_async
+
+  data_dir = kwargs.get("data_dir")
+  if data_dir is None:
+    from app.config import get_settings
+
+    data_dir = get_settings().data_dir
+    kwargs["data_dir"] = data_dir
+
+  ownership = await acquire_codex_session_activity_async(
+    data_dir,
+  )
+  try:
+    return await _run_codex_sdk_turn(*args, **kwargs)
+  finally:
+    ownership.release()
 
 
 async def steer_into_active_turn(

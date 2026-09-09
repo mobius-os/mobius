@@ -77,9 +77,9 @@ def _authorization_context(db):
   )
   top_level = auth_mod.create_agent_token(
     top_level_chat_id,
-    "recovery-top-level-run",
     owner.username,
     owner.token_epoch,
+    run_id="recovery-top-level-run",
   )
   return {
     "delegated": {"Authorization": f"Bearer {delegated}"},

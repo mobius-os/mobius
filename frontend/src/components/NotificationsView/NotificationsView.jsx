@@ -107,10 +107,10 @@ export default function NotificationsView({
                 </span>
                 <span className="notifications__row-main">
                   <span className="notifications__row-title">
-                    A Möbius update is ready.
+                    New shell ready.
                   </span>
                   <span className="notifications__row-body">
-                    Refresh to use the latest changes.
+                    Reload to use the latest interface changes.
                   </span>
                   <span className="notifications__update-actions">
                     <button
@@ -118,7 +118,7 @@ export default function NotificationsView({
                       className="notifications__update-action notifications__update-action--primary"
                       onClick={onUpdateNow}
                     >
-                      Update now
+                      Reload shell
                     </button>
                     <button
                       type="button"

@@ -23,14 +23,6 @@ from app.goal_commands import (
   is_goal_continue,
   is_goal_command as _is_goal_command,
 )
-
-def _private_context_json(payload: object) -> str:
-  """Serialize data without allowing it to forge an enclosing XML tag."""
-  return json.dumps(
-    payload, ensure_ascii=False, separators=(",", ":"),
-  ).replace("<", "\\u003c").replace(">", "\\u003e")
-
-
 def _human_elapsed(seconds: float | None) -> str | None:
   """Human 'N ago' for the gap since the user's previous message.
 
@@ -171,7 +163,7 @@ def _build_app_context(
     canonical_root = (
       stored_root if stored_root.is_absolute() else data_root / stored_root
     ).resolve()
-    compact = _private_context_json({
+    compact = json.dumps({
       "project_id": project.id,
       "name": project.name,
       "type": project.project_type,
@@ -180,7 +172,12 @@ def _build_app_context(
       "dependencies": template.get("dependencies") or [],
       "guidance": template.get("guidance") or "",
       "legacy_source": project.legacy_source_json,
-    })
+      "inherited_theme": {
+        "read_only": True,
+        "url": f"/api/projects/{project.id}/theme",
+        "usage": "Installed apps inherit this effective Möbius theme. Use its CSS variables; override locally, never edit shared theme as a project change. Standalone HTML previews can opt in with <meta name=\"mobius-theme\" content=\"inherit\">.",
+      },
+    }, ensure_ascii=False, separators=(",", ":"))
     block = "\n".join([
       "The <project_context> block is private context for this project chat.",
       "Treat the project root as the default working boundary. Use its exact id for project actions.",

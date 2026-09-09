@@ -65,3 +65,20 @@ test('chat controls retain only a correlated status or stop request', () => {
     type: 'moebius:chat-control', requestId: 'chat-control:abc:2', action: 'delete', chatId: '1',
   }), null)
 })
+
+test('open-chat accepts only navigation to Changes, never a preparation or send command', () => {
+  assert.deepEqual(appHostRequest({type:'moebius:open-chat',chatId:'source',view:'changes',draft:'existing feedback',autoSend:true,prepare:true}), {
+    type:'moebius:open-chat',chatId:'source',view:'changes',draft:'existing feedback',
+  })
+  assert.deepEqual(appHostRequest({type:'moebius:open-chat',chatId:'source',view:'prepare'}), {
+    type:'moebius:open-chat',chatId:'source',draft:'',
+  })
+})
+
+test('source import requests retain only the bounded source identity, never a chosen import kind', () => {
+  const result = appHostRequest({ type: 'moebius:projects', requestId: 'projects:abc:1', action: 'import-source', sourceId: 'a'.repeat(200), kind: 'app', token: 'secret' })
+  assert.equal(result.sourceId.length, 128)
+  assert.equal(result.kind, undefined)
+  assert.equal(result.token, undefined)
+  assert.equal(appHostRequest({ type: 'moebius:projects', requestId: 'projects:abc:2', action: 'import-sources' }).action, 'import-sources')
+})

@@ -8,7 +8,6 @@ import {
   platformStatusUnavailable,
   platformUpdateStatusLabel,
   reviewedUpdateUsesContainerRebuild,
-  reviewedRebuildNeedsDigest,
 } from '../platformUpdateState.js'
 
 test('an unavailable release check cannot inherit a cached current claim', () => {
@@ -24,6 +23,13 @@ test('an unavailable release check cannot inherit a cached current claim', () =>
   assert.equal(
     platformUpdateStatusLabel(unavailable), 'Update status unavailable',
   )
+})
+
+test('host maintenance tells the owner where to finish the update', () => {
+  assert.equal(platformUpdateStatusLabel({
+    state: 'activation_needed',
+    activation: { level: 'host_maintenance' },
+  }), 'Finish this update on your server')
 })
 
 test('the deployment classifier stays as binary as the backend that emits it', () => {
@@ -44,31 +50,16 @@ test('the deployment badge names an unresolved deployment self-hosted', () => {
 
 test('reviewed image updates rebuild directly on both deployments', () => {
   assert.equal(reviewedUpdateUsesContainerRebuild({
-    activation: { deployment: 'railway', level: 'image_rebuild' },
+    activation: { deployment: 'railway', level: 'image_rebuild', required_actions: ['image_rebuild'] },
   }), true)
   // Self-hosted image updates now also drive the rebuild from the update flow.
   assert.equal(reviewedUpdateUsesContainerRebuild({
-    activation: { deployment: 'self_hosted', level: 'image_rebuild' },
+    activation: { deployment: 'self_hosted', level: 'image_rebuild', required_actions: ['image_rebuild'] },
   }), true)
   assert.equal(reviewedUpdateUsesContainerRebuild({
     activation: { deployment: 'railway', level: 'server_restart' },
   }), false)
   assert.equal(reviewedUpdateUsesContainerRebuild(null), false)
-})
-
-test('only Railway image rebuilds require a pinned GHCR digest', () => {
-  assert.equal(reviewedRebuildNeedsDigest({
-    activation: { deployment: 'railway', level: 'image_rebuild' },
-  }), true)
-  // Self-hosted anchors on the sha-<target> tag, so no digest is required.
-  assert.equal(reviewedRebuildNeedsDigest({
-    activation: { deployment: 'self_hosted', level: 'image_rebuild' },
-  }), false)
-  // A non-rebuild update never needs a digest.
-  assert.equal(reviewedRebuildNeedsDigest({
-    activation: { deployment: 'railway', level: 'live' },
-  }), false)
-  assert.equal(reviewedRebuildNeedsDigest(null), false)
 })
 
 test('a clean apply consumes the reviewed target but preserves restart readiness', () => {
@@ -96,7 +87,7 @@ test('a clean apply consumes the reviewed target but preserves restart readiness
 
 test('an image-required apply projects the external activation contract', () => {
   const activation = {
-    level: 'image_rebuild',
+    level: 'image_rebuild', required_actions: ['image_rebuild'],
     guidance: ['Rebuild and deploy.'],
   }
   const projected = platformStatusFromApply(
@@ -112,8 +103,8 @@ test('an image-required apply projects the external activation contract', () => 
   assert.equal(projected.available, false)
   assert.equal(projected.needs_restart, false)
   assert.equal(projected.activation, activation)
-  assert.equal(platformActivationLabel(projected.activation), 'Update and restart')
-  assert.equal(platformUpdateStatusLabel(projected), 'Ready to finish update')
+  assert.equal(platformActivationLabel(projected.activation), 'Image rebuild')
+  assert.equal(platformUpdateStatusLabel(projected), 'Image rebuild required')
 })
 
 test('a dependency apply projects an in-place restart, not a rebuild', () => {
@@ -137,7 +128,7 @@ test('a dependency apply projects an in-place restart, not a rebuild', () => {
   assert.equal(projected.needs_restart, true)
   assert.equal(projected.activation, activation)
   assert.equal(
-    platformActivationLabel(projected.activation), 'Restart to finish',
+    platformActivationLabel(projected.activation), 'Dependency update',
   )
   assert.equal(platformUpdateStatusLabel(projected), 'Ready to restart')
 })
@@ -219,7 +210,7 @@ test('update-row copy represents restart and availability independently', () => 
       activation: { level: 'proxy_reload' },
       available: false,
     }),
-    'Update needs attention',
+    'Proxy reload required',
   )
 })
 
@@ -253,14 +244,12 @@ test('a legacy deployment flag does not hide an available in-app update', () => 
   )
 })
 
-for (const deployment of ['railway', 'self_hosted']) {
-  test(`${deployment} mixed external requirements never become an image-only action`, () => {
-    for (const external of ['proxy_reload', 'container_recreate', 'host_maintenance']) {
-      const activation = { level: 'image_rebuild', deployment, required_actions: ['image_rebuild', external] }
-      assert.equal(reviewedUpdateUsesContainerRebuild({ activation }), false)
-    }
-    assert.equal(reviewedUpdateUsesContainerRebuild({ activation: {
-      level: 'image_rebuild', deployment, required_actions: ['image_rebuild'],
-    } }), true)
-  })
-}
+test('routine image replacement requires complete action evidence without external work', () => {
+  for (const external of ['proxy_reload', 'container_recreate', 'host_maintenance']) {
+    const activation = { level: 'image_rebuild', required_actions: ['image_rebuild', external] }
+    assert.equal(reviewedUpdateUsesContainerRebuild({ activation }), false)
+    assert.equal(platformUpdateStatusLabel({ activation }), 'Update needs help')
+  }
+  assert.equal(reviewedUpdateUsesContainerRebuild({ activation: { level: 'image_rebuild' } }), false)
+  assert.equal(reviewedUpdateUsesContainerRebuild({ activation: { level: 'image_rebuild', required_actions: ['server_restart', 'dependency_sync', 'image_rebuild'] } }), true)
+})

@@ -16,10 +16,16 @@ test('plan providers follow typed weekly meaning, not display labels or other li
       { kind: 'other', label: 'Extra usage', used_percent: 75 },
     ],
   }), {
-    kind: 'weekly', label: 'Weekly usage', usedPercent: 58, expiresAt: null,
+    kind: 'weekly',
+    label: 'Weekly usage',
+    usedPercent: 58,
+    expiresAt: null,
   })
   assert.deepEqual(providerAllowance('claude', { state: 'ready', windows: [] }), {
-    kind: 'weekly', label: 'Weekly usage', usedPercent: null, expiresAt: null,
+    kind: 'weekly',
+    label: 'Weekly usage',
+    usedPercent: null,
+    expiresAt: null,
   })
 })
 
@@ -30,15 +36,22 @@ test('Möbius follows typed API-credit usage instead of weekly windows', () => {
       { kind: 'weekly', used_percent: 80 },
       {
         kind: 'api_credits',
-        used_percent: 2.5,
+        used_percent: 0,
+        remaining_percent: 99.98,
         expires_at: '2026-09-07T19:40:34.682998+00:00',
       },
     ],
   }), {
     kind: 'api_credits',
     label: 'API credits usage',
-    usedPercent: 2.5,
+    usedPercent: 0,
     expiresAt: '2026-09-07T19:40:34.682998+00:00',
+  })
+  assert.deepEqual(providerAllowance('mobius', { state: 'unavailable' }), {
+    kind: 'api_credits',
+    label: 'API credits usage',
+    usedPercent: null,
+    expiresAt: null,
   })
 })
 

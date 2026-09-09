@@ -180,8 +180,11 @@ def test_subagent_activity_is_natively_modeled_and_fallback_removed():
   )
   assert "subAgentActivity" in schema
 
-  # The runner imports the native item and admits only the completion value
-  # emitted by the matching app-server but omitted from the generated enum.
+  # The runner imports the native item and hands it to dispatch as a non-None
+  # entry (defensive block, so a predates-it SDK still boots). The matching
+  # 0.152.1 app-server persists a completed marker missing from its generated
+  # Python enum, so the provider boundary accepts that one known wire value
+  # without making arbitrary future schema drift permissive.
   sdk = codex_sdk_runner._sdk_imports()
   assert sdk["SubAgentActivityThreadItem"] is not None
   completed = v2_all.SubAgentActivityThreadItem.model_validate({
@@ -317,19 +320,12 @@ def test_lifecycle_notification_fields_and_status_enums_are_pinned():
   }
 
 
-def test_web_search_results_survive_generated_sdk_schema_lag():
-  """App-server result URLs must reach the source-pill extractor.
-
-  Codex 0.145's Rust protocol emits ``webSearch.results`` while the generated
-  Python leaf model still omits that field. The runner installs a narrow
-  passthrough at import time; validate the real notification union so a future
-  SDK refactor cannot silently resume dropping every search result.
-  """
+def test_web_search_results_are_native_to_the_pinned_sdk():
+  """The exact SDK pin must carry result URLs without a runtime schema patch."""
   pytest.importorskip("openai_codex")
   from openai_codex.generated import v2_all
-  from app import codex_sdk_runner
 
-  codex_sdk_runner._sdk_imports()
+  assert "results" in v2_all.WebSearchThreadItem.model_fields
   payload = v2_all.ItemCompletedNotification.model_validate({
     "completedAtMs": 1,
     "threadId": "thread-1",
@@ -357,13 +353,13 @@ def test_web_search_results_survive_generated_sdk_schema_lag():
   }]
 
 
-def test_cache_write_usage_survives_generated_sdk_schema_evolution():
-  """The cache-write counter reaches normalization on old and new SDKs."""
+def test_cache_write_usage_is_native_to_the_pinned_sdk():
+  """The exact SDK pin must carry cache-write usage as a typed field."""
   pytest.importorskip("openai_codex")
   from openai_codex.generated import v2_all
   from app import codex_sdk_runner
 
-  codex_sdk_runner._sdk_imports()
+  assert "cache_write_input_tokens" in v2_all.TokenUsageBreakdown.model_fields
   breakdown = {
     "inputTokens": 100,
     "cachedInputTokens": 10,
@@ -382,10 +378,7 @@ def test_cache_write_usage_survives_generated_sdk_schema_evolution():
     },
   })
   last = payload.token_usage.last
-  assert (
-    getattr(last, "cache_write_input_tokens", None) == 60
-    or (last.model_extra or {}).get("cacheWriteInputTokens") == 60
-  )
+  assert last.cache_write_input_tokens == 60
   assert codex_sdk_runner.normalize_codex_usage(
     payload.token_usage,
     payload.token_usage,

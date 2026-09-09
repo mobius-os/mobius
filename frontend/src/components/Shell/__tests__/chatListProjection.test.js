@@ -39,6 +39,11 @@ test('run and rename events project only the committed fields they carry', () =>
   const running = withChatRunState(rows, 'a', true)
   assert.equal(running[0].running, true)
   assert.equal(running[0].has_messages, true)
+  assert.equal(
+    running[0].activity_at,
+    rows[0].activity_at,
+    'a run can be a self-resuming wait rather than a new owner interaction',
+  )
   const renamed = withChatRename(running, 'a', {
     title: 'Current topic',
     updatedAt: '2026-08-01T12:30:00Z',

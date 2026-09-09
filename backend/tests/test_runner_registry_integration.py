@@ -206,11 +206,14 @@ def test_codex_runner_registers_then_unregisters_handle(monkeypatch):
         db=None,
       )
     )
-    for _ in range(20):
+    deadline = asyncio.get_running_loop().time() + 1.0
+    while asyncio.get_running_loop().time() < deadline:
+      if task.done():
+        await task
       handle = registry.get_handle("chat-codex", RunnerKind.CODEX_SDK)
       if handle is not None:
         break
-      await asyncio.sleep(0)
+      await asyncio.sleep(0.01)
     else:
       raise AssertionError("codex handle never registered")
 

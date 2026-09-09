@@ -16,10 +16,14 @@ from app.routes import chats_stream
 
 PROMPT = {
   "question": "Restart to activate the tested change? This interrupts active turns.",
+  "work_key": "platform:test-revision:restart",
   "options": [
     {"label": "Not now", "description": "Leave the change pending."},
     {"label": "Restart now", "description": "Interrupt active turns to activate it."},
   ],
+}
+QUESTION_PROMPT = {
+  key: value for key, value in PROMPT.items() if key != "work_key"
 }
 
 
@@ -73,6 +77,76 @@ def _finish(chat, sink):
   return asyncio.run(finish())
 
 
+class _FakeCardHandle:
+  """A registered runner handle that records card-finish requests."""
+
+  def __init__(self, chat_id):
+    from app.runner_registry import RunnerKind
+    self.chat_id = chat_id
+    self.kind = RunnerKind.CLAUDE_SDK
+    self.finishes = 0
+
+  async def finish_after_owner_card(self):
+    self.finishes += 1
+
+  async def stop(self, timeout: float = 2.0) -> bool:
+    return True
+
+  async def force_stop(self, timeout: float = 5.0) -> bool:
+    return True
+
+
+def test_continuation_card_commit_ends_the_active_turn(
+  client, chat, approval_run,
+):
+  """Saving a continuation owner-input card ends the live turn at its source, so
+  the model cannot emit text or tools after the card. The commit awaits the
+  card-finish before returning the receipt, so it has fired by the time the
+  route responds."""
+  from app.runner_registry import registry
+  handle = _FakeCardHandle(chat.id)
+  registry.register(handle)
+  try:
+    res = _ask(client, chat, approval_run)
+    assert res.status_code == 200, res.text
+    assert res.json()["state"] == "waiting_for_owner"
+    assert handle.finishes == 1
+  finally:
+    registry.unregister(chat.id, handle.kind)
+
+
+def test_native_question_event_does_not_end_the_active_turn(chat, approval_run):
+  """The native AskUserQuestion path shares `publish_question` but carries no
+  `response_mode`: it parks on an awaited future in question_bridge and must NOT
+  be interrupted here. Only continuation cards end the turn."""
+  from app.runner_registry import registry
+  sink = approval_run[0]
+  handle = _FakeCardHandle(chat.id)
+  registry.register(handle)
+
+  async def go():
+    await sink.publish_question({
+      "type": "question",
+      "question_id": "native-1",
+      "questions": [{
+        "question": "Pick a color",
+        "options": [
+          {"label": "Blue", "description": "b"},
+          {"label": "Red", "description": "r"},
+        ],
+      }],
+    })
+
+  try:
+    asyncio.run(go())
+    assert handle.finishes == 0
+    block = _row(chat.id)[1][-1]["blocks"][-1]
+    assert block["question_id"] == "native-1"
+    assert "response_mode" not in block
+  finally:
+    registry.unregister(chat.id, handle.kind)
+
+
 def test_approval_saves_before_receipt_without_a_waiting_future(
   client, chat, approval_run,
 ):
@@ -86,6 +160,7 @@ def test_approval_saves_before_receipt_without_a_waiting_future(
   assert questions.get(chat.id) is None
   block = messages[-1]["blocks"][-1]
   assert block["response_mode"] == "continuation"
+  assert block["action_key"] == PROMPT["work_key"]
   assert block["questions"][0]["options"] == PROMPT["options"]
   assert "answers" not in block
 
@@ -101,8 +176,63 @@ def test_identical_creation_retry_returns_same_card_and_different_request_confli
   assert changed.status_code == 409
 
 
+def test_shared_work_key_allows_only_the_first_chat_to_create_an_approval(
+  client, chat, approval_run, db,
+):
+  keyed = {
+    **PROMPT,
+    "work_key": "github:mobius-os/mobius:pr:1079:3134e050:merge",
+  }
+  first = _ask(client, chat, approval_run, keyed)
+  assert first.status_code == 200, first.text
+
+  other = models.Chat(
+    id="other-approval-chat", title="Duplicate integrator", messages=[],
+  )
+  other_run = models.ChatRun(
+    id="other-approval-run", root_run_id="other-approval-run",
+    chat_id=other.id, status="running", provider="codex",
+  )
+  db.add_all([other, other_run])
+  db.commit()
+  owner = db.query(models.Owner).first()
+  token = auth_mod.create_agent_token(
+    chat_id=other.id, owner_username=owner.username,
+    token_epoch=owner.token_epoch, run_id=other_run.id,
+    expires_delta=timedelta(minutes=5),
+  )
+  other_sink = ChatEventSink(
+    create_broadcast(other.id), other.id, run_token=other_run.id,
+    recall_binding=EMPTY_RECALL_BINDING,
+  )
+  register_active_sink(other.id, other_sink)
+  try:
+    duplicate = client.post(
+      f"/api/chats/{other.id}/approval", json=keyed,
+      headers={"Authorization": f"Bearer {token}"},
+    )
+  finally:
+    unregister_active_sink(other.id, other_sink)
+
+  assert duplicate.status_code == 409
+  assert "no duplicate card was created" in duplicate.text
+  assert db.query(models.AgentWorkClaim).count() == 1
+  assert _row(other.id)[0] is None
+
+
+def test_approval_without_action_identity_is_rejected_before_card_creation(
+  client, chat, approval_run,
+):
+  unowned = {key: value for key, value in PROMPT.items() if key != "work_key"}
+
+  response = _ask(client, chat, approval_run, unowned)
+
+  assert response.status_code == 422
+  assert _row(chat.id)[0] is None
+
+
 def test_creation_failure_has_no_receipt_or_orphan_card(
-  client, chat, approval_run, monkeypatch,
+  client, chat, approval_run, monkeypatch, db,
 ):
   writer = get_writer()
   original = writer._persist_question_required
@@ -114,6 +244,9 @@ def test_creation_failure_has_no_receipt_or_orphan_card(
   res = _ask(client, chat, approval_run)
   assert res.status_code == 503
   assert _row(chat.id)[0] is None
+  # Admission succeeded, so exact-action ownership remains reserved for the
+  # identical retry even though the card acknowledgement failed.
+  assert db.query(models.AgentWorkClaim).count() == 1
   assert not any(b["type"] == "question" for b in approval_run[0].assistant_blocks)
   monkeypatch.setattr(writer, "_persist_question_required", original)
   assert _ask(client, chat, approval_run).status_code == 200
@@ -185,21 +318,25 @@ def test_failed_early_answer_keeps_the_card_open_and_does_not_queue(
 
 
 def test_approval_requires_exact_agent_run_not_plain_owner_or_foreign_chat(
-  client, chat, auth, approval_run,
+  client, chat, auth, approval_run, db,
 ):
   assert client.post(f"/api/chats/{chat.id}/approval", json=PROMPT, headers=auth).status_code == 403
   foreign = client.post("/api/chats", json={"title": "Other"}, headers=auth).json()["id"]
   assert client.post(f"/api/chats/{foreign}/approval", json=PROMPT,
                      headers=approval_run[1]).status_code == 403
   assert _row(foreign)[0] is None
+  assert db.query(models.AgentWorkClaim).count() == 0
 
 
-def test_approval_rejects_missing_sink_and_superseded_run(client, chat, approval_run):
+def test_approval_rejects_missing_sink_and_superseded_run(
+  client, chat, approval_run, db,
+):
   sink = approval_run[0]
   sink.run_token = "another-run"
   assert _ask(client, chat, approval_run).status_code == 409
   unregister_active_sink(chat.id, sink)
   assert _ask(client, chat, approval_run).status_code == 409
+  assert db.query(models.AgentWorkClaim).count() == 0
 
 
 @pytest.mark.parametrize("status,keeps_card", [
@@ -306,6 +443,29 @@ def test_helper_rejects_unconfirmed_receipt_and_transport_failure(monkeypatch):
     helper.request_approval(**PROMPT)
 
 
+def test_helper_preserves_bounded_deterministic_rejection_detail(monkeypatch):
+  import io
+  from urllib.error import HTTPError
+  from tests.test_platform_tools import _control_module
+
+  helper = _control_module()._APPROVALS
+  for name in ("API_BASE_URL", "AGENT_TOKEN", "CHAT_ID", "MOBIUS_RUN_TOKEN"):
+    monkeypatch.setenv(name, "test-value")
+  monkeypatch.setenv("API_BASE_URL", "http://testserver")
+
+  def reject(request, timeout):
+    return_value = HTTPError(
+      request.full_url, 409, "Conflict", {},
+      io.BytesIO(b'{"detail":"Owned by the integration chat; no duplicate card."}'),
+    )
+    raise return_value
+
+  monkeypatch.setattr(helper, "urlopen", reject)
+  with pytest.raises(SystemExit, match="Owned by the integration chat") as exc:
+    helper.request_approval(**PROMPT)
+  assert "Fix the stated conflict" in str(exc.value)
+
+
 def test_stop_winning_answer_admission_does_not_queue_a_continuation(
   client, chat, auth, approval_run, monkeypatch,
 ):
@@ -340,7 +500,7 @@ def test_saved_owner_cards_share_blocking_marker_and_terminal_receipt(
   client, chat, auth, approval_run, route,
 ):
   payload = PROMPT if route == "approval" else {"questions": [{
-    "id": "direction", "header": "Direction", **PROMPT,
+    "id": "direction", "header": "Direction", **QUESTION_PROMPT,
   }]}
   response = client.post(f"/api/chats/{chat.id}/{route}",
                          json=payload, headers=approval_run[1])
@@ -358,7 +518,7 @@ def test_saved_owner_cards_share_blocking_marker_and_terminal_receipt(
 
 def test_saved_questions_keep_multiple_choices_and_retry_identity(client, chat, approval_run):
   payload = {"questions": [
-    {"id": "direction", "header": "Direction", **PROMPT},
+    {"id": "direction", "header": "Direction", **QUESTION_PROMPT},
     {"id": "timing", "header": "Timing", "question": "When?", "options": []},
   ]}
   first = client.post(f"/api/chats/{chat.id}/question", json=payload, headers=approval_run[1])
@@ -376,7 +536,7 @@ def test_question_tool_saves_receipt_and_never_returns_a_default_answer(monkeypa
   monkeypatch.setattr(control._APPROVALS, "request_question", lambda questions: (
     captured.append(questions) or expected
   ))
-  payload = [{"id": "choice", "header": "Choice", **PROMPT}]
+  payload = [{"id": "choice", "header": "Choice", **QUESTION_PROMPT}]
   assert control._call_request_question({"questions": payload}) == expected
   assert captured == [payload]
   assert "answers" not in expected

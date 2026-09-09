@@ -7,10 +7,11 @@ NEVER touches asyncio primitives or `ChatBroadcast` (those stay
 loop-owned), so the blocking `db.commit()` that SQLite's `busy_timeout`
 can stall for up to five seconds no longer runs on the event loop.
 
-Commands are DOMAIN-level (`PersistTranscript`, `Finalize`,
-`PersistError`, `AnswerQuestion`, `Barrier`, `DrainAndStop`) rather than
-row-level so a later milestone can swap their dispatch for normalized-row
-writes without rewriting the actor.
+Commands are DOMAIN-level (`PersistTranscript`, `Finalize`, `PersistError`,
+`AnswerQuestion`, `StartActivityContinuation`, `Barrier`, `DrainAndStop`)
+rather than row-level so a later milestone can swap their dispatch for
+normalized-row writes without rewriting the actor. Activity commands own only
+event/run state; they never manufacture conversation messages.
 
 See the "Chat persistence — single-writer actor" section in ARCHITECTURE.md
 for the contract; the v2 design + staged-rollout notes are internal/gitignored.
@@ -48,7 +49,7 @@ import time
 import uuid
 from concurrent.futures import Future, InvalidStateError
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select, text, update
 from sqlalchemy.exc import SQLAlchemyError
@@ -188,12 +189,20 @@ class PersistTranscript(_Command):
 
 @dataclass
 class Finalize(_Command):
-  """Terminal full-snapshot write for a turn.  Never coalesces."""
+  """Terminal full-snapshot write for a turn.  Never coalesces.
+
+  ``incorporate_activity_delivery`` carries successful provider intent to the
+  persistence boundary. The actor consumes the admitted helper envelope only
+  when this exact run is still the current running owner, in the same commit
+  as the assistant snapshot, and records the distinct incorporation evidence
+  used by passive activity projections.
+  """
 
   chat_id: str = ""
   run_token: str = ""
   snapshot: dict = field(default_factory=dict)
   thinking_stashes: list = field(default_factory=list)
+  incorporate_activity_delivery: bool = False
 
 
 @dataclass
@@ -224,6 +233,7 @@ class QuestionCommit(_Command):
   snapshot: dict = field(default_factory=dict)
   thinking_stashes: list = field(default_factory=list)
   secure_request: dict | None = None
+  activation_wait: dict | None = None
 
 
 @dataclass
@@ -262,6 +272,32 @@ class AnswerQuestion(_Command):
   run_token: str = ""
   question_id: str = ""
   answers: dict = field(default_factory=dict)
+  close_without_reply: bool = False
+  legacy_save_only: bool = False
+  selected_options: dict | None = None
+
+
+@dataclass
+class CancelActivationWaits(_Command):
+  """Stop cancels the activation owner and its visible cards atomically."""
+
+  chat_id: str = ""
+  run_token: str = ""
+
+
+@dataclass
+class ResolvePlatformRestartCard(_Command):
+  """Settle one typed Restart choice and claim its exact side effect.
+
+  This command, rather than a route-side preflight, owns the actual matched
+  question write.  Free text, a label, a legacy answer call, or an option id
+  from another card cannot reach the durable execution claim.
+  """
+
+  chat_id: str = ""
+  run_token: str = ""
+  question_id: str = ""
+  selected_option_id: str = ""
 
 
 @dataclass
@@ -276,6 +312,37 @@ class PersistSessionId(_Command):
 
   chat_id: str = ""
   session_id: str = ""
+
+
+@dataclass
+class AdmitProviderExecution(_Command):
+  """Commit the exact current run's one-way provider-entry boundary.
+
+  Await this ack immediately before invoking a provider runner. Failure or an
+  abandoned ack must not launch a provider; even an ack lost after commit is
+  conservatively treated as potentially executed during crash recovery. This
+  scalar write neither coalesces nor fences transcript snapshots.
+  """
+
+  chat_id: str = ""
+  run_token: str = ""
+  has_peer_context_delivery: bool = False
+  activity_delegation_ids: tuple[str, ...] = ()
+
+
+@dataclass
+class AcknowledgePeerContextDelivery(_Command):
+  """Advance the peer inbox only after a provider call returns successfully.
+
+  Provider admission is intentionally earlier: it prevents ambiguous replay
+  of an execution attempt. It is not proof that the provider accepted the
+  prompt, so peer delivery has its own later, monotonic acknowledgement.
+  """
+
+  chat_id: str = ""
+  run_token: str = ""
+  peer_message_through_created_at: datetime | None = None
+  peer_message_through_id: str | None = None
 
 
 @dataclass
@@ -396,6 +463,26 @@ class BackfillAssistantIdentity(_Command):
 
 
 @dataclass
+class RetireLegacyGauntletExecution(_Command):
+  """One atomic boot cutover from legacy Gauntlet work to inert history.
+
+  The removed workflow left its durable rows behind for transcript retention
+  and later hard-purge.  Some of those rows still own ordinary ChatRun and
+  Delegation recovery primitives, however.  This command retires that exact
+  execution graph before generic boot recovery can observe it.
+
+  It is intentionally a chat-writer command rather than a numbered schema
+  migration: interrupted assistant snapshots and queued synthetic
+  continuations live in the writer-owned JSON columns.  Startup supplies the
+  process-quiescent boundary and treats a failed acknowledgement as a degraded
+  database boot.  The same transaction records completion in the retired
+  workflow's singleton table, so later boots do not reinterpret a reused child
+  chat as permanently workflow-owned.  This command does not and must not try
+  to stop live provider processes.
+  """
+
+
+@dataclass
 class RewriteChatMediaPaths(_Command):
   """Atomically rewrite one chat's legacy media URLs during boot."""
 
@@ -424,12 +511,12 @@ class ReconcileStartupChat(_Command):
 # These own the read-modify-write of the chat's `messages` /
 # `pending_messages` blobs: initial-send (`StartTurn`, from
 # routes/chats_stream.py), append (`AppendPending`), cancel
-# (`CancelPending`), edit (`UpdatePending`), promote (`PromotePending`, from
-# chat_queue.py), and clear / run markers (`ClearPending`, from chat.py).  The
-# routes/queue submit these instead of mutating the row directly, so every
-# mutation is serialized on the actor thread.  Each is must-persist (commit-
-# before-ack, non-coalescing) and fences any pending coalescible snapshot for
-# its (chat_id, run_token) key on submit.
+# (`CancelPending`), promote (`PromotePending`, from chat_queue.py), and
+# clear / run markers (`ClearPending`, from chat.py).  The routes/queue
+# submit these instead of mutating the row directly, so every mutation is
+# serialized on the actor thread.  Each is must-persist (commit-before-ack,
+# non-coalescing) and fences any pending coalescible snapshot for its
+# (chat_id, run_token) key on submit.
 
 
 @dataclass(frozen=True)
@@ -440,10 +527,12 @@ class StartTurnBlockedByPendingQuestion:
 
 
 @dataclass(frozen=True)
-class PromotePendingBlockedByPendingQuestion:
-  """Expected non-promotion while an owner question is open."""
+class PromotePendingBlocked:
+  """A durable admission hold keeps later queued work behind its owner."""
 
-  question_id: str
+  reason: str
+  question_id: str | None = None
+  wait_id: str | None = None
 
 
 @dataclass
@@ -466,6 +555,13 @@ class StartTurn(_Command):
   title_source: str = ""
   default_provider: str = "claude"
   initiated_by_app_id: int | None = None
+  # The rendered recovery control names its exact interrupted physical run.
+  resume_run_id: str | None = None
+
+
+@dataclass(frozen=True)
+class StartTurnRecoveryChanged:
+  """The recovery target was superseded before this request committed."""
 
 
 @dataclass(frozen=True)
@@ -510,7 +606,30 @@ class StartContinuation(_Command):
   # A restart continuation atomically replaces its exact parked physical run.
   # Other programmatic continuations require an already-idle logical root.
   supersedes_run_token: str | None = None
-  consume_pending: bool = False
+  # Narrow writer-authenticated bypass for this wait's own question/pending
+  # barrier. No other programmatic caller can opt into foreign-pending starts.
+  activation_wait_id: str | None = None
+  # The loop-owned caller may attach only the exact live sink it observed
+  # under the transition lock. A database row alone is not runner ownership.
+  activation_attach_run_token: str | None = None
+
+
+@dataclass
+class StartActivityContinuation(_Command):
+  """Open one same-root provider checkpoint without writing a user message.
+
+  ``activity_id`` is a stable durable event identity. The writer validates
+  that the event is still available and that the exact logical parent is
+  explicitly waiting before it creates the physical ChatRun. The caller adds
+  an ephemeral provider protocol input after this command returns;
+  Chat.messages and Chat.pending_messages remain byte-for-byte unchanged.
+  """
+
+  chat_id: str = ""
+  run_token: str = ""
+  root_run_id: str = ""
+  source_work_id: str = ""
+  activity_id: str = ""
 
 
 def recover_start_continuation(
@@ -526,7 +645,9 @@ def recover_start_continuation(
   """Rebuild one exact committed-but-unscheduled continuation handoff.
 
   ``StartContinuation`` stores a small causal envelope on its synthetic tail
-  row when it atomically supersedes a parked run and consumes pending input.
+  row when it atomically supersedes a parked run. Older committed handoffs
+  could also consume pending input; the envelope preserves their exact rows
+  rather than reinterpreting an already-accepted prompt after an upgrade.
   That envelope identifies the exact transcript rows that formed the provider
   prompt.  A fresh process can therefore reconstruct the original provider
   handoff without duplicating user content or relying on an in-memory rollback
@@ -537,6 +658,7 @@ def recover_start_continuation(
     or chat is None
     or physical.status != "running"
     or physical.chat_id != chat.id
+    or physical.provider_execution_admitted is not False
   ):
     return None
   live = chat.live_assistant or {}
@@ -702,17 +824,14 @@ class PromotePending(_Command):
   committing (so a malformed entry can't silently consume a turn — building
   the validated schema surfaces it), moves pending rows into `messages`,
   sets the durable run marker, stamps `updated_at`, and commits. Returns
-  `{"history", "promoted", "session_id"}` with `promoted=None` only when
-  there was nothing to promote. Returns
-  ``PromotePendingBlockedByPendingQuestion`` when an owner question is open.
+  `{"history", "promoted", "session_id"}`; `promoted` is None (queue
+  unchanged) only when there was nothing to promote, or
+  ``PromotePendingBlocked`` when an owner question is open.
   Newer code persists each promoted pending row as its own visible user
   message, while `promoted.content` remains the combined provider-facing text
-  for the continuation turn. Product-result groups replace the caller's
-  provisional token with their deterministic durable run identity and return
-  it as ``promoted._run_token`` for the scheduler. A malformed pending entry
-  that can't build a valid history instead RAISES `_PersistFailed`; the
-  turn-end drain maps that to FAILED_LEAVE_MARKER (leave the marker for
-  reconciliation) rather than
+  for the continuation turn. A malformed pending entry that can't build a
+  valid history instead RAISES `_PersistFailed` — the turn-end drain maps that
+  to FAILED_LEAVE_MARKER (leave the marker for reconciliation) rather than
   confusing it with an empty queue and clearing the marker on stranded work.
   """
 
@@ -722,12 +841,6 @@ class PromotePending(_Command):
   # not turn-end handoffs and keep the clean default; drain_and_release passes
   # "failed" when the provider returned an error before queued work continues.
   ending_status: str = "completed"
-  # An explicit owner Resume may find real messages already queued behind a
-  # parked provider turn.  Those visible rows remain ordinary owner messages,
-  # but this private execution hint makes the single promoted provider turn a
-  # manual continuation instead of minting a new logical root.  The hint is
-  # actor-owned (never accepted as pending-row metadata from a client).
-  continuation_reason: str | None = None
 
 
 @dataclass
@@ -847,6 +960,8 @@ class RecoverWedgedRun(_Command):
   chat_id: str = ""
   run_token: str = ""
   interruption_block: dict = field(default_factory=dict)
+  # When set, the exact run is parked for the continuation sweep (a resource
+  # wait that resolves itself) instead of closed as an interrupted failure.
   parked_until: datetime | None = None
   park_reason: str | None = None
 
@@ -991,8 +1106,11 @@ _FENCE_COMMANDS = (
   QuestionCommit,
   SettleSecureInput,
   AnswerQuestion,
+  ResolvePlatformRestartCard,
+  CancelActivationWaits,
   StartTurn,
   StartContinuation,
+  StartActivityContinuation,
   AppendPending,
   AppendSteeredUserMessage,
   PromotePending,
@@ -1036,7 +1154,7 @@ def _needs_broad_chat_fence(cmd: _Command) -> bool:
     return True
   if isinstance(cmd, SettleSecureInput):
     return True
-  if isinstance(cmd, AnswerQuestion):
+  if isinstance(cmd, (AnswerQuestion, ResolvePlatformRestartCard, CancelActivationWaits)):
     return not cmd.run_token
   return False
 
@@ -1490,7 +1608,10 @@ class ChatWriterActor:
         # post-abandon commit strands a turn. The `finally` still GCs the
         # key's fence epoch for the skipped command.
         if (
-          isinstance(cmd, (StartTurn, StartContinuation, PromotePending))
+          isinstance(cmd, (
+            StartTurn, StartContinuation, StartActivityContinuation,
+            PromotePending,
+          ))
           and cmd.ack is not None
           and cmd.ack.done()
         ):
@@ -1684,14 +1805,19 @@ class ChatWriterActor:
       )
       if not qid:
         raise _PersistFailed("QuestionCommit has no open question id")
-      if cmd.secure_request is None:
+      if cmd.secure_request is None and cmd.activation_wait is None:
         outcome = self._persist_question_required(
           db, cmd.chat_id, cmd.snapshot, qid, cmd.thinking_stashes,
+        )
+      elif cmd.secure_request is not None:
+        outcome = self._persist_question_required(
+          db, cmd.chat_id, cmd.snapshot, qid, cmd.thinking_stashes,
+          secure_request=cmd.secure_request,
         )
       else:
         outcome = self._persist_question_required(
           db, cmd.chat_id, cmd.snapshot, qid, cmd.thinking_stashes,
-          secure_request=cmd.secure_request,
+          activation_wait=cmd.activation_wait,
         )
       if outcome is not _WriteOutcome.APPLIED:
         raise _PersistFailed(f"QuestionCommit did not persist ({outcome.value})")
@@ -1716,22 +1842,34 @@ class ChatWriterActor:
       # no blocks) is a silent loss, not a success — raise so the caller does
       # not promote the queue / schedule a continuation on a write that never
       # landed.
-      outcome = self._finalize_required(
+      return self._finalize_required(
         db,
         cmd.chat_id,
         cmd.snapshot,
         cmd.thinking_stashes,
         run_token=cmd.run_token,
+        incorporate_activity_delivery=cmd.incorporate_activity_delivery,
       )
-      if outcome is not _WriteOutcome.APPLIED:
-        raise _PersistFailed(f"Finalize did not persist ({outcome.value})")
-      return True
     if isinstance(cmd, AnswerQuestion):
       return self._answer_question(db, cmd)
+    if isinstance(cmd, ResolvePlatformRestartCard):
+      return self._resolve_platform_restart_card(db, cmd)
+    if isinstance(cmd, CancelActivationWaits):
+      chat = _active_chat(db, cmd.chat_id)
+      if chat is None:
+        return 0
+      count = _cancel_activation_owners(db, chat)
+      if not _commit_or_rollback(db):
+        raise _PersistFailed("Activation cancellation did not persist")
+      return count
     if isinstance(cmd, PersistSessionId):
       return self._persist_session_id(db, cmd)
     if isinstance(cmd, RecordRunMetrics):
       return self._record_run_metrics(db, cmd)
+    if isinstance(cmd, AdmitProviderExecution):
+      return self._admit_provider_execution(db, cmd)
+    if isinstance(cmd, AcknowledgePeerContextDelivery):
+      return self._acknowledge_peer_context_delivery(db, cmd)
     if isinstance(cmd, RecordAgentLifecycle):
       from app.agent_lifecycle import record_event
       return record_event(db, cmd.values)
@@ -1743,6 +1881,8 @@ class ChatWriterActor:
       return self._migrate_chat(db, cmd)
     if isinstance(cmd, BackfillAssistantIdentity):
       return self._backfill_assistant_identity(db, cmd)
+    if isinstance(cmd, RetireLegacyGauntletExecution):
+      return self._retire_legacy_gauntlet_execution(db)
     if isinstance(cmd, RewriteChatMediaPaths):
       return self._rewrite_chat_media_paths(db, cmd)
     if isinstance(cmd, ReconcileStartupChat):
@@ -1751,6 +1891,8 @@ class ChatWriterActor:
       return self._start_turn(db, cmd)
     if isinstance(cmd, StartContinuation):
       return self._start_continuation(db, cmd)
+    if isinstance(cmd, StartActivityContinuation):
+      return self._start_activity_continuation(db, cmd)
     if isinstance(cmd, PromoteRunToGoal):
       return self._promote_run_to_goal(db, cmd)
     if isinstance(cmd, ClearPresentedGoal):
@@ -1836,6 +1978,7 @@ class ChatWriterActor:
     question_id: str,
     thinking_stashes: list | None = None,
     *, secure_request: dict | None = None,
+    activation_wait: dict | None = None,
   ):
     """Atomically persist a question card and its open-question identity.
 
@@ -1850,6 +1993,37 @@ class ChatWriterActor:
     if chat is None:
       return _WriteOutcome.NOOP
     chat.pending_question_id = question_id
+    if activation_wait is not None:
+      from app.platform_restart import (
+        ACTIVATION_WAIT_KIND,
+        requirement_matches_current_source,
+      )
+      requirement = activation_wait.get("condition_json")
+      if not requirement_matches_current_source(requirement):
+        db.rollback()
+        raise _PersistFailed(
+          "QuestionCommit: restart source changed before card persistence"
+        )
+      if db.get(models.ChatWait, activation_wait["id"]) is not None:
+        db.rollback()
+        raise _PersistFailed("QuestionCommit: activation wait identity exists")
+      now = datetime.now(UTC).replace(tzinfo=None)
+      db.add(models.ChatWait(
+        id=activation_wait["id"],
+        chat_id=chat_id,
+        created_by_run_id=activation_wait.get("created_by_run_id") or None,
+        root_run_id=activation_wait.get("root_run_id") or None,
+        goal_id=activation_wait.get("goal_id") or None,
+        linked_question_id=activation_wait["linked_question_id"],
+        description=activation_wait["description"][:500],
+        condition_owner=activation_wait["condition_owner"][:160],
+        kind=ACTIVATION_WAIT_KIND,
+        condition_json=copy.deepcopy(requirement),
+        interval_secs=60,
+        deadline_at=now + timedelta(days=7),
+        next_check_at=now,
+        status="armed",
+      ))
     if secure_request is not None:
       # Only pre-authored execution metadata crosses this persistence seam.
       # Deliberately enumerate keys: submitted values can never be staged.
@@ -1874,22 +2048,23 @@ class ChatWriterActor:
     thinking_stashes: list | None = None,
     *,
     run_token: str = "",
-  ):
+    incorporate_activity_delivery: bool = False,
+  ) -> bool:
     """Force-complete tool blocks and write the terminal assistant message.
 
-    Backs `Finalize` and returns a `_WriteOutcome`: the dispatch raises
-    unless APPLIED, so a NOOP (missing row / empty transcript / no blocks)
-    fails the ack instead of falsely succeeding.  `snapshot["blocks"]` is
-    the accumulated block list; `finalize_response_outcome` closes any
-    running tool blocks before persisting.  On the recording stub the
-    recorded commit IS the terminal write, so it reports APPLIED.
+    Backs `Finalize` and returns True after its required commit. A NOOP
+    (missing row / empty transcript / no blocks) fails the ack instead of
+    falsely succeeding. `snapshot["blocks"]` is the accumulated block list;
+    `finalize_response_outcome` closes any running tool blocks before
+    persisting. On the recording stub the recorded commit IS the terminal
+    write.
     """
     if hasattr(db, "record_commit"):
       self._commit_snapshot(db, snapshot)
-      return _WriteOutcome.APPLIED
+      return True
     chat = _active_chat(db, chat_id)
     if chat is None:
-      return _WriteOutcome.NOOP
+      raise _PersistFailed("Finalize did not persist (noop)")
     # Native questions end with their provider turn. A continuation card is
     # deliberately handed off BY ending the turn, so keep its exact committed
     # marker. Never reconstruct it from an old snapshot: an early answer or
@@ -1907,14 +2082,20 @@ class ChatWriterActor:
       self._stage_thinking_stashes(db, thinking_stashes)
     terminal_snapshot = copy.deepcopy(snapshot)
     if not isinstance(terminal_snapshot, dict):
-      return _WriteOutcome.NOOP
+      raise _PersistFailed("Finalize did not persist (invalid snapshot)")
     # Current sinks stamp the exact assistant-segment identity. Setup-time
     # failures can finalize before a sink exists, so fall back to the physical
     # run identity there. Never rebuild a terminal message from blocks: doing
     # so discards the identity that owns its durable row.
     if terminal_snapshot.get("id") is None and run_token:
       terminal_snapshot["id"] = run_token
-    outcome = finalize_response_outcome(db, chat_id, terminal_snapshot)
+    # Stage, but do not commit, the terminal transcript. Any admitted helper
+    # result that the provider accepted is consumed below in this SAME
+    # transaction; a failed commit rolls both facts back and keeps the result
+    # redeliverable.
+    outcome = finalize_response_outcome(
+      db, chat_id, terminal_snapshot, commit=False,
+    )
     if outcome is _WriteOutcome.NOOP:
       # The sink only submits Finalize with non-empty blocks, so a NOOP here
       # means the row had nothing to finalize onto. Distinguish two causes: a
@@ -1931,10 +2112,22 @@ class ChatWriterActor:
       ).first()
       if still_exists is not None:
         db.rollback()
-        return _WriteOutcome.APPLIED
-    if outcome is not _WriteOutcome.APPLIED:
+        return True
+    if outcome is _WriteOutcome.APPLIED:
+      try:
+        if incorporate_activity_delivery:
+          self._stage_activity_delivery_consumption(
+            db, chat_id=chat_id, run_token=run_token,
+          )
+      except Exception:
+        db.rollback()
+        raise
+      if not _commit_or_rollback(db):
+        raise _PersistFailed("Finalize did not persist (dropped)")
+      return True
+    else:
       db.rollback()
-    return outcome
+      raise _PersistFailed(f"Finalize did not persist ({outcome.value})")
 
   def _answer_question(self, db, cmd: AnswerQuestion) -> bool:
     """Re-read the chat fresh, merge answers into the question block, commit.
@@ -1946,8 +2139,38 @@ class ChatWriterActor:
     chat = _active_chat(db, cmd.chat_id)
     if chat is None:
       raise _PersistFailed("AnswerQuestion: chat not found or deleted")
+    if cmd.legacy_save_only:
+      from app.questions import AnswerConflict, has_quiet_options
+      # Check the actual write target inside the actor: an unkeyed legacy
+      # request must not bypass a card published after the route's read.
+      candidates = list(chat.messages or [])
+      if isinstance(chat.live_assistant, dict):
+        candidates.insert(0, chat.live_assistant)
+      card = next((block for message in reversed(candidates)
+                   if message.get("role") == "assistant"
+                   for block in reversed(message.get("blocks") or [])
+                   if block.get("type") == "question"
+                   and (not cmd.question_id or block.get("question_id") == cmd.question_id)), None)
+      if card and (has_quiet_options(card) or card.get("secure_input")):
+        raise AnswerConflict("Use the question card to submit this answer.")
+    metadata = None
+    if cmd.close_without_reply:
+      from app.questions import AnswerConflict, accepts_saved_answer, closes_without_reply, saved_question
+      from app.goal_plans import require_quiet_answer_handoff
+      card = saved_question(chat, cmd.question_id)
+      if card is None or not closes_without_reply(card, cmd.answers, cmd.selected_options):
+        raise AnswerConflict("This answer cannot close the question without a reply.")
+      if card.get("answers"):
+        if (card.get("answer_turn") == "none" and card["answers"] == cmd.answers
+            and card.get("selected_options") == cmd.selected_options):
+          return True  # Lost acknowledgement: never clear a newer question.
+        raise AnswerConflict("This question already has a different answer.")
+      if not accepts_saved_answer(chat, cmd.question_id):
+        raise AnswerConflict("This question is no longer open.")
+      require_quiet_answer_handoff(db, chat, cmd.question_id)
+      metadata = {"answer_turn": "none", "selected_options": cmd.selected_options}
     applied = apply_answers_to_last_question(
-      chat, cmd.answers, cmd.question_id
+      chat, cmd.answers, cmd.question_id, metadata=metadata,
     )
     if not applied:
       raise _PersistFailed("AnswerQuestion: no matching question block")
@@ -1963,6 +2186,194 @@ class ChatWriterActor:
     if not _commit_or_rollback(db):
       raise _PersistFailed("AnswerQuestion did not persist")
     return True
+
+  def _resolve_platform_restart_card(
+    self, db, cmd: ResolvePlatformRestartCard,
+  ) -> dict:
+    """Atomically settle one exact typed card and claim at most one restart."""
+    from sqlalchemy.orm.attributes import flag_modified
+
+    from app.platform_restart import (
+      activation_wait_verdict,
+      requirement_matches_current_source,
+    )
+    from app.timeutil import now_naive_utc
+
+    chat = _active_chat(db, cmd.chat_id)
+    if chat is None:
+      raise _PersistFailed("Restart card: chat not found or deleted")
+
+    messages = copy.deepcopy(list(chat.messages or []))
+    matched: dict | None = None
+    for message in reversed(messages):
+      if not isinstance(message, dict) or message.get("role") != "assistant":
+        continue
+      for block in message.get("blocks") or []:
+        if (
+          isinstance(block, dict)
+          and block.get("type") == "question"
+          and block.get("question_id") == cmd.question_id
+        ):
+          matched = block
+          break
+      if matched is not None:
+        break
+    action = matched.get("platform_action") if matched is not None else None
+    if (
+      not isinstance(action, dict)
+      or action.get("version") != 1
+      or action.get("type") != "restart"
+      or not isinstance(action.get("requirement"), dict)
+      or not isinstance(action.get("action_id"), str)
+      or not isinstance(action.get("wait_id"), str)
+    ):
+      raise _PersistFailed("Restart card: exact typed question was not found")
+
+    restart_id = action.get("restart_option_id")
+    cancel_id = action.get("cancel_option_id")
+    if cmd.selected_option_id not in (restart_id, cancel_id):
+      raise _PersistFailed("Restart card: selected option is not authorized")
+    question = next((
+      question for question in (matched.get("questions") or [])
+      if isinstance(question, dict) and question.get("id") == "restart"
+    ), None)
+    options = question.get("options") if isinstance(question, dict) else None
+    labels = {
+      option.get("id"): option.get("label")
+      for option in (options or []) if isinstance(option, dict)
+    }
+    quiet_ids = {
+      option.get("id")
+      for option in (options or [])
+      if isinstance(option, dict) and option.get("on_answer") == "close"
+    }
+    if (
+      labels.get(restart_id) != "Restart now"
+      or labels.get(cancel_id) != "Not now"
+      or quiet_ids != {restart_id, cancel_id}
+    ):
+      raise _PersistFailed("Restart card: server option envelope is invalid")
+
+    wait = db.query(models.ChatWait).filter(
+      models.ChatWait.id == action["wait_id"],
+      models.ChatWait.chat_id == cmd.chat_id,
+      models.ChatWait.linked_question_id == cmd.question_id,
+      models.ChatWait.kind == "platform_activation",
+    ).first()
+    if wait is None or wait.condition_json != action["requirement"]:
+      raise _PersistFailed("Restart card: linked activation wait is invalid")
+
+    prior_selected = matched.get("selected_options")
+    if matched.get("answers"):
+      if prior_selected != {"restart": [cmd.selected_option_id]}:
+        raise _PersistFailed("Restart card: card already settled differently")
+      execution = db.get(models.PlatformRestartExecution, action["action_id"])
+      db.rollback()
+      return {
+        "status": action.get("status") or "settled",
+        "dispatch": False,
+        "action_id": action["action_id"],
+        "wait_id": wait.id,
+        "answers": copy.deepcopy(matched.get("answers")),
+        "selected_options": copy.deepcopy(prior_selected),
+        "execution_status": execution.status if execution is not None else None,
+        "answer_turn": "none",
+        "platform_action": copy.deepcopy(action),
+      }
+
+    # Stop/dismissal and a newer question both win before action claim.
+    if (
+      chat.pending_question_id != cmd.question_id
+      or wait.resume_delivered_at is not None
+      or wait.status not in ("armed", "met", "expired", "failed")
+    ):
+      raise _PersistFailed("Restart card: card is no longer accepting actions")
+
+    now = now_naive_utc()
+    selected_restart = cmd.selected_option_id == restart_id
+    dispatch = False
+    execution_status = None
+    if not selected_restart:
+      # Declining this execution is not abandoning the unfinished work.
+      # Keep its visible activation owner so another approved matching boot
+      # can satisfy it without either a model turn or manufactured consent.
+      action["status"] = "deferred"
+    else:
+      if wait.status in ("expired", "failed"):
+        db.rollback()
+        raise _PersistFailed(
+          "Restart card: activation outcome is uncertain; request a fresh card"
+        )
+      verdict, _detail = activation_wait_verdict(db, wait)
+      if verdict == "met":
+        wait.status = "met"
+        wait.met_at = now
+        action["status"] = "activated"
+        execution_status = "activated_without_dispatch"
+      else:
+        if not requirement_matches_current_source(action["requirement"]):
+          db.rollback()
+          raise _PersistFailed(
+            "Restart card: committed source changed; request a fresh card"
+          )
+        execution = db.get(models.PlatformRestartExecution, action["action_id"])
+        if execution is None:
+          execution = models.PlatformRestartExecution(
+            action_id=action["action_id"],
+            question_id=cmd.question_id,
+            chat_id=cmd.chat_id,
+            wait_id=wait.id,
+            source_boot_id=action["requirement"]["source_boot_id"],
+            requirement_json=copy.deepcopy(action["requirement"]),
+            status="claimed",
+            claimed_at=now,
+          )
+          db.add(execution)
+          dispatch = True
+        elif execution.requirement_json != action["requirement"]:
+          db.rollback()
+          raise _PersistFailed("Restart card: action identity collision")
+        execution_status = execution.status
+        action["status"] = "restart_requested"
+        wait.action_approved_at = now
+
+    answers = {question["question"]: labels[cmd.selected_option_id]}
+    selected_options = {"restart": [cmd.selected_option_id]}
+    matched["answers"] = answers
+    matched["selected_options"] = selected_options
+    chat.messages = messages
+    flag_modified(chat, "messages")
+
+    live = copy.deepcopy(chat.live_assistant)
+    if isinstance(live, dict):
+      for block in live.get("blocks") or []:
+        if (
+          isinstance(block, dict)
+          and block.get("type") == "question"
+          and block.get("question_id") == cmd.question_id
+        ):
+          block["answers"] = copy.deepcopy(answers)
+          block["selected_options"] = copy.deepcopy(selected_options)
+          live_action = block.get("platform_action")
+          if isinstance(live_action, dict):
+            live_action["status"] = action["status"]
+          chat.live_assistant = live
+          break
+    chat.pending_question_id = None
+    chat.activity_at = now
+    if not _commit_or_rollback(db):
+      raise _PersistFailed("Restart card resolution did not persist")
+    return {
+      "status": action["status"],
+      "dispatch": dispatch,
+      "action_id": action["action_id"],
+      "wait_id": wait.id,
+      "answers": answers,
+      "selected_options": selected_options,
+      "execution_status": execution_status,
+      "answer_turn": "none",
+      "platform_action": copy.deepcopy(action),
+    }
 
   def _persist_session_id(self, db, cmd: PersistSessionId) -> bool:
     """Save the chat's provider session/thread id without touching transcript.
@@ -1987,6 +2398,194 @@ class ChatWriterActor:
     if not _commit_or_rollback(db):
       raise _PersistFailed("PersistSessionId did not persist")
     return True
+
+  def _admit_provider_execution(self, db, cmd: AdmitProviderExecution) -> None:
+    """Only the current, never-admitted physical run may enter its provider."""
+    from app.run_state import latest_run
+
+    chat = _active_chat(db, cmd.chat_id)
+    run = latest_run(db, cmd.chat_id) if chat is not None else None
+    if (
+      run is None
+      or run.id != cmd.run_token
+      or run.status != "running"
+      or run.provider_execution_admitted is not False
+    ):
+      raise _PersistFailed("AdmitProviderExecution: run is not eligible")
+    activity_ids = tuple(dict.fromkeys(cmd.activity_delegation_ids))
+    if (
+      len(activity_ids) > 100
+      or any(not isinstance(item, str) or not item for item in activity_ids)
+    ):
+      raise _PersistFailed(
+        "AdmitProviderExecution: invalid activity delivery identity"
+      )
+    from app.delegations import (
+      ACTIVITY_DELIVERY_FINALIZE_ATOMIC,
+      activity_continuation_delivery_source_work_id,
+    )
+    source_work_id = activity_continuation_delivery_source_work_id(
+      db, cmd.chat_id, cmd.run_token,
+    )
+    if source_work_id == "":
+      raise _PersistFailed(
+        "AdmitProviderExecution: activity delivery scope is invalid"
+      )
+    if activity_ids:
+      ownership_filters = [
+        models.Delegation.id.in_(activity_ids),
+        models.Delegation.parent_chat_id == cmd.chat_id,
+        models.Delegation.notify_parent_on_complete.is_(True),
+        models.Delegation.parent_woken_at.is_(None),
+        models.Delegation.cancelled_at.is_(None),
+      ]
+      if source_work_id is not None:
+        ownership_filters.append(
+          models.Delegation.parent_root_run_id == source_work_id,
+        )
+      activity_rows = db.query(models.Delegation.id).filter(
+        *ownership_filters,
+      ).all()
+      if {str(row[0]) for row in activity_rows} != set(activity_ids):
+        raise _PersistFailed(
+          "AdmitProviderExecution: activity delivery is no longer available"
+        )
+    run.provider_execution_admitted = True
+    run.peer_message_delivery_pending = bool(cmd.has_peer_context_delivery)
+    delivery_envelope = (
+      {
+        "delegation_ids": list(activity_ids),
+        "delivery_contract": ACTIVITY_DELIVERY_FINALIZE_ATOMIC,
+      }
+      if activity_ids else None
+    )
+    if source_work_id is not None:
+      delivery_envelope = delivery_envelope or {
+        "delegation_ids": [],
+        "delivery_contract": ACTIVITY_DELIVERY_FINALIZE_ATOMIC,
+      }
+      delivery_envelope["source_work_id"] = source_work_id
+    run.activity_delivery_json = delivery_envelope
+    if not _commit_or_rollback(db):
+      raise _PersistFailed("AdmitProviderExecution did not persist")
+
+  def _acknowledge_peer_context_delivery(
+    self, db, cmd: AcknowledgePeerContextDelivery,
+  ) -> None:
+    """Advance one exact run's peer boundary after provider success."""
+    from app.models import ChatRun
+
+    delivered_at = cmd.peer_message_through_created_at
+    delivered_id = cmd.peer_message_through_id
+    if delivered_at is None or not delivered_id:
+      raise _PersistFailed(
+        "AcknowledgePeerContextDelivery: peer-message cursor is incomplete"
+      )
+    run = db.query(ChatRun).filter(
+      ChatRun.id == cmd.run_token,
+      ChatRun.chat_id == cmd.chat_id,
+      ChatRun.provider_execution_admitted.is_(True),
+    ).first()
+    if run is None:
+      raise _PersistFailed(
+        "AcknowledgePeerContextDelivery: admitted run not found"
+      )
+    current = None
+    if (
+      run.peer_message_through_created_at is not None
+      and run.peer_message_through_id is not None
+    ):
+      current = (
+        run.peer_message_through_created_at,
+        str(run.peer_message_through_id),
+      )
+    candidate = (delivered_at, delivered_id)
+    if current is not None and candidate <= current:
+      return
+    run.peer_message_through_created_at = delivered_at
+    run.peer_message_through_id = delivered_id
+    run.peer_message_delivery_pending = False
+    if not _commit_or_rollback(db):
+      raise _PersistFailed("AcknowledgePeerContextDelivery did not persist")
+
+  def _stage_activity_delivery_consumption(
+    self, db, *, chat_id: str, run_token: str,
+  ) -> None:
+    """Stage eligible result incorporation for the Finalize commit.
+
+    A stopped run may still finalize partial assistant output, but only the
+    exact current running owner can consume the helper envelope. The actor's
+    FIFO plus this durable/in-process ownership check closes the interval
+    between provider return and terminal Finalize without adding another
+    acceptance commit.
+    """
+    if not run_token:
+      return
+    from app.models import ChatRun
+
+    run = db.query(ChatRun).filter(
+      ChatRun.id == run_token,
+      ChatRun.chat_id == chat_id,
+      ChatRun.provider_execution_admitted.is_(True),
+    ).first()
+    if (
+      run is None
+      or run.status != "running"
+      or self._run_token_owner.get(chat_id) != run_token
+      or not self._run_is_latest(db, run)
+    ):
+      return
+    envelope = run.activity_delivery_json
+    if not isinstance(envelope, dict):
+      return
+    from app.delegations import ACTIVITY_DELIVERY_FINALIZE_ATOMIC
+    if (
+      envelope.get("delivery_contract")
+      != ACTIVITY_DELIVERY_FINALIZE_ATOMIC
+    ):
+      raise _PersistFailed("Finalize: unsupported activity delivery contract")
+    raw_ids = envelope.get("delegation_ids")
+    if not isinstance(raw_ids, list) or not raw_ids:
+      return
+    ids = tuple(dict.fromkeys(
+      item for item in raw_ids if isinstance(item, str) and item
+    ))
+    if len(ids) != len(raw_ids):
+      raise _PersistFailed("Finalize: malformed activity delivery envelope")
+    ownership_filters = [
+      models.Delegation.id.in_(ids),
+      models.Delegation.parent_chat_id == chat_id,
+    ]
+    source_work_id = envelope.get("source_work_id")
+    if source_work_id is not None:
+      if not isinstance(source_work_id, str) or not source_work_id:
+        raise _PersistFailed("Finalize: malformed activity delivery scope")
+      ownership_filters.append(
+        models.Delegation.parent_root_run_id == source_work_id,
+      )
+    matching = db.query(models.Delegation.id).filter(
+      *ownership_filters,
+    ).all()
+    if {str(row[0]) for row in matching} != set(ids):
+      raise _PersistFailed("Finalize: activity ownership changed")
+    incorporated_at = datetime.now(UTC).replace(tzinfo=None)
+    # This is the sole durable proof that the provider did more than receive a
+    # result. Keep it distinct from parent_woken_at: that older latch also
+    # closes inline claims and owner notifications before any agent response.
+    db.query(models.Delegation).filter(
+      *ownership_filters,
+      models.Delegation.result_incorporated_at.is_(None),
+    ).update(
+      {models.Delegation.result_incorporated_at: incorporated_at},
+      synchronize_session=False,
+    )
+    db.query(models.Delegation).filter(
+      *ownership_filters,
+      models.Delegation.parent_woken_at.is_(None),
+    ).update(
+      {models.Delegation.parent_woken_at: incorporated_at},
+      synchronize_session=False,
+    )
 
   def _record_run_metrics(self, db, cmd: RecordRunMetrics) -> bool:
     """Attach provider usage/cost to the exact durable run row."""
@@ -2189,11 +2788,342 @@ class ChatWriterActor:
       raise _PersistFailed("BackfillAssistantIdentity did not persist")
     return 1
 
+  def _retire_legacy_gauntlet_execution(self, db) -> dict[str, int]:
+    """Retire only execution identities durably proven to be Gauntlet-owned.
+
+    A Delegation child chat can later be reused, so chat identity is not an
+    execution lease.  Direct task links establish the first delegated logical
+    run; nested Delegations are followed only when their ``parent_root_run_id``
+    names that selected lineage.  Writer work starts at the task's exact
+    reserved ChatRun and follows only persisted predecessor/successor markers.
+
+    Row ``-1`` in the retired target-mutex table is the one-time completion
+    marker.  It commits with every writer-owned JSON and execution mutation;
+    failure rolls both back, while a later boot pays only one primary-key read.
+    """
+    from datetime import UTC, datetime
+
+    from app import models
+
+    empty = {
+      "gauntlets": 0,
+      "delegations": 0,
+      "chat_runs": 0,
+      "pending_messages": 0,
+      "assistant_snapshots": 0,
+    }
+    marker_id = models.LEGACY_GAUNTLET_RETIREMENT_MARKER_ID
+    if db.get(models.GauntletTargetMutex, marker_id) is not None:
+      db.rollback()
+      return empty
+
+    now = datetime.now(UTC).replace(tzinfo=None)
+    gauntlets = db.query(models.GauntletRun).all()
+    gauntlet_by_id = {row.id: row for row in gauntlets}
+    tasks = db.query(models.GauntletTask).order_by(
+      models.GauntletTask.created_at.asc(), models.GauntletTask.id.asc(),
+    ).all()
+    unresolved: list[str] = []
+
+    # The child is created in the same transaction as its Delegation and the
+    # delegation starter refuses to run when any ChatRun already exists.  Its
+    # earliest physical row therefore establishes the task's logical lineage;
+    # later new-root reuse is deliberately outside it.
+    delegation_ids = {
+      task.delegation_id for task in tasks if task.delegation_id is not None
+    }
+    delegations: dict[str, models.Delegation] = {}
+    delegation_runs: dict[str, list[models.ChatRun]] = {}
+    frontier = set(delegation_ids)
+    while frontier:
+      rows = db.query(models.Delegation).filter(
+        models.Delegation.id.in_(frontier),
+      ).all()
+      found_ids = {row.id for row in rows}
+      unresolved.extend(
+        f"missing selected Delegation {row_id}"
+        for row_id in sorted(frontier - found_ids)
+      )
+      frontier = set()
+      for row in rows:
+        if row.id in delegations:
+          continue
+        delegations[row.id] = row
+        runs = db.query(models.ChatRun).filter(
+          models.ChatRun.chat_id == row.child_chat_id,
+        ).order_by(
+          models.ChatRun.started_at.asc(), models.ChatRun.id.asc(),
+        ).all()
+        if not runs:
+          delegation_runs[row.id] = []
+          continue
+        seed = runs[0]
+        root_id = seed.root_run_id or seed.id
+        owned = [
+          run for run in runs
+          if run.id == seed.id or (run.root_run_id or run.id) == root_id
+        ]
+        delegation_runs[row.id] = owned
+        parent_keys = {
+          run.goal_id or run.root_run_id or run.id for run in owned
+        }
+        if not parent_keys:
+          continue
+        descendants = db.query(models.Delegation.id).filter(
+          models.Delegation.parent_chat_id == row.child_chat_id,
+          models.Delegation.parent_root_run_id.in_(parent_keys),
+        ).all()
+        frontier.update(
+          descendant_id for (descendant_id,) in descendants
+          if descendant_id not in delegations
+        )
+
+    # A notified quota park still has an explicit resume path; retirement must
+    # revoke it without changing the ordinary lifecycle's terminality rules.
+    resumable_statuses = {*models.NONTERMINAL_RUN_STATUSES, "parked_notified"}
+    selected_runs: dict[str, models.ChatRun] = {
+      run.id: run
+      for runs in delegation_runs.values()
+      for run in runs
+      if run.status in resumable_statuses
+    }
+
+    # A writer task has an exact reserved seed identity.  Restart/limit
+    # continuations are included only when a writer-owned transcript envelope
+    # names both predecessor and successor; same-root proximity is not proof.
+    writer_tasks_by_chat: dict[str, list[models.GauntletTask]] = {}
+    controller_seeds = {
+      (row.parent_chat_id, row.parent_root_run_id, row.parent_root_run_id)
+      for row in gauntlets if row.status in {"running", "stopping"}
+    }
+    for task in tasks:
+      if task.scope != "write" or task.chat_run_id is None:
+        continue
+      gauntlet = gauntlet_by_id.get(task.gauntlet_run_id)
+      if gauntlet is None:
+        continue
+      writer_tasks_by_chat.setdefault(
+        gauntlet.parent_chat_id, [],
+      ).append(task)
+      controller_seeds.add((
+        gauntlet.parent_chat_id, gauntlet.parent_root_run_id, task.chat_run_id,
+      ))
+    # The original registration/controller seed can be paused before any
+    # writer task exists. Treat its exact causal successors like writer seeds,
+    # never as permission to consume arbitrary later same-chat work.
+    for controller_chat_id, root_id, seed_id in sorted(controller_seeds):
+      seed = db.get(models.ChatRun, seed_id)
+      if seed is None or (
+        seed.chat_id != controller_chat_id
+        or (seed.root_run_id or seed.id) != root_id
+      ):
+        if seed is not None:
+          unresolved.append(
+            f"controller seed {seed_id} has mismatched chat/root"
+          )
+        continue
+      owned_ids = {seed.id}
+      chat = db.get(models.Chat, seed.chat_id)
+      successor_by_predecessor: dict[str, set[str]] = {}
+      if chat is not None:
+        for message in [
+          *(chat.messages or []), *(chat.pending_messages or []),
+        ]:
+          if not isinstance(message, dict):
+            continue
+          predecessor = message.get("_continuation_supersedes_run_token")
+          successor = message.get("_continuation_run_token")
+          if isinstance(predecessor, str) and isinstance(successor, str):
+            successor_by_predecessor.setdefault(predecessor, set()).add(
+              successor
+            )
+      pending_predecessors = {seed.id}
+      while pending_predecessors:
+        successor_ids = {
+          successor
+          for predecessor in pending_predecessors
+          for successor in successor_by_predecessor.get(predecessor, set())
+          if successor not in owned_ids
+        }
+        pending_predecessors = set()
+        for successor_id in successor_ids:
+          successor = db.get(models.ChatRun, successor_id)
+          if successor is None or (
+            successor.chat_id != seed.chat_id
+            or (successor.root_run_id or successor.id)
+              != (seed.root_run_id or seed.id)
+            or successor.initiated_by_app_id != seed.initiated_by_app_id
+          ):
+            continue
+          owned_ids.add(successor.id)
+          pending_predecessors.add(successor.id)
+          if successor.status in resumable_statuses:
+            selected_runs[successor.id] = successor
+      if seed.status in resumable_statuses:
+        selected_runs[seed.id] = seed
+
+    selected_by_chat: dict[str, set[str]] = {}
+    for run in selected_runs.values():
+      selected_by_chat.setdefault(run.chat_id, set()).add(run.id)
+
+    all_nonterminal_by_chat: dict[str, set[str]] = {}
+    if selected_by_chat:
+      for run_id, chat_id in db.query(
+        models.ChatRun.id, models.ChatRun.chat_id,
+      ).filter(
+        models.ChatRun.chat_id.in_(selected_by_chat),
+        models.ChatRun.status.in_(models.NONTERMINAL_RUN_STATUSES),
+      ).all():
+        all_nonterminal_by_chat.setdefault(chat_id, set()).add(run_id)
+
+    # Only a server-generated Gauntlet cid plus the task's immutable prompt
+    # digest proves that a queued row is synthetic.  Owner input survives even
+    # in a child whose old physical execution is being stopped.
+    def synthetic_pending(chat_id: str, message: object) -> bool:
+      if not isinstance(message, dict) or not (
+        message.get("role") == "user"
+        and message.get("kind") == "continuation"
+        and message.get("continuation_reason") == "gauntlet"
+      ):
+        return False
+      content = message.get("content")
+      cid = message.get("cid")
+      if not isinstance(content, str) or not isinstance(cid, str):
+        return False
+      digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
+      return any(
+        cid == f"gauntlet-{task.gauntlet_run_id}-integrate-{task.round}"
+        and digest == task.prompt_sha256
+        for task in writer_tasks_by_chat.get(chat_id, ())
+      )
+
+    chat_ids = set(selected_by_chat) | {
+      row.child_chat_id for row in delegations.values()
+    } | set(writer_tasks_by_chat)
+    chats = {
+      chat.id: chat for chat in db.query(models.Chat).filter(
+        models.Chat.id.in_(chat_ids),
+      ).all()
+    } if chat_ids else {}
+
+    pending_retired = 0
+    snapshots_materialized = 0
+    for chat_id, chat in chats.items():
+      changed = False
+      pending = list(chat.pending_messages or [])
+      next_pending = [
+        message for message in pending
+        if not synthetic_pending(chat_id, message)
+      ]
+      if len(next_pending) != len(pending):
+        pending_retired += len(pending) - len(next_pending)
+        chat.pending_messages = next_pending
+        changed = True
+
+      owned_run_ids = selected_by_chat.get(chat_id, set())
+      live = copy.deepcopy(chat.live_assistant)
+      live_id = _assistant_message_id(live)
+      surface_ids = {
+        value for value in (live_id, chat.active_assistant_message_id)
+        if isinstance(value, str)
+      }
+      all_nonterminal = all_nonterminal_by_chat.get(chat_id, set())
+      surface_owned = bool(
+        owned_run_ids
+        and (
+          (surface_ids and surface_ids <= owned_run_ids)
+          or (
+            not surface_ids
+            and all_nonterminal
+            and all_nonterminal <= owned_run_ids
+          )
+        )
+      )
+      if surface_owned:
+        messages = list(chat.messages or [])
+        blocks = live.get("blocks") if isinstance(live, dict) else None
+        if isinstance(blocks, list) and blocks:
+          finalized = copy.deepcopy(live)
+          finalize_blocks(finalized["blocks"])
+          live_index = assistant_message_index(messages, finalized)
+          if live_index >= 0:
+            messages[live_index] = finalized
+          else:
+            messages.append(finalized)
+          chat.messages = messages
+          snapshots_materialized += 1
+        chat.live_assistant = None
+        chat.pending_question_id = None
+        chat.active_assistant_message_id = None
+        for request in db.query(models.SavedSecureInput).filter(
+          models.SavedSecureInput.chat_id == chat_id,
+          models.SavedSecureInput.status.in_(("pending", "consuming")),
+        ).all():
+          request.status = "cancelled"
+          request.outcome = "Secure input was cancelled."
+        changed = True
+      if changed:
+        chat.updated_at = now
+
+    unfinished_statuses = resumable_statuses
+    cancelled_delegations = 0
+    for row in delegations.values():
+      owned = delegation_runs.get(row.id, [])
+      unfinished = not owned or any(
+        run.status in unfinished_statuses for run in owned
+      )
+      row.startup_prompt = None
+      row.notify_parent_on_complete = False
+      if unfinished and row.cancelled_at is None:
+        row.cancelled_at = now
+        row.source_work_active_chat_id = None
+        cancelled_delegations += 1
+
+    retired_gauntlets = 0
+    for row in gauntlets:
+      if row.status not in {"running", "stopping"}:
+        continue
+      row.status = "stopped"
+      row.phase = "terminal"
+      row.active_target_key = None
+      row.requested_terminal_status = None
+      row.stop_requested_at = row.stop_requested_at or now
+      row.terminal_reason = (
+        "Legacy Gauntlet execution was retired during the platform upgrade."
+      )
+      row.revision += 1
+      row.updated_at = now
+      row.ended_at = now
+      retired_gauntlets += 1
+
+    for run in selected_runs.values():
+      run.status = "stopped"
+      run.ended_at = run.ended_at or now
+      run.restart_nonce = None
+
+    # This row is deliberately staged last and committed with all preceding
+    # mutations.  A failed flush/commit cannot suppress the retry on next boot.
+    db.add(models.GauntletTargetMutex(id=marker_id, revision=1))
+    if not _commit_or_rollback(db):
+      raise _PersistFailed("legacy Gauntlet retirement did not persist")
+    if unresolved:
+      log.warning(
+        "legacy Gauntlet retirement preserved uncertain provenance: %s",
+        "; ".join(unresolved),
+      )
+    return {
+      "gauntlets": retired_gauntlets,
+      "delegations": cancelled_delegations,
+      "chat_runs": len(selected_runs),
+      "pending_messages": pending_retired,
+      "assistant_snapshots": snapshots_materialized,
+    }
+
   def _reconcile_startup_chat(
     self, db, cmd: "ReconcileStartupChat",
   ) -> bool:
     """Commit one boot recovery plan without bypassing transcript ownership."""
-    from app.models import Chat, ChatRun
+    from app.models import Chat, ChatRun, ChatLiveAssistant
 
     if not cmd.chat_id or cmd.recovered_at is None:
       return False
@@ -2206,7 +3136,6 @@ class ChatWriterActor:
       .values(
         messages=cmd.messages,
         has_messages=bool(cmd.messages),
-        live_assistant=None,
         # Startup repair owns the durable transcript after a process loss.
         # Rebuild the protocol barrier from that repaired source instead of
         # preserving a marker that Finalize may have cleared just before the
@@ -2218,6 +3147,7 @@ class ChatWriterActor:
     if chat_update.rowcount != 1:
       db.rollback()
       return False
+    db.query(ChatLiveAssistant).filter_by(chat_id=cmd.chat_id).delete()
     interrupted_ids = tuple(
       run_id for run_id in cmd.running_run_ids
       if run_id != cmd.restart_run_id
@@ -2235,6 +3165,13 @@ class ChatWriterActor:
           ended_at=cmd.recovered_at,
           restart_nonce=None,
         )
+      )
+      from app.chat_failure_activity import mark_failed
+      mark_failed(
+        db,
+        chat_id=cmd.chat_id,
+        run_id=interrupted_ids[-1],
+        failed_at=cmd.recovered_at,
       )
     if cmd.restart_run_id:
       db.execute(
@@ -2430,7 +3367,7 @@ class ChatWriterActor:
 
   def _start_turn(
     self, db, cmd: StartTurn,
-  ) -> dict | StartTurnBlockedByPendingQuestion:
+  ) -> dict | StartTurnBlockedByPendingQuestion | StartTurnRecoveryChanged:
     """Append the initial user message, set title/provider, mark the run.
 
     Replicates the fresh-start branch of `send_message`: builds the agent
@@ -2464,9 +3401,8 @@ class ChatWriterActor:
             "session_id": chat.session_id,
             "provider": chat.provider,
           }
-      # Defensive symmetry with AppendPending. A normal route never calls
-      # StartTurn while pending rows exist, but keeping the actor gate complete
-      # prevents a future caller from turning a queued retry into a second run.
+      # Resume can start while follow-ups remain pending. The symmetric CID
+      # gate keeps that path from turning a queued retry into a second run.
       for row in pending:
         if cid_of(row) == incoming_cid:
           return {
@@ -2484,6 +3420,15 @@ class ChatWriterActor:
       question_id = chat.pending_question_id
       db.rollback()  # End the actor's read transaction on this non-write path.
       return StartTurnBlockedByPendingQuestion(question_id)
+    from app.continuations import continuation_reason
+    from app.run_state import latest_run
+    resuming = continuation_reason(cmd.user_msg) == "manual"
+    prior = latest_run(db, cmd.chat_id) if resuming else None
+    if cmd.resume_run_id is not None and (
+      not resuming or prior is None or prior.id != cmd.resume_run_id
+    ):
+      db.rollback()
+      return StartTurnRecoveryChanged()
     if not existing:
       chat.provider = cmd.default_provider or "claude"
     # Build the agent history as schemas.ChatMessage objects, exactly as the
@@ -2541,9 +3486,13 @@ class ChatWriterActor:
     self._close_nonterminal_runs(db, cmd.chat_id, "interrupted")
     db.add(ChatRun(
       id=cmd.run_token, chat_id=cmd.chat_id, status="running",
-      root_run_id=cmd.run_token,
+      root_run_id=(
+        (prior.root_run_id or prior.id) if prior is not None else cmd.run_token
+      ),
       provider=chat.provider, started_at=started_at,
-      initiated_by_app_id=cmd.initiated_by_app_id,
+      initiated_by_app_id=(
+        prior.initiated_by_app_id if prior is not None else cmd.initiated_by_app_id
+      ),
       goal_objective=goal_objective,
       goal_id=goal_id,
     ))
@@ -2563,12 +3512,11 @@ class ChatWriterActor:
     """Append and open an idle, same-root continuation in one commit.
 
     A deterministic ``run_token`` makes a retry attach to an already-created
-    physical run.  A deterministic ``cid`` also lets this command repair the
-    one legacy crash shape produced by the former two-command implementation:
-    exactly the expected synthetic row was appended to ``pending_messages``
-    but never promoted. Ordinary coordinator calls reject foreign pending
-    work. Restart recovery may instead consume the current owner group while
-    preserving group order and every later group.
+    physical run. A deterministic ``cid`` also lets this command adopt its
+    exact synthetic row from ``pending_messages`` after a busy/input-blocked
+    wake or a crash before promotion. Ordinary coordinator calls reject foreign
+    pending work. Recovery replaces the exact parked attempt without consuming
+    follow-ups: they belong to the next ordinary turn, not this continuation.
     """
     from datetime import UTC, datetime
 
@@ -2578,6 +3526,107 @@ class ChatWriterActor:
     chat = _active_chat(db, cmd.chat_id)
     if chat is None:
       raise _PersistFailed("StartContinuation: chat not found or deleted")
+
+    activation_wait = None
+    if cmd.activation_wait_id is not None:
+      from app.platform_restart import (
+        ACTIVATION_WAIT_KIND,
+        activation_notice,
+      )
+      activation_wait = db.query(models.ChatWait).filter(
+        models.ChatWait.id == cmd.activation_wait_id,
+        models.ChatWait.chat_id == cmd.chat_id,
+        models.ChatWait.kind == ACTIVATION_WAIT_KIND,
+        models.ChatWait.status.in_(("met", "expired", "failed")),
+        models.ChatWait.resume_delivered_at.is_(None),
+      ).first()
+      if (
+        activation_wait is None
+        or activation_wait.root_run_id != cmd.root_run_id
+        or activation_wait.created_by_run_id != cmd.source_work_id
+        or cmd.content != activation_notice(
+          activation_wait,
+          "met" if activation_wait.status == "met" else "uncertain",
+        )
+      ):
+        raise _PersistFailed("StartContinuation: invalid activation wait")
+      # A stopped or dismissed Goal cannot be revived as a goal-less runner.
+      # The stored source identity is authoritative, not whichever Goal is
+      # currently presented in this chat.
+      source = db.get(ChatRun, activation_wait.created_by_run_id)
+      if source is None or source.chat_id != cmd.chat_id:
+        raise _PersistFailed("StartContinuation: activation source missing")
+      from app.run_state import _recoverable_result_goal
+      if (
+        source.goal_objective is not None
+        and _recoverable_result_goal(db, cmd.chat_id, source)[0] is None
+      ):
+        _cancel_activation_owners(db, chat, goal_id=activation_wait.goal_id)
+        if not _commit_or_rollback(db):
+          raise _PersistFailed("StartContinuation cancellation did not persist")
+        return StartContinuationBlocked("goal_stopped")
+      # The typed bypass owns only its linked question and foreign pending B.
+      # Usage-limit and arbitrary-crash recovery remain independent barriers.
+      from app.chat import _parked_until_for_chat, _restart_manual_hold_for_chat
+      if (
+        _parked_until_for_chat(db, cmd.chat_id) is not None
+        or _restart_manual_hold_for_chat(db, cmd.chat_id)
+      ):
+        db.rollback()
+        return StartContinuationBlocked("recovery_barrier")
+
+    def settle_activation_card() -> None:
+      if activation_wait is None:
+        return
+      from sqlalchemy.orm.attributes import flag_modified
+      messages = copy.deepcopy(list(chat.messages or []))
+      found = False
+      for message in reversed(messages):
+        if not isinstance(message, dict) or message.get("role") != "assistant":
+          continue
+        for block in message.get("blocks") or []:
+          if not isinstance(block, dict):
+            continue
+          action = block.get("platform_action")
+          if (
+            block.get("type") == "question"
+            and block.get("question_id") == activation_wait.linked_question_id
+            and isinstance(action, dict)
+            and action.get("type") == "restart"
+            and action.get("wait_id") == activation_wait.id
+            and action.get("requirement") == activation_wait.condition_json
+          ):
+            action["status"] = (
+              "activated" if activation_wait.status == "met"
+              else "activation_uncertain"
+            )
+            found = True
+            break
+        if found:
+          break
+      if not found:
+        raise _PersistFailed("StartContinuation: linked activation card missing")
+      chat.messages = messages
+      flag_modified(chat, "messages")
+      live = copy.deepcopy(chat.live_assistant)
+      if isinstance(live, dict):
+        for block in live.get("blocks") or []:
+          if not isinstance(block, dict):
+            continue
+          action = block.get("platform_action")
+          if (
+            block.get("question_id") == activation_wait.linked_question_id
+            and isinstance(action, dict)
+            and action.get("wait_id") == activation_wait.id
+          ):
+            action["status"] = (
+              "activated" if activation_wait.status == "met"
+              else "activation_uncertain"
+            )
+            chat.live_assistant = live
+            break
+      if chat.pending_question_id == activation_wait.linked_question_id:
+        chat.pending_question_id = None
 
     existing_run = db.query(ChatRun).filter(
       ChatRun.id == cmd.run_token,
@@ -2603,7 +3652,13 @@ class ChatWriterActor:
       raise _PersistFailed(
         "StartContinuation: logical root does not belong to chat"
       )
-    if chat.pending_question_id is not None:
+    if (
+      chat.pending_question_id is not None
+      and (
+        activation_wait is None
+        or chat.pending_question_id != activation_wait.linked_question_id
+      )
+    ):
       db.rollback()
       return StartContinuationBlocked("pending_question")
     other_run = db.query(ChatRun).filter(
@@ -2621,6 +3676,19 @@ class ChatWriterActor:
         return StartContinuationBlocked("superseded_run_changed")
       superseded = other_run
     elif other_run is not None:
+      if (
+        activation_wait is not None
+        and cmd.activation_attach_run_token == other_run.id
+        and other_run.status == "running"
+        and (other_run.root_run_id or other_run.id) == cmd.root_run_id
+      ):
+        # Planned restart recovery already owns the same interrupted A. Clear
+        # only this activation barrier and attach the wait to that work; never
+        # create a duplicate provider runner.
+        settle_activation_card()
+        if not _commit_or_rollback(db):
+          raise _PersistFailed("StartContinuation activation attach failed")
+        return StartContinuationAttached()
       db.rollback()
       return StartContinuationBlocked("active_run")
 
@@ -2648,19 +3716,12 @@ class ChatWriterActor:
     if cmd.initiated_by_app_id is not None:
       source["_initiated_by_app_id"] = cmd.initiated_by_app_id
 
-    selected_pending: list[dict] = []
-    remaining_pending: list[dict] = []
-    if cmd.consume_pending and pending:
-      from app.continuations import pending_message_group_key
-      head_group = pending_message_group_key(pending[0])
-      promote_count = 0
-      for row in pending:
-        if pending_message_group_key(row) != head_group:
-          break
-        promote_count += 1
-      selected_pending = pending[:promote_count]
-      remaining_pending = pending[promote_count:]
-    elif pending:
+    remaining_pending: list[dict] = pending if activation_wait is not None else []
+    if cmd.supersedes_run_token is not None:
+      # A physical recovery continues the interrupted input. Later owner or
+      # product rows keep their original queue boundary and attribution.
+      remaining_pending = pending
+    elif pending and activation_wait is None:
       # Recover only the exact row the retired AppendPending -> PromotePending
       # sequence could have stranded.  Never consume a real owner queue or an
       # app-attributed row in order to make coordinator progress.
@@ -2697,14 +3758,9 @@ class ChatWriterActor:
           break
 
     ensure_user_cid(source)
-    # Restart recovery consumes any already-queued owner group and writes its
-    # product continuation marker directly to history in the same commit. The
-    # marker is never a pending row. A hidden group stays hidden provider input;
-    # the visible restart marker remains transcript-only in that case.
-    provider_sources = list(selected_pending)
-    if not provider_sources or not bool(provider_sources[0].get("hidden")):
-      provider_sources.append(source)
-    if cmd.supersedes_run_token is not None and cmd.consume_pending:
+    # Recovery markers never enter the follow-up queue.
+    provider_sources = [source]
+    if cmd.supersedes_run_token is not None:
       # Persist the minimum causal envelope needed to reconstruct the exact
       # provider prompt after a crash between this commit and task creation.
       # The transcript rows remain the source of truth; this records only
@@ -2714,15 +3770,13 @@ class ChatWriterActor:
       source["_continuation_supersedes_run_token"] = (
         cmd.supersedes_run_token
       )
-      source["_continuation_consumed_cids"] = [
-        cid_of(row) for row in selected_pending if cid_of(row) is not None
-      ]
+      source["_continuation_consumed_cids"] = []
       source["_continuation_provider_cids"] = [
         cid_of(row) for row in provider_sources if cid_of(row) is not None
       ]
     agent_message = _combine_pending_messages(provider_sources)
     stored_rows = _pending_messages_for_transcript(
-      [*selected_pending, source], existing,
+      [source], existing,
     )
     try:
       history = [
@@ -2749,6 +3803,7 @@ class ChatWriterActor:
       "ts": next_message_ts(chat.messages),
     }
     chat.active_assistant_message_id = cmd.run_token
+    settle_activation_card()
     started_at = datetime.now(UTC)
     chat.updated_at = started_at
     provider = chat.provider or "claude"
@@ -2783,10 +3838,156 @@ class ChatWriterActor:
       "promoted": {
         **agent_message,
         "_messages": stored_rows,
-        "_consumed_cids": [
-          cid_of(row) for row in selected_pending if cid_of(row) is not None
-        ],
+        "_consumed_cids": [],
       },
+      "session_id": chat.session_id,
+      "provider": provider,
+    }
+
+  def _start_activity_continuation(
+    self, db, cmd: StartActivityContinuation,
+  ) -> dict | StartContinuationAttached | StartContinuationBlocked:
+    """Open an explicitly awaited helper checkpoint without a transcript row."""
+    from app.delegations import (
+      WAKE_ELIGIBLE_STATUSES,
+      _activity_continuation_run_id,
+      _parent_wake_continuation_root,
+      derived_status,
+    )
+    from app.models import ChatRun
+
+    chat = _active_chat(db, cmd.chat_id)
+    if chat is None:
+      raise _PersistFailed(
+        "StartActivityContinuation: chat not found or deleted"
+      )
+    trigger = db.query(models.Delegation).filter(
+      models.Delegation.id == cmd.activity_id,
+      models.Delegation.parent_chat_id == cmd.chat_id,
+      models.Delegation.parent_root_run_id == cmd.source_work_id,
+      models.Delegation.notify_parent_on_complete.is_(True),
+      models.Delegation.parent_woken_at.is_(None),
+      models.Delegation.cancelled_at.is_(None),
+    ).first()
+    if (
+      trigger is None
+      or derived_status(db, trigger, load_result=False)[0]
+        not in WAKE_ELIGIBLE_STATUSES
+    ):
+      db.rollback()
+      return StartContinuationBlocked("activity_unavailable")
+    if cmd.run_token != _activity_continuation_run_id(trigger):
+      raise _PersistFailed(
+        "StartActivityContinuation: run identity does not match activity"
+      )
+    expected_root_run_id = _parent_wake_continuation_root(
+      db, cmd.chat_id, cmd.source_work_id,
+    )
+    if expected_root_run_id != cmd.root_run_id:
+      raise _PersistFailed(
+        "StartActivityContinuation: source work belongs to another root"
+      )
+
+    # Caller-side admission may race card settlement. The actor owns the
+    # final A-before-activity boundary, including duplicate attach attempts.
+    from app.platform_restart import activation_barrier_for_chat
+    if activation_barrier_for_chat(db, cmd.chat_id):
+      db.rollback()
+      return StartContinuationBlocked("activation_pending")
+
+    existing_run = db.query(ChatRun).filter(
+      ChatRun.id == cmd.run_token,
+      ChatRun.chat_id == cmd.chat_id,
+    ).first()
+    if existing_run is not None:
+      existing_envelope = existing_run.activity_delivery_json
+      existing_source_work_id = (
+        existing_envelope.get("source_work_id")
+        if isinstance(existing_envelope, dict) else None
+      )
+      if (
+        (existing_run.root_run_id or existing_run.id) != cmd.root_run_id
+        or existing_run.initiated_by_app_id is not None
+        or existing_source_work_id not in (None, cmd.source_work_id)
+      ):
+        raise _PersistFailed(
+          "StartActivityContinuation: run identity belongs to other work"
+        )
+      db.rollback()
+      return StartContinuationAttached()
+
+    if chat.pending_question_id is not None:
+      db.rollback()
+      return StartContinuationBlocked("pending_question")
+    if chat.pending_messages:
+      db.rollback()
+      return StartContinuationBlocked("pending_input")
+    if db.query(ChatRun.id).filter(
+      ChatRun.chat_id == cmd.chat_id,
+      ChatRun.status.in_(models.NONTERMINAL_RUN_STATUSES),
+    ).first() is not None:
+      db.rollback()
+      return StartContinuationBlocked("active_run")
+
+    latest = db.query(ChatRun).filter(
+      ChatRun.chat_id == cmd.chat_id,
+    ).order_by(ChatRun.started_at.desc(), ChatRun.id.desc()).first()
+    latest_source = (
+      (latest.goal_id or latest.root_run_id or latest.id)
+      if latest is not None else None
+    )
+    if (
+      latest is None
+      or latest.status != "completed"
+      or latest_source != cmd.source_work_id
+    ):
+      db.rollback()
+      return StartContinuationBlocked("parent_not_waiting")
+
+    existing = list(chat.messages or [])
+    try:
+      history = [
+        schemas.ChatMessage(
+          role=row.get("role", "user"),
+          content=row.get("content", "") or "",
+        )
+        for row in existing
+      ]
+    except Exception as exc:
+      raise _PersistFailed(
+        "StartActivityContinuation: malformed controller transcript"
+      ) from exc
+
+    started_at = datetime.now(UTC)
+    chat.live_assistant = {
+      "id": cmd.run_token,
+      "role": "assistant",
+      "blocks": [],
+      "ts": next_message_ts(existing),
+    }
+    chat.active_assistant_message_id = cmd.run_token
+    chat.updated_at = started_at
+    provider = chat.provider or "claude"
+    db.add(ChatRun(
+      id=cmd.run_token,
+      chat_id=cmd.chat_id,
+      status="running",
+      root_run_id=cmd.root_run_id,
+      provider=provider,
+      started_at=started_at,
+      initiated_by_app_id=None,
+      goal_objective=latest.goal_objective,
+      goal_id=latest.goal_id,
+      activity_delivery_json={
+        "delegation_ids": [trigger.id],
+        "source_work_id": cmd.source_work_id,
+      },
+    ))
+    if not _commit_or_rollback(db):
+      raise _PersistFailed("StartActivityContinuation did not persist")
+    self._run_token_owner[cmd.chat_id] = cmd.run_token
+    return {
+      "history": history,
       "session_id": chat.session_id,
       "provider": provider,
     }
@@ -2803,10 +4004,13 @@ class ChatWriterActor:
       db.rollback()
       return GoalPromotionRejected("run_not_active")
 
-    from app.run_state import latest_run
-
-    latest = latest_run(db, cmd.chat_id)
-    if latest is None or latest.id != run.id:
+    latest = (
+      db.query(models.ChatRun.id)
+      .filter(models.ChatRun.chat_id == cmd.chat_id)
+      .order_by(models.ChatRun.started_at.desc(), models.ChatRun.id.desc())
+      .first()
+    )
+    if latest is None or latest[0] != run.id:
       db.rollback()
       return GoalPromotionRejected("run_not_current")
     if run.goal_objective not in (None, cmd.objective):
@@ -2824,7 +4028,6 @@ class ChatWriterActor:
     if root.goal_objective not in (None, cmd.objective):
       db.rollback()
       return GoalPromotionRejected("different_goal_active")
-
     if (
       run.goal_id is not None
       and root.goal_id is not None
@@ -2886,6 +4089,8 @@ class ChatWriterActor:
       db.rollback()
       return {"status": "cleared", "goal_id": goal_id}
     chat.dismissed_goal_id = goal_id
+    # Exact Goal dismissal does not cancel another Goal or generic wait.
+    _cancel_activation_owners(db, chat, goal_id=goal_id)
     if not cmd.preserve_execution:
       cleared_at = datetime.now(UTC)
       for run in db.query(models.ChatRun).filter(
@@ -3239,9 +4444,7 @@ class ChatWriterActor:
       raise _PersistFailed("PersistCompaction did not persist")
     return {"status": "committed", "stored": new_msg}
 
-  def _promote_pending(
-    self, db, cmd: PromotePending,
-  ) -> dict | PromotePendingBlockedByPendingQuestion:
+  def _promote_pending(self, db, cmd: PromotePending) -> dict:
     """Move pending follow-ups into the transcript and mark the run.
 
     Replicates `promote_pending_messages_locked`: builds the next-turn
@@ -3260,13 +4463,22 @@ class ChatWriterActor:
     if chat is None:
       raise _PersistFailed("PromotePending: chat not found or deleted")
     # Moving queued rows into the transcript is a turn-admission operation,
-    # just like StartTurn. Keep the owner-question barrier
+    # just like StartTurn / StartContinuation. Keep the owner-question barrier
     # at the actor-owned commit boundary so every caller — including recovery
     # sweepers and future programmatic wakes — gets the same TOCTOU-safe rule.
     if chat.pending_question_id is not None:
       question_id = chat.pending_question_id
       db.rollback()
-      return PromotePendingBlockedByPendingQuestion(question_id)
+      return PromotePendingBlocked("question", question_id=question_id)
+    activation = db.query(models.ChatWait.id).filter(
+      models.ChatWait.chat_id == cmd.chat_id,
+      models.ChatWait.kind == "platform_activation",
+      models.ChatWait.status.in_(("armed", "met", "expired", "failed")),
+      models.ChatWait.resume_delivered_at.is_(None),
+    ).first()
+    if activation is not None:
+      db.rollback()
+      return PromotePendingBlocked("activation", wait_id=activation[0])
     pending = list(chat.pending_messages or [])
     # `/goal clear` is no longer a runnable message. A bounded Goal-handoff
     # marker is likewise no longer runnable after its exact Goal is stopped or
@@ -3299,7 +4511,6 @@ class ChatWriterActor:
       return {"history": [], "promoted": None, "session_id": chat.session_id}
     existing = list(chat.messages or [])
     from app.continuations import (
-      PRODUCT_RESULT_MESSAGE_KINDS,
       pending_message_group_key,
       product_result_run_token,
     )
@@ -3312,16 +4523,6 @@ class ChatWriterActor:
     promoted_group = pending[:promote_count]
     remaining_pending = pending[promote_count:]
     agent_pending = _combine_pending_messages(promoted_group)
-    if (
-      cmd.continuation_reason is not None
-      and agent_pending.get("kind") not in PRODUCT_RESULT_MESSAGE_KINDS
-    ):
-      # A manual Try-now owns ordinary queued context, but a Wait/delegation
-      # receipt already owns a stronger product identity. Re-labeling it here
-      # would discard its deterministic run token and prevent the scheduler
-      # from claiming the delivery latch after provider admission.
-      agent_pending["kind"] = "continuation"
-      agent_pending["continuation_reason"] = cmd.continuation_reason
     consumed_cids = agent_pending.pop("_consumed_cids", [])
     initiated_by_app_id = agent_pending.pop("_initiated_by_app_id", None)
     durable_run_token = (
@@ -3406,9 +4607,9 @@ class ChatWriterActor:
     goal_objective, goal_id = goal_identity_for_run_start(
       db, cmd.chat_id, agent_pending,
     )
-    # This event-only metadata lets the mounted UI cross the physical-turn
+    # Event-only metadata lets the mounted UI cross the physical-turn
     # boundary without briefly clearing a Goal while the runtime refetch lands.
-    # It is not written into the transcript row.
+    # It is deliberately not written into the transcript row.
     returned_promoted["_goal_objective"] = goal_objective
     returned_promoted["_goal_id"] = goal_id
     prior_run = (
@@ -3592,11 +4793,22 @@ class ChatWriterActor:
     if except_token is not None:
       q = q.filter(ChatRun.id != except_token)
     changed = False
-    for run in q.all():
+    failed_run = None
+    for run in q.order_by(ChatRun.started_at.asc(), ChatRun.id.asc()).all():
       run.status = status
       run.ended_at = datetime.now(UTC)
       run.restart_nonce = None
       changed = True
+      if status == "failed":
+        failed_run = run
+    if failed_run is not None:
+      from app.chat_failure_activity import mark_failed
+      mark_failed(
+        db,
+        chat_id=chat_id,
+        run_id=failed_run.id,
+        failed_at=failed_run.ended_at,
+      )
     return changed
 
   def _finish_run(self, db, cmd: FinishRun):
@@ -3623,11 +4835,19 @@ class ChatWriterActor:
         ChatRun.id == cmd.run_token,
         ChatRun.chat_id == cmd.chat_id,
       ).first()
-      if run is not None and run.status == "running":
+      if run is not None and run.status in models.NONTERMINAL_RUN_STATUSES:
         run.status = cmd.terminal_status
         run.ended_at = datetime.now(UTC)
         run.restart_nonce = None
         run_changed = True
+        if cmd.terminal_status == "failed":
+          from app.chat_failure_activity import mark_failed
+          mark_failed(
+            db,
+            chat_id=cmd.chat_id,
+            run_id=run.id,
+            failed_at=run.ended_at,
+          )
     else:
       run_changed = self._close_nonterminal_runs(
         db, cmd.chat_id, cmd.terminal_status
@@ -3746,6 +4966,16 @@ class ChatWriterActor:
 
     chat = db.query(Chat).filter(Chat.id == cmd.chat_id).first()
     if chat is not None and chat.deleted_at is None:
+      if not parks:
+        # A parked wait continues by itself; only a real interruption earns
+        # the drawer's attention mark.
+        from app.chat_failure_activity import mark_failed
+        mark_failed(
+          db,
+          chat_id=cmd.chat_id,
+          run_id=cmd.run_token,
+          failed_at=run.ended_at,
+        )
       messages = list(chat.messages or [])
       live = copy.deepcopy(chat.live_assistant)
       if (
@@ -4673,7 +5903,7 @@ def _tail_open_question_state(
 
 
 def _tail_open_question_id(messages) -> str | None:
-  """Return only the open question id for callers that do not own its row."""
+  """Compatibility projection for callers that only need the question id."""
   return _tail_open_question_state(messages)[0]
 
 
@@ -4700,7 +5930,9 @@ def _active_chat(db, chat_id: str):
   ).first()
 
 
-def _apply_last_assistant_message(db, chat_id: str, message: dict):
+def _apply_last_assistant_message(
+  db, chat_id: str, message: dict, *, commit: bool = True,
+):
   """Core assistant-message write, returning a `_WriteOutcome`.
 
   Distinguishes APPLIED (the write landed), NOOP (no chat_id / missing row /
@@ -4729,13 +5961,13 @@ def _apply_last_assistant_message(db, chat_id: str, message: dict):
     existing_answers_by_key = {}
     existing_message = msgs[assistant_index]
     for ob in existing_message.get("blocks") or []:
-      if ob.get("type") == "question" and ob.get("answers"):
-        existing_answers_by_key[question_block_key(ob)] = ob["answers"]
+      if ob.get("type") == "question":
+        existing_answers_by_key[question_block_key(ob)] = _question_answer_fields(ob)
     for nb in message.get("blocks") or []:
-      if nb.get("type") == "question" and not nb.get("answers"):
+      if nb.get("type") == "question":
         carried = existing_answers_by_key.get(question_block_key(nb))
         if carried:
-          nb["answers"] = carried
+          nb.update(carried)
     # Carry a STABLE per-turn ts. build_assistant_message omits ts, so
     # assistant messages historically persisted with ts=None — which
     # silently defeated the frontend bridge gate (useBridgePartial keys
@@ -4783,10 +6015,10 @@ def _apply_last_assistant_message(db, chat_id: str, message: dict):
   message_owner_id = _assistant_message_id(message)
   if message_owner_id is not None:
     chat.active_assistant_message_id = message_owner_id
+  if not commit:
+    return _WriteOutcome.APPLIED
   return (
-    _WriteOutcome.APPLIED
-    if _commit_or_rollback(db)
-    else _WriteOutcome.DROPPED
+    _WriteOutcome.APPLIED if _commit_or_rollback(db) else _WriteOutcome.DROPPED
   )
 
 
@@ -4810,17 +6042,19 @@ def update_live_assistant(
   """Persist the current assistant snapshot without rewriting history."""
   if not chat_id:
     return True
-  from app.models import Chat
+  from app.models import Chat, ChatLiveAssistant
 
   row = db.execute(
-    select(Chat.live_assistant, Chat.active_assistant_message_id).where(
-      Chat.id == chat_id,
-      Chat.deleted_at.is_(None),
-    )
+    select(ChatLiveAssistant, Chat.active_assistant_message_id)
+    .select_from(Chat)
+    .outerjoin(ChatLiveAssistant, ChatLiveAssistant.chat_id == Chat.id)
+    .where(Chat.id == chat_id, Chat.deleted_at.is_(None))
   ).first()
   if row is None:
     return None if require_row else True
-  existing = row[0] if isinstance(row[0], dict) else None
+  live_row = row[0]
+  existing = live_row.snapshot if live_row is not None else None
+  existing = existing if isinstance(existing, dict) else None
   existing_owner_id = row[1] if isinstance(row[1], str) else None
   snapshot = json_safe(copy.deepcopy(message))
   if not isinstance(snapshot, dict):
@@ -4852,15 +6086,15 @@ def update_live_assistant(
       snapshot["id"] = answer_source["id"]
     snapshot["ts"] = answer_source.get("ts")
     existing_answers = {
-      question_block_key(block): block["answers"]
+      question_block_key(block): _question_answer_fields(block)
       for block in (answer_source.get("blocks") or [])
-      if block.get("type") == "question" and block.get("answers")
+      if block.get("type") == "question"
     }
     for block in snapshot.get("blocks") or []:
-      if block.get("type") == "question" and not block.get("answers"):
+      if block.get("type") == "question":
         answers = existing_answers.get(question_block_key(block))
         if answers:
-          block["answers"] = answers
+          block.update(answers)
   if snapshot.get("ts") is None:
     # A turn created by a pre-column process pays one historical read. Every
     # later snapshot reuses the allocated timestamp from `live_assistant`.
@@ -4873,23 +6107,42 @@ def update_live_assistant(
     snapshot["ts"] = next_message_ts(
       list(state[0] or []) + list(state[1] or [])
     )
-  db.execute(
-    update(Chat)
-    .where(Chat.id == chat_id, Chat.deleted_at.is_(None))
-    # The stream is authoritative while this value changes. Bypass
-    # updated_at's onupdate default so retained history remains reusable.
-    .values(
-      live_assistant=snapshot,
-      active_assistant_message_id=(
-        _assistant_message_id(snapshot) or existing_owner_id
-      ),
-      updated_at=Chat.updated_at,
+  # Keep the active-chat predicate on the WRITE too: retention can delete a
+  # chat after the read, and SQLite installs do not rely on FK enforcement.
+  from sqlalchemy import JSON, bindparam, insert
+  active_chat = select(Chat.id).where(Chat.id == chat_id, Chat.deleted_at.is_(None))
+  if live_row is None:
+    result = db.execute(
+      insert(ChatLiveAssistant).from_select(
+        ["chat_id", "snapshot"],
+        select(Chat.id, bindparam("snapshot", snapshot, type_=JSON))
+        .where(Chat.id == chat_id, Chat.deleted_at.is_(None)),
+      )
     )
-  )
+  else:
+    result = db.execute(
+      update(ChatLiveAssistant)
+      .where(ChatLiveAssistant.chat_id == chat_id, active_chat.exists())
+      .values(snapshot=snapshot)
+    )
+  if result.rowcount != 1:
+    db.rollback()
+    return None if require_row else True
+  owner_id = _assistant_message_id(snapshot) or existing_owner_id
+  if owner_id != existing_owner_id:
+    # Identity changes are turn boundaries, not per-token writes. Never touch
+    # the large history row merely to reaffirm the already-current owner.
+    db.execute(
+      update(Chat)
+      .where(Chat.id == chat_id, Chat.deleted_at.is_(None))
+      .values(active_assistant_message_id=owner_id, updated_at=Chat.updated_at)
+    )
   return _commit_or_rollback(db)
 
 
-def finalize_response_outcome(db, chat_id: str, assistant_message: dict):
+def finalize_response_outcome(
+  db, chat_id: str, assistant_message: dict, *, commit: bool = True,
+):
   """End-of-response cleanup, returning a `_WriteOutcome`.
 
   Empty blocks -> NOOP (no terminal state to write); otherwise force-complete
@@ -4907,11 +6160,77 @@ def finalize_response_outcome(db, chat_id: str, assistant_message: dict):
   if not isinstance(assistant_blocks, list) or not assistant_blocks:
     return _WriteOutcome.NOOP
   finalize_blocks(assistant_blocks)
-  return _apply_last_assistant_message(db, chat_id, terminal_message)
+  return _apply_last_assistant_message(
+    db, chat_id, terminal_message, commit=commit,
+  )
+
+
+def _cancel_activation_owners(db, chat, *, goal_id: str | None = None) -> int:
+  """Actor-owned cancellation keeps wait, marker and visible card coherent."""
+  from sqlalchemy.orm.attributes import flag_modified
+
+  query = db.query(models.ChatWait).filter(
+    models.ChatWait.chat_id == chat.id,
+    models.ChatWait.kind == "platform_activation",
+    models.ChatWait.status.in_(("armed", "met", "expired", "failed")),
+    models.ChatWait.resume_delivered_at.is_(None),
+  )
+  if goal_id is not None:
+    query = query.filter(models.ChatWait.goal_id == goal_id)
+  waits = query.all()
+  if not waits:
+    return 0
+  linked = {wait.linked_question_id: wait.id for wait in waits}
+  now = datetime.now(UTC).replace(tzinfo=None)
+  for wait in waits:
+    wait.status = "cancelled"
+    wait.cancelled_at = now
+
+  def settle(message):
+    if not isinstance(message, dict):
+      return False
+    changed = False
+    for block in message.get("blocks") or []:
+      if not isinstance(block, dict):
+        continue
+      action = block.get("platform_action")
+      if (
+        block.get("type") == "question"
+        and block.get("question_id") in linked
+        and isinstance(action, dict)
+        and action.get("type") == "restart"
+        and action.get("wait_id") == linked[block["question_id"]]
+      ):
+        action["status"] = "dismissed"
+        changed = True
+    return changed
+
+  messages = copy.deepcopy(list(chat.messages or []))
+  changed = False
+  for message in messages:
+    changed = settle(message) or changed
+  if changed:
+    chat.messages = messages
+    flag_modified(chat, "messages")
+  live = copy.deepcopy(chat.live_assistant)
+  if settle(live):
+    chat.live_assistant = live
+  if chat.pending_question_id in linked:
+    chat.pending_question_id = None
+  return len(waits)
+
+
+def _question_answer_fields(block: dict) -> dict:
+  """Persisted settlement wins over stale streaming snapshots, even without Yes."""
+  return {
+    key: copy.deepcopy(block[key])
+    for key in ("answers", "answer_turn", "selected_options", "platform_action")
+    if key in block
+  }
 
 
 def apply_answers_to_last_question(
-  chat, answers: dict | None, question_id: str | None = None
+  chat, answers: dict | None, question_id: str | None = None, *, metadata: dict | None = None,
 ) -> bool:
   """Writes `answers` into the question block being answered.
 
@@ -4943,9 +6262,10 @@ def apply_answers_to_last_question(
         continue
       if match_id is not None and block.get("question_id") != match_id:
         continue
-      block["answers"] = answers
+      if isinstance(block.get("platform_action"), dict):
+        return False
+      block.update({"answers": answers, **(metadata or {})})
       chat.live_assistant = live
-      flag_modified(chat, "live_assistant")
       return True
     return False
 
@@ -4960,7 +6280,9 @@ def apply_answers_to_last_question(
           block.get("type") == "question"
           and block.get("question_id") == question_id
         ):
-          block["answers"] = answers
+          if isinstance(block.get("platform_action"), dict):
+            return False
+          block.update({"answers": answers, **(metadata or {})})
           chat.messages = msgs  # rebind so SQLAlchemy detects the mutation
           flag_modified(chat, "messages")
           sync_live_answer(question_id)
@@ -4979,7 +6301,9 @@ def apply_answers_to_last_question(
       continue
     for block in reversed(msg.get("blocks") or []):
       if block.get("type") == "question":
-        block["answers"] = answers
+        if isinstance(block.get("platform_action"), dict):
+          return False
+        block.update({"answers": answers, **(metadata or {})})
         chat.messages = msgs  # rebind so SQLAlchemy detects JSON mutation
         flag_modified(chat, "messages")
         sync_live_answer(None)

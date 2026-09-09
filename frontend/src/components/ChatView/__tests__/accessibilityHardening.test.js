@@ -49,7 +49,6 @@ test('full-screen dialogs share one focus, inerting, and Escape contract', () =>
     read('../markdown/ImageLightbox.jsx'),
     read('../AgentContextInspector.jsx'),
     read('../ChatSummaryViewer.jsx'),
-    read('../ChatUsageInspector.jsx'),
   ]
 
   for (const source of dialogs) {
@@ -61,7 +60,29 @@ test('full-screen dialogs share one focus, inerting, and Escape contract', () =>
   const manageModels = dialogs[1]
   const updateReview = dialogs[2]
   assert.match(manageModels, /ref=\{keepEditingRef\}/)
-  assert.match(updateReview, /closeOnEscape: !applying/)
+  assert.match(updateReview, /const inFlight = applying \|\| rebuilding \|\| resolving/)
+  assert.match(updateReview, /closeOnEscape: !inFlight/)
+})
+
+test('Chat Changes is a modeless panel whose outside press reaches its destination', () => {
+  const changes = read('../ChatDiffViewer.jsx')
+  const css = read('../ChatWork.css')
+  const focus = read('../../../hooks/useDialogFocus.js')
+  const outsideDismiss = read('../../../hooks/useContextMenuOutsideDismiss.js')
+
+  assert.match(changes, /useContextMenuOutsideDismiss\(\{[\s\S]*?menuRef: dialogRef,[\s\S]*?onDismiss: dismissFromOutside/)
+  assert.match(changes, /restoreFocusGuardRef\.current = false[\s\S]*?onClose\?\.\(\)/,
+    'the destination keeps focus when its press dismisses Changes')
+  assert.match(changes, /shouldRestoreFocus = useCallback\([\s\S]*?restoreFocusGuardRef\.current !== false/)
+  assert.match(changes, /useDialogFocus\(\{[\s\S]*?modal: false,[\s\S]*?lockScroll: false/)
+  assert.doesNotMatch(changes, /aria-modal="true"/)
+  assert.match(css, /\.chat-work__overlay\s*\{[\s\S]*?pointer-events:\s*none/)
+  assert.match(css, /\.chat-work\s*\{[\s\S]*?pointer-events:\s*auto/)
+  assert.match(outsideDismiss, /document\.addEventListener\('pointerdown', dismissFromOutsidePointer, true\)/)
+  assert.match(focus, /if \(modal\) \{[\s\S]*?element\.inert = true/)
+  assert.match(focus, /event\.key !== 'Tab' \|\| !modal/)
+  assert.doesNotMatch(changes, /elementFromPoint|dispatchEvent|\.click\(\)/,
+    'outside activation must remain the browser’s real pointer sequence, not a replayed synthetic click')
 })
 
 test('first-use guidance is a labeled non-modal region with a dismiss action', () => {
@@ -176,4 +197,13 @@ test('the Memory search is a collapsed disclosure with linked result summaries',
   assert.match(source, /Nothing relevant is recorded yet\./)
   assert.match(css, /@media\s*\(pointer:\s*coarse\)\s*\{\s*\.chat__memory-note\s*\{\s*min-height:\s*44px/s)
   assert.match(css, /\.chat__memory-note:focus-visible\s*\{[^}]*outline:\s*2px solid var\(--accent\)/s)
+})
+
+test('incidental message focus has no box while search and controls retain keyboard indicators', () => {
+  const css = read('../ChatView.css')
+  assert.match(css, /\.chat__msg:focus\s*\{\s*outline:\s*none;\s*\}/)
+  for (const selector of ['.chat__msg--search-reveal', '.chat__msg-copy', '.chat__tool-header']) {
+    const rule = css.slice(css.indexOf(`${selector}:focus-visible`)).split('}')[0]
+    assert.match(rule, /outline:\s*2px solid var\(--accent\)/)
+  }
 })

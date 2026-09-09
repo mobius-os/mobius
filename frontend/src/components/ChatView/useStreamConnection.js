@@ -1,3 +1,4 @@
+import { questionAnswerPatch } from './questionSubmission.js'
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { getAuthHeaders, getToken, BASE } from '../../api/client.js'
 import {
@@ -40,7 +41,9 @@ import {
   retireIntent,
 } from './chatOutbox.js'
 import {
+  getRecoverySnapshot,
   reportNetworkReachable,
+  subscribeRecovery,
   verifyConnectivity,
 } from '../../lib/connectivityStore.js'
 import { sendWithAmbiguityRecovery } from './sendTransportRecovery.js'
@@ -203,9 +206,12 @@ const BROADCAST_REGISTRATION_WINDOW_MS = 1500
  *   but must not treat this as a terminal run boundary.
  * @param {(event: object) => void} [callbacks.onSystemEvent]
  *   Fired for non-chat SSE events (theme/app/shell). Not buffered.
- * @param {(opts?: {force?: boolean}) => void|Promise<void>} [callbacks.onNeedsRefresh]
+ * @param {(opts?: object) => object|null|Promise<object|null>} [callbacks.onNeedsRefresh]
  *   Fired when the stream returns 204 outside the post-send race
- *   window — caller should refetch persisted DB state.
+ *   window — caller should refetch persisted DB state. A terminal refresh
+ *   supplies isCurrent and onReconciled: check ownership after each await,
+ *   then call onReconciled(runtime) in the same synchronous commit that
+ *   installs the authoritative transcript. Failed refreshes must not call it.
  * @param {() => void} [callbacks.onCatchUpSettled]
  *   Fired after subscribe-time replay commits, or after its terminal /
  *   disconnected fallback refresh settles.
@@ -340,7 +346,16 @@ export default function useStreamConnection(chatId, {
     onQuestionResponseStartRef.current?.(questionResponseKey)
   }, [])
 
-  const armQuestionResponse = useCallback((questionResponseKey, items) => {
+  const armQuestionResponse = useCallback((questionResponseKey, items, { answer_turn } = {}) => {
+    if (questionResponseKey && answer_turn === 'none') {
+      // An answered control can settle without producing agent output. Retire
+      // only its response baseline, including one armed by an earlier replay.
+      respondedQuestionKeysRef.current.add(questionResponseKey)
+      if (pendingQuestionResponseRef.current?.questionKey === questionResponseKey) {
+        pendingQuestionResponseRef.current = null
+      }
+      return
+    }
     if (!questionResponseKey
         || respondedQuestionKeysRef.current.has(questionResponseKey)
         || pendingQuestionResponseRef.current?.questionKey === questionResponseKey) {
@@ -398,7 +413,7 @@ export default function useStreamConnection(chatId, {
   // the SSE is being proactively REPLACED after sleep/wake or network
   // recovery (an expected, healthy transition), not failing — so it renders
   // as a quiet note, never the error styling. Armed only by the
-  // visibility/online handlers below; a fast reattach (< the delay) never
+  // attachment owner after a wake; a fast reattach (< the delay) never
   // shows it. Cleared on every settled outcome: catch-up commit, `done`,
   // terminal 204/EOF, or the stream erroring into the connectionError
   // states (which take over the ConnectionStatus slot).
@@ -425,6 +440,10 @@ export default function useStreamConnection(chatId, {
   }
 
   const abortRef = useRef(null)
+  // Attachment belongs here, not to each caller that observes a wake. Hidden
+  // or offline invalidates the old socket; the first replacement clears it so
+  // visible, online, runtime refresh, and recovery can share even a pending GET.
+  const connectionStaleRef = useRef(false)
   const connectionGenerationRef = useRef(0)
   const keptSocketDeadmanTimerRef = useRef(null)
   const retryCount = useRef(0)
@@ -690,7 +709,7 @@ export default function useStreamConnection(chatId, {
     clearReconnectingNote()
     // Answers belong to the chat we're leaving; carrying them into the next
     // chat could re-arm a same-keyed question with a foreign answer.
-    answersByQuestionKeyRef.current.clear()
+    answerReceiptsByQuestionKeyRef.current.clear()
     clearQuestionResponseTracking()
   }, [
     chatId,
@@ -772,11 +791,26 @@ export default function useStreamConnection(chatId, {
   // records the answer here, and the `question` handler re-arms each incoming
   // event from it before upserting. Cleared on chatId change and at turn
   // `done` (the answer is durable in the promoted message by then).
-  const answersByQuestionKeyRef = useRef(new Map())
+  const answerReceiptsByQuestionKeyRef = useRef(new Map())
 
   const connectToStream = useCallback(async (resetState = false) => {
+    if (abortRef.current && !connectionStaleRef.current
+        && activeStreamChatIdRef.current === chatIdRef.current) return
+    // The note describes an actual attachment, never a duplicate lifecycle
+    // signal after catchup has already cleared it.
+    if (resetState && (connectionStaleRef.current || connectionErrorRef.current)) {
+      const hiddenDuration = hiddenAtRef.current
+        ? Math.max(0, Date.now() - hiddenAtRef.current)
+        : lastHiddenDurationRef.current
+      if (hiddenDuration === null || hiddenDuration >= QUICK_WAKE_HIDDEN_MS) {
+        armReconnectingNote()
+      }
+    }
     activeStreamChatIdRef.current = chatIdRef.current
+    if (connectionErrorRef.current === 'disconnected') retryCount.current = 0
     disconnect()
+    wantsReconnectRef.current = true
+    connectionStaleRef.current = false
     const catchUpOwner = {
       generation: ++connectionGenerationRef.current,
       chatId: chatIdRef.current,
@@ -798,12 +832,16 @@ export default function useStreamConnection(chatId, {
     const controller = new AbortController()
     abortRef.current = controller
     lastReadAtRef.current = 0
+    // Sharing a pending attachment must not retain a silently hung GET forever.
+    // Reuse the existing no-read deadline rather than a second retry owner.
+    armKeptSocketDeadman(controller, 0)
 
+    const isCurrent = () => streamCatchUpOwnerMatches(catchUpOwner, {
+      generation: connectionGenerationRef.current,
+      chatId: chatIdRef.current,
+    })
     const settleOwnedCatchUp = () => {
-      if (!streamCatchUpOwnerMatches(catchUpOwner, {
-        generation: connectionGenerationRef.current,
-        chatId: chatIdRef.current,
-      })) return
+      if (!isCurrent()) return
       onCatchUpSettledRef.current?.()
     }
 
@@ -825,6 +863,7 @@ export default function useStreamConnection(chatId, {
           signal: controller.signal,
         },
       )
+      reportNetworkReachable()
 
       // Stale-connection guard. Between scheduling this fetch and its
       // resolution, the connection we belong to may have been torn down
@@ -858,36 +897,50 @@ export default function useStreamConnection(chatId, {
           return
         }
 
-        // No active stream — the broadcast is gone, which means either
-        // the agent never started on this chat or it already finalized
-        // and saved the response to the DB.  In both cases the right
-        // move is to DROP any stale partial items we may still hold
-        // from a previous connection.  Promoting them would duplicate
-        // whatever the DB fetch is about to return.  Null the
-        // controller so visibility/online handlers can fire future
-        // reconnections.
-        abortRef.current = null
-        setConnectionError(null)
-        clearReconnectingNote()
-        retryCount.current = 0
-        wantsReconnectRef.current = false
-        clearStoredStreamSnapshot(activeStreamChatIdRef.current)
-        lastGoodItemsRef.current = []
-        setStreamItems([])
-        setStreamAssistantMessageId(null)
-        textBufferRef.current = ''
-        textBufferItemIdRef.current = null
-        forceNewTextBlockRef.current = false
-        // The chat may have finished while we were offline — re-fetch
-        // messages from the DB so the component shows the final state.
-        // This path is terminal: there is no active broadcast left to
-        // clobber. Keep the teardown in one React batch so the UI does not
-        // show a one-frame "thinking" row between dropping stale streamItems
-        // and ChatView clearing its running state.
-        clearQuestionResponseTracking()
-        onStreamEndRef.current?.()
-        setIsStreaming(false)
-        refreshThenSettleCatchUp({ force: true, terminal204: true })
+        // No broadcast does not prove the logical turn completed: a restart
+        // may have parked it. Keep its last visible answer until detail owns
+        // the replacement. Retiring first collapses the transcript while the
+        // fetch is pending; calling onStreamEnd also fabricates completion.
+        let reconciled = false
+        try {
+          await onNeedsRefreshRef.current?.({
+            force: true,
+            terminal204: true,
+            authoritative: true,
+            isCurrent,
+            onReconciled: (runtime) => {
+              if (!isCurrent()) return
+              reconciled = true
+              abortRef.current = null
+              wantsReconnectRef.current = runtime.running && !runtime.pendingQuestionId
+              clearStoredStreamSnapshot(activeStreamChatIdRef.current)
+              lastGoodItemsRef.current = []
+              setStreamItems([])
+              setStreamAssistantMessageId(null)
+              clearQuestionResponseTracking()
+              answerReceiptsByQuestionKeyRef.current.clear()
+              setConnectionError(null)
+              clearReconnectingNote()
+              retryCount.current = 0
+              setIsStreaming(false)
+              // The transcript and stream retirement share this synchronous
+              // commit; the existing scroll owner holds the reading position.
+              setCatchUpCommitSeq(seq => seq + 1)
+            },
+          })
+        } catch {
+          // Detail may reject or return null. Neither authorizes discarding
+          // the answer; the existing disconnected Retry owns recovery.
+        }
+        if (!isCurrent()) return
+        if (!reconciled) {
+          abortRef.current = null
+          wantsReconnectRef.current = true
+          setConnectionError('disconnected')
+          clearReconnectingNote()
+          setIsStreaming(false)
+        }
+        settleOwnedCatchUp()
         return
       }
 
@@ -961,26 +1014,27 @@ export default function useStreamConnection(chatId, {
         settleOwnedCatchUp()
       }
 
-      const patchCatchUpQuestionAnswers = (questionId, answers) => {
+      const patchCatchUpQuestionAnswers = (questionId, answers, disposition) => {
         const key = questionId ? `question_id:${questionId}` : null
-        if (key) answersByQuestionKeyRef.current.set(key, answers)
+        if (key) answerReceiptsByQuestionKeyRef.current.set(key, questionAnswerPatch(answers, disposition))
         catchUpItems = catchUpItems.map(it => {
           if (it.type !== 'question') return it
           const itKey = questionKey(it)
           if (key ? itKey === key : true) {
             // An id-less answer patches every live card and records its answer;
             // arming keys on the last one, matching the live and submitted paths.
-            if (!key) answersByQuestionKeyRef.current.set(itKey, answers)
-            return { ...it, answers }
+            if (!key) answerReceiptsByQuestionKeyRef.current.set(itKey, questionAnswerPatch(answers, disposition))
+            return { ...it, ...questionAnswerPatch(answers, disposition) }
           }
           return it
         })
         const matchedKey = key || lastQuestionKey(catchUpItems)
-        if (matchedKey) armQuestionResponse(matchedKey, catchUpItems)
+        if (matchedKey) armQuestionResponse(matchedKey, catchUpItems, disposition)
       }
 
       while (true) {
         const { done, value } = await reader.read()
+        if (!isCurrent()) return
         if (done) break
         lastReadAtRef.current = Date.now()
 
@@ -1197,16 +1251,17 @@ export default function useStreamConnection(chatId, {
               const incoming = { type: 'question', questions }
               if (event.response_mode) incoming.response_mode = event.response_mode
               if (event.secure_input) incoming.secure_input = event.secure_input
+              if (event.platform_action) incoming.platform_action = event.platform_action
               if (event.question_id) incoming.question_id = event.question_id
               // Re-arm the replayed event with any answer the user already
               // submitted this turn. After a reconnect wipe upsertQuestionItem
               // has no prior item to carry answers from; this ref does, and it
               // outlived the wipe — so a catch-up replay re-renders the card
               // as ANSWERED instead of reverting it to pending.
-              const knownAnswers = answersByQuestionKeyRef.current.get(
+              const knownReceipt = answerReceiptsByQuestionKeyRef.current.get(
                 questionKey(incoming)
               )
-              if (knownAnswers && !incoming.answers) incoming.answers = knownAnswers
+              if (knownReceipt) Object.assign(incoming, knownReceipt)
               onLiveQuestionRef.current?.(event.question_id || null)
               applyStreamItems(
                 prev => upsertQuestionItem(prev, incoming),
@@ -1263,11 +1318,11 @@ export default function useStreamConnection(chatId, {
             if (event.question_id || event.answers) {
               if (isCatchUp) {
                 patchCatchUpQuestionAnswers(
-                  event.question_id || null, event.answers || {},
+                  event.question_id || null, event.answers || {}, event,
                 )
               } else {
                 patchQuestionAnswers(
-                  event.question_id || null, event.answers || {},
+                  event.question_id || null, event.answers || {}, event,
                 )
               }
             }
@@ -1404,7 +1459,7 @@ export default function useStreamConnection(chatId, {
             // message now, so drop the reconnect-survival cache before the
             // next turn (a queued continuation streams on the same hook and
             // must not inherit a stale answer for a re-used question key).
-            answersByQuestionKeyRef.current.clear()
+            answerReceiptsByQuestionKeyRef.current.clear()
             clearQuestionResponseTracking()
             // Promote before flipping `isStreaming` false. `flushBuffer()`,
             // `commitCatchUp()`, and setStreamItems keep latestItemsRef
@@ -1459,7 +1514,9 @@ export default function useStreamConnection(chatId, {
       // An abort means this connection was REPLACED (wake handler, Stop,
       // fresh send) — the reattach window, if one is open, continues on
       // the successor connection, so the note is deliberately left alone.
-      if (err.name === 'AbortError') return
+      if (err.name === 'AbortError' || !isCurrent()) return
+      abortRef.current = null
+      void verifyConnectivity()
       flushBuffer()
       setIsStreaming(false)
       // Real failure: the connectionError states below own the
@@ -1520,15 +1577,46 @@ export default function useStreamConnection(chatId, {
   // Keep ref in sync so retry timeouts call the latest version.
   connectRef.current = connectToStream
 
+  // A retry cap only bounds one unavailable server generation. When the
+  // connectivity owner observes recovery after a restart, reopen any stream
+  // this pane still owns even if it had reached the terminal "disconnected"
+  // latch. This is deliberately a subscription to the shared store rather
+  // than another browser online listener or a local polling loop.
+  const recoveryReconnectRef = useRef(() => {})
+  recoveryReconnectRef.current = () => {
+    retryCount.current = 0
+    if (!wantsReconnectRef.current) return
+    setConnectionError(null)
+    clearReconnectingNote()
+    setIsStreaming(true)
+    // Recovery is reachability evidence, not proof that every socket is stale.
+    // The successful GET can itself publish it. Keep that attachment and use
+    // the existing read deadline to detect an older silently dead socket.
+    if (abortRef.current && !connectionStaleRef.current) {
+      armKeptSocketDeadman(abortRef.current, lastReadAtRef.current)
+    }
+    connectRef.current?.(true)
+  }
+  useEffect(() => {
+    let observedRecoveryGeneration = getRecoverySnapshot()
+    return subscribeRecovery(() => {
+      const generation = getRecoverySnapshot()
+      if (generation === observedRecoveryGeneration) return
+      observedRecoveryGeneration = generation
+      recoveryReconnectRef.current()
+    })
+  }, [])
+
   const retry = useCallback(() => {
     retryCount.current = 0
     setConnectionError(null)
     clearReconnectingNote()
     setIsStreaming(true)
     wantsReconnectRef.current = true
-    // Reset state — same reason as the automatic retry above.
+    // Explicit Retry replaces the transport; ordinary attachment requests share it.
+    disconnect()
     connectRef.current?.(true)
-  }, [])
+  }, [disconnect])
 
   const sendMessage = useCallback(async (
     text,
@@ -1543,16 +1631,27 @@ export default function useStreamConnection(chatId, {
       steeredMessages = undefined,
       answers = undefined,
       question_id = undefined,
+      selected_options = undefined,
       continuation = undefined,
+      resumeRunId = undefined,
     } = {},
   ) => {
-    activeStreamChatIdRef.current = chatIdRef.current
+    const requestOwner = {
+      chatId: chatIdRef.current,
+      generation: connectionGenerationRef.current,
+    }
+    const ownsPresentation = () => streamCatchUpOwnerMatches(requestOwner, {
+      chatId: chatIdRef.current,
+      generation: connectionGenerationRef.current,
+    })
+    activeStreamChatIdRef.current = requestOwner.chatId
     // Answer submissions usually ride the EXISTING turn: the runner is
     // paused on the AskUserQuestion future and resumes in place. Wiping
     // streamItems before the POST would erase the question card the user just
     // answered. If the backend reports `started` instead, it recovered a
     // restarted question as a fresh hidden continuation and we reset below.
     const isAnswerSubmission = !!answers
+    const isManualResume = continuation === 'manual'
     // force_steer and direct_steer inject into the LIVE turn — neither starts
     // a new turn on the expected path.
     // The fresh-send reset below (setStreamItems([]) + setIsStreaming +
@@ -1565,7 +1664,7 @@ export default function useStreamConnection(chatId, {
     // the existing SSE keeps streaming the post-steer continuation inline, so
     // there is no reconnect/replay to set up either. Skip the reset; the live
     // stream stays attached and the steered message renders inline.
-    if (!queueOnly && !isAnswerSubmission && !forceSteer && !directSteer) {
+    if (!queueOnly && !isAnswerSubmission && !isManualResume && !forceSteer && !directSteer) {
       wantsReconnectRef.current = true
       clearQuestionResponseTracking()
       justSentAtRef.current = Date.now()
@@ -1600,7 +1699,9 @@ export default function useStreamConnection(chatId, {
       // recovered hidden continuation.
       if (answers) body.answers = answers
       if (question_id) body.question_id = question_id
+      if (selected_options && Object.keys(selected_options).length) body.selected_options = selected_options
       if (continuation) body.continuation = continuation
+      if (resumeRunId) body.resume_run_id = resumeRunId
       if (attachments && attachments.length > 0) {
         body.attachments = attachments
       }
@@ -1629,7 +1730,7 @@ export default function useStreamConnection(chatId, {
       outboxCid = (cid && !forceSteer && !directSteer) ? cid : null
       if (outboxCid) {
         outboxRetained = await enqueueIntent({
-          chatId: chatIdRef.current,
+          chatId: requestOwner.chatId,
           cid: outboxCid,
           type: answers ? 'answer' : 'message',
           body,
@@ -1651,7 +1752,7 @@ export default function useStreamConnection(chatId, {
         const sendTimer = setTimeout(() => sendCtrl.abort(), SEND_POST_TIMEOUT_MS)
         try {
           return await fetch(
-            `${BASE}/api/chats/${encodeURIComponent(String(chatIdRef.current))}/messages`,
+            `${BASE}/api/chats/${encodeURIComponent(String(requestOwner.chatId))}/messages`,
             {
               method: 'POST',
               headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
@@ -1683,7 +1784,7 @@ export default function useStreamConnection(chatId, {
         if (outboxCid && replayOutcome !== 'retry' && replayOutcome !== 'auth') {
           outboxRetained = await retireInteractiveIntent({
             cid: outboxCid,
-            chatId: chatIdRef.current,
+            chatId: requestOwner.chatId,
             outcome: replayOutcome,
             outboxRetained,
           })
@@ -1698,16 +1799,23 @@ export default function useStreamConnection(chatId, {
       if (outboxCid) {
         outboxRetained = await retireInteractiveIntent({
           cid: outboxCid,
-          chatId: chatIdRef.current,
+          chatId: requestOwner.chatId,
           outcome: 'delivered',
           outboxRetained,
         })
       }
+      // Acceptance still retires the original chat's durable intent, but an
+      // acknowledgement cannot attach or alter a replacement view/connection.
+      if (!ownsPresentation()) return data
       // Trust the backend's actual status, not the frontend's queueOnly
       // hint. The frontend's `sending` flag can be stale (turn finished
       // between the doSend check and the POST landing), so a request
       // sent with queueOnly:true can come back as "started". Always
       // connect to the stream when the backend says it started.
+      // A saved close option records an answer without creating any agent
+      // activity. Preserve the existing stream and transcript ownership even
+      // when the card's original publisher is still finishing its turn.
+      if (data.answer_turn === 'none') return data
       if (data.status === 'queued' && !data.started) return data
       if (data.status === 'steered') return data
       if (data.status === 'not_steered') return data
@@ -1763,6 +1871,15 @@ export default function useStreamConnection(chatId, {
         setConnectionError(null)
         clearReconnectingNote()
       }
+      // Resume acknowledges an existing interrupted turn, not a new message.
+      // Retain its visible answer until the successor catch-up can replace it.
+      if (isManualResume && data.status === 'started') {
+        wantsReconnectRef.current = true
+        justSentAtRef.current = Date.now()
+        setIsStreaming(true)
+        setConnectionError(null)
+        clearReconnectingNote()
+      }
       // Started: ensure streaming state is set even if the caller
       // passed queueOnly:true expecting it would be queued.
       if (
@@ -1794,11 +1911,11 @@ export default function useStreamConnection(chatId, {
       // branch and then the POST itself failed mid-flight.
       //
       // EXCEPT requests that inject into an existing turn. force_steer,
-      // direct_steer, and AskUserQuestion answers do not start the live turn
+      // direct_steer, Resume, and AskUserQuestion answers do not start the live turn
       // they target, so their POST failures must not tear down that turn's
       // stream. The caller keeps the queued/direct-steer fallback or retryable
       // question intact while the existing connection remains authoritative.
-      if (!forceSteer && !directSteer && !isAnswerSubmission) {
+      if (ownsPresentation() && !forceSteer && !directSteer && !isAnswerSubmission && !isManualResume) {
         wantsReconnectRef.current = false
         setIsStreaming(false)
       }
@@ -1812,10 +1929,16 @@ export default function useStreamConnection(chatId, {
     // make can find it. (The previous 50ms wait was a patch around
     // a misdiagnosed race; verified deterministic by inspecting
     // backend/app/routes/chats_stream.py:121-131.)
-    connectRef.current?.(true)
+    if (ownsPresentation()) {
+      // A newly accepted turn may have a different broadcast. Unlike a wake,
+      // this is an explicit replacement boundary, not an attachment nudge.
+      disconnect()
+      connectRef.current?.(true)
+    }
     return responseData || { status: 'started' }
   }, [
     clearQuestionResponseTracking,
+    disconnect,
     setStreamAssistantMessageId,
     setStreamItems,
   ])
@@ -1848,13 +1971,8 @@ export default function useStreamConnection(chatId, {
     }
 
     function keepActiveConnectionWithDeadman() {
+      connectionStaleRef.current = false
       armKeptSocketDeadman(abortRef.current, lastReadAtRef.current)
-    }
-
-    function armNoteForWake(hiddenDuration) {
-      if (hiddenDuration !== null && hiddenDuration >= QUICK_WAKE_HIDDEN_MS) {
-        armReconnectingNote()
-      }
     }
 
     function onVisible() {
@@ -1863,6 +1981,7 @@ export default function useStreamConnection(chatId, {
         // visibilitychange is the last reliable lifecycle signal before a
         // mobile browser freezes or discards the page.
         persistLatestStreamSnapshot()
+        connectionStaleRef.current = true
         hiddenAtRef.current = now
         lastHiddenDurationRef.current = null
         lastWakeAtRef.current = 0
@@ -1880,14 +1999,6 @@ export default function useStreamConnection(chatId, {
         keepActiveConnectionWithDeadman()
         return
       }
-      // Past the idle gate: a reattach genuinely starts here. On the wake
-      // path, show the note only for real backgrounding; quick flips either
-      // keep the socket above or reconnect silently if the socket is stale.
-      armNoteForWake(hiddenDuration)
-      if (abortRef.current) {
-        abortRef.current.abort()
-        abortRef.current = null
-      }
       connectRef.current?.(true)
     }
 
@@ -1903,24 +2014,18 @@ export default function useStreamConnection(chatId, {
         keepActiveConnectionWithDeadman()
         return
       }
-      if (hiddenDuration === null) {
-        armReconnectingNote()
-      } else {
-        armNoteForWake(hiddenDuration)
-      }
-      if (abortRef.current) {
-        abortRef.current.abort()
-        abortRef.current = null
-      }
       connectRef.current?.(true)
     }
 
+    const onOffline = () => { connectionStaleRef.current = true }
     document.addEventListener('visibilitychange', onVisible)
     window.addEventListener('online', onOnline)
+    window.addEventListener('offline', onOffline)
 
     return () => {
       document.removeEventListener('visibilitychange', onVisible)
       window.removeEventListener('online', onOnline)
+      window.removeEventListener('offline', onOffline)
     }
   }, [persistLatestStreamSnapshot])
 
@@ -1950,14 +2055,14 @@ export default function useStreamConnection(chatId, {
   // in streamItems (not yet promoted to messages) — without this, the
   // answered state only lands on messages[-1] (which may be the user message,
   // not the assistant), so the card never visually transitions to answered.
-  function patchQuestionAnswers(questionId, answers) {
+  function patchQuestionAnswers(questionId, answers, disposition) {
     const key = questionId ? `question_id:${questionId}` : null
     // Record the answer keyed by stable identity BEFORE touching streamItems,
     // so a later reconnect's catch-up replay (which wipes streamItems first)
     // can re-arm the replayed question event instead of reverting the card to
     // pending. When the questionId is known we record under that key directly;
     // an id-less (text-keyed) question is recorded from the matched item below.
-    if (key) answersByQuestionKeyRef.current.set(key, answers)
+    if (key) answerReceiptsByQuestionKeyRef.current.set(key, questionAnswerPatch(answers, disposition))
     const baselineItems = latestItemsRef.current.length > 0
       ? latestItemsRef.current
       : lastGoodItemsRef.current
@@ -1966,7 +2071,7 @@ export default function useStreamConnection(chatId, {
     // route through lastQuestionKey). Keying on the first would diverge for a
     // turn with two or more live cards, dropping the response-activity handoff.
     let matchedKey = key || lastQuestionKey(baselineItems)
-    if (matchedKey) armQuestionResponse(matchedKey, baselineItems)
+    if (matchedKey) armQuestionResponse(matchedKey, baselineItems, disposition)
     setStreamItems(prev => {
       return prev.map(it => {
         if (it.type !== 'question') return it
@@ -1975,8 +2080,8 @@ export default function useStreamConnection(chatId, {
         const itKey = questionKey(it)
         if (key ? itKey === key : true) {
           if (!matchedKey) matchedKey = itKey
-          if (!key) answersByQuestionKeyRef.current.set(itKey, answers)
-          return { ...it, answers }
+          if (!key) answerReceiptsByQuestionKeyRef.current.set(itKey, questionAnswerPatch(answers, disposition))
+          return { ...it, ...questionAnswerPatch(answers, disposition) }
         }
         return it
       })

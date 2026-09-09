@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from starlette.requests import HTTPConnection
 
 from app import auth, models
+from app.app_capabilities import storage_grant
 from app.config import get_settings
 from app.database import SessionLocal, get_db
 from app.timeutil import now_naive_utc
@@ -116,6 +117,21 @@ class ProjectPrincipal:
 
 
 @dataclass(frozen=True)
+class SharedAppPrincipal:
+  """Owner or a revocable identity confined to one shared app instance."""
+
+  owner: models.Owner
+  role: str
+  instance_id: str | None = None
+  member_id: str | None = None
+  display_name: str | None = None
+
+  @property
+  def is_owner(self) -> bool:
+    return self.member_id is None
+
+
+@dataclass(frozen=True)
 class PublicAppAccess:
   """One live, anonymous, exact-app capability."""
 
@@ -130,6 +146,13 @@ class PublicAppAccess:
     contract = self.app.public_access_contract
     rules = contract.get("network") if isinstance(contract, dict) else None
     return rules if isinstance(rules, list) else []
+
+  @property
+  def storage(self) -> dict:
+    contract = self.app.public_access_contract
+    return storage_grant(
+      contract.get("storage") if isinstance(contract, dict) else None
+    )
 
 
 def chat_embed_grant_is_latest_consumed(
@@ -190,7 +213,7 @@ def _resolve_owner(
     raise HTTPException(status_code=401, detail="Token revoked.")
   agent_chat = payload.get("agent_chat")
   agent_run = payload.get("agent_run")
-  if agent_chat is not None or agent_run is not None:
+  if agent_run is not None:
     if not isinstance(agent_chat, str) or not isinstance(agent_run, str):
       raise HTTPException(status_code=401, detail="Invalid agent token.")
     live_run = db.query(models.ChatRun.id).filter(
@@ -360,40 +383,81 @@ def get_project_principal(
   return resolve_project_principal(token, db)
 
 
-def _enforce_delegation_claims(
-  payload: dict, db: Session, app_id: int | None,
-) -> tuple[str, str]:
-  """Bind a delegated bearer to its exact currently-running child attempt."""
-  delegation_id = payload.get("delegation_id")
-  chat_id = payload.get("delegation_chat")
-  run_id = payload.get("delegation_run")
-  if not (
-    isinstance(app_id, int)
-    and isinstance(delegation_id, str)
-    and isinstance(chat_id, str)
-    and isinstance(run_id, str)
-  ):
-    raise HTTPException(status_code=401, detail="Malformed delegation token.")
-  active = (
-    db.query(models.Delegation.id)
-    .join(models.App, models.App.id == models.Delegation.app_id)
-    .join(models.ChatRun, models.ChatRun.chat_id == models.Delegation.child_chat_id)
-    .filter(
-      models.Delegation.id == delegation_id,
-      models.Delegation.child_chat_id == chat_id,
-      models.Delegation.app_id == app_id,
-      models.Delegation.cancelled_at.is_(None),
-      models.App.deleted_at.is_(None),
-      models.ChatRun.id == run_id,
-      models.ChatRun.status == "running",
-    )
-    .first()
+def resolve_shared_app_principal(token: str, db: Session) -> SharedAppPrincipal:
+  """Resolve owner authority or one exact live shared-app membership."""
+  owner, payload = _resolve_owner(token, db)
+  scope = payload.get("scope")
+  if scope is None:
+    return SharedAppPrincipal(owner=owner, role="owner", display_name=owner.username)
+  if scope != "shared_app_collaborator":
+    raise HTTPException(403, "Token scope is not valid for shared apps.")
+  member_id = payload.get("shared_app_member")
+  instance_id = payload.get("shared_app_instance")
+  member_epoch = payload.get("member_epoch")
+  if not isinstance(member_id, str) or not isinstance(instance_id, str) or type(member_epoch) is not int:
+    raise HTTPException(401, "Invalid shared app session.")
+  member = db.query(models.SharedAppMember).filter(
+    models.SharedAppMember.id == member_id,
+    models.SharedAppMember.instance_id == instance_id,
+    models.SharedAppMember.revoked_at.is_(None),
+  ).first()
+  if member is None or member.token_epoch != member_epoch:
+    raise HTTPException(401, "Shared app access has been revoked.")
+  return SharedAppPrincipal(
+    owner=owner, role=str(member.role), instance_id=str(member.instance_id),
+    member_id=str(member.id), display_name=str(member.display_name),
   )
-  if active is None:
+
+
+def get_shared_app_principal(
+  token: str = Depends(_oauth2), db: Session = Depends(get_db),
+) -> SharedAppPrincipal:
+  return resolve_shared_app_principal(token, db)
+
+
+def get_agent_principal(
+  token: str = Depends(_oauth2),
+  db: Session = Depends(get_db),
+) -> Principal:
+  """Resolve an ordinary owner-scoped token bound to one chat agent run.
+
+  Login and service tokens intentionally fail here: possession of broad owner
+  authority is not the same as being the agent process for the chat whose
+  owner explicitly shared a live browser surface.  The ordinary agent token
+  keeps ``scope`` unset so existing owner APIs remain compatible; this extra
+  claim is consumed only by capability routes that need the distinction.
+  """
+  owner, payload = _resolve_owner(token, db)
+  chat_id = payload.get("agent_chat")
+  if payload.get("scope") is not None or not isinstance(chat_id, str) or not chat_id:
     raise HTTPException(
-      status_code=401, detail="Delegation token is no longer active.",
+      status_code=403,
+      detail="This endpoint requires a chat-bound agent token.",
     )
-  return delegation_id, chat_id
+  return Principal(
+    owner=owner,
+    app_id=None,
+    scope="owner",
+    chat_id=chat_id,
+    run_id=payload.get("agent_run"),
+  )
+
+
+def authorize_current_owner_detached(
+  token: str = Depends(_oauth2),
+) -> str:
+  """Authenticate an unscoped owner token without retaining a DB session.
+
+  Long-lived owner-only streams use the returned username to bind their
+  transient in-memory resource while releasing the pooled connection before
+  response iteration begins.
+  """
+  db = SessionLocal()
+  try:
+    owner = resolve_owner_only(token, db)
+    return owner.username
+  finally:
+    db.close()
 
 
 def _enforce_app_scope(payload: dict, db: Session) -> int | None:
@@ -436,11 +500,6 @@ def _enforce_app_scope(payload: dict, db: Session) -> int | None:
   stamped = payload.get("app_nonce")
   if stamped is not None and stamped != app.token_nonce:
     raise HTTPException(status_code=401, detail="App token no longer valid.")
-  if any(
-    payload.get(key) is not None
-    for key in ("delegation_id", "delegation_chat", "delegation_run")
-  ):
-    _enforce_delegation_claims(payload, db, app_id)
   return app_id
 
 
@@ -646,61 +705,19 @@ def get_principal(
   if payload.get("scope") not in (None, "app"):
     raise HTTPException(status_code=403, detail="Token scope is not valid here.")
   app_id = _enforce_app_scope(payload, db)
-  delegation_id = payload.get("delegation_id")
-  delegation_chat = payload.get("delegation_chat")
   return Principal(
     owner=owner,
     app_id=app_id,
     app_instance_id=payload.get("app_nonce") if app_id is not None else None,
     scope="app" if app_id is not None else "owner",
-    chat_id=payload.get("agent_chat") or delegation_chat,
+    chat_id=payload.get("agent_chat") or payload.get("delegation_chat"),
     run_id=payload.get("agent_run"),
-    delegation_id=delegation_id,
+    delegation_id=payload.get("delegation_id"),
   )
 
 
-def get_delegation_principal(
-  token: str = Depends(_oauth2),
-  db: Session = Depends(get_db),
-) -> Principal:
-  """Resolve owner/app plus the route-confined delegated-child bearer."""
-  _owner, payload = _resolve_owner(token, db)
-  if payload.get("scope") == "delegation":
-    app_id = payload.get("app_id")
-    delegation_id, chat_id = _enforce_delegation_claims(
-      payload, db, app_id,
-    )
-    return Principal(
-      owner=_owner, app_id=int(app_id), scope="delegation",
-      chat_id=str(chat_id), delegation_id=str(delegation_id),
-    )
-  # Owner-scoped delegated agents inherit ordinary owner tools, but the
-  # delegation control plane still needs their owning app identity to confine
-  # direct-child management and listings. Resolve that identity from the live
-  # immutable row rather than granting it through a generic owner dependency.
-  principal = get_principal(token, db)
-  if principal.delegation_id is None:
-    return principal
-  row = db.query(models.Delegation).filter(
-    models.Delegation.id == principal.delegation_id,
-    models.Delegation.child_chat_id == principal.chat_id,
-    models.Delegation.cancelled_at.is_(None),
-  ).first()
-  if row is None:
-    raise HTTPException(status_code=403, detail="Delegation token is stale.")
-  principal.app_id = row.app_id
-  return principal
-
-
 def require_nondelegated_owner_control(principal: Principal) -> None:
-  """Keep delegated execution bearers out of owner-confirmed controls.
-
-  Read children carry a delegation-only bearer and write children carry the
-  parent app's reviewed capabilities. ``delegation_id`` is the additional
-  authority boundary for app-capability routes whose external effect still
-  requires an owner decision. Top-level agent bearers remain valid owner
-  principals, while ordinary scoped app/embed callers keep their route gates.
-  """
+  """Keep delegated execution bearers out of owner-confirmed controls."""
   if principal.delegation_id is not None:
     raise HTTPException(
       status_code=403,
@@ -711,13 +728,7 @@ def require_nondelegated_owner_control(principal: Principal) -> None:
 def require_nondelegated_owner_or_app_control(
   principal: Principal = Depends(get_principal),
 ) -> None:
-  """Admit owner/top-level-agent and scoped-app actors, never a child agent.
-
-  Pair this with a route's existing capability dependency when the same
-  externally visible mutation is intentionally available to both the owner
-  and one reviewed system app. The capability dependency still owns app
-  authorization; this dependency preserves the delegated-agent boundary.
-  """
+  """Admit owner/top-level-agent and scoped-app actors, never a child agent."""
   require_nondelegated_owner_control(principal)
 
 
@@ -734,11 +745,7 @@ def _owner_principal_or_403(principal: Principal) -> models.Owner:
 def get_current_owner_for_lifecycle_control(
   principal: Principal = Depends(get_principal),
 ) -> models.Owner:
-  """Resolve a plain owner or top-level agent for lifecycle controls.
-
-  This is intentionally narrower than ``get_current_owner`` only along the
-  delegation boundary. Do not use it for the child's exact control plane.
-  """
+  """Resolve a plain owner or top-level agent for lifecycle controls."""
   owner = _owner_principal_or_403(principal)
   require_nondelegated_owner_control(principal)
   return owner
@@ -764,11 +771,7 @@ def require_owner_input_principal(principal: Principal) -> None:
 def get_current_owner_for_owner_input(
   principal: Principal = Depends(get_principal),
 ) -> models.Owner:
-  """Resolve the human/browser owner for answers and secret-value supply.
-
-  A top-level agent may open an owner-input card, but no agent bearer may fill
-  one. The browser's plain owner token has no chat/run/delegation binding.
-  """
+  """Resolve the human/browser owner for answers and secret-value supply."""
   owner = _owner_principal_or_403(principal)
   require_owner_input_principal(principal)
   return owner
@@ -792,7 +795,7 @@ def get_agent_run_principal(
   token: str = Depends(_oauth2),
   db: Session = Depends(get_db),
 ) -> Principal:
-  """Resolve the short-lived owner bearer minted for one physical agent run."""
+  """Resolve the owner bearer minted for one exact physical agent run."""
   principal = get_principal(token, db)
   if (
     principal.scope != "owner"
@@ -805,6 +808,39 @@ def get_agent_run_principal(
       detail="This operation requires the current agent run.",
     )
   return principal
+
+
+def get_delegation_principal(
+  token: str = Depends(_oauth2),
+  db: Session = Depends(get_db),
+) -> Principal:
+  """Resolve owner/app plus the route-confined delegated-child bearer."""
+  owner, payload = _resolve_owner(token, db)
+  if payload.get("scope") == "delegation":
+    delegation_id = payload.get("delegation_id")
+    chat_id = payload.get("delegation_chat")
+    app_id = payload.get("app_id")
+    row = db.query(models.Delegation).filter(
+      models.Delegation.id == delegation_id,
+      models.Delegation.child_chat_id == chat_id,
+      models.Delegation.app_id == app_id,
+    ).first()
+    if row is None:
+      raise HTTPException(status_code=403, detail="Delegation token is stale.")
+    return Principal(
+      owner=owner, app_id=int(app_id), scope="delegation",
+      chat_id=str(chat_id), delegation_id=str(delegation_id),
+    )
+  if payload.get("scope") not in (None, "app"):
+    raise HTTPException(status_code=403, detail="Token scope is not valid here.")
+  app_id = _enforce_app_scope(payload, db)
+  return Principal(
+    owner=owner, app_id=app_id,
+    app_instance_id=payload.get("app_nonce") if app_id is not None else None,
+    scope="app" if app_id is not None else "owner",
+    chat_id=payload.get("delegation_chat"),
+    delegation_id=payload.get("delegation_id"),
+  )
 
 
 def get_chat_view_principal(

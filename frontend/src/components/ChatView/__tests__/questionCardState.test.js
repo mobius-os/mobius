@@ -30,7 +30,7 @@ test('unanswered question cards do not have a stale gray state', () => {
     'unanswered cards should not tell the user the question expired')
   assert.match(component, /\{\(answered \|\| !disabled\) && \([\s\S]*<button[\s\S]*className="qcard__submit"/,
     'submit button should remain in place after an answer is submitted')
-  assert.match(component, /submitting \? 'Submitting…' : \(answered \? 'Submitted' : 'Submit'\)/,
+  assert.match(component, /submitting \? 'Submitting…' : \(completedAction \? actionStatusLabel : answered \? 'Submitted' : 'Submit'\)/,
     'the retained submit button should explain pending and answered states')
   assert.match(component, /\{\(!disabled \|\| answered\) && \(\s*<div className="qcard__hint"/,
     'selection hints should stay in place after the answer is submitted')
@@ -66,9 +66,9 @@ test('unanswered question cards do not have a stale gray state', () => {
     'a transient disabled handoff must not erase an offline choice')
   assert.match(component, /Your choice is saved — submit it when you’re back online/,
     'an offline submit should explain that the choice is retained')
-  assert.match(component, /const accepted = await onAnswer[\s\S]*if \(accepted !== false\) setSubmitted\(true\)/,
+  assert.match(component, /const accepted = await onAnswer[\s\S]*if \(accepted === false\)[\s\S]*else \{\s*setSubmitted\(true\)/,
     'a card should settle only after the answer request is accepted')
-  assert.match(component, /catch \{[\s\S]*Keep the choices and[\s\S]*\} finally/,
+  assert.match(component, /catch \(error\) \{[\s\S]*Keep the choices and[\s\S]*\} finally/,
     'a failed answer should retain its retryable draft')
 })
 
@@ -79,7 +79,7 @@ test('question card css has no stale styling hook', () => {
     'expiration status styling should not come back')
   assert.match(css, /\.qcard__input:disabled,\s*\.qcard__input\[readonly\]\s*\{[\s\S]*?color:\s*var\(--muted\);[\s\S]*?-webkit-text-fill-color:\s*var\(--muted\);[\s\S]*?\}/,
     'a submitted custom answer should visibly gray out in every browser')
-  assert.match(css, /\.qcard__input\s*\{[\s\S]*?width:\s*100%;[\s\S]*?min-height:\s*38px;[\s\S]*?field-sizing:\s*content;[\s\S]*?max-height:\s*180px;[\s\S]*?overflow-y:\s*auto;[\s\S]*?resize:\s*none;/,
+  assert.match(css, /\.qcard__input\s*\{[\s\S]*?width:\s*100%;[\s\S]*?min-height:\s*38px;[\s\S]*?font-size:\s*13px;[\s\S]*?field-sizing:\s*content;[\s\S]*?max-height:\s*180px;[\s\S]*?overflow-y:\s*auto;[\s\S]*?resize:\s*none;/,
     'the custom answer should expand inline to a bounded, internally scrollable height')
   assert.match(css, /\.qcard__submit-error\s*\{/,
     'a failed answer should keep its retry notice attached to the card')
@@ -127,15 +127,19 @@ test('question submission freezes the visible anchor before the async handoff', 
   const start = chatView.indexOf('const doSendSilent = useCallback')
   const end = chatView.indexOf('function handleSubmit(e)', start)
   const silentSubmit = chatView.slice(start, end)
-  const freeze = silentSubmit.indexOf('freezeQuestionSubmission()')
+  const freeze = silentSubmit.indexOf('freezeQuestionSubmission(questionSubmissionContext)')
   const send = silentSubmit.indexOf('const response = await streamSend')
 
   assert.ok(freeze >= 0 && send > freeze,
     'the reader anchor must freeze synchronously before answer delivery resumes output')
-  assert.match(component, /onPointerDownCapture=\{\(event\) => \{[\s\S]*prepareSubmit\(\)/,
-    'capture-phase pointer activation must freeze before the scroll owner claims the pointer')
-  assert.match(silentSubmit, /preparedQuestionSubmission \|\| freezeQuestionSubmission\(\)/,
-    'click submission must consume the pointer-prepared anchor with a keyboard fallback')
+  assert.match(silentSubmit, /if \(sendSilentInFlightRef\.current\) \{[\s\S]*?cancelPreparedQuestion\(\)/,
+    'a rejected competing answer must retire its provisional press hold')
+  assert.match(component, /useEffect\(\(\) => \(\) => cancelPreparedSubmission\(\)/,
+    'an unmounted or replaced question card must retire an unclicked press')
+  assert.match(component, /if \(answered \|\| disabled \|\| submitting\) cancelPreparedSubmission\(\)/,
+    'a card made inactive before click must retire its provisional hold')
+  assert.match(component, /if \(accepted === false\) \{[\s\S]*?onCancelAnswer\?\.\(preparedSubmission\)/,
+    'a non-accepted answer must restore the activation-time base')
 })
 
 test('a pending question exposes Stop instead of an impossible steer', () => {

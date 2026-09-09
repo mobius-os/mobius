@@ -44,6 +44,7 @@ import {
   addPlugins,
 } from 'workbox-precaching'
 import { registerRoute, setCatchHandler } from 'workbox-routing'
+import { LiveShellList } from './sw-shell-lists.js'
 import {
   CacheFirst, StaleWhileRevalidate, NetworkFirst, NetworkOnly,
 } from 'workbox-strategies'
@@ -59,6 +60,8 @@ import {
   withOpaqueFramePublicAssetCors,
   isCacheableAppAssetResponse,
   SHELL_DATA_CACHE,
+  requiresLiveShellList,
+  SHELL_DOCUMENT_POLICY_REVISION,
   isImmutableAppAsset,
   isPackagedAppAsset,
   packagedAppAssetCacheKey,
@@ -170,7 +173,7 @@ self.addEventListener('install', (event) => {
   if (isFirstInstall) return
   event.waitUntil((async () => {
     const entries = await outgoingShellEntries
-    const freshDocument = await fetch('/index.html', {
+    const freshDocument = await fetch(`/index.html?policy=${SHELL_DOCUMENT_POLICY_REVISION}`, {
       cache: 'reload',
       credentials: 'same-origin',
     }).catch(() => null)
@@ -610,6 +613,13 @@ registerRoute(
     url.origin === self.location.origin &&
     url.pathname === '/api/theme',
   new StaleWhileRevalidate({ cacheName: SHELL_DATA_CACHE }),
+)
+
+// Catch-up requires the network, but successful responses still replenish the
+// ordinary offline list. Keep this before the fallback-capable viewing route.
+registerRoute(
+  ({ url, request }) => url.origin === self.location.origin && requiresLiveShellList(request),
+  new LiveShellList({ cacheName: SHELL_DATA_CACHE }),
 )
 
 // `/api/chats` — same cache bucket as above (one logical

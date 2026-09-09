@@ -14,7 +14,10 @@ import {
   reportNetworkReachable,
   verifyConnectivity,
 } from '../lib/connectivityStore.js'
-import { SHELL_DATA_CACHE } from '../sw-cache-policy.js'
+import {
+  cachesToDeleteOnLogout,
+  SHELL_DATA_CACHE,
+} from '../sw-cache-policy.js'
 
 export const BASE = (import.meta.env?.BASE_URL || '/').replace(/\/$/, '')
 export const SHELL_INSTALL_PASS_TIMEOUT_MS = 5000
@@ -120,15 +123,11 @@ export function clearToken() {
 
 // Wipes persisted client state on logout / token expiry: the
 // TanStack Query cache (IndexedDB) AND the SW Cache Storage
-// entries. Two cache-name prefixes need clearing now:
-//   - `mobius-*` — runtime caches registered in src/sw.js
-//     (`mobius-vendor`, `mobius-esm`, `mobius-proxy`) plus any
-//     pre-vite-plugin-pwa legacy names that lingered.
-//   - `workbox-*` — precache entries injected by vite-plugin-pwa
-//     (`workbox-precache-v2-<scope>`) plus the workbox-runtime
-//     bucket. These hold the shell bundle, manifest, and icons —
-//     not owner-scoped data but worth purging so the next owner
-//     on a shared device gets a clean install on next visit.
+// entries. `mobius-*` runtime caches are cleared because they include
+// owner-projected shell data and private app responses. Workbox's public shell
+// precache is deliberately retained: deleting it underneath an active worker
+// leaves that worker installed but unable to serve `/index.html` or its bundle,
+// so the next launch can fail before login even appears.
 // The TanStack Query cache (IDB) holds owner-scoped chat/app
 // lists; that's the primary privacy reason for the wipe. An expired-token path
 // may preserve only the separately principal-partitioned chat outbox so the
@@ -199,6 +198,12 @@ export async function clearAppRuntimeData(appId) {
   } catch {
     // Browser support and module loading are best-effort during data removal.
   }
+  try {
+    const deviceStorage = await import('../lib/deviceStorage.js')
+    cleanups.push(deviceStorage.purgeDeviceStorage?.(appId))
+  } catch {
+    // Browser support and module loading are best-effort during data removal.
+  }
   await Promise.allSettled(cleanups)
 }
 
@@ -234,9 +239,7 @@ async function wipeSwCaches() {
   if (typeof caches === 'undefined') return
   const keys = await caches.keys()
   await Promise.all(
-    keys
-      .filter(k => k.startsWith('mobius-') || k.startsWith('workbox-'))
-      .map(k => caches.delete(k))
+    cachesToDeleteOnLogout(keys).map(k => caches.delete(k))
   )
 }
 
@@ -282,6 +285,10 @@ export async function apiFetch(path, options = {}) {
   let res
   try {
     res = await fetch(`${BASE}/api${path}`, { ...fetchOptions, headers, signal })
+    // HTTP status is application evidence, not transport evidence. Even a 401
+    // or 500 proves that this live server answered and must repair a stale
+    // Offline/Checking verdict before the caller handles the status itself.
+    reportNetworkReachable()
   } catch (error) {
     // The request is evidence, not a verdict. Ask the shared reachability store
     // to verify promptly; its hysteresis still prevents one transient failure
@@ -446,14 +453,12 @@ export const api = {
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams({ username, password }),
     }),
-    sso: {
+    mobius: {
       // This is a top-level browser navigation, not an API fetch. The fetch
       // base may be a container-local address in production builds; the login
       // handoff must begin on the origin the owner is actually viewing.
-      startUrl: (returnPath = '/') => (
-        `/api/auth/sso/start?return_path=${encodeURIComponent(returnPath)}`
-      ),
-      consume: () => apiFetch('/auth/sso/session', { method: 'POST' }),
+      startUrl: () => '/api/auth/mobius/login/start',
+      session: () => apiFetch('/auth/mobius/login/session', { method: 'POST' }),
     },
     // One-time sign-in pass for an app being added to the iOS home screen,
     // where the new web app gets its own empty storage container. `mint`
@@ -496,6 +501,7 @@ export const api = {
         method: 'POST',
         body: JSON.stringify({ app_id: appId }),
       }),
+      disconnect: (provider) => apiFetch(`/auth/provider/${encodeURIComponent(provider)}/disconnect`, { method: 'POST' }),
       claude: {
         status: () => apiFetch('/auth/provider/status'),
         startLogin: () => apiFetch('/auth/provider/login', { method: 'POST' }),
@@ -507,6 +513,9 @@ export const api = {
       codex: {
         startLogin: () => apiFetch('/auth/provider/codex/login', { method: 'POST' }),
         status: () => apiFetch('/auth/provider/codex/status'),
+      },
+      mobius: {
+        startLogin: () => apiFetch('/auth/provider/mobius/login', { method: 'POST' }),
       },
     },
   },
@@ -528,6 +537,14 @@ export const api = {
     }),
     runtime: (chatId, options = {}) => apiFetch(
       `/chats/${encodeURIComponent(chatId)}/runtime`,
+      options,
+    ),
+    activity: (chatId, { before, limit = 50, ...options } = {}) => apiFetch(
+      `/chats/${encodeURIComponent(chatId)}/activity?${new URLSearchParams({ limit, ...(before ? { before } : {}) })}`,
+      options,
+    ),
+    usage: (chatId, options = {}) => apiFetch(
+      `/chats/${encodeURIComponent(chatId)}/usage`,
       options,
     ),
     goalPlan: (chatId, options = {}) => apiFetch(
@@ -564,6 +581,13 @@ export const api = {
       method: 'PATCH',
       body: JSON.stringify(payload),
     }),
+    markFailureSeen: (chatId, activityVersion) => apiFetch(
+      `/chats/${encodeURIComponent(chatId)}/failure-activity/seen`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ activity_version: activityVersion }),
+      },
+    ),
     // Chats and apps share one pinned section, so its order is one transaction
     // even though the rows live in two resource tables.
     reorderPinned: (items) => apiFetch('/chats/pinned-order', {
@@ -575,12 +599,6 @@ export const api = {
     ),
     recover: (chatId) => listAffectingMutation(
       'chats', `/chats/${chatId}/recover`, { method: 'POST' },
-    ),
-    usage: (chatId, options = {}) => apiFetch(
-      `/chats/${encodeURIComponent(chatId)}/usage`, options,
-    ),
-    usageSummary: (chatId, options = {}) => apiFetch(
-      `/chats/${encodeURIComponent(chatId)}/usage?include_runs=false`, options,
     ),
   },
   appChats: {
@@ -610,6 +628,16 @@ export const api = {
   },
   apps: {
     list: (options = {}) => apiFetch('/apps/', options),
+    chatArtifacts: (chatId, options = {}) => apiFetch(
+      `/apps/chat-artifacts/${encodeURIComponent(chatId)}`,
+      options,
+    ),
+    markChatArtifactsSeen: (chatId, touches) => apiFetch(
+      `/apps/chat-artifacts/${encodeURIComponent(chatId)}/seen`, {
+        method: 'POST',
+        body: JSON.stringify({ touches }),
+      },
+    ),
     sourceFiles: (appId, path = '', { signal, recursive = false } = {}) => apiFetch(
       `/apps/${encodeURIComponent(appId)}/source/files?path=${encodeURIComponent(path)}${recursive ? '&recursive=true' : ''}`,
       { signal },
@@ -626,16 +654,54 @@ export const api = {
       `/apps/${encodeURIComponent(appId)}/source/file?path=${encodeURIComponent(path)}${download ? '&download=true' : ''}`,
       { signal },
     ),
+    writeSourceFile: (appId, path, content, expectedRevision) => apiFetch(
+      `/apps/${encodeURIComponent(appId)}/source/file?path=${encodeURIComponent(path)}`,
+      {
+        method: 'PUT',
+        body: JSON.stringify({
+          content,
+          ...(expectedRevision !== undefined
+            ? { expected_revision: expectedRevision }
+            : {}),
+        }),
+      },
+    ),
+    writeSourceBytes: (appId, path, bytes, expectedRevision = undefined) => apiFetch(
+      `/apps/${encodeURIComponent(appId)}/source/file-bytes?path=${encodeURIComponent(path)}`,
+      {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/octet-stream',
+          ...(expectedRevision === null
+            ? { 'If-None-Match': '*' }
+            : typeof expectedRevision === 'string'
+              ? { 'If-Match': expectedRevision }
+              : {}),
+        },
+        body: bytes,
+      },
+    ),
+    createSourceFolder: (appId, path) => apiFetch(
+      `/apps/${encodeURIComponent(appId)}/source/folder`,
+      { method: 'POST', body: JSON.stringify({ path }) },
+    ),
+    deleteSourcePath: (appId, path) => apiFetch(
+      `/apps/${encodeURIComponent(appId)}/source/file?path=${encodeURIComponent(path)}`,
+      { method: 'DELETE' },
+    ),
+    moveSourcePath: (appId, { from_path, to_path }) => apiFetch(
+      `/apps/${encodeURIComponent(appId)}/source/move`,
+      { method: 'POST', body: JSON.stringify({ from_path, to_path }) },
+    ),
+    applySource: payload => apiFetch('/apps/apply', {
+      method: 'POST', body: JSON.stringify(payload),
+    }),
     markOpened: (appId) => apiFetch(`/apps/${appId}/opened`, {
       method: 'POST',
     }),
     markActivitySeen: (appId, activityVersion) => apiFetch(`/apps/${appId}/activity/seen`, {
       method: 'POST',
       body: JSON.stringify({ activity_version: activityVersion }),
-    }),
-    markPreviewSeen: (appId, updatedAt, final = false) => apiFetch(`/apps/${appId}/preview/seen`, {
-      method: 'POST',
-      body: JSON.stringify({ updated_at: updatedAt, final }),
     }),
     update: (appId, payload) => listAffectingMutation('apps', `/apps/${appId}`, {
       method: 'PATCH',
@@ -667,6 +733,9 @@ export const api = {
     moduleUrl: (appId) => `${BASE}/api/apps/${appId}/module`,
   },
   agentCoordination: {
+    history: (chatId, { before, limit = 50 } = {}) => apiFetch(
+      `/agent-coordination/chats/${encodeURIComponent(chatId)}/history?${new URLSearchParams({ limit, ...(before ? { before } : {}) })}`,
+    ),
     chat: (chatId, options = {}) => apiFetch(
       `/agent-coordination/chats/${encodeURIComponent(chatId)}`,
       options,
@@ -680,9 +749,15 @@ export const api = {
     list: () => apiFetch('/projects'),
     templates: () => apiFetch('/projects/templates'),
     legacy: () => apiFetch('/projects/legacy'),
+    importSources: () => apiFetch('/projects/import-sources'),
     detail: (projectId) => apiFetch(`/projects/${encodeURIComponent(projectId)}`),
+    theme: (projectId, options = {}) => apiFetch(`/projects/${encodeURIComponent(projectId)}/theme`, options),
     markOpened: (projectId) => apiFetch(
       `/projects/${encodeURIComponent(projectId)}/opened`, { method: 'POST' },
+    ),
+    markArtifactOpened: (projectId, artifactId) => apiFetch(
+      `/projects/${encodeURIComponent(projectId)}/artifacts/${encodeURIComponent(artifactId)}/opened`,
+      { method: 'POST' },
     ),
     create: (payload) => apiFetch('/projects', {
       method: 'POST',
@@ -693,6 +768,10 @@ export const api = {
       body: JSON.stringify(payload),
     }),
     importGithub: (payload) => apiFetch('/projects/import-github', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+    importSource: (payload) => apiFetch('/projects/import', {
       method: 'POST',
       body: JSON.stringify(payload),
     }),
@@ -884,6 +963,50 @@ export const api = {
       { signal },
     ),
   },
+  sharedApps: {
+    list: () => apiFetch('/shared-apps'),
+    create: payload => apiFetch('/shared-apps', { method: 'POST', body: JSON.stringify(payload) }),
+    detail: instanceId => apiFetch(`/shared-apps/${encodeURIComponent(instanceId)}`),
+    publishRelease: instanceId => apiFetch(
+      `/shared-apps/${encodeURIComponent(instanceId)}/release`, { method: 'PUT' },
+    ),
+    remove: instanceId => apiFetch(`/shared-apps/${encodeURIComponent(instanceId)}`, { method: 'DELETE' }),
+    recover: instanceId => apiFetch(
+      `/shared-apps/${encodeURIComponent(instanceId)}/recover`, { method: 'POST' },
+    ),
+    redeemInvite: payload => apiFetch('/shared-apps/invites/redeem', {
+      method: 'POST', body: JSON.stringify(payload),
+    }),
+    collaboration: instanceId => apiFetch(`/shared-apps/${encodeURIComponent(instanceId)}/collaboration`),
+    createInvite: (instanceId, payload) => apiFetch(
+      `/shared-apps/${encodeURIComponent(instanceId)}/invites`,
+      { method: 'POST', body: JSON.stringify(payload) },
+    ),
+    revokeInvite: (instanceId, inviteId) => apiFetch(
+      `/shared-apps/${encodeURIComponent(instanceId)}/invites/${encodeURIComponent(inviteId)}`,
+      { method: 'DELETE' },
+    ),
+    updateMember: (instanceId, memberId, payload) => apiFetch(
+      `/shared-apps/${encodeURIComponent(instanceId)}/members/${encodeURIComponent(memberId)}`,
+      { method: 'PATCH', body: JSON.stringify(payload) },
+    ),
+    removeMember: (instanceId, memberId) => apiFetch(
+      `/shared-apps/${encodeURIComponent(instanceId)}/members/${encodeURIComponent(memberId)}`,
+      { method: 'DELETE' },
+    ),
+    state: instanceId => apiFetch(`/shared-apps/${encodeURIComponent(instanceId)}/state`),
+    changes: (instanceId, after) => apiFetch(
+      `/shared-apps/${encodeURIComponent(instanceId)}/changes?after=${encodeURIComponent(after)}`,
+    ),
+    writeState: (instanceId, path, payload) => apiFetch(
+      `/shared-apps/${encodeURIComponent(instanceId)}/state/${encodeURIComponent(path)}`,
+      { method: 'PUT', body: JSON.stringify(payload) },
+    ),
+    output: (instanceId, path, options) => apiFetch(
+      `/shared-apps/${encodeURIComponent(instanceId)}/output/${String(path || '').split('/').map(encodeURIComponent).join('/')}`,
+      options,
+    ),
+  },
   services: {
     surface: async (slug) => jsonOrThrow(
       await apiFetch(`/local-services/${encodeURIComponent(slug)}/surface`),
@@ -894,6 +1017,15 @@ export const api = {
     get: () => apiFetch('/settings'),
     providerUsage: (provider) => apiFetch(
       `/settings/provider-usage/${encodeURIComponent(provider)}`,
+    ),
+    redeemCodexReset: (creditId = null) => apiFetch(
+      '/settings/provider-usage/codex/redeem-reset',
+      {
+        method: 'POST',
+        // The server refuses to spend a reset without this explicit flag; it is
+        // sent only from the UI's Confirm step, never on a bare/accidental call.
+        body: JSON.stringify({ credit_id: creditId, confirm: true }),
+      },
     ),
     save: (payload) => apiFetch('/settings', {
       method: 'POST',
@@ -995,7 +1127,7 @@ export const api = {
     status: () => apiFetch('/platform/status'),
     check: () => apiFetch('/platform/check', { method: 'POST' }),
     // Read-only preview of the incoming update, shown for review before Apply.
-    updatePreview: () => apiFetch('/platform/update-preview'),
+    updatePreview: ({ intent = 'update' } = {}) => apiFetch(`/platform/update-preview?intent=${encodeURIComponent(intent)}`),
     updateProgress: () => apiFetch('/platform/update-progress'),
     apply: (plan) => apiFetch('/platform/apply', {
       method: 'POST',
@@ -1057,7 +1189,7 @@ export const api = {
       const prepared = (Array.isArray(records) ? records : [])
         .filter(record => record?.status === 'prepared')
       const updating = prepared.length > 0
-        && prepared.every(record => record?.action === 'pr_update')
+        && prepared[0]?.action === 'pr_update'
       return apiFetch(
         `/github/contributions/${appId}/${updating ? 'update-stack' : 'submit-stack'}`,
         {

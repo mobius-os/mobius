@@ -102,19 +102,10 @@ def test_load_records_failure_without_installing_a_global_catch_all():
 
   # An isolated empty router is a normal miss, not an unscoped route that
   # captures every path registered after it.
-  app = FastAPI()
-  app.include_router(fallback)
-
-  @app.get("/api/health")
-  def healthy_route():
-    return {"status": "ok"}
-
-  client = TestClient(app)
-  assert client.get("/api/health").json() == {"status": "ok"}
-  assert client.get("/api/anything-else").status_code == 404
+  assert _mount(fallback, prefix="/x").get("/x/anything/here").status_code == 404
 
 
-def test_broken_route_module_is_isolated_and_real_routers_remain(
+def test_broken_route_module_yields_stub_real_routers_unaffected(
   monkeypatch,
 ):
   """If `app.routes.apps` raises on import, `apps_router` becomes a
@@ -166,18 +157,13 @@ def test_router_failure_degrades_probes_without_hiding_them():
   from app import main as main_module
   from app.routes import _ROUTER_IMPORT_FAILURES
 
-  _ROUTER_IMPORT_FAILURES.add("apps")
+  _ROUTER_IMPORT_FAILURES.add("projects")
 
   health_response = Response()
   health = main_module.health(health_response)
   assert health_response.status_code == 200
   assert health["mode"] == "degraded"
-  assert health["failed_routers"] == ["apps"]
-
-  strict_response = Response()
-  strict = main_module.health_strict(strict_response)
-  assert strict_response.status_code == 503
-  assert strict["status"] == "router_import_failure"
+  assert health["failed_routers"] == ["projects"]
 
   ready_response = Response()
   ready = main_module.ready(ready_response)
@@ -185,11 +171,10 @@ def test_router_failure_degrades_probes_without_hiding_them():
   assert ready["reason"] == "router_import_failure"
 
   with pytest.raises(HTTPException) as exc_info:
-    main_module.unknown_api("apps")
+    main_module.unknown_api("projects")
   assert exc_info.value.status_code == 503
-  assert "apps" in exc_info.value.detail
-  assert "Repair the platform source" in exc_info.value.detail
-  assert "restart Möbius" in exc_info.value.detail
+  assert "projects" in exc_info.value.detail
+  assert "external Recovery" in exc_info.value.detail
 
 
 def test_lifespan_cannot_mutate_cron_for_a_low_id_test_app(

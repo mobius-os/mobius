@@ -137,6 +137,27 @@ test('an empty saved answer map cannot erase newer live answer state', () => {
   assert.deepEqual(carried.answers, liveAnswers)
 })
 
+test('a durable restart action survives blank live question replay', () => {
+  const question = {
+    type: 'question',
+    question_id: 'restart-card',
+    questions: [{ id: 'restart', question: 'Restart now?' }],
+  }
+  const platformAction = {
+    type: 'restart', version: 1, action_id: 'exact-source', status: 'activated',
+  }
+
+  const [carried] = carryQuestionAnswers(
+    [question],
+    [{ ...question, platform_action: platformAction }],
+  )
+
+  assert.equal(carried.platform_action, platformAction)
+  assert.equal(streamItemToBlock({
+    ...question, platform_action: platformAction,
+  }).platform_action, platformAction)
+})
+
 test('context compaction survives live promotion as its own block', () => {
   const item = {
     type: 'context_compaction', provider: 'codex', trigger: 'auto',

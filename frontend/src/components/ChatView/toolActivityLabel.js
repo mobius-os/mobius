@@ -38,6 +38,7 @@ const ACTIVITY_LABELS = new Map([
   // the `recall` marker the backend stamps from the command — see
   // effectiveToolName. Uncountable, so it has no singular twin.
   ['MemoryRecall', 'Searching Memory'],
+  ['PeerMessage', 'Exchanging agent messages'],
 ])
 
 // Past-tense twins for SETTLED lines — "Ran commands", not a "Running
@@ -65,6 +66,7 @@ const PAST_LABELS = new Map([
   ['Skill', 'Used skills'],
   ['ViewImage', 'Viewed images'],
   ['MemoryRecall', 'Recalled from Memory'],
+  ['PeerMessage', 'Exchanged agent messages'],
 ])
 
 // Singular twins for a ONE-occurrence activity: a lone Bash reads "Ran a
@@ -240,7 +242,7 @@ export function effectiveToolName(tool) {
 // so scanning the transcript tells the story. Skill reads are housekeeping too:
 // effectiveToolName still gives them an honest label and expandable details,
 // while the ordinary activity stretch folds them beside reads and commands.
-const DISTINCTIVE_ACTIVITIES = new Set(['ViewImage', 'MemoryRecall', 'PeerMessage'])
+const DISTINCTIVE_ACTIVITIES = new Set(['ViewImage', 'MemoryRecall'])
 
 // The one-line story of a peer-network exchange: who the agent messaged or
 // heard from, and what kind of note it was. Provider-neutral — the same card

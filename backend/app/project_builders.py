@@ -26,14 +26,17 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import json
 import os
 import re
 import shutil
 import time
+import tempfile
 from pathlib import Path
 from typing import Any, Callable
 
 from app import workspace_files
+from app.project_templates import linked_app_id
 from app.timeutil import now_naive_utc
 
 log = logging.getLogger(__name__)
@@ -45,6 +48,10 @@ ARTIFACT_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 VALID_STATUSES = ("idle", "building", "ok", "error")
 
 BUILTIN_ARTIFACT_TYPES: dict[str, dict[str, Any]] = {
+  "app": {
+    "id": "app", "name": "App", "extensions": ["jsx", "tsx"],
+    "preview": "html", "script": None, "output": "index.html",
+  },
   "website": {
     "id": "website",
     "name": "Website",
@@ -159,6 +166,9 @@ def template_artifact_types(template: Any) -> list[dict[str, Any]]:
 
 def resolve_artifact_type(project, builder: str) -> dict[str, Any] | None:
   """Resolve one project-owned builder id to its snapshotted provider contract."""
+  if builder == "app" and linked_app_id(getattr(project, "template_snapshot_json", None)):
+    # Installed app revisions have one owner: app_apply, never the HTML builder.
+    return None
   for artifact_type in template_artifact_types(
     getattr(project, "template_snapshot_json", None),
   ):
@@ -578,26 +588,18 @@ async def build_latex(
     raise RuntimeError(f"tectonic exited with status {returncode}")
 
 
-async def build_website(
-  *, root: Path, source: str, output_dir: Path, log_path: Path,
-) -> None:
-  """Copy project sources, excluding build output and repository metadata.
-
-  Copying the whole tree — not just the entry file — is what lets relative
-  assets (images, fonts, CSS, extra pages) resolve when the built site renders
-  in a sandboxed iframe. ``artifacts/`` is excluded so the output never copies
-  itself. Git control data is reserved whether represented by a directory or a
-  gitfile. Symlinks are omitted recursively; ``symlinks=True`` also guarantees
-  a concurrent entry swap can copy only the link, never dereference its target.
-  """
+def _copy_project_sources(
+  root: Path, output_dir: Path, *, excluded_dirs: frozenset[str] = frozenset(),
+) -> int:
+  """Copy preview assets without repository metadata, prior outputs or symlink targets."""
   if output_dir.exists():
     shutil.rmtree(output_dir)
   output_dir.mkdir(parents=True, exist_ok=True)
-  lines = ["Building website: copying project sources into output.\n"]
   copied = 0
   for child in sorted(root.iterdir(), key=lambda p: p.name):
     if (
       child.name == "artifacts"
+      or child.name in excluded_dirs
       or child.name in workspace_files.GIT_METADATA_NAMES
       or child.is_symlink()
     ):
@@ -612,6 +614,7 @@ async def build_website(
           name for name in names
           if (
             name in workspace_files.GIT_METADATA_NAMES
+            or name in excluded_dirs
             or (Path(directory) / name).is_symlink()
           )
         ],
@@ -619,6 +622,23 @@ async def build_website(
     else:
       shutil.copyfile(child, dest, follow_symlinks=False)
     copied += 1
+  return copied
+
+
+async def build_website(
+  *, root: Path, source: str, output_dir: Path, log_path: Path,
+) -> None:
+  """Copy project sources, excluding build output and repository metadata.
+
+  Copying the whole tree — not just the entry file — is what lets relative
+  assets (images, fonts, CSS, extra pages) resolve when the built site renders
+  in a sandboxed iframe. ``artifacts/`` is excluded so the output never copies
+  itself. Git control data is reserved whether represented by a directory or a
+  gitfile. Symlinks are omitted recursively; ``symlinks=True`` also guarantees
+  a concurrent entry swap can copy only the link, never dereference its target.
+  """
+  copied = _copy_project_sources(root, output_dir)
+  lines = ["Building website: copying project sources into output.\n"]
   entry = output_dir / source.lstrip("/")
   if not entry.is_file():
     lines.append(
@@ -628,7 +648,47 @@ async def build_website(
   _write_log(log_path, "".join(lines))
 
 
+async def build_app(
+  *, root: Path, source: str, output_dir: Path, log_path: Path,
+) -> None:
+  """Build an inert app-source preview with the same compiler as installed apps."""
+  from app.compiler import CompileError, compile_jsx
+
+  copied = _copy_project_sources(root, output_dir, excluded_dirs=frozenset({"node_modules"}))
+  _write_log(log_path, f"Building App: copied {copied} source entries for preview.\n")
+  # Compile from the confined copy, never from a symlink back into owner data.
+  fd, entry_name = tempfile.mkstemp(prefix="mobius-preview-", suffix=".jsx", dir=output_dir)
+  os.close(fd)
+  entry = Path(entry_name)
+  entry.write_text(
+    "import React from 'react';\n"
+    "import { createRoot } from 'react-dom/client';\n"
+    f"import App from {json.dumps('./' + source)};\n"
+    "createRoot(document.getElementById('root')).render(React.createElement(App, "
+    "{appId: 'project-preview'}));\nexport default App;\n",
+    encoding="utf-8",
+  )
+  bundle = entry.with_suffix(".js")
+  try:
+    await compile_jsx(entry.read_text(), out_path=bundle, source_path=entry)
+    code = re.sub(r"</script", r"<\\/script", bundle.read_text(), flags=re.IGNORECASE)
+    (output_dir / "index.html").write_text(
+      '<!doctype html><html lang="en"><meta charset="utf-8">'
+      '<meta name="viewport" content="width=device-width,initial-scale=1">'
+      '<title>App preview</title><div id="root"></div>'
+      f'<script type="module">{code}</script></html>', encoding="utf-8",
+    )
+    _append_log(log_path, "App preview compiled with the platform app compiler.\n")
+  except CompileError as exc:
+    _append_log(log_path, exc.stderr + "\n")
+    raise
+  finally:
+    entry.unlink(missing_ok=True)
+    bundle.unlink(missing_ok=True)
+
+
 BUILDERS: dict[str, Callable[..., Any]] = {
+  "app": build_app,
   "website": build_website,
   "latex": build_latex,
 }
@@ -656,6 +716,26 @@ def _publish_build_event(project_id: str, artifact_id: str, status: str) -> None
   except Exception:
     # A broadcast failure must never fail the build it is only reporting on.
     log.warning("Could not publish build event for %s/%s", project_id, artifact_id)
+
+
+def _publish_build_output(staged: Path, output: Path) -> None:
+  """Replace a complete Creation, restoring its previous files if publication fails."""
+  previous = output.with_name("output-previous")
+  # A prior process may have stopped between these two directory renames.
+  if previous.exists() and not output.exists():
+    previous.rename(output)
+  elif previous.exists():
+    shutil.rmtree(previous)
+  if output.exists():
+    output.rename(previous)
+  try:
+    staged.rename(output)
+  except OSError:
+    if previous.exists() and not output.exists():
+      previous.rename(output)
+    raise
+  if previous.exists():
+    shutil.rmtree(previous)
 
 
 async def run_build(project_id: str, artifact_id: str) -> None:
@@ -688,6 +768,7 @@ async def run_build(project_id: str, artifact_id: str) -> None:
     _publish_build_event(project_id, artifact_id, "building")
 
     status = "error"
+    staged = None
     try:
       source_path = (root / source).resolve() if source else None
       if (
@@ -699,6 +780,7 @@ async def run_build(project_id: str, artifact_id: str) -> None:
       ):
         _write_log(log_path, f"Source file is missing: {source or '(none)'}\n")
       else:
+        staged = Path(tempfile.mkdtemp(prefix=".build-", dir=artifact_dir))
         script_rel = artifact_type.get("script")
         if script_rel:
           script = (app_source / script_rel).resolve() if app_source else None
@@ -714,7 +796,7 @@ async def run_build(project_id: str, artifact_id: str) -> None:
             script=script,
             root=root,
             source=source,
-            output_dir=output_dir,
+            output_dir=staged,
             artifact_id=artifact_id,
             log_path=log_path,
           )
@@ -723,11 +805,12 @@ async def run_build(project_id: str, artifact_id: str) -> None:
           if builder is None:
             raise RuntimeError(f"unknown builder: {builder_name}")
           await builder(
-            root=root, source=source, output_dir=output_dir, log_path=log_path,
+            root=root, source=source, output_dir=staged, log_path=log_path,
           )
         entry = output_entry(artifact_type, source)
-        if entry is None or not (output_dir / entry).is_file():
+        if entry is None or not (staged / entry).is_file():
           raise RuntimeError("builder finished without its declared output")
+        _publish_build_output(staged, output_dir)
         status = "ok"
     except asyncio.CancelledError:
       _append_log(log_path, "\nBuild cancelled.\n")
@@ -737,6 +820,9 @@ async def run_build(project_id: str, artifact_id: str) -> None:
       raise
     except Exception as exc:
       _append_log(log_path, f"\nBuild failed: {exc}\n")
+    finally:
+      if staged is not None and staged.exists():
+        shutil.rmtree(staged)
 
     duration_ms = int((time.monotonic() - started) * 1000)
     _write_status(project_id, artifact_id, status=status, duration_ms=duration_ms)

@@ -7,19 +7,23 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy.orm import Session
 
 from app.agent_coordination import (
+  DELIVERY_INTERRUPT,
   MAX_PEERS,
+  MESSAGE_DELIVERIES,
+  chat_message_history,
+  deliver_peer_recipients,
   MESSAGE_KINDS,
   agent_network_snapshot,
   embedded_chat_snapshot,
   model_message,
   owner_chat_snapshot,
   owner_project_snapshot,
-  run_started_at,
   scope_for_chat,
   send_agent_message,
+  send_work_claim_notice,
   visible_peer_messages,
-  wake_idle_recipients,
 )
+from app.agent_work_claims import acknowledge_notice, claim_work, finish_work
 from app.database import get_db
 from app.deps import (
   Principal,
@@ -42,6 +46,7 @@ class AgentMessageCreate(BaseModel):
   recipients: list[str] = Field(default_factory=list, max_length=24)
   broadcast: bool = False
   kind: str = "note"
+  delivery: str = "next_turn"
   body: str = Field(min_length=1, max_length=4000)
   send_id: str | None = Field(default=None, min_length=1, max_length=64)
 
@@ -61,6 +66,31 @@ class AgentMessageCreate(BaseModel):
       raise ValueError(f"kind must be one of: {', '.join(sorted(MESSAGE_KINDS))}")
     return value
 
+  @field_validator("delivery")
+  @classmethod
+  def valid_delivery(cls, value: str) -> str:
+    value = value.strip().lower()
+    if value not in MESSAGE_DELIVERIES:
+      raise ValueError("delivery must be next_turn or interrupt")
+    return value
+
+
+class AgentWorkClaimCreate(BaseModel):
+  model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+  work_key: str = Field(min_length=3, max_length=256)
+  summary: str = Field(min_length=1, max_length=500)
+  takeover_reason: str | None = Field(default=None, min_length=10, max_length=1000)
+  expected_owner_chat_id: str | None = Field(default=None, min_length=1, max_length=64)
+
+
+class AgentWorkClaimFinish(BaseModel):
+  model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+  work_key: str = Field(min_length=3, max_length=256)
+  outcome: str = Field(min_length=1, max_length=1000)
+  release: bool = False
+
 
 def _agent_scope(
   db: Session, principal: Principal,
@@ -71,6 +101,104 @@ def _agent_scope(
   if scope is None:
     raise HTTPException(409, "This agent does not have a coordination scope.")
   return scope
+
+
+@router.post("/work-claims", dependencies=[Depends(reject_cross_site)])
+async def claim_current_work(
+  body: AgentWorkClaimCreate,
+  principal: Principal = Depends(get_agent_run_principal),
+  db: Session = Depends(get_db),
+):
+  try:
+    result = claim_work(
+      db,
+      owner_id=principal.owner.id,
+      chat_id=principal.chat_id,
+      run_id=principal.run_id,
+      **body.model_dump(),
+    )
+  except ValueError as exc:
+    raise HTTPException(409, str(exc)) from exc
+  previous = result.get("previous_owner_chat_id")
+  if previous and result.get("notification_pending"):
+    send_work_claim_notice(
+      db,
+      owner_id=principal.owner.id,
+      claim_id=result["id"],
+      revision=result["revision"],
+      sender_chat_id=principal.chat_id,
+      recipients=[previous],
+      body=(
+        f"Work claim {result['work_key']} transferred to {principal.chat_id}: "
+        f"{result.get('takeover_reason') or 'ownership changed'}"
+      ),
+    )
+    delivery = await deliver_peer_recipients(
+      recipients=[previous], delivery=DELIVERY_INTERRUPT, kind="handoff",
+      sender_chat_id=principal.chat_id,
+    )
+    # Persist the retry latch only after the durable notice has also reached
+    # its requested live/wake/queue delivery path. A crash or delivery error
+    # before this point leaves notification_pending true, so the exact same
+    # transfer request retries idempotently instead of losing the wake.
+    acknowledge_notice(
+      db, claim_id=result["id"], revision=result["revision"],
+      resolve_interests=False,
+    )
+    result["notification_pending"] = False
+    result["steered"] = delivery.steered
+    result["woken"] = delivery.woken
+    result["queued"] = delivery.queued
+  return result
+
+
+@router.post("/work-claims/finish", dependencies=[Depends(reject_cross_site)])
+async def finish_current_work(
+  body: AgentWorkClaimFinish,
+  principal: Principal = Depends(get_agent_run_principal),
+  db: Session = Depends(get_db),
+):
+  try:
+    finished = finish_work(
+      db,
+      owner_id=principal.owner.id,
+      chat_id=principal.chat_id,
+      work_key=body.work_key,
+      outcome=body.outcome,
+      release=body.release,
+    )
+  except ValueError as exc:
+    raise HTTPException(409, str(exc)) from exc
+  recipients = finished.interested_chat_ids
+  delivery = None
+  woken: list[str] = []
+  if recipients:
+    send_work_claim_notice(
+      db,
+      owner_id=principal.owner.id,
+      claim_id=finished.claim["id"],
+      revision=finished.claim["revision"],
+      sender_chat_id=principal.chat_id,
+      recipients=recipients,
+      body=(
+        f"Work claim {finished.claim['work_key']} was "
+        f"{finished.claim['state']}: {finished.claim.get('outcome') or ''}"
+      ),
+    )
+    delivery = await deliver_peer_recipients(
+      recipients=recipients, delivery=DELIVERY_INTERRUPT, kind="handoff",
+      sender_chat_id=principal.chat_id,
+    )
+    woken = delivery.woken
+  acknowledge_notice(
+    db, claim_id=finished.claim["id"], revision=finished.claim["revision"],
+    resolve_interests=True,
+  )
+  return {
+    **finished.claim, "notification_pending": False,
+    "notified": recipients, "steered": delivery.steered if recipients else [],
+    "woken": woken, "queued": delivery.queued if recipients else [],
+  }
 
 
 @router.get("/room")
@@ -95,39 +223,6 @@ def current_network(
   return snapshot
 
 
-@router.get("/messages")
-def current_messages(
-  after: str | None = Query(default=None, max_length=64),
-  limit: int = Query(default=50, ge=1, le=100),
-  principal: Principal = Depends(get_agent_run_principal),
-  db: Session = Depends(get_db),
-):
-  """Inbox notes after ``after``, or since this run started when no cursor is
-  given; earlier backlog reaches the agent through turn context instead."""
-  scope = _agent_scope(db, principal)
-  created_after = None
-  if after is None:
-    created_after = run_started_at(db, principal.chat_id, principal.run_id)
-    if created_after is None:
-      raise HTTPException(409, "Current agent run is unavailable.")
-  try:
-    items = visible_peer_messages(
-      db, scope,
-      chat_id=principal.chat_id,
-      after_id=after,
-      limit=limit,
-      inbox_only=True,
-      created_after=created_after,
-    )
-  except ValueError as exc:
-    raise HTTPException(422, str(exc)) from exc
-  return {
-    "scope": {"kind": scope.kind, "id": scope.id},
-    "messages": [model_message(item) for item in items],
-    "cursor": items[-1]["id"] if items else after,
-  }
-
-
 @router.post("/messages", dependencies=[Depends(reject_cross_site)])
 async def send_current_message(
   body: AgentMessageCreate,
@@ -145,17 +240,21 @@ async def send_current_message(
       recipients=body.recipients,
       broadcast=body.broadcast,
       kind=body.kind,
+      delivery=body.delivery,
       body=body.body,
       send_id=body.send_id,
     )
   except ValueError as exc:
     raise HTTPException(422, str(exc)) from exc
-  # The note is durable either way; a direct ask additionally wakes an idle
-  # recipient with unfinished Goal work so the handoff does not wait for the
-  # owner to notice. Broadcasts and plain notes never start a turn.
-  woken = [] if body.broadcast else await wake_idle_recipients(
-    recipients=body.recipients, kind=body.kind,
-    sender_chat_id=principal.chat_id,
+  # Meaning and delivery are independent. A direct interrupt steers a live
+  # recipient or wakes its idle unfinished Goal; next_turn and every broadcast
+  # stay quiet so one broad note cannot manufacture a wave of model work.
+  delivery = (
+    await deliver_peer_recipients(
+      recipients=body.recipients, delivery=body.delivery, kind=body.kind,
+      sender_chat_id=principal.chat_id,
+    )
+    if not body.broadcast else None
   )
   # One row is stored per recipient inbox. The sender already knows the note,
   # so return one canonical row plus the exact recipient count and names the
@@ -167,7 +266,9 @@ async def send_current_message(
       name for name in dict.fromkeys(row["recipient_name"] for row in rows)
       if name
     ],
-    "woken": woken,
+    "steered": delivery.steered if delivery else [],
+    "woken": delivery.woken if delivery else [],
+    "queued": delivery.queued if delivery else [],
   }
 
 
@@ -226,5 +327,22 @@ def inspect_project_room(
       peer_limit=peer_limit,
       peer_after=peer_after,
     )
+  except ValueError as exc:
+    raise HTTPException(422, str(exc)) from exc
+
+
+@router.get("/chats/{chat_id}/history")
+def inspect_chat_history(
+  chat_id: str,
+  before: str | None = Query(default=None, max_length=64),
+  limit: int = Query(default=50, ge=1, le=100),
+  principal: Principal = Depends(get_owner_or_chat_embed_principal),
+  db: Session = Depends(get_db),
+):
+  """Read only the mail available to this exact chat, across retained history."""
+  require_chat_embed_operation(principal, "chat:read")
+  get_active_chat_for_principal(db, chat_id, principal)
+  try:
+    return chat_message_history(db, chat_id, before=before, limit=limit)
   except ValueError as exc:
     raise HTTPException(422, str(exc)) from exc

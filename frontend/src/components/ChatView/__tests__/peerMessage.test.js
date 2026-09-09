@@ -33,7 +33,9 @@ const {
   '/src/components/ChatView/disclosureState.js',
 )
 
-after(() => vite.close())
+const priorWindow = globalThis.window
+globalThis.window = { location: new URL('https://mobius.test/shell') }
+after(() => { globalThis.window = priorWindow; return vite.close() })
 
 function renderCard(peerMessage, { open = false, suffix = 'default' } = {}) {
   const chatId = `peer-message-${suffix}`
@@ -69,10 +71,10 @@ const receivedTool = {
   },
 }
 
-test('a stamped peer exchange classifies as its own distinctive activity', () => {
+test('peer exchanges retain their identity inside ordinary tool grouping', () => {
   assert.equal(effectiveToolName(sentTool), 'PeerMessage')
   assert.equal(effectiveToolName(receivedTool), 'PeerMessage')
-  assert.equal(isDistinctiveActivityTool(sentTool), true)
+  assert.equal(isDistinctiveActivityTool(sentTool), false)
   // A tool with no marker stays an ordinary block.
   assert.equal(effectiveToolName({ tool: 'Bash' }), 'Bash')
 })
@@ -234,4 +236,65 @@ test('a settled note disclosure shows the complete bounded body', () => {
 test('the card model returns null for an unrecognized shape', () => {
   assert.equal(peerMessageCardModel(null), null)
   assert.equal(peerMessageCardModel({ status: 'weird' }), null)
+})
+
+test('incoming timeline messages expose full inline text, time, and optional source navigation', () => {
+  const chatId = 'inline-message'
+  const disclosureKey = 'inline-note'
+  _resetDisclosureStateForTests()
+  persistDisclosureOpen(chatId, disclosureKey, true)
+  const body = 'Keep working independently.\n<script>not markup</script>'
+  const html = renderToStaticMarkup(React.createElement(PeerMessageCard, {
+    t: { status: 'done', peer_message: { direction: 'read', status: 'received', count: 1,
+      notes: [{ sender: 'Other agent', kind: 'finding', body }] } },
+    chatId, disclosureKey,
+    records: [{ sender_chat_id: 'other', sender_name: 'Other agent', created_at: '2026-09-08T12:17:00', observedDelivery: 'during_work' }],
+  }))
+  assert.match(html, /Received from Other agent/)
+  assert.match(html, /Delivered during work/)
+  assert.match(html, /2026-09-08T12:17:00.000Z/)
+  assert.match(html, /Keep working independently/)
+  assert.doesNotMatch(html, /<script|&lt;script&gt;/)
+  assert.match(html, /href="\/shell\?chat=other"/)
+  assert.match(html, /aria-expanded="true"/)
+})
+
+test('requested delivery never claims the other agent read a message', () => {
+  _resetDisclosureStateForTests()
+  persistDisclosureOpen('delivery', 'note', true)
+  const html = renderToStaticMarkup(React.createElement(PeerMessageCard, {
+    t: sentTool, chatId: 'delivery', disclosureKey: 'note',
+    records: [{ delivery: 'interrupt', recipient_chat_id: 'other' }],
+  }))
+  assert.match(html, /Immediate delivery requested · not a read receipt/)
+  assert.doesNotMatch(html, /Delivered during work/)
+})
+
+test('peer disclosure follows tool chrome and renders structured message prose', () => {
+  const html = renderCard({ ...sentTool.peer_message,
+    body: '## Decision\n\nUse **the existing renderer**.\n\n- Keep `stable-id`\n- Keep the timeline\n\n```text\n<script>quoted, not executed</script>\n```',
+  }, { open: true, suffix: 'markdown' })
+  assert.equal((html.split('</button>')[0].match(/<svg/g) || []).length, 1, 'only the direction icon, no trailing disclosure chevron')
+  assert.match(html, /aria-expanded="true"/)
+  assert.match(html, /<h2[^>]*>Decision<\/h2>/)
+  assert.match(html, /<strong>the existing renderer<\/strong>/)
+  assert.match(html, /<ul/)
+  assert.match(html, /<code[^>]*>stable-id<\/code>/)
+  assert.match(html, /&lt;script&gt;quoted, not executed&lt;\/script&gt;/)
+  assert.doesNotMatch(html, /<script/)
+})
+
+
+test('single received note names its sender once; grouped notes retain each sender', () => {
+  const note = { sender: 'Review agent', kind: 'finding', body: 'Verified.' }
+  const one = renderCard({ direction: 'read', status: 'received', count: 1, notes: [note] }, { open: true, suffix: 'single-sender' })
+  assert.doesNotMatch(one, /chat__peer-kicker|chat__peer-from/)
+  assert.match(one, /Received from Review agent/)
+  assert.match(one, /chat__peer-kind--finding/)
+  const many = renderCard({ direction: 'read', status: 'received', count: 2,
+    notes: [note, { ...note, sender: 'Build agent' }] }, { open: true, suffix: 'multiple-senders' })
+  assert.match(many, /chat__peer-kicker/)
+  assert.equal((many.match(/chat__peer-from/g) || []).length, 2)
+  assert.match(many, /from Review agent/)
+  assert.match(many, /from Build agent/)
 })

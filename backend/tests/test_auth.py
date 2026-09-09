@@ -1,8 +1,11 @@
 """Tests for authentication flow."""
 
+import base64
+import hashlib
 import json
 import time
 import urllib.parse
+from datetime import timedelta
 
 import bcrypt
 from test_app_fixtures import create_local_app
@@ -19,37 +22,34 @@ def configure_managed_sso(monkeypatch):
   return settings
 
 
-class FakeSsoExchange:
-  response = {
-    "sub": "user_managed123",
-    "email": "owner@example.com",
-    "name": "Managed Owner",
-  }
-  status_code = 200
-  calls = []
+def _mobius_login_handoff(db, *, epoch=0):
+  from app import auth as auth_service, models
+  from app.timeutil import now_naive_utc
 
-  def __init__(self, *args, **kwargs):
-    self.args = args
-    self.kwargs = kwargs
+  owner = models.Owner(
+    username="mobius-owner",
+    hashed_password="unused",
+    auth_mode="mobius",
+    sso_subject="mobius-subject",
+    token_epoch=epoch,
+  )
+  db.add(owner)
+  db.flush()
+  jti = "test-mobius-login-handoff"
+  db.add(models.MobiusLoginHandoffGrant(
+    token_hash=hashlib.sha256(jti.encode()).hexdigest(),
+    owner_id=owner.id,
+    owner_epoch=epoch,
+    expires_at=now_naive_utc() + timedelta(seconds=60),
+  ))
+  db.commit()
+  token = auth_service.create_access_token({
+    "scope": "mobius_login_handoff",
+    "sub": owner.username,
+    "jti": jti,
+  }, expires_delta=timedelta(seconds=60))
+  return owner, token
 
-  async def __aenter__(self):
-    return self
-
-  async def __aexit__(self, *_args):
-    return None
-
-  async def post(self, url, **kwargs):
-    type(self).calls.append((url, kwargs))
-    payload = type(self).response
-
-    class Result:
-      status_code = type(self).status_code
-
-      @staticmethod
-      def json():
-        return payload
-
-    return Result()
 
 
 def test_setup_creates_owner(client):
@@ -90,150 +90,9 @@ def test_managed_mode_closes_local_first_owner_setup(client, monkeypatch):
     "password": "not-the-owner",
   })
 
-  assert status.json() == {"configured": False, "auth_mode": "mobius_sso"}
+  assert status.json() == {"configured": False, "auth_mode": "mobius"}
   assert setup.status_code == 403
   assert "Managed sign-in" in setup.json()["detail"]
-
-
-def test_managed_sso_first_login_creates_bound_owner_and_one_time_handoff(
-  client, db, monkeypatch,
-):
-  from app import auth as auth_util, models
-  from app.routes import auth as auth_routes
-
-  configure_managed_sso(monkeypatch)
-  FakeSsoExchange.calls = []
-  FakeSsoExchange.response = {
-    "sub": "user_managed123",
-    "email": "owner@example.com",
-    "name": "Managed Owner",
-  }
-  FakeSsoExchange.status_code = 200
-  monkeypatch.setattr(auth_routes.httpx, "AsyncClient", FakeSsoExchange)
-
-  start = client.get(
-    "/api/auth/sso/start",
-    params={"return_path": "/shell/?chat=first#tail"},
-    follow_redirects=False,
-  )
-
-  assert start.status_code == 303
-  authorize = urllib.parse.urlparse(start.headers["location"])
-  assert authorize.scheme == "http"
-  assert authorize.netloc == "launcher.test"
-  assert authorize.path == "/sso/authorize"
-  query = urllib.parse.parse_qs(authorize.query)
-  assert query["instance_id"] == ["mob_testinstance"]
-  assert query["redirect_uri"] == [
-    "http://testserver/api/auth/sso/callback"
-  ]
-  assert query["code_challenge"][0]
-  assert "s" * 48 not in start.headers["location"]
-
-  callback = client.get(
-    "/api/auth/sso/callback",
-    params={"code": "opaque-code", "state": query["state"][0]},
-    follow_redirects=False,
-  )
-
-  assert callback.status_code == 303
-  assert callback.headers["location"] == "/shell/?mobius_sso=1"
-  assert FakeSsoExchange.calls
-  exchange_url, exchange_args = FakeSsoExchange.calls[-1]
-  assert exchange_url == "http://launcher.test/sso/token"
-  assert exchange_args["json"]["client_secret"] == "s" * 48
-  assert exchange_args["json"]["code"] == "opaque-code"
-  owner = db.query(models.Owner).one()
-  assert owner.username == "Managed Owner"
-  assert owner.sso_subject == "user_managed123"
-  assert owner.sso_email == "owner@example.com"
-  assert auth_util.verify_password("anything", owner.hashed_password) is False
-
-  session = client.post("/api/auth/sso/session")
-
-  assert session.status_code == 200
-  body = session.json()
-  assert body["new_owner"] is True
-  assert body["return_path"] == "/shell/?chat=first#tail"
-  assert auth_util.decode_access_token(body["access_token"])["sub"] == owner.username
-  replay = client.post("/api/auth/sso/session")
-  assert replay.status_code == 401
-
-
-def test_managed_sso_returning_owner_is_reused_and_subject_cannot_change(
-  client, db, monkeypatch,
-):
-  from app import models
-  from app.routes import auth as auth_routes
-
-  configure_managed_sso(monkeypatch)
-  FakeSsoExchange.calls = []
-  FakeSsoExchange.response = {
-    "sub": "user_original",
-    "email": "owner@example.com",
-    "name": "Owner",
-  }
-  FakeSsoExchange.status_code = 200
-  monkeypatch.setattr(auth_routes.httpx, "AsyncClient", FakeSsoExchange)
-
-  first = client.get("/api/auth/sso/start", follow_redirects=False)
-  first_query = urllib.parse.parse_qs(
-    urllib.parse.urlparse(first.headers["location"]).query
-  )
-  callback = client.get(
-    "/api/auth/sso/callback",
-    params={"code": "first-code", "state": first_query["state"][0]},
-    follow_redirects=False,
-  )
-  assert callback.headers["location"] == "/shell/?mobius_sso=1"
-  client.post("/api/auth/sso/session")
-
-  FakeSsoExchange.response = {
-    "sub": "user_different",
-    "email": "other@example.com",
-    "name": "Other",
-  }
-  second = client.get("/api/auth/sso/start", follow_redirects=False)
-  second_query = urllib.parse.parse_qs(
-    urllib.parse.urlparse(second.headers["location"]).query
-  )
-  denied = client.get(
-    "/api/auth/sso/callback",
-    params={"code": "second-code", "state": second_query["state"][0]},
-    follow_redirects=False,
-  )
-
-  assert denied.status_code == 303
-  assert denied.headers["location"] == "/shell/?mobius_sso_error=1"
-  owners = db.query(models.Owner).all()
-  assert len(owners) == 1
-  assert owners[0].sso_subject == "user_original"
-
-
-def test_managed_sso_exchange_failure_does_not_create_owner(
-  client, db, monkeypatch,
-):
-  from app import models
-  from app.routes import auth as auth_routes
-
-  configure_managed_sso(monkeypatch)
-  FakeSsoExchange.calls = []
-  FakeSsoExchange.status_code = 400
-  monkeypatch.setattr(auth_routes.httpx, "AsyncClient", FakeSsoExchange)
-  start = client.get("/api/auth/sso/start", follow_redirects=False)
-  query = urllib.parse.parse_qs(
-    urllib.parse.urlparse(start.headers["location"]).query
-  )
-
-  callback = client.get(
-    "/api/auth/sso/callback",
-    params={"code": "rejected-code", "state": query["state"][0]},
-    follow_redirects=False,
-  )
-
-  assert callback.status_code == 303
-  assert callback.headers["location"] == "/shell/?mobius_sso_error=1"
-  assert db.query(models.Owner).count() == 0
 
 
 def test_setup_rejects_duplicate(client):
@@ -247,6 +106,63 @@ def test_setup_rejects_duplicate(client):
     "password": "anotherpassword",
   })
   assert r.status_code == 400
+
+
+def test_mobius_login_handoff_is_durably_one_use(client, db):
+  from app import models
+
+  _owner, handoff = _mobius_login_handoff(db)
+  client.cookies.set(
+    "mobius_login_handoff",
+    handoff,
+    path="/api/auth/mobius/login/session",
+  )
+
+  first = client.post("/api/auth/mobius/login/session")
+  assert first.status_code == 200
+  assert "access_token" in first.json()
+
+  # Restore the captured cookie: the browser deletes its copy after success,
+  # but a replay must still fail from durable server-side state.
+  client.cookies.set(
+    "mobius_login_handoff",
+    handoff,
+    path="/api/auth/mobius/login/session",
+  )
+  replay = client.post("/api/auth/mobius/login/session")
+  assert replay.status_code == 401
+  db.expire_all()
+  grant = db.query(models.MobiusLoginHandoffGrant).one()
+  assert grant.consumed_at is not None
+
+
+def test_mobius_login_handoff_honors_owner_epoch_revocation(client, db):
+  owner, handoff = _mobius_login_handoff(db)
+  owner.token_epoch += 1
+  db.commit()
+  client.cookies.set(
+    "mobius_login_handoff",
+    handoff,
+    path="/api/auth/mobius/login/session",
+  )
+
+  response = client.post("/api/auth/mobius/login/session")
+
+  assert response.status_code == 401
+
+
+def test_mobius_login_secret_cannot_cross_into_shell_install_protocol(client, db):
+  from app import auth as auth_service
+
+  _owner, handoff = _mobius_login_handoff(db)
+  jti = auth_service.decode_access_token(handoff)["jti"]
+  client.cookies.set(
+    "mobius_shell_install",
+    jti,
+    path="/api/auth/shell-install-pass/redeem",
+  )
+
+  assert client.post("/api/auth/shell-install-pass/redeem").status_code == 401
 
 
 def test_login_success(client):
@@ -603,13 +519,22 @@ def test_providers_status_rejects_non_utf8_claude_credentials(
 
 
 def test_providers_models_returns_known_models_on_missing_creds(
-  client, auth,
+  client, auth, monkeypatch,
 ):
   """Without real Anthropic / Codex credentials the underlying
   `list_models` falls back to KNOWN_MODELS — exercise that path and
   pin the response shape mini-apps depend on (id + name, plus a
   tier on Claude rows)."""
+  from app import providers
   from app.providers import DEFAULT_VISIBLE_MODELS, KNOWN_MODELS, invalidate_model_cache
+  real_fetch = providers._fetch_provider_models
+
+  async def missing_credentials_fetch(provider_id, data_dir):
+    if provider_id == "mobius":
+      raise RuntimeError("Möbius broker unavailable")
+    return await real_fetch(provider_id, data_dir)
+
+  monkeypatch.setattr(providers, "_fetch_provider_models", missing_credentials_fetch)
   invalidate_model_cache()
   r = client.get("/api/auth/providers/models", headers=auth)
   assert r.status_code == 200
@@ -617,6 +542,7 @@ def test_providers_models_returns_known_models_on_missing_creds(
   assert set(body) == {"claude", "codex", "mobius"}
   claude_ids = [m["id"] for m in body["claude"]]
   assert claude_ids == [
+    "claude-fable-5-1",
     "claude-fable-5", "claude-sonnet-5",
     "claude-opus-4-8", "claude-sonnet-4-6",
   ]
@@ -627,6 +553,7 @@ def test_providers_models_returns_known_models_on_missing_creds(
   assert set(claude_ids) == DEFAULT_VISIBLE_MODELS["claude"]
   assert set(codex_ids) == DEFAULT_VISIBLE_MODELS["codex"]
   assert [m["id"] for m in body["mobius"]] == ["spark", "inkling"]
+  assert [m["name"] for m in body["mobius"]] == ["Spark", "Evolve"]
   # Claude rows carry a tier derived from the id.
   by_id = {m["id"]: m for m in body["claude"]}
   assert by_id["claude-opus-4-8"]["name"] == "claude-opus-4-8"
@@ -642,6 +569,93 @@ def test_providers_models_returns_known_models_on_missing_creds(
   for rows in body.values():
     for row in rows:
       assert set(row).issubset({"id", "name", "tier"})
+
+
+def test_self_host_mobius_callback_uses_single_use_broker_state_without_auth_header(
+  client, auth, monkeypatch,
+):
+  from app.routes import auth as auth_routes
+
+  saved = {}
+  broker_calls = []
+  instance_id = "mob_self_testinstance"
+
+  async def broker_request(method, route, payload=None):
+    broker_calls.append((method, route, payload))
+    if route == "/identity":
+      return {
+        "linked": False,
+        "instance_id": instance_id,
+        "public_key_jwk": {"kty": "OKP", "crv": "Ed25519", "x": "x" * 43},
+        "key_thumbprint": "a" * 64,
+      }
+    if route == "/identity/oauth/start":
+      saved.update(payload)
+      return {"saved": True}
+    if route == "/identity/oauth/consume":
+      if payload["state"] != saved.get("state"):
+        return {"pending": None}
+      value = dict(saved)
+      saved.clear()
+      return {"pending": value}
+    if route == "/identity/enroll":
+      return {"linked": True}
+    raise AssertionError(route)
+
+  receipt_payload = base64.urlsafe_b64encode(json.dumps({
+    "sub": "mobius-test-account",
+    "instance_id": instance_id,
+    "iss": auth_routes._MOBIUS_IDENTITY_ISSUER,
+    "aud": auth_routes._MOBIUS_RECEIPT_AUDIENCE,
+    "exp": time.time() + 300,
+  }).encode()).decode().rstrip("=")
+
+  class ExchangeResponse:
+    def raise_for_status(self):
+      return None
+
+    def json(self):
+      return {"enrollment_receipt": f"header.{receipt_payload}.signature"}
+
+  class ExchangeClient:
+    def __init__(self, *args, **kwargs):
+      pass
+
+    async def __aenter__(self):
+      return self
+
+    async def __aexit__(self, *_args):
+      return None
+
+    async def post(self, *_args, **_kwargs):
+      return ExchangeResponse()
+
+  monkeypatch.setattr(auth_routes, "_mobius_broker_request", broker_request)
+  start = client.post("/api/auth/provider/mobius/login", headers=auth)
+  assert start.status_code == 200
+  authorization_url = urllib.parse.urlparse(start.json()["authorization_url"])
+  state = urllib.parse.parse_qs(authorization_url.query)["state"][0]
+  monkeypatch.setattr(auth_routes.httpx, "AsyncClient", ExchangeClient)
+
+  # A top-level browser redirect has no localStorage bearer header. State is
+  # the one-use callback credential and is consumed by the root broker.
+  callback = client.get(
+    "/api/auth/provider/mobius/callback",
+    params={"code": "central-code", "state": state},
+    follow_redirects=False,
+  )
+  assert callback.status_code == 303
+  assert callback.headers["location"] == "/settings?section=ai-providers"
+  replay = client.get(
+    "/api/auth/provider/mobius/callback",
+    params={"code": "central-code", "state": state},
+    follow_redirects=False,
+  )
+  assert replay.status_code == 303
+  assert replay.headers["location"] == (
+    "/settings?section=ai-providers&mobius_enroll_error=1"
+  )
+  assert sum(route == "/identity/enroll" for _, route, _ in broker_calls) == 1
 
 
 def test_providers_models_respects_hidden_model_prefs(client, auth):

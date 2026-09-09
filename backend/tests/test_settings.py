@@ -55,23 +55,40 @@ def test_boot_removes_stale_global_auto_resume_setting():
   assert json.loads(path.read_text()) == {"model": "claude-opus-4-7"}
 
 
-def test_set_provider(client, auth):
-  """POST /api/settings with provider switches the active provider."""
-  client.post("/api/settings", json={"provider": "codex"}, headers=auth)
+def test_set_provider_and_model_atomically(client, auth):
+  """The legacy owner picker persists provider with its selected model."""
+  client.post(
+    "/api/settings",
+    json={
+      "provider": "codex",
+      "agent_settings": {"model": "gpt-5.6-sol"},
+    },
+    headers=auth,
+  )
   r = client.get("/api/settings", headers=auth)
   assert r.json()["provider"] == "codex"
+  assert r.json()["agent_settings"]["model"] == "gpt-5.6-sol"
 
-  client.post("/api/settings", json={"provider": "claude"}, headers=auth)
+  client.post(
+    "/api/settings",
+    json={
+      "provider": "claude",
+      "agent_settings": {"model": "claude-sonnet-4-6"},
+    },
+    headers=auth,
+  )
   r = client.get("/api/settings", headers=auth)
   assert r.json()["provider"] == "claude"
+  assert r.json()["agent_settings"]["model"] == "claude-sonnet-4-6"
 
 
 def test_set_invalid_provider_rejected(client, auth):
   """POST /api/settings with invalid provider is rejected at the schema."""
+  before = client.get("/api/settings", headers=auth).json()["provider"]
   r = client.post("/api/settings", json={"provider": "invalid"}, headers=auth)
   assert r.status_code == 422
   r = client.get("/api/settings", headers=auth)
-  assert r.json()["provider"] == "claude"
+  assert r.json()["provider"] == before
 
 
 def test_skills_enabled_defaults_off(client, auth):
@@ -291,12 +308,25 @@ def test_background_agent_defaults_do_not_inherit_chat_model_defaults(tmp_path):
   assert background["fallback"] is None
 
 
-def test_get_settings_prefers_connected_codex_over_unconnected_default(client, auth):
+def test_get_settings_prefers_connected_codex_over_unconnected_default(
+  client, auth, monkeypatch,
+):
   """A fresh owner row defaults to Claude, but Codex-only setup should
   surface Codex as the active default instead of a disconnected Claude."""
   from pathlib import Path
   from app.config import get_settings as _gs
   from app import providers
+
+  # The test process may run inside a linked Möbius container. Model the
+  # contract under test explicitly instead of inheriting host availability.
+  monkeypatch.setattr(
+    providers.MobiusProvider, "check_auth",
+    lambda self, _data_dir: "not linked",
+  )
+  monkeypatch.setattr(
+    providers.ClaudeProvider, "check_auth",
+    lambda self, _data_dir: "not linked",
+  )
 
   codex_auth = Path(_gs().data_dir) / "cli-auth" / "codex" / "auth.json"
   codex_auth.parent.mkdir(parents=True, exist_ok=True)
@@ -313,13 +343,23 @@ def test_get_settings_prefers_connected_codex_over_unconnected_default(client, a
 
 
 def test_new_chat_prefers_connected_codex_over_unconnected_default(
-  client, auth, db,
+  client, auth, db, monkeypatch,
 ):
   """New chats should inherit the usable provider, not the historical
   Owner.provider default, after a Codex-only setup."""
   from pathlib import Path
   from app import models
+  from app import providers
   from app.config import get_settings as _gs
+
+  monkeypatch.setattr(
+    providers.MobiusProvider, "check_auth",
+    lambda self, _data_dir: "not linked",
+  )
+  monkeypatch.setattr(
+    providers.ClaudeProvider, "check_auth",
+    lambda self, _data_dir: "not linked",
+  )
 
   codex_auth = Path(_gs().data_dir) / "cli-auth" / "codex" / "auth.json"
   codex_auth.parent.mkdir(parents=True, exist_ok=True)
@@ -423,6 +463,8 @@ def test_set_background_agents_persists_to_shared_settings(client, auth):
         "effort": "medium",
         "enabled": True,
       },
+      # Every known provider is normalized into the durable row set; mobius
+      # was not named in the request so it persists disabled with defaults.
       {
         "provider": "mobius",
         "model": "inkling",
@@ -580,6 +622,7 @@ def test_settings_reports_agent_settings_disk_write_failure(client, auth, monkey
   """The UI must not show Saved when the shared settings file did not persist."""
   from app.routes import settings as settings_route
 
+  before = client.get("/api/settings", headers=auth).json()["provider"]
   monkeypatch.setattr(
     settings_route.providers,
     "update_agent_settings",
@@ -592,7 +635,7 @@ def test_settings_reports_agent_settings_disk_write_failure(client, auth, monkey
   )
   assert r.status_code == 500
   assert "Could not save agent settings" in r.json()["detail"]
-  assert client.get("/api/settings", headers=auth).json()["provider"] == "claude"
+  assert client.get("/api/settings", headers=auth).json()["provider"] == before
 
 
 def test_concurrent_agent_settings_merges_preserve_both_updates(tmp_path):
@@ -721,11 +764,11 @@ def test_settings_update_provider_validator_rejects_unknown():
 
 
 def test_model_registry_returns_known_models_on_missing_creds(client, auth):
-  """`/api/models` returns KNOWN_MODELS for every provider when no
+  """`/api/models` returns KNOWN_MODELS for both providers when neither
   upstream is reachable. Confirms the per-provider fallback works.
 
-  The TestClient has no real provider credentials or local broker, so all
-  fetchers raise; the registry serves KNOWN_MODELS for each. Every
+  The TestClient has no real Anthropic / Codex credentials so both
+  fetchers raise; the registry serves KNOWN_MODELS for both. Every
   entry is `available=True` in the fallback path because there's no
   live signal to mark anything unavailable.
   """
@@ -951,34 +994,32 @@ def test_model_prefs_clear(client, auth, db):
 
 
 def test_live_model_entries_keep_curated_aliases_plus_live_extras():
-  """The requested compatibility aliases survive a sparse live catalog."""
-  from app.providers import _live_model_entries
+  """Live order leads while omitted compatibility aliases remain available."""
+  from app.providers import KNOWN_MODELS, _live_model_entries
   merged = _live_model_entries(
     "claude", ["claude-future-model", "claude-opus-4-8"],
   )
-  assert [row["id"] for row in merged] == [
-    "claude-fable-5",
-    "claude-sonnet-5",
-    "claude-opus-4-8",
-    "claude-sonnet-4-6",
-    "claude-future-model",
+  ids = [row["id"] for row in merged]
+  assert ids[:2] == ["claude-future-model", "claude-opus-4-8"]
+  assert ids[2:] == [
+    model_id for model_id in KNOWN_MODELS["claude"]
+    if model_id != "claude-opus-4-8"
   ]
-  assert "claude-haiku-4-5-20251001" not in [m["id"] for m in merged]
 
 
 def test_live_model_entries_float_curated_defaults_in_requested_order():
   from app import providers
 
+  live = [
+    "claude-sonnet-5", "claude-future-model",
+    "claude-fable-5", "claude-opus-4-8",
+  ]
   entries = providers._live_model_entries(
-    "claude",
-    ["claude-sonnet-5", "claude-future-model", "claude-fable-5", "claude-opus-4-8"],
+    "claude", live,
   )
-  assert [entry["id"] for entry in entries] == [
-    "claude-fable-5",
-    "claude-sonnet-5",
-    "claude-opus-4-8",
-    "claude-sonnet-4-6",
-    "claude-future-model",
+  assert [entry["id"] for entry in entries] == live + [
+    model_id for model_id in providers.KNOWN_MODELS["claude"]
+    if model_id not in live
   ]
 
 
@@ -1136,3 +1177,35 @@ def test_settings_post_rejects_cross_site_request(client, auth):
     headers={**auth, "Sec-Fetch-Site": "same-origin"},
   )
   assert same_origin.status_code == 200
+
+
+def test_redeem_reset_requires_explicit_confirmation(client, auth, monkeypatch):
+  """A bare or unconfirmed POST must never spend a banked reset."""
+  from app.routes import settings as settings_route
+
+  called = False
+
+  async def _should_not_run(*args, **kwargs):
+    nonlocal called
+    called = True
+    return {"outcome": "reset"}
+
+  monkeypatch.setattr(
+    settings_route.provider_usage, "redeem_codex_reset", _should_not_run
+  )
+
+  # Empty body → confirm defaults to false → refused before any redeem.
+  r = client.post(
+    "/api/settings/provider-usage/codex/redeem-reset", json={}, headers=auth
+  )
+  assert r.status_code == 400
+  assert called is False
+
+  # Explicit confirm=false is likewise refused.
+  r2 = client.post(
+    "/api/settings/provider-usage/codex/redeem-reset",
+    json={"confirm": False},
+    headers=auth,
+  )
+  assert r2.status_code == 400
+  assert called is False

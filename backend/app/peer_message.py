@@ -1,9 +1,10 @@
-"""Bounded transcript metadata for Möbius peer-network tool calls.
+"""Bounded transcript metadata for Möbius peer-network sends.
 
 Claude and Codex expose the same platform-owned MCP tools with different wire
 names and result envelopes. This module is the single provider boundary for
 recognizing those calls and reducing their results to the small, durable facts
-the owner-facing transcript needs.
+the owner-facing transcript needs. Historic read markers remain displayable,
+but next-turn context is now the only inbound delivery path.
 """
 
 from __future__ import annotations
@@ -15,12 +16,10 @@ from app.agent_coordination import MESSAGE_KINDS as _KINDS
 
 
 CLAUDE_SEND_TOOL = "mcp__mobius_control__send_agent_message"
-CLAUDE_READ_TOOL = "mcp__mobius_control__read_agent_messages"
 CODEX_SEND_TOOL = "mobius_control:send_agent_message"
-CODEX_READ_TOOL = "mobius_control:read_agent_messages"
 
 MAX_PEER_NOTES = 8
-MAX_RESULT_MESSAGES = 200  # the read tool's maximum limit (1..200)
+MAX_RESULT_MESSAGES = 200  # bounds both current receipts and historic markers
 MAX_RESULT_CONTENT_ITEMS = 8
 MAX_RESULT_ENVELOPE_CHARS = 512 * 1024
 # The card preserves the FULL note (the platform caps a note at 4,000 chars),
@@ -34,6 +33,9 @@ MAX_NAME_CHARS = 120
 MAX_KIND_CHARS = 24
 
 DIRECTION_SEND = "send"
+# Persisted transcripts may contain read markers created before inbound
+# delivery became push-only. Keep their projection contract without exposing
+# or recognizing a new model-facing read operation.
 DIRECTION_READ = "read"
 
 STATUS_SENDING = "sending"
@@ -47,7 +49,6 @@ _DEFAULT_KIND = "note"
 # Kind taxonomy is owned by the coordination domain; import it so a new kind
 # there can never be silently downgraded here.
 _SEND_TOOLS = frozenset((CLAUDE_SEND_TOOL, CODEX_SEND_TOOL))
-_READ_TOOLS = frozenset((CLAUDE_READ_TOOL, CODEX_READ_TOOL))
 _STATUSES = frozenset((
   STATUS_SENDING, STATUS_READING, STATUS_SENT, STATUS_RECEIVED,
   STATUS_EMPTY, STATUS_FAILED,
@@ -58,8 +59,6 @@ def peer_call_direction(tool_name: Any) -> str | None:
   """Return the shared action represented by a provider's exact tool name."""
   if tool_name in _SEND_TOOLS:
     return DIRECTION_SEND
-  if tool_name in _READ_TOOLS:
-    return DIRECTION_READ
   return None
 
 
@@ -68,8 +67,6 @@ def peer_message_from_call(tool_name: Any) -> dict | None:
   direction = peer_call_direction(tool_name)
   if direction == DIRECTION_SEND:
     return {"direction": DIRECTION_SEND, "status": STATUS_SENDING}
-  if direction == DIRECTION_READ:
-    return {"direction": DIRECTION_READ, "status": STATUS_READING}
   return None
 
 
@@ -295,6 +292,8 @@ def settle_peer_message(
 ) -> dict:
   """Settle a provisional marker from a completed provider tool result."""
   direction = pending.get("direction")
+  if direction != DIRECTION_SEND:
+    return _failed(direction, output, output_exit_code)
   if _is_failure_exit(output_exit_code):
     return _failed(direction, output, output_exit_code)
 
@@ -306,63 +305,42 @@ def settle_peer_message(
     return _failed(direction, output)
   rows = _bounded_message_rows(messages)
 
-  if direction == DIRECTION_SEND:
-    if not rows:
-      return _failed(DIRECTION_SEND, output)
-    peers: list[str] = []
-    recipient_ids: set[str] = set()
-    broadcast = bool(data.get("broadcast"))
-    for index, message in enumerate(rows):
-      if message.get("broadcast"):
-        broadcast = True
-      name = _clip(message.get("recipient_name"), MAX_NAME_CHARS)
+  if not rows:
+    return _failed(DIRECTION_SEND, output)
+  peers: list[str] = []
+  recipient_ids: set[str] = set()
+  broadcast = bool(data.get("broadcast"))
+  for index, message in enumerate(rows):
+    if message.get("broadcast"):
+      broadcast = True
+    name = _clip(message.get("recipient_name"), MAX_NAME_CHARS)
+    if name and name not in peers:
+      peers.append(name)
+    rid = message.get("recipient_chat_id")
+    recipient_ids.add(rid if isinstance(rid, str) and rid else f"__row{index}")
+  receipt_names = data.get("recipient_names")
+  if isinstance(receipt_names, list):
+    for raw_name in receipt_names[:MAX_RESULT_MESSAGES]:
+      name = _clip(raw_name, MAX_NAME_CHARS)
       if name and name not in peers:
         peers.append(name)
-      rid = message.get("recipient_chat_id")
-      recipient_ids.add(rid if isinstance(rid, str) and rid else f"__row{index}")
-    receipt_names = data.get("recipient_names")
-    if isinstance(receipt_names, list):
-      for raw_name in receipt_names[:MAX_RESULT_MESSAGES]:
-        name = _clip(raw_name, MAX_NAME_CHARS)
-        if name and name not in peers:
-          peers.append(name)
-    visible_peers = peers[:MAX_PEER_NOTES]
-    # Count distinct recipient CHATS, not deduped display names: two chats can
-    # share a title/task key, and an unresolved name must not collapse to one.
-    count = _safe_count(
-      data.get("recipient_count"),
-      max(len(recipient_ids), len(visible_peers)),
-    )
-    first = rows[0]
-    return {
-      "direction": DIRECTION_SEND,
-      "status": STATUS_SENT,
-      "peers": visible_peers,
-      "count": count,
-      "kind": _kind(first.get("kind")),
-      "body": first["body"],
-      "body_truncated": bool(first.get("body_truncated")),
-      "broadcast": broadcast,
-    }
-
-  if direction != DIRECTION_READ:
-    return _failed(direction, output)
-  if not messages:
-    return {"direction": DIRECTION_READ, "status": STATUS_EMPTY}
-  notes = [{
-    "sender": _clip(message.get("sender_name"), MAX_NAME_CHARS),
-    "kind": _kind(message.get("kind")),
-    "body": message["body"],
-    "body_truncated": bool(message.get("body_truncated")),
-  } for message in rows]
-  if not notes:
-    return _failed(DIRECTION_READ, output)
-  visible_notes = notes[:MAX_PEER_NOTES]
+  visible_peers = peers[:MAX_PEER_NOTES]
+  # Count distinct recipient CHATS, not deduped display names: two chats can
+  # share a title/task key, and an unresolved name must not collapse to one.
+  count = _safe_count(
+    data.get("recipient_count"),
+    max(len(recipient_ids), len(visible_peers)),
+  )
+  first = rows[0]
   return {
-    "direction": DIRECTION_READ,
-    "status": STATUS_RECEIVED,
-    "count": len(notes),
-    "notes": visible_notes,
+    "direction": DIRECTION_SEND,
+    "status": STATUS_SENT,
+    "peers": visible_peers,
+    "count": count,
+    "kind": _kind(first.get("kind")),
+    "body": first["body"],
+    "body_truncated": bool(first.get("body_truncated")),
+    "broadcast": broadcast,
   }
 
 

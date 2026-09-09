@@ -1,18 +1,14 @@
+import { requestChatChanges } from '../../lib/chatChangesNavigation.js'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import AppCanvas from '../AppCanvas/AppCanvas.jsx'
-import { api, BASE, jsonOrThrow } from '../../api/client.js'
+import { api, jsonOrThrow } from '../../api/client.js'
 import { appQueries } from '../../hooks/queries.js'
 import useSystemEventStream from '../../hooks/useSystemEventStream.js'
 import { stageComposerHandoff } from '../ChatView/composerDraft.js'
 import RecoveryPanel from '../ErrorBoundary/RecoveryPanel.jsx'
-import {
-  buildAgentRepairPrompt,
-  errorRecoveryFingerprint,
-  readErrorRecoveryAttempt,
-  runAgentRepair,
-  writeRefreshedRecoveryAttempt,
-} from '../../lib/errorRecovery.js'
+import useAgentRepair from '../../hooks/useAgentRepair.js'
+import { buildAgentRepairPrompt, errorRecoveryFingerprint } from '../../lib/errorRecovery.js'
 import {
   isVisualContentOnly,
   standaloneAppVersion,
@@ -49,7 +45,16 @@ export default function StandaloneApp({ initialApp }) {
   const [crash, setCrash] = useState(null)
   const crashFingerprint = crash?.fingerprint || null
   const recoverySurfaceKey = `standalone-app:${initialApp.id}`
-  const repairControllerRef = useRef(null)
+  const { attempt, repairActive, repair, markRefreshed } = useAgentRepair({
+    surfaceKey: recoverySurfaceKey,
+    fingerprint: crashFingerprint,
+    prompt: crash ? buildAgentRepairPrompt({
+      surface: `standalone app ${app.name} (${app.id})`,
+      message: readableAppDiagnostic(crash.error),
+      componentStack: '',
+      pathname: window.location.pathname,
+    }) : '',
+  })
   const [installOpen, setInstallOpen] = useState(() => {
     try { return new URLSearchParams(window.location.search).get('install') === '1' }
     catch { return false }
@@ -86,50 +91,15 @@ export default function StandaloneApp({ initialApp }) {
   }, [app, initialApp.id, queryClient])
 
   const captureCrash = useCallback((_appId, error) => {
-    const message = readableAppDiagnostic(error)
-    const fingerprint = errorRecoveryFingerprint(recoverySurfaceKey, message)
-    const attempt = readErrorRecoveryAttempt({
-      surfaceKey: recoverySurfaceKey,
-      fingerprint,
-    })
     setCrash({
       error,
-      fingerprint,
-      attempt,
-      repairActive: false,
+      fingerprint: errorRecoveryFingerprint(recoverySurfaceKey, readableAppDiagnostic(error)),
     })
   }, [recoverySurfaceKey])
-
-  useEffect(() => () => {
-    const controller = repairControllerRef.current
-    repairControllerRef.current = null
-    controller?.abort()
-  }, [])
 
   useEffect(() => {
     if (crashFingerprint) crashHeadingRef.current?.focus()
   }, [crashFingerprint])
-
-  useEffect(() => {
-    if (!crashFingerprint) return undefined
-    function onPageShow(event) {
-      if (!event.persisted) return
-      const controller = repairControllerRef.current
-      repairControllerRef.current = null
-      controller?.abort()
-      const attempt = readErrorRecoveryAttempt({
-        surfaceKey: recoverySurfaceKey,
-        fingerprint: crashFingerprint,
-      })
-      setCrash(current => current ? {
-        ...current,
-        attempt,
-        repairActive: false,
-      } : current)
-    }
-    window.addEventListener('pageshow', onPageShow)
-    return () => window.removeEventListener('pageshow', onPageShow)
-  }, [crashFingerprint, recoverySurfaceKey])
 
   useSystemEventStream(useCallback((event) => {
     if (String(event.appId || '') !== String(initialApp.id)) return
@@ -229,6 +199,7 @@ export default function StandaloneApp({ initialApp }) {
       }
       if (request.type === 'moebius:open-chat') {
         stageComposerHandoff(request.chatId, request.draft)
+        if (request.view === 'changes') requestChatChanges(request.chatId)
         window.location.href = shellUrl({ chat: request.chatId })
         return
       }
@@ -252,49 +223,10 @@ export default function StandaloneApp({ initialApp }) {
   }, [captureCrash, initialApp])
 
   const refreshCrash = useCallback(() => {
-    if (!crash || repairControllerRef.current) return
-    writeRefreshedRecoveryAttempt({
-      surfaceKey: recoverySurfaceKey,
-      fingerprint: crash.fingerprint,
-    })
+    if (!crash || repairActive) return
+    markRefreshed()
     window.location.reload()
-  }, [crash, recoverySurfaceKey])
-
-  const reportCrash = useCallback(() => {
-    if (!crash || repairControllerRef.current) return
-    const controller = new AbortController()
-    repairControllerRef.current = controller
-    setCrash(current => current ? { ...current, repairActive: true } : current)
-    void runAgentRepair({
-      client: api,
-      base: BASE,
-      surfaceKey: recoverySurfaceKey,
-      fingerprint: crash.fingerprint,
-      previousAttempt: crash.attempt,
-      signal: controller.signal,
-      onAttempt: (attempt) => {
-        setCrash(current => current ? {
-          ...current,
-          attempt,
-        } : current)
-      },
-      prompt: buildAgentRepairPrompt({
-        surface: `standalone app ${app.name} (${app.id})`,
-        message: readableAppDiagnostic(crash.error),
-        componentStack: '',
-        pathname: window.location.pathname,
-      }),
-    }).then(result => {
-      window.location.href = result.path
-    }).catch(error => {
-      if (error?.name === 'AbortError') return
-    }).finally(() => {
-      if (repairControllerRef.current === controller) {
-        repairControllerRef.current = null
-        setCrash(current => current ? { ...current, repairActive: false } : current)
-      }
-    })
-  }, [app.id, app.name, crash, recoverySurfaceKey])
+  }, [crash, markRefreshed, repairActive])
 
   if (removed) {
     return (
@@ -349,11 +281,11 @@ export default function StandaloneApp({ initialApp }) {
             title={`${app.name} stopped unexpectedly`}
             subject="app"
             diagnostic={readableAppDiagnostic(crash.error)}
-            attempt={crash.attempt}
-            repairActive={crash.repairActive}
+            attempt={attempt}
+            repairActive={repairActive}
             refreshLabel="Refresh app"
             onRefresh={refreshCrash}
-            onAgentRepair={reportCrash}
+            onAgentRepair={repair}
             secondaryAction={{
               href: shellUrl({ app: app.id }),
               label: 'Open in Möbius',

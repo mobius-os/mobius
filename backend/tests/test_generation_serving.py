@@ -237,8 +237,8 @@ async def test_static_delivery_ignores_saturated_asyncio_executor(
   (app_static / "index.html").write_text("app-static", encoding="utf-8")
   monkeypatch.setattr(
     main,
-    "_app_source_dir_for_static_asset",
-    lambda **_kwargs: str(app_source),
+    "_open_app_runtime_for_static_asset",
+    lambda **_kwargs: (str(app_source), None),
   )
   _reset_memo()
 

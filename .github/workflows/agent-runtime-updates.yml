@@ -1,0 +1,81 @@
+# Propose one daily, review-gated update of the container's paired agent runtimes.
+name: Propose agent runtime updates
+
+on:
+  schedule:
+    - cron: '23 5 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: agent-runtime-updates
+  cancel-in-progress: false
+
+jobs:
+  propose:
+    if: github.repository == 'mobius-os/mobius'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: main
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Test the updater
+        run: python -m unittest discover -s scripts -p 'test_update_agent_runtimes.py'
+      - name: Propose stable, matched runtime pins
+        run: python scripts/update-agent-runtimes.py --write
+      - name: Refresh only the affected Python lock
+        # Retain existing transitive pins unless the updated SDK requires a
+        # change. Never turn a runtime check into a blanket dependency upgrade.
+        working-directory: backend
+        run: |
+          if ! git diff --quiet -- requirements.txt; then
+            pip install 'pip-tools==7.5.3'
+            pip-compile --generate-hashes --output-file=requirements.lock --strip-extras requirements.txt
+          fi
+      - name: Open or refresh the single review proposal
+        id: pr
+        uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8
+        with:
+          branch: automation/agent-runtimes
+          base: main
+          title: 'Update bundled agent runtimes'
+          commit-message: 'Update bundled agent runtimes'
+          # A changed proposal returns to draft. Human review and the normal
+          # protected merge queue remain mandatory; this workflow never merges.
+          draft: always-true
+          add-paths: |
+            Dockerfile
+            backend/requirements.txt
+            backend/requirements.lock
+          body: |
+            Daily stable Claude/Codex runtime update proposal.
+
+            - Claude's SDK supplies its bundled CLI; there is no second install.
+            - Codex's npm CLI and Python SDK follow the same release. Its SDK
+              CLI package shares the image's executable rather than duplicating it.
+            - The full Tests workflow is explicitly requested on this branch.
+              Review its results and the diff before marking ready for review.
+            - Merge only through ordinary review/protected merge-queue rules.
+              This builds a new image; it does not redeploy any owner's instance.
+            - No persistent owner files or local installations are deleted.
+
+            This branch is automation-owned. Requested fixes belong in the updater
+            or the default branch; the next daily check refreshes this proposal.
+      - name: Run the existing full checks on the changed proposal
+        # GITHUB_TOKEN-created PRs do not trigger pull_request workflows.
+        # Dispatch is the documented exception; no extra PAT or duplicate suite.
+        if: steps.pr.outputs.pull-request-head-sha && steps.pr.outputs.pull-request-operation != 'none'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run test.yml --ref automation/agent-runtimes

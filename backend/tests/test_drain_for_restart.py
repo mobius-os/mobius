@@ -209,7 +209,7 @@ def test_drain_pause_survives_claude_interrupt_terminal(monkeypatch):
     handle.stop_calls += 1
     # This is the terminal result Claude emits after the drain has already
     # published the authoritative, resumable restart pause.
-    chat_mod._limit_exit(sink, {}, "Execution interrupted.")
+    chat_mod._park_exit(sink, {}, "Execution interrupted.")
     registry.unregister(cid, handle.kind)
     return True
 
@@ -1057,3 +1057,104 @@ def test_wedged_sweep_stands_down_while_draining():
     chat_mod.draining = False
   assert swept == []
   assert _chat("sweep-drain")["running_status"] == "running"
+
+
+@pytest.mark.parametrize("recovery", ["manual", "automatic"])
+def test_restart_continues_a_then_normal_completion_delivers_queued_b(
+  client, auth, monkeypatch, recovery,
+):
+  """The real drain, recovery admission and terminal queue handoff agree."""
+  from app.chat_queue import TerminalDisposition
+  from app.chat_writer import PrepareAutoResume
+
+  cid = f"recovery-order-{recovery}"
+  interrupted = f"rt-{cid}"
+  queued = {"role": "user", "content": "Answer B", "cid": "owner-b", "ts": 2}
+  _live_turn(cid, pending=[queued], partial="Answer A is partly written")
+  with SessionLocal() as db:
+    db.get(models.Chat, cid).agent_settings_json = {"model": "claude-opus-4-8"}
+    db.commit()
+  original_generation = chat_mod.current_run_generation(cid)
+  assert _run_drain() == [{"chat_id": cid, "run_token": interrupted}]
+  assert _chat(cid)["pending"] == [queued]
+
+  # A late terminal from the physically interrupted attempt must not admit B.
+  with SessionLocal() as db:
+    outcome = asyncio.run(chat_mod._drain_and_release(
+      db, cid, original_generation, "must-not-start-b",
+      ending_run_token=interrupted, ending_status="failed",
+    ))
+  assert outcome[-1] is TerminalDisposition.STALE_NO_ACTION
+  assert _chat(cid)["pending"] == [queued]
+
+  # Simulate process-local boot state; the durable park/queue are untouched.
+  chat_mod.draining = False
+  chat_mod._restart_draining_chats.discard(cid)
+  chat_mod.forget_chat(cid)
+  registry.reopen_admission()
+  from app.broadcast import remove_broadcast
+  remove_broadcast(cid)
+  started = []
+
+  async def capture(messages, **kwargs):
+    started.append({"messages": messages, **kwargs})
+
+  monkeypatch.setattr("app.routes.chats_stream.run_chat", capture)
+  monkeypatch.setattr(chat_mod, "run_chat", capture)
+
+  if recovery == "manual":
+    response = client.post(f"/api/chats/{cid}/messages", headers=auth, json={
+      "content": "continue", "continuation": "manual", "cid": "resume-a",
+      "resume_run_id": interrupted,
+    })
+    assert response.status_code == 202, response.text
+  else:
+    get_writer().submit(PrepareAutoResume(
+      chat_id=cid, run_token=interrupted,
+    )).result(timeout=5)
+    monkeypatch.setattr("app.restart_ledger.authorized_restart_nonce", lambda: "restart-nonce-drain")
+
+    async def resume():
+      result = await chat_mod._auto_resume_chat(cid, park_token=interrupted)
+      await asyncio.sleep(0)
+      return result
+
+    assert asyncio.run(resume()) is True
+
+  assert len(started) == 1
+  assert started[0]["messages"][-1].content == "continue"
+  assert all(row.content != "Answer B" for row in started[0]["messages"])
+  assert _chat(cid)["pending"] == [queued]
+  resumed_token = started[0]["run_token"]
+  with SessionLocal() as db:
+    assert db.get(models.ChatRun, resumed_token).root_run_id == interrupted
+
+  bc = create_broadcast(cid)
+  sink = chat_mod._ChatEventSink(
+    bc, cid, run_token=resumed_token, recall_binding=EMPTY_RECALL_BINDING,
+  )
+  sink.publish({"type": "text", "content": "Answer A finished"})
+
+  async def finish_a():
+    with SessionLocal() as db:
+      result = await chat_mod._complete_turn(
+        bc=bc, sink=sink, db=db, chat_id=cid,
+        run_gen=chat_mod.current_run_generation(cid), provider_id="claude",
+        cost_usd=0, close_browser=False,
+      )
+    await asyncio.sleep(0)
+    return result
+
+  assert asyncio.run(finish_a()) is TerminalDisposition.CONTINUATION_PROMOTED
+  assert len(started) == 2
+  assert started[-1]["messages"][-1].content == "Answer B"
+  assert _chat(cid)["pending"] == []
+  with SessionLocal() as db:
+    assert db.get(models.ChatRun, resumed_token).status == "completed"
+    assert db.get(models.ChatRun, started[-1]["run_token"]).root_run_id == started[-1]["run_token"]
+  rows = _chat(cid)["messages"]
+  a_index = next(i for i, row in enumerate(rows) if any(
+    block.get("content") == "Answer A finished" for block in row.get("blocks", [])
+  ))
+  b_index = next(i for i, row in enumerate(rows) if row.get("cid") == "owner-b")
+  assert a_index < b_index

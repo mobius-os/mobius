@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import re
 import json
-import os
-import stat
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -24,7 +22,6 @@ from app.delegations import (
   create_or_attach_delegation,
   derived_status,
   ensure_delegation_started,
-  MAX_DELEGATION_DEPTH,
   normalize_cwd,
   parent_root_run_id,
   publish_parent_waiting_changed,
@@ -37,37 +34,6 @@ from app.resource_access import get_active_chat_or_404
 
 router = APIRouter(prefix="/api/delegations", tags=["delegations"])
 _TASK_KEY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
-_CAPABILITY_FILES = frozenset({"config.json", "status.json"})
-_CAPABILITY_FILE_MAX = 256 * 1024
-
-
-def _read_delegation_storage_json(
-  data_dir: str, app_id: int, name: str,
-) -> dict:
-  """Read one small app-owned JSON file without following storage symlinks."""
-  if name not in _CAPABILITY_FILES:
-    return {}
-  base = Path(data_dir) / "apps" / str(app_id)
-  directory_fd = file_fd = None
-  try:
-    directory_fd = os.open(
-      base, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
-    )
-    file_fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory_fd)
-    info = os.fstat(file_fd)
-    if not stat.S_ISREG(info.st_mode) or info.st_size > _CAPABILITY_FILE_MAX:
-      return {}
-    with os.fdopen(file_fd, "r", encoding="utf-8") as handle:
-      file_fd = None
-      value = json.load(handle)
-  except (OSError, UnicodeError, ValueError):
-    return {}
-  finally:
-    if file_fd is not None:
-      os.close(file_fd)
-    if directory_fd is not None:
-      os.close(directory_fd)
-  return value if isinstance(value, dict) else {}
 
 
 class DelegationSubmit(BaseModel):
@@ -105,7 +71,7 @@ class DelegationSubmit(BaseModel):
   @field_validator("provider")
   @classmethod
   def _valid_provider(cls, value: str) -> str:
-    if value not in ("claude", "codex"):
+    if value not in ("claude", "codex", "mobius"):
       raise ValueError("provider must be claude or codex")
     return value
 
@@ -132,15 +98,11 @@ def _require_submitter(
       status_code=403,
       detail="Delegated work must stay under its parent child chat.",
     )
+
   if principal.chat_id != body.parent_chat_id:
     raise HTTPException(
       status_code=403,
       detail="Delegation token may only create direct children.",
-    )
-  if principal.app_id != body.app_id:
-    raise HTTPException(
-      status_code=403,
-      detail="Delegated work must stay with its owning app.",
     )
   parent = db.query(models.Delegation).filter(
     models.Delegation.id == principal.delegation_id,
@@ -149,14 +111,6 @@ def _require_submitter(
   ).first()
   if parent is None:
     raise HTTPException(status_code=403, detail="Delegated work must stay under its parent child chat.")
-  if parent.provider == "codex":
-    raise HTTPException(
-      status_code=409,
-      detail=(
-        "Nested Codex delegation requires a narrow local bridge and is not "
-        "available yet."
-      ),
-    )
   if parent.scope == "read" and body.scope != "read":
     raise HTTPException(
       status_code=403,
@@ -172,10 +126,7 @@ def _row_for_principal(
     models.Delegation.id == delegation_id,
   )
   if principal.delegation_id is not None:
-    query = query.filter(
-      models.Delegation.parent_chat_id == principal.chat_id,
-      models.Delegation.app_id == principal.app_id,
-    )
+    query = query.filter(models.Delegation.parent_chat_id == principal.chat_id)
   elif principal.app_id is not None:
     query = query.filter(models.Delegation.app_id == principal.app_id)
   row = query.first()
@@ -219,6 +170,17 @@ async def submit_or_attach(
     raise HTTPException(
       status_code=422,
       detail="The selected model does not belong to that provider.",
+    )
+  selection = providers.snapshot_chat_agent_settings(
+    get_settings().data_dir,
+    body.provider,
+    model=body.model or providers.DEFAULT_MODELS.get(body.provider),
+    effort=body.effort or providers.DEFAULT_EFFORT,
+    fallback_model=providers.DEFAULT_MODELS.get(body.provider),
+  )
+  if selection is None:
+    raise HTTPException(
+      status_code=422, detail="Delegation requires an explicit model.",
     )
   try:
     requested_cwd = normalize_cwd(body.cwd) if body.cwd is not None else None
@@ -270,8 +232,8 @@ async def submit_or_attach(
       task_key=body.task_key,
       prompt=body.prompt,
       provider=body.provider,
-      model=body.model,
-      effort=body.effort,
+      model=selection["model"],
+      effort=selection.get("effort"),
       scope=body.scope,
       cwd=cwd,
       notify_parent_on_complete=body.notify_parent_on_complete,
@@ -299,17 +261,7 @@ async def submit_or_attach(
     from app.goal_plans import publish_plan_for_delegation
     publish_plan_for_delegation(db, row)
     publish_parent_waiting_changed(row.parent_chat_id)
-  # A blocking observer that lost to an already-durable parent wake must not
-  # receive the same result inline. The response remains a successful attach
-  # and names the winning observation channel explicitly.
-  payload = serialize_delegation(
-    db,
-    row,
-    include_result=(
-      not body.notify_parent_on_complete and observation_mode == "inline"
-    ),
-  )
-  payload["observation_mode"] = observation_mode
+  payload = serialize_delegation(db, row)
   payload["attached"] = attached
   return payload
 
@@ -320,11 +272,7 @@ async def delegation_capabilities(
   db: Session = Depends(get_db),
 ):
   """Read-only Subagents configuration for a confined delegated owner."""
-  if (
-    principal.delegation_id is None
-    or principal.chat_id is None
-    or principal.app_id is None
-  ):
+  if principal.delegation_id is None or principal.chat_id is None:
     raise HTTPException(status_code=403, detail="Delegated child token required.")
   delegation = db.query(models.Delegation).filter(
     models.Delegation.id == principal.delegation_id,
@@ -338,6 +286,14 @@ async def delegation_capabilities(
   ).first()
   if app is None:
     raise HTTPException(status_code=403, detail="Delegation owner app is unavailable.")
+
+  def read_json(name: str) -> dict:
+    path = Path(get_settings().data_dir) / "apps" / str(app.id) / name
+    try:
+      value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+      return {}
+    return value if isinstance(value, dict) else {}
 
   connections = {}
   for provider_id, provider in providers.PROVIDERS.items():
@@ -357,12 +313,8 @@ async def delegation_capabilities(
   }
   return {
     "app_id": app.id,
-    "config": _read_delegation_storage_json(
-      get_settings().data_dir, app.id, "config.json",
-    ),
-    "runtime": _read_delegation_storage_json(
-      get_settings().data_dir, app.id, "status.json",
-    ),
+    "config": read_json("config.json"),
+    "runtime": read_json("status.json"),
     "connections": connections,
     "models": models_by_provider,
   }
@@ -379,10 +331,7 @@ def list_delegations(
 ):
   query = db.query(models.Delegation)
   if principal.delegation_id is not None:
-    query = query.filter(
-      models.Delegation.parent_chat_id == principal.chat_id,
-      models.Delegation.app_id == principal.app_id,
-    )
+    query = query.filter(models.Delegation.parent_chat_id == principal.chat_id)
   elif principal.app_id is not None:
     query = query.filter(models.Delegation.app_id == principal.app_id)
   elif app_id is not None:
@@ -464,6 +413,7 @@ async def cancel_delegation(
   payload = serialize_delegation(db, row)
   from app.goal_plans import publish_plan_for_delegation
   publish_plan_for_delegation(db, row)
+  publish_parent_waiting_changed(row.parent_chat_id)
   return payload
 
 
@@ -481,4 +431,6 @@ async def cancel_active_for_parent(db: Session, parent_chat_id: str) -> list[str
     if await cancel_delegation_execution(row.id):
       cancelled.append(row.id)
   db.rollback()
+  if cancelled:
+    publish_parent_waiting_changed(parent_chat_id)
   return cancelled

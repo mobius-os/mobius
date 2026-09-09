@@ -17,7 +17,7 @@ export function normalizeArtifacts(data) {
   ))
 }
 
-export function queueArtifactBuildsAfterSourceSave(data, queueBuild) {
+export function queueArtifactBuildsAfterSourceChange(data, queueBuild) {
   const ready = normalizeArtifacts(data).filter(
     artifact => artifact.status !== 'building' && !artifact.source_missing,
   )
@@ -36,6 +36,7 @@ export function isBuilding(artifact) {
 }
 
 const BUILTIN_ARTIFACT_TYPES = [
+  { id: 'app', name: 'App', extensions: ['jsx', 'tsx'], preview: 'html' },
   {
     id: 'website', name: 'Website', extensions: ['html', 'htm'], preview: 'html',
   },
@@ -66,13 +67,13 @@ export function normalizeArtifactTypes(value) {
   }))
 }
 
-export function artifactTypeForFile(path, declaredTypes) {
+export function artifactTypeForFile(path, declaredTypes, excludedBuilders = []) {
   const extension = String(path ?? '').split('.').pop()?.toLowerCase() || ''
   const types = [
     ...normalizeArtifactTypes(declaredTypes),
     ...BUILTIN_ARTIFACT_TYPES,
   ]
-  return types.find(type => type.extensions.includes(extension)) || null
+  return types.find(type => !excludedBuilders.includes(type.id) && type.extensions.includes(extension)) || null
 }
 
 export function artifactTypeName(artifact) {
@@ -149,15 +150,14 @@ export function artifactEntryPath(artifact) {
   return 'index.html'
 }
 
-// Whether the preview surface should hot-swap (reload the iframe / re-render the
-// pdf) given the status BEFORE and AFTER a refresh. A finished build (building
-// -> ok) is the swap trigger; a fresh `ok` first seen (no prior status, e.g. the
-// tab opened after the build finished) also loads once. Same status, or a
-// transition into building/error, never swaps.
-export function shouldHotSwapPreview(prevStatus, nextStatus) {
-  if (nextStatus !== 'ok') return false
-  if (prevStatus === 'ok') return false
-  return true
+// Identity of the output currently safe to display. Build-status events can
+// coalesce when a fast build moves ok -> building -> ok between two query
+// reads. The durable completion timestamp changes for every successful build,
+// so keying the preview to it reloads the actual output even when the transient
+// `building` state was never observed.
+export function artifactPreviewRevision(artifact) {
+  if (artifactStatus(artifact) !== 'ok' || !artifact?.has_output) return ''
+  return String(artifact.updated_at || 'built-output')
 }
 
 // A build-status system event addressed at THIS project. The backend event

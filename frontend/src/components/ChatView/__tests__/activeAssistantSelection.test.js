@@ -73,6 +73,50 @@ test('a durable pending question outranks a richer stale stream snapshot', () =>
   assert.equal(result.showActiveAssistantSurface, true)
 })
 
+test('a continuation marker releases the mount bridge so the resumed turn owns the tail', () => {
+  // Reproduces the "Resumed automatically" ordering bug: a chat mounted while a
+  // turn was paused at a session limit captures the pre-pause assistant partial
+  // as the bridge. Auto-resume then appends a continuation marker (role=user,
+  // kind=continuation) and a fresh resumed assistant. Because the marker is a
+  // real turn boundary, the bridge must release and the resumed row must own the
+  // active surface — otherwise the pre-pause block is mirrored at the bottom,
+  // below the resume card and all post-resume output.
+  const prePause = {
+    role: 'assistant',
+    ts: 2,
+    content: 'reverting first',
+    blocks: [
+      { type: 'text', content: 'reverting first' },
+      { type: 'error', message: "You've hit your session limit", resumable: true },
+    ],
+  }
+  const resumed = {
+    role: 'assistant',
+    ts: 4,
+    content: 'picking up the revert',
+    blocks: [{ type: 'text', content: 'picking up the revert' }],
+  }
+  const messages = [
+    { role: 'user', content: 'revert first', ts: 1 },
+    prePause,
+    { role: 'user', content: 'continue', kind: 'continuation', ts: 3 },
+    resumed,
+  ]
+
+  const result = deriveActiveAssistantSelection({
+    turnActive: true,
+    messages,
+    streamItems: [],
+    // The mount bridge still points at the pre-pause partial by its ts.
+    findBridgeIndex: msgs => msgs.findIndex(m => m.role === 'assistant' && m.ts === 2),
+  })
+
+  assert.equal(result.bridgeMsgIdx, 1, 'the bridge is still found at the pre-pause partial')
+  assert.equal(result.activeMirrorMsg, resumed,
+    'the resumed assistant, not the pre-pause block, owns the active surface')
+  assert.equal(result.activeMirrorMsgIdx, 3)
+})
+
 test('a cached assistant identity followed by a newer turn is not current', () => {
   const stale = {
     id: 'assistant-before-restart',
@@ -143,7 +187,6 @@ test('the server owner rejects an old cached question across a hidden restart ru
   assert.equal(result.useDbActivePayload, true)
 })
 
-
 test('same-turn hidden answer does not release the identified assistant row', () => {
   const active = {
     id: 'assistant-live',
@@ -172,7 +215,6 @@ test('same-turn hidden answer does not release the identified assistant row', ()
   assert.equal(result.activeMirrorMsg, active)
   assert.equal(result.activeMirrorMsgIdx, 1)
 })
-
 
 test('a source-rich promoted answer is not painted again from its retired live array', () => {
   const messages = [

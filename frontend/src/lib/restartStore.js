@@ -8,12 +8,14 @@
 //      reachability alone would show nothing);
 //   2. a transport gap while the process is down — here reachability's own
 //      CHECKING/OFFLINE state takes over;
-//   3. the system stream reconnects to the new process.
+//   3. the client reconnects; the new process may publish `server_ready`, but it
+//      does so before any client has resubscribed, so that event is almost always
+//      dropped and can NEVER be the sole clear.
 //
 // Clearing is therefore belt-and-suspenders: the indicator clears on the first
-// successful system-stream reconnect (Shell.reconcileSystemStateOnOpen) and —
-// so a missed clear can never strand the dot — an UNCONDITIONAL max-duration
-// auto-expire. The shell renders ONE dot from
+// successful system-stream reconnect (Shell.reconcileSystemStateOnOpen) OR
+// `server_ready`, and — so a missed clear can never strand the dot — an
+// UNCONDITIONAL max-duration auto-expire. The shell renders ONE dot from
 // (reachabilityLabel || restartPending), so the drain shows this signal and the
 // following process-down window shows reachability; there is never a second dot,
 // and if a boot outlasts the auto-expire the dot stays lit via reachability

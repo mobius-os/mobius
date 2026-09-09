@@ -1,4 +1,6 @@
 import { memo } from 'react'
+import { usePositionedPeerNotes } from './peerTimelineContext.js'
+import { insertPositionedActivity } from './activityPosition.js'
 import { ProgressiveMarkdown, StandardMarkdown } from './markdown/BlockRenderer.jsx'
 import ActivityStretch from './ActivityStretch.jsx'
 import { groupActivityRuns, coalesceThinkingEntries } from './groupBlocks.js'
@@ -15,8 +17,7 @@ import {
   suppressedQuestionToolIndices,
 } from './streamReducers.js'
 import { stripAugmentation } from './msgText.js'
-import ErrorCard from './ErrorCard.jsx'
-import { isResourcePause } from './resourcePause.js'
+import ErrorCard, { errorCardViewModel } from './ErrorCard.jsx'
 import { ownsRecoveryAction } from './recoveryCard.js'
 import ContextCompactionMarker from './ContextCompactionMarker.jsx'
 import { assistantBlockKey } from './streamPromotion.js'
@@ -24,6 +25,7 @@ import { copyAssistantSelection } from './markdownClipboard.js'
 import { goalMessageObjectiveFromText } from './goalProgress.js'
 import GoalHistoryCard from './GoalHistoryCard.jsx'
 import WaitHistoryCard from './WaitHistoryCard.jsx'
+import HelperResultCard from './HelperResultCard.jsx'
 
 
 // Answerability is purely a function of the block + its position + live hint.
@@ -52,7 +54,7 @@ function AssistantCopySurface({ msg, markdownByIndex, children }) {
   if (msg.role !== 'assistant') return children
 
   function markdownForBlock(element) {
-    const index = Number(element.dataset.assistantMarkdownBlock)
+    const index = element.dataset.assistantMarkdownBlock
     // A supplied map is authoritative, including a missing entry. Streaming
     // and cold-rendered blocks intentionally omit source until the whole block
     // is visible; falling back to msg.content here would copy the hidden tail.
@@ -102,12 +104,14 @@ function MsgContentInner({
   chatId,
   messageKey,
   onQuestionAnswer,
-  onQuestionAnswerPrepare,
+  onQuestionSubmitIntent,
+  onQuestionSubmitCancel,
   // Resume a turn paused by a drain-gated restart (or interrupted by a crash):
-  // a stable send callback that re-sends a short "continue". Only the tail
+  // a stable lifecycle action, never an owner message. Only the tail
   // interrupt note (a resumable error block on the last message) shows the
   // button. Compared in the memo below, so pass a stable reference.
   onResume,
+  resumeState,
   onInternalNav,
   autoResumeEnabled,
   autoResumeAvailable,
@@ -142,7 +146,10 @@ function MsgContentInner({
   // and the SSE catch-up re-emits the same question event into both
   // the persisted message and streamItems.
   suppressedQuestionKeys,
+  activityMessageId,
+  activitySourceBlocks,
 }) {
+  const positionedNotes = usePositionedPeerNotes(activityMessageId || msg.id)
   // Build a stable per-render answerable predicate that closes over the
   // scalar props (no function prop needed from ChatView).
   const isQuestionAnswerable = (block) =>
@@ -162,12 +169,12 @@ function MsgContentInner({
     return <ContinuationCard msg={msg} />
   }
 
-  if (msg.blocks && msg.blocks.length > 0) {
+  if (msg.blocks?.length || positionedNotes?.length) {
     // Repair the one historical malformed sequence produced when a provider's
     // authoritative completion lost identity across request_user_input. This
     // is render-time as well as reducer-time so already-saved chats self-heal
     // without rewriting partner transcripts.
-    const displayBlocks = repairInterleavedQuestionText(msg.blocks)
+    const displayBlocks = repairInterleavedQuestionText(msg.blocks?.length ? msg.blocks : msg.content ? [{ type: 'text', content: msg.content }] : [])
     // The persisted transcript keeps the raw AskUserQuestion tool block
     // AND the question card (backend events.process_event appends both);
     // the live stream absorbs the tool twin into the card. Skip the twin
@@ -198,7 +205,7 @@ function MsgContentInner({
     // renders. Fragmented thinking exists only in legacy saved chats, which are
     // never a live surface, so coalescing after renumbering cannot reintroduce
     // a cross-surface position mismatch. See groupBlocks.coalesceThinkingEntries.
-    const finalEntries = coalesceThinkingEntries(entries)
+    const finalEntries = coalesceThinkingEntries(insertPositionedActivity(entries, positionedNotes, activitySourceBlocks || displayBlocks, chatId))
     // The rendered tail's entry idx — the anchor for "is this block the tail"
     // checks below. msg.blocks.length would be wrong here: a skipped twin means
     // the last VISIBLE block's idx is smaller than the raw block count.
@@ -219,7 +226,7 @@ function MsgContentInner({
         const fullyRendered = !(
           Number.isFinite(coldFraction) && coldFraction > 0 && coldFraction < 1
         )
-        return fullyRendered ? [[idx, item.content]] : []
+        return fullyRendered ? [[String(idx), item.content]] : []
       }),
     )
 
@@ -244,6 +251,18 @@ function MsgContentInner({
                 end: block.end,
               }}
               summaryToolCount={block.tool_count}
+              onInternalNav={onInternalNav}
+            />
+          </div>
+        )
+      }
+      if (block.type === 'helper_result') {
+        return (
+          <div key={block.activityId || block.id || `helper-result-${i}`} className="chat__tools">
+            <HelperResultCard
+              event={block}
+              chatId={chatId}
+              onInternalNav={onInternalNav}
             />
           </div>
         )
@@ -286,7 +305,8 @@ function MsgContentInner({
       // tool + thinking blocks never reach renderBlock: groupActivityRuns folds
       // every contiguous run of them (including a lone one) into a group node,
       // rendered by ActivityStretch below. renderBlock only sees the block types
-      // that BREAK a stretch — text/compaction (above), question, and error.
+      // that BREAK a stretch — text/compaction/helper result (above), question,
+      // and error.
       if (block.type === 'question') {
         // Suppress if this exact question is currently live in
         // streamItems — the streaming <li> is already rendering it.
@@ -328,8 +348,10 @@ function MsgContentInner({
               questions={block.questions || []}
               questionId={block.question_id}
               answeredMap={answers}
+              platformAction={block.platform_action}
               onAnswer={answerable ? onQuestionAnswer : undefined}
-              onAnswerPrepare={answerable ? onQuestionAnswerPrepare : undefined}
+              onPrepareAnswer={answerable ? onQuestionSubmitIntent : undefined}
+              onCancelAnswer={answerable ? onQuestionSubmitCancel : undefined}
               disabled={!answerable && !answers}
               pendingCardRef={answerable ? pendingQuestionRef : undefined}
             />
@@ -374,16 +396,19 @@ function MsgContentInner({
           canResume: !!onResume,
           questionOwnsTurn,
         })
-        const resourceWait = isResourcePause(block)
-        const parked = !!block.pause?.resets_at && !resourceWait
+        const { parked, resourceWait } = errorCardViewModel(block)
         const automaticContinuation = recoveryOwner && parked && !!autoResumeEnabled
-        const manualResumeAvailable = recoveryOwner && !resourceWait
+        // A resource wait owns its automatic retry. Offering Resume while the
+        // same measured pressure remains only launches a turn admission will
+        // re-park, so it is a false action rather than useful recovery.
+        const manualResumeAvailable = recoveryOwner && !resourceWait && (
+          !parked || (!!limitResetElapsed && !autoResumeEnabled)
+        )
         return (
           <ErrorCard
             key={assistantBlockKey(block, i)}
             block={block}
             autoResume={automaticContinuation}
-            restartAutoContinue={recoveryOwner && block.pause?.kind === 'restart'}
             resetElapsed={!!limitResetElapsed}
             cardRef={recoveryOwner ? resumeCardRef : undefined}
           >
@@ -413,20 +438,23 @@ function MsgContentInner({
             {manualResumeAvailable && (
               <button
                 type="button"
-                className="chat__resume"
-                onClick={() => onResume('continue', {
-                  continuation: 'manual',
-                  pin: false,
-                })}
-                disabled={submissionBlocked}
+                className="chat__resume chat__recovery-action"
+                onClick={onResume}
+                disabled={submissionBlocked || resumeState?.pending}
+                aria-busy={resumeState?.pending || undefined}
                 title={submissionBlocked
                   ? 'Wait for the provider switch to finish.'
                   : undefined}
               >
-                {parked
+                {resumeState?.pending ? 'Resuming…' : parked
                   ? limitResetElapsed ? 'Continue now' : 'Try now'
                   : 'Resume'}
               </button>
+            )}
+            {recoveryOwner && resumeState?.error && (
+              <span className="chat__recovery-action-error" role="alert">
+                {resumeState.error}
+              </span>
             )}
           </ErrorCard>
         )
@@ -537,11 +565,15 @@ function MsgContentInner({
 export default memo(MsgContentInner, (prev, next) => {
   return (
     prev.msg === next.msg
+    && prev.activityMessageId === next.activityMessageId
+    && prev.activitySourceBlocks === next.activitySourceBlocks
     && prev.chatId === next.chatId
     && prev.messageKey === next.messageKey
     && prev.onQuestionAnswer === next.onQuestionAnswer
-    && prev.onQuestionAnswerPrepare === next.onQuestionAnswerPrepare
+    && prev.onQuestionSubmitIntent === next.onQuestionSubmitIntent
+    && prev.onQuestionSubmitCancel === next.onQuestionSubmitCancel
     && prev.onResume === next.onResume
+    && prev.resumeState === next.resumeState
     && prev.onInternalNav === next.onInternalNav
     && prev.autoResumeEnabled === next.autoResumeEnabled
     && prev.autoResumeAvailable === next.autoResumeAvailable

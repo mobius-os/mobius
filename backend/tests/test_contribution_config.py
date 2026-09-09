@@ -1,13 +1,12 @@
 """Runtime resolution of contribution relay routing config.
 
 Locks in the override-then-environment layering for both the target repository
-and the anonymous-owner test-repository allowlist, the safe rejection of a
-bad override edit instead of fallback to the environment, and the end-to-end guard the route
+and the anonymous-owner test-repository allowlist, the safe degradation of a
+bad override edit to the environment, and the end-to-end guard the route
 enforces — so retargeting the relay never needs a container recreate.
 """
 
 import json
-from pathlib import Path
 
 import pytest
 
@@ -16,20 +15,6 @@ from app.routes.contribution_relay import (
   ContributionSubmitError,
   _configured_target_repo,
 )
-
-
-def test_relay_environment_is_documented_and_passed_into_the_app_container():
-  root = Path(__file__).resolve().parents[2]
-  env_example = (root / ".env.example").read_text(encoding="utf-8")
-  compose = (root / "docker-compose.yml").read_text(encoding="utf-8")
-
-  for name in (
-    "MOBIUS_CONTRIBUTION_RELAY_URL",
-    "MOBIUS_CONTRIBUTION_TARGET_REPO",
-    "MOBIUS_CONTRIBUTION_RELAY_TEST_REPOSITORIES",
-  ):
-    assert name in env_example
-    assert f"- {name}=${{{name}:-" in compose
 
 
 def _point_override(monkeypatch, tmp_path, contents=None, *, raw=None):
@@ -60,15 +45,13 @@ def test_target_repo_override_wins(monkeypatch, tmp_path):
   assert contribution_config.target_repo() == "owner/from-file"
 
 
-def test_target_repo_blank_override_deliberately_blocks_env(monkeypatch, tmp_path):
+def test_target_repo_blank_override_falls_back_to_env(monkeypatch, tmp_path):
   _point_override(monkeypatch, tmp_path, {"target_repo": "   "})
   monkeypatch.setenv(contribution_config.TARGET_REPO_ENV, "owner/env")
-  assert contribution_config.target_repo() == ""
+  assert contribution_config.target_repo() == "owner/env"
 
 
-def test_target_repo_bad_override_stops_instead_of_changing_targets(
-  monkeypatch, tmp_path,
-):
+def test_target_repo_bad_override_falls_back_to_env(monkeypatch, tmp_path):
   monkeypatch.setenv(contribution_config.TARGET_REPO_ENV, "owner/env")
   for kwargs in (
     {"raw": b"{not json"},          # malformed JSON
@@ -78,20 +61,7 @@ def test_target_repo_bad_override_stops_instead_of_changing_targets(
     {"contents": {"target_repo": None}},   # null value
   ):
     _point_override(monkeypatch, tmp_path, **kwargs)
-    with pytest.raises(contribution_config.ContributionConfigError):
-      contribution_config.target_repo()
-
-
-def test_configured_target_repo_reports_invalid_override_without_fallback(
-  monkeypatch, tmp_path,
-):
-  _point_override(monkeypatch, tmp_path, raw=b"{not json")
-  monkeypatch.setenv(contribution_config.TARGET_REPO_ENV, "mobius-os/mobius")
-
-  with pytest.raises(ContributionSubmitError) as exc:
-    _configured_target_repo("owner/source")
-
-  assert exc.value.code == "relay_config_invalid"
+    assert contribution_config.target_repo() == "owner/env"
 
 
 def test_test_repositories_parsed_from_env(monkeypatch, tmp_path):
@@ -120,23 +90,15 @@ def test_configured_target_repo_requires_explicit_target(monkeypatch, tmp_path):
   assert exc.value.code == "relay_target_not_configured"
 
 
-def test_configured_target_repo_anonymous_owner_allowed(monkeypatch, tmp_path):
-  _point_override(monkeypatch, tmp_path)
-  monkeypatch.setenv(contribution_config.TARGET_REPO_ENV, "mobius-os/mobius")
-  monkeypatch.delenv(contribution_config.TEST_REPOSITORIES_ENV, raising=False)
-  assert _configured_target_repo("mobius-os/mobius") == "mobius-os/mobius"
-
-
-def test_configured_target_repo_must_match_the_reviewed_repository(
+def test_configured_target_repo_anonymous_owner_requires_same_repo(
   monkeypatch, tmp_path,
 ):
   _point_override(monkeypatch, tmp_path)
   monkeypatch.setenv(contribution_config.TARGET_REPO_ENV, "mobius-os/mobius")
   monkeypatch.delenv(contribution_config.TEST_REPOSITORIES_ENV, raising=False)
-
+  assert _configured_target_repo("mobius-os/mobius") == "mobius-os/mobius"
   with pytest.raises(ContributionSubmitError) as exc:
-    _configured_target_repo("mobius-os/different-app")
-
+    _configured_target_repo("mobius-os/app-other")
   assert exc.value.code == "relay_target_mismatch"
 
 

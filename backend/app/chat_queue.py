@@ -113,6 +113,8 @@ class TerminalDisposition(enum.Enum):
   # (the "limit storm"). The queue is preserved and self-heals on the user's
   # next send via the stale-pending drain. No auto-resume: the user resends
   # (or waits for the limit to reset) themselves.
+  ACTIVATION_PARKED = "activation_parked"
+  # Exact activation proof owns unfinished A while later B remains queued.
   QUESTION_PARKED = "question_parked"
   # Pending work was deliberately left queued because an unanswered owner
   # question is the transcript's protocol barrier. The exact run is closed as
@@ -128,12 +130,14 @@ class TerminalDisposition(enum.Enum):
   # promoting would start a turn while the worker is shutting down.
 
 
-class PendingQuestionBlocksPromotion(RuntimeError):
-  """Expected refusal to start queued work past an owner question."""
+class PendingAdmissionBlocksPromotion(RuntimeError):
+  """Expected refusal to start queued work past its durable owner."""
 
-  def __init__(self, question_id: str):
-    super().__init__("an owner question must be answered before promotion")
-    self.question_id = question_id
+  def __init__(self, hold):
+    super().__init__(f"{hold.reason} must settle before promotion")
+    self.reason = hold.reason
+    self.question_id = hold.question_id
+    self.wait_id = hold.wait_id
 
 
 _locks: "weakref.WeakValueDictionary[str, asyncio.Lock]" = (
@@ -213,7 +217,6 @@ async def promote_pending_messages_locked(
   chat_id: str,
   run_token: str,
   ending_status: str = "completed",
-  continuation_reason: str | None = None,
 ) -> tuple[list[schemas.ChatMessage], dict | None, str | None]:
   """Inner promote logic. PRECONDITION: caller holds the per-chat
   queue lock.
@@ -230,14 +233,10 @@ async def promote_pending_messages_locked(
 
   `db` is unused now (the actor owns the write through its own session)
   but kept in the signature so the two callers' shape is unchanged.
-  ``continuation_reason`` is a trusted caller-only execution hint for the
-  explicit manual Resume path when visible owner context is already queued;
-  the actor keeps those transcript rows ordinary while binding the promoted
-  provider turn to the paused logical root.
 
   Returns (next_messages, promoted_message, session_id) on success.
   Returns ([], None, session_id) when the pending queue is empty. Raises
-  ``PendingQuestionBlocksPromotion`` when the owner must answer first. Other
+  ``PendingAdmissionBlocksPromotion`` when a question or activation owns A. Other
   actor-ack failures — missing row / dropped commit / a MALFORMED pending
   entry (the actor leaves the queue intact and fails the ack rather than
   returning promoted=None, which would be indistinguishable from an empty
@@ -250,7 +249,7 @@ async def promote_pending_messages_locked(
     return [], None, None
   from app.chat_writer import (
     PromotePending,
-    PromotePendingBlockedByPendingQuestion,
+    PromotePendingBlocked,
     await_ack,
     get_writer,
   )
@@ -260,12 +259,11 @@ async def promote_pending_messages_locked(
       chat_id=chat_id,
       run_token=run_token,
       ending_status=ending_status,
-      continuation_reason=continuation_reason,
     )
   )
   result = await await_ack(ack)
-  if isinstance(result, PromotePendingBlockedByPendingQuestion):
-    raise PendingQuestionBlocksPromotion(result.question_id)
+  if isinstance(result, PromotePendingBlocked):
+    raise PendingAdmissionBlocksPromotion(result)
   promoted = result["promoted"]
   if promoted is None:
     # Empty queue — nothing to promote (the actor returned promoted=None
@@ -395,18 +393,21 @@ async def drain_and_release(
             db, chat_id, run_token, ending_status=ending_status,
           )
         )
-      except PendingQuestionBlocksPromotion:
-        # A late durable QuestionCommit can win after Finalize's ordinary
-        # marker clear. That is a valid parked state, not a persistence error:
-        # close only this physical run as interrupted (FinishRun deliberately
-        # preserves the question marker for that status), leave every queued
-        # row untouched, and release the in-process claim without scheduling.
+      except PendingAdmissionBlocksPromotion as hold:
+        # Owner input and exact activation proof both park unfinished A.
+        # Close only this physical attempt as interrupted, preserve every B,
+        # and release the transient claim without scheduling later input.
+        # FinishRun preserves an open question marker when one exists.
         await finish_run_strict(
           chat_id, ending_run_token, "interrupted",
         )
         discard_starting(chat_id)
         forget_chat(chat_id)
-        return None, [], None, TerminalDisposition.QUESTION_PARKED
+        disposition = (
+          TerminalDisposition.ACTIVATION_PARKED if hold.reason == "activation"
+          else TerminalDisposition.QUESTION_PARKED
+        )
+        return None, [], None, disposition
       if first_pending is None:
         # Clear-before-forget, all under this one lock: clear the durable
         # marker (strict — a failed ack raises and the caller leaves the

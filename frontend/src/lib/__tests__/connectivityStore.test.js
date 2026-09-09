@@ -2,9 +2,11 @@ import { readFileSync } from 'node:fs'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  AMBIGUOUS_VERDICT_CONFIRM_MS,
   createConnectivityStore,
+  FAILURE_GRACE_MS,
   ReachabilityPhase,
+  RECOVERY_RETRY_MIN_MS,
+  reduceReachability,
 } from '../connectivityStore.js'
 
 function eventTarget(extra = {}) {
@@ -15,22 +17,15 @@ function eventTarget(extra = {}) {
       if (!listeners.has(type)) listeners.set(type, new Set())
       listeners.get(type).add(listener)
     },
-    removeEventListener(type, listener) {
-      listeners.get(type)?.delete(listener)
-    },
-    emit(type) {
-      for (const listener of listeners.get(type) || []) listener()
-    },
-    listenerCount(type) {
-      return listeners.get(type)?.size || 0
-    },
+    removeEventListener(type, listener) { listeners.get(type)?.delete(listener) },
+    emit(type) { for (const listener of listeners.get(type) || []) listener() },
+    listenerCount(type) { return listeners.get(type)?.size || 0 },
   }
 }
 
 function fakeTimers() {
   let nextId = 1
   const timeouts = new Map()
-  const intervals = new Map()
   return {
     setTimeoutFn(callback, delay) {
       const id = nextId++
@@ -38,12 +33,6 @@ function fakeTimers() {
       return id
     },
     clearTimeoutFn(id) { timeouts.delete(id) },
-    setIntervalFn(callback, delay) {
-      const id = nextId++
-      intervals.set(id, { callback, delay })
-      return id
-    },
-    clearIntervalFn(id) { intervals.delete(id) },
     runTimeout(delay) {
       const found = [...timeouts].find(([, task]) => task.delay === delay)
       assert.ok(found, `expected a ${delay}ms timeout`)
@@ -51,182 +40,176 @@ function fakeTimers() {
       timeouts.delete(id)
       task.callback()
     },
+    countDelay(delay) {
+      return [...timeouts.values()].filter(task => task.delay === delay).length
+    },
     timeoutCount: () => timeouts.size,
-    intervalCount: () => intervals.size,
   }
 }
 
-async function flushMicrotasks() {
-  for (let index = 0; index < 6; index += 1) await Promise.resolve()
+async function flush() {
+  for (let index = 0; index < 8; index += 1) await Promise.resolve()
 }
 
-function harness(fetchImpl) {
+function harness(fetchImpl, { navigatorOnline = true } = {}) {
   const windowTarget = eventTarget()
   const documentTarget = eventTarget({ visibilityState: 'visible' })
-  const navigatorTarget = { onLine: true }
+  const navigatorTarget = { onLine: navigatorOnline }
   const timers = fakeTimers()
   const store = createConnectivityStore({
-    windowTarget,
-    documentTarget,
-    navigatorTarget,
-    fetchImpl,
-    ...timers,
+    windowTarget, documentTarget, navigatorTarget, fetchImpl, ...timers,
   })
   return { store, windowTarget, documentTarget, navigatorTarget, timers }
 }
 
-test('all subscribers share one monitor and the last unsubscribe removes it', async () => {
-  const h = harness(async () => ({ ok: true }))
+test('the pure core exposes Online, Checking, and Offline without presentation policy', () => {
+  let state = { phase: ReachabilityPhase.ONLINE, staleOfflineSuccesses: 0, recoveryGeneration: 0 }
+  state = reduceReachability(state, { type: 'checking' })
+  assert.equal(state.phase, ReachabilityPhase.CHECKING)
+  state = reduceReachability(state, { type: 'failed' })
+  assert.equal(state.phase, ReachabilityPhase.CHECKING)
+  state = reduceReachability(state, { type: 'deadline' })
+  assert.equal(state.phase, ReachabilityPhase.OFFLINE)
+  state = reduceReachability(state, { type: 'reachable', strong: true })
+  assert.deepEqual(state, {
+    phase: ReachabilityPhase.ONLINE,
+    staleOfflineSuccesses: 0,
+    recoveryGeneration: 1,
+  })
+})
+
+test('any HTTP response proves reachability, including a 500 response', async () => {
+  const h = harness(async () => ({ ok: false, status: 500 }))
+  const stop = h.store.subscribe(() => {})
+  await flush()
+  assert.equal(h.store.getState().phase, ReachabilityPhase.ONLINE)
+  assert.equal(h.store.getSnapshot(), true)
+  stop()
+})
+
+test('all subscribers share one monitor and the last unsubscribe releases it', async () => {
+  const h = harness(async () => ({ status: 204 }))
   const stopA = h.store.subscribe(() => {})
   const stopB = h.store.subscribe(() => {})
-  await flushMicrotasks()
+  await flush()
 
-  assert.equal(h.timers.intervalCount(), 1)
   assert.equal(h.windowTarget.listenerCount('online'), 1)
   assert.equal(h.windowTarget.listenerCount('offline'), 1)
+  assert.equal(h.windowTarget.listenerCount('focus'), 1)
+  assert.equal(h.windowTarget.listenerCount('pageshow'), 1)
   assert.equal(h.documentTarget.listenerCount('visibilitychange'), 1)
 
   stopA()
-  assert.equal(h.timers.intervalCount(), 1)
+  assert.equal(h.windowTarget.listenerCount('online'), 1)
   stopB()
-  assert.equal(h.timers.intervalCount(), 0)
-  assert.equal(h.timers.timeoutCount(), 0)
   assert.equal(h.windowTarget.listenerCount('online'), 0)
   assert.equal(h.windowTarget.listenerCount('offline'), 0)
+  assert.equal(h.windowTarget.listenerCount('focus'), 0)
+  assert.equal(h.windowTarget.listenerCount('pageshow'), 0)
   assert.equal(h.documentTarget.listenerCount('visibilitychange'), 0)
+  assert.equal(h.timers.timeoutCount(), 0)
 })
 
-test('a stale-online failure publishes checking before it is confirmed offline', async () => {
+test('one continuous failure deadline owns demotion and foreground storms cannot extend it', async () => {
   const h = harness(async () => { throw new TypeError('offline') })
-  let notifications = 0
-  const stop = h.store.subscribe(() => { notifications += 1 })
-  await flushMicrotasks()
-
-  assert.equal(h.store.getSnapshot(), true)
+  const stop = h.store.subscribe(() => {})
+  await flush()
+  assert.equal(h.store.getState().phase, ReachabilityPhase.CHECKING)
   assert.equal(h.store.getPhaseSnapshot(), ReachabilityPhase.CHECKING)
-  assert.equal(notifications, 1)
-  h.timers.runTimeout(AMBIGUOUS_VERDICT_CONFIRM_MS)
-  await flushMicrotasks()
-
-  assert.equal(h.store.getSnapshot(), false)
-  assert.equal(h.store.getPhaseSnapshot(), ReachabilityPhase.OFFLINE)
-  assert.equal(notifications, 2)
-  stop()
-})
-
-test('stopping the last subscriber cancels a pending confirmation probe', async () => {
-  const h = harness(async () => { throw new TypeError('offline') })
-  const stop = h.store.subscribe(() => {})
-  await flushMicrotasks()
-
-  assert.equal(h.timers.timeoutCount(), 1)
-  stop()
-  assert.equal(h.timers.timeoutCount(), 0)
-  assert.equal(h.timers.intervalCount(), 0)
-})
-
-test('verification without subscribers is bounded and never starts a monitor', async () => {
-  const h = harness(async () => ({ ok: true }))
-  assert.equal(await h.store.verify(), true)
-
-  assert.equal(h.timers.intervalCount(), 0)
-  assert.equal(h.timers.timeoutCount(), 0)
-  assert.equal(h.windowTarget.listenerCount('online'), 0)
-  assert.equal(h.documentTarget.listenerCount('visibilitychange'), 0)
-})
-
-test('a live mutation response repairs a stale offline verdict immediately', async () => {
-  const h = harness(async () => { throw new TypeError('offline') })
-  let notifications = 0
-  const stop = h.store.subscribe(() => { notifications += 1 })
-  await flushMicrotasks()
-  h.timers.runTimeout(AMBIGUOUS_VERDICT_CONFIRM_MS)
-  await flushMicrotasks()
-  assert.equal(h.store.getSnapshot(), false)
-
-  h.store.reportReachable()
   assert.equal(h.store.getSnapshot(), true)
-  assert.equal(h.store.getPhaseSnapshot(), ReachabilityPhase.ONLINE)
-  assert.equal(h.store.getRecoverySnapshot(), 1)
-  assert.equal(notifications, 3)
-  stop()
-})
+  assert.equal(h.timers.countDelay(FAILURE_GRACE_MS), 1)
 
-test('a live mutation response outranks an older in-flight failed probe', async () => {
-  let rejectProbe
-  const h = harness(() => new Promise((resolve, reject) => { rejectProbe = reject }))
-  h.navigatorTarget.onLine = false
-  const stop = h.store.subscribe(() => {})
-
-  h.store.reportReachable()
-  rejectProbe(new TypeError('offline'))
-  await flushMicrotasks()
-
-  assert.equal(h.store.getSnapshot(), true)
-  assert.equal(h.timers.timeoutCount(), 0)
-  stop()
-})
-
-test('any HTTP response proves transport reachability regardless of status', async () => {
-  const h = harness(async () => ({ ok: false, status: 503 }))
-  const stop = h.store.subscribe(() => {})
-  await flushMicrotasks()
-
-  assert.equal(h.store.getSnapshot(), true)
-  assert.equal(h.store.getPhaseSnapshot(), ReachabilityPhase.ONLINE)
-  stop()
-})
-
-test('verification exposes uncertainty immediately and recovery emits one generation', async () => {
-  let reachable = true
-  const h = harness(async () => {
-    if (!reachable) throw new TypeError('offline')
-    return { ok: true }
-  })
-  let notifications = 0
-  const stop = h.store.subscribe(() => { notifications += 1 })
-  await flushMicrotasks()
-
-  reachable = false
-  const failedCheck = h.store.verify()
-  assert.equal(h.store.getPhaseSnapshot(), ReachabilityPhase.CHECKING)
-  assert.equal(h.store.getSnapshot(), true, 'uncertainty must not disable actions')
-  await failedCheck
-
-  reachable = true
-  await h.store.verify()
-  assert.equal(h.store.getPhaseSnapshot(), ReachabilityPhase.ONLINE)
-  assert.equal(h.store.getRecoverySnapshot(), 1)
-  assert.equal(notifications, 2)
-
-  h.store.reportReachable()
-  assert.equal(h.store.getRecoverySnapshot(), 1)
-  assert.equal(notifications, 2, 'settled responses must not repeat recovery')
-  stop()
-})
-
-test('returning to a stale-false browser flag confirms recovery promptly', async () => {
-  let reachable = false
-  const h = harness(async () => {
-    if (!reachable) throw new TypeError('offline')
-    return { ok: true }
-  })
-  h.navigatorTarget.onLine = false
-  const stop = h.store.subscribe(() => {})
-  await flushMicrotasks()
-
-  assert.equal(h.store.getSnapshot(), false)
-
-  reachable = true
+  h.windowTarget.emit('focus')
+  h.windowTarget.emit('pageshow')
   h.documentTarget.emit('visibilitychange')
-  await flushMicrotasks()
+  await flush()
+  assert.equal(h.timers.countDelay(FAILURE_GRACE_MS), 1)
 
-  assert.equal(h.store.getSnapshot(), false, 'one success still rejects the device anomaly')
-  h.timers.runTimeout(AMBIGUOUS_VERDICT_CONFIRM_MS)
-  await flushMicrotasks()
-
-  assert.equal(h.store.getSnapshot(), true, 'the prompt second success completes recovery')
+  h.timers.runTimeout(FAILURE_GRACE_MS)
+  assert.equal(h.store.getState().phase, ReachabilityPhase.OFFLINE)
+  assert.equal(h.store.getSnapshot(), false)
   stop()
+})
+
+test('recovery retries use one scheduler and healthy operation has no interval', async () => {
+  const h = harness(async () => { throw new TypeError('offline') })
+  const stop = h.store.subscribe(() => {})
+  await flush()
+  assert.equal(h.timers.countDelay(RECOVERY_RETRY_MIN_MS), 1)
+  assert.equal(h.timers.countDelay(FAILURE_GRACE_MS), 1)
+  stop()
+  assert.equal(h.timers.timeoutCount(), 0)
+})
+
+test('strong live evidence repairs uncertainty and emits one recovery generation', async () => {
+  const h = harness(async () => { throw new TypeError('offline') })
+  let notifications = 0
+  const stop = h.store.subscribe(() => { notifications += 1 })
+  await flush()
+  assert.equal(notifications, 1, 'Checking is visible without disabling online actions')
+  h.store.reportReachable()
+  assert.equal(h.store.getState().phase, ReachabilityPhase.ONLINE)
+  assert.equal(h.store.getRecoverySnapshot(), 1)
+  assert.equal(notifications, 2)
+  assert.equal(h.timers.timeoutCount(), 0)
+  h.store.reportReachable()
+  assert.equal(h.store.getRecoverySnapshot(), 1, 'settled responses do not repeat recovery')
+  assert.equal(notifications, 2)
+  stop()
+})
+
+test('newer live evidence outranks an older failed probe', async () => {
+  let settle
+  const h = harness(() => new Promise((_, reject) => { settle = reject }))
+  const stop = h.store.subscribe(() => {})
+  h.store.reportReachable()
+  settle(new TypeError('old failure'))
+  await flush()
+  assert.equal(h.store.getState().phase, ReachabilityPhase.ONLINE)
+  assert.equal(h.store.getSnapshot(), true)
+  stop()
+})
+
+test('cold stale-false startup remains Offline until two ordinary successes', async () => {
+  const h = harness(async () => ({ status: 204 }), { navigatorOnline: false })
+  const stop = h.store.subscribe(() => {})
+  await flush()
+  assert.equal(h.store.getSnapshot(), false)
+  h.timers.runTimeout(RECOVERY_RETRY_MIN_MS)
+  await flush()
+  assert.equal(h.store.getSnapshot(), true)
+  assert.equal(h.store.getRecoverySnapshot(), 1)
+  stop()
+})
+
+test('hidden tabs pause recovery and visibility requests one coalesced check', async () => {
+  const h = harness(async () => { throw new TypeError('offline') })
+  const stop = h.store.subscribe(() => {})
+  await flush()
+  h.documentTarget.visibilityState = 'hidden'
+  h.documentTarget.emit('visibilitychange')
+  assert.equal(h.timers.countDelay(RECOVERY_RETRY_MIN_MS), 0)
+  assert.equal(h.timers.countDelay(FAILURE_GRACE_MS), 1, 'failure history is not reset')
+  h.documentTarget.visibilityState = 'visible'
+  h.documentTarget.emit('visibilitychange')
+  await flush()
+  assert.equal(h.timers.countDelay(FAILURE_GRACE_MS), 1)
+  stop()
+})
+
+test('verification without subscribers is bounded and creates no lifecycle owner', async () => {
+  const h = harness(async () => ({ status: 401 }))
+  assert.equal(await h.store.verify(), true)
+  assert.equal(h.windowTarget.listenerCount('focus'), 0)
+  assert.equal(h.documentTarget.listenerCount('visibilitychange'), 0)
+  assert.equal(h.timers.timeoutCount(), 0)
+
+  const failed = harness(async () => { throw new TypeError('offline') })
+  assert.equal(await failed.store.verify(), false)
+  assert.equal(failed.store.getPhaseSnapshot(), ReachabilityPhase.CHECKING)
+  assert.equal(failed.windowTarget.listenerCount('focus'), 0)
+  assert.equal(failed.documentTarget.listenerCount('visibilitychange'), 0)
+  assert.equal(failed.timers.timeoutCount(), 0)
 })
 
 test('the hook and API client consume the shared store contract', () => {
@@ -237,16 +220,33 @@ test('the hook and API client consume the shared store contract', () => {
   assert.match(hook, /useRecoveryGeneration[\s\S]*?getRecoverySnapshot/)
   assert.doesNotMatch(hook, /fetch\(|setInterval\(/)
   assert.match(client, /void verifyConnectivity\(\)/)
+  assert.match(client, /reportNetworkReachable\(\)/)
 })
 
-test('visible chats subscribe their runtime owner to shared recovery', () => {
+test('both durable streams feed recovery and an exhausted chat observes it', () => {
+  const chat = readFileSync(
+    new URL('../../components/ChatView/useStreamConnection.js', import.meta.url),
+    'utf8',
+  )
   const chatView = readFileSync(
     new URL('../../components/ChatView/ChatView.jsx', import.meta.url),
     'utf8',
   )
+  const system = readFileSync(
+    new URL('../../hooks/useSystemEventStream.js', import.meta.url),
+    'utf8',
+  )
+  assert.match(chat, /const res = await fetch\([\s\S]*?reportNetworkReachable\(\)/)
   assert.match(
     chatView,
-    /reconcileRuntimeState\(\)\.then\(runtime => \{[\s\S]*?subscribeRecovery\([\s\S]*?getRecoverySnapshot\(\)[\s\S]*?run\(\)/,
-    'every visible pane rechecks durable runtime after shared reachability recovers',
+    /const run = \(\{ recovery = false \} = \{\}\) => \{[\s\S]*?reconcileRuntimeState\(\)[\s\S]*?subscribeRecovery\([\s\S]*?getRecoverySnapshot\(\)[\s\S]*?run\(\{ recovery: true \}\)/,
+    'every mounted pane rechecks durable runtime after shared reachability recovers',
   )
+  assert.match(chat, /catch \(err\) \{[\s\S]*?void verifyConnectivity\(\)/)
+  assert.match(
+    system,
+    /if \(!stopped\) \{[\s\S]*?void verifyConnectivity\(\)[\s\S]*?scheduleRetry\(\)/,
+    'an unexpected system-stream close must enter shared reachability recovery',
+  )
+  assert.match(system, /const res = await fetch\([\s\S]*?reportNetworkReachable\(\)/)
 })

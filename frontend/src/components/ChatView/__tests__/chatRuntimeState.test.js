@@ -4,7 +4,6 @@ import assert from 'node:assert/strict'
 import {
   answerKeepsCurrentTurn,
   answerTurnDisposition,
-  builtAppPulseDecision,
   canFastForwardQueue,
   shouldFreezeStreamingReturn,
   coldTranscriptRenderFrames,
@@ -13,22 +12,18 @@ import {
   isOwnerUserMessage,
   startsFollowingTurn,
   jumpToLatestShown,
-  openAppCtaViewModel,
-  previewReadyAnnouncement,
-  previewUpdatedAnnouncement,
-  runtimeStreamAttachAction,
+  shouldRepairRuntimeStream,
   serverSnapshotBehindLocal,
-  serverSnapshotMissingAcceptedCid,
   shouldAttachRunningStream,
   shouldAdoptRuntimeAssistantOwner,
   shouldRetireRestoredQuestionSnapshot,
   shouldRecoverSettledRuntime,
   shouldRetryStopAfterConfirm,
-  shouldShowOpenAppCta,
   startedMessagesFromResponse,
   stopConfirmedIdle,
   stopRequestSucceeded,
   stripInternalUserMessageFields,
+  supersedeResumedPauseBlocks,
   systemEventForChat,
 } from '../chatRuntimeState.js'
 import { mergeRecentMessagesIntoLoadedWindow } from '../../../lib/chatDetailCache.js'
@@ -69,6 +64,63 @@ test('automatic and manual continuations are product markers, not owner messages
   assert.equal(startsFollowingTurn(marker), true)
   assert.equal(startsFollowingTurn({ role: 'user', content: 'hello' }), true)
   assert.equal(startsFollowingTurn({ role: 'assistant', content: 'reply' }), false)
+})
+
+test('a continuation supersedes the resumable pause it completed', () => {
+  const pause = {
+    role: 'assistant',
+    blocks: [
+      { type: 'text', content: 'Work before the restart.' },
+      { type: 'error', resumable: true, message: 'Paused for restart.' },
+    ],
+  }
+  const hiddenControlRow = { role: 'user', hidden: true, content: 'continue' }
+  const continuation = {
+    role: 'user',
+    kind: 'continuation',
+    continuation_reason: 'restart',
+    content: 'continue',
+  }
+  const messages = [pause, hiddenControlRow, continuation]
+
+  const displayed = supersedeResumedPauseBlocks(messages)
+
+  assert.notEqual(displayed, messages)
+  assert.deepEqual(displayed[0].blocks, [pause.blocks[0]])
+  assert.equal(displayed[1], hiddenControlRow)
+  assert.equal(displayed[2], continuation)
+  assert.equal(messages[0], pause, 'the durable transcript is not mutated')
+  assert.equal(messages[0].blocks.length, 2)
+})
+
+test('a pause-only row disappears once its continuation marker replaces it', () => {
+  const messages = [
+    {
+      role: 'assistant',
+      blocks: [{ type: 'error', resumable: true, message: 'Paused.' }],
+    },
+    { role: 'user', kind: 'continuation', continuation_reason: 'manual' },
+  ]
+
+  const displayed = supersedeResumedPauseBlocks(messages)
+
+  assert.equal(displayed[0].hidden, true)
+  assert.deepEqual(displayed[0].blocks, [])
+})
+
+test('a later continuation does not erase an unrelated historical pause', () => {
+  const messages = [
+    {
+      role: 'assistant',
+      blocks: [{ type: 'error', resumable: true, message: 'Paused.' }],
+    },
+    { role: 'user', content: 'Different owner message.' },
+    { role: 'user', kind: 'continuation', continuation_reason: 'restart' },
+  ]
+
+  assert.equal(supersedeResumedPauseBlocks(messages), messages)
+  const pauseOnly = messages.slice(0, 1)
+  assert.equal(supersedeResumedPauseBlocks(pauseOnly), pauseOnly)
 })
 
 test('the initial pageshow cannot retire a fast first-send pin', () => {
@@ -153,6 +205,55 @@ test('a parked owner question uses compact history until its answer resumes the 
   }), false)
 })
 
+test('a fresh running verdict repairs an exhausted visible stream through its retry owner', () => {
+  assert.equal(shouldRepairRuntimeStream({
+    running: true,
+    connectionError: 'disconnected',
+  }), true)
+  assert.equal(shouldRepairRuntimeStream({
+    running: true,
+    connectionError: null,
+  }), true)
+  assert.equal(shouldRepairRuntimeStream({
+    running: true,
+    connectionError: 'retrying',
+  }), false, 'the bounded retry loop keeps sole ownership while active')
+  assert.equal(shouldRepairRuntimeStream({
+    running: true,
+    pendingQuestionId: 'question-1',
+    connectionError: 'disconnected',
+  }), false, 'a parked question has no live output to attach to')
+  assert.equal(shouldRepairRuntimeStream({
+    running: true,
+    connectionError: 'disconnected',
+    hidden: true,
+  }), true, 'a retained hidden pane must recover its stream after restart')
+  assert.equal(shouldRepairRuntimeStream({
+    running: false,
+    connectionError: 'disconnected',
+  }), false, 'an idle server verdict must not resurrect a stream')
+})
+
+test('assistant ownership ignores only idle responses captured behind a local transition', () => {
+  assert.equal(shouldAdoptRuntimeAssistantOwner({
+    runtimeRunning: false,
+    localAuthoritative: true,
+  }), false, 'a pre-StartTurn idle response cannot retire the new local owner')
+  assert.equal(shouldAdoptRuntimeAssistantOwner({
+    runtimeRunning: true,
+    localAuthoritative: true,
+  }), true, 'a running response has crossed the atomic start boundary')
+  assert.equal(shouldAdoptRuntimeAssistantOwner({
+    runtimeRunning: false,
+    localAuthoritative: false,
+  }), true, 'an ordinary idle response retires the settled owner')
+  assert.equal(shouldAdoptRuntimeAssistantOwner({
+    runtimeRunning: false,
+    localAuthoritative: true,
+    authoritativeRefresh: true,
+  }), true, 'a canonical transcript refresh may settle a missed terminal event')
+})
+
 test('a known server run settling recovers a live stream that missed its terminal event', () => {
   assert.equal(shouldRecoverSettledRuntime({
     runtimeWasObservedRunning: true,
@@ -190,55 +291,6 @@ test('a known server run settling recovers a live stream that missed its termina
     streamStillActive: true,
     localStartInFlight: true,
   }), false, 'an unacknowledged local start owns the idle-snapshot race')
-})
-
-test('a fresh running verdict repairs only an exhausted visible stream', () => {
-  assert.equal(runtimeStreamAttachAction({
-    running: true,
-    connectionError: 'disconnected',
-  }), 'retry')
-  assert.equal(runtimeStreamAttachAction({
-    running: true,
-    connectionError: null,
-  }), 'connect')
-  assert.equal(runtimeStreamAttachAction({
-    running: true,
-    connectionError: 'retrying',
-  }), 'none', 'the bounded retry loop keeps sole ownership while active')
-  assert.equal(runtimeStreamAttachAction({
-    running: true,
-    pendingQuestionId: 'question-1',
-    connectionError: 'disconnected',
-  }), 'none', 'a parked question has no live output to attach to')
-  assert.equal(runtimeStreamAttachAction({
-    running: true,
-    connectionError: 'disconnected',
-    hidden: true,
-  }), 'none', 'only the visible pane owns transport recovery')
-  assert.equal(runtimeStreamAttachAction({
-    running: false,
-    connectionError: 'disconnected',
-  }), 'none', 'an idle server verdict must not resurrect a stream')
-})
-
-test('assistant ownership ignores only idle responses captured behind a local transition', () => {
-  assert.equal(shouldAdoptRuntimeAssistantOwner({
-    runtimeRunning: false,
-    localAuthoritative: true,
-  }), false, 'a pre-StartTurn idle response cannot retire the new local owner')
-  assert.equal(shouldAdoptRuntimeAssistantOwner({
-    runtimeRunning: true,
-    localAuthoritative: true,
-  }), true, 'a running response has crossed the atomic start boundary')
-  assert.equal(shouldAdoptRuntimeAssistantOwner({
-    runtimeRunning: false,
-    localAuthoritative: false,
-  }), true, 'an ordinary idle response retires the settled owner')
-  assert.equal(shouldAdoptRuntimeAssistantOwner({
-    runtimeRunning: false,
-    localAuthoritative: true,
-    authoritativeRefresh: true,
-  }), true, 'a canonical transcript refresh may settle a missed terminal event')
 })
 
 test('only a cold stream prefix missing the durable question is retired', () => {
@@ -430,25 +482,6 @@ test('a local turn refreshes completed history while preserving its optimistic s
   ])
 })
 
-test('an empty pre-publication snapshot cannot erase an accepted local turn', () => {
-  const loaded = [
-    { role: 'user', cid: 'accepted-cid', ts: 3, content: 'Accepted turn' },
-  ]
-  const refreshed = mergeRecentMessagesIntoLoadedWindow({
-    loadedMessages: loaded,
-    loadedOffset: 0,
-    recentMessages: [],
-    recentOffset: 0,
-    preserveLocalSuffix: true,
-  })
-
-  assert.deepEqual(refreshed, {
-    messages: loaded,
-    offset: 0,
-    verified: true,
-  })
-})
-
 test('stripInternalUserMessageFields KEEPS cid and drops the envelope fields', () => {
   const kept = stripInternalUserMessageFields({
     role: 'user', content: 'hi', ts: 7, cid: 'keep-me',
@@ -503,63 +536,6 @@ test('canFastForwardQueue requires active turn and server-confirmed queued rows'
   assert.equal(canFastForwardQueue([{ ts: 1, serverTs: true }, { ts: 2, serverTs: true }], true), true)
 })
 
-test('shouldShowOpenAppCta is tied to the built app, not turn completion', () => {
-  assert.equal(shouldShowOpenAppCta(null), false)
-  assert.equal(shouldShowOpenAppCta({}), false)
-  assert.equal(shouldShowOpenAppCta({ id: 42, name: 'Habits' }), true)
-})
-
-test('opening a preview hides it until the turn settles, then final open hides it', () => {
-  const previewSeen = {
-    id: 42,
-    name: 'Habits',
-    updated_at: 't1',
-    preview_seen_updated_at: 't1',
-    preview_seen_final: false,
-  }
-  assert.equal(shouldShowOpenAppCta(previewSeen, true), false)
-  assert.equal(shouldShowOpenAppCta(previewSeen, false), true)
-  assert.equal(openAppCtaViewModel(previewSeen, true), null)
-  assert.equal(openAppCtaViewModel(previewSeen, false)?.label, 'Open Habits')
-
-  const finalSeen = { ...previewSeen, preview_seen_final: true }
-  assert.equal(shouldShowOpenAppCta(finalSeen, false), false)
-  assert.equal(openAppCtaViewModel(finalSeen, false), null)
-})
-
-test('a newer app build resurfaces after the prior build was opened', () => {
-  const updated = {
-    id: 42,
-    name: 'Habits',
-    updated_at: 't2',
-    preview_seen_updated_at: 't1',
-    preview_seen_final: true,
-  }
-  assert.equal(shouldShowOpenAppCta(updated, true), true)
-  assert.equal(openAppCtaViewModel(updated, true)?.label, 'Open Habits preview')
-})
-
-test('openAppCtaViewModel names the active preview and idle app action', () => {
-  assert.equal(openAppCtaViewModel(null, true), null)
-  assert.deepEqual(openAppCtaViewModel({ id: 42, name: 'Habits' }, true), {
-    label: 'Open Habits preview',
-    ariaLabel: 'Open live preview of Habits',
-  })
-  assert.deepEqual(openAppCtaViewModel({ id: 42, name: 'Habits' }, false), {
-    label: 'Open Habits',
-    ariaLabel: 'Open Habits',
-  })
-  assert.deepEqual(openAppCtaViewModel({ id: 42 }, true), {
-    label: 'Open app preview',
-    ariaLabel: 'Open live preview of app',
-  })
-})
-
-test('previewReadyAnnouncement announces when a preview becomes available', () => {
-  assert.equal(previewReadyAnnouncement(null), '')
-  assert.equal(previewReadyAnnouncement({ id: 42, name: 'Habits' }), 'Live preview ready for Habits.')
-})
-
 test('systemEventForChat annotates forwarded stream events with their chat id', () => {
   assert.deepEqual(systemEventForChat({ type: 'app_updated', appId: '7' }, 'chat-a'), {
     type: 'app_updated',
@@ -572,45 +548,6 @@ test('systemEventForChat annotates forwarded stream events with their chat id', 
   })
   assert.equal(systemEventForChat(null, 'chat-a'), null)
   assert.deepEqual(systemEventForChat({ type: 'app_updated' }, null), { type: 'app_updated' })
-})
-
-test('previewUpdatedAnnouncement names the recompiled app', () => {
-  assert.equal(previewUpdatedAnnouncement({ id: 7, name: 'Habits' }), 'Preview updated for Habits.')
-  assert.equal(previewUpdatedAnnouncement({ id: 7 }), 'Preview updated for app.')
-})
-
-test('builtAppPulseDecision: a first-seen app announces but does not pulse', () => {
-  const list = [{ id: 7, name: 'Habits', updated_at: 't1' }]
-  const d = builtAppPulseDecision(list, new Map())
-  assert.equal(d.pulseId, null)
-  assert.equal(d.announce, 'Live preview ready for Habits.')
-  assert.equal(d.nextSeen.get(7), 't1')
-})
-
-test('builtAppPulseDecision: an already-seen app whose updated_at advanced pulses', () => {
-  const list = [{ id: 7, name: 'Habits', updated_at: 't2' }]
-  const seen = new Map([[7, 't1']])
-  const d = builtAppPulseDecision(list, seen)
-  assert.equal(d.pulseId, 7)
-  assert.equal(d.announce, 'Preview updated for Habits.')
-  assert.equal(d.nextSeen.get(7), 't2')
-})
-
-test('builtAppPulseDecision: an already-seen app at the same updated_at neither pulses nor announces', () => {
-  const list = [{ id: 7, name: 'Habits', updated_at: 't1' }]
-  const d = builtAppPulseDecision(list, new Map([[7, 't1']]))
-  assert.equal(d.pulseId, null)
-  assert.equal(d.announce, '')
-})
-
-test('builtAppPulseDecision: a recompile wins the announce over a co-arriving new app', () => {
-  const list = [
-    { id: 7, name: 'Habits', updated_at: 't2' }, // seen at t1 → recompile
-    { id: 8, name: 'Notes', updated_at: 't1' },  // brand new
-  ]
-  const d = builtAppPulseDecision(list, new Map([[7, 't1']]))
-  assert.equal(d.pulseId, 7)
-  assert.equal(d.announce, 'Preview updated for Habits.')
 })
 
 test('serverSnapshotBehindLocal only preserves explicit unsaved local rows', () => {
@@ -638,21 +575,6 @@ test('serverSnapshotBehindLocal only preserves explicit unsaved local rows', () 
     ...server,
     { role: 'user', content: 'waiting for canonical ts', ts: 6, serverTs: false },
   ]), true)
-})
-
-test('accepted fresh send remains local until the compact snapshot contains its cid', () => {
-  const oldSnapshot = [
-    { role: 'user', content: 'Earlier turn', cid: 'old-cid', ts: 1 },
-  ]
-  assert.equal(
-    serverSnapshotMissingAcceptedCid(oldSnapshot, 'accepted-cid'),
-    true,
-  )
-  assert.equal(serverSnapshotMissingAcceptedCid([
-    ...oldSnapshot,
-    { role: 'user', content: 'Accepted turn', cid: 'accepted-cid', ts: 2 },
-  ], 'accepted-cid'), false)
-  assert.equal(serverSnapshotMissingAcceptedCid(oldSnapshot, null), false)
 })
 
 test('stopRequestSucceeded requires a confirmed backend stop', () => {

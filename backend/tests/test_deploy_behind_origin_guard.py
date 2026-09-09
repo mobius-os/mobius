@@ -126,15 +126,15 @@ def test_deploy_script_still_parses():
   assert result.returncode == 0, result.stderr
 
 
-def test_host_and_container_freshness_proofs_are_fixed_to_main():
+def test_host_discovery_uses_main_but_cutover_verifies_frozen_image_source():
   text = _read()
   assert "MOBIUS_PLATFORM_RELEASE_REF" not in text
   assert "PLATFORM_RELEASE_BRANCH=main" in text
   assert "PLATFORM_RELEASE_TRACKING_REF=refs/remotes/origin/main" in text
   assert '"+refs/heads/main:$PLATFORM_RELEASE_TRACKING_REF"' in text
   assert '--no-tags origin -q' in text
-  assert "ref=refs/heads/main" in text
-  assert "tracking=refs/remotes/origin/main" in text
+  assert 'merge-base --is-ancestor "$INSTALLED_SOURCE_SHA" HEAD' in text
+  assert "ref=refs/heads/main" not in text
 
 
 # ── behavioral tests against a real temp git repo ─────────────────────────

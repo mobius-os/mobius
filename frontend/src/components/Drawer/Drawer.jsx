@@ -2,7 +2,12 @@ import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useStat
 import { createPortal } from 'react-dom'
 import { useQueryClient } from '@tanstack/react-query'
 import { EmptyMessage } from '@openai/apps-sdk-ui/components/EmptyMessage'
-import { Pause, Play, Stop } from '@openai/apps-sdk-ui/components/Icon'
+import {
+  Pause,
+  Play,
+  Stop,
+} from '@openai/apps-sdk-ui/components/Icon'
+import { projectSourceAction } from '../../lib/projectSourceAction.js'
 import { api } from '../../api/client.js'
 import { appQueries, chatQueries, projectQueries } from '../../hooks/queries.js'
 import { useHistoryDismiss } from '../../hooks/useHistoryDismiss.jsx'
@@ -32,6 +37,7 @@ import {
   shouldSuppressDrawerSwipeClick,
   shouldAutoRevealActiveChat,
   clearDrawerGestureStyles,
+  settleDrawerSwipe,
 } from '../../lib/drawerLifecycle.js'
 import {
   PRESS_MENU_HOLD_MS,
@@ -99,13 +105,17 @@ export default function Drawer({
   onArtifact,
   onProjectsOpen,
   onProjectCreate,
+  onProjectImportGithub,
+  // Same import path the Projects screen offers, so a page or local app can
+  // become an editable project from either + menu.
+  onProjectImportSource,
   chats,
   chatsStatus = 'success',
   onRetryChats,
   activeChatId,
   onChat,
   onApp,
-  onAppSource,
+  onAddSourceToProjects,
   onNewChat,
   onDeleteChat,
   onDeleteApp,
@@ -129,6 +139,9 @@ export default function Drawer({
   // visual precedence over streaming because the agent cannot make progress
   // until the owner acts.
   ownerInputChatIds,
+  // Set of chats whose latest unacknowledged terminal run genuinely failed.
+  // Planned restart parks never enter this set.
+  failedChatIds,
   // Set of chat ids whose latest background run finished while the
   // user was elsewhere. Rendered as a green attention dot, distinct by
   // colour from the accent streaming dot above (neither animates).
@@ -150,17 +163,14 @@ export default function Drawer({
 }) {
   const streamingSet = streamingChatIds || EMPTY_SET
   const ownerInputSet = ownerInputChatIds || EMPTY_SET
+  const failedSet = failedChatIds || EMPTY_SET
   const attentionSet = attentionChatIds || EMPTY_SET
   const newAppSet = newAppIds || EMPTY_SET
-  const activeArtifactProjectId = activeView === 'artifact'
-    ? String(activeArtifactRef || '').split(':', 1)[0]
-    : null
+  // An open artifact is its own destination: it never lights up a project row.
   const activeProject = projects.find(project => (
     (activeView === 'project' && String(activeProjectId) === String(project.id))
     || (activeView === 'chat'
       && String(activeProjectChatProjectId) === String(project.id))
-    || (activeView === 'artifact'
-      && activeArtifactProjectId === String(project.id))
   ))
   // One source of truth for which row the focused pane is showing, so a chat
   // and an app are selected by the same rule wherever the row is rendered.
@@ -442,10 +452,10 @@ export default function Drawer({
       current.resetAppsSurfaceUi({ restoreFocus: false })
       current.onProject?.(project)
     },
-    inspectSource(app) {
+    addToProjects(source) {
       const current = rowActionInputsRef.current
       current.resetAppsSurfaceUi({ restoreFocus: false })
-      current.onAppSource?.(app)
+      current.onAddSourceToProjects?.(source)
     },
     openMenu(menu) {
       rowActionInputsRef.current.showItemMenu(menu)
@@ -850,7 +860,8 @@ export default function Drawer({
   // away. The full-screen visual scrim stops owning input as soon as close is
   // acknowledged; a geometry-matched shield follows the panel until its
   // transition ends. This keeps uncovered controls live without allowing taps
-  // through visible drawer pixels.
+  // through visible drawer pixels. transitionend and animationend release on
+  // the real end of the slide; the watchdog bounds a dropped end event.
   const [scrimBlocking, setScrimBlocking] = useState(open && !persistent)
   useLayoutEffect(() => {
     if (open && !persistent) {
@@ -946,29 +957,6 @@ export default function Drawer({
     const dx = e.clientX - gesture.x
     const dy = e.clientY - gesture.y
     const shouldClose = dx < -70 && Math.abs(dx) > Math.abs(dy) * 1.35
-    const el = drawerRef.current
-    // Smooth release: set the resting transform EXPLICITLY here so
-    // the eased transition runs from the user's finger position to
-    // the target. The previous version cleared the inline transform
-    // before calling onClose — between that clear (which let the
-    // open-class transform: 0 take over) and the parent state
-    // update, the drawer snapped back to 0 for a frame before
-    // animating to -100%. That snap was the visible jitter.
-    if (el) {
-      el.classList.remove('drawer--dragging')
-      if (shouldClose) {
-        // Animate from the drag position to the closed target. The open-state
-        // layout effect clears this inline value as soon as the parent commits
-        // the closed class, whose transform has the same target.
-        el.style.transform = 'translateX(-100%)'
-      } else {
-        // Snap-back to open: clearing the inline transform lets
-        // the .drawer--open class's translateX(0) take over with
-        // the transition running from the drag position.
-        el.style.transform = ''
-        closeShieldRef.current?.style.setProperty('--drawer-close-start-x', '0px')
-      }
-    }
     const suppressGeneratedClick = shouldSuppressDrawerSwipeClick({
       sawHorizontalMove: gesture.horizontal,
       dx,
@@ -980,7 +968,11 @@ export default function Drawer({
     // doesn't double as a row selection. A genuine tap never set
     // wasSwiping, so its click passes through untouched.
     if (suppressGeneratedClick) suppressGeneratedClickRef.current = true
-    if (shouldClose) onClose?.()
+    const closeAccepted = shouldClose && onClose?.() === true
+    settleDrawerSwipe(drawerRef.current, { closeAccepted })
+    if (!closeAccepted) {
+      closeShieldRef.current?.style.setProperty('--drawer-close-start-x', '0px')
+    }
   }
   // pointercancel positions are unreliable across browsers (clientX
   // can be 0 or stale). Treat cancel as "snap back, don't close" —
@@ -1066,7 +1058,7 @@ export default function Drawer({
   rowActionInputsRef.current = {
     onChat,
     onApp,
-    onAppSource,
+    onAddSourceToProjects,
     onProject,
     onProjectDelete,
     onArtifact,
@@ -1197,6 +1189,8 @@ export default function Drawer({
                 <ProjectCreateMenu
                   templates={projectTemplates}
                   onCreate={onProjectCreate}
+                  onImportGithub={onProjectImportGithub}
+                  onImportSource={onProjectImportSource}
                   className="drawer__projects-add"
                   align="end"
                 />
@@ -1228,6 +1222,7 @@ export default function Drawer({
                           ? !!(item.chat_id && ownerInputSet.has(item.chat_id))
                           : false}
                       streaming={kind === 'chat' && streamingSet.has(item.id)}
+                      failed={kind === 'chat' && failedSet.has(item.id)}
                       building={kind === 'app' && !!(item.chat_id && streamingSet.has(item.chat_id))}
                       attention={kind === 'chat'
                         ? attentionSet.has(item.id)
@@ -1280,6 +1275,7 @@ export default function Drawer({
                         ? !!(item.chat_id && ownerInputSet.has(item.chat_id))
                         : false}
                     streaming={kind === 'chat' && streamingSet.has(item.id)}
+                    failed={kind === 'chat' && failedSet.has(item.id)}
                     building={kind === 'app' && !!(item.chat_id && streamingSet.has(item.chat_id))}
                     attention={kind === 'chat'
                       ? attentionSet.has(item.id)
@@ -1389,6 +1385,7 @@ export default function Drawer({
       <DrawerItemMenu
         menu={openMenu}
         item={activeMenuItem}
+        projects={projects}
         actions={rowActions}
         restoreFocusRef={menuRestoreFocusRef}
       />
@@ -1435,7 +1432,7 @@ function NowPlaying({ session, app, onOpen, onControl }) {
         <button
           type="button"
           className="drawer__now-playing-control drawer__now-playing-speed"
-          aria-label={`Playback speed ${session.playbackRate} times. Change to next speed`}
+          aria-label={`Playback speed ${session.playbackRate} times. Tap for next speed`}
           title={`${session.playbackRate}× · next speed`}
           onClick={() => onControl?.('cycle-speed')}
         >
@@ -1466,10 +1463,11 @@ function NowPlaying({ session, app, onOpen, onControl }) {
 }
 
 
+// A built artifact is a plain Recents destination: name and type glyph only,
+// no project belonging. Its project is reachable from the project's own row.
 const DrawerArtifactRow = memo(function DrawerArtifactRow({ item, active, actions }) {
-  const projectChip = recentsProjectChip('artifact', item)
   return (
-    <div className={`drawer__row drawer__row--artifact drawer__row--project-owned${active ? ' drawer__row--active' : ''}`}>
+    <div className={`drawer__row drawer__row--artifact${active ? ' drawer__row--active' : ''}`}>
       <button
         type="button"
         className={`drawer__item${active ? ' drawer__item--active' : ''}`}
@@ -1482,22 +1480,6 @@ const DrawerArtifactRow = memo(function DrawerArtifactRow({ item, active, action
         </span>
         <span className="drawer__item-text">{item.name || item.artifact_id}</span>
       </button>
-      {projectChip && (
-        <button
-          type="button"
-          className="drawer__project-chip"
-          title={`Open ${projectChip.name}`}
-          aria-label={`Open project ${projectChip.name}`}
-          onClick={() => actions.openProject({ id: projectChip.id, name: projectChip.name })}
-        >
-          <ProjectIdentityIcon
-            project={{ id: projectChip.id, name: projectChip.name }}
-            size={16}
-            label=""
-          />
-          <span>{projectChip.name}</span>
-        </button>
-      )}
     </div>
   )
 })
@@ -1514,6 +1496,7 @@ const DrawerRow = memo(function DrawerRow({
   active,
   needsOwnerInput,
   streaming,
+  failed,
   // App rows only: the app's owning chat is streaming, i.e. the agent is
   // actively building/editing this app right now. Reuses the streaming
   // dot's animation with a "Building" label so an app under construction
@@ -2122,7 +2105,7 @@ const DrawerRow = memo(function DrawerRow({
             edge (where the pin lives). aria-label exposes the state. */}
         {needsOwnerInput ? (
           <span
-            className="drawer__owner-input-dot"
+            className="drawer__attention-diamond drawer__owner-input-dot"
             role="img"
             aria-label="Your input is needed"
             title="Your input is needed"
@@ -2142,6 +2125,13 @@ const DrawerRow = memo(function DrawerRow({
           >
             <Pause width={8} height={8} aria-hidden="true" />
           </span>
+        ) : failed ? (
+          <span
+            className="drawer__failure-dot"
+            role="img"
+            aria-label="Latest run failed"
+            title="Latest run failed"
+          />
         ) : building ? (
           <span
             className="drawer__streaming-dot"
@@ -2187,9 +2177,12 @@ const DrawerRow = memo(function DrawerRow({
 const DrawerItemMenu = memo(function DrawerItemMenu({
   menu,
   item,
+  projects,
   actions,
   restoreFocusRef,
 }) {
+  const importSources = projectQueries.importSources.useQuery(Boolean(menu && item && ['app', 'artifact'].includes(menu.kind)))
+  const projectAction = projectSourceAction(projects, importSources.data, menu?.kind, menu?.id)
   const kind = menu?.kind || 'chat'
   const id = menu?.id
   const surface = menu?.surface || 'drawer'
@@ -2204,7 +2197,10 @@ const DrawerItemMenu = memo(function DrawerItemMenu({
       pinned={pinned}
       canInstall={kind === 'app' && Boolean(item?.slug)}
       canShare={kind === 'app' && isDrawerAppShareEligible(item)}
-      canInspectSource={kind === 'app'}
+      projectActionLabel={projectAction?.label}
+      onProjectAction={() => projectAction?.project
+        ? actions.openProject(projectAction.project)
+        : actions.addToProjects(projectAction.source)}
       placement={menu?.placement}
       focusFirstAction={menu?.focusFirstAction === true}
       restoreFocusRef={restoreFocusRef}
@@ -2214,7 +2210,6 @@ const DrawerItemMenu = memo(function DrawerItemMenu({
       onRename={() => actions.startRename(kind, id, surface)}
       onInstall={() => actions.install(item)}
       onShare={() => actions.share(item)}
-      onInspectSource={() => actions.inspectSource(item)}
       onDelete={() => actions.remove(kind, id)}
       onDeleteData={() => actions.removeData(id)}
     />

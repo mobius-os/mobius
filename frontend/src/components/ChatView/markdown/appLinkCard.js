@@ -2,7 +2,7 @@
 
 const ITEM_ID_RE = /^[A-Za-z0-9_-]{1,64}$/
 const CARD_TYPES = Object.freeze({
-  artifacts: { kindKey: 'artifact', appName: 'Artifacts', kind: 'Artifact' },
+  artifacts: { kindKey: 'artifact', appName: 'Pages', kind: 'Page' },
   mapbook: { kindKey: 'map', appName: 'Maps', kind: 'Saved map' },
   maps: { kindKey: 'map', appName: 'Maps', kind: 'Saved map' },
 })

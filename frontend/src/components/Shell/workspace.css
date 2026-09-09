@@ -136,22 +136,14 @@ html[data-mode-view-transition="exit"]::view-transition-old(mode-navigation-draw
   scroll-margin-inline-end: 34px;
 }
 
-/* Which tab is open in each pane, and which pane has focus, both read from the
-   strips' active pill — there is NO ring or border around any pane's content
-   (owner call, live testing). The base `.shell__tab--active` (Shell.css) already
-   tints the active pill with the accent; here we add DEGREE, scoped to the tiled
-   workspace so the single-pane top nav keeps its own look:
-     - every pane's active pill stays tinted, so a glance shows each pane's open
-       tab;
-     - the FOCUSED pane's active pill carries a 2px accent underline at full
-       strength;
-     - unfocused panes' active pills drop the underline and soften the tint, so
-       they read as secondary without any content-area chrome. */
+/* Which tab is open in each pane reads from the strips' active pill — there is
+   NO ring, underline, or border around any pane's content (owner call, live
+   testing). The base `.shell__tab--active` (Shell.css) already tints the active
+   pill with the accent; here we only soften its border by degree, scoped to the
+   tiled workspace so the single-pane top nav keeps its own look. The focused
+   pane stays slightly stronger than the unfocused panes without adding a
+   persistent focus mark. */
 .workspace__strip--focused .shell__tab--active {
-  box-shadow: inset 0 -2px 0 0 var(--accent);
-  /* V4 (vizreview): soften the base full-accent border on the FOCUSED pane's active
-     pill so the 2px underline above is what carries focus — a full accent border
-     framed the pill and masked the underline. The tint (Shell.css) is kept. */
   border-color: color-mix(in srgb, var(--accent) 45%, var(--border-light));
 }
 .workspace__strip:not(.workspace__strip--focused) .shell__tab--active {

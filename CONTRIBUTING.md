@@ -22,6 +22,71 @@ guide gets a fresh clone to a running dev/test loop.
 tools). `ARCHITECTURE.md` is the deep architecture reference — read it before
 any non-trivial change.
 
+## Reviewed source conflicts in Contribute
+
+Contribute normally proves that the exact published patch is already contained
+in the installed source. A failed proof is not evidence that a broad local
+feature stack is a prerequisite. First distinguish missing behavior from a
+textual overlap caused by adapting the same fix to upstream.
+
+Keep the automatic exact-tree guard unchanged. When a prepared patch needs an
+explicit source review, its active source chat can use the existing private
+`POST /api/github/contributions/{app_id}/{record_id}/source-continuity` operation.
+This never pushes, publishes, changes the live source, or approves a restart.
+
+There are two kinds of source review:
+
+- **Later local refinement:** the captured source contained the exact patch,
+  but subsequent committed changes overlapped it. Review the complete source
+  advance and attest the existing continuity envelope.
+- **Upstream adaptation:** the installed variant and reviewed patch overlap
+  without ever being byte-identical. Call `app.app_git.preview_source_resolution`
+  using the live source directory, recorded `base_sha`, `head_sha`,
+  `diff_sha256`, and review checkout as `review_source_dir`. Pass the current
+  committed live HEAD as `source_sha`, not an older captured source revision.
+  This read-only preview runs its Git proof in a disposable repository. It
+  returns `None` if there are no real conflicts or if any nonconflicting change
+  is missing from the installed source. Otherwise its `conflict_paths`, full
+  `diff` bytes, and `diff_sha256` describe the exact resolution to review.
+
+Read every line of the published diff and the resolution diff, including all
+local choices on conflicting paths. Verify the same behavior is retained, all
+local-only changes remain local, and no private material is proposed publicly.
+A matching digest is identity evidence, not a semantic review. Never submit a
+resolution digest merely because Git reported a conflict. If the patch is
+missing or the resolution changes intent, repair the source/review instead.
+Record the resolution rationale and conflict paths in the private quality
+review, then pin its `all_clear` verdict to the exact reviewed head.
+
+The attestation body has these exact fields:
+
+```json
+{
+  "base_sha": "reviewed base commit",
+  "head_sha": "reviewed head commit",
+  "source_sha": "captured source commit from the record",
+  "diff_sha256": "canonical published diff digest",
+  "reviewed_through_sha": "current clean installed source commit",
+  "source_advance_diff_sha256": "canonical captured-to-current source diff digest",
+  "review_identity_sha256": "current reviewed record envelope digest",
+  "source_resolution_sha256": "preview resolution digest, for adaptation only"
+}
+```
+
+Use `app.app_git.canonical_diff` for the complete source advance and
+`app.github_contributions._reviewed_source_identity(record)` for the versioned
+review envelope. For adaptation, the captured and current source may be the
+same commit; the advance digest is then SHA-256 of empty bytes. Omit
+`source_resolution_sha256` for ordinary later-refinement continuity.
+
+The server independently checks the active source-chat authority, all-clear
+record, exact branch/diff, clean current source, both review digests, and the
+resolution. The immutable witness survives restart and exact retry but expires
+on a source rewind or any later commit touching a reviewed path, including a
+revert-and-reapply or a merge-parent change. Only a later, separately approved
+Send converts it into publication provenance. Accepted upstream work still
+uses the ordinary update/resolver path, preserving local resolved differences.
+
 ## Tests
 
 Required PR CI is `.github/workflows/test.yml`; the commands below mirror it.
@@ -78,14 +143,17 @@ as an explicit release-baseline change. The upgrade contract runs production's
 `create_all` → migrations order twice, requires an idempotent ledger, and then
 requires `mapped_schema_gaps()` to be empty.
 
-The semantic-history manifest freezes every published migration function. A
-new migration appends its version and hash; a changed existing hash means the
-old function must be restored and the correction expressed as another
-migration. Before sharing any schema change, run the dependency-free history
-gate and the fast contracts; before landing it, run the full backend suite:
+The history gate compares migration-owned code with the target branch itself:
+published functions and their local helpers cannot change, and new versions
+can only append. New migrations must also be self-contained; importing mutable
+runtime ``app`` modules makes historical behavior drift with unrelated code.
+Three named legacy migrations predate that boundary and are grandfathered,
+but no new exception should be added. Before sharing any schema change, run
+the dependency-free history gate against the branch you will target and the
+fast contracts; before landing it, run the full backend suite:
 
 ```bash
-python3 backend/scripts/check-schema-migrations.py
+python3 backend/scripts/check-schema-migrations.py --against origin/main
 scripts/test.sh --fast
 scripts/wt-pytest.sh backend/tests/test_db_migrations.py -q
 ```
@@ -222,3 +290,42 @@ open work items.
 Python: 2-space indent, 80-char lines, Google-style docstrings. Comments are full
 sentences (no Title Case, no enumerated steps). JS/JSX follows Vite defaults.
 There is no enforced linter config in-repo — match surrounding code.
+
+## Daily agent runtime proposals
+
+`agent-runtime-updates.yml` checks stable releases daily at 05:23 UTC in
+`mobius-os/mobius` only. It maintains one automation-owned draft PR; it never
+merges, redeploys an instance, or installs packages on an owner's volume.
+New changes return the proposal to draft. Keep required human review, stale
+approval dismissal, required checks, and the merge queue enabled on `main`.
+GitHub must allow Actions to create pull requests. These are repository-owned
+settings, not permissions the updater changes for itself.
+
+The updater modifies existing declarations rather than adding a second runtime
+manifest. Claude follows the SDK's bundled CLI (which can trail standalone
+Claude releases). Codex's stable npm version selects the matching Git release's
+immutable Python SDK commit and declared CLI package dependency. A missing
+matching release or changed package contract fails visibly instead of mixing
+versions. Only a changed Claude SDK pin regenerates the Python lock, retaining
+unrelated pins where compatible.
+
+The repository token cannot trigger PR checks through a bot-created PR, so the
+proposal workflow explicitly dispatches the existing full `Tests` workflow on
+the updated branch. A failed check/dispatch stays visible; there is no auto-merge
+or separate, weaker acceptance suite. Review the diff and checks, mark the PR
+ready, and use the ordinary protected merge process. Changes to this workflow
+need to reach the default branch before its schedule exists.
+
+Preview without changing or installing anything:
+
+```bash
+python3 scripts/update-agent-runtimes.py
+python3 -m unittest discover -s scripts -p 'test_update_agent_runtimes.py'
+```
+
+Container replacement discards installations in the old container's writable
+layer. The image already shares Claude's bundled executable and links Codex's
+SDK package to its one CLI payload, removing the duplicate payload in the same
+build layer. Persistent-volume custom installations are different: identify
+exact obsolete copies and verify their replacements before approved cleanup.
+Never treat an authentication/configuration directory as an installation cache.

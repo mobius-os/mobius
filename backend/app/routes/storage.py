@@ -198,6 +198,92 @@ def _recheck_app_identity(db: Session, app_id: int, expected_nonce) -> None:
     raise HTTPException(status_code=404, detail="App not found.")
 
 
+# The write/delete core shared by the owner routes and the anonymous public
+# lane. Each function runs UNDER the caller's per-app storage lock, after the
+# caller has re-verified that the app is still the same one it authorized
+# (`_recheck_app_identity` / public `_same_live_grant`): the lock is what makes
+# the CAS check and the quota computation atomic against a concurrent same-app
+# write or an interleaved uninstall.
+
+def check_write_precondition(
+  file_path: Path, if_match: str | None, if_none_match: str | None,
+) -> int:
+  """Reject a directory destination or a failed CAS precondition.
+
+  Returns the destination's current size (0 when absent) so the quota check
+  charges an overwrite only for its delta.
+  """
+  if file_path.is_dir():
+    raise HTTPException(status_code=400, detail="Destination is a directory.")
+  if if_none_match is not None and if_none_match.strip() == "*":
+    if file_path.exists():
+      raise HTTPException(status_code=412, detail="Storage precondition failed.")
+  elif if_match is not None:
+    if not file_path.is_file() or not etag_matches(
+      file_version_token(file_path), if_match
+    ):
+      raise HTTPException(status_code=412, detail="Storage precondition failed.")
+  try:
+    return file_path.stat().st_size if file_path.is_file() else 0
+  except OSError:
+    return 0
+
+
+def commit_write(
+  data_dir: str,
+  app_id: int,
+  path: str,
+  file_path: Path,
+  content: str | bytes,
+  stored_mime: str | None,
+  *,
+  before_size: int,
+) -> str:
+  """Quota-check, atomically write, and record the MIME sidecar for one file.
+
+  Returns the written file's version token. `app_dir_usage` re-walks the tree
+  on every call so the quota can never drift from a stale counter; the cap is
+  read from the module so a test can shrink it.
+  """
+  base = Path(data_dir) / "apps" / str(app_id)
+  new_size = len(
+    content.encode("utf-8") if isinstance(content, str) else content
+  )
+  projected = app_dir_usage(base) - before_size + new_size
+  if projected > storage_io.MAX_APP_STORAGE_BYTES:
+    raise HTTPException(
+      status_code=413,
+      detail=(
+        "App storage quota exceeded — this write would bring the app "
+        f"to {projected} bytes, over the "
+        f"{storage_io.MAX_APP_STORAGE_BYTES}-byte per-app limit. Delete "
+        "unused files or store large media outside per-app storage."
+      ),
+    )
+  atomic_write(file_path, content)
+  version = file_version_token(file_path)
+  # Inside the lock so the sidecar can't outlive a racing delete.
+  write_content_type(data_dir, Path("apps") / str(app_id), path, stored_mime)
+  return version
+
+
+def remove_file(data_dir: str, app_id: int, path: str, file_path: Path) -> int:
+  """Unlink one stored file and its MIME sidecar; returns the freed bytes."""
+  if not file_path.exists():
+    raise HTTPException(status_code=404, detail="File not found.")
+  if not file_path.is_file():
+    raise HTTPException(status_code=400, detail="Path is not a file.")
+  try:
+    deleted_size = file_path.stat().st_size
+  except OSError:
+    deleted_size = 0
+  file_path.unlink()
+  # Dropped in lockstep so a later write to the same path with a different
+  # type isn't shadowed by the stale stored MIME.
+  delete_content_type(data_dir, Path("apps") / str(app_id), path)
+  return deleted_size
+
+
 def _resolve(base: Path, rel: str) -> Path:
   """Returns a path within base, raising 400 on traversal attempts.
 
@@ -753,13 +839,9 @@ async def write_app_file(
   base = Path(data_dir) / "apps" / str(app_id)
   file_path = _resolve(base, path)
   content, stored_mime = await _decode_write_body(request, file_path)
-  new_size = len(
-    content.encode("utf-8") if isinstance(content, str) else content
-  )
   if_match = request.headers.get("if-match")
   if_none_match = request.headers.get("if-none-match")
   wants_cas = if_match is not None or if_none_match is not None
-  new_version = None
   # Serialize the write against this app's uninstall AND re-verify, under the
   # lock, that this is still the SAME app (its token_nonce is unchanged). A
   # write that paused to read its body could otherwise land after an
@@ -769,51 +851,11 @@ async def write_app_file(
   # lock fully serializes write vs uninstall.
   async with fs_locks.app_storage_lock(app_id):
     _recheck_app_identity(db, app_id, expected_nonce)
-    # A directory destination would make the write raise IsADirectory and
-    # surface as an opaque 500; reject it explicitly.
-    if file_path.is_dir():
-      raise HTTPException(status_code=400, detail="Destination is a directory.")
-    if if_none_match is not None and if_none_match.strip() == "*":
-      if file_path.exists():
-        raise HTTPException(status_code=412, detail="Storage precondition failed.")
-    elif if_match is not None:
-      if not file_path.is_file() or not etag_matches(
-        file_version_token(file_path), if_match
-      ):
-        raise HTTPException(status_code=412, detail="Storage precondition failed.")
-    # Snapshot the pre-write size for size_delta. A missing file is zero; a
-    # stat failure (race with delete) is also zero — best-effort, not
-    # load-bearing.
-    try:
-      before_size = file_path.stat().st_size if file_path.is_file() else 0
-    except OSError:
-      before_size = 0
-    # Per-app quota: reject a write that would push the app's total stored
-    # bytes over the cap, BEFORE writing — so one runaway app can't fill
-    # /data. An overwrite charges only the delta (new minus the bytes it
-    # replaces), so rewriting the same key never falsely exhausts the quota.
-    # Computed inside the lock so a concurrent same-app write can't both pass
-    # the check and overflow. `app_dir_usage` re-walks the tree (it can't
-    # drift from a stale counter); the cap is read from the module so a test
-    # can shrink it.
-    projected = app_dir_usage(base) - before_size + new_size
-    if projected > storage_io.MAX_APP_STORAGE_BYTES:
-      raise HTTPException(
-        status_code=413,
-        detail=(
-          "App storage quota exceeded — this write would bring the app "
-          f"to {projected} bytes, over the "
-          f"{storage_io.MAX_APP_STORAGE_BYTES}-byte per-app limit. Delete "
-          "unused files or store large media outside per-app storage."
-        ),
-      )
-    atomic_write(file_path, content)
-    if wants_cas:
-      new_version = file_version_token(file_path)
-    # Record (or clear) the served MIME sidecar so a cold read of an
-    # extensionless or custom-MIME blob returns the app's declared type.
-    # Inside the lock so the sidecar can't outlive a racing delete.
-    write_content_type(data_dir, Path("apps") / str(app_id), path, stored_mime)
+    before_size = check_write_precondition(file_path, if_match, if_none_match)
+    version = commit_write(
+      data_dir, app_id, path, file_path, content, stored_mime,
+      before_size=before_size,
+    )
   # storage_write: debounced per (app_id, path) to ≤1 event per
   # minute. Agents writing many small files in a single chat shouldn't
   # flood the log. size_delta uses post-write size minus pre-write
@@ -830,8 +872,8 @@ async def write_app_file(
       size_delta=after_size - before_size,
     )
   response = Response(status_code=204)
-  if new_version is not None:
-    response.headers["ETag"] = new_version
+  if wants_cas:
+    response.headers["ETag"] = version
   return response
 
 
@@ -858,20 +900,7 @@ async def delete_app_file(
   # review round-8 #1, round-9 #1).
   async with fs_locks.app_storage_lock(app_id):
     _recheck_app_identity(db, app_id, expected_nonce)
-    if not file_path.exists():
-      raise HTTPException(status_code=404, detail="File not found.")
-    if not file_path.is_file():
-      raise HTTPException(status_code=400, detail="Path is not a file.")
-    # Capture size before unlink so size_delta reflects the full removal
-    # (negative number = freed bytes).
-    try:
-      deleted_size = file_path.stat().st_size
-    except OSError:
-      deleted_size = 0
-    file_path.unlink()
-    # Drop the MIME sidecar in lockstep so a later write to the same path
-    # with a different type isn't shadowed by the stale stored MIME.
-    delete_content_type(data_dir, Path("apps") / str(app_id), path)
+    deleted_size = remove_file(data_dir, app_id, path, file_path)
   if activity.should_emit_storage_write(app_id, path):
     activity.log_event(
       "storage_write",

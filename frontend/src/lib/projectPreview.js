@@ -13,7 +13,9 @@ const SAFE_PROJECT_PREVIEW_CSP = [
 // truthful place for disposable test data. The opaque frame delegates this
 // tiny storage surface to its parent; ProjectPreviewFrame owns the browser-
 // private namespace and never hands the frame a shell or project credential.
-const PROJECT_PREVIEW_RUNTIME = `<script data-mobius-project-preview-runtime>
+function projectPreviewRuntime(dataScope = 'personal') {
+  const scope = dataScope === 'shared' ? 'shared' : 'personal'
+  return `<script data-mobius-project-preview-runtime>
 (() => {
   const pending = new Map();
   const listeners = new Map();
@@ -24,7 +26,7 @@ const PROJECT_PREVIEW_RUNTIME = `<script data-mobius-project-preview-runtime>
     const message = { type: 'mobius:project-preview-storage', requestId, method, path, value };
     const timeout = setTimeout(() => {
       pending.delete(requestId);
-      reject(new Error('Personal preview data did not connect. Reload the preview and try again.'));
+      reject(new Error('${scope === 'shared' ? 'Shared app data' : 'Personal preview data'} did not connect. Reload the preview and try again.'));
     }, 5000);
     pending.set(requestId, { resolve, reject, timeout, message });
     if (connected) parent.postMessage(message, '*');
@@ -32,6 +34,19 @@ const PROJECT_PREVIEW_RUNTIME = `<script data-mobius-project-preview-runtime>
   addEventListener('message', event => {
     if (event.source !== parent || !event.data) return;
     const message = event.data;
+    if (message.type === 'mobius:project-theme' && typeof message.theme?.css === 'string') {
+      let style = document.getElementById('mobius-inherited-project-theme');
+      if (!style) {
+        style = document.createElement('style');
+        style.id = 'mobius-inherited-project-theme';
+        document.head.prepend(style);
+      }
+      // Data, not HTML: even a closing style tag in CSS cannot inject markup.
+      style.textContent = message.theme.css + '\\nbody { margin: 0; background: var(--bg); color: var(--text); font-family: var(--font, system-ui); } button, input, textarea, select { font: inherit; }';
+      document.documentElement.dataset.theme = message.theme.mode === 'light' ? 'light' : 'dark';
+      document.documentElement.style.colorScheme = document.documentElement.dataset.theme;
+      return;
+    }
     if (message.type === 'mobius:project-preview-storage-connected') {
       connected = true;
       for (const request of pending.values()) parent.postMessage(request.message, '*');
@@ -62,18 +77,19 @@ const PROJECT_PREVIEW_RUNTIME = `<script data-mobius-project-preview-runtime>
       return () => { group.delete(listener); if (!group.size) listeners.delete(path); };
     },
   };
-  window.mobius = Object.freeze({ ...(window.mobius || {}), storage, preview: Object.freeze({ dataScope: 'personal' }) });
+  window.mobius = Object.freeze({ ...(window.mobius || {}), storage, preview: Object.freeze({ dataScope: '${scope}' }) });
   dispatchEvent(new CustomEvent('mobius:preview-ready'));
 })();
 </script>`
+}
 
-export function safeProjectHtmlDocument(source) {
+export function safeProjectHtmlDocument(source, dataScope = 'personal') {
   const csp = `<meta http-equiv="Content-Security-Policy" content="${SAFE_PROJECT_PREVIEW_CSP}">`
   // Keep the policy ahead of every untrusted byte. Inserting it after a
   // literal <head> is not sufficient: malformed HTML can place a fetching
   // element before that tag, causing the parser to issue a request (and ignore
   // the now-late head) before it ever encounters the policy.
-  return `${csp}${PROJECT_PREVIEW_RUNTIME}${String(source ?? '')}`
+  return `${csp}${projectPreviewRuntime(dataScope)}${String(source ?? '')}`
 }
 
 export function projectPreviewSandbox() {
@@ -106,7 +122,7 @@ function escapeInlineScript(source) {
  * interactive preview without exposing a project directory as a public URL.
  * Missing or remote dependencies stay in the document and are blocked by CSP.
  */
-export async function assembleProjectHtmlPreview(source, entryPath, loadText, loadDataUri = null) {
+export async function assembleProjectHtmlPreview(source, entryPath, loadText, loadDataUri = null, dataScope = 'personal') {
   let document = String(source ?? '')
   const stylesheet = /<link\b([^>]*\brel=["']?stylesheet["']?[^>]*)>/gi
   const script = /<script\b([^>]*\bsrc=["']([^"']+)["'][^>]*)><\/script\s*>/gi
@@ -118,7 +134,10 @@ export async function assembleProjectHtmlPreview(source, entryPath, loadText, lo
     if (!path) continue
     try {
       const content = await loadText(path)
-      document = document.replace(match[0], `<style data-project-file="${path}">${content}</style>`)
+      document = document.replace(
+        match[0],
+        () => `<style data-project-file="${path}">${content}</style>`,
+      )
     } catch { /* the CSP-blocked original makes a missing dependency visible */ }
   }
 
@@ -130,7 +149,7 @@ export async function assembleProjectHtmlPreview(source, entryPath, loadText, lo
       const content = await loadText(path)
       document = document.replace(
         match[0],
-        `<script data-project-file="${path}">${escapeInlineScript(content)}</script>`,
+        () => `<script data-project-file="${path}">${escapeInlineScript(content)}</script>`,
       )
     } catch { /* the CSP-blocked original makes a missing dependency visible */ }
   }
@@ -162,7 +181,7 @@ export async function assembleProjectHtmlPreview(source, entryPath, loadText, lo
         `src=${match[1]}${match[2]}${match[1]}`,
         `src=${match[1]}${uri}${match[1]}`,
       )
-      document = document.replace(match[0], replaced)
+      document = document.replace(match[0], () => replaced)
     }
 
     const cssUrl = /url\(\s*(["']?)([^)"']+)\1\s*\)/gi
@@ -173,5 +192,5 @@ export async function assembleProjectHtmlPreview(source, entryPath, loadText, lo
     }
   }
 
-  return safeProjectHtmlDocument(document)
+  return safeProjectHtmlDocument(document, dataScope)
 }

@@ -11,6 +11,16 @@ const css = readFileSync(
   'utf8',
 )
 
+const updates = readFileSync(
+  new URL('../../components/SettingsView/PlatformUpdates.jsx', import.meta.url), 'utf8',
+)
+const updateCss = readFileSync(
+  new URL('../../components/SettingsView/PlatformUpdates.css', import.meta.url), 'utf8',
+)
+const requests = readFileSync(
+  new URL('../../components/SettingsView/usePlatformUpdates.js', import.meta.url), 'utf8',
+)
+
 test('appearance keeps one icon switch without making the section clickable', () => {
   assert.match(view, /settings__section--appearance/)
   assert.match(view, /className="settings__appearance-toggle"[\s\S]*role="switch"[\s\S]*onClick=\{toggleTheme\}/)
@@ -22,56 +32,54 @@ test('appearance keeps one icon switch without making the section clickable', ()
   assert.match(css, /\.settings__appearance-toggle\s*\{[^}]*grid-template-columns:\s*repeat\(2, 34px\);/s)
 })
 
-test('model and concise synced version use the same normal-weight standard highlight', () => {
+test('last model keeps its normal-weight standard highlight', () => {
   assert.match(view, /provider-row__status-text settings__last-model/)
   assert.match(view, /Choose which models appear\. New chats use your last pick\./)
   assert.match(view, /Last model: <span className="settings__standard-highlight">/)
-  assert.match(view, /upstreamCommitDate[\s\S]*settings__standard-highlight/)
-  assert.match(view, /contained_upstream_committed_at/)
-  assert.match(view, /containerVersionIdentity\(version\)/)
-  assert.match(view, /settings__build-kind">Möbius/)
-  assert.match(view, /settings__build-kind">Container/)
-  assert.doesNotMatch(view, /Current with upstream|Last checked|upstream_checked_at|settings__update-check/)
-  assert.doesNotMatch(view, /Serving local \{mobiusVersion\.localSha\}/)
   assert.match(css, /\.settings__last-model\s*\{[^}]*color:\s*var\(--muted\);[^}]*font-weight:\s*400;/s)
   assert.match(css, /\.settings__standard-highlight\s*\{[^}]*color:\s*var\(--green\);[^}]*font-weight:\s*inherit;/s)
 })
 
-test('restart explains its container effect on demand', () => {
-  assert.match(view, /SettingsInfoLabel[\s\S]*aria-expanded=\{expanded\}/)
-  assert.match(view, /settings__info-bubble[\s\S]*role="tooltip"/)
-  assert.match(view, /dismissOnOutsidePress[\s\S]*dismissOnEscape/)
-  assert.match(view, /label="Restart"[\s\S]*settings-restart-info/)
-  assert.match(view, /does not install an update/)
-  // The standalone manual container-rebuild control was removed: an image-level
-  // update now drives the rebuild on confirmation from the update review flow.
-  assert.doesNotMatch(view, /label=\{rebuildBootstrap \? 'Container updates' : 'Rebuild container'\}/)
-  assert.doesNotMatch(view, /Rebuild now|Rebuild container|settings-rebuild-info/)
-  assert.doesNotMatch(view, /Replace container|Replace now|Replacing…/)
-  assert.match(css, /\.settings__info-button\s*\{[^}]*width:\s*32px;[^}]*height:\s*32px;/s)
-  assert.match(css, /\.settings__info-bubble\s*\{[^}]*position:\s*absolute;[^}]*bottom:\s*calc\(100% \+ 10px\);/s)
+test('version details distinguish served Möbius from its container identity', () => {
+  assert.match(view, /<PlatformUpdates/)
+  assert.match(updates, /platformVersionIdentity\(platform, version\)/)
+  assert.match(updates, /containerVersionIdentity\(version\)/)
+  assert.match(updates, /contained_upstream_committed_at/)
+  assert.match(updates, /<dt>Installed update<\/dt>/)
+  assert.match(updates, /<dt>Current system<\/dt>/)
+  assert.match(updates, /mobiusVersion\.primarySha/)
+  assert.match(updates, /containerVersion\.sha/)
+  assert.doesNotMatch(updates, /Current with upstream|Last checked|upstream_checked_at/)
 })
 
-test('historical rebuild failures do not become permanent Settings errors', () => {
-  // The host controller deliberately retains its last terminal status. Only a
-  // rebuild initiated by this mounted, reviewed update flow may surface that
-  // result; otherwise a stale failure would outlive the removed manual action.
-  assert.match(
-    view,
-    /\['failed', 'rolled_back', 'needs_recovery'\][\s\S]*!rebuildInitiatedHereRef\.current[\s\S]*!rebuildReviewedUpdateRef\.current[\s\S]*return/,
-  )
+test('restart explains the interruption and its container boundary before confirmation', () => {
+  assert.match(updates, /Restart server<\/button>/)
+  assert.match(updates, /aria-label="Confirm restart"/)
+  assert.match(updates, /briefly interrupts active chats/)
+  assert.match(updates, /does not replace the container/)
+  assert.match(updates, /onClick=\{update\.restart\}/)
+  assert.match(updates, /onClick=\{askRestart\}/)
+  // An image replacement still belongs to its exact reviewed update, not a
+  // second unreviewed maintenance action beside the server restart.
+  assert.doesNotMatch(updates, /Rebuild now|Rebuild container|Replace now/)
 })
 
-test('platform status failures replace cached current claims with unknown state', () => {
-  assert.match(view, /platformStatusUnavailable,/)
-  assert.match(
-    view,
-    /const refreshPlatform = useCallback[\s\S]*if \(!res\.ok\) throw new Error[\s\S]*catch \{[\s\S]*setPlatform\(current => platformStatusUnavailable\(current\)\)/,
-  )
-  assert.match(
-    view,
-    /const platformP = \(async \(\) => \{[\s\S]*catch \(error\) \{[\s\S]*setPlatform\(current => platformStatusUnavailable\(current\)\)[\s\S]*throw error/,
-  )
+test('Settings omits historical container diagnostics but keeps current action errors', () => {
+  assert.doesNotMatch(updates, /Last container update|Update details|rebuild\.expected_sha|rebuild\.updated_at/)
+  assert.doesNotMatch(updates, /The source is installed\./)
+  assert.match(updates, /update\.error && <Alert/)
+  assert.match(updates, /platformUpdateRepairReason/)
+  assert.match(updates, /rebuildProgressMessage\(rebuild\)/)
+  assert.doesNotMatch(updates + requests, /rebuildInitiatedHereRef|rebuildReviewedUpdateRef/)
+  assert.match(requests, /if \(!reconnect\) return/)
+})
+
+test('status failures project unknown rather than retaining an unchecked current claim', () => {
+  assert.match(requests, /platformStatusUnavailable/)
+  assert.match(requests, /if \(!response\.ok\)/)
+  assert.match(requests, /refreshPlatform[\s\S]*responseBody\(await api\.platform\.status\(\)\)/)
+  assert.match(requests, /if \(!preserveCurrentOnFailure\) setPlatform\(current => platformStatusUnavailable\(current\)\)/)
+  assert.match(requests, /results\[0\]\.status === 'rejected'[\s\S]*platformStatusUnavailable\(current\)/)
 })
 
 test('background agents are always draggable without reorder chrome or a trailing caret', () => {
@@ -99,6 +107,18 @@ test('provider-dependent settings stay unavailable until a provider is connected
   assert.match(view, /configuredProviders=\{configuredProviders\}/)
 })
 
+test('Möbius subscription is app-owned and follows Codex and Claude', () => {
+  assert.match(view, /const mobiusAvailable = providerStatusQuery\.data\?\.mobius\?\.available === true/)
+  assert.match(
+    view,
+    /name="OpenAI Codex"[\s\S]*name="Claude Code"[\s\S]*\{mobiusAvailable && \([\s\S]*name="Möbius subscription"/,
+  )
+  assert.match(view, /Sign in from Möbius · You to activate your trial\./)
+  assert.match(view, /actionLabel="Open Möbius · You"/)
+  assert.match(view, /onOpenApp\?\.\('identity'\)/)
+  assert.doesNotMatch(view, /Claim trial|connectMobius|startLogin\(\)/)
+})
+
 test('new provider connections use the curated unattended defaults', () => {
   assert.match(view, /claude: 'claude-opus-4-8'/)
   assert.match(view, /codex: 'gpt-5\.6-terra'/)
@@ -124,4 +144,53 @@ test('appearance indicator waits for the same seeded theme repaint as the palett
   assert.doesNotMatch(view, /setThemeMode\(newMode\)/)
   assert.match(view, /await themeService\.toggleTheme\(queryClient, currentMode, api\)/)
   assert.match(view, /setThemeMode\(themeModeQuery\.data === 'light'/)
+})
+
+
+test('original Settings keeps spacious rounded cards and full model summaries', () => {
+  assert.match(css, /\.settings\s*\{[^}]*padding:\s*28px 22px 20px;/s)
+  assert.match(css, /\.settings__section\s*\{[^}]*border-radius:\s*8px;[^}]*padding:\s*17px;/s)
+  assert.doesNotMatch(css, /\.settings \.provider-row\s*\{/)
+  assert.match(css, /\.settings-bg-row\s*\{[^}]*min-height:\s*50px;/s)
+  assert.match(view, /title=\{selectedModel \|\| triggerLabel\}/)
+  assert.match(view, /className="model-trigger__id"/)
+  assert.match(view, /<ModelSheet[\s\S]*onEffortChange=\{onEffortChange\}/)
+})
+
+test('compact Updates pairs its status with actions without redundant success copy', () => {
+  assert.match(updates, /platform-updates__heading[\s\S]*role="status"/)
+  assert.doesNotMatch(updates, /No action needed\./)
+  assert.match(updates, /aria-label="Confirm restart"/)
+  assert.match(updates, /className={`settings__btn settings__btn--sm/)
+  assert.match(updates, /settings__btn--outline settings__btn--sm"[^>]*>Restart server<\/button>/)
+  assert.match(updateCss, /\.platform-updates > \.platform-updates__actions\s*\{[^}]*flex-direction:\s*column;/s)
+  assert.doesNotMatch(updateCss, /platform-updates__maintenance/)
+})
+
+
+test('provider actions keep their full labels on one line without a width cap', () => {
+  assert.match(css, /\.settings \.provider-row__action\s*\{[^}]*white-space:\s*nowrap;/s)
+  assert.doesNotMatch(css, /\.settings \.provider-row__action\s*\{[^}]*max-width:/s)
+})
+
+
+test('simple Updates keeps versions and server restart visible outside optional details', () => {
+  const visible = updates.slice(0, updates.indexOf('{review && ('))
+  assert.match(visible, />Updates<\/h2>/)
+  assert.match(visible, /<dt>Installed update<\/dt>/)
+  assert.match(visible, /<dt>Current system<\/dt>/)
+  assert.match(visible, /onClick=\{askRestart\}>Restart server<\/button>/)
+  assert.match(updates, /aria-label="Confirm restart"/)
+})
+
+test('external update instructions come from the activation owner, not a second UI policy', () => {
+  assert.match(updates, /platform\?\.activation\?\.guidance/)
+  assert.doesNotMatch(updates, /scripts\/deploy-prod\.sh|hostMaintenanceNeeded|little maintenance/)
+})
+
+test('only top provider actions are pills; Updates inherits standard Settings corners', () => {
+  const providerCss = readFileSync(new URL('../../components/ProviderAuth/ProviderAuth.css', import.meta.url), 'utf8')
+  assert.match(css, /\.settings__btn\s*\{[^}]*border-radius:\s*8px;/s)
+  assert.doesNotMatch(updateCss, /border-radius:\s*999px/)
+  assert.match(providerCss, /\.provider-row__action\s*\{[^}]*border-radius:\s*999px;/s)
 })

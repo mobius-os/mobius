@@ -1,26 +1,10 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { Alert } from '@openai/apps-sdk-ui/components/Alert'
-import { ChevronDown, Info, Moon, Sun } from '@openai/apps-sdk-ui/components/Icon'
+import { ChevronDown, Moon, Sun } from '@openai/apps-sdk-ui/components/Icon'
 import GripVertical from 'lucide-react/dist/esm/icons/grip-vertical.mjs'
 import { api, clearQueryCache, clearToken } from '../../api/client.js'
-import { authQueries, modelQueries, settingsQueries, themeQueries, versionQueries } from '../../hooks/queries.js'
-import {
-  containerVersionIdentity,
-  platformVersionIdentity,
-} from '../../lib/platformVersionIdentity.js'
-import { formatUpstreamCommitDate } from '../../lib/platformProvenance.js'
-import {
-  rebuildIsActive,
-  rebuildPollShouldContinue,
-  rebuildProgressMessage,
-  rebuildRequestOutcome,
-} from '../../lib/containerRebuild.js'
-import {
-  platformStatusFromApply,
-  platformStatusUnavailable,
-  platformUpdateStatusLabel,
-} from '../../lib/platformUpdateState.js'
+import { authQueries, modelQueries, settingsQueries, themeQueries } from '../../hooks/queries.js'
 import { settleBackgroundAgentSave } from '../../lib/backgroundAgentSave.js'
 import { clearExplicitOwnerSession } from '../../lib/explicitLogout.js'
 import { stopShellInstallPassPreparation } from '../../lib/shellInstallPass.js'
@@ -29,26 +13,16 @@ import {
   PROVIDER_AVAILABILITY_PHASE,
   resolveProviderAvailability,
 } from '../../lib/providerAvailability.js'
-import {
-  restartCanReload,
-  restartPollDecision,
-} from '../../lib/restartReadiness.js'
-import { updateCheckOutcome, updateCheckLabel } from '../../lib/updateCheckPhase.js'
-import {
-  inspectShellUpdate,
-  releaseWaitingShellUpdate,
-} from '../../lib/shellUpdate.js'
 import * as themeService from '../../lib/themeService.js'
 import ProviderAuth from '../ProviderAuth/ProviderAuth.jsx'
 import CodexAuth from '../ProviderAuth/CodexAuth.jsx'
 import ProviderRow from '../ProviderAuth/ProviderRow.jsx'
+import ProviderConnection from '../ProviderAuth/ProviderConnection.jsx'
 import StatusDot from '../ui/StatusDot.jsx'
 import ModelSheet from '../ui/ModelSheet.jsx'
 import { modelEfforts, validEffort } from '../ui/modelEfforts.js'
 import ManageModelsModal from '../ChatView/ManageModelsModal.jsx'
-import UpdateRepairAction from './UpdateRepairAction.jsx'
-import { platformUpdateRepairReason } from '../../lib/platformUpdateRepair.js'
-import UpdateReviewModal from './UpdateReviewModal.jsx'
+import PlatformUpdates from './PlatformUpdates.jsx'
 import ProviderUsage from './ProviderUsage.jsx'
 import {
   formatPlanStatus,
@@ -56,38 +30,20 @@ import {
   providerAllowance,
   providerAllowanceSummary,
 } from './providerUsage.js'
-import { PROVIDER_INFO, PROVIDER_ORDER } from '../ChatView/providerRegistry.jsx'
+import { PROVIDER_INFO, PROVIDER_ORDER } from '../ChatView/ChatSettingsPanel.jsx'
 import '../ui/StatusDot.css'
 import '../ui/ModelSheet.css'
 import './SettingsView.css'
 
-// Order a provider's models with the currently-selected one first,
-// then the rest in registry order (which the backend returns newest →
-// oldest / most → least capable). Floating the active model to the top
-// of its group is what makes scrolling the picker feel natural — the
-// choice you reach for is always the first thing under your thumb.
-function orderSelectedFirst(models, selectedId) {
-  if (!Array.isArray(models) || !selectedId) return models || []
-  const sel = models.find((m) => m.id === selectedId)
-  if (!sel) return models
-  return [sel, ...models.filter((m) => m.id !== selectedId)]
-}
-
-const UPDATE_CHECKED_RESET_MS = 2200
-const RETURN_VIEW_KEY = 'mobius:return-view'
-const RESTART_SHELL_READY_PATH = '/shell/'
-const PLATFORM_APPLY_STATES = new Set([
-  'restart_needed', 'activation_needed', 'up_to_date', 'conflict', 'rolled_back',
-])
 const PROVIDER_CHOICES = [
-  { id: 'codex', label: 'OpenAI Codex' },
-  { id: 'claude', label: 'Claude Code' },
   { id: 'mobius', label: 'Möbius subscription' },
+  { id: 'claude', label: 'Claude Code' },
+  { id: 'codex', label: 'OpenAI Codex' },
 ]
 const DEFAULT_BACKGROUND_MODELS = {
+  mobius: 'inkling',
   claude: 'claude-opus-4-8',
   codex: 'gpt-5.6-terra',
-  mobius: 'inkling',
 }
 
 function defaultEffort(provider) {
@@ -128,60 +84,6 @@ function providerFromSettings(settings) {
   return isKnownProvider(settings?.provider) ? settings.provider : 'claude'
 }
 
-function SettingsInfoLabel({
-  label,
-  infoId,
-  expanded,
-  onToggle,
-  onDismiss,
-  children,
-}) {
-  const anchorRef = useRef(null)
-  const buttonRef = useRef(null)
-
-  useEffect(() => {
-    if (!expanded) return undefined
-
-    const dismissOnOutsidePress = (event) => {
-      if (!anchorRef.current?.contains(event.target)) onDismiss()
-    }
-    const dismissOnEscape = (event) => {
-      if (event.key !== 'Escape') return
-      onDismiss()
-      buttonRef.current?.focus()
-    }
-
-    document.addEventListener('pointerdown', dismissOnOutsidePress)
-    document.addEventListener('keydown', dismissOnEscape)
-    return () => {
-      document.removeEventListener('pointerdown', dismissOnOutsidePress)
-      document.removeEventListener('keydown', dismissOnEscape)
-    }
-  }, [expanded, onDismiss])
-
-  return (
-    <span ref={anchorRef} className="settings__label settings__info-anchor">
-      <span>{label}</span>
-      <button
-        ref={buttonRef}
-        className="settings__info-button"
-        type="button"
-        aria-label={`About ${label}`}
-        aria-controls={infoId}
-        aria-describedby={expanded ? infoId : undefined}
-        aria-expanded={expanded}
-        onClick={onToggle}
-      >
-        <Info width={16} height={16} aria-hidden="true" />
-      </button>
-      {expanded && (
-        <span id={infoId} className="settings__info-bubble" role="tooltip">
-          {children}
-        </span>
-      )}
-    </span>
-  )
-}
 
 function normalizeBackgroundAgents(backgroundAgents, defaultProvider = 'claude') {
   const rows = []
@@ -263,7 +165,7 @@ function BackgroundProviderRow({
     key: row.provider,
     label: info?.label || row.provider,
     Logo,
-    models: configured ? orderSelectedFirst(models, enabled ? selectedModel : null) : [],
+    models: configured ? models : [],
   }]
   const triggerLabel = enabled
     ? (selectedRow?.label || selectedModel || 'Choose model')
@@ -317,6 +219,7 @@ function BackgroundProviderRow({
         <button
           type="button"
           className={`model-trigger${enabled ? '' : ' model-trigger--off'}`}
+          title={selectedModel || triggerLabel}
           onClick={() => setSheetOpen(true)}
           disabled={!configured}
           aria-haspopup="dialog"
@@ -370,48 +273,6 @@ function BackgroundProviderRow({
   )
 }
 
-function returnToSettingsAfterReload() {
-  try { sessionStorage.setItem(RETURN_VIEW_KEY, 'settings') } catch {}
-}
-
-async function readRestartHealth() {
-  const response = await fetch('/api/health', {
-    cache: 'no-store',
-    credentials: 'same-origin',
-  })
-  if (!response.ok) return { ok: false, bootId: '' }
-  let body = null
-  try { body = await response.json() } catch {}
-  return {
-    ok: true,
-    bootId: typeof body?.boot_id === 'string' ? body.boot_id : '',
-  }
-}
-
-async function readRestartBootId() {
-  try {
-    const health = await readRestartHealth()
-    return health.ok ? health.bootId : ''
-  } catch {
-    return ''
-  }
-}
-
-async function shellDocumentReady() {
-  if (typeof window === 'undefined') return false
-  try {
-    const response = await fetch(new URL(RESTART_SHELL_READY_PATH, window.location.origin), {
-      cache: 'no-store',
-      credentials: 'same-origin',
-      headers: { Accept: 'text/html' },
-    })
-    if (!response.ok) return false
-    return (response.headers.get('content-type') || '').toLowerCase().includes('text/html')
-  } catch {
-    return false
-  }
-}
-
 export default function SettingsView({
   onThemeChange,
   onOpenChat,
@@ -424,7 +285,6 @@ export default function SettingsView({
   const settingsQuery = settingsQueries.owner.useQuery()
   const providerStatusQuery = authQueries.provider.statuses.useQuery()
   const themeModeQuery = themeQueries.mode.useQuery()
-  const versionQuery = versionQueries.current.useQuery()
   const [themeMode, setThemeMode] = useState(() => (
     typeof document !== 'undefined'
     && document.documentElement.getAttribute('data-theme') === 'light'
@@ -444,54 +304,8 @@ export default function SettingsView({
   // persist would otherwise bounce the knob without telling the user
   // why.
   const [themeError, setThemeError] = useState('')
-  const [restartPhase, setRestartPhase] = useState('idle')
-  const [restartError, setRestartError] = useState('')
-  const [restartSlow, setRestartSlow] = useState(false)
-  // A manual restart interrupts any live chat, so it's a deliberate two-step:
-  // the first tap arms the confirm, the second actually restarts.
-  const [restartConfirm, setRestartConfirm] = useState(false)
-  const [rebuildStatus, setRebuildStatus] = useState(null)
-  const [rebuildError, setRebuildError] = useState('')
-  const [rebuildRequesting, setRebuildRequesting] = useState(false)
-  const [rebuildStartedHere, setRebuildStartedHere] = useState(false)
-  const [serverInfo, setServerInfo] = useState(null)
-  const rebuildPreviousBootIdRef = useRef('')
-  const rebuildInitiatedHereRef = useRef(false)
-  const rebuildReconnectStartedRef = useRef(false)
-  const rebuildReviewedUpdateRef = useRef(false)
   const [signOutConfirm, setSignOutConfirm] = useState(false)
   const [signingOut, setSigningOut] = useState(false)
-  // Platform self-update (backend, frontend, and libraries as one release).
-  // 'idle' | 'applying' | 'resolving' | 'restarting'.
-  const [platform, setPlatform] = useState(null)
-  const [platformPhase, setPlatformPhase] = useState('idle')
-  const [platformProgress, setPlatformProgress] = useState(null)
-  const [platformError, setPlatformError] = useState('')
-  const [platformErrorCode, setPlatformErrorCode] = useState('')
-  const clearPlatformError = useCallback(() => { setPlatformError(''); setPlatformErrorCode('') }, [])
-  const [platformRestartSlow, setPlatformRestartSlow] = useState(false)
-  // Whether the update-review sheet is open. The "Update" button routes through
-  // it so the owner reviews the incoming changes before applying, rather than
-  // Apply firing on the first click.
-  const [reviewOpen, setReviewOpen] = useState(false)
-  // Keep one ref on the recommended next action so closing the review can
-  // focus its live replacement. A restart-pending row can now have TWO actions
-  // (check/review another release + restart), so this is no longer a single
-  // conditional action slot.
-  const platformActionRef = useRef(null)
-  const restorePlatformActionFocusRef = useRef(false)
-  // 'idle' | 'checking' | 'checked' | 'error' — the "Check for updates" button
-  // asks the service worker to re-check cached frontend assets and re-reads
-  // /api/version. 'checked' is a short-lived success label when no update is
-  // available; 'error' means a probe failed, so we say so instead of falsely
-  // claiming "No updates found". 'error' persists (no auto-reset) until the
-  // owner clicks the button again to retry.
-  const [updatePhase, setUpdatePhase] = useState('idle')
-  useEffect(() => {
-    if (updatePhase !== 'checked') return undefined
-    const timer = window.setTimeout(() => setUpdatePhase('idle'), UPDATE_CHECKED_RESET_MS)
-    return () => window.clearTimeout(timer)
-  }, [updatePhase])
 
   useEffect(() => {
     // Mirror the full query value so a cache invalidation that
@@ -544,6 +358,20 @@ export default function SettingsView({
       && expandedUsage.codex
     ),
   })
+  const [codexRedeem, setCodexRedeem] = useState({ busy: false, result: null })
+  const handleRedeemCodexReset = useCallback(async (creditId = null) => {
+    setCodexRedeem({ busy: true, result: null })
+    try {
+      const res = await api.settings.redeemCodexReset(creditId)
+      if (!res.ok) throw new Error('redeem failed')
+      const data = await res.json()
+      setCodexRedeem({ busy: false, result: { outcome: data?.outcome } })
+      // Refetch so the window fills and the banked count both reflect the redeem.
+      settingsQueries.providerUsage.invalidate(queryClient, 'codex')
+    } catch {
+      setCodexRedeem({ busy: false, result: { error: true } })
+    }
+  }, [queryClient])
   const claudeUsageQuery = settingsQueries.providerUsage.useQuery('claude', {
     enabled: (
       active && providerReady && claudeAuthenticated
@@ -654,7 +482,7 @@ export default function SettingsView({
     const rows = Array.isArray(draft) ? draft : []
     const enabled = rows.filter(row => row.enabled !== false)
     if (!enabled.length) {
-      setBackgroundError('Choose at least one background model.')
+      setBackgroundError('Some services are now disabled.')
       return Promise.resolve(false)
     }
     const reqId = ++backgroundSaveReqRef.current
@@ -924,6 +752,9 @@ export default function SettingsView({
     },
     [],
   )
+  const openMobiusYou = useCallback(() => {
+    onOpenApp?.('identity')
+  }, [onOpenApp])
   const toggleClaudeUsage = useCallback(() => {
     setExpandedAuth(prev => prev === 'claude' ? null : prev)
     setExpandedUsage(prev => ({ ...prev, claude: !prev.claude }))
@@ -932,9 +763,6 @@ export default function SettingsView({
     setExpandedAuth(prev => prev === 'codex' ? null : prev)
     setExpandedUsage(prev => ({ ...prev, codex: !prev.codex }))
   }, [])
-  const openMobiusYou = useCallback(() => {
-    onOpenApp?.('identity')
-  }, [onOpenApp])
   const onProviderConnected = useCallback(async (provider) => {
     const providersBefore = authProvidersAtStartRef.current || configuredProviders
     const newlyConnected = !providersBefore.has(provider)
@@ -968,6 +796,10 @@ export default function SettingsView({
     settingsQueries.providerUsage.invalidate(queryClient, provider)
     setExpandedAuth(null)
   }, [configuredProviders, persistBackgroundAgents, queryClient, settingsQuery.data])
+  const onProviderDisconnected = useCallback(() => {
+    authProvidersAtStartRef.current = null
+    setExpandedAuth(null)
+  }, [])
   const onClaudeAuthDone = useCallback(() => {
     onProviderConnected('claude')
   }, [onProviderConnected])
@@ -1027,217 +859,6 @@ export default function SettingsView({
     }
   }
 
-  // Ref to track the active health-poll interval so we can cancel it on
-  // component unmount or on a second restart attempt (shouldn't happen —
-  // the button is disabled while restarting, but belt-and-braces).
-  const restartPollRef = useRef(null)
-  const clearRestartPoll = useCallback(() => {
-    if (!restartPollRef.current) return
-    window.clearTimeout(restartPollRef.current)
-    restartPollRef.current = null
-  }, [])
-  useEffect(() => {
-    return () => clearRestartPoll()
-  }, [clearRestartPoll])
-
-  async function restartServer() {
-    if (restartPhase === 'restarting' || rebuildIsActive(rebuildStatus)) return
-    setRestartPhase('restarting')
-    setRestartError('')
-    setRestartSlow(false)
-    try {
-      const previousBootId = await readRestartBootId()
-      const res = await api.admin.restart()
-      if (!res.ok) {
-        let detail = ''
-        try { detail = (await res.json()).detail || '' } catch {}
-        throw new Error(detail || `Restart failed (${res.status})`)
-      }
-      returnToSettingsAfterReload()
-      pollRestartThenReload({
-        previousBootId,
-        onSlow: () => setRestartSlow(true),
-        onTimeout: ({ freshServerSeen }) => {
-          setRestartSlow(false)
-          setRestartError(freshServerSeen
-            ? 'The server restarted, but Möbius couldn’t reload the shell. Refresh the page.'
-            : 'Möbius still can’t confirm the restart. Use your deployment’s Recovery action if the container needs attention.')
-          setRestartPhase('idle')
-          setRestartConfirm(false)
-        },
-      })
-    } catch (err) {
-      setRestartPhase('idle')
-      setRestartConfirm(false)
-      setRestartSlow(false)
-      setRestartError(err.message || 'Restart request failed.')
-    }
-  }
-
-  const refreshRebuildStatus = useCallback(async () => {
-    try {
-      const response = await api.admin.rebuildStatus()
-      if (response.status === 404) {
-        setRebuildStatus({
-          supported: false,
-          state: 'idle',
-          message: 'Container rebuilds are not available yet.',
-        })
-        return null
-      }
-      if (!response.ok) return null
-      const body = await response.json()
-      setRebuildStatus(body)
-      return body
-    } catch {
-      return null
-    }
-  }, [])
-
-  useEffect(() => {
-    if (active) refreshRebuildStatus()
-  }, [active, refreshRebuildStatus, refreshToken])
-
-  useEffect(() => {
-    if (!active || !rebuildIsActive(rebuildStatus)) return undefined
-    let cancelled = false
-    let timer = null
-    const poll = async () => {
-      const body = await refreshRebuildStatus()
-      // A brief disconnect is expected while the container is replaced, and
-      // can also happen before replacement starts. Keep polling until the
-      // controller returns a terminal state rather than freezing on stale UI.
-      if (!cancelled && rebuildPollShouldContinue(body)) {
-        timer = window.setTimeout(poll, 1500)
-      }
-    }
-    timer = window.setTimeout(poll, 1500)
-    return () => {
-      cancelled = true
-      if (timer) window.clearTimeout(timer)
-    }
-  }, [active, rebuildStatus?.state, refreshRebuildStatus])
-
-  useEffect(() => {
-    const state = rebuildStatus?.state
-    if (!['replacing', 'verifying', 'succeeded'].includes(state)) return
-    if (!rebuildInitiatedHereRef.current) return
-    if (rebuildReconnectStartedRef.current) return
-    rebuildReconnectStartedRef.current = true
-    returnToSettingsAfterReload()
-    pollRestartThenReload({
-      previousBootId: rebuildPreviousBootIdRef.current,
-      onTimeout: ({ freshServerSeen }) => {
-        rebuildReconnectStartedRef.current = false
-        setRebuildError(freshServerSeen
-          ? 'The container changed, but Möbius couldn’t reload the shell. Refresh the page.'
-          : 'Möbius still can’t confirm the rebuild. Use your deployment’s Recovery action if it is unavailable.')
-      },
-    })
-  }, [rebuildStatus?.state])
-
-  useEffect(() => {
-    const state = rebuildStatus?.state
-    if (!['failed', 'rolled_back', 'needs_recovery'].includes(state)) return
-    // The controller keeps its last terminal result for diagnosis. That is not
-    // a current Settings error: after the standalone rebuild action was
-    // removed, only a rebuild started by this mounted update flow owns visible
-    // progress or failure UI. Otherwise an old failed attempt survives every
-    // reload indefinitely and looks like an action the owner still needs to
-    // take even when no image update is pending.
-    if (
-      !rebuildInitiatedHereRef.current
-      && !rebuildReviewedUpdateRef.current
-    ) return
-    const message = rebuildStatus?.error
-      || rebuildStatus?.message
-      || (state === 'needs_recovery'
-        ? 'The previous container could not be restored. Use your deployment’s Recovery action.'
-        : 'The container could not be rebuilt.')
-    if (rebuildReviewedUpdateRef.current) setPlatformError(message)
-    else setRebuildError(message)
-    rebuildReviewedUpdateRef.current = false
-  }, [rebuildStatus?.state, rebuildStatus?.error, rebuildStatus?.message])
-
-  async function startContainerRebuild(request, { reviewedUpdate = false } = {}) {
-    if (
-      rebuildRequesting
-      || rebuildIsActive(rebuildStatus)
-      || restartPhase === 'restarting'
-      || (reviewedUpdate && platformPhase !== 'idle')
-    ) return { ok: false }
-    setRebuildRequesting(true)
-    if (reviewedUpdate) setPlatformPhase('rebuilding')
-    setRebuildError('')
-    if (reviewedUpdate) clearPlatformError()
-    setRebuildStartedHere(false)
-    rebuildInitiatedHereRef.current = false
-    rebuildReconnectStartedRef.current = false
-    rebuildReviewedUpdateRef.current = reviewedUpdate
-    rebuildPreviousBootIdRef.current = await readRestartBootId()
-    try {
-      const response = await request()
-      let body = null
-      try { body = await response.json() } catch {}
-      if (!response.ok) {
-        const detail = body?.detail
-        if (reviewedUpdate) {
-          setPlatformErrorCode(detail?.code || '')
-          await refreshPlatform({ preserveCurrentOnFailure: true })
-        }
-        throw new Error(
-          body?.error || detail?.message || detail
-            || body?.message || `Replacement failed (${response.status})`,
-        )
-      }
-      const outcome = rebuildRequestOutcome(body, { reviewedUpdate })
-      const state = outcome.state
-      rebuildInitiatedHereRef.current = outcome.cutoverAccepted
-      setRebuildStartedHere(outcome.cutoverAccepted)
-      setRebuildStatus(body)
-      if (outcome.cutoverAccepted) returnToSettingsAfterReload()
-      if (outcome.alreadyCurrent) {
-        rebuildReviewedUpdateRef.current = false
-        await refreshPlatform()
-      } else if (reviewedUpdate && outcome.terminalFailure) {
-        const message = body?.error || body?.message
-          || 'The reviewed image could not be started.'
-        setPlatformError(message)
-      }
-      return {
-        ok: outcome.accepted,
-        state,
-        message: body?.error || body?.message || '',
-      }
-    } catch (err) {
-      const message = err?.message || 'The container could not be rebuilt.'
-      if (reviewedUpdate) setPlatformError(message)
-      else setRebuildError(message)
-      rebuildReviewedUpdateRef.current = false
-      return { ok: false, message }
-    } finally {
-      setRebuildRequesting(false)
-      if (reviewedUpdate) setPlatformPhase('idle')
-    }
-  }
-
-  async function rebuildPlatformUpdate(plan) {
-    // Railway pins an immutable GHCR digest; self-hosted anchors on the
-    // sha-<target> tag and has no digest, so the digest is not required here.
-    if (
-      !plan?.plan_id
-      || !plan?.current_sha
-      || !plan?.target_sha
-    ) {
-      setPlatformError('The update plan is incomplete. Refresh the preview and try again.')
-      return { ok: false }
-    }
-    return startContainerRebuild(
-      () => api.platform.rebuild(plan),
-      { reviewedUpdate: true },
-    )
-  }
-
   async function signOut() {
     if (signingOut) return
     setSigningOut(true)
@@ -1253,415 +874,6 @@ export default function SettingsView({
     }
   }
 
-  // Refresh both Möbius update signals on demand: the service worker cache and
-  // platform git availability. The shared inspector refreshes /sw.js and we
-  // re-read /api/version for the current
-  // served identity. Platform: POST /platform/check runs the `git fetch` that the cheap
-  // /status read deliberately skips, so a deploy that landed since boot becomes
-  // visible without waiting for a reboot. Both run in parallel and neither
-  // failing blocks the other (allSettled). If either probe rejects we land in
-  // 'error' and say "Couldn't check for updates" rather than falsely reporting
-  // "No updates found" — an honest failure the owner can retry with the same
-  // button (see updateCheckOutcome).
-  async function checkForUpdates() {
-    if (updatePhase === 'checking') return
-    setUpdatePhase('checking')
-    let freshPlatform = null
-    const frontendP = (async () => {
-      await inspectShellUpdate({ serviceWorker: navigator.serviceWorker })
-      await versionQueries.current.invalidate(queryClient)
-      // refetch resolves with an error result rather than rejecting, so a
-      // failed version probe must be re-thrown for allSettled to see it —
-      // same honesty rule as the platform arm below (feature 20).
-      const versionResult = await versionQuery.refetch()
-      if (versionResult.isError) {
-        throw versionResult.error ?? new Error('version check failed')
-      }
-    })()
-    const platformP = (async () => {
-      try {
-        const res = await api.platform.check()
-        // An HTTP failure must REJECT, not resolve: allSettled treats a
-        // resolved probe as success, so a swallowed !ok let updateCheckOutcome
-        // report "No updates found" on a real 500 (feature 20).
-        if (!res.ok) throw new Error(`platform check failed: ${res.status}`)
-        freshPlatform = await res.json()
-        setPlatform(freshPlatform)
-      } catch (error) {
-        setPlatform(current => platformStatusUnavailable(current))
-        throw error
-      }
-    })()
-    const results = await Promise.allSettled([frontendP, platformP])
-    setUpdatePhase(updateCheckOutcome(results))
-    // Discovering an update replaces the focused Check button with Review.
-    // Carry focus across that state transition instead of dropping keyboard
-    // users back onto the page body.
-    if (freshPlatform?.available) {
-      requestAnimationFrame(() => {
-        platformActionRef.current?.focus({ preventScroll: true })
-      })
-    }
-  }
-
-  // After an approved server restart, wait until the document is reachable and
-  // reload. Shell navigations are network-first, so freshness no longer depends
-  // on coordinating a service-worker takeover here.
-  async function reloadOntoFreshSW() {
-    if (!(await shellDocumentReady())) return false
-    try {
-      const { registration } = await inspectShellUpdate({
-        serviceWorker: navigator.serviceWorker,
-      })
-      releaseWaitingShellUpdate(registration)
-    } catch { /* the online navigation remains authoritative */ }
-    window.location.reload()
-    return true
-  }
-
-  // Platform self-update: read availability whenever this persistent Settings
-  // surface becomes visible, and when an explicit shell apply reports that
-  // agent-authored platform work settled. Settings can remain mounted beside a
-  // resolver chat, so mount-only fetching leaves a cleared conflict looking
-  // blocked until a full page reload.
-  const refreshPlatform = useCallback(async ({
-    preserveCurrentOnFailure = false,
-  } = {}) => {
-    try {
-      const res = await api.platform.status()
-      if (!res.ok) throw new Error(`platform status failed: ${res.status}`)
-      const body = await res.json()
-      setPlatform(body)
-      if (body?.state === 'rolled_back' && body?.rollback_error) {
-        setPlatformError(body.rollback_error)
-      }
-    } catch {
-      // A successful mutation response is itself authoritative for the state
-      // it just produced. Its best-effort follow-up read must not erase that
-      // known result merely because the status endpoint is temporarily down.
-      if (!preserveCurrentOnFailure) {
-        // Ordinary reads still fail closed: never let an unavailable release
-        // authority inherit a cached “current” or update-available claim.
-        setPlatform(current => platformStatusUnavailable(current))
-      }
-    }
-  }, [])
-  useEffect(() => {
-    if (active) refreshPlatform()
-  }, [active, refreshPlatform, refreshToken])
-
-  // Apply is currently one synchronous request, but the server publishes its
-  // real fetch/reconcile/validate/build phases while that request is running.
-  // Poll only for the short in-flight window; the future supervisor-owned
-  // updater can preserve this response shape behind SSE or durable job polling.
-  useEffect(() => {
-    if (platformPhase !== 'applying') return undefined
-    let cancelled = false
-    let timer = null
-
-    const poll = async () => {
-      try {
-        const res = await api.platform.updateProgress()
-        if (res.ok) {
-          const body = await res.json()
-          if (!cancelled) setPlatformProgress(body)
-        }
-      } catch {
-        // Progress is explanatory; the Apply response remains authoritative.
-      }
-      if (!cancelled) timer = window.setTimeout(poll, 350)
-    }
-    poll()
-    return () => {
-      cancelled = true
-      if (timer) window.clearTimeout(timer)
-    }
-  }, [platformPhase])
-
-  // Silent freshen on opening Settings: ask the SW for a newer cache manifest
-  // and re-read /api/version so the Möbius row's served identity is current the
-  // moment it renders. This is the cheap on-open pass (no git fetch) — it
-  // complements the explicit "Check for updates" button, which additionally
-  // fetches platform availability. Once per open; never touches updatePhase, so
-  // it can't make the Update/Check button look busy.
-  useEffect(() => {
-    let cancelled = false
-    ;(async () => {
-      try {
-        await inspectShellUpdate({ serviceWorker: navigator.serviceWorker })
-        if (cancelled) return
-        await versionQueries.current.invalidate(queryClient)
-        await versionQuery.refetch()
-      } catch {
-        // a refresh hiccup just leaves the last-known status on the row
-      }
-    })()
-    return () => { cancelled = true }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
-
-  // Apply the reviewed update: merge the fetched platform release into the live
-  // backend. Clean -> the row flips to "restart needed"; conflict -> show a
-  // resolver action, but wait for the owner's click before opening an agent
-  // chat. Returns the domain outcome (not merely HTTP success) so the review
-  // sheet closes only for a clean apply and becomes an explicit result when
-  // the update was blocked.
-  async function applyPlatformUpdate(plan) {
-    if (platformPhase !== 'idle') return { ok: false }
-    if (!plan?.plan_id || !plan?.current_sha || !plan?.target_sha) {
-      setPlatformError('The update plan is incomplete. Refresh the preview and try again.')
-      return { ok: false }
-    }
-    clearPlatformError()
-    setPlatformProgress(null)
-    setPlatformPhase('applying')
-    try {
-      const res = await api.platform.apply(plan)
-      let body = null
-      try { body = await res.json() } catch {}
-      if (!res.ok) {
-        const detail = body?.detail || ''
-        const detailCode = typeof detail === 'object' ? detail?.code : detail
-        const detailMessage = typeof detail === 'object' ? detail?.message : detail
-        setPlatformErrorCode(detailCode || '')
-        await refreshPlatform()
-        setPlatformError(
-          detailCode === 'update_plan_stale'
-            ? 'Möbius changed since this preview. Close it and review the refreshed update before applying.'
-            : detailMessage
-              ? `Update stopped: ${detailMessage}`
-              : 'Update stopped before completion. Check the current status before trying again.',
-        )
-        return { ok: false }
-      }
-      const state = typeof body?.state === 'string' ? body.state : ''
-      if (PLATFORM_APPLY_STATES.has(state)) {
-        setPlatform(current => platformStatusFromApply(current, body))
-      }
-      await refreshPlatform({ preserveCurrentOnFailure: true })
-      if (state === 'restart_needed' || state === 'activation_needed' || state === 'up_to_date') {
-        return { ok: true, state }
-      }
-      if (state === 'conflict' || state === 'rolled_back') {
-        if (state === 'rolled_back' && body?.error) {
-          setPlatformError(body.error)
-        }
-        return { ok: false, state }
-      }
-      setPlatformError(
-        'The update returned an unexpected result. This review will stay open — check the current status before trying again.',
-      )
-      return { ok: false, state }
-    } catch {
-      await refreshPlatform()
-      setPlatformError(
-        'Update stopped before completion. Check the current status before trying again.',
-      )
-      return { ok: false }
-    } finally {
-      setPlatformPhase('idle')
-    }
-  }
-
-  async function resolvePlatformConflict() {
-    if (platformPhase !== 'idle' || !onOpenChat) return
-    clearPlatformError()
-
-    if (platform?.conflict_chat_id) {
-      onOpenChat(platform.conflict_chat_id)
-      return
-    }
-
-    setPlatformPhase('resolving')
-    try {
-      const res = await api.platform.conflictResolverChat()
-      if (!res.ok) {
-        let detail = ''
-        try { detail = (await res.json())?.detail || '' } catch {}
-        setPlatformError(detail ? `Could not open chat: ${detail}` : 'Could not open the resolver chat.')
-        await refreshPlatform()
-        return
-      }
-      const body = await res.json()
-      await refreshPlatform()
-      if (body?.chat_id) onOpenChat(body.chat_id)
-    } catch {
-      setPlatformError('Could not open the resolver chat.')
-    } finally {
-      setPlatformPhase('idle')
-    }
-  }
-
-  // The "Update" button opens the review sheet instead of applying immediately,
-  // so the owner sees the incoming changes first. Apply happens from inside the
-  // sheet (which then advances the row to "Restart to finish").
-  function openUpdateReview() {
-    // Also reachable from a conflict that has newer releases stacked behind it:
-    // the review sheet then previews the FULL combined diff to the latest tip,
-    // and its Apply re-targets the pinned conflict so one Resolve covers all.
-    if (
-      platformPhase !== 'idle'
-      || !(platform?.available || platform?.newer_updates_available)
-    ) return
-    clearPlatformError()
-    setReviewOpen(true)
-  }
-
-  function closeUpdateReview() {
-    restorePlatformActionFocusRef.current = true
-    setReviewOpen(false)
-  }
-
-  useEffect(() => {
-    if (
-      reviewOpen
-      || platformPhase !== 'idle'
-      || !restorePlatformActionFocusRef.current
-    ) return undefined
-
-    // useDialogFocus first restores the opener captured at mount. A successful
-    // apply replaces that opener with "Restart to finish", so wait for the
-    // parent state and its live ref to commit before moving focus. Scheduling
-    // directly inside closeUpdateReview raced that commit and repeatedly left
-    // focus on <body> under CI/browser load.
-    const frame = window.requestAnimationFrame(() => {
-      const action = platformActionRef.current
-      if (!action?.isConnected || action.disabled) return
-      restorePlatformActionFocusRef.current = false
-      action.focus({ preventScroll: true })
-    })
-    return () => window.cancelAnimationFrame(frame)
-  }, [platform, platformPhase, reviewOpen, updatePhase])
-
-  // Poll until the restart is actually safe to navigate. A plain successful
-  // /api/health response can still be the OLD worker answering before its
-  // BackgroundTask sends SIGTERM, so prefer a changed boot id. When updating
-  // from an older server that does not expose boot ids, require either a
-  // down/up cycle or a conservative wait before trying to reload.
-  function pollRestartThenReload({
-    previousBootId = '',
-    onSlow = () => {},
-    onTimeout,
-  }) {
-    clearRestartPoll()
-    const startedAt = Date.now()
-    let attempts = 0
-    let sawUnavailable = false
-    let freshServerSeen = false
-    let slowNotified = false
-
-    const poll = async () => {
-      restartPollRef.current = null
-      attempts += 1
-      try {
-        const health = await readRestartHealth()
-        if (!health.ok) {
-          sawUnavailable = true
-        } else if (restartCanReload({
-          previousBootId,
-          currentBootId: health.bootId,
-          sawUnavailable,
-          elapsedMs: Date.now() - startedAt,
-        })) {
-          freshServerSeen = true
-          const reloaded = await reloadOntoFreshSW()
-          if (reloaded) return
-        }
-      } catch {
-        sawUnavailable = true
-      }
-      const decision = restartPollDecision(attempts)
-      if (decision.slow && !slowNotified) {
-        slowNotified = true
-        onSlow({ freshServerSeen })
-      }
-      if (decision.timedOut) {
-        onTimeout({ freshServerSeen })
-        return
-      }
-      restartPollRef.current = window.setTimeout(poll, decision.delayMs)
-    }
-
-    restartPollRef.current = window.setTimeout(
-      poll,
-      restartPollDecision(0).delayMs,
-    )
-  }
-
-  // The owner's explicit confirmation that finishes a platform update: clicking
-  // this IS the confirm — nothing restarts on its own.
-  async function restartToFinish() {
-    if (platformPhase === 'restarting') return
-    clearPlatformError()
-    setPlatformPhase('restarting')
-    setPlatformRestartSlow(false)
-    try {
-      const previousBootId = await readRestartBootId()
-      // apiFetch resolves for any non-401, so a 5xx is NOT a thrown error —
-      // check res.ok or we'd poll + reload onto the same (unchanged) code and
-      // report a non-restart as success. Mirrors applyPlatformUpdate's guard.
-      const res = await api.platform.restart()
-      if (!res.ok) {
-        let detail = ''
-        try { detail = (await res.json())?.detail || '' } catch {}
-        setPlatformError(detail ? `Restart failed: ${detail}` : 'Restart signal failed.')
-        setPlatformPhase('idle')
-        return
-      }
-      returnToSettingsAfterReload()
-      pollRestartThenReload({
-        previousBootId,
-        onSlow: () => setPlatformRestartSlow(true),
-        onTimeout: ({ freshServerSeen }) => {
-          setPlatformRestartSlow(false)
-          setPlatformError(freshServerSeen
-            ? 'The server restarted, but Möbius couldn’t reload the shell. Refresh the page.'
-            : 'Möbius still can’t confirm the restart. Use your deployment’s Recovery action if the container needs attention.')
-          setPlatformPhase('idle')
-        },
-      })
-    } catch {
-      setPlatformRestartSlow(false)
-      setPlatformError('Restart signal failed.')
-      setPlatformPhase('idle')
-    }
-  }
-
-  const version = versionQuery.data
-  // Show the upstream commit the local platform is reconciled to as the
-  // user-facing version. A reconcile/merge can create a local served commit
-  // whose SHA does not exist on GitHub even though it fully contains
-  // origin/main; keep that identity as a secondary diagnostic instead of
-  // presenting it as the published Möbius version.
-  const mobiusVersion = platformVersionIdentity(platform, version)
-  const containerVersion = containerVersionIdentity(version)
-  // The commit date baked at image-build time, formatted independently from
-  // the mutable platform checkout's upstream commit date below.
-  const buildDate = formatUpstreamCommitDate(version?.build_date) || null
-  const upstreamCommitDate = formatUpstreamCommitDate(
-    platform?.contained_upstream_committed_at,
-  )
-  // Derived state for the single "Möbius" update row (see the section below).
-  const platformConflict = platform?.state === 'conflict'
-  // A text-clean update that failed the post-merge import probe was rolled back
-  // to the previous served version — the update is still available, but its last
-  // apply needs a repair pass, so the row says so distinctly rather than reading
-  // as a plain "New update available".
-  const platformRolledBack = platform?.state === 'rolled_back'
-  const platformActivationLevel = platform?.activation?.level || (
-    platform?.needs_restart ? 'server_restart' : 'live'
-  )
-  const platformRestart = ['server_restart', 'dependency_sync'].includes(platformActivationLevel)
-  const platformExternalActivation = !['live', 'server_restart', 'dependency_sync'].includes(
-    platformActivationLevel,
-  )
-  const updateHelp = platformUpdateRepairReason({ platform, rebuild: rebuildStatus, error: platformError, errorCode: platformErrorCode })
-  const updateAvailable = !!platform?.available
-  const mobiusUpdating =
-    ['applying', 'rebuilding'].includes(platformPhase)
-    || rebuildIsActive(rebuildStatus)
-    || updatePhase === 'checking'
-  const checkUpdatesLabel = updateCheckLabel(updatePhase)
   const effectiveBackgroundDraft = backgroundDraft ||
     normalizeBackgroundAgents(
       settingsQuery.data?.background_agents,
@@ -1751,6 +963,7 @@ export default function SettingsView({
                 <ProviderRow
                   name="OpenAI Codex"
                   connected={codexAuthenticated}
+                  actionLabel={codexAuthenticated ? 'Manage' : 'Connect'}
                   version={codexVersion}
                   statusNode={codexAuthenticated ? (
                     <PlanUsageToggle
@@ -1766,17 +979,23 @@ export default function SettingsView({
                       snapshot={codexUsageQuery.data}
                       loading={codexUsageQuery.isPending}
                       failed={codexUsageQuery.isError}
+                      onRedeemReset={handleRedeemCodexReset}
+                      redeeming={codexRedeem.busy}
+                      redeemResult={codexRedeem.result}
                     />
                   ) : null}
                   expanded={expandedAuth === 'codex'}
                   onToggleExpand={toggleCodexAuth}
                 >
-                  <CodexAuth onConnected={onCodexAuthDone} />
+                  <ProviderConnection provider="codex" name="OpenAI Codex" connected={codexAuthenticated} onDisconnected={onProviderDisconnected}>
+                    <CodexAuth onConnected={onCodexAuthDone} />
+                  </ProviderConnection>
                 </ProviderRow>
 
                 <ProviderRow
                   name="Claude Code"
                   connected={claudeAuthenticated}
+                  actionLabel={claudeAuthenticated ? 'Manage' : 'Connect'}
                   version={claudeVersion}
                   statusNode={claudeAuthenticated ? (
                     <PlanUsageToggle
@@ -1797,11 +1016,13 @@ export default function SettingsView({
                   expanded={expandedAuth === 'claude'}
                   onToggleExpand={toggleClaudeAuth}
                 >
-                  <ProviderAuth
-                    authenticated={claudeAuthenticated}
-                    compact
-                    onDone={onClaudeAuthDone}
-                  />
+                  <ProviderConnection provider="claude" name="Claude Code" connected={claudeAuthenticated} onDisconnected={onProviderDisconnected}>
+                    <ProviderAuth
+                      authenticated={claudeAuthenticated}
+                      compact
+                      onDone={onClaudeAuthDone}
+                    />
+                  </ProviderConnection>
                 </ProviderRow>
 
                 {mobiusAvailable && (
@@ -1902,7 +1123,7 @@ export default function SettingsView({
                 </div>
                 {backgroundError && (
                   <Alert
-                    color="danger"
+                    color="info"
                     variant="soft"
                     description={backgroundError}
                   />
@@ -1981,300 +1202,9 @@ export default function SettingsView({
           )}
         </section>
 
-        {/* ONE honest "Möbius" update surface. Restart readiness and update
-            availability are independent: once an update is staged, the owner
-            can still check for or review a newer release and fold it into the
-            SAME eventual restart. A conflict remains the sole blocking state.
-            Per-layer mechanics stay invisible (the SW + platform_update.py).
-            The row always carries the current build identity. */}
+        <PlatformUpdates active={active} refreshToken={refreshToken} onOpenChat={onOpenChat} />
+
         <section className="settings__section settings__section--compact">
-          <h2 className="settings__section-title">Möbius</h2>
-          <div className="settings__row settings__row--top">
-            <div className="settings__update">
-              <StatusDot
-                color={platformConflict || platformRolledBack || platformRestart || platformExternalActivation || updateAvailable ? '--accent' : '--green'}
-              >
-                {platformUpdateStatusLabel(platform)}
-              </StatusDot>
-              {mobiusVersion.primarySha && (
-                <p className="settings__build">
-                  <span className="settings__build-kind">Möbius</span>
-                  {mobiusVersion.synced && upstreamCommitDate
-                    ? `${upstreamCommitDate} (`
-                    : !mobiusVersion.synced
-                      ? 'Serving '
-                      : ''}
-                  <span className="settings__standard-highlight">{mobiusVersion.primarySha}</span>
-                  {mobiusVersion.synced && upstreamCommitDate
-                    ? ')'
-                    : !mobiusVersion.synced && buildDate
-                      ? ` · ${buildDate}`
-                      : ''}
-                </p>
-              )}
-              {containerVersion.sha && (
-                <p className="settings__build">
-                  <span className="settings__build-kind">Container</span>
-                  {buildDate ? `${buildDate} (` : ''}
-                  <span className="settings__standard-highlight">{containerVersion.sha}</span>
-                  {buildDate ? ')' : ''}
-                </p>
-              )}
-            </div>
-            {platformConflict ? (
-              onOpenChat ? (
-                // A conflict is always resolvable in chat. When newer releases
-                // have stacked up behind it, prepend a primary "Review all" that
-                // previews the full combined diff and re-targets on Apply, so a
-                // single resolve covers the whole backlog.
-                <div
-                  className="settings__update-actions"
-                  role="group"
-                  aria-label="Resolve update conflict actions"
-                >
-                  {platform?.newer_updates_available && (
-                    <button
-                      className="settings__btn settings__btn--sm settings__btn--nowrap"
-                      type="button"
-                      onClick={openUpdateReview}
-                      disabled={mobiusUpdating || platformPhase !== 'idle'}
-                    >
-                      {mobiusUpdating ? 'Updating…' : 'Review all updates'}
-                    </button>
-                  )}
-                  <button
-                    ref={platformActionRef}
-                    className="settings__btn settings__btn--outline settings__btn--sm settings__btn--nowrap"
-                    type="button"
-                    onClick={resolvePlatformConflict}
-                    disabled={platformPhase === 'resolving'}
-                  >
-                    {platformPhase === 'resolving'
-                      ? 'Opening…'
-                      : platform?.conflict_chat_id
-                        ? 'Open chat'
-                        : platform?.newer_updates_available
-                          ? 'Resolve just this'
-                          : 'Resolve in chat'}
-                  </button>
-                </div>
-              ) : null
-            ) : platformExternalActivation ? (
-              updateAvailable ? (
-                <button
-                  ref={platformActionRef}
-                  className="settings__btn settings__btn--sm settings__btn--nowrap"
-                  type="button"
-                  onClick={openUpdateReview}
-                  disabled={mobiusUpdating || platformPhase !== 'idle'}
-                >
-                  {mobiusUpdating ? 'Updating…' : 'Review update'}
-                </button>
-              ) : (
-                <button
-                  ref={platformActionRef}
-                  className="settings__btn settings__btn--outline settings__btn--sm settings__btn--nowrap"
-                  type="button"
-                  onClick={checkForUpdates}
-                  disabled={updatePhase === 'checking' || platformPhase !== 'idle'}
-                >
-                  {updatePhase === 'idle' ? 'Check for more' : checkUpdatesLabel}
-                </button>
-              )
-            ) : platformRestart ? (
-              <div
-                className="settings__update-actions"
-                role="group"
-                aria-label="Update ready actions"
-              >
-                {updateAvailable ? (
-                  <button
-                    ref={platformActionRef}
-                    className="settings__btn settings__btn--sm settings__btn--nowrap"
-                    type="button"
-                    onClick={openUpdateReview}
-                    disabled={mobiusUpdating || platformPhase !== 'idle'}
-                  >
-                    {mobiusUpdating ? 'Updating…' : 'Review update'}
-                  </button>
-                ) : (
-                  <button
-                    className="settings__btn settings__btn--outline settings__btn--sm settings__btn--nowrap"
-                    type="button"
-                    onClick={checkForUpdates}
-                    disabled={updatePhase === 'checking' || platformPhase !== 'idle'}
-                  >
-                    {updatePhase === 'idle' ? 'Check for more' : checkUpdatesLabel}
-                  </button>
-                )}
-                <button
-                  ref={updateAvailable ? null : platformActionRef}
-                  className={`settings__btn settings__btn--sm settings__btn--nowrap${updateAvailable ? ' settings__btn--outline' : ''}`}
-                  type="button"
-                  onClick={restartToFinish}
-                  disabled={platformPhase !== 'idle' || updatePhase === 'checking'}
-                >
-                  {/* This completes every release staged since the last boot.
-                      A second update joins this same restart instead of forcing
-                      an intermediate one. */}
-                  {platformPhase === 'restarting' ? 'Restarting…' : 'Restart to finish'}
-                </button>
-              </div>
-            ) : updateAvailable ? (
-              <button
-                ref={platformActionRef}
-                className="settings__btn settings__btn--sm settings__btn--nowrap"
-                type="button"
-                onClick={openUpdateReview}
-                disabled={mobiusUpdating}
-              >
-                {mobiusUpdating ? 'Updating…' : 'Review update'}
-              </button>
-            ) : (
-              // Nothing to apply — offer an explicit refresh. Subtle outline (a
-              // secondary action, not a call-to-action) and its own transient
-              // feedback text, so it never mutates the status label beside it.
-              // If the check surfaces an update, this slot re-renders to the
-              // Update button on the next paint.
-              <button
-                ref={platformActionRef}
-                className="settings__btn settings__btn--outline settings__btn--sm settings__btn--nowrap"
-                type="button"
-                onClick={checkForUpdates}
-                disabled={updatePhase === 'checking'}
-              >
-                {checkUpdatesLabel}
-              </button>
-            )}
-          </div>
-          {platformPhase === 'restarting' && (
-            <div className="settings__notice" role="status">
-              {platformRestartSlow
-                ? 'This is taking longer than usual. Möbius is still checking.'
-                : 'Restart signal sent. The page will reload shortly.'}
-            </div>
-          )}
-          {!reviewOpen && updateHelp && !platformConflict && (
-            <div className="settings__notice settings__notice--stacked">
-              <p>{updateHelp} Open a chat to check what’s needed, with the update details included.</p>
-              <UpdateRepairAction platform={platform} rebuild={rebuildStatus}
-                error={platformError} errorCode={platformErrorCode}
-                disabled={platformPhase !== 'idle' || rebuildIsActive(rebuildStatus)} />
-            </div>
-          )}
-          {platformConflict && platform?.newer_updates_available && (
-            <div className="settings__notice" role="status">
-              More updates have arrived since the one that conflicted — review
-              them all together and resolve in one pass, or resolve just this one
-              now.
-            </div>
-          )}
-          {platformError && (
-            <Alert color="danger" variant="soft" description={platformError} />
-          )}
-        </section>
-
-        {reviewOpen && (
-          <UpdateReviewModal
-            onClose={closeUpdateReview}
-            onApply={applyPlatformUpdate}
-            onRebuild={rebuildPlatformUpdate}
-            onResolve={resolvePlatformConflict}
-            applying={platformPhase === 'applying'}
-            rebuilding={platformPhase === 'rebuilding'}
-            resolving={platformPhase === 'resolving'}
-            applyError={platformError}
-            applyErrorCode={platformErrorCode}
-            onClearError={clearPlatformError}
-            applyProgress={platformProgress}
-          />
-        )}
-
-        <section className="settings__section settings__section--compact settings__section--server">
-          <h2 className="settings__section-title">Server</h2>
-          <div className="settings__row">
-            <SettingsInfoLabel
-              label="Restart"
-              infoId="settings-restart-info"
-              expanded={serverInfo === 'restart'}
-              onToggle={() => setServerInfo((value) => (
-                value === 'restart' ? null : 'restart'
-              ))}
-              onDismiss={() => setServerInfo(null)}
-            >
-              Briefly pauses active responses and reloads Möbius.
-              This does not install an update.
-            </SettingsInfoLabel>
-            {restartConfirm ? (
-              <div className="settings__confirm">
-                <button
-                  className="settings__btn settings__btn--outline settings__btn--sm"
-                  type="button"
-                  onClick={() => setRestartConfirm(false)}
-                  disabled={restartPhase === 'restarting' || rebuildIsActive(rebuildStatus)}
-                >
-                  Cancel
-                </button>
-                <button
-                  className="settings__btn settings__btn--sm settings__btn--nowrap"
-                  type="button"
-                  onClick={restartServer}
-                  disabled={restartPhase === 'restarting' || rebuildIsActive(rebuildStatus)}
-                >
-                  {restartPhase === 'restarting' ? 'Restarting…' : 'Restart now'}
-                </button>
-              </div>
-            ) : (
-              <button
-                className="settings__btn settings__btn--outline settings__btn--sm"
-                type="button"
-                onClick={() => { setRestartError(''); setRestartConfirm(true) }}
-                disabled={rebuildIsActive(rebuildStatus)}
-              >
-                Restart server
-              </button>
-            )}
-          </div>
-          {restartConfirm && restartPhase !== 'restarting' && (
-            <p className="settings__subtext settings__subtext--tight">
-              Restarting interrupts any chat that's mid-response.
-            </p>
-          )}
-          {restartPhase === 'restarting' && (
-            <div className="settings__notice" role="status">
-              {restartSlow
-                ? 'This is taking longer than usual. Möbius is still checking.'
-                : 'Restart signal sent. The page will reload shortly.'}
-            </div>
-          )}
-          {restartError && (
-            <Alert
-              color="danger"
-              variant="soft"
-              description={restartError}
-            />
-          )}
-          {/* The container rebuild is no longer a separate manual action: an
-              image-level update drives it on confirmation from the "Möbius"
-              update review above (Railway pins the GHCR image; self-hosted
-              applies the reviewed source in place, then rebuilds the matching
-              image). Only the in-progress status and any failure remain here so
-              a rebuild started from the update flow stays visible after the
-              review sheet closes and the shell reloads. */}
-          {(rebuildIsActive(rebuildStatus) || (rebuildStartedHere && [
-            'succeeded', 'no_change', 'rolled_back', 'needs_recovery',
-          ].includes(rebuildStatus?.state))) && (
-            <div className="settings__notice" role="status">
-              {rebuildProgressMessage(rebuildStatus)}
-            </div>
-          )}
-          {rebuildError && (
-            <Alert
-              color="danger"
-              variant="soft"
-              description={rebuildError}
-            />
-          )}
           <div className="settings__row">
             <span className="settings__label">Session</span>
             {signOutConfirm ? (

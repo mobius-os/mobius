@@ -44,6 +44,8 @@ jobs:
         run: scripts/check-private-paths.sh
       - name: Test local privacy gates
         run: scripts/test-git-privacy-gates.sh
+      - name: Test agent runtime update proposals
+        run: python3 -m unittest discover -s scripts -p 'test_update_agent_runtimes.py'
       - name: Check documentation links
         run: python3 scripts/check-doc-links.py
 
@@ -55,6 +57,11 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
+        with:
+          # The migration-history gate compares the candidate against the
+          # actual target revision; a shallow checkout cannot prove that
+          # already-published entries remained unchanged.
+          fetch-depth: 0
       - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
@@ -67,7 +74,9 @@ jobs:
         with:
           node-version: 24
           cache: 'npm'
-          cache-dependency-path: frontend/package-lock.json
+          cache-dependency-path: |
+            package-lock.json
+            frontend/package-lock.json
       - name: Install frontend runtime deps
         # frontend_watcher's publish validation executes the locked Acorn /
         # eslint-scope checker. compile_jsx also uses the lockfile's Rolldown,
@@ -93,11 +102,13 @@ jobs:
         run: pip-audit --strict --disable-pip -r requirements.lock
       - name: Run serviceability contracts
         working-directory: backend
+        env:
+          SCHEMA_MIGRATION_BASE_REF: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || '' }}
         run: >-
           pytest -q
           tests/test_readiness.py
           tests/test_db_migrations.py::test_previous_release_database_upgrades_to_current_orm
-          tests/test_db_migrations.py::test_published_schema_migration_history_is_unique_ordered_and_immutable
+          tests/test_schema_migration_history.py
       - name: Validate bundled Caddy policy
         # Caddy expands these placeholders inside its container. Keep the
         # validation values non-empty and production-shaped so both site
@@ -145,9 +156,7 @@ jobs:
         with:
           node-version: 24
           cache: 'npm'
-          cache-dependency-path: |
-            package-lock.json
-            frontend/package-lock.json
+          cache-dependency-path: frontend/package-lock.json
       - name: Install frontend deps
         # Required because themeService.test.js transitively imports
         # @tanstack/react-query (via hooks/queries.js). Without

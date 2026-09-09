@@ -72,6 +72,40 @@ test('app opens outrank bundle updates without changing catalogue order', () => 
   assert.deepEqual(sections.apps.map(app => app.id), [1, 2])
 })
 
+test('opened project artifacts join Recents once, plainly, and rebuilds do not manufacture recency', () => {
+  const project = {
+    id: 12,
+    name: 'Portfolio',
+    color: '#3b82f6',
+    artifacts: [
+      {
+        id: 'site', name: 'Website', status: 'ok', has_output: true,
+        updated_at: '2026-08-25T11:30:00Z',
+        last_opened_at: '2026-08-25T11:30:00Z',
+      },
+      { id: 'draft', name: 'Draft', status: 'idle', has_output: false, updated_at: '2026-08-25T12:00:00Z' },
+    ],
+  }
+  const before = buildDrawerSections([
+    { id: 'chat', has_messages: true, activity_at: '2026-08-25T11:45:00Z' },
+  ], [], [project])
+  assert.deepEqual(before.recents.map(entry => [entry.kind, entry.item.id]), [
+    ['chat', 'chat'],
+    ['artifact', '12:site'],
+  ])
+  assert.equal(before.recents[1].item.artifact_id, 'site')
+  assert.equal('project' in before.recents[1].item, false, 'an artifact row carries no project belonging')
+
+  project.artifacts[0].updated_at = '2026-08-25T12:10:00Z'
+  const after = buildDrawerSections([
+    { id: 'chat', has_messages: true, activity_at: '2026-08-25T11:45:00Z' },
+  ], [], [project])
+  assert.deepEqual(after.recents.map(entry => [entry.kind, entry.item.id]), [
+    ['chat', 'chat'],
+    ['artifact', '12:site'],
+  ])
+})
+
 test('pinned order is stable across mixed timestamp formats (Z vs naive UTC)', () => {
   // After a drag, optimistic chat stamps carry a trailing Z while a refetched
   // app carries the server's naive-UTC form. Same instants must still interleave

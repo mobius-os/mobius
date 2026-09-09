@@ -1,14 +1,14 @@
-/* PeerMessageCard renders a Möbius peer-network exchange as its own collapsed
-   activity row — so the owner can see when the agent talked to another agent,
-   instead of it hiding inside a generic "Ran commands" block. The disclosure
-   holds the note itself: who, what kind, and the body. */
+/* PeerMessageCard discloses an agent exchange within the normal tool timeline. */
 
 import { useId, useRef } from 'react'
+import { StandardMarkdown } from './markdown/BlockRenderer.jsx'
+import { ArrowDown, ArrowUp } from '@openai/apps-sdk-ui/components/Icon'
+import { usePeerTimelineRecord } from './peerTimelineContext.js'
+import { peerTime } from './peerTimeline.js'
 import { peerMessageCardModel } from './peerMessageCard.js'
 import { preserveTogglePosition } from './preserveTogglePosition.js'
-import { ActivityTypeIcon } from './ActivityLineHeader.jsx'
 import { useDisclosureState } from './disclosureState.js'
-import { toolActivityIcon, toolCallLabel } from './toolActivityLabel.js'
+import { toolCallLabel } from './toolActivityLabel.js'
 
 const KIND_LABEL = {
   note: 'Note',
@@ -26,7 +26,10 @@ function KindBadge({ kind }) {
   )
 }
 
-export default function PeerMessageCard({ t, chatId, disclosureKey }) {
+export default function PeerMessageCard({ t, chatId, disclosureKey, records: suppliedRecords, onInternalNav }) {
+  const linkedRecords = usePeerTimelineRecord(t?.tool_use_id)
+  const records = suppliedRecords || linkedRecords || []
+  const record = records[0]
   const model = peerMessageCardModel(t?.peer_message)
   const [open, setOpen] = useDisclosureState(chatId, disclosureKey)
   const headerRef = useRef(null)
@@ -39,21 +42,28 @@ export default function PeerMessageCard({ t, chatId, disclosureKey }) {
   // send/read leaves the marker at 'sending'/'reading' but the tool is done,
   // so a historical card must not spin forever.
   const live = t?.status === 'running'
-  const label = toolCallLabel(t)
-  const iconKind = toolActivityIcon('PeerMessage')
+  const label = live ? toolCallLabel(t) : model.status === 'sent'
+    ? `Sent to ${model.broadcast ? 'the group' : model.peers.join(', ') || 'another agent'}`
+    : model.status === 'received' && model.notes.length === 1
+      ? `Received from ${model.notes[0].sender || 'another agent'}`
+      : toolCallLabel(t)
+  const DirectionIcon = model.direction === 'send' ? ArrowUp : ArrowDown
+  const time = peerTime(record?.created_at)
+  const date = Number.isFinite(time) ? new Date(time) : null
   const hasDetail = model.hasDetail
   const headerContent = (
     <>
       <span
         className={`chat__tool-icon${live ? ' chat__tool-icon--running' : ''}`}
-        data-tool-kind={iconKind}
+        data-tool-kind="agents"
         aria-hidden="true"
       >
-        <ActivityTypeIcon kind={iconKind} />
+        <DirectionIcon width={14} height={14} />
       </span>
       <span className="chat__tool-name" title={label}>
         {label}{live ? '…' : ''}
       </span>
+      {date && <time className="chat__peer-time" dateTime={date.toISOString()} title={date.toLocaleString()}>{date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</time>}
     </>
   )
 
@@ -100,6 +110,12 @@ export default function PeerMessageCard({ t, chatId, disclosureKey }) {
         >
           {open && (
           <>
+            {record && <p className="chat__peer-delivery">{record.observedDelivery === 'during_work'
+              ? 'Delivered during work'
+              : record.observedDelivery === 'next_turn' ? 'Delivered at a turn boundary'
+                : record.delivery === 'interrupt' ? 'Immediate delivery requested · not a read receipt'
+                  : record.delivery === 'next_turn' ? 'Next-turn delivery · not a read receipt'
+                    : 'Delivery timing not recorded'}</p>}
             {model.status === 'sent' && (
               <div className="chat__peer-section">
                 <span className="chat__peer-kicker">
@@ -117,7 +133,7 @@ export default function PeerMessageCard({ t, chatId, disclosureKey }) {
                 )}
                 <div className="chat__peer-note">
                   <KindBadge kind={model.kind} />
-                  {model.body && <p className="chat__peer-body">{model.body}</p>}
+                  {model.body && <div className="chat__peer-body"><StandardMarkdown text={model.body} onInternalNav={onInternalNav} /></div>}
                   {model.bodyTruncated && (
                     <span className="chat__peer-excerpt">Excerpt — full note not shown</span>
                   )}
@@ -127,21 +143,21 @@ export default function PeerMessageCard({ t, chatId, disclosureKey }) {
 
             {model.status === 'received' && (
               <div className="chat__peer-section chat__peer-results">
-                <span className="chat__peer-kicker">
-                  {model.count === 1 ? 'Received' : `Received ${model.count}`}
-                </span>
+                {model.count > 1 && <span className="chat__peer-kicker">
+                  Received {model.count}
+                </span>}
                 <ul className="chat__peer-list">
                   {model.notes.map(note => (
                     <li key={note.key} className="chat__peer-note">
                       <span className="chat__peer-note-head">
                         <KindBadge kind={note.kind} />
-                        {note.sender && (
+                        {model.count > 1 && note.sender && (
                           <span className="chat__peer-from">
                             from {note.sender}
                           </span>
                         )}
                       </span>
-                      {note.body && <p className="chat__peer-body">{note.body}</p>}
+                      {note.body && <div className="chat__peer-body"><StandardMarkdown text={note.body} onInternalNav={onInternalNav} /></div>}
                       {note.bodyTruncated && (
                         <span className="chat__peer-excerpt">Excerpt — full note not shown</span>
                       )}
@@ -156,6 +172,14 @@ export default function PeerMessageCard({ t, chatId, disclosureKey }) {
               </div>
             )}
 
+            {records.length > 0 && <div className="chat__peer-links">{[...new Map(records.map(note => {
+              const sent = model.direction === 'send'
+              return [sent ? note.recipient_chat_id : note.sender_chat_id, sent ? note.recipient_name : note.sender_name]
+            })).entries()].filter(([id]) => typeof id === 'string' && id !== chatId).map(([id, name]) => <a key={id} href={`/shell?chat=${encodeURIComponent(id)}`} onClick={event => {
+              if (!onInternalNav || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return
+              event.preventDefault()
+              onInternalNav(new URL(event.currentTarget.href))
+            }}>Open {name || 'source chat'}</a>)}</div>}
             {model.status === 'failed' && model.reason && (
               <div className="chat__peer-section">
                 <span className="chat__peer-kicker">Failed</span>

@@ -1,4 +1,4 @@
-"""Installed app source is inspectable through one confined, read-only surface."""
+"""Installed app source is inspectable and safely editable in one workspace."""
 
 from __future__ import annotations
 
@@ -64,11 +64,79 @@ def test_app_source_lists_and_reads_without_exposing_generated_or_linked_paths(
   assert traversal.status_code == 400
   blocked_write = client.put(
     f"/api/apps/{app['id']}/source/file?path=index.jsx",
-    headers=auth,
-    json={"content": "no"},
+    json={"content": "no", "expected_revision": source.json()["revision"]},
   )
-  assert blocked_write.status_code in (404, 405)
+  assert blocked_write.status_code == 401
   assert "Before" in (root / "index.jsx").read_text()
+
+
+def test_app_source_mutations_use_revision_guards_and_confined_paths(client, auth):
+  app, root = _source_app(client, auth)
+  source_url = f"/api/apps/{app['id']}/source/file?path=index.jsx"
+  opened = client.get(source_url, headers=auth).json()
+
+  missing_revision = client.put(
+    source_url, headers=auth, json={"content": "missing guard\n"},
+  )
+  assert missing_revision.status_code == 428
+
+  saved = client.put(source_url, headers=auth, json={
+    "content": "export default function App() { return <main>After</main> }\n",
+    "expected_revision": opened["revision"],
+  })
+  assert saved.status_code == 200, saved.text
+  assert saved.json()["revision"]
+  assert "After" in (root / "index.jsx").read_text()
+
+  stale = client.put(source_url, headers=auth, json={
+    "content": "stale overwrite\n",
+    "expected_revision": opened["revision"],
+  })
+  assert stale.status_code == 409
+  assert stale.json()["detail"]["code"] == "file_revision_conflict"
+  assert "After" in (root / "index.jsx").read_text()
+
+  created = client.put(
+    f"/api/apps/{app['id']}/source/file?path=notes.txt",
+    headers=auth,
+    json={"content": "draft\n", "expected_revision": None},
+  )
+  assert created.status_code == 200, created.text
+
+  folder = client.post(
+    f"/api/apps/{app['id']}/source/folder",
+    headers=auth,
+    json={"path": "assets/icons"},
+  )
+  assert folder.status_code == 200, folder.text
+  uploaded = client.put(
+    f"/api/apps/{app['id']}/source/file-bytes?path=assets/icons/mark.bin",
+    headers={**auth, "If-None-Match": "*", "Content-Type": "application/octet-stream"},
+    content=b"\x00\x01mark",
+  )
+  assert uploaded.status_code == 200, uploaded.text
+
+  moved = client.post(
+    f"/api/apps/{app['id']}/source/move",
+    headers=auth,
+    json={"from_path": "notes.txt", "to_path": "assets/notes.txt"},
+  )
+  assert moved.status_code == 200, moved.text
+  assert (root / "assets" / "notes.txt").is_file()
+
+  deleted = client.delete(
+    f"/api/apps/{app['id']}/source/file?path=assets/icons",
+    headers=auth,
+  )
+  assert deleted.status_code == 200, deleted.text
+  assert not (root / "assets" / "icons").exists()
+
+  traversal = client.post(
+    f"/api/apps/{app['id']}/source/move",
+    headers=auth,
+    json={"from_path": "assets/notes.txt", "to_path": "../escaped.txt"},
+  )
+  assert traversal.status_code == 400
 
 
 def test_app_source_reports_its_own_git_changes_and_diff(client, auth):

@@ -1,5 +1,6 @@
 /* ProjectPreviewFrame gives opaque project HTML a browser-private test-data namespace. */
-import { useEffect, useMemo, useRef } from 'react'
+import { useCallback, useEffect, useMemo, useRef } from 'react'
+import useProjectTheme from '../../hooks/useProjectTheme.js'
 import { projectPreviewSandbox } from '../../lib/projectPreview.js'
 import {
   applyProjectPreviewStorageRequest,
@@ -10,6 +11,20 @@ import {
 
 export default function ProjectPreviewFrame({ projectId, sourcePath, title, className, srcDoc }) {
   const frameRef = useRef(null)
+  const inheritsTheme = useMemo(() => {
+    if (typeof document === 'undefined') return false
+    // Template contents remain inert: checking opt-in cannot fetch HTML resources.
+    const template = document.createElement('template')
+    template.innerHTML = srcDoc || ''
+    return template.content.querySelector('meta[name="mobius-theme"]')?.content === 'inherit'
+  }, [srcDoc])
+  const theme = useProjectTheme(projectId, inheritsTheme)
+  const sendTheme = useCallback(() => {
+    if (inheritsTheme && theme.data) frameRef.current?.contentWindow?.postMessage({
+      type: 'mobius:project-theme', theme: theme.data,
+    }, '*')
+  }, [inheritsTheme, theme.data])
+  useEffect(sendTheme, [sendTheme])
   const storageKey = useMemo(
     () => projectPreviewStorageKey(projectId, sourcePath),
     [projectId, sourcePath],
@@ -51,7 +66,7 @@ export default function ProjectPreviewFrame({ projectId, sourcePath, title, clas
       try {
         previous = event.oldValue ? JSON.parse(event.oldValue) : {}
       } catch {
-        // A malformed old browser value should not break the live bridge.
+        // A malformed old browser value should not break the live preview bridge.
       }
       const next = readProjectPreviewStore(localStorage, storageKey)
       for (const path of new Set([...Object.keys(previous), ...Object.keys(next)])) {
@@ -70,14 +85,17 @@ export default function ProjectPreviewFrame({ projectId, sourcePath, title, clas
     }
   }, [storageKey])
 
-  return <iframe
+  return <>
+    {inheritsTheme && theme.isError && <p role="alert">The inherited theme could not load. <button type="button" onClick={() => theme.refetch()}>Retry theme</button></p>}
+    <iframe
     ref={frameRef}
     title={title}
     className={className}
     sandbox={projectPreviewSandbox()}
     srcDoc={srcDoc}
-    onLoad={() => frameRef.current?.contentWindow?.postMessage({
-      type: 'mobius:project-preview-storage-connected',
-    }, '*')}
-  />
+    onLoad={() => {
+      frameRef.current?.contentWindow?.postMessage({ type: 'mobius:project-preview-storage-connected' }, '*')
+      sendTheme()
+    }}
+  /></>
 }

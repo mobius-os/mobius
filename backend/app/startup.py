@@ -83,6 +83,10 @@ class StartupTask:
   name: str
   action: TaskAction
   checkpoint: str | None = None
+  # Most startup repair is best-effort so a narrow optional failure does not
+  # hide the owner's recovery surface. A task that gates execution safety may
+  # instead fail the database boot closed with one explicit diagnostic reason.
+  database_failure_reason: str | None = None
 
 
 async def run_startup_tasks(
@@ -103,6 +107,11 @@ async def run_startup_tasks(
         exc,
         exc_info=True,
       )
+      if task.database_failure_reason:
+        context.database_boot = DatabaseBootResult(
+          failure_reason=task.database_failure_reason,
+        )
+        break
     else:
       if task.checkpoint:
         record_memory_checkpoint(task.checkpoint)
@@ -129,6 +138,13 @@ async def run_startup_plan(context: StartupContext) -> DatabaseBootResult:
     record_memory_checkpoint("startup_database_degraded")
     return context.database_boot
   await run_startup_tasks(context, DATABASE_STARTUP_TASKS)
+  if not context.database_boot.serviceable:
+    context.logger.critical(
+      "database startup degraded (%s); required startup task did not settle",
+      context.database_boot.reason,
+    )
+    record_memory_checkpoint("startup_database_degraded")
+    return context.database_boot
   if context.failed_tasks:
     # Fail-open kept the server serviceable, but a swallowed database-phase task
     # (e.g. an ImportError from a dropped chat_writer command) means a reconcile
@@ -160,6 +176,37 @@ def _remove_legacy_auto_resume_setting(context: StartupContext) -> None:
 
   if not remove_legacy_global_auto_resume_setting(context.settings.data_dir):
     raise RuntimeError("legacy global auto-resume setting cleanup did not persist")
+
+
+def _sweep_codex_provider_sessions(context: StartupContext) -> None:
+  """Reclaim Codex working state before any optional config write or SQLite."""
+  from app.provider_session_retention import sweep_stale_provider_sessions
+
+  codex = sweep_stale_provider_sessions(context.settings.data_dir)
+  if codex["status"] == "skipped_active":
+    context.logger.info("provider session retention skipped while Codex is active")
+    return
+  if codex["reclaimed_bytes"]:
+    context.logger.info(
+      "provider session retention reclaimed %d bytes from %d Codex files",
+      codex["reclaimed_bytes"], codex["removed_files"],
+    )
+  if codex["errors"]:
+    context.logger.warning(
+      "provider session retention skipped %d Codex file(s)", codex["errors"],
+    )
+
+
+def _configure_claude_provider_retention(context: StartupContext) -> None:
+  """Seed Claude's native working-state retention without blocking reclaim."""
+  from app.provider_session_retention import ensure_claude_retention_default
+
+  claude = ensure_claude_retention_default(context.settings.data_dir)
+  if claude["changed"]:
+    context.logger.info(
+      "set Claude native working-state retention default to %d days",
+      claude["retention_days"],
+    )
 
 
 def _initialize_database(context: StartupContext) -> None:
@@ -231,6 +278,23 @@ def _read_restart_authorization(context: StartupContext) -> None:
   context.restart_authorization = authorized_restart_nonce()
 
 
+def _freeze_legacy_app_runtimes(context: StartupContext) -> None:
+  """Freeze pre-isolation live files before any editing or scheduled work resumes."""
+  from app.applied_app_runtime import bootstrap_legacy_runtimes, prune_runtime
+  from app import models
+  with SessionLocal() as db:
+    count, warnings = bootstrap_legacy_runtimes(db)
+    for app in db.query(models.App).all():
+      try:
+        prune_runtime(app)
+      except (OSError, RuntimeError) as exc:
+        warnings.append(f"app {app.id} runtime cleanup: {exc}")
+  if count:
+    context.logger.info("froze %d deployed app runtime baseline(s)", count)
+  for warning in warnings:
+    context.logger.warning("app runtime migration: %s", warning)
+
+
 def _reconcile_startup_chats(context: StartupContext) -> None:
   from app.chat import reconcile_startup_chats
 
@@ -292,6 +356,30 @@ def _start_chat_writer(_context: StartupContext) -> None:
   from app.chat_writer import start_writer
 
   start_writer()
+
+
+def _retire_legacy_gauntlet_execution(context: StartupContext) -> None:
+  """Retire removed workflow work before any generic recovery can restart it.
+
+  This is a cold-start data cutover, not an online cancellation path. Loading
+  this backend already requires a normal worker restart, which stops the old
+  provider processes before lifespan begins. The writer command therefore
+  owns persistence only; if it cannot commit, the required-task flag below
+  degrades the database boot and keeps every recovery supervisor stopped.
+  """
+  from app.chat_writer import (
+    RetireLegacyGauntletExecution,
+    get_writer,
+    wait_ack,
+  )
+
+  result = wait_ack(get_writer().submit(RetireLegacyGauntletExecution()))
+  changed = sum(int(value or 0) for value in result.values())
+  if changed:
+    context.logger.info(
+      "retired legacy Gauntlet execution: %s",
+      ", ".join(f"{key}={value}" for key, value in result.items()),
+    )
 
 
 def _backfill_active_assistant_identities(context: StartupContext) -> None:
@@ -416,12 +504,33 @@ def _route_diagnostics_to_chat_log(_context: StartupContext) -> None:
     logger.setLevel(level)
 
 
+def _capture_platform_activation_snapshot(context: StartupContext) -> None:
+  """Persist loaded-source evidence only after DB and writer startup work."""
+  from app.platform_restart import capture_ready_boot_snapshot
+  from app.chat_writer import Barrier, get_writer, wait_ack
+
+  # Cross the actor itself rather than sampling its just-started thread. A
+  # transient startup race must not leave this otherwise healthy boot forever
+  # recorded as not ready.
+  wait_ack(get_writer().submit(Barrier()))
+  with SessionLocal() as db:
+    capture_ready_boot_snapshot(db, boot_id=context.boot_id)
+
+
 PROCESS_STARTUP_TASKS = (
   StartupTask("refresh pm-commit launcher", _refresh_commit_launcher),
   StartupTask("validate provider defaults", _validate_provider_defaults),
   StartupTask(
     "remove legacy global auto-resume setting",
     _remove_legacy_auto_resume_setting,
+  ),
+  StartupTask(
+    "sweep Codex provider sessions",
+    _sweep_codex_provider_sessions,
+  ),
+  StartupTask(
+    "configure Claude provider retention",
+    _configure_claude_provider_retention,
   ),
   StartupTask(
     "initialize database",
@@ -436,6 +545,12 @@ DATABASE_STARTUP_TASKS = (
   # as they did when the writer started near the end of the plan.
   StartupTask("start chat writer", _start_chat_writer),
   StartupTask(
+    "retire legacy Gauntlet execution",
+    _retire_legacy_gauntlet_execution,
+    checkpoint="startup_legacy_gauntlet_retired",
+    database_failure_reason="legacy_gauntlet_retirement_failed",
+  ),
+  StartupTask(
     "backfill active assistant identities",
     _backfill_active_assistant_identities,
   ),
@@ -444,6 +559,7 @@ DATABASE_STARTUP_TASKS = (
   StartupTask("backfill prompt snapshots", _backfill_prompt_snapshots),
   StartupTask("fix forward chat media", _fix_forward_chat_media),
   StartupTask("read restart authorization", _read_restart_authorization),
+  StartupTask("freeze legacy app runtimes", _freeze_legacy_app_runtimes),
   StartupTask(
     "reconcile startup chats",
     _reconcile_startup_chats,
@@ -484,5 +600,9 @@ DATABASE_STARTUP_TASKS = (
     "route diagnostics to chat log",
     _route_diagnostics_to_chat_log,
     checkpoint="startup_app_source_ready",
+  ),
+  StartupTask(
+    "capture platform activation snapshot",
+    _capture_platform_activation_snapshot,
   ),
 )

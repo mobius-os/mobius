@@ -7,6 +7,8 @@ const read = relative => readFileSync(new URL(relative, import.meta.url), 'utf8'
 const modal = read('../../components/SettingsView/UpdateReviewModal.jsx')
 const modalCss = read('../../components/SettingsView/UpdateReviewModal.css')
 const settingsView = read('../../components/SettingsView/SettingsView.jsx')
+const updates = read('../../components/SettingsView/PlatformUpdates.jsx')
+const requests = read('../../components/SettingsView/usePlatformUpdates.js')
 const updateState = read('../platformUpdateState.js')
 const diffView = read('../../components/DiffView/DiffView.jsx')
 const diffStyles = read('../../components/DiffView/styles.js')
@@ -26,83 +28,68 @@ test('the combined raw-diff toggle is gone and truncation is explained per file'
   assert.match(modal, /preview\?\.diff_truncated/)
 })
 
-test('apply outcomes close only for explicit clean states and preserve actionable results', () => {
-  assert.match(settingsView, /state === 'restart_needed' \|\| state === 'activation_needed' \|\| state === 'up_to_date'/)
-  assert.match(settingsView, /state === 'conflict' \|\| state === 'rolled_back'/)
-  assert.match(settingsView, /The update returned an unexpected result/)
-  assert.match(modal, /result\?\.state === 'conflict' \|\| result\?\.state === 'rolled_back'/)
-  assert.match(modal, /result\.state === 'activation_needed'/)
-  assert.match(modal, /result\.state === 'up_to_date'/)
-  assert.doesNotMatch(modal, /if \(result\?\.ok\) onClose\(\)/)
-  assert.match(modal, /applyProgress\?\.plan_id === preview\?\.plan_id/)
+test('Settings delegates update lifecycle and presentation to one owner', () => {
+  assert.match(settingsView, /<PlatformUpdates/)
+  assert.doesNotMatch(settingsView, /api\.platform\.(apply|rebuild)|api\.admin\.restart/)
+  assert.match(updates, /usePlatformUpdates/)
+  assert.match(updates, /<UpdateReviewModal/)
+  assert.match(requests, /rebuildRequestOutcome/)
+  assert.match(requests, /platformStatusFromApply/)
 })
 
-test('image reviews rebuild the container instead of applying in place, on both deployments', () => {
+test('immutable review drives both source apply and container replacement', () => {
   assert.match(modal, /reviewedUpdateUsesContainerRebuild\(preview\)/)
-  assert.match(modal, /rebuildUpdate \? onRebuild\(plan\) : onApply\(plan\)/)
-  assert.match(modal, /image_digest: preview\?\.image_digest/)
-  // Only Railway pins a GHCR digest; self-hosted has none, so the plan is
-  // complete without one.
-  assert.match(modal, /!reviewedRebuildNeedsDigest\(preview\) \|\| preview\?\.image_digest/)
-  assert.match(modal, /Update now/)
-  assert.match(modal, /Starting the reviewed update…/)
-  assert.match(settingsView, /api\.platform\.rebuild\(plan\)/)
-  assert.match(settingsView, /\{ reviewedUpdate: true \}/)
-  assert.match(settingsView, /\|\| rebuildIsActive\(rebuildStatus\)/)
-  assert.match(settingsView, /rebuildRequestOutcome\(body, \{ reviewedUpdate \}\)/)
-  assert.match(settingsView, /rebuildStatus\?\.error[\s\S]*rebuildStatus\?\.message/)
+  for (const field of ['plan_id', 'current_sha', 'target_sha', 'image_digest']) {
+    assert.match(modal, new RegExp(`${field}: preview\\.${field}`))
+  }
+  assert.match(modal, /onRebuild\(plan\) : onApply\(plan\)/)
+  assert.match(requests, /api\.platform\.rebuild\(plan\)/)
+  assert.match(requests, /api\.platform\.apply\(plan\)/)
+  assert.match(requests, /reviewedUpdate: true/)
 })
 
-test('an exact no-change completes a reviewed rebuild while failures remain visible', () => {
-  assert.match(modal, /'queued', 'preparing', 'replacing', 'verifying', 'succeeded',[\s\S]*'no_change'/)
-  assert.match(settingsView, /ok: outcome\.accepted/)
-  assert.match(settingsView, /if \(outcome\.alreadyCurrent\) \{[\s\S]*await refreshPlatform\(\)/)
-  assert.doesNotMatch(settingsView, /reviewed image is already running, but this update is still pending/)
-  assert.match(settingsView, /rebuildReviewedUpdateRef\.current = false[\s\S]*return \{ ok: false, message \}/)
+test('unfinished activation can be reviewed independently of incoming source', () => {
+  assert.match(modal, /preview\?\.actionable/)
+  assert.match(modal, /preview\?\.operation === 'finish'/)
+  assert.match(modal, /updatePreview\(\{ intent \}\)/)
+  assert.match(updates, /openReview\('finish'\)/)
+  assert.doesNotMatch(modal, /disabled=\{[^}]*!preview\?\.available/)
+})
+
+test('a definitive rebuild failure refreshes status without erasing the reviewed state', () => {
   assert.match(
-    settingsView,
-    /setPlatformErrorCode\(detail\?\.code \|\| ''\)[\s\S]*refreshPlatform\(\{ preserveCurrentOnFailure: true \}\)/,
+    requests,
+    /setErrorCode\(cause\.code \|\| ''\)[\s\S]*refreshPlatform\(\{ preserveCurrentOnFailure: true \}\)/,
   )
 })
 
-test('the apply response is a truthful fallback when status refresh fails', () => {
+test('successful apply projection survives an unavailable follow-up status read', () => {
   assert.match(updateState, /function platformStatusFromApply\(previous, result\)/)
   assert.match(updateState, /available: state === 'rolled_back'/)
-  assert.match(updateState, /conflict_paths: Array\.isArray\(result\.conflict_paths\)/)
-  assert.match(updateState, /conflict_chat_id: state === 'conflict' \? \(result\.chat_id \|\| null\) : null/)
-  assert.match(
-    settingsView,
-    /setPlatform\(current => platformStatusFromApply\(current, body\)\)[\s\S]*await refreshPlatform\(\{ preserveCurrentOnFailure: true \}\)/,
-  )
-  assert.match(
-    settingsView,
-    /if \(!preserveCurrentOnFailure\) \{[\s\S]*setPlatform\(current => platformStatusUnavailable\(current\)\)/,
-  )
+  assert.match(requests, /setPlatform\(current => platformStatusFromApply\(current, body\)\)/)
+  assert.match(requests, /refreshPlatform\(\{ preserveCurrentOnFailure: true \}\)/)
+  assert.match(requests, /if \(!preserveCurrentOnFailure\) setPlatform/)
 })
 
-test('apply errors have exactly one live alert owner', () => {
-  assert.match(modal, /<div className="urm__error">[\s\S]*<Alert color="danger"/)
+test('errors have one alert owner and results focus a live control', () => {
+  assert.match(modal, /<div className="urm__error">/ )
+  assert.match(modal, /<Alert color="danger"/)
+  assert.match(modal, /buttonRef=\{resultActionRef\}/)
   assert.doesNotMatch(modal, /className="urm__error" role="alert"/)
-})
-
-test('result and close focus always land on live tabbable controls', () => {
   assert.match(modal, /ref=\{resultActionRef\}/)
   assert.match(modal, /tabIndex=\{-1\}/)
-  assert.doesNotMatch(modal, /resultHeadingRef|tabIndex=\{blocked/)
-  assert.match(settingsView, /ref=\{platformActionRef\}/)
-  assert.match(settingsView, /restorePlatformActionFocusRef\.current = true/)
-  assert.match(
-    settingsView,
-    /if \([\s\S]*reviewOpen[\s\S]*platformPhase !== 'idle'[\s\S]*requestAnimationFrame\(\(\) => \{[\s\S]*platformActionRef\.current/,
-  )
+  assert.match(updates, /ref=\{actionRef\}/)
+  assert.match(updates, /restoreFocus\.current = true/)
+  assert.match(updates, /actionRef\.current\.focus/)
 })
 
-test('a newly discovered update inherits focus from the replaced check action', () => {
-  assert.match(settingsView, /freshPlatform = await res\.json\(\)/)
-  assert.match(
-    settingsView,
-    /if \(freshPlatform\?\.available\) \{[\s\S]*requestAnimationFrame\(\(\) => \{[\s\S]*platformActionRef\.current\?\.focus/,
-  )
+test('Settings keeps current update feedback and reserves technical detail for review', () => {
+  assert.doesNotMatch(updates, /Last container update|terminalRebuild|platform-updates__details/)
+  assert.match(updates, /rebuildProgressMessage\(rebuild\)/)
+  assert.match(updates, /update\.error && <Alert/)
+  assert.doesNotMatch(updates, /rebuildRequested|rebuildReviewedUpdateRef/)
+  assert.match(modal, /<details[^>]*urm__technical/)
+  assert.match(modal, /<summary>Technical details/)
 })
 
 test('DiffView stays generic, semantic, and keyboard-scrollable', () => {
@@ -120,11 +107,26 @@ test('DiffView stays generic, semantic, and keyboard-scrollable', () => {
   assert.match(diffStyles, /var\(--danger, #ef4444\)/)
 })
 
-test('update help and confirmation use compact shared Settings controls', () => {
-  assert.doesNotMatch(modalCss, /\.urm__btn/)
-  assert.match(modal, /settings__btn settings__btn--sm/)
-  assert.match(modal, /<UpdateRepairAction/)
-  assert.match(modal, /<details className="urm__technical">/)
-  assert.match(modal, /platformUpdateRepairReason/)
-  assert.match(modal, /reviewAgain \? 'Review again'/)
+
+test('update repair reuses the shared lifecycle and keeps mobile failure text below actions', () => {
+  const repair = read('../../components/SettingsView/UpdateRepairAction.jsx')
+  assert.match(repair, /useAgentRepair/)
+  assert.doesNotMatch(repair, /api\.chats|fetch\(|window\.location/)
+  assert.match(modalCss, /\.urm__foot \{[^}]*flex-wrap: wrap/)
+  assert.match(modalCss, /\.urm__foot \.platform-updates__description \{[^}]*flex-basis: 100%/)
+})
+
+
+test('update review uses compact Settings controls without stretching mobile buttons', () => {
+  assert.match(modal, /settings__btn settings__btn--sm settings__btn--outline/)
+  assert.match(modal, /className="settings__btn settings__btn--sm"/)
+  assert.doesNotMatch(modalCss, /\.urm__btn|flex: 1(?:;|\s)/)
+})
+
+test('asking for help names one ordinary chat and explains the restart boundary', () => {
+  const repair = read('../../components/SettingsView/UpdateRepairAction.jsx')
+  assert.match(repair, /'Ask Möbius'/)
+  assert.match(modal, /Open a chat with the update details included/)
+  assert.match(modal, /asking before any restart/)
+  assert.doesNotMatch(modal + repair, /repair chat|recovery chat|help prepare it/)
 })

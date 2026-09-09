@@ -19,6 +19,18 @@ export const ESM_CACHE = 'mobius-esm-v2'
 // list-affecting write, the page evicts the corresponding cached GET so a
 // NetworkFirst fallback cannot resurrect the pre-mutation projection.
 export const SHELL_DATA_CACHE = 'mobius-shell-data'
+
+// This value deliberately participates in the built service-worker bytes. Bump
+// it whenever the server- OR edge-owned shell DOCUMENT policy changes WITHOUT an
+// accompanying shell asset change, so installed PWAs discover a byte-different
+// worker; the install-time documentPolicyChanged() comparison (sw.js) then
+// takes over and the rebuilt precache serves the new-policy index.html. Without
+// this, an unchanged sw.js never fires a new install event, so a controlled
+// client keeps its old precached shell even though the origin/edge policy moved.
+// 2026-08-17: the host edge began allowing 'wasm-unsafe-eval' + worker-src on
+// the shell document so on-device speech (News read-aloud) can compile
+// WebAssembly; no shell asset changed, so this revision is the update trigger.
+export const SHELL_DOCUMENT_POLICY_REVISION = '2026-08-17-edge-wasm-shell-v1'
 // Bumped -v2 → -v3 (2026-06-18): a one-time eviction of app-frame entries
 // cached under the pre-fix, un-revved key (`?v=<updated_at>` with NO
 // `-<frameRev>` suffix, because the SW-precached index.html lacked the
@@ -88,6 +100,18 @@ const KEEP_RUNTIME_CACHES = new Set([
   STANDALONE_APPS_CACHE,
   APP_ASSETS_CACHE,
 ])
+
+// Logout removes every cache that may contain owner-projected data or private
+// app code, but it must leave Workbox's public shell precache intact. An active
+// service worker whose own precache was deleted keeps intercepting navigations;
+// because the same worker does not reinstall, deleting `workbox-*` here leaves
+// the installed PWA with no `/index.html` or bundle to serve on its next open.
+// The retained Workbox entries contain only build-owned public assets. Owner
+// data remains covered by the `mobius-*` runtime caches plus the IndexedDB
+// stores cleared at the same logout boundary.
+export function cachesToDeleteOnLogout(cacheNames) {
+  return (cacheNames || []).filter(name => name.startsWith('mobius-'))
+}
 
 // Content types we're willing to store in a cache-first asset cache.
 // An SPA-fallback HTML body or an esm.sh `text/plain` error page is NOT
@@ -390,4 +414,12 @@ export function entriesToTrim(existingKeys, max) {
   const keys = existingKeys || []
   if (!(max > 0) || keys.length <= max) return []
   return keys.slice(0, keys.length - max)
+}
+
+// Authoritative shell reconciliation must never mistake an offline snapshot
+// for live truth. Ordinary list reads keep their NetworkFirst offline fallback.
+export function requiresLiveShellList(request) {
+  const { pathname } = new URL(request.url)
+  return request.cache === 'no-store'
+    && (pathname === '/api/chats' || pathname === '/api/apps/')
 }

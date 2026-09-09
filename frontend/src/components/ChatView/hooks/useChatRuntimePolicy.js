@@ -46,6 +46,11 @@ export default function useChatRuntimePolicy({
 
   const cachedProvider = cached?.chatInfo?.provider || null
   const cachedSessionId = cached?.chatInfo?.session_id || null
+  const cachedChatInfo = cached?.chatInfo || null
+  useLayoutEffect(() => {
+    if (!cachedChatInfo) return
+    setChatInfo(previous => previous || cachedChatInfo)
+  }, [cachedChatInfo])
   useLayoutEffect(() => {
     if (!cachedSessionId) return
     setChatInfo(previous => {

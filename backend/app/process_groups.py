@@ -8,6 +8,12 @@ import signal
 import time
 
 BACKGROUND_PROCESS_NICE = 5
+# Kernel oom_score_adj (max 1000). The container's own value is inherited by
+# every process, so the kernel otherwise kills whichever process is largest —
+# usually the server, taking every chat down with it (2026-09-03 incident).
+# Marking agent groups as the preferred victim makes an out-of-memory event
+# cost the one chat that grew, which then shows an ordinary resumable error.
+AGENT_OOM_SCORE_ADJ = 1000
 
 
 def isolated_process_group_id(pid: object) -> int | None:
@@ -29,12 +35,14 @@ def lower_process_group_priority(
   logger: logging.Logger,
   label: str,
 ) -> bool:
-  """Give one proven-private process group a modest background priority.
+  """Give one proven-private process group background priority.
 
-  Setting the group leader before it creates most descendants also makes the
-  inherited priority the default for later children. Failure is intentionally
-  non-fatal: isolation and cleanup remain useful even on a runtime without
-  ``setpriority`` support.
+  Background means two things the kernel decides separately: CPU (nice) and
+  which process dies first when the container runs out of memory
+  (``oom_score_adj``). Setting the group leader before it creates most
+  descendants also makes both values the inherited default for later
+  children. Failure is intentionally non-fatal: isolation and cleanup remain
+  useful even on a runtime without ``setpriority`` or ``/proc`` support.
   """
   if not isinstance(pgid, int) or isolated_process_group_id(pgid) != pgid:
     return False
@@ -52,7 +60,34 @@ def lower_process_group_priority(
       exc,
     )
     return False
+  for pid in _process_group_members(pgid):
+    try:
+      with open(f"/proc/{pid}/oom_score_adj", "w") as handle:
+        handle.write(str(AGENT_OOM_SCORE_ADJ))
+    except OSError as exc:
+      logger.warning(
+        "%s OOM preference failed pid=%s pgid=%s: %s", label, pid, pgid, exc,
+      )
   return True
+
+
+def _process_group_members(pgid: int) -> list[int]:
+  """Current members of ``pgid``; the leader alone when /proc is unavailable."""
+  members: list[int] = []
+  try:
+    entries = os.listdir("/proc")
+  except OSError:
+    return [pgid]
+  for entry in entries:
+    if not entry.isdigit():
+      continue
+    pid = int(entry)
+    try:
+      if os.getpgid(pid) == pgid:
+        members.append(pid)
+    except (OSError, ProcessLookupError):
+      continue
+  return members or [pgid]
 
 
 def terminate_process_group(

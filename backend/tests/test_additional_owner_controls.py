@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from app import auth, models
+from app import app_git, auth, models
 from app.config import get_settings
 from app.delegations import RunPolicy, delegation_execution_token
 
@@ -27,6 +27,11 @@ def controls(db, owner_token, tmp_path):
   )
   db.add(app)
   db.flush()
+  app_git.ensure_repo(source_dir)
+  app_git.commit_local(source_dir, "Accept owner-control fixture")
+  app.source_commit = app_git.head_sha(source_dir, app_git.LOCAL_BRANCH)
+  from app.applied_app_runtime import prepare_runtime, publish_runtime
+  publish_runtime(app, prepare_runtime(source_dir, app.source_commit))
 
   chats = {
     name: models.Chat(
@@ -66,12 +71,12 @@ def controls(db, owner_token, tmp_path):
   ), run_id="owner-controls-child-run")
   assert delegated is not None
   top_level = auth.create_agent_token(
-    chats["top-level"].id, "owner-controls-top-run",
-    owner.username, owner.token_epoch,
+    chats["top-level"].id, owner.username, owner.token_epoch,
+    run_id="owner-controls-top-run",
   )
   child_agent = auth.create_agent_token(
-    chats["child"].id, "owner-controls-child-run",
-    owner.username, owner.token_epoch,
+    chats["child"].id, owner.username, owner.token_epoch,
+    run_id="owner-controls-child-run",
   )
   app_token = auth.create_app_token(
     app.id, owner.username, owner.token_epoch, app.token_nonce,

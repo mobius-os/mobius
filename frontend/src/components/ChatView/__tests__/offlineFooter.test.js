@@ -9,6 +9,9 @@ const connectionStatus = readFileSync(new URL('../ConnectionStatus.jsx', import.
 const chatCss = readFileSync(new URL('../ChatView.css', import.meta.url), 'utf8')
 const scrollMode = readFileSync(new URL('../useScrollMode.js', import.meta.url), 'utf8')
 const shell = readFileSync(new URL('../../Shell/Shell.jsx', import.meta.url), 'utf8')
+const apiClient = readFileSync(new URL('../../../api/client.js', import.meta.url), 'utf8')
+const systemStream = readFileSync(new URL('../../../hooks/useSystemEventStream.js', import.meta.url), 'utf8')
+const settingsView = readFileSync(new URL('../../SettingsView/SettingsView.jsx', import.meta.url), 'utf8')
 
 test('only transient nudges float above the measured rail → connection → queued → composer stack', () => {
   const footStart = chatView.indexOf('<div ref={footRef} className="chat__foot">')
@@ -30,11 +33,9 @@ test('only transient nudges float above the measured rail → connection → que
     'transient post-turn actions must render in the separate floating layer')
   const transientLane = foot.indexOf('className="chat__floating-transients"')
   const offscreenNudges = foot.indexOf('className="chat__offscreen-nudges"')
-  const openApp = foot.indexOf('className="chat__open-app"')
   assert.ok(
     transientLane > floatingActions
-      && offscreenNudges > transientLane
-      && openApp > transientLane,
+      && offscreenNudges > transientLane,
     'every transient footer action must stay in the one short-lived lane',
   )
   assert.doesNotMatch(
@@ -58,11 +59,8 @@ test('only transient nudges float above the measured rail → connection → que
     /\.chat__floating-transients\s*\{[\s\S]*?display:\s*flex;[\s\S]*?flex-direction:\s*column;[\s\S]*?gap:\s*var\(--chat-foot-card-gap\);/,
     'transient footer actions must share one explicit stack',
   )
-  assert.match(
-    chatCss,
-    /\.chat__open-app\s*\{[\s\S]*?width:\s*min\(100%,\s*720px\);[\s\S]*?align-items:\s*flex-end;/,
-    'Open app keeps its original right edge inside the composer column',
-  )
+  assert.doesNotMatch(chatView, /className="chat__open-app"/)
+  assert.doesNotMatch(chatCss, /\.chat__open-app(?:-btn)?\s*\{/)
   assert.doesNotMatch(
     scrollMode,
     /floatingAction|floatingActions/,
@@ -73,16 +71,11 @@ test('only transient nudges float above the measured rail → connection → que
 test('the shell is the one persistent connection owner while send failures stay contextual', () => {
   assert.match(shell, /ReachabilityPhase\.CHECKING[\s\S]*?'Reconnecting…'/)
   assert.match(shell, /ReachabilityPhase\.OFFLINE \? 'Offline'/)
-  assert.match(
-    shell,
-    /const connectionStatusLabel = reachabilityLabel[\s\S]*?restartPending \? 'Restarting…'/,
-  )
+  // The one dot now covers a planned restart too: a single element gated on
+  // (reachabilityLabel || restartPending) so a drain and the process-down window
+  // never render two indicators. See restartStore.
+  assert.match(shell, /const connectionStatusLabel = reachabilityLabel[\s\S]*?restartPending \? 'Restarting…'/)
   assert.match(shell, /\{connectionStatusLabel && \([\s\S]*?className="shell__connection-status"[\s\S]*?shell__sr-only/)
-  assert.match(shell, /ev\.type === 'server_restarting'[\s\S]*?setRestartPending\(\)/)
-  assert.match(
-    shell,
-    /const reconcileSystemStateOnOpen = useCallback\(async \(\) => \{[\s\S]*?clearRestartPending\(\)/,
-  )
   assert.doesNotMatch(chatView, /You're offline — chat needs a connection\./)
   assert.doesNotMatch(chatInputBar, /You're offline — chat needs a connection\./)
   assert.match(
@@ -92,22 +85,101 @@ test('the shell is the one persistent connection owner while send failures stay 
   )
 })
 
-test('the composer accepts an offline send for the durable chat outbox', () => {
+test('the composer accepts an offline send so it can queue in the durable outbox', () => {
+  // The primary Send button must NOT gate on `offline`: an offline tap has to
+  // reach doSend so the send is recorded in the durable outbox (chatOutbox) and
+  // auto-replays on reconnect, exactly like the Enter path (canSubmit ignores
+  // offline). Gating it on offline silently swallowed offline taps.
   assert.match(
     chatInputBar,
     /aria-label="Send"[\s\S]{0,700}?disabled=\{hasUploading \|\| submissionBlocked\}/,
+    'the Send button must gate only on uploads / provider-switch, not offline',
   )
   assert.doesNotMatch(
     chatInputBar,
     /disabled=\{hasUploading \|\| offline \|\| submissionBlocked\}/,
+    'the old offline-gated Send button swallowed offline taps',
+  )
+  assert.match(
+    chatInputBar,
+    /const canSubmit = !submissionBlocked && !questionBlocked/,
+    'the keyboard submit path must stay offline-agnostic so the two align',
   )
   const sendFailure = readFileSync(new URL('../sendFailure.js', import.meta.url), 'utf8')
-  assert.match(sendFailure, /queued and will send when you reconnect/)
+  assert.match(
+    sendFailure,
+    /queued and will send when you reconnect/,
+    'the offline copy must promise the durable auto-replay, not a manual resend',
+  )
   assert.match(shell, /useOutboxDrain\(\)/)
   assert.match(
     streamConnection,
     /outboxRetained = await enqueueIntent\([\s\S]*?err\.outboxRetained = true/,
     'automatic-replay copy must be gated by the successful durable write',
+  )
+})
+
+test('retained sends move into the tray while authoritative failures restore the draft', () => {
+  const freshStart = chatView.indexOf('// FRESH SEND PATH: no active turn, no queue.')
+  const silentStart = chatView.indexOf('const doSendSilent = useCallback')
+  const freshSend = chatView.slice(freshStart, silentStart)
+  assert.match(
+    freshSend,
+    /const keepQueued = shouldKeepQueuedAfterSendFailure[\s\S]*?pendingQueue\.add\(\{ \.\.\.queuedUserMsg, queued: true \}, \{ inFlight: false \}\)[\s\S]*?clearFailedAttempt\(\)/,
+    'a retained fresh send must leave the composer empty and own one queued cid row',
+  )
+  assert.match(
+    freshSend,
+    /else \{[\s\S]*?rememberFailedAttempt\(failedAttempt\)[\s\S]*?restoreComposerAfterFailedSend\(\)/,
+    'only the non-retained branch may restore the composer',
+  )
+  assert.match(
+    chatView,
+    /const silentUserMsg[\s\S]*?shouldKeepQueuedAfterSendFailure[\s\S]*?const \{ hidden: _hidden, \.\.\.queuedAnswerMsg \} = silentUserMsg[\s\S]*?pendingQueue\.add\(\{ \.\.\.queuedAnswerMsg, queued: true \}, \{ inFlight: false \}\)[\s\S]*?return true/,
+    'a retained question answer must stay visibly queued for outbox delivery',
+  )
+})
+
+test('restart events verify shared connectivity so recovery generation advances', () => {
+  assert.match(
+    shell,
+    /ev\.type === 'server_restarting'[\s\S]*?setRestartPending\(\)[\s\S]*?void verifyConnectivity\(\)/,
+    'the restart edge must enter CHECKING before the new server answers',
+  )
+  assert.match(
+    streamConnection,
+    /getRecoverySnapshot[\s\S]*?subscribeRecovery[\s\S]*?retryCount\.current = 0[\s\S]*?wantsReconnectRef\.current[\s\S]*?connectRef\.current\?\.\(true\)/,
+    'the stream hook must reopen a latched stream on a recovery generation',
+  )
+  assert.doesNotMatch(
+    chatView,
+    /useEffect\(\(\) => \{\s*if \(hidden\) return\s*let cancelled = false\s*let observedRecoveryGeneration/,
+    'recovery subscription must remain active for hidden retained panes',
+  )
+})
+
+test('credential expiry preserves principal-bound intent while explicit logout wipes it', () => {
+  assert.match(
+    apiClient,
+    /function clearOwnerClientState\(\{ preserveChatOutbox \}\)/,
+  )
+  assert.match(
+    apiClient,
+    /preserveChatOutbox[\s\S]*?\? \[\][\s\S]*?: \[clearChatOutbox\(\)\]/,
+    'explicit cleanup must clear through the live outbox store, not a blocked deleteDatabase',
+  )
+  assert.match(
+    apiClient,
+    /status === 401[\s\S]*?await clearExpiredOwnerSession\(\)/,
+  )
+  assert.match(
+    systemStream,
+    /res\.status === 401[\s\S]*?await clearExpiredOwnerSession\(\)/,
+  )
+  assert.match(
+    settingsView,
+    /await clearExplicitOwnerSession\(/,
+    'owner-invoked logout must use the explicit session owner that performs the full outbox wipe',
   )
 })
 

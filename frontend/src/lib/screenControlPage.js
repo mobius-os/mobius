@@ -11,7 +11,6 @@ const SENSITIVE_AUTOCOMPLETE = new Set([
   'cc-number', 'cc-csc', 'cc-exp', 'cc-exp-month', 'cc-exp-year',
 ])
 const FRAME_TIMEOUT_MS = 2500
-const CAPTURE_START_TIMEOUT_MS = 10_000
 
 let rootRefs = new Map()
 let nextFrameRequest = 0
@@ -142,7 +141,6 @@ function screenInputEvent(type, options) {
 
 function typeInto(element, text, replace = true) {
   if (!element) throw new Error('No field is focused.')
-  if (element.closest?.('[inert]')) throw new Error('That field is not interactive.')
   if (sensitiveField(element)) {
     throw new Error('Sensitive fields stay under your control.')
   }
@@ -208,7 +206,6 @@ function localCommand(command, doc = document) {
   if (command.action === 'click') {
     const target = command.ref ? rootRefs.get(command.ref) : nearestActionTarget(pointTarget)
     if (!target || !visibleElement(target)) throw new Error('That control is no longer available.')
-    if (target.closest?.('[inert]')) throw new Error('That control is not interactive.')
     if (target.disabled || target.getAttribute?.('aria-disabled') === 'true') {
       throw new Error('That control is disabled.')
     }
@@ -258,12 +255,9 @@ function requestFrame(frame, command) {
       else reject(new Error(message.error || 'The app frame rejected the command.'))
     }
     window.addEventListener('message', onMessage)
-    // App frames are intentionally opaque-origin. The exact contentWindow is
-    // selected here and again validates the concrete parent origin, so `*` is
-    // the only delivery target that can reach the sandboxed frame safely.
     frame.contentWindow?.postMessage({
       type: 'moebius:screen-control-command', requestId, command,
-    }, '*')
+    }, window.location.origin)
   })
 }
 
@@ -348,65 +342,27 @@ export async function requestCurrentTabCapture() {
     error.name = 'NotSupportedError'
     throw error
   }
-  let stream
-  let video
-  try {
-    stream = await navigator.mediaDevices.getDisplayMedia({
-      video: { frameRate: { ideal: 2, max: 5 } },
-      audio: false,
-      preferCurrentTab: true,
-      selfBrowserSurface: 'include',
-      surfaceSwitching: 'exclude',
-      monitorTypeSurfaces: 'exclude',
-    })
-    const track = stream.getVideoTracks()[0]
-    if (!track || track.readyState === 'ended') {
-      throw new Error('The shared screen ended before it was ready.')
-    }
-    video = document.createElement('video')
-    video.muted = true
-    video.playsInline = true
-    video.srcObject = stream
-    await new Promise((resolve, reject) => {
-      let settled = false
-      const finish = (callback, value) => {
-        if (settled) return
-        settled = true
-        clearTimeout(timer)
-        track.removeEventListener('ended', onEnded)
-        video.onloadedmetadata = null
-        video.onerror = null
-        callback(value)
-      }
-      const onEnded = () => finish(
-        reject, new Error('The shared screen ended before it was ready.'),
-      )
-      const timer = setTimeout(
-        () => finish(reject, new Error('The shared screen did not become ready in time.')),
-        CAPTURE_START_TIMEOUT_MS,
-      )
-      track.addEventListener('ended', onEnded, { once: true })
-      video.onloadedmetadata = () => finish(resolve)
-      video.onerror = () => finish(
-        reject, new Error('The shared screen could not be read.'),
-      )
-    })
-    await video.play()
-    if (track.readyState === 'ended') {
-      throw new Error('The shared screen ended before it was ready.')
-    }
-    return { stream, video }
-  } catch (error) {
-    stream?.getTracks?.().forEach(track => track.stop())
-    if (video) video.srcObject = null
-    throw error
-  }
+  const stream = await navigator.mediaDevices.getDisplayMedia({
+    video: { frameRate: { ideal: 2, max: 5 } },
+    audio: false,
+    preferCurrentTab: true,
+    selfBrowserSurface: 'include',
+    surfaceSwitching: 'exclude',
+    monitorTypeSurfaces: 'exclude',
+  })
+  const video = document.createElement('video')
+  video.muted = true
+  video.playsInline = true
+  video.srcObject = stream
+  await new Promise((resolve, reject) => {
+    video.onloadedmetadata = resolve
+    video.onerror = () => reject(new Error('The shared screen could not be read.'))
+  })
+  await video.play()
+  return { stream, video }
 }
 
-function captureVideoFrame(video, track) {
-  if (!track || track.readyState === 'ended') {
-    throw new Error('The shared screen is no longer available.')
-  }
+function captureVideoFrame(video) {
   const sourceWidth = video.videoWidth
   const sourceHeight = video.videoHeight
   if (!sourceWidth || !sourceHeight) throw new Error('The shared screen has no video frame yet.')
@@ -424,30 +380,11 @@ function captureVideoFrame(video, track) {
   }
 }
 
-export function screenControlCommandExpired(deadlineAt, now = Date.now()) {
-  const deadline = Number(deadlineAt)
-  return Number.isFinite(deadline) && deadline <= now
-}
-
-export function createScreenControlClient({
-  sessionId,
-  expiresAt,
-  capture,
-  onConnected,
-  onEnded,
-}) {
+export function createScreenControlClient({ sessionId, capture, onConnected, onEnded }) {
   const controller = new AbortController()
   let stopped = false
   let stopPromise = null
-  let endedNotified = false
-  let expiryTimer = null
   const track = capture.stream.getVideoTracks()[0]
-
-  function notifyEnded(reason, error) {
-    if (endedNotified) return
-    endedNotified = true
-    onEnded?.(reason, error)
-  }
 
   async function postResponse(commandId, outcome) {
     const response = await fetch(
@@ -464,20 +401,12 @@ export function createScreenControlClient({
   }
 
   async function handleCommand(event) {
-    const { commandId, deadlineAt, type: _type, ...command } = event
-    if (!commandId || stopped) return
-    if (screenControlCommandExpired(deadlineAt)) {
-      await postResponse(commandId, {
-        ok: false,
-        error: 'The screen-control command expired before execution.',
-      }).catch(() => {})
-      return
-    }
+    const { commandId, type: _type, ...command } = event
+    if (!commandId) return
     try {
       const result = command.action === 'screenshot'
-        ? captureVideoFrame(capture.video, track)
+        ? captureVideoFrame(capture.video)
         : await executePageCommand(command)
-      if (stopped) return
       await postResponse(commandId, { ok: true, result })
     } catch (error) {
       await postResponse(commandId, {
@@ -514,7 +443,7 @@ export function createScreenControlClient({
             }
             if (event.type === 'screen-control-stop') {
               await stop({ notifyServer: false })
-              notifyEnded('stopped')
+              onEnded?.('stopped')
               return
             }
             if (event.type === 'screen-control-command') await handleCommand(event)
@@ -525,7 +454,7 @@ export function createScreenControlClient({
     } catch (error) {
       if (stopped || error?.name === 'AbortError') return
       await stop({ notifyServer: false })
-      notifyEnded('disconnected', error)
+      onEnded?.('disconnected', error)
     }
   }
 
@@ -534,7 +463,6 @@ export function createScreenControlClient({
     stopPromise = (async () => {
       stopped = true
       controller.abort()
-      clearTimeout(expiryTimer)
       capture.stream.getTracks().forEach(item => item.stop())
       capture.video.srcObject = null
       if (notifyServer) {
@@ -552,23 +480,10 @@ export function createScreenControlClient({
   }
 
   if (track) {
-    const onTrackEnded = () => {
+    track.addEventListener('ended', () => {
       if (stopped) return
-      void stop().finally(() => notifyEnded('stopped'))
-    }
-    track.addEventListener('ended', onTrackEnded, { once: true })
-    // The grant can end while the session request is still in flight, before
-    // this listener exists. Reconcile that already-ended state immediately.
-    if (track.readyState === 'ended') {
-      Promise.resolve().then(onTrackEnded)
-    }
-  }
-  const expiryDelay = Number(expiresAt) - Date.now()
-  if (Number.isFinite(expiryDelay)) {
-    expiryTimer = setTimeout(() => {
-      if (stopped) return
-      void stop().finally(() => notifyEnded('expired'))
-    }, Math.max(0, expiryDelay))
+      void stop().finally(() => onEnded?.('stopped'))
+    }, { once: true })
   }
   void connect()
   return { stop }

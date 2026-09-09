@@ -9,6 +9,7 @@ from pathlib import Path as FilePath
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
+from starlette.background import BackgroundTask
 from starlette.responses import Response
 from sqlalchemy.orm import Session
 
@@ -31,21 +32,26 @@ from app.chat_writer import (
   CancelPending,
   StartTurn,
   StartTurnBlockedByPendingQuestion,
+  StartTurnRecoveryChanged,
   UpdatePending,
   alloc_run_token,
   await_ack,
   cid_of,
   ensure_user_cid,
   get_writer,
+  ResolvePlatformRestartCard,
 )
-from app import claude_sdk_runner, codex_sdk_runner
-from app.chat_provider import resolve_chat_provider
+from app.chat_steering import (
+  has_live_steerable_turn,
+  steer_into_active_turn,
+)
 from app.chat_visibility import coerce_agent_settings
 from app.providers import (
   _load_agent_settings,
   effective_agent_settings,
+  owner_default_provider,
+  provider_of_model,
 )
-from app.runner_registry import RunnerKind, registry
 from app.config import get_settings
 from app.database import get_db
 from app.memory_observability import record_memory_checkpoint_once
@@ -65,6 +71,24 @@ from app.resource_access import (
 router = APIRouter(prefix="/api/chats", tags=["chats"])
 
 log = logging.getLogger(__name__)
+
+
+class ClaimedRestartResponse(JSONResponse):
+  """The response owns the dispatch handoff, including send/cancellation failure."""
+
+  def __init__(self, *, action_id: str, **kwargs):
+    super().__init__(**kwargs)
+    self.action_id = action_id
+
+  async def __call__(self, scope, receive, send):
+    try:
+      await super().__call__(scope, receive, send)
+    finally:
+      from app.platform_restart import settle_undispatched_execution
+      try:
+        await asyncio.to_thread(settle_undispatched_execution, self.action_id)
+      except Exception:
+        log.exception("Could not settle restart response handoff action_id=%s", self.action_id)
 
 
 async def start_queued_owner_continuation(chat_id: str, db: Session) -> dict | None:
@@ -102,7 +126,13 @@ async def start_queued_owner_continuation(chat_id: str, db: Session) -> dict | N
 
 
 def _delegation_manages_chat(db: Session, chat_id: str) -> bool:
-  """Whether a parent delegation owns this chat's send lifecycle."""
+  """Return whether a parent delegation owns this chat's send lifecycle.
+
+  Keep the send gate beside the route that enforces it. Delegation policy
+  loading is intentionally a separate concern and may evolve independently;
+  this guard only needs the durable ownership row already available through
+  the request session.
+  """
   return db.query(models.Delegation.id).filter(
     models.Delegation.child_chat_id == chat_id,
   ).first() is not None
@@ -141,14 +171,37 @@ def _selected_model_for_chat(
   return model.strip() if isinstance(model, str) and model.strip() else None
 
 
-def _next_execution_provider(chat: models.Chat) -> str:
+def _next_execution_provider(db: Session, chat: models.Chat) -> str:
   """Match the provider the current send path will actually execute on."""
-  return resolve_chat_provider(
-    chat,
-    data_dir=get_settings().data_dir,
-    running=is_chat_running(chat.id),
-    draining=is_draining(),
-  )
+  provider = chat.provider or "claude"
+  # A model selected on this exact pristine chat is more specific than the
+  # owner's latest global pick. This occurs when an app/test/API client creates
+  # an empty chat and then chooses its model before the first send. Re-routing
+  # it to an unrelated global provider makes the explicit model invalid and
+  # rejects the turn. Ordinary newly-created owner chats carry no per-chat
+  # model, so they still follow the latest owner selection below.
+  chat_settings = coerce_agent_settings(chat.agent_settings_json) or {}
+  explicit_provider = provider_of_model(chat_settings.get("model"))
+  if explicit_provider is not None:
+    return explicit_provider
+  # StartTurn alone re-reads the owner's latest provider for a pristine owner
+  # chat. Queued, draining, app-owned, and already-started chats keep their
+  # durable provider, so the model check must evaluate against that same value.
+  if (
+    chat.created_by_app_id is None
+    and not (chat.messages or [])
+    and not (chat.pending_messages or [])
+    and not is_chat_running(chat.id)
+    and not is_draining()
+  ):
+    owner = db.query(models.Owner).first()
+    # Provider follows the last-selected model, matching new-chat creation, so a
+    # pristine chat's first send can't re-diverge onto a family whose remembered
+    # model belongs to the other provider.
+    return owner_default_provider(
+      get_settings().data_dir, owner.provider if owner else None,
+    )
+  return provider
 
 # Keepalive interval for the SSE stream to prevent proxy timeouts.
 _KEEPALIVE_INTERVAL = 30  # seconds
@@ -296,38 +349,6 @@ def _answer_delivered_response(chat_id: str) -> JSONResponse:
   )
 
 
-def _has_unanswered_question(
-  chat: models.Chat,
-  question_id: str | None,
-) -> bool:
-  """Whether an answer to `question_id` should be accepted for this chat.
-
-  Primary signal is the durable `pending_question_id` marker, so an answer
-  lands even when parallel tool/subagent output or a terminal error trails the
-  card, and across a restart. Fallback: a *targeted* answer (a specific
-  question_id) is still honored when the marker has cleared but that exact card
-  is unanswered in the latest turn — answering the card after a Stop is a fresh
-  continuation request, not a stale race. Position-independent; a later user
-  turn (the decision was superseded) is not eligible.
-  """
-  open_id = chat.pending_question_id
-  if open_id is not None:
-    return question_id is None or question_id == open_id
-  if not question_id:
-    return False
-  for msg in reversed(chat.messages or []):
-    if msg.get("hidden"):
-      continue
-    if msg.get("role") != "assistant":
-      return False
-    return any(
-      block.get("type") == "question"
-      and block.get("question_id") == question_id
-      and not block.get("answers")
-      for block in (msg.get("blocks") or [])
-    )
-  return False
-
 
 def _queued_response(
   new_msg: dict,
@@ -466,48 +487,6 @@ def _steer_enabled(chat: models.Chat) -> bool:
   return bool(merged.get("steer_enabled"))
 
 
-def _has_live_steerable_turn(chat_id: str, provider: str) -> bool:
-  """True when a steerable provider handle is registered for this chat.
-
-  Codex exposes a true turn/steer primitive. Claude has no wire-level
-  mid-turn inject, so its registered client steers by interrupting the
-  live response and re-prompting on the same SDK client.
-  """
-  if provider == "claude":
-    return isinstance(
-      registry.get_handle(chat_id, RunnerKind.CLAUDE_SDK),
-      claude_sdk_runner.ActiveClaudeClient,
-    )
-  handle = registry.get_handle(chat_id, RunnerKind.CODEX_SDK)
-  return (
-    isinstance(handle, codex_sdk_runner.ActiveCodexTurn)
-    and handle.is_steerable
-  )
-
-
-async def _steer_into_active_turn(
-  provider: str,
-  chat_id: str,
-  content: str,
-  user_msgs: list[dict] | None = None,
-  consume_pending_cids: list[str] | None = None,
-) -> bool:
-  """Admit a steer to the live handle without awaiting provider I/O.
-
-  Both provider handles buffer the durable rows and own the eventual
-  acknowledgement + transcript cut. The HTTP route stays only the atomic
-  durability/admission boundary, so a wedged provider control call cannot hold
-  the per-chat queue lock or its database checkout.
-  """
-  if provider == "claude":
-    return await claude_sdk_runner.steer_into_active_turn(
-      chat_id, content, user_msgs, consume_pending_cids,
-    )
-  return await codex_sdk_runner.steer_into_active_turn(
-    chat_id, content, user_msgs, consume_pending_cids,
-  )
-
-
 def _steered_response(
   chat_id: str,
   pending_messages: list[dict] | None = None,
@@ -624,6 +603,100 @@ async def send_message(
   if body.answers:
     require_owner_input_principal(principal)
   chat = get_active_chat_for_principal(db, chat_id, principal)
+
+  # A typed Restart card is a platform action, not a prose continuation. The
+  # writer re-matches the exact card and option identity inside its mutation;
+  # this route only supplies lifecycle locking and side-effect admission after
+  # the durable claim commits.
+  from app.platform_restart import restart_action_block
+  restart_block = restart_action_block(chat, body.question_id)
+  if restart_block is not None:
+    require_owner_input_principal(principal)
+    selections = body.selected_options
+    if (
+      not isinstance(selections, dict)
+      or set(selections) != {"restart"}
+      or not isinstance(selections.get("restart"), list)
+      or len(selections["restart"]) != 1
+      or not isinstance(selections["restart"][0], str)
+    ):
+      raise HTTPException(
+        status_code=409,
+        detail="Use one of the Restart card's current buttons.",
+      )
+    async with chat_queue.get_transition_lock(chat_id):
+      async with chat_queue.get_lock(chat_id):
+        try:
+          result = await await_ack(get_writer().submit(
+            ResolvePlatformRestartCard(
+              chat_id=chat_id,
+              run_token="",
+              question_id=body.question_id or "",
+              selected_option_id=selections["restart"][0],
+            )
+          ))
+        except Exception as exc:
+          log.info(
+            "Restart card resolution refused chat_id=%s question_id=%s: %s",
+            chat_id, body.question_id, exc,
+          )
+          raise HTTPException(
+            status_code=409,
+            detail="This Restart card is stale or no longer authorized.",
+          ) from exc
+    try:
+      event = {
+        "type": "answers_applied",
+        "question_id": body.question_id,
+        "answers": result["answers"],
+        "selected_options": result["selected_options"],
+        "answer_turn": "none",
+        "platform_action": result["platform_action"],
+      }
+      from app.chat_event_sink import get_active_sink
+      sink = get_active_sink(chat_id)
+      bc = get_broadcast(chat_id)
+      if sink is not None:
+        sink.publish(event)
+      elif bc is not None:
+        bc.publish(event)
+      db.refresh(chat)
+      publish_owner_input_changed(chat_id,
+        "question" if chat.pending_question_id else None, question_id=chat.pending_question_id)
+      background = None
+      if result["dispatch"]:
+        async def execute_claimed_restart() -> None:
+          from app.restart_util import restart_this_worker
+          await restart_this_worker(action_id=result["action_id"])
+        background = BackgroundTask(execute_claimed_restart)
+      response_type = ClaimedRestartResponse if result["dispatch"] else JSONResponse
+      return response_type(**({"action_id": result["action_id"]} if result["dispatch"] else {}),
+        status_code=202, content={
+        "status": result["status"],
+        "answers": result["answers"],
+        "selected_options": result["selected_options"],
+        "platform_action": result["platform_action"],
+        "answer_turn": "none",
+        "running": is_chat_running(chat_id),
+        "question_id": body.question_id,
+        "action_id": result["action_id"],
+      }, background=background)
+    except BaseException:
+      if result["dispatch"]:
+        from app.platform_restart import settle_undispatched_execution
+        try:
+          await asyncio.to_thread(settle_undispatched_execution, result["action_id"])
+        except Exception:
+          log.exception("Could not settle restart construction handoff action_id=%s", result["action_id"])
+      raise
+
+  # Supplying typed identities for a missing/foreign card must not fall back
+  # to the generic question resolver or manufacture an ordinary continuation.
+  if body.selected_options and not (body.answers and questions.saved_question(chat, body.question_id)):
+    raise HTTPException(
+      status_code=410,
+      detail="The selected card is no longer accepting this action.",
+    )
   if goal_clear_requested(body.content or ""):
     raise HTTPException(
       status_code=409,
@@ -640,7 +713,6 @@ async def send_message(
         "message": "This evaluator chat is managed by its parent workflow.",
       },
     )
-
   # AskUserQuestion answer delivery. If a live SDK turn is blocked waiting for
   # the answer (held in `questions._pending[chat_id]`), persist through the
   # writer actor, then resolve the future in-place and return — the SDK
@@ -673,9 +745,10 @@ async def send_message(
     cancelled_when_submitted = questions.was_cancelled(
       chat_id, body.question_id,
     )
-    continuation_when_submitted = questions.open_continuation_question(
-      chat, body.question_id,
-    ) is not None
+    saved_card = questions.saved_question(chat, body.question_id)
+    continuation_when_submitted = bool(
+      saved_card and saved_card.get("response_mode") == "continuation"
+    )
     from app.chat import current_run_generation
 
     answer_generation = current_run_generation(chat_id)
@@ -696,6 +769,47 @@ async def send_message(
       continuation_card = questions.open_continuation_question(
         chat, body.question_id,
       )
+      saved_card = questions.saved_question(chat, body.question_id)
+      try:
+        quiet_answer = bool(saved_card and questions.closes_without_reply(
+          saved_card, body.answers, body.selected_options,
+        ))
+        if quiet_answer:
+          await await_ack(get_writer().submit(AnswerQuestion(
+            chat_id=chat_id, question_id=body.question_id,
+            answers=body.answers, selected_options=body.selected_options,
+            close_without_reply=True,
+          )))
+      except questions.AnswerConflict as exc:
+        raise HTTPException(409, detail=str(exc)) from exc
+      except Exception as exc:
+        log.warning("Quiet answer did not persist chat_id=%s: %s", chat_id, exc)
+        raise HTTPException(503, detail="Could not save your answer; please try again.") from exc
+      if quiet_answer:
+        from app.chat_event_sink import get_active_sink
+        event = {"type": "answers_applied", "question_id": body.question_id,
+                 "answers": body.answers, "answer_turn": "none"}
+        sink = get_active_sink(chat_id)
+        bc = get_broadcast(chat_id)
+        if sink is not None:
+          sink.publish(event)
+        elif bc is not None:
+          bc.publish(event)
+        db.refresh(chat)
+        # Closing is not a model turn. If it releases an already requested
+        # follow-up, use the ordinary queue admission (or the live publisher's
+        # terminal drain), never append a synthetic answer continuation.
+        from app.run_state import latest_run
+        current = latest_run(db, chat_id)
+        if (chat.pending_messages and not chat.pending_question_id and not is_chat_running(chat_id)
+            and (current is None or current.status != "stopped")):
+          await start_queued_owner_continuation(chat_id, db)
+        publish_owner_input_changed(chat_id,
+          "question" if chat.pending_question_id else None,
+          question_id=chat.pending_question_id)
+        return JSONResponse(content={
+          "status": "answered", "answer_turn": "none", "running": is_chat_running(chat_id),
+        })
       if continuation_card is not None and is_chat_running(chat_id):
         # A saved approval does not park a provider future. An immediate
         # answer belongs to the next turn, even before this one has settled.
@@ -827,7 +941,7 @@ async def send_message(
         )
 
       db.expire(chat)
-      if not _has_unanswered_question(chat, body.question_id):
+      if not questions.accepts_saved_answer(chat, body.question_id):
         raise HTTPException(
           status_code=410,
           detail="The question is no longer accepting answers.",
@@ -854,7 +968,9 @@ async def send_message(
             "question_id": body.question_id,
             "answers": body.answers,
           })
-      except chat_queue.PendingQuestionBlocksPromotion:
+      except chat_queue.PendingAdmissionBlocksPromotion as exc:
+        if exc.reason == "activation":
+          raise HTTPException(409, detail="This chat is waiting for its platform changes to load.") from exc
         raise _pending_question_open_conflict()
       except HTTPException:
         raise
@@ -904,7 +1020,11 @@ async def send_message(
   # Lock order is transition then queue; all send predicates refresh inside.
   async with chat_queue.get_transition_lock(chat_id):
     async with chat_queue.get_lock(chat_id):
-      db.expire(chat)
+      # End the pre-lock read snapshot, then evaluate all admission predicates
+      # against state committed by a concurrent provider switch that may have
+      # won the transition lock first.
+      db.rollback()
+      chat = get_active_chat_for_principal(db, chat_id, principal)
       return await _send_message_locked(body, chat_id, principal, db, chat)
 
 
@@ -920,8 +1040,7 @@ async def _send_message_locked(
   duplicate = _duplicate_send_response(chat_id, chat, body.cid)
   if duplicate is not None:
     return duplicate
-  # Re-check after acquiring the transition lock: creation may have attached
-  # this chat to a delegation after the request's initial admission read.
+
   if _delegation_manages_chat(db, chat_id):
     raise HTTPException(
       status_code=409,
@@ -930,12 +1049,13 @@ async def _send_message_locked(
         "message": "This evaluator chat is managed by its parent workflow.",
       },
     )
+
   if body.continuation == "manual" and principal.app_id is not None:
     raise HTTPException(
       status_code=403,
       detail="Only the owner can resume a paused chat.",
     )
-  next_execution_provider = _next_execution_provider(chat)
+  next_execution_provider = _next_execution_provider(db, chat)
   if _selected_model_for_chat(
     chat, provider=next_execution_provider,
   ) is None:
@@ -980,6 +1100,16 @@ async def _send_message_locked(
         return {}
     return {}
 
+  # Resume is a control for the interrupted turn, never a new queued input.
+  # Refuse while another physical attempt owns the chat; retrying the same cid
+  # after a lost acknowledgement is handled by the duplicate gate above.
+  manual_resume = body.continuation == "manual"
+  if manual_resume and (is_draining() or is_chat_running(chat_id)):
+    raise HTTPException(409, detail={
+      "code": "recovery_changed",
+      "message": "This chat is already continuing or restarting. Refresh its state before resuming.",
+    })
+
   # Drain gate (design §2.2): while the worker is draining for a restart, never
   # start a new turn or promote the queue — append to pending and return
   # "queued". The send is preserved and self-heals on the owner's next action
@@ -998,9 +1128,20 @@ async def _send_message_locked(
     db.expire(chat)
     return _queued_response(new_msg, len(chat.pending_messages or []))
 
+  # A typed activation wait is the unfinished work A. Later owner input B is
+  # durable, but cannot be promoted until the exact loaded-source continuation
+  # owns A. The activation writer command has the sole authenticated bypass.
+  from app.platform_restart import activation_barrier_for_chat
+  if activation_barrier_for_chat(db, chat_id):
+    new_msg = await _append_to_pending(
+      chat, body, db, initiated_by_app_id=principal.app_id,
+    )
+    db.expire(chat)
+    return _queued_response(new_msg, len(chat.pending_messages or []))
+
   # A provider-limit park has no live process, but it is still the chat's
   # exact unfinished run. Ordinary owner messages join its durable queue and
-  # are consumed when that run resumes; they do not implicitly spend a new
+  # wait until the resumed turn finishes; they do not implicitly spend a new
   # provider attempt or disable automatic recovery. The explicit recovery
   # control sends ``continuation=manual`` and deliberately bypasses this hold
   # after credits or an account reset restore availability.
@@ -1021,7 +1162,7 @@ async def _send_message_locked(
   # crashed mid-turn), we additionally spawn a run that drains the
   # queue from the head, so the queued messages actually get answered
   # rather than sitting forever.
-  if is_chat_running(chat_id) or chat.pending_messages:
+  if not manual_resume and (is_chat_running(chat_id) or chat.pending_messages):
     selected_force_pending = (
       _selected_force_steer_pending(chat, body)
       if body.force_steer else None
@@ -1054,7 +1195,7 @@ async def _send_message_locked(
         or body.direct_steer
         or not chat.pending_messages
       )
-      and _has_live_steerable_turn(chat_id, provider)
+      and has_live_steerable_turn(chat_id, provider)
     ):
       # Every provider delivery names a row already durable in pending.
       user_msg = _user_message_from_body(chat, body)
@@ -1081,7 +1222,7 @@ async def _send_message_locked(
         steered = False
       else:
         try:
-          steered = await _steer_into_active_turn(
+          steered = await steer_into_active_turn(
             provider, chat_id, steer_content,
             user_msgs, consume_cids,
           )
@@ -1116,16 +1257,7 @@ async def _send_message_locked(
     if body.force_steer:
       return _not_steered_response(chat_id)
 
-    # If real owner messages already wait behind a provider park, the explicit
-    # Try now action starts that queue directly. Persisting an extra hidden
-    # ``continue`` after visible rows would split by visibility and buy a
-    # second, content-free provider turn after the real work.
-    manual_pending_drain = (
-      body.continuation == "manual"
-      and not is_chat_running(chat_id)
-      and bool(chat.pending_messages)
-    )
-    new_msg = None if manual_pending_drain else await _append_to_pending(
+    new_msg = await _append_to_pending(
       chat, body, db, initiated_by_app_id=principal.app_id,
     )
     started_message = None
@@ -1144,9 +1276,6 @@ async def _send_message_locked(
               db,
               chat_id,
               drain_token,
-              continuation_reason=(
-                "manual" if manual_pending_drain else None
-              ),
             )
           )
           if next_user:
@@ -1168,8 +1297,10 @@ async def _send_message_locked(
             # MALFORMED head no longer lands here: it raises in the actor and
             # is handled by the `except` below (→ FAILED_LEAVE_MARKER).
             discard_starting(chat_id)
-        except chat_queue.PendingQuestionBlocksPromotion:
+        except chat_queue.PendingAdmissionBlocksPromotion as exc:
           discard_starting(chat_id)
+          if exc.reason == "activation":
+            raise HTTPException(409, detail="This chat is waiting for its platform changes to load.") from exc
           raise _pending_question_open_conflict()
         except Exception:
           discard_starting(chat_id)
@@ -1181,11 +1312,6 @@ async def _send_message_locked(
     # copy so this read reflects the actor's committed write.
     db.expire(chat)
     remaining = list(chat.pending_messages or [])
-    if new_msg is None:
-      payload = {"status": "started"}
-      if started_message is not None:
-        payload["message"] = started_message
-      return JSONResponse(status_code=202, content=payload)
     try:
       position = [m.get("ts") for m in remaining].index(new_msg["ts"]) + 1
     except ValueError:
@@ -1206,6 +1332,11 @@ async def _send_message_locked(
     )
 
   if not mark_starting(chat_id):
+    if manual_resume:
+      raise HTTPException(409, detail={
+        "code": "recovery_changed",
+        "message": "The chat cannot resume while Möbius is restarting. Try again when it reconnects.",
+      })
     new_msg = await _append_to_pending(
       chat, body, db, initiated_by_app_id=principal.app_id,
     )
@@ -1252,6 +1383,7 @@ async def _send_message_locked(
         title_source=body.content,
         default_provider=default_provider,
         initiated_by_app_id=principal.app_id,
+        resume_run_id=body.resume_run_id,
       )
     )
     # StartTurn returns the agent history (schemas.ChatMessage list built
@@ -1263,6 +1395,11 @@ async def _send_message_locked(
       result = await await_ack(ack)
     except Exception as exc:
       raise _message_persist_unavailable(exc, chat_id=chat_id) from exc
+    if isinstance(result, StartTurnRecoveryChanged):
+      raise HTTPException(409, detail={
+        "code": "recovery_changed",
+        "message": "This interrupted turn has already been continued. Refresh the chat to see its current state.",
+      })
     if isinstance(result, StartTurnBlockedByPendingQuestion):
       # The question opened after the route's early check but before the
       # actor-owned transition. The outer cleanup releases this route's claim.

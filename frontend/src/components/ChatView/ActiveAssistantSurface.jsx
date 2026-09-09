@@ -26,9 +26,13 @@ function ActiveAssistantSurface({
   streamItems,
   dataKey,
   chatId,
+  activityMessageId,
+  activitySourceBlocks,
   onAnswer,
-  onAnswerPrepare,
+  onPrepareAnswer,
+  onCancelAnswer,
   onResume,
+  resumeState,
   onInternalNav,
   autoResumeEnabled,
   autoResumeAvailable,
@@ -85,9 +89,13 @@ function ActiveAssistantSurface({
       msg={msg}
       dataKey={dataKey}
       chatId={chatId}
+      activityMessageId={activityMessageId}
+      activitySourceBlocks={activitySourceBlocks}
       onAnswer={onAnswer}
-      onAnswerPrepare={onAnswerPrepare}
+      onPrepareAnswer={onPrepareAnswer}
+      onCancelAnswer={onCancelAnswer}
       onResume={onResume}
+      resumeState={resumeState}
       onInternalNav={onInternalNav}
       autoResumeEnabled={autoResumeEnabled}
       autoResumeAvailable={autoResumeAvailable}

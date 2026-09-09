@@ -50,3 +50,16 @@ test('appsTab is one canonical workspace item with an ordinary nav target', () =
   assert.ok(!tabModel.isAppsTab(tabModel.makeTab('app', '1')))
   assert.deepEqual(tabModel.tabNavTarget(tabModel.appsTab()), { view: 'apps' })
 })
+
+test('Projects launcher is canonical and project tabs retain string identity', () => {
+  assert.deepEqual(tabModel.projectsTab(), { kind: 'projects', id: 'projects' })
+  assert.equal(tabModel.tabKey(tabModel.projectsTab()), tabModel.PROJECTS_TAB_KEY)
+  assert.ok(tabModel.isProjectsTab(tabModel.projectsTab()))
+  assert.deepEqual(tabModel.tabNavTarget(tabModel.projectsTab()), { view: 'projects' })
+
+  const project = tabModel.projectTab('project-1')
+  assert.deepEqual(project, { kind: 'project', id: 'project-1' })
+  assert.deepEqual(tabModel.tabNavTarget(project), {
+    view: 'project', opts: { projectId: 'project-1' },
+  })
+})

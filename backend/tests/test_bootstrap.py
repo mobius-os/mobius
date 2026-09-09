@@ -4,14 +4,14 @@ Validates the boot-time invariants: ordered installs, canonical manifest
 identity, per-app uninstall policy, and failure isolation.
 """
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import re
 from unittest.mock import AsyncMock, patch
 
 import pytest
 from fastapi import HTTPException
 
-from app import app_git, models
+from app import app_git, bootstrap, models
 from app.bootstrap import (
   BOOTSTRAP_CONNECTIONS_MANIFEST_URL,
   BOOTSTRAP_IDENTITY_MANIFEST_URL,
@@ -50,6 +50,56 @@ def _bootstrap_urls():
     BOOTSTRAP_MEMORY_MANIFEST_URL,
     BOOTSTRAP_REFLECTION_MANIFEST_URL,
     BOOTSTRAP_CONNECTIONS_MANIFEST_URL,
+    BOOTSTRAP_IDENTITY_MANIFEST_URL,
+  ]
+
+
+_AUDITED_SOCIAL_MANIFEST_URL = (
+  "https://raw.githubusercontent.com/mobius-os/app-social/"
+  "0123456789abcdef0123456789abcdef01234567/mobius.json"
+)
+_AUDITED_SOCIAL_PUBLISHED_AT = datetime(
+  2026, 9, 8, 1, 0, tzinfo=timezone.utc,
+)
+
+
+def _enable_social_release(monkeypatch):
+  monkeypatch.setattr(
+    bootstrap,
+    "BOOTSTRAP_SOCIAL_RELEASE",
+    bootstrap._PublishedBootstrapApp(
+      manifest_id="common",
+      manifest_url=_AUDITED_SOCIAL_MANIFEST_URL,
+      published_at=_AUDITED_SOCIAL_PUBLISHED_AT,
+    ),
+  )
+
+
+def _installed_default_rows(created_at, *, deleted=()):
+  """Core default rows with the canonical internal package identities."""
+  from app.install import _canonical_identity_key
+
+  specs = (
+    ("store", "Store", BOOTSTRAP_STORE_MANIFEST_URL),
+    ("skills", "Skills", BOOTSTRAP_SKILLS_MANIFEST_URL),
+    ("memory", "Memory", BOOTSTRAP_MEMORY_MANIFEST_URL),
+    ("reflection", "Reflection", BOOTSTRAP_REFLECTION_MANIFEST_URL),
+    ("connections", "Integrations", BOOTSTRAP_CONNECTIONS_MANIFEST_URL),
+    ("identity", "Möbius · You", BOOTSTRAP_IDENTITY_MANIFEST_URL),
+  )
+  deleted_at = datetime.now(timezone.utc)
+  return [
+    models.App(
+      source_dir=f"/tmp/mobius-tests/{manifest_id}",
+      name=display_name,
+      description="already here",
+      jsx_source="export default function App() {}",
+      slug=manifest_id,
+      manifest_url=_canonical_identity_key(manifest_url, manifest_id),
+      created_at=created_at,
+      deleted_at=deleted_at if manifest_id in deleted else None,
+    )
+    for manifest_id, display_name, manifest_url in specs
   ]
 
 
@@ -70,7 +120,7 @@ async def test_bootstrap_installs_all_apps_in_order_when_absent(db, monkeypatch)
   with patch("app.bootstrap.install_from_manifest", install_mock):
     await ensure_bootstrap_apps_installed(db)
 
-  assert install_mock.await_count == 5
+  assert install_mock.await_count == 6
   assert [
     call.kwargs["manifest_url"] for call in install_mock.await_args_list
   ] == _bootstrap_urls()
@@ -81,20 +131,164 @@ async def test_bootstrap_installs_all_apps_in_order_when_absent(db, monkeypatch)
 
 
 @pytest.mark.asyncio
-async def test_managed_deployment_also_bootstraps_identity(db, monkeypatch):
-  """Railway SSO is the install condition; local owners do not get the app."""
+async def test_local_deployment_bootstraps_identity_without_linking(
+  db, monkeypatch,
+):
+  """Möbius · You is present without SSO; account linking remains optional."""
   monkeypatch.delenv("MOEBIUS_SKIP_BOOTSTRAP", raising=False)
   install_mock = AsyncMock(return_value=_install_result())
 
-  class ManagedSettings:
-    mobius_sso_enabled = True
-
-  monkeypatch.setattr("app.bootstrap.get_settings", lambda: ManagedSettings())
   with patch("app.bootstrap.install_from_manifest", install_mock):
     await ensure_bootstrap_apps_installed(db)
 
   urls = [call.kwargs["manifest_url"] for call in install_mock.await_args_list]
-  assert urls == _bootstrap_urls() + [BOOTSTRAP_IDENTITY_MANIFEST_URL]
+  assert urls == _bootstrap_urls()
+  assert BOOTSTRAP_IDENTITY_MANIFEST_URL in urls
+  assert db.query(models.IdentityAccountLink).count() == 0
+
+
+@pytest.mark.asyncio
+async def test_social_remains_disabled_until_a_pinned_release_is_declared(
+  db, monkeypatch,
+):
+  """A mutable or missing publication does not enter fresh defaults."""
+  monkeypatch.delenv("MOEBIUS_SKIP_BOOTSTRAP", raising=False)
+  assert bootstrap.BOOTSTRAP_SOCIAL_RELEASE is None
+  install_mock = AsyncMock(return_value=_install_result())
+
+  with patch("app.bootstrap.install_from_manifest", install_mock):
+    await ensure_bootstrap_apps_installed(db)
+
+  urls = [call.kwargs["manifest_url"] for call in install_mock.await_args_list]
+  assert urls == _bootstrap_urls()
+
+  monkeypatch.setattr(
+    bootstrap,
+    "BOOTSTRAP_SOCIAL_RELEASE",
+    bootstrap._PublishedBootstrapApp(
+      manifest_id="common",
+      manifest_url=(
+        "https://raw.githubusercontent.com/mobius-os/app-social/main/"
+        "mobius.json"
+      ),
+      published_at=_AUDITED_SOCIAL_PUBLISHED_AT,
+    ),
+  )
+  install_mock.reset_mock()
+  with patch("app.bootstrap.install_from_manifest", install_mock):
+    await ensure_bootstrap_apps_installed(db)
+  assert [
+    call.kwargs["manifest_url"] for call in install_mock.await_args_list
+  ] == _bootstrap_urls()
+
+
+@pytest.mark.asyncio
+async def test_published_social_is_a_fresh_deployment_default(db, monkeypatch):
+  """The audited, pinned Social release joins a genuinely fresh bootstrap."""
+  monkeypatch.delenv("MOEBIUS_SKIP_BOOTSTRAP", raising=False)
+  _enable_social_release(monkeypatch)
+  install_mock = AsyncMock(return_value=_install_result())
+
+  with patch("app.bootstrap.install_from_manifest", install_mock):
+    await ensure_bootstrap_apps_installed(db)
+
+  assert [
+    call.kwargs["manifest_url"] for call in install_mock.await_args_list
+  ] == _bootstrap_urls() + [_AUDITED_SOCIAL_MANIFEST_URL]
+
+
+@pytest.mark.asyncio
+async def test_existing_deployment_rerun_does_not_retrofit_social(
+  db, monkeypatch,
+):
+  """Pre-publication owners keep their prior defaults on later bootstraps."""
+  monkeypatch.delenv("MOEBIUS_SKIP_BOOTSTRAP", raising=False)
+  _enable_social_release(monkeypatch)
+  db.add_all(_installed_default_rows(
+    _AUDITED_SOCIAL_PUBLISHED_AT - timedelta(days=1),
+  ))
+  db.commit()
+  install_mock = AsyncMock(return_value=_install_result())
+
+  with patch("app.bootstrap.install_from_manifest", install_mock):
+    await ensure_bootstrap_apps_installed(db)
+
+  install_mock.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_prepublication_owner_without_apps_does_not_receive_social(
+  db, monkeypatch,
+):
+  """An established owner is enough to preserve the old deployment cohort."""
+  monkeypatch.delenv("MOEBIUS_SKIP_BOOTSTRAP", raising=False)
+  _enable_social_release(monkeypatch)
+  db.add(models.Owner(
+    username="existing-owner",
+    hashed_password="not-used-by-this-test",
+    created_at=_AUDITED_SOCIAL_PUBLISHED_AT - timedelta(days=1),
+  ))
+  db.commit()
+  install_mock = AsyncMock(return_value=_install_result())
+
+  with patch("app.bootstrap.install_from_manifest", install_mock):
+    await ensure_bootstrap_apps_installed(db)
+
+  assert [
+    call.kwargs["manifest_url"] for call in install_mock.await_args_list
+  ] == _bootstrap_urls()
+
+
+@pytest.mark.asyncio
+async def test_postpublication_deployment_retries_social_after_core_defaults(
+  db, monkeypatch,
+):
+  """A transient Social failure does not lose the fresh-deployment cohort."""
+  monkeypatch.delenv("MOEBIUS_SKIP_BOOTSTRAP", raising=False)
+  _enable_social_release(monkeypatch)
+  db.add_all(_installed_default_rows(
+    _AUDITED_SOCIAL_PUBLISHED_AT + timedelta(days=1),
+  ))
+  db.commit()
+  install_mock = AsyncMock(return_value=_install_result())
+
+  with patch("app.bootstrap.install_from_manifest", install_mock):
+    await ensure_bootstrap_apps_installed(db)
+
+  assert [
+    call.kwargs["manifest_url"] for call in install_mock.await_args_list
+  ] == [_AUDITED_SOCIAL_MANIFEST_URL]
+
+
+@pytest.mark.asyncio
+async def test_social_intentional_uninstall_remains_absent(db, monkeypatch):
+  """A post-release Social tombstone is not revived by a bootstrap rerun."""
+  from app.install import _canonical_identity_key
+
+  monkeypatch.delenv("MOEBIUS_SKIP_BOOTSTRAP", raising=False)
+  _enable_social_release(monkeypatch)
+  db.add_all(_installed_default_rows(
+    _AUDITED_SOCIAL_PUBLISHED_AT + timedelta(days=1),
+  ))
+  db.add(models.App(
+    source_dir="/tmp/mobius-tests/common",
+    name="Social",
+    description="owner uninstalled",
+    jsx_source="export default function App() {}",
+    slug="common",
+    manifest_url=_canonical_identity_key(
+      _AUDITED_SOCIAL_MANIFEST_URL, "common",
+    ),
+    created_at=_AUDITED_SOCIAL_PUBLISHED_AT + timedelta(days=1),
+    deleted_at=datetime.now(timezone.utc),
+  ))
+  db.commit()
+  install_mock = AsyncMock(return_value=_install_result())
+
+  with patch("app.bootstrap.install_from_manifest", install_mock):
+    await ensure_bootstrap_apps_installed(db)
+
+  install_mock.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -118,8 +312,7 @@ async def test_bootstrap_releases_identity_transaction_before_install(
 
 @pytest.mark.asyncio
 async def test_bootstrap_applies_per_app_uninstall_policy(db, monkeypatch):
-  """Store returns after uninstall; Skills/Memory/Connections stay gone;
-  live Reflection skips."""
+  """Store returns; other default-app uninstalls remain respected."""
   monkeypatch.delenv("MOEBIUS_SKIP_BOOTSTRAP", raising=False)
   from app.install import _canonical_identity_key
 
@@ -179,6 +372,17 @@ async def test_bootstrap_applies_per_app_uninstall_policy(db, monkeypatch):
       ),
       deleted_at=deleted_at,
     ),
+    models.App(
+      source_dir="/tmp/mobius-tests/identity",
+      name="Möbius · You",
+      description="owner uninstalled",
+      jsx_source="export default function App() {}",
+      slug="identity",
+      manifest_url=_canonical_identity_key(
+        BOOTSTRAP_IDENTITY_MANIFEST_URL, "identity",
+      ),
+      deleted_at=deleted_at,
+    ),
   ])
   db.commit()
 
@@ -187,8 +391,8 @@ async def test_bootstrap_applies_per_app_uninstall_policy(db, monkeypatch):
     await ensure_bootstrap_apps_installed(db)
 
   # Only the Store (the recovery surface) returns after an owner uninstall;
-  # Skills, Memory, and Connections (policy False) stay gone; live
-  # Reflection is skipped.
+  # Skills, Memory, Integrations, and Möbius · You (policy False) stay gone;
+  # live Reflection is skipped.
   assert install_mock.await_count == 1
   assert [
     call.kwargs["manifest_url"] for call in install_mock.await_args_list
@@ -250,6 +454,16 @@ async def test_bootstrap_skips_live_apps_by_canonical_manifest(db, monkeypatch):
         BOOTSTRAP_CONNECTIONS_MANIFEST_URL, "connections",
       ),
     ),
+    models.App(
+      source_dir="/tmp/mobius-tests/identity-custom",
+      name="Möbius · You",
+      description="already here",
+      jsx_source="export default function App() {}",
+      slug="identity-custom",
+      manifest_url=_canonical_identity_key(
+        BOOTSTRAP_IDENTITY_MANIFEST_URL, "identity",
+      ),
+    ),
   ])
   db.commit()
 
@@ -297,12 +511,13 @@ async def test_bootstrap_failure_doesnt_block_remaining_apps(
     _install_result("Skills", "skills", app_id=4),
     _install_result("Memory", "memory", app_id=2),
     _install_result("Reflection", "reflection", app_id=3),
-    _install_result("Connections", "connections", app_id=5),
+    _install_result("Integrations", "connections", app_id=5),
+    _install_result("Möbius · You", "identity", app_id=6),
   ])
   with patch("app.bootstrap.install_from_manifest", install_mock):
     await ensure_bootstrap_apps_installed(db)
 
-  assert install_mock.await_count == 5
+  assert install_mock.await_count == 6
   assert [
     call.kwargs["manifest_url"] for call in install_mock.await_args_list
   ] == _bootstrap_urls()

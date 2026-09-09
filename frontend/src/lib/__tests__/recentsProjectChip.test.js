@@ -18,10 +18,10 @@ test('an app row never yields a chip even if it carries a project', () => {
   assert.equal(recentsProjectChip('app', { id: '9', name: 'App', project: { id: 1, name: 'P' } }), null)
 })
 
-test('a project artifact row yields the same project chip as its chat', () => {
-  assert.deepEqual(
+test('a built artifact row never yields a chip: it stands on its own in Recents', () => {
+  assert.equal(
     recentsProjectChip('artifact', { id: '7:site', name: 'Website', project: { id: 7, name: 'Portfolio' } }),
-    { id: '7', name: 'Portfolio', color: null },
+    null,
   )
 })
 

@@ -168,6 +168,7 @@ def test_controlled_skills_have_fix_forward_migrations():
   assert module._UNMODIFIED_MIGRATIONS["platform-maintenance.md"] == {
     "bcc617354747c49ddad7fa1f419cf921fd7280909358096323cdbc427ad063c3",
     "b591d15e335c72c0acf394ca7ce4b0daa633e124a487df7a713847cafc13ab6d",
+    "668bd365e2edf694c921606c9619fff7b8e58806a9eb48745058b22731c44995",
   }
   assert module._UNMODIFIED_MIGRATIONS["goal-planning.md"] == {
     "2adb39457e0ec2ee9d9a3596cb96e5a6240bae23d725e6459ba0f6e77d5474c4",

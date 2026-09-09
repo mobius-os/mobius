@@ -71,21 +71,29 @@ from app.routes import (
   chat_embed_router, chat_logs_router, chat_router, chats_router, chats_stream_router,
   secure_inputs_router,
   connectors_router, connectors_public_router,
+  community_router,
+  common_router,
+  common_groups_router,
+  common_objects_router,
+  contribution_relay_router,
+  contribution_reviews_router,
   chat_waits_router,
-  debug_router, delegations_router, fs_router, goal_plans_router, github_router, media_router,
+  debug_router, delegations_router, fs_router, goal_plans_router, github_router,
   identity_router,
   owner_approvals_router,
+  media_router,
   local_services_router, notifications_router, notify_router, proxy_router, push_router,
   screen_control_router,
   public_apps_router,
+  public_storage_router,
   secrets_router, self_reminders_router, settings_router, skills_router,
   client_error_router, client_signal_router, standalone_router, storage_router,
-  theme_router, uploads_router, platform_router, community_router,
-  common_router, common_groups_router, common_objects_router,
-  contribution_relay_router,
+  theme_router, uploads_router, platform_router,
   published_router,
   connect_router,
   projects_router,
+  project_copies_router,
+  shared_apps_router,
   router_import_failures,
 )
 
@@ -115,18 +123,14 @@ def _database_degraded_payload() -> dict | None:
   return None
 
 
-def _boot_degraded_payload() -> dict | None:
-  """Return the one boot verdict shared by every serviceability surface."""
-  database = _database_degraded_payload()
-  if database:
-    return database
-  failed_routers = router_import_failures()
-  if failed_routers:
-    return {
-      "reason": "router_import_failure",
-      "failed_routers": list(failed_routers),
-    }
-  return None
+def _router_degraded_payload() -> dict | None:
+  failures = router_import_failures()
+  if not failures:
+    return None
+  return {
+    "reason": "router_import_failure",
+    "failed_routers": list(failures),
+  }
 
 
 def _database_init_error_is_transient(exc: OperationalError) -> bool:
@@ -405,6 +409,7 @@ _APP_FRAME_CSP = app_frame_csp(
   _BROWSER_API_ORIGIN,
 )
 
+
 def _loopback_delivery_origin(scope) -> str | None:
   """Return the exact loopback origin serving a loopback request, if any."""
   headers = dict(scope.get("headers") or ())
@@ -460,7 +465,6 @@ def _app_frame_csp_for_scope(scope) -> str:
     delivery_origin,
   )
 
-
 # Published sites (`/sites/<token>/`) are public snapshots of the owner's own
 # agent-authored artifacts and Web Studio builds. The `sandbox` directive
 # (WITHOUT allow-same-origin) forces the top-level document into an opaque
@@ -479,10 +483,19 @@ def _app_frame_csp_for_scope(scope) -> str:
 _PUBLISHED_SITE_CSP = PUBLISHED_SITE_CSP
 
 
-# Built website artifacts render in sandboxed iframes without
-# ``allow-same-origin``, so their documents cannot reach the shell's owner
-# credentials. Keep the build-output namespace on the Projects isolation
-# policy instead of inheriting the broader shell policy.
+# A built website artifact renders in a sandboxed iframe (sandbox="allow-scripts"
+# WITHOUT allow-same-origin), so its document JS cannot reach the shell origin's
+# localStorage/cookies/owner token. This per-namespace policy is that document's
+# isolation boundary. It is set HERE rather than on the route because this
+# middleware is authoritative for CSP — it strips any route-set value — so the
+# only place a route's intended policy can actually reach the wire is this
+# namespace table. Kept exactly as the Projects build spec defines it; it also
+# covers sibling output files (assets, the compiled PDF pdfjs fetches), which a
+# stricter-than-shell policy does not harm. (Known limitation: for a sandboxed
+# opaque-origin document, WebKit does not match `'self'` against the delivering
+# origin — the same gotcha the app-frame policy names an absolute origin for —
+# so a Safari-hosted website may fail to load its own relative subresources
+# under this exact policy.)
 _ARTIFACT_OUTPUT_CSP = (
   "default-src 'self'; img-src 'self' data:; font-src 'self' data:; "
   "style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; "
@@ -668,6 +681,7 @@ _DATABASE_DEGRADED_API_PATHS = frozenset({
   "/api/health",
   "/api/health/strict",
   "/api/ready",
+  "/api/ready/agent",
   "/api/version",
   "/api/browser-bootstrap",
   "/api/admin/restart",
@@ -818,6 +832,8 @@ app.include_router(apps_router)
 app.include_router(storage_router)
 app.include_router(fs_router)
 app.include_router(projects_router)
+app.include_router(project_copies_router)
+app.include_router(shared_apps_router)
 app.include_router(chat_router)
 app.include_router(chat_embed_router)
 app.include_router(chats_router)
@@ -835,6 +851,7 @@ app.include_router(app_chat_router)
 app.include_router(notify_router)
 app.include_router(screen_control_router)
 app.include_router(proxy_router)
+app.include_router(public_storage_router)
 app.include_router(public_apps_router)
 app.include_router(local_services_router)
 app.include_router(connect_router)
@@ -851,6 +868,7 @@ app.include_router(uploads_router)
 app.include_router(media_router)
 app.include_router(secrets_router)
 app.include_router(github_router)
+app.include_router(contribution_reviews_router)
 app.include_router(identity_router)
 app.include_router(push_router)
 app.include_router(notifications_router)
@@ -881,16 +899,15 @@ def health(response: Response):
   reloading while the old process is still briefly answering before SIGTERM.
   """
   response.headers["Cache-Control"] = "no-store"
-  degraded = _boot_degraded_payload()
+  degraded = _database_degraded_payload() or _router_degraded_payload()
   payload = {
     "status": degraded["reason"] if degraded else "ok",
     "target": "mobius",
     "mode": "degraded" if degraded else "normal",
     "build_sha": settings.build_sha,
     "boot_id": _BOOT_ID,
-    # The managed account service uses this baked-image witness only for the
-    # one-time Railway bootstrap. Served source can be newer than the running
-    # image, so build_sha alone cannot prove the root cutover supervisor exists.
+    # Served source can be newer than the running image. The account service
+    # accepts this baked capability only when the marker belongs to this boot.
     "container_replacement_handoff": None,
   }
   from app.deployment_control import managed_cutover_ready
@@ -905,16 +922,16 @@ def health(response: Response):
 
 @app.get("/api/health/strict")
 def health_strict(response: Response):
-  """Boot serviceability probe retained for diagnostics.
+  """Database-focused serviceability probe retained for diagnostics.
 
   Distinct from `/api/health` (reachability — must stay 200 whenever the
   process answers, or the shell would flip devices to offline UI): this
-  variant fails when database initialization fails, mapped schema is absent,
-  or a route import failed. Deployment healthchecks use `/api/ready`, which
-  includes this boot contract plus the chat-persistence writer contract.
+  variant fails when database initialization fails or mapped schema is absent.
+  Deployment healthchecks use `/api/ready`, which includes this database
+  contract plus the chat-persistence writer contract.
   """
   response.headers["Cache-Control"] = "no-store"
-  degraded = _boot_degraded_payload()
+  degraded = _database_degraded_payload() or _router_degraded_payload()
   if degraded:
     response.status_code = 503
     return {"status": degraded["reason"], **degraded}
@@ -935,13 +952,23 @@ def browser_bootstrap():
   )
 
 
+def service_readiness() -> dict:
+  """One readiness verdict for HTTP probes and boot activation receipts."""
+  degraded = _database_degraded_payload() or _router_degraded_payload()
+  if degraded:
+    return {"ready": False, **degraded}
+  from app.chat_writer import writer_readiness
+  is_ready, reason = writer_readiness()
+  return {"ready": True} if is_ready else {"ready": False, "reason": reason}
+
+
 @app.get("/api/ready")
 def ready(response: Response):
   """Readiness probe: 200 only when chats can actually be served.
 
   Distinct from `/api/health` (reachability — the process is answering HTTP),
   this route also requires a successfully initialized database with every
-  mapped table and column, a complete route registry, plus a usable
+  mapped table and column, plus a usable
   single-writer chat-persistence actor. A deploy must not green while a mapped
   column is absent or every chat write will fail, even though the process can
   still answer ordinary HTTP requests.
@@ -954,19 +981,33 @@ def ready(response: Response):
   window where this false-fails.
   """
   response.headers["Cache-Control"] = "no-store"
-  degraded = _boot_degraded_payload()
-  if degraded:
+  result = service_readiness()
+  if not result["ready"]:
     response.status_code = 503
-    return {
-      "ready": False,
-      **degraded,
-    }
-  from app.chat_writer import writer_readiness
-  is_ready, reason = writer_readiness()
-  if is_ready:
-    return {"ready": True}
-  response.status_code = 503
-  return {"ready": False, "reason": reason}
+  return result
+
+
+@app.get("/api/ready/agent")
+def ready_agent(response: Response):
+  """Report whether the platform can safely accept new agent work.
+
+  Basic `/api/ready` remains the container healthcheck so history can keep
+  serving when agent work is resource-degraded. This public facet adds the
+  agent runtime's storage and memory prerequisites while returning stable codes
+  only; account state, exact capacity, paths, and writer details stay private.
+  """
+  response.headers["Cache-Control"] = "no-store"
+  from app.agent_readiness import agent_readiness
+
+  result = agent_readiness(
+    settings.data_dir,
+    boot_degraded=(
+      _database_degraded_payload() or _router_degraded_payload()
+    ),
+  )
+  if not result["ready"]:
+    response.status_code = 503
+  return result
 
 
 def _served_platform_identity(
@@ -1060,11 +1101,27 @@ def _served_frontend_identity() -> dict:
 
   static_dir = _resolve_static_dir()
   out = {"served_frontend": None,
-         "frontend_source": "baked" if static_dir == _baked_dir else "platform"}
+         "frontend_source": "baked" if static_dir == _baked_dir else "platform",
+         # Diagnostics for whether that bundle matches the frontend source on
+         # disk and what the watcher is doing about any difference.
+         "frontend_stale": False,
+         "frontend_stale_reason": None,
+         "frontend_building": False,
+         "frontend_build_error": None}
   try:
     html = (static_dir / "index.html").read_bytes()
     out["served_frontend"] = hashlib.sha256(html).hexdigest()[:16]
   except Exception:  # missing/unreadable dist — degrade, never raise
+    pass
+  try:
+    from app.frontend_watcher import served_frontend_freshness
+
+    freshness = served_frontend_freshness()
+    out["frontend_stale"] = bool(freshness.get("stale"))
+    out["frontend_stale_reason"] = freshness.get("reason")
+    out["frontend_building"] = bool(freshness.get("building"))
+    out["frontend_build_error"] = freshness.get("build_error")
+  except Exception:  # the watcher module is optional in slim runtimes
     pass
   return out
 
@@ -1125,14 +1182,14 @@ def unknown_api(path: str):
   or a bundled server-side script run via `/api/apps/{id}/run-job`) rather
   than a synchronous in-backend completion endpoint.
   """
-  failed_routers = router_import_failures()
-  if failed_routers:
-    failed = ", ".join(failed_routers)
+  failures = router_import_failures()
+  if failures:
+    names = ", ".join(failures)
     raise HTTPException(
       status_code=503,
       detail=(
-        f"Router imports failed ({failed}). "
-        "Repair the platform source, then restart Möbius."
+        f"Router import failed at boot: {names}. "
+        "Use the deployment's external Recovery action to repair it."
       ),
     )
   raise HTTPException(status_code=404, detail="Not found.")
@@ -1337,14 +1394,14 @@ def _top_level_app_slug_alias(path: str) -> str | None:
     db.close()
 
 
-def _app_source_dir_for_static_asset(
+def _open_app_runtime_for_static_asset(
   *, slug: str | None = None, app_id: int | None = None,
-) -> str | None:
+) -> tuple[str | None, object | None]:
   db = SessionLocal()
   try:
     # Tombstoned apps don't serve their /app-assets/ static files either —
     # consistent with the frame/module/standalone routes (feature 110).
-    query = db.query(models.App.source_dir).filter(
+    query = db.query(models.App).filter(
       models.App.deleted_at.is_(None)
     )
     if app_id is not None:
@@ -1353,9 +1410,49 @@ def _app_source_dir_for_static_asset(
       row = query.filter(models.App.slug == slug).first()
     else:
       row = None
-    return row[0] if row else None
+    if row is None:
+      return None, None
+    from app.applied_app_runtime import (
+      runtime_root, hold_static_runtime, AppliedRuntimeUnavailable,
+    )
+    pin = hold_static_runtime(row.id)
+    try:
+      return str(runtime_root(row)), pin
+    except AppliedRuntimeUnavailable:
+      pin.close()
+      return None, None
+    except BaseException:
+      pin.close()
+      raise
   finally:
     db.close()
+
+
+class _RuntimePinnedResponse(Response):
+  """Release a runtime read pin even if sending the file is cancelled."""
+
+  def __init__(self, response: Response, pin):
+    super().__init__(status_code=response.status_code)
+    self.raw_headers = response.raw_headers
+    self.response = response
+    self.pin = pin
+
+  async def __call__(self, scope, receive, send):
+    try:
+      await self.response(scope, receive, send)
+    finally:
+      self.pin.close()
+
+
+async def _serve_accepted_app_asset(request: Request, asset_path: str, **identity):
+  root, pin = await run_in_threadpool(_open_app_runtime_for_static_asset, **identity)
+  try:
+    response = _serve_app_static_asset(root, asset_path, request)
+  except BaseException:
+    if pin is not None:
+      pin.close()
+    raise
+  return _RuntimePinnedResponse(response, pin) if pin is not None else response
 
 
 # A content-hash segment in the filename (main.8f3a2b1c.js,
@@ -1477,13 +1574,9 @@ async def app_owned_asset_by_id(app_id: int, asset_path: str, request: Request):
   Imported apps like CubeRun can keep a built static site under
   /data/apps/<slug>/static instead of copying it into the platform frontend.
   This route is public like standalone app shells; it serves only files below
-  the installed app's source_dir/static.
+  the installed app's explicitly applied runtime static/ directory.
   """
-  return _serve_app_static_asset(
-    await run_in_threadpool(_app_source_dir_for_static_asset, app_id=app_id),
-    asset_path,
-    request,
-  )
+  return await _serve_accepted_app_asset(request, asset_path, app_id=app_id)
 
 
 @app.api_route(
@@ -1501,11 +1594,7 @@ async def app_owned_opaque_embed_by_id(
   assets stay below the same alias. Ordinary /app-assets remains protected by
   SAMEORIGIN and is never the document-navigation surface.
   """
-  return _serve_app_static_asset(
-    await run_in_threadpool(_app_source_dir_for_static_asset, app_id=app_id),
-    asset_path,
-    request,
-  )
+  return await _serve_accepted_app_asset(request, asset_path, app_id=app_id)
 
 
 @app.api_route(
@@ -1517,11 +1606,7 @@ async def app_owned_asset(slug: str, asset_path: str, request: Request):
   """Serve durable static assets owned by an installed app slug."""
   if not slug or not all(ch.isalnum() or ch in "-_" for ch in slug):
     raise HTTPException(status_code=404, detail="Not found.")
-  return _serve_app_static_asset(
-    await run_in_threadpool(_app_source_dir_for_static_asset, slug=slug),
-    asset_path,
-    request,
-  )
+  return await _serve_accepted_app_asset(request, asset_path, slug=slug)
 
 
 # Register the frontend serving routes whenever any static tree exists as a

@@ -3,14 +3,13 @@
 import hashlib
 import json
 from pathlib import Path
-import re
 
 from fastapi.responses import Response
 
 from app import auth as token_auth, models
 from app.config import get_settings
 from app.database import SessionLocal
-from test_app_fixtures import create_local_app
+from test_app_fixtures import create_local_app, public_host_config
 
 
 PUBLIC_ACCESS = {
@@ -39,9 +38,7 @@ def _publish(client, headers, app_id):
 
 
 def _public_token_from_html(html: str) -> str:
-  match = re.search(r"const TOKEN = (\"[^\"]+\");", html)
-  assert match, html[:1000]
-  return json.loads(match.group(1))
+  return public_host_config(html)["token"]
 
 
 def _public_module(client, app_id: int, token: str):
@@ -56,7 +53,10 @@ def test_app_is_private_by_default_and_top_level_alias_stays_owner_only(
 ):
   app = _create(client, auth)
   assert app["hosted_publication"] is None
-  assert app["capability_contract"]["public"] == PUBLIC_ACCESS
+  assert app["capability_contract"]["public"] == {
+    **PUBLIC_ACCESS,
+    "storage": {"read": False, "write_prefix": None},
+  }
 
   response = client.get(f"/{app['slug']}", follow_redirects=False)
   assert response.status_code == 307
@@ -76,8 +76,9 @@ def test_owner_publishes_exact_snapshot_without_exposing_an_owner_token(
   response = client.get(f"/{app['slug']}", follow_redirects=False)
   assert response.status_code == 200
   assert response.headers["cache-control"] == "no-store"
-  assert "moebius:frame-init" in response.text
+  # The token reaches the host only through its configuration slot, never a URL.
   assert "/module?token=" not in response.text
+  assert public_host_config(response.text)["appId"] == app["id"]
   token = _public_token_from_html(response.text)
   claims = token_auth.decode_access_token(token)
   assert claims["scope"] == "public_app"

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import math
 from typing import Any, Literal
@@ -16,7 +17,7 @@ from app.database import get_db
 from app.deps import (
   Principal,
   authorize_current_owner_input_detached,
-  get_agent_run_principal,
+  get_agent_principal,
   get_current_owner_for_owner_input,
   reject_cross_site,
 )
@@ -73,7 +74,7 @@ class AgentCommandBody(BaseModel):
   x: float | None = None
   y: float | None = None
   text: str | None = Field(default=None, max_length=20_000)
-  replace: bool | None = None
+  replace: bool = True
   deltaX: float | None = None
   deltaY: float | None = None
   key: str | None = Field(default=None, max_length=24)
@@ -88,16 +89,13 @@ class AgentCommandBody(BaseModel):
         raise ValueError("coordinates are outside the supported range")
     if self.action in {"snapshot", "screenshot"}:
       if any(value is not None for value in (
-        self.ref, self.x, self.y, self.text, self.replace,
-        self.deltaX, self.deltaY, self.key,
+        self.ref, self.x, self.y, self.text, self.deltaX, self.deltaY, self.key,
       )):
         raise ValueError(f"{self.action} does not accept a target or value")
     elif self.action == "click":
       if not self.ref and not coordinates:
         raise ValueError("click requires ref or x/y")
-      if any(value is not None for value in (
-        self.text, self.replace, self.deltaX, self.deltaY, self.key,
-      )):
+      if any(value is not None for value in (self.text, self.deltaX, self.deltaY, self.key)):
         raise ValueError("click accepts only ref or x/y")
     elif self.action == "type":
       if self.text is None:
@@ -110,16 +108,13 @@ class AgentCommandBody(BaseModel):
       for value in (self.deltaX, self.deltaY):
         if value is not None and (not math.isfinite(value) or abs(value) > 20_000):
           raise ValueError("scroll delta is outside the supported range")
-      if any(value is not None for value in (
-        self.ref, self.text, self.replace, self.key,
-      )):
+      if any(value is not None for value in (self.ref, self.text, self.key)):
         raise ValueError("scroll accepts only deltas and an optional x/y point")
     elif self.action == "press":
       if self.key not in _PRESS_KEYS:
         raise ValueError("press key is not in the supported set")
       if any(value is not None for value in (
-        self.ref, self.x, self.y, self.text, self.replace,
-        self.deltaX, self.deltaY,
+        self.ref, self.x, self.y, self.text, self.deltaX, self.deltaY,
       )):
         raise ValueError("press accepts only key")
     return self
@@ -190,12 +185,12 @@ async def browser_events(
       return
     try:
       yield f"data: {json.dumps({'type': 'screen-control-open'})}\n\n"
-      while True:
+      while session.active:
         if await request.is_disconnected():
           break
         try:
-          command = await registry.next_browser_command(
-            session, keepalive_seconds=_KEEPALIVE_SECONDS,
+          command = await asyncio.wait_for(
+            session.commands.get(), timeout=_KEEPALIVE_SECONDS,
           )
         except TimeoutError:
           yield ": keepalive\n\n"
@@ -256,7 +251,7 @@ async def stop_browser_session(
 @router.get("/chats/{chat_id}")
 async def agent_session_status(
   chat_id: str,
-  principal: Principal = Depends(get_agent_run_principal),
+  principal: Principal = Depends(get_agent_principal),
 ):
   _agent_for_chat(chat_id, principal)
   session = await registry.get_for_chat(chat_id, principal.owner.username)
@@ -270,7 +265,7 @@ async def agent_session_status(
 async def agent_command(
   chat_id: str,
   body: AgentCommandBody,
-  principal: Principal = Depends(get_agent_run_principal),
+  principal: Principal = Depends(get_agent_principal),
 ):
   _agent_for_chat(chat_id, principal)
   session = await registry.get_for_chat(chat_id, principal.owner.username)
@@ -292,7 +287,7 @@ async def agent_command(
 )
 async def agent_stop_session(
   chat_id: str,
-  principal: Principal = Depends(get_agent_run_principal),
+  principal: Principal = Depends(get_agent_principal),
 ):
   _agent_for_chat(chat_id, principal)
   session = await registry.get_for_chat(chat_id, principal.owner.username)

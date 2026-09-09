@@ -493,7 +493,6 @@ test('inspectShellUpdate preserves a handoff that settles during update()', asyn
   assert.equal(result.updateAvailable, true,
     'a document that witnessed a generation handoff still needs one navigation')
 })
-
 test('inspectShellUpdate reports an active worker newer than the controller', async () => {
   const oldWorker = { id: 'N' }
   const newWorker = { id: 'N+1' }

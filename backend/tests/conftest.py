@@ -28,6 +28,7 @@ _tmp = tempfile.mkdtemp()
 os.environ["SECRET_KEY"] = "test-secret-key-at-least-32-characters-long"
 os.environ["DATABASE_URL"] = f"sqlite:///{_tmp}/test.db"
 os.environ["DATA_DIR"] = _tmp
+os.environ["DOMAIN"] = "localhost"
 os.environ["FRONTEND_ORIGIN"] = "http://localhost:5173"
 os.environ["MOBIUS_TEST_RUNTIME"] = "1"
 # Fail closed when pytest is launched from inside a running production
@@ -77,11 +78,13 @@ from app.main import app
 from app.routes import auth as auth_module
 from app.routes.auth import _limiter as auth_limiter
 from app.routes.notifications import limiter as notifications_limiter
+from app.routes.common import _public_write_limiter as common_public_write_limiter
 
 # Disable rate limiters during tests.
 app.state.limiter.enabled = False
 auth_limiter.enabled = False
 notifications_limiter.enabled = False
+common_public_write_limiter.enabled = False
 
 
 @pytest.fixture(autouse=True)
@@ -152,6 +155,7 @@ def fresh_db():
   from app import chat_queue as chat_queue_mod
   from app import questions as questions_mod
   from app import secure_inputs as secure_inputs_mod
+  from app import restart_util as restart_util_mod
   from app.runner_registry import registry
   # ticket 033: pending-question registry lives in app.questions;
   # queue locks live in app.chat_queue. Reset both canonical homes.
@@ -167,6 +171,7 @@ def fresh_db():
   # declared lazily below the read-site.
   setattr(chat_mod, "_SKILL_TEXT_CACHE", None)
   chat_mod.draining = False
+  restart_util_mod._RESTART_ADMITTED = False
   chat_mod._clear_after_terminal_generation.clear()
   chat_mod._clear_after_terminal_status.clear()
   chat_mod._restart_draining_chats.clear()
@@ -232,7 +237,7 @@ def fresh_db():
   # Content-addressed app bundles no longer overwrite app-<id>.js between
   # tests. Clear compiled too, otherwise the per-test id reset leaves the next
   # test seeing an earlier test's immutable artifact for the same numeric id.
-  for _sub in ("apps", "app-secrets", "shared", "compiled", "cli-auth"):
+  for _sub in ("apps", "app-secrets", "app-runtime", "shared", "compiled", "cli-auth"):
     _shutil.rmtree(_os.path.join(_data_dir, _sub), ignore_errors=True)
 
   yield

@@ -11,8 +11,13 @@ from jwt.exceptions import InvalidTokenError
 from app.config import get_settings
 
 
-# Covers the platform's at-most-24-hour turn capabilities with clock skew.
-# deps._resolve_owner also rejects it as soon as the exact run stops running.
+# A tool-using turn can legitimately stay alive for many hours: long builds,
+# local model runs, and restart-gated platform work all keep the same provider
+# subprocess and therefore the same injected token.  Two hours stranded those
+# turns mid-build even though the owner session and logical chat run were still
+# valid.  Keep this much shorter than the 30-day login token, but long enough
+# for a full-day agent run plus ordinary scheduling/cleanup overhead. The
+# exact-run check in deps._resolve_owner revokes it as soon as that run ends.
 AGENT_RUN_TOKEN_TTL = timedelta(hours=26)
 
 
@@ -86,27 +91,37 @@ def create_access_token(
 
 def create_agent_token(
   chat_id: str,
-  run_id: str,
   owner_username: str,
   token_epoch: int,
   *,
+  run_id: str | None = None,
   delegation_id: str | None = None,
   delegation_chat: str | None = None,
   expires_delta: timedelta = AGENT_RUN_TOKEN_TTL,
 ) -> str:
-  """Create the owner bearer bound to one physical interactive agent run."""
+  """Create the owner bearer used by one ordinary interactive chat agent.
+
+  The token deliberately remains owner-scoped for the platform's existing
+  agent API surface.  ``agent_chat`` is an additional binding used only by
+  capabilities where the browser grants authority to the agent in one exact
+  chat, such as live screen control.  A normal owner login or service token
+  lacks that claim and therefore cannot impersonate the chat-side participant
+  at those narrow routes. ``agent_run`` additionally expires this bearer with
+  its physical run.
+  """
   if (delegation_id is None) != (delegation_chat is None):
     raise ValueError("delegation identity and chat must be supplied together")
   if delegation_chat is not None and delegation_chat != chat_id:
     raise ValueError("delegation chat must match the agent chat")
-  claims = {
-    "sub": owner_username,
-    "agent_chat": chat_id,
-    "agent_run": run_id,
-  }
+  claims = {"sub": owner_username, "agent_chat": chat_id}
+  if run_id is not None:
+    claims["agent_run"] = run_id
   if delegation_id is not None:
-    # A delegated agent keeps the ordinary owner tool surface while these
-    # claims let the delegation routes enforce direct-child and scope rules.
+    # Keep the bearer owner-scoped so a delegated agent receives the same
+    # owner-approved tools as its parent.  These extra claims do not reduce
+    # generic owner authority; they let the delegation control plane preserve
+    # direct-child and read-to-write-escalation rules when this bearer
+    # calls back into /api/delegations.
     claims["delegation_id"] = delegation_id
     claims["delegation_chat"] = delegation_chat
   return create_access_token(
@@ -125,7 +140,6 @@ def create_app_token(
   expires_delta: timedelta = timedelta(hours=8),
   delegation_id: str | None = None,
   delegation_chat: str | None = None,
-  delegation_run: str | None = None,
 ) -> str:
   """Creates a short-lived JWT scoped to a specific mini-app.
 
@@ -143,17 +157,11 @@ def create_app_token(
   claims = {"sub": owner_username, "scope": "app", "app_id": app_id}
   if app_nonce is not None:
     claims["app_nonce"] = app_nonce
-  delegated_claims = (delegation_id, delegation_chat, delegation_run)
-  if any(value is not None for value in delegated_claims) and not all(
-    value is not None for value in delegated_claims
-  ):
-    raise ValueError(
-      "delegation identity, chat, and run must be supplied together"
-    )
+  if (delegation_id is None) != (delegation_chat is None):
+    raise ValueError("delegation identity and chat must be supplied together")
   if delegation_id is not None:
     claims["delegation_id"] = delegation_id
     claims["delegation_chat"] = delegation_chat
-    claims["delegation_run"] = delegation_run
   return create_access_token(
     claims,
     expires_delta=expires_delta,
@@ -184,11 +192,33 @@ def create_project_collaborator_token(
   )
 
 
+def create_shared_app_collaborator_token(
+  *,
+  owner_username: str,
+  owner_epoch: int,
+  instance_id: str,
+  member_id: str,
+  member_epoch: int,
+  expires_delta: timedelta = timedelta(days=30),
+) -> str:
+  """Mint a bearer confined to one revocable shared-app membership."""
+  return create_access_token(
+    {
+      "sub": owner_username,
+      "scope": "shared_app_collaborator",
+      "shared_app_instance": instance_id,
+      "shared_app_member": member_id,
+      "member_epoch": member_epoch,
+    },
+    expires_delta=expires_delta,
+    token_epoch=owner_epoch,
+  )
+
+
 def create_delegation_token(
   delegation_id: str,
   app_id: int,
   chat_id: str,
-  run_id: str,
   owner_username: str,
   token_epoch: int,
   *,
@@ -202,7 +232,6 @@ def create_delegation_token(
       "delegation_id": delegation_id,
       "app_id": app_id,
       "delegation_chat": chat_id,
-      "delegation_run": run_id,
     },
     expires_delta=expires_delta,
     token_epoch=token_epoch,

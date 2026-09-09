@@ -41,8 +41,16 @@ from app.events import (
   tool_output_exit_code,
   undo_question_scrub,
 )
+from app.config import agent_scratch_root
 from app.memory_recall import (
-  RecallBinding, recall_from_command, settle_recall,
+  RECALL_SEARCHING,
+  RecallBinding,
+  background_dispatch_from_result,
+  background_recall_path,
+  defer_recall_to_task,
+  recall_from_command,
+  settle_recall,
+  settle_recall_from_task_output,
 )
 from app.peer_message import (
   peer_message_from_call, settle_peer_message,
@@ -120,6 +128,25 @@ def active_sink_assistant_message_id(chat_id: str) -> str | None:
   sink = get_active_sink(chat_id)
   message_id = getattr(sink, "assistant_message_id", None)
   return str(message_id) if message_id else None
+
+
+def active_sink_activity_position(chat_id: str) -> dict | None:
+  """Read the loop-published immutable frontier, including from a send worker.
+
+  Text offsets use browser UTF-16 units. Mutable reducer blocks never cross
+  this boundary; conversion only runs once per activity, not once per token.
+  """
+  sink = get_active_sink(chat_id)
+  frontier = getattr(sink, "_activity_frontier", None)
+  if frontier is None:
+    return None
+  message_id, block_index, text, block_key, block_distance = frontier
+  position = {"assistant_message_id": message_id, "block_index": block_index}
+  if block_key is not None:
+    position.update(block_key=block_key, block_distance=block_distance)
+  if text is not None:
+    position["text_offset"] = len(text.encode("utf-16-le", errors="surrogatepass")) // 2
+  return position
 
 
 def active_sink_stream_snapshot(chat_id: str, broadcast) -> dict | None:
@@ -201,12 +228,10 @@ def steered_into_turn_event(
     "type": "steered_into_turn",
     "messages": [
       {
+        **copy.deepcopy(msg),
         "role": "user",
-        "ts": msg.get("ts"),
         "cid": cid_of(msg),
-        "content": msg.get("content", ""),
         "steered": True,
-        **({"attachments": msg.get("attachments")} if msg.get("attachments") else {}),
       }
       for msg in stored_messages
     ],
@@ -336,6 +361,8 @@ class ChatEventSink:
       run_token or f"assistant-{uuid.uuid4().hex}"
     )
     self.assistant_blocks: list = []
+    self._activity_frontier = None
+    self._activity_raw_length = 0
     self.session_id: str | None = None
     self.cost_usd: float | None = None
     self._last_save = 0.0
@@ -374,6 +401,61 @@ class ChatEventSink:
       event["thinking_id"] = event.get("thinking_id") or (
         f"think-{uuid.uuid4().hex}"
       )
+
+  def _publish_activity_frontier(self) -> None:
+    """Replace one immutable cross-thread view after the loop-owned reduction.
+
+    Keep text itself (immutable) here; UTF-16 sizing happens only when an
+    activity is captured, never for each streamed token. Boundary markers are
+    reducer-only and absent from persisted blocks.
+    """
+    previous = self._activity_frontier
+    if (
+      previous is not None
+      and len(self.assistant_blocks) == self._activity_raw_length
+      and previous[0] == self.assistant_message_id
+      and previous[2] is not None
+      and self.assistant_blocks
+      and self.assistant_blocks[-1].get("type") == "text"
+    ):
+      # Most calls only extend the same immutable text string. Do not scan
+      # the full tool history for each token in a long-running turn.
+      self._activity_frontier = (
+        previous[0], previous[1],
+        str(self.assistant_blocks[-1].get("content") or ""),
+        previous[3], previous[4],
+      )
+      return
+    self._activity_raw_length = len(self.assistant_blocks)
+    # Share the seal contract: an early steer drops empty/whitespace-only
+    # segments. Advertising their identity would permanently orphan activity.
+    if not blocks_have_renderable_content(self.assistant_blocks):
+      self._activity_frontier = None
+      return
+    blocks = [b for b in self.assistant_blocks if b.get("type") != "text_boundary"]
+    trailing = blocks[-1] if blocks else None
+    text = None
+    index = len(blocks)
+    if trailing and trailing.get("type") == "text":
+      index -= 1
+      text = str(trailing.get("content") or "")
+    block_key = None
+    distance = None
+    for reference in range(min(index, len(blocks) - 1), -1, -1):
+      block = blocks[reference]
+      for field, prefix in (
+        ("question_id", "question"), ("tool_use_id", "tool"),
+        ("thinking_id", "thinking"),
+      ):
+        if block.get(field):
+          block_key = f"{prefix}:{block[field]}"
+          distance = index - reference
+          break
+      if block_key is not None:
+        break
+    self._activity_frontier = (
+      self.assistant_message_id, index, text, block_key, distance,
+    )
 
   def _deferred_snapshot(
     self,
@@ -492,8 +574,68 @@ class ChatEventSink:
       return
     pending = self._memory_recall_for_tool(event.get("tool_use_id"))
     if event.get("output_complete") and pending is not None:
+      dispatch = background_dispatch_from_result(event.get("content"))
+      if dispatch is not None and event.get("output_exit_code") in (None, 0):
+        # A `run_in_background` Bash call: the placeholder is not Memory's
+        # answer. The task_done for this id (or finalize) settles it.
+        event["recall"] = defer_recall_to_task(pending, dispatch)
+        return
       event["recall"] = settle_recall(
         pending, event.get("content"), event.get("output_exit_code"),
+      )
+
+  def _deferred_recall_blocks(self, task_id: str | None = None) -> list[dict]:
+    """Tool blocks whose Memory lookup is still waiting on a background task."""
+    found = []
+    for blk in self.assistant_blocks:
+      if blk.get("type") != "tool":
+        continue
+      recall = blk.get("recall")
+      if not isinstance(recall, dict) or recall.get("status") != RECALL_SEARCHING:
+        continue
+      if not isinstance(recall.get("task_id"), str):
+        continue
+      if task_id is not None and recall["task_id"] != task_id:
+        continue
+      found.append(blk)
+    return found
+
+  def _settle_deferred_recall(
+    self, pending: dict, task_status: object,
+  ) -> dict:
+    """Read the background task's captured output and settle the lookup.
+
+    Only this chat's own scratch task file is honored; an unreadable or
+    still-empty file is a failed lookup, never a silent success.
+    """
+    path = background_recall_path(
+      pending, str(agent_scratch_root() / str(self.chat_id)),
+    )
+    text = None
+    if path is not None:
+      try:
+        with open(path, "rb") as handle:
+          handle.seek(0, 2)
+          size = handle.tell()
+          handle.seek(max(0, size - 262_144))
+          text = handle.read().decode("utf-8", "replace")
+      except OSError:
+        text = None
+    return settle_recall_from_task_output(pending, text, task_status)
+
+  def _stamp_deferred_recall_done(self, event: ChatEvent) -> None:
+    """On a background task's terminal event, settle the lookup it owned.
+
+    The task_done routes to its block by task_id, so process_event copies the
+    stamped recall onto the same block the placeholder deferred from.
+    """
+    task_id = event.get("task_id")
+    if task_id is None:
+      return
+    blocks = self._deferred_recall_blocks(str(task_id))
+    if blocks:
+      event["recall"] = self._settle_deferred_recall(
+        blocks[0]["recall"], event.get("status"),
       )
 
   def _peer_message_for_tool(self, tool_use_id) -> dict | None:
@@ -714,6 +856,8 @@ class ChatEventSink:
           event["output_exit_code"] = exit_code
     if event_type in ("tool_start", "tool_input", "tool_output"):
       self._stamp_memory_recall(event)
+    if event_type == "task_done":
+      self._stamp_deferred_recall_done(event)
     if event_type in ("tool_start", "tool_input"):
       self._stamp_peer_message(event)
     if event_type == "thinking":
@@ -749,6 +893,7 @@ class ChatEventSink:
     if event_type == "error":
       self._last_error = event.get("message") or "An error occurred."
 
+    self._publish_activity_frontier()
     self.bc.publish(event)
 
     # done: capture cost.
@@ -787,7 +932,9 @@ class ChatEventSink:
         )
     return True
 
-  async def finalize(self) -> None:
+  async def finalize(
+    self, *, incorporate_activity_delivery: bool = False,
+  ) -> None:
     """Submit the terminal assistant-message write and await its ack.
 
     Runs once per turn AFTER the runner's stream loop returns, BEFORE the
@@ -800,8 +947,10 @@ class ChatEventSink:
     set for reconciliation to repair) — see the design's failure
     semantics. No fallback direct write.
 
-    No-op when there's nothing to finalize (no chat_id, no token, and
-    no accumulated blocks AND no recorded error — a truly empty turn).
+    The optional intent lets that commit also incorporate an admitted helper-
+    result envelope. No-op when there's nothing to finalize (no chat_id, no
+    token, and no accumulated blocks AND no recorded error — a truly empty
+    turn).
     When blocks are empty but _last_error is set (a turn that errored before
     any content arrived — auth failure, connect timeout, provider error),
     synthesize a minimal error block so the turn is durably persisted rather
@@ -812,6 +961,11 @@ class ChatEventSink:
     if not (self.chat_id and self.run_token):
       return
     await self._flush_lifecycle()
+    # A lookup deferred to a background task whose task_done never reached us
+    # (turn stopped, provider suppressed the terminal frame) must not persist
+    # as searching forever: settle it from the file if the task did finish.
+    for blk in self._deferred_recall_blocks():
+      blk["recall"] = self._settle_deferred_recall(blk["recall"], None)
     if not blocks_have_renderable_content(self.assistant_blocks):
       if self._last_error:
         # Synthesize an error block so the failure is durable in the transcript.
@@ -840,6 +994,7 @@ class ChatEventSink:
       Finalize(
         chat_id=self.chat_id, run_token=self.run_token, snapshot=snapshot,
         thinking_stashes=stashes,
+        incorporate_activity_delivery=incorporate_activity_delivery,
       )
     )
     await _await_ack(ack)
@@ -900,6 +1055,7 @@ class ChatEventSink:
       # Reset BEFORE the first await so the continuation accumulates into a
       # fresh list the instant the steer lands.
       self.assistant_blocks = []
+      self._publish_activity_frontier()
       # Skip the seal when the pre-steer segment has no renderable content — a
       # steer that lands before the assistant emitted any real output would
       # otherwise commit a stray empty assistant message (A1) before the
@@ -936,6 +1092,7 @@ class ChatEventSink:
           self.assistant_blocks = sealed_blocks + self.assistant_blocks
           self.assistant_message_id = sealed_message_id
           self._assistant_segment -= 1
+          self._publish_activity_frontier()
           raise
       user_msgs = user_msg if isinstance(user_msg, list) else [user_msg]
       ack = get_writer().submit(
@@ -994,7 +1151,11 @@ class ChatEventSink:
     return stored_result
 
   async def publish_question(
-    self, event: ChatEvent, *, secure_request: dict | None = None,
+    self,
+    event: ChatEvent,
+    *,
+    secure_request: dict | None = None,
+    activation_wait: dict | None = None,
   ) -> None:
     """Save-before-broadcast for an AskUserQuestion card.
 
@@ -1050,6 +1211,7 @@ class ChatEventSink:
         chat_id=self.chat_id, run_token=self.run_token or "", snapshot=snapshot,
         thinking_stashes=stashes,
         **({"secure_request": secure_request} if secure_request is not None else {}),
+        **({"activation_wait": activation_wait} if activation_wait is not None else {}),
       )
     )
     try:
@@ -1069,7 +1231,21 @@ class ChatEventSink:
       undo_question_scrub(receipt, self.assistant_blocks)
       raise
     # Committed durably — now (and only now) show the card.
+    self._publish_activity_frontier()
     self.bc.publish(event)
+    # A continuation owner-input card (request_question / request_approval /
+    # secure-input) is the TERMINAL action of the turn: its receipt returns to
+    # the model immediately (unlike native AskUserQuestion, which parks on an
+    # awaited future in question_bridge and never sets response_mode), so
+    # nothing at the provider level stops the model from emitting more text or
+    # tools after the card. End the live turn at its source now, so the card is
+    # genuinely the last thing in the turn. The owner's saved answer resumes the
+    # chat in a later turn; the durable pending-question marker owns that
+    # resumption, so this is a clean completion, not a Stop or a resumable
+    # pause. Gated strictly on the continuation marker so the native path — which
+    # this same method also serves — is never double-interrupted.
+    if event.get("response_mode") == "continuation":
+      await self._finish_turn_after_owner_card()
     # The card is persisted: record the save time so a subsequent throttled
     # snapshot in publish() doesn't redundantly re-commit the same state
     # immediately after.
@@ -1092,6 +1268,35 @@ class ChatEventSink:
           )
 
       task.add_done_callback(_settle_checkpoint)
+
+  async def _finish_turn_after_owner_card(self) -> None:
+    """End the live turn once a continuation owner-input card has committed.
+
+    Provider-agnostic and best-effort: look up whichever runner handle owns
+    this chat and, if it exposes the card-finish seam, ask it to cut the turn
+    right after the card. A handle that predates this seam simply keeps the
+    older prompt-only "end your turn after the card" contract. Runs on the
+    backend event loop concurrently with the parked runner — the same topology
+    as steering — and only signals the interrupt; it never awaits turn drain
+    (the turn cannot end until the in-flight card tool returns the receipt that
+    triggered this call).
+    """
+    from app.runner_registry import registry
+    for handle in registry.get_handles(self.chat_id):
+      finish = getattr(handle, "finish_after_owner_card", None)
+      if not callable(finish):
+        continue
+      try:
+        await finish()
+      except asyncio.CancelledError:
+        raise
+      except Exception:
+        _get_logger().warning(
+          "finish-after-owner-card failed chat_id=%s kind=%s",
+          self.chat_id,
+          getattr(handle, "kind", "?"),
+          exc_info=True,
+        )
 
 
 async def commit_steer_cut(
