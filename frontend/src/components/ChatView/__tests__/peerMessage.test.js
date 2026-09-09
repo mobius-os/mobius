@@ -235,3 +235,35 @@ test('the card model returns null for an unrecognized shape', () => {
   assert.equal(peerMessageCardModel(null), null)
   assert.equal(peerMessageCardModel({ status: 'weird' }), null)
 })
+
+test('incoming timeline messages expose full inline text, time, and optional source navigation', () => {
+  const chatId = 'inline-message'
+  const disclosureKey = 'inline-note'
+  _resetDisclosureStateForTests()
+  persistDisclosureOpen(chatId, disclosureKey, true)
+  const body = 'Keep working independently.\n<script>not markup</script>'
+  const html = renderToStaticMarkup(React.createElement(PeerMessageCard, {
+    t: { status: 'done', peer_message: { direction: 'read', status: 'received', count: 1,
+      notes: [{ sender: 'Other agent', kind: 'finding', body }] } },
+    chatId, disclosureKey,
+    records: [{ sender_chat_id: 'other', sender_name: 'Other agent', created_at: '2026-09-08T12:17:00', observedDelivery: 'during_work' }],
+  }))
+  assert.match(html, /Received from Other agent/)
+  assert.match(html, /Delivered during work/)
+  assert.match(html, /2026-09-08T12:17:00.000Z/)
+  assert.match(html, /Keep working independently/)
+  assert.match(html, /&lt;script&gt;not markup&lt;\/script&gt;/)
+  assert.match(html, /href="\/chat\/other"/)
+  assert.match(html, /aria-expanded="true"/)
+})
+
+test('requested delivery never claims the other agent read a message', () => {
+  _resetDisclosureStateForTests()
+  persistDisclosureOpen('delivery', 'note', true)
+  const html = renderToStaticMarkup(React.createElement(PeerMessageCard, {
+    t: sentTool, chatId: 'delivery', disclosureKey: 'note',
+    records: [{ delivery: 'interrupt', recipient_chat_id: 'other' }],
+  }))
+  assert.match(html, /Immediate delivery requested · not a read receipt/)
+  assert.doesNotMatch(html, /Delivered during work/)
+})

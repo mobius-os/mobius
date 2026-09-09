@@ -1,3 +1,5 @@
+import { usePeerTimeline, PeerTimelineRows } from './PeerTimeline.jsx'
+import { PeerTimelineContext } from './peerTimelineContext.js'
 import { consumeChatChanges, subscribeChatChanges } from '../../lib/chatChangesNavigation.js'
 import {
   startTransition,
@@ -5319,6 +5321,7 @@ export default function ChatView({
     ),
     [messages],
   )
+  const peerTimeline = usePeerTimeline(chatId, displayedMessages, !hidden && transcriptPaintable, streamItems)
   let lastVisibleMessageIndex = -1
   for (let i = displayedMessages.length - 1; i >= 0; i -= 1) {
     if (!displayedMessages[i].hidden) {
@@ -5489,9 +5492,11 @@ export default function ChatView({
         {/* The reservation is a permanent geometry invariant for every
             non-empty chat, including after unmount/remount. Keep the list's
             elastic min-height out of the spacer formula at all times. */}
+        <PeerTimelineContext.Provider value={peerTimeline}>
         <ul className="chat__list" style={{ minHeight: 0 }}>
-          {displayedMessages.map((msg, i) => {
-            if (msg.hidden) return null
+          {displayedMessages.flatMap((msg, i) => {
+            const peerRows = <PeerTimelineRows key={`peer-slot-${msg.cid || msg.id || msg.ts || i}`} notes={peerTimeline.slots.get(i)} chatId={chatId} />
+            if (msg.hidden) return [peerRows]
             const continuationMarker = isContinuationMessage(msg)
             const isLastMsg = i === lastVisibleMessageIndex
             // The mirrored DB row is rendered below by the SAME active
@@ -5500,7 +5505,7 @@ export default function ChatView({
             if (i === activeMirrorMsgIdx
                 && msg.role === 'assistant'
                 && showActiveAssistantSurface) {
-              return null
+              return [peerRows]
             }
             // A question is answerable while the runner is parked on it,
             // waiting for the answer. The runner BLOCKS the turn on the
@@ -5545,7 +5550,7 @@ export default function ChatView({
             const userCid = ownerUserMessage ? cidOf(msg) : null
             const copyText = ownerUserMessage ? messageCopyText(msg) : ''
             const hasMessageMeta = Boolean(copyText || (ownerUserMessage && msg.ts))
-            return (
+            return [peerRows, (
             <li
               key={userCid || msg.id || msg.ts || `${msg.role}-${i}`}
               className={`chat__msg chat__msg--${continuationMarker ? 'marker' : msg.role}`}
@@ -5598,7 +5603,8 @@ export default function ChatView({
                 visible={visibleMessageMetaKey === dataKey}
               />
             </li>
-          )})}
+          )]
+          })}
 
           {showActiveAssistantSurface && (
             <ActiveAssistantSurface
@@ -5661,6 +5667,9 @@ export default function ChatView({
             </li>
           )}
 
+          <PeerTimelineRows notes={peerTimeline.slots.get(displayedMessages.length)} chatId={chatId} />
+          {peerTimeline.error && <li className="chat__peer-load-error" role="status">Agent messages couldn’t refresh. <button type="button" onClick={() => peerTimeline.retry()}>Try again</button></li>}
+
           {/* Steering is accepted locally before the provider control channel
               acknowledges it. Keep the durable rows out of the actionable
               queue, but render them in their eventual transcript position now:
@@ -5698,6 +5707,7 @@ export default function ChatView({
             )
           })}
         </ul>
+        </PeerTimelineContext.Provider>
 
         <div className="spacer-dynamic" ref={spacerRef} aria-hidden="true" />
       </div>

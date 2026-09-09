@@ -1,0 +1,83 @@
+/* Project retained peer mail onto transcript boundaries without changing delivery or stored messages. */
+export function peerTime(value) {
+  if (typeof value === 'number') return value
+  if (typeof value !== 'string' || !value) return NaN
+  return Date.parse(/(?:Z|[+-]\d\d:\d\d)$/.test(value) ? value : `${value}Z`)
+}
+
+// Older hidden carriers are the only retained copy of some exchanges. Read only
+// the platform-owned carrier kind, never owner prose containing the same tags.
+export function carrierMessages(message) {
+  if (!message?.hidden || message.kind !== 'peer_message') return []
+  const content = message.content || ''
+  const start = content.indexOf('<agent_coordination>')
+  const end = content.lastIndexOf('</agent_coordination>')
+  if (start < 0 || end <= start) return []
+  try {
+    const payload = JSON.parse(content.slice(start + 20, end).trim())
+    return Array.isArray(payload.messages) ? payload.messages.filter(m => m?.id && typeof m.body === 'string') : []
+  } catch {
+    // A damaged historical carrier must not take down the owner's transcript.
+    return []
+  }
+}
+
+export function projectPeerTimeline(messages, history, chatId, activeTools = []) {
+  const records = new Map(history.map(m => [m.id, m]))
+  const delivered = new Map()
+  messages.forEach((msg, index) => {
+    for (const note of carrierMessages(msg)) {
+      delivered.set(note.id, { index, mode: msg.steered ? 'during_work' : 'next_turn' })
+      if (!records.has(note.id)) records.set(note.id, { ...note, created_at: msg.ts })
+    }
+  })
+  const ordered = [...records.values()].sort((a, b) => peerTime(a.created_at) - peerTime(b.created_at) || a.id.localeCompare(b.id))
+  const tools = new Map()
+  const represented = new Set()
+  // Historical tool markers preserve body but not the mailbox ID. Match one
+  // exact outgoing receipt per marker, inside that assistant segment's time range.
+  const receiptSegments = [...messages, { ts: messages.at(-1)?.ts ?? 0, blocks: activeTools }]
+  receiptSegments.forEach((msg, index) => {
+    const next = messages[index + 1]?.ts ?? Infinity
+    for (const block of msg.blocks || []) {
+      const pm = block.peer_message
+      if (pm?.status !== 'sent' || !block.tool_use_id || tools.has(block.tool_use_id)) continue
+      const matches = ordered.filter(note => !represented.has(note.id)
+        && note.sender_chat_id === chatId && note.body === pm.body
+        && (pm.broadcast ? note.broadcast : !note.broadcast && (!pm.peers?.length || pm.peers.includes(note.recipient_name)))
+        && peerTime(note.created_at) >= msg.ts && peerTime(note.created_at) <= next).slice(0, pm.count || 1)
+      if (!matches.length) continue
+      tools.set(block.tool_use_id, matches)
+      matches.forEach(note => represented.add(note.id))
+    }
+  })
+  const slots = new Map()
+  for (const note of ordered) {
+    if (represented.has(note.id)) continue
+    const arrival = peerTime(note.created_at)
+    if (!Number.isFinite(arrival)) continue
+    const delivery = delivered.get(note.id)
+    // Do not pull unseen older history ahead of the loaded transcript window.
+    if (!delivery && messages.length && arrival < messages[0].ts) continue
+    let index = delivery?.index ?? messages.findIndex(msg => msg.ts > arrival)
+    if (index < 0) index = messages.length
+    const rows = slots.get(index) || []
+    rows.push({ ...note, observedDelivery: delivery?.mode })
+    slots.set(index, rows)
+  }
+  return { slots, tools }
+}
+
+export function peerRecordTool(note, chatId) {
+  const sent = note.sender_chat_id === chatId
+  return {
+    type: 'tool', status: 'done', tool: 'PeerMessage',
+    peer_message: sent ? {
+      direction: 'send', status: 'sent', peers: [note.recipient_name || 'Agent'],
+      count: 1, kind: note.kind, body: note.body, body_truncated: Boolean(note.truncated), broadcast: note.broadcast,
+    } : {
+      direction: 'read', status: 'received', count: 1,
+      notes: [{ sender: note.sender_name || 'Agent', body: note.body, kind: note.kind, body_truncated: Boolean(note.truncated) }],
+    },
+  }
+}

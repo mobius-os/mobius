@@ -1047,6 +1047,10 @@
   box-sizing: border-box;
   gap: 10px;
   max-height: min(340px, 52vh);
+  border: 0;
+  border-inline-start: 1px solid var(--border);
+  border-radius: 0;
+  background: none;
   color: var(--text);
   font: 400 12.5px/1.45 var(--font, system-ui, sans-serif);
 }
@@ -4384,3 +4388,21 @@
 }
 
 .chat__progress-identity { display: inline-block; vertical-align: -2px; margin-right: 5px; flex-shrink: 0; }
+
+/* Tool-only continuation rows share one activity rhythm across message boundaries. */
+.chat__msg:has(> .chat__tools:last-child, > .chat__assistant-copy-surface > .chat__tools:last-child)
+  + .chat__msg:has(> .chat__tools:first-child, > .chat__assistant-copy-surface > .chat__tools:first-child) {
+  margin-block-start: calc(var(--activity-row-gap, 4px) - 24px);
+}
+.chat__msg--peer .chat__tools { width: 100%; }
+.chat__peer-tool { width: 100%; font-family: var(--font); }
+.chat__peer-tool .chat__tool-header { width: 100%; }
+.chat__peer-tool .chat__tool-name { flex: 0 1 auto; min-width: 0; }
+.chat__peer-time { flex: none; font: 400 11px/1.4 var(--font); color: var(--muted); font-variant-numeric: tabular-nums; }
+.chat__peer-chevron { flex: none; color: var(--muted); }
+.chat__peer-chevron--open { transform: rotate(180deg); }
+.chat__peer-delivery { margin: 0; color: var(--muted); font-size: 12px; }
+.chat__peer-links { display: flex; flex-wrap: wrap; gap: 8px; }
+.chat__peer-links a { color: var(--accent); text-underline-offset: 3px; overflow-wrap: anywhere; }
+.chat__peer-load-error { font-size: 12px; color: var(--muted); }
+.chat__peer-load-error button { font: inherit; color: var(--accent); background: none; border: 0; cursor: pointer; }

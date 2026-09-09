@@ -2857,7 +2857,14 @@ export default function Shell({ onInitialVisualReady }) {
 
   // Handle non-content SSE events: theme changes, app updates, shell rebuilds.
   const handleSystemEvent = useCallback((ev) => {
-    if (ev.type === 'theme_updated') {
+    if (ev.type === 'agent_coordination_message') {
+      // Mailbox hints refresh owner views without polling a model inbox.
+      const affected = new Set([ev.senderChatId, ...(ev.recipientChatIds || [])])
+      void queryClient.invalidateQueries({ predicate: query => (
+        ['chat-network-history', 'chat-network-summary'].includes(query.queryKey[0])
+        && (ev.broadcast || affected.has(query.queryKey[1]))
+      ) })
+    } else if (ev.type === 'theme_updated') {
       // Theme is dynamic in iframes since the token-free frame
       // refactor: AppCanvas re-broadcasts the theme via
       // `moebius:frame-theme` postMessage on every theme change,
