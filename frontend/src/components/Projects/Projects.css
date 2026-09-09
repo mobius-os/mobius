@@ -1339,36 +1339,38 @@ button.project-finder__change:hover { color: var(--text); background: var(--surf
   line-height: 1.5;
 }
 .project-update-status { color: var(--green); font-size: 12px; }
-.project-theme-resource { min-width: 0; margin: 0 0 12px; color: var(--text); }
-.project-theme-resource summary {
-  cursor: pointer;
-  padding: 10px 8px;
-  font-size: 13px;
-  line-height: 1.5;
-}
-.project-theme-resource summary span { margin-left: 6px; color: var(--muted); font-size: 11px; }
-.project-theme-resource summary:focus-visible,
-.project-theme-resource pre:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-.project-theme-resource__body { padding: 0 8px 8px; font-size: 12px; line-height: 1.6; }
-.project-theme-resource__body p { margin: 8px 0; }
-.project-theme-resource__body code { font-family: var(--mono); overflow-wrap: anywhere; }
-.project-theme-resource__body pre {
-  max-height: 280px;
-  overflow: auto;
-  padding: 12px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--surface);
-  white-space: pre-wrap;
-  tab-size: 2;
-}
-
-/* Source resources and status belong to Files, not the output overview. */
+/* Read-only theme inspection occupies the workspace, never a cramped file row. */
+.project-theme-resource { width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 44px; border: 0; background: transparent; color: var(--text); text-align: left; cursor: pointer; font: inherit; font-size: 12px; }
+.project-theme-resource small { display: block; color: var(--muted); font-size: 11px; }
+.project-theme-resource:hover { background: var(--surface); }
 .project-finder__explorer-scroll > .project-theme-resource { margin: 0; padding: 10px 14px; }
-
-.project-change-diff { min-width: 0; border-top: 1px solid var(--border-light); }
-.project-change-diff > summary { display: flex; align-items: center; gap: 8px; padding: 9px 3px; cursor: pointer; }
-.project-change-diff > summary > span:first-child { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.project-workspace__view { position: relative; }
+.project-workspace__resource-view { position: absolute; inset: 0; z-index: 2; background: var(--bg); }
+.project-theme-source { height: 100%; display: flex; flex-direction: column; min-height: 0; }
+.project-theme-source__toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 16px; padding: 10px 14px; border-bottom: 1px solid var(--border-light); font-size: 12px; }
+.project-theme-source__toolbar > button { display: inline-flex; align-items: center; gap: 6px; min-height: 44px; padding: 6px 10px; border: 0; border-radius: 8px; background: var(--surface); color: var(--text); font: inherit; cursor: pointer; }
+.project-theme-source__toolbar > span { margin-left: auto; color: var(--muted); }
+.project-theme-resource__files { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.project-theme-resource__files select { max-width: 100%; min-height: 40px; padding: 6px 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); color: var(--text); font: inherit; }
+.project-theme-source__body { flex: 1; min-height: 0; overflow: auto; padding: 16px; }
+.project-theme-source__body p { max-width: 75ch; color: var(--muted); font-size: 12px; line-height: 1.6; }
+.project-theme-source__body pre { width: max-content; min-width: 100%; margin: 20px 0; color: var(--text); font: 12px/1.7 var(--mono); tab-size: 2; }
+.project-theme-source__body pre:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+/* Changed files are navigation rows; patches use the main pane's full width. */
+.project-change-diff { width: 100%; display: flex; align-items: center; gap: 8px; min-height: 44px; padding: 8px 4px; border: 0; border-radius: 6px; background: transparent; color: var(--text); text-align: left; cursor: pointer; }
+.project-change-diff:hover { background: var(--surface); }
+.project-change-diff > span:first-child { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
 .project-change-diff small { color: var(--muted); font-size: 11px; }
-.project-change-diff > p { margin: 8px 3px; font-size: 12px; }
-.project-change-diff .diff-view { max-height: 420px; overflow: auto; }
+.project-finder__git-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 8px 12px; }
+.project-finder__git-controls .project-finder__git-summary { margin-right: auto; }
+.project-finder__view-switch { display: flex; flex: 0 0 auto; gap: 4px; padding: 4px 10px; border-bottom: 1px solid var(--border-light); }
+.project-finder__view-switch button { min-height: 36px; padding: 6px 12px; border: 0; border-radius: 6px; background: transparent; color: var(--muted); font: inherit; font-size: 12px; cursor: pointer; }
+.project-finder__view-switch button:hover { color: var(--text); background: var(--surface); }
+.project-finder__view-switch button[aria-pressed="true"] { color: var(--text); background: var(--surface2); }
+.project-file-diff { flex: 1; min-width: 0; overflow: auto; padding: 12px; }
+.project-file-diff > p { color: var(--muted); font-size: 12px; line-height: 1.5; }
+.project-artifacts__app-icon { width: 32px; height: 32px; border-radius: 8px; font-size: 13px; }
+.project-artifacts__build { grid-column: 1 / -1; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 0 6px; }
+.project-artifacts__build > button { justify-content: flex-start; }
+
+.project-workspace__files { display: flex; flex: 1; min-width: 0; min-height: 0; }

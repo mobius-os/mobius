@@ -1,12 +1,11 @@
 import { useEffect, useRef, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { Chat as MessageSquare, ChatCompose as MessageSquarePlus, Folder as Github, Members as Users } from '@openai/apps-sdk-ui/components/Icon'
+import { Chat as MessageSquare, ChatCompose as MessageSquarePlus, Members as Users } from '@openai/apps-sdk-ui/components/Icon'
 import { api, jsonOrThrow } from '../../api/client.js'
 import { useHistoryDismiss } from '../../hooks/useHistoryDismiss.jsx'
 import { projectQueries } from '../../hooks/queries.js'
 import { queueArtifactBuildsAfterSourceChange } from '../../lib/projectArtifacts.js'
-import ApplyAppSourceButton from './ApplyAppSourceButton.jsx'
-import ProjectThemeResource from './ProjectThemeResource.jsx'
+import ProjectThemeResource, { ProjectThemeSourceView } from './ProjectThemeResource.jsx'
 import { linkedProjectAppId } from '../../lib/appSourceProject.js'
 import ProjectArtifacts from './ProjectArtifacts.jsx'
 import ProjectFinder from './ProjectFinder.jsx'
@@ -38,6 +37,8 @@ export default function ProjectWorkspace({
   const [creatingChat, setCreatingChat] = useState(false)
   const [collaborationOpen, setCollaborationOpen] = useState(false)
   const [activityOpen, setActivityOpen] = useState(false)
+  const [themeOpen, setThemeOpen] = useState(false)
+  const themeHistory = useHistoryDismiss(() => setThemeOpen(false))
   const collaborationHistory = useHistoryDismiss(() => setCollaborationOpen(false))
   const activityHistory = useHistoryDismiss(() => setActivityOpen(false))
   const [gitOpen, setGitOpen] = useState(false)
@@ -202,22 +203,17 @@ export default function ProjectWorkspace({
         </div>
 
         <div className="project-workspace__actions">
-          {linkedApp && <button type="button" className="project-workspace__collaborate" onClick={onOpenApp}>Open app</button>}
-          {linkedApp && <ApplyAppSourceButton projectId={project.id} app={linkedApp} onError={setError} />}
-
-          <button type="button" className="project-workspace__collaborate" aria-label="Review publishing" title="Review publishing" aria-expanded={gitOpen} onClick={() => setGitOpen(true)}><Github width={17} height={17} aria-hidden="true" /><span>Publish</span></button>
           <button type="button" className="project-workspace__collaborate" aria-label="Share project" aria-expanded={collaborationOpen} onClick={() => { collaborationHistory.open(); setCollaborationOpen(true) }}><Users width={17} height={17} aria-hidden="true" /><span>Share</span></button>
           <button type="button" className="project-workspace__collaborate" aria-label="Project activity" aria-expanded={activityOpen} onClick={() => { activityHistory.open(); setActivityOpen(true) }}><span>Activity{activeWorkCount ? ` · ${activeWorkCount}` : ''}</span></button>
         </div>
 
       </div>
 
-      {isAppProject && <p className="project-source-notice">{linkedApp
-        ? 'Editing the app’s linked source. Saved changes require Build & update app.'
-        : 'The linked app is unavailable. Source files are preserved; updating is unavailable.'}</p>}
+      {isAppProject && !linkedApp && <p className="project-source-notice">The linked app is unavailable. Source files are preserved; updating is unavailable.</p>}
       {error && <p className="projects-error" role="alert">{error}</p>}
 
       <div className="project-workspace__view">
+        <div className="project-workspace__files" inert={themeOpen || undefined} aria-hidden={themeOpen || undefined}>
         <ProjectFinder
           projectId={project.id}
           projectName={project.name}
@@ -227,7 +223,8 @@ export default function ProjectWorkspace({
           sourceDescription={isAppProject ? 'Open app to use the running version. Save edits here, then Build & update app when ready.' : undefined}
           onSourceChanged={isAppProject ? undefined : rebuildRegisteredArtifacts}
           requestedFile={requestedFile}
-          resources={<ProjectThemeResource projectId={project.id} linkedApp={isAppProject} />}
+          onOpenGit={() => setGitOpen(true)}
+          resources={<ProjectThemeResource onOpen={() => { themeHistory.open(); setThemeOpen(true) }} />}
           overview={(
             <div className="project-overview" aria-label="Project overview">
               <section className="project-overview__section" aria-labelledby={`project-artifacts-heading-${project.id}`}>
@@ -280,10 +277,12 @@ export default function ProjectWorkspace({
             </div>
           )}
         />
+        </div>
+        {themeOpen && <div className="project-workspace__resource-view"><ProjectThemeSourceView projectId={project.id} linkedApp={isAppProject} onClose={themeHistory.close} /></div>}
       </div>
       {collaborationOpen && <ProjectCollaborationPanel project={project} onClose={collaborationHistory.close} onOpenGithub={() => { collaborationHistory.close(); setGitOpen(true) }} />}
       {activityOpen && <ProjectActivityPanel project={project} onClose={activityHistory.close} />}
-      {gitOpen && <ProjectGitPanel project={project} onClose={() => setGitOpen(false)} />}
+      {gitOpen && <ProjectGitPanel project={project} onOpenChat={onOpenChat} onClose={() => setGitOpen(false)} />}
     </section>
   )
 }

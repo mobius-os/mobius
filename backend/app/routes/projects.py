@@ -46,7 +46,7 @@ from app.deps import (
 from app.path_utils import validate_path_within_base
 from app.project_activity import append_project_change, project_change_view
 from app.project_templates import LINKED_APP_GUIDANCE, linked_app_id
-from app.theme import theme_data
+from app.theme import DEFAULT_THEME, theme_data
 from app.project_retention import PROJECT_LIFECYCLE_LOCK
 from app.timeutil import now_naive_utc, SOFT_DELETE_TTL
 
@@ -2797,6 +2797,30 @@ def get_project_theme(
   """Expose only the inherited theme to members, never shared storage or write access."""
   _project_for(db, project_id, principal, "viewer")
   return theme_data(get_settings().data_dir)
+
+
+@router.get("/{project_id}/theme/source")
+def get_project_theme_source(
+  project_id: str,
+  principal: ProjectPrincipal = Depends(get_project_principal),
+  db: Session = Depends(get_db),
+):
+  """Inspect the two fixed CSS sources without effective-theme augmentation.
+
+  No caller-supplied path: project membership grants only this theme resource,
+  not access to shared storage. Keep absence distinct from an empty override.
+  """
+  _project_for(db, project_id, principal, "viewer")
+  source = Path(get_settings().data_dir) / "shared" / "theme.css"
+  files = []
+  try:
+    content = source.read_bytes().decode("utf-8")
+  except FileNotFoundError:
+    pass
+  else:
+    files.append({"name": "theme.css", "content": content})
+  files.append({"name": "default-theme.css", "content": DEFAULT_THEME})
+  return {"files": files}
 
 
 @router.get("/{project_id}/artifacts")

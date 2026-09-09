@@ -9,6 +9,8 @@ import {
   isBuilding,
   normalizeArtifacts,
 } from '../../lib/projectArtifacts.js'
+import AppIcon from '../AppIcon.jsx'
+import ApplyAppSourceButton from './ApplyAppSourceButton.jsx'
 import ArtifactIdentityIcon from './ArtifactIdentityIcon.jsx'
 import './Projects.css'
 
@@ -51,7 +53,14 @@ export default function ProjectArtifacts({ projectId, onOpen, onEditSource, canB
   return (
     <div className="project-artifacts">
       {error && <p className="projects-error" role="alert">{error}</p>}
-      {linkedApp && <div className="project-artifacts__row"><button type="button" className="project-artifacts__main" aria-label={`Open running ${linkedApp.name}`} onClick={onOpenApp}><span className="project-artifacts__copy"><strong>{linkedApp.name}</strong><small>Installed app · shared source</small></span><span className="artifact-pill">Open app</span><ChevronRight width={16} height={16} aria-hidden="true" /></button></div>}
+      {linkedApp && <div className="project-artifacts__row project-artifacts__row--app">
+        <button type="button" className="project-artifacts__main" aria-label={`Open running ${linkedApp.name}`} onClick={onOpenApp}>
+          <AppIcon item={linkedApp} label={linkedApp.name} className="project-artifacts__app-icon" />
+          <span className="project-artifacts__copy"><strong>{linkedApp.name}</strong></span>
+          <span className="artifact-pill">Open app</span><ChevronRight width={16} height={16} aria-hidden="true" />
+        </button>
+        {canBuild && <div className="project-artifacts__build"><ApplyAppSourceButton projectId={projectId} app={linkedApp} onError={setError} className="project-artifacts__action" /></div>}
+      </div>}
       {artifactsQuery.isLoading ? (
         <p className="projects-empty" role="status">Loading artifacts…</p>
       ) : artifactsQuery.isError ? (

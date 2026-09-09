@@ -19,7 +19,8 @@
   visibility: hidden;
 }
 
-.app-icon img.app-icon__image--displayed { visibility: visible; }
+/* A decoded image must still inherit an inactive workspace tab’s visibility. */
+.app-icon img.app-icon__image--displayed { visibility: inherit; }
 
 .app-icon.is-image {
   overflow: visible;

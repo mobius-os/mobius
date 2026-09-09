@@ -110,3 +110,42 @@ def test_linked_project_build_status_compares_the_app_accepted_source(client, au
   status = client.get(url, headers=auth).json()
   assert status['changes'] == []
   assert status['app_build'] == {'state': 'pending'}
+
+
+def test_theme_source_preserves_raw_text_and_distinguishes_empty_missing_and_default(client, auth, linked):
+  from app.theme import DEFAULT_THEME
+  _, project, _ = linked
+  url = f"/api/projects/{project['id']}/theme/source"
+  theme_path = Path(os.environ['DATA_DIR']) / 'shared' / 'theme.css'
+  theme_path.parent.mkdir(parents=True, exist_ok=True)
+  theme_path.unlink(missing_ok=True)
+  defaults = {'name': 'default-theme.css', 'content': DEFAULT_THEME}
+  assert client.get(url, headers=auth).json() == {'files': [defaults]}
+  raw = '\r\n/* untouched source */\r\n:root { --bg: #123456; }\r\n'
+  theme_path.write_bytes(raw.encode('utf-8'))
+  assert client.get(url, headers=auth).json() == {
+    'files': [{'name': 'theme.css', 'content': raw}, defaults],
+  }
+  effective = client.get(f"/api/projects/{project['id']}/theme", headers=auth).json()['css']
+  assert effective != raw
+  assert '--accent:' in effective
+  assert theme_path.read_bytes() == raw.encode('utf-8')
+  theme_path.write_text('')
+  assert client.get(url, headers=auth).json() == {
+    'files': [{'name': 'theme.css', 'content': ''}, defaults],
+  }
+
+
+def test_theme_source_is_read_only_and_confined_to_active_viewers(client, auth, linked):
+  _, project, _ = linked
+  _, secret = _invite(client, auth, project['id'], role='viewer')
+  session, guest = _redeem(client, secret)
+  url = f"/api/projects/{project['id']}/theme/source"
+  assert client.get(url).status_code == 401
+  assert client.get(url, headers=guest).json() == client.get(url, headers=auth).json()
+  assert client.put(url, headers=guest, json={'content': 'bad'}).status_code == 404
+  assert client.get('/api/storage/shared/theme.css', headers=guest).status_code == 403
+  other = client.post('/api/projects', headers=auth, json={'name': 'Private', 'template_id': 'blank'}).json()
+  assert client.get(f"/api/projects/{other['id']}/theme/source", headers=guest).status_code == 404
+  assert client.delete(f"/api/projects/{project['id']}/members/{session['member_id']}", headers=auth).status_code == 204
+  assert client.get(url, headers=guest).status_code in (401, 403)
