@@ -48,7 +48,10 @@ def test_exact_deployed_ledger_normalizes_without_replaying_any_completed_body(
   assert normalized == dict(original + expected)
 
   calls = []
-  pending = {'0043_agent_coordination_delivery'}
+  pending = {
+    '0043_agent_coordination_delivery',
+    '0044_peer_context_delivery_cursor',
+  }
   if before_incident:
     pending.add('0042_linked_app_project_runtime')
 
