@@ -1151,7 +1151,11 @@ class ChatEventSink:
     return stored_result
 
   async def publish_question(
-    self, event: ChatEvent, *, secure_request: dict | None = None,
+    self,
+    event: ChatEvent,
+    *,
+    secure_request: dict | None = None,
+    activation_wait: dict | None = None,
   ) -> None:
     """Save-before-broadcast for an AskUserQuestion card.
 
@@ -1207,6 +1211,7 @@ class ChatEventSink:
         chat_id=self.chat_id, run_token=self.run_token or "", snapshot=snapshot,
         thinking_stashes=stashes,
         **({"secure_request": secure_request} if secure_request is not None else {}),
+        **({"activation_wait": activation_wait} if activation_wait is not None else {}),
       )
     )
     try:

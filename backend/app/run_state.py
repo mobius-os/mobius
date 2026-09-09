@@ -99,11 +99,16 @@ def goal_identity_for_run_start(
         return _recoverable_result_goal(db, chat_id, source)
     return None, None
   from app.continuations import (
-    PEER_MESSAGE_WAKE_KIND, WAIT_RESULT_MESSAGE_KIND,
+    PEER_MESSAGE_WAKE_KIND, PLATFORM_ACTIVATION_RESULT_MESSAGE_KIND,
+    WAIT_RESULT_MESSAGE_KIND,
   )
   if (
     isinstance(message, Mapping)
-    and message.get("kind") in (WAIT_RESULT_MESSAGE_KIND, PEER_MESSAGE_WAKE_KIND)
+    and message.get("kind") in (
+      WAIT_RESULT_MESSAGE_KIND,
+      PLATFORM_ACTIVATION_RESULT_MESSAGE_KIND,
+      PEER_MESSAGE_WAKE_KIND,
+    )
   ):
     # `source_work_id` is the physical run that declared the wait (or the
     # paused Goal's run a peer note woke); resume under that run's Goal

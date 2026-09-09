@@ -21,7 +21,7 @@ from urllib.request import Request, urlopen
 
 
 SERVER_NAME = "Möbius control"
-SERVER_VERSION = "1.8.0"
+SERVER_VERSION = "1.9.0"
 LATEST_PROTOCOL_VERSION = "2025-11-25"
 SUPPORTED_PROTOCOL_VERSIONS = {
   "2024-11-05",
@@ -34,6 +34,7 @@ DECLARE_WAIT_TOOL = "declare_wait"
 CANCEL_WAIT_TOOL = "cancel_wait"
 REQUEST_APPROVAL_TOOL = "request_approval"
 REQUEST_QUESTION_TOOL = "request_question"
+REQUEST_RESTART_TOOL = "request_restart"
 LIST_AGENT_PEERS_TOOL = "list_agent_peers"
 SEND_AGENT_MESSAGE_TOOL = "send_agent_message"
 CLAIM_AGENT_WORK_TOOL = "claim_agent_work"
@@ -50,6 +51,7 @@ OWNER_TOOLS = (
   CANCEL_WAIT_TOOL,
   REQUEST_APPROVAL_TOOL,
   REQUEST_QUESTION_TOOL,
+  REQUEST_RESTART_TOOL,
 )
 DELEGATED_TOOLS = COORDINATION_TOOLS
 PROMOTE_GOAL_DESCRIPTION = (
@@ -320,6 +322,15 @@ def _call_request_question(arguments: dict[str, Any]) -> dict:
     raise RuntimeError(str(exc)) from exc
 
 
+def _call_request_restart(arguments: dict[str, Any]) -> dict:
+  if arguments:
+    raise ValueError("request_restart takes no arguments")
+  try:
+    return _APPROVALS.request_restart()
+  except SystemExit as exc:
+    raise RuntimeError(str(exc)) from exc
+
+
 def _optional_int(arguments: dict[str, Any], name: str) -> int | None:
   value = arguments.get(name)
   if value is None:
@@ -453,8 +464,9 @@ _TOOL_DEFINITIONS = {
   REQUEST_APPROVAL_TOOL: {
     "name": REQUEST_APPROVAL_TOOL,
     "description": (
-      "Ask the owner to approve a proposed Möbius action, including a server "
-      "restart. This is an application decision, not a sandbox or tool-permission "
+      "Ask the owner to approve a proposed Möbius action other than a platform "
+      "restart (use request_restart for that). This is an application decision, "
+      "not a sandbox or tool-permission "
       "escalation. Saves an ordinary answerable question card and returns a "
       "receipt immediately, NOT an answer or permission. After success, end "
       "the turn without further text or tools. Put all explanation, preparation and "
@@ -493,6 +505,22 @@ _TOOL_DEFINITIONS = {
         },
       },
       "required": ["question", "options", "work_key"], "additionalProperties": False,
+    },
+  },
+  REQUEST_RESTART_TOOL: {
+    "name": REQUEST_RESTART_TOOL,
+    "description": (
+      "Ask the owner to restart Möbius so the exact current committed, tested "
+      "restart-loadable platform changes can be loaded. The platform derives "
+      "and binds the action; this tool accepts no caller-supplied command or "
+      "source identity. Use it only after the platform-maintenance activation "
+      "preflight. It saves a Restart now / Not now card and returns a receipt, "
+      "NOT approval. Put all explanation and closeout before this final call, "
+      "then end the turn without more text or tools. Choosing Restart now is "
+      "handled by the platform without waking an agent to issue the command."
+    ),
+    "inputSchema": {
+      "type": "object", "properties": {}, "additionalProperties": False,
     },
   },
   REQUEST_QUESTION_TOOL: {
@@ -704,6 +732,7 @@ _TOOL_DEFINITIONS = {
 _TOOL_HANDLERS = {
   REQUEST_APPROVAL_TOOL: _call_request_approval,
   REQUEST_QUESTION_TOOL: _call_request_question,
+  REQUEST_RESTART_TOOL: _call_request_restart,
   PROMOTE_GOAL_TOOL: _call_promote_goal,
   DECLARE_WAIT_TOOL: _call_declare_wait,
   CANCEL_WAIT_TOOL: _call_cancel_wait,

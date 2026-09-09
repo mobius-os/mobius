@@ -1,3 +1,4 @@
+import { questionAnswerPatch } from './questionSubmission.js'
 import { usePeerTimeline, PeerTimelineRows } from './PeerTimeline.jsx'
 import { PeerTimelineContext } from './peerTimelineContext.js'
 import { consumeChatChanges, subscribeChatChanges } from '../../lib/chatChangesNavigation.js'
@@ -3662,7 +3663,7 @@ export default function ChatView({
             msg.blocks = (msg.blocks || []).map(b => {
               if (b.type !== 'question') return b
               if (questionId && b.question_id !== questionId) return b
-              return { ...b, answers: resolvedAnswers }
+              return { ...b, ...questionAnswerPatch(response.answers || resolvedAnswers, response) }
             })
             updated[lastIdx] = msg
           }
@@ -3673,7 +3674,7 @@ export default function ChatView({
         })
         // A mid-turn question may still live in streamItems rather than the
         // durable message list. Keep both render sources in agreement.
-        patchQuestionAnswers(questionId, resolvedAnswers, response)
+        patchQuestionAnswers(questionId, response.answers || resolvedAnswers, response)
       }
       // Acceptance and visible response activity are deliberately separate.
       // Keep the card fixed through this answer-only commit; the stream hook

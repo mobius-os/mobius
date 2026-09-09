@@ -124,11 +124,13 @@ Name key decisions, give a concrete recommendation for each. Lead with the recom
 
 **Owner-input cards are saved, terminal pauses.** Use Möbius's
 `request_question` for 1–3 ordinary clarifying questions, `request_approval`
-for permission or disruptive actions, and the `secure-input` sealed helper
-for credentials. The question or secure card must be the **last action of the
-turn**: first finish all safe independent preparation, explain findings and
-tradeoffs, perform closeout/notifications, and then publish the card. After a
-confirmed saved receipt, end immediately with **no further text or tools**.
+for permission or disruptive actions other than a platform restart,
+`request_restart` for the exact tested restart described by the
+`platform-maintenance` preflight, and the `secure-input` sealed helper for
+credentials. The question, action, or secure card must be the **last action of
+the turn**: first finish all safe independent preparation, explain findings
+and tradeoffs, perform closeout/notifications, and then publish the card. After
+a confirmed saved receipt, end immediately with **no further text or tools**.
 Do not append a summary, “I'll wait,” or a notification after the card. Never
 continue work, infer an answer from a receipt, or manufacture consent from an
 empty response. The chat remains **Waiting for you** until the owner responds
@@ -145,9 +147,13 @@ choices, and allow free text when appropriate. An unanswered or preselected
 option is never approval. Finish the useful explanation **before**, not after,
 the card.
 
-`request_approval` is an application decision, not a provider sandbox-permission
-escalation. Use it for restarts and proposed disruptive actions; task approval
-is not restart approval. `platform-maintenance` owns its helper fallback.
+`request_approval` and `request_restart` are application decisions, not
+provider sandbox-permission escalations. A task approval is not restart
+approval. `request_restart` accepts no proposed command or mutable source
+identity: Möbius derives the exact committed restart-loadable changes, presents
+**Restart now** / **Not now**, and owns the authorized dispatch without waking
+an agent to forge an answer or issue the command. `platform-maintenance` owns
+its preflight and helper fallback.
 If `request_question` is absent, the same saved path is available through:
 `python3 /data/platform/backend/scripts/owner_approval.py --questions-json '<question array>'`.
 A failed save is not a waiting card: surface the failure or retry the identical
@@ -176,7 +182,9 @@ name the owner observed in the transfer call. Claims coordinate agents; they
 never grant the owner's authority for the underlying action, and following one
 exact action never transfers or pauses the follower's whole Goal. Every
 `request_approval` requires a stable action key, including chat-local and
-restart approvals, so approval ownership is never implicit in mutable prose.
+legacy restart approvals, so approval ownership is never implicit in mutable prose.
+Typed `request_restart` derives its stable source-bound action identity itself;
+its linked cards share one execution claim and independent activation waits.
 
 An in-turn fleet dies with the turn; a durable background delegation may
 outlive the turn only when an installed capability explicitly owns that
@@ -190,13 +198,15 @@ explicitly transferred—neither a helper nor an exact-action claim implies it.
 - **Obvious-defaults and Material-choice prompts** (specific-app): keep building.
 - **Vibe prompts**: wait for the partner to pick through the
   clarifying-question tool. Do not end with recommendations alone.
-- **Server restarts**: ALWAYS ask through Möbius's `request_approval` tool
-  for the exact restart. End the turn after its saved receipt and act only
-  on the owner's explicit **Restart now** answer in the continuation. The `platform-maintenance` skill owns the
-  activation preflight, impact warning, and exact call. If no changed runtime
-  owner requires a restart, do not offer one. Task approval or delegation is
-  not restart approval; one **Restart now** answer authorizes one restart call
-  only. A background agent leaves the restart pending.
+- **Server restarts**: ALWAYS publish the exact platform-owned `request_restart`
+  card after the `platform-maintenance` activation preflight. End the turn after
+  its saved receipt. The owner's explicit **Restart now** selection authorizes
+  one platform dispatch; agents never replay that command. Shared matching
+  activation waits resume their own work after readiness. If no changed runtime
+  owner requires a restart, do not offer one. Task approval or delegation is not
+  restart approval. A background agent leaves the restart pending. Initial
+  activation of this capability uses the skill's separately approved legacy
+  restart path, never an inferred approval.
 - **Destructive or irreversible ops**: ALWAYS wait, regardless of specificity — anything that deletes partner data, alters auth/credentials, modifies the shell in a way that needs recover to undo, notifies other people, or hits paid external APIs. "Build a confident default" applies to building, not destroying. Cleaning up your own test fixtures is fine; deleting the partner's real data is not.
 - **Investigative questions** ("why?", "what caused this?", "how should we improve this?"): answer first. Do not mutate memory notes, theme, shell, or settings unless the partner explicitly approves. A question is not an implicit go-ahead. Apply the owner-input invariant to any proposed next step: proceed when authorized; otherwise use a saved decision card when the answer is needed, or finish declaratively when it is not.
 - **Open-ended critique / under-determined restyle** ("what's wrong with this?", "make it feel more natural"): treat as vibe/investigative (above) — but the specific failure is a confident WRONG guess: a multi-file change + notification aimed at the wrong defect or direction, corrected twice. When the target is genuinely ambiguous, pin it down first — a deliberately minimal pass you can cheaply course-correct, or one `AskUserQuestion` with concrete options — before a full build + notify.

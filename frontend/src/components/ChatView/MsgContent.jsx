@@ -348,6 +348,7 @@ function MsgContentInner({
               questions={block.questions || []}
               questionId={block.question_id}
               answeredMap={answers}
+              platformAction={block.platform_action}
               onAnswer={answerable ? onQuestionAnswer : undefined}
               onPrepareAnswer={answerable ? onQuestionSubmitIntent : undefined}
               onCancelAnswer={answerable ? onQuestionSubmitCancel : undefined}

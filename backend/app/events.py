@@ -506,6 +506,9 @@ def _process_question_event(event: dict, assistant_blocks: list) -> bool:
     action_key = event.get("action_key")
     if isinstance(action_key, str) and action_key:
       new_block["action_key"] = action_key
+    platform_action = event.get("platform_action")
+    if isinstance(platform_action, dict):
+      new_block["platform_action"] = copy.deepcopy(platform_action)
     # Answer delivery is fixed when the card is created, not by later partial
     # updates. Continuation cards have no provider future to keep alive.
     if event.get("response_mode") == "continuation":
@@ -523,6 +526,8 @@ def _process_question_event(event: dict, assistant_blocks: list) -> bool:
           existing["question_id"] = question_id
         if isinstance(action_key, str) and action_key:
           existing["action_key"] = action_key
+        if isinstance(platform_action, dict):
+          existing["platform_action"] = copy.deepcopy(platform_action)
         return True
     assistant_blocks.append(new_block)
     return True
@@ -911,7 +916,9 @@ def process_event(event: dict, assistant_blocks: list) -> bool:
     for block in assistant_blocks:
       if (block.get("type") == "question"
           and block.get("question_id") == event.get("question_id")):
-        block["answers"] = event["answers"]
+        for key in ("answers", "answer_turn", "selected_options", "platform_action"):
+          if key in event:
+            block[key] = copy.deepcopy(event[key])
         return True
     return False
 

@@ -22,6 +22,11 @@ def request_question(questions: list[dict]) -> dict:
   return save_card("question", {"questions": questions})
 
 
+def request_restart() -> dict:
+  """Ask the platform to derive and save the exact pending restart action."""
+  return save_card("restart-request", {})
+
+
 def save_card(kind: str, body: dict) -> dict:
   """Save safe prompts, returning only a receipt, never a human answer."""
   names = ("API_BASE_URL", "AGENT_TOKEN", "CHAT_ID", "MOBIUS_RUN_TOKEN")
@@ -77,13 +82,21 @@ def main() -> None:
   parser = argparse.ArgumentParser(description=__doc__)
   parser.add_argument("question", nargs="?")
   parser.add_argument("--questions-json", help="JSON array for a saved ordinary question card")
+  parser.add_argument(
+    "--restart", action="store_true",
+    help="save a platform-owned card for the exact pending server restart",
+  )
   parser.add_argument("--option", action="append", nargs=2,
                       metavar=("LABEL", "DESCRIPTION"))
   parser.add_argument(
     "--work-key", help="required stable identity for the action awaiting approval",
   )
   args = parser.parse_args()
-  if args.questions_json is not None:
+  if args.restart:
+    if args.question or args.questions_json is not None or args.option or args.work_key:
+      parser.error("--restart does not accept approval or question arguments")
+    print(json.dumps(request_restart()))
+  elif args.questions_json is not None:
     if args.question or args.option or args.work_key:
       parser.error("use either --questions-json or an approval question with --option")
     try:

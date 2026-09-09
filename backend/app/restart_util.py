@@ -1,9 +1,9 @@
 """Reliable, drain-gated in-process worker restart for the owner-facing paths.
 
-Shared by ``/api/admin/restart`` (the Settings "Restart" button) and
-``/api/platform/restart`` (the platform-update "Restart to finish" button) so
-the two can never drift apart — a restart that works in one place but hangs in
-the other is exactly the bug this consolidates away.
+Shared by ``/api/admin/restart`` (the Settings button),
+``/api/platform/restart`` (the update button), and typed owner Restart cards,
+so competing surfaces cannot create multiple nonces, drains, or supervisor
+requests.
 
 Every restart routes through one DRAIN-GATED path (design §2.2): live turns are
 never simply killed. The worker first sets the ``draining`` gate (new sends
@@ -32,6 +32,38 @@ log = logging.getLogger("mobius.restart")
 # but never exits, so tini (PID 1) never exits and the container never restarts.
 _FORCE_KILL_AFTER_SECONDS = 5.0
 _CUTOVER_FAILSAFE_SECONDS = 90.0
+_RESTART_ADMISSION_LOCK = threading.Lock()
+_RESTART_ADMITTED = False
+
+
+def _claim_in_process_restart() -> bool:
+  """Admit one Settings/platform/card restart for this worker lifetime.
+
+  The winner never releases the latch after admission: losing the HTTP
+  acknowledgement must not permit another drain, nonce, timer, or restart.
+  """
+  global _RESTART_ADMITTED
+  with _RESTART_ADMISSION_LOCK:
+    if _RESTART_ADMITTED:
+      return False
+    _RESTART_ADMITTED = True
+    return True
+
+
+def restart_admission_in_progress() -> bool:
+  """Whether this worker owns a restart handoff, drain, or supervisor request."""
+  with _RESTART_ADMISSION_LOCK:
+    return _RESTART_ADMITTED
+
+
+def _release_unstarted_restart() -> None:
+  """Release only a card rejected before drain or any side effect."""
+  global _RESTART_ADMITTED
+  from app import chat
+
+  with _RESTART_ADMISSION_LOCK:
+    if not chat.draining:
+      _RESTART_ADMITTED = False
 
 
 async def _drain_exact_restart() -> tuple[str, str, list[dict[str, str]]]:
@@ -78,7 +110,9 @@ async def _drain_exact_restart() -> tuple[str, str, list[dict[str, str]]]:
   return boot_id, restart_nonce, restart_runs
 
 
-async def restart_this_worker(ready_path: Path | None = None) -> None:
+async def restart_this_worker(
+  ready_path: Path | None = None, *, action_id: str | None = None,
+) -> None:
   """Drain live turns, then restart this uvicorn worker with the current code.
 
   Runs as an async BackgroundTask (after the response is flushed), so the drain
@@ -106,6 +140,26 @@ async def restart_this_worker(ready_path: Path | None = None) -> None:
   drain flushes each paused note before SIGTERM, so a hard kill loses nothing a
   graceful drain would have saved.
   """
+  if not _claim_in_process_restart():
+    return
+
+  if action_id is not None:
+    from app.platform_restart import admit_execution_if_current
+    try:
+      admitted = admit_execution_if_current(action_id)
+    except BaseException:
+      # No drain, timer, or supervisor side effect has started. A transient DB
+      # or Git failure must not disable every later Settings restart this boot.
+      _release_unstarted_restart()
+      raise
+    if not admitted:
+      log.warning(
+        "typed restart admission refused for changed/settled action %s",
+        action_id,
+      )
+      _release_unstarted_restart()
+      return
+
   from app import chat
 
   pid = os.getpid()

@@ -192,27 +192,25 @@ the write-surface contract.
 2. Commit only the exact paths you own with `PM_COMMIT_ROOT=/data/platform
    pm-commit --from <starting-sha> '<what and why>' -- <paths>`.
 3. Run the activation preflight. Only if it proves that the settled backend
-   change is not live, ask through Möbius's `request_approval` tool for this exact restart,
-   then end the turn after the saved receipt. Explain that the restart interrupts every
-   active agent turn, name the current number of running turns when known, and
-   warn that service may be unavailable for tens of seconds. Offer **Restart
-   now** and **Not now**. Approval of the task, a broad “go ahead” or “fix it,”
-   or delegation of the complete backend-fix loop does not approve a restart.
+   change is not live, explain that the restart interrupts every active agent
+   turn, name the current number of running turns when known, warn that service
+   may be unavailable for tens of seconds, then call Möbius's
+   `request_restart` tool as the final action. Approval of the task, a broad
+   “go ahead” or “fix it,” or delegation of the complete backend-fix loop does
+   not approve a restart.
 
-   Use `request_approval` with a question naming the change and impact, and
-   two options: **Not now** and **Restart now**, each with a short description.
-   Its receipt confirms only that the card was saved. It does not grant
-   approval: end the turn, and let the owner's answer resume the chat. Do not
-   use Codex's `request_user_input` for permission or approval requests.
+   `request_restart` takes no action arguments. The platform derives the exact
+   committed, restart-loadable source and saves its own **Restart now** / **Not
+   now** card. Its receipt confirms only that the card was saved, not approval:
+   end the turn with no further text or tools. The owner's **Restart now** click
+   is dispatched by the platform without waking an agent to forge an answer or
+   issue a shell command. Do not use `request_approval` or Codex's
+   `request_user_input` for platform restart permission.
 
    If the tool is absent, the same saved-card operation is available through:
 
    ```bash
-   python3 /data/platform/backend/scripts/owner_approval.py \
-     'Restart to activate <tested change>? This interrupts <N> active turns and may take Möbius offline for tens of seconds.' \
-     --work-key 'platform:<tested-commit>:restart' \
-     --option 'Not now' 'Leave the tested change pending without interruption.' \
-     --option 'Restart now' 'Activate the tested change with the interruption described.'
+   python3 /data/platform/backend/scripts/owner_approval.py --restart
    ```
 
    A failed save is not a waiting card and not consent. Retry only the
@@ -220,18 +218,13 @@ the write-surface contract.
    this operation, ask plainly and leave activation pending; never fabricate
    a card or park a process waiting for an answer.
 
-   A **Restart now** answer authorizes exactly one safe restart call:
-
-   ```bash
-   curl -fsS -X POST "$API_BASE_URL/api/admin/restart" \
-     -H "Authorization: Bearer $AGENT_TOKEN" \
-     -H "Content-Type: application/json"
-   ```
-
-   The current tool call ends as the worker exits and Möbius resumes the turn.
-   A second restart, or an ambiguous outcome where you cannot prove whether the
-   call reached the server, requires a new question. A scheduled/background
-   agent cannot ask live, so it leaves the restart pending for the partner.
+   The card owns at-most-once admission for its exact action. A lost response,
+   duplicate click, or ambiguous process death must never cause an agent to
+   replay the restart. Möbius confirms loaded-source readiness after boot and
+   resumes each matching waiting chat independently; unrelated waits and
+   queued work keep their existing barriers. An uncertain outcome needs fresh,
+   specific approval rather than an automatic retry. A scheduled/background
+   agent cannot ask live, so it leaves activation pending for the partner.
 4. If the edited tree fails to import, the baked shell stays available. Refresh
    and repair `/data/platform` there, or use external Recovery if the interface
    itself is unavailable.

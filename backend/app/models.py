@@ -570,8 +570,21 @@ class ChatWait(Base):
   condition_owner = Column(String(160), nullable=True, default=None)
   # `command`: met when the read-only check command exits 0.
   # `timer`: met when `due_at` passes.
-  kind = Column(String(16), nullable=False)
+  kind = Column(String(32), nullable=False)
   command = Column(Text, nullable=True, default=None)
+  # Typed product waits keep their bounded, server-authored condition here.
+  # Command/timer rows leave it NULL.  Platform activation deliberately stores
+  # expected committed bytes rather than a shell predicate or Git ancestry.
+  condition_json = Column(JSON, nullable=True, default=None)
+  # The declaring physical/logical execution identities are captured at
+  # declaration time.  A later Goal dismissal or physical retry therefore
+  # cannot make a shared activation wake attach to the wrong work.
+  root_run_id = Column(String(64), nullable=True, default=None, index=True)
+  goal_id = Column(String(64), nullable=True, default=None, index=True)
+  linked_question_id = Column(
+    String(64), nullable=True, default=None, unique=True, index=True,
+  )
+  action_approved_at = Column(DateTime, nullable=True, default=None)
   due_at = Column(DateTime, nullable=True, default=None)
   interval_secs = Column(Integer, nullable=False, default=300)
   # A wait never rots silently: on deadline the chat is woken with
@@ -593,6 +606,50 @@ class ChatWait(Base):
   # a redelivered result beats a silently lost one.
   resume_delivered_at = Column(DateTime, nullable=True, default=None)
   created_at = Column(DateTime, nullable=False, default=lambda: now_naive_utc())
+
+
+class PlatformBootSnapshot(Base):
+  """Immutable proof of restart-loaded source after DB/writer readiness.
+
+  Only paths named by activation waits are hashed.  The serving sentinel says
+  which committed tree uvicorn imported; persisting the relevant tree bytes at
+  the end of startup lets every matching waiter share one cheap proof without
+  polling a shell command or mistaking a baked fallback for activation.
+  """
+
+  __tablename__ = "platform_boot_snapshots"
+
+  boot_id = Column(String(160), primary_key=True)
+  source_kind = Column(String(32), nullable=False)
+  source_sha = Column(String(64), nullable=True, default=None)
+  loaded_files_json = Column(JSON, nullable=False, default=dict)
+  service_ready = Column(Boolean, nullable=False, default=False)
+  captured_at = Column(DateTime, nullable=False, default=lambda: now_naive_utc())
+
+
+class PlatformRestartExecution(Base):
+  """At-most-once claim for one exact platform Restart action.
+
+  The claim commits before the process side effect is admitted.  If the
+  process dies in that gap the row is reconciled from boot evidence; it is
+  never replayed merely because an HTTP acknowledgement was lost.
+  """
+
+  __tablename__ = "platform_restart_executions"
+
+  action_id = Column(String(96), primary_key=True)
+  question_id = Column(String(64), nullable=False, unique=True, index=True)
+  chat_id = Column(
+    String(64), ForeignKey("chats.id"), nullable=False, index=True,
+  )
+  wait_id = Column(String(64), nullable=False, unique=True, index=True)
+  source_boot_id = Column(String(160), nullable=False)
+  requirement_json = Column(JSON, nullable=False)
+  status = Column(String(24), nullable=False, default="claimed", index=True)
+  claimed_at = Column(DateTime, nullable=False, default=lambda: now_naive_utc())
+  admitted_at = Column(DateTime, nullable=True, default=None)
+  activated_boot_id = Column(String(160), nullable=True, default=None)
+  settled_at = Column(DateTime, nullable=True, default=None)
 
 
 class GauntletRun(Base):

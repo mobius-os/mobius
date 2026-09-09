@@ -3627,6 +3627,50 @@ def _separate_chat_live_assistants(eng):
     ))
     conn.execute(text("ALTER TABLE chats DROP COLUMN live_assistant"))
 
+def _add_typed_platform_activation_waits(eng) -> None:
+  """Add the payload and declaring identities owned by typed activation waits."""
+  from sqlalchemy import inspect as sa_inspect, text
+
+  inspector = sa_inspect(eng)
+  if "chat_waits" not in inspector.get_table_names():
+    return
+  columns = {column["name"]: column for column in inspector.get_columns("chat_waits")}
+  statements = []
+  if "condition_json" not in columns:
+    statements.append("ALTER TABLE chat_waits ADD COLUMN condition_json JSON NULL")
+  if "root_run_id" not in columns:
+    statements.append("ALTER TABLE chat_waits ADD COLUMN root_run_id VARCHAR(64) NULL")
+  if "goal_id" not in columns:
+    statements.append("ALTER TABLE chat_waits ADD COLUMN goal_id VARCHAR(64) NULL")
+  if "linked_question_id" not in columns:
+    statements.append("ALTER TABLE chat_waits ADD COLUMN linked_question_id VARCHAR(64) NULL")
+  if "action_approved_at" not in columns:
+    statements.append("ALTER TABLE chat_waits ADD COLUMN action_approved_at TIMESTAMP NULL")
+  kind_length = getattr(columns.get("kind", {}).get("type"), "length", None)
+  if eng.dialect.name == "postgresql" and kind_length is not None and kind_length < 32:
+    statements.append(
+      "ALTER TABLE chat_waits ALTER COLUMN kind TYPE VARCHAR(32)"
+    )
+  if statements:
+    with eng.begin() as conn:
+      for statement in statements:
+        conn.execute(text(statement))
+  index_names = {
+    index["name"] for index in sa_inspect(eng).get_indexes("chat_waits")
+  }
+  indexes = {
+    "ix_chat_waits_root_run_id": "root_run_id",
+    "ix_chat_waits_goal_id": "goal_id",
+    "ix_chat_waits_linked_question_id": "linked_question_id",
+  }
+  with eng.begin() as conn:
+    for name, column in indexes.items():
+      if name not in index_names:
+        unique = "UNIQUE " if column == "linked_question_id" else ""
+        conn.execute(text(
+          f"CREATE {unique}INDEX {name} ON chat_waits ({column})"
+        ))
+
 
 def _add_chat_run_activity_delivery(eng):
   """Retain exact non-transcript activity delivered to each provider run."""
@@ -3710,6 +3754,8 @@ _SCHEMA_MIGRATIONS = (
   ("0045_chat_live_assistants", _separate_chat_live_assistants),
   ("0046_chat_run_activity_delivery", _add_chat_run_activity_delivery),
   ("0047_chat_activity_positions", _add_chat_activity_positions),
+
+  ("0048_typed_platform_activation_waits", _add_typed_platform_activation_waits),
 )
 
 

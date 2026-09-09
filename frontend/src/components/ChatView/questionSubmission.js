@@ -21,3 +21,14 @@ export function questionOptionSubmission(questions, answers) {
   }
   return { selected_options, closeOnlySelection }
 }
+
+
+/** One authoritative answer receipt survives local patching and stream replay. */
+export function questionAnswerPatch(answers, disposition = {}) {
+  return {
+    answers,
+    ...Object.fromEntries(['answer_turn', 'selected_options', 'platform_action']
+      .filter(key => disposition?.[key] !== undefined)
+      .map(key => [key, disposition[key]])),
+  }
+}

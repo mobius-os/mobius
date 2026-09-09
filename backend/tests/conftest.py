@@ -155,6 +155,7 @@ def fresh_db():
   from app import chat_queue as chat_queue_mod
   from app import questions as questions_mod
   from app import secure_inputs as secure_inputs_mod
+  from app import restart_util as restart_util_mod
   from app.runner_registry import registry
   # ticket 033: pending-question registry lives in app.questions;
   # queue locks live in app.chat_queue. Reset both canonical homes.
@@ -170,6 +171,7 @@ def fresh_db():
   # declared lazily below the read-site.
   setattr(chat_mod, "_SKILL_TEXT_CACHE", None)
   chat_mod.draining = False
+  restart_util_mod._RESTART_ADMITTED = False
   chat_mod._clear_after_terminal_generation.clear()
   chat_mod._clear_after_terminal_status.clear()
   chat_mod._restart_draining_chats.clear()

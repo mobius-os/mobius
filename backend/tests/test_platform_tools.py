@@ -139,6 +139,13 @@ def test_control_protocol_advertises_every_run_bound_tool(monkeypatch):
   assert tools[platform_tools.GOAL_TOOL_NAME]["inputSchema"]["required"] == [
     "objective",
   ]
+  restart = tools[platform_tools.RESTART_TOOL_NAME]
+  assert restart["inputSchema"] == {
+    "type": "object", "properties": {}, "additionalProperties": False,
+  }
+  assert "platform derives" in restart["description"]
+  assert "without waking an agent" in restart["description"]
+  assert "NOT approval" in restart["description"]
   wait_schema = tools[platform_tools.WAIT_TOOL_NAME]["inputSchema"]
   assert wait_schema["required"] == ["description"]
   assert set(wait_schema["properties"]) == {
@@ -202,6 +209,9 @@ def test_delegated_control_server_advertises_only_coordination(monkeypatch):
   assert platform_tools.CANCEL_WAIT_TOOL_NAME not in {
     tool["name"] for tool in listed["result"]["tools"]
   }
+  assert platform_tools.RESTART_TOOL_NAME not in {
+    tool["name"] for tool in listed["result"]["tools"]
+  }
   denied = control._call_tool({
     "name": platform_tools.GOAL_TOOL_NAME,
     "arguments": {"objective": "Escape child scope"},
@@ -221,6 +231,37 @@ def test_delegated_control_server_advertises_only_coordination(monkeypatch):
   })
   assert denied_cancel["isError"] is True
   assert "unavailable" in denied_cancel["content"][0]["text"]
+
+
+def test_request_restart_is_a_no_argument_owner_tool(monkeypatch):
+  monkeypatch.setenv("MOBIUS_RUN_TOKEN", "run-1")
+  control = _control_module()
+  receipt = {
+    "state": "waiting_for_owner",
+    "question_id": "restart-card-1",
+    "next_action": "End this turn.",
+  }
+  calls = []
+  monkeypatch.setattr(
+    control._APPROVALS,
+    "request_restart",
+    lambda: calls.append("request_restart") or receipt,
+  )
+
+  response = control._call_tool({
+    "name": platform_tools.RESTART_TOOL_NAME,
+    "arguments": {},
+  })
+  assert response["isError"] is False
+  assert json.loads(response["content"][0]["text"]) == receipt
+  assert calls == ["request_restart"]
+
+  invalid = control._call_tool({
+    "name": platform_tools.RESTART_TOOL_NAME,
+    "arguments": {"command": "restart"},
+  })
+  assert invalid["isError"] is True
+  assert "takes no arguments" in invalid["content"][0]["text"]
 
 
 def test_control_protocol_returns_tool_success_without_framework_wrapping(

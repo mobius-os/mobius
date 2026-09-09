@@ -1,7 +1,7 @@
 // Explicit option provenance controls presentation; free text never gains action authority.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { questionOptionSubmission } from '../questionSubmission.js'
+import { questionOptionSubmission, questionAnswerPatch } from '../questionSubmission.js'
 
 const question = {
   id: 'help', question: 'Anything else?', options: [
@@ -56,4 +56,14 @@ test('unidentified selections omit their entire subquestion without dropping oth
       'Anything else?': ['No', unknown], 'Ready?': 'Done',
     }), { selected_options: { second: ['0'] }, closeOnlySelection: false })
   }
+})
+
+
+test('answer receipts retain exact action state and option identity across replay', () => {
+  const action = { type: 'restart', version: 1, status: 'deferred' }
+  assert.deepEqual(questionAnswerPatch({ 'Restart?': 'Not now' }, {
+    answer_turn: 'none', selected_options: { restart: ['cancel-id'] }, platform_action: action,
+    running: false,
+  }), { answers: { 'Restart?': 'Not now' }, answer_turn: 'none',
+    selected_options: { restart: ['cancel-id'] }, platform_action: action })
 })

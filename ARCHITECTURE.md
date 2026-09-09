@@ -1320,6 +1320,28 @@ The frontend settles quiet replies without replacing the stream, touching the
 composer, or arming a response-follow latch; outbox replay uses the existing
 settlement subscription to refresh authoritative card detail.
 
+Platform restarts use the narrower `mobius_control.request_restart` and
+`POST /api/chats/{id}/restart-request`. The caller supplies no command, commit,
+or option identity. The server derives an immutable action from the relevant
+committed restart-loadable source and adds server-generated option ids to a
+typed **Restart now** / **Not now** card. A selected **Restart now** is an
+owner action dispatched by the platform, not a synthetic Yes message or a new
+agent turn. The durable execution claim precedes the side effect and is
+at-most-once: a lost acknowledgement or ambiguous death is reconciled against
+boot evidence, never blindly replayed.
+
+Each restart card links to a typed activation wait naming its physical run,
+Goal root and exact source-byte requirement. Startup captures one immutable
+loaded-source/readiness snapshot after database and writer readiness; that
+snapshot can satisfy every matching chat independently, including when the
+restart originated in Settings or another chat. Exact file bytes (and required
+absence for deleted paths), not Git ancestry alone, prove activation. A linked
+activation barrier keeps the interrupted work ahead of later queued messages
+until its writer-authenticated continuation owns recovery. Stop/dismissal also
+cancels a met-but-undelivered linked activation wait; ordinary question,
+secure-input, manual-crash, usage and unrelated wait barriers retain their own
+lifecycle.
+
 Sealed inputs use the same continuation question, with safe `secure_input`
 metadata rendered by `SecureInputCard`. `QuestionCommit` atomically creates a
 private `SavedSecureInput` row containing only command/cwd/action/status, never

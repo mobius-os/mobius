@@ -952,6 +952,16 @@ def browser_bootstrap():
   )
 
 
+def service_readiness() -> dict:
+  """One readiness verdict for HTTP probes and boot activation receipts."""
+  degraded = _database_degraded_payload() or _router_degraded_payload()
+  if degraded:
+    return {"ready": False, **degraded}
+  from app.chat_writer import writer_readiness
+  is_ready, reason = writer_readiness()
+  return {"ready": True} if is_ready else {"ready": False, "reason": reason}
+
+
 @app.get("/api/ready")
 def ready(response: Response):
   """Readiness probe: 200 only when chats can actually be served.
@@ -971,19 +981,10 @@ def ready(response: Response):
   window where this false-fails.
   """
   response.headers["Cache-Control"] = "no-store"
-  degraded = _database_degraded_payload() or _router_degraded_payload()
-  if degraded:
+  result = service_readiness()
+  if not result["ready"]:
     response.status_code = 503
-    return {
-      "ready": False,
-      **degraded,
-    }
-  from app.chat_writer import writer_readiness
-  is_ready, reason = writer_readiness()
-  if is_ready:
-    return {"ready": True}
-  response.status_code = 503
-  return {"ready": False, "reason": reason}
+  return result
 
 
 @app.get("/api/ready/agent")

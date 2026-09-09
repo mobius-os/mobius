@@ -39,7 +39,10 @@ from sqlalchemy.orm import Session
 
 from app import models
 from app.config import get_settings
-from app.continuations import WAIT_RESULT_MESSAGE_KIND
+from app.continuations import (
+  PLATFORM_ACTIVATION_RESULT_MESSAGE_KIND,
+  WAIT_RESULT_MESSAGE_KIND,
+)
 from app.timeutil import now_naive_utc
 
 _LOG = logging.getLogger("moebius.chat_waits")
@@ -50,23 +53,30 @@ def claim_scheduled_wait_result(chat_id: str, message: object) -> bool:
   if not isinstance(message, dict):
     return False
   cid = message.get("cid")
-  if (
-    message.get("kind") != WAIT_RESULT_MESSAGE_KIND
-    or not isinstance(cid, str)
-    or not cid.startswith("wait-result-")
-  ):
+  kind = message.get("kind")
+  prefixes = {
+    WAIT_RESULT_MESSAGE_KIND: "wait-result-",
+    PLATFORM_ACTIVATION_RESULT_MESSAGE_KIND: "activation-result-",
+  }
+  prefix = prefixes.get(kind)
+  if not isinstance(cid, str) or prefix is None or not cid.startswith(prefix):
     return False
-  row_id = cid.removeprefix("wait-result-")
+  row_id = cid.removeprefix(prefix)
   from app.database import SessionLocal
 
   with SessionLocal() as db:
-    claimed = db.query(models.ChatWait).filter(
+    query = db.query(models.ChatWait).filter(
       models.ChatWait.id == row_id,
       models.ChatWait.chat_id == chat_id,
       models.ChatWait.created_by_run_id == message.get("source_work_id"),
       models.ChatWait.status.in_(("met", "expired", "failed")),
       models.ChatWait.resume_delivered_at.is_(None),
-    ).update(
+    )
+    if kind == PLATFORM_ACTIVATION_RESULT_MESSAGE_KIND:
+      query = query.filter(models.ChatWait.kind == "platform_activation")
+    else:
+      query = query.filter(models.ChatWait.kind != "platform_activation")
+    claimed = query.update(
       {models.ChatWait.resume_delivered_at: now_naive_utc()},
       synchronize_session=False,
     )
@@ -222,10 +232,21 @@ def cancel_wait(db: Session, row: models.ChatWait) -> models.ChatWait:
 
 
 def stage_cancel_waits_for_chat(db: Session, chat_id: str) -> int:
-  """Cancel every armed wait inside the caller's chat lifecycle transaction."""
+  """Cancel waits inside the caller's chat lifecycle transaction.
+
+  Generic waits retain their established armed-only semantics. Typed
+  activation also cancels a met-but-undelivered barrier so deletion cannot
+  resurrect its linked work.
+  """
   query = db.query(models.ChatWait).filter(
     models.ChatWait.chat_id == chat_id,
-    models.ChatWait.status == "armed",
+    (
+      models.ChatWait.status == "armed"
+    ) | (
+      (models.ChatWait.kind == "platform_activation")
+      & models.ChatWait.status.in_(("met", "expired", "failed"))
+      & models.ChatWait.resume_delivered_at.is_(None)
+    ),
   )
   wait_ids = [row_id for (row_id,) in query.with_entities(models.ChatWait.id)]
   count = query.update(
@@ -565,7 +586,8 @@ def safe_startup_writer_orphan(
   still open; any drift or partial output falls through to conservative normal
   crash recovery.
   """
-  prefix = "wait-resume-"
+  activation = physical.id.startswith("activation-resume-")
+  prefix = "activation-resume-" if activation else "wait-resume-"
   if (
     physical.status != "running"
     or physical.provider_execution_admitted is not False
@@ -581,7 +603,7 @@ def safe_startup_writer_orphan(
     models.ChatWait.status.in_(("met", "expired", "failed")),
     models.ChatWait.resume_delivered_at.is_(None),
   ).first()
-  if row is None:
+  if row is None or (row.kind == "platform_activation") != activation:
     return False
   source = (
     db.query(models.ChatRun).filter(
@@ -601,15 +623,26 @@ def safe_startup_writer_orphan(
     "expired": "deadline_expired",
     "failed": "check_failed",
   }[row.status]
+  if activation:
+    from app.platform_restart import activation_notice
+    expected_content = activation_notice(
+      row, "met" if row.status == "met" else "uncertain",
+    )
+    expected_cid = f"activation-result-{row.id}"
+    expected_kind = PLATFORM_ACTIVATION_RESULT_MESSAGE_KIND
+  else:
+    expected_content = _compose_resume_notice(row, outcome)
+    expected_cid = f"wait-result-{row.id}"
+    expected_kind = WAIT_RESULT_MESSAGE_KIND
   messages = list(chat.messages or [])
   continuation = messages[-1] if messages else None
   live = chat.live_assistant or {}
   return bool(
     isinstance(continuation, dict)
     and continuation.get("role") == "user"
-    and continuation.get("cid") == f"wait-result-{row.id}"
-    and continuation.get("content") == _compose_resume_notice(row, outcome)
-    and continuation.get("kind") == WAIT_RESULT_MESSAGE_KIND
+    and continuation.get("cid") == expected_cid
+    and continuation.get("content") == expected_content
+    and continuation.get("kind") == expected_kind
     and continuation.get("source_work_id") == row.created_by_run_id
     and bool(continuation.get("hidden"))
     and live.get("id") == physical.id
@@ -725,7 +758,14 @@ async def _deliver_resume(row_id: str) -> bool:
       "expired": "deadline_expired",
       "failed": "check_failed",
     }[row.status]
-    content = _compose_resume_notice(row, outcome)
+    activation = row.kind == "platform_activation"
+    if activation:
+      from app.platform_restart import activation_notice
+      content = activation_notice(
+        row, "met" if row.status == "met" else "uncertain",
+      )
+    else:
+      content = _compose_resume_notice(row, outcome)
     source_work_id = row.created_by_run_id
     source = (
       db.query(models.ChatRun).filter(
@@ -734,12 +774,16 @@ async def _deliver_resume(row_id: str) -> bool:
       ).first()
       if source_work_id is not None else None
     )
-    resume_run_id = f"wait-resume-{row_id}"
+    resume_run_id = (
+      f"activation-resume-{row_id}" if activation
+      else f"wait-resume-{row_id}"
+    )
     existing_resume = db.query(models.ChatRun).filter(
       models.ChatRun.id == resume_run_id,
       models.ChatRun.chat_id == chat_id,
     ).first()
     root_run_id = (
+      row.root_run_id if activation else
       (source.root_run_id or source.id)
       if source is not None else (
         resume_run_id
@@ -751,7 +795,14 @@ async def _deliver_resume(row_id: str) -> bool:
       )
     )
 
-  resume_cid = f"wait-result-{row_id}"
+  resume_cid = (
+    f"activation-result-{row_id}" if activation
+    else f"wait-result-{row_id}"
+  )
+  message_kind = (
+    PLATFORM_ACTIVATION_RESULT_MESSAGE_KIND if activation
+    else WAIT_RESULT_MESSAGE_KIND
+  )
   delivered = False
   if root_run_id is not None:
     delivered = await start_programmatic_chat_continuation(
@@ -762,9 +813,10 @@ async def _deliver_resume(row_id: str) -> bool:
       continuation_id=resume_cid,
       reason="wait_result",
       initiated_by_app_id=None,
-      message_kind=WAIT_RESULT_MESSAGE_KIND,
+      message_kind=message_kind,
       source_work_id=source_work_id,
       hidden=True,
+      activation_wait_id=row_id if activation else None,
     )
 
   if not delivered and root_run_id is not None:
@@ -785,6 +837,12 @@ async def _deliver_resume(row_id: str) -> bool:
           delivered = True
         else:
           return False
+
+  if not delivered and activation:
+    # Activation has a writer-authenticated pending/question bypass. Falling
+    # back to AppendPending would put A behind queued B and reintroduce the
+    # ordering bug this typed wait exists to prevent.
+    return False
 
   if not delivered:
     # Running chat, owner question, foreign pending work, or a legacy wait
@@ -820,7 +878,7 @@ async def _deliver_resume(row_id: str) -> bool:
   if not delivered:
     return False
   claim_scheduled_wait_result(chat_id, {
-    "kind": WAIT_RESULT_MESSAGE_KIND,
+    "kind": message_kind,
     "cid": resume_cid,
     "source_work_id": source_work_id,
   })
@@ -923,6 +981,19 @@ async def _check_one(row_id: str) -> bool:
   if kind == "timer":
     met = due_at is not None and now >= due_at
     check_failed = False
+  elif kind == "platform_activation":
+    with SessionLocal() as db:
+      current = db.query(models.ChatWait).filter(
+        models.ChatWait.id == row_id,
+        models.ChatWait.status == "armed",
+      ).first()
+      if current is None:
+        return False
+      from app.platform_restart import activation_wait_verdict
+      verdict, output = activation_wait_verdict(db, current)
+    met = verdict == "met"
+    check_failed = verdict == "failed"
+    exit_code = 0 if met else (2 if check_failed else 1)
   else:
     exit_code, output = await _run_check(command or "false", wait_id=row_id)
     met = exit_code == 0

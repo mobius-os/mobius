@@ -9,6 +9,7 @@ from pathlib import Path as FilePath
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
+from starlette.background import BackgroundTask
 from starlette.responses import Response
 from sqlalchemy.orm import Session
 
@@ -38,6 +39,7 @@ from app.chat_writer import (
   cid_of,
   ensure_user_cid,
   get_writer,
+  ResolvePlatformRestartCard,
 )
 from app.chat_steering import (
   has_live_steerable_turn,
@@ -69,6 +71,24 @@ from app.resource_access import (
 router = APIRouter(prefix="/api/chats", tags=["chats"])
 
 log = logging.getLogger(__name__)
+
+
+class ClaimedRestartResponse(JSONResponse):
+  """The response owns the dispatch handoff, including send/cancellation failure."""
+
+  def __init__(self, *, action_id: str, **kwargs):
+    super().__init__(**kwargs)
+    self.action_id = action_id
+
+  async def __call__(self, scope, receive, send):
+    try:
+      await super().__call__(scope, receive, send)
+    finally:
+      from app.platform_restart import settle_undispatched_execution
+      try:
+        await asyncio.to_thread(settle_undispatched_execution, self.action_id)
+      except Exception:
+        log.exception("Could not settle restart response handoff action_id=%s", self.action_id)
 
 
 async def start_queued_owner_continuation(chat_id: str, db: Session) -> dict | None:
@@ -583,6 +603,100 @@ async def send_message(
   if body.answers:
     require_owner_input_principal(principal)
   chat = get_active_chat_for_principal(db, chat_id, principal)
+
+  # A typed Restart card is a platform action, not a prose continuation. The
+  # writer re-matches the exact card and option identity inside its mutation;
+  # this route only supplies lifecycle locking and side-effect admission after
+  # the durable claim commits.
+  from app.platform_restart import restart_action_block
+  restart_block = restart_action_block(chat, body.question_id)
+  if restart_block is not None:
+    require_owner_input_principal(principal)
+    selections = body.selected_options
+    if (
+      not isinstance(selections, dict)
+      or set(selections) != {"restart"}
+      or not isinstance(selections.get("restart"), list)
+      or len(selections["restart"]) != 1
+      or not isinstance(selections["restart"][0], str)
+    ):
+      raise HTTPException(
+        status_code=409,
+        detail="Use one of the Restart card's current buttons.",
+      )
+    async with chat_queue.get_transition_lock(chat_id):
+      async with chat_queue.get_lock(chat_id):
+        try:
+          result = await await_ack(get_writer().submit(
+            ResolvePlatformRestartCard(
+              chat_id=chat_id,
+              run_token="",
+              question_id=body.question_id or "",
+              selected_option_id=selections["restart"][0],
+            )
+          ))
+        except Exception as exc:
+          log.info(
+            "Restart card resolution refused chat_id=%s question_id=%s: %s",
+            chat_id, body.question_id, exc,
+          )
+          raise HTTPException(
+            status_code=409,
+            detail="This Restart card is stale or no longer authorized.",
+          ) from exc
+    try:
+      event = {
+        "type": "answers_applied",
+        "question_id": body.question_id,
+        "answers": result["answers"],
+        "selected_options": result["selected_options"],
+        "answer_turn": "none",
+        "platform_action": result["platform_action"],
+      }
+      from app.chat_event_sink import get_active_sink
+      sink = get_active_sink(chat_id)
+      bc = get_broadcast(chat_id)
+      if sink is not None:
+        sink.publish(event)
+      elif bc is not None:
+        bc.publish(event)
+      db.refresh(chat)
+      publish_owner_input_changed(chat_id,
+        "question" if chat.pending_question_id else None, question_id=chat.pending_question_id)
+      background = None
+      if result["dispatch"]:
+        async def execute_claimed_restart() -> None:
+          from app.restart_util import restart_this_worker
+          await restart_this_worker(action_id=result["action_id"])
+        background = BackgroundTask(execute_claimed_restart)
+      response_type = ClaimedRestartResponse if result["dispatch"] else JSONResponse
+      return response_type(**({"action_id": result["action_id"]} if result["dispatch"] else {}),
+        status_code=202, content={
+        "status": result["status"],
+        "answers": result["answers"],
+        "selected_options": result["selected_options"],
+        "platform_action": result["platform_action"],
+        "answer_turn": "none",
+        "running": is_chat_running(chat_id),
+        "question_id": body.question_id,
+        "action_id": result["action_id"],
+      }, background=background)
+    except BaseException:
+      if result["dispatch"]:
+        from app.platform_restart import settle_undispatched_execution
+        try:
+          await asyncio.to_thread(settle_undispatched_execution, result["action_id"])
+        except Exception:
+          log.exception("Could not settle restart construction handoff action_id=%s", result["action_id"])
+      raise
+
+  # Supplying typed identities for a missing/foreign card must not fall back
+  # to the generic question resolver or manufacture an ordinary continuation.
+  if body.selected_options and not (body.answers and questions.saved_question(chat, body.question_id)):
+    raise HTTPException(
+      status_code=410,
+      detail="The selected card is no longer accepting this action.",
+    )
   if goal_clear_requested(body.content or ""):
     raise HTTPException(
       status_code=409,
@@ -854,7 +968,9 @@ async def send_message(
             "question_id": body.question_id,
             "answers": body.answers,
           })
-      except chat_queue.PendingQuestionBlocksPromotion:
+      except chat_queue.PendingAdmissionBlocksPromotion as exc:
+        if exc.reason == "activation":
+          raise HTTPException(409, detail="This chat is waiting for its platform changes to load.") from exc
         raise _pending_question_open_conflict()
       except HTTPException:
         raise
@@ -1006,6 +1122,17 @@ async def _send_message_locked(
   # fall through to a fresh StartTurn). During the restart window every send —
   # steer included — queues.
   if is_draining():
+    new_msg = await _append_to_pending(
+      chat, body, db, initiated_by_app_id=principal.app_id,
+    )
+    db.expire(chat)
+    return _queued_response(new_msg, len(chat.pending_messages or []))
+
+  # A typed activation wait is the unfinished work A. Later owner input B is
+  # durable, but cannot be promoted until the exact loaded-source continuation
+  # owns A. The activation writer command has the sole authenticated bypass.
+  from app.platform_restart import activation_barrier_for_chat
+  if activation_barrier_for_chat(db, chat_id):
     new_msg = await _append_to_pending(
       chat, body, db, initiated_by_app_id=principal.app_id,
     )
@@ -1170,8 +1297,10 @@ async def _send_message_locked(
             # MALFORMED head no longer lands here: it raises in the actor and
             # is handled by the `except` below (→ FAILED_LEAVE_MARKER).
             discard_starting(chat_id)
-        except chat_queue.PendingQuestionBlocksPromotion:
+        except chat_queue.PendingAdmissionBlocksPromotion as exc:
           discard_starting(chat_id)
+          if exc.reason == "activation":
+            raise HTTPException(409, detail="This chat is waiting for its platform changes to load.") from exc
           raise _pending_question_open_conflict()
         except Exception:
           discard_starting(chat_id)

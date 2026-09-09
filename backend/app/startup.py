@@ -504,6 +504,19 @@ def _route_diagnostics_to_chat_log(_context: StartupContext) -> None:
     logger.setLevel(level)
 
 
+def _capture_platform_activation_snapshot(context: StartupContext) -> None:
+  """Persist loaded-source evidence only after DB and writer startup work."""
+  from app.platform_restart import capture_ready_boot_snapshot
+  from app.chat_writer import Barrier, get_writer, wait_ack
+
+  # Cross the actor itself rather than sampling its just-started thread. A
+  # transient startup race must not leave this otherwise healthy boot forever
+  # recorded as not ready.
+  wait_ack(get_writer().submit(Barrier()))
+  with SessionLocal() as db:
+    capture_ready_boot_snapshot(db, boot_id=context.boot_id)
+
+
 PROCESS_STARTUP_TASKS = (
   StartupTask("refresh pm-commit launcher", _refresh_commit_launcher),
   StartupTask("validate provider defaults", _validate_provider_defaults),
@@ -587,5 +600,9 @@ DATABASE_STARTUP_TASKS = (
     "route diagnostics to chat log",
     _route_diagnostics_to_chat_log,
     checkpoint="startup_app_source_ready",
+  ),
+  StartupTask(
+    "capture platform activation snapshot",
+    _capture_platform_activation_snapshot,
   ),
 )

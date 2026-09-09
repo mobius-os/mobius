@@ -37,7 +37,7 @@ from app.chat_writer import (
   PersistSessionId,
   PersistTranscript,
   PromotePending,
-  PromotePendingBlockedByPendingQuestion,
+  PromotePendingBlocked,
   QuestionCommit,
   RecoverWedgedRun,
   ReplaceTranscript,
@@ -882,7 +882,7 @@ def test_promote_pending_does_not_bypass_pending_owner_question(actor):
     run_token="blocked-promotion",
   )))
 
-  assert result == PromotePendingBlockedByPendingQuestion("owner-decision")
+  assert result == PromotePendingBlocked("question", question_id="owner-decision")
   chat = _load_chat()
   assert chat["messages"] == [question]
   assert chat["pending_messages"] == queued

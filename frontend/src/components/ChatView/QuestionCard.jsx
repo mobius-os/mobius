@@ -16,6 +16,11 @@ import {
 } from '../../lib/selectableTextControl.js'
 import { getOnlineSnapshot } from '../../lib/connectivityStore.js'
 import { questionOptionSubmission } from './questionSubmission.js'
+import {
+  isRestartCardAction,
+  restartCardSelectedOptions,
+  restartCardStatusLabel,
+} from './restartCard.js'
 
 
 function resolveAnswer(answer, otherText) {
@@ -106,6 +111,7 @@ export default function QuestionCard({
   questions,
   questionId,
   answeredMap,
+  platformAction,
   onAnswer,
   onPrepareAnswer,
   onCancelAnswer,
@@ -132,9 +138,12 @@ export default function QuestionCard({
   const pointerSelectionRef = useRef(null)
   const preparedSubmissionRef = useRef(null)
 
-  const answered = submitted || !!answeredMap
+  const actionStatusLabel = restartCardStatusLabel(platformAction)
+  const completedAction = Boolean(actionStatusLabel)
+  const answered = submitted || !!answeredMap || completedAction
   const displayAnswers = answeredMap || {}
   const grouped = questions.length > 1
+  const restartAction = isRestartCardAction(platformAction)
 
   // ChatView is keyed by chat, so switching away remounts this card. Keep an
   // unsubmitted selection in the same per-tab cache as composer drafts; the
@@ -162,6 +171,12 @@ export default function QuestionCard({
     if (a === '__other__') return !!otherTexts[q.question]?.trim()
     return true
   })
+  const selectedOptions = restartCardSelectedOptions(
+    platformAction,
+    questions,
+    answers,
+  )
+  const canSubmit = allAnswered && (!restartAction || selectedOptions !== null)
 
   function selectOption(question, label) {
     if (answered || disabled) return
@@ -222,7 +237,7 @@ export default function QuestionCard({
   }, [answered, cancelPreparedSubmission, disabled, submitting])
 
   async function handleSubmit(questionCard = null, preparedSubmission = null) {
-    if (!allAnswered || answered || disabled || submitting) {
+    if (!canSubmit || answered || disabled || submitting) {
       if (preparedSubmission) onCancelAnswer?.(preparedSubmission)
       return
     }
@@ -272,6 +287,11 @@ export default function QuestionCard({
       aria-disabled={disabled && !answered ? true : undefined}
       aria-label={grouped ? `${questions.length} decisions` : undefined}
     >
+      {actionStatusLabel && (
+        <div className="qcard__action-status" role="status">
+          {actionStatusLabel}
+        </div>
+      )}
       {grouped && (
         <div className="qcard__group-head">
           <div>
@@ -394,20 +414,22 @@ export default function QuestionCard({
                 })
               })()}
             </div>
-            <CustomAnswerArea
-              active={isOtherSelected || answeredWithOther}
-              answered={answered}
-              canSubmit={allAnswered}
-              disabled={inactive}
-              onChange={text => setOtherText(q.question, text)}
-              onSubmitShortcut={(questionCard) => {
-                if (allAnswered) handleSubmit(questionCard, null)
-              }}
-              question={q.question}
-              value={answered
-                ? unmatchedAnswers.join(', ')
-                : (otherTexts[q.question] || '')}
-            />
+            {!restartAction && (
+              <CustomAnswerArea
+                active={isOtherSelected || answeredWithOther}
+                answered={answered}
+                canSubmit={allAnswered}
+                disabled={inactive}
+                onChange={text => setOtherText(q.question, text)}
+                onSubmitShortcut={(questionCard) => {
+                  if (allAnswered) handleSubmit(questionCard, null)
+                }}
+                question={q.question}
+                value={answered
+                  ? unmatchedAnswers.join(', ')
+                  : (otherTexts[q.question] || '')}
+              />
+            )}
           </div>
         )
         })}
@@ -435,9 +457,9 @@ export default function QuestionCard({
               preparedSubmissionRef.current = null
               handleSubmit(event.currentTarget.closest('.qcard'), prepared)
             }}
-            disabled={!allAnswered || disabled || answered || submitting}
+            disabled={!canSubmit || disabled || answered || submitting}
           >
-            {submitting ? 'Submitting…' : (answered ? 'Submitted' : 'Submit')}
+            {submitting ? 'Submitting…' : (completedAction ? actionStatusLabel : answered ? 'Submitted' : 'Submit')}
           </button>
         </>
       )}

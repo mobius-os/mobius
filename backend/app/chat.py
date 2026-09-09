@@ -496,7 +496,9 @@ def _pending_owner_question_for_chat(db: Session, chat_id: str) -> bool:
   return bool(row is not None and row[0] is not None)
 
 
-def programmatic_start_blocked(db: Session, chat_id: str) -> bool:
+def programmatic_start_blocked(
+  db: Session, chat_id: str, *, activation_wait_id: str | None = None,
+) -> bool:
   """Whether a product wake (delegation result, wait resume) must queue
   instead of starting a turn.
 
@@ -506,8 +508,38 @@ def programmatic_start_blocked(db: Session, chat_id: str) -> bool:
   are not owner intent: they append to ``pending_messages``, which the answer,
   park resume, or owner's manual Resume promotes at the legitimate boundary.
   """
+  from app.platform_restart import (
+    ACTIVATION_WAIT_KIND,
+    activation_barrier_for_chat,
+  )
+  activation_wait = None
+  if activation_wait_id is not None:
+    activation_wait = db.query(models.ChatWait).filter(
+      models.ChatWait.id == activation_wait_id,
+      models.ChatWait.chat_id == chat_id,
+      models.ChatWait.kind == ACTIVATION_WAIT_KIND,
+      models.ChatWait.status.in_(("met", "expired", "failed")),
+      models.ChatWait.resume_delivered_at.is_(None),
+    ).first()
+    if activation_wait is None:
+      return True
+  pending_question = db.query(models.Chat.pending_question_id).filter(
+    models.Chat.id == chat_id,
+    models.Chat.deleted_at.is_(None),
+  ).scalar()
+  question_blocked = bool(
+    pending_question is not None
+    and (
+      activation_wait is None
+      or pending_question != activation_wait.linked_question_id
+    )
+  )
   return (
-    _pending_owner_question_for_chat(db, chat_id)
+    question_blocked
+    or (
+      activation_wait is None
+      and activation_barrier_for_chat(db, chat_id)
+    )
     or _parked_until_for_chat(db, chat_id) is not None
     or _restart_manual_hold_for_chat(db, chat_id)
   )
@@ -1433,7 +1465,7 @@ async def sweep_idle_pending_chats(db: Session) -> list[str]:
       if claimed:
         discard_starting(chat_id)
       raise
-    except chat_queue.PendingQuestionBlocksPromotion:
+    except chat_queue.PendingAdmissionBlocksPromotion:
       if claimed:
         discard_starting(chat_id)
       # The actor closed a check-to-commit race by observing a question that
@@ -2868,11 +2900,18 @@ async def _stop_chat_for_locked(
 ) -> tuple[bool, list[str]]:
   """Stop one chat while its per-chat lifecycle transition is exclusive."""
   stopped_gen = current_run_generation(chat_id)
+  # Stop owns the lifecycle fence for linked activation waits too. Unlike a
+  # generic wait, a met-but-not-yet-delivered activation still owns the A→B
+  # barrier and must be cancelled before any later sweep can wake it.
+  # Fence the terminal drain before yielding to writer persistence: otherwise
+  # cancellation could release A's hold just as the old turn promotes B.
   bump_run_generation(chat_id)
   handles = registry.get_handles(chat_id)
   if handles:
     _clear_after_terminal_generation[chat_id] = stopped_gen
     _clear_after_terminal_status[chat_id] = "stopped"
+  from app.chat_writer import CancelActivationWaits
+  await _await_ack(get_writer().submit(CancelActivationWaits(chat_id=chat_id)))
   # The queue-lock window guards the clear's COMPOUND decision against a
   # racing append/cancel/promote (the actor's ClearPending serializes the
   # DB write itself). Generation bump happens BEFORE the lock so the dying
@@ -4613,6 +4652,7 @@ _NOTE_SETTLED_DISPOSITIONS = frozenset({
   chat_queue.TerminalDisposition.STOP_HANDOFF_CLEARED,
   chat_queue.TerminalDisposition.LIMIT_PARKED,
   chat_queue.TerminalDisposition.QUESTION_PARKED,
+  chat_queue.TerminalDisposition.ACTIVATION_PARKED,
 })
 
 

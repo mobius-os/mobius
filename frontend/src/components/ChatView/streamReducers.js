@@ -377,6 +377,9 @@ export function upsertQuestionItem(prev, incoming) {
       merged.secure_input = { ...incoming.secure_input, ...existing.secure_input }
     }
     if (existing.response_mode) merged.response_mode = existing.response_mode
+    if (existing.platform_action && !merged.platform_action) {
+      merged.platform_action = existing.platform_action
+    }
     if (existing.answers && !merged.answers) merged.answers = existing.answers
     if (existing.absorbedTool) merged.absorbedTool = existing.absorbedTool
     if (existing.absorbedToolUseId) {

@@ -153,6 +153,7 @@ async def start_programmatic_chat_continuation(
   continuation_id: str, reason: str, initiated_by_app_id: int | None = None,
   message_kind: str = "continuation", source_work_id: str | None = None,
   hidden: bool = False,
+  activation_wait_id: str | None = None,
   _transition_lock_held: bool = False,
 ) -> bool:
   """Start one idempotent owner continuation on an already-settled root.
@@ -210,7 +211,9 @@ async def start_programmatic_chat_continuation(
             # Fresh machine work cannot release an owner-input, usage, or
             # manual restart hold. An already committed continuation keeps
             # its idempotent attachment/recovery path below.
-            if existing is None and programmatic_start_blocked(db, chat_id):
+            if existing is None and programmatic_start_blocked(
+              db, chat_id, activation_wait_id=activation_wait_id,
+            ):
               return False
             if existing is not None:
               if (existing.root_run_id or existing.id) != root_run_id:
@@ -270,6 +273,34 @@ async def start_programmatic_chat_continuation(
               terminal_status="failed",
             )))
             return False
+          if (
+            activation_wait_id is not None
+            and existing is None
+            and is_chat_running(chat_id)
+          ):
+            # A planned-restart recovery can already own this same logical A.
+            # Ask the writer to authenticate and attach the activation wait
+            # without claiming a second transient runner. Different-root work
+            # is rejected by StartContinuation and remains behind the barrier.
+            from app.chat_event_sink import get_active_sink
+            active_sink = get_active_sink(chat_id)
+            if active_sink is None:
+              return False
+            attached = await await_ack(get_writer().submit(StartContinuation(
+              chat_id=chat_id,
+              run_token=run_token,
+              root_run_id=root_run_id,
+              content=content,
+              cid=continuation_id,
+              reason=reason,
+              initiated_by_app_id=initiated_by_app_id,
+              message_kind=message_kind,
+              source_work_id=source_work_id,
+              hidden=hidden,
+              activation_wait_id=activation_wait_id,
+              activation_attach_run_token=active_sink.run_token,
+            )))
+            return isinstance(attached, StartContinuationAttached)
           if not mark_starting(chat_id):
             return False
           claimed = True
@@ -285,6 +316,7 @@ async def start_programmatic_chat_continuation(
               message_kind=message_kind,
               source_work_id=source_work_id,
               hidden=hidden,
+              activation_wait_id=activation_wait_id,
             ))
           )
           if isinstance(promoted, StartContinuationAttached):
