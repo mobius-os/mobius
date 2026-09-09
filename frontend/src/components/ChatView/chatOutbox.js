@@ -103,6 +103,7 @@ function announceSettlement(record, outcome) {
   const settlement = {
     chatId: String(record.chatId),
     cid: String(record.cid),
+    type: record.type || 'message',
     outcome,
   }
   for (const callback of settlementSubscribers) {

@@ -15,6 +15,7 @@ import {
   textSelectionSnapshot,
 } from '../../lib/selectableTextControl.js'
 import { getOnlineSnapshot } from '../../lib/connectivityStore.js'
+import { questionOptionSubmission } from './questionSubmission.js'
 
 
 function resolveAnswer(answer, otherText) {
@@ -239,7 +240,7 @@ export default function QuestionCard({
         lines.join('\n'),
         resolved,
         questionId,
-        { questionCard, preparedSubmission },
+        { questionCard, preparedSubmission, ...questionOptionSubmission(questions, answers) },
       )
       // Only settle (and therefore clear the durable per-tab draft) after the
       // answer endpoint confirms that the transcript write committed.
@@ -248,7 +249,7 @@ export default function QuestionCard({
       } else {
         setSubmitted(true)
       }
-    } catch {
+    } catch (error) {
       // Keep the choices and custom text intact so a transient failure is
       // immediately retryable. Keep the notice on the card too: adding an
       // assistant-looking error row after it makes the question cease to be
@@ -256,7 +257,7 @@ export default function QuestionCard({
       setSubmitError(
         !getOnlineSnapshot()
           ? 'You’re offline. Your choice is saved — submit it when you’re back online.'
-          : 'That answer didn’t save. Your choice is still here — please try again.',
+          : (error?.detail || 'That answer didn’t save. Your choice is still here — please try again.'),
       )
     } finally {
       setSubmitting(false)

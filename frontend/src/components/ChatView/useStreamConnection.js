@@ -345,7 +345,16 @@ export default function useStreamConnection(chatId, {
     onQuestionResponseStartRef.current?.(questionResponseKey)
   }, [])
 
-  const armQuestionResponse = useCallback((questionResponseKey, items) => {
+  const armQuestionResponse = useCallback((questionResponseKey, items, { answer_turn } = {}) => {
+    if (questionResponseKey && answer_turn === 'none') {
+      // An answered control can settle without producing agent output. Retire
+      // only its response baseline, including one armed by an earlier replay.
+      respondedQuestionKeysRef.current.add(questionResponseKey)
+      if (pendingQuestionResponseRef.current?.questionKey === questionResponseKey) {
+        pendingQuestionResponseRef.current = null
+      }
+      return
+    }
     if (!questionResponseKey
         || respondedQuestionKeysRef.current.has(questionResponseKey)
         || pendingQuestionResponseRef.current?.questionKey === questionResponseKey) {
@@ -1004,7 +1013,7 @@ export default function useStreamConnection(chatId, {
         settleOwnedCatchUp()
       }
 
-      const patchCatchUpQuestionAnswers = (questionId, answers) => {
+      const patchCatchUpQuestionAnswers = (questionId, answers, disposition) => {
         const key = questionId ? `question_id:${questionId}` : null
         if (key) answersByQuestionKeyRef.current.set(key, answers)
         catchUpItems = catchUpItems.map(it => {
@@ -1019,7 +1028,7 @@ export default function useStreamConnection(chatId, {
           return it
         })
         const matchedKey = key || lastQuestionKey(catchUpItems)
-        if (matchedKey) armQuestionResponse(matchedKey, catchUpItems)
+        if (matchedKey) armQuestionResponse(matchedKey, catchUpItems, disposition)
       }
 
       while (true) {
@@ -1307,11 +1316,11 @@ export default function useStreamConnection(chatId, {
             if (event.question_id || event.answers) {
               if (isCatchUp) {
                 patchCatchUpQuestionAnswers(
-                  event.question_id || null, event.answers || {},
+                  event.question_id || null, event.answers || {}, event,
                 )
               } else {
                 patchQuestionAnswers(
-                  event.question_id || null, event.answers || {},
+                  event.question_id || null, event.answers || {}, event,
                 )
               }
             }
@@ -1620,6 +1629,7 @@ export default function useStreamConnection(chatId, {
       steeredMessages = undefined,
       answers = undefined,
       question_id = undefined,
+      selected_options = undefined,
       continuation = undefined,
       resumeRunId = undefined,
     } = {},
@@ -1687,6 +1697,7 @@ export default function useStreamConnection(chatId, {
       // recovered hidden continuation.
       if (answers) body.answers = answers
       if (question_id) body.question_id = question_id
+      if (selected_options && Object.keys(selected_options).length) body.selected_options = selected_options
       if (continuation) body.continuation = continuation
       if (resumeRunId) body.resume_run_id = resumeRunId
       if (attachments && attachments.length > 0) {
@@ -1799,6 +1810,10 @@ export default function useStreamConnection(chatId, {
       // between the doSend check and the POST landing), so a request
       // sent with queueOnly:true can come back as "started". Always
       // connect to the stream when the backend says it started.
+      // A saved close option records an answer without creating any agent
+      // activity. Preserve the existing stream and transcript ownership even
+      // when the card's original publisher is still finishing its turn.
+      if (data.answer_turn === 'none') return data
       if (data.status === 'queued' && !data.started) return data
       if (data.status === 'steered') return data
       if (data.status === 'not_steered') return data
@@ -2038,7 +2053,7 @@ export default function useStreamConnection(chatId, {
   // in streamItems (not yet promoted to messages) — without this, the
   // answered state only lands on messages[-1] (which may be the user message,
   // not the assistant), so the card never visually transitions to answered.
-  function patchQuestionAnswers(questionId, answers) {
+  function patchQuestionAnswers(questionId, answers, disposition) {
     const key = questionId ? `question_id:${questionId}` : null
     // Record the answer keyed by stable identity BEFORE touching streamItems,
     // so a later reconnect's catch-up replay (which wipes streamItems first)
@@ -2054,7 +2069,7 @@ export default function useStreamConnection(chatId, {
     // route through lastQuestionKey). Keying on the first would diverge for a
     // turn with two or more live cards, dropping the response-activity handoff.
     let matchedKey = key || lastQuestionKey(baselineItems)
-    if (matchedKey) armQuestionResponse(matchedKey, baselineItems)
+    if (matchedKey) armQuestionResponse(matchedKey, baselineItems, disposition)
     setStreamItems(prev => {
       return prev.map(it => {
         if (it.type !== 'question') return it

@@ -59,7 +59,7 @@ test('R6: answering in-process keeps the active bridge through settlement', () =
   const answerPath = chatViewSource.slice(start, end)
   const sendIndex = answerPath.indexOf('const response = await streamSend')
   const ownershipIndex = answerPath.indexOf(
-    'const keepsCurrentTurn = answerKeepsCurrentTurn(response)',
+    'const keepsCurrentTurn = noAnswerTurn || answerKeepsCurrentTurn(response)',
   )
   const retireIndex = answerPath.indexOf('if (!keepsCurrentTurn)', ownershipIndex)
   const markIndex = answerPath.indexOf('bridgeHook.markBridged()', retireIndex)

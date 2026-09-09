@@ -68,7 +68,7 @@ test('unanswered question cards do not have a stale gray state', () => {
     'an offline submit should explain that the choice is retained')
   assert.match(component, /const accepted = await onAnswer[\s\S]*if \(accepted === false\)[\s\S]*else \{\s*setSubmitted\(true\)/,
     'a card should settle only after the answer request is accepted')
-  assert.match(component, /catch \{[\s\S]*Keep the choices and[\s\S]*\} finally/,
+  assert.match(component, /catch \(error\) \{[\s\S]*Keep the choices and[\s\S]*\} finally/,
     'a failed answer should retain its retryable draft')
 })
 

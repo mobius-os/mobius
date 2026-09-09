@@ -3604,7 +3604,7 @@ export default function ChatView({
     const wasSending = sendingRef.current
     const wasServerRunning = serverRunningRef.current
     sendingRef.current = true
-    promotedRef.current = false
+    if (!questionSubmissionContext?.closeOnlySelection) promotedRef.current = false
     // Keep the answer's cid and hidden row available to the failure path. A
     // restart can lose the POST acknowledgement after the outbox write; that
     // queued row reconciles by cid when the shell drain delivers the answer.
@@ -3627,18 +3627,29 @@ export default function ChatView({
         cid: silentCid,
         answers: resolvedAnswers,
         question_id: questionId,
+        selected_options: questionSubmissionContext?.selected_options,
       })
       // The transport boundary above is the commit point. Only now advertise
       // the resumed/recovered turn to the shell; successful answer settlement
       // patches the card below in the same React batch, so a source handoff
       // cannot expose an unanswered replacement card.
-      onMessageStartRef.current?.()
-      setSending(true)
-      setServerRunningState(true)
+      const noAnswerTurn = response?.answer_turn === 'none'
+      if (noAnswerTurn) {
+        // Settling a card does not start a turn or invalidate its current row.
+        // The publisher may still be finishing; use the server's real verdict
+        // without inventing a continuation or attaching a stream for the answer.
+        sendingRef.current = response.running === true
+        setSending(response.running === true)
+        setServerRunningState(response.running === true)
+      } else {
+        onMessageStartRef.current?.()
+        setSending(true)
+        setServerRunningState(true)
+      }
       // The 202 means the answer write committed. Settle the durable and live
       // card sources only now; an optimistic pre-request answer made transient
       // failures look final and erased the retryable per-tab question draft.
-      const keepsCurrentTurn = answerKeepsCurrentTurn(response)
+      const keepsCurrentTurn = noAnswerTurn || answerKeepsCurrentTurn(response)
       const recoveredRows = keepsCurrentTurn
         ? []
         : (startedMessagesFromResponse(response) || [])
@@ -3662,14 +3673,14 @@ export default function ChatView({
         })
         // A mid-turn question may still live in streamItems rather than the
         // durable message list. Keep both render sources in agreement.
-        patchQuestionAnswers(questionId, resolvedAnswers)
+        patchQuestionAnswers(questionId, resolvedAnswers, response)
       }
       // Acceptance and visible response activity are deliberately separate.
       // Keep the card fixed through this answer-only commit; the stream hook
       // dispatches response activity in the same React commit as the first
       // visible continuation. The reducer composes either arrival order.
       dispatchQuestionFollowHandoff({
-        type: keepsCurrentTurn ? 'accepted' : 'cancelled',
+        type: keepsCurrentTurn && !noAnswerTurn ? 'accepted' : 'cancelled',
         submission: questionSubmission,
       })
       // `answer_delivered` resumes the SAME assistant turn. Keep its bridge
@@ -3698,7 +3709,7 @@ export default function ChatView({
       return true
     } catch (err) {
       const keepQueued = shouldKeepQueuedAfterSendFailure(err)
-      if (keepQueued) {
+      if (keepQueued && !questionSubmissionContext?.closeOnlySelection) {
         // The delivered answer remains hidden, but its pending representation
         // must be visible in the tray so a restart gap never looks like a
         // bounced question-card submission. It keeps the same cid the outbox
@@ -3727,6 +3738,9 @@ export default function ChatView({
         setSendFailure(sendFailureMessage(err, { online: getOnlineSnapshot() }))
         return true
       }
+      // A quiet answer's ambiguous acknowledgement may still be in the
+      // outbox, but it promises no subsequent agent output to release a latch.
+      // Keep its card/draft retryable until authoritative detail settles it.
       // Restore the exact pre-submit turn state. In particular, reset the
       // synchronous ref even when React state was already false; otherwise a
       // failed answer silently blocks every later composer send. A question
@@ -4766,6 +4780,17 @@ export default function ChatView({
   // message cids and therefore cannot settle the restored composer.
   useEffect(() => subscribeOutboxSettlement((settlement) => {
     if (String(settlement?.chatId) !== String(chatId)) return
+    if (settlement.type === 'answer') {
+      // Interactive acknowledgement patches its own card. A later outbox
+      // delivery has no such caller, and a quiet answer has no queued message
+      // or agent output that could otherwise trigger transcript reconciliation.
+      if (settlement.outcome === 'delivered' && !sendSilentInFlightRef.current) {
+        fetchMessages({ force: true, authoritative: true }).then(runtime => {
+          if (runtime) ensureRuntimeStreamConnected(runtime)
+        })
+      }
+      return
+    }
     const attempt = failedSendAttemptRef.current
     const queued = pendingQueue.pendingMessagesRef.current.some(
       row => String(cidOf(row)) === String(settlement?.cid),

@@ -394,8 +394,8 @@ test('terminal retirement announces the exact cid and outcome so one draft can r
   await drain(rejected.request)
   unsubscribe()
   assert.deepEqual(seen, [
-    { chatId: 'c9', cid: 'x1', outcome: 'delivered' },
-    { chatId: 'c9', cid: 'x2', outcome: 'failed' },
+    { chatId: 'c9', cid: 'x1', type: 'message', outcome: 'delivered' },
+    { chatId: 'c9', cid: 'x2', type: 'message', outcome: 'failed' },
   ])
 })
 
@@ -483,7 +483,7 @@ test('terminal rejection stays non-replayable when retired-row deletion fails', 
 
   assert.equal(replay.calls.length, 0)
   assert.deepEqual(seen, [
-    { chatId: 'c9', cid: 'rejected-delete-fails', outcome: 'failed' },
+    { chatId: 'c9', cid: 'rejected-delete-fails', type: 'message', outcome: 'failed' },
   ])
 })
 
@@ -506,7 +506,7 @@ test('accepted response stays duplicate-safe and settles when retired-row deleti
 
   assert.equal(replay.calls.length, 0, 'accepted cid is not posted again')
   assert.deepEqual(seen, [
-    { chatId: 'c9', cid: 'accepted-delete-fails', outcome: 'delivered' },
+    { chatId: 'c9', cid: 'accepted-delete-fails', type: 'message', outcome: 'delivered' },
   ])
 })
 
@@ -542,7 +542,7 @@ test('retryable transport and auth outcomes retain intent without terminal settl
   await drain(retryReplay.request)
   assert.equal(retryReplay.calls.length, 1, 'transient intent remains replayable')
   assert.deepEqual(seen, [
-    { chatId: 'c9', cid: 'retry', outcome: 'delivered' },
+    { chatId: 'c9', cid: 'retry', type: 'message', outcome: 'delivered' },
   ])
 
   await enqueue({ chatId: 'c9', cid: 'auth', body: { content: 'owner', cid: 'auth' } })
@@ -555,8 +555,8 @@ test('retryable transport and auth outcomes retain intent without terminal settl
   unsubscribe()
   assert.equal(authReplay.calls.length, 1, 'a new authenticated document can replay it')
   assert.deepEqual(seen, [
-    { chatId: 'c9', cid: 'retry', outcome: 'delivered' },
-    { chatId: 'c9', cid: 'auth', outcome: 'delivered' },
+    { chatId: 'c9', cid: 'retry', type: 'message', outcome: 'delivered' },
+    { chatId: 'c9', cid: 'auth', type: 'message', outcome: 'delivered' },
   ])
 })
 
@@ -571,4 +571,23 @@ test('concurrent drains are single-flight', async () => {
   await Promise.all([first, second])
   assert.equal(calls.length, 1)
   await retireIntent('x1')
+})
+
+test('quiet answer replay retires without a message row and announces answer-owned reconciliation', async () => {
+  const seen = []
+  const unsubscribe = subscribeOutboxSettlement(settlement => seen.push(settlement))
+  const body = {
+    content: '- Anything else?: No', cid: 'quiet-answer', hidden: true,
+    answers: { 'Anything else?': 'No' }, question_id: 'saved-card', selected_options: { help: ['0'] },
+  }
+  await enqueue({ chatId: 'c1', cid: 'quiet-answer', type: 'answer', body })
+  const accepted = mockRequest(() => ({
+    ok: true, status: 200,
+    json: async () => ({ status: 'answered', answer_turn: 'none', running: false }),
+  }))
+  await drain(accepted.request)
+  unsubscribe()
+  assert.deepEqual(accepted.calls[0].record.body, body, 'replay preserves explicit ids and hidden intent')
+  assert.deepEqual(await list(), [])
+  assert.deepEqual(seen, [{ chatId: 'c1', cid: 'quiet-answer', type: 'answer', outcome: 'delivered' }])
 })
