@@ -1,0 +1,45 @@
+/* Copy-sharing controls inherit Projects typography, surfaces and compact action rhythm. */
+.project-copy { min-width:0; color:var(--text); font:inherit; font-size:14px; line-height:1.55; }
+.project-copy p { margin:8px 0 12px; overflow-wrap:anywhere; }
+.project-copy h2 { margin:0 0 8px; font-size:18px; line-height:1.3; }
+.project-copy h3 { margin:0 0 6px; font-size:15px; }
+.project-copy > section { padding:20px 0; }
+.project-copy > section + section { border-top:1px solid var(--border-light); }
+.project-copy small { display:block; margin-top:5px; color:var(--muted); font-size:11px; }
+.project-copy button { min-height:40px; display:inline-flex; align-items:center; justify-content:center; gap:6px; padding:8px 12px; border:1px solid var(--border-light); border-radius:9px; background:var(--surface); color:var(--text); font:inherit; font-weight:650; cursor:pointer; }
+.project-copy button:hover:not(:disabled) { background:var(--bg); border-color:var(--accent); }
+.project-copy button:disabled { opacity:.5; cursor:default; }
+.project-copy button.project-copy__primary { background:var(--accent); color:var(--accent-fg,#fff); border-color:var(--accent); }
+.project-copy button.project-copy__primary:hover:not(:disabled) { filter:brightness(.95); }
+.project-copy input:not([type=checkbox]) { width:100%; min-height:42px; box-sizing:border-box; padding:9px 11px; border:1px solid var(--border-light); border-radius:9px; background:var(--bg); color:var(--text); font:inherit; font-size:16px; }
+.project-copy :is(button,input,summary,a):focus-visible { outline:2px solid var(--accent); outline-offset:3px; }
+.project-copy label { display:block; font-weight:600; }
+.project-copy details { margin:14px 0; border-top:1px solid var(--border-light); border-bottom:1px solid var(--border-light); }
+.project-copy summary { padding:12px 0; font-weight:600; cursor:pointer; }
+.project-copy__files { max-height:260px; overflow:auto; overscroll-behavior:contain; padding:0 0 8px; }
+.project-copy__files > :is(label,div) { display:flex; align-items:center; gap:9px; min-height:40px; padding:5px 0; border-top:1px solid var(--border-light); font-weight:400; }
+.project-copy__files input { flex:0 0 auto; width:17px; height:17px; accent-color:var(--accent); }
+.project-copy__files span { flex:1; min-width:0; overflow-wrap:anywhere; }
+.project-copy__files small { flex:0 0 auto; margin:0; font-variant-numeric:tabular-nums; }
+.project-copy__boundary,.project-copy__warning { padding:12px; background:var(--surface); border-radius:10px; }
+.project-copy__error { color:var(--danger); }
+.project-copy__result { display:grid; gap:8px; }
+.project-copy__result p { margin:0; }
+.project-copy__result button { justify-self:start; }
+.project-copy__share { padding:12px 0; border-top:1px solid var(--border-light); }
+.project-copy__share strong { font-size:12px; }
+.project-copy__share button { margin:8px 6px 0 0; }
+.project-copy-page { min-height:100dvh; overflow:auto; box-sizing:border-box; padding:clamp(24px,7vw,88px) 20px; background:var(--bg); color:var(--text); }
+.project-copy-page > article { max-width:560px; margin:0 auto; font-size:14px; }
+.project-copy-page h1 { margin:0 0 20px; font-size:clamp(26px,5vw,36px); line-height:1.2; overflow-wrap:anywhere; }
+.project-copy form { display:grid; gap:10px; }
+.project-copy form p { margin:0; }
+.project-copy form details { margin:5px 0; }
+.project-copy-overlay { position:fixed; inset:0; z-index:330; display:flex; align-items:center; justify-content:center; padding:20px; background:rgba(10,12,11,.34); }
+.project-copy-dialog { width:min(520px,100%); max-height:calc(100dvh - 40px); overflow:auto; box-sizing:border-box; padding:24px; border-radius:14px; background:var(--bg); box-shadow:0 18px 60px rgba(0,0,0,.2); }
+.project-copy-dialog > header { display:flex; align-items:center; justify-content:space-between; gap:12px; }
+.project-copy-dialog > header h2 { margin:0; }
+.project-copy-dialog > header button { padding:8px; flex:0 0 auto; border:0; background:transparent; }
+.project-copy__origin { overflow-wrap:anywhere; }
+.project-copy__actions { display:flex; gap:8px; justify-content:flex-end; margin-top:6px; }
+@media (max-width:520px) { .project-copy-overlay { padding:12px; } .project-copy-dialog { padding:18px; max-height:calc(100dvh - 24px); } .project-copy-page { padding:32px 20px; } }

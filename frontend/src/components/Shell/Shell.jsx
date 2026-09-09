@@ -52,6 +52,8 @@ import {
   ownerQueries,
   projectQueries,
 } from '../../hooks/queries.js'
+import ProjectCopyImport from '../Projects/ProjectCopyImport.jsx'
+import { consumeProjectCopyRequest, clearProjectCopyRequest } from '../../lib/projectCopies.js'
 import ProjectsDirectory from '../Projects/ProjectsDirectory.jsx'
 import ProjectWorkspace from '../Projects/ProjectWorkspace.jsx'
 import AppSourceWorkspace from '../Projects/AppSourceWorkspace.jsx'
@@ -204,7 +206,27 @@ const SYSTEM_RECONNECT_LIST_TIMEOUT_MS = 5_000
 // transition completion owns its lifetime, so Shell has no animation timers.
 const SettingsView = lazy(() => import('../SettingsView/SettingsView.jsx'))
 
+// Capture the incoming fragment before navigation normalizes the URL; consume
+// the tab-scoped one-shot carry if identity sign-in redirected through /shell/.
+const incomingProjectCopy = (() => {
+  let session
+  try { session = window.sessionStorage } catch { /* fragment-only in restricted browsers */ }
+  return consumeProjectCopyRequest(window.location.href, session)
+})()
+
 export default function Shell({ onInitialVisualReady }) {
+  const [projectCopyUrl, setProjectCopyUrl] = useState(incomingProjectCopy)
+  function closeProjectCopy() {
+    setProjectCopyUrl('')
+    window.history.replaceState(window.history.state, '', clearProjectCopyRequest(window.location.href))
+  }
+  function acceptProjectCopy(project) {
+    projectsRef.current = [project, ...projectsRef.current.filter(row => String(row.id) !== String(project.id))]
+    queryClient.setQueryData(projectQueries.keys.all, projectsRef.current)
+    closeProjectCopy()
+    openProject(project)
+  }
+
   const {
     desktop: desktopSidebarMode,
     open: desktopSidebarOpen,
@@ -4403,6 +4425,7 @@ export default function Shell({ onInitialVisualReady }) {
       closeHistoryDismiss={closeHistoryDismiss}
       unregisterHistoryDismiss={unregisterHistoryDismiss}
     >
+    {projectCopyUrl && <ProjectCopyImport key={projectCopyUrl} url={projectCopyUrl} onImported={acceptProjectCopy} onClose={closeProjectCopy} />}
     <div
       ref={shellRootRef}
       // Stable shell geometry only. Beat-local custom properties live on the header

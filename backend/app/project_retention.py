@@ -117,6 +117,13 @@ def purge_expired_project_tombstones(db: Session) -> list[str]:
       remove_snapshot_root,
     )
     purge_expired_shared_apps(db)
+    # Source-copy links expire independently of the original project. Drop the
+    # potentially large immutable payload during the existing retention pass.
+    db.query(models.ProjectSourceCopy).filter(
+      models.ProjectSourceCopy.expires_at <= now_naive_utc(),
+      models.ProjectSourceCopy.package_json.is_not(None),
+    ).update({"package_json": None}, synchronize_session=False)
+    db.commit()
     rows = db.query(models.Project).filter(
       models.Project.deleted_at.isnot(None),
       models.Project.deleted_at < cutoff,
@@ -130,6 +137,9 @@ def purge_expired_project_tombstones(db: Session) -> list[str]:
     ]
     shared_app_roots = delete_project_shared_apps(db, project_ids)
     if project_ids:
+      db.query(models.ProjectSourceCopy).filter(
+        models.ProjectSourceCopy.project_id.in_(project_ids),
+      ).delete(synchronize_session=False)
       db.query(models.Project).filter(
         models.Project.id.in_(project_ids),
         models.Project.deleted_at.isnot(None),

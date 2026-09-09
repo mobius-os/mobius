@@ -1925,3 +1925,15 @@ class ContributionReviewRun(Base):
   revision = Column(Integer, nullable=False, default=0)
   created_at = Column(DateTime, default=lambda: now_naive_utc())
   __table_args__ = (UniqueConstraint("app_id", "request_id"),)
+
+
+class ProjectSourceCopy(Base):
+  """An immutable reviewed source package, separate from live membership."""
+  __tablename__ = 'project_source_copies'
+  id = Column(String(64), primary_key=True)
+  project_id = Column(String(64), ForeignKey('projects.id', ondelete='CASCADE'), nullable=False, index=True)
+  token_hash = Column(String(64), nullable=False, unique=True, index=True)
+  package_json = Column(JSON(none_as_null=True), nullable=True)
+  created_at = Column(DateTime, nullable=False, default=now_naive_utc)
+  expires_at = Column(DateTime, nullable=False, index=True)
+  revoked_at = Column(DateTime, nullable=True)

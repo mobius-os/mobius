@@ -13,6 +13,9 @@ import { api, jsonOrThrow } from '../../api/client.js'
 import useDialogFocus from '../../hooks/useDialogFocus.js'
 import { linkedProjectAppId } from '../../lib/appSourceProject.js'
 import ProjectIdentityIcon from './ProjectIdentityIcon.jsx'
+import ProjectCopyPanel from './ProjectCopyPanel.jsx'
+import ProjectGithubSharing from './ProjectGithubSharing.jsx'
+import { ArrowLeft } from '@openai/apps-sdk-ui/components/Icon'
 import './ProjectCollaborationPanel.css'
 
 const ROLES = [
@@ -27,9 +30,7 @@ function initials(name) {
   return String(name || '?').trim().split(/\s+/).slice(0, 2).map(part => part[0]).join('').toUpperCase()
 }
 
-export default function ProjectCollaborationPanel({ project, onClose }) {
-  const cardRef = useRef(null)
-  const closeRef = useRef(null)
+function ProjectLiveCollaboration({ project }) {
   const queryClient = useQueryClient()
   const [inviteOpen, setInviteOpen] = useState(false)
   const [inviteeName, setInviteeName] = useState('')
@@ -38,7 +39,6 @@ export default function ProjectCollaborationPanel({ project, onClose }) {
   const [busy, setBusy] = useState('')
   const [error, setError] = useState('')
   const [copied, setCopied] = useState(false)
-  useDialogFocus({ containerRef: cardRef, initialFocusRef: closeRef, onClose })
 
   const collaborationKey = useMemo(
     () => ['projects', 'collaboration', project.id],
@@ -128,16 +128,8 @@ export default function ProjectCollaborationPanel({ project, onClose }) {
     } finally { setBusy('') }
   }
 
-  return createPortal((
-    <div className="project-collab__overlay" onPointerDown={event => { if (event.target === event.currentTarget) onClose?.() }}>
-      <aside ref={cardRef} className="project-collab" role="dialog" aria-modal="true" aria-labelledby="project-collab-title" tabIndex={-1}>
-        <header className="project-collab__head">
-          <ProjectIdentityIcon project={project} size={34} />
-          <div><h2 id="project-collab-title">Collaborate</h2><span>{project.name}</span></div>
-          <button ref={closeRef} type="button" aria-label="Close collaboration panel" onClick={onClose}><X size={18} /></button>
-        </header>
-
-        <div className="project-collab__body">
+  return <>
+    <p className="project-sharing__description">Edit the same project together. People join with your invitation link—no GitHub account or Möbius of their own needed.</p>
           {linkedProjectAppId(project) && <p className="project-collab__empty">Share the app’s source files here. Only the owner can update the installed app; access to its data is separate.</p>}
           <section aria-labelledby="project-people-heading">
             <div className="project-collab__section-head"><h3 id="project-people-heading">People</h3><span>Private · {members.length} {members.length === 1 ? 'person' : 'people'}</span></div>
@@ -171,8 +163,53 @@ export default function ProjectCollaborationPanel({ project, onClose }) {
           </section>
 
           {error && <p className="projects-error" role="alert">{error}</p>}
+  </>
+}
+
+export default function ProjectCollaborationPanel({ project, onClose, onOpenGithub }) {
+  const [mode, setMode] = useState(null)
+  const cardRef = useRef(null)
+  const closeRef = useRef(null)
+  useDialogFocus({ containerRef: cardRef, initialFocusRef: closeRef, onClose })
+  const title = mode === 'copy' ? 'Share a copy' : mode === 'live' ? 'Work together live' : mode === 'github' ? 'Work together with GitHub' : 'Share project'
+  return createPortal(
+    <div className="project-collab__overlay" onPointerDown={event => { if (event.target === event.currentTarget) onClose?.() }}>
+      <aside ref={cardRef} className="project-collab" role="dialog" aria-modal="true" aria-labelledby="project-collab-title" tabIndex={-1}>
+        <header className="project-collab__head">
+          <ProjectIdentityIcon project={project} size={34} />
+          <div><h2 id="project-collab-title">{title}</h2><span>{project.name}</span></div>
+          <button ref={closeRef} type="button" aria-label="Close sharing panel" onClick={onClose}><X size={18} /></button>
+        </header>
+        <div className="project-collab__body">
+          {mode && <button type="button" className="project-sharing__back" onClick={() => setMode(null)}><ArrowLeft width={16} height={16} /> Sharing options</button>}
+          {!mode && <>
+            <section className="project-sharing__group" aria-labelledby="project-share-copy-heading">
+              <h3 id="project-share-copy-heading">Give someone a copy</h3>
+              <button type="button" className="project-sharing__choice" onClick={() => setMode('copy')}>
+                <strong>Share a copy</strong>
+                <span>Send a link so someone can make this their own. Their changes won’t affect yours.</span>
+                <small>No GitHub needed</small>
+              </button>
+            </section>
+            <section className="project-sharing__group" aria-labelledby="project-share-together-heading">
+              <h3 id="project-share-together-heading">Work together</h3>
+              <button type="button" className="project-sharing__choice" onClick={() => setMode('live')}>
+                <strong>Work together live</strong>
+                <span>Invite people to edit the same project with you.</span>
+                <small>No GitHub needed</small>
+              </button>
+              <button type="button" className="project-sharing__choice" onClick={() => setMode('github')}>
+                <strong>Work together with GitHub</strong>
+                <span>Work on your own versions and suggest changes for each other to review.</span>
+                <small>GitHub accounts needed</small>
+              </button>
+            </section>
+          </>}
+          {mode === 'copy' && <ProjectCopyPanel key={project.id} project={project} />}
+          {mode === 'live' && <ProjectLiveCollaboration key={project.id} project={project} />}
+          {mode === 'github' && <ProjectGithubSharing key={project.id} project={project} onOpenGithub={onOpenGithub} />}
         </div>
       </aside>
-    </div>
-  ), document.body)
+    </div>, document.body,
+  )
 }

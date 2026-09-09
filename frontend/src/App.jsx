@@ -12,6 +12,7 @@ import { beginEmbedBootstrap } from './lib/chatEmbedBootstrap.js'
 import { startInstallPromptCapture } from './lib/installPrompt.js'
 import { readInstallPass, withoutInstallPass } from './lib/installPassUrl.js'
 import { safeReturnPath } from './lib/safeReturnPath.js'
+import { rememberProjectCopyRequest } from './lib/projectCopies.js'
 import { readStandaloneBoot } from './lib/standaloneBoot.js'
 import { shellReloadNavigationTransitionIsActive } from './lib/shellReloadNavigationTransition.js'
 
@@ -24,6 +25,7 @@ const Shell = lazy(() => import('./components/Shell/Shell.jsx'))
 const ChatEmbed = lazy(() => import('./components/ChatEmbed/ChatEmbed.jsx'))
 const StandaloneApp = lazy(() => import('./components/StandaloneApp/StandaloneApp.jsx'))
 const ProjectShare = lazy(() => import('./components/Projects/ProjectShare.jsx'))
+const ProjectCopyPage = lazy(() => import('./components/Projects/ProjectCopyPage.jsx'))
 const SharedApp = lazy(() => import('./components/Projects/SharedApp.jsx'))
 
 // True when this SPA load is the stripped-chrome chat embed
@@ -53,6 +55,7 @@ const PROJECT_SHARE_ROUTE = (() => {
     return false
   }
 })()
+const PROJECT_COPY_ROUTE = window.location.pathname === `${BASE}/project-copy` || window.location.pathname === `${BASE}/project-copy/`
 const SHARED_APP_ROUTE = (() => {
   try {
     const path = window.location.pathname
@@ -66,10 +69,15 @@ const SHARED_APP_INVITE_ROUTE = (() => {
   catch { return false }
 })()
 const STANDALONE_APP = readStandaloneBoot()
+if (!PROJECT_COPY_ROUTE && !PROJECT_SHARE_ROUTE && !EMBED_ROUTE && !SHARED_APP_ROUTE) {
+  // Identity sign-in leaves this page; retain only this one explicit copy
+  // intent in tab-scoped storage, never in an OAuth URL or owner cache.
+  try { rememberProjectCopyRequest(window.location.href, window.sessionStorage) } catch { /* fragment still works for local sign-in */ }
+}
 if (EMBED_ROUTE) {
   beginEphemeralAuth()
   beginEmbedBootstrap()
-} else if (PROJECT_SHARE_ROUTE || SHARED_APP_INVITE_ROUTE) {
+} else if (PROJECT_SHARE_ROUTE || PROJECT_COPY_ROUTE || SHARED_APP_INVITE_ROUTE) {
   beginEphemeralAuth()
 } else {
   // Capture Chromium's one-shot install event before setup or sign-in can keep
@@ -105,6 +113,11 @@ export default function App() {
         </ErrorBoundary>
       </QueryClientProvider>
     )
+  }
+  if (PROJECT_COPY_ROUTE) {
+    return <ErrorBoundary label="project-copy" recoveryKey="project-copy:root" canAskAgent={false}>
+      <Suspense fallback={<RouteLoading />}><ProjectCopyPage /></Suspense>
+    </ErrorBoundary>
   }
   if (PROJECT_SHARE_ROUTE) {
     return (
