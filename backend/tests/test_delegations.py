@@ -1115,6 +1115,208 @@ def test_provider_success_consumes_exact_activity_once_across_restart(db):
   ).delegation_ids == ()
 
 
+class _ActivityCheckpointProvider:
+  """Network-free provider double for the real parent-checkpoint turn path."""
+
+  name = "Claude Code"
+  runtime_kind = "claude_sdk"
+
+  def check_auth(self, _data_dir):
+    return None
+
+  async def ensure_auth(self, _data_dir):
+    return None
+
+  def build_env(self, **_kwargs):
+    return {}
+
+
+def _run_activity_checkpoint(
+  db, monkeypatch, *, parent_id, root_run_id, delegation_id, response,
+):
+  """Drive the owning chat.py provider/ack/finalize path for one wake."""
+  from app import chat_queue, schemas
+  from app.broadcast import create_broadcast, remove_broadcast
+  from app.chat_writer import StartActivityContinuation
+
+  row = db.get(models.Delegation, delegation_id)
+  if db.query(models.Owner).first() is None:
+    db.add(models.Owner(
+      username="activity-checkpoint-owner",
+      hashed_password="unused",
+      provider="claude",
+    ))
+    db.commit()
+  run_token = delegations_mod._activity_continuation_run_id(row)
+  started = get_writer().submit(StartActivityContinuation(
+    chat_id=parent_id,
+    run_token=run_token,
+    root_run_id=root_run_id,
+    source_work_id=row.parent_root_run_id,
+    activity_id=delegation_id,
+  )).result(timeout=5)
+  assert "promoted" not in started
+
+  seen_prompts = []
+
+  async def provider_turn(*, user_message, bc, **_kwargs):
+    seen_prompts.append(user_message)
+    bc.publish({"type": "text", "content": response})
+    return {
+      "session_id": None,
+      "cost_usd": 0.0,
+      "error": None,
+      "terminal_status": "completed",
+    }
+
+  monkeypatch.setattr(
+    chat_mod, "get_provider", lambda _id: _ActivityCheckpointProvider(),
+  )
+  monkeypatch.setattr(
+    "app.claude_sdk_runner.run_claude_sdk_turn", provider_turn,
+  )
+
+  async def skip_browser_cleanup(_chat_id):
+    return None
+
+  # This regression owns only the chat state machine. Never let its terminal
+  # path address even a disposable agent-browser namespace.
+  monkeypatch.setattr(chat_mod, "_close_browser_session", skip_browser_cleanup)
+  source = delegations_mod.activity_continuation_source(
+    run_token=run_token,
+    source_work_id=row.parent_root_run_id,
+  )
+  create_broadcast(parent_id)
+  try:
+    disposition = asyncio.run(chat_mod._run_chat_impl(
+      messages=[schemas.ChatMessage(role="user", content=source["content"])],
+      chat_id=parent_id,
+      session_id=None,
+      provider_id="claude",
+      run_gen=None,
+      run_token=run_token,
+    ))
+  finally:
+    remove_broadcast(parent_id)
+  get_writer().submit(Barrier()).result(timeout=5)
+  return disposition, seen_prompts
+
+
+def test_automatic_root_checkpoint_does_not_admit_or_ack_sibling_root_result(
+  db, monkeypatch,
+):
+  """A root-A wake must not consume a terminal helper owned by root B."""
+  from app import chat_queue
+
+  parent_id, _child_a, delegation_a = _seed_delegation(
+    db,
+    suffix="root-bound-a",
+    parent_root_id="root-bound-a",
+    result_blocks=[{"type": "text", "content": "Result owned by root A."}],
+  )
+  _same_parent, _child_b, delegation_b = _seed_delegation(
+    db,
+    suffix="root-bound-b",
+    parent_id=parent_id,
+    parent_root_id="root-bound-b",
+    result_blocks=[{"type": "text", "content": "Result owned by root B."}],
+  )
+  root_b = _seed_idle_parent_wake_root(db, delegation_b)
+  root_a = _seed_idle_parent_wake_root(db, delegation_a)
+  # StartActivityContinuation's production gate requires root A to be the
+  # parent's latest completed root. Make the otherwise-real-time ordering
+  # explicit so this probe cannot depend on clock resolution.
+  db.get(models.ChatRun, root_b).started_at = now_naive_utc() - timedelta(minutes=1)
+  db.get(models.ChatRun, root_a).started_at = now_naive_utc()
+  db.commit()
+
+  disposition, seen_prompts = _run_activity_checkpoint(
+    db,
+    monkeypatch,
+    parent_id=parent_id,
+    root_run_id=root_a,
+    delegation_id=delegation_a,
+    response="Root A incorporated its helper.",
+  )
+
+  db.expire_all()
+  delivery_after_root_a = delegations_mod.build_delegation_result_context(
+    db, parent_id,
+  )
+  assert disposition is chat_queue.TerminalDisposition.EMPTY_TERMINAL_CLEARED
+  assert db.get(models.Delegation, delegation_a).parent_woken_at is not None
+  assert {
+    "root_b_was_injected": "Result owned by root B." in seen_prompts[0],
+    "root_b_was_consumed": (
+      db.get(models.Delegation, delegation_b).parent_woken_at is not None
+    ),
+    "root_b_is_redeliverable": delegation_b in delivery_after_root_a.delegation_ids,
+  } == {
+    "root_b_was_injected": False,
+    "root_b_was_consumed": False,
+    "root_b_is_redeliverable": True,
+  }
+
+
+def test_failed_finalize_keeps_injected_activity_result_redeliverable(
+  db, monkeypatch,
+):
+  """Provider success alone must not consume data whose final reply was lost."""
+  from app import chat_queue
+
+  parent_id, _child_id, delegation_id = _seed_delegation(
+    db,
+    suffix="finalize-redelivery",
+    parent_root_id="root-finalize-redelivery",
+    result_blocks=[{
+      "type": "text", "content": "Deliver again until the reply commits.",
+    }],
+  )
+  root_run_id = _seed_idle_parent_wake_root(db, delegation_id)
+
+  def reject_terminal_commit(*_args, **_kwargs):
+    raise RuntimeError("injected terminal persistence failure")
+
+  monkeypatch.setattr(
+    get_writer(), "_finalize_required", reject_terminal_commit,
+  )
+  # Owning production order under test:
+  # provider success -> AcknowledgeActivityDelivery -> _complete_turn ->
+  # sink.finalize/Finalize failure. The negative check below requires the
+  # activity latch to remain open when that terminal response never commits.
+  disposition, _seen_prompts = _run_activity_checkpoint(
+    db,
+    monkeypatch,
+    parent_id=parent_id,
+    root_run_id=root_run_id,
+    delegation_id=delegation_id,
+    response="Provider reply that Finalize must commit.",
+  )
+
+  db.expire_all()
+  parent = db.get(models.Chat, parent_id)
+  durable_messages = list(parent.messages or [])
+  delivery_after_failure = delegations_mod.build_delegation_result_context(
+    db, parent_id,
+  )
+  assert disposition is chat_queue.TerminalDisposition.FAILED_LEAVE_MARKER
+  assert not any(
+    "Provider reply that Finalize must commit." in str(message)
+    for message in durable_messages
+  )
+  assert {
+    "activity_was_consumed": (
+      db.get(models.Delegation, delegation_id).parent_woken_at is not None
+    ),
+    "activity_is_redeliverable": (
+      delegation_id in delivery_after_failure.delegation_ids
+    ),
+  } == {
+    "activity_was_consumed": False,
+    "activity_is_redeliverable": True,
+  }
+
+
 def test_unadmitted_activity_restart_reschedules_same_physical_turn(
   db, monkeypatch,
 ):
