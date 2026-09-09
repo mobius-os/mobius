@@ -143,15 +143,15 @@ export default function PeerMessageCard({ t, chatId, disclosureKey, records: sup
 
             {model.status === 'received' && (
               <div className="chat__peer-section chat__peer-results">
-                <span className="chat__peer-kicker">
-                  {model.count === 1 ? 'Received' : `Received ${model.count}`}
-                </span>
+                {model.count > 1 && <span className="chat__peer-kicker">
+                  Received {model.count}
+                </span>}
                 <ul className="chat__peer-list">
                   {model.notes.map(note => (
                     <li key={note.key} className="chat__peer-note">
                       <span className="chat__peer-note-head">
                         <KindBadge kind={note.kind} />
-                        {note.sender && (
+                        {model.count > 1 && note.sender && (
                           <span className="chat__peer-from">
                             from {note.sender}
                           </span>

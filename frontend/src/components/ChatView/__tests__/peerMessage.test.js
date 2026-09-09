@@ -283,3 +283,18 @@ test('peer disclosure follows tool chrome and renders structured message prose',
   assert.match(html, /&lt;script&gt;quoted, not executed&lt;\/script&gt;/)
   assert.doesNotMatch(html, /<script/)
 })
+
+
+test('single received note names its sender once; grouped notes retain each sender', () => {
+  const note = { sender: 'Review agent', kind: 'finding', body: 'Verified.' }
+  const one = renderCard({ direction: 'read', status: 'received', count: 1, notes: [note] }, { open: true, suffix: 'single-sender' })
+  assert.doesNotMatch(one, /chat__peer-kicker|chat__peer-from/)
+  assert.match(one, /Received from Review agent/)
+  assert.match(one, /chat__peer-kind--finding/)
+  const many = renderCard({ direction: 'read', status: 'received', count: 2,
+    notes: [note, { ...note, sender: 'Build agent' }] }, { open: true, suffix: 'multiple-senders' })
+  assert.match(many, /chat__peer-kicker/)
+  assert.equal((many.match(/chat__peer-from/g) || []).length, 2)
+  assert.match(many, /from Review agent/)
+  assert.match(many, /from Build agent/)
+})
