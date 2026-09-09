@@ -635,11 +635,17 @@ class GauntletRun(Base):
   ended_at = Column(DateTime, nullable=True, default=None)
 
 
-class GauntletTargetMutex(Base):
-  """Legacy target-lease row retained with Gauntlet history.
+LEGACY_GAUNTLET_RETIREMENT_MARKER_ID = -1
 
-  No current runtime acquires this mutex. Keeping the mapped table lets old
-  databases load and later clean up without a destructive schema migration.
+
+class GauntletTargetMutex(Base):
+  """Legacy workflow-owned singleton state retained after removal.
+
+  Historical writers used row ``1`` as the target-lease mutex.  The retirement
+  cutover reserves ``LEGACY_GAUNTLET_RETIREMENT_MARKER_ID`` as its atomic
+  completion marker. Keeping both in this already-owned table avoids a new
+  general migration service while making later boots an indexed marker lookup
+  rather than another history scan.
   """
 
   __tablename__ = "gauntlet_target_mutex"

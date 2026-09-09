@@ -235,16 +235,25 @@ would create a second, race-prone boot mechanism.
 
 The platform-Gauntlet removal has one additional cold-start cutover. Immediately
 after the chat writer starts, and before interrupted-chat, Delegation, park, or
-pending-queue recovery, a writer domain command makes every legacy
-Gauntlet-owned controller/child execution terminal while retaining its chats,
-transcripts, tasks, costs, and other audit rows. A failed cutover degrades the
-database boot, so generic recovery can never reinterpret the old work as an
-ordinary unrestricted turn. This is deliberately **not** an online stop: the
-process-quiescence boundary is the normal backend activation restart, which has
-already stopped the previous worker and its provider children before lifespan
-startup runs. Operators must not invoke the cutover against a serving old
-worker; no database transaction can prove or terminate an external live
-provider process.
+pending-queue recovery, a writer domain command makes the exact legacy task run
+lineages terminal while retaining their chats, transcripts, tasks, costs, and
+other audit rows. Direct task links seed ownership; descendant Delegations must
+also name the selected parent's logical run, and writer recoveries must carry
+their persisted predecessor/successor identity. Chat identity alone is never a
+lasting execution lease, so later owner work and delegations in a reused child
+survive the first upgrade. Pending input is retained unless its deterministic
+Gauntlet cid and immutable task prompt digest prove it is synthetic.
+
+The retired workflow's singleton table stores a reserved completion row in the
+same transaction as those writer-owned JSON and execution changes. A failed
+cutover therefore leaves no completion marker and degrades the database boot;
+retry repeats the full transaction. After success, later boots perform only the
+marker lookup and cannot reprocess new work introduced in a historical child.
+This is deliberately **not** an online stop: the process-quiescence boundary is
+the normal backend activation restart, which has already stopped the previous
+worker and its provider children before lifespan startup runs. Operators must
+not invoke the cutover against a serving old worker; no database transaction can
+prove or terminate an external live provider process.
 
 ### Misc shared helpers
 
