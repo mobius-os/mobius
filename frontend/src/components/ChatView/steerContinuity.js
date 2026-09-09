@@ -7,7 +7,6 @@ export function isSteeredUserMessage(message) {
   return !!(
     message
     && message.role === 'user'
-    && !message.hidden
     && message.steered === true
   )
 }

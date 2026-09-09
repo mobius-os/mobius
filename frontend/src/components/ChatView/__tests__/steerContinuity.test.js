@@ -25,6 +25,18 @@ function steer(content = 'change course') {
 }
 
 
+function peerSteer(content = 'new collaborator context') {
+  return {
+    role: 'user',
+    content,
+    steered: true,
+    hidden: true,
+    kind: 'peer_message',
+    cid: 'peer-steer:message-id',
+  }
+}
+
+
 test('an exact post-steer replay renders only its unseen suffix', () => {
   const sealed = assistant('The key is')
   const continuation = assistant('The key is preserving the boundary.')
@@ -172,6 +184,41 @@ test('consecutive steered rows share the same sealed assistant', () => {
     projectSettledSteerContinuations(messages)[3].blocks[0].content,
     ' suffix',
   )
+})
+
+
+test('a hidden collaborator steer does not repaint an exact assistant prefix', () => {
+  const messages = [
+    assistant('I won\u2019t disable safeguards or force unsafe merges'),
+    peerSteer(),
+    assistant('I won\u2019t disable safeguards or force unsafe merges. Continuing safely.'),
+  ]
+
+  const displayed = projectSettledSteerContinuations(messages)
+
+  assert.equal(displayed[0].blocks[0].content,
+    'I won\u2019t disable safeguards or force unsafe merges')
+  assert.equal(displayed[2].blocks[0].content, '. Continuing safely.')
+  assert.equal(displayed[1], messages[1], 'the internal provider row stays hidden')
+})
+
+
+test('a live collaborator continuation stays hidden while replaying the sealed prefix', () => {
+  const messages = [
+    assistant('The guarded path remains active.'),
+    peerSteer(),
+  ]
+  const sealed = sealedAssistantBeforeSteer(messages, messages.length)
+  const replaying = assistant('The guarded path')
+
+  const displayed = projectSteerContinuationMessage(
+    sealed,
+    replaying,
+    { active: true },
+  )
+
+  assert.equal(displayed.blocks[0].content, '')
+  assert.equal(replaying.blocks[0].content, 'The guarded path')
 })
 
 
