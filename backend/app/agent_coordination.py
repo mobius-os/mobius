@@ -1072,8 +1072,14 @@ def chat_message_history(
     ))
   limit = max(1, min(int(limit), 100))
   rows = query.order_by(message.created_at.desc(), message.id.desc()).limit(limit + 1).all()
+  messages = serialize_messages(db, rows[:limit])
+  from app.activity_position import attach_activity_positions
+  projected = [{"id": f"peer:{item['id']}"} for item in messages]
+  attach_activity_positions(db, chat_id, projected)
+  for item, evidence in zip(messages, projected, strict=True):
+    item["display_position"] = evidence["display_position"]
   return {
-    "messages": serialize_messages(db, rows[:limit]),
+    "messages": messages,
     "next_before": rows[limit - 1].id if len(rows) > limit else None,
     "total": total, "sent": sent, "received": total - sent,
     "broadcasts": broadcasts,
@@ -1253,6 +1259,9 @@ def _prune_scope_channel(db: Session, scope: CoordinationScope) -> None:
     models.AgentCoordinationMessage.id.desc(),
   ).offset(MAX_SCOPE_MESSAGES).all()
   for row in stale:
+    db.query(models.ChatActivityPosition).filter(
+      models.ChatActivityPosition.event_id == f"peer:{row.id}",
+    ).delete(synchronize_session=False)
     db.delete(row)
 
 
@@ -1267,6 +1276,9 @@ def _prune_direct_inboxes(
       models.AgentCoordinationMessage.id.desc(),
     ).offset(MAX_DIRECT_MESSAGES_PER_RECIPIENT).all()
     for row in stale:
+      db.query(models.ChatActivityPosition).filter(
+        models.ChatActivityPosition.event_id == f"peer:{row.id}",
+      ).delete(synchronize_session=False)
       db.delete(row)
 
 
@@ -1346,6 +1358,13 @@ def _persist_send(
   db.add_all(rows)
   try:
     db.flush()
+    from app.activity_position import record_activity_position
+    audience = set(recipients) | {sender_chat_id}
+    if broadcast:
+      audience.update(_scope_membership(db, channel, limit=None)[0])
+    for row in rows:
+      for chat_id in audience if broadcast else {sender_chat_id, row.to_chat_id}:
+        record_activity_position(db, chat_id, f"peer:{row.id}")
     if channel.kind == "workspace":
       _prune_direct_inboxes(db, channel, recipients)
     else:

@@ -1970,3 +1970,17 @@ class ProjectSourceCopy(Base):
   created_at = Column(DateTime, nullable=False, default=now_naive_utc)
   expires_at = Column(DateTime, nullable=False, index=True)
   revoked_at = Column(DateTime, nullable=True)
+
+
+class ChatActivityPosition(Base):
+  """A display frontier observed when an event became available in one chat.
+
+  Not a delivery receipt. Separate chat keys prevent a broadcast from exposing
+  another recipient's transcript identity. Missing historical positions stay
+  missing rather than being reconstructed from today's streaming tail.
+  """
+
+  __tablename__ = "chat_activity_positions"
+  chat_id = Column(String(64), ForeignKey("chats.id", ondelete="CASCADE"), primary_key=True)
+  event_id = Column(String(128), primary_key=True)
+  position = Column(JSON, nullable=True)

@@ -2160,6 +2160,13 @@ async def wake_parent_after_child_settled(child_chat_id: str) -> None:
         .filter(models.Delegation.child_chat_id == child_chat_id)
         .first()
       )
+      if (
+        row is not None
+        and derived_status(db, row, load_result=False)[0] in TERMINAL_DELEGATION_STATUSES
+      ):
+        from app.activity_position import record_activity_position
+        record_activity_position(db, row.parent_chat_id, f"delegation:{row.id}:completed")
+        db.commit()
       if row is not None and row.source_work_id is not None:
         status, _, _ = derived_status(db, row)
         if status in TERMINAL_DELEGATION_STATUSES:

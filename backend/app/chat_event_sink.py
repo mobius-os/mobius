@@ -130,6 +130,25 @@ def active_sink_assistant_message_id(chat_id: str) -> str | None:
   return str(message_id) if message_id else None
 
 
+def active_sink_activity_position(chat_id: str) -> dict | None:
+  """Read the loop-published immutable frontier, including from a send worker.
+
+  Text offsets use browser UTF-16 units. Mutable reducer blocks never cross
+  this boundary; conversion only runs once per activity, not once per token.
+  """
+  sink = get_active_sink(chat_id)
+  frontier = getattr(sink, "_activity_frontier", None)
+  if frontier is None:
+    return None
+  message_id, block_index, text, block_key, block_distance = frontier
+  position = {"assistant_message_id": message_id, "block_index": block_index}
+  if block_key is not None:
+    position.update(block_key=block_key, block_distance=block_distance)
+  if text is not None:
+    position["text_offset"] = len(text.encode("utf-16-le", errors="surrogatepass")) // 2
+  return position
+
+
 def active_sink_stream_snapshot(chat_id: str, broadcast) -> dict | None:
   """Freeze the current assistant segment for one snapshot-capable subscriber.
 
@@ -342,6 +361,8 @@ class ChatEventSink:
       run_token or f"assistant-{uuid.uuid4().hex}"
     )
     self.assistant_blocks: list = []
+    self._activity_frontier = (self.assistant_message_id, 0, None, None, None)
+    self._activity_raw_length = 0
     self.session_id: str | None = None
     self.cost_usd: float | None = None
     self._last_save = 0.0
@@ -380,6 +401,55 @@ class ChatEventSink:
       event["thinking_id"] = event.get("thinking_id") or (
         f"think-{uuid.uuid4().hex}"
       )
+
+  def _publish_activity_frontier(self) -> None:
+    """Replace one immutable cross-thread view after the loop-owned reduction.
+
+    Keep text itself (immutable) here; UTF-16 sizing happens only when an
+    activity is captured, never for each streamed token. Boundary markers are
+    reducer-only and absent from persisted blocks.
+    """
+    previous = self._activity_frontier
+    if (
+      len(self.assistant_blocks) == self._activity_raw_length
+      and previous[0] == self.assistant_message_id
+      and previous[2] is not None
+      and self.assistant_blocks
+      and self.assistant_blocks[-1].get("type") == "text"
+    ):
+      # Most calls only extend the same immutable text string. Do not scan
+      # the full tool history for each token in a long-running turn.
+      self._activity_frontier = (
+        previous[0], previous[1],
+        str(self.assistant_blocks[-1].get("content") or ""),
+        previous[3], previous[4],
+      )
+      return
+    self._activity_raw_length = len(self.assistant_blocks)
+    blocks = [b for b in self.assistant_blocks if b.get("type") != "text_boundary"]
+    trailing = blocks[-1] if blocks else None
+    text = None
+    index = len(blocks)
+    if trailing and trailing.get("type") == "text":
+      index -= 1
+      text = str(trailing.get("content") or "")
+    block_key = None
+    distance = None
+    for reference in range(min(index, len(blocks) - 1), -1, -1):
+      block = blocks[reference]
+      for field, prefix in (
+        ("question_id", "question"), ("tool_use_id", "tool"),
+        ("thinking_id", "thinking"),
+      ):
+        if block.get(field):
+          block_key = f"{prefix}:{block[field]}"
+          distance = index - reference
+          break
+      if block_key is not None:
+        break
+    self._activity_frontier = (
+      self.assistant_message_id, index, text, block_key, distance,
+    )
 
   def _deferred_snapshot(
     self,
@@ -817,6 +887,7 @@ class ChatEventSink:
     if event_type == "error":
       self._last_error = event.get("message") or "An error occurred."
 
+    self._publish_activity_frontier()
     self.bc.publish(event)
 
     # done: capture cost.
@@ -973,6 +1044,7 @@ class ChatEventSink:
       # Reset BEFORE the first await so the continuation accumulates into a
       # fresh list the instant the steer lands.
       self.assistant_blocks = []
+      self._publish_activity_frontier()
       # Skip the seal when the pre-steer segment has no renderable content — a
       # steer that lands before the assistant emitted any real output would
       # otherwise commit a stray empty assistant message (A1) before the
@@ -1009,6 +1081,7 @@ class ChatEventSink:
           self.assistant_blocks = sealed_blocks + self.assistant_blocks
           self.assistant_message_id = sealed_message_id
           self._assistant_segment -= 1
+          self._publish_activity_frontier()
           raise
       user_msgs = user_msg if isinstance(user_msg, list) else [user_msg]
       ack = get_writer().submit(
@@ -1142,6 +1215,7 @@ class ChatEventSink:
       undo_question_scrub(receipt, self.assistant_blocks)
       raise
     # Committed durably — now (and only now) show the card.
+    self._publish_activity_frontier()
     self.bc.publish(event)
     # A continuation owner-input card (request_question / request_approval /
     # secure-input) is the TERMINAL action of the turn: its receipt returns to

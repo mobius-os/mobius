@@ -9,7 +9,7 @@ listing.
 import shutil
 from pathlib import Path
 
-from sqlalchemy import or_, select
+from sqlalchemy import literal, or_, select
 from sqlalchemy.orm import Session
 
 from app import models, questions
@@ -147,7 +147,20 @@ def purge_expired_chat_tombstones(db: Session) -> list[str]:
       models.Delegation.id.in_(delegation_ids),
     ).delete(synchronize_session=False)
 
+  db.query(models.ChatActivityPosition).filter(or_(
+    models.ChatActivityPosition.event_id.in_(
+      [f"delegation:{value}:completed" for value in delegation_ids]
+    ),
+    models.ChatActivityPosition.event_id.in_(select(
+      literal("peer:") + models.AgentCoordinationMessage.id,
+    ).where(or_(
+      models.AgentCoordinationMessage.from_chat_id.in_(chat_ids),
+      models.AgentCoordinationMessage.to_chat_id.in_(chat_ids),
+    ))),
+  )).delete(synchronize_session=False)
+
   dependent_models = (
+    models.ChatActivityPosition,
     models.ChatLiveAssistant,
     models.ChatEmbedGrant,
     models.AgentLifecycleEvent,

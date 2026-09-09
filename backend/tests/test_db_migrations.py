@@ -1508,6 +1508,7 @@ def test_run_migrations_records_an_inspectable_append_only_history(tmp_path):
     "0044_peer_context_delivery_cursor",
     "0045_chat_live_assistants",
     "0046_chat_run_activity_delivery",
+    "0047_chat_activity_positions",
   ]
   assert second == first
 

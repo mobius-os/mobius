@@ -193,6 +193,8 @@ def chat_activity_page(
   ]
   events.sort(key=lambda item: item[0], reverse=True)
   page = events[:bounded_limit]
+  from app.activity_position import attach_activity_positions
+  attach_activity_positions(db, chat_id, [item for _key, item in page])
   return {
     "events": [item for _key, item in page],
     "next_before": (

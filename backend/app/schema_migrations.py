@@ -3645,6 +3645,21 @@ def _add_chat_run_activity_delivery(eng):
     ))
 
 
+def _add_chat_activity_positions(eng):
+  """Add nullable, exact-chat activity display evidence without guessing history."""
+  from sqlalchemy import text
+
+  with eng.begin() as conn:
+    conn.execute(text("""
+      CREATE TABLE IF NOT EXISTS chat_activity_positions (
+        chat_id VARCHAR(64) NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+        event_id VARCHAR(128) NOT NULL,
+        position JSON NULL,
+        PRIMARY KEY (chat_id, event_id)
+      )
+    """))
+
+
 _SCHEMA_MIGRATIONS = (
   # Full IDs are permanent identities, not sequence positions. Append new
   # work in execution order; never renumber a shipped ID to reconcile sources.
@@ -3694,6 +3709,7 @@ _SCHEMA_MIGRATIONS = (
   ("0044_peer_context_delivery_cursor", _add_peer_context_delivery_cursor),
   ("0045_chat_live_assistants", _separate_chat_live_assistants),
   ("0046_chat_run_activity_delivery", _add_chat_run_activity_delivery),
+  ("0047_chat_activity_positions", _add_chat_activity_positions),
 )
 
 

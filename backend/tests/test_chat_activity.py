@@ -157,6 +157,7 @@ def test_activity_route_merges_same_time_events_without_sibling_direct_leaks(
     "child_chat_id": "child-same-time",
     "source_work_id": "goal-same-time",
     "consumption": "available",
+    "display_position": None,
   }
   assert second_page["next_before"] is None
   all_ids = {
@@ -196,3 +197,35 @@ def test_activity_route_requires_exact_chat_access_and_valid_cursor(
   assert client.get(path, params={"before": "not-a-cursor"}, headers=auth).status_code == 422
   assert client.get(path, params={"limit": 101}, headers=auth).status_code == 422
   assert client.get("/api/chats/missing/activity", headers=auth).status_code == 404
+
+
+def test_helper_settled_hook_records_frontier_once_without_chat_messages(db):
+  import asyncio
+  from app.broadcast import ChatBroadcast
+  from app.chat_activity import chat_activity_page
+  from app.chat_event_sink import ChatEventSink, register_active_sink, unregister_active_sink
+  from app.delegations import wake_parent_after_child_settled
+  from app.memory_recall import EMPTY_RECALL_BINDING
+
+  parent_id = 'helper-position-parent'
+  db.add(models.Chat(id=parent_id, messages=[]))
+  _helper(db, suffix='position', parent_chat_id=parent_id,
+          created_at=datetime(2026, 9, 9), notify=False)
+  db.commit()
+  sink = ChatEventSink(ChatBroadcast(parent_id), chat_id=parent_id,
+                       recall_binding=EMPTY_RECALL_BINDING)
+  register_active_sink(parent_id, sink)
+  try:
+    sink.publish({'type': 'text', 'content': 'before'})
+    asyncio.run(wake_parent_after_child_settled('child-position'))
+    sink.publish({'type': 'text', 'content': ' after answer'})
+    asyncio.run(wake_parent_after_child_settled('child-position'))
+    db.expire_all()
+    event = chat_activity_page(db, parent_id)['events'][0]
+    assert event['display_position'] == {
+      'assistant_message_id': sink.assistant_message_id,
+      'block_index': 0, 'text_offset': 6,
+    }
+    assert db.get(models.Chat, parent_id).messages == []
+  finally:
+    unregister_active_sink(parent_id, sink)
