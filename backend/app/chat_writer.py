@@ -270,6 +270,9 @@ class AnswerQuestion(_Command):
   run_token: str = ""
   question_id: str = ""
   answers: dict = field(default_factory=dict)
+  close_without_reply: bool = False
+  legacy_save_only: bool = False
+  selected_options: dict | None = None
 
 
 @dataclass
@@ -2054,8 +2057,38 @@ class ChatWriterActor:
     chat = _active_chat(db, cmd.chat_id)
     if chat is None:
       raise _PersistFailed("AnswerQuestion: chat not found or deleted")
+    if cmd.legacy_save_only:
+      from app.questions import AnswerConflict, has_quiet_options
+      # Check the actual write target inside the actor: an unkeyed legacy
+      # request must not bypass a card published after the route's read.
+      candidates = list(chat.messages or [])
+      if isinstance(chat.live_assistant, dict):
+        candidates.insert(0, chat.live_assistant)
+      card = next((block for message in reversed(candidates)
+                   if message.get("role") == "assistant"
+                   for block in reversed(message.get("blocks") or [])
+                   if block.get("type") == "question"
+                   and (not cmd.question_id or block.get("question_id") == cmd.question_id)), None)
+      if card and (has_quiet_options(card) or card.get("secure_input")):
+        raise AnswerConflict("Use the question card to submit this answer.")
+    metadata = None
+    if cmd.close_without_reply:
+      from app.questions import AnswerConflict, accepts_saved_answer, closes_without_reply, saved_question
+      from app.goal_plans import require_quiet_answer_handoff
+      card = saved_question(chat, cmd.question_id)
+      if card is None or not closes_without_reply(card, cmd.answers, cmd.selected_options):
+        raise AnswerConflict("This answer cannot close the question without a reply.")
+      if card.get("answers"):
+        if (card.get("answer_turn") == "none" and card["answers"] == cmd.answers
+            and card.get("selected_options") == cmd.selected_options):
+          return True  # Lost acknowledgement: never clear a newer question.
+        raise AnswerConflict("This question already has a different answer.")
+      if not accepts_saved_answer(chat, cmd.question_id):
+        raise AnswerConflict("This question is no longer open.")
+      require_quiet_answer_handoff(db, chat, cmd.question_id)
+      metadata = {"answer_turn": "none", "selected_options": cmd.selected_options}
     applied = apply_answers_to_last_question(
-      chat, cmd.answers, cmd.question_id
+      chat, cmd.answers, cmd.question_id, metadata=metadata,
     )
     if not applied:
       raise _PersistFailed("AnswerQuestion: no matching question block")
@@ -5512,12 +5545,12 @@ def _apply_last_assistant_message(
     existing_message = msgs[assistant_index]
     for ob in existing_message.get("blocks") or []:
       if ob.get("type") == "question" and ob.get("answers"):
-        existing_answers_by_key[question_block_key(ob)] = ob["answers"]
+        existing_answers_by_key[question_block_key(ob)] = _question_answer_fields(ob)
     for nb in message.get("blocks") or []:
-      if nb.get("type") == "question" and not nb.get("answers"):
+      if nb.get("type") == "question":
         carried = existing_answers_by_key.get(question_block_key(nb))
         if carried:
-          nb["answers"] = carried
+          nb.update(carried)
     # Carry a STABLE per-turn ts. build_assistant_message omits ts, so
     # assistant messages historically persisted with ts=None — which
     # silently defeated the frontend bridge gate (useBridgePartial keys
@@ -5636,15 +5669,15 @@ def update_live_assistant(
       snapshot["id"] = answer_source["id"]
     snapshot["ts"] = answer_source.get("ts")
     existing_answers = {
-      question_block_key(block): block["answers"]
+      question_block_key(block): _question_answer_fields(block)
       for block in (answer_source.get("blocks") or [])
       if block.get("type") == "question" and block.get("answers")
     }
     for block in snapshot.get("blocks") or []:
-      if block.get("type") == "question" and not block.get("answers"):
+      if block.get("type") == "question":
         answers = existing_answers.get(question_block_key(block))
         if answers:
-          block["answers"] = answers
+          block.update(answers)
   if snapshot.get("ts") is None:
     # A turn created by a pre-column process pays one historical read. Every
     # later snapshot reuses the allocated timestamp from `live_assistant`.
@@ -5715,8 +5748,13 @@ def finalize_response_outcome(
   )
 
 
+def _question_answer_fields(block: dict) -> dict:
+  """Answer disposition and receipt are one durable fact across snapshots."""
+  return {key: block[key] for key in ("answers", "answer_turn", "selected_options") if key in block}
+
+
 def apply_answers_to_last_question(
-  chat, answers: dict | None, question_id: str | None = None
+  chat, answers: dict | None, question_id: str | None = None, *, metadata: dict | None = None,
 ) -> bool:
   """Writes `answers` into the question block being answered.
 
@@ -5748,7 +5786,7 @@ def apply_answers_to_last_question(
         continue
       if match_id is not None and block.get("question_id") != match_id:
         continue
-      block["answers"] = answers
+      block.update({"answers": answers, **(metadata or {})})
       chat.live_assistant = live
       return True
     return False
@@ -5764,7 +5802,7 @@ def apply_answers_to_last_question(
           block.get("type") == "question"
           and block.get("question_id") == question_id
         ):
-          block["answers"] = answers
+          block.update({"answers": answers, **(metadata or {})})
           chat.messages = msgs  # rebind so SQLAlchemy detects the mutation
           flag_modified(chat, "messages")
           sync_live_answer(question_id)
@@ -5783,7 +5821,7 @@ def apply_answers_to_last_question(
       continue
     for block in reversed(msg.get("blocks") or []):
       if block.get("type") == "question":
-        block["answers"] = answers
+        block.update({"answers": answers, **(metadata or {})})
         chat.messages = msgs  # rebind so SQLAlchemy detects JSON mutation
         flag_modified(chat, "messages")
         sync_live_answer(None)

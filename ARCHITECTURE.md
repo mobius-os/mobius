@@ -1299,6 +1299,27 @@ Both answer paths use `answers_applied` and identity-keyed answer carry.
 Native question futures retain their existing answer/cancel behavior and
 share the same open-card slot as a compatibility path for existing sessions.
 
+Saved options may explicitly set `on_answer: "close"` (default `"resume"`).
+Quiet-capable cards receive immutable option IDs; the browser sends actual
+selections in `selected_options`, keyed by subquestion ID, alongside the normal
+prompt-keyed `answers`. Free text, including text equal to an option label,
+never acquires option authority. Every subquestion must select only close
+options for quiet settlement. `AnswerQuestion` atomically records the answer,
+selection and `answer_turn: "none"` receipt without inserting a user message or
+starting an answer turn. That whole receipt survives live/terminal snapshots;
+exact retries acknowledge it without clearing a newer card. Existing queued
+follow-ups use ordinary idle admission or the publisher's terminal drain.
+Stop remains authoritative and quiet closure cannot revive stopped work.
+
+Quiet closure cannot remove the sole next owner of an unfinished Goal: it
+requires completed work or an exact-Goal wait, helper, or queued continuation.
+An unrelated follow-up does not count; conflicts preserve the card and choice.
+Legacy save-only answers cannot bypass typed-card semantics: the writer checks
+its actual matched card, including unkeyed requests racing a newly saved card.
+The frontend settles quiet replies without replacing the stream, touching the
+composer, or arming a response-follow latch; outbox replay uses the existing
+settlement subscription to refresh authoritative card detail.
+
 Sealed inputs use the same continuation question, with safe `secure_input`
 metadata rendered by `SecureInputCard`. `QuestionCommit` atomically creates a
 private `SavedSecureInput` row containing only command/cwd/action/status, never

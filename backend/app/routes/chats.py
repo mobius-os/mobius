@@ -3371,16 +3371,20 @@ async def save_question_answers(
   from app.questions import is_secure_question
   if is_secure_question(chat, body.question_id):
     raise HTTPException(409, detail="Use the secure input card to respond.")
+  from app.questions import AnswerConflict
   ack = get_writer().submit(
     AnswerQuestion(
       chat_id=chat_id,
       run_token="",  # tokenless → broad-fence by chat
       question_id=body.question_id,
       answers=body.answers,
+      legacy_save_only=True,
     )
   )
   try:
     await await_ack(ack)
+  except AnswerConflict as exc:
+    raise HTTPException(409, detail=str(exc)) from exc
   except Exception:
     # No matching question block (or the write dropped). Preserve the
     # route's 404 contract — the client treats it as "the question card

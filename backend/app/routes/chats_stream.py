@@ -329,38 +329,6 @@ def _answer_delivered_response(chat_id: str) -> JSONResponse:
   )
 
 
-def _has_unanswered_question(
-  chat: models.Chat,
-  question_id: str | None,
-) -> bool:
-  """Whether an answer to `question_id` should be accepted for this chat.
-
-  Primary signal is the durable `pending_question_id` marker, so an answer
-  lands even when parallel tool/subagent output or a terminal error trails the
-  card, and across a restart. Fallback: a *targeted* answer (a specific
-  question_id) is still honored when the marker has cleared but that exact card
-  is unanswered in the latest turn — answering the card after a Stop is a fresh
-  continuation request, not a stale race. Position-independent; a later user
-  turn (the decision was superseded) is not eligible.
-  """
-  open_id = chat.pending_question_id
-  if open_id is not None:
-    return question_id is None or question_id == open_id
-  if not question_id:
-    return False
-  for msg in reversed(chat.messages or []):
-    if msg.get("hidden"):
-      continue
-    if msg.get("role") != "assistant":
-      return False
-    return any(
-      block.get("type") == "question"
-      and block.get("question_id") == question_id
-      and not block.get("answers")
-      for block in (msg.get("blocks") or [])
-    )
-  return False
-
 
 def _queued_response(
   new_msg: dict,
@@ -663,9 +631,10 @@ async def send_message(
     cancelled_when_submitted = questions.was_cancelled(
       chat_id, body.question_id,
     )
-    continuation_when_submitted = questions.open_continuation_question(
-      chat, body.question_id,
-    ) is not None
+    saved_card = questions.saved_question(chat, body.question_id)
+    continuation_when_submitted = bool(
+      saved_card and saved_card.get("response_mode") == "continuation"
+    )
     from app.chat import current_run_generation
 
     answer_generation = current_run_generation(chat_id)
@@ -686,6 +655,47 @@ async def send_message(
       continuation_card = questions.open_continuation_question(
         chat, body.question_id,
       )
+      saved_card = questions.saved_question(chat, body.question_id)
+      try:
+        quiet_answer = bool(saved_card and questions.closes_without_reply(
+          saved_card, body.answers, body.selected_options,
+        ))
+        if quiet_answer:
+          await await_ack(get_writer().submit(AnswerQuestion(
+            chat_id=chat_id, question_id=body.question_id,
+            answers=body.answers, selected_options=body.selected_options,
+            close_without_reply=True,
+          )))
+      except questions.AnswerConflict as exc:
+        raise HTTPException(409, detail=str(exc)) from exc
+      except Exception as exc:
+        log.warning("Quiet answer did not persist chat_id=%s: %s", chat_id, exc)
+        raise HTTPException(503, detail="Could not save your answer; please try again.") from exc
+      if quiet_answer:
+        from app.chat_event_sink import get_active_sink
+        event = {"type": "answers_applied", "question_id": body.question_id,
+                 "answers": body.answers, "answer_turn": "none"}
+        sink = get_active_sink(chat_id)
+        bc = get_broadcast(chat_id)
+        if sink is not None:
+          sink.publish(event)
+        elif bc is not None:
+          bc.publish(event)
+        db.refresh(chat)
+        # Closing is not a model turn. If it releases an already requested
+        # follow-up, use the ordinary queue admission (or the live publisher's
+        # terminal drain), never append a synthetic answer continuation.
+        from app.run_state import latest_run
+        current = latest_run(db, chat_id)
+        if (chat.pending_messages and not chat.pending_question_id and not is_chat_running(chat_id)
+            and (current is None or current.status != "stopped")):
+          await start_queued_owner_continuation(chat_id, db)
+        publish_owner_input_changed(chat_id,
+          "question" if chat.pending_question_id else None,
+          question_id=chat.pending_question_id)
+        return JSONResponse(content={
+          "status": "answered", "answer_turn": "none", "running": is_chat_running(chat_id),
+        })
       if continuation_card is not None and is_chat_running(chat_id):
         # A saved approval does not park a provider future. An immediate
         # answer belongs to the next turn, even before this one has settled.
@@ -817,7 +827,7 @@ async def send_message(
         )
 
       db.expire(chat)
-      if not _has_unanswered_question(chat, body.question_id):
+      if not questions.accepts_saved_answer(chat, body.question_id):
         raise HTTPException(
           status_code=410,
           detail="The question is no longer accepting answers.",

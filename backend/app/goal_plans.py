@@ -462,7 +462,7 @@ def serialize_plan(
 
 
 def goal_handoff_owner_kind(
-  db: Session, chat_id: str, goal_id: str,
+  db: Session, chat_id: str, goal_id: str, *, excluding_question_id: str | None = None,
 ) -> str | None:
   """Name the durable actor that owns this exact Goal's next move.
 
@@ -478,7 +478,7 @@ def goal_handoff_owner_kind(
     load_only(models.Chat.pending_question_id),
   ).filter(models.Chat.id == chat_id).first()
   pending_question_id = chat.pending_question_id if chat is not None else None
-  if pending_question_id is not None:
+  if pending_question_id is not None and pending_question_id != excluding_question_id:
     from app.questions import continuation_question_owner_run_id
     owner_run_id = continuation_question_owner_run_id(chat, pending_question_id)
     if owner_run_id is not None:
@@ -525,6 +525,38 @@ def goal_handoff_owner_kind(
     ):
       return "monitor"
   return None
+
+
+def require_quiet_answer_handoff(db: Session, chat, question_id: str) -> None:
+  """Closing a card cannot remove the sole next owner of unfinished work.
+
+  This checks the card's exact Goal, not the currently presented Goal or an
+  unrelated follow-up. It neither changes the plan nor creates a continuation.
+  """
+  from app.questions import AnswerConflict, saved_question_owner_run_id
+  from app.run_state import goal_identity_for_run_start, _recoverable_result_goal
+
+  owner_id = saved_question_owner_run_id(chat, question_id)
+  owner = db.get(models.ChatRun, owner_id) if owner_id else None
+  if owner is None or not owner.goal_objective:
+    return
+  physical, root = _goal_rows_for_physical(db, owner)
+  goal_id = physical.goal_id or root.id
+  if _recoverable_result_goal(db, chat.id, owner)[0] is None:
+    return  # The exact Goal's latest physical run owns Stop, not the author.
+  plan = serialize_plan(db, physical, root)
+  if (plan is not None and plan["summary"]["can_complete"]) or (
+      plan is None and physical.status == "completed"):
+    return
+  if goal_handoff_owner_kind(db, chat.id, goal_id, excluding_question_id=question_id):
+    return
+  for pending in chat.pending_messages or []:
+    if isinstance(pending, dict) and goal_identity_for_run_start(db, chat.id, pending)[1] == goal_id:
+      return
+  raise AnswerConflict(
+    "This question is the only next step for an unfinished Goal. "
+    "Choose a reply option or Stop the Goal before closing it without a reply."
+  )
 
 
 def serialize_goal(

@@ -741,6 +741,9 @@ class SendMessage(BaseModel):
   # continuation — eliminating the POST /question-answers + POST /messages
   # race that left answers missing on mid-stream remounts.
   answers: dict | None = None
+  # Exact option selections from saved cards; free text never implies consent
+  # to close without a reply, even when it equals an option label.
+  selected_options: dict[str, list[str]] | None = None
   # Optional identity of the question being answered (the runner-
   # published PendingQuestion id). When supplied, the backend writes
   # the answers into the question block with this exact `question_id`

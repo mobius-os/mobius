@@ -509,3 +509,15 @@ def test_control_stdio_process_survives_tool_errors_and_keeps_serving():
   assert "missing environment" in responses[1]["result"]["content"][0]["text"]
   assert responses[2]["result"] == {}
   assert completed.stderr == ""
+
+
+def test_saved_card_option_schema_exposes_explicit_quiet_outcome():
+  control = _control_module()
+  approval = control._TOOL_DEFINITIONS[control.REQUEST_APPROVAL_TOOL]["inputSchema"]
+  question = control._TOOL_DEFINITIONS[control.REQUEST_QUESTION_TOOL]["inputSchema"]
+  for option in (
+    approval["properties"]["options"]["items"],
+    question["properties"]["questions"]["items"]["properties"]["options"]["items"],
+  ):
+    assert option["properties"]["on_answer"]["enum"] == ["resume", "close"]
+    assert "on_answer" not in option["required"]

@@ -485,6 +485,8 @@ _TOOL_DEFINITIONS = {
             "properties": {
               "label": {"type": "string", "minLength": 1, "maxLength": 100},
               "description": {"type": "string", "minLength": 1, "maxLength": 500},
+              "on_answer": {"type": "string", "enum": ["resume", "close"],
+                "description": "Default resume. Explicit close saves this choice without an agent reply; arrange a durable next owner first if the Goal is unfinished."},
             },
             "required": ["label", "description"], "additionalProperties": False,
           },
@@ -501,7 +503,7 @@ _TOOL_DEFINITIONS = {
       "The saved card blocks further work until the owner answers or Stops; "
       "it returns a receipt, NOT an answer. After success end immediately with "
       "no further text or tools. Do not guess, poll or keep a process waiting. "
-      "The saved answer resumes the chat even after a restart. Prefer this "
+      "Answers normally resume the chat, including after restart; explicit close choices do not. Prefer this "
       "over provider-native questions in live owner chats. Use request_approval "
       "for permission; use the sealed secure-input helper for secrets. "
       "Never use in background or scheduled work."
@@ -521,7 +523,8 @@ _TOOL_DEFINITIONS = {
               "type": "object", "additionalProperties": False,
               "required": ["label", "description"],
               "properties": {"label": {"type": "string"},
-                             "description": {"type": "string"}},
+                             "description": {"type": "string"}, "on_answer": {"type": "string", "enum": ["resume", "close"],
+                "description": "Default resume. Explicit close saves this choice without an agent reply; arrange a durable next owner first if the Goal is unfinished."},},
             }},
           },
         },
