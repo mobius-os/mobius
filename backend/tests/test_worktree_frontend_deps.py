@@ -587,3 +587,30 @@ def test_wt_npm_rejects_dependency_proof_drift(tmp_path: Path):
   assert result.returncode == 5, result.stderr
   assert "dependency proof changed" in result.stderr
   assert not (review / "frontend" / "node_modules").exists()
+
+
+@pytest.mark.parametrize('matching_sibling', [True, False])
+def test_wt_npm_reuses_only_exact_lock_registered_sibling(tmp_path, matching_sibling):
+  primary, review, fake_bin = _worktree_fixture(tmp_path)
+  sibling = tmp_path / 'sibling with spaces'
+  _git(primary, 'worktree', 'add', '-b', 'sibling', str(sibling), 'main')
+  _write_project(sibling / 'frontend', locked_version='1.2.0', installed_version='1.2.0')
+  _write_project(review / 'frontend', locked_version='1.2.0' if matching_sibling else '1.3.0', installed_version=None)
+  (review / 'frontend/node_modules').rmdir()
+  observed = tmp_path / 'borrowed'
+  fake_npm = fake_bin / 'npm'
+  fake_npm.write_text('#!/bin/sh\nreadlink -f node_modules > "$WT_NPM_OBSERVED"\n')
+  fake_npm.chmod(0o755)
+  result = subprocess.run(
+    ['bash', str(WT_NPM_SCRIPT), 'test'], cwd=review,
+    env={**os.environ, 'PATH': f'{fake_bin}:{os.environ["PATH"]}', 'WT_NPM_OBSERVED': str(observed)},
+    text=True, capture_output=True,
+  )
+  if matching_sibling:
+    assert result.returncode == 0, result.stderr
+    assert observed.read_text().strip() == str(sibling / 'frontend/node_modules')
+  else:
+    assert result.returncode == 2, result.stderr
+    assert not observed.exists()
+  assert not (review / 'frontend/node_modules').exists()
+  assert (sibling / 'frontend/node_modules').is_dir()

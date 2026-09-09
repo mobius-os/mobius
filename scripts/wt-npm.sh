@@ -109,23 +109,27 @@ trap 'forward_signal TERM 143' TERM
 
 status="$(mobius_frontend_deps_status "$FRONTEND")"
 if [ "$status" = "missing" ]; then
-  # A linked worktree normally has the same frozen dependency graph as its
-  # primary checkout. Borrow that exact-lock install only for this command
-  # instead of making every review worktree persist another ~500 MiB copy.
-  # The lock comparison is the authority: a package.json range is not enough
-  # to prove that generated build and test output came from the reviewed tree.
-  MAIN="$(cd "$(dirname "$(git rev-parse --git-common-dir)")" \
-    && pwd 2>/dev/null)" || MAIN="$ROOT"
-  shared_frontend="$MAIN/frontend"
-  shared_modules="$(readlink -f "$shared_frontend/node_modules" \
-    2>/dev/null || true)"
-  if [ "$ROOT" != "$MAIN" ] \
-      && [ -n "$shared_modules" ] \
-      && [ -f "$FRONTEND/package-lock.json" ] \
-      && [ -f "$shared_frontend/package-lock.json" ] \
-      && cmp -s "$FRONTEND/package-lock.json" \
-        "$shared_frontend/package-lock.json" \
-      && [ "$(mobius_frontend_deps_status "$shared_frontend")" = "ready" ]; then
+  # Git's registered worktrees are the bounded candidate set, primary first.
+  # Reviews on a different lock can reuse a sibling's proven install instead
+  # of each allocating another ~500 MiB. Never discover candidates by walking
+  # the data volume or borrow a semver-only match. The normal loan lifetime
+  # and before/after proof below remain identical for every candidate.
+  shared_modules=""
+  while IFS= read -r -d '' field; do
+    case "$field" in
+      "worktree "*) shared_frontend="${field#worktree }/frontend" ;;
+      *) continue ;;
+    esac
+    [ "$shared_frontend" != "$FRONTEND" ] || continue
+    [ -f "$FRONTEND/package-lock.json" ] || break
+    [ -f "$shared_frontend/package-lock.json" ] || continue
+    cmp -s "$FRONTEND/package-lock.json" \
+      "$shared_frontend/package-lock.json" || continue
+    [ "$(mobius_frontend_deps_status "$shared_frontend")" = "ready" ] || continue
+    shared_modules="$(readlink -f "$shared_frontend/node_modules" 2>/dev/null || true)"
+    [ -n "$shared_modules" ] && break
+  done < <(git worktree list --porcelain -z)
+  if [ -n "$shared_modules" ]; then
     borrowed_modules="$shared_modules"
     for attempt in 1 2 3 4 5; do
       borrowed_temp="$FRONTEND/.node_modules.borrow.${BASHPID:-$$}.$RANDOM.$attempt"
@@ -163,7 +167,7 @@ case "$status" in
   ready) ;;
   missing)
     echo "wt-npm: this checkout has no frontend dependency tree" >&2
-    echo "  its lock differs from the primary checkout; install only for the" >&2
+    echo "  no registered worktree has a verified matching install; install only for the" >&2
     echo "  required check, then remove $FRONTEND/node_modules" >&2
     exit 2
     ;;
