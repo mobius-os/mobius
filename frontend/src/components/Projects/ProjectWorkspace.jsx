@@ -206,7 +206,7 @@ export default function ProjectWorkspace({
           {linkedApp && <ApplyAppSourceButton projectId={project.id} app={linkedApp} onError={setError} />}
 
           <button type="button" className="project-workspace__collaborate" aria-label="Review publishing" title="Review publishing" aria-expanded={gitOpen} onClick={() => setGitOpen(true)}><Github width={17} height={17} aria-hidden="true" /><span>Publish</span></button>
-          <button type="button" className="project-workspace__collaborate" aria-label="Collaborate" aria-expanded={collaborationOpen} onClick={() => { collaborationHistory.open(); setCollaborationOpen(true) }}><Users width={17} height={17} aria-hidden="true" /><span>Collaborate</span></button>
+          <button type="button" className="project-workspace__collaborate" aria-label="Share project" aria-expanded={collaborationOpen} onClick={() => { collaborationHistory.open(); setCollaborationOpen(true) }}><Users width={17} height={17} aria-hidden="true" /><span>Share</span></button>
           <button type="button" className="project-workspace__collaborate" aria-label="Project activity" aria-expanded={activityOpen} onClick={() => { activityHistory.open(); setActivityOpen(true) }}><span>Activity{activeWorkCount ? ` · ${activeWorkCount}` : ''}</span></button>
         </div>
 
@@ -281,7 +281,7 @@ export default function ProjectWorkspace({
           )}
         />
       </div>
-      {collaborationOpen && <ProjectCollaborationPanel project={project} onClose={collaborationHistory.close} />}
+      {collaborationOpen && <ProjectCollaborationPanel project={project} onClose={collaborationHistory.close} onOpenGithub={() => { collaborationHistory.close(); setGitOpen(true) }} />}
       {activityOpen && <ProjectActivityPanel project={project} onClose={activityHistory.close} />}
       {gitOpen && <ProjectGitPanel project={project} onClose={() => setGitOpen(false)} />}
     </section>
