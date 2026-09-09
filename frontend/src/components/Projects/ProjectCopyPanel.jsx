@@ -49,15 +49,14 @@ export default function ProjectCopyPanel({ project }) {
     finally { setBusy('') }
   }
   return <div className="project-copy">
-    <p>An independent copy. No GitHub needed.</p>
     <section>
       {preview.isPending && <p role="status">Loading project files…</p>}
       {preview.isError && <div role="alert"><p>{preview.error.message}</p><button onClick={() => preview.refetch()}>Try again</button></div>}
       {preview.data && <>
+        <p className="project-copy__boundary">Anyone with the link can keep a copy. Check files for private information.</p>
         {files.length ? <details><summary>Files · {selected.length} selected · {copyByteLabel(selectedBytes)}</summary>
           <div className="project-copy__files">{files.map(file => <label key={file.path}><input type="checkbox" checked={selected.includes(file.path)} disabled={!!busy} onChange={() => toggle(file.path)} /><span>{file.path}</span><small>{copyByteLabel(file.size)}</small></label>)}</div>
         </details> : <p>There are no files available to share.</p>}
-        <p className="project-copy__boundary">Anyone with the link can keep a copy. Check files for private information.</p>
         <button className="project-copy__primary" disabled={!!busy || !selected.length} onClick={create}>{busy === 'create' ? 'Creating link…' : 'Create copy link'}</button>
         <small>Files only—no chats or app data. Link expires in 7 days.</small>
       </>}
