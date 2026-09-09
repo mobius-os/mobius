@@ -426,6 +426,26 @@ class BackfillAssistantIdentity(_Command):
 
 
 @dataclass
+class RetireLegacyGauntletExecution(_Command):
+  """One atomic boot cutover from legacy Gauntlet work to inert history.
+
+  The removed workflow left its durable rows behind for transcript retention
+  and later hard-purge.  Some of those rows still own ordinary ChatRun and
+  Delegation recovery primitives, however.  This command retires that exact
+  execution graph before generic boot recovery can observe it.
+
+  It is intentionally a chat-writer command rather than a numbered schema
+  migration: interrupted assistant snapshots and queued synthetic
+  continuations live in the writer-owned JSON columns.  Startup supplies the
+  process-quiescent boundary and treats a failed acknowledgement as a degraded
+  database boot.  The same transaction records completion in the retired
+  workflow's singleton table, so later boots do not reinterpret a reused child
+  chat as permanently workflow-owned.  This command does not and must not try
+  to stop live provider processes.
+  """
+
+
+@dataclass
 class RewriteChatMediaPaths(_Command):
   """Atomically rewrite one chat's legacy media URLs during boot."""
 
@@ -1779,6 +1799,8 @@ class ChatWriterActor:
       return self._migrate_chat(db, cmd)
     if isinstance(cmd, BackfillAssistantIdentity):
       return self._backfill_assistant_identity(db, cmd)
+    if isinstance(cmd, RetireLegacyGauntletExecution):
+      return self._retire_legacy_gauntlet_execution(db)
     if isinstance(cmd, RewriteChatMediaPaths):
       return self._rewrite_chat_media_paths(db, cmd)
     if isinstance(cmd, ReconcileStartupChat):
@@ -2281,6 +2303,337 @@ class ChatWriterActor:
     if not _commit_or_rollback(db):
       raise _PersistFailed("BackfillAssistantIdentity did not persist")
     return 1
+
+  def _retire_legacy_gauntlet_execution(self, db) -> dict[str, int]:
+    """Retire only execution identities durably proven to be Gauntlet-owned.
+
+    A Delegation child chat can later be reused, so chat identity is not an
+    execution lease.  Direct task links establish the first delegated logical
+    run; nested Delegations are followed only when their ``parent_root_run_id``
+    names that selected lineage.  Writer work starts at the task's exact
+    reserved ChatRun and follows only persisted predecessor/successor markers.
+
+    Row ``-1`` in the retired target-mutex table is the one-time completion
+    marker.  It commits with every writer-owned JSON and execution mutation;
+    failure rolls both back, while a later boot pays only one primary-key read.
+    """
+    from datetime import UTC, datetime
+
+    from app import models
+
+    empty = {
+      "gauntlets": 0,
+      "delegations": 0,
+      "chat_runs": 0,
+      "pending_messages": 0,
+      "assistant_snapshots": 0,
+    }
+    marker_id = models.LEGACY_GAUNTLET_RETIREMENT_MARKER_ID
+    if db.get(models.GauntletTargetMutex, marker_id) is not None:
+      db.rollback()
+      return empty
+
+    now = datetime.now(UTC).replace(tzinfo=None)
+    gauntlets = db.query(models.GauntletRun).all()
+    gauntlet_by_id = {row.id: row for row in gauntlets}
+    tasks = db.query(models.GauntletTask).order_by(
+      models.GauntletTask.created_at.asc(), models.GauntletTask.id.asc(),
+    ).all()
+    unresolved: list[str] = []
+
+    # The child is created in the same transaction as its Delegation and the
+    # delegation starter refuses to run when any ChatRun already exists.  Its
+    # earliest physical row therefore establishes the task's logical lineage;
+    # later new-root reuse is deliberately outside it.
+    delegation_ids = {
+      task.delegation_id for task in tasks if task.delegation_id is not None
+    }
+    delegations: dict[str, models.Delegation] = {}
+    delegation_runs: dict[str, list[models.ChatRun]] = {}
+    frontier = set(delegation_ids)
+    while frontier:
+      rows = db.query(models.Delegation).filter(
+        models.Delegation.id.in_(frontier),
+      ).all()
+      found_ids = {row.id for row in rows}
+      unresolved.extend(
+        f"missing selected Delegation {row_id}"
+        for row_id in sorted(frontier - found_ids)
+      )
+      frontier = set()
+      for row in rows:
+        if row.id in delegations:
+          continue
+        delegations[row.id] = row
+        runs = db.query(models.ChatRun).filter(
+          models.ChatRun.chat_id == row.child_chat_id,
+        ).order_by(
+          models.ChatRun.started_at.asc(), models.ChatRun.id.asc(),
+        ).all()
+        if not runs:
+          delegation_runs[row.id] = []
+          continue
+        seed = runs[0]
+        root_id = seed.root_run_id or seed.id
+        owned = [
+          run for run in runs
+          if run.id == seed.id or (run.root_run_id or run.id) == root_id
+        ]
+        delegation_runs[row.id] = owned
+        parent_keys = {
+          run.goal_id or run.root_run_id or run.id for run in owned
+        }
+        if not parent_keys:
+          continue
+        descendants = db.query(models.Delegation.id).filter(
+          models.Delegation.parent_chat_id == row.child_chat_id,
+          models.Delegation.parent_root_run_id.in_(parent_keys),
+        ).all()
+        frontier.update(
+          descendant_id for (descendant_id,) in descendants
+          if descendant_id not in delegations
+        )
+
+    # A notified quota park still has an explicit resume path; retirement must
+    # revoke it without changing the ordinary lifecycle's terminality rules.
+    resumable_statuses = {*models.NONTERMINAL_RUN_STATUSES, "parked_notified"}
+    selected_runs: dict[str, models.ChatRun] = {
+      run.id: run
+      for runs in delegation_runs.values()
+      for run in runs
+      if run.status in resumable_statuses
+    }
+
+    # A writer task has an exact reserved seed identity.  Restart/limit
+    # continuations are included only when a writer-owned transcript envelope
+    # names both predecessor and successor; same-root proximity is not proof.
+    writer_tasks_by_chat: dict[str, list[models.GauntletTask]] = {}
+    controller_seeds = {
+      (row.parent_chat_id, row.parent_root_run_id, row.parent_root_run_id)
+      for row in gauntlets if row.status in {"running", "stopping"}
+    }
+    for task in tasks:
+      if task.scope != "write" or task.chat_run_id is None:
+        continue
+      gauntlet = gauntlet_by_id.get(task.gauntlet_run_id)
+      if gauntlet is None:
+        continue
+      writer_tasks_by_chat.setdefault(
+        gauntlet.parent_chat_id, [],
+      ).append(task)
+      controller_seeds.add((
+        gauntlet.parent_chat_id, gauntlet.parent_root_run_id, task.chat_run_id,
+      ))
+    # The original registration/controller seed can be paused before any
+    # writer task exists. Treat its exact causal successors like writer seeds,
+    # never as permission to consume arbitrary later same-chat work.
+    for controller_chat_id, root_id, seed_id in sorted(controller_seeds):
+      seed = db.get(models.ChatRun, seed_id)
+      if seed is None or (
+        seed.chat_id != controller_chat_id
+        or (seed.root_run_id or seed.id) != root_id
+      ):
+        if seed is not None:
+          unresolved.append(
+            f"controller seed {seed_id} has mismatched chat/root"
+          )
+        continue
+      owned_ids = {seed.id}
+      chat = db.get(models.Chat, seed.chat_id)
+      successor_by_predecessor: dict[str, set[str]] = {}
+      if chat is not None:
+        for message in [
+          *(chat.messages or []), *(chat.pending_messages or []),
+        ]:
+          if not isinstance(message, dict):
+            continue
+          predecessor = message.get("_continuation_supersedes_run_token")
+          successor = message.get("_continuation_run_token")
+          if isinstance(predecessor, str) and isinstance(successor, str):
+            successor_by_predecessor.setdefault(predecessor, set()).add(
+              successor
+            )
+      pending_predecessors = {seed.id}
+      while pending_predecessors:
+        successor_ids = {
+          successor
+          for predecessor in pending_predecessors
+          for successor in successor_by_predecessor.get(predecessor, set())
+          if successor not in owned_ids
+        }
+        pending_predecessors = set()
+        for successor_id in successor_ids:
+          successor = db.get(models.ChatRun, successor_id)
+          if successor is None or (
+            successor.chat_id != seed.chat_id
+            or (successor.root_run_id or successor.id)
+              != (seed.root_run_id or seed.id)
+            or successor.initiated_by_app_id != seed.initiated_by_app_id
+          ):
+            continue
+          owned_ids.add(successor.id)
+          pending_predecessors.add(successor.id)
+          if successor.status in resumable_statuses:
+            selected_runs[successor.id] = successor
+      if seed.status in resumable_statuses:
+        selected_runs[seed.id] = seed
+
+    selected_by_chat: dict[str, set[str]] = {}
+    for run in selected_runs.values():
+      selected_by_chat.setdefault(run.chat_id, set()).add(run.id)
+
+    all_nonterminal_by_chat: dict[str, set[str]] = {}
+    if selected_by_chat:
+      for run_id, chat_id in db.query(
+        models.ChatRun.id, models.ChatRun.chat_id,
+      ).filter(
+        models.ChatRun.chat_id.in_(selected_by_chat),
+        models.ChatRun.status.in_(models.NONTERMINAL_RUN_STATUSES),
+      ).all():
+        all_nonterminal_by_chat.setdefault(chat_id, set()).add(run_id)
+
+    # Only a server-generated Gauntlet cid plus the task's immutable prompt
+    # digest proves that a queued row is synthetic.  Owner input survives even
+    # in a child whose old physical execution is being stopped.
+    def synthetic_pending(chat_id: str, message: object) -> bool:
+      if not isinstance(message, dict) or not (
+        message.get("role") == "user"
+        and message.get("kind") == "continuation"
+        and message.get("continuation_reason") == "gauntlet"
+      ):
+        return False
+      content = message.get("content")
+      cid = message.get("cid")
+      if not isinstance(content, str) or not isinstance(cid, str):
+        return False
+      digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
+      return any(
+        cid == f"gauntlet-{task.gauntlet_run_id}-integrate-{task.round}"
+        and digest == task.prompt_sha256
+        for task in writer_tasks_by_chat.get(chat_id, ())
+      )
+
+    chat_ids = set(selected_by_chat) | {
+      row.child_chat_id for row in delegations.values()
+    } | set(writer_tasks_by_chat)
+    chats = {
+      chat.id: chat for chat in db.query(models.Chat).filter(
+        models.Chat.id.in_(chat_ids),
+      ).all()
+    } if chat_ids else {}
+
+    pending_retired = 0
+    snapshots_materialized = 0
+    for chat_id, chat in chats.items():
+      changed = False
+      pending = list(chat.pending_messages or [])
+      next_pending = [
+        message for message in pending
+        if not synthetic_pending(chat_id, message)
+      ]
+      if len(next_pending) != len(pending):
+        pending_retired += len(pending) - len(next_pending)
+        chat.pending_messages = next_pending
+        changed = True
+
+      owned_run_ids = selected_by_chat.get(chat_id, set())
+      live = copy.deepcopy(chat.live_assistant)
+      live_id = _assistant_message_id(live)
+      surface_ids = {
+        value for value in (live_id, chat.active_assistant_message_id)
+        if isinstance(value, str)
+      }
+      all_nonterminal = all_nonterminal_by_chat.get(chat_id, set())
+      surface_owned = bool(
+        owned_run_ids
+        and (
+          (surface_ids and surface_ids <= owned_run_ids)
+          or (
+            not surface_ids
+            and all_nonterminal
+            and all_nonterminal <= owned_run_ids
+          )
+        )
+      )
+      if surface_owned:
+        messages = list(chat.messages or [])
+        blocks = live.get("blocks") if isinstance(live, dict) else None
+        if isinstance(blocks, list) and blocks:
+          finalized = copy.deepcopy(live)
+          finalize_blocks(finalized["blocks"])
+          live_index = assistant_message_index(messages, finalized)
+          if live_index >= 0:
+            messages[live_index] = finalized
+          else:
+            messages.append(finalized)
+          chat.messages = messages
+          snapshots_materialized += 1
+        chat.live_assistant = None
+        chat.pending_question_id = None
+        chat.active_assistant_message_id = None
+        for request in db.query(models.SavedSecureInput).filter(
+          models.SavedSecureInput.chat_id == chat_id,
+          models.SavedSecureInput.status.in_(("pending", "consuming")),
+        ).all():
+          request.status = "cancelled"
+          request.outcome = "Secure input was cancelled."
+        changed = True
+      if changed:
+        chat.updated_at = now
+
+    unfinished_statuses = resumable_statuses
+    cancelled_delegations = 0
+    for row in delegations.values():
+      owned = delegation_runs.get(row.id, [])
+      unfinished = not owned or any(
+        run.status in unfinished_statuses for run in owned
+      )
+      row.startup_prompt = None
+      row.notify_parent_on_complete = False
+      if unfinished and row.cancelled_at is None:
+        row.cancelled_at = now
+        row.source_work_active_chat_id = None
+        cancelled_delegations += 1
+
+    retired_gauntlets = 0
+    for row in gauntlets:
+      if row.status not in {"running", "stopping"}:
+        continue
+      row.status = "stopped"
+      row.phase = "terminal"
+      row.active_target_key = None
+      row.requested_terminal_status = None
+      row.stop_requested_at = row.stop_requested_at or now
+      row.terminal_reason = (
+        "Legacy Gauntlet execution was retired during the platform upgrade."
+      )
+      row.revision += 1
+      row.updated_at = now
+      row.ended_at = now
+      retired_gauntlets += 1
+
+    for run in selected_runs.values():
+      run.status = "stopped"
+      run.ended_at = run.ended_at or now
+      run.restart_nonce = None
+
+    # This row is deliberately staged last and committed with all preceding
+    # mutations.  A failed flush/commit cannot suppress the retry on next boot.
+    db.add(models.GauntletTargetMutex(id=marker_id, revision=1))
+    if not _commit_or_rollback(db):
+      raise _PersistFailed("legacy Gauntlet retirement did not persist")
+    if unresolved:
+      log.warning(
+        "legacy Gauntlet retirement preserved uncertain provenance: %s",
+        "; ".join(unresolved),
+      )
+    return {
+      "gauntlets": retired_gauntlets,
+      "delegations": cancelled_delegations,
+      "chat_runs": len(selected_runs),
+      "pending_messages": pending_retired,
+      "assistant_snapshots": snapshots_materialized,
+    }
 
   def _reconcile_startup_chat(
     self, db, cmd: "ReconcileStartupChat",

@@ -51,9 +51,6 @@ class RunPolicy:
   scope: str
   cwd: str
   depth: int = 1
-  # Ordinary Subagents never set a local spending ceiling. This field exists
-  # only for an explicitly budgeted owner workflow such as a Gauntlet.
-  explicit_provider_budget_usd: float | None = None
   required_skill_paths: tuple[str, ...] = ()
 
   @property
@@ -127,9 +124,6 @@ class DelegationIntent:
   source_work_intent: str | None = None
   source_work_context_app_id: int | None = None
   source_work_envelope: dict | None = None
-  # Kept out of the ordinary submit API. Gauntlet is the sole caller that may
-  # reserve an owner-chosen provider budget on its delegated read slots.
-  explicit_provider_budget_usd: float | None = None
 
 
 def same_delegation_intent(
@@ -146,10 +140,6 @@ def same_delegation_intent(
     row.effort == intent.effort,
     row.scope == intent.scope,
     row.cwd == intent.cwd,
-    (
-      intent.explicit_provider_budget_usd is None
-      or row.max_budget_usd == intent.explicit_provider_budget_usd
-    ),
     row.source_work_id == intent.source_work_id,
     row.source_work_intent == intent.source_work_intent,
     row.source_work_context_app_id == intent.source_work_context_app_id,
@@ -214,7 +204,6 @@ def create_or_attach_delegation(
     cwd=intent.cwd,
     prompt_sha256=hashlib.sha256(intent.prompt.encode("utf-8")).hexdigest(),
     startup_prompt=intent.prompt,
-    max_budget_usd=intent.explicit_provider_budget_usd,
     notify_parent_on_complete=intent.notify_parent_on_complete,
     source_work_id=intent.source_work_id,
     source_work_intent=intent.source_work_intent,
@@ -475,16 +464,6 @@ def policy_for_chat(db: Session, chat_id: str) -> RunPolicy | None:
     if digest != row.prompt_sha256:
       raise RuntimeError("delegation prompt no longer matches immutable intent")
   depth = delegation_depth(db, row)
-  gauntlet_budget = None
-  if row.max_budget_usd is not None and db.query(
-    models.GauntletTask.id,
-  ).filter(models.GauntletTask.delegation_id == row.id).first() is not None:
-    known_prior_cost = float(sum(
-      float(value or 0.0) for (value,) in db.query(
-        models.ChatRun.cost_usd,
-      ).filter(models.ChatRun.chat_id == chat_id).all()
-    ))
-    gauntlet_budget = max(0.001, row.max_budget_usd - known_prior_cost)
   return RunPolicy(
     delegation_id=row.id,
     app_id=row.app_id,
@@ -494,7 +473,6 @@ def policy_for_chat(db: Session, chat_id: str) -> RunPolicy | None:
     scope=row.scope,
     cwd=row.cwd,
     depth=depth,
-    explicit_provider_budget_usd=gauntlet_budget,
     required_skill_paths=(
       (CONTRIBUTION_WORKFLOW_SKILL,)
       if row.source_work_id is not None

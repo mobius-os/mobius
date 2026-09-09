@@ -495,6 +495,8 @@ class Delegation(Base):
   # above and child transcript are sufficient and this transient recovery copy
   # is cleared.
   startup_prompt = Column(Text, nullable=True, default=None)
+  # Retained for historical Gauntlet task budgets. Ordinary Delegations do not
+  # acquire or enforce a provider budget through this column.
   max_budget_usd = Column(Float, nullable=True)
   created_at = Column(DateTime, nullable=False, default=lambda: now_naive_utc())
   cancelled_at = Column(DateTime, nullable=True, default=None)
@@ -589,13 +591,12 @@ class ChatWait(Base):
 
 
 class GauntletRun(Base):
-  """Durable coordinator state for one evidence-driven improvement loop.
+  """Legacy workflow history retained for non-destructive lifecycle cleanup.
 
-  ChatRun remains the execution authority for the owner-writer and Delegation
-  remains the authority for read-only critics.  This row persists only the
-  contract and the barrier position needed to deterministically decide which
-  execution belongs next.  ``create_all`` installs this new table on existing
-  copies; no ALTER migration is required.
+  Current code never creates or advances these rows. The cold-start retirement
+  cutover makes old execution graphs terminal before generic ChatRun or
+  Delegation recovery, while the normal chat/app hard-purge paths retain this
+  model so historical data can be removed with its owner.
   """
 
   __tablename__ = "gauntlet_runs"
@@ -661,14 +662,17 @@ class GauntletRun(Base):
   ended_at = Column(DateTime, nullable=True, default=None)
 
 
-class GauntletTargetMutex(Base):
-  """Singleton row serializing hierarchical target-lease acquisition.
+LEGACY_GAUNTLET_RETIREMENT_MARKER_ID = -1
 
-  A unique exact-path key cannot prevent concurrent ``parent`` / ``child``
-  targets. Every creator updates row 1 before scanning active normalized paths;
-  that row lock serializes the overlap decision across processes on SQLite and
-  PostgreSQL without reducing unrelated, non-overlapping runs to one global
-  lease for their full lifetimes.
+
+class GauntletTargetMutex(Base):
+  """Legacy workflow-owned singleton state retained after removal.
+
+  Historical writers used row ``1`` as the target-lease mutex.  The retirement
+  cutover reserves ``LEGACY_GAUNTLET_RETIREMENT_MARKER_ID`` as its atomic
+  completion marker. Keeping both in this already-owned table avoids a new
+  general migration service while making later boots an indexed marker lookup
+  rather than another history scan.
   """
 
   __tablename__ = "gauntlet_target_mutex"
@@ -678,14 +682,11 @@ class GauntletTargetMutex(Base):
 
 
 class GauntletTask(Base):
-  """One durable execution slot in a Gauntlet all-of barrier.
+  """Legacy execution-slot history retained with a Gauntlet record.
 
-  Read slots point at scope-enforced Delegations.  The sole write slot points
-  at a physical ChatRun in the owner controller chat, preserving owner-only
-  apply/play-test authority without inventing another runner.  The ChatRun id
-  is reserved before scheduling and deliberately is not an FK: the slot must
-  survive the crash window between reserving work and StartContinuation
-  creating the run in its own chat-writer transaction.
+  The links remain mapped so startup can retire old controller/delegation work
+  exactly and retention can purge the graph after its owner expires. No
+  current runtime schedules these slots.
   """
 
   __tablename__ = "gauntlet_tasks"

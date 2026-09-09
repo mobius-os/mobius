@@ -85,7 +85,6 @@ notifications_router = _load("notifications")
 debug_router = _load("debug")
 delegations_router = _load("delegations")
 chat_waits_router = _load("chat_waits")
-gauntlets_router = _load("gauntlets")
 goal_plans_router = _load("goal_plans")
 owner_approvals_router = _load("owner_approvals")
 theme_router = _load("theme")
@@ -140,7 +139,6 @@ __all__ = [
   "debug_router",
   "delegations_router",
   "chat_waits_router",
-  "gauntlets_router",
   "goal_plans_router",
   "owner_approvals_router",
   "theme_router",

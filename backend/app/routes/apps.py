@@ -477,13 +477,6 @@ async def _hard_delete_app(db: Session, app: models.App) -> None:
   deleted_app_id = app.id
   settings = get_settings()
 
-  if db.query(models.GauntletRun.id).filter(
-    models.GauntletRun.app_id == deleted_app_id,
-    models.GauntletRun.status.in_(("running", "stopping")),
-  ).first() is not None:
-    raise RuntimeError(
-      "active Gauntlet must quiesce before permanent app deletion"
-    )
   from app.delegations import active_delegation_ids_for_app
   if active_delegation_ids_for_app(db, deleted_app_id):
     raise RuntimeError(
@@ -561,8 +554,8 @@ async def _hard_delete_app(db: Session, app: models.App) -> None:
       models.Delegation.id.in_(delegation_ids),
     ).delete(synchronize_session=False)
 
-  # Critic chats are implementation-owned and have no value after their app's
-  # seven-day recovery window closes. Hand them to the ordinary hard-purge
+  # Delegated chats are implementation-owned and have no value after their
+  # app's seven-day recovery window closes. Hand them to the ordinary hard-purge
   # lifecycle; preserve other app-created chats as owner history by removing
   # only their now-invalid app attribution.
   if critic_chat_ids:
@@ -2978,31 +2971,6 @@ async def delete_app(
         },
       )
 
-    # A Gauntlet may still own an owner-authority writer plus hidden critics
-    # for this app. Latch and cancel those executions before the app's token and
-    # runtime disappear; cancellation remains durable/retryable if an SDK stop
-    # itself times out.
-    from app.gauntlets import stop_gauntlet
-    active_gauntlet_ids = [row[0] for row in db.query(
-      models.GauntletRun.id,
-    ).filter(
-      models.GauntletRun.app_id == app_id,
-      models.GauntletRun.status.in_(("running", "stopping")),
-    ).all()]
-    for gauntlet_id in active_gauntlet_ids:
-      stopped_gauntlet = await stop_gauntlet(gauntlet_id)
-      if (
-        stopped_gauntlet is not None
-        and stopped_gauntlet.get("status") == "stopping"
-      ):
-        raise HTTPException(
-          status_code=409,
-          detail=(
-            "Could not stop all Gauntlet work yet; retry app deletion after "
-            "the active provider process exits."
-          ),
-        )
-
     # An app-owned delegated process can keep spending or writing after its
     # frame disappears. Settle every child (and its descendants) before the
     # app authority is tombstoned; a provider that will not stop makes the
@@ -3023,14 +2991,6 @@ async def delete_app(
         )
     async with chat_queue.get_transition_lock(f"app-lifecycle:{app_id}"):
       db.rollback()
-      if db.query(models.GauntletRun.id).filter(
-        models.GauntletRun.app_id == app_id,
-        models.GauntletRun.status.in_(("running", "stopping")),
-      ).first() is not None:
-        raise HTTPException(
-          status_code=409,
-          detail="A Gauntlet started while deletion was waiting; retry deletion.",
-        )
       if active_delegation_ids_for_app(db, app_id):
         raise HTTPException(
           status_code=409,
