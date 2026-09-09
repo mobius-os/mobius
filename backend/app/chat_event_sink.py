@@ -932,7 +932,9 @@ class ChatEventSink:
         )
     return True
 
-  async def finalize(self) -> None:
+  async def finalize(
+    self, *, incorporate_activity_delivery: bool = False,
+  ) -> None:
     """Submit the terminal assistant-message write and await its ack.
 
     Runs once per turn AFTER the runner's stream loop returns, BEFORE the
@@ -945,8 +947,10 @@ class ChatEventSink:
     set for reconciliation to repair) — see the design's failure
     semantics. No fallback direct write.
 
-    No-op when there's nothing to finalize (no chat_id, no token, and
-    no accumulated blocks AND no recorded error — a truly empty turn).
+    The optional intent lets that commit also incorporate an admitted helper-
+    result envelope. No-op when there's nothing to finalize (no chat_id, no
+    token, and no accumulated blocks AND no recorded error — a truly empty
+    turn).
     When blocks are empty but _last_error is set (a turn that errored before
     any content arrived — auth failure, connect timeout, provider error),
     synthesize a minimal error block so the turn is durably persisted rather
@@ -990,6 +994,7 @@ class ChatEventSink:
       Finalize(
         chat_id=self.chat_id, run_token=self.run_token, snapshot=snapshot,
         thinking_stashes=stashes,
+        incorporate_activity_delivery=incorporate_activity_delivery,
       )
     )
     await _await_ack(ack)

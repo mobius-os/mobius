@@ -83,7 +83,6 @@ from app.chat_titles import apply_generated_title, renamed_event
 from app.goal_commands import is_goal_continue
 from app.memory_observability import claim_oom_kill
 from app.chat_writer import (
-  AcknowledgeActivityDelivery,
   AcknowledgePeerContextDelivery,
   AdmitProviderExecution,
   AppendPending,
@@ -4017,21 +4016,13 @@ async def _complete_turn(
     else "completed"
   )
 
-  # Provider return is not delivery durability. Record acceptance only after
-  # the terminal ownership/status gates have selected a clean completion, and
-  # still before Finalize so its transaction can consume the exact persisted
-  # envelope. Stop, stale/superseded, park, and error exits never cross this
-  # boundary; a crash after this small commit still leaves parent_woken_at open.
-  activity_delivery_accepted = False
-  if ending_status == "completed" and activity_delegation_ids:
-    activity_delivery_accepted = await _acknowledge_activity_delivery(
-      chat_id=chat_id,
-      run_token=sink.run_token or "",
-      delegation_ids=activity_delegation_ids,
-    )
-
+  incorporate_activity_delivery = (
+    ending_status == "completed" and bool(activity_delegation_ids)
+  )
   try:
-    await sink.finalize()
+    await sink.finalize(
+      incorporate_activity_delivery=incorporate_activity_delivery,
+    )
   except Exception as exc:
     log = _get_logger()
     log.error(
@@ -4079,10 +4070,11 @@ async def _complete_turn(
     db.close()
     return chat_queue.TerminalDisposition.FAILED_LEAVE_MARKER
 
-  # Finalize is the owning atomic commit for an accepted helper-result
-  # envelope and its terminal assistant incorporation. Only now can passive
-  # waiting/activity surfaces truthfully refetch the closed delivery latch.
-  if activity_delivery_accepted:
+  # Finalize is the owning atomic boundary for the helper-result envelope and
+  # terminal assistant response. Publish after that boundary so passive
+  # surfaces refetch committed truth; a Stop ordered first can leave the latch
+  # open, which the same refetch safely observes.
+  if incorporate_activity_delivery:
     from app.delegations import (
       publish_chat_activity_changed,
       publish_parent_waiting_changed,
@@ -4786,34 +4778,6 @@ async def _acknowledge_peer_context_delivery(
       run_token,
       exc_info=True,
     )
-
-
-async def _acknowledge_activity_delivery(
-  *, chat_id: str, run_token: str, delegation_ids: tuple[str, ...],
-) -> bool:
-  """Best-effort provider-acceptance intent for helper result data.
-
-  The writer deliberately leaves ``parent_woken_at`` open here. Finalize owns
-  the single transaction that persists both the terminal assistant response
-  and result consumption.
-  """
-  if not chat_id or not run_token or not delegation_ids:
-    return False
-  try:
-    await _await_ack(get_writer().submit(AcknowledgeActivityDelivery(
-      chat_id=chat_id,
-      run_token=run_token,
-    )))
-    return True
-  except Exception:
-    _get_logger().warning(
-      "activity context acknowledgement failed; delivery stays available "
-      "chat_id=%s run_token=%s",
-      chat_id,
-      run_token,
-      exc_info=True,
-    )
-    return False
 
 
 async def _sync_chat_title(data_dir: str, chat_id: str) -> None:

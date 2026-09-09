@@ -1238,6 +1238,7 @@ WAKE_RECOVERY_BATCH_SIZE = 16
 WAKE_NOTICE_DELEGATION_LIMIT = 16
 BACKGROUND_HELPER_ITEM_LIMIT = 16
 WAKE_PARENT_DELIVERY_TIMEOUT_SECS = 40.0
+ACTIVITY_DELIVERY_FINALIZE_ATOMIC = "finalize_atomic_v1"
 _LOG = logging.getLogger("moebius.delegations")
 _WAKE_RESULTS_OPEN = "<delegation_results>"
 _WAKE_RESULTS_CLOSE = "</delegation_results>"
@@ -1366,8 +1367,13 @@ def claim_inline_delegation_observation(
     if isinstance(ids, list) and row.id in ids:
       if (
         status == "completed"
-        and envelope.get("terminal_incorporated") is True
+        and envelope.get("delivery_contract")
+        != ACTIVITY_DELIVERY_FINALIZE_ATOMIC
       ):
+        # Compatibility: older runs acknowledged outside Finalize and could
+        # leave this latch open after their run status committed. Atomic
+        # envelopes never need that repair and must not let a stopped result
+        # be inferred from completed status alone.
         row.parent_woken_at = now_naive_utc()
         db.commit()
         return "parent_wake"
@@ -1786,12 +1792,11 @@ def build_delegation_result_context(
 def repair_completed_activity_deliveries(
   db: Session, parent_chat_id: str,
 ) -> set[str]:
-  """Repair only deliveries proven incorporated by their terminal commit.
+  """Close only pre-atomic acknowledgement gaps in completed run data.
 
-  Current Finalize commits this marker and ``parent_woken_at`` atomically, so
-  the repair is normally an idempotent no-op. A merely admitted or
-  provider-accepted run is deliberately insufficient: its terminal assistant
-  response may never have reached durable history.
+  Atomic Finalize envelopes commit ``parent_woken_at`` with the assistant
+  response and are deliberately excluded. Unversioned envelopes preserve the
+  historical repair contract for runs completed by older platform versions.
   """
   repaired: set[str] = set()
   runs = db.query(models.ChatRun.activity_delivery_json).filter(
@@ -1807,7 +1812,8 @@ def repair_completed_activity_deliveries(
     )
     if (
       not isinstance(raw_ids, list)
-      or envelope.get("terminal_incorporated") is not True
+      or envelope.get("delivery_contract")
+        == ACTIVITY_DELIVERY_FINALIZE_ATOMIC
     ):
       continue
     repaired.update(

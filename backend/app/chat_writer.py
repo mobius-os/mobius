@@ -189,12 +189,19 @@ class PersistTranscript(_Command):
 
 @dataclass
 class Finalize(_Command):
-  """Terminal full-snapshot write for a turn.  Never coalesces."""
+  """Terminal full-snapshot write for a turn.  Never coalesces.
+
+  ``incorporate_activity_delivery`` carries successful provider intent to the
+  persistence boundary. The actor consumes the admitted helper envelope only
+  when this exact run is still the current running owner, in the same commit
+  as the assistant snapshot.
+  """
 
   chat_id: str = ""
   run_token: str = ""
   snapshot: dict = field(default_factory=dict)
   thinking_stashes: list = field(default_factory=list)
+  incorporate_activity_delivery: bool = False
 
 
 @dataclass
@@ -308,20 +315,6 @@ class AcknowledgePeerContextDelivery(_Command):
   run_token: str = ""
   peer_message_through_created_at: datetime | None = None
   peer_message_through_id: str | None = None
-
-
-@dataclass
-class AcknowledgeActivityDelivery(_Command):
-  """Record provider acceptance of an admitted helper-result envelope.
-
-  The identities come from the run's persisted activity-delivery envelope,
-  not from a caller-provided transcript carrier. This does NOT consume them:
-  Finalize commits ``parent_woken_at`` atomically with the terminal assistant
-  response. Provider failure or a crash before Finalize leaves them available.
-  """
-
-  chat_id: str = ""
-  run_token: str = ""
 
 
 @dataclass
@@ -1806,16 +1799,14 @@ class ChatWriterActor:
       # no blocks) is a silent loss, not a success — raise so the caller does
       # not promote the queue / schedule a continuation on a write that never
       # landed.
-      outcome = self._finalize_required(
+      return self._finalize_required(
         db,
         cmd.chat_id,
         cmd.snapshot,
         cmd.thinking_stashes,
         run_token=cmd.run_token,
+        incorporate_activity_delivery=cmd.incorporate_activity_delivery,
       )
-      if outcome is not _WriteOutcome.APPLIED:
-        raise _PersistFailed(f"Finalize did not persist ({outcome.value})")
-      return True
     if isinstance(cmd, AnswerQuestion):
       return self._answer_question(db, cmd)
     if isinstance(cmd, PersistSessionId):
@@ -1826,8 +1817,6 @@ class ChatWriterActor:
       return self._admit_provider_execution(db, cmd)
     if isinstance(cmd, AcknowledgePeerContextDelivery):
       return self._acknowledge_peer_context_delivery(db, cmd)
-    if isinstance(cmd, AcknowledgeActivityDelivery):
-      return self._acknowledge_activity_delivery(db, cmd)
     if isinstance(cmd, RecordAgentLifecycle):
       from app.agent_lifecycle import record_event
       return record_event(db, cmd.values)
@@ -1974,22 +1963,23 @@ class ChatWriterActor:
     thinking_stashes: list | None = None,
     *,
     run_token: str = "",
-  ):
+    incorporate_activity_delivery: bool = False,
+  ) -> bool:
     """Force-complete tool blocks and write the terminal assistant message.
 
-    Backs `Finalize` and returns a `_WriteOutcome`: the dispatch raises
-    unless APPLIED, so a NOOP (missing row / empty transcript / no blocks)
-    fails the ack instead of falsely succeeding.  `snapshot["blocks"]` is
-    the accumulated block list; `finalize_response_outcome` closes any
-    running tool blocks before persisting.  On the recording stub the
-    recorded commit IS the terminal write, so it reports APPLIED.
+    Backs `Finalize` and returns True after its required commit. A NOOP
+    (missing row / empty transcript / no blocks) fails the ack instead of
+    falsely succeeding. `snapshot["blocks"]` is the accumulated block list;
+    `finalize_response_outcome` closes any running tool blocks before
+    persisting. On the recording stub the recorded commit IS the terminal
+    write.
     """
     if hasattr(db, "record_commit"):
       self._commit_snapshot(db, snapshot)
-      return _WriteOutcome.APPLIED
+      return True
     chat = _active_chat(db, chat_id)
     if chat is None:
-      return _WriteOutcome.NOOP
+      raise _PersistFailed("Finalize did not persist (noop)")
     # Native questions end with their provider turn. A continuation card is
     # deliberately handed off BY ending the turn, so keep its exact committed
     # marker. Never reconstruct it from an old snapshot: an early answer or
@@ -2037,20 +2027,22 @@ class ChatWriterActor:
       ).first()
       if still_exists is not None:
         db.rollback()
-        return _WriteOutcome.APPLIED
+        return True
     if outcome is _WriteOutcome.APPLIED:
       try:
-        self._stage_activity_delivery_consumption(
-          db, chat_id=chat_id, run_token=run_token,
-        )
+        if incorporate_activity_delivery:
+          self._stage_activity_delivery_consumption(
+            db, chat_id=chat_id, run_token=run_token,
+          )
       except Exception:
         db.rollback()
         raise
       if not _commit_or_rollback(db):
-        return _WriteOutcome.DROPPED
+        raise _PersistFailed("Finalize did not persist (dropped)")
+      return True
     else:
       db.rollback()
-    return outcome
+      raise _PersistFailed(f"Finalize did not persist ({outcome.value})")
 
   def _answer_question(self, db, cmd: AnswerQuestion) -> bool:
     """Re-read the chat fresh, merge answers into the question block, commit.
@@ -2125,7 +2117,10 @@ class ChatWriterActor:
       raise _PersistFailed(
         "AdmitProviderExecution: invalid activity delivery identity"
       )
-    from app.delegations import activity_continuation_delivery_source_work_id
+    from app.delegations import (
+      ACTIVITY_DELIVERY_FINALIZE_ATOMIC,
+      activity_continuation_delivery_source_work_id,
+    )
     source_work_id = activity_continuation_delivery_source_work_id(
       db, cmd.chat_id, cmd.run_token,
     )
@@ -2155,10 +2150,17 @@ class ChatWriterActor:
     run.provider_execution_admitted = True
     run.peer_message_delivery_pending = bool(cmd.has_peer_context_delivery)
     delivery_envelope = (
-      {"delegation_ids": list(activity_ids)} if activity_ids else None
+      {
+        "delegation_ids": list(activity_ids),
+        "delivery_contract": ACTIVITY_DELIVERY_FINALIZE_ATOMIC,
+      }
+      if activity_ids else None
     )
     if source_work_id is not None:
-      delivery_envelope = delivery_envelope or {"delegation_ids": []}
+      delivery_envelope = delivery_envelope or {
+        "delegation_ids": [],
+        "delivery_contract": ACTIVITY_DELIVERY_FINALIZE_ATOMIC,
+      }
       delivery_envelope["source_work_id"] = source_work_id
     run.activity_delivery_json = delivery_envelope
     if not _commit_or_rollback(db):
@@ -2203,72 +2205,19 @@ class ChatWriterActor:
     if not _commit_or_rollback(db):
       raise _PersistFailed("AcknowledgePeerContextDelivery did not persist")
 
-  def _acknowledge_activity_delivery(
-    self, db, cmd: AcknowledgeActivityDelivery,
-  ) -> int:
-    """Mark one admitted envelope accepted without consuming its results."""
-    from app.models import ChatRun
-
-    run = db.query(ChatRun).filter(
-      ChatRun.id == cmd.run_token,
-      ChatRun.chat_id == cmd.chat_id,
-      ChatRun.provider_execution_admitted.is_(True),
-    ).first()
-    if run is None:
-      raise _PersistFailed(
-        "AcknowledgeActivityDelivery: admitted run not found"
-      )
-    envelope = run.activity_delivery_json
-    raw_ids = (
-      envelope.get("delegation_ids")
-      if isinstance(envelope, dict) else None
-    )
-    if not isinstance(raw_ids, list) or not raw_ids:
-      return 0
-    ids = tuple(dict.fromkeys(
-      item for item in raw_ids if isinstance(item, str) and item
-    ))
-    if len(ids) != len(raw_ids):
-      raise _PersistFailed(
-        "AcknowledgeActivityDelivery: malformed persisted activity delivery"
-      )
-    ownership_filters = [
-      models.Delegation.id.in_(ids),
-      models.Delegation.parent_chat_id == cmd.chat_id,
-    ]
-    source_work_id = envelope.get("source_work_id")
-    if source_work_id is not None:
-      if not isinstance(source_work_id, str) or not source_work_id:
-        raise _PersistFailed(
-          "AcknowledgeActivityDelivery: malformed activity delivery scope"
-        )
-      ownership_filters.append(
-        models.Delegation.parent_root_run_id == source_work_id,
-      )
-    matching = db.query(models.Delegation.id).filter(
-      *ownership_filters,
-    ).all()
-    if {str(row[0]) for row in matching} != set(ids):
-      raise _PersistFailed(
-        "AcknowledgeActivityDelivery: activity ownership changed"
-      )
-    if envelope.get("provider_accepted") is True:
-      db.rollback()
-      return 0
-    run.activity_delivery_json = {
-      **envelope,
-      "provider_accepted": True,
-    }
-    if not _commit_or_rollback(db):
-      raise _PersistFailed("AcknowledgeActivityDelivery did not persist")
-    return 1
-
   def _stage_activity_delivery_consumption(
     self, db, *, chat_id: str, run_token: str,
-  ) -> int:
-    """Stage accepted result consumption for the same commit as Finalize."""
+  ) -> None:
+    """Stage eligible result consumption for the same commit as Finalize.
+
+    A stopped run may still finalize partial assistant output, but only the
+    exact current running owner can consume the helper envelope. The actor's
+    FIFO plus this durable/in-process ownership check closes the interval
+    between provider return and terminal Finalize without adding another
+    acceptance commit.
+    """
     if not run_token:
-      return 0
+      return
     from app.models import ChatRun
 
     run = db.query(ChatRun).filter(
@@ -2276,14 +2225,25 @@ class ChatWriterActor:
       ChatRun.chat_id == chat_id,
       ChatRun.provider_execution_admitted.is_(True),
     ).first()
-    envelope = run.activity_delivery_json if run is not None else None
-    if not isinstance(envelope, dict) or (
-      envelope.get("provider_accepted") is not True
+    if (
+      run is None
+      or run.status != "running"
+      or self._run_token_owner.get(chat_id) != run_token
+      or not self._run_is_latest(db, run)
     ):
-      return 0
+      return
+    envelope = run.activity_delivery_json
+    if not isinstance(envelope, dict):
+      return
+    from app.delegations import ACTIVITY_DELIVERY_FINALIZE_ATOMIC
+    if (
+      envelope.get("delivery_contract")
+      != ACTIVITY_DELIVERY_FINALIZE_ATOMIC
+    ):
+      raise _PersistFailed("Finalize: unsupported activity delivery contract")
     raw_ids = envelope.get("delegation_ids")
     if not isinstance(raw_ids, list) or not raw_ids:
-      return 0
+      return
     ids = tuple(dict.fromkeys(
       item for item in raw_ids if isinstance(item, str) and item
     ))
@@ -2305,7 +2265,7 @@ class ChatWriterActor:
     ).all()
     if {str(row[0]) for row in matching} != set(ids):
       raise _PersistFailed("Finalize: activity ownership changed")
-    incorporated = db.query(models.Delegation).filter(
+    db.query(models.Delegation).filter(
       *ownership_filters,
       models.Delegation.parent_woken_at.is_(None),
     ).update(
@@ -2315,11 +2275,6 @@ class ChatWriterActor:
       },
       synchronize_session=False,
     )
-    run.activity_delivery_json = {
-      **envelope,
-      "terminal_incorporated": True,
-    }
-    return incorporated
 
   def _record_run_metrics(self, db, cmd: RecordRunMetrics) -> bool:
     """Attach provider usage/cost to the exact durable run row."""

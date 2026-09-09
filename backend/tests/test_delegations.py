@@ -1116,8 +1116,7 @@ def test_activity_scope_keeps_goal_source_distinct_from_physical_root(db):
 
 def test_successful_finalize_consumes_exact_activity_once(db):
   from app.chat_writer import (
-    AcknowledgeActivityDelivery, AdmitProviderExecution,
-    Finalize, StartActivityContinuation,
+    AdmitProviderExecution, Finalize, StartActivityContinuation,
   )
 
   parent_id, _child_id, delegation_id = _seed_delegation(
@@ -1137,14 +1136,8 @@ def test_successful_finalize_consumes_exact_activity_once(db):
     chat_id=parent_id, run_token=run_token,
     activity_delegation_ids=(delegation_id,),
   )).result(timeout=5)
-  assert get_writer().submit(AcknowledgeActivityDelivery(
-    chat_id=parent_id, run_token=run_token,
-  )).result(timeout=5) == 1
-  assert get_writer().submit(AcknowledgeActivityDelivery(
-    chat_id=parent_id, run_token=run_token,
-  )).result(timeout=5) == 0
-  # Provider acceptance records only intent. The terminal assistant reply and
-  # result consumption become durable in the same Finalize commit.
+  # Provider return is carried directly into the terminal write. The assistant
+  # reply and result consumption become durable in the same Finalize commit.
   assert db.get(models.Delegation, delegation_id).parent_woken_at is None
   terminal = Finalize(
     chat_id=parent_id,
@@ -1154,19 +1147,21 @@ def test_successful_finalize_consumes_exact_activity_once(db):
       "role": "assistant",
       "blocks": [{"type": "text", "content": "Result incorporated."}],
     },
+    incorporate_activity_delivery=True,
   )
-  get_writer().submit(terminal).result(timeout=5)
+  assert get_writer().submit(terminal).result(timeout=5) is True
   db.expire_all()
   first_woken_at = db.get(models.Delegation, delegation_id).parent_woken_at
   assert first_woken_at is not None
   assert db.get(models.ChatRun, run_token).activity_delivery_json[
-    "terminal_incorporated"
-  ] is True
-  get_writer().submit(Finalize(
+    "delivery_contract"
+  ] == delegations_mod.ACTIVITY_DELIVERY_FINALIZE_ATOMIC
+  assert get_writer().submit(Finalize(
     chat_id=terminal.chat_id,
     run_token=terminal.run_token,
     snapshot=terminal.snapshot,
-  )).result(timeout=5)
+    incorporate_activity_delivery=True,
+  )).result(timeout=5) is True
   db.expire_all()
   assert db.get(models.Delegation, delegation_id).parent_woken_at == first_woken_at
   assert delegations_mod.build_delegation_result_context(
@@ -1337,7 +1332,7 @@ def test_automatic_root_checkpoint_does_not_admit_or_ack_sibling_root_result(
 def test_ordinary_owner_turn_keeps_intentional_chat_wide_result_breadth(db):
   """Root binding narrows machine wakes, not an owner's ordinary turn."""
   from app.chat_writer import (
-    AcknowledgeActivityDelivery, AdmitProviderExecution, Finalize,
+    AdmitProviderExecution, Finalize,
   )
 
   parent_id, _child_a, delegation_a = _seed_delegation(
@@ -1374,10 +1369,7 @@ def test_ordinary_owner_turn_keeps_intentional_chat_wide_result_breadth(db):
     run_token=run_token,
     activity_delegation_ids=ordinary.delegation_ids,
   )).result(timeout=5)
-  get_writer().submit(AcknowledgeActivityDelivery(
-    chat_id=parent_id, run_token=run_token,
-  )).result(timeout=5)
-  get_writer().submit(Finalize(
+  assert get_writer().submit(Finalize(
     chat_id=parent_id,
     run_token=run_token,
     snapshot={
@@ -1385,7 +1377,8 @@ def test_ordinary_owner_turn_keeps_intentional_chat_wide_result_breadth(db):
       "role": "assistant",
       "blocks": [{"type": "text", "content": "Both incorporated."}],
     },
-  )).result(timeout=5)
+    incorporate_activity_delivery=True,
+  )).result(timeout=5) is True
 
   db.expire_all()
   assert db.get(models.Delegation, delegation_a).parent_woken_at is not None
@@ -1423,9 +1416,9 @@ def test_failed_finalize_keeps_injected_activity_result_redeliverable(
     reject_terminal_commit,
   )
   # Owning production order under test:
-  # provider success -> AcknowledgeActivityDelivery intent -> _complete_turn
-  # -> sink.finalize/Finalize rollback. The negative check below requires the
-  # activity latch to remain open when that terminal response never commits.
+  # Provider success -> _complete_turn -> sink.finalize/Finalize rollback. The
+  # negative check below requires the activity latch to remain open when that
+  # terminal response never commits.
   disposition, _seen_prompts = _run_activity_checkpoint(
     db,
     monkeypatch,
@@ -1511,12 +1504,66 @@ def test_stop_and_supersession_gates_keep_activity_result_redeliverable(
       db.get(models.Delegation, delegation_id),
     ),
   ).activity_delivery_json
-  assert envelope.get("provider_accepted") is None
+  assert envelope.get("delivery_contract") == (
+    delegations_mod.ACTIVITY_DELIVERY_FINALIZE_ATOMIC
+  )
   durable_reply = any(
     "Provider reply at the ownership race." in str(message)
     for message in (db.get(models.Chat, parent_id).messages or [])
   )
   assert durable_reply is (race == "stop")
+  assert delegations_mod.build_delegation_result_context(
+    db, parent_id,
+  ).delegation_ids == (delegation_id,)
+
+
+@pytest.mark.parametrize("provider_id", ["claude", "codex"])
+def test_stop_after_provider_return_before_finalize_keeps_activity_redeliverable(
+  db, monkeypatch, provider_id,
+):
+  """Writer eligibility closes the post-gate Stop window on real turn flow."""
+  from app.chat_writer import FinishRun, await_ack
+
+  parent_id, _child_id, delegation_id = _seed_delegation(
+    db,
+    suffix=f"activity-{provider_id}-post-return-stop",
+    result_blocks=[{"type": "text", "content": "Keep after late Stop."}],
+    parent_messages=[{"role": "user", "content": "Original owner work."}],
+  )
+  root_run_id = _seed_idle_parent_wake_root(db, delegation_id)
+  run_token = delegations_mod._activity_continuation_run_id(
+    db.get(models.Delegation, delegation_id),
+  )
+  real_finalize = chat_mod._ChatEventSink.finalize
+
+  async def stop_before_finalize(sink, **kwargs):
+    await await_ack(get_writer().submit(FinishRun(
+      chat_id=parent_id,
+      run_token=run_token,
+      terminal_status="stopped",
+    )))
+    return await real_finalize(sink, **kwargs)
+
+  monkeypatch.setattr(
+    chat_mod._ChatEventSink, "finalize", stop_before_finalize,
+  )
+  _disposition, seen_prompts = _run_activity_checkpoint(
+    db,
+    monkeypatch,
+    parent_id=parent_id,
+    root_run_id=root_run_id,
+    delegation_id=delegation_id,
+    response="Partial response persisted after Stop.",
+    provider_id=provider_id,
+  )
+
+  db.expire_all()
+  assert "Keep after late Stop." in seen_prompts[0]
+  assert db.get(models.Delegation, delegation_id).parent_woken_at is None
+  assert any(
+    "Partial response persisted after Stop." in str(message)
+    for message in (db.get(models.Chat, parent_id).messages or [])
+  )
   assert delegations_mod.build_delegation_result_context(
     db, parent_id,
   ).delegation_ids == (delegation_id,)
@@ -1569,8 +1616,7 @@ def test_unadmitted_activity_restart_reschedules_same_physical_turn(
 
 def test_admitted_provider_return_crash_keeps_result_for_owner_replay(db):
   from app.chat_writer import (
-    AcknowledgeActivityDelivery, AdmitProviderExecution,
-    StartActivityContinuation,
+    AdmitProviderExecution, StartActivityContinuation,
   )
 
   parent_id, _child_id, delegation_id = _seed_delegation(
@@ -1588,9 +1634,6 @@ def test_admitted_provider_return_crash_keeps_result_for_owner_replay(db):
   get_writer().submit(AdmitProviderExecution(
     chat_id=parent_id, run_token=run_token,
     activity_delegation_ids=(delegation_id,),
-  )).result(timeout=5)
-  get_writer().submit(AcknowledgeActivityDelivery(
-    chat_id=parent_id, run_token=run_token,
   )).result(timeout=5)
   # Simulate reconciliation after the process died after provider return but
   # before Finalize could durably incorporate its assistant response.
@@ -1610,18 +1653,75 @@ def test_admitted_provider_return_crash_keeps_result_for_owner_replay(db):
   ).count() == 1
 
 
+def test_pre_atomic_completed_delivery_repair_remains_supported(db):
+  """Existing completed envelopes retain their historical crash repair."""
+  parent_id, _child_id, delegation_id = _seed_delegation(
+    db,
+    suffix="legacy-activity-delivery-repair",
+    result_blocks=[{"type": "text", "content": "Historical result."}],
+  )
+  db.add(models.ChatRun(
+    id="rt-legacy-activity-delivery-repair",
+    root_run_id="rt-legacy-activity-delivery-repair",
+    chat_id=parent_id,
+    status="completed",
+    provider="claude",
+    provider_execution_admitted=True,
+    activity_delivery_json={"delegation_ids": [delegation_id]},
+    started_at=now_naive_utc(),
+    ended_at=now_naive_utc(),
+  ))
+  db.commit()
+
+  assert delegations_mod.repair_completed_activity_deliveries(
+    db, parent_id,
+  ) == {delegation_id}
+  db.expire_all()
+  assert db.get(models.Delegation, delegation_id).parent_woken_at is not None
+
+
+def test_atomic_completed_envelope_alone_never_repairs_activity_delivery(db):
+  """New run status is not a substitute for the atomic Finalize commit."""
+  parent_id, _child_id, delegation_id = _seed_delegation(
+    db,
+    suffix="atomic-activity-delivery-no-repair",
+    result_blocks=[{"type": "text", "content": "Still undelivered."}],
+  )
+  db.add(models.ChatRun(
+    id="rt-atomic-activity-delivery-no-repair",
+    root_run_id="rt-atomic-activity-delivery-no-repair",
+    chat_id=parent_id,
+    status="completed",
+    provider="claude",
+    provider_execution_admitted=True,
+    activity_delivery_json={
+      "delegation_ids": [delegation_id],
+      "delivery_contract": delegations_mod.ACTIVITY_DELIVERY_FINALIZE_ATOMIC,
+    },
+    started_at=now_naive_utc(),
+    ended_at=now_naive_utc(),
+  ))
+  db.commit()
+
+  assert delegations_mod.repair_completed_activity_deliveries(
+    db, parent_id,
+  ) == set()
+  db.expire_all()
+  assert db.get(models.Delegation, delegation_id).parent_woken_at is None
+
+
 @pytest.mark.parametrize("terminal_status", ["stopped", "interrupted"])
 def test_stopped_or_superseded_activity_never_consumes_accepted_result(
   db, terminal_status,
 ):
   from app.chat_writer import (
-    AcknowledgeActivityDelivery, AdmitProviderExecution,
-    StartActivityContinuation,
+    AdmitProviderExecution, Finalize, StartActivityContinuation,
   )
 
   parent_id, _child_id, delegation_id = _seed_delegation(
     db, suffix="activity-run-stop",
     result_blocks=[{"type": "text", "content": "Still available."}],
+    parent_messages=[{"role": "user", "content": "Original owner work."}],
   )
   root_run_id = _seed_idle_parent_wake_root(db, delegation_id)
   run_token = delegations_mod._activity_continuation_run_id(
@@ -1635,16 +1735,32 @@ def test_stopped_or_superseded_activity_never_consumes_accepted_result(
     chat_id=parent_id, run_token=run_token,
     activity_delegation_ids=(delegation_id,),
   )).result(timeout=5)
-  get_writer().submit(AcknowledgeActivityDelivery(
-    chat_id=parent_id, run_token=run_token,
-  )).result(timeout=5)
   get_writer().submit(FinishRun(
     chat_id=parent_id, run_token=run_token, terminal_status=terminal_status,
   )).result(timeout=5)
+  # A stopped/superseded provider can still leave partial assistant output
+  # that Finalize must preserve. The terminal run is no longer eligible to
+  # incorporate helper context even when its terminal command carries a
+  # successful-provider intent.
+  assert get_writer().submit(Finalize(
+    chat_id=parent_id,
+    run_token=run_token,
+    snapshot={
+      "id": run_token,
+      "role": "assistant",
+      "blocks": [{"type": "text", "content": "Persisted partial output."}],
+    },
+    incorporate_activity_delivery=True,
+  )).result(timeout=5) is True
   assert asyncio.run(delegations_mod._deliver_parent_wake_once(
     parent_id, "root-activity-run-stop",
   )) is False
+  db.expire_all()
   assert db.get(models.Delegation, delegation_id).parent_woken_at is None
+  assert any(
+    "Persisted partial output." in str(message)
+    for message in (db.get(models.Chat, parent_id).messages or [])
+  )
 
 
 def test_legacy_completion_carrier_is_recognized_without_rewriting_history(db):
