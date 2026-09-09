@@ -122,6 +122,7 @@ async function mount(page, { rejectFirst = false, loseFirstAck = false } = {}) {
   }, {chatPath:path})
   if (page.url() !== 'about:blank') await page.evaluate(() => sessionStorage.clear())
   await page.goto(`${BASE}/shell/?chat=${CHAT}`, { waitUntil: 'domcontentloaded' })
+  await page.bringToFront()
   const surface = page.locator('[data-chat-surface="painted"]')
   await expect(surface.getByRole('button', { name: 'Resume', exact: true })).toBeVisible({ timeout: 15000 })
   const composer = surface.getByRole('textbox', { name: 'Message Möbius…' })
@@ -159,7 +160,11 @@ test('Resume waits for acknowledgement without changing draft, attachment, queue
   const resume = state.surface.getByRole('button', { name: 'Resume', exact: true })
   await resume.evaluate(element => element.scrollIntoView({ block: 'center', behavior: 'instant' }))
   await state.surface.locator('.chat__scroll').hover()
-  await page.mouse.wheel(0, -40)
+  const beforeWheel = await state.surface.locator('.chat__scroll').evaluate(element => element.scrollTop)
+  // Establish reader hold without moving the nearby Resume control beneath
+  // the floating composer/attachment tray before the action even starts.
+  await page.mouse.wheel(0, -8)
+  await expect.poll(() => state.surface.locator('.chat__scroll').evaluate(element => element.scrollTop)).toBeLessThan(beforeWheel)
   await page.evaluate(() => new Promise(resolve => {
     const scroll = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
     let previous = null, stable = 0
@@ -186,10 +191,12 @@ test('Resume waits for acknowledgement without changing draft, attachment, queue
   const before = await sampleGeometry(page)
 
   const button = await resume.boundingBox()
-  expect(await resume.evaluate(element => {
+  const target = await resume.evaluate(element => {
     const box = element.getBoundingClientRect()
-    return element.contains(document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2))
-  })).toBe(true)
+    const hit = document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2)
+    return { receivesPointer: element.contains(hit), box: box.toJSON(), blocker: hit?.className }
+  })
+  expect(target.receivesPointer, JSON.stringify(target)).toBe(true)
   await page.mouse.click(button.x + button.width / 2, button.y + button.height / 2)
   await state.requested.promise
   await expect(state.surface.getByRole('button', { name: 'Resuming…', exact: true })).toBeDisabled()
@@ -259,7 +266,11 @@ test('a delayed no-stream reconciliation keeps the partial answer painted until 
   await expect(state.surface.getByText(/^Recovered paragraph 28:/)).toBeVisible()
   await state.surface.getByText(/^Recovered paragraph 28:/).scrollIntoViewIfNeeded()
   await state.surface.locator('.chat__scroll').hover()
-  await page.mouse.wheel(0, -40)
+  const beforeWheel = await state.surface.locator('.chat__scroll').evaluate(element => element.scrollTop)
+  // Establish reader hold without moving the nearby Resume control beneath
+  // the floating composer/attachment tray before the action even starts.
+  await page.mouse.wheel(0, -8)
+  await expect.poll(() => state.surface.locator('.chat__scroll').evaluate(element => element.scrollTop)).toBeLessThan(beforeWheel)
   await page.evaluate(() => new Promise(resolve => {
     const scroll = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
     let previous = null, stable = 0
