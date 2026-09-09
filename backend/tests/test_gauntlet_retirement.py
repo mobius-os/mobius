@@ -88,6 +88,65 @@ def _gauntlet(
   )
 
 
+@pytest.mark.parametrize("status", ["running", "parked", "resume_pending", "parked_notified"])
+def test_active_controller_before_first_writer_cannot_resume(db, status):
+  app = _app(db)
+  base = datetime(2026, 9, 8, 12)
+  db.add(models.Chat(id="launch-controller", title="Launch", messages=[]))
+  db.add(models.ChatRun(
+    id="launch-root", root_run_id="launch-root", chat_id="launch-controller",
+    status=status, started_at=base, park_reason="usage_limit",
+  ))
+  db.add(_gauntlet(
+    row_id="launch-gauntlet", app_id=app.id, chat_id="launch-controller",
+    root_id="launch-root", status="running", base=base,
+  ))
+  db.commit()
+  wait_ack(get_writer().submit(RetireLegacyGauntletExecution()))
+  db.expire_all()
+  assert db.get(models.ChatRun, "launch-root").status == "stopped"
+
+
+def test_notified_legacy_child_park_loses_resume_authority(db):
+  app = _app(db)
+  base = datetime(2026, 9, 8, 12)
+  db.add_all([
+    models.Chat(id="notified-parent", title="Parent", messages=[]),
+    models.Chat(id="notified-child", title="Child", messages=[]),
+  ])
+  db.add(_gauntlet(
+    row_id="notified-gauntlet", app_id=app.id, chat_id="notified-parent",
+    root_id="parent-root", status="running", base=base,
+  ))
+  db.add(_delegation(
+    row_id="notified-delegation", app_id=app.id, parent_chat_id="notified-parent",
+    child_chat_id="notified-child", task_key="notified-review",
+  ))
+  db.add(models.GauntletTask(
+    id="notified-task", gauntlet_run_id="notified-gauntlet", phase="baseline",
+    round=0, ordinal=0, role="critic", scope="read",
+    delegation_id="notified-delegation", prompt_sha256="1" * 64,
+  ))
+  db.add(models.ChatRun(
+    id="notified-run", root_run_id="notified-run", chat_id="notified-child",
+    status="parked_notified", started_at=base, park_reason="usage_limit",
+    initiated_by_app_id=app.id,
+  ))
+  db.commit()
+  assert limit_resume_app_id(
+    db, child_chat_id="notified-child", run_token="notified-run",
+    initiated_by_app_id=app.id,
+  ) == app.id
+  wait_ack(get_writer().submit(RetireLegacyGauntletExecution()))
+  db.expire_all()
+  assert db.get(models.ChatRun, "notified-run").status == "stopped"
+  assert db.get(models.Delegation, "notified-delegation").cancelled_at is not None
+  assert limit_resume_app_id(
+    db, child_chat_id="notified-child", run_token="notified-run",
+    initiated_by_app_id=app.id,
+  ) is None
+
+
 def test_first_cutover_retires_task_lineages_without_claiming_reused_chats(db):
   app = _app(db)
   base = datetime(2026, 9, 8, 12, 0, 0)

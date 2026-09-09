@@ -2394,17 +2394,24 @@ class ChatWriterActor:
           if descendant_id not in delegations
         )
 
+    # A notified quota park still has an explicit resume path; retirement must
+    # revoke it without changing the ordinary lifecycle's terminality rules.
+    resumable_statuses = {*models.NONTERMINAL_RUN_STATUSES, "parked_notified"}
     selected_runs: dict[str, models.ChatRun] = {
       run.id: run
       for runs in delegation_runs.values()
       for run in runs
-      if run.status in models.NONTERMINAL_RUN_STATUSES
+      if run.status in resumable_statuses
     }
 
     # A writer task has an exact reserved seed identity.  Restart/limit
     # continuations are included only when a writer-owned transcript envelope
     # names both predecessor and successor; same-root proximity is not proof.
     writer_tasks_by_chat: dict[str, list[models.GauntletTask]] = {}
+    controller_seeds = {
+      (row.parent_chat_id, row.parent_root_run_id, row.parent_root_run_id)
+      for row in gauntlets if row.status in {"running", "stopping"}
+    }
     for task in tasks:
       if task.scope != "write" or task.chat_run_id is None:
         continue
@@ -2414,14 +2421,21 @@ class ChatWriterActor:
       writer_tasks_by_chat.setdefault(
         gauntlet.parent_chat_id, [],
       ).append(task)
-      seed = db.get(models.ChatRun, task.chat_run_id)
+      controller_seeds.add((
+        gauntlet.parent_chat_id, gauntlet.parent_root_run_id, task.chat_run_id,
+      ))
+    # The original registration/controller seed can be paused before any
+    # writer task exists. Treat its exact causal successors like writer seeds,
+    # never as permission to consume arbitrary later same-chat work.
+    for controller_chat_id, root_id, seed_id in sorted(controller_seeds):
+      seed = db.get(models.ChatRun, seed_id)
       if seed is None or (
-        seed.chat_id != gauntlet.parent_chat_id
-        or (seed.root_run_id or seed.id) != gauntlet.parent_root_run_id
+        seed.chat_id != controller_chat_id
+        or (seed.root_run_id or seed.id) != root_id
       ):
         if seed is not None:
           unresolved.append(
-            f"writer task {task.id} run {seed.id} has mismatched chat/root"
+            f"controller seed {seed_id} has mismatched chat/root"
           )
         continue
       owned_ids = {seed.id}
@@ -2459,9 +2473,9 @@ class ChatWriterActor:
             continue
           owned_ids.add(successor.id)
           pending_predecessors.add(successor.id)
-          if successor.status in models.NONTERMINAL_RUN_STATUSES:
+          if successor.status in resumable_statuses:
             selected_runs[successor.id] = successor
-      if seed.status in models.NONTERMINAL_RUN_STATUSES:
+      if seed.status in resumable_statuses:
         selected_runs[seed.id] = seed
 
     selected_by_chat: dict[str, set[str]] = {}
@@ -2567,7 +2581,7 @@ class ChatWriterActor:
       if changed:
         chat.updated_at = now
 
-    unfinished_statuses = set(models.NONTERMINAL_RUN_STATUSES)
+    unfinished_statuses = resumable_statuses
     cancelled_delegations = 0
     for row in delegations.values():
       owned = delegation_runs.get(row.id, [])
