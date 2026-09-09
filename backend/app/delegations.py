@@ -1364,10 +1364,17 @@ def claim_inline_delegation_observation(
       if isinstance(envelope, dict) else None
     )
     if isinstance(ids, list) and row.id in ids:
-      if status == "completed":
+      if (
+        status == "completed"
+        and envelope.get("terminal_incorporated") is True
+      ):
         row.parent_woken_at = now_naive_utc()
         db.commit()
-      return "parent_wake"
+        return "parent_wake"
+      if status == "running":
+        # A running admission still owns its result through Finalize. Do not
+        # let a concurrent blocking attachment claim a second delivery path.
+        return "parent_wake"
   if row.id in _recorded_parent_wake_ids(db, row.parent_chat_id):
     if row.id not in _repairable_parent_wake_ids(db, row.parent_chat_id):
       # The deterministic wake owns observation, but its commit-before-spawn
@@ -1679,12 +1686,18 @@ def available_delegation_results(
   db: Session,
   parent_chat_id: str,
   *,
+  source_work_id: str | None = None,
   limit: int = WAKE_NOTICE_DELEGATION_LIMIT,
 ) -> list[models.Delegation]:
-  """Oldest terminal helper results not yet incorporated by this parent."""
+  """Oldest terminal helper results available to this context checkpoint.
+
+  Ordinary owner turns intentionally use the chat-wide default. Automatic
+  activity continuations pass their exact source-work identity so a wake for
+  one logical root cannot observe or consume a sibling root's result.
+  """
   if limit < 1:
     return []
-  return (
+  query = (
     db.query(models.Delegation)
     .join(models.ChatRun, models.ChatRun.id == _latest_child_run_id())
     .filter(
@@ -1694,17 +1707,74 @@ def available_delegation_results(
       models.Delegation.parent_woken_at.is_(None),
       models.ChatRun.status.in_(WAKE_ELIGIBLE_RUN_STATUSES),
     )
-    .order_by(models.Delegation.created_at.asc(), models.Delegation.id.asc())
-    .limit(min(limit, 100))
-    .all()
   )
+  if source_work_id is not None:
+    query = query.filter(
+      models.Delegation.parent_root_run_id == source_work_id,
+    )
+  return query.order_by(
+    models.Delegation.created_at.asc(), models.Delegation.id.asc(),
+  ).limit(min(limit, 100)).all()
+
+
+def activity_continuation_delivery_source_work_id(
+  db: Session, parent_chat_id: str, run_token: str,
+) -> str | None:
+  """Return the exact source-work scope for an automatic activity run.
+
+  ``None`` denotes an ordinary owner turn, whose result context is deliberately
+  chat-wide. New activity starts persist their scope in the existing delivery
+  envelope before scheduling. The deterministic-identity fallback recognizes
+  a pre-fix, never-admitted orphan after restart. An unrecognized token in the
+  platform-owned activity namespace returns ``""`` so it fails closed instead
+  of acquiring ordinary-turn breadth.
+  """
+  if not run_token.startswith(_ACTIVITY_RUN_PREFIX):
+    return None
+  run = db.query(models.ChatRun).filter(
+    models.ChatRun.id == run_token,
+    models.ChatRun.chat_id == parent_chat_id,
+  ).first()
+  if run is None:
+    return ""
+  envelope = run.activity_delivery_json
+  source_work_id = (
+    envelope.get("source_work_id")
+    if isinstance(envelope, dict) else None
+  )
+  if isinstance(source_work_id, str) and source_work_id:
+    root_run_id = _parent_wake_continuation_root(
+      db, parent_chat_id, source_work_id,
+    )
+    return (
+      source_work_id
+      if root_run_id is not None
+      and (run.root_run_id or run.id) == root_run_id
+      else ""
+    )
+  rows = db.query(models.Delegation).filter(
+    models.Delegation.parent_chat_id == parent_chat_id,
+  ).all()
+  for row in rows:
+    if _activity_continuation_run_id(row) != run_token:
+      continue
+    root_run_id = _parent_wake_continuation_root(
+      db, parent_chat_id, row.parent_root_run_id,
+    )
+    if root_run_id is not None and (
+      run.root_run_id or run.id
+    ) == root_run_id:
+      return row.parent_root_run_id
+  return ""
 
 
 def build_delegation_result_context(
-  db: Session, parent_chat_id: str,
+  db: Session, parent_chat_id: str, *, source_work_id: str | None = None,
 ) -> DelegationResultContextDelivery:
   """Render available helper results from their owning durable records."""
-  rows = available_delegation_results(db, parent_chat_id)
+  rows = available_delegation_results(
+    db, parent_chat_id, source_work_id=source_work_id,
+  )
   if not rows:
     return DelegationResultContextDelivery(text="", delegation_ids=())
   return DelegationResultContextDelivery(
@@ -1716,7 +1786,13 @@ def build_delegation_result_context(
 def repair_completed_activity_deliveries(
   db: Session, parent_chat_id: str,
 ) -> set[str]:
-  """Close provider-success acknowledgement gaps without rearming a turn."""
+  """Repair only deliveries proven incorporated by their terminal commit.
+
+  Current Finalize commits this marker and ``parent_woken_at`` atomically, so
+  the repair is normally an idempotent no-op. A merely admitted or
+  provider-accepted run is deliberately insufficient: its terminal assistant
+  response may never have reached durable history.
+  """
   repaired: set[str] = set()
   runs = db.query(models.ChatRun.activity_delivery_json).filter(
     models.ChatRun.chat_id == parent_chat_id,
@@ -1729,7 +1805,10 @@ def repair_completed_activity_deliveries(
       envelope.get("delegation_ids")
       if isinstance(envelope, dict) else None
     )
-    if not isinstance(raw_ids, list):
+    if (
+      not isinstance(raw_ids, list)
+      or envelope.get("terminal_incorporated") is not True
+    ):
       continue
     repaired.update(
       item for item in raw_ids if isinstance(item, str) and item

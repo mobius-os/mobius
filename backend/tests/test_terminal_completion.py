@@ -440,7 +440,7 @@ def test_terminal_finalize_failure_leaves_marker_then_reconcile_repairs(
   )
   _patch_claude_runner(monkeypatch)
 
-  def _boom(db_, chat_id, blocks):
+  def _boom(db_, chat_id, blocks, *, commit=True):
     from app.chat_writer import _PersistFailed
     raise _PersistFailed("forced finalize failure")
 
@@ -500,7 +500,7 @@ def test_terminal_failure_does_not_overwrite_a_fresh_turn(monkeypatch):
   chat_mod.mark_starting("t2-fresh")
   gen = chat_mod.current_run_generation("t2-fresh")
 
-  def _fail_after_reclaim(db_, chat_id, blocks):
+  def _fail_after_reclaim(db_, chat_id, blocks, *, commit=True):
     from app.chat_writer import StartTurn, _PersistFailed
     chat_mod.bump_run_generation(chat_id)
     writer = get_writer()
@@ -2077,9 +2077,9 @@ def test_stop_during_finalize_makes_drain_bow_out_under_lock(monkeypatch):
   # delegate to the real handler so the terminal write still persists.
   real_finalize = chat_writer.finalize_response_outcome
 
-  def bumping_finalize(db_, chat_id, blocks):
+  def bumping_finalize(db_, chat_id, blocks, *, commit=True):
     chat_mod.bump_run_generation(chat_id)
-    return real_finalize(db_, chat_id, blocks)
+    return real_finalize(db_, chat_id, blocks, commit=commit)
 
   monkeypatch.setattr(chat_writer, "finalize_response_outcome", bumping_finalize)
 

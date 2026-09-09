@@ -3863,6 +3863,7 @@ async def _complete_turn(
   parked_until: datetime | None = None,
   park_reason: str | None = None,
   provider_free: bool = False,
+  activity_delegation_ids: tuple[str, ...] = (),
 ) -> chat_queue.TerminalDisposition:
   """Terminal sequence shared by both providers' success + error exits.
 
@@ -4016,6 +4017,19 @@ async def _complete_turn(
     else "completed"
   )
 
+  # Provider return is not delivery durability. Record acceptance only after
+  # the terminal ownership/status gates have selected a clean completion, and
+  # still before Finalize so its transaction can consume the exact persisted
+  # envelope. Stop, stale/superseded, park, and error exits never cross this
+  # boundary; a crash after this small commit still leaves parent_woken_at open.
+  activity_delivery_accepted = False
+  if ending_status == "completed" and activity_delegation_ids:
+    activity_delivery_accepted = await _acknowledge_activity_delivery(
+      chat_id=chat_id,
+      run_token=sink.run_token or "",
+      delegation_ids=activity_delegation_ids,
+    )
+
   try:
     await sink.finalize()
   except Exception as exc:
@@ -4064,6 +4078,17 @@ async def _complete_turn(
       await _close_browser_session(chat_id)
     db.close()
     return chat_queue.TerminalDisposition.FAILED_LEAVE_MARKER
+
+  # Finalize is the owning atomic commit for an accepted helper-result
+  # envelope and its terminal assistant incorporation. Only now can passive
+  # waiting/activity surfaces truthfully refetch the closed delivery latch.
+  if activity_delivery_accepted:
+    from app.delegations import (
+      publish_chat_activity_changed,
+      publish_parent_waiting_changed,
+    )
+    publish_chat_activity_changed(chat_id)
+    publish_parent_waiting_changed(chat_id)
 
   # Identity-keyed: a Stop + fresh send racing in during the finalize await
   # above may already hold the active pointer; clear only if it's still ours
@@ -4765,21 +4790,21 @@ async def _acknowledge_peer_context_delivery(
 
 async def _acknowledge_activity_delivery(
   *, chat_id: str, run_token: str, delegation_ids: tuple[str, ...],
-) -> None:
-  """Best-effort provider-success acknowledgement for helper result data."""
+) -> bool:
+  """Best-effort provider-acceptance intent for helper result data.
+
+  The writer deliberately leaves ``parent_woken_at`` open here. Finalize owns
+  the single transaction that persists both the terminal assistant response
+  and result consumption.
+  """
   if not chat_id or not run_token or not delegation_ids:
-    return
+    return False
   try:
     await _await_ack(get_writer().submit(AcknowledgeActivityDelivery(
       chat_id=chat_id,
       run_token=run_token,
     )))
-    from app.delegations import (
-      publish_chat_activity_changed,
-      publish_parent_waiting_changed,
-    )
-    publish_chat_activity_changed(chat_id)
-    publish_parent_waiting_changed(chat_id)
+    return True
   except Exception:
     _get_logger().warning(
       "activity context acknowledgement failed; delivery stays available "
@@ -4788,6 +4813,7 @@ async def _acknowledge_activity_delivery(
       run_token,
       exc_info=True,
     )
+    return False
 
 
 async def _sync_chat_title(data_dir: str, chat_id: str) -> None:
@@ -5333,13 +5359,24 @@ async def _run_chat_impl_with_db(
     alive_chat_ids=registry.all_alive_chat_ids(),
   )
 
-  # Helper completion is durable activity, not human conversation. Pull the
-  # still-available result from its Delegation/child record into provider-only
-  # context and retain exact identities for provider-success acknowledgement.
+  # Helper completion is durable activity, not human conversation. Ordinary
+  # owner turns intentionally receive every available result in this chat;
+  # automatic activity continuations are bound to their exact source work so
+  # one logical root cannot admit or consume a sibling root's result.
   activity_delegation_ids: tuple[str, ...] = ()
   if run_policy is None and chat_id:
-    from app.delegations import build_delegation_result_context
-    activity_delivery = build_delegation_result_context(db, chat_id)
+    from app.delegations import (
+      activity_continuation_delivery_source_work_id,
+      build_delegation_result_context,
+    )
+    activity_source_work_id = (
+      activity_continuation_delivery_source_work_id(
+        db, chat_id, run_token or "",
+      )
+    )
+    activity_delivery = build_delegation_result_context(
+      db, chat_id, source_work_id=activity_source_work_id,
+    )
     activity_delegation_ids = activity_delivery.delegation_ids
     if activity_delivery.text:
       if is_slash_command:
@@ -5819,11 +5856,6 @@ async def _run_chat_impl_with_db(
           run_token=run_token or "",
           delivered_through=coordination_message_through,
         )
-        await _acknowledge_activity_delivery(
-          chat_id=chat_id,
-          run_token=run_token or "",
-          delegation_ids=activity_delegation_ids,
-        )
       usage_metrics = runner_result.get("usage_metrics")
       await _record_run_metrics(
         chat_id=chat_id,
@@ -5883,7 +5915,9 @@ async def _run_chat_impl_with_db(
     return await _complete_turn(
       bc=bc, sink=sink, db=db, chat_id=chat_id, run_gen=run_gen,
       provider_id=provider_id, cost_usd=runner_result.get("cost_usd") or 0,
-      close_browser=True, **park_kwargs,
+      close_browser=True,
+      activity_delegation_ids=(activity_delegation_ids if not err else ()),
+      **park_kwargs,
     )
 
   if is_claude:
@@ -6008,11 +6042,6 @@ async def _run_chat_impl_with_db(
           run_token=run_token or "",
           delivered_through=coordination_message_through,
         )
-        await _acknowledge_activity_delivery(
-          chat_id=chat_id,
-          run_token=run_token or "",
-          delegation_ids=activity_delegation_ids,
-        )
       usage_metrics = runner_result.get("usage_metrics")
       await _record_run_metrics(
         chat_id=chat_id,
@@ -6062,7 +6091,9 @@ async def _run_chat_impl_with_db(
     return await _complete_turn(
       bc=bc, sink=sink, db=db, chat_id=chat_id, run_gen=run_gen,
       provider_id=provider_id, cost_usd=runner_result.get("cost_usd") or 0,
-      close_browser=True, **park_kwargs,
+      close_browser=True,
+      activity_delegation_ids=(activity_delegation_ids if not err else ()),
+      **park_kwargs,
     )
 
   # Unknown provider — every supported provider is handled by an SDK

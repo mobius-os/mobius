@@ -312,11 +312,12 @@ class AcknowledgePeerContextDelivery(_Command):
 
 @dataclass
 class AcknowledgeActivityDelivery(_Command):
-  """Mark the exact helper results in an admitted run as incorporated.
+  """Record provider acceptance of an admitted helper-result envelope.
 
   The identities come from the run's persisted activity-delivery envelope,
-  not from a caller-provided transcript carrier. Provider failure leaves the
-  results available for the next real context checkpoint.
+  not from a caller-provided transcript carrier. This does NOT consume them:
+  Finalize commits ``parent_woken_at`` atomically with the terminal assistant
+  response. Provider failure or a crash before Finalize leaves them available.
   """
 
   chat_id: str = ""
@@ -2013,7 +2014,13 @@ class ChatWriterActor:
     # so discards the identity that owns its durable row.
     if terminal_snapshot.get("id") is None and run_token:
       terminal_snapshot["id"] = run_token
-    outcome = finalize_response_outcome(db, chat_id, terminal_snapshot)
+    # Stage, but do not commit, the terminal transcript. Any admitted helper
+    # result that the provider accepted is consumed below in this SAME
+    # transaction; a failed commit rolls both facts back and keeps the result
+    # redeliverable.
+    outcome = finalize_response_outcome(
+      db, chat_id, terminal_snapshot, commit=False,
+    )
     if outcome is _WriteOutcome.NOOP:
       # The sink only submits Finalize with non-empty blocks, so a NOOP here
       # means the row had nothing to finalize onto. Distinguish two causes: a
@@ -2031,7 +2038,17 @@ class ChatWriterActor:
       if still_exists is not None:
         db.rollback()
         return _WriteOutcome.APPLIED
-    if outcome is not _WriteOutcome.APPLIED:
+    if outcome is _WriteOutcome.APPLIED:
+      try:
+        self._stage_activity_delivery_consumption(
+          db, chat_id=chat_id, run_token=run_token,
+        )
+      except Exception:
+        db.rollback()
+        raise
+      if not _commit_or_rollback(db):
+        return _WriteOutcome.DROPPED
+    else:
       db.rollback()
     return outcome
 
@@ -2108,13 +2125,28 @@ class ChatWriterActor:
       raise _PersistFailed(
         "AdmitProviderExecution: invalid activity delivery identity"
       )
+    from app.delegations import activity_continuation_delivery_source_work_id
+    source_work_id = activity_continuation_delivery_source_work_id(
+      db, cmd.chat_id, cmd.run_token,
+    )
+    if source_work_id == "":
+      raise _PersistFailed(
+        "AdmitProviderExecution: activity delivery scope is invalid"
+      )
     if activity_ids:
-      activity_rows = db.query(models.Delegation.id).filter(
+      ownership_filters = [
         models.Delegation.id.in_(activity_ids),
         models.Delegation.parent_chat_id == cmd.chat_id,
         models.Delegation.notify_parent_on_complete.is_(True),
         models.Delegation.parent_woken_at.is_(None),
         models.Delegation.cancelled_at.is_(None),
+      ]
+      if source_work_id is not None:
+        ownership_filters.append(
+          models.Delegation.parent_root_run_id == source_work_id,
+        )
+      activity_rows = db.query(models.Delegation.id).filter(
+        *ownership_filters,
       ).all()
       if {str(row[0]) for row in activity_rows} != set(activity_ids):
         raise _PersistFailed(
@@ -2122,9 +2154,13 @@ class ChatWriterActor:
         )
     run.provider_execution_admitted = True
     run.peer_message_delivery_pending = bool(cmd.has_peer_context_delivery)
-    run.activity_delivery_json = (
+    delivery_envelope = (
       {"delegation_ids": list(activity_ids)} if activity_ids else None
     )
+    if source_work_id is not None:
+      delivery_envelope = delivery_envelope or {"delegation_ids": []}
+      delivery_envelope["source_work_id"] = source_work_id
+    run.activity_delivery_json = delivery_envelope
     if not _commit_or_rollback(db):
       raise _PersistFailed("AdmitProviderExecution did not persist")
 
@@ -2170,7 +2206,7 @@ class ChatWriterActor:
   def _acknowledge_activity_delivery(
     self, db, cmd: AcknowledgeActivityDelivery,
   ) -> int:
-    """Consume only the helper identities recorded by this admitted run."""
+    """Mark one admitted envelope accepted without consuming its results."""
     from app.models import ChatRun
 
     run = db.query(ChatRun).filter(
@@ -2196,17 +2232,81 @@ class ChatWriterActor:
       raise _PersistFailed(
         "AcknowledgeActivityDelivery: malformed persisted activity delivery"
       )
-    matching = db.query(models.Delegation.id).filter(
+    ownership_filters = [
       models.Delegation.id.in_(ids),
       models.Delegation.parent_chat_id == cmd.chat_id,
+    ]
+    source_work_id = envelope.get("source_work_id")
+    if source_work_id is not None:
+      if not isinstance(source_work_id, str) or not source_work_id:
+        raise _PersistFailed(
+          "AcknowledgeActivityDelivery: malformed activity delivery scope"
+        )
+      ownership_filters.append(
+        models.Delegation.parent_root_run_id == source_work_id,
+      )
+    matching = db.query(models.Delegation.id).filter(
+      *ownership_filters,
     ).all()
     if {str(row[0]) for row in matching} != set(ids):
       raise _PersistFailed(
         "AcknowledgeActivityDelivery: activity ownership changed"
       )
-    incorporated = db.query(models.Delegation).filter(
+    if envelope.get("provider_accepted") is True:
+      db.rollback()
+      return 0
+    run.activity_delivery_json = {
+      **envelope,
+      "provider_accepted": True,
+    }
+    if not _commit_or_rollback(db):
+      raise _PersistFailed("AcknowledgeActivityDelivery did not persist")
+    return 1
+
+  def _stage_activity_delivery_consumption(
+    self, db, *, chat_id: str, run_token: str,
+  ) -> int:
+    """Stage accepted result consumption for the same commit as Finalize."""
+    if not run_token:
+      return 0
+    from app.models import ChatRun
+
+    run = db.query(ChatRun).filter(
+      ChatRun.id == run_token,
+      ChatRun.chat_id == chat_id,
+      ChatRun.provider_execution_admitted.is_(True),
+    ).first()
+    envelope = run.activity_delivery_json if run is not None else None
+    if not isinstance(envelope, dict) or (
+      envelope.get("provider_accepted") is not True
+    ):
+      return 0
+    raw_ids = envelope.get("delegation_ids")
+    if not isinstance(raw_ids, list) or not raw_ids:
+      return 0
+    ids = tuple(dict.fromkeys(
+      item for item in raw_ids if isinstance(item, str) and item
+    ))
+    if len(ids) != len(raw_ids):
+      raise _PersistFailed("Finalize: malformed activity delivery envelope")
+    ownership_filters = [
       models.Delegation.id.in_(ids),
-      models.Delegation.parent_chat_id == cmd.chat_id,
+      models.Delegation.parent_chat_id == chat_id,
+    ]
+    source_work_id = envelope.get("source_work_id")
+    if source_work_id is not None:
+      if not isinstance(source_work_id, str) or not source_work_id:
+        raise _PersistFailed("Finalize: malformed activity delivery scope")
+      ownership_filters.append(
+        models.Delegation.parent_root_run_id == source_work_id,
+      )
+    matching = db.query(models.Delegation.id).filter(
+      *ownership_filters,
+    ).all()
+    if {str(row[0]) for row in matching} != set(ids):
+      raise _PersistFailed("Finalize: activity ownership changed")
+    incorporated = db.query(models.Delegation).filter(
+      *ownership_filters,
       models.Delegation.parent_woken_at.is_(None),
     ).update(
       {
@@ -2215,10 +2315,10 @@ class ChatWriterActor:
       },
       synchronize_session=False,
     )
-    if incorporated and not _commit_or_rollback(db):
-      raise _PersistFailed("AcknowledgeActivityDelivery did not persist")
-    if not incorporated:
-      db.rollback()
+    run.activity_delivery_json = {
+      **envelope,
+      "terminal_incorporated": True,
+    }
     return incorporated
 
   def _record_run_metrics(self, db, cmd: RecordRunMetrics) -> bool:
@@ -3361,7 +3461,12 @@ class ChatWriterActor:
     self, db, cmd: StartActivityContinuation,
   ) -> dict | StartContinuationAttached | StartContinuationBlocked:
     """Open an explicitly awaited helper checkpoint without a transcript row."""
-    from app.delegations import WAKE_ELIGIBLE_STATUSES, derived_status
+    from app.delegations import (
+      WAKE_ELIGIBLE_STATUSES,
+      _activity_continuation_run_id,
+      _parent_wake_continuation_root,
+      derived_status,
+    )
     from app.models import ChatRun
 
     chat = _active_chat(db, cmd.chat_id)
@@ -3384,15 +3489,32 @@ class ChatWriterActor:
     ):
       db.rollback()
       return StartContinuationBlocked("activity_unavailable")
+    if cmd.run_token != _activity_continuation_run_id(trigger):
+      raise _PersistFailed(
+        "StartActivityContinuation: run identity does not match activity"
+      )
+    expected_root_run_id = _parent_wake_continuation_root(
+      db, cmd.chat_id, cmd.source_work_id,
+    )
+    if expected_root_run_id != cmd.root_run_id:
+      raise _PersistFailed(
+        "StartActivityContinuation: source work belongs to another root"
+      )
 
     existing_run = db.query(ChatRun).filter(
       ChatRun.id == cmd.run_token,
       ChatRun.chat_id == cmd.chat_id,
     ).first()
     if existing_run is not None:
+      existing_envelope = existing_run.activity_delivery_json
+      existing_source_work_id = (
+        existing_envelope.get("source_work_id")
+        if isinstance(existing_envelope, dict) else None
+      )
       if (
         (existing_run.root_run_id or existing_run.id) != cmd.root_run_id
         or existing_run.initiated_by_app_id is not None
+        or existing_source_work_id not in (None, cmd.source_work_id)
       ):
         raise _PersistFailed(
           "StartActivityContinuation: run identity belongs to other work"
@@ -3400,14 +3522,6 @@ class ChatWriterActor:
       db.rollback()
       return StartContinuationAttached()
 
-    root = db.query(ChatRun.id).filter(
-      ChatRun.id == cmd.root_run_id,
-      ChatRun.chat_id == cmd.chat_id,
-    ).first()
-    if root is None:
-      raise _PersistFailed(
-        "StartActivityContinuation: logical root does not belong to chat"
-      )
     if chat.pending_question_id is not None:
       db.rollback()
       return StartContinuationBlocked("pending_question")
@@ -3470,6 +3584,10 @@ class ChatWriterActor:
       initiated_by_app_id=None,
       goal_objective=latest.goal_objective,
       goal_id=latest.goal_id,
+      activity_delivery_json={
+        "delegation_ids": [trigger.id],
+        "source_work_id": cmd.source_work_id,
+      },
     ))
     if not _commit_or_rollback(db):
       raise _PersistFailed("StartActivityContinuation did not persist")
@@ -5407,7 +5525,9 @@ def _active_chat(db, chat_id: str):
   ).first()
 
 
-def _apply_last_assistant_message(db, chat_id: str, message: dict):
+def _apply_last_assistant_message(
+  db, chat_id: str, message: dict, *, commit: bool = True,
+):
   """Core assistant-message write, returning a `_WriteOutcome`.
 
   Distinguishes APPLIED (the write landed), NOOP (no chat_id / missing row /
@@ -5490,10 +5610,10 @@ def _apply_last_assistant_message(db, chat_id: str, message: dict):
   message_owner_id = _assistant_message_id(message)
   if message_owner_id is not None:
     chat.active_assistant_message_id = message_owner_id
+  if not commit:
+    return _WriteOutcome.APPLIED
   return (
-    _WriteOutcome.APPLIED
-    if _commit_or_rollback(db)
-    else _WriteOutcome.DROPPED
+    _WriteOutcome.APPLIED if _commit_or_rollback(db) else _WriteOutcome.DROPPED
   )
 
 
@@ -5615,7 +5735,9 @@ def update_live_assistant(
   return _commit_or_rollback(db)
 
 
-def finalize_response_outcome(db, chat_id: str, assistant_message: dict):
+def finalize_response_outcome(
+  db, chat_id: str, assistant_message: dict, *, commit: bool = True,
+):
   """End-of-response cleanup, returning a `_WriteOutcome`.
 
   Empty blocks -> NOOP (no terminal state to write); otherwise force-complete
@@ -5633,7 +5755,9 @@ def finalize_response_outcome(db, chat_id: str, assistant_message: dict):
   if not isinstance(assistant_blocks, list) or not assistant_blocks:
     return _WriteOutcome.NOOP
   finalize_blocks(assistant_blocks)
-  return _apply_last_assistant_message(db, chat_id, terminal_message)
+  return _apply_last_assistant_message(
+    db, chat_id, terminal_message, commit=commit,
+  )
 
 
 def apply_answers_to_last_question(
