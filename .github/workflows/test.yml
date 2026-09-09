@@ -92,6 +92,10 @@ jobs:
         run: >-
           pip install --require-hashes -r requirements.lock
           && pip install -r requirements-static.txt
+      - name: Install pinned Codex Python SDK
+        run: >-
+          pip install --no-deps
+          'openai-codex @ git+https://github.com/openai/codex.git@3d2ee51ca2d5db578f328aa75e20aa22c0197c9a#subdirectory=sdk/python'
       - name: Run backend static analysis
         working-directory: backend
         run: |

@@ -550,7 +550,11 @@ def project_status(
   }
 
 
-def _untracked_diff(target: Path, status: str, *, limit: int = _DIFF_OUTPUT_MAX) -> dict:
+def _untracked_diff(
+  target: Path, status: str, *, limit: int | None = None,
+) -> dict:
+  if limit is None:
+    limit = _DIFF_OUTPUT_MAX
   read_failed = False
   try:
     if target.is_symlink():

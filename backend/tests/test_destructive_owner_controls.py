@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from types import SimpleNamespace
 
 from fastapi.responses import JSONResponse
@@ -413,20 +414,12 @@ def test_owner_top_level_and_app_principals_keep_common_object_controls(
         "doc": {"value": "remote"},
       }
 
-  class FakeAsyncClient:
-    def __init__(self, *_args, **_kwargs):
-      pass
+  async def fake_federation_request(*_args, **_kwargs):
+    return FakeResponse()
 
-    async def __aenter__(self):
-      return self
-
-    async def __aexit__(self, *_args):
-      return False
-
-    async def post(self, *_args, **_kwargs):
-      return FakeResponse()
-
-  monkeypatch.setattr(object_routes.httpx, "AsyncClient", FakeAsyncClient)
+  monkeypatch.setattr(
+    object_routes, "federation_request", fake_federation_request,
+  )
 
   app_created = client.post(
     "/api/common/objects",
@@ -471,7 +464,7 @@ def test_owner_top_level_and_app_principals_keep_common_object_controls(
     headers=context["app"],
   )
   assert declined.status_code == 200, declined.text
-  assert not invitation_path.exists()
+  assert json.loads(invitation_path.read_text())["status"] == "declined"
 
   joined = client.post(
     "/api/common/objects/join",

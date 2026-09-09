@@ -271,18 +271,17 @@ def test_restart_guidance_requires_activation_proof_and_fresh_approval():
   normalized_core = " ".join(core.split())
   normalized_maintenance = " ".join(maintenance.split())
 
-  assert "**Server restarts**: ALWAYS ask" in core
+  assert "**Server restarts**: ALWAYS publish the exact platform-owned" in core
   assert "If no changed runtime owner requires a restart, do not offer one" in (
     normalized_core
   )
-  assert "ALWAYS ask through Möbius's `request_approval` tool for the exact restart" in (
+  assert "`request_restart` card after the `platform-maintenance` activation preflight" in (
     normalized_core
   )
-  assert "End the turn after its saved receipt and act only" in normalized_core
-  assert "on the owner's explicit **Restart now** answer in the continuation" in (
-    normalized_core
-  )
-  assert "authorizes one restart call only" in normalized_core
+  assert "End the turn after its saved receipt" in normalized_core
+  assert "The owner's explicit **Restart now** selection authorizes" in normalized_core
+  assert "one platform dispatch; agents never replay that command" in normalized_core
+  assert "Task approval or delegation is not restart approval" in normalized_core
   assert "## Choose the smallest activation action" in maintenance
   assert "No shell rebuild or server restart" in maintenance
   assert "No server restart" in maintenance
@@ -306,13 +305,13 @@ def test_restart_guidance_requires_activation_proof_and_fresh_approval():
     normalized_maintenance
   )
   assert "Its receipt confirms only that the card was saved" in normalized_maintenance
-  assert "It does not grant approval: end the turn" in normalized_maintenance
-  assert "let the owner's answer resume the chat" in normalized_maintenance
-  assert (
-    "A **Restart now** answer authorizes exactly one safe restart call"
-    in maintenance
+  assert "not approval: end the turn with no further text or tools" in (
+    normalized_maintenance
   )
-  assert "A second restart" in maintenance
+  assert "The owner's **Restart now** click is dispatched by the platform" in (
+    normalized_maintenance
+  )
+  assert "Do not use `request_approval`" in maintenance
   assert "service may be unavailable for tens of seconds" in normalized_maintenance
   assert "delegation of the complete backend-fix loop does not approve" in (
     normalized_maintenance

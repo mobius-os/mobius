@@ -702,6 +702,7 @@ def test_manual_and_pull_request_runs_cover_suites_and_main_image():
   assert "pull_request:\n" in test_triggers
   assert "workflow_dispatch:\n" in test_triggers
   assert "push:\n" not in test_triggers
+  assert "openai-codex @ git+https://github.com/openai/codex.git@3d2ee51" in backend
   for job in (backend, e2e):
     assert "github.event_name == 'pull_request'" not in job
     assert "refs/heads/integration/" not in job
