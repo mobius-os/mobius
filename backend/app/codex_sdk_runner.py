@@ -1788,6 +1788,12 @@ async def _run_codex_sdk_turn(
   current_session_id = session_id
   completed_turn: Any | None = None
   completed_message_phases: list[str | None] = []
+  # Codex can abandon an in-progress AgentMessage and immediately start a
+  # replacement item without completing the first one. Keep that provider
+  # lifecycle identity until another item makes the first message deliberate,
+  # so the replacement can discard only the orphaned partial text.
+  open_agent_message_item_id: str | None = None
+  abandoned_agent_message_item_ids: set[str] = set()
   first_token_usage: Any | None = None
   final_token_usage: Any | None = None
   call_token_usages: list[Any] = []
@@ -2255,9 +2261,11 @@ async def _run_codex_sdk_turn(
         payload = notification.payload
 
         if isinstance(payload, sdk["AgentMessageDeltaNotification"]):
+          item_id = str(getattr(payload, "item_id", None) or "")
+          if item_id and item_id in abandoned_agent_message_item_ids:
+            continue
           if payload.delta:
             event = {"type": "text", "content": payload.delta}
-            item_id = getattr(payload, "item_id", None)
             if item_id:
               event["text_item_id"] = item_id
             bc.publish(event)
@@ -2298,8 +2306,24 @@ async def _run_codex_sdk_turn(
         if isinstance(payload, sdk["ItemStartedNotification"]):
           item = payload.item.root if hasattr(payload.item, "root") else payload.item
           if isinstance(item, sdk["AgentMessageThreadItem"]):
-            bc.publish({"type": "text_boundary"})
+            item_id = str(getattr(item, "id", None) or "")
+            event = {"type": "text_boundary"}
+            if (
+              open_agent_message_item_id
+              and item_id
+              and item_id != open_agent_message_item_id
+            ):
+              event["replace_text_item_id"] = open_agent_message_item_id
+              abandoned_agent_message_item_ids.add(
+                open_agent_message_item_id,
+              )
+            open_agent_message_item_id = item_id or None
+            bc.publish(event)
             continue
+          # A tool/reasoning item between two assistant messages makes the
+          # earlier text a deliberate separate block, even if the provider
+          # omitted its completion notification.
+          open_agent_message_item_id = None
           if isinstance(item, sdk["CollabAgentToolCallThreadItem"]):
             # One provider-neutral Task block hosts every helper activation in
             # this turn. Codex may announce ThreadStarted before or after its
@@ -2374,7 +2398,13 @@ async def _run_codex_sdk_turn(
             _publish_codex_context_compaction(bc, chat_id)
             continue
           if isinstance(item, sdk["AgentMessageThreadItem"]):
+            item_id = str(getattr(item, "id", None) or "")
+            if item_id and item_id in abandoned_agent_message_item_ids:
+              abandoned_agent_message_item_ids.discard(item_id)
+              continue
             completed_message_phases.append(_agent_message_phase(item, sdk))
+            if item_id and item_id == open_agent_message_item_id:
+              open_agent_message_item_id = None
           if not isinstance(item, sdk["CollabAgentToolCallThreadItem"]):
             for event in _tool_completed_events(item, sdk):
               _stamp_tool_use_id(event, item)

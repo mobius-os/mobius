@@ -1184,6 +1184,31 @@ def test_text_boundary_reducer_splits_consecutive_text():
   assert all(b.get("type") != "text_boundary" for b in blocks)
 
 
+def test_replacement_boundary_discards_only_the_abandoned_text_item():
+  blocks = []
+  process_event({
+    "type": "text", "content": "settled", "text_item_id": "msg-1",
+  }, blocks)
+  process_event({"type": "text_boundary"}, blocks)
+  process_event({
+    "type": "text", "content": "abandoned partial",
+    "text_item_id": "msg-2",
+  }, blocks)
+
+  changed = process_event({
+    "type": "text_boundary", "replace_text_item_id": "msg-2",
+  }, blocks)
+  process_event({
+    "type": "text", "content": "replacement", "text_item_id": "msg-3",
+  }, blocks)
+
+  assert changed is True
+  assert [
+    (block["content"], block.get("text_item_id"))
+    for block in blocks if block.get("type") == "text"
+  ] == [("settled", "msg-1"), ("replacement", "msg-3")]
+
+
 def test_text_boundary_on_empty_is_noop():
   """A leading boundary (no prior non-empty text) does nothing — guards the
   first-block case so a turn never opens with a stray marker."""

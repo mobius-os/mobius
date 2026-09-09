@@ -2241,6 +2241,96 @@ def test_run_codex_sdk_turn_cleans_up_active_session_on_stream_exception(
   assert mark_finished_calls == [True]
 
 
+def test_codex_replacement_message_discards_unfinished_provider_item(monkeypatch):
+  class AgentMessage:
+    def __init__(self, item_id, text, phase):
+      self.id = item_id
+      self.text = text
+      self.phase = phase
+
+  class AgentMessageDelta:
+    def __init__(self, item_id, delta):
+      self.item_id = item_id
+      self.delta = delta
+
+  class ItemStarted:
+    def __init__(self, item):
+      self.item = item
+
+  class ItemCompleted:
+    def __init__(self, item):
+      self.item = item
+
+  abandoned = AgentMessage(
+    "msg-abandoned", "I will publish those two commits",
+    _FakeMessagePhase.commentary,
+  )
+  replacement = AgentMessage(
+    "msg-replacement", "I will publish the two approved commits",
+    _FakeMessagePhase.final_answer,
+  )
+  completed_turn = SimpleNamespace(
+    id="turn-1", usage=None, error=None, status=_FakeTurnStatus.completed,
+    items=[replacement],
+  )
+  notifications = [
+    SimpleNamespace(payload=ItemStarted(abandoned)),
+    SimpleNamespace(payload=AgentMessageDelta(
+      abandoned.id, "I will publish those two commits",
+    )),
+    SimpleNamespace(payload=ItemStarted(replacement)),
+    SimpleNamespace(payload=AgentMessageDelta(
+      replacement.id, "I will publish the two approved commits",
+    )),
+    # Late notifications for the abandoned item must never resurrect it.
+    SimpleNamespace(payload=AgentMessageDelta(abandoned.id, " (late)")),
+    SimpleNamespace(payload=ItemCompleted(abandoned)),
+    SimpleNamespace(payload=ItemCompleted(replacement)),
+    SimpleNamespace(payload=_FakeTurnCompletedNotification(completed_turn)),
+  ]
+  thread = _FakeThread("thread-1", _FakeTurnHandle(notifications))
+
+  class FakeAsyncCodex:
+    def __init__(self, config=None):
+      self.config = config
+
+    async def __aenter__(self):
+      return self
+
+    async def __aexit__(self, _exc_type, _exc, _tb):
+      return None
+
+    async def thread_start(self, *_args, **_kwargs):
+      return thread
+
+  sdk = _fake_sdk(FakeAsyncCodex)
+  sdk.update({
+    "AgentMessageThreadItem": AgentMessage,
+    "AgentMessageDeltaNotification": AgentMessageDelta,
+    "ItemStartedNotification": ItemStarted,
+    "ItemCompletedNotification": ItemCompleted,
+  })
+  monkeypatch.setattr(codex_sdk_runner, "_sdk_imports", lambda: sdk)
+
+  bus = _FakeBroadcast()
+  result = asyncio.run(codex_sdk_runner.run_codex_sdk_turn(
+    user_message="ship", session_id=None, base_env={}, cwd="/tmp",
+    chat_id="chat-replacement", bc=bus, pending_questions={}, db=None,
+  ))
+
+  assert result["error"] is None
+  assert {
+    "type": "text_boundary",
+    "replace_text_item_id": abandoned.id,
+  } in bus.events
+  assert not any(
+    event.get("text_item_id") == abandoned.id
+    and event.get("type") == "text_final"
+    for event in bus.events
+  )
+  assert not any(event.get("content") == " (late)" for event in bus.events)
+
+
 @pytest.mark.parametrize(
   "event_kind",
   ["context_compaction_item", "legacy_notification"],

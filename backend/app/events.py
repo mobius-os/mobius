@@ -1101,12 +1101,22 @@ def process_event(event: dict, assistant_blocks: list) -> bool:
     # paragraph instead of becoming `previous.next`. The marker is internal:
     # build_assistant_message ignores it and finalize_blocks removes any
     # trailing boundary that never received text.
+    changed = False
+    replace_text_item_id = event.get("replace_text_item_id")
+    if replace_text_item_id:
+      for idx in range(len(assistant_blocks) - 1, -1, -1):
+        block = assistant_blocks[idx]
+        if (block.get("type") == "text"
+            and block.get("text_item_id") == replace_text_item_id):
+          assistant_blocks.pop(idx)
+          changed = True
+          break
     if (assistant_blocks
         and assistant_blocks[-1].get("type") == "text"
         and assistant_blocks[-1].get("content")):
       assistant_blocks.append({"type": "text_boundary"})
       return True
-    return False
+    return changed
 
   if event_type == "context_compacted":
     # Provider-native compaction is a chronological product event, not tool

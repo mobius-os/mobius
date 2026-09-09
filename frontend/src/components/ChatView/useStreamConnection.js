@@ -21,6 +21,7 @@ import {
   reconcileStreamItems,
   applyTaskEvent,
   appendTextItem,
+  discardTextItem,
   replaceTextItem,
   startToolLifecycle,
   applySkillLoaded,
@@ -1117,6 +1118,11 @@ export default function useStreamConnection(chatId, {
             // Identity was adopted above; it has no renderable payload.
           } else if (event.type === 'text_boundary') {
             flushBuffer()
+            if (event.replace_text_item_id) {
+              applyStreamItems(
+                prev => discardTextItem(prev, event.replace_text_item_id),
+              )
+            }
             forceNewTextBlockRef.current = true
           } else if (event.type === 'text') {
             const content = event.content || ''

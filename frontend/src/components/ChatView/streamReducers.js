@@ -195,6 +195,20 @@ export function appendTextItem(prev, content, {
   return updated
 }
 
+/** Remove one provider-owned text item that was abandoned before completion. */
+export function discardTextItem(prev, textItemId) {
+  if (!textItemId) return prev
+  for (let i = prev.length - 1; i >= 0; i -= 1) {
+    const item = prev[i]
+    if (item?.type === 'text' && item.text_item_id === textItemId) {
+      const updated = [...prev]
+      updated.splice(i, 1)
+      return updated
+    }
+  }
+  return prev
+}
+
 /** Replace the authoritative full text for one provider message item. */
 export function replaceTextItem(prev, content, {
   textItemId = null,

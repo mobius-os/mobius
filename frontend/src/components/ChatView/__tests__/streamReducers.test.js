@@ -29,6 +29,7 @@ import {
   attachToolSources,
   reconcileStreamItems,
   appendTextItem,
+  discardTextItem,
   repairInterleavedQuestionText,
   replaceTextItem,
   startToolLifecycle,
@@ -163,6 +164,17 @@ test('boundary plus final-only item does not replace the preceding text', () => 
   assert.deepEqual(items, [
     { type: 'text', content: 'first item' },
     { type: 'text', content: 'second item', text_item_id: 'msg-2' },
+  ])
+})
+
+test('abandoned text removal uses provider identity, not content overlap', () => {
+  const items = discardTextItem([
+    { type: 'text', content: 'settled', text_item_id: 'msg-1' },
+    { type: 'text', content: 'abandoned partial', text_item_id: 'msg-2' },
+  ], 'msg-2')
+
+  assert.deepEqual(items, [
+    { type: 'text', content: 'settled', text_item_id: 'msg-1' },
   ])
 })
 
