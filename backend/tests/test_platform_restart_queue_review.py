@@ -268,6 +268,7 @@ def test_activity_checkpoint_cannot_overtake_deferred_restart_in_writer(db, wait
   """A late helper result is context for A, not permission to bypass its hold."""
   from datetime import timedelta
   from app.timeutil import now_naive_utc
+  from app.delegations import _activity_continuation_run_id
   from tests.test_delegations import _seed_delegation, _seed_idle_parent_wake_root
   from tests.test_platform_restart_cards import _card, _requirement
 
@@ -301,7 +302,8 @@ def test_activity_checkpoint_cannot_overtake_deferred_restart_in_writer(db, wait
   before = copy.deepcopy(chat.messages)
   assert chat.pending_question_id is None
   command = chat_writer.StartActivityContinuation(
-    chat_id=cid, root_run_id=root, run_token=f"activity-{cid}",
+    chat_id=cid, root_run_id=root,
+    run_token=_activity_continuation_run_id(db.get(models.Delegation, delegation_id)),
     source_work_id=root, activity_id=delegation_id,
   )
   # Bypass the async precheck to reproduce a card committing after it passed.
