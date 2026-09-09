@@ -1181,7 +1181,10 @@ export default function SettingsView({
       try { body = await response.json() } catch {}
       if (!response.ok) {
         const detail = body?.detail
-        if (reviewedUpdate) setPlatformErrorCode(detail?.code || '')
+        if (reviewedUpdate) {
+          setPlatformErrorCode(detail?.code || '')
+          await refreshPlatform({ preserveCurrentOnFailure: true })
+        }
         throw new Error(
           body?.error || detail?.message || detail
             || body?.message || `Replacement failed (${response.status})`,

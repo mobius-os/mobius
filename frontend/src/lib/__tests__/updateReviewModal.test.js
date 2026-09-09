@@ -59,6 +59,10 @@ test('an exact no-change completes a reviewed rebuild while failures remain visi
   assert.match(settingsView, /if \(outcome\.alreadyCurrent\) \{[\s\S]*await refreshPlatform\(\)/)
   assert.doesNotMatch(settingsView, /reviewed image is already running, but this update is still pending/)
   assert.match(settingsView, /rebuildReviewedUpdateRef\.current = false[\s\S]*return \{ ok: false, message \}/)
+  assert.match(
+    settingsView,
+    /setPlatformErrorCode\(detail\?\.code \|\| ''\)[\s\S]*refreshPlatform\(\{ preserveCurrentOnFailure: true \}\)/,
+  )
 })
 
 test('the apply response is a truthful fallback when status refresh fails', () => {

@@ -693,9 +693,27 @@ async def _request_self_hosted_reviewed_rebuild(
         status_code=409,
       )
 
-  return await _request_self_hosted_rebuild(
-    expected_sha=target_sha, final_check=validate_applied_release,
-  )
+  try:
+    return await _request_self_hosted_rebuild(
+      expected_sha=target_sha, final_check=validate_applied_release,
+    )
+  except DeploymentControlError as exc:
+    if exc.code not in {
+      "update_plan_stale", "update_plan_invalid", "activation_changed",
+    }:
+      raise
+    # Source application already succeeded. A moving local checkout can make
+    # the final dispatch plan stale, but that is no longer the mutation-free
+    # "review again" outcome used before Apply. Preserve this partial success
+    # as a distinct boundary so Settings can offer recovery after a reload
+    # instead of stranding an image-level update with no available plan.
+    raise DeploymentControlError(
+      "update_applied_rebuild_pending",
+      "The reviewed source was applied, but the container rebuild was not "
+      "queued because the source changed again. Ask Möbius to inspect the "
+      "current update state and help finish it.",
+      status_code=409,
+    ) from exc
 
 
 def _raise_local_runtime_blockers(blockers: list[str]) -> None:

@@ -1248,7 +1248,8 @@ async def test_self_hosted_dispatch_binds_the_apply_result_not_a_new_source_tip(
   monkeypatch.setattr(dc.platform_update, 'apply_platform_update', apply)
   with pytest.raises(dc.DeploymentControlError) as error:
     await _request_reviewed_test_release()
-  assert error.value.code == 'update_plan_stale'
+  assert error.value.code == 'update_applied_rebuild_pending'
+  assert 'reviewed source was applied' in error.value.message
   assert [p['current_sha'] for p in plans] == [original, merged]
   assert plans[-1]['plan_id'] == dc.platform_update._update_plan_id(merged, target, _TEST_DIGEST)
   assert plans[-1]['target_sha'] == target

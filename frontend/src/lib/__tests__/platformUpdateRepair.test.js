@@ -30,6 +30,23 @@ test('external deployment work and failed validation earn agent help', () => {
   assert.match(platformUpdateRepairReason({ error: 'controller failed' }), /attention/)
 })
 
+test('a self-hosted source apply that did not queue its rebuild remains recoverable', () => {
+  assert.match(
+    platformUpdateRepairReason({ errorCode: 'update_applied_rebuild_pending' }),
+    /applied.*finishing the container replacement/,
+  )
+  const platform = {
+    available: false,
+    contained_upstream_sha: 'installed',
+    activation: { level: 'image_rebuild', required_actions: ['image_rebuild'] },
+  }
+  assert.match(platformUpdateRepairReason({ platform }), /applied.*finishing the container replacement/)
+  assert.equal(platformUpdateRepairReason({
+    platform,
+    rebuild: { expected_sha: 'installed', state: 'queued' },
+  }), null)
+})
+
 test('old replacement failures do not get attributed to another release', () => {
   const platform = { contained_upstream_sha: 'installed' }
   const rebuild = { expected_sha: 'old', state: 'failed', error: 'old error' }
