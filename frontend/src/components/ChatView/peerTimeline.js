@@ -81,3 +81,35 @@ export function peerRecordTool(note, chatId) {
     },
   }
 }
+
+// Join mail to adjoining tool stretches in the render projection only. Prose,
+// questions, and owner messages remain boundaries; hidden carriers are not UI.
+export function foldPeerActivity(messages, projection, chatId, activeMirrorIndex = -1) {
+  const rendered = [...messages]
+  const slots = new Map(projection.slots)
+  const tools = new Map(projection.tools)
+  const prepended = new Map()
+  const isActivity = block => block?.type === 'tool' || block?.type === 'thinking'
+  for (const [index, notes] of slots) {
+    let next = index
+    while (next < messages.length && messages[next].hidden) next++
+    let prev = index - 1
+    while (prev >= 0 && messages[prev].hidden) prev--
+    const before = next !== activeMirrorIndex && rendered[next]?.role === 'assistant' && isActivity(rendered[next]?.blocks?.[0])
+    const after = prev !== activeMirrorIndex && rendered[prev]?.role === 'assistant' && isActivity(rendered[prev]?.blocks?.at(-1))
+    if (!before && !after) continue
+    const target = before ? next : prev
+    const blocks = notes.map(note => {
+      const tool = { ...peerRecordTool(note, chatId), tool_use_id: `peer-${note.id}` }
+      tools.set(tool.tool_use_id, [note])
+      return tool
+    })
+    const prefixLength = prepended.get(target) || 0
+    rendered[target] = { ...rendered[target], blocks: before
+      ? [...rendered[target].blocks.slice(0, prefixLength), ...blocks, ...rendered[target].blocks.slice(prefixLength)]
+      : [...rendered[target].blocks, ...blocks] }
+    if (before) prepended.set(target, prefixLength + blocks.length)
+    slots.delete(index)
+  }
+  return { messages: rendered, slots, tools }
+}

@@ -69,10 +69,10 @@ const receivedTool = {
   },
 }
 
-test('a stamped peer exchange classifies as its own distinctive activity', () => {
+test('peer exchanges retain their identity inside ordinary tool grouping', () => {
   assert.equal(effectiveToolName(sentTool), 'PeerMessage')
   assert.equal(effectiveToolName(receivedTool), 'PeerMessage')
-  assert.equal(isDistinctiveActivityTool(sentTool), true)
+  assert.equal(isDistinctiveActivityTool(sentTool), false)
   // A tool with no marker stays an ordinary block.
   assert.equal(effectiveToolName({ tool: 'Bash' }), 'Bash')
 })
@@ -253,7 +253,7 @@ test('incoming timeline messages expose full inline text, time, and optional sou
   assert.match(html, /2026-09-08T12:17:00.000Z/)
   assert.match(html, /Keep working independently/)
   assert.match(html, /&lt;script&gt;not markup&lt;\/script&gt;/)
-  assert.match(html, /href="\/chat\/other"/)
+  assert.match(html, /href="\/shell\?chat=other"/)
   assert.match(html, /aria-expanded="true"/)
 })
 

@@ -5,7 +5,7 @@ import { peerTime } from './peerTimeline.js'
 import { preserveTogglePosition } from './preserveTogglePosition.js'
 import { useDisclosureState } from './disclosureState.js'
 
-export default function HelperResultCard({ event, chatId }) {
+export default function HelperResultCard({ event, chatId, onInternalNav }) {
   const [open, setOpen] = useDisclosureState(chatId, event.id)
   const headerRef = useRef(null)
   const detailRef = useRef(null)
@@ -33,7 +33,11 @@ export default function HelperResultCard({ event, chatId }) {
         <p className="chat__peer-delivery">{event.consumption === 'incorporated' ? 'Incorporated by the agent' : 'Available to the agent · opening this does not resume work'}</p>
         <p className="chat__peer-body">{event.body || 'No written result.'}</p>
         {event.result_truncated && <span className="chat__peer-excerpt">Excerpt — full result in the helper chat</span>}
-        {event.child_chat_id && <div className="chat__peer-links"><a href={`/chat/${encodeURIComponent(event.child_chat_id)}`}>Open helper chat</a></div>}
+        {event.child_chat_id && <div className="chat__peer-links"><a href={`/shell?chat=${encodeURIComponent(event.child_chat_id)}`} onClick={click => {
+          if (!onInternalNav || click.button !== 0 || click.metaKey || click.ctrlKey || click.shiftKey || click.altKey) return
+          click.preventDefault()
+          onInternalNav(new URL(click.currentTarget.href))
+        }}>Open helper chat</a></div>}
       </>}
     </div>
   </div>

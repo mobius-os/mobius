@@ -245,6 +245,7 @@ function MsgContentInner({
                 end: block.end,
               }}
               summaryToolCount={block.tool_count}
+              onInternalNav={onInternalNav}
             />
           </div>
         )

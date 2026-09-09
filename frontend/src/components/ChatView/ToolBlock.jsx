@@ -630,6 +630,7 @@ export default function ToolBlock({
   if (effectiveToolName(t) === 'PeerMessage') {
     return (
       <PeerMessageCard
+        onInternalNav={onInternalNav}
         t={t}
         chatId={chatId}
         disclosureKey={disclosureKey}

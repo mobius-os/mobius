@@ -5337,7 +5337,7 @@ export default function ChatView({
     ),
     [messages],
   )
-  const peerTimeline = usePeerTimeline(chatId, displayedMessages, !hidden && transcriptPaintable, streamItems)
+  const peerTimeline = usePeerTimeline(chatId, displayedMessages, !hidden && transcriptPaintable, streamItems, showActiveAssistantSurface ? activeMirrorMsgIdx : -1)
   let lastVisibleMessageIndex = -1
   for (let i = displayedMessages.length - 1; i >= 0; i -= 1) {
     if (!displayedMessages[i].hidden) {
@@ -5511,7 +5511,7 @@ export default function ChatView({
         <PeerTimelineContext.Provider value={peerTimeline}>
         <ul className="chat__list" style={{ minHeight: 0 }}>
           {displayedMessages.flatMap((msg, i) => {
-            const peerRows = <PeerTimelineRows key={`peer-slot-${msg.cid || msg.id || msg.ts || i}`} notes={peerTimeline.slots.get(i)} chatId={chatId} />
+            const peerRows = <PeerTimelineRows key={`peer-slot-${msg.cid || msg.id || msg.ts || i}`} notes={peerTimeline.slots.get(i)} chatId={chatId} onInternalNav={internalNav} />
             if (msg.hidden) return [peerRows]
             const continuationMarker = isContinuationMessage(msg)
             const isLastMsg = i === lastVisibleMessageIndex
@@ -5581,7 +5581,7 @@ export default function ChatView({
                 : undefined}
             >
               <MsgContent
-                msg={msg}
+                msg={peerTimeline.messages[i]}
                 chatId={chatId}
                 messageKey={dataKey}
                 onQuestionAnswer={doSendSilent}
@@ -5683,7 +5683,7 @@ export default function ChatView({
             </li>
           )}
 
-          <PeerTimelineRows notes={peerTimeline.slots.get(displayedMessages.length)} chatId={chatId} />
+          <PeerTimelineRows notes={peerTimeline.slots.get(displayedMessages.length)} chatId={chatId} onInternalNav={internalNav} />
           {peerTimeline.error && <li className="chat__peer-load-error" role="status">Agent messages couldn’t refresh. <button type="button" onClick={() => peerTimeline.retry()}>Try again</button></li>}
 
           {/* Steering is accepted locally before the provider control channel

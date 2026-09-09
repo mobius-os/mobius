@@ -28,7 +28,7 @@ function KindBadge({ kind }) {
   )
 }
 
-export default function PeerMessageCard({ t, chatId, disclosureKey, records: suppliedRecords }) {
+export default function PeerMessageCard({ t, chatId, disclosureKey, records: suppliedRecords, onInternalNav }) {
   const linkedRecords = usePeerTimelineRecord(t?.tool_use_id)
   const records = suppliedRecords || linkedRecords || []
   const record = records[0]
@@ -178,7 +178,11 @@ export default function PeerMessageCard({ t, chatId, disclosureKey, records: sup
             {records.length > 0 && <div className="chat__peer-links">{[...new Map(records.map(note => {
               const sent = model.direction === 'send'
               return [sent ? note.recipient_chat_id : note.sender_chat_id, sent ? note.recipient_name : note.sender_name]
-            })).entries()].filter(([id]) => typeof id === 'string' && id !== chatId).map(([id, name]) => <a key={id} href={`/chat/${encodeURIComponent(id)}`}>Open {name || 'source chat'}</a>)}</div>}
+            })).entries()].filter(([id]) => typeof id === 'string' && id !== chatId).map(([id, name]) => <a key={id} href={`/shell?chat=${encodeURIComponent(id)}`} onClick={event => {
+              if (!onInternalNav || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return
+              event.preventDefault()
+              onInternalNav(new URL(event.currentTarget.href))
+            }}>Open {name || 'source chat'}</a>)}</div>}
             {model.status === 'failed' && model.reason && (
               <div className="chat__peer-section">
                 <span className="chat__peer-kicker">Failed</span>

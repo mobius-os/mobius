@@ -112,6 +112,11 @@ function InlineToken({ token, onInternalNav, mediaDimensions }) {
           } catch {
             return
           }
+          const chatPath = url.pathname.match(/^\/chat\/([^/]+)\/?$/)
+          if (chatPath) {
+            url.pathname = '/shell'
+            url.searchParams.set('chat', decodeURIComponent(chatPath[1]))
+          }
           const hasInternalTarget = (
             (url.searchParams.has('app') && url.searchParams.get('app'))
             || (url.searchParams.has('chat') && url.searchParams.get('chat'))

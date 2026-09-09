@@ -36,5 +36,5 @@ test('failure and truncated results remain inspectable in place', () => {
   const html = render({ status: 'failed', result_truncated: true, child_chat_id: 'helper' })
   assert.match(html, /Helper failed/)
   assert.match(html, /Excerpt/)
-  assert.match(html, /href="\/chat\/helper"/)
+  assert.match(html, /href="\/shell\?chat=helper"/)
 })

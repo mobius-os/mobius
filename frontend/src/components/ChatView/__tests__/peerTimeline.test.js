@@ -65,3 +65,34 @@ test('a retained carrier excerpt is never presented as a full message', () => {
   const tool = peerRecordTool(note('old', 1500, { truncated: true }), 'chat')
   assert.equal(tool.peer_message.notes[0].body_truncated, true)
 })
+
+test('incoming notes join surrounding tools without modifying saved conversation', async () => {
+  const { foldPeerActivity } = await import('../peerTimeline.js')
+  const messages = [{ role: 'assistant', ts: 1000, blocks: [{ type: 'tool', tool: 'Bash' }] }, { role: 'assistant', ts: 3000, blocks: [{ type: 'text', content: 'Answer' }] }]
+  const projection = foldPeerActivity(messages, projectPeerTimeline(messages, [note('incoming', 2000)], 'chat'), 'chat')
+  assert.equal(projection.slots.size, 0)
+  assert.equal(projection.messages[0].blocks.length, 2)
+  assert.equal(messages[0].blocks.length, 1)
+  assert.equal(projection.tools.get('peer-incoming')[0].id, 'incoming')
+})
+test('prose remains a boundary for grouped incoming notes', async () => {
+  const { foldPeerActivity } = await import('../peerTimeline.js')
+  const messages = [{ role: 'assistant', ts: 1000, blocks: [{ type: 'text', content: 'Before' }] }, { role: 'user', ts: 3000 }]
+  assert.equal(foldPeerActivity(messages, projectPeerTimeline(messages, [note('incoming', 2000)], 'chat'), 'chat').slots.size, 1)
+})
+
+test('consecutive hidden deliveries keep their order when joining the same tool stretch', async () => {
+  const { foldPeerActivity } = await import('../peerTimeline.js')
+  const first = note('first', 2000), second = note('second', 2100)
+  const messages = [{ role: 'assistant', ts: 1000, blocks: [{ type: 'text', content: 'Intro' }] }, carrier([first]), carrier([second], { ts: 2100 }), { role: 'assistant', ts: 3000, blocks: [{ type: 'tool', tool: 'Bash' }] }]
+  const folded = foldPeerActivity(messages, projectPeerTimeline(messages, [first, second], 'chat'), 'chat')
+  assert.deepEqual(folded.messages[3].blocks.slice(0, 2).map(block => block.tool_use_id), ['peer-first', 'peer-second'])
+})
+
+test('a suppressed active mirror cannot swallow incoming activity', async () => {
+  const { foldPeerActivity } = await import('../peerTimeline.js')
+  const messages = [{ role: 'assistant', ts: 1000, blocks: [{ type: 'tool', tool: 'Bash' }] }]
+  const folded = foldPeerActivity(messages, projectPeerTimeline(messages, [note('live', 2000)], 'chat'), 'chat', 0)
+  assert.equal(folded.slots.get(1)[0].id, 'live')
+  assert.equal(folded.messages[0].blocks.length, 1)
+})
