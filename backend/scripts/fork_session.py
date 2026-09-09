@@ -399,15 +399,32 @@ def _parser() -> argparse.ArgumentParser:
     description="Fork and coach one exact Claude or Codex session"
   )
   parser.add_argument("--json", action="store_true", dest="as_json")
-  parser.add_argument("provider", choices=("claude", "codex"))
-  parser.add_argument("session_id")
-  parser.add_argument("cwd")
-  parser.add_argument("prompt")
+  parser.add_argument("provider_or_session")
+  parser.add_argument("session_or_cwd")
+  parser.add_argument("cwd_or_prompt")
+  parser.add_argument("prompt", nargs="?")
   return parser
 
 
-def main(argv: list[str] | None = None) -> int:
+def _parse_invocation(argv: list[str] | None = None) -> argparse.Namespace:
+  """Accept the explicit provider form and the released Claude-only form."""
   args = _parser().parse_args(argv)
+  if args.prompt is None:
+    args.provider = "claude"
+    args.session_id = args.provider_or_session
+    args.cwd = args.session_or_cwd
+    args.prompt = args.cwd_or_prompt
+  else:
+    args.provider = args.provider_or_session
+    args.session_id = args.session_or_cwd
+    args.cwd = args.cwd_or_prompt
+  if args.provider not in {"claude", "codex"}:
+    _parser().error("provider must be 'claude' or 'codex'")
+  return args
+
+
+def main(argv: list[str] | None = None) -> int:
+  args = _parse_invocation(argv)
   try:
     result = fork_session(args.provider, args.session_id, args.cwd, args.prompt)
   except ForkError as exc:

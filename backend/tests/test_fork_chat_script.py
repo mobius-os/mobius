@@ -14,6 +14,7 @@ ROOT = Path(__file__).resolve().parents[2]
 SCRIPTS = ROOT / "backend" / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
+import fork_session as fork_session_module  # noqa: E402
 from fork_session import (  # noqa: E402
   ForkError,
   ForkResult,
@@ -22,6 +23,7 @@ from fork_session import (  # noqa: E402
   _fork_claude,
   _fork_codex_async,
   _load_codex_sdk,
+  _parse_invocation,
 )
 from fork_chat import _chat_session, coach_chat  # noqa: E402
 
@@ -29,6 +31,39 @@ from fork_chat import _chat_session, coach_chat  # noqa: E402
 def test_platform_coaching_helpers_are_directly_executable():
   for name in ("fork-chat.sh", "fork-session.sh", "fork_chat.py", "fork_session.py"):
     assert (SCRIPTS / name).stat().st_mode & stat.S_IXUSR
+
+
+def test_legacy_three_argument_session_helper_remains_claude(monkeypatch, capsys):
+  seen = {}
+
+  def fake_fork(provider, session_id, cwd, prompt):
+    seen["args"] = (provider, session_id, cwd, prompt)
+    return ForkResult(
+      provider=provider,
+      source_session_id=session_id,
+      forked_session_id="forked-session",
+      answer="coached",
+    )
+
+  monkeypatch.setattr(fork_session_module, "fork_session", fake_fork)
+
+  assert fork_session_module.main([
+    "--json", "source-session", "/data", "coach this",
+  ]) == 0
+  assert seen["args"] == (
+    "claude", "source-session", "/data", "coach this",
+  )
+  assert json.loads(capsys.readouterr().out)["provider"] == "claude"
+
+
+def test_explicit_session_helper_provider_is_unchanged():
+  args = _parse_invocation([
+    "codex", "source-session", "/data", "coach this",
+  ])
+
+  assert (args.provider, args.session_id, args.cwd, args.prompt) == (
+    "codex", "source-session", "/data", "coach this",
+  )
 
 
 def test_claude_uses_exact_fork_and_reports_distinct_session():

@@ -196,9 +196,6 @@ def test_controlled_skills_have_fix_forward_migrations():
   assert "3b9af10ffe3db873df8ba7fd9719c126e1de2951c10c7b85cac9f47f27c82217" in (
     module._UNMODIFIED_MIGRATIONS["reflection.md"]
   )
-  assert "e5099eee9c5479312a0565c95477d59bab78da325c1622efc7b24d2a81459f34" in (
-    module._UNMODIFIED_MIGRATIONS["reflection.md"]
-  )
   assert module._UNMODIFIED_MIGRATIONS["cron.md"] == {
     "289336d78ad4268110360f12faac5512d5a53b66aa31c2a6ddd1a44f538f2559",
     "ed100cb496b887a7951adc967e92cda1449c4f8594f7859fbd32762221d24914",

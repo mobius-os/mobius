@@ -133,9 +133,6 @@ _UNMODIFIED_MIGRATIONS = {
     # Current upstream predecessor, including the learning-loop and receipt
     # refinements that Agent Coaching must preserve during migration.
     "3b9af10ffe3db873df8ba7fd9719c126e1de2951c10c7b85cac9f47f27c82217",
-    # Exact upstream seed immediately before coaching became
-    # exact-session-only. Only untouched Reflection copies may migrate.
-    "e5099eee9c5479312a0565c95477d59bab78da325c1622efc7b24d2a81459f34",
   },
   "cron.md": {
     "289336d78ad4268110360f12faac5512d5a53b66aa31c2a6ddd1a44f538f2559",
