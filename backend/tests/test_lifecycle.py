@@ -125,6 +125,14 @@ def test_hard_purge_removes_peer_mail_on_both_sides(db, chat):
       id="incoming-peer-note", room_kind="workspace", room_id="1",
       from_chat_id=peer.id, to_chat_id=chat.id, kind="note", body="in",
     ),
+    models.ChatActivityPosition(
+      chat_id=chat.id, event_id="peer:incoming-peer-note", position=None,
+    ),
+    models.ChatActivityPosition(
+      chat_id=peer.id,
+      event_id="peer:outgoing-peer-note",
+      position={"assistant_message_id": "retained-frontier", "block_index": 0},
+    ),
   ])
   chat_id = chat.id
   chat.deleted_at = datetime.now(UTC).replace(tzinfo=None) - timedelta(days=8)
@@ -135,6 +143,7 @@ def test_hard_purge_removes_peer_mail_on_both_sides(db, chat):
   assert db.get(models.Chat, chat_id) is None
   assert db.get(models.Chat, peer.id) is not None
   assert db.query(models.AgentCoordinationMessage).count() == 0
+  assert db.query(models.ChatActivityPosition).count() == 0
 
 
 def test_hard_purge_removes_derived_search_transcript_without_later_search(
