@@ -85,6 +85,15 @@ def test_production_startup_plan_has_explicit_unique_order():
   assert startup.DATABASE_STARTUP_TASKS[0].name == "start chat writer"
   assert names.index("initialize database") < names.index("start chat writer")
   assert names.index("start chat writer") < names.index(
+    "retire legacy Gauntlet execution"
+  )
+  assert names.index("retire legacy Gauntlet execution") < names.index(
+    "reconcile startup chats"
+  )
+  assert names.index("retire legacy Gauntlet execution") < names.index(
+    "reconcile unstarted delegations"
+  )
+  assert names.index("start chat writer") < names.index(
     "backfill active assistant identities"
   )
   assert names.index("backfill active assistant identities") < names.index(
@@ -227,3 +236,40 @@ async def test_schema_safe_boot_runs_the_database_startup_phase(monkeypatch):
 
   assert result.serviceable is True
   assert events == ["process", "database"]
+
+
+@pytest.mark.asyncio
+async def test_required_execution_cutover_failure_stops_database_recovery(
+  monkeypatch, caplog,
+):
+  events = []
+
+  def fail_cutover(_context):
+    events.append("cutover")
+    raise RuntimeError("writer did not commit")
+
+  monkeypatch.setattr(startup, "PROCESS_STARTUP_TASKS", ())
+  monkeypatch.setattr(startup, "DATABASE_STARTUP_TASKS", (
+    StartupTask(
+      "retire legacy Gauntlet execution",
+      fail_cutover,
+      database_failure_reason="legacy_gauntlet_retirement_failed",
+    ),
+    StartupTask(
+      "must not reconcile", lambda _context: events.append("recovery"),
+    ),
+  ))
+  checkpoints = []
+  monkeypatch.setattr(startup, "record_memory_checkpoint", checkpoints.append)
+
+  ctx = context()
+  with caplog.at_level(logging.CRITICAL, logger="test.startup"):
+    result = await run_startup_plan(ctx)
+
+  assert result == DatabaseBootResult(
+    failure_reason="legacy_gauntlet_retirement_failed",
+  )
+  assert events == ["cutover"]
+  assert ctx.failed_tasks == ["retire legacy Gauntlet execution"]
+  assert checkpoints == ["startup_database_degraded"]
+  assert "required startup task did not settle" in caplog.text

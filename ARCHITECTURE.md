@@ -233,6 +233,19 @@ the database, but the process intentionally keeps its boot verdict until
 restart; promoting only part of the skipped startup plan inside a health probe
 would create a second, race-prone boot mechanism.
 
+The platform-Gauntlet removal has one additional cold-start cutover. Immediately
+after the chat writer starts, and before interrupted-chat, Delegation, park, or
+pending-queue recovery, a writer domain command makes every legacy
+Gauntlet-owned controller/child execution terminal while retaining its chats,
+transcripts, tasks, costs, and other audit rows. A failed cutover degrades the
+database boot, so generic recovery can never reinterpret the old work as an
+ordinary unrestricted turn. This is deliberately **not** an online stop: the
+process-quiescence boundary is the normal backend activation restart, which has
+already stopped the previous worker and its provider children before lifespan
+startup runs. Operators must not invoke the cutover against a serving old
+worker; no database transaction can prove or terminate an external live
+provider process.
+
 ### Misc shared helpers
 
 Agent-editable general-purpose modules — several sit on live chat paths and are
