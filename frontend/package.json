@@ -22,7 +22,7 @@
     "test:coverage": "npm run test:lib:coverage && npm run test:hooks:coverage",
     "pretest:lib:coverage": "npm run runtime:check && npm run speech-runtime:check && npm run speech-worker:check && npm run speech-pitch:check && npm run test:structure",
     "test:lib:coverage": "node --experimental-test-coverage --test-coverage-lines=63 --test-coverage-branches=60 --test-coverage-functions=58 --loader=./src/lib/__tests__/vite-env-loader.mjs --test $(find src/lib src/utils src/hooks src/components/DiffView src/components/GlobalSearch src/components/ProviderAuth src/components/NotificationsView src/components/ChatView/__tests__ src/components/Shell/__tests__ -name '*.test.js')",
-    "test:hooks:coverage": "node --experimental-test-coverage --test-coverage-lines=63 --test-coverage-branches=60 --test-coverage-functions=58 --loader=./src/components/ChatView/hooks/__tests__/react-loader.mjs --test $(find src/components/ChatView/hooks -name '*.test.js') $(find src/hooks src/components/Shell/__tests__ -name '*.hooktest.js')"
+    "test:hooks:coverage": "node --experimental-test-coverage --test-coverage-lines=63 --test-coverage-branches=60 --test-coverage-functions=58 --test-coverage-include='src/components/ChatView/hooks/**/*.js' --test-coverage-include='src/components/Shell/**/*.js' --test-coverage-include='src/hooks/**/*.js' --loader=./src/components/ChatView/hooks/__tests__/react-loader.mjs --test $(find src/components/ChatView/hooks -name '*.test.js') $(find src/hooks src/components/Shell/__tests__ -name '*.hooktest.js')"
   },
   "dependencies": {
     "@codemirror/commands": "6.11.0",

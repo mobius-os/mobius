@@ -705,6 +705,8 @@ def test_manual_and_pull_request_runs_cover_suites_and_main_image():
   for job in (backend, e2e):
     assert "github.event_name == 'pull_request'" not in job
     assert "refs/heads/integration/" not in job
+  assert "github.event_name != 'pull_request'" not in backend
+  assert "if: github.event_name != 'pull_request'" in e2e
   assert "needs: privacy" in e2e
   assert "needs: backend" not in e2e
   assert "cache-from: type=gha" in e2e
