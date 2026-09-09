@@ -12,7 +12,7 @@ import {
   isOwnerUserMessage,
   startsFollowingTurn,
   jumpToLatestShown,
-  runtimeStreamAttachAction,
+  shouldRepairRuntimeStream,
   serverSnapshotBehindLocal,
   shouldAttachRunningStream,
   shouldAdoptRuntimeAssistantOwner,
@@ -206,32 +206,32 @@ test('a parked owner question uses compact history until its answer resumes the 
 })
 
 test('a fresh running verdict repairs an exhausted visible stream through its retry owner', () => {
-  assert.equal(runtimeStreamAttachAction({
+  assert.equal(shouldRepairRuntimeStream({
     running: true,
     connectionError: 'disconnected',
-  }), 'retry')
-  assert.equal(runtimeStreamAttachAction({
+  }), true)
+  assert.equal(shouldRepairRuntimeStream({
     running: true,
     connectionError: null,
-  }), 'connect')
-  assert.equal(runtimeStreamAttachAction({
+  }), true)
+  assert.equal(shouldRepairRuntimeStream({
     running: true,
     connectionError: 'retrying',
-  }), 'none', 'the bounded retry loop keeps sole ownership while active')
-  assert.equal(runtimeStreamAttachAction({
+  }), false, 'the bounded retry loop keeps sole ownership while active')
+  assert.equal(shouldRepairRuntimeStream({
     running: true,
     pendingQuestionId: 'question-1',
     connectionError: 'disconnected',
-  }), 'none', 'a parked question has no live output to attach to')
-  assert.equal(runtimeStreamAttachAction({
+  }), false, 'a parked question has no live output to attach to')
+  assert.equal(shouldRepairRuntimeStream({
     running: true,
     connectionError: 'disconnected',
     hidden: true,
-  }), 'retry', 'a retained hidden pane must recover its stream after restart')
-  assert.equal(runtimeStreamAttachAction({
+  }), true, 'a retained hidden pane must recover its stream after restart')
+  assert.equal(shouldRepairRuntimeStream({
     running: false,
     connectionError: 'disconnected',
-  }), 'none', 'an idle server verdict must not resurrect a stream')
+  }), false, 'an idle server verdict must not resurrect a stream')
 })
 
 test('assistant ownership ignores only idle responses captured behind a local transition', () => {

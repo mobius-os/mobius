@@ -181,7 +181,7 @@ import {
   isContinuationMessage,
   isOwnerUserMessage,
   jumpToLatestShown,
-  runtimeStreamAttachAction,
+  shouldRepairRuntimeStream,
   shouldRetireRestoredQuestionSnapshot,
   shouldAttachRunningStream,
   shouldAdoptRuntimeAssistantOwner,
@@ -780,7 +780,7 @@ export default function ChatView({
   // the previous assistant turn finishes.
   const queuedContinuationRef = useRef(null)
   const sendIntentByCidRef = useRef(new Map())
-  const runtimeReconnectInFlightRef = useRef(false)
+  const runtimeReconcileRef = useRef(null)
 
   // DOM refs
   const scrollRef = useRef(null)
@@ -1441,7 +1441,7 @@ export default function ChatView({
   // until some unrelated local event (like focusing the composer) causes a
   // refresh. While a turn or visible queue exists, poll the small chat state
   // payload and hydrate only runtime fields — do not replace the transcript.
-  const reconcileRuntimeState = useCallback(async () => {
+  const refreshRuntimeState = useCallback(async () => {
     const gen = fetchGenRef.current
     try {
       const res = await apiFetch(
@@ -1587,6 +1587,22 @@ export default function ChatView({
     setActiveAssistantMessageId,
     setGoalPresentationLocalState,
   ])
+
+  // Every runtime reader shares the same bounded request for this chat/view
+  // generation. An old view's completion must not release a successor read.
+  const reconcileRuntimeState = useCallback(() => {
+    const generation = fetchGenRef.current
+    const current = runtimeReconcileRef.current
+    if (current?.chatId === chatId && current.generation === generation) {
+      return current.promise
+    }
+    const owner = { chatId, generation }
+    owner.promise = refreshRuntimeState().finally(() => {
+      if (runtimeReconcileRef.current === owner) runtimeReconcileRef.current = null
+    })
+    runtimeReconcileRef.current = owner
+    return owner.promise
+  }, [chatId, refreshRuntimeState])
 
   const handleCompactionStored = useCallback(
     () => fetchMessages({ force: true }),
@@ -2028,7 +2044,7 @@ export default function ChatView({
           && !delta.finished
           && !isStreamingRef.current
         ) {
-          await Promise.resolve(connectToStream(true)).catch(() => {})
+          void connectToStream(true)
         }
       }
     } finally {
@@ -2048,26 +2064,15 @@ export default function ChatView({
   }, [effectiveRunSignal.seq, hidden, provisionalNewChat, reconcileExternalActivity])
 
   const ensureRuntimeStreamConnected = useCallback((runtime) => {
-    const action = runtimeStreamAttachAction({
+    if (!shouldRepairRuntimeStream({
       ...runtime,
       isStreaming: isStreamingRef.current,
       connectionError,
-    })
-    if (action === 'none') return
-    if (runtimeReconnectInFlightRef.current) return
-
-    runtimeReconnectInFlightRef.current = true
-    // The durable chat row can say "running" while this mounted mobile
-    // client has no live SSE attached: Android can pause/kill the fetch
-    // during app switch, network handoff, or a shell rebuild. Reconnect
-    // from the server verdict instead of waiting for a full remount.
-    const attaching = action === 'retry' ? retry() : connectToStream(true)
-    Promise.resolve(attaching)
-      .catch(() => {})
-      .finally(() => {
-        runtimeReconnectInFlightRef.current = false
-      })
-  }, [connectToStream, connectionError, isStreamingRef, retry])
+    })) return
+    // The stream hook owns pending and live attachment, including retries.
+    // Runtime callers request attachment without owning its lifetime.
+    void connectToStream(true)
+  }, [connectToStream, connectionError, isStreamingRef])
 
   const wasHiddenRef = useRef(hidden)
   useLayoutEffect(() => {
@@ -4689,35 +4694,21 @@ export default function ChatView({
     const hasQueue = pendingQueue.pendingMessages.length > 0
     if (!turnActive && !hasQueue) return
     let cancelled = false
-    let inFlight = false
     const run = () => {
-      if (cancelled || inFlight) return
-      // Single-flight: without this guard a slow/hung reconcile lets the next
-      // interval tick fire another overlapping fetch, and they stack unbounded
-      // against a wedged backend. Skip a tick while the prior one is in flight;
-      // the fetch is time-boxed (apiFetch timeoutMs) so inFlight always clears.
-      inFlight = true
+      if (cancelled) return
       reconcileRuntimeState()
         .then(runtime => {
           if (!cancelled && runtime) ensureRuntimeStreamConnected(runtime)
         })
-        .finally(() => { inFlight = false })
     }
     run()
     const intervalMs = hasQueue ? 1000 : 3000
     const timer = setInterval(run, intervalMs)
-    const onVisible = () => {
-      if (document.visibilityState === 'visible') run()
-    }
-    window.addEventListener('focus', run)
-    window.addEventListener('pageshow', run)
-    document.addEventListener('visibilitychange', onVisible)
+    // Foreground and recovery signals belong to the effect below, also for
+    // idle chats. This effect owns only active-turn/queue fallback polling.
     return () => {
       cancelled = true
       clearInterval(timer)
-      window.removeEventListener('focus', run)
-      window.removeEventListener('pageshow', run)
-      document.removeEventListener('visibilitychange', onVisible)
     }
   }, [
     ensureRuntimeStreamConnected,

@@ -191,7 +191,7 @@ export function shouldAttachRunningStream({
  * first; once it has exhausted, restart that owner rather than bypassing its
  * counters with another parallel reconnect.
  */
-export function runtimeStreamAttachAction({
+export function shouldRepairRuntimeStream({
   running,
   pendingQuestionId,
   isStreaming = false,
@@ -200,9 +200,8 @@ export function runtimeStreamAttachAction({
   if (
     isStreaming
     || !shouldAttachRunningStream({ running, pendingQuestionId })
-  ) return 'none'
-  if (connectionError === 'retrying') return 'none'
-  return connectionError === 'disconnected' ? 'retry' : 'connect'
+  ) return false
+  return connectionError !== 'retrying'
 }
 
 /** Retire only a cold restored prefix proven older than the durable card. */

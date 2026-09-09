@@ -54,6 +54,8 @@ async function mount(page, { rejectFirst = false, loseFirstAck = false } = {}) {
   const detailAccepted = deferred()
   let holdDetail = false
   let rejectDetail = false
+  let runtimeGate = null
+  let runtimeRequests = 0
   const attempts = []
   const unexpected = []
   const messages = [{ role: 'user', content: 'Original question A', cid: 'original-a', ts: 1788800000100 }, partial]
@@ -95,6 +97,11 @@ async function mount(page, { rejectFirst = false, loseFirstAck = false } = {}) {
       return route.fulfill({ json: {} })
     }
     if (url.pathname === path || url.pathname === `${path}/runtime`) {
+      if (url.pathname === `${path}/runtime` && runtimeGate) {
+        runtimeRequests++
+        runtimeGate.requested.resolve()
+        await runtimeGate.accepted.promise
+      }
       if (holdDetail) { detailRequested.resolve(); await detailAccepted.promise }
       if (rejectDetail) return route.fulfill({ status: 503, json: { detail: 'Fixture transcript unavailable' } })
       return route.fulfill({ json: detail() })
@@ -135,6 +142,12 @@ async function mount(page, { rejectFirst = false, loseFirstAck = false } = {}) {
   }, CHAT)).toBe(1)
   return { surface, composer, attachment, requested, accepted, attempts, unexpected,
     detailRequested, detailAccepted,
+    holdRuntime() {
+      runtimeRequests = 0
+      runtimeGate = { requested: deferred(), accepted: deferred() }
+      return runtimeGate
+    },
+    runtimeRequestCount: () => runtimeRequests,
     allowDetail() { rejectDetail = false },
     parkWithDetail(text, { reject = false } = {}) {
       rejectDetail = reject
@@ -353,4 +366,28 @@ test('failed transcript replacement retains the answer and a successful Retry re
   await expect(state.surface.getByText(/^Recovered paragraph 28:/)).toHaveCount(1)
   await expect(state.surface.getByText('Queued B stays behind A', { exact: true })).toBeVisible()
   await expect(retry).toHaveCount(0)
+})
+
+
+test('foreground and active-queue refreshes share one bounded runtime read', async ({ page }) => {
+  const fixture = await mount(page)
+  const gate = fixture.holdRuntime()
+  const wake = () => page.evaluate(() => {
+    window.dispatchEvent(new Event('focus'))
+    window.dispatchEvent(new Event('pageshow'))
+    window.dispatchEvent(new Event('online'))
+    document.dispatchEvent(new Event('visibilitychange'))
+  })
+  try {
+    await wake()
+    await gate.requested.promise
+    await wake()
+    // Keep the response held across a real queue-poll interval as well.
+    await page.waitForTimeout(1200)
+    expect(fixture.runtimeRequestCount()).toBe(1)
+    await expect(fixture.composer).toHaveValue(draft)
+    await expect(fixture.attachment).toBeVisible()
+    await expect(fixture.surface.getByText(queued.content, { exact: true })).toBeVisible()
+    expect(fixture.attempts).toHaveLength(0)
+  } finally { gate.accepted.resolve() }
 })

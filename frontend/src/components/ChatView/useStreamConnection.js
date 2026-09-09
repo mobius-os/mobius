@@ -403,7 +403,7 @@ export default function useStreamConnection(chatId, {
   // the SSE is being proactively REPLACED after sleep/wake or network
   // recovery (an expected, healthy transition), not failing — so it renders
   // as a quiet note, never the error styling. Armed only by the
-  // visibility/online handlers below; a fast reattach (< the delay) never
+  // attachment owner after a wake; a fast reattach (< the delay) never
   // shows it. Cleared on every settled outcome: catch-up commit, `done`,
   // terminal 204/EOF, or the stream erroring into the connectionError
   // states (which take over the ConnectionStatus slot).
@@ -430,6 +430,10 @@ export default function useStreamConnection(chatId, {
   }
 
   const abortRef = useRef(null)
+  // Attachment belongs here, not to each caller that observes a wake. Hidden
+  // or offline invalidates the old socket; the first replacement clears it so
+  // visible, online, runtime refresh, and recovery can share even a pending GET.
+  const connectionStaleRef = useRef(false)
   const connectionGenerationRef = useRef(0)
   const keptSocketDeadmanTimerRef = useRef(null)
   const retryCount = useRef(0)
@@ -780,8 +784,23 @@ export default function useStreamConnection(chatId, {
   const answersByQuestionKeyRef = useRef(new Map())
 
   const connectToStream = useCallback(async (resetState = false) => {
+    if (abortRef.current && !connectionStaleRef.current
+        && activeStreamChatIdRef.current === chatIdRef.current) return
+    // The note describes an actual attachment, never a duplicate lifecycle
+    // signal after catchup has already cleared it.
+    if (resetState && (connectionStaleRef.current || connectionErrorRef.current)) {
+      const hiddenDuration = hiddenAtRef.current
+        ? Math.max(0, Date.now() - hiddenAtRef.current)
+        : lastHiddenDurationRef.current
+      if (hiddenDuration === null || hiddenDuration >= QUICK_WAKE_HIDDEN_MS) {
+        armReconnectingNote()
+      }
+    }
     activeStreamChatIdRef.current = chatIdRef.current
+    if (connectionErrorRef.current === 'disconnected') retryCount.current = 0
     disconnect()
+    wantsReconnectRef.current = true
+    connectionStaleRef.current = false
     const catchUpOwner = {
       generation: ++connectionGenerationRef.current,
       chatId: chatIdRef.current,
@@ -803,6 +822,9 @@ export default function useStreamConnection(chatId, {
     const controller = new AbortController()
     abortRef.current = controller
     lastReadAtRef.current = 0
+    // Sharing a pending attachment must not retain a silently hung GET forever.
+    // Reuse the existing no-read deadline rather than a second retry owner.
+    armKeptSocketDeadman(controller, 0)
 
     const isCurrent = () => streamCatchUpOwnerMatches(catchUpOwner, {
       generation: connectionGenerationRef.current,
@@ -1482,6 +1504,7 @@ export default function useStreamConnection(chatId, {
       // fresh send) — the reattach window, if one is open, continues on
       // the successor connection, so the note is deliberately left alone.
       if (err.name === 'AbortError' || !isCurrent()) return
+      abortRef.current = null
       void verifyConnectivity()
       flushBuffer()
       setIsStreaming(false)
@@ -1555,6 +1578,12 @@ export default function useStreamConnection(chatId, {
     setConnectionError(null)
     clearReconnectingNote()
     setIsStreaming(true)
+    // Recovery is reachability evidence, not proof that every socket is stale.
+    // The successful GET can itself publish it. Keep that attachment and use
+    // the existing read deadline to detect an older silently dead socket.
+    if (abortRef.current && !connectionStaleRef.current) {
+      armKeptSocketDeadman(abortRef.current, lastReadAtRef.current)
+    }
     connectRef.current?.(true)
   }
   useEffect(() => {
@@ -1573,9 +1602,10 @@ export default function useStreamConnection(chatId, {
     clearReconnectingNote()
     setIsStreaming(true)
     wantsReconnectRef.current = true
-    // Reset state — same reason as the automatic retry above.
+    // Explicit Retry replaces the transport; ordinary attachment requests share it.
+    disconnect()
     connectRef.current?.(true)
-  }, [])
+  }, [disconnect])
 
   const sendMessage = useCallback(async (
     text,
@@ -1882,10 +1912,16 @@ export default function useStreamConnection(chatId, {
     // make can find it. (The previous 50ms wait was a patch around
     // a misdiagnosed race; verified deterministic by inspecting
     // backend/app/routes/chats_stream.py:121-131.)
-    if (ownsPresentation()) connectRef.current?.(true)
+    if (ownsPresentation()) {
+      // A newly accepted turn may have a different broadcast. Unlike a wake,
+      // this is an explicit replacement boundary, not an attachment nudge.
+      disconnect()
+      connectRef.current?.(true)
+    }
     return responseData || { status: 'started' }
   }, [
     clearQuestionResponseTracking,
+    disconnect,
     setStreamAssistantMessageId,
     setStreamItems,
   ])
@@ -1918,13 +1954,8 @@ export default function useStreamConnection(chatId, {
     }
 
     function keepActiveConnectionWithDeadman() {
+      connectionStaleRef.current = false
       armKeptSocketDeadman(abortRef.current, lastReadAtRef.current)
-    }
-
-    function armNoteForWake(hiddenDuration) {
-      if (hiddenDuration !== null && hiddenDuration >= QUICK_WAKE_HIDDEN_MS) {
-        armReconnectingNote()
-      }
     }
 
     function onVisible() {
@@ -1933,6 +1964,7 @@ export default function useStreamConnection(chatId, {
         // visibilitychange is the last reliable lifecycle signal before a
         // mobile browser freezes or discards the page.
         persistLatestStreamSnapshot()
+        connectionStaleRef.current = true
         hiddenAtRef.current = now
         lastHiddenDurationRef.current = null
         lastWakeAtRef.current = 0
@@ -1950,14 +1982,6 @@ export default function useStreamConnection(chatId, {
         keepActiveConnectionWithDeadman()
         return
       }
-      // Past the idle gate: a reattach genuinely starts here. On the wake
-      // path, show the note only for real backgrounding; quick flips either
-      // keep the socket above or reconnect silently if the socket is stale.
-      armNoteForWake(hiddenDuration)
-      if (abortRef.current) {
-        abortRef.current.abort()
-        abortRef.current = null
-      }
       connectRef.current?.(true)
     }
 
@@ -1973,24 +1997,18 @@ export default function useStreamConnection(chatId, {
         keepActiveConnectionWithDeadman()
         return
       }
-      if (hiddenDuration === null) {
-        armReconnectingNote()
-      } else {
-        armNoteForWake(hiddenDuration)
-      }
-      if (abortRef.current) {
-        abortRef.current.abort()
-        abortRef.current = null
-      }
       connectRef.current?.(true)
     }
 
+    const onOffline = () => { connectionStaleRef.current = true }
     document.addEventListener('visibilitychange', onVisible)
     window.addEventListener('online', onOnline)
+    window.addEventListener('offline', onOffline)
 
     return () => {
       document.removeEventListener('visibilitychange', onVisible)
       window.removeEventListener('online', onOnline)
+      window.removeEventListener('offline', onOffline)
     }
   }, [persistLatestStreamSnapshot])
 

@@ -399,7 +399,7 @@ test('live delegated execution outranks a stale completed task presentation', ()
 
 test('ChatView retains settled goals independently of transport liveness', () => {
   const runtimePoll = chatView.match(
-    /const reconcileRuntimeState = useCallback[\s\S]*?const handleCompactionStored/,
+    /const refreshRuntimeState = useCallback[\s\S]*?const reconcileRuntimeState/,
   )?.[0] || ''
   assert.doesNotMatch(
     runtimePoll,

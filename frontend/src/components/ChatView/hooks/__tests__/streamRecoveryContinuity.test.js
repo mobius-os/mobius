@@ -2,6 +2,7 @@
 import { test, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { IDBFactory } from 'fake-indexeddb'
+import { verifyConnectivity } from '../../../../lib/connectivityStore.js'
 import { listIntents, outboxPrincipalKey } from '../../chatOutbox.js'
 import { renderHook } from './react-hook-shim.mjs'
 import useStreamConnection from '../../useStreamConnection.js'
@@ -353,4 +354,134 @@ test('chat switches during durable intent registration keep POST and retirement 
   accepted.resolve(Response.json({ status: 'started' }))
   await sending
   assert.deepEqual(await listIntents(principal), [], 'accepted intent retires in its original chat')
+})
+
+for (const order of ['visible-online', 'online-visible']) {
+  test(`wake ${order} and runtime attachment share a pending replacement`, async () => {
+    setup()
+    const requests = []
+    const firstRead = deferred()
+    globalThis.fetch = async (url, options) => {
+      requests.push(options.signal)
+      if (requests.length > 1) return new Promise((resolve, reject) => {
+        options.signal.addEventListener('abort', () => reject(
+          Object.assign(new Error('aborted'), { name: 'AbortError' }),
+        ), { once: true })
+      })
+      return new Response(new ReadableStream({ start(controller) {
+        controller.enqueue(new TextEncoder().encode('data: {"type":"catch_up_done"}\n\n'))
+        options.signal.addEventListener('abort', () => controller.close(), { once: true })
+        firstRead.resolve()
+      } }), { status: 200 })
+    }
+    void hook.result.current.connectToStream(true)
+    await firstRead.promise
+    await Promise.resolve()
+    const originalNow = Date.now
+    try {
+      let now = originalNow()
+      Date.now = () => now
+      document.visibilityState = 'hidden'
+      document.dispatchEvent(new Event('visibilitychange'))
+      window.dispatchEvent(new Event('offline'))
+      now += 16000
+      const visible = () => {
+        document.visibilityState = 'visible'
+        document.dispatchEvent(new Event('visibilitychange'))
+      }
+      const online = () => window.dispatchEvent(new Event('online'))
+      if (order === 'visible-online') { visible(); online() }
+      else { online(); visible() }
+      void hook.result.current.connectToStream(true)
+      assert.equal(requests.length, 2, 'one old stream and one replacement, not a third GET')
+      assert.equal(requests[0].aborted, true)
+      assert.equal(requests[1].aborted, false, 'wake signals must not abort the new GET')
+      hook.result.current.disconnect({ clearStreaming: true })
+      window.dispatchEvent(new Event('online'))
+      assert.equal(requests.length, 2, 'Stop must retain ownership over later wake signals')
+    } finally { Date.now = originalNow }
+  })
+}
+
+test('repeated attachment shares a live stream but explicit Retry replaces it', async () => {
+  setup()
+  const requests = []
+  globalThis.fetch = async (url, options) => {
+    requests.push(options.signal)
+    return new Response(new ReadableStream({ start(controller) {
+      controller.enqueue(new TextEncoder().encode('data: {"type":"catch_up_done"}\n\n'))
+      options.signal.addEventListener('abort', () => controller.close(), { once: true })
+    } }), { status: 200 })
+  }
+  void hook.result.current.connectToStream(true)
+  await Promise.resolve()
+  void hook.result.current.connectToStream(true)
+  assert.equal(requests.length, 1)
+  hook.result.current.retry()
+  assert.equal(requests.length, 2)
+  assert.equal(requests[0].aborted, true)
+})
+
+test('a shared pending GET still has a no-read deadline, cancelled by unmount', async () => {
+  setup()
+  window.__MOBIUS_KEPT_SOCKET_DEADMAN_MS = 10
+  const replacement = deferred()
+  const requests = []
+  globalThis.fetch = (url, options) => {
+    requests.push(options.signal)
+    if (requests.length === 2) replacement.resolve()
+    return new Promise((resolve, reject) => {
+      options.signal.addEventListener('abort', () => reject(
+        Object.assign(new Error('aborted'), { name: 'AbortError' }),
+      ), { once: true })
+    })
+  }
+  void hook.result.current.connectToStream(true)
+  void hook.result.current.connectToStream(true)
+  assert.equal(requests.length, 1)
+  await replacement.promise
+  assert.equal(requests.length, 2)
+  assert.equal(requests[0].aborted, true)
+  hook.unmount()
+  hook = null
+  assert.equal(requests[1].aborted, true)
+})
+
+
+test('a successful attachment announcing network recovery must not cancel itself', async () => {
+  setup()
+  const requests = []
+  const checked = verifyConnectivity()
+  globalThis.fetch = async (url, options) => {
+    requests.push(options.signal)
+    return new Response(new ReadableStream({ start(controller) {
+      controller.enqueue(new TextEncoder().encode('data: {"type":"catch_up_done"}\n\n'))
+      options.signal.addEventListener('abort', () => controller.close(), { once: true })
+    } }), { status: 200 })
+  }
+  void hook.result.current.connectToStream(true)
+  await checked
+  await Promise.resolve()
+  assert.equal(requests.length, 1)
+  assert.equal(requests[0].aborted, false)
+})
+
+test('a redundant online signal cannot show Reconnecting after catchup settled', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const settled = deferred()
+  setup({ onCatchUpSettled: () => settled.resolve() })
+  let requests = 0
+  globalThis.fetch = async (url, options) => {
+    requests++
+    return new Response(new ReadableStream({ start(controller) {
+      controller.enqueue(new TextEncoder().encode('data: {"type":"catch_up_done"}\n\n'))
+      options.signal.addEventListener('abort', () => controller.close(), { once: true })
+    } }), { status: 200 })
+  }
+  void hook.result.current.connectToStream(true)
+  await settled.promise
+  window.dispatchEvent(new Event('online'))
+  t.mock.timers.tick(1600)
+  assert.equal(requests, 1)
+  assert.equal(hook.result.current.reconnecting, false)
 })
