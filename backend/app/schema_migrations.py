@@ -3628,6 +3628,23 @@ def _separate_chat_live_assistants(eng):
     conn.execute(text("ALTER TABLE chats DROP COLUMN live_assistant"))
 
 
+def _add_chat_run_activity_delivery(eng):
+  """Retain exact non-transcript activity delivered to each provider run."""
+  from sqlalchemy import inspect as sa_inspect, text
+
+  if "chat_runs" not in sa_inspect(eng).get_table_names():
+    return
+  columns = {
+    column["name"] for column in sa_inspect(eng).get_columns("chat_runs")
+  }
+  if "activity_delivery_json" in columns:
+    return
+  with eng.begin() as conn:
+    conn.execute(text(
+      "ALTER TABLE chat_runs ADD COLUMN activity_delivery_json JSON NULL"
+    ))
+
+
 _SCHEMA_MIGRATIONS = (
   # Full IDs are permanent identities, not sequence positions. Append new
   # work in execution order; never renumber a shipped ID to reconcile sources.
@@ -3676,6 +3693,7 @@ _SCHEMA_MIGRATIONS = (
   ("0043_agent_coordination_delivery", _add_agent_coordination_delivery),
   ("0044_peer_context_delivery_cursor", _add_peer_context_delivery_cursor),
   ("0045_chat_live_assistants", _separate_chat_live_assistants),
+  ("0046_chat_run_activity_delivery", _add_chat_run_activity_delivery),
 )
 
 

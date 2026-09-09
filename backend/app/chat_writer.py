@@ -7,10 +7,11 @@ NEVER touches asyncio primitives or `ChatBroadcast` (those stay
 loop-owned), so the blocking `db.commit()` that SQLite's `busy_timeout`
 can stall for up to five seconds no longer runs on the event loop.
 
-Commands are DOMAIN-level (`PersistTranscript`, `Finalize`,
-`PersistError`, `AnswerQuestion`, `Barrier`, `DrainAndStop`) rather than
-row-level so a later milestone can swap their dispatch for normalized-row
-writes without rewriting the actor.
+Commands are DOMAIN-level (`PersistTranscript`, `Finalize`, `PersistError`,
+`AnswerQuestion`, `StartActivityContinuation`, `Barrier`, `DrainAndStop`)
+rather than row-level so a later milestone can swap their dispatch for
+normalized-row writes without rewriting the actor. Activity commands own only
+event/run state; they never manufacture conversation messages.
 
 See the "Chat persistence — single-writer actor" section in ARCHITECTURE.md
 for the contract; the v2 design + staged-rollout notes are internal/gitignored.
@@ -48,7 +49,7 @@ import time
 import uuid
 from concurrent.futures import Future, InvalidStateError
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 
 from sqlalchemy import select, text, update
 from sqlalchemy.exc import SQLAlchemyError
@@ -291,6 +292,7 @@ class AdmitProviderExecution(_Command):
   chat_id: str = ""
   run_token: str = ""
   has_peer_context_delivery: bool = False
+  activity_delegation_ids: tuple[str, ...] = ()
 
 
 @dataclass
@@ -306,6 +308,19 @@ class AcknowledgePeerContextDelivery(_Command):
   run_token: str = ""
   peer_message_through_created_at: datetime | None = None
   peer_message_through_id: str | None = None
+
+
+@dataclass
+class AcknowledgeActivityDelivery(_Command):
+  """Mark the exact helper results in an admitted run as incorporated.
+
+  The identities come from the run's persisted activity-delivery envelope,
+  not from a caller-provided transcript carrier. Provider failure leaves the
+  results available for the next real context checkpoint.
+  """
+
+  chat_id: str = ""
+  run_token: str = ""
 
 
 @dataclass
@@ -567,6 +582,24 @@ class StartContinuation(_Command):
   # A restart continuation atomically replaces its exact parked physical run.
   # Other programmatic continuations require an already-idle logical root.
   supersedes_run_token: str | None = None
+
+
+@dataclass
+class StartActivityContinuation(_Command):
+  """Open one same-root provider checkpoint without writing a user message.
+
+  ``activity_id`` is a stable durable event identity. The writer validates
+  that the event is still available and that the exact logical parent is
+  explicitly waiting before it creates the physical ChatRun. The caller adds
+  an ephemeral provider protocol input after this command returns;
+  Chat.messages and Chat.pending_messages remain byte-for-byte unchanged.
+  """
+
+  chat_id: str = ""
+  run_token: str = ""
+  root_run_id: str = ""
+  source_work_id: str = ""
+  activity_id: str = ""
 
 
 def recover_start_continuation(
@@ -1045,6 +1078,7 @@ _FENCE_COMMANDS = (
   AnswerQuestion,
   StartTurn,
   StartContinuation,
+  StartActivityContinuation,
   AppendPending,
   AppendSteeredUserMessage,
   PromotePending,
@@ -1542,7 +1576,10 @@ class ChatWriterActor:
         # post-abandon commit strands a turn. The `finally` still GCs the
         # key's fence epoch for the skipped command.
         if (
-          isinstance(cmd, (StartTurn, StartContinuation, PromotePending))
+          isinstance(cmd, (
+            StartTurn, StartContinuation, StartActivityContinuation,
+            PromotePending,
+          ))
           and cmd.ack is not None
           and cmd.ack.done()
         ):
@@ -1788,6 +1825,8 @@ class ChatWriterActor:
       return self._admit_provider_execution(db, cmd)
     if isinstance(cmd, AcknowledgePeerContextDelivery):
       return self._acknowledge_peer_context_delivery(db, cmd)
+    if isinstance(cmd, AcknowledgeActivityDelivery):
+      return self._acknowledge_activity_delivery(db, cmd)
     if isinstance(cmd, RecordAgentLifecycle):
       from app.agent_lifecycle import record_event
       return record_event(db, cmd.values)
@@ -1809,6 +1848,8 @@ class ChatWriterActor:
       return self._start_turn(db, cmd)
     if isinstance(cmd, StartContinuation):
       return self._start_continuation(db, cmd)
+    if isinstance(cmd, StartActivityContinuation):
+      return self._start_activity_continuation(db, cmd)
     if isinstance(cmd, PromoteRunToGoal):
       return self._promote_run_to_goal(db, cmd)
     if isinstance(cmd, ClearPresentedGoal):
@@ -2059,8 +2100,31 @@ class ChatWriterActor:
       or run.provider_execution_admitted is not False
     ):
       raise _PersistFailed("AdmitProviderExecution: run is not eligible")
+    activity_ids = tuple(dict.fromkeys(cmd.activity_delegation_ids))
+    if (
+      len(activity_ids) > 100
+      or any(not isinstance(item, str) or not item for item in activity_ids)
+    ):
+      raise _PersistFailed(
+        "AdmitProviderExecution: invalid activity delivery identity"
+      )
+    if activity_ids:
+      activity_rows = db.query(models.Delegation.id).filter(
+        models.Delegation.id.in_(activity_ids),
+        models.Delegation.parent_chat_id == cmd.chat_id,
+        models.Delegation.notify_parent_on_complete.is_(True),
+        models.Delegation.parent_woken_at.is_(None),
+        models.Delegation.cancelled_at.is_(None),
+      ).all()
+      if {str(row[0]) for row in activity_rows} != set(activity_ids):
+        raise _PersistFailed(
+          "AdmitProviderExecution: activity delivery is no longer available"
+        )
     run.provider_execution_admitted = True
     run.peer_message_delivery_pending = bool(cmd.has_peer_context_delivery)
+    run.activity_delivery_json = (
+      {"delegation_ids": list(activity_ids)} if activity_ids else None
+    )
     if not _commit_or_rollback(db):
       raise _PersistFailed("AdmitProviderExecution did not persist")
 
@@ -2102,6 +2166,60 @@ class ChatWriterActor:
     run.peer_message_delivery_pending = False
     if not _commit_or_rollback(db):
       raise _PersistFailed("AcknowledgePeerContextDelivery did not persist")
+
+  def _acknowledge_activity_delivery(
+    self, db, cmd: AcknowledgeActivityDelivery,
+  ) -> int:
+    """Consume only the helper identities recorded by this admitted run."""
+    from app.models import ChatRun
+
+    run = db.query(ChatRun).filter(
+      ChatRun.id == cmd.run_token,
+      ChatRun.chat_id == cmd.chat_id,
+      ChatRun.provider_execution_admitted.is_(True),
+    ).first()
+    if run is None:
+      raise _PersistFailed(
+        "AcknowledgeActivityDelivery: admitted run not found"
+      )
+    envelope = run.activity_delivery_json
+    raw_ids = (
+      envelope.get("delegation_ids")
+      if isinstance(envelope, dict) else None
+    )
+    if not isinstance(raw_ids, list) or not raw_ids:
+      return 0
+    ids = tuple(dict.fromkeys(
+      item for item in raw_ids if isinstance(item, str) and item
+    ))
+    if len(ids) != len(raw_ids):
+      raise _PersistFailed(
+        "AcknowledgeActivityDelivery: malformed persisted activity delivery"
+      )
+    matching = db.query(models.Delegation.id).filter(
+      models.Delegation.id.in_(ids),
+      models.Delegation.parent_chat_id == cmd.chat_id,
+    ).all()
+    if {str(row[0]) for row in matching} != set(ids):
+      raise _PersistFailed(
+        "AcknowledgeActivityDelivery: activity ownership changed"
+      )
+    incorporated = db.query(models.Delegation).filter(
+      models.Delegation.id.in_(ids),
+      models.Delegation.parent_chat_id == cmd.chat_id,
+      models.Delegation.parent_woken_at.is_(None),
+    ).update(
+      {
+        models.Delegation.parent_woken_at:
+          datetime.now(UTC).replace(tzinfo=None),
+      },
+      synchronize_session=False,
+    )
+    if incorporated and not _commit_or_rollback(db):
+      raise _PersistFailed("AcknowledgeActivityDelivery did not persist")
+    if not incorporated:
+      db.rollback()
+    return incorporated
 
   def _record_run_metrics(self, db, cmd: RecordRunMetrics) -> bool:
     """Attach provider usage/cost to the exact durable run row."""
@@ -3235,6 +3353,129 @@ class ChatWriterActor:
         "_messages": stored_rows,
         "_consumed_cids": [],
       },
+      "session_id": chat.session_id,
+      "provider": provider,
+    }
+
+  def _start_activity_continuation(
+    self, db, cmd: StartActivityContinuation,
+  ) -> dict | StartContinuationAttached | StartContinuationBlocked:
+    """Open an explicitly awaited helper checkpoint without a transcript row."""
+    from app.delegations import WAKE_ELIGIBLE_STATUSES, derived_status
+    from app.models import ChatRun
+
+    chat = _active_chat(db, cmd.chat_id)
+    if chat is None:
+      raise _PersistFailed(
+        "StartActivityContinuation: chat not found or deleted"
+      )
+    trigger = db.query(models.Delegation).filter(
+      models.Delegation.id == cmd.activity_id,
+      models.Delegation.parent_chat_id == cmd.chat_id,
+      models.Delegation.parent_root_run_id == cmd.source_work_id,
+      models.Delegation.notify_parent_on_complete.is_(True),
+      models.Delegation.parent_woken_at.is_(None),
+      models.Delegation.cancelled_at.is_(None),
+    ).first()
+    if (
+      trigger is None
+      or derived_status(db, trigger, load_result=False)[0]
+        not in WAKE_ELIGIBLE_STATUSES
+    ):
+      db.rollback()
+      return StartContinuationBlocked("activity_unavailable")
+
+    existing_run = db.query(ChatRun).filter(
+      ChatRun.id == cmd.run_token,
+      ChatRun.chat_id == cmd.chat_id,
+    ).first()
+    if existing_run is not None:
+      if (
+        (existing_run.root_run_id or existing_run.id) != cmd.root_run_id
+        or existing_run.initiated_by_app_id is not None
+      ):
+        raise _PersistFailed(
+          "StartActivityContinuation: run identity belongs to other work"
+        )
+      db.rollback()
+      return StartContinuationAttached()
+
+    root = db.query(ChatRun.id).filter(
+      ChatRun.id == cmd.root_run_id,
+      ChatRun.chat_id == cmd.chat_id,
+    ).first()
+    if root is None:
+      raise _PersistFailed(
+        "StartActivityContinuation: logical root does not belong to chat"
+      )
+    if chat.pending_question_id is not None:
+      db.rollback()
+      return StartContinuationBlocked("pending_question")
+    if chat.pending_messages:
+      db.rollback()
+      return StartContinuationBlocked("pending_input")
+    if db.query(ChatRun.id).filter(
+      ChatRun.chat_id == cmd.chat_id,
+      ChatRun.status.in_(models.NONTERMINAL_RUN_STATUSES),
+    ).first() is not None:
+      db.rollback()
+      return StartContinuationBlocked("active_run")
+
+    latest = db.query(ChatRun).filter(
+      ChatRun.chat_id == cmd.chat_id,
+    ).order_by(ChatRun.started_at.desc(), ChatRun.id.desc()).first()
+    latest_source = (
+      (latest.goal_id or latest.root_run_id or latest.id)
+      if latest is not None else None
+    )
+    if (
+      latest is None
+      or latest.status != "completed"
+      or latest_source != cmd.source_work_id
+    ):
+      db.rollback()
+      return StartContinuationBlocked("parent_not_waiting")
+
+    existing = list(chat.messages or [])
+    try:
+      history = [
+        schemas.ChatMessage(
+          role=row.get("role", "user"),
+          content=row.get("content", "") or "",
+        )
+        for row in existing
+      ]
+    except Exception as exc:
+      raise _PersistFailed(
+        "StartActivityContinuation: malformed controller transcript"
+      ) from exc
+
+    started_at = datetime.now(UTC)
+    chat.live_assistant = {
+      "id": cmd.run_token,
+      "role": "assistant",
+      "blocks": [],
+      "ts": next_message_ts(existing),
+    }
+    chat.active_assistant_message_id = cmd.run_token
+    chat.updated_at = started_at
+    provider = chat.provider or "claude"
+    db.add(ChatRun(
+      id=cmd.run_token,
+      chat_id=cmd.chat_id,
+      status="running",
+      root_run_id=cmd.root_run_id,
+      provider=provider,
+      started_at=started_at,
+      initiated_by_app_id=None,
+      goal_objective=latest.goal_objective,
+      goal_id=latest.goal_id,
+    ))
+    if not _commit_or_rollback(db):
+      raise _PersistFailed("StartActivityContinuation did not persist")
+    self._run_token_owner[cmd.chat_id] = cmd.run_token
+    return {
+      "history": history,
       "session_id": chat.session_id,
       "provider": provider,
     }

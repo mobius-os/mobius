@@ -83,6 +83,7 @@ from app.chat_titles import apply_generated_title, renamed_event
 from app.goal_commands import is_goal_continue
 from app.memory_observability import claim_oom_kill
 from app.chat_writer import (
+  AcknowledgeActivityDelivery,
   AcknowledgePeerContextDelivery,
   AdmitProviderExecution,
   AppendPending,
@@ -2701,6 +2702,7 @@ async def _admit_provider_execution(
   run_gen: int | None,
   *,
   has_peer_context_delivery: bool = False,
+  activity_delegation_ids: tuple[str, ...] = (),
 ) -> bool:
   """Cross provider entry only while this exact turn still owns execution.
 
@@ -2715,6 +2717,7 @@ async def _admit_provider_execution(
       chat_id=chat_id,
       run_token=run_token,
       has_peer_context_delivery=has_peer_context_delivery,
+      activity_delegation_ids=activity_delegation_ids,
     )))
   except Exception:
     if not _run_generation_superseded(chat_id, run_gen):
@@ -4760,6 +4763,33 @@ async def _acknowledge_peer_context_delivery(
     )
 
 
+async def _acknowledge_activity_delivery(
+  *, chat_id: str, run_token: str, delegation_ids: tuple[str, ...],
+) -> None:
+  """Best-effort provider-success acknowledgement for helper result data."""
+  if not chat_id or not run_token or not delegation_ids:
+    return
+  try:
+    await _await_ack(get_writer().submit(AcknowledgeActivityDelivery(
+      chat_id=chat_id,
+      run_token=run_token,
+    )))
+    from app.delegations import (
+      publish_chat_activity_changed,
+      publish_parent_waiting_changed,
+    )
+    publish_chat_activity_changed(chat_id)
+    publish_parent_waiting_changed(chat_id)
+  except Exception:
+    _get_logger().warning(
+      "activity context acknowledgement failed; delivery stays available "
+      "chat_id=%s run_token=%s",
+      chat_id,
+      run_token,
+      exc_info=True,
+    )
+
+
 async def _sync_chat_title(data_dir: str, chat_id: str) -> None:
   """Compatibility helper: sync a chat title from an existing note's gist.
 
@@ -5303,6 +5333,20 @@ async def _run_chat_impl_with_db(
     alive_chat_ids=registry.all_alive_chat_ids(),
   )
 
+  # Helper completion is durable activity, not human conversation. Pull the
+  # still-available result from its Delegation/child record into provider-only
+  # context and retain exact identities for provider-success acknowledgement.
+  activity_delegation_ids: tuple[str, ...] = ()
+  if run_policy is None and chat_id:
+    from app.delegations import build_delegation_result_context
+    activity_delivery = build_delegation_result_context(db, chat_id)
+    activity_delegation_ids = activity_delivery.delegation_ids
+    if activity_delivery.text:
+      if is_slash_command:
+        user_message = f"{user_message}\n\n{activity_delivery.text}"
+      else:
+        user_message = f"{activity_delivery.text}\n\n{user_message}"
+
   if not session_id and run_policy is None:
     compaction_brief = _latest_compaction_brief(chat_row)
     if compaction_brief:
@@ -5738,6 +5782,7 @@ async def _run_chat_impl_with_db(
         run_token or "",
         run_gen,
         has_peer_context_delivery=coordination_message_through is not None,
+        activity_delegation_ids=activity_delegation_ids,
       ):
         return await _complete_turn(
           bc=bc, sink=sink, db=db, chat_id=chat_id, run_gen=run_gen,
@@ -5773,6 +5818,11 @@ async def _run_chat_impl_with_db(
           chat_id=chat_id,
           run_token=run_token or "",
           delivered_through=coordination_message_through,
+        )
+        await _acknowledge_activity_delivery(
+          chat_id=chat_id,
+          run_token=run_token or "",
+          delegation_ids=activity_delegation_ids,
         )
       usage_metrics = runner_result.get("usage_metrics")
       await _record_run_metrics(
@@ -5928,6 +5978,7 @@ async def _run_chat_impl_with_db(
         run_token or "",
         run_gen,
         has_peer_context_delivery=coordination_message_through is not None,
+        activity_delegation_ids=activity_delegation_ids,
       ):
         return await _complete_turn(
           bc=bc, sink=sink, db=db, chat_id=chat_id, run_gen=run_gen,
@@ -5956,6 +6007,11 @@ async def _run_chat_impl_with_db(
           chat_id=chat_id,
           run_token=run_token or "",
           delivered_through=coordination_message_through,
+        )
+        await _acknowledge_activity_delivery(
+          chat_id=chat_id,
+          run_token=run_token or "",
+          delegation_ids=activity_delegation_ids,
         )
       usage_metrics = runner_result.get("usage_metrics")
       await _record_run_metrics(

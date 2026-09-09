@@ -30,6 +30,7 @@ from app import (
 )
 from app.chat_visibility import coerce_agent_settings, visible_in_owner_drawer
 from app.chat_event_sink import active_sink_assistant_message_id
+from app.chat_activity import chat_activity_page
 from app.chat_waits import (
   armed_wait_chat_ids,
   armed_waits_for_chat,
@@ -1666,6 +1667,25 @@ def get_chat_message_sources(
   if not isinstance(message, dict) or message.get("role") != "assistant":
     raise HTTPException(status_code=404, detail="Reference message not found.")
   return {"sources": message_sources_for_detail(message)}
+
+
+@router.get("/{chat_id}/activity")
+def get_chat_activity(
+  chat_id: str,
+  before: str | None = Query(default=None, max_length=512),
+  limit: int = Query(default=50, ge=1, le=100),
+  principal: Principal = Depends(get_owner_or_chat_embed_principal),
+  db: Session = Depends(get_db),
+):
+  """Page durable peer notes and helper results visible to this exact chat."""
+  if principal.scope == "app":
+    raise HTTPException(status_code=403, detail="App token is not valid here.")
+  require_chat_embed_operation(principal, "chat:read")
+  get_active_chat_for_principal(db, chat_id, principal)
+  try:
+    return chat_activity_page(db, chat_id, before=before, limit=limit)
+  except ValueError as exc:
+    raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @router.get("/{chat_id}/activity-detail")

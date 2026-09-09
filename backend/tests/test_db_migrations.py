@@ -1377,6 +1377,34 @@ def test_fresh_chat_run_has_nullable_peer_context_delivery_cursor():
   assert columns.peer_message_delivery_pending.nullable is True
 
 
+def test_activity_delivery_upgrade_preserves_existing_runs(tmp_path):
+  eng = create_engine(f"sqlite:///{tmp_path / 'activity-delivery.db'}")
+  with eng.begin() as conn:
+    conn.execute(text(
+      "CREATE TABLE chat_runs (id VARCHAR(64) PRIMARY KEY)"
+    ))
+    conn.execute(text("INSERT INTO chat_runs (id) VALUES ('existing-run')"))
+
+  migrations._add_chat_run_activity_delivery(eng)
+  migrations._add_chat_run_activity_delivery(eng)
+
+  columns = {
+    column["name"]: column
+    for column in inspect(eng).get_columns("chat_runs")
+  }
+  assert columns["activity_delivery_json"]["nullable"] is True
+  with eng.connect() as conn:
+    value = conn.execute(text(
+      "SELECT activity_delivery_json FROM chat_runs "
+      "WHERE id = 'existing-run'"
+    )).scalar_one()
+  assert value is None
+
+
+def test_fresh_chat_run_has_nullable_activity_delivery_envelope():
+  assert models.ChatRun.__table__.c.activity_delivery_json.nullable is True
+
+
 def test_run_migrations_adds_read_at_and_backfills_notifications(tmp_path):
   """Pre-feature notification history must not arrive as a full unread badge.
 
@@ -1479,6 +1507,7 @@ def test_run_migrations_records_an_inspectable_append_only_history(tmp_path):
     "0043_agent_coordination_delivery",
     "0044_peer_context_delivery_cursor",
     "0045_chat_live_assistants",
+    "0046_chat_run_activity_delivery",
   ]
   assert second == first
 

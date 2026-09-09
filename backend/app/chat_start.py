@@ -318,3 +318,147 @@ async def start_programmatic_chat_continuation(
     if claimed:
       discard_starting(chat_id)
     raise
+
+
+async def start_programmatic_activity_continuation(
+  *, chat_id: str, root_run_id: str, run_token: str,
+  source_work_id: str, activity_id: str,
+  _transition_lock_held: bool = False,
+) -> bool:
+  """Schedule one durable activity checkpoint without forging chat input.
+
+  The writer creates only the ChatRun and empty live assistant slot. This seam
+  then supplies ``run_chat`` a small ephemeral provider protocol prompt; it is
+  never appended to ``messages`` or ``pending_messages``.
+  """
+  from app import chat_queue, schemas
+  from app.chat import (
+    _schedule_continuation,
+    discard_starting,
+    is_chat_running,
+    mark_starting,
+    programmatic_start_blocked,
+  )
+  from app.chat_writer import (
+    FinishRun,
+    StartActivityContinuation,
+    StartContinuationAttached,
+    StartContinuationBlocked,
+  )
+  from app.database import SessionLocal
+
+  claimed = False
+  try:
+    async with asyncio.timeout(chat_queue.TERMINAL_LOCK_TIMEOUT_SECS):
+      transition_guard = (
+        nullcontext()
+        if _transition_lock_held else chat_queue.get_transition_lock(chat_id)
+      )
+      async with transition_guard:
+        async with chat_queue.get_lock(chat_id):
+          orphaned = None
+          with SessionLocal() as db:
+            existing = db.query(models.ChatRun).filter(
+              models.ChatRun.id == run_token,
+              models.ChatRun.chat_id == chat_id,
+            ).first()
+            if existing is None and programmatic_start_blocked(db, chat_id):
+              return False
+            if existing is not None:
+              if (
+                (existing.root_run_id or existing.id) != root_run_id
+                or existing.initiated_by_app_id is not None
+              ):
+                return False
+              if existing.status == "completed":
+                return False
+              if existing.status != "running":
+                return False
+              if is_chat_running(chat_id):
+                return True
+              chat = db.query(models.Chat).filter(
+                models.Chat.id == chat_id,
+                models.Chat.deleted_at.is_(None),
+              ).first()
+              from app.delegations import (
+                activity_continuation_source,
+                safe_parent_activity_startup_writer_orphan,
+              )
+              if safe_parent_activity_startup_writer_orphan(
+                db, chat, existing,
+              ):
+                source = activity_continuation_source(
+                  run_token=run_token, source_work_id=source_work_id,
+                )
+                history = [
+                  schemas.ChatMessage(
+                    role=message.get("role", "user"),
+                    content=message.get("content", "") or "",
+                  )
+                  for message in list(chat.messages or [])
+                ]
+                history.append(schemas.ChatMessage(
+                  role="user", content=source["content"],
+                ))
+                orphaned = {
+                  "history": history,
+                  "promoted": source,
+                  "session_id": chat.session_id,
+                  "provider": chat.provider or "claude",
+                }
+          if existing is not None and orphaned is None:
+            await await_ack(get_writer().submit(FinishRun(
+              chat_id=chat_id,
+              run_token=run_token,
+              terminal_status="failed",
+            )))
+            return False
+          if not mark_starting(chat_id):
+            return False
+          claimed = True
+          promoted = orphaned if existing is not None else await await_ack(
+            get_writer().submit(StartActivityContinuation(
+              chat_id=chat_id,
+              run_token=run_token,
+              root_run_id=root_run_id,
+              source_work_id=source_work_id,
+              activity_id=activity_id,
+            ))
+          )
+          if isinstance(promoted, StartContinuationAttached):
+            discard_starting(chat_id)
+            claimed = False
+            return True
+          if isinstance(promoted, StartContinuationBlocked):
+            discard_starting(chat_id)
+            claimed = False
+            return False
+          if "promoted" not in promoted:
+            from app.delegations import activity_continuation_source
+            source = activity_continuation_source(
+              run_token=run_token, source_work_id=source_work_id,
+            )
+            promoted["history"].append(schemas.ChatMessage(
+              role="user", content=source["content"],
+            ))
+            promoted["promoted"] = source
+          get_system_broadcast().publish({
+            "type": "chat_run_started",
+            "chatId": chat_id,
+          })
+          scheduled = _schedule_continuation(
+            chat_id=chat_id,
+            messages=promoted["history"],
+            session_id=promoted["session_id"],
+            provider_id=promoted["provider"],
+            next_user=promoted["promoted"],
+            run_token=run_token,
+          )
+          if scheduled is False:
+            claimed = False
+            return False
+          return True
+  except BaseException:
+    if claimed:
+      discard_starting(chat_id)
+    raise

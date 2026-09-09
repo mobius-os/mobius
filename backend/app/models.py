@@ -365,6 +365,11 @@ class ChatRun(Base):
   # peer context was present and True while an injected page still awaits a
   # successful provider return; only the latter blocks the start-time fallback.
   peer_message_delivery_pending = Column(Boolean, nullable=True, default=None)
+  # Exact durable activity records included in this provider admission. The
+  # provider-success acknowledgement uses these identities to mark helper
+  # results incorporated without adding a synthetic user transcript row. It
+  # remains populated after acknowledgement as the restart/idempotency audit.
+  activity_delivery_json = Column(JSON, nullable=True, default=None)
   provider = Column(String(32), nullable=True, default=None)
   # Objective shown by the shell while this exact run owns a native goal.
   # This belongs to the run rather than the transcript tail: mid-turn owner
@@ -500,16 +505,16 @@ class Delegation(Base):
   max_budget_usd = Column(Float, nullable=True)
   created_at = Column(DateTime, nullable=False, default=lambda: now_naive_utc())
   cancelled_at = Column(DateTime, nullable=True, default=None)
-  # Opt-in: wake the parent chat with the result when this child settles. Off by
-  # default so pre-existing rows and any pure-poll submitter never get a surprise
-  # turn; the chat-agent subagent path sets it True at submit.
+  # Opt-in: the parent explicitly waits for this result and may receive one
+  # non-message activity checkpoint after the child settles. Off by default so
+  # pre-existing rows and pure-poll submitters never get a surprise turn.
   notify_parent_on_complete = Column(
     Boolean, nullable=False, default=False
   )
-  # Retry latch for the parent wake, stamped after the completion notice starts
-  # or queues. If a crash lands between those transactions, recovery recognizes
-  # the exact durable hidden envelope before either retrying or yielding its
-  # observation claim to a blocking attachment.
+  # Result-consumption latch. New delivery stamps it after provider success;
+  # existing values/carriers preserve the historical parent-wake contract.
+  # Until set, the owning Delegation/child result remains available to a later
+  # real context checkpoint even when Stop fences automatic continuation.
   parent_woken_at = Column(DateTime, nullable=True, default=None)
   # A source-attached job (currently contribution preparation) belongs to the
   # owner-facing source chat without fabricating a ChatRun there. The stable

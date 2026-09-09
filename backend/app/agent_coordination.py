@@ -1027,15 +1027,8 @@ def agent_network_snapshot(
   }
 
 
-def chat_message_history(
-  db: Session, chat_id: str, *, before: str | None = None, limit: int = 50,
-) -> dict[str, Any]:
-  """Page retained sent/received mail, never sibling agents' direct exchanges.
-
-  Historical logical runs retain the chat's delegation broadcast affinities.
-  Project broadcasts follow the same current-membership visibility as agent
-  context; this is accessible mail, not a claim that a model read each note.
-  """
+def chat_message_history_query(db: Session, chat_id: str):
+  """Build the exact-chat mail visibility query shared by read surfaces."""
   message = models.AgentCoordinationMessage
   scopes = []
   current_scope = scope_for_chat(db, chat_id)
@@ -1048,11 +1041,24 @@ def chat_message_history(
       models.ChatRun.goal_id, models.ChatRun.root_run_id, models.ChatRun.id,
     )).filter(models.ChatRun.chat_id == chat_id)
     scopes.append(and_(message.room_kind == "delegation", message.room_id.in_(logical_runs)))
-  query = db.query(message).filter(or_(
+  return db.query(message).filter(or_(
     message.from_chat_id == chat_id,
     message.to_chat_id == chat_id,
     and_(message.to_chat_id.is_(None), or_(*scopes)) if scopes else False,
   ))
+
+
+def chat_message_history(
+  db: Session, chat_id: str, *, before: str | None = None, limit: int = 50,
+) -> dict[str, Any]:
+  """Page retained sent/received mail, never sibling agents' direct exchanges.
+
+  Historical logical runs retain the chat's delegation broadcast affinities.
+  Project broadcasts follow the same current-membership visibility as agent
+  context; this is accessible mail, not a claim that a model read each note.
+  """
+  message = models.AgentCoordinationMessage
+  query = chat_message_history_query(db, chat_id)
   total = query.count()
   sent = query.filter(message.from_chat_id == chat_id).count()
   broadcasts = query.filter(message.to_chat_id.is_(None)).count()

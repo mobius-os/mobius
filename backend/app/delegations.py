@@ -1224,12 +1224,12 @@ async def _cancel_delegation_execution_locked(
     return True
 
 
-# --- Parent auto-wake on child completion ------------------------------------
+# --- Parent activity delivery on child completion ---------------------------
 #
-# When a delegation child settles at a real terminal, wake its parent chat with
-# the result so durable subagents "just work" without the owner re-attaching.
-# Only these statuses wake: `stopped`/`cancelled` are user-initiated and
-# `interrupted`/`resuming` auto-resume, so waking on them would be wrong.
+# A helper result stays on its Delegation/child records. An explicitly waiting,
+# idle parent may open one non-message ChatRun checkpoint; busy or fenced parents
+# consume it through a later ordinary provider context. Historical hidden wake
+# carriers are parsed only so already-stored work remains recoverable.
 
 WAKE_ELIGIBLE_STATUSES = frozenset({"completed", "failed", "needs_review"})
 WAKE_ELIGIBLE_RUN_STATUSES = frozenset({"completed", "failed"})
@@ -1241,6 +1241,39 @@ WAKE_PARENT_DELIVERY_TIMEOUT_SECS = 40.0
 _LOG = logging.getLogger("moebius.delegations")
 _WAKE_RESULTS_OPEN = "<delegation_results>"
 _WAKE_RESULTS_CLOSE = "</delegation_results>"
+_ACTIVITY_RUN_PREFIX = "helper-activity-"
+
+
+@dataclass(frozen=True)
+class DelegationResultContextDelivery:
+  """Provider context plus exact durable helper identities it contains."""
+
+  text: str
+  delegation_ids: tuple[str, ...]
+
+
+def activity_continuation_source(
+  *, run_token: str, source_work_id: str,
+) -> dict:
+  """Ephemeral provider protocol input for a non-message activity run."""
+  return {
+    "role": "user",
+    "content": (
+      "Continue the unfinished owner work using the newly available durable "
+      "activity context."
+    ),
+    "kind": "activity_checkpoint",
+    "hidden": True,
+    "source_work_id": source_work_id,
+    "_run_token": run_token,
+  }
+
+
+def _activity_continuation_run_id(row: models.Delegation) -> str:
+  """Stable physical identity for the first available helper completion."""
+  basis = f"{row.parent_chat_id}\0{row.id}"
+  digest = hashlib.sha256(basis.encode("utf-8")).hexdigest()
+  return f"{_ACTIVITY_RUN_PREFIX}{digest[:48]}"
 
 
 def _wake_message_delegation_ids(message: object) -> set[str]:
@@ -1319,6 +1352,22 @@ def claim_inline_delegation_observation(
     return "inline"
   if row.parent_woken_at is not None:
     return "parent_wake"
+  for (status, envelope) in db.query(
+    models.ChatRun.status, models.ChatRun.activity_delivery_json,
+  ).filter(
+    models.ChatRun.chat_id == row.parent_chat_id,
+    models.ChatRun.status.in_(("running", "completed")),
+    models.ChatRun.activity_delivery_json.is_not(None),
+  ).all():
+    ids = (
+      envelope.get("delegation_ids")
+      if isinstance(envelope, dict) else None
+    )
+    if isinstance(ids, list) and row.id in ids:
+      if status == "completed":
+        row.parent_woken_at = now_naive_utc()
+        db.commit()
+      return "parent_wake"
   if row.id in _recorded_parent_wake_ids(db, row.parent_chat_id):
     if row.id not in _repairable_parent_wake_ids(db, row.parent_chat_id):
       # The deterministic wake owns observation, but its commit-before-spawn
@@ -1452,6 +1501,21 @@ def publish_parent_waiting_changed(parent_chat_id: str) -> None:
     })
   except Exception:
     _LOG.debug("background helper wait broadcast failed", exc_info=True)
+
+
+def publish_chat_activity_changed(parent_chat_id: str) -> None:
+  """Hint that the exact-chat activity page has durable changes to refetch."""
+  if not parent_chat_id:
+    return
+  try:
+    from app.broadcast import get_system_broadcast
+
+    get_system_broadcast().publish({
+      "type": "chat_activity_changed",
+      "chatId": parent_chat_id,
+    })
+  except Exception:
+    _LOG.debug("chat activity broadcast failed", exc_info=True)
 
 
 @dataclass(frozen=True)
@@ -1611,6 +1675,79 @@ def _compose_wake_notice(db: Session, rows: list[models.Delegation]) -> str:
   )
 
 
+def available_delegation_results(
+  db: Session,
+  parent_chat_id: str,
+  *,
+  limit: int = WAKE_NOTICE_DELEGATION_LIMIT,
+) -> list[models.Delegation]:
+  """Oldest terminal helper results not yet incorporated by this parent."""
+  if limit < 1:
+    return []
+  return (
+    db.query(models.Delegation)
+    .join(models.ChatRun, models.ChatRun.id == _latest_child_run_id())
+    .filter(
+      models.Delegation.parent_chat_id == parent_chat_id,
+      models.Delegation.notify_parent_on_complete.is_(True),
+      models.Delegation.cancelled_at.is_(None),
+      models.Delegation.parent_woken_at.is_(None),
+      models.ChatRun.status.in_(WAKE_ELIGIBLE_RUN_STATUSES),
+    )
+    .order_by(models.Delegation.created_at.asc(), models.Delegation.id.asc())
+    .limit(min(limit, 100))
+    .all()
+  )
+
+
+def build_delegation_result_context(
+  db: Session, parent_chat_id: str,
+) -> DelegationResultContextDelivery:
+  """Render available helper results from their owning durable records."""
+  rows = available_delegation_results(db, parent_chat_id)
+  if not rows:
+    return DelegationResultContextDelivery(text="", delegation_ids=())
+  return DelegationResultContextDelivery(
+    text=_compose_wake_notice(db, rows),
+    delegation_ids=tuple(row.id for row in rows),
+  )
+
+
+def repair_completed_activity_deliveries(
+  db: Session, parent_chat_id: str,
+) -> set[str]:
+  """Close provider-success acknowledgement gaps without rearming a turn."""
+  repaired: set[str] = set()
+  runs = db.query(models.ChatRun.activity_delivery_json).filter(
+    models.ChatRun.chat_id == parent_chat_id,
+    models.ChatRun.status == "completed",
+    models.ChatRun.provider_execution_admitted.is_(True),
+    models.ChatRun.activity_delivery_json.is_not(None),
+  ).all()
+  for (envelope,) in runs:
+    raw_ids = (
+      envelope.get("delegation_ids")
+      if isinstance(envelope, dict) else None
+    )
+    if not isinstance(raw_ids, list):
+      continue
+    repaired.update(
+      item for item in raw_ids if isinstance(item, str) and item
+    )
+  if not repaired:
+    return set()
+  db.query(models.Delegation).filter(
+    models.Delegation.parent_chat_id == parent_chat_id,
+    models.Delegation.id.in_(repaired),
+    models.Delegation.parent_woken_at.is_(None),
+  ).update(
+    {models.Delegation.parent_woken_at: now_naive_utc()},
+    synchronize_session=False,
+  )
+  db.commit()
+  return repaired
+
+
 def _parent_wake_delivery_identity(
   rows: list[models.Delegation],
 ) -> tuple[str, str]:
@@ -1725,6 +1862,8 @@ def safe_parent_wake_startup_writer_orphan(
   task creation. Only the exact no-output shape remains retryable; partial or
   mismatched work falls through to ordinary conservative interruption.
   """
+  if safe_parent_activity_startup_writer_orphan(db, chat, physical):
+    return True
   messages = list(chat.messages or [])
   continuation = messages[-1] if messages else None
   committed = _committed_parent_wake(db, chat, continuation)
@@ -1736,6 +1875,45 @@ def safe_parent_wake_startup_writer_orphan(
     and (chat.live_assistant or {}).get("id") == physical.id
     and not ((chat.live_assistant or {}).get("blocks") or [])
   )
+
+
+def safe_parent_activity_startup_writer_orphan(
+  db: Session, chat: models.Chat | None, physical: models.ChatRun,
+) -> bool:
+  """Whether one exact non-message helper checkpoint may be rescheduled."""
+  if (
+    chat is None
+    or physical.status != "running"
+    or physical.provider_execution_admitted is not False
+    or chat.pending_question_id is not None
+    or bool(chat.pending_messages)
+    or (chat.live_assistant or {}).get("id") != physical.id
+    or bool((chat.live_assistant or {}).get("blocks") or [])
+  ):
+    return False
+  candidates = db.query(models.Delegation).filter(
+    models.Delegation.parent_chat_id == chat.id,
+    models.Delegation.notify_parent_on_complete.is_(True),
+    models.Delegation.parent_woken_at.is_(None),
+    models.Delegation.cancelled_at.is_(None),
+  ).all()
+  for row in candidates:
+    if _activity_continuation_run_id(row) != physical.id:
+      continue
+    if (
+      derived_status(db, row, load_result=False)[0]
+      not in WAKE_ELIGIBLE_STATUSES
+    ):
+      return False
+    root = _parent_wake_continuation_root(
+      db, chat.id, row.parent_root_run_id,
+    )
+    return bool(
+      root is not None
+      and (physical.root_run_id or physical.id) == root
+      and physical.initiated_by_app_id is None
+    )
+  return False
 
 
 def _committed_parent_wake_is_unowned(
@@ -1800,59 +1978,28 @@ async def _append_wake_pending(
   parent_chat_id: str,
   source_work_id: str,
 ) -> bool:
-  """Queue the notice behind the parent's running turn (caller holds the lock)."""
-  import time
-
-  from app.chat_writer import AppendPending, await_ack, get_writer
-  from app.continuations import DELEGATION_RESULT_MESSAGE_KIND
+  """Recognize an already-stored legacy carrier without creating a new one."""
   from app.database import SessionLocal
 
-  recorded_ids = _wake_message_delegation_ids({
-    "role": "user",
-    "content": content,
-    "hidden": True,
-    "kind": DELEGATION_RESULT_MESSAGE_KIND,
-  })
   with SessionLocal() as db:
-    rows = db.query(models.Delegation).filter(
-      models.Delegation.id.in_(recorded_ids),
-    ).order_by(
-      models.Delegation.created_at.asc(), models.Delegation.id.asc(),
-    ).all()
-    if {row.id for row in rows} != recorded_ids or not rows:
+    chat = db.query(models.Chat).filter(
+      models.Chat.id == parent_chat_id,
+    ).first()
+    if chat is None:
       return False
-    run_token, continuation_id = _parent_wake_delivery_identity(rows)
-
-  ack = get_writer().submit(AppendPending(
-    chat_id=parent_chat_id,
-    run_token="",
-    user_msg={
-      "role": "user",
-      "content": content,
-      "ts": int(time.time() * 1000),
-      "cid": continuation_id,
-      "_product_run_token": run_token,
-      "hidden": True,
-      "kind": DELEGATION_RESULT_MESSAGE_KIND,
-      "source_work_id": source_work_id,
-    },
-    initiated_by_app_id=None,
-  ))
-  try:
-    await await_ack(ack)
-    return True
-  except Exception:
-    _LOG.warning(
-      "delegation wake pending-append failed parent=%s",
-      parent_chat_id, exc_info=True,
+    return any(
+      isinstance(message, dict)
+      and message.get("content") == content
+      and message.get("source_work_id") == source_work_id
+      and bool(_wake_message_delegation_ids(message))
+      for message in [*(chat.messages or []), *(chat.pending_messages or [])]
     )
-    return False
 
 
 async def _deliver_parent_wake(
   parent_chat_id: str, source_work_id: str,
 ) -> bool:
-  """Deliver one bounded parent notice; timeout leaves its latch retryable."""
+  """Try one bounded activity checkpoint; timeout keeps results available."""
   async with asyncio.timeout(WAKE_PARENT_DELIVERY_TIMEOUT_SECS):
     return await _deliver_parent_wake_once(parent_chat_id, source_work_id)
 
@@ -1860,21 +2007,19 @@ async def _deliver_parent_wake(
 async def _deliver_parent_wake_once(
   parent_chat_id: str, source_work_id: str,
 ) -> bool:
-  """Coalesce every wake-eligible child for one parent into a single notice and
-  deliver it under the parent's transition and queue locks.
+  """Start one non-message checkpoint only for the exact waiting parent.
 
-  Idle parent -> try a deterministic continuation of the work that launched
-  the children; running parent -> queue the notice. If the actor rejects the
-  continuation (including for an open owner question), queue it so the
-  parent's next turn promotes it. Blocking attachment uses the same transition
-  lock, so exactly one path owns the result. A restart also repairs a hidden
-  result committed before its latch transaction rather than delivering it to
-  both the parent and a newly attached blocking caller.
+  Busy, owner-question, parked, stopped, and superseded parents retain the
+  durable result without queueing machine-authored input. A normal later turn
+  receives it from provider context. Existing hidden carriers remain eligible
+  only for their exact pre-upgrade recovery path.
   """
   import app.chat_queue as chat_queue
-  from app.chat import is_chat_running, programmatic_start_blocked
-  from app.chat_start import start_programmatic_chat_continuation
-  from app.continuations import DELEGATION_RESULT_MESSAGE_KIND
+  from app.chat import is_chat_running
+  from app.chat_start import (
+    start_programmatic_activity_continuation,
+    start_programmatic_chat_continuation,
+  )
   from app.database import SessionLocal
 
   async with chat_queue.get_transition_lock(parent_chat_id):
@@ -1886,9 +2031,10 @@ async def _deliver_parent_wake_once(
       )
       if parent_chat is None:
         return False
-      # Prefer an earlier exact commit whose task creation failed. Newer
-      # siblings must not change that batch's deterministic identity and
-      # abandon its no-output run; they remain eligible for the next pass.
+      repair_completed_activity_deliveries(db, parent_chat_id)
+
+      # Compatibility only: an old hidden carrier already committed with its
+      # deterministic ChatRun still owns its pre-upgrade recovery attempt.
       committed = next((
         candidate
         for message in reversed(list(parent_chat.messages or []))
@@ -1900,19 +2046,16 @@ async def _deliver_parent_wake_once(
         )
       ), None)
       if committed is not None:
-        _physical, rows = committed
+        physical, rows = committed
+        content = _compose_wake_notice(db, rows)
+        effective_source = rows[0].parent_root_run_id
+        root_run_id = _parent_wake_continuation_root(
+          db, parent_chat_id, effective_source,
+        )
+        _run_id, wake_cid = _parent_wake_delivery_identity(rows)
       else:
-        # A queued receipt owns observation without claiming delivery. Exclude
-        # its rows before coalescing a newly eligible sibling; otherwise A
-        # followed by B becomes queue [A], [A+B] and the provider sees A twice.
-        pending_ids: set[str] = set()
-        for message in parent_chat.pending_messages or []:
-          pending_ids.update(_wake_message_delegation_ids(message))
         rows = _wake_eligible_rows_for_parent(
-          db,
-          parent_chat_id,
-          source_work_id,
-          pending_ids=pending_ids,
+          db, parent_chat_id, source_work_id,
         )
         if not rows:
           return False
@@ -1921,86 +2064,44 @@ async def _deliver_parent_wake_once(
         if not rows:
           publish_parent_waiting_changed(parent_chat_id)
           return True
-      # A sweep cursor names the group that happened to trigger this pass.
-      # Recovery may instead select an older exact no-output commit from a
-      # different logical root. From here onward that committed row set owns
-      # every causal field; retaining the cursor's source would try to attach
-      # the old physical run under unrelated work and strand both groups.
-      effective_source_work_id = rows[0].parent_root_run_id
-      ids = [row.id for row in rows]
-      content = _compose_wake_notice(db, rows)
-      root_run_id = _parent_wake_continuation_root(
-        db, parent_chat_id, effective_source_work_id,
-      )
-      wake_run_id, wake_cid = _parent_wake_delivery_identity(rows)
-      # A limit-parked/restart-held parent reads as not-running, but a fresh
-      # StartTurn would supersede the park as if the owner resumed it. Machine
-      # wakes queue instead; the park's own resume promotes them later.
-      start_blocked = programmatic_start_blocked(db, parent_chat_id)
-
-    delivered = False
-    queued = False
-    if (
-      root_run_id is None
-      or start_blocked
-      or is_chat_running(parent_chat_id)
-    ):
-      async with chat_queue.get_lock(parent_chat_id):
-        delivered = await _append_wake_pending(
-          content, parent_chat_id, effective_source_work_id,
+        recorded_ids = _recorded_parent_wake_ids(db, parent_chat_id)
+        rows = [row for row in rows if row.id not in recorded_ids]
+        if not rows:
+          return False
+        trigger = rows[0]
+        effective_source = trigger.parent_root_run_id
+        root_run_id = _parent_wake_continuation_root(
+          db, parent_chat_id, effective_source,
         )
-        queued = delivered
-    else:
-      delivered = await start_programmatic_chat_continuation(
+        physical = None
+        wake_cid = None
+
+      if root_run_id is None or is_chat_running(parent_chat_id):
+        return False
+
+    if committed is not None:
+      return await start_programmatic_chat_continuation(
         chat_id=parent_chat_id,
         root_run_id=root_run_id,
-        run_token=wake_run_id,
+        run_token=physical.id,
         content=content,
         continuation_id=wake_cid,
         reason="delegation_result",
         initiated_by_app_id=None,
-        message_kind=DELEGATION_RESULT_MESSAGE_KIND,
-        source_work_id=effective_source_work_id,
+        message_kind="delegation_result",
+        source_work_id=effective_source,
         hidden=True,
         _transition_lock_held=True,
       )
-      if not delivered:
-        # A failed task-creation attempt already owns the stable transcript
-        # row and ChatRun. Leave its latch open so restart/runtime recovery
-        # reschedules that exact physical turn rather than queueing a duplicate.
-        with SessionLocal() as db:
-          existing_wake = db.query(models.ChatRun.id).filter(
-            models.ChatRun.id == wake_run_id,
-            models.ChatRun.chat_id == parent_chat_id,
-          ).first()
-        if existing_wake is not None:
-          return False
-        # The actor instead yielded to owner work or a question. Queue one
-        # durable result behind it; the queue owns deduplication, while actual
-        # provider admission owns the delivery latch.
-        async with chat_queue.get_lock(parent_chat_id):
-          delivered = await _append_wake_pending(
-            content, parent_chat_id, effective_source_work_id,
-          )
-          queued = delivered
 
-    if not delivered:
-      return False
-    if queued:
-      # Queue persistence is not provider delivery. Keep the latch open until
-      # deterministic promotion is actually scheduled; cid dedup owns retries.
-      return False
-    with SessionLocal() as db:
-      claimed = db.query(models.Delegation).filter(
-        models.Delegation.id.in_(ids),
-        models.Delegation.parent_woken_at.is_(None),
-      ).update(
-        {models.Delegation.parent_woken_at: now_naive_utc()},
-        synchronize_session=False,
-      )
-      db.commit()
-    publish_parent_waiting_changed(parent_chat_id)
-    return True
+    return await start_programmatic_activity_continuation(
+      chat_id=parent_chat_id,
+      root_run_id=root_run_id,
+      run_token=_activity_continuation_run_id(trigger),
+      source_work_id=effective_source,
+      activity_id=trigger.id,
+      _transition_lock_held=True,
+    )
 
 
 def claim_scheduled_parent_wake(chat_id: str, message: object) -> bool:
@@ -2065,20 +2166,23 @@ async def wake_parent_after_child_settled(child_chat_id: str) -> None:
           row.source_work_active_chat_id = None
         _record_lifecycle(db, row, status)
         db.commit()
+        publish_chat_activity_changed(row.parent_chat_id)
         publish_source_work_changed(row, status)
         return
-      if row is not None:
-        from app.goal_plans import publish_plan_for_delegation
-        publish_plan_for_delegation(db, row)
-        publish_parent_waiting_changed(row.parent_chat_id)
+      if row is None:
+        return
+      from app.goal_plans import publish_plan_for_delegation
+      publish_plan_for_delegation(db, row)
+      publish_parent_waiting_changed(row.parent_chat_id)
+      status, _, _ = derived_status(db, row)
+      if status in TERMINAL_DELEGATION_STATUSES:
+        publish_chat_activity_changed(row.parent_chat_id)
       if (
-        row is None
-        or not row.notify_parent_on_complete
+        not row.notify_parent_on_complete
         or row.cancelled_at is not None
         or row.parent_woken_at is not None
       ):
         return
-      status, _, _ = derived_status(db, row)
       if status not in WAKE_ELIGIBLE_STATUSES:
         return
       parent_chat_id = row.parent_chat_id
