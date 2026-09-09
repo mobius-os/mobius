@@ -33,7 +33,9 @@ const {
   '/src/components/ChatView/disclosureState.js',
 )
 
-after(() => vite.close())
+const priorWindow = globalThis.window
+globalThis.window = { location: new URL('https://mobius.test/shell') }
+after(() => { globalThis.window = priorWindow; return vite.close() })
 
 function renderCard(peerMessage, { open = false, suffix = 'default' } = {}) {
   const chatId = `peer-message-${suffix}`
@@ -252,7 +254,7 @@ test('incoming timeline messages expose full inline text, time, and optional sou
   assert.match(html, /Delivered during work/)
   assert.match(html, /2026-09-08T12:17:00.000Z/)
   assert.match(html, /Keep working independently/)
-  assert.match(html, /&lt;script&gt;not markup&lt;\/script&gt;/)
+  assert.doesNotMatch(html, /<script|&lt;script&gt;/)
   assert.match(html, /href="\/shell\?chat=other"/)
   assert.match(html, /aria-expanded="true"/)
 })
@@ -266,4 +268,18 @@ test('requested delivery never claims the other agent read a message', () => {
   }))
   assert.match(html, /Immediate delivery requested · not a read receipt/)
   assert.doesNotMatch(html, /Delivered during work/)
+})
+
+test('peer disclosure follows tool chrome and renders structured message prose', () => {
+  const html = renderCard({ ...sentTool.peer_message,
+    body: '## Decision\n\nUse **the existing renderer**.\n\n- Keep `stable-id`\n- Keep the timeline\n\n```text\n<script>quoted, not executed</script>\n```',
+  }, { open: true, suffix: 'markdown' })
+  assert.equal((html.split('</button>')[0].match(/<svg/g) || []).length, 1, 'only the direction icon, no trailing disclosure chevron')
+  assert.match(html, /aria-expanded="true"/)
+  assert.match(html, /<h2[^>]*>Decision<\/h2>/)
+  assert.match(html, /<strong>the existing renderer<\/strong>/)
+  assert.match(html, /<ul/)
+  assert.match(html, /<code[^>]*>stable-id<\/code>/)
+  assert.match(html, /&lt;script&gt;quoted, not executed&lt;\/script&gt;/)
+  assert.doesNotMatch(html, /<script/)
 })

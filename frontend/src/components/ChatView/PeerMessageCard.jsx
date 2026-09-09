@@ -1,10 +1,8 @@
-/* PeerMessageCard renders a Möbius peer-network exchange as its own collapsed
-   activity row — so the owner can see when the agent talked to another agent,
-   instead of it hiding inside a generic "Ran commands" block. The disclosure
-   holds the note itself: who, what kind, and the body. */
+/* PeerMessageCard discloses an agent exchange within the normal tool timeline. */
 
 import { useId, useRef } from 'react'
-import { ArrowDown, ArrowUp, ChevronDown } from '@openai/apps-sdk-ui/components/Icon'
+import { StandardMarkdown } from './markdown/BlockRenderer.jsx'
+import { ArrowDown, ArrowUp } from '@openai/apps-sdk-ui/components/Icon'
 import { usePeerTimelineRecord } from './peerTimelineContext.js'
 import { peerTime } from './peerTimeline.js'
 import { peerMessageCardModel } from './peerMessageCard.js'
@@ -66,7 +64,6 @@ export default function PeerMessageCard({ t, chatId, disclosureKey, records: sup
         {label}{live ? '…' : ''}
       </span>
       {date && <time className="chat__peer-time" dateTime={date.toISOString()} title={date.toLocaleString()}>{date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</time>}
-      {hasDetail && <ChevronDown className={`chat__peer-chevron${open ? ' chat__peer-chevron--open' : ''}`} width={12} height={12} />}
     </>
   )
 
@@ -136,7 +133,7 @@ export default function PeerMessageCard({ t, chatId, disclosureKey, records: sup
                 )}
                 <div className="chat__peer-note">
                   <KindBadge kind={model.kind} />
-                  {model.body && <p className="chat__peer-body">{model.body}</p>}
+                  {model.body && <div className="chat__peer-body"><StandardMarkdown text={model.body} onInternalNav={onInternalNav} /></div>}
                   {model.bodyTruncated && (
                     <span className="chat__peer-excerpt">Excerpt — full note not shown</span>
                   )}
@@ -160,7 +157,7 @@ export default function PeerMessageCard({ t, chatId, disclosureKey, records: sup
                           </span>
                         )}
                       </span>
-                      {note.body && <p className="chat__peer-body">{note.body}</p>}
+                      {note.body && <div className="chat__peer-body"><StandardMarkdown text={note.body} onInternalNav={onInternalNav} /></div>}
                       {note.bodyTruncated && (
                         <span className="chat__peer-excerpt">Excerpt — full note not shown</span>
                       )}

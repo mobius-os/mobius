@@ -1110,11 +1110,17 @@
 .chat__peer-body {
   margin: 0;
   color: var(--text);
-  font-size: 12px;
-  line-height: 1.4;
+  font-size: 13px;
+  line-height: 1.6;
   overflow-wrap: anywhere;
-  white-space: pre-wrap;
+  white-space: normal;
 }
+
+/* Message prose uses the regular markdown renderer inside a tool disclosure. */
+.chat__peer-body .md-paragraph,
+.chat__peer-body .md-heading { padding-inline: 0; }
+.chat__peer-body .md-blocks { gap: 0.6rem; }
+.chat__peer-reason { white-space: pre-wrap; }
 
 .chat__peer-meta {
   margin: 0;
@@ -4399,8 +4405,6 @@
 .chat__peer-tool .chat__tool-header { width: 100%; }
 .chat__peer-tool .chat__tool-name { flex: 0 1 auto; min-width: 0; }
 .chat__peer-time { flex: none; font: 400 11px/1.4 var(--font); color: var(--muted); font-variant-numeric: tabular-nums; }
-.chat__peer-chevron { flex: none; color: var(--muted); }
-.chat__peer-chevron--open { transform: rotate(180deg); }
 .chat__peer-delivery { margin: 0; color: var(--muted); font-size: 12px; }
 .chat__peer-links { display: flex; flex-wrap: wrap; gap: 8px; }
 .chat__peer-links a { color: var(--accent); text-underline-offset: 3px; overflow-wrap: anywhere; }
