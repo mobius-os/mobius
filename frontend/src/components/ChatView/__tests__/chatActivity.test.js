@@ -35,6 +35,14 @@ test('empty transcript still shows retained activity; updated consumption replac
   assert.equal(result.slots.get(0)[0].consumption, 'incorporated')
 })
 
+test('neutral helper consumption states survive activity projection unchanged', () => {
+  for (const consumption of ['unknown', 'notified']) {
+    const event = helper(consumption, 2000, { consumption })
+    const result = projectChatActivity([], [event], 'chat')
+    assert.equal(result.slots.get(0)[0].consumption, consumption)
+  }
+})
+
 test('stopped and owner-waiting transcript tails do not hide terminal helper results', () => {
   const tails = [
     { role: 'assistant', ts: 2000, blocks: [{ type: 'error', message: 'Stopped' }] },

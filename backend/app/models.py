@@ -511,11 +511,16 @@ class Delegation(Base):
   notify_parent_on_complete = Column(
     Boolean, nullable=False, default=False
   )
-  # Result-consumption latch. New delivery stamps it after provider success;
-  # existing values/carriers preserve the historical parent-wake contract.
-  # Until set, the owning Delegation/child result remains available to a later
-  # real context checkpoint even when Stop fences automatic continuation.
+  # Delivery-channel latch. Depending on the workflow, this may mean provider
+  # admission, an owner notification, or a historical terminal delivery; it is
+  # not universal proof that an agent incorporated the result. Until set, the
+  # owning Delegation/child result remains available to a later real context
+  # checkpoint even when Stop fences automatic continuation.
   parent_woken_at = Column(DateTime, nullable=True, default=None)
+  # Exact acceptance evidence. Only terminal Finalize stamps this in the same
+  # commit as the assistant response which incorporated the admitted helper
+  # envelope. Historical delivery latches deliberately remain NULL/unknown.
+  result_incorporated_at = Column(DateTime, nullable=True, default=None)
   # A source-attached job (currently contribution preparation) belongs to the
   # owner-facing source chat without fabricating a ChatRun there. The stable
   # work id makes retries attach; the explicit intent supports a small durable

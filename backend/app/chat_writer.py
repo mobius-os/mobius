@@ -194,7 +194,8 @@ class Finalize(_Command):
   ``incorporate_activity_delivery`` carries successful provider intent to the
   persistence boundary. The actor consumes the admitted helper envelope only
   when this exact run is still the current running owner, in the same commit
-  as the assistant snapshot.
+  as the assistant snapshot, and records the distinct incorporation evidence
+  used by passive activity projections.
   """
 
   chat_id: str = ""
@@ -2510,7 +2511,7 @@ class ChatWriterActor:
   def _stage_activity_delivery_consumption(
     self, db, *, chat_id: str, run_token: str,
   ) -> None:
-    """Stage eligible result consumption for the same commit as Finalize.
+    """Stage eligible result incorporation for the Finalize commit.
 
     A stopped run may still finalize partial assistant output, but only the
     exact current running owner can consume the helper envelope. The actor's
@@ -2567,14 +2568,22 @@ class ChatWriterActor:
     ).all()
     if {str(row[0]) for row in matching} != set(ids):
       raise _PersistFailed("Finalize: activity ownership changed")
+    incorporated_at = datetime.now(UTC).replace(tzinfo=None)
+    # This is the sole durable proof that the provider did more than receive a
+    # result. Keep it distinct from parent_woken_at: that older latch also
+    # closes inline claims and owner notifications before any agent response.
+    db.query(models.Delegation).filter(
+      *ownership_filters,
+      models.Delegation.result_incorporated_at.is_(None),
+    ).update(
+      {models.Delegation.result_incorporated_at: incorporated_at},
+      synchronize_session=False,
+    )
     db.query(models.Delegation).filter(
       *ownership_filters,
       models.Delegation.parent_woken_at.is_(None),
     ).update(
-      {
-        models.Delegation.parent_woken_at:
-          datetime.now(UTC).replace(tzinfo=None),
-      },
+      {models.Delegation.parent_woken_at: incorporated_at},
       synchronize_session=False,
     )
 

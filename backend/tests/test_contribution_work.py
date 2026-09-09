@@ -994,6 +994,7 @@ def test_hidden_source_work_terminal_persists_one_owner_notification(
   row = db.query(models.Delegation).one()
   notifications = db.query(models.Notification).all()
   assert row.parent_woken_at is not None
+  assert row.result_incorporated_at is None
   assert row.source_work_active_chat_id is None
   assert len(notifications) == 1
   assert notifications[0].source_type == "agent"
@@ -1002,3 +1003,7 @@ def test_hidden_source_work_terminal_persists_one_owner_notification(
   assert (
     "finished" if terminal == "completed" else "needs attention"
   ) in notifications[0].title.lower()
+  from app.chat_activity import chat_activity_page
+  activity = chat_activity_page(db, source.id)["events"]
+  assert activity[0]["delegation_id"] == row.id
+  assert activity[0]["consumption"] == "notified"

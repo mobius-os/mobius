@@ -3704,6 +3704,24 @@ def _add_chat_activity_positions(eng):
     """))
 
 
+def _add_delegation_result_incorporation(eng):
+  """Add nullable proof without guessing acceptance from historical latches."""
+  from sqlalchemy import inspect as sa_inspect, text
+
+  if "delegations" not in sa_inspect(eng).get_table_names():
+    return
+  columns = {
+    column["name"] for column in sa_inspect(eng).get_columns("delegations")
+  }
+  if "result_incorporated_at" in columns:
+    return
+  with eng.begin() as conn:
+    conn.execute(text(
+      "ALTER TABLE delegations "
+      "ADD COLUMN result_incorporated_at DATETIME NULL"
+    ))
+
+
 _SCHEMA_MIGRATIONS = (
   # Full IDs are permanent identities, not sequence positions. Append new
   # work in execution order; never renumber a shipped ID to reconcile sources.
@@ -3754,7 +3772,7 @@ _SCHEMA_MIGRATIONS = (
   ("0045_chat_live_assistants", _separate_chat_live_assistants),
   ("0046_chat_run_activity_delivery", _add_chat_run_activity_delivery),
   ("0047_chat_activity_positions", _add_chat_activity_positions),
-
+  ("0048_delegation_result_incorporation", _add_delegation_result_incorporation),
   ("0048_typed_platform_activation_waits", _add_typed_platform_activation_waits),
 )
 
