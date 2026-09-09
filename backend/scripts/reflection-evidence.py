@@ -658,9 +658,8 @@ def section_focus_chat(con, chat_id):
         print("  memory recall: no read-trace for this chat")
 
     fork = "fork-chat.sh" if not session else "fork-session.sh"
-    target = chat_id if fork == "fork-chat.sh" else f"{provider or 'claude'} {session} <cwd>"
     print(f"  coach with: /data/apps/reflection/{fork} "
-          f"{target} \"<coaching-prompt>\"")
+          f"{chat_id if fork == 'fork-chat.sh' else session + ' <cwd>'} \"<coaching-prompt>\"")
 
 
 def main():
