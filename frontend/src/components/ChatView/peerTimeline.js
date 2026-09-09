@@ -100,6 +100,9 @@ export function foldPeerActivity(messages, projection, chatId, activeMirrorIndex
   const prepended = new Map()
   const isActivity = block => block?.type === 'tool' || block?.type === 'thinking'
   for (const [index, notes] of slots) {
+    // Helper results own a standalone disclosure. Keep a mixed timestamp slot
+    // intact rather than folding only its peer rows across that ordering seam.
+    if (notes.some(note => note.type === 'helper_result')) continue
     let next = index
     while (next < messages.length && messages[next].hidden) next++
     let prev = index - 1

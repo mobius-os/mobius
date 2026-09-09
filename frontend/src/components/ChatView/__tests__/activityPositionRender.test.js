@@ -13,8 +13,8 @@ after(() => vite.close())
 const note = { id: 'incoming', sender_chat_id: 'peer', sender_name: 'Colleague', body: 'New information', created_at: 2000, display_position: { assistant_message_id: 'answer', block_index: 0, text_offset: 9 } }
 const context = { tools: new Map([['peer-incoming', [note]]]), positions: new Map([['answer', [note]]]) }
 const message = { id: 'answer', role: 'assistant', blocks: [{ type: 'text', content: 'Earlier\n\nLater response' }] }
-function render(Component, props) {
-  return renderToStaticMarkup(React.createElement(PeerTimelineContext.Provider, { value: context }, React.createElement(Component, props)))
+function render(Component, props, value = context) {
+  return renderToStaticMarkup(React.createElement(PeerTimelineContext.Provider, { value }, React.createElement(Component, props)))
 }
 test('live and reopened response place the incoming row before later prose', () => {
   const saved = render(Message, { msg: message, chatId: 'chat', messageKey: 'answer' })
@@ -30,4 +30,24 @@ test('live and reopened response place the incoming row before later prose', () 
 test('empty active payload still displays anchored activity exactly once', () => {
   const html = render(Message, { msg: { ...message, blocks: [] }, chatId: 'chat', messageKey: 'answer' })
   assert.equal(html.split('aria-label="Received from Colleague"').length, 2)
+})
+
+test('busy-parent helper result renders once at the same recorded frontier', () => {
+  const result = {
+    id: 'delegation:review:completed', activityId: 'delegation:review:completed',
+    type: 'helper_result', status: 'completed', task_key: 'Review',
+    body: 'Reviewed outcome', consumption: 'available', created_at: 2000,
+    display_position: { assistant_message_id: 'answer', block_index: 0, text_offset: 9 },
+  }
+  const helperContext = {
+    tools: new Map(), positions: new Map([['answer', [result]]]),
+  }
+  const html = render(
+    Message,
+    { msg: message, chatId: 'chat', messageKey: 'answer' },
+    helperContext,
+  )
+  assert.ok(html.indexOf('Earlier') < html.indexOf('Helper finished · Review'))
+  assert.ok(html.indexOf('Helper finished · Review') < html.indexOf('Later response'))
+  assert.equal(html.split('aria-label="Helper finished · Review"').length, 2)
 })

@@ -46,3 +46,17 @@ test('steer replay offsets use the projected text coordinate without moving the 
   const output = insertPositionedActivity(entries(blocks), [note('a', 0, 109)], blocks, 'chat')
   assert.deepEqual(output.map(e => e.item.content || e.item.tool_use_id), ['Before.\n\n', 'peer-a', 'After.'])
 })
+
+test('a busy-parent helper result keeps its own disclosure at the recorded frontier', () => {
+  const blocks = [{ type: 'text', content: 'Before.\n\nAfter.' }]
+  const event = {
+    id: 'delegation:helper:completed', activityId: 'delegation:helper:completed',
+    type: 'helper_result', created_at: 1000, status: 'completed', body: 'Done',
+    display_position: { assistant_message_id: 'answer', block_index: 0, text_offset: 9 },
+  }
+  const output = insertPositionedActivity(entries(blocks), [event], blocks, 'chat')
+  assert.deepEqual(output.map(e => e.item.content || e.item.type), [
+    'Before.\n\n', 'helper_result', 'After.',
+  ])
+  assert.equal(output.filter(entry => entry.item === event).length, 1)
+})

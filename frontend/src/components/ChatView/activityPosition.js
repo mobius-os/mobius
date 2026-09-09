@@ -34,7 +34,9 @@ export function insertPositionedActivity(entries, notes, sourceBlocks, chatId) {
     boundaries.set(index, list)
   }
   const result = []
-  const activity = note => ({ idx: `peer-${note.id}`, item: { ...peerRecordTool(note, chatId), tool_use_id: `peer-${note.id}` } })
+  const activity = note => note.type === 'helper_result'
+    ? { idx: `activity-${note.activityId || note.id}`, item: note }
+    : { idx: `peer-${note.id}`, item: { ...peerRecordTool(note, chatId), tool_use_id: `peer-${note.id}` } }
   for (const entry of entries) {
     const notesHere = boundaries.get(entry.idx) || []
     boundaries.delete(entry.idx)

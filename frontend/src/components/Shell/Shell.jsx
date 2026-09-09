@@ -69,6 +69,10 @@ import { projectSourceAction } from '../../lib/projectSourceAction.js'
 import { immersiveReducer, isImmersiveActive } from '../../lib/immersive.js'
 import { bumpChatRunSignal, chatRunSignal } from '../../lib/chatRunSignal.js'
 import { invalidateChatChangesQueries } from '../ChatView/chatChangesQueries.js'
+import {
+  invalidateAllChatActivity,
+  invalidateChatActivityForSystemEvent,
+} from '../ChatView/chatActivityQueries.js'
 import { clearAppFrameStorage, clearCachedAppToken } from '../../lib/appFrameStorage.js'
 import * as tabModel from './tabModel.js'
 import * as paneModel from './paneModel.js'
@@ -2882,10 +2886,16 @@ export default function Shell({ onInitialVisualReady }) {
     if (ev.type === 'agent_coordination_message') {
       // Mailbox hints refresh owner views without polling a model inbox.
       const affected = new Set([ev.senderChatId, ...(ev.recipientChatIds || [])])
+      void invalidateChatActivityForSystemEvent(queryClient, ev)
       void queryClient.invalidateQueries({ predicate: query => (
         ['chat-network-history', 'chat-network-summary'].includes(query.queryKey[0])
         && (ev.broadcast || affected.has(query.queryKey[1]))
       ) })
+    } else if (ev.type === 'chat_activity_changed') {
+      // Helper completion changes a read-only exact-chat projection. It may
+      // happen while the parent is stopped, busy, or parked on owner input, so
+      // refresh independently of ChatRun lifecycle and never start a turn.
+      void invalidateChatActivityForSystemEvent(queryClient, ev)
     } else if (ev.type === 'theme_updated') {
       // Theme is dynamic in iframes since the token-free frame
       // refactor: AppCanvas re-broadcasts the theme via
@@ -3257,6 +3267,7 @@ export default function Shell({ onInitialVisualReady }) {
     void Promise.allSettled([
       appSourceQueries.invalidate(queryClient),
       chatAppArtifactQueries.invalidateAll(queryClient),
+      invalidateAllChatActivity(queryClient),
       queryClient.invalidateQueries({ queryKey: ['projects', 'files'] }),
       queryClient.invalidateQueries({ queryKey: ['projects', 'git'] }),
       reconcileDeletedAppIdentities().then(() => refreshApps({ timeoutMs: SYSTEM_RECONNECT_LIST_TIMEOUT_MS, signal })),

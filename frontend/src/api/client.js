@@ -539,6 +539,10 @@ export const api = {
       `/chats/${encodeURIComponent(chatId)}/runtime`,
       options,
     ),
+    activity: (chatId, { before, limit = 50, ...options } = {}) => apiFetch(
+      `/chats/${encodeURIComponent(chatId)}/activity?${new URLSearchParams({ limit, ...(before ? { before } : {}) })}`,
+      options,
+    ),
     usage: (chatId, options = {}) => apiFetch(
       `/chats/${encodeURIComponent(chatId)}/usage`,
       options,

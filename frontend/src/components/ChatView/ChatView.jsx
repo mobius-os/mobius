@@ -5686,7 +5686,7 @@ export default function ChatView({
           )}
 
           <PeerTimelineRows notes={peerTimeline.slots.get(displayedMessages.length)} chatId={chatId} onInternalNav={internalNav} />
-          {peerTimeline.error && <li className="chat__peer-load-error" role="status">Agent messages couldn’t refresh. <button type="button" onClick={() => peerTimeline.retry()}>Try again</button></li>}
+          {peerTimeline.error && <li className="chat__peer-load-error" role="status">Chat activity couldn’t refresh. <button type="button" onClick={() => peerTimeline.retry()}>Try again</button></li>}
 
           {/* Steering is accepted locally before the provider control channel
               acknowledges it. Keep the durable rows out of the actionable

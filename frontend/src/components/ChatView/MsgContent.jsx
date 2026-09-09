@@ -25,6 +25,7 @@ import { copyAssistantSelection } from './markdownClipboard.js'
 import { goalMessageObjectiveFromText } from './goalProgress.js'
 import GoalHistoryCard from './GoalHistoryCard.jsx'
 import WaitHistoryCard from './WaitHistoryCard.jsx'
+import HelperResultCard from './HelperResultCard.jsx'
 
 
 // Answerability is purely a function of the block + its position + live hint.
@@ -255,6 +256,17 @@ function MsgContentInner({
           </div>
         )
       }
+      if (block.type === 'helper_result') {
+        return (
+          <div key={block.activityId || block.id || `helper-result-${i}`} className="chat__tools">
+            <HelperResultCard
+              event={block}
+              chatId={chatId}
+              onInternalNav={onInternalNav}
+            />
+          </div>
+        )
+      }
       if (block.type === 'text') {
         const text = msg.role === 'user'
           ? stripAugmentation(block.content) : block.content
@@ -293,7 +305,8 @@ function MsgContentInner({
       // tool + thinking blocks never reach renderBlock: groupActivityRuns folds
       // every contiguous run of them (including a lone one) into a group node,
       // rendered by ActivityStretch below. renderBlock only sees the block types
-      // that BREAK a stretch — text/compaction (above), question, and error.
+      // that BREAK a stretch — text/compaction/helper result (above), question,
+      // and error.
       if (block.type === 'question') {
         // Suppress if this exact question is currently live in
         // streamItems — the streaming <li> is already rendering it.
