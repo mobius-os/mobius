@@ -12,6 +12,8 @@ export default function StreamingMessage({
   msg,
   dataKey,
   chatId,
+  activityMessageId,
+  activitySourceBlocks,
   onAnswer,
   onPrepareAnswer,
   onCancelAnswer,
@@ -39,6 +41,8 @@ export default function StreamingMessage({
       <MsgContent
         msg={msg}
         chatId={chatId}
+      activityMessageId={activityMessageId}
+      activitySourceBlocks={activitySourceBlocks}
         messageKey={dataKey}
         onQuestionAnswer={onAnswer}
         onQuestionSubmitIntent={onPrepareAnswer}

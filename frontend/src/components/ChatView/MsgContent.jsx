@@ -1,4 +1,6 @@
 import { memo } from 'react'
+import { usePositionedPeerNotes } from './peerTimelineContext.js'
+import { insertPositionedActivity } from './activityPosition.js'
 import { ProgressiveMarkdown, StandardMarkdown } from './markdown/BlockRenderer.jsx'
 import ActivityStretch from './ActivityStretch.jsx'
 import { groupActivityRuns, coalesceThinkingEntries } from './groupBlocks.js'
@@ -51,7 +53,7 @@ function AssistantCopySurface({ msg, markdownByIndex, children }) {
   if (msg.role !== 'assistant') return children
 
   function markdownForBlock(element) {
-    const index = Number(element.dataset.assistantMarkdownBlock)
+    const index = element.dataset.assistantMarkdownBlock
     // A supplied map is authoritative, including a missing entry. Streaming
     // and cold-rendered blocks intentionally omit source until the whole block
     // is visible; falling back to msg.content here would copy the hidden tail.
@@ -143,7 +145,10 @@ function MsgContentInner({
   // and the SSE catch-up re-emits the same question event into both
   // the persisted message and streamItems.
   suppressedQuestionKeys,
+  activityMessageId,
+  activitySourceBlocks,
 }) {
+  const positionedNotes = usePositionedPeerNotes(activityMessageId || msg.id)
   // Build a stable per-render answerable predicate that closes over the
   // scalar props (no function prop needed from ChatView).
   const isQuestionAnswerable = (block) =>
@@ -163,12 +168,12 @@ function MsgContentInner({
     return <ContinuationCard msg={msg} />
   }
 
-  if (msg.blocks && msg.blocks.length > 0) {
+  if (msg.blocks?.length || positionedNotes?.length) {
     // Repair the one historical malformed sequence produced when a provider's
     // authoritative completion lost identity across request_user_input. This
     // is render-time as well as reducer-time so already-saved chats self-heal
     // without rewriting partner transcripts.
-    const displayBlocks = repairInterleavedQuestionText(msg.blocks)
+    const displayBlocks = repairInterleavedQuestionText(msg.blocks?.length ? msg.blocks : msg.content ? [{ type: 'text', content: msg.content }] : [])
     // The persisted transcript keeps the raw AskUserQuestion tool block
     // AND the question card (backend events.process_event appends both);
     // the live stream absorbs the tool twin into the card. Skip the twin
@@ -199,7 +204,7 @@ function MsgContentInner({
     // renders. Fragmented thinking exists only in legacy saved chats, which are
     // never a live surface, so coalescing after renumbering cannot reintroduce
     // a cross-surface position mismatch. See groupBlocks.coalesceThinkingEntries.
-    const finalEntries = coalesceThinkingEntries(entries)
+    const finalEntries = coalesceThinkingEntries(insertPositionedActivity(entries, positionedNotes, activitySourceBlocks || displayBlocks, chatId))
     // The rendered tail's entry idx — the anchor for "is this block the tail"
     // checks below. msg.blocks.length would be wrong here: a skipped twin means
     // the last VISIBLE block's idx is smaller than the raw block count.
@@ -220,7 +225,7 @@ function MsgContentInner({
         const fullyRendered = !(
           Number.isFinite(coldFraction) && coldFraction > 0 && coldFraction < 1
         )
-        return fullyRendered ? [[idx, item.content]] : []
+        return fullyRendered ? [[String(idx), item.content]] : []
       }),
     )
 
@@ -546,6 +551,8 @@ function MsgContentInner({
 export default memo(MsgContentInner, (prev, next) => {
   return (
     prev.msg === next.msg
+    && prev.activityMessageId === next.activityMessageId
+    && prev.activitySourceBlocks === next.activitySourceBlocks
     && prev.chatId === next.chatId
     && prev.messageKey === next.messageKey
     && prev.onQuestionAnswer === next.onQuestionAnswer

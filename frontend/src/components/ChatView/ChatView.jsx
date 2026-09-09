@@ -5626,6 +5626,8 @@ export default function ChatView({
             <ActiveAssistantSurface
               key={streamingDataKey}
               activeMirrorMsg={activeMirrorMsg}
+              activityMessageId={activeAssistantMessageId}
+              activitySourceBlocks={activeMirrorMsg?.blocks}
               useDbActivePayload={useDbActivePayload}
               hasLivePayload={hasLiveAssistantPayload}
               streamItems={streamItems}

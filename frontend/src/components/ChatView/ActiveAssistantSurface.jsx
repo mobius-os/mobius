@@ -26,6 +26,8 @@ function ActiveAssistantSurface({
   streamItems,
   dataKey,
   chatId,
+  activityMessageId,
+  activitySourceBlocks,
   onAnswer,
   onPrepareAnswer,
   onCancelAnswer,
@@ -87,6 +89,8 @@ function ActiveAssistantSurface({
       msg={msg}
       dataKey={dataKey}
       chatId={chatId}
+      activityMessageId={activityMessageId}
+      activitySourceBlocks={activitySourceBlocks}
       onAnswer={onAnswer}
       onPrepareAnswer={onPrepareAnswer}
       onCancelAnswer={onCancelAnswer}

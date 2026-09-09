@@ -52,8 +52,17 @@ export function projectPeerTimeline(messages, history, chatId, activeTools = [])
     }
   })
   const slots = new Map()
+  const positions = new Map()
   for (const note of ordered) {
     if (represented.has(note.id)) continue
+    if (note.display_position?.assistant_message_id) {
+      const id = note.display_position.assistant_message_id
+      const rows = positions.get(id) || []
+      rows.push(note)
+      positions.set(id, rows)
+      tools.set(`peer-${note.id}`, [note])
+      continue
+    }
     const arrival = peerTime(note.created_at)
     if (!Number.isFinite(arrival)) continue
     const delivery = delivered.get(note.id)
@@ -65,7 +74,7 @@ export function projectPeerTimeline(messages, history, chatId, activeTools = [])
     rows.push({ ...note, observedDelivery: delivery?.mode })
     slots.set(index, rows)
   }
-  return { slots, tools }
+  return { slots, tools, positions }
 }
 
 export function peerRecordTool(note, chatId) {
@@ -111,5 +120,5 @@ export function foldPeerActivity(messages, projection, chatId, activeMirrorIndex
     if (before) prepended.set(target, prefixLength + blocks.length)
     slots.delete(index)
   }
-  return { messages: rendered, slots, tools }
+  return { messages: rendered, slots, tools, positions: projection.positions }
 }
