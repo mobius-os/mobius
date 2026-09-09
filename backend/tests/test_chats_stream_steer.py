@@ -539,6 +539,13 @@ def test_steer_drops_empty_pre_steer_partial(client, auth, monkeypatch):
   run_token = "run-empty"
   # Only a whitespace token streamed before the steer landed.
   sink = _register_sink_with_partial(chat_id, run_token, " ")
+  from app.activity_position import record_activity_position
+  from app.chat_event_sink import active_sink_activity_position
+  sink._publish_activity_frontier()
+  assert active_sink_activity_position(chat_id) is None
+  with SessionLocal() as position_db:
+    record_activity_position(position_db, chat_id, "peer:early-steer")
+    position_db.commit()
 
   async def _fake_steer(cid, message, *_durable):
     return True
@@ -552,6 +559,13 @@ def test_steer_drops_empty_pre_steer_partial(client, auth, monkeypatch):
   )
   assert res.status_code == 202, res.text
   assert res.json()["status"] == "steered"
+
+  # Neither the discarded A1 nor empty replacement A2 is an anchor target.
+  assert active_sink_activity_position(chat_id) is None
+  with SessionLocal() as position_db:
+    assert position_db.get(
+      models.ChatActivityPosition, (chat_id, "peer:early-steer"),
+    ).position is None
 
   # No stray empty assistant row was sealed between Q1 and Q2.
   chat = _read_chat(chat_id)

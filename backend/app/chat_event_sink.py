@@ -361,7 +361,7 @@ class ChatEventSink:
       run_token or f"assistant-{uuid.uuid4().hex}"
     )
     self.assistant_blocks: list = []
-    self._activity_frontier = (self.assistant_message_id, 0, None, None, None)
+    self._activity_frontier = None
     self._activity_raw_length = 0
     self.session_id: str | None = None
     self.cost_usd: float | None = None
@@ -411,7 +411,8 @@ class ChatEventSink:
     """
     previous = self._activity_frontier
     if (
-      len(self.assistant_blocks) == self._activity_raw_length
+      previous is not None
+      and len(self.assistant_blocks) == self._activity_raw_length
       and previous[0] == self.assistant_message_id
       and previous[2] is not None
       and self.assistant_blocks
@@ -426,6 +427,11 @@ class ChatEventSink:
       )
       return
     self._activity_raw_length = len(self.assistant_blocks)
+    # Share the seal contract: an early steer drops empty/whitespace-only
+    # segments. Advertising their identity would permanently orphan activity.
+    if not blocks_have_renderable_content(self.assistant_blocks):
+      self._activity_frontier = None
+      return
     blocks = [b for b in self.assistant_blocks if b.get("type") != "text_boundary"]
     trailing = blocks[-1] if blocks else None
     text = None

@@ -128,3 +128,29 @@ def test_question_identity_resolves_position_when_live_hides_question_tool():
     }
   finally:
     unregister_active_sink('question-anchor', sink)
+
+
+def test_empty_and_whitespace_segments_never_advertise_phantom_identity(db):
+  from app.chat_event_sink import active_sink_activity_position
+
+  db.add(models.Chat(id='unsealed-anchor', messages=[]))
+  db.commit()
+  sink = ChatEventSink(ChatBroadcast('unsealed-anchor'), chat_id='unsealed-anchor',
+                       recall_binding=EMPTY_RECALL_BINDING)
+  register_active_sink('unsealed-anchor', sink)
+  try:
+    assert active_sink_activity_position('unsealed-anchor') is None
+    for text in ('', ' ', '\n\t'):
+      sink.publish({'type': 'text', 'content': text})
+      assert active_sink_activity_position('unsealed-anchor') is None
+    record_activity_position(db, 'unsealed-anchor', 'peer:before-steer')
+    db.commit()
+    sink.publish({'type': 'text', 'content': 'real content'})
+    assert active_sink_activity_position('unsealed-anchor') is not None
+    record_activity_position(db, 'unsealed-anchor', 'peer:before-steer')
+    db.commit()
+    events = [{'id': 'peer:before-steer'}]
+    attach_activity_positions(db, 'unsealed-anchor', events)
+    assert events[0]['display_position'] is None
+  finally:
+    unregister_active_sink('unsealed-anchor', sink)
