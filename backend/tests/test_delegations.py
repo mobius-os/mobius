@@ -1151,8 +1151,15 @@ def test_successful_finalize_consumes_exact_activity_once(db):
   )
   assert get_writer().submit(terminal).result(timeout=5) is True
   db.expire_all()
-  first_woken_at = db.get(models.Delegation, delegation_id).parent_woken_at
+  delegation = db.get(models.Delegation, delegation_id)
+  first_woken_at = delegation.parent_woken_at
+  first_incorporated_at = delegation.result_incorporated_at
   assert first_woken_at is not None
+  assert first_incorporated_at is not None
+  from app.chat_activity import chat_activity_page
+  assert chat_activity_page(db, parent_id)["events"][0][
+    "consumption"
+  ] == "incorporated"
   assert db.get(models.ChatRun, run_token).activity_delivery_json[
     "delivery_contract"
   ] == delegations_mod.ACTIVITY_DELIVERY_FINALIZE_ATOMIC
@@ -1164,6 +1171,9 @@ def test_successful_finalize_consumes_exact_activity_once(db):
   )).result(timeout=5) is True
   db.expire_all()
   assert db.get(models.Delegation, delegation_id).parent_woken_at == first_woken_at
+  assert db.get(
+    models.Delegation, delegation_id,
+  ).result_incorporated_at == first_incorporated_at
   assert delegations_mod.build_delegation_result_context(
     db, parent_id,
   ).delegation_ids == ()
@@ -1451,6 +1461,13 @@ def test_failed_finalize_keeps_injected_activity_result_redeliverable(
     "activity_was_consumed": False,
     "activity_is_redeliverable": True,
   }
+  assert db.get(
+    models.Delegation, delegation_id,
+  ).result_incorporated_at is None
+  from app.chat_activity import chat_activity_page
+  assert chat_activity_page(db, parent_id)["events"][0][
+    "consumption"
+  ] == "available"
 
 
 @pytest.mark.parametrize("race", ["stop", "superseded"])
@@ -1498,6 +1515,9 @@ def test_stop_and_supersession_gates_keep_activity_result_redeliverable(
   db.expire_all()
   assert disposition is chat_queue.TerminalDisposition.STALE_NO_ACTION
   assert db.get(models.Delegation, delegation_id).parent_woken_at is None
+  assert db.get(
+    models.Delegation, delegation_id,
+  ).result_incorporated_at is None
   envelope = db.get(
     models.ChatRun,
     delegations_mod._activity_continuation_run_id(
@@ -1515,6 +1535,10 @@ def test_stop_and_supersession_gates_keep_activity_result_redeliverable(
   assert delegations_mod.build_delegation_result_context(
     db, parent_id,
   ).delegation_ids == (delegation_id,)
+  from app.chat_activity import chat_activity_page
+  assert chat_activity_page(db, parent_id)["events"][0][
+    "consumption"
+  ] == "available"
 
 
 @pytest.mark.parametrize("provider_id", ["claude", "codex"])
@@ -1678,6 +1702,9 @@ def test_pre_atomic_completed_delivery_repair_remains_supported(db):
   ) == {delegation_id}
   db.expire_all()
   assert db.get(models.Delegation, delegation_id).parent_woken_at is not None
+  assert db.get(
+    models.Delegation, delegation_id,
+  ).result_incorporated_at is None
 
 
 @pytest.mark.parametrize("contract", [
@@ -1711,6 +1738,9 @@ def test_atomic_completed_envelope_alone_never_repairs_activity_delivery(db, con
   ) == set()
   db.expire_all()
   assert db.get(models.Delegation, delegation_id).parent_woken_at is None
+  assert db.get(
+    models.Delegation, delegation_id,
+  ).result_incorporated_at is None
 
 
 @pytest.mark.parametrize("terminal_status", ["stopped", "interrupted"])
@@ -1760,10 +1790,17 @@ def test_stopped_or_superseded_activity_never_consumes_accepted_result(
   )) is False
   db.expire_all()
   assert db.get(models.Delegation, delegation_id).parent_woken_at is None
+  assert db.get(
+    models.Delegation, delegation_id,
+  ).result_incorporated_at is None
   assert any(
     "Persisted partial output." in str(message)
     for message in (db.get(models.Chat, parent_id).messages or [])
   )
+  from app.chat_activity import chat_activity_page
+  assert chat_activity_page(db, parent_id)["events"][0][
+    "consumption"
+  ] == "available"
 
 
 def test_legacy_completion_carrier_is_recognized_without_rewriting_history(db):

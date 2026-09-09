@@ -35,6 +35,14 @@ test('opening results preserves safe full text without claiming agent consumptio
 test('incorporation is explicit evidence, not inferred from rendering', () => {
   assert.match(render({ consumption: 'incorporated' }), /Incorporated by the agent/)
 })
+test('unknown and notification-only history use neutral delivery copy', () => {
+  const unknown = render({ consumption: 'unknown' })
+  assert.match(unknown, /Agent incorporation is not known/)
+  assert.doesNotMatch(unknown, /Available to the agent|Incorporated by the agent/)
+  const notified = render({ consumption: 'notified' })
+  assert.match(notified, /Delivery recorded · agent incorporation is not known/)
+  assert.doesNotMatch(notified, /Available to the agent|Incorporated by the agent/)
+})
 test('failure and truncated results remain inspectable in place', () => {
   const html = render({ status: 'failed', result_truncated: true, child_chat_id: 'helper' })
   assert.match(html, /Helper failed/)

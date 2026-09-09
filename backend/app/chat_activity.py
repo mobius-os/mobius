@@ -129,10 +129,10 @@ def _helper_events(
       )),
       and_(
         models.ChatRun.id.is_(None),
-        models.Delegation.source_work_status.in_((
-          "completed", "failed", "needs_review", "stopped", "cancelled",
-          "interrupted",
-        )),
+        # derived_status owns the source-only projection. Of its no-run
+        # overrides, needs_review is the sole terminal state; accepted and
+        # retrying remain active, while all other strings still mean starting.
+        models.Delegation.source_work_status == "needs_review",
       ),
     ),
   )
@@ -146,7 +146,7 @@ def _helper_events(
   ).limit(limit).all()
   events = []
   for row, created_at in rows:
-    status, _run, result = derived_status(db, row)
+    status, run, result = derived_status(db, row)
     if status not in TERMINAL_DELEGATION_STATUSES:
       continue
     body = result or ""
@@ -168,8 +168,17 @@ def _helper_events(
       "source_work_id": row.parent_root_run_id,
       "consumption": (
         "incorporated"
-        if not row.notify_parent_on_complete or row.parent_woken_at is not None
+        if row.result_incorporated_at is not None
+        else "notified"
+        if row.parent_woken_at is not None
         else "available"
+        if (
+          row.notify_parent_on_complete
+          and row.cancelled_at is None
+          and run is not None
+          and run.status in ("completed", "failed")
+        )
+        else "unknown"
       ),
     }
     events.append((ActivityCursor(created_at, stable_id), item))

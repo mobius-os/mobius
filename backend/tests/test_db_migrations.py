@@ -1509,6 +1509,7 @@ def test_run_migrations_records_an_inspectable_append_only_history(tmp_path):
     "0045_chat_live_assistants",
     "0046_chat_run_activity_delivery",
     "0047_chat_activity_positions",
+    "0048_delegation_result_incorporation",
   ]
   assert second == first
 
@@ -3456,3 +3457,63 @@ def test_failed_migration_is_not_recorded_and_can_retry(tmp_path, monkeypatch):
   with pytest.raises(RuntimeError, match="interrupted migration"):
     run_migrations(eng)
   assert attempts == 2
+
+
+def test_result_incorporation_migration_preserves_unknown_history(tmp_path):
+  eng = create_engine(f"sqlite:///{tmp_path / 'result-incorporation.db'}")
+  models.Base.metadata.create_all(eng)
+  with Session(eng) as session:
+    app = models.App(
+      slug="incorporation-migration", source_dir="/tmp/incorporation",
+      name="Incorporation", description="", jsx_source="",
+    )
+    session.add(app)
+    session.flush()
+    session.add_all([
+      models.Chat(id="incorporation-parent", messages=[]),
+      models.Chat(
+        id="incorporation-child", messages=[], created_by_app_id=app.id,
+      ),
+    ])
+    session.flush()
+    session.add(models.Delegation(
+      id="incorporation-history", app_id=app.id,
+      parent_chat_id="incorporation-parent", parent_root_run_id="root",
+      task_key="history", child_chat_id="incorporation-child",
+      provider="claude", scope="read", cwd="/tmp",
+      prompt_sha256="0" * 64, notify_parent_on_complete=False,
+      parent_woken_at=datetime(2026, 9, 9),
+    ))
+    session.commit()
+  with eng.begin() as conn:
+    conn.execute(text(
+      "ALTER TABLE delegations DROP COLUMN result_incorporated_at"
+    ))
+    conn.execute(text(
+      "CREATE TABLE IF NOT EXISTS schema_migrations ("
+      "version VARCHAR(128) PRIMARY KEY, applied_at TIMESTAMP NOT NULL)"
+    ))
+    for version in _migration_versions_before(
+      "0048_delegation_result_incorporation",
+    ):
+      conn.execute(text(
+        "INSERT INTO schema_migrations (version, applied_at) VALUES (:v, :at)"
+      ), {"v": version, "at": datetime(2026, 9, 9)})
+
+  run_migrations(eng)
+  run_migrations(eng)
+
+  column = next(
+    item for item in inspect(eng).get_columns("delegations")
+    if item["name"] == "result_incorporated_at"
+  )
+  assert column["nullable"] is True
+  with eng.connect() as conn:
+    assert conn.execute(text(
+      "SELECT result_incorporated_at FROM delegations "
+      "WHERE id = 'incorporation-history'"
+    )).scalar_one() is None
+    assert conn.execute(text(
+      "SELECT COUNT(*) FROM schema_migrations "
+      "WHERE version = '0048_delegation_result_incorporation'"
+    )).scalar_one() == 1

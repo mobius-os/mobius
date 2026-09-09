@@ -16,6 +16,13 @@ export default function HelperResultCard({ event, chatId, onInternalNav }) {
   const label = `${status}${event.task_key ? ` · ${event.task_key}` : ''}`
   const time = peerTime(event.created_at)
   const date = Number.isFinite(time) ? new Date(time) : null
+  const delivery = event.consumption === 'incorporated'
+    ? 'Incorporated by the agent'
+    : event.consumption === 'available'
+      ? 'Available to the agent · opening this does not resume work'
+      : event.consumption === 'notified'
+        ? 'Delivery recorded · agent incorporation is not known · opening this does not resume work'
+        : 'Agent incorporation is not known · opening this does not resume work'
   return <div className="chat__tool chat__tool--done chat__tool--compact chat__peer-tool">
     <button ref={headerRef} id={headerId} type="button" className="chat__tool-header"
       aria-expanded={open} aria-controls={detailId} aria-label={label}
@@ -30,7 +37,7 @@ export default function HelperResultCard({ event, chatId, onInternalNav }) {
     <div ref={detailRef} id={detailId} className="chat__tool-detail chat__peer-detail" role="region"
       aria-labelledby={headerId} tabIndex={open ? 0 : undefined} hidden={!open}>
       {open && <>
-        <p className="chat__peer-delivery">{event.consumption === 'incorporated' ? 'Incorporated by the agent' : 'Available to the agent · opening this does not resume work'}</p>
+        <p className="chat__peer-delivery">{delivery}</p>
         <div className="chat__peer-body"><StandardMarkdown text={event.body || 'No written result.'} onInternalNav={onInternalNav} /></div>
         {event.result_truncated && <span className="chat__peer-excerpt">Excerpt — full result in the helper chat</span>}
         {event.child_chat_id && <div className="chat__peer-links"><a href={`/shell?chat=${encodeURIComponent(event.child_chat_id)}`} onClick={click => {

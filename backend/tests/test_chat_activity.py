@@ -27,6 +27,8 @@ def _helper(
   created_at: datetime,
   notify: bool = True,
   attached_source_work_id: str | None = None,
+  child_status: str | None = "completed",
+  source_work_status: str | None = None,
 ):
   app = _app(db, suffix)
   child_id = f"child-{suffix}"
@@ -54,18 +56,26 @@ def _helper(
     prompt_sha256=hashlib.sha256(suffix.encode()).hexdigest(),
     notify_parent_on_complete=notify,
     source_work_id=attached_source_work_id,
-    source_work_status=("completed" if attached_source_work_id else None),
+    source_work_status=(
+      source_work_status
+      if source_work_status is not None
+      else "completed" if attached_source_work_id else None
+    ),
+    source_work_result=(
+      f"source result {suffix}" if source_work_status is not None else None
+    ),
     created_at=created_at,
   ))
-  db.add(models.ChatRun(
-    id=f"child-run-{suffix}",
-    root_run_id=f"child-run-{suffix}",
-    chat_id=child_id,
-    status="completed",
-    provider="claude",
-    started_at=created_at,
-    ended_at=created_at,
-  ))
+  if child_status is not None:
+    db.add(models.ChatRun(
+      id=f"child-run-{suffix}",
+      root_run_id=f"child-run-{suffix}",
+      chat_id=child_id,
+      status=child_status,
+      provider="claude",
+      started_at=created_at,
+      ended_at=(created_at if child_status != "running" else None),
+    ))
 
 
 def test_activity_route_merges_same_time_events_without_sibling_direct_leaks(
@@ -167,7 +177,9 @@ def test_activity_route_merges_same_time_events_without_sibling_direct_leaks(
   assert "delegation:helper-other-parent:completed" not in all_ids
 
 
-def test_historical_inline_helper_is_visible_as_incorporated(client, auth, db):
+def test_terminal_inline_helper_without_acceptance_evidence_is_unknown(
+  client, auth, db,
+):
   stamp = datetime(2026, 9, 9, 3, 0)
   db.add(models.Chat(id="inline-parent", title="Inline", messages=[]))
   _helper(
@@ -182,8 +194,85 @@ def test_historical_inline_helper_is_visible_as_incorporated(client, auth, db):
   response = client.get("/api/chats/inline-parent/activity", headers=auth)
   assert response.status_code == 200, response.text
   event = response.json()["events"][0]
-  assert event["consumption"] == "incorporated"
+  assert event["consumption"] == "unknown"
   assert event["body"] == "result inline-history"
+
+
+def test_disconnected_blocking_attachment_claim_does_not_imply_incorporation(
+  client, auth, db,
+):
+  from app.delegations import claim_inline_delegation_observation
+
+  stamp = datetime(2026, 9, 9, 3, 10)
+  db.add(models.Chat(id="claimed-parent", title="Claimed", messages=[]))
+  _helper(
+    db,
+    suffix="claimed-inline",
+    parent_chat_id="claimed-parent",
+    created_at=stamp,
+    child_status="running",
+  )
+  db.commit()
+
+  row = db.get(models.Delegation, "helper-claimed-inline")
+  assert claim_inline_delegation_observation(db, row) == "inline"
+  # The blocking caller disconnects after claiming the inline channel. The
+  # helper then finishes, but no agent response commits that result.
+  run = db.get(models.ChatRun, "child-run-claimed-inline")
+  run.status = "completed"
+  run.ended_at = stamp
+  db.commit()
+
+  response = client.get("/api/chats/claimed-parent/activity", headers=auth)
+  assert response.status_code == 200, response.text
+  event = response.json()["events"][0]
+  assert event["consumption"] == "unknown"
+  assert db.get(
+    models.Delegation, "helper-claimed-inline",
+  ).result_incorporated_at is None
+
+
+def test_source_only_activity_uses_the_derived_status_terminal_contract(
+  client, auth, db,
+):
+  stamp = datetime(2026, 9, 9, 3, 20)
+  db.add(models.Chat(id="source-only-parent", title="Source", messages=[]))
+  _helper(
+    db,
+    suffix="source-review",
+    parent_chat_id="source-only-parent",
+    created_at=stamp,
+    attached_source_work_id="source-review-work",
+    child_status=None,
+    source_work_status="needs_review",
+  )
+  _helper(
+    db,
+    suffix="source-fake-terminal",
+    parent_chat_id="source-only-parent",
+    created_at=stamp,
+    attached_source_work_id="source-fake-terminal-work",
+    child_status=None,
+    source_work_status="completed",
+  )
+  db.commit()
+
+  response = client.get("/api/chats/source-only-parent/activity", headers=auth)
+  assert response.status_code == 200, response.text
+  assert response.json()["events"] == [{
+    "id": "delegation:helper-source-review:completed",
+    "type": "helper_result",
+    "created_at": stamp.isoformat(),
+    "delegation_id": "helper-source-review",
+    "task_key": "task-source-review",
+    "status": "needs_review",
+    "body": "source result source-review",
+    "result_truncated": False,
+    "child_chat_id": "child-source-review",
+    "source_work_id": "goal-source-review",
+    "consumption": "unknown",
+    "display_position": None,
+  }]
 
 
 def test_activity_route_requires_exact_chat_access_and_valid_cursor(
