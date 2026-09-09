@@ -129,6 +129,17 @@ def test_normalize_codex_usage_reset_credits_count_only_without_detail_rows():
   assert snapshot["reset_credits"] == {"available_count": 1, "credits": []}
 
 
+def test_normalize_codex_usage_preserves_an_explicit_zero_reset_count():
+  from app.provider_usage import normalize_codex_usage
+
+  snapshot = normalize_codex_usage({
+    "rate_limits": {"primary": {"used_percent": 10, "resets_at": 1785430800}},
+    "rate_limit_reset_credits": {"available_count": 0, "credits": []},
+  }, plan_type="plus")
+
+  assert snapshot["reset_credits"] == {"available_count": 0, "credits": []}
+
+
 def test_normalize_mobius_usage_reads_api_credit_consumption():
   from app.provider_usage import normalize_mobius_usage
 

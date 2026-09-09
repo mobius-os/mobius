@@ -60,6 +60,7 @@ function BankedResets({ resets, onRedeem, redeeming = false, result = null }) {
           <button
             type="button"
             className="provider-usage__redeem"
+            disabled={count === 0}
             onClick={() => setConfirming(true)}
           >
             Use a reset
@@ -98,6 +99,7 @@ export default function ProviderUsage({
   if (!snapshot && !failed) return null
   const windows = visibleUsageWindows(snapshot)
   const ready = snapshot?.state === 'ready' && windows.length > 0
+  const bankedResets = onRedeemReset ? bankedResetCredits(snapshot) : null
 
   return (
     <span id={id} className="provider-usage">
@@ -135,17 +137,17 @@ export default function ProviderUsage({
           {snapshot?.stale && (
             <span className="provider-usage__credit">Last available reading</span>
           )}
-          {onRedeemReset && (
-            <BankedResets
-              resets={bankedResetCredits(snapshot)}
-              onRedeem={onRedeemReset}
-              redeeming={redeeming}
-              result={redeemResult}
-            />
-          )}
         </span>
       ) : (
         <span className="provider-usage__unavailable">Usage unavailable</span>
+      )}
+      {bankedResets && (
+        <BankedResets
+          resets={bankedResets}
+          onRedeem={onRedeemReset}
+          redeeming={redeeming}
+          result={redeemResult}
+        />
       )}
     </span>
   )
