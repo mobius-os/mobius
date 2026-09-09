@@ -2533,3 +2533,27 @@ def test_live_install_drift_reports_only_what_the_image_lacks(tmp_path):
   # A failing query is not reported as drift.
   failing = lambda command, **_k: SimpleNamespace(returncode=1, stdout="")
   assert pu.live_install_drift(inventory, run=failing) == {}
+
+
+@pytest.mark.parametrize('external', [None, 'docker-compose.yml'])
+def test_preview_reports_local_image_blockers_even_for_mixed_updates(clone_env, monkeypatch, external):
+  origin, platform = clone_env
+  edits = {'Dockerfile': 'FROM official-new\n'}
+  if external:
+    edits[external] = 'services: {}\n'
+  target = _advance_origin(origin, edits=edits)
+  _git(platform, 'fetch', 'origin')
+  _local_commit(platform, edits={'Dockerfile': 'FROM local-only\n'})
+  monkeypatch.setattr(platform_activation, 'deployment_kind', lambda: 'self_hosted')
+  before = _served_sha(platform)
+  preview = pu.platform_update_preview(platform, target_sha=target)
+  assert 'Dockerfile' in preview['blocking_paths']
+  assert 'image_rebuild' in preview['activation']['required_actions']
+  if external:
+    assert 'container_recreate' in preview['activation']['required_actions']
+  assert _served_sha(platform) == before
+  assert (platform / 'Dockerfile').read_text() == 'FROM local-only\n'
+
+
+def test_empty_preview_has_no_preservation_blockers():
+  assert pu.empty_platform_update_preview()['blocking_paths'] == []

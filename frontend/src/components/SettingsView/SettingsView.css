@@ -368,6 +368,8 @@
    when there is nothing else waiting. */
 .settings__update-actions {
   display: flex;
+  flex-direction: column;
+  align-items: flex-end;
   flex-wrap: wrap;
   justify-content: flex-end;
   gap: 8px;
@@ -598,13 +600,7 @@
   }
 
   .settings__update-actions {
-    width: 100%;
-    display: grid;
-    grid-template-columns: minmax(0, 1fr);
-  }
-
-  .settings__update-actions .settings__btn {
-    width: 100%;
+    align-items: flex-start;
   }
 }
 

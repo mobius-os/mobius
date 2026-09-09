@@ -216,3 +216,60 @@ def test_image_input_hashes_cli_matches_the_library_contract(tmp_path):
   )
 
   assert json.loads(completed.stdout) == activation.image_input_hashes(tmp_path)
+
+
+def test_optional_deploy_command_does_not_gate_in_product_updates():
+  for deployment in ("self_hosted", "railway"):
+    assert activation.classify_activation(
+      ["scripts/deploy-prod.sh"], deployment=deployment,
+    )["level"] == "live"
+    for path, expected in (
+      ("frontend/src/App.jsx", "live"),
+      ("backend/app/main.py", "server_restart"),
+      ("Dockerfile", "image_rebuild"),
+    ):
+      impact = activation.classify_activation(
+        ["scripts/deploy-prod.sh", path], deployment=deployment,
+      )
+      assert impact["level"] == expected
+
+
+def test_installed_host_helper_and_topology_keep_their_activation_boundaries():
+  for path, expected in (
+    ("scripts/install-rebuild-helper.sh", "host_maintenance"),
+    ("scripts/mobius-rebuild-host.py", "host_maintenance"),
+    ("docker-compose.yml", "container_recreate"),
+    ("Caddyfile", "proxy_reload"),
+  ):
+    impact = activation.classify_activation([path], deployment="self_hosted")
+    assert impact["level"] == expected
+    if expected == "host_maintenance":
+      assert "sudo scripts/install-rebuild-helper.sh" in " ".join(impact["guidance"])
+      assert "deploy-prod.sh" not in " ".join(impact["guidance"])
+
+
+def test_image_work_never_subsumes_independent_deployment_actions():
+  cases = [
+    ('self_hosted', 'Caddyfile', 'proxy_reload'),
+    ('self_hosted', 'docker-compose.yml', 'container_recreate'),
+    ('self_hosted', 'scripts/mobius-rebuild-host.py', 'host_maintenance'),
+    ('railway', 'railway.toml', 'container_recreate'),
+  ]
+  for deployment, path, external in cases:
+    impact = activation.classify_activation(['Dockerfile', path], deployment=deployment)
+    assert set(impact['required_actions']) == {'image_rebuild', external}
+    assert activation.requires_agent_activation(impact)
+  for deployment in ('self_hosted', 'railway'):
+    ordinary = activation.classify_activation(
+      ['Dockerfile', 'backend/app/main.py', 'backend/requirements.lock'], deployment=deployment,
+    )
+    assert set(ordinary['required_actions']) == {'image_rebuild', 'server_restart', 'dependency_sync'}
+    assert not activation.requires_agent_activation(ordinary)
+    assert activation.classify_activation([], deployment=deployment)['required_actions'] == []
+
+
+def test_irrelevant_deployment_inputs_never_enter_required_actions():
+  for deployment, ignored in [('railway', 'Caddyfile'), ('self_hosted', 'railway.toml')]:
+    impact = activation.classify_activation(['Dockerfile', ignored], deployment=deployment)
+    assert impact['required_actions'] == ['image_rebuild']
+    assert not activation.requires_agent_activation(impact)
