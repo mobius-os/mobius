@@ -19,8 +19,8 @@ export function usePeerTimeline(chatId, messages, enabled, activeTools) {
   const windowStart = messages[0]?.ts ?? Infinity
   const { hasNextPage, isFetching, isError, fetchNextPage } = query
   useEffect(() => {
-    // Page only far enough to cover the visible transcript, not all chat history.
-    if (enabled && hasNextPage && !isFetching && !isError && oldestLoaded > windowStart) void fetchNextPage()
+    // Include ties at the window boundary: a page may split one timestamp.
+    if (enabled && hasNextPage && !isFetching && !isError && oldestLoaded >= windowStart) void fetchNextPage()
   }, [enabled, hasNextPage, isFetching, isError, oldestLoaded, windowStart, fetchNextPage])
   const projection = useMemo(() => projectPeerTimeline(messages, history, chatId, activeTools), [messages, history, chatId, activeTools])
   return { ...projection, error: query.isError, retry: query.refetch }
