@@ -3477,6 +3477,115 @@ def test_resolved_conflict_converges_static_metadata_and_bundle_once(
   assert not (app_dir / ".git" / "mobius-pending-update").exists()
 
 
+def test_preserve_local_resolution_keeps_owner_added_module(
+  client, auth, bypass_url_validation,
+):
+  """A preserve-local resolution whose tree carries an owner-added imported
+  module must finalize: presence in the activated tree counts as declared, so
+  the completeness check cannot 422 on files the published manifest can never
+  list. Pristine installs are unaffected (their tree IS the declared set —
+  see test_multifile_install_rejects_incomplete_source_files)."""
+  from app.models import App
+  from app.database import SessionLocal
+
+  base = "https://resolve-local-module.test/repo/"
+  manifest_v1 = {
+    **MANIFEST_NEWS,
+    "id": "resolve-local-module",
+    "icon": None,
+    "storage_seeds": {},
+    "schedule": None,
+  }
+  responses_v1 = {
+    base + "mobius.json": (200, json.dumps(manifest_v1).encode()),
+    base + "index.jsx": (200, JSX_MULTI.encode()),
+  }
+  with patch(
+    "app.install.httpx.AsyncClient",
+    side_effect=_fake_async_client(responses_v1),
+  ):
+    installed = client.post(
+      "/api/apps/install", headers=auth,
+      json={"manifest_url": base + "mobius.json"},
+    )
+  assert installed.status_code == 201, installed.text
+  app_id = installed.json()["id"]
+
+  data_dir = Path(get_settings().data_dir)
+  app_dir = data_dir / "apps" / "resolve-local-module"
+  jsx_file = app_dir / "index.jsx"
+  # Owner work: a NEW local module wired into the entry — the class of edit
+  # the published manifest can never declare.
+  (app_dir / "wizard.js").write_text("export const WIZARD = 'local module'\n")
+  wired = (
+    "import { WIZARD } from './wizard.js'\n"
+    + JSX_MULTI.replace("{title}", "{title}{WIZARD}")
+  )
+  jsx_file.write_text(wired.replace("ORIGINAL TITLE", "LOCAL TITLE"))
+
+  jsx_v2 = JSX_MULTI.replace("ORIGINAL TITLE", "UPSTREAM TITLE")
+  manifest_v2 = {**manifest_v1, "version": "2.0.0"}
+  responses_v2 = {
+    base + "mobius.json": (200, json.dumps(manifest_v2).encode()),
+    base + "index.jsx": (200, jsx_v2.encode()),
+  }
+  with patch(
+    "app.install.httpx.AsyncClient",
+    side_effect=_fake_async_client(responses_v2),
+  ):
+    conflicted = client.post(
+      "/api/apps/install", headers=auth,
+      json={"manifest_url": base + "mobius.json"},
+    )
+  assert conflicted.status_code == 201, conflicted.text
+  assert conflicted.json()["mode"] == "conflict"
+
+  resolver = client.post(
+    f"/api/apps/{app_id}/conflict-resolver-chat", headers=auth,
+    json={"resolution_policy": "preserve_local"},
+  )
+  assert resolver.status_code == 200, resolver.text
+  # The agent's resolution: upstream's change layered with the owner module.
+  resolved = wired.replace("ORIGINAL TITLE", "UPSTREAM TITLE")
+  jsx_file.write_text(resolved)
+  reviewed = client.post(
+    "/api/apps/resolve-update/review",
+    headers=auth,
+    json={"source_dir": str(app_dir)},
+  )
+  assert reviewed.status_code == 200, reviewed.text
+
+  replay_responses = {
+    base + "index.jsx": (200, jsx_v2.encode()),
+  }
+  with patch(
+    "app.install.httpx.AsyncClient",
+    side_effect=_fake_async_client(replay_responses),
+  ):
+    replayed = client.post(
+      "/api/apps/resolve-update",
+      headers=auth,
+      json={
+        "source_dir": str(app_dir),
+        "reviewed_tree_oid": reviewed.json()["tree_oid"],
+      },
+    )
+  assert replayed.status_code == 200, replayed.text
+  assert replayed.json()["mode"] == "updated"
+
+  assert (
+    app_dir / "wizard.js"
+  ).read_text() == "export const WIZARD = 'local module'\n"
+  db = SessionLocal()
+  try:
+    app = db.query(App).filter(App.id == app_id).first()
+    assert app.version == "2.0.0"
+    assert app.jsx_source == resolved
+  finally:
+    db.close()
+  assert not (app_dir / ".git" / "mobius-pending-update").exists()
+
+
 def test_clean_merge_with_unreadable_bytes_is_treated_as_conflict(
   client, auth, bypass_url_validation, monkeypatch,
 ):

@@ -1756,9 +1756,18 @@ def _check_source_completeness(
   writes back exactly like a compile failure. External-host references are
   logged as warnings (runtime quality, not install-breaking).
 
-  The caller invokes this only on the synthetic-fetch path, where
-  ``source_tree`` IS the whole declared tree (entry + every fetched
+  The caller invokes this only on the synthetic-fetch path. On a pristine
+  install ``source_tree`` IS the whole declared tree (entry + every fetched
   ``source_files`` entry + the job script), so it is the sole source of bytes.
+  On a merge-reconciled update (clean merge or an owner-resolved conflict
+  replay) the tree is the git-merged LOCAL tree, which legitimately carries
+  owner-added modules the published manifest can never list — so files present
+  in the tree count as declared. That is a strict no-op for pristine installs
+  (their tree already equals the declared set) and it keeps the check's real
+  target: an import reachable from the entry that a synthetic fetch would not
+  materialize at all. Load integrity of the activated tree itself is separately
+  guaranteed by the compile step, which resolves imports from the real
+  worktree.
   Static-asset dests are recorded below their installer-owned ``static/``
   directory so source checks see the exact path compilation sees. For example,
   logical destination ``logo.js`` is importable as ``./static/logo.js``.
@@ -1773,7 +1782,13 @@ def _check_source_completeness(
   result = check_app_source(
     files,
     entry=entry_key,
-    source_files=manifest.get("source_files") or [],
+    # Union the published declaration with the tree being activated: owner-
+    # preserved local modules (merge-reconciled updates) are declared by
+    # presence; on a pristine install the tree equals the declared set, so
+    # this adds nothing. See the docstring.
+    source_files=sorted(
+      set(manifest.get("source_files") or []) | set(source_tree)
+    ),
     job=job_name,
     static_assets=static_source_paths,
   )
