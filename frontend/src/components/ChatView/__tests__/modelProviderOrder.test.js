@@ -75,3 +75,65 @@ test('public Möbius rows hide internal wire ids', () => {
   assert.match(markup, />gpt-5\.6</)
   assert.match(markup, />claude-opus-4-7</)
 })
+
+test('model picker reads recover from a brief public-origin failure', async () => {
+  for (const query of [modelQueries.registry, modelQueries.prefs]) {
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    })
+    let attempts = 0
+    const result = await client.fetchQuery({
+      ...query.options(),
+      retryDelay: 0,
+      queryFn: async () => {
+        attempts += 1
+        if (attempts < 4) throw new Error('temporary edge failure')
+        return { recovered: true }
+      },
+    })
+
+    assert.deepEqual(result, { recovered: true })
+    assert.equal(attempts, 4)
+  }
+})
+
+test('model picker falls back when its dedicated reads are rejected', async () => {
+  const originalFetch = globalThis.fetch
+  const calls = []
+  globalThis.fetch = async (url) => {
+    const path = new URL(url, 'https://mobius.test').pathname
+    calls.push(path)
+    if (path === '/api/auth/providers/models') {
+      return new Response(JSON.stringify({
+        codex: [{ id: 'gpt-fallback', name: 'GPT Fallback' }],
+      }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    }
+    return new Response(JSON.stringify({ detail: 'rejected' }), {
+      status: 503,
+      headers: { 'Content-Type': 'application/json' },
+    })
+  }
+
+  try {
+    assert.deepEqual(await modelQueries.registry.fetch(), {
+      codex: [{
+        id: 'gpt-fallback',
+        name: 'GPT Fallback',
+        label: 'GPT Fallback',
+        provider: 'codex',
+        available: true,
+      }],
+    })
+    assert.deepEqual(await modelQueries.prefs.fetch(), { hidden_ids: [] })
+    assert.deepEqual(calls, [
+      '/api/models',
+      '/api/auth/providers/models',
+      '/api/owner/model-prefs',
+    ])
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})

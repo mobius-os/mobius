@@ -330,13 +330,39 @@ function markProviderConnected(queryClient, providerId) {
 }
 
 async function fetchModelRegistry() {
-  const res = await api.models.list()
-  const data = await jsonOrThrow(res, 'model registry fetch failed:')
-  return data?.providers || {}
+  try {
+    const res = await api.models.list()
+    const data = await jsonOrThrow(res, 'model registry fetch failed:')
+    return data?.providers || {}
+  } catch {
+    // The app-facing feed is backed by the same server registry but travels
+    // through a separate, already-supported read route and has the owner's
+    // hidden-model preferences applied. It is a useful last-known-good shape
+    // for the chat picker when a browser/edge path rejects /api/models.
+    const res = await api.auth.provider.models()
+    const providers = await jsonOrThrow(res, 'fallback model registry fetch failed:')
+    return Object.fromEntries(
+      Object.entries(providers || {}).map(([provider, rows]) => [
+        provider,
+        (Array.isArray(rows) ? rows : []).map(row => ({
+          ...row,
+          label: row?.label || row?.name || row?.id,
+          provider,
+          available: true,
+        })),
+      ]),
+    )
+  }
 }
 
-function useModelRegistryQuery({ enabled = true } = {}) {
-  return useQuery({
+// These are three cheap, read-only attempts after the initial request. The
+// picker otherwise turns one brief PWA/edge wobble into a sticky error that
+// survives until the owner manually taps Retry. Keep the bound local to model
+// reads rather than making every shell query more aggressive.
+const MODEL_READ_RETRY_COUNT = 3
+
+function modelRegistryQueryOptions({ enabled = true } = {}) {
+  return {
     queryKey: modelRegistryKey,
     queryFn: fetchModelRegistry,
     enabled,
@@ -345,21 +371,39 @@ function useModelRegistryQuery({ enabled = true } = {}) {
     // through explicit invalidation (the manage-models modal's
     // refresh button) — not on every popover open.
     staleTime: 5 * 60_000,
-  })
+    retry: MODEL_READ_RETRY_COUNT,
+  }
+}
+
+function useModelRegistryQuery(options) {
+  return useQuery(modelRegistryQueryOptions(options))
 }
 
 async function fetchModelPrefs() {
-  const res = await api.owner.modelPrefs.get()
-  const data = await jsonOrThrow(res, 'model prefs fetch failed:')
-  return { hidden_ids: data?.hidden_ids || [] }
+  try {
+    const res = await api.owner.modelPrefs.get()
+    const data = await jsonOrThrow(res, 'model prefs fetch failed:')
+    return { hidden_ids: data?.hidden_ids || [] }
+  } catch {
+    // Preferences refine the registry; they must not make the model control
+    // unusable when their read alone fails. The registry fallback above is
+    // already preference-filtered, while a successful full registry simply
+    // degrades to showing every available model until this read recovers.
+    return { hidden_ids: [] }
+  }
 }
 
-function useModelPrefsQuery({ enabled = true } = {}) {
-  return useQuery({
+function modelPrefsQueryOptions({ enabled = true } = {}) {
+  return {
     queryKey: modelPrefsKey,
     queryFn: fetchModelPrefs,
     enabled,
-  })
+    retry: MODEL_READ_RETRY_COUNT,
+  }
+}
+
+function useModelPrefsQuery(options) {
+  return useQuery(modelPrefsQueryOptions(options))
 }
 
 async function fetchWalkthrough() {
@@ -639,12 +683,14 @@ export const modelQueries = {
   registry: {
     key: modelRegistryKey,
     fetch: fetchModelRegistry,
+    options: modelRegistryQueryOptions,
     useQuery: useModelRegistryQuery,
     invalidate: (queryClient) => queryClient.invalidateQueries({ queryKey: modelRegistryKey }),
   },
   prefs: {
     key: modelPrefsKey,
     fetch: fetchModelPrefs,
+    options: modelPrefsQueryOptions,
     useQuery: useModelPrefsQuery,
     invalidate: (queryClient) => queryClient.invalidateQueries({ queryKey: modelPrefsKey }),
   },

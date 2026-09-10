@@ -497,6 +497,7 @@ export const api = {
     },
     provider: {
       statuses: () => apiFetch('/auth/providers/status'),
+      models: () => apiFetch('/auth/providers/models'),
       appToken: (appId) => apiFetch('/auth/app-token', {
         method: 'POST',
         body: JSON.stringify({ app_id: appId }),
