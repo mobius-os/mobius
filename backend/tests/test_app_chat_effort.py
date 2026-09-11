@@ -1,7 +1,8 @@
 """Explicit app chat effort uses the normal per-chat setting, never a global default."""
 import pytest
 
-from app import models
+from app import models, providers
+from app.config import get_settings
 from app.routes.chats import AppChatStart
 from test_app_fixtures import create_local_app
 
@@ -39,7 +40,10 @@ def test_app_chat_effort_create_patch_list_and_isolation(client, owner_token, db
   assert changed.json()["agent_settings_json"]["system_prompt"] == "App bootstrap"
   other = client.post("/api/app-chats", headers=auth, json={"provider": "codex", "model": "gpt-6-astra"})
   assert other.status_code == 201
-  assert "effort" not in db.get(models.Chat, other.json()["id"]).agent_settings_json
+  default_settings = providers.snapshot_chat_agent_settings(
+    get_settings().data_dir, "codex", model="gpt-6-astra",
+  )
+  assert db.get(models.Chat, other.json()["id"]).agent_settings_json == default_settings
   # Effort support must not weaken app attribution.
   _, other_token = _make_app(client, owner_token, "different-app")
   denied = client.patch(f"/api/app-chats/{cid}", headers={"Authorization": f"Bearer {other_token}"}, json={"effort": "low"})
