@@ -60,6 +60,7 @@ test('returning to a retained hidden chat settles a missed terminal stream event
     messages = [message]
     return route.fulfill({ status: 202, json: { status: 'started', message } })
   })
+  await page.clock.install()
   await page.goto(`${BASE}/shell/?chat=${a.id}`, { waitUntil: 'domcontentloaded' })
   const surface = page.locator(`[data-tab-key="chat:${a.id}"]`)
   await expect(surface.getByRole('textbox', { name: 'Message Möbius…' })).toBeVisible()
@@ -76,9 +77,7 @@ test('returning to a retained hidden chat settles a missed terminal stream event
 
   // Freeze interval recovery: only the observed finish + reveal can settle this
   // test, not a later runtime polling tick masking broken event wiring.
-  const frozenTime = new Date()
-  await page.clock.install({ time: frozenTime })
-  await page.clock.pauseAt(frozenTime)
+  await page.clock.pauseAt(new Date(Date.now() + 1000))
   messages = [...messages, {
     role: 'assistant', content: 'The saved final answer.', ts: 1700001000001,
     blocks: [{ type: 'text', content: 'The saved final answer.' }],
