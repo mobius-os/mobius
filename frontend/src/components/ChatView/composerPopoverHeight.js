@@ -1,3 +1,5 @@
+import { captureLayoutSpace, clientLengthToLayout } from '../../lib/layoutSpace.js'
+
 /**
  * How tall the composer popover is allowed to be.
  *
@@ -143,4 +145,21 @@ export function popoverMaxHeight({
   // Never more than the measured space: the panel must stay inside the clipping
   // ancestor even when that leaves it very short. See the no-minimum note above.
   return Math.min(cap, Math.floor(Math.max(0, space)))
+}
+
+/** Measure in zoom-normalized CLIENT coordinates, not document-local points.
+ * Translating by the root's top erases a fixed document's upward displacement
+ * while leaving viewport zero unchanged, counting offscreen room as usable.
+ */
+export function measurePopoverMaxHeight(trigger) {
+  const rect = trigger.getBoundingClientRect()
+  const space = captureLayoutSpace(document.documentElement)
+  const normalize = value => clientLengthToLayout(value, space)
+  return popoverMaxHeight({
+    triggerTop: normalize(rect.top),
+    triggerBottom: normalize(rect.bottom),
+    clipTop: normalize(nearestClipTop(trigger)),
+    viewportTop: normalize(window.visualViewport?.offsetTop || 0),
+    viewportHeight: normalize(window.visualViewport?.height || 0),
+  })
 }

@@ -176,10 +176,11 @@ or to work around a manifest/permission guard.
 The helper validates the manifest and complete source tree, compiles and
 commits that exact revision, returns a compact receipt with `app_id`,
 `preview_path`, and `open_path`, and emits one live-preview action tied to this
-building chat. On every device, that action keeps the partner's focused pane
-untouched: it opens the app in a companion pane when possible, or switches the
-app inside an existing unfocused companion pane. If neither is safe, it parks
-as an inactive tab instead of replacing what the partner is using.
+building chat. That action keeps the partner's focused pane untouched. On a
+phone it leaves Standard/Builder mode and the visible screen unchanged, parking
+the app until the partner taps the preview CTA. On a larger screen it opens the
+app in a companion pane when possible, or switches the app inside an existing
+unfocused companion pane. If neither is safe, it parks as an inactive tab.
 Reuse that numeric ID for preview, storage, notifications, and later actions;
 do not list apps again after a successful apply. Do not send a separate
 `open_item`.
