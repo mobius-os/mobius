@@ -1339,6 +1339,60 @@ test.describe('Workspace view-mode toggle', () => {
     await expect(page.getByRole('button', { name: /Use (panes|single screen)/ })).toHaveCount(0)
   })
 
+  test('a phone build preview stays in Standard until its CTA is tapped', async ({ page }) => {
+    await boot(page, PHONE)
+    const chat = await createTaggedChat(page, 'phonePreview')
+    const appId = 990111
+    await mockApps(page, [{ id: appId, name: 'Phone Preview', chatId: chat.id }])
+    const standard = paneModel.setSingleScreen(
+      paneModel.setViewMode(
+        paneModel.seedFromFlatTabs([{ kind: 'chat', id: chat.id }]),
+        'single',
+      ),
+      { kind: 'chat', id: chat.id },
+    )
+    await seedWorkspace(page, standard)
+
+    let firstSystemConnection = true
+    await page.route('**/api/events/system', route => {
+      const events = firstSystemConnection
+        ? [
+            { type: 'system_stream_open' },
+            { type: 'app_preview_ready', appId, chatId: chat.id },
+          ]
+        : [{ type: 'system_stream_open' }]
+      firstSystemConnection = false
+      return route.fulfill({
+        status: 200,
+        headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' },
+        body: events.map(event => `data: ${JSON.stringify(event)}\n\n`).join(''),
+      })
+    })
+
+    await page.goto(`${BASE}/shell/?chat=${chat.id}`, { waitUntil: 'domcontentloaded' })
+    const cta = page.getByRole('button', { name: 'Open Phone Preview' })
+    await expect(cta).toBeVisible({ timeout: 8000 })
+    await expect.poll(async () => whichPaneHas(await readWs(page), `app:${appId}`), {
+      timeout: 8000,
+      message: 'the preview event parked the app in Builder',
+    }).toBe('p0')
+
+    const afterPreview = await readWs(page)
+    expect(afterPreview.viewMode).toBe('single')
+    expect(afterPreview.singleScreen).toEqual({ kind: 'chat', id: String(chat.id) })
+    expect(afterPreview.panes.p0.activeTabKey).toBe(`chat:${chat.id}`)
+    expect(Object.keys(afterPreview.panes)).toHaveLength(1)
+    await expect(page.locator('.workspace__chrome')).toHaveCount(0)
+    await expect(page.locator('.shell__view--paned')).toHaveCount(0)
+
+    await cta.click()
+    await expect.poll(async () => (await readWs(page)).singleScreen, {
+      timeout: 3000,
+      message: 'the explicit preview CTA opens the app',
+    }).toEqual({ kind: 'app', id: String(appId) })
+    expect((await readWs(page)).viewMode).toBe('single')
+  })
+
   test('closing the final legacy Builder tab returns to a visible Standard chat', async ({ page }) => {
     await boot(page, WIDE)
     const current = await createTaggedChat(page, 'vmFinalClose')
