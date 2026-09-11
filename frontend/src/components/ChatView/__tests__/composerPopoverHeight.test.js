@@ -2,6 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
   popoverMaxHeight,
+  measurePopoverMaxHeight,
   visibleTopInRectSpace,
   POPOVER_CAP,
 } from '../composerPopoverHeight.js'
@@ -109,3 +110,37 @@ test('visibleTopInRectSpace ignores an offset the rects already contain', () => 
     triggerBottom: 834, viewportTop: 421, viewportHeight: 0,
   }), 421)
 })
+
+for (const zoom of [1, 0.8, 1.25]) {
+  test(`DOM measurement preserves a panned document's visible boundary at zoom ${zoom}`, t => {
+    const root = {
+      currentCSSZoom: zoom,
+      getBoundingClientRect: () => ({ top: -150 * zoom, left: 0, width: 402 * zoom, height: 336 * zoom }),
+    }
+    const body = {}
+    const doc = { documentElement: root, body }
+    root.ownerDocument = doc
+    const clip = {
+      parentElement: body,
+      getBoundingClientRect: () => ({ top: -150 * zoom }),
+    }
+    const trigger = {
+      parentElement: clip,
+      getBoundingClientRect: () => ({ top: 130 * zoom, bottom: 178 * zoom }),
+    }
+    const oldDocument = globalThis.document
+    const oldWindow = globalThis.window
+    t.after(() => {
+      if (oldDocument === undefined) delete globalThis.document
+      else globalThis.document = oldDocument
+      if (oldWindow === undefined) delete globalThis.window
+      else globalThis.window = oldWindow
+    })
+    globalThis.document = doc
+    globalThis.window = {
+      visualViewport: { height: 336 * zoom, offsetTop: 0 },
+      getComputedStyle: () => ({ overflowY: 'hidden', overflowX: 'hidden' }),
+    }
+    assert.equal(measurePopoverMaxHeight(trigger), 114)
+  })
+}
