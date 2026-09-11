@@ -330,29 +330,9 @@ function markProviderConnected(queryClient, providerId) {
 }
 
 async function fetchModelRegistry() {
-  try {
-    const res = await api.models.list()
-    const data = await jsonOrThrow(res, 'model registry fetch failed:')
-    return data?.providers || {}
-  } catch {
-    // The app-facing feed is backed by the same server registry but travels
-    // through a separate, already-supported read route and has the owner's
-    // hidden-model preferences applied. It is a useful last-known-good shape
-    // for the chat picker when a browser/edge path rejects /api/models.
-    const res = await api.auth.provider.models()
-    const providers = await jsonOrThrow(res, 'fallback model registry fetch failed:')
-    return Object.fromEntries(
-      Object.entries(providers || {}).map(([provider, rows]) => [
-        provider,
-        (Array.isArray(rows) ? rows : []).map(row => ({
-          ...row,
-          label: row?.label || row?.name || row?.id,
-          provider,
-          available: true,
-        })),
-      ]),
-    )
-  }
+  const res = await api.models.list()
+  const data = await jsonOrThrow(res, 'model registry fetch failed:')
+  return data?.providers || {}
 }
 
 // These are three cheap, read-only attempts after the initial request. The
@@ -386,9 +366,8 @@ async function fetchModelPrefs() {
     return { hidden_ids: data?.hidden_ids || [] }
   } catch {
     // Preferences refine the registry; they must not make the model control
-    // unusable when their read alone fails. The registry fallback above is
-    // already preference-filtered, while a successful full registry simply
-    // degrades to showing every available model until this read recovers.
+    // unusable when their read alone fails. Degrade to showing every
+    // available model until this read recovers.
     return { hidden_ids: [] }
   }
 }
