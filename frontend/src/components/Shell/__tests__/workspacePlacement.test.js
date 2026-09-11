@@ -276,6 +276,26 @@ test('live preview · phone: preserves the hidden Builder layout and focus', () 
     'the preview is parked without creating another pane')
 })
 
+test('live preview · phone: parks in the focused pane when its source is absent', () => {
+  const ws = {
+    ...twoPaneWs([CHAT('old')], [APP(5)], { focused: 'p1' }),
+    viewMode: 'single',
+    singleScreen: { kind: 'chat', id: 'new' },
+  }
+  const out = resolveWorkspaceRequest(
+    ws,
+    builtAppWorkspaceRequest('new', 9),
+    env(ws, { mode: 'phone', rect: { w: 400, h: 800 } }),
+  )
+  assert.equal(out.viewMode, ws.viewMode, 'the preview never enters Builder')
+  assert.deepEqual(out.singleScreen, ws.singleScreen, 'the Standard screen is untouched')
+  assert.equal(out.focusedPaneId, ws.focusedPaneId, 'hidden Builder focus is untouched')
+  assert.equal(out.panes.p1.activeTabKey, ws.panes.p1.activeTabKey,
+    'the focused pane keeps its active tab')
+  assert.deepEqual(keysOf(out.panes.p1), ['app:5', 'app:9'],
+    'the app is parked as an inactive tab in the focused pane')
+})
+
 test('live preview · phone update: leaves a parked app and pane geometry untouched', () => {
   const ws = paneModel.setActiveTab(builderSeed([CHAT('a'), APP(9)]), 'p0', 'chat:a')
   const out = resolveWorkspaceRequest(
