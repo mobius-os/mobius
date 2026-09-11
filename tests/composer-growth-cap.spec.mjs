@@ -129,3 +129,53 @@ test('a short keyboard room compacts the attachment before eclipsing the transcr
   expect(geometry.input).toBeGreaterThanOrEqual(24)
   expect(geometry.pill).toBeLessThanOrEqual(96)
 })
+
+// The shell applies VisualViewport geometry on an animation frame. A menu
+// listening to the viewport event alone measures BEFORE that layout change;
+// its form stays the same height, leaving its top controls clipped. This
+// exercises the event/observer ordering, not just the height arithmetic.
+for (const openFirst of [true, false]) {
+  test(`tools stay reachable when keyboard ${openFirst ? 'opens after' : 'is open before'} the menu`, async ({ page }) => {
+    await page.setViewportSize({ width: 402, height: 812 })
+    const { painted, composer } = await openNewChat(page, `tools-keyboard-${openFirst}`)
+    const trigger = painted.locator('.composer-plus > button')
+    const panel = painted.getByRole('dialog', { name: 'Chat options', exact: true })
+    await composer.focus()
+    if (openFirst) await trigger.click()
+
+    // Shrink only the visual viewport, like an overlay keyboard. The native
+    // layout viewport stays 812px; the real shell hook must fit the chat pane.
+    await page.evaluate(() => {
+      Object.defineProperty(window.visualViewport, 'height', { configurable: true, value: 450 })
+      window.visualViewport.dispatchEvent(new Event('resize'))
+    })
+    await expect.poll(async () => (await composerGeometry(page))?.chat ?? 812).toBeLessThan(450)
+    if (!openFirst) await trigger.click()
+
+    const fits = () => panel.evaluate(menu => {
+      const rect = menu.getBoundingClientRect()
+      const chat = menu.closest('.chat').getBoundingClientRect()
+      const anchor = menu.parentElement.querySelector('button').getBoundingClientRect()
+      return rect.height > 100 && rect.top >= chat.top + 7 && rect.bottom <= anchor.top - 7
+    })
+    await expect.poll(fits).toBe(true)
+    await expect(composer).toBeFocused()
+
+    // All menu content remains in ONE usable scrollport, including the first
+    // Attach row after visiting the end of a long model/settings list.
+    await panel.evaluate(menu => { menu.scrollTop = menu.scrollHeight })
+    await panel.evaluate(menu => { menu.scrollTop = 0 })
+    await expect(panel.getByRole('button', { name: /Attach files/ })).toBeInViewport()
+
+    // A pane-only resize has no viewport event and still changes the room.
+    await painted.locator('.chat').evaluate(chat => { chat.style.height = '330px' })
+    await expect.poll(fits).toBe(true)
+    await painted.locator('.chat').evaluate(chat => { chat.style.removeProperty('height') })
+    await page.evaluate(() => {
+      delete window.visualViewport.height
+      window.visualViewport.dispatchEvent(new Event('resize'))
+    })
+    await expect.poll(fits).toBe(true)
+    await expect(composer).toBeFocused()
+  })
+}
