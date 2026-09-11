@@ -84,7 +84,7 @@ test('returning to a retained hidden chat settles a missed terminal stream event
     blocks: [{ type: 'text', content: 'The saved final answer.' }],
   }]
   running = false
-  await page.evaluate(chatId => window.emitSettlementEvent({ type: 'chat_run_finished', chat_id: chatId }), a.id)
+  await page.evaluate(chatId => window.emitSettlementEvent({ type: 'chat_run_finished', chatId }), a.id)
   await page.getByRole('button', { name: 'Show all panes' }).click()
   await expect.poll(() => idleRuntimeReads).toBeGreaterThan(0)
   await expect(surface.getByText('The saved final answer.', { exact: true })).toBeVisible()
