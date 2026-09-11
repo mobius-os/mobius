@@ -278,6 +278,7 @@ class RuntimeSupervisors:
 
     async def autopilot_lease_recovery_loop():
       from app.contribution_autopilot import sweep_expired_leases
+      from app.contribution_autopilot_recovery import recover_resolved_blocks
 
       def sweep_once() -> int:
         # Session creation belongs in the worker with every operation that uses
@@ -289,6 +290,7 @@ class RuntimeSupervisors:
         await asyncio.sleep(AUTOPILOT_LEASE_RECOVERY_INTERVAL_SECS)
         try:
           await asyncio.to_thread(sweep_once)
+          await recover_resolved_blocks()
         except asyncio.CancelledError:
           raise
         except Exception as exc:

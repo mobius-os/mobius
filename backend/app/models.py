@@ -1960,8 +1960,11 @@ class ContributionAutopilot(Base):
   target_head_repository = Column(String(256), nullable=True, default=None)
   target_branch = Column(String(256), nullable=True, default=None)
   target_repo_path = Column(String(1024), nullable=True, default=None)
-  # "idle" between rounds; "responding" while a round holds the claim.
+  # "idle" between rounds; "responding" while a round holds the claim;
+  # "blocked" while an escalation awaits a reviewed repair. A blocker does
+  # not revoke owner consent; only an explicit Pause disables that grant.
   state = Column(String(16), nullable=False, default="idle")
+  blocked_at = Column(DateTime, nullable=True, default=None)
   # The live claim. run_id is a fresh uuid per round and is the round's whole
   # identity: /update, /reply, /complete, /escalate require the caller to
   # present it, so a zombie agent from a reclaimed round holds a dead id.
