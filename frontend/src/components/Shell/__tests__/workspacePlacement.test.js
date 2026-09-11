@@ -283,7 +283,7 @@ test('live preview · phone update: leaves a parked app and pane geometry untouc
     builtAppWorkspaceRequest('a', 9),
     env(ws, { mode: 'phone', rect: { w: 400, h: 800 } }),
   )
-  assert.equal(out, ws, 'a coherent update live-swaps code without opening the preview')
+  assert.deepEqual(out, ws, 'a coherent update live-swaps code without opening the preview')
 
   const appInUse = builderSeed([CHAT('a'), APP(9)])
   const unchanged = resolveWorkspaceRequest(
