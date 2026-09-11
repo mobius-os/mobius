@@ -18,6 +18,7 @@ from slowapi.util import get_remote_address
 from sqlalchemy.orm import Session
 
 from app import fs_locks, models
+from app.reviewer_automation import REPO as _REVIEWER_REPO
 from app.config import get_settings
 from app.database import get_db
 from app.deps import Principal, get_principal, reject_cross_site
@@ -53,7 +54,7 @@ class ReviewerCommentBody(BaseModel):
 
 
 def _reviewer_live_pr(repository: str, number: int) -> dict:
-  if _GITHUB_REPO.fullmatch(repository) is None or number < 1:
+  if _REVIEWER_REPO.fullmatch(repository) is None or number < 1:
     raise HTTPException(422, "Invalid Reviewer pull request target.")
   try:
     proc = _gh(

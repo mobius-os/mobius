@@ -437,3 +437,16 @@ def test_manual_ambiguous_github_result_is_not_retried(
     app_id=app.id, identity=payload["identity"],
   ).one()
   assert claim.status == "uncertain"
+
+
+def test_reviewer_live_pr_rejects_invalid_target_before_any_github_call():
+  """The validation branch must run (and reject) before any GitHub call —
+  it is the code path CI lint once caught as an undefined name."""
+  from fastapi import HTTPException
+  from app.routes.reviewer import _reviewer_live_pr
+  for repo, number in (("not a repo", 1), ("mobius-os/mobius", 0), ("a/b/c", 3)):
+    try:
+      _reviewer_live_pr(repo, number)
+      raise AssertionError(f"accepted invalid target {repo}#{number}")
+    except HTTPException as exc:
+      assert exc.status_code == 422
