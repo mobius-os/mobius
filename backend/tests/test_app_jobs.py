@@ -447,8 +447,9 @@ def test_wrapper_honors_python_job_shebang(tmp_path, monkeypatch):
   assert calls[0][0][0] == [str(runtime_job), "57"]
 
 
-def test_wrapper_keeps_bash_fallback_for_non_executable_jobs(
-  tmp_path, monkeypatch,
+@pytest.mark.parametrize("executable", [False, True])
+def test_wrapper_keeps_bash_fallback_for_legacy_jobs(
+  tmp_path, monkeypatch, executable,
 ):
   runner = _load_runner()
   data_dir = tmp_path / "data"
@@ -458,7 +459,7 @@ def test_wrapper_keeps_bash_fallback_for_non_executable_jobs(
   job.write_text("exit 0\n")
   context = _accepted_context(source)
   runtime_job = Path(context["runtime_dir"]) / job.name
-  runtime_job.chmod(0o644)
+  runtime_job.chmod(0o755 if executable else 0o644)
   monkeypatch.setattr(runner, "DATA_DIR", data_dir)
   monkeypatch.setattr(runner, "_mint_app_token", lambda _app_id: "app-token")
   monkeypatch.setattr(runner, "_app_is_live", lambda *_args: True)

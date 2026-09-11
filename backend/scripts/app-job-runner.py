@@ -362,11 +362,13 @@ def _execute_job(
     child_env["APP_JOB_STATE_DIR"] = str(job_state)
     # Accepted jobs are executable scripts, not necessarily shell programs
     # (the App Store's update checker is Python). Honor their reviewed shebang;
-    # retain the Bash fallback for older installed jobs whose executable bit
-    # was not preserved by their source package.
+    # retain the Bash fallback for legacy shell jobs without a shebang or
+    # whose executable bit was not preserved by their source package.
+    with runtime_job.open("rb") as script:
+      has_shebang = script.read(2) == b"#!"
     command = (
       [str(runtime_job), str(app_id)]
-      if os.access(runtime_job, os.X_OK)
+      if has_shebang and os.access(runtime_job, os.X_OK)
       else ["bash", str(runtime_job), str(app_id)]
     )
     # Uninstall sends TERM to this entire process group. Keep the supervisor
