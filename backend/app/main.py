@@ -454,6 +454,14 @@ def _static_embed_csp_for_scope(scope) -> str:
   return static_embed_csp(settings.frontend_origin, delivery_origin)
 
 
+def _chat_embed_csp_for_scope(scope) -> str:
+  """Let the loopback test harness exercise the real opaque chat embed."""
+  delivery_origin = _loopback_delivery_origin(scope)
+  if delivery_origin is None:
+    return _CHAT_EMBED_CSP
+  return chat_embed_csp(settings.frontend_origin, delivery_origin)
+
+
 def _app_frame_csp_for_scope(scope) -> str:
   """Let the loopback test harness exercise the real opaque app frame."""
   delivery_origin = _loopback_delivery_origin(scope)
@@ -553,9 +561,7 @@ class _SecurityHeadersMiddleware:
       elif published_site:
         csp = _PUBLISHED_SITE_CSP
       elif chat_embed:
-        delivery_origin = _loopback_delivery_origin(scope)
-        csp = (chat_embed_csp(settings.frontend_origin, delivery_origin)
-               if delivery_origin else _CHAT_EMBED_CSP)
+        csp = _chat_embed_csp_for_scope(scope)
       elif app_frame:
         csp = _app_frame_csp_for_scope(scope)
       elif artifact_output:
