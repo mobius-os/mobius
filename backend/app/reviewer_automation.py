@@ -31,6 +31,14 @@ def normalized_repositories(values) -> list[str]:
 
 
 def validated_comment(body: str, head_sha: str) -> str:
+  """Validate one public Reviewer comment. Fails closed on active markup.
+
+  The HTML guard is deliberately coarse: any ``<letter`` sequence (for
+  example ``List<T>`` or ``<details>``) is rejected along with real tags.
+  A false positive costs a reword; a markup injection costs a public
+  comment under the owner's name, so authors reword generics rather than
+  loosening this check.
+  """
   comment = str(body or "").strip()
   if not comment or len(comment) > 30_000:
     raise HTTPException(422, "Reviewer comment must contain 1-30000 characters.")

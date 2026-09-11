@@ -172,12 +172,12 @@ def test_guarded_comment_route_posts_comment_only_once(
   assert grant.status_code == 200, grant.text
   live_checks = []
   monkeypatch.setattr(
-    "app.routes.github._reviewer_assert_live_revision",
+    "app.routes.reviewer._reviewer_assert_live_revision",
     lambda repo, number, head, base: live_checks.append((repo, number, head, base)) or {},
   )
   calls = []
   monkeypatch.setattr(
-    "app.routes.github._gh",
+    "app.routes.reviewer._gh",
     lambda *args: calls.append(args) or SimpleNamespace(
       stdout='{"html_url":"https://github.test/review/1"}',
     ),
@@ -224,9 +224,9 @@ def test_second_freshness_failure_closes_identity_without_charging_slot(
     if len(checks) == 2:
       raise HTTPException(409, "revision moved")
     return {}
-  monkeypatch.setattr("app.routes.github._reviewer_assert_live_revision", freshness)
+  monkeypatch.setattr("app.routes.reviewer._reviewer_assert_live_revision", freshness)
   calls = []
-  monkeypatch.setattr("app.routes.github._gh", lambda *args: calls.append(args))
+  monkeypatch.setattr("app.routes.reviewer._gh", lambda *args: calls.append(args))
   payload = {
     "identity": "7" * 64, "repository": "mobius-os/mobius",
     "pr_number": 77, "head_sha": "a" * 40, "base_sha": "b" * 40,
@@ -268,10 +268,10 @@ def test_guarded_comment_rejects_unbound_or_active_content(
     },
   )
   monkeypatch.setattr(
-    "app.routes.github._reviewer_assert_live_revision", lambda *_args: {},
+    "app.routes.reviewer._reviewer_assert_live_revision", lambda *_args: {},
   )
   calls = []
-  monkeypatch.setattr("app.routes.github._gh", lambda *args: calls.append(args))
+  monkeypatch.setattr("app.routes.reviewer._gh", lambda *args: calls.append(args))
   response = client.post(
     f"/api/github/reviewer/{app.id}/comment", headers=auth, json={
       "identity": "8" * 64, "repository": "mobius-os/mobius",
@@ -290,12 +290,12 @@ def test_manual_comment_posts_once_without_grant_and_exposes_audit(
   app, payload, _source, _storage, _ledger = _manual_case(db, tmp_path)
   live_checks = []
   monkeypatch.setattr(
-    "app.routes.github._reviewer_assert_live_revision",
+    "app.routes.reviewer._reviewer_assert_live_revision",
     lambda *args: live_checks.append(args) or {},
   )
   calls = []
   monkeypatch.setattr(
-    "app.routes.github._gh",
+    "app.routes.reviewer._gh",
     lambda *args: calls.append(args) or SimpleNamespace(
       stdout='{"html_url":"https://github.test/review/manual"}',
     ),
@@ -358,7 +358,7 @@ def test_manual_comment_requires_exact_current_private_draft(
     value["pulls"]["mobius-os/app-memory#54"]["private"] = False
     ledger.write_text(json.dumps(value))
   calls = []
-  monkeypatch.setattr("app.routes.github._gh", lambda *args: calls.append(args))
+  monkeypatch.setattr("app.routes.reviewer._gh", lambda *args: calls.append(args))
 
   response = client.post(
     f"/api/github/reviewer/{app.id}/comment/manual", headers=auth, json=payload,
@@ -379,8 +379,8 @@ def test_manual_second_local_check_supersedes_without_refunding_grant(
   grant.daily_posts_used = 3
   grant.rounds_json = {"mobius-os/app-memory#54": 2}
   db.commit()
-  from app.routes import github as github_routes
-  original = github_routes._reviewer_manual_plan
+  from app.routes import reviewer as reviewer_routes
+  original = reviewer_routes._reviewer_manual_plan
   checks = []
 
   async def changed_after_claim(*args, **kwargs):
@@ -389,12 +389,12 @@ def test_manual_second_local_check_supersedes_without_refunding_grant(
       raise HTTPException(409, "stored draft moved")
     return await original(*args, **kwargs)
 
-  monkeypatch.setattr(github_routes, "_reviewer_manual_plan", changed_after_claim)
+  monkeypatch.setattr(reviewer_routes, "_reviewer_manual_plan", changed_after_claim)
   monkeypatch.setattr(
-    github_routes, "_reviewer_assert_live_revision", lambda *_args: {},
+    reviewer_routes, "_reviewer_assert_live_revision", lambda *_args: {},
   )
   calls = []
-  monkeypatch.setattr(github_routes, "_gh", lambda *args: calls.append(args))
+  monkeypatch.setattr(reviewer_routes, "_gh", lambda *args: calls.append(args))
 
   response = client.post(
     f"/api/github/reviewer/{app.id}/comment/manual", headers=auth, json=payload,
@@ -415,7 +415,7 @@ def test_manual_ambiguous_github_result_is_not_retried(
 ):
   app, payload, _source, _storage, _ledger = _manual_case(db, tmp_path)
   monkeypatch.setattr(
-    "app.routes.github._reviewer_assert_live_revision", lambda *_args: {},
+    "app.routes.reviewer._reviewer_assert_live_revision", lambda *_args: {},
   )
   calls = []
 
@@ -423,7 +423,7 @@ def test_manual_ambiguous_github_result_is_not_retried(
     calls.append(args)
     raise RuntimeError("ambiguous")
 
-  monkeypatch.setattr("app.routes.github._gh", fail)
+  monkeypatch.setattr("app.routes.reviewer._gh", fail)
   response = client.post(
     f"/api/github/reviewer/{app.id}/comment/manual", headers=auth, json=payload,
   )
