@@ -1659,6 +1659,14 @@ async def _fetch_provider_models(
   if provider_id == "codex":
     return await _fetch_codex_models(data_dir)
   if provider_id == "mobius":
+    # An unlinked Möbius account has no broker model capability. Probing the
+    # protected inference route anyway turns that expected state into a noisy
+    # 401 every time the registry cache expires. Ask the provider's owning
+    # identity check first and serve the same curated fallback without making
+    # an unauthorized request; once linked, the broker remains the live source.
+    mobius = PROVIDERS["mobius"]
+    if await asyncio.to_thread(mobius.check_auth, data_dir) is not None:
+      return _fallback_models("mobius")
     import httpx
     async with httpx.AsyncClient(timeout=5.0) as client:
       response = await client.get("http://127.0.0.1:8765/v1/models")
