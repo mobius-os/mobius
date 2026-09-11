@@ -154,8 +154,19 @@ def _peer_board_media_name(host: str, post_id: str) -> str:
   return f"{safe_host}-{post_id}"
 
 
+COMMUNITY_HOST = "www.mobius.you"
+DEFAULT_COMMUNITY_HOST = COMMUNITY_HOST
+
+
 def _own_host() -> str:
   return get_settings().domain
+
+
+def _canonical_community_host(host: str | None = None) -> str:
+  """Return the canonical global community host."""
+  if _own_host() in ("testserver", "localhost", "127.0.0.1", "mobius.test"):
+    return host or _own_host()
+  return COMMUNITY_HOST
 
 
 async def _download_avatar(url: str) -> bytes:
@@ -355,7 +366,7 @@ def _load_identity() -> dict:
     "enc_public_key_b64": enc_public_b64,
     "name": "",
     "bio": "",
-    "community_host": _own_host(),
+    "community_host": _canonical_community_host(),
     "created_at": int(time.time()),
   }
   atomic_write(path, json.dumps(identity, indent=2))
@@ -758,7 +769,7 @@ async def get_me(
     "name": identity.get("name") or "",
     "handle": identity.get("handle") or "",
     "bio": identity.get("bio") or "",
-    "community_host": identity.get("community_host") or _own_host(),
+    "community_host": _canonical_community_host(identity.get("community_host")),
     "connected": bool(state["profile"]) or bool(identity.get("name")),
     "joined": bool(identity.get("joined_at")),
     "account_error": state["account_error"],
@@ -796,7 +807,7 @@ async def join_community(
 
 async def _register_with_community_host(identity: dict) -> str:
   """Announce this instance to its community host. Returns a status string."""
-  host = identity.get("community_host") or _own_host()
+  host = _canonical_community_host(identity.get("community_host"))
   envelope = {
     "v": 0,
     "type": "register",
@@ -983,6 +994,7 @@ async def send_message(
 @router.post("/publish")
 async def publish_post(
   post: PublishPost,
+  community_host: str | None = None,
   db: Session = Depends(get_db),
   principal: Principal = Depends(get_principal),
 ):
@@ -1004,7 +1016,7 @@ async def publish_post(
   if attachment is not None:
     envelope["attachment"] = attachment[0]
   envelope["sig"] = _sign(envelope, identity["private_key_b64"])
-  host = identity.get("community_host") or _own_host()
+  host = _browse_community_host(community_host)
   if host == _own_host():
     board_post = {
       "id": envelope["id"],
@@ -1039,7 +1051,7 @@ def _browse_community_host(requested: str | None) -> str:
     return host
   path = _identity_path()
   identity = json.loads(path.read_text()) if path.is_file() else {}
-  return identity.get("community_host") or _own_host()
+  return _canonical_community_host(identity.get("community_host"))
 
 
 @router.get("/replies/{post_id}")
@@ -1159,6 +1171,7 @@ class ReplyPost(BaseModel):
 @router.post("/like")
 async def like_post(
   body: LikePost,
+  community_host: str | None = None,
   db: Session = Depends(get_db),
   principal: Principal = Depends(get_principal),
 ):
@@ -1169,7 +1182,7 @@ async def like_post(
   if not re.fullmatch(r"[a-f0-9-]{8,64}", post_id):
     raise HTTPException(status_code=400, detail="Post id is invalid.")
   identity = _load_identity()
-  host = identity.get("community_host") or _own_host()
+  host = _browse_community_host(community_host)
   if host == _own_host():
     return _toggle_board_like(post_id, _own_host())
   envelope = {
@@ -1197,6 +1210,7 @@ async def like_post(
 @router.post("/reply")
 async def reply_to_post(
   body: ReplyPost,
+  community_host: str | None = None,
   db: Session = Depends(get_db),
   principal: Principal = Depends(get_principal),
 ):
@@ -1210,7 +1224,7 @@ async def reply_to_post(
   if not text or len(text) > MAX_REPLY_TEXT_CHARS:
     raise HTTPException(status_code=400, detail="Reply text is invalid.")
   identity = _load_identity()
-  host = identity.get("community_host") or _own_host()
+  host = _browse_community_host(community_host)
   reply_id = str(uuid.uuid4())
   sent_at = time.time()
   if host == _own_host():
