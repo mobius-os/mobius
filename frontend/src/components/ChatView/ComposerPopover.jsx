@@ -54,13 +54,8 @@ import {
 } from './chatArtifacts.js'
 import { api, apiFetch } from '../../api/client.js'
 import { chatAppArtifactQueries, chatQueries } from '../../hooks/queries.js'
-import { popoverMaxHeight, nearestClipTop } from './composerPopoverHeight.js'
+import { measurePopoverMaxHeight } from './composerPopoverHeight.js'
 import { focusComposerElement } from './composerFocusPolicy.js'
-import {
-  captureLayoutSpace,
-  clientLengthToLayout,
-  clientPointToLayout,
-} from '../../lib/layoutSpace.js'
 import useModelSelectionPopover from './hooks/useModelSelectionPopover.js'
 import useScrollActivity from './hooks/useScrollActivity.js'
 import { clearProviderSwitch } from './providerSwitch.js'
@@ -272,27 +267,7 @@ export default function ComposerPopover({
     const measure = () => {
       const trigger = triggerRef.current
       if (!trigger) return
-      const rect = trigger.getBoundingClientRect()
-      const rootSpace = captureLayoutSpace(document.documentElement)
-      const pointY = y => clientPointToLayout({ x: 0, y }, rootSpace).y
-      const deltaY = y => clientLengthToLayout(y, rootSpace)
-      const triggerTop = pointY(rect.top)
-      const triggerBottom = pointY(rect.bottom)
-      const viewportTop = deltaY(window.visualViewport?.offsetTop || 0)
-      const viewportHeight = deltaY(window.visualViewport?.height || 0)
-      const clipTop = pointY(nearestClipTop(trigger))
-      setMaxHeight(popoverMaxHeight({
-        triggerTop,
-        // `triggerBottom` + `viewportHeight` are not extra precision — they are
-        // how the helper tells which coordinate space `rect` is in. iOS reports
-        // fixed-layer rects against the VISUAL viewport once the keyboard
-        // offsets it, and subtracting `offsetTop` as well collapsed the panel
-        // to a 14px sliver. See composerPopoverHeight.js.
-        triggerBottom,
-        viewportTop,
-        viewportHeight,
-        clipTop,
-      }))
+      setMaxHeight(measurePopoverMaxHeight(trigger))
     }
     measure()
     // The keyboard animates in/out, and iOS scrolls the layout viewport during
@@ -301,13 +276,18 @@ export default function ComposerPopover({
     window.addEventListener('resize', measure)
     window.visualViewport?.addEventListener('resize', measure)
     window.visualViewport?.addEventListener('scroll', measure)
-    // The textarea can grow while this stays open. That moves the trigger
-    // upward without resizing either viewport, so observe the owning form too.
+    // Observe BOTH owners of the available room. The form can grow, while the
+    // chat pane can shrink without changing the form's size. In particular,
+    // useShellVisualViewport fits the shell on the next animation frame, after
+    // this viewport listener has measured the old layout. Observing only the
+    // form leaves the old cap in place and clips the panel's first controls.
     const resizeObserver = typeof ResizeObserver !== 'undefined'
       ? new ResizeObserver(measure)
       : null
     const form = triggerRef.current?.closest('.chat__form')
     if (form) resizeObserver?.observe(form)
+    const chat = triggerRef.current?.closest('.chat')
+    if (chat) resizeObserver?.observe(chat)
     return () => {
       window.removeEventListener('resize', measure)
       window.visualViewport?.removeEventListener('resize', measure)
