@@ -1327,3 +1327,34 @@ def test_local_people_uses_shared_directory_store(client, auth, db):
   }, headers=auth)
   assert response.status_code == 200, response.text
   assert response.json() == {"host": common_routes._own_host(), "users": []}
+
+
+def test_board_writes_and_canonical_host_route_to_community_host(client, auth, db, monkeypatch):
+  _install_common_app(db)
+  calls = []
+  async def remote(method, url, **kwargs):
+    calls.append((method, url))
+    result = {'status': 'posted'}
+    return httpx.Response(200, json=result, request=httpx.Request(method, url))
+  monkeypatch.setattr(common_routes, 'federation_request', remote)
+
+  # publish with community_host param
+  pub = client.post('/api/common/publish?community_host=global.example.com', json={'text': 'remote post'}, headers=auth)
+  assert pub.status_code == 200, pub.text
+  assert ('POST', 'https://global.example.com/api/common/board') in calls
+
+  # like with community_host param
+  post_id = str(uuid.uuid4())
+  like = client.post('/api/common/like?community_host=global.example.com', json={'post_id': post_id}, headers=auth)
+  assert like.status_code == 200, like.text
+  assert ('POST', 'https://global.example.com/api/common/board/react') in calls
+
+  # reply with community_host param
+  reply = client.post('/api/common/reply?community_host=global.example.com', json={'post_id': post_id, 'text': 'reply'}, headers=auth)
+  assert reply.status_code == 200, reply.text
+  assert ('POST', 'https://global.example.com/api/common/board/reply') in calls
+
+  # canonical host logic: for external deployment, always resolves to the single global community host
+  monkeypatch.setattr(common_routes, '_own_host', lambda: 'peer-instance.railway.app')
+  assert common_routes._canonical_community_host() == common_routes.COMMUNITY_HOST
+  assert common_routes._canonical_community_host('peer-instance.railway.app') == common_routes.COMMUNITY_HOST
