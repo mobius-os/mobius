@@ -360,7 +360,15 @@ def _execute_job(
     job_state = DATA_DIR / "apps" / str(app_id) / "job-state"
     job_state.mkdir(parents=True, exist_ok=True)
     child_env["APP_JOB_STATE_DIR"] = str(job_state)
-    command = ["bash", str(runtime_job), str(app_id)]
+    # Accepted jobs are executable scripts, not necessarily shell programs
+    # (the App Store's update checker is Python). Honor their reviewed shebang;
+    # retain the Bash fallback for older installed jobs whose executable bit
+    # was not preserved by their source package.
+    command = (
+      [str(runtime_job), str(app_id)]
+      if os.access(runtime_job, os.X_OK)
+      else ["bash", str(runtime_job), str(app_id)]
+    )
     # Uninstall sends TERM to this entire process group. Keep the supervisor
     # alive to retain its lease while a TERM-ignoring child needs the existing
     # KILL fallback; exec resets the child's caught handler to the default.
