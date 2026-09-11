@@ -52,7 +52,7 @@ from app.frontend_assets import (
 from app.memory_observability import record_memory_checkpoint
 from app.runtime_provenance import protected_runtime_status
 from app.response_policy import (
-  CHAT_EMBED_CSP,
+  chat_embed_csp,
   PUBLISHED_SITE_CSP,
   absolute_csp_origin,
   app_frame_csp,
@@ -397,6 +397,7 @@ _ARTIFACT_OUTPUT_PATH = re.compile(
 # credential boundary: packaged code already executes in the opaque document,
 # and it still cannot reach the shell's localStorage, cookies, or owner token.
 _STATIC_EMBED_CSP = static_embed_csp(settings.frontend_origin)
+_CHAT_EMBED_CSP = chat_embed_csp(settings.frontend_origin)
 _SHELL_CSP = shell_csp(os.environ.get("MOBIUS_SERVICE_GATEWAY_ORIGIN", ""))
 _SERVICE_GATEWAY_ORIGIN = os.environ.get("MOBIUS_SERVICE_GATEWAY_ORIGIN", "")
 _BROWSER_API_ORIGIN = os.environ.get("API_BASE_URL", "")
@@ -552,7 +553,9 @@ class _SecurityHeadersMiddleware:
       elif published_site:
         csp = _PUBLISHED_SITE_CSP
       elif chat_embed:
-        csp = CHAT_EMBED_CSP
+        delivery_origin = _loopback_delivery_origin(scope)
+        csp = (chat_embed_csp(settings.frontend_origin, delivery_origin)
+               if delivery_origin else _CHAT_EMBED_CSP)
       elif app_frame:
         csp = _app_frame_csp_for_scope(scope)
       elif artifact_output:
