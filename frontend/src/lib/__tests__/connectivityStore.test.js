@@ -218,6 +218,31 @@ test('hidden verification defers without publishing a false Checking state', asy
   stop()
 })
 
+test('healthy verification keeps the last reachable verdict while its probe settles', async () => {
+  let resolveProbe
+  let probes = 0
+  const h = harness(() => {
+    probes += 1
+    if (probes === 1) return Promise.resolve({ status: 204 })
+    return new Promise(resolve => { resolveProbe = resolve })
+  })
+  let notifications = 0
+  const stop = h.store.subscribe(() => { notifications += 1 })
+  await flush()
+
+  const verification = h.store.verify()
+  assert.equal(probes, 2)
+  assert.equal(h.store.getPhaseSnapshot(), ReachabilityPhase.ONLINE,
+    'a transport reconnect is not a server outage verdict')
+  assert.equal(notifications, 0, 'the shell status dot must not flash before verification')
+
+  resolveProbe({ status: 204 })
+  assert.equal(await verification, true)
+  assert.equal(h.store.getPhaseSnapshot(), ReachabilityPhase.ONLINE)
+  assert.equal(notifications, 0)
+  stop()
+})
+
 test('foreground recovery does not wait for or accept a suspended probe', async () => {
   let probes = 0
   let rejectSuspended
@@ -232,7 +257,7 @@ test('foreground recovery does not wait for or accept a suspended probe', async 
   await flush()
 
   const suspended = h.store.verify()
-  assert.equal(h.store.getPhaseSnapshot(), ReachabilityPhase.CHECKING)
+  assert.equal(h.store.getPhaseSnapshot(), ReachabilityPhase.ONLINE)
   assert.equal(probes, 2)
 
   h.documentTarget.visibilityState = 'hidden'

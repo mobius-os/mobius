@@ -312,16 +312,19 @@ export function createConnectivityStore({
   }
 
   function verify() {
-    // Callers invoke verification only after transport evidence such as a
-    // failed request or an unexpected stream close. Surface that uncertainty
-    // immediately; the bounded probe owns the final reachability verdict.
+    // Callers invoke verification after transport evidence such as a failed
+    // request or an unexpected stream close. That evidence belongs to one
+    // transport, not necessarily to the server: keep the last reachable verdict
+    // while the bounded health probe decides. Publishing Checking before the
+    // probe made every healthy stream reconnect flash the shell status dot.
+    // A failed probe still enters Checking through applyProbe(), starts the
+    // failure grace window, and eventually confirms Offline.
     // A hidden tab is the exception: browsers intentionally suspend its
     // transports and timers, so defer to the monitor's foreground boundary
     // instead of publishing a false Checking state that can become stranded.
     if (documentTarget?.visibilityState === 'hidden') {
       return Promise.resolve(publicOnline(state))
     }
-    publish(reduceReachability(state, { type: 'checking' }))
     if (monitor) return monitor.check()
     if (standaloneCheck) return standaloneCheck
     const startedRevision = evidenceRevision
