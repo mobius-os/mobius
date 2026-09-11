@@ -311,6 +311,17 @@ def _reconcile_startup_chats(context: StartupContext) -> None:
     raise
 
 
+def _reconcile_agent_lifecycle(context: StartupContext) -> None:
+  from app.agent_lifecycle import reconcile_run_updates
+
+  with SessionLocal() as db:
+    repaired = reconcile_run_updates(db)
+  if repaired:
+    context.logger.info(
+      "repaired %d stale agent lifecycle run projection(s)", repaired,
+    )
+
+
 def _reap_staging_bundles(_context: StartupContext) -> None:
   from app.compiler import reap_staging_bundles
 
@@ -565,6 +576,7 @@ DATABASE_STARTUP_TASKS = (
     _reconcile_startup_chats,
     checkpoint="startup_state_reconciled",
   ),
+  StartupTask("reconcile agent lifecycle", _reconcile_agent_lifecycle),
   StartupTask("reap staging bundles", _reap_staging_bundles),
   StartupTask(
     "reconcile compiled bundles",
