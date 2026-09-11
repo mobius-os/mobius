@@ -11,10 +11,10 @@ export const PLACE_WITH_SOURCE = 'with-source'
 export const PLACE_WITH_FOCUS = 'with-focus'
 export const ACTIVATE_IN_BACKGROUND = 'background'
 export const ACTIVATE_FOREGROUND = 'foreground'
-// A live build preview is non-displacing on every device: it may reveal or
-// switch the app in a companion pane, but it never replaces the active tab in
-// the pane that owns keyboard focus. This is an internal lifecycle intent, not
-// an `open_item` wire value.
+// A live build preview is non-displacing on every device. Larger screens may
+// reveal or switch it in an unfocused companion pane; phones only park it until
+// the owner taps the preview CTA. This is an internal lifecycle intent, not an
+// `open_item` wire value.
 export const ACTIVATE_LIVE_PREVIEW = 'live-preview'
 
 const PLACEMENTS = new Set([PLACE_BESIDE_SOURCE, PLACE_WITH_SOURCE, PLACE_WITH_FOCUS])
@@ -286,22 +286,45 @@ export function resolveWorkspaceRequest(ws, request, env = {}) {
     && tabKey(ws.singleScreen) === sourceKey
   )
 
-  // A preview may enter Builder when the owner is already looking at its source:
-  // the source remains the foreground surface and the app can bloom beside it.
-  // If the owner has moved elsewhere in Standard, keep that surface untouched
-  // and park the preview in the hidden Builder tree for an explicit later open.
+  // A preview may enter Builder on a larger screen when the owner is already
+  // looking at its source: the source remains foreground and the app can bloom
+  // beside it. Phones never leave Standard for an unsolicited preview; the CTA
+  // is the explicit open affordance there. If the owner has moved elsewhere in
+  // Standard, keep that surface untouched on every device and park the preview.
   let working = (
     preview
+    && mode !== 'phone'
     && (world === 'panes' || singleShowsSource)
   )
     ? paneModel.setViewMode(ws, 'panes')
     : ws
-  const itemKey = tabKey(item)
 
   // Keep the relational source in the Builder tree, but never surface it over
   // another active tab. The one safe activation is Standard → Builder while
   // Standard already shows that exact source, preserving what the owner sees.
+  const itemKey = tabKey(item)
   let sourcePane = source ? paneModel.paneOf(working, tabKey(source)) : null
+
+  // A phone preview is only an availability signal. Keep Standard/Builder mode,
+  // pane geometry, the active surface, and focus exactly as the owner left them;
+  // merely park a new app beside its source so the visible CTA can open it on an
+  // explicit tap. An already-known app needs no workspace mutation because its
+  // mounted frame will live-swap independently when visible.
+  if (preview && mode === 'phone') {
+    if (paneModel.paneOf(working, itemKey)) return working
+    if (source && sourcePane) {
+      return insertBesideSource(working, item, sourcePane, source, {
+        activate: false,
+        focus: false,
+      })
+    }
+    return paneModel.openTab(working, item, {
+      paneId: working.focusedPaneId,
+      activate: false,
+      focus: false,
+    })
+  }
+
   if (preview && source) {
     if (!sourcePane) {
       working = paneModel.openTab(working, source, {
@@ -377,10 +400,9 @@ export function resolveWorkspaceRequest(ws, request, env = {}) {
   }
 
   // beside-source, the device-aware table.
-  if (mode === 'phone' && !preview) {
-    // Generic phone placements keep their existing tab-stack behavior. A live
-    // preview continues into the companion/split ladder below so it can become
-    // visible without replacing the focused chat.
+  if (mode === 'phone') {
+    // Generic phone placements keep their tab-stack behavior. Live previews
+    // returned through the passive phone branch above.
     return insertBesideSource(working, item, sourcePane, source, {
       activate: activateItem,
       focus: focusItem,
