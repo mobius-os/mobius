@@ -56,7 +56,10 @@ BOOTSTRAP_MEMORY_MANIFEST_URL = (
 BOOTSTRAP_REFLECTION_MANIFEST_URL = (
   "https://raw.githubusercontent.com/mobius-os/app-reflection/main/mobius.json"
 )
-BOOTSTRAP_CONNECTIONS_MANIFEST_URL = (
+BOOTSTRAP_INTEGRATIONS_MANIFEST_URL = (
+  "https://raw.githubusercontent.com/mobius-os/app-integrations/main/mobius.json"
+)
+BOOTSTRAP_INTEGRATIONS_PREDECESSOR_MANIFEST_URL = (
   "https://raw.githubusercontent.com/mobius-os/app-connections/main/mobius.json"
 )
 BOOTSTRAP_IDENTITY_MANIFEST_URL = (
@@ -91,6 +94,8 @@ class _BootstrapApp:
   manifest_id: str
   manifest_url: str
   reinstall_after_uninstall: bool
+  predecessor_manifest_id: str | None = None
+  predecessor_manifest_url: str | None = None
 
 
 _CORE_BOOTSTRAP_APPS = (
@@ -102,12 +107,15 @@ _CORE_BOOTSTRAP_APPS = (
   _BootstrapApp(
     "reflection", BOOTSTRAP_REFLECTION_MANIFEST_URL, False,
   ),
-  # Integrations (internal package id `connections`) manages owner MCP
-  # connections — the only management surface since the Settings section moved
-  # into the app. An owner uninstall is respected; the Store remains the way
-  # back.
+  # Integrations is the only management surface for owner MCP integrations
+  # since the Settings section moved into the app. Its explicit predecessor
+  # lets active installs migrate while an owner uninstall remains respected.
   _BootstrapApp(
-    "connections", BOOTSTRAP_CONNECTIONS_MANIFEST_URL, False,
+    "integrations", BOOTSTRAP_INTEGRATIONS_MANIFEST_URL, False,
+    predecessor_manifest_id="connections",
+    predecessor_manifest_url=(
+      BOOTSTRAP_INTEGRATIONS_PREDECESSOR_MANIFEST_URL
+    ),
   ),
   # Möbius · You is useful on every new deployment. Managed owners arrive
   # signed in; local owners see the same app with account linking optional.
@@ -207,10 +215,28 @@ async def ensure_bootstrap_apps_installed(db: Session) -> None:
       source_url=bootstrap_app.manifest_url,
       manifest_id=bootstrap_app.manifest_id,
     )
+    predecessor = None
+    if (
+      existing is None
+      and bootstrap_app.predecessor_manifest_id
+      and bootstrap_app.predecessor_manifest_url
+    ):
+      predecessor = _find_install_identity_row(
+        db,
+        source_url=bootstrap_app.predecessor_manifest_url,
+        manifest_id=bootstrap_app.predecessor_manifest_id,
+      )
     existing_id = existing.id if existing is not None else None
-    already_installed = existing is not None and (
-      existing.deleted_at is None
-      or not bootstrap_app.reinstall_after_uninstall
+    already_installed = (
+      existing is not None
+      and (
+        existing.deleted_at is None
+        or not bootstrap_app.reinstall_after_uninstall
+      )
+    ) or (
+      predecessor is not None
+      and predecessor.deleted_at is not None
+      and not bootstrap_app.reinstall_after_uninstall
     )
     # The identity query autobegins a read transaction. Do not retain its
     # connection while the installer performs serial network fetches and

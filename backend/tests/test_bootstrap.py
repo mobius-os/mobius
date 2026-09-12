@@ -13,8 +13,9 @@ from fastapi import HTTPException
 
 from app import app_git, bootstrap, models
 from app.bootstrap import (
-  BOOTSTRAP_CONNECTIONS_MANIFEST_URL,
   BOOTSTRAP_IDENTITY_MANIFEST_URL,
+  BOOTSTRAP_INTEGRATIONS_MANIFEST_URL,
+  BOOTSTRAP_INTEGRATIONS_PREDECESSOR_MANIFEST_URL,
   BOOTSTRAP_MEMORY_MANIFEST_URL,
   BOOTSTRAP_REFLECTION_MANIFEST_URL,
   BOOTSTRAP_SKILLS_MANIFEST_URL,
@@ -49,7 +50,7 @@ def _bootstrap_urls():
     BOOTSTRAP_SKILLS_MANIFEST_URL,
     BOOTSTRAP_MEMORY_MANIFEST_URL,
     BOOTSTRAP_REFLECTION_MANIFEST_URL,
-    BOOTSTRAP_CONNECTIONS_MANIFEST_URL,
+    BOOTSTRAP_INTEGRATIONS_MANIFEST_URL,
     BOOTSTRAP_IDENTITY_MANIFEST_URL,
   ]
 
@@ -90,7 +91,7 @@ def _installed_default_rows(created_at, *, deleted=()):
     ("skills", "Skills", BOOTSTRAP_SKILLS_MANIFEST_URL),
     ("memory", "Memory", BOOTSTRAP_MEMORY_MANIFEST_URL),
     ("reflection", "Reflection", BOOTSTRAP_REFLECTION_MANIFEST_URL),
-    ("connections", "Integrations", BOOTSTRAP_CONNECTIONS_MANIFEST_URL),
+    ("integrations", "Integrations", BOOTSTRAP_INTEGRATIONS_MANIFEST_URL),
     ("identity", "Möbius · You", BOOTSTRAP_IDENTITY_MANIFEST_URL),
   )
   deleted_at = datetime.now(timezone.utc)
@@ -371,13 +372,13 @@ async def test_bootstrap_applies_per_app_uninstall_policy(db, monkeypatch):
       ),
     ),
     models.App(
-      source_dir="/tmp/mobius-tests/connections",
-      name="Connections",
+      source_dir="/tmp/mobius-tests/integrations",
+      name="Integrations",
       description="owner uninstalled",
       jsx_source="export default function App() {}",
-      slug="connections",
+      slug="integrations",
       manifest_url=_canonical_identity_key(
-        BOOTSTRAP_CONNECTIONS_MANIFEST_URL, "connections",
+        BOOTSTRAP_INTEGRATIONS_MANIFEST_URL, "integrations",
       ),
       deleted_at=deleted_at,
     ),
@@ -465,13 +466,13 @@ async def test_bootstrap_skips_live_apps_by_canonical_manifest(db, monkeypatch):
       ),
     ),
     models.App(
-      source_dir="/tmp/mobius-tests/connections-custom",
-      name="Connections",
+      source_dir="/tmp/mobius-tests/integrations-custom",
+      name="Integrations",
       description="already here",
       jsx_source="export default function App() {}",
-      slug="connections-custom",
+      slug="integrations-custom",
       manifest_url=_canonical_identity_key(
-        BOOTSTRAP_CONNECTIONS_MANIFEST_URL, "connections",
+        BOOTSTRAP_INTEGRATIONS_MANIFEST_URL, "integrations",
       ),
     ),
     models.App(
@@ -500,6 +501,78 @@ async def test_bootstrap_skips_live_apps_by_canonical_manifest(db, monkeypatch):
   install_mock = AsyncMock()
   with patch("app.bootstrap.install_from_manifest", install_mock):
     await ensure_bootstrap_apps_installed(db)
+  install_mock.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_migrates_live_integrations_predecessor(db, monkeypatch):
+  """An active Connections install is offered the canonical Integrations app."""
+  monkeypatch.delenv("MOEBIUS_SKIP_BOOTSTRAP", raising=False)
+  from app.install import _canonical_identity_key
+
+  created_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+  rows = [
+    row for row in _installed_default_rows(created_at)
+    if row.slug != "integrations"
+  ]
+  rows.append(models.App(
+    source_dir="/tmp/mobius-tests/connections",
+    name="Integrations",
+    description="predecessor package",
+    jsx_source="export default function App() {}",
+    slug="connections",
+    manifest_url=_canonical_identity_key(
+      BOOTSTRAP_INTEGRATIONS_PREDECESSOR_MANIFEST_URL, "connections",
+    ),
+    created_at=created_at,
+  ))
+  db.add_all(rows)
+  db.commit()
+
+  install_mock = AsyncMock(
+    return_value=_install_result("Integrations", "integrations", app_id=5),
+  )
+  with patch("app.bootstrap.install_from_manifest", install_mock):
+    await ensure_bootstrap_apps_installed(db)
+
+  install_mock.assert_awaited_once()
+  assert install_mock.await_args.kwargs["manifest_url"] == (
+    BOOTSTRAP_INTEGRATIONS_MANIFEST_URL
+  )
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_preserves_uninstalled_integrations_predecessor(
+  db, monkeypatch,
+):
+  """A package rename never resurrects a deliberately removed default app."""
+  monkeypatch.delenv("MOEBIUS_SKIP_BOOTSTRAP", raising=False)
+  from app.install import _canonical_identity_key
+
+  created_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+  rows = [
+    row for row in _installed_default_rows(created_at)
+    if row.slug != "integrations"
+  ]
+  rows.append(models.App(
+    source_dir="/tmp/mobius-tests/connections",
+    name="Integrations",
+    description="owner uninstalled predecessor",
+    jsx_source="export default function App() {}",
+    slug="connections",
+    manifest_url=_canonical_identity_key(
+      BOOTSTRAP_INTEGRATIONS_PREDECESSOR_MANIFEST_URL, "connections",
+    ),
+    created_at=created_at,
+    deleted_at=datetime.now(timezone.utc),
+  ))
+  db.add_all(rows)
+  db.commit()
+
+  install_mock = AsyncMock()
+  with patch("app.bootstrap.install_from_manifest", install_mock):
+    await ensure_bootstrap_apps_installed(db)
+
   install_mock.assert_not_awaited()
 
 
@@ -541,7 +614,7 @@ async def test_bootstrap_failure_doesnt_block_remaining_apps(
     _install_result("Skills", "skills", app_id=4),
     _install_result("Memory", "memory", app_id=2),
     _install_result("Reflection", "reflection", app_id=3),
-    _install_result("Integrations", "connections", app_id=5),
+    _install_result("Integrations", "integrations", app_id=5),
     _install_result("Möbius · You", "identity", app_id=6),
     _install_result("Social", "common", app_id=7),
   ])
