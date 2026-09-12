@@ -1,11 +1,12 @@
-"""Typed, platform-owned Restart cards and loaded-source activation proof.
+"""Typed, platform-owned Restart cards and post-restart continuation.
 
 The action is deliberately narrower than a generic approval executor.  A card
 binds one source boot to the exact committed bytes that a server restart can
-load.  Its activation wait is satisfied only by a later, ready boot whose
-captured platform tree has those bytes (including explicit absence for deleted
-paths).  A durable execution claim precedes the restart side effect and is
-never replayed after an ambiguous process death.
+load so a stale card cannot dispatch after its source changes.  Once any later
+ready boot occurs, every linked chat resumes and verifies its own work; the
+waiter does not duplicate that judgment with file-version checks.  A durable
+execution claim precedes the restart side effect and is never replayed after an
+ambiguous process death.
 """
 
 from __future__ import annotations
@@ -20,7 +21,6 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app import models
-from app.boot_source import supported_restart_path as _supported_restart_path
 from app.timeutil import now_naive_utc
 
 
@@ -30,10 +30,20 @@ REQUIREMENT_VERSION = 1
 # If even failure-settlement persistence fails, the existing wait supervisor
 # closes that handoff after two minutes; it never retries the restart itself.
 RESTART_HANDOFF_DEADLINE_SECONDS = 120
+RESTART_SOURCE_PATHS = (
+  "backend/app",
+  "backend/runtime/identity_broker.py",
+  "backend/scripts/pm-commit",
+  "skill/core.md",
+)
 
 
 class RestartRequirementError(RuntimeError):
   """The current source cannot be represented by one safe restart card."""
+
+
+def _supported_restart_path(path: str) -> bool:
+  return path in RESTART_SOURCE_PATHS[1:] or path.startswith("backend/app/")
 
 
 def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
@@ -116,7 +126,7 @@ def build_restart_requirement(repo: Path | None = None) -> dict:
 
   dirty = _git(
     repo, "status", "--porcelain", "--untracked-files=all", "--",
-    "backend/app", "backend/scripts/pm-commit", "skill/core.md",
+    *RESTART_SOURCE_PATHS,
   )
   if dirty.returncode != 0 or dirty.stdout.strip():
     raise RestartRequirementError("restart_source_must_be_committed")
@@ -175,37 +185,17 @@ def requirement_matches_current_source(requirement: object) -> bool:
   return current == requirement
 
 
-def requirement_matches_snapshot(requirement: object, snapshot) -> bool:
-  if not isinstance(requirement, dict) or snapshot is None:
-    return False
-  expected = requirement.get("files")
-  loaded = snapshot.loaded_files_json
-  return bool(
-    snapshot.service_ready
-    and snapshot.source_kind == "platform"
-    and snapshot.boot_id != requirement.get("source_boot_id")
-    and isinstance(expected, dict)
-    and isinstance(loaded, dict)
-    and all(loaded.get(path) == value for path, value in expected.items())
-  )
-
-
 def activation_wait_verdict(
   db: Session, row: models.ChatWait,
 ) -> tuple[Literal["met", "pending", "failed"], str]:
-  """Evaluate one typed wait only from a later immutable boot snapshot."""
+  """Wake one typed Restart wait after any later ready boot."""
   requirement = row.condition_json
   if (
     not isinstance(requirement, dict)
     or requirement.get("version") != REQUIREMENT_VERSION
-    or not isinstance(requirement.get("files"), dict)
     or not requirement.get("source_boot_id")
     or not isinstance(requirement.get("action_id"), str)
     or not requirement["action_id"].startswith("platform-restart:")
-    or any(
-      not isinstance(path, str) or not _supported_restart_path(path)
-      for path in requirement["files"]
-    )
   ):
     return "failed", "The saved activation requirement is invalid."
   execution = db.get(
@@ -230,40 +220,28 @@ def activation_wait_verdict(
     from app import restart_ledger
     if execution.source_boot_id == restart_ledger.current_boot_id():
       return "failed", "The Restart response ended before dispatch could be confirmed. No action was replayed."
-  snapshots = (
+  ready_boot = (
     db.query(models.PlatformBootSnapshot)
     .filter(models.PlatformBootSnapshot.captured_at >= row.created_at)
     .filter(
       models.PlatformBootSnapshot.boot_id != requirement["source_boot_id"],
     )
+    .filter(models.PlatformBootSnapshot.service_ready.is_(True))
     .order_by(models.PlatformBootSnapshot.captured_at.desc())
-    .all()
+    .first()
   )
-  if not snapshots:
+  if ready_boot is None:
     return "pending", ""
-  latest = snapshots[0]
-  if requirement_matches_snapshot(requirement, latest):
-    return "met", "Required committed source bytes are loaded and ready."
-  if latest.service_ready:
-    if execution is not None and execution.status == "uncertain":
-      if latest.source_kind != "platform":
-        return "failed", "The dispatched restart reached a baked fallback boot."
-      return "failed", "The dispatched restart did not load the approved source bytes."
-    # A Settings/other-card restart for different changes is not evidence that
-    # this independent wait failed. Keep it armed for a later matching boot.
-    return "pending", ""
-  return "pending", ""
+  return "met", "A later ready Möbius boot was observed."
 
 
 def capture_ready_boot_snapshot(
-  db: Session, *, boot_id: str, repo: Path | None = None,
+  db: Session, *, boot_id: str,
 ) -> models.PlatformBootSnapshot:
-  """Capture one post-migration, post-writer source proof for all waiters."""
+  """Capture one post-migration, post-writer restart receipt for all waiters."""
   from app import platform_update
   from app.main import service_readiness
-  from app.boot_source import BOOT_SOURCE_INPUTS
 
-  repo = repo or platform_update.PLATFORM_REPO
   source_kind = "unknown"
   source_sha = None
   try:
@@ -281,41 +259,10 @@ def capture_ready_boot_snapshot(
   database_ready = db.execute(text("SELECT 1")).scalar() == 1
   service_ready = bool(database_ready and ready)
 
-  waits = (
-    db.query(models.ChatWait)
-    .filter(models.ChatWait.kind == ACTIVATION_WAIT_KIND)
-    .filter(models.ChatWait.status.in_(("armed", "met", "expired", "failed")))
-    .filter(models.ChatWait.resume_delivered_at.is_(None))
-    .all()
-  )
   unsettled_executions = db.query(models.PlatformRestartExecution).filter(
     models.PlatformRestartExecution.status.in_(("claimed", "admitted")),
     models.PlatformRestartExecution.source_boot_id != boot_id,
   ).all()
-  paths = sorted({
-    path
-    for wait in waits
-    if isinstance(wait.condition_json, dict)
-    for path in (wait.condition_json.get("files") or {})
-    if isinstance(path, str) and _supported_restart_path(path)
-  } | {
-    path
-    for execution in unsettled_executions
-    if isinstance(execution.requirement_json, dict)
-    for path in (execution.requirement_json.get("files") or {})
-    if isinstance(path, str) and _supported_restart_path(path)
-  })
-  loaded = {}
-  if source_kind == "platform" and source_sha and paths:
-    try:
-      if (
-        BOOT_SOURCE_INPUTS.source_kind != source_kind
-        or BOOT_SOURCE_INPUTS.source_sha != source_sha
-      ):
-        raise ValueError("boot_source_identity_changed")
-      loaded = BOOT_SOURCE_INPUTS.unchanged_manifest(repo, paths)
-    except (ValueError, OSError):
-      service_ready = False
 
   snapshot = db.get(models.PlatformBootSnapshot, boot_id)
   if snapshot is not None:
@@ -324,15 +271,18 @@ def capture_ready_boot_snapshot(
   db.add(snapshot)
   snapshot.source_kind = source_kind
   snapshot.source_sha = source_sha
-  snapshot.loaded_files_json = loaded
+  # Kept for the existing durable schema and historical audit rows. Restart
+  # continuation deliberately does not duplicate the resumed agent's source
+  # verification by storing or comparing a per-wait file manifest.
+  snapshot.loaded_files_json = {}
   snapshot.service_ready = service_ready
   snapshot.captured_at = now_naive_utc()
 
   # A prior claim is evidence that one dispatch may already have happened. A
-  # later boot settles it from source proof or labels it uncertain; neither
-  # branch replays the side effect.
+  # later ready boot settles that one-shot action; neither branch replays it.
+  # Whether the intended change loaded belongs to the resumed agent.
   for execution in unsettled_executions:
-    if requirement_matches_snapshot(execution.requirement_json, snapshot):
+    if snapshot.service_ready:
       execution.status = "activated"
       execution.activated_boot_id = boot_id
     else:
@@ -433,14 +383,23 @@ def admit_execution_if_current(action_id: str) -> bool:
     return current
 
 
-def activation_barrier_for_chat(db: Session, chat_id: str) -> bool:
-  """Whether A still owns the chat ahead of every queued B."""
-  return db.query(models.ChatWait.id).filter(
+def activation_barrier_wait_id(db: Session, chat_id: str) -> str | None:
+  """Return the approved restart wait that still owns chat admission.
+
+  A deferred card keeps its activation monitor armed so a later ready boot
+  can resume the interrupted Goal, but no restart is in flight and the owner
+  must remain free to continue chatting.  ``action_approved_at`` is the durable
+  distinction between that passive monitor and a restart the owner actually
+  asked Möbius to execute.
+  """
+  row = db.query(models.ChatWait.id).filter(
     models.ChatWait.chat_id == chat_id,
     models.ChatWait.kind == ACTIVATION_WAIT_KIND,
     models.ChatWait.status.in_(("armed", "met", "expired", "failed")),
+    models.ChatWait.action_approved_at.isnot(None),
     models.ChatWait.resume_delivered_at.is_(None),
-  ).first() is not None
+  ).first()
+  return row[0] if row is not None else None
 
 
 def restart_action_block(chat, question_id: str | None) -> dict | None:
@@ -474,9 +433,9 @@ def activation_notice(row: models.ChatWait, outcome: str) -> str:
   }, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
   if outcome == "met":
     lead = (
-      "Möbius verified that the exact committed platform source required by "
-      "this work is loaded in a ready server. Continue the interrupted work "
-      "before handling later queued owner messages."
+      "Möbius restarted and reached a ready server. Continue the interrupted "
+      "work now, verify whether its changes are active, then handle later "
+      "queued owner messages."
     )
   else:
     lead = (

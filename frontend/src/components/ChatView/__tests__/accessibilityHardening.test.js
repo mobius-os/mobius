@@ -119,7 +119,7 @@ test('a restored image with no media token stops spinning and exposes its failur
 test('QuestionCard gives the custom answer area a durable accessible name', () => {
   const source = read('../QuestionCard.jsx')
   assert.match(source, /aria-label=\{`Custom answer for: \$\{question\}`\}/)
-  assert.match(source, /placeholder=\{answered \? 'No custom answer' : 'Or type your own answer…'\}/)
+  assert.match(source, /placeholder=\{answered \? 'No custom answer' : \(placeholder \|\| 'Or type your own answer…'\)\}/)
 })
 
 test('context compaction is a provider-neutral accessible timeline marker', () => {

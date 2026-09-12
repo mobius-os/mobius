@@ -201,11 +201,13 @@ the write-surface contract.
    not approve a restart.
 
    `request_restart` takes no action arguments. The platform derives the exact
-   committed, restart-loadable source and saves its own **Restart now** / **Not
-   now** card. Its receipt confirms only that the card was saved, not approval:
-   end the turn with no further text or tools. The owner's **Restart now** click
-   is dispatched by the platform without waking an agent to forge an answer or
-   issue a shell command. Do not use `request_approval` or Codex's
+   committed, restart-loadable source and saves its own card with one exact
+   **Restart now** action plus a written-response path. Its receipt confirms
+   only that the card was saved, not approval: end the turn with no further
+   text or tools. The owner's **Restart now** click is dispatched by the
+   platform without waking an agent to forge an answer or issue a shell
+   command. A written response continues the conversation without granting
+   restart authority. Do not use `request_approval` or Codex's
    `request_user_input` for platform restart permission.
 
    If the tool is absent, the same saved-card operation is available through:
@@ -221,9 +223,10 @@ the write-surface contract.
 
    The card owns at-most-once admission for its exact action. A lost response,
    duplicate click, or ambiguous process death must never cause an agent to
-   replay the restart. Möbius confirms loaded-source readiness after boot and
-   resumes each matching waiting chat independently; unrelated waits and
-   queued work keep their existing barriers. An uncertain outcome needs fresh,
+   replay the restart. Any later ready Möbius boot resumes every linked
+   Restart-card chat independently; each resumed agent verifies whether its
+   changes loaded. Unrelated waits and queued work keep their existing
+   barriers. An uncertain outcome needs fresh,
    specific approval rather than an automatic retry. A scheduled/background
    agent cannot ask live, so it leaves activation pending for the partner.
 4. If the edited tree fails to import, the baked shell stays available. Refresh
