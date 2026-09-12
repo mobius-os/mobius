@@ -704,7 +704,7 @@ test.describe('SSE streaming (real React path)', () => {
     await expect(tool.locator('.chat__tool-spin')).toHaveCount(0)
   })
 
-  test('16b. Near-foot activity taps follow deterministically while live descendants churn', async ({ page }) => {
+  test('16b. Near-foot activity expansion holds its header while descendants churn', async ({ page }) => {
     const events = [
       { type: 'catch_up_done' },
       // Put the final activity disclosure close to the viewport foot once the
@@ -755,11 +755,11 @@ test.describe('SSE streaming (real React path)', () => {
     expect(before.relativeTop).toBeGreaterThan(before.viewport * 0.55)
     expect(before.relativeTop).toBeLessThan(before.viewport - 20)
 
-    // Simulate status/output churn inside an open live activity timeline. In
-    // FOLLOW_BOTTOM, the scroll controller remains the sole authority: opening
-    // follows the taller real-content tail and closing returns to the prior
-    // tail. Repeated equal states must land identically despite descendant
-    // mutations; that is the autoscroll half of the idempotent-toggle contract.
+    // Simulate status/output churn inside an open live activity timeline.
+    // Expansion deliberately leaves FOLLOW_BOTTOM and freezes the chosen
+    // header. Repeated opens and closes must keep that same screen coordinate;
+    // an open body grows below it instead of dragging the viewport to the new
+    // tail, while collapse naturally restores the old physical tail.
     await page.evaluate(() => {
       window.__disclosureChurn = setInterval(() => {
         const timeline = [...document.querySelectorAll('[data-chat-surface="painted"] .chat__activity-timeline')].at(-1)
@@ -772,7 +772,6 @@ test.describe('SSE streaming (real React path)', () => {
     })
 
     try {
-      let openTop = null
       for (let i = 0; i < 10; i++) {
         await header.click()
         await page.evaluate(() => new Promise(r =>
@@ -785,16 +784,14 @@ test.describe('SSE streaming (real React path)', () => {
             gap: s.scrollHeight - s.scrollTop - s.clientHeight,
           }
         })
-        expect(after.gap, `toggle ${i + 1} left the tail`).toBeLessThanOrEqual(4)
+        expect(Math.abs(after.top - before.top), `toggle ${i + 1} moved the header`)
+          .toBeLessThanOrEqual(2)
         if (i % 2 === 0) {
-          if (openTop == null) {
-            openTop = after.top
-            expect(openTop).toBeLessThan(before.top - 20)
-          } else {
-            expect(Math.abs(after.top - openTop), `open ${i + 1} drift`).toBeLessThanOrEqual(2)
-          }
+          expect(after.gap, `open ${i + 1} followed the enlarged tail`)
+            .toBeGreaterThan(20)
         } else {
-          expect(Math.abs(after.top - before.top), `closed ${i + 1} drift`).toBeLessThanOrEqual(2)
+          expect(after.gap, `close ${i + 1} did not restore the prior tail`)
+            .toBeLessThanOrEqual(4)
         }
       }
     } finally {

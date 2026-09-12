@@ -393,19 +393,21 @@ export function nestedReaderTargetOwnsInput({
  * scroll event. Snapshotting the current message anchor before its body changes
  * prevents a stale FOLLOW_BOTTOM mode from replaying after pointerup and
  * dragging a near-foot activity header down into the newly-opened timeline. */
-export function readerInputActivatesDisclosure(
+export function readerInputDisclosureTarget(
   type,
   key = '',
   target = null,
   pointerButton = 0,
 ) {
+  const activates = (type === 'pointerdown' && pointerButton === 0)
+    || type === 'touchstart'
+    || type === 'click'
+    || (type === 'keydown' && ['Enter', ' ', 'Spacebar'].includes(key))
+  if (!activates) return null
   const disclosure = target?.closest?.(
     'button.chat__activity-header, button.chat__activity-think-toggle, button.chat__tool-header, button.chat__marker-header',
   )
-  if (!disclosure) return false
-  return (type === 'pointerdown' && pointerButton === 0)
-    || type === 'touchstart'
-    || (type === 'keydown' && ['Enter', ' ', 'Spacebar'].includes(key))
+  return disclosure || null
 }
 
 
@@ -494,12 +496,26 @@ export function modeForChatExit(scrollEl) {
 
 
 /** A disclosure toggle obeys the existing reading mode instead of inventing a
- * second scroll policy. FOLLOW_BOTTOM stays live and follows the resized tail;
- * every non-follow mode freezes the exact visible message anchor before the
- * disclosure changes height. Repeating the same toggle therefore has the same
- * result until the reader explicitly changes scroll mode. */
-export function modeForDisclosureToggle(scrollEl, currentMode) {
-  if (currentMode?.kind === 'FOLLOW_BOTTOM') return currentMode
+ * second scroll policy. Collapse stays in FOLLOW_BOTTOM because removing
+ * detail does not reveal a new reading location. Expansion is a reading
+ * action: freeze the exact tapped header before its body changes height, even
+ * from FOLLOW_BOTTOM, so an older long block cannot pull the reader to the
+ * newly enlarged tail. Other modes always freeze their current anchor; the R1
+ * reservation remains the same pure geometry calculation in every mode. */
+export function modeForDisclosureToggle(
+  scrollEl,
+  currentMode,
+  { target = null, nextOpen = false } = {},
+) {
+  if (currentMode?.kind === 'FOLLOW_BOTTOM') {
+    if (!nextOpen) return currentMode
+    const disclosure = target?.closest?.(
+      'button.chat__activity-header, button.chat__activity-think-toggle, button.chat__tool-header, button.chat__marker-header',
+    )
+    return anchorModeForElement(scrollEl, disclosure)
+      || anchorModeFromScroll(scrollEl)
+      || currentMode
+  }
   return anchorModeFromScroll(scrollEl) || currentMode
 }
 

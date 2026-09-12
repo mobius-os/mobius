@@ -47,6 +47,15 @@ test('tool call labels participate in native transcript text selection', () => {
   )
 })
 
+test('tool output owns a bounded internal scroller', () => {
+  const start = chatCss.search(/(?:^|\n)\.chat__tool-detail \{/)
+  assert.ok(start >= 0, 'the generic output preview has one bounded rule')
+  const rule = chatCss.slice(start, chatCss.indexOf('}', start) + 1)
+  assert.match(rule, /max-height:\s*200px/)
+  assert.match(rule, /overflow-y:\s*auto/,
+    'tool output must stay inspectable inside its own bounded surface')
+})
+
 test('tool detail is a third nested level with labeled command and output', () => {
   assert.match(toolBlock, /\{isShell \? 'Command' : 'Input'\}/)
   assert.match(toolBlock, /\{isShell \? 'Output' : 'Result'\}/)

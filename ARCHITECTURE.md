@@ -582,7 +582,7 @@ installing Möbius.
 
 ## Chat scroll + steer contract
 
-**Owner-authoritative contract — v1.25 (2026-08-24).** This section is the
+**Owner-authoritative contract — v1.26 (2026-09-12).** This section is the
 canonical source of truth for how a chat scrolls and steers. When implementation,
 comments, and this contract disagree, the implementation/comments are the bug:
 fix behavior to match this contract. If a real case is unspecified or the desired
@@ -621,6 +621,10 @@ and attaches their rule ids to new diagnostic chats. The Playwright lock-in spec
   scroll box, now-hidden blank room is removed from the spacer first. In
   `FOLLOW_BOTTOM` this keeps the visible content fixed while room remains; after
   the spacer reaches zero, only the overflow that no longer fits moves upward.
+  Growth wholly above the latest user row moves that row and the list together,
+  so the formula and the reservation are unchanged; no layout pass may retire
+  or restore room on its own, because any later pass recomputes the same
+  formula and a one-off exception reappears as blank space at the tail.
   A `PIN_USER_MSG` has one reachability exception: while the box is narrowed by
   a same-width software keyboard, it reserves against the largest same-width
   scroll box already observed. Closing the keyboard therefore cannot clamp the
@@ -902,6 +906,7 @@ path means routing it through the same entries rather than inventing another rul
 | Later send submitted anywhere else | hold or stale follow | `ANCHOR_AT`/existing hold | None |
 | Reader reaches or explicitly swipes toward physical bottom | any | `FOLLOW_BOTTOM` | User-owned; follow the one physical tail, including remaining reservation |
 | Composer press or edit begins at physical bottom | any hold | `FOLLOW_BOTTOM` | No immediate write; the next owned layout follows the existing physical tail |
+| Disclosure expands | any hold, including follow | `ANCHOR_AT` at the tapped header | Freeze the chosen header so the screen does not move; the R1 reservation is left exactly as the formula computes it. Collapse keeps the existing mode |
 | Reader scrolls manually away from bottom | any | `ANCHOR_AT` | User-owned |
 | Reply grows while an armed live pin still has reserved room | pin hold | same pin hold | Keep prompt fixed |
 | Streaming reply consumes the armed pin reservation | pin hold | `FOLLOW_BOTTOM` | Follow physical tail |

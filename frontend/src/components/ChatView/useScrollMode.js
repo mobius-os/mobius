@@ -114,7 +114,7 @@ import {
   modeForQueuedSubmission,
   modeForScrollTransition,
   nestedReaderTargetOwnsInput,
-  readerInputActivatesDisclosure,
+  readerInputDisclosureTarget,
   readerInputClaimsPhysicalTail,
   readerInputEscapeDirection,
   readerInputMayScroll,
@@ -1172,6 +1172,11 @@ export default function useScrollMode({
         scrollEl, listEl, lastUserEl, modeRef.current,
         { pinViewportHeight: observedScrollViewportRef.current.pinHeight },
       )
+      // The reservation is a pure function of tail geometry (R1). Growth above
+      // the latest user row moves that row and the list together, so the
+      // formula keeps the same room; an earlier "retire it for one pass" patch
+      // made every later layout pass restore that room, which read as blank
+      // space appearing below the chat after a disclosure.
       spacerEl.style.height = `${h}px`
       // A wheel/touch/key gesture begins before the browser emits its first
       // scroll event. Do not let spacer geometry perform pin→follow in that
@@ -1752,12 +1757,13 @@ export default function useScrollMode({
       persistMode()
     }
     const onUserInput = (event) => {
-      const activatesDisclosure = readerInputActivatesDisclosure(
+      const disclosureTarget = readerInputDisclosureTarget(
         event?.type,
         event?.key,
         event?.target,
         event?.button,
       )
+      const activatesDisclosure = !!disclosureTarget
       if (!activatesDisclosure
           && !readerInputMayScroll(event?.type, event?.key)) return
       const inputDirection = readerInputEscapeDirection(event?.type, {
@@ -1831,11 +1837,15 @@ export default function useScrollMode({
         })
       }
       if (activatesDisclosure) {
-        // A disclosure tap obeys the mode the reader already chose. FOLLOW_BOTTOM
-        // remains the sole tail authority; every other mode latches the visible
-        // anchor BEFORE React changes body height. The gesture gate below defers
-        // ResizeObserver writes until pointerup, then replays that same policy.
-        const nextMode = modeForDisclosureToggle(scrollEl, modeRef.current)
+        // Expansion latches the chosen header BEFORE React changes body height,
+        // including from FOLLOW_BOTTOM; collapse retains the existing mode. The
+        // gesture gate below defers ResizeObserver writes until pointerup, then
+        // replays that same policy.
+        const nextMode = modeForDisclosureToggle(scrollEl, modeRef.current, {
+          target: disclosureTarget,
+          nextOpen: !!disclosureTarget
+            && disclosureTarget.getAttribute('aria-expanded') !== 'true',
+        })
         if (nextMode && nextMode !== modeRef.current) {
           readerLocationExplicitRef.current = true
           transitionMode(nextMode, 'reader:disclosure-toggle')
@@ -1860,10 +1870,11 @@ export default function useScrollMode({
       // Thunk, not an object literal: these property reads force a synchronous
       // layout, and only wheel/scroll-key branches consume them. See
       // readerInputNeedsFrameRelease.
-      // Space/Enter on a disclosure button cannot natively scroll; preserve its
-      // existing one-frame release rather than waiting for the safety cap.
-      const keyboardDisclosure = activatesDisclosure && event?.type === 'keydown'
-      if (keyboardDisclosure || readerInputNeedsFrameRelease(
+      // Space/Enter and a zero-detail assistive click cannot natively scroll;
+      // release them next frame rather than waiting for the safety cap.
+      const releaseOnlyDisclosure = activatesDisclosure
+        && (event?.type === 'keydown' || event?.type === 'click')
+      if (releaseOnlyDisclosure || readerInputNeedsFrameRelease(
           event?.type,
           readInputGeometry,
           event?.key,
@@ -1877,6 +1888,14 @@ export default function useScrollMode({
     const onWheelInput = isPerfProbeEnabled()
       ? (event) => perfTime('scroll.wheel', () => onUserInput(event))
       : onUserInput
+    // Browser accessibility activation can dispatch `click` without the
+    // pointer/key event that normally reaches onUserInput first. Handle only
+    // that zero-detail path here; physical clicks already own the gesture from
+    // pointerdown, and keyboard clicks normally own it from keydown.
+    const onSyntheticDisclosureClick = (event) => {
+      if (event.detail !== 0 || gesture.disclosureOwns) return
+      onUserInput(event)
+    }
 
     // Scroll-START latency, measured rather than inferred. Lag at the moment a
     // finger lands is a different failure from steady-state jank and has a
@@ -2036,6 +2055,9 @@ export default function useScrollMode({
     scrollEl.addEventListener('pointermove', onPointerMoveInput, { passive: true })
     scrollEl.addEventListener('wheel', onWheelInput, { passive: true })
     scrollEl.addEventListener('keydown', onUserInput, { passive: true })
+    scrollEl.addEventListener(
+      'click', onSyntheticDisclosureClick, { passive: true },
+    )
     scrollEl.addEventListener('focusin', onInlineEditorFocus, { passive: true })
     scrollEl.addEventListener('focusout', onInlineEditorBlur, { passive: true })
     scrollEl.addEventListener('beforeinput', captureInlineEditorInput, { passive: true })
@@ -2172,6 +2194,7 @@ export default function useScrollMode({
       scrollEl.removeEventListener('pointermove', onPointerMoveInput)
       scrollEl.removeEventListener('wheel', onWheelInput)
       scrollEl.removeEventListener('keydown', onUserInput)
+      scrollEl.removeEventListener('click', onSyntheticDisclosureClick)
       scrollEl.removeEventListener('focusin', onInlineEditorFocus)
       scrollEl.removeEventListener('focusout', onInlineEditorBlur)
       scrollEl.removeEventListener('beforeinput', captureInlineEditorInput)
