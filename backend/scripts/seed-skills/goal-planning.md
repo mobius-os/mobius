@@ -70,10 +70,9 @@ exactly one owning interaction:
 - Owner action: use the real question tool; its card keeps the Goal marked
   **Waiting for you**.
 
-If no actor owns the next move, the platform may give the same Goal one compact
-repair turn to reconcile its plan or establish an owner. A repeated miss stays
-visibly paused and resumable; task count or progress never buys more turns.
-Do not end with “tell me when…” or a custom status card.
+With no owner, an unfinished plan stays visibly paused and resumable; the
+platform does not invent another agent turn. Do not end with “tell me when…”
+or a custom status card.
 
 Before completion run:
 

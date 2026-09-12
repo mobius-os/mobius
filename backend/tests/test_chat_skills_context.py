@@ -202,7 +202,7 @@ def test_goal_routing_rechecks_phase_transitions_and_prefers_platform_tool():
   assert "first-class `promote_goal` tool" in planning_normalized
   assert "resilience, not an equivalent convenience path" in planning_normalized
   assert "an attempted tool call returns a failure" in planning_normalized
-  assert "task count or progress never buys more turns" in planning_normalized
+  assert "the platform does not invent another agent turn" in planning_normalized
 
 
 def test_goal_waits_always_name_a_durable_owner_interaction():
