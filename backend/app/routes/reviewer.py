@@ -21,7 +21,12 @@ from app import fs_locks, models
 from app.reviewer_automation import REPO as _REVIEWER_REPO
 from app.config import get_settings
 from app.database import get_db
-from app.deps import Principal, get_principal, reject_cross_site
+from app.deps import (
+  Principal,
+  get_principal,
+  reject_cross_site,
+  require_nondelegated_owner_control,
+)
 from app.github_contribution_git import _gh
 from app.github_contributions import _recheck_submit_app, _validate_submit_app
 
@@ -48,6 +53,22 @@ class ReviewerCommentBody(BaseModel):
   base_sha: str
   guide_hash: str
   body: str
+
+
+def _require_reviewer_owner_action(principal: Principal) -> None:
+  """Require the real owner/top-level agent for new public authority.
+
+  The app bearer may consume an existing automatic-posting grant, but it cannot
+  create, revive, pause, or bypass one. Reviewer settings and drafts are
+  intentionally app-writable, so an opaque-frame click alone is not evidence
+  of owner confirmation for a GitHub write.
+  """
+  require_nondelegated_owner_control(principal)
+  if principal.scope != "owner" or principal.app_id is not None:
+    raise HTTPException(
+      403,
+      "This Reviewer action needs confirmation through the owner chat.",
+    )
 
 
 # ─────────────────────── Reviewer automatic comments ─────────────────
@@ -326,6 +347,7 @@ async def reviewer_grant(
   """One explicit grant for exact repos, guide digest, and hard ceilings."""
   from app import reviewer_automation
 
+  _require_reviewer_owner_action(principal)
   _validate_submit_app(app_id, principal, db)
   row = reviewer_automation.stamp_grant(
     db, app_id, repositories=body.repositories,
@@ -350,6 +372,7 @@ async def reviewer_grant_toggle(
 ):
   from app import reviewer_automation
 
+  _require_reviewer_owner_action(principal)
   _validate_submit_app(app_id, principal, db)
   row = reviewer_automation.set_enabled(db, app_id, body.enabled)
   if row is None:
@@ -418,6 +441,7 @@ async def reviewer_manual_comment(
   """Send one exact stored draft without creating an automatic-post grant."""
   from app import reviewer_automation
 
+  _require_reviewer_owner_action(principal)
   expected_nonce = _validate_submit_app(app_id, principal, db)
   reviewer_automation.validated_comment(body.body, body.head_sha.lower())
   plan = await _reviewer_manual_plan(app_id, body, expected_nonce, db)

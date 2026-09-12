@@ -13,6 +13,26 @@ from app.config import get_settings
 GUIDE = hashlib.sha256(b"guide").hexdigest()
 
 
+def test_public_authority_changes_require_owner_scope():
+  from app.routes import reviewer as reviewer_routes
+
+  reviewer_routes._require_reviewer_owner_action(SimpleNamespace(
+    scope="owner", app_id=None, delegation_id=None,
+  ))
+
+  with pytest.raises(HTTPException) as app_denied:
+    reviewer_routes._require_reviewer_owner_action(SimpleNamespace(
+      scope="app", app_id=12, delegation_id=None,
+    ))
+  assert app_denied.value.status_code == 403
+
+  with pytest.raises(HTTPException) as child_denied:
+    reviewer_routes._require_reviewer_owner_action(SimpleNamespace(
+      scope="owner", app_id=None, delegation_id="child-1",
+    ))
+  assert child_denied.value.status_code == 403
+
+
 def _app(db, source_dir="/data/apps/pr-review"):
   row = models.App(
     name="Reviewer", description="test", source_dir=str(source_dir),
