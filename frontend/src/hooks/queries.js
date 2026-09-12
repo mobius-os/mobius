@@ -360,15 +360,16 @@ function useModelRegistryQuery(options) {
 }
 
 async function fetchModelPrefs() {
-  try {
-    const res = await api.owner.modelPrefs.get()
-    const data = await jsonOrThrow(res, 'model prefs fetch failed:')
-    return { hidden_ids: data?.hidden_ids || [] }
-  } catch {
-    // Preferences refine the registry; they must not make the model control
-    // unusable when their read alone fails. Degrade to showing every
-    // available model until this read recovers.
-    return { hidden_ids: [] }
+  // Resolve to an empty preference set only after spending the same bounded
+  // retry budget as registry reads. React Query cannot retry a resolved fallback.
+  for (let attempt = 0; attempt <= MODEL_READ_RETRY_COUNT; attempt += 1) {
+    try {
+      const res = await api.owner.modelPrefs.get()
+      const data = await jsonOrThrow(res, 'model prefs fetch failed:')
+      return { hidden_ids: data?.hidden_ids || [] }
+    } catch {
+      if (attempt === MODEL_READ_RETRY_COUNT) return { hidden_ids: [] }
+    }
   }
 }
 
@@ -377,7 +378,7 @@ function modelPrefsQueryOptions({ enabled = true } = {}) {
     queryKey: modelPrefsKey,
     queryFn: fetchModelPrefs,
     enabled,
-    retry: MODEL_READ_RETRY_COUNT,
+    retry: false,
   }
 }
 

@@ -6,9 +6,10 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { createServer } from 'vite'
 
 const vite = await createServer({
+  configFile: false,
   appType: 'custom',
   logLevel: 'error',
-  server: { middlewareMode: true, hmr: false, ws: false },
+  server: { middlewareMode: true, hmr: false, ws: false, watch: null },
   ssr: { noExternal: ['@openai/apps-sdk-ui'] },
 })
 const {
@@ -76,24 +77,46 @@ test('public Möbius rows hide internal wire ids', () => {
   assert.match(markup, />claude-opus-4-7</)
 })
 
-test('model picker reads recover from a brief public-origin failure', async () => {
-  for (const query of [modelQueries.registry, modelQueries.prefs]) {
-    const client = new QueryClient({
-      defaultOptions: { queries: { retry: false } },
-    })
+for (const [name, query, path, body, expected] of [
+  ['registry', modelQueries.registry, '/api/models',
+    { providers: { codex: [{ id: 'test-model' }] } }, { codex: [{ id: 'test-model' }] }],
+  ['preferences', modelQueries.prefs, '/api/owner/model-prefs',
+    { hidden_ids: ['test-model'] }, { hidden_ids: ['test-model'] }],
+]) {
+  test(`real ${name} read recovers from transient failures`, async () => {
+    const originalFetch = globalThis.fetch
+    const client = new QueryClient()
     let attempts = 0
-    const result = await client.fetchQuery({
-      ...query.options(),
-      retryDelay: 0,
-      queryFn: async () => {
-        attempts += 1
-        if (attempts < 4) throw new Error('temporary edge failure')
-        return { recovered: true }
-      },
-    })
+    globalThis.fetch = async url => {
+      assert.equal(new URL(url, 'https://example.test').pathname, path)
+      attempts += 1
+      return Response.json(attempts < 4 ? { detail: 'unavailable' } : body,
+        { status: attempts < 4 ? 503 : 200 })
+    }
+    try {
+      assert.deepEqual(await client.fetchQuery({ ...query.options(), retryDelay: 0 }), expected)
+      assert.equal(attempts, 4)
+    } finally {
+      client.clear()
+      globalThis.fetch = originalFetch
+    }
+  })
+}
 
-    assert.deepEqual(result, { recovered: true })
-    assert.equal(attempts, 4)
+test('real preference query degrades only after four failed reads', async () => {
+  const originalFetch = globalThis.fetch
+  const client = new QueryClient()
+  let attempts = 0
+  globalThis.fetch = async url => {
+    assert.equal(new URL(url, 'https://example.test').pathname, '/api/owner/model-prefs')
+    attempts += 1
+    return Response.json({ detail: 'unavailable' }, { status: 503 })
+  }
+  try {
+    assert.deepEqual(await client.fetchQuery(modelQueries.prefs.options()), { hidden_ids: [] })
+    assert.equal(attempts, 4, 'query retry must not multiply the read budget')
+  } finally {
+    client.clear()
+    globalThis.fetch = originalFetch
   }
 })
-
