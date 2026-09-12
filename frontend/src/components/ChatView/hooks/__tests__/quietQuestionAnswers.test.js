@@ -5,6 +5,7 @@ import { IDBFactory } from 'fake-indexeddb'
 import { renderHook } from './react-hook-shim.mjs'
 import { verifyConnectivity } from '../../../../lib/connectivityStore.js'
 import useStreamConnection from '../../useStreamConnection.js'
+import { restartCardSelectedOptions } from '../../restartCard.js'
 import { shouldRepairRuntimeStream } from '../../chatRuntimeState.js'
 import { clearOutboxForTests, listIntents, outboxPrincipalKey, retireIntent, subscribeOutboxChanges } from '../../chatOutbox.js'
 import { writeStoredStreamSnapshot } from '../../streamSnapshotCache.js'
@@ -282,3 +283,44 @@ test('a receipt that wins the dispatch claim cannot start a phantom answer turn'
     assert.equal(hook.result.current.streamItems[0].content, 'Existing answer')
   } finally { unsubscribe() }
 })
+
+
+for (const approvesRestart of [false, true]) {
+  test(`offline Restart v2 ${approvesRestart ? 'approval' : 'written feedback'} keeps its exact authority and continuation outcome`, async () => {
+    await setup()
+    const action = { type: 'restart', version: 2, restart_option_id: 'restart-exact' }
+    const questions = [{ id: 'restart-question', question: 'Restart?', options: [{ id: 'restart-exact', label: 'Restart now' }] }]
+    // Written text equal to the action label still must not acquire its ID.
+    const rawSelection = { 'Restart?': approvesRestart ? 'Restart now' : '__other__' }
+    const selected = restartCardSelectedOptions(action, questions, rawSelection)
+    assert.deepEqual(selected, approvesRestart ? { 'restart-question': ['restart-exact'] } : {})
+    const options = { hidden: true, cid: 'restart-answer', question_id: 'restart-card',
+      answers: { 'Restart?': 'Restart now' }, selected_options: selected }
+    globalThis.fetch = async () => Response.json({ ready: false, boot_id: 'quiet-fixture' }, { status: 503 })
+    await verifyConnectivity()
+    const local = await hook.result.current.sendMessage('Restart now', undefined, options)
+    assert.equal(local.status, 'locally_queued')
+    const [record] = await listIntents(outboxPrincipalKey(token))
+    assert.deepEqual(record.body.selected_options, approvesRestart ? { 'restart-question': ['restart-exact'] } : undefined,
+      'the transport omits empty selections; written feedback carries no action authority')
+    assert.equal(hook.result.current.streamItems[0].content, 'Existing answer')
+
+    globalThis.fetch = async () => Response.json({ ready: true, boot_id: 'quiet-fixture' })
+    await verifyConnectivity()
+    let resolveStream
+    const streamResponse = new Promise(resolve => { resolveStream = resolve })
+    const requests = []
+    globalThis.fetch = async (_url, request) => {
+      requests.push(request)
+      return request.method === 'POST'
+        ? Response.json({ status: approvesRestart ? 'restart_requested' : 'started', answer_turn: approvesRestart ? 'none' : 'new' })
+        : streamResponse
+    }
+    const response = await hook.result.current.sendMessage('Restart now', undefined, options)
+    assert.equal(response.answer_turn, approvesRestart ? 'none' : 'new')
+    assert.deepEqual(JSON.parse(requests[0].body).selected_options, record.body.selected_options)
+    assert.deepEqual(requests.map(request => request.method || 'GET'), approvesRestart ? ['POST'] : ['POST', 'GET'])
+    hook.result.current.disconnect()
+    resolveStream(new Response(null, { status: 204 }))
+  })
+}
