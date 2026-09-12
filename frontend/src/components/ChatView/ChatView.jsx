@@ -1034,10 +1034,11 @@ export default function ChatView({
   // so any in-flight fetchMessages can't resurrect cleared data.
   const fetchGenRef = useRef(0)
 
-  // Pagination flag — gates loadOlderMessages from re-entering AND
-  // gates the scroll-handler in useScrollMode from misclassifying
-  // post-prepend scroll-clamps as user gestures.
+  // Pagination flag — one compact page at a time. Scroll authority remains in
+  // useScrollMode, including while this network request is in flight.
   const loadingOlder = useRef(false)
+  const paginationLifecycleRef = useRef(0)
+  const paginationFollowupRafRef = useRef(0)
   const [olderHistoryError, setOlderHistoryError] = useState(false)
 
   // ── Scroll subsystem ─────────────────────────────────────────────
@@ -1097,7 +1098,6 @@ export default function ChatView({
     footRef,
     messages,
     messagesRef,
-    loadingOlderRef: loadingOlder,
     initialEntryPhase,
     onCachedCoordinateReady: acceptCachedReadingCoordinate,
     ownsReadingPosition: !hidden,
@@ -2713,6 +2713,9 @@ export default function ChatView({
       cancelled = true
       initialLoadController.abort()
       chatIdStaleRef.current = true
+      paginationLifecycleRef.current += 1
+      cancelAnimationFrame(paginationFollowupRafRef.current)
+      paginationFollowupRafRef.current = 0
       loadingOlder.current = false
       disconnect()
     }
@@ -2733,13 +2736,16 @@ export default function ChatView({
   // exact visible message (including a nested content part), prepend the rows,
   // and restore that coordinate in the same task before paint. Capturing at
   // request start would be stale whenever touch momentum continues in flight.
-  // (loadingOlder ref is declared earlier alongside the useScrollMode
-  // hook call — it's passed to the hook to gate the scroll handler.)
   function loadOlderMessages(before = offset, { readerDriven = false } = {}) {
     const el = scrollRef.current
     if (!el || loadingOlder.current || loading || before <= 0) return
     loadingOlder.current = true
     setOlderHistoryError(false)
+    const paginationLifecycle = paginationLifecycleRef.current
+    const requestIsCurrent = () => (
+      paginationLifecycleRef.current === paginationLifecycle
+      && !chatIdStaleRef.current
+    )
     const paginationRequest = capturePaginationRequest()
     // We deliberately do NOT save the pre-pagination mode to restore later.
     // The user paginated — their intent is now to read older content.
@@ -2754,7 +2760,7 @@ export default function ChatView({
     )
       .then(r => jsonOrThrow(r, 'Earlier messages failed to load'))
       .then(data => {
-        if (chatIdStaleRef.current) return
+        if (!requestIsCurrent()) return
         const older = data.messages || []
         for (const msg of older) {
           if (msg.blocks) {
@@ -2775,18 +2781,27 @@ export default function ChatView({
           commitMessages(prev => [...older, ...prev], nextOffset)
         })
         restorePaginationPrepend(paginationAnchor)
-        loadingOlder.current = false
-        const scrollEl = scrollRef.current
-        if (
-          scrollEl
-          && nextOffset > 0
-          && nextOffset < before
-          && olderHistoryShouldLoad(scrollEl, { userDriven: readerDriven })
-        ) {
-          loadOlderMessages(nextOffset, { readerDriven })
-        }
+        // Keep the network guard raised through the browser's matching scroll
+        // event, then decide whether this same reader-driven prefetch still
+        // needs another bounded page. The controller separately suppresses
+        // only the exact compensation coordinate, never in-flight touch.
+        paginationFollowupRafRef.current = requestAnimationFrame(() => {
+          paginationFollowupRafRef.current = 0
+          if (!requestIsCurrent()) return
+          loadingOlder.current = false
+          const scrollEl = scrollRef.current
+          if (
+            scrollEl
+            && nextOffset > 0
+            && nextOffset < before
+            && olderHistoryShouldLoad(scrollEl, { userDriven: readerDriven })
+          ) {
+            loadOlderMessages(nextOffset, { readerDriven })
+          }
+        })
       })
       .catch(() => {
+        if (!requestIsCurrent()) return
         loadingOlder.current = false
         setOlderHistoryError(true)
       })
@@ -2825,7 +2840,7 @@ export default function ChatView({
     // visible interruption instead of waiting for the absolute top.
     const userDriven = performance.now() < gestureWindowUntilRef.current
     if (offset > 0 && olderHistoryShouldLoad(el, { userDriven })) {
-      loadOlderMessages(offset, { readerDriven: true })
+      loadOlderMessages(offset, { readerDriven: userDriven })
     }
   }
 

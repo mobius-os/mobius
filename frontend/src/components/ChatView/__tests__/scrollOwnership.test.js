@@ -217,6 +217,8 @@ test('automatic geometry owners and newer semantic actions share reader authorit
   const paginationStart = chatViewSource.indexOf('function loadOlderMessages(')
   const paginationEnd = chatViewSource.indexOf('// A tall viewport', paginationStart)
   const paginationPath = chatViewSource.slice(paginationStart, paginationEnd)
+  assert.equal(ownerSource.includes('loadingOlderRef'), false,
+    'network request lifetime must not suppress genuine reader scroll ownership')
   assert.ok(
     paginationPath.indexOf('capturePaginationRequest()')
       < paginationPath.indexOf('apiFetch('),
@@ -231,6 +233,15 @@ test('automatic geometry owners and newer semantic actions share reader authorit
     paginationPath.indexOf('flushSync(() =>')
       < paginationPath.indexOf('restorePaginationPrepend(paginationAnchor)'),
     'pagination must restore the captured coordinate in the same task after commit',
+  )
+  assert.ok(
+    chatViewSource.includes('loadOlderMessages(offset, { readerDriven: userDriven })'),
+    'programmatic short-page fills must not inherit reader-driven recursive prefetch',
+  )
+  assert.ok(
+    paginationPath.includes('paginationLifecycleRef.current === paginationLifecycle')
+      && chatViewSource.includes('cancelAnimationFrame(paginationFollowupRafRef.current)'),
+    'a delayed pagination continuation must be fenced and cancelled across chat lifecycle',
   )
 
   const hotStart = ownerSource.indexOf('const onScroll = () => {')

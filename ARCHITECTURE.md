@@ -772,8 +772,13 @@ and attaches their rule ids to new diagnostic chats. The Playwright lock-in spec
   That compensation may run while touch or momentum still owns the viewport
   because it preserves rather than changes the content under the reader; it is
   rejected if any newer reader-intent generation landed after capture. Network
-  time never owns an anchor, and a stronger semantic mode chosen after the
-  request began (such as Jump to latest or Send) remains authoritative.
+  time never owns an anchor or suppresses genuine reader movement. The captured
+  compensation transaction survives the prepend's immediate React effect
+  reinstall, rebases the live momentum direction into the translated coordinate
+  space, and ignores only scroll events at its exact same-frame target. A
+  stronger semantic mode chosen after the request began (such as Jump to
+  latest, Send, or question submission) remains authoritative even when no
+  physical scroll advanced the reader generation.
   User-driven history prefetch begins several visible
   viewports before the loaded boundary and may continue bounded pages while that
   headroom remains depleted; programmatic top landings still fetch nothing.

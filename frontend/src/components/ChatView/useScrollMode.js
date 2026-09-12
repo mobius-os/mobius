@@ -240,8 +240,6 @@ function _appendScrollTrace(bucket, entry) {
  *   growth stays on its ResizeObserver so streaming cannot settle a gesture.
  * @param {React.MutableRefObject<Array<object>>} args.messagesRef
  *   Synchronous mirror for restore-time anchor validation.
- * @param {React.MutableRefObject<boolean>} args.loadingOlderRef
- *   When true, scroll events from pagination shouldn't mutate mode.
  * @param {'history'|'cache-validating'|'cached'|'stream-catchup'|'preparing'|'ready'} args.initialEntryPhase
  *   History blocks reveal, cached is a caller-validated restoration window,
  *   cache-validating mounts a complete cached window behind the gate so its
@@ -265,7 +263,6 @@ export default function useScrollMode({
   footRef,
   messages,
   messagesRef,
-  loadingOlderRef,
   initialEntryPhase,
   onCachedCoordinateReady,
   ownsReadingPosition,
@@ -326,6 +323,11 @@ export default function useScrollMode({
   // once a newer gesture lands, older work can never regain ownership merely
   // because the gesture timing window later closes.
   const readerIntentVersionRef = useRef(0)
+  // A history prepend can make the browser emit scroll events for native
+  // anchoring and/or our same-frame compensation. Preserve the transaction
+  // through its message-count effect reinstall, and suppress only its exact
+  // target coordinate; the page request never owns later touch or momentum.
+  const paginationPrependRef = useRef(null)
   // Live touch contact with the transcript (contract R5, v1.23): while any
   // finger is physically on the glass, the gesture cannot settle, the
   // no-scroll dead-man cannot release, and no gated layout commit may run.
@@ -830,10 +832,14 @@ export default function useScrollMode({
     return mode
   }, [transitionMode])
 
-  /** Remember only the reader generation at request start. Geometry captured
-   * here would become stale while network time and momentum continue. */
+  /** Remember authority, never geometry, at request start. Mode identity is
+   * needed because Send and question submission are newer semantic actions
+   * even when no physical scroll advanced the reader generation. */
   const capturePaginationRequest = useCallback(
-    () => readerIntentVersionRef.current,
+    () => ({
+      readerIntentVersion: readerIntentVersionRef.current,
+      mode: modeRef.current,
+    }),
     [],
   )
 
@@ -842,11 +848,14 @@ export default function useScrollMode({
    * anchor is already stale by the time the prepend commits. A stronger mode
    * chosen after the request began (for example Jump to latest or Send) keeps
    * its semantic ownership while the prepend is compensated. */
-  const preparePaginationPrepend = useCallback((requestReaderIntentVersion) => {
+  const preparePaginationPrepend = useCallback((request) => {
     const scrollEl = scrollRef.current
     const currentReaderIntentVersion = readerIntentVersionRef.current
     const activeMode = modeRef.current
-    const newerModeOwnsLayout = requestReaderIntentVersion !== currentReaderIntentVersion
+    // A changed reader generation is physical movement, whose latest anchor
+    // must win even if modeRef has not reached the gesture's quiet edge yet.
+    // Only a changed mode identity proves a newer semantic action.
+    const newerModeOwnsLayout = request?.mode !== activeMode
       && (activeMode?.kind === 'FOLLOW_BOTTOM'
         || activeMode?.kind === 'PIN_USER_MSG'
         || isQuestionSubmissionMode(activeMode))
@@ -861,10 +870,18 @@ export default function useScrollMode({
         ? 'reader:paginate-preserve-newer-mode'
         : 'reader:paginate-anchor',
     )
-    return {
+    const snapshot = {
       mode,
       readerIntentVersion: currentReaderIntentVersion,
+      scrollEl,
+      scrollTopBeforeCommit: scrollEl.scrollTop,
+      targetScrollTop: null,
+      clearRaf: 0,
     }
+    const previous = paginationPrependRef.current
+    if (previous?.clearRaf) cancelAnimationFrame(previous.clearRaf)
+    paginationPrependRef.current = snapshot
+    return snapshot
   }, [scrollRef, transitionMode])
 
   /** Complete the prepend in the same task as its React commit. This is a
@@ -873,20 +890,46 @@ export default function useScrollMode({
    * captured reader generation is still current. */
   const restorePaginationPrepend = useCallback((snapshot) => {
     const scrollEl = scrollRef.current
-    if (!scrollEl
+    if (paginationPrependRef.current !== snapshot
+        || !scrollEl
+        || snapshot?.scrollEl !== scrollEl
         || !snapshot?.mode
         || modeRef.current !== snapshot.mode
         || !paginationViewportCompensationAllowed({
           capturedVersion: snapshot.readerIntentVersion,
           currentVersion: readerIntentVersionRef.current,
-        })) return false
+        })) {
+      if (paginationPrependRef.current === snapshot) {
+        paginationPrependRef.current = null
+      }
+      return false
+    }
     if (!writeMode(
       scrollEl,
       snapshot.mode,
       'pagination:prepend-preserve',
       snapshot.readerIntentVersion,
       { preserveReaderViewport: true },
-    )) return false
+    )) {
+      if (paginationPrependRef.current === snapshot) {
+        paginationPrependRef.current = null
+      }
+      return false
+    }
+    const compensationDelta = scrollEl.scrollTop - snapshot.scrollTopBeforeCommit
+    const gesture = readerGestureRef.current
+    if (Number.isFinite(gesture.lastScrollTop)) {
+      // Momentum direction is measured in scrollTop coordinates. Prepending
+      // rows translates that coordinate space without changing direction, so
+      // carry the live gesture's baseline through the same translation.
+      gesture.lastScrollTop += compensationDelta
+    }
+    snapshot.targetScrollTop = scrollEl.scrollTop
+    snapshot.clearRaf = requestAnimationFrame(() => {
+      if (paginationPrependRef.current === snapshot) {
+        paginationPrependRef.current = null
+      }
+    })
     lastAppliedModeRef.current = snapshot.mode
     const anchorEl = _anchorEl(scrollEl, snapshot.mode)
     lastAnchorTopRef.current = anchorEl
@@ -1019,7 +1062,12 @@ export default function useScrollMode({
   useLayoutEffect(() => () => {
     clearTimeout(pendingGestureTimerRef.current)
     cancelAnimationFrame(pendingGestureReleaseRafRef.current)
-  }, [])
+    const paginationPrepend = paginationPrependRef.current
+    if (paginationPrepend?.clearRaf) {
+      cancelAnimationFrame(paginationPrepend.clearRaf)
+    }
+    paginationPrependRef.current = null
+  }, [chatId])
 
   // Persist mode on every chatId change so the next mount restores.
   // (Layout effect can't easily handle persistence because it runs
@@ -1738,31 +1786,31 @@ export default function useScrollMode({
       cancelAnimationFrame(pendingGestureReleaseRafRef.current)
       pendingGestureReleaseRafRef.current = 0
 
-      if (!loadingOlderRef.current) {
-        // Snapshot the exact physical position for an ordinary hold. Reaching
-        // the physical tail instead enters FOLLOW_BOTTOM, including while
-        // latest-turn reservation remains.
-        const holdMode = anchorModeFromScroll(scrollEl)
-        const settledMode = modeAfterReaderGesture({
-          escaped: settledEscaped,
-          reachedNearBottom: settledReachedNearBottom,
-          holdMode,
-        })
-        transitionMode(
-          settledMode,
-          settledMode.kind === 'FOLLOW_BOTTOM'
-            ? 'reader:scroll-bottom'
-            : 'reader:hold-exact',
-        )
-        persistMode()
-        // Tail geometry, not mode or viewport visibility, owns reservation.
-        // Recompute once after momentum, never underneath the gesture itself.
-        // When a footer resize was deferred, replay geometry + the newly
-        // settled semantic mode atomically; a bare sizeSpacer here would let
-        // native scroll anchoring paint an intermediate displaced frame.
-        if (!replayDeferredLayoutNow()) {
-          sizeSpacer(currentAuthority())
-        }
+      // Snapshot the exact physical position for an ordinary hold. Reaching
+      // the physical tail instead enters FOLLOW_BOTTOM, including while
+      // latest-turn reservation remains. A history request does not suppress
+      // this handoff: touch and momentum remain reader-owned while it is in
+      // flight.
+      const holdMode = anchorModeFromScroll(scrollEl)
+      const settledMode = modeAfterReaderGesture({
+        escaped: settledEscaped,
+        reachedNearBottom: settledReachedNearBottom,
+        holdMode,
+      })
+      transitionMode(
+        settledMode,
+        settledMode.kind === 'FOLLOW_BOTTOM'
+          ? 'reader:scroll-bottom'
+          : 'reader:hold-exact',
+      )
+      persistMode()
+      // Tail geometry, not mode or viewport visibility, owns reservation.
+      // Recompute once after momentum, never underneath the gesture itself.
+      // When a footer resize was deferred, replay geometry + the newly
+      // settled semantic mode atomically; a bare sizeSpacer here would let
+      // native scroll anchoring paint an intermediate displaced frame.
+      if (!replayDeferredLayoutNow()) {
+        sizeSpacer(currentAuthority())
       }
 
       recordTrace('events', 'reader:scroll-settled', { scrollEl })
@@ -2119,6 +2167,24 @@ export default function useScrollMode({
     // Scroll handler — user-driven scrolls only mark intent here. The expensive
     // semantic location/mode work runs once in settleReaderScroll.
     const onScroll = () => {
+      let paginationScroll = paginationPrependRef.current
+      if (paginationScroll && paginationScroll.scrollEl !== scrollEl) {
+        if (paginationScroll.clearRaf) {
+          cancelAnimationFrame(paginationScroll.clearRaf)
+        }
+        paginationPrependRef.current = null
+        paginationScroll = null
+      }
+      if (paginationScroll?.targetScrollTop != null) {
+        const preservesPaginationTarget = Math.abs(
+          scrollEl.scrollTop - paginationScroll.targetScrollTop,
+        ) <= 0.5
+        if (preservesPaginationTarget) return
+        if (paginationScroll.clearRaf) {
+          cancelAnimationFrame(paginationScroll.clearRaf)
+        }
+        paginationPrependRef.current = null
+      }
       // First scroll event of a touch gesture closes the start-latency window
       // opened on pointerdown. Placed before the early returns below so the
       // measurement reflects when content actually moved, not whether this
@@ -2137,18 +2203,6 @@ export default function useScrollMode({
       // a fresh reader gesture and must not start a 250ms settlement that later
       // overrides FOLLOW_BOTTOM or the latched reading anchor.
       if (gesture.disclosureOwns) return
-      if (loadingOlderRef.current) {
-        // Pagination owns its prepend anchor. Do not leave the gesture gate at
-        // Infinity when its reconciliation scroll lands during the load.
-        gestureWindowUntilRef.current = 0
-        clearTimeout(pendingGestureTimerRef.current)
-        pendingGestureTimerRef.current = 0
-        cancelAnimationFrame(pendingGestureReleaseRafRef.current)
-        pendingGestureReleaseRafRef.current = 0
-        gesture.lastScrollTop = null
-        resumeLayoutAfterGestureRef.current?.()
-        return
-      }
       const firstOwnedScroll = !gesture.dirty
       if (firstOwnedScroll) {
         recordTrace('events', 'reader:scroll-start', { captureGeometry: false })
@@ -2214,7 +2268,16 @@ export default function useScrollMode({
       // into the next instance. Under live touch contact this is a no-op by
       // design (contract v1.23): the gesture record survives in
       // readerGestureRef and the next instance continues it.
-      settleReaderScroll()
+      // A pagination prepend captures the current momentum coordinate before
+      // flushSync changes messageCount. Preserve that one transaction across
+      // this effect reinstall; the newly installed owner resumes the same
+      // gesture and its quiet-edge timer. Other structural commits still
+      // settle normally before their listeners are replaced.
+      const paginationCommitPending = (
+        paginationPrependRef.current?.scrollEl === scrollEl
+        && paginationPrependRef.current?.targetScrollTop == null
+      )
+      if (!paginationCommitPending) settleReaderScroll()
       clearTimeout(readerSettleTimer)
       if (discardPendingReaderSettleRef.current === discardPendingReaderSettle) {
         discardPendingReaderSettleRef.current = null
