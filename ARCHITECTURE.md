@@ -1331,21 +1331,29 @@ Platform restarts use the narrower `mobius_control.request_restart` and
 `POST /api/chats/{id}/restart-request`. The caller supplies no command, commit,
 or option identity. The server derives an immutable action from the relevant
 committed restart-loadable source and adds server-generated option ids to a
-typed **Restart now** / **Not now** card. A selected **Restart now** is an
-owner action dispatched by the platform, not a synthetic Yes message or a new
-agent turn. The durable execution claim precedes the side effect and is
-at-most-once: a lost acknowledgement or ambiguous death is reconciled against
-boot evidence, never blindly replayed.
+typed card with one **Restart now** action and an ordinary written-response
+path. A selected **Restart now** is an owner action dispatched by the platform,
+not a synthetic Yes message or a new agent turn. Written feedback atomically
+cancels that card's activation wait and queues a normal continuation without
+granting restart authority. The durable execution claim precedes the side
+effect and is at-most-once: a lost acknowledgement or ambiguous death is
+reconciled against boot evidence, never blindly replayed.
 
 Each restart card links to a typed activation wait naming its physical run,
-Goal root and exact source-byte requirement. Startup captures one immutable
-loaded-source/readiness snapshot after database and writer readiness; that
-snapshot can satisfy every matching chat independently, including when the
-restart originated in Settings or another chat. Exact file bytes (and required
-absence for deleted paths), not Git ancestry alone, prove activation. A linked
-activation barrier keeps the interrupted work ahead of later queued messages
-until its writer-authenticated continuation owns recovery. Stop/dismissal also
-cancels a met-but-undelivered linked activation wait; ordinary question,
+Goal root and originating boot. Startup captures one immutable ready-boot
+receipt after database and writer readiness; any later receipt wakes every
+linked chat independently, including when the restart originated in Settings
+or another chat. The resumed agent verifies whether its changes loaded rather
+than duplicating that judgment in the wait with file-version checks. A linked
+activation barrier keeps an **approved** restart's interrupted work ahead of
+later queued messages until its writer-authenticated continuation owns recovery.
+Legacy version-1 cards that choose **Not now** leave the activation monitor
+armed for a later restart but release ordinary owner input
+immediately; a passive monitor never suspends the chat. Platform activation
+waits do not expire on an arbitrary wall-clock deadline: they remain open
+until the owner responds, a later boot wakes them, or their owning work is
+cancelled. Stop/dismissal also cancels a met-but-undelivered linked
+activation wait; ordinary question,
 secure-input, manual-crash, usage and unrelated wait barriers retain their own
 lifecycle.
 

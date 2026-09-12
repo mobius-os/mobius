@@ -578,8 +578,8 @@ class ChatWait(Base):
   kind = Column(String(32), nullable=False)
   command = Column(Text, nullable=True, default=None)
   # Typed product waits keep their bounded, server-authored condition here.
-  # Command/timer rows leave it NULL.  Platform activation deliberately stores
-  # expected committed bytes rather than a shell predicate or Git ancestry.
+  # Command/timer rows leave it NULL. Platform Restart waits retain the action
+  # identity and originating boot; a later ready boot wakes the owning chat.
   condition_json = Column(JSON, nullable=True, default=None)
   # The declaring physical/logical execution identities are captured at
   # declaration time.  A later Goal dismissal or physical retry therefore
@@ -592,8 +592,10 @@ class ChatWait(Base):
   action_approved_at = Column(DateTime, nullable=True, default=None)
   due_at = Column(DateTime, nullable=True, default=None)
   interval_secs = Column(Integer, nullable=False, default=300)
-  # A wait never rots silently: on deadline the chat is woken with
-  # `deadline_expired` so the agent decides what to do next.
+  # Command/timer waits never rot silently: on deadline the chat is woken with
+  # `deadline_expired` so the agent decides what to do next. Platform
+  # activation rows share this required column but deliberately do not expire;
+  # their owner card remains until answer, cancellation, or a later ready boot.
   deadline_at = Column(DateTime, nullable=False)
   # armed -> met | expired | failed | cancelled. `failed` means the check
   # itself broke (distinct from a valid silent exit-1 "not yet"). Terminal
@@ -614,12 +616,11 @@ class ChatWait(Base):
 
 
 class PlatformBootSnapshot(Base):
-  """Immutable proof of restart-loaded source after DB/writer readiness.
+  """Immutable ready-boot receipt captured after DB/writer readiness.
 
-  Only paths named by activation waits are hashed.  The serving sentinel says
-  which committed tree uvicorn imported; persisting the relevant tree bytes at
-  the end of startup lets every matching waiter share one cheap proof without
-  polling a shell command or mistaking a baked fallback for activation.
+  Source identity remains useful audit context, but Restart waits care only
+  that a different boot became ready. The resumed agent verifies its work.
+  ``loaded_files_json`` remains for backward-compatible historical rows.
   """
 
   __tablename__ = "platform_boot_snapshots"

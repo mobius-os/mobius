@@ -1,8 +1,9 @@
-"""Byte-exact source proof and one-shot admission for Restart cards.
+"""One-shot admission and post-restart continuation for Restart cards.
 
 These tests never invoke a real process signal or supervisor handshake.  They
-exercise the immutable Git/boot evidence used by a card and the shared
-in-process admission latch used by card, Settings, and platform restart calls.
+exercise the exact pre-dispatch Git guard, the ready-boot receipt used to wake
+linked chats, and the shared in-process admission latch used by card, Settings,
+and platform restart calls.
 """
 
 from __future__ import annotations
@@ -94,7 +95,20 @@ def test_requirement_rejects_modified_source_after_card_is_derived(
   assert platform_restart.requirement_matches_current_source(requirement) is False
 
 
-def test_descendant_that_reverts_approved_bytes_does_not_prove_activation(
+def test_served_identity_broker_is_restart_loadable(monkeypatch, tmp_path):
+  repo, source, _base = _restart_repo(
+    monkeypatch, tmp_path, path="backend/runtime/identity_broker.py",
+  )
+  source.write_text("VALUE = 'next'\n", encoding="utf-8")
+  target = _commit(repo, "update served identity broker")
+
+  requirement = platform_restart.build_restart_requirement(repo)
+
+  assert requirement["target_sha"] == target
+  assert list(requirement["files"]) == ["backend/runtime/identity_broker.py"]
+
+
+def test_descendant_that_reverts_approved_bytes_still_wakes_agent_to_verify(
   monkeypatch, tmp_path,
 ):
   repo, source, _base = _restart_repo(monkeypatch, tmp_path)
@@ -109,92 +123,36 @@ def test_descendant_that_reverts_approved_bytes_does_not_prove_activation(
     check=False,
   ).returncode == 0
 
-  reverted_snapshot = SimpleNamespace(
-    boot_id="boot-reverted",
-    source_kind="platform",
-    service_ready=True,
-    loaded_files_json=platform_restart.committed_manifest(
-      repo, reverted_sha, ["backend/app/example.py"],
-    ),
-  )
-  # Git ancestry is deliberately irrelevant: the expected committed bytes
-  # were removed by the descendant.
-  assert platform_restart.requirement_matches_snapshot(
-    requirement, reverted_snapshot,
-  ) is False
+  created_at = now_naive_utc()
+  row = SimpleNamespace(condition_json=requirement, created_at=created_at)
+  with SessionLocal() as db:
+    db.add(models.PlatformBootSnapshot(
+      boot_id="boot-reverted", source_kind="platform",
+      source_sha=reverted_sha, loaded_files_json={}, service_ready=True,
+      captured_at=created_at + timedelta(seconds=1),
+    ))
+    db.commit()
+    assert platform_restart.activation_wait_verdict(db, row) == (
+      "met", "A later ready Möbius boot was observed.",
+    )
+  # The waiter deliberately wakes the agent even though the descendant changed
+  # the requested file. The exact source check remains at dispatch admission.
   assert platform_restart.requirement_matches_current_source(requirement) is False
 
 
 def test_deleted_path_uses_explicit_absence_proof(monkeypatch, tmp_path):
-  repo, source, base = _restart_repo(
+  repo, source, _base = _restart_repo(
     monkeypatch, tmp_path, path="backend/app/deleted_module.py",
   )
   source.unlink()
-  deleted_sha = _commit(repo, "delete server module")
+  _commit(repo, "delete server module")
 
   requirement = platform_restart.build_restart_requirement(repo)
   expected = {"backend/app/deleted_module.py": {"state": "absent"}}
   assert requirement["files"] == expected
 
-  still_present = SimpleNamespace(
-    boot_id="boot-still-present",
-    source_kind="platform",
-    service_ready=True,
-    loaded_files_json=platform_restart.committed_manifest(
-      repo, base, ["backend/app/deleted_module.py"],
-    ),
-  )
-  loaded_deletion = SimpleNamespace(
-    boot_id="boot-loaded-deletion",
-    source_kind="platform",
-    service_ready=True,
-    loaded_files_json=platform_restart.committed_manifest(
-      repo, deleted_sha, ["backend/app/deleted_module.py"],
-    ),
-  )
-  assert platform_restart.requirement_matches_snapshot(
-    requirement, still_present,
-  ) is False
-  assert platform_restart.requirement_matches_snapshot(
-    requirement, loaded_deletion,
-  ) is True
 
-
-def test_baked_and_not_ready_boots_never_satisfy_requirement():
-  requirement = {
-    "version": platform_restart.REQUIREMENT_VERSION,
-    "action_id": "platform-restart:pending-proof",
-    "source_boot_id": "boot-served",
-    "files": {"backend/app/example.py": {"state": "absent"}},
-  }
-  loaded = {"backend/app/example.py": {"state": "absent"}}
-
-  for snapshot in (
-    SimpleNamespace(
-      boot_id="boot-baked",
-      source_kind="baked",
-      service_ready=True,
-      loaded_files_json=loaded,
-    ),
-    SimpleNamespace(
-      boot_id="boot-not-ready",
-      source_kind="platform",
-      service_ready=False,
-      loaded_files_json=loaded,
-    ),
-    SimpleNamespace(
-      boot_id="boot-served",
-      source_kind="platform",
-      service_ready=True,
-      loaded_files_json=loaded,
-    ),
-  ):
-    assert platform_restart.requirement_matches_snapshot(
-      requirement, snapshot,
-    ) is False
-
-
-def test_wait_verdict_leaves_unrelated_not_ready_and_baked_boots_pending():
+def test_wait_verdict_requires_only_a_later_ready_boot():
   created_at = now_naive_utc()
   requirement = {
     "version": platform_restart.REQUIREMENT_VERSION,
@@ -208,9 +166,16 @@ def test_wait_verdict_leaves_unrelated_not_ready_and_baked_boots_pending():
     db.add(models.PlatformBootSnapshot(
       boot_id="boot-not-ready",
       source_kind="platform",
-      loaded_files_json=requirement["files"],
+      loaded_files_json={},
       service_ready=False,
       captured_at=created_at + timedelta(seconds=1),
+    ))
+    db.add(models.PlatformBootSnapshot(
+      boot_id="boot-served",
+      source_kind="platform",
+      loaded_files_json={},
+      service_ready=True,
+      captured_at=created_at + timedelta(seconds=2),
     ))
     db.commit()
     assert platform_restart.activation_wait_verdict(db, row) == ("pending", "")
@@ -218,15 +183,17 @@ def test_wait_verdict_leaves_unrelated_not_ready_and_baked_boots_pending():
     db.add(models.PlatformBootSnapshot(
       boot_id="boot-baked",
       source_kind="baked",
-      loaded_files_json=requirement["files"],
+      loaded_files_json={},
       service_ready=True,
-      captured_at=created_at + timedelta(seconds=2),
+      captured_at=created_at + timedelta(seconds=3),
     ))
     db.commit()
-    assert platform_restart.activation_wait_verdict(db, row) == ("pending", "")
+    assert platform_restart.activation_wait_verdict(db, row) == (
+      "met", "A later ready Möbius boot was observed.",
+    )
 
 
-def test_ready_boot_capture_hashes_wait_paths_and_requires_writer_readiness(
+def test_ready_boot_capture_records_event_and_requires_writer_readiness(
   monkeypatch, tmp_path,
 ):
   repo, source, _base = _restart_repo(monkeypatch, tmp_path)
@@ -234,13 +201,6 @@ def test_ready_boot_capture_hashes_wait_paths_and_requires_writer_readiness(
   target_sha = _commit(repo, "approved server change")
   requirement = platform_restart.build_restart_requirement(repo)
   platform_update.SERVING_SHA_FILE.write_text(f"{target_sha}\n", encoding="utf-8")
-  # A new boot captures committed inputs before imports; changing a sentinel
-  # alone is deliberately no longer evidence about the running source.
-  from app import boot_source
-  monkeypatch.setattr(boot_source, "BOOT_SOURCE_INPUTS", boot_source.capture_boot_source_inputs(
-    repo, source_kind="platform", source_sha=target_sha,
-  ))
-
   now = now_naive_utc()
   with SessionLocal() as db:
     db.add(models.Chat(id="chat-proof", title="Proof", messages=[]))
@@ -260,23 +220,19 @@ def test_ready_boot_capture_hashes_wait_paths_and_requires_writer_readiness(
 
     monkeypatch.setattr(chat_writer, "writer_readiness", lambda: (False, "starting"))
     not_ready = platform_restart.capture_ready_boot_snapshot(
-      db, boot_id="boot-starting", repo=repo,
+      db, boot_id="boot-starting",
     )
-    assert not_ready.loaded_files_json == requirement["files"]
+    assert not_ready.loaded_files_json == {}
     assert not_ready.service_ready is False
-    assert platform_restart.requirement_matches_snapshot(
-      requirement, not_ready,
-    ) is False
 
     monkeypatch.setattr(chat_writer, "writer_readiness", lambda: (True, None))
     ready = platform_restart.capture_ready_boot_snapshot(
-      db, boot_id="boot-ready", repo=repo,
+      db, boot_id="boot-ready",
     )
     assert ready.service_ready is True
     assert ready.source_kind == "platform"
     assert ready.source_sha == target_sha
-    assert ready.loaded_files_json == requirement["files"]
-    assert platform_restart.requirement_matches_snapshot(requirement, ready) is True
+    assert ready.loaded_files_json == {}
 
 
 def test_later_boot_reconciles_claim_without_replaying_side_effect(
@@ -287,12 +243,6 @@ def test_later_boot_reconciles_claim_without_replaying_side_effect(
   target_sha = _commit(repo, "approved server change")
   requirement = platform_restart.build_restart_requirement(repo)
   platform_update.SERVING_SHA_FILE.write_text(f"{target_sha}\n", encoding="utf-8")
-  # A new boot captures committed inputs before imports; changing a sentinel
-  # alone is deliberately no longer evidence about the running source.
-  from app import boot_source
-  monkeypatch.setattr(boot_source, "BOOT_SOURCE_INPUTS", boot_source.capture_boot_source_inputs(
-    repo, source_kind="platform", source_sha=target_sha,
-  ))
   monkeypatch.setattr(chat_writer, "writer_readiness", lambda: (True, None))
   now = now_naive_utc()
   with SessionLocal() as db:
@@ -312,7 +262,7 @@ def test_later_boot_reconciles_claim_without_replaying_side_effect(
     db.commit()
 
     snapshot = platform_restart.capture_ready_boot_snapshot(
-      db, boot_id="boot-after-ambiguous-dispatch", repo=repo,
+      db, boot_id="boot-after-ambiguous-dispatch",
     )
     execution = db.get(models.PlatformRestartExecution, requirement["action_id"])
     assert snapshot.service_ready is True
@@ -321,7 +271,7 @@ def test_later_boot_reconciles_claim_without_replaying_side_effect(
     # Re-reading the immutable boot proof is reconciliation only; there is no
     # callable restart seam here to replay.
     assert platform_restart.capture_ready_boot_snapshot(
-      db, boot_id=snapshot.boot_id, repo=repo,
+      db, boot_id=snapshot.boot_id,
     ).boot_id == snapshot.boot_id
 
 

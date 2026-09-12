@@ -510,7 +510,7 @@ def programmatic_start_blocked(
   """
   from app.platform_restart import (
     ACTIVATION_WAIT_KIND,
-    activation_barrier_for_chat,
+    activation_barrier_wait_id,
   )
   activation_wait = None
   if activation_wait_id is not None:
@@ -538,7 +538,7 @@ def programmatic_start_blocked(
     question_blocked
     or (
       activation_wait is None
-      and activation_barrier_for_chat(db, chat_id)
+      and activation_barrier_wait_id(db, chat_id) is not None
     )
     or _parked_until_for_chat(db, chat_id) is not None
     or _restart_manual_hold_for_chat(db, chat_id)

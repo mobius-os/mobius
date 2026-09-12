@@ -3,6 +3,11 @@ export function chatActivityQueryKey(chatId) {
   return ['chat-activity', String(chatId)]
 }
 
+// Activity changes and system reconnects invalidate this cache explicitly.
+// Keeping it fresh until one of those signals arrives avoids refetching a
+// complete timeline just because the chat remounted during a server restart.
+export const CHAT_ACTIVITY_STALE_TIME = Infinity
+
 export function invalidateChatActivityForSystemEvent(queryClient, event) {
   if (event?.type === 'chat_activity_changed' && event.chatId) {
     return queryClient.invalidateQueries({
