@@ -1,6 +1,7 @@
 import { test, beforeEach, afterEach, mock } from 'node:test'
 import assert from 'node:assert/strict'
-import { IDBFactory } from 'fake-indexeddb'
+import { IDBFactory, IDBObjectStore } from 'fake-indexeddb'
+import { clear, createStore, del, entries, set } from 'idb-keyval'
 
 globalThis.indexedDB = new IDBFactory()
 
@@ -20,11 +21,46 @@ import {
   retireIntent,
   storedIntentOwnership,
   subscribeOutboxSettlement,
+  subscribeOutboxChanges,
+  markIntentLocallyQueued,
+  claimIntentDispatch,
+  cancelLocalIntent,
+  editLocalIntent,
+  retryRejectedIntent,
+  discardRejectedIntent,
 } from '../chatOutbox.js'
 import { sendDraftIdentity } from '../sendAttemptIdentity.js'
 import { retireInteractiveIntent } from '../useStreamConnection.js'
 
 const realLocalStorage = globalThis.localStorage
+const realNavigator = Object.getOwnPropertyDescriptor(globalThis, 'navigator')
+
+function installReplayLocks() {
+  let held = false
+  const calls = []
+  const locks = {
+    calls,
+    request(name, options, callback) {
+      if (typeof options === 'function') { callback = options; options = {} }
+      calls.push({ name, options })
+      if (held) {
+        if (options.ifAvailable) return Promise.resolve(callback(null))
+        throw new Error('unexpected nested replay lock request')
+      }
+      held = true
+      try {
+        return Promise.resolve(callback({ name })).finally(() => { held = false })
+      } catch (error) {
+        held = false
+        return Promise.reject(error)
+      }
+    },
+  }
+  Object.defineProperty(globalThis, 'navigator', {
+    configurable: true, value: { locks },
+  })
+  return locks
+}
 
 function tokenFor(claims = {}) {
   const payload = Buffer.from(JSON.stringify({ sub: 'owner', epoch: 3, ...claims }))
@@ -91,12 +127,14 @@ function httpResponse(status) {
 
 beforeEach(async () => {
   installToken()
-  globalThis.indexedDB = new IDBFactory()
+  installReplayLocks()
   await clearOutboxForTests()
 })
 
 afterEach(() => {
   globalThis.localStorage = realLocalStorage
+  if (realNavigator) Object.defineProperty(globalThis, 'navigator', realNavigator)
+  else delete globalThis.navigator
 })
 
 test('classifyReplayOutcome separates delivery, transient, auth, and terminal responses', () => {
@@ -156,10 +194,11 @@ test('exact intent inspection accepts ordinary raw content and remains side-effe
   }), 'unknown')
   assert.equal((await list()).length, 1, 'inspection never prunes the retained row')
 
-  await enqueue({
-    chatId: 'c1', cid: 'x1', type: 'message',
-    body: { content: 'hello', cid: 'different' },
-  })
+  // Seed malformed persisted data directly: idempotent enqueue now preserves
+  // an existing body's identity instead of serving as a corruption helper.
+  await set('x1', {
+    ...(await list())[0], body: { content: 'hello', cid: 'different' },
+  }, createStore('mobius-chat-outbox', 'intents-v1'))
   assert.equal(await inspectOutboxIntent({
     chatId: 'c1', cid: 'x1', principalKey, attempt,
   }), 'absent')
@@ -368,7 +407,7 @@ test('an auth rejection is kept but attempted only once per loaded document', as
   assert.equal((await list()).length, 1)
 })
 
-test('an already-resolved answer is delivered while a permanent rejection retires', async () => {
+test('an already-resolved answer retires while a rejected background message keeps its text', async () => {
   await enqueue({
     chatId: 'c1', cid: 'ans1', type: 'answer',
     body: { content: 'x', cid: 'ans1', answers: {}, question_id: 'q1' },
@@ -380,7 +419,7 @@ test('an already-resolved answer is delivered while a permanent rejection retire
   await enqueue({ chatId: 'c1', cid: 'bad', body: { content: '', cid: 'bad' } })
   const rejected = mockRequest(() => httpResponse(400))
   await drain(rejected.request)
-  assert.equal((await list()).length, 0)
+  assert.equal((await list())[0].recovery, 'rejected')
 })
 
 test('terminal retirement announces the exact cid and outcome so one draft can reconcile', async () => {
@@ -390,8 +429,8 @@ test('terminal retirement announces the exact cid and outcome so one draft can r
   const accepted = mockRequest(() => httpResponse(202))
   await drain(accepted.request)
   await enqueue({ chatId: 'c9', cid: 'x2', body: { content: 'bad', cid: 'x2' } })
-  const rejected = mockRequest(() => httpResponse(400))
-  await drain(rejected.request)
+  // Interactive rejection has a draft owner; it may explicitly retire its copy.
+  await retireIntent('x2', { chatId: 'c9', outcome: 'failed' })
   unsubscribe()
   assert.deepEqual(seen, [
     { chatId: 'c9', cid: 'x1', type: 'message', outcome: 'delivered' },
@@ -590,4 +629,445 @@ test('quiet answer replay retires without a message row and announces answer-own
   assert.deepEqual(accepted.calls[0].record.body, body, 'replay preserves explicit ids and hidden intent')
   assert.deepEqual(await list(), [])
   assert.deepEqual(seen, [{ chatId: 'c1', cid: 'quiet-answer', type: 'answer', outcome: 'delivered' }])
+})
+
+test('projection changes publish only committed ownership-bound records and retirement', async () => {
+  const changes = []
+  const stop = subscribeOutboxChanges(change => changes.push(change))
+  try {
+    await enqueue({ chatId: 'local-chat', cid: 'local-cid', body: { cid: 'local-cid', content: 'local' } })
+    assert.equal(changes[0].kind, 'enqueue')
+    assert.equal(changes[0].record.locallyQueued, false)
+    assert.equal(changes[0].requestDelivery, false)
+    assert.equal((await list())[0].cid, changes[0].record.cid)
+    assert.equal(await markIntentLocallyQueued('local-cid', {
+      chatId: 'wrong-chat', principalKey: currentPrincipalKey(),
+    }), false)
+    assert.equal(await markIntentLocallyQueued('local-cid', {
+      chatId: 'local-chat', principalKey: 'wrong-principal',
+    }), false)
+    assert.equal(changes.length, 1, 'foreign callers cannot modify or announce the stored intent')
+    assert.equal(await markIntentLocallyQueued('local-cid', {
+      chatId: 'local-chat', principalKey: currentPrincipalKey(),
+    }), true)
+    assert.equal(changes[1].record.locallyQueued, true)
+    assert.notEqual(changes[1].requestDelivery, true, 'a transport failure does not trigger its own retry')
+    assert.equal((await list())[0].locallyQueued, true)
+    await retireIntent('local-cid', { chatId: 'local-chat', outcome: 'cancelled' })
+    assert.equal(changes[2].kind, 'retire')
+    assert.equal(changes[2].outcome, 'cancelled')
+    assert.deepEqual(await list(), [])
+    await clearChatOutbox()
+    assert.equal(changes[3].kind, 'clear')
+  } finally {
+    stop()
+  }
+})
+
+test('marking deferred presentation never recreates a missing or retired intent', async () => {
+  const options = { chatId: 'chat', principalKey: currentPrincipalKey() }
+  assert.equal(await markIntentLocallyQueued('absent', options), false)
+  await enqueue({ chatId: 'chat', cid: 'retired', body: { cid: 'retired', content: 'done' } })
+  await retireIntent('retired', { chatId: 'chat', outcome: 'delivered' }, {
+    cleanup: async () => { throw new Error('delete unavailable') },
+  })
+  assert.equal(await markIntentLocallyQueued('retired', options), false)
+  assert.deepEqual(await list(), [])
+})
+
+test('a follow-up behind an unresolved question stays durable when its queued answer fails', async () => {
+  await enqueue({ chatId: 'chat', cid: 'answer-a', type: 'answer', body: { question_id: 'question', answers: {} } })
+  await enqueue({ chatId: 'chat', cid: 'follow-up-b', body: { content: 'Please do B next', cid: 'follow-up-b' } })
+  const { request, calls } = mockRequest((_index, { record }) => (
+    record.type === 'answer'
+      ? httpResponse(422)
+      : { ...httpResponse(409), json: async () => ({ detail: { code: 'pending_question_open' } }) }
+  ))
+  await drain(request)
+  assert.equal(calls.length, 2)
+  assert.deepEqual((await list()).map(record => record.cid), ['follow-up-b'])
+  const accepted = mockRequest(() => httpResponse(202))
+  await drain(accepted.request)
+  assert.equal(accepted.calls[0].record.cid, 'follow-up-b')
+  assert.deepEqual(await list(), [])
+})
+
+test('question admission blocks follow-ups without being confused with transport failure', async () => {
+  assert.equal(classifyReplayOutcome({ ok: false, status: 409, code: 'pending_question_open' }), 'question_blocked')
+  assert.equal(classifyReplayOutcome({ ok: false, status: 409, code: 'cid_conflict' }), 'failed')
+  const record = { chatId: 'chat', cid: 'message', body: { content: 'message' } }
+  assert.equal(await deliverIntent(record, async () => ({
+    ...httpResponse(409), json: async () => ({ detail: { code: 'cid_conflict' } }),
+  })), 'failed')
+})
+
+
+test('only a newly submitted deferred intent requests delivery from change listeners', async () => {
+  const changes = []
+  const stop = subscribeOutboxChanges(change => changes.push(change))
+  try {
+    await enqueue({ chatId: 'chat', cid: 'deferred', locallyQueued: true, body: { cid: 'deferred', content: 'later' } })
+    assert.equal(changes[0].requestDelivery, true)
+    await markIntentLocallyQueued('deferred', { chatId: 'chat', principalKey: currentPrincipalKey() })
+    assert.notEqual(changes[1].requestDelivery, true)
+  } finally { stop() }
+})
+
+function localOwner(chatId = 'local') {
+  return { chatId, principalKey: currentPrincipalKey() }
+}
+function queuedRecord(cid = 'q', body = {}) {
+  return { chatId: 'local', cid, locallyQueued: true, body: { cid, content: 'original', ...body } }
+}
+
+test('never-dispatched cancellation wins atomically before a captured replay can POST', async () => {
+  await enqueue(queuedRecord())
+  const captured = (await list())[0]
+  assert.equal(captured.dispatchStarted, false)
+  const [cancel, claim] = await Promise.all([
+    cancelLocalIntent('q', localOwner()),
+    claimIntentDispatch('q', localOwner()),
+  ])
+  assert.equal(cancel.status, 'cancelled')
+  assert.ok(['retired', 'absent'].includes(claim.status))
+  const { calls, request } = mockRequest(() => httpResponse(202))
+  await drain(request)
+  assert.equal(calls.length, 0)
+  assert.deepEqual(await list(), [])
+})
+
+test('dispatch claim wins atomically and local cancellation cannot claim uncertain server work', async () => {
+  await enqueue(queuedRecord())
+  const [claim, cancel] = await Promise.all([
+    claimIntentDispatch('q', localOwner()),
+    cancelLocalIntent('q', localOwner()),
+  ])
+  assert.equal(claim.status, 'claimed')
+  assert.equal(claim.record.dispatchStarted, true)
+  assert.equal(cancel.status, 'uncertain')
+  assert.equal((await list())[0].dispatchStarted, true)
+  assert.equal((await editLocalIntent('q', { ...localOwner(), content: 'replacement' })).status, 'uncertain')
+})
+
+test('plain local edit preserves attachments and metadata and dispatch reads the committed edit', async () => {
+  const attachments = [{ name: 'photo.png', url: '/api/files/photo.png', size: 30 }]
+  await enqueue(queuedRecord('q', { attachments, viewport: { width: 390 }, timezone: 'Europe/London' }))
+  const before = (await list())[0]
+  const [edit, claim] = await Promise.all([
+    editLocalIntent('q', { ...localOwner(), content: ' edited text ' }),
+    claimIntentDispatch('q', localOwner()),
+  ])
+  assert.equal(edit.status, 'saved')
+  assert.equal(claim.status, 'claimed')
+  assert.deepEqual(claim.record.body, { ...before.body, content: 'edited text' })
+  assert.equal(claim.record.cid, before.cid)
+  assert.equal(claim.record.createdAt, before.createdAt)
+  await enqueue(queuedRecord('q', { content: 'stale captured original' }))
+  assert.equal((await list())[0].body.content, 'edited text', 'sameCID re-enqueue cannot silently overwrite the canonical body')
+  assert.equal((await list())[0].dispatchStarted, true, 'retry cannot restore a never-dispatched proof')
+})
+
+test('local edit rejects augmented and answer bodies without losing hidden context', async () => {
+  for (const content of [
+    'original\n\n<app_state>context</app_state>',
+    'original\n\n<agent_experience>context</agent_experience>',
+    'original\n[Files in this session:\nphoto.png]',
+  ]) {
+    await clearOutboxForTests()
+    await enqueue(queuedRecord('q', { content }))
+    assert.equal((await editLocalIntent('q', { ...localOwner(), content: 'edited' })).status, 'unsupported')
+    assert.equal((await list())[0].body.content, content)
+  }
+  await clearOutboxForTests()
+  await enqueue({ ...queuedRecord('answer'), type: 'answer', body: { answers: { choice: 'Yes' }, question_id: 'card' } })
+  assert.equal((await editLocalIntent('answer', { ...localOwner(), content: 'edited' })).status, 'unsupported')
+})
+
+test('legacy intents have no never-dispatched proof and remain replayable without unsafe mutation', async () => {
+  const record = { ...queuedRecord('legacy'), principalKey: currentPrincipalKey(), createdAt: 1 }
+  await set('legacy', record, createStore('mobius-chat-outbox', 'intents-v1'))
+  assert.equal((await cancelLocalIntent('legacy', localOwner())).status, 'uncertain')
+  assert.equal((await editLocalIntent('legacy', { ...localOwner(), content: 'edited' })).status, 'uncertain')
+  const claim = await claimIntentDispatch('legacy', localOwner())
+  assert.equal(claim.status, 'claimed')
+  assert.deepEqual(claim.record.body, record.body)
+  assert.equal(claim.record.dispatchStarted, true)
+})
+
+test('dispatch, edit and local cancel cannot cross owner or chat boundaries', async () => {
+  await enqueue(queuedRecord())
+  for (const owner of [localOwner('other-chat'), { ...localOwner(), principalKey: 'other-owner' }]) {
+    assert.equal((await claimIntentDispatch('q', owner)).status, 'not_owned')
+    assert.equal((await editLocalIntent('q', { ...owner, content: 'foreign edit' })).status, 'not_local')
+    assert.equal((await cancelLocalIntent('q', owner)).status, 'not_local')
+  }
+  const retained = (await list())[0]
+  assert.equal(retained.body.content, 'original')
+  assert.equal(retained.dispatchStarted, false)
+})
+
+test('a late authorization response never recreates a retired intent', async () => {
+  await enqueue(queuedRecord())
+  let resolveRequest
+  const draining = drain(() => new Promise(resolve => { resolveRequest = resolve }))
+  for (let index = 0; index < 30 && !resolveRequest; index += 1) {
+    await new Promise(resolve => setTimeout(resolve, 0))
+  }
+  assert.equal(typeof resolveRequest, 'function')
+  await retireIntent('q', { chatId: 'local', outcome: 'cancelled' })
+  resolveRequest(httpResponse(403))
+  await draining
+  assert.deepEqual(await list(), [])
+})
+
+test('active replay refuses local mutations rather than invalidate an older tab snapshot', async () => {
+  await enqueue(queuedRecord('a'))
+  await enqueue(queuedRecord('b'))
+  await enqueue(queuedRecord('c'))
+  let releaseFirst
+  const sent = []
+  const draining = drain(async record => {
+    sent.push(record)
+    if (record.cid === 'a') await new Promise(resolve => { releaseFirst = resolve })
+    return httpResponse(202)
+  })
+  for (let index = 0; index < 30 && !releaseFirst; index += 1) {
+    await new Promise(resolve => setTimeout(resolve, 0))
+  }
+  assert.equal(typeof releaseFirst, 'function')
+  assert.deepEqual(await cancelLocalIntent('b', localOwner()), { status: 'uncertain', reason: 'replay_busy' })
+  assert.deepEqual(await editLocalIntent('c', { ...localOwner(), content: 'new C' }), { status: 'uncertain', reason: 'replay_busy' })
+  releaseFirst()
+  await draining
+  assert.deepEqual(sent.map(record => record.cid), ['a', 'b', 'c'])
+  assert.equal(sent[2].body.content, 'original', 'the refused edit never claims to change the replay body')
+  assert.deepEqual(await list(), [])
+})
+
+test('unavailable local ownership transactions report failure without claiming cancellation or dispatch', async () => {
+  await enqueue(queuedRecord())
+  const failure = mock.method(IDBObjectStore.prototype, 'get', () => { throw new Error('IndexedDB unavailable') })
+  try {
+    assert.equal((await claimIntentDispatch('q', localOwner())).status, 'unavailable')
+    assert.equal((await cancelLocalIntent('q', localOwner())).status, 'unavailable')
+    assert.equal((await editLocalIntent('q', { ...localOwner(), content: 'edited' })).status, 'unavailable')
+  } finally { failure.mock.restore() }
+  const retained = (await list())[0]
+  assert.equal(retained.dispatchStarted, false)
+  assert.equal(retained.body.content, 'original')
+})
+
+test('local mutations use the existing free replay lock without queueing or nesting dispatch claims', async () => {
+  await enqueue(queuedRecord())
+  const locks = navigator.locks
+  assert.equal((await editLocalIntent('q', { ...localOwner(), content: 'edited' })).status, 'saved')
+  assert.equal((await cancelLocalIntent('q', localOwner())).status, 'cancelled')
+  assert.deepEqual(locks.calls, [
+    { name: 'mobius-chat-outbox', options: { ifAvailable: true } },
+    { name: 'mobius-chat-outbox', options: { ifAvailable: true } },
+  ])
+  await enqueue(queuedRecord('dispatch'))
+  await locks.request('mobius-chat-outbox', async () => {
+    assert.equal((await claimIntentDispatch('dispatch', localOwner())).status, 'claimed')
+  })
+  assert.equal(locks.calls.length, 3, 'claim does not reacquire the drain-owned lock')
+})
+
+test('a pre-upgrade tab holding a snapshot blocks local mutations immediately without changing intent', async () => {
+  await enqueue(queuedRecord())
+  let releaseOldTab
+  let captured
+  const oldTab = navigator.locks.request('mobius-chat-outbox', async () => {
+    captured = (await list())[0]
+    await new Promise(resolve => { releaseOldTab = resolve })
+  })
+  for (let index = 0; index < 30 && !releaseOldTab; index += 1) {
+    await new Promise(resolve => setTimeout(resolve, 0))
+  }
+  assert.equal(typeof releaseOldTab, 'function')
+  // The old implementation never changes dispatchStarted before POST.
+  assert.equal(captured.dispatchStarted, false)
+  assert.deepEqual(await editLocalIntent('q', { ...localOwner(), content: 'unsafe edit' }), {
+    status: 'uncertain', reason: 'replay_busy',
+  })
+  assert.deepEqual(await cancelLocalIntent('q', localOwner()), {
+    status: 'uncertain', reason: 'replay_busy',
+  })
+  assert.deepEqual((await list())[0], captured)
+  releaseOldTab()
+  await oldTab
+  assert.equal((await editLocalIntent('q', { ...localOwner(), content: 'safe edit' })).status, 'saved')
+  assert.equal((await cancelLocalIntent('q', localOwner())).status, 'cancelled')
+})
+
+test('without Web Locks local mutation stays conservative while replay remains available', async () => {
+  await enqueue(queuedRecord())
+  Object.defineProperty(globalThis, 'navigator', { configurable: true, value: {} })
+  const before = (await list())[0]
+  assert.deepEqual(await editLocalIntent('q', { ...localOwner(), content: 'unsafe' }), {
+    status: 'uncertain', reason: 'replay_lock_unavailable',
+  })
+  assert.deepEqual(await cancelLocalIntent('q', localOwner()), {
+    status: 'uncertain', reason: 'replay_lock_unavailable',
+  })
+  assert.deepEqual((await list())[0], before)
+  const { calls, request } = mockRequest(() => httpResponse(202))
+  await drain(request)
+  assert.equal(calls.length, 1)
+  assert.deepEqual(await list(), [])
+})
+
+
+test('a blocked follow-up cannot starve its corrected answer or another chat', async t => {
+  let timestamp = 1000
+  t.mock.method(Date, 'now', () => timestamp++)
+  for (const [cid, type, chatId] of [
+    ['rejected-answer', 'answer', 'chat'],
+    ['follow-up-b', 'message', 'chat'],
+    ['follow-up-d', 'message', 'chat'],
+    ['corrected-answer', 'answer', 'chat'],
+    ['unrelated', 'message', 'other'],
+  ]) await enqueue({ chatId, cid, type, body: { cid, content: cid } })
+  let answered = false
+  const { request, calls } = mockRequest((_index, { record }) => {
+    if (record.cid === 'rejected-answer') return httpResponse(422)
+    if (record.cid === 'corrected-answer') answered = true
+    if (record.type === 'message' && record.chatId === 'chat' && !answered) {
+      return { ...httpResponse(409), json: async () => ({ detail: { code: 'pending_question_open' } }) }
+    }
+    return httpResponse(202)
+  })
+  await drain(request)
+  assert.deepEqual(calls.map(call => call.record.cid), [
+    'rejected-answer', 'follow-up-b', 'corrected-answer', 'unrelated',
+  ])
+  assert.deepEqual((await list()).map(record => record.cid), ['follow-up-b', 'follow-up-d'])
+  await drain(request)
+  assert.deepEqual(calls.slice(-2).map(call => call.record.cid), ['follow-up-b', 'follow-up-d'])
+  assert.deepEqual(await list(), [])
+})
+
+
+for (const status of [400, 404, 409]) {
+  test(`background ${status} rejection retains text and attachments without automatic retry`, async () => {
+    installReplayLocks()
+    const body = { content: 'Keep my original text', cid: `rejected-${status}`,
+      attachments: [{ name: 'notes.txt', path: '/uploads/notes.txt', type: 'text/plain' }] }
+    const owner = { chatId: 'rejected-chat', principalKey: currentPrincipalKey() }
+    await enqueue({ ...owner, cid: body.cid, body, locallyQueued: true })
+    const rejected = mockRequest(() => new Response(JSON.stringify({ detail: {
+      code: 'model_selection_required', message: 'Choose a model before sending this chat.',
+    } }), { status, headers: { 'Content-Type': 'application/json' } }))
+    await drain(rejected.request)
+    assert.deepEqual((await list())[0].body, body)
+    assert.equal((await list())[0].recovery, 'rejected')
+    assert.equal((await list())[0].dispatchStarted, true)
+    for (let n = 0; n < 3; n++) await drain(rejected.request)
+    assert.equal(rejected.calls.length, 1, 'rejection is not an automatic retry policy')
+    // An ordinary re-enqueue cannot silently opt the owner back into replay.
+    await enqueue({ ...owner, cid: body.cid, body: { ...body, content: 'replacement' }, locallyQueued: true })
+    assert.equal((await list())[0].recovery, 'rejected')
+    assert.deepEqual((await list())[0].body, body)
+    assert.equal((await editLocalIntent(body.cid, { ...owner, content: 'changed' })).status, 'uncertain')
+    assert.equal((await cancelLocalIntent(body.cid, owner)).status, 'uncertain', 'no claim that earlier ambiguous delivery never happened')
+    assert.equal((await retryRejectedIntent(body.cid, owner)).status, 'queued')
+    const delivered = mockRequest(() => httpResponse(202))
+    await drain(delivered.request)
+    assert.deepEqual(delivered.calls[0].record.body, body)
+    assert.deepEqual(await list(), [])
+  })
+}
+
+test('discarding a rejected local copy cannot cancel or mutate other intent', async () => {
+  installReplayLocks()
+  const owner = { chatId: 'chat', principalKey: currentPrincipalKey() }
+  await enqueue({ ...owner, cid: 'failed-copy', body: { cid: 'failed-copy', content: 'failed' } })
+  await drain(mockRequest(() => httpResponse(404)).request)
+  assert.equal((await discardRejectedIntent('failed-copy', { ...owner, chatId: 'foreign' })).status, 'not_owned')
+  await enqueue({ ...owner, cid: 'newer', body: { cid: 'newer', content: 'newer draft' }, locallyQueued: true })
+  assert.equal((await discardRejectedIntent('newer', owner)).status, 'not_rejected')
+  assert.equal((await discardRejectedIntent('failed-copy', owner)).status, 'discarded')
+  const remaining = await list()
+  assert.deepEqual(remaining.map(row => row.cid), ['newer'])
+  assert.equal(remaining[0].body.content, 'newer draft')
+})
+
+
+// Frozen pre-recovery (c130) reader/drain contract: all retired rows are skipped,
+// but physical cleanup is authorized only by retirement.id. Do not teach this
+// fixture the new recovery field; it represents a still-open cached client.
+async function legacyReadAndDrain(deliver) {
+  const legacyStore = createStore('mobius-chat-outbox', 'intents-v1')
+  const rows = await entries(legacyStore)
+  for (const [key, value] of rows) {
+    if (value?.replayState === 'retired') {
+      if (value.retirement?.id) await del(key, legacyStore)
+      continue
+    }
+    if (!value?.cid || !value?.chatId || !value?.body) {
+      await del(key, legacyStore)
+      continue
+    }
+    if (value.principalKey === currentPrincipalKey()) {
+      await deliver(value)
+      await del(key, legacyStore)
+    }
+  }
+}
+
+test('cached pre-recovery reader cannot replay or compact a recoverable rejection; old logout still clears it', async () => {
+  await enqueue({ chatId: 'chat', cid: 'preserved', locallyQueued: true,
+    body: { cid: 'preserved', content: 'Kept across an older tab waking up' } })
+  await drain(mockRequest(() => httpResponse(400)).request)
+  const retained = (await list())[0]
+  assert.equal(retained.replayState, 'retired')
+  assert.equal(retained.retirement?.id, undefined)
+  const replayed = []
+  await legacyReadAndDrain(record => replayed.push(record))
+  assert.deepEqual(replayed, [])
+  assert.equal((await list())[0].body.content, retained.body.content)
+  // No new database or synthetic principal: the older explicit-logout cleanup
+  // still knows and clears the exact store containing this owner-authored text.
+  await clear(createStore('mobius-chat-outbox', 'intents-v1'))
+  assert.deepEqual(await list(), [])
+})
+
+test('failed rejection transaction leaves the original replay intent intact', async t => {
+  await enqueue({ chatId: 'chat', cid: 'keep-on-failure', body: { cid: 'keep-on-failure', content: 'Keep the original' } })
+  const originalPut = IDBObjectStore.prototype.put
+  t.mock.method(IDBObjectStore.prototype, 'put', function(value, key) {
+    if (value?.recovery === 'rejected') {
+      this.transaction.abort()
+      throw new Error('fixture rejection commit failed')
+    }
+    return originalPut.call(this, value, key)
+  })
+  await drain(mockRequest(() => httpResponse(400)).request)
+  const record = (await list())[0]
+  assert.equal(record.body.content, 'Keep the original')
+  assert.equal(record.recovery, undefined)
+})
+
+
+test('retained rejection does not block later messages and inspection does not call it auto-queued', async () => {
+  await enqueue({ chatId: 'chat', cid: 'first-rejected', body: { cid: 'first-rejected', content: 'first' } })
+  await drain(mockRequest(() => httpResponse(400)).request)
+  await enqueue({ chatId: 'other', cid: 'later', body: { cid: 'later', content: 'later' } })
+  const accepted = mockRequest(() => httpResponse(202))
+  await drain(accepted.request)
+  assert.deepEqual(accepted.calls.map(call => call.record.cid), ['later'])
+  assert.deepEqual((await list()).map(row => row.cid), ['first-rejected'])
+  assert.equal(await inspectOutboxIntent({ chatId: 'chat', cid: 'first-rejected',
+    principalKey: currentPrincipalKey(), attempt: failedAttempt('chat', 'first-rejected', 'first') }), 'absent',
+  'inspection reports no automatic delivery owner; the rejected row owns recovery')
+})
+
+test('late acceptance retirement cannot cross a renewed owner partition', async () => {
+  const currentOwner = currentPrincipalKey()
+  await enqueue({ chatId: 'chat', cid: 'same-cid', body: { cid: 'same-cid', content: 'new owner text' } })
+  await drain(mockRequest(() => httpResponse(400)).request)
+  await retireIntent('same-cid', { chatId: 'chat', principalKey: '["old-owner",0,"owner","",""]', outcome: 'delivered' })
+  assert.equal((await list())[0].body.content, 'new owner text')
+  await retireIntent('same-cid', { chatId: 'chat', principalKey: currentOwner, outcome: 'delivered' })
+  assert.deepEqual(await list(), [])
 })

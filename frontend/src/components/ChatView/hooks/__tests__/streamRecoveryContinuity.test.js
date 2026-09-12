@@ -28,7 +28,7 @@ function deferred() {
   return { promise, resolve, reject }
 }
 
-function setup(callbacks = {}) {
+async function setup(callbacks = {}) {
   globalThis.window = Object.assign(new EventTarget(), { innerHeight: 800 })
   globalThis.document = Object.assign(new EventTarget(), { visibilityState: 'visible' })
   const values = new Map()
@@ -41,7 +41,10 @@ function setup(callbacks = {}) {
     items: [{ type: 'text', content: 'The answer before interruption' }],
     assistantMessageId: 'assistant-a',
   })
-  globalThis.fetch = async () => new Response(null, { status: 204 })
+  globalThis.fetch = async url => url === '/api/ready'
+    ? Response.json({ ready: true, boot_id: 'recovery-fixture' })
+    : new Response(null, { status: 204 })
+  await verifyConnectivity()
   hook = renderHook(chat => useStreamConnection(chat, callbacks), 'a')
   return hook
 }
@@ -56,7 +59,7 @@ test('terminal 204 retains the answer until the authoritative replacement commit
   let ended = 0
   let settled = 0
   let persistedAnswer = ''
-  setup({
+  await setup({
     onStreamEnd: () => { ended++ },
     onCatchUpSettled: () => { settled++ },
     onNeedsRefresh: async options => {
@@ -93,7 +96,7 @@ test('terminal 204 retains the answer until the authoritative replacement commit
 for (const failure of ['null', 'rejected']) {
   test(`terminal 204 with ${failure} detail retains the answer and offers existing Retry`, async () => {
     let ended = 0
-    setup({
+    await setup({
       onStreamEnd: () => { ended++ },
       onNeedsRefresh: () => failure === 'null'
         ? null
@@ -113,7 +116,7 @@ test('obsolete terminal detail cannot retire a successor connection or settle it
   const requested = deferred()
   const detail = deferred()
   let settled = 0
-  setup({
+  await setup({
     onCatchUpSettled: () => { settled++ },
     onNeedsRefresh: async options => {
       requested.resolve(options)
@@ -135,7 +138,7 @@ test('obsolete terminal detail cannot retire a successor connection or settle it
 test('switching chats while terminal detail loads cannot leak or remove another chat answer', async () => {
   const requested = deferred()
   const detail = deferred()
-  setup({
+  await setup({
     onNeedsRefresh: async options => {
       requested.resolve(options)
       await detail.promise
@@ -156,7 +159,7 @@ test('switching chats while terminal detail loads cannot leak or remove another 
 })
 
 test('manual Resume does not clear the answer while acknowledgement or catchup is pending', async () => {
-  setup()
+  await setup()
   const accepted = deferred()
   const catchup = deferred()
   const getRequested = deferred()
@@ -184,7 +187,7 @@ for (const [action, options] of [
   ['direct steer', { directSteer: true }],
 ]) {
 test(`rejected ${action} leaves unrelated active stream ownership intact`, async () => {
-  setup()
+  await setup()
   const stream = deferred()
   const streamRequested = deferred()
   globalThis.fetch = async (_url, options) => {
@@ -207,7 +210,7 @@ test(`rejected ${action} leaves unrelated active stream ownership intact`, async
 
 test('failed terminal detail can retry into an atomic authoritative replacement', async () => {
   let fail = true
-  setup({
+  await setup({
     onNeedsRefresh: options => {
       if (fail) return null
       options.onReconciled({ running: false })
@@ -226,7 +229,7 @@ test('failed terminal detail can retry into an atomic authoritative replacement'
 
 test('manual Resume waits for complete server catchup before replacing the prior answer', async () => {
   const settled = deferred()
-  setup({ onCatchUpSettled: () => settled.resolve() })
+  await setup({ onCatchUpSettled: () => settled.resolve() })
   let wire
   const stream = new ReadableStream({ start(controller) { wire = controller } })
   globalThis.fetch = async (_url, options) => {
@@ -255,7 +258,7 @@ test('manual Resume waits for complete server catchup before replacing the prior
 })
 
 test('late read failure from a replaced stream cannot mark the new connection disconnected', async () => {
-  setup()
+  await setup()
   const read = deferred()
   const reading = deferred()
   globalThis.fetch = async () => ({
@@ -277,7 +280,7 @@ for (const [action, sendOptions] of [
   ['ordinary send', {}],
 ]) {
   test(`late ${action} acknowledgement cannot attach another chat`, async () => {
-    setup()
+    await setup()
     const accepted = deferred()
     const posted = deferred()
     const calls = []
@@ -303,7 +306,7 @@ for (const [action, sendOptions] of [
 }
 
 test('unmount during Resume acknowledgement does not reconnect a dead view', async () => {
-  setup()
+  await setup()
   const accepted = deferred()
   const posted = deferred()
   const calls = []
@@ -325,7 +328,7 @@ test('unmount during Resume acknowledgement does not reconnect a dead view', asy
 
 
 test('chat switches during durable intent registration keep POST and retirement bound to the original chat', async () => {
-  setup()
+  await setup()
   globalThis.indexedDB = new IDBFactory()
   const token = `stub.${Buffer.from(JSON.stringify({ sub: 'test-owner', epoch: 1 })).toString('base64url')}.stub`
   globalThis.localStorage = { getItem: () => token }
@@ -358,7 +361,7 @@ test('chat switches during durable intent registration keep POST and retirement 
 
 for (const order of ['visible-online', 'online-visible']) {
   test(`wake ${order} and runtime attachment share a pending replacement`, async () => {
-    setup()
+    await setup()
     const requests = []
     const firstRead = deferred()
     globalThis.fetch = async (url, options) => {
@@ -404,7 +407,7 @@ for (const order of ['visible-online', 'online-visible']) {
 }
 
 test('repeated attachment shares a live stream but explicit Retry replaces it', async () => {
-  setup()
+  await setup()
   const requests = []
   globalThis.fetch = async (url, options) => {
     requests.push(options.signal)
@@ -423,7 +426,7 @@ test('repeated attachment shares a live stream but explicit Retry replaces it', 
 })
 
 test('a shared pending GET still has a no-read deadline, cancelled by unmount', async () => {
-  setup()
+  await setup()
   window.__MOBIUS_KEPT_SOCKET_DEADMAN_MS = 10
   const replacement = deferred()
   const requests = []
@@ -449,7 +452,7 @@ test('a shared pending GET still has a no-read deadline, cancelled by unmount', 
 
 
 test('a successful attachment announcing network recovery must not cancel itself', async () => {
-  setup()
+  await setup()
   const requests = []
   const checked = verifyConnectivity()
   globalThis.fetch = async (url, options) => {
@@ -469,7 +472,7 @@ test('a successful attachment announcing network recovery must not cancel itself
 test('a redundant online signal cannot show Reconnecting after catchup settled', async t => {
   t.mock.timers.enable({ apis: ['setTimeout'] })
   const settled = deferred()
-  setup({ onCatchUpSettled: () => settled.resolve() })
+  await setup({ onCatchUpSettled: () => settled.resolve() })
   let requests = 0
   globalThis.fetch = async (url, options) => {
     requests++

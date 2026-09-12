@@ -989,13 +989,15 @@ def ready(response: Response):
   neither fatal nor stopping. The route only maps the verdict to a status
   code and surfaces the reason. Startup ordering is fine — the lifespan
   runs `start_writer()` before uvicorn serves, so there is no cold-start
-  window where this false-fails.
+  window where this false-fails. The boot identity accompanies both verdicts
+  so reconnecting clients do not mistake the still-answering old worker for
+  a completed restart.
   """
   response.headers["Cache-Control"] = "no-store"
   result = service_readiness()
   if not result["ready"]:
     response.status_code = 503
-  return result
+  return {**result, "boot_id": _BOOT_ID}
 
 
 @app.get("/api/ready/agent")

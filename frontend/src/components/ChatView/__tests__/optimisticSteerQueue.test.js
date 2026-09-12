@@ -66,13 +66,13 @@ test('Stop serializes behind an in-flight steer; steer bails under a committed S
   )
 })
 
-test('the foot stack hides only on the TERMINAL disconnect, not retrying blips', () => {
+test('durable queued input stays visible through transient and terminal disconnect', () => {
   // 'retrying' is a ~300ms transparent auto-reconnect; gating on it would
   // blank and pop the rail/tray on every mobile blip (review 2026-07-17).
-  assert.match(
+  assert.doesNotMatch(
     source,
     /connectionError !== 'disconnected' && \(/,
-    'the foot gate must key on the terminal disconnected state only',
+    'disconnection must not hide the owner’s locally saved queue',
   )
   assert.doesNotMatch(
     source,
@@ -97,7 +97,7 @@ test('the modified-Enter submit uses one direct request and presents it inline',
   )
   assert.match(
     source,
-    /directSteer\s*\? \{ directSteer: true, cid \}\s*: \{ queueOnly: true, cid \}/,
+    /directSteer\s*\? \{ directSteer: true, cid \}\s*: \{ queueOnly: true, cid, deferDelivery: queuesBehindLocalAnswer \}/,
     'Cmd/Ctrl+Enter must make one direct-steer POST instead of queue then force-steer',
   )
   assert.match(

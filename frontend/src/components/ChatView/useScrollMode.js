@@ -14,7 +14,7 @@
  *                                    the stable client `cid` (data-cid)
  *   { kind: 'FOLLOW_BOTTOM' }     — sticky-bottom for streaming
  *   { kind: 'ANCHOR_AT', key, offset, part?, targetKey?,
- *     questionSubmitBaseMode?, questionPrepareCancelMode? }
+ *     questionSubmitBaseMode?, questionPrepareCancelMode?, submissionLayoutHold? }
  *                                  — anchored at a message and, when that row
  *                                    is taller than the viewport, an ordered
  *                                    child-index path within it (including

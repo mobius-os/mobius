@@ -33,15 +33,12 @@ import useTheme from '../../hooks/useTheme.js'
 import useProviderAuthStatus from '../../hooks/useProviderAuthStatus.js'
 import {
   useReachabilityPhase,
+  useDeliveryReady,
   useRecoveryGeneration,
 } from '../../hooks/useOnlineStatus.js'
 import useRestartPending from '../../hooks/useRestartPending.js'
 import useOutboxDrain from '../../hooks/useOutboxDrain.js'
-import { ReachabilityPhase, verifyConnectivity } from '../../lib/connectivityStore.js'
-import {
-  clearRestartPending,
-  setRestartPending,
-} from '../../lib/restartStore.js'
+import { ReachabilityPhase, getDeliveryReadySnapshot, setRestartPending, verifyConnectivity } from '../../lib/connectivityStore.js'
 import {
   appQueries,
   appSourceQueries,
@@ -897,25 +894,18 @@ export default function Shell({ onInitialVisualReady }) {
     ))
   }, [])
 
-  // One shell-wide indicator owns the persistent offline explanation. Chat
-  // still disables sends while unavailable, but does not repeat this status
-  // beside the composer.
+  // One readable status explains why sends are waiting locally. Reachability
+  // remains separate so a service restart never masquerades as device Offline.
   const reachabilityPhase = useReachabilityPhase()
+  const deliveryReady = useDeliveryReady()
   const recoveryGeneration = useRecoveryGeneration()
   const recoveryGenerationRef = useRef(recoveryGeneration)
   recoveryGenerationRef.current = recoveryGeneration
   const online = reachabilityPhase !== ReachabilityPhase.OFFLINE
-  const reachabilityLabel = reachabilityPhase === ReachabilityPhase.CHECKING
-    ? 'Reconnecting…'
-    : (reachabilityPhase === ReachabilityPhase.OFFLINE ? 'Offline' : null)
-  // A planned restart is signalled on the system bus BEFORE the process dies
-  // (server_restarting), which is the only cue that covers a graceful drain —
-  // health still answers, so reachability alone shows nothing. Fold it into the
-  // SAME single dot: reachability wins once the process is actually down, so an
-  // OR of the two labels is exactly one indicator, never two. See restartStore.
   const restartPending = useRestartPending()
-  const connectionStatusLabel = reachabilityLabel
-    || (restartPending ? 'Restarting…' : null)
+  const connectionStatusLabel = restartPending ? 'Restarting…'
+    : reachabilityPhase === ReachabilityPhase.OFFLINE ? 'Offline'
+      : !deliveryReady ? 'Reconnecting…' : null
   // Replay any durably-queued send/answer as soon as the shell reconnects,
   // regardless of which view is open. Single-flight, so it composes with a
   // mounted chat's own reconnect reconcile without double-posting.
@@ -3217,20 +3207,11 @@ export default function Shell({ onInitialVisualReady }) {
       // producer logs the diagnostic and retries; an explicit operation such
       // as a platform update reports its own failure where it was initiated.
     } else if (ev.type === 'server_restarting') {
-      // Published by the draining OLD process before it goes down (the only cue
-      // that covers a graceful drain). setRestartPending arms an unconditional
-      // auto-expire, so a missed clear can never strand the dot; module-level
-      // store functions are stable and need no dep entry.
-      setRestartPending()
-      // The old process is about to stop answering. Put the one shared
-      // reachability owner into CHECKING now, so the first response from the
-      // new process creates a recovery generation for every mounted chat.
-      void verifyConnectivity()
+      // Capture the old boot before drain. Only readiness from a different
+      // boot releases queued sends; an answering old process cannot do so.
+      setRestartPending(ev.boot_id)
     } else if (ev.type === 'server_ready') {
-      // Best-effort secondary clear: the new process publishes this at startup
-      // before any client has resubscribed, so it is usually dropped. The
-      // authoritative clear is reconcileSystemStateOnOpen on first reconnect.
-      clearRestartPending()
+      void verifyConnectivity()
     } else if (ev.type === 'notification_created') {
       // The event is only a nudge; the durable list/count remain authoritative.
       // Keeping this behind the notification-center interface prevents the
@@ -3259,10 +3240,7 @@ export default function Shell({ onInitialVisualReady }) {
   // first list establishes the session baseline, fresh chat-owned rows flow
   // through the same idempotent placement resolver as live app_preview_ready events.
   const reconcileSystemStateOnOpen = useCallback(async ({ signal } = {}) => {
-    // First successful (re)connect to the system stream is the authoritative
-    // "we're back" signal — server_ready is almost always dropped (published
-    // before any client resubscribes), so the reconnect itself clears the dot.
-    clearRestartPending()
+    // A stream can reopen on the draining process; readiness owns delivery.
     reconcileNotifications()
     // App/project refreshes own different state. They must not hold the chat
     // catch-up barrier open when an editor request or offline cache is stalled.
@@ -3415,7 +3393,7 @@ export default function Shell({ onInitialVisualReady }) {
     // Creating a fresh chat needs the server (POST allocates the row, and a chat is
     // only useful once the server-side agent can run). The reuse branch already handled
     // the offline-friendly case, so reaching here offline means we truly need network.
-    if (!online) return { chatId: null, reason: 'offline' }
+    if (!getDeliveryReadySnapshot()) return { chatId: null, reason: 'offline' }
     // Spam-click guard: when no empty exists, two rapid taps would race two POSTs and
     // leave an extra empty behind. The in-flight ref short-circuits until the first
     // resolves — the caller acknowledges the tap without a second create.
@@ -3469,7 +3447,7 @@ export default function Shell({ onInitialVisualReady }) {
    */
   async function createDraftFirstChat(chatId) {
     const id = String(chatId)
-    if (!online) return { verdict: 'offline', chat: null }
+    if (!getDeliveryReadySnapshot()) return { verdict: 'offline', chat: null }
     const inFlight = newChatAllocationPromisesRef.current.get(id)
     if (inFlight) return inFlight
 
@@ -3759,9 +3737,9 @@ export default function Shell({ onInitialVisualReady }) {
   // create a retry loop while an ordinary server error remains unresolved.
   useEffect(() => {
     const presentation = newChatPresentationRef.current
-    if (!shouldRetryNewChatAllocation(presentation, recoveryGeneration)) return
+    if (!deliveryReady || !shouldRetryNewChatAllocation(presentation, recoveryGeneration)) return
     retryDraftFirstNewChat()
-  }, [recoveryGeneration, retryDraftFirstNewChat])
+  }, [deliveryReady, recoveryGeneration, retryDraftFirstNewChat])
 
   function startUserNewChatPresentation({ forceNew = false } = {}) {
     const ws = workspaceStateRef.current.ws
@@ -4558,16 +4536,12 @@ export default function Shell({ onInitialVisualReady }) {
             <SettingsNavIcon aria-hidden="true" />
           </button>
         </nav>
+        {connectionStatusLabel && (
+          <span className="shell__connection-status" role="status" aria-live="polite">
+            {connectionStatusLabel}
+          </span>
+        )}
         <div className="shell__bar-actions">
-          {connectionStatusLabel && (
-            <span
-              className="shell__connection-status"
-              role="status"
-              aria-live="polite"
-            >
-              <span className="shell__sr-only">{connectionStatusLabel}</span>
-            </span>
-          )}
           <ScreenControlButton chatId={activeChatId} onNotice={showToast} />
           <NotificationCenter
             ref={notificationCenterActionsRef}

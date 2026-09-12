@@ -1,6 +1,10 @@
 import { readFileSync } from 'node:fs'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { createElement } from 'react'
+import { renderToStaticMarkup } from 'react-dom/server'
+import QuestionCard from '../QuestionCard.jsx'
+import { LocalAnswersContext } from '../localAnswersContext.js'
 
 const component = readFileSync(new URL('../QuestionCard.jsx', import.meta.url), 'utf8')
 const chatView = readFileSync(new URL('../ChatView.jsx', import.meta.url), 'utf8')
@@ -30,13 +34,11 @@ test('unanswered question cards do not have a stale gray state', () => {
     'unanswered cards should not tell the user the question expired')
   assert.match(component, /\{!completedAction && \(answered \|\| !disabled\) && \([\s\S]*<button[\s\S]*className="qcard__submit"/,
     'submit button should remain in place after an answer is submitted')
-  assert.match(component, /submitting \? 'Submitting…' : \(answered \? 'Submitted' : restartAction \? 'Continue' : 'Submit'\)/,
-    'the retained submit button should explain pending and answered states')
   assert.match(component, /\{!completedAction && \(!disabled \|\| answered\) && \(\s*<div className="qcard__hint"/,
     'selection hints should stay in place after the answer is submitted')
   assert.doesNotMatch(component, /qcard__opt--other/,
     'a custom answer should be a direct writing surface, not an Other option')
-  assert.match(component, /<CustomAnswerArea[\s\S]*?answered=\{answered\}[\s\S]*?value=\{answered[\s\S]*?unmatchedAnswers\.join\(', '\)/,
+  assert.match(component, /<CustomAnswerArea[\s\S]*?answered=\{selectionLocked\}[\s\S]*?value=\{selectionLocked[\s\S]*?unmatchedAnswers\.join\(', '\)/,
     'the custom answer should stay mounted and retain submitted custom text')
   assert.match(component, /placeholder=\{restartAction \? 'Or tell me what you’d like to do instead…'/,
     'a Restart card should replace Not now with a written response')
@@ -70,7 +72,7 @@ test('unanswered question cards do not have a stale gray state', () => {
     'a transient disabled handoff must not erase an offline choice')
   assert.match(component, /Your choice is saved — submit it when you’re back online/,
     'an offline submit should explain that the choice is retained')
-  assert.match(component, /const accepted = await onAnswer[\s\S]*if \(accepted === false\)[\s\S]*else \{\s*setSubmitted\(true\)/,
+  assert.match(component, /const accepted = await onAnswer[\s\S]*if \(accepted === false \|\| accepted\?\.status === 'locally_queued' \|\| accepted\?\.status === 'locally_settled'\)[\s\S]*else \{\s*setSubmitted\(true\)/,
     'a card should settle only after the answer request is accepted')
   assert.match(component, /catch \(error\) \{[\s\S]*Keep the choices and[\s\S]*\} finally/,
     'a failed answer should retain its retryable draft')
@@ -140,9 +142,9 @@ test('question submission freezes the visible anchor before the async handoff', 
     'a rejected competing answer must retire its provisional press hold')
   assert.match(component, /useEffect\(\(\) => \(\) => cancelPreparedSubmission\(\)/,
     'an unmounted or replaced question card must retire an unclicked press')
-  assert.match(component, /if \(answered \|\| disabled \|\| submitting\) cancelPreparedSubmission\(\)/,
+  assert.match(component, /if \(selectionLocked \|\| disabled \|\| submitting\) cancelPreparedSubmission\(\)/,
     'a card made inactive before click must retire its provisional hold')
-  assert.match(component, /if \(accepted === false\) \{[\s\S]*?onCancelAnswer\?\.\(preparedSubmission\)/,
+  assert.match(component, /if \(accepted === false \|\| accepted\?\.status === 'locally_queued' \|\| accepted\?\.status === 'locally_settled'\) \{[\s\S]*?onCancelAnswer\?\.\(preparedSubmission\)/,
     'a non-accepted answer must restore the activation-time base')
 })
 
@@ -154,7 +156,40 @@ test('a pending question exposes Stop instead of an impossible steer', () => {
   )
   assert.match(
     chatView,
-    /steerActive=\{turnActive && !hasPendingQuestion\}/,
+    /steerActive=\{turnActive && !hasPendingQuestion && deliveryReady\}/,
     'queued rows must not offer per-row steer while the live question blocks it',
   )
+})
+
+
+test('question submission labels distinguish local delivery from a committed answer', () => {
+  const local = { chatId: 'labels', body: { question_id: 'labels-q', answers: { 'Next?': 'Yes' } } }
+  for (const [records, answeredMap, label, platformAction] of [
+    [[], undefined, 'Submit'],
+    [[local], undefined, 'Queued on this device'],
+    [[{ ...local, deliveryOutcome: 'delivered' }], undefined, 'Confirming answer…'],
+    [[local], { 'Next?': 'Yes' }, 'Submitted'],
+    [[], undefined, 'Continue', { type: 'restart', version: 2, status: 'pending', restart_option_id: 'yes' }],
+  ]) {
+    const html = renderToStaticMarkup(createElement(LocalAnswersContext.Provider, { value: records },
+      createElement(QuestionCard, {
+        chatId: 'labels', questionId: 'labels-q', answeredMap, platformAction,
+        questions: [{ id: 'next', question: 'Next?', options: [{ id: 'yes', label: 'Yes' }] }],
+      })))
+    assert.match(html, new RegExp(`>${label}</button>`))
+  }
+})
+
+
+test('terminal restart actions show upstream status detail without dead submission controls', () => {
+  for (const [status, label] of [['restart_requested', 'Restart requested'], ['activated', 'Möbius restarted'], ['responded', 'Response sent']]) {
+    const html = renderToStaticMarkup(createElement(QuestionCard, {
+      chatId: 'restart-labels', questionId: 'restart-q',
+      platformAction: { type: 'restart', version: 2, status, restart_option_id: 'restart' },
+      questions: [{ id: 'next', question: 'Restart?', options: [{ id: 'restart', label: 'Restart now' }] }],
+    }))
+    assert.ok(html.includes(label))
+    assert.match(html, /qcard__action-detail/)
+    assert.doesNotMatch(html, /qcard__submit|qcard__opts/)
+  }
 })

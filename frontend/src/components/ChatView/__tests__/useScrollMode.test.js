@@ -441,7 +441,7 @@ test('queued submission freezes the visible row before footer reflow', () => {
   }
   assert.deepEqual(
     modeForQueuedSubmission(scrollEl, { kind: 'FOLLOW_BOTTOM' }),
-    { kind: 'ANCHOR_AT', key: 'assistant-live', offset: 60 },
+    { kind: 'ANCHOR_AT', key: 'assistant-live', offset: 60, submissionLayoutHold: true },
   )
 })
 
@@ -676,7 +676,7 @@ test('queued submission anchors before the active assistant shell that steer wil
 
   assert.deepEqual(
     modeForQueuedSubmission(scrollEl, { kind: 'FOLLOW_BOTTOM' }),
-    { kind: 'ANCHOR_AT', key: 'user-stable', offset: -792 },
+    { kind: 'ANCHOR_AT', key: 'user-stable', offset: -792, submissionLayoutHold: true },
   )
 })
 
@@ -2318,4 +2318,64 @@ test('a part path that no longer resolves fails the restore rather than jumping 
   applyMode(scrollEl, restored)
   assert.equal(scrollEl.scrollTop, 6300,
     'lands on real content at the tail instead of scrollTop 0')
+})
+
+
+test('queued-send capture and restoration share scroll-container coordinates', () => {
+  const row = { offsetTop: 84, offsetHeight: 1000, dataset: { key: 'answer' },
+    getBoundingClientRect: () => ({ top: -427.5 }) }
+  const scrollEl = {
+    clientHeight: 865, scrollTop: 557,
+    getBoundingClientRect: () => ({ top: 46, height: 865 }),
+    querySelectorAll: () => [row],
+    querySelector: selector => selector === '[data-key="answer"]' ? row : null,
+  }
+  const mode = modeForQueuedSubmission(scrollEl, { kind: 'FOLLOW_BOTTOM' })
+  assert.equal(mode.offset, -473.5)
+  applyMode(scrollEl, mode)
+  assert.equal(scrollEl.scrollTop, 557,
+    'capture and reapply do not introduce offsetParent or subpixel displacement')
+})
+
+
+test('queued submission retains only the room needed to keep the reading position', () => {
+  const user = { offsetTop: 8, offsetHeight: 50, dataset: { key: 'user' } }
+  const active = { offsetTop: 84, offsetHeight: 1000, dataset: { key: 'active' },
+    hasAttribute: name => name === 'data-active-assistant' }
+  const scrollEl = {
+    clientHeight: 865, scrollTop: 557,
+    querySelectorAll: () => [user, active],
+    querySelector: selector => selector === '[data-key="user"]' ? user : null,
+  }
+  const mode = modeForQueuedSubmission(scrollEl, { kind: 'FOLLOW_BOTTOM' })
+  assert.deepEqual(mode, { kind: 'ANCHOR_AT', key: 'user', offset: 8 - 557, submissionLayoutHold: true },
+    'the stable row survives an active assistant split')
+  for (const [offsetHeight, room] of [[1396, 26], [1416, 6], [1436, 0]]) {
+    assert.equal(_computeSpacerH(scrollEl, { offsetHeight }, user, mode,
+      { pinViewportHeight: 1200 }), room,
+    'content consumes the exact deficit; queue hold uses the active viewport, not the keyboard ceiling')
+  }
+  const ordinary = { kind: 'ANCHOR_AT', key: mode.key, offset: mode.offset }
+  assert.equal(_computeSpacerH(scrollEl, { offsetHeight: 1396 }, user, ordinary), 0,
+    'new reader intent does not retain submission room')
+  const laterUser = { offsetTop: 600 }
+  assert.equal(_computeSpacerH(scrollEl, { offsetHeight: 1396 }, laterUser, mode),
+    Math.max(26, _computeSpacerH(scrollEl, { offsetHeight: 1396 }, laterUser, ordinary)),
+    'latest-user and submission deficits share one spacer rather than adding together')
+})
+
+
+test('durable queue anchors lose submission authority and cannot restore off-content space', () => {
+  const row = { offsetTop: 720, offsetHeight: 120, dataset: { key: 'answer' } }
+  const scrollEl = {
+    clientHeight: 600, scrollTop: 660,
+    querySelectorAll: () => [row],
+    querySelector: selector => selector === '[data-key="answer"]' ? row : null,
+  }
+  const captured = modeForQueuedSubmission(scrollEl, { kind: 'FOLLOW_BOTTOM' })
+  const durable = _validateSavedMode(captured, [], scrollEl)
+  assert.deepEqual(durable, { kind: 'ANCHOR_AT', key: 'answer', offset: 60 })
+  const offContent = _validateSavedMode({ ...captured, offset: -500 }, [], scrollEl)
+  assert.notEqual(offContent.offset, -500)
+  assert.equal(offContent.submissionLayoutHold, undefined)
 })

@@ -69,13 +69,12 @@ test('only transient nudges float above the measured rail → connection → que
 })
 
 test('the shell is the one persistent connection owner while send failures stay contextual', () => {
-  assert.match(shell, /ReachabilityPhase\.CHECKING[\s\S]*?'Reconnecting…'/)
+  assert.match(shell, /restartPending \? 'Restarting…'/)
   assert.match(shell, /ReachabilityPhase\.OFFLINE \? 'Offline'/)
-  // The one dot now covers a planned restart too: a single element gated on
-  // (reachabilityLabel || restartPending) so a drain and the process-down window
-  // never render two indicators. See restartStore.
-  assert.match(shell, /const connectionStatusLabel = reachabilityLabel[\s\S]*?restartPending \? 'Restarting…'/)
-  assert.match(shell, /\{connectionStatusLabel && \([\s\S]*?className="shell__connection-status"[\s\S]*?shell__sr-only/)
+  assert.match(shell, /!deliveryReady \? 'Reconnecting…'/)
+  assert.match(shell, /\{connectionStatusLabel && \([\s\S]*?className="shell__connection-status"[\s\S]*?\{connectionStatusLabel\}/)
+  assert.doesNotMatch(shell, /shell__sr-only">\{connectionStatusLabel\}/,
+    'connection state must be readable without hover or assistive technology')
   assert.doesNotMatch(chatView, /You're offline — chat needs a connection\./)
   assert.doesNotMatch(chatInputBar, /You're offline — chat needs a connection\./)
   assert.match(
@@ -133,18 +132,17 @@ test('retained sends move into the tray while authoritative failures restore the
     /else \{[\s\S]*?rememberFailedAttempt\(failedAttempt\)[\s\S]*?restoreComposerAfterFailedSend\(\)/,
     'only the non-retained branch may restore the composer',
   )
-  assert.match(
-    chatView,
-    /const silentUserMsg[\s\S]*?shouldKeepQueuedAfterSendFailure[\s\S]*?const \{ hidden: _hidden, \.\.\.queuedAnswerMsg \} = silentUserMsg[\s\S]*?pendingQueue\.add\(\{ \.\.\.queuedAnswerMsg, queued: true \}, \{ inFlight: false \}\)[\s\S]*?return true/,
-    'a retained question answer must stay visibly queued for outbox delivery',
-  )
+  assert.match(chatView, /if \(keepQueued\) \{[\s\S]*?status: 'locally_queued', cid: silentCid/,
+    'a retained answer must return a local receipt, not pretend server acceptance')
+  assert.doesNotMatch(chatView, /queuedAnswerMsg|const silentUserMsg/,
+    'answers stay on their original card, never become visible queued user rows')
 })
 
 test('restart events verify shared connectivity so recovery generation advances', () => {
   assert.match(
     shell,
-    /ev\.type === 'server_restarting'[\s\S]*?setRestartPending\(\)[\s\S]*?void verifyConnectivity\(\)/,
-    'the restart edge must enter CHECKING before the new server answers',
+    /ev\.type === 'server_restarting'[\s\S]*?setRestartPending\(ev\.boot_id\)/,
+    'restart readiness must retain the old boot identity before the new server answers',
   )
   assert.match(
     streamConnection,
@@ -183,10 +181,12 @@ test('credential expiry preserves principal-bound intent while explicit logout w
   )
 })
 
-test('connection failure hides queued actions and disables composer steering', () => {
-  assert.match(chatView, /\{connectionError !== 'disconnected' && \([\s\S]*?<QueuedMessages/,
-    'the lost-connection state should own the footer stack until Retry succeeds')
-  assert.match(chatView, /const showSteer = !hasPendingQuestion[\s\S]*?connectionError !== 'disconnected'[\s\S]*?turnActive[\s\S]*?pendingQueue\.visiblePendingMessages\.length > 0/,
+test('connection failure preserves the local queue and disables composer steering', () => {
+  assert.doesNotMatch(chatView, /\{connectionError !== 'disconnected' && \([\s\S]*?<QueuedMessages/,
+    'connection failure must never hide durable locally queued input')
+  assert.match(chatView, /const showSteer = !hasPendingQuestion\s*&& deliveryReady/,
+    'transport reachability is insufficient for steering')
+  assert.match(chatView, /const showSteer = !hasPendingQuestion[\s\S]*?connectionError !== 'disconnected'[\s\S]*?turnActive[\s\S]*?steerCandidates\.length > 0/,
     'the visible composer steer identity must be gated by pending QA and connection health')
   assert.match(chatView, /const canSteer = canRequestSteer[\s\S]*?canFastForwardQueue/,
     'server-confirmed steering must remain stricter than the optimistic visual identity')

@@ -3,9 +3,11 @@ import { test, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { IDBFactory } from 'fake-indexeddb'
 import { renderHook } from './react-hook-shim.mjs'
+import { verifyConnectivity } from '../../../../lib/connectivityStore.js'
 import useStreamConnection from '../../useStreamConnection.js'
+import { restartCardSelectedOptions } from '../../restartCard.js'
 import { shouldRepairRuntimeStream } from '../../chatRuntimeState.js'
-import { clearOutboxForTests, listIntents, outboxPrincipalKey } from '../../chatOutbox.js'
+import { clearOutboxForTests, listIntents, outboxPrincipalKey, retireIntent, subscribeOutboxChanges } from '../../chatOutbox.js'
 import { writeStoredStreamSnapshot } from '../../streamSnapshotCache.js'
 
 const original = Object.fromEntries(
@@ -39,6 +41,8 @@ async function setup(callbacks = {}) {
   writeStoredStreamSnapshot('a', {
     items: [{ type: 'text', content: 'Existing answer' }], assistantMessageId: 'assistant-a',
   })
+  globalThis.fetch = async () => Response.json({ ready: true, boot_id: 'quiet-fixture' })
+  await verifyConnectivity()
   hook = renderHook(chat => useStreamConnection(chat, callbacks), 'a')
 }
 
@@ -222,3 +226,101 @@ test('authoritative queued follow-up runtime attaches through the existing owner
   wire.close()
   await attached
 })
+
+for (const answer of [false, true]) {
+  test(`${answer ? 'answer' : 'message'} waits in durable local ownership without a POST or stream reset when service is not ready`, async () => {
+    await setup()
+    globalThis.fetch = async () => Response.json({ ready: false, boot_id: 'quiet-fixture' }, { status: 503 })
+    await verifyConnectivity()
+    const requests = []
+    globalThis.fetch = async (url, options) => { requests.push({ url, ...options }); throw new Error('No delivery allowed') }
+    const options = answer ? answerOptions : { cid: 'local-message' }
+    const result = await hook.result.current.sendMessage('Saved locally', undefined, options)
+    assert.equal(result.status, 'locally_queued')
+    assert.equal(requests.length, 0)
+    assert.equal(hook.result.current.isStreaming, false)
+    assert.deepEqual(hook.result.current.streamItems, [{ type: 'text', content: 'Existing answer' }])
+    assert.equal(hook.result.current.streamAssistantMessageId, 'assistant-a')
+    const records = await listIntents(outboxPrincipalKey(token))
+    assert.equal(records.length, 1)
+    assert.equal(records[0].locallyQueued, true)
+    assert.equal(records[0].body.cid, options.cid)
+    if (answer) assert.deepEqual(records[0].body.selected_options, { help: ['0'] })
+  })
+}
+
+test('a follow-up explicitly handed to the outbox cannot race an interactive POST even when service is ready', async () => {
+  await setup()
+  let posts = 0
+  globalThis.fetch = async () => { posts++; throw new Error('Outbox owns this delivery') }
+  const result = await hook.result.current.sendMessage('B', undefined, {
+    cid: 'after-answer', queueOnly: true, deferDelivery: true,
+  })
+  assert.equal(result.status, 'locally_queued')
+  assert.equal(posts, 0)
+  assert.equal(hook.result.current.isStreaming, false)
+  const records = await listIntents(outboxPrincipalKey(token))
+  assert.equal(records.length, 1)
+  assert.equal(records[0].body.content, 'B')
+  assert.equal(records[0].locallyQueued, true)
+})
+
+
+test('a receipt that wins the dispatch claim cannot start a phantom answer turn', async () => {
+  await setup()
+  let posts = 0
+  globalThis.fetch = async () => { posts++; return Response.json({ status: 'started' }) }
+  const unsubscribe = subscribeOutboxChanges(change => {
+    if (change.kind === 'enqueue' && change.record.cid === answerOptions.cid) {
+      void retireIntent(answerOptions.cid, { chatId: 'a', outcome: 'delivered' })
+    }
+  })
+  try {
+    const response = await hook.result.current.sendMessage('No', undefined, answerOptions)
+    assert.equal(response.status, 'locally_settled')
+    assert.equal(posts, 0)
+    assert.equal(hook.result.current.isStreaming, false)
+    assert.equal(hook.result.current.streamItems[0].content, 'Existing answer')
+  } finally { unsubscribe() }
+})
+
+
+for (const approvesRestart of [false, true]) {
+  test(`offline Restart v2 ${approvesRestart ? 'approval' : 'written feedback'} keeps its exact authority and continuation outcome`, async () => {
+    await setup()
+    const action = { type: 'restart', version: 2, restart_option_id: 'restart-exact' }
+    const questions = [{ id: 'restart-question', question: 'Restart?', options: [{ id: 'restart-exact', label: 'Restart now' }] }]
+    // Written text equal to the action label still must not acquire its ID.
+    const rawSelection = { 'Restart?': approvesRestart ? 'Restart now' : '__other__' }
+    const selected = restartCardSelectedOptions(action, questions, rawSelection)
+    assert.deepEqual(selected, approvesRestart ? { 'restart-question': ['restart-exact'] } : {})
+    const options = { hidden: true, cid: 'restart-answer', question_id: 'restart-card',
+      answers: { 'Restart?': 'Restart now' }, selected_options: selected }
+    globalThis.fetch = async () => Response.json({ ready: false, boot_id: 'quiet-fixture' }, { status: 503 })
+    await verifyConnectivity()
+    const local = await hook.result.current.sendMessage('Restart now', undefined, options)
+    assert.equal(local.status, 'locally_queued')
+    const [record] = await listIntents(outboxPrincipalKey(token))
+    assert.deepEqual(record.body.selected_options, approvesRestart ? { 'restart-question': ['restart-exact'] } : undefined,
+      'the transport omits empty selections; written feedback carries no action authority')
+    assert.equal(hook.result.current.streamItems[0].content, 'Existing answer')
+
+    globalThis.fetch = async () => Response.json({ ready: true, boot_id: 'quiet-fixture' })
+    await verifyConnectivity()
+    let resolveStream
+    const streamResponse = new Promise(resolve => { resolveStream = resolve })
+    const requests = []
+    globalThis.fetch = async (_url, request) => {
+      requests.push(request)
+      return request.method === 'POST'
+        ? Response.json({ status: approvesRestart ? 'restart_requested' : 'started', answer_turn: approvesRestart ? 'none' : 'new' })
+        : streamResponse
+    }
+    const response = await hook.result.current.sendMessage('Restart now', undefined, options)
+    assert.equal(response.answer_turn, approvesRestart ? 'none' : 'new')
+    assert.deepEqual(JSON.parse(requests[0].body).selected_options, record.body.selected_options)
+    assert.deepEqual(requests.map(request => request.method || 'GET'), approvesRestart ? ['POST'] : ['POST', 'GET'])
+    hook.result.current.disconnect()
+    resolveStream(new Response(null, { status: 204 }))
+  })
+}

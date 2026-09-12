@@ -2,10 +2,9 @@ import { useSyncExternalStore } from 'react'
 import {
   getRestartPendingSnapshot,
   subscribeRestart,
-} from '../lib/restartStore.js'
+} from '../lib/connectivityStore.js'
 
-// Whether Möbius is mid-restart. Backed by the module-singleton restartStore so
-// the shell dot and the queued-message copy read one verdict without racing.
+// Restart state shares the readiness owner; only a ready later boot clears it.
 export default function useRestartPending() {
   return useSyncExternalStore(
     subscribeRestart,

@@ -230,6 +230,15 @@ the single-writer persistence actor. Deployment and container probes use
 readiness. `GET /api/health/strict` retains the database-only diagnostic
 contract.
 
+The shell's `connectivityStore.js` owns reachability, service readiness, and
+restart observation together. A response proves reachability even when the
+service is not ready; delivery requires readiness and no unresolved restart.
+`/api/ready` and `server_restarting` carry the worker's boot identity so an old
+worker cannot acknowledge its own replacement. During a frontend-first
+upgrade, an identity-less legacy restart event can be completed by a ready
+response that includes the new boot-identity field. One response proves both
+readiness and identity; there is no secondary health probe or timer fallback.
+
 Boot runs `create_all`, append-only migrations, and `mapped_schema_gaps()` before
 starting any database owner. A migration/initialization failure or remaining
 mapped-shape gap enters one bounded degraded mode: ordinary APIs return a
@@ -637,11 +646,15 @@ and attaches their rule ids to new diagnostic chats. The Playwright lock-in spec
   disclosure settlement all see the same tail range. Only the DOM's latest user row
   participates—an older user row never gets a separate reservation. Durable anchor
   validation still rejects locations wholly inside reserved blank space, so
-  restoring a chat lands on real conversation content. R6's transient
-  question-submit hold is the sole calculation exception: it may reserve only the
-  exact tail deficit required for a stable card handoff while the viewport size is
-  unchanged. It is never persisted and must release to the unanswered card's prior
-  mode before a keyboard or other viewport resize is laid out.
+  restoring a chat lands on real conversation content. Transient submission
+  holds share the same spacer owner: question submission reserves the exact
+  anchor deficit through viewport changes until visible response activity or
+  newer reader intent releases it (R6). A queued send may retain the minimum
+  active-viewport deficit needed to keep the reading position when its composer
+  clears. That deficit and the latest-user deficit combine by maximum, never
+  addition; queued submission inherits neither question follow intent nor the
+  keyboard ceiling. Content growth consumes the room and newer reader intent
+  replaces the hold. Neither submission's temporary authority survives restore.
 - **R2 — One send rule everywhere.** The first visible user message always pins to
   the viewport top. Every subsequent direct, queued, promoted, or steered message
   pins only when its submit-time DOM snapshot is at the one physical
@@ -965,7 +978,7 @@ Controller structure is part of the contract, not an implementation detail:
   composer-clearance CSS geometry. Those indirect writes and every `writeMode`
   call share R5's reader-generation commit gate. Spacer height is
   derived from the latest user row, active scroll-box height (plus R1's transient
-  same-width pin ceiling), and exact tail deficit;
+  same-width pin ceiling), and exact tail deficit or transient submission reachability;
   disclosure helpers and renderers may preserve an on-screen anchor but may never
   prime, enlarge, or unwind spacer themselves.
 - The gesture-gated `scroll` event reads physical-bottom geometry directly.
@@ -1351,6 +1364,17 @@ its actual matched card, including unkeyed requests racing a newly saved card.
 The frontend settles quiet replies without replacing the stream, touching the
 composer, or arming a response-follow latch; outbox replay uses the existing
 settlement subscription to refresh authoritative card detail.
+
+`chatOutbox.js` owns browser-local message and answer delivery. Its tray/card
+projection never advances the transcript before authoritative acceptance.
+A background message rejected by the server keeps its exact body as a retired,
+recoverable local copy: it is not eligible for automatic replay. Retirement's
+cleanup token authorizes physical deletion; retaining a failure without that
+token is also understood by older open tabs, which skip it. Explicit Retry
+reuses the same body and client identity; Discard removes only the local copy.
+Both transitions use the existing outbox transaction and replay lock. No
+separate failure database or logout lifetime is introduced. The server's queue
+continues to own turn ordering, and each question card owns its answer draft.
 
 Platform restarts use the narrower `mobius_control.request_restart` and
 `POST /api/chats/{id}/restart-request`. The caller supplies no command, commit,

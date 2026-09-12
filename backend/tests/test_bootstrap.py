@@ -112,6 +112,14 @@ def test_recovery_store_bootstrap_is_pinned_to_an_immutable_commit():
 
 
 @pytest.mark.asyncio
+async def test_explicit_skip_needs_neither_database_nor_catalog(monkeypatch):
+  monkeypatch.setenv("MOEBIUS_SKIP_BOOTSTRAP", "1")
+  with patch("app.bootstrap.install_from_manifest", AsyncMock()) as install:
+    await ensure_bootstrap_apps_installed(None)
+  install.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_bootstrap_installs_all_apps_in_order_when_absent(db, monkeypatch):
   """A fresh database installs the store first, then the other core apps."""
   monkeypatch.delenv("MOEBIUS_SKIP_BOOTSTRAP", raising=False)

@@ -17,6 +17,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { renderHook } from './react-hook-shim.mjs'
 import usePendingQueue from '../usePendingQueue.js'
+import { canFastForwardQueue } from '../../chatRuntimeState.js'
 
 function fixtureMsg(overrides = {}) {
   return {
@@ -82,7 +83,7 @@ test('a steer reservation hides a row without removing its durable queue record'
     'the accepted row is no longer presented as an actionable queue item',
   )
   assert.deepEqual(
-    result.current.getVisiblePendingMessages().map(m => m.cid),
+    result.current.getSteerCandidates().map(m => m.cid),
     ['b'],
     'event handlers read the same synchronous visible queue as render',
   )
@@ -129,7 +130,7 @@ test('hidden product events remain durable but never enter the owner queue tray'
     ['owner'],
   )
   assert.deepEqual(
-    result.current.getVisiblePendingMessages().map(m => m.cid),
+    result.current.getSteerCandidates().map(m => m.cid),
     ['owner'],
   )
 })
@@ -551,4 +552,315 @@ test('confirming one cid leaves a concurrently-queued row alone', () => {
     list.every(m => m.serverTs === true),
     'both rows are server-confirmed, so fast-forward stays available on both',
   )
+})
+
+// Exercise the real IndexedDB owner, not a second in-memory approximation of
+// the local queue. The render shim only supplies React's hook lifecycle.
+import { IDBFactory } from 'fake-indexeddb'
+import {
+  clearOutboxForTests, enqueueIntent, markIntentLocallyQueued,
+  retireIntent, listIntents, claimIntentDispatch, cancelLocalIntent, editLocalIntent,
+  drainOutbox, deliverIntent, discardRejectedIntent,
+} from '../../chatOutbox.js'
+
+const localScope = { chatId: 'chat-local', principalKey: '["owner",1,"owner","",""]' }
+async function localFixture() {
+  // These projection cases have no competing tab; outbox tests own contention.
+  Object.defineProperty(globalThis, 'navigator', { configurable: true, value: {
+    locks: { request: async (_name, options, callback) => (callback || options)({ name: 'mobius-chat-outbox' }) },
+  } })
+  globalThis.indexedDB = new IDBFactory()
+  await clearOutboxForTests()
+}
+function localIntent(cid = 'local-1', extra = {}) {
+  return {
+    ...localScope, cid, locallyQueued: true,
+    body: { content: `message ${cid}`, cid }, ...extra,
+  }
+}
+async function flushLocalRead() {
+  for (let i = 0; i < 6; i += 1) await new Promise(resolve => setImmediate(resolve))
+}
+
+test('deferred intent survives finished POST and empty hydrates, including remount', async () => {
+  await localFixture()
+  await enqueueIntent(localIntent())
+  let hook = renderHook(() => usePendingQueue([], localScope))
+  await flushLocalRead()
+  hook.result.current.clearInFlight('local-1')
+  hook.result.current.hydrate([])
+  assert.deepEqual(hook.result.current.visiblePendingMessages.map(m => m.cid), ['local-1'])
+  assert.equal(hook.result.current.visiblePendingMessages[0].localOnly, true)
+  hook.unmount()
+  hook = renderHook(() => usePendingQueue([], localScope))
+  await flushLocalRead()
+  assert.deepEqual(hook.result.current.visiblePendingMessages.map(m => m.cid), ['local-1'])
+  hook.unmount()
+})
+
+test('ordinary in-flight online enqueue does not flash a second queue row', async () => {
+  await localFixture()
+  const hook = renderHook(() => usePendingQueue([], localScope))
+  await flushLocalRead()
+  await enqueueIntent(localIntent('online', { locallyQueued: false }))
+  assert.deepEqual(hook.result.current.visiblePendingMessages, [])
+  await markIntentLocallyQueued('online', localScope)
+  assert.deepEqual(hook.result.current.visiblePendingMessages.map(m => m.cid), ['online'])
+  hook.unmount()
+})
+
+test('local projection and optimistic caller deduplicate by cid, not content', async () => {
+  await localFixture()
+  const hook = renderHook(() => usePendingQueue([], localScope))
+  await flushLocalRead()
+  hook.result.current.add(fixtureMsg({ cid: 'local-1' }), { inFlight: true })
+  await enqueueIntent(localIntent())
+  hook.result.current.add(fixtureMsg({ cid: 'local-1' }))
+  assert.equal(hook.result.current.pendingMessages.length, 1)
+  hook.result.current.hydrate([{ cid: 'local-1', content: 'canonical', ts: 42 }])
+  assert.equal(hook.result.current.pendingMessages.length, 1)
+  assert.equal(hook.result.current.pendingMessages[0].serverTs, true)
+  assert.equal(hook.result.current.pendingMessages[0].localOnly, false)
+  hook.result.current.hydrate([])
+  assert.deepEqual(hook.result.current.pendingMessages, [], 'consumed server row is not resurrected by local persistence')
+  hook.unmount()
+})
+
+test('delivery retirement survives stale empty runtime until exact transcript proof then stays gone', async () => {
+  await localFixture()
+  const hook = renderHook(() => usePendingQueue([], localScope))
+  await flushLocalRead()
+  await enqueueIntent(localIntent())
+  await retireIntent('local-1', { chatId: localScope.chatId, outcome: 'delivered' })
+  assert.equal((await listIntents(localScope.principalKey)).length, 0)
+  assert.deepEqual(hook.result.current.pendingMessages.map(m => m.cid), ['local-1'])
+  hook.result.current.hydrate([])
+  assert.deepEqual(hook.result.current.pendingMessages.map(m => m.cid), ['local-1'])
+  hook.result.current.hydrate([], { completedCids: ['local-1'] })
+  assert.deepEqual(hook.result.current.pendingMessages, [])
+  hook.unmount()
+  const remount = renderHook(() => usePendingQueue([], localScope))
+  await flushLocalRead()
+  assert.deepEqual(remount.result.current.pendingMessages, [])
+  remount.unmount()
+})
+
+test('cancelled local intent disappears and cannot return on hydrate or remount', async () => {
+  await localFixture()
+  const hook = renderHook(() => usePendingQueue([], localScope))
+  await flushLocalRead()
+  await enqueueIntent(localIntent())
+  await retireIntent('local-1', { chatId: localScope.chatId, outcome: 'cancelled' })
+  assert.deepEqual(hook.result.current.pendingMessages, [])
+  hook.result.current.hydrate([])
+  assert.deepEqual(hook.result.current.pendingMessages, [])
+  hook.unmount()
+  const remount = renderHook(() => usePendingQueue([], localScope))
+  await flushLocalRead()
+  assert.deepEqual(remount.result.current.pendingMessages, [])
+  remount.unmount()
+})
+
+test('chat and principal switches release old local rows and ignore foreign events', async () => {
+  await localFixture()
+  const hook = renderHook(scope => usePendingQueue([], scope), localScope)
+  await flushLocalRead()
+  await enqueueIntent(localIntent())
+  const second = { ...localScope, chatId: 'other-chat' }
+  hook.rerender(second)
+  assert.deepEqual(hook.result.current.pendingMessages, [])
+  await enqueueIntent(localIntent('still-first'))
+  assert.deepEqual(hook.result.current.pendingMessages, [])
+  await enqueueIntent(localIntent('other', { chatId: second.chatId }))
+  assert.deepEqual(hook.result.current.pendingMessages.map(m => m.cid), ['other'])
+  hook.rerender({ ...second, principalKey: '["other-owner",1,"owner","",""]' })
+  assert.deepEqual(hook.result.current.pendingMessages, [])
+  hook.unmount()
+})
+
+test('local answers live on their card, stay disabled through delivery, and acknowledge explicitly', async () => {
+  await localFixture()
+  const hook = renderHook(() => usePendingQueue([], localScope))
+  await flushLocalRead()
+  await enqueueIntent(localIntent('answer', {
+    type: 'answer', body: { cid: 'answer', question_id: 'q1', answers: { pick: 'No' }, hidden: true },
+  }))
+  assert.deepEqual(hook.result.current.visiblePendingMessages, [])
+  assert.equal(hook.result.current.localAnswerIntents[0].body.question_id, 'q1')
+  await retireIntent('answer', { chatId: localScope.chatId, outcome: 'delivered' })
+  assert.equal(hook.result.current.localAnswerIntents[0].deliveryOutcome, 'delivered')
+  hook.result.current.hydrate([])
+  assert.equal(hook.result.current.localAnswerIntents.length, 1, 'unrelated queue refresh does not enable a duplicate answer')
+  hook.result.current.acknowledgeLocalAnswers(['q1'])
+  assert.deepEqual(hook.result.current.localAnswerIntents, [])
+  hook.unmount()
+})
+
+test('logout clears local queue and answer presentation with the durable owner', async () => {
+  await localFixture()
+  const hook = renderHook(() => usePendingQueue([], localScope))
+  await flushLocalRead()
+  await enqueueIntent(localIntent())
+  await enqueueIntent(localIntent('answer', { type: 'answer', body: { question_id: 'q1', answers: {} } }))
+  await clearOutboxForTests()
+  assert.deepEqual(hook.result.current.pendingMessages, [])
+  assert.deepEqual(hook.result.current.localAnswerIntents, [])
+  hook.unmount()
+})
+
+test('late transport failure cannot requeue a cid already confirmed and consumed', async () => {
+  await localFixture()
+  const hook = renderHook(() => usePendingQueue([], localScope))
+  await flushLocalRead()
+  await enqueueIntent(localIntent('accepted', { locallyQueued: false }))
+  hook.result.current.hydrate([{ cid: 'accepted', content: 'accepted', ts: 2 }])
+  hook.result.current.hydrate([])
+  await markIntentLocallyQueued('accepted', localScope)
+  assert.deepEqual(hook.result.current.pendingMessages, [])
+  hook.unmount()
+})
+
+test('exact transcript completion clears both local and optimistic POST preservation', async () => {
+  await localFixture()
+  const hook = renderHook(() => usePendingQueue([], localScope))
+  await flushLocalRead()
+  hook.result.current.add(fixtureMsg({ cid: 'local-1' }), { inFlight: true })
+  await enqueueIntent(localIntent())
+  await retireIntent('local-1', { chatId: localScope.chatId, outcome: 'delivered' })
+  assert.equal(hook.result.current.pendingMessages.length, 1)
+  hook.result.current.hydrate([], { completedCids: ['local-1'] })
+  assert.deepEqual(hook.result.current.pendingMessages, [])
+  hook.unmount()
+})
+
+test('local edit and cancellation project committed outbox state without server calls or ghost restoration', async () => {
+  await localFixture()
+  const hook = renderHook(() => usePendingQueue([], localScope))
+  await flushLocalRead()
+  await enqueueIntent(localIntent())
+  assert.equal(hook.result.current.pendingMessages[0].dispatchStarted, false)
+  const edited = await editLocalIntent('local-1', { ...localScope, content: 'edited locally' })
+  assert.equal(edited.status, 'saved')
+  assert.equal(hook.result.current.pendingMessages[0].content, 'edited locally')
+  assert.equal((await cancelLocalIntent('local-1', localScope)).status, 'cancelled')
+  assert.deepEqual(hook.result.current.pendingMessages, [])
+  hook.result.current.hydrate([])
+  assert.deepEqual(hook.result.current.pendingMessages, [])
+  hook.unmount()
+})
+
+test('claiming dispatch removes the UI proof of local-only cancellation before transport begins', async () => {
+  await localFixture()
+  const hook = renderHook(() => usePendingQueue([], localScope))
+  await flushLocalRead()
+  await enqueueIntent(localIntent())
+  assert.equal(hook.result.current.pendingMessages[0].dispatchStarted, false)
+  await claimIntentDispatch('local-1', localScope)
+  assert.equal(hook.result.current.pendingMessages[0].dispatchStarted, true)
+  assert.equal((await cancelLocalIntent('local-1', localScope)).status, 'uncertain')
+  assert.equal(hook.result.current.pendingMessages.length, 1)
+  hook.unmount()
+})
+
+
+test('rejected offline text survives empty reconciliation and remount until local copy is discarded', async () => {
+  await localFixture()
+  let hook = renderHook(() => usePendingQueue([], localScope))
+  await flushLocalRead()
+  const body = { cid: 'local-1', content: 'Long offline draft', attachments: [{ name: 'notes.txt' }] }
+  await enqueueIntent(localIntent('local-1', { body }))
+  await drainOutbox({ principalKey: localScope.principalKey,
+    deliver: record => deliverIntent(record, async () => Response.json({ detail: {
+      code: 'model_selection_required', message: 'Choose a model before sending this chat.',
+    } }, { status: 409 })),
+  })
+  hook.result.current.hydrate([])
+  assert.equal(hook.result.current.visiblePendingMessages[0].recoveryAvailable, true)
+  assert.equal(hook.result.current.visiblePendingMessages[0].content, body.content)
+  hook.unmount()
+  hook = renderHook(() => usePendingQueue([], localScope))
+  await flushLocalRead()
+  assert.equal(hook.result.current.visiblePendingMessages[0].recoveryAvailable, true)
+  assert.deepEqual(hook.result.current.visiblePendingMessages[0].attachments, body.attachments)
+  await discardRejectedIntent('local-1', localScope)
+  assert.deepEqual(hook.result.current.visiblePendingMessages, [])
+  hook.unmount()
+})
+
+test('rejected answer releases local card lock without announcing a committed answer', async () => {
+  await localFixture()
+  const hook = renderHook(() => usePendingQueue([], localScope))
+  await flushLocalRead()
+  await enqueueIntent(localIntent('answer', {
+    type: 'answer', body: { cid: 'answer', hidden: true, question_id: 'q1', answers: { Choice: 'My preserved answer' } },
+  }))
+  assert.equal(hook.result.current.localAnswerIntents.length, 1)
+  await drainOutbox({ principalKey: localScope.principalKey,
+    deliver: record => deliverIntent(record, async () => new Response('', { status: 400 })),
+  })
+  assert.deepEqual(hook.result.current.localAnswerIntents, [], 'QuestionCard may retry its still-unsubmitted per-card draft')
+  assert.deepEqual(hook.result.current.visiblePendingMessages, [])
+  hook.unmount()
+})
+
+
+for (const evidence of ['queue', 'transcript']) {
+  test(`exact ${evidence} acceptance retires a rejected disk copy instead of reviving it on remount`, async () => {
+    await localFixture()
+    let hook = renderHook(() => usePendingQueue([], localScope))
+    await flushLocalRead()
+    await enqueueIntent(localIntent())
+    await drainOutbox({ principalKey: localScope.principalKey,
+      deliver: record => deliverIntent(record, async () => new Response('', { status: 400 })),
+    })
+    assert.equal(hook.result.current.visiblePendingMessages[0].recoveryAvailable, true)
+    hook.result.current.hydrate(evidence === 'queue' ? [{ cid: 'local-1', content: 'accepted', ts: 1 }] : [],
+      evidence === 'transcript' ? { completedCids: ['local-1'] } : {})
+    await flushLocalRead()
+    assert.deepEqual(await listIntents(localScope.principalKey), [])
+    hook.unmount()
+    hook = renderHook(() => usePendingQueue([], localScope))
+    await flushLocalRead()
+    assert.deepEqual(hook.result.current.visiblePendingMessages, [])
+    hook.unmount()
+  })
+}
+
+test('acceptance before a late rejection cleans the copy, while local cancellation is not acceptance proof', async () => {
+  await localFixture()
+  const hook = renderHook(() => usePendingQueue([], localScope))
+  await flushLocalRead()
+  await enqueueIntent(localIntent('accepted-first'))
+  hook.result.current.hydrate([{ cid: 'accepted-first', content: 'accepted', ts: 1 }])
+  await drainOutbox({ principalKey: localScope.principalKey,
+    deliver: record => deliverIntent(record, async () => new Response('', { status: 400 })),
+  })
+  await flushLocalRead()
+  assert.deepEqual(await listIntents(localScope.principalKey), [])
+  await enqueueIntent(localIntent('cancelled-locally'))
+  hook.result.current.cancelByCid('cancelled-locally')
+  await drainOutbox({ principalKey: localScope.principalKey,
+    deliver: record => deliverIntent(record, async () => new Response('', { status: 400 })),
+  })
+  await flushLocalRead()
+  assert.equal((await listIntents(localScope.principalKey))[0].recovery, 'rejected', 'UI cancellation must not authorize deleting owner recovery')
+  hook.unmount()
+})
+
+
+test('recovery copies stay visible but never block or enter the Steer candidate set', () => {
+  const hook = renderHook(usePendingQueue)
+  hook.result.current.add(fixtureMsg({ cid: 'rejected', recoveryAvailable: true, serverTs: false }))
+  assert.equal(hook.result.current.visiblePendingMessages.length, 1)
+  assert.deepEqual(hook.result.current.getSteerCandidates(), [], 'rejected-only tray has no Steer action')
+  hook.result.current.add(fixtureMsg({ cid: 'queued', ts: 2, serverTs: true }))
+  const candidates = hook.result.current.getSteerCandidates()
+  assert.deepEqual(candidates.map(row => row.cid), ['queued'])
+  assert.equal(canFastForwardQueue(candidates, true), true, 'real queued sibling remains steerable')
+  assert.equal(hook.result.current.visiblePendingMessages.length, 2, 'rejected owner text stays visible')
+  hook.result.current.add(fixtureMsg({ cid: 'optimistic', ts: 3, serverTs: false }))
+  assert.deepEqual(hook.result.current.getSteerCandidates().map(row => row.cid), ['queued', 'optimistic'])
+  assert.equal(canFastForwardQueue(hook.result.current.getSteerCandidates(), true), false,
+    'optimistic candidates still need server confirmation before dispatch')
+  hook.unmount()
 })
