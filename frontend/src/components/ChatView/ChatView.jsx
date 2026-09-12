@@ -2002,11 +2002,14 @@ export default function ChatView({
           || localStartRequestRef.current?.chatId === String(chatId)
         ) && !externalClaimedRunRef.current
         if (locallyActive) {
-          // The local optimistic turn remains authoritative for its suffix,
-          // but completed history still needs server reconciliation. Without
-          // this fetch, an under-promoted previous reply stays missing for the
-          // lifetime of the open tab.
-          await fetchMessages({ force: true })
+          // A hidden retained pane can miss the terminal stream event while
+          // Shell still records the run finish. Re-enter the runtime owner
+          // here: it protects an unacknowledged fresh send, but an idle server
+          // verdict after an observed run authoritatively refreshes the final
+          // transcript and retires the stale stream. The old non-authoritative
+          // detail read deliberately preserved local activity, so the pane
+          // could return with its shimmer and Stop control stuck on.
+          await reconcileRuntimeState()
           continue
         }
 
@@ -2058,7 +2061,14 @@ export default function ChatView({
         queueMicrotask(reconcileExternalActivity)
       }
     }
-  }, [chatId, connectToStream, embedded, fetchMessages, isStreamingRef])
+  }, [
+    chatId,
+    connectToStream,
+    embedded,
+    fetchMessages,
+    isStreamingRef,
+    reconcileRuntimeState,
+  ])
   useEffect(() => {
     if (hidden || provisionalNewChat) return
     reconcileExternalActivity()
