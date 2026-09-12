@@ -5753,6 +5753,8 @@ async def autopilot_respond(
       return {"status": "not_granted"}
     if live_record.get("status") not in {"open", "draft"}:
       return {"status": "not_granted"}
+  if row.state == "blocked":
+    return {"status": "blocked"}
 
   # Use the owner's existing background-agent choice; no Contribute-specific
   # resource policy lives here.
@@ -5767,6 +5769,8 @@ async def autopilot_respond(
     raise HTTPException(status_code=409, detail=f"Round {status}.")
   if status == "not_granted":
     return {"status": "not_granted"}
+  if status == "blocked":
+    return {"status": "blocked"}
   if status == "escalate":
     await _autopilot_escalate_and_notify(
       db, app_id, record_id, owner_id,
