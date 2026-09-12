@@ -191,6 +191,25 @@ def validate_manifest_contract(manifest) -> None:
     validate_slug_field(previous_id, "previous_id")
     if previous_id == mid:
       _fail("Manifest `previous_id` must differ from `id`.")
+  previous_manifest_url = manifest.get("previous_manifest_url")
+  if previous_manifest_url is not None:
+    if previous_id is None:
+      _fail("Manifest `previous_manifest_url` requires `previous_id`.")
+    if not isinstance(previous_manifest_url, str) or not previous_manifest_url:
+      _fail("Manifest `previous_manifest_url` must be a non-empty string.")
+    parsed_previous = urlparse(previous_manifest_url)
+    if (
+      parsed_previous.scheme != "https"
+      or not parsed_previous.netloc
+      or parsed_previous.username is not None
+      or parsed_previous.password is not None
+      or parsed_previous.query
+      or parsed_previous.fragment
+    ):
+      _fail(
+        "Manifest `previous_manifest_url` must be an absolute HTTPS URL "
+        "without credentials, query, or fragment."
+      )
 
   validate_repo_relative_path(manifest["entry"], "entry")
   if manifest["entry"] != "index.jsx":

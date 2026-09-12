@@ -1594,8 +1594,22 @@ async def update_candidate_preview(
     else install._canonical_base(installed_manifest_url) + "/mobius.json"
   )
   fetched = await install.fetch_upstream_source(fetch_manifest_url)
-  if manifest_url is not None and not install._catalog_identity_matches(
-    installed_manifest_url, manifest_url, fetched.manifest["id"],
+  predecessor_source, _ = install._reviewed_predecessor_source(
+    fetched.manifest, manifest_url or fetch_manifest_url,
+  )
+  predecessor_matches = bool(
+    fetched.manifest.get("previous_id")
+    and install._catalog_identity_matches(
+      installed_manifest_url,
+      predecessor_source,
+      fetched.manifest["previous_id"],
+    )
+  )
+  if manifest_url is not None and not (
+    install._catalog_identity_matches(
+      installed_manifest_url, manifest_url, fetched.manifest["id"],
+    )
+    or predecessor_matches
   ):
     raise HTTPException(
       409, "Requested update source does not match the installed app.",

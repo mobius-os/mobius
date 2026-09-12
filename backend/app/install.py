@@ -288,7 +288,7 @@ def _derive_repo_ref(manifest_url: str) -> tuple[str, str] | None:
   parts = [unquote(part) for part in parsed.path.split("/") if part]
   if (
     parsed.scheme != "https"
-    or parsed.hostname != "raw.githubusercontent.com"
+    or parsed.netloc != "raw.githubusercontent.com"
     or len(parts) != 4
   ):
     return None
@@ -390,6 +390,64 @@ def _trusted_catalog_origin_url(url_or_base: str) -> str | None:
   if len(parts) != 2:
     return None
   return f"https://github.com/{parts[0]}/{parts[1]}.git"
+
+
+def _github_root_manifest_identity(url_or_base: str) -> tuple[str, str] | None:
+  """Return owner/repository for one root raw-GitHub manifest URL."""
+  if not isinstance(url_or_base, str) or not url_or_base:
+    return None
+  parsed = urlparse(_canonical_base(url_or_base))
+  if (
+    parsed.scheme != "https"
+    or parsed.hostname != "raw.githubusercontent.com"
+    or parsed.username is not None
+    or parsed.password is not None
+  ):
+    return None
+  parts = [unquote(part) for part in parsed.path.split("/") if part]
+  if len(parts) != 3 or ".." in parts:
+    return None
+  owner, repo, ref = parts
+  if any(
+    part in ("", ".", "..") or part.startswith("-") or "\\" in part
+    for part in (owner, repo, ref)
+  ):
+    return None
+  return owner.lower(), repo.lower()
+
+
+def _github_origin_url(url_or_base: str) -> str | None:
+  identity = _github_root_manifest_identity(url_or_base)
+  if identity is None:
+    return None
+  owner, repo = identity
+  return f"https://github.com/{owner}/{repo}.git"
+
+
+def _reviewed_predecessor_source(
+  manifest: dict, source_for_key: str,
+) -> tuple[str, tuple[str, str] | None]:
+  """Resolve a package rename without allowing cross-owner adoption."""
+  previous_source = manifest.get("previous_manifest_url")
+  if not previous_source:
+    return source_for_key, None
+  current_identity = _github_root_manifest_identity(source_for_key)
+  previous_identity = _github_root_manifest_identity(previous_source)
+  if (
+    current_identity is None
+    or previous_identity is None
+    or current_identity[0] != previous_identity[0]
+  ):
+    raise HTTPException(
+      400,
+      "Manifest repository renames must use root GitHub manifests owned by "
+      "the same account.",
+    )
+  old_origin = _github_origin_url(previous_source)
+  new_origin = _github_origin_url(source_for_key)
+  if old_origin is None or new_origin is None:
+    raise HTTPException(400, "Manifest repository rename is invalid.")
+  return previous_source, (old_origin, new_origin)
 
 
 def _trusted_origin_catalog_identity_matches(
@@ -1973,6 +2031,7 @@ class InstallTarget:
   trusted_catalog_origin: bool
   canonical_manifest_url: str
   force_core_store_update: bool
+  origin_migration: tuple[str, str] | None
 
 
 @dataclass
@@ -2255,22 +2314,25 @@ def _select_install_target(
   )
 
   adopting_previous_id = False
+  origin_migration = None
   if existing is None:
-    # A rename is explicit and source-bound: previous_id is looked up under the
-    # same canonical package base, never by a globally reusable slug.
+    # A rename is explicit and source-bound. Ordinarily previous_id is looked
+    # up under the same package base; previous_manifest_url may name an old
+    # repository owned by the same GitHub account.
     prev_id = manifest.get("previous_id")
     if prev_id:
-      prev_canonical = _canonical_identity_key(source_for_key, prev_id)
-      existing = (
-        db.query(models.App)
-        .filter(
-          models.App.manifest_url == prev_canonical,
-          models.App.deleted_at.is_(None),
-        )
-        .first()
+      predecessor_source, origin_migration = _reviewed_predecessor_source(
+        manifest, source_for_key,
       )
+      existing = _find_install_identity_row(
+        db, source_url=predecessor_source, manifest_id=prev_id,
+      )
+      if existing is not None and existing.deleted_at is not None:
+        existing = None
       if existing:
         adopting_previous_id = True
+      else:
+        origin_migration = None
 
   required_app_id = (
     expected_app_id
@@ -2297,6 +2359,7 @@ def _select_install_target(
     ),
     canonical_manifest_url=canonical_manifest_url,
     force_core_store_update=force_core_store_update,
+    origin_migration=origin_migration,
   )
 
 
@@ -2492,6 +2555,30 @@ async def _prepare_app_row(
         app.slug = target_slug
         app.source_dir = target_source_dir
         app.manifest_url = canonical_manifest_url
+        if target.origin_migration and app_git.has_origin(target_source_dir):
+          old_origin, new_origin = target.origin_migration
+          current_origin = app_git.origin_url(target_source_dir)
+          normalized_origin = (
+            current_origin.rstrip("/").lower() if current_origin else None
+          )
+          if normalized_origin and normalized_origin not in {
+            old_origin.rstrip("/").lower(), new_origin.rstrip("/").lower(),
+          }:
+            raise HTTPException(
+              409, "Installed app origin no longer matches its rename source.",
+            )
+          if (
+            normalized_origin
+            and normalized_origin
+            != new_origin.rstrip("/").lower()
+          ):
+            app_git.set_origin_url(target_source_dir, new_origin)
+            journal.rollback_actions.append(
+              lambda p=target_source_dir, u=current_origin:
+              app_git.set_origin_url(p, u)
+              if Path(p).is_dir() and app_git.has_origin(p)
+              else None
+            )
         db.flush()
       elif old_source_dir and Path(old_source_dir).is_dir():
         warnings.append(
