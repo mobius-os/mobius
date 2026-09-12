@@ -774,7 +774,7 @@ async def test_bootstrap_install_emits_with_source_bootstrap(db, monkeypatch):
   → event records the right source."""
   from unittest.mock import patch
   from app.bootstrap import ensure_bootstrap_apps_installed
-  from app import models
+  from app import bootstrap, models
 
   monkeypatch.delenv("MOEBIUS_SKIP_BOOTSTRAP", raising=False)
 
@@ -808,12 +808,13 @@ async def test_bootstrap_install_emits_with_source_bootstrap(db, monkeypatch):
       reconciliation=app_git.ReconciliationReceipt(),
     )
 
+  expected_count = len(bootstrap._configured_bootstrap_apps(db))
   with patch("app.bootstrap.install_from_manifest", _fake_install):
     await ensure_bootstrap_apps_installed(db)
 
-  assert captured == ["bootstrap"] * 6
+  assert captured == ["bootstrap"] * expected_count
   installs = [l for l in _read_lines() if l["ev"] == "app_install"]
-  assert len(installs) == 6
+  assert len(installs) == expected_count
   assert all(event["source"] == "bootstrap" for event in installs)
 
 

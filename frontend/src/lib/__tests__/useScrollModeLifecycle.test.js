@@ -134,7 +134,6 @@ function mountTailController(chatId, overrides = {}) {
     footRef: { current: fakeElement({ offsetHeight: 80 }) },
     messages,
     messagesRef: { current: messages },
-    loadingOlderRef: { current: false },
     initialEntryPhase: 'ready',
     ownsReadingPosition: true,
     ...overrides,
@@ -171,7 +170,6 @@ test('transcript changes keep one scroll owner after the first row mounts', () =
     footRef: { current: foot },
     messagesRef: { current: [] },
     pendingMessagesLength: 0,
-    loadingOlderRef: { current: false },
     initialEntryPhase: 'history',
     ownsReadingPosition: true,
   }
@@ -238,6 +236,318 @@ test('nested controls cannot relatch the transcript while they own the input', (
     })
     assert.equal(scroll.dataset.scrollMode, 'FOLLOW_BOTTOM',
       'the same gesture may chain to the transcript at the nested edge')
+    hook.unmount()
+  } finally {
+    restoreBrowser()
+  }
+})
+
+test('a history prepend preserves the latest coordinate while touch still owns scrolling', () => {
+  const restoreBrowser = installBrowserEnvironment()
+  try {
+    const { hook, listeners, scroll, assistant } = mountTailController(
+      'pagination-touch-compensation',
+    )
+    assistant.getBoundingClientRect = () => ({
+      top: assistant.offsetTop - scroll.scrollTop,
+      bottom: assistant.offsetTop - scroll.scrollTop + assistant.offsetHeight,
+      height: assistant.offsetHeight,
+    })
+    listeners.get('pointerdown')({
+      pointerType: 'touch', clientY: 100, target: scroll,
+    })
+    listeners.get('touchstart')({ touches: [{ identifier: 1 }] })
+    const request = hook.result.current.capturePaginationRequest()
+    const snapshot = hook.result.current.preparePaginationPrepend(request)
+    const before = scroll.scrollTop
+
+    assistant.offsetTop += 600
+    scroll.scrollHeight += 600
+    assert.equal(hook.result.current.restorePaginationPrepend(snapshot), true)
+    assert.equal(scroll.scrollTop, before + 600,
+      'the same content remains under the finger after rows are inserted above it')
+
+    const versionAfterRestore = hook.result.current
+      .capturePaginationRequest().readerIntentVersion
+    listeners.get('scroll')()
+    assert.equal(
+      hook.result.current.capturePaginationRequest().readerIntentVersion,
+      versionAfterRestore,
+      'the exact compensation scroll event is not mistaken for reader movement',
+    )
+    listeners.get('scroll')()
+    assert.equal(
+      hook.result.current.capturePaginationRequest().readerIntentVersion,
+      versionAfterRestore,
+      'coalescing differences cannot turn a second matching compensation event into intent',
+    )
+
+    const stale = snapshot
+    listeners.get('touchend')({ touches: [] })
+    listeners.get('keydown')({ type: 'keydown', key: 'PageUp', target: scroll })
+    scroll.scrollTop -= 100
+    listeners.get('scroll')()
+    const newerReaderTop = scroll.scrollTop
+    assistant.offsetTop += 300
+    scroll.scrollHeight += 300
+    assert.equal(hook.result.current.restorePaginationPrepend(stale), false)
+    assert.equal(scroll.scrollTop, newerReaderTop,
+      'an older response cannot overwrite newer reader intent')
+    hook.unmount()
+  } finally {
+    restoreBrowser()
+  }
+})
+
+test('a newer follow action keeps ownership when an older page response arrives', () => {
+  const restoreBrowser = installBrowserEnvironment()
+  try {
+    const { hook, scroll } = mountTailController('pagination-newer-follow')
+    const request = hook.result.current.capturePaginationRequest()
+
+    hook.result.current.followLatest()
+    assert.equal(scroll.dataset.scrollMode, 'FOLLOW_BOTTOM')
+    const snapshot = hook.result.current.preparePaginationPrepend(request)
+    assert.equal(snapshot.mode.kind, 'FOLLOW_BOTTOM',
+      'the older request cannot demote a newer Jump to latest action')
+
+    scroll.scrollHeight += 600
+    assert.equal(hook.result.current.restorePaginationPrepend(snapshot), true)
+    assert.equal(scroll.scrollTop, scroll.scrollHeight - scroll.clientHeight,
+      'the compensated prepend retains live-tail geometry and semantic follow')
+    assert.equal(scroll.dataset.scrollMode, 'FOLLOW_BOTTOM')
+    hook.unmount()
+  } finally {
+    restoreBrowser()
+  }
+})
+
+test('an in-flight escape from follow captures the moving reader, not stale follow', () => {
+  const restoreBrowser = installBrowserEnvironment()
+  try {
+    const { hook, listeners, scroll, assistant } = mountTailController(
+      'pagination-reader-escapes-follow',
+    )
+    assistant.getBoundingClientRect = () => ({
+      top: assistant.offsetTop - scroll.scrollTop,
+      bottom: assistant.offsetTop - scroll.scrollTop + assistant.offsetHeight,
+      height: assistant.offsetHeight,
+    })
+    hook.result.current.followLatest()
+    const request = hook.result.current.capturePaginationRequest()
+    listeners.get('pointerdown')({
+      pointerType: 'touch', clientY: 100, target: scroll,
+    })
+    listeners.get('touchstart')({ touches: [{ identifier: 1 }] })
+    scroll.scrollTop -= 80
+    listeners.get('scroll')()
+
+    const snapshot = hook.result.current.preparePaginationPrepend(request)
+    assert.equal(snapshot.mode.kind, 'ANCHOR_AT',
+      'physical reader movement wins before its quiet-edge mode transition')
+    const before = scroll.scrollTop
+    assistant.offsetTop += 600
+    scroll.scrollHeight += 600
+    assert.equal(hook.result.current.restorePaginationPrepend(snapshot), true)
+    assert.equal(scroll.scrollTop, before + 600,
+      'the prepend preserves the escaping reader instead of returning to the tail')
+    listeners.get('touchend')({ touches: [] })
+    hook.unmount()
+  } finally {
+    restoreBrowser()
+  }
+})
+
+test('physical movement after a newer follow action remains the latest authority', () => {
+  const restoreBrowser = installBrowserEnvironment()
+  try {
+    const { hook, listeners, scroll, assistant } = mountTailController(
+      'pagination-follow-then-reader-escape',
+    )
+    assistant.getBoundingClientRect = () => ({
+      top: assistant.offsetTop - scroll.scrollTop,
+      bottom: assistant.offsetTop - scroll.scrollTop + assistant.offsetHeight,
+      height: assistant.offsetHeight,
+    })
+    const request = hook.result.current.capturePaginationRequest()
+    hook.result.current.followLatest()
+    listeners.get('pointerdown')({
+      pointerType: 'touch', clientY: 100, target: scroll,
+    })
+    listeners.get('touchstart')({ touches: [{ identifier: 1 }] })
+    scroll.scrollTop -= 80
+    listeners.get('scroll')()
+
+    const snapshot = hook.result.current.preparePaginationPrepend(request)
+    assert.equal(snapshot.mode.kind, 'ANCHOR_AT',
+      'Jump cannot outrank physical movement that happened after it')
+    const before = scroll.scrollTop
+    assistant.offsetTop += 600
+    scroll.scrollHeight += 600
+    assert.equal(hook.result.current.restorePaginationPrepend(snapshot), true)
+    assert.equal(scroll.scrollTop, before + 600,
+      'the response preserves the reader who moved away from the tail')
+    listeners.get('touchend')({ touches: [] })
+    hook.unmount()
+  } finally {
+    restoreBrowser()
+  }
+})
+
+test('a follow action after physical movement remains the latest authority', () => {
+  const restoreBrowser = installBrowserEnvironment()
+  try {
+    const { hook, listeners, scroll } = mountTailController(
+      'pagination-reader-then-follow',
+    )
+    const request = hook.result.current.capturePaginationRequest()
+    listeners.get('pointerdown')({
+      pointerType: 'touch', clientY: 100, target: scroll,
+    })
+    listeners.get('touchstart')({ touches: [{ identifier: 1 }] })
+    scroll.scrollTop -= 80
+    listeners.get('scroll')()
+    listeners.get('touchend')({ touches: [] })
+    hook.result.current.followLatest()
+
+    const snapshot = hook.result.current.preparePaginationPrepend(request)
+    assert.equal(snapshot.mode.kind, 'FOLLOW_BOTTOM',
+      'the later explicit follow action supersedes the earlier movement')
+    hook.unmount()
+  } finally {
+    restoreBrowser()
+  }
+})
+
+test('reader movement before the queued pagination event remains authoritative', () => {
+  const restoreBrowser = installBrowserEnvironment()
+  try {
+    const { hook, listeners, scroll, assistant } = mountTailController(
+      'pagination-reader-before-programmatic-event',
+    )
+    assistant.getBoundingClientRect = () => ({
+      top: assistant.offsetTop - scroll.scrollTop,
+      bottom: assistant.offsetTop - scroll.scrollTop + assistant.offsetHeight,
+      height: assistant.offsetHeight,
+    })
+    listeners.get('pointerdown')({
+      pointerType: 'touch', clientY: 100, target: scroll,
+    })
+    listeners.get('touchstart')({ touches: [{ identifier: 1 }] })
+    const request = hook.result.current.capturePaginationRequest()
+    const snapshot = hook.result.current.preparePaginationPrepend(request)
+    assistant.offsetTop += 600
+    scroll.scrollHeight += 600
+    assert.equal(hook.result.current.restorePaginationPrepend(snapshot), true)
+    const versionAfterRestore = hook.result.current
+      .capturePaginationRequest().readerIntentVersion
+
+    scroll.scrollTop -= 80
+    listeners.get('scroll')()
+    assert.ok(
+      hook.result.current.capturePaginationRequest().readerIntentVersion
+        > versionAfterRestore,
+      'a different coordinate is genuine reader movement, not compensation',
+    )
+    const readerTop = scroll.scrollTop
+    assert.equal(hook.result.current.restorePaginationPrepend(snapshot), false)
+    assert.equal(scroll.scrollTop, readerTop,
+      'the stale prepend cannot overwrite movement that beat its queued event')
+    listeners.get('touchend')({ touches: [] })
+    hook.unmount()
+  } finally {
+    restoreBrowser()
+  }
+})
+
+test('a prepend commit cannot settle momentum before viewport compensation', () => {
+  const restoreBrowser = installBrowserEnvironment()
+  try {
+    const { hook, listeners, scroll, assistant, args } = mountTailController(
+      'pagination-momentum-commit',
+    )
+    assistant.getBoundingClientRect = () => ({
+      top: assistant.offsetTop - scroll.scrollTop,
+      bottom: assistant.offsetTop - scroll.scrollTop + assistant.offsetHeight,
+      height: assistant.offsetHeight,
+    })
+    listeners.get('pointerdown')({
+      pointerType: 'touch', clientY: 100, target: scroll,
+    })
+    listeners.get('touchstart')({ touches: [{ identifier: 1 }] })
+    scroll.scrollTop -= 60
+    listeners.get('scroll')()
+    listeners.get('touchend')({ touches: [] })
+
+    const request = hook.result.current.capturePaginationRequest()
+    const snapshot = hook.result.current.preparePaginationPrepend(request)
+    const before = scroll.scrollTop
+    assistant.offsetTop += 600
+    scroll.scrollHeight += 600
+    const nextMessages = [
+      { role: 'assistant', cid: 'older-row', content: 'Older answer' },
+      ...args.messages,
+    ]
+    args.messagesRef.current = nextMessages
+    hook.rerender({ ...args, messages: nextMessages })
+
+    assert.equal(hook.result.current.restorePaginationPrepend(snapshot), true,
+      'the message-count effect reinstall must not replace the captured mode')
+    assert.equal(scroll.scrollTop, before + 600,
+      'the same content remains under momentum after the prepend commit')
+    listeners.get('scroll')()
+    scroll.scrollTop -= 10
+    listeners.get('scroll')()
+    listeners.get('scrollend')()
+    assert.equal(hook.result.current.capturePaginationRequest().mode.kind, 'ANCHOR_AT',
+      'upward momentum remains upward after its scrollTop coordinate is translated')
+    hook.unmount()
+  } finally {
+    restoreBrowser()
+  }
+})
+
+test('a newer same-generation send pin keeps ownership over an older page response', () => {
+  const restoreBrowser = installBrowserEnvironment()
+  try {
+    const { hook } = mountTailController('pagination-newer-send-pin')
+    const request = hook.result.current.capturePaginationRequest()
+    const intent = hook.result.current.captureSendIntent({ isFirstUserMsg: false })
+    const pin = hook.result.current.commitSendIntent({
+      cid: 'newer-user-message',
+      intent,
+    })
+    assert.equal(pin.kind, 'PIN_USER_MSG')
+    assert.equal(
+      hook.result.current.capturePaginationRequest().readerIntentVersion,
+      request.readerIntentVersion,
+      'Send is newer semantic intent even when no physical scroll occurred',
+    )
+
+    const snapshot = hook.result.current.preparePaginationPrepend(request)
+    assert.equal(snapshot.mode, pin,
+      'the late page response cannot demote the newer send pin to an anchor')
+    hook.unmount()
+  } finally {
+    restoreBrowser()
+  }
+})
+
+test('a newer same-generation question hold keeps ownership over an older page response', () => {
+  const restoreBrowser = installBrowserEnvironment()
+  try {
+    const { hook } = mountTailController('pagination-newer-question-hold')
+    const request = hook.result.current.capturePaginationRequest()
+    const submission = hook.result.current.freezeQuestionSubmission()
+    assert.equal(
+      hook.result.current.capturePaginationRequest().readerIntentVersion,
+      request.readerIntentVersion,
+      'question submission can supersede pagination without a physical scroll',
+    )
+
+    const snapshot = hook.result.current.preparePaginationPrepend(request)
+    assert.equal(snapshot.mode, submission.mode,
+      'the late page response cannot replace the submitted-question hold')
     hook.unmount()
   } finally {
     restoreBrowser()
@@ -682,7 +992,6 @@ test('a focused inline editor keeps one current owner across keyboard and growth
     }) },
     messages,
     messagesRef: { current: messages },
-    loadingOlderRef: { current: false },
     initialEntryPhase: 'ready',
     hasTranscript: true,
     ownsReadingPosition: true,
@@ -914,7 +1223,6 @@ test('an empty chat keeps its first-send pin when the transcript mounts', () => 
       footRef: { current: null },
       messages: [],
       messagesRef,
-      loadingOlderRef: { current: false },
       initialEntryPhase: 'ready',
       ownsReadingPosition: true,
     }

@@ -2456,6 +2456,14 @@ def origin_url(source_dir: str | Path) -> str | None:
   return value if proc.returncode == 0 and value else None
 
 
+def set_origin_url(source_dir: str | Path, url: str) -> None:
+  """Replace one existing app checkout's origin with a reviewed successor."""
+  repo = Path(source_dir)
+  if not is_repo(repo) or origin_url(repo) is None:
+    raise RuntimeError("source repository has no origin")
+  _run(repo, "remote", "set-url", "origin", url)
+
+
 def has_origin(source_dir: str | Path) -> bool:
   """Whether this app repo has a real `origin` remote.
 
