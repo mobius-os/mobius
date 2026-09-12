@@ -52,7 +52,7 @@ from app.frontend_assets import (
 from app.memory_observability import record_memory_checkpoint
 from app.runtime_provenance import protected_runtime_status
 from app.response_policy import (
-  CHAT_EMBED_CSP,
+  chat_embed_csp,
   PUBLISHED_SITE_CSP,
   absolute_csp_origin,
   app_frame_csp,
@@ -398,6 +398,7 @@ _ARTIFACT_OUTPUT_PATH = re.compile(
 # credential boundary: packaged code already executes in the opaque document,
 # and it still cannot reach the shell's localStorage, cookies, or owner token.
 _STATIC_EMBED_CSP = static_embed_csp(settings.frontend_origin)
+_CHAT_EMBED_CSP = chat_embed_csp(settings.frontend_origin)
 _SHELL_CSP = shell_csp(os.environ.get("MOBIUS_SERVICE_GATEWAY_ORIGIN", ""))
 _SERVICE_GATEWAY_ORIGIN = os.environ.get("MOBIUS_SERVICE_GATEWAY_ORIGIN", "")
 _BROWSER_API_ORIGIN = os.environ.get("API_BASE_URL", "")
@@ -452,6 +453,14 @@ def _static_embed_csp_for_scope(scope) -> str:
   if delivery_origin is None:
     return _STATIC_EMBED_CSP
   return static_embed_csp(settings.frontend_origin, delivery_origin)
+
+
+def _chat_embed_csp_for_scope(scope) -> str:
+  """Let the loopback test harness exercise the real opaque chat embed."""
+  delivery_origin = _loopback_delivery_origin(scope)
+  if delivery_origin is None:
+    return _CHAT_EMBED_CSP
+  return chat_embed_csp(settings.frontend_origin, delivery_origin)
 
 
 def _app_frame_csp_for_scope(scope) -> str:
@@ -553,7 +562,7 @@ class _SecurityHeadersMiddleware:
       elif published_site:
         csp = _PUBLISHED_SITE_CSP
       elif chat_embed:
-        csp = CHAT_EMBED_CSP
+        csp = _chat_embed_csp_for_scope(scope)
       elif app_frame:
         csp = _app_frame_csp_for_scope(scope)
       elif artifact_output:
