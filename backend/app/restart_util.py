@@ -68,15 +68,15 @@ def _release_unstarted_restart() -> None:
 
 async def _drain_exact_restart() -> tuple[str, str, list[dict[str, str]]]:
   """Gate admission and bind every live run to one fresh restart nonce."""
-  from app import chat
+  from app import chat, restart_ledger
   from app.broadcast import get_system_broadcast
 
-  get_system_broadcast().publish({"type": "server_restarting"})
+  boot_id = restart_ledger.current_boot_id()
+  get_system_broadcast().publish({
+    "type": "server_restarting", "boot_id": boot_id,
+  })
   chat.begin_drain()
 
-  from app import restart_ledger
-
-  boot_id = restart_ledger.current_boot_id()
   restart_nonce = restart_ledger.new_nonce()
   restart_runs: list[dict[str, str]] = []
   try:

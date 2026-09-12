@@ -1,6 +1,7 @@
 import { useSyncExternalStore } from 'react'
 import {
   getOnlineSnapshot,
+  getDeliveryReadySnapshot,
   getRecoverySnapshot,
   getReachabilityPhaseSnapshot,
   ReachabilityPhase,
@@ -27,4 +28,9 @@ export function useReachabilityPhase() {
 // the phase hooks above; consumers gain an event, not another connection owner.
 export function useRecoveryGeneration() {
   return useSyncExternalStore(subscribeOnline, getRecoverySnapshot, () => 0)
+}
+
+// Sending stays available; this verdict chooses local queuing versus delivery.
+export function useDeliveryReady() {
+  return useSyncExternalStore(subscribeOnline, getDeliveryReadySnapshot, () => false)
 }

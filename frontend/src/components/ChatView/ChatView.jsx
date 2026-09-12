@@ -1,3 +1,4 @@
+import { LocalAnswersContext } from './localAnswersContext.js'
 import { questionAnswerPatch } from './questionSubmission.js'
 import { usePeerTimeline, PeerTimelineLoadError, PeerTimelineRows } from './PeerTimeline.jsx'
 import { PeerTimelineContext } from './peerTimelineContext.js'
@@ -38,15 +39,18 @@ import {
   savedReadingAnchorKey,
 } from './scroll/readingPositions.js'
 import useVoiceInput from './useVoiceInput.js'
-import useOnlineStatus from '../../hooks/useOnlineStatus.js'
+import useOnlineStatus, { useDeliveryReady } from '../../hooks/useOnlineStatus.js'
 import useRestartPending from '../../hooks/useRestartPending.js'
 import {
   getOnlineSnapshot,
+  getDeliveryReadySnapshot,
   getRecoverySnapshot,
   subscribeRecovery,
 } from '../../lib/connectivityStore.js'
 import {
   inspectOutboxIntent,
+  cancelLocalIntent,
+  editLocalIntent,
   outboxPrincipalKey,
   retireIntent,
   subscribeOutboxSettlement,
@@ -426,6 +430,7 @@ export default function ChatView({
   // longer disables send offline — it notes the message is queued and lets the
   // outbox flush it, rather than dropping the tap into a dead stream.
   const online = useOnlineStatus()
+  const deliveryReady = useDeliveryReady()
   const restartPending = useRestartPending()
   // Read the query cache synchronously on mount. If we've viewed this chat
   // before, its complete transcript window builds the hidden restoration DOM
@@ -775,7 +780,10 @@ export default function ChatView({
   // for render and pendingQueue.pendingMessagesRef for closure-safe
   // synchronous access (handleStop's pre-await clear, fetchMessages'
   // cid preservation).
-  const pendingQueue = usePendingQueue(cached?.pending_messages || [])
+  const pendingQueue = usePendingQueue(cached?.pending_messages || [], {
+    chatId, principalKey: outboxPrincipalKey(getToken()),
+  })
+  const { acknowledgeLocalAnswers, localAnswerIntents } = pendingQueue
   useEffect(() => {
     // The POST error and the server's durable transcript can settle in either
     // order. If a later SSE/reconcile render proves this exact cid is already
@@ -1389,7 +1397,10 @@ export default function ChatView({
       // dropped even while the agent turn is still running; preserving them
       // creates ghost queue chips that cannot be fast-forwarded.
       if (!preserveLocalTurn) {
-        pendingQueue.hydrate(data.pending_messages || [])
+        pendingQueue.hydrate(data.pending_messages || [], {
+          completedCids: (data.messages || []).filter(message => message.role === 'user')
+            .flatMap(message => [cidOf(message), ...(message._consumed_cids || [])]),
+        })
       }
       const runtime = {
         running: !!data.running,
@@ -2907,13 +2918,18 @@ export default function ChatView({
     // the older gesture that positioned it. Any input begun after this point
     // opens fresh reader ownership and still wins normally.
 
+    const queuesBehindLocalAnswer = localAnswerIntents.some(record => (
+      record.body?.question_id === liveQuestionId
+    ))
+    const deliveryDeferred = !getDeliveryReadySnapshot() || queuesBehindLocalAnswer
     const queuesBehindActiveTurn = !!(
-      sendingRef.current
+      deliveryDeferred
+      || sendingRef.current
       || isStreamingRef.current
       || serverRunningRef.current
       || pendingQueue.pendingMessagesRef.current.length > 0
     )
-    const directSteer = opts.directSteer === true && queuesBehindActiveTurn
+    const directSteer = opts.directSteer === true && queuesBehindActiveTurn && !deliveryDeferred
     if (queuesBehindActiveTurn && !directSteer) {
       // Queueing changes the footer immediately (new chip, cleared composer)
       // but adds no transcript row yet. Freeze the exact visible message
@@ -3027,10 +3043,17 @@ export default function ChatView({
           attachments.length > 0 ? attachments : undefined,
           directSteer
             ? { directSteer: true, cid }
-            : { queueOnly: true, cid },
+            : { queueOnly: true, cid, deferDelivery: queuesBehindLocalAnswer },
         )
         if (!directSteer) queuedSendRequestsRef.current.set(cid, queueRequest)
         const result = await queueRequest
+        if (result?.status === 'locally_queued' || result?.status === 'locally_settled') {
+          pendingQueue.clearInFlight(cid)
+          if (result.status === 'locally_settled') void fetchMessages({ force: true, authoritative: true })
+          releaseComposerFilesAfterAccepted()
+          clearFailedAttempt()
+          return true
+        }
         clearFailedAttempt()
         releaseComposerFilesAfterAccepted()
         // The active-turn decision can be stale while the first POST is still
@@ -3345,6 +3368,23 @@ export default function ChatView({
         // selector goes blind after the ack re-render.
         { cid },
       )
+      if (result?.status === 'locally_queued' || result?.status === 'locally_settled') {
+        // Readiness can change while a pending settings write settles. That
+        // deferred receipt is not permission to keep an optimistic run alive.
+        commitMessages(prev => prev.filter(message => !(message.role === 'user' && cidOf(message) === cid && message.optimistic)))
+        if (result.status === 'locally_queued') {
+          pendingQueue.add({ ...userMsg, optimistic: false, queued: true, localOnly: true }, { inFlight: false })
+        } else {
+          forgetSendIntent({ cid })
+          void fetchMessages({ force: true, authoritative: true })
+        }
+        setSending(false)
+        sendingRef.current = false
+        setServerRunningState(false)
+        releaseComposerFilesAfterAccepted()
+        clearFailedAttempt()
+        return true
+      }
       clearFailedAttempt()
       releaseComposerFilesAfterAccepted()
       // A resolved fresh-send transport is authoritative acceptance even when
@@ -3504,6 +3544,8 @@ export default function ChatView({
   }, [
     chatId,
     sendAfterSettingsSaved,
+    localAnswerIntents,
+    liveQuestionId,
     pendingFiles,
     commitMessages,
     fetchMessages,
@@ -3633,9 +3675,6 @@ export default function ChatView({
     const silentCid = (typeof crypto !== 'undefined' && crypto.randomUUID)
       ? crypto.randomUUID()
       : `cid-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`
-    const silentUserMsg = {
-      role: 'user', content: text, ts: Date.now(), cid: silentCid, hidden: true,
-    }
     // Hidden answer is a continuation, NOT a new visible send. The user may be
     // reading somewhere else, so it never creates a PIN. The transient
     // question hold preserves that exact position; an accepted in-process
@@ -3651,6 +3690,14 @@ export default function ChatView({
         question_id: questionId,
         selected_options: questionSubmissionContext?.selected_options,
       })
+      if (response?.status === 'locally_queued' || response?.status === 'locally_settled') {
+        if (response.status === 'locally_settled') void fetchMessages({ force: true, authoritative: true })
+        sendingRef.current = wasSending
+        setSending(wasSending)
+        setServerRunningState(wasServerRunning)
+        dispatchQuestionFollowHandoff({ type: 'cancelled', submission: questionSubmission })
+        return response
+      }
       // The transport boundary above is the commit point. Only now advertise
       // the resumed/recovered turn to the shell; successful answer settlement
       // patches the card below in the same React batch, so a source handoff
@@ -3731,38 +3778,15 @@ export default function ChatView({
       return true
     } catch (err) {
       const keepQueued = shouldKeepQueuedAfterSendFailure(err)
-      if (keepQueued && !questionSubmissionContext?.closeOnlySelection) {
-        // The delivered answer remains hidden, but its pending representation
-        // must be visible in the tray so a restart gap never looks like a
-        // bounced question-card submission. It keeps the same cid the outbox
-        // drain will replay and reconcile.
-        const { hidden: _hidden, ...queuedAnswerMsg } = silentUserMsg
-        pendingQueue.add({ ...queuedAnswerMsg, queued: true }, { inFlight: false })
-        commitMessages(prev => {
-          const updated = [...prev]
-          const lastIdx = updated.length - 1
-          if (lastIdx >= 0 && updated[lastIdx].role === 'assistant') {
-            const message = { ...updated[lastIdx] }
-            message.blocks = (message.blocks || []).map(block => {
-              if (block.type !== 'question') return block
-              if (questionId && block.question_id !== questionId) return block
-              return { ...block, answers: resolvedAnswers }
-            })
-            updated[lastIdx] = message
-          }
-          return updated
-        })
-        patchQuestionAnswers(questionId, resolvedAnswers)
-        dispatchQuestionFollowHandoff({
-          type: 'accepted',
-          submission: questionSubmission,
-        })
-        setSendFailure(sendFailureMessage(err, { online: getOnlineSnapshot() }))
-        return true
+      if (keepQueued) {
+        // The outbox projects this answer on its own card, not as an accepted
+        // answer or a visible user row. Restore the interrupted turn exactly.
+        sendingRef.current = wasSending
+        setSending(wasSending)
+        setServerRunningState(wasServerRunning)
+        dispatchQuestionFollowHandoff({ type: 'cancelled', submission: questionSubmission })
+        return { status: 'locally_queued', cid: silentCid }
       }
-      // A quiet answer's ambiguous acknowledgement may still be in the
-      // outbox, but it promises no subsequent agent output to release a latch.
-      // Keep its card/draft retryable until authoritative detail settles it.
       // Restore the exact pre-submit turn state. In particular, reset the
       // synchronous ref even when React state was already false; otherwise a
       // failed answer silently blocks every later composer send. A question
@@ -3907,6 +3931,37 @@ export default function ChatView({
     const currentQueue = pendingQueue.pendingMessagesRef.current
     const cancelledIndex = currentQueue.findIndex(row => cidOf(row) === cid)
     const cancelledRow = cancelledIndex >= 0 ? currentQueue[cancelledIndex] : null
+    const local = await cancelLocalIntent(cid, { chatId, principalKey: outboxPrincipalKey(getToken()) })
+    if (local.status === 'cancelled') {
+      pendingQueue.cancelByCid(cid)
+      forgetSendIntent({ cid })
+      return
+    }
+    if (local.status === 'unavailable') {
+      setSendFailure('Couldn’t save the cancellation on this device. Your queued message is unchanged.')
+      return
+    }
+    // A pre-upgrade tab can hold a replay snapshot without a dispatch claim.
+    // Do not let a server cancellation overtake that unconfirmed replay.
+    if (local.reason === 'replay_busy' || local.reason === 'replay_lock_unavailable') {
+      setSendFailure('Delivery is not confirmed yet. Try cancelling after delivery is confirmed.')
+      return
+    }
+    // localOnly describes presentation, not proof a POST never happened. An
+    // uncertain/server-owned message must be cancelled at its actual owner.
+    const queueWrite = queuedSendRequestsRef.current.get(cid)
+    if (getDeliveryReadySnapshot() && queueWrite) await Promise.allSettled([queueWrite])
+    const currentRow = pendingQueue.pendingMessagesRef.current.find(row => cidOf(row) === cid)
+    if ((local.status === 'uncertain' || currentRow?.localOnly) && currentRow?.serverTs !== true) {
+      // Background replay has no interactive queueWrite promise. Until exact
+      // server state proves admission, DELETE could overtake that POST.
+      setSendFailure('Delivery is not confirmed yet. Try cancelling after delivery is confirmed.')
+      return
+    }
+    if (!getDeliveryReadySnapshot()) {
+      setSendFailure('Reconnect to confirm cancellation. This message may already have reached Möbius.')
+      return
+    }
     pendingQueue.cancelByCid(cid)
     // Make replay retirement authoritative before asking the server to cancel
     // the queue row. A failed state transition restores the UI and stops here;
@@ -3918,10 +3973,6 @@ export default function ChatView({
       return
     }
     forgetSendIntent({ cid })
-    // Drop any durable outbox copy too, so a message cancelled while offline is
-    // not resurrected by the reconnect drain (the DELETE below may not reach the
-    // server, but the local intent must not replay).
-    void retireIntent(cid)
     try {
       const res = await apiFetch(`/chats/${chatId}/pending/${encodeURIComponent(cid)}`, {
         method: 'DELETE',
@@ -3954,15 +4005,26 @@ export default function ChatView({
         // back only this row, preserving any newer queue changes made while
         // the two requests were pending.
         pendingQueue.restoreByCid(cancelledRow, cancelledIndex)
+        setSendFailure('Cancellation couldn’t be confirmed. This message may still be queued in Möbius; reconnect to check.')
       }
     }
-  }, [chatId, pendingQueue])
+  }, [chatId, pendingQueue, setSendFailure])
 
   const handleUpdatePending = useCallback(async (cid, content) => {
+    const local = await editLocalIntent(cid, {
+      chatId, principalKey: outboxPrincipalKey(getToken()), content,
+    })
+    if (local.status === 'saved') return 'saved'
+    if (local.status === 'unsupported') return 'context_pending'
+    if (local.reason === 'replay_busy' || local.reason === 'replay_lock_unavailable') return 'confirming'
+    if (local.status === 'unavailable' || local.status === 'invalid') return 'error'
     // Let any in-flight enqueue for this cid settle first, so we PATCH a row
     // the server already knows about rather than racing its POST.
     const queueWrite = queuedSendRequestsRef.current.get(cid)
-    if (queueWrite) await Promise.allSettled([queueWrite])
+    if (getDeliveryReadySnapshot() && queueWrite) await Promise.allSettled([queueWrite])
+    const currentRow = pendingQueue.pendingMessagesRef.current.find(row => cidOf(row) === cid)
+    if ((local.status === 'uncertain' || currentRow?.localOnly) && currentRow?.serverTs !== true) return 'confirming'
+    if (!getDeliveryReadySnapshot()) return 'waiting'
     try {
       const res = await apiFetch(
         `/chats/${chatId}/pending/${encodeURIComponent(cid)}`,
@@ -4726,7 +4788,7 @@ export default function ChatView({
   // the stream is unavailable; otherwise the tray disappears but the composer
   // can still offer an action whose request cannot reach the running turn.
   useEffect(() => {
-    if (hidden) return
+    if (hidden || !deliveryReady) return
     const hasQueue = pendingQueue.pendingMessages.length > 0
     if (!turnActive && !hasQueue) return
     let cancelled = false
@@ -4750,6 +4812,7 @@ export default function ChatView({
     ensureRuntimeStreamConnected,
     hidden,
     turnActive,
+    deliveryReady,
     pendingQueue.pendingMessages.length,
     reconcileRuntimeState,
   ])
@@ -4795,6 +4858,18 @@ export default function ChatView({
     reconcileFailedSendOutbox,
     reconcileRuntimeState,
   ])
+
+  // Only authoritative answered blocks retire the local card projection. A
+  // delivery receipt alone leaves it stable while the transcript catches up.
+  useEffect(() => {
+    if (localAnswerIntents.length === 0) return
+    const answeredIds = [
+      ...messages.flatMap(message => message.blocks || []),
+      ...streamItems,
+    ].filter(block => block.type === 'question' && (block.answers || block.platform_action?.status === 'activated'))
+      .map(block => block.question_id).filter(Boolean)
+    acknowledgeLocalAnswers(answeredIds)
+  }, [messages, streamItems, localAnswerIntents, acknowledgeLocalAnswers])
 
   // The shell can deliver this chat's intent while another pane is visible.
   // Reconcile the authoritative transcript immediately when this mounted chat
@@ -5045,6 +5120,7 @@ export default function ChatView({
   // available instead: Stop cancels the question first, interrupts the turn,
   // and re-sends the queued rows as one fresh continuation.
   const showSteer = !hasPendingQuestion
+    && deliveryReady
     && connectionError !== 'disconnected'
     && turnActive
     && pendingQueue.visiblePendingMessages.length > 0
@@ -5052,6 +5128,7 @@ export default function ChatView({
   const canSteer = canRequestSteer
     && canFastForwardQueue(pendingQueue.visiblePendingMessages, turnActive)
   const canSubmitSteer = !hasPendingQuestion
+    && deliveryReady
     && connectionError !== 'disconnected'
     && !steerBusy
     && turnActive
@@ -5530,6 +5607,7 @@ export default function ChatView({
         {/* The reservation is a permanent geometry invariant for every
             non-empty chat, including after unmount/remount. Keep the list's
             elastic min-height out of the spacer formula at all times. */}
+        <LocalAnswersContext.Provider value={localAnswerIntents}>
         <PeerTimelineContext.Provider value={peerTimeline}>
         <ul className="chat__list" style={{ minHeight: 0 }}>
           {displayedMessages.flatMap((msg, i) => {
@@ -5748,6 +5826,7 @@ export default function ChatView({
           })}
         </ul>
         </PeerTimelineContext.Provider>
+        </LocalAnswersContext.Provider>
 
         <div className="spacer-dynamic" ref={spacerRef} aria-hidden="true" />
       </div>
@@ -5847,20 +5926,18 @@ export default function ChatView({
           reconnecting={reconnecting}
           onRetry={retry}
         />
-        {connectionError !== 'disconnected' && (
-          <QueuedMessages
+        <QueuedMessages
             items={pendingQueue.visiblePendingMessages}
             onCancel={handleCancelPending}
             onEdit={handleUpdatePending}
             onSteerOne={handleSteerOne}
-            steerActive={turnActive && !hasPendingQuestion}
+            steerActive={turnActive && !hasPendingQuestion && deliveryReady}
             steerBusy={steerBusy}
             turnActive={turnActive}
             online={online}
             restarting={restartPending}
             focusComposer={() => focusComposerElement(inputRef.current)}
           />
-        )}
         <ChatInputBar
           chatId={chatId}
           input={input}
@@ -5885,7 +5962,7 @@ export default function ChatView({
           canSubmitSteer={canSubmitSteer}
           sendFailure={sendFailure}
           submissionBlocked={providerSwitching || !!newChatSession?.submitted}
-          questionBlocked={hasPendingQuestion}
+          questionBlocked={hasPendingQuestion && !localAnswerIntents.some(record => record.body?.question_id === answerableQuestionId)}
           pendingFiles={pendingFiles}
           onAddFiles={handleComposerAddFiles}
           onRemoveFile={handleComposerRemoveFile}

@@ -65,7 +65,7 @@ The `/data` volume persists across `docker compose build && up -d`, so a new ima
 
 Möbius is meant to be self-hosted on a user-provisioned host — a managed platform (Railway/Render/Fly/PikaPods) or a raw VPS — so "apply a security update" splits into three tiers by who can even act:
 
-- **Image userspace** — the Python wheels, npm globals, apt packages, and vendored mini-app libs baked into the image. The agent owns these end-to-end: change the declared constraint (`Dockerfile` / `backend/requirements.txt` / `frontend/package.json`), regenerate the hashed Python lock, rebuild, recreate. Never `apt upgrade` / `pip install -U` a *running* container — that mutation is ephemeral and drifts the live container away from the reproducible image. `deploy-prod.sh` is the apply path. Full root is an honest default instance capability: the root entrypoint creates `mobius ALL=(root) NOPASSWD: ALL` before dropping privileges. `MOBIUS_AGENT_SUDO=0` is the coarse operator kill switch and ships with no sudoers rule. Changing either direction requires a clean recreation because an already-root agent could have installed persistent-in-container privilege paths.
+- **Image userspace** — the Python wheels, npm globals, apt packages, and vendored mini-app libs baked into the image. The agent owns these end-to-end: install a task’s named dependency into the running container when safe, then record the same resolution in its manifest and lockfile (and Dockerfile when needed). A new process can use the live install immediately; restart only when an existing process must load it. Declarations preserve reproducibility after container replacement; they do not require an immediate rebuild. Avoid blanket upgrades. Use the host-owned deployment path only when live activation is impossible or image validation was explicitly requested. Full root is an honest default instance capability: the root entrypoint creates `mobius ALL=(root) NOPASSWD: ALL` before dropping privileges. `MOBIUS_AGENT_SUDO=0` is the coarse operator kill switch and ships with no sudoers rule. Changing either direction requires a clean recreation because an already-root agent could have installed persistent-in-container privilege paths.
 - **Host OS userspace + the Docker engine** — outside every container; patched on the host (`unattended-upgrades` covers the OS packages; the engine is a separate host upgrade).
 - **Host kernel** — *not in the container*; it shares the host's and cannot be patched from inside. On a managed platform the operator patches+reboots the kernel underneath you (the safe default for non-devops owners); on a raw VPS it's the owner's job, via `unattended-upgrades` + livepatch + a scheduled reboot window.
 
@@ -636,11 +636,15 @@ and attaches their rule ids to new diagnostic chats. The Playwright lock-in spec
   disclosure settlement all see the same tail range. Only the DOM's latest user row
   participates—an older user row never gets a separate reservation. Durable anchor
   validation still rejects locations wholly inside reserved blank space, so
-  restoring a chat lands on real conversation content. R6's transient
-  question-submit hold is the sole calculation exception: it may reserve only the
-  exact tail deficit required for a stable card handoff while the viewport size is
-  unchanged. It is never persisted and must release to the unanswered card's prior
-  mode before a keyboard or other viewport resize is laid out.
+  restoring a chat lands on real conversation content. Transient submission
+  holds share the same spacer owner: question submission reserves the exact
+  anchor deficit through viewport changes until visible response activity or
+  newer reader intent releases it (R6). A queued send may retain the minimum
+  active-viewport deficit needed to keep the reading position when its composer
+  clears. That deficit and the latest-user deficit combine by maximum, never
+  addition; queued submission inherits neither question follow intent nor the
+  keyboard ceiling. Content growth consumes the room and newer reader intent
+  replaces the hold. Neither submission's temporary authority survives restore.
 - **R2 — One send rule everywhere.** The first visible user message always pins to
   the viewport top. Every subsequent direct, queued, promoted, or steered message
   pins only when its submit-time DOM snapshot is at the one physical
@@ -940,7 +944,7 @@ Controller structure is part of the contract, not an implementation detail:
   composer-clearance CSS geometry. Those indirect writes and every `writeMode`
   call share R5's reader-generation commit gate. Spacer height is
   derived from the latest user row, active scroll-box height (plus R1's transient
-  same-width pin ceiling), and exact tail deficit;
+  same-width pin ceiling), and exact tail deficit or transient submission reachability;
   disclosure helpers and renderers may preserve an on-screen anchor but may never
   prime, enlarge, or unwind spacer themselves.
 - The gesture-gated `scroll` event reads physical-bottom geometry directly.

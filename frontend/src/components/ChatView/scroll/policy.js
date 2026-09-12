@@ -2,6 +2,7 @@
 
 import {
   _topmostVisibleMsg,
+  _scrollTopOf,
   anchorModeForElement,
   anchorModeFromScroll,
   contentHoldModeFromScroll,
@@ -588,7 +589,8 @@ export function modeForQueuedSubmission(scrollEl, currentMode) {
     ? {
         kind: 'ANCHOR_AT',
         key: anchor.dataset.key,
-        offset: anchor.offsetTop - scrollEl.scrollTop,
+        offset: _scrollTopOf(scrollEl, anchor) - scrollEl.scrollTop,
+        submissionLayoutHold: true,
       }
     : currentMode
 }
