@@ -25,8 +25,8 @@ from sqlalchemy.orm import Session, defer
 from sqlalchemy.orm.attributes import flag_modified
 
 from app import (
-  auth, fs_locks, github_auth, models, project_builders, project_drawer, project_git, providers,
-  questions, workspace_files,
+  auth, drawer_pins, fs_locks, github_auth, models, project_builders,
+  project_drawer, project_git, providers, questions, workspace_files,
 )
 from app.broadcast import get_system_broadcast
 from app.chat import (
@@ -2259,10 +2259,13 @@ def patch_project(
     project.name = body.name
   if "color" in body.model_fields_set:
     project.color = body.color
-  if body.pinned is not None:
-    project_drawer.set_pinned(db, project.id, body.pinned)
   try:
-    db.commit()
+    if body.pinned is not None:
+      with drawer_pins.serialized_write():
+        project_drawer.set_pinned(db, project.id, body.pinned)
+        db.commit()
+    else:
+      db.commit()
   except IntegrityError as exc:
     db.rollback()
     raise HTTPException(409, "Project could not be updated.") from exc
@@ -2301,15 +2304,16 @@ async def delete_project(
   for chat in chats:
     bump_run_generation(chat.id)
   with PROJECT_LIFECYCLE_LOCK:
-    deleted_at = now_naive_utc()
-    project.deleted_at = deleted_at
-    from app.shared_app_retention import stage_project_shared_app_delete
-    stage_project_shared_app_delete(db, str(project.id), deleted_at)
-    from app.chat_waits import stage_cancel_waits_for_chat
-    for chat in chats:
-      stage_cancel_waits_for_chat(db, chat.id)
-      chat.deleted_at = deleted_at
-    db.commit()
+    with drawer_pins.serialized_write():
+      deleted_at = now_naive_utc()
+      project.deleted_at = deleted_at
+      from app.shared_app_retention import stage_project_shared_app_delete
+      stage_project_shared_app_delete(db, str(project.id), deleted_at)
+      from app.chat_waits import stage_cancel_waits_for_chat
+      for chat in chats:
+        stage_cancel_waits_for_chat(db, chat.id)
+        chat.deleted_at = deleted_at
+      db.commit()
   for chat in chats:
     questions.cancel(chat.id)
     mark_chat_deleted(chat.id)
@@ -2338,27 +2342,28 @@ def recover_project(
   db: Session = Depends(get_db),
 ):
   with PROJECT_LIFECYCLE_LOCK:
-    project = db.query(models.Project).filter(
-      models.Project.id == project_id,
-      models.Project.deleted_at.isnot(None),
-    ).first()
-    if project is None:
-      raise HTTPException(404, "Project not found or not deleted.")
-    if now_naive_utc() - project.deleted_at >= SOFT_DELETE_TTL:
-      raise HTTPException(410, "Recovery window has expired.")
-    if not _project_root(project).is_dir():
-      raise HTTPException(409, "Project files are unavailable.")
-    deleted_at = project.deleted_at
-    from app.shared_app_retention import stage_project_shared_app_recovery
-    stage_project_shared_app_recovery(db, str(project.id), deleted_at)
-    chats = db.query(models.Chat).filter(
-      models.Chat.project_id == project.id,
-      models.Chat.deleted_at == deleted_at,
-    ).all()
-    project.deleted_at = None
-    for chat in chats:
-      chat.deleted_at = None
-    db.commit()
+    with drawer_pins.serialized_write():
+      project = db.query(models.Project).filter(
+        models.Project.id == project_id,
+        models.Project.deleted_at.isnot(None),
+      ).first()
+      if project is None:
+        raise HTTPException(404, "Project not found or not deleted.")
+      if now_naive_utc() - project.deleted_at >= SOFT_DELETE_TTL:
+        raise HTTPException(410, "Recovery window has expired.")
+      if not _project_root(project).is_dir():
+        raise HTTPException(409, "Project files are unavailable.")
+      deleted_at = project.deleted_at
+      from app.shared_app_retention import stage_project_shared_app_recovery
+      stage_project_shared_app_recovery(db, str(project.id), deleted_at)
+      chats = db.query(models.Chat).filter(
+        models.Chat.project_id == project.id,
+        models.Chat.deleted_at == deleted_at,
+      ).all()
+      project.deleted_at = None
+      for chat in chats:
+        chat.deleted_at = None
+      db.commit()
   for chat in chats:
     recover_chat_generation(chat.id)
     get_system_broadcast().publish(

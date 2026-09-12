@@ -22,8 +22,8 @@ from sqlalchemy.orm import Session, defer
 
 from app import (
   activity, app_activity, app_apply, app_capability_acceptance, app_git,
-  app_jobs, app_recency, chat_app_artifacts, chat_queue, fs_locks, icon_cache,
-  models, project_git, providers, schemas,
+  app_jobs, app_recency, chat_app_artifacts, chat_queue, drawer_pins, fs_locks,
+  icon_cache, models, project_git, providers, schemas,
   source_dirs, workspace_files,
 )
 from app.app_identity import (
@@ -2537,8 +2537,6 @@ async def update_app(
       app.description = body.description
     if body.chat_id is not None:
       app.chat_id = body.chat_id
-    if body.pinned is not None:
-      app.pinned_at = now_naive_utc() if body.pinned else None
     if body.share_with_apps is not None:
       app.share_with_apps = body.share_with_apps
     if body.cross_app_access is not None:
@@ -2620,7 +2618,14 @@ async def update_app(
         # honest live-state projection instead of leaving review data absent.
         or contract_from_app_state(app)
       )
-    db.commit()
+    if body.pinned is not None:
+      # This timestamp participates in the drawer's combined chat/app/project
+      # order, so no reorder may validate between this assignment and commit.
+      with drawer_pins.serialized_write():
+        app.pinned_at = now_naive_utc() if body.pinned else None
+        db.commit()
+    else:
+      db.commit()
     db.refresh(app)
     # A pin toggle is drawer-local ORDERING, not a change to the app itself, so
     # it must not ride the app_updated wire. Drag-reorder re-stamps every pinned
@@ -3012,15 +3017,16 @@ async def delete_app(
       # Naive UTC to match SQLite's naive storage + the naive TTL comparison in
       # list_apps / recover_app (same contract chats.py documents). Avoids a
       # platform-dependent aware/naive round-trip mismatch.
-      app.deleted_at = now_naive_utc()
-      # Tombstoning is a permanent credential boundary, even if the same row is
-      # later recovered. Without this rotation, an app token rejected while the
-      # row is deleted becomes valid again as soon as recovery clears deleted_at.
-      app.token_nonce = secrets.token_hex(16)
-      app_name = app.name
-      app_slug = app.slug
-      app_source_dir = app.source_dir
-      db.commit()
+      with drawer_pins.serialized_write():
+        app.deleted_at = now_naive_utc()
+        # Tombstoning is a permanent credential boundary, even if the same row is
+        # later recovered. Without this rotation, an app token rejected while the
+        # row is deleted becomes valid again as soon as recovery clears deleted_at.
+        app.token_nonce = secrets.token_hex(16)
+        app_name = app.name
+        app_slug = app.slug
+        app_source_dir = app.source_dir
+        db.commit()
     # Publish the durable tombstone before best-effort job/skill/cron cleanup.
     # Cleanup errors must not leave live shells projecting a row the database
     # has already removed from the drawer.
@@ -3245,10 +3251,11 @@ async def recover_app(
           status_code=422,
           detail=f"Could not rebuild app for recovery: {exc}",
         )
-    app.deleted_at = None
-    app_name = app.name
-    app_source_dir = app.source_dir
-    db.commit()
+    with drawer_pins.serialized_write():
+      app.deleted_at = None
+      app_name = app.name
+      app_source_dir = app.source_dir
+      db.commit()
     # Recovery is durable at this point. Publish before ancillary cron/skill
     # restoration so a later best-effort failure cannot leave the live drawer
     # hidden behind a stale deletion tombstone.

@@ -47,7 +47,7 @@ import {
 import InstallSheet from './InstallSheet.jsx'
 import AppsDirectory from './AppsDirectory.jsx'
 import DrawerItemActionMenu from './DrawerItemActionMenu.jsx'
-import { createPinMutationQueue } from './pinMutationQueue.js'
+import { createPinnedMutationQueue } from './pinnedMutationQueue.js'
 import {
   buildDrawerSections,
   filterInstalledApps,
@@ -192,7 +192,7 @@ export default function Drawer({
   const pinMutationGenerationRef = useRef(0)
   const pinMutationQueueRef = useRef(null)
   if (pinMutationQueueRef.current === null) {
-    pinMutationQueueRef.current = createPinMutationQueue()
+    pinMutationQueueRef.current = createPinnedMutationQueue()
   }
   const lastPendingPinnedAtRef = useRef(null)
   const [pendingPins, setPendingPins] = useState(() => new Map())
@@ -646,7 +646,7 @@ export default function Drawer({
     return updated
   }
 
-  function mutatePin(kind, id, pinned, { queryKey, request, refresh }) {
+  function mutatePin(kind, id, pinned, { queryKey, request, recover }) {
     const generation = ++pinMutationGenerationRef.current
     const itemKey = `${kind}:${id}`
     const optimisticPinnedAt = pinned
@@ -667,31 +667,30 @@ export default function Drawer({
 
     return pinMutationQueueRef.current.enqueue(async () => {
       try {
-        const res = await request()
-        if (!res.ok) throw new Error('Pin update failed')
+        const updated = await request()
+        const persistedPinnedAt = updated?.pinned_at ?? null
+        if (pinned && !persistedPinnedAt) {
+          throw new Error('Pin update returned no canonical rank')
+        }
 
         // Retire any list request that began before the committed write, then
-        // hand the confirmed choice to the canonical cache. Keep the pending
-        // projection through the authoritative refresh as well: a cached or
-        // failed read must not expose an intermediate client rank.
+        // place the server's exact rank in the canonical cache. The pending
+        // projection keeps the owner's choice visible until this queue item
+        // retires, but never becomes durable ordering truth.
         try {
           await queryClient.cancelQueries({ queryKey, exact: true })
         } catch {}
-        const applyPendingPin = list => (list || []).map(item => (
+        const applyPersistedPin = list => (list || []).map(item => (
           String(item.id) === String(id)
-            ? { ...item, pinned_at: pending.pinnedAt }
+            ? { ...item, pinned_at: persistedPinnedAt }
             : item
         ))
-        queryClient.setQueryData(queryKey, applyPendingPin)
-        try {
-          await refresh()
-        } catch {}
-        // A service-worker or reconnect read can resolve successfully with an
-        // older snapshot. Reassert the committed choice before retiring the
-        // pending projection; a later fresh read will replace its client rank.
-        queryClient.setQueryData(queryKey, applyPendingPin)
+        queryClient.setQueryData(queryKey, applyPersistedPin)
       } catch {
         onNotice?.(`Couldn’t ${pinned ? 'pin' : 'unpin'} that item.`, { variant: 'error' })
+        // A timeout can race a successful server commit. Recovery is outside
+        // the queue so one unavailable list read cannot block later intent.
+        void Promise.resolve().then(recover).catch(() => {})
       } finally {
         setPendingPins(current => {
           if (current.get(itemKey)?.generation !== generation) return current
@@ -706,24 +705,24 @@ export default function Drawer({
   function pinChat(id, pinned) {
     return mutatePin('chat', id, pinned, {
       queryKey: chatQueries.keys.all,
-      request: () => api.chats.update(id, { pinned }),
-      refresh: refreshChats,
+      request: () => api.chats.setPinned(id, pinned),
+      recover: refreshChats,
     })
   }
 
   function pinApp(id, pinned) {
     return mutatePin('app', id, pinned, {
       queryKey: appQueries.keys.all,
-      request: () => api.apps.update(id, { pinned }),
-      refresh: refreshApps,
+      request: () => api.apps.setPinned(id, pinned),
+      recover: refreshApps,
     })
   }
 
   function pinProject(id, pinned) {
     return mutatePin('project', id, pinned, {
       queryKey: projectQueries.keys.all,
-      request: () => api.projects.update(id, { pinned }),
-      refresh: () => projectQueries.list.invalidate(queryClient),
+      request: () => api.projects.setPinned(id, pinned),
+      recover: () => projectQueries.list.invalidate(queryClient),
     })
   }
 
@@ -731,80 +730,80 @@ export default function Drawer({
   // projects share it). The visible handoff remains authoritative until the
   // ONE atomic server transaction returns exact ranks for all three query
   // caches. This prevents an unrelated refresh from exposing a mixed snapshot.
-  async function reorderPinned(orderedKeys) {
+  function reorderPinned(orderedKeys) {
     if (!Array.isArray(orderedKeys) || orderedKeys.length === 0) return
     const generation = ++pinnedReorderGenerationRef.current
-    // A just-pinned row is immediately draggable, but the atomic reorder API
-    // quite correctly rejects a set the pin write has not committed yet. Wait
-    // for every overlapping pin/unpin, including writes added while waiting,
-    // then rebase the drag onto the identities that actually settled.
-    await pinMutationQueueRef.current.settle()
-    if (generation !== pinnedReorderGenerationRef.current) return false
-    const currentPinned = buildDrawerSections(
-      queryClient.getQueryData(chatQueries.keys.all) || chats,
-      queryClient.getQueryData(appQueries.keys.all) || apps,
-      queryClient.getQueryData(projectQueries.keys.all) || projects,
-    ).pinned
-    const currentKeys = currentPinned.map(({ kind, item }) => `${kind}:${item.id}`)
-    const visibleKeys = reconcilePinnedOrder(orderedKeys, currentKeys)
-    if (
-      visibleKeys.length < 2
-      || visibleKeys.every((key, index) => key === currentKeys[index])
-    ) return false
-    const items = visibleKeys.map(key => {
-      const sep = key.indexOf(':')
-      return { kind: key.slice(0, sep), id: key.slice(sep + 1) }
-    })
-    if (items.some(item => !['chat', 'app', 'project'].includes(item.kind) || !item.id)) return
-
-    setPinnedOrderHandoff({ generation, visibleKeys, releaseRanks: null })
-    const chatKey = chatQueries.keys.all
-    const appKey = appQueries.keys.all
-    const projectKey = projectQueries.keys.all
-    try {
-      const res = await api.chats.reorderPinned(items)
-      if (!res.ok) throw new Error('Could not reorder pinned items')
-      const payload = await res.json()
-      const persisted = Array.isArray(payload?.items) ? payload.items : []
-      const rank = new Map(persisted.map(item => [
-        `${item.kind}:${item.id}`,
-        item.pinned_at,
-      ]))
-      if (rank.size !== visibleKeys.length || visibleKeys.some(key => !rank.has(key))) {
-        throw new Error('Pinned reorder returned an incomplete order')
-      }
-      if (generation !== pinnedReorderGenerationRef.current) return
-      // Cancel reads started before the transaction committed; a stale response
-      // must not overwrite the coherent ranks below.
-      await Promise.all([
-        queryClient.cancelQueries({ queryKey: chatKey }),
-        queryClient.cancelQueries({ queryKey: appKey }),
-        queryClient.cancelQueries({ queryKey: projectKey }),
-      ])
-      if (generation !== pinnedReorderGenerationRef.current) return
-      const applyRank = kind => list => (list || []).map(item => {
-        const pinnedAt = rank.get(`${kind}:${item.id}`)
-        return pinnedAt ? { ...item, pinned_at: pinnedAt } : item
+    return pinMutationQueueRef.current.enqueue(async () => {
+      if (generation !== pinnedReorderGenerationRef.current) return false
+      const currentPinned = buildDrawerSections(
+        queryClient.getQueryData(chatQueries.keys.all) || chats,
+        queryClient.getQueryData(appQueries.keys.all) || apps,
+        queryClient.getQueryData(projectQueries.keys.all) || projects,
+      ).pinned
+      const currentKeys = currentPinned.map(({ kind, item }) => `${kind}:${item.id}`)
+      const visibleKeys = reconcilePinnedOrder(orderedKeys, currentKeys)
+      if (
+        visibleKeys.length < 2
+        || visibleKeys.every((key, index) => key === currentKeys[index])
+      ) return false
+      const items = visibleKeys.map(key => {
+        const sep = key.indexOf(':')
+        return { kind: key.slice(0, sep), id: key.slice(sep + 1) }
       })
-      queryClient.setQueryData(chatKey, applyRank('chat'))
-      queryClient.setQueryData(appKey, applyRank('app'))
-      queryClient.setQueryData(projectKey, applyRank('project'))
-      setPinnedOrderHandoff(current => (
-        current?.generation === generation
-          ? {
-            ...current,
-            releaseRanks: visibleKeys.map(key => ({ key, pinnedAt: rank.get(key) })),
-          }
-          : current
-      ))
-      return true
-    } catch {
-      if (generation === pinnedReorderGenerationRef.current) {
-        setPinnedOrderHandoff(null)
-        onNotice?.('Couldn’t reorder pinned items.', { variant: 'error' })
+      if (items.some(item => !['chat', 'app', 'project'].includes(item.kind) || !item.id)) return false
+
+      setPinnedOrderHandoff({ generation, visibleKeys, releaseRanks: null })
+      const chatKey = chatQueries.keys.all
+      const appKey = appQueries.keys.all
+      const projectKey = projectQueries.keys.all
+      try {
+        const payload = await api.chats.reorderPinned(items)
+        const persisted = Array.isArray(payload?.items) ? payload.items : []
+        const rank = new Map(persisted.map(item => [
+          `${item.kind}:${item.id}`,
+          item.pinned_at,
+        ]))
+        if (rank.size !== visibleKeys.length || visibleKeys.some(key => !rank.has(key))) {
+          throw new Error('Pinned reorder returned an incomplete order')
+        }
+        if (generation !== pinnedReorderGenerationRef.current) return false
+        // Cancel reads started before the transaction committed; a stale response
+        // must not overwrite the coherent ranks below.
+        await Promise.all([
+          queryClient.cancelQueries({ queryKey: chatKey }),
+          queryClient.cancelQueries({ queryKey: appKey }),
+          queryClient.cancelQueries({ queryKey: projectKey }),
+        ])
+        if (generation !== pinnedReorderGenerationRef.current) return false
+        const applyRank = kind => list => (list || []).map(item => {
+          const pinnedAt = rank.get(`${kind}:${item.id}`)
+          return pinnedAt ? { ...item, pinned_at: pinnedAt } : item
+        })
+        queryClient.setQueryData(chatKey, applyRank('chat'))
+        queryClient.setQueryData(appKey, applyRank('app'))
+        queryClient.setQueryData(projectKey, applyRank('project'))
+        setPinnedOrderHandoff(current => (
+          current?.generation === generation
+            ? {
+              ...current,
+              releaseRanks: visibleKeys.map(key => ({ key, pinnedAt: rank.get(key) })),
+            }
+            : current
+        ))
+        return true
+      } catch {
+        if (generation === pinnedReorderGenerationRef.current) {
+          setPinnedOrderHandoff(null)
+          onNotice?.('Couldn’t reorder pinned items.', { variant: 'error' })
+          void Promise.all([
+            refreshChats(),
+            refreshApps(),
+            projectQueries.list.invalidate(queryClient),
+          ]).catch(() => {})
+        }
+        return false
       }
-      return false
-    }
+    })
   }
 
   // deleteApp is handled by Shell (where showToast lives) — the local

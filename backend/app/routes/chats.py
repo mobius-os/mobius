@@ -22,6 +22,7 @@ from app import (
   auth,
   chat_failure_activity,
   chat_search,
+  drawer_pins,
   models,
   providers,
   questions,
@@ -1155,45 +1156,46 @@ def update_pinned_order(
   if len(set(normalized)) != len(normalized):
     raise HTTPException(status_code=422, detail="Pinned order contains duplicates.")
 
-  pinned_chats = db.query(models.Chat).filter(
-    models.Chat.deleted_at.is_(None),
-    models.Chat.pinned_at.isnot(None),
-  ).all()
-  pinned_apps = db.query(models.App).filter(
-    models.App.deleted_at.is_(None),
-    models.App.pinned_at.isnot(None),
-  ).all()
-  pinned_projects = db.query(models.ProjectDrawerState).join(
-    models.Project,
-    models.Project.id == models.ProjectDrawerState.project_id,
-  ).filter(
-    models.Project.deleted_at.is_(None),
-    models.ProjectDrawerState.pinned_at.isnot(None),
-  ).all()
-  rows = {
-    **{("chat", str(chat.id)): chat for chat in pinned_chats},
-    **{("app", str(app.id)): app for app in pinned_apps},
-    **{("project", str(state.project_id)): state for state in pinned_projects},
-  }
-  if set(normalized) != set(rows):
-    raise HTTPException(
-      status_code=409,
-      detail="Pinned items changed while reordering; try again.",
-    )
+  with drawer_pins.serialized_write():
+    pinned_chats = db.query(models.Chat).filter(
+      models.Chat.deleted_at.is_(None),
+      models.Chat.pinned_at.isnot(None),
+    ).all()
+    pinned_apps = db.query(models.App).filter(
+      models.App.deleted_at.is_(None),
+      models.App.pinned_at.isnot(None),
+    ).all()
+    pinned_projects = db.query(models.ProjectDrawerState).join(
+      models.Project,
+      models.Project.id == models.ProjectDrawerState.project_id,
+    ).filter(
+      models.Project.deleted_at.is_(None),
+      models.ProjectDrawerState.pinned_at.isnot(None),
+    ).all()
+    rows = {
+      **{("chat", str(chat.id)): chat for chat in pinned_chats},
+      **{("app", str(app.id)): app for app in pinned_apps},
+      **{("project", str(state.project_id)): state for state in pinned_projects},
+    }
+    if set(normalized) != set(rows):
+      raise HTTPException(
+        status_code=409,
+        detail="Pinned items changed while reordering; try again.",
+      )
 
-  # Keep the last assigned rank at or before `now` so a pin toggled immediately
-  # after this transaction still appends below the reordered list.
-  anchor = now_naive_utc() - timedelta(microseconds=len(normalized))
-  persisted = []
-  for index, key in enumerate(normalized, start=1):
-    pinned_at = anchor + timedelta(microseconds=index)
-    rows[key].pinned_at = pinned_at
-    persisted.append({
-      "kind": key[0],
-      "id": key[1],
-      "pinned_at": pinned_at.isoformat(),
-    })
-  db.commit()
+    # Keep the last assigned rank at or before `now` so a pin toggled immediately
+    # after this transaction still appends below the reordered list.
+    anchor = now_naive_utc() - timedelta(microseconds=len(normalized))
+    persisted = []
+    for index, key in enumerate(normalized, start=1):
+      pinned_at = anchor + timedelta(microseconds=index)
+      rows[key].pinned_at = pinned_at
+      persisted.append({
+        "kind": key[0],
+        "id": key[1],
+        "pinned_at": pinned_at.isoformat(),
+      })
+    db.commit()
   return {"items": persisted}
 
 
@@ -1332,11 +1334,6 @@ async def patch_chat(
           chat.title = new_title
           chat.title_locked = True
 
-    # Drawer pin toggle. We stamp the time on pin so the shared pinned group
-    # can append the newest pin after the items already there.
-    if body.pinned is not None:
-      chat.pinned_at = now_naive_utc() if body.pinned else None
-
     data_dir = get_app_settings().data_dir
     if "model" in agent_settings_patch and not (
       isinstance(agent_settings_patch.get("model"), str)
@@ -1473,7 +1470,14 @@ async def patch_chat(
       # auto-retitles, an explicit owner rename should reliably reorder that
       # one chat in Recents.
       chat.activity_at = now_naive_utc()
-    db.commit()
+    if body.pinned is not None:
+      # Pin order is one cross-resource collection. Join its commit boundary
+      # only after every awaited validation above has completed.
+      with drawer_pins.serialized_write():
+        chat.pinned_at = now_naive_utc() if body.pinned else None
+        db.commit()
+    else:
+      db.commit()
     db.refresh(chat)
     if chat.title != previous_title:
       # Manual rename and compatibility callers share this projection path.
@@ -1535,6 +1539,7 @@ async def patch_chat(
 
     return {
       "ok": True,
+      "pinned_at": chat.pinned_at,
       "agent_settings_json": _coerce_agent_settings(chat.agent_settings_json) or None,
       "provider": chat.provider or "claude",
       "auto_resume_on_limit": bool(chat.auto_resume_on_limit),
@@ -2272,21 +2277,24 @@ async def delete_chat(
     bump_run_generation(chat_id)
     chat = db.query(models.Chat).filter(models.Chat.id == chat_id).first()
     if chat:
-      # Deleting a chat is owner intent to stop its future work too. Keep the
-      # wait cancellation atomic with the tombstone so recovery cannot revive
-      # a promise the owner explicitly removed.
-      from app.chat_waits import stage_cancel_waits_for_chat
-      from app.agent_work_claims import stage_release_claims_for_chat
-      stage_cancel_waits_for_chat(db, chat_id)
-      released_claims = stage_release_claims_for_chat(db, chat_id)
-      # A deleted follower no longer owns a Goal that should receive exact-
-      # action notices. Retire its interests with the tombstone so one stale
-      # recipient cannot poison fanout to healthy followers.
-      db.query(models.AgentWorkInterest).filter(
-        models.AgentWorkInterest.chat_id == chat_id,
-      ).delete(synchronize_session=False)
-      chat.deleted_at = now_naive_utc()
-      db.commit()
+      with drawer_pins.serialized_write():
+        # Deleting a chat is owner intent to stop its future work too. Keep the
+        # wait/claim cleanup and tombstone in the same transaction, and begin
+        # that transaction only after the shared pin boundary is owned. A
+        # staged DELETE before this point could hold SQLite's writer lock while
+        # a reorder held this boundary and waited to commit.
+        from app.chat_waits import stage_cancel_waits_for_chat
+        from app.agent_work_claims import stage_release_claims_for_chat
+        stage_cancel_waits_for_chat(db, chat_id)
+        released_claims = stage_release_claims_for_chat(db, chat_id)
+        # A deleted follower no longer owns a Goal that should receive exact-
+        # action notices. Retire its interests with the tombstone so one stale
+        # recipient cannot poison fanout to healthy followers.
+        db.query(models.AgentWorkInterest).filter(
+          models.AgentWorkInterest.chat_id == chat_id,
+        ).delete(synchronize_session=False)
+        chat.deleted_at = now_naive_utc()
+        db.commit()
       # Publish the committed tombstone before best-effort run cleanup. If that
       # cleanup fails after the commit, every live shell must still project the
       # durable deletion rather than retain a stale drawer row.
@@ -2403,8 +2411,9 @@ def recover_chat(
     raise HTTPException(status_code=404, detail="Chat not found or not deleted.")
   if (now_naive_utc() - chat.deleted_at) >= SOFT_DELETE_TTL:
     raise HTTPException(status_code=410, detail="Recovery window has expired.")
-  chat.deleted_at = None
-  db.commit()
+  with drawer_pins.serialized_write():
+    chat.deleted_at = None
+    db.commit()
   # Clear the registry's deleted flag and bump to a generation newer than every
   # pre-delete run, so a resurrected stale run can't reclaim the recovered chat.
   recover_chat_generation(chat_id)

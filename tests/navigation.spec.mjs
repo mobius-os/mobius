@@ -1232,7 +1232,13 @@ test.describe('Desktop sidebar navigation', () => {
   }
 
   test('a stale focus refresh cannot make a newly pinned chat disappear', async ({ page }) => {
-    let serverChats = NAV_CHATS.map(chat => ({ ...chat }))
+    let serverChats = NAV_CHATS.map((chat, index) => ({
+      ...chat,
+      // Keep one existing pin after the server's returned rank but before the
+      // client's optimistic clock. The final DOM order therefore proves the
+      // mutation response—not the optimistic timestamp—became canonical.
+      pinned_at: index === 1 ? '2026-09-12T12:00:30' : null,
+    }))
     let listRequests = 0
     let staleListFinished = false
     let releaseStaleList
@@ -1241,13 +1247,10 @@ test.describe('Desktop sidebar navigation', () => {
     const pinWriteGate = new Promise(resolve => { releasePinWrite = resolve })
 
     await setupDesktop(page, true, {
+      chats: serverChats,
       chatListResponder: async route => {
         listRequests += 1
-        // The post-write refresh may itself resolve from an older offline
-        // snapshot. The confirmed pin must survive that successful stale read.
-        const snapshot = listRequests === 3
-          ? NAV_CHATS.map(chat => ({ ...chat }))
-          : serverChats.map(chat => ({ ...chat }))
+        const snapshot = serverChats.map(chat => ({ ...chat }))
         if (listRequests === 2) await staleListGate
         await route.fulfill({
           status: 200,
@@ -1264,14 +1267,17 @@ test.describe('Desktop sidebar navigation', () => {
           chat.id === id
             ? {
                 ...chat,
-                pinned_at: body.pinned ? '2026-09-12T12:01:00' : null,
+                pinned_at: body.pinned ? '2026-09-12T12:00:00' : null,
               }
             : chat
         ))
         await route.fulfill({
           status: 200,
           contentType: 'application/json',
-          body: JSON.stringify({ ok: true }),
+          body: JSON.stringify({
+            ok: true,
+            pinned_at: body.pinned ? '2026-09-12T12:00:00' : null,
+          }),
         })
       },
     })
@@ -1299,8 +1305,14 @@ test.describe('Desktop sidebar navigation', () => {
     await expect(pinnedAlpha).toBeVisible()
 
     releasePinWrite()
-    await expect.poll(() => listRequests).toBeGreaterThanOrEqual(3)
     await expect(pinnedAlpha).toBeVisible()
+    await expect.poll(() => listRequests).toBe(2)
+    await expect.poll(() => pinnedSection.locator('[data-pinned-key]').evaluateAll(
+      rows => rows.map(row => row.dataset.pinnedKey),
+    )).toEqual([
+      `chat:${NAV_CHATS[0].id}`,
+      `chat:${NAV_CHATS[1].id}`,
+    ])
   })
 
   test('desktop web keeps 90% density while tablet and phone stay native', async ({ page }) => {
