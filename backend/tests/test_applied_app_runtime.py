@@ -105,6 +105,44 @@ def test_migration_preserves_deployed_ignored_static_but_pins_accepted_scripts(d
   assert (root / "static" / "asset.txt").read_text() == "deployed static"
 
 
+def test_legacy_job_migration_makes_the_old_bash_default_explicit(db):
+  row, source = _legacy_app(db)
+  (source / "mobius.json").write_text(
+    '{"schedule":{"job":"job.sh"}}', encoding="utf-8",
+  )
+  assert runtime.bootstrap_legacy_runtimes(db) == (1, [])
+  before = row.runtime_revision
+
+  migrated, warnings = runtime.migrate_legacy_job_shebangs(db)
+
+  assert (migrated, warnings) == (1, [])
+  assert row.runtime_revision != before
+  accepted = runtime.runtime_root(row)
+  assert (accepted / "job.sh").read_bytes() == (
+    b"#!/usr/bin/env bash\ndeployed script"
+  )
+  assert runtime.migrate_legacy_job_shebangs(db) == (0, [])
+
+
+def test_legacy_job_migration_retries_an_unrepairable_runtime(db):
+  _row, source = _legacy_app(db)
+  (source / "mobius.json").write_text(
+    '{"schedule":{"job":"job.sh"}}', encoding="utf-8",
+  )
+  (source / "job.sh").write_text("#!relative-interpreter\nexit 0\n")
+  assert runtime.bootstrap_legacy_runtimes(db) == (1, [])
+
+  first = runtime.migrate_legacy_job_shebangs(db)
+  second = runtime.migrate_legacy_job_shebangs(db)
+
+  assert first[0] == second[0] == 0
+  assert "absolute interpreter" in first[1][0]
+  assert "absolute interpreter" in second[1][0]
+  assert not (
+    Path(get_settings().data_dir) / "app-runtime" / "job-shebang-migration.json"
+  ).exists()
+
+
 def test_same_source_commit_with_new_generated_assets_gets_new_runtime_pointer(db):
   from app import app_git
 

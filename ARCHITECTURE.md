@@ -196,6 +196,7 @@ FastAPI app. `main.py` is the factory (CORS, rate limiting, routers, static serv
 | `fs_locks.py` | In-process async locks serializing storage-tree / source-tree mutations against app uninstall |
 | `app_compile_contract.py` | Canonical self-contained mini-app compiler contract, dependency list, and runtime ABI |
 | `app_runtime_inject.js` | React + `mobius-runtime` bridge injected into every compiled app bundle |
+| `app_services.py` | Bounded JSON request/response execution for reviewed app-owned server policy; binds every invocation to the accepted immutable runtime and a short-lived app token |
 | `runtime_types.py` | Shared runtime type definitions |
 | `net_utils.py` | SSRF-safe URL validation shared by the install fetcher and the proxy |
 | `resource_access.py` | Resource-access helpers, incl. `live_app` / `live_app_or_404` (tombstone-aware app resolution) |
@@ -294,6 +295,7 @@ Each module exposes a `router`; registration is in `routes/__init__.py`.
 | `chats_stream.py` | `POST /messages` (starts a turn, returns 202) + `GET /stream` (SSE) |
 | `chat_logs.py` | Gated, redacted chat-log read API for mini-apps |
 | `storage.py` | Per-app and shared file storage, plus confined immutable blob reads from full commits reachable on a shared repository's `main` branch (`GET /api/storage/shared-git/{repo}?revision=&file=`). The Git route applies the same Memory capability gate, rejects traversal/symlinks/submodules, and never reads the mutable worktree. |
+| `app_services.py` | Authenticated same-app/owner and explicitly public adapters for reviewed app services; apps own their paths and domain behavior behind the bounded JSON process contract |
 | `secrets.py` | Bounded encrypted secret storage scoped to an app; an app can write/delete/check its own values, while only the owner or owner-scoped agent can decrypt them; no cross-app access or listing surface |
 | `fs.py` | Owner-facing filesystem + git oversight API |
 | `uploads.py` | Per-chat file upload management |

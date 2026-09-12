@@ -353,7 +353,7 @@ test('a hidden-pane finish routes stale local activity through runtime settlemen
   const runtimeStart = chatViewSource.indexOf('const refreshRuntimeState = useCallback')
   const recovery = chatViewSource.indexOf('if (shouldRecoverSettledRuntime({', runtimeStart)
   const observedRunning = chatViewSource.indexOf(
-    'runtimeWasObservedRunning: serverRunningObservedRef.current', recovery,
+    'observedRunningRunId: observedRunningRunIdRef.current', recovery,
   )
   const refresh = chatViewSource.indexOf('const settled = await fetchMessages({', recovery)
   const authoritative = chatViewSource.indexOf('authoritative: true', refresh)
@@ -372,7 +372,7 @@ test('a hidden-pane finish routes stale local activity through runtime settlemen
   )
   const retirement = chatViewSource.indexOf('retireSettledStreamRef.current = () => {')
   const clearObservedRunning = chatViewSource.indexOf(
-    'serverRunningObservedRef.current = false', retirement,
+    'observedRunningRunIdRef.current = null', retirement,
   )
   assert.ok(
     retirement >= 0 && clearObservedRunning > retirement,

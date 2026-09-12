@@ -529,21 +529,20 @@ export default function ChatView({
   // does not fall back to Mic while a turn is still running with queued work.
   const [serverRunning, setServerRunning] = useState(() => !!cached?.running)
   const serverRunningRef = useRef(!!cached?.running)
-  // A detail refresh can commit the saved idle transcript just before the
-  // runtime fallback reads the same idle verdict. Keep the fact that this
-  // stream was authoritatively observed running until the stream itself is
-  // retired; the current serverRunning projection is allowed to turn false
-  // first without erasing the proof that makes terminal recovery safe.
-  const serverRunningObservedRef = useRef(!!cached?.running)
-  const setServerRunningLocalState = useCallback((v) => {
+  // A physical run id, unlike a boolean latch, proves that a later idle
+  // verdict belongs to the same turn this pane actually observed running.
+  const observedRunningRunIdRef = useRef(
+    cached?.running ? (cached?.runId || null) : null,
+  )
+  const setServerRunningLocalState = useCallback((v, runId = null) => {
     const running = !!v
-    if (running) serverRunningObservedRef.current = true
+    if (running && runId) observedRunningRunIdRef.current = runId
     serverRunningRef.current = running
     setServerRunning(running)
   }, [])
   const setServerRunningState = useCallback((v) => {
     const running = !!v
-    if (!running) serverRunningObservedRef.current = false
+    if (!running) observedRunningRunIdRef.current = null
     setServerRunningLocalState(running)
     updateChatRuntimeCache(
       queryClient,
@@ -1340,7 +1339,7 @@ export default function ChatView({
         sendingRef.current = false
       }
       if (data.running || (!preserveLocalTurn && !staleSnapshot)) {
-        setServerRunningLocalState(!!data.running)
+        setServerRunningLocalState(!!data.running, data.run_id || null)
       }
       const runtimeGoal = goalPresentationFromRuntime(
         data,
@@ -1368,6 +1367,8 @@ export default function ChatView({
       setBackgroundHelpers(normalizeBackgroundHelpers(data.background_helpers))
       updateChatRuntimeCache(queryClient, chatMessagesQueryKey(chatId), {
         running: !!data.running,
+        runId: data.run_id || null,
+        runStatus: data.run_status || null,
         recoveryRunId: data.recovery_run_id || null,
         goal: runtimeGoal,
         activeGoalObjective: runtimeGoal?.status === 'active'
@@ -1487,7 +1488,8 @@ export default function ChatView({
         setActiveAssistantMessageId(runtime.activeAssistantMessageId)
       }
       if (shouldRecoverSettledRuntime({
-        runtimeWasObservedRunning: serverRunningObservedRef.current,
+        observedRunningRunId: observedRunningRunIdRef.current,
+        runtimeRunId: data.run_id || null,
         runtimeRunning: !!data.running,
         pendingCount: serverPending.length,
         streamStillActive: isStreamingRef.current,
@@ -1525,7 +1527,7 @@ export default function ChatView({
         setSending(true)
       } else if (serverPending.length === 0 && !localAuthoritative) {
         // Stream is dead and the server is idle+empty: clear the stale Stop.
-        serverRunningObservedRef.current = false
+        observedRunningRunIdRef.current = null
         setSending(false)
         sendingRef.current = false
       }
@@ -1533,7 +1535,7 @@ export default function ChatView({
       // snapshot once. The side-effecting field setters are for independent
       // optimistic transitions; using them here made one poll emit up to three
       // persisted-cache updates for a single server response.
-      setServerRunningLocalState(!!data.running)
+      setServerRunningLocalState(!!data.running, data.run_id || null)
       const cachedGoal = queryClient.getQueryData(
         chatMessagesQueryKey(chatId),
       )?.goal || goalPresentationRef.current
@@ -1547,6 +1549,8 @@ export default function ChatView({
       setBackgroundHelpers(normalizeBackgroundHelpers(data.background_helpers))
       updateChatRuntimeCache(queryClient, chatMessagesQueryKey(chatId), {
         running: !!data.running,
+        runId: data.run_id || null,
+        runStatus: data.run_status || null,
         recoveryRunId: data.recovery_run_id || null,
         goal: runtimeGoal,
         activeGoalObjective: runtimeGoal?.status === 'active'
@@ -1930,7 +1934,7 @@ export default function ChatView({
   })
 
   retireSettledStreamRef.current = () => {
-    serverRunningObservedRef.current = false
+    observedRunningRunIdRef.current = null
     disconnect({ clearStreaming: true })
     clearStreamItems()
   }
@@ -3274,7 +3278,7 @@ export default function ChatView({
     // FRESH SEND PATH: no active turn, no queue.
     const localStartRequest = { chatId: String(chatId), cid }
     localStartRequestRef.current = localStartRequest
-    serverRunningObservedRef.current = false
+    observedRunningRunIdRef.current = null
     fetchGenRef.current += 1
     onMessageStartRef.current?.()
     promotedRef.current = false

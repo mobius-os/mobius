@@ -117,23 +117,6 @@ _UNMODIFIED_MIGRATIONS = {
     # authoritative configured and restart-safe delegation boundary.
     "ea58419a5a654c3b6e547426867434c8c25830a5ca3487045728c816352712f9",
   },
-  "reflection.md": {
-    "c0f57c227f61cd8539a56b70eadfbbe2212125c23b7137472dd173a578baacd8",
-    # Resource-stewardship predecessor: propagate the adaptive analytics
-    # and self-throttling contract only to untouched copies.
-    "865dd241a99668b026cd9be90c472cfde562210df51f729b2c25929f6b3bd60a",
-    # v15 baked copy: route app work through the base + matching extensions.
-    "cba6c0c7dd97384bbe3bfa19e78707bfa272085843bab5102279a937467e5d17",
-    # Pre-reconciliation seed: still scanned provider credential caches and
-    # lagged the checkpoint-ordered live Reflection procedure.
-    "1086688efd4dede48ebc95b12b92fb958280e67896a53e52e02cd5def3aa265f",
-    # Pre-Agent-Coaching seed: kept a separate Reflection interview method and
-    # still referenced the retired manager-session evidence helper.
-    "daf11f9e65e347334b57b5f5607a7a3fe4135349b4cbe20d94e53444f37e9535",
-    # Current upstream predecessor, including the learning-loop and receipt
-    # refinements that Agent Coaching must preserve during migration.
-    "3b9af10ffe3db873df8ba7fd9719c126e1de2951c10c7b85cac9f47f27c82217",
-  },
   "cron.md": {
     "289336d78ad4268110360f12faac5512d5a53b66aa31c2a6ddd1a44f538f2559",
     "ed100cb496b887a7951adc967e92cda1449c4f8594f7859fbd32762221d24914",

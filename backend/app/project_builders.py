@@ -1,10 +1,10 @@
 """Per-project artifact builders and their build lifecycle.
 
 A project artifact is a buildable output whose source lives in the project
-tree and whose build status is persisted on ``Project.artifacts_json``. The
-platform keeps website/LaTeX built-ins for blank and existing projects, while
-an installed app can contribute a reviewed on-demand build script through its
-project template. This module owns that one dispatch boundary, the in-memory
+tree and whose build status is persisted on ``Project.artifacts_json``. An
+installed app contributes a reviewed on-demand build script through its
+project template; the platform retains only its own inert app preview. This
+module owns that one dispatch boundary, the in-memory
 registry of live build tasks, and the common build lifecycle.
 
 Concurrency model (single uvicorn worker, single event loop):
@@ -52,32 +52,9 @@ BUILTIN_ARTIFACT_TYPES: dict[str, dict[str, Any]] = {
     "id": "app", "name": "App", "extensions": ["jsx", "tsx"],
     "preview": "html", "script": None, "output": "index.html",
   },
-  "website": {
-    "id": "website",
-    "name": "Website",
-    "extensions": ["html", "htm"],
-    "preview": "html",
-    "script": None,
-    "output": "{source}",
-  },
-  "latex": {
-    "id": "latex",
-    "name": "PDF",
-    "extensions": ["tex"],
-    "preview": "pdf",
-    "script": None,
-    "output": "{stem}.pdf",
-  },
 }
 
-# tectonic's first cold run downloads its support bundle, which is slow and
-# needs network egress. Pin the cache under /data so a warm cache survives
-# across builds and container restarts.
-TECTONIC_CACHE_DIR = "/data/.cache/tectonic"
-
-# A build that has not finished in this many seconds is killed. Generous
-# because a cold tectonic run fetches a multi-megabyte bundle before it can
-# typeset anything.
+# A provider build that has not finished in this many seconds is killed.
 _BUILD_TIMEOUT_SECS = 180
 
 # The on-disk build.log is capped so a pathologically chatty build cannot fill
@@ -219,18 +196,14 @@ def default_output_rel(
 ) -> str:
   """Project-relative path of the artifact's output entry file.
 
-  The website builder copies the source tree into ``output/`` preserving
-  structure, so its entry keeps the source's relative path. The LaTeX builder
-  emits ``<stem>.pdf`` from tectonic's ``--outdir`` next to no other structure,
-  so its entry is that pdf basename.
+  Provider templates declare the relative output shape; the platform merely
+  confines it beneath this artifact's output directory.
   """
   base = f"artifacts/{artifact_id}/output"
   declared = artifact_type or BUILTIN_ARTIFACT_TYPES.get(builder)
   rendered = output_entry(declared, source) if declared else None
   if rendered:
     return f"{base}/{rendered}"
-  if builder == "latex":
-    return f"{base}/{Path(source).with_suffix('.pdf').name}"
   return f"{base}/{source.lstrip('/')}"
 
 
@@ -466,44 +439,6 @@ async def _drain_to_log(stream: asyncio.StreamReader, log_file) -> None:
       log_file.flush()
 
 
-async def _run_tectonic(
-  *, source: str, output_dir: Path, cwd: Path, env: dict, log_path: Path,
-) -> int:
-  """Run tectonic, streaming combined stdout+stderr to ``build.log``.
-
-  Isolated behind its own function so tests stub the subprocess (no tectonic
-  binary, no network in CI). Returns the process exit code.
-  """
-  cmd = ["tectonic", source, "--outdir", str(output_dir)]
-  with open(log_path, "wb") as log_file:
-    log_file.write(f"$ {' '.join(cmd)}\n".encode())
-    log_file.flush()
-    proc = await asyncio.create_subprocess_exec(
-      *cmd,
-      cwd=str(cwd),
-      env=env,
-      stdout=asyncio.subprocess.PIPE,
-      stderr=asyncio.subprocess.STDOUT,
-    )
-    try:
-      await asyncio.wait_for(
-        _drain_to_log(proc.stdout, log_file), timeout=_BUILD_TIMEOUT_SECS,
-      )
-      await asyncio.wait_for(proc.wait(), timeout=_BUILD_TIMEOUT_SECS)
-    except asyncio.TimeoutError:
-      proc.kill()
-      await proc.wait()
-      log_file.write(
-        f"\ntectonic timed out after {_BUILD_TIMEOUT_SECS}s.\n".encode()
-      )
-      raise RuntimeError("tectonic build timed out")
-    except asyncio.CancelledError:
-      proc.kill()
-      await proc.wait()
-      raise
-  return proc.returncode or 0
-
-
 async def _run_provider_script(
   *, script: Path, root: Path, source: str, output_dir: Path,
   artifact_id: str, log_path: Path,
@@ -562,32 +497,6 @@ def _provider_script_env(
   return env
 
 
-async def build_latex(
-  *, root: Path, source: str, output_dir: Path, log_path: Path,
-) -> None:
-  """Compile a LaTeX source to a PDF with tectonic.
-
-  The tectonic cache is pinned under /data so a warm bundle survives restarts;
-  the first cold run fetches the bundle (slow, needs egress). Raises on a
-  non-zero exit so ``run_build`` records ``error``.
-  """
-  output_dir.mkdir(parents=True, exist_ok=True)
-  env = dict(os.environ)
-  cache_dir = Path(TECTONIC_CACHE_DIR)
-  try:
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    env["TECTONIC_CACHE_DIR"] = str(cache_dir)
-  except OSError:
-    # A read-only or missing /data cache path must not abort the build;
-    # tectonic falls back to its own default cache location.
-    log.warning("Could not create tectonic cache at %s", cache_dir)
-  returncode = await _run_tectonic(
-    source=source, output_dir=output_dir, cwd=root, env=env, log_path=log_path,
-  )
-  if returncode != 0:
-    raise RuntimeError(f"tectonic exited with status {returncode}")
-
-
 def _copy_project_sources(
   root: Path, output_dir: Path, *, excluded_dirs: frozenset[str] = frozenset(),
 ) -> int:
@@ -623,29 +532,6 @@ def _copy_project_sources(
       shutil.copyfile(child, dest, follow_symlinks=False)
     copied += 1
   return copied
-
-
-async def build_website(
-  *, root: Path, source: str, output_dir: Path, log_path: Path,
-) -> None:
-  """Copy project sources, excluding build output and repository metadata.
-
-  Copying the whole tree — not just the entry file — is what lets relative
-  assets (images, fonts, CSS, extra pages) resolve when the built site renders
-  in a sandboxed iframe. ``artifacts/`` is excluded so the output never copies
-  itself. Git control data is reserved whether represented by a directory or a
-  gitfile. Symlinks are omitted recursively; ``symlinks=True`` also guarantees
-  a concurrent entry swap can copy only the link, never dereference its target.
-  """
-  copied = _copy_project_sources(root, output_dir)
-  lines = ["Building website: copying project sources into output.\n"]
-  entry = output_dir / source.lstrip("/")
-  if not entry.is_file():
-    lines.append(
-      f"Warning: entry file '{source}' was not found in the copied output.\n"
-    )
-  lines.append(f"Copied {copied} top-level entries into output/.\n")
-  _write_log(log_path, "".join(lines))
 
 
 async def build_app(
@@ -689,8 +575,6 @@ async def build_app(
 
 BUILDERS: dict[str, Callable[..., Any]] = {
   "app": build_app,
-  "website": build_website,
-  "latex": build_latex,
 }
 
 

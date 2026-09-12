@@ -179,6 +179,8 @@ export function chatDetailCacheValue(data = {}) {
     updated_at: typeof data.updated_at === 'string' ? data.updated_at : null,
     activeAssistantMessageId: data.active_assistant_message_id || null,
     recoveryRunId: data.recovery_run_id || null,
+    runId: data.run_id || null,
+    runStatus: data.run_status || null,
     messages,
     total,
     offset,

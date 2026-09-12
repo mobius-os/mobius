@@ -55,6 +55,7 @@ def require_all_routers_loaded() -> None:
 admin_router = _load("admin")
 agent_coordination_router = _load("agent_coordination")
 apps_router = _load("apps")
+app_services_router = _load("app_services")
 auth_router = _load("auth")
 chat_router = _load("chat")
 chat_embed_router = _load("chat_embed")
@@ -95,9 +96,6 @@ standalone_router = _load("standalone")
 client_error_router = _load("client_error")
 client_signal_router = _load("client_signal")
 community_router = _load("community")
-common_router = _load("common")
-common_groups_router = _load("common_groups")
-common_objects_router = _load("common_objects")
 contribution_relay_router = _load("contribution_relay")
 platform_router = _load("platform")
 published_router = _load("published")
@@ -111,6 +109,7 @@ __all__ = [
   "agent_coordination_router",
   "auth_router",
   "apps_router",
+  "app_services_router",
   "storage_router",
   "fs_router",
   "chat_router",
@@ -150,9 +149,6 @@ __all__ = [
   "client_error_router",
   "client_signal_router",
   "community_router",
-  "common_router",
-  "common_groups_router",
-  "common_objects_router",
   "contribution_relay_router",
   "platform_router",
   "published_router",

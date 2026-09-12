@@ -15,11 +15,14 @@ from copy import deepcopy
 from typing import Any
 from urllib.parse import urlsplit
 
+from app.manifest_contract import SERVICE_REQUEST_MAX_BYTES
 
-CONTRACT_SCHEMA = 5
+
+CONTRACT_SCHEMA = 6
 
 _PUBLIC_NETWORK_RULE_LIMIT = 16
 _PUBLIC_QUERY_NAME = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
+_PRESERVE_SERVICE = object()
 
 
 def _normalize_public_query(value: Any, *, rule_index: int) -> dict[str, Any]:
@@ -518,7 +521,7 @@ def contract_from_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
   job = schedule.get("job")
   cron = schedule.get("default")
   system_prompt = manifest.get("system_prompt")
-  return {
+  contract = {
     "schema": CONTRACT_SCHEMA,
     "system_app": bool(manifest.get("system_app", False)),
     "agent": {
@@ -569,6 +572,16 @@ def contract_from_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
     "runtime": normalize_runtime_capabilities(manifest),
     "public": normalize_public_access(manifest),
   }
+  service = manifest.get("service")
+  if isinstance(service, dict):
+    contract["service"] = {
+      "entry": service["entry"],
+      "access": service.get("access", "self"),
+      "protocol": "json-v1",
+      "max_request_bytes": SERVICE_REQUEST_MAX_BYTES,
+      "max_response_bytes": SERVICE_REQUEST_MAX_BYTES,
+    }
+  return contract
 
 
 def runtime_declaration_from_contract(
@@ -602,6 +615,7 @@ def contract_from_app_state(
   capabilities: dict[str, Any] | None = None,
   public_access: dict[str, Any] | None = None,
   contract_permissions: dict[str, Any] | None = None,
+  service: dict[str, Any] | None | object = _PRESERVE_SERVICE,
 ) -> dict[str, Any]:
   """Build an accurate contract for an owner-authored local app.
 
@@ -648,6 +662,17 @@ def contract_from_app_state(
     "capabilities": capabilities,
     "public_access": public_access,
   }
+  if service is _PRESERVE_SERVICE and isinstance(
+    getattr(app, "capability_contract", None), dict,
+  ):
+    accepted_service = app.capability_contract.get("service")
+    if isinstance(accepted_service, dict):
+      service = {
+        "entry": accepted_service.get("entry"),
+        "access": accepted_service.get("access", "self"),
+      }
+  if isinstance(service, dict):
+    manifest["service"] = service
   return contract_from_manifest(manifest)
 
 

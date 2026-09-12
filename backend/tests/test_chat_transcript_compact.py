@@ -611,6 +611,8 @@ def test_runtime_route_does_not_select_transcript_json(
   assert runtime.status_code == 200
   assert runtime.json() == {
     "running": True,
+    "run_id": None,
+    "run_status": None,
     "active_assistant_message_id": None,
     "recovery_run_id": None,
     "active_goal_objective": None,

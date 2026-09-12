@@ -11,6 +11,7 @@ from app.app_capabilities import contract_and_digest
 from app.app_capabilities import contract_with_runtime_capabilities
 from app.app_capabilities import normalize_runtime_capabilities
 from app.config import get_settings
+from app.manifest_contract import ManifestContractError, validate_manifest_contract
 from test_app_fixtures import create_local_app, write_local_source
 from tests.test_apps_install import (  # noqa: F401
   JSX,
@@ -79,12 +80,39 @@ def test_preview_returns_server_derived_contract_and_digest(
     "user_configurable": False,
     "initialize_on_install": True,
   }
-  assert body["capability_contract"]["schema"] == 5
+  assert body["capability_contract"]["schema"] == 6
   assert body["capability_contract"]["runtime"] == {}
   assert body["capability_contract"]["public"] == {
     "network": [],
     "storage": {"read": False, "write_prefix": None},
   }
+
+
+def test_service_is_an_explicit_reviewed_runtime_not_an_implicit_import_hook():
+  manifest = _manifest(
+    source_files=["memory-core.md", "service.py"],
+    service={"entry": "service.py", "access": "public"},
+  )
+  validate_manifest_contract(manifest)
+  contract, _digest = contract_and_digest(manifest)
+  assert contract["service"] == {
+    "entry": "service.py",
+    "access": "public",
+    "protocol": "json-v1",
+    "max_request_bytes": 8 * 1024 * 1024,
+    "max_response_bytes": 8 * 1024 * 1024,
+  }
+
+  for service in (
+    {"entry": "nested/service.py"},
+    {"entry": "service.sh"},
+    {"entry": "missing.py"},
+    {"entry": "service.py", "access": "world"},
+  ):
+    with pytest.raises(ManifestContractError):
+      validate_manifest_contract(_manifest(
+        source_files=["memory-core.md", "service.py"], service=service,
+      ))
 
 
 def test_runtime_capability_is_independently_versioned_and_bounded():

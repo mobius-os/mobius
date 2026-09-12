@@ -3307,7 +3307,7 @@ def test_review_exposes_seed_customization_before_replacement_without_mutation(
 ):
   origin, platform = clone_env
   monkeypatch.setattr(platform_activation, "deployment_kind", lambda: deployment)
-  paths = ["backend/scripts/seed-skills/cron.md", "backend/scripts/seed-skills/reflection.md"]
+  paths = ["backend/scripts/seed-skills/cron.md", "backend/scripts/seed-skills/waiting.md"]
   _local_commit(platform, edits={path: "local instructions\n" for path in paths})
   target = _advance_origin(origin, edits={"Dockerfile": "FROM official-new\n"})
   pu._fetch(platform)

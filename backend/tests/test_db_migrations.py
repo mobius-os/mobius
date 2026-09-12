@@ -364,7 +364,7 @@ def test_run_migrations_removes_retired_job_authority_receipts(
   with Session(eng) as session:
     contract = session.get(models.App, app_id).capability_contract
   assert contract == {
-    "schema": 5,
+    "schema": 6,
     "data": {"shared_memory": "write"},
     "background": {
       "job": "fetch.sh",
@@ -1531,6 +1531,7 @@ def test_run_migrations_records_an_inspectable_append_only_history(tmp_path):
     "0048_delegation_result_incorporation",
     "0048_typed_platform_activation_waits",
     "0049_autopilot_blocked_at",
+    "0050_chat_run_update_stream",
   ]
   assert second == first
 
@@ -2311,7 +2312,7 @@ def test_hosted_publication_reaches_a_fully_ledgered_private_app(tmp_path):
     )).one()
   contract = json.loads(raw_contract) if isinstance(raw_contract, str) else raw_contract
   assert public_bundle is None
-  assert contract["schema"] == 5
+  assert contract["schema"] == 6
   assert contract["public"] == {"network": []}
   assert "0013_app_hosted_publication" in {
     entry["version"] for entry in schema_migration_history(eng)

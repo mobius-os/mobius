@@ -115,6 +115,14 @@ def _recovery_run_id(db: Session, chat_id: str) -> str | None:
   return row[0] if row is not None else None
 
 
+def _latest_run_identity(db: Session, chat_id: str) -> tuple[str | None, str | None]:
+  """Return the durable physical run identity behind a runtime verdict."""
+  row = db.query(models.ChatRun.id, models.ChatRun.status).filter(
+    models.ChatRun.chat_id == chat_id,
+  ).order_by(models.ChatRun.started_at.desc(), models.ChatRun.id.desc()).first()
+  return (row[0], row[1]) if row is not None else (None, None)
+
+
 def _active_assistant_message_id(
   chat: models.Chat,
 ) -> str | None:
@@ -676,6 +684,7 @@ def _chat_detail_response(
     running_goal_objective(db, chat.id) if running else None
   )
   goal = presented_goal(db, chat.id)
+  run_id, run_status = _latest_run_identity(db, chat.id)
   response = {
     "id": chat.id,
     "title": chat.title,
@@ -688,6 +697,8 @@ def _chat_detail_response(
     "total": total,
     "offset": start,
     "running": running,
+    "run_id": run_id,
+    "run_status": "running" if running and run_id else run_status,
     "active_assistant_message_id": _active_assistant_message_id(chat),
     "recovery_run_id": _recovery_run_id(db, chat.id),
     "active_goal_objective": active_goal_objective,
@@ -922,7 +933,7 @@ def _iso(value):
   return value.isoformat() if value is not None else None
 
 
-@router.get("/agent-lifecycle")
+@router.get("/lifecycle-events")
 def list_agent_lifecycle(
   after_id: int = Query(default=0, ge=0),
   runs_after_id: int = Query(default=0, ge=0),
@@ -932,7 +943,7 @@ def list_agent_lifecycle(
   _: models.Owner = Depends(get_current_owner),
   db: Session = Depends(get_db),
 ):
-  """Incremental owner-only feed of normalized helper lifecycle milestones.
+  """Incremental owner-only feed of normalized chat and helper lifecycle events.
 
   Event ``id`` is an ingestion cursor, not visual chronology. Consumers sort by
   provider ``occurred_at`` where present and fall back to server
@@ -959,18 +970,18 @@ def list_agent_lifecycle(
 
   run_query = (
     db.query(
-      models.AgentLifecycleRunUpdate,
+      models.ChatRunUpdate,
       models.ChatRun.root_run_id,
     )
-    .join(models.Chat, models.Chat.id == models.AgentLifecycleRunUpdate.chat_id)
+    .join(models.Chat, models.Chat.id == models.ChatRunUpdate.chat_id)
     .outerjoin(
       models.ChatRun,
-      models.ChatRun.id == models.AgentLifecycleRunUpdate.chat_run_id,
+      models.ChatRun.id == models.ChatRunUpdate.chat_run_id,
     )
     .outerjoin(
       models.Delegation,
       models.Delegation.child_chat_id
-      == models.AgentLifecycleRunUpdate.chat_id,
+      == models.ChatRunUpdate.chat_id,
     )
     .filter(
       models.Chat.deleted_at.is_(None),
@@ -978,13 +989,13 @@ def list_agent_lifecycle(
       # events under their parent root. Suppressing their private child
       # ChatRun here prevents Workflows from rendering a duplicate root.
       models.Delegation.id.is_(None),
-      models.AgentLifecycleRunUpdate.id > runs_after_id,
+      models.ChatRunUpdate.id > runs_after_id,
     )
-    .order_by(models.AgentLifecycleRunUpdate.id.asc())
+    .order_by(models.ChatRunUpdate.id.asc())
   )
   if chat_id is not None:
     run_query = run_query.filter(
-      models.AgentLifecycleRunUpdate.chat_id == chat_id
+      models.ChatRunUpdate.chat_id == chat_id
     )
   fetched_runs = run_query.limit(run_limit + 1).all()
   runs_has_more = len(fetched_runs) > run_limit
@@ -1624,8 +1635,12 @@ def get_chat_runtime(
       models.Chat.updated_at,
     ),
   )
+  running = is_chat_running(chat.id)
+  run_id, run_status = _latest_run_identity(db, chat.id)
   return {
-    "running": is_chat_running(chat.id),
+    "running": running,
+    "run_id": run_id,
+    "run_status": "running" if running and run_id else run_status,
     "active_assistant_message_id": _active_assistant_message_id(chat),
     "recovery_run_id": _recovery_run_id(db, chat.id),
     "active_goal_objective": running_goal_objective(db, chat.id),

@@ -41,6 +41,7 @@ from app.manifest_contract import (
   STATIC_ASSET_MAX_BYTES,
   STATIC_ASSETS_TOTAL_MAX,
   ManifestContractError,
+  job_interpreter,
   static_asset_entries,
   validate_manifest_contract,
   validate_repo_relative_path,
@@ -547,6 +548,7 @@ def _apply_local_manifest_runtime(
     capabilities=runtime_fields["capabilities"],
     public_access=runtime_fields["public_access"],
     contract_permissions=manifest.get("permissions") or {},
+    service=manifest.get("service"),
   )
 
 
@@ -664,6 +666,15 @@ async def apply_source_revision(
       )
       if manifest is not None:
         _validate_local_identity(source_path, manifest, app)
+        schedule = manifest.get("schedule")
+        job_name = schedule.get("job") if isinstance(schedule, dict) else None
+        if job_name:
+          try:
+            job_interpreter((snapshot_dir / job_name).read_bytes())
+          except (OSError, ManifestContractError) as exc:
+            raise AppApplyError(
+              "invalid_schedule_job", str(exc), status_code=422,
+            ) from exc
       static_assets = (
         _snapshot_static_assets(snapshot_dir, source_path, manifest)
         if manifest is not None

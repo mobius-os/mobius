@@ -51,6 +51,7 @@
     "0047_chat_activity_positions": "cab5468cf8eac1a0a6fb5ee2405b07cd157af9241a8e04b98ff1e042242b2b8e",
     "0048_delegation_result_incorporation": "7721d64f39e079ce89efdbe6e7ffec07b79918601a82e2c195c3ef28691562e6",
     "0048_typed_platform_activation_waits": "527554848dd071bcc9040eb08e23373c240d79b5eae650cb5d32138b97de5c4d",
-    "0049_autopilot_blocked_at": "dac507a7c3f50b993e8d58fbea7e0277223349fe46229a2fd1d6c7d69ac3194c"
+    "0049_autopilot_blocked_at": "dac507a7c3f50b993e8d58fbea7e0277223349fe46229a2fd1d6c7d69ac3194c",
+    "0050_chat_run_update_stream": "59736b3022e417de8d55b0fb330deb81dee934eeb3b953d2b0453a173035ab73"
   }
 }

@@ -418,8 +418,8 @@ async def resolve_handle_hosts(
     try:
       detail = response.json().get("detail")
     except (ValueError, AttributeError):
-      # The account host may not have rolled out the resolver route yet. Keep
-      # the existing Common directory available during that external rollout;
+      # The account host may not have rolled out the resolver route yet. Let
+      # the calling app use its own discovery data during that external rollout;
       # the new route's explicit 404 below remains authoritative once present.
       return None
     if detail != "No one has claimed that mobius.you handle.":
@@ -447,6 +447,22 @@ async def resolve_handle_hosts(
   ):
     raise HTTPException(502, "The Möbius account service returned an invalid handle result.")
   return hosts
+
+
+@router.get("/handles/{handle}")
+async def read_handle_hosts(
+  handle: str,
+  owner: models.Owner = Depends(get_owner_or_app_with_identity_manage),
+  db: Session = Depends(get_db),
+):
+  """Resolve an account handle for a reviewed app without exposing credentials."""
+  normalized = str(handle or "").strip().lower().lstrip("@")
+  hosts = await resolve_handle_hosts(db, owner.id, normalized)
+  return {
+    "handle": normalized,
+    "linked": hosts is not None,
+    "hosts": hosts or [],
+  }
 
 
 def _linked_since(db: Session, owner_id: int) -> str | None:

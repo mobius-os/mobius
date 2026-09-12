@@ -229,14 +229,16 @@ export function shouldRetireRestoredQuestionSnapshot({
  * for a completed turn.
  */
 export function shouldRecoverSettledRuntime({
-  runtimeWasObservedRunning = false,
+  observedRunningRunId = null,
+  runtimeRunId = null,
   runtimeRunning = false,
   pendingCount = 0,
   streamStillActive = false,
   stopInFlight = false,
   localStartInFlight = false,
 } = {}) {
-  return !!runtimeWasObservedRunning
+  return !!observedRunningRunId
+    && observedRunningRunId === runtimeRunId
     && runtimeRunning === false
     && pendingCount === 0
     && !!streamStillActive

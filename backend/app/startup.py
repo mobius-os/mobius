@@ -280,10 +280,16 @@ def _read_restart_authorization(context: StartupContext) -> None:
 
 def _freeze_legacy_app_runtimes(context: StartupContext) -> None:
   """Freeze pre-isolation live files before any editing or scheduled work resumes."""
-  from app.applied_app_runtime import bootstrap_legacy_runtimes, prune_runtime
+  from app.applied_app_runtime import (
+    bootstrap_legacy_runtimes,
+    migrate_legacy_job_shebangs,
+    prune_runtime,
+  )
   from app import models
   with SessionLocal() as db:
     count, warnings = bootstrap_legacy_runtimes(db)
+    shebang_count, shebang_warnings = migrate_legacy_job_shebangs(db)
+    warnings.extend(shebang_warnings)
     for app in db.query(models.App).all():
       try:
         prune_runtime(app)
@@ -291,6 +297,10 @@ def _freeze_legacy_app_runtimes(context: StartupContext) -> None:
         warnings.append(f"app {app.id} runtime cleanup: {exc}")
   if count:
     context.logger.info("froze %d deployed app runtime baseline(s)", count)
+  if shebang_count:
+    context.logger.info(
+      "made %d legacy app job runtime declaration(s) explicit", shebang_count,
+    )
   for warning in warnings:
     context.logger.warning("app runtime migration: %s", warning)
 

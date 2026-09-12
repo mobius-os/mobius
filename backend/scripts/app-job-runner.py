@@ -7,7 +7,6 @@ import fcntl
 import json
 import os
 import re
-import shlex
 import signal
 import subprocess
 import sys
@@ -22,6 +21,7 @@ _BACKEND_DIR = _SCRIPT_DIR.parent
 if str(_BACKEND_DIR) not in sys.path:
   sys.path.insert(0, str(_BACKEND_DIR))
 from app import cron_tz
+from app.manifest_contract import ManifestContractError, job_interpreter
 
 
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
@@ -38,7 +38,6 @@ SUPERVISOR_LOG = DATA_DIR / "cron-logs" / "app-jobs.log"
 SUPERVISOR_LOG_CAP = 2 * 1024 * 1024
 READY_WAIT_SECONDS = 90
 WALL_CLOCK_STATE_DIR = DATA_DIR / "run" / "app-wall-clock"
-MAX_SHEBANG_BYTES = 256
 
 
 def _log(app_id: object, message: str) -> None:
@@ -309,17 +308,7 @@ def _job_command(job: Path, app_id: int) -> list[str]:
   filename, executable bit, or historical Bash convention.
   """
   with job.open("rb") as script:
-    first_line = script.readline(MAX_SHEBANG_BYTES + 1)
-  if len(first_line) > MAX_SHEBANG_BYTES:
-    raise ValueError("shebang exceeds 256 bytes")
-  if not first_line.startswith(b"#!"):
-    raise ValueError("job is missing a shebang")
-  try:
-    interpreter = shlex.split(first_line[2:].decode("utf-8").strip())
-  except (UnicodeDecodeError, ValueError) as exc:
-    raise ValueError("job has an invalid shebang") from exc
-  if not interpreter or not Path(interpreter[0]).is_absolute():
-    raise ValueError("job shebang must name an absolute interpreter")
+    interpreter = job_interpreter(script.read(257))
   return [*interpreter, str(job), str(app_id)]
 
 
@@ -386,7 +375,7 @@ def _execute_job(
     child_env["APP_JOB_STATE_DIR"] = str(job_state)
     try:
       command = _job_command(runtime_job, app_id)
-    except (OSError, ValueError) as exc:
+    except (OSError, ManifestContractError) as exc:
       _log(app_id, f"rejected: invalid job declaration {runtime_job}: {exc}")
       return 4
     # Uninstall sends TERM to this entire process group. Keep the supervisor

@@ -39,6 +39,7 @@ eligible** — the correct action today is to leave all of them in place.
 | `appFrameStorage.js` per-app legacy scan | 2026-07-13 | 2026-10-11 |
 | raw-bcrypt owner hash (`auth.py`) | 2026-07-21 | 2026-10-19 |
 | notification target aliases (`push.py`) | 2026-07-28 | 2026-10-26 |
+| scheduled-job Bash default migration (`applied_app_runtime.py`) | 2026-09-12 | 2026-12-11 |
 
 The July 2026 maintenance baseline retired two expired mirrors and one
 status-derived fallback:
@@ -60,6 +61,8 @@ status-derived fallback:
 | `appFrameStorage.js` | Preferences written by the former same-origin app frame, including the narrow CubeRun and Tandem allowlists | **No code-level proof exists — the "copy marker" this row used to cite was never implemented, so the condition was unsatisfiable and the scan was permanent by accident.** The upgrade floor is the proof: past the date below, no supported install can still hold unmigrated same-origin keys | Remove the per-app legacy scans, and the `LEGACY_KEYS_BY_SLUG` allowlist naming individual apps with them, on 2026-10-11 |
 | provider event translators | Saved or replayed Claude/Codex events from older SDK payload shapes | The pinned provider SDK minimum and retained replay fixtures no longer emit or contain the old shape | Remove one fallback at a time with the SDK pin bump that makes it unreachable |
 | old notification targets (`/app/:id`, `/chat/:id`) | Previously delivered push/email links outside the current `/shell/` route shape | Product policy defines an expiry longer than every notification/link retention window and access logs show no use | Remove the parser aliases after that dated window |
+| `routes/app_services.py` and Social public host `/api/common/*` aliases | Independently updated Social clients and `common/0` peers using the former platform-owned path | Social and every first-party caller use `/api/services/common/*`; public federation traffic has used `/api/app-services/common/*` for the supported window | Remove both aliases on 2026-12-11 |
+| `applied_app_runtime.py` scheduled-job shebang migration | Accepted app runtimes from before runtime declarations became mandatory, where a missing shebang meant Bash | The rolling upgrade floor has passed 2026-12-11 and the migration receipt exists for every continuously upgraded installation | Remove the one-shot migration after that date; keep shebang validation and never restore interpreter guessing |
 
 Permanent interoperability—standard GitHub status contexts, documented
 third-party skill shapes, or public storage request formats—is not a temporary

@@ -3739,6 +3739,19 @@ def _add_autopilot_blocked_at(eng):
       ))
 
 
+def _rename_chat_run_update_stream(eng):
+  """Give the generic run cursor a platform-domain name, preserving its IDs."""
+  from sqlalchemy import inspect as sa_inspect, text
+
+  tables = set(sa_inspect(eng).get_table_names())
+  if "chat_run_updates" in tables or "agent_lifecycle_run_updates" not in tables:
+    return
+  with eng.begin() as conn:
+    conn.execute(text(
+      "ALTER TABLE agent_lifecycle_run_updates RENAME TO chat_run_updates"
+    ))
+
+
 _SCHEMA_MIGRATIONS = (
   # Full IDs are permanent identities, not sequence positions. Append new
   # work in execution order; never renumber a shipped ID to reconcile sources.
@@ -3792,6 +3805,7 @@ _SCHEMA_MIGRATIONS = (
   ("0048_delegation_result_incorporation", _add_delegation_result_incorporation),
   ("0048_typed_platform_activation_waits", _add_typed_platform_activation_waits),
   ("0049_autopilot_blocked_at", _add_autopilot_blocked_at),
+  ("0050_chat_run_update_stream", _rename_chat_run_update_stream),
 )
 
 

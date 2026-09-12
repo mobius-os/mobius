@@ -3,6 +3,7 @@
 from collections.abc import Mapping
 from urllib.parse import unquote, urlparse
 import re
+import shlex
 
 REQUIRED_STRING_FIELDS = ("id", "name", "version", "description", "entry")
 RECOGNIZED_CAPABILITIES = (
@@ -34,7 +35,8 @@ PROJECT_TEMPLATES_COUNT_MAX = 12
 PROJECT_TEMPLATE_FILES_COUNT_MAX = 64
 PROJECT_ARTIFACT_TYPES_COUNT_MAX = 12
 PROJECT_ARTIFACT_EXTENSIONS_COUNT_MAX = 16
-
+SERVICE_REQUEST_MAX_BYTES = 8 * 1024 * 1024
+MAX_JOB_SHEBANG_BYTES = 256
 _SLUG_OK = "abcdefghijklmnopqrstuvwxyz0123456789-_"
 _SOURCE_FILES_MANAGED_PREFIXES = (
   "static/", "dist/", ".build/", "node_modules/",
@@ -52,6 +54,28 @@ class ManifestContractError(ValueError):
 
 def _fail(message: str) -> None:
   raise ManifestContractError(message)
+
+
+def job_interpreter(job: bytes) -> tuple[str, ...]:
+  """Return the interpreter declared by one accepted scheduled job.
+
+  Runtime choice belongs to the app package. Keeping the byte-level contract
+  here lets Store install, local Apply, and execution reject the same invalid
+  declaration instead of discovering it only when cron fires.
+  """
+  first_line = job.splitlines(keepends=True)[:1]
+  line = first_line[0] if first_line else b""
+  if len(line) > MAX_JOB_SHEBANG_BYTES:
+    _fail(f"Schedule job shebang exceeds {MAX_JOB_SHEBANG_BYTES} bytes.")
+  if not line.startswith(b"#!"):
+    _fail("Schedule job is missing a shebang.")
+  try:
+    interpreter = tuple(shlex.split(line[2:].decode("utf-8").strip()))
+  except (UnicodeDecodeError, ValueError) as exc:
+    raise ManifestContractError("Schedule job has an invalid shebang.") from exc
+  if not interpreter or not interpreter[0].startswith("/"):
+    _fail("Schedule job shebang must name an absolute interpreter.")
+  return interpreter
 
 
 def validate_slug_field(value, field: str) -> None:
@@ -461,6 +485,26 @@ def validate_manifest_contract(manifest) -> None:
           "node_modules/, the cron/job scripts, .bak snapshots, or the "
           "numeric-id storage tree)."
         )
+
+  service = manifest.get("service")
+  if service is not None:
+    if not isinstance(service, Mapping) or set(service) - {"entry", "access"}:
+      _fail("Manifest `service` must contain only `entry` and `access`.")
+    entry = service.get("entry")
+    if not isinstance(entry, str):
+      _fail("Manifest `service.entry` must be a string.")
+    if "/" in entry or "\\" in entry:
+      _fail("Manifest `service.entry` must be a bare filename.")
+    validate_repo_relative_path(entry, "service.entry")
+    if not entry.endswith(".py"):
+      _fail("Manifest `service.entry` must be a Python file.")
+    if not isinstance(source_files, list) or entry not in source_files:
+      _fail(
+        "Manifest `service.entry` must also be listed in `source_files` so "
+        "every install contains the reviewed service."
+      )
+    if service.get("access", "self") not in {"self", "apps", "public"}:
+      _fail("Manifest `service.access` must be `self`, `apps`, or `public`.")
 
   skills = manifest.get("skills")
   if skills is not None:

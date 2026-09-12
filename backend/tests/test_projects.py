@@ -482,7 +482,7 @@ def test_manifest_template_scaffolds_files_and_snapshots_metadata(
   (source / "templates").mkdir(parents=True)
   (source / "templates" / "main.tex").write_text("\\documentclass{article}")
   app = models.App(
-    name="LaTeX", description="Documents", jsx_source="",
+    name="Document Builder", description="Documents", jsx_source="",
     slug="latex", source_dir=str(source), version="3.0.0",
     project_templates_json=[{
       "id": "latex",
@@ -656,7 +656,7 @@ def test_local_app_import_manages_existing_source_once_without_runtime_data(
 
 
 @pytest.mark.parametrize("source_state", ["valid", "missing", "remapped", "symlink", "builder_uninstalled"])
-def test_latex_artifact_import_manages_declared_sources_in_place(
+def test_app_owned_artifact_import_manages_declared_sources_in_place(
   client, auth, db, source_state,
 ):
   data_root = Path(os.environ["DATA_DIR"])
@@ -672,8 +672,8 @@ def test_latex_artifact_import_manages_declared_sources_in_place(
   )
   latex_app = models.App(
     name="LaTeX", description="Documents", jsx_source="",
-    slug="latex", source_dir=str(latex_source), project_templates_json=[{
-      "id": "document", "name": "LaTeX document", "kind": "latex",
+    slug="document-builder", source_dir=str(latex_source), project_templates_json=[{
+      "id": "document", "name": "Document", "kind": "document",
       "files": {},
       "skills": ["latex-project.md"], "dependencies": ["tectonic"],
       "previews": [{
@@ -704,7 +704,7 @@ def test_latex_artifact_import_manages_declared_sources_in_place(
     "created_at": "2026-01-01T00:00:00Z",
     "updated_at": "2026-01-01T00:00:00Z",
     "project_import": {
-      "template_id": "latex:document",
+      "template_id": "document-builder:document",
       "files": [{
         "storage_path": "sources/paper-one/main.tex", "path": "main.tex",
       }],
@@ -737,8 +737,8 @@ def test_latex_artifact_import_manages_declared_sources_in_place(
     assert record_path.is_file()
     return
   assert listed[0]["catalog_app_id"] == catalog_app.id
-  assert listed[0]["project_type"] == "latex:document"
-  assert listed[0]["template_kind"] == "latex"
+  assert listed[0]["project_type"] == "document-builder:document"
+  assert listed[0]["template_kind"] == "document"
 
   imported = client.post(
     "/api/projects/import", headers=auth,
@@ -746,7 +746,7 @@ def test_latex_artifact_import_manages_declared_sources_in_place(
   )
   assert imported.status_code == 200, imported.text
   project = imported.json()
-  assert project["project_type"] == "latex:document"
+  assert project["project_type"] == "document-builder:document"
   assert project["artifacts"][0]["source"] == "main.tex"
   opened = client.get(
     f"/api/projects/{project['id']}/file?path=main.tex", headers=auth,
@@ -938,7 +938,7 @@ def test_github_import_creates_a_private_project_owned_repository(
   assert project["template"]["repository"] == {
     "slug": "octo/example", "url": "https://github.com/octo/example",
   }
-  assert project["artifacts"][0]["source"] == "index.html"
+  assert project["artifacts"] == []
   project_row = db.get(models.Project, project["id"])
   root = Path(os.environ["DATA_DIR"]) / project_row.root_path
   assert (root / ".git").is_dir()

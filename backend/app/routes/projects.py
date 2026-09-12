@@ -975,11 +975,10 @@ def _linked_artifact_source(
 ) -> tuple[Path, dict, models.App | None]:
   """Resolve declared builder source in place; a rendered Page is not provenance."""
   metadata = record.get("project_import")
-  if not isinstance(metadata, dict) or metadata.get("template_id") not in {
-    "webstudio:website", "latex:document",
-  }:
+  template_id = metadata.get("template_id") if isinstance(metadata, dict) else None
+  if not isinstance(template_id, str) or not template_id:
     raise HTTPException(409, "This Page has no identifiable builder source.")
-  template_row = _installed_template(db, metadata["template_id"])
+  template_row = _installed_template(db, template_id)
   if template_row is None:
     raise HTTPException(409, "Install this work's builder before adding it to Projects.")
   source_locator = storage_root / "sources" / str(record["id"])
@@ -1304,25 +1303,6 @@ def import_github_project(
       "source_app_name": None,
       "source_app_version": None,
     }
-    if (root / "index.html").is_file():
-      snapshot["previews"] = [{
-        "id": "website", "name": "Website", "kind": "html", "path": "index.html",
-      }]
-      snapshot["artifact_types"] = [{
-        "id": "website", "name": "Website", "extensions": ["html", "htm"],
-        "preview": "html", "script": "", "output": "{source}",
-      }]
-    else:
-      top_level_tex = next(iter(sorted(root.glob("*.tex"))), None)
-      if top_level_tex is not None:
-        snapshot["previews"] = [{
-          "id": "document", "name": "Document", "kind": "pdf",
-          "path": top_level_tex.name,
-        }]
-        snapshot["artifact_types"] = [{
-          "id": "latex", "name": "PDF", "extensions": ["tex"],
-          "preview": "pdf", "script": "", "output": "{stem}.pdf",
-        }]
     try:
       artifacts = _previews_to_artifacts(snapshot, root)
       project = models.Project(

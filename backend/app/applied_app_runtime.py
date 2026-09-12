@@ -19,7 +19,11 @@ from pathlib import Path
 
 from app import app_git
 from app.config import get_settings
-from app.manifest_contract import static_asset_entries
+from app.manifest_contract import (
+  ManifestContractError,
+  job_interpreter,
+  static_asset_entries,
+)
 
 
 _SOURCE_MANIFEST = object()
@@ -218,6 +222,81 @@ def bootstrap_legacy_runtimes(db) -> tuple[int, list[str]]:
     finally:
       if staged is not None:
         shutil.rmtree(staged)
+  return migrated, warnings
+
+
+def migrate_legacy_job_shebangs(db) -> tuple[int, list[str]]:
+  """Repair accepted pre-contract jobs without restoring runtime guessing.
+
+  Before 2026-09-12, a missing shebang meant Bash. Copy the immutable accepted
+  runtime, make that historical choice explicit in its bytes, and advance the
+  app's content-addressed pointer. A crash is safe to retry because the source
+  is an accepted runtime, never the editable app tree; already-migrated jobs
+  validate and are skipped.
+  """
+  from app import models
+
+  cache = Path(get_settings().data_dir) / "app-runtime"
+  cache.mkdir(parents=True, exist_ok=True)
+  receipt = cache / "job-shebang-migration.json"
+  if receipt.is_file():
+    return 0, []
+
+  migrated = 0
+  warnings: list[str] = []
+  migrated_ids: list[int] = []
+  for app in db.query(models.App).filter(models.App.deleted_at.is_(None)).all():
+    staged = None
+    try:
+      source = runtime_root(app)
+      manifest_path = source / "mobius.json"
+      if not manifest_path.is_file() or manifest_path.is_symlink():
+        continue
+      manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+      schedule = manifest.get("schedule")
+      job_name = schedule.get("job") if isinstance(schedule, dict) else None
+      if not isinstance(job_name, str) or not job_name:
+        continue
+      job = source / job_name
+      if job.is_symlink() or not job.is_file():
+        raise AppliedRuntimeUnavailable(
+          f"accepted schedule job is missing ({job_name})"
+        )
+      content = job.read_bytes()
+      try:
+        job_interpreter(content)
+        continue
+      except ManifestContractError as exc:
+        if "missing a shebang" not in str(exc):
+          raise AppliedRuntimeUnavailable(str(exc)) from exc
+
+      staged = Path(tempfile.mkdtemp(prefix=".job-shebang-", dir=cache))
+      shutil.copytree(source, staged, dirs_exist_ok=True, symlinks=True)
+      target = staged / job_name
+      target.write_bytes(b"#!/usr/bin/env bash\n" + content)
+      previous_updated = app.updated_at
+      publish_runtime(app, _prepared(staged))
+      staged = None
+      from sqlalchemy.orm.attributes import flag_modified
+      app.updated_at = previous_updated
+      flag_modified(app, "updated_at")
+      db.commit()
+      migrated += 1
+      migrated_ids.append(app.id)
+    except Exception as exc:
+      db.rollback()
+      warnings.append(f"app {app.id} schedule job declaration: {exc}")
+    finally:
+      if staged is not None:
+        shutil.rmtree(staged)
+
+  if not warnings:
+    temporary = receipt.with_suffix(".tmp")
+    with temporary.open("w", encoding="utf-8") as handle:
+      json.dump({"schema": 1, "app_ids": migrated_ids}, handle)
+      handle.flush()
+      os.fsync(handle.fileno())
+    temporary.replace(receipt)
   return migrated, warnings
 
 

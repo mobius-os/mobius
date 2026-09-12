@@ -891,8 +891,8 @@ class AgentLifecycleEvent(Base):
   source_event_id = Column(String(160), nullable=True)
 
 
-class AgentLifecycleRunUpdate(Base):
-  """Append-only cursor stream of root ChatRun snapshots for Workflows.
+class ChatRunUpdate(Base):
+  """Append-only cursor stream of root ChatRun snapshots for lifecycle consumers.
 
   A helper event cursor cannot reveal a later root-run status change, while
   returning every historical run on each poll is unbounded. This companion
@@ -901,7 +901,7 @@ class AgentLifecycleRunUpdate(Base):
   rollback of a speculative ChatRun so consumers can remove the prior snapshot.
   """
 
-  __tablename__ = "agent_lifecycle_run_updates"
+  __tablename__ = "chat_run_updates"
   __table_args__ = {"sqlite_autoincrement": True}
 
   id = Column(Integer, primary_key=True, autoincrement=True)
@@ -920,7 +920,7 @@ class AgentLifecycleRunUpdate(Base):
 
 def _append_agent_lifecycle_run_update(_mapper, connection, run) -> None:
   """Record every inserted/updated ChatRun snapshot in the same transaction."""
-  connection.execute(AgentLifecycleRunUpdate.__table__.insert().values(
+  connection.execute(ChatRunUpdate.__table__.insert().values(
     chat_id=run.chat_id,
     chat_run_id=run.id,
     provider=run.provider,
@@ -933,7 +933,7 @@ def _append_agent_lifecycle_run_update(_mapper, connection, run) -> None:
 
 def _append_agent_lifecycle_run_tombstone(_mapper, connection, run) -> None:
   """Keep cursor consumers honest when a speculative ChatRun is rolled back."""
-  connection.execute(AgentLifecycleRunUpdate.__table__.insert().values(
+  connection.execute(ChatRunUpdate.__table__.insert().values(
     chat_id=run.chat_id,
     chat_run_id=run.id,
     provider=run.provider,

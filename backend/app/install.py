@@ -76,6 +76,7 @@ from app.manifest_contract import (
   STATIC_ASSETS_TOTAL_MAX as _CONTRACT_STATIC_ASSETS_TOTAL_MAX,
   SYSTEM_PROMPT_MAX_BYTES as _CONTRACT_SYSTEM_PROMPT_MAX_BYTES,
   ManifestContractError,
+  job_interpreter,
   static_asset_entries,
   validate_manifest_contract,
   validate_storage_destination,
@@ -1201,6 +1202,11 @@ def package_content_digest_from_tree(
   schedule = manifest.get("schedule")
   job_name = schedule.get("job") if isinstance(schedule, dict) else None
   bundled_job = required_bytes(job_name, "schedule job") if job_name else None
+  if bundled_job is not None:
+    try:
+      job_interpreter(bundled_job)
+    except ManifestContractError as exc:
+      raise PackageContentError(str(exc)) from exc
 
   icon_processed = None
   icon_name = manifest.get("icon")
@@ -2085,6 +2091,10 @@ async def _fetch_install_candidate(
       bundled_job = await _http_get(
         cli, raw_base + schedule["job"], _ENTRY_MAX_BYTES,
       )
+      try:
+        job_interpreter(bundled_job)
+      except ManifestContractError as exc:
+        raise HTTPException(400, str(exc)) from exc
 
     static_assets: dict[str, bytes] = {}
     static_assets_total = 0

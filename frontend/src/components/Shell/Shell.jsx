@@ -61,7 +61,6 @@ import ArtifactWorkspace from '../Projects/ArtifactWorkspace.jsx'
 import { defaultProjectName } from '../Projects/ProjectTypeIcon.jsx'
 import { buildEventProjectId, isArtifactBuildEvent } from '../../lib/projectArtifacts.js'
 import {
-  appSourceProject,
   appSourceProjectId,
   linkedProjectAppId,
   parseAppSourceProjectId,
@@ -1411,16 +1410,12 @@ export default function Shell({ onInitialVisualReady }) {
     for (const a of apps) m.set(String(a.id), a)
     return m
   }, [apps])
-  // Saved Projects always open their own workspace. Only synthetic View source
-  // rows carry `app`, keeping that source-only surface separate from Projects.
   const projectById = useMemo(() => {
-    const m = new Map(projects.map(project => [String(project.id), project]))
-    for (const app of apps) {
-      const source = appSourceProject(app)
-      if (source) m.set(source.id, source)
-    }
-    return m
-  }, [apps, projects])
+    return new Map(projects.map(project => [String(project.id), project]))
+  }, [projects])
+  const sourceAppByWorkspaceId = useMemo(() => new Map(
+    apps.map(app => [appSourceProjectId(app.id), app]),
+  ), [apps])
   const linkedProjectAppIds = useMemo(() => new Set(projects.map(linkedProjectAppId).filter(Boolean)), [projects])
   const projectArtifactByRef = useMemo(() => {
     const map = new Map()
@@ -1461,18 +1456,19 @@ export default function Shell({ onInitialVisualReady }) {
     }
     if (tab.kind === 'project') {
       const project = projectById.get(tab.id)
-      return project?.app ? `${project.app.name} · Source` : project?.name || 'Project'
+      const sourceApp = sourceAppByWorkspaceId.get(tab.id)
+      return sourceApp ? `${sourceApp.name} · Source` : project?.name || 'Project'
     }
     if (tab.kind === 'artifact') {
       // An artifact tab is its own destination: it is named for the artifact,
       // not prefixed with the project that built it.
       const parsed = tabModel.parseArtifactTabId(tab.id)
-      const sourceApp = parsed ? projectById.get(parsed.projectId)?.app : null
+      const sourceApp = parsed ? sourceAppByWorkspaceId.get(parsed.projectId) : null
       if (sourceApp) return `${sourceApp.name} · Source`
       return projectArtifactByRef.get(tab.id)?.name || parsed?.artifactId || 'Artifact'
     }
     return appById.get(tab.id)?.name || 'App'
-  }, [chatById, appById, projectById, projectArtifactByRef, projectChatLookup])
+  }, [chatById, appById, projectById, projectArtifactByRef, projectChatLookup, sourceAppByWorkspaceId])
 
   const renderedProjectIds = useMemo(() => {
     const ids = new Set(
@@ -1516,8 +1512,7 @@ export default function Shell({ onInitialVisualReady }) {
   }
 
   function openAppSource(app) {
-    const source = appSourceProject(app)
-    if (source) openProject(source)
+    if (app?.id != null) openProject({ id: appSourceProjectId(app.id) })
   }
 
   // Open a project artifact in its OWN workspace tab (website iframe / latex
@@ -1526,7 +1521,7 @@ export default function Shell({ onInitialVisualReady }) {
   function openArtifact(project, artifactId) {
     const projectId = typeof project === 'object' ? project?.id : project
     if (projectId == null || artifactId == null) return
-    const sourceApp = projectById.get(String(projectId))?.app
+    const sourceApp = sourceAppByWorkspaceId.get(String(projectId))
     if (sourceApp) {
       openAppSource(sourceApp)
       return
@@ -5086,8 +5081,8 @@ export default function Shell({ onInitialVisualReady }) {
             PaneChatView mount for that chat id. */}
         {renderedProjectIds.map((projectId) => {
           const project = projectById.get(projectId)
-          if (!project) return null
-          const sourceApp = project.app
+          const sourceApp = sourceAppByWorkspaceId.get(projectId)
+          if (!project && !sourceApp) return null
           const key = tabModel.tabKey(tabModel.projectTab(projectId))
           const paned = workspaceChromeActive ? visibleTabRects.get(key) : null
           const fullBleed = !paned && fullBleedKey === key
@@ -5147,7 +5142,7 @@ export default function Shell({ onInitialVisualReady }) {
         {renderedArtifactIds.map((artifactRef) => {
           const parsed = tabModel.parseArtifactTabId(artifactRef)
           if (!parsed) return null
-          const sourceApp = projectById.get(parsed.projectId)?.app
+          const sourceApp = sourceAppByWorkspaceId.get(parsed.projectId)
           const key = tabModel.tabKey(tabModel.makeTab('artifact', artifactRef))
           const paned = workspaceChromeActive ? visibleTabRects.get(key) : null
           const fullBleed = !paned && fullBleedKey === key

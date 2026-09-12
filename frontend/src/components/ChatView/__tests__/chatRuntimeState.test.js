@@ -256,28 +256,40 @@ test('assistant ownership ignores only idle responses captured behind a local tr
 
 test('a known server run settling recovers a live stream that missed its terminal event', () => {
   assert.equal(shouldRecoverSettledRuntime({
-    runtimeWasObservedRunning: true,
+    observedRunningRunId: 'run-a',
+    runtimeRunId: 'run-a',
     runtimeRunning: false,
     pendingCount: 0,
     streamStillActive: true,
   }), true)
 
   assert.equal(shouldRecoverSettledRuntime({
-    runtimeWasObservedRunning: false,
+    observedRunningRunId: null,
+    runtimeRunId: 'run-a',
     runtimeRunning: false,
     pendingCount: 0,
     streamStillActive: true,
   }), false, 'the optimistic send window is not mistaken for a settled turn')
 
   assert.equal(shouldRecoverSettledRuntime({
-    runtimeWasObservedRunning: true,
+    observedRunningRunId: 'run-a',
+    runtimeRunId: 'run-b',
+    runtimeRunning: false,
+    pendingCount: 0,
+    streamStillActive: true,
+  }), false, 'a different terminal run cannot settle the mounted stream')
+
+  assert.equal(shouldRecoverSettledRuntime({
+    observedRunningRunId: 'run-a',
+    runtimeRunId: 'run-a',
     runtimeRunning: false,
     pendingCount: 1,
     streamStillActive: true,
   }), false, 'a queued continuation still owns the handoff')
 
   assert.equal(shouldRecoverSettledRuntime({
-    runtimeWasObservedRunning: true,
+    observedRunningRunId: 'run-a',
+    runtimeRunId: 'run-a',
     runtimeRunning: false,
     pendingCount: 0,
     streamStillActive: true,
@@ -285,7 +297,8 @@ test('a known server run settling recovers a live stream that missed its termina
   }), false, 'the explicit stop flow owns its own settlement')
 
   assert.equal(shouldRecoverSettledRuntime({
-    runtimeWasObservedRunning: true,
+    observedRunningRunId: 'run-a',
+    runtimeRunId: 'run-a',
     runtimeRunning: false,
     pendingCount: 0,
     streamStillActive: true,
