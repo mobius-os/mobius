@@ -1361,7 +1361,10 @@ def image_input_drift(repo: Path = PLATFORM_REPO) -> list[str] | None:
     "ls-files", "--cached", "--others", "--exclude-standard", "-z",
     repo=repo, check=False,
   )
-  candidates = set(baked) | set(current)
+  # Only paths the CURRENT classifier still treats as image inputs can drift:
+  # a running image built before a path moved to served source records it in
+  # ``baked``, and that stale entry must not manufacture a permanent warning.
+  candidates = set(current)
   if authored.returncode == 0:
     candidates &= {
       path for path in authored.stdout.split("\0") if path

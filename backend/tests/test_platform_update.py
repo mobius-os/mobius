@@ -1767,9 +1767,11 @@ def test_container_replacement_accepts_image_input_covered_by_upstream(
   assert pu.container_replacement_blockers() == []
 
 
-def test_protected_runtime_is_an_image_replacement_blocker(
+def test_served_runtime_module_is_not_an_image_replacement_blocker(
   tmp_path, monkeypatch,
 ):
+  """The frozen launcher starts the broker from the served checkout, so a local
+  edit there is activated by a restart rather than by a new image."""
   marker = tmp_path / "activation.json"
   monkeypatch.setattr(pu, "RESTART_NEEDED_FLAG", marker)
   pu._write_activation_marker(
@@ -1779,22 +1781,39 @@ def test_protected_runtime_is_an_image_replacement_blocker(
     image_paths=[],
   )
 
+  assert pu.container_replacement_blockers() == ["Dockerfile"]
+
+
+def test_image_owned_runtime_is_an_image_replacement_blocker(
+  tmp_path, monkeypatch,
+):
+  """Every other module under backend/runtime still comes verbatim from the
+  image, including anything newly added there."""
+  marker = tmp_path / "activation.json"
+  monkeypatch.setattr(pu, "RESTART_NEEDED_FLAG", marker)
+  pu._write_activation_marker(
+    "a" * 40,
+    ["Dockerfile", "backend/runtime/restart_ledger.py"],
+    upstream_sha="b" * 40,
+    image_paths=[],
+  )
+
   assert pu.container_replacement_blockers() == [
-    "Dockerfile", "backend/runtime/identity_broker.py",
+    "Dockerfile", "backend/runtime/restart_ledger.py",
   ]
 
 
-def test_stale_protected_runtime_restores_image_activation_without_marker(
+def test_stale_image_owned_runtime_restores_image_activation_without_marker(
   clone_env, monkeypatch, tmp_path,
 ):
   _, platform = clone_env
   head = _local_commit(
     platform,
-    edits={"backend/runtime/identity_broker.py": "wanted\n"},
+    edits={"backend/runtime/restart_ledger.py": "wanted\n"},
   )
   deployed = tmp_path / "deployed-runtime"
   deployed.mkdir()
-  (deployed / "identity_broker.py").write_text("old\n", encoding="utf-8")
+  (deployed / "restart_ledger.py").write_text("old\n", encoding="utf-8")
   monkeypatch.setenv("MOBIUS_PROTECTED_RUNTIME_DIR", str(deployed))
   pu.SERVING_SOURCE_FILE.write_text("platform\n")
   pu.SERVING_SHA_FILE.write_text(head + "\n")
@@ -1806,13 +1825,56 @@ def test_stale_protected_runtime_restores_image_activation_without_marker(
   assert status["activation"]["reasons"] == [{
     "code": "baked_runtime",
     "summary": "Baked scripts, supervisors, or protected-file rules changed.",
-    "paths": ["backend/runtime/identity_broker.py"],
+    "paths": ["backend/runtime/restart_ledger.py"],
   }]
 
 
-def test_replacement_blocks_local_runtime_drift(
+def test_served_runtime_edit_asks_for_a_restart_not_a_new_image(
+  clone_env, monkeypatch, tmp_path,
+):
+  """The broker is served source: editing it after boot owes a restart that
+  reloads it, and never blocks the container replacement."""
+  _, platform = clone_env
+  before = _served_sha(platform)
+  _local_commit(
+    platform, edits={"backend/runtime/identity_broker.py": "wanted\n"},
+  )
+  deployed = tmp_path / "deployed-runtime"
+  deployed.mkdir()
+  (deployed / "identity_broker.py").write_text("old\n", encoding="utf-8")
+  monkeypatch.setenv("MOBIUS_PROTECTED_RUNTIME_DIR", str(deployed))
+  pu.SERVING_SOURCE_FILE.write_text("platform\n")
+  pu.SERVING_SHA_FILE.write_text(before + "\n")
+
+  status = pu.platform_status(platform)
+
+  # The served/image difference is excluded from parity, so the restart comes
+  # from the served revision advancing after boot rather than from an image
+  # remainder.
+  assert status["activation"]["required_actions"] == ["server_restart"]
+  assert pu.container_replacement_blockers(_served_sha(platform), platform) == []
+
+
+def test_replacement_blocks_local_image_owned_runtime_drift(
   clone_env,
 ):
+  _, platform = clone_env
+  official = _git(platform, "rev-parse", "HEAD").stdout.strip()
+  _local_commit(
+    platform,
+    edits={"backend/runtime/restart_ledger.py": "local-only\n"},
+  )
+
+  assert pu.container_replacement_blockers(official, platform) == [
+    "backend/runtime/restart_ledger.py",
+  ]
+
+
+def test_replacement_carries_a_local_served_runtime_edit(
+  clone_env,
+):
+  """A local broker edit is served source the replacement does not own, so it
+  neither blocks the rebuild nor gets reverted by it."""
   _, platform = clone_env
   official = _git(platform, "rev-parse", "HEAD").stdout.strip()
   _local_commit(
@@ -1820,9 +1882,7 @@ def test_replacement_blocks_local_runtime_drift(
     edits={"backend/runtime/identity_broker.py": "local-only\n"},
   )
 
-  assert pu.container_replacement_blockers(official, platform) == [
-    "backend/runtime/identity_broker.py",
-  ]
+  assert pu.container_replacement_blockers(official, platform) == []
 
 
 def test_replacement_blocks_unmarked_local_image_input_drift(clone_env):

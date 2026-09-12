@@ -127,11 +127,22 @@ capable. Once this succeeds, later Railway rebuilds use the normal managed
 challenge, drain, and receipt protocol.
 
 Ordinary local source remains in `/data/platform` and follows the normal merge
-reconciliation after boot. Protected runtime is deliberately simpler:
-`/app/runtime` always comes verbatim from the reviewed image. Identity keys and
-linked state remain under persistent `/data/identity-broker`, but executable
-root code is never merged or carried forward. A local `backend/runtime` change
-therefore follows the same rule as a Dockerfile, dependency, or bootstrap
-change: it must be present in the exact reviewed image or replacement blocks
-before chat drain. A fork that intentionally changes privileged code deploys
-its own locally built image instead of overlaying an official one.
+reconciliation after boot. Privileged runtime follows the same rule as any
+other served module: the frozen `/app/runtime/served_runtime_launcher.py`
+starts the identity broker from `/data/platform/backend/runtime`, so an edit
+there is activated by the next restart and never blocks a replacement. The
+image keeps its own copy of that module as a floor — if the served copy is
+missing, symlinked, group/world-writable, or does not compile, the image copy
+starts and the decision is recorded in
+`/data/run/protected-runtime.json`.
+
+Everything else under `backend/runtime` (the restart-ledger supervisor, the
+launcher itself, and any module added there later) stays image-owned and
+follows the Dockerfile rule: it must be present in the exact reviewed image or
+the replacement blocks before chat drain. Identity keys and linked state remain
+under persistent `/data/identity-broker`.
+
+The image must therefore contain the launcher before a served broker becomes
+authoritative. An instance whose image predates it keeps starting the broker
+from the image until the next replacement; the classifier reports the broker's
+activation action to match.

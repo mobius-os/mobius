@@ -1,19 +1,27 @@
-"""Prove that the protected image runtime matches the served source tree.
+"""Prove that the image-owned protected runtime matches the served source tree.
 
 ``/data/platform`` owns the desired platform generation, while ``/app/runtime``
-contains the root-started broker modules that only an image replacement can
-activate.  Git ancestry and BUILD_SHA prove the two generations independently;
-neither proves that these protected bytes agree.  This module provides that
-missing, read-only comparison for version diagnostics, Settings activation
-status, and deployment cutover checks.
+contains the root-started modules that only an image replacement can activate.
+Git ancestry and BUILD_SHA prove the two generations independently; neither
+proves that these protected bytes agree.  This module provides that missing,
+read-only comparison for version diagnostics, Settings activation status, and
+deployment cutover checks.
+
+Only image-owned modules are compared.  A module the frozen launcher starts
+from the served checkout is authoritative there, so its served and image copies
+are allowed to differ; treating that as a mismatch would report a permanent,
+meaningless "stale".
 """
 
 from __future__ import annotations
 
 import hashlib
 import os
+from collections.abc import Callable
 from pathlib import Path
 from typing import Literal, TypedDict
+
+from app import platform_activation
 
 
 RuntimeParityState = Literal["current", "stale", "unavailable"]
@@ -42,7 +50,12 @@ def _ignored(relative: Path) -> bool:
   return "__pycache__" in relative.parts or relative.suffix in {".pyc", ".pyo"}
 
 
-def _snapshot(root: Path) -> _TreeSnapshot:
+def _image_owned(relative: Path) -> bool:
+  """Whether this runtime module must still come verbatim from the image."""
+  return platform_activation.runtime_module_is_image_owned(relative.as_posix())
+
+
+def _snapshot(root: Path, *, include: Callable[[Path], bool]) -> _TreeSnapshot:
   """Hash a tree without following links or including Python bytecode."""
   if not root.is_dir():
     raise FileNotFoundError(root)
@@ -51,7 +64,7 @@ def _snapshot(root: Path) -> _TreeSnapshot:
   invalid: list[str] = []
   for path in sorted(root.rglob("*")):
     relative = path.relative_to(root)
-    if _ignored(relative):
+    if _ignored(relative) or not include(relative):
       continue
     name = relative.as_posix()
     if path.is_symlink():
@@ -94,7 +107,7 @@ def protected_runtime_status(
   """
   source: _TreeSnapshot
   try:
-    source = _snapshot(source_root)
+    source = _snapshot(source_root, include=_image_owned)
   except (OSError, UnicodeError):
     return {
       "state": "unavailable",
@@ -105,7 +118,7 @@ def protected_runtime_status(
 
   target_root = deployed_root if deployed_root is not None else _deployed_root()
   try:
-    deployed = _snapshot(target_root)
+    deployed = _snapshot(target_root, include=_image_owned)
   except (OSError, UnicodeError):
     return {
       "state": "stale",
