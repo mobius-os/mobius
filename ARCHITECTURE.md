@@ -445,6 +445,7 @@ The chat is large and self-contained; its hooks live beside it, not in `src/hook
 | `msgText.js` | Strips `<agent_experience>` blocks + the hidden attachment manifest from message text |
 | `useStreamConnection.js` | SSE connection, text buffering, typewriter drain, sleep/wake reconnect |
 | `useScrollMode.js` | Scroll-mode state machine |
+| `usePaginationLifecycle.js` | Commit-boundary fence for asynchronous older-history requests and delayed follow-up frames |
 | `useVoiceInput.js` | Web Speech API with Android-Chrome workarounds |
 | `useFileUpload.js` | File-upload state + API calls |
 | `hooks/usePendingQueue.js` | Owns the pending-queue state + all its mutations (optimistic vs server-confirmed `serverTs` rows); its `pendingMessagesRef` is what `handleStop` snapshots and the steer/fast-forward gate reads |
@@ -778,7 +779,14 @@ and attaches their rule ids to new diagnostic chats. The Playwright lock-in spec
   space, and ignores only scroll events at its exact same-frame target. A
   stronger semantic mode chosen after the request began (such as Jump to
   latest, Send, or question submission) remains authoritative even when no
-  physical scroll advanced the reader generation.
+  physical scroll advanced the reader generation, but only until a later
+  physical generation takes ownership. Each adopted mode records the reader
+  generation at which it became current so mixed semantic/physical order is
+  explicit rather than inferred from mode identity alone. An activation's
+  asynchronous page responses are retired by layout-effect cleanup inside the
+  commit that replaces its chat/search/load identity; passive cleanup is too
+  late because a resolved response microtask could otherwise publish old-chat
+  rows after the new transcript commits.
   User-driven history prefetch begins several visible
   viewports before the loaded boundary and may continue bounded pages while that
   headroom remains depleted; programmatic top landings still fetch nothing.

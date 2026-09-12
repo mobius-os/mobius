@@ -240,7 +240,7 @@ test('automatic geometry owners and newer semantic actions share reader authorit
   )
   assert.ok(
     paginationPath.includes('paginationLifecycleRef.current === paginationLifecycle')
-      && chatViewSource.includes('cancelAnimationFrame(paginationFollowupRafRef.current)'),
+      && chatViewSource.includes('usePaginationLifecycle({'),
     'a delayed pagination continuation must be fenced and cancelled across chat lifecycle',
   )
 

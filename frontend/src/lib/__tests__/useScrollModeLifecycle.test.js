@@ -358,6 +358,67 @@ test('an in-flight escape from follow captures the moving reader, not stale foll
   }
 })
 
+test('physical movement after a newer follow action remains the latest authority', () => {
+  const restoreBrowser = installBrowserEnvironment()
+  try {
+    const { hook, listeners, scroll, assistant } = mountTailController(
+      'pagination-follow-then-reader-escape',
+    )
+    assistant.getBoundingClientRect = () => ({
+      top: assistant.offsetTop - scroll.scrollTop,
+      bottom: assistant.offsetTop - scroll.scrollTop + assistant.offsetHeight,
+      height: assistant.offsetHeight,
+    })
+    const request = hook.result.current.capturePaginationRequest()
+    hook.result.current.followLatest()
+    listeners.get('pointerdown')({
+      pointerType: 'touch', clientY: 100, target: scroll,
+    })
+    listeners.get('touchstart')({ touches: [{ identifier: 1 }] })
+    scroll.scrollTop -= 80
+    listeners.get('scroll')()
+
+    const snapshot = hook.result.current.preparePaginationPrepend(request)
+    assert.equal(snapshot.mode.kind, 'ANCHOR_AT',
+      'Jump cannot outrank physical movement that happened after it')
+    const before = scroll.scrollTop
+    assistant.offsetTop += 600
+    scroll.scrollHeight += 600
+    assert.equal(hook.result.current.restorePaginationPrepend(snapshot), true)
+    assert.equal(scroll.scrollTop, before + 600,
+      'the response preserves the reader who moved away from the tail')
+    listeners.get('touchend')({ touches: [] })
+    hook.unmount()
+  } finally {
+    restoreBrowser()
+  }
+})
+
+test('a follow action after physical movement remains the latest authority', () => {
+  const restoreBrowser = installBrowserEnvironment()
+  try {
+    const { hook, listeners, scroll } = mountTailController(
+      'pagination-reader-then-follow',
+    )
+    const request = hook.result.current.capturePaginationRequest()
+    listeners.get('pointerdown')({
+      pointerType: 'touch', clientY: 100, target: scroll,
+    })
+    listeners.get('touchstart')({ touches: [{ identifier: 1 }] })
+    scroll.scrollTop -= 80
+    listeners.get('scroll')()
+    listeners.get('touchend')({ touches: [] })
+    hook.result.current.followLatest()
+
+    const snapshot = hook.result.current.preparePaginationPrepend(request)
+    assert.equal(snapshot.mode.kind, 'FOLLOW_BOTTOM',
+      'the later explicit follow action supersedes the earlier movement')
+    hook.unmount()
+  } finally {
+    restoreBrowser()
+  }
+})
+
 test('reader movement before the queued pagination event remains authoritative', () => {
   const restoreBrowser = installBrowserEnvironment()
   try {

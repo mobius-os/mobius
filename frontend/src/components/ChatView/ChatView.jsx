@@ -25,6 +25,7 @@ import {
 } from '../../hooks/queries.js'
 import useStreamConnection from './useStreamConnection.js'
 import useScrollMode from './useScrollMode.js'
+import usePaginationLifecycle from './usePaginationLifecycle.js'
 import {
   FOLLOW_STICK_BAND_PX,
   isNearPhysicalBottom,
@@ -1037,8 +1038,17 @@ export default function ChatView({
   // Pagination flag — one compact page at a time. Scroll authority remains in
   // useScrollMode, including while this network request is in flight.
   const loadingOlder = useRef(false)
-  const paginationLifecycleRef = useRef(0)
   const paginationFollowupRafRef = useRef(0)
+  const paginationLifecycleRef = usePaginationLifecycle({
+    chatId,
+    hidden,
+    loadNonce,
+    provisionalNewChat,
+    searchAnchorKey: searchReveal?.anchorKey,
+    searchRevealId: searchReveal?.id,
+    loadingOlderRef: loadingOlder,
+    followupRafRef: paginationFollowupRafRef,
+  })
   const [olderHistoryError, setOlderHistoryError] = useState(false)
 
   // ── Scroll subsystem ─────────────────────────────────────────────
@@ -2713,10 +2723,6 @@ export default function ChatView({
       cancelled = true
       initialLoadController.abort()
       chatIdStaleRef.current = true
-      paginationLifecycleRef.current += 1
-      cancelAnimationFrame(paginationFollowupRafRef.current)
-      paginationFollowupRafRef.current = 0
-      loadingOlder.current = false
       disconnect()
     }
   }, [

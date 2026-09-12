@@ -323,6 +323,11 @@ export default function useScrollMode({
   // once a newer gesture lands, older work can never regain ownership merely
   // because the gesture timing window later closes.
   const readerIntentVersionRef = useRef(0)
+  // Every mode identity records the reader generation at which it took
+  // authority. This orders semantic actions against later physical movement:
+  // mode identity alone can say that Jump happened, but not that the reader
+  // then scrolled away before an older page response arrived.
+  const modeAdoptedAtReaderIntentVersionRef = useRef(0)
   // A history prepend can make the browser emit scroll events for native
   // anchoring and/or our same-frame compensation. Preserve the transaction
   // through its message-count effect reinstall, and suppress only its exact
@@ -483,6 +488,7 @@ export default function useScrollMode({
     if (!nextMode) return previousMode
     if (nextMode === previousMode) return previousMode
     modeRef.current = nextMode
+    modeAdoptedAtReaderIntentVersionRef.current = readerIntentVersionRef.current
     const pinOwnedBefore = previousMode?.kind === 'PIN_USER_MSG'
     const pinOwnedAfter = nextMode?.kind === 'PIN_USER_MSG'
     if (pinOwnedBefore !== pinOwnedAfter) {
@@ -854,8 +860,11 @@ export default function useScrollMode({
     const activeMode = modeRef.current
     // A changed reader generation is physical movement, whose latest anchor
     // must win even if modeRef has not reached the gesture's quiet edge yet.
-    // Only a changed mode identity proves a newer semantic action.
+    // A changed strong mode wins only while it is still the newest authority;
+    // identity by itself cannot order Jump followed by a later upward scroll.
     const newerModeOwnsLayout = request?.mode !== activeMode
+      && modeAdoptedAtReaderIntentVersionRef.current
+        === currentReaderIntentVersion
       && (activeMode?.kind === 'FOLLOW_BOTTOM'
         || activeMode?.kind === 'PIN_USER_MSG'
         || isQuestionSubmissionMode(activeMode))
