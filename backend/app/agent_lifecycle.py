@@ -21,6 +21,7 @@ import hashlib
 from datetime import UTC, datetime
 from typing import Any
 
+from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
 
 from app import models
@@ -268,3 +269,54 @@ def record_event(db, values: dict[str, Any]) -> bool:
         return False
     raise exc
   return True
+
+
+def reconcile_run_updates(db) -> int:
+  """Append current ChatRun snapshots missing from the lifecycle cursor.
+
+  The cursor is intentionally append-only. Older startup recovery used SQL
+  ``UPDATE`` statements, which bypass SQLAlchemy's mapper listener and left a
+  handful of terminal runs represented forever by their earlier ``running``
+  snapshot. Repair those historical gaps without rewriting either history;
+  the newest appended snapshot becomes the authoritative projection.
+  """
+  update = models.AgentLifecycleRunUpdate
+  latest = (
+    db.query(
+      update.chat_run_id.label("chat_run_id"),
+      func.max(update.id).label("update_id"),
+    )
+    .group_by(update.chat_run_id)
+    .subquery()
+  )
+  rows = (
+    db.query(models.ChatRun, update)
+    .outerjoin(latest, latest.c.chat_run_id == models.ChatRun.id)
+    .outerjoin(update, update.id == latest.c.update_id)
+    .all()
+  )
+  stale = [
+    run for run, snapshot in rows
+    if (
+      snapshot is None
+      or snapshot.chat_id != run.chat_id
+      or snapshot.provider != run.provider
+      or snapshot.status != run.status
+      or snapshot.started_at != run.started_at
+      or snapshot.ended_at != run.ended_at
+    )
+  ]
+  observed_at = now_naive_utc()
+  for run in stale:
+    db.add(update(
+      chat_id=run.chat_id,
+      chat_run_id=run.id,
+      provider=run.provider,
+      status=run.status,
+      started_at=run.started_at,
+      ended_at=run.ended_at,
+      observed_at=observed_at,
+    ))
+  if stale:
+    db.commit()
+  return len(stale)
