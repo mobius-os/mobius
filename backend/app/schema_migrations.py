@@ -3722,6 +3722,23 @@ def _add_delegation_result_incorporation(eng):
     ))
 
 
+def _add_autopilot_blocked_at(eng):
+  """Distinguish new automatic blockers without guessing old pause intent."""
+  from sqlalchemy import inspect as sa_inspect, text
+
+  inspector = sa_inspect(eng)
+  if "contribution_autopilot" not in inspector.get_table_names():
+    return
+  columns = {
+    column["name"] for column in inspector.get_columns("contribution_autopilot")
+  }
+  if "blocked_at" not in columns:
+    with eng.begin() as conn:
+      conn.execute(text(
+        "ALTER TABLE contribution_autopilot ADD COLUMN blocked_at DATETIME NULL"
+      ))
+
+
 _SCHEMA_MIGRATIONS = (
   # Full IDs are permanent identities, not sequence positions. Append new
   # work in execution order; never renumber a shipped ID to reconcile sources.
@@ -3774,6 +3791,7 @@ _SCHEMA_MIGRATIONS = (
   ("0047_chat_activity_positions", _add_chat_activity_positions),
   ("0048_delegation_result_incorporation", _add_delegation_result_incorporation),
   ("0048_typed_platform_activation_waits", _add_typed_platform_activation_waits),
+  ("0049_autopilot_blocked_at", _add_autopilot_blocked_at),
 )
 
 

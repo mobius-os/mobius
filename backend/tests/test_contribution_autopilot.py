@@ -288,18 +288,22 @@ def test_concurrent_actions_preserve_push_and_both_reply_urls(db, monkeypatch):
   assert set(row.ignored_event_urls_json) == set(urls)
 
 
-def test_escalation_pauses_until_owner_resumes(db):
+def test_escalation_blocks_claims_without_revoking_owner_grant(db):
   autopilot.stamp_grant(db, 1, "rec", head_sha="abc")
   v = autopilot.claim_for_round(
     db, 1, "rec", attention_key="k", event_at="2026-07-01T00:00:00Z",
   )
   autopilot.escalate(db, 1, "rec")
   row = autopilot.get_row(db, 1, "rec")
-  assert row.enabled is False
+  assert row.enabled is True
+  assert row.state == "blocked" and row.blocked_at is not None
   assert autopilot.verify_claim(row, v["run_id"]) is False
   assert autopilot.claim_for_round(
     db, 1, "rec", attention_key="k2", event_at="2026-07-02T00:00:00Z",
-  )["status"] == "not_granted"
+  )["status"] == "blocked"
+  assert autopilot.escalate(db, 1, "rec") is False
+  autopilot.set_enabled(db, 1, "rec", True)
+  assert row.state == "idle" and row.blocked_at is None
 
 
 def test_stale_lease_reclaim_and_double_stale_escalate(db):
@@ -607,7 +611,7 @@ async def test_round_turn_does_not_bypass_pending_owner_question(
 def test_failed_surfacing_leaves_escalation_retryable(db):
   """A crash while surfacing must not consume the one-shot escalate latch.
 
-  ``escalate`` wins exactly once (its UPDATE is gated on ``enabled``), and the
+  ``escalate`` wins exactly once (its UPDATE excludes ``blocked``), and the
   caller only notifies the owner when it wins. If surfacing the chat committed
   separately, a failure between the two commits would leave the record
   escalated, the chat hidden, and the owner never told — with no retry able to
@@ -671,7 +675,7 @@ def test_failed_hiding_leaves_resume_retryable(db):
     autopilot.stage_followup_drawer_hidden = original
 
   db.expire_all()
-  assert autopilot.get_row(db, 1, "rec").enabled is False
+  assert autopilot.get_row(db, 1, "rec").state == "blocked"
   assert _visible_in_owner_drawer(_chat()) is True
 
   autopilot.set_enabled(db, 1, "rec", True)
