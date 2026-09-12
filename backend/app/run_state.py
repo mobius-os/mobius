@@ -129,10 +129,10 @@ def goal_identity_for_run_start(
     return None, None
   semantic_continuation = is_continuation_message(message)
   if continuation_reason(message) == GOAL_HANDOFF_REASON:
-    # The bounded settlement correction names the Goal it owns. Resolve that
-    # exact identity rather than borrowing whichever Goal happens to be newest
-    # when older queued owner work finishes first. The shared recovery helper
-    # also preserves explicit Stop and dismissal as authoritative fences.
+    # Settlement repair markers name the Goal they own. Resolve that exact
+    # identity rather than borrowing whichever Goal happens to be newest when
+    # older queued owner work finishes first. Saved transcripts and pending
+    # rows remain recoverable across restarts.
     requested_goal_id = message.get("goal_id") if message is not None else None
     if isinstance(requested_goal_id, str) and requested_goal_id:
       source = (
@@ -338,11 +338,10 @@ def _goal_plan_is_unfinished(db: Session, chat_id: str, goal_id: str) -> bool:
 # --- Owned settlement for auto-promoted Goals -------------------------------
 
 # Explicit ``/goal`` starts already have a provider-owned continuation loop.
-# A Goal promoted during an ordinary turn has no such owner, so a clean turn
-# end must either leave a durable handoff or receive one bounded corrective
-# continuation. Each newly settled plan task earns one further correction;
-# lack of progress then becomes a visible resumable failure instead of an
-# unbounded provider loop or a Goal that silently looks paused.
+# A Goal promoted during an ordinary turn has no provider-native continuation
+# owner. If a clean turn ends while its plan is unfinished, one compact repair
+# turn may reconcile missed bookkeeping or arrange a real owner. A second miss
+# pauses visibly; task count and progress never extend that bound.
 GOAL_HANDOFF_REASON = "goal_handoff"
 
 
@@ -352,6 +351,7 @@ class GoalSettlementTarget:
 
   goal_id: str
   retry_allowed: bool
+  unfinished_titles: tuple[str, ...]
 
 
 def _goal_started_explicitly(
@@ -403,28 +403,14 @@ def _goal_started_explicitly(
   return False
 
 
-def _goal_handoff_attempt_count(messages: Any, goal_id: str) -> int:
-  """Count this Goal's already-promoted corrective continuation markers."""
-  return sum(
-    1
-    for message in (messages or [])
-    if isinstance(message, dict)
-    and message.get("role") == "user"
-    and message.get("continuation_reason") == GOAL_HANDOFF_REASON
-    and message.get("goal_id") == goal_id
-  )
-
-
 def goal_settlement_target(
   db: Session, chat_id: str, ending_run_token: str | None,
 ) -> GoalSettlementTarget | None:
   """Describe an unfinished auto-promoted Goal at clean turn settlement.
 
   Explicit ``/goal`` paths stay under their existing Claude/Codex continuation
-  owners. Auto-promoted Goals get one baseline corrective continuation and one
-  additional attempt per task that has become completed/cancelled. The caller
-  turns an exhausted target into a manual recovery pause rather than silently doing
-  nothing.
+  owners. An auto-promoted Goal gets at most one compact repair turn. If that
+  turn also ends without settling or handing off the plan, the Goal pauses.
   """
   if not ending_run_token:
     return None
@@ -447,21 +433,27 @@ def goal_settlement_target(
   if _goal_started_explicitly(db, chat_id, messages, run):
     return None
   tasks = _goal_plan_tasks(db, chat_id, run.goal_id)
-  if not tasks or not any(
-    isinstance(task, dict)
+  unfinished = [
+    task for task in (tasks or [])
+    if isinstance(task, dict)
     and task.get("status") not in ("completed", "cancelled")
-    for task in tasks
-  ):
+  ]
+  if not unfinished:
     return None
-  completed = sum(
-    1
-    for task in tasks
-    if isinstance(task, dict) and task.get("status") in ("completed", "cancelled")
+  attempted = any(
+    isinstance(message, dict)
+    and message.get("role") == "user"
+    and message.get("continuation_reason") == GOAL_HANDOFF_REASON
+    and message.get("goal_id") == run.goal_id
+    for message in messages
   )
-  attempts = _goal_handoff_attempt_count(messages, run.goal_id)
   return GoalSettlementTarget(
     goal_id=run.goal_id,
-    retry_allowed=attempts < 1 + completed,
+    retry_allowed=not attempted,
+    unfinished_titles=tuple(
+      str(task.get("title") or task.get("id") or "Unfinished step")
+      for task in unfinished
+    ),
   )
 
 

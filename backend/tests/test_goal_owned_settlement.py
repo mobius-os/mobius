@@ -1,9 +1,9 @@
 """Owned settlement for platform-promoted Goals.
 
-An unfinished Goal promoted during an ordinary agent turn cannot settle with
-no actor responsible for the next move. One progress-bounded corrective turn
-is allowed; a repeat without plan progress becomes a visible manual recovery pause.
-Explicit ``/goal`` starts retain their native provider continuation owners.
+An unfinished Goal promoted during an ordinary agent turn cannot pretend to be
+complete when no actor owns the next move. It gets one compact repair attempt,
+then pauses visibly with its unfinished steps. Explicit ``/goal`` starts retain
+their native provider continuation owners.
 """
 
 from types import SimpleNamespace
@@ -76,7 +76,7 @@ def _correction(goal_id, index=1):
 def test_auto_promoted_unfinished_plan_returns_target(db, chat):
   _add_run(db, chat.id, "run-a", plan=UNFINISHED)
   assert _target(db, chat) == GoalSettlementTarget(
-    goal_id="run-a", retry_allowed=True,
+    goal_id="run-a", retry_allowed=True, unfinished_titles=("b",),
   )
 
 
@@ -141,8 +141,9 @@ def test_wait_or_helper_wake_keeps_auto_goal_classification(db, chat):
     plan=None,
   )
   target = _target(db, chat, "z-wake")
-  assert target is not None
-  assert target.goal_id == "a-origin"
+  assert target == GoalSettlementTarget(
+    goal_id="a-origin", retry_allowed=True, unfinished_titles=("b",),
+  )
 
 
 def test_missing_or_unknown_run_token_returns_none(db, chat):
@@ -150,33 +151,22 @@ def test_missing_or_unknown_run_token_returns_none(db, chat):
   assert goal_settlement_target(db, chat.id, "missing") is None
 
 
-# --- one baseline correction plus one per settled task ---------------------
-
-
-def test_one_correction_is_allowed_before_any_plan_progress(db, chat):
-  _add_run(db, chat.id, "run-a", plan=STUCK)
-  assert _target(db, chat).retry_allowed is True
-
-
-def test_repeat_without_progress_exhausts_the_guard(db, chat):
-  chat.messages = [_correction("run-a")]
-  db.commit()
-  _add_run(db, chat.id, "run-a", plan=STUCK)
-  assert _target(db, chat).retry_allowed is False
-
-
-def test_settled_task_earns_one_further_correction(db, chat):
+def test_goal_gets_only_one_repair_attempt_regardless_of_plan_progress(db, chat):
   chat.messages = [_correction("run-a")]
   db.commit()
   _add_run(db, chat.id, "run-a", plan=UNFINISHED)
-  assert _target(db, chat).retry_allowed is True
+  target = _target(db, chat)
+  assert target is not None
+  assert target.retry_allowed is False
 
 
-def test_other_goals_corrections_do_not_consume_this_goal_budget(db, chat):
+def test_other_goal_repair_does_not_consume_this_goals_attempt(db, chat):
   chat.messages = [_correction("another-goal")]
   db.commit()
   _add_run(db, chat.id, "run-a", plan=STUCK)
-  assert _target(db, chat).retry_allowed is True
+  target = _target(db, chat)
+  assert target is not None
+  assert target.retry_allowed is True
 
 
 # --- truthful next-owner classification ------------------------------------
@@ -388,7 +378,7 @@ def test_unrelated_wait_or_helper_does_not_own_this_goal(db, chat, monkeypatch):
   assert _goal_handoff_is_owned(db, chat.id, "run-a", _Sink()) is False
 
 
-def test_unowned_exhausted_goal_gets_visible_manual_recovery_pause(db, chat):
+def test_unowned_goal_gets_visible_manual_recovery_pause(db, chat):
   from app.chat import _prepare_goal_handoff
 
   chat.messages = [_correction("run-a")]
@@ -396,19 +386,21 @@ def test_unowned_exhausted_goal_gets_visible_manual_recovery_pause(db, chat):
   _add_run(db, chat.id, "run-a", plan=STUCK)
   sink = _Sink()
 
-  assert _prepare_goal_handoff(db, chat.id, "run-a", sink) == GoalSettlementTarget(
-    goal_id="run-a", retry_allowed=False,
+  target = _prepare_goal_handoff(db, chat.id, "run-a", sink)
+  assert target == GoalSettlementTarget(
+    goal_id="run-a", retry_allowed=False, unfinished_titles=("a",),
   )
   assert len(sink.published) == 1
   assert sink.published[0]["type"] == "error"
   assert sink.published[0]["resumable"] is True
   assert sink.published[0]["pause"] == {"kind": "goal_handoff"}
   assert "Your progress is saved" in sink.published[0]["message"]
+  assert "unfinished Goal steps: a" in sink.published[0]["message"]
   assert "wake-enabled" not in sink.published[0]["message"]
   assert sink._last_error == sink.published[0]["message"]
 
 
-def test_unowned_goal_with_budget_returns_correction_target(db, chat):
+def test_unowned_goal_returns_one_compact_repair_target(db, chat):
   from app.chat import _prepare_goal_handoff
 
   _add_run(db, chat.id, "run-a", plan=STUCK)
@@ -418,7 +410,7 @@ def test_unowned_goal_with_budget_returns_correction_target(db, chat):
   assert sink.published == []
 
 
-def test_unrelated_pending_work_does_not_hide_exhausted_goal_failure(db, chat):
+def test_unrelated_pending_work_does_not_hide_unowned_goal_pause(db, chat):
   from app.chat import _prepare_goal_handoff
 
   chat.messages = [_correction("run-a")]
@@ -427,15 +419,11 @@ def test_unrelated_pending_work_does_not_hide_exhausted_goal_failure(db, chat):
   _add_run(db, chat.id, "run-a", plan=STUCK)
   sink = _Sink()
 
-  assert _prepare_goal_handoff(db, chat.id, "run-a", sink) == GoalSettlementTarget(
-    goal_id="run-a", retry_allowed=False,
-  )
+  target = _prepare_goal_handoff(db, chat.id, "run-a", sink)
+  assert target is not None and target.retry_allowed is False
   assert len(sink.published) == 1
   assert sink.published[0]["type"] == "error"
   assert sink.published[0]["resumable"] is True
-
-
-# --- correction message shape and re-check ---------------------------------
 
 
 class _FakeWriter:
@@ -448,7 +436,7 @@ class _FakeWriter:
 
 
 @pytest.mark.asyncio
-async def test_enqueue_appends_actionable_continuation(db, chat, monkeypatch):
+async def test_repair_turn_is_short_exact_and_durably_queued(db, chat, monkeypatch):
   from app.chat import _maybe_enqueue_goal_handoff
   from app.chat_writer import AppendPending
 
@@ -461,52 +449,19 @@ async def test_enqueue_appends_actionable_continuation(db, chat, monkeypatch):
 
   monkeypatch.setattr("app.chat.get_writer", lambda: writer)
   monkeypatch.setattr("app.chat._await_ack", _fake_await_ack)
-  await _maybe_enqueue_goal_handoff(
-    db, chat.id, "run-a", target, SimpleNamespace(assistant_blocks=[]),
-  )
+  await _maybe_enqueue_goal_handoff(db, chat.id, "run-a", target)
 
   assert len(writer.submitted) == 1
   cmd = writer.submitted[0]
   assert isinstance(cmd, AppendPending)
-  assert cmd.user_msg["kind"] == "continuation"
   assert cmd.user_msg["continuation_reason"] == GOAL_HANDOFF_REASON
   assert cmd.user_msg["goal_id"] == "run-a"
-  assert cmd.user_msg["cid"] == "goal-handoff-run-a"
-  assert "clarifying-question tool" in cmd.user_msg["content"]
-  assert "prose-only request" in cmd.user_msg["content"]
+  assert "Do not create a replacement Goal" in cmd.user_msg["content"]
+  assert len(cmd.user_msg["content"]) < 400
 
 
 @pytest.mark.asyncio
-async def test_enqueue_recheck_keeps_correction_behind_unrelated_work(
-  db, chat, monkeypatch,
-):
-  from app.chat import _maybe_enqueue_goal_handoff
-  from app.chat_writer import AppendPending
-
-  _add_run(db, chat.id, "run-a", plan=STUCK)
-  target = _target(db, chat)
-  chat.pending_messages = [{"role": "user", "content": "owner work"}]
-  db.commit()
-  writer = _FakeWriter()
-
-  async def _fake_await_ack(_ack):
-    return None
-
-  monkeypatch.setattr("app.chat.get_writer", lambda: writer)
-  monkeypatch.setattr("app.chat._await_ack", _fake_await_ack)
-
-  await _maybe_enqueue_goal_handoff(
-    db, chat.id, "run-a", target, SimpleNamespace(assistant_blocks=[]),
-  )
-  assert len(writer.submitted) == 1
-  assert isinstance(writer.submitted[0], AppendPending)
-  assert writer.submitted[0].user_msg["goal_id"] == "run-a"
-
-
-@pytest.mark.asyncio
-async def test_enqueue_recheck_yields_to_same_goal_continuation(
-  db, chat, monkeypatch,
-):
+async def test_repair_recheck_yields_to_same_goal_owner(db, chat, monkeypatch):
   from app.chat import _maybe_enqueue_goal_handoff
 
   _add_run(db, chat.id, "run-a", status="running", plan=STUCK)
@@ -516,14 +471,13 @@ async def test_enqueue_recheck_yields_to_same_goal_continuation(
   writer = _FakeWriter()
   monkeypatch.setattr("app.chat.get_writer", lambda: writer)
 
-  await _maybe_enqueue_goal_handoff(
-    db, chat.id, "run-a", target, SimpleNamespace(assistant_blocks=[]),
-  )
+  await _maybe_enqueue_goal_handoff(db, chat.id, "run-a", target)
+
   assert writer.submitted == []
 
 
 @pytest.mark.asyncio
-async def test_exhausted_handoff_settles_as_resumable_goal_not_failed_history(
+async def test_ownerless_handoff_settles_as_resumable_goal_not_failed_history(
   db, chat, monkeypatch,
 ):
   from app import chat as chat_mod, chat_queue
@@ -532,15 +486,13 @@ async def test_exhausted_handoff_settles_as_resumable_goal_not_failed_history(
   from app.chat_event_sink import ChatEventSink
   from app.memory_recall import EMPTY_RECALL_BINDING
 
-  from app.chat_writer import AppendPending, PromotePending, get_writer
-
-  _add_run(db, chat.id, "run-a", status="running", plan=STUCK)
-  get_writer().submit(AppendPending(
-    chat_id=chat.id, user_msg=_correction("run-a"),
-  )).result(timeout=5)
-  get_writer().submit(PromotePending(
-    chat_id=chat.id, run_token="fixture-correction",
-  )).result(timeout=5)
+  chat.messages = [_correction("run-a")]
+  db.commit()
+  _add_run(db, chat.id, "run-a", status="completed", plan=STUCK)
+  _add_run(
+    db, chat.id, "fixture-correction", status="running", plan=None,
+    root_run_id="run-a", goal_id="run-a",
+  )
   bc = create_broadcast(chat.id)
   sink = ChatEventSink(
     bc, chat.id, run_token="fixture-correction", recall_binding=EMPTY_RECALL_BINDING,

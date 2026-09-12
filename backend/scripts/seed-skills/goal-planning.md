@@ -1,20 +1,22 @@
 # Goal planning
 
-Read this before material work on every delegated outcome and whenever a Goal
-starts or resumes. **This read is a serial gate:** finish it before batching any
-investigation, fixture read, edit, or other material call. Do not run them
-concurrently. Apply it for **every** ordinary top-level delegated outcome.
-Questions stay standard; only the top-level owner promotes.
+Read this when creating or resuming a Goal. Finish the read before material
+work. Questions and honestly bounded one-turn outcomes stay standard; only the
+top-level owner promotes.
 
 ## The execution loop — read this first
 
-1. Route before the first material action; recheck at phase changes.
-2. Promote, then plan. A Goal is durable intent, not an executor.
-3. Inspect ready leaves; parallelize safe independent work. Serialize shared
-   writes, Goal-plan revisions, and the final integrator.
-4. Finish in-turn or create one real handoff. Delegated children return future
-   conditions to the parent; they never own a cross-turn Wait.
-5. Reconcile evidence, verify the outcome, and run `goal_plan.py check-complete`.
+1. On resume, inspect the persisted plan instead of creating a replacement.
+2. Promote, then record the smallest useful nested route. A Goal is durable
+   intent; parents coordinate and verify, while leaves do the work.
+3. Run ready independent sibling leaves concurrently when isolated contexts
+   avoid repeating input. Give each helper a bounded brief and require a compact
+   result. Parallelism itself is not the saving.
+4. Serialize dependencies, shared writes, plan revisions, and final integration.
+5. Grow or revise the plan only when discovery changes the route or the owner
+   expands the outcome. Nest new work under its owner; do not append history.
+6. Finish in-turn or create one real handoff, then verify and run
+   `goal_plan.py check-complete`.
 
 ## Route and promote
 
@@ -23,13 +25,6 @@ helps (multiple stages/turns, repetition, discovery, parallel branches, a long
 operation, or restart risk) and work can start without an owner/approval/event
 gate. This is structural judgment, not a keyword trigger. Synthetic/test work
 gets the same decision. Keep bounded one-turn work standard and honor opt-outs.
-
-### Recheck when the work changes phase
-
-Reapply before the first material action after an owner choice, investigation
-becoming implementation, discovery of a durable branch, or added outcomes. An
-unanswered owner question can defer promotion. Its answer removes that blocker.
-Promote before the new branch; never backdate work.
 
 Use the first-class `promote_goal` tool. The helper is resilience, not an
 equivalent convenience path: use it only when the tool is absent or an
@@ -50,10 +45,9 @@ python3 /data/platform/backend/scripts/goal_plan.py set \
  --task 'inspect|Inspect' --task 'build|Build|inspect' --task 'verify|Verify|build'
 ```
 
-A task is `id|title|dependencies`; independent roots are ready together. After
-every update, inspect ready leaves. Parallelism is a readiness decision, not a
-helper quota. Serialize shared work and integration. Add discovered work under
-its owning task:
+A task is `id|title|dependencies`; independent siblings are ready together.
+After every update, inspect ready leaves. Add discovered work under its owning
+task:
 
 ```bash
 python3 /data/platform/backend/scripts/goal_plan.py add child 'Check edge' --parent inspect
@@ -61,8 +55,10 @@ python3 /data/platform/backend/scripts/goal_plan.py update inspect --status runn
 python3 /data/platform/backend/scripts/goal_plan.py update inspect --status completed
 ```
 
-Work deepest leaves. Children make a parent **Ready to verify**, not complete.
-Verify upward. Keep child contracts bounded. Plans may change; outcomes may not.
+Work deepest leaves. Children inherit their ancestors' dependencies. Children
+make a parent **Ready to verify**, not complete; verify upward. A cancelled
+prerequisite is settled and must not strand dependants. Plans may change;
+outcomes may not silently change.
 
 ### Make every unfinished wait explicit
 
@@ -74,7 +70,10 @@ exactly one owning interaction:
 - Owner action: use the real question tool; its card keeps the Goal marked
   **Waiting for you**.
 
-Do not end with “tell me when…”, a bare paused Goal, or a custom status card.
+If no actor owns the next move, the platform may give the same Goal one compact
+repair turn to reconcile its plan or establish an owner. A repeated miss stays
+visibly paused and resumable; task count or progress never buys more turns.
+Do not end with “tell me when…” or a custom status card.
 
 Before completion run:
 

@@ -18,6 +18,7 @@ TASK_STATUSES = frozenset({
   "pending", "running", "completed", "blocked", "failed", "cancelled",
 })
 ACTIVE_TASK_STATUSES = frozenset({"running"})
+SETTLED_TASK_STATUSES = frozenset({"completed", "cancelled"})
 MAX_TASKS = 64
 MAX_DEPENDENCIES = 16
 MAX_TITLE = 160
@@ -50,8 +51,8 @@ def normalize_tasks(raw_tasks: Any) -> list[dict[str, Any]]:
   """Validate and normalize one complete plan snapshot.
 
   Explicit dependencies and implicit child-before-parent completion edges form
-  one DAG. A task may run or complete only after every dependency has
-  completed, and repeated progress cannot claim completion before its total has
+  one DAG. A task may run or complete only after every dependency has settled,
+  and repeated progress cannot claim completion before its total has
   been reached. Those are orchestration invariants, not UI hints, so every
   write path shares this function.
   """
@@ -183,10 +184,22 @@ def normalize_tasks(raw_tasks: Any) -> list[dict[str, Any]]:
   for task in tasks:
     visit_completion_prerequisites(task["id"])
 
+  def effective_dependencies(task_id: str) -> list[str]:
+    """Return direct dependencies plus those inherited from parent groups."""
+    dependencies: list[str] = []
+    current = by_id[task_id]
+    while True:
+      dependencies.extend(current["depends_on"])
+      parent_id = current.get("parent_id")
+      if parent_id is None:
+        break
+      current = by_id[parent_id]
+    return list(dict.fromkeys(dependencies))
+
   for task in tasks:
     incomplete = [
-      dependency for dependency in task["depends_on"]
-      if by_id[dependency]["status"] != "completed"
+      dependency for dependency in effective_dependencies(task["id"])
+      if by_id[dependency]["status"] not in SETTLED_TASK_STATUSES
     ]
     if task["status"] in {"running", "completed"} and incomplete:
       raise GoalPlanError(
@@ -196,7 +209,7 @@ def normalize_tasks(raw_tasks: Any) -> list[dict[str, Any]]:
     unfinished_children = [
       child["id"] for child in tasks
       if child.get("parent_id") == task["id"]
-      and child["status"] not in {"completed", "cancelled"}
+      and child["status"] not in SETTLED_TASK_STATUSES
     ]
     if task["status"] == "completed" and unfinished_children:
       raise GoalPlanError(
@@ -394,6 +407,25 @@ def serialize_plan(
     return None
   tasks = deepcopy(raw["tasks"])
   by_id = {task["id"]: task for task in tasks}
+  children_by_parent: dict[str, list[str]] = {}
+  for task in tasks:
+    parent_id = task.get("parent_id")
+    if parent_id is not None:
+      children_by_parent.setdefault(parent_id, []).append(task["id"])
+
+  def effective_waiting(task: dict[str, Any]) -> list[str]:
+    dependencies: list[str] = []
+    current = task
+    while True:
+      dependencies.extend(current.get("depends_on", []))
+      parent_id = current.get("parent_id")
+      if parent_id is None:
+        break
+      current = by_id[parent_id]
+    return [
+      dependency for dependency in dict.fromkeys(dependencies)
+      if by_id.get(dependency, {}).get("status") not in SETTLED_TASK_STATUSES
+    ]
   delegations = _delegation_tree(db, physical, root)
   from app.delegations import TERMINAL_DELEGATION_STATUSES
 
@@ -421,21 +453,17 @@ def serialize_plan(
   ))
   ready: list[str] = []
   for task in tasks:
-    waiting_on = [
-      dep for dep in task.get("depends_on", [])
-      if by_id.get(dep, {}).get("status") != "completed"
-    ]
+    waiting_on = effective_waiting(task)
     task["waiting_on"] = waiting_on
-    task["ready"] = task.get("status") == "pending" and not waiting_on
-    children = [
-      child["id"] for child in tasks
-      if child.get("parent_id") == task["id"]
-    ]
+    children = children_by_parent.get(task["id"], [])
     task["children"] = children
+    task["ready"] = (
+      task.get("status") == "pending" and not waiting_on and not children
+    )
     task["ready_to_verify"] = (
       task.get("status") in {"pending", "running"}
-      and bool(children) and all(
-        by_id[child_id].get("status") in {"completed", "cancelled"}
+      and not waiting_on and bool(children) and all(
+        by_id[child_id].get("status") in SETTLED_TASK_STATUSES
         for child_id in children
       )
     )
