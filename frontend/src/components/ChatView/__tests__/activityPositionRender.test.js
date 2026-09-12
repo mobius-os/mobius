@@ -3,6 +3,7 @@ import test, { after } from 'node:test'
 import assert from 'node:assert/strict'
 import React from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
+import { QueryClient, QueryObserver } from '@tanstack/react-query'
 import { createServer } from 'vite'
 globalThis.window = { location: { origin: 'http://localhost', href: 'http://localhost/shell/' }, innerWidth: 420 }
 const vite = await createServer({ appType: 'custom', logLevel: 'error', server: { middlewareMode: true, hmr: false, ws: false }, ssr: { noExternal: ['@openai/apps-sdk-ui'] } })
@@ -53,14 +54,81 @@ test('busy-parent helper result renders once at the same recorded frontier', () 
   assert.equal(html.split('aria-label="Helper finished · Review"').length, 2)
 })
 
-test('a genuine activity load failure retains a manual retry', () => {
+test('activity load errors stay quiet while restart recovery is active', () => {
   assert.equal(renderToStaticMarkup(React.createElement(
     PeerTimelineLoadError, { error: false, onRetry: () => {} },
   )), '')
+  assert.equal(renderToStaticMarkup(React.createElement(
+    PeerTimelineLoadError, {
+      error: true, recoveryActive: true, onRetry: () => {},
+    },
+  )), '')
+})
+
+test('a settled activity load failure retains a manual retry', () => {
   const html = renderToStaticMarkup(React.createElement(
-    PeerTimelineLoadError, { error: true, onRetry: () => {} },
+    PeerTimelineLoadError, {
+      error: true, recoveryActive: false, onRetry: () => {},
+    },
   ))
   assert.match(html, /role="status"/)
   assert.match(html, /Chat activity couldn’t refresh/)
   assert.match(html, /<button type="button">Try again<\/button>/)
+})
+
+test('a retained activity error stays quiet through reconnect refetch, then reports only a settled failure', async (t) => {
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  t.after(() => client.clear())
+  const key = ['chat-activity', 'restart-transition']
+  let outcome = 'success'
+  let releaseRecovery
+  const observer = new QueryObserver(client, {
+    queryKey: key,
+    retry: false,
+    staleTime: Infinity,
+    queryFn: async () => {
+      if (outcome === 'failure') throw new Error('restart gap')
+      if (outcome === 'recovering') {
+        await new Promise(resolve => { releaseRecovery = resolve })
+      }
+      return { events: [], next_before: null }
+    },
+  })
+  const unsubscribe = observer.subscribe(() => {})
+  t.after(unsubscribe)
+
+  await observer.refetch()
+  outcome = 'failure'
+  await client.invalidateQueries({ queryKey: key })
+  assert.equal(observer.getCurrentResult().isError, true)
+
+  outcome = 'recovering'
+  const recovery = client.invalidateQueries({ queryKey: key })
+  await new Promise(resolve => setImmediate(resolve))
+  const recovering = observer.getCurrentResult()
+  assert.equal(recovering.isError, true)
+  assert.equal(recovering.isFetching, true)
+  assert.equal(renderToStaticMarkup(React.createElement(
+    PeerTimelineLoadError, {
+      error: recovering.isError,
+      recoveryActive: recovering.isFetching,
+      onRetry: () => {},
+    },
+  )), '')
+
+  releaseRecovery()
+  await recovery
+  assert.equal(observer.getCurrentResult().isError, false)
+
+  outcome = 'failure'
+  await client.invalidateQueries({ queryKey: key })
+  const settledFailure = observer.getCurrentResult()
+  assert.equal(settledFailure.isFetching, false)
+  assert.match(renderToStaticMarkup(React.createElement(
+    PeerTimelineLoadError, {
+      error: settledFailure.isError,
+      recoveryActive: settledFailure.isFetching,
+      onRetry: () => {},
+    },
+  )), /Try again/)
 })
