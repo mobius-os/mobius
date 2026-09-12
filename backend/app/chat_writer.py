@@ -3153,19 +3153,18 @@ class ChatWriterActor:
       if run_id != cmd.restart_run_id
     )
     if interrupted_ids:
-      db.execute(
-        update(ChatRun)
-        .where(
+      interrupted_runs = db.query(ChatRun).filter(
           ChatRun.chat_id == cmd.chat_id,
           ChatRun.id.in_(interrupted_ids),
           ChatRun.status == "running",
-        )
-        .values(
-          status="interrupted",
-          ended_at=cmd.recovered_at,
-          restart_nonce=None,
-        )
-      )
+      ).all()
+      for run in interrupted_runs:
+        # Mapper-owned assignment keeps the append-only lifecycle cursor in
+        # the same transaction as startup recovery. A Core UPDATE bypassed
+        # that listener and stranded the last projection at ``running``.
+        run.status = "interrupted"
+        run.ended_at = cmd.recovered_at
+        run.restart_nonce = None
       from app.chat_failure_activity import mark_failed
       mark_failed(
         db,
@@ -3174,20 +3173,16 @@ class ChatWriterActor:
         failed_at=cmd.recovered_at,
       )
     if cmd.restart_run_id:
-      db.execute(
-        update(ChatRun)
-        .where(
+      restart_run = db.query(ChatRun).filter(
           ChatRun.chat_id == cmd.chat_id,
           ChatRun.id == cmd.restart_run_id,
           ChatRun.status == "running",
-        )
-        .values(
-          status="parked",
-          parked_until=cmd.recovered_at,
-          park_reason="restart",
-          # Preserve restart_nonce: the reset sweep authenticates it again.
-        )
-      )
+      ).first()
+      if restart_run is not None:
+        restart_run.status = "parked"
+        restart_run.parked_until = cmd.recovered_at
+        restart_run.park_reason = "restart"
+        # Preserve restart_nonce: the reset sweep authenticates it again.
     if not _commit_or_rollback(db):
       raise _PersistFailed("ReconcileStartupChat did not persist")
     return True
