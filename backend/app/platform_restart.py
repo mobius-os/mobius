@@ -20,7 +20,10 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app import models
-from app.boot_source import supported_restart_path as _supported_restart_path
+from app.boot_source import (
+  RESTART_SOURCE_PATHS,
+  supported_restart_path as _supported_restart_path,
+)
 from app.timeutil import now_naive_utc
 
 
@@ -116,7 +119,7 @@ def build_restart_requirement(repo: Path | None = None) -> dict:
 
   dirty = _git(
     repo, "status", "--porcelain", "--untracked-files=all", "--",
-    "backend/app", "backend/scripts/pm-commit", "skill/core.md",
+    *RESTART_SOURCE_PATHS,
   )
   if dirty.returncode != 0 or dirty.stdout.strip():
     raise RestartRequirementError("restart_source_must_be_committed")

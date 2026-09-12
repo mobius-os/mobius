@@ -1377,6 +1377,7 @@ def list_project_import_sources(
       "current_version": int(record["current_version"]),
       "updated_at": record.get("updated_at") or record.get("created_at"),
       "chat_id": record.get("chat_id"), "project_type": snapshot["key"],
+      "template_kind": snapshot["kind"],
     })
 
   apps = []

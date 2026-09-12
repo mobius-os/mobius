@@ -19,7 +19,12 @@ from types import MappingProxyType
 from typing import Mapping
 
 
-RESTART_SOURCE_PATHS = ("backend/app", "backend/scripts/pm-commit", "skill/core.md")
+RESTART_SOURCE_PATHS = (
+  "backend/app",
+  "backend/runtime/identity_broker.py",
+  "backend/scripts/pm-commit",
+  "skill/core.md",
+)
 
 
 def supported_restart_path(path: str) -> bool:

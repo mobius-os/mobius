@@ -26,12 +26,13 @@ test('retired formats stay out of new project creation', () => {
 })
 
 test('existing projects retain their type identity and owner color', () => {
-  for (const [project_type, kind] of [['latex:document','latex'], ['webstudio:website','web'], ['webstudio:mini-app','mini-app'], ['webstudio:spreadsheet','sheet'], ['webstudio:document','document'], ['webstudio:presentation','slides'], ['github:repository','github']]) {
-    assert.equal(projectTypeKind({project_type}), kind)
-  }
+  assert.equal(projectTypeKind({project_type:'latex:document',template:{kind:'latex'}}), 'latex')
+  assert.equal(projectTypeKind({project_type:'webstudio:website',template:{kind:'web'}}), 'web')
   assert.equal(projectTypeKind({kind:'game',name:'Website simulator'}), 'game')
+  assert.equal(projectTypeKind({project_type:'webstudio:website',name:'Website'}), 'blank')
+  assert.equal(projectTypeKind('blank'), 'blank')
   assert.equal(normalizeProjectColor('#3B82F6'), '#3b82f6')
   assert.equal(normalizeProjectColor('blue'), null)
-  assert.deepEqual(projectIdentityTone({project_type:'latex:document',color:'#E11D48'}), {kind:'latex',accent:'#e11d48'})
+  assert.deepEqual(projectIdentityTone({template:{kind:'latex'},color:'#E11D48'}), {kind:'latex',accent:'#e11d48'})
   assert.equal(defaultProjectName(core[0]), 'Untitled project')
 })

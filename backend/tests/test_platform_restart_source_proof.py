@@ -94,6 +94,19 @@ def test_requirement_rejects_modified_source_after_card_is_derived(
   assert platform_restart.requirement_matches_current_source(requirement) is False
 
 
+def test_served_identity_broker_is_restart_loadable(monkeypatch, tmp_path):
+  repo, source, _base = _restart_repo(
+    monkeypatch, tmp_path, path="backend/runtime/identity_broker.py",
+  )
+  source.write_text("VALUE = 'next'\n", encoding="utf-8")
+  target = _commit(repo, "update served identity broker")
+
+  requirement = platform_restart.build_restart_requirement(repo)
+
+  assert requirement["target_sha"] == target
+  assert list(requirement["files"]) == ["backend/runtime/identity_broker.py"]
+
+
 def test_descendant_that_reverts_approved_bytes_does_not_prove_activation(
   monkeypatch, tmp_path,
 ):

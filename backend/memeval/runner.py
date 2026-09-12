@@ -155,10 +155,10 @@ def run_retrieval_eval_with_reflection(
   re-score on the mutated tree (AFTER). Reports `node_recall_before` /
   `node_recall_after` / `node_recall_delta` and the same for `evidence_recall`.
 
-  `reflect_fn` is injectable: `reflection_stage.pure_consolidation` (offline,
-  deterministic) for unit tests, `reflection_stage.live_reflection` for the real
-  eval. The tree must persist across both passes, so this does NOT reuse
-  `run_retrieval_eval`'s per-case temp dirs.
+  `reflect_fn` is injectable; the platform supplies the deterministic
+  `reflection_stage.pure_consolidation`, while app-owned live evaluators can
+  supply their own function. The tree must persist across both passes, so this
+  does NOT reuse `run_retrieval_eval`'s per-case temp dirs.
   """
   nr_before: list[float] = []
   nr_after: list[float] = []

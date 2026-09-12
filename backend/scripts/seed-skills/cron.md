@@ -28,7 +28,12 @@ For an installable app, use the manifest contract:
 }
 ```
 
-The job reads its numeric app id from `$1` and uses `$APP_TOKEN` for its own reviewed API routes. Add the job filename to the manifest install inputs as required by the app contract.
+The job reads its numeric app id from `$1` and uses `$APP_TOKEN` for its own
+reviewed API routes. Its first line must be a valid shebang naming an absolute
+interpreter, such as `#!/bin/bash` or `#!/usr/bin/env python3`; the platform
+follows that declaration and does not guess Bash from a filename or executable
+bit. Add the job filename to the manifest install inputs as required by the app
+contract.
 
 The scaffold is for explicit owner-managed platform/legacy jobs that are not installed from a manifest:
 

@@ -403,8 +403,9 @@ def test_wrapper_runs_job_only_after_live_check(tmp_path, monkeypatch):
   ])
 
   assert runner.run() == 0
+  runtime_job = Path(_accepted_context(source)["runtime_dir"]) / job.name
   assert calls[0][0][0] == [
-    "bash", str(Path(_accepted_context(source)["runtime_dir"]) / job.name), "57",
+    "/bin/sh", str(runtime_job), "57",
   ]
   child_env = calls[0][1]["env"]
   assert child_env["APP_TOKEN"] == "app-token"
@@ -444,22 +445,21 @@ def test_wrapper_honors_python_job_shebang(tmp_path, monkeypatch):
 
   assert runner.run() == 0
   runtime_job = Path(context["runtime_dir"]) / job.name
-  assert calls[0][0][0] == [str(runtime_job), "57"]
+  assert calls[0][0][0] == [
+    "/usr/bin/env", "python3", str(runtime_job), "57",
+  ]
 
 
-@pytest.mark.parametrize("executable", [False, True])
-def test_wrapper_keeps_bash_fallback_for_legacy_jobs(
-  tmp_path, monkeypatch, executable,
-):
+def test_wrapper_honors_nonexecutable_job_shebang(tmp_path, monkeypatch):
   runner = _load_runner()
   data_dir = tmp_path / "data"
-  source = data_dir / "apps" / "legacy"
+  source = data_dir / "apps" / "portable"
   source.mkdir(parents=True)
   job = source / "job.sh"
-  job.write_text("exit 0\n")
+  job.write_text("#!/usr/bin/env bash\nexit 0\n")
   context = _accepted_context(source)
   runtime_job = Path(context["runtime_dir"]) / job.name
-  runtime_job.chmod(0o755 if executable else 0o644)
+  runtime_job.chmod(0o644)
   monkeypatch.setattr(runner, "DATA_DIR", data_dir)
   monkeypatch.setattr(runner, "_mint_app_token", lambda _app_id: "app-token")
   monkeypatch.setattr(runner, "_app_is_live", lambda *_args: True)
@@ -479,7 +479,34 @@ def test_wrapper_keeps_bash_fallback_for_legacy_jobs(
   ])
 
   assert runner.run() == 0
-  assert calls[0][0][0] == ["bash", str(runtime_job), "57"]
+  assert calls[0][0][0] == [
+    "/usr/bin/env", "bash", str(runtime_job), "57",
+  ]
+
+
+def test_wrapper_rejects_job_without_shebang(tmp_path, monkeypatch):
+  runner = _load_runner()
+  data_dir = tmp_path / "data"
+  source = data_dir / "apps" / "ambiguous"
+  source.mkdir(parents=True)
+  job = source / "job.sh"
+  job.write_text("exit 0\n")
+  context = _accepted_context(source)
+  monkeypatch.setattr(runner, "DATA_DIR", data_dir)
+  monkeypatch.setattr(runner, "_mint_app_token", lambda _app_id: "app-token")
+  monkeypatch.setattr(runner, "_app_is_live", lambda *_args: True)
+  monkeypatch.setattr(runner, "_job_context", lambda *_args: context)
+  monkeypatch.setattr(runner.os, "getsid", lambda _pid: os.getpid())
+  monkeypatch.setattr(
+    runner.subprocess,
+    "Popen",
+    lambda *_args, **_kwargs: pytest.fail("invalid job must not start"),
+  )
+  monkeypatch.setattr(runner.sys, "argv", [
+    "app-job-runner.py", "57", str(job),
+  ])
+
+  assert runner.run() == 4
 
 
 def test_scheduled_job_emits_owner_authenticated_outcome_after_child_exit(

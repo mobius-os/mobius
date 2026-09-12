@@ -673,7 +673,8 @@ def test_latex_artifact_import_manages_declared_sources_in_place(
   latex_app = models.App(
     name="LaTeX", description="Documents", jsx_source="",
     slug="latex", source_dir=str(latex_source), project_templates_json=[{
-      "id": "document", "name": "LaTeX document", "files": {},
+      "id": "document", "name": "LaTeX document", "kind": "latex",
+      "files": {},
       "skills": ["latex-project.md"], "dependencies": ["tectonic"],
       "previews": [{
         "id": "document", "name": "Document", "kind": "pdf",
@@ -737,6 +738,7 @@ def test_latex_artifact_import_manages_declared_sources_in_place(
     return
   assert listed[0]["catalog_app_id"] == catalog_app.id
   assert listed[0]["project_type"] == "latex:document"
+  assert listed[0]["template_kind"] == "latex"
 
   imported = client.post(
     "/api/projects/import", headers=auth,
