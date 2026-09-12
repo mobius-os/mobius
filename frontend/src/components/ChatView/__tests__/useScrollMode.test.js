@@ -30,6 +30,7 @@ import {
   modeForForegroundReturn,
   modeForQuestionSubmission,
   modeForQueuedSubmission,
+  modeForScrollTransition,
   modeAfterQuestionResponseStart,
   modeAfterReaderGesture,
   modeAfterSpacerResize,
@@ -37,7 +38,7 @@ import {
   nestedReaderTargetOwnsInput,
   readerInputClaimsPhysicalTail,
   readerInputEscapeDirection,
-  readerInputActivatesDisclosure,
+  readerInputDisclosureTarget,
   readerInputMayScroll,
   readerInputNeedsFrameRelease,
   readerScrollEscapeDirection,
@@ -265,8 +266,11 @@ test('a composer press or direct edit requests follow only at the physical tail'
 })
 
 test('disclosure activation is recognized as an anchor-latching reading action', () => {
+  const disclosureHeader = {}
   const disclosureTarget = {
-    closest: selector => selector.includes('button.chat__activity-header') ? {} : null,
+    closest: selector => selector.includes('button.chat__activity-header')
+      ? disclosureHeader
+      : null,
   }
   const ordinaryTarget = { closest: () => null }
   const staticStatusTarget = {
@@ -274,29 +278,32 @@ test('disclosure activation is recognized as an anchor-latching reading action',
     closest: selector => selector.startsWith('button.') ? null : {},
   }
 
-  assert.equal(readerInputActivatesDisclosure(
-    'pointerdown', '', disclosureTarget), true)
-  assert.equal(readerInputActivatesDisclosure(
-    'pointerdown', '', disclosureTarget, 2), false,
+  assert.equal(readerInputDisclosureTarget(
+    'pointerdown', '', disclosureTarget), disclosureHeader)
+  assert.equal(readerInputDisclosureTarget(
+    'pointerdown', '', disclosureTarget, 2), null,
   'opening a context menu must not manufacture reading intent')
-  assert.equal(readerInputActivatesDisclosure(
-    'touchstart', '', disclosureTarget), true)
-  assert.equal(readerInputActivatesDisclosure(
-    'keydown', 'Enter', disclosureTarget), true)
-  assert.equal(readerInputActivatesDisclosure(
-    'keydown', ' ', disclosureTarget), true)
-  assert.equal(readerInputActivatesDisclosure(
-    'keydown', 'a', disclosureTarget), false)
-  assert.equal(readerInputActivatesDisclosure(
-    'wheel', '', disclosureTarget), false)
-  assert.equal(readerInputActivatesDisclosure(
-    'pointerdown', '', ordinaryTarget), false)
-  assert.equal(readerInputActivatesDisclosure(
-    'pointerdown', '', staticStatusTarget), false,
+  assert.equal(readerInputDisclosureTarget(
+    'touchstart', '', disclosureTarget), disclosureHeader)
+  assert.equal(readerInputDisclosureTarget(
+    'keydown', 'Enter', disclosureTarget), disclosureHeader)
+  assert.equal(readerInputDisclosureTarget(
+    'keydown', ' ', disclosureTarget), disclosureHeader)
+  assert.equal(readerInputDisclosureTarget(
+    'click', '', disclosureTarget), disclosureHeader,
+  'assistive activation may arrive without a preceding pointer or key event')
+  assert.equal(readerInputDisclosureTarget(
+    'keydown', 'a', disclosureTarget), null)
+  assert.equal(readerInputDisclosureTarget(
+    'wheel', '', disclosureTarget), null)
+  assert.equal(readerInputDisclosureTarget(
+    'pointerdown', '', ordinaryTarget), null)
+  assert.equal(readerInputDisclosureTarget(
+    'pointerdown', '', staticStatusTarget), null,
   'a non-interactive status row must not stop live follow')
 })
 
-test('disclosure toggles follow only in FOLLOW_BOTTOM and otherwise hold the reader anchor', () => {
+test('disclosure collapse keeps follow while other held states keep their anchor', () => {
   const row = {
     dataset: { key: 'assistant-1' },
     offsetTop: 420,
@@ -309,11 +316,61 @@ test('disclosure toggles follow only in FOLLOW_BOTTOM and otherwise hold the rea
   }
   const follow = { kind: 'FOLLOW_BOTTOM' }
   assert.equal(modeForDisclosureToggle(scrollEl, follow), follow,
-    'autoscroll remains the sole authority while following the tail')
+    'collapse retains follow because it reveals no new reading surface')
   assert.deepEqual(
     modeForDisclosureToggle(scrollEl, { kind: 'PIN_USER_MSG', cid: 'c1' }),
     { kind: 'ANCHOR_AT', key: 'assistant-1', offset: -80 },
-    'outside autoscroll the visible reading position is frozen before resize',
+    'an existing reading hold stays anchored through a collapse',
+  )
+})
+
+test('expanding a disclosure holds its header instead of dragging to the tail', () => {
+  const row = {
+    dataset: { key: 'assistant-1' },
+    offsetTop: 900,
+    offsetHeight: 300,
+  }
+  const disclosure = { closest: () => row }
+  const atTail = {
+    scrollTop: 1397,
+    scrollHeight: 2000,
+    clientHeight: 600,
+    querySelectorAll: () => [row],
+  }
+  const follow = { kind: 'FOLLOW_BOTTOM' }
+  const pin = { kind: 'PIN_USER_MSG', cid: 'c1' }
+  assert.deepEqual(
+    modeForDisclosureToggle(atTail, follow, {
+      target: disclosure,
+      nextOpen: true,
+    }),
+    { kind: 'ANCHOR_AT', key: 'assistant-1', offset: -497 },
+    'opening a long block freezes the tapped header before it grows',
+  )
+  assert.deepEqual(
+    modeForDisclosureToggle(atTail, pin, { target: disclosure, nextOpen: true }),
+    { kind: 'ANCHOR_AT', key: 'assistant-1', offset: -497 },
+    'a held reader also freezes the tapped header',
+  )
+  assert.deepEqual(
+    modeForScrollTransition(pin, { kind: 'FOLLOW_BOTTOM' }, 'reader:disclosure-toggle'),
+    pin,
+    'disclosure activation may not manufacture follow intent',
+  )
+  assert.deepEqual(
+    modeForDisclosureToggle(atTail, follow, {
+      target: disclosure,
+      nextOpen: false,
+    }),
+    follow,
+    'collapse keeps the existing tail policy',
+  )
+
+  const aboveTail = { ...atTail, scrollTop: 800 }
+  assert.deepEqual(
+    modeForDisclosureToggle(aboveTail, pin, { target: disclosure, nextOpen: true }),
+    { kind: 'ANCHOR_AT', key: 'assistant-1', offset: 100 },
+    'off-tail expansion still freezes the visible reading anchor',
   )
 })
 
@@ -1810,6 +1867,49 @@ test('tool expansion consumes reservation and collapse restores the exact defici
   assert.equal(collapsed, 611)
   assert.equal(expanded, 0)
   assert.equal(collapsedAgain, collapsed)
+})
+
+test('a latest user row wholly above the viewport retires stale tail room', () => {
+  const scrollEl = makeSpacerScrollEl({ clientHeight: 600, scrollTop: 1200 })
+  // Formula without the leave-viewport check would still reserve 96px.
+  const listEl = { offsetHeight: 1700 }
+  const latestUserMsgEl = {
+    offsetTop: 900,
+    offsetHeight: 80,
+    dataset: { cid: 'latest' },
+  }
+
+  assert.equal(
+    _computeSpacerH(
+      scrollEl,
+      listEl,
+      latestUserMsgEl,
+      { kind: 'FOLLOW_BOTTOM' },
+    ),
+    0,
+    'content growth above an already-left latest row must not strand blank tail room',
+  )
+})
+
+test('a latest user row below the viewport keeps its stable pre-approach range', () => {
+  const scrollEl = makeSpacerScrollEl({ clientHeight: 600 })
+  scrollEl.scrollTop = 0
+  const listEl = { offsetHeight: 1400 }
+  const latestUserMsgEl = {
+    offsetTop: 900,
+    offsetHeight: 80,
+    dataset: { cid: 'latest' },
+  }
+
+  assert.equal(
+    _computeSpacerH(
+      scrollEl,
+      listEl,
+      latestUserMsgEl,
+      { kind: 'FOLLOW_BOTTOM' },
+    ),
+    96,
+  )
 })
 
 test('spacer reservation returns zero before there is a user message', () => {

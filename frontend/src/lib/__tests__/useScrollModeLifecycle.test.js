@@ -244,6 +244,83 @@ test('nested controls cannot relatch the transcript while they own the input', (
   }
 })
 
+test('an assistive disclosure click freezes follow before the body expands', () => {
+  const restoreBrowser = installBrowserEnvironment()
+  try {
+    const { hook, listeners, scroll, assistant } = mountTailController(
+      'assistive-disclosure-click',
+    )
+    hook.result.current.followLatest()
+    assert.equal(scroll.dataset.scrollMode, 'FOLLOW_BOTTOM')
+
+    const disclosure = fakeElement({
+      dataset: { scrollAnchorKey: 'tool-header' },
+      offsetHeight: 32,
+      parentElement: assistant,
+      getAttribute(name) { return name === 'aria-expanded' ? 'false' : null },
+      getBoundingClientRect() {
+        return { top: 300, bottom: 332, height: 32 }
+      },
+      closest(selector) {
+        if (selector.startsWith('button.chat__')) return this
+        if (selector === '.chat__msg[data-key]') return assistant
+        return null
+      },
+    })
+    assistant.children = [disclosure]
+    const before = scroll.scrollTop
+
+    listeners.get('click')({ type: 'click', detail: 0, target: disclosure })
+
+    assert.equal(scroll.dataset.scrollMode, 'ANCHOR_AT',
+      'a zero-detail click latches the chosen header like touch and keyboard')
+    assert.equal(scroll.scrollTop, before,
+      'preparing the expansion never moves the viewport')
+    hook.unmount()
+  } finally {
+    restoreBrowser()
+  }
+})
+
+// R1: the reservation is a pure function of tail geometry. Growth wholly above
+// the latest user row moves the row and the list together, so the same room
+// remains on every pass. A one-pass "retire" left the next layout pass to
+// restore the room, which read as blank space appearing below the chat.
+for (const [label, enter, expectedMode] of [
+  ['follow mode', hook => hook.result.current.followLatest(), 'FOLLOW_BOTTOM'],
+  ['a held anchor', hook => hook.result.current.anchorPagination('assistant-tail', 0), 'ANCHOR_AT'],
+]) {
+  test(`growth above the latest user row keeps the same reservation in ${label}`, () => {
+    const observers = []
+    const restoreBrowser = installBrowserEnvironment({ observers })
+    try {
+      const { hook, scroll, list, args } = mountTailController(
+        `disclosure-reservation-${expectedMode}`,
+      )
+      enter(hook)
+      assert.equal(scroll.dataset.scrollMode, expectedMode)
+
+      list.offsetHeight = 300
+      observers[0].callback([{ target: list }])
+      assert.equal(args.spacerRef.current.style.height, '200px')
+
+      // One expansion wholly above the row: row and list grow by the same 100px.
+      // The row started at offsetTop 0, where the pin target clamps at 0; from
+      // 100 the target is 100 - PIN_OFFSET(4), so the exact formula yields 196.
+      scroll.querySelector('.chat__msg--user[data-cid="user-1"]').offsetTop = 100
+      list.offsetHeight = 400
+      observers[0].callback([{ target: list }])
+      assert.equal(args.spacerRef.current.style.height, '196px',
+        'the formula is stable across passes; no pass may retire or restore room')
+      observers[0].callback([{ target: list }])
+      assert.equal(args.spacerRef.current.style.height, '196px')
+      hook.unmount()
+    } finally {
+      restoreBrowser()
+    }
+  })
+}
+
 test('question response resumes the exact follow intent captured at submit', () => {
   const observers = []
   const restoreBrowser = installBrowserEnvironment({ observers })
