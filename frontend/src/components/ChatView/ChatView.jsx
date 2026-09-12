@@ -39,11 +39,12 @@ import {
   savedReadingAnchorKey,
 } from './scroll/readingPositions.js'
 import useVoiceInput from './useVoiceInput.js'
-import useOnlineStatus from '../../hooks/useOnlineStatus.js'
+import useOnlineStatus, { useReachabilityPhase } from '../../hooks/useOnlineStatus.js'
 import useRestartPending from '../../hooks/useRestartPending.js'
 import {
   getOnlineSnapshot,
   getRecoverySnapshot,
+  ReachabilityPhase,
   subscribeRecovery,
 } from '../../lib/connectivityStore.js'
 import {
@@ -427,6 +428,7 @@ export default function ChatView({
   // longer disables send offline — it notes the message is queued and lets the
   // outbox flush it, rather than dropping the tap into a dead stream.
   const online = useOnlineStatus()
+  const reachabilityPhase = useReachabilityPhase()
   const restartPending = useRestartPending()
   // Read the query cache synchronously on mount. If we've viewed this chat
   // before, its complete transcript window builds the hidden restoration DOM
@@ -5711,7 +5713,15 @@ export default function ChatView({
           )}
 
           <PeerTimelineRows notes={peerTimeline.slots.get(displayedMessages.length)} chatId={chatId} onInternalNav={internalNav} />
-          <PeerTimelineLoadError error={peerTimeline.error} onRetry={peerTimeline.retry} />
+          <PeerTimelineLoadError
+            error={peerTimeline.error}
+            recoveryActive={
+              peerTimeline.recoveryActive
+              || restartPending
+              || reachabilityPhase !== ReachabilityPhase.ONLINE
+            }
+            onRetry={peerTimeline.retry}
+          />
 
           {/* Steering is accepted locally before the provider control channel
               acknowledges it. Keep the durable rows out of the actionable
