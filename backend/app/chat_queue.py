@@ -114,7 +114,8 @@ class TerminalDisposition(enum.Enum):
   # next send via the stale-pending drain. No auto-resume: the user resends
   # (or waits for the limit to reset) themselves.
   ACTIVATION_PARKED = "activation_parked"
-  # Exact activation proof owns unfinished A while later B remains queued.
+  # An approved restart owns unfinished A until a later ready boot resumes it;
+  # later owner input B remains queued behind that recovery.
   QUESTION_PARKED = "question_parked"
   # Pending work was deliberately left queued because an unanswered owner
   # question is the transcript's protocol barrier. The exact run is closed as
@@ -394,7 +395,7 @@ async def drain_and_release(
           )
         )
       except PendingAdmissionBlocksPromotion as hold:
-        # Owner input and exact activation proof both park unfinished A.
+        # Owner input and approved restart recovery both park unfinished A.
         # Close only this physical attempt as interrupted, preserve every B,
         # and release the transient claim without scheduling later input.
         # FinishRun preserves an open question marker when one exists.

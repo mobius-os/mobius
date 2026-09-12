@@ -18,6 +18,24 @@ test('composer fast-forward dispatches immediately without an incidental blur', 
   assert.match(steerBlock, /onClick=\{onSteer\}/)
 })
 
+test('ordinary live-turn submission stays a queued Send, never implicit Steer', () => {
+  const primaryAction = inputBar.match(
+    /function PrimaryAction\([\s\S]*?\n}\n\n\n\/\*\* File-upload chips/,
+  )?.[0] || ''
+  const sendBlock = primaryAction.match(
+    /if \(hasInput && !listening\)[\s\S]*?<button[\s\S]*?<\/button>/,
+  )?.[0] || ''
+
+  assert.match(sendBlock, /className="chat__action chat__send"/)
+  assert.match(sendBlock, /onClick=\{onSubmit\}/)
+  assert.doesNotMatch(sendBlock, /onSubmitSteer|onSteer/)
+  assert.doesNotMatch(
+    primaryAction,
+    /sending && hasInput && canSubmitSteer/,
+    'typing during a live turn must not turn the primary Send action into Steer',
+  )
+})
+
 test('Send, Steer, and Stop reuse one continuously visible primary action', () => {
   assert.match(
     inputBar,
