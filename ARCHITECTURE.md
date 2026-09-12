@@ -582,7 +582,7 @@ installing Möbius.
 
 ## Chat scroll + steer contract
 
-**Owner-authoritative contract — v1.25 (2026-08-24).** This section is the
+**Owner-authoritative contract — v1.26 (2026-09-12).** This section is the
 canonical source of truth for how a chat scrolls and steers. When implementation,
 comments, and this contract disagree, the implementation/comments are the bug:
 fix behavior to match this contract. If a real case is unspecified or the desired
@@ -765,6 +765,18 @@ and attaches their rule ids to new diagnostic chats. The Playwright lock-in spec
   newer gesture is rejected; once that gesture settles, the controller adopts the
   current semantic location and performs one fresh geometry reconciliation. Waiting
   for the timing gate to expire never gives stale work its authority back.
+  Historical pagination is the narrow exception for a non-semantic viewport
+  compensation: after an older page arrives it captures the reader's latest
+  nested content anchor, prepends and commits the rows synchronously, then moves
+  `scrollTop` by exactly the inserted geometry before the same frame can paint.
+  That compensation may run while touch or momentum still owns the viewport
+  because it preserves rather than changes the content under the reader; it is
+  rejected if any newer reader-intent generation landed after capture. Network
+  time never owns an anchor, and a stronger semantic mode chosen after the
+  request began (such as Jump to latest or Send) remains authoritative.
+  User-driven history prefetch begins several visible
+  viewports before the loaded boundary and may continue bounded pages while that
+  headroom remains depleted; programmatic top landings still fetch nothing.
   An end-directed input already clamped at the tail may enter `FOLLOW_BOTTOM`
   without advancing that generation: no scroll occurred, so a delayed queued send
   retains the submit-time pin decision that the generation protects.

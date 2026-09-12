@@ -244,6 +244,68 @@ test('nested controls cannot relatch the transcript while they own the input', (
   }
 })
 
+test('a history prepend preserves the latest coordinate while touch still owns scrolling', () => {
+  const restoreBrowser = installBrowserEnvironment()
+  try {
+    const { hook, listeners, scroll, assistant } = mountTailController(
+      'pagination-touch-compensation',
+    )
+    assistant.getBoundingClientRect = () => ({
+      top: assistant.offsetTop - scroll.scrollTop,
+      bottom: assistant.offsetTop - scroll.scrollTop + assistant.offsetHeight,
+      height: assistant.offsetHeight,
+    })
+    listeners.get('touchstart')({ touches: [{ identifier: 1 }] })
+    const request = hook.result.current.capturePaginationRequest()
+    const snapshot = hook.result.current.preparePaginationPrepend(request)
+    const before = scroll.scrollTop
+
+    assistant.offsetTop += 600
+    scroll.scrollHeight += 600
+    assert.equal(hook.result.current.restorePaginationPrepend(snapshot), true)
+    assert.equal(scroll.scrollTop, before + 600,
+      'the same content remains under the finger after rows are inserted above it')
+
+    const stale = snapshot
+    listeners.get('touchend')({ touches: [] })
+    listeners.get('keydown')({ type: 'keydown', key: 'PageUp', target: scroll })
+    scroll.scrollTop -= 100
+    listeners.get('scroll')()
+    const newerReaderTop = scroll.scrollTop
+    assistant.offsetTop += 300
+    scroll.scrollHeight += 300
+    assert.equal(hook.result.current.restorePaginationPrepend(stale), false)
+    assert.equal(scroll.scrollTop, newerReaderTop,
+      'an older response cannot overwrite newer reader intent')
+    hook.unmount()
+  } finally {
+    restoreBrowser()
+  }
+})
+
+test('a newer follow action keeps ownership when an older page response arrives', () => {
+  const restoreBrowser = installBrowserEnvironment()
+  try {
+    const { hook, scroll } = mountTailController('pagination-newer-follow')
+    const request = hook.result.current.capturePaginationRequest()
+
+    hook.result.current.followLatest()
+    assert.equal(scroll.dataset.scrollMode, 'FOLLOW_BOTTOM')
+    const snapshot = hook.result.current.preparePaginationPrepend(request)
+    assert.equal(snapshot.mode.kind, 'FOLLOW_BOTTOM',
+      'the older request cannot demote a newer Jump to latest action')
+
+    scroll.scrollHeight += 600
+    assert.equal(hook.result.current.restorePaginationPrepend(snapshot), true)
+    assert.equal(scroll.scrollTop, scroll.scrollHeight - scroll.clientHeight,
+      'the compensated prepend retains live-tail geometry and semantic follow')
+    assert.equal(scroll.dataset.scrollMode, 'FOLLOW_BOTTOM')
+    hook.unmount()
+  } finally {
+    restoreBrowser()
+  }
+})
+
 test('question response resumes the exact follow intent captured at submit', () => {
   const observers = []
   const restoreBrowser = installBrowserEnvironment({ observers })

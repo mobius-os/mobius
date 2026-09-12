@@ -114,6 +114,7 @@ import {
   modeForQueuedSubmission,
   modeForScrollTransition,
   nestedReaderTargetOwnsInput,
+  paginationViewportCompensationAllowed,
   readerInputActivatesDisclosure,
   readerInputClaimsPhysicalTail,
   readerInputEscapeDirection,
@@ -508,15 +509,22 @@ export default function useScrollMode({
     mode,
     event,
     authorityVersion = readerIntentVersionRef.current,
+    { preserveReaderViewport = false } = {},
   ) => {
     if (!scrollEl || !mode) return false
-    if (!scrollAuthorityAllowsCommit({
-      capturedVersion: authorityVersion,
-      currentVersion: readerIntentVersionRef.current,
-      gestureWindowUntil: gestureWindowUntilRef.current,
-      now: performance.now(),
-      touchContactActive: touchContactCountRef.current > 0,
-    })) return false
+    const allowed = preserveReaderViewport
+      ? paginationViewportCompensationAllowed({
+        capturedVersion: authorityVersion,
+        currentVersion: readerIntentVersionRef.current,
+      })
+      : scrollAuthorityAllowsCommit({
+        capturedVersion: authorityVersion,
+        currentVersion: readerIntentVersionRef.current,
+        gestureWindowUntil: gestureWindowUntilRef.current,
+        now: performance.now(),
+        touchContactActive: touchContactCountRef.current > 0,
+      })
+    if (!allowed) return false
     const before = scrollEl.scrollTop
     applyMode(scrollEl, mode)
     if (Math.abs(scrollEl.scrollTop - before) > 0.5) {
@@ -822,14 +830,72 @@ export default function useScrollMode({
     return mode
   }, [transitionMode])
 
-  const anchorPagination = useCallback((key, offset) => {
-    if (!key) return modeRef.current
+  /** Remember only the reader generation at request start. Geometry captured
+   * here would become stale while network time and momentum continue. */
+  const capturePaginationRequest = useCallback(
+    () => readerIntentVersionRef.current,
+    [],
+  )
+
+  /** Capture the latest reader coordinate only after an older page arrives.
+   * Network time may contain more momentum/touch movement, so a request-start
+   * anchor is already stale by the time the prepend commits. A stronger mode
+   * chosen after the request began (for example Jump to latest or Send) keeps
+   * its semantic ownership while the prepend is compensated. */
+  const preparePaginationPrepend = useCallback((requestReaderIntentVersion) => {
+    const scrollEl = scrollRef.current
+    const currentReaderIntentVersion = readerIntentVersionRef.current
+    const activeMode = modeRef.current
+    const newerModeOwnsLayout = requestReaderIntentVersion !== currentReaderIntentVersion
+      && (activeMode?.kind === 'FOLLOW_BOTTOM'
+        || activeMode?.kind === 'PIN_USER_MSG'
+        || isQuestionSubmissionMode(activeMode))
+    const proposedMode = newerModeOwnsLayout
+      ? activeMode
+      : anchorModeFromScroll(scrollEl)
+    if (!scrollEl || !proposedMode) return null
     readerLocationExplicitRef.current = true
-    return transitionMode(
-      { kind: 'ANCHOR_AT', key, offset },
-      'reader:paginate-anchor',
+    const mode = transitionMode(
+      proposedMode,
+      newerModeOwnsLayout
+        ? 'reader:paginate-preserve-newer-mode'
+        : 'reader:paginate-anchor',
     )
-  }, [transitionMode])
+    return {
+      mode,
+      readerIntentVersion: currentReaderIntentVersion,
+    }
+  }, [scrollRef, transitionMode])
+
+  /** Complete the prepend in the same task as its React commit. This is a
+   * viewport compensation, not a new location: it is therefore the one
+   * scrollTop write allowed under an ongoing gesture/touch, and only while the
+   * captured reader generation is still current. */
+  const restorePaginationPrepend = useCallback((snapshot) => {
+    const scrollEl = scrollRef.current
+    if (!scrollEl
+        || !snapshot?.mode
+        || modeRef.current !== snapshot.mode
+        || !paginationViewportCompensationAllowed({
+          capturedVersion: snapshot.readerIntentVersion,
+          currentVersion: readerIntentVersionRef.current,
+        })) return false
+    if (!writeMode(
+      scrollEl,
+      snapshot.mode,
+      'pagination:prepend-preserve',
+      snapshot.readerIntentVersion,
+      { preserveReaderViewport: true },
+    )) return false
+    lastAppliedModeRef.current = snapshot.mode
+    const anchorEl = _anchorEl(scrollEl, snapshot.mode)
+    lastAnchorTopRef.current = anchorEl
+      ? _scrollTopOf(scrollEl, anchorEl)
+      : null
+    lastPinTopRef.current = null
+    persistMode()
+    return true
+  }, [persistMode, scrollRef, writeMode])
 
   /** One held search result reveal; unlike a reader gesture it is never
    * persisted over the owner's saved location. */
@@ -2365,7 +2431,9 @@ export default function useScrollMode({
     pinning: pinModeActive,
     following,
     followLatest,
-    anchorPagination,
+    capturePaginationRequest,
+    preparePaginationPrepend,
+    restorePaginationPrepend,
     captureSendIntent,
     commitSendIntent,
     cancelQuestionSubmission,
