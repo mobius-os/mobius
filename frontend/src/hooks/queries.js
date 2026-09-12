@@ -335,8 +335,14 @@ async function fetchModelRegistry() {
   return data?.providers || {}
 }
 
-function useModelRegistryQuery({ enabled = true } = {}) {
-  return useQuery({
+// These are three cheap, read-only attempts after the initial request. The
+// picker otherwise turns one brief PWA/edge wobble into a sticky error that
+// survives until the owner manually taps Retry. Keep the bound local to model
+// reads rather than making every shell query more aggressive.
+const MODEL_READ_RETRY_COUNT = 3
+
+function modelRegistryQueryOptions({ enabled = true } = {}) {
+  return {
     queryKey: modelRegistryKey,
     queryFn: fetchModelRegistry,
     enabled,
@@ -345,21 +351,39 @@ function useModelRegistryQuery({ enabled = true } = {}) {
     // through explicit invalidation (the manage-models modal's
     // refresh button) — not on every popover open.
     staleTime: 5 * 60_000,
-  })
+    retry: MODEL_READ_RETRY_COUNT,
+  }
+}
+
+function useModelRegistryQuery(options) {
+  return useQuery(modelRegistryQueryOptions(options))
 }
 
 async function fetchModelPrefs() {
-  const res = await api.owner.modelPrefs.get()
-  const data = await jsonOrThrow(res, 'model prefs fetch failed:')
-  return { hidden_ids: data?.hidden_ids || [] }
+  // Resolve to an empty preference set only after spending the same bounded
+  // retry budget as registry reads. React Query cannot retry a resolved fallback.
+  for (let attempt = 0; attempt <= MODEL_READ_RETRY_COUNT; attempt += 1) {
+    try {
+      const res = await api.owner.modelPrefs.get()
+      const data = await jsonOrThrow(res, 'model prefs fetch failed:')
+      return { hidden_ids: data?.hidden_ids || [] }
+    } catch {
+      if (attempt === MODEL_READ_RETRY_COUNT) return { hidden_ids: [] }
+    }
+  }
 }
 
-function useModelPrefsQuery({ enabled = true } = {}) {
-  return useQuery({
+function modelPrefsQueryOptions({ enabled = true } = {}) {
+  return {
     queryKey: modelPrefsKey,
     queryFn: fetchModelPrefs,
     enabled,
-  })
+    retry: false,
+  }
+}
+
+function useModelPrefsQuery(options) {
+  return useQuery(modelPrefsQueryOptions(options))
 }
 
 async function fetchWalkthrough() {
@@ -639,12 +663,14 @@ export const modelQueries = {
   registry: {
     key: modelRegistryKey,
     fetch: fetchModelRegistry,
+    options: modelRegistryQueryOptions,
     useQuery: useModelRegistryQuery,
     invalidate: (queryClient) => queryClient.invalidateQueries({ queryKey: modelRegistryKey }),
   },
   prefs: {
     key: modelPrefsKey,
     fetch: fetchModelPrefs,
+    options: modelPrefsQueryOptions,
     useQuery: useModelPrefsQuery,
     invalidate: (queryClient) => queryClient.invalidateQueries({ queryKey: modelPrefsKey }),
   },

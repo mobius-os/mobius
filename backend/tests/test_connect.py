@@ -1732,6 +1732,40 @@ def test_connect_runner_rejects_urls_that_can_leak_or_redirect_credentials(url):
     connect_runner._validated_base_url(url)
 
 
+def test_connect_runner_identifies_every_urllib_request(monkeypatch):
+  opened = []
+
+  class Opener:
+    def open(self, request, timeout):
+      opened.append((request, timeout))
+      return object()
+
+  monkeypatch.setattr(
+    connect_runner.urllib.request,
+    "build_opener",
+    lambda *_handlers: Opener(),
+  )
+
+  connect_runner._open_url(
+    "https://mobius.example/api/connect/runner",
+    timeout=30,
+  )
+  explicit = connect_runner.urllib.request.Request(
+    "https://mobius.example/api/connect/pair",
+    headers={"User-Agent": "connect-test/1"},
+  )
+  connect_runner._open_url(explicit, timeout=15)
+
+  generated, generated_timeout = opened[0]
+  assert isinstance(generated, connect_runner.urllib.request.Request)
+  assert generated.get_header("User-agent") == (
+    "mobius-connect/4 (+https://github.com/mobius-os/mobius)"
+  )
+  assert generated_timeout == 30
+  assert opened[1][0].get_header("User-agent") == "connect-test/1"
+  assert opened[1][1] == 15
+
+
 def test_connect_runner_never_redirects_an_authenticated_request():
   request = connect_runner.urllib.request.Request(
     "https://mobius.example/api/connect/result",
