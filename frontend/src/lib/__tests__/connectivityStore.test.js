@@ -189,11 +189,91 @@ test('hidden tabs pause recovery and visibility requests one coalesced check', a
   h.documentTarget.visibilityState = 'hidden'
   h.documentTarget.emit('visibilitychange')
   assert.equal(h.timers.countDelay(RECOVERY_RETRY_MIN_MS), 0)
-  assert.equal(h.timers.countDelay(FAILURE_GRACE_MS), 1, 'failure history is not reset')
+  assert.equal(h.timers.countDelay(FAILURE_GRACE_MS), 0, 'background time cannot confirm an outage')
   h.documentTarget.visibilityState = 'visible'
   h.documentTarget.emit('visibilitychange')
   await flush()
   assert.equal(h.timers.countDelay(FAILURE_GRACE_MS), 1)
+  stop()
+})
+
+test('hidden verification defers without publishing a false Checking state', async () => {
+  let probes = 0
+  const h = harness(async () => { probes += 1; return { status: 204 } })
+  const stop = h.store.subscribe(() => {})
+  await flush()
+  assert.equal(probes, 1)
+
+  h.documentTarget.visibilityState = 'hidden'
+  h.documentTarget.emit('visibilitychange')
+  assert.equal(await h.store.verify(), true)
+  assert.equal(h.store.getPhaseSnapshot(), ReachabilityPhase.ONLINE)
+  assert.equal(probes, 1, 'the hidden transport is not probed')
+
+  h.documentTarget.visibilityState = 'visible'
+  h.documentTarget.emit('visibilitychange')
+  await flush()
+  assert.equal(probes, 2, 'foreground return owns one fresh probe')
+  assert.equal(h.store.getPhaseSnapshot(), ReachabilityPhase.ONLINE)
+  stop()
+})
+
+test('healthy verification keeps the last reachable verdict while its probe settles', async () => {
+  let resolveProbe
+  let probes = 0
+  const h = harness(() => {
+    probes += 1
+    if (probes === 1) return Promise.resolve({ status: 204 })
+    return new Promise(resolve => { resolveProbe = resolve })
+  })
+  let notifications = 0
+  const stop = h.store.subscribe(() => { notifications += 1 })
+  await flush()
+
+  const verification = h.store.verify()
+  assert.equal(probes, 2)
+  assert.equal(h.store.getPhaseSnapshot(), ReachabilityPhase.ONLINE,
+    'a transport reconnect is not a server outage verdict')
+  assert.equal(notifications, 0, 'the shell status dot must not flash before verification')
+
+  resolveProbe({ status: 204 })
+  assert.equal(await verification, true)
+  assert.equal(h.store.getPhaseSnapshot(), ReachabilityPhase.ONLINE)
+  assert.equal(notifications, 0)
+  stop()
+})
+
+test('foreground recovery does not wait for or accept a suspended probe', async () => {
+  let probes = 0
+  let rejectSuspended
+  const h = harness(() => {
+    probes += 1
+    if (probes === 2) {
+      return new Promise((_, reject) => { rejectSuspended = reject })
+    }
+    return Promise.resolve({ status: 204 })
+  })
+  const stop = h.store.subscribe(() => {})
+  await flush()
+
+  const suspended = h.store.verify()
+  assert.equal(h.store.getPhaseSnapshot(), ReachabilityPhase.ONLINE)
+  assert.equal(probes, 2)
+
+  h.documentTarget.visibilityState = 'hidden'
+  h.documentTarget.emit('visibilitychange')
+  h.documentTarget.visibilityState = 'visible'
+  h.documentTarget.emit('visibilitychange')
+  await flush()
+
+  assert.equal(probes, 3)
+  assert.equal(h.store.getPhaseSnapshot(), ReachabilityPhase.ONLINE)
+
+  rejectSuspended(new TypeError('suspended transport failed late'))
+  await suspended
+  await flush()
+  assert.equal(h.store.getPhaseSnapshot(), ReachabilityPhase.ONLINE,
+    'the detached failure cannot overwrite foreground truth')
   stop()
 })
 
