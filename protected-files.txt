@@ -12,3 +12,4 @@
 /app/scripts/entrypoint.sh
 /app/scripts/agent_sudo.sh
 /app/runtime/restart_ledger.py
+/app/runtime/served_runtime_launcher.py

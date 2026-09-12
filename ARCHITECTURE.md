@@ -128,6 +128,13 @@ root-owned/non-writable, and are never imported from the mutable
 `/data/platform` clone. The image has one boot path and contains no recovery
 daemon, alternate boot mode, control-plane token, or recovery worker.
 
+Privileged *modules* are served source, not frozen files. The frozen
+`/app/runtime/served_runtime_launcher.py` starts `identity_broker.py` from
+`/data/platform/backend/runtime` and keeps the image copy as a floor, so an
+edit to the broker is an ordinary platform change that the next restart
+activates. `runtime/restart_ledger.py` and any newly added runtime module stay
+image-owned.
+
 ### Where each surface stands
 
 | Surface | Repo | On the model | Engine |

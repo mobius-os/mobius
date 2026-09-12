@@ -26,6 +26,25 @@ PREVIOUS_RELEASE_SCHEMA = (
 )
 
 
+def test_autopilot_block_upgrade_preserves_legacy_pause_intent(tmp_path):
+  eng = create_engine(f"sqlite:///{tmp_path / 'autopilot-upgrade.db'}")
+  models.Base.metadata.create_all(eng)
+  with eng.begin() as conn:
+    conn.execute(text("ALTER TABLE contribution_autopilot DROP COLUMN blocked_at"))
+    conn.execute(text(
+      "INSERT INTO contribution_autopilot "
+      "(app_id, record_id, enabled, state, rounds_used, max_rounds, consecutive_failures) "
+      "VALUES (1, 'legacy-pause', 0, 'idle', 2, 5, 0)"
+    ))
+  migrations._add_autopilot_blocked_at(eng)
+  migrations._add_autopilot_blocked_at(eng)
+  with Session(eng) as session:
+    row = session.get(models.ContributionAutopilot, (1, "legacy-pause"))
+    assert row.enabled is False and row.state == "idle"
+    assert row.blocked_at is None
+    assert row.rounds_used == 2
+
+
 def _migration_versions_before(target: str) -> list[str]:
   """Select historical setup by identity, independent of future appends."""
   versions = [version for version, _migration in migrations._SCHEMA_MIGRATIONS]
@@ -1511,6 +1530,7 @@ def test_run_migrations_records_an_inspectable_append_only_history(tmp_path):
     "0047_chat_activity_positions",
     "0048_delegation_result_incorporation",
     "0048_typed_platform_activation_waits",
+    "0049_autopilot_blocked_at",
   ]
   assert second == first
 

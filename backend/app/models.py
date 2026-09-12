@@ -1922,6 +1922,51 @@ class ThinkingTrace(Base):
   created_at = Column(DateTime, default=lambda: datetime.now(UTC))
 
 
+class ReviewerAutomationGrant(Base):
+  """Owner-approved bounds for one Reviewer's automatic public comments.
+
+  The mini-app settings are agent-writable app data, so they cannot authorize
+  a GitHub write. This platform-owned row is the durable grant and the shared
+  counter state used to serialize daily and per-PR limits.
+
+  Normal startup's ``create_all`` adds these new tables on both fresh and
+  existing installations. No existing table needs an ``ALTER`` migration.
+  """
+
+  __tablename__ = "reviewer_automation_grants"
+
+  app_id = Column(Integer, ForeignKey("apps.id"), primary_key=True)
+  enabled = Column(Boolean, nullable=False, default=True)
+  repositories_json = Column(JSON, nullable=False, default=list)
+  guide_hash = Column(String(64), nullable=False)
+  max_rounds_per_pr = Column(Integer, nullable=False, default=5)
+  daily_post_ceiling = Column(Integer, nullable=False, default=12)
+  daily_window = Column(String(10), nullable=True, default=None)
+  daily_posts_used = Column(Integer, nullable=False, default=0)
+  rounds_json = Column(JSON, nullable=False, default=dict)
+  granted_at = Column(DateTime, nullable=True, default=None)
+  updated_at = Column(DateTime, nullable=True, default=None)
+
+
+class ReviewerAutomationPost(Base):
+  """Exactly-once public-comment claim and outcome for one review identity."""
+
+  __tablename__ = "reviewer_automation_posts"
+
+  app_id = Column(Integer, ForeignKey("apps.id"), primary_key=True)
+  identity = Column(String(64), primary_key=True)
+  repository = Column(String(256), nullable=False)
+  pr_number = Column(Integer, nullable=False)
+  head_sha = Column(String(64), nullable=False)
+  base_sha = Column(String(64), nullable=False)
+  guide_hash = Column(String(64), nullable=False)
+  status = Column(String(16), nullable=False)
+  github_url = Column(String(1024), nullable=True, default=None)
+  error = Column(String(500), nullable=True, default=None)
+  claimed_at = Column(DateTime, nullable=True, default=None)
+  posted_at = Column(DateTime, nullable=True, default=None)
+
+
 class ContributionAutopilot(Base):
   """Platform-owned authorization + claim state for one contribution's autopilot.
 
@@ -1960,8 +2005,11 @@ class ContributionAutopilot(Base):
   target_head_repository = Column(String(256), nullable=True, default=None)
   target_branch = Column(String(256), nullable=True, default=None)
   target_repo_path = Column(String(1024), nullable=True, default=None)
-  # "idle" between rounds; "responding" while a round holds the claim.
+  # "idle" between rounds; "responding" while a round holds the claim;
+  # "blocked" while an escalation awaits a reviewed repair. A blocker does
+  # not revoke owner consent; only an explicit Pause disables that grant.
   state = Column(String(16), nullable=False, default="idle")
+  blocked_at = Column(DateTime, nullable=True, default=None)
   # The live claim. run_id is a fresh uuid per round and is the round's whole
   # identity: /update, /reply, /complete, /escalate require the caller to
   # present it, so a zombie agent from a reclaimed round holds a dead id.

@@ -336,6 +336,50 @@ test('terminal stream finish promotes before clearing streaming state', () => {
   assert.equal(messages.at(-1).content, 'final answer')
 })
 
+test('a hidden-pane finish routes stale local activity through runtime settlement', () => {
+  const start = chatViewSource.indexOf('const reconcileExternalActivity = useCallback')
+  const end = chatViewSource.indexOf('\n  const ensureRuntimeStreamConnected', start)
+  const reconciliation = chatViewSource.slice(start, end)
+  const activeBranchStart = reconciliation.indexOf('if (locallyActive)')
+  const activeBranchEnd = reconciliation.indexOf('\n        }', activeBranchStart)
+  const activeBranch = reconciliation.slice(activeBranchStart, activeBranchEnd)
+
+  assert.match(activeBranch, /await reconcileRuntimeState\(\)/,
+    'a retained local stream must reach the authoritative idle recovery path')
+  assert.doesNotMatch(activeBranch, /fetchMessages\(/,
+    'the non-authoritative transcript read intentionally preserves local activity')
+  // Runtime recovery now lives in the bounded request owner; the public
+  // reconcile callback only coalesces callers onto that same promise.
+  const runtimeStart = chatViewSource.indexOf('const refreshRuntimeState = useCallback')
+  const recovery = chatViewSource.indexOf('if (shouldRecoverSettledRuntime({', runtimeStart)
+  const observedRunning = chatViewSource.indexOf(
+    'runtimeWasObservedRunning: serverRunningObservedRef.current', recovery,
+  )
+  const refresh = chatViewSource.indexOf('const settled = await fetchMessages({', recovery)
+  const authoritative = chatViewSource.indexOf('authoritative: true', refresh)
+  const retire = chatViewSource.indexOf('retireSettledStreamRef.current?.()', authoritative)
+  const runtimeEnd = chatViewSource.indexOf('\n  const handleCompactionStored', runtimeStart)
+  assert.ok(
+    runtimeStart >= 0
+      && recovery > runtimeStart
+      && observedRunning > recovery
+      && observedRunning < refresh
+      && refresh > recovery
+      && authoritative > refresh
+      && retire > authoritative
+      && retire < runtimeEnd,
+    'idle runtime truth must refresh the final row before retiring stale stream state',
+  )
+  const retirement = chatViewSource.indexOf('retireSettledStreamRef.current = () => {')
+  const clearObservedRunning = chatViewSource.indexOf(
+    'serverRunningObservedRef.current = false', retirement,
+  )
+  assert.ok(
+    retirement >= 0 && clearObservedRunning > retirement,
+    'the observed-running latch must survive idle detail reads until stream retirement',
+  )
+})
+
 // ---------------------------------------------------------------------------
 // Fix 2: doSendSilent re-entrancy guard (sendSilentInFlightRef)
 // ---------------------------------------------------------------------------
