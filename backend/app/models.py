@@ -594,8 +594,9 @@ class ChatWait(Base):
   interval_secs = Column(Integer, nullable=False, default=300)
   # Command/timer waits never rot silently: on deadline the chat is woken with
   # `deadline_expired` so the agent decides what to do next. Platform
-  # activation rows share this required column but deliberately do not expire;
-  # their owner card remains until answer, cancellation, or a later ready boot.
+  # activation rows share this required legacy storage column but deliberately
+  # do not expose or enforce it; their owner card remains until answer,
+  # cancellation, or a later ready boot.
   deadline_at = Column(DateTime, nullable=False)
   # armed -> met | expired | failed | cancelled. `failed` means the check
   # itself broke (distinct from a valid silent exit-1 "not yet"). Terminal

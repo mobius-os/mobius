@@ -32,3 +32,17 @@ export async function chatHttpError(response) {
   } catch {}
   return new ChatHttpError(response.status, { code, detail })
 }
+
+export function isQuestionStateChangedError(error) {
+  if (Number(error?.status) === 410) return true
+  if (error?.code === 'question_state_changed') return true
+  // Rolling-update compatibility: the older server used exactly these two
+  // generic 409 messages for settled cards. Keep current and future validation
+  // failures retryable rather than inferring lifecycle from a shared prefix.
+  return Number(error?.status) === 409
+    && typeof error?.detail === 'string'
+    && (
+      error.detail === 'This Restart card is stale or no longer accepting a response.'
+      || error.detail === 'This Restart card is stale or no longer authorized.'
+    )
+}

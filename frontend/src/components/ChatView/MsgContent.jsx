@@ -247,6 +247,13 @@ function MsgContentInner({
           block.entries, hasRestartCard,
         )
         if (visibleEntries.length === 0) return null
+        const omittedToolCount = (
+          block.entries.filter(({ item }) => item?.type === 'tool').length
+          - visibleEntries.filter(({ item }) => item?.type === 'tool').length
+        )
+        const summaryToolCount = Number.isFinite(block.tool_count)
+          ? Math.max(0, block.tool_count - omittedToolCount)
+          : visibleEntries.filter(({ item }) => item?.type === 'tool').length
         return (
           <div
             key={block.activity_id || `activity-${i}`}
@@ -262,7 +269,10 @@ function MsgContentInner({
                 start: block.start,
                 end: block.end,
               }}
-              summaryToolCount={visibleEntries.filter(({ item }) => item?.type === 'tool').length}
+              // Current projections already omit redundant card tools. For an
+              // older cached projection, subtract only the entries repaired
+              // locally while preserving counts for repeated compacted tools.
+              summaryToolCount={summaryToolCount}
               onInternalNav={onInternalNav}
             />
           </div>
@@ -361,6 +371,7 @@ function MsgContentInner({
               questionId={block.question_id}
               answeredMap={answers}
               platformAction={block.platform_action}
+              submittedOptions={block.selected_options}
               onAnswer={answerable ? onQuestionAnswer : undefined}
               onPrepareAnswer={answerable ? onQuestionSubmitIntent : undefined}
               onCancelAnswer={answerable ? onQuestionSubmitCancel : undefined}

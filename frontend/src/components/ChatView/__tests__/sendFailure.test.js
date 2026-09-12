@@ -12,7 +12,29 @@ import {
   ChatHttpError,
   ChatTransportError,
   chatHttpError,
+  isQuestionStateChangedError,
 } from '../sendErrors.js'
+
+test('settled question errors trigger authoritative card reconciliation', () => {
+  assert.equal(isQuestionStateChangedError({ status: 410 }), true)
+  assert.equal(isQuestionStateChangedError({ code: 'question_state_changed' }), true)
+  assert.equal(isQuestionStateChangedError({
+    status: 409,
+    detail: 'This Restart card is stale or no longer authorized.',
+  }), true)
+  assert.equal(isQuestionStateChangedError({
+    status: 409,
+    detail: 'This Restart card is stale or no longer accepting a response.',
+  }), true)
+  assert.equal(isQuestionStateChangedError({
+    status: 409,
+    detail: 'This Restart card is stale or no longer ready; please retry.',
+  }), false)
+  assert.equal(isQuestionStateChangedError({
+    status: 409,
+    detail: "Use one of the Restart card's current buttons.",
+  }), false)
+})
 
 test('send failures distinguish connection, timeout, service, and generic errors', () => {
   assert.match(

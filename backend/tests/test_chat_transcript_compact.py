@@ -463,6 +463,136 @@ def test_compact_route_defers_activity_detail_until_expansion(client, auth):
   assert entries[1]["item"]["output"] == "hello"
 
 
+def test_restart_card_owns_its_tool_in_compact_and_expanded_activity(client, auth):
+  messages = [{
+    "role": "assistant",
+    "blocks": [
+      {"type": "tool", "tool": "Bash", "tool_use_id": "bash-1"},
+      {"type": "tool", "tool": "Bash", "tool_use_id": "bash-2"},
+      {"type": "tool", "tool": "Bash", "tool_use_id": "bash-3"},
+      {
+        "type": "tool", "tool": "mcp__mobius_control__request_restart",
+        "tool_use_id": "restart-tool",
+      },
+      {
+        "type": "question", "question_id": "restart-card",
+        "questions": [{"id": "restart", "question": "Restart?", "options": []}],
+        "platform_action": {"type": "restart", "version": 2},
+      },
+    ],
+  }]
+  created = client.post(
+    "/api/chats", headers=auth,
+    json={"title": "Compact Restart ownership", "messages": messages},
+  )
+  chat_id = created.json()["id"]
+
+  compact = client.get(
+    f"/api/chats/{chat_id}?limit=20&compact=1", headers=auth,
+  )
+  assert compact.status_code == 200
+  activity = compact.json()["messages"][0]["blocks"][0]
+  assert activity["type"] == "activity"
+  assert activity["tool_count"] == 3
+  assert [entry["item"]["tool"] for entry in activity["entries"]] == [
+    "Bash", "Bash",
+  ]
+
+  detail = client.get(
+    f"/api/chats/{chat_id}/activity-detail"
+    "?message_index=0&start=0&end=4",
+    headers=auth,
+  )
+  assert detail.status_code == 200
+  assert [entry["item"]["tool"] for entry in detail.json()["entries"]] == [
+    "Bash", "Bash", "Bash",
+  ]
+
+
+def test_restart_card_keeps_an_earlier_failed_request_visible(client, auth):
+  messages = [{
+    "role": "assistant",
+    "blocks": [
+      {
+        "type": "tool", "tool": "mcp__mobius_control__request_restart",
+        "tool_use_id": "failed-restart", "status": "done",
+        "output": "Working tree is dirty", "output_exit_code": 1,
+      },
+      {
+        "type": "tool", "tool": "mcp__mobius_control__request_restart",
+        "tool_use_id": "successful-restart", "status": "done",
+      },
+      {
+        "type": "question", "question_id": "restart-card",
+        "questions": [{"id": "restart", "question": "Restart?", "options": []}],
+        "platform_action": {"type": "restart", "version": 2},
+      },
+    ],
+  }]
+  created = client.post(
+    "/api/chats", headers=auth,
+    json={"title": "Failed Restart evidence", "messages": messages},
+  )
+  chat_id = created.json()["id"]
+
+  compact = client.get(
+    f"/api/chats/{chat_id}?limit=20&compact=1", headers=auth,
+  ).json()["messages"][0]["blocks"]
+  assert compact[0]["tool"] == "mcp__mobius_control__request_restart"
+  assert compact[0]["tool_use_id"] == "failed-restart"
+
+  detail = client.get(
+    f"/api/chats/{chat_id}/activity-detail"
+    "?message_index=0&start=0&end=2",
+    headers=auth,
+  )
+  assert detail.status_code == 200
+  assert [entry["item"]["tool_use_id"] for entry in detail.json()["entries"]] == [
+    "failed-restart",
+  ]
+
+
+def test_tool_pairing_never_parses_unrelated_tool_output(monkeypatch):
+  from app import chat_transcript
+
+  def unexpected_parse(_output):
+    raise AssertionError("unrelated tool output must not be parsed")
+
+  monkeypatch.setattr(chat_transcript, "tool_output_exit_code", unexpected_parse)
+  assert chat_transcript.redundant_interaction_tool_indexes([
+    {"type": "tool", "tool": "Bash", "output": "large output"},
+  ]) == set()
+
+
+def test_restart_card_never_owns_a_legacy_parse_only_failure(client, auth):
+  messages = [{
+    "role": "assistant",
+    "blocks": [
+      {
+        "type": "tool", "tool": "mcp__mobius_control__request_restart",
+        "tool_use_id": "failed-restart", "status": "done",
+        "output": '{"result":"{\\"exit_code\\":1,\\"stderr\\":\\"failed\\"}"}',
+      },
+      {
+        "type": "question", "question_id": "restart-card",
+        "questions": [{"id": "restart", "question": "Restart?", "options": []}],
+        "platform_action": {"type": "restart", "version": 2},
+      },
+    ],
+  }]
+  created = client.post(
+    "/api/chats", headers=auth,
+    json={"title": "Only failed Restart", "messages": messages},
+  )
+  chat_id = created.json()["id"]
+
+  compact = client.get(
+    f"/api/chats/{chat_id}?limit=20&compact=1", headers=auth,
+  ).json()["messages"][0]["blocks"]
+  assert compact[0]["type"] == "tool"
+  assert compact[0]["tool_use_id"] == "failed-restart"
+
+
 def test_compact_route_defers_reference_metadata_until_expansion(client, auth):
   first = {
     "title": "First title",

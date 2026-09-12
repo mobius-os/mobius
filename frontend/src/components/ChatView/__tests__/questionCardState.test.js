@@ -30,18 +30,18 @@ test('unanswered question cards do not have a stale gray state', () => {
     'unanswered cards should not tell the user the question expired')
   assert.match(component, /\{!completedAction && \(answered \|\| !disabled\) && \([\s\S]*<button[\s\S]*className="qcard__submit"/,
     'submit button should remain in place after an answer is submitted')
-  assert.match(component, /submitting \? 'Submitting…' : \(answered \? 'Submitted' : restartAction \? 'Continue' : 'Submit'\)/,
-    'the retained submit button should explain pending and answered states')
+  assert.match(component, /submitting \? 'Submitting…' : \(answered \? 'Submitted' : writtenRestartAction \? 'Continue' : 'Submit'\)/,
+    'the retained submit button should explain pending and answered states without rewriting legacy Restart cards')
   assert.match(component, /\{!completedAction && \(!disabled \|\| answered\) && \(\s*<div className="qcard__hint"/,
     'selection hints should stay in place after the answer is submitted')
   assert.doesNotMatch(component, /qcard__opt--other/,
     'a custom answer should be a direct writing surface, not an Other option')
-  assert.match(component, /<CustomAnswerArea[\s\S]*?answered=\{answered\}[\s\S]*?value=\{answered[\s\S]*?unmatchedAnswers\.join\(', '\)/,
-    'the custom answer should stay mounted and retain submitted custom text')
-  assert.match(component, /placeholder=\{restartAction \? 'Or tell me what you’d like to do instead…'/,
-    'a Restart card should replace Not now with a written response')
-  assert.match(component, /q\.options\?\.filter\(opt => opt\.id === platformAction\.restart_option_id\)/,
-    'a Restart card should show only its exact Restart now option')
+  assert.match(component, /const writtenAnswer = writtenRestartResponse[\s\S]*?unmatchedAnswers\.join\(', '\)[\s\S]*?<CustomAnswerArea[\s\S]*?answered=\{answered\}[\s\S]*?value=\{answered[\s\S]*?writtenAnswer/,
+    'the custom answer should stay mounted and retain submitted custom text, including a written Restart response that matches an option label')
+  assert.match(component, /writtenRestartAction[\s\S]*\? 'Or tell me what you’d like to do instead…'/,
+    'a version-2 Restart card should replace Not now with a written response')
+  assert.match(component, /writtenRestartAction[\s\S]*q\.options\?\.filter\(opt => opt\.id === platformAction\.restart_option_id\)/,
+    'only a version-2 Restart card should show just its exact Restart now option')
   assert.match(component, /rows=\{1\}/,
     'the custom answer should begin as one compact writing line')
   assert.match(component, /data-chat-inline-editor="question-answer"/,
@@ -110,6 +110,20 @@ test('a failed question submission does not append a transcript row', () => {
     'a transient answer failure must stay on the card, not supersede it',
   )
   assert.match(silentSubmit, /QuestionCard owns this transient failure notice/)
+  assert.match(
+    silentSubmit,
+    /isQuestionStateChangedError\(err\)[\s\S]*await fetchMessages\(\{ force: true, authoritative: true \}\)/,
+    'a stale cached card should replace itself with authoritative settled state',
+  )
+  const reconciliation = silentSubmit.slice(
+    silentSubmit.indexOf('if (isQuestionStateChangedError(err))'),
+    silentSubmit.indexOf('// QuestionCard owns this transient failure notice'),
+  )
+  assert.doesNotMatch(
+    reconciliation,
+    /setLiveQuestionId\(null\)/,
+    'a failed authoritative refresh must leave the stale card answerable for retry',
+  )
 })
 
 test('question submission paints a resumed turn only after the POST commits', () => {

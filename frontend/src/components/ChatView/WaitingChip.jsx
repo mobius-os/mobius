@@ -85,11 +85,11 @@ export function WaitCard({ wait, expanded, onToggle, onCancel }) {
         { label: 'Condition owner', value: presentation.owner },
         { label: 'Checker', value: presentation.checker },
         { label: 'Activity', value: presentation.activity },
-        { label: 'If it takes too long', value: presentation.timeout },
+        { label: presentation.timeoutLabel, value: presentation.timeout },
         { label: 'Agent usage', value: presentation.usage },
       ]}
     >
-      <button
+      {wait.kind !== 'platform_activation' && <button
         type="button"
         className="chat__wait-cancel"
         onPointerDown={(event) => event.preventDefault()}
@@ -97,7 +97,7 @@ export function WaitCard({ wait, expanded, onToggle, onCancel }) {
       >
         <X width={14} height={14} aria-hidden="true" />
         Stop waiting
-      </button>
+      </button>}
     </HandoffCard>
   )
 }

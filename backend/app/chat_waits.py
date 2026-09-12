@@ -282,6 +282,9 @@ def _cancel_active_check(wait_id: str) -> None:
 
 
 def serialize_wait(row: models.ChatWait) -> dict:
+  # Platform activation has no product deadline. Its non-null storage value is
+  # retained only for compatibility with the original shared ChatWait schema.
+  presented_deadline = None if row.kind == "platform_activation" else row.deadline_at
   return {
     "id": row.id,
     "chat_id": row.chat_id,
@@ -292,7 +295,9 @@ def serialize_wait(row: models.ChatWait) -> dict:
     "status": row.status,
     "interval_secs": row.interval_secs,
     "due_at": row.due_at.isoformat() if row.due_at else None,
-    "deadline_at": row.deadline_at.isoformat() if row.deadline_at else None,
+    "deadline_at": (
+      presented_deadline.isoformat() if presented_deadline else None
+    ),
     "next_check_at": (
       row.next_check_at.isoformat() if row.next_check_at else None
     ),
@@ -322,7 +327,10 @@ def build_active_waits_context(db: Session, chat_id: str) -> str:
     "condition_owner": row.condition_owner,
     "kind": row.kind,
     "due_at": row.due_at.isoformat() if row.due_at else None,
-    "deadline_at": row.deadline_at.isoformat() if row.deadline_at else None,
+    "deadline_at": (
+      None if row.kind == "platform_activation"
+      else row.deadline_at.isoformat() if row.deadline_at else None
+    ),
   } for row in rows]
   body = json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
   # Untrusted lifecycle labels cannot terminate the platform-owned carrier.

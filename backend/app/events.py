@@ -29,6 +29,9 @@ from app.tool_sources import (
 # only distinguishes success from failure, and an unknown non-failure reads as
 # done rather than as the failed (red) dot.
 _TERMINAL_SUBAGENT_STATUSES = frozenset({"done", "failed", "killed", "stopped"})
+_TOOL_OUTPUT_COMMON_KEYS = frozenset({
+  "result", "content", "text", "summary", "output", "data",
+})
 
 
 def _normalize_subagent_status(status: str | None) -> str:
@@ -366,8 +369,40 @@ def _tool_output_exit_code(content: str, parsed):
   return int(m.group(1)) if m else None
 
 
+def _nested_tool_output_exit_code(content: str, parsed):
+  """Read direct or common-wrapped output from one already-parsed value."""
+  direct = _tool_output_exit_code(content, parsed)
+  if direct is not None:
+    return direct
+
+  # Some providers wrap the real tool payload in one common single-key
+  # envelope, sometimes as another JSON string. Match the bounded frontend
+  # compatibility path so an old failed request cannot disappear only after
+  # server-side projection.
+  value = parsed
+  for _depth in range(4):
+    if not isinstance(value, dict) or len(value) != 1:
+      return None
+    key = next(iter(value))
+    if key not in _TOOL_OUTPUT_COMMON_KEYS:
+      return None
+    value = value[key]
+    if isinstance(value, str):
+      stripped = value.lstrip()
+      if stripped[:1] not in ("{", "["):
+        return None
+      try:
+        value = json.loads(value)
+      except (ValueError, TypeError):
+        return None
+    nested = _tool_output_exit_code("", value)
+    if nested is not None:
+      return nested
+  return None
+
+
 def tool_output_exit_code(content: object):
-  """Return a typed command exit code from any sized tool output."""
+  """Return a typed command exit code from any supported tool envelope."""
   if not isinstance(content, str):
     return None
   parsed = None
@@ -377,7 +412,7 @@ def tool_output_exit_code(content: object):
       parsed = json.loads(content)
     except (ValueError, TypeError):
       parsed = None
-  return _tool_output_exit_code(content, parsed)
+  return _nested_tool_output_exit_code(content, parsed)
 
 
 def excerpt_tool_output(content: str):
@@ -396,7 +431,7 @@ def excerpt_tool_output(content: str):
       parsed = json.loads(content)
     except (ValueError, TypeError):
       parsed = None
-  exit_code = _tool_output_exit_code(content, parsed)
+  exit_code = _nested_tool_output_exit_code(content, parsed)
   if parsed is not None:
     excerpt = json.dumps(_truncate_json_strings(parsed), ensure_ascii=True)
     # Boundedness ceiling: a JSON value whose size is in its STRUCTURE (many
