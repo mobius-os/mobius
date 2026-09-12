@@ -283,6 +283,34 @@ def _usage_event(usage: dict[str, Any]) -> dict:
   }
 
 
+# Tools that are pure harness mechanics: they carry no owner-facing meaning, so
+# they never become visible activity. `TaskOutput` is the agent waiting on work
+# it already started. Möbius's own ultracode reminder tells the agent to wait in
+# ten-minute blocks and re-issue the wait when one elapses, so a long turn used
+# to render as a wall of "TaskOutput … retrieval_status: timeout" rows — a
+# countdown expiring, read by the owner as the product timing out and failing.
+# The work itself is reported as prose; the waiting is not something to show.
+#
+# Suppression is symmetric by `tool_use_id`: dropping the start while still
+# publishing the end would leave the frontend reducer holding a `tool_end` for a
+# block it never opened.
+_MECHANICS_TOOLS = frozenset({"TaskOutput"})
+
+
+def _suppressed_tool_ids(bc) -> set[str]:
+  """Per-broadcast ids whose tool events are mechanics, not activity."""
+  ids = getattr(bc, "_mechanics_tool_ids", None)
+  if ids is None:
+    ids = set()
+    try:
+      bc._mechanics_tool_ids = ids
+    except AttributeError:
+      # A test double that forbids attributes still suppresses the start; the
+      # matching end simply falls through as it did before.
+      return set()
+  return ids
+
+
 def _claude_text_item_id(message_id: str | None, index: object) -> str | None:
   """A turn-unique id for a Claude text content block.
 
@@ -509,6 +537,11 @@ def dispatch_sdk_message(
     server_tools: dict[str, str] = {}
     for content_index, block in enumerate(sdk_msg.content):
       if isinstance(block, ToolUseBlock):
+        # Mechanics never reach the transcript — see _MECHANICS_TOOLS. Remember
+        # the id so the matching result is dropped with it.
+        if block.name in _MECHANICS_TOOLS:
+          _suppressed_tool_ids(bc).add(block.id)
+          continue
         # block.id is the canonical tool_use_id; the matching ToolResultBlock
         # carries it as .tool_use_id. Thread it through so a large tool output
         # can be reduced on the wire and fetched lazily by id (contract rule 6).
@@ -622,6 +655,10 @@ def dispatch_sdk_message(
     content = sdk_msg.content if isinstance(sdk_msg.content, list) else []
     for block in content:
       if isinstance(block, ToolResultBlock):
+        # The paired half of the mechanics suppression above.
+        if block.tool_use_id in _suppressed_tool_ids(bc):
+          _suppressed_tool_ids(bc).discard(block.tool_use_id)
+          continue
         output = _format_tool_output(block.content)
         # Carry the tool_use_id (matches the ToolUseBlock's .id) so the sink can
         # key a stash of the full output and the block can fetch it by id.
