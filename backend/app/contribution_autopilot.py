@@ -14,7 +14,8 @@ The lifecycle, per (app_id, record_id):
   agent  ─▶  /update (validated push) / /reply ─▶ /complete ─▶ idle, round logged
   crash   ─▶  lease expires ─▶ next retry marks it stale and reclaims it
   2 consecutive stale/failed rounds, or five-round limit reached ─▶ escalate
-  escalate ─▶ human_required attention + owner notification, claim released
+  escalate ─▶ blocked + human_required warning, claim revoked but grant retained
+  fresh reviewed repair + cleared warning ─▶ recovery returns the grant to idle
   merged / closed ─▶ close_out, autopilot ends
 
 Round identity is the ``run_id`` (a fresh uuid per claim): every agent-called
@@ -120,6 +121,10 @@ def stamp_grant(
     )
     db.add(row)
   else:
+    if row.state == "blocked":
+      _release_claim(row)
+      row.rounds_used = 0
+      row.consecutive_failures = 0
     row.enabled = True
     row.granted_at = now
     row.granted_head_sha = head_sha
@@ -165,6 +170,7 @@ def _lease_expired(row: models.ContributionAutopilot) -> bool:
 
 def _release_claim(row: models.ContributionAutopilot) -> None:
   row.state = "idle"
+  row.blocked_at = None
   row.run_id = None
   row.attention_key = None
   row.claimed_event_at = None
@@ -207,6 +213,7 @@ def _claim_match(
 def _release_values() -> dict:
   return {
     "state": "idle",
+    "blocked_at": None,
     "run_id": None,
     "attention_key": None,
     "claimed_event_at": None,
@@ -309,6 +316,7 @@ def claim_for_round(
   Returns a verdict dict with a ``status`` of:
     - ``"granted"`` (+ ``run_id``, ``row``): claim taken, caller may spawn.
     - ``"not_granted"``: no active grant (no row / paused) — classic flow.
+    - ``"blocked"``: an escalation still awaits a reviewed resolution.
     - ``"duplicate"``: this attention was already handled or is in flight.
     - ``"busy"``: a live (non-expired) round holds the claim.
     - ``"escalate"`` (+ ``reason``): five-round limit reached — caller escalates.
@@ -322,6 +330,8 @@ def claim_for_round(
     row = get_row(db, app_id, record_id)
     if row is None or not row.enabled:
       return {"status": "not_granted"}
+    if row.state == "blocked":
+      return {"status": "blocked"}
     if row.last_handled_attention_key == attention_key:
       return {"status": "duplicate"}
     if (
@@ -612,6 +622,7 @@ def set_enabled(
     return None
   row.enabled = bool(enabled)
   if enabled:
+    _release_claim(row)
     row.rounds_used = 0
     row.consecutive_failures = 0
   else:
@@ -641,26 +652,37 @@ def close_out(db: Session, app_id: int, record_id: str) -> None:
 
 
 def escalate(db: Session, app_id: int, record_id: str) -> bool:
-  """Atomically pause on escalation; True only for the winning notifier."""
+  """Block this grant without changing the owner's on/off choice."""
+  row = get_row(db, app_id, record_id)
+  if row is None:
+    return False
+  now = now_naive_utc()
   result = db.execute(
     update(models.ContributionAutopilot)
     .where(
       models.ContributionAutopilot.app_id == app_id,
       models.ContributionAutopilot.record_id == record_id,
       models.ContributionAutopilot.enabled.is_(True),
+      models.ContributionAutopilot.state != "blocked",
+      models.ContributionAutopilot.updated_at == row.updated_at,
     )
-    .values(
+    .values({
       **_release_values(),
-      enabled=False,
-      consecutive_failures=0,
-      updated_at=now_naive_utc(),
-    )
+      # Keep the exact interrupted event so recovery can settle it without
+      # replaying the same warning. Its run_id is still irrevocably released.
+      "attention_key": row.attention_key,
+      "claimed_event_at": row.claimed_event_at,
+      "state": "blocked",
+      "blocked_at": now,
+      "consecutive_failures": 0,
+      "updated_at": now,
+    })
   )
   won = result.rowcount == 1
   if won:
     # The one moment an autopilot chat needs the owner: surface it in the drawer.
     # Staged into THIS transaction on purpose. The UPDATE above is gated on
-    # ``enabled.is_(True)``, so it wins exactly once and no retry can ever
+    # ``state != blocked``, so it wins exactly once and no retry can ever
     # re-run it; surfacing the chat in a second transaction would let a crash or
     # a locked commit in between leave the record escalated but the chat hidden,
     # with nothing able to repair it.

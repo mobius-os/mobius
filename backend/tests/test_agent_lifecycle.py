@@ -5,12 +5,16 @@ from concurrent.futures import Future
 from datetime import datetime, timedelta
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import text, update
 from sqlalchemy.exc import IntegrityError
 
 from app import models
 from app import chat_event_sink
-from app.agent_lifecycle import normalize_chat_event, record_event
+from app.agent_lifecycle import (
+  normalize_chat_event,
+  reconcile_run_updates,
+  record_event,
+)
 from app.chat_event_sink import ChatEventSink
 from test_app_fixtures import create_local_app
 from app.memory_recall import EMPTY_RECALL_BINDING
@@ -221,6 +225,30 @@ def test_sqlite_run_update_cursor_is_never_reused_after_tail_delete(db):
   run.ended_at = datetime(2026, 7, 22, 10, 2, 0)
   db.commit()
   assert db.query(models.AgentLifecycleRunUpdate.id).scalar() > first_id
+
+
+def test_reconcile_run_updates_appends_terminal_snapshot_after_core_update(db):
+  _, run = _chat_run(db)
+  ended_at = datetime(2026, 7, 22, 10, 2, 0)
+  db.execute(
+    update(models.ChatRun)
+    .where(models.ChatRun.id == run.id)
+    .values(status="interrupted", ended_at=ended_at)
+  )
+  db.commit()
+  latest_before = db.query(models.AgentLifecycleRunUpdate).order_by(
+    models.AgentLifecycleRunUpdate.id.desc()
+  ).first()
+  assert latest_before.status == "running"
+
+  assert reconcile_run_updates(db) == 1
+  latest_after = db.query(models.AgentLifecycleRunUpdate).order_by(
+    models.AgentLifecycleRunUpdate.id.desc()
+  ).first()
+  assert latest_after.id > latest_before.id
+  assert latest_after.status == "interrupted"
+  assert latest_after.ended_at == ended_at
+  assert reconcile_run_updates(db) == 0
 
 
 def test_chat_run_delete_emits_tombstone_with_foreign_keys_enabled(db):
