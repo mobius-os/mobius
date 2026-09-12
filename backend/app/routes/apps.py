@@ -2622,8 +2622,16 @@ async def update_app(
       # This timestamp participates in the drawer's combined chat/app/project
       # order, so no reorder may validate between this assignment and commit.
       with drawer_pins.serialized_write():
-        app.pinned_at = now_naive_utc() if body.pinned else None
+        superseded = drawer_pins.intent_is_superseded(
+          body.pin_intent_client, body.pin_intent_version,
+        )
+        if not superseded:
+          app.pinned_at = now_naive_utc() if body.pinned else None
         db.commit()
+        if not superseded:
+          drawer_pins.record_committed_intent(
+            body.pin_intent_client, body.pin_intent_version,
+          )
     else:
       db.commit()
     db.refresh(app)

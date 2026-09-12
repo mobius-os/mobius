@@ -23,6 +23,9 @@ export const BASE = (import.meta.env?.BASE_URL || '/').replace(/\/$/, '')
 export const SHELL_INSTALL_PASS_TIMEOUT_MS = 5000
 export const PINNED_MUTATION_TIMEOUT_MS = 15_000
 const PINNED_CACHE_INVALIDATION_TIMEOUT_MS = 1_000
+const PIN_INTENT_STORAGE_KEY = 'mobius:pin-intent:v1'
+const PIN_INTENT_LOCK = 'mobius:pin-intent-allocation:v1'
+let fallbackPinIntentState = null
 export const OWNER_TOKEN_CHANGED_EVENT = 'mobius:owner-token-changed'
 
 // The opaque embedded-chat document must never read or receive the owner's
@@ -436,11 +439,15 @@ async function pinnedResourceMutation(
   kind,
   path,
   pinned,
-  { timeoutMs = PINNED_MUTATION_TIMEOUT_MS } = {},
+  {
+    timeoutMs = PINNED_MUTATION_TIMEOUT_MS,
+    intentWitness = null,
+  } = {},
 ) {
+  const witness = intentWitness || await reservePinnedIntent()
   return pinnedMutation(path, {
     method: 'PATCH',
-    body: { pinned },
+    body: { pinned, ...witness },
     cacheKinds: kind ? [kind] : [],
     label: 'Pin update failed',
     timeoutMs,
@@ -449,18 +456,71 @@ async function pinnedResourceMutation(
 
 async function pinnedOrderMutation(
   items,
-  { timeoutMs = PINNED_MUTATION_TIMEOUT_MS } = {},
+  {
+    timeoutMs = PINNED_MUTATION_TIMEOUT_MS,
+    intentWitness = null,
+  } = {},
 ) {
+  const witness = intentWitness || await reservePinnedIntent()
   // The combined order spans both NetworkFirst shell projections. Evict both
   // even after an ambiguous timeout; in-memory queries retain the current UI
   // while the next live read establishes the committed order.
   return pinnedMutation('/chats/pinned-order', {
     method: 'PUT',
-    body: { items },
+    body: { items, ...witness },
     cacheKinds: ['chats', 'apps'],
     label: 'Pinned reorder failed',
     timeoutMs,
   })
+}
+
+function allocatePinIntentWitness(storage) {
+  let state = fallbackPinIntentState
+  try {
+    const stored = JSON.parse(storage.getItem(PIN_INTENT_STORAGE_KEY))
+    if (
+      typeof stored?.client === 'string'
+      && stored.client.length > 0
+      && stored.client.length <= 64
+      && Number.isSafeInteger(stored.version)
+      && stored.version >= 0
+    ) state = stored
+  } catch {}
+  if (!state) {
+    state = {
+      client: globalThis.crypto?.randomUUID?.()
+        || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`,
+      version: 0,
+    }
+  }
+  state = { client: state.client, version: state.version + 1 }
+  fallbackPinIntentState = state
+  try { storage.setItem(PIN_INTENT_STORAGE_KEY, JSON.stringify(state)) } catch {}
+  return {
+    pin_intent_client: state.client,
+    pin_intent_version: state.version,
+  }
+}
+
+export async function reservePinnedIntent() {
+  // Web Locks makes the shared localStorage increment atomic across sibling
+  // tabs. Where that primitive or storage is unavailable, sessionStorage gives
+  // each tab an isolated client identity and the module fallback still orders
+  // the one queue whose timed-out request can overlap its successor.
+  if (
+    typeof navigator !== 'undefined'
+    && navigator.locks?.request
+    && typeof localStorage !== 'undefined'
+  ) {
+    return navigator.locks.request(
+      PIN_INTENT_LOCK,
+      () => allocatePinIntentWitness(localStorage),
+    )
+  }
+  // Do not use sessionStorage here: a newly opened tab may inherit a snapshot
+  // from its opener. One module-local client keeps the fallback honestly
+  // document-scoped instead of creating equal cross-document witnesses.
+  return allocatePinIntentWitness({ getItem: () => null, setItem: () => {} })
 }
 
 /**
@@ -831,7 +891,7 @@ export const api = {
     ),
   },
   projects: {
-    list: () => apiFetch('/projects'),
+    list: (options = {}) => apiFetch('/projects', options),
     templates: () => apiFetch('/projects/templates'),
     legacy: () => apiFetch('/projects/legacy'),
     importSources: () => apiFetch('/projects/import-sources'),

@@ -8,7 +8,7 @@ import {
   Stop,
 } from '@openai/apps-sdk-ui/components/Icon'
 import { projectSourceAction } from '../../lib/projectSourceAction.js'
-import { api } from '../../api/client.js'
+import { api, reservePinnedIntent } from '../../api/client.js'
 import { appQueries, chatQueries, projectQueries } from '../../hooks/queries.js'
 import { useHistoryDismiss } from '../../hooks/useHistoryDismiss.jsx'
 import {
@@ -648,6 +648,7 @@ export default function Drawer({
 
   function mutatePin(kind, id, pinned, { queryKey, request, recover }) {
     const generation = ++pinMutationGenerationRef.current
+    const intentWitness = reservePinnedIntent()
     const itemKey = `${kind}:${id}`
     const optimisticPinnedAt = pinned
       ? nextPendingPinnedAt(
@@ -667,7 +668,7 @@ export default function Drawer({
 
     return pinMutationQueueRef.current.enqueue(async () => {
       try {
-        const updated = await request()
+        const updated = await request(await intentWitness)
         const persistedPinnedAt = updated?.pinned_at ?? null
         if (pinned && !persistedPinnedAt) {
           throw new Error('Pin update returned no canonical rank')
@@ -705,7 +706,7 @@ export default function Drawer({
   function pinChat(id, pinned) {
     return mutatePin('chat', id, pinned, {
       queryKey: chatQueries.keys.all,
-      request: () => api.chats.setPinned(id, pinned),
+      request: witness => api.chats.setPinned(id, pinned, { intentWitness: witness }),
       recover: refreshChats,
     })
   }
@@ -713,7 +714,7 @@ export default function Drawer({
   function pinApp(id, pinned) {
     return mutatePin('app', id, pinned, {
       queryKey: appQueries.keys.all,
-      request: () => api.apps.setPinned(id, pinned),
+      request: witness => api.apps.setPinned(id, pinned, { intentWitness: witness }),
       recover: refreshApps,
     })
   }
@@ -721,7 +722,7 @@ export default function Drawer({
   function pinProject(id, pinned) {
     return mutatePin('project', id, pinned, {
       queryKey: projectQueries.keys.all,
-      request: () => api.projects.setPinned(id, pinned),
+      request: witness => api.projects.setPinned(id, pinned, { intentWitness: witness }),
       recover: () => projectQueries.list.invalidate(queryClient),
     })
   }
@@ -733,6 +734,7 @@ export default function Drawer({
   function reorderPinned(orderedKeys) {
     if (!Array.isArray(orderedKeys) || orderedKeys.length === 0) return
     const generation = ++pinnedReorderGenerationRef.current
+    const intentWitness = reservePinnedIntent()
     return pinMutationQueueRef.current.enqueue(async () => {
       if (generation !== pinnedReorderGenerationRef.current) return false
       const currentPinned = buildDrawerSections(
@@ -757,7 +759,9 @@ export default function Drawer({
       const appKey = appQueries.keys.all
       const projectKey = projectQueries.keys.all
       try {
-        const payload = await api.chats.reorderPinned(items)
+        const payload = await api.chats.reorderPinned(items, {
+          intentWitness: await intentWitness,
+        })
         const persisted = Array.isArray(payload?.items) ? payload.items : []
         const rank = new Map(persisted.map(item => [
           `${item.kind}:${item.id}`,

@@ -1,10 +1,13 @@
 """Atomic ordering contract for the drawer's combined pinned list."""
 
 import threading
+import time
+from collections import OrderedDict
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor
 
-from app import models
+from app import drawer_pins, install, models
+from app.database import SessionLocal
 from app.routes import chats as chat_routes
 
 
@@ -132,6 +135,94 @@ def test_chat_pin_response_returns_the_exact_persisted_rank(client, auth, db):
   returned = datetime.fromisoformat(response.json()["pinned_at"])
   db.expire_all()
   assert db.get(models.Chat, chat.id).pinned_at == returned
+
+
+def test_late_older_pin_intent_cannot_overwrite_newer_unpin(
+  client, auth, db, monkeypatch,
+):
+  monkeypatch.setattr(drawer_pins, "_LATEST_INTENT_VERSIONS", OrderedDict())
+  chat = models.Chat(
+    id="late-pin", title="Late pin", messages=[], pinned_at=datetime.now(),
+  )
+  db.add(chat)
+  db.commit()
+
+  newer = client.patch(
+    f"/api/chats/{chat.id}", headers=auth,
+    json={
+      "pinned": False,
+      "pin_intent_client": "drawer-test",
+      "pin_intent_version": 2,
+    },
+  )
+  equal_but_different = client.patch(
+    f"/api/chats/{chat.id}", headers=auth,
+    json={
+      "pinned": True,
+      "pin_intent_client": "drawer-test",
+      "pin_intent_version": 2,
+    },
+  )
+  older = client.patch(
+    f"/api/chats/{chat.id}", headers=auth,
+    json={
+      "pinned": True,
+      "pin_intent_client": "drawer-test",
+      "pin_intent_version": 1,
+    },
+  )
+
+  assert newer.status_code == 200, newer.text
+  assert equal_but_different.status_code == 200, equal_but_different.text
+  assert older.status_code == 200, older.text
+  assert equal_but_different.json()["pinned_at"] is None
+  assert older.json()["pinned_at"] is None
+  db.expire_all()
+  assert db.get(models.Chat, chat.id).pinned_at is None
+
+
+def test_store_reinstall_reveals_tombstoned_pin_inside_drawer_boundary(db):
+  app = models.App(
+    source_dir="/tmp/mobius-tests/reinstall-boundary",
+    name="Reinstall boundary",
+    description="",
+    jsx_source="export default function App() {}",
+    slug="reinstall-boundary",
+    pinned_at=datetime.now(),
+    deleted_at=datetime.now(),
+  )
+  db.add(app)
+  db.commit()
+  app_id = app.id
+  journal = install.InstallJournal()
+
+  def finish_reinstall():
+    session = SessionLocal()
+    try:
+      row = session.get(models.App, app_id)
+      install._commit_prepared_app(
+        session, row, journal, revive_after_commit=True,
+      )
+    finally:
+      session.close()
+
+  with ThreadPoolExecutor(max_workers=1) as pool:
+    with drawer_pins.serialized_write():
+      future = pool.submit(finish_reinstall)
+      deadline = time.monotonic() + 2
+      while not journal.durable and time.monotonic() < deadline:
+        time.sleep(0.01)
+      assert journal.durable, "reinstall did not persist its hidden preparation"
+      observer = SessionLocal()
+      try:
+        assert observer.get(models.App, app_id).deleted_at is not None
+      finally:
+        observer.close()
+      assert not future.done(), "reinstall became visible outside the boundary"
+    future.result(timeout=2)
+
+  db.expire_all()
+  assert db.get(models.App, app_id).deleted_at is None
 
 
 def test_concurrent_pin_waits_until_reorder_validation_and_commit_finish(

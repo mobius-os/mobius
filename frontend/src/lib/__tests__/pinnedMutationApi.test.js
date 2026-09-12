@@ -4,7 +4,9 @@ import assert from 'node:assert/strict'
 import {
   api,
   PINNED_MUTATION_TIMEOUT_MS,
+  reservePinnedIntent,
 } from '../../api/client.js'
+import { projectQueries } from '../../hooks/queries.js'
 import { SHELL_DATA_CACHE } from '../../sw-cache-policy.js'
 
 function neverSettlingFetch(_url, { signal }) {
@@ -33,6 +35,52 @@ test('a timed-out pin does not prevent the next owner intent', async (t) => {
     pinned_at: null,
   }), { status: 200, headers: { 'Content-Type': 'application/json' } })
   assert.equal((await api.chats.setPinned('chat-1', false)).pinned_at, null)
+})
+
+test('intent order is reserved before delayed network work begins', async (t) => {
+  const originalFetch = globalThis.fetch
+  t.after(() => { globalThis.fetch = originalFetch })
+  const bodies = []
+  globalThis.fetch = async (_url, options) => {
+    bodies.push(JSON.parse(options.body))
+    return new Response(JSON.stringify({ ok: true, pinned_at: null }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    })
+  }
+
+  const olderClick = await reservePinnedIntent()
+  const newerClick = await reservePinnedIntent()
+  // Simulate an older action waiting behind another queue item while a later
+  // cross-tab action reaches the network first.
+  await api.chats.setPinned('chat-1', false, { intentWitness: newerClick })
+  await api.chats.setPinned('chat-1', true, { intentWitness: olderClick })
+
+  assert.equal(typeof bodies[0].pin_intent_client, 'string')
+  assert.equal(bodies[1].pin_intent_client, bodies[0].pin_intent_client)
+  assert.equal(Number.isSafeInteger(bodies[0].pin_intent_version), true)
+  assert.equal(bodies[0].pin_intent_version > bodies[1].pin_intent_version, true)
+})
+
+test('project list reads forward the cancellation signal', async (t) => {
+  const originalFetch = globalThis.fetch
+  t.after(() => { globalThis.fetch = originalFetch })
+  const controller = new AbortController()
+  let receivedSignal
+  globalThis.fetch = async (_url, options) => {
+    receivedSignal = options.signal
+    return new Promise((_resolve, reject) => {
+      options.signal.addEventListener('abort', () => reject(options.signal.reason), {
+        once: true,
+      })
+    })
+  }
+
+  const pending = projectQueries.list.fetch({ signal: controller.signal })
+  controller.abort(new DOMException('superseded', 'AbortError'))
+
+  await assert.rejects(pending, error => error?.name === 'AbortError')
+  assert.equal(receivedSignal, controller.signal)
 })
 
 test('the mutation deadline covers a response body that never finishes', async (t) => {

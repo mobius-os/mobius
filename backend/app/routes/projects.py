@@ -98,6 +98,8 @@ class ProjectPatch(BaseModel):
   name: str | None = Field(default=None, min_length=1, max_length=256)
   color: str | None = Field(default=None, max_length=7)
   pinned: bool | None = None
+  pin_intent_client: str | None = Field(default=None, min_length=1, max_length=64)
+  pin_intent_version: int | None = Field(default=None, ge=1)
 
   @field_validator("name")
   @classmethod
@@ -2262,8 +2264,16 @@ def patch_project(
   try:
     if body.pinned is not None:
       with drawer_pins.serialized_write():
-        project_drawer.set_pinned(db, project.id, body.pinned)
+        superseded = drawer_pins.intent_is_superseded(
+          body.pin_intent_client, body.pin_intent_version,
+        )
+        if not superseded:
+          project_drawer.set_pinned(db, project.id, body.pinned)
         db.commit()
+        if not superseded:
+          drawer_pins.record_committed_intent(
+            body.pin_intent_client, body.pin_intent_version,
+          )
     else:
       db.commit()
   except IntegrityError as exc:

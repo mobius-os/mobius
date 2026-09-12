@@ -326,6 +326,8 @@ class PinnedOrderUpdate(BaseModel):
   """The complete top-to-bottom order of every currently pinned item."""
 
   items: list[PinnedOrderItem] = Field(min_length=1, max_length=5000)
+  pin_intent_client: str | None = Field(default=None, min_length=1, max_length=64)
+  pin_intent_version: int | None = Field(default=None, ge=1)
 
 
 _coerce_agent_settings = coerce_agent_settings
@@ -1177,6 +1179,18 @@ def update_pinned_order(
       **{("app", str(app.id)): app for app in pinned_apps},
       **{("project", str(state.project_id)): state for state in pinned_projects},
     }
+    if drawer_pins.intent_is_superseded(
+      body.pin_intent_client, body.pin_intent_version,
+    ):
+      persisted = [
+        {
+          "kind": key[0],
+          "id": key[1],
+          "pinned_at": row.pinned_at.isoformat(),
+        }
+        for key, row in sorted(rows.items(), key=lambda item: item[1].pinned_at)
+      ]
+      return {"items": persisted}
     if set(normalized) != set(rows):
       raise HTTPException(
         status_code=409,
@@ -1196,6 +1210,9 @@ def update_pinned_order(
         "pinned_at": pinned_at.isoformat(),
       })
     db.commit()
+    drawer_pins.record_committed_intent(
+      body.pin_intent_client, body.pin_intent_version,
+    )
   return {"items": persisted}
 
 
@@ -1474,8 +1491,16 @@ async def patch_chat(
       # Pin order is one cross-resource collection. Join its commit boundary
       # only after every awaited validation above has completed.
       with drawer_pins.serialized_write():
-        chat.pinned_at = now_naive_utc() if body.pinned else None
+        superseded = drawer_pins.intent_is_superseded(
+          body.pin_intent_client, body.pin_intent_version,
+        )
+        if not superseded:
+          chat.pinned_at = now_naive_utc() if body.pinned else None
         db.commit()
+        if not superseded:
+          drawer_pins.record_committed_intent(
+            body.pin_intent_client, body.pin_intent_version,
+          )
     else:
       db.commit()
     db.refresh(chat)
