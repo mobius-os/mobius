@@ -1929,8 +1929,8 @@ class ReviewerAutomationGrant(Base):
   a GitHub write. This platform-owned row is the durable grant and the shared
   counter state used to serialize daily and per-PR limits.
 
-  ``create_all`` builds these Reviewer tables on a fresh installation. Existing
-  installations already carrying the tables are mapped without a migration.
+  Normal startup's ``create_all`` adds these new tables on both fresh and
+  existing installations. No existing table needs an ``ALTER`` migration.
   """
 
   __tablename__ = "reviewer_automation_grants"
