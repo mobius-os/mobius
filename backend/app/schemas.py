@@ -591,6 +591,13 @@ class ChatStopRequest(BaseModel):
   chat_id: str = ""
 
 
+# One effort vocabulary for owner and app-attributed chat configuration.
+AgentEffort = Literal[
+  "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
+  "ultracode",
+]
+
+
 class AgentSettingsOverride(BaseModel):
   """Per-chat agent settings override. Unknown fields are rejected
   (422) so a typo'd or experimental key can't silently land in the
@@ -619,10 +626,7 @@ class AgentSettingsOverride(BaseModel):
   # non-Opus Claude) surfaces as a 400 at turn time, not at PATCH.
   # Acceptable per the platform's "reversibility over prevention"
   # philosophy.
-  effort: Literal[
-    "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
-    "ultracode",
-  ] | None = None
+  effort: AgentEffort | None = None
   # Per-provider memory of the last-picked effort. The enums are
   # NOT comparable across providers — Codex `medium` is roughly
   # Claude `low`, not Claude `medium` — so the picker has to

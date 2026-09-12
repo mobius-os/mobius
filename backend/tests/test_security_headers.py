@@ -7,9 +7,9 @@ from fastapi.testclient import TestClient
 
 from app import main
 from app.main import (
-  _PUBLISHED_SITE_CSP, _SHELL_CSP, _STATIC_EMBED_CSP, app,
+  _PUBLISHED_SITE_CSP, _SHELL_CSP, _STATIC_EMBED_CSP, _CHAT_EMBED_CSP, app,
 )
-from app.response_policy import CHAT_EMBED_CSP, app_frame_csp
+from app.response_policy import chat_embed_csp, app_frame_csp
 
 
 def _headers(path="/api/health"):
@@ -167,7 +167,7 @@ def test_embedded_chat_allows_opaque_origin_app_ancestor():
   # The route itself is inert: no chat id or credential is accepted in its URL.
   h = _headers("/shell/embed/chat")
   assert "x-frame-options" not in h
-  assert h.get("content-security-policy") == CHAT_EMBED_CSP
+  assert h.get("content-security-policy") == _CHAT_EMBED_CSP
   assert h.get("x-content-type-options") == "nosniff"
   assert h.get("strict-transport-security")
 
@@ -252,7 +252,7 @@ def test_bundled_caddy_keeps_only_gateway_specific_response_policy():
   # Direct origin policies retain the exact scoped differences Caddy used to
   # mirror by hand.
   assert "frame-ancestors 'self'" in _SHELL_CSP
-  assert "frame-ancestors" not in CHAT_EMBED_CSP
+  assert "frame-ancestors" not in _CHAT_EMBED_CSP
   assert "sandbox allow-scripts" in _STATIC_EMBED_CSP
   assert "allow-same-origin" not in _STATIC_EMBED_CSP
   service_csp = next(
@@ -405,3 +405,28 @@ def test_opaque_app_preflight_allows_versioned_storage_requests():
     for header in actual.headers["access-control-expose-headers"].split(",")
   }
   assert "etag" in exposed
+
+
+def test_chat_embed_uses_absolute_sources_for_opaque_webkit_frame():
+  origin = "https://app.example.test"
+  policy = chat_embed_csp(origin)
+  for directive in ("default-src", "script-src", "style-src", "font-src",
+                    "connect-src", "img-src", "frame-src"):
+    sources = policy.split(f"{directive} ", 1)[1].split(";", 1)[0].split()
+    assert origin in sources
+    assert "'self'" not in sources
+    assert "*" not in sources
+  assert "allow-same-origin" not in policy
+  assert "frame-ancestors" not in policy
+  assert "'unsafe-eval'" not in policy
+  assert "localhost" not in policy
+
+
+def test_chat_embed_loopback_delivery_is_exact_and_not_host_header_trusted():
+  client = TestClient(app, base_url="http://127.0.0.1:8000",
+                      client=("127.0.0.1", 50000))
+  policy = client.get("/shell/embed/chat").headers["content-security-policy"]
+  assert policy == chat_embed_csp(main.settings.frontend_origin, "http://127.0.0.1:8000")
+  assert client.get("/shell/embed/chat", headers={"Host": "evil.example"}).headers["content-security-policy"] == _CHAT_EMBED_CSP
+  remote = TestClient(app, base_url="http://127.0.0.1:8000", client=("203.0.113.4", 50000))
+  assert remote.get("/shell/embed/chat").headers["content-security-policy"] == _CHAT_EMBED_CSP
