@@ -71,12 +71,19 @@ class _PublishedBootstrapApp:
   published_at: datetime
 
 
-# Activation gate for the audited Social release. Keep this closed until the
-# migrated release is public, then replace None with its manifest id, immutable
-# commit-pinned manifest URL, and publication time. The timestamp separates
-# post-publication deployments from existing owners without another settings
-# table or a one-shot install migration.
-BOOTSTRAP_SOCIAL_RELEASE: _PublishedBootstrapApp | None = None
+# The audited Social release is a default only for deployments created after
+# its canonical publication. The immutable pin prevents a future app update
+# from silently changing what a platform release installs on first boot.
+BOOTSTRAP_SOCIAL_RELEASE: _PublishedBootstrapApp | None = (
+  _PublishedBootstrapApp(
+    manifest_id="common",
+    manifest_url=(
+      "https://raw.githubusercontent.com/mobius-os/app-social/"
+      "f4c6903066ae7e06ea33c026c68b6f57f79342c5/mobius.json"
+    ),
+    published_at=datetime(2026, 9, 11, 23, 58, 14, tzinfo=UTC),
+  )
+)
 
 
 @dataclass(frozen=True)
