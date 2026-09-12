@@ -8,6 +8,7 @@ globalThis.window = { location: { origin: 'http://localhost', href: 'http://loca
 const vite = await createServer({ appType: 'custom', logLevel: 'error', server: { middlewareMode: true, hmr: false, ws: false }, ssr: { noExternal: ['@openai/apps-sdk-ui'] } })
 const { default: Active } = await vite.ssrLoadModule('/src/components/ChatView/ActiveAssistantSurface.jsx')
 const { default: Message } = await vite.ssrLoadModule('/src/components/ChatView/MsgContent.jsx')
+const { PeerTimelineLoadError } = await vite.ssrLoadModule('/src/components/ChatView/PeerTimeline.jsx')
 const { PeerTimelineContext } = await vite.ssrLoadModule('/src/components/ChatView/peerTimelineContext.js')
 after(() => vite.close())
 const note = { id: 'incoming', sender_chat_id: 'peer', sender_name: 'Colleague', body: 'New information', created_at: 2000, display_position: { assistant_message_id: 'answer', block_index: 0, text_offset: 9 } }
@@ -50,4 +51,16 @@ test('busy-parent helper result renders once at the same recorded frontier', () 
   assert.ok(html.indexOf('Earlier') < html.indexOf('Helper finished · Review'))
   assert.ok(html.indexOf('Helper finished · Review') < html.indexOf('Later response'))
   assert.equal(html.split('aria-label="Helper finished · Review"').length, 2)
+})
+
+test('a genuine activity load failure retains a manual retry', () => {
+  assert.equal(renderToStaticMarkup(React.createElement(
+    PeerTimelineLoadError, { error: false, onRetry: () => {} },
+  )), '')
+  const html = renderToStaticMarkup(React.createElement(
+    PeerTimelineLoadError, { error: true, onRetry: () => {} },
+  ))
+  assert.match(html, /role="status"/)
+  assert.match(html, /Chat activity couldn’t refresh/)
+  assert.match(html, /<button type="button">Try again<\/button>/)
 })

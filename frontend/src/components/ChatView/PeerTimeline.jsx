@@ -30,7 +30,7 @@ export function usePeerTimeline(chatId, messages, enabled, activeTools, activeMi
     if (enabled && hasNextPage && !isFetching && !isError && oldestLoaded >= windowStart) void fetchNextPage()
   }, [enabled, hasNextPage, isFetching, isError, oldestLoaded, windowStart, fetchNextPage])
   const projection = useMemo(() => foldPeerActivity(messages, projectChatActivity(messages, events, chatId, activeTools), chatId, activeMirrorIndex), [messages, events, chatId, activeTools, activeMirrorIndex])
-  return projection
+  return { ...projection, error: query.isError, retry: query.refetch }
 }
 
 export function PeerTimelineRows({ notes, chatId, onInternalNav }) {
@@ -50,4 +50,11 @@ export function PeerTimelineRows({ notes, chatId, onInternalNav }) {
     </div>
   </li>
   })
+}
+
+export function PeerTimelineLoadError({ error, onRetry }) {
+  if (!error) return null
+  return <li className="chat__peer-load-error" role="status">
+    Chat activity couldn’t refresh. <button type="button" onClick={onRetry}>Try again</button>
+  </li>
 }

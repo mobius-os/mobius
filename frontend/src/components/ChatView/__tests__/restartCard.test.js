@@ -60,8 +60,12 @@ test('restart cards separate written feedback from forged action ids', () => {
 })
 
 
-test('restart status labels distinguish loaded and uncertain outcomes', () => {
-  assert.equal(restartCardStatusLabel({ ...action, status: 'activated' }), 'Changes loaded')
+test('restart status labels distinguish observed and uncertain outcomes', () => {
+  assert.equal(restartCardStatusLabel({ ...action, status: 'activated' }), 'Möbius restarted')
+  assert.match(
+    restartCardStatusDetail({ ...action, status: 'activated' }),
+    /agent will check whether these changes loaded/,
+  )
   assert.equal(
     restartCardStatusLabel({ ...action, status: 'uncertain' }),
     'Restart outcome needs review',

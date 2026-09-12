@@ -2277,15 +2277,15 @@ class ChatWriterActor:
     execution_status = None
     if not selected_restart:
       # Declining this execution is not abandoning the unfinished work.
-      # Keep its visible activation owner so another approved matching boot
+      # Keep its visible activation owner so any later ready boot
       # can satisfy it without either a model turn or manufactured consent.
       action["status"] = "deferred"
     else:
       # This is the durable admission boundary.  A merely armed activation
       # monitor does not hold later owner input after **Not now**; only an
       # explicitly approved restart keeps its recovery ahead of the queue.
-      # Stamp approval even when another matching boot already satisfied the
-      # requirement, so its still-undelivered activation receipt retains the
+      # Stamp approval even when another ready boot already satisfied the wait,
+      # so its still-undelivered activation receipt retains the
       # same ordering contract.
       wait.action_approved_at = now
       if wait.status in ("expired", "failed"):

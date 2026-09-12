@@ -516,7 +516,7 @@ def _route_diagnostics_to_chat_log(_context: StartupContext) -> None:
 
 
 def _capture_platform_activation_snapshot(context: StartupContext) -> None:
-  """Persist loaded-source evidence only after DB and writer startup work."""
+  """Persist a ready-boot receipt only after DB and writer startup work."""
   from app.platform_restart import capture_ready_boot_snapshot
   from app.chat_writer import Barrier, get_writer, wait_ack
 

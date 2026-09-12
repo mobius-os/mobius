@@ -223,9 +223,10 @@ the write-surface contract.
 
    The card owns at-most-once admission for its exact action. A lost response,
    duplicate click, or ambiguous process death must never cause an agent to
-   replay the restart. Möbius confirms loaded-source readiness after boot and
-   resumes each matching waiting chat independently; unrelated waits and
-   queued work keep their existing barriers. An uncertain outcome needs fresh,
+   replay the restart. Any later ready Möbius boot resumes every linked
+   Restart-card chat independently; each resumed agent verifies whether its
+   changes loaded. Unrelated waits and queued work keep their existing
+   barriers. An uncertain outcome needs fresh,
    specific approval rather than an automatic retry. A scheduled/background
    agent cannot ask live, so it leaves activation pending for the partner.
 4. If the edited tree fails to import, the baked shell stays available. Refresh

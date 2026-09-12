@@ -538,7 +538,7 @@ def test_activation_attaches_to_same_root_recovery_without_duplicate_run():
     assert chat.pending_question_id is None
 
 
-def test_one_boot_fans_out_to_matching_goals_and_leaves_nonmatch_pending(
+def test_one_ready_boot_wakes_every_linked_restart_goal(
   monkeypatch,
 ):
   from app import chat_start, chat_waits
@@ -569,7 +569,7 @@ def test_one_boot_fans_out_to_matching_goals_and_leaves_nonmatch_pending(
 
   assert asyncio.run(chat_waits._check_one(w1)) is True
   assert asyncio.run(chat_waits._check_one(w2)) is True
-  assert asyncio.run(chat_waits._check_one(w3)) is False
+  assert asyncio.run(chat_waits._check_one(w3)) is True
   calls = []
 
   async def capture_start(**kwargs):
@@ -581,10 +581,12 @@ def test_one_boot_fans_out_to_matching_goals_and_leaves_nonmatch_pending(
   )
   assert asyncio.run(chat_waits._deliver_resume(w1)) is True
   assert asyncio.run(chat_waits._deliver_resume(w2)) is True
+  assert asyncio.run(chat_waits._deliver_resume(w3)) is True
   assert {(call["chat_id"], call["root_run_id"]) for call in calls} == {
     ("restart-goal-one", r1), ("restart-goal-two", r2),
+    ("restart-goal-other", _r3),
   }
   with SessionLocal() as db:
     assert db.get(models.ChatWait, w1).resume_delivered_at is not None
     assert db.get(models.ChatWait, w2).resume_delivered_at is not None
-    assert db.get(models.ChatWait, w3).status == "armed"
+    assert db.get(models.ChatWait, w3).resume_delivered_at is not None

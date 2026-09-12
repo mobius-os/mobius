@@ -1025,9 +1025,9 @@ async def _check_one(row_id: str) -> bool:
     elif check_failed:
       row.status = "failed"
     # A Restart card is an owner decision, not a timed observation. Keep its
-    # exact activation link open until the owner responds, Stop cancels it, or
-    # source proof settles it; an arbitrary seven-day deadline only turned a
-    # safe pending action into an unexplained dead card.
+    # restart link open until the owner responds, Stop cancels it, or a later
+    # ready boot settles it; an arbitrary seven-day deadline only turned a safe
+    # pending action into an unexplained dead card.
     elif kind != "platform_activation" and deadline_at is not None and now >= deadline_at:
       row.status = "expired"
     else:

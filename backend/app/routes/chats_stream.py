@@ -1203,9 +1203,9 @@ async def _send_message_locked(
     db.expire(chat)
     return _queued_response(new_msg, len(chat.pending_messages or []))
 
-  # A typed activation wait is the unfinished work A. Later owner input B is
-  # durable, but cannot be promoted until the exact loaded-source continuation
-  # owns A. The activation writer command has the sole authenticated bypass.
+  # An approved typed restart wait is unfinished work A. Later owner input B is
+  # durable, but cannot be promoted until the ready-boot continuation owns A.
+  # The activation writer command has the sole authenticated bypass.
   from app.platform_restart import activation_barrier_wait_id
   if activation_barrier_wait_id(db, chat_id) is not None:
     new_msg = await _append_to_pending(

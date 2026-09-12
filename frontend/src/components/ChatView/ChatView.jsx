@@ -1,5 +1,5 @@
 import { questionAnswerPatch } from './questionSubmission.js'
-import { usePeerTimeline, PeerTimelineRows } from './PeerTimeline.jsx'
+import { usePeerTimeline, PeerTimelineLoadError, PeerTimelineRows } from './PeerTimeline.jsx'
 import { PeerTimelineContext } from './peerTimelineContext.js'
 import { consumeChatChanges, subscribeChatChanges } from '../../lib/chatChangesNavigation.js'
 import {
@@ -5708,6 +5708,7 @@ export default function ChatView({
           )}
 
           <PeerTimelineRows notes={peerTimeline.slots.get(displayedMessages.length)} chatId={chatId} onInternalNav={internalNav} />
+          <PeerTimelineLoadError error={peerTimeline.error} onRetry={peerTimeline.retry} />
 
           {/* Steering is accepted locally before the provider control channel
               acknowledges it. Keep the durable rows out of the actionable

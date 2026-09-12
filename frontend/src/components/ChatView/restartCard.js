@@ -33,7 +33,7 @@ export function restartCardStatusLabel(action) {
   if (!isRestartCardAction(action)) return ''
   return ({
     restart_requested: 'Restart requested',
-    activated: 'Changes loaded',
+    activated: 'Möbius restarted',
     deferred: 'Waiting for a later restart',
     responded: 'Response sent',
     dismissed: 'Restart wait cancelled',
@@ -48,9 +48,9 @@ export function restartCardStatusLabel(action) {
 export function restartCardStatusDetail(action) {
   if (!isRestartCardAction(action)) return ''
   return ({
-    restart_requested: 'Möbius is draining active work and will load these exact changes once.',
-    activated: 'A ready server has verified that these exact changes are loaded.',
-    deferred: 'The changes remain linked and can load with a matching restart later.',
+    restart_requested: 'Möbius is draining active work and will restart once.',
+    activated: 'A later ready server was observed. The agent will check whether these changes loaded.',
+    deferred: 'This work remains linked and the agent will resume after a later restart.',
     responded: 'This card did not restart Möbius. The agent will respond to what you wrote instead.',
     dismissed: 'This card cannot restart Möbius. The agent can check the current changes and ask again if needed.',
     expired: 'Nothing was restarted from this card. The agent can check whether a restart is still needed and ask again.',
