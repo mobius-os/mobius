@@ -1,5 +1,5 @@
 import { questionAnswerPatch } from './questionSubmission.js'
-import { usePeerTimeline, PeerTimelineRows } from './PeerTimeline.jsx'
+import { usePeerTimeline, PeerTimelineLoadError, PeerTimelineRows } from './PeerTimeline.jsx'
 import { PeerTimelineContext } from './peerTimelineContext.js'
 import { consumeChatChanges, subscribeChatChanges } from '../../lib/chatChangesNavigation.js'
 import {
@@ -25,6 +25,7 @@ import {
 } from '../../hooks/queries.js'
 import useStreamConnection from './useStreamConnection.js'
 import useScrollMode from './useScrollMode.js'
+import usePaginationLifecycle from './usePaginationLifecycle.js'
 import {
   FOLLOW_STICK_BAND_PX,
   isNearPhysicalBottom,
@@ -1034,10 +1035,20 @@ export default function ChatView({
   // so any in-flight fetchMessages can't resurrect cleared data.
   const fetchGenRef = useRef(0)
 
-  // Pagination flag — gates loadOlderMessages from re-entering AND
-  // gates the scroll-handler in useScrollMode from misclassifying
-  // post-prepend scroll-clamps as user gestures.
+  // Pagination flag — one compact page at a time. Scroll authority remains in
+  // useScrollMode, including while this network request is in flight.
   const loadingOlder = useRef(false)
+  const paginationFollowupRafRef = useRef(0)
+  const paginationLifecycleRef = usePaginationLifecycle({
+    chatId,
+    hidden,
+    loadNonce,
+    provisionalNewChat,
+    searchAnchorKey: searchReveal?.anchorKey,
+    searchRevealId: searchReveal?.id,
+    loadingOlderRef: loadingOlder,
+    followupRafRef: paginationFollowupRafRef,
+  })
   const [olderHistoryError, setOlderHistoryError] = useState(false)
 
   // ── Scroll subsystem ─────────────────────────────────────────────
@@ -1066,7 +1077,9 @@ export default function ChatView({
   const {
     gestureWindowUntilRef,
     revealed,
-    anchorPagination,
+    capturePaginationRequest,
+    preparePaginationPrepend,
+    restorePaginationPrepend,
     captureSendIntent,
     commitSendIntent,
     cancelQuestionSubmission,
@@ -1095,7 +1108,6 @@ export default function ChatView({
     footRef,
     messages,
     messagesRef,
-    loadingOlderRef: loadingOlder,
     initialEntryPhase,
     onCachedCoordinateReady: acceptCachedReadingCoordinate,
     ownsReadingPosition: !hidden,
@@ -2711,7 +2723,6 @@ export default function ChatView({
       cancelled = true
       initialLoadController.abort()
       chatIdStaleRef.current = true
-      loadingOlder.current = false
       disconnect()
     }
   }, [
@@ -2727,29 +2738,22 @@ export default function ChatView({
   ])
 
 
-  // Paginate older messages. Captures a pre-prepend anchor so we can
-  // restore the user's reading position via applyMode after the
-  // prepend grows scrollHeight upward. The anchor is the topmost
-  // currently-rendered message; after prepend, it has the same
-  // data-key but a new (larger) offsetTop. ANCHOR_AT{key, offset}
-  // lands the user at the same visual position.
-  // (loadingOlder ref is declared earlier alongside the useScrollMode
-  // hook call — it's passed to the hook to gate the scroll handler.)
-  function loadOlderMessages(before = offset) {
+  // Paginate older messages. Once the response arrives, capture the reader's
+  // exact visible message (including a nested content part), prepend the rows,
+  // and restore that coordinate in the same task before paint. Capturing at
+  // request start would be stale whenever touch momentum continues in flight.
+  function loadOlderMessages(before = offset, { readerDriven = false } = {}) {
     const el = scrollRef.current
     if (!el || loadingOlder.current || loading || before <= 0) return
     loadingOlder.current = true
     setOlderHistoryError(false)
-    // Snapshot the topmost rendered msg + its current offset for
-    // post-prepend restore. The anchor key/offset is stable: after
-    // the prepend, the SAME message has a larger offsetTop (older
-    // messages are inserted above it), and ANCHOR_AT{key, offset}
-    // resolves to the new offsetTop minus the original gap → no
-    // visible jump.
-    const topMsg = el.querySelector('.chat__msg[data-key]')
-    const anchorKey = topMsg?.dataset?.key || null
-    const anchorOffset = topMsg ? topMsg.offsetTop - el.scrollTop : 0
-    // We deliberately do NOT save the previous mode to restore later.
+    const paginationLifecycle = paginationLifecycleRef.current
+    const requestIsCurrent = () => (
+      paginationLifecycleRef.current === paginationLifecycle
+      && !chatIdStaleRef.current
+    )
+    const paginationRequest = capturePaginationRequest()
+    // We deliberately do NOT save the pre-pagination mode to restore later.
     // The user paginated — their intent is now to read older content.
     // If the previous mode was FOLLOW_BOTTOM and we restored it,
     // the next layout event (e.g., a streaming token) would yank
@@ -2762,7 +2766,7 @@ export default function ChatView({
     )
       .then(r => jsonOrThrow(r, 'Earlier messages failed to load'))
       .then(data => {
-        if (chatIdStaleRef.current) return
+        if (!requestIsCurrent()) return
         const older = data.messages || []
         for (const msg of older) {
           if (msg.blocks) {
@@ -2773,38 +2777,37 @@ export default function ChatView({
             }
           }
         }
-        // Set the temporary anchor mode BEFORE commitMessages so the
-        // ensuing layout effect (triggered by [messages] change)
-        // applies the anchor instead of intentMode. Otherwise the
-        // layout effect runs first with intentMode (e.g., PIN at the
-        // user msg's NEW offsetTop) → visible jump → then our rAF
-        // would set the anchor → second jump.
-        if (anchorKey) {
-          anchorPagination(anchorKey, anchorOffset)
-        }
+        // Capture NOW, not before the request: momentum/touch may have moved
+        // the reader while the network was in flight. Commit the page
+        // synchronously and compensate that same coordinate before paint, so
+        // prepended rows never flash and then snap back into place.
+        const paginationAnchor = preparePaginationPrepend(paginationRequest)
         const nextOffset = data.offset || 0
-        commitMessages(prev => [...older, ...prev], nextOffset)
-        requestAnimationFrame(() => {
-          // The layout effect has run with ANCHOR_AT — applyMode
-          // landed the topmost-pre-prepend msg at the same visual
-          // position. We deliberately DON'T restore the previous
-          // mode: user paginated → their intent is to read older
-          // content. The ANCHOR_AT mode keeps them there across
-          // subsequent layout events (incoming tokens, etc). Their
-          // next gesture (or send) writes a fresh mode.
+        flushSync(() => {
+          commitMessages(prev => [...older, ...prev], nextOffset)
+        })
+        restorePaginationPrepend(paginationAnchor)
+        // Keep the network guard raised through the browser's matching scroll
+        // event, then decide whether this same reader-driven prefetch still
+        // needs another bounded page. The controller separately suppresses
+        // only the exact compensation coordinate, never in-flight touch.
+        paginationFollowupRafRef.current = requestAnimationFrame(() => {
+          paginationFollowupRafRef.current = 0
+          if (!requestIsCurrent()) return
           loadingOlder.current = false
           const scrollEl = scrollRef.current
           if (
             scrollEl
             && nextOffset > 0
             && nextOffset < before
-            && olderHistoryShouldLoad(scrollEl)
+            && olderHistoryShouldLoad(scrollEl, { userDriven: readerDriven })
           ) {
-            loadOlderMessages(nextOffset)
+            loadOlderMessages(nextOffset, { readerDriven })
           }
         })
       })
       .catch(() => {
+        if (!requestIsCurrent()) return
         loadingOlder.current = false
         setOlderHistoryError(true)
       })
@@ -2843,7 +2846,7 @@ export default function ChatView({
     // visible interruption instead of waiting for the absolute top.
     const userDriven = performance.now() < gestureWindowUntilRef.current
     if (offset > 0 && olderHistoryShouldLoad(el, { userDriven })) {
-      loadOlderMessages()
+      loadOlderMessages(offset, { readerDriven: userDriven })
     }
   }
 
@@ -5708,7 +5711,7 @@ export default function ChatView({
           )}
 
           <PeerTimelineRows notes={peerTimeline.slots.get(displayedMessages.length)} chatId={chatId} onInternalNav={internalNav} />
-          {peerTimeline.error && <li className="chat__peer-load-error" role="status">Chat activity couldn’t refresh. <button type="button" onClick={() => peerTimeline.retry()}>Try again</button></li>}
+          <PeerTimelineLoadError error={peerTimeline.error} onRetry={peerTimeline.retry} />
 
           {/* Steering is accepted locally before the provider control channel
               acknowledges it. Keep the durable rows out of the actionable
@@ -5772,7 +5775,7 @@ export default function ChatView({
                     <button
                       type="button"
                       className="chat__history-retry"
-                      onClick={() => loadOlderMessages()}
+                      onClick={() => loadOlderMessages(offset, { readerDriven: true })}
                     >
                       Earlier messages didn’t load — retry
                     </button>

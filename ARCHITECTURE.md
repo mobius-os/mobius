@@ -445,6 +445,7 @@ The chat is large and self-contained; its hooks live beside it, not in `src/hook
 | `msgText.js` | Strips `<agent_experience>` blocks + the hidden attachment manifest from message text |
 | `useStreamConnection.js` | SSE connection, text buffering, typewriter drain, sleep/wake reconnect |
 | `useScrollMode.js` | Scroll-mode state machine |
+| `usePaginationLifecycle.js` | Commit-boundary fence for asynchronous older-history requests and delayed follow-up frames |
 | `useVoiceInput.js` | Web Speech API with Android-Chrome workarounds |
 | `useFileUpload.js` | File-upload state + API calls |
 | `hooks/usePendingQueue.js` | Owns the pending-queue state + all its mutations (optimistic vs server-confirmed `serverTs` rows); its `pendingMessagesRef` is what `handleStop` snapshots and the steer/fast-forward gate reads |
@@ -582,7 +583,7 @@ installing Möbius.
 
 ## Chat scroll + steer contract
 
-**Owner-authoritative contract — v1.25 (2026-08-24).** This section is the
+**Owner-authoritative contract — v1.26 (2026-09-12).** This section is the
 canonical source of truth for how a chat scrolls and steers. When implementation,
 comments, and this contract disagree, the implementation/comments are the bug:
 fix behavior to match this contract. If a real case is unspecified or the desired
@@ -765,6 +766,30 @@ and attaches their rule ids to new diagnostic chats. The Playwright lock-in spec
   newer gesture is rejected; once that gesture settles, the controller adopts the
   current semantic location and performs one fresh geometry reconciliation. Waiting
   for the timing gate to expire never gives stale work its authority back.
+  Historical pagination is the narrow exception for a non-semantic viewport
+  compensation: after an older page arrives it captures the reader's latest
+  nested content anchor, prepends and commits the rows synchronously, then moves
+  `scrollTop` by exactly the inserted geometry before the same frame can paint.
+  That compensation may run while touch or momentum still owns the viewport
+  because it preserves rather than changes the content under the reader; it is
+  rejected if any newer reader-intent generation landed after capture. Network
+  time never owns an anchor or suppresses genuine reader movement. The captured
+  compensation transaction survives the prepend's immediate React effect
+  reinstall, rebases the live momentum direction into the translated coordinate
+  space, and ignores only scroll events at its exact same-frame target. A
+  stronger semantic mode chosen after the request began (such as Jump to
+  latest, Send, or question submission) remains authoritative even when no
+  physical scroll advanced the reader generation, but only until a later
+  physical generation takes ownership. Each adopted mode records the reader
+  generation at which it became current so mixed semantic/physical order is
+  explicit rather than inferred from mode identity alone. An activation's
+  asynchronous page responses are retired by layout-effect cleanup inside the
+  commit that replaces its chat/search/load identity; passive cleanup is too
+  late because a resolved response microtask could otherwise publish old-chat
+  rows after the new transcript commits.
+  User-driven history prefetch begins several visible
+  viewports before the loaded boundary and may continue bounded pages while that
+  headroom remains depleted; programmatic top landings still fetch nothing.
   An end-directed input already clamped at the tail may enter `FOLLOW_BOTTOM`
   without advancing that generation: no scroll occurred, so a delayed queued send
   retains the submit-time pin decision that the generation protects.
@@ -1331,21 +1356,29 @@ Platform restarts use the narrower `mobius_control.request_restart` and
 `POST /api/chats/{id}/restart-request`. The caller supplies no command, commit,
 or option identity. The server derives an immutable action from the relevant
 committed restart-loadable source and adds server-generated option ids to a
-typed **Restart now** / **Not now** card. A selected **Restart now** is an
-owner action dispatched by the platform, not a synthetic Yes message or a new
-agent turn. The durable execution claim precedes the side effect and is
-at-most-once: a lost acknowledgement or ambiguous death is reconciled against
-boot evidence, never blindly replayed.
+typed card with one **Restart now** action and an ordinary written-response
+path. A selected **Restart now** is an owner action dispatched by the platform,
+not a synthetic Yes message or a new agent turn. Written feedback atomically
+cancels that card's activation wait and queues a normal continuation without
+granting restart authority. The durable execution claim precedes the side
+effect and is at-most-once: a lost acknowledgement or ambiguous death is
+reconciled against boot evidence, never blindly replayed.
 
 Each restart card links to a typed activation wait naming its physical run,
-Goal root and exact source-byte requirement. Startup captures one immutable
-loaded-source/readiness snapshot after database and writer readiness; that
-snapshot can satisfy every matching chat independently, including when the
-restart originated in Settings or another chat. Exact file bytes (and required
-absence for deleted paths), not Git ancestry alone, prove activation. A linked
-activation barrier keeps the interrupted work ahead of later queued messages
-until its writer-authenticated continuation owns recovery. Stop/dismissal also
-cancels a met-but-undelivered linked activation wait; ordinary question,
+Goal root and originating boot. Startup captures one immutable ready-boot
+receipt after database and writer readiness; any later receipt wakes every
+linked chat independently, including when the restart originated in Settings
+or another chat. The resumed agent verifies whether its changes loaded rather
+than duplicating that judgment in the wait with file-version checks. A linked
+activation barrier keeps an **approved** restart's interrupted work ahead of
+later queued messages until its writer-authenticated continuation owns recovery.
+Legacy version-1 cards that choose **Not now** leave the activation monitor
+armed for a later restart but release ordinary owner input
+immediately; a passive monitor never suspends the chat. Platform activation
+waits do not expire on an arbitrary wall-clock deadline: they remain open
+until the owner responds, a later boot wakes them, or their owning work is
+cancelled. Stop/dismissal also cancels a met-but-undelivered linked
+activation wait; ordinary question,
 secure-input, manual-crash, usage and unrelated wait barriers retain their own
 lifecycle.
 

@@ -14,6 +14,7 @@ import { isContinuationMessage } from './chatRuntimeState.js'
 import { questionKey } from './questionKey.js'
 import {
   repairInterleavedQuestionText,
+  restartCardActivityEntries,
   suppressedQuestionToolIndices,
 } from './streamReducers.js'
 import { stripAugmentation } from './msgText.js'
@@ -175,6 +176,9 @@ function MsgContentInner({
     // is render-time as well as reducer-time so already-saved chats self-heal
     // without rewriting partner transcripts.
     const displayBlocks = repairInterleavedQuestionText(msg.blocks?.length ? msg.blocks : msg.content ? [{ type: 'text', content: msg.content }] : [])
+    const hasRestartCard = displayBlocks.some(block => (
+      block?.type === 'question' && block?.platform_action?.type === 'restart'
+    ))
     // The persisted transcript keeps the raw AskUserQuestion tool block
     // AND the question card (backend events.process_event appends both);
     // the live stream absorbs the tool twin into the card. Skip the twin
@@ -235,13 +239,21 @@ function MsgContentInner({
     // nodes — text, question, error, and provider context compaction.
     const renderBlock = (block, i) => {
       if (block.type === 'activity' && Array.isArray(block.entries)) {
+        // Cold, very long turns can reach this renderer with their adjacent
+        // tools already folded into an activity block. Filter the platform
+        // call inside that block too; the Restart card is its complete visible
+        // replacement, while unrelated commands remain inspectable.
+        const visibleEntries = restartCardActivityEntries(
+          block.entries, hasRestartCard,
+        )
+        if (visibleEntries.length === 0) return null
         return (
           <div
             key={block.activity_id || `activity-${i}`}
             className="chat__tools"
           >
             <ActivityStretch
-              entries={block.entries}
+              entries={visibleEntries}
               chatId={chatId}
               live={false}
               surfaceKey={messageKey}
@@ -250,7 +262,7 @@ function MsgContentInner({
                 start: block.start,
                 end: block.end,
               }}
-              summaryToolCount={block.tool_count}
+              summaryToolCount={visibleEntries.filter(({ item }) => item?.type === 'tool').length}
               onInternalNav={onInternalNav}
             />
           </div>
