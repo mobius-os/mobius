@@ -51,6 +51,8 @@ import {
 import {
   inspectOutboxIntent,
   cancelLocalIntent,
+  discardRejectedIntent,
+  retryRejectedIntent,
   editLocalIntent,
   outboxPrincipalKey,
   retireIntent,
@@ -3983,6 +3985,12 @@ export default function ChatView({
     const currentQueue = pendingQueue.pendingMessagesRef.current
     const cancelledIndex = currentQueue.findIndex(row => cidOf(row) === cid)
     const cancelledRow = cancelledIndex >= 0 ? currentQueue[cancelledIndex] : null
+    if (cancelledRow?.recoveryAvailable) {
+      const result = await discardRejectedIntent(cid, { chatId, principalKey: outboxPrincipalKey(getToken()) })
+      if (result.status === 'discarded') forgetSendIntent({ cid })
+      else setSendFailure('Couldn’t discard this local copy. It is still kept on this device.')
+      return
+    }
     const local = await cancelLocalIntent(cid, { chatId, principalKey: outboxPrincipalKey(getToken()) })
     if (local.status === 'cancelled') {
       pendingQueue.cancelByCid(cid)
@@ -4061,6 +4069,11 @@ export default function ChatView({
       }
     }
   }, [chatId, pendingQueue, setSendFailure])
+
+  const handleRetryRejected = useCallback(async cid => {
+    const result = await retryRejectedIntent(cid, { chatId, principalKey: outboxPrincipalKey(getToken()) })
+    if (result.status !== 'queued') setSendFailure('Couldn’t retry yet. Your message is still kept on this device.')
+  }, [chatId, setSendFailure])
 
   const handleUpdatePending = useCallback(async (cid, content) => {
     const local = await editLocalIntent(cid, {
@@ -4538,12 +4551,12 @@ export default function ChatView({
       // confirms/removes each row before this continuation reads the queue.
       const queueWrites = [...queuedSendRequestsRef.current.values()]
       if (queueWrites.length > 0) await Promise.allSettled(queueWrites)
-      const snapshot = pendingQueue.getVisiblePendingMessages()
+      const snapshot = pendingQueue.getSteerCandidates()
       // Only server-confirmed entries can be force-steered: the backend
       // reconstructs the durable rows from chat.pending_messages, so an
       // optimistic-only entry whose queue-POST hasn't acked yet is not visible
       // there and its cid selects nothing. We take the simpler-correct option:
-      // only steer when EVERY queued entry is serverTs-confirmed (usePendingQueue
+      // only steer when EVERY queue candidate is serverTs-confirmed (usePendingQueue
       // sets that flag on the confirmQueued / hydrate paths). The awaited writes
       // above should establish that state, so this is belt-and-suspenders — if a
       // rejected or otherwise stray optimistic entry slips in, bail
@@ -4557,7 +4570,7 @@ export default function ChatView({
       )) {
         await reconcileRuntimeState()
       }
-      const confirmedSnapshot = pendingQueue.getVisiblePendingMessages()
+      const confirmedSnapshot = pendingQueue.getSteerCandidates()
       const allServerConfirmed = confirmedSnapshot.length > 0 && confirmedSnapshot.every(
         m => typeof m.ts === 'number' && m.serverTs === true,
       )
@@ -4584,8 +4597,7 @@ export default function ChatView({
     try {
       const queueWrite = queuedSendRequestsRef.current.get(cid)
       if (queueWrite) await Promise.allSettled([queueWrite])
-      const findRow = () => (pendingQueue.pendingMessagesRef.current || [])
-        .find(m => cidOf(m) === cid)
+      const findRow = () => pendingQueue.getSteerCandidates().find(m => cidOf(m) === cid)
       let row = findRow()
       if (row && !(typeof row.ts === 'number' && row.serverTs === true)) {
         await reconcileRuntimeState()
@@ -5171,14 +5183,15 @@ export default function ChatView({
   // steer button here is a dead end. Keep the existing deterministic Stop path
   // available instead: Stop cancels the question first, interrupts the turn,
   // and re-sends the queued rows as one fresh continuation.
+  const steerCandidates = pendingQueue.getSteerCandidates()
   const showSteer = !hasPendingQuestion
     && deliveryReady
     && connectionError !== 'disconnected'
     && turnActive
-    && pendingQueue.visiblePendingMessages.length > 0
+    && steerCandidates.length > 0
   const canRequestSteer = showSteer && !steerBusy
   const canSteer = canRequestSteer
-    && canFastForwardQueue(pendingQueue.visiblePendingMessages, turnActive)
+    && canFastForwardQueue(steerCandidates, turnActive)
   const canSubmitSteer = !hasPendingQuestion
     && deliveryReady
     && connectionError !== 'disconnected'
@@ -5989,6 +6002,7 @@ export default function ChatView({
         <QueuedMessages
             items={pendingQueue.visiblePendingMessages}
             onCancel={handleCancelPending}
+            onRetry={handleRetryRejected}
             onEdit={handleUpdatePending}
             onSteerOne={handleSteerOne}
             steerActive={turnActive && !hasPendingQuestion && deliveryReady}
