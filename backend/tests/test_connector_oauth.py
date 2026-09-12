@@ -254,6 +254,7 @@ def test_oauth_add_signin_broker_and_disconnect(client, auth, db, provider):
   meta = client.get("/api/connectors/oauth/client-metadata.json")
   assert meta.status_code == 200
   assert meta.json()["client_id"] == meta.json()["client_id"]
+  assert meta.json()["client_name"] == "Möbius Integrations"
   assert meta.json()["redirect_uris"][0].endswith("/api/connectors/oauth/callback")
 
   # 3. Start sign-in → authorize URL with PKCE + resource + sealed state.
@@ -281,6 +282,7 @@ def test_oauth_add_signin_broker_and_disconnect(client, auth, db, provider):
     params={"code": "auth-code", "state": state, "iss": AS_ISSUER},
   )
   assert callback.status_code == 200
+  assert "<title>Integrations sign-in</title>" in callback.text
   assert "connected" in callback.text
 
   listed = client.get("/api/connectors", headers=auth).json()["connectors"]

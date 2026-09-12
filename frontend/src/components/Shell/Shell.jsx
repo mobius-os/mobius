@@ -4344,8 +4344,9 @@ export default function Shell({ onInitialVisualReady }) {
       && chatsQuery.isFetchedAfterMount
     if (!liveFetched) return
     // Only bootstrap a starter chat while the chat view is what's
-    // showing. A deep-link to /app/:id (push-notification tap, PWA
-    // launch-at-app) sets activeView='canvas' with activeChatId still
+    // showing. A current /shell/?app=<id-or-slug> deep-link (a
+    // push-notification tap or PWA launch-at-app) sets
+    // activeView='canvas' with activeChatId still
     // null; without the activeView guard this fires newChat(), which
     // flips activeView to 'chat' and buries the deep-linked app behind
     // the empty chat. It only bites a zero-chat instance — a populated
