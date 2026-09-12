@@ -65,7 +65,7 @@ The `/data` volume persists across `docker compose build && up -d`, so a new ima
 
 Möbius is meant to be self-hosted on a user-provisioned host — a managed platform (Railway/Render/Fly/PikaPods) or a raw VPS — so "apply a security update" splits into three tiers by who can even act:
 
-- **Image userspace** — the Python wheels, npm globals, apt packages, and vendored mini-app libs baked into the image. The agent owns these end-to-end: install a task’s named dependency into the running container when safe, then record the same resolution in its manifest and lockfile (and Dockerfile when needed). A new process can use the live install immediately; restart only when an existing process must load it. Declarations preserve reproducibility after container replacement; they do not require an immediate rebuild. Avoid blanket upgrades. Use the host-owned deployment path only when live activation is impossible or image validation was explicitly requested. Full root is an honest default instance capability: the root entrypoint creates `mobius ALL=(root) NOPASSWD: ALL` before dropping privileges. `MOBIUS_AGENT_SUDO=0` is the coarse operator kill switch and ships with no sudoers rule. Changing either direction requires a clean recreation because an already-root agent could have installed persistent-in-container privilege paths.
+- **Image userspace** — the Python wheels, npm globals, apt packages, and vendored mini-app libs baked into the image. The agent owns these end-to-end: change the declared constraint (`Dockerfile` / `backend/requirements.txt` / `frontend/package.json`), regenerate the hashed Python lock, rebuild, recreate. Never `apt upgrade` / `pip install -U` a *running* container — that mutation is ephemeral and drifts the live container away from the reproducible image. `deploy-prod.sh` is the apply path. Full root is an honest default instance capability: the root entrypoint creates `mobius ALL=(root) NOPASSWD: ALL` before dropping privileges. `MOBIUS_AGENT_SUDO=0` is the coarse operator kill switch and ships with no sudoers rule. Changing either direction requires a clean recreation because an already-root agent could have installed persistent-in-container privilege paths.
 - **Host OS userspace + the Docker engine** — outside every container; patched on the host (`unattended-upgrades` covers the OS packages; the engine is a separate host upgrade).
 - **Host kernel** — *not in the container*; it shares the host's and cannot be patched from inside. On a managed platform the operator patches+reboots the kernel underneath you (the safe default for non-devops owners); on a raw VPS it's the owner's job, via `unattended-upgrades` + livepatch + a scheduled reboot window.
 
@@ -229,6 +229,15 @@ a successfully initialized database with every mapped table and column, and
 the single-writer persistence actor. Deployment and container probes use
 readiness. `GET /api/health/strict` retains the database-only diagnostic
 contract.
+
+The shell's `connectivityStore.js` owns reachability, service readiness, and
+restart observation together. A response proves reachability even when the
+service is not ready; delivery requires readiness and no unresolved restart.
+`/api/ready` and `server_restarting` carry the worker's boot identity so an old
+worker cannot acknowledge its own replacement. During a frontend-first
+upgrade, an identity-less legacy restart event can be completed by a ready
+response that includes the new boot-identity field. One response proves both
+readiness and identity; there is no secondary health probe or timer fallback.
 
 Boot runs `create_all`, append-only migrations, and `mapped_schema_gaps()` before
 starting any database owner. A migration/initialization failure or remaining
@@ -1330,6 +1339,17 @@ its actual matched card, including unkeyed requests racing a newly saved card.
 The frontend settles quiet replies without replacing the stream, touching the
 composer, or arming a response-follow latch; outbox replay uses the existing
 settlement subscription to refresh authoritative card detail.
+
+`chatOutbox.js` owns browser-local message and answer delivery. Its tray/card
+projection never advances the transcript before authoritative acceptance.
+A background message rejected by the server keeps its exact body as a retired,
+recoverable local copy: it is not eligible for automatic replay. Retirement's
+cleanup token authorizes physical deletion; retaining a failure without that
+token is also understood by older open tabs, which skip it. Explicit Retry
+reuses the same body and client identity; Discard removes only the local copy.
+Both transitions use the existing outbox transaction and replay lock. No
+separate failure database or logout lifetime is introduced. The server's queue
+continues to own turn ordering, and each question card owns its answer draft.
 
 Platform restarts use the narrower `mobius_control.request_restart` and
 `POST /api/chats/{id}/restart-request`. The caller supplies no command, commit,

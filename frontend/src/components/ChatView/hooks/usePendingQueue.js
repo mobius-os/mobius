@@ -1,11 +1,11 @@
 import { useState, useRef, useCallback, useLayoutEffect } from 'react'
-import { listIntents, subscribeOutboxChanges } from '../chatOutbox.js'
+import { listIntents, retireIntent, subscribeOutboxChanges } from '../chatOutbox.js'
 import { cidOf } from '../messageIdentity.js'
 
 /**
- * Hook that owns the per-chat pending-message queue (the items shown
- * in the queued-tray above the composer) and ALL the legitimate
- * mutations against it. Encapsulates the setState/ref-mirror dance
+ * Owns the per-chat pending-message projection and its UI mutations. Server
+ * acceptance belongs to the chat queue; unsent intent and recoverable
+ * rejection belong to chatOutbox. Encapsulates the setState/ref-mirror dance
  * that previously lived inline in ChatView.jsx at several call sites,
  * the natural drift between which is the bug class this hook exists
  * to prevent.
@@ -63,7 +63,7 @@ import { cidOf } from '../messageIdentity.js'
  *   pendingMessagesRef: React.MutableRefObject<PendingMsg[]>,
  *   visiblePendingMessages: PendingMsg[],
  *   steerReservedMessages: PendingMsg[],
- *   getVisiblePendingMessages: () => PendingMsg[],
+ *   getSteerCandidates: () => PendingMsg[],
  *   reserveForSteer: (cidList: string[]) => void,
  *   releaseSteerReservation: (cidList: string[]) => void,
  *   add: (msg: PendingMsg, opts?: {inFlight?: boolean}) => void,
@@ -146,7 +146,7 @@ export default function usePendingQueue(initialServerList = [], { chatId, princi
   // A failed POST does not end local ownership; nor does a delivered receipt
   // until the same cid is observed in authoritative queue/transcript state.
   const localMessageCidsRef = useRef(new Set())
-  const serverObservedCidsRef = useRef(new Set(initialPending.map(cidOf)))
+  const intentDispositionsRef = useRef(new Map(initialPending.map(msg => [cidOf(msg), 'accepted'])))
   const acknowledgedQuestionIdsRef = useRef(new Set())
   // These observations fence only the initial asynchronous disk read; they
   // are discarded when that read settles, not accumulated for the whole chat.
@@ -154,6 +154,16 @@ export default function usePendingQueue(initialServerList = [], { chatId, princi
   const observedCidsRef = useRef(new Set(initialPending.map(cidOf)))
   const [localAnswerIntents, setLocalAnswerIntents] = useState([])
   const scopeRef = useRef({ chatId, principalKey })
+
+  // Exact queue/transcript identities acknowledge the intent, not a render or
+  // a successful fetch alone. One disposition map also fences local removal;
+  // cancellation must never masquerade as proof of server acceptance.
+  const acknowledgeServerIntent = useCallback(cid => {
+    intentDispositionsRef.current.set(cid, 'accepted')
+    if (pendingMessagesRef.current.some(row => cidOf(row) === cid && row.recoveryAvailable)) {
+      void retireIntent(cid, { ...scopeRef.current, outcome: 'delivered' })
+    }
+  }, [])
 
   const applySteerReservations = useCallback((updater) => {
     const next = typeof updater === 'function'
@@ -183,9 +193,11 @@ export default function usePendingQueue(initialServerList = [], { chatId, princi
     })
   }, [applySteerReservations])
 
-  const getVisiblePendingMessages = useCallback(
+  // Recovery copies stay readable in the tray but are not pending server work.
+  // Optimistic queued rows remain candidates; dispatch separately awaits proof.
+  const getSteerCandidates = useCallback(
     () => pendingMessagesRef.current.filter(
-      msg => !msg.hidden && !steerReservedCidsRef.current.has(cidOf(msg)),
+      msg => !msg.hidden && !msg.recoveryAvailable && !steerReservedCidsRef.current.has(cidOf(msg)),
     ),
     [],
   )
@@ -246,7 +258,7 @@ export default function usePendingQueue(initialServerList = [], { chatId, princi
     inFlightCidsRef.current.delete(cid)
     localMessageCidsRef.current.delete(cid)
     if (initialReadPendingRef.current) observedCidsRef.current.add(cid)
-    serverObservedCidsRef.current.add(cid)
+    acknowledgeServerIntent(cid)
     apply(prev => prev.map(m => {
       if (cidOf(m) !== cid) return m
       const next = {
@@ -255,13 +267,14 @@ export default function usePendingQueue(initialServerList = [], { chatId, princi
         cid,
         queued: true,
         localOnly: false,
+        recoveryAvailable: false,
         ts: ts ?? serverMsg?.ts ?? m.ts,
         serverTs: true,
       }
       if (position !== undefined) next.position = position
       return next
     }))
-  }, [apply])
+  }, [acknowledgeServerIntent, apply])
 
   const promoteByCid = useCallback((cid) => {
     const current = pendingMessagesRef.current
@@ -274,14 +287,14 @@ export default function usePendingQueue(initialServerList = [], { chatId, princi
       inFlightCidsRef.current.delete(promoted.cid)
       localMessageCidsRef.current.delete(promoted.cid)
       if (initialReadPendingRef.current) observedCidsRef.current.add(promoted.cid)
-      serverObservedCidsRef.current.add(promoted.cid)
+      acknowledgeServerIntent(promoted.cid)
     }
     const rest = current.filter((_, i) => i !== idx)
     pendingMessagesRef.current = rest
     setPendingMessages(rest)
     releaseSteerReservation([cidOf(promoted)])
     return promoted
-  }, [releaseSteerReservation])
+  }, [acknowledgeServerIntent, releaseSteerReservation])
 
   const promoteAll = useCallback((cid) => {
     const current = pendingMessagesRef.current
@@ -295,7 +308,7 @@ export default function usePendingQueue(initialServerList = [], { chatId, princi
         inFlightCidsRef.current.delete(m.cid)
         localMessageCidsRef.current.delete(m.cid)
         if (initialReadPendingRef.current) observedCidsRef.current.add(m.cid)
-        serverObservedCidsRef.current.add(m.cid)
+        acknowledgeServerIntent(m.cid)
       }
     }
     const promoted = _combinePromoted(promotedGroup)
@@ -303,7 +316,7 @@ export default function usePendingQueue(initialServerList = [], { chatId, princi
     setPendingMessages(kept)
     releaseSteerReservation(promotedGroup.map(m => cidOf(m)))
     return promoted
-  }, [releaseSteerReservation])
+  }, [acknowledgeServerIntent, releaseSteerReservation])
 
   const promoteManyByCid = useCallback((cidList) => {
     const wanted = new Set((cidList || []).filter(c => c != null))
@@ -317,7 +330,7 @@ export default function usePendingQueue(initialServerList = [], { chatId, princi
         inFlightCidsRef.current.delete(m.cid)
         localMessageCidsRef.current.delete(m.cid)
         if (initialReadPendingRef.current) observedCidsRef.current.add(m.cid)
-        serverObservedCidsRef.current.add(m.cid)
+        acknowledgeServerIntent(m.cid)
       }
     }
     const promoted = _combinePromoted(promotedGroup)
@@ -325,7 +338,7 @@ export default function usePendingQueue(initialServerList = [], { chatId, princi
     setPendingMessages(kept)
     releaseSteerReservation(promotedGroup.map(m => cidOf(m)))
     return promoted
-  }, [releaseSteerReservation])
+  }, [acknowledgeServerIntent, releaseSteerReservation])
 
   const cancelByCid = useCallback((cid) => {
     // A cancelled entry is genuinely gone; drop its in-flight mark so it
@@ -333,7 +346,7 @@ export default function usePendingQueue(initialServerList = [], { chatId, princi
     inFlightCidsRef.current.delete(cid)
     localMessageCidsRef.current.delete(cid)
     if (initialReadPendingRef.current) observedCidsRef.current.add(cid)
-    serverObservedCidsRef.current.add(cid)
+    intentDispositionsRef.current.set(cid, 'cancelled')
     apply(prev => prev.filter(m => cidOf(m) !== cid))
     releaseSteerReservation([cid])
   }, [apply, releaseSteerReservation])
@@ -377,7 +390,7 @@ export default function usePendingQueue(initialServerList = [], { chatId, princi
     for (const cid of completedCids) {
       localMessageCidsRef.current.delete(cid)
       inFlightCidsRef.current.delete(cid)
-      serverObservedCidsRef.current.add(cid)
+      acknowledgeServerIntent(cid)
       if (initialReadPendingRef.current) observedCidsRef.current.add(cid)
     }
     const local = (pendingMessagesRef.current || []).filter(m => !completedCids.has(cidOf(m)))
@@ -392,7 +405,7 @@ export default function usePendingQueue(initialServerList = [], { chatId, princi
         inFlightCidsRef.current.delete(cid)
         localMessageCidsRef.current.delete(cid)
         if (initialReadPendingRef.current) observedCidsRef.current.add(cid)
-        serverObservedCidsRef.current.add(cid)
+        acknowledgeServerIntent(cid)
       }
       return { ...m, cid, queued: true, serverTs: true, localOnly: false }
     })
@@ -424,7 +437,7 @@ export default function usePendingQueue(initialServerList = [], { chatId, princi
       const kept = new Set([...prev].filter(cid => nextCidSet.has(cid)))
       return kept.size === prev.size ? prev : kept
     })
-  }, [applySteerReservations])
+  }, [acknowledgeServerIntent, applySteerReservations])
 
   const clear = useCallback(() => {
     if (initialReadPendingRef.current) {
@@ -469,7 +482,7 @@ export default function usePendingQueue(initialServerList = [], { chatId, princi
       scopeRef.current = { chatId, principalKey }
       clear()
       observedCidsRef.current.clear()
-      serverObservedCidsRef.current.clear()
+      intentDispositionsRef.current.clear()
       acknowledgedQuestionIdsRef.current.clear()
       setLocalAnswerIntents([])
     }
@@ -488,13 +501,19 @@ export default function usePendingQueue(initialServerList = [], { chatId, princi
         ])
       } else if (!record.body.hidden) {
         // A late failed POST cannot undo a newer authoritative queue/cut.
-        if (serverObservedCidsRef.current.has(cid)) return
+        if (intentDispositionsRef.current.has(cid)) {
+          if (intentDispositionsRef.current.get(cid) === 'accepted' && record.recovery === 'rejected') {
+            void retireIntent(cid, { chatId, principalKey, outcome: 'delivered' })
+          }
+          return
+        }
         localMessageCidsRef.current.add(cid)
         add({
           role: 'user', content: record.body.content,
           attachments: record.body.attachments, cid, ts: record.createdAt,
           queued: true, localOnly: true, serverTs: false,
           dispatchStarted: record.dispatchStarted,
+          recoveryAvailable: record.recovery === 'rejected',
         })
       }
     }
@@ -520,7 +539,6 @@ export default function usePendingQueue(initialServerList = [], { chatId, princi
         return
       }
       inFlightCidsRef.current.delete(cid)
-      serverObservedCidsRef.current.delete(cid)
       if (change.outcome === 'delivered') {
         // Retirement ends replay, not presentation. Keep rows/cards through
         // the receipt-to-authoritative-refresh gap.
@@ -556,7 +574,7 @@ export default function usePendingQueue(initialServerList = [], { chatId, princi
     acknowledgeLocalAnswers,
     visiblePendingMessages,
     steerReservedMessages,
-    getVisiblePendingMessages,
+    getSteerCandidates,
     reserveForSteer,
     releaseSteerReservation,
     add,

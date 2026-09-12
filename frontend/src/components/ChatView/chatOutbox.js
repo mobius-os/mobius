@@ -14,6 +14,14 @@ const OUTBOX_STORE = 'intents-v1'
 const OUTBOX_REPLAY_LOCK = 'mobius-chat-outbox'
 const store = createStore(OUTBOX_DB, OUTBOX_STORE)
 
+// Retirement ends replay; a cleanup token separately authorizes deleting the
+// payload. A rejected message has no cleanup token until the owner discards it
+// or its explicit retry succeeds. Older clients already honor that distinction.
+function hasRejectedCopy(record) {
+  return record?.replayState === 'retired' && record.recovery === 'rejected'
+    && !record.retirement?.id
+}
+
 // One authorization rejection gets one attempt per loaded document. Keeping the
 // record preserves an expired owner's intent, while this memory-only latch keeps
 // a permanent 403 from being POSTed on every focus/visibility event. A new login
@@ -83,8 +91,9 @@ export function storedIntentOwnership(recordPrincipalKey, currentPrincipalKey) {
 //   delivered — accepted, duplicate, or an answer whose question is gone;
 //   retry     — transport/rate/server trouble; preserve order and retry later;
 //   auth      — keep, but attempt only once per loaded document;
-//   failed    — an authoritative client rejection; the interactive caller
-//               restores the draft, so silently replaying it later is wrong.
+//   failed    — an authoritative client rejection; never retry automatically.
+//               Background messages keep their body in a rejected local row;
+//               interactive callers and answer cards retain their own draft.
 export function classifyReplayOutcome({ ok, status, code }) {
   if (ok || status === 410) return 'delivered'
   // A follow-up behind a locally queued answer is still valid owner intent.
@@ -150,7 +159,7 @@ function mutateOwnedIntent(cid, { chatId, principalKey }, mutate) {
         result = { status: 'not_owned' }
         return
       }
-      if (record.replayState === 'retired') {
+      if (record.replayState === 'retired' && !hasRejectedCopy(record)) {
         result = { status: 'retired', record }
         return
       }
@@ -177,7 +186,7 @@ export async function enqueueIntent({ chatId, cid, type, body, principalKey, loc
     await update(key, existing => {
       const owned = existing?.principalKey === principalKey
         && String(existing.chatId) === String(chatId)
-      const active = owned && existing.replayState !== 'retired'
+      const active = owned && (existing.replayState !== 'retired' || hasRejectedCopy(existing))
       record = {
         chatId: String(chatId),
         cid: key,
@@ -188,6 +197,8 @@ export async function enqueueIntent({ chatId, cid, type, body, principalKey, loc
         principalKey,
         createdAt: owned ? Number(existing.createdAt || Date.now()) : Date.now(),
         authBlocked: false,
+        replayState: active ? existing.replayState : undefined,
+        recovery: active ? existing.recovery : undefined,
         locallyQueued: locallyQueued || (active && existing.locallyQueued === true),
         // Legacy records lack proof of never having reached the server.
         dispatchStarted: owned ? existing.dispatchStarted !== false : false,
@@ -223,7 +234,8 @@ export async function markIntentLocallyQueued(cid, owner = {}) {
 export async function claimIntentDispatch(cid, owner = {}) {
   try {
     const result = await mutateOwnedIntent(cid, owner, record => (
-      retirementFences.has(String(cid)) ? { status: 'retired' } : {
+      retirementFences.has(String(cid)) ? { status: 'retired' }
+        : record.replayState === 'retired' ? { status: 'retired' } : {
         status: 'claimed', record: { ...record, dispatchStarted: true },
       }
     ))
@@ -234,6 +246,68 @@ export async function claimIntentDispatch(cid, owner = {}) {
   } catch {
     return { status: 'unavailable' }
   }
+}
+
+// A background rejection has no interactive draft owner to restore the text.
+// Retain the complete intent, but remove automatic replay eligibility. In
+// particular, do not reset dispatchStarted: rejection of this attempt does not
+// prove that an earlier uncertain POST never reached the server.
+async function retainRejectedMessage(record) {
+  try {
+    const result = await mutateOwnedIntent(record.cid, record, current => ({
+      status: 'rejected',
+      record: { ...current, replayState: 'retired', recovery: 'rejected', retirement: undefined, locallyQueued: true },
+    }))
+    if (result.status === 'rejected') announceChange({ kind: 'enqueue', record: result.record })
+    return result.status === 'rejected' || result.status === 'retired' || result.status === 'absent'
+  } catch {
+    return false
+  }
+}
+
+// Retry reuses the exact cid and body. Only this explicit action re-enables a
+// rejected message; ordinary drains, re-enqueues, and edits cannot do so.
+export async function retryRejectedIntent(cid, owner = {}) {
+  return withIdleReplayLock(async () => {
+    try {
+      const result = await mutateOwnedIntent(cid, owner, record => {
+        if (!hasRejectedCopy(record)) return { status: 'not_rejected' }
+        const { replayState: _retired, recovery: _rejected, ...next } = record
+        return { status: 'queued', record: next }
+      })
+      if (result.status === 'queued') {
+        announceChange({ kind: 'enqueue', record: result.record, requestDelivery: true })
+      }
+      return result
+    } catch {
+      return { status: 'unavailable' }
+    }
+  })
+}
+
+// This discards a failed LOCAL COPY, not server-owned work. The UI names that
+// narrower action; cancellation of accepted work retains its existing guard.
+export async function discardRejectedIntent(cid, owner = {}) {
+  return withIdleReplayLock(async () => {
+    try {
+      const result = await mutateOwnedIntent(cid, owner, record => {
+        if (!hasRejectedCopy(record)) return { status: 'not_rejected' }
+        return { status: 'discarded', record: {
+          ...record, replayState: 'retired',
+          retirement: { id: retirementId(), outcome: 'discarded' },
+        } }
+      })
+      if (result.status === 'discarded') {
+        retirementFences.add(String(cid))
+        completeRetirement(String(cid), {
+          state: 'retired', record: result.record, retirement: result.record.retirement,
+        })
+      }
+      return result
+    } catch {
+      return { status: 'unavailable' }
+    }
+  })
 }
 
 // Older tabs replay under this existing lock but do not claim dispatch in
@@ -358,7 +432,7 @@ function cleanupRetiredIntent(key, expectedRetirementId) {
  */
 export async function retireIntent(
   cid,
-  { chatId = null, outcome = null } = {},
+  { chatId = null, outcome = null, principalKey = null } = {},
   { cleanup = cleanupRetiredIntent } = {},
 ) {
   if (!cid) return false
@@ -366,7 +440,7 @@ export async function retireIntent(
   retirementFences.add(key)
   let transition
   try {
-    transition = await transitionIntentToRetired(key, { chatId, outcome })
+    transition = await transitionIntentToRetired(key, { chatId, outcome, principalKey })
   } catch {
     return false
   }
@@ -492,7 +566,7 @@ export async function listIntents(principalKey) {
     const owned = []
     const cleanup = []
     for (const [key, value] of rows) {
-      if (value?.replayState === 'retired') {
+      if (value?.replayState === 'retired' && !hasRejectedCopy(value)) {
         if (value.retirement?.id) {
           cleanup.push(
             cleanupRetiredIntent(String(key), value.retirement.id)
@@ -567,6 +641,7 @@ async function drainInner({ deliver, principalKey, generation }) {
   for (const snapshot of records) {
     // An open card blocks that chat's follow-ups, not the answer that can
     // release them or delivery to unrelated chats.
+    if (snapshot.replayState === 'retired') continue
     if (questionBlockedChats.has(snapshot.chatId) && snapshot.type !== 'answer') continue
     if (retirementFences.has(String(snapshot.cid))) continue
     if (snapshot.authBlocked && authBlockedAttempted.has(snapshot.cid)) break
@@ -602,6 +677,10 @@ async function drainInner({ deliver, principalKey, generation }) {
       break
     }
 
+    if (outcome === 'failed' && (record.type || 'message') === 'message' && !record.body.hidden) {
+      if (!await retainRejectedMessage(record)) break
+      continue
+    }
     const retired = await retireIntent(record.cid, {
       chatId: record.chatId,
       outcome,

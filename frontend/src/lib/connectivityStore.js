@@ -103,9 +103,9 @@ export function createConnectivityStore({
   let evidenceRevision = 0
   let readinessRevision = 0
   let ready = false
-  let bootId = null
   let restartPending = false
   let restartSourceBootId = null
+  let restartFromLegacyServer = false
 
   function getSnapshot() { return publicOnline(state) }
   function getPhaseSnapshot() { return state.phase }
@@ -121,10 +121,15 @@ export function createConnectivityStore({
     ready = value
     notify()
   }
-  function setRestartPending(sourceBootId = bootId) {
+  function setRestartPending(sourceBootId) {
     evidenceRevision += 1
     readinessRevision += 1
-    restartSourceBootId = sourceBootId || bootId
+    restartSourceBootId = typeof sourceBootId === 'string' && sourceBootId.trim()
+      ? sourceBootId : null
+    // Old servers omit the field entirely. If this event beats our first
+    // probe, a later boot-identifying readiness response still proves that
+    // the upgraded backend replaced that legacy event producer.
+    restartFromLegacyServer = sourceBootId === undefined
     const changed = !restartPending
     restartPending = true
     ready = false
@@ -159,11 +164,16 @@ export function createConnectivityStore({
       })
       let body
       try { body = await response.json() } catch { /* A proxy response is not readiness. */ }
+      const isReadinessBody = typeof body?.ready === 'boolean'
+      const readinessBootId = isReadinessBody && typeof body?.boot_id === 'string' && body.boot_id.trim()
+        ? body.boot_id : null
+      const legacyReadiness = isReadinessBody && body.boot_id === undefined
       return {
         reachable: true,
         startedReadinessRevision,
-        ready: response.ok === true && body?.ready === true,
-        bootId: typeof body?.boot_id === 'string' ? body.boot_id : null,
+        ready: response.ok === true && body?.ready === true
+          && (legacyReadiness || readinessBootId !== null),
+        bootId: readinessBootId,
       }
     } catch {
       return { reachable: false }
@@ -192,12 +202,16 @@ export function createConnectivityStore({
         type: 'reachable', strong: false,
         navigatorOnline: navigatorTarget?.onLine !== false,
       }))
-      if (result.bootId) bootId = result.bootId
+      // Readiness and boot identity must come from the same response. The
+      // legacy producer omitted boot identity from both events and readiness;
+      // a modern readiness response therefore also proves its replacement.
       const laterBoot = result.bootId && restartSourceBootId
         && result.bootId !== restartSourceBootId
-      if (restartPending && result.ready && laterBoot) {
+      const upgradedLegacyServer = restartFromLegacyServer && result.bootId
+      if (restartPending && result.ready && (laterBoot || upgradedLegacyServer)) {
         restartPending = false
         restartSourceBootId = null
+        restartFromLegacyServer = false
         notify()
       }
       setReady(result.ready === true)

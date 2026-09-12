@@ -451,3 +451,107 @@ test('returning from background rechecks readiness before releasing queued deliv
   assert.equal(h.store.getDeliveryReadySnapshot(), true)
   stop()
 })
+
+test('frontend-first upgrade uses only readiness and waits for the modern backend', async () => {
+  let response = { ready: true }
+  const urls = []
+  const h = harness(async url => { urls.push(url); return Response.json(response) })
+  await h.store.verify()
+  assert.equal(h.store.getDeliveryReadySnapshot(), true,
+    'ordinary delivery still works before backend activation')
+
+  h.store.setRestartPending()
+  await h.store.verify()
+  assert.equal(h.store.getRestartPendingSnapshot(), true,
+    'the still-answering legacy worker cannot release its restart')
+  assert.equal(h.store.getDeliveryReadySnapshot(), false)
+
+  response = { ready: false, boot_id: 'upgraded-worker' }
+  await h.store.verify()
+  assert.equal(h.store.getRestartPendingSnapshot(), true,
+    'upgraded identity without readiness is insufficient')
+  assert.equal(h.store.getDeliveryReadySnapshot(), false)
+  response = { ready: true, boot_id: 'upgraded-worker' }
+  await h.store.verify()
+  assert.equal(h.store.getRestartPendingSnapshot(), false)
+  assert.equal(h.store.getDeliveryReadySnapshot(), true)
+  assert.deepEqual(urls, Array(4).fill('/api/ready'),
+    'readiness and identity never come from separate worker responses')
+})
+
+test('a cold legacy restart needs a readiness capability transition, not time or a guessed identity', async () => {
+  let modern = false
+  const h = harness(async () => modern
+    ? readiness(true, 'upgraded-worker') : Response.json({ ready: true }))
+  // The old system stream can deliver this before the initial readiness probe.
+  h.store.setRestartPending()
+  await h.store.verify()
+  assert.equal(h.store.getRestartPendingSnapshot(), true)
+  assert.equal(h.store.getDeliveryReadySnapshot(), false)
+  await h.store.verify()
+  assert.equal(h.store.getRestartPendingSnapshot(), true,
+    'another legacy response cannot prove a worker change')
+  modern = true
+  await h.store.verify()
+  assert.equal(h.store.getRestartPendingSnapshot(), false,
+    'the legacy event producer could not have supplied boot-identifying readiness')
+  assert.equal(h.store.getDeliveryReadySnapshot(), true)
+})
+
+test('malformed modern restart identities cannot borrow prior observations or claim the legacy exception', async () => {
+  for (const sourceBootId of [null, '', ' ', 7]) {
+    let response = readiness(true, 'known-worker')
+    const h = harness(async () => response)
+    await h.store.verify()
+    response = readiness(true, 'another-worker')
+    h.store.setRestartPending(sourceBootId)
+    await h.store.verify()
+    assert.equal(h.store.getRestartPendingSnapshot(), true)
+    assert.equal(h.store.getDeliveryReadySnapshot(), false)
+  }
+})
+
+test('a pre-event readiness response cannot certify a later legacy restart', async () => {
+  let resolveOldProbe
+  let response = new Promise(resolve => { resolveOldProbe = resolve })
+  const h = harness(() => response)
+  const oldProbe = h.store.verify()
+  h.store.setRestartPending()
+  resolveOldProbe(readiness(true, 'some-worker'))
+  await oldProbe
+  assert.equal(h.store.getRestartPendingSnapshot(), true,
+    'the legacy transition still requires evidence started after the event')
+  assert.equal(h.store.getDeliveryReadySnapshot(), false)
+  response = readiness(true, 'some-worker')
+  await h.store.verify()
+  assert.equal(h.store.getRestartPendingSnapshot(), false)
+  assert.equal(h.store.getDeliveryReadySnapshot(), true)
+})
+
+test('proxy and malformed readiness bodies never authorize delivery or create another probe path', async () => {
+  for (const body of [{}, { ready: 'true' }, { ready: true, boot_id: 7 },
+    { ready: true, boot_id: '' }, { ready: true, boot_id: ' ' }]) {
+    const urls = []
+    const h = harness(async url => {
+      urls.push(url)
+      return Response.json(body)
+    })
+    await h.store.verify()
+    assert.equal(h.store.getSnapshot(), true)
+    assert.equal(h.store.getDeliveryReadySnapshot(), false)
+    assert.deepEqual(urls, ['/api/ready'])
+  }
+})
+
+test('cold modern startup without a restart event requires coherent ready evidence from that worker', async () => {
+  let response = readiness(false, 'cold-worker')
+  const urls = []
+  const h = harness(async url => { urls.push(url); return response })
+  await h.store.verify()
+  assert.equal(h.store.getRestartPendingSnapshot(), false)
+  assert.equal(h.store.getDeliveryReadySnapshot(), false)
+  response = readiness(true, 'cold-worker')
+  await h.store.verify()
+  assert.equal(h.store.getDeliveryReadySnapshot(), true)
+  assert.deepEqual(urls, ['/api/ready', '/api/ready'])
+})

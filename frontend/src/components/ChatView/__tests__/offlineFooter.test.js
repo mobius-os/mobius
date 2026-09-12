@@ -186,7 +186,7 @@ test('connection failure preserves the local queue and disables composer steerin
     'connection failure must never hide durable locally queued input')
   assert.match(chatView, /const showSteer = !hasPendingQuestion\s*&& deliveryReady/,
     'transport reachability is insufficient for steering')
-  assert.match(chatView, /const showSteer = !hasPendingQuestion[\s\S]*?connectionError !== 'disconnected'[\s\S]*?turnActive[\s\S]*?pendingQueue\.visiblePendingMessages\.length > 0/,
+  assert.match(chatView, /const showSteer = !hasPendingQuestion[\s\S]*?connectionError !== 'disconnected'[\s\S]*?turnActive[\s\S]*?steerCandidates\.length > 0/,
     'the visible composer steer identity must be gated by pending QA and connection health')
   assert.match(chatView, /const canSteer = canRequestSteer[\s\S]*?canFastForwardQueue/,
     'server-confirmed steering must remain stricter than the optimistic visual identity')
