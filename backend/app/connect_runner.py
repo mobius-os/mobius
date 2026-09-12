@@ -43,6 +43,10 @@ LAUNCHD_LABEL = "sh.mobius.connect"
 LAUNCHD_PLIST = os.path.expanduser("~/Library/LaunchAgents/%s.plist" % LAUNCHD_LABEL)
 SYSTEMD_UNIT = os.path.expanduser("~/.config/systemd/user/mobius-connect.service")
 RUNNER_PROTOCOL_VERSION = 4
+RUNNER_USER_AGENT = (
+    "mobius-connect/%s (+https://github.com/mobius-os/mobius)"
+    % RUNNER_PROTOCOL_VERSION
+)
 _POWERSHELL_STDIN_BOOTSTRAP = (
     "$encoded=[Console]::In.ReadToEnd();"
     "$script=[Text.Encoding]::UTF8.GetString("
@@ -100,6 +104,14 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 def _open_url(request, *, timeout, context=None):
+    # urllib otherwise identifies itself as Python-urllib/<version>, which
+    # browser-integrity filters commonly reject.  Keep every Connect request
+    # identifiable at this one transport boundary, including the self-update
+    # path that supplies a URL string rather than a pre-built Request.
+    if not isinstance(request, urllib.request.Request):
+        request = urllib.request.Request(request)
+    if not request.has_header("User-agent"):
+        request.add_header("User-Agent", RUNNER_USER_AGENT)
     handlers = [_NoRedirect()]
     if context is not None:
         handlers.append(urllib.request.HTTPSHandler(context=context))
