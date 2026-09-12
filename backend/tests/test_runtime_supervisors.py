@@ -293,6 +293,7 @@ async def test_stalled_delegation_wake_cannot_block_other_recovery(
   import app.broadcast as broadcast_module
   import app.chat as chat_module
   import app.contribution_autopilot as autopilot_module
+  import app.contribution_autopilot_recovery as autopilot_recovery_module
   import app.delegations as delegations_module
   import app.routes.github as github_module
   import app.runtime_supervisors as supervisors_module
@@ -301,6 +302,7 @@ async def test_stalled_delegation_wake_cannot_block_other_recovery(
   startup_recovered = asyncio.Event()
   attached_recovered = asyncio.Event()
   lease_recovered = asyncio.Event()
+  blocker_recovered = asyncio.Event()
   wake_started = asyncio.Event()
   block_wake = asyncio.Event()
   main_thread = threading.get_ident()
@@ -335,6 +337,10 @@ async def test_stalled_delegation_wake_cannot_block_other_recovery(
     loop.call_soon_threadsafe(lease_recovered.set)
     return 0
 
+  async def recover_blockers():
+    blocker_recovered.set()
+    return 0
+
   monkeypatch.setattr(broadcast_module, "get_system_broadcast", lambda: broadcast)
   monkeypatch.setattr(supervisors_module, "SessionLocal", session_factory)
   monkeypatch.setattr(
@@ -357,6 +363,7 @@ async def test_stalled_delegation_wake_cannot_block_other_recovery(
     delegations_module, "wake_parents_for_completed_delegations", wake_parents,
   )
   monkeypatch.setattr(autopilot_module, "sweep_expired_leases", sweep)
+  monkeypatch.setattr(autopilot_recovery_module, "recover_resolved_blocks", recover_blockers)
 
   supervisors = _supervisors()
   await supervisors._start_chat_supervisors()
@@ -364,6 +371,7 @@ async def test_stalled_delegation_wake_cannot_block_other_recovery(
   await asyncio.wait_for(startup_recovered.wait(), timeout=1)
   await asyncio.wait_for(attached_recovered.wait(), timeout=1)
   await asyncio.wait_for(lease_recovered.wait(), timeout=1)
+  await asyncio.wait_for(blocker_recovered.wait(), timeout=1)
 
   assert not block_wake.is_set()
   assert "delegation-startup-recovery" in supervisors._tasks

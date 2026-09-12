@@ -156,6 +156,28 @@ def test_mobius_effort_scale_uses_the_public_product_model():
   ]
 
 
+@pytest.mark.asyncio
+async def test_unlinked_mobius_registry_skips_protected_broker_request(
+  tmp_path, monkeypatch,
+):
+  """Disconnected identity is expected state, not a broker 401 failure."""
+  monkeypatch.setattr(
+    providers.MobiusProvider,
+    "check_auth",
+    lambda self, _data_dir: "not linked",
+  )
+
+  class ForbiddenClient:
+    def __init__(self, *args, **kwargs):
+      raise AssertionError("unlinked model discovery must not call the broker")
+
+  monkeypatch.setattr(httpx, "AsyncClient", ForbiddenClient)
+
+  rows = await providers._fetch_provider_models("mobius", str(tmp_path))
+  assert [row["id"] for row in rows] == providers.KNOWN_MODELS["mobius"]
+  assert [row["label"] for row in rows] == ["Spark", "Evolve"]
+
+
 # --- Expired-token refresh (the 401 root cause) -----------------------
 
 

@@ -152,7 +152,12 @@ PY
 # Root owns status and topology; the app user can create only the fixed inbox
 # request/ready files consumed by the validated worker.
 install -d -o root -g root -m 0755 "$DATA_SOURCE/mobius-rebuild"
-install -d -o "$APP_UID" -g "$APP_GID" -m 0700 "$DATA_SOURCE/mobius-rebuild/inbox"
+# GNU install accepts a numeric owner absent from the host passwd; uutils
+# (the default coreutils on Ubuntu 25.10+) does not. The app uid exists only
+# inside the container, so set the ownership portably instead.
+mkdir -p "$DATA_SOURCE/mobius-rebuild/inbox"
+chown "$APP_UID:$APP_GID" "$DATA_SOURCE/mobius-rebuild/inbox"
+chmod 0700 "$DATA_SOURCE/mobius-rebuild/inbox"
 
 cat >/etc/systemd/system/mobius-rebuild.service <<'EOF'
 [Unit]

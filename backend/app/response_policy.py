@@ -117,15 +117,27 @@ def shell_csp(gateway_origin: str = "") -> str:
   )
 
 
-CHAT_EMBED_CSP = (
-  "default-src 'self'; "
-  "script-src 'self' 'unsafe-inline' https://esm.sh; "
-  "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
-  "font-src 'self' https://fonts.gstatic.com https://cdn.openai.com; "
-  "connect-src 'self'; "
-  "img-src 'self' data: blob:; "
-  "frame-src 'self'"
-)
+def chat_embed_csp(frontend_origin: str, delivery_origin: str = "") -> str:
+  """Explicit resource origins for chat nested inside an opaque app frame.
+
+  WebKit cannot resolve CSP 'self' against the inherited opaque origin. Name
+  the same trusted site instead; do not grant allow-same-origin or broaden
+  the one-use capability/session authentication boundary.
+  """
+  sources = [_validated_frontend_origin(frontend_origin)]
+  delivery = absolute_csp_origin(delivery_origin)
+  if delivery is not None and delivery not in sources:
+    sources.append(delivery)
+  source = " ".join(sources)
+  return (
+    f"default-src {source}; "
+    f"script-src {source} 'unsafe-inline' https://esm.sh; "
+    f"style-src {source} 'unsafe-inline' https://fonts.googleapis.com; "
+    f"font-src {source} https://fonts.gstatic.com https://cdn.openai.com; "
+    f"connect-src {source}; "
+    f"img-src {source} data: blob:; "
+    f"frame-src {source}"
+  )
 
 
 def static_embed_csp(
