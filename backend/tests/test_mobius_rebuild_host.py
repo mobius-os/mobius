@@ -35,6 +35,10 @@ def test_entrypoint_restores_host_control_after_compatibility_chown():
 def test_installer_enables_boot_time_reconciliation():
   source = INSTALLER.read_text(encoding="utf-8")
 
+  assert 'mkdir -p "$DATA_SOURCE/mobius-rebuild/inbox"' in source
+  assert 'chown "$APP_UID:$APP_GID" "$DATA_SOURCE/mobius-rebuild/inbox"' in source
+  assert 'chmod 0700 "$DATA_SOURCE/mobius-rebuild/inbox"' in source
+  assert 'install -d -o "$APP_UID"' not in source
   assert "mobius-rebuild-reconcile.service" in source
   assert "ExecStart=/usr/local/libexec/mobius-rebuild-host reconcile" in source
   assert "Before=mobius-rebuild.path" in source
