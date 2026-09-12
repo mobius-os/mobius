@@ -14,9 +14,9 @@ def _write(root: Path, relative: str, content: bytes = b"same") -> None:
 def test_matching_trees_are_current_and_ignore_python_bytecode(tmp_path):
   source = tmp_path / "source"
   deployed = tmp_path / "deployed"
-  _write(source, "identity_broker.py")
-  _write(deployed, "identity_broker.py")
-  _write(deployed, "__pycache__/identity_broker.cpython-312.pyc", b"cache")
+  _write(source, "restart_ledger.py")
+  _write(deployed, "restart_ledger.py")
+  _write(deployed, "__pycache__/restart_ledger.cpython-312.pyc", b"cache")
 
   status = provenance.protected_runtime_status(source, deployed)
 
@@ -79,3 +79,37 @@ def test_symlinks_are_reported_without_following_them(tmp_path):
 
   assert status["state"] == "stale"
   assert status["mismatched_paths"] == ["linked.py"]
+
+
+def test_served_runtime_module_is_excluded_from_parity(tmp_path):
+  """The launcher starts the broker from the served checkout, so the served and
+  image copies are allowed to differ; only image-owned modules need parity."""
+  source = tmp_path / "source"
+  deployed = tmp_path / "deployed"
+  _write(source, "identity_broker.py", b"served edit")
+  _write(deployed, "identity_broker.py", b"older image copy")
+  _write(source, "restart_ledger.py", b"same")
+  _write(deployed, "restart_ledger.py", b"same")
+
+  status = provenance.protected_runtime_status(source, deployed)
+
+  assert status["state"] == "current"
+  assert status["mismatched_paths"] == []
+  assert provenance.activation_paths(status) == []
+
+
+def test_image_owned_runtime_mismatch_still_reports_stale(tmp_path):
+  source = tmp_path / "source"
+  deployed = tmp_path / "deployed"
+  _write(source, "identity_broker.py", b"served edit")
+  _write(deployed, "identity_broker.py", b"older image copy")
+  _write(source, "restart_ledger.py", b"wanted")
+  _write(deployed, "restart_ledger.py", b"old")
+
+  status = provenance.protected_runtime_status(source, deployed)
+
+  assert status["state"] == "stale"
+  assert status["mismatched_paths"] == ["restart_ledger.py"]
+  assert provenance.activation_paths(status) == [
+    "backend/runtime/restart_ledger.py",
+  ]

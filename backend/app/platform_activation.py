@@ -144,6 +144,19 @@ _RULES = (
     prefixes=("backend/legacy_runtime/",),
     dependency_fingerprint=True,
   ),
+  # A protected-runtime module the frozen launcher starts from the served
+  # checkout is ordinary source: the served bytes are what run, so an ordinary
+  # restart reloads them. Every other file under ``backend/runtime`` stays
+  # image-owned (see the broad ``baked_runtime`` rule below), so a newly added
+  # module there still defaults to needing a new image. Keep this allowlist in
+  # sync with ``SERVED_MODULES`` in ``backend/runtime/served_runtime_launcher.py``.
+  _Rule(
+    "served_runtime_module",
+    ActivationLevel.SERVER_RESTART,
+    "This protected-runtime module runs from the served checkout; restart "
+    "Möbius to reload it.",
+    exact=("backend/runtime/identity_broker.py",),
+  ),
   _Rule(
     "baked_runtime",
     ActivationLevel.IMAGE_REBUILD,
@@ -226,6 +239,16 @@ def deployment_kind(environ: dict[str, str] | None = None) -> DeploymentKind:
 def _rule_for_path(path: str) -> _Rule | None:
   normalized = _normalize_path(path)
   return next((rule for rule in _RULES if rule.matches(normalized)), None)
+
+
+def runtime_module_is_image_owned(relative_name: str) -> bool:
+  """Whether a protected-runtime module must still come verbatim from the image.
+
+  Modules the frozen launcher starts from the served checkout are ordinary
+  source, so a served/image difference there is expected rather than a fault.
+  Everything else under ``backend/runtime`` stays image-owned.
+  """
+  return path_is_image_owned(f"backend/runtime/{relative_name}")
 
 
 def backend_import_probe_required(paths: Iterable[str]) -> bool:
@@ -384,6 +407,16 @@ def dependency_fingerprint_paths(root: Path) -> list[str]:
   return sorted(paths)
 
 
+def path_is_image_owned(relative: str) -> bool:
+  """Whether the first matching rule still makes this path image-owned.
+
+  A broad prefix rule must not claim a path a narrower rule has already moved
+  to served source.
+  """
+  rule = _rule_for_path(relative)
+  return bool(rule and rule.level is ActivationLevel.IMAGE_REBUILD)
+
+
 def image_input_paths(root: Path) -> list[str]:
   """Every source path the container image bakes in, as it exists in ``root``.
 
@@ -398,7 +431,7 @@ def image_input_paths(root: Path) -> list[str]:
     if rule.level is not ActivationLevel.IMAGE_REBUILD or rule.dependency_fingerprint:
       continue
     for exact in rule.exact:
-      if (root / exact).is_file():
+      if (root / exact).is_file() and path_is_image_owned(exact):
         paths.add(exact)
     for prefix in rule.prefixes:
       base = root / prefix
@@ -406,7 +439,7 @@ def image_input_paths(root: Path) -> list[str]:
         paths.update(
           str(path.relative_to(root))
           for path in base.rglob("*")
-          if path.is_file()
+          if path.is_file() and path_is_image_owned(str(path.relative_to(root)))
         )
   return sorted(path for path in paths if (root / path).is_file())
 

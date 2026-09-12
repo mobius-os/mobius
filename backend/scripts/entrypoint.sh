@@ -972,10 +972,15 @@ umask 022
 # the application receives only the explicitly allow-listed Unix-socket API,
 # and Codex receives only the loopback Responses proxy. The one-use Railway
 # bootstrap is inherited by this process and then removed before uvicorn starts.
+#
+# The loader is frozen in the image; the broker module it starts is ordinary
+# served source, so editing backend/runtime/identity_broker.py is a normal
+# platform change that the next restart activates. A served copy that is
+# missing, unsafe, or does not compile falls back to the image copy.
 mkdir -p /data/identity-broker
 chown root:root /data/identity-broker
 chmod 700 /data/identity-broker
-DATA_DIR=/data python3 -P /app/runtime/identity_broker.py &
+DATA_DIR=/data python3 -P /app/runtime/served_runtime_launcher.py identity_broker &
 _identity_broker_pid=$!
 unset MOBIUS_IDENTITY_BOOTSTRAP
 # Scrub credentials used by pre-capability prototypes/managed SSO revisions.

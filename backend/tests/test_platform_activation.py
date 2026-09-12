@@ -63,6 +63,29 @@ def test_dependency_and_baked_runtime_never_degrade_to_restart_only():
     assert impact["level"] not in {"live", "server_restart"}, path
 
 
+def test_served_runtime_module_restarts_instead_of_rebuilding_the_image():
+  # The frozen launcher starts the broker from the served checkout, so a local
+  # edit there is an ordinary restart. Every other runtime module keeps the
+  # image boundary, including one newly added there.
+  assert activation.classify_activation(
+    ["backend/runtime/identity_broker.py"], deployment="self_hosted",
+  )["level"] == "server_restart"
+  for path in (
+    "backend/runtime/restart_ledger.py",
+    "backend/runtime/served_runtime_launcher.py",
+    "backend/runtime/anything_new.py",
+  ):
+    assert activation.classify_activation(
+      [path], deployment="self_hosted",
+    )["level"] == "image_rebuild", path
+
+
+def test_runtime_module_ownership_agrees_with_the_classifier():
+  assert activation.runtime_module_is_image_owned("identity_broker.py") is False
+  assert activation.runtime_module_is_image_owned("restart_ledger.py") is True
+  assert activation.runtime_module_is_image_owned("anything_new.py") is True
+
+
 def test_frontend_dependencies_apply_in_place_not_via_rebuild():
   # A frontend dependency bump is installed in place during Apply (npm ci) and
   # the shell is rebuilt live — it no longer forces a container/image rebuild,
