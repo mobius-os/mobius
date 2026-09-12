@@ -108,6 +108,13 @@ def test_test_compose_pins_runtime_to_mounted_checkout():
   assert "\n    init: true\n" in pytest_service
 
 
+def test_browser_runtime_skips_network_bootstrap_without_relaxing_health():
+  compose = (ROOT / "docker-compose.test.yml").read_text(encoding="utf-8")
+  app = compose.split("\n  app:\n", 1)[1].split("\n  fake-tandoor:\n", 1)[0]
+  assert "- MOEBIUS_SKIP_BOOTSTRAP=1" in app
+  assert 'python3", "/app/scripts/verify_test_runtime.py"' in app
+
+
 def test_test_wrapper_isolates_compose_and_rejects_stale_images():
   wrapper = (ROOT / "scripts" / "test.sh").read_text(encoding="utf-8")
   assert 'TEST_PROJECT="${MOBIUS_TEST_PROJECT:-mobius-test-' in wrapper

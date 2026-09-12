@@ -56,6 +56,9 @@ services:
       # checkout and validate it against its own HEAD.
       - MOBIUS_TEST_RUNTIME=1
       - MOBIUS_TEST_PLATFORM_SOURCE=/workspace
+      # Browser specs own their app fixtures; boot must not fetch and build
+      # unrelated catalog apps before the isolated server becomes ready.
+      - MOEBIUS_SKIP_BOOTSTRAP=1
       - BUILD_SHA=${GITHUB_SHA:-unknown}
       - MOBIUS_SERVICE_GATEWAY_ORIGIN=http://services.localhost:${TEST_PORT:-8001}
     volumes:
