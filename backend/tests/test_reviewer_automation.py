@@ -511,7 +511,12 @@ def test_live_revision_revalidates_actual_github_response(
   assert calls == [("api", "repos/owner/repo/pulls/17")]
 
 
-@pytest.mark.parametrize("response", ["not json", "[]"])
+@pytest.mark.parametrize("response", [
+  "not json",
+  "[]",
+  '{"state":"open","head":"not-an-object","base":{"sha":"bbbb"}}',
+  '{"state":"open","head":{"sha":"aaaa"},"base":"not-an-object"}',
+])
 def test_live_revision_rejects_invalid_github_response(monkeypatch, response):
   from app.routes import reviewer
 
@@ -519,7 +524,9 @@ def test_live_revision_rejects_invalid_github_response(monkeypatch, response):
     reviewer, "_gh", lambda *_: SimpleNamespace(stdout=response),
   )
   with pytest.raises(HTTPException) as error:
-    reviewer._reviewer_live_pr("owner/repo", 17)
+    reviewer._reviewer_assert_live_revision(
+      "owner/repo", 17, "a" * 40, "b" * 40,
+    )
   assert error.value.status_code == 502
 
 

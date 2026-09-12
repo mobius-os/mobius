@@ -94,8 +94,12 @@ def _reviewer_assert_live_revision(
   repository: str, number: int, head_sha: str, base_sha: str,
 ) -> dict:
   pull = _reviewer_live_pr(repository, number)
-  live_head = str((pull.get("head") or {}).get("sha") or "").lower()
-  live_base = str((pull.get("base") or {}).get("sha") or "").lower()
+  head = pull.get("head")
+  base = pull.get("base")
+  if not isinstance(head, dict) or not isinstance(base, dict):
+    raise HTTPException(502, "GitHub returned an invalid pull request response.")
+  live_head = str(head.get("sha") or "").lower()
+  live_base = str(base.get("sha") or "").lower()
   if (
     pull.get("state") != "open" or live_head != head_sha.lower()
     or live_base != base_sha.lower()
