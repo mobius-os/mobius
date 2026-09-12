@@ -29,6 +29,7 @@ from app import chat_queue
 from app.chat_writer import (
   AnswerQuestion,
   AppendPending,
+  AppendRestartFeedback,
   CancelPending,
   StartTurn,
   StartTurnBlockedByPendingQuestion,
@@ -313,18 +314,35 @@ async def _append_to_pending(
   The append is keyed on an empty run_token: a queued message isn't a
   streaming turn, so it has no snapshot key of its own to fence.
   """
-  ack = get_writer().submit(
-    AppendPending(
-      chat_id=chat.id,
-      run_token="",
-      user_msg=_user_message_from_body(chat, body),
-      answers=body.answers,
-      question_id=body.question_id,
-      initiated_by_app_id=initiated_by_app_id,
-      front=front,
-      require_answer_match=require_answer_match,
-    )
+  return await _submit_pending_message(
+    chat, db, AppendPending(
+      chat_id=chat.id, run_token="",
+      user_msg=_user_message_from_body(chat, body), answers=body.answers,
+      question_id=body.question_id, initiated_by_app_id=initiated_by_app_id,
+      front=front, require_answer_match=require_answer_match,
+    ),
   )
+
+
+async def _append_restart_feedback_to_pending(
+  chat: models.Chat, body: schemas.SendMessage, db: Session,
+  *, initiated_by_app_id: int | None = None,
+) -> dict:
+  """Settle a Restart card and queue its written response as one command."""
+  return await _submit_pending_message(
+    chat, db, AppendRestartFeedback(
+      chat_id=chat.id, run_token="",
+      user_msg=_user_message_from_body(chat, body), answers=body.answers,
+      question_id=body.question_id, initiated_by_app_id=initiated_by_app_id,
+    ),
+  )
+
+
+async def _submit_pending_message(
+  chat: models.Chat, db: Session, command: AppendPending,
+) -> dict:
+  """Await one writer-owned pending append and refresh the route session."""
+  ack = get_writer().submit(command)
   try:
     result = await await_ack(ack)
   except Exception as exc:
@@ -613,6 +631,63 @@ async def send_message(
   if restart_block is not None:
     require_owner_input_principal(principal)
     selections = body.selected_options
+    if not selections:
+      feedback = list((body.answers or {}).values())
+      if (len(feedback) != 1 or not isinstance(feedback[0], str)
+          or not feedback[0].strip()):
+        raise HTTPException(
+          status_code=409,
+          detail="Choose Restart now or write what you would like to do instead.",
+        )
+      async with chat_queue.get_transition_lock(chat_id):
+        async with chat_queue.get_lock(chat_id):
+          try:
+            stored = await _append_restart_feedback_to_pending(
+              chat, body, db, initiated_by_app_id=principal.app_id,
+            )
+            started_message = await start_queued_owner_continuation(chat_id, db)
+            db.expire(chat)
+            db.refresh(chat)
+            settled = restart_action_block(chat, body.question_id)
+            settled_action = (
+              settled.get("platform_action") if isinstance(settled, dict) else None
+            )
+          except HTTPException:
+            raise
+          except Exception as exc:
+            log.info(
+              "Restart feedback refused chat_id=%s question_id=%s: %s",
+              chat_id, body.question_id, exc,
+            )
+            raise HTTPException(
+              status_code=409,
+              detail="This Restart card is stale or no longer accepting a response.",
+            ) from exc
+      event = {
+        "type": "answers_applied",
+        "question_id": body.question_id,
+        "answers": body.answers,
+        "selected_options": {},
+        "platform_action": settled_action,
+      }
+      from app.chat_event_sink import get_active_sink
+      sink = get_active_sink(chat_id)
+      bc = get_broadcast(chat_id)
+      if sink is not None:
+        sink.publish(event)
+      elif bc is not None:
+        bc.publish(event)
+      publish_owner_input_changed(chat_id, None, question_id=None)
+      answer_turn = "new" if started_message is not None else "queued"
+      return JSONResponse(status_code=202, content={
+        "status": "started" if started_message is not None else "queued",
+        "answer_turn": answer_turn,
+        "answers": body.answers,
+        "selected_options": {},
+        "platform_action": settled_action,
+        "message": started_message or stored,
+        "question_id": body.question_id,
+      })
     if (
       not isinstance(selections, dict)
       or set(selections) != {"restart"}
@@ -1131,8 +1206,8 @@ async def _send_message_locked(
   # A typed activation wait is the unfinished work A. Later owner input B is
   # durable, but cannot be promoted until the exact loaded-source continuation
   # owns A. The activation writer command has the sole authenticated bypass.
-  from app.platform_restart import activation_barrier_for_chat
-  if activation_barrier_for_chat(db, chat_id):
+  from app.platform_restart import activation_barrier_wait_id
+  if activation_barrier_wait_id(db, chat_id) is not None:
     new_msg = await _append_to_pending(
       chat, body, db, initiated_by_app_id=principal.app_id,
     )

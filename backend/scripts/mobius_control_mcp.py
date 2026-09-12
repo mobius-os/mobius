@@ -514,8 +514,9 @@ _TOOL_DEFINITIONS = {
       "restart-loadable platform changes can be loaded. The platform derives "
       "and binds the action; this tool accepts no caller-supplied command or "
       "source identity. Use it only after the platform-maintenance activation "
-      "preflight. It saves a Restart now / Not now card and returns a receipt, "
-      "NOT approval. Put all explanation and closeout before this final call, "
+      "preflight. It saves a card with Restart now and a written-response path "
+      "and returns a receipt, NOT approval. Put all explanation and closeout "
+      "before this final call, "
       "then end the turn without more text or tools. Choosing Restart now is "
       "handled by the platform without waking an agent to issue the command."
     ),

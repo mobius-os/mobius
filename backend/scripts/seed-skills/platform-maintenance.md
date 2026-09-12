@@ -201,11 +201,13 @@ the write-surface contract.
    not approve a restart.
 
    `request_restart` takes no action arguments. The platform derives the exact
-   committed, restart-loadable source and saves its own **Restart now** / **Not
-   now** card. Its receipt confirms only that the card was saved, not approval:
-   end the turn with no further text or tools. The owner's **Restart now** click
-   is dispatched by the platform without waking an agent to forge an answer or
-   issue a shell command. Do not use `request_approval` or Codex's
+   committed, restart-loadable source and saves its own card with one exact
+   **Restart now** action plus a written-response path. Its receipt confirms
+   only that the card was saved, not approval: end the turn with no further
+   text or tools. The owner's **Restart now** click is dispatched by the
+   platform without waking an agent to forge an answer or issue a shell
+   command. A written response continues the conversation without granting
+   restart authority. Do not use `request_approval` or Codex's
    `request_user_input` for platform restart permission.
 
    If the tool is absent, the same saved-card operation is available through:

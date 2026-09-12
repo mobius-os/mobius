@@ -134,7 +134,6 @@ async def request_restart(
       },
     ) from exc
   action_id = requirement["action_id"]
-  not_now_id = str(uuid5(NAMESPACE_URL, f"{action_id}:not-now"))
   restart_now_id = str(uuid5(NAMESPACE_URL, f"{action_id}:restart-now"))
   paths = requirement["paths"]
   path_summary = ", ".join(paths[:3])
@@ -151,12 +150,6 @@ async def request_restart(
       ),
       "options": [
         {
-          "id": not_now_id,
-          "label": "Not now",
-          "on_answer": "close",
-          "description": "Leave these committed changes pending without interruption.",
-        },
-        {
           "id": restart_now_id,
           "label": "Restart now",
           "on_answer": "close",
@@ -165,11 +158,10 @@ async def request_restart(
       ],
     }],
     "platform_action": {
-      "version": 1,
+      "version": 2,
       "type": "restart",
       "action_id": action_id,
       "restart_option_id": restart_now_id,
-      "cancel_option_id": not_now_id,
       "requirement": requirement,
       "status": "awaiting_owner",
     },

@@ -433,14 +433,23 @@ def admit_execution_if_current(action_id: str) -> bool:
     return current
 
 
-def activation_barrier_for_chat(db: Session, chat_id: str) -> bool:
-  """Whether A still owns the chat ahead of every queued B."""
-  return db.query(models.ChatWait.id).filter(
+def activation_barrier_wait_id(db: Session, chat_id: str) -> str | None:
+  """Return the approved restart wait that still owns chat admission.
+
+  A deferred card keeps its activation monitor armed so a later matching boot
+  can resume the interrupted Goal, but no restart is in flight and the owner
+  must remain free to continue chatting.  ``action_approved_at`` is the durable
+  distinction between that passive monitor and a restart the owner actually
+  asked Möbius to execute.
+  """
+  row = db.query(models.ChatWait.id).filter(
     models.ChatWait.chat_id == chat_id,
     models.ChatWait.kind == ACTIVATION_WAIT_KIND,
     models.ChatWait.status.in_(("armed", "met", "expired", "failed")),
+    models.ChatWait.action_approved_at.isnot(None),
     models.ChatWait.resume_delivered_at.is_(None),
-  ).first() is not None
+  ).first()
+  return row[0] if row is not None else None
 
 
 def restart_action_block(chat, question_id: str | None) -> dict | None:

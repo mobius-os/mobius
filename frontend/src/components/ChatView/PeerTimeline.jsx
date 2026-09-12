@@ -5,7 +5,10 @@ import { api, jsonOrThrow } from '../../api/client.js'
 import HelperResultCard, { HelperResultGroupCard } from './HelperResultCard.jsx'
 import PeerMessageCard from './PeerMessageCard.jsx'
 import { projectChatActivity } from './chatActivity.js'
-import { chatActivityQueryKey } from './chatActivityQueries.js'
+import {
+  CHAT_ACTIVITY_STALE_TIME,
+  chatActivityQueryKey,
+} from './chatActivityQueries.js'
 import { groupHelperResultRows } from './helperResultGrouping.js'
 import { peerRecordTool, peerTime, foldPeerActivity } from './peerTimeline.js'
 
@@ -15,7 +18,7 @@ export function usePeerTimeline(chatId, messages, enabled, activeTools, activeMi
     initialPageParam: null,
     queryFn: async ({ pageParam, signal }) => jsonOrThrow(await api.chats.activity(chatId, { before: pageParam, signal }), 'Chat activity failed:'),
     getNextPageParam: page => page.next_before || undefined,
-    enabled, staleTime: 5000, retry: false,
+    enabled, staleTime: CHAT_ACTIVITY_STALE_TIME, retry: false,
   })
   const pages = query.data?.pages
   const events = useMemo(() => [...new Map((pages || []).flatMap(p => p.events).map(event => [event.id, event])).values()], [pages])
@@ -27,7 +30,7 @@ export function usePeerTimeline(chatId, messages, enabled, activeTools, activeMi
     if (enabled && hasNextPage && !isFetching && !isError && oldestLoaded >= windowStart) void fetchNextPage()
   }, [enabled, hasNextPage, isFetching, isError, oldestLoaded, windowStart, fetchNextPage])
   const projection = useMemo(() => foldPeerActivity(messages, projectChatActivity(messages, events, chatId, activeTools), chatId, activeMirrorIndex), [messages, events, chatId, activeTools, activeMirrorIndex])
-  return { ...projection, error: query.isError, retry: query.refetch }
+  return projection
 }
 
 export function PeerTimelineRows({ notes, chatId, onInternalNav }) {

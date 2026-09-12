@@ -322,6 +322,19 @@ export function isQuestionTool(tool) {
   return QUESTION_TOOLS.has(tool)
 }
 
+export function isRestartRequestTool(tool) {
+  if (typeof tool !== 'string') return false
+  return tool === 'mobius_control:request_restart'
+    || tool === 'mcp__mobius_control__request_restart'
+}
+
+export function restartCardActivityEntries(entries, hasRestartCard) {
+  if (!hasRestartCard || !Array.isArray(entries)) return entries
+  return entries.filter(({ item }) => !(
+    item?.type === 'tool' && isRestartRequestTool(item.tool)
+  ))
+}
+
 /**
  * Indices of redundant AskUserQuestion tool blocks in a PERSISTED
  * message's `blocks` array — the raw tool twin of a question card that
@@ -350,8 +363,14 @@ export function suppressedQuestionToolIndices(blocks) {
   if (!Array.isArray(blocks)) return suppressed
   const hasQuestionCard = blocks.some(b => b?.type === 'question')
   if (!hasQuestionCard) return suppressed
+  const hasRestartCard = blocks.some(b => (
+    b?.type === 'question' && b?.platform_action?.type === 'restart'
+  ))
   blocks.forEach((b, i) => {
     if (b?.type === 'tool' && isQuestionTool(b.tool)) suppressed.add(i)
+    if (hasRestartCard && b?.type === 'tool' && isRestartRequestTool(b.tool)) {
+      suppressed.add(i)
+    }
   })
   return suppressed
 }
