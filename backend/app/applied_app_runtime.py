@@ -225,27 +225,26 @@ def bootstrap_legacy_runtimes(db) -> tuple[int, list[str]]:
   return migrated, warnings
 
 
-def migrate_legacy_job_shebangs(db) -> tuple[int, list[str]]:
-  """Repair accepted pre-contract jobs without restoring runtime guessing.
+def migrate_legacy_job_declarations(db) -> tuple[int, list[str]]:
+  """Make every accepted pre-contract job explicit and executable.
 
   Before 2026-09-12, a missing shebang meant Bash. Copy the immutable accepted
-  runtime, make that historical choice explicit in its bytes, and advance the
-  app's content-addressed pointer. A crash is safe to retry because the source
-  is an accepted runtime, never the editable app tree; already-migrated jobs
-  validate and are skipped.
+  runtime, make that historical choice explicit in its bytes, add execute
+  permission where the old runner did not require it, and advance the app's
+  content-addressed pointer. A crash is safe to retry because the source is an
+  accepted runtime, never the editable app tree. Every boot scans all rows,
+  including tombstones, so restoring an older accepted pointer reopens this
+  idempotent cutover instead of trusting a receipt from unrelated app IDs.
   """
   from app import models
 
   cache = Path(get_settings().data_dir) / "app-runtime"
   cache.mkdir(parents=True, exist_ok=True)
-  receipt = cache / "job-shebang-migration.json"
-  if receipt.is_file():
-    return 0, []
-
   migrated = 0
   warnings: list[str] = []
-  migrated_ids: list[int] = []
-  for app in db.query(models.App).filter(models.App.deleted_at.is_(None)).all():
+  # Tombstones remain recoverable installed apps during their retention window;
+  # migrate them too so a later recovery cannot revive the retired contract.
+  for app in db.query(models.App).all():
     staged = None
     try:
       source = runtime_root(app)
@@ -263,17 +262,22 @@ def migrate_legacy_job_shebangs(db) -> tuple[int, list[str]]:
           f"accepted schedule job is missing ({job_name})"
         )
       content = job.read_bytes()
+      add_shebang = False
       try:
         job_interpreter(content)
-        continue
       except ManifestContractError as exc:
         if "missing a shebang" not in str(exc):
           raise AppliedRuntimeUnavailable(str(exc)) from exc
+        add_shebang = True
+      if not add_shebang and job.stat().st_mode & 0o111:
+        continue
 
       staged = Path(tempfile.mkdtemp(prefix=".job-shebang-", dir=cache))
       shutil.copytree(source, staged, dirs_exist_ok=True, symlinks=True)
       target = staged / job_name
-      target.write_bytes(b"#!/usr/bin/env bash\n" + content)
+      if add_shebang:
+        target.write_bytes(b"#!/usr/bin/env bash\n" + content)
+      target.chmod(target.stat().st_mode | 0o111)
       previous_updated = app.updated_at
       publish_runtime(app, _prepared(staged))
       staged = None
@@ -282,7 +286,6 @@ def migrate_legacy_job_shebangs(db) -> tuple[int, list[str]]:
       flag_modified(app, "updated_at")
       db.commit()
       migrated += 1
-      migrated_ids.append(app.id)
     except Exception as exc:
       db.rollback()
       warnings.append(f"app {app.id} schedule job declaration: {exc}")
@@ -290,13 +293,6 @@ def migrate_legacy_job_shebangs(db) -> tuple[int, list[str]]:
       if staged is not None:
         shutil.rmtree(staged)
 
-  if not warnings:
-    temporary = receipt.with_suffix(".tmp")
-    with temporary.open("w", encoding="utf-8") as handle:
-      json.dump({"schema": 1, "app_ids": migrated_ids}, handle)
-      handle.flush()
-      os.fsync(handle.fileno())
-    temporary.replace(receipt)
   return migrated, warnings
 
 

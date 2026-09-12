@@ -104,10 +104,7 @@ def _built_artifact(project: models.Project, artifact_id: str) -> tuple[dict, Pa
     raise HTTPException(404, "Artifact not found.")
   output_rel = artifact.get("output_rel")
   if not isinstance(output_rel, str) or not output_rel:
-    artifact_type = project_builders.resolve_artifact_type(project, str(artifact.get("builder")))
-    output_rel = project_builders.default_output_rel(
-      artifact_id, str(artifact.get("builder")), str(artifact.get("source") or ""), artifact_type,
-    )
+    raise HTTPException(422, "Artifact output is invalid.")
   project_root = (Path(get_settings().data_dir) / project.root_path).resolve()
   output_root = (project_root / "artifacts" / artifact_id / "output").resolve()
   try:

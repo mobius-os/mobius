@@ -79,6 +79,7 @@ uploads_router = _load("uploads")
 media_router = _load("media")
 secrets_router = _load("secrets")
 github_router = _load("github")
+github_access_router = _load("github_access")
 reviewer_router = _load("reviewer")
 contribution_reviews_router = _load("contribution_reviews")
 identity_router = _load("identity")
@@ -132,6 +133,7 @@ __all__ = [
   "media_router",
   "secrets_router",
   "github_router",
+  "github_access_router",
   "reviewer_router",
   "contribution_reviews_router",
   "identity_router",

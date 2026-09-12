@@ -4319,7 +4319,9 @@ def test_update_preview_conflict_returns_real_markers_without_live_mutation(
 # --------------------------------------------------------------------------
 
 
-def _simple_manifest(app_id, version="1.0.0", previous_id=None):
+def _simple_manifest(
+  app_id, version="1.0.0", previous_id=None, previous_manifest_url=None,
+):
   """A minimal installable manifest (no schedule/icon/seeds) for the
   adoption tests, so the response map only needs mobius.json + index.jsx."""
   m = {
@@ -4332,6 +4334,8 @@ def _simple_manifest(app_id, version="1.0.0", previous_id=None):
   }
   if previous_id is not None:
     m["previous_id"] = previous_id
+  if previous_manifest_url is not None:
+    m["previous_manifest_url"] = previous_manifest_url
   return m
 
 
@@ -4427,6 +4431,99 @@ def test_install_validates_previous_id_field(client, auth, bypass_url_validation
   r2 = _install_simple(client, auth, base2, self_ref)
   assert r2.status_code == 400, r2.text
   assert "previous_id" in r2.text
+
+  # A repository predecessor is meaningful only as part of an id rename.
+  missing_id = _simple_manifest(
+    "renamed", previous_manifest_url="https://example.test/old/mobius.json",
+  )
+  r3 = _install_simple(client, auth, "https://prev-missing.test/repo/", missing_id)
+  assert r3.status_code == 400, r3.text
+  assert "requires `previous_id`" in r3.text
+
+  # Credentials, mutable query parameters, and non-HTTPS predecessors are not
+  # durable package identities.
+  bad_url = _simple_manifest(
+    "renamed", previous_id="old",
+    previous_manifest_url="http://user:pass@example.test/old?ref=main",
+  )
+  r4 = _install_simple(client, auth, "https://prev-url.test/repo/", bad_url)
+  assert r4.status_code == 400, r4.text
+  assert "absolute HTTPS URL" in r4.text
+
+
+def test_rename_adopts_predecessor_across_same_owner_repository_move(
+  client, auth, bypass_url_validation,
+):
+  """A package and repository rename preserves the row, storage, and data."""
+  old_base = "https://raw.githubusercontent.com/acme/app-old/main/"
+  new_base = "https://raw.githubusercontent.com/acme/app-new/main/"
+
+  # Keep the fixture hermetic: repository identity is exercised, while source
+  # materialization uses the installer's synthetic Git path.
+  with patch("app.install._derive_repo_ref", return_value=None):
+    first = _install_simple(client, auth, old_base, _simple_manifest("old"))
+    assert first.status_code == 201, first.text
+    app_id = first.json()["id"]
+    old_source = Path(get_settings().data_dir) / "apps" / "old"
+    subprocess.run(
+      [
+        "git", "remote", "add", "origin",
+        "https://github.com/acme/app-old.git",
+      ],
+      cwd=old_source,
+      check=True,
+    )
+    storage_file = (
+      Path(get_settings().data_dir) / "apps" / str(app_id) / "data.json"
+    )
+    storage_file.parent.mkdir(parents=True, exist_ok=True)
+    storage_file.write_text('{"kept": true}')
+
+    renamed = _install_simple(
+      client,
+      auth,
+      new_base,
+      _simple_manifest(
+        "new",
+        version="2.0.0",
+        previous_id="old",
+        previous_manifest_url=old_base + "mobius.json",
+      ),
+    )
+
+  assert renamed.status_code == 201, renamed.text
+  assert renamed.json()["mode"] == "update"
+  assert renamed.json()["id"] == app_id
+  assert renamed.json()["slug"] == "new"
+  assert storage_file.read_text() == '{"kept": true}'
+  new_source = Path(get_settings().data_dir) / "apps" / "new"
+  assert not old_source.exists()
+  assert subprocess.check_output(
+    ["git", "remote", "get-url", "origin"], cwd=new_source, text=True,
+  ).strip() == "https://github.com/acme/app-new.git"
+
+
+def test_repository_move_cannot_adopt_package_from_another_owner(
+  client, auth, bypass_url_validation,
+):
+  old_base = "https://raw.githubusercontent.com/alice/app-old/main/"
+  new_base = "https://raw.githubusercontent.com/bob/app-new/main/"
+  with patch("app.install._derive_repo_ref", return_value=None):
+    first = _install_simple(client, auth, old_base, _simple_manifest("old"))
+    assert first.status_code == 201, first.text
+    refused = _install_simple(
+      client,
+      auth,
+      new_base,
+      _simple_manifest(
+        "new",
+        previous_id="old",
+        previous_manifest_url=old_base + "mobius.json",
+      ),
+    )
+
+  assert refused.status_code == 400, refused.text
+  assert "owned by the same account" in refused.text
 
 
 def test_rename_adopts_predecessor_row_and_moves_source_dir(

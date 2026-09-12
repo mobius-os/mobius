@@ -25,7 +25,7 @@ export default function ProviderConnection({ provider, name, connected, onDiscon
       await queryClient.cancelQueries({ queryKey: statuses.key })
       queryClient.setQueryData(statuses.key, current => ({
         ...current,
-        [provider]: { ...current?.[provider], configured: false, authenticated: false, error: null },
+        [provider]: { ...current?.[provider], configured: false, error: null },
       }))
       void statuses.invalidate(queryClient)
       void modelQueries.registry.invalidate(queryClient)

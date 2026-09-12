@@ -12,6 +12,7 @@ import {
   isOwnerUserMessage,
   startsFollowingTurn,
   jumpToLatestShown,
+  runtimeSnapshotTransition,
   shouldRepairRuntimeStream,
   serverSnapshotBehindLocal,
   shouldAttachRunningStream,
@@ -256,7 +257,7 @@ test('assistant ownership ignores only idle responses captured behind a local tr
 
 test('a known server run settling recovers a live stream that missed its terminal event', () => {
   assert.equal(shouldRecoverSettledRuntime({
-    observedRunningRunId: 'run-a',
+    settledRun: true,
     runtimeRunId: 'run-a',
     runtimeRunning: false,
     pendingCount: 0,
@@ -264,7 +265,7 @@ test('a known server run settling recovers a live stream that missed its termina
   }), true)
 
   assert.equal(shouldRecoverSettledRuntime({
-    observedRunningRunId: null,
+    settledRun: false,
     runtimeRunId: 'run-a',
     runtimeRunning: false,
     pendingCount: 0,
@@ -272,15 +273,15 @@ test('a known server run settling recovers a live stream that missed its termina
   }), false, 'the optimistic send window is not mistaken for a settled turn')
 
   assert.equal(shouldRecoverSettledRuntime({
-    observedRunningRunId: 'run-a',
-    runtimeRunId: 'run-b',
+    settledRun: true,
+    runtimeRunId: null,
     runtimeRunning: false,
     pendingCount: 0,
     streamStillActive: true,
-  }), false, 'a different terminal run cannot settle the mounted stream')
+  }), false, 'a transition without an exact run cannot settle the mounted stream')
 
   assert.equal(shouldRecoverSettledRuntime({
-    observedRunningRunId: 'run-a',
+    settledRun: true,
     runtimeRunId: 'run-a',
     runtimeRunning: false,
     pendingCount: 1,
@@ -288,7 +289,7 @@ test('a known server run settling recovers a live stream that missed its termina
   }), false, 'a queued continuation still owns the handoff')
 
   assert.equal(shouldRecoverSettledRuntime({
-    observedRunningRunId: 'run-a',
+    settledRun: true,
     runtimeRunId: 'run-a',
     runtimeRunning: false,
     pendingCount: 0,
@@ -297,13 +298,57 @@ test('a known server run settling recovers a live stream that missed its termina
   }), false, 'the explicit stop flow owns its own settlement')
 
   assert.equal(shouldRecoverSettledRuntime({
-    observedRunningRunId: 'run-a',
+    settledRun: true,
     runtimeRunId: 'run-a',
     runtimeRunning: false,
     pendingCount: 0,
     streamStillActive: true,
     localStartInFlight: true,
   }), false, 'an unacknowledged local start owns the idle-snapshot race')
+})
+
+test('runtime lifecycle revisions reject late snapshots and identify one exact settlement', () => {
+  const running = runtimeSnapshotTransition(null, {
+    runtime_revision: 12,
+    running: true,
+    run_id: 'run-a',
+    run_status: 'running',
+  })
+  assert.deepEqual(running, {
+    adopt: true,
+    settled: false,
+    next: { revision: 12, runId: 'run-a', status: 'running' },
+  })
+
+  assert.deepEqual(runtimeSnapshotTransition(running.next, {
+    runtime_revision: 11,
+    running: false,
+    run_id: 'older-run',
+    run_status: 'completed',
+  }), {
+    adopt: false,
+    settled: false,
+    next: running.next,
+  })
+
+  const completed = runtimeSnapshotTransition(running.next, {
+    runtime_revision: 13,
+    running: false,
+    run_id: 'run-a',
+    run_status: 'completed',
+  })
+  assert.equal(completed.adopt, true)
+  assert.equal(completed.settled, true)
+  assert.deepEqual(completed.next, {
+    revision: 13,
+    runId: 'run-a',
+    status: 'completed',
+  })
+
+  assert.equal(runtimeSnapshotTransition(completed.next, {
+    running: true,
+    run_id: 'run-b',
+  }).adopt, false, 'unversioned runtime projections cannot overwrite lifecycle truth')
 })
 
 test('only a cold stream prefix missing the durable question is retired', () => {

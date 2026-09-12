@@ -26,7 +26,6 @@ const chatAppArtifactsKey = chatId => [
 ]
 const projectsKey = ['projects']
 const projectTemplatesKey = ['projects', 'templates']
-const legacyProjectsKey = ['projects', 'legacy']
 const chatsKey = ['chats']
 const chatUsageRootKey = ['chat-usage']
 const chatUsageKey = chatId => [...chatUsageRootKey, chatId]
@@ -172,16 +171,6 @@ function useProjectTemplatesQuery() {
   return useQuery({ queryKey: projectTemplatesKey, queryFn: fetchProjectTemplates })
 }
 
-async function fetchLegacyProjects() {
-  const res = await api.projects.legacy()
-  const data = await jsonOrThrow(res, 'legacy projects fetch failed:')
-  return Array.isArray(data) ? data : []
-}
-
-function useLegacyProjectsQuery({ enabled = true } = {}) {
-  return useQuery({ queryKey: legacyProjectsKey, queryFn: fetchLegacyProjects, enabled })
-}
-
 async function fetchChats({ signal, timeoutMs, cache } = {}) {
   const res = await api.chats.list({ signal, timeoutMs, cache })
   const data = await jsonOrThrow(res, 'chats fetch failed:')
@@ -320,7 +309,6 @@ function markProviderConnected(queryClient, providerId) {
     [providerId]: {
       ...(current?.[providerId] || {}),
       configured: true,
-      authenticated: true,
     },
   }))
   // Authentication endpoints only return success after credentials are
@@ -547,7 +535,6 @@ export const projectQueries = {
     all: projectsKey,
     templates: projectTemplatesKey,
     importSources: ['projects', 'import-sources'],
-    legacy: legacyProjectsKey,
     detail: (projectId) => ['projects', 'detail', projectId],
     chats: (projectId) => ['projects', 'chats', projectId],
     files: (projectId, path = '') => ['projects', 'files', projectId, path],
@@ -578,12 +565,6 @@ export const projectQueries = {
     fetch: fetchProjectTemplates,
     useQuery: useProjectTemplatesQuery,
     invalidate: (queryClient) => queryClient.invalidateQueries({ queryKey: projectTemplatesKey }),
-  },
-  legacy: {
-    key: legacyProjectsKey,
-    fetch: fetchLegacyProjects,
-    useQuery: useLegacyProjectsQuery,
-    invalidate: (queryClient) => queryClient.invalidateQueries({ queryKey: legacyProjectsKey }),
   },
   files: {
     key: (projectId, path = '') => ['projects', 'files', projectId, path],

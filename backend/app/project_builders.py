@@ -155,24 +155,6 @@ def resolve_artifact_type(project, builder: str) -> dict[str, Any] | None:
   return dict(builtin) if builtin is not None else None
 
 
-def artifact_type_for_source(
-  template: Any, source: str, *, preview: str | None = None,
-) -> dict[str, Any] | None:
-  """Choose the declared type for a source extension and optional preview kind."""
-  extension = Path(source).suffix.lower().lstrip(".")
-  for artifact_type in template_artifact_types(template):
-    if extension not in artifact_type["extensions"]:
-      continue
-    if preview is None or artifact_type["preview"] == preview:
-      return artifact_type
-  for artifact_type in BUILTIN_ARTIFACT_TYPES.values():
-    if extension in artifact_type["extensions"] and (
-      preview is None or artifact_type["preview"] == preview
-    ):
-      return dict(artifact_type)
-  return None
-
-
 def output_entry(artifact_type: dict[str, Any], source: str) -> str | None:
   """Render and confine one provider-declared output entry template."""
   source_path = Path(source.lstrip("/"))
@@ -191,8 +173,7 @@ def output_entry(artifact_type: dict[str, Any], source: str) -> str | None:
 
 
 def default_output_rel(
-  artifact_id: str, builder: str, source: str,
-  artifact_type: dict[str, Any] | None = None,
+  artifact_id: str, source: str, artifact_type: dict[str, Any],
 ) -> str:
   """Project-relative path of the artifact's output entry file.
 
@@ -200,11 +181,10 @@ def default_output_rel(
   confines it beneath this artifact's output directory.
   """
   base = f"artifacts/{artifact_id}/output"
-  declared = artifact_type or BUILTIN_ARTIFACT_TYPES.get(builder)
-  rendered = output_entry(declared, source) if declared else None
-  if rendered:
-    return f"{base}/{rendered}"
-  return f"{base}/{source.lstrip('/')}"
+  rendered = output_entry(artifact_type, source)
+  if rendered is None:
+    raise ValueError("artifact type has no confined output declaration")
+  return f"{base}/{rendered}"
 
 
 def default_log_rel(artifact_id: str) -> str:
@@ -213,18 +193,17 @@ def default_log_rel(artifact_id: str) -> str:
 
 def new_artifact_entry(
   artifact_id: str, name: str, builder: str, source: str,
-  artifact_type: dict[str, Any] | None = None,
+  artifact_type: dict[str, Any],
 ) -> dict[str, Any]:
   """Build a fresh registry entry in the canonical shape."""
-  declared = artifact_type or BUILTIN_ARTIFACT_TYPES.get(builder)
   return {
     "id": artifact_id,
     "name": name,
     "builder": builder,
     "source": source,
-    "output_rel": default_output_rel(artifact_id, builder, source, declared),
-    "preview": declared.get("preview") if declared else None,
-    "type_name": declared.get("name") if declared else None,
+    "output_rel": default_output_rel(artifact_id, source, artifact_type),
+    "preview": artifact_type["preview"],
+    "type_name": artifact_type["name"],
     "status": "idle",
     "updated_at": _now_iso(),
     "duration_ms": None,

@@ -613,6 +613,7 @@ def test_runtime_route_does_not_select_transcript_json(
     "running": True,
     "run_id": None,
     "run_status": None,
+    "runtime_revision": 0,
     "active_assistant_message_id": None,
     "recovery_run_id": None,
     "active_goal_objective": None,
@@ -636,6 +637,32 @@ def test_runtime_route_does_not_select_transcript_json(
     "json_extract(chats.live_assistant" in statement
     for statement in statements
   )
+
+
+def test_runtime_projection_orders_run_transitions_with_the_lifecycle_cursor(
+  client, auth, db, monkeypatch,
+):
+  chat_id = client.post(
+    "/api/chats", headers=auth, json={"title": "Revisioned runtime"},
+  ).json()["id"]
+  run = models.ChatRun(id="revision-run", chat_id=chat_id, status="running")
+  db.add(run)
+  db.commit()
+  monkeypatch.setattr("app.routes.chats.is_chat_running", lambda _: True)
+
+  running = client.get(f"/api/chats/{chat_id}/runtime", headers=auth).json()
+  assert running["run_id"] == "revision-run"
+  assert running["run_status"] == "running"
+  assert running["runtime_revision"] > 0
+
+  run.status = "completed"
+  db.commit()
+  monkeypatch.setattr("app.routes.chats.is_chat_running", lambda _: False)
+  completed = client.get(f"/api/chats/{chat_id}/runtime", headers=auth).json()
+
+  assert completed["run_id"] == "revision-run"
+  assert completed["run_status"] == "completed"
+  assert completed["runtime_revision"] > running["runtime_revision"]
 
 
 def test_detail_and_runtime_expose_the_durable_assistant_owner(

@@ -1,5 +1,5 @@
 import { questionAnswerPatch } from './questionSubmission.js'
-import { usePeerTimeline, PeerTimelineRows } from './PeerTimeline.jsx'
+import { usePeerTimeline, PeerTimelineLoadError, PeerTimelineRows } from './PeerTimeline.jsx'
 import { PeerTimelineContext } from './peerTimelineContext.js'
 import { consumeChatChanges, subscribeChatChanges } from '../../lib/chatChangesNavigation.js'
 import {
@@ -25,6 +25,7 @@ import {
 } from '../../hooks/queries.js'
 import useStreamConnection from './useStreamConnection.js'
 import useScrollMode from './useScrollMode.js'
+import usePaginationLifecycle from './usePaginationLifecycle.js'
 import {
   FOLLOW_STICK_BAND_PX,
   isNearPhysicalBottom,
@@ -182,6 +183,8 @@ import {
   isContinuationMessage,
   isOwnerUserMessage,
   jumpToLatestShown,
+  runtimeSnapshot,
+  runtimeSnapshotTransition,
   shouldRepairRuntimeStream,
   shouldRetireRestoredQuestionSnapshot,
   shouldAttachRunningStream,
@@ -529,20 +532,28 @@ export default function ChatView({
   // does not fall back to Mic while a turn is still running with queued work.
   const [serverRunning, setServerRunning] = useState(() => !!cached?.running)
   const serverRunningRef = useRef(!!cached?.running)
-  // A physical run id, unlike a boolean latch, proves that a later idle
-  // verdict belongs to the same turn this pane actually observed running.
-  const observedRunningRunIdRef = useRef(
-    cached?.running ? (cached?.runId || null) : null,
-  )
-  const setServerRunningLocalState = useCallback((v, runId = null) => {
+  // HTTP runtime reads share the database lifecycle stream's monotonic cursor.
+  // Keep one accepted snapshot, rather than a second observed-running latch,
+  // so a slow older response can never erase a newer run transition.
+  const runtimeSnapshotRef = useRef(runtimeSnapshot(cached))
+  const inspectRuntimeSnapshot = useCallback((value) => (
+    runtimeSnapshotTransition(runtimeSnapshotRef.current, value)
+  ), [])
+  const commitRuntimeSnapshot = useCallback((transition) => {
+    runtimeSnapshotRef.current = transition.next
+  }, [])
+  useEffect(() => {
+    runtimeSnapshotRef.current = runtimeSnapshot(
+      queryClient.getQueryData(chatMessagesQueryKey(chatId)),
+    )
+  }, [chatId, queryClient])
+  const setServerRunningLocalState = useCallback((v) => {
     const running = !!v
-    if (running && runId) observedRunningRunIdRef.current = runId
     serverRunningRef.current = running
     setServerRunning(running)
   }, [])
   const setServerRunningState = useCallback((v) => {
     const running = !!v
-    if (!running) observedRunningRunIdRef.current = null
     setServerRunningLocalState(running)
     updateChatRuntimeCache(
       queryClient,
@@ -1033,10 +1044,20 @@ export default function ChatView({
   // so any in-flight fetchMessages can't resurrect cleared data.
   const fetchGenRef = useRef(0)
 
-  // Pagination flag — gates loadOlderMessages from re-entering AND
-  // gates the scroll-handler in useScrollMode from misclassifying
-  // post-prepend scroll-clamps as user gestures.
+  // Pagination flag — one compact page at a time. Scroll authority remains in
+  // useScrollMode, including while this network request is in flight.
   const loadingOlder = useRef(false)
+  const paginationFollowupRafRef = useRef(0)
+  const paginationLifecycleRef = usePaginationLifecycle({
+    chatId,
+    hidden,
+    loadNonce,
+    provisionalNewChat,
+    searchAnchorKey: searchReveal?.anchorKey,
+    searchRevealId: searchReveal?.id,
+    loadingOlderRef: loadingOlder,
+    followupRafRef: paginationFollowupRafRef,
+  })
   const [olderHistoryError, setOlderHistoryError] = useState(false)
 
   // ── Scroll subsystem ─────────────────────────────────────────────
@@ -1065,7 +1086,9 @@ export default function ChatView({
   const {
     gestureWindowUntilRef,
     revealed,
-    anchorPagination,
+    capturePaginationRequest,
+    preparePaginationPrepend,
+    restorePaginationPrepend,
     captureSendIntent,
     commitSendIntent,
     cancelQuestionSubmission,
@@ -1094,7 +1117,6 @@ export default function ChatView({
     footRef,
     messages,
     messagesRef,
-    loadingOlderRef: loadingOlder,
     initialEntryPhase,
     onCachedCoordinateReady: acceptCachedReadingCoordinate,
     ownsReadingPosition: !hidden,
@@ -1299,6 +1321,9 @@ export default function ChatView({
       // must not install an older terminal snapshot over its successor.
       if (chatIdStaleRef.current || fetchGenRef.current !== gen
           || isCurrent?.() === false) return
+      const runtimeTransition = inspectRuntimeSnapshot(data)
+      if (!runtimeTransition.adopt) return null
+      commitRuntimeSnapshot(runtimeTransition)
       const preserveLocalTurn =
         !authoritative
         && force
@@ -1339,7 +1364,7 @@ export default function ChatView({
         sendingRef.current = false
       }
       if (data.running || (!preserveLocalTurn && !staleSnapshot)) {
-        setServerRunningLocalState(!!data.running, data.run_id || null)
+        setServerRunningLocalState(!!data.running)
       }
       const runtimeGoal = goalPresentationFromRuntime(
         data,
@@ -1369,6 +1394,7 @@ export default function ChatView({
         running: !!data.running,
         runId: data.run_id || null,
         runStatus: data.run_status || null,
+        runtimeRevision: data.runtime_revision,
         recoveryRunId: data.recovery_run_id || null,
         goal: runtimeGoal,
         activeGoalObjective: runtimeGoal?.status === 'active'
@@ -1401,6 +1427,19 @@ export default function ChatView({
       // Stream retirement and the authoritative replacement must be one
       // commit, not two paints separated by the detail request.
       onReconciled?.(runtime)
+      const localStartInFlight =
+        localStartRequestRef.current?.chatId === String(chatId)
+      if (shouldRecoverSettledRuntime({
+        settledRun: runtimeTransition.settled,
+        runtimeRunId: data.run_id || null,
+        runtimeRunning: !!data.running,
+        pendingCount: (data.pending_messages || []).length,
+        streamStillActive: isStreamingRef.current,
+        stopInFlight: handlingStopRef.current,
+        localStartInFlight,
+      })) {
+        retireSettledStreamRef.current?.()
+      }
       return runtime
     } catch {
       void reconcileFailedSendOutbox({
@@ -1423,6 +1462,8 @@ export default function ChatView({
     embedded,
     queryClient,
     reconcileFailedSendOutbox,
+    commitRuntimeSnapshot,
+    inspectRuntimeSnapshot,
     setActiveAssistantMessageId,
     setGoalPresentationLocalState,
   ])
@@ -1461,7 +1502,8 @@ export default function ChatView({
       const data = await jsonOrThrow(res, 'Runtime refresh failed')
       if (chatIdStaleRef.current) return null
       if (fetchGenRef.current !== gen) return null
-      setRecoveryRunId(data.recovery_run_id || null)
+      const runtimeTransition = inspectRuntimeSnapshot(data)
+      if (!runtimeTransition.adopt) return null
       const serverPending = data.pending_messages || []
       const runtime = {
         running: !!data.running,
@@ -1488,7 +1530,7 @@ export default function ChatView({
         setActiveAssistantMessageId(runtime.activeAssistantMessageId)
       }
       if (shouldRecoverSettledRuntime({
-        observedRunningRunId: observedRunningRunIdRef.current,
+        settledRun: runtimeTransition.settled,
         runtimeRunId: data.run_id || null,
         runtimeRunning: !!data.running,
         pendingCount: serverPending.length,
@@ -1499,8 +1541,9 @@ export default function ChatView({
         // The backend has durably finalized a run but this browser missed its
         // terminal SSE event. Re-read the transcript before retiring the stale
         // transport so a saved final reply can never remain hidden behind the
-        // cached in-flight surface. A failed refresh leaves serverRunning
-        // latched, so the next runtime poll retries instead of declaring idle.
+        // cached in-flight surface. Commit the terminal revision only through
+        // that detail read; failure leaves the running revision current so the
+        // next runtime poll retries.
         const settled = await fetchMessages({
           force: true,
           terminal204: true,
@@ -1511,6 +1554,8 @@ export default function ChatView({
         }
         return runtime
       }
+      commitRuntimeSnapshot(runtimeTransition)
+      setRecoveryRunId(data.recovery_run_id || null)
       // A finalized reply can advance while this client holds an idle warm
       // cache with no stream left to reconcile it. Foreground runtime reads
       // already carry the durable version; when it disproves the cache, use
@@ -1527,7 +1572,6 @@ export default function ChatView({
         setSending(true)
       } else if (serverPending.length === 0 && !localAuthoritative) {
         // Stream is dead and the server is idle+empty: clear the stale Stop.
-        observedRunningRunIdRef.current = null
         setSending(false)
         sendingRef.current = false
       }
@@ -1535,7 +1579,7 @@ export default function ChatView({
       // snapshot once. The side-effecting field setters are for independent
       // optimistic transitions; using them here made one poll emit up to three
       // persisted-cache updates for a single server response.
-      setServerRunningLocalState(!!data.running, data.run_id || null)
+      setServerRunningLocalState(!!data.running)
       const cachedGoal = queryClient.getQueryData(
         chatMessagesQueryKey(chatId),
       )?.goal || goalPresentationRef.current
@@ -1551,6 +1595,7 @@ export default function ChatView({
         running: !!data.running,
         runId: data.run_id || null,
         runStatus: data.run_status || null,
+        runtimeRevision: data.runtime_revision,
         recoveryRunId: data.recovery_run_id || null,
         goal: runtimeGoal,
         activeGoalObjective: runtimeGoal?.status === 'active'
@@ -1594,7 +1639,9 @@ export default function ChatView({
     return null
   }, [
     chatId,
+    commitRuntimeSnapshot,
     fetchMessages,
+    inspectRuntimeSnapshot,
     messagesRef,
     pendingQueue.hydrate,
     queryClient,
@@ -1934,7 +1981,6 @@ export default function ChatView({
   })
 
   retireSettledStreamRef.current = () => {
-    observedRunningRunIdRef.current = null
     disconnect({ clearStreaming: true })
     clearStreamItems()
   }
@@ -2019,7 +2065,7 @@ export default function ChatView({
           // A hidden retained pane can miss the terminal stream event while
           // Shell still records the run finish. Re-enter the runtime owner
           // here: it protects an unacknowledged fresh send, but an idle server
-          // verdict after an observed run authoritatively refreshes the final
+          // verdict after a revisioned run transition refreshes the final
           // transcript and retires the stale stream. The old non-authoritative
           // detail read deliberately preserved local activity, so the pane
           // could return with its shimmer and Stop control stuck on.
@@ -2394,6 +2440,11 @@ export default function ChatView({
     }
 
     const settleRuntime = (runtime, visibleMessages) => {
+      const transition = inspectRuntimeSnapshot(runtime)
+      if (!transition.adopt) {
+        throw new Error('CHAT_RUNTIME_OUT_OF_ORDER')
+      }
+      commitRuntimeSnapshot(transition)
       const running = !!runtime.running
       setRecoveryRunId(runtime.recovery_run_id || null)
       const attachesToStream = shouldAttachRunningStream({
@@ -2522,6 +2573,9 @@ export default function ChatView({
         )
         updateChatRuntimeCache(queryClient, queryKey, {
           running: !!runtime.running,
+          runId: runtime.run_id || null,
+          runStatus: runtime.run_status || null,
+          runtimeRevision: runtime.runtime_revision,
           recoveryRunId: runtime.recovery_run_id || null,
           activeAssistantMessageId:
             runtime.active_assistant_message_id || null,
@@ -2715,7 +2769,6 @@ export default function ChatView({
       cancelled = true
       initialLoadController.abort()
       chatIdStaleRef.current = true
-      loadingOlder.current = false
       disconnect()
     }
   }, [
@@ -2725,35 +2778,30 @@ export default function ChatView({
     provisionalNewChat,
     searchReveal?.anchorKey,
     searchReveal?.id,
+    commitRuntimeSnapshot,
+    inspectRuntimeSnapshot,
     reconcileFailedSendOutbox,
     setActiveAssistantMessageId,
     setGoalPresentationLocalState,
   ])
 
 
-  // Paginate older messages. Captures a pre-prepend anchor so we can
-  // restore the user's reading position via applyMode after the
-  // prepend grows scrollHeight upward. The anchor is the topmost
-  // currently-rendered message; after prepend, it has the same
-  // data-key but a new (larger) offsetTop. ANCHOR_AT{key, offset}
-  // lands the user at the same visual position.
-  // (loadingOlder ref is declared earlier alongside the useScrollMode
-  // hook call — it's passed to the hook to gate the scroll handler.)
-  function loadOlderMessages(before = offset) {
+  // Paginate older messages. Once the response arrives, capture the reader's
+  // exact visible message (including a nested content part), prepend the rows,
+  // and restore that coordinate in the same task before paint. Capturing at
+  // request start would be stale whenever touch momentum continues in flight.
+  function loadOlderMessages(before = offset, { readerDriven = false } = {}) {
     const el = scrollRef.current
     if (!el || loadingOlder.current || loading || before <= 0) return
     loadingOlder.current = true
     setOlderHistoryError(false)
-    // Snapshot the topmost rendered msg + its current offset for
-    // post-prepend restore. The anchor key/offset is stable: after
-    // the prepend, the SAME message has a larger offsetTop (older
-    // messages are inserted above it), and ANCHOR_AT{key, offset}
-    // resolves to the new offsetTop minus the original gap → no
-    // visible jump.
-    const topMsg = el.querySelector('.chat__msg[data-key]')
-    const anchorKey = topMsg?.dataset?.key || null
-    const anchorOffset = topMsg ? topMsg.offsetTop - el.scrollTop : 0
-    // We deliberately do NOT save the previous mode to restore later.
+    const paginationLifecycle = paginationLifecycleRef.current
+    const requestIsCurrent = () => (
+      paginationLifecycleRef.current === paginationLifecycle
+      && !chatIdStaleRef.current
+    )
+    const paginationRequest = capturePaginationRequest()
+    // We deliberately do NOT save the pre-pagination mode to restore later.
     // The user paginated — their intent is now to read older content.
     // If the previous mode was FOLLOW_BOTTOM and we restored it,
     // the next layout event (e.g., a streaming token) would yank
@@ -2766,7 +2814,7 @@ export default function ChatView({
     )
       .then(r => jsonOrThrow(r, 'Earlier messages failed to load'))
       .then(data => {
-        if (chatIdStaleRef.current) return
+        if (!requestIsCurrent()) return
         const older = data.messages || []
         for (const msg of older) {
           if (msg.blocks) {
@@ -2777,38 +2825,37 @@ export default function ChatView({
             }
           }
         }
-        // Set the temporary anchor mode BEFORE commitMessages so the
-        // ensuing layout effect (triggered by [messages] change)
-        // applies the anchor instead of intentMode. Otherwise the
-        // layout effect runs first with intentMode (e.g., PIN at the
-        // user msg's NEW offsetTop) → visible jump → then our rAF
-        // would set the anchor → second jump.
-        if (anchorKey) {
-          anchorPagination(anchorKey, anchorOffset)
-        }
+        // Capture NOW, not before the request: momentum/touch may have moved
+        // the reader while the network was in flight. Commit the page
+        // synchronously and compensate that same coordinate before paint, so
+        // prepended rows never flash and then snap back into place.
+        const paginationAnchor = preparePaginationPrepend(paginationRequest)
         const nextOffset = data.offset || 0
-        commitMessages(prev => [...older, ...prev], nextOffset)
-        requestAnimationFrame(() => {
-          // The layout effect has run with ANCHOR_AT — applyMode
-          // landed the topmost-pre-prepend msg at the same visual
-          // position. We deliberately DON'T restore the previous
-          // mode: user paginated → their intent is to read older
-          // content. The ANCHOR_AT mode keeps them there across
-          // subsequent layout events (incoming tokens, etc). Their
-          // next gesture (or send) writes a fresh mode.
+        flushSync(() => {
+          commitMessages(prev => [...older, ...prev], nextOffset)
+        })
+        restorePaginationPrepend(paginationAnchor)
+        // Keep the network guard raised through the browser's matching scroll
+        // event, then decide whether this same reader-driven prefetch still
+        // needs another bounded page. The controller separately suppresses
+        // only the exact compensation coordinate, never in-flight touch.
+        paginationFollowupRafRef.current = requestAnimationFrame(() => {
+          paginationFollowupRafRef.current = 0
+          if (!requestIsCurrent()) return
           loadingOlder.current = false
           const scrollEl = scrollRef.current
           if (
             scrollEl
             && nextOffset > 0
             && nextOffset < before
-            && olderHistoryShouldLoad(scrollEl)
+            && olderHistoryShouldLoad(scrollEl, { userDriven: readerDriven })
           ) {
-            loadOlderMessages(nextOffset)
+            loadOlderMessages(nextOffset, { readerDriven })
           }
         })
       })
       .catch(() => {
+        if (!requestIsCurrent()) return
         loadingOlder.current = false
         setOlderHistoryError(true)
       })
@@ -2847,7 +2894,7 @@ export default function ChatView({
     // visible interruption instead of waiting for the absolute top.
     const userDriven = performance.now() < gestureWindowUntilRef.current
     if (offset > 0 && olderHistoryShouldLoad(el, { userDriven })) {
-      loadOlderMessages()
+      loadOlderMessages(offset, { readerDriven: userDriven })
     }
   }
 
@@ -3278,7 +3325,6 @@ export default function ChatView({
     // FRESH SEND PATH: no active turn, no queue.
     const localStartRequest = { chatId: String(chatId), cid }
     localStartRequestRef.current = localStartRequest
-    observedRunningRunIdRef.current = null
     fetchGenRef.current += 1
     onMessageStartRef.current?.()
     promotedRef.current = false
@@ -5712,7 +5758,7 @@ export default function ChatView({
           )}
 
           <PeerTimelineRows notes={peerTimeline.slots.get(displayedMessages.length)} chatId={chatId} onInternalNav={internalNav} />
-          {peerTimeline.error && <li className="chat__peer-load-error" role="status">Chat activity couldn’t refresh. <button type="button" onClick={() => peerTimeline.retry()}>Try again</button></li>}
+          <PeerTimelineLoadError error={peerTimeline.error} onRetry={peerTimeline.retry} />
 
           {/* Steering is accepted locally before the provider control channel
               acknowledges it. Keep the durable rows out of the actionable
@@ -5776,7 +5822,7 @@ export default function ChatView({
                     <button
                       type="button"
                       className="chat__history-retry"
-                      onClick={() => loadOlderMessages()}
+                      onClick={() => loadOlderMessages(offset, { readerDriven: true })}
                     >
                       Earlier messages didn’t load — retry
                     </button>

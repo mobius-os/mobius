@@ -52,7 +52,6 @@ export function makeProjects() {
   return {
     templates: () => request('templates'),
     list: () => request('list'),
-    migrate: () => request('migrate'),
     create: ({ templateId, name } = {}) => request('create', { templateId, name }),
     open: projectId => request('open', { projectId }),
     browse: () => request('browse'),

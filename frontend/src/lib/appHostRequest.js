@@ -39,7 +39,7 @@ export function appHostRequest(message) {
     }
   }
   if (message.type === 'moebius:projects') {
-    const actions = new Set(['templates', 'list', 'migrate', 'create', 'open', 'browse', 'import-sources', 'import-source'])
+    const actions = new Set(['templates', 'list', 'create', 'open', 'browse', 'import-sources', 'import-source'])
     if (
       typeof message.requestId !== 'string'
       || !/^projects:[a-z0-9]+:[a-z0-9]+$/i.test(message.requestId)

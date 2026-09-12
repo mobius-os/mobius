@@ -375,12 +375,28 @@ def publication_handoff_spec(
     raise ContributionSubmitError(
       "The reviewed package belongs to a different local app."
     )
-  if target.manifest_url is not None and not install._catalog_identity_matches(
-    target.manifest_url, identity.manifest_url, manifest_id,
-  ):
-    raise ContributionSubmitError(
-      "This installed app is already connected to a different package."
+  if target.manifest_url is not None:
+    try:
+      predecessor_source, _ = install._reviewed_predecessor_source(
+        reviewed_manifest, identity.manifest_url,
+      )
+    except HTTPException as exc:
+      raise ContributionSubmitError(str(exc.detail)) from exc
+    predecessor_matches = bool(
+      previous_id
+      and install._catalog_identity_matches(
+        target.manifest_url, predecessor_source, previous_id,
+      )
     )
+    if not (
+      install._catalog_identity_matches(
+        target.manifest_url, identity.manifest_url, manifest_id,
+      )
+      or predecessor_matches
+    ):
+      raise ContributionSubmitError(
+        "This installed app is already connected to a different package."
+      )
 
   return PublicationHandoffSpec(
     **asdict(identity),

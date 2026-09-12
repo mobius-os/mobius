@@ -238,7 +238,7 @@ def test_template_previews_auto_register_as_artifacts(client, auth, db):
       "id": "latex",
       "name": "LaTeX document",
       "previews": [{
-        "id": "pdf", "name": "PDF", "kind": "pdf", "path": "main.pdf",
+        "id": "pdf", "name": "PDF", "source": "main.tex", "builder": "latex",
       }],
       "files": {"main.tex": "templates/main.tex"},
       "artifact_types": [{

@@ -8,6 +8,7 @@ obvious and prevents current schema work from disappearing into boot plumbing.
 
 import json
 import os
+import re
 import secrets
 import uuid
 from datetime import UTC, datetime
@@ -3752,6 +3753,745 @@ def _rename_chat_run_update_stream(eng):
     ))
 
 
+def _legacy_project_json(value, fallback):
+  """Decode one JSON column without depending on the current ORM."""
+  if isinstance(value, str):
+    try:
+      value = json.loads(value)
+    except (TypeError, ValueError):
+      return fallback
+  return value
+
+
+def _legacy_project_snapshot(app: dict) -> dict:
+  """Freeze the installed provider declaration into a current Project."""
+  templates = _legacy_project_json(app.get("project_templates_json"), [])
+  template = next(
+    (value for value in templates if isinstance(value, dict)), {}
+  ) if isinstance(templates, list) else {}
+  template_id = str(template.get("id") or app["slug"])
+  files = template.get("files")
+  return {
+    "key": f"{app['slug']}:{template_id}",
+    "id": template_id,
+    "kind": str(template.get("kind") or ""),
+    "name": str(template.get("name") or app["name"]),
+    "description": str(template.get("description") or app.get("description") or ""),
+    "guidance": str(template.get("guidance") or ""),
+    "skills": [str(value) for value in template.get("skills") or []],
+    "dependencies": [str(value) for value in template.get("dependencies") or []],
+    "previews": [
+      {
+        "id": str(value.get("id") or "preview"),
+        "name": str(value.get("name") or "Preview"),
+        "kind": str(value.get("kind") or "html"),
+        "path": str(value.get("path") or ""),
+      }
+      for value in template.get("previews") or [] if isinstance(value, dict)
+    ],
+    "actions": [
+      {
+        "id": str(value.get("id") or "action"),
+        "name": str(value.get("name") or "Run"),
+        "prompt": str(value.get("prompt") or ""),
+      }
+      for value in template.get("actions") or [] if isinstance(value, dict)
+    ],
+    "artifact_types": [
+      {
+        "id": str(value.get("id") or "artifact"),
+        "name": str(value.get("name") or "Artifact"),
+        "extensions": [str(item) for item in value.get("extensions") or []],
+        "preview": str(value.get("preview") or "html"),
+        "script": str(value.get("script") or ""),
+        "output": str(value.get("output") or "{source}"),
+      }
+      for value in template.get("artifact_types") or [] if isinstance(value, dict)
+    ],
+    "files": dict(files) if isinstance(files, dict) else {},
+    "source_app_id": int(app["id"]),
+    "source_app_name": str(app["name"]),
+    "source_app_version": str(app.get("version") or ""),
+  }
+
+
+def _legacy_project_artifacts(snapshot: dict, root: Path, now: datetime) -> list[dict]:
+  """Lift valid legacy previews without calling today's builder helpers."""
+  import stat
+
+  artifacts = []
+  seen = set()
+  artifact_types = snapshot.get("artifact_types") or []
+  for preview in snapshot.get("previews") or []:
+    kind = str(preview.get("kind") or "").lower()
+    output_path = str(preview.get("path") or "").lstrip("/")
+    if not output_path:
+      continue
+    if kind == "pdf":
+      source = str(Path(output_path).with_suffix(".tex"))
+    elif kind in ("html", "website"):
+      source, kind = output_path, "html"
+    else:
+      continue
+    source_path = Path(source)
+    if (
+      not source or source_path.is_absolute() or "\\" in source
+      or any(part in ("", ".", "..") for part in source_path.parts)
+    ):
+      continue
+    try:
+      source_mode = (root / source_path).stat().st_mode
+    except FileNotFoundError:
+      continue
+    except OSError as exc:
+      raise RuntimeError(
+        f"legacy Project source is unreadable: {root / source_path}"
+      ) from exc
+    if not stat.S_ISREG(source_mode):
+      continue
+    extension = source_path.suffix.lower().lstrip(".")
+    artifact_type = next((
+      value for value in artifact_types
+      if isinstance(value, dict)
+      and extension in (value.get("extensions") or [])
+      and value.get("preview") == kind
+      and re.fullmatch(r"[A-Za-z0-9_-]{1,64}", str(value.get("id") or ""))
+    ), None)
+    if artifact_type is None:
+      continue
+    raw_id = str(preview.get("id") or preview.get("name") or artifact_type["id"])
+    artifact_id = re.sub(r"[^a-z0-9_-]+", "-", raw_id.lower()).strip("-_")[:64]
+    if not artifact_id or artifact_id in seen:
+      continue
+    seen.add(artifact_id)
+    output = str(artifact_type.get("output") or "{source}")
+    output = output.replace("{source}", source).replace("{stem}", source_path.stem)
+    output_candidate = Path(output)
+    if (
+      not output or output_candidate.is_absolute() or "\\" in output
+      or any(part in ("", ".", "..") for part in output_candidate.parts)
+    ):
+      output = source
+    artifacts.append({
+      "id": artifact_id,
+      "name": str(preview.get("name") or artifact_id),
+      "builder": str(artifact_type["id"]),
+      "source": source,
+      "output_rel": f"artifacts/{artifact_id}/output/{output}",
+      "preview": artifact_type.get("preview"),
+      "type_name": artifact_type.get("name"),
+      "status": "idle",
+      "updated_at": now.isoformat(),
+      "duration_ms": None,
+      "log_rel": f"artifacts/{artifact_id}/build.log",
+    })
+  return artifacts
+
+
+def _materialize_legacy_projects(eng):
+  """Materialize legacy builder roots, then retire their runtime marker.
+
+  The filesystem is preflighted completely before database mutation. Missing or
+  unreadable declared workspaces fail the migration so a later boot can retry;
+  existing deleted Projects remain recoverable but never acquire a live chat.
+  """
+  import stat
+  from sqlalchemy import JSON as SAJSON, bindparam, inspect as sa_inspect, text
+
+  def path_kind(path: Path) -> str:
+    try:
+      mode = path.lstat().st_mode
+    except FileNotFoundError:
+      return "missing"
+    if stat.S_ISLNK(mode):
+      return "symlink"
+    if stat.S_ISDIR(mode):
+      return "directory"
+    if stat.S_ISREG(mode):
+      return "file"
+    return "other"
+
+  def read_json(path: Path, *, missing=None):
+    try:
+      raw = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+      return missing
+    except OSError as exc:
+      raise RuntimeError(f"legacy Project metadata is unreadable: {path}") from exc
+    try:
+      return json.loads(raw)
+    except (TypeError, ValueError) as exc:
+      raise RuntimeError(f"legacy Project metadata is invalid: {path}") from exc
+
+  inspector = sa_inspect(eng)
+  tables = set(inspector.get_table_names())
+  if not {"apps", "projects", "chats"}.issubset(tables):
+    return
+  app_columns = {column["name"] for column in inspector.get_columns("apps")}
+  if not {"id", "name", "slug"}.issubset(app_columns):
+    return
+  optional = [
+    name for name in (
+      "description", "version", "project_templates_json",
+    ) if name in app_columns
+  ]
+  project_columns = {
+    column["name"] for column in inspector.get_columns("projects")
+  }
+  data_root = Path(os.environ.get("DATA_DIR", "/data")).resolve()
+  valid_id = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+  now = datetime.now(UTC).replace(tzinfo=None)
+
+  with eng.connect() as conn:
+    app_rows = conn.execute(text(
+      "SELECT " + ", ".join(["id", "name", "slug", *optional])
+      + " FROM apps WHERE slug IN ('latex', 'webstudio') ORDER BY id"
+    )).mappings().all()
+    current_rows = conn.execute(text(
+      "SELECT id, root_path, deleted_at FROM projects"
+    )).mappings().all()
+
+  roots = {}
+  ids = {}
+  for row in current_rows:
+    stored = Path(str(row["root_path"]))
+    resolved = (stored if stored.is_absolute() else data_root / stored).resolve()
+    identity = (str(row["id"]), row["deleted_at"] is None)
+    roots[resolved] = identity
+    ids[str(row["id"])] = resolved
+
+  prepared = []
+  for raw_app in app_rows:
+    app = dict(raw_app)
+    storage_path = data_root / "apps" / str(app["id"])
+    storage_kind = path_kind(storage_path)
+    if storage_kind == "missing":
+      continue
+    if storage_kind != "directory":
+      raise RuntimeError(
+        f"legacy Project storage must be a real directory: {storage_path}"
+      )
+    storage = storage_path.resolve()
+    try:
+      storage.relative_to(data_root)
+    except ValueError as exc:
+      raise RuntimeError(
+        f"legacy Project storage escapes the data directory: {storage_path}"
+      ) from exc
+
+    raw_metadata = read_json(storage / "projects.json", missing=None)
+    if raw_metadata is None:
+      metadata = {}
+    elif not isinstance(raw_metadata, list):
+      raise RuntimeError(
+        f"legacy Project metadata must be a list: {storage / 'projects.json'}"
+      )
+    else:
+      metadata = {
+        str(row["id"]): str(row.get("name") or row["id"])
+        for row in raw_metadata
+        if isinstance(row, dict) and valid_id.fullmatch(str(row.get("id") or ""))
+      }
+
+    candidates = set(metadata)
+    files_kind = path_kind(storage / "files")
+    if files_kind == "directory":
+      candidates.add("default")
+    elif files_kind not in ("missing",):
+      raise RuntimeError(
+        f"legacy Project files must be a real directory: {storage / 'files'}"
+      )
+    projects_dir = storage / "projects"
+    projects_kind = path_kind(projects_dir)
+    if projects_kind == "directory":
+      for child in projects_dir.iterdir():
+        child_kind = path_kind(child)
+        if child_kind == "symlink":
+          raise RuntimeError(f"legacy Project directory may not be a symlink: {child}")
+        if child_kind == "directory" and valid_id.fullmatch(child.name):
+          candidates.add(child.name)
+    elif projects_kind not in ("missing",):
+      raise RuntimeError(
+        f"legacy Projects root must be a real directory: {projects_dir}"
+      )
+
+    snapshot = _legacy_project_snapshot(app)
+    for legacy_id in sorted(candidates, key=lambda value: (value != "default", value)):
+      base = storage if legacy_id == "default" else projects_dir / legacy_id
+      root_path = base / "files"
+      if path_kind(root_path) != "directory":
+        raise RuntimeError(f"declared legacy Project root is unavailable: {root_path}")
+      root = root_path.resolve()
+      try:
+        root.relative_to(storage)
+      except ValueError as exc:
+        raise RuntimeError(f"legacy Project root escapes app storage: {root_path}") from exc
+
+      deterministic_id = str(uuid.uuid5(
+        uuid.NAMESPACE_URL, f"mobius:legacy-project:{app['id']}:{legacy_id}",
+      ))
+      existing = roots.get(root)
+      conflicting_root = ids.get(deterministic_id)
+      if existing is None and conflicting_root is not None and conflicting_root != root:
+        raise RuntimeError(
+          f"legacy Project id {deterministic_id} already owns another root"
+        )
+      project_id, project_active = existing or (deterministic_id, True)
+      chat_id = None
+      if project_active:
+        chat_value = read_json(base / "chat_id.json", missing=None)
+        if chat_value is not None and not isinstance(chat_value, dict):
+          raise RuntimeError(
+            f"legacy Project chat metadata is invalid: {base / 'chat_id.json'}"
+          )
+        chat_id = chat_value.get("id") if isinstance(chat_value, dict) else None
+        if chat_id is not None and not isinstance(chat_id, str):
+          raise RuntimeError(f"legacy Project chat id is invalid: {base / 'chat_id.json'}")
+      display_name = str(metadata.get(legacy_id) or (
+        "Default project" if legacy_id == "default"
+        else legacy_id.replace("-", " ").title()
+      )).strip()[:256] or "Untitled project"
+      artifacts = (
+        _legacy_project_artifacts(snapshot, root, now)
+        if existing is None else []
+      )
+      prepared.append({
+        "app": app,
+        "root": root,
+        "snapshot": snapshot,
+        "project_id": project_id,
+        "project_active": project_active,
+        "insert": existing is None,
+        "chat_id": chat_id,
+        "display_name": display_name,
+        "artifacts": artifacts,
+      })
+      if existing is None:
+        roots[root] = (project_id, True)
+        ids[project_id] = root
+
+  insert_project = text(
+    "INSERT INTO projects "
+    "(id, name, project_type, root_path, chat_id, source_app_id, "
+    "template_snapshot_json, artifacts_json, deleted_at, created_at, updated_at) "
+    "VALUES (:id, :name, :project_type, :root_path, NULL, :source_app_id, "
+    ":template, :artifacts, NULL, :created_at, :updated_at)"
+  ).bindparams(
+    bindparam("template", type_=SAJSON),
+    bindparam("artifacts", type_=SAJSON),
+  )
+  with eng.begin() as conn:
+    for item in prepared:
+      if item["insert"]:
+        conn.execute(insert_project, {
+          "id": item["project_id"],
+          "name": item["display_name"],
+          "project_type": item["snapshot"]["key"],
+          "root_path": item["root"].relative_to(data_root).as_posix(),
+          "source_app_id": int(item["app"]["id"]),
+          "template": item["snapshot"],
+          "artifacts": item["artifacts"] or None,
+          "created_at": now,
+          "updated_at": now,
+        })
+      if item["project_active"] and item["chat_id"]:
+        conn.execute(text(
+          "UPDATE chats SET project_id = :project_id "
+          "WHERE id = :chat_id AND deleted_at IS NULL AND project_id IS NULL "
+          "AND NOT EXISTS (SELECT 1 FROM projects WHERE chat_id = :chat_id)"
+        ), {"project_id": item["project_id"], "chat_id": item["chat_id"]})
+
+    if "legacy_source_json" in project_columns:
+      conn.execute(text("ALTER TABLE projects DROP COLUMN legacy_source_json"))
+
+
+def _normalize_compatibility_cutover_data(eng):
+  """Rewrite retained notification links into their current durable shape."""
+  from sqlalchemy import MetaData, Table, inspect as sa_inspect, select, update
+  from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+
+  def current_target(value):
+    if not isinstance(value, str):
+      return value
+    parsed = urlsplit(value)
+    absolute = parsed.scheme in ("http", "https") and bool(parsed.netloc)
+    if not absolute and (parsed.scheme or parsed.netloc or not value.startswith("/")):
+      return value
+    path = parsed.path
+    query = list(parse_qsl(parsed.query, keep_blank_values=True))
+    replacement = None
+    if path.startswith("/app/") and path[5:] and all(
+      character in "0123456789" for character in path[5:]
+    ):
+      replacement = [("app", path[5:])]
+    elif (
+      path.startswith("/chat/")
+      and path[6:]
+      and all(
+        character in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+        for character in path[6:]
+      )
+    ):
+      replacement = [("chat", path[6:])]
+    elif path in ("/shell", "/shell/"):
+      replacement = [
+        (key, "pages" if key == "app" and item == "artifacts" else item)
+        for key, item in query
+      ]
+      if replacement == query and path == "/shell/":
+        return value
+    if replacement is not None:
+      return urlunsplit((
+        parsed.scheme,
+        parsed.netloc,
+        "/shell/",
+        urlencode(replacement),
+        parsed.fragment,
+      ))
+    return value
+
+  tables = set(sa_inspect(eng).get_table_names())
+  if "notifications" in tables:
+    notification_columns = {
+      column["name"]
+      for column in sa_inspect(eng).get_columns("notifications")
+    }
+  else:
+    notification_columns = set()
+  if {"id", "target", "actions"}.issubset(notification_columns):
+    notifications = Table("notifications", MetaData(), autoload_with=eng)
+    with eng.begin() as conn:
+      rows = conn.execute(select(
+        notifications.c.id, notifications.c.target, notifications.c.actions,
+      )).mappings().all()
+      for row in rows:
+        target = current_target(row["target"])
+        actions = row["actions"]
+        if isinstance(actions, list):
+          actions = [
+            ({**item, "target": current_target(item.get("target"))}
+             if isinstance(item, dict) and "target" in item else item)
+            for item in actions
+          ]
+        if target != row["target"] or actions != row["actions"]:
+          conn.execute(
+            update(notifications).where(notifications.c.id == row["id"]).values(
+              target=target, actions=actions,
+            )
+          )
+
+
+
+def _rename_retired_app_identities(eng):
+  """Rename retained app rows through the configured SQLAlchemy database."""
+  import os
+  from pathlib import Path
+  from sqlalchemy import inspect as sa_inspect, text
+
+  inspector = sa_inspect(eng)
+  if "apps" not in set(inspector.get_table_names()):
+    return
+  columns = {column["name"] for column in inspector.get_columns("apps")}
+  if not {"id", "slug", "name", "source_dir"}.issubset(columns):
+    return
+  root = Path(os.environ.get("DATA_DIR", "/data")) / "apps"
+  with eng.begin() as conn:
+    for old, new, name in (
+      ("mind", "memory", "Memory"),
+      ("dreaming", "reflection", "Reflection"),
+    ):
+      old_row = conn.execute(text(
+        "SELECT id, source_dir FROM apps WHERE slug = :slug"
+      ), {"slug": old}).mappings().first()
+      new_row = conn.execute(text(
+        "SELECT id, source_dir FROM apps WHERE slug = :slug"
+      ), {"slug": new}).mappings().first()
+      current_dir = str(root / new)
+      if old_row is not None and new_row is not None:
+        raise RuntimeError(
+          f"app identity conflict: both {old!r} and {new!r} exist"
+        )
+      if old_row is not None:
+        conn.execute(text(
+          "UPDATE apps SET slug = :new, name = :name, source_dir = :source_dir "
+          "WHERE id = :app_id"
+        ), {
+          "new": new,
+          "name": name,
+          "source_dir": current_dir,
+          "app_id": old_row["id"],
+        })
+      elif new_row is not None:
+        source_dir = str(new_row["source_dir"] or "").rstrip("/")
+        if source_dir.endswith("/" + old):
+          conn.execute(text(
+            "UPDATE apps SET source_dir = :source_dir WHERE id = :app_id"
+          ), {"source_dir": current_dir, "app_id": new_row["id"]})
+    remaining = conn.execute(text(
+      "SELECT slug FROM apps WHERE slug IN (:mind, :dreaming)"
+    ), {"mind": "mind", "dreaming": "dreaming"}).scalars().all()
+    if remaining:
+      raise RuntimeError(
+        "retired app identities remain: " + ", ".join(sorted(remaining))
+      )
+
+
+
+
+def _advance_app_capability_contract_schema_6(eng):
+  """Promote already-normalized app contracts to the current schema."""
+  from sqlalchemy import JSON as SAJSON, bindparam, inspect as sa_inspect, text
+
+  if "apps" not in set(sa_inspect(eng).get_table_names()):
+    return
+  columns = {column["name"] for column in sa_inspect(eng).get_columns("apps")}
+  if "capability_contract" not in columns:
+    return
+  with eng.begin() as conn:
+    rows = conn.execute(text(
+      "SELECT id, capability_contract FROM apps "
+      "WHERE capability_contract IS NOT NULL"
+    )).fetchall()
+    update_contract = text(
+      "UPDATE apps SET capability_contract = :contract WHERE id = :app_id"
+    ).bindparams(bindparam("contract", type_=SAJSON))
+    for app_id, value in rows:
+      if isinstance(value, str):
+        try:
+          value = json.loads(value)
+        except (TypeError, ValueError):
+          continue
+      if not isinstance(value, dict) or value.get("schema") != 5:
+        continue
+      conn.execute(update_contract, {
+        "contract": {**value, "schema": 6},
+        "app_id": app_id,
+      })
+
+
+def _make_project_artifacts_declarative(eng):
+  """Freeze historical Project guesses into data, then retire copy semantics.
+
+  Before this cutover, template previews named only an output path and transport
+  kind. Runtime code guessed the source and builder from those fields, and the
+  shell guessed missing artifact presentation fields from builder names and file
+  extensions. This migration makes those historical choices explicit in each
+  retained snapshot/registry row.
+
+  Early Add-to-Projects copied source into an independent Project and recorded
+  ``imported_from`` without a management mode. Those roots remain ordinary
+  Projects; only the behavior-bearing source alias is removed. Explicit
+  ``management=linked`` records are current and remain unchanged.
+  """
+  from pathlib import Path
+  from sqlalchemy import MetaData, Table, inspect as sa_inspect, select, update
+
+  if "projects" not in set(sa_inspect(eng).get_table_names()):
+    return
+  columns = {
+    column["name"] for column in sa_inspect(eng).get_columns("projects")
+  }
+  if not {"id", "template_snapshot_json", "artifacts_json"}.issubset(columns):
+    return
+
+  # Frozen definitions reproduce the old platform-owned inference exactly.
+  # They are migration data, not a runtime registry.
+  historical_types = {
+    "app": {
+      "name": "App", "extensions": ("jsx", "tsx"),
+      "preview": "html", "script": None, "output": "index.html",
+    },
+    "website": {
+      "name": "Website", "extensions": ("html", "htm"),
+      "preview": "html", "script": "project-builder.sh", "output": "{source}",
+    },
+    "latex": {
+      "name": "PDF", "extensions": ("tex",),
+      "preview": "pdf", "script": "project-builder.sh", "output": "{stem}.pdf",
+    },
+  }
+
+  def decoded(value, fallback):
+    if isinstance(value, str):
+      try:
+        value = json.loads(value)
+      except (TypeError, ValueError):
+        return fallback
+    return value
+
+  def declared_types(template):
+    result = {}
+    for value in template.get("artifact_types") or []:
+      if not isinstance(value, dict):
+        continue
+      type_id = value.get("id")
+      extensions = value.get("extensions")
+      if not isinstance(type_id, str) or not isinstance(extensions, list):
+        continue
+      result[type_id] = {
+        "name": value.get("name"),
+        "extensions": tuple(
+          extension for extension in extensions if isinstance(extension, str)
+        ),
+        "preview": value.get("preview"),
+        "script": value.get("script"),
+        "output": value.get("output"),
+      }
+    return result
+
+  def confined_output(output, source):
+    if not isinstance(output, str) or not output:
+      return None
+    source_path = Path(source.lstrip("/"))
+    rendered = output.replace("{source}", source_path.as_posix()).replace(
+      "{stem}", source_path.stem,
+    )
+    candidate = Path(rendered)
+    if (
+      candidate.is_absolute() or "\\" in rendered
+      or any(part in ("", ".", "..") for part in candidate.parts)
+    ):
+      return None
+    return candidate.as_posix()
+
+  def inferred_preview(preview, types):
+    if not isinstance(preview, dict):
+      return preview
+    if (
+      isinstance(preview.get("source"), str) and preview.get("source")
+      and isinstance(preview.get("builder"), str) and preview.get("builder")
+    ):
+      return {
+        key: value for key, value in preview.items()
+        if key not in {"kind", "path"}
+      }
+    kind = str(preview.get("kind") or "").lower()
+    old_path = str(preview.get("path") or "").lstrip("/")
+    if not old_path:
+      return preview
+    if kind == "pdf":
+      source = Path(old_path).with_suffix(".tex").as_posix()
+    elif kind in ("html", "website"):
+      source = old_path
+      kind = "html"
+    else:
+      return preview
+    extension = Path(source).suffix.lower().lstrip(".")
+    builder = next((
+      type_id for type_id, value in types.items()
+      if extension in value["extensions"] and value.get("preview") == kind
+    ), None)
+    if builder is None:
+      builder = next((
+        type_id for type_id, value in historical_types.items()
+        if extension in value["extensions"] and value["preview"] == kind
+      ), None)
+    if builder is None:
+      return preview
+    current = {
+      key: value for key, value in preview.items() if key not in {"kind", "path"}
+    }
+    current.update({"source": source, "builder": builder})
+    return current
+
+  def explicit_artifact(entry, types):
+    if not isinstance(entry, dict):
+      return entry
+    artifact_id = entry.get("id")
+    if not isinstance(artifact_id, str) or not artifact_id:
+      return entry
+    current = dict(entry)
+    builder = str(current.get("builder") or "")
+    source = str(current.get("source") or "")
+    artifact_type = types.get(builder) or historical_types.get(builder)
+    if not isinstance(current.get("type_name"), str) or not current["type_name"]:
+      current["type_name"] = (
+        artifact_type.get("name") if artifact_type else None
+      ) or "Artifact"
+    if current.get("preview") not in ("html", "pdf", "image"):
+      current["preview"] = (
+        artifact_type.get("preview") if artifact_type else None
+      ) or ("pdf" if builder == "latex" else "html")
+    if not isinstance(current.get("output_rel"), str) or not current["output_rel"]:
+      rendered = confined_output(
+        artifact_type.get("output") if artifact_type else None, source,
+      )
+      if rendered is None:
+        rendered = (
+          Path(source).with_suffix(".pdf").name
+          if builder == "latex" else source.lstrip("/")
+        )
+      if rendered:
+        current["output_rel"] = f"artifacts/{artifact_id}/output/{rendered}"
+    if not isinstance(current.get("log_rel"), str) or not current["log_rel"]:
+      current["log_rel"] = f"artifacts/{artifact_id}/build.log"
+    return current
+
+  projects = Table("projects", MetaData(), autoload_with=eng)
+  with eng.begin() as conn:
+    rows = conn.execute(select(
+      projects.c.id,
+      projects.c.template_snapshot_json,
+      projects.c.artifacts_json,
+    )).mappings().all()
+    for row in rows:
+      template = decoded(row["template_snapshot_json"], None)
+      artifacts = decoded(row["artifacts_json"], None)
+      if not isinstance(template, dict):
+        continue
+      current_template = dict(template)
+      imported = current_template.get("imported_from")
+      if isinstance(imported, dict) and imported.get("management") != "linked":
+        current_template.pop("imported_from", None)
+      types = declared_types(current_template)
+      previews = current_template.get("previews")
+      if isinstance(previews, list):
+        current_template["previews"] = [
+          inferred_preview(preview, types) for preview in previews
+        ]
+      required_builders = {
+        preview.get("builder")
+        for preview in current_template.get("previews") or []
+        if isinstance(preview, dict)
+      }
+      if isinstance(artifacts, list):
+        required_builders.update(
+          entry.get("builder") for entry in artifacts if isinstance(entry, dict)
+        )
+      missing_types = [
+        builder for builder in ("website", "latex")
+        if builder in required_builders and builder not in types
+      ]
+      if missing_types:
+        declared = [
+          dict(value) for value in current_template.get("artifact_types") or []
+          if isinstance(value, dict)
+        ]
+        for builder in missing_types:
+          frozen = historical_types[builder]
+          declared.append({
+            "id": builder,
+            "name": frozen["name"],
+            "extensions": list(frozen["extensions"]),
+            "preview": frozen["preview"],
+            "script": frozen["script"],
+            "output": frozen["output"],
+          })
+        current_template["artifact_types"] = declared
+        types = declared_types(current_template)
+      current_artifacts = (
+        [explicit_artifact(entry, types) for entry in artifacts]
+        if isinstance(artifacts, list) else artifacts
+      )
+      if current_template != template or current_artifacts != artifacts:
+        conn.execute(
+          update(projects).where(projects.c.id == row["id"]).values(
+            template_snapshot_json=current_template,
+            artifacts_json=current_artifacts,
+          )
+        )
+
+
 _SCHEMA_MIGRATIONS = (
   # Full IDs are permanent identities, not sequence positions. Append new
   # work in execution order; never renumber a shipped ID to reconcile sources.
@@ -3806,6 +4546,11 @@ _SCHEMA_MIGRATIONS = (
   ("0048_typed_platform_activation_waits", _add_typed_platform_activation_waits),
   ("0049_autopilot_blocked_at", _add_autopilot_blocked_at),
   ("0050_chat_run_update_stream", _rename_chat_run_update_stream),
+  ("0051_materialize_legacy_projects", _materialize_legacy_projects),
+  ("0052_compatibility_cutover_data", _normalize_compatibility_cutover_data),
+  ("0053_app_capability_contract_schema_6", _advance_app_capability_contract_schema_6),
+  ("0054_retired_app_identities", _rename_retired_app_identities),
+  ("0055_declarative_project_artifacts", _make_project_artifacts_declarative),
 )
 
 
@@ -3823,6 +4568,27 @@ def schema_migration_history(eng) -> list[dict]:
     {"version": version, "applied_at": applied_at}
     for version, applied_at in rows
   ]
+
+
+def app_identity_cutover_is_current(eng, data_dir: str) -> bool:
+  """Whether database and current-boot filesystem proofs are both current."""
+  from sqlalchemy import inspect as sa_inspect, text
+
+  root = Path(data_dir)
+  tables = set(sa_inspect(eng).get_table_names())
+  if not {"apps", "schema_migrations"}.issubset(tables):
+    return False
+  file_receipt = root / ".migration-receipts" / "app-identity-files-v1"
+  if not file_receipt.is_file():
+    return False
+  with eng.connect() as conn:
+    migrated = conn.execute(text(
+      "SELECT 1 FROM schema_migrations WHERE version = :version"
+    ), {"version": "0054_retired_app_identities"}).first()
+    retired = conn.execute(text(
+      "SELECT slug FROM apps WHERE slug IN (:mind, :dreaming)"
+    ), {"mind": "mind", "dreaming": "dreaming"}).scalars().all()
+  return migrated is not None and not retired
 
 
 def _ensure_migration_ledger(eng) -> None:

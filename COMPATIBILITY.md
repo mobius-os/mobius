@@ -1,69 +1,72 @@
 # Compatibility lifecycle
 
-Compatibility code is allowed when it protects owner data or a real external
-contract. Temporary rollout shims need an owner and an observable exit proof;
-“one release” is not a permanent architecture.
+Möbius preserves **owner data and explicit external contracts**, not obsolete
+runtime behavior. The current runtime should have one request shape, one state
+model, and one execution path.
 
-## Upgrade floor
+## Fix-forward rules
 
-Möbius is continuously deployed from git — there are no numbered releases — so
-the supported-upgrade window is a **rolling date**, not a version.
+- Normalize durable owner data before current code consumes it. A migration may
+  understand an old shape; request handlers, UI, workers, and recovery code do
+  not keep serving it.
+- Make migrations one-way, idempotent, and self-contained. Write their durable
+  receipt only after the new invariant is proven. An interrupted migration must
+  safely retry.
+- Fail closed when a safe conversion cannot be inferred. Never guess a model,
+  rewrite local Git history, resume old work, or discard an unknown future
+  shape merely to make an upgrade appear seamless.
+- Keep published schema-migration identities, order, and owned code immutable.
+  Append a new migration instead of editing history.
+- Preserve an old executable path only when a real independently deployed
+  counterparty still has a documented contract with it. Version that contract
+  at its owning boundary; do not disguise it as an internal fallback.
 
-> **A self-hosted owner may upgrade directly from any commit landed in the last
-> 90 days.** An install older than that must update through an intermediate
-> checkout rather than jumping to HEAD.
+Elapsed time, release count, traffic on one instance, and an empty table on one
+instance are not cutover proofs. A proof is an invariant the code can verify:
+a schema-ledger entry, a content-addressed receipt, or an exact durable marker.
 
-This is the number that makes removals mechanical instead of a judgement call:
+## Upgrade checkpoints
 
-- A compatibility path may be deleted once it has been **superseded for 90 days
-  AND** its exit proof in the table below holds. Both conditions, not either.
-- Before that date, deleting it is a regression for a supported upgrade, no
-  matter how empty the current database looks. Row counts on one instance are
-  evidence about *that* instance, never about the upgrade window.
-- After that date, keeping it needs a fresh justification recorded here.
+Möbius deploys continuously from Git rather than numbered releases. When a
+change cannot both normalize old data and delete unsafe old behavior in one
+boot, the normalizing commit is an explicit **upgrade checkpoint**:
 
-“One release” is explicitly NOT the floor. Retiring the `mobius-open-tabs`
-workspace fallback after a single release stranded owners who skipped a
-version and restored an empty workspace; the 90-day window exists so that
-cannot recur.
+1. the checkpoint boots, performs the one-way migration, and records proof;
+2. the later runtime requires that proof and otherwise fails closed with the
+   exact checkpoint the owner must traverse;
+3. the later change removes the old executable machinery while retaining owner
+   data and published migration history.
 
-### Earliest removal dates
+This is a causal barrier, not a waiting period. Owners upgrading from before a
+retired checkpoint may need to run the checkpoint once before jumping to HEAD.
 
-Every active migration below was introduced in July 2026, so **none is yet
-eligible** — the correct action today is to leave all of them in place.
+The current compatibility-deletion programme owns these checkpoints:
 
-| Path | Superseded | Earliest removal |
+| Cutover | Proof | Current-only behavior after proof |
 | --- | --- | --- |
-| legacy platform-app migration (`bootstrap.py`, `install.py`) | 2026-07-10 | 2026-10-08 |
-| transcript `cid` backfill (`chat_writer.py`) | 2026-07-13 | 2026-10-11 |
-| `appFrameStorage.js` per-app legacy scan | 2026-07-13 | 2026-10-11 |
-| raw-bcrypt owner hash (`auth.py`) | 2026-07-21 | 2026-10-19 |
-| notification target aliases (`push.py`) | 2026-07-28 | 2026-10-26 |
-| scheduled-job Bash default migration (`applied_app_runtime.py`) | 2026-09-12 | 2026-12-11 |
+| Scheduled app jobs | every boot scans every accepted runtime pointer, including tombstones, and repairs any legacy job declaration it finds | jobs require an absolute shebang and executable declaration; no Bash or chmod fallback |
+| `mind` → `memory`, `dreaming` → `reflection` | schema ledger `0054_retired_app_identities` proves the configured database; every image boot discards stale filesystem proof, scans files/logs/skills/crontab, then republishes `/data/.migration-receipts/app-identity-files-v1` for that boot | only current app identities are recognized |
+| activation marker v0/v1 → v2 | every boot inspects the current marker and writes `/data/.platform-activation-v2` only after the v2 parser accepts it (or proves no marker exists) | the runtime parser accepts v2 only |
+| Gauntlet shutdown | `gauntlet_target_mutex.id = -1` after exact legacy lineages are stopped and detached from generic recovery | the stacked deletion may remove Gauntlet models, writer commands, startup and recovery logic while leaving historical tables inert |
+| retained notification links | schema ledger `0052_compatibility_cutover_data` after DB targets/actions are structurally rewritten without changing absolute-link origins | current `/shell/` app/chat targets only; no retired route parser |
+| legacy Project copies and inferred Creations | schema ledger `0055_declarative_project_artifacts` after independent roots are detached from retired source-management metadata and retained preview/artifact choices are stored explicitly | only `management=linked` declares live source ownership; preview source, builder, type, transport and output are data rather than runtime guesses |
+| background-agent provider choices | the atomically stored `background_agents.providers` shape itself; startup rechecks it on every boot, restoring `primary`/`fallback` reopens the cutover, and filesystem read failures fail startup closed | stored provider rows are authoritative; old mirrors are removed and never merged back |
 
-The July 2026 maintenance baseline retired two expired mirrors and one
-status-derived fallback:
+## Earned compatibility
 
-- `mobius-open-tabs`, the flat workspace read/write path. `mobius-workspace` is
-  now the only workspace state.
-- `mobius-theme-bg`, the bare-colour theme read/write path. The structured
-  `mobius-theme` value is now the only cold-boot theme state.
-- status-derived AskUserQuestion row ownership. `answer_turn` is now required at
-  that semantic boundary.
+The following complexity remains because it protects data or a genuine
+contract:
 
-## Active migrations
+- append-only schema migration history and its ledger;
+- raw-bcrypt password verification until that owner's successful login or an
+  explicit password migration proves the current wrapper format;
+- transcript/provider-event readers needed for durable historical chat content,
+  until a versioned migration proves every retained row uses the current shape;
+- documented public interoperability such as GitHub protocols, skill formats,
+  and public storage request formats.
+- the plural provider-status response's `authenticated` alias until released
+  first-party apps migrate to `configured`; remove it only in the later stacked
+  platform deletion, without restoring the retired singular status route.
 
-| Owner | Protected data or contract | Exit proof | Earliest removal |
-| --- | --- | --- | --- |
-| `chat_writer.py` transcript migration | Historical chats without stable `cid` values or bounded thinking sidecars | The versioned migration ledger records the transcript migration and production diagnostics report no unmigrated rows | Remove only the read fallbacks in the next transcript-format change after that proof; keep the migrated `legacy-*` identifiers as data |
-| `auth.py` / `routes/auth.py` | Owner password hashes written in the earlier raw-bcrypt form | A versioned migration or bounded audit proves every owner hash uses the current wrapper format | Remove raw-bcrypt verification in the following release |
-| `install.py`, `routes/apps.py`, `compiler.py` | Installed apps created before source directories, immutable bundles, capability contracts, or publication records existed | Startup migrations and an app-table audit prove no installed row lacks the current source, bundle, contract, and publication identities | Remove each fallback with the migration that establishes its corresponding non-null invariant |
-| `appFrameStorage.js` | Preferences written by the former same-origin app frame, including the narrow CubeRun and Tandem allowlists | **No code-level proof exists — the "copy marker" this row used to cite was never implemented, so the condition was unsatisfiable and the scan was permanent by accident.** The upgrade floor is the proof: past the date below, no supported install can still hold unmigrated same-origin keys | Remove the per-app legacy scans, and the `LEGACY_KEYS_BY_SLUG` allowlist naming individual apps with them, on 2026-10-11 |
-| provider event translators | Saved or replayed Claude/Codex events from older SDK payload shapes | The pinned provider SDK minimum and retained replay fixtures no longer emit or contain the old shape | Remove one fallback at a time with the SDK pin bump that makes it unreachable |
-| old notification targets (`/app/:id`, `/chat/:id`) | Previously delivered push/email links outside the current `/shell/` route shape | Product policy defines an expiry longer than every notification/link retention window and access logs show no use | Remove the parser aliases after that dated window |
-| `routes/app_services.py` and Social public host `/api/common/*` aliases | Independently updated Social clients and `common/0` peers using the former platform-owned path | Social and every first-party caller use `/api/services/common/*`; public federation traffic has used `/api/app-services/common/*` for the supported window | Remove both aliases on 2026-12-11 |
-| `applied_app_runtime.py` scheduled-job shebang migration | Accepted app runtimes from before runtime declarations became mandatory, where a missing shebang meant Bash | The rolling upgrade floor has passed 2026-12-11 and the migration receipt exists for every continuously upgraded installation | Remove the one-shot migration after that date; keep shebang validation and never restore interpreter guessing |
-
-Permanent interoperability—standard GitHub status contexts, documented
-third-party skill shapes, or public storage request formats—is not a temporary
-migration and does not belong in this removal ledger.
+Everything else needs a named owner, a concrete protected contract, and a
+machine-checkable exit proof. “Older code might call this” is not sufficient.

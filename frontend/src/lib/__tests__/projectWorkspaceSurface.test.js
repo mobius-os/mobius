@@ -124,10 +124,9 @@ test('managed View source advertises draft-only saves and an explicit Apply acti
 })
 
 
-test('legacy imported app copies keep the real Project workspace without installed-app Apply', () => {
+test('ordinary preserved copies use the normal Project workspace', () => {
   const markup = renderWorkspace({ project: {
-    id: 'legacy-app-copy', name: 'Preserved copy', chats: [],
-    template: { imported_from: { kind: 'app', id: 123 } },
+    id: 'preserved-copy', name: 'Preserved copy', chats: [], template: {},
   } })
   assert.match(markup, /aria-label="Preserved copy project"/)
   assert.match(markup, /aria-label="Project overview"/)

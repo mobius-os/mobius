@@ -859,13 +859,19 @@ fi
 # Publish the per-deploy upstream-diff file (/data/shared/upstream-diff.txt).
 python3 /app/scripts/init_agent_context.py
 
-# One-time idempotent app-rename migration (mind->memory, dreaming->reflection)
-# for EXISTING instances. MUST run before init_skills, which renames the
-# agent-edited skill file in place, so the migration does not reseed a fresh
-# file. Preserves each app's numeric id, so reports/storage are untouched. No-op
-# on a fresh instance or one already migrated. Runs as mobius (writes /data + the
-# mobius crontab; as root it would poison /data ownership + target root's crontab).
-su -s /bin/sh mobius -c "bash /app/scripts/migrate-app-rename.sh" 2>&1 || true
+# Filesystem half of the one-way app-identity cutover. A restored /data can
+# reintroduce old paths or crontab commands after an earlier successful boot,
+# so discard the derived proof and scan the real invariants every time. The
+# configured database is normalized separately by schema migration 0054.
+APP_IDENTITY_FILES_RECEIPT=/data/.migration-receipts/app-identity-files-v1
+if ! rm -f "$APP_IDENTITY_FILES_RECEIPT"; then
+  echo "FATAL: could not clear stale app-identity filesystem proof" >&2
+  exit 1
+fi
+if su -s /bin/sh mobius -c "bash /app/scripts/migrate-app-rename.sh" 2>&1; then
+  install -d -o mobius -g mobius "$(dirname "$APP_IDENTITY_FILES_RECEIPT")"
+  su -s /bin/sh mobius -c "touch '$APP_IDENTITY_FILES_RECEIPT'"
+fi
 
 # Bootstrap only the always-on per-chat summary directory. Optional graph
 # memory, its seeds, and its `.ready` lifecycle belong to the installed Memory

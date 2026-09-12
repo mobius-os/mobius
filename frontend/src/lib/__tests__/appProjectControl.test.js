@@ -22,7 +22,6 @@ function project({
     updated_at: '2026-09-01T12:00:00Z',
     chat_id: `${id}-primary-chat`,
     chats: [{ id: `${id}-chat`, title: 'Private chat', provider: 'private-provider' }],
-    legacy_source: { storage_root: `apps/7/projects/${id}` },
     artifacts: [{ id: `${id}-artifact`, source: 'private-source.html' }],
     ...overrides,
   }
@@ -39,7 +38,7 @@ function runtimeView(row) {
   }
 }
 
-function harness({ projects = [], templates = [], legacy = [], created } = {}) {
+function harness({ projects = [], templates = [], created } = {}) {
   const calls = []
   const opened = []
   const published = []
@@ -47,11 +46,6 @@ function harness({ projects = [], templates = [], legacy = [], created } = {}) {
   const client = {
     list: async () => response(projects),
     templates: async () => response(templates),
-    legacy: async () => response(legacy),
-    importLegacy: async payload => {
-      calls.push(['import', payload])
-      return response({ ok: true })
-    },
     create: async payload => {
       calls.push(['create', payload])
       return response({ ...createdProject, name: payload.name })
@@ -69,31 +63,27 @@ function harness({ projects = [], templates = [], legacy = [], created } = {}) {
   return { calls, opened, options, published }
 }
 
-test('project listing keeps ordinary and legacy app projects behind a least-privilege view', async () => {
+test('project listing keeps every app-owned project behind a least-privilege view', async () => {
   const ordinary = project({ id: 'ordinary' })
-  const legacy = project({ id: 'legacy', legacy_source: {
-    app_id: 7,
-    project_id: 'old-site',
-    storage_root: 'apps/7/projects/old-site',
-  } })
+  const existing = project({ id: 'existing' })
   const imported = project({
     id: 'project-owned-import',
-    template: { id: 'site', imported_from: { artifact_id: 'private-artifact' } },
+    template: { id: 'site', imported_from: { management: 'linked', kind: 'artifact', id: 'private-artifact' } },
   })
-  const h = harness({ projects: [ordinary, legacy, imported, project({
+  const h = harness({ projects: [ordinary, existing, imported, project({
     id: 'other-app', sourceAppId: 8,
   })] })
 
   const result = await handleAppProjectsRequest(h.options, { action: 'list' })
 
-  assert.deepEqual(result, [runtimeView(ordinary), runtimeView(legacy)])
+  assert.deepEqual(result, [runtimeView(ordinary), runtimeView(existing)])
   assert.equal(h.published.length, 1)
 })
 
 test('project open rejects foreign and Project-owned imports without navigating', async () => {
   const imported = project({
     id: 'project-owned-import',
-    template: { id: 'site', imported_from: { artifact_id: 'private-artifact' } },
+    template: { id: 'site', imported_from: { management: 'linked', kind: 'artifact', id: 'private-artifact' } },
   })
   const h = harness({ projects: [
     project({ id: 'other', sourceAppId: 8 }),
@@ -166,7 +156,7 @@ test('a created Project-owned import is not exposed or opened', async () => {
     templates: [{ key: 'studio:site', source_app_id: 7, name: 'Site' }],
     created: project({
       id: 'imported',
-      template: { id: 'site', imported_from: { artifact_id: 'private-artifact' } },
+      template: { id: 'site', imported_from: { management: 'linked', kind: 'artifact', id: 'private-artifact' } },
     }),
   })
 
@@ -180,30 +170,7 @@ test('a created Project-owned import is not exposed or opened', async () => {
   assert.deepEqual(h.opened, [])
 })
 
-test('legacy migration imports only this app and returns narrow refreshed projects', async () => {
-  const own = project({ id: 'own' })
-  const imported = project({
-    id: 'project-owned-import',
-    template: { id: 'site', imported_from: { artifact_id: 'private-artifact' } },
-  })
-  const h = harness({
-    projects: [own, imported, project({ id: 'other', sourceAppId: 8 })],
-    legacy: [
-      { app_id: 7, legacy_project_id: 'site', name: 'Site', imported: false },
-      { app_id: 7, legacy_project_id: 'done', name: 'Done', imported: true },
-      { app_id: 8, legacy_project_id: 'foreign', name: 'Foreign', imported: false },
-    ],
-  })
-  const result = await handleAppProjectsRequest(h.options, { action: 'migrate' })
-  assert.deepEqual(h.calls, [['import', {
-    app_id: 7,
-    legacy_project_id: 'site',
-    name: 'Site',
-  }]])
-  assert.deepEqual(result, [runtimeView(own)])
-})
-
- test('template discovery exposes only this installed app and no private contract fields', async () => {
+test('template discovery exposes only this installed app and no private contract fields', async () => {
   const h = harness({ templates: [
     { key: 'renamed:game', id: 'game', source_app_id: 7, name: 'Canvas game', kind: 'game', description: 'Play', guidance: 'private', files: { secret: 'path' } },
     { key: 'foreign:game', id: 'game', source_app_id: 8, name: 'Other' },

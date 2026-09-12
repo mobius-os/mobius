@@ -56,17 +56,18 @@ def test_answer_while_publisher_finishes_keeps_b_behind_activation(monkeypatch):
 
 
 @pytest.mark.parametrize("wait_status", ["armed", "met", "failed", "expired"])
-def test_actor_admission_holds_b_without_an_open_question(wait_status):
+def test_approved_restart_holds_b_without_an_open_question(wait_status):
   qid, wait_id, root, _ = _install(f"actor-{wait_status}", queued=True, status=wait_status)
   with SessionLocal() as db:
     chat = db.get(models.Chat, f"actor-{wait_status}")
     chat.pending_question_id = None
+    db.get(models.ChatWait, wait_id).action_approved_at = chat.created_at
     db.commit()
   result = _submit(chat_writer.PromotePending(chat_id=f"actor-{wait_status}", run_token="b"))
   assert result == chat_writer.PromotePendingBlocked("activation", wait_id=wait_id)
 
 
-def test_not_now_preserves_unfinished_owner_and_later_matching_activation(monkeypatch):
+def test_not_now_releases_owner_queue_without_abandoning_activation(monkeypatch):
   monkeypatch.setattr("app.platform_restart.requirement_matches_current_source", lambda _: True)
   qid, wait_id, root, _ = _install("deferred-owner", queued=True)
   result = _submit(chat_writer.ResolvePlatformRestartCard(
@@ -80,11 +81,17 @@ def test_not_now_preserves_unfinished_owner_and_later_matching_activation(monkey
     assert wait.status == "armed"
     assert wait.action_approved_at is None
     assert db.query(models.PlatformRestartExecution).count() == 0
-    wait.status = "met"  # Evidence from another independently approved boot.
-    db.commit()
-  assert isinstance(_submit(_activation_command("deferred-owner", wait_id, root)), dict)
+  promoted = _submit(chat_writer.PromotePending(
+    chat_id="deferred-owner", run_token="owner-after-deferral",
+  ))
+  assert isinstance(promoted, dict)
   with SessionLocal() as db:
-    assert [m["content"] for m in db.get(models.Chat, "deferred-owner").pending_messages] == ["B"]
+    chat = db.get(models.Chat, "deferred-owner")
+    assert chat.pending_messages == []
+    assert chat.messages[-1]["content"] == "B"
+    wait = db.get(models.ChatWait, wait_id)
+    assert wait.status == "armed"
+    assert wait.resume_delivered_at is None
 
 
 @pytest.mark.parametrize("status", ["armed", "met"])
@@ -264,8 +271,8 @@ def test_restart_settlement_updates_separated_live_snapshot(monkeypatch, settled
 
 
 @pytest.mark.parametrize("wait_status", ["armed", "met", "failed", "expired"])
-def test_activity_checkpoint_cannot_overtake_deferred_restart_in_writer(db, wait_status):
-  """A late helper result is context for A, not permission to bypass its hold."""
+def test_deferred_restart_monitor_does_not_suspend_other_work(db, wait_status):
+  """Not now leaves a monitor, not an admission barrier."""
   from datetime import timedelta
   from app.timeutil import now_naive_utc
   from app.delegations import _activity_continuation_run_id
@@ -299,24 +306,17 @@ def test_activity_checkpoint_cannot_overtake_deferred_restart_in_writer(db, wait
   wait.status = wait_status
   db.commit()
   chat = db.get(models.Chat, cid)
-  before = copy.deepcopy(chat.messages)
   assert chat.pending_question_id is None
   command = chat_writer.StartActivityContinuation(
     chat_id=cid, root_run_id=root,
     run_token=_activity_continuation_run_id(db.get(models.Delegation, delegation_id)),
     source_work_id=root, activity_id=delegation_id,
   )
-  # Bypass the async precheck to reproduce a card committing after it passed.
-  assert _submit(command) == chat_writer.StartContinuationBlocked("activation_pending")
+  # Bypass the async precheck to exercise the actor-owned admission boundary.
+  assert isinstance(_submit(command), dict)
   db.expire_all()
-  assert db.get(models.ChatRun, command.run_token) is None
-  assert db.get(models.Chat, cid).messages == before
+  assert db.get(models.ChatRun, command.run_token) is not None
   assert db.get(models.Chat, cid).pending_messages == []
-  assert db.get(models.Delegation, delegation_id).parent_woken_at is None
-  # Once activation's continuation owns the receipt, this seam works normally.
-  db.get(models.ChatWait, wait_id).resume_delivered_at = now_naive_utc()
-  db.commit()
-  assert isinstance(_submit(chat_writer.StartActivityContinuation(
-    chat_id=cid, root_run_id=root, run_token=command.run_token,
-    source_work_id=root, activity_id=delegation_id,
-  )), dict)
+  wait = db.get(models.ChatWait, wait_id)
+  assert wait.status == wait_status
+  assert wait.resume_delivered_at is None

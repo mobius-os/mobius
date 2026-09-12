@@ -1,11 +1,11 @@
-"""Failure boundaries of platform-owned restart admission and source proof."""
+"""Failure boundaries of Restart admission and ready-boot continuation."""
 
 import asyncio
 from datetime import timedelta
 
 import pytest
 
-from app import boot_source, chat, chat_writer, models, platform_restart, restart_ledger
+from app import chat, chat_writer, models, platform_restart, restart_ledger
 from app import main, restart_util
 from app.database import SessionLocal
 from app.timeutil import now_naive_utc
@@ -57,9 +57,6 @@ def _approved_boot(monkeypatch, tmp_path):
   requirement = platform_restart.build_restart_requirement(repo)
   from app import platform_update
   platform_update.SERVING_SHA_FILE.write_text(target)
-  monkeypatch.setattr(boot_source, "BOOT_SOURCE_INPUTS", boot_source.capture_boot_source_inputs(
-    repo, source_kind="platform", source_sha=target,
-  ))
   monkeypatch.setattr(chat_writer, "writer_readiness", lambda: (True, None))
   return repo, source, requirement
 
@@ -72,59 +69,9 @@ def test_router_degraded_boot_cannot_satisfy_activation(monkeypatch, tmp_path):
   }
   with SessionLocal() as db:
     _proof_wait(db, requirement)
-    snapshot = platform_restart.capture_ready_boot_snapshot(db, boot_id="degraded", repo=repo)
-    assert snapshot.loaded_files_json == requirement["files"]
-    assert snapshot.service_ready is False
-    assert not platform_restart.requirement_matches_snapshot(requirement, snapshot)
-
-
-def test_source_changed_after_boot_boundary_is_not_loaded_proof(monkeypatch, tmp_path):
-  repo, source, requirement = _approved_boot(monkeypatch, tmp_path)
-  source.write_text("VALUE = 'changed during imports'\n")
-  with SessionLocal() as db:
-    _proof_wait(db, requirement)
-    snapshot = platform_restart.capture_ready_boot_snapshot(db, boot_id="drifted", repo=repo)
-    assert not snapshot.service_ready
+    snapshot = platform_restart.capture_ready_boot_snapshot(db, boot_id="degraded")
     assert snapshot.loaded_files_json == {}
-
-
-def test_approved_bytes_copied_after_import_boundary_do_not_prove_activation(monkeypatch, tmp_path):
-  repo, source, base = _restart_repo(monkeypatch, tmp_path)
-  old_inputs = boot_source.capture_boot_source_inputs(repo, source_kind="platform", source_sha=base)
-  # Python imports the old source in this boot; an edit later writes the very
-  # bytes the waiter wants. A post-startup-only filesystem hash would pass.
-  source.write_text("VALUE = 'approved'\n")
-  target = _commit(repo, "approved after import")
-  requirement = platform_restart.build_restart_requirement(repo)
-  monkeypatch.setattr(boot_source, "BOOT_SOURCE_INPUTS", old_inputs)
-  monkeypatch.setattr(chat_writer, "writer_readiness", lambda: (True, None))
-  with SessionLocal() as db:
-    _proof_wait(db, requirement)
-    snapshot = platform_restart.capture_ready_boot_snapshot(db, boot_id="old-imports", repo=repo)
-    assert not snapshot.service_ready
-    assert not platform_restart.requirement_matches_snapshot(requirement, snapshot)
-
-
-def test_boot_capture_is_immutable_and_rejects_uncommitted_inputs(monkeypatch, tmp_path):
-  repo, source, base = _restart_repo(monkeypatch, tmp_path)
-  inputs = boot_source.capture_boot_source_inputs(repo, source_kind="platform", source_sha=base)
-  assert inputs.valid
-  with pytest.raises(TypeError):
-    inputs.files["backend/app/example.py"]["sha256"] = "changed"
-  source.write_text("VALUE = 'dirty'\n")
-  assert not boot_source.capture_boot_source_inputs(
-    repo, source_kind="platform", source_sha=base,
-  ).valid
-
-
-def test_boot_capture_before_any_wait_can_prove_deletion(monkeypatch, tmp_path):
-  repo, source, base = _restart_repo(monkeypatch, tmp_path)
-  source.unlink()
-  target = _commit(repo, "delete")
-  inputs = boot_source.capture_boot_source_inputs(repo, source_kind="platform", source_sha=target)
-  assert inputs.unchanged_manifest(repo, ["backend/app/example.py"]) == {
-    "backend/app/example.py": {"state": "absent"},
-  }
+    assert snapshot.service_ready is False
 
 
 @pytest.mark.parametrize("status,changed", [("claimed", True), ("admitted", False), ("activated", False)])

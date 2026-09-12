@@ -492,7 +492,7 @@ def test_manifest_template_scaffolds_files_and_snapshots_metadata(
       "skills": ["latex"],
       "dependencies": ["tectonic"],
       "previews": [{
-        "id": "pdf", "name": "PDF", "kind": "pdf", "path": "main.pdf",
+        "id": "pdf", "name": "PDF", "source": "main.tex", "builder": "latex",
       }],
       "actions": [{
         "id": "build", "name": "Build PDF", "prompt": "Compile main.tex.",
@@ -518,7 +518,9 @@ def test_manifest_template_scaffolds_files_and_snapshots_metadata(
   project = created.json()
   assert project["source_app_id"] == app.id
   assert project["template"]["dependencies"] == ["tectonic"]
-  assert project["template"]["previews"][0]["path"] == "main.pdf"
+  assert project["template"]["previews"][0] == {
+    "id": "pdf", "name": "PDF", "source": "main.tex", "builder": "latex",
+  }
   assert project["template"]["actions"][0]["prompt"] == "Compile main.tex."
   assert project["template"]["artifact_types"][0]["script"] == "project-builder.sh"
   opened = client.get(
@@ -677,8 +679,8 @@ def test_app_owned_artifact_import_manages_declared_sources_in_place(
       "files": {},
       "skills": ["latex-project.md"], "dependencies": ["tectonic"],
       "previews": [{
-        "id": "document", "name": "Document", "kind": "pdf",
-        "path": "main.pdf",
+        "id": "document", "name": "Document", "source": "main.tex",
+        "builder": "latex",
       }],
       "artifact_types": [{
         "id": "latex", "name": "PDF", "extensions": ["tex"],
@@ -829,73 +831,6 @@ def test_concurrent_file_writes_and_delete_are_atomic(client, auth):
     assert final.json()["content"] in payloads
   else:
     assert final.status_code == 404
-
-
-def test_legacy_import_reuses_project_chat_without_moving_files(
-  client, auth, db,
-):
-  storage = Path(os.environ["DATA_DIR"]) / "apps"
-  app_source = storage / "webstudio-source"
-  app_source.mkdir(parents=True)
-  app = models.App(
-    name="Web Studio", description="Sites", jsx_source="",
-    slug="webstudio", source_dir=str(app_source),
-    project_templates_json=[{
-      "id": "web-app", "name": "Web app", "files": {},
-      "skills": ["web"], "dependencies": [],
-      "previews": [{
-        "id": "site", "name": "Website", "kind": "html",
-        "path": "index.html",
-      }],
-      "artifact_types": [{
-        "id": "website", "name": "Website", "extensions": ["html"],
-        "preview": "html", "script": "project-builder.sh",
-        "output": "{source}",
-      }],
-    }],
-  )
-  db.add(app)
-  db.commit()
-  db.refresh(app)
-  legacy = storage / str(app.id) / "projects" / "portfolio"
-  (legacy / "files").mkdir(parents=True)
-  (legacy / "files" / "index.html").write_text("<h1>Mine</h1>")
-  chat = models.Chat(id="legacy-project-chat", title="Portfolio", messages=[])
-  db.add(chat)
-  db.commit()
-  (legacy / "chat_id.json").write_text(json.dumps({"id": chat.id}))
-  (storage / str(app.id) / "projects.json").write_text(json.dumps([
-    {"id": "portfolio", "name": "Portfolio"},
-  ]))
-
-  candidates = client.get("/api/projects/legacy", headers=auth).json()
-  assert candidates == [{
-    "legacy_project_id": "portfolio",
-    "name": "Portfolio",
-    "app_id": app.id,
-    "app_name": "Web Studio",
-    "imported": False,
-  }]
-  imported = client.post(
-    "/api/projects/import-legacy", headers=auth,
-    json={"app_id": app.id, "legacy_project_id": "portfolio"},
-  )
-  assert imported.status_code == 200, imported.text
-  project = imported.json()
-  assert project["chat_id"] is None
-  assert [row["id"] for row in project["artifacts"]] == ["site"]
-  assert project["artifacts"][0]["builder"] == "website"
-  db.refresh(chat)
-  assert chat.project_id == project["id"]
-  assert (legacy / "files" / "index.html").is_file()
-  opened = client.get(
-    f"/api/projects/{project['id']}/file?path=index.html", headers=auth,
-  )
-  assert opened.json()["content"] == "<h1>Mine</h1>"
-
-  uninstall = client.delete(f"/api/apps/{app.id}", headers=auth)
-  assert uninstall.status_code == 409
-  assert uninstall.json()["detail"]["code"] == "app_has_imported_project"
 
 
 def test_github_import_creates_a_private_project_owned_repository(
@@ -1154,7 +1089,7 @@ def _expire_project_pair(db, project_id: str, chat_id: str) -> None:
   db.commit()
 
 
-def test_project_retention_removes_native_root_and_chat_but_preserves_legacy_root(
+def test_project_retention_removes_native_root_and_chat_but_preserves_linked_root(
   client, auth, db,
 ):
   native = client.post(
@@ -1176,7 +1111,6 @@ def test_project_retention_removes_native_root_and_chat_but_preserves_legacy_roo
     root_path="apps/legacy/files",
     chat_id=None,
     template_snapshot_json={},
-    legacy_source_json={"app_id": 1, "project_id": "default"},
   )
   legacy_project_id = legacy_project.id
   legacy_chat_id = legacy_chat.id

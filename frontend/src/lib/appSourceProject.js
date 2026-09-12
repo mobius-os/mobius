@@ -12,7 +12,6 @@ export function parseAppSourceProjectId(projectId) {
 }
 
 // Only explicitly linked Projects can apply changes to an installed app.
-// Legacy imported copies remain independent Projects with their own source.
 export function linkedProjectAppId(project) {
   const imported = project?.template?.imported_from
   if (imported?.management !== 'linked' || imported.kind !== 'app' || imported.id == null) return null

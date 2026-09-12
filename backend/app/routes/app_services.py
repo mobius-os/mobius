@@ -173,12 +173,17 @@ async def public_app_service(
   methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
 )
 @_limiter.limit("60/minute")
-async def legacy_social_service(
+async def social_protocol_service(
   path: str,
   request: Request,
   db: Session = Depends(get_db),
 ):
-  """Temporary external-protocol alias while peers adopt app-owned Social."""
+  """Serve Social's published federation protocol through its app-owned service.
+
+  ``/api/common`` is an independently deployed peer contract, not an internal
+  runtime alias.  The platform owns only authentication and bounded dispatch;
+  the installed Social app owns every response and protocol decision.
+  """
   app = (
     db.query(models.App)
     .filter(models.App.slug == "common", models.App.deleted_at.is_(None))
@@ -212,9 +217,4 @@ async def legacy_social_service(
   status, body, headers, media_type = await app_services.invoke_service(
     app, owner, envelope,
   )
-  headers.update({
-    "Deprecation": "true",
-    "Sunset": "Fri, 11 Dec 2026 00:00:00 GMT",
-    "Link": '</api/app-services/common/>; rel="successor-version"',
-  })
   return _response(status, body, headers, media_type)

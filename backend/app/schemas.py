@@ -795,6 +795,18 @@ class NotificationAction(BaseModel):
   title: str
   target: str | None = None
 
+  @field_validator("target")
+  @classmethod
+  def require_current_target(cls, value: str | None) -> str | None:
+    if value and (
+      value.startswith("/app/")
+      or value.startswith("/chat/")
+      or value == "/shell/?app=artifacts"
+      or value.startswith("/shell/?app=artifacts&")
+    ):
+      raise ValueError("use the current /shell/ notification target")
+    return value
+
 
 class NotificationSendRequest(BaseModel):
   title: str
@@ -806,6 +818,18 @@ class NotificationSendRequest(BaseModel):
   # with just {title, body}. Apps should pass 'app' + their id.
   source_type: str = "agent"
   source_id: str | None = None
+
+  @field_validator("target")
+  @classmethod
+  def require_current_target(cls, value: str | None) -> str | None:
+    if value and (
+      value.startswith("/app/")
+      or value.startswith("/chat/")
+      or value == "/shell/?app=artifacts"
+      or value.startswith("/shell/?app=artifacts&")
+    ):
+      raise ValueError("use the current /shell/ notification target")
+    return value
 
 
 class BackgroundAgentChoice(BaseModel):
@@ -827,9 +851,9 @@ class BackgroundAgentChoice(BaseModel):
 class BackgroundAgentsUpdate(BaseModel):
   """System-level provider choices for scheduled app agents."""
 
+  model_config = ConfigDict(extra="forbid")
+
   providers: list[BackgroundAgentChoice] | None = None
-  primary: BackgroundAgentChoice | None = None
-  fallback: BackgroundAgentChoice | None = None
 
 
 class SettingsUpdate(BaseModel):

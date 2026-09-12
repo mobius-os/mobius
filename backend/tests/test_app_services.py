@@ -91,6 +91,21 @@ def test_public_service_requires_an_explicit_reviewed_grant(client, auth, db):
   assert private.id != public.id
 
 
+def test_social_protocol_address_dispatches_to_the_app_owned_service(
+  client, auth, db,
+):
+  _service_app(db, access="public", slug="common")
+
+  peer = client.get("/api/common/status")
+  local = client.get("/api/common/status", headers=auth)
+
+  assert peer.status_code == 201
+  assert peer.json()["scope"] == "public"
+  assert local.status_code == 201
+  assert local.json()["scope"] == "owner"
+  assert "deprecation" not in peer.headers
+
+
 def test_shared_service_requires_an_explicit_cross_app_grant(
   client, owner_token, db,
 ):

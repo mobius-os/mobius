@@ -21,9 +21,9 @@ test('existing project wins over stale import eligibility and returns the same r
   assert.equal(projectSourceAction([project], undefined, 'app', '1').project, project)
 })
 
-test('older imports open their existing project rather than importing a second copy', () => {
-  const legacy = { ...project, template: { imported_from: source } }
-  assert.equal(projectSourceAction([legacy], sources, 'app', 1).project, legacy)
+test('pre-linked import metadata has no current source-management behavior', () => {
+  const ordinary = { ...project, template: { imported_from: source } }
+  assert.equal(projectSourceAction([ordinary], sources, 'app', 1).label, 'Import to Projects')
 })
 
 test('builder app identity and unrelated source kinds do not imply project membership', () => {

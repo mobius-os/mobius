@@ -31,6 +31,7 @@ covered by `test_codex_sdk_runner.py`; here we only exercise the wiring.
 
 import asyncio
 from concurrent.futures import Future
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -1112,11 +1113,11 @@ def test_split_gates_snapshots_so_continuation_cannot_clobber_a1(
   )
 
 
-def test_force_steer_consumes_existing_queued_messages(
+def test_force_steer_consumes_queue_past_deferred_restart_monitor(
   client, auth, monkeypatch,
 ):
   """Stop can collapse queued rows into a steer even when the normal
-  steer flag is off, and only the named queued rows are consumed."""
+  steer flag is off, and a passive Not-now monitor cannot suppress it."""
   chat_id = "codexforcesteer"
   _make_codex_chat(chat_id, steer_enabled=False)
   db = SessionLocal()
@@ -1127,6 +1128,18 @@ def test_force_steer_consumes_existing_queued_messages(
       {"role": "user", "content": "also square", "ts": 11, "cid": "legacy-11"},
       {"role": "user", "content": "later", "ts": 12, "cid": "legacy-12"},
     ]
+    now = datetime.now(UTC).replace(tzinfo=None)
+    db.add(models.ChatWait(
+      id="deferred-steer-wait", chat_id=chat_id,
+      created_by_run_id="rt", root_run_id="rt", goal_id="goal-rt",
+      linked_question_id="answered-restart-card",
+      description="Load source later", condition_owner="Möbius startup",
+      kind="platform_activation", condition_json={"version": 1},
+      status="armed", next_check_at=now,
+      deadline_at=now + timedelta(days=1),
+      # None is the durable legacy-v1 **Not now** verdict.
+      action_approved_at=None,
+    ))
     db.commit()
   finally:
     db.close()

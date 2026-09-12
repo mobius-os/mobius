@@ -181,6 +181,9 @@ export function chatDetailCacheValue(data = {}) {
     recoveryRunId: data.recovery_run_id || null,
     runId: data.run_id || null,
     runStatus: data.run_status || null,
+    runtimeRevision: Number.isSafeInteger(data.runtime_revision)
+      ? data.runtime_revision
+      : null,
     messages,
     total,
     offset,

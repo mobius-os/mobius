@@ -115,12 +115,18 @@ def _recovery_run_id(db: Session, chat_id: str) -> str | None:
   return row[0] if row is not None else None
 
 
-def _latest_run_identity(db: Session, chat_id: str) -> tuple[str | None, str | None]:
-  """Return the durable physical run identity behind a runtime verdict."""
-  row = db.query(models.ChatRun.id, models.ChatRun.status).filter(
-    models.ChatRun.chat_id == chat_id,
-  ).order_by(models.ChatRun.started_at.desc(), models.ChatRun.id.desc()).first()
-  return (row[0], row[1]) if row is not None else (None, None)
+def _latest_run_snapshot(
+  db: Session, chat_id: str,
+) -> tuple[str | None, str | None, int]:
+  """Return one revisioned runtime identity for browser reconciliation."""
+  row = db.query(
+    models.ChatRunUpdate.chat_run_id,
+    models.ChatRunUpdate.status,
+    models.ChatRunUpdate.id,
+  ).filter(
+    models.ChatRunUpdate.chat_id == chat_id,
+  ).order_by(models.ChatRunUpdate.id.desc()).first()
+  return (row[0], row[1], row[2]) if row is not None else (None, None, 0)
 
 
 def _active_assistant_message_id(
@@ -684,7 +690,7 @@ def _chat_detail_response(
     running_goal_objective(db, chat.id) if running else None
   )
   goal = presented_goal(db, chat.id)
-  run_id, run_status = _latest_run_identity(db, chat.id)
+  run_id, run_status, runtime_revision = _latest_run_snapshot(db, chat.id)
   response = {
     "id": chat.id,
     "title": chat.title,
@@ -699,6 +705,7 @@ def _chat_detail_response(
     "running": running,
     "run_id": run_id,
     "run_status": "running" if running and run_id else run_status,
+    "runtime_revision": runtime_revision,
     "active_assistant_message_id": _active_assistant_message_id(chat),
     "recovery_run_id": _recovery_run_id(db, chat.id),
     "active_goal_objective": active_goal_objective,
@@ -1636,11 +1643,12 @@ def get_chat_runtime(
     ),
   )
   running = is_chat_running(chat.id)
-  run_id, run_status = _latest_run_identity(db, chat.id)
+  run_id, run_status, runtime_revision = _latest_run_snapshot(db, chat.id)
   return {
     "running": running,
     "run_id": run_id,
     "run_status": "running" if running and run_id else run_status,
+    "runtime_revision": runtime_revision,
     "active_assistant_message_id": _active_assistant_message_id(chat),
     "recovery_run_id": _recovery_run_id(db, chat.id),
     "active_goal_objective": running_goal_objective(db, chat.id),

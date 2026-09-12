@@ -67,13 +67,16 @@ import {
 } from '../../lib/appSourceProject.js'
 import { projectSourceAction } from '../../lib/projectSourceAction.js'
 import { immersiveReducer, isImmersiveActive } from '../../lib/immersive.js'
-import { bumpChatRunSignal, chatRunSignal } from '../../lib/chatRunSignal.js'
 import { invalidateChatChangesQueries } from '../ChatView/chatChangesQueries.js'
 import {
   invalidateAllChatActivity,
   invalidateChatActivityForSystemEvent,
 } from '../ChatView/chatActivityQueries.js'
-import { clearAppFrameStorage, clearCachedAppToken } from '../../lib/appFrameStorage.js'
+import {
+  clearAppFrameStorage,
+  clearCachedAppToken,
+  migrateLegacyAppFrameStorage,
+} from '../../lib/appFrameStorage.js'
 import * as tabModel from './tabModel.js'
 import * as paneModel from './paneModel.js'
 import { releaseFocusFromHiddenAppFrame } from './appFrameFocus.js'
@@ -134,7 +137,6 @@ import {
   withChatOwnerInput,
   withChatRename,
   withChatRunState,
-  withoutSettledLocalChatRuns,
 } from './chatListProjection.js'
 import {
   clearComposerDraft,
@@ -156,6 +158,7 @@ import WorkspaceChrome from './WorkspaceChrome.jsx'
 import useWorkspaceDrag from './useWorkspaceDrag.js'
 import useModeController from './useModeController.js'
 import useModeViewTransition, { modeViewTransitionStyle } from './useModeViewTransition.js'
+import useShellChatRunLifecycle from './useShellChatRunLifecycle.js'
 import * as modeMachine from './modeMachine.js'
 import { undoKeyPressed, isEditableTarget } from './workspaceOnboarding.js'
 import PaneChatView from './PaneChatView.jsx'
@@ -693,6 +696,9 @@ export default function Shell({ onInitialVisualReady }) {
     reconcile: reconcileCreatedChats,
   })
   const apps = appsQuery.data ?? EMPTY_LIST
+  useEffect(() => {
+    for (const app of apps) migrateLegacyAppFrameStorage(app.id, app.slug)
+  }, [apps])
   const artifactsAppId = apps.find(app => app.slug === 'pages')?.id ?? null
   const projects = projectsQuery.data ?? EMPTY_LIST
   const projectTemplates = projectTemplatesQuery.data ?? EMPTY_LIST
@@ -2131,32 +2137,35 @@ export default function Shell({ onInitialVisualReady }) {
     && !walkthroughQuery.data.completed
 
   // Local streaming ids come from the mounted ChatView immediately at send
-  // time. The computed streamingChatIds below merges those with durable
+  // time. The run-lifecycle owner merges those with durable
   // `running` flags from /api/chats, so drawer dots survive navigation,
   // reloads, and PWA reopen even when the streaming ChatView is unmounted.
   // A fresh reconnect also retires local starts whose finish event was missed;
   // otherwise the optimistic half of this union can outlive server truth.
   // attentionChatIds is separate: it marks a background-finished chat until
   // the user opens it, without pretending the turn is still streaming.
-  const [localStreamingChatIds, setLocalStreamingChatIds] = useState(() => new Set())
-  // Keep the send-time owner synchronous across the reconnect await. A compact
-  // row can still say `running: false` before the accepted send emits its
-  // durable start, so state committed on the next React frame is too late to
-  // decide whether that row may retire the optimistic marker.
-  const localStreamingChatIdsRef = useRef(localStreamingChatIds)
-  const acknowledgedLocalChatRunIdsRef = useRef(new Set())
-  // Monotonic per-chat activity survives a start+finish pair delivered in one
-  // system-stream chunk. A running boolean can end the React batch exactly as
-  // it began (false) and lose the fact that the transcript changed.
-  const [chatRunSignals, setChatRunSignals] = useState(() => new Map())
   const [attentionChatIds, setAttentionChatIds] = useState(() => new Set())
-  const streamingChatIds = useMemo(() => {
-    const next = new Set(localStreamingChatIds)
-    for (const chat of chats) {
-      if (chat.running) next.add(chat.id)
-    }
-    return next
-  }, [localStreamingChatIds, chats])
+  const {
+    chatRunSignalFor,
+    markChatRunActivity,
+    markChatRunFinished,
+    markChatRunReconcile,
+    markStreamingAcknowledged: markStreamingAcknowledgedState,
+    markStreamingEnd,
+    markStreamingStart: markStreamingStartState,
+    reconcileLocalChatRuns,
+    streamingChatIds,
+    streamingChatIdsRef,
+  } = useShellChatRunLifecycle(chats)
+  const clearChatAttention = useCallback((chatId) => {
+    if (!chatId) return
+    setAttentionChatIds(prev => {
+      if (!prev.has(chatId)) return prev
+      const next = new Set(prev)
+      next.delete(chatId)
+      return next
+    })
+  }, [])
   const ownerInputChatIds = useMemo(() => {
     const next = new Set()
     for (const chat of chats) {
@@ -2172,9 +2181,6 @@ export default function Shell({ onInitialVisualReady }) {
     () => failedChatIds(chats, visibleChatIds),
     [chats, visibleChatIds],
   )
-  const streamingChatIdsRef = useRef(streamingChatIds)
-  useEffect(() => { streamingChatIdsRef.current = streamingChatIds }, [streamingChatIds])
-
   const {
     updateAvailable: shellUpdateAvailable,
     markShellUpdateAvailable,
@@ -2198,66 +2204,15 @@ export default function Shell({ onInitialVisualReady }) {
   const markStreamingStart = useCallback((chatId) => {
     if (!chatId) return
     const key = String(chatId)
-    // Publish activity synchronously before React schedules the rendered Set;
-    // new-chat reuse and placement decisions may run in the same task.
-    if (!streamingChatIdsRef.current.has(key)) {
-      const next = new Set(streamingChatIdsRef.current)
-      next.add(key)
-      streamingChatIdsRef.current = next
-    }
-    const previous = localStreamingChatIdsRef.current
-    if (!previous.has(key)) {
-      const next = new Set(previous)
-      next.add(key)
-      localStreamingChatIdsRef.current = next
-      setLocalStreamingChatIds(next)
-    }
-    setAttentionChatIds(prev => {
-      if (!prev.has(key)) return prev
-      const next = new Set(prev)
-      next.delete(key)
-      return next
-    })
-  }, [])
+    markStreamingStartState(key)
+    clearChatAttention(key)
+  }, [clearChatAttention, markStreamingStartState])
   const markStreamingAcknowledged = useCallback((chatId) => {
     if (!chatId) return
     const key = String(chatId)
-    acknowledgedLocalChatRunIdsRef.current.add(key)
-    markStreamingStart(key)
-  }, [markStreamingStart])
-  const markStreamingEnd = useCallback((chatId) => {
-    if (!chatId) return
-    const key = String(chatId)
-    acknowledgedLocalChatRunIdsRef.current.delete(key)
-    const previous = localStreamingChatIdsRef.current
-    if (!previous.has(key)) return
-    const next = new Set(previous)
-    next.delete(key)
-    localStreamingChatIdsRef.current = next
-    setLocalStreamingChatIds(next)
-  }, [])
-
-  const markChatRunActivity = useCallback((chatId) => {
-    setChatRunSignals(prev => bumpChatRunSignal(prev, chatId, 'chat_run_started'))
-  }, [])
-
-  const markChatRunReconcile = useCallback((chatId) => {
-    setChatRunSignals(prev => bumpChatRunSignal(prev, chatId, 'chat_run_reconcile'))
-  }, [])
-
-  const markChatRunFinished = useCallback((chatId) => {
-    setChatRunSignals(prev => bumpChatRunSignal(prev, chatId, 'chat_run_finished'))
-  }, [])
-
-  const clearChatAttention = useCallback((chatId) => {
-    if (!chatId) return
-    setAttentionChatIds(prev => {
-      if (!prev.has(chatId)) return prev
-      const next = new Set(prev)
-      next.delete(chatId)
-      return next
-    })
-  }, [])
+    markStreamingAcknowledgedState(key)
+    clearChatAttention(key)
+  }, [clearChatAttention, markStreamingAcknowledgedState])
 
   // Clear the attention dot for EVERY visible chat pane — membership in the
   // visible set, not equality with one global id (design §2 M13).
@@ -3273,30 +3228,10 @@ export default function Shell({ onInitialVisualReady }) {
     signal?.throwIfAborted()
     const refreshedChats = await fetchFreshChats({ timeoutMs: SYSTEM_RECONNECT_LIST_TIMEOUT_MS, signal })
     signal?.throwIfAborted()
-    const localIds = localStreamingChatIdsRef.current
-    for (const chat of refreshedChats) {
-      const chatId = String(chat.id)
-      if (chat.running && localIds.has(chatId)) {
-        acknowledgedLocalChatRunIdsRef.current.add(chatId)
-      }
-    }
-    const reconciledLocalIds = withoutSettledLocalChatRuns(
-      localIds,
+    const reconciledLocalIds = reconcileLocalChatRuns(
       refreshedChats,
-      {
-        acknowledgedIds: acknowledgedLocalChatRunIdsRef.current,
-        protectedIds: visibleChatIdsRef.current,
-      },
+      visibleChatIdsRef.current,
     )
-    if (reconciledLocalIds !== localIds) {
-      for (const chatId of localIds) {
-        if (!reconciledLocalIds.has(chatId)) {
-          acknowledgedLocalChatRunIdsRef.current.delete(String(chatId))
-        }
-      }
-      localStreamingChatIdsRef.current = reconciledLocalIds
-      setLocalStreamingChatIds(reconciledLocalIds)
-    }
     for (const chat of refreshedChats) {
       const chatId = String(chat.id)
       // The mounted stream owns a local start until it reaches a boundary.
@@ -3313,6 +3248,7 @@ export default function Shell({ onInitialVisualReady }) {
   }, [
     fetchFreshChats,
     markChatRunReconcile,
+    reconcileLocalChatRuns,
     reconcileNotifications,
     reconcileDeletedAppIdentities,
     reconcileDeletedChatIdentities,
@@ -4959,7 +4895,7 @@ export default function Shell({ onInitialVisualReady }) {
                 paneContentHeight={builderRect ? builderRect.h : null}
                 // Select before the memo boundary. Passing the replacement Map
                 // would rerender every visible chat pane for another chat's run.
-                externalRunSignal={chatRunSignal(chatRunSignals, chatId)}
+                externalRunSignal={chatRunSignalFor(chatId)}
                 // A modal drawer owns focus until its close commits. Keeping
                 // the request pending avoids a focus-trap/restore race while
                 // the already-visible blank closes navigation.

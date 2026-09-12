@@ -21,7 +21,11 @@ _BACKEND_DIR = _SCRIPT_DIR.parent
 if str(_BACKEND_DIR) not in sys.path:
   sys.path.insert(0, str(_BACKEND_DIR))
 from app import cron_tz
-from app.manifest_contract import ManifestContractError, job_interpreter
+from app.manifest_contract import (
+  ManifestContractError,
+  job_interpreter,
+  require_executable_job,
+)
 
 
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
@@ -309,6 +313,7 @@ def _job_command(job: Path, app_id: int) -> list[str]:
   """
   with job.open("rb") as script:
     interpreter = job_interpreter(script.read(257))
+  require_executable_job(job.stat().st_mode)
   return [*interpreter, str(job), str(app_id)]
 
 

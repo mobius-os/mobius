@@ -19,6 +19,15 @@
   font-weight: 600;
 }
 
+.qcard__action-detail {
+  display: block;
+  margin-top: 3px;
+  color: var(--text);
+  font-size: 12.5px;
+  font-weight: 400;
+  line-height: 1.4;
+}
+
 .qcard--grouped {
   padding: 0;
   overflow: hidden;

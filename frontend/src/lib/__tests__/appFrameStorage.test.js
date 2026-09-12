@@ -2,9 +2,9 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
   cacheAppToken, clearAppFrameStorage, clearCachedAppToken, isSafeVirtualStorageKey,
-  isLegacyFrameStorageKey, readAppFrameStorage, readCachedAppToken,
+  migrateLegacyAppFrameStorage, readAppFrameStorage, readCachedAppToken,
   removeAppFrameStorage,
-  setAppFrameStorage,
+  setAppFrameStorage, _storagePrefixes,
 } from '../appFrameStorage.js'
 
 class MemoryStorage {
@@ -21,7 +21,7 @@ function jwt(claims) {
   return `${encode({ alg: 'none' })}.${encode(claims)}.signature`
 }
 
-test('frame snapshot never exposes owner auth or internal token caches', () => {
+test('one-time migration never claims storage from a numeric key heuristic', () => {
   const storage = new MemoryStorage({
     token: 'owner-secret',
     'mobius:app-token:7': 'cached-secret',
@@ -30,10 +30,63 @@ test('frame snapshot never exposes owner auth or internal token caches', () => {
     'mobius-app-lru': '[7,8]',
     'news:8:cache': 'sibling preference',
     'news:7:cache': 'safe preference',
+    highscores: '[999]',
+    'tn-split-ratio-v2': '0.4',
+    'mobius-theme': 'dark',
   })
-  assert.deepEqual(readAppFrameStorage(7, storage), {
-    'news:7:cache': 'safe preference',
+  assert.deepEqual(readAppFrameStorage(7, storage, 'news'), {})
+  assert.equal(
+    storage.getItem(`${_storagePrefixes.LEGACY_MIGRATION_PREFIX}7`),
+    'done',
+  )
+  assert.equal(storage.getItem('news:7:cache'), 'safe preference')
+})
+
+test('catalog-only CubeRun and Tandem preferences survive the cutover', () => {
+  const cube = new MemoryStorage({ highscores: '[999]', musicEnabled: 'false' })
+  assert.equal(migrateLegacyAppFrameStorage(4, 'cuberun', cube), true)
+  assert.deepEqual(readAppFrameStorage(4, cube, 'cuberun'), {
+    highscores: '[999]', musicEnabled: 'false',
   })
+  const tandem = new MemoryStorage({ 'tn-split-ratio-v2': '0.4' })
+  assert.equal(migrateLegacyAppFrameStorage(5, 'tandem', tandem), true)
+  assert.deepEqual(readAppFrameStorage(5, tandem, 'tandem'), {
+    'tn-split-ratio-v2': '0.4',
+  })
+})
+
+test('migration is idempotent and never overwrites a current app value', () => {
+  const storage = new MemoryStorage({
+    highscores: 'legacy',
+    'mobius:app-frame-storage:7:highscores': 'current',
+  })
+  assert.deepEqual(readAppFrameStorage(7, storage, 'cuberun'), {
+    highscores: 'current',
+  })
+  storage.setItem('highscores', 'changed after proof')
+  assert.deepEqual(readAppFrameStorage(7, storage, 'cuberun'), {
+    highscores: 'current',
+  })
+})
+
+test('a failed copy writes no proof and retries on the next mount', () => {
+  class FailingStorage extends MemoryStorage {
+    constructor(entries) { super(entries); this.failCopy = true }
+    setItem(key, value) {
+      if (this.failCopy && String(key).startsWith('mobius:app-frame-storage:7:')) {
+        this.failCopy = false
+        throw new Error('quota')
+      }
+      super.setItem(key, value)
+    }
+  }
+  const storage = new FailingStorage({ highscores: 'legacy' })
+  assert.deepEqual(readAppFrameStorage(7, storage, 'cuberun'), {})
+  assert.equal(storage.getItem(`${_storagePrefixes.LEGACY_MIGRATION_PREFIX}7`), null)
+  assert.deepEqual(readAppFrameStorage(7, storage, 'cuberun'), {
+    highscores: 'legacy',
+  })
+  assert.equal(storage.getItem(`${_storagePrefixes.LEGACY_MIGRATION_PREFIX}7`), 'done')
 })
 
 test('app writes are isolated from shell and sibling storage', () => {
@@ -66,13 +119,6 @@ test('sensitive and malformed virtual keys are rejected', () => {
   assert.equal(isSafeVirtualStorageKey('token'), false)
   assert.equal(isSafeVirtualStorageKey('refresh_token'), false)
   assert.equal(isSafeVirtualStorageKey('ordinary-pref'), true)
-})
-
-test('legacy unscoped preferences are limited to their catalog app', () => {
-  assert.equal(isLegacyFrameStorageKey(7, 'cuberun', 'highscores'), true)
-  assert.equal(isLegacyFrameStorageKey(7, 'news', 'highscores'), false)
-  assert.equal(isLegacyFrameStorageKey(7, 'tandem', 'tn-split-ratio-v2'), true)
-  assert.equal(isLegacyFrameStorageKey(7, 'news', 'moebius_active_chat'), false)
 })
 
 test('cached app token must match the exact app id and may be retained for offline boot', () => {

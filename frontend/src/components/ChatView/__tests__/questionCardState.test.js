@@ -28,16 +28,20 @@ test('unanswered question cards do not have a stale gray state', () => {
     'unanswered cards should not receive a stale visual class')
   assert.doesNotMatch(component, /This question is no longer active/,
     'unanswered cards should not tell the user the question expired')
-  assert.match(component, /\{\(answered \|\| !disabled\) && \([\s\S]*<button[\s\S]*className="qcard__submit"/,
+  assert.match(component, /\{!completedAction && \(answered \|\| !disabled\) && \([\s\S]*<button[\s\S]*className="qcard__submit"/,
     'submit button should remain in place after an answer is submitted')
-  assert.match(component, /submitting \? 'Submitting…' : \(completedAction \? actionStatusLabel : answered \? 'Submitted' : 'Submit'\)/,
+  assert.match(component, /submitting \? 'Submitting…' : \(answered \? 'Submitted' : restartAction \? 'Continue' : 'Submit'\)/,
     'the retained submit button should explain pending and answered states')
-  assert.match(component, /\{\(!disabled \|\| answered\) && \(\s*<div className="qcard__hint"/,
+  assert.match(component, /\{!completedAction && \(!disabled \|\| answered\) && \(\s*<div className="qcard__hint"/,
     'selection hints should stay in place after the answer is submitted')
   assert.doesNotMatch(component, /qcard__opt--other/,
     'a custom answer should be a direct writing surface, not an Other option')
   assert.match(component, /<CustomAnswerArea[\s\S]*?answered=\{answered\}[\s\S]*?value=\{answered[\s\S]*?unmatchedAnswers\.join\(', '\)/,
     'the custom answer should stay mounted and retain submitted custom text')
+  assert.match(component, /placeholder=\{restartAction \? 'Or tell me what you’d like to do instead…'/,
+    'a Restart card should replace Not now with a written response')
+  assert.match(component, /q\.options\?\.filter\(opt => opt\.id === platformAction\.restart_option_id\)/,
+    'a Restart card should show only its exact Restart now option')
   assert.match(component, /rows=\{1\}/,
     'the custom answer should begin as one compact writing line')
   assert.match(component, /data-chat-inline-editor="question-answer"/,

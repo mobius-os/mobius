@@ -152,7 +152,7 @@ def test_project_templates_validate_ids_lists_and_confined_file_paths(tmp_path):
     "skills": ["web"],
     "dependencies": ["node"],
     "previews": [{
-      "id": "site", "name": "Site", "kind": "html", "path": "index.html",
+      "id": "site", "name": "Site", "source": "index.html", "builder": "website",
     }],
     "actions": [{
       "id": "review", "name": "Review", "prompt": "Review the rendered site.",
@@ -189,8 +189,8 @@ def test_project_templates_validate_ids_lists_and_confined_file_paths(tmp_path):
   manifest["project_templates"][0]["files"] = {
     "index.html": "templates/index.html",
   }
-  manifest["project_templates"][0]["previews"][0]["kind"] = "browser"
-  with pytest.raises(ManifestContractError, match="must be html, pdf, or image"):
+  manifest["project_templates"][0]["previews"][0]["builder"] = "unknown"
+  with pytest.raises(ManifestContractError, match="must name one of"):
     validate_manifest_contract(manifest)
 
 

@@ -540,53 +540,17 @@ async def test_managed_final_validation_runs_after_drain_and_before_start(
 
 
 @pytest.mark.asyncio
-async def test_legacy_railway_image_offers_managed_bootstrap(tmp_path, monkeypatch):
-  from app import chat
-
+async def test_railway_without_current_handoff_requires_image_upgrade(tmp_path, monkeypatch):
   monkeypatch.setattr(dc.platform_activation, "deployment_kind", lambda: "railway")
   monkeypatch.setattr(dc, "get_settings", lambda: type("S", (), {"data_dir": str(tmp_path)})())
-  calls = []
-
-  def managed_request(method, suffix, payload=None):
-    calls.append((method, suffix, payload))
-    if method == "GET":
-      return {"mode": "handoff", "state": "idle"}
-    if suffix == "bootstrap/prepare":
-      return {
-        "mode": "bootstrap", "state": "awaiting_bootstrap",
-        "operation_id": "bootstrap_123", "handoff_nonce": "nonce",
-        "expected_sha": "a" * 40, "image_digest": _TEST_DIGEST,
-      }
-    return {
-      "mode": "bootstrap", "state": "queued",
-      "operation_id": "bootstrap_123", "expected_sha": "a" * 40,
-      "image_digest": _TEST_DIGEST,
-    }
-
-  monkeypatch.setattr(dc, "_managed_request", managed_request)
-  began = []
-  monkeypatch.setattr(
-    chat, "begin_idle_drain", lambda: began.append(True) or True,
-  )
+  monkeypatch.setattr(dc, "_managed_request", lambda *_args, **_kwargs: pytest.fail(
+    "retired bootstrap protocol must not contact the account service"
+  ))
 
   status = await dc.read_rebuild_status()
-  assert status["supported"] is False
-  assert status["bootstrap_available"] is True
-  assert status["code"] == "controller_upgrade_required"
 
-  started = await dc._request_managed_bootstrap("a" * 40, _TEST_DIGEST)
-  assert started["state"] == "queued"
-  assert started["bootstrap_available"] is True
-  assert began == [True]
-  assert calls == [
-    ("GET", "status", None),
-    ("POST", "bootstrap/prepare", {
-      "expected_sha": "a" * 40, "expected_digest": _TEST_DIGEST,
-    }),
-    ("POST", "bootstrap/start", {
-      "operation_id": "bootstrap_123", "handoff_nonce": "nonce",
-    }),
-  ]
+  assert status["supported"] is False
+  assert status["code"] == "controller_upgrade_required"
 
 
 @pytest.mark.asyncio
@@ -609,7 +573,6 @@ async def test_stale_managed_marker_cannot_impersonate_current_boot(
 
   assert dc.managed_cutover_ready() is False
   assert status["supported"] is False
-  assert status["bootstrap_available"] is True
   assert status["code"] == "controller_upgrade_required"
 
 
@@ -620,113 +583,6 @@ def test_managed_marker_belongs_only_to_matching_boot(tmp_path, monkeypatch):
   )
 
   assert dc.managed_cutover_ready() is True
-
-
-@pytest.mark.asyncio
-async def test_legacy_railway_bootstrap_requires_linked_account(
-  tmp_path, monkeypatch,
-):
-  monkeypatch.setattr(dc.platform_activation, "deployment_kind", lambda: "railway")
-  monkeypatch.setattr(
-    dc, "get_settings", lambda: type("S", (), {"data_dir": str(tmp_path)})(),
-  )
-
-  def unlinked(*_args, **_kwargs):
-    raise dc.DeploymentControlError("not_configured", "not linked", status_code=409)
-
-  monkeypatch.setattr(dc, "_managed_request", unlinked)
-
-  status = await dc.read_rebuild_status()
-
-  assert status["supported"] is False
-  assert status["bootstrap_available"] is False
-  assert status["code"] == "not_configured"
-
-
-@pytest.mark.asyncio
-async def test_legacy_railway_bootstrap_does_not_mask_controller_failure(
-  tmp_path, monkeypatch,
-):
-  monkeypatch.setattr(dc.platform_activation, "deployment_kind", lambda: "railway")
-  monkeypatch.setattr(
-    dc, "get_settings", lambda: type("S", (), {"data_dir": str(tmp_path)})(),
-  )
-
-  def unavailable(*_args, **_kwargs):
-    raise dc.DeploymentControlError(
-      "controller_unavailable", "The Möbius account service is unavailable.",
-    )
-
-  monkeypatch.setattr(dc, "_managed_request", unavailable)
-
-  status = await dc.read_rebuild_status()
-
-  assert status["supported"] is False
-  assert status["bootstrap_available"] is False
-  assert status["code"] == "controller_unavailable"
-  assert status["message"] == "The Möbius account service is unavailable."
-
-
-@pytest.mark.asyncio
-async def test_legacy_railway_bootstrap_waits_for_idle_chats(tmp_path, monkeypatch):
-  from app import chat
-
-  monkeypatch.setattr(dc.platform_activation, "deployment_kind", lambda: "railway")
-  monkeypatch.setattr(dc, "get_settings", lambda: type("S", (), {"data_dir": str(tmp_path)})())
-  calls = []
-
-  def managed_request(method, suffix, payload=None):
-    calls.append((method, suffix, payload))
-    return {
-      "mode": "bootstrap", "state": "awaiting_bootstrap",
-      "operation_id": "bootstrap_123", "handoff_nonce": "nonce",
-      "expected_sha": "a" * 40, "image_digest": _TEST_DIGEST,
-    }
-
-  monkeypatch.setattr(dc, "_managed_request", managed_request)
-  began = []
-  monkeypatch.setattr(
-    chat, "begin_idle_drain", lambda: began.append(True) or False,
-  )
-
-  with pytest.raises(dc.DeploymentControlError) as exc:
-    await dc._request_managed_bootstrap("a" * 40, _TEST_DIGEST)
-
-  assert exc.value.code == "active_chats"
-  assert began == [True]
-  assert [suffix for _method, suffix, _payload in calls] == ["bootstrap/prepare"]
-
-
-@pytest.mark.asyncio
-async def test_legacy_bootstrap_reopens_admission_only_after_definitive_rejection(
-  monkeypatch,
-):
-  from app import chat
-
-  began = []
-  cancelled = []
-  monkeypatch.setattr(
-    chat, "begin_idle_drain", lambda: began.append(True) or True,
-  )
-  monkeypatch.setattr(chat, "cancel_idle_drain", lambda: cancelled.append(True))
-
-  def managed_request(method, suffix, _payload=None):
-    if suffix == "bootstrap/prepare":
-      return {
-        "operation_id": "bootstrap_123", "handoff_nonce": "nonce",
-        "expected_sha": "a" * 40, "image_digest": _TEST_DIGEST,
-      }
-    raise dc.DeploymentControlError(
-      "controller_rejected", "The managed upgrade was rejected.", status_code=409,
-    )
-
-  monkeypatch.setattr(dc, "_managed_request", managed_request)
-
-  with pytest.raises(dc.DeploymentControlError):
-    await dc._request_managed_bootstrap("a" * 40, _TEST_DIGEST)
-
-  assert began == [True]
-  assert cancelled == [True]
 
 
 @pytest.mark.asyncio
@@ -1256,28 +1112,6 @@ def test_prepare_path_requires_matching_root_owned_operation(tmp_path, monkeypat
 
 
 @pytest.mark.asyncio
-async def test_reviewed_legacy_upgrade_keeps_reviewed_target_and_final_check(monkeypatch):
-  _install_source_apply(monkeypatch)
-  monkeypatch.setattr(dc.platform_activation, "deployment_kind", lambda: "railway")
-  monkeypatch.setattr(dc, "managed_cutover_ready", lambda: False)
-  _install_reviewed_image_plan(monkeypatch)
-  calls = []
-
-  async def bootstrap(sha, digest, *, final_check):
-    final_check()
-    calls.append((sha, digest))
-    return {"state": "queued"}
-
-  monkeypatch.setattr(dc, "_request_managed_bootstrap", bootstrap)
-  result = await dc.request_reviewed_rebuild(
-    db=None, plan_id="a" * 64, current_sha="1" * 40,
-    target_sha="2" * 40, image_digest=_TEST_DIGEST,
-  )
-  assert result["state"] == "queued"
-  assert calls == [("2" * 40, _TEST_DIGEST)]
-
-
-@pytest.mark.asyncio
 async def test_reviewed_local_image_blocker_precedes_any_source_apply(monkeypatch):
   monkeypatch.setattr(dc.platform_activation, "deployment_kind", lambda: "self_hosted")
   _install_reviewed_image_plan(monkeypatch, blockers=["Dockerfile"])
@@ -1291,26 +1125,6 @@ async def test_reviewed_local_image_blocker_precedes_any_source_apply(monkeypatc
       db=None, plan_id="a" * 64, current_sha="1" * 40,
       target_sha="2" * 40, image_digest=None,
     )
-
-
-@pytest.mark.asyncio
-async def test_bootstrap_stale_review_reopens_admission_without_start(monkeypatch):
-  from app import chat
-  calls = []
-  monkeypatch.setattr(dc, "_managed_request", lambda *args: {
-    "operation_id": "operation", "handoff_nonce": "nonce",
-    "expected_sha": "a" * 40, "image_digest": _TEST_DIGEST,
-  })
-  monkeypatch.setattr(chat, "begin_idle_drain", lambda: calls.append("drain") or True)
-  monkeypatch.setattr(chat, "cancel_idle_drain", lambda: calls.append("cancel"))
-
-  def stale():
-    calls.append("validate")
-    raise dc.DeploymentControlError("update_plan_stale", "Review changed")
-
-  with pytest.raises(dc.DeploymentControlError, match="Review changed"):
-    await dc._request_managed_bootstrap("a" * 40, _TEST_DIGEST, final_check=stale)
-  assert calls == ["drain", "validate", "cancel"]
 
 
 @pytest.mark.asyncio
@@ -1375,18 +1189,17 @@ def test_concurrent_request_never_overwrites_an_already_reviewed_target(tmp_path
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("ready", [True, False])
 @pytest.mark.parametrize("outcome", ["activation_needed", "conflict", "rolled_back"])
-async def test_managed_update_installs_source_before_cutover_and_keeps_apply_failures(monkeypatch, ready, outcome):
+async def test_managed_update_installs_source_before_cutover_and_keeps_apply_failures(monkeypatch, outcome):
   monkeypatch.setattr(dc.platform_activation, "deployment_kind", lambda: "railway")
-  monkeypatch.setattr(dc, "managed_cutover_ready", lambda: ready)
+  monkeypatch.setattr(dc, "managed_cutover_ready", lambda: True)
   calls = []
   def verify(**plan):
     calls.append(("verify", plan["current_sha"]))
     return {"activation": {"level": "image_rebuild", "required_actions": ["image_rebuild"]}, "blockers": []}
   monkeypatch.setattr(dc.platform_update, "reviewed_container_rebuild_plan", verify)
   async def status():
-    return {"supported": ready, "bootstrap_available": not ready, "state": "idle"}
+    return {"supported": True, "state": "idle"}
   async def apply(db, **plan):
     calls.append(("apply", plan["target_sha"]))
     assert plan["current_sha"] == "1" * 40
@@ -1399,7 +1212,6 @@ async def test_managed_update_installs_source_before_cutover_and_keeps_apply_fai
   monkeypatch.setattr(dc, "read_rebuild_status", status)
   monkeypatch.setattr(dc.platform_update, "apply_platform_update", apply)
   monkeypatch.setattr(dc, "_request_managed_rebuild", cutover)
-  monkeypatch.setattr(dc, "_request_managed_bootstrap", cutover)
   result = await dc.request_reviewed_rebuild(db=None, plan_id="a" * 64, current_sha="1" * 40, target_sha="2" * 40, image_digest=_TEST_DIGEST)
   if outcome == "activation_needed":
     assert result["state"] == "queued"
@@ -1421,7 +1233,6 @@ async def test_managed_update_refuses_source_moving_after_its_apply(monkeypatch)
   async def must_not_start(*args, **kwargs):
     pytest.fail("a concurrent source edit must not be hidden by capturing a fresh plan")
   monkeypatch.setattr(dc, "_request_managed_rebuild", must_not_start)
-  monkeypatch.setattr(dc, "_request_managed_bootstrap", must_not_start)
   with pytest.raises(dc.DeploymentControlError) as error:
     await dc.request_reviewed_rebuild(db=None, plan_id="a" * 64, current_sha="1" * 40, target_sha="2" * 40, image_digest=_TEST_DIGEST)
   assert error.value.code == "update_applied_rebuild_pending"
@@ -1453,7 +1264,7 @@ async def test_mixed_activation_cannot_dispatch_replacement(monkeypatch, deploym
   monkeypatch.setattr(dc.platform_update, 'reviewed_container_rebuild_plan', review)
   monkeypatch.setattr(dc.platform_update, 'apply_platform_update', apply)
   monkeypatch.setattr(dc, 'read_rebuild_status', ready)
-  for name in ('_request_self_hosted_rebuild', '_request_managed_rebuild', '_request_managed_bootstrap'):
+  for name in ('_request_self_hosted_rebuild', '_request_managed_rebuild'):
     monkeypatch.setattr(dc, name, forbidden)
   with pytest.raises(dc.DeploymentControlError) as error:
     await dc.request_reviewed_rebuild(db=None, plan_id='a'*64, current_sha='1'*40, target_sha='2'*40, image_digest=_TEST_DIGEST)

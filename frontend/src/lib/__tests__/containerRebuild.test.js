@@ -3,7 +3,6 @@ import test from 'node:test'
 
 import {
   rebuildIsActive,
-  rebuildNeedsBootstrap,
   rebuildPollShouldContinue,
   rebuildProgressMessage,
   rebuildRequestOutcome,
@@ -41,15 +40,6 @@ test('reviewed no-change is completion while standalone no-change stays informat
     rebuildRequestOutcome({ state: 'rolled_back' }, { reviewedUpdate: true })
       .terminalFailure,
     true,
-  )
-})
-
-test('legacy Railway status exposes the one-time bootstrap action', () => {
-  assert.equal(rebuildNeedsBootstrap({ bootstrap_available: true }), true)
-  assert.equal(rebuildNeedsBootstrap({ bootstrap_available: false }), false)
-  assert.equal(
-    rebuildProgressMessage({ bootstrap_available: true, state: 'succeeded' }),
-    'Container updates are now enabled.',
   )
 })
 

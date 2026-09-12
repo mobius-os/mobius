@@ -22,7 +22,7 @@ All files are written atomically with mode 0o600 inside a 0o700 dir: the token
 is readable only by the mobius user and never reaches the browser — status
 endpoints echo metadata, never the token (INV1).
 
-No FastAPI imports here — routes/github.py owns the HTTP surface.
+No FastAPI imports here — routes/github_access.py owns the HTTP surface.
 """
 
 import fcntl

@@ -78,6 +78,12 @@ def job_interpreter(job: bytes) -> tuple[str, ...]:
   return interpreter
 
 
+def require_executable_job(mode: int) -> None:
+  """Reject a scheduled job that its accepted package cannot execute."""
+  if not mode & 0o111:
+    _fail("Schedule job is not executable.")
+
+
 def validate_slug_field(value, field: str) -> None:
   if not isinstance(value, str) or not value:
     _fail(f"Manifest `{field}` must be a non-empty string.")
@@ -215,6 +221,25 @@ def validate_manifest_contract(manifest) -> None:
     validate_slug_field(previous_id, "previous_id")
     if previous_id == mid:
       _fail("Manifest `previous_id` must differ from `id`.")
+  previous_manifest_url = manifest.get("previous_manifest_url")
+  if previous_manifest_url is not None:
+    if previous_id is None:
+      _fail("Manifest `previous_manifest_url` requires `previous_id`.")
+    if not isinstance(previous_manifest_url, str) or not previous_manifest_url:
+      _fail("Manifest `previous_manifest_url` must be a non-empty string.")
+    parsed_previous = urlparse(previous_manifest_url)
+    if (
+      parsed_previous.scheme != "https"
+      or not parsed_previous.netloc
+      or parsed_previous.username is not None
+      or parsed_previous.password is not None
+      or parsed_previous.query
+      or parsed_previous.fragment
+    ):
+      _fail(
+        "Manifest `previous_manifest_url` must be an absolute HTTPS URL "
+        "without credentials, query, or fragment."
+      )
 
   validate_repo_relative_path(manifest["entry"], "entry")
   if manifest["entry"] != "index.jsx":
@@ -294,6 +319,11 @@ def validate_manifest_contract(manifest) -> None:
       if not isinstance(previews, list) or len(previews) > 8:
         _fail(f"Manifest `{field}.previews` must be an array with at most 8 entries.")
       seen_preview_ids = set()
+      raw_artifact_types = template.get("artifact_types", [])
+      declared_artifact_type_ids = {
+        value.get("id") for value in raw_artifact_types
+        if isinstance(value, Mapping)
+      } if isinstance(raw_artifact_types, list) else set()
       for preview_index, preview in enumerate(previews):
         preview_field = f"{field}.previews[{preview_index}]"
         if not isinstance(preview, Mapping):
@@ -303,11 +333,16 @@ def validate_manifest_contract(manifest) -> None:
         if preview_id in seen_preview_ids:
           _fail(f"Manifest `{preview_field}.id` duplicates {preview_id!r}.")
         seen_preview_ids.add(preview_id)
-        if preview.get("kind") not in {"html", "pdf", "image"}:
-          _fail(f"Manifest `{preview_field}.kind` must be html, pdf, or image.")
         if not isinstance(preview.get("name"), str) or not preview["name"].strip():
           _fail(f"Manifest `{preview_field}.name` must be a non-empty string.")
-        validate_repo_relative_path(preview.get("path"), f"{preview_field}.path")
+        validate_repo_relative_path(preview.get("source"), f"{preview_field}.source")
+        builder = preview.get("builder")
+        validate_slug_field(builder, f"{preview_field}.builder")
+        if builder not in declared_artifact_type_ids:
+          _fail(
+            f"Manifest `{preview_field}.builder` must name one of this "
+            "template's artifact_types."
+          )
       actions = template.get("actions", [])
       if not isinstance(actions, list) or len(actions) > 8:
         _fail(f"Manifest `{field}.actions` must be an array with at most 8 entries.")

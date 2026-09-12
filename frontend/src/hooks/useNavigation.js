@@ -82,9 +82,7 @@ const safeStoredChatId = readStoredChatId
 // Parse deep-link URL. A COLD notification tap lands on the in-scope
 // shell form `/shell/?app=<id-or-slug>` (or `?chat=<id>`) — this reopens
 // the installed standalone PWA instead of a browser tab, because it's
-// inside the manifest scope (`/shell/`). The legacy out-of-scope forms
-// `/app/:id` and `/chat/:id` are still parsed for back-compat (warm taps
-// on notifications already in the OS tray, or older senders).
+// inside the manifest scope (`/shell/`).
 export const deepLink = parseShellDeepLink(window.location)
 
 // Cold-restore of the active view/app (mirror of moebius_active_chat) so a

@@ -77,6 +77,7 @@ from app.routes import (
   contribution_reviews_router,
   chat_waits_router,
   debug_router, delegations_router, fs_router, goal_plans_router, github_router,
+  github_access_router,
   reviewer_router,
   identity_router,
   owner_approvals_router,
@@ -874,6 +875,7 @@ app.include_router(uploads_router)
 app.include_router(media_router)
 app.include_router(secrets_router)
 app.include_router(github_router)
+app.include_router(github_access_router)
 app.include_router(reviewer_router)
 app.include_router(contribution_reviews_router)
 app.include_router(identity_router)

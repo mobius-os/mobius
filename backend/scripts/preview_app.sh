@@ -9,10 +9,10 @@
 #   preview_app.sh [--standalone] <app_id> [output_path]
 #   defaults: output_path=/data/chats/$CHAT_ID/media/app-<id>.png
 #
-# Maps to the in-shell app route /app/<id>. The bare app-frame URL
+# Maps to the current in-shell app route /shell/?app=<id>. The bare app-frame URL
 # can't be screenshotted directly — the frame waits for the parent
 # shell's `moebius:frame-init` postMessage before initializing — so we
-# go through /app/<id> in the authenticated shell. `--standalone` keeps the
+# go through /shell/?app=<id> in the authenticated shell. `--standalone` keeps the
 # same numeric input and resolves the unique slug internally before opening
 # the PWA page.
 # All auth/viewport/banner handling lives in agent-screenshot.sh. App previews
@@ -78,7 +78,7 @@ PY
   ROUTE="/apps/${SLUG}/"
 else
   OUT="${2:-/data/chats/${CHAT_ID:-unknown}/media/app-${APP_ID}.png}"
-  ROUTE="/app/${APP_ID}"
+  ROUTE="/shell/?app=${APP_ID}"
 fi
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
