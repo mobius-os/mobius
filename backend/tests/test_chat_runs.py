@@ -675,6 +675,14 @@ def test_startup_reconciliation_marks_unplanned_loss_but_not_planned_restart():
     recovered_at=recovered_at,
   )).result(timeout=5)
   assert _runs("r6-unplanned")["rt-unplanned"] == ("interrupted", True)
+  db = SessionLocal()
+  try:
+    latest = db.query(models.AgentLifecycleRunUpdate).filter_by(
+      chat_run_id="rt-unplanned",
+    ).order_by(models.AgentLifecycleRunUpdate.id.desc()).first()
+    assert latest.status == "interrupted"
+  finally:
+    db.close()
   assert _failure_activity("r6-unplanned") == {
     "run_id": "rt-unplanned",
     "version": 1,
@@ -693,6 +701,14 @@ def test_startup_reconciliation_marks_unplanned_loss_but_not_planned_restart():
     recovered_at=recovered_at,
   )).result(timeout=5)
   assert _runs("r6-restart")["rt-restart"] == ("parked", False)
+  db = SessionLocal()
+  try:
+    latest = db.query(models.AgentLifecycleRunUpdate).filter_by(
+      chat_run_id="rt-restart",
+    ).order_by(models.AgentLifecycleRunUpdate.id.desc()).first()
+    assert latest.status == "parked"
+  finally:
+    db.close()
   assert _failure_activity("r6-restart") is None
 
 
