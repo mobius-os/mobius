@@ -459,14 +459,84 @@ def test_manual_ambiguous_github_result_is_not_retried(
   assert claim.status == "uncertain"
 
 
-def test_reviewer_live_pr_rejects_invalid_target_before_any_github_call():
+@pytest.mark.parametrize("repository,number", [
+  ("not a repo", 1),
+  ("mobius-os/mobius", 0),
+  ("a/b/c", 3),
+])
+def test_reviewer_live_pr_rejects_invalid_target_before_any_github_call(
+  monkeypatch, repository, number,
+):
   """The validation branch must run (and reject) before any GitHub call —
   it is the code path CI lint once caught as an undefined name."""
-  from fastapi import HTTPException
-  from app.routes.reviewer import _reviewer_live_pr
-  for repo, number in (("not a repo", 1), ("mobius-os/mobius", 0), ("a/b/c", 3)):
-    try:
-      _reviewer_live_pr(repo, number)
-      raise AssertionError(f"accepted invalid target {repo}#{number}")
-    except HTTPException as exc:
-      assert exc.status_code == 422
+  from app.routes import reviewer
+
+  monkeypatch.setattr(
+    reviewer, "_gh", lambda *_: pytest.fail("invalid target reached GitHub"),
+  )
+  with pytest.raises(HTTPException) as error:
+    reviewer._reviewer_live_pr(repository, number)
+  assert error.value.status_code == 422
+
+
+@pytest.mark.parametrize("state,head,base,expected", [
+  ("open", "a" * 40, "b" * 40, None),
+  ("closed", "a" * 40, "b" * 40, 409),
+  ("open", "c" * 40, "b" * 40, 409),
+  ("open", "a" * 40, "c" * 40, 409),
+])
+def test_live_revision_revalidates_actual_github_response(
+  monkeypatch, state, head, base, expected,
+):
+  from app.routes import reviewer
+
+  calls = []
+  pull = {"state": state, "head": {"sha": head}, "base": {"sha": base}}
+
+  def gh(*args):
+    calls.append(args[1:])
+    return SimpleNamespace(stdout=json.dumps(pull))
+
+  monkeypatch.setattr(reviewer, "_gh", gh)
+  if expected:
+    with pytest.raises(HTTPException) as error:
+      reviewer._reviewer_assert_live_revision(
+        "owner/repo", 17, "a" * 40, "b" * 40,
+      )
+    assert error.value.status_code == expected
+  else:
+    assert reviewer._reviewer_assert_live_revision(
+      "owner/repo", 17, "a" * 40, "b" * 40,
+    ) == pull
+  assert calls == [("api", "repos/owner/repo/pulls/17")]
+
+
+@pytest.mark.parametrize("response", [
+  "not json",
+  "[]",
+  '{"state":"open","head":"not-an-object","base":{"sha":"bbbb"}}',
+  '{"state":"open","head":{"sha":"aaaa"},"base":"not-an-object"}',
+])
+def test_live_revision_rejects_invalid_github_response(monkeypatch, response):
+  from app.routes import reviewer
+
+  monkeypatch.setattr(
+    reviewer, "_gh", lambda *_: SimpleNamespace(stdout=response),
+  )
+  with pytest.raises(HTTPException) as error:
+    reviewer._reviewer_assert_live_revision(
+      "owner/repo", 17, "a" * 40, "b" * 40,
+    )
+  assert error.value.status_code == 502
+
+
+def test_live_revision_handles_github_read_failure(monkeypatch):
+  from app.routes import reviewer
+
+  def unavailable(*_):
+    raise RuntimeError("read unavailable")
+
+  monkeypatch.setattr(reviewer, "_gh", unavailable)
+  with pytest.raises(HTTPException) as error:
+    reviewer._reviewer_live_pr("owner/repo", 17)
+  assert error.value.status_code == 502
