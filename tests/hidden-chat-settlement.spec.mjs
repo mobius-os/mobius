@@ -38,8 +38,11 @@ test('returning to a retained hidden chat settles a missed terminal stream event
     }
   }, { key: paneModel.STORAGE_KEY, workspace: paneModel.serializeWorkspace(ws), chatId: a.id })
 
-  let running = false
-  let messages = []
+  let running = true
+  let messages = [{
+    role: 'user', content: 'Run the settlement check', ts: 1700001000000,
+    blocks: [{ type: 'text', content: 'Run the settlement check' }],
+  }]
   let idleRuntimeReads = 0
   await page.route(new RegExp(`/api/chats/${a.id}(?:\\?.*)?$`), route => {
     if (route.request().method() !== 'GET') return route.fallback()
@@ -53,20 +56,12 @@ test('returning to a retained hidden chat settles a missed terminal stream event
     if (!running && messages.length > 1) idleRuntimeReads += 1
     return route.fulfill({ json: { running, pending_messages: [], pending_question_id: null } })
   })
-  await page.route(new RegExp(`/api/chats/${a.id}/messages$`), route => {
-    const body = route.request().postDataJSON()
-    running = true
-    const message = { role: 'user', content: body.content, cid: body.cid, ts: 1700001000000 }
-    messages = [message]
-    return route.fulfill({ status: 202, json: { status: 'started', message } })
-  })
   await page.clock.install()
   await page.goto(`${BASE}/shell/?chat=${a.id}`, { waitUntil: 'domcontentloaded' })
   const surface = page.locator(`[data-tab-key="chat:${a.id}"]`)
   await expect(surface.getByRole('textbox', { name: 'Message Möbius…' })).toBeVisible()
-  await surface.getByRole('textbox', { name: 'Message Möbius…' }).fill('Run the settlement check')
-  await page.keyboard.press('Enter')
   await expect(surface.locator('.chat__stop')).toBeVisible()
+  await expect(surface.locator('.chat__activity--running')).toBeVisible()
   await page.waitForFunction(() => typeof window.emitSettlementEvent === 'function')
   await page.evaluate(chatId => {
     window.retainedSettlementRoot = document.querySelector(`[data-tab-key="chat:${chatId}"] .chat`)
@@ -88,7 +83,7 @@ test('returning to a retained hidden chat settles a missed terminal stream event
   await expect.poll(() => idleRuntimeReads).toBeGreaterThan(0)
   await expect(surface.getByText('The saved final answer.', { exact: true })).toBeVisible()
   await expect(surface.locator('.chat__stop')).toHaveCount(0)
-  await expect(surface.locator('.chat__thinking')).toHaveCount(0)
+  await expect(surface.locator('.chat__activity--running')).toHaveCount(0)
   expect(await page.evaluate(chatId => (
     window.retainedSettlementRoot === document.querySelector(`[data-tab-key="chat:${chatId}"] .chat`)
   ), a.id)).toBe(true)

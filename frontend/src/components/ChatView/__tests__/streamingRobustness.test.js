@@ -352,6 +352,9 @@ test('a hidden-pane finish routes stale local activity through runtime settlemen
   // reconcile callback only coalesces callers onto that same promise.
   const runtimeStart = chatViewSource.indexOf('const refreshRuntimeState = useCallback')
   const recovery = chatViewSource.indexOf('if (shouldRecoverSettledRuntime({', runtimeStart)
+  const observedRunning = chatViewSource.indexOf(
+    'runtimeWasObservedRunning: serverRunningObservedRef.current', recovery,
+  )
   const refresh = chatViewSource.indexOf('const settled = await fetchMessages({', recovery)
   const authoritative = chatViewSource.indexOf('authoritative: true', refresh)
   const retire = chatViewSource.indexOf('retireSettledStreamRef.current?.()', authoritative)
@@ -359,11 +362,21 @@ test('a hidden-pane finish routes stale local activity through runtime settlemen
   assert.ok(
     runtimeStart >= 0
       && recovery > runtimeStart
+      && observedRunning > recovery
+      && observedRunning < refresh
       && refresh > recovery
       && authoritative > refresh
       && retire > authoritative
       && retire < runtimeEnd,
     'idle runtime truth must refresh the final row before retiring stale stream state',
+  )
+  const retirement = chatViewSource.indexOf('retireSettledStreamRef.current = () => {')
+  const clearObservedRunning = chatViewSource.indexOf(
+    'serverRunningObservedRef.current = false', retirement,
+  )
+  assert.ok(
+    retirement >= 0 && clearObservedRunning > retirement,
+    'the observed-running latch must survive idle detail reads until stream retirement',
   )
 })
 

@@ -529,13 +529,21 @@ export default function ChatView({
   // does not fall back to Mic while a turn is still running with queued work.
   const [serverRunning, setServerRunning] = useState(() => !!cached?.running)
   const serverRunningRef = useRef(!!cached?.running)
+  // A detail refresh can commit the saved idle transcript just before the
+  // runtime fallback reads the same idle verdict. Keep the fact that this
+  // stream was authoritatively observed running until the stream itself is
+  // retired; the current serverRunning projection is allowed to turn false
+  // first without erasing the proof that makes terminal recovery safe.
+  const serverRunningObservedRef = useRef(!!cached?.running)
   const setServerRunningLocalState = useCallback((v) => {
     const running = !!v
+    if (running) serverRunningObservedRef.current = true
     serverRunningRef.current = running
     setServerRunning(running)
   }, [])
   const setServerRunningState = useCallback((v) => {
     const running = !!v
+    if (!running) serverRunningObservedRef.current = false
     setServerRunningLocalState(running)
     updateChatRuntimeCache(
       queryClient,
@@ -1479,7 +1487,7 @@ export default function ChatView({
         setActiveAssistantMessageId(runtime.activeAssistantMessageId)
       }
       if (shouldRecoverSettledRuntime({
-        runtimeWasObservedRunning: serverRunningRef.current,
+        runtimeWasObservedRunning: serverRunningObservedRef.current,
         runtimeRunning: !!data.running,
         pendingCount: serverPending.length,
         streamStillActive: isStreamingRef.current,
@@ -1517,6 +1525,7 @@ export default function ChatView({
         setSending(true)
       } else if (serverPending.length === 0 && !localAuthoritative) {
         // Stream is dead and the server is idle+empty: clear the stale Stop.
+        serverRunningObservedRef.current = false
         setSending(false)
         sendingRef.current = false
       }
@@ -1921,6 +1930,7 @@ export default function ChatView({
   })
 
   retireSettledStreamRef.current = () => {
+    serverRunningObservedRef.current = false
     disconnect({ clearStreaming: true })
     clearStreamItems()
   }
@@ -3264,6 +3274,7 @@ export default function ChatView({
     // FRESH SEND PATH: no active turn, no queue.
     const localStartRequest = { chatId: String(chatId), cid }
     localStartRequestRef.current = localStartRequest
+    serverRunningObservedRef.current = false
     fetchGenRef.current += 1
     onMessageStartRef.current?.()
     promotedRef.current = false
