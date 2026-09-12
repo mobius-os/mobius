@@ -155,6 +155,7 @@ export function createConnectivityStore({
 
     let cancelled = false
     let activeCheck = null
+    let checkGeneration = 0
     let rerun = false
     let failureTimer = null
     let retryTimer = null
@@ -222,24 +223,38 @@ export function createConnectivityStore({
       scheduleRetry()
       return false
     }
-    function check() {
+    // A browser may suspend an in-flight fetch while a tab is backgrounded.
+    // Detach that attempt at the lifecycle boundary so foreground recovery is
+    // never serialized behind a promise the browser may no longer settle.
+    // The generation guard also prevents a late failure from overwriting the
+    // fresh foreground verdict.
+    function abandonActiveCheck() {
+      checkGeneration += 1
+      activeCheck = null
+      rerun = false
+    }
+    function check({ fresh = false } = {}) {
+      if (fresh && activeCheck) abandonActiveCheck()
       if (activeCheck) {
         rerun = true
         return activeCheck
       }
       const startedRevision = evidenceRevision
-      activeCheck = probeReachable()
-        .then(reachable => cancelled
+      const generation = ++checkGeneration
+      const current = probeReachable()
+        .then(reachable => cancelled || generation !== checkGeneration
           ? reachable
           : applyProbe(reachable, startedRevision))
         .finally(() => {
+          if (activeCheck !== current) return
           activeCheck = null
           if (rerun && !cancelled) {
             rerun = false
             void check()
           }
         })
-      return activeCheck
+      activeCheck = current
+      return current
     }
     function requestCheck() {
       if (!visible()) return
@@ -247,10 +262,15 @@ export function createConnectivityStore({
     }
     function onVisibilityChange() {
       if (!visible()) {
+        // Background suspension is not evidence that the server went away.
+        // Retire both the pending verdict and its deadline; foreground return
+        // starts one independent probe instead of inheriting stale work.
+        clearFailureDeadline()
         clearRetry()
+        abandonActiveCheck()
         return
       }
-      requestCheck()
+      void check({ fresh: true })
     }
 
     const current = {
@@ -292,10 +312,19 @@ export function createConnectivityStore({
   }
 
   function verify() {
-    // Callers invoke verification only after transport evidence such as a
-    // failed request or an unexpected stream close. Surface that uncertainty
-    // immediately; the bounded probe owns the final reachability verdict.
-    publish(reduceReachability(state, { type: 'checking' }))
+    // Callers invoke verification after transport evidence such as a failed
+    // request or an unexpected stream close. That evidence belongs to one
+    // transport, not necessarily to the server: keep the last reachable verdict
+    // while the bounded health probe decides. Publishing Checking before the
+    // probe made every healthy stream reconnect flash the shell status dot.
+    // A failed probe still enters Checking through applyProbe(), starts the
+    // failure grace window, and eventually confirms Offline.
+    // A hidden tab is the exception: browsers intentionally suspend its
+    // transports and timers, so defer to the monitor's foreground boundary
+    // instead of publishing a false Checking state that can become stranded.
+    if (documentTarget?.visibilityState === 'hidden') {
+      return Promise.resolve(publicOnline(state))
+    }
     if (monitor) return monitor.check()
     if (standaloneCheck) return standaloneCheck
     const startedRevision = evidenceRevision

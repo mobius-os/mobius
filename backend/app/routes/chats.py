@@ -2749,6 +2749,7 @@ class AppChatCreate(BaseModel):
   title: str | None = None
   system_prompt: str | None = Field(default=None, max_length=20000)
   model: str | None = Field(default=None, max_length=256)
+  effort: schemas.AgentEffort | None = None
   provider: str | None = None
   report_date: str | None = None
   report_kind: str | None = Field(default=None, max_length=64)
@@ -2813,6 +2814,7 @@ class AppChatStart(AppChatCreate):
 class AppChatPatch(BaseModel):
   system_prompt: str | None = Field(default=None, max_length=20000)
   model: str | None = Field(default=None, max_length=256)
+  effort: schemas.AgentEffort | None = None
   provider: str | None = None
   scope: str | None = Field(default=None, max_length=_CHAT_SCOPE_MAX)
   scope_label: str | None = Field(default=None, max_length=_CHAT_SCOPE_LABEL_MAX)
@@ -2835,6 +2837,7 @@ def _merge_app_chat_settings(
   *,
   system_prompt: str | None = None,
   model: str | None = None,
+  effort: schemas.AgentEffort | None = None,
   report_date: str | None = None,
   report_kind: str | None = None,
   project_id: str | None = None,
@@ -2858,6 +2861,8 @@ def _merge_app_chat_settings(
       settings["model"] = value
     else:
       raise ValueError("A chat model cannot be cleared.")
+  if effort is not None:
+    settings["effort"] = effort
   # report_date is already ISO-validated by AppChatCreate; chat.py reads it
   # on the first turn to inject the brief this chat is about. report_kind is
   # a free-form tag (e.g. "reflection") that travels alongside it.
@@ -2942,6 +2947,8 @@ def _app_chat_summary(chat: models.Chat, usage: dict) -> dict:
     "provider": chat.provider or "claude",
     "scope": _app_chat_scope(chat),
     "scope_label": _app_chat_scope_label(chat),
+    "model": _coerce_agent_settings(chat.agent_settings_json).get("model"),
+    "effort": _coerce_agent_settings(chat.agent_settings_json).get("effort"),
     "usage": usage,
   }
 
@@ -3094,6 +3101,7 @@ def create_app_chat(
     chat,
     system_prompt=body.system_prompt,
     model=agent_settings["model"],
+    effort=body.effort,
     report_date=body.report_date,
     report_kind=body.report_kind,
     project_id=body.project_id,
@@ -3319,6 +3327,7 @@ async def patch_app_chat(
       chat,
       system_prompt=body.system_prompt,
       model=body.model,
+      effort=body.effort,
       scope=body.scope,
       scope_label=body.scope_label,
     )
