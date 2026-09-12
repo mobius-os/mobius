@@ -143,6 +143,12 @@ export default function QueuedMessages({
       if (outcome === 'saved') {
         setEditingCid(null)
         setEditDraft('')
+      } else if (outcome === 'confirming') {
+        setEditError('Delivery is being confirmed. Your edit is kept here.')
+      } else if (outcome === 'waiting') {
+        setEditError('Reconnect to confirm this edit. Your changes are kept here.')
+      } else if (outcome === 'context_pending') {
+        setEditError('This message includes app context. It can be edited after delivery is confirmed.')
       } else if (outcome === 'gone') {
         setEditError('This message already started — it can’t be edited now.')
       } else {

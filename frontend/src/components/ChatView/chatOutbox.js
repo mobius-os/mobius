@@ -1,5 +1,6 @@
-import { clear, createStore, del, entries, get, set, update } from 'idb-keyval'
+import { clear, createStore, del, entries, get, update } from 'idb-keyval'
 import { sendDraftIdentity } from './sendAttemptIdentity.js'
+import { stripAugmentation } from './msgText.js'
 
 // Durable owner intent for the two ordinary chat writes: sending a message and
 // answering a question. useStreamConnection records the complete POST body here
@@ -10,6 +11,7 @@ import { sendDraftIdentity } from './sendAttemptIdentity.js'
 
 const OUTBOX_DB = 'mobius-chat-outbox'
 const OUTBOX_STORE = 'intents-v1'
+const OUTBOX_REPLAY_LOCK = 'mobius-chat-outbox'
 const store = createStore(OUTBOX_DB, OUTBOX_STORE)
 
 // One authorization rejection gets one attempt per loaded document. Keeping the
@@ -83,13 +85,32 @@ export function storedIntentOwnership(recordPrincipalKey, currentPrincipalKey) {
 //   auth      — keep, but attempt only once per loaded document;
 //   failed    — an authoritative client rejection; the interactive caller
 //               restores the draft, so silently replaying it later is wrong.
-export function classifyReplayOutcome({ ok, status }) {
+export function classifyReplayOutcome({ ok, status, code }) {
   if (ok || status === 410) return 'delivered'
+  // A follow-up behind a locally queued answer is still valid owner intent.
+  // The unresolved card is an admission barrier, not rejection of that text.
+  if (status === 409 && code === 'pending_question_open') return 'question_blocked'
   if (status === 401 || status === 403) return 'auth'
   if (status === 408 || status === 425 || status === 429 || status >= 500) {
     return 'retry'
   }
   return 'failed'
+}
+
+const changeSubscribers = new Set()
+
+// Changes are announced only after the IndexedDB transaction commits. The
+// queue/card projection observes this owner instead of inventing another
+// persistence lifetime from the success or failure of one HTTP request.
+export function subscribeOutboxChanges(callback) {
+  changeSubscribers.add(callback)
+  return () => { changeSubscribers.delete(callback) }
+}
+
+function announceChange(change) {
+  for (const callback of changeSubscribers) {
+    try { callback(change) } catch { /* presentation cannot block persistence */ }
+  }
 }
 
 const settlementSubscribers = new Set()
@@ -111,38 +132,153 @@ function announceSettlement(record, outcome) {
   }
 }
 
-async function persistRecord(record) {
+// One transaction owns each local-intent decision and its write. Dispatch and
+// local edits/cancellation must not decide from a previously captured row.
+function mutateOwnedIntent(cid, { chatId, principalKey }, mutate) {
+  if (!cid || !chatId || !principalKey) return Promise.resolve({ status: 'not_owned' })
+  return store('readwrite', objectStore => new Promise((resolve, reject) => {
+    let result = { status: 'absent' }
+    const transaction = objectStore.transaction
+    transaction.oncomplete = () => resolve(result)
+    transaction.onerror = () => reject(transaction.error)
+    transaction.onabort = () => reject(transaction.error)
+    const request = objectStore.get(String(cid))
+    request.onsuccess = () => {
+      const record = request.result
+      if (!record) return
+      if (record.principalKey !== principalKey || String(record.chatId) !== String(chatId)) {
+        result = { status: 'not_owned' }
+        return
+      }
+      if (record.replayState === 'retired') {
+        result = { status: 'retired', record }
+        return
+      }
+      result = mutate(record)
+      if (result.record) objectStore.put(result.record, String(cid))
+    }
+  }))
+}
+
+async function setIntentAuthBlocked(record, authBlocked) {
   try {
-    await set(record.cid, record, store)
+    await mutateOwnedIntent(record.cid, record, current => ({
+      status: 'updated', record: { ...current, authBlocked },
+    }))
+  } catch { /* a later authenticated attempt can retry the unchanged intent */ }
+}
+
+export async function enqueueIntent({ chatId, cid, type, body, principalKey, locallyQueued = false }) {
+  if (!chatId || !cid || !body) return false
+  if (!principalKey) return false
+  const key = String(cid)
+  try {
+    let record
+    await update(key, existing => {
+      const owned = existing?.principalKey === principalKey
+        && String(existing.chatId) === String(chatId)
+      const active = owned && existing.replayState !== 'retired'
+      record = {
+        chatId: String(chatId),
+        cid: key,
+        type: active ? existing.type : type || 'message',
+        // Re-enqueue is idempotent. The named local edit operation is the only
+        // path allowed to revise a not-yet-dispatched body's text.
+        body: active ? existing.body : body,
+        principalKey,
+        createdAt: owned ? Number(existing.createdAt || Date.now()) : Date.now(),
+        authBlocked: false,
+        locallyQueued: locallyQueued || (active && existing.locallyQueued === true),
+        // Legacy records lack proof of never having reached the server.
+        dispatchStarted: owned ? existing.dispatchStarted !== false : false,
+      }
+      return record
+    }, store)
+    retirementFences.delete(key)
+    announceChange({ kind: 'enqueue', record, requestDelivery: locallyQueued })
     return true
   } catch {
     return false
   }
 }
 
-export async function enqueueIntent({ chatId, cid, type, body, principalKey }) {
-  if (!chatId || !cid || !body) return false
-  if (!principalKey) return false
-  const key = String(cid)
+// An online request may become uncertain after its POST started. Mark the
+// existing durable intent; do not mint another cid or another queue record.
+export async function markIntentLocallyQueued(cid, owner = {}) {
   try {
-    await update(key, existing => ({
-      chatId: String(chatId),
-      cid: key,
-      type: type || 'message',
-      body,
-      principalKey,
-      createdAt: (
-        (!existing?.principalKey || existing.principalKey === principalKey)
-          ? Number(existing?.createdAt || Date.now())
-          : Date.now()
-      ),
-      authBlocked: false,
-    }), store)
-    retirementFences.delete(key)
+    const result = await mutateOwnedIntent(cid, owner, record => ({
+      status: 'updated', record: { ...record, locallyQueued: true },
+    }))
+    if (result.status !== 'updated') return false
+    announceChange({ kind: 'enqueue', record: result.record })
     return true
   } catch {
     return false
   }
+}
+
+// This is the boundary before any POST of a retained intent. Existing replay
+// singleflight/Web Locks and server cid dedup still own duplicate requests;
+// this transaction makes local mutation versus first dispatch unambiguous.
+export async function claimIntentDispatch(cid, owner = {}) {
+  try {
+    const result = await mutateOwnedIntent(cid, owner, record => (
+      retirementFences.has(String(cid)) ? { status: 'retired' } : {
+        status: 'claimed', record: { ...record, dispatchStarted: true },
+      }
+    ))
+    if (result.status === 'claimed') {
+      announceChange({ kind: 'enqueue', record: result.record })
+    }
+    return result
+  } catch {
+    return { status: 'unavailable' }
+  }
+}
+
+// Older tabs replay under this existing lock but do not claim dispatch in
+// IndexedDB. A free lock is therefore also required before promising a local
+// mutation during a rolling client upgrade. Do not wait behind a replay or
+// introduce a second lock: the owner should see an honest uncertain outcome.
+async function withIdleReplayLock(mutate) {
+  const locks = typeof navigator !== 'undefined' ? navigator.locks : null
+  if (!locks?.request) return { status: 'uncertain', reason: 'replay_lock_unavailable' }
+  try {
+    return await locks.request(OUTBOX_REPLAY_LOCK, { ifAvailable: true }, lock => (
+      lock ? mutate() : { status: 'uncertain', reason: 'replay_busy' }
+    ))
+  } catch {
+    return { status: 'uncertain', reason: 'replay_lock_unavailable' }
+  }
+}
+
+export async function editLocalIntent(cid, { content, ...owner } = {}) {
+  if (typeof content !== 'string' || !content.trim()) return { status: 'invalid' }
+  return withIdleReplayLock(async () => {
+    try {
+      const result = await mutateOwnedIntent(cid, owner, record => {
+        if (record.dispatchStarted !== false) return { status: 'uncertain' }
+        const body = record.body
+        // Queued plain text needs no parser. Hidden app/session augmentation is
+        // intentionally unsupported here rather than guessed at or discarded.
+        if (
+          record.type !== 'message' || typeof body?.content !== 'string'
+          || body.hidden || body.answers != null || body.question_id != null
+          || body.continuation != null
+          || stripAugmentation(body.content) !== body.content.trim()
+        ) return { status: 'unsupported' }
+        return {
+          status: 'saved',
+          record: { ...record, locallyQueued: true, body: { ...body, content: content.trim() } },
+        }
+      })
+      if (result.status === 'saved') announceChange({ kind: 'enqueue', record: result.record })
+      if (['absent', 'retired', 'not_owned'].includes(result.status)) return { status: 'not_local' }
+      return result
+    } catch {
+      return { status: 'unavailable' }
+    }
+  })
 }
 
 function retirementId() {
@@ -150,7 +286,7 @@ function retirementId() {
   return `${Date.now()}:${retirementSequence}`
 }
 
-function transitionIntentToRetired(key, { chatId, outcome }) {
+function transitionIntentToRetired(key, { chatId, outcome, principalKey, onlyUndispatched = false }) {
   return store('readwrite', objectStore => new Promise((resolve, reject) => {
     const transaction = objectStore.transaction
     let result = { state: 'absent' }
@@ -162,6 +298,11 @@ function transitionIntentToRetired(key, { chatId, outcome }) {
     request.onsuccess = () => {
       const record = request.result
       if (!record || (chatId && String(record.chatId) !== String(chatId))) return
+      if (principalKey && record.principalKey !== principalKey) return
+      if (onlyUndispatched && record.dispatchStarted !== false) {
+        result = { state: 'uncertain' }
+        return
+      }
       if (record.replayState === 'retired' && record.retirement?.id) {
         result = {
           state: 'already-retired',
@@ -235,14 +376,21 @@ export async function retireIntent(
     return true
   }
 
+  return completeRetirement(key, transition, cleanup)
+}
+
+function completeRetirement(key, transition, cleanup = cleanupRetiredIntent) {
   authBlockedAttempted.delete(key)
+  if (transition.state === 'retired') {
+    announceChange({ kind: 'retire', record: transition.record, outcome: transition.retirement.outcome })
+  }
   if (
     transition.state === 'retired'
-    && (outcome === 'delivered' || outcome === 'failed')
+    && (transition.retirement.outcome === 'delivered' || transition.retirement.outcome === 'failed')
   ) {
     // The record owns its chat identity; never let a caller-supplied label move
     // a private cid settlement onto another mounted chat.
-    announceSettlement(transition.record, outcome)
+    announceSettlement(transition.record, transition.retirement.outcome)
   }
   // Compaction is deliberately outside the awaited state boundary. A blocked
   // physical delete must not hold an accepted response or cancellation after
@@ -257,6 +405,29 @@ export async function retireIntent(
       },
     )
   return true
+}
+
+// Local cancellation promises no server work can be started by this intent.
+// A dispatched/legacy row cannot make that promise and stays unchanged for
+// the server-owned cancellation/reconciliation path.
+export async function cancelLocalIntent(cid, { chatId, principalKey } = {}) {
+  if (!cid || !chatId || !principalKey) return { status: 'not_local' }
+  const key = String(cid)
+  return withIdleReplayLock(async () => {
+    try {
+      const transition = await transitionIntentToRetired(key, {
+        chatId, principalKey, outcome: 'cancelled', onlyUndispatched: true,
+      })
+      if (transition.state === 'absent') return { status: 'not_local' }
+      if (transition.state === 'uncertain') return { status: 'uncertain' }
+      if (transition.retirement?.outcome !== 'cancelled') return { status: 'not_local' }
+      retirementFences.add(key)
+      completeRetirement(key, transition)
+      return { status: 'cancelled' }
+    } catch {
+      return { status: 'unavailable' }
+    }
+  })
 }
 
 function replayBodyMatchesAttempt(record, attempt, chatId, key) {
@@ -373,6 +544,12 @@ export async function deliverIntent(record, request) {
   const timer = setTimeout(() => controller.abort(), REPLAY_TIMEOUT_MS)
   try {
     response = await request(record, { signal: controller.signal })
+    let code
+    if (response.status === 409) {
+      const payload = await response.json()
+      code = payload?.detail?.code
+    }
+    return classifyReplayOutcome({ ok: response.ok, status: response.status, code })
   } catch (error) {
     if (error?.message === 'AUTH_EXPIRED' || error?.message === 'EMBED_AUTH_EXPIRED') {
       return 'auth'
@@ -381,26 +558,37 @@ export async function deliverIntent(record, request) {
   } finally {
     clearTimeout(timer)
   }
-  return classifyReplayOutcome({ ok: response.ok, status: response.status })
 }
 
 async function drainInner({ deliver, principalKey, generation }) {
   const records = await listIntents(principalKey)
   if (generation !== clearGeneration) return
-  for (const record of records) {
-    if (retirementFences.has(String(record.cid))) continue
-    if (record.authBlocked && authBlockedAttempted.has(record.cid)) break
-    if (record.authBlocked) authBlockedAttempted.add(record.cid)
-
+  const questionBlockedChats = new Set()
+  for (const snapshot of records) {
+    // An open card blocks that chat's follow-ups, not the answer that can
+    // release them or delivery to unrelated chats.
+    if (questionBlockedChats.has(snapshot.chatId) && snapshot.type !== 'answer') continue
+    if (retirementFences.has(String(snapshot.cid))) continue
+    if (snapshot.authBlocked && authBlockedAttempted.has(snapshot.cid)) break
+    if (snapshot.authBlocked) authBlockedAttempted.add(snapshot.cid)
+    const claim = await claimIntentDispatch(snapshot.cid, { chatId: snapshot.chatId, principalKey })
+    if (generation !== clearGeneration) return
+    if (claim.status === 'absent' || claim.status === 'retired') continue
+    if (claim.status !== 'claimed') break
+    const record = claim.record
     const outcome = await deliver(record)
     // Logout/owner cleanup may race a bounded request already on the wire. Its
     // result must never repopulate or announce data after the owner store was
     // cleared.
     if (generation !== clearGeneration) return
+    if (outcome === 'question_blocked') {
+      questionBlockedChats.add(record.chatId)
+      continue
+    }
     if (outcome === 'retry') {
       authBlockedAttempted.delete(record.cid)
       if (record.authBlocked) {
-        await persistRecord({ ...record, authBlocked: false })
+        await setIntentAuthBlocked(record, false)
       }
       // Preserve accepted order and avoid N timeout/server attempts while one
       // earlier intent has already proved transport unavailable.
@@ -409,7 +597,7 @@ async function drainInner({ deliver, principalKey, generation }) {
     if (outcome === 'auth') {
       authBlockedAttempted.add(record.cid)
       if (!record.authBlocked) {
-        await persistRecord({ ...record, authBlocked: true })
+        await setIntentAuthBlocked(record, true)
       }
       break
     }
@@ -432,7 +620,7 @@ export function drainOutbox({ deliver, principalKey }) {
   const run = () => (
     (typeof navigator !== 'undefined' && navigator.locks?.request)
       ? navigator.locks.request(
-          'mobius-chat-outbox',
+          OUTBOX_REPLAY_LOCK,
           () => drainInner({ deliver, principalKey, generation }),
         )
       : drainInner({ deliver, principalKey, generation })
@@ -451,6 +639,7 @@ export async function clearChatOutbox() {
   retirementFences.clear()
   try {
     await clear(store)
+    announceChange({ kind: 'clear' })
     return true
   } catch {
     return false

@@ -1,10 +1,7 @@
-// One process-wide owner for server reachability.
-//
-// Browser online/offline events are prompts, not verdicts. Any HTTP response
-// proves that the server is reachable; only a network failure can move the
-// state toward Offline. The public boolean deliberately maps Checking to
-// online so a cold radio or laptop wake does not disable the product.
-const HEALTH_URL = '/api/health'
+// One owner for transport reachability and chat delivery readiness.
+// Any HTTP response proves reachability, but only /api/ready permits delivery.
+// Browsing remains usable during uncertainty; durable sends wait locally.
+const READINESS_URL = '/api/ready'
 
 export const PROBE_TIMEOUT_MS = 3000
 export const FAILURE_GRACE_MS = 5000
@@ -94,7 +91,7 @@ export function createConnectivityStore({
   windowTarget = typeof window === 'undefined' ? null : window,
   documentTarget = typeof document === 'undefined' ? null : document,
   navigatorTarget = typeof navigator === 'undefined' ? null : navigator,
-  fetchImpl = typeof fetch === 'undefined' ? null : fetch,
+  fetchImpl = (...args) => globalThis.fetch(...args),
   AbortControllerImpl = typeof AbortController === 'undefined' ? null : AbortController,
   setTimeoutFn = setTimeout,
   clearTimeoutFn = clearTimeout,
@@ -104,17 +101,45 @@ export function createConnectivityStore({
   let monitor = null
   let standaloneCheck = null
   let evidenceRevision = 0
+  let readinessRevision = 0
+  let ready = false
+  let bootId = null
+  let restartPending = false
+  let restartSourceBootId = null
 
   function getSnapshot() { return publicOnline(state) }
   function getPhaseSnapshot() { return state.phase }
   function getRecoverySnapshot() { return state.recoveryGeneration }
   function getState() { return state }
+  function getDeliveryReadySnapshot() {
+    return state.phase === ReachabilityPhase.ONLINE && ready && !restartPending
+  }
+  function getRestartPendingSnapshot() { return restartPending }
+  function notify() { listeners.forEach(listener => listener()) }
+  function setReady(value) {
+    if (ready === value) return
+    ready = value
+    notify()
+  }
+  function setRestartPending(sourceBootId = bootId) {
+    evidenceRevision += 1
+    readinessRevision += 1
+    restartSourceBootId = sourceBootId || bootId
+    const changed = !restartPending
+    restartPending = true
+    ready = false
+    if (changed) notify()
+    void verify()
+  }
 
   function publish(next) {
+    // Recovery consumers may deliver work: transport alone is not that edge.
+    next = { ...next, recoveryGeneration: state.recoveryGeneration }
     if (sameState(state, next)) return false
     const previousPhase = state.phase
     const previousRecovery = state.recoveryGeneration
     state = next
+    if (next.phase !== ReachabilityPhase.ONLINE) ready = false
     if (
       previousPhase !== next.phase
       || previousRecovery !== next.recoveryGeneration
@@ -122,31 +147,68 @@ export function createConnectivityStore({
     return true
   }
 
-  async function probeReachable() {
-    if (typeof fetchImpl !== 'function') return false
+  async function probeReadiness() {
+    const startedReadinessRevision = readinessRevision
+    if (typeof fetchImpl !== 'function') return { reachable: false }
     let timer = null
     const controller = AbortControllerImpl ? new AbortControllerImpl() : null
     try {
       if (controller) timer = setTimeoutFn(() => controller.abort(), PROBE_TIMEOUT_MS)
-      // Any response is transport success. Authentication and server errors
-      // belong to the request owner and must never masquerade as Offline.
-      await fetchImpl(HEALTH_URL, {
+      const response = await fetchImpl(READINESS_URL, {
         method: 'GET', cache: 'no-store', signal: controller?.signal,
       })
-      return true
+      let body
+      try { body = await response.json() } catch { /* A proxy response is not readiness. */ }
+      return {
+        reachable: true,
+        startedReadinessRevision,
+        ready: response.ok === true && body?.ready === true,
+        bootId: typeof body?.boot_id === 'string' ? body.boot_id : null,
+      }
     } catch {
-      return false
+      return { reachable: false }
     } finally {
       if (timer !== null) clearTimeoutFn(timer)
     }
   }
 
   function reportReachable() {
+    const wasUncertain = state.phase !== ReachabilityPhase.ONLINE
     evidenceRevision += 1
     publish(reduceReachability(state, {
       type: 'reachable', strong: true, navigatorOnline: true,
     }))
-    monitor?.settleRecovery()
+    if (getDeliveryReadySnapshot()) monitor?.settleRecovery()
+    else if (wasUncertain) monitor?.check()
+  }
+
+  function applyEvidence(result, startedRevision) {
+    // A response started before an observed restart/failure cannot clear it.
+    if (!result.reachable && startedRevision !== evidenceRevision) return true
+    if (result.reachable && result.startedReadinessRevision !== readinessRevision) return true
+    if (result.reachable) {
+      const wasReady = getDeliveryReadySnapshot()
+      publish(reduceReachability(state, {
+        type: 'reachable', strong: false,
+        navigatorOnline: navigatorTarget?.onLine !== false,
+      }))
+      if (result.bootId) bootId = result.bootId
+      const laterBoot = result.bootId && restartSourceBootId
+        && result.bootId !== restartSourceBootId
+      if (restartPending && result.ready && laterBoot) {
+        restartPending = false
+        restartSourceBootId = null
+        notify()
+      }
+      setReady(result.ready === true)
+      if (!wasReady && getDeliveryReadySnapshot()) {
+        state = { ...state, recoveryGeneration: state.recoveryGeneration + 1 }
+        notify()
+      }
+    } else {
+      publish(reduceReachability(state, { type: 'failed' }))
+    }
+    return result.reachable
   }
 
   function startMonitor() {
@@ -198,30 +260,22 @@ export function createConnectivityStore({
         scheduleRetry()
       }, FAILURE_GRACE_MS)
     }
-    function applyProbe(reachable, startedRevision) {
-      if (!reachable && startedRevision !== evidenceRevision) return true
-      if (reachable) {
-        const next = reduceReachability(state, {
-          type: 'reachable',
-          strong: false,
-          navigatorOnline: navigatorTarget?.onLine !== false,
-        })
-        publish(next)
-        if (next.phase === ReachabilityPhase.ONLINE) settleRecovery()
+    function applyProbe(result, startedRevision) {
+      const reachable = applyEvidence(result, startedRevision)
+      if (getDeliveryReadySnapshot()) settleRecovery()
+      else {
+        if (!reachable) beginFailureWindow()
+        // Reachable-but-not-ready is a service state, never device Offline.
         else {
-          // One real response while navigator.onLine is stale-false is useful
-          // progress. Confirm it promptly rather than inheriting an outage's
-          // potentially long exponential backoff.
-          clearRetry()
-          retryAttempt = 0
-          scheduleRetry()
+          clearFailureDeadline()
+          if (state.phase === ReachabilityPhase.OFFLINE) {
+            clearRetry()
+            retryAttempt = 0
+          }
         }
-        return true
+        scheduleRetry()
       }
-      publish(reduceReachability(state, { type: 'failed' }))
-      beginFailureWindow()
-      scheduleRetry()
-      return false
+      return reachable
     }
     // A browser may suspend an in-flight fetch while a tab is backgrounded.
     // Detach that attempt at the lifecycle boundary so foreground recovery is
@@ -241,7 +295,7 @@ export function createConnectivityStore({
       }
       const startedRevision = evidenceRevision
       const generation = ++checkGeneration
-      const current = probeReachable()
+      const current = probeReadiness()
         .then(reachable => cancelled || generation !== checkGeneration
           ? reachable
           : applyProbe(reachable, startedRevision))
@@ -258,6 +312,9 @@ export function createConnectivityStore({
     }
     function requestCheck() {
       if (!visible()) return
+      evidenceRevision += 1
+      readinessRevision += 1
+      publish(reduceReachability(state, { type: 'checking' }))
       void check()
     }
     function onVisibilityChange() {
@@ -267,6 +324,8 @@ export function createConnectivityStore({
         // starts one independent probe instead of inheriting stale work.
         clearFailureDeadline()
         clearRetry()
+        readinessRevision += 1
+        setReady(false)
         abandonActiveCheck()
         return
       }
@@ -325,20 +384,12 @@ export function createConnectivityStore({
     if (documentTarget?.visibilityState === 'hidden') {
       return Promise.resolve(publicOnline(state))
     }
+
     if (monitor) return monitor.check()
     if (standaloneCheck) return standaloneCheck
     const startedRevision = evidenceRevision
-    standaloneCheck = probeReachable()
-      .then(reachable => {
-        if (!reachable && startedRevision !== evidenceRevision) return true
-        publish(reduceReachability(state, reachable
-          ? {
-              type: 'reachable', strong: false,
-              navigatorOnline: navigatorTarget?.onLine !== false,
-            }
-          : { type: 'failed' }))
-        return reachable
-      })
+    standaloneCheck = probeReadiness()
+      .then(result => applyEvidence(result, startedRevision))
       .finally(() => { standaloneCheck = null })
     return standaloneCheck
   }
@@ -348,6 +399,9 @@ export function createConnectivityStore({
     getPhaseSnapshot,
     getRecoverySnapshot,
     getState,
+    getDeliveryReadySnapshot,
+    getRestartPendingSnapshot,
+    setRestartPending,
     subscribe,
     verify,
     reportReachable,
@@ -363,3 +417,9 @@ export const subscribeOnline = connectivityStore.subscribe
 export const subscribeRecovery = connectivityStore.subscribe
 export const verifyConnectivity = connectivityStore.verify
 export const reportNetworkReachable = connectivityStore.reportReachable
+
+export const getDeliveryReadySnapshot = connectivityStore.getDeliveryReadySnapshot
+export const subscribeDeliveryReady = connectivityStore.subscribe
+export const getRestartPendingSnapshot = connectivityStore.getRestartPendingSnapshot
+export const subscribeRestart = connectivityStore.subscribe
+export const setRestartPending = connectivityStore.setRestartPending

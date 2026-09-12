@@ -1,4 +1,5 @@
-import { useState, useRef, useCallback } from 'react'
+import { useState, useRef, useCallback, useLayoutEffect } from 'react'
+import { listIntents, subscribeOutboxChanges } from '../chatOutbox.js'
 import { cidOf } from '../messageIdentity.js'
 
 /**
@@ -47,8 +48,9 @@ import { cidOf } from '../messageIdentity.js'
  * it is the persist-but-vanish clobber race. Each optimistic entry is
  * tracked in-flight (inFlightCidsRef) from its add() until its
  * round-trip resolves (confirm, cancel, promote, or clear); hydrate
- * preserves an in-flight entry the server list omits, and only an
- * entry that is NOT in flight is dropped. Identity matching is now BY
+ * preserves an in-flight entry the server list omits. Durable locally queued
+ * intents survive even after a failed POST finishes. Delivery acknowledgement
+ * ends replay, while an exact pending/transcript cid owns presentation handoff. Identity matching is now BY
  * CID — the server row carries the same cid the client minted, so
  * hydrate reconciles directly with no content-heuristic guessing.
  *
@@ -71,7 +73,7 @@ import { cidOf } from '../messageIdentity.js'
  *   promoteManyByCid: (cidList: string[]) => PendingMsg | null,
  *   cancelByCid: (cid: string) => void,
  *   restoreByCid: (msg: PendingMsg, index: number) => void,
- *   hydrate: (serverList: Array<{ts: number, content: string, cid?: string, role?: string, attachments?: Array, position?: number}>, opts?: {preserveMissing?: boolean}) => void,
+ *   hydrate: (serverList: Array<{ts: number, content: string, cid?: string, role?: string, attachments?: Array, position?: number}>, opts?: {preserveMissing?: boolean, completedCids?: string[]}) => void,
  *   markInFlight: (cid: string) => void,
  *   clearInFlight: (cid: string) => void,
  *   clear: () => void,
@@ -117,7 +119,7 @@ function _combinePromoted(promotedGroup) {
   return promoted
 }
 
-export default function usePendingQueue(initialServerList = []) {
+export default function usePendingQueue(initialServerList = [], { chatId, principalKey } = {}) {
   const initialPending = _fromServerList(initialServerList)
   const [pendingMessages, setPendingMessages] = useState(initialPending)
   const pendingMessagesRef = useRef(initialPending)
@@ -137,10 +139,21 @@ export default function usePendingQueue(initialServerList = []) {
   // it is the reconcile-clobber race. `add({inFlight:true})` enters a cid here;
   // every path that resolves the optimistic round-trip — confirm, cancel,
   // promote, or a wholesale clear — removes it. An entry NOT in this set is
-  // either already server-confirmed or genuinely gone, so hydrate is free to
-  // drop it (a cancelled message must not resurrect). This is orthogonal to
-  // identity — it guards the POST-vs-reconcile race, not the ts-swap.
+  // eligible for removal unless the durable outbox still owns its local queue
+  // lifetime (a failed POST is not proof that the owner intent is gone).
+  // This is orthogonal to identity — it guards the POST-vs-reconcile race, not the ts-swap.
   const inFlightCidsRef = useRef(new Set())
+  // A failed POST does not end local ownership; nor does a delivered receipt
+  // until the same cid is observed in authoritative queue/transcript state.
+  const localMessageCidsRef = useRef(new Set())
+  const serverObservedCidsRef = useRef(new Set(initialPending.map(cidOf)))
+  const acknowledgedQuestionIdsRef = useRef(new Set())
+  // These observations fence only the initial asynchronous disk read; they
+  // are discarded when that read settles, not accumulated for the whole chat.
+  const initialReadPendingRef = useRef(false)
+  const observedCidsRef = useRef(new Set(initialPending.map(cidOf)))
+  const [localAnswerIntents, setLocalAnswerIntents] = useState([])
+  const scopeRef = useRef({ chatId, principalKey })
 
   const applySteerReservations = useCallback((updater) => {
     const next = typeof updater === 'function'
@@ -206,9 +219,10 @@ export default function usePendingQueue(initialServerList = []) {
   const add = useCallback((msg, { inFlight = false } = {}) => {
     const cid = cidOf(msg)
     if (inFlight && cid != null) inFlightCidsRef.current.add(cid)
-    apply(prev => [
-      ...prev,
-      {
+    apply(prev => {
+      const existing = prev.find(m => cidOf(m) === cid)
+      const next = {
+        ...existing,
         ...msg,
         cid: cid ?? msg.cid,
         position: msg.position ?? prev.length + 1,
@@ -216,9 +230,12 @@ export default function usePendingQueue(initialServerList = []) {
         // Date.now(). An optimistic add starts unconfirmed; confirmQueued flips
         // it once the POST acks. The steer action reads this after awaiting
         // an optimistic row's queue write.
-        serverTs: msg.serverTs === true,
-      },
-    ])
+        serverTs: msg.serverTs === true || existing?.serverTs === true,
+      }
+      return existing
+        ? prev.map(m => cidOf(m) === cid ? next : m)
+        : [...prev, next]
+    })
   }, [apply])
 
   // confirmQueued(cid, {ts, position, serverMsg}) — the POST acked. Update the
@@ -227,6 +244,9 @@ export default function usePendingQueue(initialServerList = []) {
   // collapse, no reissued-ts guard. Clear the in-flight mark.
   const confirmQueued = useCallback((cid, { ts, position, serverMsg } = {}) => {
     inFlightCidsRef.current.delete(cid)
+    localMessageCidsRef.current.delete(cid)
+    if (initialReadPendingRef.current) observedCidsRef.current.add(cid)
+    serverObservedCidsRef.current.add(cid)
     apply(prev => prev.map(m => {
       if (cidOf(m) !== cid) return m
       const next = {
@@ -234,6 +254,7 @@ export default function usePendingQueue(initialServerList = []) {
         ...(serverMsg && typeof serverMsg === 'object' ? serverMsg : {}),
         cid,
         queued: true,
+        localOnly: false,
         ts: ts ?? serverMsg?.ts ?? m.ts,
         serverTs: true,
       }
@@ -249,7 +270,12 @@ export default function usePendingQueue(initialServerList = []) {
       : (current.length > 0 ? 0 : -1)
     if (idx < 0) return null
     const promoted = current[idx]
-    if (promoted.cid != null) inFlightCidsRef.current.delete(promoted.cid)
+    if (promoted.cid != null) {
+      inFlightCidsRef.current.delete(promoted.cid)
+      localMessageCidsRef.current.delete(promoted.cid)
+      if (initialReadPendingRef.current) observedCidsRef.current.add(promoted.cid)
+      serverObservedCidsRef.current.add(promoted.cid)
+    }
     const rest = current.filter((_, i) => i !== idx)
     pendingMessagesRef.current = rest
     setPendingMessages(rest)
@@ -265,7 +291,12 @@ export default function usePendingQueue(initialServerList = []) {
     const promotedGroup = current.slice(idx)
     const kept = current.slice(0, idx)
     for (const m of promotedGroup) {
-      if (m.cid != null) inFlightCidsRef.current.delete(m.cid)
+      if (m.cid != null) {
+        inFlightCidsRef.current.delete(m.cid)
+        localMessageCidsRef.current.delete(m.cid)
+        if (initialReadPendingRef.current) observedCidsRef.current.add(m.cid)
+        serverObservedCidsRef.current.add(m.cid)
+      }
     }
     const promoted = _combinePromoted(promotedGroup)
     pendingMessagesRef.current = kept
@@ -282,7 +313,12 @@ export default function usePendingQueue(initialServerList = []) {
     if (promotedGroup.length === 0) return null
     const kept = current.filter(m => !wanted.has(cidOf(m)))
     for (const m of promotedGroup) {
-      if (m.cid != null) inFlightCidsRef.current.delete(m.cid)
+      if (m.cid != null) {
+        inFlightCidsRef.current.delete(m.cid)
+        localMessageCidsRef.current.delete(m.cid)
+        if (initialReadPendingRef.current) observedCidsRef.current.add(m.cid)
+        serverObservedCidsRef.current.add(m.cid)
+      }
     }
     const promoted = _combinePromoted(promotedGroup)
     pendingMessagesRef.current = kept
@@ -295,6 +331,9 @@ export default function usePendingQueue(initialServerList = []) {
     // A cancelled entry is genuinely gone; drop its in-flight mark so it
     // cannot resurrect on the next hydrate.
     inFlightCidsRef.current.delete(cid)
+    localMessageCidsRef.current.delete(cid)
+    if (initialReadPendingRef.current) observedCidsRef.current.add(cid)
+    serverObservedCidsRef.current.add(cid)
     apply(prev => prev.filter(m => cidOf(m) !== cid))
     releaseSteerReservation([cid])
   }, [apply, releaseSteerReservation])
@@ -324,28 +363,43 @@ export default function usePendingQueue(initialServerList = []) {
   // invisible to the server precisely because its write is racing this read —
   // it is not "removed", it is "not yet there". Replacing the tray wholesale
   // would drop it (persist-but-vanish). So we keep any local entry that is
-  // (a) still flagged in-flight AND (b) absent from the server list (matched by
-  // cid), appending it after the reconciled server entries.
+  // (a) still in flight OR awaiting an exact local-intent handoff, and (b)
+  // absent from the server list, appending it after reconciled server entries.
   //
   // Identity matching is BY CID: the server row carries the same cid the client
   // minted (or a legacy-<ts> derivation), so a server row reuses that exact
   // identity. No content-identity heuristic is needed anymore.
   const hydrate = useCallback((serverList, opts = {}) => {
-    const local = pendingMessagesRef.current || []
-    const serverRows = serverList || []
+    // Only exact transcript identities prove that a delivered local intent
+    // completed its queue-to-history handoff. Empty runtime snapshots may have
+    // been read before delivery; they do not prove that the intent disappeared.
+    const completedCids = new Set(opts.completedCids || [])
+    for (const cid of completedCids) {
+      localMessageCidsRef.current.delete(cid)
+      inFlightCidsRef.current.delete(cid)
+      serverObservedCidsRef.current.add(cid)
+      if (initialReadPendingRef.current) observedCidsRef.current.add(cid)
+    }
+    const local = (pendingMessagesRef.current || []).filter(m => !completedCids.has(cidOf(m)))
+    const serverRows = (serverList || []).filter(m => !completedCids.has(cidOf(m)))
     const serverCidSet = new Set(serverRows.map(m => cidOf(m)))
 
     const reconciled = serverRows.map(m => {
       const cid = cidOf(m)
       // The server has now seen this row, so its optimistic round-trip is
       // resolved — clear any lingering in-flight mark for its cid.
-      if (cid != null) inFlightCidsRef.current.delete(cid)
-      return { ...m, cid, queued: true, serverTs: true }
+      if (cid != null) {
+        inFlightCidsRef.current.delete(cid)
+        localMessageCidsRef.current.delete(cid)
+        if (initialReadPendingRef.current) observedCidsRef.current.add(cid)
+        serverObservedCidsRef.current.add(cid)
+      }
+      return { ...m, cid, queued: true, serverTs: true, localOnly: false }
     })
     const preservedInFlight = local.filter(m => {
       const cid = cidOf(m)
       return cid != null
-        && inFlightCidsRef.current.has(cid)
+        && (inFlightCidsRef.current.has(cid) || localMessageCidsRef.current.has(cid))
         && !serverCidSet.has(cid)
     })
     const preservedCidSet = new Set(preservedInFlight.map(m => cidOf(m)))
@@ -373,6 +427,10 @@ export default function usePendingQueue(initialServerList = []) {
   }, [applySteerReservations])
 
   const clear = useCallback(() => {
+    if (initialReadPendingRef.current) {
+      for (const row of pendingMessagesRef.current) observedCidsRef.current.add(cidOf(row))
+    }
+    localMessageCidsRef.current.clear()
     inFlightCidsRef.current.clear()
     pendingMessagesRef.current = []
     setPendingMessages([])
@@ -392,9 +450,110 @@ export default function usePendingQueue(initialServerList = []) {
     inFlightCidsRef.current.delete(cid)
   }, [])
 
+  const acknowledgeLocalAnswers = useCallback((questionIds) => {
+    for (const id of questionIds || []) acknowledgedQuestionIdsRef.current.add(String(id))
+    setLocalAnswerIntents(current => {
+      const next = current.filter(record => (
+        !acknowledgedQuestionIdsRef.current.has(String(record.body.question_id))
+      ))
+      return next.length === current.length ? current : next
+    })
+  }, [])
+
+  useLayoutEffect(() => {
+    let active = true
+    let initialReadValid = true
+    initialReadPendingRef.current = true
+    const previous = scopeRef.current
+    if (previous.chatId !== chatId || previous.principalKey !== principalKey) {
+      scopeRef.current = { chatId, principalKey }
+      clear()
+      observedCidsRef.current.clear()
+      serverObservedCidsRef.current.clear()
+      acknowledgedQuestionIdsRef.current.clear()
+      setLocalAnswerIntents([])
+    }
+    if (!chatId || !principalKey) {
+      initialReadPendingRef.current = false
+      return undefined
+    }
+    const owns = record => record?.principalKey === principalKey
+      && String(record.chatId) === String(chatId)
+    const project = record => {
+      const cid = String(record.cid)
+      if (record.type === 'answer' || record.body.question_id != null) {
+        if (acknowledgedQuestionIdsRef.current.has(String(record.body.question_id))) return
+        setLocalAnswerIntents(current => [
+          ...current.filter(item => item.cid !== record.cid), record,
+        ])
+      } else if (!record.body.hidden) {
+        // A late failed POST cannot undo a newer authoritative queue/cut.
+        if (serverObservedCidsRef.current.has(cid)) return
+        localMessageCidsRef.current.add(cid)
+        add({
+          role: 'user', content: record.body.content,
+          attachments: record.body.attachments, cid, ts: record.createdAt,
+          queued: true, localOnly: true, serverTs: false,
+          dispatchStarted: record.dispatchStarted,
+        })
+      }
+    }
+    // Subscribe before reading: a late initial read must not resurrect an
+    // intent acknowledged or cancelled while IndexedDB was busy.
+    const unsubscribe = subscribeOutboxChanges(change => {
+      if (!active) return
+      if (change.kind === 'clear') {
+        initialReadValid = false
+        for (const row of pendingMessagesRef.current) {
+          if (row.localOnly) cancelByCid(cidOf(row))
+        }
+        localMessageCidsRef.current.clear()
+        setLocalAnswerIntents([])
+        return
+      }
+      const record = change.record
+      if (!owns(record)) return
+      const cid = String(record.cid)
+      if (initialReadPendingRef.current) observedCidsRef.current.add(cid)
+      if (change.kind === 'enqueue') {
+        if (record.locallyQueued) project(record)
+        return
+      }
+      inFlightCidsRef.current.delete(cid)
+      serverObservedCidsRef.current.delete(cid)
+      if (change.outcome === 'delivered') {
+        // Retirement ends replay, not presentation. Keep rows/cards through
+        // the receipt-to-authoritative-refresh gap.
+        setLocalAnswerIntents(current => current.map(item => item.cid === record.cid
+          ? { ...item, deliveryOutcome: 'delivered' } : item))
+      } else {
+        cancelByCid(cid)
+        setLocalAnswerIntents(current => current.filter(item => item.cid !== record.cid))
+      }
+    })
+    void listIntents(principalKey).then(records => {
+      if (!active || !initialReadValid) return
+      for (const record of records) {
+        if (owns(record) && !observedCidsRef.current.has(String(record.cid))) {
+          // After remount no interactive POST owner remains. Every retained
+          // intent needs local ownership until server confirmation.
+          project(record)
+        }
+      }
+    }).finally(() => {
+      if (active) {
+        initialReadPendingRef.current = false
+        observedCidsRef.current.clear()
+      }
+    })
+    return () => { active = false; unsubscribe() }
+  }, [chatId, principalKey, add, cancelByCid, clear])
+
   return {
     pendingMessages,
     pendingMessagesRef,
+    localAnswerIntents,
+    acknowledgeLocalAnswers,
     visiblePendingMessages,
     steerReservedMessages,
     getVisiblePendingMessages,

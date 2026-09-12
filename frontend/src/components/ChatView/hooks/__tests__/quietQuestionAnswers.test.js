@@ -3,9 +3,10 @@ import { test, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { IDBFactory } from 'fake-indexeddb'
 import { renderHook } from './react-hook-shim.mjs'
+import { verifyConnectivity } from '../../../../lib/connectivityStore.js'
 import useStreamConnection from '../../useStreamConnection.js'
 import { shouldRepairRuntimeStream } from '../../chatRuntimeState.js'
-import { clearOutboxForTests, listIntents, outboxPrincipalKey } from '../../chatOutbox.js'
+import { clearOutboxForTests, listIntents, outboxPrincipalKey, retireIntent, subscribeOutboxChanges } from '../../chatOutbox.js'
 import { writeStoredStreamSnapshot } from '../../streamSnapshotCache.js'
 
 const original = Object.fromEntries(
@@ -39,6 +40,8 @@ async function setup(callbacks = {}) {
   writeStoredStreamSnapshot('a', {
     items: [{ type: 'text', content: 'Existing answer' }], assistantMessageId: 'assistant-a',
   })
+  globalThis.fetch = async () => Response.json({ ready: true, boot_id: 'quiet-fixture' })
+  await verifyConnectivity()
   hook = renderHook(chat => useStreamConnection(chat, callbacks), 'a')
 }
 
@@ -221,4 +224,61 @@ test('authoritative queued follow-up runtime attaches through the existing owner
   hook.result.current.disconnect()
   wire.close()
   await attached
+})
+
+for (const answer of [false, true]) {
+  test(`${answer ? 'answer' : 'message'} waits in durable local ownership without a POST or stream reset when service is not ready`, async () => {
+    await setup()
+    globalThis.fetch = async () => Response.json({ ready: false, boot_id: 'quiet-fixture' }, { status: 503 })
+    await verifyConnectivity()
+    const requests = []
+    globalThis.fetch = async (url, options) => { requests.push({ url, ...options }); throw new Error('No delivery allowed') }
+    const options = answer ? answerOptions : { cid: 'local-message' }
+    const result = await hook.result.current.sendMessage('Saved locally', undefined, options)
+    assert.equal(result.status, 'locally_queued')
+    assert.equal(requests.length, 0)
+    assert.equal(hook.result.current.isStreaming, false)
+    assert.deepEqual(hook.result.current.streamItems, [{ type: 'text', content: 'Existing answer' }])
+    assert.equal(hook.result.current.streamAssistantMessageId, 'assistant-a')
+    const records = await listIntents(outboxPrincipalKey(token))
+    assert.equal(records.length, 1)
+    assert.equal(records[0].locallyQueued, true)
+    assert.equal(records[0].body.cid, options.cid)
+    if (answer) assert.deepEqual(records[0].body.selected_options, { help: ['0'] })
+  })
+}
+
+test('a follow-up explicitly handed to the outbox cannot race an interactive POST even when service is ready', async () => {
+  await setup()
+  let posts = 0
+  globalThis.fetch = async () => { posts++; throw new Error('Outbox owns this delivery') }
+  const result = await hook.result.current.sendMessage('B', undefined, {
+    cid: 'after-answer', queueOnly: true, deferDelivery: true,
+  })
+  assert.equal(result.status, 'locally_queued')
+  assert.equal(posts, 0)
+  assert.equal(hook.result.current.isStreaming, false)
+  const records = await listIntents(outboxPrincipalKey(token))
+  assert.equal(records.length, 1)
+  assert.equal(records[0].body.content, 'B')
+  assert.equal(records[0].locallyQueued, true)
+})
+
+
+test('a receipt that wins the dispatch claim cannot start a phantom answer turn', async () => {
+  await setup()
+  let posts = 0
+  globalThis.fetch = async () => { posts++; return Response.json({ status: 'started' }) }
+  const unsubscribe = subscribeOutboxChanges(change => {
+    if (change.kind === 'enqueue' && change.record.cid === answerOptions.cid) {
+      void retireIntent(answerOptions.cid, { chatId: 'a', outcome: 'delivered' })
+    }
+  })
+  try {
+    const response = await hook.result.current.sendMessage('No', undefined, answerOptions)
+    assert.equal(response.status, 'locally_settled')
+    assert.equal(posts, 0)
+    assert.equal(hook.result.current.isStreaming, false)
+    assert.equal(hook.result.current.streamItems[0].content, 'Existing answer')
+  } finally { unsubscribe() }
 })

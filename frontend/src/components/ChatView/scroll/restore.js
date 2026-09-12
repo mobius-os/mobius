@@ -6,7 +6,7 @@ import { isOwnerUserMessage } from '../chatRuntimeState.js'
 import {
   _anchorEl,
   _anchorModeIntersectsContent,
-  _durableQuestionSubmissionMode,
+  _durableSubmissionMode,
   _pinnedUserEl,
   bottomAnchorModeFromScroll,
 } from './geometry.js'
@@ -38,7 +38,7 @@ export function _validateSavedMode(saved, messages, scrollEl) {
     // a huge negative offset while the viewport sat wholly in spacer below it.
     // Enforce the same content-intersection invariant used by spacer sizing,
     // self-healing every off-content restore to the real tail.
-    const durable = _durableQuestionSubmissionMode(saved)
+    const durable = _durableSubmissionMode(saved)
     const target = _anchorEl(scrollEl, durable)
     return _anchorModeIntersectsContent(target, durable, scrollEl?.clientHeight)
       ? durable

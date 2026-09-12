@@ -84,7 +84,8 @@ def test_restart_announces_server_restarting_on_the_system_bus(monkeypatch):
   """The drain-gated restart publishes `server_restarting` to the system bus
   before it drains — the ONLY cue that covers a graceful drain (health still
   answers, so client reachability alone shows nothing). The shell mirrors it
-  into restartStore and lights its offline dot; see frontend restartStore.js."""
+  into the shared delivery state. The boot id prevents the still-answering
+  old worker from being mistaken for a completed restart."""
   from app.broadcast import get_system_broadcast
 
   _FakeTimer.instances = []
@@ -117,7 +118,9 @@ def test_restart_announces_server_restarting_on_the_system_bus(monkeypatch):
   finally:
     bus.unsubscribe(q)
 
-  assert observed_before_drain == [{"type": "server_restarting"}]
+  assert observed_before_drain == [{
+    "type": "server_restarting", "boot_id": "boot-12345678",
+  }]
   assert q.empty()
 
 
