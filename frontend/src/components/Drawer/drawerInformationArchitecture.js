@@ -7,6 +7,37 @@ function pinnedAt(item) {
   return (item?.pinned_at || '').replace(/(?:Z|\+00:00)$/, '')
 }
 
+function pinnedAtMillis(item) {
+  const value = item?.pinned_at
+  if (!value) return Number.NaN
+  const normalized = /(?:Z|[+-]\d\d:\d\d)$/.test(value) ? value : `${value}Z`
+  return Date.parse(normalized)
+}
+
+/**
+ * Give an in-flight pin a temporary rank that is guaranteed to append.
+ *
+ * The server remains authoritative after the write, but using Date.now()
+ * alone makes a slow or incorrectly-set device clock place a new pin above an
+ * existing one until the refetch finishes. Include every currently visible
+ * rank and the last optimistic rank so rapid pins are monotonic too.
+ */
+export function nextPendingPinnedAt(
+  chats = [],
+  apps = [],
+  projects = [],
+  { now = Date.now(), previous = null } = {},
+) {
+  let next = Number.isFinite(Number(now)) ? Number(now) : Date.now()
+  for (const item of [...(chats || []), ...(apps || []), ...(projects || [])]) {
+    const millis = pinnedAtMillis(item)
+    if (Number.isFinite(millis)) next = Math.max(next, millis + 1)
+  }
+  const previousMillis = pinnedAtMillis({ pinned_at: previous })
+  if (Number.isFinite(previousMillis)) next = Math.max(next, previousMillis + 1)
+  return new Date(next).toISOString()
+}
+
 // Oldest pin first, newest pin last. Pinning stamps pinned_at = now (the
 // largest value), so a freshly pinned item lands at the BOTTOM of the pinned
 // list, and drag-to-reorder re-stamps timestamps in this same ascending order.
@@ -24,6 +55,37 @@ function recentAt({ kind, item }) {
 
 function newestRecentFirst(a, b) {
   return recentAt(b).localeCompare(recentAt(a))
+}
+
+/**
+ * Keep an owner's pin/unpin choice visible while the server write settles.
+ *
+ * The query cache remains server-owned. A focus/reconnect read that began
+ * before the mutation may still briefly publish its older snapshot, so the
+ * drawer projects the pending choice over whichever list revision is current.
+ * This is one shared boundary for chats, apps, and projects rather than three
+ * ad-hoc optimistic caches that can each be overwritten independently.
+ */
+export function projectPendingDrawerPins(
+  chats = [],
+  apps = [],
+  projects = [],
+  pendingPins = new Map(),
+) {
+  const project = (kind, items) => (items || []).map(item => {
+    const pending = pendingPins.get(`${kind}:${item.id}`)
+    if (!pending) return item
+    return {
+      ...item,
+      pinned_at: pending.pinned ? pending.pinnedAt : null,
+    }
+  })
+
+  return {
+    chats: project('chat', chats),
+    apps: project('app', apps),
+    projects: project('project', projects),
+  }
 }
 
 /**

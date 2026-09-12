@@ -131,6 +131,8 @@ async function setup(
     chatDetailGate = null,
     chats = NAV_CHATS,
     detailForChat = null,
+    chatListResponder = null,
+    chatPatchResponder = null,
   } = {},
 ) {
   await page.setViewportSize(viewport)
@@ -152,6 +154,7 @@ async function setup(
   }, chats[0].id)
   await page.route(/\/api\/chats(?:\?.*)?$/, route => {
     if (route.request().method() !== 'GET') return route.fallback()
+    if (chatListResponder) return chatListResponder(route)
     return route.fulfill({
       status: 200,
       contentType: 'application/json',
@@ -159,6 +162,9 @@ async function setup(
     })
   })
   await page.route(/\/api\/chats\/([0-9a-f-]+)(?:\?.*)?$/, route => {
+    if (route.request().method() === 'PATCH' && chatPatchResponder) {
+      return chatPatchResponder(route)
+    }
     if (route.request().method() !== 'GET') return route.fallback()
     const id = new URL(route.request().url()).pathname.split('/').pop()
     // Capture the body when the request begins. A delayed cold read represents
@@ -1215,15 +1221,87 @@ test.describe('Touch navigation', () => {
 })
 
 test.describe('Desktop sidebar navigation', () => {
-  async function setupDesktop(page, open = true) {
+  async function setupDesktop(page, open = true, options = {}) {
     await page.addInitScript(({ key, value }) => {
       if (localStorage.getItem(key) === null) localStorage.setItem(key, value)
     }, {
       key: 'mobius:desktop-sidebar-open:v1',
       value: String(open),
     })
-    await setup(page, { width: 1280, height: 800 })
+    await setup(page, { width: 1280, height: 800 }, options)
   }
+
+  test('a stale focus refresh cannot make a newly pinned chat disappear', async ({ page }) => {
+    let serverChats = NAV_CHATS.map(chat => ({ ...chat }))
+    let listRequests = 0
+    let staleListFinished = false
+    let releaseStaleList
+    let releasePinWrite
+    const staleListGate = new Promise(resolve => { releaseStaleList = resolve })
+    const pinWriteGate = new Promise(resolve => { releasePinWrite = resolve })
+
+    await setupDesktop(page, true, {
+      chatListResponder: async route => {
+        listRequests += 1
+        // The post-write refresh may itself resolve from an older offline
+        // snapshot. The confirmed pin must survive that successful stale read.
+        const snapshot = listRequests === 3
+          ? NAV_CHATS.map(chat => ({ ...chat }))
+          : serverChats.map(chat => ({ ...chat }))
+        if (listRequests === 2) await staleListGate
+        await route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify(snapshot),
+        })
+        if (listRequests === 2) staleListFinished = true
+      },
+      chatPatchResponder: async route => {
+        const id = new URL(route.request().url()).pathname.split('/').pop()
+        const body = route.request().postDataJSON()
+        await pinWriteGate
+        serverChats = serverChats.map(chat => (
+          chat.id === id
+            ? {
+                ...chat,
+                pinned_at: body.pinned ? '2026-09-12T12:01:00' : null,
+              }
+            : chat
+        ))
+        await route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({ ok: true }),
+        })
+      },
+    })
+
+    // A real return to the tab revalidates chats even inside staleTime. Hold
+    // that request at the older unpinned snapshot while the owner pins.
+    await page.evaluate(() => window.dispatchEvent(new Event('visibilitychange')))
+    await expect.poll(() => listRequests).toBe(2)
+
+    const navigation = page.getByRole('navigation', { name: 'Primary navigation' })
+    const alpha = navigation.getByRole('button', { name: NAV_CHATS[0].title, exact: true })
+    await alpha.focus()
+    await page.keyboard.press('Shift+F10')
+    await page.getByRole('menuitem', { name: 'Pin', exact: true }).click()
+
+    const pinnedSection = navigation.getByRole('region', { name: 'Pinned' })
+    const pinnedAlpha = pinnedSection.locator(`[data-drawer-key="chat:${NAV_CHATS[0].id}"]`)
+    await expect(pinnedAlpha).toBeVisible()
+
+    releaseStaleList()
+    await expect.poll(() => staleListFinished).toBe(true)
+    await page.evaluate(() => new Promise(resolve => (
+      requestAnimationFrame(() => requestAnimationFrame(resolve))
+    )))
+    await expect(pinnedAlpha).toBeVisible()
+
+    releasePinWrite()
+    await expect.poll(() => listRequests).toBeGreaterThanOrEqual(3)
+    await expect(pinnedAlpha).toBeVisible()
+  })
 
   test('desktop web keeps 90% density while tablet and phone stay native', async ({ page }) => {
     await setupDesktop(page)

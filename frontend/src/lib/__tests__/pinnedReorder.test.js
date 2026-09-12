@@ -7,7 +7,9 @@ import {
   pinnedEntriesMatchRanks,
   pinnedOrderHandoffStatus,
   projectPinnedEntries,
+  reconcilePinnedOrder,
 } from '../../components/Drawer/pinnedReorder.js'
+import { createPinMutationQueue } from '../../components/Drawer/pinMutationQueue.js'
 
 // Four uniform 40px rows stacked from top 0.
 function uniformRows() {
@@ -167,4 +169,73 @@ test('a concurrent pin-set change safely supersedes the preview handoff', () => 
     class ObserverStub { observe() {} disconnect() {} },
   )
   assert.deepEqual(settled, ['superseded'])
+})
+
+test('a reorder keeps the chosen relative order after a failed pending pin', () => {
+  assert.deepEqual(
+    reconcilePinnedOrder(
+      ['chat:c', 'chat:new', 'chat:a', 'chat:b'],
+      ['chat:a', 'chat:b', 'chat:c'],
+    ),
+    ['chat:c', 'chat:a', 'chat:b'],
+  )
+})
+
+test('a reorder retains a concurrently restored pin in its prior slot', () => {
+  assert.deepEqual(
+    reconcilePinnedOrder(
+      ['chat:c', 'chat:a'],
+      ['chat:a', 'chat:b', 'chat:c'],
+    ),
+    ['chat:c', 'chat:b', 'chat:a'],
+  )
+})
+
+test('a reorder includes a concurrent external pin exactly once', () => {
+  assert.deepEqual(
+    reconcilePinnedOrder(
+      ['chat:c', 'chat:a', 'chat:b'],
+      ['chat:a', 'app:new', 'chat:b', 'chat:c'],
+    ),
+    ['chat:c', 'app:new', 'chat:a', 'chat:b'],
+  )
+})
+
+test('pin mutations settle in owner-intent order', async () => {
+  const queue = createPinMutationQueue()
+  const order = []
+  let releasePin
+  const pinGate = new Promise(resolve => { releasePin = resolve })
+
+  queue.enqueue(async () => {
+    await pinGate
+    order.push('pin')
+  })
+  queue.enqueue(async () => { order.push('unpin') })
+
+  let settled = false
+  const settlement = queue.settle().then(() => { settled = true })
+  await Promise.resolve()
+  assert.equal(settled, false)
+  releasePin()
+  await settlement
+  assert.deepEqual(order, ['pin', 'unpin'])
+})
+
+test('reorder settlement includes a pin appended while waiting', async () => {
+  const queue = createPinMutationQueue()
+  const order = []
+  let releaseFirst
+  const firstGate = new Promise(resolve => { releaseFirst = resolve })
+
+  queue.enqueue(async () => {
+    await firstGate
+    order.push('first')
+  })
+  const settlement = queue.settle().then(() => { order.push('settled') })
+  queue.enqueue(async () => { order.push('second') })
+  releaseFirst()
+  await settlement
+
+  assert.deepEqual(order, ['first', 'second', 'settled'])
 })
