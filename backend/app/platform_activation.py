@@ -248,8 +248,7 @@ def runtime_module_is_image_owned(relative_name: str) -> bool:
   source, so a served/image difference there is expected rather than a fault.
   Everything else under ``backend/runtime`` stays image-owned.
   """
-  rule = _rule_for_path(f"backend/runtime/{relative_name}")
-  return bool(rule and rule.level is ActivationLevel.IMAGE_REBUILD)
+  return path_is_image_owned(f"backend/runtime/{relative_name}")
 
 
 def backend_import_probe_required(paths: Iterable[str]) -> bool:
@@ -408,7 +407,7 @@ def dependency_fingerprint_paths(root: Path) -> list[str]:
   return sorted(paths)
 
 
-def _still_image_owned(relative: str) -> bool:
+def path_is_image_owned(relative: str) -> bool:
   """Whether the first matching rule still makes this path image-owned.
 
   A broad prefix rule must not claim a path a narrower rule has already moved
@@ -432,7 +431,7 @@ def image_input_paths(root: Path) -> list[str]:
     if rule.level is not ActivationLevel.IMAGE_REBUILD or rule.dependency_fingerprint:
       continue
     for exact in rule.exact:
-      if (root / exact).is_file() and _still_image_owned(exact):
+      if (root / exact).is_file() and path_is_image_owned(exact):
         paths.add(exact)
     for prefix in rule.prefixes:
       base = root / prefix
@@ -440,7 +439,7 @@ def image_input_paths(root: Path) -> list[str]:
         paths.update(
           str(path.relative_to(root))
           for path in base.rglob("*")
-          if path.is_file() and _still_image_owned(str(path.relative_to(root)))
+          if path.is_file() and path_is_image_owned(str(path.relative_to(root)))
         )
   return sorted(path for path in paths if (root / path).is_file())
 

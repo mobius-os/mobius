@@ -3042,6 +3042,35 @@ def test_image_input_drift_ignores_generated_files_but_keeps_local_source(
   assert pu.image_input_drift(platform) == ["backend/runtime/local.py"]
 
 
+def test_image_input_drift_ignores_reclassified_baked_path_but_keeps_deletion(
+  clone_env, monkeypatch,
+):
+  _, platform = clone_env
+  runtime = platform / "backend/runtime"
+  runtime.mkdir(parents=True, exist_ok=True)
+  broker = platform / "backend/runtime/identity_broker.py"
+  ledger = platform / "backend/runtime/restart_ledger.py"
+  broker.write_text("served broker\n", encoding="utf-8")
+  ledger.write_text("image-owned ledger\n", encoding="utf-8")
+  _git(platform, "add", "backend/runtime")
+  _git(platform, "commit", "-q", "-m", "runtime inputs")
+  baked = platform_activation.image_input_hashes(platform)
+  # Model an older image whose manifest still classified the broker as frozen.
+  baked[str(broker.relative_to(platform))] = hashlib.sha256(
+    broker.read_bytes(),
+  ).hexdigest()
+  monkeypatch.setattr(pu, "_build_info", lambda: {"image_inputs": baked})
+
+  assert pu.image_input_drift(platform) == []
+
+  # A currently image-owned tracked input that disappears must still block a
+  # replacement; otherwise the image would silently restore the deleted file.
+  ledger.unlink()
+  assert pu.image_input_drift(platform) == [
+    "backend/runtime/restart_ledger.py",
+  ]
+
+
 def test_failed_dependency_sync_invalidates_previous_success_receipt(
   clone_env, monkeypatch,
 ):
