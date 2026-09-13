@@ -191,6 +191,30 @@ def test_written_restart_response_atomically_closes_wait_and_queues_feedback():
     assert db.query(models.PlatformRestartExecution).count() == 0
 
 
+def test_stale_written_restart_response_has_a_state_changed_outcome():
+  qid, _wait_id, _run, _requirement = _install("restart-feedback-stale")
+  with SessionLocal() as db:
+    chat = db.get(models.Chat, "restart-feedback-stale")
+    chat.pending_question_id = None
+    db.commit()
+
+  with pytest.raises(chat_writer.RestartCardStateChanged):
+    _submit(AppendRestartFeedback(
+      chat_id="restart-feedback-stale", question_id=qid,
+      answers={"Restart?": "Please check the rollout first"},
+      user_msg={
+        "role": "user", "content": "Please check the rollout first",
+        "hidden": True, "cid": "restart-feedback-stale-answer",
+        "kind": "continuation", "continuation_reason": "question_answer",
+        "ts": 3,
+      },
+    ))
+
+  with SessionLocal() as db:
+    chat = db.get(models.Chat, "restart-feedback-stale")
+    assert chat.pending_messages == []
+
+
 def test_restart_activation_wait_does_not_expire_while_owner_is_deciding(monkeypatch):
   from app import chat_waits
 
@@ -526,6 +550,74 @@ def test_restart_route_keeps_transient_writer_failure_retryable(
       "content": "", "hidden": True,
       "question_id": "writer-failure-card",
       "selected_options": {"restart": ["restart-id"]},
+    },
+  )
+
+  assert response.status_code == 503, response.text
+  assert "try again" in response.json()["detail"].lower()
+
+
+def test_stale_written_restart_feedback_refreshes_instead_of_ghost_queuing(
+  client, chat, auth, monkeypatch,
+):
+  from concurrent.futures import Future
+
+  requirement = _requirement("platform-restart:stale-written-route")
+  block = _card("stale-written-card", "stale-written-wait", requirement)
+  monkeypatch.setattr(
+    "app.platform_restart.restart_action_block", lambda _chat, _qid: block,
+  )
+
+  class RefusingWriter:
+    def submit(self, _command):
+      result = Future()
+      result.set_exception(
+        chat_writer.RestartCardStateChanged("card already settled")
+      )
+      return result
+
+  monkeypatch.setattr(chats_stream, "get_writer", lambda: RefusingWriter())
+  response = client.post(
+    f"/api/chats/{chat.id}/messages", headers=auth, json={
+      "content": "- Restart?: Please check the rollout first",
+      "hidden": True,
+      "answers": {"Restart?": "Please check the rollout first"},
+      "question_id": "stale-written-card",
+      "selected_options": {},
+      "cid": "stale-written-feedback",
+    },
+  )
+
+  assert response.status_code == 410, response.text
+  assert response.json()["detail"]["code"] == "question_state_changed"
+
+
+def test_written_restart_feedback_keeps_transient_failure_retryable(
+  client, chat, auth, monkeypatch,
+):
+  from concurrent.futures import Future
+
+  requirement = _requirement("platform-restart:written-writer-failure")
+  block = _card("written-failure-card", "written-failure-wait", requirement)
+  monkeypatch.setattr(
+    "app.platform_restart.restart_action_block", lambda _chat, _qid: block,
+  )
+
+  class FailingWriter:
+    def submit(self, _command):
+      result = Future()
+      result.set_exception(RuntimeError("database temporarily unavailable"))
+      return result
+
+  monkeypatch.setattr(chats_stream, "get_writer", lambda: FailingWriter())
+  response = client.post(
+    f"/api/chats/{chat.id}/messages", headers=auth, json={
+      "content": "- Restart?: Please check the rollout first",
+      "hidden": True,
+      "answers": {"Restart?": "Please check the rollout first"},
+      "question_id": "written-failure-card",
+      "selected_options": {},
+      "cid": "written-failure-feedback",
     },
   )
 

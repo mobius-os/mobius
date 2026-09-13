@@ -489,9 +489,10 @@ def compact_messages_for_detail(
     next_blocks: list[dict] = []
     run: list[tuple[int, dict]] = []
     changed = False
+    emitted_activity_projection = False
 
     def flush() -> None:
-      nonlocal changed
+      nonlocal changed, emitted_activity_projection
       while run:
         chunk = run[:MAX_ACTIVITY_DETAIL_BLOCKS]
         del run[:MAX_ACTIVITY_DETAIL_BLOCKS]
@@ -502,6 +503,7 @@ def compact_messages_for_detail(
             binding=binding,
           ))
           changed = True
+          emitted_activity_projection = True
         else:
           next_blocks.extend(block for _, block in chunk)
       run.clear()
@@ -552,6 +554,12 @@ def compact_messages_for_detail(
     if projected is None:
       projected = list(messages)
     next_message = dict(message)
+    if emitted_activity_projection:
+      # Fresh compact projections already omit the exact interaction tool
+      # owned by a product card. Older cached messages have no marker, so the
+      # frontend can repair their sampled counts without undercounting current
+      # payloads.
+      next_message["interaction_tool_projection_version"] = 1
     if sources:
       # Historical source cards are deliberately absent from the ordinary
       # transcript payload. A single source_ref paints the collapsed row and

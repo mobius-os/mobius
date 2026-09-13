@@ -22,6 +22,7 @@ import {
   upsertTerminalErrorItem,
   isQuestionTool,
   isRestartRequestTool,
+  legacyRestartActivityOwners,
   restartCardActivityEntries,
   suppressedQuestionToolIndices,
   appendThinkingChunk,
@@ -704,6 +705,48 @@ test('recognizes both persisted names for the platform Restart request', () => {
   assert.equal(isRestartRequestTool('mobius_control:request_restart'), true)
   assert.equal(isRestartRequestTool('mcp__mobius_control__request_restart'), true)
   assert.equal(isRestartRequestTool('mobius_control:request_approval'), false)
+})
+
+test('legacy compact activity owns one later Restart card across prose', () => {
+  const activity = {
+    type: 'activity',
+    entries: [{
+      item: {
+        type: 'tool', tool: 'mcp__mobius_control__request_restart',
+        output_exit_code: 1,
+      },
+    }],
+  }
+  const blocks = [
+    activity,
+    { type: 'text', content: 'Ready after retry.' },
+    { type: 'question', platform_action: { type: 'restart' } },
+  ]
+
+  assert.deepEqual([...legacyRestartActivityOwners(blocks, undefined)], [activity])
+  assert.deepEqual([...legacyRestartActivityOwners(blocks, 1)], [])
+})
+
+test('a later standalone Restart request prevents decrementing older activity', () => {
+  const activity = {
+    type: 'activity',
+    entries: [{
+      item: {
+        type: 'tool', tool: 'mcp__mobius_control__request_restart',
+        output_exit_code: 1,
+      },
+    }],
+  }
+  const blocks = [
+    activity,
+    {
+      type: 'tool', tool: 'mcp__mobius_control__request_restart',
+      output_exit_code: 0,
+    },
+    { type: 'question', platform_action: { type: 'restart' } },
+  ]
+
+  assert.deepEqual([...legacyRestartActivityOwners(blocks, undefined)], [])
 })
 
 test('a pre-grouped long turn hides only the Restart request entry', () => {

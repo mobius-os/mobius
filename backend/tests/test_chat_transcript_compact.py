@@ -106,6 +106,7 @@ def test_compacts_multi_step_activity_and_preserves_render_metadata():
 
   assert compact is not messages
   assert compact[0] is not messages[0]
+  assert compact[0]["interaction_tool_projection_version"] == 1
   assert "content" not in compact[0]
   assert compact[0]["blocks"][0] == {"type": "text", "content": "Before"}
   summary = compact[0]["blocks"][1]

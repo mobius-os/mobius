@@ -347,6 +347,8 @@ async def _submit_pending_message(
   ack = get_writer().submit(command)
   try:
     result = await await_ack(ack)
+  except (RestartCardStateChanged, RestartCardActionConflict):
+    raise
   except Exception as exc:
     raise _message_persist_unavailable(exc, chat_id=chat.id) from exc
   # Reflect the committed state on the request's session so a later
@@ -654,9 +656,7 @@ async def send_message(
             settled_action = (
               settled.get("platform_action") if isinstance(settled, dict) else None
             )
-          except HTTPException:
-            raise
-          except Exception as exc:
+          except RestartCardStateChanged as exc:
             log.info(
               "Restart feedback refused chat_id=%s question_id=%s: %s",
               chat_id, body.question_id, exc,
@@ -667,6 +667,25 @@ async def send_message(
                 "code": "question_state_changed",
                 "message": "This Restart card has already been settled.",
               },
+            ) from exc
+          except RestartCardActionConflict as exc:
+            raise HTTPException(
+              status_code=409,
+              detail={
+                "code": "restart_action_conflict",
+                "message": str(exc),
+              },
+            ) from exc
+          except HTTPException:
+            raise
+          except Exception as exc:
+            log.exception(
+              "Restart feedback failed chat_id=%s question_id=%s",
+              chat_id, body.question_id,
+            )
+            raise HTTPException(
+              status_code=503,
+              detail="Möbius could not save that Restart response. Please try again.",
             ) from exc
       event = {
         "type": "answers_applied",

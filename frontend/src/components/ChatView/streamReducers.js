@@ -329,8 +329,44 @@ export function isRestartRequestTool(tool) {
     || tool === 'mcp__mobius_control__request_restart'
 }
 
-export function restartCardActivityEntries(entries, hasRestartCard) {
-  if (!hasRestartCard || !Array.isArray(entries)) return entries
+export function legacyRestartActivityOwners(blocks, projectionVersion) {
+  const owners = new Set()
+  if (
+    !Array.isArray(blocks)
+    || (Number.isInteger(projectionVersion) && projectionVersion >= 1)
+  ) return owners
+
+  let latestCandidate = null
+  blocks.forEach(block => {
+    if (
+      block?.type === 'tool'
+      && isRestartRequestTool(block.tool)
+      && !toolBlockFailed(block)
+    ) {
+      latestCandidate = block
+      return
+    }
+    if (
+      block?.type === 'activity'
+      && block.entries?.some(({ item }) => (
+        item?.type === 'tool' && isRestartRequestTool(item.tool)
+      ))
+    ) {
+      latestCandidate = block
+      return
+    }
+    if (
+      block?.type !== 'question'
+      || block?.platform_action?.type !== 'restart'
+    ) return
+    if (latestCandidate?.type === 'activity') owners.add(latestCandidate)
+    latestCandidate = null
+  })
+  return owners
+}
+
+export function restartCardActivityEntries(entries, ownsRestartCard) {
+  if (!ownsRestartCard || !Array.isArray(entries)) return entries
   let twinIndex = -1
   entries.forEach(({ item }, index) => {
     if (

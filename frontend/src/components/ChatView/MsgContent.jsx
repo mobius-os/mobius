@@ -13,6 +13,7 @@ import ContinuationCard from './ContinuationCard.jsx'
 import { isContinuationMessage } from './chatRuntimeState.js'
 import { questionKey } from './questionKey.js'
 import {
+  legacyRestartActivityOwners,
   repairInterleavedQuestionText,
   restartCardActivityEntries,
   suppressedQuestionToolIndices,
@@ -176,9 +177,15 @@ function MsgContentInner({
     // is render-time as well as reducer-time so already-saved chats self-heal
     // without rewriting partner transcripts.
     const displayBlocks = repairInterleavedQuestionText(msg.blocks?.length ? msg.blocks : msg.content ? [{ type: 'text', content: msg.content }] : [])
-    const hasRestartCard = displayBlocks.some(block => (
-      block?.type === 'question' && block?.platform_action?.type === 'restart'
-    ))
+    // A legacy compact activity may have sampled out the successful Restart
+    // request while retaining earlier failed attempts. Mirror the ordinary
+    // tool/card pairing: the latest eligible activity or standalone request
+    // owns the next Restart card, even across harmless prose/error markers.
+    // Fresh server projections are marked and already report corrected counts.
+    const restartActivityOwners = legacyRestartActivityOwners(
+      displayBlocks,
+      msg.interaction_tool_projection_version,
+    )
     // The persisted transcript keeps the raw AskUserQuestion tool block
     // AND the question card (backend events.process_event appends both);
     // the live stream absorbs the tool twin into the card. Skip the twin
@@ -243,16 +250,24 @@ function MsgContentInner({
         // tools already folded into an activity block. Filter the platform
         // call inside that block too; the Restart card is its complete visible
         // replacement, while unrelated commands remain inspectable.
+        const ownsLegacyRestart = restartActivityOwners.has(block)
         const visibleEntries = restartCardActivityEntries(
-          block.entries, hasRestartCard,
+          block.entries, ownsLegacyRestart,
         )
         if (visibleEntries.length === 0) return null
         const omittedToolCount = (
           block.entries.filter(({ item }) => item?.type === 'tool').length
           - visibleEntries.filter(({ item }) => item?.type === 'tool').length
         )
+        const hiddenLegacyRestartCount = ownsLegacyRestart ? 1 : 0
         const summaryToolCount = Number.isFinite(block.tool_count)
-          ? Math.max(0, block.tool_count - omittedToolCount)
+          ? Math.max(
+              0,
+              block.tool_count - Math.max(
+                omittedToolCount,
+                hiddenLegacyRestartCount,
+              ),
+            )
           : visibleEntries.filter(({ item }) => item?.type === 'tool').length
         return (
           <div

@@ -122,7 +122,9 @@ test('rendering retains a failed Restart attempt before the card-owned request',
 test('rendering a compact server projection retains its surviving failed Restart', () => {
   const html = render(Message, {
     msg: {
-      id: 'restart-projected', role: 'assistant', blocks: [
+      id: 'restart-projected', role: 'assistant',
+      interaction_tool_projection_version: 1,
+      blocks: [
         {
           type: 'activity', activity_id: '0:0:1', message_index: 0,
           start: 0, end: 1, tool_count: 1,
@@ -147,4 +149,114 @@ test('rendering a compact server projection retains its surviving failed Restart
   assert.match(html, /mcp__mobius_control__request_restart/)
   assert.match(html, /\(1 step\)/)
   assert.match(html, /Restart\?/)
+})
+
+test('a legacy compact projection repairs one sampled-out Restart request', () => {
+  const html = render(Message, {
+    msg: {
+      id: 'legacy-restart-projected', role: 'assistant', blocks: [
+        {
+          type: 'activity', activity_id: '0:0:3', message_index: 0,
+          start: 0, end: 3, tool_count: 3,
+          entries: [
+            {
+              idx: 0, item: {
+                type: 'tool', tool: 'mcp__mobius_control__request_restart',
+                tool_use_id: 'failed-one', status: 'done', output_exit_code: 1,
+                output: 'First failure',
+              },
+            },
+            {
+              idx: 1, item: {
+                type: 'tool', tool: 'mcp__mobius_control__request_restart',
+                tool_use_id: 'failed-two', status: 'done', output_exit_code: 1,
+                output: 'Second failure',
+              },
+            },
+          ],
+        },
+        { type: 'text', content: 'Ready after retry.' },
+        {
+          type: 'question', question_id: 'restart-card',
+          questions: [{ id: 'restart', question: 'Restart?', options: [] }],
+          platform_action: { type: 'restart', version: 2 },
+        },
+      ],
+    },
+    chatId: 'chat', messageKey: 'legacy-restart-projected',
+  }, { tools: new Map(), positions: new Map() })
+
+  assert.match(html, /\(2 steps\)/)
+  assert.equal((html.match(/mcp__mobius_control__request_restart/g) || []).length, 2)
+})
+
+test('a marked compact projection trusts the corrected server count', () => {
+  const html = render(Message, {
+    msg: {
+      id: 'fresh-restart-projected', role: 'assistant',
+      interaction_tool_projection_version: 1,
+      blocks: [
+        {
+          type: 'activity', activity_id: '0:0:3', message_index: 0,
+          start: 0, end: 3, tool_count: 2,
+          entries: [
+            {
+              idx: 0, item: {
+                type: 'tool', tool: 'mcp__mobius_control__request_restart',
+                tool_use_id: 'failed-one', status: 'done', output_exit_code: 1,
+              },
+            },
+            {
+              idx: 1, item: {
+                type: 'tool', tool: 'mcp__mobius_control__request_restart',
+                tool_use_id: 'failed-two', status: 'done', output_exit_code: 1,
+              },
+            },
+          ],
+        },
+        {
+          type: 'question', question_id: 'restart-card',
+          questions: [{ id: 'restart', question: 'Restart?', options: [] }],
+          platform_action: { type: 'restart', version: 2 },
+        },
+      ],
+    },
+    chatId: 'chat', messageKey: 'fresh-restart-projected',
+  }, { tools: new Map(), positions: new Map() })
+
+  assert.match(html, /\(2 steps\)/)
+})
+
+test('a later standalone Restart request owns the card before legacy activity', () => {
+  const html = render(Message, {
+    msg: {
+      id: 'standalone-restart-owner', role: 'assistant', blocks: [
+        {
+          type: 'activity', activity_id: '0:0:3', message_index: 0,
+          start: 0, end: 3, tool_count: 3,
+          entries: [{
+            idx: 0, item: {
+              type: 'tool', tool: 'mcp__mobius_control__request_restart',
+              tool_use_id: 'old-failed', status: 'done', output_exit_code: 1,
+            },
+          }],
+        },
+        { type: 'text', content: 'Trying once more.' },
+        {
+          type: 'tool', tool: 'mcp__mobius_control__request_restart',
+          tool_use_id: 'successful', status: 'done', output: '',
+          input: { marker: 'standalone-success' },
+        },
+        {
+          type: 'question', question_id: 'restart-card',
+          questions: [{ id: 'restart', question: 'Restart?', options: [] }],
+          platform_action: { type: 'restart', version: 2 },
+        },
+      ],
+    },
+    chatId: 'chat', messageKey: 'standalone-restart-owner',
+  }, { tools: new Map(), positions: new Map() })
+
+  assert.match(html, /\(3 steps\)/)
+  assert.doesNotMatch(html, /standalone-success/)
 })

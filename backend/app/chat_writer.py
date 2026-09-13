@@ -6273,20 +6273,29 @@ def _apply_platform_restart_feedback(
         break
     if matched is not None:
       break
-  action, question, _labels = _platform_restart_card_envelope(
-    matched, "Restart feedback",
-  )
+  if matched is None:
+    raise RestartCardStateChanged("Restart feedback: card is no longer present")
+  try:
+    action, question, _labels = _platform_restart_card_envelope(
+      matched, "Restart feedback",
+    )
+  except _PersistFailed as exc:
+    raise RestartCardActionConflict(
+      "This Restart request is no longer active. Tell the agent to check it again."
+    ) from exc
   prompt = question["question"]
   value = answers.get(prompt) if isinstance(prompt, str) else None
   if set(answers) != {prompt} or not isinstance(value, str) or not value.strip():
-    raise _PersistFailed("Restart feedback: answer does not match the card")
+    raise RestartCardActionConflict(
+      "Use this Restart card's current writing prompt."
+    )
 
   # A lost acknowledgement may retry the same cid after this exact settlement.
   if (action.get("status") == "responded" and matched.get("answers") == answers
       and matched.get("selected_options") == {}):
     return copy.deepcopy(action)
   if matched.get("answers") or chat.pending_question_id != question_id:
-    raise _PersistFailed("Restart feedback: card is no longer open")
+    raise RestartCardStateChanged("Restart feedback: card is no longer open")
 
   wait = db.query(models.ChatWait).filter(
     models.ChatWait.id == action["wait_id"],
@@ -6297,7 +6306,9 @@ def _apply_platform_restart_feedback(
   ).first()
   if (wait is None or wait.condition_json != action["requirement"]
       or wait.status not in ("armed", "met", "expired", "failed")):
-    raise _PersistFailed("Restart feedback: linked activation wait is not open")
+    raise RestartCardActionConflict(
+      "This Restart request is no longer active. Tell the agent to check it again."
+    )
 
   now = now_naive_utc()
   wait.status = "cancelled"
