@@ -620,8 +620,13 @@ export async function deliverIntent(record, request) {
     response = await request(record, { signal: controller.signal })
     let code
     if (response.status === 409) {
-      const payload = await response.json()
-      code = payload?.detail?.code
+      try {
+        const payload = await response.json()
+        code = payload?.detail?.code
+      } catch {
+        // The status still owns the terminal outcome when an intermediary
+        // strips or replaces the optional structured conflict detail.
+      }
     }
     return classifyReplayOutcome({ ok: response.ok, status: response.status, code })
   } catch (error) {

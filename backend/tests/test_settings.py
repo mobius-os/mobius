@@ -421,202 +421,148 @@ def test_set_chat_agent_defaults_persists_without_clobbering_background(client, 
   assert body["agent_settings"]["effort"] == "high"
 
 
-def test_set_background_agents_persists_to_shared_settings(client, auth):
-  """POST /api/settings stores primary/fallback without clobbering siblings."""
+def test_set_background_agents_persists_only_current_provider_rows(client, auth):
   from app.config import get_settings as _gs
   from app import providers
 
   data_dir = _gs().data_dir
   providers.write_agent_settings(data_dir, {"skills_enabled": True})
-  r = client.post(
+  rows = [
+    {"provider": "claude", "model": "claude-sonnet-4-6", "effort": "high", "enabled": True},
+    {"provider": "codex", "model": "gpt-5.4", "effort": "medium", "enabled": True},
+    {"provider": "mobius", "model": "inkling", "effort": "medium", "enabled": False},
+  ]
+  response = client.post(
     "/api/settings",
-    json={
-      "background_agents": {
-        "primary": {
-          "provider": "claude",
-          "model": "claude-sonnet-4-6",
-          "effort": "high",
-        },
-        "fallback": {
-          "provider": "codex",
-          "model": "gpt-5.4",
-          "effort": "medium",
-        },
-      },
-    },
+    json={"background_agents": {"providers": rows}},
     headers=auth,
   )
-  assert r.status_code == 200, r.text
+
+  assert response.status_code == 200, response.text
   merged = providers._load_agent_settings(data_dir)
   assert merged["skills_enabled"] is True
-  assert merged["background_agents"] == {
+  assert merged["background_agents"] == {"providers": rows}
+  resolved = client.get("/api/settings", headers=auth).json()["background_agents"]
+  assert resolved["providers"] == rows
+  assert resolved["primary"]["provider"] == "claude"
+  assert resolved["fallback"]["provider"] == "codex"
+
+
+def test_set_background_agents_requires_one_enabled_provider(client, auth):
+  response = client.post(
+    "/api/settings",
+    json={"background_agents": {"providers": [
+      {"provider": "codex", "model": "gpt-5.5", "enabled": False},
+    ]}},
+    headers=auth,
+  )
+  assert response.status_code == 422
+
+
+def test_set_background_agents_rejects_retired_primary_fallback_shape(client, auth):
+  response = client.post(
+    "/api/settings",
+    json={"background_agents": {"primary": {"provider": "claude"}}},
+    headers=auth,
+  )
+
+  assert response.status_code == 422
+
+
+def test_background_settings_cutover_trusts_current_rows_and_strips_mirrors(
+  tmp_path,
+):
+  from app import providers
+
+  settings = tmp_path / "shared" / "agent-settings.json"
+  settings.parent.mkdir(parents=True)
+  current_rows = [{
+    "provider": "claude", "model": None, "effort": "high", "enabled": True,
+  }]
+  settings.write_text(json.dumps({
+    "skills_enabled": True,
+    "background_agents": {
+      "providers": current_rows,
+      "primary": {"provider": "codex", "model": "obsolete-mirror"},
+      "fallback": {"provider": "mobius", "model": "spark"},
+      "future_policy": "preserve",
+    },
+  }))
+
+  assert providers.normalize_background_agent_settings(str(tmp_path)) is True
+  assert json.loads(settings.read_text()) == {
+    "skills_enabled": True,
+    "background_agents": {
+      "providers": current_rows,
+      "future_policy": "preserve",
+    },
+  }
+
+
+def test_background_settings_cutover_translates_aliases_without_guessing_model(
+  tmp_path,
+):
+  from app import providers
+
+  settings = tmp_path / "shared" / "agent-settings.json"
+  settings.parent.mkdir(parents=True)
+  old = {
+    "background_agents": {
+      "primary": {"provider": "claude", "effort": "high"},
+      "fallback": {"provider": "codex", "model": "gpt-5.5"},
+    },
+  }
+  settings.write_text(json.dumps(old))
+
+  assert providers.normalize_background_agent_settings(str(tmp_path)) is True
+  assert json.loads(settings.read_text())["background_agents"] == {
     "providers": [
-      {
-        "provider": "claude",
-        "model": "claude-sonnet-4-6",
-        "effort": "high",
-        "enabled": True,
-      },
-      {
-        "provider": "codex",
-        "model": "gpt-5.4",
-        "effort": "medium",
-        "enabled": True,
-      },
-      # Every known provider is normalized into the durable row set; mobius
-      # was not named in the request so it persists disabled with defaults.
-      {
-        "provider": "mobius",
-        "model": "inkling",
-        "effort": "medium",
-        "enabled": False,
-      },
+      {"provider": "claude", "effort": "high", "model": None, "enabled": True},
+      {"provider": "codex", "model": "gpt-5.5", "enabled": True},
     ],
-    "primary": {
-      "provider": "claude",
-      "model": "claude-sonnet-4-6",
-      "effort": "high",
-    },
-    "fallback": {
-      "provider": "codex",
-      "model": "gpt-5.4",
-      "effort": "medium",
-    },
   }
-  body = client.get("/api/settings", headers=auth).json()
-  assert body["background_agents"] == merged["background_agents"]
+  first = settings.read_text()
+  assert providers.normalize_background_agent_settings(str(tmp_path)) is True
+  assert settings.read_text() == first
+
+  # A partial restore of the old file reopens the shape-driven cutover.
+  settings.write_text(json.dumps(old))
+  assert providers.normalize_background_agent_settings(str(tmp_path)) is True
+  assert "primary" not in json.loads(settings.read_text())["background_agents"]
 
 
-def test_set_background_agent_provider_order_persists_legacy_mirror(client, auth):
-  """The ordered provider list is the source of truth; primary/fallback mirror it."""
-  from app.config import get_settings as _gs
+def test_background_settings_cutover_fails_closed_on_read_error(
+  tmp_path, monkeypatch,
+):
   from app import providers
 
-  data_dir = _gs().data_dir
-  r = client.post(
-    "/api/settings",
-    json={
-      "background_agents": {
-        "providers": [
-          {
-            "provider": "codex",
-            "model": "gpt-5.5",
-            "effort": "medium",
-            "enabled": True,
-          },
-          {
-            "provider": "claude",
-            "model": "claude-opus-4-8",
-            "effort": "xhigh",
-            "enabled": False,
-          },
-        ],
-      },
-    },
-    headers=auth,
-  )
-  assert r.status_code == 200, r.text
-  merged = providers._load_agent_settings(data_dir)
-  assert merged["background_agents"]["providers"] == [
-    {
-      "provider": "codex",
-      "model": "gpt-5.5",
-      "effort": "medium",
-      "enabled": True,
-    },
-    {
-      "provider": "claude",
-      "model": "claude-opus-4-8",
-      "effort": "xhigh",
-      "enabled": False,
-    },
-  ]
-  assert merged["background_agents"]["primary"] == {
-    "provider": "codex",
-    "model": "gpt-5.5",
-    "effort": "medium",
-  }
-  assert merged["background_agents"]["fallback"] is None
+  settings = tmp_path / "shared" / "agent-settings.json"
+  settings.parent.mkdir(parents=True)
+  settings.write_text("{}", encoding="utf-8")
+  original = providers.Path.read_text
+
+  def unreadable(path, *args, **kwargs):
+    if path == settings:
+      raise OSError("unreadable restored settings")
+    return original(path, *args, **kwargs)
+
+  monkeypatch.setattr(providers.Path, "read_text", unreadable)
+  assert providers.normalize_background_agent_settings(str(tmp_path)) is False
 
 
-def test_set_background_agents_primary_only_preserves_existing_fallback(client, auth):
-  """Partial background-agent updates should not silently remove fallback."""
-  from app.config import get_settings as _gs
+def test_background_settings_cutover_preserves_missing_and_invalid_json(tmp_path):
   from app import providers
 
-  data_dir = _gs().data_dir
-  providers.write_agent_settings(
-    data_dir,
-    {
-      "background_agents": {
-        "primary": {
-          "provider": "claude",
-          "model": "claude-sonnet-4-6",
-          "effort": "medium",
-        },
-        "fallback": {
-          "provider": "codex",
-          "model": "gpt-5.4",
-          "effort": "high",
-        },
-      }
-    },
-  )
-  r = client.post(
-    "/api/settings",
-    json={
-      "background_agents": {
-        "primary": {
-          "provider": "codex",
-          "model": "gpt-5.5",
-          "effort": "medium",
-        },
-      },
-    },
-    headers=auth,
-  )
-  assert r.status_code == 200, r.text
-  merged = providers._load_agent_settings(data_dir)
-  assert merged["background_agents"]["primary"] == {
-    "provider": "codex",
-    "model": "gpt-5.5",
-    "effort": "medium",
-  }
-  assert merged["background_agents"]["fallback"] == {
-    "provider": "codex",
-    "model": "gpt-5.4",
-    "effort": "high",
-  }
+  assert providers.normalize_background_agent_settings(str(tmp_path)) is True
+  settings = tmp_path / "shared" / "agent-settings.json"
+  settings.parent.mkdir(parents=True)
+  settings.write_text("{not valid json", encoding="utf-8")
 
-
-def test_set_background_agents_explicit_null_clears_fallback(client, auth):
-  """Explicit fallback null remains the deliberate way to remove fallback."""
-  from app.config import get_settings as _gs
-  from app import providers
-
-  data_dir = _gs().data_dir
-  providers.write_agent_settings(
-    data_dir,
-    {
-      "background_agents": {
-        "primary": {"provider": "claude", "model": None, "effort": "medium"},
-        "fallback": {"provider": "codex", "model": "gpt-5.4", "effort": "medium"},
-      }
-    },
-  )
-  r = client.post(
-    "/api/settings",
-    json={"background_agents": {"fallback": None}},
-    headers=auth,
-  )
-  assert r.status_code == 200, r.text
-  merged = providers._load_agent_settings(data_dir)
-  assert merged["background_agents"]["fallback"] is None
-  assert [
-    row for row in merged["background_agents"]["providers"]
-    if row["provider"] == "codex"
-  ][0]["enabled"] is False
-
+  assert providers.normalize_background_agent_settings(str(tmp_path)) is True
+  assert settings.read_text(encoding="utf-8") == "{not valid json"
+  settings.write_bytes(b"\xff\xfe")
+  assert providers.normalize_background_agent_settings(str(tmp_path)) is True
+  assert settings.read_bytes() == b"\xff\xfe"
 
 def test_settings_reports_agent_settings_disk_write_failure(client, auth, monkeypatch):
   """The UI must not show Saved when the shared settings file did not persist."""
@@ -696,18 +642,10 @@ def test_background_agent_settings_drops_cross_provider_models(tmp_path):
   providers.write_agent_settings(
     str(tmp_path),
     {
-      "background_agents": {
-        "primary": {
-          "provider": "claude",
-          "model": "gpt-5.5",
-          "effort": "high",
-        },
-        "fallback": {
-          "provider": "codex",
-          "model": "claude-opus-4-8",
-          "effort": "medium",
-        },
-      },
+      "background_agents": {"providers": [
+        {"provider": "claude", "model": "gpt-5.5", "effort": "high", "enabled": True},
+        {"provider": "codex", "model": "claude-opus-4-8", "effort": "medium", "enabled": True},
+      ]},
     },
   )
   background = providers.background_agent_settings(str(tmp_path), "claude")
@@ -727,7 +665,7 @@ def test_settings_rejects_unknown_background_agent_provider(client, auth):
   """Background agent provider ids share the same strict provider enum."""
   r = client.post(
     "/api/settings",
-    json={"background_agents": {"primary": {"provider": "bogus"}}},
+    json={"background_agents": {"providers": [{"provider": "bogus"}]}},
     headers=auth,
   )
   assert r.status_code == 422
@@ -763,18 +701,30 @@ def test_settings_update_provider_validator_rejects_unknown():
 # ─── Model registry + owner prefs ─────────────────────────────────────
 
 
-def test_model_registry_returns_known_models_on_missing_creds(client, auth):
+def test_model_registry_returns_known_models_on_discovery_failure(
+  client, auth, monkeypatch,
+):
   """`/api/models` returns KNOWN_MODELS for both providers when neither
   upstream is reachable. Confirms the per-provider fallback works.
 
-  The TestClient has no real Anthropic / Codex credentials so both
-  fetchers raise; the registry serves KNOWN_MODELS for both. Every
+  Provider discovery is forced offline, so the registry serves
+  KNOWN_MODELS for every provider. Every
   entry is `available=True` in the fallback path because there's no
   live signal to mark anything unavailable.
   """
-  from app.providers import (
-    KNOWN_MODELS, _fallback_models, invalidate_model_cache,
+  from app import providers
+  from app.providers import KNOWN_MODELS, _fallback_models, invalidate_model_cache
+
+  monkeypatch.setattr(
+    providers.PROVIDERS["mobius"],
+    "check_auth",
+    lambda _data_dir: "Möbius account is not linked",
   )
+
+  async def discovery_fails(_provider_id, _data_dir):
+    raise RuntimeError("offline")
+
+  monkeypatch.setattr(providers, "_fetch_provider_models", discovery_fails)
   invalidate_model_cache()
   res = client.get("/api/models", headers=auth)
   assert res.status_code == 200
@@ -787,7 +737,9 @@ def test_model_registry_returns_known_models_on_missing_creds(client, auth):
   mobius_ids = [m["id"] for m in body["providers"]["mobius"]]
   assert mobius_ids == KNOWN_MODELS["mobius"]
   assert [m["label"] for m in body["providers"]["mobius"]] == [
-    "Spark", "Evolve",
+    "Spark (Qwen3.8 27B)", "Evolve",
+    "Reflect (DeepSeek V4.1 Flash)", "Flow (GLM 5.3 Flash)",
+    "Prism (Gemini 3.8 Flash)",
   ]
   # Offline fallbacks use the exact model id; live catalogs own display names.
   by_id = {m["id"]: m for m in body["providers"]["claude"]}
@@ -993,21 +945,18 @@ def test_model_prefs_clear(client, auth, db):
   assert owner.model_prefs_json == {"hidden_ids": []}
 
 
-def test_live_model_entries_keep_curated_aliases_plus_live_extras():
-  """Live order leads while omitted compatibility aliases remain available."""
-  from app.providers import KNOWN_MODELS, _live_model_entries
-  merged = _live_model_entries(
+def test_live_model_entries_trust_successful_provider_catalog():
+  """A successful discovery response contains only provider-owned models."""
+  from app.providers import _live_model_entries
+  entries = _live_model_entries(
     "claude", ["claude-future-model", "claude-opus-4-8"],
   )
-  ids = [row["id"] for row in merged]
-  assert ids[:2] == ["claude-future-model", "claude-opus-4-8"]
-  assert ids[2:] == [
-    model_id for model_id in KNOWN_MODELS["claude"]
-    if model_id != "claude-opus-4-8"
+  assert [row["id"] for row in entries] == [
+    "claude-future-model", "claude-opus-4-8",
   ]
 
 
-def test_live_model_entries_float_curated_defaults_in_requested_order():
+def test_live_model_entries_preserve_provider_order():
   from app import providers
 
   live = [
@@ -1017,10 +966,30 @@ def test_live_model_entries_float_curated_defaults_in_requested_order():
   entries = providers._live_model_entries(
     "claude", live,
   )
-  assert [entry["id"] for entry in entries] == live + [
-    model_id for model_id in providers.KNOWN_MODELS["claude"]
-    if model_id not in live
-  ]
+  assert [entry["id"] for entry in entries] == live
+
+
+def test_offline_model_fallback_keeps_real_provider_ids_only():
+  from app import providers
+
+  claude_ids = {row["id"] for row in providers._fallback_models("claude")}
+  codex_ids = {row["id"] for row in providers._fallback_models("codex")}
+  assert {
+    "claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6",
+    "claude-opus-4-5-20251101", "claude-sonnet-4-6",
+    "claude-sonnet-4-5-20250929", "claude-haiku-4-5-20251001",
+  }.issubset(claude_ids)
+  assert {
+    "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5",
+    "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex-spark",
+  }.issubset(codex_ids)
+  assert not {
+    "claude-opus-4-5-20251001",
+    "claude-sonnet-4-5-20251001",
+    "claude-opus-4-6-20251015",
+    "claude-opus-4-7-20251215",
+    "claude-sonnet-4-7-20251215",
+  } & claude_ids
 
 
 def test_live_model_entries_prefer_provider_display_names():

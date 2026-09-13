@@ -699,6 +699,9 @@ test('question admission blocks follow-ups without being confused with transport
   assert.equal(await deliverIntent(record, async () => ({
     ...httpResponse(409), json: async () => ({ detail: { code: 'cid_conflict' } }),
   })), 'failed')
+  assert.equal(await deliverIntent(record, async () => ({
+    ...httpResponse(409), json: async () => { throw new SyntaxError('not JSON') },
+  })), 'failed', 'an unstructured conflict stays terminal instead of retrying forever')
 })
 
 

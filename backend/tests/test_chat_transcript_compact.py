@@ -106,6 +106,7 @@ def test_compacts_multi_step_activity_and_preserves_render_metadata():
 
   assert compact is not messages
   assert compact[0] is not messages[0]
+  assert compact[0]["interaction_tool_projection_version"] == 1
   assert "content" not in compact[0]
   assert compact[0]["blocks"][0] == {"type": "text", "content": "Before"}
   summary = compact[0]["blocks"][1]
@@ -463,6 +464,136 @@ def test_compact_route_defers_activity_detail_until_expansion(client, auth):
   assert entries[1]["item"]["output"] == "hello"
 
 
+def test_restart_card_owns_its_tool_in_compact_and_expanded_activity(client, auth):
+  messages = [{
+    "role": "assistant",
+    "blocks": [
+      {"type": "tool", "tool": "Bash", "tool_use_id": "bash-1"},
+      {"type": "tool", "tool": "Bash", "tool_use_id": "bash-2"},
+      {"type": "tool", "tool": "Bash", "tool_use_id": "bash-3"},
+      {
+        "type": "tool", "tool": "mcp__mobius_control__request_restart",
+        "tool_use_id": "restart-tool",
+      },
+      {
+        "type": "question", "question_id": "restart-card",
+        "questions": [{"id": "restart", "question": "Restart?", "options": []}],
+        "platform_action": {"type": "restart", "version": 2},
+      },
+    ],
+  }]
+  created = client.post(
+    "/api/chats", headers=auth,
+    json={"title": "Compact Restart ownership", "messages": messages},
+  )
+  chat_id = created.json()["id"]
+
+  compact = client.get(
+    f"/api/chats/{chat_id}?limit=20&compact=1", headers=auth,
+  )
+  assert compact.status_code == 200
+  activity = compact.json()["messages"][0]["blocks"][0]
+  assert activity["type"] == "activity"
+  assert activity["tool_count"] == 3
+  assert [entry["item"]["tool"] for entry in activity["entries"]] == [
+    "Bash", "Bash",
+  ]
+
+  detail = client.get(
+    f"/api/chats/{chat_id}/activity-detail"
+    "?message_index=0&start=0&end=4",
+    headers=auth,
+  )
+  assert detail.status_code == 200
+  assert [entry["item"]["tool"] for entry in detail.json()["entries"]] == [
+    "Bash", "Bash", "Bash",
+  ]
+
+
+def test_restart_card_keeps_an_earlier_failed_request_visible(client, auth):
+  messages = [{
+    "role": "assistant",
+    "blocks": [
+      {
+        "type": "tool", "tool": "mcp__mobius_control__request_restart",
+        "tool_use_id": "failed-restart", "status": "done",
+        "output": "Working tree is dirty", "output_exit_code": 1,
+      },
+      {
+        "type": "tool", "tool": "mcp__mobius_control__request_restart",
+        "tool_use_id": "successful-restart", "status": "done",
+      },
+      {
+        "type": "question", "question_id": "restart-card",
+        "questions": [{"id": "restart", "question": "Restart?", "options": []}],
+        "platform_action": {"type": "restart", "version": 2},
+      },
+    ],
+  }]
+  created = client.post(
+    "/api/chats", headers=auth,
+    json={"title": "Failed Restart evidence", "messages": messages},
+  )
+  chat_id = created.json()["id"]
+
+  compact = client.get(
+    f"/api/chats/{chat_id}?limit=20&compact=1", headers=auth,
+  ).json()["messages"][0]["blocks"]
+  assert compact[0]["tool"] == "mcp__mobius_control__request_restart"
+  assert compact[0]["tool_use_id"] == "failed-restart"
+
+  detail = client.get(
+    f"/api/chats/{chat_id}/activity-detail"
+    "?message_index=0&start=0&end=2",
+    headers=auth,
+  )
+  assert detail.status_code == 200
+  assert [entry["item"]["tool_use_id"] for entry in detail.json()["entries"]] == [
+    "failed-restart",
+  ]
+
+
+def test_tool_pairing_never_parses_unrelated_tool_output(monkeypatch):
+  from app import chat_transcript
+
+  def unexpected_parse(_output):
+    raise AssertionError("unrelated tool output must not be parsed")
+
+  monkeypatch.setattr(chat_transcript, "tool_output_exit_code", unexpected_parse)
+  assert chat_transcript.redundant_interaction_tool_indexes([
+    {"type": "tool", "tool": "Bash", "output": "large output"},
+  ]) == set()
+
+
+def test_restart_card_never_owns_a_legacy_parse_only_failure(client, auth):
+  messages = [{
+    "role": "assistant",
+    "blocks": [
+      {
+        "type": "tool", "tool": "mcp__mobius_control__request_restart",
+        "tool_use_id": "failed-restart", "status": "done",
+        "output": '{"result":"{\\"exit_code\\":1,\\"stderr\\":\\"failed\\"}"}',
+      },
+      {
+        "type": "question", "question_id": "restart-card",
+        "questions": [{"id": "restart", "question": "Restart?", "options": []}],
+        "platform_action": {"type": "restart", "version": 2},
+      },
+    ],
+  }]
+  created = client.post(
+    "/api/chats", headers=auth,
+    json={"title": "Only failed Restart", "messages": messages},
+  )
+  chat_id = created.json()["id"]
+
+  compact = client.get(
+    f"/api/chats/{chat_id}?limit=20&compact=1", headers=auth,
+  ).json()["messages"][0]["blocks"]
+  assert compact[0]["type"] == "tool"
+  assert compact[0]["tool_use_id"] == "failed-restart"
+
+
 def test_compact_route_defers_reference_metadata_until_expansion(client, auth):
   first = {
     "title": "First title",
@@ -611,6 +742,9 @@ def test_runtime_route_does_not_select_transcript_json(
   assert runtime.status_code == 200
   assert runtime.json() == {
     "running": True,
+    "run_id": None,
+    "run_status": None,
+    "runtime_revision": 0,
     "active_assistant_message_id": None,
     "recovery_run_id": None,
     "active_goal_objective": None,
@@ -634,6 +768,32 @@ def test_runtime_route_does_not_select_transcript_json(
     "json_extract(chats.live_assistant" in statement
     for statement in statements
   )
+
+
+def test_runtime_projection_orders_run_transitions_with_the_lifecycle_cursor(
+  client, auth, db, monkeypatch,
+):
+  chat_id = client.post(
+    "/api/chats", headers=auth, json={"title": "Revisioned runtime"},
+  ).json()["id"]
+  run = models.ChatRun(id="revision-run", chat_id=chat_id, status="running")
+  db.add(run)
+  db.commit()
+  monkeypatch.setattr("app.routes.chats.is_chat_running", lambda _: True)
+
+  running = client.get(f"/api/chats/{chat_id}/runtime", headers=auth).json()
+  assert running["run_id"] == "revision-run"
+  assert running["run_status"] == "running"
+  assert running["runtime_revision"] > 0
+
+  run.status = "completed"
+  db.commit()
+  monkeypatch.setattr("app.routes.chats.is_chat_running", lambda _: False)
+  completed = client.get(f"/api/chats/{chat_id}/runtime", headers=auth).json()
+
+  assert completed["run_id"] == "revision-run"
+  assert completed["run_status"] == "completed"
+  assert completed["runtime_revision"] > running["runtime_revision"]
 
 
 def test_detail_and_runtime_expose_the_durable_assistant_owner(

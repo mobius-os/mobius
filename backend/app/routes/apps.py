@@ -22,8 +22,8 @@ from sqlalchemy.orm import Session, defer
 
 from app import (
   activity, app_activity, app_apply, app_capability_acceptance, app_git,
-  app_jobs, app_recency, chat_app_artifacts, chat_queue, fs_locks, icon_cache,
-  models, project_git, providers, schemas,
+  app_jobs, app_recency, chat_app_artifacts, chat_queue, drawer_pins, fs_locks,
+  icon_cache, models, project_git, providers, schemas,
   source_dirs, workspace_files,
 )
 from app.app_identity import (
@@ -527,28 +527,6 @@ async def _hard_delete_app(db: Session, app: models.App) -> None:
   critic_chat_ids = [row[0] for row in db.query(
     models.Delegation.child_chat_id,
   ).filter(models.Delegation.app_id == deleted_app_id).all()]
-  gauntlet_ids = {row[0] for row in db.query(models.GauntletRun.id).filter(
-    models.GauntletRun.app_id == deleted_app_id,
-  ).all()}
-  if delegation_ids:
-    gauntlet_ids.update(row[0] for row in db.query(
-      models.GauntletTask.gauntlet_run_id,
-    ).filter(
-      models.GauntletTask.delegation_id.in_(delegation_ids),
-    ).all())
-  task_query = db.query(models.GauntletTask)
-  task_filters = []
-  if gauntlet_ids:
-    task_filters.append(models.GauntletTask.gauntlet_run_id.in_(gauntlet_ids))
-  if delegation_ids:
-    task_filters.append(models.GauntletTask.delegation_id.in_(delegation_ids))
-  if task_filters:
-    from sqlalchemy import or_
-    task_query.filter(or_(*task_filters)).delete(synchronize_session=False)
-  if gauntlet_ids:
-    db.query(models.GauntletRun).filter(
-      models.GauntletRun.id.in_(gauntlet_ids),
-    ).delete(synchronize_session=False)
   if delegation_ids:
     db.query(models.Delegation).filter(
       models.Delegation.id.in_(delegation_ids),
@@ -1594,8 +1572,22 @@ async def update_candidate_preview(
     else install._canonical_base(installed_manifest_url) + "/mobius.json"
   )
   fetched = await install.fetch_upstream_source(fetch_manifest_url)
-  if manifest_url is not None and not install._catalog_identity_matches(
-    installed_manifest_url, manifest_url, fetched.manifest["id"],
+  predecessor_source, _ = install._reviewed_predecessor_source(
+    fetched.manifest, manifest_url or fetch_manifest_url,
+  )
+  predecessor_matches = bool(
+    fetched.manifest.get("previous_id")
+    and install._catalog_identity_matches(
+      installed_manifest_url,
+      predecessor_source,
+      fetched.manifest["previous_id"],
+    )
+  )
+  if manifest_url is not None and not (
+    install._catalog_identity_matches(
+      installed_manifest_url, manifest_url, fetched.manifest["id"],
+    )
+    or predecessor_matches
   ):
     raise HTTPException(
       409, "Requested update source does not match the installed app.",
@@ -2537,8 +2529,6 @@ async def update_app(
       app.description = body.description
     if body.chat_id is not None:
       app.chat_id = body.chat_id
-    if body.pinned is not None:
-      app.pinned_at = now_naive_utc() if body.pinned else None
     if body.share_with_apps is not None:
       app.share_with_apps = body.share_with_apps
     if body.cross_app_access is not None:
@@ -2620,7 +2610,22 @@ async def update_app(
         # honest live-state projection instead of leaving review data absent.
         or contract_from_app_state(app)
       )
-    db.commit()
+    if body.pinned is not None:
+      # This timestamp participates in the drawer's combined chat/app/project
+      # order, so no reorder may validate between this assignment and commit.
+      with drawer_pins.serialized_write():
+        superseded = drawer_pins.intent_is_superseded(
+          body.pin_intent_client, body.pin_intent_version,
+        )
+        if not superseded:
+          app.pinned_at = now_naive_utc() if body.pinned else None
+        db.commit()
+        if not superseded:
+          drawer_pins.record_committed_intent(
+            body.pin_intent_client, body.pin_intent_version,
+          )
+    else:
+      db.commit()
     db.refresh(app)
     # A pin toggle is drawer-local ORDERING, not a change to the app itself, so
     # it must not ride the app_updated wire. Drag-reorder re-stamps every pinned
@@ -3012,15 +3017,16 @@ async def delete_app(
       # Naive UTC to match SQLite's naive storage + the naive TTL comparison in
       # list_apps / recover_app (same contract chats.py documents). Avoids a
       # platform-dependent aware/naive round-trip mismatch.
-      app.deleted_at = now_naive_utc()
-      # Tombstoning is a permanent credential boundary, even if the same row is
-      # later recovered. Without this rotation, an app token rejected while the
-      # row is deleted becomes valid again as soon as recovery clears deleted_at.
-      app.token_nonce = secrets.token_hex(16)
-      app_name = app.name
-      app_slug = app.slug
-      app_source_dir = app.source_dir
-      db.commit()
+      with drawer_pins.serialized_write():
+        app.deleted_at = now_naive_utc()
+        # Tombstoning is a permanent credential boundary, even if the same row is
+        # later recovered. Without this rotation, an app token rejected while the
+        # row is deleted becomes valid again as soon as recovery clears deleted_at.
+        app.token_nonce = secrets.token_hex(16)
+        app_name = app.name
+        app_slug = app.slug
+        app_source_dir = app.source_dir
+        db.commit()
     # Publish the durable tombstone before best-effort job/skill/cron cleanup.
     # Cleanup errors must not leave live shells projecting a row the database
     # has already removed from the drawer.
@@ -3245,10 +3251,11 @@ async def recover_app(
           status_code=422,
           detail=f"Could not rebuild app for recovery: {exc}",
         )
-    app.deleted_at = None
-    app_name = app.name
-    app_source_dir = app.source_dir
-    db.commit()
+    with drawer_pins.serialized_write():
+      app.deleted_at = None
+      app_name = app.name
+      app_source_dir = app.source_dir
+      db.commit()
     # Recovery is durable at this point. Publish before ancillary cron/skill
     # restoration so a later best-effort failure cannot leave the live drawer
     # hidden behind a stale deletion tombstone.

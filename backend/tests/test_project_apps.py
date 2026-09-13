@@ -89,6 +89,14 @@ def test_failed_publication_restores_previous_creation(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize('outcome', ['cancel', 'missing_output', 'replace'])
 def test_rebuild_publishes_only_complete_output(client, auth, monkeypatch, outcome):
+  monkeypatch.setitem(project_builders.BUILTIN_ARTIFACT_TYPES, 'website', {
+    'id': 'website', 'name': 'Test output', 'extensions': ['html'],
+    'preview': 'html', 'script': None, 'output': '{source}',
+  })
+  async def initial_build(**kwargs):
+    kwargs['output_dir'].mkdir(parents=True, exist_ok=True)
+    (kwargs['output_dir'] / 'index.html').write_text('old')
+  monkeypatch.setitem(project_builders.BUILDERS, 'website', initial_build)
   project = client.post('/api/projects', headers=auth,
     json={'name': 'Build fixture', 'template_id': 'blank'}).json()
   project_id = project['id']

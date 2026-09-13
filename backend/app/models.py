@@ -500,9 +500,6 @@ class Delegation(Base):
   # above and child transcript are sufficient and this transient recovery copy
   # is cleared.
   startup_prompt = Column(Text, nullable=True, default=None)
-  # Retained for historical Gauntlet task budgets. Ordinary Delegations do not
-  # acquire or enforce a provider budget through this column.
-  max_budget_usd = Column(Float, nullable=True)
   created_at = Column(DateTime, nullable=False, default=lambda: now_naive_utc())
   cancelled_at = Column(DateTime, nullable=True, default=None)
   # Opt-in: the parent explicitly waits for this result and may receive one
@@ -594,8 +591,9 @@ class ChatWait(Base):
   interval_secs = Column(Integer, nullable=False, default=300)
   # Command/timer waits never rot silently: on deadline the chat is woken with
   # `deadline_expired` so the agent decides what to do next. Platform
-  # activation rows share this required column but deliberately do not expire;
-  # their owner card remains until answer, cancellation, or a later ready boot.
+  # activation rows share this required legacy storage column but deliberately
+  # do not expose or enforce it; their owner card remains until answer,
+  # cancellation, or a later ready boot.
   deadline_at = Column(DateTime, nullable=False)
   # armed -> met | expired | failed | cancelled. `failed` means the check
   # itself broke (distinct from a valid silent exit-1 "not yet"). Terminal
@@ -656,151 +654,6 @@ class PlatformRestartExecution(Base):
   admitted_at = Column(DateTime, nullable=True, default=None)
   activated_boot_id = Column(String(160), nullable=True, default=None)
   settled_at = Column(DateTime, nullable=True, default=None)
-
-
-class GauntletRun(Base):
-  """Legacy workflow history retained for non-destructive lifecycle cleanup.
-
-  Current code never creates or advances these rows. The cold-start retirement
-  cutover makes old execution graphs terminal before generic ChatRun or
-  Delegation recovery, while the normal chat/app hard-purge paths retain this
-  model so historical data can be removed with its owner.
-  """
-
-  __tablename__ = "gauntlet_runs"
-  __table_args__ = (
-    CheckConstraint(
-      "status IN "
-      "('running','stopping','completed','budget_exhausted','failed','stopped')",
-      name="ck_gauntlet_runs_status",
-    ),
-    CheckConstraint(
-      "phase IN ('baseline','integrate','evaluate','terminal')",
-      name="ck_gauntlet_runs_phase",
-    ),
-    CheckConstraint("current_round >= 0", name="ck_gauntlet_runs_round"),
-    CheckConstraint("max_rounds >= 1", name="ck_gauntlet_runs_max_rounds"),
-    CheckConstraint(
-      "(status IN ('running','stopping') AND active_target_key IS NOT NULL) OR "
-      "(status NOT IN ('running','stopping') AND active_target_key IS NULL)",
-      name="ck_gauntlet_runs_active_target",
-    ),
-    CheckConstraint(
-      "(status = 'stopping' AND requested_terminal_status IN "
-      "('stopped','budget_exhausted','failed')) OR "
-      "(status != 'stopping' AND requested_terminal_status IS NULL)",
-      name="ck_gauntlet_runs_requested_terminal",
-    ),
-  )
-
-  # Caller-provided stable identity is also POST idempotency.
-  id = Column(String(64), primary_key=True)
-  app_id = Column(Integer, ForeignKey("apps.id"), nullable=False, index=True)
-  parent_chat_id = Column(
-    String(64), ForeignKey("chats.id"), nullable=False, index=True
-  )
-  # The controller's original logical run.  Like Delegation's parent root,
-  # this intentionally has no FK so audit state survives unusual run repair.
-  parent_root_run_id = Column(String(64), nullable=False, index=True)
-  target_path = Column(String(1024), nullable=False)
-  # A nullable unique lease: exactly one running coordinator may own a target,
-  # while terminal historical rows all release it to NULL. The value is the
-  # normalized path's SHA-256 digest, keeping the unique index bounded even on
-  # databases with tight index-key byte limits.
-  active_target_key = Column(
-    String(64), nullable=True, unique=True, index=True
-  )
-  contract_json = Column(JSON, nullable=False)
-  contract_sha256 = Column(String(64), nullable=False)
-  provider = Column(String(32), nullable=False)
-  model = Column(String(256), nullable=True)
-  effort = Column(String(32), nullable=True)
-  status = Column(String(24), nullable=False, default="running", index=True)
-  phase = Column(String(16), nullable=False, default="baseline")
-  current_round = Column(Integer, nullable=False, default=0)
-  max_rounds = Column(Integer, nullable=False)
-  max_budget_usd = Column(Float, nullable=True)
-  deadline_at = Column(DateTime, nullable=True)
-  stop_requested_at = Column(DateTime, nullable=True, default=None)
-  requested_terminal_status = Column(String(24), nullable=True, default=None)
-  terminal_reason = Column(Text, nullable=True, default=None)
-  revision = Column(Integer, nullable=False, default=0)
-  created_at = Column(DateTime, nullable=False, default=now_naive_utc)
-  updated_at = Column(DateTime, nullable=False, default=now_naive_utc)
-  ended_at = Column(DateTime, nullable=True, default=None)
-
-
-LEGACY_GAUNTLET_RETIREMENT_MARKER_ID = -1
-
-
-class GauntletTargetMutex(Base):
-  """Legacy workflow-owned singleton state retained after removal.
-
-  Historical writers used row ``1`` as the target-lease mutex.  The retirement
-  cutover reserves ``LEGACY_GAUNTLET_RETIREMENT_MARKER_ID`` as its atomic
-  completion marker. Keeping both in this already-owned table avoids a new
-  general migration service while making later boots an indexed marker lookup
-  rather than another history scan.
-  """
-
-  __tablename__ = "gauntlet_target_mutex"
-
-  id = Column(Integer, primary_key=True)
-  revision = Column(Integer, nullable=False, default=0)
-
-
-class GauntletTask(Base):
-  """Legacy execution-slot history retained with a Gauntlet record.
-
-  The links remain mapped so startup can retire old controller/delegation work
-  exactly and retention can purge the graph after its owner expires. No
-  current runtime schedules these slots.
-  """
-
-  __tablename__ = "gauntlet_tasks"
-  __table_args__ = (
-    UniqueConstraint(
-      "gauntlet_run_id", "phase", "round", "ordinal",
-      name="uq_gauntlet_tasks_phase_slot",
-    ),
-    CheckConstraint(
-      "(scope = 'read' AND phase IN ('baseline','evaluate') "
-      "AND delegation_id IS NOT NULL AND chat_run_id IS NULL) OR "
-      "(scope = 'write' AND phase = 'integrate' AND ordinal = 0 "
-      "AND delegation_id IS NULL AND chat_run_id IS NOT NULL)",
-      name="ck_gauntlet_tasks_execution_shape",
-    ),
-    CheckConstraint("round >= 0", name="ck_gauntlet_tasks_round"),
-    CheckConstraint("ordinal >= 0", name="ck_gauntlet_tasks_ordinal"),
-    CheckConstraint(
-      "retry_count >= 0 AND retry_count <= 1",
-      name="ck_gauntlet_tasks_retry_count",
-    ),
-    CheckConstraint(
-      "max_budget_usd IS NULL OR max_budget_usd > 0",
-      name="ck_gauntlet_tasks_budget",
-    ),
-  )
-
-  id = Column(String(64), primary_key=True)
-  gauntlet_run_id = Column(
-    String(64), ForeignKey("gauntlet_runs.id"), nullable=False, index=True
-  )
-  phase = Column(String(16), nullable=False)
-  round = Column(Integer, nullable=False)
-  ordinal = Column(Integer, nullable=False)
-  role = Column(String(128), nullable=False)
-  scope = Column(String(16), nullable=False)
-  delegation_id = Column(
-    String(64), ForeignKey("delegations.id"), nullable=True, unique=True
-  )
-  chat_run_id = Column(String(64), nullable=True, unique=True)
-  # One deterministic execution reservation. Claude enforces this on the
-  # provider turn; Codex reports only observed spend, surfaced by the API.
-  max_budget_usd = Column(Float, nullable=True)
-  retry_count = Column(Integer, nullable=False, default=0)
-  prompt_sha256 = Column(String(64), nullable=False)
-  created_at = Column(DateTime, nullable=False, default=now_naive_utc)
 
 
 class ChatSessionLink(Base):
@@ -892,8 +745,8 @@ class AgentLifecycleEvent(Base):
   source_event_id = Column(String(160), nullable=True)
 
 
-class AgentLifecycleRunUpdate(Base):
-  """Append-only cursor stream of root ChatRun snapshots for Workflows.
+class ChatRunUpdate(Base):
+  """Append-only cursor stream of root ChatRun snapshots for lifecycle consumers.
 
   A helper event cursor cannot reveal a later root-run status change, while
   returning every historical run on each poll is unbounded. This companion
@@ -902,7 +755,7 @@ class AgentLifecycleRunUpdate(Base):
   rollback of a speculative ChatRun so consumers can remove the prior snapshot.
   """
 
-  __tablename__ = "agent_lifecycle_run_updates"
+  __tablename__ = "chat_run_updates"
   __table_args__ = {"sqlite_autoincrement": True}
 
   id = Column(Integer, primary_key=True, autoincrement=True)
@@ -921,7 +774,7 @@ class AgentLifecycleRunUpdate(Base):
 
 def _append_agent_lifecycle_run_update(_mapper, connection, run) -> None:
   """Record every inserted/updated ChatRun snapshot in the same transaction."""
-  connection.execute(AgentLifecycleRunUpdate.__table__.insert().values(
+  connection.execute(ChatRunUpdate.__table__.insert().values(
     chat_id=run.chat_id,
     chat_run_id=run.id,
     provider=run.provider,
@@ -934,7 +787,7 @@ def _append_agent_lifecycle_run_update(_mapper, connection, run) -> None:
 
 def _append_agent_lifecycle_run_tombstone(_mapper, connection, run) -> None:
   """Keep cursor consumers honest when a speculative ChatRun is rolled back."""
-  connection.execute(AgentLifecycleRunUpdate.__table__.insert().values(
+  connection.execute(ChatRunUpdate.__table__.insert().values(
     chat_id=run.chat_id,
     chat_run_id=run.id,
     provider=run.provider,
@@ -1291,10 +1144,9 @@ class App(Base):
 class Project(Base):
   """A first-class owner workspace containing files, chats, and artifacts.
 
-  Project files live outside the database. ``root_path`` is nevertheless
-  explicit so a non-destructive legacy import can point at an existing
-  app-storage ``files/`` tree without moving it. All access goes through the
-  project router's resolved-path confinement.
+  Project files live outside the database. ``root_path`` is explicit so
+  Projects can manage an existing confined source tree without copying it.
+  All access goes through the project router's resolved-path confinement.
   """
 
   __tablename__ = "projects"
@@ -1319,13 +1171,13 @@ class Project(Base):
     nullable=True, default=None, index=True,
   )
   template_snapshot_json = Column(JSON, nullable=False, default=dict)
-  legacy_source_json = Column(JSON, nullable=True, default=None)
   # Artifact registry plus per-artifact build status for this project. The ORM
   # row is the atomic source of truth (mirrors ``template_snapshot_json``), not
   # a lock-free on-disk manifest: build status transitions read-update-commit
   # this column serialized by the per-project build lock. Each entry is
-  # {id, name, builder, source, output_rel, status, updated_at, duration_ms,
-  # log_rel}. Nullable so an existing row reads as "no artifacts yet." The agent
+  # {id, name, builder, source, output_rel, preview, type_name, status,
+  # updated_at, duration_ms, log_rel}. Nullable so a row can have no artifacts.
+  # The agent
   # owns the project tree and may hand-edit this value, so every read tolerates
   # malformed entries rather than trusting the shape (see project_builders and
   # routes/projects.py artifact listing).

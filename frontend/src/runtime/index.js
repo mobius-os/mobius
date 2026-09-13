@@ -56,7 +56,6 @@
 //     session.ready, session.result, session.on(event, cb), finish(), cancel()
 //   window.mobius.capabilities.invoke(name, input, {signal?}) -> one-shot result
 //   window.mobius.projects.list()                    -> projects created by this app
-//   window.mobius.projects.migrate()                 -> import this app's legacy projects
 //   window.mobius.projects.create({templateId,name}) -> create and open a native project
 //   window.mobius.projects.open(projectId)           -> open one of this app's projects
 //   window.mobius.projects.browse()                  -> open the Projects directory

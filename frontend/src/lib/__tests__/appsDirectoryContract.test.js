@@ -57,7 +57,7 @@ test('phone and web share one searchable launcher tab', () => {
   )?.[0] || ''
   assert.match(phoneMenu, /drawer__item-action-menu[\s\S]*?width:\s*224px/)
   assert.doesNotMatch(phoneMenu, /\n\s*bottom:|backdrop-filter|drawer-item-sheet-in/)
-  assert.match(shell, /const navigationSurfaceOpen = modalDrawerOpen/)
+  assert.match(shell, /id="main-content"[\s\S]*?inert=\{modalDrawerOpen\}/)
 })
 
 test('chat, app, and project rows share one placed action menu contract', () => {

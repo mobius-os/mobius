@@ -204,6 +204,38 @@ export function shouldRepairRuntimeStream({
   return connectionError !== 'retrying'
 }
 
+export function runtimeSnapshot(value = {}) {
+  const revision = value.runtime_revision ?? value.runtimeRevision
+  if (!Number.isSafeInteger(revision) || revision < 0) return null
+  const runId = value.run_id ?? value.runId ?? null
+  const status = value.running
+    ? 'running'
+    : (value.run_status ?? value.runStatus ?? null)
+  return {
+    revision,
+    runId: typeof runId === 'string' && runId ? runId : null,
+    status: typeof status === 'string' && status ? status : null,
+  }
+}
+
+/**
+ * Order every HTTP runtime projection by the database-owned lifecycle cursor.
+ * A response captured before a newer run transition cannot overwrite that
+ * transition merely because it arrived later in the browser.
+ */
+export function runtimeSnapshotTransition(current, incoming) {
+  const next = runtimeSnapshot(incoming)
+  if (!next) return { adopt: false, settled: false, next: current || null }
+  if (current && next.revision < current.revision) {
+    return { adopt: false, settled: false, next: current }
+  }
+  const settled = !!current
+    && current.status === 'running'
+    && current.runId === next.runId
+    && next.status !== 'running'
+  return { adopt: true, settled, next }
+}
+
 /** Retire only a cold restored prefix proven older than the durable card. */
 export function shouldRetireRestoredQuestionSnapshot({
   isStreaming = false,
@@ -229,14 +261,16 @@ export function shouldRetireRestoredQuestionSnapshot({
  * for a completed turn.
  */
 export function shouldRecoverSettledRuntime({
-  runtimeWasObservedRunning = false,
+  settledRun = false,
+  runtimeRunId = null,
   runtimeRunning = false,
   pendingCount = 0,
   streamStillActive = false,
   stopInFlight = false,
   localStartInFlight = false,
 } = {}) {
-  return !!runtimeWasObservedRunning
+  return !!settledRun
+    && !!runtimeRunId
     && runtimeRunning === false
     && pendingCount === 0
     && !!streamStillActive

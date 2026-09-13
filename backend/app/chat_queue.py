@@ -218,6 +218,8 @@ async def promote_pending_messages_locked(
   chat_id: str,
   run_token: str,
   ending_status: str = "completed",
+  ending_run_token: str = "",
+  allow_goal_continuation: bool = False,
 ) -> tuple[list[schemas.ChatMessage], dict | None, str | None]:
   """Inner promote logic. PRECONDITION: caller holds the per-chat
   queue lock.
@@ -260,6 +262,8 @@ async def promote_pending_messages_locked(
       chat_id=chat_id,
       run_token=run_token,
       ending_status=ending_status,
+      ending_run_token=ending_run_token,
+      allow_goal_continuation=allow_goal_continuation,
     )
   )
   result = await await_ack(ack)
@@ -321,6 +325,7 @@ async def drain_and_release(
   current_generation,
   ending_run_token: str = "",
   ending_status: str = "completed",
+  allow_goal_continuation: bool = False,
 ) -> tuple[dict | None, list, str | None, "TerminalDisposition"]:
   """End-of-turn queue drain. Returns (next_user, next_messages,
   next_session_id, disposition) for the caller to publish + schedule.
@@ -329,6 +334,9 @@ async def drain_and_release(
   (`asyncio.timeout(TERMINAL_LOCK_TIMEOUT_SECS)` around `get_lock`):
     - Promotes pending_messages (if any) via the actor's
       `PromotePending` (keyed on `run_token`, the continuation's token).
+      When enabled for a real provider terminal, that same actor transition
+      first supplies one exact continuation for an unfinished Goal that has no
+      saved question, monitor/helper, or queued executor.
       Promoted follow-ups → `CONTINUATION_PROMOTED`: the marker stays
       continuously set (PromotePending re-set it for the next turn) and
       ownership passes to the scheduled continuation; do NOT clear/forget.
@@ -391,7 +399,12 @@ async def drain_and_release(
       try:
         next_messages, first_pending, next_session_id = (
           await promote_pending_messages_locked(
-            db, chat_id, run_token, ending_status=ending_status,
+            db,
+            chat_id,
+            run_token,
+            ending_status=ending_status,
+            ending_run_token=ending_run_token,
+            allow_goal_continuation=allow_goal_continuation,
           )
         )
       except PendingAdmissionBlocksPromotion as hold:

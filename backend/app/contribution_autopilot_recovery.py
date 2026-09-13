@@ -10,11 +10,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 
 from sqlalchemy import exists, update
 
-from app import contribution_autopilot as autopilot, fs_locks, models
+from app import app_services, contribution_autopilot as autopilot, fs_locks, models
 from app.contribution_records import read_record, record_paths, write_record
 from app.database import SessionLocal
 from app.timeutil import now_naive_utc
@@ -22,68 +22,45 @@ from app.timeutil import now_naive_utc
 log = logging.getLogger(__name__)
 
 
-def _has_reviewed_resolution(row: models.ContributionAutopilot, record: dict) -> bool:
-  """Require a fresh, exact published-head review, not just a dismissed alert."""
-  if (
-    record.get("id") != row.record_id
-    or record.get("repo") != row.target_repo
-    or record.get("type") != "pr"
-    or record.get("status") not in {"open", "draft"}
-    or record.get("needs_attention")
-    or record.get("attention")
-    or row.blocked_at is None
-  ):
-    return False
-  plan = record.get("plan")
-  review = record.get("quality_review")
-  if not isinstance(plan, dict) or not isinstance(review, dict):
-    return False
-  expected = (
-    row.target_repo, row.target_pr_number, row.target_head_repository,
-    row.target_branch, row.target_repo_path,
-  )
-  actual = (
-    plan.get("repo") or record.get("repo"), record.get("number"),
-    record.get("head_repository") or plan.get("head_repository"),
-    plan.get("branch") or record.get("branch"), plan.get("repo_path"),
-  )
-  if any(value in (None, "") for value in expected) or actual != expected:
-    return False
-  reviewed_head = review.get("reviewed_head_sha")
-  if (
-    review.get("state") != "all_clear"
-    or not row.granted_head_sha
-    or not reviewed_head
-    # The publisher may normalize attribution without changing the reviewed
-    # diff. Keep the same public-head equivalence as _personal_ready_target;
-    # the DB grant, not this marker, still pins the actual published head.
-    or reviewed_head not in {
-      row.granted_head_sha, plan.get("attribution_normalized_from"),
-    }
-    or plan.get("head_sha") != row.granted_head_sha
-  ):
-    return False
-  try:
-    reviewed_at = datetime.fromisoformat(
-      str(review.get("reviewed_at") or "").replace("Z", "+00:00")
-    )
-  except ValueError:
-    return False
-  if reviewed_at.tzinfo is None:
-    reviewed_at = reviewed_at.replace(tzinfo=UTC)
-  reviewed_at = reviewed_at.astimezone(UTC).replace(tzinfo=None)
-  return row.blocked_at <= reviewed_at <= now_naive_utc() + timedelta(minutes=5)
-
-
-def _recover_one(app_id: int, record_id: str) -> bool:
-  """Called in a worker while the app's record lock is held."""
+async def _recover_one(app_id: int, record_id: str) -> bool:
+  """Ask Contribute to validate its record, then CAS-release core authority."""
   with SessionLocal() as db:
     row = autopilot.get_row(db, app_id, record_id)
-    if row is None or not row.enabled or row.state != "blocked":
+    app = db.get(models.App, app_id)
+    owner = db.query(models.Owner).first()
+    if (
+      row is None or not row.enabled or row.state != "blocked"
+      or row.blocked_at is None or app is None or owner is None
+    ):
       return False
     path, _ = record_paths(app_id, record_id)
     record = read_record(path)
-    if not _has_reviewed_resolution(row, record):
+    grant = {
+      "record_id": row.record_id,
+      "target_repo": row.target_repo,
+      "target_pr_number": row.target_pr_number,
+      "target_head_repository": row.target_head_repository,
+      "target_branch": row.target_branch,
+      "target_repo_path": row.target_repo_path,
+      "granted_head_sha": row.granted_head_sha,
+      "blocked_at": row.blocked_at.replace(tzinfo=UTC).isoformat(),
+    }
+    db.expunge(app)
+    db.expunge(owner)
+  verdict = await app_services.invoke_policy(
+    app, owner, "autopilot/reviewed-resolution",
+    {
+      "grant": grant,
+      "record": record,
+      "now": datetime.now(UTC).isoformat(),
+    },
+  )
+  if verdict.get("eligible") is not True:
+    return False
+
+  with SessionLocal() as db:
+    row = autopilot.get_row(db, app_id, record_id)
+    if row is None or not row.enabled or row.state != "blocked":
       return False
     chat = db.get(models.Chat, row.followup_chat_id) if row.followup_chat_id else None
     if chat is not None and chat.pending_question_id:
@@ -109,6 +86,12 @@ def _recover_one(app_id: int, record_id: str) -> bool:
         models.ContributionAutopilot.state == "blocked",
         models.ContributionAutopilot.blocked_at == row.blocked_at,
         models.ContributionAutopilot.granted_head_sha == row.granted_head_sha,
+        models.ContributionAutopilot.target_repo == grant["target_repo"],
+        models.ContributionAutopilot.target_pr_number == grant["target_pr_number"],
+        models.ContributionAutopilot.target_head_repository
+          == grant["target_head_repository"],
+        models.ContributionAutopilot.target_branch == grant["target_branch"],
+        models.ContributionAutopilot.target_repo_path == grant["target_repo_path"],
         ~exists().where(
           models.Chat.id == models.ContributionAutopilot.followup_chat_id,
           models.Chat.pending_question_id.isnot(None),
@@ -143,7 +126,7 @@ async def recover_resolved_blocks() -> int:
   for app_id, record_id in await asyncio.to_thread(blocked_records):
     try:
       async with fs_locks.app_storage_lock(app_id):
-        recovered += await asyncio.to_thread(_recover_one, app_id, record_id)
+        recovered += await _recover_one(app_id, record_id)
     except Exception:
       # One missing/deleted/malformed review must not strand healthy siblings.
       log.warning("Autopilot recovery failed for %s/%s", app_id, record_id, exc_info=True)

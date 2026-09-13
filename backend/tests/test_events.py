@@ -9,6 +9,7 @@ from app.events import (
   build_assistant_message,
   finalize_blocks,
   process_event,
+  tool_output_exit_code,
 )
 from app.tool_sources import MAX_TOOL_SOURCES
 
@@ -18,6 +19,11 @@ def test_text_event_creates_block():
   changed = process_event({"type": "text", "content": "hello"}, blocks)
   assert changed
   assert blocks == [{"type": "text", "content": "hello"}]
+
+
+def test_tool_output_exit_code_unwraps_common_nested_envelopes():
+  output = '{"result":"{\\"exit_code\\":1,\\"stderr\\":\\"failed\\"}"}'
+  assert tool_output_exit_code(output) == 1
 
 
 def test_text_events_concatenate():

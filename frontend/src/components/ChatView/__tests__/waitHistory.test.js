@@ -94,3 +94,26 @@ test('active wait details show the full condition and its owner separately', () 
   assert.match(html, /Condition owner<\/dt><dd>Hosted deployment/)
   assert.match(html, /Stop waiting/)
 })
+
+
+test('a Restart wait has no fake deadline or generic cancellation control', () => {
+  const html = renderToStaticMarkup(createElement(WaitCard, {
+    wait: {
+      id: 'activation-wait',
+      kind: 'platform_activation',
+      description: 'Load committed changes',
+      condition_owner: 'Möbius startup',
+      interval_secs: 60,
+      deadline_at: '2026-09-19T01:00:00',
+    },
+    expanded: true,
+    onToggle: () => {},
+    onCancel: () => {},
+  }))
+
+  assert.match(html, /Wake-up/)
+  assert.match(html, /Restart card has no time limit/)
+  assert.doesNotMatch(html, /If it takes too long/)
+  assert.doesNotMatch(html, /Stop waiting/)
+  assert.doesNotMatch(html, /Sep/)
+})

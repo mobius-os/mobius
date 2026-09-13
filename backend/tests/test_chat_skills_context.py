@@ -189,24 +189,21 @@ def test_goal_routing_rechecks_phase_transitions_and_prefers_platform_tool():
 
   assert "Before the first material tool call" in core_normalized
   assert "read the complete `goal-planning` skill" in core_normalized
-  assert "planning, parallel-execution, handoff, and completion loop" in core_normalized
+  assert "honestly bounded one-turn work standard" in core_normalized
   assert "## The execution loop — read this first" in planning
-  assert "This read is a serial gate" in planning_normalized
-  assert "Do not run them concurrently" in planning_normalized
+  assert "Finish the read before material work" in planning_normalized
   assert len(planning.encode("utf-8")) < 4_000
-  assert "A Goal is durable intent, not an executor" in planning_normalized
-  assert "Inspect ready leaves" in planning_normalized
-  assert "Goal-plan revisions, and the final integrator" in planning_normalized
-  assert "Delegated children return future conditions" in planning_normalized
+  assert "A Goal is durable intent" in planning_normalized
+  assert "ready independent sibling leaves concurrently" in planning_normalized
+  assert "Parallelism itself is not the saving" in planning_normalized
+  assert "Serialize dependencies, shared writes, plan revisions" in planning_normalized
   assert "goal_plan.py check-complete" in planning_normalized
-  assert "### Recheck when the work changes phase" in planning
-  assert "before the first material action" in planning_normalized
-  assert "for **every** ordinary top-level delegated outcome" in planning_normalized
   assert "not a keyword trigger" in planning_normalized
-  assert "Its answer removes that blocker" in planning_normalized
   assert "first-class `promote_goal` tool" in planning_normalized
   assert "resilience, not an equivalent convenience path" in planning_normalized
   assert "an attempted tool call returns a failure" in planning_normalized
+  assert "Terminal settlement continues the exact Goal" in planning_normalized
+  assert "this is a backstop, not a planning strategy" in planning_normalized
 
 
 def test_goal_waits_always_name_a_durable_owner_interaction():
@@ -230,7 +227,7 @@ def test_goal_waits_always_name_a_durable_owner_interaction():
   assert "### Make every unfinished wait explicit" in planning
   assert "create exactly one owning interaction" in planning_normalized
   assert "keeps the Goal marked **Waiting for you**" in planning_normalized
-  assert "Do not end with “tell me when…”" in planning_normalized
+  assert "Never end with “tell me when…”" in planning_normalized
   assert "# Waiting visibly — durable monitors or explicit owner actions" in waiting
   assert "`--owner` is required for command waits" in waiting_normalized
   assert "exit **0 exactly when the condition is met**" in waiting_normalized
@@ -375,7 +372,6 @@ def test_seeded_guidance_uses_current_preview_recovery_and_resolver_contracts():
   quickstart = (seed_dir / "building-apps-quickstart.md").read_text()
   resolving = (seed_dir / "resolving-app-git.md").read_text()
   theming = (seed_dir / "theming.md").read_text()
-  reflection = (seed_dir / "reflection.md").read_text()
 
   assert "preview_app.sh" in quickstart
   assert "--review" in resolving
@@ -383,8 +379,6 @@ def test_seeded_guidance_uses_current_preview_recovery_and_resolver_contracts():
   assert "deployment's external Recovery action" in theming
   assert "`/recover` →" not in theming
   assert "`/recover/chat`" not in theming
-  assert "Reconcile the active instruction with its shipped owner" in reflection
-  assert "Do not turn this trigger into an unconditional nightly diff" in reflection
 
 
 def test_core_routes_operational_recipes_to_their_owning_skills():
@@ -415,25 +409,10 @@ def test_advanced_app_skill_does_not_duplicate_the_component_catalog():
   assert "/* mobius-ui:Button" not in advanced
 
 
-def test_reflection_seed_uses_staged_evidence_and_avoids_template_duplication():
-  repo = Path(__file__).resolve().parents[2]
-  reflection = (
-    repo / "backend" / "scripts" / "seed-skills" / "reflection.md"
-  ).read_text()
-
-  assert "inputs/chats.md" in reflection
-  assert "ordered `cron_outcome` events" in reflection
-  assert "/data/cli-auth/" not in reflection
-  assert "this wasted a turn on 2026" not in reflection
-  assert "The seeded template owns the exact HTML and styling" in reflection
-  assert "Copy this skeleton" not in reflection
-
-
 def test_agent_coaching_is_the_single_neutral_coaching_skill():
   repo = Path(__file__).resolve().parents[2]
   seed_dir = repo / "backend" / "scripts" / "seed-skills"
   coaching = (seed_dir / "agent-coaching.md").read_text(encoding="utf-8")
-  reflection = (seed_dir / "reflection.md").read_text(encoding="utf-8")
 
   assert not (seed_dir / "manager-session.md").exists()
   assert "neutral learning conversation" in coaching
@@ -446,11 +425,6 @@ def test_agent_coaching_is_the_single_neutral_coaching_skill():
   assert "reconstructive coaching" not in coaching
   assert "evidence-only fallback" not in coaching
   assert "<claude|codex> <session_id>" in coaching
-  assert "`/data/shared/skills/agent-coaching.md` completely" in reflection
-  assert "what should Reflection itself change" in reflection
-  assert "/data/platform/backend/scripts/reflection-evidence.py" in reflection
-  assert "same-provider transcript reseed" not in reflection
-  assert "exact-session coaching was unavailable" in reflection
 
 
 def test_image_skill_returns_tool_result_without_touching_protected_storage():

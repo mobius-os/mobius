@@ -22,6 +22,7 @@ import {
   upsertTerminalErrorItem,
   isQuestionTool,
   isRestartRequestTool,
+  legacyRestartActivityOwners,
   restartCardActivityEntries,
   suppressedQuestionToolIndices,
   appendThinkingChunk,
@@ -673,10 +674,89 @@ test('suppresses the mobius-control call when its Restart card is present', () =
   assert.deepEqual([...suppressedQuestionToolIndices(blocks)], [0])
 })
 
+test('a Restart card suppresses only its latest matching request', () => {
+  const blocks = [
+    { type: 'tool', tool: 'mobius_control:request_restart', output_exit_code: 1 },
+    { type: 'tool', tool: 'mobius_control:request_restart', status: 'done' },
+    { type: 'question', question_id: 'restart-1', questions: [],
+      platform_action: { type: 'restart', version: 2 } },
+  ]
+  assert.deepEqual([...suppressedQuestionToolIndices(blocks)], [1])
+})
+
+test('a Restart card never suppresses a surviving failed request', () => {
+  const blocks = [
+    { type: 'tool', tool: 'mobius_control:request_restart', output_exit_code: 1 },
+    { type: 'question', question_id: 'restart-1', questions: [],
+      platform_action: { type: 'restart', version: 2 } },
+  ]
+  assert.deepEqual([...suppressedQuestionToolIndices(blocks)], [])
+})
+
+test('tool pairing never reads unrelated tool output', () => {
+  const unrelated = { type: 'tool', tool: 'Bash' }
+  Object.defineProperty(unrelated, 'output', {
+    get() { throw new Error('unrelated tool output must not be parsed') },
+  })
+  assert.deepEqual([...suppressedQuestionToolIndices([unrelated])], [])
+})
+
 test('recognizes both persisted names for the platform Restart request', () => {
   assert.equal(isRestartRequestTool('mobius_control:request_restart'), true)
   assert.equal(isRestartRequestTool('mcp__mobius_control__request_restart'), true)
   assert.equal(isRestartRequestTool('mobius_control:request_approval'), false)
+})
+
+test('legacy compact activity owns one later Restart card across prose', () => {
+  const activity = {
+    type: 'activity',
+    entries: [{
+      item: {
+        type: 'tool', tool: 'mcp__mobius_control__request_restart',
+        output_exit_code: 1,
+      },
+    }],
+  }
+  const blocks = [
+    activity,
+    { type: 'text', content: 'Ready after retry.' },
+    { type: 'question', platform_action: { type: 'restart' } },
+  ]
+
+  assert.deepEqual([...legacyRestartActivityOwners(blocks, undefined)], [activity])
+  assert.deepEqual([...legacyRestartActivityOwners(blocks, 1)], [])
+})
+
+test('a later standalone Restart request prevents decrementing older activity', () => {
+  const activity = {
+    type: 'activity',
+    entries: [{
+      item: {
+        type: 'tool', tool: 'mcp__mobius_control__request_restart',
+        output_exit_code: 1,
+      },
+    }],
+  }
+  const blocks = [
+    activity,
+    {
+      type: 'tool', tool: 'mcp__mobius_control__request_restart',
+      output_exit_code: 0,
+    },
+    { type: 'question', platform_action: { type: 'restart' } },
+  ]
+
+  assert.deepEqual([...legacyRestartActivityOwners(blocks, undefined)], [])
+})
+
+test('malformed legacy activity entries cannot crash Restart pairing', () => {
+  const malformed = { type: 'activity', entries: {} }
+  const blocks = [
+    malformed,
+    { type: 'question', platform_action: { type: 'restart' } },
+  ]
+
+  assert.deepEqual([...legacyRestartActivityOwners(blocks, undefined)], [])
 })
 
 test('a pre-grouped long turn hides only the Restart request entry', () => {
@@ -686,6 +766,30 @@ test('a pre-grouped long turn hides only the Restart request entry', () => {
   }
   assert.deepEqual(restartCardActivityEntries([bash, restart], true), [bash])
   assert.equal(restartCardActivityEntries([bash, restart], false)[1], restart)
+})
+
+test('a pre-grouped long turn retains an earlier failed Restart request', () => {
+  const failed = {
+    idx: 4, item: {
+      type: 'tool', tool: 'mobius_control:request_restart', output_exit_code: 1,
+    },
+  }
+  const successful = {
+    idx: 5, item: { type: 'tool', tool: 'mobius_control:request_restart' },
+  }
+  assert.deepEqual(
+    restartCardActivityEntries([failed, successful], true),
+    [failed],
+  )
+})
+
+test('a pre-grouped server projection never removes its surviving failure', () => {
+  const failed = {
+    idx: 4, item: {
+      type: 'tool', tool: 'mobius_control:request_restart', output_exit_code: 1,
+    },
+  }
+  assert.deepEqual(restartCardActivityEntries([failed], true), [failed])
 })
 
 test('keeps mobius-control visible without a Restart card', () => {

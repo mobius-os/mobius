@@ -116,7 +116,11 @@ The owner's customizations end up *on top of* the current release, as if they'd 
 - **Clean merge** → the merged tree is replayed as a single-parent commit on the new `upstream` tip and the app recompiles onto the new code.
 - **Conflict** (the release and the local edits touched the same lines) → an **owner-clicked agent chat** resolves it. The update attempt records the new upstream plus a durable receipt bound to every fetched source/static/icon/seed byte, and leaves live files untouched. When the owner chooses "Resolve in chat", apps materialize standard conflict markers (`start_conflict_merge`, a `git merge --no-commit --no-ff upstream`) for the agent to edit; the platform updater leaves the live tree untouched and the resolver chat runs the merge itself. Saving marker-free source records a *single-parent replay* — `--no-ff` points `MERGE_HEAD` at the upstream tip and the commit takes only that one parent, so even a resolved conflict stays linear (`A → B → X`), never the 2-parent commit a plain `git merge` would leave. The canonical installer then verifies the receipt and promotes source, bundle, static files, DB metadata, icon, seeds, cron, and skills through its normal lifecycle. If fetch/materialization fails after the source commit, the previous app remains served and the receipt survives for startup/user retry. Both app and platform conflicts are click-gated: the update surfaces `mode=conflict` / conflict paths or a Settings conflict state, and the owner chooses "Resolve in chat" before an agent turn starts. The owner never hand-merges; back out with `git merge --abort`.
 
-The platform clone differs: it fetches the selected origin target and either fast-forwards local `main` or merges that target once, preserving both histories without rewriting local commits.
+The platform clone uses the same fix-forward shape at repository scale. It
+fetches the selected target, fast-forwards when local `main` is fully contained
+in it, and otherwise replays the still-local overlay as a linear series on top
+of the target. Changes proven to have landed upstream are retired instead of
+being carried forever under a different commit identity.
 
 **"Update available" is an ancestry question, not a version-string compare:** an update is available iff `upstream`'s tip is **not yet an ancestor of `main`** (a new release has not been incorporated). This is the content question — "does my working tree already contain this release" — that a `image_sha != recorded_sha` proxy can't answer on a customized instance, and it's what eliminates phantom "update available" rows after a deploy that changed nothing the owner hadn't already.
 
@@ -128,21 +132,21 @@ root-owned/non-writable, and are never imported from the mutable
 `/data/platform` clone. The image has one boot path and contains no recovery
 daemon, alternate boot mode, control-plane token, or recovery worker.
 
-Privileged *modules* are served source, not frozen files. The frozen
-`/app/runtime/served_runtime_launcher.py` starts `identity_broker.py` from
-`/data/platform/backend/runtime` and keeps the image copy as a floor, so an
-edit to the broker is an ordinary platform change that the next restart
-activates. `runtime/restart_ledger.py` and any newly added runtime module stay
-image-owned.
+`identity_broker.py` is the one privileged module allowed to run from served
+source. Before any served backend starts, the frozen
+`/app/runtime/served_runtime_launcher.py` validates that exact broker path. A
+failure selects the complete baked platform for the boot; it never combines a
+served backend with a frozen broker. The launcher, `runtime/restart_ledger.py`,
+and any newly added runtime module stay image-owned.
 
 ### Where each surface stands
 
 | Surface | Repo | On the model | Engine |
 |---------|------|------------------|--------|
 | **Mini-apps** (`/data/apps/<slug>`) | `.git` per app (installed apps; agent-built bespoke apps have no upstream to track) | yes — whole source tree on `upstream`, single-parent replay, so **multi-file apps update cleanly** | `backend/app/app_git.py` + `install.py` |
-| **Platform** (`/data/platform` — backend *and* frontend) | `.git` | yes — clone-native `git fetch origin`, then fast-forward or merge the selected target into local `main` (commit-stray-edits-first, conflict-abort, post-merge import probe with rollback); ancestry availability (`origin/main` not yet an ancestor of local `main`) | `backend/app/platform_update.py` |
+| **Platform** (`/data/platform` — backend *and* frontend) | `.git` | yes — clone-native `git fetch origin`, then fast-forward or replay the local overlay onto the selected target (commit-stray-edits-first, off-tree conflict handling, post-replay import probe with rollback); ancestry availability (`origin/main` not yet an ancestor of local `main`) | `backend/app/platform_update.py` |
 
-Mini-apps use **one** small tree-aware engine (`app_git.py`): `record_upstream` commits the *whole source tree* on `upstream`, `merge_upstream` verdicts a clean-vs-conflict via `git merge-tree`, and a clean apply replays the merged tree as a **single-parent** commit on top of `upstream` (linear `A→B→X`). Mini-apps are thin callers of that primitive — they pass their own source tree. The platform (backend + frontend, one served clone) is clone-native instead: it uses `git fetch origin` plus a fast-forward or merge of the selected target into local `main`, with ancestry-based availability (`origin/main` not yet an ancestor of local `main`). Mini-app update discovery is different: the store compares the catalog manifest version against the installed `App.version` (the new release lives in the remote catalog, so a local ancestry check can't see it). There is no per-surface protected-file scaffolding.
+Mini-apps use **one** small tree-aware engine (`app_git.py`): `record_upstream` commits the *whole source tree* on `upstream`, `merge_upstream` verdicts a clean-vs-conflict via `git merge-tree`, and a clean apply replays the merged tree as a **single-parent** commit on top of `upstream` (linear `A→B→X`). Mini-apps are thin callers of that primitive — they pass their own source tree. The platform (backend + frontend, one served clone) is clone-native instead: it uses `git fetch origin`, a provably lossless fast-forward when possible, and otherwise a linear replay of the still-local overlay onto the selected target. Mini-app update discovery is different: the store compares the catalog manifest version against the installed `App.version` (the new release lives in the remote catalog, so a local ancestry check can't see it). There is no per-surface protected-file scaffolding.
 
 ## Backend (`backend/app/`)
 
@@ -192,6 +196,7 @@ FastAPI app. `main.py` is the factory (CORS, rate limiting, routers, static serv
 | `fs_locks.py` | In-process async locks serializing storage-tree / source-tree mutations against app uninstall |
 | `app_compile_contract.py` | Canonical self-contained mini-app compiler contract, dependency list, and runtime ABI |
 | `app_runtime_inject.js` | React + `mobius-runtime` bridge injected into every compiled app bundle |
+| `app_services.py` | Bounded JSON request/response execution for reviewed app-owned server policy; binds every invocation to the accepted immutable runtime and a short-lived app token |
 | `runtime_types.py` | Shared runtime type definitions |
 | `net_utils.py` | SSRF-safe URL validation shared by the install fetcher and the proxy |
 | `resource_access.py` | Resource-access helpers, incl. `live_app` / `live_app_or_404` (tombstone-aware app resolution) |
@@ -278,7 +283,7 @@ not part of the baked boot infrastructure.
 
 | File | Role |
 |------|------|
-| `bootstrap.py` | First-boot bootstrap (`ensure_bootstrap_apps_installed`) that auto-installs the App Store, Memory, and Reflection; called idempotently from the FastAPI lifespan |
+| `bootstrap.py` | First-boot bootstrap (`ensure_bootstrap_apps_installed`) for the platform's recovery and management apps; called idempotently from the FastAPI lifespan |
 | `chat_log_redaction.py` | Server-side structural redaction for the gated chat-log read API |
 | `chat_media.py` | One-way startup migration that moves old chat images and stored URLs onto the canonical `/media/` path |
 | `http_caching.py` | Range/206 hardening for revalidating `FileResponse`s |
@@ -299,6 +304,7 @@ Each module exposes a `router`; registration is in `routes/__init__.py`.
 | `chats_stream.py` | `POST /messages` (starts a turn, returns 202) + `GET /stream` (SSE) |
 | `chat_logs.py` | Gated, redacted chat-log read API for mini-apps |
 | `storage.py` | Per-app and shared file storage, plus confined immutable blob reads from full commits reachable on a shared repository's `main` branch (`GET /api/storage/shared-git/{repo}?revision=&file=`). The Git route applies the same Memory capability gate, rejects traversal/symlinks/submodules, and never reads the mutable worktree. |
+| `app_services.py` | Authenticated same-app/owner and explicitly public adapters for reviewed app services; apps own their paths and domain behavior behind the bounded JSON process contract |
 | `secrets.py` | Bounded encrypted secret storage scoped to an app; an app can write/delete/check its own values, while only the owner or owner-scoped agent can decrypt them; no cross-app access or listing surface |
 | `fs.py` | Owner-facing filesystem + git oversight API |
 | `uploads.py` | Per-chat file upload management |
@@ -504,7 +510,7 @@ The chat is large and self-contained; its hooks live beside it, not in `src/hook
 | Change offline / SW behavior | `frontend/src/sw.js` + `frontend/src/sw-cache-policy.js` (read *Service worker + offline* below first) |
 | Change the in-product agent's instructions | `skill/core.md` (constitution) or `backend/scripts/seed-skills/*.md` (per-task skills) — see below |
 | Add/install a skill | Ecosystem installs go through `POST /api/skills/install` (`routes/skills.py`; the Skills app + `finding-skills.md` seed drive it); new platform seeds go in `backend/scripts/seed-skills/`; edits that must reach existing untouched copies register their predecessor digest in `init_skills.py`; the index (`skills-index.md`) is generated — never hand-edit it |
-| Change a bootstrap app (Store / Memory / Reflection) | Change its catalog repository (`mobius-os/app-<slug>`). `backend/app/bootstrap.py` installs the canonical manifest on first boot; afterward the app is an ordinary owner-editable app under `/data/apps/<slug>` |
+| Change a bootstrap app (Store / Skills / Memory / Reflection / Integrations / Möbius · You) | Change its catalog repository (`mobius-os/app-<slug>`). `backend/app/bootstrap.py` installs the canonical manifest on first boot; afterward the app is an ordinary owner-editable app under `/data/apps/<slug>` |
 | Theme CSS / tokens | `backend/app/theme.py` + `routes/theme.py` + `frontend/src/hooks/useTheme.js` |
 
 ## In-product agent context — three layers
@@ -547,9 +553,10 @@ Runtime trees are gitignored (db, compiled, app-secrets, cli-auth).
 **Updates** flow through git. `backend/app/platform_update.py` is clone-native:
 `/data/platform` is a real `git clone` of the canonical repo, so an update
 fetches `origin/main`, commits any stray working-tree edits, and then
-fast-forwards or merges that target into local `main`. A conflict aborts back to
-the last-served commit, and a post-merge `import app.main` probe rolls back
-rather than serving a broken tree. (It reuses `app_git`'s isolated git env +
+fast-forwards or replays the still-local overlay onto that target. A conflict
+stays in an isolated candidate worktree while the last-served commit remains
+live, and a post-replay `import app.main` probe rolls back rather than serving a
+broken tree. (It reuses `app_git`'s isolated git env +
 `commit_local` but drops
 the pre-slice-B baked-floor `upstream`-record model; card refs below point at the
 maintainers' local `.pm/` backlog, gitignored and absent from a fresh clone.) The
@@ -568,12 +575,15 @@ stamp `entrypoint.sh` writes at boot), `platform_sha`, `platform_dirty`,
 (it also hard-blocks deploying a checkout strictly BEHIND
 `origin/main`).
 
-**Bootstrap apps (Store, Memory, Reflection)** install from their canonical
-catalog manifests through `backend/app/bootstrap.py` on first boot. Each becomes
-an ordinary owner-editable app under `/data/apps/<slug>` and follows the same
-update and divergence rules as any other catalog app. The bootstrap path also
-migrates rows left by old images whose source still points at the retired
-platform-core tree; no app snapshot is baked into the platform image.
+**Bootstrap apps (Store, Skills, Memory, Reflection, Integrations, and Möbius ·
+You)** install from their canonical catalog manifests through
+`backend/app/bootstrap.py` on first boot. These are recovery or management
+surfaces; domain apps are installed explicitly rather than named in platform
+boot policy. Each becomes an ordinary owner-editable app under
+`/data/apps/<slug>` and follows the same update and divergence rules as any
+other catalog app. The bootstrap path also migrates rows left by old images
+whose source still points at the retired platform-core tree; no app snapshot is
+baked into the platform image.
 
 **Recovery and self-heal.** Recovery is outside both the editable platform and
 the normal app process. Managed recovery attaches through Railway native SSH;
@@ -582,11 +592,12 @@ path introduces an alternate Möbius boot mode. A broken persistent clone falls
 back to the baked backend, so the live container remains reachable to inspect.
 
 Normal platform boot serves `/data/platform/backend` directly after an import
-probe. It fetches `origin/main`, commits stray local edits, and merges that target
-into local `main` (fast-forwarding when possible); a conflict or failed post-merge
-probe returns to the exact pre-reconcile commit and leaves a visible flag. An
-invalid existing clone serves the baked backend without overwriting, quarantining,
-or reseeding the broken tree. Owner-data disaster recovery is the separate
+probe and validation of its served identity broker. It fetches `origin/main`,
+commits stray local edits, and fast-forwards or replays the local overlay onto
+that target; a conflict or failed post-replay probe leaves the exact
+pre-reconcile commit served and records a visible flag. An invalid existing
+clone or broker selects the complete baked platform without overwriting,
+quarantining, or reseeding the broken tree. Owner-data disaster recovery is the separate
 `backup-data.py` / `restore-data.py` flow and is not automatically armed by
 installing Möbius.
 
@@ -631,6 +642,10 @@ and attaches their rule ids to new diagnostic chats. The Playwright lock-in spec
   scroll box, now-hidden blank room is removed from the spacer first. In
   `FOLLOW_BOTTOM` this keeps the visible content fixed while room remains; after
   the spacer reaches zero, only the overflow that no longer fits moves upward.
+  Growth wholly above the latest user row moves that row and the list together,
+  so the formula and the reservation are unchanged; no layout pass may retire
+  or restore room on its own, because any later pass recomputes the same
+  formula and a one-off exception reappears as blank space at the tail.
   A `PIN_USER_MSG` has one reachability exception: while the box is narrowed by
   a same-width software keyboard, it reserves against the largest same-width
   scroll box already observed. Closing the keyboard therefore cannot clamp the
@@ -940,6 +955,7 @@ path means routing it through the same entries rather than inventing another rul
 | Later send submitted anywhere else | hold or stale follow | `ANCHOR_AT`/existing hold | None |
 | Reader reaches or explicitly swipes toward physical bottom | any | `FOLLOW_BOTTOM` | User-owned; follow the one physical tail, including remaining reservation |
 | Composer press or edit begins at physical bottom | any hold | `FOLLOW_BOTTOM` | No immediate write; the next owned layout follows the existing physical tail |
+| Disclosure expands | any hold, including follow | `ANCHOR_AT` at the tapped header | Freeze the chosen header so the screen does not move; the R1 reservation is left exactly as the formula computes it. Collapse keeps the existing mode |
 | Reader scrolls manually away from bottom | any | `ANCHOR_AT` | User-owned |
 | Reply grows while an armed live pin still has reserved room | pin hold | same pin hold | Keep prompt fixed |
 | Streaming reply consumes the armed pin reservation | pin hold | `FOLLOW_BOTTOM` | Follow physical tail |
@@ -1622,7 +1638,7 @@ never strand an owner-requested refresh. The write may still finish after the de
 
 ## Mini-app manifest (mobius.json)
 
-Every mini-app ships a `mobius.json`; the dependency-free source of truth is `backend/app/manifest_contract.py`, used by Store install, explicit local apply, and `backend/scripts/validate-app.py`. Five required non-empty string fields are `id`, `name`, `version`, `description`, and `entry`; `entry` must be the canonical `index.jsx` used by the source/apply lifecycle. The `id` is the manifest identity and the initial slug (source dir `/data/apps/<slug>/`; `allocate_unique_slug` can diverge it on a collision, and cron registration keys off the resolved `app.slug`), so it uses charset `a-z 0-9 - _`, cannot start with `-`/`_`, and cannot be purely numeric (bare integers are reserved for the numeric-id storage tree). Optional fields the parser recognizes include `previous_id`, `icon`, colors/display, `offline_capable`, `embeds_agent`, `offline`, `permissions`, `storage_seeds`, `static_assets`, `source_files`, `skills`, `system_prompt`, and `schedule`. Decorative-only fields such as `author`, `license`, and `homepage` are not validated or stored. Three gotchas: (1) **`runtime` (`imports`/`esm_deps`) is informational**; dependency resolution is governed by the pinned self-contained compiler in `app_compile_contract.py`. (2) **`storage_seeds` value type is a switch**: a string is a repo-relative file the installer fetches; a non-string is stored inline as JSON. (3) **`schedule.job` has dual semantics** — with an exactly five-field `schedule.default` it installs recurring cron; without it the script is an on-demand build hook. `static_assets` caps at 256 files / 16 MB each / 64 MB total and logical destination `x` is materialized at source path `static/x`.
+Every mini-app ships a `mobius.json`; the dependency-free source of truth is `backend/app/manifest_contract.py`, used by Store install, explicit local apply, and `backend/scripts/validate-app.py`. Five required non-empty string fields are `id`, `name`, `version`, `description`, and `entry`; `entry` must be the canonical `index.jsx` used by the source/apply lifecycle. The `id` is the manifest identity and the initial slug (source dir `/data/apps/<slug>/`; `allocate_unique_slug` can diverge it on a collision, and cron registration keys off the resolved `app.slug`), so it uses charset `a-z 0-9 - _`, cannot start with `-`/`_`, and cannot be purely numeric (bare integers are reserved for the numeric-id storage tree). Optional fields the parser recognizes include `previous_id`, `icon`, colors/display, `offline_capable`, `embeds_agent`, `offline`, `permissions`, `storage_seeds`, `static_assets`, `source_files`, `skills`, `system_prompt`, and `schedule`. Decorative-only fields such as `author`, `license`, and `homepage` are not validated or stored. Three gotchas: (1) **`runtime` (`imports`/`esm_deps`) is informational**; dependency resolution is governed by the pinned self-contained compiler in `app_compile_contract.py`. (2) **`storage_seeds` value type is a switch**: a string is a repo-relative file the installer fetches; a non-string is stored inline as JSON. (3) **`schedule.job` has dual semantics** — with an exactly five-field `schedule.default` it installs recurring cron; without it the script is an on-demand build hook. In either mode the script declares its interpreter with an absolute shebang; the platform never guesses from its filename or executable bit. `static_assets` caps at 256 files / 16 MB each / 64 MB total and logical destination `x` is materialized at source path `static/x`.
 
 ## Testing — determinism principle
 

@@ -35,7 +35,7 @@ def test_shell_preview_delegates_its_chat_default_to_the_media_owner(
 
   assert result.returncode == 0, result.stderr
   assert log.read_text(encoding="utf-8").strip() == (
-    "chat-example|/chat/chat-example"
+    "chat-example|/shell/?chat=chat-example"
   )
 
 
@@ -61,7 +61,7 @@ def test_shell_preview_preserves_explicit_output_and_non_chat_fallback(
     check=True,
   )
   assert log.read_text(encoding="utf-8").strip() == (
-    f"chat-example|/chat/chat-example {explicit}"
+    f"chat-example|/shell/?chat=chat-example {explicit}"
   )
 
   subprocess.run(["bash", str(preview)], env=env, check=True)
