@@ -75,10 +75,14 @@ export default function UpdateReviewModal({
   const hasResult = ['conflict', 'rolled_back'].includes(resultState)
   const hasPlan = !!(preview?.plan_id && preview?.current_sha && preview?.target_sha)
   const actionable = preview?.actionable
+  // The review proved there is nothing to apply. A leftover rolled_back flag
+  // must not turn this into a "needs repair" offer — that is the contradictory
+  // "already complete + Ask Möbius" state. Show a single Done instead.
+  const nothingToApply = !!preview && actionable === false && !hasResult
   const progressLabel = observing ? 'Confirming the request. No second update will be sent…' : rebuilding ? 'Starting the reviewed container update…'
     : (applyProgress?.plan_id === preview?.plan_id && UPDATE_PHASE_LABELS[applyProgress?.phase]) || 'Preparing the update…'
   const needsRestart = ['server_restart', 'dependency_sync'].includes(activation?.level)
-  const repairReason = resultState === 'conflict' ? null : platformUpdateRepairReason({
+  const repairReason = (resultState === 'conflict' || nothingToApply) ? null : platformUpdateRepairReason({
     preview, platform: { ...platform, state: resultState || platform?.state }, error: applyError, errorCode: applyErrorCode,
   })
 
@@ -143,8 +147,9 @@ export default function UpdateReviewModal({
           ? <details><summary>Failure details</summary><p>{applyError}</p></details>
           : <Alert color="danger" variant="soft" description={applyError} />}</div>}
         <div className="urm__foot">
-          <button type="button" className="settings__btn settings__btn--sm settings__btn--outline" onClick={requestClose} disabled={inFlight}>{observing ? 'Keep working' : 'Not now'}</button>
-          {repairReason ? <UpdateRepairAction preview={preview} platform={{ ...platform, state: resultState || platform?.state }} rebuild={rebuild} error={applyError} errorCode={applyErrorCode} disabled={busy || loading} buttonRef={resultActionRef} className="settings__btn settings__btn--sm" />
+          {!nothingToApply && <button type="button" className="settings__btn settings__btn--sm settings__btn--outline" onClick={requestClose} disabled={inFlight}>{observing ? 'Keep working' : 'Not now'}</button>}
+          {nothingToApply ? <button ref={resultActionRef} type="button" className="settings__btn settings__btn--sm" onClick={requestClose} disabled={busy}>Done</button>
+          : repairReason ? <UpdateRepairAction preview={preview} platform={{ ...platform, state: resultState || platform?.state }} rebuild={rebuild} error={applyError} errorCode={applyErrorCode} disabled={busy || loading} buttonRef={resultActionRef} className="settings__btn settings__btn--sm" />
           : hasResult ? <button ref={resultActionRef} type="button" className="settings__btn settings__btn--sm"
             onClick={resultState === 'conflict' ? onResolve : requestClose} disabled={busy}>
             {resultState === 'conflict' ? (resolving ? 'Opening…' : 'Resolve in chat') : 'Done'}
