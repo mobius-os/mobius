@@ -542,8 +542,14 @@ class Broker:
       "state", "owner", "verifier", "instance_id", "public_key_jwk",
       "redirect_uri", "expires_at",
     }
+    allowed = required | {"select_account"}
     if (
-      set(value) != required
+      not required.issubset(value)
+      or not set(value).issubset(allowed)
+      or (
+        "select_account" in value
+        and not isinstance(value["select_account"], bool)
+      )
       or not OAUTH_STATE_RE.fullmatch(str(value.get("state") or ""))
       or value.get("instance_id") != self.instance_id
       or not isinstance(value.get("expires_at"), (int, float))
