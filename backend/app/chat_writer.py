@@ -4530,7 +4530,7 @@ class ChatWriterActor:
     from app.goal_plans import (
       goal_handoff_owner_kind,
       goal_plan_is_unfinished,
-      goal_requiring_terminal_continuation,
+      goal_terminal_handoff,
     )
 
     seen_goal_continuations: set[str] = set()
@@ -4564,16 +4564,25 @@ class ChatWriterActor:
       pending = runnable
       chat.pending_messages = pending
     if cmd.allow_goal_continuation and cmd.ending_status == "completed":
-      continuation_goal_id = goal_requiring_terminal_continuation(
+      handoff = goal_terminal_handoff(
         db, cmd.chat_id, cmd.ending_run_token,
       )
-      if continuation_goal_id is not None:
+      if handoff is not None and not handoff.automatic_allowed:
+        # The normal terminal path saves a real owner card before reaching
+        # this transaction. Fail closed if a future caller skips that seam:
+        # the current run marker remains the recovery owner instead of either
+        # clearing unfinished work or starting an unbounded retry chain.
+        raise _PersistFailed(
+          "PromotePending: exhausted Goal continuation needs an owner card"
+        )
+      if handoff is not None:
         pending.append({
           "role": "user",
           "content": "continue",
           "kind": "continuation",
           "continuation_reason": GOAL_HANDOFF_REASON,
-          "goal_id": continuation_goal_id,
+          "goal_id": handoff.goal_id,
+          "goal_settled_count": handoff.settled_count,
           "cid": f"goal-handoff-{cmd.ending_run_token}",
           "ts": next_message_ts(list(chat.messages or []) + pending),
         })

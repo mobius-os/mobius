@@ -3888,10 +3888,51 @@ async def _complete_turn(
     else "completed"
   )
 
+  # A no-progress automatic Goal continuation must converge instead of
+  # manufacturing another clean turn forever. The first retry stays automatic;
+  # another requires a newly settled plan task. Exhaustion uses the
+  # existing saved-question owner so the Goal remains exact and durable while
+  # the partner decides whether to continue or stop it.
+  terminal_handoff = None
+  if ending_status == "completed" and not provider_free:
+    from app.goal_plans import goal_terminal_handoff
+
+    terminal_handoff = goal_terminal_handoff(
+      db, chat_id, sink.run_token or "",
+    )
+
   incorporate_activity_delivery = (
     ending_status == "completed" and bool(activity_delegation_ids)
   )
   try:
+    if terminal_handoff is not None and not terminal_handoff.automatic_allowed:
+      question_id = f"goal-handoff-{sink.run_token}"
+      await sink.publish_question({
+        "type": "question",
+        "question_id": question_id,
+        "response_mode": "continuation",
+        "questions": [{
+          "id": "goal_next_step",
+          "header": "Goal",
+          "question": (
+            "This Goal is still unfinished, and another turn ended without "
+            "enough plan progress to continue automatically. What should "
+            "happen next?"
+          ),
+          "options": [
+            {
+              "label": "Continue once (Recommended)",
+              "description": "Start another turn on this Goal.",
+            },
+            {
+              "label": "Stop this Goal",
+              "description": "Stop the Goal and summarize the unfinished work.",
+            },
+          ],
+        }],
+      })
+      from app.owner_input import publish_owner_input_changed
+      publish_owner_input_changed(chat_id, "question", question_id=question_id)
     await sink.finalize(
       incorporate_activity_delivery=incorporate_activity_delivery,
     )
