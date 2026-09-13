@@ -467,7 +467,7 @@ def test_set_background_agents_persists_to_shared_settings(client, auth):
       # was not named in the request so it persists disabled with defaults.
       {
         "provider": "mobius",
-        "model": "inkling",
+        "model": "evolve",
         "effort": "medium",
         "enabled": False,
       },
@@ -787,7 +787,9 @@ def test_model_registry_returns_known_models_on_missing_creds(client, auth):
   mobius_ids = [m["id"] for m in body["providers"]["mobius"]]
   assert mobius_ids == KNOWN_MODELS["mobius"]
   assert [m["label"] for m in body["providers"]["mobius"]] == [
-    "Spark", "Evolve",
+    "Spark (Qwen3.8 27B)", "Evolve (Qwen3.8 2.4T A95B)",
+    "Reflect (DeepSeek V4.1 Flash)", "Flow (GLM 5.3 Flash)",
+    "Prism (Gemini 3.8 Flash)",
   ]
   # Offline fallbacks use the exact model id; live catalogs own display names.
   by_id = {m["id"]: m for m in body["providers"]["claude"]}

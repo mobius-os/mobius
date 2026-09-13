@@ -36,26 +36,43 @@ def test_trial_provider_config_uses_only_local_broker_marker(tmp_path):
   assert "secret" not in config.lower()
 
 
-def test_subscription_catalog_exposes_spark_and_evolve_without_backing_details():
+def test_subscription_catalog_exposes_public_models_without_backing_details():
   payload = json.loads(providers.MobiusProvider._catalog_path().read_text())
-  assert [row["slug"] for row in payload["models"]] == ["spark", "inkling"]
-  assert [row["display_name"] for row in payload["models"]] == ["Spark", "Evolve"]
+  assert [row["slug"] for row in payload["models"]] == [
+    "spark", "evolve", "reflect", "flow", "prism",
+  ]
+  assert [row["display_name"] for row in payload["models"]] == [
+    "Spark (Qwen3.8 27B)", "Evolve (Qwen3.8 2.4T A95B)",
+    "Reflect (DeepSeek V4.1 Flash)", "Flow (GLM 5.3 Flash)",
+    "Prism (Gemini 3.8 Flash)",
+  ]
   assert all(row["supports_parallel_tool_calls"] is False for row in payload["models"])
   assert all(row["support_verbosity"] is False for row in payload["models"])
-  assert providers.MODEL_LABELS["spark"] == "Spark"
-  assert providers.MODEL_LABELS["inkling"] == "Evolve"
-  assert providers.DEFAULT_MODELS["mobius"] == "inkling"
+  assert providers.MODEL_LABELS["spark"] == "Spark (Qwen3.8 27B)"
+  assert providers.MODEL_LABELS["evolve"] == "Evolve (Qwen3.8 2.4T A95B)"
+  assert providers.MODEL_LABELS["reflect"] == "Reflect (DeepSeek V4.1 Flash)"
+  assert providers.MODEL_LABELS["flow"] == "Flow (GLM 5.3 Flash)"
+  assert providers.MODEL_LABELS["prism"] == "Prism (Gemini 3.8 Flash)"
+  assert providers.DEFAULT_MODELS["mobius"] == "evolve"
   assert providers.provider_runtime_kind("mobius") == "codex_sdk"
   fallback = providers._fallback_models("mobius")
-  assert [row["id"] for row in fallback] == ["spark", "inkling"]
-  assert [row["label"] for row in fallback] == ["Spark", "Evolve"]
-  assert all(row["context_window"] == 235_930 for row in fallback)
+  assert [row["id"] for row in fallback] == [
+    "spark", "evolve", "reflect", "flow", "prism",
+  ]
+  assert [row["label"] for row in fallback] == [
+    "Spark (Qwen3.8 27B)", "Evolve (Qwen3.8 2.4T A95B)",
+    "Reflect (DeepSeek V4.1 Flash)", "Flow (GLM 5.3 Flash)",
+    "Prism (Gemini 3.8 Flash)",
+  ]
+  assert [row["context_window"] for row in fallback] == [
+    235_930, 900_000, 943_718, 943_718, 943_718,
+  ]
 
 
 def test_evolve_is_valid_for_atomic_provider_handoff():
   switch = ChatProviderSwitch(
     provider="mobius",
-    agent_settings_json=AgentSettingsOverride(model="inkling", effort="high"),
+    agent_settings_json=AgentSettingsOverride(model="evolve", effort="high"),
     switch_id="switch-to-evolve",
   )
   assert switch.provider == "mobius"

@@ -32,10 +32,10 @@ PROVIDERS_LIST = {
 def test_evolve_is_a_valid_background_provider(tmp_path):
   out = bg.resolve_background_agents(
     str(tmp_path),
-    {"primary": {"provider": "mobius", "model": "inkling", "effort": "high"}},
+    {"primary": {"provider": "mobius", "model": "evolve", "effort": "high"}},
   )
   assert out["primary"] == {
-    "provider": "mobius", "model": "inkling", "effort": "high",
+    "provider": "mobius", "model": "evolve", "effort": "high",
   }
 
 
