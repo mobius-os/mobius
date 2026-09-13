@@ -55,6 +55,7 @@ services:
       # GITHUB_SHA to Compose automatically; local runs still seed their current
       # checkout and validate it against its own HEAD.
       - MOBIUS_TEST_RUNTIME=1
+      - MOBIUS_TEST_DATABASE_ISOLATED=1
       - MOBIUS_TEST_PLATFORM_SOURCE=/workspace
       - BUILD_SHA=${GITHUB_SHA:-unknown}
       - MOBIUS_SERVICE_GATEWAY_ORIGIN=http://services.localhost:${TEST_PORT:-8001}
@@ -108,6 +109,7 @@ services:
       - DATA_DIR=/tmp/testdata
       - FRONTEND_ORIGIN=http://localhost:5173
       - MOBIUS_TEST_RUNTIME=1
+      - MOBIUS_TEST_DATABASE_ISOLATED=1
       - MOBIUS_BUILD_INFO_PATH=/workspace/.test-build-info-does-not-exist.json
       # Execute the current checkout's checker source with the dependency tree
       # baked into the verified test image; the /workspace bind intentionally

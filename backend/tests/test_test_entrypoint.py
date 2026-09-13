@@ -51,6 +51,15 @@ def test_host_runner_checks_backend_node_surface_not_full_frontend_tree():
   assert "npm ls --depth=0" not in source
 
 
+def test_host_runner_isolates_database_before_pytest_collects_modules():
+  source = HOST_RUNNER.read_text()
+  pytest_call = source.index('"$PYTHON" -m pytest')
+  assert source.index('TEST_RUNTIME_ROOT="$(mktemp -d') < pytest_call
+  assert 'DATABASE_URL="sqlite:///$TEST_RUNTIME_ROOT/test.db"' in source
+  assert 'DATA_DIR="$TEST_RUNTIME_ROOT/data"' in source
+  assert "MOBIUS_TEST_DATABASE_ISOLATED=1" in source
+
+
 def test_image_runtime_reports_when_its_python_lock_differs():
   source = HOST_RUNNER.read_text()
   assert 'cmp -s "$ROOT/backend/requirements.lock" /app/requirements.lock' in source
