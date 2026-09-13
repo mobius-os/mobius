@@ -91,7 +91,7 @@ def _manifest_schedule(source_dir: Path) -> tuple[str, str] | None:
 
 
 def _schedule_from_crontab_text(
-  source_dir: Path, text: str, runtime_dir: Path,
+  source_dir: Path, text: str, runtime_dir: Path, *, supervised_only: bool = False,
 ) -> tuple[str, str] | None:
   needle = f"{str(source_dir).rstrip('/')}/"
   for line in text.splitlines():
@@ -101,11 +101,11 @@ def _schedule_from_crontab_text(
     parsed = _parse_cron_job_line(line)
     if parsed is None:
       continue
+    if supervised_only and not app_cron.is_supervised_crontab_entry(line):
+      continue
     cron, _ = parsed
-    # Managed entries launch Python first, then the common runner, then the
-    # real app job.  Resolve that indirection so schedule discovery remains
-    # stable after an entry is supervised (and can still migrate old direct
-    # entries on the next boot).
+    # Managed live entries launch Python first, then the common runner, then the
+    # real app job. Resolve that indirection to the durable app declaration.
     command_path = app_cron.crontab_command_path(line)
     if not command_path.startswith(needle):
       continue
@@ -119,7 +119,6 @@ def _schedule_from_crontab_text(
     # re-registered and the whole supervision pass reported a warning.
     # Skipping debris lets discovery fall through to the durable init-cron.sh
     # declaration and then the manifest — both of which state real intent.
-    # Legacy unsupervised entries still migrate: their script exists.
     if not (runtime_dir / Path(command_path).name).is_file():
       continue
     return cron, Path(command_path).name
@@ -128,7 +127,9 @@ def _schedule_from_crontab_text(
 
 def _app_schedule(app: models.App, live_crontab: str, runtime_dir: Path) -> tuple[str, str] | None:
   source_dir = Path(app.source_dir)
-  live = _schedule_from_crontab_text(source_dir, live_crontab, runtime_dir)
+  live = _schedule_from_crontab_text(
+    source_dir, live_crontab, runtime_dir, supervised_only=True,
+  )
   if live is not None:
     return live
   for replay_dir in _cron_replay_dirs_for_app(app, runtime_dir):
@@ -163,12 +164,11 @@ def _is_orphaned_supervised_entry(line: str, apps_root: Path, runtime_roots: dic
 
   Deliberately narrow. Only a platform-supervised entry (one routed through
   app-job-runner) naming a job directly under the apps root qualifies, so
-  unsupervised owner lines, env assignments, comments, and legacy direct
-  entries — which migration, not pruning, owns — are never candidates.
+  unsupervised owner lines, env assignments, and comments are never candidates.
   """
   if _parse_cron_job_line(line) is None:
     return False
-  if "/app-job-runner.py" not in line:
+  if not app_cron.is_supervised_crontab_entry(line):
     return False
   command_path = app_cron.crontab_command_path(line)
   if not command_path:
@@ -218,13 +218,12 @@ def _prune_orphaned_supervised_entries(apps_root: Path, runtime_roots: dict[Path
 def reconcile_app_cron_supervision(db: Session) -> tuple[int, list[str]]:
   """Converge every live managed schedule through the common job runner.
 
-  Older ``init-cron.sh`` files wrote ``<source>/fetch.sh`` directly. Boot never
-  executes those files; cron is deliberately started only after FastAPI
-  lifespan completes. This reconciliation therefore gets a race-free window
-  to parse and preserve each effective cadence while rewriting both the live
-  crontab entry and its durable declaration via the current
-  scaffold. Tombstoned apps are excluded and source trees must be ordinary,
-  non-symlink direct children of ``/data/apps``.
+  Cron is deliberately started only after FastAPI lifespan completes. This
+  reconciliation gets a race-free window to restore each current durable
+  declaration through the common runner. Unsupervised live crontab lines are
+  owner-managed and are never adopted as app schedules. Tombstoned apps are
+  excluded and source trees must be ordinary, non-symlink direct children of
+  ``/data/apps``.
 
   A schedule owned in an IANA timezone (see ``app.cron_tz``) is materialized
   as an every-minute supervised gate. The gate, not a snapshot of today's UTC
