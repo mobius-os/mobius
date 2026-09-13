@@ -295,7 +295,7 @@ export default function QuestionCard({
     }
   }
 
-  let submitLabel = restartAction ? 'Continue' : 'Submit'
+  let submitLabel = writtenRestartAction ? 'Continue' : 'Submit'
   if (answered) submitLabel = 'Submitted'
   if (submitting) submitLabel = 'Submitting…'
   if (locallyQueued) submitLabel = localAnswer.deliveryOutcome === 'delivered'

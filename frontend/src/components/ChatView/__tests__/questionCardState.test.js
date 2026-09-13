@@ -34,7 +34,7 @@ test('unanswered question cards do not have a stale gray state', () => {
     'unanswered cards should not tell the user the question expired')
   assert.match(component, /\{!completedAction && \(answered \|\| !disabled\) && \([\s\S]*<button[\s\S]*className="qcard__submit"/,
     'submit button should remain in place after an answer is submitted')
-  assert.match(component, /submitting \? 'Submitting…' : \(answered \? 'Submitted' : writtenRestartAction \? 'Continue' : 'Submit'\)/,
+  assert.match(component, /let submitLabel = writtenRestartAction \? 'Continue' : 'Submit'[\s\S]*if \(answered\) submitLabel = 'Submitted'[\s\S]*if \(submitting\) submitLabel = 'Submitting…'/,
     'the retained submit button should explain pending and answered states without rewriting legacy Restart cards')
   assert.match(component, /\{!completedAction && \(!disabled \|\| answered\) && \(\s*<div className="qcard__hint"/,
     'selection hints should stay in place after the answer is submitted')
