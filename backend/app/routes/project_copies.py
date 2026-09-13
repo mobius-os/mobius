@@ -20,7 +20,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session
 
 from app import models, workspace_files
-from app.common_transport import federation_request, FederationTransportError
+from app.federation_transport import federation_request, FederationTransportError
 from app.config import get_settings
 from app.database import get_db
 from app.deps import get_current_owner, reject_cross_site

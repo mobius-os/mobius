@@ -3,23 +3,14 @@
 # mind->memory and dreaming->reflection. Keep those old source slugs visible
 # here until the supported migration window closes.
 #
-# The migration renames each app's slug, display name, and source_dir in place,
-# then moves slug-keyed on-disk state under /data/apps/<slug>, the editable skill
-# file, cron logs, and the crontab entry. It deliberately does not touch
-# /data/apps/<numeric-id>, so report history and id-keyed storage stay attached
-# to the same app row.
+# This image-owned half moves slug-keyed on-disk state under /data/apps/<slug>,
+# the editable skill file, cron logs, and the crontab entry. It deliberately
+# does not touch /data/apps/<numeric-id>; the dialect-neutral database half
+# preserves that row and numeric identity separately.
 #
-# source_dir is load-bearing because explicit apply matches an existing app by
-# source_dir, not name. A migrated row with the old source_dir would make a
-# later apply create a duplicate and strand brief history.
-#
-# Reflection owns real data under its numeric app id, so this must be an
-# in-place rename rather than install-core-apps' "register new and archive old"
-# pattern.
-#
-# The database, filesystem, and crontab steps are guarded independently. A fresh
-# instance, an already migrated instance, or a boot interrupted partway through a
-# previous run can safely run this script again.
+# The filesystem and crontab steps are guarded independently. The configured
+# database is migrated later by SQLAlchemy; this image-owned script must not
+# assume either SQLite or a fixed database path.
 #
 # Run before init_skills.py and install-core-apps.sh, as the mobius user, so live
 # skill edits are moved before seeding and app rows are renamed before core app
@@ -27,8 +18,6 @@
 set -uo pipefail
 
 DATA_DIR="${DATA_DIR:-/data}"
-DB="$DATA_DIR/db/ultimate.db"
-[ -f "$DB" ] || exit 0   # no db yet on first boot, so there is nothing to migrate.
 
 # Return the first base-plus-extension path that does not already exist.
 next_available_path() {
@@ -151,41 +140,7 @@ sys.exit(0 if changed else 3)
 
 # Migrate one old app slug to its new platform identity.
 migrate_one() {
-  local old="$1" new="$2" name="$3"
-  local newdir="$DATA_DIR/apps/$new"
-
-  # Rename the row in place when only the old slug exists, repair stale
-  # source_dir when only the new slug exists, and preserve both rows on conflict.
-  DB="$DB" NEWDIR="$newdir" python3 - "$old" "$new" "$name" <<'PY' 2>&1 || true
-import os, sqlite3, sys
-old, new, name = sys.argv[1], sys.argv[2], sys.argv[3]
-newdir = os.environ["NEWDIR"]
-con = sqlite3.connect(os.environ["DB"]); cur = con.cursor()
-if not cur.execute(
-    "select 1 from sqlite_master where type='table' and name='apps'"
-).fetchone():
-    # A fresh image can contain the database file before FastAPI creates its
-    # schema.  The filesystem/crontab migration below is deliberately
-    # independent, so skip only this database step without a noisy traceback.
-    sys.exit(0)
-o = cur.execute("select id, source_dir from apps where slug=?", (old,)).fetchone()
-n = cur.execute("select id, source_dir from apps where slug=?", (new,)).fetchone()
-if o and not n:
-    cur.execute("update apps set slug=?, name=?, source_dir=? where slug=?",
-                (new, name, newdir, old))
-    con.commit()
-    print(f"migrate-app-rename: DB {old} -> {new} (id {o[0]}, source_dir set)")
-elif o and n:
-    print(
-        f"migrate-app-rename: WARN db conflict for {old} -> {new}; "
-        f"preserved old id {o[0]} and new id {n[0]}",
-        file=sys.stderr,
-    )
-elif n and (n[1] or "").rstrip("/").endswith("/" + old):
-    cur.execute("update apps set source_dir=? where slug=?", (newdir, new))
-    con.commit()
-    print(f"migrate-app-rename: repaired stale source_dir for {new} (id {n[0]})")
-PY
+  local old="$1" new="$2"
 
   move_source_dir "$old" "$new"
   move_skill_file "$old" "$new"
@@ -193,6 +148,38 @@ PY
   rewrite_crontab "$old" "$new"
 }
 
-migrate_one mind memory Memory
-migrate_one dreaming reflection Reflection
-exit 0
+migrate_one mind memory
+migrate_one dreaming reflection
+
+# The boot caller records the filesystem-domain receipt only after every old
+# slug-keyed path disappeared. Database proof is deliberately separate.
+DATA_DIR="$DATA_DIR" python3 - <<'PYPROOF'
+import glob
+import os
+import sys
+from pathlib import Path
+
+root = Path(os.environ["DATA_DIR"])
+old = ("mind", "dreaming")
+leftovers = []
+for slug in old:
+    if (root / "apps" / slug).exists():
+        leftovers.append(f"source directory apps/{slug}")
+    if (root / "shared" / "skills" / f"{slug}.md").exists():
+        leftovers.append(f"skill {slug}.md")
+    if glob.glob(str(root / "cron-logs" / f"{slug}.*")):
+        leftovers.append(f"cron logs for {slug}")
+if leftovers:
+    print("migrate-app-rename: incomplete: " + ", ".join(leftovers), file=sys.stderr)
+    raise SystemExit(1)
+PYPROOF
+proof_status=$?
+if [ "$proof_status" -ne 0 ]; then
+  exit "$proof_status"
+fi
+if crontab -l 2>/dev/null \
+  | grep -Ev '^[[:space:]]*(#|$)' \
+  | grep -Eq '/apps/(mind|dreaming)/'; then
+  echo "migrate-app-rename: incomplete: crontab still references an old app slug" >&2
+  exit 1
+fi

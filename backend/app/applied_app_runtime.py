@@ -19,7 +19,11 @@ from pathlib import Path
 
 from app import app_git
 from app.config import get_settings
-from app.manifest_contract import static_asset_entries
+from app.manifest_contract import (
+  ManifestContractError,
+  job_interpreter,
+  static_asset_entries,
+)
 
 
 _SOURCE_MANIFEST = object()
@@ -218,6 +222,77 @@ def bootstrap_legacy_runtimes(db) -> tuple[int, list[str]]:
     finally:
       if staged is not None:
         shutil.rmtree(staged)
+  return migrated, warnings
+
+
+def migrate_legacy_job_declarations(db) -> tuple[int, list[str]]:
+  """Make every accepted pre-contract job explicit and executable.
+
+  Before 2026-09-12, a missing shebang meant Bash. Copy the immutable accepted
+  runtime, make that historical choice explicit in its bytes, add execute
+  permission where the old runner did not require it, and advance the app's
+  content-addressed pointer. A crash is safe to retry because the source is an
+  accepted runtime, never the editable app tree. Every boot scans all rows,
+  including tombstones, so restoring an older accepted pointer reopens this
+  idempotent cutover instead of trusting a receipt from unrelated app IDs.
+  """
+  from app import models
+
+  cache = Path(get_settings().data_dir) / "app-runtime"
+  cache.mkdir(parents=True, exist_ok=True)
+  migrated = 0
+  warnings: list[str] = []
+  # Tombstones remain recoverable installed apps during their retention window;
+  # migrate them too so a later recovery cannot revive the retired contract.
+  for app in db.query(models.App).all():
+    staged = None
+    try:
+      source = runtime_root(app)
+      manifest_path = source / "mobius.json"
+      if not manifest_path.is_file() or manifest_path.is_symlink():
+        continue
+      manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+      schedule = manifest.get("schedule")
+      job_name = schedule.get("job") if isinstance(schedule, dict) else None
+      if not isinstance(job_name, str) or not job_name:
+        continue
+      job = source / job_name
+      if job.is_symlink() or not job.is_file():
+        raise AppliedRuntimeUnavailable(
+          f"accepted schedule job is missing ({job_name})"
+        )
+      content = job.read_bytes()
+      add_shebang = False
+      try:
+        job_interpreter(content)
+      except ManifestContractError as exc:
+        if "missing a shebang" not in str(exc):
+          raise AppliedRuntimeUnavailable(str(exc)) from exc
+        add_shebang = True
+      if not add_shebang and job.stat().st_mode & 0o111:
+        continue
+
+      staged = Path(tempfile.mkdtemp(prefix=".job-shebang-", dir=cache))
+      shutil.copytree(source, staged, dirs_exist_ok=True, symlinks=True)
+      target = staged / job_name
+      if add_shebang:
+        target.write_bytes(b"#!/usr/bin/env bash\n" + content)
+      target.chmod(target.stat().st_mode | 0o111)
+      previous_updated = app.updated_at
+      publish_runtime(app, _prepared(staged))
+      staged = None
+      from sqlalchemy.orm.attributes import flag_modified
+      app.updated_at = previous_updated
+      flag_modified(app, "updated_at")
+      db.commit()
+      migrated += 1
+    except Exception as exc:
+      db.rollback()
+      warnings.append(f"app {app.id} schedule job declaration: {exc}")
+    finally:
+      if staged is not None:
+        shutil.rmtree(staged)
+
   return migrated, warnings
 
 

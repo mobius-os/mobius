@@ -24,17 +24,6 @@ def test_mark_starting_duplicate_returns_false():
   assert registry.mark_starting("chat-1") is False
 
 
-def test_idle_admission_close_and_runner_reservation_are_one_boundary():
-  registry = RunnerRegistry()
-
-  assert registry.close_admission_if_idle() is True
-  assert registry.mark_starting("late-chat") is False
-
-  registry.reopen_admission()
-  assert registry.mark_starting("early-chat") is True
-  assert registry.close_admission_if_idle() is False
-
-
 def test_maintenance_lease_cannot_reopen_concurrent_restart_drain():
   registry = RunnerRegistry()
 
@@ -44,8 +33,6 @@ def test_maintenance_lease_cannot_reopen_concurrent_restart_drain():
   registry.release_admission_lease(lease)
 
   assert registry.mark_starting("late-chat") is False
-  registry.reopen_admission()
-  assert registry.mark_starting("after-cancel") is True
 
 
 def test_register_replaces_same_kind_handle():

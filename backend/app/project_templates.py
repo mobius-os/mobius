@@ -13,7 +13,7 @@ LINKED_APP_GUIDANCE = (
 
 
 def linked_app_id(template):
-  """Identify explicit linked-app ownership, excluding historical imported copies."""
+  """Identify the current explicit linked-app ownership declaration."""
   imported = template.get("imported_from", {}) if isinstance(template, dict) else {}
   if not isinstance(imported, dict) or imported.get("management") != "linked" or imported.get("kind") != "app":
     return None
@@ -39,6 +39,8 @@ CORE_TEMPLATES = [
     ),
     "skills": ["building-apps-quickstart", "visual-testing", "notifications"],
     "files": {"index.jsx": "app/index.jsx", "mobius.json": "app/mobius.json"},
-    "previews": [{"id": "app", "name": "App", "kind": "html", "path": "index.jsx"}],
+    "previews": [{
+      "id": "app", "name": "App", "source": "index.jsx", "builder": "app",
+    }],
   },
 ]

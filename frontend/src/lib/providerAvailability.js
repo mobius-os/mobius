@@ -13,10 +13,7 @@ export const PROVIDER_AVAILABILITY_PHASE = Object.freeze({
 })
 
 export function providerIsConfigured(info) {
-  return info?.available !== false && (
-    info?.configured === true
-    || (info?.configured === undefined && info?.authenticated === true)
-  )
+  return info?.available !== false && info?.configured === true
 }
 
 export function configuredProviderSet(statusByProvider) {

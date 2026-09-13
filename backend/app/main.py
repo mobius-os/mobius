@@ -66,19 +66,18 @@ from app import activity, models
 # uvicorn boot. See the
 # wrapped imports in lifespan() below.
 from app.routes import (
-  admin_router, agent_coordination_router, apps_router, auth_router,
+  admin_router, agent_coordination_router, apps_router, app_services_router,
+  auth_router,
   app_chat_router,
   chat_embed_router, chat_logs_router, chat_router, chats_router, chats_stream_router,
   secure_inputs_router,
   connectors_router, connectors_public_router,
   community_router,
-  common_router,
-  common_groups_router,
-  common_objects_router,
   contribution_relay_router,
   contribution_reviews_router,
   chat_waits_router,
   debug_router, delegations_router, fs_router, goal_plans_router, github_router,
+  github_access_router,
   reviewer_router,
   identity_router,
   owner_approvals_router,
@@ -839,6 +838,7 @@ app.add_middleware(_RequestErrorTelemetryMiddleware)
 # -- API routes --------------------------------------------------------
 app.include_router(auth_router)
 app.include_router(apps_router)
+app.include_router(app_services_router)
 app.include_router(storage_router)
 app.include_router(fs_router)
 app.include_router(projects_router)
@@ -868,9 +868,6 @@ app.include_router(connect_router)
 app.include_router(client_error_router)
 app.include_router(client_signal_router)
 app.include_router(community_router)
-app.include_router(common_router)
-app.include_router(common_groups_router)
-app.include_router(common_objects_router)
 app.include_router(contribution_relay_router)
 app.include_router(settings_router)
 app.include_router(platform_router)
@@ -878,6 +875,7 @@ app.include_router(uploads_router)
 app.include_router(media_router)
 app.include_router(secrets_router)
 app.include_router(github_router)
+app.include_router(github_access_router)
 app.include_router(reviewer_router)
 app.include_router(contribution_reviews_router)
 app.include_router(identity_router)

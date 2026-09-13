@@ -375,7 +375,6 @@ def test_seeded_guidance_uses_current_preview_recovery_and_resolver_contracts():
   quickstart = (seed_dir / "building-apps-quickstart.md").read_text()
   resolving = (seed_dir / "resolving-app-git.md").read_text()
   theming = (seed_dir / "theming.md").read_text()
-  reflection = (seed_dir / "reflection.md").read_text()
 
   assert "preview_app.sh" in quickstart
   assert "--review" in resolving
@@ -383,8 +382,6 @@ def test_seeded_guidance_uses_current_preview_recovery_and_resolver_contracts():
   assert "deployment's external Recovery action" in theming
   assert "`/recover` →" not in theming
   assert "`/recover/chat`" not in theming
-  assert "Reconcile the active instruction with its shipped owner" in reflection
-  assert "Do not turn this trigger into an unconditional nightly diff" in reflection
 
 
 def test_core_routes_operational_recipes_to_their_owning_skills():
@@ -415,25 +412,10 @@ def test_advanced_app_skill_does_not_duplicate_the_component_catalog():
   assert "/* mobius-ui:Button" not in advanced
 
 
-def test_reflection_seed_uses_staged_evidence_and_avoids_template_duplication():
-  repo = Path(__file__).resolve().parents[2]
-  reflection = (
-    repo / "backend" / "scripts" / "seed-skills" / "reflection.md"
-  ).read_text()
-
-  assert "inputs/chats.md" in reflection
-  assert "ordered `cron_outcome` events" in reflection
-  assert "/data/cli-auth/" not in reflection
-  assert "this wasted a turn on 2026" not in reflection
-  assert "The seeded template owns the exact HTML and styling" in reflection
-  assert "Copy this skeleton" not in reflection
-
-
 def test_agent_coaching_is_the_single_neutral_coaching_skill():
   repo = Path(__file__).resolve().parents[2]
   seed_dir = repo / "backend" / "scripts" / "seed-skills"
   coaching = (seed_dir / "agent-coaching.md").read_text(encoding="utf-8")
-  reflection = (seed_dir / "reflection.md").read_text(encoding="utf-8")
 
   assert not (seed_dir / "manager-session.md").exists()
   assert "neutral learning conversation" in coaching
@@ -446,11 +428,6 @@ def test_agent_coaching_is_the_single_neutral_coaching_skill():
   assert "reconstructive coaching" not in coaching
   assert "evidence-only fallback" not in coaching
   assert "<claude|codex> <session_id>" in coaching
-  assert "`/data/shared/skills/agent-coaching.md` completely" in reflection
-  assert "what should Reflection itself change" in reflection
-  assert "/data/platform/backend/scripts/reflection-evidence.py" in reflection
-  assert "same-provider transcript reseed" not in reflection
-  assert "exact-session coaching was unavailable" in reflection
 
 
 def test_image_skill_returns_tool_result_without_touching_protected_storage():

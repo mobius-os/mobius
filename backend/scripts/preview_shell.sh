@@ -8,7 +8,7 @@
 #   preview_shell.sh [chat_id] [output_path]
 #   defaults: chat_id=$CHAT_ID, output_path=the current chat's unique media path
 #
-# Maps to the shell route: /chat/<id> when a chat id is given, else /.
+# Maps to the shell route: /shell/?chat=<id> when a chat id is given, else /.
 # All the auth/viewport/banner handling lives in agent-screenshot.sh.
 
 set -euo pipefail
@@ -26,7 +26,7 @@ if [ -z "$OUT" ] && [ -z "$CHAT_ID" ]; then
 fi
 
 if [ -n "${CHAT_ID}" ]; then
-  ROUTE="/chat/${CHAT_ID}"
+  ROUTE="/shell/?chat=${CHAT_ID}"
 else
   ROUTE="/"
 fi

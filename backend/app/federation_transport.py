@@ -1,7 +1,7 @@
-"""SSRF-safe transport for Common federation's outbound requests.
+"""SSRF-safe transport for platform-owned outbound federation requests.
 
-Common accepts peer locations from signed and unsigned protocol data.  Every
-outbound Common request therefore crosses this one boundary: resolve and
+Federated project copies accept peer locations from remote data. Every
+outbound request therefore crosses this one boundary: resolve and
 validate with the platform's canonical policy, connect to that exact address,
 preserve the original Host/SNI identity, reject redirects, ignore ambient
 proxies, and cap the response before buffering it.

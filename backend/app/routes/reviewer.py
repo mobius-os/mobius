@@ -7,7 +7,6 @@ accumulating unrelated features — public paths under ``/api/github``
 are unchanged.
 """
 
-import hashlib
 import json
 from pathlib import Path
 
@@ -17,7 +16,7 @@ from slowapi import Limiter
 from slowapi.util import get_remote_address
 from sqlalchemy.orm import Session
 
-from app import fs_locks, models
+from app import app_services, fs_locks, models
 from app.reviewer_automation import REPO as _REVIEWER_REPO
 from app.config import get_settings
 from app.database import get_db
@@ -111,172 +110,74 @@ def _reviewer_assert_live_revision(
   return pull
 
 
-_REVIEWER_LEDGER_MAX_BYTES = 4 * 1024 * 1024
-_REVIEWER_SETTINGS_MAX_BYTES = 256 * 1024
-_REVIEWER_GUIDE_MAX_BYTES = 256 * 1024
-
-
-def _reviewer_read_json_object(path: Path, limit: int) -> dict:
-  try:
-    with path.open("rb") as handle:
-      raw = handle.read(limit + 1)
-    if len(raw) > limit:
-      raise ValueError("oversized")
-    value = json.loads(raw)
-  except (OSError, UnicodeDecodeError, ValueError) as exc:
-    raise HTTPException(
-      409, "The stored Reviewer draft is unavailable; refresh it before sending.",
-    ) from exc
-  if not isinstance(value, dict):
-    raise HTTPException(
-      409, "The stored Reviewer draft is unavailable; refresh it before sending.",
-    )
-  return value
-
-
-def _reviewer_read_guide(path: Path) -> str:
-  try:
-    with path.open("rb") as handle:
-      raw = handle.read(_REVIEWER_GUIDE_MAX_BYTES + 1)
-    if len(raw) > _REVIEWER_GUIDE_MAX_BYTES:
-      raise ValueError("oversized")
-    return raw.decode("utf-8").strip()
-  except (OSError, UnicodeDecodeError, ValueError) as exc:
-    raise HTTPException(
-      409, "Reviewer guidance is unavailable; refresh the review before sending.",
-    ) from exc
-
-
-def _reviewer_json_digest(value: object) -> str:
-  raw = json.dumps(
-    value, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
-  ).encode("utf-8")
-  return hashlib.sha256(raw).hexdigest()
-
-
-def _reviewer_manual_plan_locked(
-  app_id: int, source_dir: str, body: ReviewerCommentBody,
-) -> dict:
-  storage = Path(get_settings().data_dir) / "apps" / str(app_id)
-  ledger = _reviewer_read_json_object(
-    storage / "job-state" / "ledger.json", _REVIEWER_LEDGER_MAX_BYTES,
-  )
-  settings = _reviewer_read_json_object(
-    storage / "settings.json", _REVIEWER_SETTINGS_MAX_BYTES,
-  )
-  pulls = ledger.get("pulls")
-  if not isinstance(pulls, dict) or len(pulls) > 500:
-    raise HTTPException(
-      409, "The stored Reviewer draft is unavailable; refresh it before sending.",
-    )
-
-  repository = body.repository.strip()
-  record = pulls.get(f"{repository}#{body.pr_number}")
-  if not isinstance(record, dict):
-    matches = [
-      value for value in pulls.values()
-      if isinstance(value, dict)
-      and str(value.get("repository") or "").casefold() == repository.casefold()
-      and value.get("number") == body.pr_number
-    ]
-    record = matches[0] if len(matches) == 1 else None
-  if not isinstance(record, dict):
-    raise HTTPException(409, "This exact private Reviewer draft no longer exists.")
-
-  selected = settings.get("selectedRepos")
-  if (
-    not isinstance(selected, list)
-    or repository.casefold() not in {
-      str(value).strip().casefold() for value in selected if isinstance(value, str)
-    }
-  ):
-    raise HTTPException(409, "This repository is no longer selected in Reviewer.")
-
-  base_guide = _reviewer_read_guide(Path(source_dir) / "reviewing.md")
-  custom = settings.get("customGuidance")
-  repo_guidance = settings.get("repoGuidance")
-  if not isinstance(custom, str) or not isinstance(repo_guidance, dict):
-    raise HTTPException(409, "Reviewer guidance changed; refresh the review before sending.")
-  repo_extra = repo_guidance.get(repository)
-  if repo_extra is None:
-    for key, value in repo_guidance.items():
-      if str(key).casefold() == repository.casefold():
-        repo_extra = value
-        break
-  if repo_extra is not None and not isinstance(repo_extra, str):
-    raise HTTPException(409, "Reviewer guidance changed; refresh the review before sending.")
-  guide_parts = [base_guide]
-  if custom.strip():
-    guide_parts.append("# Workspace guidance\n\n" + custom.strip())
-  if str(repo_extra or "").strip():
-    guide_parts.append("# Repository guidance\n\n" + str(repo_extra).strip())
-  effective_guide = "\n\n---\n\n".join(guide_parts)
-  effective_hash = hashlib.sha256(effective_guide.encode("utf-8")).hexdigest()
-  identity_fields = {
-    "repository": repository.lower(),
-    "number": body.pr_number,
-    "head_sha": body.head_sha.lower(),
-    "base_sha": body.base_sha.lower(),
-    "guide_hash": effective_hash,
-    "bundle_hash": str(record.get("bundle_hash") or "").lower(),
-  }
-  computed_identity = _reviewer_json_digest(identity_fields)
-  exact = (
-    record.get("status") == "complete"
-    and record.get("private") is True
-    and str(record.get("identity") or "").lower() == body.identity.lower()
-    and computed_identity == body.identity.lower()
-    and str(record.get("repository") or "").casefold() == repository.casefold()
-    and record.get("number") == body.pr_number
-    and str(record.get("head_sha") or "").lower() == body.head_sha.lower()
-    and str(record.get("base_sha") or "").lower() == body.base_sha.lower()
-    and str(record.get("guide_hash") or "").lower() == effective_hash
-    and str(record.get("draft_comment") or "") == body.body
-    and body.guide_hash.lower() == effective_hash
-  )
-  if not exact:
-    raise HTTPException(
-      409, "The draft or guidance changed; refresh the review before sending.",
-    )
-  return {
-    "identity": computed_identity,
-    "repository": str(record["repository"]),
-    "pr_number": int(record["number"]),
-    "head_sha": str(record["head_sha"]).lower(),
-    "base_sha": str(record["base_sha"]).lower(),
-    "guide_hash": effective_hash,
-    "body": str(record["draft_comment"]),
-  }
-
-
 async def _reviewer_manual_plan(
   app_id: int, body: ReviewerCommentBody, expected_nonce: str | None,
   db: Session,
+) -> dict:
+  # Never reserve a pooled connection while waiting for filesystem owners.
+  db.close()
+  async with fs_locks.app_storage_lock(app_id):
+    _recheck_submit_app(db, app_id, expected_nonce)
+    current = (
+      db.query(models.App)
+      .populate_existing()
+      .filter(models.App.id == app_id, models.App.deleted_at.is_(None))
+      .one_or_none()
+    )
+    if current is None:
+      db.close()
+      raise HTTPException(409, "Reviewer changed; refresh the review before sending.")
+    owner = db.query(models.Owner).first()
+    if owner is None:
+      db.close()
+      raise HTTPException(503, "Owner setup is incomplete.")
+    db.expunge(current)
+    db.expunge(owner)
+    db.close()
+    result = await app_services.invoke_policy(
+      current, owner, "reviewer/manual-plan", body.model_dump(),
+    )
+    return result
+
+
+async def _reviewer_validate_comment(
+  db: Session, app_id: int, body: str, head_sha: str,
+) -> str:
+  app = (
+    db.query(models.App)
+    .filter(models.App.id == app_id, models.App.deleted_at.is_(None))
+    .one_or_none()
+  )
+  owner = db.query(models.Owner).first()
+  if app is None or owner is None:
+    raise HTTPException(404, "Reviewer app not found.")
+  db.expunge(app)
+  db.expunge(owner)
+  db.close()
+  result = await app_services.invoke_policy(
+    app, owner, "reviewer/validate-comment",
+    {"body": body, "head_sha": head_sha},
+  )
+  return str(result["body"])
+
+
+async def _reviewer_prepare_grant(
+  db: Session, app_id: int, body: ReviewerGrantBody,
 ) -> dict:
   app = (
     db.query(models.App)
     .filter(models.App.id == app_id, models.App.deleted_at.is_(None))
     .one_or_none()
   )
-  if app is None:
-    raise HTTPException(404, "App not found.")
-  source_dir = str(app.source_dir)
-  # Never reserve a pooled connection while waiting for filesystem owners.
+  owner = db.query(models.Owner).first()
+  if app is None or owner is None:
+    raise HTTPException(404, "Reviewer app not found.")
+  db.expunge(app)
+  db.expunge(owner)
   db.close()
-  async with fs_locks.app_storage_lock(app_id):
-    async with fs_locks.source_dir_lock(source_dir):
-      _recheck_submit_app(db, app_id, expected_nonce)
-      current = (
-        db.query(models.App)
-        .populate_existing()
-        .filter(models.App.id == app_id, models.App.deleted_at.is_(None))
-        .one_or_none()
-      )
-      if current is None or str(current.source_dir) != source_dir:
-        db.close()
-        raise HTTPException(409, "Reviewer changed; refresh the review before sending.")
-      db.close()
-      return _reviewer_manual_plan_locked(app_id, source_dir, body)
+  return await app_services.invoke_policy(
+    app, owner, "reviewer/normalize-grant", body.model_dump(),
+  )
 
 
 def _reviewer_write_comment(
@@ -352,12 +253,14 @@ async def reviewer_grant(
   from app import reviewer_automation
 
   _require_reviewer_owner_action(principal)
-  _validate_submit_app(app_id, principal, db)
+  expected_nonce = _validate_submit_app(app_id, principal, db)
+  grant = await _reviewer_prepare_grant(db, app_id, body)
+  _recheck_submit_app(db, app_id, expected_nonce)
   row = reviewer_automation.stamp_grant(
-    db, app_id, repositories=body.repositories,
-    guide_hash=body.guide_hash.lower(),
-    max_rounds_per_pr=body.max_rounds_per_pr,
-    daily_post_ceiling=body.daily_post_ceiling,
+    db, app_id, repositories=grant["repositories"],
+    guide_hash=grant["guide_hash"],
+    max_rounds_per_pr=grant["max_rounds_per_pr"],
+    daily_post_ceiling=grant["daily_post_ceiling"],
   )
   return {"status": "granted", "grant": reviewer_automation.public_grant(row)}
 
@@ -404,7 +307,7 @@ async def reviewer_comment(
   head_sha = body.head_sha.lower()
   base_sha = body.base_sha.lower()
   guide_hash = body.guide_hash.lower()
-  comment = reviewer_automation.validated_comment(body.body, head_sha)
+  comment = await _reviewer_validate_comment(db, app_id, body.body, head_sha)
   _reviewer_assert_live_revision(
     repository, body.pr_number, head_sha, base_sha,
   )
@@ -447,9 +350,8 @@ async def reviewer_manual_comment(
 
   _require_reviewer_owner_action(principal)
   expected_nonce = _validate_submit_app(app_id, principal, db)
-  reviewer_automation.validated_comment(body.body, body.head_sha.lower())
   plan = await _reviewer_manual_plan(app_id, body, expected_nonce, db)
-  comment = reviewer_automation.validated_comment(plan["body"], plan["head_sha"])
+  comment = plan["body"]
   _reviewer_assert_live_revision(
     plan["repository"], plan["pr_number"], plan["head_sha"], plan["base_sha"],
   )
@@ -469,9 +371,7 @@ async def reviewer_manual_comment(
       raise HTTPException(
         409, "The draft or guidance changed; refresh the review before sending.",
       )
-    comment = reviewer_automation.validated_comment(
-      refreshed["body"], refreshed["head_sha"],
-    )
+    comment = refreshed["body"]
     _reviewer_assert_live_revision(
       refreshed["repository"], refreshed["pr_number"],
       refreshed["head_sha"], refreshed["base_sha"],

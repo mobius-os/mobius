@@ -35,17 +35,16 @@ test('provider-specific settings list only connected providers', () => {
   )
 })
 
-test('configured is authoritative with authenticated as a legacy fallback', () => {
+test('configured is the only provider availability authority', () => {
   const configured = configuredProviderSet({
-    codex: { configured: true, authenticated: true },
-    claude: { authenticated: false },
-    legacy: { authenticated: true },
-    contradictory: { configured: false, authenticated: true },
+    codex: { configured: true },
+    claude: { configured: false },
+    retiredAlias: { authenticated: true },
     unavailable: { configured: true, available: false },
     future: {},
   })
 
-  assert.deepEqual([...configured], ['codex', 'legacy'])
+  assert.deepEqual([...configured], ['codex'])
 })
 
 test('an unavailable retained provider exposes only its selected model', () => {

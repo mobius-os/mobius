@@ -171,7 +171,6 @@ def _build_app_context(
       "skills": template.get("skills") or [],
       "dependencies": template.get("dependencies") or [],
       "guidance": template.get("guidance") or "",
-      "legacy_source": project.legacy_source_json,
       "inherited_theme": {
         "read_only": True,
         "url": f"/api/projects/{project.id}/theme",

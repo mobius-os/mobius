@@ -2,6 +2,7 @@
 
 import fcntl
 import shutil
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -103,6 +104,79 @@ def test_migration_preserves_deployed_ignored_static_but_pins_accepted_scripts(d
   assert (root / "static" / "asset.txt").read_text() == "deployed static"
   (source / "static" / "asset.txt").write_text("later edited static")
   assert (root / "static" / "asset.txt").read_text() == "deployed static"
+
+
+def test_legacy_job_migration_makes_execution_contract_explicit(db):
+  row, source = _legacy_app(db)
+  (source / "mobius.json").write_text(
+    '{"schedule":{"job":"job.sh"}}', encoding="utf-8",
+  )
+  assert runtime.bootstrap_legacy_runtimes(db) == (1, [])
+  before = row.runtime_revision
+  stale_receipt = (
+    Path(get_settings().data_dir)
+    / "app-runtime" / "job-execution-contract-migration.json"
+  )
+  stale_receipt.write_text('{"schema":1,"app_ids":[]}', encoding="utf-8")
+
+  migrated, warnings = runtime.migrate_legacy_job_declarations(db)
+
+  assert (migrated, warnings) == (1, [])
+  assert row.runtime_revision != before
+  accepted = runtime.runtime_root(row)
+  assert (accepted / "job.sh").read_bytes() == (
+    b"#!/usr/bin/env bash\ndeployed script"
+  )
+  assert accepted.joinpath("job.sh").stat().st_mode & 0o111
+  assert runtime.migrate_legacy_job_declarations(db) == (0, [])
+
+  # A selective database restore can point back at the accepted legacy tree
+  # while the old receipt survives on disk. Current bytes, not that receipt,
+  # decide whether the cutover runs again.
+  row.runtime_revision = before
+  db.commit()
+  assert runtime.migrate_legacy_job_declarations(db) == (1, [])
+  assert runtime.runtime_root(row) == accepted
+
+
+def test_legacy_job_migration_includes_tombstones_without_rewriting_bytes(db):
+  row, source = _legacy_app(db)
+  content = "#!/usr/bin/env bash\necho accepted\n"
+  (source / "mobius.json").write_text(
+    '{"schedule":{"job":"job.sh"}}', encoding="utf-8",
+  )
+  (source / "job.sh").write_text(content, encoding="utf-8")
+  (source / "job.sh").chmod(0o644)
+  row.deleted_at = datetime(2026, 9, 12, 12)
+  db.commit()
+  assert runtime.bootstrap_legacy_runtimes(db) == (1, [])
+
+  assert runtime.migrate_legacy_job_declarations(db) == (1, [])
+
+  accepted = runtime.runtime_root(row) / "job.sh"
+  assert accepted.read_text(encoding="utf-8") == content
+  assert accepted.stat().st_mode & 0o111
+
+
+def test_legacy_job_migration_retries_an_unrepairable_runtime(db):
+  _row, source = _legacy_app(db)
+  (source / "mobius.json").write_text(
+    '{"schedule":{"job":"job.sh"}}', encoding="utf-8",
+  )
+  (source / "job.sh").write_text("#!relative-interpreter\nexit 0\n")
+  assert runtime.bootstrap_legacy_runtimes(db) == (1, [])
+
+  first = runtime.migrate_legacy_job_declarations(db)
+  second = runtime.migrate_legacy_job_declarations(db)
+
+  assert first[0] == second[0] == 0
+  assert "absolute interpreter" in first[1][0]
+  assert "absolute interpreter" in second[1][0]
+  assert not (
+    Path(get_settings().data_dir)
+    / "app-runtime"
+    / "job-execution-contract-migration.json"
+  ).exists()
 
 
 def test_same_source_commit_with_new_generated_assets_gets_new_runtime_pointer(db):

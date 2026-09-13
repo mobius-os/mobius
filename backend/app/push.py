@@ -170,7 +170,7 @@ def _prepare_owner_notification(
       lights the drawer activity dot). New subsystems add a short
       stable slug.
     - target: in-scope deep-link only — '/shell/?app=<id>' or
-      '/shell/?chat=<id>' (legacy '/app/:id' and '/chat/:id' still parse).
+      '/shell/?chat=<id>'.
       Clients treat it as UNTRUSTED and fail closed on anything else.
   """
   notification_id = notification_id or str(uuid.uuid4())

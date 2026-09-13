@@ -306,8 +306,7 @@ def test_providers_status_accepts_app_token(client, auth):
   assert "claude" in body
   assert "codex" in body
   assert "configured" in body["claude"]
-  assert "authenticated" in body["claude"]
-  assert body["claude"]["configured"] is body["claude"]["authenticated"]
+  assert body["claude"]["authenticated"] == body["claude"]["configured"]
   assert body["mobius"]["available"] is False
   assert body["mobius"]["configured"] is False
 
@@ -377,14 +376,6 @@ def test_providers_status_hides_mobius_trial_from_app_principals(
   assert app_body["mobius"]["available"] is True
   assert app_body["mobius"]["configured"] is True
   assert "trial" not in app_body["mobius"]
-
-
-def test_provider_status_exposes_configured_with_legacy_alias(client, auth):
-  r = client.get("/api/auth/provider/status", headers=auth)
-
-  assert r.status_code == 200, r.text
-  body = r.json()
-  assert body["configured"] is body["authenticated"]
 
 
 def test_providers_status_rejects_empty_claude_oauth_record(

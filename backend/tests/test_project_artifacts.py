@@ -25,8 +25,14 @@ class _FakeTask:
 
 
 @pytest.fixture(autouse=True)
-def _reset_live_builds():
+def _reset_live_builds(monkeypatch):
   project_builders.reset_for_tests()
+  # Exercise the generic registry/lifecycle with a synthetic declaration.
+  # Production website/PDF declarations now come only from provider apps.
+  monkeypatch.setitem(project_builders.BUILTIN_ARTIFACT_TYPES, "website", {
+    "id": "website", "name": "Test output", "extensions": ["html"],
+    "preview": "html", "script": None, "output": "{source}",
+  })
   yield
   project_builders.reset_for_tests()
 
@@ -154,237 +160,6 @@ def test_creation_open_recency_is_navigation_state(client, auth, db):
   ).status_code == 404
 
 
-def test_website_build_copies_tree_and_serves_entry_with_csp(client, auth):
-  project = _make_project(client, auth)
-  _write_file(client, auth, project, "index.html", "<h1>Hello site</h1>")
-  _write_file(client, auth, project, "assets/app.css", "body{color:red}")
-  client.post(
-    f"/api/projects/{project['id']}/artifacts", headers=auth,
-    json={"name": "Website", "builder": "website", "source": "index.html"},
-  )
-
-  asyncio.run(project_builders.run_build(project["id"], "website"))
-
-  art = _artifact(client, auth, project["id"], "website")
-  assert art["status"] == "ok"
-  assert art["has_output"] is True
-  assert art["duration_ms"] is not None
-
-  entry = client.get(
-    f"/api/projects/{project['id']}/artifacts/website/output/index.html",
-    headers=auth,
-  )
-  assert entry.status_code == 200
-  assert "Hello site" in entry.text
-  # The website-entry CSP is exactly the spec's isolation policy — applied by
-  # the authoritative security middleware for this output namespace, not the
-  # shell CSP.
-  csp = entry.headers.get("content-security-policy", "")
-  assert csp == (
-    "default-src 'self'; img-src 'self' data:; font-src 'self' data:; "
-    "style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; "
-    "frame-ancestors 'self'"
-  )
-
-  asset = client.get(
-    f"/api/projects/{project['id']}/artifacts/website/output/assets/app.css",
-    headers=auth,
-  )
-  assert asset.status_code == 200
-  assert "color:red" in asset.text
-  # Sibling output files share the isolating namespace CSP, never the shell one.
-  assert "frame-ancestors 'self'" in asset.headers.get(
-    "content-security-policy", "",
-  )
-
-  log = client.get(
-    f"/api/projects/{project['id']}/artifacts/website/log", headers=auth,
-  ).json()
-  assert "Copied" in log["log"]
-  assert log["truncated"] is False
-
-
-def test_website_build_never_dereferences_nested_symlinks(
-  client, auth, db, tmp_path,
-):
-  project = _make_project(client, auth)
-  row = db.query(models.Project).filter(models.Project.id == project["id"]).one()
-  root = Path(os.environ["DATA_DIR"]) / row.root_path
-  (root / "index.html").write_text("<h1>safe</h1>", encoding="utf-8")
-  (root / "nested").mkdir()
-  outside_file = tmp_path / "private.txt"
-  outside_file.write_text("must-not-copy", encoding="utf-8")
-  outside_dir = tmp_path / "private-dir"
-  outside_dir.mkdir()
-  (outside_dir / "secret.txt").write_text("also-private", encoding="utf-8")
-  (root / "nested" / "file-link").symlink_to(outside_file)
-  (root / "nested" / "dir-link").symlink_to(
-    outside_dir, target_is_directory=True,
-  )
-  client.post(
-    f"/api/projects/{project['id']}/artifacts", headers=auth,
-    json={"name": "Website", "builder": "website", "source": "index.html"},
-  )
-
-  asyncio.run(project_builders.run_build(project["id"], "website"))
-
-  output = root / "artifacts" / "website" / "output" / "nested"
-  assert not (output / "file-link").exists()
-  assert not (output / "file-link").is_symlink()
-  assert not (output / "dir-link").exists()
-  assert not (output / "dir-link").is_symlink()
-
-
-def test_website_build_excludes_git_directories_and_gitfiles(client, auth, db):
-  project = _make_project(client, auth)
-  row = db.query(models.Project).filter(models.Project.id == project["id"]).one()
-  root = Path(os.environ["DATA_DIR"]) / row.root_path
-  (root / "index.html").write_text("<h1>safe</h1>", encoding="utf-8")
-  (root / ".git" / "hooks").mkdir(parents=True)
-  (root / ".git" / "config").write_text("[core]\n", encoding="utf-8")
-  (root / "packages" / "child").mkdir(parents=True)
-  (root / "packages" / "child" / ".git").write_text(
-    "gitdir: ../../../.git/modules/child\n", encoding="utf-8",
-  )
-  (root / "packages" / "child" / "page.html").write_text(
-    "<p>copied</p>", encoding="utf-8",
-  )
-  (root / "packages" / "vendor" / ".git").mkdir(parents=True)
-  (root / "packages" / "vendor" / ".git" / "config").write_text(
-    "[core]\n", encoding="utf-8",
-  )
-  client.post(
-    f"/api/projects/{project['id']}/artifacts", headers=auth,
-    json={"name": "Website", "builder": "website", "source": "index.html"},
-  )
-
-  asyncio.run(project_builders.run_build(project["id"], "website"))
-
-  output = root / "artifacts" / "website" / "output"
-  assert not (output / ".git").exists()
-  assert not (output / "packages" / "child" / ".git").exists()
-  assert not (output / "packages" / "vendor" / ".git").exists()
-  assert (output / "packages" / "child" / "page.html").read_text(
-    encoding="utf-8",
-  ) == "<p>copied</p>"
-
-
-def test_output_serving_is_confined_and_header_authed(client, auth, owner_token):
-  project = _make_project(client, auth)
-  _write_file(client, auth, project, "index.html", "<h1>ok</h1>")
-  client.post(
-    f"/api/projects/{project['id']}/artifacts", headers=auth,
-    json={"name": "Website", "builder": "website", "source": "index.html"},
-  )
-  asyncio.run(project_builders.run_build(project["id"], "website"))
-
-  # The output route authenticates via the Authorization header only. The shell
-  # fetches these bytes with the Bearer header (pdfjs for latex; the website is
-  # fetched and inlined into a sandboxed srcDoc), so the owner token is never on
-  # the URL where a sandboxed artifact's JS could read it.
-  by_header = client.get(
-    f"/api/projects/{project['id']}/artifacts/website/output/index.html",
-    headers=auth,
-  )
-  assert by_header.status_code == 200
-  assert "ok" in by_header.text
-
-  # A ?token= query param must NOT authenticate — that is the URL-leak vector we
-  # deliberately closed.
-  by_query = client.get(
-    f"/api/projects/{project['id']}/artifacts/website/output/index.html"
-    f"?token={owner_token}",
-  )
-  assert by_query.status_code == 401
-
-  unauth = client.get(
-    f"/api/projects/{project['id']}/artifacts/website/output/index.html",
-  )
-  assert unauth.status_code == 401
-
-  traversal = client.get(
-    f"/api/projects/{project['id']}/artifacts/website/output/../../../secret",
-    headers=auth,
-  )
-  assert traversal.status_code in (400, 404)
-
-  missing = client.get(
-    f"/api/projects/{project['id']}/artifacts/website/output/nope.html",
-    headers=auth,
-  )
-  assert missing.status_code == 404
-
-
-def test_latex_build_success_with_stubbed_tectonic(
-  client, auth, monkeypatch, tmp_path,
-):
-  project = _make_project(client, auth, "Paper")
-  _write_file(client, auth, project, "main.tex", "\\documentclass{article}")
-  client.post(
-    f"/api/projects/{project['id']}/artifacts", headers=auth,
-    json={"name": "PDF", "builder": "latex", "source": "main.tex"},
-  )
-  cache = tmp_path / "tectonic-cache"
-  monkeypatch.setattr(project_builders, "TECTONIC_CACHE_DIR", str(cache))
-
-  async def fake_tectonic(*, source, output_dir, cwd, env, log_path):
-    assert source == "main.tex"
-    # The cache dir is pinned into the environment before the subprocess runs.
-    assert env["TECTONIC_CACHE_DIR"] == str(cache)
-    Path(output_dir).mkdir(parents=True, exist_ok=True)
-    (Path(output_dir) / "main.pdf").write_bytes(b"%PDF-1.5 fake pdf")
-    Path(log_path).write_text("tectonic finished\n", encoding="utf-8")
-    return 0
-
-  monkeypatch.setattr(project_builders, "_run_tectonic", fake_tectonic)
-  asyncio.run(project_builders.run_build(project["id"], "pdf"))
-
-  art = _artifact(client, auth, project["id"], "pdf")
-  assert art["status"] == "ok"
-  assert art["has_output"] is True
-  assert art["output_rel"] == "artifacts/pdf/output/main.pdf"
-  assert cache.is_dir()
-
-  pdf = client.get(
-    f"/api/projects/{project['id']}/artifacts/pdf/output/main.pdf", headers=auth,
-  )
-  assert pdf.status_code == 200
-  assert pdf.content.startswith(b"%PDF")
-  # pdfjs fetches the PDF via this route; the namespace CSP rides along and is
-  # harmless to a fetch() consumed by the shell.
-  assert "frame-ancestors 'self'" in pdf.headers.get(
-    "content-security-policy", "",
-  )
-
-
-def test_latex_build_failure_records_error(client, auth, monkeypatch, tmp_path):
-  project = _make_project(client, auth, "Broken paper")
-  _write_file(client, auth, project, "main.tex", "\\documentclass{article}")
-  client.post(
-    f"/api/projects/{project['id']}/artifacts", headers=auth,
-    json={"name": "PDF", "builder": "latex", "source": "main.tex"},
-  )
-  monkeypatch.setattr(
-    project_builders, "TECTONIC_CACHE_DIR", str(tmp_path / "cache"),
-  )
-
-  async def failing_tectonic(*, source, output_dir, cwd, env, log_path):
-    Path(output_dir).mkdir(parents=True, exist_ok=True)
-    Path(log_path).write_text("! LaTeX Error: something\n", encoding="utf-8")
-    return 1
-
-  monkeypatch.setattr(project_builders, "_run_tectonic", failing_tectonic)
-  asyncio.run(project_builders.run_build(project["id"], "pdf"))
-
-  art = _artifact(client, auth, project["id"], "pdf")
-  assert art["status"] == "error"
-  assert art["has_output"] is False
-  log = client.get(
-    f"/api/projects/{project['id']}/artifacts/pdf/log", headers=auth,
-  ).json()
-  assert "LaTeX Error" in log["log"]
-
-
 def test_build_missing_source_records_error_not_500(client, auth, db):
   project = _make_project(client, auth)
   _write_file(client, auth, project, "index.html", "<h1>x</h1>")
@@ -455,6 +230,7 @@ def test_template_previews_auto_register_as_artifacts(client, auth, db):
   source = Path(os.environ["DATA_DIR"]) / "apps" / "latex"
   (source / "templates").mkdir(parents=True)
   (source / "templates" / "main.tex").write_text("\\documentclass{article}")
+  (source / "project-builder.sh").write_text("#!/bin/bash\n")
   app = models.App(
     name="LaTeX", description="Documents", jsx_source="",
     slug="latex", source_dir=str(source), version="3.0.0",
@@ -462,9 +238,14 @@ def test_template_previews_auto_register_as_artifacts(client, auth, db):
       "id": "latex",
       "name": "LaTeX document",
       "previews": [{
-        "id": "pdf", "name": "PDF", "kind": "pdf", "path": "main.pdf",
+        "id": "pdf", "name": "PDF", "source": "main.tex", "builder": "latex",
       }],
       "files": {"main.tex": "templates/main.tex"},
+      "artifact_types": [{
+        "id": "latex", "name": "PDF", "extensions": ["tex"],
+        "preview": "pdf", "script": "project-builder.sh",
+        "output": "{stem}.pdf",
+      }],
     }],
   )
   db.add(app)
@@ -576,27 +357,3 @@ def test_malformed_artifacts_json_never_500s(client, auth, db):
   ).json()["artifacts"]
   assert [a["id"] for a in artifacts] == ["ok-one"]
   assert artifacts[0]["source_missing"] is True
-
-
-def test_artifacts_dir_is_hidden_from_the_root_finder_listing(client, auth):
-  project = _make_project(client, auth)
-  _write_file(client, auth, project, "index.html", "<h1>ok</h1>")
-  client.post(
-    f"/api/projects/{project['id']}/artifacts", headers=auth,
-    json={"name": "Website", "builder": "website", "source": "index.html"},
-  )
-  asyncio.run(project_builders.run_build(project["id"], "website"))
-
-  # The build created artifacts/ on disk; it must NOT show in the root finder
-  # listing (it is surfaced in the Artifacts zone instead), while real source
-  # files stay listed.
-  root = client.get(f"/api/projects/{project['id']}/files", headers=auth).json()
-  names = {e["name"] for e in root["entries"]}
-  assert "artifacts" not in names
-  assert "index.html" in names
-
-  # It stays reachable on disk (listing inside it still works).
-  inside = client.get(
-    f"/api/projects/{project['id']}/files?path=artifacts", headers=auth,
-  ).json()
-  assert inside["entries"], "artifacts/ should still be browsable when navigated into"

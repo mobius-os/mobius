@@ -11,19 +11,7 @@ export function parseAppSourceProjectId(projectId) {
   return appId ? appId : null
 }
 
-export function appSourceProject(app) {
-  if (app?.id == null) return null
-  return {
-    id: appSourceProjectId(app.id),
-    name: `${app.name || 'App'} · Source`,
-    source_kind: 'app',
-    source_app_id: String(app.id),
-    app,
-  }
-}
-
 // Only explicitly linked Projects can apply changes to an installed app.
-// Legacy imported copies remain independent Projects with their own source.
 export function linkedProjectAppId(project) {
   const imported = project?.template?.imported_from
   if (imported?.management !== 'linked' || imported.kind !== 'app' || imported.id == null) return null

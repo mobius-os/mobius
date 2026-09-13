@@ -1,6 +1,6 @@
 """Canonical resolution of which background AI agent a scheduled app uses.
 
-A "background agent" is a nightly cron app (Reflection, Memory/dreaming, News)
+A "background agent" is a scheduled app run (for example Reflection or Memory)
 that drives a Claude/Codex turn, with a fallback provider for the nights the
 primary is unavailable (usage limit, outage). The platform once carried several
 copies of this resolution and they drifted. This module is the source of truth
@@ -11,7 +11,7 @@ Two layers:
 - **System** — the owner's Settings > background agents, in
   ``/data/shared/agent-settings.json`` under ``background_agents``: a
   ``providers`` list (one row per provider, ordered, with enabled flags) is the
-  source of truth, with legacy ``primary``/``fallback`` dicts as a fallback.
+  single source of truth.
 
 - **Caller override** — a background agent may declare its own pick in ONE
   uniform shape (see :func:`resolve_background_agents`). Each app owns the
@@ -94,15 +94,6 @@ def _system_choices(data_dir: str) -> list[dict]:
       choice = _clean_choice(raw_choice, label=f"system provider {index + 1}")
       if choice and not any(_same_choice(choice, existing) for existing in choices):
         choices.append(choice)
-
-  if not choices:
-    primary = _clean_choice(background.get("primary"),
-                            default_provider=default_provider, label="system primary")
-    fallback = _clean_choice(background.get("fallback"), label="system fallback")
-    if primary:
-      choices.append(primary)
-    if fallback and not _same_choice(primary, fallback):
-      choices.append(fallback)
 
   if not choices:
     primary = _clean_choice(

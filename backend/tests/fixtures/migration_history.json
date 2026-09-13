@@ -51,6 +51,12 @@
     "0047_chat_activity_positions": "cab5468cf8eac1a0a6fb5ee2405b07cd157af9241a8e04b98ff1e042242b2b8e",
     "0048_delegation_result_incorporation": "7721d64f39e079ce89efdbe6e7ffec07b79918601a82e2c195c3ef28691562e6",
     "0048_typed_platform_activation_waits": "527554848dd071bcc9040eb08e23373c240d79b5eae650cb5d32138b97de5c4d",
-    "0049_autopilot_blocked_at": "dac507a7c3f50b993e8d58fbea7e0277223349fe46229a2fd1d6c7d69ac3194c"
+    "0049_autopilot_blocked_at": "dac507a7c3f50b993e8d58fbea7e0277223349fe46229a2fd1d6c7d69ac3194c",
+    "0050_chat_run_update_stream": "59736b3022e417de8d55b0fb330deb81dee934eeb3b953d2b0453a173035ab73",
+    "0051_materialize_legacy_projects": "d0927aad5ff34717e3c7396c4680d6c1c44c2192f2674241274dfae427a3980f",
+    "0052_compatibility_cutover_data": "8eeb7791487106d678ff46cfa36b34edb0d2215951b057c9e8fd78462adb6111",
+    "0053_app_capability_contract_schema_6": "483b185cbdc4d591cbb0c1d950fd9c0d42733e28e1264b77a580527a8c7a00ad",
+    "0054_retired_app_identities": "380b74a022a924575301977b01bea68328fde3836714bf29a5fb9f10464c65aa",
+    "0055_declarative_project_artifacts": "eeef7589388e702faeb99fca855022fdc13ed515ee814963b5d9727088902430"
   }
 }

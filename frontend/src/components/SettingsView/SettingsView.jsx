@@ -108,12 +108,6 @@ function normalizeBackgroundAgents(backgroundAgents, defaultProvider = 'claude')
 
   if (Array.isArray(backgroundAgents?.providers)) {
     backgroundAgents.providers.forEach((choice) => addChoice(choice, true))
-  } else {
-    addChoice(
-      backgroundAgents?.primary || { provider: resolvedDefaultProvider },
-      true,
-    )
-    addChoice(backgroundAgents?.fallback, true)
   }
 
   if (!rows.length) addChoice({ provider: resolvedDefaultProvider }, true)
@@ -502,8 +496,6 @@ export default function SettingsView({
         }
         const payload = {
           providers: rows.map(row => toChoice(row, true)),
-          primary: toChoice(enabled[0]),
-          fallback: enabled[1] ? toChoice(enabled[1]) : null,
         }
         // A first provider connection also establishes the interactive default.
         // Keep that transition in one settings write so disk failure cannot

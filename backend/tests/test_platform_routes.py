@@ -109,7 +109,6 @@ def test_reviewed_rebuild_forwards_exact_sha_and_digest(
     captured.update({k: v for k, v in plan.items() if k != "db"})
     return {
       "supported": True,
-      "bootstrap_available": False,
       "deployment": "railway",
       "operation_id": "replace_123",
       "state": "queued",

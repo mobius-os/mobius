@@ -1,4 +1,4 @@
-"""Tests for the GitHub connection + read-surface routes (routes/github.py).
+"""Tests for GitHub access and contribution routes.
 
 The upstream GitHub calls are mocked with httpx.MockTransport (the
 test_model_registry.py idiom — respx is not installed), so no test touches
@@ -41,12 +41,15 @@ from app.database import checked_out_connections
 from app.storage_io import atomic_write
 from test_app_fixtures import create_local_app
 
-# The github router's Limiter is a separate instance from app.state.limiter,
-# so conftest's disable doesn't reach it (see module docstring).
+# The GitHub routers' Limiters are separate from app.state.limiter, so
+# conftest's disable doesn't reach them (see module docstring).
 from app.routes.github import _limiter as _github_limiter
+from app.routes.github_access import _limiter as _github_access_limiter
 from app.routes import github as github_routes
+from app.routes import github_access as github_access_routes
 
 _github_limiter.enabled = False
+_github_access_limiter.enabled = False
 
 
 # --- fixtures + helpers -----------------------------------------------
@@ -202,7 +205,7 @@ async def test_disconnected_start_never_publishes_attempt():
       return True
 
   with pytest.raises(HTTPException) as caught:
-    await github_routes._start_device_attempt(GoneRequest())
+    await github_access_routes._start_device_attempt(GoneRequest())
 
   assert getattr(caught.value, "status_code", None) == 499
   assert github_auth.get_device_flow() is None
@@ -285,6 +288,14 @@ def test_connect_start_always_requests_full_pr_access(
   assert r.json()["requested_scopes"] == ["public_repo", "workflow"]
 
 
+def test_connect_start_rejects_the_retired_workflow_option(client, auth):
+  response = client.post(
+    "/api/github/connect/start", headers=auth, json={"workflow": True},
+  )
+
+  assert response.status_code == 422
+
+
 def test_connect_start_private_opt_in_requests_repo_scope(
   client, auth, monkeypatch,
 ):
@@ -324,7 +335,7 @@ def test_connect_start_private_opt_in_requests_repo_scope(
   ],
 )
 def test_private_repo_access_requires_repo_scope(scopes, expected):
-  assert github_routes.has_private_repo_access(scopes) is expected
+  assert github_access_routes.has_private_repo_access(scopes) is expected
 
 
 @pytest.mark.parametrize(
@@ -338,7 +349,7 @@ def test_private_repo_access_requires_repo_scope(scopes, expected):
   ],
 )
 def test_full_pr_access_is_one_explicit_scope_contract(scopes, expected):
-  assert github_routes.has_full_pr_access(scopes) is expected
+  assert github_access_routes.has_full_pr_access(scopes) is expected
 
 
 def test_connect_start_app_with_github_connect(
@@ -917,8 +928,8 @@ def test_source_status_releases_db_before_waiting_on_repository_locks(
     assert function is source_status.build_platform_status
     return {"key": "platform", "available": True}
 
-  monkeypatch.setattr(github_routes.asyncio, "to_thread", checked_to_thread)
-  result = asyncio.run(github_routes.github_source_status(None, db))
+  monkeypatch.setattr(github_access_routes.asyncio, "to_thread", checked_to_thread)
+  result = asyncio.run(github_access_routes.github_source_status(None, db))
 
   assert result["platform"] == {"key": "platform", "available": True}
   assert result["apps"] == []
@@ -2009,7 +2020,7 @@ def test_github_capability_releases_db_before_upstream_request(
     checked_out.append(checked_out_connections())
     return Response(content=b'{}', media_type="application/json")
 
-  monkeypatch.setattr(github_routes, "_forward_capped", fake_forward)
+  monkeypatch.setattr(github_access_routes, "_forward_capped", fake_forward)
   r = client.get(
     "/api/github/api/user",
     headers={"Authorization": f"Bearer {app_token}"},

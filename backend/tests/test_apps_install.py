@@ -116,6 +116,11 @@ def _fake_async_client(responses: dict):
       tup = responses[url]
       if len(tup) == 2:
         status, body = tup
+        # Historical install fixtures used empty bytes as an inert stand-in
+        # for the otherwise-unexamined scheduled job. Accepted jobs now own an
+        # explicit interpreter, so keep those unrelated fixtures valid.
+        if status == 200 and body == b"" and url.endswith("/fetch.sh"):
+          body = b"#!/bin/sh\n"
         return _StreamCtx(status, body)
       status, body, headers = tup
       return _StreamCtx(status, body, headers=headers)
@@ -150,6 +155,30 @@ MANIFEST_NEWS = {
   },
   "runtime": {"imports": ["react"], "esm_deps": []},
 }
+
+
+def test_install_rejects_a_scheduled_job_without_runtime_declaration(
+  client, auth, bypass_url_validation,
+):
+  base = "https://x.test/no-job-shebang/"
+  manifest = {**MANIFEST_NEWS, "id": "no-job-shebang"}
+  responses = {
+    base + "mobius.json": (200, json.dumps(manifest).encode()),
+    base + "index.jsx": (200, JSX.encode()),
+    base + "icon.png": (200, _png_bytes()),
+    base + "prompt.md": (200, PROMPT.encode()),
+    base + "fetch.sh": (200, b"echo ambiguous runtime\n"),
+  }
+  with patch(
+    "app.install.httpx.AsyncClient",
+    side_effect=_fake_async_client(responses),
+  ):
+    response = client.post("/api/apps/install", headers=auth, json={
+      "manifest_url": base + "mobius.json",
+    })
+
+  assert response.status_code == 400
+  assert response.json()["detail"] == "Schedule job is missing a shebang."
 
 
 def test_validate_url_safe_blocks_ipv6_embedded_ipv4():

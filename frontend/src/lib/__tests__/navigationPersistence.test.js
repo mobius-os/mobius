@@ -34,8 +34,10 @@ test('deep links preserve slug, numeric identity, and intent', () => {
     pathname: '/shell/', search: '?app=42&intent=open%3Areport',
   }), { view: 'canvas', app: '42', appId: 42, intent: 'open:report' })
   assert.deepEqual(parseShellDeepLink({
-    pathname: '/shell/', search: '?app=artifacts',
-  }), { view: 'canvas', app: 'artifacts', appId: null, intent: null })
+    pathname: '/shell/', search: '?app=pages',
+  }), { view: 'canvas', app: 'pages', appId: null, intent: null })
+  assert.equal(parseShellDeepLink({ pathname: '/app/42', search: '' }), null)
+  assert.equal(parseShellDeepLink({ pathname: '/chat/c-1', search: '' }), null)
 })
 
 test('deep links can open the Projects directory or one project', () => {

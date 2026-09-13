@@ -178,6 +178,13 @@ def _remove_legacy_auto_resume_setting(context: StartupContext) -> None:
     raise RuntimeError("legacy global auto-resume setting cleanup did not persist")
 
 
+def _normalize_background_agent_settings(context: StartupContext) -> None:
+  from app.providers import normalize_background_agent_settings
+
+  if not normalize_background_agent_settings(context.settings.data_dir):
+    raise RuntimeError("background agent settings cutover did not persist")
+
+
 def _sweep_codex_provider_sessions(context: StartupContext) -> None:
   """Reclaim Codex working state before any optional config write or SQLite."""
   from app.provider_session_retention import sweep_stale_provider_sessions
@@ -220,6 +227,14 @@ def _initialize_database(context: StartupContext) -> None:
       failure_reason="database_initialization_failed",
     )
   record_memory_checkpoint("startup_database_checked")
+
+
+def _verify_app_identity_cutover(context: StartupContext) -> None:
+  from app.database import engine
+  from app.schema_migrations import app_identity_cutover_is_current
+
+  if not app_identity_cutover_is_current(engine, context.settings.data_dir):
+    raise RuntimeError("app identity database/filesystem cutover is incomplete")
 
 
 def _purge_expired_chats(context: StartupContext) -> None:
@@ -280,10 +295,16 @@ def _read_restart_authorization(context: StartupContext) -> None:
 
 def _freeze_legacy_app_runtimes(context: StartupContext) -> None:
   """Freeze pre-isolation live files before any editing or scheduled work resumes."""
-  from app.applied_app_runtime import bootstrap_legacy_runtimes, prune_runtime
+  from app.applied_app_runtime import (
+    bootstrap_legacy_runtimes,
+    migrate_legacy_job_declarations,
+    prune_runtime,
+  )
   from app import models
   with SessionLocal() as db:
     count, warnings = bootstrap_legacy_runtimes(db)
+    job_count, job_warnings = migrate_legacy_job_declarations(db)
+    warnings.extend(job_warnings)
     for app in db.query(models.App).all():
       try:
         prune_runtime(app)
@@ -291,6 +312,10 @@ def _freeze_legacy_app_runtimes(context: StartupContext) -> None:
         warnings.append(f"app {app.id} runtime cleanup: {exc}")
   if count:
     context.logger.info("froze %d deployed app runtime baseline(s)", count)
+  if job_count:
+    context.logger.info(
+      "migrated %d legacy app job execution declaration(s)", job_count,
+    )
   for warning in warnings:
     context.logger.warning("app runtime migration: %s", warning)
 
@@ -536,6 +561,11 @@ PROCESS_STARTUP_TASKS = (
     _remove_legacy_auto_resume_setting,
   ),
   StartupTask(
+    "normalize background agent settings",
+    _normalize_background_agent_settings,
+    database_failure_reason="background_agent_settings_cutover_failed",
+  ),
+  StartupTask(
     "sweep Codex provider sessions",
     _sweep_codex_provider_sessions,
   ),
@@ -551,9 +581,15 @@ PROCESS_STARTUP_TASKS = (
 
 
 DATABASE_STARTUP_TASKS = (
+  StartupTask(
+    "verify app identity cutover",
+    _verify_app_identity_cutover,
+    database_failure_reason="app_identity_cutover_incomplete",
+  ),
   # Transcript migrations below are writer domain commands. Start ownership as
-  # soon as the schema exists; later startup failures still fail open exactly
-  # as they did when the writer started near the end of the plan.
+  # soon as the schema and required identity cutover exist; later startup
+  # failures still fail open exactly as they did when the writer started near
+  # the end of the plan.
   StartupTask("start chat writer", _start_chat_writer),
   StartupTask(
     "retire legacy Gauntlet execution",

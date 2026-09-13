@@ -201,7 +201,7 @@ async def ensure_bootstrap_apps_installed(db: Session) -> None:
 
   # Bootstrap uses the same resolver as preview and install so all three paths
   # agree on persisted identities, moved refs, and proven legacy origins.
-  from app.install import _find_install_identity_row
+  from app.install import _canonical_identity_key, _find_install_identity_row
 
   # Resolve the release cohort once before any successful install creates an
   # App row. This keeps the first-install decision stable for the whole pass.
@@ -226,6 +226,17 @@ async def ensure_bootstrap_apps_installed(db: Session) -> None:
         source_url=bootstrap_app.predecessor_manifest_url,
         manifest_id=bootstrap_app.predecessor_manifest_id,
       )
+    if predecessor is not None and predecessor.deleted_at is not None:
+      # Preserve an owner's uninstall after this one-release predecessor
+      # checkpoint is deleted. The tombstone keeps its source and storage, but
+      # its durable package identity becomes current; a later explicit Store
+      # install can therefore revive/update the same row without boot needing
+      # to remember the old package forever.
+      predecessor.manifest_url = _canonical_identity_key(
+        bootstrap_app.manifest_url, bootstrap_app.manifest_id,
+      )
+      db.commit()
+      existing = predecessor
     existing_id = existing.id if existing is not None else None
     already_installed = (
       existing is not None
@@ -233,10 +244,6 @@ async def ensure_bootstrap_apps_installed(db: Session) -> None:
         existing.deleted_at is None
         or not bootstrap_app.reinstall_after_uninstall
       )
-    ) or (
-      predecessor is not None
-      and predecessor.deleted_at is not None
-      and not bootstrap_app.reinstall_after_uninstall
     )
     # The identity query autobegins a read transaction. Do not retain its
     # connection while the installer performs serial network fetches and

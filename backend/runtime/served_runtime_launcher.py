@@ -1,21 +1,21 @@
 #!/usr/bin/env python3
-"""Start one allowlisted protected-runtime module from the served checkout.
+"""Validate and start one protected-runtime module from the served checkout.
 
 Some privileged code runs as root before the app drops privileges, so its
 *launcher* has to be frozen in the image. The module it starts does not: the
 identity broker is ordinary served source under ``backend/runtime``, so editing
 it is a normal platform change and an ordinary restart reloads it.
 
-The image keeps a copy beside this file as a floor. The served copy is used
-only when it is a real, non-symlinked, non-group/world-writable file inside the
-served runtime directory that compiles; otherwise the frozen copy starts and
-the reason is recorded. A wrong local edit is therefore visible and cheap to
-undo instead of making boot impossible.
+The launcher never mixes served platform code with a frozen module. Entrypoint
+first uses ``--check`` while choosing the whole platform source: an unusable
+served module makes that boot select the baked platform. Once the served tree
+is selected, the ordinary invocation validates the same path again and execs
+it. This keeps one source owner per boot instead of hiding an invalid local edit
+behind an older privileged implementation.
 """
 
 from __future__ import annotations
 
-import json
 import os
 import stat
 import sys
@@ -29,10 +29,6 @@ SERVED_MODULES = ("identity_broker",)
 
 PLATFORM_DIR = Path(os.environ.get("MOBIUS_PLATFORM_DIR", "/data/platform"))
 RUNTIME_SUBDIR = Path("backend") / "runtime"
-FROZEN_DIR = Path(__file__).resolve().parent
-RECEIPT_PATH = (
-  Path(os.environ.get("DATA_DIR", "/data")) / "run" / "protected-runtime.json"
-)
 
 
 def _reject_reason(path: Path) -> str | None:
@@ -64,54 +60,23 @@ def _reject_reason(path: Path) -> str | None:
   return None
 
 
-def _choose(name: str) -> tuple[Path, str, str | None]:
-  """Return the module to start, which copy it is, and why the other lost."""
-  frozen = FROZEN_DIR / f"{name}.py"
-  served = PLATFORM_DIR / RUNTIME_SUBDIR / f"{name}.py"
-  reason = _reject_reason(served)
-  if reason is None:
-    return served, "served", None
-  if frozen.is_file():
-    return frozen, "frozen", reason
-  raise SystemExit(
-    f"FATAL: {name} is unusable from the served checkout ({reason}) and the "
-    "image copy is missing"
-  )
-
-
-def _record(name: str, target: Path, source: str, reason: str | None) -> None:
-  """Leave the boot decision where a later reader can find it."""
-  payload = {
-    "version": 1,
-    "module": name,
-    "started": source,
-    "path": str(target),
-    "reason": reason,
-    "pid": os.getpid(),
-  }
-  try:
-    RECEIPT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    RECEIPT_PATH.write_text(
-      json.dumps(payload, separators=(",", ":")) + "\n", encoding="utf-8",
-    )
-    os.chmod(RECEIPT_PATH, 0o644)
-  except OSError:
-    # The record is diagnostic; it must never stop the module from starting.
-    pass
-
-
 def main(argv: list[str]) -> int:
-  if len(argv) != 2 or argv[1] not in SERVED_MODULES:
+  check_only = len(argv) == 3 and argv[1] == "--check"
+  name = argv[2] if check_only else (argv[1] if len(argv) == 2 else "")
+  if name not in SERVED_MODULES or len(argv) != (3 if check_only else 2):
     print(
-      f"usage: {Path(argv[0]).name} {{{'|'.join(SERVED_MODULES)}}}",
+      f"usage: {Path(argv[0]).name} [--check] "
+      f"{{{'|'.join(SERVED_MODULES)}}}",
       file=sys.stderr,
     )
     return 2
-  name = argv[1]
-  target, source, reason = _choose(name)
+  target = PLATFORM_DIR / RUNTIME_SUBDIR / f"{name}.py"
+  reason = _reject_reason(target)
   if reason is not None:
-    print(f"WARNING: starting the image copy of {name}: {reason}", file=sys.stderr)
-  _record(name, target, source, reason)
+    print(f"FATAL: served {name} is unusable: {reason}", file=sys.stderr)
+    return 1
+  if check_only:
+    return 0
   try:
     # ``-P`` keeps the module's own directory off sys.path, exactly as the
     # entrypoint started it directly before this loader existed.

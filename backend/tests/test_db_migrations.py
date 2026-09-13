@@ -2,6 +2,7 @@ import asyncio
 import hashlib
 import json
 import sqlite3
+import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -364,7 +365,7 @@ def test_run_migrations_removes_retired_job_authority_receipts(
   with Session(eng) as session:
     contract = session.get(models.App, app_id).capability_contract
   assert contract == {
-    "schema": 5,
+    "schema": 6,
     "data": {"shared_memory": "write"},
     "background": {
       "job": "fetch.sh",
@@ -1531,6 +1532,12 @@ def test_run_migrations_records_an_inspectable_append_only_history(tmp_path):
     "0048_delegation_result_incorporation",
     "0048_typed_platform_activation_waits",
     "0049_autopilot_blocked_at",
+    "0050_chat_run_update_stream",
+    "0051_materialize_legacy_projects",
+    "0052_compatibility_cutover_data",
+    "0053_app_capability_contract_schema_6",
+    "0054_retired_app_identities",
+    "0055_declarative_project_artifacts",
   ]
   assert second == first
 
@@ -1746,6 +1753,114 @@ def test_project_artifacts_migration_no_projects_table_is_a_noop(tmp_path):
     conn.execute(text("CREATE TABLE apps (id INTEGER PRIMARY KEY)"))
   migrations._add_project_artifacts(eng)
   assert "projects" not in inspect(eng).get_table_names()
+
+
+def test_legacy_project_cutover_materializes_roots_and_drops_runtime_marker(
+  tmp_path, monkeypatch,
+):
+  data_dir = tmp_path / "data"
+  monkeypatch.setenv("DATA_DIR", str(data_dir))
+  eng = create_engine(f"sqlite:///{tmp_path / 'legacy-projects.db'}")
+  models.Base.metadata.create_all(eng)
+  with eng.begin() as conn:
+    conn.execute(text("ALTER TABLE projects ADD COLUMN legacy_source_json JSON NULL"))
+  template = {
+    "id": "web-app", "name": "Web app", "files": {},
+    "skills": ["web"], "dependencies": [],
+    "previews": [{
+      "id": "site", "name": "Website", "kind": "html", "path": "index.html",
+    }],
+    "artifact_types": [{
+      "id": "website", "name": "Website", "extensions": ["html"],
+      "preview": "html", "script": "project-builder.sh", "output": "{source}",
+    }],
+  }
+  with Session(eng) as db:
+    app = models.App(
+      name="Web Studio", description="Sites", jsx_source="", slug="webstudio",
+      source_dir=str(data_dir / "apps" / "webstudio-source"),
+      project_templates_json=[template],
+    )
+    chat = models.Chat(id="legacy-project-chat", title="Portfolio", messages=[])
+    db.add_all([app, chat])
+    db.commit()
+    db.refresh(app)
+    app_id = app.id
+
+  default_root = data_dir / "apps" / str(app_id) / "files"
+  default_root.mkdir(parents=True)
+  (default_root / "keep.txt").write_text("owner data", encoding="utf-8")
+  portfolio = data_dir / "apps" / str(app_id) / "projects" / "portfolio"
+  (portfolio / "files").mkdir(parents=True)
+  (portfolio / "files" / "index.html").write_text("<h1>Mine</h1>", encoding="utf-8")
+  (portfolio / "chat_id.json").write_text(
+    json.dumps({"id": "legacy-project-chat"}), encoding="utf-8",
+  )
+  (data_dir / "apps" / str(app_id) / "projects.json").write_text(json.dumps([
+    {"id": "portfolio", "name": "Portfolio"},
+  ]), encoding="utf-8")
+  with eng.begin() as conn:
+    conn.execute(text(
+      "INSERT INTO projects "
+      "(id, name, project_type, root_path, chat_id, source_app_id, "
+      "template_snapshot_json, legacy_source_json) "
+      "VALUES ('already-imported', 'Default', 'webstudio:web-app', :root, NULL, "
+      ":app_id, '{}', :legacy)"
+    ), {
+      "root": f"apps/{app_id}/files", "app_id": app_id,
+      "legacy": json.dumps({"app_id": app_id, "project_id": "default"}),
+    })
+
+  migrations._materialize_legacy_projects(eng)
+  migrations._materialize_legacy_projects(eng)
+
+  assert "legacy_source_json" not in {
+    column["name"] for column in inspect(eng).get_columns("projects")
+  }
+  expected_id = str(uuid.uuid5(
+    uuid.NAMESPACE_URL, f"mobius:legacy-project:{app_id}:portfolio",
+  ))
+  with eng.connect() as conn:
+    rows = conn.execute(text(
+      "SELECT id, name, root_path, source_app_id, template_snapshot_json, "
+      "artifacts_json FROM projects ORDER BY id"
+    )).mappings().all()
+    assert len(rows) == 2
+    imported = next(row for row in rows if row["id"] == expected_id)
+    assert imported["name"] == "Portfolio"
+    assert imported["root_path"] == f"apps/{app_id}/projects/portfolio/files"
+    assert imported["source_app_id"] == app_id
+    snapshot = imported["template_snapshot_json"]
+    artifacts = imported["artifacts_json"]
+    if isinstance(snapshot, str):
+      snapshot = json.loads(snapshot)
+    if isinstance(artifacts, str):
+      artifacts = json.loads(artifacts)
+    assert snapshot["key"] == "webstudio:web-app"
+    assert [(row["id"], row["builder"], row["source"]) for row in artifacts] == [
+      ("site", "website", "index.html"),
+    ]
+    assert conn.execute(text(
+      "SELECT project_id FROM chats WHERE id = 'legacy-project-chat'"
+    )).scalar_one() == expected_id
+  assert (default_root / "keep.txt").read_text(encoding="utf-8") == "owner data"
+  assert (portfolio / "files" / "index.html").read_text(encoding="utf-8") == "<h1>Mine</h1>"
+
+
+def test_legacy_project_cutover_is_empty_on_fresh_state(tmp_path, monkeypatch):
+  data_dir = tmp_path / "data"
+  monkeypatch.setenv("DATA_DIR", str(data_dir))
+  eng = create_engine(f"sqlite:///{tmp_path / 'fresh-projects.db'}")
+  models.Base.metadata.create_all(eng)
+
+  migrations._materialize_legacy_projects(eng)
+  migrations._materialize_legacy_projects(eng)
+
+  assert "legacy_source_json" not in {
+    column["name"] for column in inspect(eng).get_columns("projects")
+  }
+  with eng.connect() as conn:
+    assert conn.execute(text("SELECT COUNT(*) FROM projects")).scalar_one() == 0
 
 
 def test_shared_app_path_state_migrates_prototype_data_without_runtime_columns(
@@ -2311,7 +2426,7 @@ def test_hosted_publication_reaches_a_fully_ledgered_private_app(tmp_path):
     )).one()
   contract = json.loads(raw_contract) if isinstance(raw_contract, str) else raw_contract
   assert public_bundle is None
-  assert contract["schema"] == 5
+  assert contract["schema"] == 6
   assert contract["public"] == {"network": []}
   assert "0013_app_hosted_publication" in {
     entry["version"] for entry in schema_migration_history(eng)
@@ -3538,3 +3653,343 @@ def test_result_incorporation_migration_preserves_unknown_history(tmp_path):
       "SELECT COUNT(*) FROM schema_migrations "
       "WHERE version = '0048_delegation_result_incorporation'"
     )).scalar_one() == 1
+def test_compatibility_cutover_normalizes_notification_links(tmp_path, monkeypatch):
+  from sqlalchemy import create_engine
+  from sqlalchemy.orm import Session
+  from app import models, schema_migrations
+
+  monkeypatch.setenv("DATA_DIR", str(tmp_path))
+  eng = create_engine(f"sqlite:///{tmp_path / 'cutover-links.db'}")
+  models.Base.metadata.create_all(eng)
+  with Session(eng) as db:
+    db.add(models.Owner(id=1, username="owner", hashed_password="x"))
+    rows = (
+      ("legacy-links", "/app/42", "/chat/c-1"),
+      ("shell-no-slash", "/shell?intent=open&app=artifacts", "/shell/?intent=open&app=pages"),
+      ("shell-chat", "/shell?chat=c-3&intent=open", "/shell/?chat=c-3&intent=open"),
+      ("shell-slash", "/shell/?x=1&app=artifacts&intent=show", "/shell/?x=1&app=pages&intent=show"),
+      ("same-origin", "https://mobius.test/app/7", "https://mobius.test/shell/?app=7"),
+      ("cross-origin", "https://elsewhere.test/chat/c_2", "https://elsewhere.test/shell/?chat=c_2"),
+    )
+    for notification_id, target, action_target in rows:
+      db.add(models.Notification(
+        id=notification_id, owner_id=1, source_type="system",
+        title="done", target=target,
+        actions=[{"action": "open", "title": "Open", "target": action_target}],
+      ))
+    db.commit()
+
+  schema_migrations._normalize_compatibility_cutover_data(eng)
+  schema_migrations._normalize_compatibility_cutover_data(eng)
+
+  with Session(eng) as db:
+    expected = {
+      "legacy-links": ("/shell/?app=42", "/shell/?chat=c-1"),
+      "shell-no-slash": ("/shell/?intent=open&app=pages", "/shell/?intent=open&app=pages"),
+      "shell-chat": ("/shell/?chat=c-3&intent=open", "/shell/?chat=c-3&intent=open"),
+      "shell-slash": ("/shell/?x=1&app=pages&intent=show", "/shell/?x=1&app=pages&intent=show"),
+      "same-origin": ("https://mobius.test/shell/?app=7", "https://mobius.test/shell/?app=7"),
+      # Origin is retained, so the current parser continues rejecting this
+      # link rather than accidentally turning it into a local navigation.
+      "cross-origin": ("https://elsewhere.test/shell/?chat=c_2", "https://elsewhere.test/shell/?chat=c_2"),
+    }
+    for notification_id, (target, action_target) in expected.items():
+      row = db.get(models.Notification, notification_id)
+      assert row.target == target
+      assert row.actions[0]["target"] == action_target
+
+
+def test_retired_app_identity_migration_uses_custom_sqlite_url(tmp_path, monkeypatch):
+  from sqlalchemy import create_engine
+  from sqlalchemy.orm import Session
+  from app import models, schema_migrations
+
+  data_dir = tmp_path / "custom-data"
+  monkeypatch.setenv("DATA_DIR", str(data_dir))
+  eng = create_engine(f"sqlite:///{tmp_path / 'configured-elsewhere.db'}")
+  models.Base.metadata.create_all(eng)
+  with Session(eng) as db:
+    db.add(models.App(
+      id=91, slug="mind", name="Mind",
+      source_dir=str(data_dir / "apps" / "mind"),
+    ))
+    db.commit()
+
+  schema_migrations._rename_retired_app_identities(eng)
+  schema_migrations._rename_retired_app_identities(eng)
+
+  with Session(eng) as db:
+    row = db.get(models.App, 91)
+    assert row.slug == "memory"
+    assert row.name == "Memory"
+    assert row.source_dir == str(data_dir / "apps" / "memory")
+
+
+def test_project_declaration_cutover_preserves_roots_and_retires_copy_behavior(
+  tmp_path,
+):
+  eng = create_engine(f"sqlite:///{tmp_path / 'projects.db'}")
+  models.Base.metadata.create_all(eng)
+  root = tmp_path / "data" / "projects" / "copy"
+  root.mkdir(parents=True)
+  source = root / "main.tex"
+  source.write_text("owner source", encoding="utf-8")
+  legacy_template = {
+    "key": "latex:document",
+    "imported_from": {"kind": "artifact", "id": "old-page"},
+    "previews": [{
+      "id": "document", "name": "Document", "kind": "pdf", "path": "main.pdf",
+    }],
+  }
+  with Session(eng) as db:
+    db.add_all([
+      models.Project(
+        id="copy", name="Preserved copy", project_type="latex:document",
+        root_path=str(root), template_snapshot_json=legacy_template,
+        artifacts_json=[{
+          "id": "document", "name": "Document", "builder": "latex",
+          "source": "main.tex", "status": "ok",
+        }],
+      ),
+      models.Project(
+        id="linked", name="Linked", project_type="latex:document",
+        root_path=str(tmp_path / "linked"),
+        template_snapshot_json={
+          **legacy_template,
+          "imported_from": {
+            "kind": "artifact", "id": "current-page", "management": "linked",
+          },
+        },
+      ),
+      models.Project(
+        id="app", name="App", project_type="app",
+        root_path=str(tmp_path / "app"),
+        template_snapshot_json={
+          "previews": [{
+            "id": "app", "name": "App", "kind": "html", "path": "index.jsx",
+          }],
+        },
+        artifacts_json=[{
+          "id": "app", "name": "App", "builder": "app",
+          "source": "index.jsx", "status": "idle",
+        }],
+      ),
+    ])
+    db.commit()
+
+  migrations._make_project_artifacts_declarative(eng)
+  migrations._make_project_artifacts_declarative(eng)
+
+  with Session(eng) as db:
+    copied = db.get(models.Project, "copy")
+    assert copied.root_path == str(root)
+    assert "imported_from" not in copied.template_snapshot_json
+    assert copied.template_snapshot_json["previews"] == [{
+      "id": "document", "name": "Document",
+      "source": "main.tex", "builder": "latex",
+    }]
+    assert copied.template_snapshot_json["artifact_types"] == [{
+      "id": "latex", "name": "PDF", "extensions": ["tex"],
+      "preview": "pdf", "script": "project-builder.sh",
+      "output": "{stem}.pdf",
+    }]
+    assert copied.artifacts_json == [{
+      "id": "document", "name": "Document", "builder": "latex",
+      "source": "main.tex", "status": "ok", "type_name": "PDF",
+      "preview": "pdf", "output_rel": "artifacts/document/output/main.pdf",
+      "log_rel": "artifacts/document/build.log",
+    }]
+    linked = db.get(models.Project, "linked")
+    assert linked.template_snapshot_json["imported_from"] == {
+      "kind": "artifact", "id": "current-page", "management": "linked",
+    }
+    assert linked.template_snapshot_json["previews"] == [{
+      "id": "document", "name": "Document",
+      "source": "main.tex", "builder": "latex",
+    }]
+    app = db.get(models.Project, "app")
+    assert app.template_snapshot_json["previews"] == [{
+      "id": "app", "name": "App", "source": "index.jsx", "builder": "app",
+    }]
+    assert app.artifacts_json[0]["type_name"] == "App"
+    assert app.artifacts_json[0]["preview"] == "html"
+    assert app.artifacts_json[0]["output_rel"] == "artifacts/app/output/index.html"
+  assert source.read_text(encoding="utf-8") == "owner source"
+
+
+def test_retired_app_identity_conflict_preserves_both_rows_and_ledger(tmp_path):
+  from sqlalchemy import create_engine
+  from sqlalchemy.orm import Session
+  from app import models, schema_migrations
+
+  eng = create_engine(f"sqlite:///{tmp_path / 'identity-conflict.db'}")
+  models.Base.metadata.create_all(eng)
+  with Session(eng) as db:
+    db.add_all([
+      models.App(id=81, slug="mind", name="Mind", source_dir="/old/mind"),
+      models.App(id=82, slug="memory", name="Memory", source_dir="/new/memory"),
+    ])
+    db.commit()
+  with eng.begin() as conn:
+    conn.execute(text(
+      "CREATE TABLE schema_migrations (version VARCHAR(128) PRIMARY KEY, applied_at TIMESTAMP NOT NULL)"
+    ))
+    for version in _migration_versions_before("0054_retired_app_identities"):
+      conn.execute(text(
+        "INSERT INTO schema_migrations (version, applied_at) VALUES (:version, :at)"
+      ), {"version": version, "at": datetime.now(UTC).replace(tzinfo=None)})
+
+  with pytest.raises(RuntimeError, match="both 'mind' and 'memory'"):
+    schema_migrations.run_migrations(eng)
+
+  with eng.connect() as conn:
+    assert set(conn.execute(text(
+      "SELECT slug FROM apps WHERE slug IN ('mind', 'memory')"
+    )).scalars()) == {"mind", "memory"}
+    assert conn.execute(text(
+      "SELECT 1 FROM schema_migrations WHERE version = '0054_retired_app_identities'"
+    )).first() is None
+
+
+def test_app_identity_cutover_requires_database_and_current_filesystem_proof(
+  tmp_path,
+):
+  from sqlalchemy import create_engine
+  from app import models, schema_migrations
+
+  eng = create_engine(f"sqlite:///{tmp_path / 'configured.db'}")
+  models.Base.metadata.create_all(eng)
+  schema_migrations.run_migrations(eng)
+  assert schema_migrations.app_identity_cutover_is_current(
+    eng, str(tmp_path),
+  ) is False
+
+  files = tmp_path / ".migration-receipts" / "app-identity-files-v1"
+  files.parent.mkdir(parents=True)
+  files.touch()
+  assert schema_migrations.app_identity_cutover_is_current(
+    eng, str(tmp_path),
+  ) is True
+
+
+def test_legacy_project_cutover_never_links_chat_to_deleted_project(
+  tmp_path, monkeypatch,
+):
+  data_dir = tmp_path / "data"
+  monkeypatch.setenv("DATA_DIR", str(data_dir))
+  eng = create_engine(f"sqlite:///{tmp_path / 'legacy-deleted-project.db'}")
+  models.Base.metadata.create_all(eng)
+  with eng.begin() as conn:
+    conn.execute(text("ALTER TABLE projects ADD COLUMN legacy_source_json JSON NULL"))
+  with Session(eng) as db:
+    app = models.App(
+      name="Web Studio", description="", jsx_source="", slug="webstudio",
+      source_dir=str(data_dir / "apps" / "webstudio"),
+    )
+    chat = models.Chat(id="legacy-live-chat", title="Live", messages=[])
+    db.add_all([app, chat])
+    db.commit()
+    db.refresh(app)
+    app_id = app.id
+  root = data_dir / "apps" / str(app_id) / "files"
+  root.mkdir(parents=True)
+  (data_dir / "apps" / str(app_id) / "chat_id.json").write_text(
+    json.dumps({"id": "legacy-live-chat"}), encoding="utf-8",
+  )
+  with eng.begin() as conn:
+    conn.execute(text(
+      "INSERT INTO projects "
+      "(id, name, project_type, root_path, source_app_id, "
+      "template_snapshot_json, deleted_at, created_at, updated_at) "
+      "VALUES ('deleted-project', 'Deleted', 'webstudio:web-app', :root, "
+      ":app_id, '{}', :deleted_at, :deleted_at, :deleted_at)"
+    ), {
+      "root": f"apps/{app_id}/files", "app_id": app_id,
+      "deleted_at": datetime(2026, 9, 1),
+    })
+
+  migrations._materialize_legacy_projects(eng)
+
+  with Session(eng) as db:
+    assert db.get(models.Chat, "legacy-live-chat").project_id is None
+    assert db.get(models.Project, "deleted-project").deleted_at is not None
+  assert "legacy_source_json" not in {
+    column["name"] for column in inspect(eng).get_columns("projects")
+  }
+
+
+def test_legacy_project_cutover_retries_declared_missing_root(
+  tmp_path, monkeypatch,
+):
+  data_dir = tmp_path / "data"
+  monkeypatch.setenv("DATA_DIR", str(data_dir))
+  eng = create_engine(f"sqlite:///{tmp_path / 'legacy-missing-root.db'}")
+  models.Base.metadata.create_all(eng)
+  with eng.begin() as conn:
+    conn.execute(text("ALTER TABLE projects ADD COLUMN legacy_source_json JSON NULL"))
+  with Session(eng) as db:
+    app = models.App(
+      name="Web Studio", description="", jsx_source="", slug="webstudio",
+      source_dir=str(data_dir / "apps" / "webstudio"),
+    )
+    db.add(app)
+    db.commit()
+    db.refresh(app)
+    app_id = app.id
+  storage = data_dir / "apps" / str(app_id)
+  storage.mkdir(parents=True)
+  (storage / "projects.json").write_text(
+    json.dumps([{"id": "missing", "name": "Keep me"}]), encoding="utf-8",
+  )
+
+  with pytest.raises(RuntimeError, match="declared legacy Project root is unavailable"):
+    migrations._materialize_legacy_projects(eng)
+  assert "legacy_source_json" in {
+    column["name"] for column in inspect(eng).get_columns("projects")
+  }
+  with eng.connect() as conn:
+    assert conn.execute(text("SELECT COUNT(*) FROM projects")).scalar_one() == 0
+
+  (storage / "projects" / "missing" / "files").mkdir(parents=True)
+  migrations._materialize_legacy_projects(eng)
+  with eng.connect() as conn:
+    assert conn.execute(text("SELECT name FROM projects")).scalar_one() == "Keep me"
+  assert "legacy_source_json" not in {
+    column["name"] for column in inspect(eng).get_columns("projects")
+  }
+
+
+def test_legacy_project_cutover_does_not_retire_unreadable_metadata(
+  tmp_path, monkeypatch,
+):
+  data_dir = tmp_path / "data"
+  monkeypatch.setenv("DATA_DIR", str(data_dir))
+  eng = create_engine(f"sqlite:///{tmp_path / 'legacy-unreadable.db'}")
+  models.Base.metadata.create_all(eng)
+  with eng.begin() as conn:
+    conn.execute(text("ALTER TABLE projects ADD COLUMN legacy_source_json JSON NULL"))
+  with Session(eng) as db:
+    app = models.App(
+      name="LaTeX", description="", jsx_source="", slug="latex",
+      source_dir=str(data_dir / "apps" / "latex"),
+    )
+    db.add(app)
+    db.commit()
+    db.refresh(app)
+    app_id = app.id
+  metadata = data_dir / "apps" / str(app_id) / "projects.json"
+  metadata.parent.mkdir(parents=True)
+  metadata.write_text("[]", encoding="utf-8")
+  original_read_text = Path.read_text
+
+  def fail_metadata(path, *args, **kwargs):
+    if path == metadata:
+      raise PermissionError("temporarily unavailable")
+    return original_read_text(path, *args, **kwargs)
+
+  monkeypatch.setattr(Path, "read_text", fail_metadata)
+  with pytest.raises(RuntimeError, match="metadata is unreadable"):
+    migrations._materialize_legacy_projects(eng)
+  assert "legacy_source_json" in {
+    column["name"] for column in inspect(eng).get_columns("projects")
+  }

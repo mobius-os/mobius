@@ -218,13 +218,13 @@ def test_sqlite_lifecycle_cursor_is_never_reused_after_tail_delete(db):
 
 def test_sqlite_run_update_cursor_is_never_reused_after_tail_delete(db):
   _, run = _chat_run(db)
-  first_id = db.query(models.AgentLifecycleRunUpdate.id).scalar()
-  db.query(models.AgentLifecycleRunUpdate).delete()
+  first_id = db.query(models.ChatRunUpdate.id).scalar()
+  db.query(models.ChatRunUpdate).delete()
   db.commit()
   run.status = "completed"
   run.ended_at = datetime(2026, 7, 22, 10, 2, 0)
   db.commit()
-  assert db.query(models.AgentLifecycleRunUpdate.id).scalar() > first_id
+  assert db.query(models.ChatRunUpdate.id).scalar() > first_id
 
 
 def test_reconcile_run_updates_appends_terminal_snapshot_after_core_update(db):
@@ -236,14 +236,14 @@ def test_reconcile_run_updates_appends_terminal_snapshot_after_core_update(db):
     .values(status="interrupted", ended_at=ended_at)
   )
   db.commit()
-  latest_before = db.query(models.AgentLifecycleRunUpdate).order_by(
-    models.AgentLifecycleRunUpdate.id.desc()
+  latest_before = db.query(models.ChatRunUpdate).order_by(
+    models.ChatRunUpdate.id.desc()
   ).first()
   assert latest_before.status == "running"
 
   assert reconcile_run_updates(db) == 1
-  latest_after = db.query(models.AgentLifecycleRunUpdate).order_by(
-    models.AgentLifecycleRunUpdate.id.desc()
+  latest_after = db.query(models.ChatRunUpdate).order_by(
+    models.ChatRunUpdate.id.desc()
   ).first()
   assert latest_after.id > latest_before.id
   assert latest_after.status == "interrupted"
@@ -257,8 +257,8 @@ def test_chat_run_delete_emits_tombstone_with_foreign_keys_enabled(db):
   db.delete(run)
   db.commit()
   assert db.get(models.ChatRun, "run-life") is None
-  updates = db.query(models.AgentLifecycleRunUpdate).order_by(
-    models.AgentLifecycleRunUpdate.id
+  updates = db.query(models.ChatRunUpdate).order_by(
+    models.ChatRunUpdate.id
   ).all()
   assert [row.status for row in updates] == ["running", "deleted"]
 
@@ -378,7 +378,7 @@ def test_owner_endpoint_paginates_events_and_run_updates_independently(
   assert record_event(db, hidden) is True
 
   first = client.get(
-    "/api/chats/agent-lifecycle?after_id=0&limit=1&run_limit=1", headers=auth,
+    "/api/chats/lifecycle-events?after_id=0&limit=1&run_limit=1", headers=auth,
   )
   assert first.status_code == 200, first.text
   page = first.json()
@@ -396,7 +396,7 @@ def test_owner_endpoint_paginates_events_and_run_updates_independently(
   run.ended_at = run.started_at + timedelta(minutes=3)
   db.commit()
   tail = client.get(
-    f"/api/chats/agent-lifecycle?after_id=999999&runs_after_id={run_cursor}&limit=1",
+    f"/api/chats/lifecycle-events?after_id=999999&runs_after_id={run_cursor}&limit=1",
     headers=auth,
   ).json()
   assert tail["events"] == []
@@ -409,13 +409,13 @@ def test_owner_endpoint_paginates_events_and_run_updates_independently(
   chat.deleted_at = datetime(2026, 7, 22, 10, 4, 0)
   db.commit()
   hidden_replay = client.get(
-    "/api/chats/agent-lifecycle?after_id=0&chat_id=chat-life", headers=auth,
+    "/api/chats/lifecycle-events?after_id=0&chat_id=chat-life", headers=auth,
   ).json()
   assert hidden_replay["events"] == []
   chat.deleted_at = None
   db.commit()
   recovered = client.get(
-    "/api/chats/agent-lifecycle?after_id=0&runs_after_id=0&chat_id=chat-life",
+    "/api/chats/lifecycle-events?after_id=0&runs_after_id=0&chat_id=chat-life",
     headers=auth,
   ).json()
   assert len(recovered["events"]) == 2
@@ -433,7 +433,7 @@ def test_owner_endpoint_rejects_app_token(client, owner_token):
   ).json()["token"]
 
   response = client.get(
-    "/api/chats/agent-lifecycle",
+    "/api/chats/lifecycle-events",
     headers={"Authorization": f"Bearer {token}"},
   )
   assert response.status_code == 403
@@ -465,7 +465,7 @@ def test_stale_chat_hard_purge_removes_lifecycle_before_run(db):
   assert db.query(models.AgentLifecycleEvent).filter_by(
     event_key=values["event_key"]
   ).first() is None
-  assert db.query(models.AgentLifecycleRunUpdate).filter_by(
+  assert db.query(models.ChatRunUpdate).filter_by(
     chat_id="chat-stale"
   ).first() is None
   assert db.get(models.ChatRun, "run-stale") is None

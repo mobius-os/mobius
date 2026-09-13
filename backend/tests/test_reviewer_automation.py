@@ -13,6 +13,23 @@ from app.config import get_settings
 GUIDE = hashlib.sha256(b"guide").hexdigest()
 
 
+@pytest.fixture(autouse=True)
+def _app_owned_reviewer_policy(monkeypatch):
+  """Route tests exercise the trust adapter; app tests own policy details."""
+  async def validate(_db, _app_id, body, _head_sha):
+    return str(body).strip()
+
+  async def manual(_app_id, body, _nonce, _db):
+    return body.model_dump()
+
+  async def grant(_db, _app_id, body):
+    return body.model_dump()
+
+  monkeypatch.setattr("app.routes.reviewer._reviewer_validate_comment", validate)
+  monkeypatch.setattr("app.routes.reviewer._reviewer_manual_plan", manual)
+  monkeypatch.setattr("app.routes.reviewer._reviewer_prepare_grant", grant)
+
+
 def test_public_authority_changes_require_owner_scope():
   from app.routes import reviewer as reviewer_routes
 
@@ -270,40 +287,6 @@ def test_second_freshness_failure_closes_identity_without_charging_slot(
   assert grant.rounds_json == {}
 
 
-@pytest.mark.parametrize("body", [
-  "arbitrary app comment\n\n_Reviewed revision `aaaaaaaaaaaa`._",
-  "### Reviewer: QA second look\n\nPing @someone\n\n_Reviewed revision `aaaaaaaaaaaa`._",
-  "### Reviewer: QA second look\n\n<img src=x>\n\n_Reviewed revision `aaaaaaaaaaaa`._",
-  "### Reviewer: QA second look\n\n![pixel](https://evil.test)\n\n_Reviewed revision `aaaaaaaaaaaa`._",
-  "### Reviewer: all clear\n\nClean.\n\n_Reviewed revision `bbbbbbbbbbbb`._",
-])
-def test_guarded_comment_rejects_unbound_or_active_content(
-  client, auth, db, monkeypatch, body,
-):
-  app = _app(db)
-  client.post(
-    f"/api/github/reviewer/{app.id}/grant", headers=auth, json={
-      "repositories": ["mobius-os/mobius"], "guide_hash": GUIDE,
-      "max_rounds_per_pr": 2, "daily_post_ceiling": 4,
-    },
-  )
-  monkeypatch.setattr(
-    "app.routes.reviewer._reviewer_assert_live_revision", lambda *_args: {},
-  )
-  calls = []
-  monkeypatch.setattr("app.routes.reviewer._gh", lambda *args: calls.append(args))
-  response = client.post(
-    f"/api/github/reviewer/{app.id}/comment", headers=auth, json={
-      "identity": "8" * 64, "repository": "mobius-os/mobius",
-      "pr_number": 77, "head_sha": "a" * 40, "base_sha": "b" * 40,
-      "guide_hash": GUIDE,
-      "body": body,
-    },
-  )
-  assert response.status_code in {409, 422}
-  assert calls == []
-
-
 def test_manual_comment_posts_once_without_grant_and_exposes_audit(
   client, auth, db, monkeypatch, tmp_path,
 ):
@@ -353,30 +336,13 @@ def test_manual_comment_posts_once_without_grant_and_exposes_audit(
   }]
 
 
-@pytest.mark.parametrize(
-  "mismatch", ["body", "guide", "identity", "selection", "source", "public"],
-)
-def test_manual_comment_requires_exact_current_private_draft(
-  client, auth, db, monkeypatch, tmp_path, mismatch,
+def test_manual_comment_stops_when_app_policy_rejects_the_draft(
+  client, auth, db, monkeypatch, tmp_path,
 ):
-  app, payload, source, storage, ledger = _manual_case(db, tmp_path)
-  payload = dict(payload)
-  if mismatch == "body":
-    payload["body"] = payload["body"].replace("One concrete", "A different")
-  elif mismatch == "guide":
-    payload["guide_hash"] = "d" * 64
-  elif mismatch == "identity":
-    payload["identity"] = "e" * 64
-  elif mismatch == "selection":
-    settings = json.loads((storage / "settings.json").read_text())
-    settings["selectedRepos"] = []
-    (storage / "settings.json").write_text(json.dumps(settings))
-  elif mismatch == "source":
-    (source / "reviewing.md").write_text("# Changed Reviewer guide")
-  else:
-    value = json.loads(ledger.read_text())
-    value["pulls"]["mobius-os/app-memory#54"]["private"] = False
-    ledger.write_text(json.dumps(value))
+  app, payload, _source, _storage, _ledger = _manual_case(db, tmp_path)
+  async def reject(*_args, **_kwargs):
+    raise HTTPException(409, "The draft or guidance changed; refresh the review before sending.")
+  monkeypatch.setattr("app.routes.reviewer._reviewer_manual_plan", reject)
   calls = []
   monkeypatch.setattr("app.routes.reviewer._gh", lambda *args: calls.append(args))
 

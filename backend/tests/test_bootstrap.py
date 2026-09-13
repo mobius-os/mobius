@@ -545,7 +545,7 @@ async def test_bootstrap_migrates_live_integrations_predecessor(db, monkeypatch)
 async def test_bootstrap_preserves_uninstalled_integrations_predecessor(
   db, monkeypatch,
 ):
-  """A package rename never resurrects a deliberately removed default app."""
+  """The checkpoint preserves an uninstall under the current identity."""
   monkeypatch.delenv("MOEBIUS_SKIP_BOOTSTRAP", raising=False)
   from app.install import _canonical_identity_key
 
@@ -574,6 +574,13 @@ async def test_bootstrap_preserves_uninstalled_integrations_predecessor(
     await ensure_bootstrap_apps_installed(db)
 
   install_mock.assert_not_awaited()
+  predecessor = db.query(models.App).filter(
+    models.App.slug == "connections",
+  ).one()
+  assert predecessor.deleted_at is not None
+  assert predecessor.manifest_url == _canonical_identity_key(
+    BOOTSTRAP_INTEGRATIONS_MANIFEST_URL, "integrations",
+  )
 
 
 

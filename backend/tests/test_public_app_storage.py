@@ -84,19 +84,19 @@ def test_anonymous_read_write_scoping_cas_and_quota(client, auth, monkeypatch):
 
   # Anonymous READ of the public/ folder works.
   read = client.get(
-    f"/api/public-apps/{app_id}/storage/public/config.json", headers=bearer,
+    "/api/public-storage/public/config.json", headers=bearer,
   )
   assert read.status_code == 200
   assert read.json() == {"maxPerSlot": 2}
 
   # Anonymous READ of anything outside public/ is refused.
   assert client.get(
-    f"/api/public-apps/{app_id}/storage/private.json", headers=bearer,
+    "/api/public-storage/private.json", headers=bearer,
   ).status_code == 403
 
   # Anonymous WRITE inside the declared area succeeds.
   wrote = client.put(
-    f"/api/public-apps/{app_id}/storage/public/submissions/b1.json",
+    "/api/public-storage/public/submissions/b1.json",
     json={"name": "Sam"}, headers=bearer,
   )
   assert wrote.status_code == 204
@@ -110,46 +110,47 @@ def test_anonymous_read_write_scoping_cas_and_quota(client, auth, monkeypatch):
 
   # Anonymous WRITE outside the declared area is refused (admin data is safe).
   assert client.put(
-    f"/api/public-apps/{app_id}/storage/public/config.json",
+    "/api/public-storage/public/config.json",
     json={"maxPerSlot": 999}, headers=bearer,
   ).status_code == 403
 
   # Create-only precondition (If-None-Match: *) enforces one booking per key.
   again = client.put(
-    f"/api/public-apps/{app_id}/storage/public/submissions/b1.json",
+    "/api/public-storage/public/submissions/b1.json",
     json={"name": "Imposter"}, headers={**bearer, "If-None-Match": "*"},
   )
   assert again.status_code == 412
 
   # Compare-and-swap: a stale If-Match is rejected (capacity stays consistent).
   stale = client.put(
-    f"/api/public-apps/{app_id}/storage/public/submissions/b1.json",
+    "/api/public-storage/public/submissions/b1.json",
     json={"name": "Race"}, headers={**bearer, "If-Match": '"deadbeef"'},
   )
   assert stale.status_code == 412
 
   # One anonymous value is capped, and the whole write area is capped.
   oversized = client.put(
-    f"/api/public-apps/{app_id}/storage/public/submissions/big.txt",
+    "/api/public-storage/public/submissions/big.txt",
     content=b"x" * (public_storage.PUBLIC_WRITE_MAX_VALUE_BYTES + 1),
     headers={**bearer, "Content-Type": "text/plain"},
   )
   assert oversized.status_code == 413
   monkeypatch.setattr(public_storage, "PUBLIC_WRITE_SUBTREE_MAX_BYTES", 64)
   full = client.put(
-    f"/api/public-apps/{app_id}/storage/public/submissions/b2.json",
+    "/api/public-storage/public/submissions/b2.json",
     json={"name": "y" * 100}, headers=bearer,
   )
   assert full.status_code == 413
   assert client.get(
-    f"/api/public-apps/{app_id}/storage/public/submissions/b2.json",
+    "/api/public-storage/public/submissions/b2.json",
     headers=bearer,
   ).status_code == 404
   monkeypatch.undo()
 
   # Anonymous listing enumerates the submissions.
   listing = client.get(
-    f"/api/public-apps/{app_id}/storage-list/public/submissions",
+    "/api/public-storage",
+    params={"prefix": "public/submissions"},
     headers=bearer,
   )
   assert listing.status_code == 200
@@ -158,11 +159,11 @@ def test_anonymous_read_write_scoping_cas_and_quota(client, auth, monkeypatch):
 
   # Anonymous delete inside the write area works; outside is refused.
   assert client.delete(
-    f"/api/public-apps/{app_id}/storage/public/submissions/b1.json",
+    "/api/public-storage/public/submissions/b1.json",
     headers=bearer,
   ).status_code == 204
   assert client.delete(
-    f"/api/public-apps/{app_id}/storage/public/config.json", headers=bearer,
+    "/api/public-storage/public/config.json", headers=bearer,
   ).status_code == 403
 
 
@@ -174,7 +175,7 @@ def test_storage_closed_by_default_and_write_needs_declared_prefix(client, auth)
   token = _public_token(client, app["slug"])
   bearer = {"Authorization": f"Bearer {token}"}
   assert client.put(
-    f"/api/public-apps/{app_id}/storage/public/submissions/x.json",
+    "/api/public-storage/public/submissions/x.json",
     json={"a": 1}, headers=bearer,
   ).status_code == 403
 
@@ -184,7 +185,7 @@ def test_storage_closed_by_default_and_write_needs_declared_prefix(client, auth)
   plain_token = _public_token(client, plain["slug"])
   plain_bearer = {"Authorization": f"Bearer {plain_token}"}
   assert client.get(
-    f"/api/public-apps/{plain['id']}/storage/public/config.json",
+    "/api/public-storage/public/config.json",
     headers=plain_bearer,
   ).status_code == 403
 
@@ -255,7 +256,7 @@ def test_public_host_exposes_only_the_reviewed_device_storage_capability(client,
   assert plain_config["capabilityContract"] == {"runtime": {}}
 
 
-def test_canonical_public_storage_and_legacy_alias_share_one_namespace(client, auth):
+def test_public_storage_list_and_value_routes_share_one_namespace(client, auth):
   app = _create(client, auth)
   app_id = app["id"]
   assert _publish(client, auth, app_id).status_code == 200
@@ -267,12 +268,20 @@ def test_canonical_public_storage_and_legacy_alias_share_one_namespace(client, a
     json={"source": "canonical"}, headers=bearer,
   )
   assert wrote.status_code == 204
-  legacy = client.get(
+  read = client.get(
+    "/api/public-storage/public/submissions/canonical.json", headers=bearer,
+  )
+  assert read.status_code == 200
+  assert read.json() == {"source": "canonical"}
+
+  # Keep the released hosted-app address until its owning app has shipped the
+  # canonical URL; the later deletion stack removes this exact assertion.
+  transitional = client.get(
     f"/api/public-apps/{app_id}/storage/public/submissions/canonical.json",
     headers=bearer,
   )
-  assert legacy.status_code == 200
-  assert legacy.json() == {"source": "canonical"}
+  assert transitional.status_code == 200
+  assert transitional.json() == {"source": "canonical"}
 
   listing = client.get(
     "/api/public-storage",
@@ -285,19 +294,49 @@ def test_canonical_public_storage_and_legacy_alias_share_one_namespace(client, a
   }
 
 
-def test_public_storage_is_exact_app_scoped(client, auth):
+def test_public_storage_token_selects_one_exact_app_namespace(client, auth):
   app = _create(client, auth, name="First booking")
   other = _create(client, auth, name="Second booking")
   assert _publish(client, auth, app["id"]).status_code == 200
   assert _publish(client, auth, other["id"]).status_code == 200
+  assert client.put(
+    f"/api/storage/apps/{other['id']}/public/config.json",
+    json={"owner": "other"}, headers=auth,
+  ).status_code in (200, 204)
   token = _public_token(client, app["slug"])
   bearer = {"Authorization": f"Bearer {token}"}
-  # One app's public token cannot touch another app's public storage.
+  # There is no app id in the canonical route: the bearer alone selects the
+  # namespace and cannot be redirected toward a different installed app.
   assert client.get(
-    f"/api/public-apps/{other['id']}/storage/public/config.json",
-    headers=bearer,
-  ).status_code == 401
+    "/api/public-storage/public/config.json", headers=bearer,
+  ).status_code == 404
   assert client.put(
-    f"/api/public-apps/{other['id']}/storage/public/submissions/x.json",
+    "/api/public-storage/public/submissions/x.json",
     json={"a": 1}, headers=bearer,
-  ).status_code == 401
+  ).status_code == 204
+  assert client.get(
+    f"/api/storage/apps/{app['id']}/public/submissions/x.json", headers=auth,
+  ).json() == {"a": 1}
+  assert client.get(
+    f"/api/storage/apps/{other['id']}/public/submissions/x.json", headers=auth,
+  ).status_code == 404
+
+
+def test_public_app_storage_aliases_remain_until_released_app_cutover(client, auth):
+  app = _create(client, auth)
+  assert _publish(client, auth, app["id"]).status_code == 200
+  bearer = {"Authorization": f"Bearer {_public_token(client, app['slug'])}"}
+  base = f"/api/public-apps/{app['id']}"
+
+  assert client.put(
+    f"{base}/storage/public/submissions/value.json", json={"a": 1}, headers=bearer,
+  ).status_code == 204
+  assert client.get(
+    f"{base}/storage/public/submissions/value.json", headers=bearer,
+  ).json() == {"a": 1}
+  assert client.get(
+    f"{base}/storage-list/public/submissions", headers=bearer,
+  ).json()["entries"][0]["path"] == "public/submissions/value.json"
+  assert client.delete(
+    f"{base}/storage/public/submissions/value.json", headers=bearer,
+  ).status_code == 204

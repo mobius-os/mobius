@@ -537,6 +537,18 @@ if [ "$_use_platform" -eq 1 ] && [ "${MOBIUS_TEST_RUNTIME:-0}" != "1" ]; then
   fi
 fi
 
+# Privileged served source belongs to the same boot choice as the FastAPI
+# process. Validate it before publishing the source marker: an invalid broker
+# makes this boot use the complete baked platform instead of quietly combining
+# served backend code with an older frozen broker.
+if [ "$_use_platform" -eq 1 ] &&
+   ! DATA_DIR=/data MOBIUS_PLATFORM_DIR=/data/platform \
+     python3 -P /app/runtime/served_runtime_launcher.py \
+       --check identity_broker; then
+  echo "PLATFORM LAYER WARNING: served identity broker failed validation." >&2
+  _platform_use_baked
+fi
+
 # Record the source selected after startup recovery, never its pre-recovery tip.
 printf '%s\n' "$_serve_source" > /tmp/serving-source
 printf '%s\n' "$_served_sha" > /tmp/serving-sha
@@ -847,13 +859,19 @@ fi
 # Publish the per-deploy upstream-diff file (/data/shared/upstream-diff.txt).
 python3 /app/scripts/init_agent_context.py
 
-# One-time idempotent app-rename migration (mind->memory, dreaming->reflection)
-# for EXISTING instances. MUST run before init_skills, which renames the
-# agent-edited skill file in place, so the migration does not reseed a fresh
-# file. Preserves each app's numeric id, so reports/storage are untouched. No-op
-# on a fresh instance or one already migrated. Runs as mobius (writes /data + the
-# mobius crontab; as root it would poison /data ownership + target root's crontab).
-su -s /bin/sh mobius -c "bash /app/scripts/migrate-app-rename.sh" 2>&1 || true
+# Filesystem half of the one-way app-identity cutover. A restored /data can
+# reintroduce old paths or crontab commands after an earlier successful boot,
+# so discard the derived proof and scan the real invariants every time. The
+# configured database is normalized separately by schema migration 0054.
+APP_IDENTITY_FILES_RECEIPT=/data/.migration-receipts/app-identity-files-v1
+if ! rm -f "$APP_IDENTITY_FILES_RECEIPT"; then
+  echo "FATAL: could not clear stale app-identity filesystem proof" >&2
+  exit 1
+fi
+if su -s /bin/sh mobius -c "bash /app/scripts/migrate-app-rename.sh" 2>&1; then
+  install -d -o mobius -g mobius "$(dirname "$APP_IDENTITY_FILES_RECEIPT")"
+  su -s /bin/sh mobius -c "touch '$APP_IDENTITY_FILES_RECEIPT'"
+fi
 
 # Bootstrap only the always-on per-chat summary directory. Optional graph
 # memory, its seeds, and its `.ready` lifecycle belong to the installed Memory
@@ -975,12 +993,17 @@ umask 022
 #
 # The loader is frozen in the image; the broker module it starts is ordinary
 # served source, so editing backend/runtime/identity_broker.py is a normal
-# platform change that the next restart activates. A served copy that is
-# missing, unsafe, or does not compile falls back to the image copy.
+# platform change that the next restart activates. Source selection above has
+# already made the broker and backend one whole-platform decision.
 mkdir -p /data/identity-broker
 chown root:root /data/identity-broker
 chmod 700 /data/identity-broker
-DATA_DIR=/data python3 -P /app/runtime/served_runtime_launcher.py identity_broker &
+if [ "$_use_platform" -eq 1 ]; then
+  DATA_DIR=/data MOBIUS_PLATFORM_DIR=/data/platform \
+    python3 -P /app/runtime/served_runtime_launcher.py identity_broker &
+else
+  DATA_DIR=/data python3 -P /app/runtime/identity_broker.py &
+fi
 _identity_broker_pid=$!
 unset MOBIUS_IDENTITY_BOOTSTRAP
 # Scrub credentials used by pre-capability prototypes/managed SSO revisions.
