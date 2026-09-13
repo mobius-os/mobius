@@ -428,6 +428,34 @@ def test_tool_completed_events_emit_output_before_end():
   ]
 
 
+def test_dynamic_tool_completion_marks_its_authoritative_result():
+  class DynamicToolCallThreadItem:
+    def __init__(self, status="completed"):
+      self.content_items = [{"type": "text", "text": "done"}]
+      self.status = status
+
+  sdk = {
+    "CommandExecutionThreadItem": type("CommandExecutionThreadItem", (), {}),
+    "FileChangeThreadItem": type("FileChangeThreadItem", (), {}),
+    "McpToolCallThreadItem": type("McpToolCallThreadItem", (), {}),
+    "DynamicToolCallThreadItem": DynamicToolCallThreadItem,
+    "WebSearchThreadItem": type("WebSearchThreadItem", (), {}),
+  }
+  assert codex_sdk_runner._tool_completed_events(
+    DynamicToolCallThreadItem(), sdk,
+  ) == [
+    {
+      "type": "tool_output",
+      "content": '[\n  {\n    "type": "text",\n    "text": "done"\n  }\n]',
+      "output_complete": True,
+    },
+    {"type": "tool_end"},
+  ]
+  assert codex_sdk_runner._tool_completed_events(
+    DynamicToolCallThreadItem("failed"), sdk,
+  )[0]["output_exit_code"] == 1
+
+
 def test_native_image_view_item_uses_shared_view_image_activity():
   class ImageViewThreadItem:
     id = "image-1"
@@ -805,7 +833,7 @@ def test_active_codex_turn_interrupt_waits_for_runner_finish():
   asyncio.run(_scenario())
 
 
-def test_active_codex_turn_owner_card_finish_is_a_clean_non_stop_end():
+def test_active_codex_turn_delivered_card_finish_is_a_clean_non_stop_end():
   """A continuation owner-input card ends the turn on our initiative, so the
   resulting TurnStatus.interrupted must read as a clean completion — but it is
   NOT Stop. It marks only `owner_card_requested` (never `interrupt_requested`),

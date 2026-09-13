@@ -700,7 +700,13 @@ def _tool_completed_events(item: Any, sdk: dict[str, Any]) -> list[dict[str, Any
     events: list[dict[str, Any]] = []
     result = _format_json(item.content_items)
     if result:
-      events.append({"type": "tool_output", "content": result})
+      status = _enum_wire_value(getattr(item, "status", None))
+      events.append({
+        "type": "tool_output",
+        "content": result,
+        "output_complete": True,
+        **({"output_exit_code": 1} if status == "failed" else {}),
+      })
     events.append({"type": "tool_end"})
     return events
 

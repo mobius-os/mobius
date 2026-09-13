@@ -1,13 +1,19 @@
 """Owner approval travels through real saved cards and the ordinary answer queue."""
 
 import asyncio
+import json
 from datetime import timedelta
 
 import pytest
 
 from app import auth as auth_mod, chat as chat_mod, models, questions
 from app.broadcast import create_broadcast
-from app.chat_event_sink import ChatEventSink, register_active_sink, unregister_active_sink
+from app.chat_event_sink import (
+  ChatEventSink,
+  _owner_card_receipt_id,
+  register_active_sink,
+  unregister_active_sink,
+)
 from app.chat_writer import Barrier, FinishRun, StartTurn, get_writer
 from app.database import SessionLocal
 from app.memory_recall import EMPTY_RECALL_BINDING
@@ -96,13 +102,29 @@ class _FakeCardHandle:
     return True
 
 
-def test_continuation_card_commit_ends_the_active_turn(
+def test_owner_card_receipt_detection_handles_provider_result_shapes():
+  receipt = {
+    "state": "waiting_for_owner", "question_id": "saved-1",
+    "next_action": "End now",
+  }
+  assert _owner_card_receipt_id(json.dumps(receipt)) == "saved-1"
+  assert _owner_card_receipt_id({
+    "content": [{"type": "text", "text": json.dumps(receipt)}],
+    "isError": False,
+  }) == "saved-1"
+  assert _owner_card_receipt_id(
+    "Script completed\nOutput:\n" + json.dumps(receipt)
+  ) == "saved-1"
+  assert _owner_card_receipt_id({
+    "content": [{"type": "text", "text": json.dumps(receipt)}],
+    "isError": True,
+  }) is None
+
+
+def test_continuation_card_save_does_not_interrupt_its_own_receipt(
   client, chat, approval_run,
 ):
-  """Saving a continuation owner-input card ends the live turn at its source, so
-  the model cannot emit text or tools after the card. The commit awaits the
-  card-finish before returning the receipt, so it has fired by the time the
-  route responds."""
+  """The save request must return before a separate post-receipt cut."""
   from app.runner_registry import registry
   handle = _FakeCardHandle(chat.id)
   registry.register(handle)
@@ -110,6 +132,43 @@ def test_continuation_card_commit_ends_the_active_turn(
     res = _ask(client, chat, approval_run)
     assert res.status_code == 200, res.text
     assert res.json()["state"] == "waiting_for_owner"
+    assert handle.finishes == 0
+  finally:
+    registry.unregister(chat.id, handle.kind)
+
+
+def test_completed_receipt_ends_only_the_exact_saved_card_turn(
+  client, chat, approval_run,
+):
+  from app.runner_registry import registry
+  handle = _FakeCardHandle(chat.id)
+  registry.register(handle)
+  try:
+    saved = _ask(client, chat, approval_run)
+    qid = saved.json()["question_id"]
+    async def deliver(content, *, complete=True, exit_code=0):
+      approval_run[0].publish({
+        "type": "tool_output", "content": content,
+        "output_complete": complete, "output_exit_code": exit_code,
+      })
+      await asyncio.sleep(0)
+
+    asyncio.run(deliver(saved.text, complete=False))
+    asyncio.run(deliver(saved.text, exit_code=1))
+    assert handle.finishes == 0
+    asyncio.run(deliver(saved.text))
+    assert handle.finishes == 1
+
+    asyncio.run(deliver({
+      "content": [{
+        "type": "text",
+        "text": json.dumps({
+          "state": "waiting_for_owner",
+          "question_id": "another-card",
+          "next_action": "End",
+        }),
+      }],
+    }))
     assert handle.finishes == 1
   finally:
     registry.unregister(chat.id, handle.kind)
