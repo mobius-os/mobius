@@ -46,6 +46,7 @@ from app import (
   activity,
   app_git,
   data_git,
+  drawer_pins,
   fs_locks,
   icon_assets,
   models,
@@ -76,6 +77,8 @@ from app.manifest_contract import (
   STATIC_ASSETS_TOTAL_MAX as _CONTRACT_STATIC_ASSETS_TOTAL_MAX,
   SYSTEM_PROMPT_MAX_BYTES as _CONTRACT_SYSTEM_PROMPT_MAX_BYTES,
   ManifestContractError,
+  job_interpreter,
+  require_executable_job,
   static_asset_entries,
   validate_manifest_contract,
   validate_storage_destination,
@@ -1259,6 +1262,11 @@ def package_content_digest_from_tree(
   schedule = manifest.get("schedule")
   job_name = schedule.get("job") if isinstance(schedule, dict) else None
   bundled_job = required_bytes(job_name, "schedule job") if job_name else None
+  if bundled_job is not None:
+    try:
+      job_interpreter(bundled_job)
+    except ManifestContractError as exc:
+      raise PackageContentError(str(exc)) from exc
 
   icon_processed = None
   icon_name = manifest.get("icon")
@@ -2144,6 +2152,10 @@ async def _fetch_install_candidate(
       bundled_job = await _http_get(
         cli, raw_base + schedule["job"], _ENTRY_MAX_BYTES,
       )
+      try:
+        job_interpreter(bundled_job)
+      except ManifestContractError as exc:
+        raise HTTPException(400, str(exc)) from exc
 
     static_assets: dict[str, bytes] = {}
     static_assets_total = 0
@@ -2390,11 +2402,6 @@ async def _sync_manifest_cron_unlocked(
     await asyncio.to_thread(_drop_app_cron, app_data_dir)
     (app_cron.schedule_state_dir(app.id) / "init-cron.sh").unlink(missing_ok=True)
   job_path = app_data_dir / cron_job_name
-  if job_name and job_path.exists() and not os.access(job_path, os.X_OK):
-    warnings.append(
-      f"schedule.job {cron_job_name} is not executable — cron/run-job "
-      "will fail until the app repo commits the executable bit"
-    )
   active_cron_scaffold = app_cron.cron_scaffold(CRON_SCAFFOLD)
   if has_cron and active_cron_scaffold.exists():
     await asyncio.to_thread(
@@ -2515,7 +2522,6 @@ async def _prepare_app_row(
 
   if existing:
     app = existing
-    app.deleted_at = None
     app.name = manifest["name"]
     app.description = manifest.get("description", "")
     db.flush()
@@ -2630,6 +2636,35 @@ async def _prepare_app_row(
   db.add(app)
   db.flush()
   return app
+
+
+def _commit_prepared_app(
+  db: Session,
+  app: models.App,
+  journal: InstallJournal,
+  *,
+  revive_after_commit: bool,
+) -> None:
+  """Make prepared source durable, then reveal a recovered pinned app.
+
+  Reinstall performs awaited filesystem work and may flush row metadata long
+  before its final commit, so it must not hold the drawer's blocking process
+  lock for the whole operation. A tombstoned app stays outside the live pinned
+  identity set while that work is made durable. Its visibility transition is
+  then one short, independently committed drawer mutation.
+
+  If the revival commit fails, the fully prepared app remains safely hidden
+  and a retry can recover it; the compensation journal must not remove source
+  that the first commit already made authoritative.
+  """
+  db.commit()
+  journal.mark_durable()
+  if not revive_after_commit:
+    return
+  with drawer_pins.serialized_write():
+    app.deleted_at = None
+    db.commit()
+
 
 @dataclass(frozen=True)
 class ActivationPlan:
@@ -2781,6 +2816,12 @@ async def _activate_install_source(
         job_name=plan.job_name,
       )
 
+  if plan.job_name:
+    try:
+      require_executable_job((source_dir / plan.job_name).stat().st_mode)
+    except (OSError, ManifestContractError) as exc:
+      raise HTTPException(400, str(exc)) from exc
+
   _write_static_assets(
     source_dir,
     plan.static_assets,
@@ -2874,6 +2915,10 @@ async def install_from_manifest(
       The app is fully installed at that point; cron failure becomes a
       non-fatal warning appended to the returned `warnings` list. The
       owner can re-register cron manually by editing the schedule.
+    - A tombstoned reinstall deliberately commits its prepared row while it is
+      still hidden, then revives it in one short drawer-serialized commit. If
+      revival fails, the durable prepared source remains hidden and a retry can
+      recover it without exposing a half-installed pinned item.
     - FastAPI surfaces each HTTPException with its proper status code;
       we never catch + swallow anything that would land the DB or
       filesystem in a half state.
@@ -2927,6 +2972,7 @@ async def install_from_manifest(
     publication_handoff_app_id=publication_handoff_app_id,
   )
   existing = target.existing
+  revive_after_commit = bool(existing and existing.deleted_at is not None)
   mode = target.mode
   canonical_manifest_url = target.canonical_manifest_url
   force_core_store_update = target.force_core_store_update
@@ -3474,8 +3520,9 @@ async def install_from_manifest(
       # Commit the recorded upstream provenance + return so the App Store can
       # surface a click-gated resolver. The served source/bundle stay the prior
       # good ones until the owner chooses Resolve in chat.
-      db.commit()
-      journal.mark_durable()
+      _commit_prepared_app(
+        db, app, journal, revive_after_commit=revive_after_commit,
+      )
       db.refresh(app)
       activity.log_event(
         "app_install", app_id=app.id, slug=app.slug, source=source,
@@ -3517,12 +3564,13 @@ async def install_from_manifest(
     # is a non-fatal "best effort" step. Doing cron BEFORE commit
     # could leave a crontab entry firing for a row that rolled back
     # (orphaned cron, mysterious 'app not found' errors at runtime).
-    db.commit()
+    _commit_prepared_app(
+      db, app, journal, revive_after_commit=revive_after_commit,
+    )
     # The transaction is now irreversible. Never let a later refresh, activity
     # write, or cleanup error run the failure actions and remove files selected
     # by the durable row. Superseded artifacts can safely remain for the startup
     # orphan reaper if post-commit cleanup is interrupted.
-    journal.mark_durable()
     db.refresh(app)
 
     # Only the durable update may retire provenance.  Doing this before the DB

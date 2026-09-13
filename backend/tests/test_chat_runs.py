@@ -677,9 +677,9 @@ def test_startup_reconciliation_marks_unplanned_loss_but_not_planned_restart():
   assert _runs("r6-unplanned")["rt-unplanned"] == ("interrupted", True)
   db = SessionLocal()
   try:
-    latest = db.query(models.AgentLifecycleRunUpdate).filter_by(
+    latest = db.query(models.ChatRunUpdate).filter_by(
       chat_run_id="rt-unplanned",
-    ).order_by(models.AgentLifecycleRunUpdate.id.desc()).first()
+    ).order_by(models.ChatRunUpdate.id.desc()).first()
     assert latest.status == "interrupted"
   finally:
     db.close()
@@ -703,9 +703,9 @@ def test_startup_reconciliation_marks_unplanned_loss_but_not_planned_restart():
   assert _runs("r6-restart")["rt-restart"] == ("parked", False)
   db = SessionLocal()
   try:
-    latest = db.query(models.AgentLifecycleRunUpdate).filter_by(
+    latest = db.query(models.ChatRunUpdate).filter_by(
       chat_run_id="rt-restart",
-    ).order_by(models.AgentLifecycleRunUpdate.id.desc()).first()
+    ).order_by(models.ChatRunUpdate.id.desc()).first()
     assert latest.status == "parked"
   finally:
     db.close()

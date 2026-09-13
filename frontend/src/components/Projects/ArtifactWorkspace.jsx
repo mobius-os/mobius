@@ -122,13 +122,15 @@ export default function ArtifactWorkspace({ projectId, project, onOpenApp, artif
             <p>{status === 'building' ? 'The preview will appear here when it is ready.' : status === 'error' ? 'The last build failed. Fix the source and build again.' : 'Build this Creation to see it here.'}</p>
             {!readOnly && <button type="button" className="project-build-button" disabled={busy || status === 'building'} onClick={build}><Hammer width={16} height={16} aria-hidden="true" /><span>Build</span></button>}
           </div>
+        ) : !entryPath || !['html', 'pdf', 'image'].includes(preview) ? (
+          <div className="project-document__empty" role="alert"><h2>Creation declaration unavailable</h2><p>This Project does not declare how to open its built output.</p></div>
         ) : preview === 'pdf' ? (
           <PdfPreview projectId={projectId} artifactId={artifactId} entryPath={entryPath} version={previewVersion} />
         ) : preview === 'image' ? (
           <ImagePreview projectId={projectId} artifactId={artifactId} entryPath={entryPath} version={previewVersion} name={name} />
-        ) : (
+        ) : preview === 'html' ? (
           <WebsitePreview projectId={projectId} artifactId={artifactId} sourcePath={artifact.source || entryPath} entryPath={entryPath} version={previewVersion} name={name} />
-        )}
+        ) : null}
       </div>
     </section>
   )
@@ -146,7 +148,7 @@ function WebsitePreview({ projectId, artifactId, sourcePath, entryPath, version,
   const [doc, setDoc] = useState('')
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(true)
-  const entry = entryPath || 'index.html'
+  const entry = entryPath
   useEffect(() => {
     const controller = new AbortController()
     let active = true
@@ -215,7 +217,7 @@ function PdfPreview({ projectId, artifactId, entryPath, version }) {
     setLoading(true); setError('')
     ;(async () => {
       try {
-        const res = await api.projects.artifactOutput(projectId, artifactId, entryPath || 'main.pdf', { signal: controller.signal })
+        const res = await api.projects.artifactOutput(projectId, artifactId, entryPath, { signal: controller.signal })
         if (!active) return
         if (!res.ok) throw new Error(`The document could not be loaded (${res.status}).`)
         const bytes = new Uint8Array(await res.arrayBuffer())

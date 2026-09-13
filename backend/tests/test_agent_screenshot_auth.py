@@ -1007,7 +1007,7 @@ def test_content_mode_suppresses_modals_without_dom_surgery():
 def test_app_preview_requests_ephemeral_content_only_mode():
   source = PREVIEW_APP.read_text(encoding="utf-8")
 
-  assert 'ROUTE="/app/${APP_ID}"' in source
+  assert 'ROUTE="/shell/?app=${APP_ID}"' in source
   assert 'agent-screenshot.sh" --content-only "${ROUTE}"' in source
 
 

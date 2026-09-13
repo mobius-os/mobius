@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 
 from app.chat_message_identity import assistant_message_index
+from app.events import tool_output_exit_code
 from app.memory_recall import (
   RecallBinding,
   recall_from_command,
@@ -16,12 +17,59 @@ from app.tool_sources import normalize_tool_sources
 
 
 _QUESTION_TOOLS = {"AskUserQuestion", "request_user_input"}
+_RESTART_REQUEST_TOOLS = {
+  "mobius_control:request_restart",
+  "mcp__mobius_control__request_restart",
+}
 _IMAGE_PATH_RE = re.compile(
   r"\.(?:avif|bmp|gif|heic|heif|jpe?g|png|svg|webp)(?:[?#].*)?$",
   re.IGNORECASE,
 )
 _MAX_SOURCE_ROWS_SCANNED = 512
 MAX_ACTIVITY_DETAIL_BLOCKS = 2000
+
+
+def redundant_interaction_tool_indexes(blocks: list[dict]) -> set[int]:
+  """Return tools whose immediately following product card owns the UI."""
+  latest_unowned: dict[str, int | None] = {"question": None, "restart": None}
+  owned: set[int] = set()
+  for index, block in enumerate(blocks):
+    if not isinstance(block, dict):
+      continue
+    if block.get("type") == "tool":
+      tool = block.get("tool")
+      family = (
+        "question" if tool in _QUESTION_TOOLS
+        else "restart" if tool in _RESTART_REQUEST_TOOLS
+        else None
+      )
+      if family is None:
+        continue
+      exit_code = block.get("output_exit_code")
+      if exit_code is None:
+        exit_code = tool_output_exit_code(block.get("output"))
+      failed = (
+        isinstance(exit_code, (int, float))
+        and not isinstance(exit_code, bool)
+        and exit_code != 0
+      )
+      if failed:
+        continue
+      latest_unowned[family] = index
+      continue
+    if block.get("type") != "question":
+      continue
+    action = block.get("platform_action")
+    family = (
+      "restart"
+      if isinstance(action, dict) and action.get("type") == "restart"
+      else "question"
+    )
+    twin = latest_unowned[family]
+    if twin is not None:
+      owned.add(twin)
+      latest_unowned[family] = None
+  return owned
 
 
 def materialized_messages(chat) -> list[dict]:
@@ -437,16 +485,14 @@ def compact_messages_for_detail(
       continue
 
     sources = message_sources_for_detail(message)
-    has_question = any(
-      isinstance(block, dict) and block.get("type") == "question"
-      for block in blocks
-    )
+    redundant_tool_indexes = redundant_interaction_tool_indexes(blocks)
     next_blocks: list[dict] = []
     run: list[tuple[int, dict]] = []
     changed = False
+    emitted_activity_projection = False
 
     def flush() -> None:
-      nonlocal changed
+      nonlocal changed, emitted_activity_projection
       while run:
         chunk = run[:MAX_ACTIVITY_DETAIL_BLOCKS]
         del run[:MAX_ACTIVITY_DETAIL_BLOCKS]
@@ -457,6 +503,7 @@ def compact_messages_for_detail(
             binding=binding,
           ))
           changed = True
+          emitted_activity_projection = True
         else:
           next_blocks.extend(block for _, block in chunk)
       run.clear()
@@ -466,13 +513,7 @@ def compact_messages_for_detail(
         isinstance(block, dict)
         and block.get("type") in {"tool", "thinking"}
       )
-      question_twin = (
-        activity
-        and block.get("type") == "tool"
-        and has_question
-        and block.get("tool") in _QUESTION_TOOLS
-      )
-      if question_twin:
+      if activity and raw_index in redundant_tool_indexes:
         flush()
         changed = True
         continue
@@ -513,6 +554,12 @@ def compact_messages_for_detail(
     if projected is None:
       projected = list(messages)
     next_message = dict(message)
+    if emitted_activity_projection:
+      # Fresh compact projections already omit the exact interaction tool
+      # owned by a product card. Older cached messages have no marker, so the
+      # frontend can repair their sampled counts without undercounting current
+      # payloads.
+      next_message["interaction_tool_projection_version"] = 1
     if sources:
       # Historical source cards are deliberately absent from the ordinary
       # transcript payload. A single source_ref paints the collapsed row and

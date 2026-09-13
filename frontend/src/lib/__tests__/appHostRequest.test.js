@@ -42,7 +42,7 @@ test('project host requests retain only the correlated, bounded contract', () =>
   }), null)
   assert.equal(appHostRequest({
     type: 'moebius:projects', requestId: 'projects:abc:3', action: 'migrate',
-  })?.action, 'migrate')
+  }), null)
 })
 
 test('chat controls retain only a correlated status or stop request', () => {

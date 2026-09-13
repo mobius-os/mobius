@@ -18,7 +18,7 @@ keeps serving the old code until the resolver finishes it; a clean replay
 whose result fails to import rolls back; uncommitted edits come back
 uncommitted; an offline fetch keeps serving unchanged; a crash-interrupted
 reconcile is cleaned up on the next pass; and a merge-shaped legacy history is
-folded into one linear overlay unit.
+left untouched with an explicit normalization error.
 """
 
 import hashlib
@@ -170,6 +170,11 @@ def clone_env(tmp_path, monkeypatch):
   monkeypatch.setattr(pu, "RECONCILE_PRE_FLAG", tmp_path / ".reconcile-pre")
   monkeypatch.setattr(pu, "OFFLINE_FLAG", tmp_path / ".offline")
   monkeypatch.setattr(pu, "RECONCILE_LOCK", tmp_path / ".reconcile.lock")
+  monkeypatch.setattr(
+    pu,
+    "ACTIVATION_V2_CUTOVER_RECEIPT",
+    tmp_path / ".platform-activation-v2",
+  )
   monkeypatch.setattr(
     pu,
     "UPDATE_PROGRESS_PATH",
@@ -637,10 +642,8 @@ def test_replay_failure_serves_old_without_a_resolver_flag(
   assert not pu.RECONCILE_PRE_FLAG.exists()
 
 
-def test_legacy_merge_history_folds_into_one_linear_unit(clone_env):
-  """An installation shaped by the old merge model converges on its first
-  update: the net local delta becomes one ``legacy-overlay`` commit on the exact
-  new target, and the next update is an ordinary replay."""
+def test_merge_shaped_history_is_left_untouched_for_explicit_normalization(clone_env):
+  """Current updates never silently rewrite an installation's Git history."""
   origin, platform = clone_env
   _local_commit(platform, edits={"backend/app/foo.py": "VALUE = 'LOCAL'\n"},
                 msg="old local")
@@ -648,30 +651,17 @@ def test_legacy_merge_history_folds_into_one_linear_unit(clone_env):
     _MAIN_PY.replace("LINE_C = 3", "LINE_C = 30")})
   _git(platform, "fetch", "-q", "origin")
   _git(platform, "merge", "--no-ff", "-m", "platform: merge upstream", first)
-  assert len(_parents(platform)) == 2
-  second = _advance_origin(origin, edits={"backend/app/main.py":
+  before = _served_sha(platform)
+  _advance_origin(origin, edits={"backend/app/main.py":
     _MAIN_PY.replace("LINE_C = 3", "LINE_C = 300")})
 
   res = pu.reconcile_clone(platform)
 
-  assert res.status == "updated"
-  assert res.overlay["legacy"] is True
-  assert _parents(platform) == [second]
-  assert _overlay_subjects(platform, second) == [
-    f"platform: local overlay carried onto {second[:12]}",
-  ]
+  assert res.status == "error"
+  assert "local_overlay_not_linear" in res.error
+  assert _served_sha(platform) == before
+  assert len(_parents(platform)) == 2
   assert (platform / "backend/app/foo.py").read_text() == "VALUE = 'LOCAL'\n"
-  assert "LINE_C = 300" in (platform / "backend/app/main.py").read_text()
-  status = pu.platform_status(platform)
-  assert status["overlay"]["linear"] is True
-  assert [u["id"] for u in status["overlay"]["units"]] == ["legacy-overlay"]
-
-  third = _advance_origin(origin, edits={"backend/app/main.py":
-    _MAIN_PY.replace("LINE_C = 3", "LINE_C = 3000")})
-  res2 = pu.reconcile_clone(platform)
-  assert res2.status == "updated"
-  assert res2.overlay["replayed_units"] == ["legacy-overlay"]
-  assert _parents(platform) == [third]
 
 
 # --- V-B4: import-broken text-clean merge -> rollback -----------------------
@@ -899,7 +889,7 @@ def test_continue_rolls_back_a_candidate_that_fails_a_gate(clone_env, monkeypatc
   assert not pu.CONFLICT_FLAG.exists()
 
 
-def test_legacy_fold_keeps_uncommitted_edits_uncommitted(clone_env):
+def test_merge_shaped_history_failure_restores_uncommitted_edits(clone_env):
   origin, platform = clone_env
   _local_commit(platform, edits={"backend/app/foo.py": "VALUE = 'LOCAL'\n"},
                 msg="old local")
@@ -907,24 +897,19 @@ def test_legacy_fold_keeps_uncommitted_edits_uncommitted(clone_env):
     _MAIN_PY.replace("LINE_C = 3", "LINE_C = 30")})
   _git(platform, "fetch", "-q", "origin")
   _git(platform, "merge", "--no-ff", "-m", "platform: merge upstream", first)
+  before = _served_sha(platform)
   (platform / "backend/app/foo.py").write_text("VALUE = 'DIRTY'\n")
-  second = _advance_origin(origin, edits={"backend/app/main.py":
+  _advance_origin(origin, edits={"backend/app/main.py":
     _MAIN_PY.replace("LINE_C = 3", "LINE_C = 300")})
 
   res = pu.reconcile_clone(platform)
 
-  assert res.status == "updated", res
-  assert res.overlay["legacy"] is True
-  # The fold is one committed unit on the exact target; the edit is not in it.
-  assert _overlay_subjects(platform, second) == [
-    f"platform: local overlay carried onto {second[:12]}",
-  ]
-  assert "LINE_C = 300" in (platform / "backend/app/main.py").read_text()
+  assert res.status == "error"
+  assert _served_sha(platform) == before
   assert (platform / "backend/app/foo.py").read_text() == "VALUE = 'DIRTY'\n"
   assert _git(platform, "status", "--porcelain").stdout.splitlines() == [
     " M backend/app/foo.py",
   ]
-  assert _git(platform, "show", "HEAD:backend/app/foo.py").stdout == "VALUE = 'LOCAL'\n"
 
 
 def _landed_review(platform, base, head, contribution_id, target):
@@ -2070,18 +2055,126 @@ def test_marker_coverage_survives_newer_descendant_official_image(
   ) == ["Dockerfile"]
 
 
-def test_legacy_activation_marker_cannot_claim_official_image_coverage(
+def test_legacy_activation_marker_is_normalized_before_current_runtime_reads(
   tmp_path, monkeypatch,
 ):
   marker = tmp_path / "activation.json"
+  receipt = tmp_path / "activation-v2"
   marker.write_text(
     '{"target_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",'
     '"paths":["Dockerfile"]}',
     encoding="utf-8",
   )
   monkeypatch.setattr(pu, "RESTART_NEEDED_FLAG", marker)
+  monkeypatch.setattr(pu, "ACTIVATION_V2_CUTOVER_RECEIPT", receipt)
 
+  assert pu._read_activation_marker() is None
+  pu._normalize_activation_marker()
+  assert pu._read_activation_marker() == {
+    "version": 2,
+    "target_sha": "a" * 40,
+    "upstream_sha": None,
+    "paths": ["Dockerfile"],
+    "image_paths": [],
+  }
   assert pu.container_replacement_blockers() == ["Dockerfile"]
+  assert receipt.read_text() == "v2"
+
+
+def test_bare_sha_activation_marker_normalizes_to_backend_restart(
+  tmp_path, monkeypatch,
+):
+  marker = tmp_path / "activation.json"
+  receipt = tmp_path / "activation-v2"
+  marker.write_text("b" * 40, encoding="utf-8")
+  monkeypatch.setattr(pu, "RESTART_NEEDED_FLAG", marker)
+  monkeypatch.setattr(pu, "ACTIVATION_V2_CUTOVER_RECEIPT", receipt)
+
+  pu._normalize_activation_marker()
+
+  assert pu._read_activation_marker() == {
+    "version": 2,
+    "target_sha": "b" * 40,
+    "upstream_sha": None,
+    "paths": ["backend/app"],
+    "image_paths": [],
+  }
+
+
+def test_stale_activation_receipt_cannot_hide_restored_legacy_marker(
+  tmp_path, monkeypatch,
+):
+  marker = tmp_path / "activation.json"
+  receipt = tmp_path / "activation-v2"
+  marker.write_text("d" * 40, encoding="utf-8")
+  receipt.write_text("v2", encoding="utf-8")
+  monkeypatch.setattr(pu, "RESTART_NEEDED_FLAG", marker)
+  monkeypatch.setattr(pu, "ACTIVATION_V2_CUTOVER_RECEIPT", receipt)
+
+  pu._normalize_activation_marker()
+
+  assert pu._read_activation_marker() == {
+    "version": 2,
+    "target_sha": "d" * 40,
+    "upstream_sha": None,
+    "paths": ["backend/app"],
+    "image_paths": [],
+  }
+  assert receipt.read_text(encoding="utf-8") == "v2"
+
+
+def test_invalid_v2_marker_revokes_stale_activation_proof(
+  tmp_path, monkeypatch,
+):
+  marker = tmp_path / "activation.json"
+  receipt = tmp_path / "activation-v2"
+  raw = '{"version":2,"target_sha":"' + "e" * 40 + '","paths":["backend/app"]}'
+  marker.write_text(raw, encoding="utf-8")
+  receipt.write_text("v2", encoding="utf-8")
+  monkeypatch.setattr(pu, "RESTART_NEEDED_FLAG", marker)
+  monkeypatch.setattr(pu, "ACTIVATION_V2_CUTOVER_RECEIPT", receipt)
+
+  pu._normalize_activation_marker()
+
+  assert pu._read_activation_marker() is None
+  assert marker.read_text(encoding="utf-8") == raw
+  assert receipt.exists() is False
+
+
+@pytest.mark.parametrize("payload", [
+  {"version": 2, "target_sha": "short", "paths": ["backend/app"], "image_paths": []},
+  {"version": 2, "target_sha": "e" * 40, "paths": [], "image_paths": []},
+  {"version": 2, "target_sha": "e" * 40, "paths": ["backend/app"], "image_paths": ["Dockerfile"]},
+  {"version": 2, "target_sha": "e" * 40, "upstream_sha": "bad", "paths": ["backend/app"], "image_paths": []},
+])
+def test_current_activation_reader_rejects_incomplete_or_inconsistent_shapes(
+  tmp_path, monkeypatch, payload,
+):
+  marker = tmp_path / "activation.json"
+  marker.write_text(json.dumps(payload), encoding="utf-8")
+  monkeypatch.setattr(pu, "RESTART_NEEDED_FLAG", marker)
+
+  assert pu._read_activation_marker() is None
+
+
+@pytest.mark.parametrize("raw", [
+  "not-a-sha",
+  '{"version":3,"target_sha":"' + "c" * 40 + '","paths":["Dockerfile"]}',
+])
+def test_activation_cutover_does_not_invent_meaning_for_unknown_markers(
+  tmp_path, monkeypatch, raw,
+):
+  marker = tmp_path / "activation.json"
+  receipt = tmp_path / "activation-v2"
+  marker.write_text(raw, encoding="utf-8")
+  monkeypatch.setattr(pu, "RESTART_NEEDED_FLAG", marker)
+  monkeypatch.setattr(pu, "ACTIVATION_V2_CUTOVER_RECEIPT", receipt)
+
+  pu._normalize_activation_marker()
+
+  assert pu._read_activation_marker() is None
+  assert marker.read_text(encoding="utf-8") == raw
+  assert receipt.exists() is False
 
 
 def test_import_probe_classifier_excludes_constitution_only_change():
@@ -2801,7 +2894,7 @@ async def test_frontend_build_failure_rolls_back_source_and_is_not_success(
   if not started_with_upstream_marker:
     pu._clear_upstream(platform)
   previous_upstream = pu.recorded_upstream_sha(platform)
-  pu.RESTART_NEEDED_FLAG.write_text("preexisting-restart")
+  pu._write_activation_marker(before, ["backend/app"])
   target = _advance_origin(
     origin,
     edits={"frontend/src/App.jsx": "export default 'broken candidate'\n"},
@@ -2833,7 +2926,13 @@ async def test_frontend_build_failure_rolls_back_source_and_is_not_success(
   assert "frontend_build_failed" in result["error"]
   assert _served_sha(platform) == before
   assert pu.recorded_upstream_sha(platform) == previous_upstream
-  assert pu.RESTART_NEEDED_FLAG.read_text() == "preexisting-restart"
+  assert pu._read_activation_marker() == {
+    "version": 2,
+    "target_sha": before,
+    "upstream_sha": None,
+    "paths": ["backend/app"],
+    "image_paths": [],
+  }
   assert not (platform / "frontend/src/App.jsx").exists()
   rollback = pu._read_rolled_back_flag()
   assert rollback["target"] == target
@@ -3307,7 +3406,7 @@ def test_review_exposes_seed_customization_before_replacement_without_mutation(
 ):
   origin, platform = clone_env
   monkeypatch.setattr(platform_activation, "deployment_kind", lambda: deployment)
-  paths = ["backend/scripts/seed-skills/cron.md", "backend/scripts/seed-skills/reflection.md"]
+  paths = ["backend/scripts/seed-skills/cron.md", "backend/scripts/seed-skills/waiting.md"]
   _local_commit(platform, edits={path: "local instructions\n" for path in paths})
   target = _advance_origin(origin, edits={"Dockerfile": "FROM official-new\n"})
   pu._fetch(platform)

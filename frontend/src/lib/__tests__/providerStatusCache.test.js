@@ -4,8 +4,8 @@ import { authQueries } from '../../hooks/queries.js'
 
 test('markConnected publishes durable auth immediately and revalidates off-path', () => {
   let data = {
-    codex: { configured: false, authenticated: false, detail: 'stale' },
-    claude: { configured: true, authenticated: true },
+    codex: { configured: false, detail: 'stale' },
+    claude: { configured: true },
   }
   let invalidatedKey = null
   const queryClient = {
@@ -24,10 +24,9 @@ test('markConnected publishes durable auth immediately and revalidates off-path'
   assert.deepEqual(data, {
     codex: {
       configured: true,
-      authenticated: true,
       detail: 'stale',
     },
-    claude: { configured: true, authenticated: true },
+    claude: { configured: true },
   })
   assert.deepEqual(invalidatedKey, authQueries.provider.statuses.key)
 })
@@ -42,6 +41,6 @@ test('markConnected supports future provider ids without a registry edit', () =>
   authQueries.provider.statuses.markConnected(queryClient, 'future-provider')
 
   assert.deepEqual(data, {
-    'future-provider': { configured: true, authenticated: true },
+    'future-provider': { configured: true },
   })
 })

@@ -45,10 +45,6 @@ export function parseShellDeepLink(location = globalThis.location) {
     } catch { /* malformed query is an ordinary empty destination */ }
     return null
   }
-  const appMatch = path.match(/^\/app\/([^/]+)$/)
-  const chatMatch = path.match(/^\/chat\/([^/]+)$/)
-  if (appMatch) return { view: 'canvas', appId: Number.parseInt(appMatch[1], 10) }
-  if (chatMatch) return { view: 'chat', chatId: chatMatch[1] }
   return null
 }
 

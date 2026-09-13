@@ -33,6 +33,10 @@ const promotion = readFileSync(new URL('../streamPromotion.js', import.meta.url)
 const css = readFileSync(new URL('../ChatView.css', import.meta.url), 'utf8')
 const chatView = readFileSync(new URL('../ChatView.jsx', import.meta.url), 'utf8')
 const shell = readFileSync(new URL('../../Shell/Shell.jsx', import.meta.url), 'utf8')
+const shellChatRunLifecycle = readFileSync(
+  new URL('../../Shell/useShellChatRunLifecycle.js', import.meta.url),
+  'utf8',
+)
 const chatSettingsPanel = readFileSync(new URL('../ChatSettingsPanel.jsx', import.meta.url), 'utf8')
 const continuationCard = readFileSync(
   new URL('../ContinuationCard.jsx', import.meta.url), 'utf8',
@@ -227,8 +231,13 @@ test('a system-announced auto-resume reconnects the mounted chat surface', () =>
   // Every mounted chat surface is now a PaneChatView (one per visible chat pane,
   // including the single-pane case): Shell selects per-chat run activity BEFORE
   // the memo boundary, so another chat's Map update cannot rerender this pane.
-  assert.match(shell, /externalRunSignal=\{chatRunSignal\(chatRunSignals, chatId\)\}/,
+  assert.match(shell, /externalRunSignal=\{chatRunSignalFor\(chatId\)\}/,
     'Shell must forward only this pane chat’s monotonic run activity')
+  assert.match(
+    shellChatRunLifecycle,
+    /chatId => chatRunSignal\(chatRunSignals, chatId\)/,
+    'the lifecycle owner must select one chat before the pane memo boundary',
+  )
   assert.doesNotMatch(shell, /chatRunSignals=\{chatRunSignals\}/,
     'the replacement run-signal Map must not cross every pane memo boundary')
   assert.match(shell, /openAppWithIntent=\{openAppWithIntent\}/,

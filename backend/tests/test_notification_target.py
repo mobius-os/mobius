@@ -16,8 +16,6 @@ import pytest
   [
     "/shell/?app=42",
     "/shell/?chat=abc-123",
-    "/app/42",  # legacy form still accepted for back-compat
-    "/chat/abc-123",
   ],
 )
 def test_notification_target_round_trips(client, auth, target):
@@ -40,6 +38,16 @@ def test_notification_target_round_trips(client, auth, target):
   row = next((n for n in hist.json() if n["id"] == notif_id), None)
   assert row is not None, "sent notification missing from history"
   assert row["target"] == target
+
+
+@pytest.mark.parametrize("target", ["/app/42", "/chat/abc-123", "/shell/?app=artifacts"])
+def test_notification_target_rejects_retired_aliases(client, auth, target):
+  response = client.post(
+    "/api/notifications/send",
+    headers=auth,
+    json={"title": "Old link", "target": target},
+  )
+  assert response.status_code == 422
 
 
 def test_notification_action_targets_round_trip(client, auth):

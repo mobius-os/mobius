@@ -45,6 +45,44 @@ def test_ready_returns_200_when_writer_running(client):
   assert body["boot_id"]
 
 
+def test_runtime_schema_loss_fails_readiness_and_stays_degraded(
+  client, monkeypatch,
+):
+  """A table drop after boot must invalidate the container healthcheck."""
+  class MissingTableInspector:
+    @staticmethod
+    def get_table_names():
+      return [
+        name for name in main_module.Base.metadata.tables
+        if name != "owner"
+      ]
+
+  main_module._set_database_runtime_failure(None)
+  monkeypatch.setattr(
+    main_module, "inspect_database", lambda _engine: MissingTableInspector(),
+  )
+  try:
+    ready = client.get("/api/ready")
+    assert ready.status_code == 503
+    assert ready.json() == {
+      "ready": False,
+      "reason": "database_runtime_schema_missing",
+    }
+    # Sticky until restart: a later catalog result cannot make skipped or
+    # damaged database owners serviceable inside this process.
+    monkeypatch.setattr(
+      main_module,
+      "inspect_database",
+      lambda _engine: pytest.fail("sticky failure unexpectedly re-probed"),
+    )
+    assert client.get("/api/ready").status_code == 503
+    health = client.get("/api/health")
+    assert health.status_code == 200
+    assert health.json()["status"] == "database_runtime_schema_missing"
+  finally:
+    main_module._set_database_runtime_failure(None)
+
+
 def test_schema_gap_fails_serviceability_but_not_reachability(client):
   """A mapped-column gap must keep every deployment probe fail-closed."""
   gap = "apps.paused_capabilities"

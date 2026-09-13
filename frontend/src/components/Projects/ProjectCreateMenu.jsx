@@ -198,7 +198,7 @@ export default function ProjectCreateMenu({
                 {artifactSources.length > 0 && <>
                   <h3>Websites & documents</h3>
                   {artifactSources.map(source => <button key={`artifact:${source.id}`} type="button" disabled={busyKey != null} onClick={() => void importSource(source)}>
-                    <span className="project-create-menu__icon" aria-hidden="true"><ProjectTypeIcon value={source.project_type} size={19} /></span>
+                    <span className="project-create-menu__icon" aria-hidden="true"><ProjectTypeIcon value={{ kind: source.template_kind }} size={19} /></span>
                     <span><strong>{busyKey === `artifact:${source.id}` ? 'Adding…' : source.name}</strong><small>{source.description || 'Manage existing builder work'}</small></span>
                   </button>)}
                 </>}

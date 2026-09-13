@@ -22,6 +22,7 @@ from app import (
   auth,
   chat_failure_activity,
   chat_search,
+  drawer_pins,
   models,
   providers,
   questions,
@@ -113,6 +114,20 @@ def _recovery_run_id(db: Session, chat_id: str) -> str | None:
     models.ChatRun.chat_id == chat_id,
   ).order_by(models.ChatRun.started_at.desc(), models.ChatRun.id.desc()).first()
   return row[0] if row is not None else None
+
+
+def _latest_run_snapshot(
+  db: Session, chat_id: str,
+) -> tuple[str | None, str | None, int]:
+  """Return one revisioned runtime identity for browser reconciliation."""
+  row = db.query(
+    models.ChatRunUpdate.chat_run_id,
+    models.ChatRunUpdate.status,
+    models.ChatRunUpdate.id,
+  ).filter(
+    models.ChatRunUpdate.chat_id == chat_id,
+  ).order_by(models.ChatRunUpdate.id.desc()).first()
+  return (row[0], row[1], row[2]) if row is not None else (None, None, 0)
 
 
 def _active_assistant_message_id(
@@ -325,6 +340,8 @@ class PinnedOrderUpdate(BaseModel):
   """The complete top-to-bottom order of every currently pinned item."""
 
   items: list[PinnedOrderItem] = Field(min_length=1, max_length=5000)
+  pin_intent_client: str | None = Field(default=None, min_length=1, max_length=64)
+  pin_intent_version: int | None = Field(default=None, ge=1)
 
 
 _coerce_agent_settings = coerce_agent_settings
@@ -676,6 +693,7 @@ def _chat_detail_response(
     running_goal_objective(db, chat.id) if running else None
   )
   goal = presented_goal(db, chat.id)
+  run_id, run_status, runtime_revision = _latest_run_snapshot(db, chat.id)
   response = {
     "id": chat.id,
     "title": chat.title,
@@ -688,6 +706,9 @@ def _chat_detail_response(
     "total": total,
     "offset": start,
     "running": running,
+    "run_id": run_id,
+    "run_status": "running" if running and run_id else run_status,
+    "runtime_revision": runtime_revision,
     "active_assistant_message_id": _active_assistant_message_id(chat),
     "recovery_run_id": _recovery_run_id(db, chat.id),
     "active_goal_objective": active_goal_objective,
@@ -922,7 +943,7 @@ def _iso(value):
   return value.isoformat() if value is not None else None
 
 
-@router.get("/agent-lifecycle")
+@router.get("/lifecycle-events")
 def list_agent_lifecycle(
   after_id: int = Query(default=0, ge=0),
   runs_after_id: int = Query(default=0, ge=0),
@@ -932,7 +953,7 @@ def list_agent_lifecycle(
   _: models.Owner = Depends(get_current_owner),
   db: Session = Depends(get_db),
 ):
-  """Incremental owner-only feed of normalized helper lifecycle milestones.
+  """Incremental owner-only feed of normalized chat and helper lifecycle events.
 
   Event ``id`` is an ingestion cursor, not visual chronology. Consumers sort by
   provider ``occurred_at`` where present and fall back to server
@@ -959,18 +980,18 @@ def list_agent_lifecycle(
 
   run_query = (
     db.query(
-      models.AgentLifecycleRunUpdate,
+      models.ChatRunUpdate,
       models.ChatRun.root_run_id,
     )
-    .join(models.Chat, models.Chat.id == models.AgentLifecycleRunUpdate.chat_id)
+    .join(models.Chat, models.Chat.id == models.ChatRunUpdate.chat_id)
     .outerjoin(
       models.ChatRun,
-      models.ChatRun.id == models.AgentLifecycleRunUpdate.chat_run_id,
+      models.ChatRun.id == models.ChatRunUpdate.chat_run_id,
     )
     .outerjoin(
       models.Delegation,
       models.Delegation.child_chat_id
-      == models.AgentLifecycleRunUpdate.chat_id,
+      == models.ChatRunUpdate.chat_id,
     )
     .filter(
       models.Chat.deleted_at.is_(None),
@@ -978,13 +999,13 @@ def list_agent_lifecycle(
       # events under their parent root. Suppressing their private child
       # ChatRun here prevents Workflows from rendering a duplicate root.
       models.Delegation.id.is_(None),
-      models.AgentLifecycleRunUpdate.id > runs_after_id,
+      models.ChatRunUpdate.id > runs_after_id,
     )
-    .order_by(models.AgentLifecycleRunUpdate.id.asc())
+    .order_by(models.ChatRunUpdate.id.asc())
   )
   if chat_id is not None:
     run_query = run_query.filter(
-      models.AgentLifecycleRunUpdate.chat_id == chat_id
+      models.ChatRunUpdate.chat_id == chat_id
     )
   fetched_runs = run_query.limit(run_limit + 1).all()
   runs_has_more = len(fetched_runs) > run_limit
@@ -1155,45 +1176,61 @@ def update_pinned_order(
   if len(set(normalized)) != len(normalized):
     raise HTTPException(status_code=422, detail="Pinned order contains duplicates.")
 
-  pinned_chats = db.query(models.Chat).filter(
-    models.Chat.deleted_at.is_(None),
-    models.Chat.pinned_at.isnot(None),
-  ).all()
-  pinned_apps = db.query(models.App).filter(
-    models.App.deleted_at.is_(None),
-    models.App.pinned_at.isnot(None),
-  ).all()
-  pinned_projects = db.query(models.ProjectDrawerState).join(
-    models.Project,
-    models.Project.id == models.ProjectDrawerState.project_id,
-  ).filter(
-    models.Project.deleted_at.is_(None),
-    models.ProjectDrawerState.pinned_at.isnot(None),
-  ).all()
-  rows = {
-    **{("chat", str(chat.id)): chat for chat in pinned_chats},
-    **{("app", str(app.id)): app for app in pinned_apps},
-    **{("project", str(state.project_id)): state for state in pinned_projects},
-  }
-  if set(normalized) != set(rows):
-    raise HTTPException(
-      status_code=409,
-      detail="Pinned items changed while reordering; try again.",
-    )
+  with drawer_pins.serialized_write():
+    pinned_chats = db.query(models.Chat).filter(
+      models.Chat.deleted_at.is_(None),
+      models.Chat.pinned_at.isnot(None),
+    ).all()
+    pinned_apps = db.query(models.App).filter(
+      models.App.deleted_at.is_(None),
+      models.App.pinned_at.isnot(None),
+    ).all()
+    pinned_projects = db.query(models.ProjectDrawerState).join(
+      models.Project,
+      models.Project.id == models.ProjectDrawerState.project_id,
+    ).filter(
+      models.Project.deleted_at.is_(None),
+      models.ProjectDrawerState.pinned_at.isnot(None),
+    ).all()
+    rows = {
+      **{("chat", str(chat.id)): chat for chat in pinned_chats},
+      **{("app", str(app.id)): app for app in pinned_apps},
+      **{("project", str(state.project_id)): state for state in pinned_projects},
+    }
+    if drawer_pins.intent_is_superseded(
+      body.pin_intent_client, body.pin_intent_version,
+    ):
+      persisted = [
+        {
+          "kind": key[0],
+          "id": key[1],
+          "pinned_at": row.pinned_at.isoformat(),
+        }
+        for key, row in sorted(rows.items(), key=lambda item: item[1].pinned_at)
+      ]
+      return {"items": persisted}
+    if set(normalized) != set(rows):
+      raise HTTPException(
+        status_code=409,
+        detail="Pinned items changed while reordering; try again.",
+      )
 
-  # Keep the last assigned rank at or before `now` so a pin toggled immediately
-  # after this transaction still appends below the reordered list.
-  anchor = now_naive_utc() - timedelta(microseconds=len(normalized))
-  persisted = []
-  for index, key in enumerate(normalized, start=1):
-    pinned_at = anchor + timedelta(microseconds=index)
-    rows[key].pinned_at = pinned_at
-    persisted.append({
-      "kind": key[0],
-      "id": key[1],
-      "pinned_at": pinned_at.isoformat(),
-    })
-  db.commit()
+    # Keep the last assigned rank at or before `now` so a pin toggled immediately
+    # after this transaction still appends below the reordered list.
+    anchor = now_naive_utc() - timedelta(microseconds=len(normalized))
+    persisted = []
+    for index, key in enumerate(normalized, start=1):
+      pinned_at = anchor + timedelta(microseconds=index)
+      rows[key].pinned_at = pinned_at
+      persisted.append({
+        "kind": key[0],
+        "id": key[1],
+        "pinned_at": pinned_at.isoformat(),
+      })
+    db.commit()
+    drawer_pins.record_committed_intent(
+      body.pin_intent_client, body.pin_intent_version,
+    )
   return {"items": persisted}
 
 
@@ -1332,11 +1369,6 @@ async def patch_chat(
           chat.title = new_title
           chat.title_locked = True
 
-    # Drawer pin toggle. We stamp the time on pin so the shared pinned group
-    # can append the newest pin after the items already there.
-    if body.pinned is not None:
-      chat.pinned_at = now_naive_utc() if body.pinned else None
-
     data_dir = get_app_settings().data_dir
     if "model" in agent_settings_patch and not (
       isinstance(agent_settings_patch.get("model"), str)
@@ -1473,7 +1505,22 @@ async def patch_chat(
       # auto-retitles, an explicit owner rename should reliably reorder that
       # one chat in Recents.
       chat.activity_at = now_naive_utc()
-    db.commit()
+    if body.pinned is not None:
+      # Pin order is one cross-resource collection. Join its commit boundary
+      # only after every awaited validation above has completed.
+      with drawer_pins.serialized_write():
+        superseded = drawer_pins.intent_is_superseded(
+          body.pin_intent_client, body.pin_intent_version,
+        )
+        if not superseded:
+          chat.pinned_at = now_naive_utc() if body.pinned else None
+        db.commit()
+        if not superseded:
+          drawer_pins.record_committed_intent(
+            body.pin_intent_client, body.pin_intent_version,
+          )
+    else:
+      db.commit()
     db.refresh(chat)
     if chat.title != previous_title:
       # Manual rename and compatibility callers share this projection path.
@@ -1535,6 +1582,7 @@ async def patch_chat(
 
     return {
       "ok": True,
+      "pinned_at": chat.pinned_at,
       "agent_settings_json": _coerce_agent_settings(chat.agent_settings_json) or None,
       "provider": chat.provider or "claude",
       "auto_resume_on_limit": bool(chat.auto_resume_on_limit),
@@ -1624,8 +1672,13 @@ def get_chat_runtime(
       models.Chat.updated_at,
     ),
   )
+  running = is_chat_running(chat.id)
+  run_id, run_status, runtime_revision = _latest_run_snapshot(db, chat.id)
   return {
-    "running": is_chat_running(chat.id),
+    "running": running,
+    "run_id": run_id,
+    "run_status": "running" if running and run_id else run_status,
+    "runtime_revision": runtime_revision,
     "active_assistant_message_id": _active_assistant_message_id(chat),
     "recovery_run_id": _recovery_run_id(db, chat.id),
     "active_goal_objective": running_goal_objective(db, chat.id),
@@ -1708,6 +1761,7 @@ def get_chat_activity_detail(
     historical_tool_output_ids,
     materialized_messages,
     project_messages_for_detail,
+    redundant_interaction_tool_indexes,
   )
 
   if principal.scope == "app":
@@ -1725,19 +1779,13 @@ def get_chat_activity_detail(
   if not isinstance(blocks, list) or end > len(blocks):
     raise HTTPException(status_code=404, detail="Activity range not found.")
 
+  redundant_tool_indexes = redundant_interaction_tool_indexes(blocks)
   selected = [
     (raw_index, block)
     for raw_index, block in enumerate(blocks[start:end], start=start)
     if isinstance(block, dict)
     and block.get("type") in {"tool", "thinking"}
-    and not (
-      block.get("type") == "tool"
-      and block.get("tool") in {"AskUserQuestion", "request_user_input"}
-      and any(
-        isinstance(candidate, dict) and candidate.get("type") == "question"
-        for candidate in blocks
-      )
-    )
+    and raw_index not in redundant_tool_indexes
   ]
   detail_message = {
     "role": "assistant",
@@ -2272,21 +2320,24 @@ async def delete_chat(
     bump_run_generation(chat_id)
     chat = db.query(models.Chat).filter(models.Chat.id == chat_id).first()
     if chat:
-      # Deleting a chat is owner intent to stop its future work too. Keep the
-      # wait cancellation atomic with the tombstone so recovery cannot revive
-      # a promise the owner explicitly removed.
-      from app.chat_waits import stage_cancel_waits_for_chat
-      from app.agent_work_claims import stage_release_claims_for_chat
-      stage_cancel_waits_for_chat(db, chat_id)
-      released_claims = stage_release_claims_for_chat(db, chat_id)
-      # A deleted follower no longer owns a Goal that should receive exact-
-      # action notices. Retire its interests with the tombstone so one stale
-      # recipient cannot poison fanout to healthy followers.
-      db.query(models.AgentWorkInterest).filter(
-        models.AgentWorkInterest.chat_id == chat_id,
-      ).delete(synchronize_session=False)
-      chat.deleted_at = now_naive_utc()
-      db.commit()
+      with drawer_pins.serialized_write():
+        # Deleting a chat is owner intent to stop its future work too. Keep the
+        # wait/claim cleanup and tombstone in the same transaction, and begin
+        # that transaction only after the shared pin boundary is owned. A
+        # staged DELETE before this point could hold SQLite's writer lock while
+        # a reorder held this boundary and waited to commit.
+        from app.chat_waits import stage_cancel_waits_for_chat
+        from app.agent_work_claims import stage_release_claims_for_chat
+        stage_cancel_waits_for_chat(db, chat_id)
+        released_claims = stage_release_claims_for_chat(db, chat_id)
+        # A deleted follower no longer owns a Goal that should receive exact-
+        # action notices. Retire its interests with the tombstone so one stale
+        # recipient cannot poison fanout to healthy followers.
+        db.query(models.AgentWorkInterest).filter(
+          models.AgentWorkInterest.chat_id == chat_id,
+        ).delete(synchronize_session=False)
+        chat.deleted_at = now_naive_utc()
+        db.commit()
       # Publish the committed tombstone before best-effort run cleanup. If that
       # cleanup fails after the commit, every live shell must still project the
       # durable deletion rather than retain a stale drawer row.
@@ -2403,8 +2454,9 @@ def recover_chat(
     raise HTTPException(status_code=404, detail="Chat not found or not deleted.")
   if (now_naive_utc() - chat.deleted_at) >= SOFT_DELETE_TTL:
     raise HTTPException(status_code=410, detail="Recovery window has expired.")
-  chat.deleted_at = None
-  db.commit()
+  with drawer_pins.serialized_write():
+    chat.deleted_at = None
+    db.commit()
   # Clear the registry's deleted flag and bump to a generation newer than every
   # pre-delete run, so a resurrected stale run can't reclaim the recovered chat.
   recover_chat_generation(chat_id)

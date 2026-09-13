@@ -126,15 +126,14 @@ stale marker on the shared volume cannot make a rolled-back legacy image look
 capable. Once this succeeds, later Railway rebuilds use the normal managed
 challenge, drain, and receipt protocol.
 
-Ordinary local source remains in `/data/platform` and follows the normal merge
+Ordinary local source remains in `/data/platform` and follows the normal overlay
 reconciliation after boot. Privileged runtime follows the same rule as any
 other served module: the frozen `/app/runtime/served_runtime_launcher.py`
-starts the identity broker from `/data/platform/backend/runtime`, so an edit
-there is activated by the next restart and never blocks a replacement. The
-image keeps its own copy of that module as a floor — if the served copy is
-missing, symlinked, group/world-writable, or does not compile, the image copy
-starts and the decision is recorded in
-`/data/run/protected-runtime.json`.
+validates and starts the identity broker from `/data/platform/backend/runtime`,
+so an edit there is activated by the next restart and never blocks a
+replacement. If that served copy is missing, symlinked,
+group/world-writable, or does not compile, boot selects the complete baked
+platform instead. A served backend never runs beside the image's broker.
 
 Everything else under `backend/runtime` (the restart-ledger supervisor, the
 launcher itself, and any module added there later) stays image-owned and
@@ -143,6 +142,6 @@ the replacement blocks before chat drain. Identity keys and linked state remain
 under persistent `/data/identity-broker`.
 
 The image must therefore contain the launcher before a served broker becomes
-authoritative. An instance whose image predates it keeps starting the broker
-from the image until the next replacement; the classifier reports the broker's
-activation action to match.
+authoritative. The one-time transition from an image that predates the
+launcher is handled by the updater version shipped in that old image; current
+boot has only the single whole-platform source decision described above.
