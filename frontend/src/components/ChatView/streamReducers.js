@@ -348,7 +348,8 @@ export function legacyRestartActivityOwners(blocks, projectionVersion) {
     }
     if (
       block?.type === 'activity'
-      && block.entries?.some(({ item }) => (
+      && Array.isArray(block.entries)
+      && block.entries.some(({ item }) => (
         item?.type === 'tool' && isRestartRequestTool(item.tool)
       ))
     ) {

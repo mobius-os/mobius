@@ -749,6 +749,16 @@ test('a later standalone Restart request prevents decrementing older activity', 
   assert.deepEqual([...legacyRestartActivityOwners(blocks, undefined)], [])
 })
 
+test('malformed legacy activity entries cannot crash Restart pairing', () => {
+  const malformed = { type: 'activity', entries: {} }
+  const blocks = [
+    malformed,
+    { type: 'question', platform_action: { type: 'restart' } },
+  ]
+
+  assert.deepEqual([...legacyRestartActivityOwners(blocks, undefined)], [])
+})
+
 test('a pre-grouped long turn hides only the Restart request entry', () => {
   const bash = { idx: 4, item: { type: 'tool', tool: 'Bash' } }
   const restart = {

@@ -4169,19 +4169,33 @@ class ChatWriterActor:
     chat = _active_chat(db, cmd.chat_id)
     if chat is None:
       raise _PersistFailed("AppendPending: chat not found or deleted")
+    pending = list(chat.pending_messages or [])
+    new_msg = dict(cmd.user_msg)
+    ensure_user_cid(new_msg)
+    incoming_cid = new_msg.get("cid")
+    existing_message = None
+    if incoming_cid is not None:
+      for existing in pending:
+        if cid_of(existing) == incoming_cid:
+          existing_message = existing
+          break
+      if existing_message is None:
+        for existing in list(chat.messages or []):
+          if existing.get("role") == "user" and cid_of(existing) == incoming_cid:
+            existing_message = existing
+            break
+
     feedback_action = None
     if isinstance(cmd, AppendRestartFeedback):
       feedback_action = _apply_platform_restart_feedback(
         db, chat, cmd.answers, cmd.question_id,
+        allow_replay=existing_message is not None,
       )
       applied = True
     else:
       applied = apply_answers_to_last_question(chat, cmd.answers, cmd.question_id)
     if cmd.require_answer_match and not applied:
       raise _PersistFailed("AppendPending: no matching question block")
-    pending = list(chat.pending_messages or [])
-    new_msg = dict(cmd.user_msg)
-    ensure_user_cid(new_msg)
     if cmd.initiated_by_app_id is not None:
       new_msg["_initiated_by_app_id"] = cmd.initiated_by_app_id
     # Idempotent append: `cid` is untrusted client input, and a retried POST
@@ -4195,20 +4209,15 @@ class ChatWriterActor:
     # otherwise server-minted above. A caller that retries without supplying
     # a cid receives a fresh identity (there is no cross-request key to match),
     # while retries carrying the returned cid remain idempotent.
-    incoming_cid = new_msg.get("cid")
-    if incoming_cid is not None:
-      for existing in pending:
-        if cid_of(existing) == incoming_cid:
-          return {
-            "stored": existing, "pending": pending,
-            **({"platform_action": feedback_action} if feedback_action else {}),
-          }
-      for existing in list(chat.messages or []):
-        if existing.get("role") == "user" and cid_of(existing) == incoming_cid:
-          return {
-            "stored": existing, "pending": pending,
-            **({"platform_action": feedback_action} if feedback_action else {}),
-          }
+    if existing_message is not None:
+      # This branch is a read-only idempotent acknowledgement. End the actor's
+      # transaction explicitly instead of leaving a read transaction open for
+      # the shared session lifecycle to clean up.
+      db.rollback()
+      return {
+        "stored": existing_message, "pending": pending, "duplicate": True,
+        **({"platform_action": feedback_action} if feedback_action else {}),
+      }
     _ensure_unique_ts(new_msg, pending + list(chat.messages or []))
     if cmd.front:
       pending.insert(0, new_msg)
@@ -4229,7 +4238,7 @@ class ChatWriterActor:
     if not _commit_or_rollback(db):
       raise _PersistFailed("AppendPending did not persist")
     return {
-      "stored": new_msg, "pending": pending,
+      "stored": new_msg, "pending": pending, "duplicate": False,
       **({"platform_action": feedback_action} if feedback_action else {}),
     }
 
@@ -6246,6 +6255,7 @@ def _cancel_activation_owners(db, chat, *, goal_id: str | None = None) -> int:
 
 def _apply_platform_restart_feedback(
   db, chat, answers: dict | None, question_id: str | None,
+  *, allow_replay: bool = False,
 ) -> dict:
   """Close one exact Restart card and its wait without granting authority.
 
@@ -6291,9 +6301,18 @@ def _apply_platform_restart_feedback(
     )
 
   # A lost acknowledgement may retry the same cid after this exact settlement.
+  # Equal text from another tab is a distinct response, not idempotency.
   if (action.get("status") == "responded" and matched.get("answers") == answers
       and matched.get("selected_options") == {}):
-    return copy.deepcopy(action)
+    if allow_replay:
+      return copy.deepcopy(action)
+    raise RestartCardStateChanged("Restart feedback: card is already settled")
+  if allow_replay:
+    # CID is untrusted client input. An older unrelated row with the same CID
+    # cannot turn a still-open Restart card into a successful duplicate.
+    raise RestartCardActionConflict(
+      "This response identity already belongs to another message. Try again."
+    )
   if matched.get("answers") or chat.pending_question_id != question_id:
     raise RestartCardStateChanged("Restart feedback: card is no longer open")
 

@@ -316,7 +316,7 @@ async def _append_to_pending(
   The append is keyed on an empty run_token: a queued message isn't a
   streaming turn, so it has no snapshot key of its own to fence.
   """
-  return await _submit_pending_message(
+  result = await _submit_pending_message(
     chat, db, AppendPending(
       chat_id=chat.id, run_token="",
       user_msg=_user_message_from_body(chat, body), answers=body.answers,
@@ -324,6 +324,7 @@ async def _append_to_pending(
       front=front, require_answer_match=require_answer_match,
     ),
   )
+  return result["stored"]
 
 
 async def _append_restart_feedback_to_pending(
@@ -354,7 +355,7 @@ async def _submit_pending_message(
   # Reflect the committed state on the request's session so a later
   # `db.refresh(chat)` in this handler sees the actor's write.
   db.expire(chat)
-  return result["stored"]
+  return result
 
 
 def _answer_delivered_response(chat_id: str) -> JSONResponse:
@@ -646,10 +647,32 @@ async def send_message(
       async with chat_queue.get_transition_lock(chat_id):
         async with chat_queue.get_lock(chat_id):
           try:
-            stored = await _append_restart_feedback_to_pending(
+            append_result = await _append_restart_feedback_to_pending(
               chat, body, db, initiated_by_app_id=principal.app_id,
             )
-            started_message = await start_queued_owner_continuation(chat_id, db)
+            stored = append_result["stored"]
+            duplicate = append_result.get("duplicate") is True
+            started_message = None
+            if not duplicate:
+              try:
+                started_message = await start_queued_owner_continuation(chat_id, db)
+              except Exception:
+                # The response is already committed. If admission failed
+                # before promotion, acknowledge the durable queued row rather
+                # than asking the browser to retry a write that succeeded.
+                db.expire(chat)
+                db.refresh(chat)
+                stored_cid = cid_of(stored)
+                still_queued = stored_cid is not None and any(
+                  cid_of(row) == stored_cid
+                  for row in list(chat.pending_messages or [])
+                )
+                if not still_queued:
+                  raise
+                log.warning(
+                  "Restart feedback committed but remains queued chat_id=%s cid=%s",
+                  chat_id, stored_cid,
+                )
             db.expire(chat)
             db.refresh(chat)
             settled = restart_action_block(chat, body.question_id)
@@ -702,10 +725,19 @@ async def send_message(
       elif bc is not None:
         bc.publish(event)
       publish_owner_input_changed(chat_id, None, question_id=None)
-      answer_turn = "new" if started_message is not None else "queued"
+      answer_turn = (
+        "none" if duplicate
+        else "new" if started_message is not None
+        else "queued"
+      )
       return JSONResponse(status_code=202, content={
-        "status": "started" if started_message is not None else "queued",
+        "status": (
+          "duplicate" if duplicate
+          else "started" if started_message is not None
+          else "queued"
+        ),
         "answer_turn": answer_turn,
+        "running": is_chat_running(chat_id),
         "answers": body.answers,
         "selected_options": {},
         "platform_action": settled_action,

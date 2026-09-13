@@ -191,6 +191,174 @@ def test_written_restart_response_atomically_closes_wait_and_queues_feedback():
     assert db.query(models.PlatformRestartExecution).count() == 0
 
 
+def test_written_restart_response_retries_only_the_same_message_identity():
+  qid, _wait_id, _run, _requirement = _install("restart-feedback-identity")
+  answer = {"Restart?": "Please check the rollout first"}
+  original = {
+    "role": "user", "content": answer["Restart?"], "hidden": True,
+    "cid": "restart-feedback-original", "kind": "continuation",
+    "continuation_reason": "question_answer", "ts": 3,
+  }
+
+  first = _submit(AppendRestartFeedback(
+    chat_id="restart-feedback-identity", question_id=qid,
+    answers=answer, user_msg=original,
+  ))
+  retry = _submit(AppendRestartFeedback(
+    chat_id="restart-feedback-identity", question_id=qid,
+    answers=answer, user_msg=original,
+  ))
+
+  assert first["duplicate"] is False
+  assert retry["duplicate"] is True
+  with pytest.raises(chat_writer.RestartCardStateChanged):
+    _submit(AppendRestartFeedback(
+      chat_id="restart-feedback-identity", question_id=qid,
+      answers=answer,
+      user_msg={**original, "cid": "restart-feedback-other-tab", "ts": 4},
+    ))
+
+  with SessionLocal() as db:
+    chat = db.get(models.Chat, "restart-feedback-identity")
+    assert [row["cid"] for row in chat.pending_messages] == [
+      "restart-feedback-original",
+    ]
+
+
+def test_existing_unrelated_cid_cannot_false_acknowledge_an_open_restart_card():
+  qid, wait_id, _run, _requirement = _install("restart-feedback-cid-collision")
+  collision = {
+    "role": "user", "content": "Older unrelated message",
+    "cid": "restart-feedback-collision", "ts": 1,
+  }
+  with SessionLocal() as db:
+    chat = db.get(models.Chat, "restart-feedback-cid-collision")
+    chat.messages = [collision, *chat.messages]
+    db.commit()
+
+  with pytest.raises(chat_writer.RestartCardActionConflict):
+    _submit(AppendRestartFeedback(
+      chat_id="restart-feedback-cid-collision", question_id=qid,
+      answers={"Restart?": "Please check the rollout first"},
+      user_msg={
+        "role": "user", "content": "Please check the rollout first",
+        "hidden": True, "cid": collision["cid"], "kind": "continuation",
+        "continuation_reason": "question_answer", "ts": 3,
+      },
+    ))
+
+  with SessionLocal() as db:
+    chat = db.get(models.Chat, "restart-feedback-cid-collision")
+    wait = db.get(models.ChatWait, wait_id)
+    card = chat.messages[-1]["blocks"][0]
+    assert wait.status == "armed"
+    assert chat.pending_question_id == qid
+    assert not card.get("answers")
+    assert chat.pending_messages == []
+
+
+def test_promoted_written_restart_retry_is_acknowledged_without_a_new_turn(
+  client, auth,
+):
+  qid, _wait_id, _run, _requirement = _install("restart-feedback-promoted")
+  answer = {"Restart?": "Please check the rollout first"}
+  original = {
+    "role": "user", "content": answer["Restart?"], "hidden": True,
+    "cid": "restart-feedback-promoted-cid", "kind": "continuation",
+    "continuation_reason": "question_answer", "ts": 3,
+  }
+  _submit(AppendRestartFeedback(
+    chat_id="restart-feedback-promoted", question_id=qid,
+    answers=answer, user_msg=original,
+  ))
+  with SessionLocal() as db:
+    chat = db.get(models.Chat, "restart-feedback-promoted")
+    chat.pending_messages = []
+    chat.messages = [*chat.messages, original]
+    db.commit()
+
+  response = client.post(
+    "/api/chats/restart-feedback-promoted/messages", headers=auth, json={
+      "content": answer["Restart?"], "hidden": True,
+      "answers": answer, "question_id": qid,
+      "selected_options": {}, "cid": original["cid"],
+    },
+  )
+
+  assert response.status_code == 202, response.text
+  assert response.json()["status"] == "duplicate"
+  assert response.json()["answer_turn"] == "none"
+  with SessionLocal() as db:
+    chat = db.get(models.Chat, "restart-feedback-promoted")
+    assert chat.pending_messages == []
+    assert [row.get("cid") for row in chat.messages].count(original["cid"]) == 1
+
+
+def test_queued_written_restart_retry_is_acknowledged_while_turn_is_running(
+  client, auth, monkeypatch,
+):
+  qid, _wait_id, _run, _requirement = _install("restart-feedback-running")
+  answer = {"Restart?": "Please check the rollout first"}
+  body = {
+    "content": answer["Restart?"], "hidden": True,
+    "answers": answer, "question_id": qid,
+    "selected_options": {}, "cid": "restart-feedback-running-cid",
+  }
+  monkeypatch.setattr(chats_stream, "is_chat_running", lambda _chat_id: True)
+
+  first = client.post(
+    "/api/chats/restart-feedback-running/messages", headers=auth, json=body,
+  )
+  retry = client.post(
+    "/api/chats/restart-feedback-running/messages", headers=auth, json=body,
+  )
+
+  assert first.status_code == 202, first.text
+  assert first.json()["status"] == "queued"
+  assert retry.status_code == 202, retry.text
+  assert retry.json()["status"] == "duplicate"
+  assert retry.json()["answer_turn"] == "none"
+  assert retry.json()["running"] is True
+  with SessionLocal() as db:
+    chat = db.get(models.Chat, "restart-feedback-running")
+    assert [row["cid"] for row in chat.pending_messages] == [body["cid"]]
+
+
+def test_same_written_restart_text_from_another_tab_refreshes_stale_card(
+  client, auth, monkeypatch,
+):
+  qid, _wait_id, _run, _requirement = _install("restart-feedback-other-tab")
+  answer = {"Restart?": "Please check the rollout first"}
+  monkeypatch.setattr(chats_stream, "_selected_model_for_chat", lambda _chat: None)
+
+  first = client.post(
+    "/api/chats/restart-feedback-other-tab/messages", headers=auth, json={
+      "content": answer["Restart?"], "hidden": True,
+      "answers": answer, "question_id": qid,
+      "selected_options": {}, "cid": "restart-feedback-first-tab",
+    },
+  )
+
+  assert first.status_code == 202, first.text
+  assert first.json()["status"] == "queued"
+
+  response = client.post(
+    "/api/chats/restart-feedback-other-tab/messages", headers=auth, json={
+      "content": answer["Restart?"], "hidden": True,
+      "answers": answer, "question_id": qid,
+      "selected_options": {}, "cid": "restart-feedback-second-tab",
+    },
+  )
+
+  assert response.status_code == 410, response.text
+  assert response.json()["detail"]["code"] == "question_state_changed"
+  with SessionLocal() as db:
+    chat = db.get(models.Chat, "restart-feedback-other-tab")
+    assert [row["cid"] for row in chat.pending_messages] == [
+      "restart-feedback-first-tab",
+    ]
+
+
 def test_stale_written_restart_response_has_a_state_changed_outcome():
   qid, _wait_id, _run, _requirement = _install("restart-feedback-stale")
   with SessionLocal() as db:
