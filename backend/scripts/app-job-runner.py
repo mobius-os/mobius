@@ -21,6 +21,11 @@ _BACKEND_DIR = _SCRIPT_DIR.parent
 if str(_BACKEND_DIR) not in sys.path:
   sys.path.insert(0, str(_BACKEND_DIR))
 from app import cron_tz
+from app.manifest_contract import (
+  ManifestContractError,
+  job_interpreter,
+  require_executable_job,
+)
 
 
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
@@ -299,6 +304,19 @@ def _job_env(app_token: str) -> dict[str, str]:
   return env
 
 
+def _job_command(job: Path, app_id: int) -> list[str]:
+  """Build the command declared by a job's shebang.
+
+  Job packages own their runtime choice. The platform only validates that
+  declaration and passes the app id; it does not guess an interpreter from a
+  filename, executable bit, or historical Bash convention.
+  """
+  with job.open("rb") as script:
+    interpreter = job_interpreter(script.read(257))
+  require_executable_job(job.stat().st_mode)
+  return [*interpreter, str(job), str(app_id)]
+
+
 def _execute_job(
   app_id: int,
   resolved: Path,
@@ -360,17 +378,11 @@ def _execute_job(
     job_state = DATA_DIR / "apps" / str(app_id) / "job-state"
     job_state.mkdir(parents=True, exist_ok=True)
     child_env["APP_JOB_STATE_DIR"] = str(job_state)
-    # Accepted jobs are executable scripts, not necessarily shell programs
-    # (the App Store's update checker is Python). Honor their reviewed shebang;
-    # retain the Bash fallback for legacy shell jobs without a shebang or
-    # whose executable bit was not preserved by their source package.
-    with runtime_job.open("rb") as script:
-      has_shebang = script.read(2) == b"#!"
-    command = (
-      [str(runtime_job), str(app_id)]
-      if has_shebang and os.access(runtime_job, os.X_OK)
-      else ["bash", str(runtime_job), str(app_id)]
-    )
+    try:
+      command = _job_command(runtime_job, app_id)
+    except (OSError, ManifestContractError) as exc:
+      _log(app_id, f"rejected: invalid job declaration {runtime_job}: {exc}")
+      return 4
     # Uninstall sends TERM to this entire process group. Keep the supervisor
     # alive to retain its lease while a TERM-ignoring child needs the existing
     # KILL fallback; exec resets the child's caught handler to the default.

@@ -7,6 +7,10 @@ const css = readFileSync(
   'utf8',
 )
 const shell = readFileSync(new URL('../Shell.jsx', import.meta.url), 'utf8')
+const shellChatLifecycle = readFileSync(
+  new URL('../useShellChatRunLifecycle.js', import.meta.url),
+  'utf8',
+)
 const app = readFileSync(new URL('../../../App.jsx', import.meta.url), 'utf8')
 const index = readFileSync(new URL('../../../../index.html', import.meta.url), 'utf8')
 const appFrameCache = readFileSync(
@@ -53,6 +57,17 @@ test('the workspace menu avoids an oversized border-and-shadow card', () => {
   assert.match(rule, /border:\s*1px/)
   assert.match(rule, /box-shadow:\s*0 4px 8px/)
   assert.doesNotMatch(rule, /box-shadow:[^;]*(?:1[6-9]|[2-9]\d)px/)
+})
+
+test('the app catalog runs the bounded storage cutover before any app opens', () => {
+  assert.match(shell, /migrateLegacyAppFrameStorage/)
+  assert.match(shell,
+    /const apps = appsQuery\.data \?\? EMPTY_LIST[\s\S]*?useEffect\(\(\) => \{[\s\S]*?for \(const app of apps\) migrateLegacyAppFrameStorage\(app\.id, app\.slug\)[\s\S]*?\}, \[apps\]\)/)
+  const checkpoint = shell.slice(
+    shell.indexOf('const apps = appsQuery.data ?? EMPTY_LIST'),
+    shell.indexOf('const artifactsAppId'),
+  )
+  assert.doesNotMatch(checkpoint, /renderedAppIds/)
 })
 
 test('the workspace tab menu stays close-only, edge-clamped, and keyboard navigable', () => {
@@ -900,7 +915,7 @@ test('chat drawer indicators distinguish owner input, active work, waiting, and 
     'a started run must raise and acknowledge the active-work dot',
   )
   assert.match(
-    shell,
+    shellChatLifecycle,
     /const markStreamingStart = useCallback\(\(chatId\) => \{[\s\S]*?streamingChatIdsRef\.current = next[\s\S]*?setLocalStreamingChatIds/,
     'a send must publish activity before same-task placement decisions run',
   )

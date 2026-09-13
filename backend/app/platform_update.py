@@ -38,10 +38,8 @@ The reconcile is built to be non-destructive above all else:
    catches that and rolls back to the previous served commit rather than
    serving a broken tree.
 
-A pre-overlay history (merge commits below ``main``) is folded into one
-``legacy-overlay`` unit the first time this updater runs on it, using the same
-off-tree net merge and reviewed-change provenance the merge model used, so an
-existing installation converges on the linear shape without a manual rewrite.
+Merge-shaped pre-overlay history is never rewritten automatically. The update
+returns an explicit normalization error and leaves the served tree untouched.
 
 Availability is an EXACT ancestry check, not a sha-string compare: an update is
 available iff the configured target is NOT already an ancestor of local ``main`` — the
@@ -94,6 +92,7 @@ UPGRADE_FLAG = Path("/data/.platform-upgrade-available")
 # Legacy content was a bare restart SHA; current content is a JSON target+paths
 # record that can survive a server restart when host/image work is still due.
 RESTART_NEEDED_FLAG = Path("/data/.platform-restart-needed")
+ACTIVATION_V2_CUTOVER_RECEIPT = Path("/data/.platform-activation-v2")
 # Written by entrypoint.sh before uvicorn starts. These identify the backend
 # tree the current Python process actually imported, which can differ from the
 # on-disk clone after an agent edits /data/platform.
@@ -1007,58 +1006,103 @@ def applied_release_sha(repo: Path = PLATFORM_REPO) -> str:
     raise PlatformUpdateError("applied_release_unavailable")
 
 
-def _read_activation_marker() -> _ActivationMarker | None:
-  """Read the current target+paths marker, including the legacy bare SHA."""
-  try:
-    raw = RESTART_NEEDED_FLAG.read_text(encoding="utf-8").strip()
-  except (FileNotFoundError, OSError):
-    return None
-  if not raw:
-    return None
+def _parse_legacy_activation_marker(raw: str) -> _ActivationMarker | None:
+  """Translate a pre-v2 activation marker during the one-way boot cutover."""
   try:
     parsed = json.loads(raw)
   except json.JSONDecodeError:
-    # Before activation impacts existed this file held only a target SHA.  Its
-    # only meaning was a backend restart, so preserve exactly that remainder.
+    if re.fullmatch(r"[0-9a-fA-F]{40}", raw) is None:
+      return None
     return {
-      "version": 0,
-      "target_sha": raw,
+      "version": 2,
+      "target_sha": raw.lower(),
       "upstream_sha": None,
       "paths": ["backend/app"],
       "image_paths": [],
     }
   if not isinstance(parsed, dict):
     return None
+  if parsed.get("version") not in (None, 1):
+    return None
   target = str(parsed.get("target_sha") or "").strip()
   paths = parsed.get("paths")
-  if not isinstance(paths, list):
+  if re.fullmatch(r"[0-9a-fA-F]{40}", target) is None or not isinstance(paths, list):
     return None
   clean_paths = sorted({str(path).strip() for path in paths if str(path).strip()})
-  if parsed.get("version") == 2:
-    upstream = str(parsed.get("upstream_sha") or "").strip() or None
-    raw_image_paths = parsed.get("image_paths")
-    if not isinstance(raw_image_paths, list):
-      return None
-    image_paths = sorted({
-      str(path).strip() for path in raw_image_paths
-      if str(path).strip() in clean_paths
-    })
-    return {
-      "version": 2,
-      "target_sha": target,
-      "upstream_sha": upstream,
-      "paths": clean_paths,
-      "image_paths": image_paths,
-    }
-  # Schema 1 stored only target+paths, so it cannot prove an official image
-  # contains a pending local runtime change. Fail closed until the next Apply
-  # writes a schema-2 receipt with exact upstream coverage.
   return {
-    "version": 1,
-    "target_sha": target,
+    "version": 2,
+    "target_sha": target.lower(),
     "upstream_sha": None,
     "paths": clean_paths,
     "image_paths": [],
+  }
+
+
+def _normalize_activation_marker() -> None:
+  """Replace the old bare-SHA/v1 shapes before current runtime reads them."""
+  # A selectively restored marker is newer evidence than this derived proof.
+  # Rebuild the receipt only after the marker present on this boot passes the
+  # current parser; never let a stale receipt bypass normalization.
+  ACTIVATION_V2_CUTOVER_RECEIPT.unlink(missing_ok=True)
+  try:
+    raw = RESTART_NEEDED_FLAG.read_text(encoding="utf-8").strip()
+  except FileNotFoundError:
+    _atomic_write_text(ACTIVATION_V2_CUTOVER_RECEIPT, "v2")
+    return
+  if not raw:
+    RESTART_NEEDED_FLAG.unlink(missing_ok=True)
+    _atomic_write_text(ACTIVATION_V2_CUTOVER_RECEIPT, "v2")
+    return
+  if _read_activation_marker() is not None:
+    _atomic_write_text(ACTIVATION_V2_CUTOVER_RECEIPT, "v2")
+    return
+  migrated = _parse_legacy_activation_marker(raw)
+  if migrated is None:
+    return
+  _write_activation_marker(
+    migrated["target_sha"], migrated["paths"],
+    upstream_sha=migrated["upstream_sha"],
+    image_paths=migrated["image_paths"],
+  )
+  if _read_activation_marker() is not None:
+    _atomic_write_text(ACTIVATION_V2_CUTOVER_RECEIPT, "v2")
+
+
+def _read_activation_marker() -> _ActivationMarker | None:
+  """Read the current v2 activation marker; boot owns older normalization."""
+  try:
+    parsed = json.loads(RESTART_NEEDED_FLAG.read_text(encoding="utf-8"))
+  except (FileNotFoundError, OSError, json.JSONDecodeError):
+    return None
+  if not isinstance(parsed, dict) or parsed.get("version") != 2:
+    return None
+  target = str(parsed.get("target_sha") or "").strip()
+  paths = parsed.get("paths")
+  raw_image_paths = parsed.get("image_paths")
+  upstream = parsed.get("upstream_sha")
+  clean_upstream = str(upstream or "").strip()
+  if (
+    re.fullmatch(r"[0-9a-fA-F]{40}", target) is None
+    or not isinstance(paths, list)
+    or not paths
+    or not all(isinstance(path, str) and path.strip() for path in paths)
+    or not isinstance(raw_image_paths, list)
+    or not all(isinstance(path, str) and path.strip() for path in raw_image_paths)
+    or (clean_upstream and re.fullmatch(
+      r"[0-9a-fA-F]{40}", clean_upstream,
+    ) is None)
+  ):
+    return None
+  clean_paths = sorted({path.strip() for path in paths})
+  image_paths = sorted({path.strip() for path in raw_image_paths})
+  if any(path not in clean_paths for path in image_paths):
+    return None
+  return {
+    "version": 2,
+    "target_sha": target.lower(),
+    "upstream_sha": clean_upstream.lower() or None,
+    "paths": clean_paths,
+    "image_paths": image_paths,
   }
 
 
@@ -2045,7 +2089,7 @@ def _finalize_update(
   """Move the served branch to a complete candidate and run every gate.
 
   The one path that turns a candidate — a fast-forward target, a replayed
-  overlay, a folded legacy history, or a resolver-finished replay — into the
+  overlay, or a resolver-finished replay — into the
   served tree: the declared dependency installs, the import probe, provenance
   bookkeeping, the upstream marker, flags, and the frontend rebuild. Every
   caller gets every gate, so a resolver-finished replay can never land with
@@ -2256,15 +2300,21 @@ def _apply_overlay(
   A linear overlay is replayed commit by commit in the candidate worktree,
   dropping every commit already proven upstream. No ref of the served checkout
   moves here; :func:`_finalize_update` activates a complete candidate. A
-  conflict parks the worktree and returns the conflict result; a merge-shaped
-  history is folded into one legacy unit.
+  conflict parks the worktree and returns the conflict result. A merge-shaped
+  history remains untouched until the owner explicitly normalizes it.
   """
   pre = carried.pre
   try:
     commits = app_git.overlay_commits(repo, target, pre)
   except app_git.OverlayNotLinear:
-    return _fold_legacy_overlay(
-      repo, carried, target, ordinary_base, reconciliation,
+    _clear_reconcile_pre()
+    return ReconcileResult.unchanged(
+      "error", pre, target,
+      error=(
+        "local_overlay_not_linear: normalize this installation's local Git "
+        "history into a linear overlay before applying the update"
+      ),
+      reconciliation=reconciliation,
     )
   equivalent = app_git.merge_with_equivalent_changes(repo, pre, target)
   if equivalent is not None:
@@ -2280,97 +2330,6 @@ def _apply_overlay(
       replay, skip,
     )
   return _Candidate(replay.tip, reconciliation, _overlay_summary(commits, replay))
-
-
-def _fold_legacy_overlay(
-  repo: Path,
-  carried: _Carried,
-  target: str,
-  ordinary_base: str,
-  reconciliation: app_git.ReconciliationReceipt,
-) -> ReconcileResult | _Candidate:
-  """Fold a merge-shaped local history into one linear overlay unit.
-
-  The net COMMITTED local tree is merged with the target off-tree ONCE,
-  exactly as the merge model did, but the result is recorded as a single
-  commit on the target instead of a two-parent merge, so the next update sees
-  a linear overlay. Uncommitted edits stay their own transient unit, replayed
-  on top of the fold, so they return to the working tree afterwards instead
-  of being frozen into the legacy commit. Reviewed-change provenance still
-  turns a squash-landed contribution into a clean result; a genuine conflict
-  goes to the existing net-merge resolver whose finalize already writes a
-  single-parent replay.
-  """
-  served = carried.served
-  message = app_git.overlay_message(
-    f"platform: local overlay carried onto {target[:12]}",
-    unit=app_git.OVERLAY_LEGACY_UNIT,
-    disposition="wip",
-    body=(
-      "Folded a merge-shaped local history into one linear overlay unit so "
-      "later updates replay it instead of merging upstream into it."
-    ),
-  )
-  merged = app_git.merge_refs(repo, served, target)
-  tree_oid = merged.merged_tree_oid if merged.status == "clean" else None
-  equivalent = None
-  if tree_oid is None:
-    # Before asking the owner to resolve a content conflict, let the shared
-    # app/platform provenance engine replace Git's historical base with a
-    # semantic base made ONLY from reviewed changes proven to come from this
-    # local history and to have landed in this target history (the squash case).
-    equivalent = app_git.merge_with_equivalent_changes(repo, served, target)
-    if equivalent is not None:
-      reconciliation = equivalent.reconciliation
-      tree_oid = equivalent.merged_tree_oid
-  if tree_oid:
-    folded = _commit_single_parent_tree(
-      repo, parent=target, tree_oid=tree_oid, message=message,
-    )
-    summary = {
-      "legacy": True,
-      "replayed_units": [app_git.OVERLAY_LEGACY_UNIT],
-      "dropped_units": [],
-      "dropped_commits": [],
-    }
-    if not carried.working:
-      return _Candidate(folded, reconciliation, summary)
-    worktree = _overlay_candidate_path(repo)
-    working = app_git.overlay_commits(repo, served, carried.pre)
-    replay = app_git.replay_overlay(
-      repo, commits=working, onto=folded, worktree=worktree,
-    )
-    if replay.status == "conflict":
-      return _park_replay(
-        repo, carried, target, ordinary_base, reconciliation, worktree,
-        replay, set(),
-      )
-    return _Candidate(replay.tip, reconciliation, summary)
-  conflict_paths = (
-    equivalent.conflict_paths
-    if equivalent is not None and equivalent.conflict_paths
-    else merged.conflict_paths
-  )
-  merge_base = equivalent.merge_base_oid if equivalent is not None else None
-  if merge_base:
-    _git("update-ref", _CONFLICT_MERGE_BASE_REF, merge_base, repo=repo)
-  _write_conflict_flag(target, conflict_paths, merge_base=merge_base)
-  ROLLED_BACK_FLAG.unlink(missing_ok=True)
-  _clear_reconcile_pre()
-  pre = carried.pre
-  return ReconcileResult.unchanged(
-    "conflict", pre, target,
-    conflict_paths=conflict_paths,
-    merge_base=merge_base,
-    reconciliation=(
-      equivalent.reconciliation
-      if equivalent is not None
-      else app_git.describe_reconciliation(
-        repo, ordinary_base, target, local=pre,
-        conflict_paths=conflict_paths,
-      )
-    ),
-  )
 
 
 def continue_platform_overlay_update(repo: Path = PLATFORM_REPO) -> str:
@@ -2561,6 +2520,7 @@ def reconcile_clone_sync() -> str:
   try:
     with _reconcile_flock():
       recovery = boot_guard_clean_served_tree(PLATFORM_REPO)
+      _normalize_activation_marker()
       _complete_boot_activation(PLATFORM_REPO)
       source = recorded_upstream_sha(PLATFORM_REPO)
       if source and not _is_ancestor(PLATFORM_REPO, source, "HEAD"):

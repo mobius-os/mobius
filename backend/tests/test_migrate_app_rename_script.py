@@ -1,41 +1,12 @@
 """migrate-app-rename.sh regressions."""
 
 import os
-import sqlite3
 import subprocess
 from pathlib import Path
 
 
 SCRIPT = Path(__file__).parents[1] / "scripts" / "migrate-app-rename.sh"
-
-
-def _init_db(data_dir, rows=()):
-  db_dir = data_dir / "db"
-  db_dir.mkdir(parents=True)
-  db = db_dir / "ultimate.db"
-  con = sqlite3.connect(db)
-  con.execute(
-    "create table apps (id integer primary key, slug text, name text, source_dir text)"
-  )
-  con.executemany(
-    "insert into apps (id, slug, name, source_dir) values (?, ?, ?, ?)",
-    rows,
-  )
-  con.commit()
-  con.close()
-  return db
-
-
-def _rows(data_dir):
-  con = sqlite3.connect(data_dir / "db" / "ultimate.db")
-  rows = {
-    slug: {"id": app_id, "name": name, "source_dir": source_dir}
-    for app_id, slug, name, source_dir in con.execute(
-      "select id, slug, name, source_dir from apps order by id"
-    )
-  }
-  con.close()
-  return rows
+ENTRYPOINT = Path(__file__).parents[1] / "scripts" / "entrypoint.sh"
 
 
 def _run_migration(tmp_path, data_dir, crontab_text=""):
@@ -72,15 +43,8 @@ def _run_migration(tmp_path, data_dir, crontab_text=""):
   return result, state.read_text()
 
 
-def test_old_only_state_migrates_in_place_and_preserves_app_ids(tmp_path):
+def test_old_only_filesystem_state_migrates_without_a_database(tmp_path):
   data_dir = tmp_path / "data"
-  _init_db(
-    data_dir,
-    [
-      (11, "mind", "Mind", str(data_dir / "apps" / "mind")),
-      (12, "dreaming", "Dreaming", str(data_dir / "apps" / "dreaming")),
-    ],
-  )
   for slug in ("mind", "dreaming"):
     app_dir = data_dir / "apps" / slug
     app_dir.mkdir(parents=True)
@@ -102,17 +66,6 @@ def test_old_only_state_migrates_in_place_and_preserves_app_ids(tmp_path):
   result, live_crontab = _run_migration(tmp_path, data_dir, crontab)
 
   assert result.returncode == 0, result.stderr
-  rows = _rows(data_dir)
-  assert rows["memory"] == {
-    "id": 11,
-    "name": "Memory",
-    "source_dir": str(data_dir / "apps" / "memory"),
-  }
-  assert rows["reflection"] == {
-    "id": 12,
-    "name": "Reflection",
-    "source_dir": str(data_dir / "apps" / "reflection"),
-  }
   assert not (data_dir / "apps" / "mind").exists()
   assert not (data_dir / "apps" / "dreaming").exists()
   assert (data_dir / "apps" / "memory" / "index.jsx").read_text() == "mind source"
@@ -127,13 +80,6 @@ def test_old_only_state_migrates_in_place_and_preserves_app_ids(tmp_path):
 
 def test_new_only_state_is_a_clean_noop(tmp_path):
   data_dir = tmp_path / "data"
-  _init_db(
-    data_dir,
-    [
-      (21, "memory", "Memory", str(data_dir / "apps" / "memory")),
-      (22, "reflection", "Reflection", str(data_dir / "apps" / "reflection")),
-    ],
-  )
   for slug in ("memory", "reflection"):
     app_dir = data_dir / "apps" / slug
     app_dir.mkdir(parents=True)
@@ -150,8 +96,6 @@ def test_new_only_state_is_a_clean_noop(tmp_path):
   result, live_crontab = _run_migration(tmp_path, data_dir, crontab)
 
   assert result.returncode == 0, result.stderr
-  rows = _rows(data_dir)
-  assert set(rows) == {"memory", "reflection"}
   assert (data_dir / "apps" / "memory" / "index.jsx").read_text() == "memory source"
   assert (data_dir / "apps" / "reflection" / "index.jsx").read_text() == "reflection source"
   assert (skills / "memory.md").read_text() == "new memory skill"
@@ -160,11 +104,18 @@ def test_new_only_state_is_a_clean_noop(tmp_path):
   assert live_crontab == crontab
 
 
-def test_pre_schema_database_skips_db_step_without_traceback(tmp_path):
+def test_entrypoint_reproves_app_identity_files_on_every_boot():
+  source = ENTRYPOINT.read_text(encoding="utf-8")
+  clear = 'if ! rm -f "$APP_IDENTITY_FILES_RECEIPT"; then'
+  migrate = 'bash /app/scripts/migrate-app-rename.sh'
+
+  assert clear in source
+  assert source.index(clear) < source.index(migrate)
+  assert '[ ! -f "$APP_IDENTITY_FILES_RECEIPT" ]' not in source
+
+
+def test_no_database_is_not_a_reason_to_skip_filesystem_cutover(tmp_path):
   data_dir = tmp_path / "data"
-  db_dir = data_dir / "db"
-  db_dir.mkdir(parents=True)
-  sqlite3.connect(db_dir / "ultimate.db").close()
   old_dir = data_dir / "apps" / "mind"
   old_dir.mkdir(parents=True)
   (old_dir / "index.jsx").write_text("legacy source")
@@ -180,10 +131,6 @@ def test_pre_schema_database_skips_db_step_without_traceback(tmp_path):
 
 def test_half_migrated_source_dir_is_repaired(tmp_path):
   data_dir = tmp_path / "data"
-  _init_db(
-    data_dir,
-    [(31, "reflection", "Reflection", str(data_dir / "apps" / "dreaming"))],
-  )
   old_dir = data_dir / "apps" / "dreaming"
   old_dir.mkdir(parents=True)
   (old_dir / "prompt.md").write_text("prompt")
@@ -191,20 +138,12 @@ def test_half_migrated_source_dir_is_repaired(tmp_path):
   result, _ = _run_migration(tmp_path, data_dir)
 
   assert result.returncode == 0, result.stderr
-  assert _rows(data_dir)["reflection"]["source_dir"] == str(data_dir / "apps" / "reflection")
   assert not old_dir.exists()
   assert (data_dir / "apps" / "reflection" / "prompt.md").read_text() == "prompt"
 
 
-def test_both_old_and_new_rows_are_preserved_with_warning(tmp_path):
+def test_both_old_and_new_source_dirs_are_preserved_with_warning(tmp_path):
   data_dir = tmp_path / "data"
-  _init_db(
-    data_dir,
-    [
-      (41, "mind", "Mind", str(data_dir / "apps" / "mind")),
-      (42, "memory", "Memory", str(data_dir / "apps" / "memory")),
-    ],
-  )
   for slug, text in (("mind", "old"), ("memory", "new")):
     app_dir = data_dir / "apps" / slug
     app_dir.mkdir(parents=True)
@@ -212,19 +151,15 @@ def test_both_old_and_new_rows_are_preserved_with_warning(tmp_path):
 
   result, _ = _run_migration(tmp_path, data_dir)
 
-  assert result.returncode == 0
-  rows = _rows(data_dir)
-  assert rows["mind"]["id"] == 41
-  assert rows["memory"]["id"] == 42
+  assert result.returncode == 1
   assert (data_dir / "apps" / "mind" / "index.jsx").read_text() == "old"
   assert (data_dir / "apps" / "memory" / "index.jsx").read_text() == "new"
-  assert "WARN db conflict for mind -> memory" in result.stdout
   assert "WARN source dir conflict for mind -> memory" in result.stderr
+  assert "incomplete" in result.stderr
 
 
 def test_cron_logs_never_overwrite_existing_new_logs(tmp_path):
   data_dir = tmp_path / "data"
-  _init_db(data_dir)
   logs = data_dir / "cron-logs"
   logs.mkdir(parents=True)
   (logs / "dreaming.log").write_text("old log")
@@ -247,7 +182,6 @@ def test_cron_logs_never_overwrite_existing_new_logs(tmp_path):
 
 def test_skill_conflict_archives_old_file_out_of_root_namespace(tmp_path):
   data_dir = tmp_path / "data"
-  _init_db(data_dir)
   skills = data_dir / "shared" / "skills"
   archive_dir = skills / ".rename-conflicts"
   archive_dir.mkdir(parents=True)

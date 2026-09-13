@@ -23,11 +23,9 @@ test('in-scope shell chat target parses', () => {
     { view: 'chat', chatId: 'abc-123' })
 })
 
-test('legacy /app/:id and /chat/:id still parse (old rows)', () => {
-  assert.deepEqual(parseNotificationTarget('/app/42'),
-    { view: 'canvas', app: '42', intent: null })
-  assert.deepEqual(parseNotificationTarget('/chat/abc123'),
-    { view: 'chat', chatId: 'abc123' })
+test('retired out-of-scope app and chat routes fail closed', () => {
+  assert.equal(parseNotificationTarget('/app/42'), null)
+  assert.equal(parseNotificationTarget('/chat/abc123'), null)
 })
 
 test('a same-origin absolute URL parses like its path form', () => {

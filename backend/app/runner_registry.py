@@ -76,19 +76,6 @@ class RunnerRegistry:
     with self._admission_lock:
       self._admission_closed = True
 
-  def close_admission_if_idle(self) -> bool:
-    """Atomically close admission only when no runner is active or starting."""
-    with self._admission_lock:
-      if self._starting or self._handles:
-        return False
-      self._admission_closed = True
-      return True
-
-  def reopen_admission(self) -> None:
-    """Allow future runner reservations after an idle drain is cancelled."""
-    with self._admission_lock:
-      self._admission_closed = False
-
   def acquire_idle_admission_lease(self) -> object | None:
     """Close admission for one owner only when the registry is fully idle."""
     with self._admission_lock:

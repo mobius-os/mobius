@@ -5,19 +5,15 @@ written tree, runs a `reflect_fn(data_dir)` IN THE MIDDLE, then re-scores on the
 mutated tree — the headline capability: "run a test, reflect, measure the
 improvement." A `reflect_fn` takes the memory-tree root and mutates it in place.
 
-Two are provided:
-
-- `pure_consolidation` — a DETERMINISTIC, CLI-free stand-in for what reflection's
-  phase-3 consolidation does to ONE fact: promote a buried durable fact out of a
-  per-chat note that has aged past the recent-`RECENT_CHAT_NOTES` window into a
-  first-class `notes/<slug>.md`, and add a router line in `index.md` pointing at
-  it. After this, a router-traversing or search system can reach the fact that
-  injection alone could not — so `node_recall_after > node_recall_before`. Fully
-  offline; this is what makes the before/after harness unit-testable.
-
-- `live_reflection` — a thin wrapper that shells the REAL
-  `backend/scripts/reflection_runner.py` against the test `DATA_DIR`. LIVE-GATED
-  (`MEMEVAL_LIVE=1`), mirroring `run_live_eval.py`; never runs in unit tests.
+`pure_consolidation` is a DETERMINISTIC, CLI-free stand-in for what reflection's
+phase-3 consolidation does to ONE fact: promote a buried durable fact out of a
+per-chat note that has aged past the recent-`RECENT_CHAT_NOTES` window into a
+first-class `notes/<slug>.md`, and add a router line in `index.md` pointing at
+it. After this, a router-traversing or search system can reach the fact that
+injection alone could not — so `node_recall_after > node_recall_before`. Fully
+offline; this is what makes the before/after harness unit-testable. Live
+Reflection belongs to the Reflection app and is deliberately outside this
+platform evaluation harness.
 
 WHERE THE STAND-IN DIVERGES FROM REAL REFLECTION (the live gap to keep in mind):
 real phase-3 consolidation is an LLM judgement call — it reads the day's chat
@@ -32,9 +28,7 @@ reachability delta; it does not reproduce reflection's selection intelligence.
 """
 from __future__ import annotations
 
-import os
 import re
-import subprocess
 from pathlib import Path
 
 
@@ -73,34 +67,6 @@ def pure_consolidation(
       existing += "\n"
     existing += link + "\n"
   index.write_text(existing, encoding="utf-8")
-
-
-def live_reflection(
-    data_dir: str | Path,
-    *,
-    timeout: int = 7200,
-) -> None:
-  """Shell the REAL `backend/scripts/reflection_runner.py` against `data_dir`.
-
-  LIVE ONLY — refuses to run unless `MEMEVAL_LIVE=1` (mirrors `run_live_eval.py`
-  and `MemorySearchSystem.live`). The reflection runner reads `DATA_DIR` from the
-  env and runs the full nightly pass (interview, consolidate, brief), so this
-  expects a fully-provisioned test `DATA_DIR` (CLI creds, reflection skill,
-  settings). Unit tests use `pure_consolidation` instead.
-  """
-  if os.environ.get("MEMEVAL_LIVE") != "1":
-    raise RuntimeError(
-      "live_reflection requires MEMEVAL_LIVE=1 (it shells the real "
-      "reflection_runner.py). Unit tests must use pure_consolidation instead."
-    )
-  runner = Path(__file__).resolve().parents[1] / "scripts" / "reflection_runner.py"
-  env = dict(os.environ, DATA_DIR=str(data_dir))
-  subprocess.run(
-    ["python3", str(runner)],
-    env=env,
-    timeout=timeout,
-    check=False,
-  )
 
 
 def _slugify(text: str) -> str:

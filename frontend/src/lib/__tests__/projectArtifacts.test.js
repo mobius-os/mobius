@@ -53,8 +53,8 @@ test('artifactStatus and pill map the four states, unknown reads as idle', () =>
   assert.equal(isBuilding({ status: 'ok' }), false)
 })
 
-test('artifactEntryPath: website entry is index.html unless a concrete output is declared', () => {
-  assert.equal(artifactEntryPath({ builder: 'website' }), 'index.html')
+test('artifactEntryPath reads only a concrete declared output', () => {
+  assert.equal(artifactEntryPath({ builder: 'website' }), null)
   assert.equal(
     artifactEntryPath({ builder: 'website', output_rel: 'artifacts/site/output/index.html' }),
     'index.html',
@@ -65,9 +65,9 @@ test('artifactEntryPath: website entry is index.html unless a concrete output is
   )
 })
 
-test('artifactEntryPath: latex resolves the compiled pdf from source or output_rel', () => {
-  assert.equal(artifactEntryPath({ builder: 'latex', source: 'main.tex' }), 'main.pdf')
-  assert.equal(artifactEntryPath({ builder: 'latex', source: 'paper/thesis.tex' }), 'thesis.pdf')
+test('artifactEntryPath does not infer a compiled path from a builder or source', () => {
+  assert.equal(artifactEntryPath({ builder: 'latex', source: 'main.tex' }), null)
+  assert.equal(artifactEntryPath({ builder: 'latex', source: 'paper/thesis.tex' }), null)
   assert.equal(
     artifactEntryPath({ builder: 'latex', source: 'main.tex', output_rel: 'artifacts/x/output/report.pdf' }),
     'report.pdf',
@@ -82,7 +82,7 @@ test('project templates contribute artifact types and win over built-in extensio
   }]
   assert.deepEqual(artifactTypeForFile('design.svg', types), types[0])
   assert.equal(artifactTypeForFile('index.html', types).id, 'owned-web')
-  assert.equal(artifactTypeForFile('paper.tex', types).id, 'latex')
+  assert.equal(artifactTypeForFile('paper.tex', types), null)
   assert.equal(artifactTypeForFile('notes.md', types), null)
 })
 
@@ -97,16 +97,16 @@ test('artifact presentation comes from the provider contract, not builder ids', 
   assert.equal(artifactTypeName(custom), 'Poster')
   assert.equal(artifactPreviewKind(custom), 'image')
   assert.equal(artifactEntryPath(custom), 'render/final.png')
-  assert.equal(artifactTypeName({ builder: 'latex' }), 'PDF')
+  assert.equal(artifactTypeName({ builder: 'latex' }), 'Artifact')
 })
 
-test('HTML-backed formats retain distinct artifact icon identities', () => {
-  assert.equal(artifactVisualKind({ builder: 'document', source: 'brief.md', preview: 'html' }), 'document')
-  assert.equal(artifactVisualKind({ builder: 'spreadsheet', source: 'sheet.csv', preview: 'html' }), 'sheet')
-  assert.equal(artifactVisualKind({ builder: 'mini-app', source: 'index.jsx', preview: 'html' }), 'mini-app')
-  assert.equal(artifactVisualKind({ type_name: 'Visualization', source: 'index.html', preview: 'html' }), 'visualization')
-  assert.equal(artifactVisualKind({ type_name: 'Presentation', source: 'deck.html', preview: 'html' }), 'presentation')
-  assert.equal(artifactVisualKind({ builder: 'website', source: 'index.html', preview: 'html' }), 'html')
+test('artifact icons use only declared transport plus the platform App type', () => {
+  assert.equal(artifactVisualKind({ builder: 'document', source: 'brief.md', preview: 'html' }), 'html')
+  assert.equal(artifactVisualKind({ type_name: 'Presentation', preview: 'html' }), 'html')
+  assert.equal(artifactVisualKind({ preview: 'pdf' }), 'pdf')
+  assert.equal(artifactVisualKind({ preview: 'image' }), 'image')
+  assert.equal(artifactVisualKind({ builder: 'app', preview: 'html' }), 'mini-app')
+  assert.equal(artifactVisualKind({ builder: 'unknown' }), 'artifact')
 })
 
 test('artifactPreviewRevision tracks successful output rather than transient status', () => {

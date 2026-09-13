@@ -645,7 +645,6 @@ export const api = {
       }),
       disconnect: (provider) => apiFetch(`/auth/provider/${encodeURIComponent(provider)}/disconnect`, { method: 'POST' }),
       claude: {
-        status: () => apiFetch('/auth/provider/status'),
         startLogin: () => apiFetch('/auth/provider/login', { method: 'POST' }),
         submitCode: (code) => apiFetch('/auth/provider/code', {
           method: 'POST',
@@ -893,7 +892,6 @@ export const api = {
   projects: {
     list: (options = {}) => apiFetch('/projects', options),
     templates: () => apiFetch('/projects/templates'),
-    legacy: () => apiFetch('/projects/legacy'),
     importSources: () => apiFetch('/projects/import-sources'),
     detail: (projectId) => apiFetch(`/projects/${encodeURIComponent(projectId)}`),
     theme: (projectId, options = {}) => apiFetch(`/projects/${encodeURIComponent(projectId)}/theme`, options),
@@ -905,10 +903,6 @@ export const api = {
       { method: 'POST' },
     ),
     create: (payload) => apiFetch('/projects', {
-      method: 'POST',
-      body: JSON.stringify(payload),
-    }),
-    importLegacy: (payload) => apiFetch('/projects/import-legacy', {
       method: 'POST',
       body: JSON.stringify(payload),
     }),

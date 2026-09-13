@@ -417,8 +417,8 @@ async def resolve_handle_hosts(
     try:
       detail = response.json().get("detail")
     except (ValueError, AttributeError):
-      # The account host may not have rolled out the resolver route yet. Keep
-      # the existing Common directory available during that external rollout;
+      # The account host may not have rolled out the resolver route yet. Let
+      # the calling app use its own discovery data during that external rollout;
       # the new route's explicit 404 below remains authoritative once present.
       return None
     if detail != "No one has claimed that mobius.you handle.":
@@ -446,6 +446,22 @@ async def resolve_handle_hosts(
   ):
     raise HTTPException(502, "The Möbius account service returned an invalid handle result.")
   return hosts
+
+
+@router.get("/handles/{handle}")
+async def read_handle_hosts(
+  handle: str,
+  owner: models.Owner = Depends(get_owner_or_app_with_identity_manage),
+  db: Session = Depends(get_db),
+):
+  """Resolve an account handle for a reviewed app without exposing credentials."""
+  normalized = str(handle or "").strip().lower().lstrip("@")
+  hosts = await resolve_handle_hosts(db, owner.id, normalized)
+  return {
+    "handle": normalized,
+    "linked": hosts is not None,
+    "hosts": hosts or [],
+  }
 
 
 def _linked_since(db: Session, owner_id: int) -> str | None:
@@ -501,6 +517,17 @@ def _managed_payload(payload: dict, owner: models.Owner) -> dict:
   }
 
 
+def _with_member_since(payload: dict, owner: models.Owner) -> dict:
+  """Add the installation owner's stable, public membership date."""
+  return {
+    **payload,
+    "member_since": (
+      owner.created_at.date().isoformat()
+      if owner.created_at is not None else None
+    ),
+  }
+
+
 @router.get("")
 async def read_identity(
   owner: models.Owner = Depends(get_owner_or_app_with_identity_manage),
@@ -517,11 +544,13 @@ async def read_identity(
           account_mode="linked", account_unavailable=True,
         )
         degraded["linked_at"] = _linked_since(db, owner.id)
-        return degraded
+        return _with_member_since(degraded, owner)
       raise
     if linked is None:
-      return local
-    return _merge_local_deployment(linked, _linked_since(db, owner.id))
+      return _with_member_since(local, owner)
+    return _with_member_since(
+      _merge_local_deployment(linked, _linked_since(db, owner.id)), owner,
+    )
   try:
     remote = await _managed_remote("GET")
   except HTTPException as exc:
@@ -537,8 +566,8 @@ async def read_identity(
       "handle": None,
       "avatar_url": None,
     }
-    return degraded
-  return _managed_payload(remote, owner)
+    return _with_member_since(degraded, owner)
+  return _with_member_since(_managed_payload(remote, owner), owner)
 
 
 @router.patch(

@@ -61,20 +61,22 @@ import ArtifactWorkspace from '../Projects/ArtifactWorkspace.jsx'
 import { defaultProjectName } from '../Projects/ProjectTypeIcon.jsx'
 import { buildEventProjectId, isArtifactBuildEvent } from '../../lib/projectArtifacts.js'
 import {
-  appSourceProject,
   appSourceProjectId,
   linkedProjectAppId,
   parseAppSourceProjectId,
 } from '../../lib/appSourceProject.js'
 import { projectSourceAction } from '../../lib/projectSourceAction.js'
 import { immersiveReducer, isImmersiveActive } from '../../lib/immersive.js'
-import { bumpChatRunSignal, chatRunSignal } from '../../lib/chatRunSignal.js'
 import { invalidateChatChangesQueries } from '../ChatView/chatChangesQueries.js'
 import {
   invalidateAllChatActivity,
   invalidateChatActivityForSystemEvent,
 } from '../ChatView/chatActivityQueries.js'
-import { clearAppFrameStorage, clearCachedAppToken } from '../../lib/appFrameStorage.js'
+import {
+  clearAppFrameStorage,
+  clearCachedAppToken,
+  migrateLegacyAppFrameStorage,
+} from '../../lib/appFrameStorage.js'
 import * as tabModel from './tabModel.js'
 import * as paneModel from './paneModel.js'
 import { releaseFocusFromHiddenAppFrame } from './appFrameFocus.js'
@@ -135,7 +137,6 @@ import {
   withChatOwnerInput,
   withChatRename,
   withChatRunState,
-  withoutSettledLocalChatRuns,
 } from './chatListProjection.js'
 import {
   clearComposerDraft,
@@ -157,6 +158,7 @@ import WorkspaceChrome from './WorkspaceChrome.jsx'
 import useWorkspaceDrag from './useWorkspaceDrag.js'
 import useModeController from './useModeController.js'
 import useModeViewTransition, { modeViewTransitionStyle } from './useModeViewTransition.js'
+import useShellChatRunLifecycle from './useShellChatRunLifecycle.js'
 import * as modeMachine from './modeMachine.js'
 import { undoKeyPressed, isEditableTarget } from './workspaceOnboarding.js'
 import PaneChatView from './PaneChatView.jsx'
@@ -694,6 +696,9 @@ export default function Shell({ onInitialVisualReady }) {
     reconcile: reconcileCreatedChats,
   })
   const apps = appsQuery.data ?? EMPTY_LIST
+  useEffect(() => {
+    for (const app of apps) migrateLegacyAppFrameStorage(app.id, app.slug)
+  }, [apps])
   const artifactsAppId = apps.find(app => app.slug === 'pages')?.id ?? null
   const projects = projectsQuery.data ?? EMPTY_LIST
   const projectTemplates = projectTemplatesQuery.data ?? EMPTY_LIST
@@ -1411,16 +1416,12 @@ export default function Shell({ onInitialVisualReady }) {
     for (const a of apps) m.set(String(a.id), a)
     return m
   }, [apps])
-  // Saved Projects always open their own workspace. Only synthetic View source
-  // rows carry `app`, keeping that source-only surface separate from Projects.
   const projectById = useMemo(() => {
-    const m = new Map(projects.map(project => [String(project.id), project]))
-    for (const app of apps) {
-      const source = appSourceProject(app)
-      if (source) m.set(source.id, source)
-    }
-    return m
-  }, [apps, projects])
+    return new Map(projects.map(project => [String(project.id), project]))
+  }, [projects])
+  const sourceAppByWorkspaceId = useMemo(() => new Map(
+    apps.map(app => [appSourceProjectId(app.id), app]),
+  ), [apps])
   const linkedProjectAppIds = useMemo(() => new Set(projects.map(linkedProjectAppId).filter(Boolean)), [projects])
   const projectArtifactByRef = useMemo(() => {
     const map = new Map()
@@ -1461,18 +1462,19 @@ export default function Shell({ onInitialVisualReady }) {
     }
     if (tab.kind === 'project') {
       const project = projectById.get(tab.id)
-      return project?.app ? `${project.app.name} · Source` : project?.name || 'Project'
+      const sourceApp = sourceAppByWorkspaceId.get(tab.id)
+      return sourceApp ? `${sourceApp.name} · Source` : project?.name || 'Project'
     }
     if (tab.kind === 'artifact') {
       // An artifact tab is its own destination: it is named for the artifact,
       // not prefixed with the project that built it.
       const parsed = tabModel.parseArtifactTabId(tab.id)
-      const sourceApp = parsed ? projectById.get(parsed.projectId)?.app : null
+      const sourceApp = parsed ? sourceAppByWorkspaceId.get(parsed.projectId) : null
       if (sourceApp) return `${sourceApp.name} · Source`
       return projectArtifactByRef.get(tab.id)?.name || parsed?.artifactId || 'Artifact'
     }
     return appById.get(tab.id)?.name || 'App'
-  }, [chatById, appById, projectById, projectArtifactByRef, projectChatLookup])
+  }, [chatById, appById, projectById, projectArtifactByRef, projectChatLookup, sourceAppByWorkspaceId])
 
   const renderedProjectIds = useMemo(() => {
     const ids = new Set(
@@ -1516,8 +1518,7 @@ export default function Shell({ onInitialVisualReady }) {
   }
 
   function openAppSource(app) {
-    const source = appSourceProject(app)
-    if (source) openProject(source)
+    if (app?.id != null) openProject({ id: appSourceProjectId(app.id) })
   }
 
   // Open a project artifact in its OWN workspace tab (website iframe / latex
@@ -1526,7 +1527,7 @@ export default function Shell({ onInitialVisualReady }) {
   function openArtifact(project, artifactId) {
     const projectId = typeof project === 'object' ? project?.id : project
     if (projectId == null || artifactId == null) return
-    const sourceApp = projectById.get(String(projectId))?.app
+    const sourceApp = sourceAppByWorkspaceId.get(String(projectId))
     if (sourceApp) {
       openAppSource(sourceApp)
       return
@@ -2136,32 +2137,35 @@ export default function Shell({ onInitialVisualReady }) {
     && !walkthroughQuery.data.completed
 
   // Local streaming ids come from the mounted ChatView immediately at send
-  // time. The computed streamingChatIds below merges those with durable
+  // time. The run-lifecycle owner merges those with durable
   // `running` flags from /api/chats, so drawer dots survive navigation,
   // reloads, and PWA reopen even when the streaming ChatView is unmounted.
   // A fresh reconnect also retires local starts whose finish event was missed;
   // otherwise the optimistic half of this union can outlive server truth.
   // attentionChatIds is separate: it marks a background-finished chat until
   // the user opens it, without pretending the turn is still streaming.
-  const [localStreamingChatIds, setLocalStreamingChatIds] = useState(() => new Set())
-  // Keep the send-time owner synchronous across the reconnect await. A compact
-  // row can still say `running: false` before the accepted send emits its
-  // durable start, so state committed on the next React frame is too late to
-  // decide whether that row may retire the optimistic marker.
-  const localStreamingChatIdsRef = useRef(localStreamingChatIds)
-  const acknowledgedLocalChatRunIdsRef = useRef(new Set())
-  // Monotonic per-chat activity survives a start+finish pair delivered in one
-  // system-stream chunk. A running boolean can end the React batch exactly as
-  // it began (false) and lose the fact that the transcript changed.
-  const [chatRunSignals, setChatRunSignals] = useState(() => new Map())
   const [attentionChatIds, setAttentionChatIds] = useState(() => new Set())
-  const streamingChatIds = useMemo(() => {
-    const next = new Set(localStreamingChatIds)
-    for (const chat of chats) {
-      if (chat.running) next.add(chat.id)
-    }
-    return next
-  }, [localStreamingChatIds, chats])
+  const {
+    chatRunSignalFor,
+    markChatRunActivity,
+    markChatRunFinished,
+    markChatRunReconcile,
+    markStreamingAcknowledged: markStreamingAcknowledgedState,
+    markStreamingEnd,
+    markStreamingStart: markStreamingStartState,
+    reconcileLocalChatRuns,
+    streamingChatIds,
+    streamingChatIdsRef,
+  } = useShellChatRunLifecycle(chats)
+  const clearChatAttention = useCallback((chatId) => {
+    if (!chatId) return
+    setAttentionChatIds(prev => {
+      if (!prev.has(chatId)) return prev
+      const next = new Set(prev)
+      next.delete(chatId)
+      return next
+    })
+  }, [])
   const ownerInputChatIds = useMemo(() => {
     const next = new Set()
     for (const chat of chats) {
@@ -2177,9 +2181,6 @@ export default function Shell({ onInitialVisualReady }) {
     () => failedChatIds(chats, visibleChatIds),
     [chats, visibleChatIds],
   )
-  const streamingChatIdsRef = useRef(streamingChatIds)
-  useEffect(() => { streamingChatIdsRef.current = streamingChatIds }, [streamingChatIds])
-
   const {
     updateAvailable: shellUpdateAvailable,
     markShellUpdateAvailable,
@@ -2203,66 +2204,15 @@ export default function Shell({ onInitialVisualReady }) {
   const markStreamingStart = useCallback((chatId) => {
     if (!chatId) return
     const key = String(chatId)
-    // Publish activity synchronously before React schedules the rendered Set;
-    // new-chat reuse and placement decisions may run in the same task.
-    if (!streamingChatIdsRef.current.has(key)) {
-      const next = new Set(streamingChatIdsRef.current)
-      next.add(key)
-      streamingChatIdsRef.current = next
-    }
-    const previous = localStreamingChatIdsRef.current
-    if (!previous.has(key)) {
-      const next = new Set(previous)
-      next.add(key)
-      localStreamingChatIdsRef.current = next
-      setLocalStreamingChatIds(next)
-    }
-    setAttentionChatIds(prev => {
-      if (!prev.has(key)) return prev
-      const next = new Set(prev)
-      next.delete(key)
-      return next
-    })
-  }, [])
+    markStreamingStartState(key)
+    clearChatAttention(key)
+  }, [clearChatAttention, markStreamingStartState])
   const markStreamingAcknowledged = useCallback((chatId) => {
     if (!chatId) return
     const key = String(chatId)
-    acknowledgedLocalChatRunIdsRef.current.add(key)
-    markStreamingStart(key)
-  }, [markStreamingStart])
-  const markStreamingEnd = useCallback((chatId) => {
-    if (!chatId) return
-    const key = String(chatId)
-    acknowledgedLocalChatRunIdsRef.current.delete(key)
-    const previous = localStreamingChatIdsRef.current
-    if (!previous.has(key)) return
-    const next = new Set(previous)
-    next.delete(key)
-    localStreamingChatIdsRef.current = next
-    setLocalStreamingChatIds(next)
-  }, [])
-
-  const markChatRunActivity = useCallback((chatId) => {
-    setChatRunSignals(prev => bumpChatRunSignal(prev, chatId, 'chat_run_started'))
-  }, [])
-
-  const markChatRunReconcile = useCallback((chatId) => {
-    setChatRunSignals(prev => bumpChatRunSignal(prev, chatId, 'chat_run_reconcile'))
-  }, [])
-
-  const markChatRunFinished = useCallback((chatId) => {
-    setChatRunSignals(prev => bumpChatRunSignal(prev, chatId, 'chat_run_finished'))
-  }, [])
-
-  const clearChatAttention = useCallback((chatId) => {
-    if (!chatId) return
-    setAttentionChatIds(prev => {
-      if (!prev.has(chatId)) return prev
-      const next = new Set(prev)
-      next.delete(chatId)
-      return next
-    })
-  }, [])
+    markStreamingAcknowledgedState(key)
+    clearChatAttention(key)
+  }, [clearChatAttention, markStreamingAcknowledgedState])
 
   // Clear the attention dot for EVERY visible chat pane — membership in the
   // visible set, not equality with one global id (design §2 M13).
@@ -3278,30 +3228,10 @@ export default function Shell({ onInitialVisualReady }) {
     signal?.throwIfAborted()
     const refreshedChats = await fetchFreshChats({ timeoutMs: SYSTEM_RECONNECT_LIST_TIMEOUT_MS, signal })
     signal?.throwIfAborted()
-    const localIds = localStreamingChatIdsRef.current
-    for (const chat of refreshedChats) {
-      const chatId = String(chat.id)
-      if (chat.running && localIds.has(chatId)) {
-        acknowledgedLocalChatRunIdsRef.current.add(chatId)
-      }
-    }
-    const reconciledLocalIds = withoutSettledLocalChatRuns(
-      localIds,
+    const reconciledLocalIds = reconcileLocalChatRuns(
       refreshedChats,
-      {
-        acknowledgedIds: acknowledgedLocalChatRunIdsRef.current,
-        protectedIds: visibleChatIdsRef.current,
-      },
+      visibleChatIdsRef.current,
     )
-    if (reconciledLocalIds !== localIds) {
-      for (const chatId of localIds) {
-        if (!reconciledLocalIds.has(chatId)) {
-          acknowledgedLocalChatRunIdsRef.current.delete(String(chatId))
-        }
-      }
-      localStreamingChatIdsRef.current = reconciledLocalIds
-      setLocalStreamingChatIds(reconciledLocalIds)
-    }
     for (const chat of refreshedChats) {
       const chatId = String(chat.id)
       // The mounted stream owns a local start until it reaches a boundary.
@@ -3318,6 +3248,7 @@ export default function Shell({ onInitialVisualReady }) {
   }, [
     fetchFreshChats,
     markChatRunReconcile,
+    reconcileLocalChatRuns,
     reconcileNotifications,
     reconcileDeletedAppIdentities,
     reconcileDeletedChatIdentities,
@@ -4413,8 +4344,9 @@ export default function Shell({ onInitialVisualReady }) {
       && chatsQuery.isFetchedAfterMount
     if (!liveFetched) return
     // Only bootstrap a starter chat while the chat view is what's
-    // showing. A deep-link to /app/:id (push-notification tap, PWA
-    // launch-at-app) sets activeView='canvas' with activeChatId still
+    // showing. A current /shell/?app=<id-or-slug> deep-link (a
+    // push-notification tap or PWA launch-at-app) sets
+    // activeView='canvas' with activeChatId still
     // null; without the activeView guard this fires newChat(), which
     // flips activeView to 'chat' and buries the deep-linked app behind
     // the empty chat. It only bites a zero-chat instance — a populated
@@ -4964,7 +4896,7 @@ export default function Shell({ onInitialVisualReady }) {
                 paneContentHeight={builderRect ? builderRect.h : null}
                 // Select before the memo boundary. Passing the replacement Map
                 // would rerender every visible chat pane for another chat's run.
-                externalRunSignal={chatRunSignal(chatRunSignals, chatId)}
+                externalRunSignal={chatRunSignalFor(chatId)}
                 // A modal drawer owns focus until its close commits. Keeping
                 // the request pending avoids a focus-trap/restore race while
                 // the already-visible blank closes navigation.
@@ -5086,8 +5018,8 @@ export default function Shell({ onInitialVisualReady }) {
             PaneChatView mount for that chat id. */}
         {renderedProjectIds.map((projectId) => {
           const project = projectById.get(projectId)
-          if (!project) return null
-          const sourceApp = project.app
+          const sourceApp = sourceAppByWorkspaceId.get(projectId)
+          if (!project && !sourceApp) return null
           const key = tabModel.tabKey(tabModel.projectTab(projectId))
           const paned = workspaceChromeActive ? visibleTabRects.get(key) : null
           const fullBleed = !paned && fullBleedKey === key
@@ -5147,7 +5079,7 @@ export default function Shell({ onInitialVisualReady }) {
         {renderedArtifactIds.map((artifactRef) => {
           const parsed = tabModel.parseArtifactTabId(artifactRef)
           if (!parsed) return null
-          const sourceApp = projectById.get(parsed.projectId)?.app
+          const sourceApp = sourceAppByWorkspaceId.get(parsed.projectId)
           const key = tabModel.tabKey(tabModel.makeTab('artifact', artifactRef))
           const paned = workspaceChromeActive ? visibleTabRects.get(key) : null
           const fullBleed = !paned && fullBleedKey === key

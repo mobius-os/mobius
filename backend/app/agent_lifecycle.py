@@ -280,7 +280,7 @@ def reconcile_run_updates(db) -> int:
   snapshot. Repair those historical gaps without rewriting either history;
   the newest appended snapshot becomes the authoritative projection.
   """
-  update = models.AgentLifecycleRunUpdate
+  update = models.ChatRunUpdate
   latest = (
     db.query(
       update.chat_run_id.label("chat_run_id"),

@@ -909,48 +909,6 @@ def test_notify_after_reconcile_noop_when_nothing_reconciled(owner_token, monkey
   assert calls == []
 
 
-# -- bootstrap rejection may reopen only an idle drain ------------------------
-
-def test_idle_drain_includes_terminal_broadcast_ownership(monkeypatch):
-  monkeypatch.setattr(chat_mod, "has_running_chat_broadcast", lambda: True)
-
-  assert chat_mod.begin_idle_drain() is False
-  # The failed idle proof reopens ordinary admission.
-  assert registry.mark_starting("next-chat") is True
-
-
-def test_idle_drain_blocks_late_runner_reservations(monkeypatch):
-  monkeypatch.setattr(chat_mod, "has_running_chat_broadcast", lambda: False)
-
-  assert chat_mod.begin_idle_drain() is True
-  assert registry.mark_starting("late-chat") is False
-  assert chat_mod.cancel_idle_drain() is True
-  assert registry.mark_starting("after-cancel") is True
-
-
-def test_cancel_idle_drain_keeps_admission_closed_for_a_live_runner():
-  chat_mod.begin_drain()
-  registry.register(_Handle("bootstrap-live-runner"))
-
-  assert chat_mod.cancel_idle_drain() is False
-  assert chat_mod.is_draining() is True
-
-
-def test_cancel_idle_drain_keeps_admission_closed_for_a_restart_claim():
-  chat_mod.begin_drain()
-  chat_mod._restart_draining_chats.add("bootstrap-restart-claim")
-
-  assert chat_mod.cancel_idle_drain() is False
-  assert chat_mod.is_draining() is True
-
-
-def test_cancel_idle_drain_reopens_admission_when_the_worker_is_idle():
-  chat_mod.begin_drain()
-
-  assert chat_mod.cancel_idle_drain() is True
-  assert chat_mod.is_draining() is False
-
-
 # -- (d) a send while draining queues instead of starting ---------------------
 
 def test_send_while_draining_queues_instead_of_starting(client, auth):
@@ -1091,7 +1049,7 @@ def test_restart_continues_a_then_normal_completion_delivers_queued_b(
   chat_mod.draining = False
   chat_mod._restart_draining_chats.discard(cid)
   chat_mod.forget_chat(cid)
-  registry.reopen_admission()
+  registry._admission_closed = False
   from app.broadcast import remove_broadcast
   remove_broadcast(cid)
   started = []

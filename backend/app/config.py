@@ -85,7 +85,7 @@ class Settings(BaseSettings):
   build_date: str = "unknown"
 
   # GitHub OAuth app client id (env GITHUB_OAUTH_CLIENT_ID) for the device
-  # flow in routes/github.py. Device flow needs only the client id — no
+  # flow in routes/github_access.py. Device flow needs only the client id — no
   # secret — and a client id is public by design, so the Möbius OAuth
   # app's id ships as the default: every instance gets one-tap GitHub
   # sign-in out of the box. Self-hosters can point at their own OAuth app
