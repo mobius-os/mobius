@@ -218,6 +218,83 @@ async def test_complete_turn_schedules_the_terminal_goal_executor(
 
 
 @pytest.mark.asyncio
+async def test_no_progress_across_two_terminals_stops_at_a_saved_owner_question(
+  db, chat, monkeypatch,
+):
+  """A clean continuation cannot recursively manufacture provider turns."""
+  from app import chat as chat_mod, chat_queue
+  from app.broadcast import create_broadcast, remove_broadcast
+  from app.chat_event_sink import ChatEventSink
+  from app.memory_recall import EMPTY_RECALL_BINDING
+
+  _add_goal_run(db, chat)
+  scheduled = []
+  monkeypatch.setattr(
+    chat_mod, "_schedule_continuation", lambda **kwargs: scheduled.append(kwargs),
+  )
+  monkeypatch.setattr(chat_mod, "_publish_chat_run_finished", lambda *_: None)
+
+  first_broadcast = create_broadcast(chat.id)
+  first_sink = ChatEventSink(
+    first_broadcast,
+    chat.id,
+    run_token="goal-run",
+    recall_binding=EMPTY_RECALL_BINDING,
+  )
+  first_sink.publish({"type": "text", "content": "Work remains."})
+  first = await chat_mod._complete_turn(
+    bc=first_broadcast,
+    sink=first_sink,
+    db=db,
+    chat_id=chat.id,
+    run_gen=None,
+    provider_id="codex",
+    cost_usd=0,
+    close_browser=False,
+  )
+  remove_broadcast(chat.id)
+  assert first is chat_queue.TerminalDisposition.CONTINUATION_PROMOTED
+  assert len(scheduled) == 1
+  assert scheduled[0]["next_user"]["goal_settled_count"] == 0
+
+  continuation_run = scheduled[0]["run_token"]
+  second_broadcast = create_broadcast(chat.id)
+  second_sink = ChatEventSink(
+    second_broadcast,
+    chat.id,
+    run_token=continuation_run,
+    recall_binding=EMPTY_RECALL_BINDING,
+  )
+  second_sink.publish({
+    "type": "text", "content": "No plan task changed status.",
+  })
+  try:
+    second = await chat_mod._complete_turn(
+      bc=second_broadcast,
+      sink=second_sink,
+      db=db,
+      chat_id=chat.id,
+      run_gen=None,
+      provider_id="codex",
+      cost_usd=0,
+      close_browser=False,
+    )
+  finally:
+    remove_broadcast(chat.id)
+
+  assert second is chat_queue.TerminalDisposition.QUESTION_PARKED
+  assert len(scheduled) == 1
+  db.expire_all()
+  saved = db.get(models.Chat, chat.id)
+  assert saved.pending_question_id == f"goal-handoff-{continuation_run}"
+  card = saved.messages[-1]["blocks"][-1]
+  assert card["type"] == "question"
+  assert card["response_mode"] == "continuation"
+  assert "without enough plan progress" in card["questions"][0]["question"]
+  assert db.get(models.ChatRun, continuation_run).status == "interrupted"
+
+
+@pytest.mark.asyncio
 async def test_provider_free_terminal_does_not_loop_an_unfinished_goal(
   db, chat, monkeypatch,
 ):

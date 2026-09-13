@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from dataclasses import dataclass
 from datetime import UTC, datetime
 import json
 import re
@@ -27,10 +28,10 @@ MAX_NOTE = 500
 MAX_RESULT = 1000
 
 
-def goal_plan_is_unfinished(
+def _goal_plan_tasks(
   db: Session, chat_id: str, goal_id: str,
-) -> bool:
-  """Whether one stable Goal owns a plan with unsettled work."""
+) -> list[dict[str, Any]] | None:
+  """Return one stable Goal's task snapshot, if it owns a plan."""
   owner = (
     db.query(models.ChatRun.goal_plan_json)
     .filter(
@@ -47,8 +48,16 @@ def goal_plan_is_unfinished(
   try:
     plan = json.loads(raw) if isinstance(raw, str) else raw
   except (TypeError, json.JSONDecodeError):
-    return False
+    return None
   tasks = (plan or {}).get("tasks") if isinstance(plan, dict) else None
+  return tasks if isinstance(tasks, list) and tasks else None
+
+
+def goal_plan_is_unfinished(
+  db: Session, chat_id: str, goal_id: str,
+) -> bool:
+  """Whether one stable Goal owns a plan with unsettled work."""
+  tasks = _goal_plan_tasks(db, chat_id, goal_id)
   return bool(tasks) and any(
     isinstance(task, dict)
     and task.get("status") not in SETTLED_TASK_STATUSES
@@ -615,15 +624,29 @@ def goal_handoff_owner_kind(
   return None
 
 
-def goal_requiring_terminal_continuation(
+@dataclass(frozen=True)
+class GoalTerminalHandoff:
+  """An ownerless unfinished Goal and its bounded automatic next move."""
+
+  goal_id: str
+  automatic_allowed: bool
+  settled_count: int
+
+
+def goal_terminal_handoff(
   db: Session, chat_id: str, ending_run_token: str,
-) -> str | None:
-  """Return the unfinished Goal whose clean terminal has no next owner.
+) -> GoalTerminalHandoff | None:
+  """Describe an unfinished Goal whose clean terminal has no next owner.
 
   The physical provider turn is still ``running`` while the writer performs
   this check. It is deliberately not an owner of its own future: only a saved
   question, durable monitor/helper, or queued exact continuation may let it
   close without creating the next executor.
+
+  Each generated continuation records the settled-task frontier. Another is
+  allowed only after that frontier advances. Otherwise the terminal path must
+  save an owner question instead of starting an unbounded chain of clean,
+  no-progress turns.
   """
   if not ending_run_token:
     return None
@@ -634,15 +657,50 @@ def goal_requiring_terminal_continuation(
     models.ChatRun.goal_objective.isnot(None),
     models.ChatRun.goal_id.isnot(None),
   ).first()
+  if run is None:
+    return None
+  tasks = _goal_plan_tasks(db, chat_id, run.goal_id)
   if (
-    run is None
-    or not goal_plan_is_unfinished(db, chat_id, run.goal_id)
+    not tasks
+    or not any(
+      isinstance(task, dict)
+      and task.get("status") not in SETTLED_TASK_STATUSES
+      for task in tasks
+    )
     or goal_handoff_owner_kind(
       db, chat_id, run.goal_id, include_queued_execution=True,
     ) is not None
   ):
     return None
-  return run.goal_id
+  messages_row = db.query(models.Chat.messages).filter(
+    models.Chat.id == chat_id,
+  ).first()
+  messages = messages_row[0] if messages_row is not None else []
+  settled = sum(
+    isinstance(task, dict)
+    and task.get("status") in SETTLED_TASK_STATUSES
+    for task in tasks
+  )
+  prior_frontier = None
+  prior_continuation = False
+  for message in reversed(messages or []):
+    if (
+      isinstance(message, dict)
+      and message.get("role") == "user"
+      and message.get("continuation_reason") == "goal_handoff"
+      and message.get("goal_id") == run.goal_id
+    ):
+      prior_continuation = True
+      prior_frontier = message.get("goal_settled_count")
+      break
+  return GoalTerminalHandoff(
+    goal_id=run.goal_id,
+    automatic_allowed=(
+      not prior_continuation
+      or isinstance(prior_frontier, int) and settled > prior_frontier
+    ),
+    settled_count=settled,
+  )
 
 
 def require_quiet_answer_handoff(db: Session, chat, question_id: str) -> None:
