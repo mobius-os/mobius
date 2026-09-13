@@ -7,10 +7,11 @@ import {
   X,
 } from '@openai/apps-sdk-ui/components/Icon'
 import { api } from '../../api/client.js'
-import { appQueries, chatQueries } from '../../hooks/queries.js'
+import { appQueries, chatQueries, projectQueries } from '../../hooks/queries.js'
 import useDialogFocus from '../../hooks/useDialogFocus.js'
 import { requestChatSearchReveal } from '../../lib/chatSearchReveal.js'
 import AppIcon from '../AppIcon.jsx'
+import ProjectIdentityIcon from '../Projects/ProjectIdentityIcon.jsx'
 import {
   SHELL_SHORTCUTS,
   shortcutLabel,
@@ -23,9 +24,11 @@ import {
   chatSearchResultIsCurrent,
   moveSearchSelection,
   pointerPositionChanged,
+  projectTypeLabel,
   resolvedSearchSelection,
   searchCommands,
   searchInstalledApps,
+  searchProjects,
   visibleChatSearchState,
 } from './globalSearchModel.js'
 import {
@@ -113,6 +116,28 @@ function GlobalSearchResult({
     )
   }
 
+  if (row.kind === 'project') {
+    const project = row.value
+    return (
+      <button {...sharedProps}>
+        <ProjectIdentityIcon
+          project={project}
+          size={30}
+          className="global-search__result-icon"
+        />
+        <span className="global-search__result-main">
+          <span className="global-search__result-title">
+            {project.name || 'Untitled project'}
+          </span>
+          <span className="global-search__result-detail">
+            {projectTypeLabel(project.project_type)}
+          </span>
+        </span>
+        <span className="global-search__match-kind">{row.matchArea}</span>
+      </button>
+    )
+  }
+
   const result = row.value
   const lastActiveValue = result.last_active
     || result.activity_at
@@ -192,6 +217,7 @@ export default function GlobalSearch({ commands = [], onClose, onOpenTarget, onR
   const pointerPositionRef = useRef(null)
   const appsQuery = appQueries.list.useQuery()
   const chatsQuery = chatQueries.list.useQuery()
+  const projectsQuery = projectQueries.list.useQuery()
 
   useDialogFocus({
     containerRef: dialogRef,
@@ -261,6 +287,15 @@ export default function GlobalSearch({ commands = [], onClose, onOpenTarget, onR
     ),
     [appsQuery.data, normalizedQuery, recentSelectionRefs],
   )
+  const projectResults = useMemo(
+    () => searchProjects(
+      projectsQuery.data,
+      normalizedQuery,
+      6,
+      recentSelectionRefs,
+    ),
+    [projectsQuery.data, normalizedQuery, recentSelectionRefs],
+  )
   const commandResults = useMemo(
     () => searchCommands(commands, normalizedQuery).filter(command => command.id !== 'search.open'),
     [commands, normalizedQuery],
@@ -291,6 +326,12 @@ export default function GlobalSearch({ commands = [], onClose, onOpenTarget, onR
     onOpenTarget?.({ view: 'canvas', app: String(app.id), intent: null })
   }, [onClose, onOpenTarget])
 
+  const openProject = useCallback((project) => {
+    if (!project?.id) return
+    onClose()
+    onOpenTarget?.({ view: 'project', projectId: String(project.id) })
+  }, [onClose, onOpenTarget])
+
   const openRecentChat = useCallback((chat) => {
     if (!chat?.id) return
     onClose()
@@ -308,6 +349,7 @@ export default function GlobalSearch({ commands = [], onClose, onOpenTarget, onR
       query: normalizedQuery,
       commandResults,
       appResults,
+      projectResults,
       visibleChats,
       recentSelections: recentSelectionRows,
     })
@@ -317,7 +359,7 @@ export default function GlobalSearch({ commands = [], onClose, onOpenTarget, onR
       ...group,
       rows: group.rows.map(row => ({ ...row, index: nextIndex++ })),
     }))
-  }, [appResults, commandResults, normalizedQuery, recentSelectionRows, visibleChats])
+  }, [appResults, commandResults, normalizedQuery, projectResults, recentSelectionRows, visibleChats])
 
   const selectableResults = useMemo(
     () => resultGroups.flatMap(group => group.rows),
@@ -335,9 +377,10 @@ export default function GlobalSearch({ commands = [], onClose, onOpenTarget, onR
   const openResult = useCallback((row) => {
     if (row?.kind === 'command') openCommand(row.value)
     if (row?.kind === 'app') openApp(row.value)
+    if (row?.kind === 'project') openProject(row.value)
     if (row?.kind === 'chat' && row.recent) openRecentChat(row.value)
     if (row?.kind === 'chat' && !row.recent) openChat(row.value)
-  }, [openApp, openChat, openCommand, openRecentChat])
+  }, [openApp, openChat, openCommand, openProject, openRecentChat])
 
   const openSelectedResult = useCallback(() => {
     openResult(selectableResults[activeResultIndex])
@@ -386,6 +429,7 @@ export default function GlobalSearch({ commands = [], onClose, onOpenTarget, onR
     && visibleChats.status === 'ready'
     && visibleChats.results.length === 0
     && appResults.length === 0
+    && projectResults.length === 0
     && commandResults.length === 0
   const loadingRecentSelections = !normalizedQuery
     && resultGroups.length === 0
@@ -412,7 +456,7 @@ export default function GlobalSearch({ commands = [], onClose, onOpenTarget, onR
         <header className="global-search__header">
           <div>
             <h2 id="global-search-title" className="global-search__title">Search &amp; commands</h2>
-            <p className="global-search__subtitle">Workspace actions, chats, and installed apps</p>
+            <p className="global-search__subtitle">Workspace actions, chats, projects, and installed apps</p>
           </div>
           <button
             type="button"
@@ -436,8 +480,8 @@ export default function GlobalSearch({ commands = [], onClose, onOpenTarget, onR
               if (contentRef.current) contentRef.current.scrollTop = 0
             }}
             onKeyDown={handleSearchKeyDown}
-            placeholder="Search commands, chats, apps, and app details"
-            aria-label="Search commands, chats, apps, and app details"
+            placeholder="Search commands, chats, projects, apps, and app details"
+            aria-label="Search commands, chats, projects, apps, and app details"
             role="combobox"
             aria-autocomplete="list"
             aria-controls={resultListIds || undefined}

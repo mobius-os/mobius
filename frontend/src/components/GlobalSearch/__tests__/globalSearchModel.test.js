@@ -7,9 +7,11 @@ import {
   chatSearchResultIsCurrent,
   moveSearchSelection,
   pointerPositionChanged,
+  projectTypeLabel,
   resolvedSearchSelection,
   searchCommands,
   searchInstalledApps,
+  searchProjects,
   visibleChatSearchState,
 } from '../globalSearchModel.js'
 
@@ -100,6 +102,74 @@ test('recency breaks equally relevant app suggestions without beating match qual
     searchInstalledApps(notes, 'notes', 8, recent).map(result => result.app.id),
     [4, 3, 5],
   )
+})
+
+const projects = [
+  {
+    id: 'p-book',
+    name: 'Reservations',
+    project_type: 'app',
+    template: { imported_from: { kind: 'app', slug: 'booking-desk', name: 'Booking Desk' } },
+  },
+  {
+    id: 'p-site',
+    name: 'Landing page',
+    project_type: 'webstudio:website',
+    template: {},
+  },
+  {
+    id: 'p-doc',
+    name: 'Weekly plan',
+    project_type: 'latex:document',
+    template: {},
+  },
+]
+
+test('project search prioritizes names, then details, and respects limits', () => {
+  assert.deepEqual(
+    searchProjects(projects, 'reservations').map(result => [result.project.id, result.matchArea]),
+    [['p-book', 'Name']],
+  )
+  // The linked app's slug is searchable even when it differs from the project name.
+  assert.deepEqual(
+    searchProjects(projects, 'booking-desk').map(result => result.project.id),
+    ['p-book'],
+  )
+  // Matches the human-facing type label ("Website") even though the raw
+  // project_type is "webstudio:website".
+  assert.deepEqual(
+    searchProjects(projects, 'website').map(result => [result.project.id, result.matchArea]),
+    [['p-site', 'Details']],
+  )
+  assert.deepEqual(searchProjects(projects, 'plan').map(result => result.project.id), ['p-doc'])
+  assert.deepEqual(searchProjects(projects, 'nomatch'), [])
+  assert.equal(searchProjects(projects, 'p', 1).length, 1)
+  assert.deepEqual(searchProjects(projects, ''), [])
+})
+
+test('project type labels are humanized for display and search', () => {
+  assert.equal(projectTypeLabel('app'), 'App')
+  assert.equal(projectTypeLabel('webstudio:mini-app'), 'Mini app')
+  assert.equal(projectTypeLabel('latex:document'), 'Document')
+  assert.equal(projectTypeLabel('blank'), 'Project')
+  assert.equal(projectTypeLabel(''), 'Project')
+})
+
+test('projects appear as their own group between apps and chats', () => {
+  assert.deepEqual(buildSearchResultGroups({
+    query: 'rez',
+    appResults: [{ app: apps[0], matchArea: 'Name' }],
+    projectResults: [{ project: projects[0], matchArea: 'Name' }],
+    visibleChats: { status: 'ready', results: [{ id: 'chat-1' }] },
+  }).map(group => group.label), ['Apps', 'Projects', 'Chats'])
+
+  const projectGroup = buildSearchResultGroups({
+    query: 'rez',
+    projectResults: [{ project: projects[0], matchArea: 'Name' }],
+  }).find(group => group.label === 'Projects')
+  assert.deepEqual(projectGroup.rows, [{
+    kind: 'project', value: projects[0], matchArea: 'Name',
+  }])
 })
 
 test('command search covers action copy, keywords, and shortcut labels', () => {

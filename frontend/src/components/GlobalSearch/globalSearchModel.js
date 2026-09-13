@@ -118,10 +118,76 @@ export function searchInstalledApps(apps, query, limit = 8, recentSelections = [
     .map(({ score: _score, ...result }) => result)
 }
 
+export function projectTypeLabel(projectType) {
+  const raw = String(projectType || '').trim()
+  if (!raw || raw === 'blank') return 'Project'
+  // Template keys look like "webstudio:mini-app" or "latex:document"; show the
+  // human-facing part ("Mini app", "Document"). A bare "app" is a linked app.
+  if (raw === 'app') return 'App'
+  const tail = raw.includes(':') ? raw.split(':').pop() : raw
+  const spaced = tail.replace(/[-_]+/g, ' ').trim()
+  return spaced ? spaced.charAt(0).toUpperCase() + spaced.slice(1) : 'Project'
+}
+
+function projectSearchDocument(project) {
+  const imported = project?.template?.imported_from || {}
+  return normalize([
+    project?.name,
+    projectTypeLabel(project?.project_type),
+    project?.project_type,
+    imported?.slug,
+    imported?.name,
+  ].filter(Boolean).join(' '))
+}
+
+export function searchProjects(projects, query, limit = 6, recentSelections = []) {
+  const tokens = queryTokens(query)
+  if (!tokens.length) return []
+  const recentIndex = new Map(
+    recentSelections
+      .filter(selection => selection?.kind === 'project')
+      .map((selection, index) => [String(selection.id), index]),
+  )
+
+  const ranked = []
+  for (const project of Array.isArray(projects) ? projects : []) {
+    const name = normalize(project?.name)
+    const whole = projectSearchDocument(project)
+    if (!includesEvery(whole, tokens)) continue
+
+    let score = 100
+    let matchArea = 'Details'
+    const normalizedQuery = tokens.join(' ')
+    if (name === normalizedQuery) {
+      score = 500
+      matchArea = 'Name'
+    } else if (name.startsWith(normalizedQuery)) {
+      score = 420
+      matchArea = 'Name'
+    } else if (includesEvery(name, tokens)) {
+      score = 340
+      matchArea = 'Name'
+    }
+
+    ranked.push({ project, matchArea, score })
+  }
+
+  return ranked
+    .sort((left, right) => (
+      right.score - left.score
+      || (recentIndex.get(String(left.project?.id)) ?? Infinity)
+        - (recentIndex.get(String(right.project?.id)) ?? Infinity)
+      || String(left.project?.name || '').localeCompare(String(right.project?.name || ''))
+    ))
+    .slice(0, Math.max(0, limit))
+    .map(({ score: _score, ...result }) => result)
+}
+
 export function buildSearchResultGroups({
   query,
   commandResults = [],
   appResults = [],
+  projectResults = [],
   visibleChats = { status: 'idle', results: [] },
   recentSelections = [],
 }) {
@@ -161,6 +227,14 @@ export function buildSearchResultGroups({
       label: 'Apps',
       rows: appResults.map(({ app, matchArea }) => ({
         kind: 'app', value: app, matchArea,
+      })),
+    }] : []),
+    ...(projectResults.length ? [{
+      headingId: 'global-search-projects',
+      listId: 'global-search-project-results',
+      label: 'Projects',
+      rows: projectResults.map(({ project, matchArea }) => ({
+        kind: 'project', value: project, matchArea,
       })),
     }] : []),
     {
