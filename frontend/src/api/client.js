@@ -21,6 +21,11 @@ import {
 
 export const BASE = (import.meta.env?.BASE_URL || '/').replace(/\/$/, '')
 export const SHELL_INSTALL_PASS_TIMEOUT_MS = 5000
+export const PINNED_MUTATION_TIMEOUT_MS = 15_000
+const PINNED_CACHE_INVALIDATION_TIMEOUT_MS = 1_000
+const PIN_INTENT_STORAGE_KEY = 'mobius:pin-intent:v1'
+const PIN_INTENT_LOCK = 'mobius:pin-intent-allocation:v1'
+let fallbackPinIntentState = null
 export const OWNER_TOKEN_CHANGED_EVENT = 'mobius:owner-token-changed'
 
 // The opaque embedded-chat document must never read or receive the owner's
@@ -359,6 +364,7 @@ async function appScopedFetch(path, appToken, options = {}) {
 export async function invalidateShellListCache(kind, {
   cacheStorage = typeof caches === 'undefined' ? null : caches,
   origin = typeof location === 'undefined' ? null : location.origin,
+  timeoutMs,
 } = {}) {
   if (!cacheStorage || !origin) return false
   const pathname = kind === 'chats'
@@ -367,9 +373,19 @@ export async function invalidateShellListCache(kind, {
       ? `${BASE}/api/apps/`
       : null
   if (!pathname) return false
-  try {
+  const invalidate = async () => {
     const cache = await cacheStorage.open(SHELL_DATA_CACHE)
     return await cache.delete(new URL(pathname, origin).href)
+  }
+  try {
+    if (!timeoutMs) return await invalidate()
+    let timer
+    return await Promise.race([
+      invalidate(),
+      new Promise(resolve => {
+        timer = setTimeout(() => resolve(false), timeoutMs)
+      }),
+    ]).finally(() => clearTimeout(timer))
   } catch {
     return false
   }
@@ -385,6 +401,128 @@ async function listAffectingMutation(kind, path, options) {
   return response
 }
 
+async function pinnedMutation(path, {
+  method,
+  body,
+  cacheKinds,
+  label,
+  timeoutMs = PINNED_MUTATION_TIMEOUT_MS,
+}) {
+  const controller = new AbortController()
+  let timer
+  if (timeoutMs) {
+    timer = setTimeout(() => {
+      const error = new Error('Request timed out')
+      error.name = 'TimeoutError'
+      controller.abort(error)
+    }, timeoutMs)
+  }
+  try {
+    const response = await apiFetch(path, {
+      method,
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    })
+    return await jsonOrThrow(response, label)
+  } finally {
+    if (timer) clearTimeout(timer)
+    // A timed-out write is ambiguous: it may have committed after the client
+    // stopped waiting. Retire the stale offline snapshot on both success and
+    // failure so the caller's recovery read can converge on live truth.
+    await Promise.all(cacheKinds.map(kind => invalidateShellListCache(kind, {
+      timeoutMs: PINNED_CACHE_INVALIDATION_TIMEOUT_MS,
+    })))
+  }
+}
+
+async function pinnedResourceMutation(
+  kind,
+  path,
+  pinned,
+  {
+    timeoutMs = PINNED_MUTATION_TIMEOUT_MS,
+    intentWitness = null,
+  } = {},
+) {
+  const witness = intentWitness || await reservePinnedIntent()
+  return pinnedMutation(path, {
+    method: 'PATCH',
+    body: { pinned, ...witness },
+    cacheKinds: kind ? [kind] : [],
+    label: 'Pin update failed',
+    timeoutMs,
+  })
+}
+
+async function pinnedOrderMutation(
+  items,
+  {
+    timeoutMs = PINNED_MUTATION_TIMEOUT_MS,
+    intentWitness = null,
+  } = {},
+) {
+  const witness = intentWitness || await reservePinnedIntent()
+  // The combined order spans both NetworkFirst shell projections. Evict both
+  // even after an ambiguous timeout; in-memory queries retain the current UI
+  // while the next live read establishes the committed order.
+  return pinnedMutation('/chats/pinned-order', {
+    method: 'PUT',
+    body: { items, ...witness },
+    cacheKinds: ['chats', 'apps'],
+    label: 'Pinned reorder failed',
+    timeoutMs,
+  })
+}
+
+function allocatePinIntentWitness(storage) {
+  let state = fallbackPinIntentState
+  try {
+    const stored = JSON.parse(storage.getItem(PIN_INTENT_STORAGE_KEY))
+    if (
+      typeof stored?.client === 'string'
+      && stored.client.length > 0
+      && stored.client.length <= 64
+      && Number.isSafeInteger(stored.version)
+      && stored.version >= 0
+    ) state = stored
+  } catch {}
+  if (!state) {
+    state = {
+      client: globalThis.crypto?.randomUUID?.()
+        || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`,
+      version: 0,
+    }
+  }
+  state = { client: state.client, version: state.version + 1 }
+  fallbackPinIntentState = state
+  try { storage.setItem(PIN_INTENT_STORAGE_KEY, JSON.stringify(state)) } catch {}
+  return {
+    pin_intent_client: state.client,
+    pin_intent_version: state.version,
+  }
+}
+
+export async function reservePinnedIntent() {
+  // Web Locks makes the shared localStorage increment atomic across sibling
+  // tabs. Where that primitive or storage is unavailable, sessionStorage gives
+  // each tab an isolated client identity and the module fallback still orders
+  // the one queue whose timed-out request can overlap its successor.
+  if (
+    typeof navigator !== 'undefined'
+    && navigator.locks?.request
+    && typeof localStorage !== 'undefined'
+  ) {
+    return navigator.locks.request(
+      PIN_INTENT_LOCK,
+      () => allocatePinIntentWitness(localStorage),
+    )
+  }
+  // Do not use sessionStorage here: a newly opened tab may inherit a snapshot
+  // from its opener. One module-local client keeps the fallback honestly
+  // document-scoped instead of creating equal cross-document witnesses.
+  return allocatePinIntentWitness({ getItem: () => null, setItem: () => {} })
+}
+
 /**
  * Decode a JSON API response at the client boundary. Endpoints that expose a
  * data-object contract (rather than the raw Fetch Response contract used by
@@ -395,7 +533,11 @@ export async function jsonOrThrow(response, label = 'Request failed') {
   let body = null
   try {
     body = await response.json()
-  } catch {
+  } catch (error) {
+    // Preserve lifecycle and deadline outcomes from a body stream. Replacing
+    // them with "invalid JSON" would hide why a bounded operation stopped and
+    // prevent its owner from choosing the right recovery path.
+    if (error?.name === 'AbortError' || error?.name === 'TimeoutError') throw error
     if (response.ok) throw new Error(`${label}: invalid JSON response`)
   }
   if (!response.ok) {
@@ -580,6 +722,9 @@ export const api = {
       method: 'PATCH',
       body: JSON.stringify(payload),
     }),
+    setPinned: (chatId, pinned, options) => pinnedResourceMutation(
+      'chats', `/chats/${chatId}`, pinned, options,
+    ),
     markFailureSeen: (chatId, activityVersion) => apiFetch(
       `/chats/${encodeURIComponent(chatId)}/failure-activity/seen`,
       {
@@ -589,10 +734,7 @@ export const api = {
     ),
     // Chats and apps share one pinned section, so its order is one transaction
     // even though the rows live in two resource tables.
-    reorderPinned: (items) => apiFetch('/chats/pinned-order', {
-      method: 'PUT',
-      body: JSON.stringify({ items }),
-    }),
+    reorderPinned: pinnedOrderMutation,
     remove: (chatId) => listAffectingMutation(
       'chats', `/chats/${chatId}`, { method: 'DELETE' },
     ),
@@ -706,6 +848,9 @@ export const api = {
       method: 'PATCH',
       body: JSON.stringify(payload),
     }),
+    setPinned: (appId, pinned, options) => pinnedResourceMutation(
+      'apps', `/apps/${appId}`, pinned, options,
+    ),
     publishHosted: (appId) => listAffectingMutation(
       'apps', `/apps/${appId}/hosted-publication`, { method: 'PUT' },
     ),
@@ -745,7 +890,7 @@ export const api = {
     ),
   },
   projects: {
-    list: () => apiFetch('/projects'),
+    list: (options = {}) => apiFetch('/projects', options),
     templates: () => apiFetch('/projects/templates'),
     importSources: () => apiFetch('/projects/import-sources'),
     detail: (projectId) => apiFetch(`/projects/${encodeURIComponent(projectId)}`),
@@ -799,6 +944,9 @@ export const api = {
       method: 'PATCH',
       body: JSON.stringify(payload),
     }),
+    setPinned: (projectId, pinned, options) => pinnedResourceMutation(
+      null, `/projects/${encodeURIComponent(projectId)}`, pinned, options,
+    ),
     remove: (projectId) => apiFetch(`/projects/${encodeURIComponent(projectId)}`, {
       method: 'DELETE',
     }),

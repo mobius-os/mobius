@@ -151,8 +151,8 @@ function useAppsQuery({ reconcile, enabled = true } = {}) {
   })
 }
 
-async function fetchProjects() {
-  const res = await api.projects.list()
+async function fetchProjects({ signal } = {}) {
+  const res = await api.projects.list({ signal })
   const data = await jsonOrThrow(res, 'projects fetch failed:')
   return Array.isArray(data) ? data : []
 }

@@ -969,7 +969,10 @@ test('live preview reveal keeps the workspace controller distinct from device mo
 })
 
 test('large drawer lists memoize ordering and row actions without changing row ownership', () => {
-  assert.match(drawer, /useMemo\(\(\) => buildDrawerSections\(chats, apps, projects\), \[chats, apps, projects\]\)/)
+  assert.match(
+    drawer,
+    /const projectedDrawerItems = useMemo\(\(\) => projectPendingDrawerPins\([\s\S]*?\), \[chats, apps, projects, pendingPins\]\)[\s\S]*?useMemo\(\(\) => buildDrawerSections\([\s\S]*?\), \[projectedDrawerItems\]\)/,
+  )
   assert.match(drawer, /const filteredApps = useMemo\(/)
   assert.match(drawer, /const rowActions = useMemo\(/)
   assert.match(drawer, /const DrawerRow = memo\(function DrawerRow/)

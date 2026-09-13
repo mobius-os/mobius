@@ -149,6 +149,8 @@ class AppUpdate(BaseModel):
   chat_id: str | None = None
   # Drawer pin toggle. True sets pinned_at = now, False clears it.
   pinned: bool | None = None
+  pin_intent_client: str | None = Field(default=None, min_length=1, max_length=64)
+  pin_intent_version: int | None = Field(default=None, ge=1)
   cross_app_access: ShareLevel | None = None
   share_with_apps: ShareLevel | None = None
   # Owner-approved requested/effective scope. Source apply never grants this
@@ -650,6 +652,8 @@ class ChatPatch(BaseModel):
   title: str | None = Field(default=None, max_length=500)
   # Drawer pin toggle. True sets pinned_at = now, False clears it.
   pinned: bool | None = None
+  pin_intent_client: str | None = Field(default=None, min_length=1, max_length=64)
+  pin_intent_version: int | None = Field(default=None, ge=1)
   # Per-chat automatic continuation after a paid provider limit.
   auto_resume_on_limit: bool | None = None
   # Naming precedence. by_agent marks an AGENT title-sync — it fills the name
