@@ -128,13 +128,27 @@ resolve_frontend_node_modules() {
   return 1
 }
 
-# The installed hook is shared by linked worktrees, including reviews based on
-# an older commit that predates this helper. The main checkout owns the hook's
-# runtime support while the helper still validates the review checkout passed
-# to it.
+# The installed hook and its support files are one copied generation, so linked
+# worktrees cannot accidentally pair a new hook with an old main checkout.
+# Direct/manual invocation falls back to this checkout's scripts directory.
+HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+FRONTEND_DEPS_HELPER="$HOOK_DIR/frontend-deps.sh"
+if [ ! -r "$FRONTEND_DEPS_HELPER" ]; then
+  if [ "$HOOK_DIR" = "$ROOT/scripts/githooks" ]; then
+    FRONTEND_DEPS_HELPER="$ROOT/scripts/frontend-deps.sh"
+  elif changed_match '^frontend/'; then
+    err "installed frontend dependency checker is missing"
+    err "  repair with: scripts/install-hooks.sh"
+    fail_check frontend-deps-support
+  fi
+fi
 # shellcheck source=../../scripts/frontend-deps.sh
-source "$MAIN/scripts/frontend-deps.sh"
-MOBIUS_FRONTEND_STATUS="$(mobius_frontend_deps_status "$ROOT/frontend" 2>/dev/null || true)"
+if [ -r "$FRONTEND_DEPS_HELPER" ]; then
+  source "$FRONTEND_DEPS_HELPER"
+  MOBIUS_FRONTEND_STATUS="$(mobius_frontend_deps_status "$ROOT/frontend" 2>/dev/null || true)"
+else
+  MOBIUS_FRONTEND_STATUS=missing
+fi
 if [ "$MOBIUS_FRONTEND_STATUS" = "lock-mismatch" ] \
     && changed_match '^frontend/'; then
   err "frontend/node_modules does not match this package-lock.json"

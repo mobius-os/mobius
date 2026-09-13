@@ -164,6 +164,8 @@ _HOOK_MAX_BYTES = 1_000_000
 _HOOK_SOURCES = (
   ("scripts/pre-commit.sh", "pre-commit"),
   ("scripts/githooks/pre-push", "pre-push"),
+  ("scripts/frontend-deps.sh", "frontend-deps.sh"),
+  ("scripts/check-frontend-deps.mjs", "check-frontend-deps.mjs"),
 )
 
 # Update-preview payload bounds. A whole-platform deploy can carry a huge diff;

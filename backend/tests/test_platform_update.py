@@ -1285,6 +1285,10 @@ def _make_hook_repo(tmp_path: Path, *, complete: bool = True) -> Path:
   (scripts / "githooks").mkdir(parents=True)
   (scripts / "install-hooks.sh").write_text("#!/bin/sh\nexit 99\n")
   (scripts / "pre-commit.sh").write_text("#!/bin/sh\necho committed-pre-commit\n")
+  (scripts / "frontend-deps.sh").write_text("#!/bin/sh\n# committed helper\n")
+  (scripts / "check-frontend-deps.mjs").write_text(
+    "#!/usr/bin/env node\n// committed helper\n"
+  )
   if complete:
     (scripts / "githooks" / "pre-push").write_text(
       "#!/bin/sh\necho committed-pre-push\n"
@@ -1312,6 +1316,12 @@ def test_hook_refresh_uses_only_committed_allowlisted_sources(tmp_path):
   )
   assert (hooks / "pre-push").read_text() == (
     "#!/bin/sh\necho committed-pre-push\n"
+  )
+  assert (hooks / "frontend-deps.sh").read_text() == (
+    "#!/bin/sh\n# committed helper\n"
+  )
+  assert (hooks / "check-frontend-deps.mjs").read_text() == (
+    "#!/usr/bin/env node\n// committed helper\n"
   )
   assert not (hooks / "post-checkout").exists()
   assert (hooks / "pre-commit").stat().st_mode & 0o777 == 0o755
