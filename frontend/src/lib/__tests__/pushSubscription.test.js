@@ -41,11 +41,17 @@ function fakeContainer({
   delayedUpdate = false,
 } = {}) {
   const registered = []
-  const refreshedWorker = (updating || delayedUpdate) ? fakeInstallingWorker() : null
   const updateListeners = []
   let resolveUpdatePublished = null
   const updatePublished = delayedUpdate
     ? new Promise((resolve) => { resolveUpdatePublished = resolve })
+    : null
+  let resolveActivationWaitStarted = null
+  const activationWaitStarted = (updating || delayedUpdate)
+    ? new Promise((resolve) => { resolveActivationWaitStarted = resolve })
+    : null
+  const refreshedWorker = (updating || delayedUpdate)
+    ? fakeInstallingWorker(() => resolveActivationWaitStarted?.())
     : null
   const pushWorker = {
     scope: `${ORIGIN}${PUSH_SW_SCOPE}`,
@@ -91,6 +97,7 @@ function fakeContainer({
     refreshedWorker,
     updateListeners,
     updatePublished,
+    activationWaitStarted,
     register: async (url, options) => {
       registered.push({ url, ...options })
       return pushWorker
@@ -110,9 +117,12 @@ function fakeContainer({
   }
 }
 
-function fakeInstallingWorker() {
+function fakeInstallingWorker(onActivationWaitStarted) {
   const worker = { state: 'installing', listeners: [] }
-  worker.addEventListener = (_, fn) => worker.listeners.push(fn)
+  worker.addEventListener = (_, fn) => {
+    worker.listeners.push(fn)
+    onActivationWaitStarted?.()
+  }
   worker.removeEventListener = (_, fn) => {
     worker.listeners = worker.listeners.filter(l => l !== fn)
   }
@@ -231,7 +241,7 @@ test('a replacement published after update resolves is still awaited', async () 
 
   const done = subscribeToPush({ container, push })
   await container.updatePublished
-  await new Promise((resolve) => setImmediate(resolve))
+  await container.activationWaitStarted
 
   assert.deepEqual(push.sent, [], 'does not miss the queued worker announcement')
   assert.equal(worker.listeners.length, 1, 'waits for the late-published worker')

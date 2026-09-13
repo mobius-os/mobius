@@ -94,6 +94,7 @@ from app.github_checks import (
   _github_graphql_json,
   _fetch_base_failing_names,
 )
+from app.github_contribution_contract import GITHUB_LOGIN as _GITHUB_LOGIN
 from app.github_contribution_git import (
   _git,
   _gh,
