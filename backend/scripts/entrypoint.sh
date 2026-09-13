@@ -983,9 +983,11 @@ chmod 700 /data/identity-broker
 DATA_DIR=/data python3 -P /app/runtime/served_runtime_launcher.py identity_broker &
 _identity_broker_pid=$!
 unset MOBIUS_IDENTITY_BOOTSTRAP
-# Scrub credentials used by pre-capability prototypes/managed SSO revisions.
-# They are no longer accepted anywhere and must not reach the unprivileged app.
-unset MOBIUS_SSO_CLIENT_SECRET MOBIUS_COMPUTE_INSTANCE_TOKEN
+# The legacy compute token is no longer accepted, but the managed account
+# bridge still authenticates its requests with MOBIUS_SSO_CLIENT_SECRET. Keep
+# that credential available to the unprivileged web app until the bridge has
+# moved behind the root-owned broker.
+unset MOBIUS_COMPUTE_INSTANCE_TOKEN
 _identity_broker_ready=0
 for _broker_wait in $(seq 1 50); do
   if [ -S /run/mobius-identity-broker.sock ]; then

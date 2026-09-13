@@ -19,10 +19,17 @@ import pytest
 
 
 BROKER_PATH = Path(__file__).parents[1] / "runtime" / "identity_broker.py"
+ENTRYPOINT_PATH = Path(__file__).parents[1] / "scripts" / "entrypoint.sh"
 SPEC = importlib.util.spec_from_file_location("mobius_identity_broker", BROKER_PATH)
 assert SPEC and SPEC.loader
 broker_module = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(broker_module)
+
+
+def test_entrypoint_preserves_managed_identity_credential():
+  source = ENTRYPOINT_PATH.read_text()
+  assert "unset MOBIUS_COMPUTE_INSTANCE_TOKEN" in source
+  assert "unset MOBIUS_SSO_CLIENT_SECRET" not in source
 
 
 def test_broker_and_app_consumers_share_the_root_owned_socket():
