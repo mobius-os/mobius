@@ -47,3 +47,14 @@ test('list invalidation is best-effort and rejects unknown projections', async (
     origin: 'https://mobius.test',
   }), false)
 })
+
+test('list invalidation has an optional deadline for ordered mutations', async () => {
+  const neverSettles = {
+    async open() { return new Promise(() => {}) },
+  }
+  assert.equal(await invalidateShellListCache('chats', {
+    cacheStorage: neverSettles,
+    origin: 'https://mobius.test',
+    timeoutMs: 5,
+  }), false)
+})

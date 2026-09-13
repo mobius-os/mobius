@@ -7,7 +7,9 @@ import {
   pinnedEntriesMatchRanks,
   pinnedOrderHandoffStatus,
   projectPinnedEntries,
+  reconcilePinnedOrder,
 } from '../../components/Drawer/pinnedReorder.js'
+import { createPinnedMutationQueue } from '../../components/Drawer/pinnedMutationQueue.js'
 
 // Four uniform 40px rows stacked from top 0.
 function uniformRows() {
@@ -167,4 +169,116 @@ test('a concurrent pin-set change safely supersedes the preview handoff', () => 
     class ObserverStub { observe() {} disconnect() {} },
   )
   assert.deepEqual(settled, ['superseded'])
+})
+
+test('a reorder keeps the chosen relative order after a failed pending pin', () => {
+  assert.deepEqual(
+    reconcilePinnedOrder(
+      ['chat:c', 'chat:new', 'chat:a', 'chat:b'],
+      ['chat:a', 'chat:b', 'chat:c'],
+    ),
+    ['chat:c', 'chat:a', 'chat:b'],
+  )
+})
+
+test('a reorder retains a concurrently restored pin in its prior slot', () => {
+  assert.deepEqual(
+    reconcilePinnedOrder(
+      ['chat:c', 'chat:a'],
+      ['chat:a', 'chat:b', 'chat:c'],
+    ),
+    ['chat:c', 'chat:b', 'chat:a'],
+  )
+})
+
+test('a reorder includes a concurrent external pin exactly once', () => {
+  assert.deepEqual(
+    reconcilePinnedOrder(
+      ['chat:c', 'chat:a', 'chat:b'],
+      ['chat:a', 'app:new', 'chat:b', 'chat:c'],
+    ),
+    ['chat:c', 'app:new', 'chat:a', 'chat:b'],
+  )
+})
+
+test('all pinned mutations settle in owner-intent order', async () => {
+  const queue = createPinnedMutationQueue()
+  const order = []
+  let releasePin
+  const pinGate = new Promise(resolve => { releasePin = resolve })
+
+  queue.enqueue(async () => {
+    await pinGate
+    order.push('pin')
+  })
+  const unpin = queue.enqueue(async () => { order.push('unpin') })
+  await Promise.resolve()
+  assert.deepEqual(order, [])
+  releasePin()
+  await unpin
+  assert.deepEqual(order, ['pin', 'unpin'])
+})
+
+test('a later reorder cannot overtake a queued pin', async () => {
+  const queue = createPinnedMutationQueue()
+  const order = []
+  let releaseFirst
+  const firstGate = new Promise(resolve => { releaseFirst = resolve })
+
+  queue.enqueue(async () => {
+    await firstGate
+    order.push('first')
+  })
+  const reorder = queue.enqueue(async () => { order.push('reorder') })
+  releaseFirst()
+  await reorder
+
+  assert.deepEqual(order, ['first', 'reorder'])
+})
+
+test('a later unpin cannot be resurrected by an older reorder response', async () => {
+  const queue = createPinnedMutationQueue()
+  const order = []
+  let releaseReorder
+  const reorderGate = new Promise(resolve => { releaseReorder = resolve })
+
+  queue.enqueue(async () => {
+    await reorderGate
+    order.push('reorder response')
+  })
+  const unpin = queue.enqueue(async () => { order.push('unpin') })
+  await Promise.resolve()
+  assert.deepEqual(order, [])
+  releaseReorder()
+  await unpin
+
+  assert.deepEqual(order, ['reorder response', 'unpin'])
+})
+
+test('a newer reorder reaches persistence after the older reorder', async () => {
+  const queue = createPinnedMutationQueue()
+  const order = []
+  let releaseFirst
+  const firstGate = new Promise(resolve => { releaseFirst = resolve })
+
+  queue.enqueue(async () => {
+    await firstGate
+    order.push('first reorder')
+  })
+  const second = queue.enqueue(async () => { order.push('second reorder') })
+  await Promise.resolve()
+  assert.deepEqual(order, [])
+  releaseFirst()
+  await second
+
+  assert.deepEqual(order, ['first reorder', 'second reorder'])
+})
+
+test('a failed or timed-out mutation cannot poison the queue', async () => {
+  const queue = createPinnedMutationQueue()
+  const failed = queue.enqueue(async () => { throw new Error('timeout') })
+  const next = queue.enqueue(async () => 'unpinned')
+
+  await assert.rejects(failed, /timeout/)
+  assert.equal(await next, 'unpinned')
 })
