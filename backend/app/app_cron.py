@@ -1,6 +1,8 @@
 """Shared cron declaration and parsing primitives for installed apps."""
 
 import os
+import re
+import shlex
 import subprocess
 from pathlib import Path
 
@@ -147,25 +149,77 @@ def write_crontab(text: str) -> bool:
   return result.returncode == 0
 
 
-def crontab_command_path(line: str) -> str:
-  """Return the app executable path from one cron line, or an empty string."""
+def _crontab_command_tokens(line: str) -> list[str]:
+  """Return shell tokens for a cron command, excluding its schedule."""
   stripped = line.strip()
   if not stripped or stripped.startswith("#"):
-    return ""
+    return []
   first = stripped.split(None, 1)[0]
   if first.startswith("@"):
     command = (stripped.split(None, 1) + [""])[1]
   elif "=" in first:
-    return ""
+    return []
   else:
     parts = stripped.split(None, 5)
     command = parts[5] if len(parts) == 6 else ""
-  tokens = command.split()
-  while tokens and "=" in tokens[0] and not tokens[0].startswith("/"):
-    tokens.pop(0)
+  try:
+    # Cron executes through a shell: an unquoted # starts a comment, while a
+    # quoted # remains part of the argument it belongs to.
+    return shlex.split(command, comments=True, posix=True)
+  except ValueError:
+    return []
+
+
+_SHELL_ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+_PYTHON_EXECUTABLE = re.compile(r"^python(?:3(?:\.\d+)*)?$")
+
+
+def _supervised_job_path(tokens: list[str]) -> str | None:
+  """Return JOB only for the app-job runner's complete supported CLI."""
+  index = 0
+  while index < len(tokens) and _SHELL_ASSIGNMENT.match(tokens[index]):
+    index += 1
+  if index < len(tokens) and Path(tokens[index]).name == "env":
+    index += 1
+    while index < len(tokens) and _SHELL_ASSIGNMENT.match(tokens[index]):
+      index += 1
+  if (
+    index < len(tokens)
+    and _PYTHON_EXECUTABLE.fullmatch(Path(tokens[index]).name)
+  ):
+    index += 1
+  if (
+    index >= len(tokens)
+    or Path(tokens[index]).name != "app-job-runner.py"
+  ):
+    return None
+  argv = tokens[index + 1:]
+  if argv[:1] == ["--wait-for-ready"]:
+    argv = argv[1:]
+  if argv[:1] == ["--scheduled"]:
+    argv = argv[1:]
+  if argv[:1] == ["--wall-clock"]:
+    if len(argv) < 3:
+      return None
+    argv = argv[3:]
+  if len(argv) != 2 or not argv[0].isdigit():
+    return None
+  return argv[1]
+
+
+def is_supervised_crontab_entry(line: str) -> bool:
+  """Whether cron actually invokes the platform app-job runner."""
+  return _supervised_job_path(_crontab_command_tokens(line)) is not None
+
+
+def crontab_command_path(line: str) -> str:
+  """Return the app executable path from one cron line, or an empty string."""
+  tokens = _crontab_command_tokens(line)
   if not tokens:
     return ""
-  for index, token in enumerate(tokens):
-    if token.endswith("/app-job-runner.py") and len(tokens) > index + 2:
-      return tokens[-1]
-  return tokens[0]
+  supervised_job = _supervised_job_path(tokens)
+  if supervised_job is not None:
+    return supervised_job
+  while tokens and _SHELL_ASSIGNMENT.match(tokens[0]):
+    tokens.pop(0)
+  return tokens[0] if tokens else ""
