@@ -2993,29 +2993,49 @@ async def test_frontend_build_admission_deferral_is_retryable(
   assert rollback["error"].startswith("frontend_build_deferred")
 
 
-def test_owner_update_waits_for_build_admission(monkeypatch, clone_env):
-  import app.frontend_watcher as frontend_watcher
+@pytest.mark.asyncio
+async def test_owner_update_waits_before_activating_frontend_source(
+  monkeypatch, clone_env,
+):
+  from app.build_admission import ViteBuildDeferred
 
-  _, platform = clone_env
-  calls = []
+  origin, platform = clone_env
+  before = _served_sha(platform)
+  target = _advance_origin(
+    origin,
+    edits={"frontend/src/App.jsx": "export default 'safe candidate'\n"},
+  )
+  pu._fetch(platform)
+  preview = pu.platform_update_preview(platform)
+
+  def defer(_timeout):
+    raise ViteBuildDeferred("memory pressure stayed constrained")
+
+  monkeypatch.setattr(pu, "wait_for_vite_build_admission", defer)
   monkeypatch.setattr(
-    pu, "wait_for_vite_build_admission",
-    lambda timeout: calls.append(("wait", timeout)),
+    pu, "_activate_candidate",
+    lambda *_args, **_kwargs: pytest.fail("source moved before admission"),
   )
-  monkeypatch.setattr(
-    frontend_watcher, "rebuild_frontend_now",
-    lambda reason: calls.append(("build", reason)),
-  )
+  pu.CONFLICT_FLAG.write_text("stale candidate marker")
 
-  pu._rebuild_frontend(
-    platform,
-    pu.ReconcileResult("updated", "a" * 40, "b" * 40, "b" * 40),
-  )
+  with pytest.raises(pu.PlatformUpdateError, match="vite_build_deferred"):
+    await pu.apply_platform_update(
+      SimpleNamespace(),
+      plan_id=preview["plan_id"],
+      current_sha=preview["current_sha"],
+      target_sha=preview["target_sha"],
+      repo=platform,
+    )
 
-  assert calls == [
-    ("wait", pu._APPLY_BUILD_ADMISSION_WAIT_SECS),
-    ("build", "platform update aaaaaaaa->bbbbbbbb"),
-  ]
+  assert _served_sha(platform) == before
+  assert not (platform / "frontend/src/App.jsx").exists()
+  assert not pu.ROLLED_BACK_FLAG.exists()
+  assert not pu.CONFLICT_FLAG.exists()
+  assert pu.recorded_upstream_sha(platform) != target
+  progress = pu.platform_update_progress()
+  assert progress["phase"] == pu.PlatformUpdatePhase.POSTPONED.value
+  assert progress["active"] is False
+  assert progress["error"] == pu.VITE_BUILD_DEFERRED_MESSAGE
 
 
 def test_boot_policy_ignores_durable_update_progress_from_outer_data_repo():

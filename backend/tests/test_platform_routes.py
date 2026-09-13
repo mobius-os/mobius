@@ -98,6 +98,31 @@ def test_apply_forwards_exact_reviewed_plan(client, auth, monkeypatch):
   assert res.json()["upstream_commit"] == body["target_sha"]
 
 
+def test_apply_reports_resource_deferral_as_untouched_postponement(
+  client, auth, monkeypatch,
+):
+  from app.platform_update import PlatformUpdateError
+
+  async def defer(*_args, **_kwargs):
+    raise PlatformUpdateError("vite_build_deferred")
+
+  monkeypatch.setattr(
+    "app.routes.platform.platform_update.apply_platform_update", defer,
+  )
+  response = client.post("/api/platform/apply", headers=auth, json={
+    "plan_id": "a" * 64,
+    "current_sha": "1" * 40,
+    "target_sha": "2" * 40,
+  })
+
+  assert response.status_code == 409
+  assert response.json()["detail"] == {
+    "code": "vite_build_deferred",
+    "message": "The update was postponed because this instance is busy. "
+    "Nothing changed; try again when other work finishes.",
+  }
+
+
 def test_reviewed_rebuild_forwards_exact_sha_and_digest(
   client, auth, monkeypatch,
 ):
