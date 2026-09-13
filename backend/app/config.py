@@ -100,14 +100,12 @@ class Settings(BaseSettings):
   # is sent, so it adds no user-facing latency. No chat agent writes these files.
   ensure_chat_note: bool = True
 
-  # Managed deployments receive this complete triplet from their provisioning
-  # layer. When absent, Möbius is an ordinary self-hosted installation and
-  # keeps the local username/password setup flow. Partial configuration is a
-  # startup error: silently falling back to first-owner setup would reopen the
-  # ownership race managed sign-in exists to close.
+  # The unprivileged app receives only managed deployment identity. Its
+  # credential stays in the root-owned identity broker. When this pair is
+  # absent, Möbius is an ordinary self-hosted installation and keeps the local
+  # username/password setup flow.
   mobius_sso_issuer: str = ""
   mobius_sso_instance_id: str = ""
-  mobius_sso_client_secret: str = ""
   # Authoritative account service used by ordinary self-hosted installations
   # when their owner links a mobius.you identity. Keep this independent from
   # the managed-deployment SSO issuer so the account service can move hosts
@@ -163,15 +161,10 @@ class Settings(BaseSettings):
         "Set DOMAIN=your-domain.com in .env, or set FRONTEND_ORIGIN "
         "explicitly for HTTP-only deployments."
       )
-    sso_values = (
-      self.mobius_sso_issuer.strip(),
-      self.mobius_sso_instance_id.strip(),
-      self.mobius_sso_client_secret,
-    )
+    sso_values = (self.mobius_sso_issuer.strip(), self.mobius_sso_instance_id.strip())
     if any(sso_values) and not all(sso_values):
       raise ValueError(
-        "MOBIUS_SSO_ISSUER, MOBIUS_SSO_INSTANCE_ID, and "
-        "MOBIUS_SSO_CLIENT_SECRET must be configured together."
+        "MOBIUS_SSO_ISSUER and MOBIUS_SSO_INSTANCE_ID must be configured together."
       )
     if all(sso_values):
       self.mobius_sso_issuer = _validated_origin(
@@ -179,8 +172,6 @@ class Settings(BaseSettings):
       )
       if not re.fullmatch(r"mob_[A-Za-z0-9_-]{3,80}", sso_values[1]):
         raise ValueError("MOBIUS_SSO_INSTANCE_ID is invalid.")
-      if len(sso_values[2]) < 32:
-        raise ValueError("MOBIUS_SSO_CLIENT_SECRET must be at least 32 characters.")
       self.mobius_sso_instance_id = sso_values[1]
     self.mobius_account_origin = _validated_origin(
       self.mobius_account_origin, "MOBIUS_ACCOUNT_ORIGIN",
@@ -215,11 +206,7 @@ class Settings(BaseSettings):
 
   @property
   def mobius_sso_enabled(self) -> bool:
-    return bool(
-      self.mobius_sso_issuer
-      and self.mobius_sso_instance_id
-      and self.mobius_sso_client_secret
-    )
+    return bool(self.mobius_sso_issuer and self.mobius_sso_instance_id)
 
 
 @lru_cache

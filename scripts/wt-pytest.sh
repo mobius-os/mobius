@@ -21,6 +21,23 @@
 # only fills it in when unset.
 set -uo pipefail
 
+# Isolate the database before Python imports anything. A test module outside
+# backend/tests is collected before that directory's conftest.py, so relying on
+# conftest to replace an inherited production DATABASE_URL is too late: a
+# module-level `from app.database import ...` has already bound the engine.
+TEST_RUNTIME_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/mobius-wt-pytest.XXXXXX")" \
+  || { echo "wt-pytest: could not create isolated runtime" >&2; exit 1; }
+cleanup_test_runtime() {
+  case "$TEST_RUNTIME_ROOT" in
+    "${TMPDIR:-/tmp}"/mobius-wt-pytest.*) rm -rf -- "$TEST_RUNTIME_ROOT" ;;
+    *) echo "wt-pytest: refusing unsafe cleanup target: $TEST_RUNTIME_ROOT" >&2 ;;
+  esac
+}
+trap cleanup_test_runtime EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
 ROOT="$(git rev-parse --show-toplevel)" || {
   echo "wt-pytest: not inside a git checkout" >&2; exit 1; }
 # Main checkout = parent of the SHARED git dir; equals $ROOT in the main
@@ -100,14 +117,14 @@ done
 
 if [ -x "$VENV" ]; then
   PYTHON="$VENV"
-elif python3 -c 'import pytest' >/dev/null 2>&1; then
-  # The running image already carries the backend dependencies. The explicit
-  # MOBIUS_TEST_RUNTIME environment below is the safety boundary; using this
-  # interpreter through the wrapper is not the guarded direct-pytest path.
+elif [ -r /app/requirements.lock ] \
+    && python3 -c 'import pytest' >/dev/null 2>&1; then
+  # The running image already carries the backend dependencies. The disposable
+  # database and data paths below are established before this interpreter
+  # starts, so using it through the wrapper remains isolated.
   PYTHON="$(command -v python3)"
   echo "wt-pytest: shared venv absent; using the image's Python test runtime" >&2
-  if [ -r /app/requirements.lock ] \
-      && ! cmp -s "$ROOT/backend/requirements.lock" /app/requirements.lock; then
+  if ! cmp -s "$ROOT/backend/requirements.lock" /app/requirements.lock; then
     echo "wt-pytest: WARNING — checkout requirements.lock differs from the image runtime" >&2
     echo "wt-pytest: results are useful but not dependency-authoritative; use a lock-matched venv or hosted checks" >&2
   fi
@@ -116,8 +133,25 @@ else
   echo "  create the shared venv once with:" >&2
   echo "    python3 -m venv \"$MAIN/backend/.venv\" \\" >&2
   echo "      && \"$MAIN/backend/.venv/bin/pip\" install --require-hashes -r \"$MAIN/backend/requirements.lock\"" >&2
-  exit 1
+  # Reserved for callers that may legitimately defer the full suite to CI.
+  # Pytest itself uses only 0–5, so this cannot hide an internal pytest error.
+  exit 78
 fi
+
+# Full pre-push suites opt into serialization because sibling sessions normally
+# share one venv and running two broad suites together only makes both slower.
+# Focused developer runs remain concurrent. This is best-effort performance
+# protection, never a correctness boundary.
+if [ "${MOBIUS_PYTEST_SERIALIZE:-0}" = "1" ] \
+    && command -v flock >/dev/null 2>&1 \
+    && exec 9>"$MAIN/backend/.venv/.suite.lock" 2>/dev/null; then
+  if ! flock -n 9; then
+    echo "wt-pytest: shared venv busy; waiting up to 15m for the full-suite lock" >&2
+    flock -w 900 9 \
+      || echo "wt-pytest: lock wait timed out; running anyway (may contend)" >&2
+  fi
+fi
+
 cd "$ROOT/backend" || exit 1
 # The worktree's backend/ is on sys.path (cwd); the venv supplies deps; the
 # generated SECRET_KEY satisfies pydantic Settings for tests that build it.
@@ -133,8 +167,12 @@ TEST_ENV=(env \
   GIT_CEILING_DIRECTORIES="$ROOT" \
   DOMAIN=localhost \
   FRONTEND_ORIGIN=http://localhost:5173 \
+  DATABASE_URL="sqlite:///$TEST_RUNTIME_ROOT/test.db" \
+  DATA_DIR="$TEST_RUNTIME_ROOT/data" \
+  MOBIUS_APP_BASE="$TEST_RUNTIME_ROOT/data/apps" \
   RAILWAY_PUBLIC_DOMAIN= \
   MOBIUS_TEST_RUNTIME=1 \
+  MOBIUS_TEST_DATABASE_ISOLATED=1 \
   MOEBIUS_SKIP_BOOTSTRAP=1 \
   API_BASE_URL=http://127.0.0.1:9 \
   PATH="$NODE_BIN_DIR:${PATH:-}" \
@@ -143,8 +181,9 @@ TEST_ENV=(env \
   SECRET_KEY="${SECRET_KEY:-$(python3 -c 'import secrets;print(secrets.token_hex(32))')}")
 
 if [ "${#PYTEST_ARGS[@]}" -eq 0 ]; then
-  exec "${TEST_ENV[@]}" "$PYTHON" -m pytest -p no:cacheprovider
+  "${TEST_ENV[@]}" "$PYTHON" -m pytest -p no:cacheprovider
+  exit $?
 fi
 
-exec "${TEST_ENV[@]}" "$PYTHON" -m pytest -p no:cacheprovider \
+"${TEST_ENV[@]}" "$PYTHON" -m pytest -p no:cacheprovider \
   "${PYTEST_ARGS[@]}"

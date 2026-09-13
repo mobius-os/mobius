@@ -301,63 +301,33 @@ if changed_match '^(backend/scripts/package-static-app\.mjs|scripts/package-stat
   fi
 fi
 
-# 5. Backend pytest — explicit locally, required in PR CI, and only possible
-#    when the shared local venv exists.
+# 5. Backend pytest — explicit locally and required in PR CI.
 if backend_needs_pytest && [ "$RUN_FULL_BACKEND" -eq 0 ]; then
   warn "backend changed, but this push does not update main —"
   warn "  skipping full pytest (required PR CI runs it)."
   warn "  enable locally: MOBIUS_PREPUSH_FULL=1 git push …"
 elif backend_needs_pytest; then
-  VENV="$MAIN/backend/.venv/bin/python"
-  if [ -x "$VENV" ]; then
-    NODE_MODULES="$(resolve_frontend_node_modules || true)"
-    if [ -z "$NODE_MODULES" ]; then
-      err "backend tests need frontend dependencies matching this worktree's lockfile"
-      err "  enable: (cd frontend && npm ci)"
-      fail_check backend-deps
-    else
-      warn "running backend pytest (full suite currently ~10m)…"
-      # Sibling sessions all share this ONE venv (+ its SQLite fixtures),
-      # so two full suites at once thrash CPU/IO and BOTH crawl — a push can look
-      # like it "hangs" for many minutes when it is really contending with another
-      # session's suite. Serialize on an advisory lock at the shared venv so the
-      # suites run back-to-back at full speed instead. Best-effort by design: if
-      # flock is missing or the wait times out we run anyway — the lock is a
-      # courtesy to avoid thrash, never a correctness requirement (--no-verify
-      # still bypasses everything).
-      if command -v flock >/dev/null 2>&1 && exec 9>"$MAIN/backend/.venv/.suite.lock" 2>/dev/null; then
-        if ! flock -n 9; then
-          warn "  shared venv busy (a sibling suite is running) — waiting up to 15m…"
-          flock -w 900 9 || warn "  lock wait timed out — running anyway (may contend)"
-        fi
-      fi
-      # The locked frontend compiler tree + a throwaway SECRET_KEY satisfy the
-      # runtime. The shared venv supplies Python deps; cwd
-      # ($ROOT/backend) supplies the code under test.
-      # GIT_CEILING_DIRECTORIES="$ROOT" stops git's upward repo discovery at the
-      # repo root, so an app-git test (.pm/096) can't walk out of its tmpdir and
-      # mutate THIS repo's .git (flip core.bare / append "Initialize app repo"
-      # commits). Verified: it blocks enclosing-repo discovery from backend/ and
-      # no backend test relies on implicit discovery of the enclosing repo.
-      if (cd backend \
-          && GIT_CEILING_DIRECTORIES="$ROOT" \
-             PATH="$NODE_MODULES/.bin:$PATH" \
-             MOBIUS_APP_NODE_PATH="$NODE_MODULES" \
-             NODE_PATH="$NODE_MODULES${NODE_PATH:+:$NODE_PATH}" \
-             SECRET_KEY="${SECRET_KEY:-$(python3 -c 'import secrets;print(secrets.token_hex(32))')}" \
-             "$VENV" -m pytest -q -p no:cacheprovider >"$PP_TMP/be" 2>&1); then
-        ok "backend pytest passed"
-      else
-        err "backend pytest FAILED:"; tail -n 30 "$PP_TMP/be" | sed 's/^/    /' >&2; fail_check backend-pytest
-      fi
-      # Release the shared-venv lock (fd 9 also closes on hook exit; explicit is tidier).
-      exec 9>&- || true
-    fi
-  else
-    warn "backend changed, no shared venv ($MAIN/backend/.venv) — skipping pytest (CI runs it)."
-    warn "  enable: python3 -m venv \"$MAIN/backend/.venv\" \\"
-    warn "    && \"$MAIN/backend/.venv/bin/pip\" install --require-hashes -r \"$MAIN/backend/requirements.lock\""
-  fi
+  warn "running backend pytest (full suite currently ~10m)…"
+  # Invoke the MAIN checkout's canonical runner so an older linked worktree
+  # cannot revive an older launcher. Opt into its best-effort full-suite lock
+  # because concurrent pre-push suites only add resource contention.
+  backend_status=0
+  (cd "$ROOT" \
+    && MOBIUS_PYTEST_SERIALIZE=1 \
+       "$MAIN/scripts/wt-pytest.sh" -q >"$PP_TMP/be" 2>&1) \
+    || backend_status=$?
+  case "$backend_status" in
+    0) ok "backend pytest passed" ;;
+    78)
+      warn "backend pytest skipped: no Python test runtime (PR CI runs it)."
+      tail -n 4 "$PP_TMP/be" | sed 's/^/    /' >&2
+      ;;
+    *)
+      err "backend pytest FAILED:"
+      tail -n 30 "$PP_TMP/be" | sed 's/^/    /' >&2
+      fail_check backend-pytest
+      ;;
+  esac
 elif changed_match '^backend/scripts/seed-skills/.*\.md$'; then
   ok "backend seed-skill docs changed — full pytest not required"
 fi

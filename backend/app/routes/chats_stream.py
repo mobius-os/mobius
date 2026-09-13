@@ -40,7 +40,9 @@ from app.chat_writer import (
   cid_of,
   ensure_user_cid,
   get_writer,
+  RestartCardActionConflict,
   ResolvePlatformRestartCard,
+  RestartCardStateChanged,
 )
 from app.chat_steering import (
   has_live_steerable_turn,
@@ -314,7 +316,7 @@ async def _append_to_pending(
   The append is keyed on an empty run_token: a queued message isn't a
   streaming turn, so it has no snapshot key of its own to fence.
   """
-  return await _submit_pending_message(
+  result = await _submit_pending_message(
     chat, db, AppendPending(
       chat_id=chat.id, run_token="",
       user_msg=_user_message_from_body(chat, body), answers=body.answers,
@@ -322,6 +324,7 @@ async def _append_to_pending(
       front=front, require_answer_match=require_answer_match,
     ),
   )
+  return result["stored"]
 
 
 async def _append_restart_feedback_to_pending(
@@ -345,12 +348,14 @@ async def _submit_pending_message(
   ack = get_writer().submit(command)
   try:
     result = await await_ack(ack)
+  except (RestartCardStateChanged, RestartCardActionConflict):
+    raise
   except Exception as exc:
     raise _message_persist_unavailable(exc, chat_id=chat.id) from exc
   # Reflect the committed state on the request's session so a later
   # `db.refresh(chat)` in this handler sees the actor's write.
   db.expire(chat)
-  return result["stored"]
+  return result
 
 
 def _answer_delivered_response(chat_id: str) -> JSONResponse:
@@ -642,26 +647,68 @@ async def send_message(
       async with chat_queue.get_transition_lock(chat_id):
         async with chat_queue.get_lock(chat_id):
           try:
-            stored = await _append_restart_feedback_to_pending(
+            append_result = await _append_restart_feedback_to_pending(
               chat, body, db, initiated_by_app_id=principal.app_id,
             )
-            started_message = await start_queued_owner_continuation(chat_id, db)
+            stored = append_result["stored"]
+            duplicate = append_result.get("duplicate") is True
+            started_message = None
+            if not duplicate:
+              try:
+                started_message = await start_queued_owner_continuation(chat_id, db)
+              except Exception:
+                # The response is already committed. If admission failed
+                # before promotion, acknowledge the durable queued row rather
+                # than asking the browser to retry a write that succeeded.
+                db.expire(chat)
+                db.refresh(chat)
+                stored_cid = cid_of(stored)
+                still_queued = stored_cid is not None and any(
+                  cid_of(row) == stored_cid
+                  for row in list(chat.pending_messages or [])
+                )
+                if not still_queued:
+                  raise
+                log.warning(
+                  "Restart feedback committed but remains queued chat_id=%s cid=%s",
+                  chat_id, stored_cid,
+                )
             db.expire(chat)
             db.refresh(chat)
             settled = restart_action_block(chat, body.question_id)
             settled_action = (
               settled.get("platform_action") if isinstance(settled, dict) else None
             )
-          except HTTPException:
-            raise
-          except Exception as exc:
+          except RestartCardStateChanged as exc:
             log.info(
               "Restart feedback refused chat_id=%s question_id=%s: %s",
               chat_id, body.question_id, exc,
             )
             raise HTTPException(
+              status_code=410,
+              detail={
+                "code": "question_state_changed",
+                "message": "This Restart card has already been settled.",
+              },
+            ) from exc
+          except RestartCardActionConflict as exc:
+            raise HTTPException(
               status_code=409,
-              detail="This Restart card is stale or no longer accepting a response.",
+              detail={
+                "code": "restart_action_conflict",
+                "message": str(exc),
+              },
+            ) from exc
+          except HTTPException:
+            raise
+          except Exception as exc:
+            log.exception(
+              "Restart feedback failed chat_id=%s question_id=%s",
+              chat_id, body.question_id,
+            )
+            raise HTTPException(
+              status_code=503,
+              detail="Möbius could not save that Restart response. Please try again.",
             ) from exc
       event = {
         "type": "answers_applied",
@@ -678,10 +725,19 @@ async def send_message(
       elif bc is not None:
         bc.publish(event)
       publish_owner_input_changed(chat_id, None, question_id=None)
-      answer_turn = "new" if started_message is not None else "queued"
+      answer_turn = (
+        "none" if duplicate
+        else "new" if started_message is not None
+        else "queued"
+      )
       return JSONResponse(status_code=202, content={
-        "status": "started" if started_message is not None else "queued",
+        "status": (
+          "duplicate" if duplicate
+          else "started" if started_message is not None
+          else "queued"
+        ),
         "answer_turn": answer_turn,
+        "running": is_chat_running(chat_id),
         "answers": body.answers,
         "selected_options": {},
         "platform_action": settled_action,
@@ -710,14 +766,34 @@ async def send_message(
               selected_option_id=selections["restart"][0],
             )
           ))
-        except Exception as exc:
+        except RestartCardStateChanged as exc:
           log.info(
             "Restart card resolution refused chat_id=%s question_id=%s: %s",
             chat_id, body.question_id, exc,
           )
           raise HTTPException(
+            status_code=410,
+            detail={
+              "code": "question_state_changed",
+              "message": "This Restart card has already been settled.",
+            },
+          ) from exc
+        except RestartCardActionConflict as exc:
+          raise HTTPException(
             status_code=409,
-            detail="This Restart card is stale or no longer authorized.",
+            detail={
+              "code": "restart_action_conflict",
+              "message": str(exc),
+            },
+          ) from exc
+        except Exception as exc:
+          log.exception(
+            "Restart card resolution failed chat_id=%s question_id=%s",
+            chat_id, body.question_id,
+          )
+          raise HTTPException(
+            status_code=503,
+            detail="Möbius could not save that Restart choice. Please try again.",
           ) from exc
     try:
       event = {

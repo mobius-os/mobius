@@ -67,6 +67,7 @@ export function resourcePausePresentation(block) {
 }
 
 export function waitPresentation(wait) {
+  const activation = wait.kind === 'platform_activation'
   const cadence = cadenceLabel(wait)
   const next = clockLabel(wait.next_check_at)
   const due = clockLabel(wait.due_at)
@@ -85,7 +86,10 @@ export function waitPresentation(wait) {
     summary,
     checker: `Möbius · ${cadence}${wait.kind !== 'timer' && next ? ` · next at ${next}` : ''}`,
     activity,
-    timeout: `This chat wakes to investigate at ${dateTimeLabel(wait.deadline_at)}`,
+    timeoutLabel: activation ? 'Wake-up' : 'If it takes too long',
+    timeout: activation
+      ? 'A later ready restart wakes this chat; the Restart card has no time limit'
+      : `This chat wakes to investigate at ${dateTimeLabel(wait.deadline_at)}`,
     usage: 'No model tokens while checking · one turn when it wakes',
   }
 }

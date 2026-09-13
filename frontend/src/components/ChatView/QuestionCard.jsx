@@ -114,6 +114,7 @@ export default function QuestionCard({
   questionId,
   answeredMap,
   platformAction,
+  submittedOptions,
   onAnswer,
   onPrepareAnswer,
   onCancelAnswer,
@@ -147,6 +148,10 @@ export default function QuestionCard({
   const displayAnswers = answeredMap || {}
   const grouped = questions.length > 1
   const restartAction = isRestartCardAction(platformAction)
+  const writtenRestartAction = restartAction && platformAction?.version === 2
+  const respondedRestartAction = (
+    writtenRestartAction && platformAction?.status === 'responded'
+  )
 
   // ChatView is keyed by chat, so switching away remounts this card. Keep an
   // unsubmitted selection in the same per-tab cache as composer drafts; the
@@ -333,7 +338,15 @@ export default function QuestionCard({
                   ? [answeredValue]
                   : []))
           : []
-        const answeredWithOther = unmatchedAnswers.length > 0
+        const writtenRestartResponse = Boolean(
+          respondedRestartAction
+          && submittedOptions
+          && Object.keys(submittedOptions).length === 0
+        )
+        const writtenAnswer = writtenRestartResponse
+          ? answeredValue
+          : unmatchedAnswers.join(', ')
+        const answeredWithOther = writtenAnswer.length > 0
         const selectionCount = answered
           ? (isMulti ? answeredArr.length : (answeredValue ? 1 : 0))
           : selectedArr.length
@@ -350,7 +363,7 @@ export default function QuestionCard({
                 (□ checkbox for multi, ○ radio for single). */}
             {!completedAction && (!disabled || answered) && (
               <div className="qcard__hint">
-                {restartAction
+                {writtenRestartAction
                   ? 'Restart now, or reply below'
                   : isMulti
                   ? `Select all that apply${selectionCount ? ` · ${selectionCount} selected` : ''}`
@@ -368,7 +381,7 @@ export default function QuestionCard({
               {/* For multi-select answered state, the comma-joined value is
                   parsed above so each chosen option highlights correctly. */}
               {(() => {
-                const visibleOptions = restartAction
+                const visibleOptions = writtenRestartAction
                   ? q.options?.filter(opt => opt.id === platformAction.restart_option_id)
                   : q.options
                 return visibleOptions?.map((opt, oi) => {
@@ -425,20 +438,23 @@ export default function QuestionCard({
                 })
               })()}
             </div>}
-            {!completedAction && (
+            {(!completedAction || respondedRestartAction)
+              && (!restartAction || writtenRestartAction) && (
               <CustomAnswerArea
                 active={isOtherSelected || answeredWithOther}
                 answered={answered}
                 canSubmit={allAnswered}
                 disabled={inactive}
-                placeholder={restartAction ? 'Or tell me what you’d like to do instead…' : undefined}
+                placeholder={writtenRestartAction
+                  ? 'Or tell me what you’d like to do instead…'
+                  : undefined}
                 onChange={text => setOtherText(q.question, text)}
                 onSubmitShortcut={(questionCard) => {
                   if (allAnswered) handleSubmit(questionCard, null)
                 }}
                 question={q.question}
                 value={answered
-                  ? unmatchedAnswers.join(', ')
+                  ? writtenAnswer
                   : (otherTexts[q.question] || '')}
               />
             )}
@@ -471,7 +487,7 @@ export default function QuestionCard({
             }}
             disabled={!canSubmit || disabled || answered || submitting}
           >
-            {submitting ? 'Submitting…' : (answered ? 'Submitted' : restartAction ? 'Continue' : 'Submit')}
+            {submitting ? 'Submitting…' : (answered ? 'Submitted' : writtenRestartAction ? 'Continue' : 'Submit')}
           </button>
         </>
       )}
