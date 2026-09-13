@@ -2456,6 +2456,14 @@ def origin_url(source_dir: str | Path) -> str | None:
   return value if proc.returncode == 0 and value else None
 
 
+def set_origin_url(source_dir: str | Path, url: str) -> None:
+  """Replace one existing app checkout's origin with a reviewed successor."""
+  repo = Path(source_dir)
+  if not is_repo(repo) or origin_url(repo) is None:
+    raise RuntimeError("source repository has no origin")
+  _run(repo, "remote", "set-url", "origin", url)
+
+
 def has_origin(source_dir: str | Path) -> bool:
   """Whether this app repo has a real `origin` remote.
 
@@ -3057,9 +3065,6 @@ OVERLAY_UNSORTED_UNIT = "unsorted"
 # Uncommitted working edits ride through an update as this transient unit and
 # return to the working tree afterwards.
 OVERLAY_WORKING_UNIT = "working-tree"
-# A pre-overlay (merge-shaped) local history is folded into this one unit the
-# first time the linear updater runs on it.
-OVERLAY_LEGACY_UNIT = "legacy-overlay"
 _OVERLAY_UNIT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$")
 _OVERLAY_LOG_FORMAT = (
   "%H%x00%s%x00"

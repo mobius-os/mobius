@@ -592,11 +592,10 @@ def _job_manifest(app_id: str):
   }
 
 
-def test_cloned_job_without_exec_bit_warns(
+def test_cloned_job_without_exec_bit_is_rejected(
   client, auth, tmp_path, bypass_url_validation,
 ):
-  """A repo carrying job.sh as 100644 lands non-executable (the installer
-  must not chmod tracked clone files) and the install says so."""
+  """A cloned package must commit executable mode for its scheduled job."""
   base = "https://raw.githubusercontent.com/acme/app-cronjob/main/"
   _, bare = _make_repo(tmp_path, {"index.jsx": JSX, "job.sh": JOB_SH})
   m = _job_manifest("cronjob")
@@ -605,13 +604,8 @@ def test_cloned_job_without_exec_bit_warns(
     base + "index.jsx": (200, JSX.encode()),
     base + "job.sh": (200, JOB_SH.encode()),
   }, bare)
-  assert r.status_code == 201, r.text
-  job = Path(get_settings().data_dir) / "apps" / "cronjob" / "job.sh"
-  assert job.exists()
-  assert not os.access(job, os.X_OK)
-  assert any(
-    "job.sh is not executable" in w for w in r.json()["warnings"]
-  ), r.json()["warnings"]
+  assert r.status_code == 400, r.text
+  assert r.json()["detail"] == "Schedule job is not executable."
 
 
 def test_cloned_job_with_exec_bit_is_executable(

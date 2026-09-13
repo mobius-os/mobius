@@ -71,7 +71,7 @@ def test_apply_prints_compact_reusable_identity_receipt(
     "slug": "same-name-2",
     "source_dir": str(source.resolve()),
     "chat_id": "building-chat",
-    "preview_path": "/app/73",
+    "preview_path": "/shell/?app=73",
     "open_path": "/shell/?app=73",
     "warnings": ["skill guide.md: left unchanged"],
   }

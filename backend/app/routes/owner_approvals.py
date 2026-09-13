@@ -134,7 +134,6 @@ async def request_restart(
       },
     ) from exc
   action_id = requirement["action_id"]
-  not_now_id = str(uuid5(NAMESPACE_URL, f"{action_id}:not-now"))
   restart_now_id = str(uuid5(NAMESPACE_URL, f"{action_id}:restart-now"))
   paths = requirement["paths"]
   path_summary = ", ".join(paths[:3])
@@ -151,12 +150,6 @@ async def request_restart(
       ),
       "options": [
         {
-          "id": not_now_id,
-          "label": "Not now",
-          "on_answer": "close",
-          "description": "Leave these committed changes pending without interruption.",
-        },
-        {
           "id": restart_now_id,
           "label": "Restart now",
           "on_answer": "close",
@@ -165,11 +158,10 @@ async def request_restart(
       ],
     }],
     "platform_action": {
-      "version": 1,
+      "version": 2,
       "type": "restart",
       "action_id": action_id,
       "restart_option_id": restart_now_id,
-      "cancel_option_id": not_now_id,
       "requirement": requirement,
       "status": "awaiting_owner",
     },
@@ -312,8 +304,9 @@ def _receipt(
     "next_action": (
       "End this turn now without further text or tools. This receipt is not "
       "approval and not an answer. The platform handles an eventual Restart "
-      "now choice and resumes this work only after loaded-source readiness; "
-      "do not issue or replay a restart command."
+      "now choice and resumes this work after a later ready boot; the agent "
+      "then verifies whether its changes loaded. Do not issue or replay a "
+      "restart command."
       if platform_restart else
       "End this turn now without further text or tools. This receipt is not approval and not an answer. The owner's answer "
       "is saved and normally resumes the chat; explicit close choices need no reply. Do not poll or "

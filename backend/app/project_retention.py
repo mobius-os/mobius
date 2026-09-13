@@ -42,18 +42,13 @@ def projects_using_app_files(db: Session, app: models.App) -> list[models.Projec
   for project in db.query(models.Project).all():
     stored = Path(project.root_path)
     root = (stored if stored.is_absolute() else data_root / stored).resolve()
-    if (
-      any(root.is_relative_to(app_root) for app_root in app_roots)
-      or (project.source_app_id == app.id and project.legacy_source_json is not None)
-    ):
+    if any(root.is_relative_to(app_root) for app_root in app_roots):
       dependent.append(project)
   return dependent
 
 
-def _owned_native_root(project_id: str, root_path: str, legacy: object) -> Path | None:
+def _owned_native_root(project_id: str, root_path: str) -> Path | None:
   """Return a root only when it is exactly Möbius' native project directory."""
-  if legacy is not None:
-    return None
   data_root = Path(get_settings().data_dir).resolve()
   projects_root = data_root / "projects"
   expected = projects_root / str(project_id)
@@ -101,13 +96,13 @@ def _sweep_orphaned_native_roots(db: Session) -> None:
 
 
 def purge_expired_project_tombstones(db: Session) -> list[str]:
-  """Release expired project/chat pairs, preserving imported legacy storage.
+  """Release expired project/chat pairs, preserving externally owned roots.
 
   The project rows commit away before any filesystem deletion. Thus a failed
   transaction leaves the project fully recoverable. A crash after that commit
   may leave only an owner-managed orphan under ``data/projects``; the next sweep
-  recognizes that exact UUID namespace and retries it. Legacy imports point into
-  app storage and are never passed to filesystem cleanup.
+  recognizes that exact UUID namespace and retries it. Linked roots outside
+  that namespace are never passed to filesystem cleanup.
   """
   cutoff = now_naive_utc() - SOFT_DELETE_TTL
   with PROJECT_LIFECYCLE_LOCK:
@@ -132,7 +127,7 @@ def purge_expired_project_tombstones(db: Session) -> list[str]:
     roots = [
       root for project in rows
       if (root := _owned_native_root(
-        str(project.id), project.root_path, project.legacy_source_json,
+        str(project.id), project.root_path,
       )) is not None
     ]
     shared_app_roots = delete_project_shared_apps(db, project_ids)

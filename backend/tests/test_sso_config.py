@@ -5,9 +5,6 @@ from app.config import Settings
 
 
 SECRET_KEY = "test-secret-key-that-is-at-least-thirty-two-characters"
-CLIENT_SECRET = "managed-client-secret-that-is-at-least-thirty-two-characters"
-
-
 def settings(**values):
   return Settings(secret_key=SECRET_KEY, _env_file=None, **values)
 
@@ -20,17 +17,13 @@ def test_managed_sign_in_is_disabled_for_ordinary_self_hosting():
 
 def test_managed_sign_in_requires_complete_configuration():
   with pytest.raises(ValidationError, match="must be configured together"):
-    settings(
-      mobius_sso_issuer="https://www.mobius.you",
-      mobius_sso_instance_id="mob_example",
-    )
+    settings(mobius_sso_issuer="https://www.mobius.you")
 
 
 def test_managed_sign_in_accepts_launcher_origin_and_normalizes_it():
   config = settings(
     mobius_sso_issuer="https://www.mobius.you/",
     mobius_sso_instance_id="mob_example",
-    mobius_sso_client_secret=CLIENT_SECRET,
   )
 
   assert config.mobius_sso_enabled is True
@@ -112,14 +105,16 @@ def test_managed_sign_in_rejects_unsafe_issuer(issuer, message):
     settings(
       mobius_sso_issuer=issuer,
       mobius_sso_instance_id="mob_example",
-      mobius_sso_client_secret=CLIENT_SECRET,
     )
 
 
-def test_managed_sign_in_rejects_short_instance_secret():
-  with pytest.raises(ValidationError, match="must be at least 32 characters"):
+def test_managed_sign_in_rejects_invalid_instance_id():
+  with pytest.raises(ValidationError, match="MOBIUS_SSO_INSTANCE_ID is invalid"):
     settings(
       mobius_sso_issuer="https://www.mobius.you",
-      mobius_sso_instance_id="mob_example",
-      mobius_sso_client_secret="too-short",
+      mobius_sso_instance_id="not-an-instance",
     )
+
+
+def test_unprivileged_settings_do_not_expose_the_managed_credential():
+  assert "mobius_sso_client_secret" not in Settings.model_fields

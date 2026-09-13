@@ -2,18 +2,19 @@
 
 import os
 import tempfile
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 
 # Never turn a live application process into a test runner. This check must
 # happen before the test overrides below: docker exec inherits production's
-# DATA_DIR/DATABASE_URL, while the disposable test services declare
-# MOBIUS_TEST_RUNTIME=1 before pytest starts.
+# DATA_DIR/DATABASE_URL, while supported disposable runtimes explicitly attest
+# that the same production-shaped path belongs to an isolated test volume.
 _inherited_data_dir = os.environ.get("DATA_DIR", "").rstrip("/")
 _inherited_database_url = os.environ.get("DATABASE_URL", "")
 if (
-  os.environ.get("MOBIUS_TEST_RUNTIME") != "1"
+  os.environ.get("MOBIUS_TEST_DATABASE_ISOLATED") != "1"
   and _inherited_data_dir == "/data"
   and "/data/db/" in _inherited_database_url
 ):
@@ -31,12 +32,22 @@ os.environ["DATA_DIR"] = _tmp
 os.environ["DOMAIN"] = "localhost"
 os.environ["FRONTEND_ORIGIN"] = "http://localhost:5173"
 os.environ["MOBIUS_TEST_RUNTIME"] = "1"
+os.environ["MOBIUS_TEST_DATABASE_ISOLATED"] = "1"
 # Fail closed when pytest is launched from inside a running production
 # container. DATA_DIR isolates Python file writes, but subprocess-facing
 # defaults historically still pointed at the live service and /data/apps.
 os.environ["MOBIUS_APP_BASE"] = f"{_tmp}/apps"
 os.environ["API_BASE_URL"] = "http://127.0.0.1:9"
 os.environ["MOEBIUS_SKIP_BOOTSTRAP"] = "1"
+
+# Production entrypoint proves the image-owned filesystem half before FastAPI
+# starts. Reproduce that boundary in the host-only runtime so startup can
+# combine it with the configured test database migration.
+_file_receipt = (
+  Path(_tmp) / ".migration-receipts" / "app-identity-files-v1"
+)
+_file_receipt.parent.mkdir(parents=True, exist_ok=True)
+_file_receipt.touch()
 
 # Ensure the baked static dir exists with an index.html carrying the
 # __mobius-theme__ slot BEFORE importing app.main — main.py registers the SPA
@@ -78,13 +89,11 @@ from app.main import app
 from app.routes import auth as auth_module
 from app.routes.auth import _limiter as auth_limiter
 from app.routes.notifications import limiter as notifications_limiter
-from app.routes.common import _public_write_limiter as common_public_write_limiter
 
 # Disable rate limiters during tests.
 app.state.limiter.enabled = False
 auth_limiter.enabled = False
 notifications_limiter.enabled = False
-common_public_write_limiter.enabled = False
 
 
 @pytest.fixture(autouse=True)

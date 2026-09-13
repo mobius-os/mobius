@@ -32,6 +32,7 @@ import {
   boundedMessageSource,
   enrichMessageSource,
 } from './messageSources.js'
+import { toolBlockFailed } from './toolResultFormat.js'
 
 // Tool names whose tool events describe an AskUserQuestion-style
 // call: Claude's AskUserQuestion and Codex's request_user_input.
@@ -322,6 +323,64 @@ export function isQuestionTool(tool) {
   return QUESTION_TOOLS.has(tool)
 }
 
+export function isRestartRequestTool(tool) {
+  if (typeof tool !== 'string') return false
+  return tool === 'mobius_control:request_restart'
+    || tool === 'mcp__mobius_control__request_restart'
+}
+
+export function legacyRestartActivityOwners(blocks, projectionVersion) {
+  const owners = new Set()
+  if (
+    !Array.isArray(blocks)
+    || (Number.isInteger(projectionVersion) && projectionVersion >= 1)
+  ) return owners
+
+  let latestCandidate = null
+  blocks.forEach(block => {
+    if (
+      block?.type === 'tool'
+      && isRestartRequestTool(block.tool)
+      && !toolBlockFailed(block)
+    ) {
+      latestCandidate = block
+      return
+    }
+    if (
+      block?.type === 'activity'
+      && Array.isArray(block.entries)
+      && block.entries.some(({ item }) => (
+        item?.type === 'tool' && isRestartRequestTool(item.tool)
+      ))
+    ) {
+      latestCandidate = block
+      return
+    }
+    if (
+      block?.type !== 'question'
+      || block?.platform_action?.type !== 'restart'
+    ) return
+    if (latestCandidate?.type === 'activity') owners.add(latestCandidate)
+    latestCandidate = null
+  })
+  return owners
+}
+
+export function restartCardActivityEntries(entries, ownsRestartCard) {
+  if (!ownsRestartCard || !Array.isArray(entries)) return entries
+  let twinIndex = -1
+  entries.forEach(({ item }, index) => {
+    if (
+      item?.type === 'tool'
+      && isRestartRequestTool(item.tool)
+      && !toolBlockFailed(item)
+    ) twinIndex = index
+  })
+  return twinIndex < 0
+    ? entries
+    : entries.filter((_, index) => index !== twinIndex)
+}
+
 /**
  * Indices of redundant AskUserQuestion tool blocks in a PERSISTED
  * message's `blocks` array — the raw tool twin of a question card that
@@ -336,11 +395,9 @@ export function isQuestionTool(tool) {
  * at render time so the persisted view matches the live view, with no
  * backend migration (it fixes already-persisted old chats too).
  *
- * A question-tool block is suppressed only when the message also contains
- * a question block — the card is the canonical rendering of the same call,
- * so the tool twin is pure noise. Non-question tools (Bash, Grep) and
- * question-tool blocks in a message with no card (a defensive edge that
- * shouldn't occur) are left untouched.
+ * Pair each card with the latest matching tool before it. Earlier failed
+ * attempts stay visible, while the successful call represented by the card
+ * is pure noise. The one-pass pairing mirrors the backend projection.
  *
  * @param {Array<object>} blocks  a persisted message's blocks
  * @returns {Set<number>} indices into `blocks` to skip when rendering
@@ -348,10 +405,23 @@ export function isQuestionTool(tool) {
 export function suppressedQuestionToolIndices(blocks) {
   const suppressed = new Set()
   if (!Array.isArray(blocks)) return suppressed
-  const hasQuestionCard = blocks.some(b => b?.type === 'question')
-  if (!hasQuestionCard) return suppressed
+  const latestUnowned = { question: null, restart: null }
   blocks.forEach((b, i) => {
-    if (b?.type === 'tool' && isQuestionTool(b.tool)) suppressed.add(i)
+    if (b?.type === 'tool') {
+      const family = isQuestionTool(b.tool)
+        ? 'question'
+        : isRestartRequestTool(b.tool) ? 'restart' : null
+      if (family === null || toolBlockFailed(b)) return
+      latestUnowned[family] = i
+      return
+    }
+    if (b?.type !== 'question') return
+    const family = b?.platform_action?.type === 'restart' ? 'restart' : 'question'
+    const twin = latestUnowned[family]
+    if (twin !== null) {
+      suppressed.add(twin)
+      latestUnowned[family] = null
+    }
   })
   return suppressed
 }

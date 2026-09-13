@@ -1,7 +1,10 @@
 """Applied source files are immutable to editing and retained while in use."""
 
 import fcntl
+import json
 import shutil
+import tempfile
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -103,6 +106,163 @@ def test_migration_preserves_deployed_ignored_static_but_pins_accepted_scripts(d
   assert (root / "static" / "asset.txt").read_text() == "deployed static"
   (source / "static" / "asset.txt").write_text("later edited static")
   assert (root / "static" / "asset.txt").read_text() == "deployed static"
+
+
+def test_legacy_job_migration_makes_execution_contract_explicit(db):
+  row, source = _legacy_app(db)
+  (source / "mobius.json").write_text(
+    '{"schedule":{"job":"job.sh"}}', encoding="utf-8",
+  )
+  assert runtime.bootstrap_legacy_runtimes(db) == (1, [])
+  before = row.runtime_revision
+  stale_receipt = (
+    Path(get_settings().data_dir)
+    / "app-runtime" / "job-execution-contract-migration.json"
+  )
+  stale_receipt.write_text('{"schema":1,"app_ids":[]}', encoding="utf-8")
+
+  migrated, warnings = runtime.migrate_legacy_job_declarations(db)
+
+  assert (migrated, warnings) == (1, [])
+  assert row.runtime_revision != before
+  accepted = runtime.runtime_root(row)
+  assert (accepted / "job.sh").read_bytes() == (
+    b"#!/usr/bin/env bash\ndeployed script"
+  )
+  assert accepted.joinpath("job.sh").stat().st_mode & 0o111
+  assert runtime.migrate_legacy_job_declarations(db) == (0, [])
+
+  # A selective database restore can point back at the accepted legacy tree
+  # while the old receipt survives on disk. Current bytes, not that receipt,
+  # decide whether the cutover runs again.
+  row.runtime_revision = before
+  db.commit()
+  assert runtime.migrate_legacy_job_declarations(db) == (1, [])
+  assert runtime.runtime_root(row) == accepted
+
+
+def _app_with_pre_service_host_contract(db, *, service):
+  source = Path(get_settings().data_dir) / "apps" / "service-contract-migration"
+  source.mkdir(parents=True, exist_ok=True)
+  manifest = {
+    "id": "service-contract-migration",
+    "name": "Service migration",
+    "version": "1.0.0",
+    "description": "test",
+    "entry": "index.jsx",
+    "source_files": ["service.py"],
+    "service": service,
+  }
+  (source / "mobius.json").write_text(json.dumps(manifest))
+  row = models.App(
+    name="Service migration", slug="service-contract-migration",
+    description="", source_dir=str(source),
+    jsx_source="export default () => null",
+    capability_contract={"schema": 6, "reviewed": "older-host"},
+  )
+  db.add(row)
+  db.commit()
+  runtime.runtime_parent(row.id).parent.mkdir(parents=True, exist_ok=True)
+  staged = Path(tempfile.mkdtemp(
+    prefix=".service-contract-", dir=runtime.runtime_parent(row.id).parent,
+  ))
+  (staged / "mobius.json").write_text(json.dumps(manifest))
+  (staged / "service.py").write_text("print('{}')\n")
+  runtime.publish_runtime(row, runtime._prepared(staged))
+  db.commit()
+  return row, source
+
+
+def test_service_contract_migration_uses_only_the_accepted_runtime(db):
+  row, source = _app_with_pre_service_host_contract(
+    db, service={"entry": "service.py", "access": "self"},
+  )
+  previous_updated = row.updated_at
+  live_manifest = json.loads((source / "mobius.json").read_text())
+  live_manifest["service"]["access"] = "public"
+  (source / "mobius.json").write_text(json.dumps(live_manifest))
+
+  migrated, warnings = runtime.migrate_accepted_service_contracts(db)
+
+  assert (migrated, warnings) == (1, [])
+  assert row.capability_contract == {
+    "schema": 6,
+    "reviewed": "older-host",
+    "service": {
+      "entry": "service.py",
+      "access": "self",
+      "protocol": "json-v1",
+      "max_request_bytes": 8 * 1024 * 1024,
+      "max_response_bytes": 8 * 1024 * 1024,
+    },
+  }
+  assert row.updated_at == previous_updated
+  assert runtime.migrate_accepted_service_contracts(db) == (0, [])
+
+
+def test_invalid_accepted_service_contract_stays_inactive_and_retries(db):
+  row, _source = _app_with_pre_service_host_contract(
+    db, service={"entry": "missing.py", "access": "self"},
+  )
+
+  first = runtime.migrate_accepted_service_contracts(db)
+
+  assert first[0] == 0
+  assert "source_files" in first[1][0]
+  assert "service" not in row.capability_contract
+  accepted = runtime.runtime_root(row)
+  staged = Path(tempfile.mkdtemp(
+    prefix=".service-contract-repair-", dir=runtime.runtime_parent(row.id).parent,
+  ))
+  shutil.copytree(accepted, staged, dirs_exist_ok=True)
+  manifest = json.loads((staged / "mobius.json").read_text())
+  manifest["source_files"] = ["missing.py"]
+  (staged / "mobius.json").write_text(json.dumps(manifest))
+  (staged / "missing.py").write_text("print('{}')\n")
+  runtime.publish_runtime(row, runtime._prepared(staged))
+  db.commit()
+  assert runtime.migrate_accepted_service_contracts(db) == (1, [])
+  assert row.capability_contract["service"]["entry"] == "missing.py"
+
+
+def test_legacy_job_migration_includes_tombstones_without_rewriting_bytes(db):
+  row, source = _legacy_app(db)
+  content = "#!/usr/bin/env bash\necho accepted\n"
+  (source / "mobius.json").write_text(
+    '{"schedule":{"job":"job.sh"}}', encoding="utf-8",
+  )
+  (source / "job.sh").write_text(content, encoding="utf-8")
+  (source / "job.sh").chmod(0o644)
+  row.deleted_at = datetime(2026, 9, 12, 12)
+  db.commit()
+  assert runtime.bootstrap_legacy_runtimes(db) == (1, [])
+
+  assert runtime.migrate_legacy_job_declarations(db) == (1, [])
+
+  accepted = runtime.runtime_root(row) / "job.sh"
+  assert accepted.read_text(encoding="utf-8") == content
+  assert accepted.stat().st_mode & 0o111
+
+
+def test_legacy_job_migration_retries_an_unrepairable_runtime(db):
+  _row, source = _legacy_app(db)
+  (source / "mobius.json").write_text(
+    '{"schedule":{"job":"job.sh"}}', encoding="utf-8",
+  )
+  (source / "job.sh").write_text("#!relative-interpreter\nexit 0\n")
+  assert runtime.bootstrap_legacy_runtimes(db) == (1, [])
+
+  first = runtime.migrate_legacy_job_declarations(db)
+  second = runtime.migrate_legacy_job_declarations(db)
+
+  assert first[0] == second[0] == 0
+  assert "absolute interpreter" in first[1][0]
+  assert "absolute interpreter" in second[1][0]
+  assert not (
+    Path(get_settings().data_dir)
+    / "app-runtime"
+    / "job-execution-contract-migration.json"
+  ).exists()
 
 
 def test_same_source_commit_with_new_generated_assets_gets_new_runtime_pointer(db):

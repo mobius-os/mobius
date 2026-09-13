@@ -6,15 +6,13 @@ const TONES = {
   html: ['#3b82f6', '#1d4ed8'],
   pdf: ['#a855f7', '#6b21a8'],
   image: ['#f97316', '#c2410c'],
-  sheet: ['#22c55e', '#047857'],
-  document: ['#14b8a6', '#0f766e'],
-  visualization: ['#f97316', '#c2410c'],
+  artifact: ['#64748b', '#334155'],
   'mini-app': ['#ec4899', '#a21caf'],
 }
 
 export default function ArtifactIdentityIcon({ artifact, size = 30, className = '', label = '' }) {
   const kind = artifactVisualKind(artifact)
-  const [primary, secondary] = TONES[kind] || TONES.html
+  const [primary, secondary] = TONES[kind] || TONES.artifact
   return (
     <span
       className={`artifact-identity-icon ${className}`.trim()}

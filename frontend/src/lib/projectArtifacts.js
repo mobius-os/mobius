@@ -37,18 +37,11 @@ export function isBuilding(artifact) {
 
 const BUILTIN_ARTIFACT_TYPES = [
   { id: 'app', name: 'App', extensions: ['jsx', 'tsx'], preview: 'html' },
-  {
-    id: 'website', name: 'Website', extensions: ['html', 'htm'], preview: 'html',
-  },
-  {
-    id: 'latex', name: 'PDF', extensions: ['tex'], preview: 'pdf',
-  },
 ]
 
 // Template declarations come from installed apps. Read them leniently because
-// old project snapshots predate artifact types and an app update must never
-// make the Finder disappear. Built-ins remain the fallback for blank and old
-// projects; declarations win so a provider can own its normal extension.
+// agent-authored snapshots can be malformed. The platform contributes only its
+// generic App type; every domain builder belongs to its provider declaration.
 export function normalizeArtifactTypes(value) {
   if (!Array.isArray(value)) return []
   return value.filter(type => (
@@ -80,34 +73,20 @@ export function artifactTypeName(artifact) {
   if (typeof artifact?.type_name === 'string' && artifact.type_name) {
     return artifact.type_name
   }
-  const builtin = BUILTIN_ARTIFACT_TYPES.find(type => type.id === artifact?.builder)
-  return builtin?.name || 'Artifact'
+  return artifact?.builder === 'app' ? 'App' : 'Artifact'
 }
 
 export function artifactPreviewKind(artifact) {
   if (['html', 'pdf', 'image'].includes(artifact?.preview)) return artifact.preview
-  return artifact?.builder === 'latex' ? 'pdf' : 'html'
+  return artifact?.builder === 'app' ? 'html' : null
 }
 
-// A richer visual identity than the transport preview kind. Many durable
-// formats compile to HTML, but a Markdown document, CSV sheet, React mini-app,
-// and data visualization should not all look like generic browser windows.
+// Visual identity follows the declared output transport. Domain-specific
+// semantics belong to the provider, not a shell-side word/extension classifier.
 export function artifactVisualKind(artifact) {
-  const words = [
-    artifact?.builder,
-    artifact?.type_name,
-    artifact?.name,
-    artifact?.source,
-  ].filter(Boolean).join(' ').toLowerCase()
+  if (artifact?.builder === 'app') return 'mini-app'
   const preview = artifactPreviewKind(artifact)
-  if (preview === 'pdf' || /latex|\.tex\b|\bpdf\b/.test(words)) return 'pdf'
-  if (preview === 'image') return 'image'
-  if (/slides?|presentation|\bdeck\b/.test(words)) return 'presentation'
-  if (/spreadsheet|\bsheet\b|\.csv\b|\btable\b/.test(words)) return 'sheet'
-  if (/document|markdown|\.md\b|writing/.test(words)) return 'document'
-  if (/visuali[sz]ation|chart|dashboard|data story/.test(words)) return 'visualization'
-  if (/mini.?app|react app|\.jsx\b|\.tsx\b/.test(words)) return 'mini-app'
-  return 'html'
+  return ['html', 'pdf', 'image'].includes(preview) ? preview : 'artifact'
 }
 
 // Human label + a semantic variant for the status pill. Variants are stable
@@ -122,32 +101,16 @@ export function artifactStatusPill(artifact) {
   }
 }
 
-// The last path segment without its extension, e.g. `paper/main.tex` -> `main`.
-export function fileStem(path) {
-  const base = String(path ?? '').split('/').pop() || ''
-  const dot = base.lastIndexOf('.')
-  return dot > 0 ? base.slice(0, dot) : base
-}
-
 // The path WITHIN `artifacts/<id>/output/` that the preview should load. The
-// backend resolves each provider's output declaration into `output_rel`; honor
-// it for every artifact kind. Old rows without that field retain sensible
-// website/PDF fallbacks.
+// backend resolves each provider's output declaration into `output_rel`; there
+// is no second shell-owned interpretation of a missing declaration.
 export function artifactEntryPath(artifact) {
   const outputRel = String(artifact?.output_rel ?? '')
   const marker = '/output/'
   const at = outputRel.indexOf(marker)
   const withinOutput = at !== -1 ? outputRel.slice(at + marker.length) : ''
   if (withinOutput && !withinOutput.endsWith('/')) return withinOutput
-  const preview = artifactPreviewKind(artifact)
-  if (preview === 'pdf') {
-    const stem = fileStem(artifact?.source) || 'main'
-    return `${stem}.pdf`
-  }
-  if (preview === 'image') {
-    return String(artifact?.source ?? '').split('/').pop() || 'preview.png'
-  }
-  return 'index.html'
+  return null
 }
 
 // Identity of the output currently safe to display. Build-status events can

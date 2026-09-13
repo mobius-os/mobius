@@ -75,6 +75,24 @@ export function pinnedOrderHandoffStatus(currentKeys, expectedKeys) {
   return currentKeys.every(key => expected.has(key)) ? 'pending' : 'superseded'
 }
 
+/**
+ * Rebase a drag order onto the pinned identities that still exist after any
+ * in-flight pin/unpin writes settle. Keys the owner actually dragged retain
+ * their chosen relative order. A concurrently restored or externally-added
+ * pin keeps its previous slot, so the atomic endpoint always receives the
+ * complete current set without silently discarding the owner's reorder.
+ */
+export function reconcilePinnedOrder(requestedKeys, currentKeys) {
+  if (!Array.isArray(requestedKeys) || !Array.isArray(currentKeys)) return []
+  const current = new Set(currentKeys)
+  const requested = new Set(requestedKeys)
+  const reconciled = requestedKeys.filter(key => current.has(key))
+  currentKeys.forEach((key, index) => {
+    if (!requested.has(key)) reconciled.splice(index, 0, key)
+  })
+  return reconciled
+}
+
 function pinnedEntryKey(entry) {
   return `${entry.kind}:${entry.item.id}`
 }

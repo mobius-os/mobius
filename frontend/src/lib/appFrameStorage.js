@@ -1,12 +1,12 @@
 const STORAGE_PREFIX = 'mobius:app-frame-storage:'
 const TOKEN_PREFIX = 'mobius:app-token:'
+const LEGACY_MIGRATION_PREFIX = 'mobius:app-frame-storage-migrated:v1:'
 const MAX_KEY_LENGTH = 256
 const MAX_VALUE_LENGTH = 2 * 1024 * 1024
 const SHARED_KEYS = new Set([
   'mobius:setup-complete:v1',
   'mobius:system-setup-ready:v1',
 ])
-const THEME_KEYS = new Set(['mobius-theme'])
 const LEGACY_KEYS_BY_SLUG = {
   cuberun: new Set([
     'highscores', 'musicEnabled',
@@ -28,6 +28,43 @@ function tokenKey(appId) {
   return `${TOKEN_PREFIX}${encodeURIComponent(String(appId))}`
 }
 
+function legacyMigrationKey(appId) {
+  return `${LEGACY_MIGRATION_PREFIX}${encodeURIComponent(String(appId))}`
+}
+
+function legacyKeyBelongsToApp(appSlug, key) {
+  if (!isSafeVirtualStorageKey(key) || isSharedVirtualStorageKey(key)) return false
+  return LEGACY_KEYS_BY_SLUG[String(appSlug || '').toLowerCase()]?.has(key) === true
+}
+
+export function migrateLegacyAppFrameStorage(appId, appSlug, storage) {
+  const store = storageOrNull(storage)
+  if (!store) return false
+  const marker = legacyMigrationKey(appId)
+  try {
+    if (store.getItem(marker) === 'done') return true
+    const candidates = []
+    const prefix = appPrefix(appId)
+    for (let i = 0; i < store.length; i += 1) {
+      const key = store.key(i)
+      if (!legacyKeyBelongsToApp(appSlug, key)) continue
+      const value = store.getItem(key)
+      if (typeof value !== 'string' || value.length > MAX_VALUE_LENGTH) continue
+      candidates.push([key, value])
+    }
+    for (const [key, value] of candidates) {
+      const destination = `${prefix}${encodeURIComponent(key)}`
+      if (store.getItem(destination) === null) store.setItem(destination, value)
+    }
+    store.setItem(marker, 'done')
+    return true
+  } catch {
+    // A partial copy is safe: existing current values win, and no marker means
+    // the next app mount retries the remaining legacy keys.
+    return false
+  }
+}
+
 export function isSafeVirtualStorageKey(key) {
   if (typeof key !== 'string' || !key || key.length > MAX_KEY_LENGTH) return false
   const normalized = key.toLowerCase()
@@ -43,30 +80,13 @@ export function isSharedVirtualStorageKey(key) {
   return SHARED_KEYS.has(key)
 }
 
-export function isLegacyFrameStorageKey(appId, appSlug, key) {
-  if (!isSafeVirtualStorageKey(key)) return false
-  if (isSharedVirtualStorageKey(key) || THEME_KEYS.has(key)) return true
-  if (LEGACY_KEYS_BY_SLUG[String(appSlug || '').toLowerCase()]?.has(key)) {
-    return true
-  }
-  const escapedId = String(appId).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-  return new RegExp(`(^|[:/_-])${escapedId}([:/_-]|$)`).test(key)
-}
-
 export function readAppFrameStorage(appId, storage, appSlug) {
   const store = storageOrNull(storage)
   if (!store) return {}
+  migrateLegacyAppFrameStorage(appId, appSlug, store)
   const snapshot = {}
   try {
-    // Compatibility migration: old same-origin frames wrote app preferences
-    // directly into shell localStorage. Copy only shared theme/setup state,
-    // keys scoped to THIS numeric app id, and a tiny catalog legacy allowlist.
-    // A broad "anything except token" copy leaked shell navigation state (for
-    // example the active chat id) and sibling preferences into every frame.
-    // All future writes are isolated under this app's private prefix below.
-    for (let i = 0; i < store.length; i += 1) {
-      const key = store.key(i)
-      if (!isLegacyFrameStorageKey(appId, appSlug, key)) continue
+    for (const key of SHARED_KEYS) {
       const value = store.getItem(key)
       if (typeof value === 'string' && value.length <= MAX_VALUE_LENGTH) snapshot[key] = value
     }
@@ -189,4 +209,4 @@ export function clearCachedAppTokens(storage) {
   } catch {}
 }
 
-export const _storagePrefixes = { STORAGE_PREFIX, TOKEN_PREFIX }
+export const _storagePrefixes = { STORAGE_PREFIX, TOKEN_PREFIX, LEGACY_MIGRATION_PREFIX }

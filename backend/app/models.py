@@ -578,8 +578,8 @@ class ChatWait(Base):
   kind = Column(String(32), nullable=False)
   command = Column(Text, nullable=True, default=None)
   # Typed product waits keep their bounded, server-authored condition here.
-  # Command/timer rows leave it NULL.  Platform activation deliberately stores
-  # expected committed bytes rather than a shell predicate or Git ancestry.
+  # Command/timer rows leave it NULL. Platform Restart waits retain the action
+  # identity and originating boot; a later ready boot wakes the owning chat.
   condition_json = Column(JSON, nullable=True, default=None)
   # The declaring physical/logical execution identities are captured at
   # declaration time.  A later Goal dismissal or physical retry therefore
@@ -592,8 +592,11 @@ class ChatWait(Base):
   action_approved_at = Column(DateTime, nullable=True, default=None)
   due_at = Column(DateTime, nullable=True, default=None)
   interval_secs = Column(Integer, nullable=False, default=300)
-  # A wait never rots silently: on deadline the chat is woken with
-  # `deadline_expired` so the agent decides what to do next.
+  # Command/timer waits never rot silently: on deadline the chat is woken with
+  # `deadline_expired` so the agent decides what to do next. Platform
+  # activation rows share this required legacy storage column but deliberately
+  # do not expose or enforce it; their owner card remains until answer,
+  # cancellation, or a later ready boot.
   deadline_at = Column(DateTime, nullable=False)
   # armed -> met | expired | failed | cancelled. `failed` means the check
   # itself broke (distinct from a valid silent exit-1 "not yet"). Terminal
@@ -614,12 +617,11 @@ class ChatWait(Base):
 
 
 class PlatformBootSnapshot(Base):
-  """Immutable proof of restart-loaded source after DB/writer readiness.
+  """Immutable ready-boot receipt captured after DB/writer readiness.
 
-  Only paths named by activation waits are hashed.  The serving sentinel says
-  which committed tree uvicorn imported; persisting the relevant tree bytes at
-  the end of startup lets every matching waiter share one cheap proof without
-  polling a shell command or mistaking a baked fallback for activation.
+  Source identity remains useful audit context, but Restart waits care only
+  that a different boot became ready. The resumed agent verifies its work.
+  ``loaded_files_json`` remains for backward-compatible historical rows.
   """
 
   __tablename__ = "platform_boot_snapshots"
@@ -891,8 +893,8 @@ class AgentLifecycleEvent(Base):
   source_event_id = Column(String(160), nullable=True)
 
 
-class AgentLifecycleRunUpdate(Base):
-  """Append-only cursor stream of root ChatRun snapshots for Workflows.
+class ChatRunUpdate(Base):
+  """Append-only cursor stream of root ChatRun snapshots for lifecycle consumers.
 
   A helper event cursor cannot reveal a later root-run status change, while
   returning every historical run on each poll is unbounded. This companion
@@ -901,7 +903,7 @@ class AgentLifecycleRunUpdate(Base):
   rollback of a speculative ChatRun so consumers can remove the prior snapshot.
   """
 
-  __tablename__ = "agent_lifecycle_run_updates"
+  __tablename__ = "chat_run_updates"
   __table_args__ = {"sqlite_autoincrement": True}
 
   id = Column(Integer, primary_key=True, autoincrement=True)
@@ -920,7 +922,7 @@ class AgentLifecycleRunUpdate(Base):
 
 def _append_agent_lifecycle_run_update(_mapper, connection, run) -> None:
   """Record every inserted/updated ChatRun snapshot in the same transaction."""
-  connection.execute(AgentLifecycleRunUpdate.__table__.insert().values(
+  connection.execute(ChatRunUpdate.__table__.insert().values(
     chat_id=run.chat_id,
     chat_run_id=run.id,
     provider=run.provider,
@@ -933,7 +935,7 @@ def _append_agent_lifecycle_run_update(_mapper, connection, run) -> None:
 
 def _append_agent_lifecycle_run_tombstone(_mapper, connection, run) -> None:
   """Keep cursor consumers honest when a speculative ChatRun is rolled back."""
-  connection.execute(AgentLifecycleRunUpdate.__table__.insert().values(
+  connection.execute(ChatRunUpdate.__table__.insert().values(
     chat_id=run.chat_id,
     chat_run_id=run.id,
     provider=run.provider,
@@ -1290,10 +1292,9 @@ class App(Base):
 class Project(Base):
   """A first-class owner workspace containing files, chats, and artifacts.
 
-  Project files live outside the database. ``root_path`` is nevertheless
-  explicit so a non-destructive legacy import can point at an existing
-  app-storage ``files/`` tree without moving it. All access goes through the
-  project router's resolved-path confinement.
+  Project files live outside the database. ``root_path`` is explicit so
+  Projects can manage an existing confined source tree without copying it.
+  All access goes through the project router's resolved-path confinement.
   """
 
   __tablename__ = "projects"
@@ -1318,13 +1319,13 @@ class Project(Base):
     nullable=True, default=None, index=True,
   )
   template_snapshot_json = Column(JSON, nullable=False, default=dict)
-  legacy_source_json = Column(JSON, nullable=True, default=None)
   # Artifact registry plus per-artifact build status for this project. The ORM
   # row is the atomic source of truth (mirrors ``template_snapshot_json``), not
   # a lock-free on-disk manifest: build status transitions read-update-commit
   # this column serialized by the per-project build lock. Each entry is
-  # {id, name, builder, source, output_rel, status, updated_at, duration_ms,
-  # log_rel}. Nullable so an existing row reads as "no artifacts yet." The agent
+  # {id, name, builder, source, output_rel, preview, type_name, status,
+  # updated_at, duration_ms, log_rel}. Nullable so a row can have no artifacts.
+  # The agent
   # owns the project tree and may hand-edit this value, so every read tolerates
   # malformed entries rather than trusting the shape (see project_builders and
   # routes/projects.py artifact listing).

@@ -9,6 +9,7 @@ this module.
 
 import logging
 import os
+import sys
 import threading
 import time
 from contextvars import ContextVar, Token
@@ -38,6 +39,31 @@ _pool_metrics = {
 }
 
 
+def _assert_test_database_isolated() -> None:
+  """Refuse to construct an application engine in an unmarked test process.
+
+  Pytest imports a test module before it registers a module-level
+  ``pytest_plugins`` declaration. An out-of-tree probe can therefore import
+  ``app.database`` while it still inherits the live service environment, then
+  load the normal fixtures whose schema reset drops production tables. Every
+  supported test entrypoint marks its database as disposable before Python
+  starts; anything else must fail before SQLAlchemy creates an engine.
+  """
+  running_tests = (
+    os.environ.get("MOBIUS_TEST_RUNTIME") == "1"
+    or "pytest" in sys.modules
+    or any("pytest" in Path(arg).name for arg in sys.argv[:2])
+  )
+  if (
+    running_tests
+    and os.environ.get("MOBIUS_TEST_DATABASE_ISOLATED") != "1"
+  ):
+    raise RuntimeError(
+      "Refusing to create a database engine in an unisolated test process. "
+      "Use scripts/wt-pytest.sh or the disposable test Compose service."
+    )
+
+
 def set_database_request_label(label: str) -> Token:
   return _request_label.set(label)
 
@@ -48,6 +74,7 @@ def reset_database_request_label(token: Token) -> None:
 
 def _make_engine():
   """Creates the SQLAlchemy engine, ensuring the DB directory exists."""
+  _assert_test_database_isolated()
   settings = get_settings()
   is_sqlite = settings.database_url.startswith("sqlite")
   if settings.database_url.startswith("sqlite:////"):

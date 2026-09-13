@@ -104,7 +104,7 @@ Review the exact changed paths and use the smallest matching action:
 | `backend/app/*.py` | After compile checks, tests, and commit, one server restart loads the settled backend revision. |
 | `skill/core.md` | A server restart refreshes the cached constitution for new agent sessions only; existing sessions keep their immutable prompt snapshot. Unless new sessions need the rule immediately, leave it pending for the next separately approved restart. |
 | `backend/scripts/entrypoint.sh`, the exact `/app/scripts/*` bootstrap files it invokes, `backend/scripts/seed-skills/`, or `backend/runtime/` | Image-owned. Batch and test the change, then leave one image replacement pending; never rebuild between iterations. `platform_activation.py` is the source of truth for the exact bootstrap allowlist. |
-| `backend/runtime/identity_broker.py` | Served privileged source. The frozen `/app/runtime/served_runtime_launcher.py` starts it from `/data/platform`, so one server restart activates it and it never blocks a container replacement. The other `backend/runtime` files above stay image-owned. |
+| `backend/runtime/identity_broker.py` | Served privileged source. The frozen `/app/runtime/served_runtime_launcher.py` validates it before the served platform starts and launches it from `/data/platform`; validation failure selects the complete baked platform for that boot. One server restart activates a valid broker edit. The other `backend/runtime` files above stay image-owned. |
 | `backend/scripts/pm-commit` | One server restart refreshes the installed launcher from the served checkout; no image rebuild. |
 | Other `backend/scripts/`, tests, docs, and shared skill content | Takes effect on its next invocation or read. No server restart or image rebuild. An agent that already read old instructions cannot be rewritten in place. |
 | A package needed by the current task | Install it into the running container first when safe. A new process can use it immediately; restart only when the already-running backend must load it. |
@@ -201,11 +201,13 @@ the write-surface contract.
    not approve a restart.
 
    `request_restart` takes no action arguments. The platform derives the exact
-   committed, restart-loadable source and saves its own **Restart now** / **Not
-   now** card. Its receipt confirms only that the card was saved, not approval:
-   end the turn with no further text or tools. The owner's **Restart now** click
-   is dispatched by the platform without waking an agent to forge an answer or
-   issue a shell command. Do not use `request_approval` or Codex's
+   committed, restart-loadable source and saves its own card with one exact
+   **Restart now** action plus a written-response path. Its receipt confirms
+   only that the card was saved, not approval: end the turn with no further
+   text or tools. The owner's **Restart now** click is dispatched by the
+   platform without waking an agent to forge an answer or issue a shell
+   command. A written response continues the conversation without granting
+   restart authority. Do not use `request_approval` or Codex's
    `request_user_input` for platform restart permission.
 
    If the tool is absent, the same saved-card operation is available through:
@@ -221,9 +223,10 @@ the write-surface contract.
 
    The card owns at-most-once admission for its exact action. A lost response,
    duplicate click, or ambiguous process death must never cause an agent to
-   replay the restart. Möbius confirms loaded-source readiness after boot and
-   resumes each matching waiting chat independently; unrelated waits and
-   queued work keep their existing barriers. An uncertain outcome needs fresh,
+   replay the restart. Any later ready Möbius boot resumes every linked
+   Restart-card chat independently; each resumed agent verifies whether its
+   changes loaded. Unrelated waits and queued work keep their existing
+   barriers. An uncertain outcome needs fresh,
    specific approval rather than an automatic retry. A scheduled/background
    agent cannot ask live, so it leaves activation pending for the partner.
 4. If the edited tree fails to import, the baked shell stays available. Refresh
