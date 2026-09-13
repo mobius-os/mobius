@@ -575,7 +575,7 @@ def test_agent_settings_override_rejects_unknown_keys():
   from pydantic import ValidationError
   try:
     AgentSettingsOverride(
-      model="claude-opus-4-7-20251215",
+      model="claude-opus-4-7",
       sandbox_mode="workspace-write",
     )
   except ValidationError:
@@ -712,7 +712,7 @@ def test_patch_model_only_with_cross_provider_model_switches_provider(
   r = client.patch(
     f"/api/chats/{chat.id}",
     headers=auth,
-    json={"agent_settings_json": {"model": "claude-sonnet-4-5-20251001"}},
+    json={"agent_settings_json": {"model": "claude-sonnet-4-5-20250929"}},
   )
   assert r.status_code == 200
 
@@ -841,7 +841,7 @@ def test_patch_model_only_same_provider_does_not_change_provider(
   r = client.patch(
     f"/api/chats/{chat.id}",
     headers=auth,
-    json={"agent_settings_json": {"model": "claude-opus-4-7-20251215"}},
+    json={"agent_settings_json": {"model": "claude-opus-4-7"}},
   )
   assert r.status_code == 200, r.json()
   assert r.json()["provider"] == "claude"

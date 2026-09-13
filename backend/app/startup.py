@@ -401,30 +401,6 @@ def _start_chat_writer(_context: StartupContext) -> None:
   start_writer()
 
 
-def _retire_legacy_gauntlet_execution(context: StartupContext) -> None:
-  """Retire removed workflow work before any generic recovery can restart it.
-
-  This is a cold-start data cutover, not an online cancellation path. Loading
-  this backend already requires a normal worker restart, which stops the old
-  provider processes before lifespan begins. The writer command therefore
-  owns persistence only; if it cannot commit, the required-task flag below
-  degrades the database boot and keeps every recovery supervisor stopped.
-  """
-  from app.chat_writer import (
-    RetireLegacyGauntletExecution,
-    get_writer,
-    wait_ack,
-  )
-
-  result = wait_ack(get_writer().submit(RetireLegacyGauntletExecution()))
-  changed = sum(int(value or 0) for value in result.values())
-  if changed:
-    context.logger.info(
-      "retired legacy Gauntlet execution: %s",
-      ", ".join(f"{key}={value}" for key, value in result.items()),
-    )
-
-
 def _backfill_active_assistant_identities(context: StartupContext) -> None:
   """Route the legacy parked-question identity repair through chat_writer."""
   from app import models
@@ -598,12 +574,6 @@ DATABASE_STARTUP_TASKS = (
   # failures still fail open exactly as they did when the writer started near
   # the end of the plan.
   StartupTask("start chat writer", _start_chat_writer),
-  StartupTask(
-    "retire legacy Gauntlet execution",
-    _retire_legacy_gauntlet_execution,
-    checkpoint="startup_legacy_gauntlet_retired",
-    database_failure_reason="legacy_gauntlet_retirement_failed",
-  ),
   StartupTask(
     "backfill active assistant identities",
     _backfill_active_assistant_identities,

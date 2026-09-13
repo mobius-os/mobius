@@ -34,7 +34,7 @@ def test_known_models_fallback_lists_current_claude_and_codex():
   endpoint still offers today's models — not a stale snapshot.
 
   These assert PRESENCE of the known-current ids rather than freezing an
-  exact list: the registry is meant to grow (new dated aliases get appended
+  exact list: the registry is meant to grow (new provider IDs get appended
   as Anthropic ships them), and an exact-match would force a test edit on
   every additive bump. But a missing or renamed CANONICAL id (e.g. a typo'd
   Opus suffix or a dropped default) is a real regression the prefix-only
@@ -52,10 +52,9 @@ def test_known_models_fallback_lists_current_claude_and_codex():
     "claude-opus-4-8",
     "claude-opus-4-7",
     "claude-opus-4-6",
-    "claude-opus-4-5-20251001",
+    "claude-opus-4-5-20251101",
     "claude-sonnet-4-6",
-    "claude-sonnet-4-7-20251215",
-    "claude-sonnet-4-5-20251001",
+    "claude-sonnet-4-5-20250929",
     "claude-haiku-4-5-20251001",
   ):
     assert model_id in claude, f"{model_id} missing from KNOWN_MODELS[claude]"
@@ -115,21 +114,15 @@ def test_fallback_models_shape_matches_registry_entries():
   assert ids == providers.KNOWN_MODELS["claude"], "order preserved"
 
 
-def test_live_catalog_keeps_new_models_above_older_compatibility_aliases():
-  """Provider newest-first order must reach every picker unchanged.
-
-  A newly discovered model used to be appended after the curated fallback
-  list, burying it below older choices. Compatibility aliases that discovery
-  omits still remain usable, but only after the live catalog.
-  """
+def test_live_catalog_is_authoritative_when_discovery_succeeds():
+  """Provider newest-first order and membership reach pickers unchanged."""
   entries = providers._live_model_entries("claude", [
     {"id": "claude-future-6", "label": "Claude Future 6"},
     {"id": "claude-fable-5-1", "label": "Claude Fable 5.1"},
   ])
   ids = [entry["id"] for entry in entries]
 
-  assert ids[:2] == ["claude-future-6", "claude-fable-5-1"]
-  assert ids.index("claude-opus-4-8") > ids.index("claude-fable-5-1")
+  assert ids == ["claude-future-6", "claude-fable-5-1"]
 
 
 def test_model_specific_effort_levels_are_registry_metadata(monkeypatch):

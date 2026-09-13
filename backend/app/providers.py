@@ -54,17 +54,14 @@ KNOWN_MODELS = {
     "claude-fable-5-1",
     "claude-fable-5",
     "claude-sonnet-5",
-    # Anthropic switched to dateless pinned IDs starting with 4.6;
-    # the dated entries below stay listed because existing chats
-    # persist them in agent_settings_json and the API still resolves
-    # them as aliases.
+    # Anthropic switched to dateless pinned IDs starting with 4.6. Keep only
+    # provider-owned IDs here; migration 0056 rewrites obsolete platform IDs.
     "claude-opus-4-8",
     "claude-opus-4-7",
     "claude-opus-4-6",
-    "claude-opus-4-5-20251001",
+    "claude-opus-4-5-20251101",
     "claude-sonnet-4-6",
-    "claude-sonnet-4-7-20251215",
-    "claude-sonnet-4-5-20251001",
+    "claude-sonnet-4-5-20250929",
     "claude-haiku-4-5-20251001",
   ],
   "codex": [
@@ -121,11 +118,10 @@ MODEL_CONTEXT_WINDOWS: dict[str, int] = {
   "claude-opus-4-8": 1_000_000,
   "claude-opus-4-7": 1_000_000,
   "claude-opus-4-6": 1_000_000,
+  "claude-opus-4-5-20251101": 200_000,
   "claude-sonnet-5": 1_000_000,
-  "claude-sonnet-4-7-20251215": 1_000_000,
   "claude-sonnet-4-6": 1_000_000,
-  "claude-opus-4-5-20251001": 200_000,
-  "claude-sonnet-4-5-20251001": 200_000,
+  "claude-sonnet-4-5-20250929": 200_000,
   "claude-haiku-4-5-20251001": 200_000,
   "gpt-5.6-sol": 258_400,
   "gpt-5.6-terra": 258_400,
@@ -1237,28 +1233,17 @@ def _live_model_entries(
     live_by_id[raw["id"]] = raw
 
   # The live catalog is already ordered newest first by each provider. Keep
-  # that order intact so a just-released model is immediately the first choice
-  # in every picker. Older compatibility aliases remain available after the
-  # live catalog when discovery temporarily omits them.
+  # that order intact and do not mix failure-fallback entries into a successful
+  # discovery response: the provider is authoritative about what works now.
   ordered_ids = list(live_by_id)
-  ordered_ids.extend(
-    model_id for model_id in KNOWN_MODELS.get(provider_id, [])
-    if model_id not in live_by_id
-  )
   entries: list[dict[str, Any]] = []
   for model_id in ordered_ids:
-    metadata = live_by_id.get(model_id, {})
+    metadata = live_by_id[model_id]
     label = metadata.get("label")
     efforts = metadata.get("effort_levels")
     context_window = metadata.get("context_window")
     if not isinstance(label, str) or not label.strip():
-      # A catalog-discovered model owns its upstream label. A curated model
-      # appended only because the live catalog omitted it keeps the product
-      # name from the same curated registry instead of exposing its raw id.
-      label = (
-        MODEL_LABELS.get(model_id, model_id)
-        if model_id not in live_by_id else model_id
-      )
+      label = model_id
     else:
       label = label.strip()
     entry = {

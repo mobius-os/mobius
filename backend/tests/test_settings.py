@@ -701,24 +701,30 @@ def test_settings_update_provider_validator_rejects_unknown():
 # ─── Model registry + owner prefs ─────────────────────────────────────
 
 
-def test_model_registry_returns_known_models_on_missing_creds(
+def test_model_registry_returns_known_models_on_discovery_failure(
   client, auth, monkeypatch,
 ):
   """`/api/models` returns KNOWN_MODELS for both providers when neither
   upstream is reachable. Confirms the per-provider fallback works.
 
-  The TestClient has no real Anthropic / Codex credentials so both
-  fetchers raise; the registry serves KNOWN_MODELS for both. Every
+  Provider discovery is forced offline, so the registry serves
+  KNOWN_MODELS for every provider. Every
   entry is `available=True` in the fallback path because there's no
   live signal to mark anything unavailable.
   """
   from app import providers
   from app.providers import KNOWN_MODELS, _fallback_models, invalidate_model_cache
+
   monkeypatch.setattr(
     providers.PROVIDERS["mobius"],
     "check_auth",
     lambda _data_dir: "Möbius account is not linked",
   )
+
+  async def discovery_fails(_provider_id, _data_dir):
+    raise RuntimeError("offline")
+
+  monkeypatch.setattr(providers, "_fetch_provider_models", discovery_fails)
   invalidate_model_cache()
   res = client.get("/api/models", headers=auth)
   assert res.status_code == 200
@@ -939,21 +945,18 @@ def test_model_prefs_clear(client, auth, db):
   assert owner.model_prefs_json == {"hidden_ids": []}
 
 
-def test_live_model_entries_keep_curated_aliases_plus_live_extras():
-  """Live order leads while omitted compatibility aliases remain available."""
-  from app.providers import KNOWN_MODELS, _live_model_entries
-  merged = _live_model_entries(
+def test_live_model_entries_trust_successful_provider_catalog():
+  """A successful discovery response contains only provider-owned models."""
+  from app.providers import _live_model_entries
+  entries = _live_model_entries(
     "claude", ["claude-future-model", "claude-opus-4-8"],
   )
-  ids = [row["id"] for row in merged]
-  assert ids[:2] == ["claude-future-model", "claude-opus-4-8"]
-  assert ids[2:] == [
-    model_id for model_id in KNOWN_MODELS["claude"]
-    if model_id != "claude-opus-4-8"
+  assert [row["id"] for row in entries] == [
+    "claude-future-model", "claude-opus-4-8",
   ]
 
 
-def test_live_model_entries_float_curated_defaults_in_requested_order():
+def test_live_model_entries_preserve_provider_order():
   from app import providers
 
   live = [
@@ -963,10 +966,30 @@ def test_live_model_entries_float_curated_defaults_in_requested_order():
   entries = providers._live_model_entries(
     "claude", live,
   )
-  assert [entry["id"] for entry in entries] == live + [
-    model_id for model_id in providers.KNOWN_MODELS["claude"]
-    if model_id not in live
-  ]
+  assert [entry["id"] for entry in entries] == live
+
+
+def test_offline_model_fallback_keeps_real_provider_ids_only():
+  from app import providers
+
+  claude_ids = {row["id"] for row in providers._fallback_models("claude")}
+  codex_ids = {row["id"] for row in providers._fallback_models("codex")}
+  assert {
+    "claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6",
+    "claude-opus-4-5-20251101", "claude-sonnet-4-6",
+    "claude-sonnet-4-5-20250929", "claude-haiku-4-5-20251001",
+  }.issubset(claude_ids)
+  assert {
+    "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5",
+    "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex-spark",
+  }.issubset(codex_ids)
+  assert not {
+    "claude-opus-4-5-20251001",
+    "claude-sonnet-4-5-20251001",
+    "claude-opus-4-6-20251015",
+    "claude-opus-4-7-20251215",
+    "claude-sonnet-4-7-20251215",
+  } & claude_ids
 
 
 def test_live_model_entries_prefer_provider_display_names():
