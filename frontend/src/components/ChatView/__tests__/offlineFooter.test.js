@@ -9,6 +9,7 @@ const connectionStatus = readFileSync(new URL('../ConnectionStatus.jsx', import.
 const chatCss = readFileSync(new URL('../ChatView.css', import.meta.url), 'utf8')
 const scrollMode = readFileSync(new URL('../useScrollMode.js', import.meta.url), 'utf8')
 const shell = readFileSync(new URL('../../Shell/Shell.jsx', import.meta.url), 'utf8')
+const shellCss = readFileSync(new URL('../../Shell/Shell.css', import.meta.url), 'utf8')
 const apiClient = readFileSync(new URL('../../../api/client.js', import.meta.url), 'utf8')
 const systemStream = readFileSync(new URL('../../../hooks/useSystemEventStream.js', import.meta.url), 'utf8')
 const settingsView = readFileSync(new URL('../../SettingsView/SettingsView.jsx', import.meta.url), 'utf8')
@@ -75,6 +76,11 @@ test('the shell is the one persistent connection owner while send failures stay 
   assert.match(shell, /\{connectionStatusLabel && \([\s\S]*?className="shell__connection-status"[\s\S]*?\{connectionStatusLabel\}/)
   assert.doesNotMatch(shell, /shell__sr-only">\{connectionStatusLabel\}/,
     'connection state must be readable without hover or assistive technology')
+  assert.match(
+    shellCss,
+    /\.shell__connection-status\s*\{[\s\S]*?flex:\s*0 1 auto;[\s\S]*?min-width:\s*0;[\s\S]*?max-width:\s*40vw;[\s\S]*?text-overflow:\s*ellipsis;/,
+    'the visible phone status must shrink instead of displacing the header',
+  )
   assert.doesNotMatch(chatView, /You're offline — chat needs a connection\./)
   assert.doesNotMatch(chatInputBar, /You're offline — chat needs a connection\./)
   assert.match(

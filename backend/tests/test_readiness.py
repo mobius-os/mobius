@@ -66,6 +66,7 @@ def test_runtime_schema_loss_fails_readiness_and_stays_degraded(
     assert ready.status_code == 503
     assert ready.json() == {
       "ready": False,
+      "boot_id": main_module._BOOT_ID,
       "reason": "database_runtime_schema_missing",
     }
     # Sticky until restart: a later catalog result cannot make skipped or

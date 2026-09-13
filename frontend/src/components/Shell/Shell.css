@@ -601,12 +601,16 @@
    no space. On desktop it stays visible even when the navigation rail folds. */
 .shell__connection-status {
   align-self: center;
-  flex: 0 0 auto;
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 40vw;
   margin-left: 12px;
   color: var(--text);
   background: var(--bg);
   font-size: 12px;
   line-height: 1.4;
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
   pointer-events: auto;
 }
@@ -615,6 +619,7 @@
     position: fixed;
     top: 12px;
     left: var(--desktop-rail-width);
+    max-width: none;
     margin-left: 12px;
     padding: 4px 8px;
     border: 1px solid var(--border);
