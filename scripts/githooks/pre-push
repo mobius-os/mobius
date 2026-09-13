@@ -301,8 +301,7 @@ if changed_match '^(backend/scripts/package-static-app\.mjs|scripts/package-stat
   fi
 fi
 
-# 5. Backend pytest — explicit locally, required in PR CI, and only possible
-#    when the shared local venv exists.
+# 5. Backend pytest — explicit locally and required in PR CI.
 if backend_needs_pytest && [ "$RUN_FULL_BACKEND" -eq 0 ]; then
   warn "backend changed, but this push does not update main —"
   warn "  skipping full pytest (required PR CI runs it)."
@@ -312,15 +311,23 @@ elif backend_needs_pytest; then
   # Invoke the MAIN checkout's canonical runner so an older linked worktree
   # cannot revive an older launcher. Opt into its best-effort full-suite lock
   # because concurrent pre-push suites only add resource contention.
-  if (cd "$ROOT" \
-      && MOBIUS_PYTEST_SERIALIZE=1 \
-         "$MAIN/scripts/wt-pytest.sh" -q >"$PP_TMP/be" 2>&1); then
-    ok "backend pytest passed"
-  else
-    err "backend pytest FAILED:"
-    tail -n 30 "$PP_TMP/be" | sed 's/^/    /' >&2
-    fail_check backend-pytest
-  fi
+  backend_status=0
+  (cd "$ROOT" \
+    && MOBIUS_PYTEST_SERIALIZE=1 \
+       "$MAIN/scripts/wt-pytest.sh" -q >"$PP_TMP/be" 2>&1) \
+    || backend_status=$?
+  case "$backend_status" in
+    0) ok "backend pytest passed" ;;
+    78)
+      warn "backend pytest skipped: no Python test runtime (PR CI runs it)."
+      tail -n 4 "$PP_TMP/be" | sed 's/^/    /' >&2
+      ;;
+    *)
+      err "backend pytest FAILED:"
+      tail -n 30 "$PP_TMP/be" | sed 's/^/    /' >&2
+      fail_check backend-pytest
+      ;;
+  esac
 elif changed_match '^backend/scripts/seed-skills/.*\.md$'; then
   ok "backend seed-skill docs changed — full pytest not required"
 fi

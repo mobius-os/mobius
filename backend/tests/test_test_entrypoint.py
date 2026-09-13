@@ -59,6 +59,8 @@ def test_host_runner_isolates_database_before_pytest_collects_modules():
   assert 'DATABASE_URL="sqlite:///$TEST_RUNTIME_ROOT/test.db"' in source
   assert 'DATA_DIR="$TEST_RUNTIME_ROOT/data"' in source
   assert "MOBIUS_TEST_DATABASE_ISOLATED=1" in source
+  assert "trap cleanup_test_runtime EXIT" in source
+  assert "trap 'exit 130' INT" in source
 
 
 def test_live_database_guard_requires_database_isolation_not_generic_test_mode():
@@ -76,14 +78,18 @@ def test_pre_push_delegates_backend_pytest_to_the_canonical_runner():
   assert '"$MAIN/scripts/wt-pytest.sh" -q' in hook
   assert '"$VENV" -m pytest' not in hook
   assert "flock" not in hook
+  assert '78)' in hook
+  assert "no Python test runtime" in hook
 
   runner = HOST_RUNNER.read_text()
   assert '"${MOBIUS_PYTEST_SERIALIZE:-0}" = "1"' in runner
   assert '"$MAIN/backend/.venv/.suite.lock"' in runner
+  assert "exit 78" in runner
 
 
 def test_image_runtime_reports_when_its_python_lock_differs():
   source = HOST_RUNNER.read_text()
   assert 'cmp -s "$ROOT/backend/requirements.lock" /app/requirements.lock' in source
+  assert 'elif [ -r /app/requirements.lock ]' in source
   assert "checkout requirements.lock differs from the image runtime" in source
   assert "not dependency-authoritative" in source
