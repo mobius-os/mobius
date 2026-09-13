@@ -80,7 +80,7 @@ def test_runtime_pruning_waits_for_readers_then_keeps_current_and_previous(db, r
     pin = (lock_dir / f"{row.id}.lock").open("a")
     fcntl.flock(pin, fcntl.LOCK_EX)
   else:
-    pin = runtime.hold_static_runtime(row.id)
+    pin = runtime.hold_runtime(row.id)
   try:
     assert runtime.prune_runtime(row, previous_revision=revisions[-2]) == 0
     assert all((runtime.runtime_parent(row.id) / revision).is_dir() for revision in revisions)

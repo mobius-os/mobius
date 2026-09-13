@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from app import auth as auth_tokens, models
+from app import app_services, auth as auth_tokens, models
 from app.applied_app_runtime import runtime_parent
 from app.config import get_settings
 
@@ -91,23 +91,14 @@ def test_public_service_requires_an_explicit_reviewed_grant(client, auth, db):
   assert private.id != public.id
 
 
-def test_social_protocol_address_dispatches_to_the_app_owned_service(
-  client, auth, db,
-):
+def test_app_services_have_no_app_specific_route_aliases(client, auth, db):
   _service_app(db, access="public", slug="common")
 
-  peer = client.get("/api/common/status")
-  local = client.get("/api/common/status", headers=auth)
-  internal = client.get("/api/services/common/status", headers=auth)
+  canonical = client.get("/api/app-services/common/status")
+  legacy = client.get("/api/common/status")
 
-  assert peer.status_code == 201
-  assert peer.json()["scope"] == "public"
-  assert local.status_code == 201
-  assert local.json()["scope"] == "owner"
-  assert internal.status_code == 201
-  assert internal.json()["scope"] == "owner"
-  assert "deprecation" not in peer.headers
-  assert "sunset" not in peer.headers
+  assert canonical.status_code == 201, canonical.text
+  assert legacy.status_code == 404
 
 
 def test_shared_service_requires_an_explicit_cross_app_grant(
@@ -146,6 +137,61 @@ def test_service_contract_is_bound_to_the_accepted_runtime(client, auth, db):
 
   assert response.status_code == 503
   assert response.json()["detail"] == "Accepted app service entry is unavailable."
+
+
+def test_service_runtime_stays_pinned_through_process_exit(
+  client, auth, db, monkeypatch,
+):
+  app = _service_app(db, slug="pinned-service")
+  state = {"closed": False}
+
+  class Pin:
+    def close(self):
+      state["closed"] = True
+
+  monkeypatch.setattr(app_services, "hold_runtime", lambda _app_id: Pin())
+  response = client.get(f"/api/apps/{app.id}/service/status", headers=auth)
+
+  assert response.status_code == 201
+  assert state["closed"] is True
+
+
+def test_service_cannot_set_transport_or_credential_headers(client, auth, db):
+  app = _service_app(db, slug="header-service")
+  accepted = runtime_parent(app.id) / ("a" * 64)
+  (accepted / "service.py").write_text(
+    "import json\nprint(json.dumps({\"headers\":{\"Set-Cookie\":\"x=y\"}}))\n"
+  )
+
+  response = client.get(f"/api/apps/{app.id}/service/status", headers=auth)
+
+  assert response.status_code == 502
+  assert response.json()["detail"] == "response contains an invalid header"
+  assert "set-cookie" not in response.headers
+
+
+def test_service_rejects_nonstandard_json_constants(client, auth, db):
+  app = _service_app(db, slug="constant-service")
+  accepted = runtime_parent(app.id) / ("a" * 64)
+  (accepted / "service.py").write_text('print("{\\\"body\\\":NaN}")\n')
+
+  response = client.get(f"/api/apps/{app.id}/service/status", headers=auth)
+
+  assert response.status_code == 502
+  assert response.json()["detail"] == "App service returned invalid JSON."
+
+
+def test_service_rejects_nonstandard_request_json(client, auth, db):
+  app = _service_app(db, slug="request-constant-service")
+
+  response = client.post(
+    f"/api/apps/{app.id}/service/status", headers={
+      **auth, "Content-Type": "application/json",
+    }, content='{"value":NaN}',
+  )
+
+  assert response.status_code == 400
+  assert response.json()["detail"] == "App service requests must contain JSON."
 
 
 def test_public_service_failure_does_not_expose_app_diagnostics(client, auth, db):

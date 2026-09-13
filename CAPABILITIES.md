@@ -138,7 +138,8 @@ reviewed service to other installed apps at `/api/services/{slug}/{path}` by
 setting `access` to `apps`, or additionally expose anonymous calls at
 `/api/app-services/{slug}/{path}` by setting it to `public`. These are explicit
 install-time grants and do not widen the service app token's accepted
-permissions. Services receive the same `APP_ID`, `APP_SLUG`,
+permissions. The generic routes are the whole contract: the platform does not
+carry app-specific path aliases. Services receive the same `APP_ID`, `APP_SLUG`,
 `APP_STORAGE_DIR`, `API_BASE_URL`, and short-lived
 `APP_TOKEN` environment as other reviewed app-owned processes.
 

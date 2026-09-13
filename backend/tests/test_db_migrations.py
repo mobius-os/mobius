@@ -375,6 +375,36 @@ def test_run_migrations_removes_retired_job_authority_receipts(
   }
 
 
+def test_capability_schema_6_upgrade_preserves_all_accepted_fields(tmp_path):
+  eng = create_engine(f"sqlite:///{tmp_path / 'service-contract.db'}")
+  models.Base.metadata.create_all(eng)
+  accepted = {
+    "schema": 5,
+    "service": {
+      "entry": "service.py",
+      "access": "apps",
+      "protocol": "json-v1",
+    },
+    "future_optional_field": {"kept": True},
+  }
+  with Session(eng) as session:
+    app = models.App(
+      name="Service app", slug="service-app", source_dir="/tmp/service-app",
+      description="", jsx_source="export default () => null",
+      capability_contract=accepted,
+    )
+    session.add(app)
+    session.commit()
+    app_id = app.id
+
+  migrations._advance_app_capability_contract_schema_6(eng)
+  migrations._advance_app_capability_contract_schema_6(eng)
+
+  with Session(eng) as session:
+    contract = session.get(models.App, app_id).capability_contract
+  assert contract == {**accepted, "schema": 6}
+
+
 def test_run_migrations_adds_manifest_url_to_existing_apps_table(tmp_path):
   db_path = tmp_path / "legacy.db"
   eng = create_engine(f"sqlite:///{db_path}")

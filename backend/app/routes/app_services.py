@@ -21,20 +21,14 @@ router = APIRouter(tags=["app-services"])
 _limiter = Limiter(key_func=get_remote_address, key_style="endpoint")
 
 
+def _reject_json_constant(value: str):
+  raise ValueError(f"invalid JSON constant: {value}")
+
+
 def _response(status: int, body, headers: dict[str, str], media_type: str | None):
   if media_type is not None:
     return Response(body, status_code=status, headers=headers, media_type=media_type)
   return JSONResponse(body, status_code=status, headers=headers)
-
-
-def _header_principal(request: Request, db: Session) -> Principal | None:
-  authorization = request.headers.get("authorization")
-  if not authorization:
-    return None
-  scheme, separator, token = authorization.partition(" ")
-  if separator != " " or scheme.lower() != "bearer" or not token:
-    raise HTTPException(401, "Invalid authorization header.")
-  return get_principal(token, db)
 
 
 async def _envelope(request: Request, path: str, *, public: bool, scope: str) -> dict:
@@ -48,8 +42,8 @@ async def _envelope(request: Request, path: str, *, public: bool, scope: str) ->
   body = None
   if raw:
     try:
-      body = json.loads(raw)
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+      body = json.loads(raw, parse_constant=_reject_json_constant)
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError, RecursionError) as exc:
       raise HTTPException(400, "App service requests must contain JSON.") from exc
   return {
     "schema": 1,
@@ -159,58 +153,6 @@ async def public_app_service(
   if owner is None:
     raise HTTPException(503, "Owner setup is incomplete.")
   envelope = await _envelope(request, path, public=True, scope="public")
-  db.expunge(app)
-  db.expunge(owner)
-  db.close()
-  status, body, headers, media_type = await app_services.invoke_service(
-    app, owner, envelope,
-  )
-  return _response(status, body, headers, media_type)
-
-
-@router.api_route(
-  "/api/common/{path:path}",
-  methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
-)
-@_limiter.limit("60/minute")
-async def social_protocol_service(
-  path: str,
-  request: Request,
-  db: Session = Depends(get_db),
-):
-  """Serve Social's published federation protocol through its app-owned service.
-
-  ``/api/common`` is an independently deployed peer contract, not an internal
-  runtime alias.  The platform owns only authentication and bounded dispatch;
-  the installed Social app owns every response and protocol decision.
-  """
-  app = (
-    db.query(models.App)
-    .filter(models.App.slug == "common", models.App.deleted_at.is_(None))
-    .one_or_none()
-  )
-  if app is None:
-    raise HTTPException(404, "Social service not found.")
-  app_services.service_contract(app, access="public")
-  principal = _header_principal(request, db)
-  public = principal is None
-  if not public and request.method != "GET":
-    reject_cross_site(request)
-  actor = {"scope": "public"}
-  owner = db.query(models.Owner).first() if public else principal.owner
-  caller = None
-  if principal is not None:
-    caller = db.get(models.App, principal.app_id) if principal.app_id else None
-    actor = {
-      "scope": principal.scope,
-      "app_id": principal.app_id,
-      "app_slug": caller.slug if caller is not None else None,
-      "delegated": principal.delegation_id is not None,
-    }
-  if owner is None:
-    raise HTTPException(503, "Owner setup is incomplete.")
-  envelope = await _envelope(request, path, public=public, scope=actor["scope"])
-  envelope["actor"] = actor
   db.expunge(app)
   db.expunge(owner)
   db.close()

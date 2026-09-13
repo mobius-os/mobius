@@ -110,6 +110,56 @@ def _reviewer_assert_live_revision(
   return pull
 
 
+def _owner_bound_manual_plan(body: ReviewerCommentBody, result: dict) -> dict:
+  """Accept validation from Reviewer without delegating the public target."""
+  expected = body.model_dump()
+  exact = (
+    str(result.get("identity") or "").lower() == expected["identity"].lower()
+    and str(result.get("repository") or "").casefold()
+      == expected["repository"].strip().casefold()
+    and result.get("pr_number") == expected["pr_number"]
+    and str(result.get("head_sha") or "").lower() == expected["head_sha"].lower()
+    and str(result.get("base_sha") or "").lower() == expected["base_sha"].lower()
+    and str(result.get("guide_hash") or "").lower()
+      == expected["guide_hash"].lower()
+    and result.get("body") == expected["body"].strip()
+  )
+  if not exact:
+    raise HTTPException(502, "Reviewer policy tried to change the approved action.")
+  return {
+    "identity": expected["identity"].lower(),
+    "repository": expected["repository"].strip(),
+    "pr_number": expected["pr_number"],
+    "head_sha": expected["head_sha"].lower(),
+    "base_sha": expected["base_sha"].lower(),
+    "guide_hash": expected["guide_hash"].lower(),
+    "body": expected["body"].strip(),
+  }
+
+
+def _owner_bound_comment(body: str, head_sha: str, result: dict) -> str:
+  expected = body.strip()
+  if (
+    result.get("body") != expected
+    or str(result.get("head_sha") or "").lower() != head_sha.lower()
+  ):
+    raise HTTPException(502, "Reviewer policy tried to change the approved comment.")
+  return expected
+
+
+def _owner_bound_grant(body: ReviewerGrantBody, result: dict) -> dict:
+  from app import reviewer_automation
+  expected = {
+    "repositories": reviewer_automation.normalized_repositories(body.repositories),
+    "guide_hash": body.guide_hash.lower(),
+    "max_rounds_per_pr": body.max_rounds_per_pr,
+    "daily_post_ceiling": body.daily_post_ceiling,
+  }
+  if result != expected:
+    raise HTTPException(502, "Reviewer policy tried to broaden the approved grant.")
+  return expected
+
+
 async def _reviewer_manual_plan(
   app_id: int, body: ReviewerCommentBody, expected_nonce: str | None,
   db: Session,
@@ -137,7 +187,7 @@ async def _reviewer_manual_plan(
     result = await app_services.invoke_policy(
       current, owner, "reviewer/manual-plan", body.model_dump(),
     )
-    return result
+    return _owner_bound_manual_plan(body, result)
 
 
 async def _reviewer_validate_comment(
@@ -158,7 +208,7 @@ async def _reviewer_validate_comment(
     app, owner, "reviewer/validate-comment",
     {"body": body, "head_sha": head_sha},
   )
-  return str(result["body"])
+  return _owner_bound_comment(body, head_sha, result)
 
 
 async def _reviewer_prepare_grant(
@@ -175,9 +225,10 @@ async def _reviewer_prepare_grant(
   db.expunge(app)
   db.expunge(owner)
   db.close()
-  return await app_services.invoke_policy(
+  result = await app_services.invoke_policy(
     app, owner, "reviewer/normalize-grant", body.model_dump(),
   )
+  return _owner_bound_grant(body, result)
 
 
 def _reviewer_write_comment(

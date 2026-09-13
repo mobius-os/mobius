@@ -349,8 +349,8 @@ def migrate_legacy_job_declarations(db) -> tuple[int, list[str]]:
   return migrated, warnings
 
 
-def hold_static_runtime(app_id: int):
-  """Pin runtime files until a static HTTP response has finished sending."""
+def hold_runtime(app_id: int):
+  """Pin accepted runtime files while any reader is still using them."""
   parent = Path(get_settings().data_dir) / "run" / "app-runtime-readers"
   parent.mkdir(parents=True, exist_ok=True)
   handle = (parent / f"{int(app_id)}.lock").open("a")
@@ -367,8 +367,8 @@ def prune_runtime(app, *, previous_revision: str | None = None) -> int:
 
   The existing single-flight job lock covers job-context lookup AND child
   lifetime, so pruning cannot race a job that has not published its path yet.
-  Static responses use a short shared read pin. A busy app defers cleanup to
-  the next Apply or startup rather than interrupting running work.
+  Static responses and app services use a short shared read pin. A busy app
+  defers cleanup to the next Apply or startup rather than interrupting work.
   """
   parent = runtime_parent(app.id)
   if not parent.is_dir():

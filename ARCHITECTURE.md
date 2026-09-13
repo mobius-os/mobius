@@ -274,7 +274,7 @@ not part of the baked boot infrastructure.
 
 | File | Role |
 |------|------|
-| `bootstrap.py` | First-boot bootstrap (`ensure_bootstrap_apps_installed`) that auto-installs the App Store, Memory, and Reflection; called idempotently from the FastAPI lifespan |
+| `bootstrap.py` | First-boot bootstrap (`ensure_bootstrap_apps_installed`) for the platform's recovery and management apps; called idempotently from the FastAPI lifespan |
 | `chat_log_redaction.py` | Server-side structural redaction for the gated chat-log read API |
 | `chat_media.py` | One-way startup migration that moves old chat images and stored URLs onto the canonical `/media/` path |
 | `http_caching.py` | Range/206 hardening for revalidating `FileResponse`s |
@@ -501,7 +501,7 @@ The chat is large and self-contained; its hooks live beside it, not in `src/hook
 | Change offline / SW behavior | `frontend/src/sw.js` + `frontend/src/sw-cache-policy.js` (read *Service worker + offline* below first) |
 | Change the in-product agent's instructions | `skill/core.md` (constitution) or `backend/scripts/seed-skills/*.md` (per-task skills) — see below |
 | Add/install a skill | Ecosystem installs go through `POST /api/skills/install` (`routes/skills.py`; the Skills app + `finding-skills.md` seed drive it); new platform seeds go in `backend/scripts/seed-skills/`; edits that must reach existing untouched copies register their predecessor digest in `init_skills.py`; the index (`skills-index.md`) is generated — never hand-edit it |
-| Change a bootstrap app (Store / Memory / Reflection) | Change its catalog repository (`mobius-os/app-<slug>`). `backend/app/bootstrap.py` installs the canonical manifest on first boot; afterward the app is an ordinary owner-editable app under `/data/apps/<slug>` |
+| Change a bootstrap app (Store / Skills / Memory / Reflection / Integrations / Möbius · You) | Change its catalog repository (`mobius-os/app-<slug>`). `backend/app/bootstrap.py` installs the canonical manifest on first boot; afterward the app is an ordinary owner-editable app under `/data/apps/<slug>` |
 | Theme CSS / tokens | `backend/app/theme.py` + `routes/theme.py` + `frontend/src/hooks/useTheme.js` |
 
 ## In-product agent context — three layers
@@ -566,12 +566,15 @@ stamp `entrypoint.sh` writes at boot), `platform_sha`, `platform_dirty`,
 (it also hard-blocks deploying a checkout strictly BEHIND
 `origin/main`).
 
-**Bootstrap apps (Store, Memory, Reflection)** install from their canonical
-catalog manifests through `backend/app/bootstrap.py` on first boot. Each becomes
-an ordinary owner-editable app under `/data/apps/<slug>` and follows the same
-update and divergence rules as any other catalog app. The bootstrap path also
-migrates rows left by old images whose source still points at the retired
-platform-core tree; no app snapshot is baked into the platform image.
+**Bootstrap apps (Store, Skills, Memory, Reflection, Integrations, and Möbius ·
+You)** install from their canonical catalog manifests through
+`backend/app/bootstrap.py` on first boot. These are recovery or management
+surfaces; domain apps are installed explicitly rather than named in platform
+boot policy. Each becomes an ordinary owner-editable app under
+`/data/apps/<slug>` and follows the same update and divergence rules as any
+other catalog app. The bootstrap path also migrates rows left by old images
+whose source still points at the retired platform-core tree; no app snapshot is
+baked into the platform image.
 
 **Recovery and self-heal.** Recovery is outside both the editable platform and
 the normal app process. Managed recovery attaches through Railway native SSH;

@@ -17,13 +17,14 @@ import os
 import re
 import signal
 import sys
+import weakref
 from datetime import timedelta
 from pathlib import Path
 
 from fastapi import HTTPException
 
 from app import auth
-from app.applied_app_runtime import AppliedRuntimeUnavailable, runtime_root
+from app.applied_app_runtime import AppliedRuntimeUnavailable, hold_runtime, runtime_root
 from app.config import get_settings
 from app.manifest_contract import SERVICE_REQUEST_MAX_BYTES
 
@@ -41,7 +42,13 @@ _FORBIDDEN_HEADERS = frozenset({
   "transfer-encoding", "upgrade",
 })
 _global_slots = asyncio.Semaphore(8)
-_app_slots: dict[int, asyncio.Semaphore] = {}
+_app_slots: weakref.WeakValueDictionary[int, asyncio.Semaphore] = (
+  weakref.WeakValueDictionary()
+)
+
+
+def _reject_json_constant(value: str):
+  raise ValueError(f"invalid JSON constant: {value}")
 
 
 def service_contract(app, *, access: str) -> dict:
@@ -154,10 +161,13 @@ async def invoke_service(
   service = service_contract(
     app, access="public" if request_envelope.get("public") else "self",
   )
-  entry = service_entry(app, service)
-  request_bytes = json.dumps(
-    request_envelope, ensure_ascii=False, separators=(",", ":"),
-  ).encode("utf-8")
+  try:
+    request_bytes = json.dumps(
+      request_envelope, ensure_ascii=False, separators=(",", ":"),
+      allow_nan=False,
+    ).encode("utf-8")
+  except (TypeError, ValueError, RecursionError) as exc:
+    raise HTTPException(400, "App service request contains invalid JSON data.") from exc
   if len(request_bytes) > MAX_REQUEST_BYTES:
     raise HTTPException(413, "App service request is too large.")
 
@@ -165,50 +175,55 @@ async def invoke_service(
   # simple file-backed services do not need a platform-specific lock API.
   slot = _app_slots.setdefault(app.id, asyncio.Semaphore(1))
   async with _global_slots, slot:
+    pin = hold_runtime(app.id)
     try:
-      process = await asyncio.create_subprocess_exec(
-        sys.executable,
-        str(entry),
-        stdin=asyncio.subprocess.PIPE,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        cwd=str(entry.parent),
-        env=service_environment(app, owner),
-        start_new_session=True,
-      )
-    except OSError as exc:
-      raise HTTPException(502, "App service could not start.") from exc
-    assert process.stdin is not None
-    assert process.stdout is not None
-    assert process.stderr is not None
-    stdout_task = asyncio.create_task(_read_bounded(process.stdout, MAX_RESPONSE_BYTES))
-    stderr_task = asyncio.create_task(_read_bounded(process.stderr, MAX_ERROR_BYTES))
-    write_task = asyncio.create_task(_write_request(process.stdin, request_bytes))
-    try:
-      _written, stdout, stderr, returncode = await asyncio.wait_for(
-        asyncio.gather(write_task, stdout_task, stderr_task, process.wait()),
-        timeout=SERVICE_TIMEOUT_SECONDS,
-      )
-    except (TimeoutError, ValueError) as exc:
-      await _stop_process(process, write_task, stdout_task, stderr_task)
-      raise HTTPException(503, "App service exceeded its execution limits.")
-    except OSError as exc:
-      await _stop_process(process, write_task, stdout_task, stderr_task)
-      raise HTTPException(502, "App service failed before accepting its request.") from exc
-    except asyncio.CancelledError:
-      await _stop_process(process, write_task, stdout_task, stderr_task)
-      raise
-    try:
-      os.killpg(process.pid, signal.SIGKILL)
-    except ProcessLookupError:
-      pass
-    if returncode != 0:
-      detail = stderr.decode("utf-8", errors="replace").strip()[-1000:]
-      log.warning("App service %s failed: %s", app.slug, detail or "no diagnostics")
-      raise HTTPException(502, "App service failed.")
+      entry = service_entry(app, service)
+      try:
+        process = await asyncio.create_subprocess_exec(
+          sys.executable,
+          str(entry),
+          stdin=asyncio.subprocess.PIPE,
+          stdout=asyncio.subprocess.PIPE,
+          stderr=asyncio.subprocess.PIPE,
+          cwd=str(entry.parent),
+          env=service_environment(app, owner),
+          start_new_session=True,
+        )
+      except OSError as exc:
+        raise HTTPException(502, "App service could not start.") from exc
+      assert process.stdin is not None
+      assert process.stdout is not None
+      assert process.stderr is not None
+      stdout_task = asyncio.create_task(_read_bounded(process.stdout, MAX_RESPONSE_BYTES))
+      stderr_task = asyncio.create_task(_read_bounded(process.stderr, MAX_ERROR_BYTES))
+      write_task = asyncio.create_task(_write_request(process.stdin, request_bytes))
+      try:
+        _written, stdout, stderr, returncode = await asyncio.wait_for(
+          asyncio.gather(write_task, stdout_task, stderr_task, process.wait()),
+          timeout=SERVICE_TIMEOUT_SECONDS,
+        )
+      except (TimeoutError, ValueError) as exc:
+        await _stop_process(process, write_task, stdout_task, stderr_task)
+        raise HTTPException(503, "App service exceeded its execution limits.")
+      except OSError as exc:
+        await _stop_process(process, write_task, stdout_task, stderr_task)
+        raise HTTPException(502, "App service failed before accepting its request.") from exc
+      except asyncio.CancelledError:
+        await _stop_process(process, write_task, stdout_task, stderr_task)
+        raise
+      try:
+        os.killpg(process.pid, signal.SIGKILL)
+      except ProcessLookupError:
+        pass
+      if returncode != 0:
+        detail = stderr.decode("utf-8", errors="replace").strip()[-1000:]
+        log.warning("App service %s failed: %s", app.slug, detail or "no diagnostics")
+        raise HTTPException(502, "App service failed.")
+    finally:
+      pin.close()
   try:
-    response = json.loads(stdout)
-  except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+    response = json.loads(stdout, parse_constant=_reject_json_constant)
+  except (UnicodeDecodeError, json.JSONDecodeError, ValueError, RecursionError) as exc:
     raise HTTPException(502, "App service returned invalid JSON.") from exc
   if not isinstance(response, dict) or set(response) - {
     "status", "body", "body_base64", "headers", "media_type",

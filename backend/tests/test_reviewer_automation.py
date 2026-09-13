@@ -50,6 +50,53 @@ def test_public_authority_changes_require_owner_scope():
   assert child_denied.value.status_code == 403
 
 
+def test_app_policy_cannot_broaden_an_owner_approved_grant():
+  from app.routes import reviewer as routes
+
+  body = routes.ReviewerGrantBody(
+    repositories=["mobius-os/app-memory"], guide_hash="a" * 64,
+    max_rounds_per_pr=2, daily_post_ceiling=4,
+  )
+  exact = body.model_dump()
+  assert routes._owner_bound_grant(body, exact) == exact
+
+  broadened = {**exact, "repositories": ["mobius-os/app-memory", "other/repo"]}
+  with pytest.raises(HTTPException) as denied:
+    routes._owner_bound_grant(body, broadened)
+  assert denied.value.status_code == 502
+
+
+def test_app_policy_cannot_retarget_or_rewrite_an_owner_approved_comment():
+  from app.routes import reviewer as routes
+
+  body = routes.ReviewerCommentBody(
+    identity="a" * 64, repository="mobius-os/app-memory", pr_number=54,
+    head_sha="b" * 40, base_sha="c" * 40, guide_hash="d" * 64,
+    body="### Reviewer: all clear\n\nLooks good.\n\n_Reviewed revision `bbbbbbbbbbbb`._",
+  )
+  exact = body.model_dump()
+  assert routes._owner_bound_manual_plan(body, exact) == exact
+  assert routes._owner_bound_comment(
+    body.body, body.head_sha,
+    {"body": body.body, "head_sha": body.head_sha},
+  ) == body.body
+
+  for changed in (
+    {**exact, "repository": "other/repo"},
+    {**exact, "body": "Different public comment"},
+  ):
+    with pytest.raises(HTTPException) as denied:
+      routes._owner_bound_manual_plan(body, changed)
+    assert denied.value.status_code == 502
+
+  with pytest.raises(HTTPException) as rewritten:
+    routes._owner_bound_comment(
+      body.body, body.head_sha,
+      {"body": "Different public comment", "head_sha": body.head_sha},
+    )
+  assert rewritten.value.status_code == 502
+
+
 def _app(db, source_dir="/data/apps/pr-review"):
   row = models.App(
     name="Reviewer", description="test", source_dir=str(source_dir),

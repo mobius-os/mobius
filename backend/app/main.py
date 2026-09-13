@@ -1471,9 +1471,9 @@ def _open_app_runtime_for_static_asset(
     if row is None:
       return None, None
     from app.applied_app_runtime import (
-      runtime_root, hold_static_runtime, AppliedRuntimeUnavailable,
+      runtime_root, hold_runtime, AppliedRuntimeUnavailable,
     )
-    pin = hold_static_runtime(row.id)
+    pin = hold_runtime(row.id)
     try:
       return str(runtime_root(row)), pin
     except AppliedRuntimeUnavailable:

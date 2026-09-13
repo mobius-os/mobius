@@ -49,7 +49,7 @@ async def test_dns_rebinding_cannot_change_pinned_peer_host_or_tls_name(monkeypa
 
   client_options = _mock_network(monkeypatch, handler)
   response = await federation_transport.federation_request(
-    "GET", "https://peer.example/api/common/actor", params={"view": "card"}
+    "GET", "https://peer.example/api/project-copies/package", params={"view": "card"}
   )
 
   assert response.json() == {"status": "ok"}
@@ -78,7 +78,7 @@ async def test_redirect_to_metadata_is_rejected_without_second_request(monkeypat
   _mock_network(monkeypatch, handler)
   with pytest.raises(federation_transport.FederationTransportError):
     await federation_transport.federation_request(
-      "GET", "https://peer.example/api/common/actor"
+      "GET", "https://peer.example/api/project-copies/package"
     )
 
   assert len(requests) == 1
@@ -105,7 +105,7 @@ async def test_invalid_peer_json_response_is_rejected(
   _mock_network(monkeypatch, handler)
   with pytest.raises(federation_transport.FederationTransportError):
     await federation_transport.federation_request(
-      "GET", "https://peer.example/api/common/actor"
+      "GET", "https://peer.example/api/project-copies/package"
     )
 
 
@@ -121,7 +121,7 @@ async def test_peer_response_is_stopped_at_the_callers_byte_limit(monkeypatch):
   _mock_network(monkeypatch, handler)
   with pytest.raises(federation_transport.FederationTransportError):
     await federation_transport.federation_request(
-      "GET", "https://peer.example/api/common/actor", max_response_bytes=8
+      "GET", "https://peer.example/api/project-copies/package", max_response_bytes=8
     )
 
 
@@ -140,7 +140,7 @@ async def test_compressed_peer_response_is_decoded_once(monkeypatch):
 
   _mock_network(monkeypatch, handler)
   response = await federation_transport.federation_request(
-    "GET", "https://peer.example/api/common/actor"
+    "GET", "https://peer.example/api/project-copies/package"
   )
   assert response.json() == {"status": "ok"}
   assert response.content == payload
