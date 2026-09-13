@@ -76,15 +76,18 @@ KNOWN_MODELS = {
     "gpt-5.4-mini",
     "gpt-5.3-codex-spark",
   ],
-  "mobius": ["spark", "inkling"],
+  "mobius": ["spark", "inkling", "reflect", "flow", "prism"],
 }
 
 MODEL_LABELS = {
   "claude-fable-5-1": "Claude Fable 5.1",
-  "spark": "Spark",
+  "spark": "Spark (Qwen3.8 27B)",
   # Public product name. Keep the stable wire id so existing chats and the
   # signed compute contract survive a display-name change without migration.
   "inkling": "Evolve",
+  "reflect": "Reflect (DeepSeek V4.1 Flash)",
+  "flow": "Flow (GLM 5.3 Flash)",
+  "prism": "Prism (Gemini 3.8 Flash)",
 }
 
 
@@ -102,6 +105,9 @@ MODEL_EFFORT_LEVELS: dict[str, list[str]] = {
   # The subscription product models share one graduated effort scale.
   "spark": ["minimal", "low", "medium", "high", "max"],
   "inkling": ["minimal", "low", "medium", "high", "max"],
+  "reflect": ["minimal", "low", "medium", "high", "max"],
+  "flow": ["minimal", "low", "medium", "high", "max"],
+  "prism": ["minimal", "low", "medium", "high", "max"],
 }
 
 # Usable input context before the provider runtime compacts. Live Codex and
@@ -129,7 +135,10 @@ MODEL_CONTEXT_WINDOWS: dict[str, int] = {
   "gpt-5.4-mini": 258_400,
   "gpt-5.3-codex-spark": 121_600,
   "spark": 235_930,
-  "inkling": 235_930,
+  "inkling": 900_000,
+  "reflect": 943_718,
+  "flow": 943_718,
+  "prism": 943_718,
 }
 
 # Runtime recovery defaults are intentionally independent of picker order.
@@ -159,7 +168,7 @@ DEFAULT_VISIBLE_MODEL_ORDER: dict[str, tuple[str, ...]] = {
     "gpt-5.6-luna",
     "gpt-5.5",
   ),
-  "mobius": ("spark", "inkling"),
+  "mobius": ("spark", "inkling", "reflect", "flow", "prism"),
 }
 DEFAULT_VISIBLE_MODELS: dict[str, frozenset[str]] = {
   provider_id: frozenset(models)
