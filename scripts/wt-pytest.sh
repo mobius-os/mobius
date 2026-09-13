@@ -21,6 +21,20 @@
 # only fills it in when unset.
 set -uo pipefail
 
+# Isolate the database before Python imports anything. A test module outside
+# backend/tests is collected before that directory's conftest.py, so relying on
+# conftest to replace an inherited production DATABASE_URL is too late: a
+# module-level `from app.database import ...` has already bound the engine.
+TEST_RUNTIME_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/mobius-wt-pytest.XXXXXX")" \
+  || { echo "wt-pytest: could not create isolated runtime" >&2; exit 1; }
+cleanup_test_runtime() {
+  case "$TEST_RUNTIME_ROOT" in
+    "${TMPDIR:-/tmp}"/mobius-wt-pytest.*) rm -rf -- "$TEST_RUNTIME_ROOT" ;;
+    *) echo "wt-pytest: refusing unsafe cleanup target: $TEST_RUNTIME_ROOT" >&2 ;;
+  esac
+}
+trap cleanup_test_runtime EXIT HUP INT TERM
+
 ROOT="$(git rev-parse --show-toplevel)" || {
   echo "wt-pytest: not inside a git checkout" >&2; exit 1; }
 # Main checkout = parent of the SHARED git dir; equals $ROOT in the main
@@ -133,8 +147,12 @@ TEST_ENV=(env \
   GIT_CEILING_DIRECTORIES="$ROOT" \
   DOMAIN=localhost \
   FRONTEND_ORIGIN=http://localhost:5173 \
+  DATABASE_URL="sqlite:///$TEST_RUNTIME_ROOT/test.db" \
+  DATA_DIR="$TEST_RUNTIME_ROOT/data" \
+  MOBIUS_APP_BASE="$TEST_RUNTIME_ROOT/data/apps" \
   RAILWAY_PUBLIC_DOMAIN= \
   MOBIUS_TEST_RUNTIME=1 \
+  MOBIUS_TEST_DATABASE_ISOLATED=1 \
   MOEBIUS_SKIP_BOOTSTRAP=1 \
   API_BASE_URL=http://127.0.0.1:9 \
   PATH="$NODE_BIN_DIR:${PATH:-}" \
@@ -143,8 +161,9 @@ TEST_ENV=(env \
   SECRET_KEY="${SECRET_KEY:-$(python3 -c 'import secrets;print(secrets.token_hex(32))')}")
 
 if [ "${#PYTEST_ARGS[@]}" -eq 0 ]; then
-  exec "${TEST_ENV[@]}" "$PYTHON" -m pytest -p no:cacheprovider
+  "${TEST_ENV[@]}" "$PYTHON" -m pytest -p no:cacheprovider
+  exit $?
 fi
 
-exec "${TEST_ENV[@]}" "$PYTHON" -m pytest -p no:cacheprovider \
+"${TEST_ENV[@]}" "$PYTHON" -m pytest -p no:cacheprovider \
   "${PYTEST_ARGS[@]}"

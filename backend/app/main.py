@@ -31,7 +31,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
-from sqlalchemy.exc import OperationalError
+from sqlalchemy import inspect as inspect_database
+from sqlalchemy.exc import OperationalError, SQLAlchemyError
 from starlette.concurrency import run_in_threadpool
 
 from app.config import get_settings
@@ -103,6 +104,7 @@ _BOOT_ID = os.environ.get("MOBIUS_BOOT_ID") or f"{os.getpid()}-{time.time_ns()}"
 # These stay fixed until restart: Recovery may repair the database externally,
 # but only a clean boot can coherently start the skipped database owners.
 _DATABASE_BOOT_RESULT = None
+_DATABASE_RUNTIME_FAILURE = None
 
 
 def _set_database_boot_state(result) -> None:
@@ -110,7 +112,14 @@ def _set_database_boot_state(result) -> None:
   _DATABASE_BOOT_RESULT = result
 
 
+def _set_database_runtime_failure(result: dict | None) -> None:
+  global _DATABASE_RUNTIME_FAILURE
+  _DATABASE_RUNTIME_FAILURE = result
+
+
 def _database_degraded_payload() -> dict | None:
+  if _DATABASE_RUNTIME_FAILURE:
+    return dict(_DATABASE_RUNTIME_FAILURE)
   result = _DATABASE_BOOT_RESULT
   if result is None or result.serviceable:
     return None
@@ -122,6 +131,38 @@ def _database_degraded_payload() -> dict | None:
       "schema_gaps": list(result.schema_gaps),
     }
   return None
+
+
+def _probe_runtime_database_schema() -> dict | None:
+  """Detect destructive schema loss after a previously healthy boot.
+
+  The boot verdict is intentionally sticky, but it cannot describe a database
+  changed by another process after startup. The deployment healthcheck calls
+  this bounded catalog probe every 30 seconds. A failure is sticky until a
+  clean restart because database-owning background services may already be in
+  an incoherent state even if an operator repairs the file underneath them.
+  """
+  if _DATABASE_RUNTIME_FAILURE:
+    return dict(_DATABASE_RUNTIME_FAILURE)
+  try:
+    present = set(inspect_database(engine).get_table_names())
+  except SQLAlchemyError as exc:
+    logging.getLogger(__name__).error(
+      "runtime database readiness probe failed: %s", exc,
+    )
+    failure = {"reason": "database_runtime_unavailable"}
+    _set_database_runtime_failure(failure)
+    return failure
+  missing = sorted(set(Base.metadata.tables) - present)
+  if not missing:
+    return None
+  logging.getLogger(__name__).critical(
+    "runtime database schema lost %d mapped tables: %s",
+    len(missing), ", ".join(missing[:10]),
+  )
+  failure = {"reason": "database_runtime_schema_missing"}
+  _set_database_runtime_failure(failure)
+  return failure
 
 
 def _router_degraded_payload() -> dict | None:
@@ -942,7 +983,11 @@ def health_strict(response: Response):
   contract plus the chat-persistence writer contract.
   """
   response.headers["Cache-Control"] = "no-store"
-  degraded = _database_degraded_payload() or _router_degraded_payload()
+  degraded = (
+    _database_degraded_payload()
+    or _probe_runtime_database_schema()
+    or _router_degraded_payload()
+  )
   if degraded:
     response.status_code = 503
     return {"status": degraded["reason"], **degraded}
@@ -965,7 +1010,11 @@ def browser_bootstrap():
 
 def service_readiness() -> dict:
   """One readiness verdict for HTTP probes and boot activation receipts."""
-  degraded = _database_degraded_payload() or _router_degraded_payload()
+  degraded = (
+    _database_degraded_payload()
+    or _probe_runtime_database_schema()
+    or _router_degraded_payload()
+  )
   if degraded:
     return {"ready": False, **degraded}
   from app.chat_writer import writer_readiness

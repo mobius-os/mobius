@@ -380,6 +380,40 @@ def test_browser_oauth_state_is_root_persisted_multi_worker_safe_and_single_use(
     other_worker.close()
 
 
+def test_browser_oauth_state_preserves_explicit_account_selection(broker):
+  state = "state_" + ("s" * 40)
+  value = {
+    "state": state,
+    "owner": "owner",
+    "verifier": "verifier_" + ("v" * 40),
+    "instance_id": broker.instance_id,
+    "public_key_jwk": broker.public_jwk(),
+    "redirect_uri": "https://example.test/api/auth/provider/mobius/callback",
+    "expires_at": time.time() + 300,
+    "select_account": True,
+  }
+
+  broker.save_oauth_state(value)
+
+  assert broker.consume_oauth_state(state) == value
+
+
+def test_browser_oauth_state_rejects_invalid_account_selection(broker):
+  value = {
+    "state": "state_" + ("s" * 40),
+    "owner": "owner",
+    "verifier": "verifier_" + ("v" * 40),
+    "instance_id": broker.instance_id,
+    "public_key_jwk": broker.public_jwk(),
+    "redirect_uri": "https://example.test/api/auth/provider/mobius/callback",
+    "expires_at": time.time() + 300,
+    "select_account": "yes",
+  }
+
+  with pytest.raises(ValueError, match="invalid OAuth state"):
+    broker.save_oauth_state(value)
+
+
 def test_mobius_uid_cannot_read_broker_files_or_root_process_environment(broker):
   if os.geteuid() != 0:
     pytest.skip("requires root to exercise the production UID boundary")

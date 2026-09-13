@@ -51,6 +51,75 @@ def _mobius_login_handoff(db, *, epoch=0):
   return owner, token
 
 
+def test_mobius_subject_fingerprint_is_stable_and_non_disclosing():
+  from app.routes.auth import _mobius_subject_fingerprint
+
+  subject = "user_private-account-id"
+  fingerprint = _mobius_subject_fingerprint(subject)
+
+  assert fingerprint == hashlib.sha256(subject.encode()).hexdigest()[:16]
+  assert subject not in fingerprint
+  assert len(fingerprint) == 16
+
+
+def test_mobius_pkce_account_selection_is_explicit_and_loop_bounded(monkeypatch):
+  import asyncio
+  from app.routes import auth as auth_routes
+
+  saved = {}
+
+  async def broker_request(method, route, payload=None):
+    assert (method, route) == ("POST", "/identity/oauth/start")
+    saved.update(payload)
+    return {"saved": True}
+
+  monkeypatch.setattr(auth_routes, "_mobius_broker_request", broker_request)
+  url, _ = asyncio.run(auth_routes._begin_mobius_pkce(
+    {
+      "instance_id": "mob_self_testinstance",
+      "public_key_jwk": {"kty": "OKP"},
+      "key_thumbprint": "a" * 64,
+    },
+    "owner",
+    select_account=True,
+  ))
+
+  params = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
+  assert params["prompt"] == ["select_account"]
+  assert saved["select_account"] is True
+  assert auth_routes._mobius_account_selection_redirect().headers["location"] == (
+    "/api/auth/mobius/login/start?select_account=true"
+  )
+  assert auth_routes._mobius_account_mismatch_redirect().headers["location"] == (
+    "/shell/?mobius_login_account_mismatch=1"
+  )
+
+
+def test_mobius_web_login_mismatch_retries_once_then_stops(monkeypatch, db):
+  import asyncio
+  from app.routes import auth as auth_routes
+
+  _mobius_login_handoff(db)
+
+  async def exchange(_pending, _code):
+    return "receipt", {"sub": "a-different-mobius-account"}
+
+  monkeypatch.setattr(auth_routes, "_exchange_mobius_receipt", exchange)
+  pending = {"select_account": False}
+  first = asyncio.run(
+    auth_routes._complete_mobius_web_login(db, pending, "authorization-code")
+  )
+  pending["select_account"] = True
+  second = asyncio.run(
+    auth_routes._complete_mobius_web_login(db, pending, "authorization-code")
+  )
+
+  assert first.headers["location"] == (
+    "/api/auth/mobius/login/start?select_account=true"
+  )
+  assert second.headers["location"] == "/shell/?mobius_login_account_mismatch=1"
+
+
 
 def test_setup_creates_owner(client):
   r = client.post("/api/auth/setup", json={
