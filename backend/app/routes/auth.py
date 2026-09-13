@@ -1188,7 +1188,7 @@ async def _complete_mobius_web_login(
   if owner is None or owner.auth_mode != "mobius" or not owner.sso_subject:
     return _mobius_login_error_redirect()
 
-  _, claims = await _exchange_mobius_receipt(pending, code)
+  receipt, claims = await _exchange_mobius_receipt(pending, code)
   same_subject = secrets.compare_digest(
     claims["sub"], owner.sso_subject
   )
@@ -1219,6 +1219,24 @@ async def _complete_mobius_web_login(
     or not secrets.compare_digest(str(claims["sub"]), owner.sso_subject)
   ):
     return _mobius_login_error_redirect()
+
+  runtime_identity = await _mobius_broker_request("GET", "/identity")
+  if runtime_identity.get("linked") is True:
+    if not secrets.compare_digest(
+      str(runtime_identity.get("subject") or ""), str(claims["sub"]),
+    ):
+      return _mobius_login_error_redirect()
+  else:
+    enrolled = await _mobius_broker_request(
+      "POST", "/identity/enroll", {"receipt": receipt}
+    )
+    if (
+      enrolled.get("linked") is not True
+      or not secrets.compare_digest(
+        str(enrolled.get("subject") or ""), str(claims["sub"]),
+      )
+    ):
+      return _mobius_login_error_redirect()
 
   # The handoff PROVES a completed mobius.you login for this owner; it does not
   # carry the session token. A signed JWT is integrity-protected, not encrypted,

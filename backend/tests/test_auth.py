@@ -119,6 +119,37 @@ def test_mobius_web_login_mismatch_retries_once_then_stops(monkeypatch, db):
   assert second.headers["location"] == "/shell/?mobius_login_account_mismatch=1"
 
 
+def test_managed_web_login_enrolls_the_local_model_identity(monkeypatch, db):
+  import asyncio
+  from app.routes import auth as auth_routes
+
+  _mobius_login_handoff(db)
+  calls = []
+
+  async def exchange(_pending, _code):
+    return "header.payload.signature", {"sub": "mobius-subject"}
+
+  async def broker_request(method, route, payload=None):
+    calls.append((method, route, payload))
+    if (method, route) == ("GET", "/identity"):
+      return {"linked": False}
+    assert (method, route) == ("POST", "/identity/enroll")
+    return {"linked": True, "subject": "mobius-subject"}
+
+  monkeypatch.setattr(auth_routes, "_exchange_mobius_receipt", exchange)
+  monkeypatch.setattr(auth_routes, "_mobius_broker_request", broker_request)
+
+  response = asyncio.run(auth_routes._complete_mobius_web_login(
+    db, {}, "authorization-code",
+  ))
+
+  assert response.headers["location"] == "/shell/?mobius_login=1"
+  assert calls == [
+    ("GET", "/identity", None),
+    ("POST", "/identity/enroll", {"receipt": "header.payload.signature"}),
+  ]
+
+
 
 def test_setup_creates_owner(client):
   r = client.post("/api/auth/setup", json={

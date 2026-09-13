@@ -253,6 +253,147 @@ def test_identity_member_since_preserves_the_owners_original_calendar_date(
   assert response.json()["member_since"] == "2022-03-04"
 
 
+def test_linked_agent_access_and_trial_activation_are_proxied_without_credentials(
+  client, auth, account_service,
+):
+  granted = _link_account(client, auth)
+  seen = []
+  remote = {
+    "models": [{
+      "id": "evolve",
+      "name": "Evolve",
+      "pricing": {"input": 0.3, "cached_input": 0.01, "output": 1.2},
+    }],
+    "balance": {"available_units": 2_000_000, "available_usd": "2.000000"},
+    "trial": {"state": "active"},
+    "retention": {
+      "policy": "local-testing-v1",
+      "notice": "Test conversations are stored privately for testing.",
+    },
+  }
+
+  def handler(method, url, **kwargs):
+    seen.append((method, url, kwargs["headers"]))
+    return 200, remote
+
+  account_service(handler)
+  status = client.get("/api/identity/agent", headers=granted)
+  activation = client.post("/api/identity/agent/trial", headers=granted)
+
+  assert status.status_code == activation.status_code == 200
+  assert status.json() == {"agent_access": "available", **remote}
+  assert activation.json() == {"agent_access": "available", **remote}
+  assert seen[0][0:2] == (
+    "GET", "https://www.mobius.you/api/account/v1/agent",
+  )
+  assert seen[1][0:2] == (
+    "POST", "https://www.mobius.you/api/account/v1/agent/trial",
+  )
+  assert seen[0][2]["Authorization"].startswith("Bearer linked-token-")
+
+
+@pytest.mark.asyncio
+async def test_managed_agent_access_uses_the_root_broker(monkeypatch, db):
+  from app.config import get_settings
+  from app.routes import identity
+
+  settings = get_settings()
+  monkeypatch.setattr(settings, "mobius_sso_issuer", "https://www.mobius.you")
+  monkeypatch.setattr(settings, "mobius_sso_instance_id", "mob_managed")
+  calls = []
+  public = {
+    "models": [{
+      "id": "evolve",
+      "name": "Evolve",
+      "pricing": {"input": 0.3, "cached_input": 0.01, "output": 1.2},
+    }],
+    "balance": {"available_units": 2_000_000},
+    "trial": {"state": "ready"},
+    "retention": {
+      "policy": "local-testing-v1",
+      "notice": "Test conversations are stored privately for testing.",
+    },
+  }
+
+  class Response:
+    status_code = 200
+
+    @staticmethod
+    def json():
+      return public
+
+  async def managed_response(method, path, **_kwargs):
+    calls.append((method, path))
+    return Response()
+
+  monkeypatch.setattr(identity, "_managed_response", managed_response)
+
+  assert await identity._agent_remote(db, 1, "GET") == public
+  assert await identity._agent_remote(db, 1, "POST") == public
+  assert calls == [
+    ("GET", "/api/instance/v1/agent"),
+    ("POST", "/api/instance/v1/agent/trial"),
+  ]
+
+
+def test_agent_contract_rejects_nested_routing_fields_and_projects_public_data():
+  from app.routes.identity import _agent_contract
+
+  public = {
+    "models": [{
+      "id": "evolve",
+      "name": "Evolve",
+      "pricing": {"input": 0.3, "cached_input": 0.01, "output": 1.2},
+      "context_window": 1_000_000,
+    }],
+    "balance": {"available_units": 2_000_000, "available_usd": "2.000000"},
+    "trial": {"state": "active"},
+    "retention": {
+      "policy": "local-testing-v1",
+      "notice": "Test conversations are stored privately for testing.",
+    },
+  }
+  assert _agent_contract(public) == public
+
+  leaked_payloads = [
+    {**public, "provider": "hidden"},
+    {**public, "models": [{**public["models"][0], "provider": "hidden"}]},
+    {**public, "models": [{
+      **public["models"][0],
+      "pricing": {**public["models"][0]["pricing"], "route": "hidden"},
+    }]},
+    {**public, "balance": {**public["balance"], "provider_account": "hidden"}},
+    {**public, "trial": {**public["trial"], "campaign": "hidden"}},
+    {**public, "retention": {**public["retention"], "training_bucket": "hidden"}},
+  ]
+  for payload in leaked_payloads:
+    with pytest.raises(HTTPException) as error:
+      _agent_contract(payload)
+    assert error.value.status_code == 502
+
+
+def test_trial_fund_exhaustion_keeps_the_actionable_gateway_error(
+  client, auth, account_service,
+):
+  granted = _link_account(client, auth)
+  account_service(lambda *_args, **_kwargs: (
+    409,
+    {"error": {
+      "code": "trial_fund_exhausted",
+      "message": (
+        "The shared trial fund is currently empty. Your account is ready, "
+        "and the owner can add more trial capacity."
+      ),
+    }},
+  ))
+
+  response = client.post("/api/identity/agent/trial", headers=granted)
+
+  assert response.status_code == 409
+  assert response.json()["detail"]["code"] == "trial_fund_exhausted"
+  assert "owner can add more trial capacity" in response.json()["detail"]["message"]
+
+
 def test_identity_permission_is_part_of_review_contract():
   from app.app_capabilities import contract_from_app_state, contract_from_manifest
 
@@ -757,10 +898,8 @@ def test_link_complete_consumes_attempt_and_stores_encrypted_grant(
   assert body["account_mode"] == "linked"
   assert body["profile"]["user_id"] == "usr_123"
   assert [item["id"] for item in body["deployments"]] == ["remote", "local"]
-  # The local link row is the only truthful "since" date the account card can
-  # show (the remote profile carries no creation date), so linked responses
-  # must expose the UTC link instant.
-  assert isinstance(body["linked_at"], str) and body["linked_at"].endswith("Z")
+  assert "linked_at" not in body
+  assert isinstance(body["member_since"], str)
   assert [call[:2] for call in broker_calls] == [
     ("GET", "/identity"),
     ("POST", "/identity/enroll"),

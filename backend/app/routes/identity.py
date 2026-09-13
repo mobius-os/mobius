@@ -11,6 +11,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import math
 import re
 import secrets
 from datetime import timedelta
@@ -202,6 +203,101 @@ def _railway_contract(payload: object) -> dict:
   return payload
 
 
+def _agent_contract(payload: object) -> dict:
+  """Validate the provider-neutral model access contract.
+
+  The account service may add model capabilities over time, but the identity
+  app only receives stable aliases, public prices, balance, trial, and the
+  non-interactive retention notice. Raw routing fields are deliberately
+  outside this interface.
+  """
+  if not isinstance(payload, dict):
+    raise HTTPException(502, "The Möbius account service returned invalid model access.")
+  if set(payload) != {"models", "balance", "trial", "retention"}:
+    raise HTTPException(502, "The Möbius account service returned invalid model access.")
+  models_list = payload.get("models")
+  if (
+    not isinstance(models_list, list)
+    or len(models_list) > 50
+    or not all(isinstance(item, dict) for item in models_list)
+    or not isinstance(payload.get("balance"), dict)
+    or not isinstance(payload.get("trial"), dict)
+    or not isinstance(payload.get("retention"), dict)
+  ):
+    raise HTTPException(502, "The Möbius account service returned invalid model access.")
+  projected_models = []
+  for item in models_list:
+    pricing = item.get("pricing")
+    context_window = item.get("context_window")
+    if (
+      not set(item).issubset({"id", "name", "pricing", "context_window"})
+      or not isinstance(item.get("id"), str)
+      or not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,79}", item["id"])
+      or not isinstance(item.get("name"), str)
+      or not 1 <= len(item["name"]) <= 80
+      or not isinstance(pricing, dict)
+      or set(pricing) != {"input", "cached_input", "output"}
+      or not all(
+        not isinstance(pricing.get(kind), bool)
+        and isinstance(pricing.get(kind), (int, float))
+        and math.isfinite(pricing[kind])
+        and pricing[kind] >= 0
+        for kind in ("input", "cached_input", "output")
+      )
+      or (context_window is not None and (
+        isinstance(context_window, bool)
+        or not isinstance(context_window, int)
+        or context_window < 1
+        or context_window > 9_007_199_254_740_991
+      ))
+    ):
+      raise HTTPException(502, "The Möbius account service returned invalid model prices.")
+    projected = {
+      "id": item["id"],
+      "name": item["name"],
+      "pricing": {kind: pricing[kind] for kind in ("input", "cached_input", "output")},
+    }
+    if context_window is not None:
+      projected["context_window"] = context_window
+    projected_models.append(projected)
+  if len({item["id"] for item in projected_models}) != len(projected_models):
+    raise HTTPException(502, "The Möbius account service returned duplicate model aliases.")
+  balance = payload["balance"]
+  trial = payload["trial"]
+  retention = payload["retention"]
+  available_units = balance.get("available_units")
+  available_usd = balance.get("available_usd")
+  if (
+    not set(balance).issubset({"available_units", "available_usd"})
+    or isinstance(available_units, bool)
+    or not isinstance(available_units, int)
+    or not 0 <= available_units <= 9_007_199_254_740_991
+    or (available_usd is not None and (
+      not isinstance(available_usd, str)
+      or re.fullmatch(r"\d+(?:\.\d{1,6})?", available_usd) is None
+    ))
+    or set(trial) != {"state"}
+    or trial.get("state") not in {"ready", "active", "expired", "ineligible"}
+    or set(retention) != {"policy", "notice"}
+    or retention.get("policy") != "local-testing-v1"
+    or not isinstance(retention.get("notice"), str)
+    or not 20 <= len(retention["notice"]) <= 500
+  ):
+    raise HTTPException(502, "The Möbius account service returned invalid model access.")
+  projected_balance = {"available_units": available_units}
+  if available_usd is not None:
+    projected_balance["available_usd"] = available_usd
+  return {
+    "models": projected_models,
+    "balance": projected_balance,
+    "trial": {"state": trial["state"]},
+    "retention": {
+      "policy": retention["policy"],
+      "notice": retention["notice"],
+    },
+  }
+
+
 def _remote_avatar_url(payload: dict | None) -> str | None:
   """Return one safe HTTPS avatar URL from the trusted account response.
 
@@ -349,6 +445,56 @@ async def _linked_remote(
   return _identity_contract(payload)
 
 
+async def _agent_remote(
+  db: Session, owner_id: int, method: str,
+) -> dict | None:
+  """Read or activate model access through the owner's account binding."""
+  settings = get_settings()
+  link = None
+  if settings.mobius_sso_enabled:
+    path = "/api/instance/v1/agent"
+    if method == "POST":
+      path += "/trial"
+    response = await _managed_response(method, path)
+  else:
+    link = _linked_row(db, owner_id)
+    if link is None:
+      return None
+    try:
+      token = _open(link.access_token_encrypted)
+    except HTTPException:
+      db.delete(link)
+      db.commit()
+      return None
+    url = settings.mobius_account_origin + "/api/account/v1/agent"
+    headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+    if method == "POST":
+      url += "/trial"
+    try:
+      async with httpx.AsyncClient(timeout=15.0, follow_redirects=False) as client:
+        response = await client.request(method, url, headers=headers)
+    except httpx.HTTPError as exc:
+      raise HTTPException(502, "The Möbius account service could not be reached.") from exc
+  if response.status_code == 401 and link is not None:
+    db.delete(link)
+    db.commit()
+    return None
+  try:
+    payload = response.json()
+  except ValueError as exc:
+    raise HTTPException(502, "The Möbius account service returned invalid model access.") from exc
+  if response.status_code != 200:
+    error = payload.get("error") if isinstance(payload, dict) else None
+    code = error.get("code") if isinstance(error, dict) else None
+    message = error.get("message") if isinstance(error, dict) else None
+    if not isinstance(code, str) or not isinstance(message, str):
+      code = "model_access_unavailable"
+      message = "Möbius model access is temporarily unavailable."
+    status = response.status_code if response.status_code in {403, 409, 422} else 502
+    raise HTTPException(status, {"code": code, "message": message})
+  return _agent_contract(payload)
+
+
 async def resolve_owner_profile(db: Session, owner: models.Owner) -> dict | None:
   """The owner's connected mobius.you profile, or None when none is linked.
 
@@ -464,20 +610,7 @@ async def read_handle_hosts(
   }
 
 
-def _linked_since(db: Session, owner_id: int) -> str | None:
-  """UTC link-creation instant, or None when no link row survives.
-
-  The remote profile deliberately carries no account-creation date, so the
-  local link row is the only truthful "since" the card can show. Relinking
-  creates a fresh row and honestly resets the date.
-  """
-  link = _linked_row(db, owner_id)
-  if link is None or link.linked_at is None:
-    return None
-  return link.linked_at.replace(microsecond=0).isoformat() + "Z"
-
-
-def _merge_local_deployment(payload: dict, linked_since: str | None = None) -> dict:
+def _merge_local_deployment(payload: dict) -> dict:
   local = _local_payload()
   remote_deployments = payload.get("deployments")
   deployments = list(remote_deployments) if isinstance(remote_deployments, list) else []
@@ -497,7 +630,6 @@ def _merge_local_deployment(payload: dict, linked_since: str | None = None) -> d
       payload.get("profile") if isinstance(payload.get("profile"), dict) else None
     ),
     "deployments": deployments,
-    "linked_at": linked_since,
   }
 
 
@@ -543,14 +675,11 @@ async def read_identity(
         degraded = _local_payload(
           account_mode="linked", account_unavailable=True,
         )
-        degraded["linked_at"] = _linked_since(db, owner.id)
         return _with_member_since(degraded, owner)
       raise
     if linked is None:
       return _with_member_since(local, owner)
-    return _with_member_since(
-      _merge_local_deployment(linked, _linked_since(db, owner.id)), owner,
-    )
+    return _with_member_since(_merge_local_deployment(linked), owner)
   try:
     remote = await _managed_remote("GET")
   except HTTPException as exc:
@@ -570,6 +699,48 @@ async def read_identity(
   return _with_member_since(_managed_payload(remote, owner), owner)
 
 
+@router.get("/agent")
+async def read_agent_access(
+  owner: models.Owner = Depends(get_owner_or_app_with_identity_manage),
+  db: Session = Depends(get_db),
+):
+  try:
+    remote = await _agent_remote(db, owner.id, "GET")
+  except HTTPException as exc:
+    if exc.status_code == 502:
+      return {
+        "agent_access": "unavailable",
+        "models": [],
+        "balance": {},
+        "trial": {},
+        "retention": {},
+      }
+    raise
+  if remote is None:
+    return {
+      "agent_access": "signed_out",
+      "models": [],
+      "balance": {},
+      "trial": {},
+      "retention": {},
+    }
+  return {"agent_access": "available", **remote}
+
+
+@router.post(
+  "/agent/trial",
+  dependencies=[Depends(require_nondelegated_owner_or_app_control)],
+)
+async def activate_agent_trial(
+  owner: models.Owner = Depends(get_owner_or_app_with_identity_manage),
+  db: Session = Depends(get_db),
+):
+  remote = await _agent_remote(db, owner.id, "POST")
+  if remote is None:
+    raise HTTPException(409, "Sign in to activate Möbius model access.")
+  return {"agent_access": "available", **remote}
+
+
 @router.patch(
   "/profile",
   dependencies=[Depends(require_nondelegated_owner_or_app_control)],
@@ -584,13 +755,13 @@ async def update_profile(
     raise HTTPException(422, "Use 3–30 letters, numbers, or underscores.")
   if get_settings().mobius_sso_enabled:
     remote = await _managed_remote("PATCH", "/profile", json={"handle": handle})
-    return _managed_payload(remote, owner)
+    return _with_member_since(_managed_payload(remote, owner), owner)
   remote = await _linked_remote(
     db, owner.id, "PATCH", "/profile", json={"handle": handle},
   )
   if remote is None:
     raise HTTPException(409, "Sign in to edit your Möbius profile.")
-  return _merge_local_deployment(remote, _linked_since(db, owner.id))
+  return _with_member_since(_merge_local_deployment(remote), owner)
 
 
 @router.post(
@@ -611,11 +782,11 @@ async def update_avatar(
   files = {"avatar": (avatar.filename or "avatar", content, content_type)}
   if get_settings().mobius_sso_enabled:
     remote = await _managed_remote("POST", "/avatar", files=files)
-    return _managed_payload(remote, owner)
+    return _with_member_since(_managed_payload(remote, owner), owner)
   remote = await _linked_remote(db, owner.id, "POST", "/avatar", files=files)
   if remote is None:
     raise HTTPException(409, "Sign in to edit your Möbius profile.")
-  return _merge_local_deployment(remote, _linked_since(db, owner.id))
+  return _with_member_since(_merge_local_deployment(remote), owner)
 
 
 @router.get("/avatar")
@@ -1379,7 +1550,7 @@ async def complete_link(
       _open(winner.access_token_encrypted), token,
     ):
       raise HTTPException(409, "Another account link completed first.")
-  return _merge_local_deployment(identity, _linked_since(db, owner.id))
+  return _with_member_since(_merge_local_deployment(identity), owner)
 
 
 @router.delete(
