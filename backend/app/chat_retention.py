@@ -95,9 +95,7 @@ def purge_expired_chat_tombstones(db: Session) -> list[str]:
     return []
 
   # Delegated child chats are part of their parent's durable lifecycle.
-  # Purging either side reclaims the complete parent/child graph. Legacy
-  # Gauntlet rows are included only so data created by older releases can be
-  # removed safely after the owning chat's recovery window expires.
+  # Purging either side reclaims the complete parent/child graph.
   chat_id_set = set(chat_ids)
   delegation_rows = db.query(
     models.Delegation.id, models.Delegation.child_chat_id,
@@ -107,23 +105,6 @@ def purge_expired_chat_tombstones(db: Session) -> list[str]:
   ).all()
   delegation_ids = {row[0] for row in delegation_rows}
   chat_id_set.update(row[1] for row in delegation_rows)
-  gauntlet_ids = {row[0] for row in db.query(
-    models.GauntletRun.id,
-  ).filter(models.GauntletRun.parent_chat_id.in_(chat_id_set)).all()}
-  if delegation_ids:
-    gauntlet_ids.update(row[0] for row in db.query(
-      models.GauntletTask.gauntlet_run_id,
-    ).filter(
-      models.GauntletTask.delegation_id.in_(delegation_ids),
-    ).all())
-  if gauntlet_ids:
-    owned_delegations = db.query(
-      models.GauntletTask.delegation_id,
-    ).filter(
-      models.GauntletTask.gauntlet_run_id.in_(gauntlet_ids),
-      models.GauntletTask.delegation_id.isnot(None),
-    ).all()
-    delegation_ids.update(row[0] for row in owned_delegations)
   if delegation_ids:
     child_rows = db.query(models.Delegation.child_chat_id).filter(
       models.Delegation.id.in_(delegation_ids),
@@ -131,18 +112,7 @@ def purge_expired_chat_tombstones(db: Session) -> list[str]:
     chat_id_set.update(row[0] for row in child_rows)
   chat_ids = sorted(chat_id_set)
 
-  if gauntlet_ids:
-    db.query(models.GauntletTask).filter(
-      models.GauntletTask.gauntlet_run_id.in_(gauntlet_ids),
-    ).delete(synchronize_session=False)
-    db.query(models.GauntletRun).filter(
-      models.GauntletRun.id.in_(gauntlet_ids),
-    ).delete(synchronize_session=False)
   if delegation_ids:
-    # Defensive: a standalone delegation can be reclaimed without a Gauntlet.
-    db.query(models.GauntletTask).filter(
-      models.GauntletTask.delegation_id.in_(delegation_ids),
-    ).delete(synchronize_session=False)
     db.query(models.Delegation).filter(
       models.Delegation.id.in_(delegation_ids),
     ).delete(synchronize_session=False)

@@ -1568,6 +1568,8 @@ def test_run_migrations_records_an_inspectable_append_only_history(tmp_path):
     "0053_app_capability_contract_schema_6",
     "0054_retired_app_identities",
     "0055_declarative_project_artifacts",
+    "0056_model_selection_ids",
+    "0057_detach_retired_gauntlet_history",
   ]
   assert second == first
 
@@ -1581,6 +1583,18 @@ def test_chat_retention_repair_reclaims_broken_workflow_graph(
   monkeypatch.setenv("DATA_DIR", str(data_dir))
   eng = create_engine(f"sqlite:///{tmp_path / 'retention-orphans.db'}")
   models.Base.metadata.create_all(eng)
+  with eng.begin() as conn:
+    conn.execute(text(
+      "CREATE TABLE gauntlet_runs ("
+      "id VARCHAR(64) PRIMARY KEY, app_id INTEGER NOT NULL REFERENCES apps(id), "
+      "parent_chat_id VARCHAR(64) NOT NULL REFERENCES chats(id))"
+    ))
+    conn.execute(text(
+      "CREATE TABLE gauntlet_tasks ("
+      "id VARCHAR(64) PRIMARY KEY, "
+      "gauntlet_run_id VARCHAR(64) NOT NULL REFERENCES gauntlet_runs(id), "
+      "delegation_id VARCHAR(64) NULL REFERENCES delegations(id))"
+    ))
 
   controller_id = "missing-controller"
   child_id = "orphan-child"
@@ -1615,13 +1629,6 @@ def test_chat_retention_repair_reclaims_broken_workflow_graph(
     session.add_all((app, controller, child, nested, survivor))
     session.flush()
     session.add_all((
-      models.GauntletRun(
-        id="orphan-gauntlet", app_id=app.id,
-        parent_chat_id=controller.id, parent_root_run_id="controller-run",
-        target_path="/data/platform", contract_json={},
-        contract_sha256="a" * 64, provider="codex", status="stopped",
-        phase="terminal", current_round=1, max_rounds=1, revision=1,
-      ),
       models.Delegation(
         id="orphan-delegation", app_id=app.id,
         parent_chat_id=controller.id, parent_root_run_id="controller-run",
@@ -1644,10 +1651,13 @@ def test_chat_retention_repair_reclaims_broken_workflow_graph(
       valid_run,
     ))
     session.flush()
-    session.add(models.GauntletTask(
-      id="orphan-task", gauntlet_run_id="orphan-gauntlet",
-      phase="baseline", round=0, ordinal=0, role="critic", scope="read",
-      delegation_id="orphan-delegation", prompt_sha256="d" * 64,
+    session.execute(text(
+      "INSERT INTO gauntlet_runs (id, app_id, parent_chat_id) "
+      "VALUES ('orphan-gauntlet', :app_id, :chat_id)"
+    ), {"app_id": app.id, "chat_id": controller.id})
+    session.execute(text(
+      "INSERT INTO gauntlet_tasks (id, gauntlet_run_id, delegation_id) "
+      "VALUES ('orphan-task', 'orphan-gauntlet', 'orphan-delegation')"
     ))
     for key, run_id in (("orphan-event", "missing-run"),
                         ("valid-event", "valid-run")):
@@ -1698,6 +1708,122 @@ def test_chat_retention_repair_reclaims_broken_workflow_graph(
   assert "0031_chat_retention_orphan_repair" in {
     row["version"] for row in schema_migration_history(eng)
   }
+
+
+def test_gauntlet_history_requires_the_completed_execution_cutover(
+  tmp_path, monkeypatch,
+):
+  """0057 fails closed before generic recovery can revive legacy work."""
+  from app.schema_migrations import _detach_retired_gauntlet_history
+
+  eng = create_engine(f"sqlite:///{tmp_path / 'uncut-gauntlet-history.db'}")
+  with eng.begin() as conn:
+    conn.execute(text("CREATE TABLE apps (id INTEGER PRIMARY KEY)"))
+    conn.execute(text(
+      "CREATE TABLE gauntlet_runs ("
+      "id TEXT PRIMARY KEY, app_id INTEGER REFERENCES apps(id))"
+    ))
+    conn.execute(text("CREATE TABLE gauntlet_target_mutex (id INTEGER PRIMARY KEY)"))
+    conn.execute(text("INSERT INTO apps VALUES (7)"))
+    conn.execute(text("INSERT INTO gauntlet_runs VALUES ('run', 7)"))
+
+  monkeypatch.setattr(migrations, "_SCHEMA_MIGRATIONS", (
+    ("0057_detach_retired_gauntlet_history", _detach_retired_gauntlet_history),
+  ))
+  with pytest.raises(RuntimeError, match="prerequisite Gauntlet cutover build"):
+    run_migrations(eng)
+
+  with eng.connect() as conn:
+    assert conn.execute(text("SELECT * FROM gauntlet_runs")).one() == ("run", 7)
+    assert conn.execute(text(
+      "SELECT version FROM schema_migrations"
+    )).fetchall() == []
+    assert conn.exec_driver_sql(
+      'PRAGMA foreign_key_list("gauntlet_runs")'
+    ).fetchall()
+
+
+def test_retired_gauntlet_history_detaches_foreign_keys_without_losing_rows(
+  tmp_path,
+):
+  """0057 accepts the atomic cutover marker and retains inert history."""
+  from app.schema_migrations import _detach_retired_gauntlet_history
+
+  eng = create_engine(f"sqlite:///{tmp_path / 'gauntlet-history.db'}")
+  with eng.begin() as conn:
+    conn.execute(text("CREATE TABLE apps (id INTEGER PRIMARY KEY)"))
+    conn.execute(text("CREATE TABLE chats (id TEXT PRIMARY KEY)"))
+    conn.execute(text("CREATE TABLE delegations (id TEXT PRIMARY KEY)"))
+    conn.execute(text(
+      "CREATE TABLE gauntlet_runs ("
+      "id TEXT PRIMARY KEY, app_id INTEGER REFERENCES apps(id), "
+      "parent_chat_id TEXT REFERENCES chats(id), payload JSON)"
+    ))
+    conn.execute(text(
+      "CREATE TABLE gauntlet_tasks ("
+      "id TEXT PRIMARY KEY, gauntlet_run_id TEXT REFERENCES gauntlet_runs(id), "
+      "delegation_id TEXT REFERENCES delegations(id), cost FLOAT)"
+    ))
+    conn.execute(text(
+      "CREATE TABLE gauntlet_target_mutex ("
+      "id INTEGER PRIMARY KEY, revision INTEGER NOT NULL)"
+    ))
+    conn.execute(text("INSERT INTO apps VALUES (7)"))
+    conn.execute(text("INSERT INTO chats VALUES ('controller')"))
+    conn.execute(text("INSERT INTO delegations VALUES ('critic')"))
+    conn.execute(text(
+      "INSERT INTO gauntlet_runs VALUES "
+      "('run', 7, 'controller', '{\"goal\":\"preserve\"}')"
+    ))
+    conn.execute(text(
+      "INSERT INTO gauntlet_tasks VALUES ('task', 'run', 'critic', 1.25)"
+    ))
+    conn.execute(text("INSERT INTO gauntlet_target_mutex VALUES (-1, 1)"))
+
+  _detach_retired_gauntlet_history(eng)
+  _detach_retired_gauntlet_history(eng)
+
+  with eng.connect() as conn:
+    assert conn.execute(text(
+      "SELECT id, app_id, parent_chat_id, payload FROM gauntlet_runs"
+    )).one() == ("run", 7, "controller", '{"goal":"preserve"}')
+    assert conn.execute(text(
+      "SELECT id, gauntlet_run_id, delegation_id, cost FROM gauntlet_tasks"
+    )).one() == ("task", "run", "critic", 1.25)
+    assert conn.execute(text(
+      "SELECT id, revision FROM gauntlet_target_mutex"
+    )).one() == (-1, 1)
+    assert conn.exec_driver_sql(
+      'PRAGMA foreign_key_list("gauntlet_runs")'
+    ).fetchall() == []
+    assert conn.exec_driver_sql(
+      'PRAGMA foreign_key_list("gauntlet_tasks")'
+    ).fetchall() == []
+
+
+def test_empty_gauntlet_tables_do_not_require_a_cutover_marker(tmp_path):
+  from app.schema_migrations import _detach_retired_gauntlet_history
+
+  eng = create_engine(f"sqlite:///{tmp_path / 'empty-gauntlet-history.db'}")
+  with eng.begin() as conn:
+    conn.execute(text("CREATE TABLE apps (id INTEGER PRIMARY KEY)"))
+    conn.execute(text(
+      "CREATE TABLE gauntlet_runs ("
+      "id TEXT PRIMARY KEY, app_id INTEGER REFERENCES apps(id))"
+    ))
+
+  _detach_retired_gauntlet_history(eng)
+
+  assert inspect(eng).get_foreign_keys("gauntlet_runs") == []
+
+
+def test_fresh_schema_does_not_recreate_retired_gauntlet_runtime(tmp_path):
+  eng = create_engine(f"sqlite:///{tmp_path / 'fresh.db'}")
+  models.Base.metadata.create_all(eng)
+
+  assert {
+    "gauntlet_runs", "gauntlet_tasks", "gauntlet_target_mutex",
+  }.isdisjoint(inspect(eng).get_table_names())
 
 
 def test_project_chat_collection_migration_preserves_and_backfills_legacy_pair(
@@ -3881,25 +4007,124 @@ def test_retired_app_identity_conflict_preserves_both_rows_and_ledger(tmp_path):
     )).first() is None
 
 
-def test_app_identity_cutover_requires_database_and_current_filesystem_proof(
-  tmp_path,
+def test_model_selection_id_migration_updates_active_choices_only(
+  tmp_path, monkeypatch,
 ):
-  from sqlalchemy import create_engine
-  from app import models, schema_migrations
+  """0056 updates every reusable selection without rewriting history/data."""
+  data_dir = tmp_path / "data"
+  settings_path = data_dir / "shared" / "agent-settings.json"
+  settings_path.parent.mkdir(parents=True)
+  settings_path.write_text(json.dumps({
+    "model": "claude-opus-4-5-20251001",
+    "future_setting": {"keep": True},
+    "background_agents": {
+      "providers": [
+        {
+          "provider": "claude",
+          "model": "claude-sonnet-4-5-20251001",
+          "effort": "high",
+        },
+        {"provider": "claude", "model": "claude-future-9"},
+        "malformed-provider-row",
+      ],
+      "keep": "sibling",
+    },
+  }, indent=2) + "\n")
+  monkeypatch.setenv("DATA_DIR", str(data_dir))
 
-  eng = create_engine(f"sqlite:///{tmp_path / 'configured.db'}")
+  eng = create_engine(f"sqlite:///{tmp_path / 'model-cutover.db'}")
   models.Base.metadata.create_all(eng)
-  schema_migrations.run_migrations(eng)
-  assert schema_migrations.app_identity_cutover_is_current(
-    eng, str(tmp_path),
-  ) is False
+  with Session(eng) as session:
+    app = models.App(
+      name="Migration owner", slug="migration-owner",
+      source_dir=str(data_dir / "apps" / "migration-owner"),
+    )
+    owner = models.Owner(
+      id=1, username="owner", hashed_password="unused",
+      model_prefs_json={
+        "hidden_ids": [
+          "claude-opus-4-7-20251215",
+          "claude-opus-4-7",
+          "claude-future-9",
+          "claude-future-9",
+        ],
+        "keep": {"sibling": True},
+      },
+    )
+    parent = models.Chat(
+      id="model-parent", title="Parent", messages=[],
+      agent_settings_json={
+        "model": "claude-opus-4-5-20251001", "effort": "medium",
+      },
+    )
+    child = models.Chat(
+      id="model-child", title="Child", messages=[],
+      agent_settings_json={"model": "claude-future-9"},
+    )
+    deleted = models.Chat(
+      id="model-deleted", title="Deleted", messages=[],
+      deleted_at=datetime(2026, 9, 1),
+      agent_settings_json={
+        "model": "claude-sonnet-4-7-20251215", "keep": "history",
+      },
+    )
+    malformed = models.Chat(
+      id="model-malformed", title="Malformed", messages=[],
+      agent_settings_json=["not", "a", "mapping"],
+    )
+    session.add_all([app, owner, parent, child, deleted, malformed])
+    session.flush()
+    session.add(models.Delegation(
+      id="model-delegation", app_id=app.id,
+      parent_chat_id=parent.id, parent_root_run_id="root",
+      task_key="migration", child_chat_id=child.id, provider="claude",
+      model="claude-opus-4-6-20251015", scope="read", cwd="/data",
+      prompt_sha256="d" * 64,
+    ))
+    session.commit()
 
-  files = tmp_path / ".migration-receipts" / "app-identity-files-v1"
-  files.parent.mkdir(parents=True)
-  files.touch()
-  assert schema_migrations.app_identity_cutover_is_current(
-    eng, str(tmp_path),
-  ) is True
+  migrations._migrate_model_selection_ids(eng)
+  migrations._migrate_model_selection_ids(eng)
+
+  migrated_settings = json.loads(settings_path.read_text())
+  assert migrated_settings == {
+    "model": "claude-opus-4-5-20251101",
+    "future_setting": {"keep": True},
+    "background_agents": {
+      "providers": [
+        {
+          "provider": "claude",
+          "model": "claude-sonnet-4-5-20250929",
+          "effort": "high",
+        },
+        {"provider": "claude", "model": "claude-future-9"},
+        "malformed-provider-row",
+      ],
+      "keep": "sibling",
+    },
+  }
+  with Session(eng) as session:
+    assert session.get(models.Owner, 1).model_prefs_json == {
+      "hidden_ids": [
+        "claude-opus-4-7", "claude-future-9", "claude-future-9",
+      ],
+      "keep": {"sibling": True},
+    }
+    assert session.get(models.Chat, "model-parent").agent_settings_json == {
+      "model": "claude-opus-4-5-20251101", "effort": "medium",
+    }
+    assert session.get(models.Chat, "model-child").agent_settings_json == {
+      "model": "claude-future-9",
+    }
+    assert session.get(models.Chat, "model-deleted").agent_settings_json == {
+      "model": "claude-sonnet-4-6", "keep": "history",
+    }
+    assert session.get(models.Chat, "model-malformed").agent_settings_json == [
+      "not", "a", "mapping",
+    ]
+    assert session.get(models.Delegation, "model-delegation").model == (
+      "claude-opus-4-6"
+    )
 
 
 def test_legacy_project_cutover_never_links_chat_to_deleted_project(

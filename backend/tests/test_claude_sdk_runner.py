@@ -1368,7 +1368,7 @@ def test_claude_thinking_config_requests_summarized_adaptive_thinking():
     "display": "summarized",
   }
   assert claude_sdk_runner._claude_thinking_config(
-    "claude-sonnet-4-7-20251215"
+    "claude-sonnet-4-6"
   ) == {
     "type": "adaptive",
     "display": "summarized",
@@ -1378,7 +1378,7 @@ def test_claude_thinking_config_requests_summarized_adaptive_thinking():
     "display": "summarized",
   }
   assert (
-    claude_sdk_runner._claude_thinking_config("claude-opus-4-5-20251001")
+    claude_sdk_runner._claude_thinking_config("claude-opus-4-5-20251101")
     is None
   )
 
