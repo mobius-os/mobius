@@ -8,6 +8,7 @@ rather than reaching through the broader chat scheduler.
 
 import asyncio
 import copy
+import json
 import time
 import uuid
 from datetime import UTC, datetime
@@ -61,6 +62,60 @@ from app.tool_edit_preview import edit_diff_sidecar_id
 
 
 _active_sinks: dict[str, "ChatEventSink"] = {}
+
+
+def _owner_card_receipt_id(content: object) -> str | None:
+  """Find a validated saved-card receipt in a completed tool result.
+
+  Claude exposes an MCP text result directly, while Codex preserves the MCP
+  content envelope. Walk only those small JSON shapes; the exact id is checked
+  against this turn's live continuation card before any runner is interrupted.
+  """
+  pending = [content]
+  visited = 0
+  while pending and visited < 24:
+    value = pending.pop()
+    visited += 1
+    if isinstance(value, str):
+      text = value.strip()
+      candidates = [text]
+      if "\n" in text:
+        candidates.extend(
+          line.strip() for line in text.splitlines()[-8:] if line.strip()
+        )
+      for candidate in candidates:
+        if (
+          not candidate
+          or len(candidate) > 32_768
+          or candidate[0] not in "[{"
+        ):
+          continue
+        try:
+          pending.append(json.loads(candidate))
+        except (json.JSONDecodeError, RecursionError):
+          pass
+      continue
+    if isinstance(value, list):
+      pending.extend(value[:12])
+      continue
+    if not isinstance(value, dict):
+      continue
+    question_id = value.get("question_id")
+    if (
+      value.get("state") in {"waiting_for_owner", "answered"}
+      and isinstance(question_id, str)
+      and question_id
+      and len(question_id) <= 64
+      and isinstance(value.get("next_action"), str)
+    ):
+      return question_id
+    if value.get("isError") is True:
+      continue
+    for key in ("content", "result", "structuredContent", "text", "output"):
+      nested = value.get(key)
+      if isinstance(nested, (dict, list, str)):
+        pending.append(nested)
+  return None
 
 
 def _pause_note(
@@ -345,7 +400,7 @@ class ChatEventSink:
     # caller owns summary policy; the sink only fires this optional hook after
     # the QuestionCommit barrier and never waits on it before showing the card.
     self._on_question_checkpoint = on_question_checkpoint
-    self._checkpoint_tasks: set[asyncio.Task] = set()
+    self._side_tasks: set[asyncio.Task] = set()
     # Per-turn run identity, allocated by the scheduler and threaded in
     # via `_run_chat_impl`. The sink stamps it on every writer-actor
     # command so the actor coalesces/fences this turn's snapshots under
@@ -374,6 +429,7 @@ class ChatEventSink:
     # invisible. When blocks are empty but _last_error is set, finalize()
     # synthesizes a minimal error block so the turn is durable.
     self._last_error: str | None = None
+
     # True only for the duration of `split_for_steer`. While set, `publish()`
     # still broadcasts and accumulates the continuation's blocks, but does NOT
     # submit a transcript snapshot — a snapshot landing mid-split would target
@@ -384,6 +440,29 @@ class ChatEventSink:
     # a fresh assistant message.
     self._steering = False
     self._lifecycle_writes: list[tuple[RecordAgentLifecycle, object]] = []
+
+  def _start_side_task(
+    self,
+    awaitable: Awaitable[None],
+    *,
+    failure_message: str,
+    warn: bool = False,
+  ) -> None:
+    """Keep a short in-turn side task alive and consume its terminal state."""
+    task = asyncio.create_task(awaitable)
+    self._side_tasks.add(task)
+
+    def _settle(done: asyncio.Task) -> None:
+      self._side_tasks.discard(done)
+      try:
+        done.result()
+      except asyncio.CancelledError:
+        pass
+      except Exception:
+        report = _get_logger().warning if warn else _get_logger().debug
+        report(failure_message, self.chat_id, exc_info=True)
+
+    task.add_done_callback(_settle)
 
   def _prepare_thinking_event(self, event: ChatEvent) -> None:
     """Give a reasoning run stable identity before reducer + broadcast."""
@@ -841,6 +920,7 @@ class ChatEventSink:
     # its bounded structured Memory result last, so the carved tail still
     # contains the line that settles a recognized lookup.
     output_reduced = False
+    owner_card_receipt_id = None
     if event_type == "tool_output":
       # An explicit secure-input reveal reaches the provider as a tool result,
       # but the marked envelope must not enter Möbius's live UI, transcript, or
@@ -849,6 +929,11 @@ class ChatEventSink:
       # Settle a peer-network exchange from the FULL result JSON before it can be
       # carved by reduction (the envelope is one object, not a tail-safe line).
       self._stamp_peer_message(event)
+      if (
+        event.get("output_complete") is True
+        and event.get("output_exit_code") in (None, 0)
+      ):
+        owner_card_receipt_id = _owner_card_receipt_id(event.get("content"))
       output_reduced = self._reduce_tool_output(event)
       if not output_reduced and event.get("output_exit_code") is None:
         exit_code = tool_output_exit_code(event.get("content"))
@@ -930,6 +1015,18 @@ class ChatEventSink:
             thinking_stashes=stashes,
           )
         )
+    if (
+      owner_card_receipt_id is not None
+      and self._has_continuation_card(owner_card_receipt_id)
+    ):
+      # A completed provider event is the first universal boundary at which the
+      # result is no longer in flight. It covers MCP and command-backed helpers
+      # alike, without a timer or a second transport callback.
+      self._start_side_task(
+        self._finish_turn_after_owner_card(owner_card_receipt_id),
+        failure_message="finish-after-owner-card failed chat_id=%s",
+        warn=True,
+      )
     return True
 
   async def finalize(
@@ -1233,54 +1330,30 @@ class ChatEventSink:
     # Committed durably — now (and only now) show the card.
     self._publish_activity_frontier()
     self.bc.publish(event)
-    # A continuation owner-input card (request_question / request_approval /
-    # secure-input) is the TERMINAL action of the turn: its receipt returns to
-    # the model immediately (unlike native AskUserQuestion, which parks on an
-    # awaited future in question_bridge and never sets response_mode), so
-    # nothing at the provider level stops the model from emitting more text or
-    # tools after the card. End the live turn at its source now, so the card is
-    # genuinely the last thing in the turn. The owner's saved answer resumes the
-    # chat in a later turn; the durable pending-question marker owns that
-    # resumption, so this is a clean completion, not a Stop or a resumable
-    # pause. Gated strictly on the continuation marker so the native path — which
-    # this same method also serves — is never double-interrupted.
-    if event.get("response_mode") == "continuation":
-      await self._finish_turn_after_owner_card()
+    # A continuation card is terminal, but this save path is still inside the
+    # provider's tool call. Interrupting here rejects that in-flight call before
+    # its successful receipt reaches the provider. `publish()` ends the turn
+    # only when the provider later emits the matching completed tool result.
     # The card is persisted: record the save time so a subsequent throttled
     # snapshot in publish() doesn't redundantly re-commit the same state
     # immediately after.
     self._last_save = time.monotonic()
     if self._on_question_checkpoint is not None:
-      task = asyncio.create_task(self._on_question_checkpoint())
-      self._checkpoint_tasks.add(task)
+      self._start_side_task(
+        self._on_question_checkpoint(),
+        failure_message="question checkpoint summary failed chat_id=%s",
+      )
 
-      def _settle_checkpoint(done: asyncio.Task) -> None:
-        self._checkpoint_tasks.discard(done)
-        try:
-          done.result()
-        except asyncio.CancelledError:
-          pass
-        except Exception:
-          _get_logger().debug(
-            "question checkpoint summary failed chat_id=%s",
-            self.chat_id,
-            exc_info=True,
-          )
+  async def _finish_turn_after_owner_card(self, question_id: str) -> None:
+    """End the live turn after its committed card receipt has been delivered.
 
-      task.add_done_callback(_settle_checkpoint)
-
-  async def _finish_turn_after_owner_card(self) -> None:
-    """End the live turn once a continuation owner-input card has committed.
-
-    Provider-agnostic and best-effort: look up whichever runner handle owns
-    this chat and, if it exposes the card-finish seam, ask it to cut the turn
-    right after the card. A handle that predates this seam simply keeps the
-    older prompt-only "end your turn after the card" contract. Runs on the
-    backend event loop concurrently with the parked runner — the same topology
-    as steering — and only signals the interrupt; it never awaits turn drain
-    (the turn cannot end until the in-flight card tool returns the receipt that
-    triggered this call).
+    Validate the exact continuation card against this sink's live transcript
+    before touching a runner, then ask whichever provider owns the chat to make
+    the card the turn's final action. Native provider questions have no
+    continuation marker and are never cut here.
     """
+    if not self._has_continuation_card(question_id):
+      raise ValueError("Continuation owner-input card is not current for this turn.")
     from app.runner_registry import registry
     for handle in registry.get_handles(self.chat_id):
       finish = getattr(handle, "finish_after_owner_card", None)
@@ -1297,6 +1370,14 @@ class ChatEventSink:
           getattr(handle, "kind", "?"),
           exc_info=True,
         )
+
+  def _has_continuation_card(self, question_id: str) -> bool:
+    return any(
+      block.get("type") == "question"
+      and block.get("question_id") == question_id
+      and block.get("response_mode") == "continuation"
+      for block in self.assistant_blocks
+    )
 
 
 async def commit_steer_cut(

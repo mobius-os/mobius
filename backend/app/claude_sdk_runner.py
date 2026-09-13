@@ -564,31 +564,29 @@ class ActiveClaudeClient:
     return True
 
   async def finish_after_owner_card(self) -> None:
-    """End the turn right after a continuation owner-input card commits.
+    """End the turn after a continuation owner-input receipt is delivered.
 
     A saved question / approval / secure-input card is the terminal action of
     the turn: the owner's answer resumes the chat in a LATER turn, so the model
     must not emit any more text or tools after the card. That path returns a
-    receipt to the model immediately (unlike native `AskUserQuestion`, which
-    parks in `can_use_tool`), so nothing at the SDK level stops the model from
-    continuing — this fires the same soft interrupt `steer` uses to cut the
-    in-flight generation at its source.
+    receipt to the model (unlike native `AskUserQuestion`, which parks in
+    `can_use_tool`). The event sink calls this only when the SDK emits the
+    matching completed tool result, then this fires the same soft interrupt
+    `steer` uses to stop any trailing generation at its source.
 
-    Signal-only, exactly like `steer`: it never awaits `_finished` (the turn
-    cannot end until the in-flight card tool returns the receipt that triggered
-    this call, so awaiting drain here would deadlock). Tagged `card` so the
-    terminal branch classifies the result as a clean completion — no steer
-    requery (`pending_steer` stays empty) and no resumable "Paused" note; the
-    chat's durable pending-question marker already owns resumption. Defers to a
-    Stop or steer that already owns this turn's interrupt so their semantics
-    win.
+    Signal-only, exactly like `steer`: it never awaits `_finished`. Tagged
+    `card` so the terminal branch classifies the result as a clean completion —
+    no steer requery (`pending_steer` stays empty) and no resumable "Paused"
+    note; the chat's durable pending-question marker already owns resumption.
+    Defers to a Stop or steer that already owns this turn's interrupt so their
+    semantics win.
     """
     if self._finished.done():
       return
     if self._interrupt_owner is not None:
       return
     self._interrupt_owner = "card"
-    # Collapse a steer that races the card-commit drain window into this cut
+    # Collapse a steer that races the post-receipt drain window into this cut
     # rather than firing a second interrupt (mirrors `steer`); the terminal
     # branch clears the flag.
     self._interrupt_in_flight = True
@@ -1503,8 +1501,8 @@ async def run_claude_sdk_turn(
             and active_client.interrupt_issued
             and (
               sdk_msg.stop_reason == "interrupt"
-              # A card commit interrupts WHILE the card tool is the last action,
-              # so the CLI's terminal carries stop_reason `tool_use`/null (its
+              # A card receipt interrupts while its tool is the last action, so
+              # the CLI's terminal carries stop_reason `tool_use`/null (its
               # own `[ede_diagnostic]` names exactly this), not `interrupt`. We
               # initiated this cut, so classify it by our own ownership flag
               # rather than the provider's stop_reason, or the raw "Execution
