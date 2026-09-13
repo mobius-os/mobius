@@ -119,6 +119,13 @@ async function navigateToSettings(page) {
   await expect(page.locator('.settings')).toBeVisible()
 }
 
+// New Chat owns the canonical composer before and after row allocation.
+function newChatSurface(page, chatId = null) {
+  return page.locator(chatId
+    ? `[data-chat-surface="painted"][data-chat-id="${chatId}"]`
+    : '[data-chat-surface="painted"]')
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -218,6 +225,25 @@ async function setup(
           || document.querySelector('.chat__form')),
     { timeout: 10000 }
   )
+}
+
+for (const width of [412, 1512]) {
+  test(`the message composer has an unambiguous accessible name at ${width}px`, async ({ page }) => {
+    await setup(page, { width, height: 915 })
+    const composer = page.getByRole('textbox', { name: 'Message Möbius…', exact: true })
+    const handoff = page.getByRole('textbox', { name: 'Preparing message input', exact: true })
+    await expect(composer).toHaveCount(1)
+    await expect(handoff).toHaveCount(1)
+    await expect(handoff).toHaveAttribute('tabindex', '-1')
+    // The temporary control must remain focusable for a synchronous touch
+    // keyboard transfer; hiding or unmounting it would change that contract.
+    await handoff.focus()
+    await expect(handoff).toBeFocused()
+    await composer.fill('Draft stays with the real composer')
+    await expect(composer).toBeFocused()
+    await expect(composer).toHaveValue('Draft stays with the real composer')
+    await expect(handoff).toHaveValue('')
+  })
 }
 
 /** Read the current navigation state from the app. */
@@ -746,16 +772,21 @@ test.describe('Touch navigation', () => {
     await expect(navigation).toBeFocused()
     await navigation.getByRole('button', { name: 'New chat', exact: true }).click()
 
-    const presentation = page.locator('[data-new-chat-presentation]')
+    const presentation = newChatSurface(page, intentId)
     const composer = presentation.getByRole('textbox', { name: 'Message Möbius…' })
     await expect.poll(() => requestedId).toBe(intentId)
     await expect(composer).toBeFocused()
     await expect(composer).toHaveValue('Resume this saved thought')
+    // The saved intent id owns the workspace destination from the first commit,
+    // so the different visible blank is never adopted: the active chat is the
+    // saved intent, not blank.id.
     await expect.poll(() => page.evaluate(() => localStorage.getItem('moebius_active_chat')))
-      .toBe(blank.id)
+      .toBe(intentId)
+    await expect.poll(() => page.evaluate(() => localStorage.getItem('moebius_active_chat')))
+      .not.toBe(blank.id)
 
     releaseCreation()
-    const paintedComposer = page.locator('[data-chat-surface="painted"] textarea')
+    const paintedComposer = presentation.locator('textarea')
     await expect(paintedComposer).toBeFocused()
     await expect(paintedComposer).toHaveValue('Resume this saved thought')
     await expect.poll(() => page.evaluate(() => localStorage.getItem('moebius_active_chat')))
@@ -801,14 +832,16 @@ test.describe('Touch navigation', () => {
     await openDrawer(page)
     const navigation = page.getByRole('navigation', { name: 'Primary navigation' })
     await navigation.getByRole('button', { name: 'New chat', exact: true }).click()
-    const presentation = page.locator('[data-new-chat-presentation]')
+    const presentation = newChatSurface(page, intentId)
     const composer = presentation.getByRole('textbox', { name: 'Message Möbius…' })
     await expect.poll(() => requestedId).toBe(intentId)
     await expect(composer).toBeFocused()
     await expect(composer).toHaveValue(durableInput)
+    // Hydration fills the canonical composer's normal session cache. The
+    // earlier null assertion proves the input came from IndexedDB only.
     await expect.poll(() => page.evaluate(id => (
-      sessionStorage.getItem(`draft:${id}`)
-    ), intentId)).toBeNull()
+      JSON.parse(sessionStorage.getItem(`draft:${id}`))?.input
+    ), intentId)).toBe(durableInput)
 
     releaseCreation()
     const painted = page.locator(
@@ -861,8 +894,11 @@ test.describe('Touch navigation', () => {
       /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
     )
 
-    const presentation = page.locator('[data-new-chat-presentation]')
-    await expect(presentation).toHaveAttribute('data-new-chat-presentation', replacementId)
+    // The authoritative 409 rotates the id: the same canonical surface is now
+    // mounted under replacementId (the old intentId surface must be gone).
+    const presentation = newChatSurface(page, replacementId)
+    await expect(presentation).toBeVisible()
+    await expect(newChatSurface(page, intentId)).toHaveCount(0)
     const composer = presentation.getByRole('textbox', { name: 'Message Möbius…' })
     await expect(composer).toBeFocused()
     await expect(composer).toHaveValue(durableInput)
@@ -913,7 +949,7 @@ test.describe('Touch navigation', () => {
     await expect(painted).toHaveValue(durableInput)
   })
 
-  test('the immediate New Chat cover keeps a queued old-chat focus inert', async ({ page }) => {
+  test('New Chat keeps a queued old-chat focus inert through allocation', async ({ page }) => {
     const oldId = NAV_CHATS[0].id
     await setup(page, { width: 1280, height: 900 }, {
       detailForChat: emptyChatDetail,
@@ -936,14 +972,14 @@ test.describe('Touch navigation', () => {
     await openDrawer(page)
     const navigation = page.getByRole('navigation', { name: 'Primary navigation' })
     await navigation.getByRole('button', { name: 'New chat', exact: true }).click()
-    const presentation = page.locator('[data-new-chat-presentation]')
+    const presentation = newChatSurface(page)
     const composer = presentation.getByRole('textbox', { name: 'Message Möbius…' })
     await expect.poll(() => requestedId).not.toBeNull()
     await expect(composer).toBeFocused()
 
-    const coveredOldChat = page.locator(
-      `[data-chat-surface="painted"][data-chat-id="${oldId}"]`,
-    )
+    // The old chat may already be parked rather than held after first paint;
+    // neither state may accept a late focus callback.
+    const coveredOldChat = page.locator(`.shell__chat-view[data-chat-id="${oldId}"]`)
     await expect(coveredOldChat).toHaveAttribute('inert', '')
     await expect(coveredOldChat).toHaveAttribute('aria-hidden', 'true')
     // Model a focus callback that was queued by the outgoing ChatView before
@@ -965,54 +1001,43 @@ test.describe('Touch navigation', () => {
     await expect(painted).toHaveValue('The cover owns this draft')
   })
 
-  test('reopening navigation retires a materialized cover and can resume its draft', async ({ page }) => {
-    const oldId = NAV_CHATS[0].id
-    await page.addInitScript(chatId => {
-      const nativeFocus = HTMLElement.prototype.focus
-      window.__allowDestinationComposerFocus = false
-      window.__blockedDestinationFocusCount = 0
-      HTMLElement.prototype.focus = function patchedFocus(...args) {
-        const owner = this.closest?.('[data-chat-surface="painted"][data-chat-id]')
-        if (owner && owner.dataset.chatId !== chatId
-            && !window.__allowDestinationComposerFocus) {
-          window.__blockedDestinationFocusCount += 1
-          return
-        }
-        return nativeFocus.apply(this, args)
-      }
-    }, oldId)
+  test('late New Chat allocation cannot steal navigation focus or lose the draft', async ({ page }) => {
     await setup(page, undefined, { detailForChat: emptyChatDetail })
-
-    await page.route(/\/api\/chats(?:\?.*)?$/, route => {
+    let releaseCreation
+    const creationGate = new Promise(resolve => { releaseCreation = resolve })
+    let requestedId = null
+    await page.route(/\/api\/chats(?:\?.*)?$/, async route => {
       if (route.request().method() !== 'POST') return route.fallback()
-      const id = route.request().postDataJSON().id
-      return route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        body: JSON.stringify(createdChat(id)),
-      })
+      requestedId = route.request().postDataJSON().id
+      await creationGate
+      return route.fulfill({ status: 200, json: createdChat(requestedId) })
     })
 
     await openDrawer(page)
     const navigation = page.getByRole('navigation', { name: 'Primary navigation' })
+    await expect(navigation).toBeFocused()
     await navigation.getByRole('button', { name: 'New chat', exact: true }).click()
-    const presentation = page.locator('[data-new-chat-presentation]')
-    const composer = presentation.getByRole('textbox', { name: 'Message Möbius…' })
+    await expect.poll(() => requestedId).not.toBeNull()
+    const composer = newChatSurface(page, requestedId)
+      .getByRole('textbox', { name: 'Message Möbius…' })
     await expect(composer).toBeFocused()
     await composer.fill('Navigation can recover this')
-    await expect.poll(() => page.evaluate(() => window.__blockedDestinationFocusCount))
-      .toBeGreaterThanOrEqual(2)
-    await expect(presentation).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Toggle navigation' }))
+      .toHaveAttribute('aria-expanded', 'false')
 
-    const toggle = page.getByRole('button', { name: 'Toggle navigation' })
-    await toggle.click()
-    await expect(presentation).toHaveCount(0)
-    await expect(toggle).toHaveAttribute('aria-expanded', 'true')
-    await expect(navigation).toBeVisible()
+    await openDrawer(page)
+    await expect(navigation).toBeFocused()
+    releaseCreation()
+    await expect.poll(() => page.evaluate(() => (
+      JSON.parse(sessionStorage.getItem('new-chat-intent'))?.status
+    ))).toBe('materialized')
+    await expect(navigation).toBeFocused()
+    await expect(page.getByRole('button', { name: 'Toggle navigation' }))
+      .toHaveAttribute('aria-expanded', 'true')
 
-    await page.evaluate(() => { window.__allowDestinationComposerFocus = true })
     await navigation.getByRole('button', { name: 'New chat', exact: true }).click()
-    const resumed = page.locator('[data-chat-surface="painted"] textarea')
+    const resumed = newChatSurface(page, requestedId)
+      .getByRole('textbox', { name: 'Message Möbius…' })
     await expect(resumed).toBeFocused()
     await expect(resumed).toHaveValue('Navigation can recover this')
   })
@@ -1087,17 +1112,31 @@ test.describe('Touch navigation', () => {
       .getByRole('button', { name: 'New chat', exact: true })
       .click()
 
-    const presentation = page.locator('[data-new-chat-presentation]')
+    const presentation = newChatSurface(page)
     const immediateComposer = presentation.getByRole('textbox', { name: 'Message Möbius…' })
-    const pendingOptions = presentation.getByRole('button', {
-      name: 'Chat options unavailable until this chat is ready',
-    })
+    // Local attachment actions remain available; server reads wait for allocation.
+    const pendingOptions = presentation.locator('.composer-plus > button')
     await expect(presentation).toBeVisible()
     await expect(presentation.getByText("What's on your mind?", { exact: true })).toBeVisible()
+    await expect(pendingOptions).toHaveCount(1)
     await expect(pendingOptions).toBeVisible()
-    await expect(pendingOptions).toBeDisabled()
-    await expect(pendingOptions.locator('svg')).toBeVisible()
+    await expect(pendingOptions.locator('svg').first()).toBeVisible()
     const pendingOptionsBox = await pendingOptions.boundingBox()
+    await expect.poll(() => requestedId).not.toBeNull()
+    const prematureReads = []
+    const observeRead = request => {
+      if (request.url().includes(`/api/chats/${requestedId}/`)) {
+        prematureReads.push(new URL(request.url()).pathname)
+      }
+    }
+    page.on('request', observeRead)
+    await pendingOptions.click()
+    const options = page.getByRole('dialog', { name: 'Chat options', exact: true })
+    await expect(options.getByRole('button', { name: /Attach files/ })).toBeEnabled()
+    await pendingOptions.click()
+    await expect(options).toHaveCount(0)
+    page.off('request', observeRead)
+    expect(prematureReads).toEqual([])
     await expect(immediateComposer).toBeFocused()
     await page.keyboard.type('Typed while opening')
     await expect.poll(() => requestedId).toMatch(
@@ -1115,7 +1154,9 @@ test.describe('Touch navigation', () => {
     const composer = page.locator('[data-chat-surface="painted"] textarea')
     await expect(composer).toBeFocused()
     await expect(composer).toHaveValue('Typed while opening')
-    await expect(presentation).toHaveCount(0)
+    // Allocation keeps the same canonical composer instead of swapping in a
+    // second surface: exactly one message composer exists throughout.
+    await expect(page.getByRole('textbox', { name: 'Message Möbius…' })).toHaveCount(1)
     await expect.poll(() => page.evaluate(() => localStorage.getItem('moebius_active_chat')))
       .toBe(requestedId)
     await expect.poll(() => page.evaluate(id => (
@@ -1127,10 +1168,10 @@ test.describe('Touch navigation', () => {
       length: element.value.length,
     }))).toEqual({ start: 19, end: 19, length: 19 })
     const readySurface = page.locator('[data-chat-surface="painted"]')
-    const readyOptions = readySurface.getByRole('button', { name: /Chat options/ })
+    const readyOptions = readySurface.locator('.composer-plus > button')
+    await expect(readyOptions).toHaveCount(1)
     await expect(readyOptions).toBeVisible()
     await expect(readyOptions).toBeEnabled()
-    await expect(readySurface.locator('.composer-plus > button')).toHaveCount(1)
     const readyOptionsBox = await readyOptions.boundingBox()
     expect(pendingOptionsBox).not.toBeNull()
     expect(readyOptionsBox).not.toBeNull()
@@ -1174,7 +1215,7 @@ test.describe('Touch navigation', () => {
     await expect(navigation).toBeFocused()
     await navigation.getByRole('button', { name: 'New chat', exact: true }).click()
 
-    const presentation = page.locator('[data-new-chat-presentation]')
+    const presentation = newChatSurface(page)
     const composer = presentation.getByRole('textbox', { name: 'Message Möbius…' })
     await expect(presentation).toBeVisible()
     await expect(composer).toBeFocused()
@@ -1197,7 +1238,7 @@ test.describe('Touch navigation', () => {
     await expect(reloadedNavigation).toBeFocused()
     await reloadedNavigation.getByRole('button', { name: 'New chat', exact: true }).click()
 
-    const restored = page.locator('[data-new-chat-presentation]')
+    const restored = newChatSurface(page)
       .getByRole('textbox', { name: 'Message Möbius…' })
     await expect.poll(() => createCount).toBe(2)
     await expect(restored).toBeFocused()
@@ -1214,7 +1255,9 @@ test.describe('Touch navigation', () => {
     const paintedComposer = page.locator('[data-chat-surface="painted"] textarea')
     await expect(paintedComposer).toBeFocused()
     await expect(paintedComposer).toHaveValue('Survives retry and reload')
-    await expect(page.locator('[data-new-chat-presentation]')).toHaveCount(0)
+    // The retried allocation resolves into the same canonical surface rather
+    // than tearing down and remounting a separate presentation.
+    await expect(page.getByRole('textbox', { name: 'Message Möbius…' })).toHaveCount(1)
     await expect.poll(() => page.evaluate(() => localStorage.getItem('moebius_active_chat')))
       .toBe(requestedId)
   })
@@ -1671,7 +1714,7 @@ test.describe('Drawer touch lifecycle', () => {
       selectionChanged: true,
     })
     const serializedTrace = JSON.stringify(trace)
-    for (const [id, title] of NAV_CHATS) {
+    for (const { id, title } of NAV_CHATS) {
       expect(serializedTrace).not.toContain(id)
       expect(serializedTrace).not.toContain(title)
     }

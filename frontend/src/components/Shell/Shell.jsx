@@ -808,15 +808,6 @@ export default function Shell({ onInitialVisualReady }) {
     initialVisualReadyRef.current = true
     onInitialVisualReady?.()
   }, [onInitialVisualReady])
-  // A slow New-chat allocation replaces the modal drawer visually without
-  // consuming its history entry. Destination navigation owns that entry once
-  // the concrete chat exists; avoiding an early Back traversal also keeps the
-  // temporary phone composer focused until the real composer accepts it.
-  const displayedNavigationOpen = navigationOpen && (
-    persistentDrawer || newChatPresentation == null
-  )
-  const navigationSurfaceOpen = modalDrawerOpen && newChatPresentation == null
-
   const requestComposer = useCallback((chatId, {
     draft,
     focus = false,
@@ -4394,7 +4385,8 @@ export default function Shell({ onInitialVisualReady }) {
         ref={composerFocusLeaseRef}
         className="shell__composer-focus-lease"
         tabIndex={-1}
-        aria-label="Message Möbius…"
+        // This temporary keyboard handoff is not a second message composer.
+        aria-label="Preparing message input"
         autoComplete="off"
         onInput={(event) => {
           const draftId = composerFocusLeaseDraftIdRef.current
@@ -4512,7 +4504,7 @@ export default function Shell({ onInitialVisualReady }) {
       </header>
 
       <Drawer
-        open={displayedNavigationOpen}
+        open={navigationOpen}
         persistent={persistentDrawer}
         width={desktopSidebarWidth}
         onWidthChange={setDesktopSidebarWidth}
@@ -4625,7 +4617,7 @@ export default function Shell({ onInitialVisualReady }) {
           // a mode scene, so it is pointer/keyboard inert throughout — not just under
           // the drawer (M4). It matches the WorkspaceChrome strips, which already go
           // inert for the full mode beat.
-          inert={navigationSurfaceOpen || modeBeatActive}
+          inert={modalDrawerOpen || modeBeatActive}
           aria-label="Open tabs"
           // The single-pane strip is the PRIMARY drag source once the flag is on
           // Tag it with the sole pane's id so the drag controller resolves a
@@ -4672,7 +4664,7 @@ export default function Shell({ onInitialVisualReady }) {
           : ''}`}
         id="main-content"
         tabIndex={-1}
-        inert={navigationSurfaceOpen}
+        inert={modalDrawerOpen}
         ref={contentElRef}
       >
         {/* Content layer (design §2): app-iframe wrappers (id-sorted) and chat
@@ -4754,7 +4746,7 @@ export default function Shell({ onInitialVisualReady }) {
               // suspend its iframe interaction while the drawer is open OR during any
               // mode scene (cross-origin app interaction is inert throughout).
               interactive={appRuntimeVisible
-                && !navigationSurfaceOpen && !modeBeatActive}
+                && !modalDrawerOpen && !modeBeatActive}
               version={versionForApp(id)}
               appName={app?.name}
               appSlug={app?.slug}
@@ -4809,7 +4801,7 @@ export default function Shell({ onInitialVisualReady }) {
           const chatSurfaceInteractive = surfaceVisible
             && role === 'active'
             && !settingsOverlay
-            && !navigationSurfaceOpen
+            && !modalDrawerOpen
           const tabPanel = role !== 'held' && paned
           // A retained owner may belong to the hidden workspace world. Its
           // layers stay mounted for continuity, but only a surface painted by
@@ -5208,7 +5200,7 @@ export default function Shell({ onInitialVisualReady }) {
             // pointer-transparent (CSS) but fully INERT — keyboard-unfocusable and
             // aria-hidden — so a tab/divider that already held focus can't process
             // Enter/arrow input while its captured scene is moving.
-            inert={navigationSurfaceOpen || modeBeatActive}
+            inert={modalDrawerOpen || modeBeatActive}
             workspace={workspace}
             projection={projection}
             mode={workspaceMode}
@@ -5236,7 +5228,7 @@ export default function Shell({ onInitialVisualReady }) {
           type="button"
           className="shell__immersive-exit"
           aria-label="Exit full screen"
-          inert={navigationSurfaceOpen}
+          inert={modalDrawerOpen}
           onClick={() => dispatchImmersive({ type: 'exit' })}
         >
           <CollapseSm width={18} height={18} aria-hidden="true" />

@@ -32,10 +32,10 @@
  *      cleanup so a non-null value at the end can only mean bootstrap
  *      created the chat.
  *
- *  (c) The logout cache wipe covers BOTH `mobius-*` and `workbox-*`
- *      Cache Storage prefixes (api/client.js `wipeSwCaches`). A test
- *      asserting only `mobius-*` would miss a regression that dropped
- *      the workbox-precache purge. We seed both and assert both go.
+ *  (c) Logout clears private `mobius-*` runtime caches while retaining
+ *      build-owned `workbox-*` assets. The installed offline shell must
+ *      remain usable after its owner data is removed. Seed both prefixes
+ *      and assert their distinct outcomes.
  *
  * Run: scripts/playwright-local.sh --allow-local-e2e tests/bootstrap.spec.mjs
  */
@@ -442,7 +442,7 @@ test.describe('Unauthenticated startup', () => {
     await expect(page.locator('.login')).toHaveCount(0)
   })
 
-  test('managed handoff signs in and skips separate account setup', async ({ page }) => {
+  test('managed login handoff opens the bound owner without another setup flow', async ({ page }) => {
     // The handoff response must carry a token the real test backend accepts.
     // A made-up token used to work only because the retired provider wizard
     // delayed the first authenticated API request; opening the shell
@@ -456,13 +456,16 @@ test.describe('Unauthenticated startup', () => {
     )?.value
     expect(ownerToken).toBeTruthy()
 
+    // Authentication must not borrow or create real chats in the shared test DB.
+    await routeShell(page)
     let handoffCalls = 0
     let setupChecks = 0
     await page.route(/\/api\/auth\/setup\/status$/, route => {
       setupChecks += 1
       return route.fulfill({ status: 500, body: '{}' })
     })
-    await page.route(/\/api\/auth\/sso\/session$/, route => {
+    await page.route(/\/api\/auth\/mobius\/login\/session$/, route => {
+      expect(route.request().method()).toBe('POST')
       handoffCalls += 1
       return route.fulfill({
         status: 200,
@@ -470,8 +473,6 @@ test.describe('Unauthenticated startup', () => {
         body: JSON.stringify({
           access_token: ownerToken,
           token_type: 'bearer',
-          new_owner: true,
-          return_path: '/',
         }),
       })
     })
@@ -483,7 +484,7 @@ test.describe('Unauthenticated startup', () => {
       })
     )
 
-    await page.goto(`${BASE}/shell/?mobius_sso=1`, { waitUntil: 'domcontentloaded' })
+    await page.goto(`${BASE}/shell/?mobius_login=1`, { waitUntil: 'domcontentloaded' })
 
     await waitForShell(page)
     expect(handoffCalls).toBe(1)
@@ -548,19 +549,15 @@ test.describe('Logout cache wipe', () => {
     expect(cachesAfter).toContain('unrelated-cache-keep-me')
   })
 
-  test('clears BOTH mobius-* and workbox-* Cache Storage entries (fix c)', async ({ page }) => {
+  test('expired authentication clears private caches but retains the public offline shell', async ({ page }) => {
     // The real wipe runs inside api/client.js's 401 handler
     // (clearQueryCache → wipeSwCaches), which is the only production
     // path that fires it automatically when an authenticated request expires. We
-    // drive that genuine path: seed both cache prefixes, force a 401
-    // on an authenticated API call, and assert both prefixes are gone.
-    await page.setViewportSize({ width: 412, height: 915 })
-
-    // Let the shell mount normally first (real chats endpoint is fine —
-    // we only need a same-origin authenticated page to run client code).
-    await page.route(/\/api\/chats\/[^/]+\/stream$/, route =>
-      route.fulfill({ status: 204, body: '' })
-    )
+    // drive that genuine path: seed private and public cache prefixes, force a
+    // 401 on an authenticated API call, and assert only private caches are gone.
+    // Use the existing isolated chat fixture; cache cleanup must not depend on
+    // or create chats in the shared database merely to mount its client code.
+    await routeShell(page)
     const initialChatsResponse = page.waitForResponse(response =>
       response.request().method() === 'GET'
       && /\/api\/chats\/?$/.test(response.url()),
@@ -571,7 +568,7 @@ test.describe('Logout cache wipe', () => {
     await waitForShell(page)
 
     // Seed Cache Storage with a representative entry under each prefix
-    // the wipe must cover. `mobius-vendor` mirrors src/sw.js runtime
+    // the wipe distinguishes. `mobius-vendor` mirrors src/sw.js runtime
     // caches; `workbox-precache-v2-...` mirrors vite-plugin-pwa's
     // precache. A control cache under an unrelated prefix proves the
     // wipe is scoped, not a blanket caches.delete-everything.
@@ -615,11 +612,11 @@ test.describe('Logout cache wipe', () => {
     // caches on a stable, post-wipe page rather than racing the reload.
     await expect(page.locator('.login')).toBeVisible({ timeout: 10000 })
 
-    // Both targeted prefixes are gone after the wipe; the unrelated
-    // cache survives — the wipe is prefix-scoped, not a blanket purge.
+    // Owner-scoped caches are gone. Retain the build-owned precache: an
+    // already-active service worker needs it to reopen the installed PWA.
     const afterKeys = await page.evaluate(() => caches.keys())
     expect(afterKeys).not.toContain('mobius-vendor')
-    expect(afterKeys).not.toContain('workbox-precache-v2-https://example/')
+    expect(afterKeys).toContain('workbox-precache-v2-https://example/')
     expect(afterKeys).toContain('unrelated-cache-keep-me')
   })
 })

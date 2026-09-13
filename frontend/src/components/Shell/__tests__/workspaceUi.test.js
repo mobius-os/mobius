@@ -860,12 +860,12 @@ test('the pane focus action stays compact at the far edge and reachable on overf
 test('navigation surfaces keep the brand close path while the workspace is inert', () => {
   const header = shell.match(/<header className="shell__bar"[^>]*>/)?.[0] || ''
   assert.doesNotMatch(header, /inert=/)
-  assert.match(shell, /const navigationSurfaceOpen = modalDrawerOpen/)
-  assert.doesNotMatch(shell, /const navigationSurfaceOpen = .*apps/,
+  assert.match(shell, /const modalDrawerOpen = !persistentDrawer && drawerOpen/)
+  assert.doesNotMatch(shell, /const modalDrawerOpen = .*apps/,
     'the canonical Apps tab is workspace content, not a modal navigation surface')
   assert.match(
     shell,
-    /<main\s+[\s\S]*?className=\{`shell__content\$\{shellTabStripVisible[\s\S]*?inert=\{navigationSurfaceOpen\}/,
+    /<main\s+[\s\S]*?className=\{`shell__content\$\{shellTabStripVisible[\s\S]*?inert=\{modalDrawerOpen\}/,
   )
   assert.match(shellBrand, /aria-expanded=\{navigationOpen\}/)
   assert.match(shell, /drawerOpen \? closeDrawer\(\) : openDrawer\(\)/)
