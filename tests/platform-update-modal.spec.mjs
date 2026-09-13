@@ -32,7 +32,7 @@ const preview = {
   available: true,
   actionable: true,
   operation: 'update',
-  activation: { level: 'live', deployment: 'self_hosted', reasons: [], guidance: [] },
+  activation: { level: 'live', required_actions: [], deployment: 'self_hosted', reasons: [], guidance: [] },
   current_sha: '1111111111111111111111111111111111111111',
   target_sha: '2222222222222222222222222222222222222222',
   plan_id: 'a'.repeat(64),
@@ -130,6 +130,21 @@ async function openUpdateReview(page) {
   await expect(dialog.getByRole('button', { name: 'Apply update' })).toBeEnabled()
   return dialog
 }
+
+test('an incomplete activation preview offers no update action', async ({ page }) => {
+  const state = { current: 'available', preview: {
+    ...preview, activation: { level: 'live', deployment: 'self_hosted' },
+  } }
+  await mockPlatform(page, state)
+  await openSettings(page)
+  await page.getByRole('button', { name: 'Review update', exact: true }).click()
+  const dialog = page.getByRole('dialog', { name: 'Review update' })
+  await expect(dialog.getByText(/server has not loaded these update controls yet/)).toBeVisible()
+  await expect(dialog.getByRole('button', { name: 'Try again' })).toBeEnabled()
+  await expect(dialog.getByRole('button', { name: 'Apply update' })).toHaveCount(0)
+  await expect(dialog.getByRole('button', { name: 'Update now', exact: true })).toHaveCount(0)
+  expect(state.unexpectedMutations).toEqual([])
+})
 
 test('a clean apply closes the review and exposes the restart step', async ({ page }) => {
   const state = { current: 'available' }
@@ -467,11 +482,12 @@ for (const [label, body] of [
     const review = await openUpdateReview(page)
     await review.getByRole('button', { name: 'Apply update' }).click()
     await expect(review).toBeVisible()
-    await expect(review.locator('.urm__error').getByRole('alert')).toContainText(
-      'The update returned an unexpected result.',
-    )
-    await expect(review.getByRole('alert')).toHaveCount(1)
+    await expect(review.getByRole('heading', { name: 'This update needs help' })).toBeVisible()
     await expect(review.getByRole('button', { name: 'Ask Möbius' })).toBeFocused()
+    const failure = review.locator('.urm__error details')
+    await expect(failure).not.toHaveAttribute('open', '')
+    await failure.getByText('Failure details', { exact: true }).click()
+    await expect(failure).toContainText('The update returned an unexpected result.')
     await expect(review.getByRole('button', { name: 'Apply update' })).toHaveCount(0)
   })
 }
@@ -512,7 +528,7 @@ test('Escape and dismissal stay gated while Apply is pending', async ({ page }) 
 })
 
 const imageActivation = {
-  level: 'image_rebuild', deployment: 'self_hosted',
+  level: 'image_rebuild', required_actions: ['image_rebuild'], deployment: 'self_hosted',
   reasons: [{ code: 'baked_runtime', summary: 'Container runtime changed.', paths: ['backend/runtime/example.py'] }],
   guidance: [],
 }
@@ -535,7 +551,7 @@ test('an installed image update can finish without a newer source release', asyn
   await request
   const dialog = page.getByRole('dialog', { name: 'Finish update' })
   await expect(dialog).toBeVisible()
-  await expect(dialog.getByRole('button', { name: 'Update container now' })).toBeEnabled()
+  await expect(dialog.getByRole('button', { name: 'Update now', exact: true })).toBeEnabled()
   await expect(dialog.getByText('Make the installed update active')).toBeVisible()
   await expect(dialog.getByText('There’s nothing to apply. This update is already complete.')).toHaveCount(0)
   expect(state.unexpectedMutations).toEqual([])
@@ -562,7 +578,7 @@ test('finish submits the exact reviewed plan, not the newer available release', 
   await updates.getByRole('button', { name: 'Finish installed update' }).click()
   await request
   const dialog = page.getByRole('dialog', { name: 'Finish update' })
-  await dialog.getByRole('button', { name: 'Update container now' }).click()
+  await dialog.getByRole('button', { name: 'Update now', exact: true }).click()
   await expect(dialog).toHaveCount(0)
   expect(submitted).toEqual({ plan_id: installed.plan_id, current_sha: installed.current_sha,
     target_sha: installed.target_sha, image_digest: installed.image_digest })
@@ -591,7 +607,7 @@ test('a failed container result survives reopening Settings without an unsolicit
 for (const level of ['server_restart', 'dependency_sync']) {
   test(`${level} completion asks before restarting and cancellation performs no mutation`, async ({ page }) => {
     const state = { current: 'restart_needed', overrides: { available: false, needs_restart: true,
-      activation: { level, deployment: 'self_hosted', reasons: [], guidance: [] } } }
+      activation: { level, required_actions: [level], deployment: 'self_hosted', reasons: [], guidance: [] } } }
     await mockPlatform(page, state)
     const updates = await openSettings(page)
     await updates.getByRole('button', { name: 'Restart to finish' }).click()
