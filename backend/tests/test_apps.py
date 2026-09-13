@@ -723,6 +723,9 @@ def test_prune_spares_unsupervised_and_unreadable_crontabs(client, auth, db):
   # Neither are comments or env assignments.
   assert not apps_module._is_orphaned_supervised_entry("# a comment", apps_root)
   assert not apps_module._is_orphaned_supervised_entry("PATH=/usr/bin", apps_root)
+  assert not apps_module._is_orphaned_supervised_entry(
+    f"* * * * * echo {runner} ignored {apps_root}/gone/job.sh", apps_root,
+  )
   # A supervised entry whose job is gone is debris.
   assert apps_module._is_orphaned_supervised_entry(
     f"* * * * * python3 {runner} 61 {apps_root}/gone/job.sh", apps_root,
@@ -863,7 +866,7 @@ def test_app_schedules_resolve_supervised_runner_job(client, auth):
   ]
 
 
-def test_boot_reconciles_legacy_direct_cron_through_runner(client, db):
+def test_boot_never_adopts_an_unsupervised_owner_cron_entry(client, db):
   source_dir = Path(get_settings().data_dir) / "apps" / "memory"
   source_dir.mkdir(parents=True)
   job = source_dir / "fetch.sh"
@@ -880,18 +883,20 @@ def test_boot_reconciles_legacy_direct_cron_through_runner(client, db):
   db.refresh(app)
 
   from app.routes import app_schedules as apps_module
-  from app.applied_app_runtime import bootstrap_legacy_runtimes
-  assert bootstrap_legacy_runtimes(db) == (1, [])
+  from app.applied_app_runtime import prepare_runtime, publish_runtime
+  from app import app_git
+  app_git.commit_local(source_dir, "accept scheduled app")
+  app.source_commit = app_git.head_sha(source_dir, app_git.LOCAL_BRANCH)
+  publish_runtime(app, prepare_runtime(source_dir, app.source_commit))
+  db.commit()
   direct = f"15 4 * * * {source_dir}/fetch.sh {app.id}"
   with patch.object(apps_module, "_read_live_crontab", return_value=direct), \
        patch("app.app_cron.register_cron") as register:
     count, warnings = apps_module.reconcile_app_cron_supervision(db)
 
-  assert count == 1
+  assert count == 0
   assert warnings == []
-  register.assert_called_once_with(
-    "memory", "15 4 * * *", job.resolve(), app.id,
-  )
+  register.assert_not_called()
 
 
 def _make_icon_app(client, auth, db):

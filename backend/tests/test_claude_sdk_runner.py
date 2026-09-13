@@ -484,13 +484,12 @@ def _tool_boundary_interrupt_result(
 # carries stop_reason `tool_use`/null — never `interrupt`. Include the
 # `interrupt` value too so the historic steer/stop shape stays covered.
 @pytest.mark.parametrize("stop_reason", ["tool_use", None, "interrupt"])
-async def test_owner_card_commit_ends_turn_as_clean_completion(
+async def test_delivered_owner_card_receipt_ends_turn_as_clean_completion(
   monkeypatch, session_id, stop_reason,
 ):
   """A committed continuation owner-input card ends the turn at its source.
 
-  The card path returns its receipt to the model immediately, so nothing at the
-  SDK level stops the model from emitting trailing text or tools after the card.
+  After the event sink observes the completed tool result,
   `finish_after_owner_card` fires the same soft interrupt `steer` uses, tagged
   `card`, so the interrupt terminal is classified as a CLEAN completion: no
   requery (`pending_steer` is empty), no resumable "Paused" note, no leaked

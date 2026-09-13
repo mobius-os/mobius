@@ -47,6 +47,60 @@ def test_cron_parser_resolves_wall_clock_gate_to_real_job():
   )
 
 
+@pytest.mark.parametrize("runner", [
+  "/app/scripts/app-job-runner.py",
+  "/data/platform/backend/scripts/app-job-runner.py",
+])
+@pytest.mark.parametrize("prefix", [
+  "API_BASE_URL=http://backend python3",
+  "/usr/bin/env API_BASE_URL=http://backend /usr/bin/python3",
+  "",
+])
+def test_cron_parser_structurally_recognizes_supervised_runner(runner, prefix):
+  job = "/data/apps/memory/memory-job.sh"
+  command = f"{prefix} {runner}".strip()
+  line = f"30 5 * * * {command} --scheduled 57 {job}"
+  assert app_cron.is_supervised_crontab_entry(line)
+  assert app_cron.crontab_command_path(line) == job
+
+
+def test_cron_parser_rejects_runner_text_used_as_an_argument_or_comment():
+  deceptive = (
+    "30 5 * * * echo /app/scripts/app-job-runner.py ignored "
+    "/data/apps/memory/memory-job.sh"
+  )
+  comment = "30 5 * * * echo job # /app/scripts/app-job-runner.py"
+  assert not app_cron.is_supervised_crontab_entry(deceptive)
+  assert not app_cron.is_supervised_crontab_entry(comment)
+
+
+def test_cron_parser_obeys_shell_comment_and_quoting_semantics():
+  runner = "/app/scripts/app-job-runner.py"
+  ordinary = (
+    f"30 5 * * * python3 {runner} --scheduled 57 "
+    "/data/apps/memory/job.sh # harmless trailing comment"
+  )
+  quoted_hash = (
+    f"30 5 * * * python3 {runner} --scheduled 57 "
+    "'/data/apps/mem#ory/job.sh'"
+  )
+  assert app_cron.crontab_command_path(ordinary) == "/data/apps/memory/job.sh"
+  assert app_cron.crontab_command_path(quoted_hash) == "/data/apps/mem#ory/job.sh"
+
+
+@pytest.mark.parametrize("argv", [
+  "--unknown 57 /data/apps/memory/job.sh",
+  "--scheduled /data/apps/memory/job.sh",
+  "--scheduled 57 /data/apps/memory/job.sh extra",
+  "--scheduled --wall-clock Europe/Belgrade 57 /data/apps/memory/job.sh",
+  "--scheduled --wall-clock Europe/Belgrade '30 2 * * *' 57",
+  "57 /data/apps/memory/job.sh /app/scripts/app-job-runner.py",
+])
+def test_cron_parser_rejects_invalid_runner_cli(argv):
+  line = f"30 5 * * * python3 /app/scripts/app-job-runner.py {argv}"
+  assert not app_cron.is_supervised_crontab_entry(line)
+
+
 def test_initialization_commands_request_a_readiness_wait():
   job = Path("/data/apps/memory/memory-job.sh")
 

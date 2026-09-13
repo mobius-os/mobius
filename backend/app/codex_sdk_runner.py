@@ -747,18 +747,15 @@ class ActiveCodexTurn:
     return self._owner_card_requested
 
   async def finish_after_owner_card(self) -> None:
-    """End the turn right after a continuation owner-input card commits.
+    """End the turn after a continuation owner-input receipt is delivered.
 
-    The card path returns its receipt to the model immediately (unlike native
-    AskUserQuestion, which parks), so nothing stops the model from emitting more
-    text or tools after the card. Interrupt the live turn now so the card is the
-    turn's last action. Distinct from Stop: it marks only `_owner_card_requested`
+    The event sink calls this only after Codex emits the completed card tool
+    result. Interrupt the live turn now so nothing can follow the card.
+    Distinct from Stop: it marks only `_owner_card_requested`
     (folded into `stop_requested()` so terminal validation treats the resulting
     TurnStatus.interrupted as a clean, error-free completion) and never runs
     Stop's queue-clear / generation-bump, so the owner's saved answer resumes the
-    chat normally. Signal-only — it does not await turn drain, which cannot
-    complete until the in-flight card tool returns the receipt that triggered
-    this call.
+    chat normally. Signal-only — it does not await turn drain.
     """
     if (
       self._finished.done()
