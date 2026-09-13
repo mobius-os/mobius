@@ -64,3 +64,87 @@ test('a genuine activity load failure retains a manual retry', () => {
   assert.match(html, /Chat activity couldn’t refresh/)
   assert.match(html, /<button type="button">Try again<\/button>/)
 })
+
+test('a cached compact Restart tool stays hidden without undercounting steps', () => {
+  const html = render(Message, {
+    msg: {
+      id: 'restart-activity', role: 'assistant', blocks: [
+        {
+          type: 'activity', activity_id: '0:0:8', message_index: 0,
+          start: 0, end: 8, tool_count: 7,
+          entries: [
+            { idx: 0, item: { type: 'tool', tool: 'Bash', status: 'done' } },
+            { idx: 1, item: { type: 'tool', tool: 'mcp__mobius_control__request_restart', status: 'done' } },
+          ],
+        },
+        {
+          type: 'question', question_id: 'restart-card',
+          questions: [{ id: 'restart', question: 'Restart?', options: [] }],
+          platform_action: { type: 'restart', version: 2 },
+        },
+      ],
+    },
+    chatId: 'chat', messageKey: 'restart-activity',
+  }, { tools: new Map(), positions: new Map() })
+
+  assert.match(html, /\(6 steps\)/)
+  assert.doesNotMatch(html, /request_restart/)
+})
+
+test('rendering retains a failed Restart attempt before the card-owned request', () => {
+  const html = render(Message, {
+    msg: {
+      id: 'restart-retry', role: 'assistant', blocks: [
+        {
+          type: 'tool', tool: 'mcp__mobius_control__request_restart',
+          tool_use_id: 'failed', status: 'done', output_exit_code: 1,
+          output: 'Working tree is dirty',
+        },
+        {
+          type: 'tool', tool: 'mcp__mobius_control__request_restart',
+          tool_use_id: 'successful', status: 'done', output: '',
+        },
+        {
+          type: 'question', question_id: 'restart-card',
+          questions: [{ id: 'restart', question: 'Restart?', options: [] }],
+          platform_action: { type: 'restart', version: 2 },
+        },
+      ],
+    },
+    chatId: 'chat', messageKey: 'restart-retry',
+  }, { tools: new Map(), positions: new Map() })
+
+  assert.match(html, /chat__tool--failed/)
+  assert.match(html, /mcp__mobius_control__request_restart/)
+  assert.match(html, /Restart\?/)
+})
+
+test('rendering a compact server projection retains its surviving failed Restart', () => {
+  const html = render(Message, {
+    msg: {
+      id: 'restart-projected', role: 'assistant', blocks: [
+        {
+          type: 'activity', activity_id: '0:0:1', message_index: 0,
+          start: 0, end: 1, tool_count: 1,
+          entries: [{
+            idx: 0, item: {
+              type: 'tool', tool: 'mcp__mobius_control__request_restart',
+              tool_use_id: 'failed', status: 'done', output_exit_code: 1,
+              output: 'Working tree is dirty',
+            },
+          }],
+        },
+        {
+          type: 'question', question_id: 'restart-card',
+          questions: [{ id: 'restart', question: 'Restart?', options: [] }],
+          platform_action: { type: 'restart', version: 2 },
+        },
+      ],
+    },
+    chatId: 'chat', messageKey: 'restart-projected',
+  }, { tools: new Map(), positions: new Map() })
+
+  assert.match(html, /mcp__mobius_control__request_restart/)
+  assert.match(html, /\(1 step\)/)
+  assert.match(html, /Restart\?/)
+})

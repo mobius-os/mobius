@@ -105,6 +105,78 @@ test('pending Restart card offers one exact action and a written response', () =
 })
 
 
+test('a pending legacy Restart card retains both original choices', () => {
+  const html = renderToStaticMarkup(createElement(QuestionCard, {
+    chatId: 'chat', questionId: 'legacy-question', platformAction: action,
+    questions,
+    disabled: false,
+  }))
+
+  assert.match(html, />Restart now</)
+  assert.match(html, />Not now</)
+  assert.match(html, />Submit</)
+  assert.doesNotMatch(html, /textarea/)
+})
+
+
+test('ordinary questions retain their general written-answer field', () => {
+  const html = renderToStaticMarkup(createElement(QuestionCard, {
+    chatId: 'chat', questionId: 'ordinary-question',
+    questions: [{
+      id: 'ordinary', question: 'Which direction?', options: [
+        { id: 'first', label: 'First' },
+        { id: 'second', label: 'Second' },
+      ],
+    }],
+    disabled: false,
+  }))
+
+  assert.match(html, /Or type your own answer…/)
+  assert.match(html, />Submit</)
+})
+
+
+test('a written Restart response remains visible after settlement', () => {
+  const prompt = 'Restart to load these changes?'
+  const response = 'Please check the rollout first'
+  const html = renderToStaticMarkup(createElement(QuestionCard, {
+    chatId: 'chat', questionId: 'responded-question',
+    platformAction: { ...action, version: 2, status: 'responded' },
+    answeredMap: { [prompt]: response },
+    submittedOptions: {},
+    questions: [{
+      id: 'restart', question: prompt,
+      options: [{ id: 'restart-id', label: 'Restart now' }],
+    }],
+    disabled: true,
+  }))
+
+  assert.match(html, /Response sent/)
+  assert.match(html, new RegExp(`>${response}<`))
+  assert.match(html, /readOnly=""/)
+  assert.doesNotMatch(html, /qcard__opt/)
+})
+
+
+test('written Restart feedback remains visible when it matches the action label', () => {
+  const prompt = 'Restart to load these changes?'
+  const response = 'Restart now'
+  const html = renderToStaticMarkup(createElement(QuestionCard, {
+    chatId: 'chat', questionId: 'responded-label-collision',
+    platformAction: { ...action, version: 2, status: 'responded' },
+    answeredMap: { [prompt]: response },
+    submittedOptions: {},
+    questions: [{
+      id: 'restart', question: prompt,
+      options: [{ id: 'restart-id', label: response }],
+    }],
+    disabled: true,
+  }))
+
+  assert.match(html, />Restart now<\/textarea>/)
+})
+
+
 test('closed Restart card explains the outcome without dead controls', () => {
   const html = renderToStaticMarkup(createElement(QuestionCard, {
     chatId: 'chat', questionId: 'question',

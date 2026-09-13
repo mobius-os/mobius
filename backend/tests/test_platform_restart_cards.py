@@ -213,6 +213,53 @@ def test_restart_activation_wait_does_not_expire_while_owner_is_deciding(monkeyp
     assert wait.next_check_at > now_naive_utc()
 
 
+def test_restart_wait_hides_storage_deadline_from_owner_and_agent_context():
+  from app.chat_waits import build_active_waits_context, serialize_wait
+
+  _qid, wait_id, _run, _requirement = _install("restart-no-visible-expiry")
+  with SessionLocal() as db:
+    wait = db.get(models.ChatWait, wait_id)
+    assert wait.deadline_at is not None  # Legacy shared-schema storage only.
+    assert serialize_wait(wait)["deadline_at"] is None
+    assert '"deadline_at":null' in build_active_waits_context(
+      db, "restart-no-visible-expiry",
+    )
+
+
+def test_generic_wait_cancel_cannot_strand_an_open_restart_card(client, auth):
+  qid, wait_id, _run, _requirement = _install("restart-cancel-boundary")
+
+  response = client.post(f"/api/chat-waits/{wait_id}/cancel", headers=auth)
+
+  assert response.status_code == 409, response.text
+  assert "Restart card" in response.json()["detail"]
+  with SessionLocal() as db:
+    chat = db.get(models.Chat, "restart-cancel-boundary")
+    wait = db.get(models.ChatWait, wait_id)
+    assert chat.pending_question_id == qid
+    assert wait.status == "armed"
+
+
+def test_generic_wait_cancel_cannot_desynchronize_a_deferred_legacy_card(
+  client, auth, monkeypatch,
+):
+  monkeypatch.setattr(
+    "app.platform_restart.requirement_matches_current_source", lambda _r: True,
+  )
+  qid, wait_id, _run, _requirement = _install("restart-deferred-boundary")
+  result = _submit(ResolvePlatformRestartCard(
+    chat_id="restart-deferred-boundary", question_id=qid,
+    selected_option_id="cancel-id",
+  ))
+  assert result["status"] == "deferred"
+
+  response = client.post(f"/api/chat-waits/{wait_id}/cancel", headers=auth)
+
+  assert response.status_code == 409, response.text
+  with SessionLocal() as db:
+    assert db.get(models.ChatWait, wait_id).status == "armed"
+
+
 def test_source_change_after_claim_refuses_side_effect_admission(monkeypatch):
   from app import chat as chat_mod
   from app import restart_util
@@ -423,6 +470,110 @@ def test_route_sends_written_restart_feedback_without_restart_authority(
       "restart-feedback-route-answer",
     ]
     assert read.query(models.PlatformRestartExecution).count() == 0
+
+
+def test_stale_restart_route_signals_authoritative_card_refresh(
+  client, chat, auth, monkeypatch,
+):
+  from concurrent.futures import Future
+  from app.chat_writer import RestartCardStateChanged
+
+  requirement = _requirement("platform-restart:stale-route")
+  block = _card("stale-restart-card", "stale-wait", requirement)
+  monkeypatch.setattr(
+    "app.platform_restart.restart_action_block", lambda _chat, _qid: block,
+  )
+
+  class RefusingWriter:
+    def submit(self, _command):
+      result = Future()
+      result.set_exception(RestartCardStateChanged("card already settled"))
+      return result
+
+  monkeypatch.setattr(chats_stream, "get_writer", lambda: RefusingWriter())
+  response = client.post(
+    f"/api/chats/{chat.id}/messages", headers=auth, json={
+      "content": "", "hidden": True,
+      "question_id": "stale-restart-card",
+      "selected_options": {"restart": ["restart-id"]},
+    },
+  )
+
+  assert response.status_code == 410, response.text
+  assert response.json()["detail"]["code"] == "question_state_changed"
+
+
+def test_restart_route_keeps_transient_writer_failure_retryable(
+  client, chat, auth, monkeypatch,
+):
+  from concurrent.futures import Future
+
+  requirement = _requirement("platform-restart:writer-failure")
+  block = _card("writer-failure-card", "writer-failure-wait", requirement)
+  monkeypatch.setattr(
+    "app.platform_restart.restart_action_block", lambda _chat, _qid: block,
+  )
+
+  class FailingWriter:
+    def submit(self, _command):
+      result = Future()
+      result.set_exception(RuntimeError("database temporarily unavailable"))
+      return result
+
+  monkeypatch.setattr(chats_stream, "get_writer", lambda: FailingWriter())
+  response = client.post(
+    f"/api/chats/{chat.id}/messages", headers=auth, json={
+      "content": "", "hidden": True,
+      "question_id": "writer-failure-card",
+      "selected_options": {"restart": ["restart-id"]},
+    },
+  )
+
+  assert response.status_code == 503, response.text
+  assert "try again" in response.json()["detail"].lower()
+
+
+def test_source_changed_restart_route_keeps_written_agent_handoff_available(
+  client, auth, monkeypatch,
+):
+  qid, _wait_id, _run, _requirement = _install("restart-source-changed")
+  monkeypatch.setattr(
+    "app.platform_restart.requirement_matches_current_source", lambda _r: False,
+  )
+
+  response = client.post(
+    "/api/chats/restart-source-changed/messages", headers=auth, json={
+      "content": "", "hidden": True, "question_id": qid,
+      "selected_options": {"restart": ["restart-id"]},
+    },
+  )
+
+  assert response.status_code == 409, response.text
+  assert response.json()["detail"]["code"] == "restart_action_conflict"
+  assert "fresh Restart card" in response.json()["detail"]["message"]
+  with SessionLocal() as db:
+    chat = db.get(models.Chat, "restart-source-changed")
+    assert chat.pending_question_id == qid
+    assert not chat.messages[0]["blocks"][0].get("answers")
+
+
+def test_failed_restart_wait_requires_agent_recheck_instead_of_false_retry(
+  client, auth,
+):
+  qid, _wait_id, _run, _requirement = _install(
+    "restart-failed-wait", status="failed",
+  )
+
+  response = client.post(
+    "/api/chats/restart-failed-wait/messages", headers=auth, json={
+      "content": "", "hidden": True, "question_id": qid,
+      "selected_options": {"restart": ["restart-id"]},
+    },
+  )
+
+  assert response.status_code == 409, response.text
+  assert response.json()["detail"]["code"] == "restart_action_conflict"
+  assert "checked again" in response.json()["detail"]["message"]
 
 
 def test_idle_written_restart_feedback_starts_exactly_one_continuation(

@@ -629,6 +629,22 @@ def test_sink_reduces_large_tagged_output_and_stashes_full(db):
     assert row is not None and row.output == big
 
 
+def test_sink_preserves_exit_code_from_a_large_nested_envelope(db):
+    sink = _sink()
+    nested = json.dumps({"exit_code": 1, "stderr": "x" * 6000})
+    big = json.dumps({"result": nested})
+    assert len(big) > TOOL_OUTPUT_INLINE_THRESHOLD
+    event = {
+        "type": "tool_output", "content": big,
+        "tool_use_id": "tu_nested_failure",
+    }
+
+    sink._reduce_tool_output(event)
+
+    assert event["output_truncated"] is True
+    assert event["output_exit_code"] == 1
+
+
 def test_sink_keeps_a_runner_supplied_exit_code_on_large_plain_output(db):
     sink = _sink()
     sink.publish({

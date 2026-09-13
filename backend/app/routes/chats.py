@@ -1738,6 +1738,7 @@ def get_chat_activity_detail(
     historical_tool_output_ids,
     materialized_messages,
     project_messages_for_detail,
+    redundant_interaction_tool_indexes,
   )
 
   if principal.scope == "app":
@@ -1755,19 +1756,13 @@ def get_chat_activity_detail(
   if not isinstance(blocks, list) or end > len(blocks):
     raise HTTPException(status_code=404, detail="Activity range not found.")
 
+  redundant_tool_indexes = redundant_interaction_tool_indexes(blocks)
   selected = [
     (raw_index, block)
     for raw_index, block in enumerate(blocks[start:end], start=start)
     if isinstance(block, dict)
     and block.get("type") in {"tool", "thinking"}
-    and not (
-      block.get("type") == "tool"
-      and block.get("tool") in {"AskUserQuestion", "request_user_input"}
-      and any(
-        isinstance(candidate, dict) and candidate.get("type") == "question"
-        for candidate in blocks
-      )
-    )
+    and raw_index not in redundant_tool_indexes
   ]
   detail_message = {
     "role": "assistant",

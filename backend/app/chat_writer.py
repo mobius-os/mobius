@@ -285,6 +285,24 @@ class CancelActivationWaits(_Command):
   run_token: str = ""
 
 
+class RestartCardStateChanged(Exception):
+  """The submitted Restart choice no longer targets an open durable card.
+
+  This is intentionally distinct from `_PersistFailed`: callers may repair a
+  stale browser projection from authoritative chat state, while a failed write
+  must remain retryable and must never be presented as a settled card.
+  """
+
+
+class RestartCardActionConflict(Exception):
+  """The card is still visible, but its exact Restart authority is unusable.
+
+  The route returns this as an actionable 409 rather than pretending a retry
+  can repair it or that authoritative chat state has already settled it. The
+  card's writing surface remains available to resume the owning agent.
+  """
+
+
 @dataclass
 class ResolvePlatformRestartCard(_Command):
   """Settle one typed Restart choice and claim its exact side effect.
@@ -2212,7 +2230,7 @@ class ChatWriterActor:
 
     chat = _active_chat(db, cmd.chat_id)
     if chat is None:
-      raise _PersistFailed("Restart card: chat not found or deleted")
+      raise RestartCardStateChanged("Restart card: chat not found or deleted")
 
     messages = copy.deepcopy(list(chat.messages or []))
     matched: dict | None = None
@@ -2229,12 +2247,16 @@ class ChatWriterActor:
           break
       if matched is not None:
         break
+    if matched is None:
+      raise RestartCardStateChanged("Restart card: card is no longer present")
     action, question, labels = _platform_restart_card_envelope(
       matched, "Restart card",
     )
     restart_id = action["restart_option_id"]
     if cmd.selected_option_id not in labels:
-      raise _PersistFailed("Restart card: selected option is not authorized")
+      raise RestartCardActionConflict(
+        "Use one of this Restart card's current choices."
+      )
 
     wait = db.query(models.ChatWait).filter(
       models.ChatWait.id == action["wait_id"],
@@ -2243,12 +2265,16 @@ class ChatWriterActor:
       models.ChatWait.kind == "platform_activation",
     ).first()
     if wait is None or wait.condition_json != action["requirement"]:
-      raise _PersistFailed("Restart card: linked activation wait is invalid")
+      raise RestartCardActionConflict(
+        "This Restart request is no longer active. Tell the agent to check it again."
+      )
 
     prior_selected = matched.get("selected_options")
     if matched.get("answers"):
       if prior_selected != {"restart": [cmd.selected_option_id]}:
-        raise _PersistFailed("Restart card: card already settled differently")
+        raise RestartCardStateChanged(
+          "Restart card: card already settled differently"
+        )
       execution = db.get(models.PlatformRestartExecution, action["action_id"])
       db.rollback()
       return {
@@ -2269,7 +2295,9 @@ class ChatWriterActor:
       or wait.resume_delivered_at is not None
       or wait.status not in ("armed", "met", "expired", "failed")
     ):
-      raise _PersistFailed("Restart card: card is no longer accepting actions")
+      raise RestartCardStateChanged(
+        "Restart card: card is no longer accepting actions"
+      )
 
     now = now_naive_utc()
     selected_restart = cmd.selected_option_id == restart_id
@@ -2290,8 +2318,8 @@ class ChatWriterActor:
       wait.action_approved_at = now
       if wait.status in ("expired", "failed"):
         db.rollback()
-        raise _PersistFailed(
-          "Restart card: activation outcome is uncertain; request a fresh card"
+        raise RestartCardActionConflict(
+          "This Restart request needs to be checked again. Tell the agent what happened."
         )
       verdict, _detail = activation_wait_verdict(db, wait)
       if verdict == "met":
@@ -2302,8 +2330,9 @@ class ChatWriterActor:
       else:
         if not requirement_matches_current_source(action["requirement"]):
           db.rollback()
-          raise _PersistFailed(
-            "Restart card: committed source changed; request a fresh card"
+          raise RestartCardActionConflict(
+            "Möbius changed since this card was created. Tell the agent to check it "
+            "and request a fresh Restart card."
           )
         execution = db.get(models.PlatformRestartExecution, action["action_id"])
         if execution is None:

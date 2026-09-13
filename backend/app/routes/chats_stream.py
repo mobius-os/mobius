@@ -40,7 +40,9 @@ from app.chat_writer import (
   cid_of,
   ensure_user_cid,
   get_writer,
+  RestartCardActionConflict,
   ResolvePlatformRestartCard,
+  RestartCardStateChanged,
 )
 from app.chat_steering import (
   has_live_steerable_turn,
@@ -660,8 +662,11 @@ async def send_message(
               chat_id, body.question_id, exc,
             )
             raise HTTPException(
-              status_code=409,
-              detail="This Restart card is stale or no longer accepting a response.",
+              status_code=410,
+              detail={
+                "code": "question_state_changed",
+                "message": "This Restart card has already been settled.",
+              },
             ) from exc
       event = {
         "type": "answers_applied",
@@ -710,14 +715,34 @@ async def send_message(
               selected_option_id=selections["restart"][0],
             )
           ))
-        except Exception as exc:
+        except RestartCardStateChanged as exc:
           log.info(
             "Restart card resolution refused chat_id=%s question_id=%s: %s",
             chat_id, body.question_id, exc,
           )
           raise HTTPException(
+            status_code=410,
+            detail={
+              "code": "question_state_changed",
+              "message": "This Restart card has already been settled.",
+            },
+          ) from exc
+        except RestartCardActionConflict as exc:
+          raise HTTPException(
             status_code=409,
-            detail="This Restart card is stale or no longer authorized.",
+            detail={
+              "code": "restart_action_conflict",
+              "message": str(exc),
+            },
+          ) from exc
+        except Exception as exc:
+          log.exception(
+            "Restart card resolution failed chat_id=%s question_id=%s",
+            chat_id, body.question_id,
+          )
+          raise HTTPException(
+            status_code=503,
+            detail="Möbius could not save that Restart choice. Please try again.",
           ) from exc
     try:
       event = {

@@ -160,6 +160,7 @@ import {
   sendFailureMessage,
   shouldKeepQueuedAfterSendFailure,
 } from './sendFailure.js'
+import { isQuestionStateChangedError } from './sendErrors.js'
 import {
   assistantStreamBelongsToActiveMessage,
   assistantStreamCoversMessage,
@@ -3782,13 +3783,14 @@ export default function ChatView({
       if (showPicker && isModelSelectionRequiredFailure(err)) {
         setModelSelectionRequest(request => request + 1)
       }
-      if (err.message === 'HTTP 410') {
+      if (isQuestionStateChangedError(err)) {
         // The backend refused this answer because the durable transcript no
         // longer has that open question (for example Stop cancelled it, or a
         // newer question superseded it). Refetch authoritative state rather
-        // than keeping the optimistic answer locally.
-        setLiveQuestionId(null)
-        fetchMessages({ force: true })
+        // than keeping the optimistic answer locally. Keep the current card
+        // answerable until that read succeeds; a network failure must not turn
+        // a retryable stale projection into a disabled card.
+        await fetchMessages({ force: true, authoritative: true })
         throw err
       }
       // QuestionCard owns this transient failure notice and retains the
