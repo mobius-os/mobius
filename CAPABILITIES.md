@@ -29,6 +29,7 @@ model, lifecycle rules, and escape hatches.
 | Tier | Use | Authority |
 |---|---|---|
 | Ordinary mini-app | Most native Möbius apps | Opaque frame, scoped token, declared host capabilities |
+| Reviewed app service | App-owned server policy, persistence, and public protocols | Accepted immutable Python entrypoint, short-lived app token, bounded JSON request/response process |
 | Trusted web service | Existing full applications with cookies, origin storage, or their own backend | Separate service origin/gateway; never restored to the shell origin |
 | Platform capability provider | Reusable privileged integration such as MIDI, Bluetooth, or specialist hardware | Owner-reviewed platform extension implementing this provider contract |
 | Platform code | Shell behavior itself | Full shell authority; contributable and recoverable like other platform edits |
@@ -110,6 +111,42 @@ The installed, server-derived contract is passed to the frame. App input can
 never enlarge it. Runtime revocation is therefore a contract update followed
 by a frame refresh; future per-owner grant controls can narrow the installed
 contract further without changing the manifest.
+
+Apps that need server-side policy can declare one reviewed Python entrypoint:
+
+```json
+{
+  "service": {
+    "entry": "service.py",
+    "access": "self"
+  },
+  "source_files": ["index.jsx", "service.py"]
+}
+```
+
+The platform starts a fresh process from the exact accepted app revision for
+each request. It sends one JSON object on stdin and accepts one JSON response
+on stdout: `{ "status": 200, "body": ..., "headers": {...} }`. The platform
+owns authentication, immutable source selection, the short-lived app token,
+8 MiB request/response ceilings, timeout, concurrency, and response-header
+safety.
+The app owns its paths, policy, storage format, and domain behavior. This is a
+reviewed trusted process like an app job, not an operating-system sandbox.
+
+Same-app calls use `/api/apps/{app_id}/service/{path}`. An app can expose a
+reviewed service to other installed apps at `/api/services/{slug}/{path}` by
+setting `access` to `apps`, or additionally expose anonymous calls at
+`/api/app-services/{slug}/{path}` by setting it to `public`. These are explicit
+install-time grants and do not widen the service app token's accepted
+permissions. Services receive the same `APP_ID`, `APP_SLUG`,
+`APP_STORAGE_DIR`, `API_BASE_URL`, and short-lived
+`APP_TOKEN` environment as other reviewed app-owned processes.
+
+Project output formats are app-owned too. A `project_templates[].artifact_types`
+declaration names the source extensions, preview kind, output path, and reviewed
+builder script. Core confines execution and publishes the resulting artifact;
+it does not contain Website or LaTeX builders. The sole built-in builder is the
+platform's inert app-source preview because it must use the platform compiler.
 
 ## App API
 

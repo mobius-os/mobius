@@ -254,6 +254,7 @@ def test_initialization_uses_the_token_returned_by_readiness(
   source.mkdir(parents=True)
   job = source / "memory-job.sh"
   job.write_text("#!/bin/sh\nexit 0\n")
+  job.chmod(0o755)
   monkeypatch.setattr(runner, "DATA_DIR", data_dir)
   monkeypatch.setattr(runner.os, "getsid", lambda _pid: os.getpid())
   events = []
@@ -368,6 +369,7 @@ def test_wrapper_runs_job_only_after_live_check(tmp_path, monkeypatch):
   source.mkdir(parents=True)
   job = source / "memory-job.sh"
   job.write_text("#!/bin/sh\nexit 0\n")
+  job.chmod(0o755)
   monkeypatch.setattr(runner, "DATA_DIR", data_dir)
   monkeypatch.setattr(runner, "_mint_app_token", lambda app_id: "app-token")
   monkeypatch.setattr(
@@ -403,8 +405,9 @@ def test_wrapper_runs_job_only_after_live_check(tmp_path, monkeypatch):
   ])
 
   assert runner.run() == 0
+  runtime_job = Path(_accepted_context(source)["runtime_dir"]) / job.name
   assert calls[0][0][0] == [
-    "bash", str(Path(_accepted_context(source)["runtime_dir"]) / job.name), "57",
+    "/bin/sh", str(runtime_job), "57",
   ]
   child_env = calls[0][1]["env"]
   assert child_env["APP_TOKEN"] == "app-token"
@@ -444,42 +447,61 @@ def test_wrapper_honors_python_job_shebang(tmp_path, monkeypatch):
 
   assert runner.run() == 0
   runtime_job = Path(context["runtime_dir"]) / job.name
-  assert calls[0][0][0] == [str(runtime_job), "57"]
+  assert calls[0][0][0] == [
+    "/usr/bin/env", "python3", str(runtime_job), "57",
+  ]
 
 
-@pytest.mark.parametrize("executable", [False, True])
-def test_wrapper_keeps_bash_fallback_for_legacy_jobs(
-  tmp_path, monkeypatch, executable,
-):
+def test_wrapper_rejects_nonexecutable_job_before_launch(tmp_path, monkeypatch):
   runner = _load_runner()
   data_dir = tmp_path / "data"
-  source = data_dir / "apps" / "legacy"
+  source = data_dir / "apps" / "portable"
   source.mkdir(parents=True)
   job = source / "job.sh"
-  job.write_text("exit 0\n")
+  job.write_text("#!/usr/bin/env bash\nexit 0\n")
   context = _accepted_context(source)
   runtime_job = Path(context["runtime_dir"]) / job.name
-  runtime_job.chmod(0o755 if executable else 0o644)
+  runtime_job.chmod(0o644)
   monkeypatch.setattr(runner, "DATA_DIR", data_dir)
   monkeypatch.setattr(runner, "_mint_app_token", lambda _app_id: "app-token")
   monkeypatch.setattr(runner, "_app_is_live", lambda *_args: True)
   monkeypatch.setattr(runner, "_job_context", lambda *_args: context)
   monkeypatch.setattr(runner.os, "getsid", lambda _pid: os.getpid())
-  calls = []
   monkeypatch.setattr(
     runner.subprocess,
     "Popen",
-    lambda *args, **kwargs: (
-      calls.append((args, kwargs))
-      or types.SimpleNamespace(wait=lambda: 0)
-    ),
+    lambda *_args, **_kwargs: pytest.fail("invalid job must not launch"),
   )
   monkeypatch.setattr(runner.sys, "argv", [
     "app-job-runner.py", "57", str(job),
   ])
 
-  assert runner.run() == 0
-  assert calls[0][0][0] == ["bash", str(runtime_job), "57"]
+  assert runner.run() == 4
+
+
+def test_wrapper_rejects_job_without_shebang(tmp_path, monkeypatch):
+  runner = _load_runner()
+  data_dir = tmp_path / "data"
+  source = data_dir / "apps" / "ambiguous"
+  source.mkdir(parents=True)
+  job = source / "job.sh"
+  job.write_text("exit 0\n")
+  context = _accepted_context(source)
+  monkeypatch.setattr(runner, "DATA_DIR", data_dir)
+  monkeypatch.setattr(runner, "_mint_app_token", lambda _app_id: "app-token")
+  monkeypatch.setattr(runner, "_app_is_live", lambda *_args: True)
+  monkeypatch.setattr(runner, "_job_context", lambda *_args: context)
+  monkeypatch.setattr(runner.os, "getsid", lambda _pid: os.getpid())
+  monkeypatch.setattr(
+    runner.subprocess,
+    "Popen",
+    lambda *_args, **_kwargs: pytest.fail("invalid job must not start"),
+  )
+  monkeypatch.setattr(runner.sys, "argv", [
+    "app-job-runner.py", "57", str(job),
+  ])
+
+  assert runner.run() == 4
 
 
 def test_scheduled_job_emits_owner_authenticated_outcome_after_child_exit(
@@ -491,6 +513,7 @@ def test_scheduled_job_emits_owner_authenticated_outcome_after_child_exit(
   source.mkdir(parents=True)
   job = source / "fetch.sh"
   job.write_text("#!/bin/sh\nexit 7\n")
+  job.chmod(0o755)
   token_file = data_dir / "service-token.txt"
   token_file.write_text("owner-token\n")
   monkeypatch.setattr(runner, "DATA_DIR", data_dir)
@@ -686,6 +709,7 @@ def test_job_executes_accepted_script_and_siblings_even_when_draft_job_is_delete
   source.mkdir(parents=True)
   job = source / "fetch.sh"
   job.write_text('#!/bin/sh\ncat sibling.txt > "$APP_JOB_STATE_DIR/result"\n')
+  job.chmod(0o755)
   (source / "sibling.txt").write_text("accepted sibling")
   context = _accepted_context(source)
   job.unlink()

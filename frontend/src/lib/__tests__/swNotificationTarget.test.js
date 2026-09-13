@@ -56,12 +56,12 @@ test('push worker uses a dedicated transparent 96px status-bar badge', () => {
 })
 
 test('an app deep-link keeps the intent naming which item to open', () => {
-  // The agent links artifacts as /shell/?app=artifacts&intent=artifact:<id>,
+  // The agent links Pages artifacts as /shell/?app=pages&intent=artifact:<id>,
   // and sends the SAME url as a notification target. Dropping the intent here
   // opened the app's index instead of the artifact the notification was about.
   assert.equal(
-    safeTarget('/shell/?app=artifacts&intent=artifact:tip-calculator-7f3a'),
-    '/shell/?app=artifacts&intent=artifact%3Atip-calculator-7f3a',
+    safeTarget('/shell/?app=pages&intent=artifact:tip-calculator-7f3a'),
+    '/shell/?app=pages&intent=artifact%3Atip-calculator-7f3a',
   )
 })
 
@@ -81,14 +81,14 @@ test('a malformed intent is dropped but the app still opens', () => {
   // intent is discarded.
   for (const bad of ['a b', '../../etc', 'x'.repeat(129), '<script>']) {
     assert.equal(
-      safeTarget(`/shell/?app=artifacts&intent=${encodeURIComponent(bad)}`),
-      '/shell/?app=artifacts',
+      safeTarget(`/shell/?app=pages&intent=${encodeURIComponent(bad)}`),
+      '/shell/?app=pages',
     )
   }
 })
 
 test('targets without an intent are unchanged', () => {
-  assert.equal(safeTarget('/shell/?app=artifacts'), '/shell/?app=artifacts')
+  assert.equal(safeTarget('/shell/?app=pages'), '/shell/?app=pages')
   assert.equal(safeTarget('/shell/?chat=abc'), '/shell/?chat=abc')
   assert.equal(safeTarget('/shell/'), '/shell/')
 })
@@ -101,16 +101,16 @@ test('an intent cannot smuggle in a different destination', () => {
   )
   // The intent is encoded, so an injected separator cannot append a param.
   assert.equal(
-    safeTarget('/shell/?app=artifacts&intent=' + encodeURIComponent('a&chat=evil')),
-    '/shell/?app=artifacts',
+    safeTarget('/shell/?app=pages&intent=' + encodeURIComponent('a&chat=evil')),
+    '/shell/?app=pages',
   )
 })
 
 test('out-of-scope targets still fall back to root', () => {
-  assert.equal(safeTarget('https://evil.test/phish?app=artifacts'), '/')
+  assert.equal(safeTarget('https://evil.test/phish?app=pages'), '/')
   // A cross-origin target is refused even when it mimics a valid shell route.
   assert.equal(
-    safeTarget('https://evil.test/shell/?app=artifacts&intent=artifact:x'), '/',
+    safeTarget('https://evil.test/shell/?app=pages&intent=artifact:x'), '/',
   )
   assert.equal(safeTarget('/app/5'), '/')
   assert.equal(safeTarget('javascript:alert(1)'), '/')

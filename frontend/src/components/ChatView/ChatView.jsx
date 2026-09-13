@@ -39,11 +39,12 @@ import {
   savedReadingAnchorKey,
 } from './scroll/readingPositions.js'
 import useVoiceInput from './useVoiceInput.js'
-import useOnlineStatus from '../../hooks/useOnlineStatus.js'
+import useOnlineStatus, { useReachabilityPhase } from '../../hooks/useOnlineStatus.js'
 import useRestartPending from '../../hooks/useRestartPending.js'
 import {
   getOnlineSnapshot,
   getRecoverySnapshot,
+  ReachabilityPhase,
   subscribeRecovery,
 } from '../../lib/connectivityStore.js'
 import {
@@ -160,6 +161,7 @@ import {
   sendFailureMessage,
   shouldKeepQueuedAfterSendFailure,
 } from './sendFailure.js'
+import { isQuestionStateChangedError } from './sendErrors.js'
 import {
   assistantStreamBelongsToActiveMessage,
   assistantStreamCoversMessage,
@@ -183,6 +185,8 @@ import {
   isContinuationMessage,
   isOwnerUserMessage,
   jumpToLatestShown,
+  runtimeSnapshot,
+  runtimeSnapshotTransition,
   shouldRepairRuntimeStream,
   shouldRetireRestoredQuestionSnapshot,
   shouldAttachRunningStream,
@@ -427,6 +431,7 @@ export default function ChatView({
   // longer disables send offline — it notes the message is queued and lets the
   // outbox flush it, rather than dropping the tap into a dead stream.
   const online = useOnlineStatus()
+  const reachabilityPhase = useReachabilityPhase()
   const restartPending = useRestartPending()
   // Read the query cache synchronously on mount. If we've viewed this chat
   // before, its complete transcript window builds the hidden restoration DOM
@@ -530,21 +535,28 @@ export default function ChatView({
   // does not fall back to Mic while a turn is still running with queued work.
   const [serverRunning, setServerRunning] = useState(() => !!cached?.running)
   const serverRunningRef = useRef(!!cached?.running)
-  // A detail refresh can commit the saved idle transcript just before the
-  // runtime fallback reads the same idle verdict. Keep the fact that this
-  // stream was authoritatively observed running until the stream itself is
-  // retired; the current serverRunning projection is allowed to turn false
-  // first without erasing the proof that makes terminal recovery safe.
-  const serverRunningObservedRef = useRef(!!cached?.running)
+  // HTTP runtime reads share the database lifecycle stream's monotonic cursor.
+  // Keep one accepted snapshot, rather than a second observed-running latch,
+  // so a slow older response can never erase a newer run transition.
+  const runtimeSnapshotRef = useRef(runtimeSnapshot(cached))
+  const inspectRuntimeSnapshot = useCallback((value) => (
+    runtimeSnapshotTransition(runtimeSnapshotRef.current, value)
+  ), [])
+  const commitRuntimeSnapshot = useCallback((transition) => {
+    runtimeSnapshotRef.current = transition.next
+  }, [])
+  useEffect(() => {
+    runtimeSnapshotRef.current = runtimeSnapshot(
+      queryClient.getQueryData(chatMessagesQueryKey(chatId)),
+    )
+  }, [chatId, queryClient])
   const setServerRunningLocalState = useCallback((v) => {
     const running = !!v
-    if (running) serverRunningObservedRef.current = true
     serverRunningRef.current = running
     setServerRunning(running)
   }, [])
   const setServerRunningState = useCallback((v) => {
     const running = !!v
-    if (!running) serverRunningObservedRef.current = false
     setServerRunningLocalState(running)
     updateChatRuntimeCache(
       queryClient,
@@ -1312,6 +1324,9 @@ export default function ChatView({
       // must not install an older terminal snapshot over its successor.
       if (chatIdStaleRef.current || fetchGenRef.current !== gen
           || isCurrent?.() === false) return
+      const runtimeTransition = inspectRuntimeSnapshot(data)
+      if (!runtimeTransition.adopt) return null
+      commitRuntimeSnapshot(runtimeTransition)
       const preserveLocalTurn =
         !authoritative
         && force
@@ -1380,6 +1395,9 @@ export default function ChatView({
       setBackgroundHelpers(normalizeBackgroundHelpers(data.background_helpers))
       updateChatRuntimeCache(queryClient, chatMessagesQueryKey(chatId), {
         running: !!data.running,
+        runId: data.run_id || null,
+        runStatus: data.run_status || null,
+        runtimeRevision: data.runtime_revision,
         recoveryRunId: data.recovery_run_id || null,
         goal: runtimeGoal,
         activeGoalObjective: runtimeGoal?.status === 'active'
@@ -1412,6 +1430,19 @@ export default function ChatView({
       // Stream retirement and the authoritative replacement must be one
       // commit, not two paints separated by the detail request.
       onReconciled?.(runtime)
+      const localStartInFlight =
+        localStartRequestRef.current?.chatId === String(chatId)
+      if (shouldRecoverSettledRuntime({
+        settledRun: runtimeTransition.settled,
+        runtimeRunId: data.run_id || null,
+        runtimeRunning: !!data.running,
+        pendingCount: (data.pending_messages || []).length,
+        streamStillActive: isStreamingRef.current,
+        stopInFlight: handlingStopRef.current,
+        localStartInFlight,
+      })) {
+        retireSettledStreamRef.current?.()
+      }
       return runtime
     } catch {
       void reconcileFailedSendOutbox({
@@ -1434,6 +1465,8 @@ export default function ChatView({
     embedded,
     queryClient,
     reconcileFailedSendOutbox,
+    commitRuntimeSnapshot,
+    inspectRuntimeSnapshot,
     setActiveAssistantMessageId,
     setGoalPresentationLocalState,
   ])
@@ -1472,7 +1505,8 @@ export default function ChatView({
       const data = await jsonOrThrow(res, 'Runtime refresh failed')
       if (chatIdStaleRef.current) return null
       if (fetchGenRef.current !== gen) return null
-      setRecoveryRunId(data.recovery_run_id || null)
+      const runtimeTransition = inspectRuntimeSnapshot(data)
+      if (!runtimeTransition.adopt) return null
       const serverPending = data.pending_messages || []
       const runtime = {
         running: !!data.running,
@@ -1499,7 +1533,8 @@ export default function ChatView({
         setActiveAssistantMessageId(runtime.activeAssistantMessageId)
       }
       if (shouldRecoverSettledRuntime({
-        runtimeWasObservedRunning: serverRunningObservedRef.current,
+        settledRun: runtimeTransition.settled,
+        runtimeRunId: data.run_id || null,
         runtimeRunning: !!data.running,
         pendingCount: serverPending.length,
         streamStillActive: isStreamingRef.current,
@@ -1509,8 +1544,9 @@ export default function ChatView({
         // The backend has durably finalized a run but this browser missed its
         // terminal SSE event. Re-read the transcript before retiring the stale
         // transport so a saved final reply can never remain hidden behind the
-        // cached in-flight surface. A failed refresh leaves serverRunning
-        // latched, so the next runtime poll retries instead of declaring idle.
+        // cached in-flight surface. Commit the terminal revision only through
+        // that detail read; failure leaves the running revision current so the
+        // next runtime poll retries.
         const settled = await fetchMessages({
           force: true,
           terminal204: true,
@@ -1521,6 +1557,8 @@ export default function ChatView({
         }
         return runtime
       }
+      commitRuntimeSnapshot(runtimeTransition)
+      setRecoveryRunId(data.recovery_run_id || null)
       // A finalized reply can advance while this client holds an idle warm
       // cache with no stream left to reconcile it. Foreground runtime reads
       // already carry the durable version; when it disproves the cache, use
@@ -1537,7 +1575,6 @@ export default function ChatView({
         setSending(true)
       } else if (serverPending.length === 0 && !localAuthoritative) {
         // Stream is dead and the server is idle+empty: clear the stale Stop.
-        serverRunningObservedRef.current = false
         setSending(false)
         sendingRef.current = false
       }
@@ -1559,6 +1596,9 @@ export default function ChatView({
       setBackgroundHelpers(normalizeBackgroundHelpers(data.background_helpers))
       updateChatRuntimeCache(queryClient, chatMessagesQueryKey(chatId), {
         running: !!data.running,
+        runId: data.run_id || null,
+        runStatus: data.run_status || null,
+        runtimeRevision: data.runtime_revision,
         recoveryRunId: data.recovery_run_id || null,
         goal: runtimeGoal,
         activeGoalObjective: runtimeGoal?.status === 'active'
@@ -1602,7 +1642,9 @@ export default function ChatView({
     return null
   }, [
     chatId,
+    commitRuntimeSnapshot,
     fetchMessages,
+    inspectRuntimeSnapshot,
     messagesRef,
     pendingQueue.hydrate,
     queryClient,
@@ -1942,7 +1984,6 @@ export default function ChatView({
   })
 
   retireSettledStreamRef.current = () => {
-    serverRunningObservedRef.current = false
     disconnect({ clearStreaming: true })
     clearStreamItems()
   }
@@ -2027,7 +2068,7 @@ export default function ChatView({
           // A hidden retained pane can miss the terminal stream event while
           // Shell still records the run finish. Re-enter the runtime owner
           // here: it protects an unacknowledged fresh send, but an idle server
-          // verdict after an observed run authoritatively refreshes the final
+          // verdict after a revisioned run transition refreshes the final
           // transcript and retires the stale stream. The old non-authoritative
           // detail read deliberately preserved local activity, so the pane
           // could return with its shimmer and Stop control stuck on.
@@ -2402,6 +2443,11 @@ export default function ChatView({
     }
 
     const settleRuntime = (runtime, visibleMessages) => {
+      const transition = inspectRuntimeSnapshot(runtime)
+      if (!transition.adopt) {
+        throw new Error('CHAT_RUNTIME_OUT_OF_ORDER')
+      }
+      commitRuntimeSnapshot(transition)
       const running = !!runtime.running
       setRecoveryRunId(runtime.recovery_run_id || null)
       const attachesToStream = shouldAttachRunningStream({
@@ -2530,6 +2576,9 @@ export default function ChatView({
         )
         updateChatRuntimeCache(queryClient, queryKey, {
           running: !!runtime.running,
+          runId: runtime.run_id || null,
+          runStatus: runtime.run_status || null,
+          runtimeRevision: runtime.runtime_revision,
           recoveryRunId: runtime.recovery_run_id || null,
           activeAssistantMessageId:
             runtime.active_assistant_message_id || null,
@@ -2732,6 +2781,8 @@ export default function ChatView({
     provisionalNewChat,
     searchReveal?.anchorKey,
     searchReveal?.id,
+    commitRuntimeSnapshot,
+    inspectRuntimeSnapshot,
     reconcileFailedSendOutbox,
     setActiveAssistantMessageId,
     setGoalPresentationLocalState,
@@ -3277,7 +3328,6 @@ export default function ChatView({
     // FRESH SEND PATH: no active turn, no queue.
     const localStartRequest = { chatId: String(chatId), cid }
     localStartRequestRef.current = localStartRequest
-    serverRunningObservedRef.current = false
     fetchGenRef.current += 1
     onMessageStartRef.current?.()
     promotedRef.current = false
@@ -3782,13 +3832,14 @@ export default function ChatView({
       if (showPicker && isModelSelectionRequiredFailure(err)) {
         setModelSelectionRequest(request => request + 1)
       }
-      if (err.message === 'HTTP 410') {
+      if (isQuestionStateChangedError(err)) {
         // The backend refused this answer because the durable transcript no
         // longer has that open question (for example Stop cancelled it, or a
         // newer question superseded it). Refetch authoritative state rather
-        // than keeping the optimistic answer locally.
-        setLiveQuestionId(null)
-        fetchMessages({ force: true })
+        // than keeping the optimistic answer locally. Keep the current card
+        // answerable until that read succeeds; a network failure must not turn
+        // a retryable stale projection into a disabled card.
+        await fetchMessages({ force: true, authoritative: true })
         throw err
       }
       // QuestionCard owns this transient failure notice and retains the
@@ -5711,7 +5762,15 @@ export default function ChatView({
           )}
 
           <PeerTimelineRows notes={peerTimeline.slots.get(displayedMessages.length)} chatId={chatId} onInternalNav={internalNav} />
-          <PeerTimelineLoadError error={peerTimeline.error} onRetry={peerTimeline.retry} />
+          <PeerTimelineLoadError
+            error={peerTimeline.error}
+            recoveryActive={
+              peerTimeline.recoveryActive
+              || restartPending
+              || reachabilityPhase !== ReachabilityPhase.ONLINE
+            }
+            onRetry={peerTimeline.retry}
+          />
 
           {/* Steering is accepted locally before the provider control channel
               acknowledges it. Keep the durable rows out of the actionable

@@ -677,31 +677,6 @@ async def _exchange_claude_code(body: schemas.ProviderCodeRequest):
     raise HTTPException(status_code=500, detail=str(exc))
 
 
-@router.get("/provider/status")
-async def provider_status(
-  owner: models.Owner = Depends(get_current_owner),
-):
-  """Checks whether the active provider has local credentials configured.
-
-  Uses the provider's own check_auth method so this endpoint works
-  for any registered provider, not just Claude. `authenticated` remains as a
-  compatibility alias; neither field performs a remote token probe.
-  """
-  from app.providers import get_provider, owner_default_provider
-  # The active provider is the one the last-selected model implies (the single
-  # source of truth), so this status matches the provider chats will actually use.
-  provider_id = owner_default_provider(get_settings().data_dir, owner.provider)
-  provider = get_provider(provider_id)
-  error = await run_in_threadpool(provider.check_auth, get_settings().data_dir)
-  return {
-    "provider": provider_id,
-    "provider_name": provider.name,
-    "configured": error is None,
-    "authenticated": error is None,
-    "error": error,
-  }
-
-
 @router.get("/providers/status")
 async def providers_status(
   principal: Principal = Depends(get_chat_view_principal),
@@ -709,11 +684,8 @@ async def providers_status(
 ):
   """Returns local credential status for ALL registered providers.
 
-  The `/provider/status` route above only reports the currently-
-  active provider. Mini-app setup screens also need the full provider
-  map, using app tokens, so their model pickers can disable disconnected
-  providers instead of guessing. `configured` is the durable semantic field;
-  `authenticated` is retained for compatibility with installed mini-apps.
+  Mini-app setup screens need the full provider map, using app tokens, so their
+  model pickers can disable disconnected providers instead of guessing.
 
   Availability is safe to share across the app/embed boundary; the owner's
   Möbius trial balance is not. `trial` is therefore attached only for a true
@@ -734,6 +706,9 @@ async def providers_status(
     out[pid] = {
       "name": provider.name,
       "configured": error is None,
+      # Released first-party apps still consume this response field. Keep it
+      # until their stacked migrations have shipped; the singular retired
+      # status endpoint is not restored.
       "authenticated": error is None,
       "error": error,
     }

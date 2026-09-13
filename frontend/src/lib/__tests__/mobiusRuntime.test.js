@@ -456,24 +456,6 @@ test('projects runtime sends bounded requests and accepts only its parent respon
   })
 })
 
-test('projects runtime exposes the owner-mediated legacy migration action', async () => {
-  await withFakeWindow(async ({ window, parent }) => {
-    const projects = makeProjects()
-    const pending = projects.migrate()
-    const message = parent.messages.at(-1)
-    assert.equal(message.data.type, 'moebius:projects')
-    assert.equal(message.data.action, 'migrate')
-    window.emit({
-      type: 'moebius:projects-result',
-      requestId: message.data.requestId,
-      ok: true,
-      result: [{ id: 'legacy-project' }],
-    })
-    assert.deepEqual(await pending, [{ id: 'legacy-project' }])
-    projects._destroy()
-  })
-})
-
 test('reversible nav restores the same app view on Forward and can unwind again', async () => {
   await withFakeWindow(async ({ window, parent }) => {
     const events = []

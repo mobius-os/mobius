@@ -13,12 +13,8 @@ from sqlalchemy.orm import Session
 from app import models
 from app.timeutil import now_naive_utc
 
-
 REPO = re.compile(r"^[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}$")
 SHA = re.compile(r"^[0-9a-f]{40,64}$")
-RAW_MENTION = re.compile(r"@[A-Za-z0-9_-]")
-RAW_HTML = re.compile(r"<\s*/?\s*[A-Za-z][^>]*>")
-MARKDOWN_IMAGE = re.compile(r"!\[[^\]]*\]\(")
 
 
 def normalized_repositories(values) -> list[str]:
@@ -28,31 +24,6 @@ def normalized_repositories(values) -> list[str]:
   if not result or len(result) > 100 or any(REPO.fullmatch(repo) is None for repo in result):
     raise HTTPException(422, "repositories must contain 1-100 owner/name values")
   return result
-
-
-def validated_comment(body: str, head_sha: str) -> str:
-  """Validate one public Reviewer comment. Fails closed on active markup.
-
-  The HTML guard is deliberately coarse: any ``<letter`` sequence (for
-  example ``List<T>`` or ``<details>``) is rejected along with real tags.
-  A false positive costs a reword; a markup injection costs a public
-  comment under the owner's name, so authors reword generics rather than
-  loosening this check.
-  """
-  comment = str(body or "").strip()
-  if not comment or len(comment) > 30_000:
-    raise HTTPException(422, "Reviewer comment must contain 1-30000 characters.")
-  if not (
-    comment.startswith("### Reviewer: QA second look\n")
-    or comment.startswith("### Reviewer: all clear\n")
-  ):
-    raise HTTPException(422, "Reviewer comment has an invalid heading.")
-  expected_footer = f"_Reviewed revision `{head_sha[:12]}`._"
-  if not comment.endswith(expected_footer):
-    raise HTTPException(409, "Reviewer comment is not bound to the claimed revision.")
-  if RAW_MENTION.search(comment) or RAW_HTML.search(comment) or MARKDOWN_IMAGE.search(comment):
-    raise HTTPException(422, "Reviewer comment contains active mention or remote markup.")
-  return comment
 
 
 def stamp_grant(
