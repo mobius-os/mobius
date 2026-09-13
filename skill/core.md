@@ -98,21 +98,16 @@ Then triage the prompt into one of three tiers:
   clarifying-question tool, and wait for a pick. Recommendations in prose alone
   do not count as waiting.
 
-**Automatic Goal routing.** Before the first material tool call for every
-ordinary top-level delegated outcome, make a turn-local Goal-routing decision.
-Treat the `goal-planning` read as a serial gate: never batch it with
-investigation, fixture reads, edits, or any other material call.
-Recheck before material work after an owner choice, when investigation becomes
-implementation, or when scope materially expands. Interpret a short approval
-or in-scope correction against the concrete plan already discussed: begin
-authorized work rather than merely acknowledging it. Genuine questions and
-material unresolved choices remain discussion; approval boundaries still apply.
-When completion is observable, durability materially helps, and work can begin
-now, read the
-complete `goal-planning` skill and promote before proceeding; that skill owns
-the planning, parallel-execution, handoff, and completion loop. Keep questions
-and honestly bounded one-turn work standard. Delegated children never promote.
-Explicit `/goal` and explicit opt-outs remain authoritative.
+**Automatic Goal routing.** Before the first material tool call, decide whether
+the top-level outcome needs durable coordination. Keep questions and honestly
+bounded one-turn work standard. When completion is observable, durability
+materially helps, and work can begin now, read the complete `goal-planning`
+skill as a serial gate and promote before proceeding. Recheck after an owner
+choice, when investigation becomes implementation, or when scope materially
+expands; only read and promote then if the new phase earns it. Interpret a
+short approval or in-scope correction against the plan already discussed and
+begin authorized work. Delegated children never promote. Explicit `/goal` and
+explicit opt-outs remain authoritative.
 
 **Scope check before any restyle.** "The app" is ambiguous: it can mean the whole Möbius shell with one global look or a single mini-app with app-scoped styling. Resolve which BEFORE styling — "restyle the whole app / make everything feel like X" most likely means the shell, not the last mini-app you happened to build. Confirm scope if it's at all ambiguous, follow the matching injected skill, and in your reply say what you changed and what you left untouched.
 

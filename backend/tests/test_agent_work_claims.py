@@ -159,7 +159,7 @@ def test_deleted_follower_cannot_suppress_live_follower_notification(db):
 
 
 def test_exact_action_claim_never_masquerades_as_whole_goal_handoff(db):
-  from app.chat import _goal_handoff_is_owned
+  from app.goal_plans import goal_handoff_owner_kind
 
   owner, first, second = _fixture(db)
   first.pending_question_id = "approval-card"
@@ -174,9 +174,7 @@ def test_exact_action_claim_never_masquerades_as_whole_goal_handoff(db):
     work_key=key, summary="Merge the same reviewed PR",
   )
 
-  assert _goal_handoff_is_owned(
-    db, second.id, "claim-goal-second",
-  ) is False
+  assert goal_handoff_owner_kind(db, second.id, "claim-goal-second") is None
 
 
 def test_deleting_owner_releases_only_unfinished_exact_action(db):

@@ -7,7 +7,6 @@ reconstructed from a second per-chat marker.
 """
 
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
 from typing import Any
 import json
 import uuid
@@ -129,10 +128,10 @@ def goal_identity_for_run_start(
     return None, None
   semantic_continuation = is_continuation_message(message)
   if continuation_reason(message) == GOAL_HANDOFF_REASON:
-    # The bounded settlement correction names the Goal it owns. Resolve that
-    # exact identity rather than borrowing whichever Goal happens to be newest
-    # when older queued owner work finishes first. The shared recovery helper
-    # also preserves explicit Stop and dismissal as authoritative fences.
+    # Settlement repair markers name the Goal they own. Resolve that exact
+    # identity rather than borrowing whichever Goal happens to be newest when
+    # older queued owner work finishes first. Saved transcripts and pending
+    # rows remain recoverable across restarts.
     requested_goal_id = message.get("goal_id") if message is not None else None
     if isinstance(requested_goal_id, str) and requested_goal_id:
       source = (
@@ -335,134 +334,9 @@ def _goal_plan_is_unfinished(db: Session, chat_id: str, goal_id: str) -> bool:
   )
 
 
-# --- Owned settlement for auto-promoted Goals -------------------------------
-
-# Explicit ``/goal`` starts already have a provider-owned continuation loop.
-# A Goal promoted during an ordinary turn has no such owner, so a clean turn
-# end must either leave a durable handoff or receive one bounded corrective
-# continuation. Each newly settled plan task earns one further correction;
-# lack of progress then becomes a visible resumable failure instead of an
-# unbounded provider loop or a Goal that silently looks paused.
+# Saved transcripts can contain this legacy continuation reason. Keep identity
+# recovery for those rows, but do not generate new settlement turns.
 GOAL_HANDOFF_REASON = "goal_handoff"
-
-
-@dataclass(frozen=True)
-class GoalSettlementTarget:
-  """An unfinished auto-promoted Goal reaching a clean physical turn end."""
-
-  goal_id: str
-  retry_allowed: bool
-
-
-def _goal_started_explicitly(
-  db: Session,
-  chat_id: str,
-  messages: Any,
-  run: models.ChatRun,
-) -> bool:
-  """Whether this Goal belongs to the provider-native ``/goal`` path.
-
-  Current explicit starts mint a Goal id distinct from their original logical
-  root, while mid-turn promotion deliberately adopts that root as its id. A
-  later wait/helper wake may itself have a fresh physical root, so classify
-  from the Goal's earliest run rather than the turn that happens to be ending.
-  Historical rows predate the id distinction; for those inspect only the owner
-  message that opened the exact original assistant segment. Never scan for an
-  unrelated ``/goal`` elsewhere in a long-lived chat.
-  """
-  origin = (
-    db.query(models.ChatRun)
-    .filter(
-      models.ChatRun.chat_id == chat_id,
-      models.ChatRun.goal_id == run.goal_id,
-    )
-    .order_by(models.ChatRun.started_at.asc(), models.ChatRun.id.asc())
-    .first()
-  )
-  if origin is None:
-    return True
-  logical_root = origin.root_run_id or origin.id
-  if origin.goal_id != logical_root:
-    return True
-
-  from app.goal_commands import is_goal_command
-
-  rows = list(messages or [])
-  for index, message in enumerate(rows):
-    if not (
-      isinstance(message, dict)
-      and message.get("role") == "assistant"
-      and message.get("id") == logical_root
-    ):
-      continue
-    for prior in reversed(rows[:index]):
-      if not isinstance(prior, dict) or prior.get("role") != "user":
-        continue
-      return is_goal_command(str(prior.get("content") or ""))
-    return False
-  return False
-
-
-def _goal_handoff_attempt_count(messages: Any, goal_id: str) -> int:
-  """Count this Goal's already-promoted corrective continuation markers."""
-  return sum(
-    1
-    for message in (messages or [])
-    if isinstance(message, dict)
-    and message.get("role") == "user"
-    and message.get("continuation_reason") == GOAL_HANDOFF_REASON
-    and message.get("goal_id") == goal_id
-  )
-
-
-def goal_settlement_target(
-  db: Session, chat_id: str, ending_run_token: str | None,
-) -> GoalSettlementTarget | None:
-  """Describe an unfinished auto-promoted Goal at clean turn settlement.
-
-  Explicit ``/goal`` paths stay under their existing Claude/Codex continuation
-  owners. Auto-promoted Goals get one baseline corrective continuation and one
-  additional attempt per task that has become completed/cancelled. The caller
-  turns an exhausted target into a manual recovery pause rather than silently doing
-  nothing.
-  """
-  if not ending_run_token:
-    return None
-  run = (
-    db.query(models.ChatRun)
-    .filter(
-      models.ChatRun.id == ending_run_token,
-      models.ChatRun.chat_id == chat_id,
-    )
-    .first()
-  )
-  if run is None or run.goal_objective is None or run.goal_id is None:
-    return None
-  chat_row = (
-    db.query(models.Chat.messages)
-    .filter(models.Chat.id == chat_id)
-    .first()
-  )
-  messages = chat_row[0] if chat_row is not None else []
-  if _goal_started_explicitly(db, chat_id, messages, run):
-    return None
-  tasks = _goal_plan_tasks(db, chat_id, run.goal_id)
-  if not tasks or not any(
-    isinstance(task, dict)
-    and task.get("status") not in ("completed", "cancelled")
-    for task in tasks
-  ):
-    return None
-  completed = sum(
-    1
-    for task in tasks
-    if isinstance(task, dict) and task.get("status") in ("completed", "cancelled")
-  )
-  attempts = _goal_handoff_attempt_count(messages, run.goal_id)
-  return GoalSettlementTarget(
-    goal_id=run.goal_id,
-    retry_allowed=attempts < 1 + completed,
-  )
 
 
 def latest_run(db: Session, chat_id: str) -> models.ChatRun | None:
