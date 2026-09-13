@@ -187,6 +187,7 @@ import useDesktopSidebar, {
   desktopContentWidthAfterSidebarToggle,
 } from './useDesktopSidebar.js'
 import useWorkspaceSession from './useWorkspaceSession.js'
+import useDeferredNewChatMaterialization from './useDeferredNewChatMaterialization.js'
 import useShellUpdateController from './useShellUpdateController.js'
 import useAppFrameCache from './useAppFrameCache.js'
 import useShellVisualViewport from './useShellVisualViewport.js'
@@ -3980,25 +3981,19 @@ export default function Shell({ onInitialVisualReady }) {
     requestEmptySingleNewChat()
   }, [newChatPresentation, requestEmptySingleNewChat, workspaceStateRef])
 
-  // ── Deferred New Chat materialization watcher (round 4 item 3) ─────────────
-  // A pending New Chat request (recorded by requestEmptySingleNewChat) materializes
-  // only once the visual scene is IDLE and the slot is still an empty single.
-  useEffect(() => {
-    if (!pendingNewChatToken) return
-    if (modeView.active || modeState.transition) return
-    const pending = pendingNewChatRef.current
-    if (!pending || pending.token !== pendingNewChatToken) return
-    const ws = workspaceStateRef.current.ws
-    const single = ws.viewMode === 'single'
-    if (!single || ws.singleScreen != null) {
-      // No longer an empty single slot (re-toggled to builder, or a slot was set by
-      // another path) — drop the request.
-      pendingNewChatRef.current = null
-      return
-    }
-    materializeNewChatHomeRef.current?.(pending)
-  }, [pendingNewChatToken, materializeNewChatRevision, modeView.active, modeState.transition,
-      workspace.viewMode, workspace.singleScreen, workspaceStateRef])
+  // Empty-workspace allocation resumes on the same recovery edge as New Chat.
+  useDeferredNewChatMaterialization({
+    pendingNewChatToken,
+    materializeNewChatRevision,
+    recoveryGeneration,
+    modeActive: modeView.active,
+    modeTransition: modeState.transition,
+    viewMode: workspace.viewMode,
+    singleScreen: workspace.singleScreen,
+    workspaceStateRef,
+    pendingNewChatRef,
+    materializeRef: materializeNewChatHomeRef,
+  })
 
   function selectChat(id, { focusComposer = true } = {}) {
     clearChatAttention(id)

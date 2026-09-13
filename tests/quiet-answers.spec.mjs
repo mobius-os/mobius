@@ -1,30 +1,5 @@
 /* Saved close answers never manufacture a model turn or disturb owner intent. */
-import { test as base, expect, chromium } from '@playwright/test'
-import { readFile } from 'node:fs/promises'
-import { resolve, sep } from 'node:path'
-
-// An authenticated screenshot-helper browser may run these fully intercepted
-// fixtures against a live build. No fixture request may mutate the real chat.
-const test = process.env.MOBIUS_RECOVERY_CDP ? base.extend({
-  page: async ({}, use) => {
-    const browser = await chromium.connectOverCDP(process.env.MOBIUS_RECOVERY_CDP)
-    // Export standard Playwright auth state from the authenticated screenshot
-    // helper before starting fixtures. Never sample changing/closing test tabs.
-    if (!process.env.MOBIUS_RECOVERY_AUTH_STATE) {
-      throw new Error('Provide the screenshot helper auth export in MOBIUS_RECOVERY_AUTH_STATE')
-    }
-    const context = await browser.newContext({
-      serviceWorkers: 'block',
-      storageState: process.env.MOBIUS_RECOVERY_AUTH_STATE,
-    })
-    const page = await context.newPage()
-    try { await use(page) } finally {
-      await context.close()
-      await browser.close()
-    }
-  },
-}) : base
-test.use({ serviceWorkers: 'block' })
+import { test, expect, serveRecoveryBuild } from './_recoveryBrowser.mjs'
 
 const BASE = process.env.MOBIUS_URL || process.env.API_BASE_URL || 'http://localhost:8001'
 const CHAT = process.env.MOBIUS_RECOVERY_CHAT_ID || 'ffffffff-1111-4222-8333-444444444444'
@@ -32,7 +7,7 @@ const path = `/api/chats/${CHAT}`
 const question = 'Would you like another explanation?'
 const draft = 'Keep this unrelated draft'
 
-async function mount(page, { reject = false, loseAck = false, restart = false, activated = false, pauseMessage = false } = {}) {
+async function mount(page, { reject = false, acknowledgement = 'response', restart = null, pauseMessage = false } = {}) {
   page.on('console', msg => { if (msg.type() === 'error') console.error('Fixture console:', msg.text()) })
   page.on('requestfailed', req => console.error('Fixture request failed:', req.url(), req.failure()))
   page.on('pageerror', error => console.error('Fixture page error:', error.message))
@@ -43,31 +18,41 @@ async function mount(page, { reject = false, loseAck = false, restart = false, a
       { id: '1', label: 'Yes please', description: 'Continue with more detail.' },
     ] },
   ] }
+  const restartVersion = restart?.version ?? 2
+  const restartStatus = restart?.status ?? 'awaiting_owner'
   if (restart) {
     block.question_id = 'restart-fixture'
     block.questions = [{ id: 'restart', header: 'Restart', question, options: [
       { id: 'restart-option', label: 'Restart now', description: 'Load the tested changes.' },
-      { id: 'defer-option', label: 'Not now', description: 'Wait for a later approved restart.' },
+      ...(restartVersion === 1 ? [{ id: 'defer-option', label: 'Not now', description: 'Wait for a later approved restart.' }] : []),
     ] }]
-    block.platform_action = { type: 'restart', version: 1, status: activated ? 'activated' : 'awaiting_owner',
-      restart_option_id: 'restart-option', cancel_option_id: 'defer-option',
+    block.platform_action = { type: 'restart', version: restartVersion, status: restartStatus,
+      restart_option_id: 'restart-option',
+      ...(restartVersion === 1 ? { cancel_option_id: 'defer-option' } : {}),
       action_id: 'platform-restart:fixture' }
   }
   const messages = [{ role: 'user', content: 'Original A', ts: 1788800000100 },
     { role: 'assistant', id: 'assistant-a', ts: 1788800000200, blocks: [
       { type: 'text', content: 'Here is the completed explanation.\n\n' + 'A stable answer. '.repeat(70) }, block,
     ] }]
+  const unansweredMessages = structuredClone(messages)
+  let answerWrites = 0
   const pendingMessages = []
   const attempts = []
   const mutations = []
   let releaseMessage
   const messageGate = pauseMessage ? new Promise(resolve => { releaseMessage = resolve }) : null
   let streams = 0
-  const detail = () => ({ id: CHAT, title: 'Quiet answer fixture', provider: 'codex', messages,
-    total: messages.length, offset: 0, running: false, pending_messages: pendingMessages,
-    agent_settings_json: { model: 'gpt-6-astra' }, effective: { model: 'gpt-6-astra' },
-    pending_question_id: (block.answers || activated) ? null : block.question_id, active_goal_objective: null,
-    recovery_run_id: null, active_assistant_message_id: null, updated_at: '2026-09-09T02:00:00Z' })
+  const detail = () => {
+    const awaitingReplay = acknowledgement === 'replay' && attempts.length === 1
+    const answered = restartStatus !== 'awaiting_owner' || (block.answers && !awaitingReplay)
+    return { id: CHAT, title: 'Quiet answer fixture', provider: 'codex',
+      messages: awaitingReplay ? unansweredMessages : messages,
+      total: messages.length, offset: 0, running: false, pending_messages: pendingMessages,
+      agent_settings_json: { model: 'gpt-6-astra' }, effective: { model: 'gpt-6-astra' },
+      pending_question_id: answered ? null : block.question_id, active_goal_objective: null,
+      recovery_run_id: null, active_assistant_message_id: null, updated_at: '2026-09-09T02:00:00Z' }
+  }
   await page.route('**/api/**', async route => {
     const req = route.request(), url = new URL(req.url())
     if (!['GET', 'HEAD'].includes(req.method())) mutations.push({ method: req.method(), path: url.pathname })
@@ -81,11 +66,15 @@ async function mount(page, { reject = false, loseAck = false, restart = false, a
       }
       if (reject && attempts.length === 1) return route.fulfill({ status: 409, json: {
         detail: 'This question is the only next step for an unfinished Goal.' } })
+      if (!block.answers) answerWrites++
       block.answers = body.answers
-      block.answer_turn = 'none'
-      if (restart) block.platform_action = { ...block.platform_action, status: body.selected_options?.restart?.[0] === 'defer-option' ? 'deferred' : 'restart_requested' }
-      if (loseAck && attempts.length === 1) return route.fulfill({ status: 503, json: { detail: 'Acknowledgement unavailable; your choice remains retryable.' } })
-      return route.fulfill({ status: 200, json: { status: 'answered', answer_turn: 'none', running: false, answers: block.answers, selected_options: body.selected_options, ...(restart ? { platform_action: block.platform_action } : {}) } })
+      const closesWithoutReply = restart
+        ? body.selected_options?.restart?.[0] === 'restart-option'
+        : body.selected_options?.help?.[0] === '0'
+      block.answer_turn = closesWithoutReply ? 'none' : 'new'
+      if (restart) block.platform_action = { ...block.platform_action, status: body.selected_options?.restart?.[0] === 'restart-option' ? 'restart_requested' : 'responded' }
+      if (acknowledgement !== 'response' && attempts.length === 1) return route.fulfill({ status: 503, json: { detail: 'Acknowledgement unavailable; your choice remains retryable.' } })
+      return route.fulfill({ status: 200, json: { status: closesWithoutReply ? 'answered' : 'started', answer_turn: block.answer_turn, running: !closesWithoutReply, answers: block.answers, selected_options: body.selected_options, ...(restart ? { platform_action: block.platform_action } : {}) } })
     }
     if (!['GET', 'HEAD'].includes(req.method())) {
       if (url.pathname.includes('upload')) return route.fulfill({ json: {
@@ -99,18 +88,7 @@ async function mount(page, { reject = false, loseAck = false, restart = false, a
     if (url.pathname === '/api/chats') return route.fulfill({ json: [detail()] })
     return route.continue()
   })
-  if (process.env.MOBIUS_FIXTURE_DIST) {
-    const dist = resolve(process.env.MOBIUS_FIXTURE_DIST)
-    await page.route(/\/(?:shell|assets)\//, async route => {
-      const pathname = decodeURIComponent(new URL(route.request().url()).pathname)
-      const filename = resolve(dist, pathname.replace(/^\/shell\//, '').replace(/^\//, '') || 'index.html')
-      if (!filename.startsWith(dist + sep)) return route.abort()
-      const contentType = filename.endsWith('.js') ? 'application/javascript'
-        : filename.endsWith('.css') ? 'text/css'
-          : filename.endsWith('.html') ? 'text/html' : 'application/octet-stream'
-      await route.fulfill({ body: await readFile(filename), contentType })
-    })
-  }
+  await serveRecoveryBuild(page)
   await page.addInitScript(() => sessionStorage.setItem('mobius:visual-content-only', '1'))
   await page.goto(`${BASE}/shell/?chat=${CHAT}`, { waitUntil: 'domcontentloaded' })
   const surface = page.locator('[data-chat-surface="painted"]')
@@ -121,7 +99,7 @@ async function mount(page, { reject = false, loseAck = false, restart = false, a
   await surface.locator('input[type="file"]').setInputFiles({ name: 'draft-note.txt', mimeType: 'text/plain', buffer: Buffer.from('draft attachment') })
   const attachment = surface.getByRole('button', { name: 'Remove draft-note.txt' })
   await expect(attachment).toBeVisible()
-  return { surface, card, composer, attachment, attempts, mutations, releaseMessage: () => releaseMessage?.(), streams: () => streams }
+  return { surface, card, composer, attachment, attempts, mutations, answerWrites: () => answerWrites, releaseMessage: () => releaseMessage?.(), streams: () => streams }
 }
 
 test('quiet acknowledgement preserves draft and attachment without starting a stream', async ({ page }) => {
@@ -151,56 +129,73 @@ test('quiet rejection keeps selected choice and draft retryable with its explana
   expect(f.attempts[1].selected_options).toEqual({ help: ['0'] })
 })
 
-test('lost quiet acknowledgement settles from outbox replay without clearing draft', async ({ page }) => {
-  const f = await mount(page, { loseAck: true })
-  await f.card.getByRole('radio', { name: /No thanks/ }).click()
-  await f.card.getByRole('button', { name: 'Submit', exact: true }).click()
-  // Confirmation may already arrive through authoritative detail before the
-  // local queued label can be observed. Offline cases below own that hold;
-  // this case verifies the same-cid replay and final saved answer.
-  // Existing shell wake delivery owns retries; no synthetic retry timer.
-  await page.evaluate(() => window.dispatchEvent(new Event('online')))
-  await expect.poll(() => f.attempts.length, { timeout: 35000 }).toBeGreaterThanOrEqual(2)
-  await expect(f.card.getByRole('button', { name: 'Submitted', exact: true })).toBeVisible()
-  expect(f.attempts[1].cid).toBe(f.attempts[0].cid)
-  await expect(f.composer).toHaveValue(draft)
-  await expect(f.attachment).toBeVisible()
-})
+for (const acknowledgement of ['detail', 'replay']) {
+  test(`lost quiet acknowledgement settles through ${acknowledgement} without repeating its effect`, async ({ page }) => {
+    const f = await mount(page, { acknowledgement })
+    await f.card.getByRole('radio', { name: /No thanks/ }).click()
+    await f.card.getByRole('button', { name: 'Submit', exact: true }).click()
+    // The replay case deliberately withholds the saved answer from detail
+    // until the second POST. Otherwise detail is authoritative and may settle
+    // the answer before a retry; making both race for a required second POST
+    // tests scheduling, not preservation or exactly-once effects.
+    await page.evaluate(() => window.dispatchEvent(new Event('online')))
+    if (acknowledgement === 'replay') {
+      await expect.poll(() => f.attempts.length).toBe(2)
+    }
+    await expect(f.card.getByRole('button', { name: 'Submitted', exact: true })).toBeVisible()
+    expect(f.attempts.length).toBeGreaterThanOrEqual(1)
+    for (const attempt of f.attempts) expect(attempt).toEqual(f.attempts[0])
+    expect(f.answerWrites()).toBe(1)
+    await expect(f.composer).toHaveValue(draft)
+    await expect(f.attachment).toBeVisible()
+  })
+}
 
+for (const restartVersion of [1, 2]) {
+  test(`Restart v${restartVersion} submits its exact action identity without a model turn or lost draft`, async ({ page }) => {
+    const f = await mount(page, { restart: { version: restartVersion } })
+    await f.card.getByRole('radio', { name: /Restart now/ }).click()
+    const beforeStreams = f.streams()
+    await f.card.getByRole('button', { name: 'Continue', exact: true }).click()
+    await expect(f.card.getByRole('status')).toContainText('Restart requested')
+    expect(f.attempts).toHaveLength(1)
+    expect(f.attempts[0].selected_options).toEqual({ restart: ['restart-option'] })
+    expect(f.streams()).toBe(beforeStreams)
+    await expect(f.composer).toHaveValue(draft)
+    await expect(f.attachment).toBeVisible()
+    await expect(f.surface.getByText('continue', { exact: true })).toHaveCount(0)
+  })
 
-test('Restart submits its exact action identity without a model turn or lost draft', async ({ page }) => {
-  const f = await mount(page, { restart: true })
-  await f.card.getByRole('radio', { name: /Restart now/ }).click()
-  const beforeStreams = f.streams()
-  await f.card.getByRole('button', { name: 'Submit', exact: true }).click()
-  await expect(f.card.getByRole('status')).toContainText('Restart requested')
+}
+
+test('writing Restart now does not grant option authority', async ({ page }) => {
+  const f = await mount(page, { restart: {} })
+  await expect(f.card.getByRole('radio', { name: /Not now/ })).toHaveCount(0)
+  await f.card.getByRole('textbox', { name: `Custom answer for: ${question}` }).fill('Restart now')
+  await f.card.getByRole('button', { name: 'Continue', exact: true }).click()
+  await expect(f.card.getByRole('status')).toContainText('Response sent')
   expect(f.attempts).toHaveLength(1)
-  expect(f.attempts[0].selected_options).toEqual({ restart: ['restart-option'] })
-  expect(f.streams()).toBe(beforeStreams)
+  expect(f.attempts[0]).not.toHaveProperty('selected_options')
+  expect(f.attempts[0].answers).toEqual({ [question]: 'Restart now' })
   await expect(f.composer).toHaveValue(draft)
   await expect(f.attachment).toBeVisible()
-  await expect(f.surface.getByText('continue', { exact: true })).toHaveCount(0)
 })
 
-test('deferred Restart retains its action receipt without a model turn or lost draft', async ({ page }) => {
-  const f = await mount(page, { restart: true })
-  await f.card.getByRole('radio', { name: /Not now/ }).click()
-  const beforeStreams = f.streams()
-  await f.card.getByRole('button', { name: 'Submit', exact: true }).click()
+test('a legacy deferred Restart receipt remains settled without reviving its removed option', async ({ page }) => {
+  const f = await mount(page, { restart: { version: 1, status: 'deferred' } })
   await expect(f.card.getByRole('status')).toContainText('Waiting for a later restart')
-  expect(f.attempts).toHaveLength(1)
-  expect(f.attempts[0].selected_options).toEqual({ restart: ['defer-option'] })
-  expect(f.streams()).toBe(beforeStreams)
+  await expect(f.card.getByRole('radio')).toHaveCount(0)
+  await expect(f.card.getByRole('button', { name: 'Continue', exact: true })).toHaveCount(0)
+  expect(f.attempts).toHaveLength(0)
   await expect(f.composer).toHaveValue(draft)
   await expect(f.attachment).toBeVisible()
-  await expect(f.surface.getByText('continue', { exact: true })).toHaveCount(0)
 })
 
 test('independent activation settles a Restart card without fabricating an owner answer', async ({ page }) => {
-  const f = await mount(page, { restart: true, activated: true })
-  await expect(f.card.getByRole('status')).toContainText('Changes loaded')
+  const f = await mount(page, { restart: { status: 'activated' } })
+  await expect(f.card.getByRole('status')).toContainText('Möbius restarted')
   await expect(f.card.locator('[aria-checked="true"]')).toHaveCount(0)
-  await expect(f.card.getByRole('button', { name: 'Submit', exact: true })).toHaveCount(0)
+  await expect(f.card.getByRole('button', { name: 'Continue', exact: true })).toHaveCount(0)
   expect(f.attempts).toHaveLength(0)
   await expect(f.composer).toHaveValue(draft)
   await expect(f.attachment).toBeVisible()
@@ -292,10 +287,10 @@ test('known-offline fresh send stays in its local queue without POST or transcri
 
 for (const mode of ['quiet', 'reply', 'restart']) {
   test(`${mode} answer queues on its card offline, then confirms without touching the draft`, async ({ page }) => {
-    const f = await mount(page, { restart: mode === 'restart' })
+    const f = await mount(page, { restart: mode === 'restart' ? {} : null })
     const network = await disconnectDelivery(page)
     await f.card.getByRole('radio', { name: mode === 'restart' ? /Restart now/ : mode === 'quiet' ? /No thanks/ : /Yes please/ }).click()
-    await f.card.getByRole('button', { name: 'Submit', exact: true }).click()
+    await f.card.getByRole('button', { name: mode === 'restart' ? 'Continue' : 'Submit', exact: true }).click()
     await expect(f.card.getByRole('button', { name: 'Queued on this device' })).toBeDisabled()
     await expect(f.card.getByRole('status')).toContainText('saved here')
     expect(network.attempts()).toBe(0)
