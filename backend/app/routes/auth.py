@@ -840,7 +840,7 @@ _MOBIUS_HANDOFF_TTL_SECONDS = 60
 
 
 async def _begin_mobius_pkce(
-  identity: dict, owner_username: str,
+  identity: dict, owner_username: str, *, select_account: bool = False,
 ) -> tuple[str, str]:
   """Register a broker PKCE pending for `identity`; return (authorization_url, state)."""
   state = secrets.token_urlsafe(32)
@@ -858,19 +858,26 @@ async def _begin_mobius_pkce(
     "instance_id": identity["instance_id"],
     "public_key_jwk": identity["public_key_jwk"],
     "redirect_uri": redirect_uri,
+    # Preserve whether this is the one automatic recovery attempt after the
+    # launcher returned a valid receipt for a different cached account. The
+    # callback uses it to prevent an account-selection loop.
+    "select_account": select_account,
     "expires_at": time.time() + _MOBIUS_OAUTH_TTL_SECONDS,
   }
   await _mobius_broker_request("POST", "/identity/oauth/start", pending)
+  authorization_params = {
+    "instance_id": identity["instance_id"],
+    "state": state,
+    "redirect_uri": redirect_uri,
+    "code_challenge": challenge,
+    "key_thumbprint": identity["key_thumbprint"],
+  }
+  if select_account:
+    authorization_params["prompt"] = "select_account"
   authorization_url = (
     _mobius_authorization_issuer()
     + "/identity/authorize?"
-    + urlencode({
-      "instance_id": identity["instance_id"],
-      "state": state,
-      "redirect_uri": redirect_uri,
-      "code_challenge": challenge,
-      "key_thumbprint": identity["key_thumbprint"],
-    })
+    + urlencode(authorization_params)
   )
   return authorization_url, state
 
@@ -984,6 +991,37 @@ def _mobius_login_error_redirect() -> RedirectResponse:
     "mobius_login_state", path=_MOBIUS_CALLBACK_PATH
   )
   return response
+
+
+def _mobius_account_selection_redirect() -> RedirectResponse:
+  """Retry once through the launcher's explicit account-selection flow."""
+  response = RedirectResponse(
+    url="/api/auth/mobius/login/start?select_account=true", status_code=303,
+  )
+  response.headers["Cache-Control"] = "no-store"
+  response.headers["Referrer-Policy"] = "no-referrer"
+  response.delete_cookie(
+    "mobius_login_state", path=_MOBIUS_CALLBACK_PATH
+  )
+  return response
+
+
+def _mobius_account_mismatch_redirect() -> RedirectResponse:
+  """Explain a mismatch after the explicit account chooser was already used."""
+  response = RedirectResponse(
+    url="/shell/?mobius_login_account_mismatch=1", status_code=303,
+  )
+  response.headers["Cache-Control"] = "no-store"
+  response.headers["Referrer-Policy"] = "no-referrer"
+  response.delete_cookie(
+    "mobius_login_state", path=_MOBIUS_CALLBACK_PATH
+  )
+  return response
+
+
+def _mobius_subject_fingerprint(subject: object) -> str:
+  """Return a log-safe correlation key for an opaque account subject."""
+  return hashlib.sha256(str(subject or "").encode("utf-8")).hexdigest()[:16]
 
 
 def _mobius_enroll_error_redirect() -> RedirectResponse:
@@ -1114,7 +1152,9 @@ async def _complete_mobius_enrollment(
 @router.get("/mobius/login/start")
 @_limiter.limit("5/minute")
 async def mobius_web_login_start(
-  request: Request, db: Session = Depends(get_db),
+  request: Request,
+  select_account: bool = False,
+  db: Session = Depends(get_db),
 ):
   """Begin the owner's mobius.you login as a plain top-level navigation.
 
@@ -1134,7 +1174,9 @@ async def mobius_web_login_start(
   # redirect_uri (_valid_identity_redirect hardcodes it), so the login
   # rides the shared /provider/mobius/callback and is told apart there by
   # the browser-binding cookie.
-  url, state = await _begin_mobius_pkce(identity, owner.username)
+  url, state = await _begin_mobius_pkce(
+    identity, owner.username, select_account=select_account,
+  )
   response = RedirectResponse(url=url, status_code=303)
   # One-use browser binding: the callback requires this cookie to equal the
   # echoed state, so a callback link opened in a different browser cannot
@@ -1178,7 +1220,17 @@ async def _complete_mobius_web_login(
   # Common receipt validation binds the issuer, audience, instance, and expiry;
   # this load-bearing check additionally binds login to the stored owner.
   if not same_subject:
-    return _mobius_login_error_redirect()
+    # Subjects are credentials-adjacent opaque identifiers, so log only stable
+    # fingerprints. This makes an account migration distinguishable from a
+    # connectivity failure without disclosing either identifier.
+    log.warning(
+      "mobius login subject mismatch stored=%s authenticated=%s",
+      _mobius_subject_fingerprint(owner.sso_subject),
+      _mobius_subject_fingerprint(claims["sub"]),
+    )
+    if not pending.get("select_account"):
+      return _mobius_account_selection_redirect()
+    return _mobius_account_mismatch_redirect()
 
   # Re-load and re-check the current row before minting any credential: a
   # host-side flip back to local (or a subject change) between the first check
