@@ -4236,6 +4236,180 @@ def _rename_retired_app_identities(eng):
       )
 
 
+def _migrate_model_selection_ids(eng):
+  """Rewrite obsolete platform model IDs in durable active selections.
+
+  Historical execution attribution is deliberately outside this migration.
+  Unknown IDs and malformed JSON remain byte-for-byte untouched so provider
+  additions and owner data never get mistaken for platform compatibility.
+  """
+  import json
+  import os
+  import tempfile
+  from pathlib import Path
+  from sqlalchemy import JSON as SAJSON, bindparam, inspect as sa_inspect, text
+
+  replacements = {
+    "claude-opus-4-5-20251001": "claude-opus-4-5-20251101",
+    "claude-sonnet-4-5-20251001": "claude-sonnet-4-5-20250929",
+    "claude-opus-4-6-20251015": "claude-opus-4-6",
+    "claude-opus-4-7-20251215": "claude-opus-4-7",
+    "claude-sonnet-4-7-20251215": "claude-sonnet-4-6",
+  }
+
+  def replacement(value):
+    return replacements.get(value, value) if isinstance(value, str) else value
+
+  def mapping(value):
+    if isinstance(value, str):
+      try:
+        value = json.loads(value)
+      except (TypeError, ValueError):
+        return None
+    return value if isinstance(value, dict) else None
+
+  inspector = sa_inspect(eng)
+  tables = set(inspector.get_table_names())
+  columns = {
+    table: {column["name"] for column in inspector.get_columns(table)}
+    for table in ("owner", "chats", "delegations")
+    if table in tables
+  }
+
+  with eng.begin() as conn:
+    if {"id", "model_prefs_json"}.issubset(columns.get("owner", set())):
+      update_owner = text(
+        "UPDATE owner SET model_prefs_json = :payload WHERE id = :row_id"
+      ).bindparams(bindparam("payload", type_=SAJSON))
+      for row in conn.execute(text(
+        "SELECT id, model_prefs_json FROM owner "
+        "WHERE model_prefs_json IS NOT NULL"
+      )).mappings():
+        prefs = mapping(row["model_prefs_json"])
+        hidden = prefs.get("hidden_ids") if prefs is not None else None
+        if not isinstance(hidden, list) or not all(
+          isinstance(item, str) for item in hidden
+        ):
+          continue
+        next_hidden = []
+        origins: dict[str, list[str]] = {}
+        for original in hidden:
+          item = replacement(original)
+          previous_origins = origins.get(item, [])
+          collision_was_introduced = (
+            original != item
+            or any(previous != item for previous in previous_origins)
+          )
+          if not previous_origins or not collision_was_introduced:
+            next_hidden.append(item)
+          origins.setdefault(item, []).append(original)
+        if next_hidden != hidden:
+          conn.execute(update_owner, {
+            "payload": {**prefs, "hidden_ids": next_hidden},
+            "row_id": row["id"],
+          })
+
+    if {"id", "agent_settings_json"}.issubset(columns.get("chats", set())):
+      update_chat = text(
+        "UPDATE chats SET agent_settings_json = :payload WHERE id = :row_id"
+      ).bindparams(bindparam("payload", type_=SAJSON))
+      for row in conn.execute(text(
+        "SELECT id, agent_settings_json FROM chats "
+        "WHERE agent_settings_json IS NOT NULL"
+      )).mappings():
+        settings = mapping(row["agent_settings_json"])
+        if settings is None:
+          continue
+        old_model = settings.get("model")
+        new_model = replacement(old_model)
+        if new_model != old_model:
+          conn.execute(update_chat, {
+            "payload": {**settings, "model": new_model},
+            "row_id": row["id"],
+          })
+
+    if {"id", "model"}.issubset(columns.get("delegations", set())):
+      for row in conn.execute(text(
+        "SELECT id, model FROM delegations WHERE model IS NOT NULL"
+      )).mappings():
+        new_model = replacement(row["model"])
+        if new_model != row["model"]:
+          conn.execute(text(
+            "UPDATE delegations SET model = :model WHERE id = :row_id"
+          ), {"model": new_model, "row_id": row["id"]})
+
+  settings_path = (
+    Path(os.environ.get("DATA_DIR", "/data"))
+    / "shared" / "agent-settings.json"
+  )
+  try:
+    raw_settings = settings_path.read_text(encoding="utf-8")
+    settings = json.loads(raw_settings)
+  except FileNotFoundError:
+    return
+  except (json.JSONDecodeError, UnicodeError):
+    return
+  if not isinstance(settings, dict):
+    return
+
+  next_settings = dict(settings)
+  changed = False
+  old_model = settings.get("model")
+  new_model = replacement(old_model)
+  if new_model != old_model:
+    next_settings["model"] = new_model
+    changed = True
+
+  background = settings.get("background_agents")
+  if (
+    isinstance(background, dict)
+    and isinstance(background.get("providers"), list)
+  ):
+    next_providers = []
+    providers_changed = False
+    for provider in background["providers"]:
+      if not isinstance(provider, dict):
+        next_providers.append(provider)
+        continue
+      old_model = provider.get("model")
+      new_model = replacement(old_model)
+      if new_model == old_model:
+        next_providers.append(provider)
+        continue
+      next_providers.append({**provider, "model": new_model})
+      providers_changed = True
+    if providers_changed:
+      next_settings["background_agents"] = {
+        **background, "providers": next_providers,
+      }
+      changed = True
+
+  if not changed:
+    return
+
+  mode = settings_path.stat().st_mode & 0o777
+  fd, temporary = tempfile.mkstemp(
+    dir=settings_path.parent, prefix=".agent-settings.", text=True,
+  )
+  try:
+    os.fchmod(fd, mode)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+      handle.write(json.dumps(next_settings, indent=2) + "\n")
+      handle.flush()
+      os.fsync(handle.fileno())
+    os.replace(temporary, settings_path)
+    directory_fd = os.open(settings_path.parent, os.O_RDONLY)
+    try:
+      os.fsync(directory_fd)
+    finally:
+      os.close(directory_fd)
+  finally:
+    try:
+      os.unlink(temporary)
+    except FileNotFoundError:
+      pass
+
+
 
 
 def _advance_app_capability_contract_schema_6(eng):
@@ -4492,6 +4666,100 @@ def _make_project_artifacts_declarative(eng):
         )
 
 
+def _detach_retired_gauntlet_history(eng):
+  """Keep Gauntlet history inert after its execution cutover has committed.
+
+  Non-empty history is safe to detach only when the retired runtime's atomic
+  marker proves its writer-owned Chat, Delegation, and ChatRun state was made
+  terminal before generic recovery. An installation that skipped that build
+  must stop here rather than revive obsolete work.
+  """
+  from sqlalchemy import inspect as sa_inspect, text
+
+  tables = set(sa_inspect(eng).get_table_names())
+  history_tables = [
+    table for table in ("gauntlet_tasks", "gauntlet_runs")
+    if table in tables
+  ]
+  if not history_tables:
+    return
+
+  with eng.connect() as conn:
+    has_history = any(
+      conn.execute(text(f'SELECT 1 FROM "{table}" LIMIT 1')).first()
+      is not None
+      for table in history_tables
+    )
+    cutover_complete = (
+      "gauntlet_target_mutex" in tables
+      and conn.execute(text(
+        "SELECT 1 FROM gauntlet_target_mutex WHERE id = -1"
+      )).first() is not None
+    )
+  if has_history and not cutover_complete:
+    raise RuntimeError(
+      "Gauntlet history is not retired; boot the prerequisite Gauntlet "
+      "cutover build containing 'retire legacy Gauntlet execution' before "
+      "retrying this upgrade"
+    )
+
+  if eng.dialect.name == "sqlite":
+    raw = eng.raw_connection()
+    cursor = raw.cursor()
+    foreign_keys_enabled = None
+    try:
+      foreign_keys_enabled = int(
+        cursor.execute("PRAGMA foreign_keys").fetchone()[0]
+      )
+      raw.commit()
+      cursor.execute("PRAGMA foreign_keys=OFF")
+      cursor.execute("BEGIN IMMEDIATE")
+      for table in history_tables:
+        if not cursor.execute(
+          f'PRAGMA foreign_key_list("{table}")'
+        ).fetchall():
+          continue
+        inert_table = f"{table}__inert"
+        cursor.execute(f'DROP TABLE IF EXISTS "{inert_table}"')
+        cursor.execute(
+          f'CREATE TABLE "{inert_table}" AS SELECT * FROM "{table}"'
+        )
+        cursor.execute(f'DROP TABLE "{table}"')
+        cursor.execute(f'ALTER TABLE "{inert_table}" RENAME TO "{table}"')
+      raw.commit()
+    except BaseException:
+      raw.rollback()
+      raise
+    finally:
+      try:
+        if foreign_keys_enabled is not None:
+          cursor.execute(f"PRAGMA foreign_keys={foreign_keys_enabled}")
+      finally:
+        cursor.close()
+        raw.close()
+    return
+
+  if eng.dialect.name == "postgresql":
+    inspector = sa_inspect(eng)
+    quote = eng.dialect.identifier_preparer.quote
+    with eng.begin() as conn:
+      for table in history_tables:
+        for foreign_key in inspector.get_foreign_keys(table):
+          name = foreign_key.get("name")
+          if not name:
+            raise RuntimeError(
+              f"cannot detach unnamed foreign key from {table}"
+            )
+          conn.execute(text(
+            f"ALTER TABLE {quote(table)} DROP CONSTRAINT {quote(name)}"
+          ))
+    return
+
+  raise RuntimeError(
+    f"Gauntlet history detachment does not support {eng.dialect.name}"
+  )
+
+
 _SCHEMA_MIGRATIONS = (
   # Full IDs are permanent identities, not sequence positions. Append new
   # work in execution order; never renumber a shipped ID to reconcile sources.
@@ -4551,6 +4819,8 @@ _SCHEMA_MIGRATIONS = (
   ("0053_app_capability_contract_schema_6", _advance_app_capability_contract_schema_6),
   ("0054_retired_app_identities", _rename_retired_app_identities),
   ("0055_declarative_project_artifacts", _make_project_artifacts_declarative),
+  ("0056_model_selection_ids", _migrate_model_selection_ids),
+  ("0057_detach_retired_gauntlet_history", _detach_retired_gauntlet_history),
 )
 
 

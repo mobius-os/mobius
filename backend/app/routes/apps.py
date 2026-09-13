@@ -527,28 +527,6 @@ async def _hard_delete_app(db: Session, app: models.App) -> None:
   critic_chat_ids = [row[0] for row in db.query(
     models.Delegation.child_chat_id,
   ).filter(models.Delegation.app_id == deleted_app_id).all()]
-  gauntlet_ids = {row[0] for row in db.query(models.GauntletRun.id).filter(
-    models.GauntletRun.app_id == deleted_app_id,
-  ).all()}
-  if delegation_ids:
-    gauntlet_ids.update(row[0] for row in db.query(
-      models.GauntletTask.gauntlet_run_id,
-    ).filter(
-      models.GauntletTask.delegation_id.in_(delegation_ids),
-    ).all())
-  task_query = db.query(models.GauntletTask)
-  task_filters = []
-  if gauntlet_ids:
-    task_filters.append(models.GauntletTask.gauntlet_run_id.in_(gauntlet_ids))
-  if delegation_ids:
-    task_filters.append(models.GauntletTask.delegation_id.in_(delegation_ids))
-  if task_filters:
-    from sqlalchemy import or_
-    task_query.filter(or_(*task_filters)).delete(synchronize_session=False)
-  if gauntlet_ids:
-    db.query(models.GauntletRun).filter(
-      models.GauntletRun.id.in_(gauntlet_ids),
-    ).delete(synchronize_session=False)
   if delegation_ids:
     db.query(models.Delegation).filter(
       models.Delegation.id.in_(delegation_ids),

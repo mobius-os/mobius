@@ -57,6 +57,8 @@
     "0052_compatibility_cutover_data": "8eeb7791487106d678ff46cfa36b34edb0d2215951b057c9e8fd78462adb6111",
     "0053_app_capability_contract_schema_6": "483b185cbdc4d591cbb0c1d950fd9c0d42733e28e1264b77a580527a8c7a00ad",
     "0054_retired_app_identities": "380b74a022a924575301977b01bea68328fde3836714bf29a5fb9f10464c65aa",
-    "0055_declarative_project_artifacts": "eeef7589388e702faeb99fca855022fdc13ed515ee814963b5d9727088902430"
+    "0055_declarative_project_artifacts": "eeef7589388e702faeb99fca855022fdc13ed515ee814963b5d9727088902430",
+    "0056_model_selection_ids": "13d038081765721af8af1c98e04faa2737d33e6d8155d8ae9cfc6214f6347630",
+    "0057_detach_retired_gauntlet_history": "14b7d90f660c612167f19a9a4941b7bbcb9808f55061f6105778cc941737b7b7"
   }
 }

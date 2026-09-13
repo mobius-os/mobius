@@ -80,12 +80,10 @@ def test_reconcile_and_backfill_startup_commands_are_importable():
   from app.chat_writer import (
     BackfillAssistantIdentity,
     ReconcileStartupChat,
-    RetireLegacyGauntletExecution,
   )
 
   assert BackfillAssistantIdentity(chat_id="c").chat_id == "c"
   assert ReconcileStartupChat is not None
-  assert RetireLegacyGauntletExecution is not None
 
 
 def _context():
