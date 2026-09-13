@@ -297,13 +297,16 @@ def _freeze_legacy_app_runtimes(context: StartupContext) -> None:
   """Freeze pre-isolation live files before any editing or scheduled work resumes."""
   from app.applied_app_runtime import (
     bootstrap_legacy_runtimes,
+    migrate_accepted_service_contracts,
     migrate_legacy_job_declarations,
     prune_runtime,
   )
   from app import models
   with SessionLocal() as db:
     count, warnings = bootstrap_legacy_runtimes(db)
+    service_count, service_warnings = migrate_accepted_service_contracts(db)
     job_count, job_warnings = migrate_legacy_job_declarations(db)
+    warnings.extend(service_warnings)
     warnings.extend(job_warnings)
     for app in db.query(models.App).all():
       try:
@@ -315,6 +318,10 @@ def _freeze_legacy_app_runtimes(context: StartupContext) -> None:
   if job_count:
     context.logger.info(
       "migrated %d legacy app job execution declaration(s)", job_count,
+    )
+  if service_count:
+    context.logger.info(
+      "migrated %d accepted app service declaration(s)", service_count,
     )
   for warning in warnings:
     context.logger.warning("app runtime migration: %s", warning)

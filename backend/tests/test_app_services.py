@@ -98,12 +98,16 @@ def test_social_protocol_address_dispatches_to_the_app_owned_service(
 
   peer = client.get("/api/common/status")
   local = client.get("/api/common/status", headers=auth)
+  internal = client.get("/api/services/common/status", headers=auth)
 
   assert peer.status_code == 201
   assert peer.json()["scope"] == "public"
   assert local.status_code == 201
   assert local.json()["scope"] == "owner"
+  assert internal.status_code == 201
+  assert internal.json()["scope"] == "owner"
   assert "deprecation" not in peer.headers
+  assert "sunset" not in peer.headers
 
 
 def test_shared_service_requires_an_explicit_cross_app_grant(

@@ -518,6 +518,17 @@ def _managed_payload(payload: dict, owner: models.Owner) -> dict:
   }
 
 
+def _with_member_since(payload: dict, owner: models.Owner) -> dict:
+  """Add the installation owner's stable, public membership date."""
+  return {
+    **payload,
+    "member_since": (
+      owner.created_at.date().isoformat()
+      if owner.created_at is not None else None
+    ),
+  }
+
+
 @router.get("")
 async def read_identity(
   owner: models.Owner = Depends(get_owner_or_app_with_identity_manage),
@@ -534,11 +545,13 @@ async def read_identity(
           account_mode="linked", account_unavailable=True,
         )
         degraded["linked_at"] = _linked_since(db, owner.id)
-        return degraded
+        return _with_member_since(degraded, owner)
       raise
     if linked is None:
-      return local
-    return _merge_local_deployment(linked, _linked_since(db, owner.id))
+      return _with_member_since(local, owner)
+    return _with_member_since(
+      _merge_local_deployment(linked, _linked_since(db, owner.id)), owner,
+    )
   try:
     remote = await _managed_remote("GET")
   except HTTPException as exc:
@@ -554,8 +567,8 @@ async def read_identity(
       "handle": None,
       "avatar_url": None,
     }
-    return degraded
-  return _managed_payload(remote, owner)
+    return _with_member_since(degraded, owner)
+  return _with_member_since(_managed_payload(remote, owner), owner)
 
 
 @router.patch(

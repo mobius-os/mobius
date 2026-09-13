@@ -1,7 +1,9 @@
 """Applied source files are immutable to editing and retained while in use."""
 
 import fcntl
+import json
 import shutil
+import tempfile
 from datetime import datetime
 from pathlib import Path
 
@@ -137,6 +139,90 @@ def test_legacy_job_migration_makes_execution_contract_explicit(db):
   db.commit()
   assert runtime.migrate_legacy_job_declarations(db) == (1, [])
   assert runtime.runtime_root(row) == accepted
+
+
+def _app_with_pre_service_host_contract(db, *, service):
+  source = Path(get_settings().data_dir) / "apps" / "service-contract-migration"
+  source.mkdir(parents=True, exist_ok=True)
+  manifest = {
+    "id": "service-contract-migration",
+    "name": "Service migration",
+    "version": "1.0.0",
+    "description": "test",
+    "entry": "index.jsx",
+    "source_files": ["service.py"],
+    "service": service,
+  }
+  (source / "mobius.json").write_text(json.dumps(manifest))
+  row = models.App(
+    name="Service migration", slug="service-contract-migration",
+    description="", source_dir=str(source),
+    jsx_source="export default () => null",
+    capability_contract={"schema": 6, "reviewed": "older-host"},
+  )
+  db.add(row)
+  db.commit()
+  runtime.runtime_parent(row.id).parent.mkdir(parents=True, exist_ok=True)
+  staged = Path(tempfile.mkdtemp(
+    prefix=".service-contract-", dir=runtime.runtime_parent(row.id).parent,
+  ))
+  (staged / "mobius.json").write_text(json.dumps(manifest))
+  (staged / "service.py").write_text("print('{}')\n")
+  runtime.publish_runtime(row, runtime._prepared(staged))
+  db.commit()
+  return row, source
+
+
+def test_service_contract_migration_uses_only_the_accepted_runtime(db):
+  row, source = _app_with_pre_service_host_contract(
+    db, service={"entry": "service.py", "access": "self"},
+  )
+  previous_updated = row.updated_at
+  live_manifest = json.loads((source / "mobius.json").read_text())
+  live_manifest["service"]["access"] = "public"
+  (source / "mobius.json").write_text(json.dumps(live_manifest))
+
+  migrated, warnings = runtime.migrate_accepted_service_contracts(db)
+
+  assert (migrated, warnings) == (1, [])
+  assert row.capability_contract == {
+    "schema": 6,
+    "reviewed": "older-host",
+    "service": {
+      "entry": "service.py",
+      "access": "self",
+      "protocol": "json-v1",
+      "max_request_bytes": 8 * 1024 * 1024,
+      "max_response_bytes": 8 * 1024 * 1024,
+    },
+  }
+  assert row.updated_at == previous_updated
+  assert runtime.migrate_accepted_service_contracts(db) == (0, [])
+
+
+def test_invalid_accepted_service_contract_stays_inactive_and_retries(db):
+  row, _source = _app_with_pre_service_host_contract(
+    db, service={"entry": "missing.py", "access": "self"},
+  )
+
+  first = runtime.migrate_accepted_service_contracts(db)
+
+  assert first[0] == 0
+  assert "source_files" in first[1][0]
+  assert "service" not in row.capability_contract
+  accepted = runtime.runtime_root(row)
+  staged = Path(tempfile.mkdtemp(
+    prefix=".service-contract-repair-", dir=runtime.runtime_parent(row.id).parent,
+  ))
+  shutil.copytree(accepted, staged, dirs_exist_ok=True)
+  manifest = json.loads((staged / "mobius.json").read_text())
+  manifest["source_files"] = ["missing.py"]
+  (staged / "mobius.json").write_text(json.dumps(manifest))
+  (staged / "missing.py").write_text("print('{}')\n")
+  runtime.publish_runtime(row, runtime._prepared(staged))
+  db.commit()
+  assert runtime.migrate_accepted_service_contracts(db) == (1, [])
+  assert row.capability_contract["service"]["entry"] == "missing.py"
 
 
 def test_legacy_job_migration_includes_tombstones_without_rewriting_bytes(db):

@@ -20,9 +20,11 @@ from pathlib import Path
 from app import app_git
 from app.config import get_settings
 from app.manifest_contract import (
+  MANIFEST_MAX_BYTES,
   ManifestContractError,
   job_interpreter,
   static_asset_entries,
+  validate_manifest_contract,
 )
 
 
@@ -222,6 +224,57 @@ def bootstrap_legacy_runtimes(db) -> tuple[int, list[str]]:
     finally:
       if staged is not None:
         shutil.rmtree(staged)
+  return migrated, warnings
+
+
+def migrate_accepted_service_contracts(db) -> tuple[int, list[str]]:
+  """Adopt service declarations accepted by the previous platform version.
+
+  App updates can land before the platform version that understands services.
+  That older host freezes the reviewed manifest and entrypoint but cannot add
+  the service to its normalized capability contract. Read only that immutable
+  runtime here, then add only the newly understood declaration. Existing
+  contract fields remain authoritative, and an invalid runtime stays inactive
+  and is retried on the next boot instead of falling back to editable source.
+  """
+  from app import models
+  from app.app_capabilities import CONTRACT_SCHEMA, contract_from_manifest
+  from sqlalchemy.orm.attributes import flag_modified
+
+  migrated = 0
+  warnings: list[str] = []
+  for app in db.query(models.App).all():
+    contract = app.capability_contract
+    if (
+      not isinstance(contract, dict)
+      or contract.get("schema") != CONTRACT_SCHEMA
+      or "service" in contract
+    ):
+      continue
+    try:
+      manifest_path = runtime_root(app) / "mobius.json"
+      if manifest_path.is_symlink() or not manifest_path.is_file():
+        continue
+      with manifest_path.open("rb") as handle:
+        raw = handle.read(MANIFEST_MAX_BYTES + 1)
+      if len(raw) > MANIFEST_MAX_BYTES:
+        raise ManifestContractError("Manifest exceeds the size limit.")
+      manifest = json.loads(raw)
+      if not isinstance(manifest, dict) or manifest.get("service") is None:
+        continue
+      validate_manifest_contract(manifest)
+      service = contract_from_manifest(manifest).get("service")
+      if not isinstance(service, dict):
+        raise ManifestContractError("Manifest service declaration is invalid.")
+      previous_updated = app.updated_at
+      app.capability_contract = {**contract, "service": service}
+      app.updated_at = previous_updated
+      flag_modified(app, "updated_at")
+      db.commit()
+      migrated += 1
+    except Exception as exc:
+      db.rollback()
+      warnings.append(f"app {app.id} accepted service declaration: {exc}")
   return migrated, warnings
 
 
