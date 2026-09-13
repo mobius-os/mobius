@@ -74,6 +74,10 @@ from typing import Callable, Literal, TypedDict
 from sqlalchemy.orm import Session
 
 from app import app_git, platform_activation, runtime_provenance
+from app.build_admission import (
+  BuildAdmissionUnavailable,
+  wait_for_vite_build_admission,
+)
 from app.platform_activation import PlatformActivationImpact
 
 
@@ -141,6 +145,13 @@ _CONFLICT_MERGE_BASE_REF = "refs/mobius/platform-conflict-base"
 # this is wedged, not busy. Fetch gets its own (network-bound) budget.
 _GIT_TIMEOUT = 120
 _FETCH_TIMEOUT = 120
+# Owner Apply has already been reviewed; let brief co-tenant pressure clear
+# instead of turning one momentary admission refusal into a full rollback.
+_APPLY_BUILD_ADMISSION_WAIT_SECS = 45.0
+VITE_BUILD_DEFERRED_MESSAGE = (
+  "The update was postponed because this instance is busy. Nothing changed; "
+  "try again when other work finishes."
+)
 # The candidate worktree an update replays the overlay into. It lives inside
 # the clone's own git directory so neither the outer ``/data`` safety repo nor
 # the platform tree ever sees it as content, and a conflicting replay can stay
@@ -157,6 +168,8 @@ _HOOK_MAX_BYTES = 1_000_000
 _HOOK_SOURCES = (
   ("scripts/pre-commit.sh", "pre-commit"),
   ("scripts/githooks/pre-push", "pre-push"),
+  ("scripts/frontend-deps.sh", "frontend-deps.sh"),
+  ("scripts/check-frontend-deps.mjs", "check-frontend-deps.mjs"),
 )
 
 # Update-preview payload bounds. A whole-platform deploy can carry a huge diff;
@@ -188,6 +201,7 @@ class PlatformUpdatePhase(str, Enum):
   FINALIZING = "finalizing"
   COMPLETE = "complete"
   BLOCKED = "blocked"
+  POSTPONED = "postponed"
   FAILED = "failed"
 
 
@@ -387,7 +401,8 @@ class ReconcileResult:
   ``status`` is one of ``up_to_date`` (origin already integrated), ``updated``
   (fast-forward or merge applied and the import probe passed), ``conflict``
   (merge conflicted, aborted, serving the pre sha), ``rolled_back`` (text-clean
-  merge failed the import probe, reset to the pre sha), ``offline`` (fetch
+  merge failed the import probe, reset to the pre sha), ``deferred`` (frontend
+  resources stayed unsafe, serving the pre sha unchanged), ``offline`` (fetch
   failed — kept serving unchanged), ``skipped`` (not a reconcilable clone), or
   ``error`` (an unexpected git failure was caught and the served tree reset to
   the pre sha).
@@ -1872,7 +1887,12 @@ def _roll_back_failed_frontend_build(
   # A marker already present before this attempt belongs to earlier on-disk
   # backend changes and must survive this failed frontend candidate.
   CONFLICT_FLAG.unlink(missing_ok=True)
-  message = f"frontend_build_failed: {error!r}"[:_ERROR_EXCERPT_CHARS]
+  kind = (
+    "frontend_build_deferred"
+    if isinstance(error, BuildAdmissionUnavailable)
+    else "frontend_build_failed"
+  )
+  message = f"{kind}: {error!r}"[:_ERROR_EXCERPT_CHARS]
   restore_error = _restore_update_dependencies(
     repo, python_changed=python_changed, frontend_changed=frontend_changed,
   )
@@ -2097,13 +2117,27 @@ def _finalize_update(
   (restoring the previous declared dependency versions) exactly like any
   other failed update.
   """
-  _activate_candidate(repo, local, pre, tip)
-  app_git.remove_overlay_worktree(repo, _overlay_candidate_path(repo))
-
   changed = _activation_paths_between(repo, pre, tip)
   python_changed = any(path in _PYTHON_DEPENDENCY_INPUTS for path in changed)
   frontend_changed = any(path in _FRONTEND_DEPENDENCY_INPUTS for path in changed)
   touched_frontend = any(path.startswith("frontend/") for path in changed)
+
+  if touched_frontend:
+    try:
+      wait_for_vite_build_admission(_APPLY_BUILD_ADMISSION_WAIT_SECS)
+    except BuildAdmissionUnavailable as exc:
+      app_git.remove_overlay_worktree(repo, _overlay_candidate_path(repo))
+      # A previous conflict marker points into that candidate worktree. Once
+      # the candidate is retired, a later retry must prepare a fresh replay.
+      CONFLICT_FLAG.unlink(missing_ok=True)
+      _clear_reconcile_pre()
+      return ReconcileResult.unchanged(
+        "deferred", pre, target, error=str(exc),
+        reconciliation=reconciliation, overlay=overlay,
+      )
+
+  _activate_candidate(repo, local, pre, tip)
+  app_git.remove_overlay_worktree(repo, _overlay_candidate_path(repo))
 
   if python_changed:
     if progress:
@@ -3028,6 +3062,8 @@ async def apply_platform_update(
         head = _rev(repo, _local_branch(repo)) or res.pre_sha
         activation = record_current_activation(head)
         state = _state_for_activation(activation)
+      elif res.status == "deferred":
+        raise PlatformUpdateError("vite_build_deferred")
       else:  # offline / skipped — nothing changed; tell the UI plainly.
         raise PlatformUpdateError(res.error or res.status)
 
@@ -3061,12 +3097,22 @@ async def apply_platform_update(
         error=res.error if state is PlatformUpdateState.ROLLED_BACK else None,
       )
     except Exception as exc:
+      phase = (
+        PlatformUpdatePhase.POSTPONED
+        if isinstance(exc, PlatformUpdateError)
+        and str(exc) == "vite_build_deferred"
+        else PlatformUpdatePhase.FAILED
+      )
       _set_update_progress(
-        PlatformUpdatePhase.FAILED,
+        phase,
         plan_id=plan_id,
         target_sha=target_sha,
         active=False,
-        error=str(exc)[:_ERROR_EXCERPT_CHARS] or exc.__class__.__name__,
+        error=(
+          VITE_BUILD_DEFERRED_MESSAGE
+          if phase is PlatformUpdatePhase.POSTPONED
+          else str(exc)[:_ERROR_EXCERPT_CHARS] or exc.__class__.__name__
+        ),
       )
       raise
 

@@ -93,6 +93,19 @@ def require_vite_build_admission(memory: dict | None = None) -> None:
   )
 
 
+def wait_for_vite_build_admission(
+  timeout: float, *, poll: float = 1.0,
+) -> None:
+  """Wait briefly for transient pressure, then raise the precise refusal."""
+  deadline = time.monotonic() + max(0.0, timeout)
+  while not vite_build_admitted():
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+      require_vite_build_admission()
+      return
+    time.sleep(min(max(0.01, poll), remaining))
+
+
 @contextlib.contextmanager
 def build_lease(
   *,

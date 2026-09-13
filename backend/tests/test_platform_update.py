@@ -1285,6 +1285,10 @@ def _make_hook_repo(tmp_path: Path, *, complete: bool = True) -> Path:
   (scripts / "githooks").mkdir(parents=True)
   (scripts / "install-hooks.sh").write_text("#!/bin/sh\nexit 99\n")
   (scripts / "pre-commit.sh").write_text("#!/bin/sh\necho committed-pre-commit\n")
+  (scripts / "frontend-deps.sh").write_text("#!/bin/sh\n# committed helper\n")
+  (scripts / "check-frontend-deps.mjs").write_text(
+    "#!/usr/bin/env node\n// committed helper\n"
+  )
   if complete:
     (scripts / "githooks" / "pre-push").write_text(
       "#!/bin/sh\necho committed-pre-push\n"
@@ -1312,6 +1316,12 @@ def test_hook_refresh_uses_only_committed_allowlisted_sources(tmp_path):
   )
   assert (hooks / "pre-push").read_text() == (
     "#!/bin/sh\necho committed-pre-push\n"
+  )
+  assert (hooks / "frontend-deps.sh").read_text() == (
+    "#!/bin/sh\n# committed helper\n"
+  )
+  assert (hooks / "check-frontend-deps.mjs").read_text() == (
+    "#!/usr/bin/env node\n// committed helper\n"
   )
   assert not (hooks / "post-checkout").exists()
   assert (hooks / "pre-commit").stat().st_mode & 0o777 == 0o755
@@ -2945,6 +2955,87 @@ async def test_frontend_build_failure_rolls_back_source_and_is_not_success(
   assert progress["phase"] == pu.PlatformUpdatePhase.BLOCKED.value
   assert progress["active"] is False
   assert "frontend_build_failed" in progress["error"]
+
+
+@pytest.mark.asyncio
+async def test_frontend_build_admission_deferral_is_retryable(
+  monkeypatch, clone_env,
+):
+  from app.build_admission import ViteBuildDeferred
+
+  origin, platform = clone_env
+  before = _served_sha(platform)
+  target = _advance_origin(
+    origin,
+    edits={"frontend/src/App.jsx": "export default 'contended candidate'\n"},
+  )
+  pu._fetch(platform)
+  preview = pu.platform_update_preview(platform)
+
+  def defer_build(_repo, _result):
+    raise ViteBuildDeferred("retry after memory pressure falls")
+
+  monkeypatch.setattr(pu, "_rebuild_frontend", defer_build)
+
+  result = await pu.apply_platform_update(
+    SimpleNamespace(),
+    plan_id=preview["plan_id"],
+    current_sha=preview["current_sha"],
+    target_sha=preview["target_sha"],
+    repo=platform,
+  )
+
+  assert result["state"] == pu.PlatformUpdateState.ROLLED_BACK.value
+  assert result["error"].startswith("frontend_build_deferred")
+  assert _served_sha(platform) == before
+  rollback = pu._read_rolled_back_flag()
+  assert rollback["target"] == target
+  assert rollback["error"].startswith("frontend_build_deferred")
+
+
+@pytest.mark.asyncio
+async def test_owner_update_waits_before_activating_frontend_source(
+  monkeypatch, clone_env,
+):
+  from app.build_admission import ViteBuildDeferred
+
+  origin, platform = clone_env
+  before = _served_sha(platform)
+  target = _advance_origin(
+    origin,
+    edits={"frontend/src/App.jsx": "export default 'safe candidate'\n"},
+  )
+  pu._fetch(platform)
+  preview = pu.platform_update_preview(platform)
+
+  def defer(_timeout):
+    raise ViteBuildDeferred("memory pressure stayed constrained")
+
+  monkeypatch.setattr(pu, "wait_for_vite_build_admission", defer)
+  monkeypatch.setattr(
+    pu, "_activate_candidate",
+    lambda *_args, **_kwargs: pytest.fail("source moved before admission"),
+  )
+  pu.CONFLICT_FLAG.write_text("stale candidate marker")
+
+  with pytest.raises(pu.PlatformUpdateError, match="vite_build_deferred"):
+    await pu.apply_platform_update(
+      SimpleNamespace(),
+      plan_id=preview["plan_id"],
+      current_sha=preview["current_sha"],
+      target_sha=preview["target_sha"],
+      repo=platform,
+    )
+
+  assert _served_sha(platform) == before
+  assert not (platform / "frontend/src/App.jsx").exists()
+  assert not pu.ROLLED_BACK_FLAG.exists()
+  assert not pu.CONFLICT_FLAG.exists()
+  assert pu.recorded_upstream_sha(platform) != target
+  progress = pu.platform_update_progress()
+  assert progress["phase"] == pu.PlatformUpdatePhase.POSTPONED.value
+  assert progress["active"] is False
+  assert progress["error"] == pu.VITE_BUILD_DEFERRED_MESSAGE
 
 
 def test_boot_policy_ignores_durable_update_progress_from_outer_data_repo():
