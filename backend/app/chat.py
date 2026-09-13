@@ -3103,6 +3103,7 @@ async def _drain_and_release(
   run_token: str,
   ending_run_token: str = "",
   ending_status: str = "completed",
+  allow_goal_continuation: bool = False,
 ) -> tuple[dict | None, list, str | None, chat_queue.TerminalDisposition]:
   """Local helper around chat_queue.drain_and_release that binds the
   chat.py-owned discard_starting + forget_chat + strict-clear callbacks.
@@ -3123,7 +3124,9 @@ async def _drain_and_release(
   Returns the 4-tuple `(next_user, next_messages, next_session_id,
   disposition)`; the disposition tells `_complete_turn` whether a
   continuation was promoted (marker stays set), the queue was empty +
-  cleared (marker cleared inside the lock), or the run was stale.
+  cleared (marker cleared inside the lock), or the run was stale. A real
+  provider terminal opts into the writer-owned unfinished-Goal continuation;
+  provider-free guidance does not, so a missing provider cannot form a loop.
   """
   return await chat_queue.drain_and_release(
     db, chat_id, run_gen, run_token,
@@ -3133,124 +3136,8 @@ async def _drain_and_release(
     current_generation=current_run_generation,
     ending_run_token=ending_run_token,
     ending_status=ending_status,
+    allow_goal_continuation=allow_goal_continuation,
   )
-
-
-def _goal_handoff_is_owned(
-  db: Session,
-  chat_id: str,
-  goal_id: str,
-  sink: "_ChatEventSink | None" = None,
-) -> bool:
-  """Whether a durable actor already owns an unfinished Goal's next move."""
-  chat = (
-    db.query(
-      models.Chat.pending_messages,
-    )
-    .filter(models.Chat.id == chat_id)
-    .first()
-  )
-  if chat is None:
-    return True
-  # A pending row owns this handoff only when it will actually resume the same
-  # Goal. Ordinary owner prose deliberately opens a fresh logical root; it can
-  # run first, but it must not suppress the bounded corrective continuation
-  # that remains responsible for the unfinished Goal.
-  for pending in chat.pending_messages or []:
-    if not isinstance(pending, Mapping):
-      continue
-    _objective, pending_goal_id = run_state.goal_identity_for_run_start(
-      db, chat_id, pending,
-    )
-    if pending_goal_id == goal_id:
-      return True
-  if sink is not None and any(
-    isinstance(block, dict)
-    and block.get("type") == "question"
-    and not block.get("answers")
-    for block in sink.assistant_blocks
-  ):
-    return True
-  from app.goal_plans import goal_handoff_owner_kind
-  return goal_handoff_owner_kind(db, chat_id, goal_id) is not None
-
-
-def _prepare_goal_handoff(
-  db: Session,
-  chat_id: str,
-  ending_run_token: str,
-  sink: "_ChatEventSink",
-) -> run_state.GoalSettlementTarget | None:
-  """Return the unfinished target and publish a manual pause if exhausted."""
-  target = run_state.goal_settlement_target(db, chat_id, ending_run_token)
-  if target is None or _goal_handoff_is_owned(
-    db, chat_id, target.goal_id, sink,
-  ):
-    return None
-  if target.retry_allowed:
-    return target
-  sink.publish(_pause_note(
-    "The agent stopped before arranging the next step. "
-    "Your progress is saved. Resume to continue this Goal.",
-    kind="goal_handoff",
-  ))
-  return target
-
-
-async def _maybe_enqueue_goal_handoff(
-  db: Session,
-  chat_id: str,
-  ending_run_token: str,
-  target: run_state.GoalSettlementTarget,
-  sink: "_ChatEventSink | None" = None,
-) -> None:
-  """Queue one corrective turn when an unfinished Goal has no next owner.
-
-  The marker flows through the ordinary append/drain/promote path, so it gains
-  the same durable run identity and recovery semantics as every continuation.
-  Re-checking ownership immediately before append lets a real queued message,
-  question, wait, or waking helper that arrived during finalization win.
-  """
-  if _goal_handoff_is_owned(db, chat_id, target.goal_id, sink):
-    return
-  current = run_state.goal_settlement_target(db, chat_id, ending_run_token)
-  if (
-    current is None
-    or current.goal_id != target.goal_id
-    or not current.retry_allowed
-  ):
-    return
-  await _await_ack(get_writer().submit(
-    AppendPending(
-      chat_id=chat_id,
-      run_token="",
-      user_msg={
-        "role": "user",
-        "content": (
-          "This Goal is still unfinished, but the last turn ended without "
-          "assigning who or what will advance it. Continue the work now. "
-          f"The exact unfinished Goal is {target.goal_id}. Inspect its saved "
-          "plan before promoting anything: a follow-up to the same outcome "
-          "must not create a replacement Goal. Background helpers belong to "
-          "their recorded parent_root_run_id, not every Goal in this chat. "
-          "If needed work belongs to an older Goal, arrange an explicit "
-          "handoff for THIS Goal (for example a durable wait for that "
-          "helper's result); a task note alone does not connect ownership. "
-          "Before ending again, either complete or update the Goal, ask "
-          "through the clarifying-question tool if only the partner can act, "
-          "declare a durable wait for an observable external condition, or "
-          "leave a wake-enabled helper as the next owner. Do not stop on a "
-          "prose-only request for user action."
-        ),
-        "ts": int(time.time() * 1000),
-        "kind": "continuation",
-        "continuation_reason": run_state.GOAL_HANDOFF_REASON,
-        "goal_id": target.goal_id,
-        # One correction per finishing run; an ambiguous retry cannot double-send.
-        "cid": f"goal-handoff-{ending_run_token}",
-      },
-    )
-  ))
 
 
 _BROWSER_CLOSE_CREATE_TIMEOUT = 5.0
@@ -3890,6 +3777,9 @@ async def _complete_turn(
        silent loss is worse than a visible "couldn't save" error.
     2. On success: allocate the CONTINUATION's run_token, drain the queue
        under ONE bounded lock (`drain_and_release`). The drain returns the
+       exact unfinished Goal to execution first when no durable handoff owns
+       it; this decision is made after Finalize has saved any question card.
+       Otherwise the drain returns the ordinary
        disposition: `CONTINUATION_PROMOTED` (a head was promoted — marker
        stays set, schedule the continuation), `EMPTY_TERMINAL_CLEARED` (the
        drain already cleared the marker + forgot the chat under the lock),
@@ -3973,24 +3863,6 @@ async def _complete_turn(
     db.close()
     return chat_queue.TerminalDisposition.STALE_NO_ACTION
 
-  # A platform-promoted Goal has no provider-native stop hook. Before a clean
-  # turn can settle, require a truthful next owner: a queued message, an open
-  # question, a durable monitor, or a wake-enabled helper. With no owner, one
-  # progress-bounded corrective continuation gets queued after finalization.
-  # If the agent repeats the unowned handoff without plan progress, persist
-  # a manual recovery pause in the same terminal snapshot. This is unfinished
-  # work needing intervention, not a provider failure or an automatic wait.
-  goal_handoff_target = None
-  if (
-    we_own_gen
-    and not stop_handoff_successor
-    and not parked
-    and not sink._last_error
-  ):
-    goal_handoff_target = _prepare_goal_handoff(
-      db, chat_id, sink.run_token or "", sink,
-    )
-
   # Lost-reply backstop (defense-in-depth behind the runner-side fixes). A
   # normally-owned run that reached a CLEAN provider terminal (no error, no
   # limit/park) yet produced ZERO renderable content is a genuine dropped reply
@@ -4012,9 +3884,6 @@ async def _complete_turn(
   ending_status = (
     _clear_after_terminal_status.get(chat_id, "stopped")
     if stop_handoff_successor
-    else "interrupted" if (
-      goal_handoff_target is not None and not goal_handoff_target.retry_allowed
-    )
     else "failed" if sink._last_error or lost_reply
     else "completed"
   )
@@ -4167,16 +4036,6 @@ async def _complete_turn(
       await _close_browser_session(chat_id)
     db.close()
     return chat_queue.TerminalDisposition.LIMIT_PARKED
-  # A clean, unfinished auto-promoted Goal with no durable owner gets its one
-  # bounded correction through the same queue path as every other continuation.
-  if ending_status == "completed" and goal_handoff_target is not None:
-    await _maybe_enqueue_goal_handoff(
-      db,
-      chat_id,
-      sink.run_token or "",
-      goal_handoff_target,
-      sink,
-    )
   # The continuation is a fresh turn — give it its own run_token. The
   # turn-end drain's PromotePending sets the next turn's run marker under
   # this token, and _schedule_continuation hands the SAME token to the
@@ -4188,6 +4047,7 @@ async def _complete_turn(
         db, chat_id, run_gen, next_run_token,
         ending_run_token=sink.run_token or "",
         ending_status=ending_status,
+        allow_goal_continuation=not provider_free,
       )
     )
   except (Exception, asyncio.TimeoutError) as exc:

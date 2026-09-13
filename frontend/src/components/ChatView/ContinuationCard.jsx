@@ -12,7 +12,8 @@ export default function ContinuationCard({ msg }) {
     usage_limit: 'Usage available again — continuing automatically',
     memory: 'Memory freed up — continuing automatically',
     storage: 'Storage freed up — continuing automatically',
-  }[reason]
+    goal_handoff: 'An unfinished Goal had no next step — continuing automatically',
+  }[reason] || (!manual ? 'Interrupted work recovered — continuing automatically' : null)
 
   return (
     <MarkerCard

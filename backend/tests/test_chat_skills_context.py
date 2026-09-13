@@ -189,24 +189,21 @@ def test_goal_routing_rechecks_phase_transitions_and_prefers_platform_tool():
 
   assert "Before the first material tool call" in core_normalized
   assert "read the complete `goal-planning` skill" in core_normalized
-  assert "planning, parallel-execution, handoff, and completion loop" in core_normalized
+  assert "honestly bounded one-turn work standard" in core_normalized
   assert "## The execution loop — read this first" in planning
-  assert "This read is a serial gate" in planning_normalized
-  assert "Do not run them concurrently" in planning_normalized
+  assert "Finish the read before material work" in planning_normalized
   assert len(planning.encode("utf-8")) < 4_000
-  assert "A Goal is durable intent, not an executor" in planning_normalized
-  assert "Inspect ready leaves" in planning_normalized
-  assert "Goal-plan revisions, and the final integrator" in planning_normalized
-  assert "Delegated children return future conditions" in planning_normalized
+  assert "A Goal is durable intent" in planning_normalized
+  assert "ready independent sibling leaves concurrently" in planning_normalized
+  assert "Parallelism itself is not the saving" in planning_normalized
+  assert "Serialize dependencies, shared writes, plan revisions" in planning_normalized
   assert "goal_plan.py check-complete" in planning_normalized
-  assert "### Recheck when the work changes phase" in planning
-  assert "before the first material action" in planning_normalized
-  assert "for **every** ordinary top-level delegated outcome" in planning_normalized
   assert "not a keyword trigger" in planning_normalized
-  assert "Its answer removes that blocker" in planning_normalized
   assert "first-class `promote_goal` tool" in planning_normalized
   assert "resilience, not an equivalent convenience path" in planning_normalized
   assert "an attempted tool call returns a failure" in planning_normalized
+  assert "Terminal settlement continues the exact Goal" in planning_normalized
+  assert "this is a backstop, not a planning strategy" in planning_normalized
 
 
 def test_goal_waits_always_name_a_durable_owner_interaction():
@@ -230,7 +227,7 @@ def test_goal_waits_always_name_a_durable_owner_interaction():
   assert "### Make every unfinished wait explicit" in planning
   assert "create exactly one owning interaction" in planning_normalized
   assert "keeps the Goal marked **Waiting for you**" in planning_normalized
-  assert "Do not end with “tell me when…”" in planning_normalized
+  assert "Never end with “tell me when…”" in planning_normalized
   assert "# Waiting visibly — durable monitors or explicit owner actions" in waiting
   assert "`--owner` is required for command waits" in waiting_normalized
   assert "exit **0 exactly when the condition is met**" in waiting_normalized

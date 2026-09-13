@@ -978,6 +978,83 @@ def test_nested_children_settle_before_parent_becomes_ready_to_verify(
   assert "children settle" in incomplete_parent.json()["detail"]
 
 
+def test_nested_plan_exposes_ready_sibling_leaves_not_their_parent(
+  client, owner_token, db,
+):
+  auth, chat_id = _active_goal(client, owner_token, db)
+  created = client.put(
+    f"/api/chats/{chat_id}/goal-plan",
+    json={"expected_revision": 0, "tasks": [
+      {"id": "parent", "title": "Coordinate the work"},
+      {"id": "left", "title": "Independent left", "parent_id": "parent"},
+      {"id": "right", "title": "Independent right", "parent_id": "parent"},
+    ]}, headers=auth,
+  )
+  assert created.status_code == 200, created.text
+  plan = created.json()["plan"]
+  tasks = {task["id"]: task for task in plan["tasks"]}
+  assert plan["summary"]["ready"] == ["left", "right"]
+  assert tasks["parent"]["ready"] is False
+  assert tasks["parent"]["ready_to_verify"] is False
+
+
+def test_parent_dependency_gates_every_descendant_leaf(
+  client, owner_token, db,
+):
+  auth, chat_id = _active_goal(client, owner_token, db)
+  created = client.put(
+    f"/api/chats/{chat_id}/goal-plan",
+    json={"expected_revision": 0, "tasks": [
+      {"id": "first", "title": "Establish the input"},
+      {
+        "id": "parent", "title": "Coordinate dependent work",
+        "depends_on": ["first"],
+      },
+      {"id": "child", "title": "Use the input", "parent_id": "parent"},
+    ]}, headers=auth,
+  )
+  assert created.status_code == 200, created.text
+  plan = created.json()["plan"]
+  child = next(task for task in plan["tasks"] if task["id"] == "child")
+  assert plan["summary"]["ready"] == ["first"]
+  assert child["waiting_on"] == ["first"]
+
+  premature = client.patch(
+    f"/api/chats/{chat_id}/goal-plan/tasks/child",
+    json={"expected_revision": 1, "status": "running"}, headers=auth,
+  )
+  assert premature.status_code == 422
+  assert "dependencies complete" in premature.json()["detail"]
+
+  completed = client.patch(
+    f"/api/chats/{chat_id}/goal-plan/tasks/first",
+    json={"expected_revision": 1, "status": "completed"}, headers=auth,
+  )
+  assert completed.status_code == 200, completed.text
+  assert completed.json()["plan"]["summary"]["ready"] == ["child"]
+
+
+def test_cancelled_dependency_releases_downstream_work(
+  client, owner_token, db,
+):
+  auth, chat_id = _active_goal(client, owner_token, db)
+  created = client.put(
+    f"/api/chats/{chat_id}/goal-plan",
+    json={"expected_revision": 0, "tasks": [
+      {"id": "removed", "title": "No longer needed", "status": "cancelled"},
+      {"id": "next", "title": "Continue", "depends_on": ["removed"]},
+    ]}, headers=auth,
+  )
+  assert created.status_code == 200, created.text
+  assert created.json()["plan"]["summary"]["ready"] == ["next"]
+
+  running = client.patch(
+    f"/api/chats/{chat_id}/goal-plan/tasks/next",
+    json={"expected_revision": 1, "status": "running"}, headers=auth,
+  )
+  assert running.status_code == 200, running.text
+
+
 def test_mixed_parent_dependency_cycle_is_rejected_before_it_can_deadlock(
   client, owner_token, db,
 ):
