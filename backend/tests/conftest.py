@@ -31,6 +31,7 @@ os.environ["DATA_DIR"] = _tmp
 os.environ["DOMAIN"] = "localhost"
 os.environ["FRONTEND_ORIGIN"] = "http://localhost:5173"
 os.environ["MOBIUS_TEST_RUNTIME"] = "1"
+os.environ["MOBIUS_TEST_DATABASE_ISOLATED"] = "1"
 # Fail closed when pytest is launched from inside a running production
 # container. DATA_DIR isolates Python file writes, but subprocess-facing
 # defaults historically still pointed at the live service and /data/apps.

@@ -94,6 +94,7 @@ function retryMobiusLogin() {
   const current = new URL(window.location.href)
   current.searchParams.delete('mobius_login')
   current.searchParams.delete('mobius_login_error')
+  current.searchParams.delete('mobius_login_account_mismatch')
   window.location.replace(current.pathname + current.search + current.hash)
 }
 
@@ -170,6 +171,7 @@ function AppRoot() {
     const params = new URLSearchParams(window.location.search)
     if (params.get('mobius_login') === '1') mobiusLoginSignal = 'handoff'
     if (params.get('mobius_login_error') === '1') mobiusLoginSignal = 'error'
+    if (params.get('mobius_login_account_mismatch') === '1') mobiusLoginSignal = 'account-mismatch'
     installPass = readInstallPass(window.location.search, STANDALONE_APP)
   } catch { /* ignore */ }
   const initialStatus = resumeStep
@@ -180,9 +182,11 @@ function AppRoot() {
             ? 'install-pass'
             : (mobiusLoginSignal === 'handoff'
                 ? 'mobius-login'
-                : (mobiusLoginSignal === 'error'
+                : (mobiusLoginSignal === 'account-mismatch'
+                    ? 'mobius-login-account-mismatch'
+                    : (mobiusLoginSignal === 'error'
                     ? 'mobius-login-error'
-                    : 'loading'))))
+                    : 'loading')))))
   const [status, setStatus] = useState(initialStatus)
   const [shellVisualReady, setShellVisualReady] = useState(false)
   const markShellVisualReady = useCallback(() => {
@@ -337,6 +341,13 @@ function AppRoot() {
     <StartupError
       title="Couldn’t sign in"
       message="Your Möbius account could not be confirmed. Try again from this browser."
+      onRetry={retryMobiusLogin}
+    />
+  )
+  if (status === 'mobius-login-account-mismatch') return (
+    <StartupError
+      title="Choose the account for this Möbius"
+      message="This instance belongs to a different Möbius account. Try again and choose the account that owns it."
       onRetry={retryMobiusLogin}
     />
   )

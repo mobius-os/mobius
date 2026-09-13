@@ -6,7 +6,8 @@ Run this *after uvicorn is healthy but before auth.setup or any fixture write*:
   GATE="$(mktemp -d /tmp/mobius-manual-e2e.XXXXXX)"
   export DATA_DIR="$GATE"
   export DATABASE_URL="sqlite:///$GATE/db/ultimate.db"
-  export MOBIUS_TEST_RUNTIME=1 MOEBIUS_SKIP_BOOTSTRAP=1
+  export MOBIUS_TEST_RUNTIME=1 MOBIUS_TEST_DATABASE_ISOLATED=1
+  export MOEBIUS_SKIP_BOOTSTRAP=1
   # start uvicorn and capture its PID, then:
   python3 scripts/verify-manual-e2e-runtime.py --gate "$GATE" --pid "$UVICORN_PID"
 
@@ -83,6 +84,12 @@ def main() -> None:
   test_runtime = env.get("MOBIUS_TEST_RUNTIME")
   if test_runtime != "1":
     _fail(f"uvicorn MOBIUS_TEST_RUNTIME is {test_runtime!r}, not '1'")
+  database_isolated = env.get("MOBIUS_TEST_DATABASE_ISOLATED")
+  if database_isolated != "1":
+    _fail(
+      "uvicorn must set MOBIUS_TEST_DATABASE_ISOLATED=1 after assigning its "
+      f"disposable database (got {database_isolated!r})"
+    )
   skip_bootstrap = env.get("MOEBIUS_SKIP_BOOTSTRAP")
   if skip_bootstrap != "1":
     _fail(
