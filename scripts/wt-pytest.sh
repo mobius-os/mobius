@@ -115,9 +115,9 @@ done
 if [ -x "$VENV" ]; then
   PYTHON="$VENV"
 elif python3 -c 'import pytest' >/dev/null 2>&1; then
-  # The running image already carries the backend dependencies. The explicit
-  # MOBIUS_TEST_RUNTIME environment below is the safety boundary; using this
-  # interpreter through the wrapper is not the guarded direct-pytest path.
+  # The running image already carries the backend dependencies. The disposable
+  # database and data paths below are established before this interpreter
+  # starts, so using it through the wrapper remains isolated.
   PYTHON="$(command -v python3)"
   echo "wt-pytest: shared venv absent; using the image's Python test runtime" >&2
   if [ -r /app/requirements.lock ] \
@@ -132,6 +132,21 @@ else
   echo "      && \"$MAIN/backend/.venv/bin/pip\" install --require-hashes -r \"$MAIN/backend/requirements.lock\"" >&2
   exit 1
 fi
+
+# Full pre-push suites opt into serialization because sibling sessions normally
+# share one venv and running two broad suites together only makes both slower.
+# Focused developer runs remain concurrent. This is best-effort performance
+# protection, never a correctness boundary.
+if [ "${MOBIUS_PYTEST_SERIALIZE:-0}" = "1" ] \
+    && command -v flock >/dev/null 2>&1 \
+    && exec 9>"$MAIN/backend/.venv/.suite.lock" 2>/dev/null; then
+  if ! flock -n 9; then
+    echo "wt-pytest: shared venv busy; waiting up to 15m for the full-suite lock" >&2
+    flock -w 900 9 \
+      || echo "wt-pytest: lock wait timed out; running anyway (may contend)" >&2
+  fi
+fi
+
 cd "$ROOT/backend" || exit 1
 # The worktree's backend/ is on sys.path (cwd); the venv supplies deps; the
 # generated SECRET_KEY satisfies pydantic Settings for tests that build it.

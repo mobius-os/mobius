@@ -8,12 +8,12 @@ from fastapi.testclient import TestClient
 
 # Never turn a live application process into a test runner. This check must
 # happen before the test overrides below: docker exec inherits production's
-# DATA_DIR/DATABASE_URL, while the disposable test services declare
-# MOBIUS_TEST_RUNTIME=1 before pytest starts.
+# DATA_DIR/DATABASE_URL, while supported disposable runtimes explicitly attest
+# that the same production-shaped path belongs to an isolated test volume.
 _inherited_data_dir = os.environ.get("DATA_DIR", "").rstrip("/")
 _inherited_database_url = os.environ.get("DATABASE_URL", "")
 if (
-  os.environ.get("MOBIUS_TEST_RUNTIME") != "1"
+  os.environ.get("MOBIUS_TEST_DATABASE_ISOLATED") != "1"
   and _inherited_data_dir == "/data"
   and "/data/db/" in _inherited_database_url
 ):
