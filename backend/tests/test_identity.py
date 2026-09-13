@@ -372,6 +372,28 @@ def test_agent_contract_rejects_nested_routing_fields_and_projects_public_data()
     assert error.value.status_code == 502
 
 
+def test_agent_contract_rejects_oversized_integer_prices():
+  from app.routes.identity import _agent_contract
+
+  payload = {
+    "models": [{
+      "id": "evolve",
+      "name": "Evolve",
+      "pricing": {"input": 10**400, "cached_input": 0.01, "output": 1.2},
+    }],
+    "balance": {"available_units": 2_000_000},
+    "trial": {"state": "ready"},
+    "retention": {
+      "policy": "local-testing-v1",
+      "notice": "Test conversations are stored privately for testing.",
+    },
+  }
+
+  with pytest.raises(HTTPException) as error:
+    _agent_contract(payload)
+  assert error.value.status_code == 502
+
+
 def test_trial_fund_exhaustion_keeps_the_actionable_gateway_error(
   client, auth, account_service,
 ):

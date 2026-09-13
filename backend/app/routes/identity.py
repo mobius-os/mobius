@@ -240,8 +240,13 @@ def _agent_contract(payload: object) -> dict:
       or not all(
         not isinstance(pricing.get(kind), bool)
         and isinstance(pricing.get(kind), (int, float))
-        and math.isfinite(pricing[kind])
         and pricing[kind] >= 0
+        and (
+          isinstance(pricing[kind], int)
+          and pricing[kind] <= 9_007_199_254_740_991
+          or isinstance(pricing[kind], float)
+          and math.isfinite(pricing[kind])
+        )
         for kind in ("input", "cached_input", "output")
       )
       or (context_window is not None and (
