@@ -26,7 +26,7 @@ import signal
 import subprocess
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 from watchdog.events import FileSystemEventHandler
@@ -34,7 +34,9 @@ from watchdog.observers.polling import PollingObserverVFS
 
 from app.build_admission import (
   BuildLeaseUnavailable,
+  ViteBuildDeferred,
   build_lease,
+  require_owner_vite_build_admission,
   require_vite_build_admission,
   vite_build_admitted,
 )
@@ -753,7 +755,10 @@ def _publish_built_dir(source_dir: Path, reason: str) -> bool:
         fcntl.flock(lock_fh, fcntl.LOCK_UN)
 
 
-def _run_vite_build_once(out_dir: Path) -> str:
+def _run_vite_build_once(
+  out_dir: Path, *, owner_update: bool = False,
+  on_admitted: Callable[[], None] | None = None,
+) -> str:
   """Run one explicit full Vite build into ``out_dir``.
 
   This path waits for the shared lease. If the cgroup is still unsafe once it
@@ -761,7 +766,12 @@ def _run_vite_build_once(out_dir: Path) -> str:
   aborts cleanly; either operation can be retried without risking an OOM kill.
   """
   with build_lease():
-    require_vite_build_admission()
+    if owner_update:
+      require_owner_vite_build_admission()
+    else:
+      require_vite_build_admission()
+    if on_admitted:
+      on_admitted()
     _ensure_node_modules()
     if out_dir.exists():
       shutil.rmtree(out_dir)
@@ -781,21 +791,28 @@ def _run_vite_build_once(out_dir: Path) -> str:
   return result.stdout
 
 
-def rebuild_frontend_now(
-  reason: str = "manual", *, emit_events: bool = True,
+def _rebuild_frontend(
+  reason: str, *, emit_events: bool, owner_update: bool,
 ) -> str:
-  """Run an explicit full rebuild, then publish via the generation path.
+  """Run one admitted full rebuild, then publish via the generation path.
 
-  Used by the platform update flow and ``backend/scripts/rebuild_shell.sh``.
   Warm watcher publications do NOT call this; they publish existing staging so
   settle/apply-now latency stays at file-copy + atomic swap, not a cold build.
   """
   log.info("frontend full rebuild requested: %s", reason)
-  if emit_events:
-    _publish_system_event({"type": "shell_rebuilding"})
   try:
-    output = _run_vite_build_once(_REBUILD_DIST_DIR)
+    output = _run_vite_build_once(
+      _REBUILD_DIST_DIR, owner_update=owner_update,
+      on_admitted=(
+        (lambda: _publish_system_event({"type": "shell_rebuilding"}))
+        if emit_events else None
+      ),
+    )
     published = _publish_built_dir(_REBUILD_DIST_DIR, reason)
+  except ViteBuildDeferred:
+    # Admission is a postponement, not a rejected bundle. The platform updater
+    # reports it without manufacturing a shell-build failure event.
+    raise
   except Exception as exc:
     if emit_events:
       _publish_system_event({
@@ -809,6 +826,24 @@ def rebuild_frontend_now(
   if emit_events and published:
     _publish_system_event({"type": "shell_rebuilt"})
   return output
+
+
+def rebuild_frontend_now(
+  reason: str = "manual", *, emit_events: bool = True,
+) -> str:
+  """Run an explicit full rebuild under the conservative default policy."""
+  return _rebuild_frontend(
+    reason, emit_events=emit_events, owner_update=False,
+  )
+
+
+def rebuild_frontend_for_platform_update(
+  reason: str = "platform_update", *, emit_events: bool = True,
+) -> str:
+  """Build an owner-reviewed update under its intentional admission policy."""
+  return _rebuild_frontend(
+    reason, emit_events=emit_events, owner_update=True,
+  )
 
 
 def _active_watcher() -> "_FrontendHandler | None":

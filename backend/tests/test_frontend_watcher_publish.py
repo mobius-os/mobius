@@ -68,6 +68,7 @@ def fw_dirs(tmp_path, monkeypatch):
   monkeypatch.setattr(fw, "_REBUILD_TMP_DIR", dirs["rebuild_tmp"])
   monkeypatch.setattr(fw, "_memory_is_tight", lambda: False)
   monkeypatch.setattr(fw, "require_vite_build_admission", lambda: None)
+  monkeypatch.setattr(fw, "require_owner_vite_build_admission", lambda: None)
   monkeypatch.setattr(
     fw,
     "_BUILT_GLOBAL_CHECK",
@@ -579,6 +580,47 @@ def test_explicit_rebuild_defers_before_mutating_or_starting_vite(
     fw._run_vite_build_once(fw_dirs["rebuild"])
 
   assert previous.read_text(encoding="utf-8") == "keep"
+
+
+def test_platform_update_build_uses_owner_admission(fw_dirs, monkeypatch):
+  calls = []
+  monkeypatch.setattr(
+    fw, "require_vite_build_admission",
+    lambda: pytest.fail("platform updates do not use background admission"),
+  )
+  monkeypatch.setattr(
+    fw, "require_owner_vite_build_admission", lambda: calls.append("owner"),
+  )
+  monkeypatch.setattr(fw, "_ensure_node_modules", lambda: None)
+
+  def run(*args, **kwargs):
+    _write_build(fw_dirs["rebuild"], "owner")
+    return fw.subprocess.CompletedProcess(args[0], 0, "vite complete", None)
+
+  monkeypatch.setattr(fw.subprocess, "run", run)
+
+  assert fw._run_vite_build_once(
+    fw_dirs["rebuild"], owner_update=True,
+  ) == "vite complete"
+  assert calls == ["owner"]
+
+
+def test_platform_update_deferral_does_not_publish_failure_event(
+  fw_dirs, monkeypatch,
+):
+  events = []
+  monkeypatch.setattr(fw, "_publish_system_event", events.append)
+  monkeypatch.setattr(
+    fw, "_run_vite_build_once",
+    lambda *_args, **_kwargs: (_ for _ in ()).throw(
+      ViteBuildDeferred("critical pressure"),
+    ),
+  )
+
+  with pytest.raises(ViteBuildDeferred, match="critical pressure"):
+    fw.rebuild_frontend_for_platform_update()
+
+  assert events == []
 
 
 def test_conflict_markers_defer_vite_without_touching_generations(

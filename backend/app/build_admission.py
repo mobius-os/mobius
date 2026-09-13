@@ -46,24 +46,16 @@ _LEASE_POLL_SECS = 0.1
 VITE_BUILD_MIN_HEADROOM_BYTES = 512 * MIB
 
 
-def vite_build_admitted(memory: dict | None = None) -> bool:
-  """Whether a new Vite process can start without a known cgroup OOM risk.
+def _vite_build_refusal_causes(
+  memory: dict | None = None, *, allow_constrained: bool,
+) -> list[str]:
+  """Return the measured reasons a Vite process must not start.
 
-  Missing or unlimited cgroup telemetry stays fail-open for developer hosts.
-  A finite cgroup must have both a healthy pressure state and the canary-backed
-  absolute reserve; ratios alone hide dangerous low-capacity states.
+  Owner-reviewed updates may outlive a short ``constrained`` PSI sample when
+  the canary-backed absolute reserve is still intact. Background work stays
+  conservative, and ``critical`` pressure or insufficient headroom always
+  refuses a new native build.
   """
-  assessment = assess_memory_pressure(memory)
-  if assessment["state"] in {"constrained", "critical"}:
-    return False
-  headroom = assessment.get("headroom_bytes")
-  return not isinstance(headroom, int) or (
-    headroom >= VITE_BUILD_MIN_HEADROOM_BYTES
-  )
-
-
-def require_vite_build_admission(memory: dict | None = None) -> None:
-  """Raise a retryable error instead of starting a known-unsafe Vite build."""
   assessment = assess_memory_pressure(memory)
   state = assessment["state"]
   headroom = assessment.get("headroom_bytes")
@@ -71,14 +63,11 @@ def require_vite_build_admission(memory: dict | None = None) -> None:
     isinstance(headroom, int)
     and headroom < VITE_BUILD_MIN_HEADROOM_BYTES
   )
-  if state not in {"constrained", "critical"} and not too_little_headroom:
-    return
-  # Say exactly which condition refused the build. A single headroom-shaped
-  # template once produced "5260 MiB headroom; 512 MiB is required" while the
-  # real trigger was a PSI spike — a self-contradiction that misdirects
-  # whoever is debugging a stalled rebuild.
   causes: list[str] = []
-  if state in {"constrained", "critical"}:
+  pressure_refuses = state == "critical" or (
+    state == "constrained" and not allow_constrained
+  )
+  if pressure_refuses:
     signals = (assessment.get("reason") or {}).get("signals") or []
     named = "; ".join(signals) if signals else f"memory pressure is {state}"
     causes.append(f"memory pressure is {state} ({named})")
@@ -87,6 +76,44 @@ def require_vite_build_admission(memory: dict | None = None) -> None:
       f"only {headroom // MIB} MiB cgroup headroom;"
       f" {VITE_BUILD_MIN_HEADROOM_BYTES // MIB} MiB is required to start"
     )
+  return causes
+
+
+def vite_build_admitted(memory: dict | None = None) -> bool:
+  """Whether a new Vite process can start without a known cgroup OOM risk.
+
+  Missing or unlimited cgroup telemetry stays fail-open for developer hosts.
+  A finite cgroup must have both a healthy pressure state and the canary-backed
+  absolute reserve; ratios alone hide dangerous low-capacity states.
+  """
+  return not _vite_build_refusal_causes(memory, allow_constrained=False)
+
+
+def require_vite_build_admission(memory: dict | None = None) -> None:
+  """Raise a retryable error instead of starting a known-unsafe Vite build."""
+  causes = _vite_build_refusal_causes(memory, allow_constrained=False)
+  if not causes:
+    return
+  # Say exactly which condition refused the build. A single headroom-shaped
+  # template once produced "5260 MiB headroom; 512 MiB is required" while the
+  # real trigger was a PSI spike — a self-contradiction that misdirects
+  # whoever is debugging a stalled rebuild.
+  raise ViteBuildDeferred(
+    "Vite build deferred: " + " and ".join(causes) +
+    ". Retry after memory pressure falls."
+  )
+
+
+def require_owner_vite_build_admission(memory: dict | None = None) -> None:
+  """Admission policy for an owner-reviewed platform update.
+
+  A transient constrained PSI sample alone must not strand an update when the
+  measured absolute reserve remains safe. Critical pressure and the hard
+  headroom floor still defer before source activation.
+  """
+  causes = _vite_build_refusal_causes(memory, allow_constrained=True)
+  if not causes:
+    return
   raise ViteBuildDeferred(
     "Vite build deferred: " + " and ".join(causes) +
     ". Retry after memory pressure falls."

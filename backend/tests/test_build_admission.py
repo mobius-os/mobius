@@ -17,6 +17,7 @@ from app.build_admission import (
   ViteBuildDeferred,
   build_lease,
   build_lease_async,
+  require_owner_vite_build_admission,
   require_vite_build_admission,
   vite_build_admitted,
 )
@@ -219,3 +220,33 @@ def test_refusal_names_footprint_ratio_when_ratio_trips():
   with pytest.raises(ViteBuildDeferred) as exc:
     require_vite_build_admission(hot)
   assert "unreclaimable footprint is 80% of the limit" in str(exc.value)
+
+
+def test_owner_update_can_proceed_during_constrained_psi_with_safe_headroom():
+  four_gib = 4 * 1024 * 1024 * 1024
+  constrained = _memory(working_set=3 * 1024 * 1024 * 1024, limit=four_gib)
+  constrained["pressure"] = {
+    "some": {"avg60": 2.0}, "full": {"avg60": 0.0},
+  }
+
+  with pytest.raises(ViteBuildDeferred, match="PSI some"):
+    require_vite_build_admission(constrained)
+  require_owner_vite_build_admission(constrained)
+
+
+def test_owner_update_still_defers_critical_pressure_and_low_headroom():
+  four_gib = 4 * 1024 * 1024 * 1024
+  critical = _memory(working_set=2 * 1024 * 1024 * 1024, limit=four_gib)
+  critical["pressure"] = {
+    "some": {"avg60": 12.0}, "full": {"avg60": 0.0},
+  }
+  with pytest.raises(ViteBuildDeferred, match="critical"):
+    require_owner_vite_build_admission(critical)
+
+  one_gib = 1024 * 1024 * 1024
+  low_headroom = _memory(
+    working_set=one_gib - VITE_BUILD_MIN_HEADROOM_BYTES + 1,
+    limit=one_gib,
+  )
+  with pytest.raises(ViteBuildDeferred, match="511 MiB"):
+    require_owner_vite_build_admission(low_headroom)

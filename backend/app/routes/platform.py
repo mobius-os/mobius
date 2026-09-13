@@ -60,6 +60,10 @@ _PLAN_ERROR_MESSAGES = {
   "image_release_invalid": (
     "The official image returned an invalid release identity. Try again later."
   ),
+  "vite_build_deferred": (
+    "The update was postponed because this instance is under heavy memory "
+    "pressure. Nothing changed; try again when activity settles."
+  ),
 }
 
 

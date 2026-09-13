@@ -76,6 +76,7 @@ from typing import Callable, Literal, TypedDict
 from sqlalchemy.orm import Session
 
 from app import app_git, platform_activation, runtime_provenance
+from app.build_admission import ViteBuildDeferred
 from app.platform_activation import PlatformActivationImpact
 
 
@@ -189,6 +190,7 @@ class PlatformUpdatePhase(str, Enum):
   FINALIZING = "finalizing"
   COMPLETE = "complete"
   BLOCKED = "blocked"
+  POSTPONED = "postponed"
   FAILED = "failed"
 
 
@@ -388,10 +390,11 @@ class ReconcileResult:
   ``status`` is one of ``up_to_date`` (origin already integrated), ``updated``
   (fast-forward or merge applied and the import probe passed), ``conflict``
   (merge conflicted, aborted, serving the pre sha), ``rolled_back`` (text-clean
-  merge failed the import probe, reset to the pre sha), ``offline`` (fetch
-  failed — kept serving unchanged), ``skipped`` (not a reconcilable clone), or
-  ``error`` (an unexpected git failure was caught and the served tree reset to
-  the pre sha).
+  merge failed the import probe, reset to the pre sha), ``deferred`` (frontend
+  resources were temporarily unsafe, serving the pre sha unchanged),
+  ``offline`` (fetch failed — kept serving unchanged), ``skipped`` (not a
+  reconcilable clone), or ``error`` (an unexpected git failure was caught and
+  the served tree reset to the pre sha).
   ``pre_sha`` is the served commit before the pass; ``new_sha`` the served commit
   after (== ``pre_sha`` unless ``updated``); ``target_sha`` the resolved
   ``origin/main``.
@@ -1763,11 +1766,54 @@ def _rebuild_frontend(repo: Path, res: ReconcileResult) -> None:
   while ``dist`` keeps serving the old bundle.
   """
   try:
-    from app.frontend_watcher import rebuild_frontend_now
+    from app.frontend_watcher import rebuild_frontend_for_platform_update
   except Exception as exc:
     raise RuntimeError("frontend rebuild is unavailable") from exc
-  rebuild_frontend_now(
+  rebuild_frontend_for_platform_update(
     f"platform update {_short(res.pre_sha)}->{_short(res.new_sha)}",
+  )
+
+
+def _require_owner_frontend_build_admission() -> None:
+  """Refuse an unsafe owner build before the served source generation moves."""
+  from app.build_admission import require_owner_vite_build_admission
+
+  require_owner_vite_build_admission()
+
+
+def _restore_deferred_frontend_build(
+  repo: Path,
+  res: ReconcileResult,
+  previous_upstream_sha: str | None,
+  error: ViteBuildDeferred,
+  *,
+  python_changed: bool,
+  frontend_changed: bool,
+) -> ReconcileResult:
+  """Undo a late admission race without labelling the release broken."""
+  _abort_interrupted(repo)
+  if res.pre_sha:
+    _reset_hard_to(repo, _local_branch(repo), res.pre_sha)
+  if previous_upstream_sha:
+    _set_upstream(repo, previous_upstream_sha)
+  else:
+    _clear_upstream(repo)
+  CONFLICT_FLAG.unlink(missing_ok=True)
+  restore_error = _restore_update_dependencies(
+    repo, python_changed=python_changed, frontend_changed=frontend_changed,
+  )
+  _clear_reconcile_pre()
+  if restore_error:
+    message = f"frontend_restore_failed: {restore_error}"[:_ERROR_EXCERPT_CHARS]
+    _write_rolled_back_flag(res.target_sha, message)
+    return replace(
+      res, status="rolled_back", new_sha=res.pre_sha, error=message,
+      hook_source_sha=previous_upstream_sha,
+    )
+  ROLLED_BACK_FLAG.unlink(missing_ok=True)
+  return replace(
+    res, status="deferred", new_sha=res.pre_sha, error=str(error),
+    hook_source_sha=previous_upstream_sha,
   )
 
 
@@ -2053,13 +2099,24 @@ def _finalize_update(
   (restoring the previous declared dependency versions) exactly like any
   other failed update.
   """
-  _activate_candidate(repo, local, pre, tip)
-  app_git.remove_overlay_worktree(repo, _overlay_candidate_path(repo))
-
   changed = _activation_paths_between(repo, pre, tip)
   python_changed = any(path in _PYTHON_DEPENDENCY_INPUTS for path in changed)
   frontend_changed = any(path in _FRONTEND_DEPENDENCY_INPUTS for path in changed)
   touched_frontend = any(path.startswith("frontend/") for path in changed)
+
+  if touched_frontend:
+    try:
+      _require_owner_frontend_build_admission()
+    except ViteBuildDeferred as exc:
+      app_git.remove_overlay_worktree(repo, _overlay_candidate_path(repo))
+      _clear_reconcile_pre()
+      return ReconcileResult.unchanged(
+        "deferred", pre, target, error=str(exc),
+        reconciliation=reconciliation, overlay=overlay,
+      )
+
+  _activate_candidate(repo, local, pre, tip)
+  app_git.remove_overlay_worktree(repo, _overlay_candidate_path(repo))
 
   if python_changed:
     if progress:
@@ -2122,6 +2179,14 @@ def _finalize_update(
       if not deps_ok:
         raise RuntimeError(f"frontend dependency install failed: {deps_err}")
     _rebuild_frontend(repo, result)
+  except ViteBuildDeferred as exc:
+    log.info(
+      "frontend build postponed platform update %s: %s", _short(target), exc,
+    )
+    return _restore_deferred_frontend_build(
+      repo, result, previous_upstream_sha, exc,
+      python_changed=python_changed, frontend_changed=frontend_changed,
+    )
   except Exception as exc:
     log.warning(
       "frontend build rejected platform update %s: %r", _short(target), exc,
@@ -2378,7 +2443,8 @@ def continue_platform_overlay_update(repo: Path = PLATFORM_REPO) -> str:
 
   Returns ``updated`` once the served checkout moved to the completed
   candidate, ``conflict`` when a later commit conflicted (the flag now names
-  it), or ``rolled_back`` when the finished tree failed a post-replay gate.
+  it), ``deferred`` when frontend resources are temporarily unsafe, or
+  ``rolled_back`` when the finished tree failed a post-replay gate.
   Runs the same finalize path as an ordinary owner Apply, including the
   dependency sync, import probe, and frontend build.
   """
@@ -3068,6 +3134,8 @@ async def apply_platform_update(
         head = _rev(repo, _local_branch(repo)) or res.pre_sha
         activation = record_current_activation(head)
         state = _state_for_activation(activation)
+      elif res.status == "deferred":
+        raise PlatformUpdateError("vite_build_deferred")
       else:  # offline / skipped — nothing changed; tell the UI plainly.
         raise PlatformUpdateError(res.error or res.status)
 
@@ -3101,8 +3169,14 @@ async def apply_platform_update(
         error=res.error if state is PlatformUpdateState.ROLLED_BACK else None,
       )
     except Exception as exc:
+      phase = (
+        PlatformUpdatePhase.POSTPONED
+        if isinstance(exc, PlatformUpdateError)
+        and str(exc) == "vite_build_deferred"
+        else PlatformUpdatePhase.FAILED
+      )
       _set_update_progress(
-        PlatformUpdatePhase.FAILED,
+        phase,
         plan_id=plan_id,
         target_sha=target_sha,
         active=False,
