@@ -150,6 +150,58 @@ def test_managed_web_login_enrolls_the_local_model_identity(monkeypatch, db):
   ]
 
 
+def test_managed_web_login_accepts_the_matching_local_model_identity(monkeypatch, db):
+  import asyncio
+  from app.routes import auth as auth_routes
+
+  _mobius_login_handoff(db)
+  calls = []
+
+  async def exchange(_pending, _code):
+    return "header.payload.signature", {"sub": "mobius-subject"}
+
+  async def broker_request(method, route, payload=None):
+    calls.append((method, route, payload))
+    assert (method, route) == ("GET", "/identity")
+    return {"linked": True, "subject": "mobius-subject"}
+
+  monkeypatch.setattr(auth_routes, "_exchange_mobius_receipt", exchange)
+  monkeypatch.setattr(auth_routes, "_mobius_broker_request", broker_request)
+
+  response = asyncio.run(auth_routes._complete_mobius_web_login(
+    db, {}, "authorization-code",
+  ))
+
+  assert response.headers["location"] == "/shell/?mobius_login=1"
+  assert calls == [("GET", "/identity", None)]
+
+
+def test_managed_web_login_rejects_a_different_local_model_identity(monkeypatch, db):
+  import asyncio
+  from app.routes import auth as auth_routes
+
+  _mobius_login_handoff(db)
+  calls = []
+
+  async def exchange(_pending, _code):
+    return "header.payload.signature", {"sub": "mobius-subject"}
+
+  async def broker_request(method, route, payload=None):
+    calls.append((method, route, payload))
+    assert (method, route) == ("GET", "/identity")
+    return {"linked": True, "subject": "different-subject"}
+
+  monkeypatch.setattr(auth_routes, "_exchange_mobius_receipt", exchange)
+  monkeypatch.setattr(auth_routes, "_mobius_broker_request", broker_request)
+
+  response = asyncio.run(auth_routes._complete_mobius_web_login(
+    db, {}, "authorization-code",
+  ))
+
+  assert response.headers["location"] == "/shell/?mobius_login_error=1"
+  assert calls == [("GET", "/identity", None)]
+
+
 
 def test_setup_creates_owner(client):
   r = client.post("/api/auth/setup", json={

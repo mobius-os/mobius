@@ -44,12 +44,12 @@ test('Send, Steer, and Stop reuse one continuously visible primary action', () =
   )
   assert.match(
     chatView,
-    /const showSteer = !hasPendingQuestion[\s\S]*?turnActive[\s\S]*?pendingQueue\.visiblePendingMessages\.length > 0/,
+    /const showSteer = !hasPendingQuestion[\s\S]*?turnActive[\s\S]*?steerCandidates\.length > 0/,
     'an optimistic visible queue row should choose Steer immediately',
   )
   assert.match(
     chatView,
-    /const queueWrites = \[\.\.\.queuedSendRequestsRef\.current\.values\(\)\][\s\S]*?await Promise\.allSettled\(queueWrites\)[\s\S]*?const snapshot = pendingQueue\.getVisiblePendingMessages\(\)/,
+    /const queueWrites = \[\.\.\.queuedSendRequestsRef\.current\.values\(\)\][\s\S]*?await Promise\.allSettled\(queueWrites\)[\s\S]*?const snapshot = pendingQueue\.getSteerCandidates\(\)/,
     'an early Steer tap must await the queue write before reading steerable rows',
   )
   const steerBlock = inputBar.match(
@@ -70,7 +70,7 @@ test('Send, Steer, and Stop reuse one continuously visible primary action', () =
 test('per-row fast-forward appears with the optimistic row and dispatches on touchend', () => {
   assert.match(
     queuedMessages,
-    /\{steerActive && \(/,
+    /\{steerActive && !rejected && \(/,
     'the row action should render before serverTs confirmation, alongside cancel',
   )
   assert.doesNotMatch(

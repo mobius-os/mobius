@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { LocalAnswersContext } from './localAnswersContext.js'
+import { useCallback, useContext, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import './QuestionCard.css'
 import {
   clearQuestionDraft,
@@ -141,11 +142,18 @@ export default function QuestionCard({
   const pointerSelectionRef = useRef(null)
   const preparedSubmissionRef = useRef(null)
 
+  const localAnswers = useContext(LocalAnswersContext)
+  const localAnswer = (localAnswers || []).find(record => (
+    String(record.chatId) === String(chatId)
+    && record.body?.question_id === questionId
+  ))
   const actionStatusLabel = restartCardStatusLabel(platformAction)
   const actionStatusDetail = restartCardStatusDetail(platformAction)
   const completedAction = Boolean(actionStatusLabel)
   const answered = submitted || !!answeredMap || completedAction
-  const displayAnswers = answeredMap || {}
+  const locallyQueued = !answered && Boolean(localAnswer)
+  const selectionLocked = answered || locallyQueued
+  const displayAnswers = answeredMap || localAnswer?.body?.answers || {}
   const grouped = questions.length > 1
   const restartAction = isRestartCardAction(platformAction)
   const writtenRestartAction = restartAction && platformAction?.version === 2
@@ -187,7 +195,7 @@ export default function QuestionCard({
   const canSubmit = allAnswered && (!restartAction || selectedOptions !== null)
 
   function selectOption(question, label) {
-    if (answered || disabled) return
+    if (selectionLocked || disabled) return
     const q = questions.find(qq => qq.question === question)
     if (!q?.multiSelect) {
       setOtherTexts(prev => ({ ...prev, [question]: '' }))
@@ -241,11 +249,11 @@ export default function QuestionCard({
     // A remote answer, source replacement, or competing submission can make
     // the button inactive between press and click. Retire the provisional hold
     // immediately; there will be no answer handoff to release it later.
-    if (answered || disabled || submitting) cancelPreparedSubmission()
-  }, [answered, cancelPreparedSubmission, disabled, submitting])
+    if (selectionLocked || disabled || submitting) cancelPreparedSubmission()
+  }, [selectionLocked, cancelPreparedSubmission, disabled, submitting])
 
   async function handleSubmit(questionCard = null, preparedSubmission = null) {
-    if (!canSubmit || answered || disabled || submitting) {
+    if (!canSubmit || selectionLocked || disabled || submitting) {
       if (preparedSubmission) onCancelAnswer?.(preparedSubmission)
       return
     }
@@ -267,7 +275,7 @@ export default function QuestionCard({
       )
       // Only settle (and therefore clear the durable per-tab draft) after the
       // answer endpoint confirms that the transcript write committed.
-      if (accepted === false) {
+      if (accepted === false || accepted?.status === 'locally_queued' || accepted?.status === 'locally_settled') {
         if (preparedSubmission) onCancelAnswer?.(preparedSubmission)
       } else {
         setSubmitted(true)
@@ -286,6 +294,12 @@ export default function QuestionCard({
       setSubmitting(false)
     }
   }
+
+  let submitLabel = writtenRestartAction ? 'Continue' : 'Submit'
+  if (answered) submitLabel = 'Submitted'
+  if (submitting) submitLabel = 'Submitting…'
+  if (locallyQueued) submitLabel = localAnswer.deliveryOutcome === 'delivered'
+    ? 'Confirming answer…' : 'Queued on this device'
 
   return (
     <div
@@ -324,14 +338,14 @@ export default function QuestionCard({
         const isOtherSelected = isMulti
           ? selectedArr.includes('__other__')
           : selected === '__other__'
-        const inactive = answered || disabled || submitting
+        const inactive = selectionLocked || disabled || submitting
 
         const answeredValue = displayAnswers[q.question]
           || (submitted ? resolveAnswer(answers[q.question], otherTexts[q.question]) : '')
-        const answeredArr = answered && isMulti
+        const answeredArr = selectionLocked && isMulti
           ? (answeredValue ? answeredValue.split(', ').map(s => s.trim()) : [])
           : []
-        const unmatchedAnswers = answered
+        const unmatchedAnswers = selectionLocked
           ? (isMulti
               ? answeredArr.filter(v => !q.options?.some(o => o.label === v))
               : (answeredValue && !q.options?.some(o => o.label === answeredValue)
@@ -347,7 +361,7 @@ export default function QuestionCard({
           ? answeredValue
           : unmatchedAnswers.join(', ')
         const answeredWithOther = writtenAnswer.length > 0
-        const selectionCount = answered
+        const selectionCount = selectionLocked
           ? (isMulti ? answeredArr.length : (answeredValue ? 1 : 0))
           : selectedArr.length
 
@@ -385,10 +399,10 @@ export default function QuestionCard({
                   ? q.options?.filter(opt => opt.id === platformAction.restart_option_id)
                   : q.options
                 return visibleOptions?.map((opt, oi) => {
-                  const isChosen = answered
+                  const isChosen = selectionLocked
                     ? (isMulti ? answeredArr.includes(opt.label) : answeredValue === opt.label)
                     : false
-                  const isActive = answered
+                  const isActive = selectionLocked
                     ? isChosen
                     : (isMulti ? selectedArr.includes(opt.label) : selected === opt.label)
                   const dimmed = answered && !isChosen
@@ -442,7 +456,7 @@ export default function QuestionCard({
               && (!restartAction || writtenRestartAction) && (
               <CustomAnswerArea
                 active={isOtherSelected || answeredWithOther}
-                answered={answered}
+                answered={selectionLocked}
                 canSubmit={allAnswered}
                 disabled={inactive}
                 placeholder={writtenRestartAction
@@ -453,7 +467,7 @@ export default function QuestionCard({
                   if (allAnswered) handleSubmit(questionCard, null)
                 }}
                 question={q.question}
-                value={answered
+                value={selectionLocked
                   ? writtenAnswer
                   : (otherTexts[q.question] || '')}
               />
@@ -464,7 +478,14 @@ export default function QuestionCard({
       </div>
       {!completedAction && (answered || !disabled) && (
         <>
-          {submitError && !answered && (
+          {locallyQueued && (
+            <div className="qcard__queue-status" role="status">
+              {localAnswer.deliveryOutcome === 'delivered'
+                ? 'Your answer reached Möbius. Confirming this card…'
+                : 'Your answer is saved here and will send when Möbius reconnects.'}
+            </div>
+          )}
+          {submitError && !answered && !locallyQueued && (
             <div className="qcard__submit-error" role="status">{submitError}</div>
           )}
           <button
@@ -485,9 +506,9 @@ export default function QuestionCard({
               preparedSubmissionRef.current = null
               handleSubmit(event.currentTarget.closest('.qcard'), prepared)
             }}
-            disabled={!canSubmit || disabled || answered || submitting}
+            disabled={!canSubmit || disabled || selectionLocked || submitting}
           >
-            {submitting ? 'Submitting…' : (answered ? 'Submitted' : writtenRestartAction ? 'Continue' : 'Submit')}
+            {submitLabel}
           </button>
         </>
       )}

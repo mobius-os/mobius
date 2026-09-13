@@ -47,6 +47,11 @@ function fakeTimers() {
   }
 }
 
+function readiness(ready = true, bootId = 'boot-a') {
+  return { ok: ready, status: ready ? 200 : 503,
+    json: async () => ({ ready, boot_id: bootId }) }
+}
+
 async function flush() {
   for (let index = 0; index < 8; index += 1) await Promise.resolve()
 }
@@ -88,7 +93,7 @@ test('any HTTP response proves reachability, including a 500 response', async ()
 })
 
 test('all subscribers share one monitor and the last unsubscribe releases it', async () => {
-  const h = harness(async () => ({ status: 204 }))
+  const h = harness(async () => readiness())
   const stopA = h.store.subscribe(() => {})
   const stopB = h.store.subscribe(() => {})
   await flush()
@@ -141,20 +146,25 @@ test('recovery retries use one scheduler and healthy operation has no interval',
   assert.equal(h.timers.timeoutCount(), 0)
 })
 
-test('strong live evidence repairs uncertainty and emits one recovery generation', async () => {
-  const h = harness(async () => { throw new TypeError('offline') })
-  let notifications = 0
-  const stop = h.store.subscribe(() => { notifications += 1 })
+test('strong transport evidence restores browsing but recovery waits for service readiness', async () => {
+  let available = false
+  const h = harness(async () => {
+    if (!available) throw new TypeError('offline')
+    return readiness()
+  })
+  const stop = h.store.subscribe(() => {})
   await flush()
-  assert.equal(notifications, 1, 'Checking is visible without disabling online actions')
+  available = true
   h.store.reportReachable()
   assert.equal(h.store.getState().phase, ReachabilityPhase.ONLINE)
+  assert.equal(h.store.getDeliveryReadySnapshot(), false)
+  assert.equal(h.store.getRecoverySnapshot(), 0)
+  await flush()
+  assert.equal(h.store.getDeliveryReadySnapshot(), true)
   assert.equal(h.store.getRecoverySnapshot(), 1)
-  assert.equal(notifications, 2)
   assert.equal(h.timers.timeoutCount(), 0)
   h.store.reportReachable()
   assert.equal(h.store.getRecoverySnapshot(), 1, 'settled responses do not repeat recovery')
-  assert.equal(notifications, 2)
   stop()
 })
 
@@ -171,7 +181,7 @@ test('newer live evidence outranks an older failed probe', async () => {
 })
 
 test('cold stale-false startup remains Offline until two ordinary successes', async () => {
-  const h = harness(async () => ({ status: 204 }), { navigatorOnline: false })
+  const h = harness(async () => readiness(), { navigatorOnline: false })
   const stop = h.store.subscribe(() => {})
   await flush()
   assert.equal(h.store.getSnapshot(), false)
@@ -223,12 +233,13 @@ test('healthy verification keeps the last reachable verdict while its probe sett
   let probes = 0
   const h = harness(() => {
     probes += 1
-    if (probes === 1) return Promise.resolve({ status: 204 })
+    if (probes === 1) return Promise.resolve(readiness())
     return new Promise(resolve => { resolveProbe = resolve })
   })
   let notifications = 0
   const stop = h.store.subscribe(() => { notifications += 1 })
   await flush()
+  notifications = 0 // Initial readiness is separate from transport re-verification.
 
   const verification = h.store.verify()
   assert.equal(probes, 2)
@@ -236,7 +247,7 @@ test('healthy verification keeps the last reachable verdict while its probe sett
     'a transport reconnect is not a server outage verdict')
   assert.equal(notifications, 0, 'the shell status dot must not flash before verification')
 
-  resolveProbe({ status: 204 })
+  resolveProbe(readiness())
   assert.equal(await verification, true)
   assert.equal(h.store.getPhaseSnapshot(), ReachabilityPhase.ONLINE)
   assert.equal(notifications, 0)
@@ -329,4 +340,218 @@ test('both durable streams feed recovery and an exhausted chat observes it', () 
     'an unexpected system-stream close must enter shared reachability recovery',
   )
   assert.match(system, /const res = await fetch\([\s\S]*?reportNetworkReachable\(\)/)
+})
+
+test('checking and reachable service failure queue sends without calling the device offline', async () => {
+  let response = readiness()
+  const h = harness(async () => response)
+  const stop = h.store.subscribe(() => {})
+  await flush()
+  assert.equal(h.store.getDeliveryReadySnapshot(), true)
+  response = readiness(false)
+  h.windowTarget.emit('offline')
+  assert.equal(h.store.getDeliveryReadySnapshot(), false, 'observed interruption suspends delivery synchronously')
+  await flush()
+  assert.equal(h.store.getSnapshot(), true)
+  assert.equal(h.store.getPhaseSnapshot(), ReachabilityPhase.ONLINE)
+  assert.equal(h.store.getDeliveryReadySnapshot(), false)
+  assert.equal(h.timers.countDelay(FAILURE_GRACE_MS), 0)
+  stop()
+})
+
+test('browser offline suspends delivery before its probe settles', async () => {
+  let response = readiness()
+  const h = harness(async () => response)
+  const stop = h.store.subscribe(() => {})
+  await flush()
+  response = new Promise(() => {})
+  h.navigatorTarget.onLine = false
+  h.windowTarget.emit('offline')
+  assert.equal(h.store.getDeliveryReadySnapshot(), false)
+  stop()
+})
+
+test('an old process answering readiness never releases a planned restart', async () => {
+  let response = readiness()
+  const h = harness(async () => response)
+  const stop = h.store.subscribe(() => {})
+  await flush()
+  h.store.setRestartPending('boot-a')
+  await flush()
+  assert.equal(h.store.getRestartPendingSnapshot(), true)
+  assert.equal(h.store.getDeliveryReadySnapshot(), false)
+  response = readiness(false, 'boot-b')
+  await h.store.verify()
+  assert.equal(h.store.getRestartPendingSnapshot(), true, 'a later but unready boot is insufficient')
+  response = readiness(true, 'boot-b')
+  await h.store.verify()
+  assert.equal(h.store.getRestartPendingSnapshot(), false)
+  assert.equal(h.store.getDeliveryReadySnapshot(), true)
+  assert.equal(h.timers.timeoutCount(), 0, 'healthy operation has no expiry/retry timer')
+  stop()
+})
+
+test('an in-flight pre-restart response cannot approve delivery after restart was observed', async () => {
+  let settle
+  let response = readiness()
+  const h = harness(() => response)
+  const stop = h.store.subscribe(() => {})
+  await flush()
+  response = new Promise(resolve => { settle = resolve })
+  const check = h.store.verify()
+  h.store.setRestartPending('boot-a')
+  response = new Promise(() => {})
+  settle(readiness(true, 'boot-b'))
+  await check
+  assert.equal(h.store.getRestartPendingSnapshot(), true)
+  assert.equal(h.store.getDeliveryReadySnapshot(), false)
+  stop()
+})
+
+test('cold startup and concurrent verification never guess readiness from navigator', async () => {
+  let settle
+  const h = harness(() => new Promise(resolve => { settle = resolve }))
+  assert.equal(h.store.getSnapshot(), true, 'browsing can mount immediately')
+  assert.equal(h.store.getDeliveryReadySnapshot(), false)
+  const first = h.store.verify()
+  const second = h.store.verify()
+  assert.equal(first, second, 'one bounded probe owns concurrent verification')
+  settle(readiness())
+  await first
+  assert.equal(h.store.getDeliveryReadySnapshot(), true)
+  assert.equal(h.store.getRecoverySnapshot(), 1)
+})
+
+test('a proxy success without the application readiness body never permits delivery', async () => {
+  const h = harness(async () => new Response('<html>Proxy ready</html>'))
+  const stop = h.store.subscribe(() => {})
+  await flush()
+  assert.equal(h.store.getSnapshot(), true)
+  assert.equal(h.store.getDeliveryReadySnapshot(), false)
+  stop()
+})
+
+
+test('returning from background rechecks readiness before releasing queued delivery', async () => {
+  let resolveProbe
+  let response = readiness()
+  const h = harness(() => response)
+  const stop = h.store.subscribe(() => {})
+  await flush()
+  h.documentTarget.visibilityState = 'hidden'
+  h.documentTarget.emit('visibilitychange')
+  assert.equal(h.store.getDeliveryReadySnapshot(), false)
+  assert.equal(h.store.getSnapshot(), true, 'suspension is not an Offline verdict')
+  response = new Promise(resolve => { resolveProbe = resolve })
+  h.documentTarget.visibilityState = 'visible'
+  h.documentTarget.emit('visibilitychange')
+  assert.equal(h.store.getDeliveryReadySnapshot(), false)
+  resolveProbe(readiness())
+  await flush()
+  assert.equal(h.store.getDeliveryReadySnapshot(), true)
+  stop()
+})
+
+test('frontend-first upgrade uses only readiness and waits for the modern backend', async () => {
+  let response = { ready: true }
+  const urls = []
+  const h = harness(async url => { urls.push(url); return Response.json(response) })
+  await h.store.verify()
+  assert.equal(h.store.getDeliveryReadySnapshot(), true,
+    'ordinary delivery still works before backend activation')
+
+  h.store.setRestartPending()
+  await h.store.verify()
+  assert.equal(h.store.getRestartPendingSnapshot(), true,
+    'the still-answering legacy worker cannot release its restart')
+  assert.equal(h.store.getDeliveryReadySnapshot(), false)
+
+  response = { ready: false, boot_id: 'upgraded-worker' }
+  await h.store.verify()
+  assert.equal(h.store.getRestartPendingSnapshot(), true,
+    'upgraded identity without readiness is insufficient')
+  assert.equal(h.store.getDeliveryReadySnapshot(), false)
+  response = { ready: true, boot_id: 'upgraded-worker' }
+  await h.store.verify()
+  assert.equal(h.store.getRestartPendingSnapshot(), false)
+  assert.equal(h.store.getDeliveryReadySnapshot(), true)
+  assert.deepEqual(urls, Array(4).fill('/api/ready'),
+    'readiness and identity never come from separate worker responses')
+})
+
+test('a cold legacy restart needs a readiness capability transition, not time or a guessed identity', async () => {
+  let modern = false
+  const h = harness(async () => modern
+    ? readiness(true, 'upgraded-worker') : Response.json({ ready: true }))
+  // The old system stream can deliver this before the initial readiness probe.
+  h.store.setRestartPending()
+  await h.store.verify()
+  assert.equal(h.store.getRestartPendingSnapshot(), true)
+  assert.equal(h.store.getDeliveryReadySnapshot(), false)
+  await h.store.verify()
+  assert.equal(h.store.getRestartPendingSnapshot(), true,
+    'another legacy response cannot prove a worker change')
+  modern = true
+  await h.store.verify()
+  assert.equal(h.store.getRestartPendingSnapshot(), false,
+    'the legacy event producer could not have supplied boot-identifying readiness')
+  assert.equal(h.store.getDeliveryReadySnapshot(), true)
+})
+
+test('malformed modern restart identities cannot borrow prior observations or claim the legacy exception', async () => {
+  for (const sourceBootId of [null, '', ' ', 7]) {
+    let response = readiness(true, 'known-worker')
+    const h = harness(async () => response)
+    await h.store.verify()
+    response = readiness(true, 'another-worker')
+    h.store.setRestartPending(sourceBootId)
+    await h.store.verify()
+    assert.equal(h.store.getRestartPendingSnapshot(), true)
+    assert.equal(h.store.getDeliveryReadySnapshot(), false)
+  }
+})
+
+test('a pre-event readiness response cannot certify a later legacy restart', async () => {
+  let resolveOldProbe
+  let response = new Promise(resolve => { resolveOldProbe = resolve })
+  const h = harness(() => response)
+  const oldProbe = h.store.verify()
+  h.store.setRestartPending()
+  resolveOldProbe(readiness(true, 'some-worker'))
+  await oldProbe
+  assert.equal(h.store.getRestartPendingSnapshot(), true,
+    'the legacy transition still requires evidence started after the event')
+  assert.equal(h.store.getDeliveryReadySnapshot(), false)
+  response = readiness(true, 'some-worker')
+  await h.store.verify()
+  assert.equal(h.store.getRestartPendingSnapshot(), false)
+  assert.equal(h.store.getDeliveryReadySnapshot(), true)
+})
+
+test('proxy and malformed readiness bodies never authorize delivery or create another probe path', async () => {
+  for (const body of [{}, { ready: 'true' }, { ready: true, boot_id: 7 },
+    { ready: true, boot_id: '' }, { ready: true, boot_id: ' ' }]) {
+    const urls = []
+    const h = harness(async url => {
+      urls.push(url)
+      return Response.json(body)
+    })
+    await h.store.verify()
+    assert.equal(h.store.getSnapshot(), true)
+    assert.equal(h.store.getDeliveryReadySnapshot(), false)
+    assert.deepEqual(urls, ['/api/ready'])
+  }
+})
+
+test('cold modern startup without a restart event requires coherent ready evidence from that worker', async () => {
+  let response = readiness(false, 'cold-worker')
+  const urls = []
+  const h = harness(async url => { urls.push(url); return response })
+  await h.store.verify()
+  assert.equal(h.store.getRestartPendingSnapshot(), false)
+  assert.equal(h.store.getDeliveryReadySnapshot(), false)
+  response = readiness(true, 'cold-worker')
+  await h.store.verify()
+  assert.equal(h.store.getDeliveryReadySnapshot(), true)
+  assert.deepEqual(urls, ['/api/ready', '/api/ready'])
 })

@@ -36,13 +36,13 @@ def test_ready_returns_200_when_writer_running(client):
   """With the writer running (the fixture's default), /api/ready is 200."""
   r = client.get("/api/ready")
   assert r.status_code == 200
-  assert r.json() == {"ready": True}
+  assert r.json() == {"ready": True, "boot_id": main_module._BOOT_ID}
   # Liveness is unaffected and stays simple.
   h = client.get("/api/health")
   assert h.status_code == 200
   body = h.json()
   assert body["status"] == "ok"
-  assert body["boot_id"]
+  assert body["boot_id"] == r.json()["boot_id"]
 
 
 def test_runtime_schema_loss_fails_readiness_and_stays_degraded(
@@ -66,6 +66,7 @@ def test_runtime_schema_loss_fails_readiness_and_stays_degraded(
     assert ready.status_code == 503
     assert ready.json() == {
       "ready": False,
+      "boot_id": main_module._BOOT_ID,
       "reason": "database_runtime_schema_missing",
     }
     # Sticky until restart: a later catalog result cannot make skipped or
@@ -92,6 +93,7 @@ def test_schema_gap_fails_serviceability_but_not_reachability(client):
     assert ready.status_code == 503
     assert ready.json() == {
       "ready": False,
+      "boot_id": main_module._BOOT_ID,
       "reason": "schema_mismatch",
       "schema_gaps": [gap],
     }
@@ -129,6 +131,7 @@ def test_database_initialization_failure_uses_the_same_degraded_boundary(client)
     assert ready.status_code == 503
     assert ready.json() == {
       "ready": False,
+      "boot_id": main_module._BOOT_ID,
       "reason": "database_initialization_failed",
     }
     strict = client.get("/api/health/strict")

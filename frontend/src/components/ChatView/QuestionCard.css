@@ -364,3 +364,11 @@
     margin-inline: 14px;
   }
 }
+
+.qcard__queue-status {
+  margin-block: 10px;
+  color: var(--text);
+  font-size: 14px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}

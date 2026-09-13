@@ -1,6 +1,7 @@
 import { useRef, useState } from 'react'
 import { flushSync } from 'react-dom'
 import {
+  ArrowRotateCw,
   Check,
   ChevronDown,
   DoubleChevronRight,
@@ -42,7 +43,7 @@ const EDITOR_MAX_HEIGHT = 160
  * the chat list and the input form. Empty queue → nothing rendered.
  */
 export default function QueuedMessages({
-  items, onCancel, onEdit, onSteerOne, steerActive, steerBusy = false,
+  items, onCancel, onEdit, onRetry, onSteerOne, steerActive, steerBusy = false,
   turnActive = false, online = true, restarting = false, focusComposer,
 }) {
   const [expanded, setExpanded] = useState(() => new Set())
@@ -57,7 +58,8 @@ export default function QueuedMessages({
   if (!items || items.length === 0) return null
 
   // The caption states the real reason these are waiting (see queuedHint).
-  const hint = queuedHint({ turnActive, online, restarting })
+  const rejectedCount = items.filter(msg => msg.recoveryAvailable).length
+  const hint = rejectedCount ? `${rejectedCount} ${rejectedCount === 1 ? 'needs' : 'need'} attention — kept here` : queuedHint({ turnActive, online, restarting })
 
   // Stable key: the row's `cid` (client-minted, or a `legacy-<ts>`
   // derivation for pre-cid rows). cid is minted once at compose time and
@@ -143,6 +145,12 @@ export default function QueuedMessages({
       if (outcome === 'saved') {
         setEditingCid(null)
         setEditDraft('')
+      } else if (outcome === 'confirming') {
+        setEditError('Delivery is being confirmed. Your edit is kept here.')
+      } else if (outcome === 'waiting') {
+        setEditError('Reconnect to confirm this edit. Your changes are kept here.')
+      } else if (outcome === 'context_pending') {
+        setEditError('This message includes app context. It can be edited after delivery is confirmed.')
       } else if (outcome === 'gone') {
         setEditError('This message already started — it can’t be edited now.')
       } else {
@@ -206,6 +214,7 @@ export default function QueuedMessages({
               : firstLine + (text.includes('\n') ? ' …' : '')
             const MessageSurface = needsTruncation ? 'button' : 'div'
             const isEditing = editingCid === key
+            const rejected = msg.recoveryAvailable
 
             return (
               <div
@@ -306,9 +315,24 @@ export default function QueuedMessages({
                       )}
                       <span className="queued__text">
                         {isExpanded ? text : preview}
+                        {rejected && <span className="queued__rejection" role="status">
+                          Send rejected. Your message is kept here.
+                        </span>}
                       </span>
                     </MessageSurface>
-                    {steerActive && (
+                    {rejected && (
+                      <button
+                        type="button"
+                        className="queued__action"
+                        onPointerDown={event => event.preventDefault()}
+                        onClick={() => onRetry?.(cidOf(msg))}
+                        aria-label="Retry this message"
+                        title="Retry this message"
+                      >
+                        <ArrowRotateCw width={16} height={16} aria-hidden="true" />
+                      </button>
+                    )}
+                    {steerActive && !rejected && (
                       // Per-row fast-forward (owner ask, 2026-07-17): the same
                       // double-chevron as the composer's steer button, in the
                       // queue action's compact neutral well — send exactly THIS
@@ -339,8 +363,8 @@ export default function QueuedMessages({
                       onPointerDown={(e) => e.preventDefault()}
                       onClick={() => beginEdit(msg)}
                       aria-label="Edit queued message"
-                      title="Edit"
-                      disabled={editSaving}
+                      title={rejected ? 'Retry keeps the original message unchanged.' : 'Edit'}
+                      disabled={editSaving || rejected}
                     >
                       <Pencil width={16} height={16} aria-hidden="true" />
                     </button>
@@ -349,8 +373,8 @@ export default function QueuedMessages({
                       className="queued__action queued__cancel"
                       onPointerDown={(e) => e.preventDefault()}
                       onClick={() => onCancel?.(cidOf(msg))}
-                      aria-label="Cancel queued message"
-                      title="Cancel"
+                      aria-label={rejected ? 'Discard local copy of this message' : 'Cancel queued message'}
+                      title={rejected ? 'Discard local copy' : 'Cancel'}
                     >
                       <X width={16} height={16} aria-hidden="true" />
                     </button>

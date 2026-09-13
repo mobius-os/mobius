@@ -533,9 +533,10 @@ export function _anchorModeIntersectsContent(target, mode, viewportHeight) {
 }
 
 
-export function _durableQuestionSubmissionMode(mode) {
-  if (!isQuestionSubmissionMode(mode)) return mode
+export function _durableSubmissionMode(mode) {
+  if (!isQuestionSubmissionMode(mode) && !mode?.submissionLayoutHold) return mode
   const {
+    submissionLayoutHold: _transientLayoutHold,
     questionSubmitBaseMode: _transientBaseMode,
     questionPrepareCancelMode: _transientCancelMode,
     ...durable
@@ -610,8 +611,7 @@ export function _anchorReapplyNeeded(scrollEl, mode, lastAnchorTop) {
 
 /** Spacer height needed so the latest user message can sit near the
  *  top of the viewport, with the PIN_OFFSET breathing room above it, or so a
- *  transient question-submit anchor remains reachable through responsive
- *  viewport changes.
+ *  held reading anchor remains reachable through composer/content reflow.
  *
  *  Tail geometry is the defining invariant. Reservation exists before a
  *  downward gesture reaches the latest row, so scrollHeight cannot grow at the
@@ -638,6 +638,12 @@ export function _anchorReapplyNeeded(scrollEl, mode, lastAnchorTop) {
  *  software-keyboard close cannot make the target unreachable for one paint.
  *  FOLLOW and ordinary anchors remain based on the active viewport.
  *
+ *  A queued-submission hold also reserves its exact reachability deficit when
+ *  that exceeds the latest-user room. Its stable row can precede the visible
+ *  active assistant (which may split on steer). This is transient submission
+ *  authority, not permission for ordinary/restored off-content anchors to add
+ *  blank space. Content growth consumes the deficit; no ceiling is retained.
+ *
  *  A question-submit anchor instead reserves only its exact reachability
  *  deficit. Viewport changes recompute that deficit and reapply the same
  *  anchor, so submission remains visually fixed until response activity.
@@ -657,23 +663,26 @@ export function _computeSpacerH(
   // largest same-width viewport already observed so that imminent growth is
   // reachable before it happens. FOLLOW_BOTTOM and ordinary anchors keep using
   // the active box and therefore retain their responsive keyboard behavior.
-  const viewH = mode?.kind === 'PIN_USER_MSG' || isQuestionSubmissionMode(mode)
+  const questionSubmission = isQuestionSubmissionMode(mode)
+  const viewH = mode?.kind === 'PIN_USER_MSG' || questionSubmission
     ? Math.max(activeViewH, Number(pinViewportHeight) || 0)
     : activeViewH
-  if (isQuestionSubmissionMode(mode)) {
-    const anchorEl = _anchorEl(scrollEl, mode)
-    if (!anchorEl) return 0
-    const anchorTarget = Math.max(
-      0, _scrollTopOf(scrollEl, anchorEl) - mode.offset,
-    )
-    return Math.max(0, viewH + anchorTarget - listEl.offsetHeight)
-  }
-  if (!lastUserMsgEl) return 0
-  const pinTarget = Math.max(0, lastUserMsgEl.offsetTop - PIN_OFFSET)
-  return Math.max(
-    0,
-    viewH + pinTarget - listEl.offsetHeight + PIN_BOTTOM_ROOM,
-  )
+  const holdsSubmission = questionSubmission || mode?.submissionLayoutHold === true
+  const anchorEl = holdsSubmission ? _anchorEl(scrollEl, mode) : null
+  const anchorTarget = anchorEl
+    ? Math.max(0, _scrollTopOf(scrollEl, anchorEl) - mode.offset)
+    : 0
+  const anchorRoom = anchorEl
+    ? Math.max(0, viewH + anchorTarget - listEl.offsetHeight)
+    : 0
+  if (questionSubmission) return anchorRoom
+  const pinTarget = lastUserMsgEl
+    ? Math.max(0, lastUserMsgEl.offsetTop - PIN_OFFSET)
+    : 0
+  const pinRoom = lastUserMsgEl
+    ? Math.max(0, viewH + pinTarget - listEl.offsetHeight + PIN_BOTTOM_ROOM)
+    : 0
+  return Math.max(anchorRoom, pinRoom)
 }
 
 

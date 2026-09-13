@@ -37,12 +37,15 @@ import { agentViewport } from '../../lib/agentViewport.js'
 import { ChatTransportError, chatHttpError } from './sendErrors.js'
 import {
   classifyReplayOutcome,
+  claimIntentDispatch,
   enqueueIntent,
+  markIntentLocallyQueued,
   outboxPrincipalKey,
   retireIntent,
 } from './chatOutbox.js'
 import {
   getRecoverySnapshot,
+  getDeliveryReadySnapshot,
   reportNetworkReachable,
   subscribeRecovery,
   verifyConnectivity,
@@ -1630,6 +1633,7 @@ export default function useStreamConnection(chatId, {
     {
       hidden = false,
       queueOnly = false,
+      deferDelivery = false,
       forceSteer = false,
       directSteer = false,
       cid = undefined,
@@ -1670,20 +1674,6 @@ export default function useStreamConnection(chatId, {
     // the existing SSE keeps streaming the post-steer continuation inline, so
     // there is no reconnect/replay to set up either. Skip the reset; the live
     // stream stays attached and the steered message renders inline.
-    if (!queueOnly && !isAnswerSubmission && !isManualResume && !forceSteer && !directSteer) {
-      wantsReconnectRef.current = true
-      clearQuestionResponseTracking()
-      justSentAtRef.current = Date.now()
-      clearStoredStreamSnapshot(activeStreamChatIdRef.current)
-      lastGoodItemsRef.current = []
-      setStreamItems([])
-      setStreamAssistantMessageId(null)
-      textBufferRef.current = ''
-      textBufferItemIdRef.current = null
-      setIsStreaming(true)
-      setConnectionError(null)
-      clearReconnectingNote()
-    }
 
     let responseData = null
     let outboxCid = null
@@ -1734,6 +1724,7 @@ export default function useStreamConnection(chatId, {
       // the backend returns its idempotent duplicate result instead of starting
       // another turn. Steers target one live turn and are never replayable.
       outboxCid = (cid && !forceSteer && !directSteer) ? cid : null
+      const deferToOutbox = deferDelivery || !getDeliveryReadySnapshot()
       if (outboxCid) {
         outboxRetained = await enqueueIntent({
           chatId: requestOwner.chatId,
@@ -1741,7 +1732,32 @@ export default function useStreamConnection(chatId, {
           type: answers ? 'answer' : 'message',
           body,
           principalKey: outboxPrincipalKey(getToken()),
+          locallyQueued: deferToOutbox,
         })
+      }
+      // Saving an intent and accepting a turn are distinct transitions. During
+      // a known interruption, leave presentation with the local queue/card.
+      // No POST, stream reset, or optimistic run belongs to that transition.
+      if (deferToOutbox || !getDeliveryReadySnapshot()) {
+        if (outboxRetained) {
+          await markIntentLocallyQueued(outboxCid, { chatId: requestOwner.chatId, principalKey: outboxPrincipalKey(getToken()) })
+          return { status: 'locally_queued', cid: outboxCid }
+        }
+        throw new Error('Möbius is unavailable and this device could not save the message. Your draft is unchanged.')
+      }
+      if (!queueOnly && !isAnswerSubmission && !isManualResume && !forceSteer && !directSteer) {
+        wantsReconnectRef.current = true
+        clearQuestionResponseTracking()
+        justSentAtRef.current = Date.now()
+        clearStoredStreamSnapshot(activeStreamChatIdRef.current)
+        lastGoodItemsRef.current = []
+        setStreamItems([])
+        setStreamAssistantMessageId(null)
+        textBufferRef.current = ''
+        textBufferItemIdRef.current = null
+        setIsStreaming(true)
+        setConnectionError(null)
+        clearReconnectingNote()
       }
       // Time-box the send POST. It normally returns 202 immediately (the turn
       // runs as a background task), so a hang means a dead socket (mobile
@@ -1751,6 +1767,24 @@ export default function useStreamConnection(chatId, {
       // in-flight guard needed here: doSend already gates re-entry.
       let res
       const sendOnce = async () => {
+        // Ambiguity recovery may prove reachable but still not ready. It may
+        // retry this exact cid only after the same delivery gate reopens.
+        if (!getDeliveryReadySnapshot()) {
+          throw new ChatTransportError(new Error('Möbius is not ready to receive messages.'))
+        }
+        let dispatchBody = body
+        if (outboxRetained) {
+          const claimed = await claimIntentDispatch(outboxCid, {
+            chatId: requestOwner.chatId, principalKey: outboxPrincipalKey(getToken()),
+          })
+          if (claimed.status === 'absent' || claimed.status === 'retired') {
+            const settled = new Error('The local intent was already settled.')
+            settled.code = 'OUTBOX_SETTLED'
+            throw settled
+          }
+          if (claimed.status !== 'claimed') throw new Error('Could not confirm this device’s queued message for delivery.')
+          dispatchBody = claimed.record.body
+        }
         // Each ambiguity retry needs a fresh controller. Reusing the aborted
         // first attempt's signal would make the idempotent replay fail before
         // it reached the server.
@@ -1762,7 +1796,7 @@ export default function useStreamConnection(chatId, {
             {
               method: 'POST',
               headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
-              body: JSON.stringify(body),
+              body: JSON.stringify(dispatchBody),
               signal: sendCtrl.signal,
             },
           )
@@ -1906,10 +1940,23 @@ export default function useStreamConnection(chatId, {
         setConnectionError(null)
       }
     } catch (err) {
+      if (err?.code === 'OUTBOX_SETTLED') {
+        // A concurrent local cancellation or another tab's receipt owns this
+        // cid now. Neither absence nor retirement authorizes another POST.
+        if (!queueOnly && !isAnswerSubmission && !isManualResume) {
+          wantsReconnectRef.current = false
+          setIsStreaming(false)
+        }
+        return { status: 'locally_settled', cid: outboxCid }
+      }
       if (outboxRetained && err && typeof err === 'object') {
         // ChatView owns the copy and draft rollback; this transport fact keeps
         // that copy honest when IndexedDB was unavailable or quota-blocked.
+        await markIntentLocallyQueued(outboxCid, { chatId: requestOwner.chatId, principalKey: outboxPrincipalKey(getToken()) })
         err.outboxRetained = true
+        // Recheck service readiness once after interactive failure. The drain
+        // itself never manufactures a readiness edge from its own retry.
+        if (Number(err.status) >= 500) void verifyConnectivity()
       }
       // Reset streaming state on POST failure. The earlier
       // `if (!queueOnly)` guard left the UI stuck on "thinking" dots
