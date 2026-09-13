@@ -701,7 +701,9 @@ def test_settings_update_provider_validator_rejects_unknown():
 # ─── Model registry + owner prefs ─────────────────────────────────────
 
 
-def test_model_registry_returns_known_models_on_missing_creds(client, auth):
+def test_model_registry_returns_known_models_on_missing_creds(
+  client, auth, monkeypatch,
+):
   """`/api/models` returns KNOWN_MODELS for both providers when neither
   upstream is reachable. Confirms the per-provider fallback works.
 
@@ -710,8 +712,12 @@ def test_model_registry_returns_known_models_on_missing_creds(client, auth):
   entry is `available=True` in the fallback path because there's no
   live signal to mark anything unavailable.
   """
-  from app.providers import (
-    KNOWN_MODELS, _fallback_models, invalidate_model_cache,
+  from app import providers
+  from app.providers import KNOWN_MODELS, _fallback_models, invalidate_model_cache
+  monkeypatch.setattr(
+    providers.PROVIDERS["mobius"],
+    "check_auth",
+    lambda _data_dir: "Möbius account is not linked",
   )
   invalidate_model_cache()
   res = client.get("/api/models", headers=auth)
@@ -725,7 +731,9 @@ def test_model_registry_returns_known_models_on_missing_creds(client, auth):
   mobius_ids = [m["id"] for m in body["providers"]["mobius"]]
   assert mobius_ids == KNOWN_MODELS["mobius"]
   assert [m["label"] for m in body["providers"]["mobius"]] == [
-    "Spark", "Evolve",
+    "Spark (Qwen3.8 27B)", "Evolve",
+    "Reflect (DeepSeek V4.1 Flash)", "Flow (GLM 5.3 Flash)",
+    "Prism (Gemini 3.8 Flash)",
   ]
   # Offline fallbacks use the exact model id; live catalogs own display names.
   by_id = {m["id"]: m for m in body["providers"]["claude"]}
