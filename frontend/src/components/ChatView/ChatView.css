@@ -1279,6 +1279,9 @@
   font-size: 12px; /* floor raised from 10.5px */
   color: var(--muted); /* CONTRACT: low-contrast text on opaque fill */
   max-height: 200px;
+  /* The output owns a bounded internal scroller so its contents stay visible.
+     The cap keeps that reading surface inside the disclosure; the transcript
+     and its tail reservation never absorb the hidden overflow. */
   overflow-y: auto;
   line-height: 1.5;
 }
