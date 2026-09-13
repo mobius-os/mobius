@@ -2523,6 +2523,12 @@ export default function Shell({ onInitialVisualReady }) {
       if (target.focusComposer === true && supportsDesktopPaneComposerFocus()) {
         requestComposer(target.chatId, { focus: true })
       }
+    } else if (target?.view === 'project') {
+      const project = projectsRef.current.find(
+        row => String(row.id) === String(target.projectId),
+      )
+      if (project) openProjectRef.current(project)
+      else navToRef.current('projects')
     }
   }, [openAppWithIntent, requestComposer])
 
