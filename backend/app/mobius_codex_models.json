@@ -6,26 +6,11 @@
       "description": "Fast agent for everyday work",
       "default_reasoning_level": "medium",
       "supported_reasoning_levels": [
-        {
-          "effort": "minimal",
-          "description": "Minimal reasoning"
-        },
-        {
-          "effort": "low",
-          "description": "Light reasoning"
-        },
-        {
-          "effort": "medium",
-          "description": "Balanced reasoning"
-        },
-        {
-          "effort": "high",
-          "description": "Deeper reasoning"
-        },
-        {
-          "effort": "max",
-          "description": "Maximum reasoning"
-        }
+        {"effort": "minimal", "description": "Minimal reasoning"},
+        {"effort": "low", "description": "Light reasoning"},
+        {"effort": "medium", "description": "Balanced reasoning"},
+        {"effort": "high", "description": "Deeper reasoning"},
+        {"effort": "max", "description": "Maximum reasoning"}
       ],
       "shell_type": "shell_command",
       "visibility": "list",
@@ -46,10 +31,7 @@
       "default_verbosity": "low",
       "apply_patch_tool_type": null,
       "web_search_tool_type": "text",
-      "truncation_policy": {
-        "mode": "tokens",
-        "limit": 10000
-      },
+      "truncation_policy": {"mode": "tokens", "limit": 10000},
       "supports_parallel_tool_calls": false,
       "supports_image_detail_original": false,
       "context_window": 262144,
@@ -57,38 +39,21 @@
       "auto_compact_token_limit": null,
       "effective_context_window_percent": 90,
       "experimental_supported_tools": [],
-      "input_modalities": [
-        "text"
-      ],
+      "input_modalities": ["text"],
       "supports_search_tool": false,
       "use_responses_lite": false
     },
     {
-      "slug": "evolve",
-      "display_name": "Evolve (Qwen3.8 2.4T A95B)",
+      "slug": "inkling",
+      "display_name": "Evolve",
       "description": "Deep agent for complex work",
       "default_reasoning_level": "medium",
       "supported_reasoning_levels": [
-        {
-          "effort": "minimal",
-          "description": "Minimal reasoning"
-        },
-        {
-          "effort": "low",
-          "description": "Light reasoning"
-        },
-        {
-          "effort": "medium",
-          "description": "Balanced reasoning"
-        },
-        {
-          "effort": "high",
-          "description": "Deeper reasoning"
-        },
-        {
-          "effort": "max",
-          "description": "Maximum reasoning"
-        }
+        {"effort": "minimal", "description": "Minimal reasoning"},
+        {"effort": "low", "description": "Light reasoning"},
+        {"effort": "medium", "description": "Balanced reasoning"},
+        {"effort": "high", "description": "Deeper reasoning"},
+        {"effort": "max", "description": "Maximum reasoning"}
       ],
       "shell_type": "shell_command",
       "visibility": "list",
@@ -109,10 +74,7 @@
       "default_verbosity": "low",
       "apply_patch_tool_type": null,
       "web_search_tool_type": "text",
-      "truncation_policy": {
-        "mode": "tokens",
-        "limit": 10000
-      },
+      "truncation_policy": {"mode": "tokens", "limit": 10000},
       "supports_parallel_tool_calls": false,
       "supports_image_detail_original": false,
       "context_window": 1000000,
@@ -120,9 +82,7 @@
       "auto_compact_token_limit": null,
       "effective_context_window_percent": 90,
       "experimental_supported_tools": [],
-      "input_modalities": [
-        "text"
-      ],
+      "input_modalities": ["text"],
       "supports_search_tool": false,
       "use_responses_lite": false
     },
@@ -132,26 +92,11 @@
       "description": "Fast reasoning for analysis and coding",
       "default_reasoning_level": "medium",
       "supported_reasoning_levels": [
-        {
-          "effort": "minimal",
-          "description": "Minimal reasoning"
-        },
-        {
-          "effort": "low",
-          "description": "Light reasoning"
-        },
-        {
-          "effort": "medium",
-          "description": "Balanced reasoning"
-        },
-        {
-          "effort": "high",
-          "description": "Deeper reasoning"
-        },
-        {
-          "effort": "max",
-          "description": "Maximum reasoning"
-        }
+        {"effort": "minimal", "description": "Minimal reasoning"},
+        {"effort": "low", "description": "Light reasoning"},
+        {"effort": "medium", "description": "Balanced reasoning"},
+        {"effort": "high", "description": "Deeper reasoning"},
+        {"effort": "max", "description": "Maximum reasoning"}
       ],
       "shell_type": "shell_command",
       "visibility": "list",
@@ -172,10 +117,7 @@
       "default_verbosity": "low",
       "apply_patch_tool_type": null,
       "web_search_tool_type": "text",
-      "truncation_policy": {
-        "mode": "tokens",
-        "limit": 10000
-      },
+      "truncation_policy": {"mode": "tokens", "limit": 10000},
       "supports_parallel_tool_calls": false,
       "supports_image_detail_original": false,
       "context_window": 1048576,
@@ -183,9 +125,7 @@
       "auto_compact_token_limit": null,
       "effective_context_window_percent": 90,
       "experimental_supported_tools": [],
-      "input_modalities": [
-        "text"
-      ],
+      "input_modalities": ["text"],
       "supports_search_tool": false,
       "use_responses_lite": false
     },
@@ -195,26 +135,11 @@
       "description": "Fast, efficient agent for iterative work",
       "default_reasoning_level": "medium",
       "supported_reasoning_levels": [
-        {
-          "effort": "minimal",
-          "description": "Minimal reasoning"
-        },
-        {
-          "effort": "low",
-          "description": "Light reasoning"
-        },
-        {
-          "effort": "medium",
-          "description": "Balanced reasoning"
-        },
-        {
-          "effort": "high",
-          "description": "Deeper reasoning"
-        },
-        {
-          "effort": "max",
-          "description": "Maximum reasoning"
-        }
+        {"effort": "minimal", "description": "Minimal reasoning"},
+        {"effort": "low", "description": "Light reasoning"},
+        {"effort": "medium", "description": "Balanced reasoning"},
+        {"effort": "high", "description": "Deeper reasoning"},
+        {"effort": "max", "description": "Maximum reasoning"}
       ],
       "shell_type": "shell_command",
       "visibility": "list",
@@ -235,10 +160,7 @@
       "default_verbosity": "low",
       "apply_patch_tool_type": null,
       "web_search_tool_type": "text",
-      "truncation_policy": {
-        "mode": "tokens",
-        "limit": 10000
-      },
+      "truncation_policy": {"mode": "tokens", "limit": 10000},
       "supports_parallel_tool_calls": false,
       "supports_image_detail_original": false,
       "context_window": 1048576,
@@ -246,9 +168,7 @@
       "auto_compact_token_limit": null,
       "effective_context_window_percent": 90,
       "experimental_supported_tools": [],
-      "input_modalities": [
-        "text"
-      ],
+      "input_modalities": ["text"],
       "supports_search_tool": false,
       "use_responses_lite": false
     },
@@ -258,26 +178,11 @@
       "description": "Fast generalist with a large context",
       "default_reasoning_level": "medium",
       "supported_reasoning_levels": [
-        {
-          "effort": "minimal",
-          "description": "Minimal reasoning"
-        },
-        {
-          "effort": "low",
-          "description": "Light reasoning"
-        },
-        {
-          "effort": "medium",
-          "description": "Balanced reasoning"
-        },
-        {
-          "effort": "high",
-          "description": "Deeper reasoning"
-        },
-        {
-          "effort": "max",
-          "description": "Maximum reasoning"
-        }
+        {"effort": "minimal", "description": "Minimal reasoning"},
+        {"effort": "low", "description": "Light reasoning"},
+        {"effort": "medium", "description": "Balanced reasoning"},
+        {"effort": "high", "description": "Deeper reasoning"},
+        {"effort": "max", "description": "Maximum reasoning"}
       ],
       "shell_type": "shell_command",
       "visibility": "list",
@@ -298,10 +203,7 @@
       "default_verbosity": "low",
       "apply_patch_tool_type": null,
       "web_search_tool_type": "text",
-      "truncation_policy": {
-        "mode": "tokens",
-        "limit": 10000
-      },
+      "truncation_policy": {"mode": "tokens", "limit": 10000},
       "supports_parallel_tool_calls": false,
       "supports_image_detail_original": false,
       "context_window": 1048576,
@@ -309,9 +211,7 @@
       "auto_compact_token_limit": null,
       "effective_context_window_percent": 90,
       "experimental_supported_tools": [],
-      "input_modalities": [
-        "text"
-      ],
+      "input_modalities": ["text"],
       "supports_search_tool": false,
       "use_responses_lite": false
     }

@@ -151,7 +151,7 @@ def test_mobius_effort_scale_uses_the_public_product_model():
   assert providers.MODEL_EFFORT_LEVELS["spark"] == [
     "minimal", "low", "medium", "high", "max",
   ]
-  assert providers.MODEL_EFFORT_LEVELS["evolve"] == [
+  assert providers.MODEL_EFFORT_LEVELS["inkling"] == [
     "minimal", "low", "medium", "high", "max",
   ]
   for model_id in ("reflect", "flow", "prism"):
@@ -180,7 +180,7 @@ async def test_unlinked_mobius_registry_skips_protected_broker_request(
   rows = await providers._fetch_provider_models("mobius", str(tmp_path))
   assert [row["id"] for row in rows] == providers.KNOWN_MODELS["mobius"]
   assert [row["label"] for row in rows] == [
-    "Spark (Qwen3.8 27B)", "Evolve (Qwen3.8 2.4T A95B)",
+    "Spark (Qwen3.8 27B)", "Evolve",
     "Reflect (DeepSeek V4.1 Flash)", "Flow (GLM 5.3 Flash)",
     "Prism (Gemini 3.8 Flash)",
   ]

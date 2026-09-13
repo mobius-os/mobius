@@ -29,13 +29,13 @@ PROVIDERS_LIST = {
 }
 
 
-def test_evolve_is_a_valid_background_provider(tmp_path):
+def test_saved_evolve_selection_keeps_its_stable_inkling_wire_id(tmp_path):
   out = bg.resolve_background_agents(
     str(tmp_path),
-    {"primary": {"provider": "mobius", "model": "evolve", "effort": "high"}},
+    {"primary": {"provider": "mobius", "model": "inkling", "effort": "high"}},
   )
   assert out["primary"] == {
-    "provider": "mobius", "model": "evolve", "effort": "high",
+    "provider": "mobius", "model": "inkling", "effort": "high",
   }
 
 

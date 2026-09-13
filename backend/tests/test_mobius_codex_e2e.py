@@ -30,7 +30,7 @@ def _response(response_id: str, output: list[dict]) -> dict:
     "incomplete_details": None,
     "instructions": None,
     "max_output_tokens": 32768,
-    "model": "evolve",
+    "model": "inkling",
     "output": output,
     "parallel_tool_calls": True,
     "previous_response_id": None,
@@ -199,7 +199,7 @@ def test_installed_codex_streams_tool_call_through_trial_catalog(tmp_path):
   assert proof.read_text() == "mobius-tool-ok"
   assert "mobius-e2e-complete" in result.stdout
   assert len(requests) == 2
-  assert all(request["model"] == "evolve" for request in requests)
+  assert all(request["model"] == "inkling" for request in requests)
   assert all(request["stream"] is True for request in requests)
   assert any(
     item.get("type") == "function_call_output"

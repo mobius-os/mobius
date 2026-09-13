@@ -467,7 +467,7 @@ def test_set_background_agents_persists_to_shared_settings(client, auth):
       # was not named in the request so it persists disabled with defaults.
       {
         "provider": "mobius",
-        "model": "evolve",
+        "model": "inkling",
         "effort": "medium",
         "enabled": False,
       },
@@ -763,7 +763,9 @@ def test_settings_update_provider_validator_rejects_unknown():
 # ─── Model registry + owner prefs ─────────────────────────────────────
 
 
-def test_model_registry_returns_known_models_on_missing_creds(client, auth):
+def test_model_registry_returns_known_models_on_missing_creds(
+  client, auth, monkeypatch,
+):
   """`/api/models` returns KNOWN_MODELS for both providers when neither
   upstream is reachable. Confirms the per-provider fallback works.
 
@@ -772,8 +774,12 @@ def test_model_registry_returns_known_models_on_missing_creds(client, auth):
   entry is `available=True` in the fallback path because there's no
   live signal to mark anything unavailable.
   """
-  from app.providers import (
-    KNOWN_MODELS, _fallback_models, invalidate_model_cache,
+  from app import providers
+  from app.providers import KNOWN_MODELS, _fallback_models, invalidate_model_cache
+  monkeypatch.setattr(
+    providers.PROVIDERS["mobius"],
+    "check_auth",
+    lambda _data_dir: "Möbius account is not linked",
   )
   invalidate_model_cache()
   res = client.get("/api/models", headers=auth)
@@ -787,7 +793,7 @@ def test_model_registry_returns_known_models_on_missing_creds(client, auth):
   mobius_ids = [m["id"] for m in body["providers"]["mobius"]]
   assert mobius_ids == KNOWN_MODELS["mobius"]
   assert [m["label"] for m in body["providers"]["mobius"]] == [
-    "Spark (Qwen3.8 27B)", "Evolve (Qwen3.8 2.4T A95B)",
+    "Spark (Qwen3.8 27B)", "Evolve",
     "Reflect (DeepSeek V4.1 Flash)", "Flow (GLM 5.3 Flash)",
     "Prism (Gemini 3.8 Flash)",
   ]

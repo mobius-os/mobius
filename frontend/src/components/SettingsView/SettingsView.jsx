@@ -41,7 +41,7 @@ const PROVIDER_CHOICES = [
   { id: 'codex', label: 'OpenAI Codex' },
 ]
 const DEFAULT_BACKGROUND_MODELS = {
-  mobius: 'evolve',
+  mobius: 'inkling',
   claude: 'claude-opus-4-8',
   codex: 'gpt-5.6-terra',
 }

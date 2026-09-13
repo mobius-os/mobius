@@ -622,10 +622,10 @@ def test_providers_models_returns_known_models_on_missing_creds(
   assert set(claude_ids) == DEFAULT_VISIBLE_MODELS["claude"]
   assert set(codex_ids) == DEFAULT_VISIBLE_MODELS["codex"]
   assert [m["id"] for m in body["mobius"]] == [
-    "spark", "evolve", "reflect", "flow", "prism",
+    "spark", "inkling", "reflect", "flow", "prism",
   ]
   assert [m["name"] for m in body["mobius"]] == [
-    "Spark (Qwen3.8 27B)", "Evolve (Qwen3.8 2.4T A95B)",
+    "Spark (Qwen3.8 27B)", "Evolve",
     "Reflect (DeepSeek V4.1 Flash)", "Flow (GLM 5.3 Flash)",
     "Prism (Gemini 3.8 Flash)",
   ]
@@ -639,7 +639,7 @@ def test_providers_models_returns_known_models_on_missing_creds(
     assert "tier" not in row
     assert "id" in row and "name" in row
   assert [m["name"] for m in body["mobius"]] == [
-    "Spark (Qwen3.8 27B)", "Evolve (Qwen3.8 2.4T A95B)",
+    "Spark (Qwen3.8 27B)", "Evolve",
     "Reflect (DeepSeek V4.1 Flash)", "Flow (GLM 5.3 Flash)",
     "Prism (Gemini 3.8 Flash)",
   ]
