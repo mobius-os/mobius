@@ -27,6 +27,8 @@ cp "$ROOT/.gitignore" "$repo/.gitignore"
 cp "$ROOT/scripts/pre-commit.sh" "$repo/scripts/pre-commit.sh"
 cp "$ROOT/scripts/install-hooks.sh" "$repo/scripts/install-hooks.sh"
 cp "$ROOT/scripts/githooks/pre-push" "$repo/scripts/githooks/pre-push"
+cp "$ROOT/scripts/frontend-deps.sh" "$repo/scripts/frontend-deps.sh"
+cp "$ROOT/scripts/check-frontend-deps.mjs" "$repo/scripts/check-frontend-deps.mjs"
 cp "$ROOT/scripts/submit-pr.sh" "$repo/scripts/submit-pr.sh"
 cp "$ROOT/scripts/check-private-paths.sh" "$repo/scripts/check-private-paths.sh"
 chmod +x "$repo/scripts/"*.sh "$repo/scripts/githooks/pre-push"
@@ -53,8 +55,32 @@ cmp -s "$repo/scripts/pre-commit.sh" "$repo/.git/hooks/pre-commit" \
   || fail "installer did not install pre-commit"
 cmp -s "$repo/scripts/githooks/pre-push" "$repo/.git/hooks/pre-push" \
   || fail "installer did not install pre-push"
+cmp -s "$repo/scripts/frontend-deps.sh" "$repo/.git/hooks/frontend-deps.sh" \
+  || fail "installer did not install frontend dependency helper"
+cmp -s "$repo/scripts/check-frontend-deps.mjs" "$repo/.git/hooks/check-frontend-deps.mjs" \
+  || fail "installer did not install frontend dependency checker"
 [ "$(git -C "$repo" rev-parse --path-format=absolute --git-path hooks)" = \
   "$repo/.git/hooks" ] || fail "installer did not activate the repository hook directory"
+
+# A copied hook must never silently borrow executable support from whichever
+# linked worktree happens to be current. Missing support blocks frontend pushes
+# with an actionable repair, while non-frontend work remains independent.
+mkdir -p "$repo/frontend/src"
+printf 'export default 1\n' >"$repo/frontend/src/app.js"
+git -C "$repo" add frontend/src/app.js
+git -C "$repo" commit -qm frontend-fixture
+frontend_sha="$(git -C "$repo" rev-parse HEAD)"
+frontend_base="$(git -C "$repo" rev-parse HEAD^)"
+mv "$repo/.git/hooks/frontend-deps.sh" "$repo/.git/hooks/frontend-deps.sh.missing"
+missing_support_output="$({
+  printf 'refs/heads/master %s refs/heads/fix/frontend-fixture %s\n' \
+    "$frontend_sha" "$frontend_base"
+} | (cd "$repo" && .git/hooks/pre-push) 2>&1)" && \
+  fail "pre-push accepted a frontend change without its installed support"
+printf '%s\n' "$missing_support_output" \
+  | grep -q 'checks=frontend-deps-support' \
+  || fail "pre-push did not identify its missing dependency support"
+mv "$repo/.git/hooks/frontend-deps.sh.missing" "$repo/.git/hooks/frontend-deps.sh"
 
 # Pre-commit must reject all private roots even when force-added.
 mkdir -p "$repo/docs" "$repo/demo-logs" "$repo/.claude" "$repo/.pm"

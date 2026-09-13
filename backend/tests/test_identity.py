@@ -1,5 +1,6 @@
 """Identity app authorization and local-account behavior."""
 
+from datetime import datetime
 import httpx
 import pytest
 from fastapi import HTTPException
@@ -232,6 +233,24 @@ def test_identity_app_requires_reviewed_capability(client, auth):
   assert body["profile"] is None
   assert "test" not in response.text
   assert body["deployments"][0]["current"] is True
+  with SessionLocal() as session:
+    owner = session.query(models.Owner).one()
+    assert body["member_since"] == owner.created_at.date().isoformat()
+
+
+def test_identity_member_since_preserves_the_owners_original_calendar_date(
+  client, auth,
+):
+  granted = _app_auth(client, auth, granted=True)
+  with SessionLocal() as session:
+    owner = session.query(models.Owner).one()
+    owner.created_at = datetime(2022, 3, 4, 23, 59, 58)
+    session.commit()
+
+  response = client.get("/api/identity", headers=granted)
+
+  assert response.status_code == 200, response.text
+  assert response.json()["member_since"] == "2022-03-04"
 
 
 def test_identity_permission_is_part_of_review_contract():

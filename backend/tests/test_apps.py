@@ -777,6 +777,7 @@ def test_app_schedules_are_readable_by_app_tokens(client, auth):
   source_dir = Path(get_settings().data_dir) / "apps" / "news"
   source_dir.mkdir(parents=True)
   (source_dir / "fetch.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+  (source_dir / "fetch.sh").chmod(0o755)
   (source_dir / "mobius.json").write_text(
     '{"schedule":{"default":"0 10 * * *","job":"fetch.sh"}}',
     encoding="utf-8",
@@ -815,6 +816,7 @@ def test_app_schedules_prefer_init_cron_over_manifest(client, auth):
   source_dir = Path(get_settings().data_dir) / "apps" / "reflection"
   source_dir.mkdir(parents=True)
   (source_dir / "fetch.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+  (source_dir / "fetch.sh").chmod(0o755)
   (source_dir / "mobius.json").write_text(
     '{"schedule":{"default":"0 10 * * *","job":"fetch.sh"}}',
     encoding="utf-8",

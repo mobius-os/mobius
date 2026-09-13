@@ -77,6 +77,8 @@ from app.manifest_contract import (
   STATIC_ASSETS_TOTAL_MAX as _CONTRACT_STATIC_ASSETS_TOTAL_MAX,
   SYSTEM_PROMPT_MAX_BYTES as _CONTRACT_SYSTEM_PROMPT_MAX_BYTES,
   ManifestContractError,
+  job_interpreter,
+  require_executable_job,
   static_asset_entries,
   validate_manifest_contract,
   validate_storage_destination,
@@ -1260,6 +1262,11 @@ def package_content_digest_from_tree(
   schedule = manifest.get("schedule")
   job_name = schedule.get("job") if isinstance(schedule, dict) else None
   bundled_job = required_bytes(job_name, "schedule job") if job_name else None
+  if bundled_job is not None:
+    try:
+      job_interpreter(bundled_job)
+    except ManifestContractError as exc:
+      raise PackageContentError(str(exc)) from exc
 
   icon_processed = None
   icon_name = manifest.get("icon")
@@ -2145,6 +2152,10 @@ async def _fetch_install_candidate(
       bundled_job = await _http_get(
         cli, raw_base + schedule["job"], _ENTRY_MAX_BYTES,
       )
+      try:
+        job_interpreter(bundled_job)
+      except ManifestContractError as exc:
+        raise HTTPException(400, str(exc)) from exc
 
     static_assets: dict[str, bytes] = {}
     static_assets_total = 0
@@ -2391,11 +2402,6 @@ async def _sync_manifest_cron_unlocked(
     await asyncio.to_thread(_drop_app_cron, app_data_dir)
     (app_cron.schedule_state_dir(app.id) / "init-cron.sh").unlink(missing_ok=True)
   job_path = app_data_dir / cron_job_name
-  if job_name and job_path.exists() and not os.access(job_path, os.X_OK):
-    warnings.append(
-      f"schedule.job {cron_job_name} is not executable — cron/run-job "
-      "will fail until the app repo commits the executable bit"
-    )
   active_cron_scaffold = app_cron.cron_scaffold(CRON_SCAFFOLD)
   if has_cron and active_cron_scaffold.exists():
     await asyncio.to_thread(
@@ -2809,6 +2815,12 @@ async def _activate_install_source(
         static_dests=list(plan.static_assets),
         job_name=plan.job_name,
       )
+
+  if plan.job_name:
+    try:
+      require_executable_job((source_dir / plan.job_name).stat().st_mode)
+    except (OSError, ManifestContractError) as exc:
+      raise HTTPException(400, str(exc)) from exc
 
   _write_static_assets(
     source_dir,

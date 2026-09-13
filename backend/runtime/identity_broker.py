@@ -67,7 +67,15 @@ MAX_BODY = 2_000_000
 MAX_CONTRIBUTION_BODY = 3_000_000
 REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{7,199}$")
 INSTANCE_RE = re.compile(r"^mob_[A-Za-z0-9_-]{3,160}$")
+MANAGED_INSTANCE_RE = re.compile(r"^mob_[A-Za-z0-9_-]{3,80}$")
 OAUTH_STATE_RE = re.compile(r"^[A-Za-z0-9_-]{32,256}$")
+MANAGED_PREFIX = "/managed"
+MANAGED_UPSTREAM_POLICIES = (
+  ("/api/instance/v1/identity", frozenset({"GET", "POST", "PATCH"})),
+  ("/api/instance/v1/railway", frozenset({"GET", "POST", "PATCH", "DELETE"})),
+  ("/api/instance/v1/container-replacement", frozenset({"GET", "POST"})),
+)
+MANAGED_USER_AGENT = "mobius-managed-deployment/1"
 
 # Declarative public forwarding policy. Callers never supply a target URL,
 # audience, or arbitrary upstream path. Contribution and community routes are
@@ -179,6 +187,54 @@ def _b64(value: bytes) -> str:
 
 def _unb64(value: str) -> bytes:
   return base64.urlsafe_b64decode(value + ("=" * (-len(value) % 4)))
+
+
+def _managed_configuration() -> tuple[str, str, str] | None:
+  """Validate the credential owned exclusively by this root process."""
+  issuer = os.environ.get("MOBIUS_SSO_ISSUER", "").strip().rstrip("/")
+  instance_id = os.environ.get("MOBIUS_SSO_INSTANCE_ID", "").strip()
+  secret = os.environ.get("MOBIUS_SSO_CLIENT_SECRET", "")
+  values = (issuer, instance_id, secret)
+  if not any(values):
+    return None
+  if not all(values):
+    raise RuntimeError("managed identity configuration is incomplete")
+  parsed = urllib.parse.urlsplit(issuer)
+  if (
+    parsed.scheme != "https"
+    or not parsed.netloc
+    or parsed.path
+    or parsed.query
+    or parsed.fragment
+    or parsed.username
+    or parsed.password
+  ):
+    raise RuntimeError("managed identity issuer must be an HTTPS origin")
+  if not MANAGED_INSTANCE_RE.fullmatch(instance_id):
+    raise RuntimeError("managed identity instance id is invalid")
+  if len(secret) < 32:
+    raise RuntimeError("managed identity credential is invalid")
+  return issuer, instance_id, secret
+
+
+def _managed_upstream_path(method: str, path: str) -> str | None:
+  """Map only declared instance API families; callers never choose an origin."""
+  if not path.startswith(MANAGED_PREFIX):
+    return None
+  upstream = path.removeprefix(MANAGED_PREFIX)
+  if (
+    any(character in upstream for character in "?#%\\")
+    or "//" in upstream
+    or any(segment in {".", ".."} for segment in upstream.split("/"))
+  ):
+    return None
+  if any(
+    method in methods
+    and (upstream == prefix or upstream.startswith(prefix + "/"))
+    for prefix, methods in MANAGED_UPSTREAM_POLICIES
+  ):
+    return upstream
+  return None
 
 
 def _atomic_root_write(path: Path, value: bytes) -> None:
@@ -354,6 +410,8 @@ def _load_or_create_instance_id() -> str:
 
 class Broker:
   def __init__(self) -> None:
+    self.managed_credentials = _managed_configuration()
+    os.environ.pop("MOBIUS_SSO_CLIENT_SECRET", None)
     self.key = _load_or_create_key()
     self.instance_id = _load_or_create_instance_id()
     self.lock = threading.RLock()
@@ -668,12 +726,35 @@ class Broker:
     path: str,
     body: bytes,
     headers: dict[str, str],
-    allow_contributions: bool,
+    allow_private_routes: bool,
   ) -> httpx.Response:
     split = urllib.parse.urlsplit(path)
     route_path = split.path
     if not route_path.startswith("/") or split.fragment:
       raise FileNotFoundError("broker route not found")
+    managed_path = _managed_upstream_path(method, path) if allow_private_routes else None
+    if managed_path is not None:
+      if self.managed_credentials is None:
+        raise PermissionError("managed deployment is not configured")
+      issuer, instance_id, secret = self.managed_credentials
+      forwarded = {
+        "Authorization": f"Bearer {secret}",
+        "X-Mobius-Instance-Id": instance_id,
+        "Accept": headers.get("accept", "application/json"),
+        "Accept-Encoding": "identity",
+        "User-Agent": MANAGED_USER_AGENT,
+      }
+      content_type = headers.get("content-type")
+      if content_type:
+        forwarded["Content-Type"] = content_type
+      request = self.client.build_request(
+        method,
+        issuer + managed_path,
+        content=body if body else None,
+        headers=forwarded,
+        timeout=30.0,
+      )
+      return self.client.send(request, stream=True)
     declared = INFERENCE_ROUTES.get((method, route_path)) if not split.query else None
     route = None
     if declared is not None:
@@ -683,7 +764,7 @@ class Broker:
         GATEWAY_BASE_URL if target_name == "gateway" else "",
         audience,
       )
-    if route is None and allow_contributions:
+    if route is None and allow_private_routes:
       if method == "POST" and route_path == "/v1/contributions" and not split.query:
         route = (
           "contribution:submit", CONTRIBUTION_BASE_URL,
@@ -825,7 +906,7 @@ class _Handler(BaseHTTPRequestHandler):
         path=path,
         body=body,
         headers=incoming,
-        allow_contributions=is_unix,
+        allow_private_routes=is_unix,
       )
       try:
         self.send_response(upstream.status_code)
@@ -858,6 +939,8 @@ class _Handler(BaseHTTPRequestHandler):
   do_GET = _handle
   do_POST = _handle
   do_PUT = _handle
+  do_PATCH = _handle
+  do_DELETE = _handle
 
 
 class _UnixServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):

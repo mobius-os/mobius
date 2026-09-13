@@ -1,39 +1,7 @@
-function semanticTypeKey(value) {
-  const raw = String(value || '').toLowerCase()
-  const separator = raw.indexOf(':')
-  if (separator < 0) return raw
-  const provider = raw.slice(0, separator)
-  const type = raw.slice(separator + 1)
-  // LaTeX is itself the defining kind; other prefixes identify the provider
-  // and must not leak words such as "web" into the template classification.
-  return provider === 'latex' ? `latex ${type}` : type
-}
-
-function projectTypeWords(value) {
-  if (!value) return ''
-  if (typeof value === 'string') return semanticTypeKey(value)
-  return [
-    semanticTypeKey(value.project_type),
-    semanticTypeKey(value.key),
-    value.name,
-    semanticTypeKey(value.template?.key),
-    value.template?.name,
-  ].filter(Boolean).join(' ').toLowerCase()
-}
-
 export function projectTypeKind(value) {
-  const declared = value && typeof value === 'object' ? (value.kind || value.template?.kind) : ''
-  if (declared) return declared
-  const words = projectTypeWords(value)
-  if (/github|repository|\brepo\b/.test(words)) return 'github'
-  if (/latex|\.tex\b|paper/.test(words)) return 'latex'
-  if (/visuali[sz]ation|chart|dashboard|data story/.test(words)) return 'visualization'
-  if (/mini.?app|gadget|interactive app/.test(words)) return 'mini-app'
-  if (/slides?|presentation|deck/.test(words)) return 'slides'
-  if (/web|site|html/.test(words)) return 'web'
-  if (/sheet|table|csv/.test(words)) return 'sheet'
-  if (/document|docs|markdown|writing/.test(words)) return 'document'
-  return 'blank'
+  if (typeof value === 'string') return value || 'blank'
+  if (!value || typeof value !== 'object') return 'blank'
+  return value.kind || value.template?.kind || 'blank'
 }
 
 export function defaultProjectName(template) {

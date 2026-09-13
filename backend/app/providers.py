@@ -76,15 +76,18 @@ KNOWN_MODELS = {
     "gpt-5.4-mini",
     "gpt-5.3-codex-spark",
   ],
-  "mobius": ["spark", "inkling"],
+  "mobius": ["spark", "inkling", "reflect", "flow", "prism"],
 }
 
 MODEL_LABELS = {
   "claude-fable-5-1": "Claude Fable 5.1",
-  "spark": "Spark",
+  "spark": "Spark (Qwen3.8 27B)",
   # Public product name. Keep the stable wire id so existing chats and the
   # signed compute contract survive a display-name change without migration.
   "inkling": "Evolve",
+  "reflect": "Reflect (DeepSeek V4.1 Flash)",
+  "flow": "Flow (GLM 5.3 Flash)",
+  "prism": "Prism (Gemini 3.8 Flash)",
 }
 
 
@@ -102,6 +105,9 @@ MODEL_EFFORT_LEVELS: dict[str, list[str]] = {
   # The subscription product models share one graduated effort scale.
   "spark": ["minimal", "low", "medium", "high", "max"],
   "inkling": ["minimal", "low", "medium", "high", "max"],
+  "reflect": ["minimal", "low", "medium", "high", "max"],
+  "flow": ["minimal", "low", "medium", "high", "max"],
+  "prism": ["minimal", "low", "medium", "high", "max"],
 }
 
 # Usable input context before the provider runtime compacts. Live Codex and
@@ -129,7 +135,10 @@ MODEL_CONTEXT_WINDOWS: dict[str, int] = {
   "gpt-5.4-mini": 258_400,
   "gpt-5.3-codex-spark": 121_600,
   "spark": 235_930,
-  "inkling": 235_930,
+  "inkling": 900_000,
+  "reflect": 943_718,
+  "flow": 943_718,
+  "prism": 943_718,
 }
 
 # Runtime recovery defaults are intentionally independent of picker order.
@@ -159,7 +168,7 @@ DEFAULT_VISIBLE_MODEL_ORDER: dict[str, tuple[str, ...]] = {
     "gpt-5.6-luna",
     "gpt-5.5",
   ),
-  "mobius": ("spark", "inkling"),
+  "mobius": ("spark", "inkling", "reflect", "flow", "prism"),
 }
 DEFAULT_VISIBLE_MODELS: dict[str, frozenset[str]] = {
   provider_id: frozenset(models)
@@ -207,14 +216,65 @@ def remove_legacy_global_auto_resume_setting(data_dir: str) -> bool:
       return True
     try:
       settings = json.loads(path.read_text())
-    except (json.JSONDecodeError, OSError):
+    except json.JSONDecodeError:
       return True
+    except OSError:
+      return False
     if (
       not isinstance(settings, dict)
       or _LEGACY_GLOBAL_AUTO_RESUME_KEY not in settings
     ):
       return True
     settings.pop(_LEGACY_GLOBAL_AUTO_RESUME_KEY)
+    return write_agent_settings(data_dir, settings)
+
+
+def normalize_background_agent_settings(data_dir: str) -> bool:
+  """Converge retired primary/fallback mirrors into provider rows once.
+
+  The current ``providers`` list always wins, even when empty or malformed:
+  aliases beside it are stale mirrors and are removed rather than merged back
+  into owner state. When no list exists, recognizable old choices are carried
+  forward without inventing a model. Shape inspection on every boot means a
+  selectively restored old settings file is normalized again.
+  """
+  with _AGENT_SETTINGS_LOCK:
+    path = Path(data_dir) / "shared" / "agent-settings.json"
+    try:
+      settings = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+      return True
+    except (json.JSONDecodeError, UnicodeError):
+      return True
+    except OSError:
+      return False
+    if not isinstance(settings, dict):
+      return True
+    background = settings.get("background_agents")
+    if not isinstance(background, dict):
+      return True
+    has_alias = "primary" in background or "fallback" in background
+    if not has_alias:
+      return True
+
+    current = dict(background)
+    if "providers" not in current:
+      rows = []
+      seen = set()
+      for key in ("primary", "fallback"):
+        choice = current.get(key)
+        provider = choice.get("provider") if isinstance(choice, dict) else None
+        if not isinstance(provider, str) or not provider or provider in seen:
+          continue
+        row = dict(choice)
+        row.setdefault("model", None)
+        row["enabled"] = True
+        rows.append(row)
+        seen.add(provider)
+      current["providers"] = rows
+    current.pop("primary", None)
+    current.pop("fallback", None)
+    settings["background_agents"] = current
     return write_agent_settings(data_dir, settings)
 
 
@@ -465,13 +525,8 @@ def _clean_background_choice(
     model = raw_model.strip()
     if _model_belongs_to_other_provider(model, provider):
       model = DEFAULT_BACKGROUND_MODELS.get(provider)
-  elif "model" in raw:
-    # Explicit null/empty means "let this provider use its native default".
-    model = None
   else:
-    # Legacy provider-only choices predate nullable model defaults; keep them
-    # concrete so background runners do not inherit the chat model by accident.
-    model = DEFAULT_BACKGROUND_MODELS.get(provider)
+    model = None
   out["model"] = model
   effort = raw.get("effort")
   out["effort"] = effort.strip() if isinstance(effort, str) and effort.strip() else None
@@ -490,16 +545,13 @@ def background_agent_settings(data_dir: str, default_provider: str | None = None
           {"provider": "claude", "model": "...", "effort": "...", "enabled": true},
           {"provider": "codex", "model": "...", "effort": "...", "enabled": true}
         ],
-        "primary": {"provider": "claude", "model": "...", "effort": "..."},
-        "fallback": {"provider": "codex", "model": "...", "effort": "..."}
       }
     }
 
-  `primary`/`fallback` are kept for older runners and app settings. The richer
-  `providers` list is the owner-facing source of truth: one default per
-  provider, plus enabled/order for quota fallback. Absence stays backwards-
-  compatible: only the resolved provider is enabled until the owner opts
-  additional providers in.
+  `providers` is the single source of truth: one default per
+  provider, plus enabled/order for quota fallback. When the setting is absent,
+  only the resolved provider is enabled until the owner opts additional
+  providers in.
   """
   provider = default_provider if default_provider in PROVIDERS else DEFAULT_PROVIDER
   file_layer = _load_agent_settings(data_dir)
@@ -532,15 +584,6 @@ def background_agent_settings(data_dir: str, default_provider: str | None = None
         _clean_background_choice(raw_choice, include_enabled=True),
         enabled_default=True,
       )
-  else:
-    primary = _clean_background_choice(bg.get("primary"), provider)
-    if primary is None:
-      primary = _background_default_choice(
-        provider,
-        enabled=True,
-      )
-    add_row(primary, enabled_default=True)
-    add_row(_clean_background_choice(bg.get("fallback")), enabled_default=True)
 
   if not rows:
     add_row(
@@ -1209,7 +1252,13 @@ def _live_model_entries(
     efforts = metadata.get("effort_levels")
     context_window = metadata.get("context_window")
     if not isinstance(label, str) or not label.strip():
-      label = model_id
+      # A catalog-discovered model owns its upstream label. A curated model
+      # appended only because the live catalog omitted it keeps the product
+      # name from the same curated registry instead of exposing its raw id.
+      label = (
+        MODEL_LABELS.get(model_id, model_id)
+        if model_id not in live_by_id else model_id
+      )
     else:
       label = label.strip()
     entry = {

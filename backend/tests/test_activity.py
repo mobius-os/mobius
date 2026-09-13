@@ -808,7 +808,7 @@ async def test_bootstrap_install_emits_with_source_bootstrap(db, monkeypatch):
       reconciliation=app_git.ReconciliationReceipt(),
     )
 
-  expected_count = len(bootstrap._configured_bootstrap_apps(db))
+  expected_count = len(bootstrap._CORE_BOOTSTRAP_APPS)
   with patch("app.bootstrap.install_from_manifest", _fake_install):
     await ensure_bootstrap_apps_installed(db)
 

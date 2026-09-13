@@ -17,8 +17,6 @@
 // and used by the bounded preview):
 //   /shell/?app=<id-or-slug>[&intent=...]  → { view: 'canvas', app, intent }
 //   /shell/?chat=<id>                      → { view: 'chat', chatId }
-//   /app/<numeric-id>   (legacy)           → { view: 'canvas', app, intent: null }
-//   /chat/<id>          (legacy)           → { view: 'chat', chatId }
 //
 // `app` is returned as the RAW accepted string (id or slug) because the shell
 // resolves slugs via openAppWithIntent, exactly like the cold deepLink parser.
@@ -71,10 +69,5 @@ export function parseNotificationTarget(target) {
     return null
   }
 
-  // Legacy out-of-scope forms, still present on old notification rows.
-  const appMatch = path.match(/^\/app\/(\d+)$/)
-  if (appMatch) return { view: 'canvas', app: appMatch[1], intent: null }
-  const chatMatch = path.match(/^\/chat\/([A-Za-z0-9_-]+)$/)
-  if (chatMatch) return { view: 'chat', chatId: chatMatch[1] }
   return null
 }

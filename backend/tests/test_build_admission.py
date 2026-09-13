@@ -19,6 +19,7 @@ from app.build_admission import (
   build_lease_async,
   require_vite_build_admission,
   vite_build_admitted,
+  wait_for_vite_build_admission,
 )
 
 
@@ -219,3 +220,24 @@ def test_refusal_names_footprint_ratio_when_ratio_trips():
   with pytest.raises(ViteBuildDeferred) as exc:
     require_vite_build_admission(hot)
   assert "unreclaimable footprint is 80% of the limit" in str(exc.value)
+
+
+def test_wait_returns_when_pressure_clears(monkeypatch):
+  checks = iter([False, False, True])
+  monkeypatch.setattr(
+    "app.build_admission.vite_build_admitted", lambda: next(checks),
+  )
+  monkeypatch.setattr("app.build_admission.time.sleep", lambda _delay: None)
+
+  wait_for_vite_build_admission(1)
+
+
+def test_wait_raises_the_existing_precise_refusal_at_timeout(monkeypatch):
+  monkeypatch.setattr("app.build_admission.vite_build_admitted", lambda: False)
+
+  def refuse():
+    raise ViteBuildDeferred("Vite build deferred: still constrained")
+
+  monkeypatch.setattr("app.build_admission.require_vite_build_admission", refuse)
+  with pytest.raises(ViteBuildDeferred, match="Vite build deferred"):
+    wait_for_vite_build_admission(0)

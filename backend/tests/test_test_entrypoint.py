@@ -5,6 +5,7 @@ from pathlib import Path
 
 SCRIPT = Path(__file__).parents[2] / "scripts" / "test.sh"
 HOST_RUNNER = Path(__file__).parents[2] / "scripts" / "wt-pytest.sh"
+CONFTEST = Path(__file__).parent / "conftest.py"
 CONTRIBUTING = Path(__file__).parents[2] / "CONTRIBUTING.md"
 PLATFORM_MAINTENANCE = (
   Path(__file__).parents[1] / "scripts" / "seed-skills" / "platform-maintenance.md"
@@ -58,10 +59,37 @@ def test_host_runner_isolates_database_before_pytest_collects_modules():
   assert 'DATABASE_URL="sqlite:///$TEST_RUNTIME_ROOT/test.db"' in source
   assert 'DATA_DIR="$TEST_RUNTIME_ROOT/data"' in source
   assert "MOBIUS_TEST_DATABASE_ISOLATED=1" in source
+  assert "trap cleanup_test_runtime EXIT" in source
+  assert "trap 'exit 130' INT" in source
+
+
+def test_live_database_guard_requires_database_isolation_not_generic_test_mode():
+  source = CONFTEST.read_text()
+  guard = source[source.index("_inherited_data_dir"):source.index("# Set env vars")]
+  assert 'os.environ.get("MOBIUS_TEST_DATABASE_ISOLATED") != "1"' in guard
+  assert 'os.environ.get("MOBIUS_TEST_RUNTIME")' not in guard
+
+
+def test_pre_push_delegates_backend_pytest_to_the_canonical_runner():
+  hook = (
+    Path(__file__).parents[2] / "scripts" / "githooks" / "pre-push"
+  ).read_text()
+  assert "MOBIUS_PYTEST_SERIALIZE=1" in hook
+  assert '"$MAIN/scripts/wt-pytest.sh" -q' in hook
+  assert '"$VENV" -m pytest' not in hook
+  assert "flock" not in hook
+  assert '78)' in hook
+  assert "no Python test runtime" in hook
+
+  runner = HOST_RUNNER.read_text()
+  assert '"${MOBIUS_PYTEST_SERIALIZE:-0}" = "1"' in runner
+  assert '"$MAIN/backend/.venv/.suite.lock"' in runner
+  assert "exit 78" in runner
 
 
 def test_image_runtime_reports_when_its_python_lock_differs():
   source = HOST_RUNNER.read_text()
   assert 'cmp -s "$ROOT/backend/requirements.lock" /app/requirements.lock' in source
+  assert 'elif [ -r /app/requirements.lock ]' in source
   assert "checkout requirements.lock differs from the image runtime" in source
   assert "not dependency-authoritative" in source

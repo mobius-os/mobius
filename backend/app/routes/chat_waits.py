@@ -119,4 +119,9 @@ def cancel(
   # token may cancel any.
   if principal.chat_id is not None and principal.chat_id != row.chat_id:
     raise HTTPException(status_code=403, detail="Not this chat's wait.")
+  if row.kind == "platform_activation":
+    raise HTTPException(
+      status_code=409,
+      detail="Use the Restart card or Stop the chat instead.",
+    )
   return serialize_wait(cancel_wait(db, row))

@@ -82,7 +82,9 @@ ACTIVE_HOOKS_DIR="$(git rev-parse --path-format=absolute --git-path hooks 2>/dev
 STALE_HOOKS=0
 for pair in \
   "scripts/pre-commit.sh:$HOOKS_DIR/pre-commit" \
-  "scripts/githooks/pre-push:$HOOKS_DIR/pre-push"; do
+  "scripts/githooks/pre-push:$HOOKS_DIR/pre-push" \
+  "scripts/frontend-deps.sh:$HOOKS_DIR/frontend-deps.sh" \
+  "scripts/check-frontend-deps.mjs:$HOOKS_DIR/check-frontend-deps.mjs"; do
   source_path="${pair%%:*}"
   installed_path="${pair#*:}"
   if git cat-file -e "origin/main:$source_path" 2>/dev/null; then

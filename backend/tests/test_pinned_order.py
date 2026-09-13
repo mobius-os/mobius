@@ -181,6 +181,150 @@ def test_late_older_pin_intent_cannot_overwrite_newer_unpin(
   assert db.get(models.Chat, chat.id).pinned_at is None
 
 
+def test_app_pin_response_returns_the_exact_persisted_rank(client, auth, db):
+  app = models.App(
+    source_dir="/tmp/mobius-tests/canonical-app-pin",
+    name="Canonical app pin",
+    description="",
+    jsx_source="export default function App() {}",
+    slug="canonical-app-pin",
+  )
+  db.add(app)
+  db.commit()
+
+  response = client.patch(
+    f"/api/apps/{app.id}", headers=auth, json={"pinned": True},
+  )
+
+  assert response.status_code == 200, response.text
+  returned = datetime.fromisoformat(response.json()["pinned_at"])
+  db.expire_all()
+  assert db.get(models.App, app.id).pinned_at == returned
+
+
+def test_late_older_app_pin_intent_cannot_overwrite_newer_unpin(
+  client, auth, db, monkeypatch,
+):
+  monkeypatch.setattr(drawer_pins, "_LATEST_INTENT_VERSIONS", OrderedDict())
+  app = models.App(
+    source_dir="/tmp/mobius-tests/late-app-pin",
+    name="Late app pin",
+    description="",
+    jsx_source="export default function App() {}",
+    slug="late-app-pin",
+    pinned_at=datetime.now(),
+  )
+  db.add(app)
+  db.commit()
+
+  newer = client.patch(
+    f"/api/apps/{app.id}", headers=auth,
+    json={
+      "pinned": False,
+      "pin_intent_client": "drawer-test",
+      "pin_intent_version": 2,
+    },
+  )
+  equal_but_different = client.patch(
+    f"/api/apps/{app.id}", headers=auth,
+    json={
+      "pinned": True,
+      "pin_intent_client": "drawer-test",
+      "pin_intent_version": 2,
+    },
+  )
+  older = client.patch(
+    f"/api/apps/{app.id}", headers=auth,
+    json={
+      "pinned": True,
+      "pin_intent_client": "drawer-test",
+      "pin_intent_version": 1,
+    },
+  )
+
+  assert newer.status_code == 200, newer.text
+  assert equal_but_different.status_code == 200, equal_but_different.text
+  assert older.status_code == 200, older.text
+  assert equal_but_different.json()["pinned_at"] is None
+  assert older.json()["pinned_at"] is None
+  db.expire_all()
+  assert db.get(models.App, app.id).pinned_at is None
+
+
+def test_project_pin_response_returns_the_exact_persisted_rank(client, auth, db):
+  project = models.Project(
+    id="canonical-project-pin",
+    name="Canonical project pin",
+    project_type="blank",
+    root_path="projects/canonical-project-pin",
+    template_snapshot_json={},
+  )
+  db.add(project)
+  db.commit()
+
+  response = client.patch(
+    f"/api/projects/{project.id}", headers=auth, json={"pinned": True},
+  )
+
+  assert response.status_code == 200, response.text
+  returned = datetime.fromisoformat(response.json()["pinned_at"])
+  db.expire_all()
+  state = db.get(models.ProjectDrawerState, project.id)
+  assert state is not None
+  assert state.pinned_at == returned
+
+
+def test_late_older_project_pin_intent_cannot_overwrite_newer_unpin(
+  client, auth, db, monkeypatch,
+):
+  monkeypatch.setattr(drawer_pins, "_LATEST_INTENT_VERSIONS", OrderedDict())
+  project = models.Project(
+    id="late-project-pin",
+    name="Late project pin",
+    project_type="blank",
+    root_path="projects/late-project-pin",
+    template_snapshot_json={},
+  )
+  state = models.ProjectDrawerState(
+    project_id=project.id, pinned_at=datetime.now(),
+  )
+  db.add_all([project, state])
+  db.commit()
+
+  newer = client.patch(
+    f"/api/projects/{project.id}", headers=auth,
+    json={
+      "pinned": False,
+      "pin_intent_client": "drawer-test",
+      "pin_intent_version": 2,
+    },
+  )
+  equal_but_different = client.patch(
+    f"/api/projects/{project.id}", headers=auth,
+    json={
+      "pinned": True,
+      "pin_intent_client": "drawer-test",
+      "pin_intent_version": 2,
+    },
+  )
+  older = client.patch(
+    f"/api/projects/{project.id}", headers=auth,
+    json={
+      "pinned": True,
+      "pin_intent_client": "drawer-test",
+      "pin_intent_version": 1,
+    },
+  )
+
+  assert newer.status_code == 200, newer.text
+  assert equal_but_different.status_code == 200, equal_but_different.text
+  assert older.status_code == 200, older.text
+  assert equal_but_different.json()["pinned_at"] is None
+  assert older.json()["pinned_at"] is None
+  db.expire_all()
+  assert db.get(models.ProjectDrawerState, project.id).pinned_at is None
+
+
 def test_store_reinstall_reveals_tombstoned_pin_inside_drawer_boundary(db):
   app = models.App(
     source_dir="/tmp/mobius-tests/reinstall-boundary",

@@ -17,7 +17,7 @@
     "guidance": "Edit scene.game.json in this project's root. Build the Game Creation to play it. The installed Project app owns the renderer; project source stays independent.",
     "skills": ["game-project.md"],
     "files": {"scene.game.json": "templates/scene.game.json"},
-    "previews": [{"id": "game", "name": "Game", "kind": "html", "path": "scene.game.json"}],
+    "previews": [{"id": "game", "name": "Game", "source": "scene.game.json", "builder": "game"}],
     "artifact_types": [{"id": "game", "name": "Playable game", "extensions": ["json"], "preview": "html", "script": "build.sh", "output": "index.html"}],
     "actions": [{"id": "level", "name": "Design a level", "prompt": "Help me design a level for this game. Inspect the current scene and ask what I want to change before editing."}]
   }]

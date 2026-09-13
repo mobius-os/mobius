@@ -6,10 +6,8 @@ function requireRows(value, label) {
 function isAppRuntimeProject(project, appId) {
   if (!project || typeof project !== 'object') return false
   const template = project.template
-  const importedByProjects = template
-    && typeof template === 'object'
-    && Object.hasOwn(template, 'imported_from')
-  return !importedByProjects && String(project.source_app_id) === String(appId)
+  const linkedSource = template?.imported_from?.management === 'linked'
+  return !linkedSource && String(project.source_app_id) === String(appId)
 }
 
 function appRuntimeProjectView(project) {
@@ -104,19 +102,6 @@ export async function handleAppProjectsRequest({
       description: row.description || '',
       kind: row.kind || '',
     }))
-  }
-
-  if (request.action === 'migrate') {
-    const legacyRows = await readRows(client.legacy(), 'Legacy project discovery failed')
-    for (const legacy of legacyRows) {
-      if (String(legacy.app_id) !== String(app.id) || legacy.imported) continue
-      await readJson(await client.importLegacy({
-        app_id: app.id,
-        legacy_project_id: legacy.legacy_project_id,
-        name: legacy.name,
-      }), 'Legacy project import failed:')
-    }
-    return projectViews(await readProjects())
   }
 
   const projects = await readProjects()
