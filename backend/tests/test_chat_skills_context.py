@@ -202,7 +202,8 @@ def test_goal_routing_rechecks_phase_transitions_and_prefers_platform_tool():
   assert "first-class `promote_goal` tool" in planning_normalized
   assert "resilience, not an equivalent convenience path" in planning_normalized
   assert "an attempted tool call returns a failure" in planning_normalized
-  assert "the platform does not invent another agent turn" in planning_normalized
+  assert "Terminal settlement continues the exact Goal" in planning_normalized
+  assert "this is a backstop, not a planning strategy" in planning_normalized
 
 
 def test_goal_waits_always_name_a_durable_owner_interaction():
@@ -226,7 +227,7 @@ def test_goal_waits_always_name_a_durable_owner_interaction():
   assert "### Make every unfinished wait explicit" in planning
   assert "create exactly one owning interaction" in planning_normalized
   assert "keeps the Goal marked **Waiting for you**" in planning_normalized
-  assert "Do not end with “tell me when…”" in planning_normalized
+  assert "Never end with “tell me when…”" in planning_normalized
   assert "# Waiting visibly — durable monitors or explicit owner actions" in waiting
   assert "`--owner` is required for command waits" in waiting_normalized
   assert "exit **0 exactly when the condition is met**" in waiting_normalized

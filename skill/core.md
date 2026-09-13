@@ -162,9 +162,10 @@ read the `waiting` skill and declare a durable monitor so this chat resumes
 itself. If only the partner can act or confirm, use the saved owner-input
 card as the final action with concrete choices such as **Done**, **Need help**, and **Not
 now** (or task-specific equivalents). The existing wait chip and question card
-are the owning UI; do not add another persistent status card. Never rely on a
-paused Goal, a prose promise, or “tell me when…” to communicate that the
-partner is expected to act.
+are the owning UI; do not add another persistent status card. If neither a
+monitor nor owner action is needed, continue working. Never rely on a paused
+Goal, a prose promise, or “tell me when…” to communicate that the partner is
+expected to act.
 
 **Claim convergent work once.** Before a public action, shared integration, or
 other exact outcome that another chat can independently reach, call

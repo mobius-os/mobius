@@ -3139,6 +3139,7 @@ async def _drain_and_release(
   run_token: str,
   ending_run_token: str = "",
   ending_status: str = "completed",
+  allow_goal_continuation: bool = False,
 ) -> tuple[dict | None, list, str | None, chat_queue.TerminalDisposition]:
   """Local helper around chat_queue.drain_and_release that binds the
   chat.py-owned discard_starting + forget_chat + strict-clear callbacks.
@@ -3159,7 +3160,9 @@ async def _drain_and_release(
   Returns the 4-tuple `(next_user, next_messages, next_session_id,
   disposition)`; the disposition tells `_complete_turn` whether a
   continuation was promoted (marker stays set), the queue was empty +
-  cleared (marker cleared inside the lock), or the run was stale.
+  cleared (marker cleared inside the lock), or the run was stale. A real
+  provider terminal opts into the writer-owned unfinished-Goal continuation;
+  provider-free guidance does not, so a missing provider cannot form a loop.
   """
   return await chat_queue.drain_and_release(
     db, chat_id, run_gen, run_token,
@@ -3169,6 +3172,7 @@ async def _drain_and_release(
     current_generation=current_run_generation,
     ending_run_token=ending_run_token,
     ending_status=ending_status,
+    allow_goal_continuation=allow_goal_continuation,
   )
 
 
@@ -3809,6 +3813,9 @@ async def _complete_turn(
        silent loss is worse than a visible "couldn't save" error.
     2. On success: allocate the CONTINUATION's run_token, drain the queue
        under ONE bounded lock (`drain_and_release`). The drain returns the
+       exact unfinished Goal to execution first when no durable handoff owns
+       it; this decision is made after Finalize has saved any question card.
+       Otherwise the drain returns the ordinary
        disposition: `CONTINUATION_PROMOTED` (a head was promoted — marker
        stays set, schedule the continuation), `EMPTY_TERMINAL_CLEARED` (the
        drain already cleared the marker + forgot the chat under the lock),
@@ -4076,6 +4083,7 @@ async def _complete_turn(
         db, chat_id, run_gen, next_run_token,
         ending_run_token=sink.run_token or "",
         ending_status=ending_status,
+        allow_goal_continuation=not provider_free,
       )
     )
   except (Exception, asyncio.TimeoutError) as exc:

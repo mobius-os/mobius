@@ -8,7 +8,6 @@ reconstructed from a second per-chat marker.
 
 from collections.abc import Iterable, Mapping
 from typing import Any
-import json
 import uuid
 
 from sqlalchemy.orm import Session
@@ -19,6 +18,7 @@ from app.goal_commands import (
   is_goal_continue,
   is_natural_goal_resume,
 )
+from app.goal_plans import goal_plan_is_unfinished
 
 
 def _recoverable_result_goal(
@@ -160,7 +160,7 @@ def goal_identity_for_run_start(
     if presentation["status"] == "paused" or (
       manual_continue
       and presentation["status"] == "failed"
-      and _goal_plan_is_unfinished(db, chat_id, rows[0].goal_id)
+      and goal_plan_is_unfinished(db, chat_id, rows[0].goal_id)
     ):
       # A visible manual Resume is explicit recovery, including older Goal
       # handoff notes persisted as failures. Never turn it into ordinary work
@@ -200,7 +200,7 @@ def goal_identity_for_run_start(
           presentation["status"] == "paused"
           and physical.status in ("completed", "interrupted")
           and goal_id is not None
-          and _goal_plan_is_unfinished(db, chat_id, goal_id)
+          and goal_plan_is_unfinished(db, chat_id, goal_id)
         ):
           return rows[0].goal_objective, goal_id
     return None, None
@@ -227,7 +227,7 @@ def goal_identity_for_run_start(
       return previous.goal_objective, previous.goal_id
     if (
       previous.goal_id is not None
-      and _goal_plan_is_unfinished(db, chat_id, previous.goal_id)
+      and goal_plan_is_unfinished(db, chat_id, previous.goal_id)
     ):
       return previous.goal_objective, previous.goal_id
   # A restart can interrupt a physical continuation after its provider turn
@@ -252,7 +252,7 @@ def goal_identity_for_run_start(
     seen.add(candidate.goal_id)
     if candidate.status == "stopped":
       continue
-    if _goal_plan_is_unfinished(db, chat_id, candidate.goal_id):
+    if goal_plan_is_unfinished(db, chat_id, candidate.goal_id):
       return candidate.goal_objective, candidate.goal_id
   return None, None
 
@@ -299,43 +299,8 @@ def product_result_continuation_root(
   return root_run_id if exists is not None else None
 
 
-def _goal_plan_tasks(
-  db: Session, chat_id: str, goal_id: str,
-) -> list[dict[str, Any]] | None:
-  """Return one stable Goal's validated task list, if it owns a plan."""
-  owner = (
-    db.query(models.ChatRun.goal_plan_json)
-    .filter(
-      models.ChatRun.chat_id == chat_id,
-      models.ChatRun.goal_id == goal_id,
-      models.ChatRun.goal_plan_json.isnot(None),
-    )
-    .order_by(models.ChatRun.started_at.asc(), models.ChatRun.id.asc())
-    .first()
-  )
-  if owner is None:
-    return None
-  raw = owner[0]
-  try:
-    plan = json.loads(raw) if isinstance(raw, str) else raw
-  except (TypeError, json.JSONDecodeError):
-    return None
-  tasks = (plan or {}).get("tasks") if isinstance(plan, dict) else None
-  return tasks if isinstance(tasks, list) and tasks else None
-
-
-def _goal_plan_is_unfinished(db: Session, chat_id: str, goal_id: str) -> bool:
-  """Whether a stable Goal identity owns a plan with unsettled work."""
-  tasks = _goal_plan_tasks(db, chat_id, goal_id)
-  return bool(tasks) and any(
-    isinstance(task, dict)
-    and task.get("status") not in ("completed", "cancelled")
-    for task in tasks
-  )
-
-
-# Saved transcripts can contain this legacy continuation reason. Keep identity
-# recovery for those rows, but do not generate new settlement turns.
+# Durable hidden continuations use this reason to retain the exact Goal across
+# physical turns. Older transcripts use the same value and remain recoverable.
 GOAL_HANDOFF_REASON = "goal_handoff"
 
 

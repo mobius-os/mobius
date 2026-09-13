@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from datetime import UTC, datetime
+import json
 import re
 from typing import Any
 
@@ -24,6 +25,35 @@ MAX_DEPENDENCIES = 16
 MAX_TITLE = 160
 MAX_NOTE = 500
 MAX_RESULT = 1000
+
+
+def goal_plan_is_unfinished(
+  db: Session, chat_id: str, goal_id: str,
+) -> bool:
+  """Whether one stable Goal owns a plan with unsettled work."""
+  owner = (
+    db.query(models.ChatRun.goal_plan_json)
+    .filter(
+      models.ChatRun.chat_id == chat_id,
+      models.ChatRun.goal_id == goal_id,
+      models.ChatRun.goal_plan_json.isnot(None),
+    )
+    .order_by(models.ChatRun.started_at.asc(), models.ChatRun.id.asc())
+    .first()
+  )
+  if owner is None:
+    return False
+  raw = owner[0]
+  try:
+    plan = json.loads(raw) if isinstance(raw, str) else raw
+  except (TypeError, json.JSONDecodeError):
+    return False
+  tasks = (plan or {}).get("tasks") if isinstance(plan, dict) else None
+  return bool(tasks) and any(
+    isinstance(task, dict)
+    and task.get("status") not in SETTLED_TASK_STATUSES
+    for task in tasks
+  )
 
 
 class GoalPlanError(ValueError):
@@ -490,7 +520,13 @@ def serialize_plan(
 
 
 def goal_handoff_owner_kind(
-  db: Session, chat_id: str, goal_id: str, *, excluding_question_id: str | None = None,
+  db: Session,
+  chat_id: str,
+  goal_id: str,
+  *,
+  excluding_question_id: str | None = None,
+  include_queued_execution: bool = False,
+  excluding_automatic_continuations: bool = False,
 ) -> str | None:
   """Name the durable actor that owns this exact Goal's next move.
 
@@ -502,9 +538,12 @@ def goal_handoff_owner_kind(
   # historical Goal. Do not decode the entire transcript for an absent card.
   # An actual continuation card still lazily reads messages to prove its exact
   # author; a detail read's already-loaded Chat is reused by the identity map.
-  chat = db.query(models.Chat).options(
-    load_only(models.Chat.pending_question_id),
-  ).filter(models.Chat.id == chat_id).first()
+  projected = [models.Chat.pending_question_id]
+  if include_queued_execution:
+    projected.append(models.Chat.pending_messages)
+  chat = db.query(models.Chat).options(load_only(*projected)).filter(
+    models.Chat.id == chat_id,
+  ).first()
   pending_question_id = chat.pending_question_id if chat is not None else None
   if pending_question_id is not None and pending_question_id != excluding_question_id:
     from app.questions import continuation_question_owner_run_id
@@ -532,6 +571,27 @@ def goal_handoff_owner_kind(
     ):
       return "owner_question"
 
+  # A queued continuation is durable execution ownership, not owner speech.
+  # Resolve its exact Goal so an unrelated continuation cannot make this Goal
+  # look safely handed off.
+  if include_queued_execution and chat is not None:
+    from app.continuations import continuation_reason, is_continuation_message
+    from app.run_state import GOAL_HANDOFF_REASON, goal_identity_for_run_start
+
+    for pending in chat.pending_messages or []:
+      if not isinstance(pending, dict) or not is_continuation_message(pending):
+        continue
+      if (
+        excluding_automatic_continuations
+        and continuation_reason(pending) == GOAL_HANDOFF_REASON
+      ):
+        continue
+      _objective, pending_goal_id = goal_identity_for_run_start(
+        db, chat_id, pending,
+      )
+      if pending_goal_id == goal_id:
+        return "executor"
+
   from app.delegations import background_helper_goal_ids
   if goal_id in background_helper_goal_ids(db, chat_id):
     return "monitor"
@@ -553,6 +613,36 @@ def goal_handoff_owner_kind(
     ):
       return "monitor"
   return None
+
+
+def goal_requiring_terminal_continuation(
+  db: Session, chat_id: str, ending_run_token: str,
+) -> str | None:
+  """Return the unfinished Goal whose clean terminal has no next owner.
+
+  The physical provider turn is still ``running`` while the writer performs
+  this check. It is deliberately not an owner of its own future: only a saved
+  question, durable monitor/helper, or queued exact continuation may let it
+  close without creating the next executor.
+  """
+  if not ending_run_token:
+    return None
+  run = db.query(models.ChatRun).filter(
+    models.ChatRun.id == ending_run_token,
+    models.ChatRun.chat_id == chat_id,
+    models.ChatRun.status == "running",
+    models.ChatRun.goal_objective.isnot(None),
+    models.ChatRun.goal_id.isnot(None),
+  ).first()
+  if (
+    run is None
+    or not goal_plan_is_unfinished(db, chat_id, run.goal_id)
+    or goal_handoff_owner_kind(
+      db, chat_id, run.goal_id, include_queued_execution=True,
+    ) is not None
+  ):
+    return None
+  return run.goal_id
 
 
 def require_quiet_answer_handoff(db: Session, chat, question_id: str) -> None:

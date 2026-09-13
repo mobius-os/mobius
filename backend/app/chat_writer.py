@@ -833,6 +833,9 @@ class PromotePending(_Command):
   valid history instead RAISES `_PersistFailed` — the turn-end drain maps that
   to FAILED_LEAVE_MARKER (leave the marker for reconciliation) rather than
   confusing it with an empty queue and clearing the marker on stranded work.
+  A clean terminal may also materialize and immediately promote one exact Goal
+  continuation when no durable next owner exists; stale-pending callers must
+  opt out through the default ``allow_goal_continuation=False``.
   """
 
   chat_id: str = ""
@@ -841,6 +844,10 @@ class PromotePending(_Command):
   # not turn-end handoffs and keep the clean default; drain_and_release passes
   # "failed" when the provider returned an error before queued work continues.
   ending_status: str = "completed"
+  # Exact physical run handing off at a terminal boundary. Empty for ordinary
+  # stale-pending promotion, which must never manufacture Goal execution.
+  ending_run_token: str = ""
+  allow_goal_continuation: bool = False
 
 
 @dataclass
@@ -4475,15 +4482,20 @@ class ChatWriterActor:
       db.rollback()
       return PromotePendingBlocked("activation", wait_id=activation[0])
     pending = list(chat.pending_messages or [])
-    # `/goal clear` is no longer a runnable message. A bounded Goal-handoff
-    # marker is likewise no longer runnable after its exact Goal is stopped or
-    # dismissed. Retire either stale control row before it can reach a
-    # provider as ordinary prose, while preserving every real follow-up around
-    # it. This writer-owned admission point serializes the decision with Goal
-    # dismissal and Stop instead of relying on a read-side identity projection.
+    # `/goal clear` is no longer a runnable message. An automatic Goal
+    # continuation is likewise retired once its Goal settles, stops, or gains
+    # another exact owner. This writer-owned admission point prevents a saved
+    # question/monitor/manual continuation from racing a second executor.
     from app.goal_commands import goal_clear_requested
     from app.continuations import continuation_reason
     from app.run_state import GOAL_HANDOFF_REASON, goal_identity_for_run_start
+    from app.goal_plans import (
+      goal_handoff_owner_kind,
+      goal_plan_is_unfinished,
+      goal_requiring_terminal_continuation,
+    )
+
+    seen_goal_continuations: set[str] = set()
 
     def runnable_pending(row: dict) -> bool:
       if goal_clear_requested(str(row.get("content") or "")):
@@ -4493,13 +4505,41 @@ class ChatWriterActor:
       _objective, goal_id = goal_identity_for_run_start(
         db, cmd.chat_id, row,
       )
-      return goal_id is not None
+      if goal_id is None or not goal_plan_is_unfinished(
+        db, cmd.chat_id, goal_id,
+      ):
+        return False
+      if goal_id in seen_goal_continuations or goal_handoff_owner_kind(
+        db,
+        cmd.chat_id,
+        goal_id,
+        include_queued_execution=True,
+        excluding_automatic_continuations=True,
+      ) is not None:
+        return False
+      seen_goal_continuations.add(goal_id)
+      return True
 
     runnable = [row for row in pending if runnable_pending(row)]
     retired_control = len(runnable) != len(pending)
     if retired_control:
       pending = runnable
       chat.pending_messages = pending
+    if cmd.allow_goal_continuation and cmd.ending_status == "completed":
+      continuation_goal_id = goal_requiring_terminal_continuation(
+        db, cmd.chat_id, cmd.ending_run_token,
+      )
+      if continuation_goal_id is not None:
+        pending.append({
+          "role": "user",
+          "content": "continue",
+          "kind": "continuation",
+          "continuation_reason": GOAL_HANDOFF_REASON,
+          "goal_id": continuation_goal_id,
+          "cid": f"goal-handoff-{cmd.ending_run_token}",
+          "ts": next_message_ts(list(chat.messages or []) + pending),
+        })
+        chat.pending_messages = pending
     if not pending:
       if retired_control and not _commit_or_rollback(db):
         raise _PersistFailed("PromotePending could not retire stale control")

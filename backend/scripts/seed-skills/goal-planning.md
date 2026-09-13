@@ -70,9 +70,10 @@ exactly one owning interaction:
 - Owner action: use the real question tool; its card keeps the Goal marked
   **Waiting for you**.
 
-With no owner, an unfinished plan stays visibly paused and resumable; the
-platform does not invent another agent turn. Do not end with “tell me when…”
-or a custom status card.
+With no owner, keep working. Terminal settlement continues the exact Goal if
+the agent returns early; this is a backstop, not a planning strategy. Finish
+useful work in-turn or create a real handoff. Never end with “tell me when…”,
+a prose status, or a custom status card.
 
 Before completion run:
 
