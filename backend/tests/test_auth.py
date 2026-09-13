@@ -17,7 +17,6 @@ def configure_managed_sso(monkeypatch):
   settings = get_settings()
   monkeypatch.setattr(settings, "mobius_sso_issuer", "http://launcher.test")
   monkeypatch.setattr(settings, "mobius_sso_instance_id", "mob_testinstance")
-  monkeypatch.setattr(settings, "mobius_sso_client_secret", "s" * 48)
   monkeypatch.setattr(settings, "frontend_origin", "http://testserver")
   return settings
 

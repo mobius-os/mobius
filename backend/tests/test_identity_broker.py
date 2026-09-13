@@ -19,10 +19,30 @@ import pytest
 
 
 BROKER_PATH = Path(__file__).parents[1] / "runtime" / "identity_broker.py"
+ENTRYPOINT_PATH = Path(__file__).parents[1] / "scripts" / "entrypoint.sh"
 SPEC = importlib.util.spec_from_file_location("mobius_identity_broker", BROKER_PATH)
 assert SPEC and SPEC.loader
 broker_module = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(broker_module)
+
+
+def test_entrypoint_scrubs_managed_credentials_before_starting_the_app():
+  source = ENTRYPOINT_PATH.read_text()
+  scrubbed = {
+    word
+    for line in source.splitlines()
+    if line.strip().startswith("unset ")
+    for word in line.split()[1:]
+  }
+  assert {"MOBIUS_SSO_CLIENT_SECRET", "MOBIUS_COMPUTE_INSTANCE_TOKEN"} <= scrubbed
+  env_scrub = next(
+    line for line in source.splitlines() if line.startswith('_env_scrub="')
+  )
+  assert "-u MOBIUS_SSO_CLIENT_SECRET" in env_scrub
+  assert "-u MOBIUS_COMPUTE_INSTANCE_TOKEN" in env_scrub
+  assert source.index("identity_broker &") < source.index(
+    "unset MOBIUS_SSO_CLIENT_SECRET"
+  ) < source.index("exec $_env_scrub uvicorn")
 
 
 def test_broker_and_app_consumers_share_the_root_owned_socket():
@@ -453,17 +473,126 @@ def test_loopback_surface_cannot_reach_identity_contribution_or_generic_targets(
   with pytest.raises(FileNotFoundError):
     broker.proxy(
       method="POST", path="/v1/contributions", body=b"{}", headers={},
-      allow_contributions=False,
+      allow_private_routes=False,
     )
   with pytest.raises(FileNotFoundError):
     broker.proxy(
+      method="GET", path="/managed/api/instance/v1/identity", body=b"",
+      headers={}, allow_private_routes=False,
+    )
+
+
+def test_managed_configuration_is_complete_and_root_owned(monkeypatch):
+  monkeypatch.setenv("MOBIUS_SSO_ISSUER", "https://account.example/")
+  monkeypatch.setenv("MOBIUS_SSO_INSTANCE_ID", "mob_example")
+  monkeypatch.setenv("MOBIUS_SSO_CLIENT_SECRET", "s" * 32)
+
+  assert broker_module._managed_configuration() == (
+    "https://account.example", "mob_example", "s" * 32,
+  )
+
+  monkeypatch.delenv("MOBIUS_SSO_CLIENT_SECRET")
+  with pytest.raises(RuntimeError, match="incomplete"):
+    broker_module._managed_configuration()
+
+
+@pytest.mark.parametrize(
+  ("issuer", "instance_id", "secret", "message"),
+  [
+    ("http://account.example", "mob_example", "s" * 32, "HTTPS origin"),
+    ("https://account.example", "invalid", "s" * 32, "instance id"),
+    ("https://account.example", "mob_" + "a" * 81, "s" * 32, "instance id"),
+    ("https://account.example", "mob_example", "short", "credential"),
+  ],
+)
+def test_managed_configuration_rejects_unsafe_values(
+  monkeypatch, issuer, instance_id, secret, message,
+):
+  monkeypatch.setenv("MOBIUS_SSO_ISSUER", issuer)
+  monkeypatch.setenv("MOBIUS_SSO_INSTANCE_ID", instance_id)
+  monkeypatch.setenv("MOBIUS_SSO_CLIENT_SECRET", secret)
+
+  with pytest.raises(RuntimeError, match=message):
+    broker_module._managed_configuration()
+
+
+def test_managed_proxy_owns_credentials_and_rejects_other_targets(broker):
+  seen = {}
+
+  class FakeClient:
+    def build_request(self, method, url, **kwargs):
+      seen.update(method=method, url=url, headers=kwargs["headers"])
+      return httpx.Request(
+        method, url, content=kwargs.get("content"), headers=kwargs["headers"]
+      )
+
+    def send(self, request, *, stream):
+      seen["stream"] = stream
+      return httpx.Response(200, request=request, content=b"{}")
+
+    def close(self):
+      return None
+
+  broker.client.close()
+  broker.client = FakeClient()
+  broker.managed_credentials = (
+    "https://account.example", "mob_example", "s" * 32,
+  )
+  response = broker.proxy(
+    method="POST",
+    path="/managed/api/instance/v1/railway/plan/refresh",
+    body=b"{}",
+    headers={"content-type": "application/json", "authorization": "attacker"},
+    allow_private_routes=True,
+  )
+  response.close()
+
+  assert seen["url"] == (
+    "https://account.example/api/instance/v1/railway/plan/refresh"
+  )
+  assert seen["headers"]["Authorization"] == "Bearer " + "s" * 32
+  assert seen["headers"]["X-Mobius-Instance-Id"] == "mob_example"
+  assert "attacker" not in json.dumps(seen)
+  assert seen["stream"] is True
+
+  with pytest.raises(FileNotFoundError):
+    broker.proxy(
+      method="GET", path="/managed/api/account/v1/identity", body=b"",
+      headers={}, allow_private_routes=True,
+    )
+  with pytest.raises(FileNotFoundError):
+    broker.proxy(
+      method="GET", path="/managed/api/instance/v1/identity?next=evil", body=b"",
+      headers={}, allow_private_routes=True,
+    )
+  for traversal in ("../agent", "%2e%2e/agent", "//agent"):
+    with pytest.raises(FileNotFoundError):
+      broker.proxy(
+        method="GET",
+        path="/managed/api/instance/v1/identity/" + traversal,
+        body=b"",
+        headers={},
+        allow_private_routes=True,
+      )
+  for method, path in (
+    ("DELETE", "/managed/api/instance/v1/identity"),
+    ("PATCH", "/managed/api/instance/v1/container-replacement/status"),
+    ("GET", "/managed/api/instance/v1/agent"),
+  ):
+    with pytest.raises(FileNotFoundError):
+      broker.proxy(
+        method=method, path=path, body=b"", headers={},
+        allow_private_routes=True,
+      )
+  with pytest.raises(FileNotFoundError):
+    broker.proxy(
       method="POST", path="/v1/chat/completions", body=b"{}", headers={},
-      allow_contributions=False,
+      allow_private_routes=False,
     )
   with pytest.raises(FileNotFoundError):
     broker.proxy(
       method="GET", path="/identity", body=b"", headers={},
-      allow_contributions=False,
+      allow_private_routes=False,
     )
 
 
@@ -502,7 +631,7 @@ def test_proxy_streams_identity_encoding_and_never_forwards_caller_target(
       "accept-encoding": "gzip",
       "x-forwarded-host": "attacker.example",
     },
-    allow_contributions=False,
+    allow_private_routes=False,
   )
   try:
     assert seen["url"] == broker_module.GATEWAY_BASE_URL + "/v1/models"
@@ -547,7 +676,7 @@ def test_contribution_proxy_binds_and_forwards_idempotency_key(broker, monkeypat
     path="/v1/contributions",
     body=b'{"repo":"mobius-os/mobius"}',
     headers={"idempotency-key": key, "x-mobius-request-id": "request:12345678"},
-    allow_contributions=True,
+    allow_private_routes=True,
   )
   response.close()
 
@@ -562,7 +691,7 @@ def test_contribution_proxy_binds_and_forwards_idempotency_key(broker, monkeypat
     path="/v1/contributions/ctr_1234567890abcdef1234567890abcdef",
     body=b"",
     headers={"x-mobius-request-id": "request:12345678"},
-    allow_contributions=True,
+    allow_private_routes=True,
   )
   response.close()
   assert seen["capability"]["scope"] == "contribution:read"
@@ -576,7 +705,7 @@ def test_contribution_proxy_binds_and_forwards_idempotency_key(broker, monkeypat
       "idempotency-key": "mobius-withdraw:0123456789abcdef",
       "x-mobius-request-id": "request:12345678",
     },
-    allow_contributions=True,
+    allow_private_routes=True,
   )
   response.close()
   assert seen["capability"]["scope"] == "contribution:withdraw"
@@ -589,7 +718,7 @@ def test_contribution_proxy_binds_and_forwards_idempotency_key(broker, monkeypat
     with pytest.raises(FileNotFoundError):
       broker.proxy(
         method=method, path=forbidden, body=b"", headers={},
-        allow_contributions=True,
+        allow_private_routes=True,
       )
 
 
@@ -676,7 +805,7 @@ def test_community_proxy_binds_canonical_query_and_rejects_route_expansion(
   )
   target = "/v1/community/apps?limit=25&offset=0&q=latex"
   response = broker.proxy(
-    method="GET", path=target, body=b"", headers={}, allow_contributions=True,
+    method="GET", path=target, body=b"", headers={}, allow_private_routes=True,
   )
   response.close()
 
@@ -695,7 +824,7 @@ def test_community_proxy_binds_canonical_query_and_rejects_route_expansion(
     with pytest.raises(FileNotFoundError):
       broker.proxy(
         method="GET", path=forbidden, body=b"", headers={},
-        allow_contributions=True,
+        allow_private_routes=True,
       )
 
 
@@ -734,12 +863,12 @@ def test_community_mutations_are_narrow_and_require_idempotency(
   with pytest.raises(ValueError, match="idempotency key is required"):
     broker.proxy(
       method="POST", path=publish_path, body=b'{}', headers={},
-      allow_contributions=True,
+      allow_private_routes=True,
     )
   broker.proxy(
     method="POST", path=publish_path, body=b'{}',
     headers={"idempotency-key": "publish:1234567890abcdef"},
-    allow_contributions=True,
+    allow_private_routes=True,
   ).close()
   install_path = (
     "/v1/community/apps/app_12345678/revisions/"
@@ -748,13 +877,13 @@ def test_community_mutations_are_narrow_and_require_idempotency(
   broker.proxy(
     method="POST", path=install_path, body=b'{}',
     headers={"idempotency-key": "install:1234567890abcdef"},
-    allow_contributions=True,
+    allow_private_routes=True,
   ).close()
   rating_path = "/v1/community/apps/app_12345678/rating"
   broker.proxy(
     method="PUT", path=rating_path, body=b'{"value":5}',
     headers={"idempotency-key": "rating:1234567890abcdef"},
-    allow_contributions=True,
+    allow_private_routes=True,
   ).close()
   comment_path = (
     "/v1/community/apps/app_12345678/revisions/"
@@ -763,19 +892,19 @@ def test_community_mutations_are_narrow_and_require_idempotency(
   broker.proxy(
     method="POST", path=comment_path, body=b'{"body":"Useful"}',
     headers={"idempotency-key": "comment:1234567890abcdef"},
-    allow_contributions=True,
+    allow_private_routes=True,
   ).close()
   editorial_asset_path = "/v1/community/editorial/assets"
   broker.proxy(
     method="POST", path=editorial_asset_path, body=b'{"data_base64":"abcd"}',
     headers={"idempotency-key": "editorial:1234567890abcdef"},
-    allow_contributions=True,
+    allow_private_routes=True,
   ).close()
   editorial_feed_path = "/v1/community/editorial/spotlight"
   broker.proxy(
     method="PUT", path=editorial_feed_path, body=b'{"items":[]}',
     headers={"idempotency-key": "editorial:feed:12345678"},
-    allow_contributions=True,
+    allow_private_routes=True,
   ).close()
 
   assert capabilities[0]["scope"] == "community:publish"
@@ -807,7 +936,7 @@ def test_community_mutations_are_narrow_and_require_idempotency(
       broker.proxy(
         method=method, path=path, body=b'{}',
         headers={"idempotency-key": "retired:1234567890abcdef"},
-        allow_contributions=True,
+        allow_private_routes=True,
       )
 
 
@@ -836,7 +965,8 @@ def test_handler_supports_feedback_broker_http_methods():
   assert handler.do_GET is handler._handle
   assert handler.do_POST is handler._handle
   assert handler.do_PUT is handler._handle
-  assert not hasattr(handler, "do_DELETE")
+  assert handler.do_PATCH is handler._handle
+  assert handler.do_DELETE is handler._handle
 
 
 def test_unix_handler_rejects_identity_queries_and_forwards_feedback_mutations():
@@ -848,8 +978,8 @@ def test_unix_handler_rejects_identity_queries_and_forwards_feedback_mutations()
     def identity(self):
       return {"linked": True}
 
-    def proxy(self, *, method, path, body, headers, allow_contributions):
-      seen.append((method, path, body, allow_contributions))
+    def proxy(self, *, method, path, body, headers, allow_private_routes):
+      seen.append((method, path, body, allow_private_routes))
       request = httpx.Request(method, "https://central.test" + path)
       payload = json.dumps({"method": method}).encode()
       return httpx.Response(

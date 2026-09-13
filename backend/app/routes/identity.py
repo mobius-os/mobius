@@ -34,7 +34,10 @@ from app.deps import (
   require_nondelegated_owner_or_app_control,
   reject_cross_site,
 )
-from app.runtime_identity import broker_request as runtime_identity_broker_request
+from app.runtime_identity import (
+  broker_async_client,
+  broker_request as runtime_identity_broker_request,
+)
 from app.timeutil import now_naive_utc
 
 router = APIRouter(
@@ -161,13 +164,13 @@ def _local_payload(
   }
 
 
-def _remote_headers() -> dict[str, str]:
+def _account_origin() -> str:
   settings = get_settings()
-  return {
-    "Authorization": f"Bearer {settings.mobius_sso_client_secret}",
-    "X-Mobius-Instance-Id": settings.mobius_sso_instance_id,
-    "Accept": "application/json",
-  }
+  return (
+    settings.mobius_sso_issuer
+    if settings.mobius_sso_enabled
+    else settings.mobius_account_origin
+  )
 
 
 def _identity_contract(payload: object) -> dict:
@@ -281,20 +284,21 @@ def _raise_remote_request_error(response: httpx.Response) -> None:
   raise HTTPException(response.status_code, _remote_error_detail(response, fallback))
 
 
-async def _managed_remote(method: str, suffix: str = "", **kwargs) -> dict:
-  settings = get_settings()
-  if not settings.mobius_sso_enabled:
+async def _managed_response(
+  method: str, path: str, *, timeout: float = 15.0, **kwargs,
+) -> httpx.Response:
+  """Call one managed instance API without exposing its credential to the app."""
+  if not get_settings().mobius_sso_enabled:
     raise HTTPException(409, "This Möbius uses a local account.")
   try:
-    async with httpx.AsyncClient(timeout=15.0, follow_redirects=False) as client:
-      response = await client.request(
-        method,
-        settings.mobius_sso_issuer + _REMOTE_PATH + suffix,
-        headers=_remote_headers(),
-        **kwargs,
-      )
-  except httpx.HTTPError:
+    async with broker_async_client(timeout=timeout) as client:
+      return await client.request(method, "/managed" + path, **kwargs)
+  except (httpx.HTTPError, OSError):
     raise HTTPException(502, "The Möbius account service could not be reached.")
+
+
+async def _managed_remote(method: str, suffix: str = "", **kwargs) -> dict:
+  response = await _managed_response(method, _REMOTE_PATH + suffix, **kwargs)
   _raise_remote_request_error(response)
   try:
     payload = response.json()
@@ -380,13 +384,9 @@ async def resolve_handle_hosts(
   settings = get_settings()
   link = None
   if settings.mobius_sso_enabled:
-    url = (
-      settings.mobius_sso_issuer
-      + _REMOTE_PATH
-      + "/handles/"
-      + quote(normalized, safe="")
+    response = await _managed_response(
+      "GET", _REMOTE_PATH + "/handles/" + quote(normalized, safe="")
     )
-    headers = _remote_headers()
   else:
     link = _linked_row(db, owner_id)
     if link is None:
@@ -404,12 +404,11 @@ async def resolve_handle_hosts(
       + quote(normalized, safe="")
     )
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
-
-  try:
-    async with httpx.AsyncClient(timeout=15.0, follow_redirects=False) as client:
-      response = await client.get(url, headers=headers)
-  except httpx.HTTPError as exc:
-    raise HTTPException(502, "The Möbius account service could not be reached.") from exc
+    try:
+      async with httpx.AsyncClient(timeout=15.0, follow_redirects=False) as client:
+        response = await client.get(url, headers=headers)
+    except httpx.HTTPError as exc:
+      raise HTTPException(502, "The Möbius account service could not be reached.") from exc
   if response.status_code == 401 and link is not None:
     db.delete(link)
     db.commit()
@@ -614,17 +613,7 @@ async def read_avatar(
 
 
 async def _managed_railway_remote() -> dict:
-  settings = get_settings()
-  if not settings.mobius_sso_enabled:
-    raise HTTPException(409, "This Möbius uses a linked account.")
-  try:
-    async with httpx.AsyncClient(timeout=15.0, follow_redirects=False) as client:
-      response = await client.get(
-        settings.mobius_sso_issuer + "/api/instance/v1/railway",
-        headers=_remote_headers(),
-      )
-  except httpx.HTTPError:
-    raise HTTPException(502, "The Möbius account service could not be reached.")
+  response = await _managed_response("GET", "/api/instance/v1/railway")
   if response.status_code != 200:
     raise HTTPException(502, "The Möbius account service could not read Railway state.")
   try:
@@ -712,8 +701,9 @@ async def _railway_proxy(
   """
   settings = get_settings()
   if settings.mobius_sso_enabled:
-    url = settings.mobius_sso_issuer + "/api/instance/v1/railway" + suffix
-    headers = _remote_headers()
+    response = await _managed_response(
+      method, "/api/instance/v1/railway" + suffix, timeout=30.0, json=json,
+    )
   else:
     link = _linked_row(db, owner_id)
     if link is None:
@@ -732,11 +722,11 @@ async def _railway_proxy(
       raise HTTPException(409, "Sign in again to manage Railway deployments.")
     url = settings.mobius_account_origin + "/api/account/v1/railway" + suffix
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
-  try:
-    async with httpx.AsyncClient(timeout=30.0, follow_redirects=False) as client:
-      response = await client.request(method, url, headers=headers, json=json)
-  except httpx.HTTPError:
-    raise HTTPException(502, "The Möbius account service could not be reached.")
+    try:
+      async with httpx.AsyncClient(timeout=30.0, follow_redirects=False) as client:
+        response = await client.request(method, url, headers=headers, json=json)
+    except httpx.HTTPError:
+      raise HTTPException(502, "The Möbius account service could not be reached.")
   if response.status_code == 401 and not settings.mobius_sso_enabled:
     link = _linked_row(db, owner_id)
     if link is not None:
@@ -864,7 +854,7 @@ def _railway_recovery_status_contract(payload: object) -> dict:
     if (
       parsed.scheme != "https"
       or parsed.fragment
-      or f"{parsed.scheme}://{parsed.netloc}" != get_settings().mobius_account_origin
+      or f"{parsed.scheme}://{parsed.netloc}" != _account_origin()
       or not parsed.path.endswith("/account/recovery/open")
     ):
       raise invalid
@@ -876,8 +866,9 @@ async def _railway_connect_start(
 ) -> dict:
   settings = get_settings()
   if settings.mobius_sso_enabled:
-    url = settings.mobius_sso_issuer + "/api/instance/v1/railway/connect/start"
-    headers = _remote_headers()
+    response = await _managed_response(
+      "POST", "/api/instance/v1/railway/connect/start", json={"replace": replace},
+    )
   else:
     link = _linked_row(db, owner_id)
     if link is None or not _LINK_SCOPES.issubset(set(link.scopes_json or [])):
@@ -892,11 +883,11 @@ async def _railway_connect_start(
       raise HTTPException(409, "Sign in again to reconnect Railway.")
     url = settings.mobius_account_origin + "/api/account/v1/railway/connect/start"
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
-  try:
-    async with httpx.AsyncClient(timeout=15.0, follow_redirects=False) as client:
-      response = await client.post(url, headers=headers, json={"replace": replace})
-  except httpx.HTTPError:
-    raise HTTPException(502, "The Möbius account service could not be reached.")
+    try:
+      async with httpx.AsyncClient(timeout=15.0, follow_redirects=False) as client:
+        response = await client.post(url, headers=headers, json={"replace": replace})
+    except httpx.HTTPError:
+      raise HTTPException(502, "The Möbius account service could not be reached.")
   if response.status_code != 200:
     raise HTTPException(502, "The Möbius account service could not start Railway sign-in.")
   try:
@@ -907,7 +898,7 @@ async def _railway_connect_start(
   if (
     parsed.scheme != "https"
     or parsed.fragment
-    or f"{parsed.scheme}://{parsed.netloc}" != settings.mobius_account_origin
+    or f"{parsed.scheme}://{parsed.netloc}" != _account_origin()
     or not parsed.path.endswith("/railway/connect")
   ):
     raise HTTPException(502, "The Möbius account service returned an invalid Railway address.")

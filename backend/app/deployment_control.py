@@ -16,14 +16,15 @@ import os
 import re
 import secrets
 import time
-import urllib.error
-import urllib.request
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any, Literal, TypedDict
 
+import httpx
+
 from app import platform_activation, platform_update
 from app.config import get_settings
+from app.runtime_identity import broker_client
 
 
 RebuildState = Literal[
@@ -74,7 +75,6 @@ _KNOWN_STATES = {
 }
 _ACTIVE_STATES = {"queued", "preparing", "replacing", "verifying"}
 _HANDOFF_VERSION = "external-cutover-v1"
-_MANAGED_USER_AGENT = "mobius-managed-deployment/1"
 _managed_recovery_tasks: set[asyncio.Task[None]] = set()
 _UPGRADE_MESSAGE = (
   "The Host replacement helper predates safe external chat handoff. Re-run "
@@ -220,24 +220,6 @@ def _normalize_status(
   )
 
 
-def _managed_headers() -> dict[str, str]:
-  settings = get_settings()
-  if not settings.mobius_sso_enabled:
-    raise DeploymentControlError(
-      "not_configured",
-      "This Railway deployment is not linked to its Möbius account service.",
-      status_code=409,
-    )
-  return {
-    "Authorization": f"Bearer {settings.mobius_sso_client_secret}",
-    "X-Mobius-Instance-Id": settings.mobius_sso_instance_id,
-    "Accept": "application/json",
-    # Browser-oriented edge checks reject Python's default urllib signature.
-    # Identify this authenticated machine-to-machine client explicitly instead.
-    "User-Agent": _MANAGED_USER_AGENT,
-  }
-
-
 def managed_cutover_ready() -> bool:
   """Whether this exact boot owns the baked managed-cutover supervisor."""
   marker = Path(get_settings().data_dir) / "run" / "managed-cutover-ready"
@@ -249,55 +231,57 @@ def managed_cutover_ready() -> bool:
   return bool(boot_id and secrets.compare_digest(marker_boot_id, boot_id))
 
 
-class _NoManagedRedirect(urllib.request.HTTPRedirectHandler):
-  def redirect_request(self, *_args: Any, **_kwargs: Any) -> None:
-    return None
-
-
 def _managed_request(method: str, suffix: str, payload: dict[str, str] | None = None) -> dict[str, Any]:
-  settings = get_settings()
-  body = None
-  headers = _managed_headers()
-  if payload is not None:
-    body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
-    headers["Content-Type"] = "application/json"
-  request_object = urllib.request.Request(
-    settings.mobius_account_origin + "/api/instance/v1/container-replacement/" + suffix,
-    data=body,
-    headers=headers,
-    method=method,
-  )
+  if not get_settings().mobius_sso_enabled:
+    raise DeploymentControlError(
+      "not_configured",
+      "This Railway deployment is not linked to its Möbius account service.",
+      status_code=409,
+    )
+  request_kwargs: dict[str, Any] = {"json": payload} if payload is not None else {}
   try:
-    with urllib.request.build_opener(_NoManagedRedirect()).open(
-      request_object, timeout=15,
-    ) as response:
-      raw = response.read(64 * 1024 + 1)
-      if len(raw) > 64 * 1024:
-        raise DeploymentControlError(
-          "controller_invalid_response", "The account service returned too much data."
-        )
-      value = json.loads(raw.decode("utf-8"))
-  except urllib.error.HTTPError as exc:
+    raw = bytearray()
+    with broker_client(timeout=15.0) as client:
+      with client.stream(
+        method,
+        "/managed/api/instance/v1/container-replacement/" + suffix,
+        **request_kwargs,
+      ) as response:
+        status = response.status_code
+        for chunk in response.iter_bytes():
+          raw.extend(chunk)
+          if len(raw) > 64 * 1024:
+            raise DeploymentControlError(
+              "controller_invalid_response",
+              "The account service returned too much data.",
+            )
+  except (httpx.HTTPError, OSError) as exc:
+    raise DeploymentControlError(
+      "controller_unavailable", "The Möbius account service is unavailable."
+    ) from exc
+  if status >= 400:
     try:
-      error = json.loads(exc.read(16 * 1024).decode("utf-8"))
+      error = json.loads(bytes(raw[:16 * 1024]).decode("utf-8"))
       detail = (
         str(error.get("detail") or error.get("message") or "")
         if isinstance(error, dict) else ""
       )
     except (ValueError, UnicodeError):
       detail = ""
-    if exc.code not in {400, 409} or not detail:
+    if status not in {400, 409} or not detail:
       raise DeploymentControlError(
         "controller_unavailable", "The Möbius account service is unavailable."
-      ) from exc
+      )
     raise DeploymentControlError(
       "controller_rejected",
       detail[:360],
       status_code=409,
-    ) from exc
-  except (urllib.error.URLError, TimeoutError, OSError, ValueError, UnicodeError) as exc:
+    )
+  try:
+    value = json.loads(raw.decode("utf-8"))
+  except (ValueError, UnicodeError) as exc:
     raise DeploymentControlError(
-      "controller_unavailable", "The Möbius account service is unavailable."
+      "controller_invalid_response", "The account service returned invalid status."
     ) from exc
   if not isinstance(value, dict):
     raise DeploymentControlError(

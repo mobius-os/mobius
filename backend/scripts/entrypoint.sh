@@ -215,13 +215,14 @@ _serve_source=baked
 _served_sha="${BUILD_SHA:-unknown}"
 
 # Env scrub shared by the import probe and the uvicorn exec so probe and serve
-# stay identical. Drops ONLY inherited GIT_*/PYTHONPATH: a GIT_DIR/GIT_WORK_TREE
+# stay identical. Drops inherited repository controls and root-owned managed
+# credentials: a GIT_DIR/GIT_WORK_TREE
 # leaked from the entrypoint would silently redirect the app's own git ops
 # (app_git, platform_update, the /data repo) at the wrong repository, and a
 # stray PYTHONPATH could shadow app.main. SECRET_KEY/DATABASE_URL/DATA_DIR are
 # preserved (env -u removes only the named vars) so `import app.main` still
 # resolves settings exactly as the served process does.
-_env_scrub="env -u PYTHONPATH -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_OBJECT_DIRECTORY -u GIT_COMMON_DIR -u GIT_NAMESPACE"
+_env_scrub="env -u PYTHONPATH -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_OBJECT_DIRECTORY -u GIT_COMMON_DIR -u GIT_NAMESPACE -u MOBIUS_SSO_CLIENT_SECRET -u MOBIUS_COMPUTE_INSTANCE_TOKEN -u MOBIUS_IDENTITY_BOOTSTRAP"
 
 _platform_git_valid() {
   [ -d /data/platform/.git ] || return 1
@@ -983,8 +984,8 @@ chmod 700 /data/identity-broker
 DATA_DIR=/data python3 -P /app/runtime/served_runtime_launcher.py identity_broker &
 _identity_broker_pid=$!
 unset MOBIUS_IDENTITY_BOOTSTRAP
-# Scrub credentials used by pre-capability prototypes/managed SSO revisions.
-# They are no longer accepted anywhere and must not reach the unprivileged app.
+# The broker owns managed account credentials; neither it nor the retired
+# compute token may reach the unprivileged app or its child processes.
 unset MOBIUS_SSO_CLIENT_SECRET MOBIUS_COMPUTE_INSTANCE_TOKEN
 _identity_broker_ready=0
 for _broker_wait in $(seq 1 50); do

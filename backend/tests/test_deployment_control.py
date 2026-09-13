@@ -3,12 +3,11 @@
 from __future__ import annotations
 
 import asyncio
-import io
 import json
 import threading
 from types import SimpleNamespace
-import urllib.error
 
+import httpx
 import pytest
 
 from app import deployment_control as dc
@@ -68,28 +67,29 @@ def _install_managed_cutover_marker(tmp_path, monkeypatch, boot_id="boot-test"):
   monkeypatch.setenv("MOBIUS_BOOT_ID", boot_id)
 
 
-def test_managed_request_identifies_the_machine_client(monkeypatch):
+def test_managed_request_uses_the_private_broker_without_credentials(monkeypatch):
   settings = SimpleNamespace(
-    mobius_account_origin="https://account.example",
     mobius_sso_enabled=True,
-    mobius_sso_client_secret="secret",
-    mobius_sso_instance_id="instance",
   )
   captured = []
 
-  def open_request(request, **_kwargs):
+  def handle(request):
     captured.append(request)
-    return io.BytesIO(b"{}")
+    return httpx.Response(200, json={})
 
-  opener = SimpleNamespace(open=open_request)
   monkeypatch.setattr(dc, "get_settings", lambda: settings)
-  monkeypatch.setattr(dc.urllib.request, "build_opener", lambda *_args: opener)
+  monkeypatch.setattr(
+    dc, "broker_client",
+    lambda **_kwargs: httpx.Client(
+      base_url="http://broker", transport=httpx.MockTransport(handle),
+    ),
+  )
 
   assert dc._managed_request("GET", "status") == {}
-  headers = {name.lower(): value for name, value in captured[0].header_items()}
-  assert headers["user-agent"] == "mobius-managed-deployment/1"
-  assert headers["authorization"] == "Bearer secret"
-  assert headers["x-mobius-instance-id"] == "instance"
+  assert captured[0].url == httpx.URL(
+    "http://broker/managed/api/instance/v1/container-replacement/status"
+  )
+  assert "authorization" not in captured[0].headers
 
 
 @pytest.mark.parametrize("status", [400, 409])
@@ -97,22 +97,21 @@ def test_managed_request_recognizes_only_structured_client_rejections(
   monkeypatch, status,
 ):
   settings = SimpleNamespace(
-    mobius_account_origin="https://account.example",
     mobius_sso_enabled=True,
-    mobius_sso_client_secret="secret",
-    mobius_sso_instance_id="instance",
-  )
-  response = urllib.error.HTTPError(
-    "https://account.example/start", status, "rejected", {},
-    io.BytesIO(b'{"detail":"Replacement handoff rejected."}'),
   )
 
-  def open_request(*_args, **_kwargs):
-    raise response
+  def handle(_request):
+    return httpx.Response(
+      status, json={"detail": "Replacement handoff rejected."}
+    )
 
-  opener = SimpleNamespace(open=open_request)
   monkeypatch.setattr(dc, "get_settings", lambda: settings)
-  monkeypatch.setattr(dc.urllib.request, "build_opener", lambda *_args: opener)
+  monkeypatch.setattr(
+    dc, "broker_client",
+    lambda **_kwargs: httpx.Client(
+      base_url="http://broker", transport=httpx.MockTransport(handle),
+    ),
+  )
 
   with pytest.raises(dc.DeploymentControlError) as exc:
     dc._managed_request("POST", "start", {"operation_id": "replacement"})
@@ -134,22 +133,19 @@ def test_managed_request_keeps_ambiguous_http_failures_ambiguous(
   monkeypatch, status, body,
 ):
   settings = SimpleNamespace(
-    mobius_account_origin="https://account.example",
     mobius_sso_enabled=True,
-    mobius_sso_client_secret="secret",
-    mobius_sso_instance_id="instance",
-  )
-  response = urllib.error.HTTPError(
-    "https://account.example/start", status, "gateway failure", {},
-    io.BytesIO(body),
   )
 
-  def open_request(*_args, **_kwargs):
-    raise response
+  def handle(_request):
+    return httpx.Response(status, content=body)
 
-  opener = SimpleNamespace(open=open_request)
   monkeypatch.setattr(dc, "get_settings", lambda: settings)
-  monkeypatch.setattr(dc.urllib.request, "build_opener", lambda *_args: opener)
+  monkeypatch.setattr(
+    dc, "broker_client",
+    lambda **_kwargs: httpx.Client(
+      base_url="http://broker", transport=httpx.MockTransport(handle),
+    ),
+  )
 
   with pytest.raises(dc.DeploymentControlError) as exc:
     dc._managed_request("POST", "start", {"operation_id": "replacement"})
