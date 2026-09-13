@@ -285,13 +285,32 @@ class CancelActivationWaits(_Command):
   run_token: str = ""
 
 
+class RestartCardStateChanged(Exception):
+  """The submitted Restart choice no longer targets an open durable card.
+
+  This is intentionally distinct from `_PersistFailed`: callers may repair a
+  stale browser projection from authoritative chat state, while a failed write
+  must remain retryable and must never be presented as a settled card.
+  """
+
+
+class RestartCardActionConflict(Exception):
+  """The card is still visible, but its exact Restart authority is unusable.
+
+  The route returns this as an actionable 409 rather than pretending a retry
+  can repair it or that authoritative chat state has already settled it. The
+  card's writing surface remains available to resume the owning agent.
+  """
+
+
 @dataclass
 class ResolvePlatformRestartCard(_Command):
   """Settle one typed Restart choice and claim its exact side effect.
 
   This command, rather than a route-side preflight, owns the actual matched
-  question write.  Free text, a label, a legacy answer call, or an option id
-  from another card cannot reach the durable execution claim.
+  question write. A label, free text, a legacy answer call, or an option id
+  from another card cannot reach the durable execution claim. Written feedback
+  uses AppendPending instead and atomically closes this card without authority.
   """
 
   chat_id: str = ""
@@ -782,6 +801,13 @@ class AppendPending(_Command):
 
 
 @dataclass
+class AppendRestartFeedback(AppendPending):
+  """Settle one typed Restart card and queue its written continuation."""
+
+  front: bool = True
+
+
+@dataclass
 class AppendSteeredUserMessage(_Command):
   """Append a mid-turn steered user message at the END of the transcript.
 
@@ -833,6 +859,9 @@ class PromotePending(_Command):
   valid history instead RAISES `_PersistFailed` — the turn-end drain maps that
   to FAILED_LEAVE_MARKER (leave the marker for reconciliation) rather than
   confusing it with an empty queue and clearing the marker on stranded work.
+  A clean terminal may also materialize and immediately promote one exact Goal
+  continuation when no durable next owner exists; stale-pending callers must
+  opt out through the default ``allow_goal_continuation=False``.
   """
 
   chat_id: str = ""
@@ -841,6 +870,10 @@ class PromotePending(_Command):
   # not turn-end handoffs and keep the clean default; drain_and_release passes
   # "failed" when the provider returned an error before queued work continues.
   ending_status: str = "completed"
+  # Exact physical run handing off at a terminal boundary. Empty for ordinary
+  # stale-pending promotion, which must never manufacture Goal execution.
+  ending_run_token: str = ""
+  allow_goal_continuation: bool = False
 
 
 @dataclass
@@ -2020,6 +2053,9 @@ class ChatWriterActor:
         kind=ACTIVATION_WAIT_KIND,
         condition_json=copy.deepcopy(requirement),
         interval_secs=60,
+        # ChatWait's shared schema still requires a deadline, but the typed
+        # activation checker deliberately ignores it: Restart is an owner
+        # decision and remains open until answered, cancelled, or satisfied.
         deadline_at=now + timedelta(days=7),
         next_check_at=now,
         status="armed",
@@ -2201,7 +2237,7 @@ class ChatWriterActor:
 
     chat = _active_chat(db, cmd.chat_id)
     if chat is None:
-      raise _PersistFailed("Restart card: chat not found or deleted")
+      raise RestartCardStateChanged("Restart card: chat not found or deleted")
 
     messages = copy.deepcopy(list(chat.messages or []))
     matched: dict | None = None
@@ -2218,41 +2254,16 @@ class ChatWriterActor:
           break
       if matched is not None:
         break
-    action = matched.get("platform_action") if matched is not None else None
-    if (
-      not isinstance(action, dict)
-      or action.get("version") != 1
-      or action.get("type") != "restart"
-      or not isinstance(action.get("requirement"), dict)
-      or not isinstance(action.get("action_id"), str)
-      or not isinstance(action.get("wait_id"), str)
-    ):
-      raise _PersistFailed("Restart card: exact typed question was not found")
-
-    restart_id = action.get("restart_option_id")
-    cancel_id = action.get("cancel_option_id")
-    if cmd.selected_option_id not in (restart_id, cancel_id):
-      raise _PersistFailed("Restart card: selected option is not authorized")
-    question = next((
-      question for question in (matched.get("questions") or [])
-      if isinstance(question, dict) and question.get("id") == "restart"
-    ), None)
-    options = question.get("options") if isinstance(question, dict) else None
-    labels = {
-      option.get("id"): option.get("label")
-      for option in (options or []) if isinstance(option, dict)
-    }
-    quiet_ids = {
-      option.get("id")
-      for option in (options or [])
-      if isinstance(option, dict) and option.get("on_answer") == "close"
-    }
-    if (
-      labels.get(restart_id) != "Restart now"
-      or labels.get(cancel_id) != "Not now"
-      or quiet_ids != {restart_id, cancel_id}
-    ):
-      raise _PersistFailed("Restart card: server option envelope is invalid")
+    if matched is None:
+      raise RestartCardStateChanged("Restart card: card is no longer present")
+    action, question, labels = _platform_restart_card_envelope(
+      matched, "Restart card",
+    )
+    restart_id = action["restart_option_id"]
+    if cmd.selected_option_id not in labels:
+      raise RestartCardActionConflict(
+        "Use one of this Restart card's current choices."
+      )
 
     wait = db.query(models.ChatWait).filter(
       models.ChatWait.id == action["wait_id"],
@@ -2261,12 +2272,16 @@ class ChatWriterActor:
       models.ChatWait.kind == "platform_activation",
     ).first()
     if wait is None or wait.condition_json != action["requirement"]:
-      raise _PersistFailed("Restart card: linked activation wait is invalid")
+      raise RestartCardActionConflict(
+        "This Restart request is no longer active. Tell the agent to check it again."
+      )
 
     prior_selected = matched.get("selected_options")
     if matched.get("answers"):
       if prior_selected != {"restart": [cmd.selected_option_id]}:
-        raise _PersistFailed("Restart card: card already settled differently")
+        raise RestartCardStateChanged(
+          "Restart card: card already settled differently"
+        )
       execution = db.get(models.PlatformRestartExecution, action["action_id"])
       db.rollback()
       return {
@@ -2287,7 +2302,9 @@ class ChatWriterActor:
       or wait.resume_delivered_at is not None
       or wait.status not in ("armed", "met", "expired", "failed")
     ):
-      raise _PersistFailed("Restart card: card is no longer accepting actions")
+      raise RestartCardStateChanged(
+        "Restart card: card is no longer accepting actions"
+      )
 
     now = now_naive_utc()
     selected_restart = cmd.selected_option_id == restart_id
@@ -2295,14 +2312,21 @@ class ChatWriterActor:
     execution_status = None
     if not selected_restart:
       # Declining this execution is not abandoning the unfinished work.
-      # Keep its visible activation owner so another approved matching boot
+      # Keep its visible activation owner so any later ready boot
       # can satisfy it without either a model turn or manufactured consent.
       action["status"] = "deferred"
     else:
+      # This is the durable admission boundary.  A merely armed activation
+      # monitor does not hold later owner input after **Not now**; only an
+      # explicitly approved restart keeps its recovery ahead of the queue.
+      # Stamp approval even when another ready boot already satisfied the wait,
+      # so its still-undelivered activation receipt retains the
+      # same ordering contract.
+      wait.action_approved_at = now
       if wait.status in ("expired", "failed"):
         db.rollback()
-        raise _PersistFailed(
-          "Restart card: activation outcome is uncertain; request a fresh card"
+        raise RestartCardActionConflict(
+          "This Restart request needs to be checked again. Tell the agent what happened."
         )
       verdict, _detail = activation_wait_verdict(db, wait)
       if verdict == "met":
@@ -2313,8 +2337,9 @@ class ChatWriterActor:
       else:
         if not requirement_matches_current_source(action["requirement"]):
           db.rollback()
-          raise _PersistFailed(
-            "Restart card: committed source changed; request a fresh card"
+          raise RestartCardActionConflict(
+            "Möbius changed since this card was created. Tell the agent to check it "
+            "and request a fresh Restart card."
           )
         execution = db.get(models.PlatformRestartExecution, action["action_id"])
         if execution is None:
@@ -2335,7 +2360,6 @@ class ChatWriterActor:
           raise _PersistFailed("Restart card: action identity collision")
         execution_status = execution.status
         action["status"] = "restart_requested"
-        wait.action_approved_at = now
 
     answers = {question["question"]: labels[cmd.selected_option_id]}
     selected_options = {"restart": [cmd.selected_option_id]}
@@ -3885,8 +3909,8 @@ class ChatWriterActor:
 
     # Caller-side admission may race card settlement. The actor owns the
     # final A-before-activity boundary, including duplicate attach attempts.
-    from app.platform_restart import activation_barrier_for_chat
-    if activation_barrier_for_chat(db, cmd.chat_id):
+    from app.platform_restart import activation_barrier_wait_id
+    if activation_barrier_wait_id(db, cmd.chat_id) is not None:
       db.rollback()
       return StartContinuationBlocked("activation_pending")
 
@@ -4152,12 +4176,33 @@ class ChatWriterActor:
     chat = _active_chat(db, cmd.chat_id)
     if chat is None:
       raise _PersistFailed("AppendPending: chat not found or deleted")
-    applied = apply_answers_to_last_question(chat, cmd.answers, cmd.question_id)
-    if cmd.require_answer_match and not applied:
-      raise _PersistFailed("AppendPending: no matching question block")
     pending = list(chat.pending_messages or [])
     new_msg = dict(cmd.user_msg)
     ensure_user_cid(new_msg)
+    incoming_cid = new_msg.get("cid")
+    existing_message = None
+    if incoming_cid is not None:
+      for existing in pending:
+        if cid_of(existing) == incoming_cid:
+          existing_message = existing
+          break
+      if existing_message is None:
+        for existing in list(chat.messages or []):
+          if existing.get("role") == "user" and cid_of(existing) == incoming_cid:
+            existing_message = existing
+            break
+
+    feedback_action = None
+    if isinstance(cmd, AppendRestartFeedback):
+      feedback_action = _apply_platform_restart_feedback(
+        db, chat, cmd.answers, cmd.question_id,
+        allow_replay=existing_message is not None,
+      )
+      applied = True
+    else:
+      applied = apply_answers_to_last_question(chat, cmd.answers, cmd.question_id)
+    if cmd.require_answer_match and not applied:
+      raise _PersistFailed("AppendPending: no matching question block")
     if cmd.initiated_by_app_id is not None:
       new_msg["_initiated_by_app_id"] = cmd.initiated_by_app_id
     # Idempotent append: `cid` is untrusted client input, and a retried POST
@@ -4171,14 +4216,15 @@ class ChatWriterActor:
     # otherwise server-minted above. A caller that retries without supplying
     # a cid receives a fresh identity (there is no cross-request key to match),
     # while retries carrying the returned cid remain idempotent.
-    incoming_cid = new_msg.get("cid")
-    if incoming_cid is not None:
-      for existing in pending:
-        if cid_of(existing) == incoming_cid:
-          return {"stored": existing, "pending": pending}
-      for existing in list(chat.messages or []):
-        if existing.get("role") == "user" and cid_of(existing) == incoming_cid:
-          return {"stored": existing, "pending": pending}
+    if existing_message is not None:
+      # This branch is a read-only idempotent acknowledgement. End the actor's
+      # transaction explicitly instead of leaving a read transaction open for
+      # the shared session lifecycle to clean up.
+      db.rollback()
+      return {
+        "stored": existing_message, "pending": pending, "duplicate": True,
+        **({"platform_action": feedback_action} if feedback_action else {}),
+      }
     _ensure_unique_ts(new_msg, pending + list(chat.messages or []))
     if cmd.front:
       pending.insert(0, new_msg)
@@ -4198,7 +4244,10 @@ class ChatWriterActor:
     chat.activity_at = datetime.now(UTC)
     if not _commit_or_rollback(db):
       raise _PersistFailed("AppendPending did not persist")
-    return {"stored": new_msg, "pending": pending}
+    return {
+      "stored": new_msg, "pending": pending, "duplicate": False,
+      **({"platform_action": feedback_action} if feedback_action else {}),
+    }
 
   def _append_steered_user_message(
     self, db, cmd: AppendSteeredUserMessage
@@ -4465,25 +4514,26 @@ class ChatWriterActor:
       question_id = chat.pending_question_id
       db.rollback()
       return PromotePendingBlocked("question", question_id=question_id)
-    activation = db.query(models.ChatWait.id).filter(
-      models.ChatWait.chat_id == cmd.chat_id,
-      models.ChatWait.kind == "platform_activation",
-      models.ChatWait.status.in_(("armed", "met", "expired", "failed")),
-      models.ChatWait.resume_delivered_at.is_(None),
-    ).first()
-    if activation is not None:
+    from app.platform_restart import activation_barrier_wait_id
+    activation_wait_id = activation_barrier_wait_id(db, cmd.chat_id)
+    if activation_wait_id is not None:
       db.rollback()
-      return PromotePendingBlocked("activation", wait_id=activation[0])
+      return PromotePendingBlocked("activation", wait_id=activation_wait_id)
     pending = list(chat.pending_messages or [])
-    # `/goal clear` is no longer a runnable message. A bounded Goal-handoff
-    # marker is likewise no longer runnable after its exact Goal is stopped or
-    # dismissed. Retire either stale control row before it can reach a
-    # provider as ordinary prose, while preserving every real follow-up around
-    # it. This writer-owned admission point serializes the decision with Goal
-    # dismissal and Stop instead of relying on a read-side identity projection.
+    # `/goal clear` is no longer a runnable message. An automatic Goal
+    # continuation is likewise retired once its Goal settles, stops, or gains
+    # another exact owner. This writer-owned admission point prevents a saved
+    # question/monitor/manual continuation from racing a second executor.
     from app.goal_commands import goal_clear_requested
     from app.continuations import continuation_reason
     from app.run_state import GOAL_HANDOFF_REASON, goal_identity_for_run_start
+    from app.goal_plans import (
+      goal_handoff_owner_kind,
+      goal_plan_is_unfinished,
+      goal_terminal_handoff,
+    )
+
+    seen_goal_continuations: set[str] = set()
 
     def runnable_pending(row: dict) -> bool:
       if goal_clear_requested(str(row.get("content") or "")):
@@ -4493,13 +4543,50 @@ class ChatWriterActor:
       _objective, goal_id = goal_identity_for_run_start(
         db, cmd.chat_id, row,
       )
-      return goal_id is not None
+      if goal_id is None or not goal_plan_is_unfinished(
+        db, cmd.chat_id, goal_id,
+      ):
+        return False
+      if goal_id in seen_goal_continuations or goal_handoff_owner_kind(
+        db,
+        cmd.chat_id,
+        goal_id,
+        include_queued_execution=True,
+        excluding_automatic_continuations=True,
+      ) is not None:
+        return False
+      seen_goal_continuations.add(goal_id)
+      return True
 
     runnable = [row for row in pending if runnable_pending(row)]
     retired_control = len(runnable) != len(pending)
     if retired_control:
       pending = runnable
       chat.pending_messages = pending
+    if cmd.allow_goal_continuation and cmd.ending_status == "completed":
+      handoff = goal_terminal_handoff(
+        db, cmd.chat_id, cmd.ending_run_token,
+      )
+      if handoff is not None and not handoff.automatic_allowed:
+        # The normal terminal path saves a real owner card before reaching
+        # this transaction. Fail closed if a future caller skips that seam:
+        # the current run marker remains the recovery owner instead of either
+        # clearing unfinished work or starting an unbounded retry chain.
+        raise _PersistFailed(
+          "PromotePending: exhausted Goal continuation needs an owner card"
+        )
+      if handoff is not None:
+        pending.append({
+          "role": "user",
+          "content": "continue",
+          "kind": "continuation",
+          "continuation_reason": GOAL_HANDOFF_REASON,
+          "goal_id": handoff.goal_id,
+          "goal_settled_count": handoff.settled_count,
+          "cid": f"goal-handoff-{cmd.ending_run_token}",
+          "ts": next_message_ts(list(chat.messages or []) + pending),
+        })
+        chat.pending_messages = pending
     if not pending:
       if retired_control and not _commit_or_rollback(db):
         raise _PersistFailed("PromotePending could not retire stale control")
@@ -6213,6 +6300,167 @@ def _cancel_activation_owners(db, chat, *, goal_id: str | None = None) -> int:
   if chat.pending_question_id in linked:
     chat.pending_question_id = None
   return len(waits)
+
+
+def _apply_platform_restart_feedback(
+  db, chat, answers: dict | None, question_id: str | None,
+  *, allow_replay: bool = False,
+) -> dict:
+  """Close one exact Restart card and its wait without granting authority.
+
+  Written feedback resumes the ordinary conversation. It is committed with
+  the queued continuation so neither a crash nor a competing startup check can
+  leave the text behind an activation barrier. Only the separately typed
+  Restart now option can reach ResolvePlatformRestartCard and claim a restart.
+  """
+  from sqlalchemy.orm.attributes import flag_modified
+
+  from app.platform_restart import ACTIVATION_WAIT_KIND
+  from app.timeutil import now_naive_utc
+
+  if not question_id or not isinstance(answers, dict) or len(answers) != 1:
+    raise _PersistFailed("Restart feedback: one written answer is required")
+  messages = copy.deepcopy(list(chat.messages or []))
+  matched = None
+  for message in reversed(messages):
+    if not isinstance(message, dict) or message.get("role") != "assistant":
+      continue
+    for block in message.get("blocks") or []:
+      if (isinstance(block, dict) and block.get("type") == "question"
+          and block.get("question_id") == question_id):
+        matched = block
+        break
+    if matched is not None:
+      break
+  if matched is None:
+    raise RestartCardStateChanged("Restart feedback: card is no longer present")
+  try:
+    action, question, _labels = _platform_restart_card_envelope(
+      matched, "Restart feedback",
+    )
+  except _PersistFailed as exc:
+    raise RestartCardActionConflict(
+      "This Restart request is no longer active. Tell the agent to check it again."
+    ) from exc
+  prompt = question["question"]
+  value = answers.get(prompt) if isinstance(prompt, str) else None
+  if set(answers) != {prompt} or not isinstance(value, str) or not value.strip():
+    raise RestartCardActionConflict(
+      "Use this Restart card's current writing prompt."
+    )
+
+  # A lost acknowledgement may retry the same cid after this exact settlement.
+  # Equal text from another tab is a distinct response, not idempotency.
+  if (action.get("status") == "responded" and matched.get("answers") == answers
+      and matched.get("selected_options") == {}):
+    if allow_replay:
+      return copy.deepcopy(action)
+    raise RestartCardStateChanged("Restart feedback: card is already settled")
+  if allow_replay:
+    # CID is untrusted client input. An older unrelated row with the same CID
+    # cannot turn a still-open Restart card into a successful duplicate.
+    raise RestartCardActionConflict(
+      "This response identity already belongs to another message. Try again."
+    )
+  if matched.get("answers") or chat.pending_question_id != question_id:
+    raise RestartCardStateChanged("Restart feedback: card is no longer open")
+
+  wait = db.query(models.ChatWait).filter(
+    models.ChatWait.id == action["wait_id"],
+    models.ChatWait.chat_id == chat.id,
+    models.ChatWait.linked_question_id == question_id,
+    models.ChatWait.kind == ACTIVATION_WAIT_KIND,
+    models.ChatWait.resume_delivered_at.is_(None),
+  ).first()
+  if (wait is None or wait.condition_json != action["requirement"]
+      or wait.status not in ("armed", "met", "expired", "failed")):
+    raise RestartCardActionConflict(
+      "This Restart request is no longer active. Tell the agent to check it again."
+    )
+
+  now = now_naive_utc()
+  wait.status = "cancelled"
+  wait.cancelled_at = now
+  action["status"] = "responded"
+  matched["answers"] = copy.deepcopy(answers)
+  matched["selected_options"] = {}
+  chat.messages = messages
+  flag_modified(chat, "messages")
+
+  live = copy.deepcopy(chat.live_assistant)
+  if isinstance(live, dict):
+    for block in live.get("blocks") or []:
+      if (isinstance(block, dict) and block.get("type") == "question"
+          and block.get("question_id") == question_id):
+        block["answers"] = copy.deepcopy(answers)
+        block["selected_options"] = {}
+        live_action = block.get("platform_action")
+        if isinstance(live_action, dict):
+          live_action["status"] = "responded"
+        chat.live_assistant = live
+        break
+  return copy.deepcopy(action)
+
+
+def _platform_restart_card_envelope(
+  block: dict | None, error_prefix: str,
+) -> tuple[dict, dict, dict[str, str]]:
+  """Validate the complete server-issued Restart card authority envelope."""
+  action = block.get("platform_action") if isinstance(block, dict) else None
+  if (
+    not isinstance(action, dict)
+    or action.get("version") not in (1, 2)
+    or action.get("type") != "restart"
+    or not isinstance(action.get("requirement"), dict)
+    or not isinstance(action.get("action_id"), str)
+    or not action["action_id"]
+    or not isinstance(action.get("wait_id"), str)
+    or not action["wait_id"]
+    or action["requirement"].get("action_id") != action["action_id"]
+  ):
+    raise _PersistFailed(f"{error_prefix}: exact typed card was not found")
+
+  questions = block.get("questions")
+  if (
+    not isinstance(questions, list)
+    or len(questions) != 1
+    or not isinstance(questions[0], dict)
+    or questions[0].get("id") != "restart"
+    or not isinstance(questions[0].get("question"), str)
+    or not questions[0]["question"]
+  ):
+    raise _PersistFailed(f"{error_prefix}: server question envelope is invalid")
+  question = questions[0]
+
+  restart_id = action.get("restart_option_id")
+  cancel_id = action.get("cancel_option_id")
+  if not isinstance(restart_id, str) or not restart_id:
+    raise _PersistFailed(f"{error_prefix}: server option identity is invalid")
+  if action["version"] == 1 and (
+    not isinstance(cancel_id, str) or not cancel_id or cancel_id == restart_id
+  ):
+    raise _PersistFailed(f"{error_prefix}: server option identity is invalid")
+  expected = {restart_id: "Restart now"}
+  if action["version"] == 1:
+    expected[cancel_id] = "Not now"
+
+  options = question.get("options")
+  if not isinstance(options, list) or len(options) != len(expected):
+    raise _PersistFailed(f"{error_prefix}: server option envelope is invalid")
+  labels: dict[str, str] = {}
+  for option in options:
+    if (
+      not isinstance(option, dict)
+      or option.get("id") not in expected
+      or option.get("label") != expected[option["id"]]
+      or option.get("on_answer") != "close"
+      or option["id"] in labels
+    ):
+      raise _PersistFailed(f"{error_prefix}: server option envelope is invalid")
+    labels[option["id"]] = option["label"]
+  if set(labels) != set(expected):
+    raise _PersistFailed(f"{error_prefix}: server option envelope is invalid")
+  return action, question, labels
 
 
 def _question_answer_fields(block: dict) -> dict:

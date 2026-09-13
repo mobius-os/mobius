@@ -37,6 +37,16 @@ test('resume, pause and errors share icon geometry without sharing meaning', () 
  assert.match(resumed, /Resumed manually/); assert.match(paused, /Paused/); assert.match(failed, /role="alert"/)
 })
 
+test('automatic resume markers explain what caused the continuation', () => {
+ const restarted = render(h(Resume, { msg: { continuation_reason: 'restart' } }))
+ const goalHandoff = render(h(Resume, { msg: { continuation_reason: 'goal_handoff' } }))
+ const recovered = render(h(Resume, { msg: {} }))
+
+ assert.match(restarted, /Server restarted — continuing automatically/)
+ assert.match(goalHandoff, /An unfinished Goal had no next step — continuing automatically/)
+ assert.match(recovered, /Interrupted work recovered — continuing automatically/)
+})
+
 test('composer Waiting follows the compact Goal identity instead of a tile or badge', async () => {
  const { WaitCard } = await vite.ssrLoadModule('/src/components/ChatView/WaitingChip.jsx')
  const html = render(h(WaitCard, { wait: { id: 'sample', kind: 'condition', description: 'Review approved' }, expanded: false, onToggle: () => {}, onCancel: () => {} }))

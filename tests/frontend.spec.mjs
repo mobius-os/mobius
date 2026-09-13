@@ -934,10 +934,9 @@ test.describe('Scroll position', () => {
       () => document.querySelector('[data-key="history-cid-10"]'),
       { timeout: 5000 },
     )
-    // loadOlderMessages keeps its pagination guard raised until the commit's
-    // requestAnimationFrame. Wait for that boundary before synthesizing the
-    // reader gesture; otherwise the scroll handler correctly ignores the
-    // programmatic prepend settle and this test accidentally races the guard.
+    // The prepend and its viewport compensation complete in one task. Wait for
+    // the resulting layout to settle before synthesizing the next reader
+    // gesture so this return-location check starts from stable geometry.
     await page.evaluate(() => new Promise(resolve =>
       requestAnimationFrame(() => requestAnimationFrame(resolve))))
 

@@ -25,8 +25,8 @@ from sqlalchemy.orm import Session, defer
 from sqlalchemy.orm.attributes import flag_modified
 
 from app import (
-  auth, fs_locks, github_auth, models, project_builders, project_drawer, project_git, providers,
-  questions, workspace_files,
+  auth, drawer_pins, fs_locks, github_auth, models, project_builders,
+  project_drawer, project_git, providers, questions, workspace_files,
 )
 from app.broadcast import get_system_broadcast
 from app.chat import (
@@ -57,7 +57,7 @@ log = logging.getLogger(__name__)
 # Tail window returned by the build-log endpoint. The on-disk log is bounded
 # separately by project_builders; this caps what a single read returns.
 _LOG_TAIL_MAX = 64 * 1024
-_LEGACY_PROJECT_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+_PROJECT_SOURCE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 _PROJECT_COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
 _GITHUB_REPO_RE = re.compile(
   r"^[A-Za-z0-9](?:[A-Za-z0-9_.-]{0,98}[A-Za-z0-9])?/"
@@ -98,6 +98,8 @@ class ProjectPatch(BaseModel):
   name: str | None = Field(default=None, min_length=1, max_length=256)
   color: str | None = Field(default=None, max_length=7)
   pinned: bool | None = None
+  pin_intent_client: str | None = Field(default=None, min_length=1, max_length=64)
+  pin_intent_version: int | None = Field(default=None, ge=1)
 
   @field_validator("name")
   @classmethod
@@ -297,21 +299,6 @@ class ProjectMemberPatch(BaseModel):
     return value
 
 
-class LegacyImport(BaseModel):
-  model_config = ConfigDict(extra="forbid")
-
-  app_id: int = Field(gt=0)
-  legacy_project_id: str = Field(min_length=1, max_length=64)
-  name: str | None = Field(default=None, max_length=256)
-
-  @field_validator("legacy_project_id")
-  @classmethod
-  def valid_legacy_id(cls, value: str) -> str:
-    if value != "default" and not _LEGACY_PROJECT_ID_RE.fullmatch(value):
-      raise ValueError("legacy_project_id must be `default` or a project slug")
-    return value
-
-
 class FileWrite(BaseModel):
   model_config = ConfigDict(extra="forbid")
 
@@ -397,7 +384,6 @@ def _project_response(
     "chat_id": project.chat_id,
     "source_app_id": project.source_app_id,
     "template": project.template_snapshot_json or {},
-    "legacy_source": project.legacy_source_json,
     "artifacts": _project_artifacts_view(project),
     "created_at": project.created_at,
     "updated_at": project.updated_at,
@@ -683,13 +669,11 @@ def _artifact_view(
   source = entry.get("source")
   artifact_type = project_builders.resolve_artifact_type(project, str(builder))
   output_rel = entry.get("output_rel")
-  if not (isinstance(output_rel, str) and output_rel):
-    output_rel = project_builders.default_output_rel(
-      str(artifact_id), str(builder), str(source or ""), artifact_type,
-    )
+  if not isinstance(output_rel, str):
+    output_rel = ""
   log_rel = entry.get("log_rel")
-  if not (isinstance(log_rel, str) and log_rel):
-    log_rel = project_builders.default_log_rel(str(artifact_id))
+  if not isinstance(log_rel, str):
+    log_rel = ""
   source_exists = False
   if isinstance(source, str) and source:
     try:
@@ -708,12 +692,8 @@ def _artifact_view(
     "id": artifact_id,
     "name": entry.get("name") or artifact_id,
     "builder": builder if artifact_type is not None else None,
-    "type_name": (
-      artifact_type.get("name") if artifact_type else entry.get("type_name")
-    ),
-    "preview": (
-      artifact_type.get("preview") if artifact_type else entry.get("preview")
-    ),
+    "type_name": entry.get("type_name"),
+    "preview": entry.get("preview"),
     "source": source,
     "output_rel": output_rel,
     "log_rel": log_rel,
@@ -738,39 +718,29 @@ def _project_artifacts_view(project: models.Project) -> list[dict[str, Any]]:
   ]
 
 
-def _previews_to_artifacts(
+def _declared_previews_to_artifacts(
   snapshot: dict, root: Path,
 ) -> list[dict[str, Any]]:
-  """Map a template's website/latex previews to buildable artifact entries.
-
-  A preview declares its OUTPUT path and kind; the artifact needs the SOURCE.
-  A pdf preview (``main.pdf``) builds from the matching ``.tex`` source; an
-  html preview's path is both source and output entry. A preview is registered
-  only when its mapped source file actually exists in the freshly scaffolded
-  project, so no artifact points at a file that was never copied.
-  """
+  """Register only preview sources and builders declared by the template."""
   artifacts: list[dict[str, Any]] = []
   seen: set[str] = set()
   for preview in snapshot.get("previews") or []:
     if not isinstance(preview, dict):
       continue
-    kind = str(preview.get("kind") or "").lower()
-    output_path = str(preview.get("path") or "").lstrip("/")
-    if not output_path:
+    source = preview.get("source")
+    builder = preview.get("builder")
+    if not isinstance(source, str) or not source:
       continue
-    if kind == "pdf":
-      source = Path(output_path).with_suffix(".tex").as_posix()
-    elif kind in ("html", "website"):
-      source = output_path
-      kind = "html"
-    else:
+    if not isinstance(builder, str) or not builder:
       continue
-    artifact_type = project_builders.artifact_type_for_source(
-      snapshot, source, preview=kind,
-    )
+    artifact_type = next((
+      value for value in project_builders.template_artifact_types(snapshot)
+      if value["id"] == builder
+    ), None)
+    if builder == "app":
+      artifact_type = dict(project_builders.BUILTIN_ARTIFACT_TYPES["app"])
     if artifact_type is None:
       continue
-    builder = artifact_type["id"]
     if not (root / source).is_file():
       continue
     artifact_id = project_builders.slug_artifact_id(
@@ -828,8 +798,8 @@ def _safe_template(template: dict, app: models.App | None = None) -> dict:
       {
         "id": str(value.get("id") or "preview"),
         "name": str(value.get("name") or "Preview"),
-        "kind": str(value.get("kind") or "html"),
-        "path": str(value.get("path") or ""),
+        "source": str(value.get("source") or ""),
+        "builder": str(value.get("builder") or ""),
       }
       for value in template.get("previews") or []
       if isinstance(value, dict)
@@ -850,9 +820,9 @@ def _safe_template(template: dict, app: models.App | None = None) -> dict:
         "extensions": [
           str(extension) for extension in value.get("extensions") or []
         ],
-        "preview": str(value.get("preview") or "html"),
+        "preview": str(value.get("preview") or ""),
         "script": str(value.get("script") or ""),
-        "output": str(value.get("output") or "{source}"),
+        "output": str(value.get("output") or ""),
       }
       for value in template.get("artifact_types") or []
       if isinstance(value, dict)
@@ -945,7 +915,7 @@ def _read_artifact_records(db: Session) -> list[tuple[models.App, Path, dict[str
     version = record.get("current_version")
     if (
       artifact_id != path.stem
-      or not _LEGACY_PROJECT_ID_RE.fullmatch(artifact_id)
+      or not _PROJECT_SOURCE_ID_RE.fullmatch(artifact_id)
       or not isinstance(version, int)
       or version < 1
     ):
@@ -975,11 +945,10 @@ def _linked_artifact_source(
 ) -> tuple[Path, dict, models.App | None]:
   """Resolve declared builder source in place; a rendered Page is not provenance."""
   metadata = record.get("project_import")
-  if not isinstance(metadata, dict) or metadata.get("template_id") not in {
-    "webstudio:website", "latex:document",
-  }:
+  template_id = metadata.get("template_id") if isinstance(metadata, dict) else None
+  if not isinstance(template_id, str) or not template_id:
     raise HTTPException(409, "This Page has no identifiable builder source.")
-  template_row = _installed_template(db, metadata["template_id"])
+  template_row = _installed_template(db, template_id)
   if template_row is None:
     raise HTTPException(409, "Install this work's builder before adding it to Projects.")
   source_locator = storage_root / "sources" / str(record["id"])
@@ -1012,11 +981,14 @@ def _linked_artifact_source(
 
 
 def _source_project(db: Session, kind: str, source_id: str) -> models.Project | None:
-  # Old independent imports still count as managed work. Never replace them or
-  # silently retarget their saved source; their owner can deliberately migrate.
+  """Return the Project that currently manages this source in place."""
   for project in db.query(models.Project).all():
     imported = (project.template_snapshot_json or {}).get("imported_from") or {}
-    if imported.get("kind") == kind and str(imported.get("id")) == source_id:
+    if (
+      imported.get("management") == "linked"
+      and imported.get("kind") == kind
+      and str(imported.get("id")) == source_id
+    ):
       return project
   return None
 
@@ -1208,10 +1180,9 @@ def create_project(
     try:
       _copy_template_files(root, template, app)
       snapshot = _safe_template(template, app)
-      # A template's website/latex previews become buildable artifacts up
-      # front, so a new project is never left half-wired: the file grid, the
-      # artifact list, and the build button all reference the same registry.
-      artifacts = _previews_to_artifacts(snapshot, root)
+      # Declared previews become buildable artifacts up front, so the file
+      # grid, artifact list, and build button share one explicit registry.
+      artifacts = _declared_previews_to_artifacts(snapshot, root)
       project = models.Project(
         id=project_id,
         name=body.name,
@@ -1304,27 +1275,8 @@ def import_github_project(
       "source_app_name": None,
       "source_app_version": None,
     }
-    if (root / "index.html").is_file():
-      snapshot["previews"] = [{
-        "id": "website", "name": "Website", "kind": "html", "path": "index.html",
-      }]
-      snapshot["artifact_types"] = [{
-        "id": "website", "name": "Website", "extensions": ["html", "htm"],
-        "preview": "html", "script": "", "output": "{source}",
-      }]
-    else:
-      top_level_tex = next(iter(sorted(root.glob("*.tex"))), None)
-      if top_level_tex is not None:
-        snapshot["previews"] = [{
-          "id": "document", "name": "Document", "kind": "pdf",
-          "path": top_level_tex.name,
-        }]
-        snapshot["artifact_types"] = [{
-          "id": "latex", "name": "PDF", "extensions": ["tex"],
-          "preview": "pdf", "script": "", "output": "{stem}.pdf",
-        }]
     try:
-      artifacts = _previews_to_artifacts(snapshot, root)
+      artifacts = _declared_previews_to_artifacts(snapshot, root)
       project = models.Project(
         id=project_id,
         name=body.name or body.repository.split("/", 1)[1],
@@ -1356,6 +1308,7 @@ def list_project_import_sources(
     (str(meta.get("kind")), str(meta.get("id")))
     for project in projects
     if (meta := (project.template_snapshot_json or {}).get("imported_from"))
+    and meta.get("management") == "linked"
   }
   roots = {_project_root(project) for project in projects}
   artifacts = []
@@ -1377,6 +1330,7 @@ def list_project_import_sources(
       "current_version": int(record["current_version"]),
       "updated_at": record.get("updated_at") or record.get("created_at"),
       "chat_id": record.get("chat_id"), "project_type": snapshot["key"],
+      "template_kind": snapshot["kind"],
     })
 
   apps = []
@@ -1497,7 +1451,7 @@ def _import_project_source(body: ProjectImport, db: Session):
       root_path=root.relative_to(Path(get_settings().data_dir).resolve()).as_posix(),
       chat_id=None, source_app_id=template_app.id if template_app is not None else None,
       template_snapshot_json=snapshot,
-      artifacts_json=_previews_to_artifacts(snapshot, root) or None,
+      artifacts_json=_declared_previews_to_artifacts(snapshot, root) or None,
     )
     db.add(project)
     try:
@@ -1508,179 +1462,6 @@ def _import_project_source(body: ProjectImport, db: Session):
       raise
     db.refresh(project)
     return _project_response(project)
-
-
-def _legacy_storage_root(app: models.App, legacy_id: str) -> Path:
-  data_root = Path(get_settings().data_dir).resolve()
-  app_storage = (data_root / "apps" / str(app.id)).resolve()
-  base = app_storage if legacy_id == "default" else app_storage / "projects" / legacy_id
-  root = (base / "files").resolve()
-  try:
-    root.relative_to(app_storage)
-  except ValueError as exc:
-    raise HTTPException(400, "Invalid legacy project root.") from exc
-  return root
-
-
-def _read_legacy_projects(app: models.App) -> list[dict]:
-  storage = Path(get_settings().data_dir) / "apps" / str(app.id)
-  metadata: dict[str, str] = {}
-  try:
-    raw = json.loads((storage / "projects.json").read_text(encoding="utf-8"))
-    if isinstance(raw, list):
-      for row in raw:
-        if isinstance(row, dict) and isinstance(row.get("id"), str):
-          metadata[row["id"]] = str(row.get("name") or row["id"])
-  except (OSError, ValueError, TypeError):
-    pass
-  ids = set(metadata)
-  if (storage / "files").is_dir():
-    ids.add("default")
-  projects_dir = storage / "projects"
-  if projects_dir.is_dir():
-    for child in projects_dir.iterdir():
-      if child.is_dir() and not child.is_symlink() and _LEGACY_PROJECT_ID_RE.fullmatch(child.name):
-        ids.add(child.name)
-  return [
-    {"legacy_project_id": project_id, "name": metadata.get(project_id) or (
-      "Default project" if project_id == "default" else project_id.replace("-", " ").title()
-    )}
-    for project_id in sorted(ids, key=lambda value: (value != "default", value))
-    if _legacy_storage_root(app, project_id).is_dir()
-  ]
-
-
-@router.get("/legacy")
-def list_legacy_projects(
-  _: models.Owner = Depends(get_current_owner),
-  db: Session = Depends(get_db),
-):
-  imported = {
-    (int(source.get("app_id")), str(source.get("project_id")))
-    for (source,) in db.query(models.Project.legacy_source_json).filter(
-      models.Project.legacy_source_json.isnot(None),
-    ).all()
-    if isinstance(source, dict) and source.get("app_id") is not None
-  }
-  out = []
-  apps = db.query(models.App).filter(
-    models.App.deleted_at.is_(None),
-    models.App.slug.in_(("latex", "webstudio")),
-  ).order_by(models.App.name).all()
-  for app in apps:
-    for row in _read_legacy_projects(app):
-      key = (app.id, row["legacy_project_id"])
-      out.append({
-        **row,
-        "app_id": app.id,
-        "app_name": app.name,
-        "imported": key in imported,
-      })
-  return out
-
-
-def _legacy_chat_id(app: models.App, legacy_id: str, db: Session) -> str | None:
-  storage = Path(get_settings().data_dir) / "apps" / str(app.id)
-  base = storage if legacy_id == "default" else storage / "projects" / legacy_id
-  try:
-    raw = json.loads((base / "chat_id.json").read_text(encoding="utf-8"))
-  except (OSError, ValueError, TypeError):
-    return None
-  value = raw.get("id") if isinstance(raw, dict) else None
-  if not isinstance(value, str):
-    return None
-  chat = db.query(models.Chat).filter(
-    models.Chat.id == value,
-    models.Chat.deleted_at.is_(None),
-  ).first()
-  if chat is None:
-    return None
-  linked = db.query(models.Project.id).filter(
-    (models.Project.chat_id == value)
-    | (models.Project.id == chat.project_id)
-  ).first()
-  return None if linked else value
-
-
-@router.post("/import-legacy", dependencies=[Depends(reject_cross_site)])
-def import_legacy_project(
-  body: LegacyImport,
-  owner: models.Owner = Depends(get_current_owner),
-  db: Session = Depends(get_db),
-):
-  app = db.query(models.App).filter(
-    models.App.id == body.app_id,
-    models.App.deleted_at.is_(None),
-  ).first()
-  if app is None or app.slug not in ("latex", "webstudio"):
-    raise HTTPException(404, "Compatible legacy app not found.")
-  root = _legacy_storage_root(app, body.legacy_project_id)
-  if not root.is_dir():
-    raise HTTPException(404, "Legacy project files were not found.")
-  for project in db.query(models.Project).filter(
-    models.Project.legacy_source_json.isnot(None),
-  ).all():
-    source = project.legacy_source_json or {}
-    if source.get("app_id") == app.id and source.get("project_id") == body.legacy_project_id:
-      if project.deleted_at is not None:
-        raise HTTPException(409, "This imported project is in recovery.")
-      return _project_response(project, _live_project_chat_rows(db, project.id))
-
-  legacy_rows = _read_legacy_projects(app)
-  legacy = next(
-    (row for row in legacy_rows if row["legacy_project_id"] == body.legacy_project_id),
-    None,
-  )
-  name = (body.name or (legacy or {}).get("name") or body.legacy_project_id).strip()
-  templates = app.project_templates_json or []
-  template = next((row for row in templates if isinstance(row, dict)), {
-    "id": app.slug,
-    "name": app.name,
-    "description": app.description,
-    "skills": [],
-    "dependencies": [],
-    "files": {},
-  })
-  snapshot = _safe_template(template, app)
-  artifacts = _previews_to_artifacts(snapshot, root)
-  project_id = str(uuid.uuid5(
-    uuid.NAMESPACE_URL,
-    f"mobius:legacy-project:{app.id}:{body.legacy_project_id}",
-  ))
-  chat_id = _legacy_chat_id(app, body.legacy_project_id, db)
-  legacy_chat = db.get(models.Chat, chat_id) if chat_id else None
-  if legacy_chat is not None:
-    legacy_chat.project_id = project_id
-  project = models.Project(
-    id=project_id,
-    name=name,
-    project_type=_template_key(template, app),
-    root_path=root.relative_to(Path(get_settings().data_dir).resolve()).as_posix(),
-    chat_id=None,
-    source_app_id=app.id,
-    template_snapshot_json=snapshot,
-    artifacts_json=artifacts or None,
-    legacy_source_json={
-      "app_id": app.id,
-      "project_id": body.legacy_project_id,
-      "storage_root": root.parent.relative_to(
-        Path(get_settings().data_dir).resolve(),
-      ).as_posix(),
-    },
-  )
-  db.add(project)
-  try:
-    db.commit()
-  except IntegrityError:
-    db.rollback()
-    existing = db.query(models.Project).filter(models.Project.id == project_id).first()
-    if existing is not None:
-      return _project_response(existing, _live_project_chat_rows(db, existing.id))
-    raise
-  db.refresh(project)
-  return _project_response(
-    project, [legacy_chat] if legacy_chat is not None else [],
-  )
 
 
 @router.post(
@@ -2259,10 +2040,21 @@ def patch_project(
     project.name = body.name
   if "color" in body.model_fields_set:
     project.color = body.color
-  if body.pinned is not None:
-    project_drawer.set_pinned(db, project.id, body.pinned)
   try:
-    db.commit()
+    if body.pinned is not None:
+      with drawer_pins.serialized_write():
+        superseded = drawer_pins.intent_is_superseded(
+          body.pin_intent_client, body.pin_intent_version,
+        )
+        if not superseded:
+          project_drawer.set_pinned(db, project.id, body.pinned)
+        db.commit()
+        if not superseded:
+          drawer_pins.record_committed_intent(
+            body.pin_intent_client, body.pin_intent_version,
+          )
+    else:
+      db.commit()
   except IntegrityError as exc:
     db.rollback()
     raise HTTPException(409, "Project could not be updated.") from exc
@@ -2301,15 +2093,16 @@ async def delete_project(
   for chat in chats:
     bump_run_generation(chat.id)
   with PROJECT_LIFECYCLE_LOCK:
-    deleted_at = now_naive_utc()
-    project.deleted_at = deleted_at
-    from app.shared_app_retention import stage_project_shared_app_delete
-    stage_project_shared_app_delete(db, str(project.id), deleted_at)
-    from app.chat_waits import stage_cancel_waits_for_chat
-    for chat in chats:
-      stage_cancel_waits_for_chat(db, chat.id)
-      chat.deleted_at = deleted_at
-    db.commit()
+    with drawer_pins.serialized_write():
+      deleted_at = now_naive_utc()
+      project.deleted_at = deleted_at
+      from app.shared_app_retention import stage_project_shared_app_delete
+      stage_project_shared_app_delete(db, str(project.id), deleted_at)
+      from app.chat_waits import stage_cancel_waits_for_chat
+      for chat in chats:
+        stage_cancel_waits_for_chat(db, chat.id)
+        chat.deleted_at = deleted_at
+      db.commit()
   for chat in chats:
     questions.cancel(chat.id)
     mark_chat_deleted(chat.id)
@@ -2338,27 +2131,28 @@ def recover_project(
   db: Session = Depends(get_db),
 ):
   with PROJECT_LIFECYCLE_LOCK:
-    project = db.query(models.Project).filter(
-      models.Project.id == project_id,
-      models.Project.deleted_at.isnot(None),
-    ).first()
-    if project is None:
-      raise HTTPException(404, "Project not found or not deleted.")
-    if now_naive_utc() - project.deleted_at >= SOFT_DELETE_TTL:
-      raise HTTPException(410, "Recovery window has expired.")
-    if not _project_root(project).is_dir():
-      raise HTTPException(409, "Project files are unavailable.")
-    deleted_at = project.deleted_at
-    from app.shared_app_retention import stage_project_shared_app_recovery
-    stage_project_shared_app_recovery(db, str(project.id), deleted_at)
-    chats = db.query(models.Chat).filter(
-      models.Chat.project_id == project.id,
-      models.Chat.deleted_at == deleted_at,
-    ).all()
-    project.deleted_at = None
-    for chat in chats:
-      chat.deleted_at = None
-    db.commit()
+    with drawer_pins.serialized_write():
+      project = db.query(models.Project).filter(
+        models.Project.id == project_id,
+        models.Project.deleted_at.isnot(None),
+      ).first()
+      if project is None:
+        raise HTTPException(404, "Project not found or not deleted.")
+      if now_naive_utc() - project.deleted_at >= SOFT_DELETE_TTL:
+        raise HTTPException(410, "Recovery window has expired.")
+      if not _project_root(project).is_dir():
+        raise HTTPException(409, "Project files are unavailable.")
+      deleted_at = project.deleted_at
+      from app.shared_app_retention import stage_project_shared_app_recovery
+      stage_project_shared_app_recovery(db, str(project.id), deleted_at)
+      chats = db.query(models.Chat).filter(
+        models.Chat.project_id == project.id,
+        models.Chat.deleted_at == deleted_at,
+      ).all()
+      project.deleted_at = None
+      for chat in chats:
+        chat.deleted_at = None
+      db.commit()
   for chat in chats:
     recover_chat_generation(chat.id)
     get_system_broadcast().publish(

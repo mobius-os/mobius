@@ -44,6 +44,11 @@ _DEFAULT_ACCESS_TTL = timedelta(hours=1)
 # default TTL and the next refresh corrects it.
 _MAX_ACCESS_TTL_SECONDS = 366 * 24 * 60 * 60
 
+# Keep the owner-facing product identity in one place while the stable
+# connector API and persisted connection vocabulary remain unchanged.
+INTEGRATIONS_PRODUCT_NAME = "Integrations"
+OAUTH_CLIENT_NAME = f"Möbius {INTEGRATIONS_PRODUCT_NAME}"
+
 # Per-connector async refresh locks. One API worker → an asyncio.Lock is a
 # sufficient single-flight guard so two concurrent turns never double-spend a
 # rotating refresh token.
@@ -313,7 +318,7 @@ def client_metadata_document() -> dict:
   url = client_metadata_url()
   return {
     "client_id": url,
-    "client_name": "Möbius Connections",
+    "client_name": OAUTH_CLIENT_NAME,
     "client_uri": get_settings().frontend_origin.rstrip("/"),
     "redirect_uris": [redirect_uri()],
     "token_endpoint_auth_method": "none",
@@ -357,7 +362,7 @@ async def ensure_client(db, discovery: Discovery) -> tuple[str, str | None]:
     "POST",
     discovery.registration_endpoint,
     json_body={
-      "client_name": "Möbius Connections",
+      "client_name": OAUTH_CLIENT_NAME,
       "redirect_uris": [redirect_uri()],
       "token_endpoint_auth_method": "none",
       "grant_types": ["authorization_code", "refresh_token"],

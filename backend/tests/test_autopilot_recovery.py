@@ -1,7 +1,7 @@
 """Recovery resumes an existing grant, never grants or publishes anything."""
 
 import asyncio
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -27,12 +27,60 @@ BLOCKED_EVENT = "2026-07-02T00:00:00.000000Z"
 NEXT_EVENT = "2026-07-03T00:00:00.000000Z"
 
 
+@pytest.fixture(autouse=True)
+def _contribute_owned_recovery_policy(monkeypatch):
+  """Core tests verify the CAS adapter; Contribute tests own record policy."""
+  async def policy(_app, _owner, path, body):
+    assert path == "autopilot/reviewed-resolution"
+    row = body["grant"]
+    record = body["record"]
+    plan = record.get("plan")
+    review = record.get("quality_review")
+    exact_target = isinstance(plan, dict) and (
+      plan.get("repo") or record.get("repo"), record.get("number"),
+      record.get("head_repository") or plan.get("head_repository"),
+      plan.get("branch") or record.get("branch"), plan.get("repo_path"),
+    ) == (
+      row.get("target_repo"), row.get("target_pr_number"),
+      row.get("target_head_repository"), row.get("target_branch"),
+      row.get("target_repo_path"),
+    )
+    try:
+      reviewed_at = datetime.fromisoformat(
+        str(review.get("reviewed_at") or "").replace("Z", "+00:00"),
+      )
+      blocked_at = datetime.fromisoformat(row["blocked_at"])
+      now = datetime.fromisoformat(body["now"])
+    except (AttributeError, KeyError, TypeError, ValueError):
+      reviewed_at = blocked_at = now = None
+    eligible = bool(
+      record.get("id") == row.get("record_id")
+      and record.get("repo") == row.get("target_repo")
+      and record.get("type") == "pr"
+      and record.get("status") in {"open", "draft"}
+      and not record.get("needs_attention")
+      and not record.get("attention")
+      and exact_target
+      and isinstance(review, dict)
+      and review.get("state") == "all_clear"
+      and review.get("reviewed_head_sha") in {
+        row.get("granted_head_sha"),
+        plan.get("attribution_normalized_from") if isinstance(plan, dict) else None,
+      }
+      and plan.get("head_sha") == row.get("granted_head_sha")
+      and reviewed_at is not None and blocked_at <= reviewed_at <= now + timedelta(minutes=5)
+    )
+    return {"eligible": eligible}
+
+  monkeypatch.setattr(recovery.app_services, "invoke_policy", policy)
+
+
 def _iso(value):
   return value.isoformat() + "Z"
 
 
 @pytest.fixture
-def blocked(db, monkeypatch):
+def blocked(db, auth, monkeypatch):
   app = models.App(
     name="Recovery test", slug="recovery-test", source_dir="recovery-test",
     github_access=True,
@@ -314,6 +362,22 @@ def test_owner_interruption_wins_between_recovery_read_and_compare_swap(
   else:
     assert row.enabled is False
     assert row.state == "idle"
+
+
+def test_retargeting_the_grant_while_app_policy_runs_blocks_recovery(
+  blocked, monkeypatch,
+):
+  async def retarget_then_approve(*_args, **_kwargs):
+    with SessionLocal() as owner:
+      row = autopilot.get_row(owner, blocked.app_id, blocked.record_id)
+      row.target_branch = "fix/new-target"
+      owner.commit()
+    return {"eligible": True}
+
+  monkeypatch.setattr(recovery.app_services, "invoke_policy", retarget_then_approve)
+  assert _recover() == 0
+  assert _row(blocked).state == "blocked"
+  assert _row(blocked).target_branch == "fix/new-target"
 
 
 def test_failed_drawer_commit_rolls_back_recovery_and_can_retry(blocked, monkeypatch):

@@ -11,7 +11,8 @@ import {
 
 const PHYSICAL_BOTTOM_EPSILON_PX = 4
 export const FOLLOW_STICK_BAND_PX = 70
-export const HISTORY_PREFETCH_PX = 240
+export const HISTORY_PREFETCH_MIN_PX = 240
+export const HISTORY_PREFETCH_VIEWPORTS = 4
 
 export function olderHistoryRetryShown(error, offset) {
   return Boolean(error) && Number(offset) > 0
@@ -19,8 +20,24 @@ export function olderHistoryRetryShown(error, offset) {
 
 export function olderHistoryShouldLoad(scrollEl, { userDriven = false } = {}) {
   if (!scrollEl) return false
-  return scrollEl.scrollHeight <= scrollEl.clientHeight + 1
-    || (userDriven && scrollEl.scrollTop <= HISTORY_PREFETCH_PX)
+  const viewportHeight = Number(scrollEl.clientHeight) || 0
+  const prefetchDistance = Math.max(
+    HISTORY_PREFETCH_MIN_PX,
+    viewportHeight * HISTORY_PREFETCH_VIEWPORTS,
+  )
+  return scrollEl.scrollHeight <= viewportHeight + 1
+    || (userDriven && scrollEl.scrollTop <= prefetchDistance)
+}
+
+/** Historical rows are inserted because of the reader's own upward gesture.
+ * Their same-frame compensation may preserve that exact viewport even while
+ * the gesture/touch gate remains closed, but only while no newer scroll intent
+ * has landed since the coordinate was captured. */
+export function paginationViewportCompensationAllowed({
+  capturedVersion,
+  currentVersion,
+}) {
+  return capturedVersion === currentVersion
 }
 
 /** The single submit-time rule used by direct, queued, and steered user rows.

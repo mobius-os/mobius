@@ -113,7 +113,6 @@ def _request(client, auth, method, path, body=None, extra_headers=None):
 def test_real_delegated_bearer_is_rejected_across_owner_control_surface(
   client, owner_token, db, tmp_path, monkeypatch,
 ):
-  from app.routes import common as common_routes
   from app.routes import community as community_routes
 
   context = _authorization_context(client, owner_token, db, tmp_path)
@@ -124,23 +123,12 @@ def test_real_delegated_bearer_is_rejected_across_owner_control_surface(
   async def fake_existing_publication(*_args, **_kwargs):
     return JSONResponse({"ok": True})
 
-  async def disconnected_profile(_db, _principal):
-    return {
-      "identity": {"name": "", "handle": ""},
-      "profile": None,
-      "account_error": None,
-    }
-
   monkeypatch.setattr(community_routes, "_request", fake_request)
   monkeypatch.setattr(
     community_routes,
     "_publish_existing_github_revision",
     fake_existing_publication,
   )
-  monkeypatch.setattr(common_routes, "_refresh_profile_cache", disconnected_profile)
-  monkeypatch.setattr(common_routes, "_load_identity", lambda: {"joined_at": None})
-  monkeypatch.setattr(common_routes, "_save_identity", lambda _identity: None)
-
   idempotency = {"Idempotency-Key": "owner-control-0001"}
   cases = [
     ("POST", "/api/projects/missing/invites", {"role": "viewer"}, None),
@@ -196,49 +184,6 @@ def test_real_delegated_bearer_is_rejected_across_owner_control_surface(
       "/api/community/editorial/spotlight",
       {"items": [{"app_id": "control-app"}]},
       idempotency,
-    ),
-    ("POST", "/api/common/join", None, None),
-    ("PUT", "/api/common/me", {"bio": "Updated"}, None),
-    ("POST", "/api/common/send", {"to": "", "text": "Hello"}, None),
-    ("POST", "/api/common/publish", {"text": ""}, None),
-    ("POST", "/api/common/like", {"post_id": "invalid"}, None),
-    ("POST", "/api/common/reply", {"post_id": "invalid", "text": "Reply"}, None),
-    ("POST", "/api/common/groups", {"name": "", "members": []}, None),
-    ("POST", "/api/common/groups/invalid/send", {"text": "Hello"}, None),
-    ("DELETE", "/api/common/groups/invalid", None, None),
-    (
-      "POST",
-      "/api/common/groups/invalid/members",
-      {"host": "invalid"},
-      None,
-    ),
-    (
-      "POST",
-      "/api/common/objects/invalid/invites",
-      {"role": "viewer"},
-      None,
-    ),
-    ("DELETE", "/api/common/objects/invalid/members/peer.example", None, None),
-    ("DELETE", "/api/common/objects/invalid", None, None),
-    ("POST", "/api/common/objects/invalid/invalid/leave", None, None),
-    (
-      "POST",
-      "/api/common/objects/invitations/invalid/invalid/decline",
-      None,
-      None,
-    ),
-    ("POST", "/api/common/objects", {"app": "", "doc": {}}, None),
-    (
-      "POST",
-      "/api/common/objects/join",
-      {"app": "common", "invite": "invalid"},
-      None,
-    ),
-    (
-      "PUT",
-      "/api/common/objects/invalid/invalid/state",
-      {"doc": {}, "expected_version": 1},
-      None,
     ),
     (
       "POST",
@@ -351,13 +296,6 @@ def test_intended_app_principals_keep_their_existing_control_paths(
     fake_existing_publication,
   )
 
-  invalid_dm = client.post(
-    "/api/common/send",
-    json={"to": "", "text": "Hello"},
-    headers=context["app"],
-  )
-  assert invalid_dm.status_code == 400, invalid_dm.text
-
   no_site = client.post(
     f"/api/apps/{app_id}/publish",
     json={},
@@ -388,94 +326,6 @@ def test_intended_app_principals_keep_their_existing_control_paths(
     ("PUT", "/v1/community/apps/app:1234/rating"),
     ("POST", "existing-publication"),
   ]
-
-
-def test_owner_top_level_and_app_principals_keep_common_object_controls(
-  client, owner_token, db, tmp_path, monkeypatch,
-):
-  from app.routes import common as common_routes
-  from app.routes import common_objects as object_routes
-
-  context = _authorization_context(client, owner_token, db, tmp_path)
-  peer_host = "peer.example.com"
-  remote_oid = "b" * 32
-
-  class FakeResponse:
-    status_code = 200
-
-    def json(self):
-      return {
-        "object": {
-          "app": "common",
-          "kind": "board",
-          "label": "Joined object",
-          "members": {common_routes._own_host(): {"role": "editor"}},
-        },
-        "doc": {"value": "remote"},
-      }
-
-  async def fake_federation_request(*_args, **_kwargs):
-    return FakeResponse()
-
-  monkeypatch.setattr(
-    object_routes, "federation_request", fake_federation_request,
-  )
-
-  app_created = client.post(
-    "/api/common/objects",
-    json={
-      "app": "common",
-      "kind": "board",
-      "label": "App object",
-      "doc": {"value": 1},
-    },
-    headers=context["app"],
-  )
-  assert app_created.status_code == 200, app_created.text
-  app_oid = app_created.json()["id"]
-
-  app_write = client.put(
-    f"/api/common/objects/{common_routes._own_host()}/{app_oid}/state",
-    json={"doc": {"value": 2}, "expected_version": 1},
-    headers=context["app"],
-  )
-  assert app_write.status_code == 200, app_write.text
-  assert app_write.json() == {"status": "ok", "version": 2}
-
-  owner_created = client.post(
-    "/api/common/objects",
-    json={"app": "common", "doc": {"value": "owner"}},
-    headers=context["owner"],
-  )
-  assert owner_created.status_code == 200, owner_created.text
-
-  top_level_created = client.post(
-    "/api/common/objects",
-    json={"app": "common", "doc": {"value": "top-level"}},
-    headers=context["top_level"],
-  )
-  assert top_level_created.status_code == 200, top_level_created.text
-
-  invitation_oid = "a" * 32
-  invitation_path = object_routes._invitation_path(peer_host, invitation_oid)
-  invitation_path.write_text('{"app":"common"}')
-  declined = client.post(
-    f"/api/common/objects/invitations/{peer_host}/{invitation_oid}/decline",
-    headers=context["app"],
-  )
-  assert declined.status_code == 200, declined.text
-  assert json.loads(invitation_path.read_text())["status"] == "declined"
-
-  joined = client.post(
-    "/api/common/objects/join",
-    json={
-      "app": "common",
-      "invite": f"{remote_oid}@{peer_host}#{'s' * 24}",
-    },
-    headers=context["app"],
-  )
-  assert joined.status_code == 200, joined.text
-  assert joined.json()["status"] == "joined"
 
 
 def test_owner_top_level_and_app_principals_keep_notification_controls(

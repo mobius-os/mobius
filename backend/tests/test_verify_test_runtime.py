@@ -100,12 +100,21 @@ def test_healthcheck_marks_only_the_mounted_checkout_safe(monkeypatch):
 def test_test_compose_pins_runtime_to_mounted_checkout():
   compose = (ROOT / "docker-compose.test.yml").read_text(encoding="utf-8")
   assert "MOBIUS_TEST_RUNTIME=1" in compose
+  assert "MOBIUS_TEST_DATABASE_ISOLATED=1" in compose
   assert "MOBIUS_TEST_PLATFORM_SOURCE=/workspace" in compose
   assert "BUILD_SHA=${GITHUB_SHA:-unknown}" in compose
   assert "./:/workspace:ro" in compose
   assert 'python3", "/app/scripts/verify_test_runtime.py"' in compose
   pytest_service = compose.split("\n  pytest:\n", 1)[1].split("\nvolumes:\n", 1)[0]
   assert "\n    init: true\n" in pytest_service
+
+
+def test_manual_e2e_verifier_requires_explicit_database_isolation():
+  verifier = (
+    ROOT / "scripts" / "verify-manual-e2e-runtime.py"
+  ).read_text(encoding="utf-8")
+  assert "MOBIUS_TEST_DATABASE_ISOLATED=1" in verifier
+  assert 'env.get("MOBIUS_TEST_DATABASE_ISOLATED")' in verifier
 
 
 def test_test_wrapper_isolates_compose_and_rejects_stale_images():

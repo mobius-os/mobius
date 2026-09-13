@@ -16,14 +16,10 @@ from __future__ import annotations
 
 import logging
 import os
-import re
 from dataclasses import dataclass
-from datetime import UTC, datetime
 
-from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
-from app import models
 from app.install import install_from_manifest
 
 log = logging.getLogger("mobius.bootstrap")
@@ -34,7 +30,7 @@ log = logging.getLogger("mobius.bootstrap")
 # reviewed commit provides the same immutable input until it does.
 BOOTSTRAP_STORE_MANIFEST_URL = (
   "https://raw.githubusercontent.com/mobius-os/app-store/"
-  "4371719331644b7f5005ef46f2011f7cab0f4851/mobius.json"
+  "7140bc9afa2f60498993567ab4628a8b40345d14/mobius.json"
 )
 
 # The Skills app (browse/install ecosystem skills + the skill-agent chat).
@@ -56,7 +52,10 @@ BOOTSTRAP_MEMORY_MANIFEST_URL = (
 BOOTSTRAP_REFLECTION_MANIFEST_URL = (
   "https://raw.githubusercontent.com/mobius-os/app-reflection/main/mobius.json"
 )
-BOOTSTRAP_CONNECTIONS_MANIFEST_URL = (
+BOOTSTRAP_INTEGRATIONS_MANIFEST_URL = (
+  "https://raw.githubusercontent.com/mobius-os/app-integrations/main/mobius.json"
+)
+BOOTSTRAP_INTEGRATIONS_PREDECESSOR_MANIFEST_URL = (
   "https://raw.githubusercontent.com/mobius-os/app-connections/main/mobius.json"
 )
 BOOTSTRAP_IDENTITY_MANIFEST_URL = (
@@ -65,25 +64,12 @@ BOOTSTRAP_IDENTITY_MANIFEST_URL = (
 
 
 @dataclass(frozen=True)
-class _PublishedBootstrapApp:
-  manifest_id: str
-  manifest_url: str
-  published_at: datetime
-
-
-# Activation gate for the audited Social release. Keep this closed until the
-# migrated release is public, then replace None with its manifest id, immutable
-# commit-pinned manifest URL, and publication time. The timestamp separates
-# post-publication deployments from existing owners without another settings
-# table or a one-shot install migration.
-BOOTSTRAP_SOCIAL_RELEASE: _PublishedBootstrapApp | None = None
-
-
-@dataclass(frozen=True)
 class _BootstrapApp:
   manifest_id: str
   manifest_url: str
   reinstall_after_uninstall: bool
+  predecessor_manifest_id: str | None = None
+  predecessor_manifest_url: str | None = None
 
 
 _CORE_BOOTSTRAP_APPS = (
@@ -95,12 +81,15 @@ _CORE_BOOTSTRAP_APPS = (
   _BootstrapApp(
     "reflection", BOOTSTRAP_REFLECTION_MANIFEST_URL, False,
   ),
-  # Integrations (internal package id `connections`) manages owner MCP
-  # connections — the only management surface since the Settings section moved
-  # into the app. An owner uninstall is respected; the Store remains the way
-  # back.
+  # Integrations is the only management surface for owner MCP integrations
+  # since the Settings section moved into the app. Its explicit predecessor
+  # lets active installs migrate while an owner uninstall remains respected.
   _BootstrapApp(
-    "connections", BOOTSTRAP_CONNECTIONS_MANIFEST_URL, False,
+    "integrations", BOOTSTRAP_INTEGRATIONS_MANIFEST_URL, False,
+    predecessor_manifest_id="connections",
+    predecessor_manifest_url=(
+      BOOTSTRAP_INTEGRATIONS_PREDECESSOR_MANIFEST_URL
+    ),
   ),
   # Möbius · You is useful on every new deployment. Managed owners arrive
   # signed in; local owners see the same app with account linking optional.
@@ -108,55 +97,6 @@ _CORE_BOOTSTRAP_APPS = (
     "identity", BOOTSTRAP_IDENTITY_MANIFEST_URL, False,
   ),
 )
-
-_PINNED_SOCIAL_MANIFEST = re.compile(
-  r"https://raw\.githubusercontent\.com/mobius-os/app-social/"
-  r"[0-9a-f]{40}/mobius\.json"
-)
-
-
-def _deployment_predates(db: Session, published_at: datetime) -> bool:
-  """Whether durable owner/app state existed before an app was published.
-
-  Bootstrap is invoked on every server start. Comparing against the immutable
-  release time keeps a failed install retryable on a genuinely new deployment,
-  while an upgrade of an established deployment never acquires a newly-added
-  default merely because bootstrap ran again. Null legacy timestamps are
-  conservatively treated as pre-existing.
-  """
-  cutoff = published_at.astimezone(UTC).replace(tzinfo=None)
-  for created_at in (models.Owner.created_at, models.App.created_at):
-    if db.query(created_at).filter(or_(
-      created_at.is_(None), created_at < cutoff,
-    )).first() is not None:
-      return True
-  return False
-
-
-def _configured_bootstrap_apps(db: Session) -> tuple[_BootstrapApp, ...]:
-  """Return this release's defaults, failing closed for unpublished Social."""
-  release = BOOTSTRAP_SOCIAL_RELEASE
-  if release is None:
-    return _CORE_BOOTSTRAP_APPS
-  if (
-    not release.manifest_id.strip()
-    or _PINNED_SOCIAL_MANIFEST.fullmatch(release.manifest_url) is None
-    or release.published_at.tzinfo is None
-  ):
-    log.error(
-      "bootstrap: Social release gate is invalid; Social remains disabled"
-    )
-    return _CORE_BOOTSTRAP_APPS
-  if _deployment_predates(db, release.published_at):
-    log.info(
-      "bootstrap: Social skipped for a deployment predating its release"
-    )
-    return _CORE_BOOTSTRAP_APPS
-  return _CORE_BOOTSTRAP_APPS + (_BootstrapApp(
-    release.manifest_id,
-    release.manifest_url,
-    False,
-  ),)
 
 # Tests set MOEBIUS_SKIP_BOOTSTRAP=1 so the pytest suite doesn't hit
 # the live GitHub URL. Set in docker-compose.test.yml's `pytest`
@@ -186,12 +126,9 @@ async def ensure_bootstrap_apps_installed(db: Session) -> None:
 
   # Bootstrap uses the same resolver as preview and install so all three paths
   # agree on persisted identities, moved refs, and proven legacy origins.
-  from app.install import _find_install_identity_row
+  from app.install import _canonical_identity_key, _find_install_identity_row
 
-  # Resolve the release cohort once before any successful install creates an
-  # App row. This keeps the first-install decision stable for the whole pass.
-  bootstrap_apps = _configured_bootstrap_apps(db)
-  for bootstrap_app in bootstrap_apps:
+  for bootstrap_app in _CORE_BOOTSTRAP_APPS:
     # Use the installer's identity resolver here too: bootstrap and an explicit
     # Store action must agree across ref moves and legacy rows whose matching
     # catalog origin predates persisted manifest identity.
@@ -200,10 +137,35 @@ async def ensure_bootstrap_apps_installed(db: Session) -> None:
       source_url=bootstrap_app.manifest_url,
       manifest_id=bootstrap_app.manifest_id,
     )
+    predecessor = None
+    if (
+      existing is None
+      and bootstrap_app.predecessor_manifest_id
+      and bootstrap_app.predecessor_manifest_url
+    ):
+      predecessor = _find_install_identity_row(
+        db,
+        source_url=bootstrap_app.predecessor_manifest_url,
+        manifest_id=bootstrap_app.predecessor_manifest_id,
+      )
+    if predecessor is not None and predecessor.deleted_at is not None:
+      # Preserve an owner's uninstall after this one-release predecessor
+      # checkpoint is deleted. The tombstone keeps its source and storage, but
+      # its durable package identity becomes current; a later explicit Store
+      # install can therefore revive/update the same row without boot needing
+      # to remember the old package forever.
+      predecessor.manifest_url = _canonical_identity_key(
+        bootstrap_app.manifest_url, bootstrap_app.manifest_id,
+      )
+      db.commit()
+      existing = predecessor
     existing_id = existing.id if existing is not None else None
-    already_installed = existing is not None and (
-      existing.deleted_at is None
-      or not bootstrap_app.reinstall_after_uninstall
+    already_installed = (
+      existing is not None
+      and (
+        existing.deleted_at is None
+        or not bootstrap_app.reinstall_after_uninstall
+      )
     )
     # The identity query autobegins a read transaction. Do not retain its
     # connection while the installer performs serial network fetches and

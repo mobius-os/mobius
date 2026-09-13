@@ -19,6 +19,7 @@ import { questionOptionSubmission } from './questionSubmission.js'
 import {
   isRestartCardAction,
   restartCardSelectedOptions,
+  restartCardStatusDetail,
   restartCardStatusLabel,
 } from './restartCard.js'
 
@@ -46,6 +47,7 @@ function CustomAnswerArea({
   answered,
   canSubmit,
   disabled,
+  placeholder,
   onChange,
   onSubmitShortcut,
   question,
@@ -84,7 +86,7 @@ function CustomAnswerArea({
       data-chat-scroll-region
       data-chat-inline-editor="question-answer"
       aria-label={`Custom answer for: ${question}`}
-      placeholder={answered ? 'No custom answer' : 'Or type your own answer…'}
+      placeholder={answered ? 'No custom answer' : (placeholder || 'Or type your own answer…')}
       autoComplete="off"
       rows={1}
       value={value}
@@ -112,6 +114,7 @@ export default function QuestionCard({
   questionId,
   answeredMap,
   platformAction,
+  submittedOptions,
   onAnswer,
   onPrepareAnswer,
   onCancelAnswer,
@@ -139,11 +142,16 @@ export default function QuestionCard({
   const preparedSubmissionRef = useRef(null)
 
   const actionStatusLabel = restartCardStatusLabel(platformAction)
+  const actionStatusDetail = restartCardStatusDetail(platformAction)
   const completedAction = Boolean(actionStatusLabel)
   const answered = submitted || !!answeredMap || completedAction
   const displayAnswers = answeredMap || {}
   const grouped = questions.length > 1
   const restartAction = isRestartCardAction(platformAction)
+  const writtenRestartAction = restartAction && platformAction?.version === 2
+  const respondedRestartAction = (
+    writtenRestartAction && platformAction?.status === 'responded'
+  )
 
   // ChatView is keyed by chat, so switching away remounts this card. Keep an
   // unsubmitted selection in the same per-tab cache as composer drafts; the
@@ -290,6 +298,9 @@ export default function QuestionCard({
       {actionStatusLabel && (
         <div className="qcard__action-status" role="status">
           {actionStatusLabel}
+          {actionStatusDetail && (
+            <span className="qcard__action-detail">{actionStatusDetail}</span>
+          )}
         </div>
       )}
       {grouped && (
@@ -327,7 +338,15 @@ export default function QuestionCard({
                   ? [answeredValue]
                   : []))
           : []
-        const answeredWithOther = unmatchedAnswers.length > 0
+        const writtenRestartResponse = Boolean(
+          respondedRestartAction
+          && submittedOptions
+          && Object.keys(submittedOptions).length === 0
+        )
+        const writtenAnswer = writtenRestartResponse
+          ? answeredValue
+          : unmatchedAnswers.join(', ')
+        const answeredWithOther = writtenAnswer.length > 0
         const selectionCount = answered
           ? (isMulti ? answeredArr.length : (answeredValue ? 1 : 0))
           : selectedArr.length
@@ -342,9 +361,11 @@ export default function QuestionCard({
                 and watched whether a prior pick cleared. Surface it up front:
                 a caption (with a live count for multi) plus a per-option glyph
                 (□ checkbox for multi, ○ radio for single). */}
-            {(!disabled || answered) && (
+            {!completedAction && (!disabled || answered) && (
               <div className="qcard__hint">
-                {isMulti
+                {writtenRestartAction
+                  ? 'Restart now, or reply below'
+                  : isMulti
                   ? `Select all that apply${selectionCount ? ` · ${selectionCount} selected` : ''}`
                   : 'Choose one'}
               </div>
@@ -352,7 +373,7 @@ export default function QuestionCard({
             {/* Selection state was conveyed only by a CSS class — silent to
                 screen readers. Expose it as a radiogroup (single) / group of
                 checkboxes (multi) with per-option aria-checked. */}
-            <div
+            {!completedAction && <div
               className="qcard__opts"
               role={isMulti ? 'group' : 'radiogroup'}
               aria-label={q.question}
@@ -360,7 +381,10 @@ export default function QuestionCard({
               {/* For multi-select answered state, the comma-joined value is
                   parsed above so each chosen option highlights correctly. */}
               {(() => {
-                return q.options?.map((opt, oi) => {
+                const visibleOptions = writtenRestartAction
+                  ? q.options?.filter(opt => opt.id === platformAction.restart_option_id)
+                  : q.options
+                return visibleOptions?.map((opt, oi) => {
                   const isChosen = answered
                     ? (isMulti ? answeredArr.includes(opt.label) : answeredValue === opt.label)
                     : false
@@ -413,20 +437,24 @@ export default function QuestionCard({
                   )
                 })
               })()}
-            </div>
-            {!restartAction && (
+            </div>}
+            {(!completedAction || respondedRestartAction)
+              && (!restartAction || writtenRestartAction) && (
               <CustomAnswerArea
                 active={isOtherSelected || answeredWithOther}
                 answered={answered}
                 canSubmit={allAnswered}
                 disabled={inactive}
+                placeholder={writtenRestartAction
+                  ? 'Or tell me what you’d like to do instead…'
+                  : undefined}
                 onChange={text => setOtherText(q.question, text)}
                 onSubmitShortcut={(questionCard) => {
                   if (allAnswered) handleSubmit(questionCard, null)
                 }}
                 question={q.question}
                 value={answered
-                  ? unmatchedAnswers.join(', ')
+                  ? writtenAnswer
                   : (otherTexts[q.question] || '')}
               />
             )}
@@ -434,7 +462,7 @@ export default function QuestionCard({
         )
         })}
       </div>
-      {(answered || !disabled) && (
+      {!completedAction && (answered || !disabled) && (
         <>
           {submitError && !answered && (
             <div className="qcard__submit-error" role="status">{submitError}</div>
@@ -459,7 +487,7 @@ export default function QuestionCard({
             }}
             disabled={!canSubmit || disabled || answered || submitting}
           >
-            {submitting ? 'Submitting…' : (completedAction ? actionStatusLabel : answered ? 'Submitted' : 'Submit')}
+            {submitting ? 'Submitting…' : (answered ? 'Submitted' : writtenRestartAction ? 'Continue' : 'Submit')}
           </button>
         </>
       )}

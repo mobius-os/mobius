@@ -17,7 +17,6 @@ def configure_managed_sso(monkeypatch):
   settings = get_settings()
   monkeypatch.setattr(settings, "mobius_sso_issuer", "http://launcher.test")
   monkeypatch.setattr(settings, "mobius_sso_instance_id", "mob_testinstance")
-  monkeypatch.setattr(settings, "mobius_sso_client_secret", "s" * 48)
   monkeypatch.setattr(settings, "frontend_origin", "http://testserver")
   return settings
 
@@ -49,6 +48,75 @@ def _mobius_login_handoff(db, *, epoch=0):
     "jti": jti,
   }, expires_delta=timedelta(seconds=60))
   return owner, token
+
+
+def test_mobius_subject_fingerprint_is_stable_and_non_disclosing():
+  from app.routes.auth import _mobius_subject_fingerprint
+
+  subject = "user_private-account-id"
+  fingerprint = _mobius_subject_fingerprint(subject)
+
+  assert fingerprint == hashlib.sha256(subject.encode()).hexdigest()[:16]
+  assert subject not in fingerprint
+  assert len(fingerprint) == 16
+
+
+def test_mobius_pkce_account_selection_is_explicit_and_loop_bounded(monkeypatch):
+  import asyncio
+  from app.routes import auth as auth_routes
+
+  saved = {}
+
+  async def broker_request(method, route, payload=None):
+    assert (method, route) == ("POST", "/identity/oauth/start")
+    saved.update(payload)
+    return {"saved": True}
+
+  monkeypatch.setattr(auth_routes, "_mobius_broker_request", broker_request)
+  url, _ = asyncio.run(auth_routes._begin_mobius_pkce(
+    {
+      "instance_id": "mob_self_testinstance",
+      "public_key_jwk": {"kty": "OKP"},
+      "key_thumbprint": "a" * 64,
+    },
+    "owner",
+    select_account=True,
+  ))
+
+  params = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
+  assert params["prompt"] == ["select_account"]
+  assert saved["select_account"] is True
+  assert auth_routes._mobius_account_selection_redirect().headers["location"] == (
+    "/api/auth/mobius/login/start?select_account=true"
+  )
+  assert auth_routes._mobius_account_mismatch_redirect().headers["location"] == (
+    "/shell/?mobius_login_account_mismatch=1"
+  )
+
+
+def test_mobius_web_login_mismatch_retries_once_then_stops(monkeypatch, db):
+  import asyncio
+  from app.routes import auth as auth_routes
+
+  _mobius_login_handoff(db)
+
+  async def exchange(_pending, _code):
+    return "receipt", {"sub": "a-different-mobius-account"}
+
+  monkeypatch.setattr(auth_routes, "_exchange_mobius_receipt", exchange)
+  pending = {"select_account": False}
+  first = asyncio.run(
+    auth_routes._complete_mobius_web_login(db, pending, "authorization-code")
+  )
+  pending["select_account"] = True
+  second = asyncio.run(
+    auth_routes._complete_mobius_web_login(db, pending, "authorization-code")
+  )
+
+  assert first.headers["location"] == (
+    "/api/auth/mobius/login/start?select_account=true"
+  )
+  assert second.headers["location"] == "/shell/?mobius_login_account_mismatch=1"
 
 
 
@@ -306,8 +374,7 @@ def test_providers_status_accepts_app_token(client, auth):
   assert "claude" in body
   assert "codex" in body
   assert "configured" in body["claude"]
-  assert "authenticated" in body["claude"]
-  assert body["claude"]["configured"] is body["claude"]["authenticated"]
+  assert body["claude"]["authenticated"] == body["claude"]["configured"]
   assert body["mobius"]["available"] is False
   assert body["mobius"]["configured"] is False
 
@@ -377,14 +444,6 @@ def test_providers_status_hides_mobius_trial_from_app_principals(
   assert app_body["mobius"]["available"] is True
   assert app_body["mobius"]["configured"] is True
   assert "trial" not in app_body["mobius"]
-
-
-def test_provider_status_exposes_configured_with_legacy_alias(client, auth):
-  r = client.get("/api/auth/provider/status", headers=auth)
-
-  assert r.status_code == 200, r.text
-  body = r.json()
-  assert body["configured"] is body["authenticated"]
 
 
 def test_providers_status_rejects_empty_claude_oauth_record(
@@ -552,8 +611,14 @@ def test_providers_models_returns_known_models_on_missing_creds(
   ]
   assert set(claude_ids) == DEFAULT_VISIBLE_MODELS["claude"]
   assert set(codex_ids) == DEFAULT_VISIBLE_MODELS["codex"]
-  assert [m["id"] for m in body["mobius"]] == ["spark", "inkling"]
-  assert [m["name"] for m in body["mobius"]] == ["Spark", "Evolve"]
+  assert [m["id"] for m in body["mobius"]] == [
+    "spark", "inkling", "reflect", "flow", "prism",
+  ]
+  assert [m["name"] for m in body["mobius"]] == [
+    "Spark (Qwen3.8 27B)", "Evolve",
+    "Reflect (DeepSeek V4.1 Flash)", "Flow (GLM 5.3 Flash)",
+    "Prism (Gemini 3.8 Flash)",
+  ]
   # Claude rows carry a tier derived from the id.
   by_id = {m["id"]: m for m in body["claude"]}
   assert by_id["claude-opus-4-8"]["name"] == "claude-opus-4-8"
@@ -563,7 +628,11 @@ def test_providers_models_returns_known_models_on_missing_creds(
   for row in body["codex"]:
     assert "tier" not in row
     assert "id" in row and "name" in row
-  assert [m["name"] for m in body["mobius"]] == ["Spark", "Evolve"]
+  assert [m["name"] for m in body["mobius"]] == [
+    "Spark (Qwen3.8 27B)", "Evolve",
+    "Reflect (DeepSeek V4.1 Flash)", "Flow (GLM 5.3 Flash)",
+    "Prism (Gemini 3.8 Flash)",
+  ]
   # `available` / `provider` from the shell-facing /api/models response
   # are NOT leaked through; mini-apps see only id + name (+ tier).
   for rows in body.values():

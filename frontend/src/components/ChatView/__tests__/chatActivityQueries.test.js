@@ -3,6 +3,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { api } from '../../../api/client.js'
 import {
+  CHAT_ACTIVITY_STALE_TIME,
   chatActivityQueryKey,
   invalidateAllChatActivity,
   invalidateChatActivityForSystemEvent,
@@ -79,4 +80,8 @@ test('system reconnect refreshes active activity queries without a poll loop', a
   const queryClient = queryClientSpy()
   await invalidateAllChatActivity(queryClient)
   assert.deepEqual(queryClient.calls, [{ queryKey: ['chat-activity'] }])
+})
+
+test('activity remains cached until an owning event invalidates it', () => {
+  assert.equal(CHAT_ACTIVITY_STALE_TIME, Infinity)
 })

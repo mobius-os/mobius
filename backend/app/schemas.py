@@ -149,6 +149,8 @@ class AppUpdate(BaseModel):
   chat_id: str | None = None
   # Drawer pin toggle. True sets pinned_at = now, False clears it.
   pinned: bool | None = None
+  pin_intent_client: str | None = Field(default=None, min_length=1, max_length=64)
+  pin_intent_version: int | None = Field(default=None, ge=1)
   cross_app_access: ShareLevel | None = None
   share_with_apps: ShareLevel | None = None
   # Owner-approved requested/effective scope. Source apply never grants this
@@ -650,6 +652,8 @@ class ChatPatch(BaseModel):
   title: str | None = Field(default=None, max_length=500)
   # Drawer pin toggle. True sets pinned_at = now, False clears it.
   pinned: bool | None = None
+  pin_intent_client: str | None = Field(default=None, min_length=1, max_length=64)
+  pin_intent_version: int | None = Field(default=None, ge=1)
   # Per-chat automatic continuation after a paid provider limit.
   auto_resume_on_limit: bool | None = None
   # Naming precedence. by_agent marks an AGENT title-sync — it fills the name
@@ -795,6 +799,18 @@ class NotificationAction(BaseModel):
   title: str
   target: str | None = None
 
+  @field_validator("target")
+  @classmethod
+  def require_current_target(cls, value: str | None) -> str | None:
+    if value and (
+      value.startswith("/app/")
+      or value.startswith("/chat/")
+      or value == "/shell/?app=artifacts"
+      or value.startswith("/shell/?app=artifacts&")
+    ):
+      raise ValueError("use the current /shell/ notification target")
+    return value
+
 
 class NotificationSendRequest(BaseModel):
   title: str
@@ -806,6 +822,18 @@ class NotificationSendRequest(BaseModel):
   # with just {title, body}. Apps should pass 'app' + their id.
   source_type: str = "agent"
   source_id: str | None = None
+
+  @field_validator("target")
+  @classmethod
+  def require_current_target(cls, value: str | None) -> str | None:
+    if value and (
+      value.startswith("/app/")
+      or value.startswith("/chat/")
+      or value == "/shell/?app=artifacts"
+      or value.startswith("/shell/?app=artifacts&")
+    ):
+      raise ValueError("use the current /shell/ notification target")
+    return value
 
 
 class BackgroundAgentChoice(BaseModel):
@@ -827,9 +855,9 @@ class BackgroundAgentChoice(BaseModel):
 class BackgroundAgentsUpdate(BaseModel):
   """System-level provider choices for scheduled app agents."""
 
+  model_config = ConfigDict(extra="forbid")
+
   providers: list[BackgroundAgentChoice] | None = None
-  primary: BackgroundAgentChoice | None = None
-  fallback: BackgroundAgentChoice | None = None
 
 
 class SettingsUpdate(BaseModel):

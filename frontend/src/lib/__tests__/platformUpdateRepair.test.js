@@ -17,7 +17,10 @@ test('routine activation and stale reviews stay with their UI actions', () => {
   for (const level of ['live', 'server_restart', 'dependency_sync', 'image_rebuild']) {
     assert.equal(platformUpdateRepairReason({ preview: { activation: { level, required_actions: level === 'live' ? [] : [level] }, blocking_paths: [] } }), null)
   }
-  for (const errorCode of ['update_plan_stale', 'update_plan_invalid', 'activation_changed']) {
+  for (const errorCode of [
+    'update_plan_stale', 'update_plan_invalid', 'activation_changed',
+    'vite_build_deferred',
+  ]) {
     assert.equal(platformUpdateRepairReason({ error: 'review changed', errorCode }), null)
   }
 })
@@ -28,6 +31,17 @@ test('external deployment work and failed validation earn agent help', () => {
   }
   assert.match(platformUpdateRepairReason({ platform: { state: 'rolled_back' } }), /attention/)
   assert.match(platformUpdateRepairReason({ error: 'controller failed' }), /attention/)
+})
+
+test('resource admission rollback is presented as retryable contention', () => {
+  const reason = platformUpdateRepairReason({
+    platform: {
+      state: 'rolled_back',
+      rollback_error: 'frontend_build_deferred: memory pressure is constrained',
+    },
+  })
+  assert.match(reason, /safely rolled back/)
+  assert.match(reason, /Try again after other work finishes/)
 })
 
 test('a self-hosted source apply that did not queue its rebuild remains recoverable', () => {

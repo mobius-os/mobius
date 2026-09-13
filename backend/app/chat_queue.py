@@ -114,7 +114,8 @@ class TerminalDisposition(enum.Enum):
   # next send via the stale-pending drain. No auto-resume: the user resends
   # (or waits for the limit to reset) themselves.
   ACTIVATION_PARKED = "activation_parked"
-  # Exact activation proof owns unfinished A while later B remains queued.
+  # An approved restart owns unfinished A until a later ready boot resumes it;
+  # later owner input B remains queued behind that recovery.
   QUESTION_PARKED = "question_parked"
   # Pending work was deliberately left queued because an unanswered owner
   # question is the transcript's protocol barrier. The exact run is closed as
@@ -217,6 +218,8 @@ async def promote_pending_messages_locked(
   chat_id: str,
   run_token: str,
   ending_status: str = "completed",
+  ending_run_token: str = "",
+  allow_goal_continuation: bool = False,
 ) -> tuple[list[schemas.ChatMessage], dict | None, str | None]:
   """Inner promote logic. PRECONDITION: caller holds the per-chat
   queue lock.
@@ -259,6 +262,8 @@ async def promote_pending_messages_locked(
       chat_id=chat_id,
       run_token=run_token,
       ending_status=ending_status,
+      ending_run_token=ending_run_token,
+      allow_goal_continuation=allow_goal_continuation,
     )
   )
   result = await await_ack(ack)
@@ -320,6 +325,7 @@ async def drain_and_release(
   current_generation,
   ending_run_token: str = "",
   ending_status: str = "completed",
+  allow_goal_continuation: bool = False,
 ) -> tuple[dict | None, list, str | None, "TerminalDisposition"]:
   """End-of-turn queue drain. Returns (next_user, next_messages,
   next_session_id, disposition) for the caller to publish + schedule.
@@ -328,6 +334,9 @@ async def drain_and_release(
   (`asyncio.timeout(TERMINAL_LOCK_TIMEOUT_SECS)` around `get_lock`):
     - Promotes pending_messages (if any) via the actor's
       `PromotePending` (keyed on `run_token`, the continuation's token).
+      When enabled for a real provider terminal, that same actor transition
+      first supplies one exact continuation for an unfinished Goal that has no
+      saved question, monitor/helper, or queued executor.
       Promoted follow-ups → `CONTINUATION_PROMOTED`: the marker stays
       continuously set (PromotePending re-set it for the next turn) and
       ownership passes to the scheduled continuation; do NOT clear/forget.
@@ -390,11 +399,16 @@ async def drain_and_release(
       try:
         next_messages, first_pending, next_session_id = (
           await promote_pending_messages_locked(
-            db, chat_id, run_token, ending_status=ending_status,
+            db,
+            chat_id,
+            run_token,
+            ending_status=ending_status,
+            ending_run_token=ending_run_token,
+            allow_goal_continuation=allow_goal_continuation,
           )
         )
       except PendingAdmissionBlocksPromotion as hold:
-        # Owner input and exact activation proof both park unfinished A.
+        # Owner input and approved restart recovery both park unfinished A.
         # Close only this physical attempt as interrupted, preserve every B,
         # and release the transient claim without scheduling later input.
         # FinishRun preserves an open question marker when one exists.

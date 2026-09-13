@@ -15,6 +15,7 @@ const chatViewDir = join(dir, '..')
 
 const OWNER = 'useScrollMode.js'
 const ownerSource = readFileSync(join(chatViewDir, OWNER), 'utf8')
+const chatViewSource = readFileSync(join(chatViewDir, 'ChatView.jsx'), 'utf8')
 
 // A line that assigns a height to the dynamic spacer. Matches
 // `spacer.style.height = ...` / `spacerEl.style.height = ...` on any variable,
@@ -198,7 +199,7 @@ test('automatic geometry owners and newer semantic actions share reader authorit
     'const freezeQuestionSubmission =',
   )
   const questionEnd = ownerSource.indexOf(
-    'const anchorPagination =',
+    'const preparePaginationPrepend =',
     questionStart,
   )
   const questionPath = ownerSource.slice(questionStart, questionEnd)
@@ -211,6 +212,36 @@ test('automatic geometry owners and newer semantic actions share reader authorit
     questionPath.indexOf('supersedePendingReaderGesture()')
       < questionPath.indexOf('transitionMode('),
     'older settlement must be retired before the question anchor is committed',
+  )
+
+  const paginationStart = chatViewSource.indexOf('function loadOlderMessages(')
+  const paginationEnd = chatViewSource.indexOf('// A tall viewport', paginationStart)
+  const paginationPath = chatViewSource.slice(paginationStart, paginationEnd)
+  assert.equal(ownerSource.includes('loadingOlderRef'), false,
+    'network request lifetime must not suppress genuine reader scroll ownership')
+  assert.ok(
+    paginationPath.indexOf('capturePaginationRequest()')
+      < paginationPath.indexOf('apiFetch('),
+    'pagination may capture only reader authority, never geometry, before network time',
+  )
+  assert.ok(
+    paginationPath.indexOf('preparePaginationPrepend(paginationRequest)')
+      < paginationPath.indexOf('flushSync(() =>'),
+    'pagination must capture the latest reader coordinate before its DOM commit',
+  )
+  assert.ok(
+    paginationPath.indexOf('flushSync(() =>')
+      < paginationPath.indexOf('restorePaginationPrepend(paginationAnchor)'),
+    'pagination must restore the captured coordinate in the same task after commit',
+  )
+  assert.ok(
+    chatViewSource.includes('loadOlderMessages(offset, { readerDriven: userDriven })'),
+    'programmatic short-page fills must not inherit reader-driven recursive prefetch',
+  )
+  assert.ok(
+    paginationPath.includes('paginationLifecycleRef.current === paginationLifecycle')
+      && chatViewSource.includes('usePaginationLifecycle({'),
+    'a delayed pagination continuation must be fenced and cancelled across chat lifecycle',
   )
 
   const hotStart = ownerSource.indexOf('const onScroll = () => {')

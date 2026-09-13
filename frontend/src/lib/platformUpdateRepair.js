@@ -2,7 +2,10 @@
 import { redactDiagnosticText } from './diagnosticRedaction.js'
 import { requiresAgentActivation } from './platformUpdateState.js'
 
-const REVIEW_AGAIN = new Set(['update_plan_stale', 'update_plan_invalid', 'activation_changed'])
+const REVIEW_AGAIN = new Set([
+  'update_plan_stale', 'update_plan_invalid', 'activation_changed',
+  'vite_build_deferred',
+])
 
 export function platformUpdateRepairReason({ preview, platform, rebuild, error = '', errorCode = '' } = {}) {
   if (REVIEW_AGAIN.has(errorCode)) return null
@@ -30,6 +33,9 @@ export function platformUpdateRepairReason({ preview, platform, rebuild, error =
       .includes(matchingReplacement?.state)
   ) {
     return 'The update is applied, but Möbius needs help finishing the container replacement.'
+  }
+  if (platform?.rollback_error?.startsWith('frontend_build_deferred')) {
+    return 'The update was safely rolled back because this instance was busy. Try again after other work finishes.'
   }
   if (error || platform?.state === 'rolled_back') {
     return 'The update needs attention before you try again.'

@@ -1866,7 +1866,8 @@ def _oauth_result_page(*, ok: bool):
   status = "connected" if ok else "failed"
   html = (
     "<!doctype html><html><head><meta charset='utf-8'>"
-    "<title>Connections sign-in</title></head><body style='font-family:"
+    f"<title>{connector_oauth_mod.INTEGRATIONS_PRODUCT_NAME} sign-in</title>"
+    "</head><body style='font-family:"
     "system-ui;background:#12121a;color:#e8e8f0;display:flex;height:100vh;"
     "align-items:center;justify-content:center;margin:0'>"
     f"<p>Sign-in {status}. You can close this window.</p>"
