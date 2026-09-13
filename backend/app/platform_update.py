@@ -74,6 +74,10 @@ from typing import Callable, Literal, TypedDict
 from sqlalchemy.orm import Session
 
 from app import app_git, platform_activation, runtime_provenance
+from app.build_admission import (
+  BuildAdmissionUnavailable,
+  wait_for_vite_build_admission,
+)
 from app.platform_activation import PlatformActivationImpact
 
 
@@ -141,6 +145,9 @@ _CONFLICT_MERGE_BASE_REF = "refs/mobius/platform-conflict-base"
 # this is wedged, not busy. Fetch gets its own (network-bound) budget.
 _GIT_TIMEOUT = 120
 _FETCH_TIMEOUT = 120
+# Owner Apply has already been reviewed; let brief co-tenant pressure clear
+# instead of turning one momentary admission refusal into a full rollback.
+_APPLY_BUILD_ADMISSION_WAIT_SECS = 45.0
 # The candidate worktree an update replays the overlay into. It lives inside
 # the clone's own git directory so neither the outer ``/data`` safety repo nor
 # the platform tree ever sees it as content, and a conflicting replay can stay
@@ -1810,6 +1817,7 @@ def _rebuild_frontend(repo: Path, res: ReconcileResult) -> None:
     from app.frontend_watcher import rebuild_frontend_now
   except Exception as exc:
     raise RuntimeError("frontend rebuild is unavailable") from exc
+  wait_for_vite_build_admission(_APPLY_BUILD_ADMISSION_WAIT_SECS)
   rebuild_frontend_now(
     f"platform update {_short(res.pre_sha)}->{_short(res.new_sha)}",
   )
@@ -1872,7 +1880,12 @@ def _roll_back_failed_frontend_build(
   # A marker already present before this attempt belongs to earlier on-disk
   # backend changes and must survive this failed frontend candidate.
   CONFLICT_FLAG.unlink(missing_ok=True)
-  message = f"frontend_build_failed: {error!r}"[:_ERROR_EXCERPT_CHARS]
+  kind = (
+    "frontend_build_deferred"
+    if isinstance(error, BuildAdmissionUnavailable)
+    else "frontend_build_failed"
+  )
+  message = f"{kind}: {error!r}"[:_ERROR_EXCERPT_CHARS]
   restore_error = _restore_update_dependencies(
     repo, python_changed=python_changed, frontend_changed=frontend_changed,
   )

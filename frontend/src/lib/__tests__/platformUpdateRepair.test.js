@@ -30,6 +30,17 @@ test('external deployment work and failed validation earn agent help', () => {
   assert.match(platformUpdateRepairReason({ error: 'controller failed' }), /attention/)
 })
 
+test('resource admission rollback is presented as retryable contention', () => {
+  const reason = platformUpdateRepairReason({
+    platform: {
+      state: 'rolled_back',
+      rollback_error: 'frontend_build_deferred: memory pressure is constrained',
+    },
+  })
+  assert.match(reason, /safely rolled back/)
+  assert.match(reason, /Try again after other work finishes/)
+})
+
 test('a self-hosted source apply that did not queue its rebuild remains recoverable', () => {
   assert.match(
     platformUpdateRepairReason({ errorCode: 'update_applied_rebuild_pending' }),

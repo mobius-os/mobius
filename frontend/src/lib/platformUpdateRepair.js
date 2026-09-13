@@ -31,6 +31,9 @@ export function platformUpdateRepairReason({ preview, platform, rebuild, error =
   ) {
     return 'The update is applied, but Möbius needs help finishing the container replacement.'
   }
+  if (platform?.rollback_error?.startsWith('frontend_build_deferred')) {
+    return 'The update was safely rolled back because this instance was busy. Try again after other work finishes.'
+  }
   if (error || platform?.state === 'rolled_back') {
     return 'The update needs attention before you try again.'
   }

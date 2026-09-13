@@ -2947,6 +2947,67 @@ async def test_frontend_build_failure_rolls_back_source_and_is_not_success(
   assert "frontend_build_failed" in progress["error"]
 
 
+@pytest.mark.asyncio
+async def test_frontend_build_admission_deferral_is_retryable(
+  monkeypatch, clone_env,
+):
+  from app.build_admission import ViteBuildDeferred
+
+  origin, platform = clone_env
+  before = _served_sha(platform)
+  target = _advance_origin(
+    origin,
+    edits={"frontend/src/App.jsx": "export default 'contended candidate'\n"},
+  )
+  pu._fetch(platform)
+  preview = pu.platform_update_preview(platform)
+
+  def defer_build(_repo, _result):
+    raise ViteBuildDeferred("retry after memory pressure falls")
+
+  monkeypatch.setattr(pu, "_rebuild_frontend", defer_build)
+
+  result = await pu.apply_platform_update(
+    SimpleNamespace(),
+    plan_id=preview["plan_id"],
+    current_sha=preview["current_sha"],
+    target_sha=preview["target_sha"],
+    repo=platform,
+  )
+
+  assert result["state"] == pu.PlatformUpdateState.ROLLED_BACK.value
+  assert result["error"].startswith("frontend_build_deferred")
+  assert _served_sha(platform) == before
+  rollback = pu._read_rolled_back_flag()
+  assert rollback["target"] == target
+  assert rollback["error"].startswith("frontend_build_deferred")
+
+
+def test_owner_update_waits_for_build_admission(monkeypatch, clone_env):
+  import app.frontend_watcher as frontend_watcher
+
+  _, platform = clone_env
+  calls = []
+  monkeypatch.setattr(
+    pu, "wait_for_vite_build_admission",
+    lambda timeout: calls.append(("wait", timeout)),
+  )
+  monkeypatch.setattr(
+    frontend_watcher, "rebuild_frontend_now",
+    lambda reason: calls.append(("build", reason)),
+  )
+
+  pu._rebuild_frontend(
+    platform,
+    pu.ReconcileResult("updated", "a" * 40, "b" * 40, "b" * 40),
+  )
+
+  assert calls == [
+    ("wait", pu._APPLY_BUILD_ADMISSION_WAIT_SECS),
+    ("build", "platform update aaaaaaaa->bbbbbbbb"),
+  ]
+
+
 def test_boot_policy_ignores_durable_update_progress_from_outer_data_repo():
   scripts = Path(__file__).resolve().parents[1] / "scripts"
   entrypoint = (scripts / "entrypoint.sh").read_text(encoding="utf-8")
