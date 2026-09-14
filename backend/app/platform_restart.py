@@ -190,7 +190,7 @@ def requirement_matches_current_source(requirement: object) -> bool:
     return False
   return all(
     current.get(key) == requirement.get(key)
-    for key in ("version", "source_boot_id", "files", "paths")
+    for key in ("version", "source_boot_id", "files", "paths", "action_id")
   )
 
 

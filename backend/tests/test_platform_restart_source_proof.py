@@ -127,6 +127,19 @@ def test_unrelated_commits_do_not_expire_exact_restart_bytes(monkeypatch, tmp_pa
   assert not platform_restart.requirement_matches_current_source(requirement)
 
 
+def test_restart_action_id_must_match_the_current_source_identity(
+  monkeypatch, tmp_path,
+):
+  repo, source, _base = _restart_repo(monkeypatch, tmp_path)
+  source.write_text("VALUE = 'approved'\n")
+  _commit(repo, "approved server change")
+  requirement = platform_restart.build_restart_requirement(repo)
+
+  requirement["action_id"] = "platform-restart:tampered"
+
+  assert not platform_restart.requirement_matches_current_source(requirement)
+
+
 def test_descendant_that_reverts_approved_bytes_still_wakes_agent_to_verify(
   monkeypatch, tmp_path,
 ):
