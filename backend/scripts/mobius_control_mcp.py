@@ -282,7 +282,8 @@ def _initialize_result(params: Any) -> dict[str, Any]:
 def _available_tool_names() -> tuple[str, ...]:
   if os.environ.get("MOBIUS_RUN_TOKEN"):
     if os.environ.get("MOBIUS_COORDINATION_ENABLED") == "0":
-      return OWNER_TOOLS
+      # Peer-message discovery is optional; durable action ownership is not.
+      return (*OWNER_TOOLS, CLAIM_AGENT_WORK_TOOL, FINISH_AGENT_WORK_TOOL)
     return (*OWNER_TOOLS, *COORDINATION_TOOLS)
   return DELEGATED_TOOLS
 

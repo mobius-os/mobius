@@ -46,6 +46,10 @@ OWNER_CONTROL_TOOL_NAMES = (
   APPROVAL_TOOL_NAME,
   QUESTION_TOOL_NAME,
   RESTART_TOOL_NAME,
+  # Claims own durable actions, including work held by an idle chat. They
+  # must not disappear when this turn has no currently useful peer context.
+  CLAIM_WORK_TOOL_NAME,
+  FINISH_WORK_TOOL_NAME,
 )
 CONTROL_ENV_VARS = (
   "API_BASE_URL",
