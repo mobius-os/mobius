@@ -481,7 +481,7 @@ def _trusted_catalog_origin_matches(
 def _find_ref_independent_catalog_row(
   db: Session, canonical_manifest_url: str, manifest_id: str,
 ) -> models.App | None:
-  """An existing row for the same trusted repo + manifest id at ANY ref.
+  """An existing row for the same GitHub repo + manifest id at ANY ref.
 
   Used only when the exact-ref identity lookups miss. Prefers a live row, then
   the lowest id, and re-verifies each candidate in Python because SQL `LIKE`
@@ -491,13 +491,13 @@ def _find_ref_independent_catalog_row(
   owner's uninstall of a `reinstall_after_uninstall=False` app is the bootstrap
   layer's job — it decides whether to call install at all.
   """
-  repo_base = _trusted_catalog_repo_base(canonical_manifest_url)
-  if repo_base is None:
+  repository = _github_root_manifest_identity(canonical_manifest_url)
+  if repository is None:
     return None
   suffix = f"#manifest-id={manifest_id}"
   candidates = (
     db.query(models.App)
-    .filter(models.App.manifest_url.like(f"{repo_base}/%{suffix}"))
+    .filter(models.App.manifest_url.like(f"%{suffix}"))
     .order_by(
       case((models.App.deleted_at.is_(None), 0), else_=1),
       models.App.id.asc(),
@@ -506,7 +506,10 @@ def _find_ref_independent_catalog_row(
   )
   for cand in candidates:
     url = cand.manifest_url or ""
-    if url.endswith(suffix) and _trusted_catalog_repo_base(url) == repo_base:
+    if (
+      url.endswith(suffix)
+      and _github_root_manifest_identity(url) == repository
+    ):
       return cand
   return None
 
@@ -566,18 +569,19 @@ def _catalog_identity_matches(
   candidate_url: str,
   manifest_id: str,
 ) -> bool:
-  """Whether a reviewed candidate is the installed trusted catalog app."""
+  """Whether a reviewed candidate keeps the installed GitHub package."""
   if not existing_identity:
     return False
   candidate_identity = _canonical_identity_key(candidate_url, manifest_id)
   if candidate_identity == existing_identity:
     return True
   suffix = f"#manifest-id={manifest_id}"
-  existing_repo = _trusted_catalog_repo_base(existing_identity)
+  existing_repo = _github_root_manifest_identity(existing_identity)
+  candidate_repo = _github_root_manifest_identity(candidate_identity)
   return bool(
     existing_identity.endswith(suffix)
     and existing_repo
-    and existing_repo == _trusted_catalog_repo_base(candidate_identity)
+    and existing_repo == candidate_repo
   )
 
 

@@ -4076,10 +4076,10 @@ def test_update_candidate_preview_fetches_incoming_diff_without_mutation(
   assert row["version"] == "1.0.0"
 
 
-def test_update_candidate_preview_uses_selected_trusted_catalog_ref(
+def test_update_candidate_preview_uses_selected_same_repository_ref(
   client, auth, db, bypass_url_validation,
 ):
-  """Review and Apply bind the same catalog ref, not an old stored pin."""
+  """An explicit review may move a pin within the same GitHub repository."""
   from app import models
 
   base = "https://candidate-selected.test/repo/"
@@ -4089,7 +4089,7 @@ def test_update_candidate_preview_uses_selected_trusted_catalog_ref(
   app_id = installed.json()["id"]
 
   pinned_identity = (
-    "https://raw.githubusercontent.com/mobius-os/app-selected/"
+    "https://raw.githubusercontent.com/hamzamerzic/app-selected/"
     "0123456789abcdef0123456789abcdef01234567"
     "#manifest-id=selected-candidate"
   )
@@ -4098,7 +4098,7 @@ def test_update_candidate_preview_uses_selected_trusted_catalog_ref(
   db.commit()
 
   selected_url = (
-    "https://raw.githubusercontent.com/mobius-os/"
+    "https://raw.githubusercontent.com/hamzamerzic/"
     "app-selected/main/mobius.json"
   )
   next_manifest = {**manifest, "version": "2.0.0"}
@@ -4125,6 +4125,18 @@ def test_update_candidate_preview_uses_selected_trusted_catalog_ref(
   assert payload["upstream_version"] == "2.0.0"
   assert "SELECTED REF FOOTER" in payload["upstream_diff"]
   assert "ORIGINAL FOOTER" in payload["upstream_diff"]
+
+  with patch(
+    "app.install.httpx.AsyncClient",
+    side_effect=_fake_async_client(responses),
+  ):
+    applied = client.post("/api/apps/install", headers=auth, json={
+      "manifest_url": selected_url,
+      "reviewed_source_digest": payload["source_digest"],
+    })
+  assert applied.status_code == 201, applied.text
+  assert applied.json()["id"] == app_id
+  assert applied.json()["version"] == "2.0.0"
 
 
 def test_update_candidate_preview_rejects_a_different_catalog_app(
