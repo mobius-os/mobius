@@ -320,6 +320,95 @@ def test_managed_bootstrap_creates_the_bound_owner(client, db, monkeypatch):
   assert login.headers["location"] == "http://launcher.test/identity/authorize"
 
 
+def test_managed_bootstrap_repairs_an_accidental_local_owner(
+  client, db, monkeypatch,
+):
+  from app import auth as auth_service, models
+
+  setup = client.post("/api/auth/setup", json={
+    "username": "accidental-local-owner",
+    "password": "securepassword123",
+  })
+  assert setup.status_code == 200
+  owner = db.query(models.Owner).one()
+  original_password = owner.hashed_password
+  original_epoch = owner.token_epoch
+
+  settings = configure_managed_sso(monkeypatch)
+  configure_runtime_identity(monkeypatch, {
+    "linked": True,
+    "issuer": settings.mobius_sso_issuer,
+    "subject": "user_managed-owner",
+    "instance_id": settings.mobius_sso_instance_id,
+  })
+
+  status = client.get("/api/auth/setup/status")
+
+  assert status.json() == {"configured": True, "auth_mode": "mobius"}
+  db.expire_all()
+  owner = db.query(models.Owner).one()
+  assert owner.username == "accidental-local-owner"
+  assert owner.auth_mode == "mobius"
+  assert owner.sso_subject == "user_managed-owner"
+  assert owner.token_epoch == original_epoch + 1
+  assert owner.hashed_password != original_password
+  assert not auth_service.verify_password(
+    "securepassword123", owner.hashed_password,
+  )
+  assert Path(settings.data_dir, "service-token.txt").is_file()
+
+
+def test_managed_configuration_blocks_local_login_before_broker_recovery(
+  client, monkeypatch,
+):
+  setup = client.post("/api/auth/setup", json={
+    "username": "accidental-local-owner",
+    "password": "securepassword123",
+  })
+  assert setup.status_code == 200
+  configure_managed_sso(monkeypatch)
+
+  login = client.post(
+    "/api/auth/token",
+    data={
+      "username": "accidental-local-owner",
+      "password": "securepassword123",
+    },
+  )
+
+  assert login.status_code == 403
+  assert "mobius.you" in login.json()["detail"]
+
+
+def test_managed_bootstrap_never_rebinds_a_local_owner(
+  client, db, monkeypatch,
+):
+  from app import models
+
+  client.post("/api/auth/setup", json={
+    "username": "owner",
+    "password": "securepassword123",
+  })
+  owner = db.query(models.Owner).one()
+  owner.sso_subject = "user_existing-binding"
+  db.commit()
+  settings = configure_managed_sso(monkeypatch)
+  configure_runtime_identity(monkeypatch, {
+    "linked": True,
+    "issuer": settings.mobius_sso_issuer,
+    "subject": "user_different-binding",
+    "instance_id": settings.mobius_sso_instance_id,
+  })
+
+  status = client.get("/api/auth/setup/status")
+
+  assert status.json() == {"configured": True, "auth_mode": "local"}
+  db.expire_all()
+  owner = db.query(models.Owner).one()
+  assert owner.auth_mode == "local"
+  assert owner.sso_subject == "user_existing-binding"
+
+
 def test_managed_bootstrap_tolerates_the_broker_starting_late(
   client, db, monkeypatch,
 ):

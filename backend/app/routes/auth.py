@@ -165,10 +165,19 @@ def setup_status(db: Session = Depends(get_db)):
 
 
 def _ensure_managed_owner(db: Session, settings=None):
-  """Create the managed singleton owner from the root broker's verified link."""
+  """Create or repair the managed owner from the broker's verified link.
+
+  A launcher-managed instance can have a local owner only when an earlier boot
+  reached password setup before its managed configuration was active. Once the
+  root broker proves the configured instance and account binding, convert that
+  same singleton row in place. This preserves the owner's data while revoking
+  every credential minted by the obsolete local password mode.
+  """
   settings = settings or get_settings()
   owner = db.query(models.Owner).first()
-  if owner is not None or not settings.mobius_sso_enabled:
+  if not settings.mobius_sso_enabled:
+    return owner
+  if owner is not None and owner.auth_mode != "local":
     return owner
   try:
     with runtime_identity.broker_client(timeout=2.0) as client:
@@ -191,7 +200,44 @@ def _ensure_managed_owner(db: Session, settings=None):
     and isinstance(instance_id, str)
     and secrets.compare_digest(instance_id, settings.mobius_sso_instance_id)
   ):
-    return None
+    return owner
+  if owner is not None:
+    if owner.sso_subject and not secrets.compare_digest(
+      owner.sso_subject, subject
+    ):
+      return owner
+    replacement_password = auth.hash_password(secrets.token_urlsafe(32))
+    updated = db.query(models.Owner).filter(
+      models.Owner.id == owner.id,
+      models.Owner.auth_mode == "local",
+      (
+        models.Owner.sso_subject.is_(None)
+        | (models.Owner.sso_subject == "")
+        | (models.Owner.sso_subject == subject)
+      ),
+    ).update(
+      {
+        models.Owner.auth_mode: "mobius",
+        models.Owner.sso_subject: subject,
+        models.Owner.hashed_password: replacement_password,
+        models.Owner.token_epoch: models.Owner.token_epoch + 1,
+      },
+      synchronize_session=False,
+    )
+    if updated != 1:
+      db.rollback()
+      return db.query(models.Owner).first()
+    try:
+      db.commit()
+    except SQLAlchemyError:
+      db.rollback()
+      return db.query(models.Owner).first()
+    owner = db.query(models.Owner).filter(models.Owner.id == owner.id).first()
+    try:
+      _write_service_token(owner.username, owner.token_epoch)
+    except OSError as exc:
+      log.warning("Could not write service token: %s", exc)
+    return owner
   owner = models.Owner(
     username="owner",
     hashed_password=auth.hash_password(secrets.token_urlsafe(32)),
@@ -424,7 +470,10 @@ def login(
   # bcrypt work, or cooldown bookkeeping so no password-login side effect (a
   # timing signal, a failure count, a rehash) runs while the mode forbids it.
   singleton_owner = db.query(models.Owner).first()
-  if singleton_owner is not None and singleton_owner.auth_mode != "local":
+  if (
+    get_settings().mobius_sso_enabled
+    or singleton_owner is not None and singleton_owner.auth_mode != "local"
+  ):
     raise HTTPException(
       status_code=403,
       detail="Local password login is disabled; sign in with mobius.you.",
