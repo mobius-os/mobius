@@ -1022,11 +1022,7 @@ class ChatEventSink:
       # A completed provider event is the first universal boundary at which the
       # result is no longer in flight. It covers MCP and command-backed helpers
       # alike, without a timer or a second transport callback.
-      self._start_side_task(
-        self._finish_turn_after_owner_card(owner_card_receipt_id),
-        failure_message="finish-after-owner-card failed chat_id=%s",
-        warn=True,
-      )
+      self._request_finish_turn_after_owner_card(owner_card_receipt_id)
     return True
 
   async def finalize(
@@ -1344,31 +1340,39 @@ class ChatEventSink:
         failure_message="question checkpoint summary failed chat_id=%s",
       )
 
-  async def _finish_turn_after_owner_card(self, question_id: str) -> None:
-    """End the live turn after its committed card receipt has been delivered.
+  def _request_finish_turn_after_owner_card(self, question_id: str) -> None:
+    """Claim the clean card end synchronously, then signal it asynchronously.
 
     Validate the exact continuation card against this sink's live transcript
-    before touching a runner, then ask whichever provider owns the chat to make
-    the card the turn's final action. Native provider questions have no
+    before touching a runner. The provider's ownership marker must be set in
+    this same callback: its terminal event can already be queued behind the
+    completed tool result, so deferring the whole request to a task races that
+    terminal and can leak its raw interruption error. Only the actual provider
+    interrupt runs as a side task. Native provider questions have no
     continuation marker and are never cut here.
     """
     if not self._has_continuation_card(question_id):
       raise ValueError("Continuation owner-input card is not current for this turn.")
     from app.runner_registry import registry
     for handle in registry.get_handles(self.chat_id):
-      finish = getattr(handle, "finish_after_owner_card", None)
-      if not callable(finish):
+      begin = getattr(handle, "begin_finish_after_owner_card", None)
+      if not callable(begin):
         continue
       try:
-        await finish()
-      except asyncio.CancelledError:
-        raise
+        interrupt = begin()
       except Exception:
         _get_logger().warning(
           "finish-after-owner-card failed chat_id=%s kind=%s",
           self.chat_id,
           getattr(handle, "kind", "?"),
           exc_info=True,
+        )
+        continue
+      if interrupt is not None:
+        self._start_side_task(
+          interrupt,
+          failure_message="finish-after-owner-card failed chat_id=%s",
+          warn=True,
         )
 
   def _has_continuation_card(self, question_id: str) -> bool:

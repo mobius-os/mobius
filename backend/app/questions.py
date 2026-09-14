@@ -36,7 +36,7 @@ persist, the turn ENDS so the process is released, and the answer route
 resumes a fresh turn (restart-safe). Because the card's receipt returns to the
 model immediately, the runner interrupts the live turn the moment such a card
 commits, so nothing follows the card; see `ChatEventSink.publish_question` and
-each runner's `finish_after_owner_card`.
+each runner's `begin_finish_after_owner_card`.
 """
 
 from __future__ import annotations

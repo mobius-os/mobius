@@ -66,6 +66,7 @@ import os
 import signal
 import shutil
 import time
+from collections.abc import Awaitable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -712,7 +713,7 @@ class ActiveCodexTurn:
     # validation distinguish them without treating a deliberate Stop as an
     # error.
     self._interrupt_requested = False
-    # Set synchronously before finish_after_owner_card()'s first await. A
+    # Set synchronously by begin_finish_after_owner_card(). A
     # continuation owner-input card ends the turn on our initiative — like Stop,
     # terminal validation must read it as "we did this to ourselves" (a clean
     # TurnStatus.interrupted, not a provider failure) — but it is NOT Stop: it
@@ -746,7 +747,7 @@ class ActiveCodexTurn:
     """Whether a continuation owner-input card ended this turn on our side."""
     return self._owner_card_requested
 
-  async def finish_after_owner_card(self) -> None:
+  def begin_finish_after_owner_card(self) -> Awaitable[None] | None:
     """End the turn after a continuation owner-input receipt is delivered.
 
     The event sink calls this only after Codex emits the completed card tool
@@ -755,7 +756,9 @@ class ActiveCodexTurn:
     (folded into `stop_requested()` so terminal validation treats the resulting
     TurnStatus.interrupted as a clean, error-free completion) and never runs
     Stop's queue-clear / generation-bump, so the owner's saved answer resumes the
-    chat normally. Signal-only — it does not await turn drain.
+    chat normally. Claim ownership synchronously before returning the interrupt
+    awaitable: a terminal already queued behind the tool result must classify
+    this as our clean end even before the event loop runs that awaitable.
     """
     if (
       self._finished.done()
@@ -763,8 +766,11 @@ class ActiveCodexTurn:
       or self._owner_card_requested
       or self.turn is None
     ):
-      return
+      return None
     self._owner_card_requested = True
+    return self._interrupt_after_owner_card()
+
+  async def _interrupt_after_owner_card(self) -> None:
     try:
       await self.turn.interrupt()
     except Exception as exc:

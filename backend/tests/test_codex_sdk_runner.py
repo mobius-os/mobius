@@ -848,15 +848,19 @@ def test_active_codex_turn_delivered_card_finish_is_a_clean_non_stop_end():
     assert active.owner_card_requested is False
     assert active.is_steerable is True
 
-    await active.finish_after_owner_card()
-    assert turn.interrupt_calls == 1
+    interrupt = active.begin_finish_after_owner_card()
+    # Ownership is synchronous even though the provider signal is not.
     assert active.owner_card_requested is True
     # A card end is ours, but not a Stop.
     assert active.interrupt_requested is False
     # Once the card owns the end, the turn is no longer steerable.
     assert active.is_steerable is False
+    assert turn.interrupt_calls == 0
+    await interrupt
+    assert turn.interrupt_calls == 1
     # Idempotent — a second entry does not double-interrupt.
-    await active.finish_after_owner_card()
+    duplicate = active.begin_finish_after_owner_card()
+    assert duplicate is None
     assert turn.interrupt_calls == 1
 
   asyncio.run(_scenario())
@@ -871,7 +875,8 @@ def test_active_codex_turn_owner_card_finish_defers_to_stop():
       object(), turn, chat_id="chat-card-vs-stop",
     )
     active._interrupt_requested = True  # Stop owns the turn.
-    await active.finish_after_owner_card()
+    duplicate = active.begin_finish_after_owner_card()
+    assert duplicate is None
     assert turn.interrupt_calls == 0
     assert active.owner_card_requested is False
 

@@ -92,8 +92,12 @@ class _FakeCardHandle:
     self.kind = RunnerKind.CLAUDE_SDK
     self.finishes = 0
 
-  async def finish_after_owner_card(self):
+  def begin_finish_after_owner_card(self):
     self.finishes += 1
+    return self._finish()
+
+  async def _finish(self):
+    pass
 
   async def stop(self, timeout: float = 2.0) -> bool:
     return True
@@ -151,6 +155,10 @@ def test_completed_receipt_ends_only_the_exact_saved_card_turn(
         "type": "tool_output", "content": content,
         "output_complete": complete, "output_exit_code": exit_code,
       })
+      # The runner must own the clean card ending before this callback returns;
+      # a provider terminal may be the very next already-queued event.
+      if complete and exit_code == 0:
+        assert handle.finishes == 1
       await asyncio.sleep(0)
 
     asyncio.run(deliver(saved.text, complete=False))
