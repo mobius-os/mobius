@@ -63,6 +63,17 @@ def test_host_runner_isolates_database_before_pytest_collects_modules():
   assert "trap 'exit 130' INT" in source
 
 
+def test_host_runner_drops_managed_identity_before_pytest_collects_modules():
+  source = HOST_RUNNER.read_text()
+  pytest_call = source.index('"$PYTHON" -m pytest')
+  assert 'MOBIUS_SSO_ISSUER=' in source[:pytest_call]
+  assert 'MOBIUS_SSO_INSTANCE_ID=' in source[:pytest_call]
+  assert (
+    'MOBIUS_IDENTITY_BROKER_SOCKET="$TEST_RUNTIME_ROOT/no-identity-broker.sock"'
+    in source[:pytest_call]
+  )
+
+
 def test_live_database_guard_requires_database_isolation_not_generic_test_mode():
   source = CONFTEST.read_text()
   guard = source[source.index("_inherited_data_dir"):source.index("# Set env vars")]
