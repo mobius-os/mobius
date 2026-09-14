@@ -9,6 +9,7 @@ from datetime import timedelta
 from pathlib import Path
 
 import bcrypt
+import httpx
 from test_app_fixtures import create_local_app
 
 
@@ -277,6 +278,7 @@ def test_managed_mode_closes_local_first_owner_setup(client, monkeypatch):
 
 def test_managed_bootstrap_creates_the_bound_owner(client, db, monkeypatch):
   from app import models
+  from app.routes import auth as auth_routes
 
   settings = configure_managed_sso(monkeypatch)
   configure_runtime_identity(monkeypatch, {
@@ -289,6 +291,22 @@ def test_managed_bootstrap_creates_the_bound_owner(client, db, monkeypatch):
   first = client.get("/api/auth/setup/status")
   second = client.get("/api/auth/setup/status")
 
+  async def broker_request(method, route, payload=None):
+    assert (method, route, payload) == ("GET", "/identity", None)
+    return {"instance_id": settings.mobius_sso_instance_id}
+
+  async def begin_pkce(identity, owner, *, select_account=False):
+    assert identity == {"instance_id": settings.mobius_sso_instance_id}
+    assert owner == "owner"
+    assert select_account is False
+    return "http://launcher.test/identity/authorize", "s" * 43
+
+  monkeypatch.setattr(auth_routes, "_mobius_broker_request", broker_request)
+  monkeypatch.setattr(auth_routes, "_begin_mobius_pkce", begin_pkce)
+  login = client.get(
+    "/api/auth/mobius/login/start", follow_redirects=False,
+  )
+
   assert first.json() == {"configured": True, "auth_mode": "mobius"}
   assert second.json() == first.json()
   db.expire_all()
@@ -298,6 +316,31 @@ def test_managed_bootstrap_creates_the_bound_owner(client, db, monkeypatch):
   assert owners[0].auth_mode == "mobius"
   assert owners[0].sso_subject == "user_managed-owner"
   assert Path(settings.data_dir, "service-token.txt").is_file()
+  assert login.status_code == 303
+  assert login.headers["location"] == "http://launcher.test/identity/authorize"
+
+
+def test_managed_bootstrap_tolerates_the_broker_starting_late(
+  client, db, monkeypatch,
+):
+  from app import models
+  from app.routes import auth as auth_routes
+
+  configure_managed_sso(monkeypatch)
+
+  def unavailable_broker(*, timeout):
+    assert timeout == 2.0
+    raise httpx.ConnectError("identity broker is still starting")
+
+  monkeypatch.setattr(
+    auth_routes.runtime_identity, "broker_client", unavailable_broker,
+  )
+
+  status = client.get("/api/auth/setup/status")
+
+  assert status.status_code == 200
+  assert status.json() == {"configured": False, "auth_mode": "mobius"}
+  assert db.query(models.Owner).count() == 0
 
 
 def test_managed_bootstrap_rejects_a_mismatched_broker_identity(
