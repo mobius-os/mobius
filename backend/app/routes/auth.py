@@ -26,7 +26,7 @@ from slowapi.util import get_remote_address
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
-from app import auth, models, schemas
+from app import auth, models, runtime_identity, schemas
 from app.config import get_settings
 from app.database import get_db
 from app.deps import (
@@ -153,7 +153,7 @@ def setup_status(db: Session = Depends(get_db)):
   password owner.
   """
   settings = get_settings()
-  owner = db.query(models.Owner).first()
+  owner = _ensure_managed_owner(db, settings)
   return schemas.SetupStatus(
     configured=owner is not None,
     auth_mode=(
@@ -162,6 +162,54 @@ def setup_status(db: Session = Depends(get_db)):
       else ("mobius" if settings.mobius_sso_enabled else "local")
     ),
   )
+
+
+def _ensure_managed_owner(db: Session, settings=None):
+  """Create the managed singleton owner from the root broker's verified link."""
+  settings = settings or get_settings()
+  owner = db.query(models.Owner).first()
+  if owner is not None or not settings.mobius_sso_enabled:
+    return owner
+  try:
+    with runtime_identity.broker_client(timeout=2.0) as client:
+      response = client.get("/identity")
+      response.raise_for_status()
+      identity = response.json()
+  except (httpx.HTTPError, OSError, ValueError):
+    return None
+  if not isinstance(identity, dict):
+    return None
+  subject = identity.get("subject")
+  issuer = identity.get("issuer")
+  instance_id = identity.get("instance_id")
+  if not (
+    identity.get("linked") is True
+    and isinstance(subject, str)
+    and 0 < len(subject) <= 128
+    and isinstance(issuer, str)
+    and secrets.compare_digest(issuer, settings.mobius_sso_issuer)
+    and isinstance(instance_id, str)
+    and secrets.compare_digest(instance_id, settings.mobius_sso_instance_id)
+  ):
+    return None
+  owner = models.Owner(
+    username="owner",
+    hashed_password=auth.hash_password(secrets.token_urlsafe(32)),
+    auth_mode="mobius",
+    sso_subject=subject,
+  )
+  db.add(owner)
+  try:
+    db.commit()
+  except IntegrityError:
+    db.rollback()
+    return db.query(models.Owner).first()
+  db.refresh(owner)
+  try:
+    _write_service_token(owner.username, owner.token_epoch)
+  except OSError as exc:
+    log.warning("Could not write service token: %s", exc)
+  return owner
 
 
 def _write_service_token(username: str, token_epoch: int) -> None:
@@ -190,7 +238,8 @@ def _write_service_token(username: str, token_epoch: int) -> None:
 # Self-hosted ownership contract: without managed SSO, possession of the
 # instance URL is the security boundary for the short first-setup window. A
 # Railway-managed instance never reaches this path: injected SSO configuration
-# closes local setup and binds the owner through the launcher's one-time code.
+# closes local setup and the root broker's one-use enrollment receipt binds the
+# managed owner.
 @router.post("/setup", response_model=schemas.TokenResponse,
              dependencies=[Depends(reject_cross_site)])
 @_limiter.limit("3/minute")
@@ -942,7 +991,8 @@ async def mobius_login_callback(
 # callback fetches itself from mobius.you ``/identity/token`` (mirroring the
 # account-link callback above): the app holds no SaaS secret and verifies no
 # signature. This is login only — the owner row and its bound ``sso_subject``
-# already exist; the host-side binding step created them.
+# already exist; the setup-status reconciliation created them from the root
+# broker's verified first-boot identity.
 
 
 def _mobius_authorization_issuer() -> str:

@@ -6,6 +6,7 @@ import json
 import time
 import urllib.parse
 from datetime import timedelta
+from pathlib import Path
 
 import bcrypt
 from test_app_fixtures import create_local_app
@@ -19,6 +20,34 @@ def configure_managed_sso(monkeypatch):
   monkeypatch.setattr(settings, "mobius_sso_instance_id", "mob_testinstance")
   monkeypatch.setattr(settings, "frontend_origin", "http://testserver")
   return settings
+
+
+def configure_runtime_identity(monkeypatch, identity):
+  from app.routes import auth as auth_routes
+
+  class Response:
+    def raise_for_status(self):
+      return None
+
+    def json(self):
+      return identity
+
+  class Client:
+    def __enter__(self):
+      return self
+
+    def __exit__(self, *_args):
+      return None
+
+    def get(self, path):
+      assert path == "/identity"
+      return Response()
+
+  monkeypatch.setattr(
+    auth_routes.runtime_identity,
+    "broker_client",
+    lambda *, timeout: Client(),
+  )
 
 
 def _mobius_login_handoff(db, *, epoch=0):
@@ -244,6 +273,50 @@ def test_managed_mode_closes_local_first_owner_setup(client, monkeypatch):
   assert status.json() == {"configured": False, "auth_mode": "mobius"}
   assert setup.status_code == 403
   assert "Managed sign-in" in setup.json()["detail"]
+
+
+def test_managed_bootstrap_creates_the_bound_owner(client, db, monkeypatch):
+  from app import models
+
+  settings = configure_managed_sso(monkeypatch)
+  configure_runtime_identity(monkeypatch, {
+    "linked": True,
+    "issuer": settings.mobius_sso_issuer,
+    "subject": "user_managed-owner",
+    "instance_id": settings.mobius_sso_instance_id,
+  })
+
+  first = client.get("/api/auth/setup/status")
+  second = client.get("/api/auth/setup/status")
+
+  assert first.json() == {"configured": True, "auth_mode": "mobius"}
+  assert second.json() == first.json()
+  db.expire_all()
+  owners = db.query(models.Owner).all()
+  assert len(owners) == 1
+  assert owners[0].username == "owner"
+  assert owners[0].auth_mode == "mobius"
+  assert owners[0].sso_subject == "user_managed-owner"
+  assert Path(settings.data_dir, "service-token.txt").is_file()
+
+
+def test_managed_bootstrap_rejects_a_mismatched_broker_identity(
+  client, db, monkeypatch,
+):
+  from app import models
+
+  settings = configure_managed_sso(monkeypatch)
+  configure_runtime_identity(monkeypatch, {
+    "linked": True,
+    "issuer": settings.mobius_sso_issuer,
+    "subject": "user_wrong-instance",
+    "instance_id": "mob_anotherinstance",
+  })
+
+  status = client.get("/api/auth/setup/status")
+
+  assert status.json() == {"configured": False, "auth_mode": "mobius"}
+  assert db.query(models.Owner).count() == 0
 
 
 def test_setup_rejects_duplicate(client):
