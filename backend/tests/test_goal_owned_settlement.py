@@ -102,6 +102,83 @@ def test_terminal_does_not_continue_a_settled_or_failed_goal(db, chat):
   assert db.get(models.ChatRun, "must-not-start") is None
 
 
+@pytest.mark.parametrize("outcome", ["met", "expired", "failed"])
+def test_finished_wait_keeps_goal_ownership_until_result_admission(db, chat, outcome):
+  """A sweep can settle a check just before the declaring turn finishes."""
+  from app import chat_waits
+
+  _add_goal_run(db, chat)
+  wait = chat_waits.declare_wait(
+    db, chat_id=chat.id, created_by_run_id="goal-run",
+    description="Observe the external gate", kind="timer", delay_secs=60,
+  )
+  wait.status = outcome
+  db.commit()
+
+  result = _terminal_promote(chat.id, "goal-run")
+
+  assert result["promoted"] is None, "Goal raced its already-owned Wait result"
+  db.expire_all()
+  assert db.get(models.ChatRun, "successor") is None
+  assert db.get(models.ChatWait, wait.id).resume_delivered_at is None
+
+
+@pytest.mark.parametrize("case", ["delivered", "cancelled", "different_goal"])
+def test_wait_without_exact_outstanding_delivery_cannot_hold_goal(db, chat, case):
+  from app import chat_waits
+  from app.timeutil import now_naive_utc
+
+  _add_goal_run(db, chat)
+  source_id = "goal-run"
+  if case == "different_goal":
+    source_id = "other-goal"
+    _add_goal_run(db, chat, run_id=source_id, goal_id=source_id)
+  wait = chat_waits.declare_wait(
+    db, chat_id=chat.id, created_by_run_id=source_id,
+    description="Observe the gate", kind="timer", delay_secs=60,
+  )
+  wait.status = "cancelled" if case == "cancelled" else "met"
+  if case == "delivered":
+    wait.resume_delivered_at = now_naive_utc()
+  db.commit()
+
+  result = _terminal_promote(chat.id, "goal-run")
+
+  assert result["promoted"]["continuation_reason"] == GOAL_HANDOFF_REASON
+  assert result["promoted"]["_goal_id"] == "goal-run"
+
+
+@pytest.mark.asyncio
+async def test_wait_delivery_after_terminal_gap_starts_only_its_exact_goal_run(db, chat, monkeypatch):
+  from app import chat as chat_mod, chat_waits
+
+  _add_goal_run(db, chat)
+  wait = chat_waits.declare_wait(
+    db, chat_id=chat.id, created_by_run_id="goal-run",
+    description="External gate finished", kind="timer", delay_secs=60,
+  )
+  wait.status = "met"
+  db.commit()
+  assert _terminal_promote(chat.id, "goal-run")["promoted"] is None
+  db.expire_all()
+  db.get(models.ChatRun, "goal-run").status = "completed"
+  db.commit()
+  scheduled = []
+  monkeypatch.setattr(chat_mod, "_schedule_continuation", lambda **kw: scheduled.append(kw))
+
+  assert await chat_waits._deliver_resume(wait.id) is True
+  assert await chat_waits._deliver_resume(wait.id) is False
+
+  db.expire_all()
+  assert len(scheduled) == 1
+  successor = db.get(models.ChatRun, f"wait-resume-{wait.id}")
+  assert successor.goal_id == "goal-run"
+  assert db.get(models.ChatRun, "successor") is None
+  assert db.get(models.ChatWait, wait.id).resume_delivered_at is not None
+  assert all(message.get("continuation_reason") != GOAL_HANDOFF_REASON
+             for message in db.get(models.Chat, chat.id).messages)
+
+
 def test_existing_exact_goal_executor_is_not_duplicated(db, chat):
   _add_goal_run(db, chat)
   chat.pending_messages = [_automatic_continuation("goal-run")]
