@@ -75,6 +75,10 @@ MANAGED_UPSTREAM_POLICIES = (
   ("/api/instance/v1/railway", frozenset({"GET", "POST", "PATCH", "DELETE"})),
   ("/api/instance/v1/container-replacement", frozenset({"GET", "POST"})),
 )
+MANAGED_EXACT_ROUTES = frozenset({
+  ("GET", "/api/instance/v1/agent"),
+  ("POST", "/api/instance/v1/agent/trial"),
+})
 MANAGED_USER_AGENT = "mobius-managed-deployment/1"
 
 # Declarative public forwarding policy. Callers never supply a target URL,
@@ -228,6 +232,8 @@ def _managed_upstream_path(method: str, path: str) -> str | None:
     or any(segment in {".", ".."} for segment in upstream.split("/"))
   ):
     return None
+  if (method, upstream) in MANAGED_EXACT_ROUTES:
+    return upstream
   if any(
     method in methods
     and (upstream == prefix or upstream.startswith(prefix + "/"))

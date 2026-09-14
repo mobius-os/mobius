@@ -555,6 +555,20 @@ def test_managed_proxy_owns_credentials_and_rejects_other_targets(broker):
   assert "attacker" not in json.dumps(seen)
   assert seen["stream"] is True
 
+  for method, path in (
+    ("GET", "/managed/api/instance/v1/agent"),
+    ("POST", "/managed/api/instance/v1/agent/trial"),
+  ):
+    response = broker.proxy(
+      method=method, path=path, body=b"", headers={},
+      allow_private_routes=True,
+    )
+    response.close()
+    assert seen["method"] == method
+    assert seen["url"] == (
+      "https://account.example" + path.removeprefix("/managed")
+    )
+
   with pytest.raises(FileNotFoundError):
     broker.proxy(
       method="GET", path="/managed/api/account/v1/identity", body=b"",
@@ -577,7 +591,9 @@ def test_managed_proxy_owns_credentials_and_rejects_other_targets(broker):
   for method, path in (
     ("DELETE", "/managed/api/instance/v1/identity"),
     ("PATCH", "/managed/api/instance/v1/container-replacement/status"),
-    ("GET", "/managed/api/instance/v1/agent"),
+    ("POST", "/managed/api/instance/v1/agent"),
+    ("GET", "/managed/api/instance/v1/agent/trial"),
+    ("POST", "/managed/api/instance/v1/agent/trial/extra"),
   ):
     with pytest.raises(FileNotFoundError):
       broker.proxy(
