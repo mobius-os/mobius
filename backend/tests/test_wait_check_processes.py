@@ -8,6 +8,12 @@ import pytest
 from app import chat_waits
 
 
+def test_checks_use_bash_without_requiring_a_nested_shell_wrapper():
+  assert asyncio.run(chat_waits._run_check(
+    "set -o pipefail; values=(ready); [[ ${values[0]} == ready ]]",
+  )) == (0, "")
+
+
 @pytest.fixture
 def command_wait(client, owner_token, db):
   response = client.post(

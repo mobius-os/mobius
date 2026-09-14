@@ -477,6 +477,10 @@ async def _run_check(command: str, *, wait_id: str | None = None) -> tuple[int, 
 
     spawn = asyncio.create_task(asyncio.create_subprocess_shell(
       command,
+      # Agent shell work and saved checks share Bash syntax. The platform's
+      # /bin/sh may be dash; silently changing interpreters broke otherwise
+      # valid saved checks (notably `set -o pipefail`). No login/startup files.
+      executable="/bin/bash",
       cwd=get_settings().data_dir,
       stdout=asyncio.subprocess.PIPE,
       stderr=asyncio.subprocess.STDOUT,
