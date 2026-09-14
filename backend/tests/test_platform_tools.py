@@ -187,7 +187,8 @@ def test_control_protocol_advertises_every_run_bound_tool(monkeypatch):
   cancel_schema = tools[platform_tools.CANCEL_WAIT_TOOL_NAME]["inputSchema"]
   assert cancel_schema["required"] == ["wait_id"]
   assert set(cancel_schema["properties"]) == {"wait_id"}
-  assert set(platform_tools.COORDINATION_TOOL_NAMES) <= set(tools)
+  assert set(platform_tools.PEER_TOOL_NAMES) <= set(tools)
+  assert set(platform_tools.WORK_OWNERSHIP_TOOL_NAMES) <= set(tools)
   assert "read_agent_messages" not in tools
   send_schema = tools[platform_tools.SEND_MESSAGE_TOOL_NAME]["inputSchema"]
   assert send_schema["required"] == ["body"]
