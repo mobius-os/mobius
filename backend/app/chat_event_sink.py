@@ -8,7 +8,6 @@ rather than reaching through the broader chat scheduler.
 
 import asyncio
 import copy
-import json
 import time
 import uuid
 from datetime import UTC, datetime
@@ -56,66 +55,15 @@ from app.memory_recall import (
 from app.peer_message import (
   peer_message_from_call, settle_peer_message,
 )
+from app.owner_card_receipts import (
+  owner_card_receipt_id as _owner_card_receipt_id,
+)
 from app.runtime_types import ChatEvent
 from app.secure_inputs import redact_reveal_markers
 from app.tool_edit_preview import edit_diff_sidecar_id
 
 
 _active_sinks: dict[str, "ChatEventSink"] = {}
-
-
-def _owner_card_receipt_id(content: object) -> str | None:
-  """Find a validated saved-card receipt in a completed tool result.
-
-  Claude exposes an MCP text result directly, while Codex preserves the MCP
-  content envelope. Walk only those small JSON shapes; the exact id is checked
-  against this turn's live continuation card before any runner is interrupted.
-  """
-  pending = [content]
-  visited = 0
-  while pending and visited < 24:
-    value = pending.pop()
-    visited += 1
-    if isinstance(value, str):
-      text = value.strip()
-      candidates = [text]
-      if "\n" in text:
-        candidates.extend(
-          line.strip() for line in text.splitlines()[-8:] if line.strip()
-        )
-      for candidate in candidates:
-        if (
-          not candidate
-          or len(candidate) > 32_768
-          or candidate[0] not in "[{"
-        ):
-          continue
-        try:
-          pending.append(json.loads(candidate))
-        except (json.JSONDecodeError, RecursionError):
-          pass
-      continue
-    if isinstance(value, list):
-      pending.extend(value[:12])
-      continue
-    if not isinstance(value, dict):
-      continue
-    question_id = value.get("question_id")
-    if (
-      value.get("state") in {"waiting_for_owner", "answered"}
-      and isinstance(question_id, str)
-      and question_id
-      and len(question_id) <= 64
-      and isinstance(value.get("next_action"), str)
-    ):
-      return question_id
-    if value.get("isError") is True:
-      continue
-    for key in ("content", "result", "structuredContent", "text", "output"):
-      nested = value.get(key)
-      if isinstance(nested, (dict, list, str)):
-        pending.append(nested)
-  return None
 
 
 def _pause_note(
@@ -948,6 +896,19 @@ class ChatEventSink:
     if event_type == "thinking":
       self._prepare_thinking_event(event)
 
+    # The helper that creates a saved owner card is transport, not a second
+    # user-visible action.  Mark only a successful, completed receipt whose
+    # exact continuation card is already present in this turn.  That validated
+    # identity lets both the live renderer and historical projection hide the
+    # enclosing command/tool even though its result necessarily arrives AFTER
+    # the card (the clean post-receipt finish boundary above).
+    owner_card_receipt_matches = (
+      owner_card_receipt_id is not None
+      and self._has_continuation_card(owner_card_receipt_id)
+    )
+    if owner_card_receipt_matches:
+      event["owner_card_question_id"] = owner_card_receipt_id
+
     # Accumulate the event into assistant_blocks and decide whether a
     # save is due (immediate for save-triggering types, throttled
     # otherwise).
@@ -1015,10 +976,7 @@ class ChatEventSink:
             thinking_stashes=stashes,
           )
         )
-    if (
-      owner_card_receipt_id is not None
-      and self._has_continuation_card(owner_card_receipt_id)
-    ):
+    if owner_card_receipt_matches:
       # A completed provider event is the first universal boundary at which the
       # result is no longer in flight. It covers MCP and command-backed helpers
       # alike, without a timer or a second transport callback.

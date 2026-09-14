@@ -148,12 +148,17 @@ def test_completed_receipt_ends_only_the_exact_saved_card_turn(
   handle = _FakeCardHandle(chat.id)
   registry.register(handle)
   try:
+    approval_run[0].publish({
+      "type": "tool_start", "tool": "Bash", "input": "owner helper",
+      "tool_use_id": "owner-helper-1",
+    })
     saved = _ask(client, chat, approval_run)
     qid = saved.json()["question_id"]
     async def deliver(content, *, complete=True, exit_code=0):
       approval_run[0].publish({
         "type": "tool_output", "content": content,
         "output_complete": complete, "output_exit_code": exit_code,
+        "tool_use_id": "owner-helper-1",
       })
       # The runner must own the clean card ending before this callback returns;
       # a provider terminal may be the very next already-queued event.
@@ -166,6 +171,9 @@ def test_completed_receipt_ends_only_the_exact_saved_card_turn(
     assert handle.finishes == 0
     asyncio.run(deliver(saved.text))
     assert handle.finishes == 1
+    assert approval_run[0].assistant_blocks[0][
+      "owner_card_question_id"
+    ] == qid
 
     asyncio.run(deliver({
       "content": [{

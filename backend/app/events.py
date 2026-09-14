@@ -855,6 +855,12 @@ def _process_tool_event(event: dict, assistant_blocks: list) -> bool:
       # actually said/received (see chat_event_sink._stamp_peer_message).
       if isinstance(event.get("peer_message"), dict):
         blk["peer_message"] = event["peer_message"]
+      # A successful command/MCP result can be the transport receipt for a
+      # saved owner card. The sink validates that exact relationship before
+      # stamping it; preserve the identity on the owning tool so presentation
+      # can suppress transport without guessing from tool names or output.
+      if isinstance(event.get("owner_card_question_id"), str):
+        blk["owner_card_question_id"] = event["owner_card_question_id"]
       return True
     return False
 

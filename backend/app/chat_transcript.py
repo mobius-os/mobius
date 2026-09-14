@@ -12,6 +12,7 @@ from app.memory_recall import (
   recall_from_tool_block,
   settle_recall,
 )
+from app.owner_card_receipts import owner_card_receipt_id
 from app.peer_message import bounded_peer_message
 from app.tool_sources import normalize_tool_sources
 
@@ -30,13 +31,45 @@ MAX_ACTIVITY_DETAIL_BLOCKS = 2000
 
 
 def redundant_interaction_tool_indexes(blocks: list[dict]) -> set[int]:
-  """Return tools whose immediately following product card owns the UI."""
+  """Return tool transport whose product card owns the visible interaction.
+
+  New saved-card helpers carry an exact, sink-validated card identity and may
+  complete after the card. Legacy native-question and restart tools are paired
+  by family and position so already-persisted chats keep their repair.
+  """
+  question_ids = {
+    block.get("question_id")
+    for block in blocks
+    if isinstance(block, dict)
+    and block.get("type") == "question"
+    and isinstance(block.get("question_id"), str)
+  }
   latest_unowned: dict[str, int | None] = {"question": None, "restart": None}
+  seen_continuation_ids: set[str] = set()
   owned: set[int] = set()
   for index, block in enumerate(blocks):
     if not isinstance(block, dict):
       continue
     if block.get("type") == "tool":
+      if block.get("owner_card_question_id") in question_ids:
+        owned.add(index)
+      # Historical saved-card turns predate the explicit ownership stamp. They
+      # can still be repaired without a migration: after a continuation card,
+      # accept only the same bounded receipt shape used by the live sink and
+      # require its exact id to name a card already seen in this message.
+      elif seen_continuation_ids:
+        exit_code = block.get("output_exit_code")
+        if exit_code is None:
+          exit_code = tool_output_exit_code(block.get("output"))
+        failed = (
+          isinstance(exit_code, (int, float))
+          and not isinstance(exit_code, bool)
+          and exit_code != 0
+        )
+        if not failed and owner_card_receipt_id(
+          block.get("output")
+        ) in seen_continuation_ids:
+          owned.add(index)
       tool = block.get("tool")
       family = (
         "question" if tool in _QUESTION_TOOLS
@@ -59,6 +92,11 @@ def redundant_interaction_tool_indexes(blocks: list[dict]) -> set[int]:
       continue
     if block.get("type") != "question":
       continue
+    if (
+      block.get("response_mode") == "continuation"
+      and isinstance(block.get("question_id"), str)
+    ):
+      seen_continuation_ids.add(block["question_id"])
     action = block.get("platform_action")
     family = (
       "restart"

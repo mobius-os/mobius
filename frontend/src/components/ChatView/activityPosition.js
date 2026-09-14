@@ -24,10 +24,24 @@ export function insertPositionedActivity(entries, notes, sourceBlocks, chatId) {
     const reference = position.block_key && entries.find(({ item }) => {
       const key = item.type === 'question' ? item.question_id
         : item.type === 'thinking' ? item.thinking_id : item.tool_use_id
-      return key && `${item.type}:${key}` === position.block_key
+      if (key && `${item.type}:${key}` === position.block_key) return true
+      return item.type === 'activity' && Array.isArray(item.entries)
+        && item.entries.some(({ item: nested }) => {
+          const nestedKey = nested?.type === 'question' ? nested.question_id
+            : nested?.type === 'thinking' ? nested.thinking_id : nested?.tool_use_id
+          return nestedKey && `${nested.type}:${nestedKey}` === position.block_key
+        })
     })
+    const nestedReference = reference?.item?.type === 'activity'
     const index = position.block_key
-      ? reference ? reference.idx + position.block_distance : entries.length + 1
+      ? reference
+        // A compact activity run is one lazy top-level surface. When the exact
+        // anchor lives inside it, retain chronology at that owning boundary:
+        // before the run for non-positive distance, after it otherwise. Never
+        // demote a valid nested anchor to the end of the assistant message.
+        ? reference.idx + (nestedReference && position.block_distance > 0
+          ? 1 : nestedReference ? 0 : position.block_distance)
+        : entries.length + 1
       : position.block_index - [...skipped].filter(i => i < position.block_index).length
     const list = boundaries.get(index) || []
     list.push(note)
