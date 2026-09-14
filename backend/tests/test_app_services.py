@@ -77,6 +77,10 @@ async def test_cancel_during_spawn_reaps_process_before_releasing_runtime(monkey
     await asyncio.wait_for(created.wait(), timeout=3)
     task.cancel()
     await asyncio.sleep(0)  # Deliver cancellation precisely inside admission.
+    task.cancel()  # A shutdown or timeout can cancel cleanup again.
+    await asyncio.sleep(0)
+    assert not task.done()
+    assert not released
     finish_spawn.set()
     with pytest.raises(asyncio.CancelledError):
       await asyncio.wait_for(task, timeout=3)

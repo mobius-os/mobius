@@ -201,14 +201,23 @@ async def invoke_service(
           process = await asyncio.shield(spawn)
         except asyncio.CancelledError:
           # Admission can be cancelled after the OS child exists but before
-          # asyncio returns its handle. Keep that handle and the runtime pin
-          # until the child is reaped, just as for cancellation during I/O.
-          try:
-            process = await spawn
-          except OSError:
-            pass
-          else:
-            await _stop_process(process)
+          # asyncio returns its handle. Finish recovery before releasing the
+          # runtime pin, even if shutdown cancels this request again.
+
+          async def recover_spawn() -> None:
+            try:
+              process = await asyncio.shield(spawn)
+            except OSError:
+              pass
+            else:
+              await _stop_process(process)
+
+          recovery = asyncio.create_task(recover_spawn())
+          while not recovery.done():
+            try:
+              await asyncio.shield(recovery)
+            except asyncio.CancelledError:
+              continue
           raise
       except OSError as exc:
         raise HTTPException(502, "App service could not start.") from exc
