@@ -38,7 +38,7 @@ services:
         MOBIUS_LOCAL_PLATFORM_DATE: ${MOBIUS_LOCAL_PLATFORM_DATE:-unknown}
     image: ${MOBIUS_IMAGE:-mobius}
     container_name: mobius
-    init: true
+    # No `init:` — the image runs tini as PID 1 via its ENTRYPOINT.
     restart: unless-stopped
     environment:
       # Fail loudly instead of silently blanking these: a bare `docker compose
