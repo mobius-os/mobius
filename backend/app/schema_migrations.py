@@ -4760,6 +4760,80 @@ def _detach_retired_gauntlet_history(eng):
   )
 
 
+def _add_stable_app_package_identities(eng) -> None:
+  """Separate package, source-trust, and service identities from app slugs."""
+  from sqlalchemy import inspect as sa_inspect, text
+
+  columns = {
+    column["name"] for column in sa_inspect(eng).get_columns("apps")
+  }
+  additions = {
+    "package_id": "VARCHAR(128) NULL",
+    "source_identity": "VARCHAR(256) NULL",
+    "service_id": "VARCHAR(128) NULL",
+  }
+  with eng.begin() as conn:
+    for name, definition in additions.items():
+      if name not in columns:
+        conn.execute(text(f"ALTER TABLE apps ADD COLUMN {name} {definition}"))
+    conn.execute(text(
+      "CREATE UNIQUE INDEX IF NOT EXISTS ix_apps_package_id "
+      "ON apps (package_id)"
+    ))
+    conn.execute(text(
+      "CREATE INDEX IF NOT EXISTS ix_apps_source_identity "
+      "ON apps (source_identity)"
+    ))
+    conn.execute(text(
+      "CREATE UNIQUE INDEX IF NOT EXISTS ix_apps_service_id "
+      "ON apps (service_id)"
+    ))
+
+    # Existing accepted services remain reachable at exactly their current
+    # route. Their next reviewed manifest may give the contract a permanent id
+    # without leaving this legacy slug exposed as a second alias.
+    if not {"id", "slug", "capability_contract"}.issubset(columns):
+      return
+    rows = conn.execute(text(
+      "SELECT id, slug, capability_contract, service_id FROM apps"
+    )).all()
+    for app_id, slug, raw_contract, service_id in rows:
+      if service_id is not None:
+        continue
+      try:
+        contract = (
+          json.loads(raw_contract)
+          if isinstance(raw_contract, str)
+          else raw_contract
+        )
+      except (TypeError, ValueError, json.JSONDecodeError):
+        continue
+      service = contract.get("service") if isinstance(contract, dict) else None
+      if not isinstance(service, dict) or service.get("protocol") != "json-v1":
+        continue
+      conn.execute(text(
+        "UPDATE apps SET service_id = :service_id WHERE id = :app_id"
+      ), {"service_id": slug, "app_id": app_id})
+
+
+def _add_app_service_aliases(eng) -> None:
+  """Add explicit, removable routes for a bounded service rename window."""
+  from sqlalchemy import text
+
+  with eng.begin() as conn:
+    conn.execute(text(
+      "CREATE TABLE IF NOT EXISTS app_service_aliases ("
+      "service_id VARCHAR(128) PRIMARY KEY, "
+      "app_id INTEGER NOT NULL REFERENCES apps(id) ON DELETE CASCADE, "
+      "created_at TIMESTAMP NOT NULL"
+      ")"
+    ))
+    conn.execute(text(
+      "CREATE INDEX IF NOT EXISTS ix_app_service_aliases_app_id "
+      "ON app_service_aliases (app_id)"
+    ))
+
+
 _SCHEMA_MIGRATIONS = (
   # Full IDs are permanent identities, not sequence positions. Append new
   # work in execution order; never renumber a shipped ID to reconcile sources.
@@ -4821,6 +4895,8 @@ _SCHEMA_MIGRATIONS = (
   ("0055_declarative_project_artifacts", _make_project_artifacts_declarative),
   ("0056_model_selection_ids", _migrate_model_selection_ids),
   ("0057_detach_retired_gauntlet_history", _detach_retired_gauntlet_history),
+  ("0058_stable_app_package_identities", _add_stable_app_package_identities),
+  ("0059_app_service_aliases", _add_app_service_aliases),
 )
 
 

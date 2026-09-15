@@ -173,13 +173,17 @@ def _app_with_pre_service_host_contract(db, *, service):
   return row, source
 
 
-def test_service_contract_migration_uses_only_the_accepted_runtime(db):
+@pytest.mark.parametrize("service_id", [None, "accepted-service"])
+def test_service_contract_migration_uses_only_the_accepted_runtime(db, service_id):
   row, source = _app_with_pre_service_host_contract(
-    db, service={"entry": "service.py", "access": "self"},
+    db, service={"entry": "service.py", "access": "self",
+                 **({"id": service_id} if service_id else {})},
   )
   previous_updated = row.updated_at
   live_manifest = json.loads((source / "mobius.json").read_text())
   live_manifest["service"]["access"] = "public"
+  live_manifest["service"]["id"] = "unreviewed-service"
+  live_manifest["id"] = "unreviewed-package"
   (source / "mobius.json").write_text(json.dumps(live_manifest))
 
   migrated, warnings = runtime.migrate_accepted_service_contracts(db)
@@ -189,6 +193,7 @@ def test_service_contract_migration_uses_only_the_accepted_runtime(db):
     "schema": 6,
     "reviewed": "older-host",
     "service": {
+      "id": service_id or "service-contract-migration",
       "entry": "service.py",
       "access": "self",
       "protocol": "json-v1",

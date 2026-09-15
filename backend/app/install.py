@@ -547,8 +547,16 @@ def _find_install_identity_row(
   *,
   source_url: str,
   manifest_id: str,
+  package_id: str | None = None,
 ) -> models.App | None:
-  """Resolve exact, moved-ref, and proven legacy catalog identities."""
+  """Resolve permanent package identity, then the bounded legacy witnesses."""
+  package_row = None
+  if package_id:
+    package_row = (
+      db.query(models.App)
+      .filter(models.App.package_id == package_id)
+      .one_or_none()
+    )
   canonical = _canonical_identity_key(source_url, manifest_id)
   existing = (
     db.query(models.App)
@@ -561,7 +569,109 @@ def _find_install_identity_row(
     existing = _find_trusted_origin_catalog_row(
       db, canonical, manifest_id,
     )
-  return existing
+  if package_row is not None and existing is not None and package_row.id != existing.id:
+    raise HTTPException(
+      409, "Permanent package identity conflicts with the installed source.",
+    )
+  return package_row or existing
+
+
+def _manifest_service_id(
+  manifest: dict, *, app: models.App | None = None, slug: str | None = None,
+) -> str | None:
+  """Resolve the identity that this accepted manifest will actually store.
+
+  Explicit package identities are stable by declaration. Legacy manifests
+  keep the row's existing identity, or fall back to the collision-resolved
+  slug for a fresh install, matching the migration backfill.
+  """
+  service = manifest.get("service")
+  if not isinstance(service, dict):
+    return None
+  if "id" in service:
+    return service["id"]
+  if app is not None and app.service_id:
+    return app.service_id
+  return slug or (app.slug if app is not None else manifest["id"])
+
+
+def _manifest_service_aliases(manifest: dict) -> list[str]:
+  service = manifest.get("service")
+  if not isinstance(service, dict):
+    return []
+  return list(service.get("aliases") or [])
+
+
+def _assert_service_identity_available(
+  db: Session, *, service_id: str | None, app_id: int | None,
+) -> None:
+  if service_id is None:
+    return
+  owner = (
+    db.query(models.App)
+    .filter(models.App.service_id == service_id)
+    .one_or_none()
+  )
+  if owner is not None and owner.id != app_id:
+    raise HTTPException(409, "App service identity is already installed.")
+  alias_owner = db.get(models.AppServiceAlias, service_id)
+  if alias_owner is not None and alias_owner.app_id != app_id:
+    raise HTTPException(409, "App service identity is already installed.")
+
+
+def _assert_service_aliases_available(
+  db: Session, *, aliases: list[str], service_id: str | None, app_id: int | None,
+) -> None:
+  for alias in aliases:
+    if alias == service_id:
+      raise HTTPException(409, "App service alias repeats its stable identity.")
+    _assert_service_identity_available(db, service_id=alias, app_id=app_id)
+
+
+def _assert_service_transition_safe(
+  app: models.App | None, *, service_id: str | None, aliases: list[str],
+) -> None:
+  if (
+    app is not None
+    and app.service_id is not None
+    and service_id is not None
+    and app.service_id != service_id
+    and app.service_id not in aliases
+  ):
+    raise HTTPException(
+      409,
+      "Changing an app service identity requires retaining the previous "
+      "identity in `service.aliases` for the reviewed transition.",
+    )
+
+
+def _sync_service_aliases(
+  db: Session, *, app: models.App, manifest: dict,
+) -> None:
+  """Replace only this app's explicit transition routes in the transaction."""
+  aliases = _manifest_service_aliases(manifest)
+  db.query(models.AppServiceAlias).filter(
+    models.AppServiceAlias.app_id == app.id,
+  ).delete(synchronize_session=False)
+  for alias in aliases:
+    db.add(models.AppServiceAlias(service_id=alias, app_id=app.id))
+
+
+def _contract_with_service_identity(
+  contract: dict, *, service_id: str | None, aliases: list[str],
+) -> dict:
+  """Align the accepted contract with the collision-resolved row identity."""
+  if service_id is None or not isinstance(contract.get("service"), dict):
+    return contract
+  result = dict(contract)
+  service = dict(result["service"])
+  service["id"] = service_id
+  if aliases:
+    service["aliases"] = list(aliases)
+  else:
+    service.pop("aliases", None)
+  result["service"] = service
+  return result
 
 
 def _catalog_identity_matches(
@@ -724,6 +834,54 @@ async def _http_get(
   # Recurse outside the stream context so the previous connection is
   # already released by the time we open the next one.
   return await _http_get(client, next_url, max_bytes, _hops + 1)
+
+
+async def _resolve_source_identity(
+  client: httpx.AsyncClient, source_url: str,
+) -> tuple[str, str]:
+  """Return the provider-owned trust identity and current fetch locator.
+
+  GitHub repository paths are mutable, so resolve their numeric repository id
+  only when a package opts into permanent identity. Other HTTPS sources retain
+  an exact URL-derived identity and can still move through the explicit
+  old-source handoff contract.
+  """
+  repository = _github_root_manifest_identity(source_url)
+  if repository is None:
+    base = _canonical_base(source_url)
+    digest = hashlib.sha256(base.encode("utf-8")).hexdigest()
+    return f"url:{digest}", source_url
+
+  owner, repo = repository
+  api_url = f"https://api.github.com/repos/{owner}/{repo}"
+  try:
+    raw = await _http_get(client, api_url, 256 * 1024)
+    metadata = json.loads(raw)
+  except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+    raise HTTPException(502, "GitHub returned invalid repository metadata.") from exc
+  repository_id = metadata.get("id") if isinstance(metadata, dict) else None
+  full_name = metadata.get("full_name") if isinstance(metadata, dict) else None
+  if (
+    not isinstance(repository_id, int)
+    or repository_id <= 0
+    or not isinstance(full_name, str)
+    or full_name.count("/") != 1
+  ):
+    raise HTTPException(502, "GitHub returned incomplete repository metadata.")
+  canonical_owner, canonical_repo = full_name.split("/", 1)
+  if not canonical_owner or not canonical_repo:
+    raise HTTPException(502, "GitHub returned incomplete repository metadata.")
+
+  parsed = urlparse(source_url)
+  parts = [part for part in parsed.path.split("/") if part]
+  if len(parts) < 3:
+    raise HTTPException(400, "GitHub package source is not a root manifest.")
+  parts[0] = canonical_owner
+  parts[1] = canonical_repo
+  trailing_slash = parsed.path.endswith("/")
+  canonical_path = "/" + "/".join(parts) + ("/" if trailing_slash else "")
+  canonical_url = parsed._replace(path=canonical_path).geturl()
+  return f"github:{repository_id}", canonical_url
 
 
 def _header(headers, name: str) -> str | None:
@@ -1149,6 +1307,9 @@ def _install_candidate_digest(
   *,
   manifest: dict,
   raw_base: str,
+  source_identity: str | None,
+  predecessor_source_identity: str | None,
+  canonical_source_url: str,
   entry_bytes: bytes,
   icon_processed: bytes | None,
   bundled_job: bytes | None,
@@ -1180,6 +1341,12 @@ def _install_candidate_digest(
     ).encode("utf-8"),
   )
   add("raw_base", raw_base.encode("utf-8"))
+  add("source-identity", (source_identity or "").encode("utf-8"))
+  add(
+    "predecessor-source-identity",
+    (predecessor_source_identity or "").encode("utf-8"),
+  )
+  add("canonical-source-url", canonical_source_url.encode("utf-8"))
   add("entry", entry_bytes)
   add("icon-present", b"1" if icon_processed is not None else b"0")
   if icon_processed is not None:
@@ -1220,6 +1387,9 @@ def package_content_digest(
   return _install_candidate_digest(
     manifest=manifest,
     raw_base="",
+    source_identity=None,
+    predecessor_source_identity=None,
+    canonical_source_url="",
     entry_bytes=entry_bytes,
     icon_processed=icon_processed,
     bundled_job=bundled_job,
@@ -2016,6 +2186,9 @@ class InstallCandidate:
   capability_digest: str
   candidate_digest: str
   source_review_digest: str
+  source_identity: str | None = None
+  predecessor_source_identity: str | None = None
+  canonical_source_url: str = ""
 
 
 def install_candidate_content_digest(candidate: InstallCandidate) -> str:
@@ -2043,6 +2216,9 @@ class InstallTarget:
   canonical_manifest_url: str
   force_core_store_update: bool
   origin_migration: tuple[str, str] | None
+  package_id: str | None
+  source_identity: str | None
+  source_handoff_required: bool
 
 
 @dataclass
@@ -2111,6 +2287,19 @@ async def _fetch_install_candidate(
       manifest=manifest,
       raw_base=raw_base,
     )
+    source_url = manifest_url if manifest_url is not None else raw_base
+    source_identity = None
+    predecessor_source_identity = None
+    canonical_source_url = raw_base
+    if manifest.get("package_id"):
+      source_identity, canonical_source_url = await _resolve_source_identity(
+        cli, source_url,
+      )
+      previous_source = manifest.get("previous_manifest_url")
+      if previous_source:
+        predecessor_source_identity, _ = await _resolve_source_identity(
+          cli, previous_source,
+        )
     capability_contract, capability_digest = contract_and_digest(manifest)
     if (
       reviewed_capability_digest is not None
@@ -2221,6 +2410,9 @@ async def _fetch_install_candidate(
   candidate_digest = _install_candidate_digest(
     manifest=manifest,
     raw_base=raw_base,
+    source_identity=source_identity,
+    predecessor_source_identity=predecessor_source_identity,
+    canonical_source_url=canonical_source_url,
     entry_bytes=entry_bytes,
     icon_processed=icon_processed,
     bundled_job=bundled_job,
@@ -2286,6 +2478,9 @@ async def _fetch_install_candidate(
     capability_digest=capability_digest,
     candidate_digest=candidate_digest,
     source_review_digest=source_review_digest,
+    source_identity=source_identity,
+    predecessor_source_identity=predecessor_source_identity,
+    canonical_source_url=canonical_source_url,
   )
 
 
@@ -2303,6 +2498,47 @@ async def fetch_install_candidate(manifest_url: str) -> InstallCandidate:
   )
 
 
+async def _authorize_source_handoff(
+  target: InstallTarget, candidate: InstallCandidate,
+) -> None:
+  """Require the currently trusted source to authorize a new repository.
+
+  Matching package ids select the existing row, but never grant source trust:
+  an unrelated repository can copy a public manifest. A different provider
+  identity is accepted only when the old installed manifest names the new
+  source and both manifests carry the same permanent package id.
+  """
+  if not target.source_handoff_required:
+    return
+  existing = target.existing
+  package_id = target.package_id
+  if existing is None or not package_id or not existing.manifest_url:
+    raise HTTPException(409, "App source changed without a trusted handoff.")
+  old_manifest_url = _canonical_base(existing.manifest_url) + "/mobius.json"
+  async with httpx.AsyncClient(
+    timeout=_HTTP_TIMEOUT,
+    follow_redirects=False,
+  ) as cli:
+    old_manifest, _ = await _fetch_and_validate_manifest(
+      cli,
+      manifest_url=old_manifest_url,
+      manifest=None,
+      raw_base=None,
+    )
+    moved_to = old_manifest.get("moved_to")
+    if (
+      old_manifest.get("package_id") != package_id
+      or not isinstance(moved_to, dict)
+    ):
+      raise HTTPException(409, "App source changed without a trusted handoff.")
+    moved_url = moved_to.get("manifest_url")
+    if not isinstance(moved_url, str):
+      raise HTTPException(409, "App source changed without a trusted handoff.")
+    moved_identity, _ = await _resolve_source_identity(cli, moved_url)
+  if moved_identity != candidate.source_identity:
+    raise HTTPException(409, "Trusted app handoff names a different source.")
+
+
 def _select_install_target(
   db: Session,
   *,
@@ -2315,8 +2551,12 @@ def _select_install_target(
   """Resolve install/update/adoption identity without mutating the target row."""
   manifest = candidate.manifest
   manifest_id = manifest["id"]
-  source_for_key = (
+  package_id = manifest.get("package_id")
+  requested_source = (
     manifest_url if manifest_url is not None else candidate.raw_base
+  )
+  source_for_key = candidate.canonical_source_url or (
+    requested_source
   )
   canonical_manifest_url = _canonical_identity_key(
     source_for_key, manifest_id,
@@ -2325,8 +2565,29 @@ def _select_install_target(
     source, manifest_id, canonical_manifest_url,
   )
   existing = _find_install_identity_row(
-    db, source_url=source_for_key, manifest_id=manifest_id,
+    db,
+    source_url=requested_source,
+    manifest_id=manifest_id,
+    package_id=package_id,
   )
+  previous_source = manifest.get("previous_manifest_url")
+  if (
+    existing is None
+    and package_id
+    and previous_source
+    and candidate.predecessor_source_identity == candidate.source_identity
+  ):
+    existing = _find_install_identity_row(
+      db, source_url=previous_source, manifest_id=manifest_id,
+    )
+
+  if existing is not None and existing.package_id is not None:
+    if package_id is None:
+      raise HTTPException(
+        409, "This installed app requires its permanent package identity.",
+      )
+    if existing.package_id != package_id:
+      raise HTTPException(409, "Permanent package identity changed.")
 
   adopting_previous_id = False
   origin_migration = None
@@ -2336,18 +2597,44 @@ def _select_install_target(
     # repository owned by the same GitHub account.
     prev_id = manifest.get("previous_id")
     if prev_id:
-      predecessor_source, origin_migration = _reviewed_predecessor_source(
-        manifest, source_for_key,
-      )
-      existing = _find_install_identity_row(
-        db, source_url=predecessor_source, manifest_id=prev_id,
-      )
+      if package_id:
+        # First recover identity-free installs already checked out from the
+        # current trusted repository (Main's pre-manifest Social state).
+        existing = _find_install_identity_row(
+          db, source_url=source_for_key, manifest_id=prev_id,
+        )
+        # A persisted predecessor URL is safe across owner/repo renames only
+        # when the provider proves both paths are the same repository.
+        if (
+          existing is None
+          and previous_source
+          and candidate.predecessor_source_identity
+          == candidate.source_identity
+        ):
+          existing = _find_install_identity_row(
+            db, source_url=previous_source, manifest_id=prev_id,
+          )
+      else:
+        predecessor_source, origin_migration = _reviewed_predecessor_source(
+          manifest, source_for_key,
+        )
+        existing = _find_install_identity_row(
+          db, source_url=predecessor_source, manifest_id=prev_id,
+        )
       if existing is not None and existing.deleted_at is not None:
         existing = None
       if existing:
         adopting_previous_id = True
       else:
         origin_migration = None
+
+  if (
+    existing is not None
+    and package_id
+    and existing.package_id == package_id
+    and existing.slug != manifest_id
+  ):
+    adopting_previous_id = True
 
   required_app_id = (
     expected_app_id
@@ -2358,6 +2645,40 @@ def _select_install_target(
     existing is None or existing.id != required_app_id
   ):
     raise HTTPException(409, "Pending update no longer matches this app.")
+  source_handoff_required = bool(
+    existing is not None
+    and existing.source_identity is not None
+    and existing.source_identity != candidate.source_identity
+  )
+  if existing is not None and existing.source_identity and not candidate.source_identity:
+    raise HTTPException(
+      409, "This installed app requires a verifiable source identity.",
+    )
+
+  old_origin = _github_origin_url(existing.manifest_url) if existing else None
+  new_origin = _github_origin_url(source_for_key)
+  if old_origin and new_origin and old_origin.lower() != new_origin.lower():
+    origin_migration = (old_origin, new_origin)
+
+  service = manifest.get("service")
+  explicit_service_id = isinstance(service, dict) and "id" in service
+  resolved_service_id = _manifest_service_id(manifest, app=existing)
+  service_aliases = _manifest_service_aliases(manifest)
+  # A fresh implicit service cannot be resolved until its unique slug is
+  # allocated below. Explicit identities and every update are known now.
+  if existing is not None or explicit_service_id:
+    _assert_service_identity_available(
+      db, service_id=resolved_service_id,
+      app_id=existing.id if existing is not None else None,
+    )
+    _assert_service_aliases_available(
+      db, aliases=service_aliases, service_id=resolved_service_id,
+      app_id=existing.id if existing is not None else None,
+    )
+    _assert_service_transition_safe(
+      existing, service_id=resolved_service_id, aliases=service_aliases,
+    )
+
   return InstallTarget(
     existing=existing,
     mode="update" if existing else "install",
@@ -2375,6 +2696,9 @@ def _select_install_target(
     canonical_manifest_url=canonical_manifest_url,
     force_core_store_update=force_core_store_update,
     origin_migration=origin_migration,
+    package_id=package_id,
+    source_identity=candidate.source_identity,
+    source_handoff_required=source_handoff_required,
   )
 
 
@@ -2565,30 +2889,6 @@ async def _prepare_app_row(
         app.slug = target_slug
         app.source_dir = target_source_dir
         app.manifest_url = canonical_manifest_url
-        if target.origin_migration and app_git.has_origin(target_source_dir):
-          old_origin, new_origin = target.origin_migration
-          current_origin = app_git.origin_url(target_source_dir)
-          normalized_origin = (
-            current_origin.rstrip("/").lower() if current_origin else None
-          )
-          if normalized_origin and normalized_origin not in {
-            old_origin.rstrip("/").lower(), new_origin.rstrip("/").lower(),
-          }:
-            raise HTTPException(
-              409, "Installed app origin no longer matches its rename source.",
-            )
-          if (
-            normalized_origin
-            and normalized_origin
-            != new_origin.rstrip("/").lower()
-          ):
-            app_git.set_origin_url(target_source_dir, new_origin)
-            journal.rollback_actions.append(
-              lambda p=target_source_dir, u=current_origin:
-              app_git.set_origin_url(p, u)
-              if Path(p).is_dir() and app_git.has_origin(p)
-              else None
-            )
         db.flush()
       elif old_source_dir and Path(old_source_dir).is_dir():
         warnings.append(
@@ -2597,6 +2897,27 @@ async def _prepare_app_row(
       else:
         warnings.append(
           f"could not rename slug {old_slug}->{manifest_id}: source missing"
+        )
+
+    if target.origin_migration and app_git.has_origin(app.source_dir):
+      old_origin, new_origin = target.origin_migration
+      current_origin = app_git.origin_url(app.source_dir)
+      normalized_origin = (
+        current_origin.rstrip("/").lower() if current_origin else None
+      )
+      if normalized_origin and normalized_origin not in {
+        old_origin.rstrip("/").lower(), new_origin.rstrip("/").lower(),
+      }:
+        raise HTTPException(
+          409, "Installed app origin no longer matches its trusted source.",
+        )
+      if normalized_origin and normalized_origin != new_origin.rstrip("/").lower():
+        app_git.set_origin_url(app.source_dir, new_origin)
+        journal.rollback_actions.append(
+          lambda p=app.source_dir, u=current_origin:
+          app_git.set_origin_url(p, u)
+          if Path(p).is_dir() and app_git.has_origin(p)
+          else None
         )
     return app
 
@@ -2612,6 +2933,17 @@ async def _prepare_app_row(
   source_dir = str(data_dir / "apps" / slug)
   journal.created_paths.append(Path(source_dir))
   permissions = manifest.get("permissions") or {}
+  service_id = _manifest_service_id(manifest, slug=slug)
+  service_aliases = _manifest_service_aliases(manifest)
+  capability_contract = _contract_with_service_identity(
+    candidate.capability_contract,
+    service_id=service_id,
+    aliases=service_aliases,
+  )
+  _assert_service_identity_available(db, service_id=service_id, app_id=None)
+  _assert_service_aliases_available(
+    db, aliases=service_aliases, service_id=service_id, app_id=None,
+  )
   app = models.App(
     name=manifest["name"],
     description=manifest.get("description", ""),
@@ -2619,6 +2951,9 @@ async def _prepare_app_row(
     source_dir=source_dir,
     slug=slug,
     manifest_url=canonical_manifest_url,
+    package_id=target.package_id,
+    source_identity=target.source_identity,
+    service_id=service_id,
     cross_app_access=permissions.get("cross_app_access", "none"),
     share_with_apps=permissions.get("share_with_apps", "none"),
     chat_log_access=permissions.get("chat_log_access", "none"),
@@ -2634,11 +2969,12 @@ async def _prepare_app_row(
     offline_contract=manifest.get("offline") or None,
     system_prompt_file=manifest.get("system_prompt") or None,
     system_app=bool(manifest.get("system_app", False)),
-    capability_contract=candidate.capability_contract,
+    capability_contract=capability_contract,
     project_templates_json=manifest.get("project_templates") or None,
   )
   db.add(app)
   db.flush()
+  _sync_service_aliases(db, app=app, manifest=manifest)
   return app
 
 
@@ -2688,14 +3024,19 @@ class ActivationPlan:
   updating: bool
   canonical_manifest_url: str
   capability_contract: dict
+  package_id: str | None
+  source_identity: str | None
 
 
 def _apply_manifest_metadata(
+  db: Session,
   app: models.App,
   *,
   manifest: dict,
   canonical_manifest_url: str,
   capability_contract: dict,
+  package_id: str | None,
+  source_identity: str | None,
   entry_source: str | None,
 ) -> None:
   """Attach one reviewed package identity and its runtime declarations.
@@ -2715,6 +3056,17 @@ def _apply_manifest_metadata(
   if entry_source is not None:
     app.jsx_source = entry_source
   app.manifest_url = canonical_manifest_url
+  if package_id:
+    app.package_id = package_id
+  if source_identity:
+    app.source_identity = source_identity
+  app.service_id = _manifest_service_id(manifest, app=app)
+  _sync_service_aliases(db, app=app, manifest=manifest)
+  capability_contract = _contract_with_service_identity(
+    capability_contract,
+    service_id=app.service_id,
+    aliases=_manifest_service_aliases(manifest),
+  )
   app.published_manifest_url = None
   permissions = manifest.get("permissions") or {}
   app.cross_app_access = permissions.get(
@@ -2766,10 +3118,13 @@ async def _activate_install_source(
   """
   entry_source = plan.source_tree[plan.entry_key].decode("utf-8")
   _apply_manifest_metadata(
+    db,
     app,
     manifest=manifest,
     canonical_manifest_url=plan.canonical_manifest_url,
     capability_contract=plan.capability_contract,
+    package_id=plan.package_id,
+    source_identity=plan.source_identity,
     entry_source=entry_source,
   )
 
@@ -2975,6 +3330,7 @@ async def install_from_manifest(
     expected_app_id=expected_app_id,
     publication_handoff_app_id=publication_handoff_app_id,
   )
+  await _authorize_source_handoff(target, candidate)
   existing = target.existing
   revive_after_commit = bool(existing and existing.deleted_at is not None)
   mode = target.mode
@@ -3498,6 +3854,8 @@ async def install_from_manifest(
             updating=existing is not None,
             canonical_manifest_url=canonical_manifest_url,
             capability_contract=capability_contract,
+            package_id=target.package_id,
+            source_identity=target.source_identity,
           ),
           journal=journal,
           data_dir=data_dir,
@@ -3515,10 +3873,13 @@ async def install_from_manifest(
         # ordinary source resolver: the current source/bundle stay untouched,
         # while the reviewed identity and capability grant become durable.
         _apply_manifest_metadata(
+          db,
           app,
           manifest=manifest,
           canonical_manifest_url=canonical_manifest_url,
           capability_contract=capability_contract,
+          package_id=target.package_id,
+          source_identity=target.source_identity,
           entry_source=None,
         )
       # Commit the recorded upstream provenance + return so the App Store can

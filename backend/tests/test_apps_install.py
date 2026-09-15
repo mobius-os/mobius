@@ -4463,6 +4463,299 @@ def test_install_validates_previous_id_field(client, auth, bypass_url_validation
   assert "absolute HTTPS URL" in r4.text
 
 
+def test_permanent_identity_manifest_requires_stable_service_id(
+  client, auth, bypass_url_validation,
+):
+  manifest = _simple_manifest("social")
+  manifest["package_id"] = "app.mobius.social"
+  manifest["source_files"] = ["service.py"]
+  manifest["service"] = {"entry": "service.py", "access": "public"}
+
+  response = _install_simple(
+    client, auth, "https://identity.test/social/", manifest,
+  )
+
+  assert response.status_code == 400
+  assert "service.id" in response.text
+
+
+def test_service_identity_collision_is_a_clear_install_conflict(
+  client, auth, bypass_url_validation,
+):
+  service_source = b'import json, sys\njson.dump({"status": 200}, sys.stdout)\n'
+
+  def install(app_id: str, package_id: str):
+    base = f"https://identity.test/{app_id}/"
+    manifest = _simple_manifest(app_id)
+    manifest.update({
+      "package_id": package_id,
+      "source_files": ["service.py"],
+      "service": {"id": "shared-api", "entry": "service.py"},
+    })
+    responses = {
+      base + "mobius.json": (200, json.dumps(manifest).encode()),
+      base + "index.jsx": (200, JSX.encode()),
+      base + "service.py": (200, service_source),
+    }
+    with patch(
+      "app.install.httpx.AsyncClient",
+      side_effect=_fake_async_client(responses),
+    ):
+      return client.post(
+        "/api/apps/install", headers=auth,
+        json={"manifest_url": base + "mobius.json"},
+      )
+
+  first = install("first-service", "app.example.first")
+  second = install("second-service", "app.example.second")
+
+  assert first.status_code == 201, first.text
+  assert second.status_code == 409
+  assert "service identity is already installed" in second.text
+
+
+def test_implicit_service_identity_follows_unique_slug_on_install_and_update(
+  client, auth, db, bypass_url_validation,
+):
+  service_source = b'import json, sys\njson.dump({"status": 200}, sys.stdout)\n'
+
+  def install(base: str, version: str):
+    manifest = _simple_manifest("shared-service", version=version)
+    manifest.update({
+      "source_files": ["service.py"],
+      "service": {"entry": "service.py"},
+    })
+    responses = {
+      base + "mobius.json": (200, json.dumps(manifest).encode()),
+      base + "index.jsx": (200, JSX.encode()),
+      base + "service.py": (200, service_source),
+    }
+    with patch(
+      "app.install.httpx.AsyncClient",
+      side_effect=_fake_async_client(responses),
+    ):
+      return client.post(
+        "/api/apps/install", headers=auth,
+        json={"manifest_url": base + "mobius.json"},
+      )
+
+  first = install("https://implicit-one.test/repo/", "1.0.0")
+  second = install("https://implicit-two.test/repo/", "1.0.0")
+  updated = install("https://implicit-two.test/repo/", "2.0.0")
+
+  assert first.status_code == 201, first.text
+  assert second.status_code == 201, second.text
+  assert updated.status_code == 201, updated.text
+  apps = db.query(models.App).filter(
+    models.App.slug.like("shared-service%"),
+  ).order_by(models.App.id).all()
+  assert [(app.slug, app.service_id) for app in apps] == [
+    ("shared-service", "shared-service"),
+    ("shared-service-2", "shared-service-2"),
+  ]
+  assert [app.capability_contract["service"]["id"] for app in apps] == [
+    "shared-service", "shared-service-2",
+  ]
+
+
+def test_service_rename_requires_and_routes_one_reviewed_transition_alias(
+  client, auth, db, bypass_url_validation,
+):
+  base = "https://service-rename.test/repo/"
+  service_source = (
+    b'import json, sys\n'
+    b'json.load(sys.stdin)\n'
+    b'json.dump({"status": 200, "body": {"ok": True}}, sys.stdout)\n'
+  )
+
+  def install(version: str, service: dict):
+    manifest = _simple_manifest("social", version=version)
+    manifest.update({
+      "package_id": "app.example.social",
+      "source_files": ["service.py"],
+      "service": {**service, "entry": "service.py", "access": "public"},
+    })
+    responses = {
+      base + "mobius.json": (200, json.dumps(manifest).encode()),
+      base + "index.jsx": (200, JSX.encode()),
+      base + "service.py": (200, service_source),
+    }
+    with patch(
+      "app.install.httpx.AsyncClient",
+      side_effect=_fake_async_client(responses),
+    ):
+      return client.post(
+        "/api/apps/install", headers=auth,
+        json={"manifest_url": base + "mobius.json"},
+      )
+
+  initial = install("1.0.0", {"id": "common"})
+  unsafe = install("2.0.0", {"id": "social"})
+  transition = install(
+    "2.0.0", {"id": "social", "aliases": ["common"]},
+  )
+
+  assert initial.status_code == 201, initial.text
+  assert unsafe.status_code == 409
+  assert "previous identity" in unsafe.text
+  assert transition.status_code == 201, transition.text
+  assert client.get("/api/app-services/social/status").status_code == 200
+  assert client.get("/api/app-services/common/status").status_code == 200
+  app = db.query(models.App).filter_by(package_id="app.example.social").one()
+  assert app.service_id == "social"
+  assert db.get(models.AppServiceAlias, "common").app_id == app.id
+
+  retired = install("3.0.0", {"id": "social"})
+  assert retired.status_code == 201, retired.text
+  assert client.get("/api/app-services/social/status").status_code == 200
+  assert client.get("/api/app-services/common/status").status_code == 404
+  assert db.get(models.AppServiceAlias, "common") is None
+
+
+def test_package_identity_adopts_a_github_owner_transfer_by_repository_id(
+  client, auth, bypass_url_validation,
+):
+  old_base = "https://raw.githubusercontent.com/alice/app-social/main/"
+  new_base = "https://raw.githubusercontent.com/acme/app-social/main/"
+  first = _simple_manifest("common")
+  with patch("app.install._derive_repo_ref", return_value=None):
+    installed = _install_simple(client, auth, old_base, first)
+  assert installed.status_code == 201, installed.text
+  app_id = installed.json()["id"]
+
+  moved = _simple_manifest(
+    "social",
+    version="2.0.0",
+    previous_id="common",
+    previous_manifest_url=old_base + "mobius.json",
+  )
+  moved["package_id"] = "urn:uuid:2e824551-03cd-5166-b52a-8530f0c02c50"
+  metadata = json.dumps({
+    "id": 12345, "full_name": "acme/app-social",
+  }).encode()
+  responses = {
+    new_base + "mobius.json": (200, json.dumps(moved).encode()),
+    new_base + "index.jsx": (200, JSX.encode()),
+    "https://api.github.com/repos/acme/app-social": (200, metadata),
+    "https://api.github.com/repos/alice/app-social": (200, metadata),
+  }
+  with patch(
+    "app.install.httpx.AsyncClient", side_effect=_fake_async_client(responses),
+  ), patch("app.install._derive_repo_ref", return_value=None):
+    adopted = client.post(
+      "/api/apps/install", headers=auth,
+      json={"manifest_url": new_base + "mobius.json"},
+    )
+
+  assert adopted.status_code == 201, adopted.text
+  assert adopted.json()["mode"] == "update", adopted.json()
+  assert adopted.json()["id"] == app_id
+  assert adopted.json()["slug"] == "social"
+  assert adopted.json()["package_id"] == moved["package_id"]
+
+
+def test_package_identity_rejects_a_different_repository_without_old_source_handoff(
+  client, auth, bypass_url_validation,
+):
+  old_base = "https://raw.githubusercontent.com/alice/app-kanban/main/"
+  new_base = "https://raw.githubusercontent.com/acme/app-kanban/main/"
+  package_id = "urn:uuid:9e136d55-9631-585a-aa75-a745a5dc8f2e"
+  old = _simple_manifest("kanban")
+  old["package_id"] = package_id
+  old_responses = {
+    old_base + "mobius.json": (200, json.dumps(old).encode()),
+    old_base + "index.jsx": (200, JSX.encode()),
+    "https://api.github.com/repos/alice/app-kanban": (
+      200, json.dumps({"id": 100, "full_name": "alice/app-kanban"}).encode(),
+    ),
+  }
+  with patch(
+    "app.install.httpx.AsyncClient", side_effect=_fake_async_client(old_responses),
+  ), patch("app.install._derive_repo_ref", return_value=None):
+    installed = client.post(
+      "/api/apps/install", headers=auth,
+      json={"manifest_url": old_base + "mobius.json"},
+    )
+  assert installed.status_code == 201, installed.text
+
+  new = _simple_manifest("kanban", version="2.0.0")
+  new["package_id"] = package_id
+  new_responses = {
+    new_base + "mobius.json": (200, json.dumps(new).encode()),
+    new_base + "index.jsx": (200, JSX.encode()),
+    old_base + "mobius.json": (200, json.dumps(old).encode()),
+    "https://api.github.com/repos/acme/app-kanban": (
+      200, json.dumps({"id": 200, "full_name": "acme/app-kanban"}).encode(),
+    ),
+  }
+  with patch(
+    "app.install.httpx.AsyncClient", side_effect=_fake_async_client(new_responses),
+  ), patch("app.install._derive_repo_ref", return_value=None):
+    refused = client.post(
+      "/api/apps/install", headers=auth,
+      json={"manifest_url": new_base + "mobius.json"},
+    )
+
+  assert refused.status_code == 409
+  assert "trusted handoff" in refused.text
+
+
+def test_package_identity_accepts_a_different_repository_named_by_old_source(
+  client, auth, bypass_url_validation,
+):
+  old_base = "https://raw.githubusercontent.com/alice/app-kanban/main/"
+  new_base = "https://raw.githubusercontent.com/acme/app-kanban/main/"
+  package_id = "urn:uuid:9e136d55-9631-585a-aa75-a745a5dc8f2e"
+  old = _simple_manifest("kanban")
+  old.update({
+    "package_id": package_id,
+    "moved_to": {"manifest_url": new_base + "mobius.json"},
+  })
+  old_api = json.dumps({
+    "id": 100, "full_name": "alice/app-kanban",
+  }).encode()
+  new_api = json.dumps({
+    "id": 200, "full_name": "acme/app-kanban",
+  }).encode()
+  first_responses = {
+    old_base + "mobius.json": (200, json.dumps(old).encode()),
+    old_base + "index.jsx": (200, JSX.encode()),
+    "https://api.github.com/repos/alice/app-kanban": (200, old_api),
+  }
+  with patch(
+    "app.install.httpx.AsyncClient",
+    side_effect=_fake_async_client(first_responses),
+  ), patch("app.install._derive_repo_ref", return_value=None):
+    installed = client.post(
+      "/api/apps/install", headers=auth,
+      json={"manifest_url": old_base + "mobius.json"},
+    )
+  assert installed.status_code == 201, installed.text
+  app_id = installed.json()["id"]
+
+  new = _simple_manifest("kanban", version="2.0.0")
+  new["package_id"] = package_id
+  moved_responses = {
+    new_base + "mobius.json": (200, json.dumps(new).encode()),
+    new_base + "index.jsx": (200, JSX.encode()),
+    old_base + "mobius.json": (200, json.dumps(old).encode()),
+    "https://api.github.com/repos/acme/app-kanban": (200, new_api),
+  }
+  with patch(
+    "app.install.httpx.AsyncClient",
+    side_effect=_fake_async_client(moved_responses),
+  ), patch("app.install._derive_repo_ref", return_value=None):
+    moved = client.post(
+      "/api/apps/install", headers=auth,
+      json={"manifest_url": new_base + "mobius.json"},
+    )
+
+  assert moved.status_code == 201, moved.text
+  assert moved.json()["id"] == app_id
+  assert moved.json()["package_id"] == package_id
+  assert moved.json()["manifest_url"].startswith(new_base.rstrip("/"))
+
+
 def test_rename_adopts_predecessor_across_same_owner_repository_move(
   client, auth, bypass_url_validation,
 ):

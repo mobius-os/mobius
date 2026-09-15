@@ -1570,6 +1570,8 @@ def test_run_migrations_records_an_inspectable_append_only_history(tmp_path):
     "0055_declarative_project_artifacts",
     "0056_model_selection_ids",
     "0057_detach_retired_gauntlet_history",
+    "0058_stable_app_package_identities",
+    "0059_app_service_aliases",
   ]
   assert second == first
 

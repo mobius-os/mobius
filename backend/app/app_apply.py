@@ -462,7 +462,7 @@ def _validate_local_identity(
 
 
 def _apply_explicit_package_runtime(
-  app: models.App, manifest: dict, *, package_icon: bytes | None,
+  db: Session, app: models.App, manifest: dict, *, package_icon: bytes | None,
 ) -> None:
   """Persist every live field owned by an explicitly accepted Store package.
 
@@ -505,17 +505,23 @@ def _apply_explicit_package_runtime(
   app.system_prompt_file = manifest.get("system_prompt") or None
   app.system_app = bool(manifest.get("system_app", False))
   app.project_templates_json = manifest.get("project_templates") or None
+  service = manifest.get("service")
+  app.service_id = install._manifest_service_id(manifest, app=app)
+  install._sync_service_aliases(db, app=app, manifest=manifest)
   effective_manifest = dict(manifest)
   # The reviewed Store updater preserves these two live fields when an older
   # manifest omits them. Normalize the accepted local package against the same
   # effective state so its durable contract cannot disagree with its App row.
   effective_manifest.setdefault("offline_capable", app.offline_capable)
   effective_manifest.setdefault("embeds_agent", app.embeds_agent)
+  if isinstance(effective_manifest.get("service"), dict):
+    effective_manifest["service"] = dict(effective_manifest["service"])
+    effective_manifest["service"].setdefault("id", app.service_id)
   app.capability_contract = contract_from_manifest(effective_manifest)
 
 
 def _apply_local_manifest_runtime(
-  app: models.App, manifest: dict, *, package_icon: bytes | None,
+  db: Session, app: models.App, manifest: dict, *, package_icon: bytes | None,
 ) -> None:
   """Apply owner-authored metadata without granting server permissions.
 
@@ -544,12 +550,18 @@ def _apply_local_manifest_runtime(
   app.system_prompt_file = manifest.get("system_prompt") or None
   app.system_app = bool(manifest.get("system_app", False))
   app.project_templates_json = manifest.get("project_templates") or None
+  service = manifest.get("service")
+  app.service_id = install._manifest_service_id(manifest, app=app)
+  install._sync_service_aliases(db, app=app, manifest=manifest)
+  if isinstance(service, dict):
+    service = dict(service)
+    service.setdefault("id", app.service_id)
   app.capability_contract = contract_from_app_state(
     app,
     capabilities=runtime_fields["capabilities"],
     public_access=runtime_fields["public_access"],
     contract_permissions=manifest.get("permissions") or {},
-    service=manifest.get("service"),
+    service=service,
   )
 
 
@@ -578,6 +590,9 @@ def _live_runtime_state(app: models.App) -> tuple:
     app.system_prompt_file,
     app.system_app,
     app.project_templates_json,
+    app.package_id,
+    app.source_identity,
+    app.service_id,
     app.capability_contract,
     app.chat_id,
     app.jsx_source,
@@ -745,13 +760,26 @@ async def apply_source_revision(
         _validate_static_asset_publish_paths(source_path, static_assets)
 
       if manifest is not None:
+        from app import install
+
+        service_id = install._manifest_service_id(manifest, app=app)
+        service_aliases = install._manifest_service_aliases(manifest)
+        install._assert_service_identity_available(
+          db, service_id=service_id, app_id=app.id,
+        )
+        install._assert_service_aliases_available(
+          db, aliases=service_aliases, service_id=service_id, app_id=app.id,
+        )
+        install._assert_service_transition_safe(
+          app, service_id=service_id, aliases=service_aliases,
+        )
         if store_managed and accept_local_package:
           _apply_explicit_package_runtime(
-            app, manifest, package_icon=package_icon,
+            db, app, manifest, package_icon=package_icon,
           )
         else:
           _apply_local_manifest_runtime(
-            app, manifest, package_icon=package_icon,
+            db, app, manifest, package_icon=package_icon,
           )
       if chat_id is not None:
         app.chat_id = chat_id
@@ -768,8 +796,6 @@ async def apply_source_revision(
       # parent is the already-accepted tip.
       app.source_commit = committed or candidate.parent_sha
       if manifest is not None:
-        from app import install
-
         static_materialized = True
         try:
           install._write_static_assets(

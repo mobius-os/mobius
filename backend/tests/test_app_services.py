@@ -113,7 +113,9 @@ print(json.dumps({
 '''
 
 
-def _service_app(db, *, access="self", slug="service-test"):
+def _service_app(
+  db, *, access="self", slug="service-test", service_id=None, aliases=(),
+):
   source = Path(get_settings().data_dir) / "apps" / slug
   source.mkdir(parents=True)
   app = models.App(
@@ -132,8 +134,12 @@ def _service_app(db, *, access="self", slug="service-test"):
         "max_response_bytes": 8 * 1024 * 1024,
       },
     },
+    service_id=service_id,
   )
   db.add(app)
+  db.commit()
+  for alias in aliases:
+    db.add(models.AppServiceAlias(service_id=alias, app_id=app.id))
   db.commit()
   revision = "a" * 64
   accepted = runtime_parent(app.id) / revision
@@ -188,6 +194,40 @@ def test_app_services_have_no_app_specific_route_aliases(client, auth, db):
 
   assert canonical.status_code == 201, canonical.text
   assert legacy.status_code == 404
+
+
+def test_public_service_uses_stable_identity_without_leaving_slug_alias(
+  client, auth, db,
+):
+  _service_app(
+    db, access="public", slug="renamed-product", service_id="stable-social",
+  )
+
+  stable = client.get("/api/app-services/stable-social/status")
+  mutable_slug = client.get("/api/app-services/renamed-product/status")
+
+  assert stable.status_code == 201, stable.text
+  assert mutable_slug.status_code == 404
+
+
+def test_public_service_routes_only_explicit_transition_aliases(
+  client, auth, db,
+):
+  app = _service_app(
+    db, access="public", slug="renamed-product", service_id="social",
+    aliases=("common",),
+  )
+
+  canonical = client.get("/api/app-services/social/status")
+  transition = client.get("/api/app-services/common/status")
+  product_slug = client.get("/api/app-services/renamed-product/status")
+
+  assert canonical.status_code == 201, canonical.text
+  assert transition.status_code == 201, transition.text
+  assert product_slug.status_code == 404
+  db.query(models.AppServiceAlias).filter_by(app_id=app.id).delete()
+  db.commit()
+  assert client.get("/api/app-services/common/status").status_code == 404
 
 
 def test_shared_service_requires_an_explicit_cross_app_grant(

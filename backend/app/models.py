@@ -928,6 +928,19 @@ class App(Base):
   # between user-built apps and store-installed apps are tolerated
   # because allocate_unique_slug just picks the next free suffix.
   manifest_url = Column(String(1024), nullable=True, index=True)
+  # Immutable package identity declared by the app publisher. Names, slugs,
+  # repository locations, and owners may all change while this value keeps the
+  # same local row and id-keyed storage attached. Nullable only for packages
+  # installed before the identity contract existed and for owner-built apps.
+  package_id = Column(String(128), nullable=True, unique=True, index=True)
+  # Provider-owned immutable source identity (for example ``github:1354986466``).
+  # ``manifest_url`` remains the current fetch locator; it is deliberately not
+  # the trust identity because repository paths can be renamed or transferred.
+  source_identity = Column(String(256), nullable=True, index=True)
+  # Stable app-service contract name. Unlike ``slug``, this is not a product or
+  # source-directory identity and therefore survives app renames. Null means
+  # the app exposes no accepted service (or predates this migration).
+  service_id = Column(String(128), nullable=True, unique=True, index=True)
   # Public manifest URL the owner explicitly attached for distributing this app.
   # Kept separate from `manifest_url`: the latter is install/update identity,
   # while a locally-built app may be published later without becoming a
@@ -1139,6 +1152,24 @@ class App(Base):
   updated_at = Column(
     DateTime, default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC)
   )
+
+
+class AppServiceAlias(Base):
+  """One explicitly reviewed, temporary route for an app service rename.
+
+  Aliases are separate rows rather than another app-name fallback: each name
+  has one owner, can be removed by the next accepted manifest, and never
+  changes the app's canonical ``service_id``.
+  """
+
+  __tablename__ = "app_service_aliases"
+
+  service_id = Column(String(128), primary_key=True)
+  app_id = Column(
+    Integer, ForeignKey("apps.id", ondelete="CASCADE"), nullable=False,
+    index=True,
+  )
+  created_at = Column(DateTime, nullable=False, default=now_naive_utc)
 
 
 class Project(Base):

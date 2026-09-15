@@ -178,6 +178,40 @@ def test_apply_updates_multifile_revision_once(client, auth, db):
   ]
 
 
+def test_apply_probes_the_implicit_service_identity_it_will_keep(
+  client, auth, db,
+):
+  source = _source("shared-service-2")
+  created = _apply(client, auth, source)
+  assert created.status_code == 200, created.text
+  target = db.get(models.App, created.json()["app"]["id"])
+  target.manifest_url = (
+    "https://example.test/second#manifest-id=shared-service"
+  )
+  target.service_id = "shared-service-2"
+  manifest = json.loads((source / "mobius.json").read_text())
+  manifest["id"] = "shared-service"
+  manifest["source_files"] = ["service.py"]
+  manifest["service"] = {"entry": "service.py"}
+  (source / "mobius.json").write_text(json.dumps(manifest))
+  (source / "service.py").write_text(
+    'import json, sys\njson.dump({"status": 200}, sys.stdout)\n'
+  )
+  owner = models.App(
+    name="First", slug="shared-service", description="",
+    source_dir=str(Path(get_settings().data_dir) / "apps" / "first"),
+    jsx_source="export default () => null", service_id="shared-service",
+  )
+  db.add(owner)
+  db.commit()
+
+  response = _apply(client, auth, source)
+
+  assert response.status_code == 200, response.text
+  db.refresh(target)
+  assert target.service_id == "shared-service-2"
+
+
 def test_local_apply_materializes_versioned_static_assets(client, auth):
   source = _source()
   listing_source = source / "listing-assets" / "screen.png"

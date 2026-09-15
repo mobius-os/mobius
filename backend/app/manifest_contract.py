@@ -36,6 +36,7 @@ PROJECT_TEMPLATE_FILES_COUNT_MAX = 64
 PROJECT_ARTIFACT_TYPES_COUNT_MAX = 12
 PROJECT_ARTIFACT_EXTENSIONS_COUNT_MAX = 16
 SERVICE_REQUEST_MAX_BYTES = 8 * 1024 * 1024
+SERVICE_ALIASES_MAX = 4
 MAX_JOB_SHEBANG_BYTES = 256
 _SLUG_OK = "abcdefghijklmnopqrstuvwxyz0123456789-_"
 _SOURCE_FILES_MANAGED_PREFIXES = (
@@ -46,6 +47,7 @@ _SOURCE_FILES_MANAGED_EXACT = frozenset((
 ))
 _CRON_FIELD_OK = re.compile(r"^[\d\*/,\- ]+$")
 _SKILL_FILENAME_OK = re.compile(r"^[a-z0-9][a-z0-9._-]*\.md$")
+_PACKAGE_ID_OK = re.compile(r"^[a-z0-9][a-z0-9._:-]{2,127}$")
 
 
 class ManifestContractError(ValueError):
@@ -216,6 +218,37 @@ def validate_manifest_contract(manifest) -> None:
 
   mid = manifest["id"]
   validate_slug_field(mid, "id")
+  package_id = manifest.get("package_id")
+  if package_id is not None and (
+    not isinstance(package_id, str)
+    or _PACKAGE_ID_OK.fullmatch(package_id) is None
+  ):
+    _fail(
+      "Manifest `package_id` must be 3-128 lowercase letters, digits, or "
+      "the characters '.', '_', ':', and '-', starting with a letter or digit."
+    )
+  moved_to = manifest.get("moved_to")
+  if moved_to is not None:
+    if package_id is None:
+      _fail("Manifest `moved_to` requires `package_id`.")
+    if not isinstance(moved_to, Mapping) or set(moved_to) != {"manifest_url"}:
+      _fail("Manifest `moved_to` must contain only `manifest_url`.")
+    moved_url = moved_to.get("manifest_url")
+    if not isinstance(moved_url, str) or not moved_url:
+      _fail("Manifest `moved_to.manifest_url` must be a non-empty string.")
+    parsed_moved = urlparse(moved_url)
+    if (
+      parsed_moved.scheme != "https"
+      or not parsed_moved.netloc
+      or parsed_moved.username is not None
+      or parsed_moved.password is not None
+      or parsed_moved.query
+      or parsed_moved.fragment
+    ):
+      _fail(
+        "Manifest `moved_to.manifest_url` must be an absolute HTTPS URL "
+        "without credentials, query, or fragment."
+      )
   previous_id = manifest.get("previous_id")
   if previous_id is not None:
     validate_slug_field(previous_id, "previous_id")
@@ -523,8 +556,33 @@ def validate_manifest_contract(manifest) -> None:
 
   service = manifest.get("service")
   if service is not None:
-    if not isinstance(service, Mapping) or set(service) - {"entry", "access"}:
-      _fail("Manifest `service` must contain only `entry` and `access`.")
+    if not isinstance(service, Mapping) or set(service) - {
+      "id", "aliases", "entry", "access",
+    }:
+      _fail(
+        "Manifest `service` must contain only `id`, `aliases`, `entry`, "
+        "and `access`."
+      )
+    if package_id is not None and "id" not in service:
+      _fail("Manifest `service.id` is required when `package_id` is declared.")
+    service_id = service.get("id", mid)
+    validate_slug_field(service_id, "service.id")
+    aliases = service.get("aliases", [])
+    if not isinstance(aliases, list) or len(aliases) > SERVICE_ALIASES_MAX:
+      _fail(
+        f"Manifest `service.aliases` must be an array with at most "
+        f"{SERVICE_ALIASES_MAX} entries."
+      )
+    if aliases and "id" not in service:
+      _fail("Manifest `service.aliases` requires an explicit `service.id`.")
+    seen_aliases = set()
+    for index, alias in enumerate(aliases):
+      validate_slug_field(alias, f"service.aliases[{index}]")
+      if alias == service_id:
+        _fail("Manifest `service.aliases` must not repeat `service.id`.")
+      if alias in seen_aliases:
+        _fail(f"Manifest `service.aliases` duplicates {alias!r}.")
+      seen_aliases.add(alias)
     entry = service.get("entry")
     if not isinstance(entry, str):
       _fail("Manifest `service.entry` must be a string.")

@@ -59,6 +59,8 @@
     "0054_retired_app_identities": "380b74a022a924575301977b01bea68328fde3836714bf29a5fb9f10464c65aa",
     "0055_declarative_project_artifacts": "eeef7589388e702faeb99fca855022fdc13ed515ee814963b5d9727088902430",
     "0056_model_selection_ids": "13d038081765721af8af1c98e04faa2737d33e6d8155d8ae9cfc6214f6347630",
-    "0057_detach_retired_gauntlet_history": "14b7d90f660c612167f19a9a4941b7bbcb9808f55061f6105778cc941737b7b7"
+    "0057_detach_retired_gauntlet_history": "14b7d90f660c612167f19a9a4941b7bbcb9808f55061f6105778cc941737b7b7",
+    "0058_stable_app_package_identities": "29762fead9678ba553dd90665f396fccbe11241ea17a0841fdf557eed651eeac",
+    "0059_app_service_aliases": "f75656a90738ded77a97de17049d8a8f7ae475b5c3da77543db5101e92cc7b59"
   }
 }

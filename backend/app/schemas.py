@@ -222,6 +222,11 @@ class AppOut(BaseModel):
   # POST /api/apps/install). Null for user-built apps. The install
   # endpoint matches by this for update-vs-install discrimination.
   manifest_url: str | None = None
+  # Stable package and service identities. Repository/name changes do not
+  # change either value; the Store consumes package_id rather than re-deriving
+  # installation state from mutable URLs.
+  package_id: str | None = None
+  service_id: str | None = None
   # Internal publication inputs. Clients receive the typed projections below,
   # never the nullable persistence fields or executable path.
   published_manifest_url: str | None = Field(default=None, exclude=True)

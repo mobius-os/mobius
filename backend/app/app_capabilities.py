@@ -574,13 +574,18 @@ def contract_from_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
   }
   service = manifest.get("service")
   if isinstance(service, dict):
-    contract["service"] = {
+    accepted_service = {
+      "id": service.get("id", manifest.get("id")),
       "entry": service["entry"],
       "access": service.get("access", "self"),
       "protocol": "json-v1",
       "max_request_bytes": SERVICE_REQUEST_MAX_BYTES,
       "max_response_bytes": SERVICE_REQUEST_MAX_BYTES,
     }
+    aliases = list(service.get("aliases") or [])
+    if aliases:
+      accepted_service["aliases"] = aliases
+    contract["service"] = accepted_service
   return contract
 
 
@@ -668,9 +673,12 @@ def contract_from_app_state(
     accepted_service = app.capability_contract.get("service")
     if isinstance(accepted_service, dict):
       service = {
+        "id": accepted_service.get("id"),
         "entry": accepted_service.get("entry"),
         "access": accepted_service.get("access", "self"),
       }
+      if accepted_service.get("aliases"):
+        service["aliases"] = list(accepted_service["aliases"])
   if isinstance(service, dict):
     manifest["service"] = service
   return contract_from_manifest(manifest)
