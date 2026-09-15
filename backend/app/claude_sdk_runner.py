@@ -185,17 +185,20 @@ async def _await_control_mcp_ready(
 # register: appended AFTER the constitution, never substituted for it.
 _CONCISE_REGISTER = r"""# Concise register
 
-Be concise by default: lead with the result, skip preamble and narration, keep only what the partner needs — full detail on request. Concision trims length and preamble, never substance: it never drops a required citation, the escaped `\$` for currency, a screenshot embedded before you describe it, the detail the platform summary or a future continuation needs, or the deliberate speech acts the constitution requires (the one-sentence intent opener, making non-obvious findings explicit, clarifying-question cards, destructive-op and restart confirmations, and the turn closeout)."""
-# Cross-turn scheduling has one owner in Möbius: the durable Waiting lifecycle.
-# Provider-native schedulers cannot render its card, survive the same restart
-# boundary, or reliably wake a top-level parent from a delegated child.
-_CLAUDE_NATIVE_SCHEDULING_TOOLS = (
-  "Monitor",
-  "ScheduleWakeup",
-  "CronCreate",
-)
+Be concise by default: lead with the result, skip preamble and narration, keep only what the partner needs — full detail on request. Concision trims length and preamble, never substance: it never drops a required citation, the escaped `\$` for currency, a screenshot embedded before you describe it, the detail the platform summary or a future continuation needs, or the deliberate speech acts the constitution requires (the one-sentence intent opener, making non-obvious findings explicit, clarifying-question cards, destructive-op and restart confirmations, and the turn closeout).
 
+# Execution lifetimes in Möbius
 
+Bash background tasks are local to this running turn. Their native receipt's
+"You will be notified" promise does not survive ending this turn or a restart.
+For work finishing now, join the exact task with TaskOutput(block=true) and
+read its result before finishing; an empty output file is not completion.
+For an external condition that must outlive this turn, declare a durable
+Möbius Wait and confirm its saved receipt. Never end with "I'm waiting" on a
+Bash task, an output file, or ListAgents. Native Agent/Workflow work is also
+turn-local; join and synthesize it. Durable delegated work belongs to the
+installed Subagents capability, whose own receipt owns the later wake.
+"""
 # Cross-turn scheduling has one owner in Möbius: the durable Waiting lifecycle.
 # Provider-native schedulers cannot render its card, survive the same restart
 # boundary, or reliably wake a top-level parent from a delegated child.

@@ -72,7 +72,9 @@ test('only transient nudges float above the measured rail → connection → que
 test('the shell is the one persistent connection owner while send failures stay contextual', () => {
   assert.match(shell, /restartPending \? 'Restarting…'/)
   assert.match(shell, /ReachabilityPhase\.OFFLINE \? 'Offline'/)
-  assert.match(shell, /!deliveryReady \? 'Reconnecting…'/)
+  assert.match(shell, /showReconnectNotice \? 'Reconnecting…'/)
+  assert.match(shell, /useDelayedConnectionNotice\([\s\S]*?!deliveryReady/)
+  assert.match(connectionStatus, /useDelayedConnectionNotice\(transient\)/)
   assert.match(shell, /\{connectionStatusLabel && \([\s\S]*?className="shell__connection-status"[\s\S]*?\{connectionStatusLabel\}/)
   assert.doesNotMatch(shell, /shell__sr-only">\{connectionStatusLabel\}/,
     'connection state must be readable without hover or assistive technology')

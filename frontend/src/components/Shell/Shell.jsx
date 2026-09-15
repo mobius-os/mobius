@@ -37,6 +37,7 @@ import {
   useRecoveryGeneration,
 } from '../../hooks/useOnlineStatus.js'
 import useRestartPending from '../../hooks/useRestartPending.js'
+import useDelayedConnectionNotice from '../../hooks/useDelayedConnectionNotice.js'
 import useOutboxDrain from '../../hooks/useOutboxDrain.js'
 import { ReachabilityPhase, getDeliveryReadySnapshot, setRestartPending, verifyConnectivity } from '../../lib/connectivityStore.js'
 import {
@@ -893,6 +894,8 @@ export default function Shell({ onInitialVisualReady }) {
 
   // One readable status explains why sends are waiting locally. Reachability
   // remains separate so a service restart never masquerades as device Offline.
+  // Delivery gating stays immediate, while a brief healthy foreground/proxy
+  // check must settle before it becomes a human-facing reconnect notice.
   const reachabilityPhase = useReachabilityPhase()
   const deliveryReady = useDeliveryReady()
   const recoveryGeneration = useRecoveryGeneration()
@@ -900,9 +903,14 @@ export default function Shell({ onInitialVisualReady }) {
   recoveryGenerationRef.current = recoveryGeneration
   const online = reachabilityPhase !== ReachabilityPhase.OFFLINE
   const restartPending = useRestartPending()
+  const showReconnectNotice = useDelayedConnectionNotice(
+    !restartPending
+      && reachabilityPhase !== ReachabilityPhase.OFFLINE
+      && !deliveryReady,
+  )
   const connectionStatusLabel = restartPending ? 'Restarting…'
     : reachabilityPhase === ReachabilityPhase.OFFLINE ? 'Offline'
-      : !deliveryReady ? 'Reconnecting…' : null
+      : showReconnectNotice ? 'Reconnecting…' : null
   // Replay any durably-queued send/answer as soon as the shell reconnects,
   // regardless of which view is open. Single-flight, so it composes with a
   // mounted chat's own reconnect reconcile without double-posting.
