@@ -261,6 +261,11 @@ class PlatformStatus(TypedDict):
   # merge that did not run the updater's marker-maintenance path.
   contained_upstream_sha: str | None
   contained_upstream_committed_at: str | None
+  # Commit timestamp (%cI) of the running image's build commit, so Settings can
+  # render "Current system" in the same local zone as "Installed update" rather
+  # than the image's bare UTC build date. None when that commit is not in this
+  # clone's object store.
+  current_build_committed_at: str | None
   # Timestamp of the most recent successful fetch represented by this status.
   # GET /status remains fetch-free; POST /check advances FETCH_HEAD first.
   upstream_checked_at: str | None
@@ -2631,6 +2636,7 @@ def platform_status(
   contained_upstream_committed_at = _commit_timestamp(
     repo, contained_upstream_sha,
   )
+  current_build_committed_at = _commit_timestamp(repo, image_sha)
   upstream_checked_at = _last_fetch_timestamp(repo)
 
   if conflict:
@@ -2651,6 +2657,7 @@ def platform_status(
       recorded_upstream_sha=upstream_sha,
       contained_upstream_sha=contained_upstream_sha,
       contained_upstream_committed_at=contained_upstream_committed_at,
+      current_build_committed_at=current_build_committed_at,
       upstream_checked_at=upstream_checked_at,
       seed_required=False,
       conflict_paths=paths, conflict_chat_id=flag.get("chat_id"),
@@ -2682,6 +2689,7 @@ def platform_status(
     current_build_sha=image_sha, recorded_upstream_sha=upstream_sha,
     contained_upstream_sha=contained_upstream_sha,
     contained_upstream_committed_at=contained_upstream_committed_at,
+    current_build_committed_at=current_build_committed_at,
     upstream_checked_at=upstream_checked_at,
     seed_required=False, conflict_paths=[], conflict_chat_id=None,
     newer_updates_available=False,
