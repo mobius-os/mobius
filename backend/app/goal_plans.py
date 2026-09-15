@@ -605,8 +605,8 @@ def goal_handoff_owner_kind(
   if goal_id in background_helper_goal_ids(db, chat_id):
     return "monitor"
 
-  from app.chat_waits import wait_owned_goal_ids
-  if goal_id in wait_owned_goal_ids(db, chat_id):
+  from app.chat_waits import wait_owns_goal
+  if wait_owns_goal(db, chat_id, goal_id):
     return "monitor"
   return None
 
