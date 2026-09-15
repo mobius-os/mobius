@@ -47,17 +47,16 @@ WORK_OWNERSHIP_TOOLS = (
   CLAIM_AGENT_WORK_TOOL,
   FINISH_AGENT_WORK_TOOL,
 )
-OWNER_BASE_TOOLS = (
+OWNER_TOOLS = (
   PROMOTE_GOAL_TOOL,
   DECLARE_WAIT_TOOL,
   CANCEL_WAIT_TOOL,
   REQUEST_APPROVAL_TOOL,
   REQUEST_QUESTION_TOOL,
   REQUEST_RESTART_TOOL,
+  *WORK_OWNERSHIP_TOOLS,
 )
-OWNER_TOOLS = (*OWNER_BASE_TOOLS, *WORK_OWNERSHIP_TOOLS)
 DELEGATED_TOOLS = (*PEER_TOOLS, *WORK_OWNERSHIP_TOOLS)
-ALL_TOOLS = (*OWNER_TOOLS, *PEER_TOOLS)
 PROMOTE_GOAL_DESCRIPTION = (
   "Promote the current ordinary top-level owner turn into a durable, "
   "platform-owned Goal after the goal-planning criteria are satisfied. "
@@ -287,7 +286,7 @@ def _available_tool_names() -> tuple[str, ...]:
   if os.environ.get("MOBIUS_RUN_TOKEN"):
     if os.environ.get("MOBIUS_COORDINATION_ENABLED") == "0":
       return OWNER_TOOLS
-    return ALL_TOOLS
+    return (*OWNER_TOOLS, *PEER_TOOLS)
   return DELEGATED_TOOLS
 
 
