@@ -257,6 +257,7 @@ def test_railway_status_and_check_use_latest_verified_ghcr_target(
       "recorded_upstream_sha": None,
       "contained_upstream_sha": None,
       "contained_upstream_committed_at": None,
+      "current_build_committed_at": None,
       "upstream_checked_at": None,
       "seed_required": False,
       "conflict_paths": [], "conflict_chat_id": None,
