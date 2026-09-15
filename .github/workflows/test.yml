@@ -335,11 +335,7 @@ jobs:
           set +e
           # --kill-after sends SIGKILL 30s after the SIGINT if Playwright
           # ignores the interrupt, so the step can't hang past the cap.
-          timeout --signal=INT --kill-after=30s 12m npx playwright test \
-            tests/attention-nudges.spec.mjs \
-            tests/mode-transition.spec.mjs \
-            tests/quiet-answers.spec.mjs \
-            --project=tests --repeat-each=2
+          timeout --signal=INT --kill-after=30s 12m npx playwright test
           echo "exit=$?" >> "$GITHUB_OUTPUT"
           exit 0
         env:
