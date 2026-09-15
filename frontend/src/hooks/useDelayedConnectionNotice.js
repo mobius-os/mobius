@@ -1,12 +1,12 @@
 /* Delays transient connection notices without delaying delivery safety or terminal errors. */
-import { useLayoutEffect, useState } from 'react'
+import { useEffect, useState } from 'react'
 
 export const CONNECTION_NOTICE_DELAY_MS = 2500
 
 export default function useDelayedConnectionNotice(active) {
   const [visible, setVisible] = useState(false)
 
-  useLayoutEffect(() => {
+  useEffect(() => {
     if (!active) {
       setVisible(false)
       return undefined
