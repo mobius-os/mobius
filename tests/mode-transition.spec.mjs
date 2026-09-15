@@ -698,9 +698,11 @@ test('retiring an explicit Builder cover returns the selected tab and preserves 
   const navigation = page.getByRole('navigation', { name: 'Primary navigation' })
   await navigation.getByRole('button', { name: 'New chat', exact: true }).click()
 
-  const presentation = page.locator('[data-new-chat-presentation]')
-  const composer = presentation.getByRole('textbox', { name: 'Message Möbius…' })
   await expect.poll(() => explicitCreates).toBe(1)
+  const presentation = page.locator(
+    `[data-chat-surface="painted"][data-chat-id="${explicitId}"]`,
+  )
+  const composer = presentation.getByRole('textbox', { name: 'Message Möbius…' })
   await expect(composer).toBeFocused()
   await composer.fill('Keep this parked Builder draft')
 

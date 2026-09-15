@@ -169,9 +169,14 @@ for (const acknowledgement of ['detail', 'replay']) {
 for (const restartVersion of [1, 2]) {
   test(`Restart v${restartVersion} submits its exact action identity without a model turn or lost draft`, async ({ page }) => {
     const f = await mount(page, { restart: { version: restartVersion } })
+    await expect(f.card.getByRole('radio', { name: /Restart now/ })).toHaveCount(1)
+    await expect(f.card.getByRole('radio', { name: /Not now/ })).toHaveCount(restartVersion === 1 ? 1 : 0)
     await f.card.getByRole('radio', { name: /Restart now/ }).click()
     const beforeStreams = f.streams()
-    await f.card.getByRole('button', { name: 'Continue', exact: true }).click()
+    await f.card.getByRole('button', {
+      name: restartVersion === 1 ? 'Submit' : 'Continue',
+      exact: true,
+    }).click()
     await expect(f.card.getByRole('status')).toContainText('Restart requested')
     expect(f.attempts).toHaveLength(1)
     expect(f.attempts[0].selected_options).toEqual({ restart: ['restart-option'] })

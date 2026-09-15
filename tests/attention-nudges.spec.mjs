@@ -253,21 +253,26 @@ test('jump-to-latest appears only away from the physical tail and resumes follow
       blocks: paragraphs,
     },
   ]
+  const runtime = createMockChatRuntime()
 
   await page.route(new RegExp(`/api/chats/${chat.id}\\?limit=`), route => {
     if (route.request().method() !== 'GET') return route.continue()
     return route.fulfill({
       status: 200,
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
+      body: JSON.stringify(runtime.detail({
         messages,
         total: messages.length,
         offset: 0,
-        running: false,
-        pending_messages: [],
-      }),
+      })),
     })
   })
+  await page.route(new RegExp(`/api/chats/${chat.id}/runtime$`), route =>
+    route.fulfill({
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(runtime.snapshot()),
+    }))
   await page.route(new RegExp(`/api/chats/${chat.id}/stream$`), route =>
     route.fulfill({
       status: 200,
