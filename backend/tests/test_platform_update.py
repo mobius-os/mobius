@@ -1145,7 +1145,7 @@ def test_check_for_updates_syncs_marker_when_local_already_contains_origin(clone
   assert pu.recorded_upstream_sha(platform) == new
 
 
-def test_status_reports_contained_origin_when_updater_marker_is_stale(clone_env):
+def test_status_reports_contained_origin_when_updater_marker_is_stale(clone_env, monkeypatch):
   origin, platform = clone_env
   stale_marker = pu.recorded_upstream_sha(platform)
   new = _advance_origin(origin, edits={"backend/app/main.py":
@@ -1165,6 +1165,19 @@ def test_status_reports_contained_origin_when_updater_marker_is_stale(clone_env)
     platform, "show", "-s", "--format=%cI", new,
   ).stdout.strip()
   assert status["upstream_checked_at"] is not None
+  # The running image's build commit is surfaced with the same %cI shape so
+  # Settings can render "Current system" in the same zone as "Installed update".
+  # This clone's BUILD_SHA is a fake ("test-sha"), so it resolves to None; the
+  # key is always present.
+  assert status["current_build_committed_at"] is None
+
+  # Positive path: when the build sha resolves to a real commit, its %cI surfaces
+  # so Settings can render "Current system" from a real instant.
+  monkeypatch.setattr(pu, "current_build_sha", lambda: new)
+  status_built = pu.platform_status(platform)
+  assert status_built["current_build_committed_at"] == _git(
+    platform, "show", "-s", "--format=%cI", new,
+  ).stdout.strip()
 
 
 def test_successful_update_check_refreshes_the_reported_fetch_time(clone_env):

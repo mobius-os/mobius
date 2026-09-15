@@ -105,7 +105,7 @@ export default function PlatformUpdates({ active, refreshToken, onOpenChat }) {
       )}
       <dl className="platform-updates__versions">
         <dt>Installed update</dt><dd>{formatUpstreamCommitDate(platform?.contained_upstream_committed_at) || 'Unknown'} {mobiusVersion.primarySha && <code>{mobiusVersion.primarySha}</code>}</dd>
-        <dt>Current system</dt><dd>{formatUpstreamCommitDate(version?.build_date) || 'Unknown'} {containerVersion.sha && <code>{containerVersion.sha}</code>}</dd>
+        <dt>Current system</dt><dd>{formatUpstreamCommitDate(platform?.current_build_committed_at || version?.build_date) || 'Unknown'} {containerVersion.sha && <code>{containerVersion.sha}</code>}</dd>
       </dl>
       {!busy && !unavailable && !conflict && restartNeeded && (
         <p className="platform-updates__description">Your changes are ready. You can add more updates before restarting once.</p>
