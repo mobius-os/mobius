@@ -6,7 +6,6 @@ import { groupMarkdownImages } from './imageGallery.js'
 import ImageGallery from './ImageGallery.jsx'
 import AppLinkCard from './AppLinkCard.jsx'
 import { appLinkCardFromParagraph } from './appLinkCard.js'
-import { perfTime } from '../../../lib/perfProbe.js'
 import '../markdown.css'
 
 /**
@@ -41,7 +40,7 @@ export function ProgressiveMarkdown({
   // a report can tell "streaming is expensive" from "the transcript is
   // expensive" - those have different fixes.
   const tokens = useMemo(
-    () => perfTime('markdown.tokenize.streaming', () => groupMarkdownImages(tokenize(text))),
+    () => groupMarkdownImages(tokenize(text)),
     [text],
   )
 
@@ -107,7 +106,7 @@ export function StandardMarkdown({
   // message, which the probe surfaces as a burst of calls with no stream
   // running.
   const tokens = useMemo(
-    () => perfTime('markdown.tokenize.settled', () => groupMarkdownImages(tokenize(text))),
+    () => groupMarkdownImages(tokenize(text)),
     [text],
   )
   const fraction = Number(renderFraction)

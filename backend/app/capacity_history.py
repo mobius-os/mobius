@@ -6,11 +6,11 @@ observation history (every capacity read was a point sample lost at restart), a
 forecast (rate-of-change / time-to-exhaustion), and de-duplicated alerting so a
 threshold cross does not storm the owner.
 
-Persistence reuses ``routes/debug.py``'s perf-samples idiom: a capped JSONL ring
-under ``{data_dir}/logs`` with high-water trim — cheap, restart-durable, no
-schema migration. Writes are best-effort (swallow ``OSError`` like perf-samples)
-and strictly capped, so the monitor can never amplify the very pressure it
-watches by growing an unbounded history during a disk-full event.
+Persistence is a capped JSONL ring under ``{data_dir}/logs`` with high-water
+trim — cheap, restart-durable, no schema migration. Writes are best-effort
+(swallow ``OSError``) and strictly capped, so the monitor can never amplify the
+very pressure it watches by growing an unbounded history during a disk-full
+event. ``oom_diagnostics`` reuses this same ring idiom for OOM events.
 
 Alert suppression is a pure tier-transition rule: notify only when the tier
 ESCALATES (cross-down to a worse tier); the 8/5/2 GiB tier bands give inherent

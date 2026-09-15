@@ -30,6 +30,13 @@ AUTOPILOT_LEASE_RECOVERY_INTERVAL_SECS = 60.0
 CAPACITY_MONITOR_INTERVAL_SECS = 300.0
 CAPACITY_MONITOR_DOMAIN_EVERY_N_TICKS = 6
 PROVIDER_SESSION_RETENTION_INTERVAL_SECS = 6 * 60 * 60
+# OOM watchdog: the counter read is a single tiny file, but the per-tick process
+# sample walks the cgroup, so we sample fast only through the boot window (when a
+# resume burst can OOM) and back off afterwards. The kernel's oom_kill counter is
+# monotonic per container life, so a rise is unambiguous proof of a kill.
+OOM_WATCHDOG_FAST_INTERVAL_SECS = 2.0
+OOM_WATCHDOG_SLOW_INTERVAL_SECS = 20.0
+OOM_WATCHDOG_FAST_WINDOW_SECS = 180.0
 
 
 class RuntimeSettings(Protocol):
@@ -88,6 +95,71 @@ class RuntimeSupervisors:
     await self._start_frontend_watcher()
     from app.connect_outbound import supervise_outbound_connects
     self._spawn("connect-outbound", supervise_outbound_connects())
+    self._spawn("oom-watchdog", self._oom_watchdog_loop())
+
+  async def _oom_watchdog_loop(self) -> None:
+    """Record a durable diagnostic whenever the cgroup loses a process to OOM.
+
+    Started with the process services — before chat supervisors trigger the
+    restart resume burst — so a boot-time OOM is captured rather than lost. The
+    previous tick's process sample is retained so a detected kill can name the
+    PIDs that vanished across it (the likely victims), which kernel logs no
+    longer reveal after the fact.
+    """
+    from app import oom_diagnostics
+
+    data_dir = self.settings.data_dir
+    boot_at = asyncio.get_running_loop().time()
+    # Establish the baseline WITHOUT recording: a nonzero count here means a kill
+    # happened earlier in this container's life (or before the watchdog started),
+    # which we cannot attribute, so we only mark it and watch for the next rise.
+    baseline = oom_diagnostics.cgroup_oom_kill_count()
+    if baseline:
+      self.log.warning(
+        "oom watchdog started with oom_kill=%d already recorded this container",
+        baseline,
+      )
+    prev_sample = None
+    while True:
+      try:
+        sample = await asyncio.to_thread(
+          oom_diagnostics.lightweight_process_sample,
+        )
+        count = oom_diagnostics.cgroup_oom_kill_count()
+        if count is not None and baseline is not None and count > baseline:
+          kills = count - baseline
+          event = await asyncio.to_thread(
+            oom_diagnostics.capture_oom_event,
+            oom_kill_count=count,
+            kills_since_last=kills,
+            seconds_since_boot=asyncio.get_running_loop().time() - boot_at,
+            pre_sample=prev_sample,
+            post_sample=sample,
+          )
+          await asyncio.to_thread(
+            oom_diagnostics.record_oom_event, data_dir, event,
+          )
+          victims = event.get("likely_victims") or []
+          self.log.warning(
+            "OOM kill recorded: oom_kill=%d (+%d) active_turns=%s "
+            "likely_victims=%s",
+            count, kills, event.get("active_turns"),
+            [v.get("name") for v in victims],
+          )
+        if count is not None:
+          baseline = count if baseline is None else max(baseline, count)
+        prev_sample = sample
+      except asyncio.CancelledError:
+        raise
+      except Exception as exc:
+        self.log.error("oom watchdog tick failed: %s", exc, exc_info=True)
+      elapsed = asyncio.get_running_loop().time() - boot_at
+      interval = (
+        OOM_WATCHDOG_FAST_INTERVAL_SECS
+        if elapsed < OOM_WATCHDOG_FAST_WINDOW_SECS
+        else OOM_WATCHDOG_SLOW_INTERVAL_SECS
+      )
+      await asyncio.sleep(interval)
 
   async def start_database_services(self) -> None:
     """Start long-lived database work; individual wiring failures fail open."""
@@ -177,40 +249,6 @@ class RuntimeSupervisors:
           last_sweep = await sweep_reset_parks_once()
       finally:
         system_broadcast.unsubscribe(events)
-
-    async def compress_legacy_tool_outputs():
-      from app.tool_output_storage import compress_legacy_tool_output_batch
-      total_rows = raw_chars = stored_chars = 0
-      after_chat_id = after_tool_use_id = None
-      try:
-        while True:
-          report = await asyncio.to_thread(
-            compress_legacy_tool_output_batch,
-            SessionLocal,
-            batch_size=16,
-            after_chat_id=after_chat_id,
-            after_tool_use_id=after_tool_use_id,
-          )
-          if not int(report["scanned"]):
-            break
-          total_rows += int(report["compressed"])
-          raw_chars += int(report["raw_chars"])
-          stored_chars += int(report["stored_chars"])
-          after_chat_id = report["last_chat_id"]
-          after_tool_use_id = report["last_tool_use_id"]
-          await asyncio.sleep(0.01)
-      except asyncio.CancelledError:
-        raise
-      except Exception as exc:
-        self.log.error(
-          "legacy tool-output compression failed: %s", exc, exc_info=True,
-        )
-        return
-      if total_rows:
-        self.log.info(
-          "compressed %d legacy tool output(s): %d -> %d stored characters",
-          total_rows, raw_chars, stored_chars,
-        )
 
     async def writer_supervisor_loop():
       from app.chat_writer import supervise_writer
@@ -485,7 +523,6 @@ class RuntimeSupervisors:
     self._spawn("writer-supervisor", writer_supervisor_loop())
     self._spawn("browser-profile-quota", browser_profile_loop())
     self._spawn("agent-scratch-retention", agent_scratch_loop())
-    self._spawn("legacy-tool-output-compression", compress_legacy_tool_outputs())
     self._spawn("provider-session-retention", provider_session_retention_loop())
     self._spawn("capacity-monitor", capacity_monitor_loop())
 

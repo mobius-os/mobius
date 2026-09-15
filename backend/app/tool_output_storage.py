@@ -3,8 +3,7 @@
 Tool output is text at every product boundary, but large results live in the
 ``tool_outputs`` side table for lazy expansion.  Keep the database column as
 portable TEXT (SQLite and PostgreSQL) while compressing its payload behind a
-versioned frame. Legacy plain-text rows remain readable while a bounded
-background fix-forward migrates them without a schema change.
+versioned frame. Legacy plain-text rows remain readable without a schema change.
 """
 
 from __future__ import annotations
@@ -14,7 +13,7 @@ import binascii
 import codecs
 import zlib
 
-from sqlalchemy import Text, text as sql_text
+from sqlalchemy import Text
 from sqlalchemy.types import TypeDecorator
 
 
@@ -128,80 +127,3 @@ def decode_tool_output(
       "tool-output compression length mismatch"
     )
   return text
-
-
-def compress_legacy_tool_output_batch(
-  session_factory,
-  *,
-  batch_size: int = 16,
-  after_chat_id: str | None = None,
-  after_tool_use_id: str | None = None,
-) -> dict[str, object]:
-  """Compress one old plain-text batch with an optimistic exact-value CAS.
-
-  New ORM writes already cross ``CompressedToolOutputText``. The comparison in
-  this one-time fix-forward prevents a concurrently refreshed tool result from
-  being overwritten by the older value selected for compression.
-  """
-  limit = max(1, min(int(batch_size), 128))
-  cursor_sql = ""
-  params: dict[str, object] = {
-    "prefix": TOOL_OUTPUT_STORAGE_PREFIX,
-    "prefix_length": len(TOOL_OUTPUT_STORAGE_PREFIX),
-    "limit": limit,
-  }
-  if after_chat_id is not None and after_tool_use_id is not None:
-    cursor_sql = (
-      "AND (chat_id > :after_chat_id OR "
-      "(chat_id = :after_chat_id AND tool_use_id > :after_tool_use_id)) "
-    )
-    params["after_chat_id"] = after_chat_id
-    params["after_tool_use_id"] = after_tool_use_id
-
-  with session_factory() as db:
-    rows = db.execute(sql_text(
-      "SELECT chat_id, tool_use_id, output FROM tool_outputs "
-      "WHERE output <> '' "
-      "AND substr(output, 1, :prefix_length) <> :prefix "
-      f"{cursor_sql}"
-      "ORDER BY chat_id ASC, tool_use_id ASC LIMIT :limit"
-    ), params).mappings().all()
-    if not rows:
-      return {
-        "scanned": 0,
-        "compressed": 0,
-        "raw_chars": 0,
-        "stored_chars": 0,
-        "last_chat_id": after_chat_id,
-        "last_tool_use_id": after_tool_use_id,
-      }
-
-    compressed_count = 0
-    raw_chars = 0
-    stored_chars = 0
-    for row in rows:
-      original = row["output"] or ""
-      stored = encode_tool_output(original)
-      result = db.execute(sql_text(
-        "UPDATE tool_outputs SET output = :stored "
-        "WHERE chat_id = :chat_id AND tool_use_id = :tool_use_id "
-        "AND output = :original"
-      ), {
-        "stored": stored,
-        "chat_id": row["chat_id"],
-        "tool_use_id": row["tool_use_id"],
-        "original": original,
-      })
-      if result.rowcount:
-        compressed_count += 1
-        raw_chars += len(original)
-        stored_chars += len(stored)
-    db.commit()
-    return {
-      "scanned": len(rows),
-      "compressed": compressed_count,
-      "raw_chars": raw_chars,
-      "stored_chars": stored_chars,
-      "last_chat_id": rows[-1]["chat_id"],
-      "last_tool_use_id": rows[-1]["tool_use_id"],
-    }

@@ -76,7 +76,6 @@
 
 import { useState, useRef, useLayoutEffect, useCallback } from 'react'
 import { BEFORE_SHELL_RELOAD_EVENT } from '../../lib/shellReloadEvents.js'
-import { isPerfProbeEnabled, perfMark, perfTime } from '../../lib/perfProbe.js'
 import { captureLayoutSpace, clientLengthToLayout } from '../../lib/layoutSpace.js'
 import {
   _anchorEl,
@@ -2006,11 +2005,6 @@ export default function useScrollMode({
         scheduleNoScrollRelease()
       }
     }
-    // Reuse the exact input handler when the opt-in field probe is disabled;
-    // the hot path then carries no timing closure or extra wrapper.
-    const onWheelInput = isPerfProbeEnabled()
-      ? (event) => perfTime('scroll.wheel', () => onUserInput(event))
-      : onUserInput
     // Browser accessibility activation can dispatch `click` without the
     // pointer/key event that normally reaches onUserInput first. Handle only
     // that zero-detail path here; physical clicks already own the gesture from
@@ -2020,22 +2014,11 @@ export default function useScrollMode({
       onUserInput(event)
     }
 
-    // Scroll-START latency, measured rather than inferred. Lag at the moment a
-    // finger lands is a different failure from steady-state jank and has a
-    // different cause: the work between touch pointerdown and the first frame
-    // that actually moves. Stamped on pointerdown, consumed by that gesture's first
-    // scroll event, so the recorded value is exactly the gap a reader feels.
-    let pendingGestureStart = 0
     const onPointerDownInput = (event) => {
       if (event.pointerType === 'touch') {
         gesture.touchStartY = Number.isFinite(event.clientY) ? event.clientY : null
         gesture.touchStartTarget = event.target
         gesture.touchEndChecked = false
-        if (isPerfProbeEnabled()) {
-          pendingGestureStart = performance.now()
-          perfTime('scroll.touchstart', () => onUserInput(event))
-          return
-        }
       }
       onUserInput(event)
     }
@@ -2082,7 +2065,6 @@ export default function useScrollMode({
       else if (touchDirection === 'up') gesture.escaped = true
     }
     const onPointerUpInput = () => {
-      if (!gesture.dirty) pendingGestureStart = 0
       gesture.touchStartY = null
       gesture.touchStartTarget = null
       gesture.touchEndChecked = false
@@ -2168,15 +2150,9 @@ export default function useScrollMode({
     const onComposerPointerDown = (event) => runComposerTailIntent(event)
     composerEditRunRef.current = runComposerTailIntent
 
-    const noteScrollStart = () => {
-      if (!pendingGestureStart) return
-      perfMark('scroll.startLatency', performance.now() - pendingGestureStart)
-      pendingGestureStart = 0
-    }
-
     scrollEl.addEventListener('pointerdown', onPointerDownInput, { passive: true })
     scrollEl.addEventListener('pointermove', onPointerMoveInput, { passive: true })
-    scrollEl.addEventListener('wheel', onWheelInput, { passive: true })
+    scrollEl.addEventListener('wheel', onUserInput, { passive: true })
     scrollEl.addEventListener('keydown', onUserInput, { passive: true })
     scrollEl.addEventListener(
       'click', onSyntheticDisclosureClick, { passive: true },
@@ -2216,11 +2192,6 @@ export default function useScrollMode({
         }
         paginationPrependRef.current = null
       }
-      // First scroll event of a touch gesture closes the start-latency window
-      // opened on pointerdown. Placed before the early returns below so the
-      // measurement reflects when content actually moved, not whether this
-      // controller classified the movement as reader-driven.
-      noteScrollStart()
       const userDriven = performance.now() < gestureWindowUntilRef.current
       if (!userDriven) {
         return
@@ -2330,7 +2301,7 @@ export default function useScrollMode({
       scrollEl.removeEventListener('scrollend', settleReaderScroll)
       scrollEl.removeEventListener('pointerdown', onPointerDownInput)
       scrollEl.removeEventListener('pointermove', onPointerMoveInput)
-      scrollEl.removeEventListener('wheel', onWheelInput)
+      scrollEl.removeEventListener('wheel', onUserInput)
       scrollEl.removeEventListener('keydown', onUserInput)
       scrollEl.removeEventListener('click', onSyntheticDisclosureClick)
       scrollEl.removeEventListener('focusin', onInlineEditorFocus)

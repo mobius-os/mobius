@@ -6,11 +6,7 @@ authentication.  The agent uses these when debugging issues instead of
 ad-hoc debug endpoints.
 """
 
-import json
 import os
-import threading
-from collections import deque
-from datetime import UTC, datetime
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, Query, Request
@@ -285,6 +281,8 @@ def debug_memory(
   tracemalloc was enabled before process import, ``allocation_limit`` source
   locations are included; otherwise its report explains that tracing is off.
   """
+  from app.oom_diagnostics import recent_oom_events
+
   return {
     **memory_status(include_checkpoints=True),
     "memory_maps": memory_map_summary(),
@@ -292,6 +290,7 @@ def debug_memory(
     "runtime_memory": _runtime_memory_ownership(),
     "gc": gc_diagnostics(deep=deep),
     "allocations": allocation_report(limit=allocation_limit),
+    "oom_events": recent_oom_events(get_settings().data_dir, limit=10),
   }
 
 
@@ -325,151 +324,3 @@ def debug_logs(
   # an otherwise line-bounded diagnostic response.
   result = [elide(line, 4000)[0] for line in all_lines[-lines:]]
   return {"lines": result, "total_size": total_size}
-
-
-# ---------------------------------------------------------------------------
-# Field performance probe
-#
-# Every prior Mobius performance investigation measured headless desktop
-# Chromium with software rasterization. That environment cannot observe the
-# things that make a phone slow: a tile-based GPU, a 3-5x slower CPU, touch
-# input at 120-240Hz, `visualViewport` events (which essentially never fire on
-# desktop), mobile flash-storage latency, and a real cellular link.
-#
-# This endpoint pair is the missing half: the shell's probe (frontend/src/lib/
-# perfProbe.js) reports PASSIVE browser observations from the owner's actual
-# devices, and the agent reads them back here. It is opt-in, per-device, and
-# writes nothing unless the owner has explicitly enabled it.
-#
-# Samples are diagnostic exhaust, not durable state: they live in a single
-# capped JSONL file that is trimmed on write, so an enabled probe can never
-# grow the data directory without bound.
-_PERF_SAMPLE_LIMIT = 2000
-_PERF_SAMPLE_TRIM_TARGET = 1600
-_perf_sample_count: int | None = None
-_perf_sample_lock = threading.Lock()
-
-
-def _perf_sample_path() -> Path:
-  settings = get_settings()
-  return Path(settings.data_dir) / "logs" / "perf-samples.jsonl"
-
-
-def _trim_perf_samples(path: Path) -> int:
-  """Atomically retain the newest low-water batch and return its size."""
-  with open(path, encoding="utf-8") as f:
-    retained = deque(f, maxlen=_PERF_SAMPLE_TRIM_TARGET)
-
-  staging = path.with_name(f".{path.name}.tmp")
-  with open(staging, "w", encoding="utf-8") as f:
-    f.writelines(retained)
-  os.replace(staging, path)
-  return len(retained)
-
-
-def _append_perf_sample(path: Path, line: str) -> None:
-  """Append one sample, trimming only at the high-water mark.
-
-  The process-local count is reconstructed once after restart. Möbius runs a
-  single uvicorn worker; the lock also serializes its sync read/clear routes
-  with this async ingest route.
-  """
-  global _perf_sample_count
-
-  with _perf_sample_lock:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if _perf_sample_count is None:
-      try:
-        with open(path, encoding="utf-8") as f:
-          _perf_sample_count = sum(1 for _ in f)
-      except FileNotFoundError:
-        _perf_sample_count = 0
-
-    with open(path, "a", encoding="utf-8") as f:
-      f.write(line + "\n")
-    _perf_sample_count += 1
-
-    if _perf_sample_count > _PERF_SAMPLE_LIMIT:
-      try:
-        _perf_sample_count = _trim_perf_samples(path)
-      except OSError:
-        # The sample was appended successfully. Retry the trim on the next
-        # write rather than reporting that this stored diagnostic was lost.
-        pass
-
-
-@router.post("/perf")
-async def debug_perf_ingest(
-  request: Request,
-  _owner: models.Owner = Depends(get_current_owner),
-):
-  """Accepts one aggregated performance sample from a shell instance.
-
-  The body is stored verbatim alongside a server-side receipt timestamp. The
-  probe already bounds its own payload, so the only server-side concern is
-  keeping the file capped. Crossing the high-water mark trims to a lower
-  target, amortizing the rewrite while keeping retention strictly bounded.
-  """
-  try:
-    sample = await request.json()
-  except Exception:
-    return {"stored": False, "reason": "invalid json"}
-
-  if not isinstance(sample, dict):
-    return {"stored": False, "reason": "sample must be an object"}
-
-  sample["received_at"] = datetime.now(UTC).isoformat()
-
-  path = _perf_sample_path()
-  line = json.dumps(sample, separators=(",", ":"), default=str)
-  _append_perf_sample(path, line)
-
-  return {"stored": True}
-
-
-@router.get("/perf")
-def debug_perf_read(
-  _owner: models.Owner = Depends(get_current_owner),
-  limit: int = Query(default=50, ge=1, le=500),
-  device: str | None = Query(default=None),
-):
-  """Returns the most recent probe samples, newest last.
-
-  `device` filters to one reported form factor ("phone" / "desktop") so the
-  mobile and desktop populations can be compared without pulling both.
-  """
-  path = _perf_sample_path()
-  samples = []
-  with _perf_sample_lock:
-    if not path.exists():
-      return {"samples": [], "total": 0}
-
-    with open(path, encoding="utf-8") as f:
-      for line in f:
-        line = line.strip()
-        if not line:
-          continue
-        try:
-          samples.append(json.loads(line))
-        except ValueError:
-          continue
-
-  if device:
-    samples = [s for s in samples if s.get("device", {}).get("formFactor") == device]
-
-  return {"samples": samples[-limit:], "total": len(samples)}
-
-
-@router.delete("/perf")
-def debug_perf_clear(
-  _owner: models.Owner = Depends(get_current_owner),
-):
-  """Drops all collected samples so a new measurement run starts clean."""
-  global _perf_sample_count
-
-  path = _perf_sample_path()
-  with _perf_sample_lock:
-    if path.exists():
-      path.unlink()
-    _perf_sample_count = 0
-  return {"cleared": True}
