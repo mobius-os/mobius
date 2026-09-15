@@ -39,6 +39,11 @@ os.environ["MOBIUS_TEST_DATABASE_ISOLATED"] = "1"
 os.environ["MOBIUS_APP_BASE"] = f"{_tmp}/apps"
 os.environ["API_BASE_URL"] = "http://127.0.0.1:9"
 os.environ["MOEBIUS_SKIP_BOOTSTRAP"] = "1"
+# A test started in a managed container must neither adopt its live account
+# nor call its root-owned broker. Managed-login tests opt in with local fakes.
+os.environ["MOBIUS_SSO_ISSUER"] = ""
+os.environ["MOBIUS_SSO_INSTANCE_ID"] = ""
+os.environ["MOBIUS_IDENTITY_BROKER_SOCKET"] = f"{_tmp}/no-identity-broker.sock"
 
 # Production entrypoint proves the image-owned filesystem half before FastAPI
 # starts. Reproduce that boundary in the host-only runtime so startup can
@@ -84,6 +89,22 @@ if not (_static / "index.html").is_file():
   )
 
 from app.database import Base, engine
+
+# Environment overrides cannot retarget an engine or Settings singleton that
+# an earlier collected module already imported. Check the actual bind before
+# loading the application or allowing either schema-reset fixture to run.
+if (
+  engine.url.get_backend_name() != "sqlite"
+  or not engine.url.database
+  or Path(engine.url.database).resolve() != Path(_tmp, "test.db").resolve()
+):
+  pytest.exit(
+    "Refusing schema reset outside the fixture-owned database. "
+    "An application engine was imported before test isolation; "
+    "use scripts/wt-pytest.sh and import fixtures before app modules.",
+    returncode=2,
+  )
+
 from app.schema_migrations import _create_chat_search_tables
 from app.main import app
 from app.routes import auth as auth_module
@@ -284,6 +305,7 @@ def owner_token(client):
     "username": "test",
     "password": "testpassword123",
   })
+  assert r.status_code == 200, r.text
   return r.json()["access_token"]
 
 
