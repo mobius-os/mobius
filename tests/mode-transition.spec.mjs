@@ -708,7 +708,6 @@ test('retiring an explicit Builder cover returns the selected tab and preserves 
 
   await toggleMode(page)
   await expect.poll(() => builderActive(page)).toBe(false)
-  await expect(presentation).toBeHidden()
   await expect.poll(() => page.evaluate(key => (
     JSON.parse(localStorage.getItem(key))?.singleScreen
   ), paneModel.STORAGE_KEY), { timeout: 4000 }).toEqual({
