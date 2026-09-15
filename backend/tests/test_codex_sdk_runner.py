@@ -4499,9 +4499,9 @@ def _window(resets_at, used_percent):
   return SimpleNamespace(resets_at=resets_at, used_percent=used_percent)
 
 
-def test_extract_rate_limit_reset_picks_most_constrained_window():
-  # The binding limit is the fullest window; its reset is the one worth waiting
-  # for even though the other window resets sooner.
+def test_extract_rate_limit_reset_falls_back_to_fullest_when_none_exhausted():
+  # No window is at cap (e.g. a credit/spend-control limit with partial usage
+  # windows): fall back to the fullest window's reset as a best guess.
   snapshot = SimpleNamespace(
     primary=_window(1_800_000_000, 40),
     secondary=_window(1_800_009_999, 97),
@@ -4509,6 +4509,37 @@ def test_extract_rate_limit_reset_picks_most_constrained_window():
   )
   reset, reached = codex_sdk_runner._extract_rate_limit_reset(snapshot)
   assert reset == 1_800_009_999
+  assert reached is True
+
+
+def test_extract_rate_limit_reset_waits_for_latest_exhausted_window():
+  # Both windows are maxed: a short window resets sooner, the weekly window
+  # resets ~5 days out. The turn stays blocked until the weekly cap resets, so
+  # its (later) reset is the one to park on — not the sooner short window, even
+  # though a used_percent tie would otherwise keep `primary`.
+  five_days = 1_800_000_000 + 5 * 24 * 3600
+  snapshot = SimpleNamespace(
+    primary=_window(1_800_000_000, 100),
+    secondary=_window(five_days, 100),
+    rate_limit_reached_type="workspace_owner_usage_limit_reached",
+  )
+  reset, reached = codex_sdk_runner._extract_rate_limit_reset(snapshot)
+  assert reset == five_days
+  assert reached is True
+
+
+def test_extract_rate_limit_reset_ignores_later_unexhausted_window():
+  # Only the short window is at cap; the weekly window is partial and resets
+  # later. We must resume when the exhausted window clears, not wait needlessly
+  # for the unexhausted later reset.
+  five_days = 1_800_000_000 + 5 * 24 * 3600
+  snapshot = SimpleNamespace(
+    primary=_window(1_800_000_000, 100),
+    secondary=_window(five_days, 40),
+    rate_limit_reached_type="rate_limit_reached",
+  )
+  reset, reached = codex_sdk_runner._extract_rate_limit_reset(snapshot)
+  assert reset == 1_800_000_000
   assert reached is True
 
 
@@ -4531,6 +4562,17 @@ def test_extract_rate_limit_reset_skips_windows_without_reset():
     primary=_window(None, 99),
     secondary=_window(1_800_005_000, 55),
     rate_limit_reached_type="workspace_owner_usage_limit_reached",
+  )
+  reset, reached = codex_sdk_runner._extract_rate_limit_reset(snapshot)
+  assert reset == 1_800_005_000
+  assert reached is True
+
+
+def test_extract_rate_limit_reset_skips_malformed_reset():
+  snapshot = SimpleNamespace(
+    primary=_window("not-an-epoch", 100),
+    secondary=_window(1_800_005_000, 55),
+    rate_limit_reached_type="rate_limit_reached",
   )
   reset, reached = codex_sdk_runner._extract_rate_limit_reset(snapshot)
   assert reset == 1_800_005_000

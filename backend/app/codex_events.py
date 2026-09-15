@@ -55,12 +55,10 @@ def _codex_thinking_segment_id(payload: Any) -> str | None:
 def _extract_rate_limit_reset(snapshot) -> tuple[int | None, bool]:
   """Pull a park-worthy reset epoch + reached flag from a RateLimitSnapshot.
 
-  The Codex analog of what the Claude runner reads off RateLimitEvent. Picks the
-  most-constrained window's ``resets_at`` (the binding limit is the one closest
-  to full, so its reset is the one worth waiting for) and reports whether any
-  window/credit pool actually hit its cap. ``rate_limit_reached_type`` has no
-  "ok" member, so a non-None value reliably means a real limit hit — a
-  structured signal trustworthy without string-matching the error text.
+  The turn stays blocked until every exhausted window has reset, so choose the
+  latest reset among windows at 100%. If no window is exhausted (for example,
+  a credit limit with partially used windows), retain the existing fallback to
+  the fullest window's reset.
 
   Returns ``(resets_at_epoch_or_None, reached_bool)``. Defensive against partial
   or older SDK payloads: any missing field degrades to skip / (None, False).
@@ -68,8 +66,7 @@ def _extract_rate_limit_reset(snapshot) -> tuple[int | None, bool]:
   if snapshot is None:
     return None, False
   reached = getattr(snapshot, "rate_limit_reached_type", None) is not None
-  best_reset: int | None = None
-  best_used = -1.0
+  windows: list[tuple[float, int]] = []
   for window in (
     getattr(snapshot, "primary", None),
     getattr(snapshot, "secondary", None),
@@ -80,12 +77,20 @@ def _extract_rate_limit_reset(snapshot) -> tuple[int | None, bool]:
     if resets_at is None:
       continue
     try:
+      reset = int(resets_at)
+    except (TypeError, ValueError):
+      continue
+    try:
       used = float(getattr(window, "used_percent", 0) or 0)
     except (TypeError, ValueError):
       used = 0.0
-    if used > best_used:
-      best_used = used
-      best_reset = resets_at
+    windows.append((used, reset))
+  if not windows:
+    return None, reached
+  exhausted = [reset for used, reset in windows if used >= 100.0]
+  if exhausted:
+    return max(exhausted), reached
+  best_reset = max(windows, key=lambda w: w[0])[1]
   return best_reset, reached
 
 
