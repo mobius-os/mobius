@@ -216,7 +216,7 @@ export default function CodexAuth({ onConnected, showSetupHint = true }) {
                 className="pa__btn pa__btn--sm codex-auth__copy-btn"
                 onClick={() => copyCode()}
               >
-                {copyState?.startsWith('copied') ? 'Copied' : 'Copy code'}
+                {copyState === 'copied' ? 'Copied' : 'Copy code'}
               </button>
             </span>
           </div>
