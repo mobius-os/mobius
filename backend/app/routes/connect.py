@@ -471,6 +471,7 @@ class ResultBody(BaseModel):
   exit_code: int = 0
   timed_out: bool = False
   outcome: str | None = Field(default=None, max_length=16)
+  truncated: bool = False
 
 
 class ExecBody(BaseModel):
@@ -971,7 +972,9 @@ def _format_result(request_id: str, result: dict) -> dict:
     "stderr": stderr,
     "exit_code": exit_code,
     "outcome": outcome,
-    "truncated": stdout_truncated or stderr_truncated,
+    "truncated": (
+      bool(result.get("truncated")) or stdout_truncated or stderr_truncated
+    ),
     "timed_out": outcome in ("timed_out", "expired"),
     "canceled": outcome == "canceled",
   }
@@ -1006,6 +1009,7 @@ def _runner_result(host_id: str, body: ResultBody) -> None:
     "exit_code": body.exit_code,
     "timed_out": body.timed_out,
     "outcome": outcome,
+    "truncated": body.truncated,
   })
 
 

@@ -1,8 +1,13 @@
+import useDelayedConnectionNotice from '../../hooks/useDelayedConnectionNotice.js'
+
 /**
  * Subtle reconnection indicator shown when the SSE connection is lost,
  * plus a quieter note while a wake/online reattach is in flight.
  */
 export default function ConnectionStatus({ error, reconnecting, onRetry }) {
+  const transient = reconnecting || error === 'retrying'
+  const showTransient = useDelayedConnectionNotice(transient)
+
   if (!error) {
     // `reconnecting` is the healthy sleep/wake reattach window (see
     // useStreamConnection's armReconnectingNote): the stream is being
@@ -10,7 +15,7 @@ export default function ConnectionStatus({ error, reconnecting, onRetry }) {
     // error bar or a Retry affordance. Error states below win the slot —
     // 'retrying' already announces its own reconnect, and 'disconnected'
     // needs the Retry button front and center.
-    if (!reconnecting) return null
+    if (!showTransient) return null
     return (
       <div
         className="connection-status connection-status--reattach"
@@ -27,6 +32,7 @@ export default function ConnectionStatus({ error, reconnecting, onRetry }) {
   // and can find Retry; 'status' (polite) for the transient reconnecting
   // state so it doesn't interrupt.
   const isLost = error !== 'retrying'
+  if (!isLost && !showTransient) return null
   return (
     <div
       className="connection-status"

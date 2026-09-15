@@ -428,6 +428,24 @@ def _run_command(cmd, cwd, timeout):
         return "", "runner error: %s" % exc, 1, False
 
 
+# Match the diagnostic view the server can return. Sending more only spends
+# bandwidth before the server discards it, and sufficiently large output can
+# be rejected before it reaches that truncation boundary. Keep the head and
+# tail: both the first error and the final summary usually matter.
+_MAX_RESULT_STREAM = 60_000
+
+
+def _cap_output(text):
+    text = text or ""
+    if len(text) <= _MAX_RESULT_STREAM:
+        return text, False
+    marker = "\n…[output truncated by runner]…\n"
+    kept = _MAX_RESULT_STREAM - len(marker)
+    head = (kept + 1) // 2
+    tail = kept // 2
+    return text[:head] + marker + text[-tail:], True
+
+
 class _CommandRunner:
     """Own one subprocess and retain lifecycle messages across reconnects."""
 
@@ -438,6 +456,7 @@ class _CommandRunner:
         self.flush_lock = threading.Lock()
         self.active = None
         self.outbox = deque()
+        self.reconcile_requested = False
         # A rotating stream can deliver the same event from the retiring and
         # replacement connection. Request ids are idempotency keys: once this
         # process accepts one, never spawn it a second time.
@@ -463,6 +482,13 @@ class _CommandRunner:
             ]
         return active_id, pending
 
+    def take_reconcile_request(self):
+        """Consume a request to reconnect after discarding a terminal result."""
+        with self.lock:
+            requested = self.reconcile_requested
+            self.reconcile_requested = False
+        return requested
+
     def flush_pending_results(self):
         """Retry retained results without holding the subprocess-state lock."""
         with self.flush_lock:
@@ -472,7 +498,29 @@ class _CommandRunner:
                         self.base + "/api/connect/result", message,
                         token=self.token,
                     )
-                except (urllib.error.URLError, urllib.error.HTTPError) as exc:
+                except urllib.error.HTTPError as exc:
+                    # A 4xx means the server refuses this exact payload, so an
+                    # identical retry can never succeed. Retrying it forever
+                    # would pin the machine on one finished command and block
+                    # every new one, which is exactly how a runner wedges.
+                    # Drop it and let the server's reconcile finalize the
+                    # command as lost. 408/425/429 are transient, so retry.
+                    if 400 <= exc.code < 500 and exc.code not in (408, 425, 429):
+                        print(
+                            "dropping unreportable result for %s: %s"
+                            % (message.get("request_id"), exc)
+                        )
+                        self.acknowledge_message(message)
+                        # The server still owns the corresponding command.
+                        # Reconnect without this pending id so its existing
+                        # reconciliation path can finalize that command as
+                        # lost now, rather than waiting for stream rotation.
+                        with self.lock:
+                            self.reconcile_requested = True
+                        continue
+                    print("failed to report result: %s" % exc)
+                    return False
+                except urllib.error.URLError as exc:
                     print("failed to report result: %s" % exc)
                     return False
                 self.acknowledge_message(message)
@@ -481,6 +529,8 @@ class _CommandRunner:
     def _post_result(
         self, request_id, stdout, stderr, exit_code, outcome, record=None,
     ):
+        stdout, stdout_truncated = _cap_output(stdout)
+        stderr, stderr_truncated = _cap_output(stderr)
         message = {
             "type": "result",
             "request_id": request_id,
@@ -489,6 +539,7 @@ class _CommandRunner:
             "exit_code": exit_code,
             "timed_out": outcome in ("timed_out", "expired"),
             "outcome": outcome,
+            "truncated": stdout_truncated or stderr_truncated,
         }
         # Retain before attempting the network request. A concurrent stream
         # rotation can now always announce this pending id, so the server will
@@ -648,6 +699,9 @@ def _serve(cfg):
             # next stream hello so its pending list reflects what still needs
             # recovery, then again after connecting to close any race.
             commands.flush_pending_results()
+            # A result discarded before opening the stream has already made
+            # this upcoming hello the required reconciliation boundary.
+            commands.take_reconcile_request()
             active_id, pending_ids = commands.snapshot()
             query = [
                 ("protocol", str(RUNNER_PROTOCOL_VERSION)),
@@ -671,10 +725,16 @@ def _serve(cfg):
                 print("Connected. This machine is now reachable from Mobius.")
                 backoff = 1
                 commands.flush_pending_results()
+                if commands.take_reconcile_request():
+                    print("reconnecting to reconcile a rejected result")
+                    continue
                 for raw in stream:
                     # Heartbeat comments make this retry path run even while
                     # the host has no new commands.
                     commands.flush_pending_results()
+                    if commands.take_reconcile_request():
+                        print("reconnecting to reconcile a rejected result")
+                        break
                     line = raw.decode("utf-8", "replace").rstrip("\r\n")
                     if not line.startswith("data:"):
                         continue

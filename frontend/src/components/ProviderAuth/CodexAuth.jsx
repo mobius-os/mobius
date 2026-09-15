@@ -2,7 +2,6 @@ import { useState, useEffect, useRef, useCallback } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { api } from '../../api/client.js'
 import { authQueries } from '../../hooks/queries.js'
-import { closeAuthWindow, navigateAuthWindow, reserveAuthWindow } from '../../utils/authWindow.js'
 import { detailToMessage } from '../../lib/errorDetail.js'
 
 const CHATGPT_SECURITY_URL = 'https://chatgpt.com/#settings/Security'
@@ -26,7 +25,6 @@ export default function CodexAuth({ onConnected, showSetupHint = true }) {
   const [copyState, setCopyState] = useState(null)
   const [error, setError] = useState('')
   const pollRef = useRef(null)
-  const copyTimerRef = useRef(null)
   // Generation counter for in-flight poll fetches. setInterval gets
   // cleared on cancel, but a request that was already awaiting a
   // response when cancel ran could still resolve after and call
@@ -34,13 +32,6 @@ export default function CodexAuth({ onConnected, showSetupHint = true }) {
   // Each startLogin bumps the gen; each poll captures it and bails
   // if it no longer matches.
   const pollGenRef = useRef(0)
-  // The sign-in tab is reserved by the Copy action, not by startLogin. That
-  // ordering keeps the one-time code visible before ChatGPT opens while still
-  // satisfying popup blockers' requirement that a tab originate in a user
-  // gesture. Holding the handle here lets unmount clean up the brief blank tab
-  // if the clipboard promise is still settling.
-  const authWindowRef = useRef(null)
-
   // Three callers can be checking status at once: the interval poll, a pageshow
   // after the sign-in tab hands control back, and a visibilitychange. Comparing
   // the generation is not enough on its own -- concurrent checks all captured
@@ -54,11 +45,6 @@ export default function CodexAuth({ onConnected, showSetupHint = true }) {
     return true
   }, [])
 
-  const releaseAuthWindow = useCallback(() => {
-    closeAuthWindow(authWindowRef.current)
-    authWindowRef.current = null
-  }, [])
-
   const stopPolling = useCallback(() => {
     if (pollRef.current) {
       clearInterval(pollRef.current)
@@ -66,14 +52,6 @@ export default function CodexAuth({ onConnected, showSetupHint = true }) {
     }
   }, [])
 
-  const showCopyState = useCallback((nextState) => {
-    setCopyState(nextState)
-    if (copyTimerRef.current) clearTimeout(copyTimerRef.current)
-    copyTimerRef.current = setTimeout(() => {
-      setCopyState(null)
-      copyTimerRef.current = null
-    }, 1800)
-  }, [])
 
   // On unmount, also bump the gen so any in-flight fetch (login or
   // poll) that resolves after the component is gone won't call
@@ -82,23 +60,15 @@ export default function CodexAuth({ onConnected, showSetupHint = true }) {
   useEffect(() => () => {
     pollGenRef.current += 1
     stopPolling()
-    releaseAuthWindow()
-    if (copyTimerRef.current) clearTimeout(copyTimerRef.current)
-  }, [stopPolling, releaseAuthWindow])
+  }, [stopPolling])
 
-  async function copyCodeAndOpen(value = code) {
+  async function copyCode(value = code) {
     if (!value) return
-    const authWindow = reserveAuthWindow('Opening ChatGPT sign-in…')
-    authWindowRef.current = authWindow
     try {
       await navigator.clipboard.writeText(value)
-      const opened = navigateAuthWindow(authWindow, url)
-      if (opened) authWindowRef.current = null
-      else releaseAuthWindow()
-      showCopyState(opened ? 'copied-opened' : 'copied')
+      setCopyState('copied')
     } catch {
-      releaseAuthWindow()
-      showCopyState('failed')
+      setCopyState('failed')
     }
   }
 
@@ -150,14 +120,12 @@ export default function CodexAuth({ onConnected, showSetupHint = true }) {
     try {
       const res = await api.auth.provider.codex.startLogin()
       if (myGen !== pollGenRef.current) {
-        releaseAuthWindow()
         return
       }
       if (!res.ok) {
         const data = await res.json()
         setError(detailToMessage(data.detail, 'Could not start Codex login.'))
         setStatus('idle')
-        releaseAuthWindow()
         return
       }
       const data = await res.json()
@@ -191,7 +159,6 @@ export default function CodexAuth({ onConnected, showSetupHint = true }) {
     } catch {
       setError('Network error.')
       setStatus('idle')
-      releaseAuthWindow()
     }
   }
 
@@ -219,7 +186,6 @@ export default function CodexAuth({ onConnected, showSetupHint = true }) {
     // a stale 'complete'/'failed'.
     pollGenRef.current += 1
     stopPolling()
-    releaseAuthWindow()
     setStatus('idle')
     setUrl('')
     setCode('')
@@ -231,8 +197,7 @@ export default function CodexAuth({ onConnected, showSetupHint = true }) {
     return (
       <div className="codex-auth">
         <p className="pa__muted">
-          Copy this one-time code. ChatGPT opens after it is safely on your
-          clipboard, ready for you to paste.
+          Copy this one-time code, then open ChatGPT and paste it to continue.
         </p>
         <div className="codex-auth__device">
           <div className="codex-auth__step">
@@ -242,32 +207,27 @@ export default function CodexAuth({ onConnected, showSetupHint = true }) {
               <code
                 className="codex-auth__code"
                 title="Click to copy"
-                onClick={() => copyCodeAndOpen()}
+                onClick={() => copyCode()}
               >
                 {code}
               </code>
               <button
                 type="button"
                 className="pa__btn pa__btn--sm codex-auth__copy-btn"
-                onClick={() => copyCodeAndOpen()}
+                onClick={() => copyCode()}
               >
-                {copyState?.startsWith('copied') ? 'Copied' : 'Copy code'}
+                {copyState === 'copied' ? 'Copied' : 'Copy code'}
               </button>
             </span>
           </div>
           {copyState === 'failed' && (
             <p className="pa__error codex-auth__copy-error" role="alert">
-              Could not copy. Select the code above.
-            </p>
-          )}
-          {copyState === 'copied-opened' && (
-            <p className="pa__success codex-auth__copy-result" role="status">
-              Copied — ChatGPT opened in a new tab.
+              Could not copy. Select the code above and copy it manually.
             </p>
           )}
           {copyState === 'copied' && (
             <p className="pa__muted codex-auth__copy-result" role="status">
-              Copied. If ChatGPT did not open, use Open page below.
+              Code copied. Open ChatGPT, then paste it to continue.
             </p>
           )}
         </div>
@@ -280,7 +240,7 @@ export default function CodexAuth({ onConnected, showSetupHint = true }) {
             className="pa__btn pa__btn--sm"
             onClick={openVerificationPage}
           >
-            Open page
+            Open ChatGPT
           </button>
           <button
             type="button"

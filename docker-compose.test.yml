@@ -36,7 +36,7 @@ services:
         # image. Normal/release images fail closed without an exact SHA.
         MOBIUS_ALLOW_UNKNOWN_BUILD_SHA: "1"
     container_name: ${MOBIUS_CONTAINER:-mobius-test}
-    init: true
+    # No `init:` — runs the image entrypoint (tini as PID 1), matching prod.
     # Settings restart SIGTERMs uvicorn and relies on Docker bringing the
     # container back up.
     restart: unless-stopped
@@ -91,9 +91,11 @@ services:
   pytest:
     image: ${MOBIUS_IMAGE:-mobius-test:ci}
     profiles: ["test"]
-    # The full suite launches many short-lived subprocesses. Keep pytest out
-    # of PID 1 so orphaned children are reaped and later /proc-based recovery
-    # target tests see a production-shaped process table.
+    # This service overrides the image entrypoint (runs pytest directly) and so
+    # bypasses the image's tini. The full suite launches many short-lived
+    # subprocesses; keep pytest out of PID 1 via docker-init so orphaned children
+    # are reaped and later /proc-based recovery target tests see a
+    # production-shaped process table.
     init: true
     volumes:
       # Mount one coherent checkout at a non-runtime path and run exactly like
