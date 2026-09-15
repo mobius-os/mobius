@@ -32,15 +32,12 @@ export function insertPositionedActivity(entries, notes, sourceBlocks, chatId) {
           return nestedKey && `${nested.type}:${nestedKey}` === position.block_key
         })
     })
-    const nestedReference = reference?.item?.type === 'activity'
     const index = position.block_key
       ? reference
-        // A compact activity run is one lazy top-level surface. When the exact
-        // anchor lives inside it, retain chronology at that owning boundary:
-        // before the run for non-positive distance, after it otherwise. Never
-        // demote a valid nested anchor to the end of the assistant message.
-        ? reference.idx + (nestedReference && position.block_distance > 0
-          ? 1 : nestedReference ? 0 : position.block_distance)
+        // A compact activity run changes the anchor's top-level surface, not
+        // the boundary it recorded. Its distance still selects the matching
+        // later visible block.
+        ? reference.idx + position.block_distance
         : entries.length + 1
       : position.block_index - [...skipped].filter(i => i < position.block_index).length
     const list = boundaries.get(index) || []
