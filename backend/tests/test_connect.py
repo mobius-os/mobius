@@ -1169,6 +1169,19 @@ async def test_exec_caps_large_output_and_reports_runner_timeout(client, auth):
   assert result["outcome"] == "timed_out"
 
 
+def test_result_preserves_runner_reported_truncation():
+  result = connect_routes._format_result("d" * 16, {
+    "stdout": "already capped by runner",
+    "stderr": "",
+    "exit_code": 0,
+    "outcome": "completed",
+    "truncated": True,
+  })
+
+  assert result["stdout"] == "already capped by runner"
+  assert result["truncated"] is True
+
+
 @pytest.mark.asyncio
 async def test_busy_host_rejects_work_instead_of_queueing_it(client, auth):
   pairing, _ = _paired_host(client, auth)

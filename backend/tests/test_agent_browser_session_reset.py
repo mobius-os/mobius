@@ -176,3 +176,28 @@ def test_pid_reuse_is_rechecked_before_any_signal(tmp_path: Path, monkeypatch):
   )
 
   assert signals == []
+
+
+def test_killed_session_can_be_exited_but_not_yet_reaped(tmp_path: Path, monkeypatch):
+  proc_root = tmp_path / "proc"
+  proc_root.mkdir()
+  _write_process(
+    proc_root, 100, ppid=1, start_ticks=10,
+    args=("/opt/agent-browser-linux-x64",),
+  )
+  process = RESET.ProcessIdentity(pid=100, start_ticks=10)
+  signals = []
+
+  def kill(pid, sig):
+    signals.append((pid, sig))
+    stat = proc_root / str(pid) / "stat"
+    stat.write_text(stat.read_text().replace(") S ", ") Z ", 1))
+    (proc_root / str(pid) / "cmdline").write_bytes(b"")
+
+  monkeypatch.setattr(RESET.os, "kill", kill)
+  RESET.terminate_session_processes(
+    RESET.SessionProcesses(browser=None, daemon=process),
+    wait_seconds=0.1, proc_root=proc_root,
+  )
+  assert signals == [(100, RESET.signal.SIGKILL)]
+  assert RESET._still_same_process(process, proc_root) is False
