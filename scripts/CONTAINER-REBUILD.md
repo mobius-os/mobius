@@ -33,9 +33,58 @@ Self-hosted installations use the host helper below; linked Railway deployments
 use the Möbius account service.
 
 Changes to the optional `deploy-prod.sh` command do not require running it or
-block Settings updates. It uses its updated source when next invoked. Changes
-to the installed host helper are different: update that root-owned helper with
-the installer below; an app restart or image replacement cannot replace it.
+block Settings updates. It uses its updated source when next invoked. Compatible
+changes to the installed helper, Compose files, or Railway configuration follow
+the same rule: existing installations keep their proven host-owned configuration,
+while new installations and later intentional host refreshes use the updated
+reference source. `Caddyfile` is deliberately different: it is the active
+self-hosted routing policy, so a change still requires a proxy reload.
+
+## Deployment compatibility contract
+
+The image and served application must remain compatible with the installed
+host controller and deployment topology by default. Editing a host-owned source
+file therefore does not, by itself, block a reviewed image replacement. A
+release that actually requires new external behavior advances the corresponding
+reserved marker:
+
+| Required external change | Marker path | Fixed legacy bridge | Activation |
+|---|---|---|---|
+| Self-hosted helper capability or protocol | `deployment/self-hosted-helper.required` | revision comment in `scripts/install-rebuild-helper.sh` | Reinstall the helper |
+| Self-hosted mount, port, network, privilege, or secret delivery | `deployment/self-hosted-topology.required` | revision comment in `docker-compose.yml` | Deploy from the current host topology |
+| Railway service or deployment configuration | `deployment/railway-topology.required` | revision comment in `railway.toml` | Apply the Railway configuration |
+
+The marker may be introduced only when the first incompatible migration needs
+it. Its content is a monotonically advancing revision: never delete, rename,
+reuse, decrement, or revert it. Update review compares endpoint trees, so this
+monotonic identity is what makes an installation that skipped releases still
+see every outstanding external requirement.
+
+Every marker introduction or advance must set the same monotonically advancing
+revision in a retained comment in the fixed legacy bridge file from the table.
+Never delete, rename, reuse, decrement, or revert that bridge revision, even if
+the surrounding configuration changes later. Installations that predate
+marker-aware classification already treat those legacy paths as external
+activation requirements, so their endpoint comparison sees the retained bridge
+and stops safely too. This bridge is permanent: an owner may skip directly from
+any older release, so do not assume the installed updater already understands
+markers. The bridge comment may also explain the migration, but its monotonic
+revision—not temporary wording—is the durable identity.
+
+Compatibility is with configurations already installed in the field, not only
+the repository's current defaults. Advance a marker when a new image or served
+feature requires external behavior that an older installation lacks. Comments,
+portable implementation fixes, optional features, and defaults used only by new
+installs do not require a marker. A preflight that boots successfully is
+valuable evidence, but cannot prove mounts, privileges, secrets, or security
+policy that may matter only after readiness; release review owns this
+declaration.
+
+An image health receipt never proves an external migration completed. After the
+operator follows the migration-specific instructions, verify the installed
+helper or provider configuration and retire only that exact pending activation
+requirement. Never clear the complete activation ledger merely because the new
+image is healthy.
 
 ## Install
 
@@ -99,7 +148,9 @@ the existing owner-presence gate and says so explicitly; subsequent Host
 rebuilds preserve eligible active chats even with `--force-now`.
 
 An installation of the older Host helper is reported as **upgrade required**
-and cannot queue a Settings rebuild. Re-run
+and cannot queue a Settings rebuild. This includes the retired helper that used
+host-generated protected-runtime overlays despite advertising the current chat
+handoff version. Re-run
 `sudo scripts/install-rebuild-helper.sh` from the current trusted checkout;
 the refusal happens before chat admission is closed or an image is touched.
 

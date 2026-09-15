@@ -2367,10 +2367,19 @@ def test_manual_deploy_source_does_not_hide_pending_server_restart(clone_env):
   assert status["activation"]["level"] == "server_restart"
 
 
-def test_boot_retires_old_manual_deploy_markers_without_dropping_real_host_work(clone_env):
+def test_boot_retires_compatible_host_paths_but_preserves_required_migrations(
+  clone_env,
+):
   _, platform = clone_env
   target = _served_sha(platform)
-  for remainder in ([], ["scripts/mobius-rebuild-host.py"]):
+  for remainder, expected in (
+    ([], None),
+    (["scripts/mobius-rebuild-host.py"], None),
+    (
+      ["deployment/self-hosted-helper.required"],
+      ["deployment/self-hosted-helper.required"],
+    ),
+  ):
     pu._write_activation_marker(
       target, ["scripts/deploy-prod.sh", "backend/app/main.py", *remainder],
     )
@@ -2378,8 +2387,8 @@ def test_boot_retires_old_manual_deploy_markers_without_dropping_real_host_work(
     pu._complete_boot_activation(platform)
 
     marker = pu._read_activation_marker()
-    if remainder:
-      assert marker["paths"] == remainder
+    if expected:
+      assert marker["paths"] == expected
     else:
       assert marker is None
 
@@ -2412,16 +2421,16 @@ def test_boot_rebuild_retires_only_upstream_covered_image_paths(
   }
 
 
-def test_image_receipt_does_not_claim_compose_topology_was_applied(
+def test_image_receipt_does_not_claim_required_topology_migration_was_applied(
   clone_env, monkeypatch,
 ):
   _, platform = clone_env
   upstream = _served_sha(platform)
   pu._write_activation_marker(
     upstream,
-    ["docker-compose.yml"],
+    ["deployment/self-hosted-topology.required"],
     upstream_sha=upstream,
-    image_paths=["docker-compose.yml"],
+    image_paths=["deployment/self-hosted-topology.required"],
   )
   monkeypatch.setattr(pu, "current_build_sha", lambda: upstream)
 
@@ -2429,7 +2438,30 @@ def test_image_receipt_does_not_claim_compose_topology_was_applied(
 
   marker = pu._read_activation_marker()
   assert marker is not None
-  assert marker["paths"] == ["docker-compose.yml"]
+  assert marker["paths"] == ["deployment/self-hosted-topology.required"]
+
+
+def test_skipped_release_still_carries_required_topology_migration(clone_env):
+  origin, platform = clone_env
+  migration = _advance_origin(
+    origin,
+    edits={"deployment/self-hosted-topology.required": "1\n"},
+    msg="require topology migration",
+  )
+  target = _advance_origin(
+    origin,
+    edits={"Dockerfile": "FROM python:3.12\n"},
+    msg="later image release",
+  )
+  pu._fetch(platform)
+
+  preview = pu.platform_update_preview(platform, target_sha=target)
+
+  assert migration != target
+  assert set(preview["activation"]["required_actions"]) == {
+    "container_recreate", "image_rebuild",
+  }
+  assert preview["activation"]["level"] == "image_rebuild"
 
 
 def test_boot_retires_in_place_python_dependency_sync(clone_env, monkeypatch):

@@ -97,12 +97,36 @@ IMAGE_BOOTSTRAP_SCRIPTS = (
 # backend runtime rule.  A path may require only one owning activation boundary;
 # mixed updates still report every distinct rule they touch.
 _RULES = (
-  # deploy-prod.sh is an optional, on-demand host deployment path, not an
-  # installed controller. Its source updates do not gate Settings updates.
+  # Host-owned source is backward-compatible unless a release also advances
+  # the matching explicit migration marker.  The installed helper and frozen
+  # topology remain authoritative for existing installations; new installs and
+  # later intentional host refreshes consume the newer reference source.  See
+  # scripts/CONTAINER-REBUILD.md for the compatibility contract.
+  _Rule(
+    "host_helper_migration",
+    ActivationLevel.HOST_MAINTENANCE,
+    "This release requires a newer self-hosted replacement helper.",
+    exact=("deployment/self-hosted-helper.required",),
+    deployment="self_hosted",
+  ),
+  _Rule(
+    "self_hosted_topology_migration",
+    ActivationLevel.CONTAINER_RECREATE,
+    "This release requires a self-hosted topology migration.",
+    exact=("deployment/self-hosted-topology.required",),
+    deployment="self_hosted",
+  ),
+  _Rule(
+    "railway_topology_migration",
+    ActivationLevel.CONTAINER_RECREATE,
+    "This release requires a Railway topology migration.",
+    exact=("deployment/railway-topology.required",),
+    deployment="railway",
+  ),
   _Rule(
     "host_operator_tooling",
-    ActivationLevel.HOST_MAINTENANCE,
-    "Host-operated deployment tooling changed.",
+    ActivationLevel.LIVE,
+    "Compatible host-helper source changed for new installs or a later refresh.",
     exact=(
       "scripts/install-rebuild-helper.sh",
       "scripts/mobius-rebuild-host.py",
@@ -169,16 +193,16 @@ _RULES = (
     ),
   ),
   _Rule(
-    "self_hosted_topology",
-    ActivationLevel.CONTAINER_RECREATE,
-    "Self-hosted container topology or runtime configuration changed.",
+    "self_hosted_topology_source",
+    ActivationLevel.LIVE,
+    "Compatible self-hosted topology defaults changed for new installations.",
     exact=("docker-compose.yml", "docker-compose.prod.yml"),
     deployment="self_hosted",
   ),
   _Rule(
-    "railway_topology",
-    ActivationLevel.CONTAINER_RECREATE,
-    "Railway build or deployment configuration changed.",
+    "railway_topology_source",
+    ActivationLevel.LIVE,
+    "Compatible Railway deployment defaults changed for new deployments.",
     exact=("railway.toml",),
     deployment="railway",
   ),
@@ -274,7 +298,11 @@ def _applies(rule: _Rule, deployment: DeploymentKind) -> bool:
 
 def _guidance(level: ActivationLevel, deployment: DeploymentKind) -> str:
   if level is ActivationLevel.LIVE:
-    return "No deployment action is required; live source is rebuilt or read on demand."
+    return (
+      "No deployment action is required; live source is rebuilt or read on "
+      "demand, while compatible deployment reference changes leave the "
+      "installed external configuration unchanged."
+    )
   if level is ActivationLevel.SERVER_RESTART:
     return "Restart Möbius after Apply so the running server loads the new source."
   if level is ActivationLevel.DEPENDENCY_SYNC:

@@ -985,6 +985,30 @@ async def test_queued_request_masks_the_previous_terminal_status(tmp_path, monke
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("pending_request", [False, True])
+async def test_retired_runtime_overlay_helper_cannot_replace_current_image(
+  tmp_path, monkeypatch, pending_request,
+):
+  control, inbox = _install_control(tmp_path, monkeypatch)
+  (control / "status.json").write_text(json.dumps({
+    "state": "succeeded" if pending_request else "idle",
+    "handoff": "external-cutover-v1",
+    "runtime_overlay": "active-runtime-v1",
+  }), encoding="utf-8")
+  if pending_request:
+    (inbox / "request.json").write_text(json.dumps({
+      "version": 1, "expected_sha": "e" * 40,
+    }), encoding="utf-8")
+  monkeypatch.setattr(dc.platform_activation, "deployment_kind", lambda: "self_hosted")
+
+  status = await dc.read_rebuild_status()
+
+  assert status["supported"] is False
+  assert status["code"] == "controller_upgrade_required"
+  assert "protected-runtime" in status["message"]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("failure", [
   "update_plan_stale", "external_activation_required", "local_runtime_changes",
 ])
@@ -1238,8 +1262,9 @@ async def test_managed_update_refuses_source_moving_after_its_apply(monkeypatch)
 @pytest.mark.asyncio
 @pytest.mark.parametrize('deployment,path', [
   ('self_hosted', 'Caddyfile'),
-  ('self_hosted', 'docker-compose.yml'),
-  ('railway', 'railway.toml'),
+  ('self_hosted', 'deployment/self-hosted-helper.required'),
+  ('self_hosted', 'deployment/self-hosted-topology.required'),
+  ('railway', 'deployment/railway-topology.required'),
 ])
 @pytest.mark.parametrize('change_after_apply', [False, True])
 async def test_mixed_activation_cannot_dispatch_replacement(monkeypatch, deployment, path, change_after_apply):
@@ -1266,3 +1291,59 @@ async def test_mixed_activation_cannot_dispatch_replacement(monkeypatch, deploym
     await dc.request_reviewed_rebuild(db=None, plan_id='a'*64, current_sha='1'*40, target_sha='2'*40, image_digest=_TEST_DIGEST)
   assert error.value.code == 'external_activation_required'
   assert calls == (['apply'] if change_after_apply else [])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('deployment,path', [
+  ('self_hosted', 'scripts/install-rebuild-helper.sh'),
+  ('self_hosted', 'scripts/mobius-rebuild-host.py'),
+  ('self_hosted', 'docker-compose.yml'),
+  ('self_hosted', 'docker-compose.prod.yml'),
+  ('railway', 'railway.toml'),
+])
+async def test_compatible_deployment_source_does_not_block_reviewed_replacement(
+  monkeypatch, deployment, path,
+):
+  monkeypatch.setattr(dc.platform_activation, 'deployment_kind', lambda: deployment)
+  calls = []
+
+  def review(**_plan):
+    return {
+      'activation': dc.platform_activation.classify_activation(
+        ['Dockerfile', path], deployment=deployment,
+      ),
+      'blockers': [],
+    }
+
+  async def ready():
+    return {'supported': True, 'state': 'idle'}
+
+  async def apply(_db, **_plan):
+    calls.append('apply')
+    return {'state': 'activation_needed', 'merge_commit': 'e' * 40}
+
+  async def self_hosted(*, expected_sha, final_check):
+    final_check()
+    calls.append(('replace', expected_sha))
+    return {'state': 'queued'}
+
+  async def managed(expected_sha, image_digest, *, final_check):
+    final_check()
+    calls.append(('replace', expected_sha, image_digest))
+    return {'state': 'queued'}
+
+  monkeypatch.setattr(dc.platform_update, 'reviewed_container_rebuild_plan', review)
+  monkeypatch.setattr(dc.platform_update, 'apply_platform_update', apply)
+  monkeypatch.setattr(dc, 'read_rebuild_status', ready)
+  monkeypatch.setattr(dc, '_request_self_hosted_rebuild', self_hosted)
+  monkeypatch.setattr(dc, '_request_managed_rebuild', managed)
+
+  result = await dc.request_reviewed_rebuild(
+    db=None, plan_id='a' * 64, current_sha='1' * 40,
+    target_sha='2' * 40,
+    image_digest=_TEST_DIGEST if deployment == 'railway' else None,
+  )
+
+  assert result['state'] == 'queued'
+  assert calls[0] == 'apply'
+  assert calls[1][0] == 'replace'
