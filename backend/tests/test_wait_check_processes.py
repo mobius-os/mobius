@@ -8,9 +8,16 @@ import pytest
 from app import chat_waits
 
 
-def test_checks_use_bash_without_requiring_a_nested_shell_wrapper():
+def test_checks_use_bash_without_requiring_a_nested_shell_wrapper(
+  monkeypatch, tmp_path,
+):
+  startup = tmp_path / "host-bash-env"
+  startup.write_text("echo inherited-bash-env; exit 0\n")
+  monkeypatch.setenv("BASH_ENV", str(startup))
+  monkeypatch.setenv("WAIT_CHECK_PRESERVED", "ready")
   assert asyncio.run(chat_waits._run_check(
-    "set -o pipefail; values=(ready); [[ ${values[0]} == ready ]]",
+    "set -o pipefail; values=($WAIT_CHECK_PRESERVED); "
+    "[[ ${values[0]} == ready ]]",
   )) == (0, "")
 
 

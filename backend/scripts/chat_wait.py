@@ -119,7 +119,7 @@ def main() -> None:
     "--command-file", type=Path,
     help="read the Bash check literally from a file and save its contents",
   )
-  declare.add_argument(
+  command_input.add_argument(
     "--in", dest="delay_secs", type=int,
     help="timer wait: resume after this many seconds (no command)",
   )

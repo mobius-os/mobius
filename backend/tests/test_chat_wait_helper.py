@@ -23,6 +23,22 @@ def test_command_file_is_saved_literally_not_nested_in_shell_quotes(monkeypatch,
   assert captured[0][2]['command'] == command
 
 
+def test_command_file_and_timer_are_rejected_before_any_request(monkeypatch, tmp_path):
+  path = Path(__file__).parents[1] / 'scripts' / 'chat_wait.py'
+  spec = importlib.util.spec_from_file_location('chat_wait_helper', path)
+  module = importlib.util.module_from_spec(spec)
+  spec.loader.exec_module(module)
+  check = tmp_path / 'check.sh'
+  check.write_text('true\n')
+  monkeypatch.setattr(module, '_settings', lambda: pytest.fail('must not connect'))
+  monkeypatch.setattr('sys.argv', [
+    'chat_wait.py', 'declare', 'Ready', '--command-file', str(check), '--in', '60',
+  ])
+  with pytest.raises(SystemExit) as exc:
+    module.main()
+  assert exc.value.code == 2
+
+
 @pytest.mark.parametrize('kind', ['timer', 'command'])
 def test_declaration_receipt_distinguishes_timers_and_command_checks(monkeypatch, capsys, kind):
   path = Path(__file__).parents[1] / 'scripts' / 'chat_wait.py'
