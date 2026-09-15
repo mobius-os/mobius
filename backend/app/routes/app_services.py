@@ -31,6 +31,35 @@ def _response(status: int, body, headers: dict[str, str], media_type: str | None
   return JSONResponse(body, status_code=status, headers=headers)
 
 
+def _service_app(db: Session, service_id: str) -> models.App | None:
+  """Resolve one stable service id, with a one-way legacy fallback.
+
+  Once an app has ``service_id`` only that identity is routable; its product
+  slug does not remain as a second exposed alias. Rows predating the migration
+  retain their slug until their next accepted manifest stamps the explicit
+  service contract.
+  """
+  target = (
+    db.query(models.App)
+    .filter(
+      models.App.service_id == service_id,
+      models.App.deleted_at.is_(None),
+    )
+    .one_or_none()
+  )
+  if target is not None:
+    return target
+  return (
+    db.query(models.App)
+    .filter(
+      models.App.service_id.is_(None),
+      models.App.slug == service_id,
+      models.App.deleted_at.is_(None),
+    )
+    .one_or_none()
+  )
+
+
 async def _envelope(request: Request, path: str, *, public: bool, scope: str) -> dict:
   if ".." in path.split("/") or len(path) > 512:
     raise HTTPException(404, "App service path not found.")
@@ -103,11 +132,7 @@ async def shared_app_service(
 ):
   if request.method != "GET":
     reject_cross_site(request)
-  target = (
-    db.query(models.App)
-    .filter(models.App.slug == slug, models.App.deleted_at.is_(None))
-    .one_or_none()
-  )
+  target = _service_app(db, slug)
   if target is None:
     raise HTTPException(404, "App service not found.")
   caller = db.get(models.App, principal.app_id) if principal.app_id is not None else None
@@ -141,11 +166,7 @@ async def public_app_service(
   request: Request,
   db: Session = Depends(get_db),
 ):
-  app = (
-    db.query(models.App)
-    .filter(models.App.slug == slug, models.App.deleted_at.is_(None))
-    .one_or_none()
-  )
+  app = _service_app(db, slug)
   if app is None:
     raise HTTPException(404, "Public app service not found.")
   app_services.service_contract(app, access="public")

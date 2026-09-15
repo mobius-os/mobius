@@ -757,7 +757,10 @@ async def preview_app_install(
   )
   source = body.manifest_url if body.manifest_url is not None else raw_base
   existing = install._find_install_identity_row(
-    db, source_url=source, manifest_id=manifest["id"],
+    db,
+    source_url=source,
+    manifest_id=manifest["id"],
+    package_id=manifest.get("package_id"),
   )
   if existing is not None and existing.deleted_at is not None:
     existing = None
@@ -858,6 +861,8 @@ async def install_app(
     filesystem_access=app.filesystem_access,
     slug=app.slug,
     manifest_url=app.manifest_url,
+    package_id=app.package_id,
+    service_id=app.service_id,
     published_manifest_url=app.published_manifest_url,
     public_name=app.public_name,
     public_bundle_path=app.public_bundle_path,

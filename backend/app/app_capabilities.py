@@ -575,6 +575,7 @@ def contract_from_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
   service = manifest.get("service")
   if isinstance(service, dict):
     contract["service"] = {
+      "id": service.get("id", manifest.get("id")),
       "entry": service["entry"],
       "access": service.get("access", "self"),
       "protocol": "json-v1",
@@ -668,6 +669,7 @@ def contract_from_app_state(
     accepted_service = app.capability_contract.get("service")
     if isinstance(accepted_service, dict):
       service = {
+        "id": accepted_service.get("id"),
         "entry": accepted_service.get("entry"),
         "access": accepted_service.get("access", "self"),
       }

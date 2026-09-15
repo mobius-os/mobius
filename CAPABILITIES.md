@@ -117,6 +117,7 @@ Apps that need server-side policy can declare one reviewed Python entrypoint:
 ```json
 {
   "service": {
+    "id": "weather-api",
     "entry": "service.py",
     "access": "self"
   },
@@ -134,9 +135,11 @@ The app owns its paths, policy, storage format, and domain behavior. This is a
 reviewed trusted process like an app job, not an operating-system sandbox.
 
 Same-app calls use `/api/apps/{app_id}/service/{path}`. An app can expose a
-reviewed service to other installed apps at `/api/services/{slug}/{path}` by
-setting `access` to `apps`, or additionally expose anonymous calls at
-`/api/app-services/{slug}/{path}` by setting it to `public`. These are explicit
+reviewed service to other installed apps at `/api/services/{service_id}/{path}`
+by setting `access` to `apps`, or additionally expose anonymous calls at
+`/api/app-services/{service_id}/{path}` by setting it to `public`. `service.id`
+is the stable public contract and does not change when the app's display name,
+manifest `id`, repository, or installed slug changes. These are explicit
 install-time grants and do not widen the service app token's accepted
 permissions. The generic routes are the whole contract: the platform does not
 carry app-specific path aliases. Services receive the same `APP_ID`, `APP_SLUG`,
