@@ -16,8 +16,43 @@ const vite = await createServer({
 const { default: ErrorCard } = await vite.ssrLoadModule(
   '/src/components/ChatView/ErrorCard.jsx',
 )
+const { default: MsgContent } = await vite.ssrLoadModule(
+  '/src/components/ChatView/MsgContent.jsx',
+)
 
 after(() => vite.close())
+
+for (const autoResumeEnabled of [true, false]) {
+  test(`future limit exposes an explicit retry with auto-continue ${autoResumeEnabled}`, () => {
+    const html = renderToStaticMarkup(createElement(MsgContent, {
+      msg: { role: 'assistant', content: '', blocks: [{
+        type: 'error', message: '', resumable: true,
+        pause: { kind: 'limit', resets_at: '2099-09-14T12:00:00Z' },
+      }] },
+      isLastMsg: true, onResume() {}, limitResetElapsed: false,
+      autoResumeEnabled, autoResumeAvailable: true, onAutoResumeChange() {},
+    }))
+    assert.match(html, />Try now<\/button>/)
+  })
+}
+
+for (const [label, overrides, kind] of [
+  ['historical card', { isLastMsg: false }, 'limit'],
+  ['memory wait', {}, 'memory'],
+  ['storage wait', {}, 'storage'],
+]) {
+  test(`early retry does not bypass ${label} ownership`, () => {
+    const html = renderToStaticMarkup(createElement(MsgContent, {
+      msg: { role: 'assistant', content: '', blocks: [{
+        type: 'error', message: '', resumable: true,
+        pause: { kind, resets_at: '2099-09-14T12:00:00Z' },
+      }] },
+      isLastMsg: true, onResume() {}, autoResumeEnabled: true,
+      ...overrides,
+    }))
+    assert.doesNotMatch(html, /class="chat__resume /)
+  })
+}
 
 // Provider-limit parking (design §2.4): a limit-killed turn persists an error
 // block carrying a single `pause` descriptor ({kind, resets_at?}), which

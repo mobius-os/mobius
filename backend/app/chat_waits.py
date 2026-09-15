@@ -157,8 +157,8 @@ def declare_wait(
 
   due_at = None
   if kind == "command":
-    command = (command or "").strip()
-    if not command:
+    command = command if isinstance(command, str) else ""
+    if not command.strip():
       raise WaitValidationError("command waits need a check command")
     # Probe on the next supervisor tick. A malformed check should fail visibly
     # now, not after its whole polling interval, and an already-met condition
@@ -477,6 +477,15 @@ async def _run_check(command: str, *, wait_id: str | None = None) -> tuple[int, 
 
     spawn = asyncio.create_task(asyncio.create_subprocess_shell(
       command,
+      # Agent shell work and saved checks share Bash syntax. The platform's
+      # /bin/sh may be dash; silently changing interpreters broke otherwise
+      # valid saved checks (notably `set -o pipefail`). No login/startup files.
+      executable="/bin/bash",
+      # Non-interactive Bash sources BASH_ENV before the saved command. A
+      # managed host must not be able to prepend output, state, or an early
+      # success to a durable check. Preserve the ordinary process environment
+      # while disabling shell startup hooks explicitly.
+      env={**os.environ, "BASH_ENV": "", "ENV": ""},
       cwd=get_settings().data_dir,
       stdout=asyncio.subprocess.PIPE,
       stderr=asyncio.subprocess.STDOUT,

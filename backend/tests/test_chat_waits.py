@@ -140,6 +140,17 @@ def test_declare_validates_shape(client, owner_token, db):
                  delay_secs=120, command="true")
 
 
+def test_command_wait_persists_the_exact_validated_bash_text(
+  client, owner_token, db,
+):
+  chat_id = _owner_chat(client, owner_token)
+  command = "  printf ready \\\n"
+  row = _command_wait(
+    db, chat_id=chat_id, description="Literal command", command=command,
+  )
+  assert row.command == command
+
+
 def test_declare_caps_armed_waits_per_chat(client, owner_token, db):
   chat_id = _owner_chat(client, owner_token)
   for index in range(chat_waits_mod.MAX_ARMED_WAITS_PER_CHAT):

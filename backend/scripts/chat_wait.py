@@ -21,6 +21,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+from pathlib import Path
 import sys
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
@@ -106,14 +107,19 @@ def main() -> None:
     "--owner", dest="condition_owner",
     help="who or what is expected to make the condition true",
   )
-  declare.add_argument(
+  command_input = declare.add_mutually_exclusive_group()
+  command_input.add_argument(
     "--command",
     help=(
       "read-only silent-on-unmet check: 0=met, silent 1=not yet; "
       "any other result wakes the chat as check_failed"
     ),
   )
-  declare.add_argument(
+  command_input.add_argument(
+    "--command-file", type=Path,
+    help="read the Bash check literally from a file and save its contents",
+  )
+  command_input.add_argument(
     "--in", dest="delay_secs", type=int,
     help="timer wait: resume after this many seconds (no command)",
   )
@@ -136,6 +142,11 @@ def main() -> None:
   _, _, chat_id = _settings()
 
   if args.action == "declare":
+    if args.command_file is not None:
+      try:
+        args.command = args.command_file.read_text(encoding="utf-8")
+      except (OSError, UnicodeError) as exc:
+        parser.error(f"cannot read --command-file: {exc}")
     if args.command and not args.condition_owner:
       parser.error("command waits require --owner")
     if args.command and args.deadline_secs is None:
