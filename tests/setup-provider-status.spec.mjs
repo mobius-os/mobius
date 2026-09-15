@@ -4,7 +4,7 @@ const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
 
 test.use({ serviceWorkers: 'block' })
 
-test('Codex shows the code before opening ChatGPT and stays authoritative', async ({ page }) => {
+test('Codex copies the code before the owner separately opens ChatGPT and stays authoritative', async ({ page }) => {
   await page.addInitScript(() => {
     // Older builds persisted this provider-wizard marker. It must never pull a
     // returning owner out of the shell now that agent setup is contextual.
@@ -89,11 +89,14 @@ test('Codex shows the code before opening ChatGPT and stays authoritative', asyn
   await page.context().grantPermissions(['clipboard-read', 'clipboard-write'], {
     origin: BASE,
   })
-  const popupPromise = page.waitForEvent('popup')
   await codexRow.getByRole('button', { name: 'Copy code' }).click()
+  await expect(codexRow.getByText('Code copied. Open ChatGPT, then paste it to continue.')).toBeVisible()
+  expect(popupCount).toBe(0)
+
+  const popupPromise = page.waitForEvent('popup')
+  await codexRow.getByRole('button', { name: 'Open ChatGPT' }).click()
   const signInPage = await popupPromise
   await expect(signInPage).toHaveURL(`${BASE}/codex-test-login`)
-  await expect(codexRow.getByText('Copied — ChatGPT opened in a new tab.')).toBeVisible()
 
   await page.evaluate(() => window.dispatchEvent(new Event('pageshow')))
 

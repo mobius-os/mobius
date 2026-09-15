@@ -605,22 +605,9 @@ def goal_handoff_owner_kind(
   if goal_id in background_helper_goal_ids(db, chat_id):
     return "monitor"
 
-  from app.chat_waits import armed_waits_for_chat
-  wait_run_ids = [
-    wait.created_by_run_id
-    for wait in armed_waits_for_chat(db, chat_id)
-    if wait.created_by_run_id is not None
-  ]
-  if wait_run_ids:
-    wait_owners = db.query(models.ChatRun).filter(
-      models.ChatRun.chat_id == chat_id,
-      models.ChatRun.id.in_(wait_run_ids),
-    ).all()
-    if any(
-      (owner.goal_id or owner.root_run_id or owner.id) == goal_id
-      for owner in wait_owners
-    ):
-      return "monitor"
+  from app.chat_waits import wait_owns_goal
+  if wait_owns_goal(db, chat_id, goal_id):
+    return "monitor"
   return None
 
 

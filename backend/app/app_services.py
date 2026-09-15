@@ -128,6 +128,12 @@ async def _stop_process(process, *tasks) -> None:
     os.killpg(process.pid, signal.SIGKILL)
   except ProcessLookupError:
     pass
+  if not tasks:
+    # Admission cancellation has not installed pipe readers yet. Drain the
+    # now-stopped child as well as reaping it; wait() alone can block on a full
+    # asyncio pipe buffer even after SIGKILL.
+    await process.communicate()
+    return
   await process.wait()
   for task in tasks:
     task.cancel()
@@ -174,12 +180,14 @@ async def invoke_service(
   # A service owns its persistence semantics. Serialize one app's requests so
   # simple file-backed services do not need a platform-specific lock API.
   slot = _app_slots.setdefault(app.id, asyncio.Semaphore(1))
-  async with _global_slots, slot:
+  # Backlog for one app must not reserve all platform execution capacity while
+  # waiting for that app's serialized request. Count only executable requests.
+  async with slot, _global_slots:
     pin = hold_runtime(app.id)
     try:
       entry = service_entry(app, service)
       try:
-        process = await asyncio.create_subprocess_exec(
+        spawn = asyncio.create_task(asyncio.create_subprocess_exec(
           sys.executable,
           str(entry),
           stdin=asyncio.subprocess.PIPE,
@@ -188,7 +196,29 @@ async def invoke_service(
           cwd=str(entry.parent),
           env=service_environment(app, owner),
           start_new_session=True,
-        )
+        ))
+        try:
+          process = await asyncio.shield(spawn)
+        except asyncio.CancelledError:
+          # Admission can be cancelled after the OS child exists but before
+          # asyncio returns its handle. Finish recovery before releasing the
+          # runtime pin, even if shutdown cancels this request again.
+
+          async def recover_spawn() -> None:
+            try:
+              process = await asyncio.shield(spawn)
+            except OSError:
+              pass
+            else:
+              await _stop_process(process)
+
+          recovery = asyncio.create_task(recover_spawn())
+          while not recovery.done():
+            try:
+              await asyncio.shield(recovery)
+            except asyncio.CancelledError:
+              continue
+          raise
       except OSError as exc:
         raise HTTPException(502, "App service could not start.") from exc
       assert process.stdin is not None

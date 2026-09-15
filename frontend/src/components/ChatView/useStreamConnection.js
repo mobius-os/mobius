@@ -81,12 +81,6 @@ export async function retireInteractiveIntent({
   return retired ? false : outboxRetained
 }
 
-// Delay before the wake/online reattach surfaces as a visible
-// "Reconnecting…" note. Real mobile reattach can spend time waking the
-// radio, negotiating TLS, and replaying a long event log; quick
-// app-switches should not flash a note at all.
-const RECONNECT_NOTE_DELAY_MS = 1500
-
 // A hidden tab that comes back inside this window is usually a glance at
 // the notification shade or an app switch. If the SSE socket has also read
 // recently, keep it: tearing down a healthy stream is what makes quiet tool
@@ -417,26 +411,19 @@ export default function useStreamConnection(chatId, {
   // the SSE is being proactively REPLACED after sleep/wake or network
   // recovery (an expected, healthy transition), not failing — so it renders
   // as a quiet note, never the error styling. Armed only by the
-  // attachment owner after a wake; a fast reattach (< the delay) never
-  // shows it. Cleared on every settled outcome: catch-up commit, `done`,
+  // attachment owner after a wake. Presentation owns the visibility delay so
+  // proxy rotations and wake reattachments share one policy. Cleared on every
+  // settled outcome: catch-up commit, `done`,
   // terminal 204/EOF, or the stream erroring into the connectionError
   // states (which take over the ConnectionStatus slot).
   const [reconnecting, _setReconnecting] = useState(false)
-  const reconnectNoteTimerRef = useRef(null)
   const reconnectNoteShownRef = useRef(false)
   function armReconnectingNote() {
-    if (reconnectNoteShownRef.current || reconnectNoteTimerRef.current) return
-    reconnectNoteTimerRef.current = setTimeout(() => {
-      reconnectNoteTimerRef.current = null
-      reconnectNoteShownRef.current = true
-      _setReconnecting(true)
-    }, RECONNECT_NOTE_DELAY_MS)
+    if (reconnectNoteShownRef.current) return
+    reconnectNoteShownRef.current = true
+    _setReconnecting(true)
   }
   function clearReconnectingNote() {
-    if (reconnectNoteTimerRef.current) {
-      clearTimeout(reconnectNoteTimerRef.current)
-      reconnectNoteTimerRef.current = null
-    }
     if (reconnectNoteShownRef.current) {
       reconnectNoteShownRef.current = false
       _setReconnecting(false)

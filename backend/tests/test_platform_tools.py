@@ -53,7 +53,7 @@ def test_codex_control_merges_without_mutating_remote_connector_snapshot():
   ) is None
 
 
-def test_isolated_owner_control_omits_coordination_tools(monkeypatch):
+def test_isolated_owner_control_omits_peer_messaging_tools(monkeypatch):
   expected = platform_tools.OWNER_CONTROL_TOOL_NAMES
   assert platform_tools.expected_control_tool_names(
     top_level=True, coordination_enabled=False,
@@ -69,6 +69,19 @@ def test_isolated_owner_control_omits_coordination_tools(monkeypatch):
   monkeypatch.setenv("MOBIUS_RUN_TOKEN", "run-1")
   monkeypatch.setenv("MOBIUS_COORDINATION_ENABLED", "0")
   assert control._available_tool_names() == expected
+
+
+def test_isolated_owner_keeps_durable_work_claims_without_peer_messaging(monkeypatch):
+  """Restarting into an otherwise idle instance cannot hide claim ownership."""
+  monkeypatch.setenv("MOBIUS_RUN_TOKEN", "resumed-owner-run")
+  monkeypatch.setenv("MOBIUS_COORDINATION_ENABLED", "0")
+  advertised = set(_control_module()._available_tool_names())
+  configured = set(platform_tools.codex_turn_mcp_config(
+    None, control_enabled=True, coordination_enabled=False,
+  )["mcp_servers"]["mobius_control"]["tools"])
+  for names in (advertised, configured):
+    assert {"claim_agent_work", "finish_agent_work"} <= names
+    assert not {"list_agent_peers", "send_agent_message"} & names
 
 
 def _control_module():
@@ -174,7 +187,8 @@ def test_control_protocol_advertises_every_run_bound_tool(monkeypatch):
   cancel_schema = tools[platform_tools.CANCEL_WAIT_TOOL_NAME]["inputSchema"]
   assert cancel_schema["required"] == ["wait_id"]
   assert set(cancel_schema["properties"]) == {"wait_id"}
-  assert set(platform_tools.COORDINATION_TOOL_NAMES) <= set(tools)
+  assert set(platform_tools.PEER_TOOL_NAMES) <= set(tools)
+  assert set(platform_tools.WORK_OWNERSHIP_TOOL_NAMES) <= set(tools)
   assert "read_agent_messages" not in tools
   send_schema = tools[platform_tools.SEND_MESSAGE_TOOL_NAME]["inputSchema"]
   assert send_schema["required"] == ["body"]
@@ -193,7 +207,7 @@ def test_control_protocol_advertises_every_run_bound_tool(monkeypatch):
   assert "instead of checking for replies" in send_description
 
 
-def test_delegated_control_server_advertises_only_coordination(monkeypatch):
+def test_delegated_control_server_advertises_only_peer_and_ownership_tools(monkeypatch):
   monkeypatch.delenv("MOBIUS_RUN_TOKEN", raising=False)
   control = _control_module()
 

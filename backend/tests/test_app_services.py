@@ -1,10 +1,99 @@
 """Accepted app services own policy; the platform owns their hard boundary."""
 
+import asyncio
+import os
 from pathlib import Path
+import signal
+from types import SimpleNamespace
+
+import pytest
+from fastapi import HTTPException
 
 from app import app_services, auth as auth_tokens, models
 from app.applied_app_runtime import runtime_parent
 from app.config import get_settings
+
+
+@pytest.mark.asyncio
+async def test_one_apps_backlog_does_not_take_other_apps_execution_slots(monkeypatch):
+  class BusyApp(asyncio.Semaphore):
+    def __init__(self):
+      super().__init__(0)
+      self.waiting = asyncio.Event()
+
+    async def acquire(self):
+      self.waiting.set()
+      return await super().acquire()
+
+  busy = BusyApp()
+  monkeypatch.setattr(app_services, "_app_slots", {1: busy})
+  monkeypatch.setattr(app_services, "_global_slots", asyncio.Semaphore(1))
+  monkeypatch.setattr(app_services, "service_contract", lambda *a, **k: {})
+  monkeypatch.setattr(app_services, "hold_runtime", lambda *_: SimpleNamespace(close=lambda: None))
+
+  def entered(app, _contract):
+    assert app.id == 2
+    raise HTTPException(418, "second app admitted")
+
+  monkeypatch.setattr(app_services, "service_entry", entered)
+  first = asyncio.create_task(app_services.invoke_service(SimpleNamespace(id=1), None, {}))
+  try:
+    await asyncio.wait_for(busy.waiting.wait(), timeout=1)
+    with pytest.raises(HTTPException, match="second app admitted"):
+      await asyncio.wait_for(
+        app_services.invoke_service(SimpleNamespace(id=2), None, {}), timeout=1,
+      )
+  finally:
+    first.cancel()
+    await asyncio.gather(first, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_cancel_during_spawn_reaps_process_before_releasing_runtime(monkeypatch, tmp_path):
+  entry = tmp_path / "service.py"
+  entry.write_text("import time; time.sleep(60)")
+  created = asyncio.Event()
+  finish_spawn = asyncio.Event()
+  processes = []
+  released = []
+  real_spawn = asyncio.create_subprocess_exec
+
+  async def delayed_spawn(*args, **kwargs):
+    process = await real_spawn(*args, **kwargs)
+    processes.append(process)
+    created.set()
+    await finish_spawn.wait()
+    return process
+
+  monkeypatch.setattr(app_services, "service_contract", lambda *a, **k: {})
+  monkeypatch.setattr(app_services, "service_entry", lambda *a: entry)
+  monkeypatch.setattr(app_services, "service_environment", lambda *a: {})
+  monkeypatch.setattr(app_services, "hold_runtime", lambda *_: SimpleNamespace(
+    close=lambda: released.append(processes[0].returncode),
+  ))
+  monkeypatch.setattr(asyncio, "create_subprocess_exec", delayed_spawn)
+  task = asyncio.create_task(app_services.invoke_service(SimpleNamespace(id=1), None, {}))
+  try:
+    await asyncio.wait_for(created.wait(), timeout=3)
+    task.cancel()
+    await asyncio.sleep(0)  # Deliver cancellation precisely inside admission.
+    task.cancel()  # A shutdown or timeout can cancel cleanup again.
+    await asyncio.sleep(0)
+    assert not task.done()
+    assert not released
+    finish_spawn.set()
+    with pytest.raises(asyncio.CancelledError):
+      await asyncio.wait_for(task, timeout=3)
+    assert released and released[0] is not None, "runtime released before child was reaped"
+    assert processes[0].returncode is not None
+  finally:
+    finish_spawn.set()
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+    for process in processes:
+      if process.returncode is None:
+        os.killpg(process.pid, signal.SIGKILL)
+      await process.wait()
 
 
 SERVICE = b'''import json, sys
