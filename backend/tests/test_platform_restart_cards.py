@@ -66,12 +66,17 @@ def _card(question_id, wait_id, requirement):
   }
 
 
-def _install(chat_id, *, action_id="platform-restart:test", status="armed", queued=False):
+def _install(
+  chat_id, *, action_id="platform-restart:test", target_sha=None,
+  status="armed", queued=False,
+):
   now = now_naive_utc()
   question_id = f"question-{chat_id}"
   wait_id = f"wait-{chat_id}"
   run_id = f"run-{chat_id}"
   requirement = _requirement(action_id)
+  if target_sha is not None:
+    requirement["target_sha"] = target_sha
   with SessionLocal() as db:
     db.add(models.Chat(
       id=chat_id, title="Restart", pending_question_id=question_id,
@@ -111,7 +116,11 @@ def test_duplicate_and_cross_chat_cards_share_one_durable_dispatch(monkeypatch):
     "app.platform_restart.requirement_matches_current_source", lambda _r: True,
   )
   q1, w1, _r1, requirement = _install("restart-one")
-  q2, w2, _r2, _ = _install("restart-two", action_id=requirement["action_id"])
+  q2, w2, _r2, second_requirement = _install(
+    "restart-two", action_id=requirement["action_id"], target_sha="c" * 40,
+  )
+  assert second_requirement["target_sha"] != requirement["target_sha"]
+  assert second_requirement["action_id"] == requirement["action_id"]
 
   first = _submit(ResolvePlatformRestartCard(
     chat_id="restart-one", question_id=q1, selected_option_id="restart-id",

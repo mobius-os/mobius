@@ -174,6 +174,18 @@ def build_restart_requirement(repo: Path | None = None) -> dict:
   }
 
 
+_RESTART_AUTHORITY_FIELDS = (
+  "version", "source_boot_id", "files", "paths", "action_id",
+)
+
+
+def restart_requirements_share_authority(left: object, right: object) -> bool:
+  """Compare only the source identity a restart action authorizes."""
+  if not isinstance(left, dict) or not isinstance(right, dict):
+    return False
+  return all(left.get(key) == right.get(key) for key in _RESTART_AUTHORITY_FIELDS)
+
+
 def requirement_matches_current_source(requirement: object) -> bool:
   """Re-derive restart authority, not unrelated repository history.
 
@@ -182,16 +194,11 @@ def requirement_matches_current_source(requirement: object) -> bool:
   complete pending runtime manifest, including deletions and modes. New or
   uncommitted runtime code still invalidates the card.
   """
-  if not isinstance(requirement, dict):
-    return False
   try:
     current = build_restart_requirement()
   except RestartRequirementError:
     return False
-  return all(
-    current.get(key) == requirement.get(key)
-    for key in ("version", "source_boot_id", "files", "paths", "action_id")
-  )
+  return restart_requirements_share_authority(current, requirement)
 
 
 def activation_wait_verdict(
