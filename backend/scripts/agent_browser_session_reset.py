@@ -47,6 +47,11 @@ def _process_state(pid: int, proc_root: Path = PROC_ROOT) -> tuple[int, int]:
   # comm can contain spaces and parentheses. Everything after the final ") "
   # begins at proc(5) field 3: state, ppid, ... starttime (field 22).
   fields = raw.rsplit(") ", 1)[1].split()
+  # A killed orphan can remain in /proc until its parent reaps it. It no
+  # longer owns a browser/profile; do not mistake that zombie for a live
+  # process merely because its PID and start time still match.
+  if fields[0] == "Z":
+    raise ProcessLookupError(pid)
   return int(fields[1]), int(fields[19])
 
 
