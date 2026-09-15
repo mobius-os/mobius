@@ -49,7 +49,9 @@ def test_broker_and_app_consumers_share_the_root_owned_socket():
   backend = Path(__file__).parents[1]
   socket = "/run/mobius-identity-broker.sock"
 
-  assert str(broker_module.SOCKET_PATH) == socket
+  # The test runtime deliberately overrides the broker path so it cannot reach
+  # a host-owned socket. Verify the production default from the module source.
+  assert socket in BROKER_PATH.read_text(encoding="utf-8")
   for relative in (
     "app/runtime_identity.py",
     "app/contribution_broker.py",

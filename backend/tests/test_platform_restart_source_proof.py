@@ -108,6 +108,38 @@ def test_served_identity_broker_is_restart_loadable(monkeypatch, tmp_path):
   assert list(requirement["files"]) == ["backend/runtime/identity_broker.py"]
 
 
+def test_unrelated_commits_do_not_expire_exact_restart_bytes(monkeypatch, tmp_path):
+  repo, source, _base = _restart_repo(monkeypatch, tmp_path)
+  source.write_text("VALUE = 'approved'\n")
+  _commit(repo, "approved server change")
+  requirement = platform_restart.build_restart_requirement(repo)
+
+  (repo / "README.md").write_text("Documentation only\n")
+  _commit(repo, "document the change")
+  assert platform_restart.requirement_matches_current_source(requirement)
+  current = platform_restart.build_restart_requirement(repo)
+  assert current["target_sha"] != requirement["target_sha"]
+  assert current["action_id"] == requirement["action_id"]
+
+  # A new runtime file is additional restart authority, not unrelated work.
+  (source.parent / "additional.py").write_text("VALUE = 'unreviewed'\n")
+  _commit(repo, "additional runtime change")
+  assert not platform_restart.requirement_matches_current_source(requirement)
+
+
+def test_restart_action_id_must_match_the_current_source_identity(
+  monkeypatch, tmp_path,
+):
+  repo, source, _base = _restart_repo(monkeypatch, tmp_path)
+  source.write_text("VALUE = 'approved'\n")
+  _commit(repo, "approved server change")
+  requirement = platform_restart.build_restart_requirement(repo)
+
+  requirement["action_id"] = "platform-restart:tampered"
+
+  assert not platform_restart.requirement_matches_current_source(requirement)
+
+
 def test_descendant_that_reverts_approved_bytes_still_wakes_agent_to_verify(
   monkeypatch, tmp_path,
 ):

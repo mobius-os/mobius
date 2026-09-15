@@ -157,8 +157,8 @@ def declare_wait(
 
   due_at = None
   if kind == "command":
-    command = (command or "").strip()
-    if not command:
+    command = command if isinstance(command, str) else ""
+    if not command.strip():
       raise WaitValidationError("command waits need a check command")
     # Probe on the next supervisor tick. A malformed check should fail visibly
     # now, not after its whole polling interval, and an already-met condition
@@ -477,6 +477,15 @@ async def _run_check(command: str, *, wait_id: str | None = None) -> tuple[int, 
 
     spawn = asyncio.create_task(asyncio.create_subprocess_shell(
       command,
+      # Agent shell work and saved checks share Bash syntax. The platform's
+      # /bin/sh may be dash; silently changing interpreters broke otherwise
+      # valid saved checks (notably `set -o pipefail`). No login/startup files.
+      executable="/bin/bash",
+      # Non-interactive Bash sources BASH_ENV before the saved command. A
+      # managed host must not be able to prepend output, state, or an early
+      # success to a durable check. Preserve the ordinary process environment
+      # while disabling shell startup hooks explicitly.
+      env={**os.environ, "BASH_ENV": "", "ENV": ""},
       cwd=get_settings().data_dir,
       stdout=asyncio.subprocess.PIPE,
       stderr=asyncio.subprocess.STDOUT,
@@ -1064,6 +1073,31 @@ def armed_waits_for_chat(db: Session, chat_id: str) -> list[models.ChatWait]:
     .order_by(models.ChatWait.created_at.asc())
     .all()
   )
+
+
+def wait_owns_goal(db: Session, chat_id: str, goal_id: str) -> bool:
+  """Whether one Goal is owned through observation or result admission.
+
+  Check settlement is not delivery. Between those transitions (including a
+  restart), the Wait supervisor still owns the next move; Goal settlement
+  must not manufacture another executor. Keep this projection small rather
+  than hydrating commands, transcripts or activation manifests per Goal.
+  """
+  from sqlalchemy import func
+
+  return db.query(models.ChatWait.id).join(
+      models.ChatRun, models.ChatRun.id == models.ChatWait.created_by_run_id,
+    ).filter(
+      models.ChatRun.chat_id == chat_id,
+      models.ChatWait.chat_id == chat_id,
+      func.coalesce(
+        models.ChatRun.goal_id, models.ChatRun.root_run_id, models.ChatRun.id,
+      ) == goal_id,
+      (models.ChatWait.status == "armed") | (
+        models.ChatWait.status.in_(("met", "expired", "failed"))
+        & models.ChatWait.resume_delivered_at.is_(None)
+      ),
+    ).first() is not None
 
 
 def armed_wait_chat_ids(db: Session) -> set[str]:

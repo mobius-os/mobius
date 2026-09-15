@@ -164,25 +164,41 @@ def build_restart_requirement(repo: Path | None = None) -> dict:
   identity = {
     "version": REQUIREMENT_VERSION,
     "source_boot_id": source_boot_id,
-    "target_sha": head,
     "files": files,
   }
   return {
     **identity,
+    "target_sha": head,
     "action_id": f"platform-restart:{_canonical_hash(identity)}",
     "paths": sorted(restart_paths),
   }
 
 
-def requirement_matches_current_source(requirement: object) -> bool:
-  """Re-derive the action immediately before claim; never trust card JSON."""
-  if not isinstance(requirement, dict):
+_RESTART_AUTHORITY_FIELDS = (
+  "version", "source_boot_id", "files", "paths", "action_id",
+)
+
+
+def restart_requirements_share_authority(left: object, right: object) -> bool:
+  """Compare only the source identity a restart action authorizes."""
+  if not isinstance(left, dict) or not isinstance(right, dict):
     return False
+  return all(left.get(key) == right.get(key) for key in _RESTART_AUTHORITY_FIELDS)
+
+
+def requirement_matches_current_source(requirement: object) -> bool:
+  """Re-derive restart authority, not unrelated repository history.
+
+  The commit remains useful provenance on the saved card, but docs or a shell
+  rebuild cannot change what this restart loads. Require the same boot and
+  complete pending runtime manifest, including deletions and modes. New or
+  uncommitted runtime code still invalidates the card.
+  """
   try:
     current = build_restart_requirement()
   except RestartRequirementError:
     return False
-  return current == requirement
+  return restart_requirements_share_authority(current, requirement)
 
 
 def activation_wait_verdict(

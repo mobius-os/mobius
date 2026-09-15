@@ -2210,6 +2210,7 @@ class ChatWriterActor:
     from app.platform_restart import (
       activation_wait_verdict,
       requirement_matches_current_source,
+      restart_requirements_share_authority,
     )
     from app.timeutil import now_naive_utc
 
@@ -2333,7 +2334,9 @@ class ChatWriterActor:
           )
           db.add(execution)
           dispatch = True
-        elif execution.requirement_json != action["requirement"]:
+        elif not restart_requirements_share_authority(
+          execution.requirement_json, action["requirement"],
+        ):
           db.rollback()
           raise _PersistFailed("Restart card: action identity collision")
         execution_status = execution.status
