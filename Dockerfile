@@ -50,7 +50,7 @@ RUN useradd -m -s /bin/bash mobius
 ARG CODEX_VERSION=0.154.0
 ARG AGENT_BROWSER_VERSION=0.35.1
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    age ca-certificates cron curl git jq procps ripgrep sqlite3 sudo unzip util-linux \
+    age ca-certificates cron curl git jq procps ripgrep sqlite3 sudo tini unzip util-linux \
     libnss3 libnspr4 libatk1.0-0 libatk-bridge2.0-0 libcups2 \
     libdrm2 libxkbcommon0 libatspi2.0-0 libxcomposite1 libxdamage1 \
     libxfixes3 libxrandr2 libgbm1 libpango-1.0-0 libcairo2 libasound2t64 \
@@ -430,4 +430,9 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=10s --start-period=20s --retries=3 \
   CMD curl -f http://localhost:8000/api/ready || exit 1
 
+# Own PID 1 with tini so orphaned children (e.g. short-lived git helpers) are
+# reaped on every runtime, including hosts that inject no init of their own
+# (Railway). `-s` (subreaper) keeps reaping working whether tini is PID 1 or a
+# child of another init (Compose's docker-init).
+ENTRYPOINT ["/usr/bin/tini", "-s", "--"]
 CMD ["./scripts/entrypoint.sh"]
