@@ -155,13 +155,16 @@ def _config_mutation_lock():
     """Serialize a config read-modify-write across runner processes."""
     lock_path = CONFIG_PATH + ".lock"
     os.makedirs(os.path.dirname(lock_path) or ".", exist_ok=True)
-    with _config_lock, open(lock_path, "a+", encoding="utf-8") as lock_file:
+    lock_fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    with _config_lock, os.fdopen(lock_fd, "r+", encoding="utf-8") as lock_file:
         if fcntl is not None:
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
         elif msvcrt is not None:
+            lock_file.seek(0, os.SEEK_END)
+            if lock_file.tell() == 0:
+                lock_file.write("\x00")
+                lock_file.flush()
             lock_file.seek(0)
-            lock_file.write("\\0")
-            lock_file.flush()
             while True:
                 try:
                     msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)

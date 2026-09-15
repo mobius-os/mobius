@@ -1544,6 +1544,35 @@ def test_connection_mutations_hold_a_cross_process_file_lock(tmp_path, monkeypat
   assert (tmp_path / "config.json.lock").exists()
 
 
+def test_connection_mutations_lock_and_unlock_the_same_windows_byte(
+  tmp_path, monkeypatch,
+):
+  monkeypatch.setattr(connect_runner, "CONFIG_DIR", str(tmp_path))
+  monkeypatch.setattr(
+    connect_runner, "CONFIG_PATH", str(tmp_path / "config.json"),
+  )
+  calls = []
+
+  class Msvcrt:
+    LK_NBLCK = "lock"
+    LK_UNLCK = "unlock"
+
+    @staticmethod
+    def locking(fd, operation, length):
+      calls.append((fd, operation, length))
+
+  monkeypatch.setattr(connect_runner, "fcntl", None)
+  monkeypatch.setattr(connect_runner, "msvcrt", Msvcrt)
+  connect_runner._add_connection({
+    "url": "https://a.test", "host_id": "h_a", "token": "ta",
+  })
+
+  assert [call[1:] for call in calls] == [
+    (Msvcrt.LK_NBLCK, 1), (Msvcrt.LK_UNLCK, 1),
+  ]
+  assert (tmp_path / "config.json.lock").read_bytes() == b"\0"
+
+
 def test_runner_disconnect_scopes_to_one_of_several_connections(monkeypatch):
   posted = []
   uninstalled = []
