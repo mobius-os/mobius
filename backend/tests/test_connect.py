@@ -266,7 +266,9 @@ async def test_outbound_revoke_fails_closed_until_remote_confirms(
   })
   connect_outbound._atomic_json(
     connect_outbound._runner_config_path(profile_id),
-    {"url": "https://friend.example", "host_id": "h_remote", "token": "secret"},
+    {"connections": [{
+      "url": "https://friend.example", "host_id": "h_remote", "token": "secret",
+    }]},
   )
   def keep_access(_config):
     raise connect_outbound.OutboundConnectError("access was kept")
@@ -277,6 +279,63 @@ async def test_outbound_revoke_fails_closed_until_remote_confirms(
 
   with pytest.raises(connect_outbound.OutboundConnectError, match="kept"):
     await connect_outbound.revoke_profile(profile_id)
+  assert connect_outbound._profile_dir(profile_id).is_dir()
+  assert stopped == []
+
+
+def test_outbound_revoke_uses_single_connection_from_multi_config(
+  tmp_path, monkeypatch,
+):
+  profiles = tmp_path / "outbound"
+  monkeypatch.setattr(connect_outbound, "_profiles_dir", lambda: profiles)
+  profile_id = "o_0123456789abcdef"
+  connect_outbound._atomic_json(connect_outbound._meta_path(profile_id), {
+    "id": profile_id, "base_url": "https://friend.example", "status": "active",
+  })
+  connection = {
+    "url": "https://friend.example", "host_id": "h_remote", "token": "secret",
+  }
+  connect_outbound._atomic_json(
+    connect_outbound._runner_config_path(profile_id), {"connections": [connection]},
+  )
+  disconnected = []
+  monkeypatch.setattr(
+    connect_outbound, "_disconnect_remote", lambda config: disconnected.append(config),
+  )
+  monkeypatch.setattr(connect_outbound, "_stop_process_tree", lambda _id: None)
+
+  connect_outbound._revoke_profile(profile_id)
+
+  assert disconnected == [{**connection, "name": None}]
+  assert not connect_outbound._profile_dir(profile_id).exists()
+
+
+def test_outbound_revoke_keeps_ambiguous_multi_connection_credentials(
+  tmp_path, monkeypatch,
+):
+  profiles = tmp_path / "outbound"
+  monkeypatch.setattr(connect_outbound, "_profiles_dir", lambda: profiles)
+  profile_id = "o_0123456789abcdef"
+  connect_outbound._atomic_json(connect_outbound._meta_path(profile_id), {
+    "id": profile_id, "base_url": "https://friend.example", "status": "active",
+  })
+  connect_outbound._atomic_json(
+    connect_outbound._runner_config_path(profile_id), {"connections": [
+      {"url": "https://friend.example", "host_id": "h_remote", "token": "one"},
+      {"url": "https://other.example", "host_id": "h_other", "token": "two"},
+    ]},
+  )
+  monkeypatch.setattr(
+    connect_outbound,
+    "_disconnect_remote",
+    lambda _config: pytest.fail("ambiguous credentials must not be revoked"),
+  )
+  stopped = []
+  monkeypatch.setattr(connect_outbound, "_stop_process_tree", stopped.append)
+
+  with pytest.raises(connect_outbound.OutboundConnectError, match="kept"):
+    connect_outbound._revoke_profile(profile_id)
+
   assert connect_outbound._profile_dir(profile_id).is_dir()
   assert stopped == []
 

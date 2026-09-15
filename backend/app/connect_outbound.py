@@ -459,7 +459,16 @@ def _revoke_profile(profile_id: str) -> None:
         "cannot be confirmed. Access was kept.",
       )
   else:
-    _disconnect_remote(config)
+    # The runner now saves its credentials in a connections list. An outbound
+    # profile owns exactly one remote connection, so ambiguous credentials must
+    # fail closed rather than revoking an arbitrary instance.
+    connections = connect_runner._connections(config)
+    if len(connections) != 1:
+      raise OutboundConnectError(
+        "The saved Connect details are unreadable, so remote revocation "
+        "cannot be confirmed. Access was kept.",
+      )
+    _disconnect_remote(connections[0])
   with _lock:
     _discard(profile_id)
 
