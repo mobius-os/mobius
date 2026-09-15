@@ -43,3 +43,19 @@ test('renders in the requested zone; viewer-local when omitted', () => {
   // Omitting timeZone uses the runtime's local zone (whatever the viewer's is).
   assert.equal(typeof formatUpstreamCommitDate(ts, 'en-GB'), 'string')
 })
+
+test('bare calendar dates render in UTC regardless of viewer zone (UTC+14 boundary)', () => {
+  // A bare date has no instant, so it must read the same day everywhere.
+  // Regression (P2): anchoring noon UTC then rendering local shifted it a day at
+  // UTC+13/+14 — e.g. Pacific/Kiritimati (UTC+14) showed the next day.
+  const utc = formatUpstreamCommitDate('2026-09-14', 'en-GB', 'UTC')
+  const kiritimati = formatUpstreamCommitDate('2026-09-14', 'en-GB', 'Pacific/Kiritimati')
+  assert.equal(kiritimati, utc)
+  assert.match(kiritimati, /\b14\b/)
+  // A full %cI timestamp is a real instant and still honors the zone: 23:50Z is
+  // already the next day at UTC+14.
+  assert.match(
+    formatUpstreamCommitDate('2026-09-14T23:50:13+00:00', 'en-GB', 'Pacific/Kiritimati'),
+    /\b15\b/,
+  )
+})
