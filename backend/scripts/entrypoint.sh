@@ -406,7 +406,11 @@ _platform_seed_test_checkout() {
   mkdir -p "$_test_seeding"
   # Copy only the committed tree (not host node_modules/build output), then the
   # real git metadata so /api/version and runtime git operations see exact HEAD.
-  if ! git -c safe.directory="$_test_source" -C "$_test_source" \
+  # Git archive otherwise applies its default tar.umask=0002 and turns tracked
+  # 0644 files into 0664 files. Keep the disposable seed aligned with the
+  # checked-in modes so privileged served source passes the same guard as prod.
+  if ! git -c safe.directory="$_test_source" -c tar.umask=0022 \
+       -C "$_test_source" \
        archive --format=tar -o "$_test_archive" HEAD ||
      ! tar -xf "$_test_archive" -C "$_test_seeding"; then
     echo "TEST RUNTIME FATAL: could not copy mounted checkout tree." >&2

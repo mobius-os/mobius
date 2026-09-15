@@ -458,6 +458,22 @@ def test_test_runtime_seed_precedes_selection_and_skips_reconcile():
   ) in entrypoint
 
 
+def test_test_runtime_seed_preserves_non_group_writable_source_modes():
+  entrypoint = (
+    ROOT / "backend" / "scripts" / "entrypoint.sh"
+  ).read_text(encoding="utf-8")
+  seed = entrypoint[
+    entrypoint.index("_platform_seed_test_checkout() {"):
+    entrypoint.index("_platform_use_direct() {")
+  ]
+
+  archive = seed[
+    seed.index("git -c safe.directory="):
+    seed.index("archive --format=tar")
+  ]
+  assert "-c tar.umask=0022" in archive
+
+
 def test_platform_boot_has_one_main_reconcile_path():
   entrypoint = (
     ROOT / "backend" / "scripts" / "entrypoint.sh"
