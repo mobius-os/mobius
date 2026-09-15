@@ -1076,8 +1076,8 @@ def wait_owns_goal(db: Session, chat_id: str, goal_id: str) -> bool:
   """
   from sqlalchemy import func
 
-  return db.query(models.ChatWait.id).select_from(models.ChatRun).join(
-      models.ChatWait, models.ChatWait.created_by_run_id == models.ChatRun.id,
+  return db.query(models.ChatWait.id).join(
+      models.ChatRun, models.ChatRun.id == models.ChatWait.created_by_run_id,
     ).filter(
       models.ChatRun.chat_id == chat_id,
       models.ChatWait.chat_id == chat_id,
