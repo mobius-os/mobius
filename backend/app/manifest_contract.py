@@ -36,6 +36,7 @@ PROJECT_TEMPLATE_FILES_COUNT_MAX = 64
 PROJECT_ARTIFACT_TYPES_COUNT_MAX = 12
 PROJECT_ARTIFACT_EXTENSIONS_COUNT_MAX = 16
 SERVICE_REQUEST_MAX_BYTES = 8 * 1024 * 1024
+SERVICE_ALIASES_MAX = 4
 MAX_JOB_SHEBANG_BYTES = 256
 _SLUG_OK = "abcdefghijklmnopqrstuvwxyz0123456789-_"
 _SOURCE_FILES_MANAGED_PREFIXES = (
@@ -555,12 +556,33 @@ def validate_manifest_contract(manifest) -> None:
 
   service = manifest.get("service")
   if service is not None:
-    if not isinstance(service, Mapping) or set(service) - {"id", "entry", "access"}:
-      _fail("Manifest `service` must contain only `id`, `entry`, and `access`.")
+    if not isinstance(service, Mapping) or set(service) - {
+      "id", "aliases", "entry", "access",
+    }:
+      _fail(
+        "Manifest `service` must contain only `id`, `aliases`, `entry`, "
+        "and `access`."
+      )
     if package_id is not None and "id" not in service:
       _fail("Manifest `service.id` is required when `package_id` is declared.")
     service_id = service.get("id", mid)
     validate_slug_field(service_id, "service.id")
+    aliases = service.get("aliases", [])
+    if not isinstance(aliases, list) or len(aliases) > SERVICE_ALIASES_MAX:
+      _fail(
+        f"Manifest `service.aliases` must be an array with at most "
+        f"{SERVICE_ALIASES_MAX} entries."
+      )
+    if aliases and "id" not in service:
+      _fail("Manifest `service.aliases` requires an explicit `service.id`.")
+    seen_aliases = set()
+    for index, alias in enumerate(aliases):
+      validate_slug_field(alias, f"service.aliases[{index}]")
+      if alias == service_id:
+        _fail("Manifest `service.aliases` must not repeat `service.id`.")
+      if alias in seen_aliases:
+        _fail(f"Manifest `service.aliases` duplicates {alias!r}.")
+      seen_aliases.add(alias)
     entry = service.get("entry")
     if not isinstance(entry, str):
       _fail("Manifest `service.entry` must be a string.")

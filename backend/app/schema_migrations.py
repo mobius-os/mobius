@@ -4816,6 +4816,24 @@ def _add_stable_app_package_identities(eng) -> None:
       ), {"service_id": slug, "app_id": app_id})
 
 
+def _add_app_service_aliases(eng) -> None:
+  """Add explicit, removable routes for a bounded service rename window."""
+  from sqlalchemy import text
+
+  with eng.begin() as conn:
+    conn.execute(text(
+      "CREATE TABLE IF NOT EXISTS app_service_aliases ("
+      "service_id VARCHAR(128) PRIMARY KEY, "
+      "app_id INTEGER NOT NULL REFERENCES apps(id) ON DELETE CASCADE, "
+      "created_at TIMESTAMP NOT NULL"
+      ")"
+    ))
+    conn.execute(text(
+      "CREATE INDEX IF NOT EXISTS ix_app_service_aliases_app_id "
+      "ON app_service_aliases (app_id)"
+    ))
+
+
 _SCHEMA_MIGRATIONS = (
   # Full IDs are permanent identities, not sequence positions. Append new
   # work in execution order; never renumber a shipped ID to reconcile sources.
@@ -4878,6 +4896,7 @@ _SCHEMA_MIGRATIONS = (
   ("0056_model_selection_ids", _migrate_model_selection_ids),
   ("0057_detach_retired_gauntlet_history", _detach_retired_gauntlet_history),
   ("0058_stable_app_package_identities", _add_stable_app_package_identities),
+  ("0059_app_service_aliases", _add_app_service_aliases),
 )
 
 

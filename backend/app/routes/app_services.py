@@ -32,17 +32,32 @@ def _response(status: int, body, headers: dict[str, str], media_type: str | None
 
 
 def _service_app(db: Session, service_id: str) -> models.App | None:
-  """Resolve one stable service id, with a one-way legacy fallback.
+  """Resolve one stable service id, an explicit transition alias, or legacy.
 
-  Once an app has ``service_id`` only that identity is routable; its product
-  slug does not remain as a second exposed alias. Rows predating the migration
-  retain their slug until their next accepted manifest stamps the explicit
-  service contract.
+  Product slugs never become automatic aliases after a stable identity is
+  stamped. A reviewed manifest may carry a bounded alias list for one rolling
+  rename; removing it from the next accepted version retires that route.
+  Rows predating the migration retain their slug until their next accepted
+  manifest stamps the explicit service contract.
   """
   target = (
     db.query(models.App)
     .filter(
       models.App.service_id == service_id,
+      models.App.deleted_at.is_(None),
+    )
+    .one_or_none()
+  )
+  if target is not None:
+    return target
+  target = (
+    db.query(models.App)
+    .join(
+      models.AppServiceAlias,
+      models.AppServiceAlias.app_id == models.App.id,
+    )
+    .filter(
+      models.AppServiceAlias.service_id == service_id,
       models.App.deleted_at.is_(None),
     )
     .one_or_none()

@@ -1154,6 +1154,24 @@ class App(Base):
   )
 
 
+class AppServiceAlias(Base):
+  """One explicitly reviewed, temporary route for an app service rename.
+
+  Aliases are separate rows rather than another app-name fallback: each name
+  has one owner, can be removed by the next accepted manifest, and never
+  changes the app's canonical ``service_id``.
+  """
+
+  __tablename__ = "app_service_aliases"
+
+  service_id = Column(String(128), primary_key=True)
+  app_id = Column(
+    Integer, ForeignKey("apps.id", ondelete="CASCADE"), nullable=False,
+    index=True,
+  )
+  created_at = Column(DateTime, nullable=False, default=now_naive_utc)
+
+
 class Project(Base):
   """A first-class owner workspace containing files, chats, and artifacts.
 

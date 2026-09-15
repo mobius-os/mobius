@@ -4514,6 +4514,104 @@ def test_service_identity_collision_is_a_clear_install_conflict(
   assert "service identity is already installed" in second.text
 
 
+def test_implicit_service_identity_follows_unique_slug_on_install_and_update(
+  client, auth, db, bypass_url_validation,
+):
+  service_source = b'import json, sys\njson.dump({"status": 200}, sys.stdout)\n'
+
+  def install(base: str, version: str):
+    manifest = _simple_manifest("shared-service", version=version)
+    manifest.update({
+      "source_files": ["service.py"],
+      "service": {"entry": "service.py"},
+    })
+    responses = {
+      base + "mobius.json": (200, json.dumps(manifest).encode()),
+      base + "index.jsx": (200, JSX.encode()),
+      base + "service.py": (200, service_source),
+    }
+    with patch(
+      "app.install.httpx.AsyncClient",
+      side_effect=_fake_async_client(responses),
+    ):
+      return client.post(
+        "/api/apps/install", headers=auth,
+        json={"manifest_url": base + "mobius.json"},
+      )
+
+  first = install("https://implicit-one.test/repo/", "1.0.0")
+  second = install("https://implicit-two.test/repo/", "1.0.0")
+  updated = install("https://implicit-two.test/repo/", "2.0.0")
+
+  assert first.status_code == 201, first.text
+  assert second.status_code == 201, second.text
+  assert updated.status_code == 201, updated.text
+  apps = db.query(models.App).filter(
+    models.App.slug.like("shared-service%"),
+  ).order_by(models.App.id).all()
+  assert [(app.slug, app.service_id) for app in apps] == [
+    ("shared-service", "shared-service"),
+    ("shared-service-2", "shared-service-2"),
+  ]
+  assert [app.capability_contract["service"]["id"] for app in apps] == [
+    "shared-service", "shared-service-2",
+  ]
+
+
+def test_service_rename_requires_and_routes_one_reviewed_transition_alias(
+  client, auth, db, bypass_url_validation,
+):
+  base = "https://service-rename.test/repo/"
+  service_source = (
+    b'import json, sys\n'
+    b'json.load(sys.stdin)\n'
+    b'json.dump({"status": 200, "body": {"ok": True}}, sys.stdout)\n'
+  )
+
+  def install(version: str, service: dict):
+    manifest = _simple_manifest("social", version=version)
+    manifest.update({
+      "package_id": "app.example.social",
+      "source_files": ["service.py"],
+      "service": {**service, "entry": "service.py", "access": "public"},
+    })
+    responses = {
+      base + "mobius.json": (200, json.dumps(manifest).encode()),
+      base + "index.jsx": (200, JSX.encode()),
+      base + "service.py": (200, service_source),
+    }
+    with patch(
+      "app.install.httpx.AsyncClient",
+      side_effect=_fake_async_client(responses),
+    ):
+      return client.post(
+        "/api/apps/install", headers=auth,
+        json={"manifest_url": base + "mobius.json"},
+      )
+
+  initial = install("1.0.0", {"id": "common"})
+  unsafe = install("2.0.0", {"id": "social"})
+  transition = install(
+    "2.0.0", {"id": "social", "aliases": ["common"]},
+  )
+
+  assert initial.status_code == 201, initial.text
+  assert unsafe.status_code == 409
+  assert "previous identity" in unsafe.text
+  assert transition.status_code == 201, transition.text
+  assert client.get("/api/app-services/social/status").status_code == 200
+  assert client.get("/api/app-services/common/status").status_code == 200
+  app = db.query(models.App).filter_by(package_id="app.example.social").one()
+  assert app.service_id == "social"
+  assert db.get(models.AppServiceAlias, "common").app_id == app.id
+
+  retired = install("3.0.0", {"id": "social"})
+  assert retired.status_code == 201, retired.text
+  assert client.get("/api/app-services/social/status").status_code == 200
+  assert client.get("/api/app-services/common/status").status_code == 404
+  assert db.get(models.AppServiceAlias, "common") is None
+
+
 def test_package_identity_adopts_a_github_owner_transfer_by_repository_id(
   client, auth, bypass_url_validation,
 ):

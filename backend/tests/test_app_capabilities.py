@@ -118,6 +118,38 @@ def test_service_is_an_explicit_reviewed_runtime_not_an_implicit_import_hook(ser
       ))
 
 
+def test_service_transition_aliases_are_explicit_bounded_contract_data():
+  manifest = _manifest(
+    source_files=["memory-core.md", "service.py"],
+    service={
+      "id": "social", "aliases": ["common"],
+      "entry": "service.py", "access": "public",
+    },
+  )
+  validate_manifest_contract(manifest)
+  contract, _digest = contract_and_digest(manifest)
+  assert contract["service"]["id"] == "social"
+  assert contract["service"]["aliases"] == ["common"]
+
+  for aliases in (
+    ["social"], ["common", "common"],
+    ["one", "two", "three", "four", "five"],
+  ):
+    invalid = _manifest(
+      source_files=["memory-core.md", "service.py"],
+      service={"id": "social", "aliases": aliases, "entry": "service.py"},
+    )
+    with pytest.raises(ManifestContractError):
+      validate_manifest_contract(invalid)
+
+  implicit = _manifest(
+    source_files=["memory-core.md", "service.py"],
+    service={"aliases": ["common"], "entry": "service.py"},
+  )
+  with pytest.raises(ManifestContractError):
+    validate_manifest_contract(implicit)
+
+
 def test_runtime_capability_is_independently_versioned_and_bounded():
   manifest = _manifest(capabilities={
     "media.microphone.capture": {

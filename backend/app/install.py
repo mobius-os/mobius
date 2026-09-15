@@ -576,11 +576,30 @@ def _find_install_identity_row(
   return package_row or existing
 
 
-def _manifest_service_id(manifest: dict) -> str | None:
+def _manifest_service_id(
+  manifest: dict, *, app: models.App | None = None, slug: str | None = None,
+) -> str | None:
+  """Resolve the identity that this accepted manifest will actually store.
+
+  Explicit package identities are stable by declaration. Legacy manifests
+  keep the row's existing identity, or fall back to the collision-resolved
+  slug for a fresh install, matching the migration backfill.
+  """
   service = manifest.get("service")
   if not isinstance(service, dict):
     return None
-  return service.get("id", manifest["id"])
+  if "id" in service:
+    return service["id"]
+  if app is not None and app.service_id:
+    return app.service_id
+  return slug or (app.slug if app is not None else manifest["id"])
+
+
+def _manifest_service_aliases(manifest: dict) -> list[str]:
+  service = manifest.get("service")
+  if not isinstance(service, dict):
+    return []
+  return list(service.get("aliases") or [])
 
 
 def _assert_service_identity_available(
@@ -595,6 +614,64 @@ def _assert_service_identity_available(
   )
   if owner is not None and owner.id != app_id:
     raise HTTPException(409, "App service identity is already installed.")
+  alias_owner = db.get(models.AppServiceAlias, service_id)
+  if alias_owner is not None and alias_owner.app_id != app_id:
+    raise HTTPException(409, "App service identity is already installed.")
+
+
+def _assert_service_aliases_available(
+  db: Session, *, aliases: list[str], service_id: str | None, app_id: int | None,
+) -> None:
+  for alias in aliases:
+    if alias == service_id:
+      raise HTTPException(409, "App service alias repeats its stable identity.")
+    _assert_service_identity_available(db, service_id=alias, app_id=app_id)
+
+
+def _assert_service_transition_safe(
+  app: models.App | None, *, service_id: str | None, aliases: list[str],
+) -> None:
+  if (
+    app is not None
+    and app.service_id is not None
+    and service_id is not None
+    and app.service_id != service_id
+    and app.service_id not in aliases
+  ):
+    raise HTTPException(
+      409,
+      "Changing an app service identity requires retaining the previous "
+      "identity in `service.aliases` for the reviewed transition.",
+    )
+
+
+def _sync_service_aliases(
+  db: Session, *, app: models.App, manifest: dict,
+) -> None:
+  """Replace only this app's explicit transition routes in the transaction."""
+  aliases = _manifest_service_aliases(manifest)
+  db.query(models.AppServiceAlias).filter(
+    models.AppServiceAlias.app_id == app.id,
+  ).delete(synchronize_session=False)
+  for alias in aliases:
+    db.add(models.AppServiceAlias(service_id=alias, app_id=app.id))
+
+
+def _contract_with_service_identity(
+  contract: dict, *, service_id: str | None, aliases: list[str],
+) -> dict:
+  """Align the accepted contract with the collision-resolved row identity."""
+  if service_id is None or not isinstance(contract.get("service"), dict):
+    return contract
+  result = dict(contract)
+  service = dict(result["service"])
+  service["id"] = service_id
+  if aliases:
+    service["aliases"] = list(aliases)
+  else:
+    service.pop("aliases", None)
+  result["service"] = service
+  return result
 
 
 def _catalog_identity_matches(
@@ -2583,11 +2660,24 @@ def _select_install_target(
   if old_origin and new_origin and old_origin.lower() != new_origin.lower():
     origin_migration = (old_origin, new_origin)
 
-  _assert_service_identity_available(
-    db,
-    service_id=_manifest_service_id(manifest),
-    app_id=existing.id if existing is not None else None,
-  )
+  service = manifest.get("service")
+  explicit_service_id = isinstance(service, dict) and "id" in service
+  resolved_service_id = _manifest_service_id(manifest, app=existing)
+  service_aliases = _manifest_service_aliases(manifest)
+  # A fresh implicit service cannot be resolved until its unique slug is
+  # allocated below. Explicit identities and every update are known now.
+  if existing is not None or explicit_service_id:
+    _assert_service_identity_available(
+      db, service_id=resolved_service_id,
+      app_id=existing.id if existing is not None else None,
+    )
+    _assert_service_aliases_available(
+      db, aliases=service_aliases, service_id=resolved_service_id,
+      app_id=existing.id if existing is not None else None,
+    )
+    _assert_service_transition_safe(
+      existing, service_id=resolved_service_id, aliases=service_aliases,
+    )
 
   return InstallTarget(
     existing=existing,
@@ -2843,6 +2933,17 @@ async def _prepare_app_row(
   source_dir = str(data_dir / "apps" / slug)
   journal.created_paths.append(Path(source_dir))
   permissions = manifest.get("permissions") or {}
+  service_id = _manifest_service_id(manifest, slug=slug)
+  service_aliases = _manifest_service_aliases(manifest)
+  capability_contract = _contract_with_service_identity(
+    candidate.capability_contract,
+    service_id=service_id,
+    aliases=service_aliases,
+  )
+  _assert_service_identity_available(db, service_id=service_id, app_id=None)
+  _assert_service_aliases_available(
+    db, aliases=service_aliases, service_id=service_id, app_id=None,
+  )
   app = models.App(
     name=manifest["name"],
     description=manifest.get("description", ""),
@@ -2852,11 +2953,7 @@ async def _prepare_app_row(
     manifest_url=canonical_manifest_url,
     package_id=target.package_id,
     source_identity=target.source_identity,
-    service_id=(
-      manifest["service"].get("id", manifest_id)
-      if isinstance(manifest.get("service"), dict)
-      else None
-    ),
+    service_id=service_id,
     cross_app_access=permissions.get("cross_app_access", "none"),
     share_with_apps=permissions.get("share_with_apps", "none"),
     chat_log_access=permissions.get("chat_log_access", "none"),
@@ -2872,11 +2969,12 @@ async def _prepare_app_row(
     offline_contract=manifest.get("offline") or None,
     system_prompt_file=manifest.get("system_prompt") or None,
     system_app=bool(manifest.get("system_app", False)),
-    capability_contract=candidate.capability_contract,
+    capability_contract=capability_contract,
     project_templates_json=manifest.get("project_templates") or None,
   )
   db.add(app)
   db.flush()
+  _sync_service_aliases(db, app=app, manifest=manifest)
   return app
 
 
@@ -2931,6 +3029,7 @@ class ActivationPlan:
 
 
 def _apply_manifest_metadata(
+  db: Session,
   app: models.App,
   *,
   manifest: dict,
@@ -2961,11 +3060,12 @@ def _apply_manifest_metadata(
     app.package_id = package_id
   if source_identity:
     app.source_identity = source_identity
-  service = manifest.get("service")
-  app.service_id = (
-    service.get("id", app.service_id or manifest["id"])
-    if isinstance(service, dict)
-    else None
+  app.service_id = _manifest_service_id(manifest, app=app)
+  _sync_service_aliases(db, app=app, manifest=manifest)
+  capability_contract = _contract_with_service_identity(
+    capability_contract,
+    service_id=app.service_id,
+    aliases=_manifest_service_aliases(manifest),
   )
   app.published_manifest_url = None
   permissions = manifest.get("permissions") or {}
@@ -3018,6 +3118,7 @@ async def _activate_install_source(
   """
   entry_source = plan.source_tree[plan.entry_key].decode("utf-8")
   _apply_manifest_metadata(
+    db,
     app,
     manifest=manifest,
     canonical_manifest_url=plan.canonical_manifest_url,
@@ -3772,6 +3873,7 @@ async def install_from_manifest(
         # ordinary source resolver: the current source/bundle stay untouched,
         # while the reviewed identity and capability grant become durable.
         _apply_manifest_metadata(
+          db,
           app,
           manifest=manifest,
           canonical_manifest_url=canonical_manifest_url,
