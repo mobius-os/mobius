@@ -20,6 +20,7 @@ Manage the installed service:
 import argparse
 import base64
 from collections import deque
+from contextlib import contextmanager
 import ipaddress
 import json
 import os
@@ -33,6 +34,15 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+
+try:
+    import fcntl
+except ImportError:  # Windows uses msvcrt below.
+    fcntl = None
+try:
+    import msvcrt
+except ImportError:  # POSIX uses fcntl above.
+    msvcrt = None
 
 CONFIG_DIR = os.path.expanduser("~/.mobius-connect")
 CONFIG_PATH = os.path.join(CONFIG_DIR, "config.json")
@@ -140,6 +150,36 @@ def _save_config(cfg):
 _config_lock = threading.Lock()
 
 
+@contextmanager
+def _config_mutation_lock():
+    """Serialize a config read-modify-write across runner processes."""
+    lock_path = CONFIG_PATH + ".lock"
+    os.makedirs(os.path.dirname(lock_path) or ".", exist_ok=True)
+    with _config_lock, open(lock_path, "a+", encoding="utf-8") as lock_file:
+        if fcntl is not None:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        elif msvcrt is not None:
+            lock_file.seek(0)
+            lock_file.write("\\0")
+            lock_file.flush()
+            while True:
+                try:
+                    msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+                    break
+                except OSError:
+                    time.sleep(0.05)
+        else:
+            raise RuntimeError("Connect cannot lock its configuration safely.")
+        try:
+            yield
+        finally:
+            if fcntl is not None:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+            else:
+                lock_file.seek(0)
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+
+
 def _connections(cfg=None):
     """Normalize either config shape into a list of connection dicts."""
     if cfg is None:
@@ -171,7 +211,7 @@ def _same_connection(a, b):
 
 def _add_connection(conn):
     """Add or refresh one connection without dropping the others."""
-    with _config_lock:
+    with _config_mutation_lock():
         conns = _connections()
         conns = [c for c in conns if not _same_connection(c, conn)]
         conns.append(conn)
@@ -182,7 +222,7 @@ def _add_connection(conn):
 def _remove_connection(url, host_id):
     """Drop one connection; return how many remain."""
     target = {"url": url, "host_id": host_id}
-    with _config_lock:
+    with _config_mutation_lock():
         conns = [c for c in _connections() if not _same_connection(c, target)]
         _save_config({"connections": conns})
     return len(conns)

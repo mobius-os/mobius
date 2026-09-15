@@ -1517,6 +1517,33 @@ def test_pair_is_additive_across_instances(tmp_path, monkeypatch):
   assert next(c for c in conns if c["host_id"] == "h_a")["token"] == "ta2"
 
 
+def test_connection_mutations_hold_a_cross_process_file_lock(tmp_path, monkeypatch):
+  monkeypatch.setattr(connect_runner, "CONFIG_DIR", str(tmp_path))
+  monkeypatch.setattr(
+    connect_runner, "CONFIG_PATH", str(tmp_path / "config.json"),
+  )
+  calls = []
+
+  class Fcntl:
+    LOCK_EX = "exclusive"
+    LOCK_UN = "unlock"
+
+    @staticmethod
+    def flock(fd, operation):
+      calls.append((fd, operation))
+
+  monkeypatch.setattr(connect_runner, "fcntl", Fcntl)
+  connect_runner._add_connection({
+    "url": "https://a.test", "host_id": "h_a", "token": "ta",
+  })
+  connect_runner._remove_connection("https://a.test", "h_a")
+
+  assert [operation for _fd, operation in calls] == [
+    Fcntl.LOCK_EX, Fcntl.LOCK_UN, Fcntl.LOCK_EX, Fcntl.LOCK_UN,
+  ]
+  assert (tmp_path / "config.json.lock").exists()
+
+
 def test_runner_disconnect_scopes_to_one_of_several_connections(monkeypatch):
   posted = []
   uninstalled = []
