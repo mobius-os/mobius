@@ -1066,6 +1066,31 @@ def armed_waits_for_chat(db: Session, chat_id: str) -> list[models.ChatWait]:
   )
 
 
+def wait_owns_goal(db: Session, chat_id: str, goal_id: str) -> bool:
+  """Whether one Goal is owned through observation or result admission.
+
+  Check settlement is not delivery. Between those transitions (including a
+  restart), the Wait supervisor still owns the next move; Goal settlement
+  must not manufacture another executor. Keep this projection small rather
+  than hydrating commands, transcripts or activation manifests per Goal.
+  """
+  from sqlalchemy import func
+
+  return db.query(models.ChatWait.id).join(
+      models.ChatRun, models.ChatRun.id == models.ChatWait.created_by_run_id,
+    ).filter(
+      models.ChatRun.chat_id == chat_id,
+      models.ChatWait.chat_id == chat_id,
+      func.coalesce(
+        models.ChatRun.goal_id, models.ChatRun.root_run_id, models.ChatRun.id,
+      ) == goal_id,
+      (models.ChatWait.status == "armed") | (
+        models.ChatWait.status.in_(("met", "expired", "failed"))
+        & models.ChatWait.resume_delivered_at.is_(None)
+      ),
+    ).first() is not None
+
+
 def armed_wait_chat_ids(db: Session) -> set[str]:
   """Return which owner-list chats have at least one armed durable wait."""
   return {

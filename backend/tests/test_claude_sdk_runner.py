@@ -1318,18 +1318,18 @@ def test_control_mcp_readiness_waits_for_every_platform_tool():
 
 def test_control_mcp_readiness_accepts_delegated_coordination_subset():
   from app import claude_sdk_runner
-  from app.platform_tools import COORDINATION_TOOL_NAMES
+  from app.platform_tools import DELEGATED_CONTROL_TOOL_NAMES
 
   class _Client:
     async def get_mcp_status(self):
       return {"mcpServers": [{
         "name": "mobius_control",
         "status": "connected",
-        "tools": [{"name": name} for name in COORDINATION_TOOL_NAMES],
+        "tools": [{"name": name} for name in DELEGATED_CONTROL_TOOL_NAMES],
       }]}
 
   assert asyncio.run(claude_sdk_runner._await_control_mcp_ready(
-    _Client(), enabled=True, expected_tool_names=COORDINATION_TOOL_NAMES,
+    _Client(), enabled=True, expected_tool_names=DELEGATED_CONTROL_TOOL_NAMES,
   )) is None
 
 
@@ -1402,6 +1402,9 @@ async def test_run_claude_sdk_turn_requests_summarized_thinking(monkeypatch):
   )
   assert options.system_prompt.startswith("system")
   assert "# Concise register" in options.system_prompt
+  assert "# Execution lifetimes in Möbius" in options.system_prompt
+  assert "TaskOutput(block=true)" in options.system_prompt
+  assert "confirm its saved receipt" in options.system_prompt
   assert options.max_buffer_size == 10 * 1024 * 1024
   assert set(claude_sdk_runner._CLAUDE_NATIVE_SCHEDULING_TOOLS) <= set(
     options.disallowed_tools
