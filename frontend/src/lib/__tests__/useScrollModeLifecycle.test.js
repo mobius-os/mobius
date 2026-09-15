@@ -396,6 +396,50 @@ test('an assistive disclosure click freezes follow before the body expands', () 
   }
 })
 
+test('a live-tail disclosure keeps following as its current response grows', async () => {
+  const observers = []
+  const frames = []
+  const restoreBrowser = installBrowserEnvironment({ observers, frames })
+  try {
+    const { hook, listeners, scroll, list, assistant } = mountTailController(
+      'live-tail-disclosure-follow',
+    )
+    assistant.dataset.activeAssistant = 'true'
+    const disclosure = fakeElement({
+      parentElement: assistant,
+      getAttribute(name) { return name === 'aria-expanded' ? 'false' : null },
+      closest(selector) {
+        if (selector.startsWith('button.chat__')) return this
+        if (selector === '[data-active-assistant="true"]') return assistant
+        if (selector === '.chat__msg[data-key]') return assistant
+        return null
+      },
+    })
+    hook.result.current.followLatest()
+
+    listeners.get('pointerdown')({
+      type: 'pointerdown', pointerType: 'mouse', button: 0, target: disclosure,
+    })
+    assert.equal(scroll.dataset.scrollMode, 'FOLLOW_BOTTOM')
+
+    assistant.offsetHeight += 300
+    list.offsetHeight += 300
+    scroll.scrollHeight += 300
+    observers[0].callback([{ target: list }])
+    assert.equal(scroll.scrollTop, 400,
+      'layout remains deferred while the disclosure press owns the viewport')
+
+    listeners.get('pointerup')({ pointerType: 'mouse' })
+    frames.splice(0).forEach(callback => callback())
+    await new Promise(resolve => setTimeout(resolve, 5))
+    assert.equal(scroll.scrollTop, scroll.scrollHeight - scroll.clientHeight,
+      'releasing the disclosure follows the expanded current-response tail')
+    hook.unmount()
+  } finally {
+    restoreBrowser()
+  }
+})
+
 test('physical movement after a newer follow action remains the latest authority', () => {
   const restoreBrowser = installBrowserEnvironment()
   try {

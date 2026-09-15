@@ -955,7 +955,8 @@ path means routing it through the same entries rather than inventing another rul
 | Later send submitted anywhere else | hold or stale follow | `ANCHOR_AT`/existing hold | None |
 | Reader reaches or explicitly swipes toward physical bottom | any | `FOLLOW_BOTTOM` | User-owned; follow the one physical tail, including remaining reservation |
 | Composer press or edit begins at physical bottom | any hold | `FOLLOW_BOTTOM` | No immediate write; the next owned layout follows the existing physical tail |
-| Disclosure expands | any hold, including follow | `ANCHOR_AT` at the tapped header | Freeze the chosen header so the screen does not move; the R1 reservation is left exactly as the formula computes it. Collapse keeps the existing mode |
+| Current assistant disclosure expands at the physical tail | `FOLLOW_BOTTOM` | same follow | Defer layout through the press, then follow the expanded live tail |
+| Any other disclosure expands | any | `ANCHOR_AT` | From follow, freeze the tapped header; from an existing hold, preserve its visible anchor. The R1 reservation stays formula-owned. Collapse keeps the existing mode |
 | Reader scrolls manually away from bottom | any | `ANCHOR_AT` | User-owned |
 | Reply grows while an armed live pin still has reserved room | pin hold | same pin hold | Keep prompt fixed |
 | Streaming reply consumes the armed pin reservation | pin hold | `FOLLOW_BOTTOM` | Follow physical tail |

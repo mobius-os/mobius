@@ -265,7 +265,7 @@ test('a composer press or direct edit requests follow only at the physical tail'
   }, atTail), false, 'unrelated form events do not claim scroll ownership')
 })
 
-test('disclosure activation is recognized as an anchor-latching reading action', () => {
+test('disclosure activation is recognized as a scroll-policy action', () => {
   const disclosureHeader = {}
   const disclosureTarget = {
     closest: selector => selector.includes('button.chat__activity-header')
@@ -324,13 +324,18 @@ test('disclosure collapse keeps follow while other held states keep their anchor
   )
 })
 
-test('expanding a disclosure holds its header instead of dragging to the tail', () => {
+test('expanding a historical disclosure holds its header instead of dragging to the tail', () => {
   const row = {
     dataset: { key: 'assistant-1' },
     offsetTop: 900,
     offsetHeight: 300,
   }
-  const disclosure = { closest: () => row }
+  const disclosure = {
+    closest(selector) {
+      if (selector === '[data-active-assistant="true"]') return null
+      return row
+    },
+  }
   const atTail = {
     scrollTop: 1397,
     scrollHeight: 2000,
@@ -371,6 +376,48 @@ test('expanding a disclosure holds its header instead of dragging to the tail', 
     modeForDisclosureToggle(aboveTail, pin, { target: disclosure, nextOpen: true }),
     { kind: 'ANCHOR_AT', key: 'assistant-1', offset: 100 },
     'off-tail expansion still freezes the visible reading anchor',
+  )
+})
+
+test('expanding the live assistant at the physical tail preserves follow', () => {
+  const liveRow = {
+    dataset: { key: 'assistant-live', activeAssistant: 'true' },
+    offsetTop: 900,
+    offsetHeight: 300,
+  }
+  const disclosure = {
+    closest(selector) {
+      if (selector === '[data-active-assistant="true"]') return liveRow
+      if (selector.startsWith('button.chat__')) return this
+      if (selector === '.chat__msg[data-key]') return liveRow
+      return null
+    },
+  }
+  const follow = { kind: 'FOLLOW_BOTTOM' }
+  const atTail = {
+    scrollTop: 1400,
+    scrollHeight: 2000,
+    clientHeight: 600,
+    querySelectorAll: () => [liveRow],
+  }
+
+  assert.equal(
+    modeForDisclosureToggle(atTail, follow, {
+      target: disclosure,
+      nextOpen: true,
+    }),
+    follow,
+    'opening current response detail must not silently disable live-tail follow',
+  )
+
+  const offTail = { ...atTail, scrollTop: 1200 }
+  assert.deepEqual(
+    modeForDisclosureToggle(offTail, follow, {
+      target: disclosure,
+      nextOpen: true,
+    }),
+    { kind: 'ANCHOR_AT', key: 'assistant-live', offset: -300 },
+    'a stale follow mode away from the physical tail cannot regain follow',
   )
 })
 
