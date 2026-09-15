@@ -31,7 +31,16 @@ def _response(status: int, body, headers: dict[str, str], media_type: str | None
   return JSONResponse(body, status_code=status, headers=headers)
 
 
-async def _envelope(request: Request, path: str, *, public: bool, scope: str) -> dict:
+def _actor(principal: Principal, caller: models.App | None) -> dict:
+  return {
+    "scope": principal.scope,
+    "app_id": principal.app_id,
+    "app_slug": caller.slug if caller is not None else None,
+    "delegated": principal.delegation_id is not None,
+  }
+
+
+async def _envelope(request: Request, path: str, *, public: bool, actor: dict) -> dict:
   if ".." in path.split("/") or len(path) > 512:
     raise HTTPException(404, "App service path not found.")
   raw = await read_capped_body(
@@ -57,7 +66,7 @@ async def _envelope(request: Request, path: str, *, public: bool, scope: str) ->
     },
     "body": body,
     "public": public,
-    "actor": {"scope": scope},
+    "actor": actor,
   }
 
 
@@ -79,7 +88,10 @@ async def authenticated_app_service(
   if principal.app_id is not None and principal.app_id != app.id:
     raise HTTPException(403, "An app can invoke only its own service.")
   app_services.service_contract(app, access="self")
-  envelope = await _envelope(request, path, public=False, scope=principal.scope)
+  envelope = await _envelope(
+    request, path, public=False,
+    actor=_actor(principal, app if principal.app_id is not None else None),
+  )
   db.expunge(app)
   db.expunge(principal.owner)
   db.close()
@@ -115,12 +127,9 @@ async def shared_app_service(
     raise HTTPException(403, "Calling app is unavailable.")
   required = "self" if principal.app_id in {None, target.id} else "apps"
   app_services.service_contract(target, access=required)
-  envelope = await _envelope(request, path, public=False, scope=principal.scope)
-  envelope["actor"].update({
-    "app_id": principal.app_id,
-    "app_slug": caller.slug if caller is not None else None,
-    "delegated": principal.delegation_id is not None,
-  })
+  envelope = await _envelope(
+    request, path, public=False, actor=_actor(principal, caller),
+  )
   db.expunge(target)
   db.expunge(principal.owner)
   db.close()
@@ -152,7 +161,7 @@ async def public_app_service(
   owner = db.query(models.Owner).first()
   if owner is None:
     raise HTTPException(503, "Owner setup is incomplete.")
-  envelope = await _envelope(request, path, public=True, scope="public")
+  envelope = await _envelope(request, path, public=True, actor={"scope": "public"})
   db.expunge(app)
   db.expunge(owner)
   db.close()

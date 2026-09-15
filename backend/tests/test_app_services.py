@@ -295,3 +295,47 @@ def test_public_service_failure_does_not_expose_app_diagnostics(client, auth, db
   assert response.status_code == 502, response.text
   assert response.json()["detail"] == "App service failed."
   assert "private app detail" not in response.text
+
+
+@pytest.mark.parametrize('route', ['numeric', 'named'])
+@pytest.mark.parametrize('caller_kind', ['app', 'owner', 'delegated-owner'])
+def test_authenticated_routes_preserve_the_same_complete_actor(
+  client, auth, db, route, caller_kind,
+):
+  from app.deps import Principal, get_principal
+  from app.main import app as server
+
+  target = _service_app(db, access='public', slug='stable-actor')
+  accepted = runtime_parent(target.id) / target.runtime_revision
+  (accepted / 'service.py').write_text(
+    'import json,sys\nr=json.load(sys.stdin)\n'
+    'print(json.dumps({"status":200,"body":r["actor"]}))\n'
+  )
+  owner = db.query(models.Owner).one()
+  headers = auth
+  expected = {'scope':'owner', 'app_id':None, 'app_slug':None, 'delegated':False}
+  if caller_kind == 'app':
+    token = auth_tokens.create_app_token(
+      target.id, owner.username, owner.token_epoch, app_nonce=target.token_nonce,
+    )
+    headers = {'Authorization':f'Bearer {token}'}
+    expected.update(scope='app', app_id=target.id, app_slug=target.slug)
+  elif caller_kind == 'delegated-owner':
+    from fastapi import Depends
+    from app.database import get_db
+
+    def delegated_principal(session=Depends(get_db)):
+      return Principal(owner=session.query(models.Owner).one(), app_id=None,
+                       delegation_id='fixture-delegation')
+
+    server.dependency_overrides[get_principal] = delegated_principal
+    expected['delegated'] = True
+  path = (f'/api/apps/{target.id}/service/actor' if route == 'numeric'
+          else '/api/services/stable-actor/actor')
+  try:
+    response = client.post(path, headers=headers, json={'actor':{'scope':'owner'}})
+    assert response.status_code == 200, response.text
+    assert response.json() == expected
+  finally:
+    if caller_kind == 'delegated-owner':
+      server.dependency_overrides.pop(get_principal, None)
