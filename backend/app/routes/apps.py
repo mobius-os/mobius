@@ -2342,6 +2342,7 @@ async def resolve_app_update(
         expected_app_id=app_id,
         expected_upstream_commit=replay_upstream_commit,
         expected_candidate_digest=receipt["candidate_digest"],
+        expected_canonical_source_url=receipt.get("canonical_source_url"),
         resolution_policy=resolution_policy,
         reviewed_resolution_tree_oid=receipt["reviewed_tree_oid"],
       )

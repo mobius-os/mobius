@@ -1149,6 +1149,7 @@ def stage_pending_conflict_update(
   raw_base: str,
   capability_digest: str,
   candidate_digest: str,
+  canonical_source_url: str | None = None,
 ) -> None:
   """Persist everything explicit resolution needs to finish an update.
 
@@ -1171,6 +1172,7 @@ def stage_pending_conflict_update(
     "upstream_commit": upstream_commit,
     "manifest": manifest,
     "raw_base": raw_base,
+    "canonical_source_url": canonical_source_url,
     "capability_digest": capability_digest,
     "candidate_digest": candidate_digest,
     "resolution_policy": None,
@@ -1204,6 +1206,10 @@ def read_pending_conflict_update_receipt(
   reviewed_tree_oid = (
     receipt.get("reviewed_tree_oid") if schema == 2 else None
   ) if isinstance(receipt, dict) else None
+  canonical_source_url = (
+    receipt.get("canonical_source_url")
+    if isinstance(receipt, dict) else None
+  )
   if (
     not isinstance(receipt, dict)
     or schema not in (1, 2)
@@ -1212,6 +1218,10 @@ def read_pending_conflict_update_receipt(
     or receipt.get("upstream_commit") != upstream_commit
     or not isinstance(receipt.get("manifest"), dict)
     or not isinstance(receipt.get("raw_base"), str)
+    or (
+      canonical_source_url is not None
+      and not isinstance(canonical_source_url, str)
+    )
     or not isinstance(receipt.get("capability_digest"), str)
     or not re.fullmatch(r"[0-9a-f]{64}", receipt.get("candidate_digest", ""))
     or policy not in ({None} | UPDATE_RESOLUTION_POLICIES)
@@ -1230,6 +1240,7 @@ def read_pending_conflict_update_receipt(
   # the first explicit policy choice upgrades the durable receipt atomically.
   receipt["resolution_policy"] = policy
   receipt["reviewed_tree_oid"] = reviewed_tree_oid
+  receipt["canonical_source_url"] = canonical_source_url
   return receipt
 
 
@@ -2264,6 +2275,7 @@ async def _fetch_install_candidate(
   expected_app_id: int | None,
   expected_upstream_commit: str | None,
   expected_candidate_digest: str | None,
+  expected_canonical_source_url: str | None = None,
 ) -> InstallCandidate:
   """Fetch every install input once and enforce all review/replay guards."""
   async with httpx.AsyncClient(
@@ -2401,7 +2413,13 @@ async def _fetch_install_candidate(
     raw_base=raw_base,
     source_identity=source_identity,
     predecessor_source_identity=predecessor_source_identity,
-    canonical_source_url=canonical_source_url,
+    # Conflict replay supplies the canonical URL recorded by the original
+    # reviewed fetch. Inline replay starts from raw_base, which can canonicalize
+    # to the directory rather than the original manifest URL even though every
+    # fetched byte and the verified repository identity are unchanged.
+    canonical_source_url=(
+      expected_canonical_source_url or canonical_source_url
+    ),
     entry_bytes=entry_bytes,
     icon_processed=icon_processed,
     bundled_job=bundled_job,
@@ -3225,6 +3243,7 @@ async def install_from_manifest(
   expected_app_id: int | None = None,
   expected_upstream_commit: str | None = None,
   expected_candidate_digest: str | None = None,
+  expected_canonical_source_url: str | None = None,
   resolution_policy: str | None = None,
   reviewed_resolution_tree_oid: str | None = None,
   publication_handoff_app_id: int | None = None,
@@ -3295,6 +3314,7 @@ async def install_from_manifest(
     expected_app_id=expected_app_id,
     expected_upstream_commit=expected_upstream_commit,
     expected_candidate_digest=expected_candidate_digest,
+    expected_canonical_source_url=expected_canonical_source_url,
   )
   manifest = candidate.manifest
   raw_base = candidate.raw_base
@@ -3815,6 +3835,7 @@ async def install_from_manifest(
           upstream_commit=app.upstream_commit,
           manifest=manifest,
           raw_base=raw_base,
+          canonical_source_url=candidate.canonical_source_url,
           capability_digest=fetched_capability_digest,
           candidate_digest=candidate_digest,
         )

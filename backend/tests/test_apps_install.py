@@ -3744,6 +3744,10 @@ def test_exact_upstream_policy_replaces_complete_tracked_source_tree(
   conflicted = _update_v2(client, auth, base, manifest_v2, upstream)
   assert conflicted.status_code == 201, conflicted.text
   assert conflicted.json()["mode"] == "conflict"
+  receipt = json.loads(
+    (app_dir / ".git" / "mobius-pending-update" / "receipt.json").read_text()
+  )
+  assert receipt["canonical_source_url"] == base
 
   selected = client.post(
     f"/api/apps/{app_id}/conflict-resolver-chat",
@@ -4218,6 +4222,65 @@ def test_deferred_replay_reports_changed_candidate_as_structured_recovery(
       "Review the latest update and start again."
     ),
   }
+
+
+def test_deferred_replay_reuses_the_reviewed_canonical_source_url(
+  bypass_url_validation,
+):
+  """Inline replay must not rename an unchanged package source directory."""
+  from app import install
+
+  base = "https://raw.githubusercontent.com/mobius-os/app-canonical/main/"
+  manifest_url = base + "mobius.json"
+  manifest = {
+    **MANIFEST_NEWS,
+    "id": "canonical-replay",
+    "package_id": "urn:uuid:09c24efa-79e5-457f-b92e-b7d6f03e63bd",
+  }
+  responses = {
+    manifest_url: (200, json.dumps(manifest).encode()),
+    base + "index.jsx": (200, JSX.encode()),
+    base + "icon.png": (200, _png_bytes()),
+    base + "prompt.md": (200, PROMPT.encode()),
+    base + "fetch.sh": (200, b"#!/bin/sh\n"),
+  }
+
+  async def identity(_client, source_url):
+    return "github:123", source_url
+
+  with patch(
+    "app.install.httpx.AsyncClient",
+    side_effect=_fake_async_client(responses),
+  ), patch("app.install._resolve_source_identity", side_effect=identity):
+    reviewed = asyncio.run(install._fetch_install_candidate(
+      manifest_url=manifest_url,
+      manifest=None,
+      raw_base=None,
+      reviewed_capability_digest=None,
+      reviewed_source_digest=None,
+      expected_app_id=None,
+      expected_upstream_commit=None,
+      expected_candidate_digest=None,
+    ))
+
+  with patch(
+    "app.install.httpx.AsyncClient",
+    side_effect=_fake_async_client(responses),
+  ), patch("app.install._resolve_source_identity", side_effect=identity):
+    replayed = asyncio.run(install._fetch_install_candidate(
+      manifest_url=None,
+      manifest=manifest,
+      raw_base=base,
+      reviewed_capability_digest=None,
+      reviewed_source_digest=None,
+      expected_app_id=1,
+      expected_upstream_commit="a" * 40,
+      expected_candidate_digest=reviewed.candidate_digest,
+      expected_canonical_source_url=reviewed.canonical_source_url,
+    ))
+
+  assert reviewed.canonical_source_url == manifest_url
+  assert replayed.candidate_digest == reviewed.candidate_digest
 
 
 def test_update_preview_accepts_app_token_with_manage_apps_for_other_app(
