@@ -83,6 +83,13 @@ async function setupShellBasics(page) {
     }
     return route.fulfill({ status: 204, body: '' })
   })
+  await page.route(/\/api\/ready$/, route =>
+    route.fulfill({
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ready: true, boot_id: 'app-canvas-fixture-boot' }),
+    })
+  )
   await page.route(/\/api\/health$/, route =>
     route.fulfill({
       status: 200,

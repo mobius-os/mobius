@@ -201,7 +201,7 @@ test.describe('Bug 1: AskUserQuestion', () => {
   })
 
 
-  test('a failed answer keeps the question and choice retryable', async ({ page }) => {
+  test('a transiently failed answer stays durably queued on its question card', async ({ page }) => {
     const questionStream = [
       `data: ${JSON.stringify({
         type: 'question',
@@ -251,13 +251,13 @@ test.describe('Bug 1: AskUserQuestion', () => {
     // Prove the failure below comes from the intended answer request, not a
     // competing route mock or a click that never reached the transport.
     await expect.poll(() => answerAttempts).toBe(1)
-    await expect(card.getByText(/answer didn’t save/i)).toBeVisible()
+    await expect(card.getByRole('status')).toContainText(
+      'Your answer is saved here and will send when Möbius reconnects.',
+    )
     await expect(careful).toHaveAttribute('aria-checked', 'true')
-    await expect(careful).toBeEnabled()
-    await expect(submit).toBeEnabled()
-    await submit.click()
-    await expect.poll(() => answerAttempts).toBe(2)
-    await expect(page.getByRole('button', { name: 'Submitted' })).toBeDisabled()
+    await expect(careful).toBeDisabled()
+    await expect(page.getByRole('button', { name: 'Queued on this device' })).toBeDisabled()
+    expect(answerAttempts).toBe(1)
   })
 
 
