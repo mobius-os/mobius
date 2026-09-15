@@ -207,7 +207,7 @@ def test_control_protocol_advertises_every_run_bound_tool(monkeypatch):
   assert "instead of checking for replies" in send_description
 
 
-def test_delegated_control_server_advertises_only_coordination(monkeypatch):
+def test_delegated_control_server_advertises_only_peer_and_ownership_tools(monkeypatch):
   monkeypatch.delenv("MOBIUS_RUN_TOKEN", raising=False)
   control = _control_module()
 
