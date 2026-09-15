@@ -1,5 +1,6 @@
 import { test, expect } from '@playwright/test'
 import { attachCleanup, createTaggedChat } from './_chatTracker.mjs'
+import { createMockChatRuntime } from './_mockChatRuntime.mjs'
 import * as paneModel from '../frontend/src/components/Shell/paneModel.js'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
@@ -39,6 +40,7 @@ test('returning to a retained hidden chat settles a missed terminal stream event
   }, { key: paneModel.STORAGE_KEY, workspace: paneModel.serializeWorkspace(ws), chatId: a.id })
 
   let running = true
+  const runtime = createMockChatRuntime({ running: true })
   let messages = [{
     role: 'user', content: 'Run the settlement check', ts: 1700001000000,
     blocks: [{ type: 'text', content: 'Run the settlement check' }],
@@ -46,15 +48,14 @@ test('returning to a retained hidden chat settles a missed terminal stream event
   let idleRuntimeReads = 0
   await page.route(new RegExp(`/api/chats/${a.id}(?:\\?.*)?$`), route => {
     if (route.request().method() !== 'GET') return route.fallback()
-    return route.fulfill({ json: {
+    return route.fulfill({ json: runtime.detail({
       id: a.id, title: 'Hidden settlement', provider: 'codex',
-      messages, total: messages.length, offset: 0, running,
-      pending_messages: [], pending_question_id: null,
-    } })
+      messages, total: messages.length, offset: 0,
+    }) })
   })
   await page.route(new RegExp(`/api/chats/${a.id}/runtime(?:\\?.*)?$`), route => {
     if (!running && messages.length > 1) idleRuntimeReads += 1
-    return route.fulfill({ json: { running, pending_messages: [], pending_question_id: null } })
+    return route.fulfill({ json: runtime.snapshot() })
   })
   await page.clock.install()
   await page.goto(`${BASE}/shell/?chat=${a.id}`, { waitUntil: 'domcontentloaded' })
@@ -78,6 +79,7 @@ test('returning to a retained hidden chat settles a missed terminal stream event
     blocks: [{ type: 'text', content: 'The saved final answer.' }],
   }]
   running = false
+  runtime.update({ running: false })
   await page.evaluate(chatId => window.emitSettlementEvent({ type: 'chat_run_finished', chatId }), a.id)
   await page.getByRole('button', { name: 'Show all panes' }).click()
   await expect.poll(() => idleRuntimeReads).toBeGreaterThan(0)

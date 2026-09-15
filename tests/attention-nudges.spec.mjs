@@ -11,6 +11,7 @@
  */
 import { test, expect } from '@playwright/test'
 import { createTaggedChat, attachCleanup } from './_chatTracker.mjs'
+import { createMockChatRuntime } from './_mockChatRuntime.mjs'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
 
@@ -94,24 +95,25 @@ for (const scenario of SCENARIOS) {
     const pendingQuestionId = scenario.tailBlock.type === 'question'
       ? scenario.tailBlock.question_id
       : null
+    const runtime = createMockChatRuntime({
+      running: true,
+      active_goal_objective: goalObjective,
+      pending_question_id: pendingQuestionId,
+    })
 
     await page.route(new RegExp(`/api/chats/${chat.id}\\?limit=`), route => {
       if (route.request().method() !== 'GET') return route.continue()
       return route.fulfill({
         status: 200,
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+        body: JSON.stringify(runtime.detail({
           messages,
           total: messages.length,
           offset: 0,
           // The build-phase rail is a live-run surface. Keep the fixture's
           // turn active; a durable question intentionally does not reattach
           // its stream, so its active goal owns the same progress rail.
-          running: true,
-          active_goal_objective: goalObjective,
-          pending_question_id: pendingQuestionId,
-          pending_messages: [],
-        }),
+        })),
       })
     })
     await page.route(new RegExp(`/api/chats/${chat.id}/runtime$`), route => {
@@ -119,12 +121,7 @@ for (const scenario of SCENARIOS) {
       return route.fulfill({
         status: 200,
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          running: true,
-          active_goal_objective: goalObjective,
-          pending_messages: [],
-          pending_question_id: pendingQuestionId,
-        }),
+        body: JSON.stringify(runtime.snapshot()),
       })
     })
     const streamBody = [

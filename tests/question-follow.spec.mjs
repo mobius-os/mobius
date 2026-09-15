@@ -6,6 +6,7 @@
  */
 import { test, expect, serveRecoveryBuild } from './_recoveryBrowser.mjs'
 import { testChatAgentSettings, installMockAgentProvider } from './_chatTestPrerequisites.mjs'
+import { createMockChatRuntime } from './_mockChatRuntime.mjs'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
 
@@ -154,6 +155,7 @@ for (const scenario of [...questionFollowScenarios, coldQuestionScenario]) test(
     let acceptedMessage = null
     let messagePosts = 0
     let pendingQuestionId = null
+    const runtime = createMockChatRuntime()
     await page.route(new RegExp(`/api/chats/${chat.id}/messages$`), async route => {
       if (route.request().method() !== 'POST') return route.fallback()
       const body = route.request().postDataJSON()
@@ -162,6 +164,10 @@ for (const scenario of [...questionFollowScenarios, coldQuestionScenario]) test(
         acceptedMessage = { role: 'user', content: body.content, cid: body.cid, ts: 1700000600000 }
         turnStarted = true
         pendingQuestionId = questionBlock.question_id
+        runtime.update({
+          running: true,
+          pending_question_id: pendingQuestionId,
+        })
         return route.fulfill({
           status: 202,
           contentType: 'application/json',
@@ -169,6 +175,7 @@ for (const scenario of [...questionFollowScenarios, coldQuestionScenario]) test(
         })
       }
       pendingQuestionId = null
+      runtime.update({ pending_question_id: null })
       questionBlock.answers = body.answers
       await page.evaluate(answers => window.__answerQuestionStream(answers), body.answers)
       return route.fulfill({
@@ -192,13 +199,7 @@ for (const scenario of [...questionFollowScenarios, coldQuestionScenario]) test(
       width: scenario.viewport.width,
       height: scenario.viewport.initialHeight,
     })
-    const runtimeState = () => ({
-      running: turnStarted,
-      active_goal_objective: null,
-      pending_messages: [],
-      pending_question_id: pendingQuestionId,
-      updated_at: null,
-    })
+    const runtimeState = () => runtime.snapshot()
     await page.route(new RegExp(`/api/chats/${chat.id}/runtime(?:\\?.*)?$`), route => {
       if (route.request().method() !== 'GET') return route.fallback()
       return route.fulfill({
@@ -212,8 +213,7 @@ for (const scenario of [...questionFollowScenarios, coldQuestionScenario]) test(
       return route.fulfill({
         status: 200,
         contentType: 'application/json',
-        body: JSON.stringify({
-          ...runtimeState(),
+        body: JSON.stringify(runtime.detail({
           id: chat.id,
           // A published question is already durable. Reconnecting views read
           // this card instead of replaying the entire pre-question stream.
@@ -225,7 +225,7 @@ for (const scenario of [...questionFollowScenarios, coldQuestionScenario]) test(
           offset: 0,
           provider: 'claude',
           ...testChatAgentSettings(),
-        }),
+        })),
       })
     })
     await page.goto(`${BASE}/shell/?chat=${encodeURIComponent(chat.id)}`, {

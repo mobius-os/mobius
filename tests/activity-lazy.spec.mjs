@@ -7,6 +7,7 @@
  */
 import { test, expect } from '@playwright/test'
 import { createTaggedChat, attachCleanup } from './_chatTracker.mjs'
+import { createMockChatRuntime } from './_mockChatRuntime.mjs'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
 
@@ -99,6 +100,7 @@ test('cold historical activity reveals once at its final height', async ({ page 
     { timeout: 10000 },
   )
   const chat = await createTaggedChat(page, 'atomic-activity-detail')
+  const runtime = createMockChatRuntime()
   const messages = [
     { role: 'user', content: 'Inspect this saved run.', ts: 1700000000000 },
     {
@@ -142,14 +144,12 @@ test('cold historical activity reveals once at its final height', async ({ page 
     return route.fulfill({
       status: 200,
       contentType: 'application/json',
-      body: JSON.stringify({
+      body: JSON.stringify(runtime.detail({
         ...chat,
         messages,
         total: messages.length,
         offset: 0,
-        running: false,
-        pending_messages: [],
-      }),
+      })),
     })
   })
   await page.route(new RegExp(`/api/chats/${chat.id}/stream$`), route =>
@@ -255,6 +255,7 @@ test('a lone activity is direct and sources render as safe compact pills', async
     { timeout: 10000 },
   )
   const chat = await createTaggedChat(page, 'direct-activity-sources')
+  const runtime = createMockChatRuntime()
   const blocks = [
     {
       type: 'tool',
@@ -280,14 +281,12 @@ test('a lone activity is direct and sources render as safe compact pills', async
     return route.fulfill({
       status: 200,
       contentType: 'application/json',
-      body: JSON.stringify({
+      body: JSON.stringify(runtime.detail({
         ...chat,
         messages,
         total: messages.length,
         offset: 0,
-        running: false,
-        pending_messages: [],
-      }),
+      })),
     })
   })
   await page.route(new RegExp(`/api/chats/${chat.id}/stream$`), route =>
@@ -379,6 +378,7 @@ test('activity stays nested and lazy, aborts on close, and copies exact tool out
     { timeout: 10000 },
   )
   const chat = await createTaggedChat(page, 'lazy-activity')
+  const runtime = createMockChatRuntime()
 
   const thinkingId = 'thinking-ui-contract'
   const toolUseId = 'tool-ui-contract'
@@ -417,14 +417,12 @@ test('activity stays nested and lazy, aborts on close, and copies exact tool out
     return route.fulfill({
       status: 200,
       contentType: 'application/json',
-      body: JSON.stringify({
+      body: JSON.stringify(runtime.detail({
         ...chat,
         messages,
         total: messages.length,
         offset: 0,
-        running: false,
-        pending_messages: [],
-      }),
+      })),
     })
   })
   await page.route(new RegExp(`/api/chats/${chat.id}/stream$`), route =>

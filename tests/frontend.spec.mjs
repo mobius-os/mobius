@@ -9,6 +9,7 @@
 import { test, expect } from '@playwright/test'
 import { createTaggedChat, attachCleanup } from './_chatTracker.mjs'
 import { mockPendingQuestionState } from './_mockPendingQuestion.mjs'
+import { createMockChatRuntime } from './_mockChatRuntime.mjs'
 import { applyApp } from './app-source.mjs'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
@@ -665,6 +666,7 @@ test.describe('Scroll position', () => {
         ],
       },
     ]
+    const runtime = createMockChatRuntime()
 
     // Scroll restore is only meaningful for content that survives navigation.
     // The shared POST stub creates optimistic rows only, so this test serves
@@ -675,13 +677,11 @@ test.describe('Scroll position', () => {
       return route.fulfill({
         status: 200,
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+        body: JSON.stringify(runtime.detail({
           messages,
           total: messages.length,
           offset: 0,
-          running: false,
-          pending_messages: [],
-        }),
+        })),
       })
     })
 
@@ -777,19 +777,18 @@ test.describe('Scroll position', () => {
         })),
       },
     ]
+    const runtime = createMockChatRuntime()
 
     await page.route(new RegExp(`/api/chats/${chatId}\\?limit=`), route => {
       if (route.request().method() !== 'GET') return route.continue()
       return route.fulfill({
         status: 200,
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+        body: JSON.stringify(runtime.detail({
           messages,
           total: messages.length,
           offset: 0,
-          running: false,
-          pending_messages: [],
-        }),
+        })),
       })
     })
 
@@ -894,6 +893,7 @@ test.describe('Scroll position', () => {
       }
     })
     let recentFetches = 0
+    const runtime = createMockChatRuntime()
 
     await page.route(new RegExp(`/api/chats/${chatId}\\?limit=`), async route => {
       if (route.request().method() !== 'GET') return route.continue()
@@ -906,13 +906,11 @@ test.describe('Scroll position', () => {
       return route.fulfill({
         status: 200,
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+        body: JSON.stringify(runtime.detail({
           messages: allMessages.slice(start, before),
           total: allMessages.length,
           offset: start,
-          running: false,
-          pending_messages: [],
-        }),
+        })),
       })
     })
 
@@ -1007,6 +1005,7 @@ test.describe('Scroll position', () => {
     expect(occupyResponse.ok()).toBe(true)
 
     let returning = false
+    const runtime = createMockChatRuntime()
     let streamCount = 0
     let catchUpServed = false
     let releaseCatchUp
@@ -1038,13 +1037,11 @@ test.describe('Scroll position', () => {
       return route.fulfill({
         status: 200,
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+        body: JSON.stringify(runtime.detail({
           messages: history(returning ? 'entry-image-return.png' : 'entry-image-initial.png'),
           total: 4,
           offset: 0,
-          running: returning,
-          pending_messages: [],
-        }),
+        })),
       })
     })
     await page.route('**/entry-image-initial.png', route => route.fulfill({
@@ -1122,6 +1119,7 @@ test.describe('Scroll position', () => {
     expect(decoyChatId).not.toBe(chatId)
 
     returning = true
+    runtime.update({ running: true })
     await page.evaluate(() => {
       window.__entryTrajectory = []
       const started = performance.now()
@@ -1384,6 +1382,7 @@ test.describe('Connection recovery', () => {
 
     let streamCallCount = 0
     let refreshReady = false
+    const runtime = createMockChatRuntime()
 
     await page.route(/\/api\/chats\/[0-9a-f-]+\/messages$/, route =>
       fulfillStartedPost(route)
@@ -1400,14 +1399,14 @@ test.describe('Connection recovery', () => {
       route.fulfill({
         status: 200,
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+        body: JSON.stringify(runtime.detail({
           messages: [
             { role: 'user', content: 'Recovery test', ts: Date.now() },
             { role: 'assistant', content: 'Recovered final response from DB.' },
           ],
           total: 2,
           offset: 0,
-        }),
+        })),
       })
     })
 

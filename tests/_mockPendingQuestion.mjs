@@ -7,10 +7,12 @@
  * transient question card into read-only history.
  */
 import { testChatAgentSettings } from './_chatTestPrerequisites.mjs'
+import { createMockChatRuntime } from './_mockChatRuntime.mjs'
 
 export async function mockPendingQuestionState(page, questionId) {
   let pendingQuestionId = null
   let turnStarted = false
+  const runtime = createMockChatRuntime()
 
   // Register this helper after the test's response mocks. Playwright invokes
   // the newest route first, so fallback preserves the existing POST response
@@ -22,6 +24,10 @@ export async function mockPendingQuestionState(page, questionId) {
       if (!body.answers) {
         turnStarted = true
         pendingQuestionId = questionId
+        runtime.update({
+          running: true,
+          pending_question_id: pendingQuestionId,
+        })
       }
     }
     return route.fallback()
@@ -34,27 +40,22 @@ export async function mockPendingQuestionState(page, questionId) {
     }
 
     const path = new URL(request.url()).pathname
-    const runtime = {
-      running: false,
-      active_goal_objective: null,
-      pending_messages: [],
+    const runtimeState = runtime.snapshot({
       pending_question_id: pendingQuestionId,
-      updated_at: null,
-    }
+    })
     return route.fulfill({
       status: 200,
       contentType: 'application/json',
       json: path.endsWith('/runtime')
-        ? runtime
-        : {
-            ...runtime,
+        ? runtimeState
+        : runtime.detail({
             id: path.split('/').at(-1),
             messages: [],
             total: 0,
             offset: 0,
             provider: 'claude',
             ...testChatAgentSettings(),
-          },
+          }),
     })
   }
 
@@ -70,6 +71,7 @@ export async function mockPendingQuestionState(page, questionId) {
   return {
     markAnswered() {
       pendingQuestionId = null
+      runtime.update({ pending_question_id: null })
     },
   }
 }

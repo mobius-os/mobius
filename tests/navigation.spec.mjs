@@ -8,6 +8,7 @@
  */
 import { test, expect } from '@playwright/test'
 import * as paneModel from '../frontend/src/components/Shell/paneModel.js'
+import { createMockChatRuntime } from './_mockChatRuntime.mjs'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
 const NAV_CHATS = [
@@ -138,6 +139,7 @@ async function setup(
     chatDetailGate = null,
     chats = NAV_CHATS,
     detailForChat = null,
+    runtimeFixture = createMockChatRuntime(),
     chatListResponder = null,
     chatPatchResponder = null,
   } = {},
@@ -177,7 +179,9 @@ async function setup(
     // Capture the body when the request begins. A delayed cold read represents
     // that older server snapshot; later reads may observe a message accepted
     // while it was in flight without rewriting history inside the fixture.
-    const detail = detailForChat ? detailForChat(id) : navChatDetail(id, assistantContent)
+    const detail = runtimeFixture.detail(
+      detailForChat ? detailForChat(id) : navChatDetail(id, assistantContent),
+    )
     const fulfill = () => route.fulfill({
       status: 200,
       contentType: 'application/json',
@@ -205,13 +209,7 @@ async function setup(
     return route.fulfill({
       status: 200,
       contentType: 'application/json',
-      body: JSON.stringify({
-        running: false,
-        active_goal_objective: null,
-        pending_messages: [],
-        pending_question_id: null,
-        updated_at: null,
-      }),
+      body: JSON.stringify(runtimeFixture.snapshot()),
     })
   })
   await page.route('**/api/chat/stop', route =>
@@ -398,6 +396,7 @@ test.describe('Navigation basics', () => {
     let releaseChatDetail
     const wait = new Promise(resolve => { releaseChatDetail = resolve })
     let runtimeRunning = false
+    const runtime = createMockChatRuntime()
     let acceptedMessage = null
     const blank = {
       ...NAV_CHATS[0],
@@ -414,6 +413,7 @@ test.describe('Navigation basics', () => {
         running: runtimeRunning,
       }),
       chatDetailGate: { id: blank.id, wait },
+      runtimeFixture: runtime,
     })
 
     let releaseStream
@@ -423,18 +423,13 @@ test.describe('Navigation basics', () => {
       return route.fulfill({
         status: 200,
         contentType: 'application/json',
-        body: JSON.stringify({
-          running: runtimeRunning,
-          active_goal_objective: null,
-          pending_messages: [],
-          pending_question_id: null,
-          updated_at: null,
-        }),
+        body: JSON.stringify(runtime.snapshot()),
       })
     })
     await page.route(/\/api\/chats\/[0-9a-f-]+\/messages$/, route => {
       sendRequests += 1
       runtimeRunning = true
+      runtime.update({ running: true })
       const request = route.request().postDataJSON()
       acceptedMessage = {
         role: 'user',

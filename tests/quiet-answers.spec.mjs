@@ -1,5 +1,6 @@
 /* Saved close answers never manufacture a model turn or disturb owner intent. */
 import { test, expect, serveRecoveryBuild } from './_recoveryBrowser.mjs'
+import { createMockChatRuntime } from './_mockChatRuntime.mjs'
 
 const BASE = process.env.MOBIUS_URL || process.env.API_BASE_URL || 'http://localhost:8001'
 const CHAT = process.env.MOBIUS_RECOVERY_CHAT_ID || 'ffffffff-1111-4222-8333-444444444444'
@@ -38,6 +39,11 @@ async function mount(page, { reject = false, acknowledgement = 'response', resta
   const unansweredMessages = structuredClone(messages)
   let answerWrites = 0
   const pendingMessages = []
+  const initiallyAnswered = restartStatus !== 'awaiting_owner'
+  const runtime = createMockChatRuntime({
+    pending_question_id: initiallyAnswered ? null : block.question_id,
+  })
+  const unansweredRuntime = runtime.snapshot()
   const attempts = []
   const mutations = []
   let releaseMessage
@@ -46,12 +52,14 @@ async function mount(page, { reject = false, acknowledgement = 'response', resta
   const detail = () => {
     const awaitingReplay = acknowledgement === 'replay' && attempts.length === 1
     const answered = restartStatus !== 'awaiting_owner' || (block.answers && !awaitingReplay)
+    const runtimeState = awaitingReplay ? unansweredRuntime : runtime.snapshot()
     return { id: CHAT, title: 'Quiet answer fixture', provider: 'codex',
       messages: awaitingReplay ? unansweredMessages : messages,
-      total: messages.length, offset: 0, running: false, pending_messages: pendingMessages,
+      total: messages.length, offset: 0,
       agent_settings_json: { model: 'gpt-6-astra' }, effective: { model: 'gpt-6-astra' },
-      pending_question_id: answered ? null : block.question_id, active_goal_objective: null,
-      recovery_run_id: null, active_assistant_message_id: null, updated_at: '2026-09-09T02:00:00Z' }
+      ...runtimeState,
+      pending_question_id: answered ? null : block.question_id,
+      updated_at: '2026-09-09T02:00:00Z' }
   }
   await page.route('**/api/**', async route => {
     const req = route.request(), url = new URL(req.url())
@@ -61,7 +69,10 @@ async function mount(page, { reject = false, acknowledgement = 'response', resta
       if (!body.answers) {
         if (messageGate) await messageGate
         const pending = { role: 'user', content: body.content, cid: body.cid, ts: Date.now() }
-        if (!pendingMessages.some(row => row.cid === body.cid)) pendingMessages.push(pending)
+        if (!pendingMessages.some(row => row.cid === body.cid)) {
+          pendingMessages.push(pending)
+          runtime.update({ pending_messages: [...pendingMessages] })
+        }
         return route.fulfill({ status: 202, json: { status: 'queued', pending_message: pending, position: pendingMessages.length } })
       }
       if (reject && attempts.length === 1) return route.fulfill({ status: 409, json: {
@@ -73,6 +84,10 @@ async function mount(page, { reject = false, acknowledgement = 'response', resta
         : body.selected_options?.help?.[0] === '0'
       block.answer_turn = closesWithoutReply ? 'none' : 'new'
       if (restart) block.platform_action = { ...block.platform_action, status: body.selected_options?.restart?.[0] === 'restart-option' ? 'restart_requested' : 'responded' }
+      runtime.update({
+        running: !closesWithoutReply,
+        pending_question_id: null,
+      })
       if (acknowledgement !== 'response' && attempts.length === 1) return route.fulfill({ status: 503, json: { detail: 'Acknowledgement unavailable; your choice remains retryable.' } })
       return route.fulfill({ status: 200, json: { status: closesWithoutReply ? 'answered' : 'started', answer_turn: block.answer_turn, running: !closesWithoutReply, answers: block.answers, selected_options: body.selected_options, ...(restart ? { platform_action: block.platform_action } : {}) } })
     }

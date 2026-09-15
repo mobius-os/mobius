@@ -23,24 +23,21 @@
 import { test, expect } from '@playwright/test'
 import * as paneModel from '../frontend/src/components/Shell/paneModel.js'
 import * as tabModel from '../frontend/src/components/Shell/tabModel.js'
+import { createMockChatRuntime } from './_mockChatRuntime.mjs'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
 
 async function mockIdleChatRuntime(page) {
+  const runtime = createMockChatRuntime()
   await page.route(/\/api\/chats\/[^/?]+\/runtime(?:\?.*)?$/, route => {
     if (route.request().method() !== 'GET') return route.fallback()
     return route.fulfill({
       status: 200,
       contentType: 'application/json',
-      body: JSON.stringify({
-        running: false,
-        active_goal_objective: null,
-        pending_messages: [],
-        pending_question_id: null,
-        updated_at: null,
-      }),
+      body: JSON.stringify(runtime.snapshot()),
     })
   })
+  return runtime
 }
 
 async function bootShell(page, viewport) {
@@ -62,11 +59,21 @@ async function bootSeededWorkspace(page, viewport, ws) {
   await page.setViewportSize(viewport)
   await page.route(/\/api\/chats\/[0-9a-f-]+\/messages$/, r => r.fulfill({ status: 202, body: '{}' }))
   await page.route(/\/api\/chats\/[0-9a-f-]+\/stream$/, r => r.fulfill({ status: 204, body: '' }))
-  await mockIdleChatRuntime(page)
+  const runtime = await mockIdleChatRuntime(page)
   await page.route('**/api/chat/stop', r => r.fulfill({ status: 200, body: '{}' }))
   await page.route(/\/api\/chats\/[^/?]+(\?.*)?$/, (r) => {
     if (r.request().method() !== 'GET') return r.fallback()
-    return r.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ id: 'x', title: 'Seeded', messages: [] }) })
+    return r.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify(runtime.detail({
+        id: new URL(r.request().url()).pathname.split('/').pop(),
+        title: 'Seeded',
+        messages: [],
+        total: 0,
+        offset: 0,
+      })),
+    })
   })
   const blob = paneModel.serializeWorkspace(ws)
   await page.addInitScript(([key, raw]) => {

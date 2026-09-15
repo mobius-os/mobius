@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test'
+import { createMockChatRuntime } from './_mockChatRuntime.mjs'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
 const CHAT_ID = '70000000-0000-4000-8000-000000000007'
@@ -32,6 +33,7 @@ function chatListItem() {
 }
 
 async function setupGallery(page, viewport) {
+  const runtime = createMockChatRuntime()
   await page.setViewportSize(viewport)
   await page.addInitScript(chatId => {
     localStorage.setItem('moebius_active_chat', chatId)
@@ -50,16 +52,14 @@ async function setupGallery(page, viewport) {
     return route.fulfill({
       status: 200,
       contentType: 'application/json',
-      body: JSON.stringify({
+      body: JSON.stringify(runtime.detail({
         messages: [
           { role: 'user', content: 'Show the related photos', ts: 1700000000000, blocks: [] },
           { role: 'assistant', content: imageMarkup(), ts: 1700000000001, blocks: [] },
         ],
         total: 2,
         offset: 0,
-        running: false,
-        pending_messages: [],
-      }),
+      })),
     })
   })
   await page.route(/\/api\/chats\/[0-9a-f-]+\/stream$/, route =>
