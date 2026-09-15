@@ -1960,10 +1960,10 @@ export default function useScrollMode({
         })
       }
       if (activatesDisclosure) {
-        // Expansion latches the chosen header BEFORE React changes body height,
-        // including from FOLLOW_BOTTOM; collapse retains the existing mode. The
-        // gesture gate below defers ResizeObserver writes until pointerup, then
-        // replays that same policy.
+        // Historical expansion latches the chosen header before React changes
+        // its height. Current-response detail at the physical tail retains
+        // FOLLOW_BOTTOM. The gesture gate below defers either layout policy
+        // until pointerup.
         const nextMode = modeForDisclosureToggle(scrollEl, modeRef.current, {
           target: disclosureTarget,
           nextOpen: !!disclosureTarget

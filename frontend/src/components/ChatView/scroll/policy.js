@@ -407,10 +407,9 @@ export function nestedReaderTargetOwnsInput({
 }
 
 
-/** A disclosure activation is a reading action even when it produces no native
- * scroll event. Snapshotting the current message anchor before its body changes
- * prevents a stale FOLLOW_BOTTOM mode from replaying after pointerup and
- * dragging a near-foot activity header down into the newly-opened timeline. */
+/** A disclosure activation owns the input window even when it produces no
+ * native scroll event. Historical expansion snapshots the tapped anchor;
+ * current-response expansion at the physical tail retains live follow. */
 export function readerInputDisclosureTarget(
   type,
   key = '',
@@ -514,12 +513,10 @@ export function modeForChatExit(scrollEl) {
 
 
 /** A disclosure toggle obeys the existing reading mode instead of inventing a
- * second scroll policy. Collapse stays in FOLLOW_BOTTOM because removing
- * detail does not reveal a new reading location. Expansion is a reading
- * action: freeze the exact tapped header before its body changes height, even
- * from FOLLOW_BOTTOM, so an older long block cannot pull the reader to the
- * newly enlarged tail. Other modes always freeze their current anchor; the R1
- * reservation remains the same pure geometry calculation in every mode. */
+ * second scroll policy. Current-response detail opened at the physical tail
+ * stays in FOLLOW_BOTTOM; historical detail freezes the tapped header before
+ * it grows. Other modes always freeze their current anchor, and collapse
+ * preserves the existing mode because it reveals no new reading surface. */
 export function modeForDisclosureToggle(
   scrollEl,
   currentMode,
@@ -527,6 +524,9 @@ export function modeForDisclosureToggle(
 ) {
   if (currentMode?.kind === 'FOLLOW_BOTTOM') {
     if (!nextOpen) return currentMode
+    const opensLiveTail = isNearPhysicalBottom(scrollEl)
+      && !!target?.closest?.('[data-active-assistant="true"]')
+    if (opensLiveTail) return currentMode
     const disclosure = target?.closest?.(
       'button.chat__activity-header, button.chat__activity-think-toggle, button.chat__tool-header, button.chat__marker-header',
     )
