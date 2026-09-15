@@ -30,6 +30,13 @@ REQUIREMENT_VERSION = 1
 # If even failure-settlement persistence fails, the existing wait supervisor
 # closes that handoff after two minutes; it never retries the restart itself.
 RESTART_HANDOFF_DEADLINE_SECONDS = 120
+# After a restart is actually dispatched (admitted), give the new boot a bounded
+# window to record a service-ready receipt. If none appears — the boot came up
+# degraded, or a failing update rolled the source back so the readiness snapshot
+# never ran — the activation wait must not pin the agent forever. Past this
+# window we resume the agent to verify manually instead. Generous enough to
+# cover a slow boot or container replacement, bounded enough to self-heal.
+ACTIVATION_CONFIRM_DEADLINE_SECONDS = 900
 RESTART_SOURCE_PATHS = (
   "backend/app",
   "backend/runtime/identity_broker.py",
@@ -246,9 +253,28 @@ def activation_wait_verdict(
     .order_by(models.PlatformBootSnapshot.captured_at.desc())
     .first()
   )
-  if ready_boot is None:
-    return "pending", ""
-  return "met", "A later ready Möbius boot was observed."
+  if ready_boot is not None:
+    return "met", "A later ready Möbius boot was observed."
+
+  # A restart that was actually dispatched (admitted) but never produced a
+  # service-ready boot must not pin the agent forever. Once we are past the
+  # dispatching boot and either a degraded boot settled this execution as
+  # uncertain, or no healthy boot appeared within the bounded confirm window,
+  # resume the agent to verify the outcome — a failing update that rolls the
+  # source back never writes the healthy-boot receipt this wait was polling for.
+  if execution is not None and execution.admitted_at is not None:
+    from app import restart_ledger
+    on_later_boot = execution.source_boot_id != restart_ledger.current_boot_id()
+    degraded = execution.status == "uncertain"
+    timed_out = (
+      now_naive_utc() - execution.admitted_at
+    ).total_seconds() >= ACTIVATION_CONFIRM_DEADLINE_SECONDS
+    if on_later_boot and (degraded or timed_out):
+      return "failed", (
+        "Möbius restarted but did not come up healthy enough to confirm "
+        "activation. Resuming to verify the update state manually."
+      )
+  return "pending", ""
 
 
 def capture_ready_boot_snapshot(

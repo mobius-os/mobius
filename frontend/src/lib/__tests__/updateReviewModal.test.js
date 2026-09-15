@@ -123,6 +123,17 @@ test('update review uses compact Settings controls without stretching mobile but
   assert.doesNotMatch(modalCss, /\.urm__btn|flex: 1(?:;|\s)/)
 })
 
+test('a proven-complete review offers a single Done, never a contradictory repair action', () => {
+  // Regression: an "already complete" review that still carried a stale
+  // rolled_back state showed "There's nothing to apply" alongside a "Not now" +
+  // "Ask Möbius" repair offer. The no-op case must suppress the repair reason
+  // and collapse to one clear Done button.
+  assert.match(modal, /const nothingToApply = !!preview && actionable === false && !hasResult/)
+  assert.match(modal, /\(resultState === 'conflict' \|\| nothingToApply\) \? null : platformUpdateRepairReason/)
+  assert.match(modal, /nothingToApply \? <button[^>]*onClick=\{requestClose\}[^>]*>Done<\/button>/)
+  assert.match(modal, /\{!nothingToApply && <button[^>]*>\{observing \? 'Keep working' : 'Not now'\}/)
+})
+
 test('asking for help names one ordinary chat and explains the restart boundary', () => {
   const repair = read('../../components/SettingsView/UpdateRepairAction.jsx')
   assert.match(repair, /'Ask Möbius'/)

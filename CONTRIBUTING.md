@@ -89,7 +89,7 @@ uses the ordinary update/resolver path, preserving local resolved differences.
 
 ## Tests
 
-Required PR CI is `.github/workflows/test.yml`; the commands below mirror it.
+The required PR checks live in `.github/workflows/test.yml`; the commands below mirror them.
 After protected merges, `.github/workflows/main-image.yml` publishes the
 prebuilt `ghcr.io/mobius-os/mobius:main` Railway image without repeating the
 test suite.

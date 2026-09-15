@@ -225,6 +225,66 @@ def test_wait_verdict_requires_only_a_later_ready_boot():
     )
 
 
+def test_dispatched_restart_that_never_confirms_healthy_self_heals(monkeypatch):
+  # Regression: a restart that was actually dispatched (admitted) but whose boot
+  # never became service-ready left the activation wait "pending" forever — no
+  # healthy snapshot to meet it, and platform_activation waits are exempt from
+  # deadline expiry, so the agent stayed paused across restarts. It must now
+  # settle "failed" so the paused agent resumes to verify manually.
+  monkeypatch.setattr(restart_ledger, "current_boot_id", lambda: "boot-new")
+  created_at = now_naive_utc()
+  action_id = "platform-restart:self-heal"
+  requirement = {
+    "version": platform_restart.REQUIREMENT_VERSION,
+    "action_id": action_id,
+    "source_boot_id": "boot-dispatch",
+    "files": {"backend/app/example.py": {"state": "absent"}},
+  }
+  row = SimpleNamespace(condition_json=requirement, created_at=created_at)
+
+  with SessionLocal() as db:
+    db.add(models.Chat(id="chat-self-heal", title="Heal", messages=[]))
+    execution = models.PlatformRestartExecution(
+      action_id=action_id, question_id="q-self-heal",
+      chat_id="chat-self-heal", wait_id="wait-self-heal",
+      source_boot_id="boot-dispatch", requirement_json=requirement,
+      status="admitted", claimed_at=created_at, admitted_at=now_naive_utc(),
+    )
+    db.add(execution)
+    db.commit()
+
+    # Waiting for the owner to press Restart (claimed, never dispatched) must
+    # NOT self-heal — that pending card is a valid owner decision.
+    execution.status = "claimed"
+    execution.admitted_at = None
+    db.commit()
+    assert platform_restart.activation_wait_verdict(db, row)[0] == "pending"
+
+    # Just dispatched, boot still settling: no premature failure.
+    execution.status = "admitted"
+    execution.admitted_at = now_naive_utc()
+    db.commit()
+    assert platform_restart.activation_wait_verdict(db, row)[0] == "pending"
+
+    # A degraded boot settled this execution as uncertain -> resume to verify.
+    execution.status = "uncertain"
+    execution.settled_at = now_naive_utc()
+    db.commit()
+    verdict, message = platform_restart.activation_wait_verdict(db, row)
+    assert verdict == "failed"
+    assert "did not come up healthy" in message
+
+    # Or the boot short-circuited before recording anything, but the confirm
+    # window elapsed since admission -> also resume to verify.
+    execution.status = "admitted"
+    execution.settled_at = None
+    execution.admitted_at = now_naive_utc() - timedelta(
+      seconds=platform_restart.ACTIVATION_CONFIRM_DEADLINE_SECONDS + 1,
+    )
+    db.commit()
+    assert platform_restart.activation_wait_verdict(db, row)[0] == "failed"
+
+
 def test_ready_boot_capture_records_event_and_requires_writer_readiness(
   monkeypatch, tmp_path,
 ):

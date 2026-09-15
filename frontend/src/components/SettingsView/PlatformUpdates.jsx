@@ -86,27 +86,31 @@ export default function PlatformUpdates({ active, refreshToken, onOpenChat }) {
         </div>
       ) : (
         <div className="platform-updates__actions">
-          <button ref={actionRef} className={`settings__btn settings__btn--sm${!conflict && !available && !imageNeeded && !restartNeeded ? ' settings__btn--outline' : ''}`} disabled={busy || (conflict && !onOpenChat)} onClick={primary.act}>
-            {busy ? (phase === 'checking' ? 'Checking…' : 'Updating…') : primary.label}
-          </button>
-          {available && !conflict && (imageNeeded || restartNeeded) && (
-            <button className="settings__btn settings__btn--outline settings__btn--sm" disabled={busy} onClick={imageNeeded ? () => openReview('finish') : askRestart}>
-              {imageNeeded ? 'Finish installed update' : 'Restart to finish'}
+          {repairReason ? (
+            <UpdateRepairAction platform={platform} rebuild={rebuild} error={update.error} errorCode={update.errorCode}
+              disabled={busy} buttonRef={actionRef} className="settings__btn settings__btn--sm" />
+          ) : (
+            <button ref={actionRef} className={`settings__btn settings__btn--sm${!conflict && !available && !imageNeeded && !restartNeeded ? ' settings__btn--outline' : ''}`} disabled={busy || (conflict && !onOpenChat)} onClick={primary.act}>
+              {busy ? (phase === 'checking' ? 'Checking…' : 'Updating…') : primary.label}
             </button>
           )}
-          {conflict && platform?.newer_updates_available && (
-            <button className="settings__btn settings__btn--outline settings__btn--sm" disabled={busy} onClick={() => openReview()}>Review all updates</button>
-          )}
-          {!available && !conflict && (restartNeeded || imageNeeded) && (
-            <button className="settings__btn settings__btn--outline settings__btn--sm" disabled={busy} onClick={check}>Check for more</button>
-          )}
-          <button className="settings__btn settings__btn--outline settings__btn--sm platform-updates__restart" disabled={busy || confirmRestart} onClick={askRestart}>Restart server</button>
+        </div>
+      )}
+      {repairReason && !review && !update.reconnecting && (
+        <div className="platform-updates__description">
+          <p>{repairReason}</p>
+          {(platform?.activation?.guidance || []).map(line => <p key={line}>{line}</p>)}
         </div>
       )}
       <dl className="platform-updates__versions">
         <dt>Installed update</dt><dd>{formatUpstreamCommitDate(platform?.contained_upstream_committed_at) || 'Unknown'} {mobiusVersion.primarySha && <code>{mobiusVersion.primarySha}</code>}</dd>
         <dt>Current system</dt><dd>{formatUpstreamCommitDate(platform?.current_build_committed_at || version?.build_date) || 'Unknown'} {containerVersion.sha && <code>{containerVersion.sha}</code>}</dd>
       </dl>
+      {!confirmRestart && (
+        <div className="platform-updates__restart-row">
+          <button className="settings__btn settings__btn--outline settings__btn--sm" disabled={busy} onClick={askRestart}>Restart server</button>
+        </div>
+      )}
       {!busy && !unavailable && !conflict && restartNeeded && (
         <p className="platform-updates__description">Your changes are ready. You can add more updates before restarting once.</p>
       )}
@@ -117,17 +121,6 @@ export default function PlatformUpdates({ active, refreshToken, onOpenChat }) {
         <p className="platform-updates__description" role="status">{update.slow
           ? 'Taking longer than usual. Still checking; there is no need to restart again.'
           : 'The page will refresh when Möbius is ready.'}</p>
-      )}
-      {repairReason && !review && !update.reconnecting && (
-        <div className="platform-updates__description">
-          <p>{repairReason}</p>
-          <UpdateRepairAction platform={platform} rebuild={rebuild} error={update.error} errorCode={update.errorCode} disabled={busy} />
-          <details><summary>Technical details</summary>
-            {update.error && <p>{update.error}</p>}
-            {platform?.rollback_error && <p>{platform.rollback_error}</p>}
-            {(platform?.activation?.guidance || []).map(line => <p key={line}>{line}</p>)}
-          </details>
-        </div>
       )}
       {update.checkResult && <p className="platform-updates__description" role="status">{update.checkResult}</p>}
       {!review && !repairReason && update.error && <Alert color="danger" variant="soft" description={update.error} />}

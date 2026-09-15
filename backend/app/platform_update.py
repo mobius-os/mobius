@@ -130,6 +130,12 @@ UPDATE_PROGRESS_PATH = Path("/data/.platform-update-progress.json")
 # Container-local: survives a server restart but never claims a replacement
 # image inherited packages installed in the previous container.
 DEPENDENCY_RECEIPT_PATH = Path("/tmp/mobius-dependency-inputs.json")
+# Fresh images link the editable clone to the baked dependency tree so ordinary
+# frontend builds do not copy hundreds of megabytes into /data.  npm ci treats
+# a node_modules symlink as the tree to clean, though, and the baked target is
+# intentionally root-owned.  Dependency-changing updates therefore detach
+# this one known bootstrap link lazily, just before the first mutable install.
+BAKED_FRONTEND_NODE_MODULES = Path("/app/shell-src/node_modules")
 
 UPSTREAM_BRANCH = "upstream"
 LOCAL_BRANCH = "main"
@@ -1639,6 +1645,19 @@ def _sync_frontend_dependencies(repo: Path) -> tuple[bool, str]:
     return True, ""
   try:
     _record_dependency_inputs(repo, _FRONTEND_DEPENDENCY_INPUTS, installed=False)
+    node_modules = frontend / "node_modules"
+    if node_modules.is_symlink():
+      target = node_modules.resolve(strict=False)
+      if target != BAKED_FRONTEND_NODE_MODULES.resolve(strict=False):
+        return False, (
+          "frontend node_modules is an unexpected symlink; refusing to let "
+          f"npm ci replace its target ({target})"
+        )
+      # Leave no missing-path window for the frontend watcher to relink the
+      # baked tree before npm starts.  Once detached, candidate failure and
+      # rollback both reuse this writable real directory.
+      node_modules.unlink()
+      node_modules.mkdir()
     proc = subprocess.run(
       ["npm", "ci", "--ignore-scripts"],
       cwd=str(frontend),
@@ -2620,6 +2639,15 @@ def platform_status(
   conflict = CONFLICT_FLAG.exists() or _reconcile_in_progress(repo)
   rolled_back = ROLLED_BACK_FLAG.exists()
   rollback = _read_rolled_back_flag() if rolled_back else None
+  # A rollback flag is stale once its recorded target is already contained in
+  # local main: the failed release (or an equivalent) has since landed, so there
+  # is nothing left to repair. Mirror _reconcile_pass and stop projecting "needs
+  # repair" — otherwise Settings shows a permanent ghost that no read/check path
+  # clears. This projection is read-only; check_for_updates removes the file
+  # under the reconcile lock.
+  if rollback and rollback.get("target") and _is_ancestor(repo, rollback["target"], local):
+    rolled_back = False
+    rollback = None
   activation = _platform_activation_impact(repo)
   activation_state = _state_for_activation(activation)
   restart_needed = activation["level"] in {
@@ -2673,7 +2701,8 @@ def platform_status(
   available = bool(target_sha or target) and not target_contained
 
   if rolled_back:
-    # An update is available but its last apply failed the import probe.
+    # A not-yet-landed target whose last apply failed (import probe or build).
+    # Stale rollbacks whose target already landed were cleared above.
     state = PlatformUpdateState.ROLLED_BACK
     available = True
   elif activation_state is not PlatformUpdateState.UP_TO_DATE:
@@ -2744,6 +2773,12 @@ def check_for_updates(
     local = _local_branch(repo)
     if target and _is_ancestor(repo, target, local):
       _set_upstream(repo, target)
+    # Remove a stale rollback flag whose target already landed, so the owner's
+    # explicit check clears the "needs repair" ghost for good (safe under the
+    # reconcile lock; a live rollback is always for a not-yet-contained target).
+    rollback = _read_rolled_back_flag()
+    if rollback and rollback.get("target") and _is_ancestor(repo, rollback["target"], local):
+      ROLLED_BACK_FLAG.unlink(missing_ok=True)
   return platform_status(repo, target_sha=target_sha)
 
 

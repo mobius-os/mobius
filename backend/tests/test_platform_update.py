@@ -693,6 +693,28 @@ def test_import_broken_merge_rolls_back(clone_env):
   assert _served_sha(platform) == pre
 
 
+def test_stale_rollback_flag_is_ignored_once_its_target_landed(clone_env):
+  origin, platform = clone_env
+  # A rollback flag left from a prior failed attempt whose target is now already
+  # contained in local main (it landed or was superseded) is a stale ghost: it
+  # must not keep projecting "needs repair"/available, and an explicit check
+  # clears it for good. Regression: previously the flag's mere existence forced
+  # state=rolled_back + available=True forever, with no read/check path to undo.
+  landed = _served_sha(platform)
+  pu._write_rolled_back_flag(landed, "old frontend build failure")
+
+  status = pu.platform_status(platform)
+  assert status["state"] == pu.PlatformUpdateState.UP_TO_DATE.value
+  assert status["available"] is False
+  assert status["rollback_error"] is None
+  # Status is read-only, so the file lingers until an explicit check/reconcile.
+  assert pu.ROLLED_BACK_FLAG.exists()
+
+  # The owner's explicit "Check for updates" removes the ghost under the lock.
+  pu.check_for_updates(platform)
+  assert not pu.ROLLED_BACK_FLAG.exists()
+
+
 # --- V-B5: offline fetch keeps serving --------------------------------------
 
 def test_offline_fetch_serves_current_unchanged(clone_env, monkeypatch):
@@ -2517,6 +2539,66 @@ async def test_apply_installs_frontend_dependencies_in_place(
   assert result["state"] != pu.PlatformUpdateState.CONFLICT.value
   assert synced.get("ran") is True  # npm ci ran during Apply, before the build
   assert _served_sha(platform) == target
+
+
+def test_frontend_dependency_install_detaches_known_baked_symlink_for_rollback(
+  tmp_path, monkeypatch,
+):
+  platform = tmp_path / "platform"
+  frontend = platform / "frontend"
+  baked = tmp_path / "baked-node-modules"
+  frontend.mkdir(parents=True)
+  baked.mkdir()
+  (baked / "baked-marker").write_text("immutable")
+  (frontend / "package-lock.json").write_text("{}")
+  (frontend / "node_modules").symlink_to(baked, target_is_directory=True)
+  monkeypatch.setattr(pu, "BAKED_FRONTEND_NODE_MODULES", baked)
+  monkeypatch.setattr(pu, "_record_dependency_inputs", lambda *args, **kwargs: None)
+
+  installs = []
+
+  def npm_ci(*args, **kwargs):
+    node_modules = frontend / "node_modules"
+    installs.append((node_modules.is_dir(), node_modules.is_symlink()))
+    if len(installs) == 1:
+      return subprocess.CompletedProcess(args[0], 1, "", "candidate failed")
+    return subprocess.CompletedProcess(args[0], 0, "", "")
+
+  monkeypatch.setattr(pu.subprocess, "run", npm_ci)
+
+  assert pu._sync_frontend_dependencies(platform) == (False, "candidate failed")
+  assert pu._sync_frontend_dependencies(platform) == (True, "")
+  assert installs == [(True, False), (True, False)]
+  assert (baked / "baked-marker").read_text() == "immutable"
+
+
+def test_frontend_dependency_install_refuses_an_unexpected_symlink(
+  tmp_path, monkeypatch,
+):
+  platform = tmp_path / "platform"
+  frontend = platform / "frontend"
+  expected_baked = tmp_path / "expected-baked-node-modules"
+  custom = tmp_path / "custom-node-modules"
+  frontend.mkdir(parents=True)
+  expected_baked.mkdir()
+  custom.mkdir()
+  (frontend / "package-lock.json").write_text("{}")
+  node_modules = frontend / "node_modules"
+  node_modules.symlink_to(custom, target_is_directory=True)
+  monkeypatch.setattr(pu, "BAKED_FRONTEND_NODE_MODULES", expected_baked)
+  monkeypatch.setattr(pu, "_record_dependency_inputs", lambda *args, **kwargs: None)
+
+  def must_not_run(*args, **kwargs):
+    raise AssertionError("npm ci must not mutate an unexpected symlink target")
+
+  monkeypatch.setattr(pu.subprocess, "run", must_not_run)
+
+  ok, error = pu._sync_frontend_dependencies(platform)
+
+  assert ok is False
+  assert "unexpected symlink" in error
+  assert node_modules.is_symlink()
+  assert node_modules.resolve() == custom
 
 
 @pytest.mark.asyncio
