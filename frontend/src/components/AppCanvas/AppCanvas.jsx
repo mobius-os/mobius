@@ -11,8 +11,7 @@ import { getOnlineSnapshot } from '../../lib/connectivityStore.js'
 import { appTokenIdentity, liveAppToken, resolveLatchedToken } from '../../lib/appToken.js'
 import { createAppStorageHost } from '../../lib/appStorageHost.js'
 import {
-  cacheAppToken, readAppFrameStorage, readCachedAppToken,
-  isSharedVirtualStorageKey,
+  readAppFrameStorage, readCachedAppToken, isSharedVirtualStorageKey,
 } from '../../lib/appFrameStorage.js'
 import { immersiveLifecycleValue } from '../../lib/immersive.js'
 import { getEffectiveTheme } from '../../lib/themeService.js'
@@ -384,10 +383,6 @@ const AppCanvas = forwardRef(function AppCanvas({
     { allowExpired: !online },
   )
   const liveToken = liveAppToken(appToken, online, cachedAppToken)
-
-  useEffect(() => {
-    if (appToken) cacheAppToken(appId, appToken)
-  }, [appId, appToken])
 
   // Latch the token so an `online` oscillation (stale navigator.onLine on
   // Android PWAs) can't revoke a token we already resolved and unmount the live

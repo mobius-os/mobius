@@ -1,6 +1,7 @@
 import { useQuery } from '@tanstack/react-query'
 import { api } from '../api/client.js'
 import { appTokenRefreshInterval } from '../lib/appToken.js'
+import { cacheAppToken } from '../lib/appFrameStorage.js'
 import { chatDetailCacheValue } from '../lib/chatDetailCache.js'
 
 function jsonOrThrow(res, label) {
@@ -259,6 +260,11 @@ function useChatsQuery({ reconcile } = {}) {
 async function fetchAppToken(appId) {
   const res = await api.auth.provider.appToken(appId)
   const data = await jsonOrThrow(res, 'app-token fetch failed:')
+  // Persist at the authority boundary, not in AppCanvas's post-render effect.
+  // A standalone host can be reloaded offline immediately after its first
+  // successful render; the next mount then has its exact scoped token even if
+  // React never gets a later effect turn before the network is removed.
+  cacheAppToken(appId, data.token)
   return data.token
 }
 
