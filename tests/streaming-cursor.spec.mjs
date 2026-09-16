@@ -178,7 +178,10 @@ test('terminal cursor removal keeps followed geometry unchanged', async ({ page 
   )))
   const settled = await measure()
 
-  expect(Math.abs(settled.scrollHeight - live.scrollHeight)).toBeLessThanOrEqual(1)
-  expect(Math.abs(settled.scrollTop - live.scrollTop)).toBeLessThanOrEqual(1)
-  expect(Math.abs(settled.paragraphTop - live.paragraphTop)).toBeLessThanOrEqual(1)
+  // Device-scale rounding can move a CSS layout measurement by one physical
+  // pixel (1.11 CSS px on this runner) without moving the followed surface.
+  const roundingTolerance = 1.5
+  expect(Math.abs(settled.scrollHeight - live.scrollHeight)).toBeLessThanOrEqual(roundingTolerance)
+  expect(Math.abs(settled.scrollTop - live.scrollTop)).toBeLessThanOrEqual(roundingTolerance)
+  expect(Math.abs(settled.paragraphTop - live.paragraphTop)).toBeLessThanOrEqual(roundingTolerance)
 })

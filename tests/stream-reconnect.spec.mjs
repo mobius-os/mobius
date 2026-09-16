@@ -623,14 +623,17 @@ test.describe('Stream reconnection', () => {
     await page.waitForFunction(() => window.__streamFetchCount === 1)
 
     await setVisibility(page, 'hidden')
-    await page.waitForTimeout(5200)
+    // Stay comfortably beyond the product's 5s quick-wake boundary. Hosted
+    // timer scheduling can otherwise land exactly on that boundary and turn
+    // this deliberate long-wake case into a quick-wake case.
+    await page.waitForTimeout(6000)
     await setVisibility(page, 'visible')
 
     await page.waitForFunction(() => window.__streamFetchCount === 2)
     await expect(page.locator('[data-chat-surface="painted"] .connection-status--reattach')).toBeVisible({
       // Presentation intentionally suppresses transient notices for 2.5s;
       // leave scheduling headroom beyond that product-owned delay.
-      timeout: 6000,
+      timeout: 8000,
     })
 
     await page.evaluate(() => window.__releaseSlowReattach())

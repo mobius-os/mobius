@@ -98,7 +98,10 @@ test.describe('shell update — owner-controlled navigation', () => {
     await page.getByRole('button', { name: /Notifications/ }).click()
     await expect(page.getByRole('button', { name: 'Reload shell' })).toBeVisible()
     await expect(page.getByRole('button', { name: 'Later' })).toBeVisible()
-    await expect(page.getByText('New shell ready. Reload to use the latest interface changes.')).toHaveCount(1)
+    // The title and supporting copy are separate inline elements in the
+    // current notification, so assert their accessible text individually.
+    await expect(page.getByText('New shell ready.', { exact: true })).toHaveCount(1)
+    await expect(page.getByText('Reload to use the latest interface changes.', { exact: true })).toHaveCount(1)
     expect(await loadCount(page)).toBe(0)
 
     await page.getByRole('button', { name: 'Close notifications' }).click()
