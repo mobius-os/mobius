@@ -310,16 +310,11 @@ async function navigateToChat(page, index = 0) {
 
 /** Navigate to an app by clicking in the drawer. */
 async function navigateToApp(page, index = 0) {
-  const clicked = await page.evaluate((idx) => {
-    const appSection = document.querySelector('.drawer__group:last-of-type .drawer__scroll')
-      || document.querySelectorAll('.drawer__scroll')[1]
-    if (!appSection) return false
-    const items = appSection.querySelectorAll('button')
-    if (!items[idx]) return false
-    items[idx].click()
-    return true
-  }, index)
-  if (clicked) await expect(page.locator('.canvas')).toBeVisible()
+  const app = index === 0 ? NAV_APP : null
+  if (!app) throw new Error(`No navigation app fixture at index ${index}`)
+  const navigation = page.getByRole('navigation', { name: 'Primary navigation' })
+  await navigation.getByRole('button', { name: app.name, exact: true }).click()
+  await expect(page.locator('.canvas')).toBeVisible()
 }
 
 /** Open the drawer via the toggle button (aria-expanded attribute). */
