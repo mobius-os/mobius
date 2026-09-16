@@ -106,7 +106,7 @@ test.use({ serviceWorkers: 'block' })
 attachCleanup()
 
 test.describe('Steer queued messages (fast-forward into the live turn)', () => {
-  test('fast-forward posts the exact payload and presents the row inline immediately', async ({ page }) => {
+  test('queued work replaces Stop with one durable fast-forward action', async ({ page }) => {
     // The server-assigned ts the queueOnly POST hands back. The steer's
     // consume_pending_cids must equal [queued cid] and its content must equal
     // the queued message's trimmed content (single message → no join).

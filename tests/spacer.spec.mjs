@@ -818,6 +818,9 @@ test.describe('SSE streaming (real React path)', () => {
     // its single automatic handoff to real-content tail follow.
     const gap = m.scrollH - m.scrollTop - m.clientH
     expect(Math.abs(gap)).toBeLessThanOrEqual(4)
+    // The terminal cursor is absolutely positioned while live and its removal
+    // must not leave a layout artifact or move the followed surface.
+    await expect(page.locator('[data-chat-surface="painted"] .chat__cursor')).toHaveCount(0)
   })
 })
 

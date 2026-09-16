@@ -36,8 +36,44 @@ async function ownerToken(page) {
   return page.evaluate(() => localStorage.getItem('token'))
 }
 
+async function waitForServiceWorkerControl(page) {
+  await page.waitForFunction(
+    () => navigator.serviceWorker && navigator.serviceWorker.controller,
+    undefined,
+    { timeout: 15000 },
+  )
+}
+
 
 test.describe('Service worker — vite-plugin-pwa contract', () => {
+
+  test('offline fallback uses the persisted shell theme', async ({ page }) => {
+    await page.goto(`${BASE}/shell/`)
+    await page.waitForFunction(() => {
+      try {
+        return Boolean(JSON.parse(localStorage.getItem('mobius-theme'))?.bg)
+      } catch {
+        return false
+      }
+    }, undefined, { timeout: 15000 })
+    const background = await page.evaluate(
+      () => JSON.parse(localStorage.getItem('mobius-theme')).bg,
+    )
+
+    await page.goto(`${BASE}/offline.html`)
+    await expect.poll(() => page.evaluate(() => (
+      getComputedStyle(document.documentElement).getPropertyValue('--bg').trim()
+    ))).toBe(background)
+  })
+
+  test('the service worker serves the shell while offline', async ({ page, context }) => {
+    await page.goto(`${BASE}/shell/`)
+    await waitForServiceWorkerControl(page)
+    await context.setOffline(true)
+    await page.goto(`${BASE}/shell/`)
+    await expect(page.locator('#root')).toBeAttached()
+    await context.setOffline(false)
+  })
 
   test('sw.js is served and registers on page load', async ({ page }) => {
     // The SW itself must be reachable at /sw.js and contain the

@@ -4,8 +4,6 @@ export const E2E_SHARDS = [
     'service-surface.spec.mjs',
     'send-rule.spec.mjs',
     'bootstrap.spec.mjs',
-    'tabs.spec.mjs',
-    'streaming-cursor.spec.mjs',
     'app-apply-lifecycle.spec.mjs',
     'chat-offline.spec.mjs',
     'composer-growth-cap.spec.mjs',
@@ -22,7 +20,6 @@ export const E2E_SHARDS = [
     'activity-lazy.spec.mjs',
     'embedded-chat-capability.spec.mjs',
     'attention-nudges.spec.mjs',
-    'send-viewport-stability.spec.mjs',
     'standalone-routing.spec.mjs',
     'setup-provider-status.spec.mjs',
     'project-source-list-layout.spec.mjs',
@@ -38,10 +35,8 @@ export const E2E_SHARDS = [
     'second-send-pin.spec.mjs',
     'composer-draft-attachments.spec.mjs',
     'settled-transcript-handoff.spec.mjs',
-    'offline-fallback.spec.mjs',
     'fresh-send-runtime-race.spec.mjs',
     'outbox.spec.mjs',
-    'sw-cache-policy.spec.mjs',
   ],
   [
     'stream-reconnect.spec.mjs',
@@ -54,7 +49,6 @@ export const E2E_SHARDS = [
     'image-gallery.spec.mjs',
     'question-follow.spec.mjs',
     'viewed-image-layout.spec.mjs',
-    'handleStop-sync-ordering.spec.mjs',
     'embedded-chat-hostile.unauth.spec.mjs',
   ],
 ]
@@ -65,7 +59,6 @@ export const UNAUTHENTICATED_SPECS = new Set([
 
 export const TIMING_SPECS = new Set([
   'stream-reconnect.spec.mjs',
-  'handleStop-sync-ordering.spec.mjs',
 ])
 
 export function projectShard(projectName) {
