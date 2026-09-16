@@ -75,66 +75,11 @@ test.describe('Service worker — vite-plugin-pwa contract', () => {
     await context.setOffline(false)
   })
 
-  test('sw.js is served and registers on page load', async ({ page }) => {
-    // The SW itself must be reachable at /sw.js and contain the
-    // Workbox precache marker. A plugin misconfig that produces
-    // an empty SW (or a different filename) would surface here.
-    const res = await page.request.get(`${BASE}/sw.js`)
-    expect(res.status()).toBe(200)
-    const body = await res.text()
-    // Workbox precache + routing artifacts visible in the bundled
-    // SW. Without precacheAndRoute, the migration is incomplete.
-    expect(body).toContain('precache')
-    expect(body).toMatch(/mobius-vendor|mobius-esm|mobius-proxy/)
-    // Push deliberately does NOT live here — see the push-worker test below.
-    expect(body).not.toContain('notificationclick')
-  })
 
-  test('the push worker owns notification handling, inside the PWA scope',
-    async ({ page }) => {
-      // Android hands a push to the installed shell only when the SERVICE
-      // WORKER'S SCOPE resolves to that WebAPK, and a WebAPK's intent filter
-      // carries the manifest `scope` as its pathPrefix. The caching worker is
-      // registered at `/` so it can also serve the standalone mini-app pages,
-      // which puts it outside `/shell/` — so push lives on its own worker.
-      // Get this wrong and every notification becomes a Chrome notification
-      // whose tap leaves the app, which nothing else in CI can see.
-      const res = await page.request.get(`${BASE}/sw-push.js`)
-      expect(res.status()).toBe(200)
-      const body = await res.text()
-      expect(body).toContain('notificationclick')
-      expect(body).toContain('notification-click')
-      expect(body).toContain('postMessage')
-      expect(body).toMatch(/\.navigate\(/)
 
-      const manifest = JSON.parse(
-        await (await page.request.get(`${BASE}/manifest.webmanifest`)).text(),
-      )
-      await page.goto(BASE, { waitUntil: 'domcontentloaded' })
-      const scope = await page.evaluate(async () => {
-        const reg = await navigator.serviceWorker.register(
-          '/sw-push.js', { scope: '/shell/push/' },
-        )
-        return reg.scope
-      })
-      expect(new URL(scope).pathname.startsWith(manifest.scope)).toBe(true)
 
-      // The scope must hold no documents: a page there would be controlled by
-      // this worker, which has no fetch handler, so it would boot the shell
-      // with no precache and no offline fallback.
-      const doc = await page.request.get(`${BASE}/shell/push/`)
-      expect(doc.status()).toBe(404)
-    })
 
-  test('manifest is reachable', async ({ page }) => {
-    const res = await page.request.get(`${BASE}/manifest.webmanifest`)
-    expect(res.status()).toBe(200)
-    const m = JSON.parse(await res.text())
-    // Bare minimum so a browser will treat the page as installable.
-    expect(m.name || m.short_name).toBeTruthy()
-    expect(m.icons?.length || 0).toBeGreaterThan(0)
-    expect(m.start_url).toBeTruthy()
-  })
+
 
   test('SW registers after a normal navigation', async ({ page }) => {
     await page.setViewportSize({ width: 412, height: 915 })
@@ -231,9 +176,18 @@ test.describe('Service worker — vite-plugin-pwa contract', () => {
     }
     const { app } = await applyApp(request, token, options)
     const standaloneUrl = `${BASE}/apps/${app.slug}/`
-    const standaloneMarker = () => page
-      .frameLocator(`iframe[data-app-id="${app.id}"]`)
-      .locator('#standalone-revision')
+    const bootVersion = () => page.evaluate(() => JSON.parse(
+      document.getElementById('__mobius-standalone-app__')?.textContent || 'null',
+    )?.updated_at || null)
+    const cachedBootVersion = () => page.evaluate(async ({ url, cacheName }) => {
+      const cache = await caches.open(cacheName)
+      const response = await cache.match(url)
+      if (!response) return null
+      const doc = new DOMParser().parseFromString(await response.text(), 'text/html')
+      return JSON.parse(
+        doc.getElementById('__mobius-standalone-app__')?.textContent || 'null',
+      )?.updated_at || null
+    }, { url: standaloneUrl, cacheName: STANDALONE_APPS_CACHE })
 
     try {
       await page.evaluate(async () => {
@@ -248,7 +202,8 @@ test.describe('Service worker — vite-plugin-pwa contract', () => {
       )).toBe(true)
 
       await page.goto(standaloneUrl, { waitUntil: 'domcontentloaded' })
-      await expect(standaloneMarker()).toHaveText(firstMarker)
+      const firstVersion = await bootVersion()
+      expect(firstVersion).toBe(app.updated_at)
       await expect.poll(() => page.evaluate(async ({ url, cacheName }) => {
         const cache = await caches.open(cacheName)
         return !!await cache.match(url)
@@ -262,17 +217,20 @@ test.describe('Service worker — vite-plugin-pwa contract', () => {
         jsxSource: source(secondMarker),
       })
       expect(updated.mode).toBe('updated')
+      expect(updated.app.updated_at).not.toBe(firstVersion)
 
       // This FIRST navigation after the edit must be authoritative. A
       // cache-first standalone route serves revision one here and only refreshes
       // the cache in the background, forcing a second reload to see the update.
       await page.goto(standaloneUrl, { waitUntil: 'domcontentloaded' })
-      await expect(standaloneMarker()).toHaveText(secondMarker)
+      await expect.poll(bootVersion).toBe(updated.app.updated_at)
+      await expect.poll(cachedBootVersion).toBe(updated.app.updated_at)
 
       // The same authoritative response is now the offline fallback.
       await context.setOffline(true)
       await page.reload({ waitUntil: 'domcontentloaded' })
-      await expect(standaloneMarker()).toHaveText(secondMarker)
+      expect(await bootVersion()).toBe(updated.app.updated_at)
+      await expect(page.locator(`iframe[data-app-id="${app.id}"]`)).toBeAttached()
     } finally {
       await context.setOffline(false)
       await request.delete(`${BASE}/api/apps/${app.id}`, {

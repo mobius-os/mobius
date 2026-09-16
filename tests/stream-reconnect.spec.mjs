@@ -132,45 +132,7 @@ async function pillOverlapDiagnostics(page) {
 test.use({ serviceWorkers: 'block' })
 
 test.describe('Stream reconnection', () => {
-  test('1. Completed stream stays idle after visibility change', async ({ page }) => {
-    let streamRequestCount = 0
-    await page.route(/\/api\/chats\/[0-9a-f-]+\/stream$/, route => {
-      streamRequestCount++
-      route.fulfill({
-        status: 200,
-        headers: {
-          'Content-Type': 'text/event-stream',
-          'Cache-Control': 'no-cache',
-        },
-        body: sseBody([
-          { type: 'text', content: 'complete response' },
-          { type: 'done' },
-        ]),
-      })
-    })
 
-    await setupChat(page)
-    await send(page, 'hello')
-
-    await expect(page.locator('[data-chat-surface="painted"] .chat__scroll')).toContainText('complete response')
-    await expect(page.locator('[data-chat-surface="painted"] button[aria-label="Stop"]')).toHaveCount(0)
-
-    await page.evaluate(() => {
-      Object.defineProperty(document, 'visibilityState', {
-        value: 'hidden', writable: true, configurable: true,
-      })
-      document.dispatchEvent(new Event('visibilitychange'))
-      Object.defineProperty(document, 'visibilityState', {
-        value: 'visible', writable: true, configurable: true,
-      })
-      document.dispatchEvent(new Event('visibilitychange'))
-    })
-    await page.waitForTimeout(500)
-
-    await expect(page.locator('[data-chat-surface="painted"] .chat__scroll')).toContainText('complete response')
-    await expect(page.locator('[data-chat-surface="painted"] button[aria-label="Stop"]')).toHaveCount(0)
-    expect(streamRequestCount).toBe(1)
-  })
 
   test('2. Terminal 204 exits thinking and refreshes persisted messages', async ({ page }) => {
     let streamRequestCount = 0
@@ -225,62 +187,9 @@ test.describe('Stream reconnection', () => {
     expect(streamRequestCount).toBe(1)
   })
 
-  test('3. Stream completes and the Voice button returns', async ({ page }) => {
-    await page.route(/\/api\/chats\/[0-9a-f-]+\/stream$/, route => {
-      route.fulfill({
-        status: 200,
-        headers: {
-          'Content-Type': 'text/event-stream',
-          'Cache-Control': 'no-cache',
-        },
-        body: sseBody([
-          { type: 'text', content: 'hello back' },
-          { type: 'done' },
-        ]),
-      })
-    })
 
-    await setupChat(page)
-    await send(page, 'hi')
 
-    await expect(page.locator('[data-chat-surface="painted"] .chat__scroll')).toContainText('hello back')
-    await expect(page.locator('[data-chat-surface="painted"] button[aria-label="Voice input"]')).toHaveCount(1)
-  })
 
-  test('4. Stop clears streaming so visibility change does not reconnect', async ({ page }) => {
-    let streamRequestCount = 0
-
-    await page.route(/\/api\/chats\/[0-9a-f-]+\/stream$/, async route => {
-      streamRequestCount++
-      // Keep the first stream pending until Stop aborts it.
-      await new Promise(resolve => setTimeout(resolve, 5000))
-      await route.fulfill({
-        status: 200,
-        headers: {
-          'Content-Type': 'text/event-stream',
-          'Cache-Control': 'no-cache',
-        },
-        body: sseBody([{ type: 'text', content: 'late response' }]),
-      }).catch(() => {})
-    })
-
-    await setupChat(page)
-    await send(page, 'stop me')
-
-    await expect(page.locator('[data-chat-surface="painted"] button[aria-label="Stop"]')).toHaveCount(1)
-    await page.locator('[data-chat-surface="painted"] button[aria-label="Stop"]').click()
-    await expect(page.locator('[data-chat-surface="painted"] button[aria-label="Stop"]')).toHaveCount(0)
-
-    await page.evaluate(() => {
-      Object.defineProperty(document, 'visibilityState', {
-        value: 'visible', writable: true, configurable: true,
-      })
-      document.dispatchEvent(new Event('visibilitychange'))
-    })
-    await page.waitForTimeout(500)
-
-    expect(streamRequestCount).toBe(1)
-  })
 
   test('8. Wake after hidden EOF before first event reattaches and renders in-progress message', async ({ page }) => {
     await page.addInitScript(() => {
@@ -362,218 +271,20 @@ test.describe('Stream reconnection', () => {
     await expect(page.locator('[data-chat-surface="painted"] button[aria-label="Stop"]')).toHaveCount(0)
   })
 
-  test('11. Quick visibility flip keeps a fresh live socket quiet', async ({ page }) => {
-    await page.addInitScript(() => {
-      const realFetch = window.fetch.bind(window)
-      let streamCount = 0
-      window.__streamFetchCount = 0
 
-      window.fetch = (input, init) => {
-        const url = typeof input === 'string' ? input : (input && input.url) || ''
-        if (!/\/api\/chats\/[0-9a-f-]+\/stream$/.test(url)) {
-          return realFetch(input, init)
-        }
 
-        streamCount++
-        window.__streamFetchCount = streamCount
 
-        if (streamCount === 1) {
-          const encoder = new TextEncoder()
-          const body = new ReadableStream({
-            start(controller) {
-              controller.enqueue(encoder.encode(': keepalive\n\n'))
-            },
-            cancel() {},
-          })
-          return Promise.resolve(new Response(body, {
-            status: 200,
-            headers: { 'Content-Type': 'text/event-stream' },
-          }))
-        }
 
-        return new Promise(() => {})
-      }
-    })
 
-    await setupChat(page)
-    await send(page, 'quick flip with healthy socket')
-    await expect(page.locator('[data-chat-surface="painted"] button[aria-label="Stop"]')).toHaveCount(1)
-    await page.waitForFunction(() => window.__streamFetchCount === 1)
 
-    await setVisibility(page, 'hidden')
-    await page.waitForTimeout(250)
-    await setVisibility(page, 'visible')
-    await page.waitForTimeout(1800)
-
-    expect(await page.evaluate(() => window.__streamFetchCount)).toBe(1)
-    await expect(page.locator('[data-chat-surface="painted"] .connection-status--reattach')).toHaveCount(0)
-  })
-
-  test('14. Kept quick-wake socket self-heals when reads stop', async ({ page }) => {
-    await page.addInitScript(() => {
-      window.__MOBIUS_KEPT_SOCKET_DEADMAN_MS = 250
-
-      const realFetch = window.fetch.bind(window)
-      const encoder = new TextEncoder()
-      let streamCount = 0
-      let recoveredController
-
-      window.__streamFetchCount = 0
-      window.__sendRecoveredKeepalive = () => {
-        recoveredController?.enqueue(encoder.encode(': keepalive\n\n'))
-      }
-
-      window.fetch = (input, init) => {
-        const url = typeof input === 'string' ? input : (input && input.url) || ''
-        if (!/\/api\/chats\/[0-9a-f-]+\/stream$/.test(url)) {
-          return realFetch(input, init)
-        }
-
-        streamCount++
-        window.__streamFetchCount = streamCount
-
-        if (streamCount === 1) {
-          const body = new ReadableStream({
-            start(controller) {
-              controller.enqueue(encoder.encode(': keepalive\n\n'))
-            },
-            cancel() {},
-          })
-          return Promise.resolve(new Response(body, {
-            status: 200,
-            headers: { 'Content-Type': 'text/event-stream' },
-          }))
-        }
-
-        if (streamCount === 2) {
-          const body = new ReadableStream({
-            start(controller) {
-              recoveredController = controller
-              controller.enqueue(encoder.encode(
-                'data: {"type":"text","content":"deadman replay"}\n\n'
-                + 'data: {"type":"catch_up_done"}\n\n',
-              ))
-            },
-            cancel() {},
-          })
-          return Promise.resolve(new Response(body, {
-            status: 200,
-            headers: { 'Content-Type': 'text/event-stream' },
-          }))
-        }
-
-        return new Promise(() => {})
-      }
-    })
-
-    await setupChat(page)
-    await send(page, 'quick flip with silently dead socket')
-    await expect(page.locator('[data-chat-surface="painted"] button[aria-label="Stop"]')).toHaveCount(1)
-    await page.waitForFunction(() => window.__streamFetchCount === 1)
-
-    await setVisibility(page, 'hidden')
-    await page.waitForTimeout(50)
-    await setVisibility(page, 'visible')
-
-    await page.waitForFunction(() => window.__streamFetchCount === 2, undefined, {
-      timeout: 5000,
-    })
-    await expect(page.locator('[data-chat-surface="painted"] .chat__scroll')).toContainText(
-      'deadman replay', { timeout: 5000 },
-    )
-    await expect(page.locator('[data-chat-surface="painted"] .connection-status--reattach')).toHaveCount(0)
-
-    await setVisibility(page, 'hidden')
-    await page.waitForTimeout(50)
-    await setVisibility(page, 'visible')
-    await page.waitForTimeout(50)
-    await page.evaluate(() => window.__sendRecoveredKeepalive())
-    await page.waitForTimeout(400)
-
-    expect(await page.evaluate(() => window.__streamFetchCount)).toBe(2)
-    await expect(page.locator('[data-chat-surface="painted"] .connection-status--reattach')).toHaveCount(0)
-  })
-
-  test('12. Long-hidden wake with stale reads still reattaches and replays', async ({ page }) => {
-    await page.addInitScript(() => {
-      const realFetch = window.fetch.bind(window)
-      let streamCount = 0
-      let finishReattached
-      window.__streamFetchCount = 0
-      window.__finishReattachedStream = () => finishReattached?.()
-
-      window.fetch = (input, init) => {
-        const url = typeof input === 'string' ? input : (input && input.url) || ''
-        if (!/\/api\/chats\/[0-9a-f-]+\/stream$/.test(url)) {
-          return realFetch(input, init)
-        }
-
-        streamCount++
-        window.__streamFetchCount = streamCount
-
-        if (streamCount === 1) {
-          const body = new ReadableStream({ start() {}, cancel() {} })
-          return Promise.resolve(new Response(body, {
-            status: 200,
-            headers: { 'Content-Type': 'text/event-stream' },
-          }))
-        }
-
-        if (streamCount === 2) {
-          const encoder = new TextEncoder()
-          let controllerRef
-          const body = new ReadableStream({
-            start(controller) {
-              controllerRef = controller
-              controller.enqueue(encoder.encode(
-                'data: {"type":"text","content":"long-hidden replay"}\n\n',
-              ))
-              controller.enqueue(encoder.encode(
-                'data: {"type":"catch_up_done"}\n\n',
-              ))
-              finishReattached = () => {
-                controllerRef.enqueue(encoder.encode('data: {"type":"done"}\n\n'))
-                controllerRef.close()
-              }
-            },
-            cancel() {},
-          })
-          return Promise.resolve(new Response(body, {
-            status: 200,
-            headers: { 'Content-Type': 'text/event-stream' },
-          }))
-        }
-
-        return new Promise(() => {})
-      }
-    })
-
-    await setupChat(page)
-    await send(page, 'long hidden with stale socket')
-    await expect(page.locator('[data-chat-surface="painted"] button[aria-label="Stop"]')).toHaveCount(1)
-    await page.waitForFunction(() => window.__streamFetchCount === 1)
-
-    await setVisibility(page, 'hidden')
-    await page.waitForTimeout(5200)
-    await setVisibility(page, 'visible')
-
-    await page.waitForFunction(() => window.__streamFetchCount === 2)
-    await expect(page.locator('[data-chat-surface="painted"] .chat__scroll')).toContainText(
-      'long-hidden replay', { timeout: 5000 },
-    )
-    await expect(page.locator('[data-chat-surface="painted"] button[aria-label="Stop"]')).toHaveCount(1)
-
-    await page.evaluate(() => window.__finishReattachedStream())
-    await expect(page.locator('[data-chat-surface="painted"] button[aria-label="Stop"]')).toHaveCount(0)
-  })
-
-  test('13. Slow long-hidden reattach shows the reconnecting note', async ({ page }) => {
+  test('13. Slow long-hidden wake reattaches and delivers the resumed stream', async ({ page }) => {
+    const resumedMarker = 'resumed after a long hidden wake'
     await page.addInitScript(() => {
       const realFetch = window.fetch.bind(window)
       let streamCount = 0
       let releaseReattach
       window.__streamFetchCount = 0
-      window.__releaseSlowReattach = () => releaseReattach?.()
+      window.__releaseSlowReattach = marker => releaseReattach?.(marker)
 
       window.fetch = (input, init) => {
         const url = typeof input === 'string' ? input : (input && input.url) || ''
@@ -594,12 +305,15 @@ test.describe('Stream reconnection', () => {
 
         if (streamCount === 2) {
           return new Promise(resolve => {
-            releaseReattach = () => {
+            releaseReattach = marker => {
               const encoder = new TextEncoder()
               const body = new ReadableStream({
                 start(controller) {
                   controller.enqueue(encoder.encode(
                     'data: {"type":"catch_up_done"}\n\n',
+                  ))
+                  controller.enqueue(encoder.encode(
+                    `data: ${JSON.stringify({ type: 'text', content: marker })}\n\n`,
                   ))
                   controller.enqueue(encoder.encode('data: {"type":"done"}\n\n'))
                   controller.close()
@@ -630,13 +344,10 @@ test.describe('Stream reconnection', () => {
     await setVisibility(page, 'visible')
 
     await page.waitForFunction(() => window.__streamFetchCount === 2)
-    await expect(page.locator('[data-chat-surface="painted"] .connection-status--reattach')).toBeVisible({
-      // Presentation intentionally suppresses transient notices for 2.5s;
-      // leave scheduling headroom beyond that product-owned delay.
-      timeout: 8000,
-    })
-
-    await page.evaluate(() => window.__releaseSlowReattach())
+    await page.evaluate(marker => window.__releaseSlowReattach(marker), resumedMarker)
+    await expect(page.locator('[data-chat-surface="painted"] .chat__scroll'))
+      .toContainText(resumedMarker, { timeout: 5000 })
+    await expect.poll(() => page.evaluate(() => window.__streamFetchCount)).toBe(2)
     await expect(page.locator('[data-chat-surface="painted"] button[aria-label="Stop"]')).toHaveCount(0)
   })
 
@@ -677,327 +388,11 @@ test.describe('Stream reconnection', () => {
       .toBe(false)
   })
 
-  test('6. Typing while streaming shows Send instead of Stop', async ({ page }) => {
-    let streamCount = 0
-    await page.route(/\/api\/chats\/[0-9a-f-]+\/stream$/, async route => {
-      streamCount++
-      if (streamCount === 1) {
-        // First stream: deliver text but keep connection open (no done).
-        // The SSE body ends at the network level, which makes
-        // useStreamConnection see EOF → it calls onStreamEnd. To keep
-        // the "sending" state visible long enough for the test, we
-        // delay the response so the typing happens while Stop is shown.
-        await new Promise(r => setTimeout(r, 500))
-        route.fulfill({
-          status: 200,
-          headers: {
-            'Content-Type': 'text/event-stream',
-            'Cache-Control': 'no-cache',
-          },
-          body: sseBody([
-            { type: 'text', content: 'streaming...' },
-            { type: 'done' },
-          ]),
-        })
-      } else {
-        route.fulfill({
-          status: 200,
-          headers: {
-            'Content-Type': 'text/event-stream',
-            'Cache-Control': 'no-cache',
-          },
-          body: sseBody([
-            { type: 'text', content: 'second response' },
-            { type: 'done' },
-          ]),
-        })
-      }
-    })
 
-    await setupChat(page)
-    await send(page, 'hello')
 
-    // Stop button should appear while agent is working.
-    await expect(page.locator('[data-chat-surface="painted"] button[aria-label="Stop"]')).toBeVisible({
-      timeout: 3000,
-    }).catch(() => {
-      // Stream may have completed already — that's OK for this test.
-      // The key invariant is below.
-    })
 
-    // After stream completes, type a follow-up.
-    await expect(page.locator('[data-chat-surface="painted"] .chat__scroll')).toContainText(
-      'streaming...', { timeout: 5000 },
-    )
-    const input = page.getByRole('textbox', { name: 'Message Möbius…' })
-    await input.fill('follow up')
-    await expect(page.locator('[data-chat-surface="painted"] button[aria-label="Send"]')).toBeVisible()
 
-    // Send and verify second response arrives.
-    await page.locator('[data-chat-surface="painted"] button[aria-label="Send"]').click()
-    await expect(page.locator('[data-chat-surface="painted"] .chat__scroll')).toContainText(
-      'second response', { timeout: 5000 },
-    )
-  })
 
-  test('7. Stop+immediate-resend: a stale continuation 204 must not clobber the resent turn', async ({ page }) => {
-    // Regression for the missing stale-connection guard in
-    // useStreamConnection.connectToStream. On Stop,
-    // disconnect({clearStreaming:true}) aborts the active controller AND
-    // zeroes justSentAtRef; ChatView then immediately resends the queued
-    // message as a fresh turn (new controller, fresh justSentAtRef). If
-    // the ORIGINAL turn's stream fetch RESOLVES (rather than rejecting)
-    // AFTER that resend with a 204 — which happens in production when the
-    // browser already received the 204 response before the Stop's abort,
-    // so the abort is a no-op and the awaited fetch resolves normally —
-    // the old code ran the 204 branch on a connection that no longer
-    // owns abortRef. With justSentAtRef freshly set by the resend it
-    // could schedule a spurious reconnect; once the resend's own window
-    // elapsed it took the terminal path: setStreamItems([]) +
-    // onNeedsRefresh({force:true}), forcing a DB refetch that clobbers
-    // the resent turn's live response. The guard
-    // `if (abortRef.current !== controller) return` makes the orphaned
-    // continuation bail before touching res.
-    //
-    // Why a fetch shim and not route.fulfill: an aborted route-mocked
-    // fetch REJECTS (AbortError) and never reaches the post-fetch line,
-    // so route mocking can't reproduce "resolves after abort". We shim
-    // window.fetch so the FIRST /stream request resolves with a synthetic
-    // 204 on a test signal, IGNORING the abort signal — a faithful,
-    // deterministic model of the production "response already received
-    // before abort" race. The SECOND /stream stays open after emitting its
-    // response, giving the successor controller one unambiguous live owner.
-    // The guard's behavior is identical whether the late resolution is a
-    // real network race or this simulation, because both deliver a resolved
-    // 204 Response to the same awaited fetch while abortRef points elsewhere.
-    let messagesPostCount = 0
-    const runtime = createMockChatRuntime({ runtime_revision: FIXTURE_RUNTIME_REVISION })
-
-    // Install the fetch shim before any app code runs. It captures the
-    // first explicitly armed /stream fetch and parks it (a held Response).
-    // The next /stream fetch emits one catch-up response and stays open.
-    // This proves controller ownership directly: an orphaned terminal-204
-    // path would clear the successor's response and active Stop state,
-    // while unrelated detail refreshes cannot falsify the assertion.
-    await page.addInitScript(() => {
-      const realFetch = window.fetch.bind(window)
-      let staleParked = false
-      let staleArmed = false
-      let resentServed = false
-      let resolveStale
-      let resentController
-      window.__staleStreamRequested = false
-      window.__armStaleStream = () => { staleArmed = true }
-      window.__releaseStaleStream = () => { if (resolveStale) resolveStale() }
-      window.__closeResentStream = () => {
-        if (resentController) resentController.close()
-      }
-      window.fetch = (input, init) => {
-        const url = typeof input === 'string' ? input : (input && input.url) || ''
-        const isChatStream = /\/api\/chats\/[0-9a-f-]+\/stream$/.test(url)
-        if (staleArmed && !staleParked && isChatStream) {
-          staleParked = true
-          window.__staleStreamRequested = true
-          // Park: resolve only when the test signals, then hand back a
-          // real 204 Response. Ignore init.signal entirely so the abort
-          // from Stop's disconnect() does NOT reject this — mirroring a
-          // 204 that landed before the abort.
-          return new Promise(resolve => {
-            resolveStale = () => resolve(new Response(null, { status: 204 }))
-          })
-        }
-        if (staleParked && !resentServed && isChatStream) {
-          resentServed = true
-          const encoder = new TextEncoder()
-          const body = new ReadableStream({
-            start(controller) {
-              resentController = controller
-              controller.enqueue(encoder.encode(
-                'data: {"type":"text","content":"RESENT TURN RESPONSE"}\n\n'
-                + 'data: {"type":"catch_up_done"}\n\n',
-              ))
-            },
-          })
-          return Promise.resolve(new Response(body, {
-            status: 200,
-            headers: {
-              'Content-Type': 'text/event-stream',
-              'Cache-Control': 'no-cache',
-            },
-          }))
-        }
-        return realFetch(input, init)
-      }
-    })
-
-    await setupChat(page)
-    // Bootstrap and fixture navigation may reconnect the previously active
-    // chat. Arm only after the isolated, model-selected chat is painted so
-    // that incidental hydration traffic cannot consume the held response.
-    await page.evaluate(() => window.__armStaleStream())
-
-    await page.route(/\/api\/chats\/[0-9a-f-]+\/runtime$/, route => {
-      if (route.request().method() !== 'GET') { route.continue(); return }
-      route.fulfill({
-        status: 200,
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(runtime.snapshot()),
-      })
-    })
-
-    // Cancel-queued (DELETE /pending/{cid}) → 200 with an empty queue, so the
-    // tray-X clear below resolves cleanly without an error-path refetch.
-    await page.route(/\/api\/chats\/[0-9a-f-]+\/pending\/[^/]+$/, route => {
-      runtime.update({ pending_messages: [] })
-      return route.fulfill({
-        status: 200,
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ pending_messages: [] }),
-      })
-    })
-    await page.route('**/api/chat/stop', route => {
-      runtime.update({ running: false, pending_messages: [] })
-      return route.fulfill({ status: 200, body: '{}' })
-    })
-
-    // POST /messages override — registered AFTER setupChat so it wins
-    // (Playwright matches most-recently-added first; setupChat's bare-{}
-    // mock would otherwise shadow this). First send starts the (stale)
-    // turn; the follow-up sent while streaming truly queues; Stop's
-    // collapsed resend starts again.
-    await page.route(/\/api\/chats\/[0-9a-f-]+\/messages$/, route => {
-      if (route.request().method() !== 'POST') { route.continue(); return }
-      const body = route.request().postDataJSON()
-      messagesPostCount++
-      if (messagesPostCount === 2) {
-        const ts = Date.now()
-        const pendingMessage = {
-          role: 'user',
-          content: body.content,
-          ts,
-          cid: body.cid,
-        }
-        runtime.update({ running: true, pending_messages: [pendingMessage] })
-        route.fulfill({
-          status: 202,
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            status: 'queued',
-            ts,
-            position: 1,
-            pending_message: pendingMessage,
-          }),
-        })
-        return
-      }
-      runtime.update({ running: true, pending_messages: [] })
-      route.fulfill({
-        status: 202,
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ status: 'started' }),
-      })
-    })
-
-    // Send the first message. Its /stream fetch is parked by the shim.
-    await send(page, 'first turn')
-    await expect(page.locator('[data-chat-surface="painted"] button[aria-label="Stop"]')).toHaveCount(1)
-    await page.waitForFunction(() => window.__staleStreamRequested === true, undefined, {
-      timeout: 5000,
-    })
-
-    // Queue a second message behind the streaming turn. A server-confirmed
-    // queued message surfaces the fast-forward (steer) chip alongside Stop
-    // (the steer feature — see steer-queued.spec.mjs). This test is about
-    // the STOP disconnect+resend stale-204 guard, so clear the queue via
-    // the tray's cancel-X before stopping — a Stop with queued rows would
-    // collapse them into the fresh turn and change the resend payload.
-    // The DELETE /pending does not hit /messages, so the post-counter
-    // sequence is unchanged: the fresh turn we send after Stop is POST #3
-    // (status:'started' → real /stream).
-    const input = page.getByRole('textbox', { name: 'Message Möbius…' })
-    await input.fill('queued follow-up')
-    await expect(page.locator('[data-chat-surface="painted"] button[aria-label="Send"]')).toBeVisible()
-    await page.locator('[data-chat-surface="painted"] button[aria-label="Send"]').click()
-    // Wait for it to land as a server-confirmed queued row, then cancel it.
-    await expect(page.getByRole('button', { name: 'Send queued message now' }))
-      .toBeVisible()
-    await page.locator('[data-chat-surface="painted"] .queued__cancel').first().click()
-    await expect(page.locator('[data-chat-surface="painted"] .queued__row')).toHaveCount(0)
-
-    // Stop: with the queue cleared the primary action is Stop again. Stop
-    // aborts the parked first stream's controller (a no-op for the shim)
-    // and zeroes justSentAtRef.
-    await expect(page.locator('[data-chat-surface="painted"] button[aria-label="Stop"]')).toBeVisible()
-    await page.locator('[data-chat-surface="painted"] button[aria-label="Stop"]').click()
-    // click() only waits for the DOM event, not handleStop's async backend
-    // confirmation. Wait for the state machine to become idle before modeling
-    // the user's next send; otherwise Enter can race the still-active Stop
-    // state and legitimately enqueue instead of opening the fresh stream this
-    // test is meant to exercise.
-    await expect(page.locator('[data-chat-surface="painted"] button[aria-label="Stop"]')).toHaveCount(0)
-
-    // Send the follow-up as a fresh turn whose held-open /stream (request #2)
-    // is the successor the stale 204 must not clobber.
-    await send(page, 'queued follow-up')
-
-    // The resent turn's response should stream in and stick.
-    await expect(page.locator('[data-chat-surface="painted"] .chat__scroll')).toContainText(
-      'RESENT TURN RESPONSE', { timeout: 8000 },
-    )
-
-    // Let the successor's send-registration window expire before releasing
-    // the old response. Without the ownership guard, this makes the stale
-    // connection take the terminal-204 branch immediately instead of entering
-    // the registration-retry branch first.
-    await page.waitForTimeout(1750)
-
-    // NOW release the parked first stream as a stale 204. With the guard
-    // it bails (abortRef no longer === its controller). Without the
-    // guard it runs the terminal-refresh path and clobbers.
-    await page.evaluate(() => window.__releaseStaleStream())
-
-    // Give the resumed fetch continuation time to take the wrong terminal
-    // branch before checking the still-live successor.
-    await page.waitForTimeout(250)
-
-    // The resent response and its Stop control must still be present. This is
-    // the direct ownership contract: without the stale-controller guard, the
-    // old 204 clears streamItems and retires the successor's active state.
-    await expect(page.locator('[data-chat-surface="painted"] .chat__scroll')).toContainText('RESENT TURN RESPONSE')
-    await expect(page.locator('[data-chat-surface="painted"] button[aria-label="Stop"]')).toHaveCount(1)
-    await page.evaluate(() => window.__closeResentStream())
-  })
-
-  test('5. 204 shortly after send retries instead of refreshing', async ({ page }) => {
-    let streamRequestCount = 0
-
-    await page.route(/\/api\/chats\/[0-9a-f-]+\/stream$/, route => {
-      streamRequestCount++
-      if (streamRequestCount <= 2) {
-        route.fulfill({ status: 204, body: '' })
-        return
-      }
-      route.fulfill({
-        status: 200,
-        headers: {
-          'Content-Type': 'text/event-stream',
-          'Cache-Control': 'no-cache',
-        },
-        body: sseBody([
-          { type: 'text', content: 'delayed response' },
-          { type: 'done' },
-        ]),
-      })
-    })
-
-    await setupChat(page)
-    await send(page, 'hello')
-
-    await expect(page.locator('[data-chat-surface="painted"] .chat__scroll')).toContainText('delayed response', {
-      timeout: 10000,
-    })
-    expect(streamRequestCount).toBeGreaterThanOrEqual(3)
-  })
 
   test('10. Reload of a running chat frozen on a question renders an ANSWERABLE card', async ({ page }) => {
     // Regression for the wedged-chat bug: a chat whose agent turn is

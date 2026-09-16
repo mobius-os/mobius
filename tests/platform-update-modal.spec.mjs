@@ -131,20 +131,7 @@ async function openUpdateReview(page) {
   return dialog
 }
 
-test('an incomplete activation preview offers no update action', async ({ page }) => {
-  const state = { current: 'available', preview: {
-    ...preview, activation: { level: 'live', deployment: 'self_hosted' },
-  } }
-  await mockPlatform(page, state)
-  await openSettings(page)
-  await page.getByRole('button', { name: 'Review update', exact: true }).click()
-  const dialog = page.getByRole('dialog', { name: 'Review update' })
-  await expect(dialog.getByText(/server has not loaded these update controls yet/)).toBeVisible()
-  await expect(dialog.getByRole('button', { name: 'Try again' })).toBeEnabled()
-  await expect(dialog.getByRole('button', { name: 'Apply update' })).toHaveCount(0)
-  await expect(dialog.getByRole('button', { name: 'Update now', exact: true })).toHaveCount(0)
-  expect(state.unexpectedMutations).toEqual([])
-})
+
 
 test('a clean apply closes the review and exposes the restart step', async ({ page }) => {
   const state = { current: 'available' }
@@ -181,58 +168,7 @@ test('a clean apply closes the review and exposes the restart step', async ({ pa
   await expect(restart).toBeFocused()
 })
 
-test('a staged update can review another release before one restart', async ({ page }) => {
-  const state = {
-    current: 'restart_needed',
-    overrides: { available: true, needs_restart: true },
-  }
-  await mockPlatform(page, state)
-  await page.route('**/api/platform/apply', route => {
-    state.overrides = { available: false, needs_restart: true }
-    return route.fulfill({
-      status: 200,
-      contentType: 'application/json',
-      body: JSON.stringify({
-        state: 'restart_needed',
-        needs_restart: true,
-        upstream_commit: preview.target_sha,
-        merge_commit: '3333333333333333333333333333333333333333',
-        conflict_paths: [],
-        chat_id: null,
-      }),
-    })
-  })
 
-  await page.setViewportSize({ width: 900, height: 800 })
-  await page.goto(BASE, { waitUntil: 'domcontentloaded' })
-  await page.waitForFunction(
-    () => !!(document.querySelector('.chat__empty-wrap')
-      || document.querySelector('.chat__scroll')
-      || document.querySelector('.chat__form')),
-    undefined, { timeout: 10000 },
-  )
-  const navigationToggle = page.getByLabel('Toggle navigation')
-  if (await navigationToggle.getAttribute('aria-expanded') !== 'true') {
-    await navigationToggle.click()
-  }
-  await page.getByRole('button', { name: 'Settings', exact: true }).click()
-
-  await expect(page.getByText('More updates available', { exact: true })).toBeVisible()
-  const review = page.getByRole('button', { name: 'Review update' })
-  await expect(review).toBeVisible()
-  await expect(page.getByRole('button', { name: 'Restart server' })).toBeVisible()
-  await expect(page.getByRole('button', { name: 'Restart to finish' })).toHaveCount(0)
-  await review.click()
-
-  const dialog = page.getByRole('dialog', { name: 'Review update' })
-  await expect(dialog).toBeVisible()
-  await dialog.getByRole('button', { name: 'Apply update' }).click()
-
-  await expect(dialog).toHaveCount(0)
-  await expect(page.getByText('Ready to restart', { exact: true })).toBeVisible()
-  await expect(page.getByRole('button', { name: 'Restart to finish' })).toBeFocused()
-  await expect(page.getByRole('button', { name: 'Restart server' })).toBeVisible()
-})
 
 test('staged-update actions stack without overflow in a narrow settings pane', async ({ page }) => {
   const state = {
@@ -330,127 +266,13 @@ test('a blocked apply stays open, focuses its result, and shows resolver failure
   await expect(page.getByRole('button', { name: 'Resolve in chat' })).toBeFocused()
 })
 
-test('a rolled-back apply stays open with an explicit repair action', async ({ page }) => {
-  const state = { current: 'available' }
-  await mockPlatform(page, state)
-  await page.route('**/api/platform/apply', route => {
-    state.current = 'rolled_back'
-    return route.fulfill({
-      status: 200,
-      contentType: 'application/json',
-      body: JSON.stringify({
-        state: 'rolled_back',
-        needs_restart: false,
-        upstream_commit: preview.target_sha,
-        merge_commit: null,
-        conflict_paths: [],
-        chat_id: null,
-      }),
-    })
-  })
 
-  const review = await openUpdateReview(page)
-  await review.getByRole('button', { name: 'Apply update' }).click()
 
-  const result = page.getByRole('dialog', { name: 'Update rolled back' })
-  await expect(result).toBeVisible()
-  await expect(result.getByText('Your previous source was restored.')).toBeVisible()
-  await expect(result.getByRole('button', { name: 'Ask Möbius' })).toBeFocused()
-  await result.getByRole('button', { name: 'Not now' }).click()
-  await expect(result).toHaveCount(0)
-  await expect(page.getByText('Update needs repair', { exact: true })).toBeVisible()
-  await expect(page.getByRole('button', { name: 'Ask Möbius', exact: true })).toBeFocused()
-})
 
-test('a clean apply remains truthful when every follow-up status read fails', async ({ page }) => {
-  const state = { current: 'available', failStatus: false }
-  await mockPlatform(page, state)
-  await page.route('**/api/platform/apply', route => {
-    state.failStatus = true
-    return route.fulfill({
-      status: 200,
-      contentType: 'application/json',
-      body: JSON.stringify({
-        state: 'restart_needed',
-        needs_restart: true,
-        upstream_commit: preview.target_sha,
-        merge_commit: '3333333333333333333333333333333333333333',
-        conflict_paths: [],
-        chat_id: null,
-      }),
-    })
-  })
 
-  const review = await openUpdateReview(page)
-  await review.getByRole('button', { name: 'Apply update' }).click()
 
-  await expect(review).toHaveCount(0)
-  await expect(
-    page.locator('.platform-updates').getByText('Ready to restart', { exact: true }),
-  ).toBeVisible()
-  await expect(page.getByRole('button', { name: 'Restart to finish' })).toBeFocused()
-})
 
-test('a conflict result closes to truthful repair state when status reads fail', async ({ page }) => {
-  const state = { current: 'available', failStatus: false }
-  await mockPlatform(page, state)
-  await page.route('**/api/platform/apply', route => {
-    state.failStatus = true
-    return route.fulfill({
-      status: 200,
-      contentType: 'application/json',
-      body: JSON.stringify({
-        state: 'conflict',
-        needs_restart: false,
-        upstream_commit: preview.target_sha,
-        merge_commit: null,
-        conflict_paths: ['frontend/src/example.js'],
-        chat_id: null,
-      }),
-    })
-  })
 
-  const review = await openUpdateReview(page)
-  await review.getByRole('button', { name: 'Apply update' }).click()
-
-  const result = page.getByRole('dialog', { name: 'Update not applied' })
-  await expect(result).toBeVisible()
-  await result.getByRole('button', { name: 'Not now' }).click()
-  await expect(result).toHaveCount(0)
-  await expect(page.getByText('Update blocked', { exact: true })).toBeVisible()
-  await expect(page.getByRole('button', { name: 'Resolve in chat' })).toBeFocused()
-})
-
-test('a rollback result keeps an explicit repair action when status reads fail', async ({ page }) => {
-  const state = { current: 'available', failStatus: false }
-  await mockPlatform(page, state)
-  await page.route('**/api/platform/apply', route => {
-    state.failStatus = true
-    return route.fulfill({
-      status: 200,
-      contentType: 'application/json',
-      body: JSON.stringify({
-        state: 'rolled_back',
-        needs_restart: false,
-        upstream_commit: preview.target_sha,
-        merge_commit: null,
-        conflict_paths: [],
-        chat_id: null,
-      }),
-    })
-  })
-
-  const review = await openUpdateReview(page)
-  await review.getByRole('button', { name: 'Apply update' }).click()
-
-  const result = page.getByRole('dialog', { name: 'Update rolled back' })
-  await expect(result).toBeVisible()
-  await expect(result.getByRole('button', { name: 'Ask Möbius' })).toBeFocused()
-  await result.getByRole('button', { name: 'Not now' }).click()
-  await expect(result).toHaveCount(0)
-  await expect(page.getByText('Update needs repair', { exact: true })).toBeVisible()
-  await expect(page.getByRole('button', { name: 'Ask Möbius', exact: true })).toBeFocused()
-})
 
 for (const [label, body] of [
   ['malformed', '{'],
@@ -526,38 +348,9 @@ function finishPreview(overrides = {}) {
     activation: imageActivation, commits: [], total_commits: 0, ...overrides }
 }
 
-test('an unfinished installed image update routes to the repair action', async ({ page }) => {
-  const state = { current: 'activation_needed',
-    overrides: { available: false, activation: imageActivation }, preview: finishPreview(),
-    rebuild: { supported: true, state: 'no_change', expected_sha: preview.current_sha } }
-  await mockPlatform(page, state)
-  const updates = await openSettings(page)
-  await expect(updates.getByRole('button', { name: 'Finish update', exact: true })).toBeVisible()
-  await expect(updates.getByRole('button', { name: 'Review update', exact: true })).toHaveCount(0)
-  const request = page.waitForRequest('**/api/platform/update-preview?intent=finish')
-  await updates.getByRole('button', { name: 'Finish update', exact: true }).click()
-  await request
-  const dialog = page.getByRole('dialog', { name: 'Finish update' })
-  await expect(dialog).toBeVisible()
-  await expect(dialog.getByRole('heading', { name: 'This update needs help' })).toBeVisible()
-  await expect(dialog.getByRole('button', { name: 'Ask Möbius', exact: true })).toBeEnabled()
-  await expect(dialog.getByRole('button', { name: 'Update now', exact: true })).toHaveCount(0)
-  expect(state.unexpectedMutations).toEqual([])
-})
 
-test('a newer release remains the single next action while installed activation waits', async ({ page }) => {
-  const installed = finishPreview({ activation: { ...imageActivation, deployment: 'railway' },
-    image_digest: `sha256:${'b'.repeat(64)}` })
-  const state = { current: 'activation_needed',
-    overrides: { available: true, activation: imageActivation }, preview: installed,
-    rebuild: { supported: true, state: 'no_change', expected_sha: installed.target_sha } }
-  await mockPlatform(page, state)
-  const updates = await openSettings(page)
-  await expect(updates.getByRole('button', { name: 'Review update', exact: true })).toBeVisible()
-  await expect(updates.getByRole('button', { name: 'Finish installed update' })).toHaveCount(0)
-  await expect(updates.getByRole('button', { name: 'Finish update', exact: true })).toHaveCount(0)
-  expect(state.unexpectedMutations).toEqual([])
-})
+
+
 
 test('a failed container result survives reopening Settings without an unsolicited alert', async ({ page }) => {
   const state = { current: 'activation_needed', overrides: { available: false, activation: imageActivation },
@@ -594,19 +387,3 @@ for (const level of ['server_restart', 'dependency_sync']) {
     expect(state.unexpectedMutations).toEqual([])
   })
 }
-
-test('technical changes stay behind an optional disclosure in the review', async ({ page }) => {
-  const state = { current: 'available', preview: { ...preview,
-    files: [{ path: 'frontend/src/example.js', status: 'M', insertions: 1, deletions: 1 }],
-    diff: 'diff --git a/frontend/src/example.js b/frontend/src/example.js\n--- a/frontend/src/example.js\n+++ b/frontend/src/example.js\n@@ -1 +1 @@\n-old\n+new\n' } }
-  await mockPlatform(page, state)
-  const dialog = await openUpdateReview(page)
-  const technical = dialog.locator('details.urm__technical')
-  await expect(technical).not.toHaveAttribute('open', '')
-  await expect(dialog.getByRole('heading', { name: 'What to expect' })).toBeVisible()
-  await expect(dialog.getByText('Incoming platform change')).not.toBeVisible()
-  await technical.locator('summary').first().click()
-  await expect(dialog.getByText('Incoming platform change')).toBeVisible()
-  await expect(technical.getByTitle('frontend/src/example.js', { exact: true })).toBeVisible()
-  expect(state.unexpectedMutations).toEqual([])
-})

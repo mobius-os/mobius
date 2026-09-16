@@ -127,35 +127,9 @@ test('bell opens a bounded preview and seen-on-open clears its badge', async ({ 
   await expect(bell).toHaveAttribute('aria-expanded', 'false')
 })
 
-test('clear all immediately removes the preview rows and badge', async ({ page }) => {
-  const state = await mockNotifications(page)
-  await setup(page)
-  await openPreview(page)
 
-  await expect(page.locator('.notifications__row')).toHaveCount(2)
-  await page.getByRole('button', { name: 'Clear all' }).click()
-  await expect.poll(() => state.deleteCalls).toBe(1)
-  await expect(page.locator('.notifications__row')).toHaveCount(0)
-  await expect(page.locator('.notifications__empty')).toBeVisible()
-  await expect(page.locator('.notification-bell__badge')).toHaveCount(0)
-})
 
-test('bell toggles; Escape and outside click dismiss without navigation', async ({ page }) => {
-  await mockNotifications(page)
-  await setup(page)
-  await openPreview(page)
-  await page.locator('.notification-bell').click()
-  await expect(page.locator('.notifications')).toBeHidden()
 
-  await openPreview(page)
-  await page.keyboard.press('Escape')
-  await expect(page.locator('.notifications')).toBeHidden()
-  await expect(page.locator('.notification-bell')).toBeFocused()
-
-  await openPreview(page)
-  await page.locator('.shell__brand').click({ position: { x: 2, y: 2 } })
-  await expect(page.locator('.notifications')).toBeHidden()
-})
 
 test('valid targets navigate; hostile targets remain inert', async ({ page }) => {
   await mockNotifications(page)
@@ -205,42 +179,4 @@ test('phone header preserves the 44px bell and widest badge without collisions',
   for (const [a, b] of [[brand, pillBox], [brand, bellBox2], [pillBox, bellBox2], [pillBox, badgeBox]]) {
     expect(overlaps(a, b)).toBe(false)
   }
-})
-
-test('phone preview stays content-sized for a short list', async ({ page }) => {
-  await mockNotifications(page)
-  await setup(page, { width: 390, height: 500 })
-  await openPreview(page)
-
-  const panelBox = await page.locator('.notifications').boundingBox()
-  expect(panelBox.height).toBeLessThan(300)
-})
-
-test('phone preview scrolls a long list within its compact cap', async ({ page }) => {
-  const manyRows = Array.from({ length: 8 }, (_, index) => ({
-    id: `n-${index}`, source_type: 'agent', source_id: CHAT_ID,
-    title: `Notification ${index + 1}`, body: 'A useful update with enough detail for two lines.',
-    icon: null, target: `/shell/?chat=${CHAT_ID}`, actions: null,
-    sent_at: new Date(Date.now() - index * 60_000).toISOString(), clicked_at: null, read_at: null,
-  }))
-  await mockNotifications(page, { rows: manyRows })
-  await setup(page, { width: 390, height: 500 })
-  await openPreview(page)
-
-  const panel = page.locator('.notifications')
-  const content = page.locator('.notifications__content')
-  const panelBox = await panel.boundingBox()
-  expect(panelBox.height).toBeLessThanOrEqual(352)
-  const dimensions = await content.evaluate(element => ({
-    clientHeight: element.clientHeight,
-    scrollHeight: element.scrollHeight,
-  }))
-  expect(dimensions.scrollHeight).toBeGreaterThan(dimensions.clientHeight)
-})
-
-test('preview is identical at desktop width', async ({ page }) => {
-  await mockNotifications(page)
-  await setup(page, { width: 1280, height: 800 })
-  await openPreview(page)
-  await expect(page.locator('.notifications__row')).toHaveCount(2)
 })

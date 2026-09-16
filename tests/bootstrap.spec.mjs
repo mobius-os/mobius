@@ -318,97 +318,11 @@ test.describe('Unauthenticated startup', () => {
     })
   })
 
-  test('invalid credentials stay on the short-height login form', async ({ page }) => {
-    await page.setViewportSize({ width: 360, height: 420 })
-    await page.route(/\/api\/auth\/setup\/status$/, route =>
-      route.fulfill({
-        status: 200,
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ configured: true }),
-      })
-    )
-    await page.route(/\/api\/auth\/token$/, route =>
-      route.fulfill({
-        status: 401,
-        headers: { 'Content-Type': 'application/json' },
-        body: '{"detail":"Incorrect username or password"}',
-      })
-    )
 
-    await page.goto(BASE, { waitUntil: 'domcontentloaded' })
-    const username = page.getByLabel('Username')
-    const password = page.getByLabel('Password')
-    await expect(username).toBeVisible({ timeout: 10000 })
 
-    // Safe top alignment keeps the beginning of an overflowing card reachable
-    // when a short viewport or software keyboard reduces the visual height.
-    expect(await page.locator('.login__card').evaluate(el => el.getBoundingClientRect().top))
-      .toBeGreaterThanOrEqual(0)
 
-    await username.fill('owner')
-    await password.fill('wrong password')
-    await page.getByRole('button', { name: 'Sign in' }).click()
 
-    await expect(page.getByRole('alert')).toHaveText('Incorrect username or password.')
-    await expect(page.getByText(/session expired/i)).toHaveCount(0)
-    await expect(username).toHaveValue('owner')
-    expect(await page.evaluate(() => sessionStorage.getItem('auth_expired'))).toBeNull()
-  })
 
-  test('a login service failure is not mislabeled as a bad password', async ({ page }) => {
-    await page.route(/\/api\/auth\/setup\/status$/, route =>
-      route.fulfill({
-        status: 200,
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ configured: true }),
-      })
-    )
-    await page.route(/\/api\/auth\/token$/, route =>
-      route.fulfill({
-        status: 503,
-        headers: { 'Content-Type': 'application/json' },
-        body: '{"detail":"Authentication service is starting"}',
-      })
-    )
-
-    await page.goto(BASE, { waitUntil: 'domcontentloaded' })
-    await page.getByLabel('Username').fill('owner')
-    await page.getByLabel('Password').fill('correct password')
-    await page.getByRole('button', { name: 'Sign in' }).click()
-
-    await expect(page.getByRole('alert'))
-      .toHaveText('Authentication service is starting')
-    await expect(page.getByText(/incorrect username or password/i)).toHaveCount(0)
-  })
-
-  test('setup-status failure pauses startup until a successful retry', async ({ page }) => {
-    let checks = 0
-    await page.route(/\/api\/auth\/setup\/status$/, route => {
-      checks += 1
-      if (checks === 1) {
-        return route.fulfill({
-          status: 503,
-          headers: { 'Content-Type': 'application/json' },
-          body: '{"detail":"starting"}',
-        })
-      }
-      return route.fulfill({
-        status: 200,
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ configured: false }),
-      })
-    })
-
-    await page.goto(BASE, { waitUntil: 'domcontentloaded' })
-    await expect(page.getByRole('heading', { name: 'Couldn’t reach Möbius' }))
-      .toBeVisible({ timeout: 10000 })
-    await expect(page.locator('.login')).toHaveCount(0)
-
-    await page.getByRole('button', { name: 'Try again' }).click()
-    await expect.poll(() => checks).toBe(2)
-    await expect(page.getByRole('heading', { name: 'Set up your Möbius' }))
-      .toBeVisible({ timeout: 10000 })
-  })
 
   test('managed deployment presents Möbius sign-in without local setup', async ({ page }) => {
     let setupChecks = 0

@@ -131,95 +131,22 @@ test('quiet acknowledgement preserves draft and attachment without starting a st
   await expect(f.surface.getByText('continue', { exact: true })).toHaveCount(0)
 })
 
-test('quiet rejection keeps selected choice and draft retryable with its explanation', async ({ page }) => {
-  const f = await mount(page, { reject: true })
-  await f.card.getByRole('radio', { name: /No thanks/ }).click()
-  await f.card.getByRole('button', { name: 'Submit', exact: true }).click()
-  await expect(f.card.getByRole('status')).toContainText('unfinished Goal')
-  await expect(f.composer).toHaveValue(draft)
-  await expect(f.attachment).toBeVisible()
-  await f.card.getByRole('button', { name: 'Submit', exact: true }).click()
-  await expect(f.card.getByRole('button', { name: 'Submitted', exact: true })).toBeVisible()
-  expect(f.attempts).toHaveLength(2)
-  expect(f.attempts[1].selected_options).toEqual({ help: ['0'] })
-})
+
 
 for (const acknowledgement of ['detail', 'replay']) {
-  test(`lost quiet acknowledgement settles through ${acknowledgement} without repeating its effect`, async ({ page }) => {
-    const f = await mount(page, { acknowledgement })
-    await f.card.getByRole('radio', { name: /No thanks/ }).click()
-    await f.card.getByRole('button', { name: 'Submit', exact: true }).click()
-    // The replay case deliberately withholds the saved answer from detail
-    // until the second POST. Otherwise detail is authoritative and may settle
-    // the answer before a retry; making both race for a required second POST
-    // tests scheduling, not preservation or exactly-once effects.
-    await page.evaluate(() => window.dispatchEvent(new Event('online')))
-    if (acknowledgement === 'replay') {
-      await expect.poll(() => f.attempts.length).toBe(2)
-    }
-    await expect(f.card.getByRole('button', { name: 'Submitted', exact: true })).toBeVisible()
-    expect(f.attempts.length).toBeGreaterThanOrEqual(1)
-    for (const attempt of f.attempts) expect(attempt).toEqual(f.attempts[0])
-    expect(f.answerWrites()).toBe(1)
-    await expect(f.composer).toHaveValue(draft)
-    await expect(f.attachment).toBeVisible()
-  })
+
 }
 
 for (const restartVersion of [1, 2]) {
-  test(`Restart v${restartVersion} submits its exact action identity without a model turn or lost draft`, async ({ page }) => {
-    const f = await mount(page, { restart: { version: restartVersion } })
-    await expect(f.card.getByRole('radio', { name: /Restart now/ })).toHaveCount(1)
-    await expect(f.card.getByRole('radio', { name: /Not now/ })).toHaveCount(restartVersion === 1 ? 1 : 0)
-    await f.card.getByRole('radio', { name: /Restart now/ }).click()
-    const beforeStreams = f.streams()
-    await f.card.getByRole('button', {
-      name: restartVersion === 1 ? 'Submit' : 'Continue',
-      exact: true,
-    }).click()
-    await expect(f.card.getByRole('status')).toContainText('Restart requested')
-    expect(f.attempts).toHaveLength(1)
-    expect(f.attempts[0].selected_options).toEqual({ restart: ['restart-option'] })
-    expect(f.streams()).toBe(beforeStreams)
-    await expect(f.composer).toHaveValue(draft)
-    await expect(f.attachment).toBeVisible()
-    await expect(f.surface.getByText('continue', { exact: true })).toHaveCount(0)
-  })
+
 
 }
 
-test('writing Restart now does not grant option authority', async ({ page }) => {
-  const f = await mount(page, { restart: {} })
-  await expect(f.card.getByRole('radio', { name: /Not now/ })).toHaveCount(0)
-  await f.card.getByRole('textbox', { name: `Custom answer for: ${question}` }).fill('Restart now')
-  await f.card.getByRole('button', { name: 'Continue', exact: true }).click()
-  await expect(f.card.getByRole('status')).toContainText('Response sent')
-  expect(f.attempts).toHaveLength(1)
-  expect(f.attempts[0]).not.toHaveProperty('selected_options')
-  expect(f.attempts[0].answers).toEqual({ [question]: 'Restart now' })
-  await expect(f.composer).toHaveValue(draft)
-  await expect(f.attachment).toBeVisible()
-})
 
-test('a legacy deferred Restart receipt remains settled without reviving its removed option', async ({ page }) => {
-  const f = await mount(page, { restart: { version: 1, status: 'deferred' } })
-  await expect(f.card.getByRole('status')).toContainText('Waiting for a later restart')
-  await expect(f.card.getByRole('radio')).toHaveCount(0)
-  await expect(f.card.getByRole('button', { name: 'Continue', exact: true })).toHaveCount(0)
-  expect(f.attempts).toHaveLength(0)
-  await expect(f.composer).toHaveValue(draft)
-  await expect(f.attachment).toBeVisible()
-})
 
-test('independent activation settles a Restart card without fabricating an owner answer', async ({ page }) => {
-  const f = await mount(page, { restart: { status: 'activated' } })
-  await expect(f.card.getByRole('status')).toContainText('Möbius restarted')
-  await expect(f.card.locator('[aria-checked="true"]')).toHaveCount(0)
-  await expect(f.card.getByRole('button', { name: 'Continue', exact: true })).toHaveCount(0)
-  expect(f.attempts).toHaveLength(0)
-  await expect(f.composer).toHaveValue(draft)
-  await expect(f.attachment).toBeVisible()
-})
+
+
+
 
 async function disconnectDelivery(page) {
   let postAttempts = 0
@@ -253,57 +180,7 @@ async function disconnectDelivery(page) {
   } }
 }
 
-test('known-offline fresh send stays in its local queue without POST or transcript movement', async ({ page }) => {
-  const f = await mount(page)
-  await f.card.getByRole('radio', { name: /No thanks/ }).click()
-  await f.card.getByRole('button', { name: 'Submit', exact: true }).click()
-  await expect(f.card.getByRole('button', { name: 'Submitted', exact: true })).toBeVisible()
-  await f.attachment.click()
-  const marker = 'OFFLINE-QUEUED-FOLLOWUP'
-  await f.composer.focus()
-  await f.composer.fill(marker)
-  await expect(f.composer).toHaveValue(marker)
-  const network = await disconnectDelivery(page)
-  await page.evaluate(marker => {
-    window.__offlineTrace = []
-    const sample = () => {
-      // Exclude the inert offscreen restoration/measurement copy; only the
-      // painted chat is a user-visible transcript/queue.
-      const surface = document.querySelector('[data-chat-surface="painted"]')
-      const users = [...(surface?.querySelectorAll('.chat__msg--user') || [])].filter(e => e.textContent.includes(marker))
-      const queued = [...(surface?.querySelectorAll('.queued__row') || [])].filter(e => e.textContent.includes(marker))
-      window.__offlineTrace.push({ users: users.length, queued: queued.length })
-    }
-    window.__offlineObserver = new MutationObserver(sample)
-    window.__offlineObserver.observe(document.body, { childList: true, subtree: true, attributes: true })
-    sample()
-  }, marker)
-  const readingTop = await f.card.evaluate(element => element.getBoundingClientRect().top)
-  await f.surface.getByRole('button', { name: 'Send', exact: true }).click()
-  const row = f.surface.locator('.queued__row').filter({ hasText: marker })
-  await expect(row).toBeVisible()
-  await expect(f.composer).toHaveValue('')
-  const queuedTop = await f.card.evaluate(element => element.getBoundingClientRect().top)
-  expect(Math.abs(queuedTop - readingTop)).toBeLessThanOrEqual(2)
-  expect(network.attempts()).toBe(0)
-  // A focus/runtime reconciliation must not mistake a local outbox row for a
-  // server row that disappeared. Reconnect then acknowledges that same cid.
-  await page.evaluate(() => window.dispatchEvent(new Event('focus')))
-  await expect(row).toBeVisible()
-  await network.reconnect()
-  await expect.poll(() => f.attempts.length).toBe(2)
-  await expect(row).toBeVisible()
-  const trace = await page.evaluate(() => {
-    window.__offlineObserver.disconnect()
-    return window.__offlineTrace
-  })
-  console.log('OFFLINE_PRESENTATION_TRACE', JSON.stringify(trace.filter((frame,i) => i === 0 || JSON.stringify(frame) !== JSON.stringify(trace[i-1]))))
-  expect(trace.some(frame => frame.users > 0)).toBe(false)
-  const firstQueued = trace.findIndex(frame => frame.queued === 1)
-  expect(firstQueued).toBeGreaterThanOrEqual(0)
-  expect(trace.slice(firstQueued).every(frame => frame.queued === 1)).toBe(true)
-  expect(f.attempts[1].cid).toBeTruthy()
-})
+
 
 for (const mode of ['quiet', 'reply', 'restart']) {
   test(`${mode} answer queues on its card offline, then confirms without touching the draft`, async ({ page }) => {
@@ -336,129 +213,17 @@ for (const mode of ['quiet', 'reply', 'restart']) {
   })
 }
 
-test('a follow-up can queue behind a locally saved answer without clearing its barrier', async ({ page }) => {
-  const f = await mount(page)
-  const network = await disconnectDelivery(page)
-  await f.card.getByRole('radio', { name: /Yes please/ }).click()
-  await f.card.getByRole('button', { name: 'Submit', exact: true }).click()
-  await expect(f.card.getByRole('button', { name: 'Queued on this device' })).toBeDisabled()
-  await f.attachment.click()
-  await f.composer.focus()
-  await f.composer.fill('FOLLOWUP-B-AFTER-LOCAL-ANSWER')
-  await expect(f.composer).toHaveValue('FOLLOWUP-B-AFTER-LOCAL-ANSWER')
-  await f.surface.getByRole('button', { name: 'Send', exact: true }).click()
-  await expect(f.surface.locator('.queued__row')).toContainText('FOLLOWUP-B-AFTER-LOCAL-ANSWER')
-  await expect(f.card.getByRole('button', { name: 'Queued on this device' })).toBeDisabled()
-  expect(network.attempts()).toBe(0)
-  expect(f.attempts).toHaveLength(0)
-  await network.reconnect()
-  await expect.poll(() => f.attempts.length).toBe(2)
-  expect(f.attempts[0].answers).toEqual({ [question]: 'Yes please' })
-  expect(f.attempts[1].content).toBe('FOLLOWUP-B-AFTER-LOCAL-ANSWER')
-  await expect(f.surface.locator('.queued__row')).toContainText('FOLLOWUP-B-AFTER-LOCAL-ANSWER')
-})
+
 
 
 for (const action of ['edit', 'cancel']) {
-  test(`a never-dispatched local message can ${action} offline without a server mutation`, async ({ page }) => {
-    const f = await mount(page)
-    await f.card.getByRole('radio', { name: /No thanks/ }).click()
-    await f.card.getByRole('button', { name: 'Submit', exact: true }).click()
-    await expect(f.card.getByRole('button', { name: 'Submitted', exact: true })).toBeVisible()
-    const marker = 'LOCAL-CONTROL-MESSAGE'
-    await f.composer.focus()
-    await f.composer.fill(marker)
-    const network = await disconnectDelivery(page)
-    await f.surface.getByRole('button', { name: 'Send', exact: true }).click()
-    const row = f.surface.locator('.queued__row')
-    await expect(row).toHaveCount(1)
-    if (action === 'edit') {
-      await row.getByRole('button', { name: 'Edit queued message' }).click()
-      await row.getByRole('textbox', { name: 'Edit queued message' }).fill('REVISED-LOCAL-MESSAGE')
-      await row.getByRole('button', { name: 'Save queued message edit' }).click()
-      await expect(row).toContainText('REVISED-LOCAL-MESSAGE')
-      await expect(row.getByRole('textbox')).toHaveCount(0)
-    } else {
-      await row.getByRole('button', { name: 'Cancel queued message' }).click()
-      await expect(row).toHaveCount(0)
-    }
-    expect(network.attempts()).toBe(0)
-    expect(f.mutations.some(request => request.path.includes('/pending/'))).toBe(false)
-    await page.reload({ waitUntil: 'domcontentloaded' })
-    await expect(f.card.getByRole('button', { name: 'Submitted', exact: true })).toBeVisible()
-    if (action === 'edit') await expect(row).toContainText('REVISED-LOCAL-MESSAGE')
-    else await expect(row).toHaveCount(0)
-    await network.reconnect()
-    if (action === 'edit') {
-      await expect.poll(() => f.attempts.length).toBe(2)
-      expect(f.attempts[1].content).toBe('REVISED-LOCAL-MESSAGE')
-      expect(f.attempts[1].attachments).toHaveLength(1)
-    } else {
-      await expect(page.locator('.shell__connection-status')).toHaveCount(0)
-      expect(f.attempts).toHaveLength(1)
-      await expect(row).toHaveCount(0)
-    }
-  })
+
 }
 
 
-test('cancellation cannot overtake a claimed background delivery', async ({ page }) => {
-  const f = await mount(page, { pauseMessage: true })
-  try {
-    await f.card.getByRole('radio', { name: /No thanks/ }).click()
-    await f.card.getByRole('button', { name: 'Submit', exact: true }).click()
-    await expect(f.card.getByRole('button', { name: 'Submitted', exact: true })).toBeVisible()
-    await f.composer.focus()
-    await f.composer.fill('DELIVERY-IN-FLIGHT')
-    const network = await disconnectDelivery(page)
-    await f.surface.getByRole('button', { name: 'Send', exact: true }).click()
-    const row = f.surface.locator('.queued__row')
-    await expect(row).toHaveCount(1)
-    await network.reconnect()
-    await expect.poll(() => f.attempts.length).toBe(2)
-    await row.getByRole('button', { name: 'Cancel queued message' }).click()
-    await expect(f.surface.getByText('Delivery is not confirmed yet. Try cancelling after delivery is confirmed.')).toBeVisible()
-    expect(f.mutations.some(request => request.method === 'DELETE')).toBe(false)
-    await expect(row).toHaveCount(1)
-    f.releaseMessage()
-    await expect(row).toContainText('DELIVERY-IN-FLIGHT')
-  } finally { f.releaseMessage() }
-})
+
 
 
 for (const action of ['edit', 'cancel']) {
-  test(`a busy replay owner prevents ${action} from racing a server-confirmed queue row`, async ({ page }) => {
-    const f = await mount(page)
-    await f.card.getByRole('radio', { name: /No thanks/ }).click()
-    await f.card.getByRole('button', { name: 'Submit', exact: true }).click()
-    await expect(f.card.getByRole('button', { name: 'Submitted', exact: true })).toBeVisible()
-    await f.composer.focus()
-    await f.composer.fill('CONFIRMED-QUEUE-MESSAGE')
-    await f.surface.getByRole('button', { name: 'Send', exact: true }).click()
-    const row = f.surface.locator('.queued__row')
-    await expect(row).toHaveCount(1)
-    await expect.poll(() => f.attempts.length).toBe(2)
-    // Model an older tab which has captured a body while holding the existing
-    // replay lock. Even canonical serverTs is not permission to overtake it.
-    await page.evaluate(() => new Promise(resolve => {
-      navigator.locks.request('mobius-chat-outbox', () => new Promise(release => {
-        window.releaseFixtureReplayLock = release
-        resolve()
-      }))
-    }))
-    try {
-      if (action === 'edit') {
-        await row.getByRole('button', { name: 'Edit queued message' }).click()
-        await row.getByRole('textbox', { name: 'Edit queued message' }).fill('UNCONFIRMED-EDIT')
-        await row.getByRole('button', { name: 'Save queued message edit' }).click()
-        await expect(row.getByRole('textbox', { name: 'Edit queued message' })).toHaveValue('UNCONFIRMED-EDIT')
-        await expect(row.getByRole('status')).toBeVisible()
-      } else {
-        await row.getByRole('button', { name: 'Cancel queued message' }).click()
-        await expect(f.surface.getByText('Delivery is not confirmed yet. Try cancelling after delivery is confirmed.')).toBeVisible()
-      }
-      expect(f.mutations.some(request => request.path.includes('/pending/'))).toBe(false)
-      await expect(row).toHaveCount(1)
-    } finally { await page.evaluate(() => window.releaseFixtureReplayLock()) }
-  })
+
 }

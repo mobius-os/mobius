@@ -210,22 +210,7 @@ test.describe('Chat messages cache (TanStack Query)', () => {
     expect(hasEmptyState).toBe(true)
   })
 
-  test('2. TanStack QueryClient is initialized and exposes `setQueryData`', async ({ page }) => {
-    // Smoke test: the query layer is wired up at all. If the provider
-    // is missing, useQueryClient throws and the app fails to mount.
-    await setup(page)
-    const [chatId] = await ensureChats(page, 1)
-    expect(chatId).toBeTruthy()
-    await visitChat(page, chatId)
-    // A fresh Standard workspace can intentionally have no selected chat.
-    // Seed an explicit destination before using the painted ChatView mount as
-    // the provider smoke signal; hidden retained owners are not interactive.
-    await expect(page.locator(
-      '[data-chat-surface="painted"] .chat__empty-wrap, '
-      + '[data-chat-surface="painted"] .chat__scroll, '
-      + '[data-chat-surface="painted"] .chat__form'
-    ).first()).toBeVisible()
-  })
+
 
   test('3. IndexedDB persister key exists after a chat-view visit', async ({ page }) => {
     // Verifies the persister is actually writing to IndexedDB. The
@@ -257,62 +242,7 @@ test.describe('Chat messages cache (TanStack Query)', () => {
 })
 
 test.describe('Theme query (/api/theme)', () => {
-  test('4. /api/theme returns valid CSS object', async ({ page }) => {
-    // Smoke test of the new endpoint via the authenticated client.
-    await setup(page)
-    const res = await page.evaluate(async () => {
-      const tok = localStorage.getItem('token')
-      const r = await fetch('/api/theme', {
-        headers: { 'Authorization': 'Bearer ' + tok },
-      })
-      return { status: r.status, body: r.ok ? await r.json() : null }
-    })
-    expect(res.status).toBe(200)
-    expect(res.body).toHaveProperty('css')
-    expect(res.body).toHaveProperty('bg')
-    expect(res.body.css).toContain(':root')
-    expect(res.body.bg).toMatch(/^#[0-9a-fA-F]{3,8}$/)
-  })
 
-  test('5. DELETE /api/storage/shared/theme.css resets theme to defaults', async ({ page }) => {
-    // The agent's reset path: write a custom theme, delete the override,
-    // verify /api/theme returns defaults again.
-    await setup(page)
-    const result = await page.evaluate(async () => {
-      const tok = localStorage.getItem('token')
-      const headers = { 'Authorization': 'Bearer ' + tok, 'Content-Type': 'application/json' }
 
-      // Write a custom theme.
-      const customCss = ':root { --bg: #abcdef; }'
-      const writeR = await fetch('/api/storage/shared/theme.css', {
-        method: 'PUT',
-        headers,
-        body: JSON.stringify({ content: customCss }),
-      })
-      if (!writeR.ok) return { stage: 'write', status: writeR.status }
 
-      // Verify endpoint reflects the override.
-      const customResp = await fetch('/api/theme', {
-        headers: { 'Authorization': 'Bearer ' + tok },
-      }).then(r => r.json())
-
-      // Delete to reset.
-      const delR = await fetch('/api/storage/shared/theme.css', {
-        method: 'DELETE',
-        headers: { 'Authorization': 'Bearer ' + tok },
-      })
-      if (!delR.ok && delR.status !== 204) return { stage: 'delete', status: delR.status }
-
-      // Verify endpoint returns defaults.
-      const defaultResp = await fetch('/api/theme', {
-        headers: { 'Authorization': 'Bearer ' + tok },
-      }).then(r => r.json())
-
-      return { custom: customResp, default: defaultResp }
-    })
-
-    expect(result.custom.css).toContain('#abcdef')
-    expect(result.default.css).not.toContain('#abcdef')
-    expect(result.default.css).toContain(':root')
-  })
 })

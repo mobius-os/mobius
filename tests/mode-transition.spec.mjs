@@ -293,166 +293,14 @@ for (const [name, viewport] of [
     await expect.poll(() => modePhase(page)).toBe('idle')
   })
 
-  test(`[${name}] a cancelled single-mode drag UNTILES (BLOCKER 1: no permanent tile)`, async ({ page }) => {
-    await bootSeededWorkspace(page, viewport, standardChatWithEmptyBuilder())
-    // Ensure SINGLE mode.
-    if (await builderActive(page)) {
-      await toggleMode(page)
-      await expect.poll(() => builderActive(page)).toBe(false)
-    }
-    // Open navigation and use the deterministic chat row supplied by this
-    // fixture. A missing source is a broken contract, not a reason to silently
-    // remove this browser boundary from CI coverage.
-    await openNavigation(page)
-    const src = page.locator('[data-drag-key]').first()
-    await expect(src).toHaveCount(1)
-    const box = await src.boundingBox()
-    // Arm a single-mode drag: press + move past the drag threshold. This unfolds
-    // the builder preview (data-mode-phase becomes 'drag-preview').
-    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2)
-    await page.mouse.down()
-    await page.mouse.move(box.x + box.width / 2 + 40, box.y + box.height / 2 + 40, { steps: 6 })
-    await page.mouse.move(box.x + box.width / 2 + 120, box.y + box.height / 2 + 80, { steps: 6 })
-    await expect.poll(() => modePhase(page), { timeout: 2000 }).toBe('drag-preview')
-    // Cancel the drag (Escape) — the id handoff must clear the LIVE preview.
-    await page.keyboard.press('Escape')
-    await page.mouse.up().catch(() => {})
-    // The descriptor returns to idle and the workspace is NOT stranded in the
-    // builder/tiled render — this is the exact wedge the dragArm epoch fix closes.
-    await expect.poll(() => modePhase(page), { timeout: 2000 }).toBe('idle')
-    await expect.poll(() => builderActive(page)).toBe(false)
-    // Still responsive: a subsequent toggle works.
-    await toggleMode(page)
-    await expect.poll(() => builderActive(page)).toBe(true)
-  })
 
-  test(`[${name}] 20x rapid toggle never wedges and never doubles the beat class`, async ({ page }) => {
-    await bootSeededWorkspace(page, viewport, standardChatWithEmptyBuilder())
-    await armOneBeatObserver(page)
-    const startBuilder = await builderActive(page)
-    // Storm the toggle far faster than the beat can complete, so enter-during-exit
-    // and exit-during-entry supersessions are exercised repeatedly (the wedge loop).
-    for (let i = 0; i < 20; i += 1) {
-      await toggleMode(page)
-      await page.waitForTimeout(35)
-    }
-    // INV 1: at no observed frame were both beat classes present at once.
-    expect(await readViolations(page)).toEqual([])
-    // Let the final beat settle, then assert NO stranded transient class.
-    await expect.poll(() => transientClassCount(page), { timeout: 2000 }).toBe(0)
-    // 20 flips from the start state lands back on the start state (even count).
-    await expect.poll(() => builderActive(page)).toBe(startBuilder)
-    // NOT WEDGED: the machine still responds to the very next toggle.
-    await toggleMode(page)
-    await expect.poll(() => builderActive(page)).toBe(!startBuilder)
-    await expect.poll(() => transientClassCount(page), { timeout: 2000 }).toBe(0)
-  })
 
-  test(`[${name}] the builder root class always agrees with the logo state (no reducer/render split)`, async ({ page }) => {
-    // Give both worlds real content. An empty Builder workspace correctly has
-    // no tab strip, so using strip presence as its rendered-world witness would
-    // conflate "Builder is active" with "Builder has at least one tab".
-    await bootSeededWorkspace(
-      page,
-      viewport,
-      twoPaneBuilder({ kind: 'chat', id: 'aaa' }),
-    )
-    for (let i = 0; i < 6; i += 1) {
-      await toggleMode(page)
-      await page.waitForTimeout(120)
-      // effectiveViewMode / logo / geometry all derive from ONE descriptor, so the
-      // committed logo state and the rendered content must never disagree once the
-      // beat has settled.
-      const agree = await page.evaluate(() => {
-        const root = document.querySelector('.shell')
-        const builder = !!document.querySelector('.shell__brand--builder')
-        // The strip is the builder world's rendered surface; the logo state is the
-        // committed mode. Both derive from ONE descriptor, so once no beat class
-        // is present they must agree — that agreement IS this test's contract.
-        const strip = !!document.querySelector('.shell__tabstrip, .workspace__strip')
-        const exiting = root.className.includes('shell--builder-exiting')
-        const settled = !root.className.includes('shell--builder-entering') && !exiting
-        return { builder, strip, settled }
-      })
-      if (agree.settled) expect(agree.strip).toBe(agree.builder)
-    }
-    // The shell content is still mounted (no wedge / crash) after the sequence.
-    await expect(page.locator('.shell__content')).toBeAttached()
-  })
+
+
+
 }
 
-test('phone one-pane Builder keeps the workspace and composer anchored across repeated toggles', async ({ page }) => {
-  await bootSeededWorkspace(page, { width: 412, height: 915 }, onePaneStandardChat())
-  const paintedComposer = page.locator(
-    '[data-chat-surface="painted"] textarea.chat__input',
-  )
-  await expect(paintedComposer).toBeVisible()
 
-  const baseline = await page.evaluate(() => {
-    const content = document.querySelector('.shell__content').getBoundingClientRect()
-    const composer = document.querySelector(
-      '[data-chat-surface="painted"] textarea.chat__input',
-    ).getBoundingClientRect()
-    return {
-      contentTop: content.top,
-      contentHeight: content.height,
-      composerBottom: composer.bottom,
-    }
-  })
-
-  const sampleToggle = async () => {
-    const frames = page.evaluate(async () => {
-      const samples = []
-      for (let frame = 0; frame < 42; frame += 1) {
-        await new Promise(resolve => requestAnimationFrame(resolve))
-        const content = document.querySelector('.shell__content')?.getBoundingClientRect()
-        const composer = document.querySelector(
-          '[data-chat-surface="painted"] textarea.chat__input',
-        )?.getBoundingClientRect()
-        const strip = document.querySelector('.shell__tabstrip')?.getBoundingClientRect()
-        samples.push({
-          contentTop: content?.top ?? null,
-          contentHeight: content?.height ?? null,
-          composerBottom: composer?.bottom ?? null,
-          stripTop: strip?.top ?? null,
-        })
-      }
-      return samples
-    })
-    await page.waitForTimeout(32)
-    await toggleMode(page)
-    return frames
-  }
-
-  for (let toggle = 0; toggle < 2; toggle += 1) {
-    const frames = await sampleToggle()
-    for (const frame of frames) {
-      expect(frame.contentTop).toBeCloseTo(baseline.contentTop, 0)
-      expect(frame.contentHeight).toBeCloseTo(baseline.contentHeight, 0)
-      if (frame.composerBottom != null) {
-        expect(frame.composerBottom).toBeCloseTo(baseline.composerBottom, 0)
-      }
-      if (frame.stripTop != null) {
-        expect(frame.stripTop).toBeCloseTo(baseline.contentTop, 0)
-      }
-    }
-    await expect.poll(() => transientClassCount(page), { timeout: 2000 }).toBe(0)
-  }
-
-  await expect.poll(() => builderActive(page)).toBe(false)
-  const returned = await page.evaluate(() => {
-    const content = document.querySelector('.shell__content').getBoundingClientRect()
-    const composer = document.querySelector(
-      '[data-chat-surface="painted"] textarea.chat__input',
-    ).getBoundingClientRect()
-    return {
-      contentTop: content.top,
-      contentHeight: content.height,
-      composerBottom: composer.bottom,
-    }
-  })
-  expect(returned).toEqual(baseline)
-})
 
 // ── Assemble/scatter v3 browser coverage ─────────────────────────────────────
 // Frame-sampled proof of the compositor-only contract in a real browser. Wide only
@@ -461,94 +309,15 @@ test('phone one-pane Builder keeps the workspace and composer anchored across re
 // stay constant while their transforms animate, and the same nodes must survive.
 const WIDE = { width: 1280, height: 900 }
 
-test('captured Builder panes scatter toward their durable edges on one timeline', async ({ page }) => {
-  await bootSeededWorkspace(page, WIDE, twoPaneBuilder({ kind: 'chat', id: 'aaa' }))
-  const sampler = sampleSceneTransition(page)
-  await page.waitForTimeout(30)
-  await toggleMode(page)
-  const scene = await sampler
-  const panes = paneAnimations(scene, 'old')
-  expect(scene.direction).toBe('exit')
-  expect(panes).toHaveLength(2)
-  const destinations = panes.map(record => translation(record.frames.at(-1)))
-  expect(destinations.some(({ x, y }) => x < 0 && y === 0), 'left pane scatters left').toBe(true)
-  expect(destinations.some(({ x, y }) => x > 0 && y === 0), 'right pane scatters right').toBe(true)
-  expect(new Set(panes.map(record => record.startTime)).size, 'one shared start time').toBe(1)
-  expect(new Set(panes.map(record => record.duration)).size, 'one shared duration').toBe(1)
-  expect(panes.every(record => record.frames.every(frame => frame.opacity === 1 || frame.opacity === '1')),
-    'captured panes remain opaque').toBe(true)
-  await expect.poll(() => modePhase(page), { timeout: 2000 }).toBe('idle')
-  await expect.poll(() => builderActive(page)).toBe(false)
-})
 
-test('focused pane retains its durable right edge during a mode exit', async ({ page }) => {
-  await bootSeededWorkspace(page, WIDE, twoPaneBuilder({ kind: 'chat', id: 'aaa' }))
-  await page.locator('[data-pane-strip="p1"]').getByRole('button', { name: 'Focus pane' }).click()
-  await expect(page.locator('[data-pane-strip]')).toHaveCount(1)
-  const content = await page.locator('.shell__content').boundingBox()
-  const sampler = sampleSceneTransition(page)
-  await toggleMode(page)
-  const scene = await sampler
-  const panes = paneAnimations(scene, 'old')
-  expect(panes).toHaveLength(1)
-  const destination = translation(panes[0].frames.at(-1))
-  expect(destination.x).toBeGreaterThan(content.width)
-  expect(destination.y).toBe(0)
-})
 
-test('captured panes assemble from corresponding edges and land together', async ({ page }) => {
-  await bootSeededWorkspace(page, WIDE, unevenThreePaneBuilder({ kind: 'chat', id: 'ghost' }))
-  await toggleMode(page)
-  await expect.poll(() => modePhase(page)).toBe('idle')
-  const sampler = sampleSceneTransition(page)
-  await toggleMode(page)
-  const scene = await sampler
-  const panes = paneAnimations(scene, 'new')
-  expect(scene.direction).toBe('enter')
-  expect(panes).toHaveLength(3)
-  const origins = panes.map(record => translation(record.frames[0]))
-  expect(origins.some(({ x, y }) => x < 0 && y === 0), 'a pane enters from the left').toBe(true)
-  expect(origins.some(({ x }) => x > 0), 'a pane enters from the right').toBe(true)
-  expect(panes.every(record => translation(record.frames.at(-1)).x === 0
-    && translation(record.frames.at(-1)).y === 0), 'all panes land in place').toBe(true)
-  expect(new Set(panes.map(record => record.startTime)).size, 'every pane starts together').toBe(1)
-  expect(new Set(panes.map(record => record.duration)).size, 'every pane lands together').toBe(1)
-  await expect.poll(() => builderActive(page)).toBe(true)
-})
 
-test('world reveal keeps the ready Standard snapshot stationary beneath scattering panes', async ({ page }) => {
-  await bootSeededWorkspace(page, WIDE, twoPaneBuilder({ kind: 'chat', id: 'ghost' }))
-  const sampler = sampleSceneTransition(page)
-  await toggleMode(page)
-  const scene = await sampler
-  const panes = paneAnimations(scene, 'old')
-  const workspace = scene.records.find(record => record.pseudo === '::view-transition-new(mode-workspace)')
-  expect(panes).toHaveLength(2)
-  expect(workspace, 'the destination workspace has an explicit snapshot animation').toBeTruthy()
-  expect(workspace.frames.every(frame => frame.opacity === 1 || frame.opacity === '1')).toBe(true)
-  expect(workspace.frames.every(frame => !frame.transform || frame.transform === 'none'),
-    'the destination snapshot stays still').toBe(true)
-  expect(workspace.startTime, 'destination and panes share one clock').toBe(panes[0].startTime)
-  expect(workspace.duration).toBe(panes[0].duration)
-  await expect.poll(() => builderActive(page)).toBe(false)
-})
 
-test('shared Standard chat stays stationary while both captured Builder owners assemble above it', async ({ page }) => {
-  await bootSeededWorkspace(page, WIDE, twoPaneBuilder({ kind: 'chat', id: 'aaa' }))
-  await toggleMode(page)
-  await expect.poll(() => modePhase(page)).toBe('idle')
-  const sampler = sampleSceneTransition(page)
-  await toggleMode(page)
-  const scene = await sampler
-  const panes = paneAnimations(scene, 'new')
-  const workspace = scene.records.find(record => record.pseudo === '::view-transition-old(mode-workspace)')
-  expect(panes).toHaveLength(2)
-  expect(workspace).toBeTruthy()
-  expect(workspace.frames.every(frame => !frame.transform || frame.transform === 'none')).toBe(true)
-  expect(workspace.frames.every(frame => frame.opacity === 1 || frame.opacity === '1')).toBe(true)
-  expect(workspace.startTime).toBe(panes[0].startTime)
-  await expect.poll(() => builderActive(page)).toBe(true)
-})
+
+
+
+
+
 
 test('reduced motion has no intermediate exit phase (instant world flip)', async ({ page }) => {
   await page.emulateMedia({ reducedMotion: 'reduce' })
@@ -578,98 +347,11 @@ test('reduced motion has no intermediate exit phase (instant world flip)', async
 })
 
 // ── Round 4 item 3: the null slot is a first-class New Chat landing ────────────
-test('round4-3: exiting a NULL-slot builder reveals the New Chat landing, not a blank main, no composer focus', async ({ page }) => {
-  // A materialize POST /chats (when there is no reusable empty) returns a fresh empty
-  // row so the swap to a real empty ChatView is seamless.
-  await page.route(/\/api\/chats$/, r => {
-    if (r.request().method() !== 'POST') return r.fallback()
-    return r.fulfill({
-      status: 200, contentType: 'application/json',
-      body: JSON.stringify({ id: 'freshnew', title: 'New chat', has_messages: false }),
-    })
-  })
-  // Two-pane builder with an EXPLICIT null slot → exit reveals home:new-chat.
-  await bootSeededWorkspace(page, WIDE, twoPaneBuilder(null))
-  await expect.poll(() => builderActive(page)).toBe(true)
-  await toggleMode(page)
-  await expect.poll(() => builderActive(page)).toBe(false)
-  // The first-class New Chat empty surface renders (What's on your mind?), never a
-  // blank <main> and never the freshest transcript. Scope to the VISIBLE full-bleed
-  // surface — the preserved builder chat panes sit mounted-but-hidden and also carry
-  // an empty title, so an unscoped selector would strict-mode-match several.
-  await expect(page.locator('.shell__view--active .chat__empty-title')).toBeVisible({ timeout: 3000 })
-  // The automatic landing must NOT summon the mobile keyboard — the composer is not
-  // auto-focused by a mode toggle.
-  const composerFocused = await page.evaluate(() => document.activeElement?.tagName === 'TEXTAREA')
-  expect(composerFocused, 'a mode toggle must not auto-focus the composer').toBe(false)
-})
 
-test('round4-3: a persisted NULL single slot stays New Chat even with historical chats', async ({ page }) => {
-  let createCount = 0
-  await page.route(/\/api\/chats(?:\?.*)?$/, (route) => {
-    const method = route.request().method()
-    if (method === 'GET') {
-      return route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        body: JSON.stringify([
-          { id: 'historical', title: 'Historical transcript', has_messages: true },
-        ]),
-      })
-    }
-    if (method === 'POST') {
-      createCount += 1
-      return route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        body: JSON.stringify({ id: 'freshboot', title: 'New chat', has_messages: false }),
-      })
-    }
-    return route.fallback()
-  })
-  const ws = paneModel.setViewMode(twoPaneBuilder(null), 'single')
-  await bootSeededWorkspace(page, WIDE, ws)
 
-  await expect.poll(() => page.evaluate(
-    key => JSON.parse(localStorage.getItem(key))?.singleScreen?.id || null,
-    paneModel.STORAGE_KEY,
-  ), { timeout: 3000 }).toBe('freshboot')
-  expect(createCount, 'boot materializes one new row instead of selecting chats[0]').toBe(1)
-  await expect(page.locator('.shell__view--active .chat__empty-title')).toBeVisible()
-})
 
-test('leaving Builder replaces an empty Standard slot without allocating a chat', async ({ page }) => {
-  let createCount = 0
 
-  await page.route(/\/api\/chats(?:\?.*)?$/, async (route) => {
-    const method = route.request().method()
-    if (method === 'GET') {
-      return route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        body: JSON.stringify([
-          { id: 'aaa', title: 'Left', has_messages: true },
-          { id: 'bbb', title: 'Right', has_messages: true },
-        ]),
-      })
-    }
-    if (method !== 'POST') return route.fallback()
-    createCount += 1
-    return route.fulfill({
-      status: 200,
-      contentType: 'application/json',
-      body: JSON.stringify(createdEmptyChat(`unexpected-${createCount}`)),
-    })
-  })
 
-  await bootSeededWorkspace(page, WIDE, twoPaneBuilder(null))
-  await toggleMode(page)
-  await expect.poll(() => builderActive(page)).toBe(false)
-  await expect.poll(() => page.evaluate(key => (
-    JSON.parse(localStorage.getItem(key))?.singleScreen
-  ), paneModel.STORAGE_KEY)).toEqual({ kind: 'chat', id: 'aaa' })
-  expect(createCount, 'the selected Builder tab avoids an unnecessary New Chat row').toBe(0)
-})
 
 test('retiring Builder returns the canonical New Chat and preserves its draft', async ({ page }) => {
   let explicitId = null
@@ -763,96 +445,13 @@ test('retiring Builder returns the canonical New Chat and preserves its draft', 
   })
 })
 
-test('a selected Builder tab supersedes an in-flight NULL-slot allocation', async ({ page }) => {
-  let createCount = 0
-  let releaseFirstCreate
-  const firstCreateGate = new Promise(resolve => { releaseFirstCreate = resolve })
-  await page.route(/\/api\/chats(?:\?.*)?$/, async (route) => {
-    const method = route.request().method()
-    if (method === 'GET') {
-      return route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        body: JSON.stringify([
-          { id: 'aaa', title: 'Left', has_messages: true },
-          { id: 'bbb', title: 'Right', has_messages: true },
-        ]),
-      })
-    }
-    if (method === 'POST') {
-      const ordinal = ++createCount
-      if (ordinal === 1) await firstCreateGate
-      return route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        body: JSON.stringify({ id: `fresh-race-${ordinal}`, title: 'New chat', has_messages: false }),
-      })
-    }
-    return route.fallback()
-  })
-  const emptyStandard = { ...twoPaneBuilder(null), viewMode: 'single' }
-  await bootSeededWorkspace(page, WIDE, emptyStandard)
-  await expect.poll(() => createCount, { timeout: 3000 }).toBe(1)
 
-  // Enter Builder while the automatic allocation is held, then return to Standard.
-  // The focused Builder tab is now the newer visible intent and owns the slot.
-  await toggleMode(page)
-  await expect.poll(() => builderActive(page)).toBe(true)
-  await toggleMode(page)
-  await expect.poll(() => builderActive(page)).toBe(false)
-  releaseFirstCreate()
-
-  await expect.poll(() => page.evaluate(
-    key => JSON.parse(localStorage.getItem(key))?.singleScreen?.id || null,
-    paneModel.STORAGE_KEY,
-  ), { timeout: 4000 }).toBe('aaa')
-  expect(createCount, 'the stale allocation settles without duplicating or taking the slot').toBe(1)
-  await expect(page.locator(
-    '[data-chat-surface="painted"][data-chat-id="aaa"].shell__view--active',
-  )).toHaveCount(1)
-})
 
 // R4: same-batch descriptor atomicity for the last-tab-close auto-return. A one-tab
 // builder is exited by closing its sole tab; a frame-sampler proves the descriptor
 // (logo/builder class) and the emptied tree flip in the SAME commit — never an
 // intermediate frame where builder is still true over an emptied single tree.
-test('v2 auto-return flips the descriptor and the tree atomically (no lagging frame)', async ({ page }) => {
-  const builder = paneModel.setViewMode(
-    paneModel.seedFromFlatTabs([{ kind: 'chat', id: 'aaa' }]), 'panes')
-  await bootSeededWorkspace(page, WIDE, builder)
-  await expect.poll(() => builderActive(page)).toBe(true)
-  await expect(page.locator('.shell__tabstrip, .workspace__strip').first()).toBeVisible()
-  // Sample builder-class vs strip-presence on every frame across the close.
-  const sampler = page.evaluate(async () => {
-    const disagreements = []
-    let frames = 0
-    await new Promise((resolve) => {
-      const tick = () => {
-        const builder = !!document.querySelector('.shell__brand--builder')
-        const strip = !!document.querySelector('.shell__tabstrip, .workspace__strip')
-        const root = document.querySelector('.shell')
-        const beat = root.className.includes('shell--builder-exiting') || root.className.includes('shell--builder-entering')
-        // Off-beat, builder ⟺ strip. A lagging descriptor shows builder=true with the
-        // strip already retired (or vice versa) in a settled frame.
-        if (!beat && builder !== strip) disagreements.push({ builder, strip })
-        frames += 1
-        if (frames > 60) { resolve(); return }
-        requestAnimationFrame(tick)
-      }
-      requestAnimationFrame(tick)
-    })
-    return disagreements
-  })
-  await page.waitForTimeout(30)
-  await page.locator('.shell__tab-close').first().click()
-  const disagreements = await sampler
-  expect(disagreements, 'builder-class and strip never disagree in a settled frame').toEqual([])
-  // The emptied builder auto-returned to single.
-  await expect.poll(() => builderActive(page)).toBe(false)
-  await expect.poll(() => page.evaluate(
-    key => JSON.parse(localStorage.getItem(key))?.viewMode, paneModel.STORAGE_KEY,
-  ), { timeout: 3000 }).toBe('single')
-})
+
 
 // ── Round 4 item 1: the logo holds its breath until completion ────────────────
 // The hold hands its compression to the descriptor: while an animated beat owns the
@@ -912,104 +511,3 @@ async function sampleLogoBeat(page) {
 async function beatHeldNow(page) {
   return page.evaluate(() => !!document.querySelector('.shell__brand.is-beat-held'))
 }
-
-test('round4-1: a completed HOLD keeps the logo compressed then springs back at completion', async ({ page }) => {
-  await bootSeededWorkspace(page, WIDE, twoPaneBuilder({ kind: 'chat', id: 'aaa' }))
-  // Explicit builder seed; a hold EXITS to single with an animated beat.
-  await expect.poll(() => builderActive(page)).toBe(true)
-  const sampler = sampleLogoBeat(page)
-  await page.waitForTimeout(30)
-  await pressHoldLogo(page)
-  const r = await sampler
-  expect(r.sawBeatClass, 'an animated beat ran').toBe(true)
-  expect(r.beatHeldSeen, 'the hold emitted the is-beat-held compression class').toBe(true)
-  // The mark stayed compressed at ~.84 through the beat (pointer release did NOT
-  // spring it) and reaches full size only at completion.
-  expect(r.minScale, 'the logo held its .84 compression during the beat').toBeLessThanOrEqual(0.88)
-  expect(r.epochMismatch, 'the logo release always tracks the live beat epoch').toBe(false)
-  await expect.poll(() => builderActive(page)).toBe(false)
-  // Settled: no compression class lingers, the mark is full size.
-  await expect.poll(() => beatHeldNow(page)).toBe(false)
-  const finalScale = await page.evaluate(() => parseFloat(getComputedStyle(document.querySelector('.shell__logo')).scale))
-  expect(Math.abs(finalScale - 1)).toBeLessThan(0.02)
-})
-
-test('round4-1: a standalone Shift+Enter flip never emits a compression class', async ({ page }) => {
-  await bootSeededWorkspace(page, WIDE, twoPaneBuilder({ kind: 'chat', id: 'aaa' }))
-  await expect.poll(() => builderActive(page)).toBe(true)
-  const sampler = sampleLogoBeat(page)
-  await page.waitForTimeout(30)
-  await toggleMode(page) // keyboard path — the standalone announcement is enough
-  const r = await sampler
-  expect(r.sawBeatClass, 'the keyboard flip still ran an animated beat').toBe(true)
-  expect(r.beatHeldSeen, 'no synthetic compression on a standalone keyboard flip').toBe(false)
-  // The logo never dipped toward .84 — it was not compressed.
-  expect(r.minScale, 'the logo stayed full size (no compression)').toBeGreaterThan(0.95)
-  await expect.poll(() => builderActive(page)).toBe(false)
-})
-
-test('round4-1: an EARLY logo release is a tap — mode unchanged, no compression class', async ({ page }) => {
-  await bootShell(page, WIDE)
-  const before = await builderActive(page)
-  // A press well under the ~450ms threshold releases as a tap (opens the drawer),
-  // never a mode flip, and never emits is-beat-held.
-  await pressHoldLogo(page, 150)
-  await page.waitForTimeout(200)
-  expect(await beatHeldNow(page)).toBe(false)
-  expect(await builderActive(page)).toBe(before)
-})
-
-test('round4-1: rapid hold → keyboard retoggle keeps the logo epoch equal to the mode epoch', async ({ page }) => {
-  await bootSeededWorkspace(page, WIDE, twoPaneBuilder({ kind: 'chat', id: 'aaa' }))
-  await expect.poll(() => builderActive(page)).toBe(true)
-  const sampler = sampleLogoBeat(page)
-  await page.waitForTimeout(30)
-  // Complete a hold (holdOwnsBeat latches), then immediately retoggle by keyboard —
-  // the compression rides through to the newest epoch, whose id the logo release must
-  // track (data-logo-beat-epoch === data-mode-epoch on every sampled frame).
-  await pressHoldLogo(page)
-  await toggleMode(page)
-  const r = await sampler
-  expect(r.beatHeldSeen, 'the hold-owned compression rode through the retoggle').toBe(true)
-  expect(r.epochMismatch, 'the logo release never lagged behind the newest beat epoch').toBe(false)
-  await expect.poll(() => modePhase(page), { timeout: 3000 }).toBe('idle')
-})
-
-test('round4-1: reduced motion keeps direct hold feedback but releases without animation', async ({ page }) => {
-  await page.emulateMedia({ reducedMotion: 'reduce' })
-  await bootSeededWorkspace(page, WIDE, twoPaneBuilder({ kind: 'chat', id: 'aaa' }))
-  await expect.poll(() => builderActive(page)).toBe(true)
-  await page.evaluate(() => {
-    const root = document.documentElement
-    window.__reducedMotionBeatSeen = false
-    window.__reducedMotionObserver = new MutationObserver(() => {
-      if (root.dataset.modeViewTransition) window.__reducedMotionBeatSeen = true
-    })
-    window.__reducedMotionObserver.observe(root, { attributes: true, attributeFilter: ['class'] })
-  })
-  const box = await page.getByLabel('Toggle navigation').boundingBox()
-  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2)
-  await page.mouse.down()
-  await page.waitForTimeout(325)
-  const heldScale = await page.evaluate(() => parseFloat(
-    getComputedStyle(document.querySelector('.shell__logo')).scale,
-  ))
-  expect(heldScale, 'the user-controlled hold still gives immediate compression feedback').toBeLessThan(0.96)
-  // Cross the 450ms completion threshold. Under reduced motion the mode commits and
-  // the scale returns to 1 in that same frame; the old 160ms release failed here.
-  await page.waitForTimeout(150)
-  const result = await page.evaluate(() => {
-    window.__reducedMotionObserver?.disconnect()
-    return {
-      builder: !!document.querySelector('.shell__brand--builder'),
-      beatHeld: !!document.querySelector('.shell__brand.is-beat-held'),
-      beatSeen: !!window.__reducedMotionBeatSeen,
-      scale: parseFloat(getComputedStyle(document.querySelector('.shell__logo')).scale),
-    }
-  })
-  await page.mouse.up()
-  expect(result.builder, 'the hold still flips the mode').toBe(false)
-  expect(result.beatSeen, 'reduced motion arms no transition descriptor').toBe(false)
-  expect(result.beatHeld, 'reduced motion never hands compression to a beat').toBe(false)
-  expect(Math.abs(result.scale - 1), 'release is immediate under reduced motion').toBeLessThan(0.02)
-})

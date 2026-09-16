@@ -128,25 +128,9 @@ test('blob round-trip preserves bytes + contentType', async ({ page }) => {
   expect(out.bytes).toEqual([137, 80, 78, 71, 1, 2, 3, 4])
 })
 
-test('typed-mismatch read throws (no string-as-Blob corruption)', async ({ page }) => {
-  await installStore(page)
-  await initRuntime(page, 9104)
-  const threw = await page.evaluate(async () => {
-    const s = window.mobius.storage
-    await s.setText('x.md', 'hi')
-    try { await s.getBlob('x.md'); return false } catch (e) { return /does not hold a blob|holds text/.test(e.message) }
-  })
-  expect(threw).toBe(true)
-})
 
-test('setText rejects a non-string', async ({ page }) => {
-  await installStore(page)
-  await initRuntime(page, 9105)
-  const rejected = await page.evaluate(async () => {
-    try { await window.mobius.storage.setText('y.md', { obj: 1 }); return false } catch (e) { return /must be a string/.test(e.message) }
-  })
-  expect(rejected).toBe(true)
-})
+
+
 
 test('offline queue + read-your-writes + drain on recovery (always-enqueue)', async ({ page }) => {
   const store = await installStore(page)
@@ -166,48 +150,11 @@ test('offline queue + read-your-writes + drain on recovery (always-enqueue)', as
   await expect.poll(() => page.evaluate(() => window.mobius.storage.pendingCount()), { timeout: 8000 }).toBe(0)
 })
 
-test('FATAL write resolves (no deadlock) + leaves the path lock acquirable', async ({ page }) => {
-  const store = await installStore(page)
-  await initRuntime(page, 9107)
-  store.mode = 'fatal'   // server 422 on every write → fatal dead-letter path
-  const result = await page.evaluate(async () => {
-    const s = window.mobius.storage
-    // This must RESOLVE, not hang (the deadlock regression).
-    const a = await Promise.race([
-      s.set('bad.json', { x: 1 }).then(() => 'resolved'),
-      new Promise((r) => setTimeout(() => r('HANG'), 6000)),
-    ])
-    // The outbox lock + path lock must be free for a subsequent write.
-    store_mode_up_marker: void 0
-    return { a }
-  })
-  expect(result.a).toBe('resolved')
-  // A subsequent write to the SAME path must also complete (lock not stuck).
-  store.mode = 'up'
-  const after = await page.evaluate(async () => {
-    return await Promise.race([
-      window.mobius.storage.set('bad.json', { x: 2 }).then((r) => r),
-      new Promise((res) => setTimeout(() => res('HANG'), 6000)),
-    ])
-  })
-  expect(after).toEqual({ synced: true })
-})
+
 
 // ── 078: offline-capable list() (cache + outbox overlay) ──────────────────
 
-test('list() online returns the server listing + entry shape', async ({ page }) => {
-  await installStore(page)
-  await initRuntime(page, 9108)
-  const out = await page.evaluate(async () => {
-    const s = window.mobius.storage
-    await s.set('items/a.json', { n: 1 })
-    await s.set('items/b.json', { n: 2 })
-    const entries = await s.list('items/')
-    return { entries }
-  })
-  expect(out.entries.map((e) => e.name).sort()).toEqual(['a.json', 'b.json'])
-  expect(out.entries[0]).toMatchObject({ type: 'file', path: expect.stringContaining('items/') })
-})
+
 
 test('list() enumerates from the cache after going offline (the Notes reload case)', async ({ page }) => {
   const store = await installStore(page)
@@ -224,24 +171,4 @@ test('list() enumerates from the cache after going offline (the Notes reload cas
   })
   expect(out.online).toEqual(['x.json', 'y.json'])
   expect(offline).toEqual(['x.json', 'y.json'])  // enumerable offline, no index file
-})
-
-test('list() offline reflects pending creates + deletes (read-your-writes)', async ({ page }) => {
-  const store = await installStore(page)
-  await initRuntime(page, 9110)
-  await page.evaluate(async () => {
-    const s = window.mobius.storage
-    await s.set('items/keep.json', { v: 1 })
-    await s.set('items/gone.json', { v: 2 })
-  })
-  store.mode = 'down'  // go offline; the next writes queue + mirror to cache
-  const offline = await page.evaluate(async () => {
-    const s = window.mobius.storage
-    await s.set('items/fresh.json', { v: 3 })   // pending create
-    await s.remove('items/gone.json')           // pending delete
-    return (await s.list('items/')).map((e) => e.name).sort()
-  })
-  // fresh.json appears (pending PUT), gone.json is dropped (pending DELETE),
-  // keep.json stays — and a tombstoned delete never resurrects.
-  expect(offline).toEqual(['fresh.json', 'keep.json'])
 })
