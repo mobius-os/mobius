@@ -136,7 +136,7 @@ test.describe('Stream reconnection', () => {
 
   test('2. Terminal 204 exits thinking and refreshes persisted messages', async ({ page }) => {
     let streamRequestCount = 0
-    let refreshReady = false
+    let settledDetailReady = false
     const runtime = createMockChatRuntime({ runtime_revision: FIXTURE_RUNTIME_REVISION })
 
     await page.route(/\/api\/chats\/[0-9a-f-]+\/runtime$/, route => {
@@ -149,7 +149,7 @@ test.describe('Stream reconnection', () => {
     })
 
     await page.route(/\/api\/chats\/[0-9a-f-]+\?limit=20&compact=1$/, route => {
-      if (!refreshReady || route.request().method() !== 'GET') {
+      if (!settledDetailReady || route.request().method() !== 'GET') {
         route.continue()
         return
       }
@@ -170,10 +170,13 @@ test.describe('Stream reconnection', () => {
     await page.route(/\/api\/chats\/[0-9a-f-]+\/stream$/, async route => {
       streamRequestCount++
       runtime.update({ running: true })
-      refreshReady = true
       // Wait past useStreamConnection's just-sent 204 retry window.
       await new Promise(resolve => setTimeout(resolve, 1700))
       runtime.update({ running: false })
+      // Publish the authoritative detail only with the terminal stream state.
+      // Exposing it while the stream is still open lets background refreshes
+      // consume the fixture before the 204 asks ChatView to reconcile.
+      settledDetailReady = true
       await route.fulfill({ status: 204, body: '' })
     })
 
