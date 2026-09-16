@@ -141,6 +141,14 @@ async function mount(page, { rejectFirst = false, loseFirstAck = false } = {}) {
   await page.goto(`${BASE}/shell/?chat=${CHAT}`, { waitUntil: 'domcontentloaded' })
   await page.bringToFront()
   const surface = page.locator('[data-chat-surface="painted"]')
+  const resume = surface.getByRole('button', { name: 'Resume', exact: true })
+  await expect(resume).toHaveCount(1, { timeout: 15000 })
+  // Establish the stale test's intended condition explicitly: the recovery
+  // card exists at the transcript tail, but the reader is looking above it.
+  await surface.locator('.chat__scroll').evaluate(element => {
+    element.scrollTop = 0
+    element.dispatchEvent(new Event('scroll', { bubbles: true }))
+  })
   const resumeNudge = surface.getByRole('button', {
     name: 'Turn paused — tap to resume',
     exact: true,
@@ -149,7 +157,7 @@ async function mount(page, { rejectFirst = false, loseFirstAck = false } = {}) {
   // Activate the canonical nudge without racing the startup splash's pointer
   // interception; keyboard activation exercises the same button handler.
   await resumeNudge.press('Enter')
-  await expect(surface.getByRole('button', { name: 'Resume', exact: true })).toBeVisible()
+  await expect(resume).toBeVisible()
   const composer = surface.getByRole('textbox', { name: 'Message Möbius…' })
   await composer.fill(draft)
   await surface.locator('input[type="file"]').setInputFiles({ name: 'draft-note.txt', mimeType: 'text/plain', buffer: Buffer.from('draft attachment') })
