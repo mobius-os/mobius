@@ -448,18 +448,6 @@ def _restart_manual_hold_for_chat(db: Session, chat_id: str) -> bool:
   )
 
 
-def _pending_owner_question_for_chat(db: Session, chat_id: str) -> bool:
-  """Whether durable owner input is the chat's current protocol barrier."""
-  try:
-    row = db.query(models.Chat.pending_question_id).filter(
-      models.Chat.id == chat_id,
-      models.Chat.deleted_at.is_(None),
-    ).first()
-  except Exception:
-    return True  # Fail closed: an unreadable barrier cannot authorize a wake.
-  return bool(row is not None and row[0] is not None)
-
-
 def programmatic_start_blocked(
   db: Session, chat_id: str, *, activation_wait_id: str | None = None,
 ) -> bool:
@@ -4683,48 +4671,6 @@ async def _acknowledge_peer_context_delivery(
       run_token,
       exc_info=True,
     )
-
-
-async def _sync_chat_title(data_dir: str, chat_id: str) -> None:
-  """Compatibility helper: sync a chat title from an existing note's gist.
-
-  Normal turn-end publication consumes the structured result emitted by
-  ``chat_note.py`` after its compare-and-swap succeeds. This tool-free helper
-  remains useful to older callers and operator repair paths.
-  """
-  log = _get_logger()
-  script = Path(__file__).parent.parent / "scripts" / "chat_note.py"
-  if not script.exists() or not chat_id:
-    return
-  env = dict(os.environ)
-  env["DATA_DIR"] = data_dir
-  proc = None
-  try:
-    proc = await asyncio.create_subprocess_exec(
-      "python3", str(script), chat_id, "--sync-title",
-      stdout=asyncio.subprocess.PIPE,
-      stderr=asyncio.subprocess.PIPE,
-      env=env,
-    )
-    out, err = await asyncio.wait_for(proc.communicate(), timeout=20)
-    if proc.returncode:
-      tail = " ".join((err or b"").decode("utf-8", "replace").split())[-300:]
-      log.warning(
-        "chat-note title repair failed for chat %s (rc=%s): %s",
-        chat_id, proc.returncode, tail,
-      )
-      return
-    title = _chat_note_title_result(out)
-    if title is not None:
-      await _sync_generated_chat_title(chat_id, title)
-  except asyncio.TimeoutError:
-    if proc is not None:
-      try:
-        proc.kill()
-      except ProcessLookupError:
-        pass
-  except Exception:
-    log.warning("sync_chat_title failed for chat %s", chat_id, exc_info=True)
 
 
 # Fallback viewport for turns no shell initiated (cron, reflection,

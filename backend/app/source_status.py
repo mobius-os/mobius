@@ -747,25 +747,3 @@ def build_app_status(app: dict[str, Any]) -> dict[str, Any] | None:
       str(repository_manifest_url) if repository_manifest_url else None
     ),
   )
-
-
-def build_source_status(apps: list[dict[str, Any]]) -> dict[str, Any]:
-  """Return the platform plus every live app source repo in one snapshot.
-
-  Routes should hold ``source_dir_lock`` around each :func:`build_app_status`
-  call. This aggregate remains useful to tests and non-serving callers where
-  no source writer can race the inspection.
-  """
-  platform = build_platform_status()
-  app_results: list[dict[str, Any]] = []
-  for app in apps:
-    status = build_app_status(app)
-    if status is not None:
-      app_results.append(status)
-  app_results.sort(key=lambda item: item["name"].casefold())
-  return {
-    "generated_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
-    "fetch_free": True,
-    "platform": platform,
-    "apps": app_results,
-  }

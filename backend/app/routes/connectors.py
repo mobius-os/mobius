@@ -706,28 +706,6 @@ async def patch_connector(
   return _public(current, _oauth_row(db, connector_id))
 
 
-def _record_check(connector_id: int, generation: str, values: dict) -> None:
-  """Identity-filtered health write in its own short session.
-
-  Shared by the static-key refresh, the OAuth refresh, and the post-sign-in
-  probe: a concurrent disable/delete rotates the generation, so a stale
-  check can never overwrite a newer row's state.
-  """
-  values = {**values, "last_checked_at": now_naive_utc()}
-  session = _reopen()
-  try:
-    updated = session.query(models.Connector).filter(
-      models.Connector.id == connector_id,
-      models.Connector.capability_id == generation,
-    ).update(values, synchronize_session=False)
-    if updated == 1:
-      session.commit()
-    else:
-      session.rollback()
-  finally:
-    session.close()
-
-
 def _gcloud_refresh_shared(
   db: Session, connector_id: int, refresh_plaintext: str,
 ) -> bool:

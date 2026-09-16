@@ -337,12 +337,6 @@ class _ActivationMarker(TypedDict):
   image_paths: list[str]
 
 
-class PlatformRestartResponse(TypedDict):
-  """Response shape for ``POST /api/platform/restart``."""
-
-  status: Literal["restarting"]
-
-
 class PlatformConflictResolverChatOut(TypedDict):
   """Response shape for ``POST /api/platform/conflict-resolver-chat``."""
 
@@ -584,13 +578,6 @@ def _rev(repo: Path, ref: str) -> str:
   return proc.stdout.strip()
 
 
-def _has_branch(name: str, repo: Path = PLATFORM_REPO) -> bool:
-  return _git(
-    "rev-parse", "--verify", "--quiet", f"refs/heads/{name}",
-    repo=repo, check=False,
-  ).returncode == 0
-
-
 def _local_branch(repo: Path = PLATFORM_REPO) -> str:
   """The repo's actual working branch. A clone of ``origin/main`` checks out
   ``main``, but detect it rather than assume so a differently-defaulted clone
@@ -763,15 +750,6 @@ def _activate_candidate(repo: Path, local: str, pre_sha: str, tip: str) -> None:
   _git("update-ref", f"refs/heads/{local}", tip, pre_sha, repo=repo)
   _git("checkout", "-q", local, repo=repo, check=False)
   _git("reset", "--hard", tip, repo=repo)
-
-
-def _commit_single_parent_tree(
-  repo: Path, *, parent: str, tree_oid: str, message: str,
-) -> str:
-  """Record an off-tree merged tree as ONE overlay commit on ``parent``."""
-  return app_git._run(
-    repo, "commit-tree", tree_oid, "-p", parent, "-m", message,
-  ).stdout.strip()
 
 
 def _restore_working_edits(repo: Path, local: str) -> bool:

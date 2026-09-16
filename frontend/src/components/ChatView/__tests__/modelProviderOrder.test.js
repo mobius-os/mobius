@@ -15,7 +15,7 @@ const vite = await createServer({
 const {
   PROVIDER_INFO,
   PROVIDER_ORDER,
-} = await vite.ssrLoadModule('/src/components/ChatView/ChatSettingsPanel.jsx')
+} = await vite.ssrLoadModule('/src/components/ChatView/providerRegistry.jsx')
 const { default: ManageModelsModal } = await vite.ssrLoadModule(
   '/src/components/ChatView/ManageModelsModal.jsx',
 )
@@ -67,6 +67,16 @@ test('Möbius exposes the provider mark through its rendered metadata', () => {
     markup,
     '<span class="csp__mobius-logo" aria-hidden="true"></span>',
   )
+})
+
+test('shared provider metadata preserves each provider-specific effort sequence', () => {
+  assert.deepEqual(Object.fromEntries(PROVIDER_ORDER.map(id => [
+    id, PROVIDER_INFO[id].efforts.map(effort => effort.value),
+  ])), {
+    codex: ['none', 'minimal', 'low', 'medium', 'high', 'xhigh'],
+    claude: ['low', 'medium', 'high', 'xhigh', 'max', 'ultracode'],
+    mobius: ['minimal', 'low', 'medium', 'high', 'max'],
+  })
 })
 
 test('public Möbius rows hide internal wire ids', () => {

@@ -8,20 +8,26 @@ import {
   resetProviderSwitchMemoryForTests,
   stageProviderSwitch,
 } from '../../providerSwitch.js'
-import useDiscardUnconfirmedSwitchOnPickerClose from '../useDiscardUnconfirmedSwitchOnPickerClose.js'
+import useComposerPopoverClose from '../useComposerPopoverClose.js'
 import { renderHook } from './react-hook-shim.mjs'
 
 // Renders the hook inside the unified open picker, then returns a close action
 // that drives the true -> false transition the component sees on dismissal.
 function openPicker(chatId, status) {
+  const collapsed = []
+  const setArtifactsExpanded = value => collapsed.push(value)
   const { rerender } = renderHook(
-    useDiscardUnconfirmedSwitchOnPickerClose,
+    useComposerPopoverClose,
     true,
     status,
     chatId,
+    setArtifactsExpanded,
   )
   return {
-    closePicker: () => rerender(false, status, chatId),
+    closePicker: () => {
+      rerender(false, status, chatId, setArtifactsExpanded)
+      assert.deepEqual(collapsed, [false], 'one dismissal collapses artifacts once')
+    },
     rerender,
   }
 }
@@ -83,12 +89,26 @@ test('opening the picker does not discard a confirming switch', () => {
   // Start with the picker closed, then open it (false -> true). Entering the
   // picker is not a close, so the staged switch must survive to be shown.
   const { rerender } = renderHook(
-    useDiscardUnconfirmedSwitchOnPickerClose,
+    useComposerPopoverClose,
     false,
     'confirming',
     chatId,
+    () => assert.fail('opening or mounting closed must not collapse artifacts'),
   )
-  rerender(true, 'confirming', chatId)
+  rerender(true, 'confirming', chatId, () => assert.fail('opening must not collapse artifacts'))
 
   assert.equal(getProviderSwitchState(chatId).status, 'confirming')
+})
+
+test('a closed picker rerender cannot discard newly staged or sibling work', () => {
+  resetProviderSwitchMemoryForTests()
+  const chatId = 'closed-picker'
+  const siblingId = 'sibling-picker'
+  stageProviderSwitch(siblingId, { chatId: siblingId, switchId: 'sibling' })
+  const collapse = () => assert.fail('no dismissal occurred')
+  const hook = renderHook(useComposerPopoverClose, false, 'idle', chatId, collapse)
+  stageProviderSwitch(chatId, { chatId, switchId: 'new' })
+  hook.rerender(false, 'confirming', chatId, collapse)
+  assert.equal(getProviderSwitchState(chatId).status, 'confirming')
+  assert.equal(getProviderSwitchState(siblingId).status, 'confirming')
 })

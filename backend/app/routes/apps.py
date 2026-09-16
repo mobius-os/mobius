@@ -1060,17 +1060,6 @@ def _accepted_local_distribution_package(app: models.App) -> tuple[str, str]:
     ) from exc
 
 
-def _git_path_exists(repo: Path, name: str) -> bool:
-  """Whether git reports an internal path that currently exists."""
-  proc = app_git._run(repo, "rev-parse", "--git-path", name, check=False)
-  if proc.returncode != 0:
-    return False
-  path = Path(proc.stdout.strip())
-  if not path.is_absolute():
-    path = repo / path
-  return path.exists()
-
-
 def _unmerged_status_paths(repo: Path) -> list[str]:
   """Repo-relative paths that git status reports as unmerged."""
   proc = app_git._run(repo, "status", "--porcelain", check=False)

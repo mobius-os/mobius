@@ -50,7 +50,6 @@ from app import (
   fs_locks,
   icon_assets,
   models,
-  source_dirs,
 )
 from app import app_cron
 from app.app_capabilities import contract_and_digest
@@ -299,16 +298,6 @@ def _derive_repo_ref(manifest_url: str) -> tuple[str, str] | None:
     if part in ("", ".", "..") or part.startswith("-") or "\\" in part:
       return None
   return f"https://github.com/{org}/{repo}.git", ref
-
-
-def _canonical_for_inline(raw_base: str, manifest_id: str) -> str:
-  """Synthesize a stable manifest_url for inline-manifest installs.
-
-  Used when the caller passed `manifest` + `raw_base` instead of a
-  manifest_url. We need SOMETHING to key update-vs-install
-  discrimination on; the raw_base + manifest_id is unique-enough for
-  that purpose."""
-  return _canonical_identity_key(raw_base, manifest_id)
 
 
 def _normalize_raw_base(raw_base: str) -> str:

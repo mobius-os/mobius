@@ -30,7 +30,7 @@ import {
   providerAllowance,
   providerAllowanceSummary,
 } from './providerUsage.js'
-import { PROVIDER_INFO, PROVIDER_ORDER } from '../ChatView/ChatSettingsPanel.jsx'
+import { PROVIDER_INFO, PROVIDER_ORDER } from '../ChatView/providerRegistry.jsx'
 import '../ui/StatusDot.css'
 import '../ui/ModelSheet.css'
 import './SettingsView.css'

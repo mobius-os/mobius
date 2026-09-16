@@ -11,7 +11,6 @@ from contextlib import asynccontextmanager
 
 import httpx
 from fastapi import HTTPException, Request
-from pydantic import BaseModel
 
 from app import github_auth, models
 from app.config import get_settings
@@ -31,10 +30,6 @@ _FULL_PR_SCOPES = ("public_repo", "workflow")
 _PRIVATE_PR_SCOPES = ("repo", "workflow")
 
 log = logging.getLogger("moebius.github")
-
-
-class GithubTokenRequest(BaseModel):
-  token: str
 
 
 def has_full_pr_access(scopes: object) -> bool:
