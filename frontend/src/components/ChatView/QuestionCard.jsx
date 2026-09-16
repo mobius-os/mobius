@@ -55,9 +55,19 @@ function CustomAnswerArea({
   value,
 }) {
   const textareaRef = useRef(null)
+  const transcriptScrollHoldRef = useRef(null)
+
+  const holdTranscriptPosition = useCallback(() => {
+    const scroller = textareaRef.current?.closest?.('.chat__scroll')
+    if (!scroller) return
+    transcriptScrollHoldRef.current = { scroller, scrollTop: scroller.scrollTop }
+  }, [])
 
   useLayoutEffect(() => {
     resizeCustomAnswer(textareaRef.current)
+    const hold = transcriptScrollHoldRef.current
+    transcriptScrollHoldRef.current = null
+    if (hold?.scroller?.isConnected) hold.scroller.scrollTop = hold.scrollTop
   }, [value])
 
   // The measured fallback also reacts to width: wrapping can add lines without
@@ -91,11 +101,18 @@ function CustomAnswerArea({
       autoComplete="off"
       rows={1}
       value={value}
+      // Chromium may scroll the nearest ancestor to reveal the caret when a
+      // field-sizing textarea grows. The transcript deliberately disables
+      // native anchoring, so capture the owner before the edit and restore it
+      // in the value commit's layout effect. The textarea keeps its own scroll
+      // once capped; only the surrounding conversation is held still.
+      onBeforeInput={holdTranscriptPosition}
       onChange={e => onChange(e.target.value)}
       onFocus={e => placeCaretAtTextEnd(e.currentTarget)}
       readOnly={answered}
       disabled={disabled && !answered}
       onKeyDown={e => {
+        holdTranscriptPosition()
         // Let Enter stay a newline until every question is answered, so a
         // half-filled grouped card can still take multi-line custom text.
         if (!canSubmit) return

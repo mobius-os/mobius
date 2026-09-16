@@ -1410,8 +1410,8 @@ test('round4-3: the null-slot landing is passive and interactive New Chat uses C
   assert.match(shell,
     /fullBleedKey === EMPTY_SINGLE_SURFACE_KEY && \([\s\S]*<NewChatLanding[\s\S]*failure=\{newChatLandingFailure\}/)
   assert.match(shell,
-    /setNewChatPresentation\(presentation\)[\s\S]*applyModeDestination\(\{[\s\S]*chatId,[\s\S]*paneId: ws\.focusedPaneId/,
-    'the final client id must mount in the workspace immediately')
+    /setNewChatPresentation\(presentation\)[\s\S]*navTo\('chat', \{ chatId, paneId: ws\.focusedPaneId \}\)/,
+    'the final client id must mount immediately through the browser-history owner')
   assert.match(shell,
     /<PaneChatView[\s\S]*newChatSession=\{newChatSession\}[\s\S]*onNewChatSubmit=\{queueDraftFirstNewChat\}/)
   assert.match(shell,

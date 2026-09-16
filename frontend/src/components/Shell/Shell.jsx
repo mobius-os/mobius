@@ -3778,12 +3778,11 @@ export default function Shell({ onInitialVisualReady }) {
     flushSync(() => {
       newChatPresentationRef.current = presentation
       setNewChatPresentation(presentation)
-      applyModeDestination({
-        view: 'chat',
-        chatId,
-        appId: null,
-        paneId: ws.focusedPaneId,
-      })
+      // This is a real owner navigation, not a background workspace repair.
+      // Route it through the history owner so browser Back can restore the
+      // chat that was visible before New Chat. navTo still applies the
+      // destination synchronously, preserving the draft-first composer.
+      navTo('chat', { chatId, paneId: ws.focusedPaneId })
     })
     closeDrawer(modalDrawerOpen ? { preserveModalUntilTraversal: true } : undefined)
     requestComposer(chatId, { focus: true, restoreExistingDraft: true })

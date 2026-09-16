@@ -321,8 +321,8 @@ test('direct chat actions hand focus to the destination composer', () => {
     /const visibleBlank = !forceNew[\s\S]*resolveNewChatIntentId\([\s\S]*paneId: forceNew \? ws\.focusedPaneId : null[\s\S]*flushSync\([\s\S]*settleDraftFirstNewChat\(presentation\)/,
     'Builder stays additive while mounting the UUID-backed presentation synchronously')
   assert.match(startUserNewChatPresentation,
-    /flushSync\(\(\) => \{[\s\S]*setNewChatPresentation\(presentation\)[\s\S]*applyModeDestination\(\{[\s\S]*chatId,[\s\S]*paneId: ws\.focusedPaneId[\s\S]*closeDrawer\(modalDrawerOpen \? \{ preserveModalUntilTraversal: true \} : undefined\)/,
-    'the client id must enter the workspace before the tap dismisses navigation, independent of allocation')
+    /flushSync\(\(\) => \{[\s\S]*setNewChatPresentation\(presentation\)[\s\S]*navTo\('chat', \{ chatId, paneId: ws\.focusedPaneId \}\)[\s\S]*closeDrawer\(modalDrawerOpen \? \{ preserveModalUntilTraversal: true \} : undefined\)/,
+    'the client id must enter the workspace and browser history before the tap dismisses navigation, independent of allocation')
   assert.match(shell,
     /const newChatSession = String\(newChatPresentation\?\.chatId[\s\S]*<PaneChatView[\s\S]*newChatSession=\{newChatSession\}[\s\S]*onNewChatSubmit=\{queueDraftFirstNewChat\}/,
     'the active pane passes allocation state into its canonical ChatView instead of covering it')

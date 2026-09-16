@@ -1,5 +1,5 @@
 /** Reviews one immutable update or unfinished activation before the owner commits to it. */
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { Alert } from '@openai/apps-sdk-ui/components/Alert'
 import { X } from '@openai/apps-sdk-ui/components/Icon'
 import { api } from '../../api/client.js'
@@ -63,8 +63,6 @@ export default function UpdateReviewModal({
     // HTTP success alone never closes this review.
     else if (result?.ok) onClose()
   }
-  useEffect(() => { if (resultState) resultActionRef.current?.focus({ preventScroll: true }) }, [resultState])
-
   const summary = summarizePreview(preview)
   const target = shortSha(preview?.target_sha)
   const commits = preview?.commits || []
@@ -85,6 +83,16 @@ export default function UpdateReviewModal({
   const repairReason = (resultState === 'conflict' || nothingToApply) ? null : platformUpdateRepairReason({
     preview, platform: { ...platform, state: resultState || platform?.state }, error: applyError, errorCode: applyErrorCode,
   })
+  // Result actions are conditional children. Focus them only after the render
+  // that actually mounts the chosen action: unexpected successful responses
+  // enter repair through `applyError`, without ever changing `resultState`.
+  // The former resultState-only effect therefore ran either before the button
+  // existed or not at all, leaving keyboard users on the retired Apply button.
+  useLayoutEffect(() => {
+    if (hasResult || repairReason || nothingToApply) {
+      resultActionRef.current?.focus({ preventScroll: true })
+    }
+  }, [hasResult, repairReason, nothingToApply])
 
   return (
     <div className="urm__overlay" role="presentation" onClick={requestClose}>
