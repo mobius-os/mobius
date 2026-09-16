@@ -2991,7 +2991,34 @@ export default function Shell({ onInitialVisualReady }) {
               const chatExists = updatedChats.some(
                 chat => String(chat.id) === placementRequest.source.id,
               )
-              if (chatExists) placeInWorkspace(placementRequest)
+              if (!chatExists) return
+              placeInWorkspace(placementRequest)
+              // A phone parks a live preview so it never displaces the chat
+              // the owner is reading. The parked tab needs an equally direct,
+              // explicit way forward; the shared toast action keeps that
+              // choice in the current surface instead of making the owner
+              // hunt through hidden Builder state or the drawer.
+              let rect = contentRectRef.current
+              if ((!rect.w || !rect.h) && contentElRef.current) {
+                rect = {
+                  w: contentElRef.current.clientWidth,
+                  h: contentElRef.current.clientHeight,
+                }
+              }
+              if (paneModel.modeForRect(rect) !== 'phone') return
+              showToast(`${app.name} is ready.`, {
+                duration: 8000,
+                action: {
+                  label: `Open ${app.name}`,
+                  onAction: () => dispatchWorkspace({
+                    type: 'APPLY_PLACEMENT',
+                    toast: null,
+                    resolve: current => paneModel.setSingleScreen(current, {
+                      kind: 'app', id: String(placementRequest.item.id),
+                    }),
+                  }),
+                },
+              })
             })
           }
         }
