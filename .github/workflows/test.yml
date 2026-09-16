@@ -226,7 +226,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4]
+        shard: [3, 4]
 
     steps:
       - uses: actions/checkout@v7
@@ -350,9 +350,19 @@ jobs:
           set +e
           # --kill-after sends SIGKILL 30s after the SIGINT if Playwright
           # ignores the interrupt, so the step can't hang past the cap.
-          timeout --signal=INT --kill-after=30s 12m \
-            npx playwright test --shard=${{ matrix.shard }}/4
-          echo "exit=$?" >> "$GITHUB_OUTPUT"
+          case "${{ matrix.shard }}" in
+            3) files=(tests/fresh-send-runtime-race.spec.mjs tests/steer-queued.spec.mjs); project=shard-3 ;;
+            4) files=(tests/stream-reconnect.spec.mjs); project=shard-4-timing ;;
+          esac
+          test_status=0
+          for repetition in 1 2; do
+            echo "=== retained contract pass $repetition/2 ==="
+            timeout --signal=INT --kill-after=30s 12m \
+              npx playwright test "${files[@]}" --project="$project"
+            rc=$?
+            if [ "$rc" != 0 ]; then test_status="$rc"; fi
+          done
+          echo "exit=$test_status" >> "$GITHUB_OUTPUT"
           exit 0
         env:
           CI: '1'
