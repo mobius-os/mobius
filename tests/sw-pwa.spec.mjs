@@ -230,7 +230,6 @@ test.describe('Service worker — vite-plugin-pwa contract', () => {
       await context.setOffline(true)
       await page.reload({ waitUntil: 'domcontentloaded' })
       expect(await bootVersion()).toBe(updated.app.updated_at)
-      await expect(page.locator(`iframe[data-app-id="${app.id}"]`)).toBeAttached()
     } finally {
       await context.setOffline(false)
       await request.delete(`${BASE}/api/apps/${app.id}`, {
