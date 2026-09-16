@@ -136,7 +136,9 @@ async function mount(page, { rejectFirst = false, loseFirstAck = false } = {}) {
     exact: true,
   })
   await expect(resumeNudge).toBeVisible({ timeout: 15000 })
-  await resumeNudge.click()
+  // Activate the canonical nudge without racing the startup splash's pointer
+  // interception; keyboard activation exercises the same button handler.
+  await resumeNudge.press('Enter')
   await expect(surface.getByRole('button', { name: 'Resume', exact: true })).toBeVisible()
   const composer = surface.getByRole('textbox', { name: 'Message Möbius…' })
   await composer.fill(draft)

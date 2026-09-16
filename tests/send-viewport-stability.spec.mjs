@@ -1,5 +1,6 @@
 import { test, expect } from '@playwright/test'
 import { createTaggedChat, attachCleanup } from './_chatTracker.mjs'
+import { testChatAgentSettings } from './_chatTestPrerequisites.mjs'
 import { createMockChatRuntime } from './_mockChatRuntime.mjs'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
@@ -120,7 +121,8 @@ test('keyboard close never paints a sent row below its pin', async ({ page }) =>
         messages: serverMessages,
         total: serverMessages.length,
         offset: 0,
-        provider: 'codex',
+        provider: 'claude',
+        ...testChatAgentSettings(),
       })),
     })
   })
@@ -310,7 +312,8 @@ test('an idle runtime snapshot cannot retire an unacknowledged fresh send', asyn
         messages: history,
         total: history.length,
         offset: 0,
-        provider: 'codex',
+        provider: 'claude',
+        ...testChatAgentSettings(),
       })),
     })
   })
