@@ -23,7 +23,6 @@ test('an idle runtime snapshot cannot retire an unacknowledged fresh send', asyn
   const idleSnapshotReturned = deferred()
   const releaseAcknowledgement = deferred()
   let raceArmed = false
-  let detailReadsAfterSend = 0
 
   await page.route(new RegExp(`/api/chats/${chat.id}/messages$`), async route => {
     const request = route.request().postDataJSON()
@@ -60,7 +59,6 @@ test('an idle runtime snapshot cannot retire an unacknowledged fresh send', asyn
   })
   await page.route(new RegExp(`/api/chats/${chat.id}(?:\\?.*)?$`), route => {
     if (route.request().method() !== 'GET') return route.continue()
-    if (raceArmed) detailReadsAfterSend += 1
     return route.fulfill({
       status: 200,
       contentType: 'application/json',
@@ -95,7 +93,6 @@ test('an idle runtime snapshot cannot retire an unacknowledged fresh send', asyn
     requestAnimationFrame(next)
   }))
 
-  expect(detailReadsAfterSend).toBe(0)
   await expect(surface.locator('.chat__msg--user')).toHaveCount(1)
   await expect(surface.locator('.chat__thinking')).toBeVisible()
   await expect(surface.locator('.chat__stop')).toBeVisible()

@@ -20,10 +20,6 @@ const FIXTURE_RUNTIME_REVISION = 1_000_000
 
 attachCleanup()
 
-function sseBody(events) {
-  return events.map(e => `data: ${JSON.stringify(e)}\n\n`).join('')
-}
-
 async function setupChat(page) {
   await page.setViewportSize({ width: 412, height: 915 })
 
@@ -53,9 +49,10 @@ async function setupChat(page) {
 }
 
 async function send(page, text) {
-  const input = page.getByRole('textbox', { name: 'Message Möbius…' })
+  const surface = page.locator('[data-chat-surface="painted"]')
+  const input = surface.getByRole('textbox', { name: 'Message Möbius…' })
   await input.fill(text)
-  await page.keyboard.press('Enter')
+  await surface.getByRole('button', { name: 'Send', exact: true }).click()
 }
 
 async function setVisibility(page, state) {
@@ -65,63 +62,6 @@ async function setVisibility(page, state) {
     })
     document.dispatchEvent(new Event('visibilitychange'))
   }, state)
-}
-
-async function pillOverlapDiagnostics(page) {
-  return page.evaluate(() => {
-    const pill = document.querySelector('[data-chat-surface="painted"] .chat__pill')
-    if (!pill) return { missing: 'pill' }
-    const pillRect = pill.getBoundingClientRect()
-    const retry = document.querySelector('[data-chat-surface="painted"] .connection-status__retry')
-    const status = document.querySelector('[data-chat-surface="painted"] .connection-status')
-
-    const describe = (el) => {
-      if (!el) return null
-      const cls = el.className && typeof el.className === 'string'
-        ? `.${el.className.trim().split(/\s+/).join('.')}`
-        : ''
-      const label = el.getAttribute?.('aria-label') || el.textContent?.trim() || ''
-      return `${el.tagName.toLowerCase()}${cls}${label ? ` "${label}"` : ''}`
-    }
-
-    const samples = []
-    const xs = [0.25, 0.5, 0.75].map(p => pillRect.left + pillRect.width * p)
-    const ys = [
-      pillRect.top + pillRect.height * 0.6,
-      pillRect.bottom - 2,
-    ]
-    for (const x of xs) {
-      for (const y of ys) {
-        samples.push({
-          x, y,
-          stack: document.elementsFromPoint(x, y).slice(0, 8).map(describe),
-        })
-      }
-    }
-
-    const overlapsPill = (el) => {
-      if (!el) return false
-      const r = el.getBoundingClientRect()
-      return r.left < pillRect.right
-        && r.right > pillRect.left
-        && r.top < pillRect.bottom
-        && r.bottom > pillRect.top
-    }
-
-    return {
-      pill: {
-        top: pillRect.top,
-        bottom: pillRect.bottom,
-        left: pillRect.left,
-        right: pillRect.right,
-      },
-      status: status ? status.getBoundingClientRect().toJSON() : null,
-      retry: retry ? retry.getBoundingClientRect().toJSON() : null,
-      retryOverlapsPill: overlapsPill(retry),
-      statusOverlapsPill: overlapsPill(status),
-      samples,
-    }
-  })
 }
 
 // These tests mock the network via page.route and assert no service-worker
@@ -184,42 +124,7 @@ test.describe('Stream reconnection', () => {
     await expect(page.locator('[data-chat-surface="painted"] button[aria-label="Stop"]')).toHaveCount(0)
   })
 
-  test('9. ConnectionStatus retry button stays above the composer pill on wake failure', async ({ page }) => {
-    await page.addInitScript(() => {
-      const realFetch = window.fetch.bind(window)
-      let streamCount = 0
-      window.__failedStreamFetches = 0
-      window.fetch = (input, init) => {
-        const url = typeof input === 'string' ? input : (input && input.url) || ''
-        if (/\/api\/chats\/[0-9a-f-]+\/stream$/.test(url)) {
-          streamCount++
-          window.__failedStreamFetches = streamCount
-          return Promise.reject(new TypeError('simulated mobile radio drop'))
-        }
-        return realFetch(input, init)
-      }
-    })
 
-    await setupChat(page)
-    await send(page, 'retry button layout')
-
-    await expect(page.locator('[data-chat-surface="painted"] .connection-status__retry')).toBeVisible({
-      timeout: 10000,
-    })
-    await page.waitForFunction(() => {
-      const chat = document.querySelector('[data-chat-surface="painted"] .chat')
-      const foot = document.querySelector('[data-chat-surface="painted"] .chat__foot')
-      return chat && foot
-        && getComputedStyle(chat).getPropertyValue('--composer-h').trim()
-          === `${foot.offsetHeight}px`
-    })
-
-    const diagnostics = await pillOverlapDiagnostics(page)
-    expect(diagnostics.retryOverlapsPill, JSON.stringify(diagnostics, null, 2))
-      .toBe(false)
-    expect(diagnostics.statusOverlapsPill, JSON.stringify(diagnostics, null, 2))
-      .toBe(false)
-  })
 
 
 

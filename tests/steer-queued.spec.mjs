@@ -76,7 +76,7 @@ async function sendMessage(page, text) {
   const surface = page.locator('[data-chat-surface="painted"]')
   const input = surface.getByRole('textbox', { name: 'Message Möbius…' })
   await input.fill(text)
-  await page.keyboard.press('Enter')
+  await surface.getByRole('button', { name: 'Send', exact: true }).click()
 }
 
 async function installRuntimeRoute(page, runtime) {
