@@ -1066,8 +1066,10 @@ test.describe('Drawer state machine — extended invariants', () => {
     await page.waitForFunction(() => history.state?.kind === 'app')
     await goBack(page)
     await goForward(page)
-    await page.waitForFunction(() => history.state?.kind === 'nav', null, { timeout: 2000 })
-
+    // The rejected restoration is an internal history repair. Its stable
+    // browser contract is that it does not resurrect a nested app route and
+    // the next physical Back leaves the app exactly once.
+    await expect.poll(async () => (await getNavState(page)).hasCanvas).toBe(true)
     await goBack(page)
     expect((await getNavState(page)).hasChat).toBe(true)
   })
