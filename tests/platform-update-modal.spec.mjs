@@ -107,7 +107,7 @@ async function openSettings(page, width = 900) {
     () => !!(document.querySelector('.chat__empty-wrap')
       || document.querySelector('.chat__scroll')
       || document.querySelector('.chat__form')),
-    { timeout: 10000 },
+    undefined, { timeout: 10000 },
   )
 
   const navigationToggle = page.getByLabel('Toggle navigation')
@@ -209,7 +209,7 @@ test('a staged update can review another release before one restart', async ({ p
     () => !!(document.querySelector('.chat__empty-wrap')
       || document.querySelector('.chat__scroll')
       || document.querySelector('.chat__form')),
-    { timeout: 10000 },
+    undefined, { timeout: 10000 },
   )
   const navigationToggle = page.getByLabel('Toggle navigation')
   if (await navigationToggle.getAttribute('aria-expanded') !== 'true') {
@@ -247,7 +247,7 @@ test('staged-update actions stack without overflow in a narrow settings pane', a
     () => !!(document.querySelector('.chat__empty-wrap')
       || document.querySelector('.chat__scroll')
       || document.querySelector('.chat__form')),
-    { timeout: 10000 },
+    undefined, { timeout: 10000 },
   )
   const navigationToggle = page.getByLabel('Toggle navigation')
   if (await navigationToggle.getAttribute('aria-expanded') !== 'true') {

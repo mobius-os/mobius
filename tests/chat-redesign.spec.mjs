@@ -63,7 +63,7 @@ async function setupWithStreamMock(
     () => !!(document.querySelector('.chat__empty-wrap')
           || document.querySelector('.chat__scroll')
           || document.querySelector('.chat__form')),
-    { timeout: 10000 }
+    undefined, { timeout: 10000 }
   )
 }
 
@@ -764,7 +764,7 @@ test.describe('Q&A atomic write', () => {
     await page.waitForFunction(
       () => !!(document.querySelector('[data-chat-surface="painted"] .chat__empty-wrap')
             || document.querySelector('[data-chat-surface="painted"] .chat__form')),
-      { timeout: 10000 }
+      undefined, { timeout: 10000 }
     )
     await newChat(page)
     await sendMessage(page, 'Ask')
@@ -864,7 +864,7 @@ test.describe('Q&A atomic write', () => {
     await page.waitForFunction(
       () => !!(document.querySelector('[data-chat-surface="painted"] .chat__empty-wrap')
             || document.querySelector('[data-chat-surface="painted"] .chat__form')),
-      { timeout: 10000 },
+      undefined, { timeout: 10000 },
     )
     await newChat(page)
     await sendMessage(page, 'Ask the anchored question')
@@ -959,7 +959,7 @@ test.describe('Error block: persists across chat return', () => {
     await page.waitForFunction(
       () => !!(document.querySelector('[data-chat-surface="painted"] .chat__empty-wrap')
             || document.querySelector('[data-chat-surface="painted"] .chat__form')),
-      { timeout: 10000 }
+      undefined, { timeout: 10000 }
     )
     await newChat(page)
     await sendMessage(page, 'Try something')
@@ -983,7 +983,7 @@ test.describe('Error block: persists across chat return', () => {
     // to null and disappears here.
     await page.waitForFunction(
       () => !document.querySelector('[data-chat-surface="painted"] .chat__stop'),
-      { timeout: 5000 },
+      undefined, { timeout: 5000 },
     )
     // The Stop button is gone; the streaming `<li>` (which
     // shares its rendering path with the streaming render
@@ -1029,7 +1029,7 @@ test.describe('Error block: persists across chat return', () => {
     await page.waitForFunction(
       () => !!(document.querySelector('[data-chat-surface="painted"] .chat__empty-wrap')
             || document.querySelector('[data-chat-surface="painted"] .chat__form')),
-      { timeout: 10000 }
+      undefined, { timeout: 10000 }
     )
     await newChat(page)
     await sendMessage(page, 'Trigger error')

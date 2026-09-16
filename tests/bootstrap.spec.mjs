@@ -230,7 +230,7 @@ async function waitForShell(page) {
     () => !!(document.querySelector('[data-chat-surface="painted"] .chat__empty-wrap')
           || document.querySelector('[data-chat-surface="painted"] .chat__scroll')
           || document.querySelector('[data-chat-surface="painted"] .chat__form')),
-    { timeout: 10000 }
+    undefined, { timeout: 10000 }
   )
 }
 

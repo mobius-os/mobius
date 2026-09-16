@@ -43,7 +43,7 @@ async function setupWithSSE(page, events, viewport = { width: 412, height: 915 }
     () => !!(document.querySelector('[data-chat-surface="painted"] .chat__empty-wrap')
           || document.querySelector('[data-chat-surface="painted"] .chat__scroll')
           || document.querySelector('[data-chat-surface="painted"] .chat__form')),
-    { timeout: 10000 }
+    undefined, { timeout: 10000 }
   )
 }
 
@@ -54,7 +54,7 @@ async function newChat(page) {
   })
   await page.waitForFunction(
     () => !!document.querySelector('.drawer--open'),
-    { timeout: 3000 }
+    undefined, { timeout: 3000 }
   )
   await page.evaluate(() => {
     const newChatBtn = document.querySelector('.drawer__item--new')
@@ -62,7 +62,7 @@ async function newChat(page) {
   })
   await page.waitForFunction(
     () => !document.querySelector('.drawer--open'),
-    { timeout: 3000 }
+    undefined, { timeout: 3000 }
   )
 }
 
@@ -100,7 +100,7 @@ async function gestureToBottom(page) {
 async function waitStreamDone(page) {
   await page.waitForFunction(
     () => !document.querySelector('[data-chat-surface="painted"] .chat__stop'),
-    { timeout: 10000 }
+    undefined, { timeout: 10000 }
   )
   // Settle for any post-stream effects (promoteStreamToMessages, etc.).
   await page.evaluate(() => new Promise(r => setTimeout(r, 300)))
@@ -445,7 +445,7 @@ test('Second send pins and HOLDS through a thinking pause when the server ts dif
     () => !!(document.querySelector('[data-chat-surface="painted"] .chat__empty-wrap')
           || document.querySelector('[data-chat-surface="painted"] .chat__scroll')
           || document.querySelector('[data-chat-surface="painted"] .chat__form')),
-    { timeout: 10000 })
+    undefined, { timeout: 10000 })
   await newChat(page)
 
   await sendMessage(page, 'First user message')
@@ -466,7 +466,7 @@ test('Second send pins and HOLDS through a thinking pause when the server ts dif
     const last = users[users.length - 1]
     return !!last && (last.querySelector('.chat__text--user')?.textContent || '')
       .includes('Second user message')
-  }, { timeout: 3000 })
+  }, undefined, { timeout: 3000 })
   await page.evaluate(() => new Promise(r =>
     requestAnimationFrame(() => requestAnimationFrame(r))))
 

@@ -41,7 +41,7 @@ async function bootAndCreateChat(page, label, viewport = { width: 412, height: 9
     () => !!(document.querySelector('.chat__empty-wrap')
           || document.querySelector('.chat__scroll')
           || document.querySelector('.chat__form')),
-    { timeout: 10000 })
+    undefined, { timeout: 10000 })
   const chat = await createTaggedChat(page, label)
   return chat
 }

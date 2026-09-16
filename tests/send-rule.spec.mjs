@@ -27,7 +27,7 @@ async function setup(page, viewport = { width: 412, height: 915 }) {
     () => !!(document.querySelector('.chat__empty-wrap')
           || document.querySelector('.chat__scroll')
           || document.querySelector('.chat__form')),
-    { timeout: 10000 })
+    undefined, { timeout: 10000 })
 }
 
 /** Swap in an SSE response body for the next stream the app opens. */
@@ -96,11 +96,16 @@ async function newChat(page) {
     const btn = document.querySelector('[aria-expanded]')
     if (btn && btn.getAttribute('aria-expanded') !== 'true') btn.click()
   })
-  await page.waitForFunction(() => !!document.querySelector('.drawer--open'), { timeout: 3000 })
+  await page.waitForFunction(() => !!document.querySelector('.drawer--open'), undefined, { timeout: 3000 })
   await page.evaluate(() => document.querySelector('.drawer__item--new')?.click())
-  await page.waitForFunction(() => !document.querySelector('.drawer--open'), { timeout: 3000 })
+  await page.waitForFunction(() => !document.querySelector('.drawer--open'), undefined, { timeout: 3000 })
   await page.waitForFunction(
-    () => !document.querySelector('[data-new-chat-presentation]'),
+    () => {
+      const surface = document.querySelector('[data-chat-surface="painted"]')
+      const composer = surface?.querySelector('[aria-label="Message Möbius…"]')
+      return !!surface?.getAttribute('data-chat-id') && !!composer && !composer.disabled
+    },
+    undefined,
     { timeout: 10000 },
   )
 }
@@ -116,7 +121,7 @@ async function sendMessage(page, text) {
 }
 
 async function waitStreamDone(page) {
-  await page.waitForFunction(() => !document.querySelector('[data-chat-surface="painted"] .chat__stop'), { timeout: 10000 })
+  await page.waitForFunction(() => !document.querySelector('[data-chat-surface="painted"] .chat__stop'), undefined, { timeout: 10000 })
   await page.evaluate(() => new Promise(r => setTimeout(r, 300)))
 }
 

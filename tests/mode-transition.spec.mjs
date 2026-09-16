@@ -61,6 +61,24 @@ async function bootSeededWorkspace(page, viewport, ws) {
   await page.route(/\/api\/chats\/[0-9a-f-]+\/stream$/, r => r.fulfill({ status: 204, body: '' }))
   const runtime = await mockIdleChatRuntime(page)
   await page.route('**/api/chat/stop', r => r.fulfill({ status: 200, body: '{}' }))
+  await page.route(/\/api\/chats(?:\?.*)?$/, (r) => {
+    if (r.request().method() !== 'GET') return r.fallback()
+    return r.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify([{
+        id: 'aaa',
+        title: 'Seeded',
+        created_at: '2026-01-01T00:00:00Z',
+        updated_at: '2026-01-01T00:00:00Z',
+        activity_at: '2026-01-01T00:00:00Z',
+        pinned_at: null,
+        created_by_app_id: null,
+        has_messages: true,
+        running: false,
+      }]),
+    })
+  })
   await page.route(/\/api\/chats\/[^/?]+(\?.*)?$/, (r) => {
     if (r.request().method() !== 'GET') return r.fallback()
     return r.fulfill({
@@ -282,11 +300,12 @@ for (const [name, viewport] of [
       await toggleMode(page)
       await expect.poll(() => builderActive(page)).toBe(false)
     }
-    // Open navigation and find a draggable source (a chat/app row carries
-    // data-drag-key). Skip only if the instance genuinely has no source.
+    // Open navigation and use the deterministic chat row supplied by this
+    // fixture. A missing source is a broken contract, not a reason to silently
+    // remove this browser boundary from CI coverage.
     await openNavigation(page)
     const src = page.locator('[data-drag-key]').first()
-    if (!(await src.count())) { test.skip(true, 'no drag source available'); return }
+    await expect(src).toHaveCount(1)
     const box = await src.boundingBox()
     // Arm a single-mode drag: press + move past the drag threshold. This unfolds
     // the builder preview (data-mode-phase becomes 'drag-preview').
@@ -788,7 +807,9 @@ test('a selected Builder tab supersedes an in-flight NULL-slot allocation', asyn
     paneModel.STORAGE_KEY,
   ), { timeout: 4000 }).toBe('aaa')
   expect(createCount, 'the stale allocation settles without duplicating or taking the slot').toBe(1)
-  await expect(page.locator('[data-new-chat-presentation]')).toHaveCount(0)
+  await expect(page.locator(
+    '[data-chat-surface="painted"][data-chat-id="aaa"].shell__view--active',
+  )).toHaveCount(1)
 })
 
 // R4: same-batch descriptor atomicity for the last-tab-close auto-return. A one-tab

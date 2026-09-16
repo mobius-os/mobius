@@ -100,7 +100,7 @@ async function setup(page, viewport = { width: 412, height: 915 }) {
     document.querySelector('.chat__empty-wrap')
     || document.querySelector('.chat__scroll')
     || document.querySelector('.chat__form')
-  ), { timeout: 10000 })
+  ), undefined, { timeout: 10000 })
 }
 
 async function openPreview(page) {

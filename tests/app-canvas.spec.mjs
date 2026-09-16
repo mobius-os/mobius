@@ -144,7 +144,7 @@ async function setupShellBasics(page) {
 
 
 /** Set up the routes Shell needs to render an app canvas:
- *   - chats list (empty is fine — we land directly via /app/:id)
+ *   - chats list (empty is fine — we land directly via /shell/?app=:id)
  *   - apps list with our test app
  *   - theme + setup status (idle but must respond)
  *   - app-token POST returns a dummy token

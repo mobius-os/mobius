@@ -34,7 +34,7 @@ async function setupChat(page) {
     () => !!(document.querySelector('[data-chat-surface="painted"] .chat__empty-wrap')
           || document.querySelector('[data-chat-surface="painted"] .chat__scroll')
           || document.querySelector('[data-chat-surface="painted"] .chat__form')),
-    { timeout: 10000 }
+    undefined, { timeout: 10000 }
   )
 }
 
@@ -45,7 +45,7 @@ async function newChat(page) {
   })
   await page.waitForFunction(
     () => !!document.querySelector('.drawer--open'),
-    { timeout: 3000 }
+    undefined, { timeout: 3000 }
   )
   await page.evaluate(() => {
     const newChatBtn = document.querySelector('.drawer__item--new')
@@ -53,7 +53,7 @@ async function newChat(page) {
   })
   await page.waitForFunction(
     () => !document.querySelector('.drawer--open'),
-    { timeout: 3000 }
+    undefined, { timeout: 3000 }
   )
   // New Chat may correctly reuse the already-visible untouched chat. Wait for
   // the draft-first cover to hand off to whichever durable composer owns the
@@ -62,7 +62,6 @@ async function newChat(page) {
     const surface = document.querySelector('[data-chat-surface="painted"]')
     const composer = surface?.querySelector('[aria-label="Message Möbius…"]')
     return !!surface?.getAttribute('data-chat-id')
-      && !document.querySelector('[data-new-chat-presentation]')
       && !!composer
       && !composer.disabled
   }, undefined, { timeout: 10000 })
@@ -214,7 +213,7 @@ test.describe('handleStop sync-ordering (Ticket 034 R1)', () => {
     await page.waitForFunction(
       () => Array.from(document.querySelectorAll('[data-chat-surface="painted"] .queued__text'))
         .some(el => el.textContent?.includes('queued message')),
-      { timeout: 5000 },
+      undefined, { timeout: 5000 },
     )
 
     // Queued work intentionally replaces Stop with Steer. Enter the real

@@ -42,7 +42,7 @@ async function setup(page, viewport = { width: 412, height: 915 }) {
     () => !!(document.querySelector('[data-chat-surface="painted"] .chat__empty-wrap')
           || document.querySelector('[data-chat-surface="painted"] .chat__scroll')
           || document.querySelector('[data-chat-surface="painted"] .chat__form')),
-    { timeout: 10000 }
+    undefined, { timeout: 10000 }
   )
 }
 
@@ -93,7 +93,7 @@ async function stopAgent(page) {
   await page.evaluate(() => document.querySelector('[data-chat-surface="painted"] .chat__stop')?.click())
   await page.waitForFunction(
     () => !document.querySelector('[data-chat-surface="painted"] .chat__stop'),
-    { timeout: 3000 }
+    undefined, { timeout: 3000 }
   )
   // Let React settle.
   await page.evaluate(() => new Promise(r =>
@@ -265,7 +265,7 @@ async function setupWithSSE(page, events, viewport = { width: 412, height: 915 }
     () => !!(document.querySelector('[data-chat-surface="painted"] .chat__empty-wrap')
           || document.querySelector('[data-chat-surface="painted"] .chat__scroll')
           || document.querySelector('[data-chat-surface="painted"] .chat__form')),
-    { timeout: 10000 }
+    undefined, { timeout: 10000 }
   )
 }
 
@@ -462,7 +462,7 @@ test.describe('Short responses', () => {
     await page.waitForFunction(
       () => !!(document.querySelector('[data-chat-surface="painted"] .chat__scroll')
               && localStorage.getItem('moebius_active_chat')),
-      { timeout: 3000 },
+      undefined, { timeout: 3000 },
     )
     await page.evaluate(async () => {
       const token = localStorage.getItem('token')

@@ -70,7 +70,7 @@ async function setup(page, systemRoute) {
   await page.goto(BASE, { waitUntil: 'domcontentloaded' })
   await page.waitForFunction(
     () => !!document.querySelector('.shell'),
-    { timeout: 10000 },
+    undefined, { timeout: 10000 },
   )
 }
 
@@ -155,7 +155,7 @@ test.describe('shell update — owner-controlled navigation', () => {
 
     await page.waitForFunction(
       () => Number(sessionStorage.getItem('__load_count') || '0') === 1,
-      { timeout: 10000 },
+      undefined, { timeout: 10000 },
     )
     await expect(page.locator(
       `[data-chat-id="${current.id}"][data-chat-surface="painted"]`,

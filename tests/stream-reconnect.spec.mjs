@@ -39,7 +39,7 @@ async function setupChat(page) {
     () => !!(document.querySelector('.chat__empty-wrap')
           || document.querySelector('.chat__scroll')
           || document.querySelector('.chat__form')),
-    { timeout: 10000 }
+    undefined, { timeout: 10000 }
   )
   const chat = await createTaggedChat(page, 'stream-reconnect')
   await page.goto(`${BASE}/shell/?chat=${encodeURIComponent(chat.id)}`, {
@@ -47,7 +47,7 @@ async function setupChat(page) {
   })
   await page.waitForFunction(
     () => !!document.querySelector('[data-chat-surface="painted"] .chat__form'),
-    { timeout: 10000 },
+    undefined, { timeout: 10000 },
   )
   return chat
 }
@@ -475,7 +475,7 @@ test.describe('Stream reconnection', () => {
     await page.waitForTimeout(50)
     await setVisibility(page, 'visible')
 
-    await page.waitForFunction(() => window.__streamFetchCount === 2, {
+    await page.waitForFunction(() => window.__streamFetchCount === 2, undefined, {
       timeout: 5000,
     })
     await expect(page.locator('[data-chat-surface="painted"] .chat__scroll')).toContainText(
@@ -901,7 +901,7 @@ test.describe('Stream reconnection', () => {
     // Send the first message. Its /stream fetch is parked by the shim.
     await send(page, 'first turn')
     await expect(page.locator('[data-chat-surface="painted"] button[aria-label="Stop"]')).toHaveCount(1)
-    await page.waitForFunction(() => window.__staleStreamRequested === true, {
+    await page.waitForFunction(() => window.__staleStreamRequested === true, undefined, {
       timeout: 5000,
     })
 

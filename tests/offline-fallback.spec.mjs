@@ -11,7 +11,7 @@ const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
 async function swReady(page) {
   await page.waitForFunction(
     () => navigator.serviceWorker && navigator.serviceWorker.controller,
-    { timeout: 15000 },
+    undefined, { timeout: 15000 },
   )
 }
 
@@ -26,7 +26,7 @@ test('offline page consumes the structured theme persisted by the shell', async 
         return false
       }
     },
-    { timeout: 15000 },
+    undefined, { timeout: 15000 },
   )
   const bg = await page.evaluate(() => JSON.parse(localStorage.getItem('mobius-theme')).bg)
 

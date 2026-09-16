@@ -30,7 +30,7 @@ test('the first thinking event becomes interactive without moving the row', asyn
     () => !!(document.querySelector('.chat__empty-wrap')
       || document.querySelector('.chat__scroll')
       || document.querySelector('.chat__form')),
-    { timeout: 10000 },
+    undefined, { timeout: 10000 },
   )
   const chat = await createTaggedChat(page, 'thinking-handoff')
   await page.goto(`${BASE}/shell/?chat=${encodeURIComponent(chat.id)}`, {
@@ -97,7 +97,7 @@ test('cold historical activity reveals once at its final height', async ({ page 
     () => !!(document.querySelector('.chat__empty-wrap')
       || document.querySelector('.chat__scroll')
       || document.querySelector('.chat__form')),
-    { timeout: 10000 },
+    undefined, { timeout: 10000 },
   )
   const chat = await createTaggedChat(page, 'atomic-activity-detail')
   const runtime = createMockChatRuntime()
@@ -252,7 +252,7 @@ test('a lone activity is direct and sources render as safe compact pills', async
     () => !!(document.querySelector('.chat__empty-wrap')
       || document.querySelector('.chat__scroll')
       || document.querySelector('.chat__form')),
-    { timeout: 10000 },
+    undefined, { timeout: 10000 },
   )
   const chat = await createTaggedChat(page, 'direct-activity-sources')
   const runtime = createMockChatRuntime()
@@ -375,7 +375,7 @@ test('activity stays nested and lazy, aborts on close, and copies exact tool out
     () => !!(document.querySelector('.chat__empty-wrap')
       || document.querySelector('.chat__scroll')
       || document.querySelector('.chat__form')),
-    { timeout: 10000 },
+    undefined, { timeout: 10000 },
   )
   const chat = await createTaggedChat(page, 'lazy-activity')
   const runtime = createMockChatRuntime()

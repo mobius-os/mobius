@@ -40,7 +40,7 @@ async function setupChat(page) {
     () => !!(document.querySelector('.chat__empty-wrap')
           || document.querySelector('.chat__scroll')
           || document.querySelector('.chat__form')),
-    { timeout: 10000 }
+    undefined, { timeout: 10000 }
   )
 }
 
@@ -51,7 +51,7 @@ async function newChat(page) {
   })
   await page.waitForFunction(
     () => !!document.querySelector('.drawer--open'),
-    { timeout: 3000 }
+    undefined, { timeout: 3000 }
   )
   await page.evaluate(() => {
     const newChatBtn = document.querySelector('.drawer__item--new')
@@ -59,10 +59,15 @@ async function newChat(page) {
   })
   await page.waitForFunction(
     () => !document.querySelector('.drawer--open'),
-    { timeout: 3000 }
+    undefined, { timeout: 3000 }
   )
   await page.waitForFunction(
-    () => !document.querySelector('[data-new-chat-presentation]'),
+    () => {
+      const surface = document.querySelector('[data-chat-surface="painted"]')
+      const composer = surface?.querySelector('[aria-label="Message Möbius…"]')
+      return !!surface?.getAttribute('data-chat-id') && !!composer && !composer.disabled
+    },
+    undefined,
     { timeout: 10000 },
   )
 }
@@ -243,7 +248,7 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
     releaseSteer()
     await page.waitForFunction(
       () => document.querySelectorAll('[data-chat-surface="painted"] .queued__row').length === 0,
-      { timeout: 5000 },
+      undefined, { timeout: 5000 },
     )
     expect(await page.locator('[data-chat-surface="painted"] .queued__row').count()).toBe(0)
     await expect(pendingSteer).toContainText(QUEUED_TEXT)
@@ -443,7 +448,7 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
     // Wait for both rows queued + both server-confirmed (steer button shows).
     await page.waitForFunction(
       () => document.querySelectorAll('[data-chat-surface="painted"] .queued__row').length === 2,
-      { timeout: 5000 },
+      undefined, { timeout: 5000 },
     )
     const steerBtn = page.getByRole('button', { name: 'Send queued message now' })
     await expect(steerBtn).toBeVisible({ timeout: 5000 })

@@ -63,7 +63,7 @@ for (const scenario of SCENARIOS) {
       () => !!(document.querySelector('[data-chat-surface="painted"] .chat__empty-wrap')
         || document.querySelector('[data-chat-surface="painted"] .chat__scroll')
         || document.querySelector('[data-chat-surface="painted"] .chat__form')),
-      { timeout: 10000 },
+      undefined, { timeout: 10000 },
     )
 
     const chat = await createTaggedChat(page, scenario.label)
@@ -153,7 +153,7 @@ for (const scenario of SCENARIOS) {
     await page.waitForFunction(() => {
       const scroll = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
       return !!scroll && scroll.scrollHeight > scroll.clientHeight + 1000
-    }, { timeout: 5000 })
+    }, undefined, { timeout: 5000 })
 
     // Put the attention card well below the viewport with the same gesture
     // signal the controller receives from a human scroll.
@@ -228,7 +228,7 @@ test('jump-to-latest appears only away from the physical tail and resumes follow
     () => !!(document.querySelector('[data-chat-surface="painted"] .chat__empty-wrap')
       || document.querySelector('[data-chat-surface="painted"] .chat__scroll')
       || document.querySelector('[data-chat-surface="painted"] .chat__form')),
-    { timeout: 10000 },
+    undefined, { timeout: 10000 },
   )
 
   const chat = await createTaggedChat(page, 'jump-to-latest-tail')
@@ -292,7 +292,7 @@ test('jump-to-latest appears only away from the physical tail and resumes follow
   await page.waitForFunction(() => {
     const scroll = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
     return !!scroll && scroll.scrollHeight > scroll.clientHeight + 1000
-  }, { timeout: 5000 })
+  }, undefined, { timeout: 5000 })
 
   // R4's fallback lands the restored chat at the latest content. Wait for the
   // settled near-tail restore, then require the control absent: at the end of
@@ -302,7 +302,7 @@ test('jump-to-latest appears only away from the physical tail and resumes follow
     const scroll = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
     return !!scroll
       && scroll.scrollHeight - scroll.clientHeight - scroll.scrollTop < 200
-  }, { timeout: 5000 })
+  }, undefined, { timeout: 5000 })
   await expect(jump).toHaveCount(0)
 
   // Scroll well above the tail with the same gesture signal the controller
@@ -327,7 +327,7 @@ test('jump-to-latest appears only away from the physical tail and resumes follow
     const scroll = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
     if (!scroll || document.querySelector('.chat__jump-latest')) return false
     return Math.abs(scroll.scrollHeight - scroll.clientHeight - scroll.scrollTop) <= 1
-  }, { timeout: 5000 })
+  }, undefined, { timeout: 5000 })
 
   const modeKind = await page.evaluate(chatId => {
     try {

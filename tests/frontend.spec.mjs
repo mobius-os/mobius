@@ -44,7 +44,7 @@ async function setup(page, viewport = { width: 412, height: 915 }) {
     () => !!(document.querySelector('.chat__empty-wrap')
           || document.querySelector('.chat__scroll')
           || document.querySelector('.chat__form')),
-    { timeout: 10000 }
+    undefined, { timeout: 10000 }
   )
 }
 
@@ -276,7 +276,7 @@ test.describe('Message rendering', () => {
 
     // Stop and send second
     await page.evaluate(() => document.querySelector('[data-chat-surface="painted"] .chat__stop')?.click())
-    await page.waitForFunction(() => !document.querySelector('[data-chat-surface="painted"] .chat__stop'), { timeout: 3000 })
+    await page.waitForFunction(() => !document.querySelector('[data-chat-surface="painted"] .chat__stop'), undefined, { timeout: 3000 })
     await page.evaluate(() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r))))
     await sendMessage(page, 'Second')
 
@@ -326,7 +326,7 @@ test.describe('Message rendering', () => {
     await page.waitForFunction(
       () => !!(document.querySelector('[data-chat-surface="painted"] .chat__empty-wrap')
             || document.querySelector('[data-chat-surface="painted"] .chat__form')),
-      { timeout: 10000 }
+      undefined, { timeout: 10000 }
     )
     await newChat(page)
     await sendMessage(page, 'Render markdown')
@@ -425,7 +425,7 @@ test.describe('Message rendering', () => {
     await page.waitForFunction(
       () => !!(document.querySelector('[data-chat-surface="painted"] .chat__empty-wrap')
             || document.querySelector('[data-chat-surface="painted"] .chat__form')),
-      { timeout: 10000 }
+      undefined, { timeout: 10000 }
     )
     await newChat(page)
     await sendMessage(page, 'Ask me something')
@@ -509,7 +509,7 @@ test.describe('Message rendering', () => {
     await page.goto(BASE, { waitUntil: 'domcontentloaded' })
     await page.waitForFunction(
       () => !!(document.querySelector('[data-chat-surface="painted"] .chat__empty-wrap') || document.querySelector('[data-chat-surface="painted"] .chat__form')),
-      { timeout: 10000 }
+      undefined, { timeout: 10000 }
     )
     await newChat(page)
     await sendMessage(page, 'Ask me')
@@ -551,7 +551,7 @@ test.describe('Message rendering', () => {
     await page.goto(BASE, { waitUntil: 'domcontentloaded' })
     await page.waitForFunction(
       () => !!(document.querySelector('[data-chat-surface="painted"] .chat__empty-wrap') || document.querySelector('[data-chat-surface="painted"] .chat__form')),
-      { timeout: 10000 }
+      undefined, { timeout: 10000 }
     )
     await newChat(page)
     await sendMessage(page, 'Ask me')
@@ -694,7 +694,7 @@ test.describe('Scroll position', () => {
           && el.scrollHeight > el.clientHeight + 100
           && el.textContent.includes('Scroll restore paragraph 36')
       },
-      { timeout: 10000 }
+      undefined, { timeout: 10000 }
     )
 
     // Use the same browser-owned delayed key scroll that exposed the bug. A
@@ -740,7 +740,7 @@ test.describe('Scroll position', () => {
           && el.scrollHeight > el.clientHeight + 100
           && el.textContent.includes('Scroll restore paragraph 36')
       },
-      { timeout: 10000 }
+      undefined, { timeout: 10000 }
     )
     await page.evaluate(() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r))))
 
@@ -801,7 +801,7 @@ test.describe('Scroll position', () => {
           && el.scrollHeight > el.clientHeight + 100
           && el.textContent.includes('Initial follow paragraph 32')
       },
-      { timeout: 10000 },
+      undefined, { timeout: 10000 },
     )
 
     // A real wheel gesture is the sole transition into FOLLOW_BOTTOM. The
@@ -816,12 +816,12 @@ test.describe('Scroll position', () => {
       return !!el
         && el.scrollTop > 0
         && el.scrollHeight - el.scrollTop - el.clientHeight > 100
-    }, { timeout: 3000 })
+    }, undefined, { timeout: 3000 })
     await page.mouse.wheel(0, 100000)
     await page.waitForFunction(() => {
       const el = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
       return !!el && el.scrollHeight - el.scrollTop - el.clientHeight < 50
-    }, { timeout: 3000 })
+    }, undefined, { timeout: 3000 })
     await waitForChatMode(page, chatId, 'FOLLOW_BOTTOM')
     const scrollBefore = await page.evaluate(
       () => document.querySelector('[data-chat-surface="painted"] .chat__scroll')?.scrollTop ?? null,
@@ -857,7 +857,7 @@ test.describe('Scroll position', () => {
           && getComputedStyle(el).visibility !== 'hidden'
           && el.textContent.includes('Grown while away marker 18')
       },
-      { timeout: 10000 },
+      undefined, { timeout: 10000 },
     )
     await page.evaluate(() => new Promise(r =>
       requestAnimationFrame(() => requestAnimationFrame(r))))
@@ -917,7 +917,7 @@ test.describe('Scroll position', () => {
     await page.goto(`${BASE}/shell/?chat=${chatId}`, { waitUntil: 'domcontentloaded' })
     await page.waitForFunction(
       () => document.querySelector('[data-key="history-cid-44"]'),
-      { timeout: 10000 },
+      undefined, { timeout: 10000 },
     )
     // Older pages now prefetch from the reader's near-top gesture instead of
     // exposing a manual Load button. Drive that owning interaction directly.
@@ -930,7 +930,7 @@ test.describe('Scroll position', () => {
     })
     await page.waitForFunction(
       () => document.querySelector('[data-key="history-cid-10"]'),
-      { timeout: 5000 },
+      undefined, { timeout: 5000 },
     )
     // The prepend and its viewport compensation complete in one task. Wait for
     // the resulting layout to settle before synthesizing the next reader
@@ -967,7 +967,7 @@ test.describe('Scroll position', () => {
         const el = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
         return !!el && getComputedStyle(el).visibility !== 'hidden'
       },
-      { timeout: 10000 },
+      undefined, { timeout: 10000 },
     )
     await page.evaluate(() => new Promise(resolve =>
       requestAnimationFrame(() => requestAnimationFrame(resolve))))
@@ -1179,7 +1179,7 @@ test.describe('Scroll position', () => {
       return !!el && getComputedStyle(el).visibility !== 'hidden'
         && !!img?.src.includes('entry-image-return.png') && !!img.complete
         && !!document.querySelector('[data-key="entry-anchor"]')
-    }, { timeout: 10000 })
+    }, undefined, { timeout: 10000 })
 
     const trajectory = await page.evaluate(() => window.__entryTrajectory || [])
     const visibleRows = trajectory.filter(row => row.visible)
@@ -1218,7 +1218,7 @@ test.describe('Enter key — touch-primary device (mobile)', () => {
     await page.waitForFunction(
       () => !!(document.querySelector('[data-chat-surface="painted"] .chat__empty-wrap')
             || document.querySelector('[data-chat-surface="painted"] .chat__form')),
-      { timeout: 10000 }
+      undefined, { timeout: 10000 }
     )
     await newChat(page)
 
@@ -1320,7 +1320,7 @@ test.describe('Scroll after stream end', () => {
     await page.waitForFunction(
       () => !!(document.querySelector('[data-chat-surface="painted"] .chat__empty-wrap')
             || document.querySelector('[data-chat-surface="painted"] .chat__form')),
-      { timeout: 10000 }
+      undefined, { timeout: 10000 }
     )
     await newChat(page)
 
@@ -1331,7 +1331,7 @@ test.describe('Scroll after stream end', () => {
 
     await page.waitForFunction(
       () => !document.querySelector('[data-chat-surface="painted"] .chat__stop'),
-      { timeout: 10000 }
+      undefined, { timeout: 10000 }
     )
 
     // Verify content overflows.
@@ -1423,7 +1423,7 @@ test.describe('Connection recovery', () => {
     await page.waitForFunction(
       () => !!(document.querySelector('[data-chat-surface="painted"] .chat__empty-wrap')
             || document.querySelector('[data-chat-surface="painted"] .chat__form')),
-      { timeout: 10000 }
+      undefined, { timeout: 10000 }
     )
     await newChat(page)
 
@@ -1434,7 +1434,7 @@ test.describe('Connection recovery', () => {
 
     await page.waitForFunction(
       () => !document.querySelector('[data-chat-surface="painted"] .chat__stop'),
-      { timeout: 10000 }
+      undefined, { timeout: 10000 }
     )
     await expect(page.locator('[data-chat-surface="painted"] .chat__scroll')).toContainText(
       'Recovered final response from DB.',
@@ -1479,7 +1479,7 @@ test.describe('Connection recovery', () => {
     await page.waitForFunction(
       () => !!(document.querySelector('[data-chat-surface="painted"] .chat__empty-wrap')
             || document.querySelector('[data-chat-surface="painted"] .chat__form')),
-      { timeout: 10000 }
+      undefined, { timeout: 10000 }
     )
     await newChat(page)
 
@@ -1489,7 +1489,7 @@ test.describe('Connection recovery', () => {
 
     await page.waitForFunction(
       () => !document.querySelector('[data-chat-surface="painted"] .chat__stop'),
-      { timeout: 10000 }
+      undefined, { timeout: 10000 }
     )
     await expect(page.locator('[data-chat-surface="painted"] .chat__msg--assistant')).toContainText('Agent response.')
     expect(streamCallCount).toBe(1)

@@ -27,6 +27,11 @@ const NAV_CHATS = [
   running: false,
 }))
 
+const NAV_APP = {
+  id: 990203,
+  name: 'Navigation Fixture',
+}
+
 function navChatDetail(id, assistantContent = 'Fixture response') {
   return {
     messages: [
@@ -221,8 +226,44 @@ async function setup(
     () => !!(document.querySelector('.chat__empty-wrap')
           || document.querySelector('.chat__scroll')
           || document.querySelector('.chat__form')),
-    { timeout: 10000 }
+    undefined, { timeout: 10000 }
   )
+}
+
+// The app-history cases exercise the browser/app message boundary. They must
+// not borrow whichever app happens to be installed in the runner database:
+// that used to make the tests silently skip and provided no CI coverage.
+async function installNavigationAppFixture(page) {
+  await page.route(/\/api\/apps(?:\?.*)?$/, route => {
+    if (route.request().method() !== 'GET') return route.fallback()
+    return route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify([{
+        id: NAV_APP.id,
+        name: NAV_APP.name,
+        description: '',
+        compiled_path: '',
+        chat_id: null,
+        source_dir: null,
+        pinned_at: null,
+        cross_app_access: 'none',
+        share_with_apps: 'none',
+        offline_capable: false,
+        updated_at: '2026-01-01T00:00:00Z',
+      }]),
+    })
+  })
+  await page.route(new RegExp(`/api/apps/${NAV_APP.id}/frame`), route => route.fulfill({
+    status: 200,
+    contentType: 'text/html',
+    body: '<!doctype html><html><body><main>Navigation fixture</main></body></html>',
+  }))
+  await page.route(/\/api\/auth\/app-token$/, route => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({ token: 'navigation-fixture-token' }),
+  }))
 }
 
 for (const width of [412, 1512]) {
@@ -278,7 +319,7 @@ async function navigateToChat(page, index = 0) {
       && !!(document.querySelector('[data-chat-surface="painted"] .chat__empty-wrap')
         || document.querySelector('[data-chat-surface="painted"] .chat__scroll')
         || document.querySelector('[data-chat-surface="painted"] .chat__form')),
-    { timeout: 8000 }
+    undefined, { timeout: 8000 }
   )
 }
 
@@ -2073,14 +2114,12 @@ test.describe('Drawer state machine — extended invariants', () => {
   })
 
   test('20c. legacy Forward lands at app base and the next Back leaves once', async ({ page }) => {
+    await installNavigationAppFixture(page)
     await setup(page)
     await openDrawer(page)
     await navigateToApp(page, 0)
-    const iframe = page.locator('iframe[data-app-id]').first()
-    if (await iframe.count() === 0) test.skip(true, 'no installed app available')
-    const appId = await iframe.getAttribute('data-app-id')
-    const appFrame = page.frames().find(frame => /\/api\/apps\/\d+\/frame/.test(frame.url()))
-    if (!appFrame) test.skip(true, 'app frame did not load')
+    const appId = String(NAV_APP.id)
+    const appFrame = await appFrameFor(page, NAV_APP.id)
 
     // Drive the same wire protocol a nested app route uses, while recording
     // how many semantic closes the shell sends back to that exact frame.
@@ -2104,24 +2143,32 @@ test.describe('Drawer state machine — extended invariants', () => {
   })
 
   test('20d. reversible app entries restore on Forward and unwind once again', async ({ page }) => {
+    await installNavigationAppFixture(page)
     await setup(page)
     await openDrawer(page)
     await navigateToApp(page, 0)
-    const iframe = page.locator('iframe[data-app-id]').first()
-    if (await iframe.count() === 0) test.skip(true, 'no installed app available')
-    const appFrame = page.frames().find(frame => /\/api\/apps\/\d+\/frame/.test(frame.url()))
-    if (!appFrame) test.skip(true, 'app frame did not load')
+    const appFrame = await appFrameFor(page, NAV_APP.id)
 
-    await expect.poll(
-      () => appFrame.evaluate(() => typeof window.mobius?.nav?.open === 'function')
-    ).toBe(true)
     await appFrame.evaluate(() => {
       window.__mobiusBackCount = 0
       window.__mobiusForwardCount = 0
-      window.__mobiusTestNavHandle = window.mobius.nav.open('e2e-report', {
-        onBack() { window.__mobiusBackCount += 1 },
-        onForward() { window.__mobiusForwardCount += 1 },
+      window.addEventListener('message', (event) => {
+        const message = event?.data
+        if (message?.type === 'moebius:nav-back') window.__mobiusBackCount += 1
+        if (message?.type === 'moebius:nav-forward') {
+          window.__mobiusForwardCount += 1
+          window.parent.postMessage({
+            type: 'moebius:nav-forward-ack',
+            requestId: message.requestId,
+          }, '*')
+        }
       })
+      window.parent.postMessage({
+        type: 'moebius:nav-push',
+        label: 'e2e-report',
+        requestId: 'e2e-report',
+        reversible: true,
+      }, '*')
     })
     await page.waitForFunction(() => history.state?.kind === 'app')
 
@@ -2135,13 +2182,11 @@ test.describe('Drawer state machine — extended invariants', () => {
   })
 
   test('20e. rejected Forward restoration retires the ghost app step', async ({ page }) => {
+    await installNavigationAppFixture(page)
     await setup(page)
     await openDrawer(page)
     await navigateToApp(page, 0)
-    const iframe = page.locator('iframe[data-app-id]').first()
-    if (await iframe.count() === 0) test.skip(true, 'no installed app available')
-    const appFrame = page.frames().find(frame => /\/api\/apps\/\d+\/frame/.test(frame.url()))
-    if (!appFrame) test.skip(true, 'app frame did not load')
+    const appFrame = await appFrameFor(page, NAV_APP.id)
 
     await appFrame.evaluate(() => {
       // Deliberately announce a reversible id the runtime never registered.

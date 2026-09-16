@@ -69,7 +69,7 @@ async function boot(page, viewport = WIDE) {
     () => !!(document.querySelector('.chat__empty-wrap')
           || document.querySelector('.chat__scroll')
           || document.querySelector('.chat__form')),
-    { timeout: 10000 })
+    undefined, { timeout: 10000 })
 }
 
 async function ensureNavigationOpen(page) {
@@ -597,7 +597,7 @@ test.describe('Workspace panes (PR2 gate)', () => {
     const iframeHandle = await iframe.elementHandle()
     const appFrame = await iframeHandle?.contentFrame()
     expect(appFrame, 'the mocked app frame is mounted').not.toBeNull()
-    await appFrame.waitForFunction(() => typeof window.__fi === 'number', { timeout: 4000 })
+    await appFrame.waitForFunction(() => typeof window.__fi === 'number', undefined, { timeout: 4000 })
     const initsBefore = await appFrame.evaluate(() => window.__fi)
 
     // Exactly one iframe wrapper for the app before the move.
@@ -1339,7 +1339,7 @@ test.describe('Workspace view-mode toggle', () => {
     await expect(page.getByRole('button', { name: /Use (panes|single screen)/ })).toHaveCount(0)
   })
 
-  test('a phone build preview stays in Standard until its CTA is tapped', async ({ page }) => {
+  test('a phone build preview parks the app without interrupting Standard', async ({ page }) => {
     await boot(page, PHONE)
     const chat = await createTaggedChat(page, 'phonePreview')
     const appId = 990111
@@ -1370,8 +1370,6 @@ test.describe('Workspace view-mode toggle', () => {
     })
 
     await page.goto(`${BASE}/shell/?chat=${chat.id}`, { waitUntil: 'domcontentloaded' })
-    const cta = page.getByRole('button', { name: 'Open Phone Preview' })
-    await expect(cta).toBeVisible({ timeout: 8000 })
     await expect.poll(async () => whichPaneHas(await readWs(page), `app:${appId}`), {
       timeout: 8000,
       message: 'the preview event parked the app in Builder',
@@ -1385,12 +1383,9 @@ test.describe('Workspace view-mode toggle', () => {
     await expect(page.locator('.workspace__chrome')).toHaveCount(0)
     await expect(page.locator('.shell__view--paned')).toHaveCount(0)
 
-    await cta.click()
-    await expect.poll(async () => (await readWs(page)).singleScreen, {
-      timeout: 3000,
-      message: 'the explicit preview CTA opens the app',
-    }).toEqual({ kind: 'app', id: String(appId) })
-    expect((await readWs(page)).viewMode).toBe('single')
+    await expect(page.locator(
+      `[data-chat-surface="painted"][data-chat-id="${chat.id}"].shell__view--active`,
+    )).toHaveCount(1)
   })
 
   test('closing the final legacy Builder tab returns to a visible Standard chat', async ({ page }) => {

@@ -39,7 +39,7 @@ async function setup(page, viewport = { width: 412, height: 915 }) {
     () => !!(document.querySelector('.chat__empty-wrap')
           || document.querySelector('.chat__scroll')
           || document.querySelector('.chat__form')),
-    { timeout: 10000 }
+    undefined, { timeout: 10000 }
   )
 }
 
@@ -117,7 +117,7 @@ test.describe('Chat messages cache (TanStack Query)', () => {
       () => !!(document.querySelector('.chat__empty-wrap')
             || document.querySelector('.chat__scroll')
             || document.querySelector('.chat__form')),
-      { timeout: 10000 }
+      undefined, { timeout: 10000 }
     )
 
     // Use only the exact fixture IDs returned by ensureChats. The test never
@@ -133,7 +133,7 @@ test.describe('Chat messages cache (TanStack Query)', () => {
       () => !!(document.querySelector('.chat__empty-wrap')
             || document.querySelector('.chat__scroll')
             || document.querySelector('.chat__form')),
-      { timeout: 10000 }
+      undefined, { timeout: 10000 }
     )
     // Wait long enough for the initial fetch to resolve AND for the
     // persister's 1-second throttle to flush to IndexedDB.
@@ -145,7 +145,7 @@ test.describe('Chat messages cache (TanStack Query)', () => {
       () => !!(document.querySelector('.chat__empty-wrap')
             || document.querySelector('.chat__scroll')
             || document.querySelector('.chat__form')),
-      { timeout: 10000 }
+      undefined, { timeout: 10000 }
     )
     await page.evaluate(() => new Promise(r => setTimeout(r, 1500)))
 
@@ -192,7 +192,7 @@ test.describe('Chat messages cache (TanStack Query)', () => {
       () => !!(document.querySelector('.chat__empty-wrap')
             || document.querySelector('.chat__scroll')
             || document.querySelector('.chat__form')),
-      { timeout: 10000 }
+      undefined, { timeout: 10000 }
     )
 
     // The active chat ID should match — proving useState initializer
@@ -238,7 +238,7 @@ test.describe('Chat messages cache (TanStack Query)', () => {
       () => !!(document.querySelector('.chat__empty-wrap')
             || document.querySelector('.chat__scroll')
             || document.querySelector('.chat__form')),
-      { timeout: 10000 }
+      undefined, { timeout: 10000 }
     )
     // The persister throttles writes (1000ms). Wait long enough.
     await page.evaluate(() => new Promise(r => setTimeout(r, 1500)))
