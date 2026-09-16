@@ -7,6 +7,7 @@ import { createTaggedChat, attachCleanup } from './_chatTracker.mjs'
 import { createMockChatRuntime } from './_mockChatRuntime.mjs'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
+const FIXTURE_RUNTIME_REVISION = 1_000_000
 
 attachCleanup()
 test.use({ serviceWorkers: 'block' })
@@ -71,7 +72,12 @@ test('terminal cursor removal keeps followed geometry unchanged', async ({ page 
     ts: 1700000500000,
     cid: 'cursor-user',
   }
-  const runtime = createMockChatRuntime({ running: true })
+  // The tagged chat has already received a server-owned runtime projection.
+  // Start this intercepted lifecycle above it so the fixture is authoritative.
+  const runtime = createMockChatRuntime({
+    running: true,
+    runtime_revision: FIXTURE_RUNTIME_REVISION,
+  })
   await page.route(new RegExp(`/api/chats/${chat.id}/runtime(?:\\?.*)?$`), route => {
     if (route.request().method() !== 'GET') return route.continue()
     return route.fulfill({

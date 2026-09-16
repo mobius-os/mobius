@@ -16,6 +16,7 @@ import { createTaggedChat, attachCleanup } from './_chatTracker.mjs'
 import { createMockChatRuntime } from './_mockChatRuntime.mjs'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
+const FIXTURE_RUNTIME_REVISION = 1_000_000
 
 attachCleanup()
 
@@ -174,7 +175,7 @@ test.describe('Stream reconnection', () => {
   test('2. Terminal 204 exits thinking and refreshes persisted messages', async ({ page }) => {
     let streamRequestCount = 0
     let refreshReady = false
-    const runtime = createMockChatRuntime()
+    const runtime = createMockChatRuntime({ runtime_revision: FIXTURE_RUNTIME_REVISION })
 
     await page.route(/\/api\/chats\/[0-9a-f-]+\/runtime$/, route => {
       if (route.request().method() !== 'GET') { route.continue(); return }
@@ -767,7 +768,7 @@ test.describe('Stream reconnection', () => {
     // real network race or this simulation, because both deliver a resolved
     // 204 Response to the same awaited fetch while abortRef points elsewhere.
     let messagesPostCount = 0
-    const runtime = createMockChatRuntime()
+    const runtime = createMockChatRuntime({ runtime_revision: FIXTURE_RUNTIME_REVISION })
 
     // Install the fetch shim before any app code runs. It captures the
     // first explicitly armed /stream fetch and parks it (a held Response).
@@ -1035,6 +1036,7 @@ test.describe('Stream reconnection', () => {
       },
     ]
     const runtime = createMockChatRuntime({
+      runtime_revision: FIXTURE_RUNTIME_REVISION,
       running: true,
       active_goal_objective: GOAL,
       pending_messages: [],

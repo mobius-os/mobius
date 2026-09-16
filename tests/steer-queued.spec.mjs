@@ -27,6 +27,7 @@ import { attachCleanup, createTaggedChat } from './_chatTracker.mjs'
 import { createMockChatRuntime } from './_mockChatRuntime.mjs'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
+const FIXTURE_RUNTIME_REVISION = 1_000_000
 
 function sseBody(events) {
   return events.map(e => `data: ${JSON.stringify(e)}\n\n`).join('')
@@ -106,7 +107,7 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
     // the queued message's trimmed content (single message → no join).
     const QUEUE_TS = 777001
     const QUEUED_TEXT = 'queued message to steer'
-    const runtime = createMockChatRuntime()
+    const runtime = createMockChatRuntime({ runtime_revision: FIXTURE_RUNTIME_REVISION })
     await installRuntimeRoute(page, runtime)
     let releaseSteer
     const steerGate = new Promise(resolve => { releaseSteer = resolve })
@@ -246,7 +247,7 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
   test('Ctrl+Enter sends one direct-steer request and renders it inline, never queued', async ({ page }) => {
     const STEER_TEXT = 'change course immediately'
     const messagePosts = []
-    const runtime = createMockChatRuntime()
+    const runtime = createMockChatRuntime({ runtime_revision: FIXTURE_RUNTIME_REVISION })
     await installRuntimeRoute(page, runtime)
     let releaseDirectSteer
     const directSteerGate = new Promise(resolve => { releaseDirectSteer = resolve })
@@ -369,7 +370,7 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
     const TEXT2 = 'second queued'
 
     const messagePosts = []
-    const runtime = createMockChatRuntime()
+    const runtime = createMockChatRuntime({ runtime_revision: FIXTURE_RUNTIME_REVISION })
     await installRuntimeRoute(page, runtime)
     // The queueOnly POSTs land in order, so hand back TS1 then TS2.
     let queueCount = 0
@@ -461,7 +462,7 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
     const TEXT2 = 'leave this message queued'
     const messagePosts = []
     let queueCount = 0
-    const runtime = createMockChatRuntime()
+    const runtime = createMockChatRuntime({ runtime_revision: FIXTURE_RUNTIME_REVISION })
     await installRuntimeRoute(page, runtime)
 
     await page.route(/\/api\/chats\/[0-9a-f-]+\/messages$/, async (route) => {
@@ -822,7 +823,7 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
     let durableMessages = []
     let durablePending = []
     let durableRunning = false
-    const runtime = createMockChatRuntime()
+    const runtime = createMockChatRuntime({ runtime_revision: FIXTURE_RUNTIME_REVISION })
     await installRuntimeRoute(page, runtime)
 
     await page.route(/\/api\/chats\/[0-9a-f-]+\/messages$/, async (route) => {
