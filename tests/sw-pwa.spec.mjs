@@ -376,31 +376,35 @@ test.describe('Service worker — vite-plugin-pwa contract', () => {
     const token = await ownerToken(page)
     const headers = { Authorization: `Bearer ${token}` }
     const stamp = Date.now()
+    const staticFiles = {
+      'static/index.html': '<!doctype html><title>Opaque packaged fixture</title><script src="./child.deadbeef.js"></script><main id="packaged">real packaged document</main>',
+      'static/child.deadbeef.js': `(async()=>{
+        let token=null;try{token=localStorage.getItem('token')}catch(_e){}
+        let parentToken=null;try{parentToken=parent.localStorage.getItem('token')}catch(_e){}
+        let api=-1;try{api=(await fetch('/api/apps/',token?{headers:{Authorization:'Bearer '+token}}:{})).status}catch(_e){}
+        parent.postMessage({type:'opaque-static-sw-ready',origin:self.origin,token,parentToken,api},'*')
+      })()`,
+      'static/hostile.svg': `<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20"><script><![CDATA[
+        (async()=>{let token=null;try{token=localStorage.getItem('token')}catch(_e){}
+        let api=-1;try{api=(await fetch('/api/apps/',token?{headers:{Authorization:'Bearer '+token}}:{})).status}catch(_e){}
+        parent.postMessage({type:'opaque-svg-proof',origin:self.origin,token,api},'*')})()
+      ]]></script><rect width="20" height="20" fill="red"/></svg>`,
+    }
     const { app } = await applyApp(request, token, {
       slug: `opaque-static-sw-${stamp}`,
       name: `Opaque static SW ${stamp}`,
       description: 'Disposable controlled-service-worker fixture.',
       jsxSource: 'export default function App(){return <main>fixture</main>}',
+      files: staticFiles,
+      manifest: {
+        static_assets: {
+          'index.html': 'static/index.html',
+          'child.deadbeef.js': 'static/child.deadbeef.js',
+          'hostile.svg': 'static/hostile.svg',
+        },
+      },
     })
-    const prefix = `apps/${app.slug}/static`
-    const write = (path, body) => request.put(
-      `${BASE}/api/fs/write?path=${encodeURIComponent(`${prefix}/${path}`)}`,
-      { headers: { ...headers, 'Content-Type': 'text/plain' }, data: body },
-    )
     try {
-      expect((await write('index.html', `<!doctype html><title>Opaque packaged fixture</title><script src="./child.deadbeef.js"></script><main id="packaged">real packaged document</main>`)).ok()).toBeTruthy()
-      expect((await write('child.deadbeef.js', `(async()=>{
-        let token=null;try{token=localStorage.getItem('token')}catch(_e){}
-        let parentToken=null;try{parentToken=parent.localStorage.getItem('token')}catch(_e){}
-        let api=-1;try{api=(await fetch('/api/apps/',token?{headers:{Authorization:'Bearer '+token}}:{})).status}catch(_e){}
-        parent.postMessage({type:'opaque-static-sw-ready',origin:self.origin,token,parentToken,api},'*')
-      })()`)).ok()).toBeTruthy()
-      expect((await write('hostile.svg', `<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20"><script><![CDATA[
-        (async()=>{let token=null;try{token=localStorage.getItem('token')}catch(_e){}
-        let api=-1;try{api=(await fetch('/api/apps/',token?{headers:{Authorization:'Bearer '+token}}:{})).status}catch(_e){}
-        parent.postMessage({type:'opaque-svg-proof',origin:self.origin,token,api},'*')})()
-      ]]></script><rect width="20" height="20" fill="red"/></svg>`)).ok()).toBeTruthy()
-
       await page.evaluate(async () => {
         await navigator.serviceWorker.register('/sw.js')
         await navigator.serviceWorker.ready
