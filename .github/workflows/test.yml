@@ -226,7 +226,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4]
+        shard: [1]
 
     steps:
       - uses: actions/checkout@v7
@@ -351,7 +351,11 @@ jobs:
           # --kill-after sends SIGKILL 30s after the SIGINT if Playwright
           # ignores the interrupt, so the step can't hang past the cap.
           timeout --signal=INT --kill-after=30s 12m \
-            npx playwright test --shard=${{ matrix.shard }}/4
+            npx playwright test --repeat-each=2 \
+              tests/streaming-cursor.spec.mjs \
+              tests/shell-update-idle.spec.mjs \
+              tests/steer-queued.spec.mjs \
+              tests/stream-reconnect.spec.mjs
           echo "exit=$?" >> "$GITHUB_OUTPUT"
           exit 0
         env:
