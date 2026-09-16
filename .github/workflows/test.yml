@@ -208,7 +208,7 @@ jobs:
         run: npm run test:e2e-harness
 
   e2e:
-    name: e2e focused cold-image gate
+    name: e2e (${{ matrix.shard }}/4)
     runs-on: ubuntu-latest
     # Keep the browser suite available for manual dispatches and any future
     # merge-group runs, but do not block ordinary pull requests while the merge
@@ -225,6 +225,8 @@ jobs:
     needs: privacy
     strategy:
       fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
 
     steps:
       - uses: actions/checkout@v7
@@ -349,7 +351,7 @@ jobs:
           # --kill-after sends SIGKILL 30s after the SIGINT if Playwright
           # ignores the interrupt, so the step can't hang past the cap.
           timeout --signal=INT --kill-after=30s 12m \
-            npx playwright test tests/viewed-image-layout.spec.mjs
+            npx playwright test --shard=${{ matrix.shard }}/4
           echo "exit=$?" >> "$GITHUB_OUTPUT"
           exit 0
         env:
@@ -358,6 +360,10 @@ jobs:
           MOBIUS_TEST_INTERNAL_API: http://localhost:8012
           MOBIUS_USER: admin
           MOBIUS_PASS: admin
+          # Native Playwright sharding normally balances by raw discovered test
+          # count. Exact bucket sizes keep the reviewed timing-balanced file
+          # groups intact while still using --shard=x/4.
+          PWTEST_SHARD_WEIGHTS: ${{ steps.shard-plan.outputs.weights }}
 
       - name: Container logs
         if: failure() || (steps.pw.outcome != 'skipped' && steps.pw.outputs.exit != '0')
