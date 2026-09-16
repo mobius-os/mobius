@@ -266,7 +266,9 @@ async def test_outbound_revoke_fails_closed_until_remote_confirms(
   })
   connect_outbound._atomic_json(
     connect_outbound._runner_config_path(profile_id),
-    {"url": "https://friend.example", "host_id": "h_remote", "token": "secret"},
+    {"connections": [{
+      "url": "https://friend.example", "host_id": "h_remote", "token": "secret",
+    }]},
   )
   def keep_access(_config):
     raise connect_outbound.OutboundConnectError("access was kept")
@@ -277,6 +279,63 @@ async def test_outbound_revoke_fails_closed_until_remote_confirms(
 
   with pytest.raises(connect_outbound.OutboundConnectError, match="kept"):
     await connect_outbound.revoke_profile(profile_id)
+  assert connect_outbound._profile_dir(profile_id).is_dir()
+  assert stopped == []
+
+
+def test_outbound_revoke_uses_single_connection_from_multi_config(
+  tmp_path, monkeypatch,
+):
+  profiles = tmp_path / "outbound"
+  monkeypatch.setattr(connect_outbound, "_profiles_dir", lambda: profiles)
+  profile_id = "o_0123456789abcdef"
+  connect_outbound._atomic_json(connect_outbound._meta_path(profile_id), {
+    "id": profile_id, "base_url": "https://friend.example", "status": "active",
+  })
+  connection = {
+    "url": "https://friend.example", "host_id": "h_remote", "token": "secret",
+  }
+  connect_outbound._atomic_json(
+    connect_outbound._runner_config_path(profile_id), {"connections": [connection]},
+  )
+  disconnected = []
+  monkeypatch.setattr(
+    connect_outbound, "_disconnect_remote", lambda config: disconnected.append(config),
+  )
+  monkeypatch.setattr(connect_outbound, "_stop_process_tree", lambda _id: None)
+
+  connect_outbound._revoke_profile(profile_id)
+
+  assert disconnected == [{**connection, "name": None}]
+  assert not connect_outbound._profile_dir(profile_id).exists()
+
+
+def test_outbound_revoke_keeps_ambiguous_multi_connection_credentials(
+  tmp_path, monkeypatch,
+):
+  profiles = tmp_path / "outbound"
+  monkeypatch.setattr(connect_outbound, "_profiles_dir", lambda: profiles)
+  profile_id = "o_0123456789abcdef"
+  connect_outbound._atomic_json(connect_outbound._meta_path(profile_id), {
+    "id": profile_id, "base_url": "https://friend.example", "status": "active",
+  })
+  connect_outbound._atomic_json(
+    connect_outbound._runner_config_path(profile_id), {"connections": [
+      {"url": "https://friend.example", "host_id": "h_remote", "token": "one"},
+      {"url": "https://other.example", "host_id": "h_other", "token": "two"},
+    ]},
+  )
+  monkeypatch.setattr(
+    connect_outbound,
+    "_disconnect_remote",
+    lambda _config: pytest.fail("ambiguous credentials must not be revoked"),
+  )
+  stopped = []
+  monkeypatch.setattr(connect_outbound, "_stop_process_tree", stopped.append)
+
+  with pytest.raises(connect_outbound.OutboundConnectError, match="kept"):
+    connect_outbound._revoke_profile(profile_id)
+
   assert connect_outbound._profile_dir(profile_id).is_dir()
   assert stopped == []
 
@@ -1385,12 +1444,19 @@ def test_runner_uses_standard_urllib_for_protocol_four_stream(monkeypatch):
   monkeypatch.setattr(
     connect_runner, "_uninstall_service", lambda stop_running: None,
   )
+  # The disconnected connection is the last one, so the whole service is torn
+  # down and the runner reports the daemon removed.
+  monkeypatch.setattr(
+    connect_runner, "_remove_connection", lambda url, host_id: 0,
+  )
   monkeypatch.setattr(
     connect_runner, "_post",
     lambda url, payload, token=None: posted.append((url, payload, token)),
   )
 
-  connect_runner._serve({"url": "https://mobius.test", "token": "secret"})
+  connect_runner._serve_connection(
+    {"url": "https://mobius.test", "host_id": "h_a", "token": "secret"},
+  )
 
   request, kwargs = opened[0]
   assert request.full_url.startswith(
@@ -1409,6 +1475,157 @@ def test_runner_uses_standard_urllib_for_protocol_four_stream(monkeypatch):
     },
     "secret",
   )]
+
+
+def test_connections_normalizes_legacy_and_multi_formats():
+  # A pre-multi-connection config kept one connection at the top level.
+  legacy = {"url": "https://a.test", "host_id": "h_a", "token": "ta"}
+  assert connect_runner._connections(legacy) == [
+    {"url": "https://a.test", "host_id": "h_a", "token": "ta", "name": None},
+  ]
+  # The multi-connection list is preserved; entries without creds are dropped.
+  multi = {
+    "connections": [
+      {"url": "https://a.test", "host_id": "h_a", "token": "ta", "name": "A"},
+      {"url": "https://b.test", "host_id": "h_b", "token": "tb"},
+      {"host_id": "h_c"},
+    ],
+  }
+  conns = connect_runner._connections(multi)
+  assert [c["url"] for c in conns] == ["https://a.test", "https://b.test"]
+  assert connect_runner._connections({}) == []
+
+
+def test_pair_is_additive_across_instances(tmp_path, monkeypatch):
+  monkeypatch.setattr(connect_runner, "CONFIG_DIR", str(tmp_path))
+  monkeypatch.setattr(
+    connect_runner, "CONFIG_PATH", str(tmp_path / "config.json"),
+  )
+  responses = {
+    "https://a.test/api/connect/pair": {
+      "host_id": "h_a", "token": "ta", "name": "A",
+    },
+    "https://b.test/api/connect/pair": {
+      "host_id": "h_b", "token": "tb", "name": "B",
+    },
+  }
+  monkeypatch.setattr(
+    connect_runner, "_post", lambda url, payload, token=None: responses[url],
+  )
+
+  # Pairing a second instance keeps the first: one machine, two Mobius.
+  connect_runner._pair("https://a.test", "AAAA-AAAA")
+  connect_runner._pair("https://b.test", "BBBB-BBBB")
+  assert sorted(c["host_id"] for c in connect_runner._connections()) == [
+    "h_a", "h_b",
+  ]
+
+  # Re-pairing the same instance refreshes its token in place, no duplicate.
+  responses["https://a.test/api/connect/pair"] = {
+    "host_id": "h_a", "token": "ta2", "name": "A",
+  }
+  connect_runner._pair("https://a.test", "AAAA-AAAA")
+  conns = connect_runner._connections()
+  assert len(conns) == 2
+  assert next(c for c in conns if c["host_id"] == "h_a")["token"] == "ta2"
+
+
+def test_connection_mutations_hold_a_cross_process_file_lock(tmp_path, monkeypatch):
+  monkeypatch.setattr(connect_runner, "CONFIG_DIR", str(tmp_path))
+  monkeypatch.setattr(
+    connect_runner, "CONFIG_PATH", str(tmp_path / "config.json"),
+  )
+  calls = []
+
+  class Fcntl:
+    LOCK_EX = "exclusive"
+    LOCK_UN = "unlock"
+
+    @staticmethod
+    def flock(fd, operation):
+      calls.append((fd, operation))
+
+  monkeypatch.setattr(connect_runner, "fcntl", Fcntl)
+  connect_runner._add_connection({
+    "url": "https://a.test", "host_id": "h_a", "token": "ta",
+  })
+  connect_runner._remove_connection("https://a.test", "h_a")
+
+  assert [operation for _fd, operation in calls] == [
+    Fcntl.LOCK_EX, Fcntl.LOCK_UN, Fcntl.LOCK_EX, Fcntl.LOCK_UN,
+  ]
+  assert (tmp_path / "config.json.lock").exists()
+
+
+def test_connection_mutations_lock_and_unlock_the_same_windows_byte(
+  tmp_path, monkeypatch,
+):
+  monkeypatch.setattr(connect_runner, "CONFIG_DIR", str(tmp_path))
+  monkeypatch.setattr(
+    connect_runner, "CONFIG_PATH", str(tmp_path / "config.json"),
+  )
+  calls = []
+
+  class Msvcrt:
+    LK_NBLCK = "lock"
+    LK_UNLCK = "unlock"
+
+    @staticmethod
+    def locking(fd, operation, length):
+      calls.append((fd, operation, length))
+
+  monkeypatch.setattr(connect_runner, "fcntl", None)
+  monkeypatch.setattr(connect_runner, "msvcrt", Msvcrt)
+  connect_runner._add_connection({
+    "url": "https://a.test", "host_id": "h_a", "token": "ta",
+  })
+
+  assert [call[1:] for call in calls] == [
+    (Msvcrt.LK_NBLCK, 1), (Msvcrt.LK_UNLCK, 1),
+  ]
+  assert (tmp_path / "config.json.lock").read_bytes() == b"\0"
+
+
+def test_runner_disconnect_scopes_to_one_of_several_connections(monkeypatch):
+  posted = []
+  uninstalled = []
+
+  class Stream:
+    def __enter__(self):
+      return self
+
+    def __exit__(self, *_args):
+      return False
+
+    def __iter__(self):
+      return iter([b'data: {"type":"disconnect","request_id":"z"}\n\n'])
+
+  monkeypatch.setattr(
+    connect_runner, "_open_url", lambda request, **kwargs: Stream(),
+  )
+  monkeypatch.setattr(
+    connect_runner, "_uninstall_service",
+    lambda stop_running: uninstalled.append(True),
+  )
+  # A second connection remains, so the shared service stays installed.
+  monkeypatch.setattr(
+    connect_runner, "_remove_connection", lambda url, host_id: 1,
+  )
+  monkeypatch.setattr(
+    connect_runner, "_post",
+    lambda url, payload, token=None: posted.append(payload),
+  )
+
+  connect_runner._serve_connection(
+    {"url": "https://a.test", "host_id": "h_a", "token": "ta"},
+  )
+  assert uninstalled == []
+  assert posted == [{
+    "request_id": "z",
+    "stdout": "Disconnected from https://a.test.",
+    "stderr": "",
+    "exit_code": 0,
+  }]
 
 
 def test_runner_refuses_expired_command_without_spawning(
@@ -1508,6 +1725,56 @@ def test_runner_ignores_duplicate_delivery_of_an_accepted_request(monkeypatch):
   assert spawned == [("do it once", None)]
   assert runner.active["request_id"] == event["request_id"]
   assert runner.pending_messages() == []
+
+
+def test_runner_refuses_parallel_commands_from_different_connections(monkeypatch):
+  gate = threading.Lock()
+  first = connect_runner._CommandRunner("https://a.test", "ta", gate)
+  second = connect_runner._CommandRunner("https://b.test", "tb", gate)
+  spawned = []
+  posted = []
+  monkeypatch.setattr(
+    connect_runner,
+    "_spawn_command",
+    lambda cmd, cwd: spawned.append((cmd, cwd)) or object(),
+  )
+  monkeypatch.setattr(
+    connect_runner,
+    "_post",
+    lambda _url, payload, token=None: posted.append((payload, token)),
+  )
+  monkeypatch.setattr(first, "_post_started", lambda _request_id: None)
+  monkeypatch.setattr(second, "_post_started", lambda _request_id: None)
+  monkeypatch.setattr(threading.Thread, "start", lambda self: None)
+
+  first.start({
+    "request_id": "1" * 16,
+    "cmd": "first",
+    "timeout": 30,
+    "not_after": time.time() + 10,
+  })
+  second.start({
+    "request_id": "2" * 16,
+    "cmd": "second",
+    "timeout": 30,
+    "not_after": time.time() + 10,
+  })
+
+  assert spawned == [("first", None)]
+  assert second.active is None
+  assert posted[-1][0]["outcome"] == "expired"
+
+  record = first.active
+  first._post_result(
+    record["request_id"], "done", "", 0, "completed", record=record,
+  )
+  second.start({
+    "request_id": "3" * 16,
+    "cmd": "third",
+    "timeout": 30,
+    "not_after": time.time() + 10,
+  })
+  assert spawned == [("first", None), ("third", None)]
 
 
 def test_runner_keeps_literal_script_off_the_process_command_line(monkeypatch):

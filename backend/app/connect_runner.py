@@ -20,6 +20,7 @@ Manage the installed service:
 import argparse
 import base64
 from collections import deque
+from contextlib import contextmanager
 import ipaddress
 import json
 import os
@@ -33,6 +34,15 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+
+try:
+    import fcntl
+except ImportError:  # Windows uses msvcrt below.
+    fcntl = None
+try:
+    import msvcrt
+except ImportError:  # POSIX uses fcntl above.
+    msvcrt = None
 
 CONFIG_DIR = os.path.expanduser("~/.mobius-connect")
 CONFIG_PATH = os.path.join(CONFIG_DIR, "config.json")
@@ -133,6 +143,94 @@ def _save_config(cfg):
     os.chmod(CONFIG_PATH, 0o600)
 
 
+# One machine can be paired to several Mobius instances at once. The config
+# holds a list of connections; each is an independent {url, host_id, token}
+# credential served by one shared runner process. A pre-multi-connection config
+# stored a single connection at the top level, so it is migrated on read.
+_config_lock = threading.Lock()
+
+
+@contextmanager
+def _config_mutation_lock():
+    """Serialize a config read-modify-write across runner processes."""
+    lock_path = CONFIG_PATH + ".lock"
+    os.makedirs(os.path.dirname(lock_path) or ".", exist_ok=True)
+    lock_fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    with _config_lock, os.fdopen(lock_fd, "r+", encoding="utf-8") as lock_file:
+        if fcntl is not None:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        elif msvcrt is not None:
+            lock_file.seek(0, os.SEEK_END)
+            if lock_file.tell() == 0:
+                lock_file.write("\x00")
+                lock_file.flush()
+            lock_file.seek(0)
+            while True:
+                try:
+                    msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+                    break
+                except OSError:
+                    time.sleep(0.05)
+        else:
+            raise RuntimeError("Connect cannot lock its configuration safely.")
+        try:
+            yield
+        finally:
+            if fcntl is not None:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+            else:
+                lock_file.seek(0)
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+
+
+def _connections(cfg=None):
+    """Normalize either config shape into a list of connection dicts."""
+    if cfg is None:
+        cfg = _load_config()
+    if not isinstance(cfg, dict):
+        return []
+    raw = cfg.get("connections")
+    if not isinstance(raw, list):
+        # Legacy single-connection config kept url/host_id/token at the top.
+        raw = [cfg] if cfg.get("token") and cfg.get("url") else []
+    conns = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        if not item.get("token") or not item.get("url"):
+            continue
+        conns.append({
+            "url": item["url"],
+            "host_id": item.get("host_id"),
+            "token": item["token"],
+            "name": item.get("name"),
+        })
+    return conns
+
+
+def _same_connection(a, b):
+    return a.get("url") == b.get("url") and a.get("host_id") == b.get("host_id")
+
+
+def _add_connection(conn):
+    """Add or refresh one connection without dropping the others."""
+    with _config_mutation_lock():
+        conns = _connections()
+        conns = [c for c in conns if not _same_connection(c, conn)]
+        conns.append(conn)
+        _save_config({"connections": conns})
+    return conn
+
+
+def _remove_connection(url, host_id):
+    """Drop one connection; return how many remain."""
+    target = {"url": url, "host_id": host_id}
+    with _config_mutation_lock():
+        conns = [c for c in _connections() if not _same_connection(c, target)]
+        _save_config({"connections": conns})
+    return len(conns)
+
+
 def _post(url, payload, token=None):
     data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(url, data=data, method="POST")
@@ -146,10 +244,17 @@ def _post(url, payload, token=None):
 def _pair(base, code):
     base = _validated_base_url(base)
     out = _post(base + "/api/connect/pair", {"code": code})
-    cfg = {"url": base, "host_id": out["host_id"], "token": out["token"]}
-    _save_config(cfg)
+    conn = {
+        "url": base,
+        "host_id": out["host_id"],
+        "token": out["token"],
+        "name": out.get("name"),
+    }
+    # Additive: pairing to another instance keeps the machine's existing
+    # connections, so one runner can serve several Mobius instances at once.
+    _add_connection(conn)
     print("Paired as '%s'." % out.get("name", "machine"))
-    return cfg
+    return conn
 
 
 def _run(cmd):
@@ -252,8 +357,8 @@ def _install_background(py):
     return True
 
 
-def _install_service(cfg):
-    _self_download(cfg["url"])
+def _install_service(base):
+    _self_download(base)
     py = sys.executable or "python3"
     system = platform.system()
     if system == "Darwin":
@@ -449,9 +554,13 @@ def _cap_output(text):
 class _CommandRunner:
     """Own one subprocess and retain lifecycle messages across reconnects."""
 
-    def __init__(self, base, token):
+    def __init__(self, base, token, command_gate=None):
         self.base = base
         self.token = token
+        # Several Mobius connections still represent one physical machine.
+        # Share this gate across their runners so commands cannot overlap just
+        # because they arrived from different instances.
+        self.command_gate = command_gate or threading.Lock()
         self.lock = threading.Lock()
         self.flush_lock = threading.Lock()
         self.active = None
@@ -547,10 +656,14 @@ class _CommandRunner:
         # Releasing the active slot and retaining its result must be one
         # atomic state transition. Otherwise a reconnect can observe neither
         # and tell the server that successfully completed work was lost.
+        release_gate = False
         with self.lock:
             self.outbox.append(message)
             if record is not None and self.active is record:
                 self.active = None
+                release_gate = bool(record.get("gate_claimed"))
+        if release_gate:
+            self.command_gate.release()
         self.flush_pending_results()
 
     def _post_started(self, request_id):
@@ -588,13 +701,15 @@ class _CommandRunner:
             "reason": None,
             "timeout": max(1, int(evt.get("timeout", 60))),
             "input": None,
+            "gate_claimed": False,
         }
-        if refused:
+        if refused or not self.command_gate.acquire(blocking=False):
             self._post_result(
                 request_id, "", "runner refused a parallel command", 125,
                 "expired",
             )
             return
+        record["gate_claimed"] = True
         with self.lock:
             self.active = record
 
@@ -685,12 +800,12 @@ class _CommandRunner:
         return True
 
 
-def _serve(cfg):
-    base = _validated_base_url(cfg["url"])
-    token = cfg["token"]
+def _serve_connection(conn, command_gate=None):
+    base = _validated_base_url(conn["url"])
+    token = conn["token"]
     ctx = ssl.create_default_context()
     plat = "%s %s" % (platform.system(), platform.release())
-    commands = _CommandRunner(base, token)
+    commands = _CommandRunner(base, token, command_gate)
     backoff = 1
     print("Connecting to %s ..." % base)
     while True:
@@ -747,11 +862,21 @@ def _serve(cfg):
                         continue
                     if evt.get("type") == "disconnect":
                         commands.cancel(None, "disconnect")
+                        # Drop only this instance's connection. The shared
+                        # runner keeps serving any others; it uninstalls the
+                        # whole service only when the last connection is gone.
                         try:
-                            _uninstall_service(stop_running=False)
+                            remaining = _remove_connection(
+                                conn.get("url"), conn.get("host_id"),
+                            )
+                            if remaining == 0:
+                                _uninstall_service(stop_running=False)
+                                stdout = "Connect daemon removed."
+                            else:
+                                stdout = "Disconnected from %s." % base
                             payload = {
                                 "request_id": evt.get("request_id"),
-                                "stdout": "Connect daemon removed.",
+                                "stdout": stdout,
                                 "stderr": "", "exit_code": 0,
                             }
                         except Exception as exc:  # local cleanup failure
@@ -793,6 +918,41 @@ def _serve(cfg):
         backoff = min(backoff * 2, 30)
 
 
+def _serve_connection_safe(conn, command_gate):
+    """Run one connection's loop so its failure never stops the others."""
+    try:
+        _serve_connection(conn, command_gate)
+    except Exception as exc:  # noqa: BLE001 - one connection must not crash all
+        print("connection to %s stopped: %s" % (conn.get("url"), exc))
+
+
+def _serve_all():
+    """Serve every paired connection from this one runner process."""
+    conns = _connections()
+    if not conns:
+        print("Not paired. Run with --pair CODE --url URL first.")
+        sys.exit(2)
+    command_gate = threading.Lock()
+    if len(conns) == 1:
+        _serve_connection(conns[0], command_gate)
+        return
+    print("Serving %d Mobius connections." % len(conns))
+    threads = []
+    for conn in conns:
+        thread = threading.Thread(
+            target=_serve_connection_safe, args=(conn, command_gate), daemon=True,
+            name="mobius-connect-%s" % (conn.get("host_id") or "unknown"),
+        )
+        thread.start()
+        threads.append(thread)
+    try:
+        for thread in threads:
+            while thread.is_alive():
+                thread.join(timeout=1)
+    except KeyboardInterrupt:
+        print("\nStopped.")
+
+
 def main():
     ap = argparse.ArgumentParser(description="Mobius Connect runner")
     ap.add_argument("--pair", help="one-time pairing code from the Connect app")
@@ -808,30 +968,33 @@ def main():
     args = ap.parse_args()
 
     if args.uninstall:
-        cfg = _load_config()
-        _revoke_server(cfg)
+        # Uninstalling the machine's runner revokes every connection it holds.
+        for conn in _connections():
+            _revoke_server(conn)
         _uninstall_service()
         return
 
-    cfg = _load_config()
+    conns = _connections()
     try:
         if args.pair:
-            base = args.url or cfg.get("url") or ""
+            base = args.url or (conns[0]["url"] if conns else "")
             if not base:
                 print("Missing --url")
                 sys.exit(2)
-            cfg = _pair(base, args.pair.strip())
-        elif cfg.get("url"):
-            cfg["url"] = _validated_base_url(cfg["url"])
+            install_base = _pair(base, args.pair.strip())["url"]
+        else:
+            if not conns:
+                print("Not paired. Run with --pair CODE --url URL first.")
+                sys.exit(2)
+            install_base = _validated_base_url(conns[0]["url"])
     except ValueError as exc:
         print(str(exc))
         sys.exit(2)
-    if not cfg.get("token"):
-        print("Not paired. Run with --pair CODE --url URL first.")
-        sys.exit(2)
 
     if args.install:
-        _install_service(cfg)
+        # One shared service serves all connections; installing it again after
+        # pairing another instance simply refreshes the runner and restarts it.
+        _install_service(install_base)
         return
 
     if args.background_service:
@@ -839,7 +1002,7 @@ def main():
         with open(PID_PATH, "w", encoding="utf-8") as fh:
             fh.write(str(os.getpid()))
     try:
-        _serve(cfg)
+        _serve_all()
     finally:
         if args.background_service:
             _remove_file(PID_PATH)
