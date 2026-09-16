@@ -24,6 +24,7 @@
  */
 import { test, expect } from '@playwright/test'
 import { attachCleanup, createTaggedChat } from './_chatTracker.mjs'
+import { createMockChatRuntime } from './_mockChatRuntime.mjs'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
 
@@ -79,6 +80,17 @@ async function tapSend(page, text) {
   await surface.getByRole('button', { name: 'Send', exact: true }).click()
 }
 
+async function installRuntimeRoute(page, runtime) {
+  await page.route(/\/api\/chats\/[0-9a-f-]+\/runtime$/, route => {
+    if (route.request().method() !== 'GET') return route.continue()
+    return route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify(runtime.snapshot()),
+    })
+  })
+}
+
 // The real service worker claims the page ~1s after load; from then on its
 // fetch() handler bypasses page.route, so the mocked /messages + /stream
 // contracts silently fall through to the real backend and the mock's steer
@@ -94,6 +106,8 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
     // the queued message's trimmed content (single message → no join).
     const QUEUE_TS = 777001
     const QUEUED_TEXT = 'queued message to steer'
+    const runtime = createMockChatRuntime()
+    await installRuntimeRoute(page, runtime)
     let releaseSteer
     const steerGate = new Promise(resolve => { releaseSteer = resolve })
 
@@ -111,6 +125,7 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
       // {status:"steered"} and the remaining (now empty) server queue.
       if (body.force_steer) {
         await steerGate
+        runtime.update({ running: true, pending_messages: [] })
         return route.fulfill({
           status: 202,
           contentType: 'application/json',
@@ -125,6 +140,7 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
       // First send (fresh turn): 202 starts the turn; the held-open
       // /stream below keeps sending=true.
       if (body.content === 'first message') {
+        runtime.update({ running: true, pending_messages: [] })
         return route.fulfill({
           status: 202,
           contentType: 'application/json',
@@ -140,6 +156,10 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
       // Second send while streaming: the queue path. Return a SERVER ts so
       // confirmQueued clears the in-flight flag — only then is the entry
       // steer-eligible (canSteer requires a confirmed server ts).
+      const pendingMessage = {
+        role: 'user', content: body.content, ts: QUEUE_TS, cid: body.cid,
+      }
+      runtime.update({ running: true, pending_messages: [pendingMessage] })
       return route.fulfill({
         status: 202,
         contentType: 'application/json',
@@ -226,6 +246,8 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
   test('Ctrl+Enter sends one direct-steer request and renders it inline, never queued', async ({ page }) => {
     const STEER_TEXT = 'change course immediately'
     const messagePosts = []
+    const runtime = createMockChatRuntime()
+    await installRuntimeRoute(page, runtime)
     let releaseDirectSteer
     const directSteerGate = new Promise(resolve => { releaseDirectSteer = resolve })
 
@@ -250,6 +272,7 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
         })
       }
       if (body.force_steer) {
+        runtime.update({ running: true, pending_messages: [] })
         return route.fulfill({
           status: 202,
           contentType: 'application/json',
@@ -261,6 +284,7 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
         })
       }
       if (body.content === 'first message') {
+        runtime.update({ running: true, pending_messages: [] })
         return route.fulfill({
           status: 202,
           contentType: 'application/json',
@@ -345,6 +369,8 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
     const TEXT2 = 'second queued'
 
     const messagePosts = []
+    const runtime = createMockChatRuntime()
+    await installRuntimeRoute(page, runtime)
     // The queueOnly POSTs land in order, so hand back TS1 then TS2.
     let queueCount = 0
 
@@ -355,6 +381,7 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
       messagePosts.push(body)
 
       if (body.force_steer) {
+        runtime.update({ running: true, pending_messages: [] })
         return route.fulfill({
           status: 202,
           contentType: 'application/json',
@@ -362,6 +389,7 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
         })
       }
       if (body.content === 'first message') {
+        runtime.update({ running: true, pending_messages: [] })
         return route.fulfill({
           status: 202,
           contentType: 'application/json',
@@ -376,6 +404,13 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
       const ts = queueCount === 0 ? TS1 : TS2
       const position = queueCount + 1
       queueCount++
+      const pendingMessages = messagePosts
+        .filter(post => post.content === TEXT1 || post.content === TEXT2)
+        .map((post, index) => ({
+          role: 'user', content: post.content,
+          ts: index === 0 ? TS1 : TS2, cid: post.cid,
+        }))
+      runtime.update({ running: true, pending_messages: pendingMessages })
       return route.fulfill({
         status: 202,
         contentType: 'application/json',
@@ -426,6 +461,8 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
     const TEXT2 = 'leave this message queued'
     const messagePosts = []
     let queueCount = 0
+    const runtime = createMockChatRuntime()
+    await installRuntimeRoute(page, runtime)
 
     await page.route(/\/api\/chats\/[0-9a-f-]+\/messages$/, async (route) => {
       let body = {}
@@ -436,23 +473,23 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
         const siblingPost = messagePosts.find(post => (
           !post.force_steer && post.content === TEXT2
         ))
+        const sibling = {
+          role: 'user', content: TEXT2, ts: 990002, cid: siblingPost.cid,
+        }
+        runtime.update({ running: true, pending_messages: [sibling] })
         return route.fulfill({
           status: 202,
           contentType: 'application/json',
           body: JSON.stringify({
             status: 'steered',
             chat_id: 'mock',
-            pending_messages: [{
-              role: 'user',
-              content: TEXT2,
-              ts: 990002,
-              cid: siblingPost.cid,
-            }],
+            pending_messages: [sibling],
           }),
         })
       }
 
       if (body.content === 'first message') {
+        runtime.update({ running: true, pending_messages: [] })
         return route.fulfill({
           status: 202,
           contentType: 'application/json',
@@ -466,6 +503,13 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
       }
 
       queueCount += 1
+      const pendingMessages = messagePosts
+        .filter(post => post.content === TEXT1 || post.content === TEXT2)
+        .map((post, index) => ({
+          role: 'user', content: post.content,
+          ts: 990001 + index, cid: post.cid,
+        }))
+      runtime.update({ running: true, pending_messages: pendingMessages })
       return route.fulfill({
         status: 202,
         contentType: 'application/json',
@@ -493,11 +537,11 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
     await sendMessage(page, TEXT1)
     await sendMessage(page, TEXT2)
 
-    const rowSteerButtons = page.getByRole('button', {
-      name: 'Send this queued message now',
-    })
+    const rowSteerButtons = page.getByRole('button', { name: 'Send this queued message now' })
     await expect(rowSteerButtons).toHaveCount(2, { timeout: 5000 })
-    await rowSteerButtons.first().click()
+    const firstQueuedRow = page.locator('[data-chat-surface="painted"] .queued__row')
+      .filter({ hasText: TEXT1 })
+    await firstQueuedRow.getByRole('button', { name: 'Send this queued message now' }).click()
 
     await expect.poll(
       () => messagePosts.filter(post => post.force_steer).length,
@@ -778,6 +822,8 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
     let durableMessages = []
     let durablePending = []
     let durableRunning = false
+    const runtime = createMockChatRuntime()
+    await installRuntimeRoute(page, runtime)
 
     await page.route(/\/api\/chats\/[0-9a-f-]+\/messages$/, async (route) => {
       const req = route.request()
@@ -786,6 +832,7 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
       messagePosts.push(body)
       if (body.force_steer) {
         durablePending = []
+        runtime.update({ running: true, pending_messages: [] })
         return route.fulfill({
           status: 202,
           contentType: 'application/json',
@@ -800,6 +847,7 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
         }
         durableMessages = [message]
         durableRunning = true
+        runtime.update({ running: true, pending_messages: [] })
         return route.fulfill({
           status: 202,
           contentType: 'application/json',
@@ -813,6 +861,7 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
         role: 'user', content: body.content, ts: QUEUE_TS, cid: body.cid,
       }
       durablePending = [pendingMessage]
+      runtime.update({ running: true, pending_messages: durablePending })
       return route.fulfill({
         status: 202,
         contentType: 'application/json',
@@ -889,13 +938,11 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
       return route.fulfill({
         status: 200,
         contentType: 'application/json',
-        body: JSON.stringify({
+        body: JSON.stringify(runtime.detail({
           messages: durableMessages,
           total: durableMessages.length,
           offset: 0,
-          running: durableRunning,
-          pending_messages: durablePending,
-        }),
+        })),
       })
     })
     await page.route(/\/api\/chats(?:\?.*)?$/, route => {

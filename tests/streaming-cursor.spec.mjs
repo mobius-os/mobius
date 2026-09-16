@@ -4,6 +4,7 @@
  */
 import { test, expect } from '@playwright/test'
 import { createTaggedChat, attachCleanup } from './_chatTracker.mjs'
+import { createMockChatRuntime } from './_mockChatRuntime.mjs'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
 
@@ -70,17 +71,13 @@ test('terminal cursor removal keeps followed geometry unchanged', async ({ page 
     ts: 1700000500000,
     cid: 'cursor-user',
   }
+  const runtime = createMockChatRuntime({ running: true })
   await page.route(new RegExp(`/api/chats/${chat.id}/runtime(?:\\?.*)?$`), route => {
     if (route.request().method() !== 'GET') return route.continue()
     return route.fulfill({
       status: 200,
       contentType: 'application/json',
-      body: JSON.stringify({
-        running: true,
-        active_goal_objective: null,
-        pending_messages: [],
-        pending_question_id: null,
-      }),
+      body: JSON.stringify(runtime.snapshot()),
     })
   })
   await page.route(new RegExp(`/api/chats/${chat.id}(?:\\?.*)?$`), route => {
@@ -88,16 +85,13 @@ test('terminal cursor removal keeps followed geometry unchanged', async ({ page 
     return route.fulfill({
       status: 200,
       contentType: 'application/json',
-      body: JSON.stringify({
+      body: JSON.stringify(runtime.detail({
         id: chat.id,
         messages: [userMessage],
         total: 1,
         offset: 0,
-        running: true,
-        pending_messages: [],
-        pending_question_id: null,
         provider: 'claude',
-      }),
+      })),
     })
   })
   await page.goto(`${BASE}/shell/?chat=${encodeURIComponent(chat.id)}`, {

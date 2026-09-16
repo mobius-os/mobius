@@ -13,6 +13,7 @@
 import { test, expect } from '@playwright/test'
 import { streamSnapshotKey } from '../frontend/src/components/ChatView/streamSnapshotCache.js'
 import { createTaggedChat, attachCleanup } from './_chatTracker.mjs'
+import { createMockChatRuntime } from './_mockChatRuntime.mjs'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
 
@@ -173,6 +174,16 @@ test.describe('Stream reconnection', () => {
   test('2. Terminal 204 exits thinking and refreshes persisted messages', async ({ page }) => {
     let streamRequestCount = 0
     let refreshReady = false
+    const runtime = createMockChatRuntime()
+
+    await page.route(/\/api\/chats\/[0-9a-f-]+\/runtime$/, route => {
+      if (route.request().method() !== 'GET') { route.continue(); return }
+      route.fulfill({
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(runtime.snapshot()),
+      })
+    })
 
     await page.route(/\/api\/chats\/[0-9a-f-]+\?limit=20&compact=1$/, route => {
       if (!refreshReady || route.request().method() !== 'GET') {
@@ -182,22 +193,24 @@ test.describe('Stream reconnection', () => {
       route.fulfill({
         status: 200,
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+        body: JSON.stringify(runtime.detail({
           messages: [
             { role: 'user', content: 'expired broadcast', ts: Date.now() },
             { role: 'assistant', content: 'final response from db' },
           ],
           total: 2,
           offset: 0,
-        }),
+        })),
       })
     })
 
     await page.route(/\/api\/chats\/[0-9a-f-]+\/stream$/, async route => {
       streamRequestCount++
+      runtime.update({ running: true })
       refreshReady = true
       // Wait past useStreamConnection's just-sent 204 retry window.
       await new Promise(resolve => setTimeout(resolve, 1700))
+      runtime.update({ running: false })
       await route.fulfill({ status: 204, body: '' })
     })
 
@@ -614,7 +627,9 @@ test.describe('Stream reconnection', () => {
 
     await page.waitForFunction(() => window.__streamFetchCount === 2)
     await expect(page.locator('[data-chat-surface="painted"] .connection-status--reattach')).toBeVisible({
-      timeout: 3000,
+      // Presentation intentionally suppresses transient notices for 2.5s;
+      // leave scheduling headroom beyond that product-owned delay.
+      timeout: 6000,
     })
 
     await page.evaluate(() => window.__releaseSlowReattach())
@@ -752,6 +767,7 @@ test.describe('Stream reconnection', () => {
     // real network race or this simulation, because both deliver a resolved
     // 204 Response to the same awaited fetch while abortRef points elsewhere.
     let messagesPostCount = 0
+    const runtime = createMockChatRuntime()
 
     // Install the fetch shim before any app code runs. It captures the
     // first explicitly armed /stream fetch and parks it (a held Response).
@@ -816,15 +832,29 @@ test.describe('Stream reconnection', () => {
     // that incidental hydration traffic cannot consume the held response.
     await page.evaluate(() => window.__armStaleStream())
 
+    await page.route(/\/api\/chats\/[0-9a-f-]+\/runtime$/, route => {
+      if (route.request().method() !== 'GET') { route.continue(); return }
+      route.fulfill({
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(runtime.snapshot()),
+      })
+    })
+
     // Cancel-queued (DELETE /pending/{cid}) → 200 with an empty queue, so the
     // tray-X clear below resolves cleanly without an error-path refetch.
-    await page.route(/\/api\/chats\/[0-9a-f-]+\/pending\/[^/]+$/, route =>
-      route.fulfill({
+    await page.route(/\/api\/chats\/[0-9a-f-]+\/pending\/[^/]+$/, route => {
+      runtime.update({ pending_messages: [] })
+      return route.fulfill({
         status: 200,
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ pending_messages: [] }),
       })
-    )
+    })
+    await page.route('**/api/chat/stop', route => {
+      runtime.update({ running: false, pending_messages: [] })
+      return route.fulfill({ status: 200, body: '{}' })
+    })
 
     // POST /messages override — registered AFTER setupChat so it wins
     // (Playwright matches most-recently-added first; setupChat's bare-{}
@@ -837,6 +867,13 @@ test.describe('Stream reconnection', () => {
       messagesPostCount++
       if (messagesPostCount === 2) {
         const ts = Date.now()
+        const pendingMessage = {
+          role: 'user',
+          content: body.content,
+          ts,
+          cid: body.cid,
+        }
+        runtime.update({ running: true, pending_messages: [pendingMessage] })
         route.fulfill({
           status: 202,
           headers: { 'Content-Type': 'application/json' },
@@ -844,16 +881,12 @@ test.describe('Stream reconnection', () => {
             status: 'queued',
             ts,
             position: 1,
-            pending_message: {
-              role: 'user',
-              content: body.content,
-              ts,
-              cid: body.cid,
-            },
+            pending_message: pendingMessage,
           }),
         })
         return
       }
+      runtime.update({ running: true, pending_messages: [] })
       route.fulfill({
         status: 202,
         headers: { 'Content-Type': 'application/json' },
@@ -1001,14 +1034,14 @@ test.describe('Stream reconnection', () => {
         output: 'source-rich output that is still only an older prefix',
       },
     ]
-    const runtimeState = {
+    const runtime = createMockChatRuntime({
       running: true,
       active_goal_objective: GOAL,
       pending_messages: [],
       pending_question_id: QUESTION_ID,
       updated_at: updatedAt,
-    }
-    const detail = {
+    })
+    const detail = runtime.detail({
       id: CHAT_ID,
       title: 'frozen chat',
       messages: [
@@ -1035,8 +1068,7 @@ test.describe('Stream reconnection', () => {
       offset: 0,
       session_id: 'sess-1',
       provider: 'claude',
-      ...runtimeState,
-    }
+    })
     await page.route(/\/api\/chats\/[0-9a-f-]+\?limit=(?:1|20&compact=1)$/, route => {
       if (route.request().method() !== 'GET') { route.continue(); return }
       route.fulfill({
@@ -1050,7 +1082,7 @@ test.describe('Stream reconnection', () => {
       route.fulfill({
         status: 200,
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(runtimeState),
+        body: JSON.stringify(runtime.snapshot()),
       })
     })
 
