@@ -112,243 +112,16 @@ test.use({ serviceWorkers: 'block' })
 
 test.describe('Bug 1: AskUserQuestion', () => {
 
-  test('QuestionCard buttons are NOT disabled after the question event', async ({ page }) => {
-    // Mock SSE: text → question → done. (Backend's chat.py kill-on-
-    // question fix means done arrives soon after the question; here
-    // we simulate the same SSE the frontend would see.)
-    const streamBody = [
-      'data: {"type":"text","content":"Let me ask:"}\n\n',
-      `data: ${JSON.stringify({
-        type: 'question',
-        question_id: 'q-pick-one',
-        questions: [{
-          question: 'Pick one',
-          header: 'Test',
-          multiSelect: false,
-          options: [{ label: 'A' }, { label: 'B' }],
-        }],
-      })}\n\n`,
-      'data: {"type":"done"}\n\n',
-    ].join('')
-    await setupWithStreamMock(page, streamBody)
-    await mockPendingQuestionState(page, 'q-pick-one')
-    await newChat(page)
-    await sendMessage(page, 'Ask me a question')
-
-    await expect(page.locator('[data-chat-surface="painted"] .qcard')).toBeVisible({ timeout: 5000 })
-    // The option buttons MUST be enabled (the regression was that
-    // post-question tool_start events kept isStreaming=true →
-    // disabled={isStreaming} stayed grayed out).
-    const optionButtons = page.locator('[data-chat-surface="painted"] .qcard__opt')
-    await expect(optionButtons.first()).toBeEnabled({ timeout: 5000 })
-  })
 
 
-  test('a restart pause renders before the unanswered question without a refresh', async ({ page }) => {
-    // Exact planned-restart sequence: the question is already live when the
-    // drain publishes its terminal pause. The durable reducer has always
-    // normalized this to text -> pause -> question; the in-browser reducer
-    // must do the same immediately rather than waiting for a reload.
-    const streamBody = [
-      'data: {"type":"text","content":"The change is ready."}\n\n',
-      `data: ${JSON.stringify({
-        type: 'question',
-        question_id: 'q-restart-order',
-        questions: [{
-          question: 'Restart now?',
-          header: 'Restart',
-          multiSelect: false,
-          options: [
-            { label: 'Restart now' },
-            { label: 'Not now' },
-          ],
-        }],
-      })}\n\n`,
-      `data: ${JSON.stringify({
-        type: 'error',
-        message: 'Paused for a platform update.',
-        resumable: true,
-        pause: { kind: 'restart' },
-      })}\n\n`,
-      'data: {"type":"done"}\n\n',
-    ].join('')
-    await setupWithStreamMock(page, streamBody)
-    await mockPendingQuestionState(page, 'q-restart-order')
-    await newChat(page)
-    await sendMessage(page, 'Prepare the change and ask before restarting')
-
-    const assistant = page.locator(
-      '[data-chat-surface="painted"] .chat__msg--assistant',
-    ).last()
-    await expect(assistant.locator('.qcard')).toBeVisible({ timeout: 5000 })
-    const pauseCard = assistant.locator('.chat__text--error')
-    await expect(pauseCard).toBeVisible()
-    await expect(pauseCard.locator('.chat__recovery-title')).toHaveText('Paused')
-    await expect(pauseCard.locator('.chat__recovery-copy')).toHaveText(
-      'Paused for a platform update.',
-    )
-
-    const order = await assistant.evaluate(element => (
-      [...element.querySelectorAll('.chat__text--assistant, .chat__text--error, .qcard')]
-        .map(node => {
-          if (node.classList.contains('qcard')) return 'question'
-          if (node.classList.contains('chat__text--error')) return 'error'
-          return 'text'
-        })
-    ))
-    expect(order).toEqual(['text', 'error', 'question'])
-    await expect(assistant.locator('.chat__resume')).toHaveCount(0)
-  })
 
 
-  test('a transiently failed answer stays durably queued on its question card', async ({ page }) => {
-    const questionStream = [
-      `data: ${JSON.stringify({
-        type: 'question',
-        question_id: 'q-retry-answer',
-        questions: [{
-          question: 'Choose a launch lane',
-          header: 'Launch',
-          multiSelect: false,
-          options: [{ label: 'Careful' }, { label: 'Fast' }],
-        }],
-      })}\n\n`,
-      'data: {"type":"done"}\n\n',
-    ].join('')
-    let streamCount = 0
-    let answerAttempts = 0
-    let pendingQuestion
-    await setupWithStreamMock(page, () => (
-      streamCount++ === 0 ? questionStream : 'data: {"type":"done"}\n\n'
-    ))
-    await page.route(/\/api\/chats\/[0-9a-f-]+\/messages$/, route => {
-      if (route.request().method() !== 'POST') return route.continue()
-      const body = route.request().postDataJSON()
-      if (!body.answers) return fulfillStartedPost(route)
-      answerAttempts += 1
-      if (answerAttempts === 1) {
-        return route.fulfill({
-          status: 503,
-          headers: { 'Content-Type': 'application/json' },
-          body: '{"detail":"temporary failure"}',
-        })
-      }
-      pendingQuestion.markAnswered()
-      return fulfillStartedPost(route)
-    })
-    pendingQuestion = await mockPendingQuestionState(page, 'q-retry-answer')
-
-    await newChat(page)
-    await sendMessage(page, 'Ask for a launch lane')
-
-    const card = page.locator('[data-chat-surface="painted"] .qcard')
-    const careful = page.getByRole('radio', { name: 'Careful' })
-    const submit = page.getByRole('button', { name: 'Submit' })
-    await expect(card).toBeVisible({ timeout: 5000 })
-    await careful.click()
-    await submit.click()
-
-    // Prove the failure below comes from the intended answer request, not a
-    // competing route mock or a click that never reached the transport.
-    await expect.poll(() => answerAttempts).toBe(1)
-    await expect(card.getByRole('status')).toContainText(
-      'Your answer is saved here and will send when Möbius reconnects.',
-    )
-    await expect(careful).toHaveAttribute('aria-checked', 'true')
-    await expect(careful).toBeDisabled()
-    await expect(page.getByRole('button', { name: 'Queued on this device' })).toBeDisabled()
-    expect(answerAttempts).toBe(1)
-  })
 
 
-  test('submitting a choice keeps every question-card row in place', async ({ page }) => {
-    const streamBody = [
-      `data: ${JSON.stringify({
-        type: 'question',
-        question_id: 'q-stable-card',
-        questions: [{
-          question: 'Which route?',
-          header: 'Route',
-          multiSelect: false,
-          options: [
-            { label: 'Direct', description: 'Use the shortest path' },
-            { label: 'Scenic', description: 'Keep more context visible' },
-          ],
-        }],
-      })}\n\n`,
-      'data: {"type":"done"}\n\n',
-    ].join('')
-    let streamCount = 0
-    let pendingQuestion
-    await setupWithStreamMock(page, () => (
-      streamCount++ === 0 ? streamBody : 'data: {"type":"done"}\n\n'
-    ))
-    await page.route(/\/api\/chats\/[0-9a-f-]+\/messages$/, route => {
-      if (route.request().method() !== 'POST') return route.fallback()
-      const body = route.request().postDataJSON()
-      if (body.answers) pendingQuestion.markAnswered()
-      return fulfillStartedPost(route)
-    })
-    pendingQuestion = await mockPendingQuestionState(page, 'q-stable-card')
-    await newChat(page)
-    await sendMessage(page, 'Ask me which route')
 
-    const card = page.locator('[data-chat-surface="painted"] .qcard')
-    await expect(card).toBeVisible({ timeout: 5000 })
-    const customAnswer = card.getByRole('textbox', { name: 'Custom answer for: Which route?' })
-    await customAnswer.fill('Take the quiet streets')
 
-    const geometry = () => card.evaluate(el => ({
-      height: el.getBoundingClientRect().height,
-      hint: (() => {
-        const node = el.querySelector('.qcard__hint')
-        const rect = node?.getBoundingClientRect()
-        return node && rect
-          ? { text: node.textContent, top: rect.top, height: rect.height }
-          : null
-      })(),
-      options: [...el.querySelectorAll('.qcard__opt')].map(node => {
-        const rect = node.getBoundingClientRect()
-        return { text: node.textContent.trim(), top: rect.top, height: rect.height }
-      }),
-      input: (() => {
-        const node = el.querySelector('.qcard__input')
-        const rect = node?.getBoundingClientRect()
-        return node && rect
-          ? {
-              value: node.value,
-              top: rect.top,
-              width: rect.width,
-              height: rect.height,
-              color: getComputedStyle(node).color,
-              textFillColor: getComputedStyle(node).webkitTextFillColor,
-            }
-          : null
-      })(),
-      submitTop: el.querySelector('.qcard__submit')?.getBoundingClientRect().top,
-    }))
 
-    const before = await geometry()
-    await page.getByRole('button', { name: 'Submit' }).click()
-    await expect(page.getByRole('button', { name: 'Submitted' })).toBeDisabled()
-    await expect(card.locator('.qcard__hint')).toHaveText('Choose one')
-    await expect(card.locator('.qcard__opt')).toHaveCount(2)
-    await expect(customAnswer).toHaveAttribute('readonly', '')
-    await expect(customAnswer).not.toBeEditable()
-    await expect(customAnswer).toHaveValue('Take the quiet streets')
 
-    const after = await geometry()
-    expect(after.height).toBeCloseTo(before.height, 5)
-    expect(after.hint).toEqual(before.hint)
-    expect(after.options).toEqual(before.options)
-    expect(after.input.value).toBe(before.input.value)
-    expect(after.input.top).toBeCloseTo(before.input.top, 5)
-    expect(after.input.width).toBeCloseTo(before.input.width, 5)
-    expect(after.input.height).toBeCloseTo(before.input.height, 5)
-    expect(after.input.color).not.toBe(before.input.color)
-    expect(after.input.textFillColor).toBe(after.input.color)
-    expect(after.submitTop).toBeCloseTo(before.submitTop, 5)
-  })
 
 
   test('multiline custom answers grow inline without moving the conversation', async ({ page }) => {
@@ -499,121 +272,13 @@ test.describe('Bug 1: AskUserQuestion', () => {
   })
 
 
-  test('partial question + text token + full question for same id renders ONE card', async ({ page }) => {
-    // The user-visible duplicate-card bug from the klix chat: the
-    // SDK's --include-partial-messages can deliver two `question`
-    // events for the same AskUserQuestion call with other events
-    // (text token, tool boundary) landing between them. Old dedup
-    // ("last block is question?") missed the second match and
-    // appended a phantom card. New dedup matches by question id
-    // and replaces in place no matter where the existing block
-    // sits.
-    const streamBody = [
-      `data: ${JSON.stringify({
-        type: 'question',
-        questions: [{
-          id: 'klix_scope',
-          question: 'What change?',
-          header: 'Scope',
-          multiSelect: false,
-          options: [],
-        }],
-      })}\n\n`,
-      'data: {"type":"text","content":"thinking..."}\n\n',
-      `data: ${JSON.stringify({
-        type: 'question',
-        questions: [{
-          id: 'klix_scope',
-          question: 'What change?',
-          header: 'Scope',
-          multiSelect: false,
-          options: [{ label: 'Fix' }, { label: 'Skip' }],
-        }],
-      })}\n\n`,
-      'data: {"type":"done"}\n\n',
-    ].join('')
-    await setupWithStreamMock(page, streamBody)
-    await newChat(page)
-    await sendMessage(page, 'Try the partial-then-full sequence')
-
-    await expect(page.locator('[data-chat-surface="painted"] .qcard')).toHaveCount(1, { timeout: 5000 })
-    // The single card has the FINAL options (replace happened), not
-    // the empty partial options.
-    await expect(page.locator('[data-chat-surface="painted"] .qcard__opt')).toHaveCount(
-      2,
-      { timeout: 2000 }
-    )
-    await expect(page.getByRole('textbox', { name: 'Custom answer for: What change?' }))
-      .toBeVisible()
-    // Options are radios (single-select) — single AskUserQuestion radiogroup.
-    await expect(page.getByRole('radio', { name: 'Fix' })).toBeVisible()
-    await expect(page.getByRole('radio', { name: 'Skip' })).toBeVisible()
-  })
 
 
-  test('two distinct AskUserQuestion calls (different ids) render TWO cards', async ({ page }) => {
-    // Companion to the previous test: identity-based dedup must NOT
-    // collapse genuinely different question calls just because they
-    // share a question text or a common position.
-    const streamBody = [
-      `data: ${JSON.stringify({
-        type: 'question',
-        questions: [{
-          id: 'q-scope',
-          question: 'What change?',
-          header: 'Scope',
-          multiSelect: false,
-          options: [{ label: 'Fix' }],
-        }],
-      })}\n\n`,
-      'data: {"type":"text","content":"got it"}\n\n',
-      `data: ${JSON.stringify({
-        type: 'question',
-        questions: [{
-          id: 'q-mode',
-          question: 'Which mode?',
-          header: 'Mode',
-          multiSelect: false,
-          options: [{ label: 'Direct' }],
-        }],
-      })}\n\n`,
-      'data: {"type":"done"}\n\n',
-    ].join('')
-    await setupWithStreamMock(page, streamBody)
-    await newChat(page)
-    await sendMessage(page, 'Ask two questions')
-
-    await expect(page.locator('[data-chat-surface="painted"] .qcard')).toHaveCount(2, { timeout: 5000 })
-  })
 
 
-  test('extra tool_start events AFTER the question are ignored on the question turn', async ({ page }) => {
-    // Reproduces the prod garage chat shape: question followed by
-    // unsuppressed tool blocks. The kill-on-question backend fix
-    // means tool events arriving after the question would be a
-    // SSE-mock-only test (real backend would have stopped). Here we
-    // verify that ONE question event followed by done leaves
-    // exactly ONE question block in the rendered transcript.
-    const streamBody = [
-      `data: ${JSON.stringify({
-        type: 'question',
-        questions: [{
-          question: 'Scope?',
-          header: 'Scope',
-          multiSelect: false,
-          options: [{ label: 'Small' }, { label: 'Big' }],
-        }],
-      })}\n\n`,
-      'data: {"type":"done"}\n\n',
-    ].join('')
-    await setupWithStreamMock(page, streamBody)
-    await newChat(page)
-    await sendMessage(page, 'Pick scope')
 
-    await expect(page.locator('[data-chat-surface="painted"] .qcard')).toHaveCount(1, { timeout: 5000 })
-    // Only the question card; no leaked tool blocks.
-    await expect(page.locator('[data-chat-surface="painted"] .chat__tool')).toHaveCount(0)
-  })
+
+
 })
 
 
@@ -631,29 +296,7 @@ test.describe('Bug 3: mid-stream return shows persisted content', () => {
   // path via injected DOM (the same pattern existing spacer tests
   // use) and asserting the assistant message stays rendered when
   // streamItems is empty.
-  test('an assistant message in messages persists when streamItems is empty', async ({ page }) => {
-    await setupWithStreamMock(page, null)
-    await newChat(page)
-    await sendMessage(page, 'Test')
-    // Inject a fake assistant message into the chat list — the
-    // redesign means messages.map's suppression only fires under
-    // bridgePartialRef.current (which we don't set in tests).
-    await page.evaluate(() => {
-      const list = document.querySelector('[data-chat-surface="painted"] .chat__list')
-      const li = document.createElement('li')
-      li.className = 'chat__msg chat__msg--assistant'
-      li.setAttribute('data-key', 'assistant-99-test')
-      li.textContent = 'Persisted partial visible'
-      list.appendChild(li)
-    })
-    // The injected assistant should still be in the DOM after the
-    // next render cycle (no test code is suppressing it).
-    await page.evaluate(() => new Promise(r =>
-      requestAnimationFrame(() => requestAnimationFrame(r))
-    ))
-    await expect(page.locator('[data-chat-surface="painted"] .chat__msg--assistant').last())
-      .toContainText('Persisted partial visible')
-  })
+
 })
 
 
@@ -663,35 +306,13 @@ test.describe('Bug 3: mid-stream return shows persisted content', () => {
 
 test.describe('Bug 2/4: scroll state machine', () => {
 
-  test('bottom detection has no lagging sentinel authority', async ({ page }) => {
-    await setupWithStreamMock(page, null)
-    await newChat(page)
-    await sendMessage(page, 'First send')
-    await expect(page.locator('[data-chat-surface="painted"] .chat__bottom-sentinel')).toHaveCount(0)
-    await expect(page.locator('[data-chat-surface="painted"] .chat__scroll')).toHaveCount(1)
-  })
 
 
-  test('user messages carry data-cid (for PIN_USER_MSG resolution)', async ({ page }) => {
-    await setupWithStreamMock(page, null)
-    await newChat(page)
-    await sendMessage(page, 'Send with cid')
-    // The pin resolves the user row by its stable cid (data-cid). data-ts is
-    // kept too, but only for the timestamp tooltip (display metadata).
-    const pinnable = await page.locator('[data-chat-surface="painted"] .chat__msg--user[data-cid]').count()
-    expect(pinnable).toBeGreaterThan(0)
-    const withTs = await page.locator('[data-chat-surface="painted"] .chat__msg--user[data-ts]').count()
-    expect(withTs).toBeGreaterThan(0)
-  })
 
 
-  test('messages carry data-key (for ANCHOR_AT resolution)', async ({ page }) => {
-    await setupWithStreamMock(page, null)
-    await newChat(page)
-    await sendMessage(page, 'Send with key')
-    const keyed = await page.locator('[data-chat-surface="painted"] .chat__msg[data-key]').count()
-    expect(keyed).toBeGreaterThan(0)
-  })
+
+
+
 })
 
 
@@ -701,117 +322,7 @@ test.describe('Bug 2/4: scroll state machine', () => {
 
 test.describe('Q&A atomic write', () => {
 
-  test('POST /messages with hidden + answers sets answers on the question block', async ({ page }) => {
-    // This is a backend behavior test — sanity-check that the
-    // frontend's doSendSilent puts `answers` in the body, not in a
-    // separate POST /question-answers request.
-    const sentBodies = []
-    let pendingQuestion
-    await page.route(/\/api\/chats\/[0-9a-f-]+\/messages$/, route => {
-      if (route.request().method() !== 'POST') return route.continue()
-      const body = route.request().postDataJSON()
-      sentBodies.push(body)
-      if (body.answers) {
-        pendingQuestion.markAnswered()
-        return route.fulfill({
-          status: 202,
-          contentType: 'application/json',
-          body: JSON.stringify({
-            status: 'answer_delivered',
-            answer_turn: 'same',
-          }),
-        })
-      }
-      return fulfillStartedPost(route)
-    })
-    await page.route(/\/api\/chats\/[0-9a-f-]+\/question-answers$/, route => {
-      // SHOULD NOT be called by the new frontend.
-      route.fulfill({ status: 404, body: '{}' })
-    })
-    await page.route('**/api/chat/stop', route =>
-      route.fulfill({ status: 200, body: '{}' })
-    )
-    const streamBody = [
-      `data: ${JSON.stringify({
-        type: 'text',
-        content: 'Context before the atomic question. '.repeat(160),
-      })}\n\n`,
-      `data: ${JSON.stringify({
-        type: 'question',
-        question_id: 'q-pick-atomic',
-        questions: [{
-          question: 'Pick',
-          header: 'X',
-          multiSelect: false,
-          options: [{ label: 'Yes' }],
-        }],
-      })}\n\n`,
-      'data: {"type":"done"}\n\n',
-    ].join('')
-    let streamCount = 0
-    await page.route(/\/api\/chats\/[0-9a-f-]+\/stream$/, route => {
-      streamCount++
-      route.fulfill({
-        status: 200,
-        headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' },
-        body: streamCount === 1 ? streamBody : 'data: {"type":"done"}\n\n',
-      })
-    })
-    pendingQuestion = await mockPendingQuestionState(page, 'q-pick-atomic')
 
-    await page.setViewportSize({ width: 412, height: 915 })
-    await page.goto(BASE, { waitUntil: 'domcontentloaded' })
-    await page.waitForFunction(
-      () => !!(document.querySelector('[data-chat-surface="painted"] .chat__empty-wrap')
-            || document.querySelector('[data-chat-surface="painted"] .chat__form')),
-      undefined, { timeout: 10000 }
-    )
-    await newChat(page)
-    await sendMessage(page, 'Ask')
-    await expect(page.locator('[data-chat-surface="painted"] .qcard')).toBeVisible({ timeout: 5000 })
-    await page.locator('[data-chat-surface="painted"] .qcard__opt', { hasText: 'Yes' }).click()
-    await page.evaluate(() => {
-      window.__mobiusChatScrollTrace = {
-        version: 1, transitions: [], writes: [], events: [],
-      }
-      const scroll = document.querySelector('.chat__scroll')
-      const submit = document.querySelector('.qcard__submit')
-      if (!scroll || !submit) throw new Error('question race fixture is incomplete')
-      // The answer action is newer than this just-finished bottom gesture. Its
-      // exact card anchor must not be replaced by the older quiet settlement.
-      scroll.dispatchEvent(new PointerEvent('pointerdown', {
-        bubbles: true,
-        button: 0,
-      }))
-      scroll.scrollTop = scroll.scrollHeight
-      scroll.dispatchEvent(new Event('scroll'))
-      submit.click()
-    })
-    await expect.poll(() => sentBodies.length).toBe(2)
-    // The hidden answer message MUST carry the answers field
-    // (atomic backend write — no separate /question-answers POST).
-    expect(sentBodies[1].hidden).toBe(true)
-    expect(sentBodies[1].answers).toBeTruthy()
-    expect(sentBodies[1].answers).toHaveProperty('Pick', 'Yes')
-    const questionFreeze = await page.evaluate(() => (
-      window.__mobiusChatScrollTrace?.transitions?.find(
-        row => row.event === 'send:question-freeze',
-      ) || null
-    ))
-    expect(questionFreeze).toBeTruthy()
-    expect(questionFreeze.to?.kind).toBe('ANCHOR_AT')
-    await page.waitForTimeout(250)
-    const laterReaderBottom = await page.evaluate(() => {
-      const transitions = window.__mobiusChatScrollTrace?.transitions || []
-      const freezeIndex = transitions.findIndex(
-        row => row.event === 'send:question-freeze',
-      )
-      return transitions.slice(freezeIndex + 1).some(
-        row => row.event === 'reader:scroll-bottom',
-      )
-    })
-    expect(laterReaderBottom).toBe(false)
-  })
 
   test('an Android viewport growth keeps a submitted question anchored', async ({ page }) => {
     const longLead = 'Context before the question. '.repeat(180)

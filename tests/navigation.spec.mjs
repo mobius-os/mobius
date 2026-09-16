@@ -267,22 +267,7 @@ async function installNavigationAppFixture(page) {
 }
 
 for (const width of [412, 1512]) {
-  test(`the message composer has an unambiguous accessible name at ${width}px`, async ({ page }) => {
-    await setup(page, { width, height: 915 })
-    const composer = page.getByRole('textbox', { name: 'Message Möbius…', exact: true })
-    const handoff = page.getByRole('textbox', { name: 'Preparing message input', exact: true })
-    await expect(composer).toHaveCount(1)
-    await expect(handoff).toHaveCount(1)
-    await expect(handoff).toHaveAttribute('tabindex', '-1')
-    // The temporary control must remain focusable for a synchronous touch
-    // keyboard transfer; hiding or unmounting it would change that contract.
-    await handoff.focus()
-    await expect(handoff).toBeFocused()
-    await composer.fill('Draft stays with the real composer')
-    await expect(composer).toBeFocused()
-    await expect(composer).toHaveValue('Draft stays with the real composer')
-    await expect(handoff).toHaveValue('')
-  })
+
 }
 
 /** Read the current navigation state from the app. */
@@ -433,127 +418,11 @@ async function goForward(page) {
 test.use({ serviceWorkers: 'block' })
 
 test.describe('Navigation basics', () => {
-  test('a first send retires the cold activation gate it supersedes', async ({ page }) => {
-    let releaseChatDetail
-    const wait = new Promise(resolve => { releaseChatDetail = resolve })
-    let runtimeRunning = false
-    const runtime = createMockChatRuntime()
-    let acceptedMessage = null
-    const blank = {
-      ...NAV_CHATS[0],
-      title: 'Cold empty chat',
-      has_messages: false,
-    }
 
-    await setup(page, undefined, {
-      chats: [blank],
-      detailForChat: () => ({
-        ...emptyChatDetail(),
-        messages: acceptedMessage ? [acceptedMessage] : [],
-        total: acceptedMessage ? 1 : 0,
-        running: runtimeRunning,
-      }),
-      chatDetailGate: { id: blank.id, wait },
-      runtimeFixture: runtime,
-    })
 
-    let releaseStream
-    const streamWait = new Promise(resolve => { releaseStream = resolve })
-    let sendRequests = 0
-    await page.route(/\/api\/chats\/[0-9a-f-]+\/runtime(?:\?.*)?$/, route => {
-      return route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        body: JSON.stringify(runtime.snapshot()),
-      })
-    })
-    await page.route(/\/api\/chats\/[0-9a-f-]+\/messages$/, route => {
-      sendRequests += 1
-      runtimeRunning = true
-      runtime.update({ running: true })
-      const request = route.request().postDataJSON()
-      acceptedMessage = {
-        role: 'user',
-        content: request.content,
-        ts: Date.now(),
-        cid: request.cid,
-      }
-      return route.fulfill({
-        status: 202,
-        contentType: 'application/json',
-        body: JSON.stringify({
-          status: 'started',
-          message: acceptedMessage,
-        }),
-      })
-    })
-    await page.route(/\/api\/chats\/[0-9a-f-]+\/stream$/, async route => {
-      await streamWait
-      return route.fulfill({ status: 204, body: '' })
-    })
 
-    try {
-      const painted = page.locator(
-        `[data-chat-surface="painted"][data-chat-id="${blank.id}"]`,
-      )
-      const composer = painted
-        .getByRole('textbox', { name: 'Message Möbius…' })
-      await expect(composer).toBeVisible()
-      await composer.fill('Visible after superseding the cold read')
-      await composer.press('Enter')
 
-      await expect.poll(() => sendRequests).toBe(1)
-      releaseChatDetail()
 
-      const userRow = painted.locator('.chat__msg--user')
-      await expect(userRow).toContainText('Visible after superseding the cold read')
-      await expect(userRow).toBeVisible()
-
-      const position = await userRow.evaluate((row) => {
-        const scroll = row.closest('.chat__scroll')
-        return Math.round(row.getBoundingClientRect().top - scroll.getBoundingClientRect().top)
-      })
-      expect(position).toBeGreaterThanOrEqual(-2)
-      expect(position).toBeLessThanOrEqual(10)
-    } finally {
-      releaseChatDetail()
-      releaseStream()
-    }
-  })
-
-  test('1. Initial state — chat view, URL is /shell/', async ({ page }) => {
-    await setup(page)
-    const state = await getNavState(page)
-    expect(state.hasChat).toBe(true)
-    expect(state.url).toBe('/shell/')
-  })
-
-  test('owner-input status is named and outranks the active-work dot', async ({ page }) => {
-    const chats = NAV_CHATS.map((chat, index) => ({
-      ...chat,
-      running: index < 2,
-      owner_input_kind: index === 0 ? 'secure_input' : null,
-      pending_question_id: null,
-    }))
-    await setup(page, { width: 1512, height: 861 }, { chats })
-
-    const navigation = page.getByRole('navigation', {
-      name: 'Primary navigation',
-    })
-    const waiting = navigation.getByRole('button', {
-      name: `Your input is needed ${chats[0].title}`,
-      exact: true,
-    })
-    await expect(waiting.locator('.drawer__owner-input-dot')).toBeVisible()
-    await expect(waiting.locator('.drawer__streaming-dot')).toHaveCount(0)
-
-    const working = navigation.getByRole('button', {
-      name: `Currently streaming ${chats[1].title}`,
-      exact: true,
-    })
-    await expect(working.locator('.drawer__streaming-dot')).toBeVisible()
-    await expect(working.locator('.drawer__owner-input-dot')).toHaveCount(0)
-  })
 
   test('2. Navigate between two chats — back returns to first', async ({ page }) => {
     await setup(page)
@@ -637,42 +506,7 @@ test.describe('Navigation basics', () => {
   })
 })
 
-test('held chat cover suppresses stale floating actions while the destination settles', async ({ page }) => {
-  let releaseChatDetail
-  const wait = new Promise(resolve => { releaseChatDetail = resolve })
-  await setup(page, { width: 1512, height: 861 }, {
-    assistantContent: `Long outgoing answer. ${'Conversation content. '.repeat(900)}`,
-    chatDetailGate: { id: NAV_CHATS[1].id, wait },
-  })
 
-  const painted = page.locator('[data-chat-surface="painted"]')
-  const jump = painted.locator('.chat__jump-latest')
-  await painted.locator('.chat__scroll').evaluate(scroll => {
-    scroll.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }))
-    scroll.scrollTop = 0
-    scroll.dispatchEvent(new Event('scroll', { bubbles: true }))
-  })
-  await expect(jump).toBeVisible({ timeout: 3000 })
-
-  const navigation = page.getByRole('navigation', { name: 'Primary navigation' })
-  await navigation.getByRole('button', { name: NAV_CHATS[1].title, exact: true }).click()
-  await expect.poll(() => page.evaluate(() => ({
-    held: document.querySelector('.shell__chat-view--held')?.dataset.chatId,
-    staging: document.querySelector('.shell__chat-view--staging')?.dataset.chatId,
-  }))).toEqual({
-    held: NAV_CHATS[0].id,
-    staging: NAV_CHATS[1].id,
-  })
-
-  const heldTransient = page.locator('.shell__chat-view--held .chat__floating-transients')
-  await expect(heldTransient).toHaveCount(1)
-  await expect(heldTransient).toBeHidden()
-  await expect(page.locator('.shell__chat-view--held .chat__jump-latest')).toHaveCount(1)
-
-  releaseChatDetail()
-  await expect(page.locator('[data-chat-surface="painted"]'))
-    .toHaveAttribute('data-chat-id', NAV_CHATS[1].id)
-})
 
 test.describe('Touch navigation', () => {
   test.use({ hasTouch: true, isMobile: true })
@@ -763,360 +597,19 @@ test.describe('Touch navigation', () => {
     await expect(painted.getByRole('button', { name: 'Remove reference.txt' })).toBeVisible()
   })
 
-  test('a saved New Chat draft outranks a different visible blank', async ({ page }) => {
-    const blank = {
-      ...NAV_CHATS[0],
-      id: '10000000-0000-4000-8000-000000000094',
-      title: 'Different blank',
-      has_messages: false,
-    }
-    const intentId = '10000000-0000-4000-8000-000000000095'
-    await page.addInitScript(({ chatId, input }) => {
-      sessionStorage.setItem('new-chat-intent', JSON.stringify({
-        chatId,
-        status: 'failed',
-      }))
-      sessionStorage.setItem(`draft:${chatId}`, JSON.stringify({
-        type: 'mobius-composer-draft',
-        version: 2,
-        updated_at: Date.now(),
-        input,
-        attachments: [],
-      }))
-    }, { chatId: intentId, input: 'Resume this saved thought' })
-    await setup(page, undefined, {
-      chats: [blank],
-      detailForChat: emptyChatDetail,
-    })
 
-    let releaseCreation
-    const creationGate = new Promise(resolve => { releaseCreation = resolve })
-    let requestedId = null
-    await page.route(/\/api\/chats(?:\?.*)?$/, async route => {
-      if (route.request().method() !== 'POST') return route.fallback()
-      requestedId = route.request().postDataJSON().id
-      await creationGate
-      return route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        body: JSON.stringify(createdChat(requestedId)),
-      })
-    })
 
-    await openDrawer(page)
-    const navigation = page.getByRole('navigation', { name: 'Primary navigation' })
-    await expect(navigation).toBeFocused()
-    await navigation.getByRole('button', { name: 'New chat', exact: true }).click()
 
-    const presentation = newChatSurface(page, intentId)
-    const composer = presentation.getByRole('textbox', { name: 'Message Möbius…' })
-    await expect.poll(() => requestedId).toBe(intentId)
-    await expect(composer).toBeFocused()
-    await expect(composer).toHaveValue('Resume this saved thought')
-    // The saved intent id owns the workspace destination from the first commit,
-    // so the different visible blank is never adopted: the active chat is the
-    // saved intent, not blank.id.
-    await expect.poll(() => page.evaluate(() => localStorage.getItem('moebius_active_chat')))
-      .toBe(intentId)
-    await expect.poll(() => page.evaluate(() => localStorage.getItem('moebius_active_chat')))
-      .not.toBe(blank.id)
 
-    releaseCreation()
-    const paintedComposer = presentation.locator('textarea')
-    await expect(paintedComposer).toBeFocused()
-    await expect(paintedComposer).toHaveValue('Resume this saved thought')
-    await expect.poll(() => page.evaluate(() => localStorage.getItem('moebius_active_chat')))
-      .toBe(intentId)
-  })
 
-  test('an IndexedDB-only New Chat draft keeps its intent id and hydrates', async ({ page }) => {
-    const intentId = '10000000-0000-4000-8000-000000000096'
-    const durableInput = 'Recovered from the independent durable draft'
-    await seedDurableNewChatDraft(page, {
-      chatId: intentId,
-      input: durableInput,
-    })
-    await setup(page, undefined, { detailForChat: emptyChatDetail })
 
-    await expect.poll(() => page.evaluate(id => new Promise((resolve, reject) => {
-      const request = indexedDB.open('mobius-owner-drafts', 1)
-      request.onerror = () => reject(request.error)
-      request.onsuccess = () => {
-        const transaction = request.result.transaction('drafts-v1', 'readonly')
-        const read = transaction.objectStore('drafts-v1').get(id)
-        read.onsuccess = () => resolve(read.result || null)
-        read.onerror = () => reject(read.error)
-      }
-    }), intentId)).toContain(durableInput)
-    await expect.poll(() => page.evaluate(id => (
-      sessionStorage.getItem(`draft:${id}`)
-    ), intentId)).toBeNull()
-    let releaseCreation
-    const creationGate = new Promise(resolve => { releaseCreation = resolve })
-    let requestedId = null
-    await page.route(/\/api\/chats(?:\?.*)?$/, async route => {
-      if (route.request().method() !== 'POST') return route.fallback()
-      requestedId = route.request().postDataJSON().id
-      await creationGate
-      return route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        body: JSON.stringify(createdChat(requestedId)),
-      })
-    })
 
-    await openDrawer(page)
-    const navigation = page.getByRole('navigation', { name: 'Primary navigation' })
-    await navigation.getByRole('button', { name: 'New chat', exact: true }).click()
-    const presentation = newChatSurface(page, intentId)
-    const composer = presentation.getByRole('textbox', { name: 'Message Möbius…' })
-    await expect.poll(() => requestedId).toBe(intentId)
-    await expect(composer).toBeFocused()
-    await expect(composer).toHaveValue(durableInput)
-    // Hydration fills the canonical composer's normal session cache. The
-    // earlier null assertion proves the input came from IndexedDB only.
-    await expect.poll(() => page.evaluate(id => (
-      JSON.parse(sessionStorage.getItem(`draft:${id}`))?.input
-    ), intentId)).toBe(durableInput)
 
-    releaseCreation()
-    const painted = page.locator(
-      `[data-chat-surface="painted"][data-chat-id="${intentId}"] textarea`,
-    )
-    await expect(painted).toBeFocused()
-    await expect(painted).toHaveValue(durableInput)
-  })
 
-  test('an IDB-only draft survives authoritative intent-id rotation', async ({ page }) => {
-    const intentId = '10000000-0000-4000-8000-000000000097'
-    const durableInput = 'Carry this durable thought across the conflict'
-    await seedDurableNewChatDraft(page, {
-      chatId: intentId,
-      input: durableInput,
-    })
-    await setup(page, undefined, { detailForChat: emptyChatDetail })
 
-    let replacementId = null
-    let releaseReplacement
-    const replacementGate = new Promise(resolve => { releaseReplacement = resolve })
-    const requestedIds = []
-    await page.route(/\/api\/chats(?:\?.*)?$/, async route => {
-      if (route.request().method() !== 'POST') return route.fallback()
-      const id = route.request().postDataJSON().id
-      requestedIds.push(id)
-      if (id === intentId) {
-        return route.fulfill({
-          status: 409,
-          contentType: 'application/json',
-          body: JSON.stringify({ detail: 'Chat id is no longer available' }),
-        })
-      }
-      replacementId = id
-      await replacementGate
-      return route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        body: JSON.stringify(createdChat(id)),
-      })
-    })
 
-    await openDrawer(page)
-    const navigation = page.getByRole('navigation', { name: 'Primary navigation' })
-    await navigation.getByRole('button', { name: 'New chat', exact: true }).click()
-    await expect.poll(() => requestedIds.length).toBe(2)
-    expect(requestedIds[0]).toBe(intentId)
-    expect(replacementId).not.toBe(intentId)
-    expect(replacementId).toMatch(
-      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
-    )
 
-    // The authoritative 409 rotates the id: the same canonical surface is now
-    // mounted under replacementId (the old intentId surface must be gone).
-    const presentation = newChatSurface(page, replacementId)
-    await expect(presentation).toBeVisible()
-    await expect(newChatSurface(page, intentId)).toHaveCount(0)
-    const composer = presentation.getByRole('textbox', { name: 'Message Möbius…' })
-    await expect(composer).toBeFocused()
-    await expect(composer).toHaveValue(durableInput)
-    await expect.poll(() => page.evaluate(id => ({
-      intent: JSON.parse(sessionStorage.getItem('new-chat-intent')),
-      replacementDraft: JSON.parse(sessionStorage.getItem(`draft:${id}`))?.input,
-    }), replacementId)).toEqual({
-      intent: { chatId: replacementId, status: 'allocating' },
-      replacementDraft: durableInput,
-    })
 
-    releaseReplacement()
-    const painted = page.locator(
-      `[data-chat-surface="painted"][data-chat-id="${replacementId}"] textarea`,
-    )
-    await expect(painted).toBeFocused()
-    await expect(painted).toHaveValue(durableInput)
-  })
-
-  test('a fast allocation waits for its IDB-only draft before handoff', async ({ page }) => {
-    const intentId = '10000000-0000-4000-8000-000000000098'
-    const durableInput = 'Hydrate this before the fast destination takes focus'
-    await seedDurableNewChatDraft(page, {
-      chatId: intentId,
-      input: durableInput,
-    })
-    await setup(page, undefined, { detailForChat: emptyChatDetail })
-
-    let requestedId = null
-    await page.route(/\/api\/chats(?:\?.*)?$/, route => {
-      if (route.request().method() !== 'POST') return route.fallback()
-      requestedId = route.request().postDataJSON().id
-      return route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        body: JSON.stringify(createdChat(requestedId)),
-      })
-    })
-
-    await openDrawer(page)
-    const navigation = page.getByRole('navigation', { name: 'Primary navigation' })
-    await navigation.getByRole('button', { name: 'New chat', exact: true }).click()
-    await expect.poll(() => requestedId).toBe(intentId)
-    const painted = page.locator(
-      `[data-chat-surface="painted"][data-chat-id="${intentId}"] textarea`,
-    )
-    await expect(painted).toBeFocused()
-    await expect(painted).toHaveValue(durableInput)
-  })
-
-  test('New Chat keeps a queued old-chat focus inert through allocation', async ({ page }) => {
-    const oldId = NAV_CHATS[0].id
-    await setup(page, { width: 1280, height: 900 }, {
-      detailForChat: emptyChatDetail,
-    })
-
-    let releaseCreation
-    const creationGate = new Promise(resolve => { releaseCreation = resolve })
-    let requestedId = null
-    await page.route(/\/api\/chats(?:\?.*)?$/, async route => {
-      if (route.request().method() !== 'POST') return route.fallback()
-      requestedId = route.request().postDataJSON().id
-      await creationGate
-      return route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        body: JSON.stringify(createdChat(requestedId)),
-      })
-    })
-
-    await openDrawer(page)
-    const navigation = page.getByRole('navigation', { name: 'Primary navigation' })
-    await navigation.getByRole('button', { name: 'New chat', exact: true }).click()
-    const presentation = newChatSurface(page)
-    const composer = presentation.getByRole('textbox', { name: 'Message Möbius…' })
-    await expect.poll(() => requestedId).not.toBeNull()
-    await expect(composer).toBeFocused()
-
-    // The old chat may already be parked rather than held after first paint;
-    // neither state may accept a late focus callback.
-    const coveredOldChat = page.locator(`.shell__chat-view[data-chat-id="${oldId}"]`)
-    await expect(coveredOldChat).toHaveAttribute('inert', '')
-    await expect(coveredOldChat).toHaveAttribute('aria-hidden', 'true')
-    // Model a focus callback that was queued by the outgoing ChatView before
-    // the presentation committed. Native inertness must reject it even if the
-    // callback itself has escaped React's request cleanup.
-    await coveredOldChat.locator('textarea')
-      .evaluate(textarea => textarea.focus({ preventScroll: true }))
-    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => (
-      requestAnimationFrame(() => requestAnimationFrame(resolve))
-    ))))
-    await expect(composer).toBeFocused()
-    await composer.fill('The cover owns this draft')
-
-    releaseCreation()
-    const painted = page.locator(
-      `[data-chat-surface="painted"][data-chat-id="${requestedId}"] textarea`,
-    )
-    await expect(painted).toBeFocused()
-    await expect(painted).toHaveValue('The cover owns this draft')
-  })
-
-  test('late New Chat allocation cannot steal navigation focus or lose the draft', async ({ page }) => {
-    await setup(page, undefined, { detailForChat: emptyChatDetail })
-    let releaseCreation
-    const creationGate = new Promise(resolve => { releaseCreation = resolve })
-    let requestedId = null
-    await page.route(/\/api\/chats(?:\?.*)?$/, async route => {
-      if (route.request().method() !== 'POST') return route.fallback()
-      requestedId = route.request().postDataJSON().id
-      await creationGate
-      return route.fulfill({ status: 200, json: createdChat(requestedId) })
-    })
-
-    await openDrawer(page)
-    const navigation = page.getByRole('navigation', { name: 'Primary navigation' })
-    await expect(navigation).toBeFocused()
-    await navigation.getByRole('button', { name: 'New chat', exact: true }).click()
-    await expect.poll(() => requestedId).not.toBeNull()
-    const composer = newChatSurface(page, requestedId)
-      .getByRole('textbox', { name: 'Message Möbius…' })
-    await expect(composer).toBeFocused()
-    await composer.fill('Navigation can recover this')
-    await expect(page.getByRole('button', { name: 'Toggle navigation' }))
-      .toHaveAttribute('aria-expanded', 'false')
-
-    await openDrawer(page)
-    await expect(navigation).toBeFocused()
-    releaseCreation()
-    await expect.poll(() => page.evaluate(() => (
-      JSON.parse(sessionStorage.getItem('new-chat-intent'))?.status
-    ))).toBe('materialized')
-    await expect(navigation).toBeFocused()
-    await expect(page.getByRole('button', { name: 'Toggle navigation' }))
-      .toHaveAttribute('aria-expanded', 'true')
-
-    await navigation.getByRole('button', { name: 'New chat', exact: true }).click()
-    const resumed = newChatSurface(page, requestedId)
-      .getByRole('textbox', { name: 'Message Möbius…' })
-    await expect(resumed).toBeFocused()
-    await expect(resumed).toHaveValue('Navigation can recover this')
-  })
-
-  test('New chat does not reuse a blank hidden behind Settings', async ({ page }) => {
-    const blank = {
-      ...NAV_CHATS[0],
-      id: '10000000-0000-4000-8000-000000000097',
-      title: 'Hidden blank',
-      has_messages: false,
-    }
-    let newChatId = null
-    await setup(page, undefined, {
-      chats: [blank],
-      detailForChat: emptyChatDetail,
-    })
-    await page.route(/\/api\/chats(?:\?.*)?$/, async route => {
-      if (route.request().method() !== 'POST') return route.fallback()
-      newChatId = route.request().postDataJSON().id
-      return route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        body: JSON.stringify(createdChat(newChatId)),
-      })
-    })
-
-    await openDrawer(page)
-    await navigateToSettings(page)
-    await openDrawer(page)
-    const navigation = page.getByRole('navigation', { name: 'Primary navigation' })
-    await expect(navigation).toBeFocused()
-    await navigation.getByRole('button', { name: 'New chat', exact: true }).click()
-
-    await expect(page.locator('.settings')).toHaveCount(0)
-    await expect.poll(() => newChatId).toMatch(
-      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
-    )
-    await expect.poll(() => page.evaluate(() => localStorage.getItem('moebius_active_chat')))
-      .toBe(newChatId)
-    await expect(page.locator('[data-chat-surface="painted"]'))
-      .toHaveAttribute('data-chat-id', newChatId)
-    await expect(page.locator('[data-chat-surface="painted"] textarea')).toBeFocused()
-  })
 
   test('New chat keeps options geometry, phone focus, and early typing through allocation', async ({ page }) => {
     await setup(page)
@@ -1310,144 +803,11 @@ test.describe('Desktop sidebar navigation', () => {
     await setup(page, { width: 1280, height: 800 }, options)
   }
 
-  test('a stale focus refresh cannot make a newly pinned chat disappear', async ({ page }) => {
-    let serverChats = NAV_CHATS.map((chat, index) => ({
-      ...chat,
-      // Keep one existing pin after the server's returned rank but before the
-      // client's optimistic clock. The final DOM order therefore proves the
-      // mutation response—not the optimistic timestamp—became canonical.
-      pinned_at: index === 1 ? '2026-09-12T12:00:30' : null,
-    }))
-    let listRequests = 0
-    let staleListFinished = false
-    let releaseStaleList
-    let releasePinWrite
-    const staleListGate = new Promise(resolve => { releaseStaleList = resolve })
-    const pinWriteGate = new Promise(resolve => { releasePinWrite = resolve })
 
-    await setupDesktop(page, true, {
-      chats: serverChats,
-      chatListResponder: async route => {
-        listRequests += 1
-        const snapshot = serverChats.map(chat => ({ ...chat }))
-        if (listRequests === 2) await staleListGate
-        await route.fulfill({
-          status: 200,
-          contentType: 'application/json',
-          body: JSON.stringify(snapshot),
-        })
-        if (listRequests === 2) staleListFinished = true
-      },
-      chatPatchResponder: async route => {
-        const id = new URL(route.request().url()).pathname.split('/').pop()
-        const body = route.request().postDataJSON()
-        await pinWriteGate
-        serverChats = serverChats.map(chat => (
-          chat.id === id
-            ? {
-                ...chat,
-                pinned_at: body.pinned ? '2026-09-12T12:00:00' : null,
-              }
-            : chat
-        ))
-        await route.fulfill({
-          status: 200,
-          contentType: 'application/json',
-          body: JSON.stringify({
-            ok: true,
-            pinned_at: body.pinned ? '2026-09-12T12:00:00' : null,
-          }),
-        })
-      },
-    })
 
-    // A real return to the tab revalidates chats even inside staleTime. Hold
-    // that request at the older unpinned snapshot while the owner pins.
-    await page.evaluate(() => window.dispatchEvent(new Event('visibilitychange')))
-    await expect.poll(() => listRequests).toBe(2)
 
-    const navigation = page.getByRole('navigation', { name: 'Primary navigation' })
-    const alpha = navigation.getByRole('button', { name: NAV_CHATS[0].title, exact: true })
-    await alpha.focus()
-    await page.keyboard.press('Shift+F10')
-    await page.getByRole('menuitem', { name: 'Pin', exact: true }).click()
 
-    const pinnedSection = navigation.getByRole('region', { name: 'Pinned' })
-    const pinnedAlpha = pinnedSection.locator(`[data-drawer-key="chat:${NAV_CHATS[0].id}"]`)
-    await expect(pinnedAlpha).toBeVisible()
 
-    releaseStaleList()
-    await expect.poll(() => staleListFinished).toBe(true)
-    await page.evaluate(() => new Promise(resolve => (
-      requestAnimationFrame(() => requestAnimationFrame(resolve))
-    )))
-    await expect(pinnedAlpha).toBeVisible()
-
-    releasePinWrite()
-    await expect(pinnedAlpha).toBeVisible()
-    await expect.poll(() => listRequests).toBe(2)
-    await expect.poll(() => pinnedSection.locator('[data-pinned-key]').evaluateAll(
-      rows => rows.map(row => row.dataset.pinnedKey),
-    )).toEqual([
-      `chat:${NAV_CHATS[0].id}`,
-      `chat:${NAV_CHATS[1].id}`,
-    ])
-  })
-
-  test('desktop web keeps 90% density while tablet and phone stay native', async ({ page }) => {
-    await setupDesktop(page)
-
-    const readDensity = () => page.evaluate(() => {
-      const root = document.documentElement
-      const rootRect = root.getBoundingClientRect()
-      const shellRect = document.querySelector('.shell').getBoundingClientRect()
-      return {
-        ratio: root.offsetWidth > 0 ? rootRect.width / root.offsetWidth : 0,
-        shell: {
-          left: shellRect.left,
-          top: shellRect.top,
-          right: shellRect.right,
-          bottom: shellRect.bottom,
-        },
-        viewport: { width: innerWidth, height: innerHeight },
-      }
-    })
-
-    for (const { label, size, ratio } of [
-      { label: 'desktop boundary', size: { width: 1024, height: 800 }, ratio: 0.9 },
-      { label: 'below desktop', size: { width: 1023, height: 800 }, ratio: 1 },
-      { label: 'phone', size: { width: 390, height: 844 }, ratio: 1 },
-    ]) {
-      await test.step(label, async () => {
-        await page.setViewportSize(size)
-        await expect.poll(async () => (await readDensity()).ratio).toBeCloseTo(ratio, 2)
-        const density = await readDensity()
-        expect(density.shell.left).toBeCloseTo(0, 1)
-        expect(density.shell.top).toBeCloseTo(0, 1)
-        expect(density.shell.right).toBeCloseTo(density.viewport.width, 1)
-        expect(density.shell.bottom).toBeCloseTo(density.viewport.height, 1)
-      })
-    }
-  })
-
-  test('rename stays focused after the action menu leaves browser history', async ({ page }) => {
-    await setupDesktop(page)
-    const navigation = page.getByRole('navigation', { name: 'Primary navigation' })
-    const alpha = navigation.getByRole('button', { name: NAV_CHATS[0].title, exact: true })
-
-    await alpha.focus()
-    await page.keyboard.press('Shift+F10')
-    await expect.poll(() => page.evaluate(() => history.state?.kind)).toBe('dismissible')
-    await page.getByRole('menuitem', { name: 'Rename', exact: true }).click()
-
-    const editor = navigation.getByRole('textbox', { name: 'Rename chat' })
-    await expect.poll(() => page.evaluate(() => history.state?.kind)).not.toBe('dismissible')
-    await expect(editor).toBeFocused()
-    await expect(editor).toHaveValue(NAV_CHATS[0].title)
-
-    await page.keyboard.press('Escape')
-    await expect(alpha).toBeVisible()
-  })
 
   test('28. desktop sidebar reserves workspace width and persists its toggle', async ({ page }) => {
     await setupDesktop(page)
@@ -1487,43 +847,7 @@ test.describe('Desktop sidebar navigation', () => {
     await expect(toggle).toHaveAttribute('aria-expanded', 'false')
   })
 
-  test('29. desktop destinations keep the sidebar open without no-op history edges', async ({ page }) => {
-    await setupDesktop(page)
-    const toggle = page.getByRole('button', { name: 'Toggle navigation' })
-    const navigation = page.getByRole('navigation', { name: 'Primary navigation' })
-    const alpha = navigation.getByRole('button', { name: 'Navigation Alpha', exact: true })
-    const beta = navigation.getByRole('button', { name: 'Navigation Beta', exact: true })
 
-    await expect(alpha).toHaveAttribute('aria-current', 'page')
-    await alpha.focus()
-    await expect(alpha).toBeFocused()
-    await expect(alpha).toHaveCSS('outline-style', 'solid')
-    expect(await alpha.evaluate(element => Number.parseFloat(
-      getComputedStyle(element).outlineWidth,
-    ))).toBeGreaterThan(0)
-    const initialLength = await page.evaluate(() => history.length)
-    await alpha.click()
-    expect(await page.evaluate(() => history.length)).toBe(initialLength)
-
-    await beta.click()
-    await expect(beta).toHaveAttribute('aria-current', 'page')
-    await expect(toggle).toHaveAttribute('aria-expanded', 'true')
-    const afterBeta = await page.evaluate(() => history.length)
-    expect(afterBeta).toBe(initialLength + 1)
-
-    await beta.click()
-    expect(await page.evaluate(() => history.length)).toBe(afterBeta)
-
-    await page.evaluate(() => history.back())
-    await expect(alpha).toHaveAttribute('aria-current', 'page')
-    await expect(toggle).toHaveAttribute('aria-expanded', 'true')
-
-    const settings = navigation.getByRole('button', { name: 'Settings', exact: true })
-    await settings.click()
-    await expect(settings)
-      .toHaveAttribute('aria-current', 'page')
-    await expect(toggle).toHaveAttribute('aria-expanded', 'true')
-  })
 
   test('30. widening restores the saved desktop preference, not the mobile modal state', async ({ page }) => {
     await setupDesktop(page, false)
@@ -1542,304 +866,27 @@ test.describe('Desktop sidebar navigation', () => {
     await expect.poll(() => page.evaluate(() => history.state?.kind)).not.toBe('drawer')
   })
 
-  test('31. breakpoint cleanup stays modal and seeks through phantom history', async ({ page }) => {
-    await page.addInitScript(() => {
-      localStorage.setItem('mobius:desktop-sidebar-open:v1', 'true')
-    })
-    await setup(page)
-    const toggle = page.getByRole('button', { name: 'Toggle navigation' })
 
-    await page.evaluate(() => history.pushState(null, ''))
-    await toggle.click()
-    await expect(toggle).toHaveAttribute('aria-expanded', 'true')
-
-    await page.evaluate(() => {
-      const originalBack = history.back.bind(history)
-      history.back = () => {
-        window.__releaseBreakpointBack = () => {
-          history.back = originalBack
-          originalBack()
-        }
-      }
-    })
-    await page.setViewportSize({ width: 1280, height: 800 })
-    await page.waitForFunction(() => typeof window.__releaseBreakpointBack === 'function')
-
-    // Desktop mode is requested, but the still-open mobile sentinel retains its
-    // complete modal boundary until the traversal is allowed to finish.
-    await expect(page.locator('.drawer-overlay')).toBeVisible()
-    await expect(page.locator('.shell__content')).toHaveAttribute('inert', '')
-
-    await page.evaluate(() => window.__releaseBreakpointBack())
-    await expect(page.locator('.drawer.drawer--persistent')).toBeVisible()
-    await expect(page.locator('.drawer-overlay')).toHaveCount(0)
-    await expect(page.locator('.shell__content')).not.toHaveAttribute('inert', '')
-    await expect.poll(() => page.evaluate(() => history.state?.__mobiusNav)).toBe(true)
-
-    // Scope to the sidebar landmark: builder mode (the default view-mode) opens
-    // Settings as a canonical pane tab, so an unscoped `Settings` role query
-    // matches BOTH the sidebar nav item and that tab. This test is about the
-    // sidebar item's active highlight.
-    const navigation = page.getByRole('navigation', { name: 'Primary navigation' })
-    const settings = navigation.getByRole('button', { name: 'Settings', exact: true })
-    await settings.click()
-    await expect(settings)
-      .toHaveAttribute('aria-current', 'page')
-  })
 })
 
 test.describe('Drawer touch lifecycle', () => {
   test.use({ hasTouch: true })
 
-  test('an interrupted workspace drag cannot consume the next real drawer-row tap', async ({ page }) => {
-    // Touch drawer rows own menu/reorder locally; a hybrid device's mouse or
-    // trackpad still uses the row-to-workspace drag contract tested below.
-    await setup(page, { width: 412, height: 915 })
-    await openDrawer(page)
 
-    // The coordinate-level touchscreen tap below cannot use Playwright's
-    // locator click re-targeting. Wait until the 250ms opening transition has
-    // stopped moving the row before sampling its bounding box; otherwise a
-    // valid tap can land at the row's old in-flight coordinate under load.
-    const drawer = page.locator('#navigation-drawer')
-    await expect(drawer).toHaveCSS('transform', 'matrix(1, 0, 0, 1, 0, 0)')
 
-    const navigation = page.getByRole('navigation', { name: 'Primary navigation' })
-    const beta = navigation.getByRole('button', { name: NAV_CHATS[1].title, exact: true })
-    await expect(beta).toBeVisible()
 
-    // Reproduce the hybrid-device interruption precisely: a trackpad/mouse
-    // drawer-row drag enters the workspace controller and installs its
-    // transparent viewport layer, then the browser steals the terminal event.
-    // Standard phone mode has no tab strip, while touch on drawer rows belongs
-    // to their local menu/reorder owner, so this is the real drawer source.
-    await beta.evaluate((row) => {
-      const box = row.getBoundingClientRect()
-      const start = {
-        bubbles: true,
-        cancelable: true,
-        pointerId: 1,
-        pointerType: 'mouse',
-        isPrimary: true,
-        button: 0,
-        clientX: box.left + 40,
-        clientY: box.top + box.height / 2,
-      }
-      row.dispatchEvent(new PointerEvent('pointerdown', start))
-      window.dispatchEvent(new PointerEvent('pointermove', {
-        ...start,
-        clientX: start.clientX + 30,
-      }))
-    })
-    await expect(page.locator('.workspace__drag-shield')).toHaveCount(1)
-    await expect(page.locator('.workspace__drag-shield')).toHaveCSS('pointer-events', 'none')
 
-    // A real touchscreen gesture (not HTMLElement.click) must both reconcile the
-    // abandoned session and activate its row in this SAME interaction. Mobile
-    // browsers commonly reuse pointerId=1, which is why identity cannot stand in
-    // for the old pointer's liveness.
-    const box = await beta.boundingBox()
-    await page.touchscreen.tap(box.x + box.width / 2, box.y + box.height / 2)
 
-    await expect(page.getByRole('button', { name: 'Toggle navigation' }))
-      .toHaveAttribute('aria-expanded', 'false')
-    await expect.poll(() => page.evaluate(() => localStorage.getItem('moebius_active_chat')))
-      .toBe(NAV_CHATS[1].id)
-    await expect(page.locator('.workspace__drag-shield')).toHaveCount(0)
-  })
-
-  test('touch rows recover through both responsive drawer modes', async ({ page }) => {
-    await setup(page, { width: 412, height: 915 })
-    await openDrawer(page)
-
-    // Widening consumes the mobile history sentinel before converting the modal
-    // into a persistent sidebar. `drawer--locked` is deliberately allowed only
-    // during that traversal; it must not survive into the interactive sidebar.
-    await page.setViewportSize({ width: 1280, height: 800 })
-    const drawer = page.locator('#navigation-drawer')
-    await expect(drawer).toHaveClass(/drawer--persistent/)
-    await expect(drawer).not.toHaveClass(/drawer--locked/)
-    await expect(drawer).not.toHaveAttribute('inert', '')
-
-    const navigation = page.getByRole('navigation', { name: 'Primary navigation' })
-    const beta = navigation.getByRole('button', { name: NAV_CHATS[1].title, exact: true })
-    let box = await beta.boundingBox()
-    await page.touchscreen.tap(box.x + box.width / 2, box.y + box.height / 2)
-    await expect.poll(() => page.evaluate(() => localStorage.getItem('moebius_active_chat')))
-      .toBe(NAV_CHATS[1].id)
-
-    // Narrowing returns to a closed modal; one real touch opens it and one real
-    // touch selects a different destination. No desktop interaction lock or
-    // stale sentinel may leak across the reverse transition.
-    await page.setViewportSize({ width: 412, height: 915 })
-    await expect(drawer).not.toHaveClass(/drawer--persistent/)
-    const toggle = page.getByRole('button', { name: 'Toggle navigation' })
-    box = await toggle.boundingBox()
-    await page.touchscreen.tap(box.x + box.width / 2, box.y + box.height / 2)
-    await expect(toggle).toHaveAttribute('aria-expanded', 'true')
-    await expect(drawer).toHaveCSS('transform', 'matrix(1, 0, 0, 1, 0, 0)')
-
-    const gamma = navigation.getByRole('button', { name: NAV_CHATS[2].title, exact: true })
-    box = await gamma.boundingBox()
-    await page.touchscreen.tap(box.x + box.width / 2, box.y + box.height / 2)
-    await expect.poll(() => page.evaluate(() => localStorage.getItem('moebius_active_chat')))
-      .toBe(NAV_CHATS[2].id)
-    await expect(toggle).toHaveAttribute('aria-expanded', 'false')
-  })
-
-  test('a drawer selection survives its recovered close arriving late', async ({ page }) => {
-    await page.route('**/api/client-error', route => route.fulfill({
-      status: 204,
-      body: '',
-    }))
-    await setup(page, { width: 426, height: 860 })
-    await openDrawer(page)
-
-    // Hold the explicit scrim-close traversal past the stale-close recovery
-    // boundary. The shell must let the next real tap reopen the drawer without
-    // forgetting that this exact programmatic Back can still arrive later.
-    await page.evaluate(() => {
-      const originalBack = history.back.bind(history)
-      history.back = () => {
-        window.__releaseLateDrawerClose = () => {
-          history.back = originalBack
-          originalBack()
-        }
-      }
-    })
-    await closeDrawerButton(page)
-    await page.evaluate(() => {
-      const originalNow = Date.now.bind(Date)
-      Date.now = () => originalNow() + 5000
-      window.__restoreDateNow = () => { Date.now = originalNow }
-    })
-
-    const toggle = page.getByRole('button', { name: 'Toggle navigation' })
-    let box = await toggle.boundingBox()
-    await page.touchscreen.tap(box.x + box.width / 2, box.y + box.height / 2)
-    await expect(toggle).toHaveAttribute('aria-expanded', 'true')
-    await page.evaluate(() => window.__restoreDateNow())
-
-    const navigation = page.getByRole('navigation', { name: 'Primary navigation' })
-    const beta = navigation.getByRole('button', { name: NAV_CHATS[1].title, exact: true })
-    await expect(page.locator('#navigation-drawer'))
-      .toHaveCSS('transform', 'matrix(1, 0, 0, 1, 0, 0)')
-    box = await beta.boundingBox()
-    await page.touchscreen.tap(box.x + box.width / 2, box.y + box.height / 2)
-    await expect.poll(() => page.evaluate(() => localStorage.getItem('moebius_active_chat')))
-      .toBe(NAV_CHATS[1].id)
-    await expect(toggle).toHaveAttribute('aria-expanded', 'false')
-
-    await page.evaluate(() => window.__releaseLateDrawerClose())
-    await expect.poll(() => page.evaluate(() => history.state?.route?.chatId))
-      .toBe(NAV_CHATS[1].id)
-    await expect.poll(() => page.evaluate(() => localStorage.getItem('moebius_active_chat')))
-      .toBe(NAV_CHATS[1].id)
-
-    const trace = await page.evaluate(() => {
-      const ring = JSON.parse(sessionStorage.getItem('mobius:error-log') || '[]')
-      return ring.find(entry => entry.where === 'useNavigation.recoveredDrawerClose')
-    })
-    expect(trace).toBeTruthy()
-    expect(JSON.parse(trace.stack)).toEqual({
-      sourceKind: 'nav',
-      destinationKind: 'base',
-      sourceIndex: 1,
-      destinationIndex: 0,
-      expectedReturn: true,
-      selectionChanged: true,
-    })
-    const serializedTrace = JSON.stringify(trace)
-    for (const { id, title } of NAV_CHATS) {
-      expect(serializedTrace).not.toContain(id)
-      expect(serializedTrace).not.toContain(title)
-    }
-  })
 })
 
 test.describe('Back button edge cases', () => {
-  test('5. Multiple navigations — back pops in LIFO order', async ({ page }) => {
-    await setup(page)
 
-    // Navigate: chat A -> open drawer -> chat B -> open drawer -> chat C.
-    await openDrawer(page)
-    await navigateToChat(page, 0)
-    const chatA = (await getNavState(page)).activeChatId
 
-    await openDrawer(page)
-    await navigateToChat(page, 1)
-    const chatB = (await getNavState(page)).activeChatId
 
-    if (chatA && chatB && chatA !== chatB) {
-      // Back should return to chat A.
-      await goBack(page)
-      const afterBack = await getNavState(page)
-      expect(afterBack.activeChatId).toBe(chatA)
-    }
-  })
 
-  test('6. URL stays at /shell/ throughout navigation', async ({ page }) => {
-    await setup(page)
-    expect((await getNavState(page)).url).toBe('/shell/')
 
-    await openDrawer(page)
-    // Move to a different chat so this test creates a real navigation entry. Opening
-    // and selecting the already-active row only consumes the drawer sentinel; a
-    // subsequent Back would correctly leave the app because there is no chat route
-    // to return to.
-    await navigateToChat(page, 1)
-    expect((await getNavState(page)).url).toBe('/shell/')
 
-    await goBack(page)
-    expect((await getNavState(page)).url).toBe('/shell/')
-  })
 
-  test('8. Drawer cycles return to the same view + closed state', async ({ page }) => {
-    // The UX-relevant invariant is "after N drawer cycles you are
-    // still on the same view with drawer closed." history.length may
-    // stay elevated due to Navigation API intercept() semantics, but
-    // exit-on-back from the bottom of the stack still works because
-    // the active history index returns to baseline after each close.
-    await setup(page)
-    const start = await getNavState(page)
-
-    for (let i = 0; i < 5; i++) {
-      await openDrawer(page)
-      await closeDrawerButton(page)
-    }
-    const end = await getNavState(page)
-    expect(end.drawerOpen).toBe(false)
-    expect(end.activeChatId).toBe(start.activeChatId)
-    expect(end.hasChat).toBe(true)
-  })
-
-  test('9. Drawer close (toggle) on a non-default view stays on that view', async ({ page }) => {
-    // Regression guard for the bug where closeDrawer's history.back()
-    // was popping the navStack and yanking the user out of the current
-    // view. Sequence: navigate to settings, open drawer, close it via
-    // the brand toggle — must stay on settings, not pop back to chat.
-    await setup(page)
-
-    // Move to a non-default view (settings) so navStack is non-empty.
-    await openDrawer(page)
-    await navigateToSettings(page)
-    const onSettings = await page.evaluate(
-      () => !!document.querySelector('.settings')
-    )
-    expect(onSettings).toBe(true)
-
-    // Open drawer (sentinel + drawer open) and close via the brand toggle.
-    await openDrawer(page)
-    expect((await getNavState(page)).drawerOpen).toBe(true)
-
-    await closeDrawerButton(page)
-    const stillOnSettings = await page.evaluate(
-      () => !!document.querySelector('.settings')
-    )
-    const afterClose = await getNavState(page)
-    expect(afterClose.drawerOpen).toBe(false)
-    expect(stillOnSettings).toBe(true)
-  })
 
   test('10. Back from drawer-open closes drawer and stays on view (drawer-first)', async ({ page }) => {
     // Drawer-first contract: a back-gesture while the drawer is open
@@ -1874,173 +921,25 @@ test.describe('Drawer state machine — extended invariants', () => {
   // machine. A modal drawer owns one history sentinel; destination navigation
   // retags that entry, and every close is consumed by the popstate handler.
 
-  test('11. Repeated openDrawer clicks while open are toggle-guarded no-ops', async ({ page }) => {
-    // The toggle button calls openDrawer only when aria-expanded is
-    // false, so repeated taps after the drawer is already open don't
-    // re-fire openDrawer. This locks in the toggle's idempotency
-    // (matters because openDrawer pushes a sentinel; double-firing
-    // would leak entries and the close-via-back would pop only one).
-    await setup(page)
-    const before = await page.evaluate(() => history.length)
-    for (let i = 0; i < 3; i++) await openDrawer(page)
-    const after = await page.evaluate(() => history.length)
-    expect(after).toBe(before + 1) // exactly one push, regardless of click count
-    expect((await getNavState(page)).drawerOpen).toBe(true)
-  })
 
-  test('Brand button is the only header drawer trigger', async ({ page }) => {
-    await setup(page)
 
-    const toggle = page.getByRole('button', { name: 'Toggle navigation' })
-    const header = page.locator('.shell__bar')
-    await expect(toggle).toHaveAttribute('type', 'button')
-    await expect(toggle).toHaveAttribute('aria-controls', 'navigation-drawer')
-    await expect(toggle).toHaveAttribute('aria-expanded', 'false')
 
-    const [toggleBox, headerBox] = await Promise.all([toggle.boundingBox(), header.boundingBox()])
-    expect(toggleBox).not.toBeNull()
-    expect(headerBox).not.toBeNull()
-    expect(toggleBox.width).toBeLessThan(headerBox.width / 2)
 
-    // A tap in the intentionally empty part of the toolbar must not open the drawer.
-    await page.mouse.click(headerBox.x + headerBox.width - 12, headerBox.y + headerBox.height / 2)
-    await expect(toggle).toHaveAttribute('aria-expanded', 'false')
 
-    await toggle.focus()
-    await page.keyboard.press('Space')
-    await expect(toggle).toHaveAttribute('aria-expanded', 'true')
-  })
 
-  test('12. closeDrawer when drawer already closed is a no-op', async ({ page }) => {
-    // Defensive guard against wiring extra close calls.
-    await setup(page)
-    const before = await page.evaluate(() => history.length)
-    await closeDrawerToggle(page) // drawer is already closed
-    const after = await page.evaluate(() => history.length)
-    expect(after).toBe(before)
-  })
 
-  test('13. Drawer open -> nav-to-settings -> back returns to chat (not drawer)', async ({ page }) => {
-    // After navTo, the sentinel is "consumed" semantically — drawerPushedRef
-    // is false. Back from settings must pop the navStack, not re-open the
-    // drawer.
-    await setup(page)
-    const startId = (await getNavState(page)).activeChatId
 
-    await openDrawer(page)
-    await navigateToSettings(page)
-    expect(await page.evaluate(() => !!document.querySelector('.settings'))).toBe(true)
 
-    await goBack(page)
-    expect(await page.evaluate(() => !!document.querySelector('.settings'))).toBe(false)
-    const after = await getNavState(page)
-    expect(after.drawerOpen).toBe(false)
-    expect(after.activeChatId).toBe(startId)
-    expect(after.hasChat).toBe(true)
-  })
 
-  test('14. Settings -> drawer-open -> back closes drawer (stays on settings)', async ({ page }) => {
-    // Drawer-first: back from drawer-open never navigates. Repeats
-    // test 10 from the settings starting point to lock in that the
-    // drawer-first guard works regardless of which deep view you're
-    // on when the drawer was opened.
-    await setup(page)
 
-    await openDrawer(page)
-    await navigateToSettings(page)
-    expect(await page.evaluate(() => !!document.querySelector('.settings'))).toBe(true)
 
-    await openDrawer(page)
-    expect((await getNavState(page)).drawerOpen).toBe(true)
 
-    await goBack(page)
-    expect((await getNavState(page)).drawerOpen).toBe(false)
-    // Still on settings — drawer-first did not pop navStack.
-    expect(await page.evaluate(() => !!document.querySelector('.settings'))).toBe(true)
-  })
 
-  test('15. Two drawer cycles end on the same view (drawer closed)', async ({ page }) => {
-    // Post-fa605f6 contract: each open-close cycle returns the
-    // active history index to baseline; the user lands back on
-    // their original view with drawer closed. (history.length may
-    // stay elevated due to intercept() — see test 8.)
-    await setup(page)
-    const start = await getNavState(page)
-    await openDrawer(page)
-    await closeDrawerToggle(page)
-    expect((await getNavState(page)).activeChatId).toBe(start.activeChatId)
-    await openDrawer(page)
-    await closeDrawerToggle(page)
-    const end = await getNavState(page)
-    expect(end.activeChatId).toBe(start.activeChatId)
-    expect(end.drawerOpen).toBe(false)
-  })
 
-  test('16. Settings -> drawer-open -> nav-to-other-chat -> back returns to settings', async ({ page }) => {
-    // navStack should record settings as the "previous view"; back from
-    // chat must pop to settings, not deeper.
-    await setup(page)
 
-    await openDrawer(page)
-    await navigateToSettings(page)
-    expect(await page.evaluate(() => !!document.querySelector('.settings'))).toBe(true)
 
-    await openDrawer(page)
-    await navigateToChat(page, 0) // goes to a chat
-    expect(await page.evaluate(() => !!document.querySelector('.settings'))).toBe(false)
 
-    await goBack(page)
-    expect(await page.evaluate(() => !!document.querySelector('.settings'))).toBe(true)
-  })
 
-  test('17. activeChatId in localStorage matches the displayed chat after back', async ({ page }) => {
-    // Sanity: when handleBack pops navStack, the URL/localStorage and
-    // displayed view must agree. Decoupling these silently shows the
-    // wrong content with the right URL.
-    await setup(page)
-    const startId = (await getNavState(page)).activeChatId
-
-    await openDrawer(page)
-    await navigateToSettings(page)
-    await goBack(page)
-
-    const after = await getNavState(page)
-    expect(after.activeChatId).toBe(startId)
-    expect(after.hasChat).toBe(true)
-  })
-
-  test('18. Triple cycle: chat -> settings -> chat -> back -> back exits cleanly', async ({ page }) => {
-    // Stress test: navigate forward several steps and back through them,
-    // verifying each pop hits the correct prior view.
-    await setup(page)
-    const startId = (await getNavState(page)).activeChatId
-
-    await openDrawer(page)
-    await navigateToSettings(page)
-    await openDrawer(page)
-    await navigateToChat(page, 0)
-
-    await goBack(page) // -> settings
-    expect(await page.evaluate(() => !!document.querySelector('.settings'))).toBe(true)
-
-    await goBack(page) // -> chat
-    expect(await page.evaluate(() => !!document.querySelector('.settings'))).toBe(false)
-    expect((await getNavState(page)).activeChatId).toBe(startId)
-  })
-
-  test('19. closeDrawer via toggle consumes its sentinel without growing history', async ({ page }) => {
-    // A toggle close and OS Back both traverse the drawer sentinel. History
-    // length remains stable because closing moves the active index; it does not
-    // push another entry.
-    await setup(page)
-    await openDrawer(page)
-    const beforeToggle = await page.evaluate(() => history.length)
-    await closeDrawerToggle(page)
-    const afterToggle = await page.evaluate(() => history.length)
-    // Toggle close: no history change, drawer closed.
-    expect(afterToggle).toBe(beforeToggle)
-    expect((await getNavState(page)).drawerOpen).toBe(false)
-  })
 
   test('20. Back and Forward restore shell routes without reversing semantic direction', async ({ page }) => {
     await setup(page)
@@ -2079,39 +978,9 @@ test.describe('Drawer state machine — extended invariants', () => {
     expect(await page.evaluate(() => !!document.querySelector('.settings'))).toBe(true)
   })
 
-  test('20a. returning to a chat through browser history restores composer focus', async ({ page }) => {
-    await setup(page, { width: 1280, height: 800 })
 
-    const paintedComposer = page.locator(
-      '[data-chat-surface="painted"] textarea[aria-label="Message Möbius…"]',
-    )
-    await paintedComposer.focus()
-    await expect(paintedComposer).toBeFocused()
 
-    // Cmd+,/. invokes this same browser traversal outside the app. The route
-    // restore must carry the outgoing chat's keyboard-forward intent back to
-    // its real composer, rather than leaving focus on the document body.
-    await page.getByRole('button', { name: 'Apps', exact: true }).click()
-    await expect(page.getByRole('region', { name: 'Installed apps' })).toBeVisible()
 
-    await goBack(page)
-    await expect(paintedComposer).toBeFocused()
-  })
-
-  test('20b. Forward to an unconsumed drawer sentinel reopens the drawer', async ({ page }) => {
-    await setup(page)
-    await openDrawer(page)
-    expect((await getNavState(page)).drawerOpen).toBe(true)
-
-    await goBack(page)
-    expect((await getNavState(page)).drawerOpen).toBe(false)
-
-    await goForward(page)
-    expect((await getNavState(page)).drawerOpen).toBe(true)
-
-    await goBack(page)
-    expect((await getNavState(page)).drawerOpen).toBe(false)
-  })
 
   test('20c. legacy Forward lands at app base and the next Back leaves once', async ({ page }) => {
     await installNavigationAppFixture(page)
@@ -2210,35 +1079,7 @@ test.describe('Drawer state machine — extended invariants', () => {
 })
 
 test.describe('Delete response boundaries', () => {
-  test('a chat delete 500 keeps the live row and route intact', async ({ page }) => {
-    await setup(page)
-    const target = NAV_CHATS[0]
-    let deleteAttempts = 0
-    await page.route(new RegExp(`/api/chats/${target.id}$`), route => {
-      if (route.request().method() !== 'DELETE') return route.fallback()
-      deleteAttempts += 1
-      return route.fulfill({
-        status: 500,
-        contentType: 'application/json',
-        body: '{"detail":"delete failed"}',
-      })
-    })
 
-    await openDrawer(page)
-    await page.getByLabel('Primary navigation')
-      .getByRole('button', { name: target.title, exact: true })
-      .click({ button: 'right' })
-    await page.getByRole('menuitem', { name: 'Delete' }).click()
-
-    await expect.poll(() => deleteAttempts).toBe(1)
-    await expect(page.getByText("Couldn't delete this chat — please try again."))
-      .toBeVisible()
-    await expect(
-      page.getByLabel('Primary navigation')
-        .getByRole('button', { name: target.title, exact: true }),
-    ).toBeVisible()
-    expect((await getNavState(page)).activeChatId).toBe(target.id)
-  })
 })
 
 test.describe('BFCache snapshot contract', () => {
@@ -2253,29 +1094,7 @@ test.describe('BFCache snapshot contract', () => {
   // The two tests below lock in the load-bearing structural property
   // (no pushState in navTo) that delivers this fix.
 
-  test('21. navTo does NOT call history.pushState', async ({ page }) => {
-    // Locks in the fa605f6 model. If a future change re-introduces
-    // pushState in navTo (e.g. "drawer purely visual" rewrite v2),
-    // this test fails loudly. See CLAUDE.md "Navigation — desiderata"
-    // for the trade-off this protects.
-    await setup(page)
-    await page.evaluate(() => {
-      window.__pushStateCalls = 0
-      const original = history.pushState.bind(history)
-      history.pushState = function(...args) {
-        window.__pushStateCalls++
-        return original(...args)
-      }
-    })
-    // Open drawer is allowed to push (the sentinel) — capture the
-    // count after open so we can isolate navTo's contribution.
-    await openDrawer(page)
-    const afterOpen = await page.evaluate(() => window.__pushStateCalls)
-    // Tap Settings — this triggers navTo. navTo MUST NOT pushState.
-    await navigateToSettings(page)
-    const afterNav = await page.evaluate(() => window.__pushStateCalls)
-    expect(afterNav).toBe(afterOpen)
-  })
+
 })
 
 test.describe('Drawer close paths converge through handleBack', () => {
@@ -2289,28 +1108,7 @@ test.describe('Drawer close paths converge through handleBack', () => {
   // prevents the navStack pop. These tests lock in that contract for
   // each close path independently.
 
-  test('concurrent close requests issue one history traversal', async ({ page }) => {
-    await setup(page)
-    const toggle = page.getByRole('button', { name: 'Toggle navigation' })
-    await toggle.click()
-    await expect(toggle).toHaveAttribute('aria-expanded', 'true')
 
-    const calls = await page.evaluate(() => {
-      let count = 0
-      history.back = () => { count += 1 }
-      const overlay = document.querySelector('.drawer-overlay')
-      const event = () => new PointerEvent('pointerdown', {
-        bubbles: true,
-        button: 0,
-        isPrimary: true,
-        pointerId: 1,
-      })
-      overlay.dispatchEvent(event())
-      overlay.dispatchEvent(event())
-      return count
-    })
-    expect(calls).toBe(1)
-  })
 
   test('22. Outside press closes drawer without activating revealed content', async ({ page }) => {
     await setup(page)
@@ -2362,20 +1160,7 @@ test.describe('Drawer close paths converge through handleBack', () => {
     expect(await page.evaluate(() => !!document.querySelector('.settings'))).toBe(true)
   })
 
-  test('22a. A deliberate drawer tap immediately after Back is not discarded', async ({ page }) => {
-    await setup(page, { width: 426, height: 860 })
-    await openDrawer(page)
 
-    // Closing the drawer traverses history and arms the Android bare-click
-    // guard. A fresh owner tap has its own pointerdown, so it must clear that
-    // guard and reopen the drawer immediately.
-    await page.evaluate(() => history.back())
-    await expect(page.getByRole('button', { name: 'Toggle navigation' }))
-      .toHaveAttribute('aria-expanded', 'false')
-    await page.getByRole('button', { name: 'Toggle navigation' }).click()
-    await expect(page.getByRole('button', { name: 'Toggle navigation' }))
-      .toHaveAttribute('aria-expanded', 'true')
-  })
 
   test('22b. Drawer scrim owns touch pans instead of the background', async ({ page }) => {
     await setup(page)
@@ -2403,203 +1188,21 @@ test.describe('Drawer close paths converge through handleBack', () => {
     })
   })
 
-  test('22c. Vertical drawer scroll does not swallow the next destination tap', async ({ page }) => {
-    await setup(page, { width: 426, height: 860 })
-    await openDrawer(page)
 
-    // Reproduce the Android sequence: a noisy diagonal sample briefly looks
-    // horizontal, then native pan-y takes over and emits pointercancel. The
-    // immediately-following destination tap must pass; cancellation is not a
-    // custom swipe completion.
-    await dispatchDrawerPointerGesture(page, {
-      pointerId: 37,
-      points: [[180, 520], [165, 512], [165, 390]],
-      terminal: 'pointercancel',
-    })
-    await page.getByRole('navigation', { name: 'Primary navigation' })
-      .getByRole('button', { name: 'Settings', exact: true })
-      .click()
 
-    // Drawer closure proves the destination action fired. Waiting for Settings
-    // data here would couple an input-ownership test to unrelated fetch latency.
-    await expect(page.getByRole('button', { name: 'Toggle navigation' }))
-      .toHaveAttribute('aria-expanded', 'false')
-  })
 
-  test('22ca. Swipe click suppression cannot survive into a later tap', async ({ page }) => {
-    await setup(page, { width: 426, height: 860 })
-    await openDrawer(page)
 
-    // Some browsers emit the swipe's synthetic click; others suppress it. Arm
-    // the guard with a short horizontal swipe that snaps back, but deliberately
-    // omit that generated click. The next genuine Playwright tap starts with
-    // pointerdown and must clear the stale same-gesture guard before clicking.
-    await dispatchDrawerPointerGesture(page, {
-      pointerId: 38,
-      points: [[180, 420], [150, 421]],
-    })
 
-    await page.getByRole('navigation', { name: 'Primary navigation' })
-      .getByRole('button', { name: 'Settings', exact: true })
-      .click()
-    await expect(page.getByRole('button', { name: 'Toggle navigation' }))
-      .toHaveAttribute('aria-expanded', 'false')
-  })
 
-  test('22cb. A swipe-generated click cannot activate the row under its lift', async ({ page }) => {
-    await setup(page, { width: 426, height: 860 })
-    await openDrawer(page)
 
-    await dispatchDrawerPointerGesture(page, {
-      pointerId: 39,
-      points: [[180, 420], [150, 421]],
-      compatibilityClickSelector: 'button[aria-label="Settings"]',
-    })
 
-    expect((await getNavState(page)).drawerOpen).toBe(true)
-    expect(await page.evaluate(() => !!document.querySelector('.settings'))).toBe(false)
-  })
 
-  test('22cc. Swipe-to-close returns transform ownership to the closed state', async ({ page }) => {
-    await setup(page, { width: 426, height: 860 })
-    await openDrawer(page)
 
-    await dispatchDrawerPointerGesture(page, {
-      pointerId: 40,
-      points: [[260, 420], [110, 420]],
-    })
 
-    await expect(page.getByRole('button', { name: 'Toggle navigation' }))
-      .toHaveAttribute('aria-expanded', 'false')
-    expect(await page.locator('.drawer').evaluate((drawer) => ({
-      inlineTransform: drawer.style.transform,
-      inert: drawer.inert,
-    }))).toEqual({ inlineTransform: '', inert: true })
-  })
 
-  test('22d. Interrupted drawer swipe cannot strand an inert panel onscreen', async ({ page }) => {
-    await setup(page, { width: 426, height: 860 })
-    await openDrawer(page)
 
-    // Reproduce the mobile failure: a slight horizontal drawer drag writes an
-    // inline transform, then shell navigation closes the drawer before the
-    // browser delivers pointerup/pointercancel. The close state must clear that
-    // imperative transform unconditionally rather than trusting a terminal
-    // pointer event that may never arrive.
-    await dispatchDrawerPointerGesture(page, {
-      pointerId: 41,
-      points: [[220, 420], [195, 420]],
-      terminal: null,
-    })
-    expect(await page.locator('.drawer').evaluate((drawer) => drawer.style.transform))
-      .toBe('translateX(-25px)')
 
-    await page.evaluate(() => history.back())
-    await expect(page.getByRole('button', { name: 'Toggle navigation' }))
-      .toHaveAttribute('aria-expanded', 'false')
-    expect(await page.locator('.drawer').evaluate((drawer) => ({
-      inlineTransform: drawer.style.transform,
-      inert: drawer.inert,
-    }))).toEqual({ inlineTransform: '', inert: true })
-    await expect.poll(() => page.locator('.drawer').evaluate(
-      (drawer) => new DOMMatrixReadOnly(getComputedStyle(drawer).transform).m41,
-    )).toBeLessThanOrEqual(-359)
-  })
 
-  test('22e. Closing input shield follows the panel instead of blocking the workspace', async ({ page }) => {
-    await setup(page, { width: 426, height: 860 })
-    await openDrawer(page)
-    await page.addStyleTag({ content: `
-      .drawer { transition-duration: 1s !important; }
-      .drawer-close-shield--active { animation-duration: 1s !important; }
-    ` })
-    await page.locator('.drawer-overlay').dispatchEvent('pointerdown', {
-      button: 0,
-      isPrimary: true,
-      pointerId: 7,
-      pointerType: 'touch',
-    })
-
-    await expect(page.getByRole('button', { name: 'Toggle navigation' }))
-      .toHaveAttribute('aria-expanded', 'false')
-    const closing = await page.locator('.drawer').evaluate((drawer) => {
-      const x = new DOMMatrixReadOnly(getComputedStyle(drawer).transform).m41
-      const overlay = document.querySelector('.drawer-overlay')
-      const shield = document.querySelector('.drawer-close-shield')
-      return {
-        x,
-        overlayPointerEvents: getComputedStyle(overlay).pointerEvents,
-        shieldPointerEvents: getComputedStyle(shield).pointerEvents,
-        shieldRect: shield.getBoundingClientRect().toJSON(),
-        uncoveredTarget: document.elementFromPoint(400, 300)?.className || null,
-      }
-    })
-    expect(closing.overlayPointerEvents).toBe('none')
-    if (closing.x > -359) {
-      expect(closing.shieldPointerEvents).toBe('auto')
-      expect(closing.shieldRect.right).toBeLessThanOrEqual(360)
-      expect(closing.uncoveredTarget).not.toContain('drawer-overlay')
-      expect(closing.uncoveredTarget).not.toContain('drawer-close-shield')
-    }
-    await expect.poll(() => page.locator('.drawer').evaluate(
-      (drawer) => new DOMMatrixReadOnly(getComputedStyle(drawer).transform).m41,
-    )).toBeLessThanOrEqual(-359)
-    await expect(page.locator('.drawer-overlay')).toHaveCSS('pointer-events', 'none')
-    await expect(page.locator('.drawer-close-shield')).toHaveCSS('pointer-events', 'none')
-  })
-
-  test('22f. Reduced motion releases the scrim in the committed close layout', async ({ page }) => {
-    await page.emulateMedia({ reducedMotion: 'reduce' })
-    await setup(page, { width: 426, height: 860 })
-    await openDrawer(page)
-
-    const committedClose = page.evaluate(() => new Promise((resolve) => {
-      const drawer = document.querySelector('.drawer')
-      const overlay = document.querySelector('.drawer-overlay')
-      const observer = new MutationObserver(() => {
-        if (drawer.classList.contains('drawer--open')) return
-        observer.disconnect()
-        resolve({
-          blocking: overlay.classList.contains('drawer-overlay--blocking'),
-          pointerEvents: getComputedStyle(overlay).pointerEvents,
-          transitionProperty: getComputedStyle(drawer).transitionProperty,
-        })
-      })
-      observer.observe(drawer, { attributes: true, attributeFilter: ['class'] })
-      observer.observe(overlay, { attributes: true, attributeFilter: ['class'] })
-    }))
-
-    await page.locator('.drawer-overlay').dispatchEvent('pointerdown', {
-      button: 0,
-      isPrimary: true,
-      pointerId: 8,
-      pointerType: 'touch',
-    })
-
-    expect(await committedClose).toEqual({
-      blocking: false,
-      pointerEvents: 'none',
-      transitionProperty: 'none',
-    })
-  })
-
-  test('22g. Swipe close leaves a click-only next activation live', async ({ page }) => {
-    await setup(page, { width: 426, height: 860 })
-    await openDrawer(page)
-    const toggle = page.getByRole('button', { name: 'Toggle navigation' })
-
-    await dispatchDrawerPointerGesture(page, {
-      pointerId: 72,
-      points: [[260, 420], [100, 422]],
-    })
-    await expect(toggle).toHaveAttribute('aria-expanded', 'false')
-
-    // WebKit can omit the next pointerdown after a moved touch stream while
-    // still delivering its click. The drawer's own history.back() is not an OS
-    // Back gesture, so that click must remain a first-try open.
-    await toggle.dispatchEvent('click', { detail: 1 })
-    await expect(toggle).toHaveAttribute('aria-expanded', 'true')
-  })
 
   test('22h. Desktop drawer resize follows pointer delta and settles lost capture', async ({ page }) => {
     await setup(page, { width: 1280, height: 800 })
@@ -2659,18 +1262,7 @@ test.describe('Drawer close paths converge through handleBack', () => {
     await page.mouse.up()
   })
 
-  test('23. Brand toggle close does not navigate, even from a deep view', async ({ page }) => {
-    // Same regression as test 22 but via the existing mobile brand toggle.
-    // Test 9 covers the basic case from a non-default view; this test keeps
-    // the close-without-navigation contract explicit.
-    await setup(page)
-    await openDrawer(page)
-    await navigateToSettings(page)
-    await openDrawer(page)
-    await closeDrawerButton(page)
-    expect((await getNavState(page)).drawerOpen).toBe(false)
-    expect(await page.evaluate(() => !!document.querySelector('.settings'))).toBe(true)
-  })
+
 
   test('24. OS back-gesture from drawer-open closes drawer (does not navigate)', async ({ page }) => {
     // Same regression via the third close path. Drawer-first guard

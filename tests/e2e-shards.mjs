@@ -40,8 +40,8 @@ export const E2E_SHARDS = [
   ],
   [
     'stream-reconnect.spec.mjs',
-    'frontend.spec.mjs',
-    'chat-redesign.spec.mjs',
+    'retained-chat-history.spec.mjs',
+    'question-scroll-contract.spec.mjs',
     'app-canvas.spec.mjs',
     'project-saved-collaboration.spec.mjs',
     'recovery-resume.spec.mjs',
