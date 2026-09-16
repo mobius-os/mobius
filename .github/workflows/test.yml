@@ -335,10 +335,7 @@ jobs:
           set +e
           # --kill-after sends SIGKILL 30s after the SIGINT if Playwright
           # ignores the interrupt, so the step can't hang past the cap.
-          timeout --signal=INT --kill-after=30s 12m npx playwright test \
-            tests/platform-update-modal.spec.mjs tests/bootstrap.spec.mjs \
-            --grep "a staged update can review another release before one restart|staged-update actions stack without overflow in a narrow settings pane|a rolled-back apply stays open with an explicit repair action|a rollback result keeps an explicit repair action when status reads fail|an unfinished installed image update routes to the repair action|a newer release remains the single next action while installed activation waits|a failed container result survives reopening Settings without an unsolicited alert|managed deployment presents Möbius sign-in without local setup" \
-            --repeat-each=2 --retries=0 --workers=2 --trace=on
+          timeout --signal=INT --kill-after=30s 12m npx playwright test
           echo "exit=$?" >> "$GITHUB_OUTPUT"
           exit 0
         env:
