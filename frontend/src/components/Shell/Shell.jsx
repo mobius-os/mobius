@@ -3010,9 +3010,12 @@ export default function Shell({ onInitialVisualReady }) {
                 duration: 8000,
                 action: {
                   label: `Open ${app.name}`,
-                  onAction: () => placeInWorkspace({
-                    ...placementRequest,
-                    activation: ACTIVATE_FOREGROUND,
+                  onAction: () => dispatchWorkspace({
+                    type: 'APPLY_PLACEMENT',
+                    toast: null,
+                    resolve: current => paneModel.setSingleScreen(current, {
+                      kind: 'app', id: String(placementRequest.item.id),
+                    }),
                   }),
                 },
               })

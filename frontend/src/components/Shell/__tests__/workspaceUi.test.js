@@ -974,7 +974,7 @@ test('a phone preview provides a direct foreground action without displacing its
     shell.indexOf("} else if (ev.type === 'open_item')"),
   )
   assert.match(previewEvent, /placeInWorkspace\(placementRequest\)[\s\S]*?paneModel\.modeForRect\(rect\) !== 'phone'[\s\S]*?showToast\(`\$\{app\.name\} is ready\.`,/)
-  assert.match(previewEvent, /label: `Open \$\{app\.name\}`[\s\S]*?activation: ACTIVATE_FOREGROUND/)
+  assert.match(previewEvent, /label: `Open \$\{app\.name\}`[\s\S]*?paneModel\.setSingleScreen\(current, \{[\s\S]*?kind: 'app'/)
 })
 
 test('large drawer lists memoize ordering and row actions without changing row ownership', () => {
