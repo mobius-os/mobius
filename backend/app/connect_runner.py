@@ -908,9 +908,11 @@ def _serve_connection(conn, command_gate=None):
             print("\nStopped.")
             return
         except urllib.error.HTTPError as exc:
-            if exc.code in (401, 403):
-                print("Token rejected (removed from Mobius?). Re-pair to reconnect.")
-                return
+            # 401/403 is transient during a deploy/restart, or a genuinely
+            # revoked token. Either way keep retrying with backoff: a blip
+            # self-heals and a real revocation simply idles here until the
+            # owner re-pairs or removes this connection -- never a silent
+            # permanent exit that abandons one instance while the others stay up.
             print("HTTP %s; retrying in %ss" % (exc.code, backoff))
         except urllib.error.URLError as exc:
             print("connection lost (%s); retrying in %ss" % (exc.reason, backoff))
@@ -927,28 +929,40 @@ def _serve_connection_safe(conn, command_gate):
 
 
 def _serve_all():
-    """Serve every paired connection from this one runner process."""
-    conns = _connections()
-    if not conns:
+    """Serve every paired connection from this one runner process.
+
+    Supervises each connection independently: one live thread per configured
+    connection, respawned if it exits, and dropped when it is removed from
+    config. A single connection dropping can never leave that instance dark
+    while the others keep running; the process exits only when the last
+    connection is gone or on an explicit stop."""
+    if not _connections():
         print("Not paired. Run with --pair CODE --url URL first.")
         sys.exit(2)
     command_gate = threading.Lock()
-    if len(conns) == 1:
-        _serve_connection(conns[0], command_gate)
-        return
-    print("Serving %d Mobius connections." % len(conns))
-    threads = []
-    for conn in conns:
-        thread = threading.Thread(
-            target=_serve_connection_safe, args=(conn, command_gate), daemon=True,
-            name="mobius-connect-%s" % (conn.get("host_id") or "unknown"),
-        )
-        thread.start()
-        threads.append(thread)
+    threads = {}
     try:
-        for thread in threads:
-            while thread.is_alive():
-                thread.join(timeout=1)
+        while True:
+            conns = _connections()
+            if not conns:
+                break
+            live_keys = set()
+            for conn in conns:
+                key = conn.get("host_id") or conn.get("url")
+                live_keys.add(key)
+                thread = threads.get(key)
+                if thread is None or not thread.is_alive():
+                    thread = threading.Thread(
+                        target=_serve_connection_safe,
+                        args=(conn, command_gate), daemon=True,
+                        name="mobius-connect-%s" % (key or "unknown"),
+                    )
+                    thread.start()
+                    threads[key] = thread
+            for key in [k for k in threads if k not in live_keys]:
+                if not threads[key].is_alive():
+                    threads.pop(key, None)
+            time.sleep(2)
     except KeyboardInterrupt:
         print("\nStopped.")
 
