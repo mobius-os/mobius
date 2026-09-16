@@ -234,7 +234,7 @@ async function setup(
 // not borrow whichever app happens to be installed in the runner database:
 // that used to make the tests silently skip and provided no CI coverage.
 async function installNavigationAppFixture(page) {
-  await page.route(/\/api\/apps(?:\?.*)?$/, route => {
+  await page.route(/\/api\/apps\/?(?:\?.*)?$/, route => {
     if (route.request().method() !== 'GET') return route.fallback()
     return route.fulfill({
       status: 200,
