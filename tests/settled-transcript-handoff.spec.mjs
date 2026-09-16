@@ -202,7 +202,7 @@ async function sendFromBottom(page, surface, text) {
   await page.keyboard.press('Enter')
 }
 
-async function sampleNextSend(page, surface, text, settledAssistantTs) {
+async function sampleNextSend(page, surface, text) {
   await prepareSendFromBottom(page, surface, text)
   const priorCount = await surface.locator('.chat__msg--user').count()
   await page.evaluate(() => {
@@ -225,12 +225,7 @@ async function sampleNextSend(page, surface, text, settledAssistantTs) {
   })
 
   await page.keyboard.press('Enter')
-  await page.waitForFunction(ts => {
-    const rows = document.querySelectorAll(
-      '[data-chat-surface="painted"] .chat__msg--assistant',
-    )
-    return [...rows].some(row => row.dataset.key === `assistant-${ts}`)
-  }, settledAssistantTs, { timeout: 10000 })
+  await expect(surface.locator('.chat__msg--user')).toHaveCount(priorCount + 1)
   await page.evaluate(() => new Promise(resolve => (
     requestAnimationFrame(() => requestAnimationFrame(resolve))
   )))
@@ -253,13 +248,9 @@ test('an authoritative settled-answer handoff cannot move a pinned send', async 
   await expect(scenario.surface.locator('.chat__stop')).toHaveCount(0, {
     timeout: 10000,
   })
-  await page.waitForFunction(ts => {
-    const rows = document.querySelectorAll(
-      '[data-chat-surface="painted"] .chat__msg--assistant',
-    )
-    const key = rows[rows.length - 1]?.dataset.key
-    return key && key !== `assistant-${ts}`
-  }, scenario.settledAssistant.ts)
+  await expect(
+    scenario.surface.locator('.chat__msg--assistant[data-active-assistant="true"]'),
+  ).toHaveCount(0)
 
   // Sample every painted frame across that source handoff. The newly sent row
   // must stay at its semantic pin rather than wait for a later resize repair.
@@ -267,7 +258,6 @@ test('an authoritative settled-answer handoff cannot move a pinned send', async 
     page,
     scenario.surface,
     'Second message',
-    scenario.settledAssistant.ts,
   )
   expect(tops.length).toBeGreaterThan(0)
   expect(Math.max(...tops)).toBeLessThanOrEqual(12)

@@ -1,5 +1,6 @@
 /* Rendered recovery contracts: Resume is acknowledged control, never a queued owner message. */
 import { test as base, expect, chromium } from '@playwright/test'
+import { createMockChatRuntime } from './_mockChatRuntime.mjs'
 
 // An authenticated screenshot-helper browser may run these fully intercepted
 // fixtures against a live build. No fixture request may mutate the real chat.
@@ -59,13 +60,14 @@ async function mount(page, { rejectFirst = false, loseFirstAck = false } = {}) {
   const attempts = []
   const unexpected = []
   const messages = [{ role: 'user', content: 'Original question A', cid: 'original-a', ts: 1788800000100 }, partial]
-  const detail = () => ({
-    id: CHAT, title: 'Recovery fixture', provider: 'codex', messages,
-    total: messages.length, offset: 0, running: resumed, pending_messages: [queued],
-    pending_question_id: null, active_goal_objective: null,
-    recovery_run_id: resumed ? null : 'interrupted-a',
-    active_assistant_message_id: resumed ? 'assistant-resumed-a' : null,
+  const runtime = createMockChatRuntime({
+    pending_messages: [queued],
+    recovery_run_id: 'interrupted-a',
     updated_at: '2026-09-08T17:00:00Z',
+  })
+  const detail = () => runtime.detail({
+    id: CHAT, title: 'Recovery fixture', provider: 'codex', messages,
+    total: messages.length, offset: 0,
   })
   // Block mutations globally, not only the expected Resume request. This also
   // keeps read receipts, preference writes, uploads, and accidental sends local.
@@ -85,6 +87,12 @@ async function mount(page, { rejectFirst = false, loseFirstAck = false } = {}) {
       const message = { role: 'user', kind: 'continuation', continuation_reason: 'manual',
         content: 'continue', cid: attempts.at(-1).cid, ts: 1788800000600 }
       messages.push(message)
+      runtime.update({
+        running: true,
+        run_id: 'resumed-a',
+        recovery_run_id: null,
+        active_assistant_message_id: 'assistant-resumed-a',
+      })
       if (loseFirstAck && attempts.length === 1) return route.abort('connectionreset')
       return route.fulfill({ status: 202, json: { status: 'started', message, run_id: 'resumed-a' } })
     }
@@ -104,7 +112,9 @@ async function mount(page, { rejectFirst = false, loseFirstAck = false } = {}) {
       }
       if (holdDetail) { detailRequested.resolve(); await detailAccepted.promise }
       if (rejectDetail) return route.fulfill({ status: 503, json: { detail: 'Fixture transcript unavailable' } })
-      return route.fulfill({ json: detail() })
+      return route.fulfill({
+        json: url.pathname === `${path}/runtime` ? runtime.snapshot() : detail(),
+      })
     }
     if (url.pathname === `${path}/stream`) return route.fulfill({ status: 204, body: '' })
     if (url.pathname === '/api/chats') return route.fulfill({ json: [detail()] })
@@ -164,6 +174,11 @@ async function mount(page, { rejectFirst = false, loseFirstAck = false } = {}) {
       messages.push({ id: 'assistant-resumed-a', role: 'assistant', ts: 1788800000700,
         content: text, blocks: [{ type: 'text', content: text },
           { type: 'error', message: 'Interrupted work is ready to resume.', resumable: true }] })
+      runtime.update({
+        running: false,
+        recovery_run_id: 'interrupted-a',
+        active_assistant_message_id: null,
+      })
     },
   }
 }
