@@ -1,5 +1,6 @@
 import { test, expect } from '@playwright/test'
 import { createTaggedChat, attachCleanup } from './_chatTracker.mjs'
+import { createMockChatRuntime } from './_mockChatRuntime.mjs'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
 // Hold the acknowledgement beyond the keyboard-close transition so the test
@@ -66,16 +67,18 @@ function deferred() {
 }
 
 test('keyboard close never paints a sent row below its pin', async ({ page }) => {
-  let running = false
   let sendCount = 0
   let serverMessages = []
+  const runtime = createMockChatRuntime()
   await page.setViewportSize({ width: 412, height: 915 })
   await installStreams(page)
   await page.route(/\/api\/chats\/[0-9a-f-]+\/messages$/, async route => {
     const request = route.request().postDataJSON()
     sendCount += 1
-    running = true
-    setTimeout(() => { running = false }, sendCount === 1 ? 120 : 2500)
+    runtime.update({ running: true })
+    setTimeout(() => {
+      runtime.update({ running: false })
+    }, sendCount === 1 ? 120 : 2500)
     const message = {
       role: 'user',
       content: request.content,
@@ -104,12 +107,7 @@ test('keyboard close never paints a sent row below its pin', async ({ page }) =>
     route.fulfill({
       status: 200,
       contentType: 'application/json',
-      body: JSON.stringify({
-        running,
-        active_goal_objective: null,
-        pending_messages: [],
-        pending_question_id: null,
-      }),
+      body: JSON.stringify(runtime.snapshot()),
     })
   ))
   await page.route(new RegExp(`/api/chats/${chat.id}(?:\\?.*)?$`), route => {
@@ -117,16 +115,13 @@ test('keyboard close never paints a sent row below its pin', async ({ page }) =>
     return route.fulfill({
       status: 200,
       contentType: 'application/json',
-      body: JSON.stringify({
+      body: JSON.stringify(runtime.detail({
         id: chat.id,
         messages: serverMessages,
         total: serverMessages.length,
         offset: 0,
-        running,
-        pending_messages: [],
-        pending_question_id: null,
         provider: 'codex',
-      }),
+      })),
     })
   })
   await page.goto(`${BASE}/shell/?chat=${encodeURIComponent(chat.id)}`, {
@@ -147,6 +142,7 @@ test('keyboard close never paints a sent row below its pin', async ({ page }) =>
       ts: 1700000801000,
     },
   ]
+  runtime.update()
 
   const surface = page.locator('[data-chat-surface="painted"]')
   const input = surface.getByRole('textbox', { name: 'Message Möbius…' })
@@ -265,8 +261,8 @@ test('an idle runtime snapshot cannot retire an unacknowledged fresh send', asyn
   const runtimeRaceReturned = deferred()
   const releaseAcknowledgement = deferred()
   let raceArmed = false
-  let running = false
   let postSendDetailReads = 0
+  const runtime = createMockChatRuntime()
 
   await page.route(new RegExp(`/api/chats/${chat.id}/messages$`), async route => {
     const request = route.request().postDataJSON()
@@ -279,7 +275,7 @@ test('an idle runtime snapshot cannot retire an unacknowledged fresh send', asyn
       ts: 1700001000000,
       cid: request.cid,
     }
-    running = true
+    runtime.update({ running: true })
     await route.fulfill({
       status: 202,
       contentType: 'application/json',
@@ -298,12 +294,7 @@ test('an idle runtime snapshot cannot retire an unacknowledged fresh send', asyn
       await route.fulfill({
         status: 200,
         contentType: 'application/json',
-        body: JSON.stringify({
-          running,
-          active_goal_objective: null,
-          pending_messages: [],
-          pending_question_id: null,
-        }),
+        body: JSON.stringify(runtime.snapshot()),
       })
       if (raceArmed) runtimeRaceReturned.resolve()
     },
@@ -314,16 +305,13 @@ test('an idle runtime snapshot cannot retire an unacknowledged fresh send', asyn
     return route.fulfill({
       status: 200,
       contentType: 'application/json',
-      body: JSON.stringify({
+      body: JSON.stringify(runtime.detail({
         id: chat.id,
         messages: history,
         total: history.length,
         offset: 0,
-        running,
-        pending_messages: [],
-        pending_question_id: null,
         provider: 'codex',
-      }),
+      })),
     })
   })
 

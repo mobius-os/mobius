@@ -1,5 +1,6 @@
 import { test, expect } from '@playwright/test'
 import { createTaggedChat, attachCleanup } from './_chatTracker.mjs'
+import { createMockChatRuntime } from './_mockChatRuntime.mjs'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8000'
 
@@ -102,8 +103,8 @@ async function mountScenario(page) {
   }
 
   let messages = seedHistory()
-  let running = false
   let sendCount = 0
+  const runtime = createMockChatRuntime()
 
   await installStreamMock(page, liveItems)
 
@@ -116,12 +117,7 @@ async function mountScenario(page) {
     route.fulfill({
       status: 200,
       contentType: 'application/json',
-      body: JSON.stringify({
-        running,
-        active_goal_objective: null,
-        pending_messages: [],
-        pending_question_id: null,
-      }),
+      body: JSON.stringify(runtime.snapshot()),
     })
   ))
   await page.route(new RegExp(`/api/chats/${chat.id}(?:\\?.*)?$`), async route => {
@@ -129,23 +125,20 @@ async function mountScenario(page) {
     return route.fulfill({
       status: 200,
       contentType: 'application/json',
-      body: JSON.stringify({
+      body: JSON.stringify(runtime.detail({
         id: chat.id,
         title: 'Settled transcript handoff',
         messages,
         total: messages.length,
         offset: 0,
-        running,
-        pending_messages: [],
-        pending_question_id: null,
         provider: 'codex',
-      }),
+      })),
     })
   })
   await page.route(new RegExp(`/api/chats/${chat.id}/messages$`), async route => {
     const request = route.request().postDataJSON()
     sendCount += 1
-    running = true
+    runtime.update({ running: true })
     const message = {
       role: 'user',
       content: request.content,
@@ -157,7 +150,7 @@ async function mountScenario(page) {
     if (sendCount === 1) {
       setTimeout(() => {
         messages = [...messages, settledAssistant]
-        running = false
+        runtime.update({ running: false })
       }, 320)
     }
     await new Promise(resolve => setTimeout(resolve, 100))

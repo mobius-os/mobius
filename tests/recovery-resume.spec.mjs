@@ -131,7 +131,13 @@ async function mount(page, { rejectFirst = false, loseFirstAck = false } = {}) {
   await page.goto(`${BASE}/shell/?chat=${CHAT}`, { waitUntil: 'domcontentloaded' })
   await page.bringToFront()
   const surface = page.locator('[data-chat-surface="painted"]')
-  await expect(surface.getByRole('button', { name: 'Resume', exact: true })).toBeVisible({ timeout: 15000 })
+  const resumeNudge = surface.getByRole('button', {
+    name: 'Turn paused — tap to resume',
+    exact: true,
+  })
+  await expect(resumeNudge).toBeVisible({ timeout: 15000 })
+  await resumeNudge.click()
+  await expect(surface.getByRole('button', { name: 'Resume', exact: true })).toBeVisible()
   const composer = surface.getByRole('textbox', { name: 'Message Möbius…' })
   await composer.fill(draft)
   await surface.locator('input[type="file"]').setInputFiles({ name: 'draft-note.txt', mimeType: 'text/plain', buffer: Buffer.from('draft attachment') })

@@ -2,6 +2,7 @@
 // intercepted: this spec needs no persisted chat, provider turn, or cleanup job.
 import { test, expect, serveRecoveryBuild } from './_recoveryBrowser.mjs'
 import { installMockAgentProvider, testChatAgentSettings } from './_chatTestPrerequisites.mjs'
+import { createMockChatRuntime } from './_mockChatRuntime.mjs'
 import { FAILURE_GRACE_MS, PROBE_TIMEOUT_MS } from '../frontend/src/lib/connectivityStore.js'
 
 const BASE = process.env.MOBIUS_URL || process.env.API_BASE_URL || 'http://localhost:8001'
@@ -39,8 +40,9 @@ test('offline Send survives reload and drains into the chat once after reconnect
   let delivered = null
   const attemptedBodies = []
   const acceptedBodies = []
+  const runtime = createMockChatRuntime()
 
-  const detail = () => ({ ...chat, messages: delivered ? [{
+  const detail = () => runtime.detail({ ...chat, messages: delivered ? [{
     role: 'user', content: delivered.content, cid: delivered.cid, ts: delivered.ts,
   }] : [], total: delivered ? 1 : 0, offset: 0 })
   await page.route('**/api/**', async route => {
@@ -51,6 +53,7 @@ test('offline Send survives reload and drains into the chat once after reconnect
       if (!networkUp) return route.abort('internetdisconnected')
       acceptedBodies.push(body)
       delivered = { ...body, ts: Date.now() }
+      runtime.update()
       return route.fulfill({ status: 202, json: { status: 'started' } })
     }
     // Unknown fixture mutations must never reach the real server, including
@@ -61,7 +64,8 @@ test('offline Send survives reload and drains into the chat once after reconnect
     if (!serverReachable) return route.abort('internetdisconnected')
     if (url.pathname === '/api/ready') return route.fulfill({ json: { ready: true, boot_id: 'offline-fixture-boot' } })
     if (url.pathname === '/api/chats') return route.fulfill({ json: [detail()] })
-    if (url.pathname === chatPath || url.pathname === `${chatPath}/runtime`) return route.fulfill({ json: detail() })
+    if (url.pathname === chatPath) return route.fulfill({ json: detail() })
+    if (url.pathname === `${chatPath}/runtime`) return route.fulfill({ json: runtime.snapshot() })
     if (url.pathname === `${chatPath}/stream`) return route.fulfill({ status: 204, body: '' })
     return route.continue()
   })
