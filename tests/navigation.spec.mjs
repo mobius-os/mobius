@@ -482,6 +482,7 @@ test.describe('Navigation basics', () => {
   })
 
   test('4. Navigate chat -> app -> back returns to chat', async ({ page }) => {
+    await installNavigationAppFixture(page)
     await setup(page)
     const initialState = await getNavState(page)
     expect(initialState.hasChat).toBe(true)
@@ -497,7 +498,6 @@ test.describe('Navigation basics', () => {
       const backState = await getNavState(page)
       expect(backState.hasChat).toBe(true)
     }
-    // If no apps exist, the test passes vacuously.
   })
 })
 

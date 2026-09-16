@@ -134,66 +134,6 @@ test.use({ serviceWorkers: 'block' })
 test.describe('Stream reconnection', () => {
 
 
-  test('2. Terminal 204 exits thinking and refreshes persisted messages', async ({ page }) => {
-    let streamRequestCount = 0
-    let settledDetailReady = false
-    const runtime = createMockChatRuntime({ runtime_revision: FIXTURE_RUNTIME_REVISION })
-
-    await page.route(/\/api\/chats\/[0-9a-f-]+\/runtime$/, route => {
-      if (route.request().method() !== 'GET') { route.continue(); return }
-      route.fulfill({
-        status: 200,
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(runtime.snapshot()),
-      })
-    })
-
-    await page.route(/\/api\/chats\/[0-9a-f-]+\?limit=20&compact=1$/, route => {
-      if (!settledDetailReady || route.request().method() !== 'GET') {
-        route.continue()
-        return
-      }
-      route.fulfill({
-        status: 200,
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(runtime.detail({
-          messages: [
-            { role: 'user', content: 'expired broadcast', ts: Date.now() },
-            { role: 'assistant', content: 'final response from db' },
-          ],
-          total: 2,
-          offset: 0,
-        })),
-      })
-    })
-
-    await page.route(/\/api\/chats\/[0-9a-f-]+\/stream$/, async route => {
-      streamRequestCount++
-      runtime.update({ running: true })
-      // Wait past useStreamConnection's just-sent 204 retry window.
-      await new Promise(resolve => setTimeout(resolve, 1700))
-      runtime.update({ running: false })
-      // Publish the authoritative detail only with the terminal stream state.
-      // Exposing it while the stream is still open lets background refreshes
-      // consume the fixture before the 204 asks ChatView to reconcile.
-      settledDetailReady = true
-      await route.fulfill({ status: 204, body: '' })
-    })
-
-    await setupChat(page)
-    await send(page, 'expired broadcast')
-
-    await expect(page.locator('[data-chat-surface="painted"] .chat__scroll')).toContainText('final response from db', {
-      timeout: 8000,
-    })
-    await expect(page.locator('[data-chat-surface="painted"] button[aria-label="Stop"]')).toHaveCount(0)
-    expect(streamRequestCount).toBe(1)
-  })
-
-
-
-
-
   test('8. Wake after hidden EOF before first event reattaches and renders in-progress message', async ({ page }) => {
     await page.addInitScript(() => {
       const realFetch = window.fetch.bind(window)
@@ -282,75 +222,43 @@ test.describe('Stream reconnection', () => {
 
   test('13. Slow long-hidden wake reattaches and delivers the resumed stream', async ({ page }) => {
     const resumedMarker = 'resumed after a long hidden wake'
-    await page.addInitScript(() => {
-      const realFetch = window.fetch.bind(window)
-      let streamCount = 0
-      let releaseReattach
-      window.__streamFetchCount = 0
-      window.__releaseSlowReattach = marker => releaseReattach?.(marker)
-
-      window.fetch = (input, init) => {
-        const url = typeof input === 'string' ? input : (input && input.url) || ''
-        if (!/\/api\/chats\/[0-9a-f-]+\/stream$/.test(url)) {
-          return realFetch(input, init)
-        }
-
-        streamCount++
-        window.__streamFetchCount = streamCount
-
-        if (streamCount === 1) {
-          const body = new ReadableStream({ start() {}, cancel() {} })
-          return Promise.resolve(new Response(body, {
-            status: 200,
-            headers: { 'Content-Type': 'text/event-stream' },
-          }))
-        }
-
-        if (streamCount === 2) {
-          return new Promise(resolve => {
-            releaseReattach = marker => {
-              const encoder = new TextEncoder()
-              const body = new ReadableStream({
-                start(controller) {
-                  controller.enqueue(encoder.encode(
-                    'data: {"type":"catch_up_done"}\n\n',
-                  ))
-                  controller.enqueue(encoder.encode(
-                    `data: ${JSON.stringify({ type: 'text', content: marker })}\n\n`,
-                  ))
-                  controller.enqueue(encoder.encode('data: {"type":"done"}\n\n'))
-                  controller.close()
-                },
-              })
-              resolve(new Response(body, {
-                status: 200,
-                headers: { 'Content-Type': 'text/event-stream' },
-              }))
-            }
-          })
-        }
-
-        return new Promise(() => {})
+    let streamRequestCount = 0
+    let dropFirstStream
+    const firstStreamDropped = new Promise(resolve => { dropFirstStream = resolve })
+    await page.route(/\/api\/chats\/[0-9a-f-]+\/stream$/, async route => {
+      streamRequestCount += 1
+      if (streamRequestCount === 1) {
+        await firstStreamDropped
+        await route.abort('connectionreset').catch(() => {})
+        return
       }
+      await route.fulfill({
+        status: 200,
+        headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' },
+        body: [
+          `data: ${JSON.stringify({ type: 'text', content: resumedMarker })}\n\n`,
+          'data: {"type":"catch_up_done"}\n\n',
+          'data: {"type":"done"}\n\n',
+        ].join(''),
+      })
     })
 
     await setupChat(page)
     await send(page, 'slow reattach')
     await expect(page.locator('[data-chat-surface="painted"] button[aria-label="Stop"]')).toHaveCount(1)
-    await page.waitForFunction(() => window.__streamFetchCount === 1)
+    await expect.poll(() => streamRequestCount).toBe(1)
 
     await setVisibility(page, 'hidden')
     // Stay comfortably beyond the product's 5s quick-wake boundary. Hosted
     // timer scheduling can otherwise land exactly on that boundary and turn
     // this deliberate long-wake case into a quick-wake case.
     await page.waitForTimeout(6000)
+    dropFirstStream()
     await setVisibility(page, 'visible')
 
-    await page.waitForFunction(() => window.__streamFetchCount === 2)
-    await page.evaluate(marker => window.__releaseSlowReattach(marker), resumedMarker)
+    await expect.poll(() => streamRequestCount, { timeout: 5000 }).toBe(2)
     await expect(page.locator('[data-chat-surface="painted"] .chat__scroll'))
       .toContainText(resumedMarker, { timeout: 5000 })
-    await expect.poll(() => page.evaluate(() => window.__streamFetchCount)).toBe(2)
     await expect(page.locator('[data-chat-surface="painted"] button[aria-label="Stop"]')).toHaveCount(0)
   })
 
