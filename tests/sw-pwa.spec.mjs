@@ -377,14 +377,14 @@ test.describe('Service worker — vite-plugin-pwa contract', () => {
     const headers = { Authorization: `Bearer ${token}` }
     const stamp = Date.now()
     const staticFiles = {
-      'static/index.html': '<!doctype html><title>Opaque packaged fixture</title><script src="./child.deadbeef.js"></script><main id="packaged">real packaged document</main>',
-      'static/child.deadbeef.js': `(async()=>{
+      'embed-fixture/index.html': '<!doctype html><title>Opaque packaged fixture</title><script src="./child.deadbeef.js"></script><main id="packaged">real packaged document</main>',
+      'embed-fixture/child.deadbeef.js': `(async()=>{
         let token=null;try{token=localStorage.getItem('token')}catch(_e){}
         let parentToken=null;try{parentToken=parent.localStorage.getItem('token')}catch(_e){}
         let api=-1;try{api=(await fetch('/api/apps/',token?{headers:{Authorization:'Bearer '+token}}:{})).status}catch(_e){}
         parent.postMessage({type:'opaque-static-sw-ready',origin:self.origin,token,parentToken,api},'*')
       })()`,
-      'static/hostile.svg': `<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20"><script><![CDATA[
+      'embed-fixture/hostile.svg': `<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20"><script><![CDATA[
         (async()=>{let token=null;try{token=localStorage.getItem('token')}catch(_e){}
         let api=-1;try{api=(await fetch('/api/apps/',token?{headers:{Authorization:'Bearer '+token}}:{})).status}catch(_e){}
         parent.postMessage({type:'opaque-svg-proof',origin:self.origin,token,api},'*')})()
@@ -399,9 +399,9 @@ test.describe('Service worker — vite-plugin-pwa contract', () => {
       manifest: {
         source_files: Object.keys(staticFiles),
         static_assets: {
-          'index.html': 'static/index.html',
-          'child.deadbeef.js': 'static/child.deadbeef.js',
-          'hostile.svg': 'static/hostile.svg',
+          'index.html': 'embed-fixture/index.html',
+          'child.deadbeef.js': 'embed-fixture/child.deadbeef.js',
+          'hostile.svg': 'embed-fixture/hostile.svg',
         },
       },
     })
