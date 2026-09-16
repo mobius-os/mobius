@@ -98,6 +98,55 @@ def test_served_runtime_module_is_excluded_from_parity(tmp_path):
   assert provenance.activation_paths(status) == []
 
 
+def _broker(epoch: object) -> bytes:
+  return f"BROKER_ROUTE_EPOCH = {epoch}\n".encode("utf-8")
+
+
+def test_served_runtime_status_reports_behind_when_served_epoch_is_lower(tmp_path):
+  source = tmp_path / "source"
+  image = tmp_path / "image"
+  _write(source, "identity_broker.py", _broker(1))
+  _write(image, "identity_broker.py", _broker(2))
+
+  status = provenance.served_runtime_status(source, image)
+
+  assert status == [{
+    "module": "identity_broker.py",
+    "state": "behind",
+    "served_epoch": 1,
+    "image_epoch": 2,
+  }]
+
+
+def test_served_runtime_status_is_current_when_served_epoch_is_at_least_image(
+  tmp_path,
+):
+  source = tmp_path / "source"
+  image = tmp_path / "image"
+  _write(source, "identity_broker.py", _broker(2))
+  _write(image, "identity_broker.py", _broker(2))
+  assert provenance.served_runtime_status(source, image)[0]["state"] == "current"
+
+  _write(source, "identity_broker.py", _broker(3))
+  ahead = provenance.served_runtime_status(source, image)[0]
+  assert ahead["state"] == "current"
+  assert ahead["served_epoch"] == 3
+
+
+def test_served_runtime_status_is_unavailable_when_image_epoch_is_unreadable(
+  tmp_path,
+):
+  source = tmp_path / "source"
+  image = tmp_path / "image"
+  _write(source, "identity_broker.py", _broker(2))
+  image.mkdir()
+
+  status = provenance.served_runtime_status(source, image)[0]
+
+  assert status["state"] == "unavailable"
+  assert status["image_epoch"] is None
+
+
 def test_image_owned_runtime_mismatch_still_reports_stale(tmp_path):
   source = tmp_path / "source"
   deployed = tmp_path / "deployed"

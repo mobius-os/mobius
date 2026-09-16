@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 from collections.abc import Callable
 from pathlib import Path
 from typing import Literal, TypedDict
@@ -25,6 +26,26 @@ from app import platform_activation
 
 
 RuntimeParityState = Literal["current", "stale", "unavailable"]
+
+# Protected-runtime modules the frozen launcher starts from the served checkout.
+# Keep in sync with ``SERVED_MODULES`` in
+# ``backend/runtime/served_runtime_launcher.py``.
+SERVED_RUNTIME_MODULES = ("identity_broker.py",)
+
+# The served/image ``BROKER_ROUTE_EPOCH`` marker, read from bytes without
+# importing the privileged module. Mirrors the launcher's own gate.
+_ROUTE_EPOCH_RE = re.compile(rb"^BROKER_ROUTE_EPOCH\s*=\s*(\d+)", re.MULTILINE)
+
+ServedRuntimeState = Literal["behind", "current", "unavailable"]
+
+
+class ServedRuntimeModule(TypedDict):
+  """Route-epoch comparison for one served protected-runtime module."""
+
+  module: str
+  state: ServedRuntimeState
+  served_epoch: int | None
+  image_epoch: int | None
 
 
 class RuntimeParity(TypedDict):
@@ -142,6 +163,48 @@ def protected_runtime_status(
     "deployed_sha256": deployed["digest"],
     "mismatched_paths": sorted(mismatches),
   }
+
+
+def _module_route_epoch(path: Path) -> int | None:
+  """Route epoch declared by a runtime module, or None when absent/unreadable."""
+  try:
+    source = path.read_bytes()
+  except OSError:
+    return None
+  match = _ROUTE_EPOCH_RE.search(source)
+  return int(match.group(1)) if match else None
+
+
+def served_runtime_status(
+  source_root: Path,
+  deployed_root: Path | None = None,
+) -> list[ServedRuntimeModule]:
+  """Report whether each served protected-runtime module is behind the image.
+
+  Unlike ``protected_runtime_status`` (which excludes these launcher-started
+  modules because their bytes may legitimately differ), this compares only the
+  declared route epoch, so a served broker that predates a route the running app
+  needs surfaces as ``behind`` instead of a misleading ``current``. ``image_epoch``
+  missing means there is nothing to prove against — ``unavailable``.
+  """
+  image_root = deployed_root if deployed_root is not None else _deployed_root()
+  results: list[ServedRuntimeModule] = []
+  for name in SERVED_RUNTIME_MODULES:
+    served_epoch = _module_route_epoch(Path(source_root) / name)
+    image_epoch = _module_route_epoch(image_root / name)
+    if image_epoch is None:
+      state: ServedRuntimeState = "unavailable"
+    elif served_epoch is None or served_epoch < image_epoch:
+      state = "behind"
+    else:
+      state = "current"
+    results.append({
+      "module": name,
+      "state": state,
+      "served_epoch": served_epoch,
+      "image_epoch": image_epoch,
+    })
+  return results
 
 
 def activation_paths(status: RuntimeParity) -> list[str]:

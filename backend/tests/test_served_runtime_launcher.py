@@ -24,6 +24,20 @@ def _served_tree(tmp_path, monkeypatch, source: str | None):
   return runtime / "identity_broker.py"
 
 
+def _image_tree(tmp_path, monkeypatch, source: str | None):
+  """Point the launcher at an image runtime copy with the given broker source."""
+  image = tmp_path / "image-runtime"
+  image.mkdir()
+  if source is not None:
+    (image / "identity_broker.py").write_text(source, encoding="utf-8")
+  monkeypatch.setenv("MOBIUS_PROTECTED_RUNTIME_DIR", str(image))
+  return image
+
+
+def _epoch_source(epoch: object) -> str:
+  return f"BROKER_ROUTE_EPOCH = {epoch}\nVALUE = 'served'\n"
+
+
 def test_check_accepts_a_valid_served_module(tmp_path, monkeypatch):
   _served_tree(tmp_path, monkeypatch, "VALUE = 'served'\n")
 
@@ -62,6 +76,58 @@ def test_an_unlisted_module_is_refused():
   assert launcher.main(["launcher.py", "restart_ledger"]) == 2
   assert launcher.main(["launcher.py", "--check", "restart_ledger"]) == 2
   assert launcher.main(["launcher.py"]) == 2
+
+
+def test_served_epoch_behind_image_is_refused(tmp_path, monkeypatch):
+  _served_tree(tmp_path, monkeypatch, _epoch_source(1))
+  _image_tree(tmp_path, monkeypatch, _epoch_source(2))
+
+  assert launcher.main(["launcher.py", "--check", "identity_broker"]) == 1
+
+
+def test_served_epoch_equal_to_image_is_allowed(tmp_path, monkeypatch):
+  _served_tree(tmp_path, monkeypatch, _epoch_source(2))
+  _image_tree(tmp_path, monkeypatch, _epoch_source(2))
+
+  assert launcher.main(["launcher.py", "--check", "identity_broker"]) == 0
+
+
+def test_served_epoch_ahead_of_image_is_allowed(tmp_path, monkeypatch):
+  _served_tree(tmp_path, monkeypatch, _epoch_source(3))
+  _image_tree(tmp_path, monkeypatch, _epoch_source(2))
+
+  assert launcher.main(["launcher.py", "--check", "identity_broker"]) == 0
+
+
+def test_served_missing_marker_with_image_marker_is_refused(tmp_path, monkeypatch):
+  _served_tree(tmp_path, monkeypatch, "VALUE = 'served'\n")
+  _image_tree(tmp_path, monkeypatch, _epoch_source(2))
+
+  assert launcher.main(["launcher.py", "--check", "identity_broker"]) == 1
+
+
+def test_non_numeric_served_marker_with_image_marker_is_refused(
+  tmp_path, monkeypatch
+):
+  _served_tree(tmp_path, monkeypatch, _epoch_source("'two'"))
+  _image_tree(tmp_path, monkeypatch, _epoch_source(2))
+
+  assert launcher.main(["launcher.py", "--check", "identity_broker"]) == 1
+
+
+def test_image_without_marker_fails_open(tmp_path, monkeypatch):
+  _served_tree(tmp_path, monkeypatch, "VALUE = 'served'\n")
+  _image_tree(tmp_path, monkeypatch, "VALUE = 'image'\n")
+
+  assert launcher.main(["launcher.py", "--check", "identity_broker"]) == 0
+
+
+def test_unreadable_image_copy_fails_open(tmp_path, monkeypatch):
+  _served_tree(tmp_path, monkeypatch, "VALUE = 'served'\n")
+  # No image identity_broker.py at the configured directory: cannot prove behind.
+  _image_tree(tmp_path, monkeypatch, None)
+
+  assert launcher.main(["launcher.py", "--check", "identity_broker"]) == 0
 
 
 def test_exec_uses_the_same_validated_served_path(tmp_path, monkeypatch):

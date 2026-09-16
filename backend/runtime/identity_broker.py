@@ -81,6 +81,13 @@ MANAGED_EXACT_ROUTES = frozenset({
 })
 MANAGED_USER_AGENT = "mobius-managed-deployment/1"
 
+# Monotonic marker read (without importing this module) by the frozen launcher
+# and runtime provenance. Bump it whenever the served app starts depending on
+# broker routes an older broker lacks, so a stale served broker is rejected in
+# favour of the baked copy instead of returning 404 for the new routes.
+# 1 = pre-/managed broker; 2 = /managed upstream-proxy routes present.
+BROKER_ROUTE_EPOCH = 2
+
 # Declarative public forwarding policy. Callers never supply a target URL,
 # audience, or arbitrary upstream path. Contribution and community routes are
 # available only through the root-owned Unix socket; loopback TCP remains the
