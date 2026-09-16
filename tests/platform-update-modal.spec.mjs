@@ -181,20 +181,12 @@ test('a clean apply closes the review and exposes the restart step', async ({ pa
   await expect(restart).toBeFocused()
 })
 
-test('a staged update can check for and review another release before one restart', async ({ page }) => {
+test('a staged update can review another release before one restart', async ({ page }) => {
   const state = {
     current: 'restart_needed',
-    overrides: { available: false, needs_restart: true },
+    overrides: { available: true, needs_restart: true },
   }
   await mockPlatform(page, state)
-  await page.route('**/api/platform/check', route => {
-    state.overrides = { available: true, needs_restart: true }
-    return route.fulfill({
-      status: 200,
-      contentType: 'application/json',
-      body: JSON.stringify(platformStatus('restart_needed', state.overrides)),
-    })
-  })
   await page.route('**/api/platform/apply', route => {
     state.overrides = { available: false, needs_restart: true }
     return route.fulfill({
@@ -225,17 +217,12 @@ test('a staged update can check for and review another release before one restar
   }
   await page.getByRole('button', { name: 'Settings', exact: true }).click()
 
-  await expect(page.getByText('Ready to restart', { exact: true })).toBeVisible()
-  const check = page.getByRole('button', { name: 'Check for more' })
-  await expect(check).toBeVisible()
-  await expect(page.getByRole('button', { name: 'Restart to finish' })).toBeVisible()
-  await check.click()
-
   await expect(page.getByText('More updates available', { exact: true })).toBeVisible()
   const review = page.getByRole('button', { name: 'Review update' })
   await expect(review).toBeVisible()
   await expect(review).toBeFocused()
-  await expect(page.getByRole('button', { name: 'Restart to finish' })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Restart server' })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Restart to finish' })).toHaveCount(0)
   await review.click()
 
   const dialog = page.getByRole('dialog', { name: 'Review update' })
@@ -244,8 +231,8 @@ test('a staged update can check for and review another release before one restar
 
   await expect(dialog).toHaveCount(0)
   await expect(page.getByText('Ready to restart', { exact: true })).toBeVisible()
-  await expect(page.getByRole('button', { name: 'Check for more' })).toBeVisible()
   await expect(page.getByRole('button', { name: 'Restart to finish' })).toBeFocused()
+  await expect(page.getByRole('button', { name: 'Restart server' })).toBeVisible()
 })
 
 test('staged-update actions stack without overflow in a narrow settings pane', async ({ page }) => {
@@ -277,7 +264,8 @@ test('staged-update actions stack without overflow in a narrow settings pane', a
   expect(box.x).toBeGreaterThanOrEqual(0)
   expect(box.x + box.width).toBeLessThanOrEqual(viewport.width)
   await expect(page.getByRole('button', { name: 'Review update' })).toBeVisible()
-  await expect(page.getByRole('button', { name: 'Restart to finish' })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Restart server' })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Restart to finish' })).toHaveCount(0)
 })
 
 test('a blocked apply stays open, focuses its result, and shows resolver failures', async ({ page }) => {
@@ -372,7 +360,7 @@ test('a rolled-back apply stays open with an explicit repair action', async ({ p
   await result.getByRole('button', { name: 'Not now' }).click()
   await expect(result).toHaveCount(0)
   await expect(page.getByText('Update needs repair', { exact: true })).toBeVisible()
-  await expect(page.getByRole('button', { name: 'Review update', exact: true })).toBeFocused()
+  await expect(page.getByRole('button', { name: 'Ask Möbius', exact: true })).toBeFocused()
 })
 
 test('a clean apply remains truthful when every follow-up status read fails', async ({ page }) => {
@@ -462,7 +450,7 @@ test('a rollback result keeps an explicit repair action when status reads fail',
   await result.getByRole('button', { name: 'Not now' }).click()
   await expect(result).toHaveCount(0)
   await expect(page.getByText('Update needs repair', { exact: true })).toBeVisible()
-  await expect(page.getByRole('button', { name: 'Review update', exact: true })).toBeFocused()
+  await expect(page.getByRole('button', { name: 'Ask Möbius', exact: true })).toBeFocused()
 })
 
 for (const [label, body] of [
@@ -541,7 +529,8 @@ function finishPreview(overrides = {}) {
 
 test('an installed image update can finish without a newer source release', async ({ page }) => {
   const state = { current: 'activation_needed',
-    overrides: { available: false, activation: imageActivation }, preview: finishPreview() }
+    overrides: { available: false, activation: imageActivation }, preview: finishPreview(),
+    rebuild: { supported: true, state: 'no_change', expected_sha: preview.current_sha } }
   await mockPlatform(page, state)
   const updates = await openSettings(page)
   await expect(updates.getByRole('button', { name: 'Finish update', exact: true })).toBeVisible()
@@ -557,11 +546,12 @@ test('an installed image update can finish without a newer source release', asyn
   expect(state.unexpectedMutations).toEqual([])
 })
 
-test('finish submits the exact reviewed plan, not the newer available release', async ({ page }) => {
+test('finish submits the exact reviewed installed plan', async ({ page }) => {
   const installed = finishPreview({ activation: { ...imageActivation, deployment: 'railway' },
     image_digest: `sha256:${'b'.repeat(64)}` })
   const state = { current: 'activation_needed',
-    overrides: { available: true, activation: imageActivation }, preview: installed }
+    overrides: { available: false, activation: imageActivation }, preview: installed,
+    rebuild: { supported: true, state: 'no_change', expected_sha: installed.target_sha } }
   await mockPlatform(page, state)
   await page.route('**/api/health', route => route.fulfill({ status: 200,
     contentType: 'application/json', body: JSON.stringify({ status: 'ok', boot_id: 'before' }) }))
@@ -573,9 +563,8 @@ test('finish submits the exact reviewed plan, not the newer available release', 
     }) })
   })
   const updates = await openSettings(page)
-  await expect(updates.getByRole('button', { name: 'Review update', exact: true })).toBeVisible()
   const request = page.waitForRequest('**/api/platform/update-preview?intent=finish')
-  await updates.getByRole('button', { name: 'Finish installed update' }).click()
+  await updates.getByRole('button', { name: 'Finish update', exact: true }).click()
   await request
   const dialog = page.getByRole('dialog', { name: 'Finish update' })
   await dialog.getByRole('button', { name: 'Update now', exact: true }).click()
@@ -593,14 +582,12 @@ test('a failed container result survives reopening Settings without an unsolicit
   let updates = await openSettings(page)
   const error = 'The reviewed image could not start.'
   await expect(updates.getByText(error)).not.toBeVisible()
-  await updates.getByText('Details and maintenance', { exact: true }).click()
-  await expect(updates.getByRole('heading', { name: 'Last container update' })).toBeVisible()
-  await expect(updates.getByText(error)).toBeVisible()
+  await expect(updates.getByRole('button', { name: 'Ask Möbius', exact: true })).toBeVisible()
+  await expect(updates.getByText('Details and maintenance', { exact: true })).toHaveCount(0)
   // A full reload exercises a fresh component with no in-memory request owner.
   updates = await openSettings(page)
-  await updates.getByText('Details and maintenance', { exact: true }).click()
-  await expect(updates.getByText(error)).toBeVisible()
-  await expect(updates.getByRole('button', { name: 'Finish update', exact: true })).toBeEnabled()
+  await expect(updates.getByText(error)).not.toBeVisible()
+  await expect(updates.getByRole('button', { name: 'Ask Möbius', exact: true })).toBeEnabled()
   expect(state.unexpectedMutations).toEqual([])
 })
 

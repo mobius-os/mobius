@@ -419,7 +419,7 @@ test.describe('Unauthenticated startup', () => {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           configured: false,
-          auth_mode: 'mobius_sso',
+          auth_mode: 'mobius',
         }),
       })
     })
