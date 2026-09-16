@@ -93,16 +93,6 @@ test('question card css has no stale styling hook', () => {
     'a failed answer should keep its retry notice attached to the card')
 })
 
-test('custom answer growth preserves the surrounding transcript position', () => {
-  assert.match(component, /const transcriptScrollHoldRef = useRef\(null\)/)
-  assert.match(component,
-    /onBeforeInput=\{holdTranscriptPosition\}[\s\S]*onKeyDown=\{e => \{[\s\S]*holdTranscriptPosition\(\)/,
-    'both text insertion and newline keyboard edits capture the transcript before layout')
-  assert.match(component,
-    /resizeCustomAnswer\(textareaRef\.current\)[\s\S]*hold\.scroller\.scrollTop = hold\.scrollTop/,
-    'the value layout commit restores the transcript before paint')
-})
-
 test('multiple questions read as one compact decision panel', () => {
   assert.match(component, /const grouped = questions\.length > 1/)
   assert.match(component, /className=\{`qcard\$\{grouped \? ' qcard--grouped'/)

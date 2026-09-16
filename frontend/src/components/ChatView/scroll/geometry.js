@@ -556,14 +556,14 @@ export function isQuestionSubmissionMode(mode) {
 
 
 /** A focused custom Q&A answer gives the browser one narrow exception to the
- * ordinary viewport-resize rule: native caret reveal becomes the new exact
- * reading hold instead of being overwritten by the pre-keyboard anchor.
- * Stronger send pins, live following, and the question-submission overlay keep
- * their existing ownership contracts. */
+ * ordinary viewport-resize rule: its exact reading position replaces passive
+ * live-follow or an ordinary reading hold. A send pin and the semantic
+ * question-submission overlay remain stronger owners. */
 export function modeForQuestionEditingViewportChange(mode, caretAnchor = null) {
-  if (mode?.kind !== 'ANCHOR_AT'
+  if (mode?.kind === 'PIN_USER_MSG'
       || isQuestionSubmissionMode(mode)
       || !caretAnchor) return mode
+  if (mode?.kind !== 'ANCHOR_AT' && mode?.kind !== 'FOLLOW_BOTTOM') return mode
   if (mode.key === caretAnchor.key
       && Math.abs(mode.offset - caretAnchor.offset) <= 0.5) return mode
   return caretAnchor

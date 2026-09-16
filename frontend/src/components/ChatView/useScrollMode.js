@@ -1624,7 +1624,16 @@ export default function useScrollMode({
         })
       })
     }
-    const onInlineEditorFocus = (event) => observeQuestionEditor(event.target)
+    const onInlineEditorFocus = (event) => {
+      observeQuestionEditor(event.target)
+      // Focusing an in-message editor is explicit reading/editing intent. Turn
+      // passive tail-follow into an exact hold before the first input can grow
+      // the field; otherwise FOLLOW_BOTTOM keeps the card's bottom fixed and
+      // makes every added line move the prompt upward.
+      revealFocusedQuestionEditor('reader:inline-editor-focus', {
+        editor: event.target,
+      })
+    }
     const onInlineEditorBlur = (event) => stopObservingQuestionEditor(event.target)
 
     // ResizeObserver — re-runs spacer sizing on content size changes.

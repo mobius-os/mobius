@@ -758,6 +758,7 @@ export default function Shell({ onInitialVisualReady }) {
   const composerFocusLeaseRef = useRef(null)
   const composerFocusLeaseDraftIdRef = useRef(null)
   const composerFocusLeaseDirtyRef = useRef(false)
+  const composerRequestAfterDrawerCloseRef = useRef(null)
   // A user-initiated Standard New-chat tap mints its final id synchronously.
   // That id owns both the immediate live composer draft and the eventual row;
   // the tiny focus lease carries only the tap's mobile activation through the
@@ -827,6 +828,19 @@ export default function Shell({ onInitialVisualReady }) {
     composerRequestRef.current = request
     setComposerRequest(request)
   }, [])
+
+  // A modal drawer keeps workspace content inert until its close commit. Keep
+  // the user-activation request alive across that exact boundary rather than
+  // guessing with a timer: the immediate request preserves the tap handoff,
+  // and this replay makes the destination composer the owner once the drawer
+  // can legally receive focus.
+  useEffect(() => {
+    if (modalDrawerOpen) return
+    const pending = composerRequestAfterDrawerCloseRef.current
+    if (!pending) return
+    composerRequestAfterDrawerCloseRef.current = null
+    requestComposer(pending.chatId, pending.options)
+  }, [modalDrawerOpen, requestComposer])
 
   function focusDesktopChatPaneComposer(chatId) {
     if (!supportsDesktopPaneComposerFocus()) return
@@ -3772,6 +3786,13 @@ export default function Shell({ onInitialVisualReady }) {
       paneId: forceNew ? ws.focusedPaneId : null,
       paneActiveKey: forceNew ? `chat:${chatId}` : null,
     }
+    const composerOptions = { focus: true, restoreExistingDraft: true }
+    if (modalDrawerOpen) {
+      composerRequestAfterDrawerCloseRef.current = {
+        chatId,
+        options: composerOptions,
+      }
+    }
     // The client-minted id is the workspace destination immediately. This
     // mounts ChatView's one canonical composer before the tap task ends; row
     // allocation only unlocks its server runtime and never swaps its owner.
@@ -3785,7 +3806,7 @@ export default function Shell({ onInitialVisualReady }) {
       navTo('chat', { chatId, paneId: ws.focusedPaneId })
     })
     closeDrawer(modalDrawerOpen ? { preserveModalUntilTraversal: true } : undefined)
-    requestComposer(chatId, { focus: true, restoreExistingDraft: true })
+    requestComposer(chatId, composerOptions)
     void settleDraftFirstNewChat(presentation)
   }
 

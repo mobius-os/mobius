@@ -324,6 +324,12 @@ test('direct chat actions hand focus to the destination composer', () => {
     /flushSync\(\(\) => \{[\s\S]*setNewChatPresentation\(presentation\)[\s\S]*navTo\('chat', \{ chatId, paneId: ws\.focusedPaneId \}\)[\s\S]*closeDrawer\(modalDrawerOpen \? \{ preserveModalUntilTraversal: true \} : undefined\)/,
     'the client id must enter the workspace and browser history before the tap dismisses navigation, independent of allocation')
   assert.match(shell,
+    /if \(modalDrawerOpen\) \{[\s\S]*composerRequestAfterDrawerCloseRef\.current = \{[\s\S]*chatId,[\s\S]*options: composerOptions/,
+    'a modal New Chat tap must retain its composer request across drawer close')
+  assert.match(shell,
+    /if \(modalDrawerOpen\) return[\s\S]*composerRequestAfterDrawerCloseRef\.current = null[\s\S]*requestComposer\(pending\.chatId, pending\.options\)/,
+    'the retained request must replay after the drawer stops making the workspace inert')
+  assert.match(shell,
     /const newChatSession = String\(newChatPresentation\?\.chatId[\s\S]*<PaneChatView[\s\S]*newChatSession=\{newChatSession\}[\s\S]*onNewChatSubmit=\{queueDraftFirstNewChat\}/,
     'the active pane passes allocation state into its canonical ChatView instead of covering it')
   assert.doesNotMatch(shell, /shell__new-chat-presentation|handleNewChatLandingComposerReady/,
