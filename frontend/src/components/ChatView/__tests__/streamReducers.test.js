@@ -820,6 +820,33 @@ test('does NOT suppress ordinary tool blocks in a question message', () => {
   assert.ok(skip.has(1), 'AskUserQuestion twin suppressed')
 })
 
+test('a saved card suppresses its exact command helper even when it finishes after the card', () => {
+  const blocks = [
+    { type: 'question', question_id: 'saved-card', questions: [] },
+    {
+      type: 'tool', tool: 'Bash', status: 'done', tool_use_id: 'helper',
+      owner_card_question_id: 'saved-card',
+    },
+  ]
+  assert.deepEqual([...suppressedQuestionToolIndices(blocks)], [1])
+})
+
+test('an exact helper link never suppresses a tool without its owning card', () => {
+  const blocks = [{
+    type: 'tool', tool: 'Bash', status: 'done',
+    owner_card_question_id: 'different-card',
+  }]
+  assert.deepEqual([...suppressedQuestionToolIndices(blocks)], [])
+})
+
+test('completed owner-card receipt identity reaches the live tool item', () => {
+  const prev = [toolItem('Bash', { tool_use_id: 'helper' })]
+  const next = attachToolOutput(prev, '{"state":"waiting_for_owner"}', {
+    tool_use_id: 'helper', owner_card_question_id: 'saved-card',
+  })
+  assert.equal(next[0].owner_card_question_id, 'saved-card')
+})
+
 test('suppresses every AskUserQuestion twin when two questions are in one message', () => {
   const blocks = [
     { type: 'tool', tool: 'AskUserQuestion', input: 'Q1', output: '', status: 'done' },

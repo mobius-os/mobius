@@ -1,9 +1,13 @@
 """Compact chat reads keep the transcript light without changing stored truth."""
 
 import asyncio
+import json
 
 from app import models, questions
-from app.chat_transcript import compact_messages_for_detail
+from app.chat_transcript import (
+  compact_messages_for_detail,
+  redundant_interaction_tool_indexes,
+)
 from app.pending_questions import PendingQuestion
 from app.routes.chats import _chat_detail_window
 from sqlalchemy import event
@@ -563,6 +567,49 @@ def test_tool_pairing_never_parses_unrelated_tool_output(monkeypatch):
   assert chat_transcript.redundant_interaction_tool_indexes([
     {"type": "tool", "tool": "Bash", "output": "large output"},
   ]) == set()
+
+
+def test_saved_card_owns_its_exact_helper_even_when_helper_finishes_after_card():
+  blocks = [
+    {
+      "type": "question", "question_id": "saved-card",
+      "questions": [{"id": "confirm", "question": "Proceed?"}],
+    },
+    {
+      "type": "tool", "tool": "Bash", "status": "done",
+      "tool_use_id": "helper", "owner_card_question_id": "saved-card",
+    },
+  ]
+  assert redundant_interaction_tool_indexes(blocks) == {1}
+
+
+def test_saved_card_does_not_own_a_helper_linked_to_another_card():
+  blocks = [
+    {"type": "question", "question_id": "saved-card", "questions": []},
+    {
+      "type": "tool", "tool": "Bash", "status": "done",
+      "owner_card_question_id": "different-card",
+    },
+  ]
+  assert redundant_interaction_tool_indexes(blocks) == set()
+
+
+def test_historical_saved_card_receipt_repairs_the_pre_stamp_helper():
+  receipt = {
+    "state": "waiting_for_owner", "question_id": "saved-card",
+    "next_action": "End this turn now without further text or tools.",
+  }
+  blocks = [
+    {
+      "type": "question", "question_id": "saved-card", "questions": [],
+      "response_mode": "continuation",
+    },
+    {
+      "type": "tool", "tool": "Bash", "status": "done",
+      "output": "Script completed\nOutput:\n" + json.dumps(receipt),
+    },
+  ]
+  assert redundant_interaction_tool_indexes(blocks) == {1}
 
 
 def test_restart_card_never_owns_a_legacy_parse_only_failure(client, auth):

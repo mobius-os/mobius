@@ -490,7 +490,7 @@ async def test_delivered_owner_card_receipt_ends_turn_as_clean_completion(
   """A committed continuation owner-input card ends the turn at its source.
 
   After the event sink observes the completed tool result,
-  `finish_after_owner_card` fires the same soft interrupt `steer` uses, tagged
+  `begin_finish_after_owner_card` fires the same soft interrupt `steer` uses, tagged
   `card`, so the interrupt terminal is classified as a CLEAN completion: no
   requery (`pending_steer` is empty), no resumable "Paused" note, no leaked
   "Execution interrupted." error block, and the pre-card text is the last thing
@@ -502,8 +502,9 @@ async def test_delivered_owner_card_receipt_ends_turn_as_clean_completion(
       if len(self.queries) == 1:
         yield _stream_delta("text_delta", text="here are your options")
         handle = registry.get_handle("card-chat", RunnerKind.CLAUDE_SDK)
-        await handle.finish_after_owner_card()
+        interrupt = handle.begin_finish_after_owner_card()
         assert handle.owner_card_interrupt is True
+        await interrupt
         yield _tool_boundary_interrupt_result(
           session_id=session_id or "sess-1", stop_reason=stop_reason,
         )
@@ -552,7 +553,9 @@ async def test_owner_card_finish_defers_to_an_owner_that_already_interrupted():
   handle = ActiveClaudeClient(client, chat_id="card-defers")
   # A Stop already owns the cut.
   handle._interrupt_owner = "stop"
-  await handle.finish_after_owner_card()
+  interrupt = handle.begin_finish_after_owner_card()
+  if interrupt is not None:
+    await interrupt
   assert client.interrupts == 0
   assert handle._interrupt_owner == "stop"
   assert handle.owner_card_interrupt is False

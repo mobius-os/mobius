@@ -405,9 +405,13 @@ export function restartCardActivityEntries(entries, ownsRestartCard) {
 export function suppressedQuestionToolIndices(blocks) {
   const suppressed = new Set()
   if (!Array.isArray(blocks)) return suppressed
+  const questionIds = new Set(blocks
+    .filter(b => b?.type === 'question' && typeof b.question_id === 'string')
+    .map(b => b.question_id))
   const latestUnowned = { question: null, restart: null }
   blocks.forEach((b, i) => {
     if (b?.type === 'tool') {
+      if (questionIds.has(b.owner_card_question_id)) suppressed.add(i)
       const family = isQuestionTool(b.tool)
         ? 'question'
         : isRestartRequestTool(b.tool) ? 'restart' : null
@@ -556,6 +560,9 @@ export function attachToolOutput(prev, content, event = null) {
   // bounded authoritative receipt onto the completed output.
   if (event?.peer_message) {
     block.peer_message = event.peer_message
+  }
+  if (typeof event?.owner_card_question_id === 'string') {
+    block.owner_card_question_id = event.owner_card_question_id
   }
   if (event?.output_exit_code != null) {
     block.output_exit_code = event.output_exit_code

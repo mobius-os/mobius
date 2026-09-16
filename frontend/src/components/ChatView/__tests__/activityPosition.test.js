@@ -41,6 +41,57 @@ test('stable question reference survives live absorption of its saved tool twin'
   const output = insertPositionedActivity(entries(blocks), [event], [], 'chat')
   assert.deepEqual(output.map(e => e.item.type), ['question', 'tool', 'text'])
 })
+
+test('an anchor nested in compact activity stays before later prose and owner card', () => {
+  const blocks = [
+    {
+      type: 'activity', entries: [{
+        idx: 72, item: { type: 'tool', tool: 'Bash', tool_use_id: 'send-peer' },
+      }],
+    },
+    { type: 'text', content: 'Final explanation.' },
+    { type: 'question', question_id: 'restart', questions: [] },
+  ]
+  const event = note('a', 73)
+  event.display_position.block_key = 'tool:send-peer'
+  event.display_position.block_distance = 1
+  const output = insertPositionedActivity(entries(blocks), [event], blocks, 'chat')
+  assert.deepEqual(output.map(e => e.item.type), [
+    'activity', 'tool', 'text', 'question',
+  ])
+})
+
+test('a nested compact anchor preserves a later recorded boundary', () => {
+  const blocks = [
+    {
+      type: 'activity', entries: [{
+        idx: 72, item: { type: 'tool', tool: 'Bash', tool_use_id: 'send-peer' },
+      }],
+    },
+    { type: 'text', content: 'First later block.' },
+    { type: 'text', content: 'Second later block.' },
+  ]
+  const event = note('a', 74)
+  event.display_position.block_key = 'tool:send-peer'
+  event.display_position.block_distance = 2
+  const output = insertPositionedActivity(entries(blocks), [event], blocks, 'chat')
+  assert.deepEqual(output.map(e => e.item.type), [
+    'activity', 'text', 'tool', 'text',
+  ])
+})
+
+test('a nested non-positive anchor stays before its compact activity', () => {
+  const blocks = [{
+    type: 'activity', entries: [{
+      idx: 2, item: { type: 'thinking', thinking_id: 'thought' },
+    }],
+  }]
+  const event = note('a', 2)
+  event.display_position.block_key = 'thinking:thought'
+  event.display_position.block_distance = 0
+  const output = insertPositionedActivity(entries(blocks), [event], blocks, 'chat')
+  assert.deepEqual(output.map(e => e.item.type), ['tool', 'activity'])
+})
 test('steer replay offsets use the projected text coordinate without moving the event', () => {
   const blocks = [{ type: 'text', content: 'Before.\n\nAfter.', source_text_offset: 100 }]
   const output = insertPositionedActivity(entries(blocks), [note('a', 0, 109)], blocks, 'chat')

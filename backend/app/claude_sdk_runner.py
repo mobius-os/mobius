@@ -65,6 +65,7 @@ import signal
 import shutil
 import re
 from collections import deque
+from collections.abc import Awaitable
 from contextlib import ExitStack
 from typing import Any, Literal
 
@@ -566,7 +567,7 @@ class ActiveClaudeClient:
       await self._client.interrupt()
     return True
 
-  async def finish_after_owner_card(self) -> None:
+  def begin_finish_after_owner_card(self) -> Awaitable[None] | None:
     """End the turn after a continuation owner-input receipt is delivered.
 
     A saved question / approval / secure-input card is the terminal action of
@@ -577,7 +578,10 @@ class ActiveClaudeClient:
     matching completed tool result, then this fires the same soft interrupt
     `steer` uses to stop any trailing generation at its source.
 
-    Signal-only, exactly like `steer`: it never awaits `_finished`. Tagged
+    Claim ownership synchronously at the receipt boundary, before returning
+    the interrupt awaitable. This ordering is load-bearing: the SDK terminal
+    may already be queued behind the tool result and must see `card` ownership
+    even if the event loop has not yet run the interrupt task. Tagged
     `card` so the terminal branch classifies the result as a clean completion —
     no steer requery (`pending_steer` stays empty) and no resumable "Paused"
     note; the chat's durable pending-question marker already owns resumption.
@@ -585,15 +589,15 @@ class ActiveClaudeClient:
     semantics win.
     """
     if self._finished.done():
-      return
+      return None
     if self._interrupt_owner is not None:
-      return
+      return None
     self._interrupt_owner = "card"
     # Collapse a steer that races the post-receipt drain window into this cut
     # rather than firing a second interrupt (mirrors `steer`); the terminal
     # branch clears the flag.
     self._interrupt_in_flight = True
-    await self._client.interrupt()
+    return self._client.interrupt()
 
   async def interrupt(self) -> None:
     """Interrupts the live run and waits for runner-side drain.
