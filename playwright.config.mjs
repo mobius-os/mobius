@@ -2,6 +2,7 @@ import { defineConfig } from '@playwright/test'
 import { existsSync, readdirSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
+import { E2E_SHARDS, TIMING_SPECS, UNAUTHENTICATED_SPECS } from './tests/e2e-shards.mjs'
 
 const AUTH_FILE = process.env.MOBIUS_AUTH_FILE || 'tests/.auth/state.json'
 const isCI = !!process.env.CI
@@ -50,6 +51,15 @@ function localChromeExecutable() {
 }
 
 const localChrome = isCI ? null : localChromeExecutable()
+
+function exactFilePattern(files) {
+  const escaped = files.map(file => file.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+  return new RegExp(`(?:^|/)(${escaped.join('|')})$`)
+}
+
+function ordinarySpecs(shard) {
+  return shard.filter(file => !TIMING_SPECS.has(file) && !UNAUTHENTICATED_SPECS.has(file))
+}
 
 export default defineConfig({
   testDir: './tests',
@@ -134,25 +144,18 @@ export default defineConfig({
       // contention that produced most auth flakes in the first place.
       retries: 1,
     },
-    {
-      name: 'tests',
-      testMatch: /\.spec\.mjs$/,
-      // Exclude SSE-timing specs from this project — they get their
-      // own project below with retries=0 so a 50%-flake regression
-      // can't be papered over by the global retries=1.
-      testIgnore: [
-        /(stream-reconnect|handleStop-sync-ordering)\.spec\.mjs$/,
-        /\.unauth\.spec\.mjs$/,
-      ],
+    ...E2E_SHARDS.map((files, index) => ({
+      name: `shard-${index + 1}`,
+      testMatch: exactFilePattern(ordinarySpecs(files)),
       dependencies: ['auth'],
       use: { storageState: AUTH_FILE },
-    },
+    })),
     {
       // Security checks that must prove their result without a login or owner
       // state. Keeping these in a dependency-free project prevents auth.setup
       // failures from masking whether the hostile request was actually tested.
-      name: 'tests-unauthenticated',
-      testMatch: /\.unauth\.spec\.mjs$/,
+      name: 'shard-4-unauthenticated',
+      testMatch: exactFilePattern([...UNAUTHENTICATED_SPECS]),
       use: { storageState: { cookies: [], origins: [] } },
       retries: 0,
     },
@@ -163,8 +166,8 @@ export default defineConfig({
       // Pin to retries=0 so the regression surfaces on the first
       // attempt — these tests' contracts are explicitly about timing
       // windows and shouldn't be retried into green.
-      name: 'tests-timing',
-      testMatch: /(stream-reconnect|handleStop-sync-ordering)\.spec\.mjs$/,
+      name: 'shard-4-timing',
+      testMatch: exactFilePattern([...TIMING_SPECS]),
       dependencies: ['auth'],
       use: { storageState: AUTH_FILE },
       retries: 0,
