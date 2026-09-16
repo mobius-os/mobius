@@ -109,6 +109,7 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
     const QUEUED_TEXT = 'queued message to steer'
     const runtime = createMockChatRuntime({ runtime_revision: FIXTURE_RUNTIME_REVISION })
     await installRuntimeRoute(page, runtime)
+    let queuedRuntimeMessages = []
     let releaseSteer
     const steerGate = new Promise(resolve => { releaseSteer = resolve })
 
@@ -126,14 +127,17 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
       // {status:"steered"} and the remaining (now empty) server queue.
       if (body.force_steer) {
         await steerGate
-        runtime.update({ running: true, pending_messages: [] })
+        // Claude accepts the steer now but applies the transcript cut at its
+        // next natural boundary. Keep the durable queue projection coherent
+        // with that deferred cut while its inline reservation is visible.
+        runtime.update({ running: true, pending_messages: queuedRuntimeMessages })
         return route.fulfill({
           status: 202,
           contentType: 'application/json',
           body: JSON.stringify({
             status: 'steered',
             chat_id: 'mock',
-            pending_messages: [],
+            cut_deferred: true,
           }),
         })
       }
@@ -160,7 +164,8 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
       const pendingMessage = {
         role: 'user', content: body.content, ts: QUEUE_TS, cid: body.cid,
       }
-      runtime.update({ running: true, pending_messages: [pendingMessage] })
+      queuedRuntimeMessages = [pendingMessage]
+      runtime.update({ running: true, pending_messages: queuedRuntimeMessages })
       return route.fulfill({
         status: 202,
         contentType: 'application/json',

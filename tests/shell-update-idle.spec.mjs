@@ -106,7 +106,9 @@ test.describe('shell update — owner-controlled navigation', () => {
 
     await page.getByRole('button', { name: 'Close notifications' }).click()
     await page.getByRole('button', { name: 'Toggle navigation' }).click()
-    await page.locator(`[data-drawer-key="chat:${target.id}"]`).click()
+    const targetChat = page.locator(`[data-drawer-key="chat:${target.id}"]`)
+    await expect(targetChat).toBeVisible({ timeout: 8000 })
+    await targetChat.click()
     await expect(page.locator(
       `[data-chat-id="${target.id}"][data-chat-surface="painted"]`,
     )).toBeVisible({ timeout: 8000 })
