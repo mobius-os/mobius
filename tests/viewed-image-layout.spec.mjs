@@ -1,10 +1,15 @@
 /** Cold viewed-image loads must reveal once, after decode fixes final layout. */
 import { test, expect } from '@playwright/test'
 import { readFileSync } from 'node:fs'
+import { createMockChatRuntime } from './_mockChatRuntime.mjs'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
 const CHAT_ID = '70000000-0000-4000-8000-000000000008'
 const IMAGE = readFileSync(new URL('./fixtures/viewed-image-800x600.png', import.meta.url))
+// The shell can already have accepted a server runtime before this route
+// fulfills. Keep this fixture authoritative rather than letting an implicit
+// revision zero be discarded as stale.
+const FIXTURE_RUNTIME_REVISION = 1_000_000
 
 test.use({ serviceWorkers: 'block' })
 
@@ -23,6 +28,9 @@ function chatListItem() {
 }
 
 async function verifyColdImageLayout(page, viewport) {
+  const runtime = createMockChatRuntime({
+    runtime_revision: FIXTURE_RUNTIME_REVISION,
+  })
   await page.setViewportSize(viewport)
   await page.addInitScript(chatId => {
     localStorage.setItem('moebius_active_chat', chatId)
@@ -57,13 +65,13 @@ async function verifyColdImageLayout(page, viewport) {
     return route.fulfill({
       status: 200,
       contentType: 'application/json',
-      body: JSON.stringify({
+      body: JSON.stringify(runtime.snapshot({
         messages,
         total: messages.length,
         offset: 0,
         running: false,
         pending_messages: [],
-      }),
+      })),
     })
   })
   await page.route(new RegExp(`/api/chats/${CHAT_ID}/stream$`), route =>
