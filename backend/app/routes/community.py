@@ -1146,6 +1146,27 @@ async def set_community_rating(
 
 
 @router.post(
+  "/apps/{app_id}/withdraw",
+  dependencies=[Depends(reject_cross_site)],
+)
+async def withdraw_community_app(
+  app_id: str,
+  _: models.Owner = Depends(_store_owner_control),
+  idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+) -> JSONResponse:
+  """Withdraw a community listing the caller's linked identity published.
+
+  Authorization is enforced by the registry against the publisher identity;
+  the Store only surfaces this for a viewer's own publications.
+  """
+  return await _request(
+    "POST",
+    f"{COMMUNITY_PREFIX}/apps/{_safe_public_id(app_id, 'App id')}/withdraw",
+    idempotency_key=_idempotency(idempotency_key),
+  )
+
+
+@router.post(
   "/apps/{app_id}/revisions/{revision_id}/comments",
   dependencies=[Depends(reject_cross_site)],
 )

@@ -113,6 +113,11 @@ _COMMUNITY_ROUTES = (
   ("POST", re.compile(r"/v1/community/apps"), "community:publish"),
   (
     "POST",
+    re.compile(r"/v1/community/apps/[A-Za-z0-9_:-]{8,200}/withdraw"),
+    "community:publish",
+  ),
+  (
+    "POST",
     re.compile(
       r"/v1/community/apps/[A-Za-z0-9_:-]{8,200}/revisions/"
       r"[A-Za-z0-9_:-]{8,200}/installs"
