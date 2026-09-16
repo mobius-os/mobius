@@ -1071,7 +1071,7 @@ test.describe('Drawer state machine — extended invariants', () => {
     // the next physical Back leaves the app exactly once.
     await expect.poll(async () => (await getNavState(page)).hasCanvas).toBe(true)
     await goBack(page)
-    expect((await getNavState(page)).hasChat).toBe(true)
+    await expect.poll(async () => (await getNavState(page)).hasChat).toBe(true)
   })
 })
 
