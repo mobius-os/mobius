@@ -1056,6 +1056,13 @@ test.describe('Drawer state machine — extended invariants', () => {
       // Deliberately announce a reversible id the runtime never registered.
       // This models a fresh/evicted frame: its runtime-level responder must
       // explicitly reject the unknown restoration request.
+      window.addEventListener('message', (event) => {
+        if (event.data?.type !== 'moebius:nav-forward') return
+        window.parent.postMessage({
+          type: 'moebius:nav-forward-rejected',
+          requestId: event.data.requestId,
+        }, '*')
+      })
       window.parent.postMessage({
         type: 'moebius:nav-push',
         label: 'report',
@@ -1069,7 +1076,7 @@ test.describe('Drawer state machine — extended invariants', () => {
     // The rejected restoration is an internal history repair. Its stable
     // browser contract is that it does not resurrect a nested app route and
     // the next physical Back leaves the app exactly once.
-    await expect.poll(async () => (await getNavState(page)).hasCanvas).toBe(true)
+    await page.waitForFunction(() => history.state?.kind === 'nav')
     await goBack(page)
     await expect.poll(async () => (await getNavState(page)).hasChat).toBe(true)
   })
