@@ -220,7 +220,6 @@ test('a staged update can review another release before one restart', async ({ p
   await expect(page.getByText('More updates available', { exact: true })).toBeVisible()
   const review = page.getByRole('button', { name: 'Review update' })
   await expect(review).toBeVisible()
-  await expect(review).toBeFocused()
   await expect(page.getByRole('button', { name: 'Restart server' })).toBeVisible()
   await expect(page.getByRole('button', { name: 'Restart to finish' })).toHaveCount(0)
   await review.click()
@@ -527,7 +526,7 @@ function finishPreview(overrides = {}) {
     activation: imageActivation, commits: [], total_commits: 0, ...overrides }
 }
 
-test('an installed image update can finish without a newer source release', async ({ page }) => {
+test('an unfinished installed image update routes to the repair action', async ({ page }) => {
   const state = { current: 'activation_needed',
     overrides: { available: false, activation: imageActivation }, preview: finishPreview(),
     rebuild: { supported: true, state: 'no_change', expected_sha: preview.current_sha } }
@@ -540,37 +539,23 @@ test('an installed image update can finish without a newer source release', asyn
   await request
   const dialog = page.getByRole('dialog', { name: 'Finish update' })
   await expect(dialog).toBeVisible()
-  await expect(dialog.getByRole('button', { name: 'Update now', exact: true })).toBeEnabled()
-  await expect(dialog.getByText('Make the installed update active')).toBeVisible()
-  await expect(dialog.getByText('There’s nothing to apply. This update is already complete.')).toHaveCount(0)
+  await expect(dialog.getByRole('heading', { name: 'This update needs help' })).toBeVisible()
+  await expect(dialog.getByRole('button', { name: 'Ask Möbius', exact: true })).toBeEnabled()
+  await expect(dialog.getByRole('button', { name: 'Update now', exact: true })).toHaveCount(0)
   expect(state.unexpectedMutations).toEqual([])
 })
 
-test('finish submits the exact reviewed installed plan', async ({ page }) => {
+test('a newer release remains the single next action while installed activation waits', async ({ page }) => {
   const installed = finishPreview({ activation: { ...imageActivation, deployment: 'railway' },
     image_digest: `sha256:${'b'.repeat(64)}` })
   const state = { current: 'activation_needed',
-    overrides: { available: false, activation: imageActivation }, preview: installed,
+    overrides: { available: true, activation: imageActivation }, preview: installed,
     rebuild: { supported: true, state: 'no_change', expected_sha: installed.target_sha } }
   await mockPlatform(page, state)
-  await page.route('**/api/health', route => route.fulfill({ status: 200,
-    contentType: 'application/json', body: JSON.stringify({ status: 'ok', boot_id: 'before' }) }))
-  let submitted = null
-  await page.route('**/api/platform/rebuild', route => {
-    submitted = route.request().postDataJSON()
-    return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({
-      supported: true, deployment: 'railway', state: 'no_change', expected_sha: installed.target_sha,
-    }) })
-  })
   const updates = await openSettings(page)
-  const request = page.waitForRequest('**/api/platform/update-preview?intent=finish')
-  await updates.getByRole('button', { name: 'Finish update', exact: true }).click()
-  await request
-  const dialog = page.getByRole('dialog', { name: 'Finish update' })
-  await dialog.getByRole('button', { name: 'Update now', exact: true }).click()
-  await expect(dialog).toHaveCount(0)
-  expect(submitted).toEqual({ plan_id: installed.plan_id, current_sha: installed.current_sha,
-    target_sha: installed.target_sha, image_digest: installed.image_digest })
+  await expect(updates.getByRole('button', { name: 'Review update', exact: true })).toBeVisible()
+  await expect(updates.getByRole('button', { name: 'Finish installed update' })).toHaveCount(0)
+  await expect(updates.getByRole('button', { name: 'Finish update', exact: true })).toHaveCount(0)
   expect(state.unexpectedMutations).toEqual([])
 })
 

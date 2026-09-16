@@ -410,7 +410,7 @@ test.describe('Unauthenticated startup', () => {
       .toBeVisible({ timeout: 10000 })
   })
 
-  test('managed deployment goes straight to Möbius sign-in', async ({ page }) => {
+  test('managed deployment presents Möbius sign-in without local setup', async ({ page }) => {
     let setupChecks = 0
     await page.route(/\/api\/auth\/setup\/status$/, route => {
       setupChecks += 1
@@ -418,7 +418,7 @@ test.describe('Unauthenticated startup', () => {
         status: 200,
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          configured: false,
+          configured: true,
           auth_mode: 'mobius',
         }),
       })
@@ -431,15 +431,16 @@ test.describe('Unauthenticated startup', () => {
       })
     )
 
-    const started = page.waitForRequest(/\/api\/auth\/sso\/start(\?.*)?$/)
     await page.goto(`${BASE}/shell/`, { waitUntil: 'domcontentloaded' })
+    const signIn = page.getByRole('link', { name: 'Sign in with mobius.you' })
+    await expect(signIn).toBeVisible({ timeout: 10000 })
+    const started = page.waitForRequest(/\/api\/auth\/sso\/start(\?.*)?$/)
+    await signIn.click()
     const request = await started
 
     expect(setupChecks).toBe(1)
     expect(new URL(request.url()).searchParams.get('return_path')).toBe('/shell/')
-    await expect(page.getByRole('heading', { name: 'Set up your Möbius' }))
-      .toHaveCount(0)
-    await expect(page.locator('.login')).toHaveCount(0)
+    await expect(page.getByRole('heading', { name: 'Set up your Möbius' })).toHaveCount(0)
   })
 
   test('managed login handoff opens the bound owner without another setup flow', async ({ page }) => {
