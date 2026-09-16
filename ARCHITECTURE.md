@@ -268,12 +268,6 @@ the database, but the process intentionally keeps its boot verdict until
 restart; promoting only part of the skipped startup plan inside a health probe
 would create a second, race-prone boot mechanism.
 
-Gauntlet execution and its writer cutover are retired. Migration
-`0057_detach_retired_gauntlet_history` preserves historical tables without
-keeping the runtime alive. Non-empty history requires the prior atomic cutover
-marker; installations that skipped that prerequisite build fail closed and
-must complete that upgrade first. Do not bypass the marker or delete history.
-
 ### Misc shared helpers
 
 Agent-editable general-purpose modules — several sit on live chat paths and are
