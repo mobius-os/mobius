@@ -76,7 +76,8 @@ _ACTIVE_STATES = {"queued", "preparing", "replacing", "verifying"}
 _HANDOFF_VERSION = "external-cutover-v1"
 _managed_recovery_tasks: set[asyncio.Task[None]] = set()
 _UPGRADE_MESSAGE = (
-  "The Host replacement helper predates safe external chat handoff. Re-run "
+  "The Host replacement helper predates the current protected-runtime or "
+  "safe external chat-handoff contract. Re-run "
   "scripts/install-rebuild-helper.sh from the current trusted checkout."
 )
 
@@ -404,12 +405,19 @@ def _read_host_status() -> dict[str, Any]:
         "expected_sha": expected,
         "message": "Container rebuild queued.",
         "handoff": value.get("handoff"),
+        # Helpers predating image-owned protected runtime advertised the same
+        # handoff version. Preserve their retired capability through this
+        # synthesized state so a pending request cannot make them look current.
+        "runtime_overlay": value.get("runtime_overlay"),
       }
   return value
 
 
-def _current_handoff(raw: dict[str, Any]) -> bool:
-  return raw.get("handoff") == _HANDOFF_VERSION
+def _current_host_controller(raw: dict[str, Any]) -> bool:
+  return (
+    raw.get("handoff") == _HANDOFF_VERSION
+    and not raw.get("runtime_overlay")
+  )
 
 
 def _write_request(expected_sha: str) -> None:
@@ -495,7 +503,7 @@ async def read_rebuild_status() -> RebuildStatus:
       ),
     )
   raw = await asyncio.to_thread(_read_host_status)
-  if not _current_handoff(raw):
+  if not _current_host_controller(raw):
     return _empty_status(
       deployment,
       supported=False,

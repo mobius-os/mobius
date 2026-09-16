@@ -22,6 +22,25 @@ guide gets a fresh clone to a running dev/test loop.
 tools). `ARCHITECTURE.md` is the deep architecture reference — read it before
 any non-trivial change.
 
+### Deployment compatibility
+
+Existing self-hosted and Railway installations keep their proven external
+controller and topology across ordinary updates. A change to Compose, Railway
+configuration, or the self-hosted helper is compatible reference source by
+default; it affects new installations or a later intentional host refresh.
+
+Before changing image or runtime behavior, review it against configurations
+already installed in the field—not only the repository's current defaults. If
+the release requires a new helper protocol or capability, mount, port, network,
+privilege, secret-delivery mechanism, or Railway service setting, advance the
+matching monotonic `deployment/*.required` marker. Advance it in the same
+release as the matching monotonic compatibility revision in the fixed helper,
+Compose, or Railway reference file. That retained paired edit is the bridge for
+installations that skipped the marker-aware updater: their older classifier
+already treats the legacy path as external work and will refuse an unsafe
+in-product replacement. See `scripts/CONTAINER-REBUILD.md` for the exact bridge
+files, marker table, and migration contract.
+
 ## Reviewed source conflicts in Contribute
 
 Contribute normally proves that the exact published patch is already contained

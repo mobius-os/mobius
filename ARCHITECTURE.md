@@ -77,17 +77,26 @@ used by update preview, Apply/status, and the image-dependency fingerprint:
 
 | Impact | Typical source | Activation |
 |---|---|---|
-| `live` | frontend source, tests, docs | frontend is rebuilt or source is read on demand |
+| `live` | frontend source, tests, docs, compatible deployment reference source | frontend is rebuilt, source is read on demand, or existing external configuration remains authoritative |
 | `server_restart` | `backend/app/`, `skill/core.md` | restart the FastAPI process |
 | `proxy_reload` | `Caddyfile` | self-hosted host checkout + Caddy reload |
-| `container_recreate` | Compose topology or `railway.toml` | recreate services or trigger a managed deployment |
+| `container_recreate` | `deployment/self-hosted-topology.required` or `deployment/railway-topology.required` | recreate services or trigger a managed deployment |
 | `image_rebuild` | Dockerfile, dependency locks, baked scripts/supervisors | rebuild the image and replace the app container |
-| `host_maintenance` | host-operated deployment/repair tooling | update and act from the host |
+| `host_maintenance` | `deployment/self-hosted-helper.required` | update and act from the host |
 
 Rules can be deployment-scoped: Railway does not pretend to reload Caddy, and a
 self-hosted install does not pretend to apply `railway.toml`. Mixed updates keep
 every applicable reason and order by the highest action. Settings shows this
 impact before Apply and never offers **Restart to finish** for a higher level.
+Ordinary changes to Compose, `railway.toml`, or host-helper source are compatible
+defaults for new installs; a release advances the matching monotonic
+`deployment/*.required` marker only when existing installations need an
+external migration. Every marker advance is paired with its corresponding
+monotonic revision in a fixed legacy Compose, Railway, or helper-source file so
+an installation that skips the marker-aware updater also stops safely.
+`Caddyfile` remains an immediate `proxy_reload` because it is live routing
+policy rather than a container compatibility default. The full contract is
+documented in `scripts/CONTAINER-REBUILD.md`.
 The backend records external activation remainders but never invokes Docker,
 Caddy, Railway, or host package/kernel tools. In-container sudo cannot make
 those changes durable, and mounting a Docker socket would weaken the container
