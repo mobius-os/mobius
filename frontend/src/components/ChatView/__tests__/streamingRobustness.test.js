@@ -53,6 +53,13 @@ test('streaming deltas are flags on the shared active markdown tree', () => {
     'cursor insertion must toggle behind isStreaming instead of selecting another renderer')
 })
 
+test('a reconnect state update cannot run the chat-route teardown', () => {
+  assert.match(streamHookSource,
+    /const chatTeardownRef = useRef\(null\)[\s\S]*?chatTeardownRef\.current = \{[\s\S]*?disconnect,[\s\S]*?persistLatestStreamSnapshot,[\s\S]*?\}\n\n  useEffect\(\(\) => \(\) => \{[\s\S]*?const teardown = chatTeardownRef\.current[\s\S]*?\}, \[chatId\]\)/,
+    'the destructive teardown follows only an actual chat boundary; reconnect state must stay visible while catch-up is pending',
+  )
+})
+
 test('R6: answering in-process keeps the active bridge through settlement', () => {
   const start = chatViewSource.indexOf('const doSendSilent = useCallback')
   const end = chatViewSource.indexOf('\n  function handleSubmit', start)

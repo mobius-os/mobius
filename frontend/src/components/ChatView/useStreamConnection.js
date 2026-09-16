@@ -675,6 +675,19 @@ export default function useStreamConnection(chatId, {
     }
   }, [clearQuestionResponseTracking, flushBuffer])
 
+  // The route teardown must follow the chat identity, not incidental render
+  // identities. In particular, arming the healthy reconnect note changes
+  // state; if that made this effect clean up, it cancelled the very note the
+  // user needed while the replacement stream was still pending.
+  const chatTeardownRef = useRef(null)
+  chatTeardownRef.current = {
+    disconnect,
+    persistLatestStreamSnapshot,
+    clearQuestionResponseTracking,
+    setStreamItems,
+    setStreamAssistantMessageId,
+  }
+
   useEffect(() => () => {
     // On chatId change: tear down the old connection AND wipe stream
     // state. Without the wipe, streamItems from the previous chat
@@ -684,12 +697,13 @@ export default function useStreamConnection(chatId, {
     // The bridge-partial bridge logic is NOT affected — useBridgePartial
     // captures its ts from the initial DB fetch, not from streamItems;
     // clearing streamItems here does not interact with that gate.
-    disconnect()
+    const teardown = chatTeardownRef.current
+    teardown.disconnect()
     // disconnect() moves any final text reveal into latestItemsRef. Persist that
     // completed old-chat frame before the next effect changes the active id.
-    persistLatestStreamSnapshot()
-    setStreamItems([])
-    setStreamAssistantMessageId(null)
+    teardown.persistLatestStreamSnapshot()
+    teardown.setStreamItems([])
+    teardown.setStreamAssistantMessageId(null)
     textBufferRef.current = ''
     textBufferItemIdRef.current = null
     forceNewTextBlockRef.current = false
@@ -701,15 +715,10 @@ export default function useStreamConnection(chatId, {
     // Answers belong to the chat we're leaving; carrying them into the next
     // chat could re-arm a same-keyed question with a foreign answer.
     answerReceiptsByQuestionKeyRef.current.clear()
-    clearQuestionResponseTracking()
-  }, [
-    chatId,
-    clearQuestionResponseTracking,
-    disconnect,
-    persistLatestStreamSnapshot,
-    setStreamAssistantMessageId,
-    setStreamItems,
-  ])
+    teardown.clearQuestionResponseTracking()
+  // All current callbacks are read through chatTeardownRef. This cleanup only
+  // owns a route boundary (or unmount), never a state-driven render.
+  }, [chatId])
 
   useEffect(() => {
     activeStreamChatIdRef.current = chatId
