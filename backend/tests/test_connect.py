@@ -2109,3 +2109,57 @@ def test_serve_connection_retries_after_auth_rejection(monkeypatch):
   # Reconnected after the 401 instead of returning on the first attempt.
   assert len(opened) == 2
   assert posted and posted[-1]["stdout"] == "Connect daemon removed."
+
+
+def test_serve_all_respawns_and_stops_removed_connections(monkeypatch):
+  """The supervisor must respawn a connection whose thread exits and signal a
+  connection removed from config to stop, without respawning it afterwards."""
+  a = {"url": "https://a.test", "host_id": "h_a", "token": "ta"}
+  b = {"url": "https://b.test", "host_id": "h_b", "token": "tb"}
+
+  created = []
+
+  class FakeThread:
+    def __init__(self, target=None, args=(), daemon=None, name=None):
+      self.args = args
+      self.name = name
+      self._alive = True
+      created.append(self)
+
+    def start(self):
+      pass
+
+    def is_alive(self):
+      return self._alive
+
+  monkeypatch.setattr(connect_runner.threading, "Thread", FakeThread)
+
+  # One config snapshot per supervisor iteration: both present, both present
+  # (to test respawn), then B removed, then B removed.
+  conn_seq = [[a, b], [a, b], [a], [a]]
+  step = {"i": 0}
+  monkeypatch.setattr(
+    connect_runner, "_connections",
+    lambda *args, **kw: list(conn_seq[min(step["i"], len(conn_seq) - 1)]),
+  )
+
+  def fake_sleep(_seconds):
+    step["i"] += 1
+    if step["i"] == 1:
+      created[0]._alive = False   # A's first thread exits -> must respawn
+    if step["i"] == 3:
+      created[1]._alive = False   # B (already removed) finally dies -> dropped
+    if step["i"] >= 4:
+      raise KeyboardInterrupt     # end the supervisor loop cleanly
+  monkeypatch.setattr(connect_runner.time, "sleep", fake_sleep)
+
+  connect_runner._serve_all()
+
+  names = [t.name for t in created]
+  # A respawned after its thread exited; B spawned once and never respawned.
+  assert names.count("mobius-connect-h_a") == 2
+  assert names.count("mobius-connect-h_b") == 1
+  # B's worker was signalled to stop when it left the config.
+  b_thread = created[1]
+  assert b_thread.name == "mobius-connect-h_b"
+  assert b_thread.args[2].is_set()
