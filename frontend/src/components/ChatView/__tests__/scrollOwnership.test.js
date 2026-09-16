@@ -259,7 +259,8 @@ test('automatic geometry owners and newer semantic actions share reader authorit
   )
 
   const composerStart = ownerSource.indexOf('const runComposerTailIntent =')
-  const composerEnd = ownerSource.indexOf('const noteScrollStart =', composerStart)
+  const composerEnd = ownerSource.indexOf(
+    "scrollEl.addEventListener('pointerdown', onPointerDownInput", composerStart)
   const composerPath = ownerSource.slice(composerStart, composerEnd)
   assert.ok(composerStart >= 0 && composerEnd > composerStart,
     'composer tail intent must remain inside the scroll owner')

@@ -8,7 +8,6 @@ import ReactDOM from 'react-dom/client'
 // thumbs rendered as squares instead of circles).
 import App from './App.jsx'
 import { installGlobalErrorHandlers } from './lib/errorLog.js'
-import { installPerfProbe } from './lib/perfProbe.js'
 import { SHELL_BUILD } from './lib/buildInfo.js'
 import {
   redeemInstalledShellSession,
@@ -20,11 +19,6 @@ import './index.css'
 // unhandled promise rejections) so no failure white-screens or vanishes
 // without a trace.
 installGlobalErrorHandlers()
-
-// Opt-in field performance probe. Returns immediately unless this specific
-// device was enrolled with `?perf=1`, so an ordinary session registers no
-// observers and sends nothing.
-installPerfProbe()
 
 // Surface the shell build marker once at startup. This also keeps
 // SHELL_BUILD referenced so the bundler can't tree-shake it away — its

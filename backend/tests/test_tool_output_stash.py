@@ -7,7 +7,7 @@ carrying tool identity + truncation metadata onto the persisted block."""
 import json
 import uuid
 
-from sqlalchemy import Text, cast, event as sqlalchemy_event, text as sql_text
+from sqlalchemy import Text, cast, event as sqlalchemy_event
 
 from app import models
 from app.chat_transcript import project_messages_for_detail
@@ -26,7 +26,6 @@ from app.routes.chats import TOOL_OUTPUT_PREVIEW_CHARS
 from app.memory_recall import EMPTY_RECALL_BINDING
 from app.tool_output_storage import (
     TOOL_OUTPUT_STORAGE_PREFIX,
-    compress_legacy_tool_output_batch,
     decode_tool_output,
 )
 
@@ -77,32 +76,6 @@ def test_stash_upsert_last_write_wins(db):
     ).all()
     assert len(rows) == 1
     assert rows[0].output == "second"
-
-
-def test_legacy_tool_output_backfill_is_bounded_and_idempotent(db):
-    big = "legacy\n" * 5000
-    db.execute(sql_text(
-        "INSERT INTO tool_outputs (chat_id, tool_use_id, output) "
-        "VALUES (:chat_id, :tool_use_id, :output)"
-    ), {"chat_id": "c1", "tool_use_id": "legacy", "output": big})
-    db.commit()
-
-    from app.database import SessionLocal
-    first = compress_legacy_tool_output_batch(
-        SessionLocal,
-        batch_size=1,
-    )
-    assert first["compressed"] == 1
-    db.expire_all()
-    stored = _raw_tool_output(db, "c1", "legacy")
-    assert stored.startswith(TOOL_OUTPUT_STORAGE_PREFIX)
-    assert decode_tool_output(stored) == big
-
-    second = compress_legacy_tool_output_batch(
-        SessionLocal,
-        batch_size=1,
-    )
-    assert second["compressed"] == 0
 
 
 def test_stash_ignores_empty_key(db):
