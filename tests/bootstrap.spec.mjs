@@ -423,7 +423,7 @@ test.describe('Unauthenticated startup', () => {
         }),
       })
     })
-    await page.route(/\/api\/auth\/sso\/start(\?.*)?$/, route =>
+    await page.route(/\/api\/auth\/mobius\/login\/start$/, route =>
       route.fulfill({
         status: 200,
         headers: { 'Content-Type': 'text/html' },
@@ -434,12 +434,12 @@ test.describe('Unauthenticated startup', () => {
     await page.goto(`${BASE}/shell/`, { waitUntil: 'domcontentloaded' })
     const signIn = page.getByRole('link', { name: 'Sign in with mobius.you' })
     await expect(signIn).toBeVisible({ timeout: 10000 })
-    const started = page.waitForRequest(/\/api\/auth\/sso\/start(\?.*)?$/)
+    const started = page.waitForRequest(/\/api\/auth\/mobius\/login\/start$/)
     await signIn.click()
     const request = await started
 
     expect(setupChecks).toBe(1)
-    expect(new URL(request.url()).searchParams.get('return_path')).toBe('/shell/')
+    expect(new URL(request.url()).pathname).toBe('/api/auth/mobius/login/start')
     await expect(page.getByRole('heading', { name: 'Set up your Möbius' })).toHaveCount(0)
   })
 
