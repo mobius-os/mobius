@@ -335,29 +335,7 @@ jobs:
           set +e
           # --kill-after sends SIGKILL 30s after the SIGINT if Playwright
           # ignores the interrupt, so the step can't hang past the cap.
-          timeout --signal=INT --kill-after=30s 12m bash -c '
-            set +e
-            npx playwright test tests/platform-update-modal.spec.mjs tests/bootstrap.spec.mjs \
-              --grep "a staged update can review another release before one restart|staged-update actions stack without overflow in a narrow settings pane|a rolled-back apply stays open with an explicit repair action|a rollback result keeps an explicit repair action when status reads fail|an installed image update can finish without a newer source release|finish submits the exact reviewed installed plan|a failed container result survives reopening Settings without an unsolicited alert|managed deployment goes straight to Möbius sign-in" \
-              --repeat-each=2 --retries=0 --workers=2 --trace=on --output=test-results-parta
-            parta=$?
-            cp playwright-results.xml playwright-results-parta.xml 2>/dev/null || true
-            echo "MOBIUS_GATE_RESULT parta=$parta"
-
-            npx playwright test tests/chat-offline.spec.mjs \
-              --repeat-each=10 --retries=0 --workers=1 --output=test-results-chat-offline
-            offline=$?
-            cp playwright-results.xml playwright-results-chat-offline.xml 2>/dev/null || true
-            echo "MOBIUS_GATE_RESULT chat_offline=$offline"
-
-            npx playwright test tests/embedded-chat-capability.spec.mjs \
-              --repeat-each=10 --retries=0 --workers=1 --output=test-results-embedded-chat
-            embedded=$?
-            cp playwright-results.xml playwright-results-embedded-chat.xml 2>/dev/null || true
-            echo "MOBIUS_GATE_RESULT embedded_chat=$embedded"
-
-            test "$parta" = 0 -a "$offline" = 0 -a "$embedded" = 0
-          '
+          timeout --signal=INT --kill-after=30s 12m npx playwright test
           echo "exit=$?" >> "$GITHUB_OUTPUT"
           exit 0
         env:
@@ -383,7 +361,7 @@ jobs:
         with:
           name: e2e-failure-history
           path: |
-            playwright-results*.xml
+            playwright-results.xml
             e2e-container.log
           # Rich traces remain short-lived below. These small text artifacts
           # retain the failing tests and their backend causes across a month.
@@ -422,7 +400,7 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: playwright-test-results
-          path: test-results-*/
+          path: test-results/
           retention-days: 7
           if-no-files-found: warn
 
