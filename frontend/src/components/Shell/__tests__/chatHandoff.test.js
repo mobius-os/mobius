@@ -327,8 +327,8 @@ test('direct chat actions hand focus to the destination composer', () => {
     /if \(modalDrawerOpen\) \{[\s\S]*composerRequestAfterDrawerCloseRef\.current = \{[\s\S]*chatId,[\s\S]*options: composerOptions/,
     'a modal New Chat tap must retain its composer request across drawer close')
   assert.match(shell,
-    /if \(modalDrawerOpen\) return[\s\S]*composerRequestAfterDrawerCloseRef\.current = null[\s\S]*requestComposer\(pending\.chatId, pending\.options\)/,
-    'the retained request must replay after the drawer stops making the workspace inert')
+    /const handleDrawerCloseSettled = useCallback\(\(\) => \{[\s\S]*composerRequestAfterDrawerCloseRef\.current = null[\s\S]*requestComposer\(pending\.chatId, pending\.options\)[\s\S]*onCloseSettled=\{handleDrawerCloseSettled\}/,
+    'the retained request must replay after Drawer reports its visual close boundary settled')
   assert.match(shell,
     /const newChatSession = String\(newChatPresentation\?\.chatId[\s\S]*<PaneChatView[\s\S]*newChatSession=\{newChatSession\}[\s\S]*onNewChatSubmit=\{queueDraftFirstNewChat\}/,
     'the active pane passes allocation state into its canonical ChatView instead of covering it')

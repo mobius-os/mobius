@@ -90,6 +90,7 @@ export default function Drawer({
   onWidthChange,
   interactionLocked = false,
   onClose,
+  onCloseSettled,
   apps,
   appsStatus = 'success',
   onRetryApps,
@@ -951,6 +952,21 @@ export default function Drawer({
     const timer = setTimeout(() => setScrimBlocking(false), watchdogMs)
     return () => clearTimeout(timer)
   }, [open, scrimBlocking])
+
+  const closeSettlementPendingRef = useRef(open && !persistent)
+  useEffect(() => {
+    if (open && !persistent) {
+      closeSettlementPendingRef.current = true
+      return
+    }
+    if (persistent) {
+      closeSettlementPendingRef.current = false
+      return
+    }
+    if (scrimBlocking || !closeSettlementPendingRef.current) return
+    closeSettlementPendingRef.current = false
+    onCloseSettled?.()
+  }, [open, onCloseSettled, persistent, scrimBlocking])
 
   function handleDrawerTransitionEnd(e) {
     if (open || e.target !== e.currentTarget || e.propertyName !== 'transform') return

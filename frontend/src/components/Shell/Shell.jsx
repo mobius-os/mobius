@@ -829,18 +829,16 @@ export default function Shell({ onInitialVisualReady }) {
     setComposerRequest(request)
   }, [])
 
-  // A modal drawer keeps workspace content inert until its close commit. Keep
-  // the user-activation request alive across that exact boundary rather than
-  // guessing with a timer: the immediate request preserves the tap handoff,
-  // and this replay makes the destination composer the owner once the drawer
-  // can legally receive focus.
-  useEffect(() => {
-    if (modalDrawerOpen) return
+  // The drawer remains a visible, focus-owning surface while its close shield
+  // tracks the sliding panel. Replay only when Drawer reports that exact visual
+  // boundary complete; a React `open=false` commit can still occur inside the
+  // activating click before the browser performs its default focus action.
+  const handleDrawerCloseSettled = useCallback(() => {
     const pending = composerRequestAfterDrawerCloseRef.current
     if (!pending) return
     composerRequestAfterDrawerCloseRef.current = null
     requestComposer(pending.chatId, pending.options)
-  }, [modalDrawerOpen, requestComposer])
+  }, [requestComposer])
 
   function focusDesktopChatPaneComposer(chatId) {
     if (!supportsDesktopPaneComposerFocus()) return
@@ -4513,6 +4511,7 @@ export default function Shell({ onInitialVisualReady }) {
         onWidthChange={setDesktopSidebarWidth}
         interactionLocked={drawerModeTransitioning}
         onClose={drawerModeTransitioning ? undefined : closeDrawer}
+        onCloseSettled={handleDrawerCloseSettled}
         apps={apps}
         appsStatus={appsStatus}
         onRetryApps={() => appsQuery.refetch()}

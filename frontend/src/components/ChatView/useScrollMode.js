@@ -90,6 +90,7 @@ import {
   anchorModeFromScroll,
   applyMode,
   contentHoldModeFromScroll,
+  inlineEditorOwnsCaretScroll,
   isQuestionSubmissionMode,
   modeForInlineEditorReveal,
   modeForQuestionEditingViewportChange,
@@ -1616,6 +1617,17 @@ export default function useScrollMode({
         inlineEditorRaf = requestAnimationFrame(() => {
           inlineEditorRaf = 0
           if (Math.abs(scrollEl.scrollTop - plan.scrollTop) <= 0.5) return
+          // Once the textarea is capped it owns its own scroll range. Chromium
+          // can still reveal the caret by moving the nearest ancestor first;
+          // restore the existing transcript anchor and leave the field's own
+          // scrollTop intact instead of adopting that incidental movement.
+          if (inlineEditorOwnsCaretScroll(plan.editor)) {
+            applyLayoutMode(
+              'reader:inline-editor-contained-caret',
+              plan.authorityVersion,
+            )
+            return
+          }
           revealFocusedQuestionEditor('reader:inline-editor-caret', {
             editor: plan.editor,
             nativePositionAlreadyApplied: true,

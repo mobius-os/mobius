@@ -570,6 +570,19 @@ export function modeForQuestionEditingViewportChange(mode, caretAnchor = null) {
 }
 
 
+/** Once an inline editor owns an internal scroll range, caret reveal belongs
+ * inside that field. The transcript must keep its existing reading anchor
+ * rather than adopting the browser's incidental ancestor scroll. */
+export function inlineEditorOwnsCaretScroll(editor) {
+  if (!editor) return false
+  const scrollHeight = Number(editor.scrollHeight)
+  const clientHeight = Number(editor.clientHeight)
+  return Number.isFinite(scrollHeight)
+    && Number.isFinite(clientHeight)
+    && scrollHeight > clientHeight + 0.5
+}
+
+
 /** The ANCHOR_AT twin of `_pinReapplyNeeded` — the SAME two-case repair. A
  *  settled anchor drifts off its reader-chosen position when either the anchor
  *  element's offsetTop SHIFTED (content grew above it) or scrollTop was CLAMPED

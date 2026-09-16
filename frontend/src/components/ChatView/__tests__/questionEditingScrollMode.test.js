@@ -1,6 +1,9 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { modeForQuestionEditingViewportChange } from '../scroll/geometry.js'
+import {
+  inlineEditorOwnsCaretScroll,
+  modeForQuestionEditingViewportChange,
+} from '../scroll/geometry.js'
 
 test('question editing retires passive follow and rebases a held viewport to the editor', () => {
   const staleHold = { kind: 'ANCHOR_AT', key: 'before-edit', offset: 20 }
@@ -28,4 +31,10 @@ test('question editing retires passive follow and rebases a held viewport to the
     caretHold,
     'an unchanged caret hold does not manufacture a mode transition',
   )
+})
+
+test('a capped inline editor owns caret scrolling without rebasing the transcript', () => {
+  assert.equal(inlineEditorOwnsCaretScroll({ scrollHeight: 220, clientHeight: 180 }), true)
+  assert.equal(inlineEditorOwnsCaretScroll({ scrollHeight: 180, clientHeight: 180 }), false)
+  assert.equal(inlineEditorOwnsCaretScroll(null), false)
 })
