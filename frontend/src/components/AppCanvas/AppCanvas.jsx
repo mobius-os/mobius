@@ -383,7 +383,12 @@ const AppCanvas = forwardRef(function AppCanvas({
     Date.now(),
     { allowExpired: !online },
   )
-  const liveToken = liveAppToken(appToken, online, cachedAppToken)
+  // A cold PWA reload can retain a stale optimistic reachability verdict while
+  // the token request has already failed at the transport layer. In that short
+  // window this exact app-scoped cache is safer and more useful than rendering
+  // a permanent session error; a healthy online load still waits for a fresh
+  // token and never trusts the cache merely because it exists.
+  const liveToken = liveAppToken(appToken, online && !appTokenError, cachedAppToken)
 
   useEffect(() => {
     if (appToken) cacheAppToken(appId, appToken)
