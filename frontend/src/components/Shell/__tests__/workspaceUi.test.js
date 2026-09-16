@@ -968,6 +968,15 @@ test('live preview reveal keeps the workspace controller distinct from device mo
   assert.doesNotMatch(shell, /const mode = paneModel\.modeForRect\(contentRect\)/)
 })
 
+test('a phone preview provides a direct foreground action without displacing its source chat', () => {
+  const previewEvent = shell.slice(
+    shell.indexOf("ev.type === 'app_updated'"),
+    shell.indexOf("} else if (ev.type === 'open_item')"),
+  )
+  assert.match(previewEvent, /placeInWorkspace\(placementRequest\)[\s\S]*?paneModel\.modeForRect\(rect\) !== 'phone'[\s\S]*?showToast\(`\$\{app\.name\} is ready\.`,/)
+  assert.match(previewEvent, /label: `Open \$\{app\.name\}`[\s\S]*?activation: ACTIVATE_FOREGROUND/)
+})
+
 test('large drawer lists memoize ordering and row actions without changing row ownership', () => {
   assert.match(
     drawer,
