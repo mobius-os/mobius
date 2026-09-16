@@ -541,6 +541,12 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
     await sendMessage(page, 'first message')
     await expect(page.locator('[data-chat-surface="painted"] .chat__stop')).toBeVisible({ timeout: 5000 })
     await sendMessage(page, TEXT1)
+    // Queue acknowledgements are ordered by the backend. Wait for the first
+    // confirmed row before issuing the second send rather than manufacturing
+    // an arrival-order race in this per-row selection contract.
+    await expect(page.locator('[data-chat-surface="painted"] .queued__row')).toHaveCount(1, {
+      timeout: 5000,
+    })
     await sendMessage(page, TEXT2)
 
     const rowSteerButtons = page.getByRole('button', { name: 'Send this queued message now' })

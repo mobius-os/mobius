@@ -86,6 +86,15 @@ test.describe('shell update — owner-controlled navigation', () => {
     ], armed))
     const target = await createTaggedChat(page, 'update-target')
     const current = await createTaggedChat(page, 'update-current')
+    // The drawer intentionally lists recent chats, not untouched drafts.
+    // Give the navigation target one durable row so this test exercises the
+    // ordinary drawer route rather than relying on a retired blank-draft row.
+    const token = await page.evaluate(() => localStorage.getItem('token'))
+    const seedTarget = await page.request.put(`${BASE}/api/chats/${target.id}`, {
+      headers: { Authorization: `Bearer ${token}` },
+      data: { messages: [{ role: 'user', content: 'Navigation fixture' }] },
+    })
+    expect(seedTarget.ok()).toBe(true)
     await page.goto(`${BASE}/shell/?chat=${current.id}`, { waitUntil: 'domcontentloaded' })
     await expect(page.locator(
       `[data-chat-id="${current.id}"][data-chat-surface="painted"]`,
