@@ -1264,6 +1264,16 @@ def _live_model_entries(
       entry["context_window"] = round(context_window)
     elif model_id in MODEL_CONTEXT_WINDOWS:
       entry["context_window"] = MODEL_CONTEXT_WINDOWS[model_id]
+    # The trial broker bounds each model's usable context below its catalog
+    # spec, and the reported modelContextWindow on real runs proves the cap.
+    # Advertise the effective ceiling so the pre-turn gauge estimate matches
+    # what a completed turn reports.
+    if (
+      provider_id == "mobius"
+      and model_id in MODEL_CONTEXT_WINDOWS
+      and MODEL_CONTEXT_WINDOWS[model_id] < entry.get("context_window", 0)
+    ):
+      entry["context_window"] = MODEL_CONTEXT_WINDOWS[model_id]
     entries.append(entry)
   return entries
 

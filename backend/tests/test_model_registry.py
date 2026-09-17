@@ -418,3 +418,23 @@ def test_claude_fallback_context_matches_documented_model_limit():
   assert by_id["claude-fable-5-1"]["context_window"] == 1_000_000
   assert by_id["claude-opus-4-8"]["context_window"] == 1_000_000
   assert by_id["claude-haiku-4-5-20251001"]["context_window"] == 200_000
+
+
+def test_mobius_live_context_is_clamped_to_the_trial_cap():
+  """The catalog advertises the raw spec; the trial broker enforces a cap.
+
+  Real runs report the capped modelContextWindow, so the registry must not
+  advertise a larger pre-turn estimate than a completed turn will confirm.
+  """
+  entries = providers._live_model_entries("mobius", [
+    {
+      "id": "flow",
+      "label": "Flow",
+      "context_window": 1_048_576,
+    },
+    {"id": "mystery-model", "context_window": 50_000},
+  ])
+  by_id = {entry["id"]: entry for entry in entries}
+  assert by_id["flow"]["context_window"] == 943_718
+  # A model without a known cap keeps its catalog value.
+  assert by_id["mystery-model"]["context_window"] == 50_000

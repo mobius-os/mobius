@@ -44,11 +44,20 @@ export default function BrainUsageButton({
   const contextSnapshot = contextUsageQuery.isLoading
     ? null
     : contextUsageQuery.data
+  // A chat with no provider session yet never enables the usage query, so the
+  // snapshot is undefined rather than a null-session record. The registry
+  // fallback still owns the pre-first-turn estimate there.
+  const noSession = (
+    usageEnabled
+    && !providerSessionId
+    && Boolean(provider && model)
+  )
   const contextTokens = resolvedContextTokenCounts(
     contextSnapshot,
     modelRegistryQuery.isLoading ? null : modelRegistryQuery.data,
     provider,
     model,
+    { noSession },
   )
   const rightPercent = contextTokens === null
     ? null
