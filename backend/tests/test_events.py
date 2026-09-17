@@ -1276,3 +1276,30 @@ def test_blocks_have_renderable_content_real_token_and_blocks():
       {"type": "tool", "tool": "Bash", "status": "done"},
     ]
   ) is True
+
+
+def test_empty_completed_tool_output_never_erases_streamed_output():
+  """Codex may omit aggregatedOutput on the completing event when the output
+  already streamed as deltas. An empty completed payload is not evidence the
+  output was empty, so it must not erase what streamed."""
+  blocks = []
+  process_event({
+    "type": "tool_start", "tool": "Bash", "input": "card helper",
+    "tool_use_id": "t1",
+  }, blocks)
+  process_event({
+    "type": "tool_output", "content": "partial stdout\n",
+    "tool_use_id": "t1",
+  }, blocks)
+  process_event({
+    "type": "tool_output", "content": "final stdout\n",
+    "tool_use_id": "t1",
+  }, blocks)
+  process_event({
+    "type": "tool_output", "content": "",
+    "output_complete": True, "output_exit_code": 0,
+    "tool_use_id": "t1",
+  }, blocks)
+  assert blocks[0]["output"] == "final stdout\n"
+  process_event({"type": "tool_end", "tool_use_id": "t1"}, blocks)
+  assert blocks[0]["status"] == "done"

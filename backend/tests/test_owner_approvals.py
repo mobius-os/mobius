@@ -190,6 +190,51 @@ def test_completed_receipt_ends_only_the_exact_saved_card_turn(
     registry.unregister(chat.id, handle.kind)
 
 
+def test_streamed_receipt_survives_an_empty_completed_payload(
+  client, chat, approval_run,
+):
+  """The card cut must not depend on which channel carried the receipt.
+
+  A provider that streams command output can omit its re-aggregated copy on
+  completion (Codex's aggregatedOutput is optional). The completed event then
+  arrives empty; it must neither erase the streamed output nor skip the
+  finish-after-owner-card cut.
+  """
+  from app.runner_registry import registry
+  handle = _FakeCardHandle(chat.id)
+  registry.register(handle)
+  try:
+    approval_run[0].publish({
+      "type": "tool_start", "tool": "Bash", "input": "owner helper",
+      "tool_use_id": "owner-helper-1",
+    })
+    saved = _ask(client, chat, approval_run)
+    qid = saved.json()["question_id"]
+    async def deliver(content, *, complete=False, exit_code=None):
+      event = {
+        "type": "tool_output", "content": content,
+        "tool_use_id": "owner-helper-1",
+      }
+      if complete:
+        event["output_complete"] = True
+      if exit_code is not None:
+        event["output_exit_code"] = exit_code
+      approval_run[0].publish(event)
+      await asyncio.sleep(0)
+
+    asyncio.run(deliver(saved.text))
+    asyncio.run(deliver("", complete=True, exit_code=0))
+    assert handle.finishes == 1
+    blk = next(
+      block for block in approval_run[0].assistant_blocks
+      if block.get("type") == "tool"
+    )
+    assert blk["owner_card_question_id"] == qid
+    assert saved.text in blk["output"]
+  finally:
+    registry.unregister(chat.id, handle.kind)
+
+
 def test_native_question_event_does_not_end_the_active_turn(chat, approval_run):
   """The native AskUserQuestion path shares `publish_question` but carries no
   `response_mode`: it parks on an awaited future in question_bridge and must NOT

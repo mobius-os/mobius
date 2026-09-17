@@ -833,7 +833,12 @@ def _process_tool_event(event: dict, assistant_blocks: list) -> bool:
   if event_type == "tool_output":
     blk = _tool_block_for_event(assistant_blocks, event.get("tool_use_id"))
     if blk is not None:
-      blk["output"] = event.get("content", "")
+      # Streaming deltas carry the output in chunks; the completing event can
+      # arrive with an EMPTY payload when the provider omits its re-aggregated
+      # copy (Codex's aggregatedOutput is optional). An empty completed payload
+      # is not evidence that the output was empty — never erase what streamed.
+      if event.get("content", ""):
+        blk["output"] = event.get("content", "")
       # A tool_output the sink reduced (contract rule 6) carries a bounded
       # excerpt as `content` plus the metadata below; carry it onto the block
       # so the persisted transcript + wire agree and the frontend can fetch

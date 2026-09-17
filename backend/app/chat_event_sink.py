@@ -32,6 +32,7 @@ from app.chat_writer import (
 from app.events import (
   THINKING_INLINE_THRESHOLD,
   TOOL_OUTPUT_INLINE_THRESHOLD,
+  _tool_block_for_event,
   blocks_have_renderable_content,
   build_assistant_message,
   capture_question_scrub,
@@ -882,6 +883,16 @@ class ChatEventSink:
         and event.get("output_exit_code") in (None, 0)
       ):
         owner_card_receipt_id = _owner_card_receipt_id(event.get("content"))
+        if owner_card_receipt_id is None and not (event.get("content") or "").strip():
+          # A provider that streams output deltas may omit its re-aggregated
+          # copy on completion (see events.py's no-clobber rule). The receipt
+          # text still lives in the tool block's streamed output, and the
+          # card-end boundary must not depend on which channel carried it.
+          blk = _tool_block_for_event(
+            self.assistant_blocks, event.get("tool_use_id"),
+          )
+          if blk is not None:
+            owner_card_receipt_id = _owner_card_receipt_id(blk.get("output"))
       output_reduced = self._reduce_tool_output(event)
       if not output_reduced and event.get("output_exit_code") is None:
         exit_code = tool_output_exit_code(event.get("content"))
