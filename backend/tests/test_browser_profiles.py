@@ -2,8 +2,38 @@ import asyncio
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
+import pytest
+
 from app import browser_profiles, browser_processes, chat
 from app.browser_profiles import enforce_browser_profile_quota
+
+
+@pytest.mark.parametrize("chat_id, name", [
+  ("12345678-1234-1234-1234-123456789abc", "chat-12345678-1234-1234-1234-123456789abc"),
+  ("chat-a_B9", "chat-chat-a_B9"),
+  ("../a:b/ø", "chat-___a_b__"),
+  ("", "chat-default"),
+])
+def test_chat_browser_profile_path_preserves_names_in_configured_root(
+  monkeypatch, tmp_path, chat_id, name,
+):
+  from app import config
+  monkeypatch.setattr(config, "get_settings", lambda: SimpleNamespace(data_dir=str(tmp_path)))
+  profile = browser_profiles.chat_browser_profile_path(chat_id)
+  assert profile == tmp_path / "agent-browser-profiles" / name
+  assert not profile.exists()  # Computing a path must not create a profile.
+
+
+def test_browser_discovery_uses_shared_profile_path(monkeypatch, tmp_path):
+  profile = tmp_path / "alternate-profile"
+  monkeypatch.setattr(browser_profiles, "chat_browser_profile_path", lambda cid: profile)
+  calls = []
+  def scan(**kwargs):
+    calls.append(kwargs)
+    return browser_processes.BrowserSessionScan(frozenset(), True)
+  monkeypatch.setattr(browser_profiles, "scan_browser_processes", scan)
+  assert browser_profiles.browser_session_targets_for_chat("chat-a", proc_root=tmp_path).idle
+  assert calls == [{"chat_id": "chat-a", "profile": str(profile), "proc_root": tmp_path}]
 
 
 def _profile(root, chat_id, *, cache_bytes, durable_bytes):
@@ -697,6 +727,18 @@ def test_terminal_cleanup_releases_orphan_without_starting_close_cli(monkeypatch
   assert events[1][0] == "reset"
   assert events[1][1]["chat_id"] == "chat-a"
   assert events[1][1]["profile"].endswith("/agent-browser-profiles/chat-chat-a")
+
+
+def test_terminal_cleanup_uses_shared_profile_path(monkeypatch, tmp_path):
+  profile = tmp_path / "alternate-profile"
+  monkeypatch.setattr(browser_profiles, "chat_browser_profile_path", lambda cid: profile)
+  _stub_cleanup_inventory(monkeypatch, browser_profiles.BrowserSessionScan(
+    frozenset(), True, (browser_processes.ProcessIdentity(100, 10),),
+  ))
+  calls = []
+  monkeypatch.setattr(browser_processes, "reset_browser_processes", lambda **kwargs: calls.append(kwargs))
+  asyncio.run(chat._close_browser_session("chat-a"))
+  assert calls == [{"chat_id": "chat-a", "profile": str(profile)}]
 
 
 def test_terminal_cleanup_does_not_signal_incomplete_preclose_inventory(monkeypatch, caplog):

@@ -3147,7 +3147,7 @@ async def _close_browser_session(chat_id: str) -> None:
   if not chat_id:
     return
   log = _get_logger()
-  from app.browser_profiles import BrowserSessionTarget
+  from app.browser_profiles import BrowserSessionTarget, chat_browser_profile_path
 
   targets: set[BrowserSessionTarget] = set()
   scan = None
@@ -3280,8 +3280,7 @@ async def _close_browser_session(chat_id: str) -> None:
     from app.browser_processes import terminate_processes, reset_browser_processes
     if scan is not None and scan.complete:
       await asyncio.to_thread(terminate_processes, scan.processes)
-    safe = re.sub(r"[^A-Za-z0-9_-]", "_", chat_id)
-    profile = Path(get_settings().data_dir) / "agent-browser-profiles" / f"chat-{safe}"
+    profile = chat_browser_profile_path(chat_id)
     await asyncio.to_thread(
       reset_browser_processes, chat_id=chat_id, profile=str(profile),
     )
@@ -5411,10 +5410,8 @@ async def _run_chat_impl_with_db(
   # parallel agent chats both launching Chrome against a shared dir
   # would race on the profile lock. The dir is created on first
   # agent-browser invocation by the CLI itself; we just point at it.
-  chat_id_safe = re.sub(r"[^A-Za-z0-9_-]", "_", chat_id or "default")
-  base_env["AGENT_BROWSER_PROFILE"] = (
-    f"/data/agent-browser-profiles/chat-{chat_id_safe}"
-  )
+  from app.browser_profiles import chat_browser_profile_path
+  base_env["AGENT_BROWSER_PROFILE"] = str(chat_browser_profile_path(chat_id))
   # Persistent profiles are valuable for reproducing the partner's warm-PWA
   # state, but Chromium's default disk/media caches are effectively unbounded
   # across hundreds of chats (4+ GiB was observed on the production volume).
