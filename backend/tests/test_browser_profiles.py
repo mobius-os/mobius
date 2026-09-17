@@ -2,8 +2,37 @@ import asyncio
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
-from app import browser_profiles, chat
+import pytest
+
+from app import browser_profiles, browser_processes, chat, config
 from app.browser_profiles import enforce_browser_profile_quota
+
+
+@pytest.mark.parametrize("chat_id, name", [
+  ("12345678-1234-1234-1234-123456789abc", "chat-12345678-1234-1234-1234-123456789abc"),
+  ("chat-a_B9", "chat-chat-a_B9"),
+  ("../a:b/ø", "chat-___a_b__"),
+  ("", "chat-default"),
+])
+def test_chat_browser_profile_path_preserves_names_in_configured_root(
+  monkeypatch, tmp_path, chat_id, name,
+):
+  monkeypatch.setattr(config, "get_settings", lambda: SimpleNamespace(data_dir=str(tmp_path)))
+  profile = browser_profiles.chat_browser_profile_path(chat_id)
+  assert profile == tmp_path / "agent-browser-profiles" / name
+  assert not profile.exists()  # Computing a path must not create a profile.
+
+
+def test_browser_discovery_uses_shared_profile_path(monkeypatch, tmp_path):
+  profile = tmp_path / "alternate-profile"
+  monkeypatch.setattr(browser_profiles, "chat_browser_profile_path", lambda cid: profile)
+  calls = []
+  def scan(**kwargs):
+    calls.append(kwargs)
+    return browser_processes.BrowserSessionScan(frozenset(), True)
+  monkeypatch.setattr(browser_profiles, "scan_browser_processes", scan)
+  assert browser_profiles.browser_session_targets_for_chat("chat-a", proc_root=tmp_path).idle
+  assert calls == [{"chat_id": "chat-a", "profile": str(profile), "proc_root": tmp_path}]
 
 
 def _profile(root, chat_id, *, cache_bytes, durable_bytes):
@@ -106,6 +135,8 @@ def _fake_browser_process(
 ):
   process = proc / str(pid)
   process.mkdir(parents=True)
+  fields = ["S", "1", *("0" for _ in range(17)), str(pid)]
+  (process / "stat").write_text(f"{pid} (browser) {' '.join(fields)}\n")
   (process / "cmdline").write_bytes(
     f"/usr/local/lib/{executable}\0".encode()
   )
@@ -146,19 +177,8 @@ def test_browser_sessions_for_chat_preserves_opaque_session_values(tmp_path):
     executable="agent-browser-linux-x64-wrapper",
   )
 
-  foreign = proc / "104"
-  foreign.mkdir()
-  (foreign / "cmdline").write_bytes(b"/opt/agent-browser-linux-x64\0")
-  (foreign / "environ").write_bytes(
-    b"CHAT_ID=chat-b\0AGENT_BROWSER_SESSION=foreign-preview\0"
-  )
-
-  unrelated = proc / "105"
-  unrelated.mkdir()
-  (unrelated / "cmdline").write_bytes(b"/usr/bin/python3\0")
-  (unrelated / "environ").write_bytes(
-    b"CHAT_ID=chat-a\0AGENT_BROWSER_SESSION=not-a-browser\0"
-  )
+  _fake_browser_process(proc, 104, chat_id="chat-b", session="foreign-preview")
+  _fake_browser_process(proc, 105, chat_id="chat-a", session="not-a-browser", executable="python3")
 
   scan = browser_profiles.browser_session_targets_for_chat(
     "chat-a", proc_root=proc,
@@ -178,16 +198,34 @@ def test_browser_sessions_for_chat_preserves_opaque_session_values(tmp_path):
   })
 
 
+def _stub_cleanup_inventory(monkeypatch, initial):
+  scans = []
+  def scan(_chat_id):
+    scans.append(_chat_id)
+    return initial if len(scans) == 1 else browser_profiles.BrowserSessionScan(frozenset(), True)
+  monkeypatch.setattr(browser_profiles, "browser_session_targets_for_chat", scan)
+  monkeypatch.setattr(browser_processes, "terminate_processes", lambda processes: None)
+  monkeypatch.setattr(browser_processes, "reset_browser_processes", lambda **kwargs: False)
+  return scans
+
+
+def test_terminal_browser_cleanup_does_not_launch_absent_default_session(monkeypatch):
+  scans = _stub_cleanup_inventory(monkeypatch, browser_profiles.BrowserSessionScan(frozenset(), True))
+  async def unexpected(*args, **kwargs):
+    raise AssertionError("An absent default session must not start a CLI")
+  monkeypatch.setattr(chat.asyncio, "create_subprocess_exec", unexpected)
+  asyncio.run(chat._close_browser_session("chat-a"))
+  assert scans == ["chat-a"]  # verified idle: no CLI or redundant rescan
+
+
 def test_terminal_browser_cleanup_closes_inherited_and_custom_sessions(
   monkeypatch,
 ):
   long_name = "preview-" + ("x" * 256)
   monkeypatch.setenv("AGENT_BROWSER_NAMESPACE", "stale-parent-namespace")
   monkeypatch.setenv("AGENT_BROWSER_SOCKET_DIR", "/stale/parent/socket-dir")
-  monkeypatch.setattr(
-    browser_profiles,
-    "browser_session_targets_for_chat",
-    lambda _chat_id: browser_profiles.BrowserSessionScan(frozenset({
+  scans = _stub_cleanup_inventory(monkeypatch, browser_profiles.BrowserSessionScan(frozenset({
+      browser_profiles.BrowserSessionTarget(session="chat-chat-a"),
       browser_profiles.BrowserSessionTarget(session="custom:colon"),
       browser_profiles.BrowserSessionTarget(session="unicode-ø-世界"),
       browser_profiles.BrowserSessionTarget(session=long_name),
@@ -217,6 +255,7 @@ def test_terminal_browser_cleanup_closes_inherited_and_custom_sessions(
 
   asyncio.run(chat._close_browser_session("chat-a"))
 
+  assert scans == ["chat-a", "chat-a"]
   assert all(args == ("agent-browser", "close") for args, _env in calls)
   routes = {
     env["AGENT_BROWSER_SESSION"]: env
@@ -233,10 +272,9 @@ def test_terminal_browser_cleanup_closes_inherited_and_custom_sessions(
 
 
 def test_terminal_browser_cleanup_kills_timed_out_close_process(monkeypatch):
-  monkeypatch.setattr(
-    browser_profiles, "browser_session_targets_for_chat",
-    lambda _chat_id: browser_profiles.BrowserSessionScan(frozenset(), True),
-  )
+  _stub_cleanup_inventory(monkeypatch, browser_profiles.BrowserSessionScan(
+    frozenset({browser_profiles.BrowserSessionTarget(session="chat-chat-a")}), True,
+  ))
   monkeypatch.setattr(chat, "_BROWSER_CLOSE_WAIT_TIMEOUT", 0.01)
   monkeypatch.setattr(chat, "_BROWSER_CLOSE_KILL_GRACE", 0.01)
 
@@ -279,10 +317,9 @@ def test_terminal_browser_cleanup_kills_timed_out_close_process(monkeypatch):
 
 
 def test_terminal_browser_cleanup_bounds_wait_after_sigkill(monkeypatch, caplog):
-  monkeypatch.setattr(
-    browser_profiles, "browser_session_targets_for_chat",
-    lambda _chat_id: browser_profiles.BrowserSessionScan(frozenset(), True),
-  )
+  _stub_cleanup_inventory(monkeypatch, browser_profiles.BrowserSessionScan(
+    frozenset({browser_profiles.BrowserSessionTarget(session="chat-chat-a")}), True,
+  ))
   monkeypatch.setattr(chat, "_BROWSER_CLOSE_WAIT_TIMEOUT", 0.01)
   monkeypatch.setattr(chat, "_BROWSER_CLOSE_KILL_GRACE", 0.01)
   monkeypatch.setattr(chat, "_BROWSER_CLOSE_KILL_WAIT_TIMEOUT", 0.01)
@@ -327,10 +364,9 @@ def test_terminal_browser_cleanup_bounds_wait_after_sigkill(monkeypatch, caplog)
 def test_terminal_browser_cleanup_bounds_wait_when_process_disappears_before_term(
   monkeypatch, caplog,
 ):
-  monkeypatch.setattr(
-    browser_profiles, "browser_session_targets_for_chat",
-    lambda _chat_id: browser_profiles.BrowserSessionScan(frozenset(), True),
-  )
+  _stub_cleanup_inventory(monkeypatch, browser_profiles.BrowserSessionScan(
+    frozenset({browser_profiles.BrowserSessionTarget(session="chat-chat-a")}), True,
+  ))
   monkeypatch.setattr(chat, "_BROWSER_CLOSE_WAIT_TIMEOUT", 0.01)
   monkeypatch.setattr(chat, "_BROWSER_CLOSE_KILL_WAIT_TIMEOUT", 0.01)
 
@@ -673,3 +709,50 @@ def test_quota_does_not_count_or_reclaim_symlinked_file_targets(tmp_path):
   assert result["bytes_after"] == 20
   assert result["reclaimed_bytes"] == 0
   assert result["over_quota_bytes"] == 10
+
+
+def test_terminal_cleanup_releases_orphan_without_starting_close_cli(monkeypatch):
+  owned = (browser_processes.ProcessIdentity(100, 10),)
+  scans = _stub_cleanup_inventory(monkeypatch, browser_profiles.BrowserSessionScan(frozenset(), True, owned))
+  events = []
+  monkeypatch.setattr(browser_processes, "terminate_processes", lambda processes: events.append(("terminate", processes)))
+  monkeypatch.setattr(browser_processes, "reset_browser_processes", lambda **kwargs: events.append(("reset", kwargs)))
+  async def unexpected(*args, **kwargs):
+    raise AssertionError("Orphan Chrome has no daemon to close")
+  monkeypatch.setattr(chat.asyncio, "create_subprocess_exec", unexpected)
+  asyncio.run(chat._close_browser_session("chat-a"))
+  assert scans == ["chat-a", "chat-a"]
+  assert events[0] == ("terminate", owned)
+  assert events[1][0] == "reset"
+  assert events[1][1]["chat_id"] == "chat-a"
+  assert events[1][1]["profile"].endswith("/agent-browser-profiles/chat-chat-a")
+
+
+def test_terminal_cleanup_uses_shared_profile_path(monkeypatch, tmp_path):
+  profile = tmp_path / "alternate-profile"
+  monkeypatch.setattr(browser_profiles, "chat_browser_profile_path", lambda cid: profile)
+  _stub_cleanup_inventory(monkeypatch, browser_profiles.BrowserSessionScan(
+    frozenset(), True, (browser_processes.ProcessIdentity(100, 10),),
+  ))
+  calls = []
+  monkeypatch.setattr(browser_processes, "reset_browser_processes", lambda **kwargs: calls.append(kwargs))
+  asyncio.run(chat._close_browser_session("chat-a"))
+  assert calls == [{"chat_id": "chat-a", "profile": str(profile)}]
+
+
+def test_terminal_cleanup_does_not_signal_incomplete_preclose_inventory(monkeypatch, caplog):
+  owned = (browser_processes.ProcessIdentity(100, 10),)
+  _stub_cleanup_inventory(monkeypatch, browser_profiles.BrowserSessionScan(frozenset(), False, owned))
+  events = []
+  monkeypatch.setattr(browser_processes, "terminate_processes", lambda processes: events.append(processes))
+  asyncio.run(chat._close_browser_session("chat-a"))
+  assert events == []
+  assert "discovery incomplete" in caplog.text
+
+
+def test_terminal_cleanup_reports_survivors_instead_of_claiming_release(monkeypatch, caplog):
+  scan = browser_profiles.BrowserSessionScan(frozenset(), True, (browser_processes.ProcessIdentity(100, 10),))
+  _stub_cleanup_inventory(monkeypatch, scan)
+  monkeypatch.setattr(browser_profiles, "browser_session_targets_for_chat", lambda _chat_id: scan)
+  asyncio.run(chat._close_browser_session("chat-a"))
+  assert "ownership remains unverified" in caplog.text

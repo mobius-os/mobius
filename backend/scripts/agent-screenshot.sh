@@ -75,14 +75,23 @@ die() {
   if [ -n "$BROWSER_TIMEOUT_FILE" ] && [ -s "$BROWSER_TIMEOUT_FILE" ]; then
     timed_out_phase="$(head -n 1 "$BROWSER_TIMEOUT_FILE")"
     if [ "$SCREENSHOT_RECOVERY_COUNT" -eq 0 ]; then
-      printf 'agent-screenshot.sh: %s timed out; restarting this chat\047s isolated browser session once\n' \
-        "$timed_out_phase" >&2
+      if [ "$CURRENT_PAGE" -eq 1 ]; then
+        printf 'agent-screenshot.sh: %s timed out; cleaning up the isolated browser session\n' \
+          "$timed_out_phase" >&2
+      else
+        printf 'agent-screenshot.sh: %s timed out; restarting this chat\047s isolated browser session once\n' \
+          "$timed_out_phase" >&2
+      fi
       # Do not queue `agent-browser close` behind the timed-out daemon. It can
       # create a competing supervisor while the old command is still in flight.
       # Go straight to the exact profile-owned process boundary instead.
       if python3 "$(dirname "${BASH_SOURCE[0]}")/agent_browser_session_reset.py" \
           "$AGENT_BROWSER_PROFILE"; then
         clear_stale_browser_profile_lock
+        if [ "$CURRENT_PAGE" -eq 1 ]; then
+          echo "agent-screenshot.sh: current-page state was lost during browser reset; open and prepare the page again before capturing" >&2
+          exit 1
+        fi
         cleanup
         export MOBIUS_SCREENSHOT_RECOVERY_COUNT=1
         exec bash "${BASH_SOURCE[0]}" "${ORIGINAL_ARGS[@]}"
@@ -91,6 +100,12 @@ die() {
     else
       printf 'agent-screenshot.sh: %s timed out again after one isolated browser-session restart\n' \
         "$timed_out_phase" >&2
+      # Exhausting recovery must not leave the second poisoned browser alive.
+      # Cleanup only this exact profile; do not launch or retry another capture.
+      if ! python3 "$(dirname "${BASH_SOURCE[0]}")/agent_browser_session_reset.py" \
+          "$AGENT_BROWSER_PROFILE"; then
+        echo "agent-screenshot.sh: final isolated browser cleanup could not be verified" >&2
+      fi
     fi
   fi
   printf 'agent-screenshot.sh: %s\n' "$*" >&2
@@ -111,8 +126,11 @@ browser_command() {
   # The browser daemon outlives this process. Never let it inherit the capture
   # transaction's flock descriptor or every later capture would block behind a
   # lock whose owning helper already exited.
-  timeout "${timeout_seconds}s" agent-browser "$@" 9>&- \
+  timeout --kill-after=2s "${timeout_seconds}s" agent-browser "$@" 9>&- \
     2>"$BROWSER_ERROR_FILE" || status=$?
+  # GNU timeout reports 137 when the client ignores TERM and needs KILL.
+  # Treat either deadline outcome as a poisoned session, not a retryable error.
+  [ "$status" -ne 137 ] || status=124
   if [ "$status" -eq 124 ] && [ ! -s "$BROWSER_ERROR_FILE" ]; then
     printf 'command timed out after %ss\n' "$timeout_seconds" \
       > "$BROWSER_ERROR_FILE"
@@ -385,6 +403,32 @@ case "$ROUTE" in
   /*) : ;;
   *) ROUTE="/$ROUTE" ;;
 esac
+
+# Resolve app intent before launching a browser. Both the canonical preview
+# query and legacy deep link must wait for the same exact mounted frame. Never
+# interpolate unchecked route text into the browser's readiness expression.
+if ! APP_ID="$(python3 - "$ROUTE" <<'PYROUTE'
+import re
+import sys
+from urllib.parse import parse_qs, urlsplit
+
+route = urlsplit(sys.argv[1])
+query_ids = parse_qs(route.query, keep_blank_values=True).get("app", [])
+app_id = ""
+if route.path == "/app" or route.path.startswith("/app/"):
+  match = re.fullmatch(r"/app/([0-9]+)/?", route.path)
+  if not match or query_ids:
+    raise SystemExit(1)
+  app_id = match.group(1)
+elif route.path in ("/shell", "/shell/") and query_ids:
+  if len(query_ids) != 1 or not re.fullmatch(r"[0-9]+", query_ids[0]):
+    raise SystemExit(1)
+  app_id = query_ids[0]
+print(str(int(app_id)) if app_id else "")
+PYROUTE
+)"; then
+  die "in-shell app routes require a numeric app id and one unambiguous app target"
+fi
 
 mkdir -p "$(dirname "$OUT")"
 
@@ -714,28 +758,18 @@ if [ "$CURRENT_PAGE" -eq 0 ]; then
   fi
 fi
 
-# `/app/<id>` has an exact readiness signal: AppCanvas removes its
+# Both app route forms have an exact readiness signal: AppCanvas removes its
 # `.canvas-loading` overlay only after the opaque iframe posts
 # `moebius:frame-mounted`, which itself fires after the app's first React commit.
-# Waiting for that state avoids successful-looking screenshots of the branded
-# loading skeleton. Keep the predicate as a simple boolean expression —
-# agent-browser's wait parser has timed out on equivalent IIFE forms.
-case "$ROUTE" in
-  /app/*)
-    BROWSER_PHASE="app frame readiness"
-    APP_ID="${ROUTE#/app/}"
-    APP_ID="${APP_ID%%[/?#]*}"
-    case "$APP_ID" in
-      ''|*[!0-9]*)
-        die "in-shell app routes require a numeric app id"
-        ;;
-    esac
-    READY_EXPR="document.querySelector('iframe[data-app-id=\"${APP_ID}\"]') !== null && document.querySelector('iframe[data-app-id=\"${APP_ID}\"]')?.parentElement.querySelector('.canvas-loading') === null"
-    if ! browser_wait --fn "$READY_EXPR" >/dev/null; then
-      die "app ${APP_ID} did not reach its mounted frame before capture"
-    fi
-    ;;
-esac
+# Keep this a simple boolean expression; agent-browser's wait parser has timed
+# out on equivalent IIFE forms.
+if [ -n "$APP_ID" ]; then
+  BROWSER_PHASE="app frame readiness"
+  READY_EXPR="document.querySelector('iframe[data-app-id=\"${APP_ID}\"]') !== null && document.querySelector('iframe[data-app-id=\"${APP_ID}\"]')?.parentElement.querySelector('.canvas-loading') === null"
+  if ! browser_wait --fn "$READY_EXPR" >/dev/null; then
+    die "app ${APP_ID} did not reach its mounted frame before capture"
+  fi
+fi
 
 # Chromium can expose a complete DOM and a first-contentful-paint timing entry
 # one compositor submission before CDP's first screenshot contains that paint.

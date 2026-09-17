@@ -3,7 +3,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 import uuid
 
-from app import chat_search, models
+from app import browser_profiles, chat_retention, chat_search, models
 from app.chat_retention import purge_expired_chat_tombstones
 from sqlalchemy import event
 
@@ -369,3 +369,23 @@ def test_old_notifications_survive_chat_drawer_reads(client, db, auth):
 def test_chat_has_uploads_column(db, chat):
   """Chat.uploads must default to an empty list."""
   assert chat.uploads == []
+
+
+def test_profile_purge_uses_launch_path_and_preserves_other_profiles():
+  chat_id = "retention:profile " + uuid.uuid4().hex
+  profile = browser_profiles.chat_browser_profile_path(chat_id)
+  other = browser_profiles.chat_browser_profile_path(str(uuid.uuid4()))
+  profile.mkdir(parents=True)
+  other.mkdir(parents=True)
+  (profile / "state").write_text("owned")
+  (other / "state").write_text("other")
+  try:
+    chat_retention._purge_chat_storage(chat_id)
+    assert not profile.exists()
+    assert (other / "state").read_text() == "other"
+  finally:
+    # These directories are disposable fixtures, not owner profiles.
+    for directory in (profile, other):
+      (directory / "state").unlink(missing_ok=True)
+      if directory.exists():
+        directory.rmdir()

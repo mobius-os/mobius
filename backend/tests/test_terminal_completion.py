@@ -14,6 +14,7 @@ the test DB, so `get_writer()` is the real path throughout.
 """
 
 import asyncio
+import importlib
 import json
 import os
 import pathlib
@@ -23,7 +24,7 @@ import time
 import pytest
 
 from app import chat as chat_mod
-from app import chat_queue, chat_writer, models
+from app import browser_profiles, chat_queue, chat_writer, models
 from app.broadcast import ChatBroadcast, create_broadcast
 from app.chat_transcript import materialized_messages
 from app.chat_writer import Barrier, get_writer
@@ -216,6 +217,28 @@ def _seed_provider_turn(monkeypatch, provider_id, cid, token):
     pass
 
   monkeypatch.setattr(provider_type, "ensure_auth", ready)
+
+
+@pytest.mark.parametrize("provider_id", ["claude", "codex"])
+def test_provider_launch_uses_shared_browser_profile(monkeypatch, tmp_path, provider_id):
+  cid, token = "shared-browser-profile", "rt-shared-browser-profile"
+  _seed_provider_turn(monkeypatch, provider_id, cid, token)
+  profile = tmp_path / "alternate-profile"
+  monkeypatch.setattr(browser_profiles, "chat_browser_profile_path", lambda chat_id: profile)
+  profiles = []
+
+  async def runner(**kwargs):
+    profiles.append(kwargs["base_env"]["AGENT_BROWSER_PROFILE"])
+    return {"cost_usd": 0.0}
+
+  monkeypatch.setattr(
+    importlib.import_module(f"app.{provider_id}_sdk_runner"),
+    f"run_{provider_id}_sdk_turn", runner,
+  )
+  chat_mod.mark_starting(cid)
+  _run_real_chat(cid, run_token=token, provider_id=provider_id,
+                 run_gen=chat_mod.current_run_generation(cid))
+  assert profiles == [str(profile)]
 
 
 @pytest.mark.parametrize("provider_id", ["claude", "codex"])
@@ -895,7 +918,8 @@ def test_stop_handoff_clears_only_immediate_successor_marker(monkeypatch):
 
 
 # -- 7. unsupported runtime cleanup: marker cleared, pending dropped -----
-def test_unsupported_provider_cleanup_clears_marker_and_pending(monkeypatch):
+@pytest.mark.parametrize("superseded", [None, "before_close", "during_close"])
+def test_unsupported_provider_cleanup_clears_marker_and_pending(monkeypatch, superseded):
   """An unsupported provider hits the setup-error terminal cleanup: the
   pending queue is cleared durably, the marker is cleared before the
   registry release, and no continuation is scheduled."""
@@ -908,16 +932,44 @@ def test_unsupported_provider_cleanup_clears_marker_and_pending(monkeypatch):
 
   # Force an unsupported provider: stub get_provider to return a provider
   # whose name matches neither SDK branch and whose check_auth passes.
+  auth_checked = []
   class _Unsupported:
     name = "Bogus"
 
     def check_auth(self, data_dir):
+      auth_checked.append(True)
       return None
 
     def build_env(self, **kwargs):
       return {}
 
   monkeypatch.setattr(chat_mod, "get_provider", lambda pid: _Unsupported())
+
+  def runtime_kind(_provider):
+    if superseded == "before_close" and auth_checked:
+      # A fresh generation owns the chat by the unsupported-runtime boundary.
+      chat_mod.bump_run_generation("t7")
+      chat_mod.discard_starting("t7")
+      assert chat_mod.registry.mark_starting("t7")
+      auth_checked.clear()
+    return "unsupported"
+
+  monkeypatch.setattr(chat_mod, "provider_runtime_kind", runtime_kind)
+  closed = []
+
+  async def close(chat_id):
+    closed.append((chat_id, chat_mod._browser_lifecycle_lock(chat_id).locked(),
+                   chat_mod.registry.is_alive(chat_id), _load(chat_id)["running"]))
+    if superseded == "during_close":
+      chat_mod.bump_run_generation(chat_id)
+      chat_mod.discard_starting(chat_id)
+      assert chat_mod.registry.mark_starting(chat_id)
+      await chat_writer.await_ack(get_writer().submit(chat_writer.StartTurn(
+        chat_id=chat_id, run_token="rt-t7-successor",
+        user_msg={"role": "user", "content": "successor", "ts": 9},
+      )))
+
+  monkeypatch.setattr(chat_mod, "_close_browser_session", close)
 
   scheduled = []
   orig_sched = chat_mod._schedule_continuation
@@ -936,6 +988,20 @@ def test_unsupported_provider_cleanup_clears_marker_and_pending(monkeypatch):
   assert "queued_turn_starting" not in published
   assert scheduled == []
   state = _load("t7")
+  if superseded:
+    expected = [] if superseded == "before_close" else [("t7", True, True, True)]
+    assert closed == expected, "only the current owner may close browsers under the gate"
+    assert state["running"] is True
+    assert len(state["pending_messages"]) == 1
+    assert state["messages"][-1]["role"] == "user"
+    if superseded == "during_close":
+      assert state["messages"][-1]["content"] == "successor"
+      assert _run_outcomes("t7")["rt-t7-successor"] == "running"
+    assert chat_mod.registry.is_alive("t7")
+    return
+  assert closed == [("t7", True, True, True)], (
+    "browser cleanup must hold the lifecycle gate before terminal ownership is released"
+  )
   assert state["running"] is False, "unsupported cleanup must clear marker"
   assert state["pending_messages"] == [], "pending must be cleared durably"
   assert state["messages"][-1]["blocks"] == [{
@@ -2468,3 +2534,184 @@ def test_mutating_commands_do_not_resurrect_soft_deleted_chat():
   )
   assert len(state["pending_messages"]) == 1, "the queue must not be promoted"
   assert state["running"] is False, "no run marker on a soft-deleted chat"
+
+
+def test_browser_release_precedes_continuation_and_done(monkeypatch):
+  """A successor must never start before predecessor browser teardown."""
+  _seed_owner_and_creds()
+  _seed_chat('browser-order', messages=[{'role': 'user', 'content': 'hi', 'ts': 1}],
+             pending=[{'role': 'user', 'content': 'next', 'ts': 2}], running='running')
+  _patch_claude_runner(monkeypatch)
+  order = []
+
+  async def close(_chat_id):
+    order.append('close-start')
+    await asyncio.sleep(0)
+    order.append('close-end')
+
+  monkeypatch.setattr(chat_mod, '_close_browser_session', close)
+  monkeypatch.setattr(chat_mod, '_schedule_continuation',
+                      lambda **kw: order.append('successor'))
+  chat_mod.mark_starting('browser-order')
+  _run_real_chat('browser-order', run_token='rt-browser-order',
+                 run_gen=chat_mod.current_run_generation('browser-order'))
+  assert order == ['close-start', 'close-end', 'successor']
+
+
+def test_browser_cleanup_cancellation_joins_before_releasing_gate(monkeypatch):
+  async def scenario():
+    entered, release, acquired = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+    async def close(_chat_id):
+      entered.set()
+      await release.wait()
+
+    monkeypatch.setattr(chat_mod, '_close_browser_session', close)
+    owner = asyncio.create_task(chat_mod._close_turn_browser('cancel-browser', None))
+    await entered.wait()
+    owner.cancel()
+
+    async def next_owner():
+      async with chat_mod._browser_lifecycle_lock('cancel-browser'):
+        acquired.set()
+
+    successor = asyncio.create_task(next_owner())
+    await asyncio.sleep(0)
+    assert not acquired.is_set()
+    owner.cancel()  # a second Stop must not cancel the cleanup worker
+    await asyncio.sleep(0)
+    assert not acquired.is_set()
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+      await owner
+    await successor
+    assert acquired.is_set()
+
+  asyncio.run(scenario())
+
+
+def test_browser_gate_rechecks_generation_after_wait(monkeypatch):
+  calls = []
+
+  async def close(chat_id):
+    calls.append(chat_id)
+
+  monkeypatch.setattr(chat_mod, '_close_browser_session', close)
+
+  async def scenario():
+    gen = chat_mod.current_run_generation('browser-stale-gate')
+    async with chat_mod._browser_lifecycle_lock('browser-stale-gate'):
+      task = asyncio.create_task(chat_mod._close_turn_browser('browser-stale-gate', gen))
+      await asyncio.sleep(0)
+      chat_mod.bump_run_generation('browser-stale-gate')
+    await task
+
+  asyncio.run(scenario())
+  assert calls == []
+
+
+def test_fresh_turn_claim_during_browser_close_skips_stale_finalize(monkeypatch):
+  """Shutdown awaits must precede, not invalidate, the finalize ownership gate."""
+  cid = "browser-finalize-race"
+  _seed_owner_and_creds()
+  _seed_chat(cid, messages=[{"role": "user", "content": "hi", "ts": 1}],
+             running="running", run_token="rt-browser-old")
+  _patch_claude_runner(monkeypatch, text="old answer")
+  chat_mod.mark_starting(cid)
+  gen = chat_mod.current_run_generation(cid)
+  closes = []
+
+  async def close(chat_id):
+    closes.append(chat_id)
+    chat_mod._clear_after_terminal_generation[cid] = gen
+    chat_mod.bump_run_generation(cid)
+    chat_mod.discard_starting(cid)
+    assert chat_mod.registry.mark_starting(cid)
+    await chat_writer.await_ack(get_writer().submit(chat_writer.StartTurn(
+      chat_id=cid, run_token="rt-browser-fresh",
+      user_msg={"role": "user", "content": "fresh question", "ts": 9},
+    )))
+
+  monkeypatch.setattr(chat_mod, "_close_browser_session", close)
+  dispositions = []
+  original_complete = chat_mod._complete_turn
+
+  async def complete(**kwargs):
+    result = await original_complete(**kwargs)
+    dispositions.append(result)
+    return result
+
+  monkeypatch.setattr(chat_mod, "_complete_turn", complete)
+  _run_real_chat(cid, run_token="rt-browser-old", run_gen=gen)
+  _drain_actor()
+  assert closes == [cid]
+  assert dispositions == [chat_queue.TerminalDisposition.STALE_NO_ACTION]
+  state = _load(cid)
+  assert state["messages"][-1]["role"] == "user"
+  assert state["messages"][-1]["content"] == "fresh question"
+  assert state["running"]
+  assert chat_mod.registry.is_alive(cid)
+
+
+@pytest.mark.parametrize("stopped", [False, True])
+def test_direct_run_cancellation_joins_browser_cleanup_before_successor(monkeypatch, stopped):
+  """Cancellation outside provider completion still owns and joins teardown."""
+  cid = "browser-cancel-run"
+  events = []
+  finished = []
+
+  async def scenario():
+    started, closing, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    next_started = asyncio.Event()
+
+    async def impl(*args, **kwargs):
+      started.set()
+      await asyncio.Event().wait()
+
+    async def close(chat_id):
+      assert chat_id == cid
+      events.append("close-start")
+      closing.set()
+      await release.wait()
+      events.append("close-end")
+
+    monkeypatch.setattr(chat_mod, "_run_chat_impl", impl)
+    monkeypatch.setattr(chat_mod, "_close_browser_session", close)
+    async def finish(chat_id, run_token, **kwargs):
+      finished.append((chat_id, run_token, kwargs["terminal_status"]))
+    monkeypatch.setattr(chat_mod, "_finish_run_strict", finish)
+    assert chat_mod.registry.mark_starting(cid)
+    gen = chat_mod.current_run_generation(cid)
+    owner = asyncio.create_task(chat_mod.run_chat(
+      [], chat_id=cid, run_gen=gen, run_token="rt-browser-cancel",
+    ))
+    await asyncio.wait_for(started.wait(), 2)
+    owner.cancel()
+    await asyncio.wait_for(closing.wait(), 2)
+    if stopped:
+      chat_mod._clear_after_terminal_generation[cid] = gen
+      chat_mod._clear_after_terminal_status[cid] = "stopped"
+      chat_mod.bump_run_generation(cid)
+      chat_mod.registry.discard_starting(cid)
+
+    async def successor():
+      async with chat_mod._browser_lifecycle_lock(cid):
+        events.append("successor")
+        next_started.set()
+
+    next_task = asyncio.create_task(successor())
+    owner.cancel()
+    await asyncio.sleep(0)
+    assert not next_started.is_set()
+    assert not owner.done()
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+      await asyncio.wait_for(owner, 2)
+    await asyncio.wait_for(next_task, 2)
+
+  asyncio.run(scenario())
+  assert events == ["close-start", "close-end", "successor"]
+  assert not chat_mod.registry.is_alive(cid)
+  assert cid not in chat_mod._clear_after_terminal_generation
+  assert cid not in chat_mod._clear_after_terminal_status
+  assert finished == ([(cid, "rt-browser-cancel", "stopped")] if stopped else [])
