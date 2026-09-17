@@ -52,7 +52,7 @@ test('composer Waiting follows the compact Goal identity instead of a tile or ba
  const html = render(h(WaitCard, { wait: { id: 'sample', kind: 'condition', description: 'Review approved' }, expanded: false, onToggle: () => {}, onCancel: () => {} }))
  assert.match(html, /chat__progress-identity/)
  assert.match(html, /Waiting · Review approved/)
- assert.doesNotMatch(html, /chat__lifecycle-icon|chat__wait-tag/)
+ assert.doesNotMatch(html, /chat__lifecycle-icon|chat__wait-tag|chat__wait-chevron/)
  assert.match(html, /aria-expanded="false"/)
 })
 
