@@ -918,7 +918,8 @@ def test_stop_handoff_clears_only_immediate_successor_marker(monkeypatch):
 
 
 # -- 7. unsupported runtime cleanup: marker cleared, pending dropped -----
-def test_unsupported_provider_cleanup_clears_marker_and_pending(monkeypatch):
+@pytest.mark.parametrize("superseded", [None, "before_close", "during_close"])
+def test_unsupported_provider_cleanup_clears_marker_and_pending(monkeypatch, superseded):
   """An unsupported provider hits the setup-error terminal cleanup: the
   pending queue is cleared durably, the marker is cleared before the
   registry release, and no continuation is scheduled."""
@@ -931,16 +932,44 @@ def test_unsupported_provider_cleanup_clears_marker_and_pending(monkeypatch):
 
   # Force an unsupported provider: stub get_provider to return a provider
   # whose name matches neither SDK branch and whose check_auth passes.
+  auth_checked = []
   class _Unsupported:
     name = "Bogus"
 
     def check_auth(self, data_dir):
+      auth_checked.append(True)
       return None
 
     def build_env(self, **kwargs):
       return {}
 
   monkeypatch.setattr(chat_mod, "get_provider", lambda pid: _Unsupported())
+
+  def runtime_kind(_provider):
+    if superseded == "before_close" and auth_checked:
+      # A fresh generation owns the chat by the unsupported-runtime boundary.
+      chat_mod.bump_run_generation("t7")
+      chat_mod.discard_starting("t7")
+      assert chat_mod.registry.mark_starting("t7")
+      auth_checked.clear()
+    return "unsupported"
+
+  monkeypatch.setattr(chat_mod, "provider_runtime_kind", runtime_kind)
+  closed = []
+
+  async def close(chat_id):
+    closed.append((chat_id, chat_mod._browser_lifecycle_lock(chat_id).locked(),
+                   chat_mod.registry.is_alive(chat_id), _load(chat_id)["running"]))
+    if superseded == "during_close":
+      chat_mod.bump_run_generation(chat_id)
+      chat_mod.discard_starting(chat_id)
+      assert chat_mod.registry.mark_starting(chat_id)
+      await chat_writer.await_ack(get_writer().submit(chat_writer.StartTurn(
+        chat_id=chat_id, run_token="rt-t7-successor",
+        user_msg={"role": "user", "content": "successor", "ts": 9},
+      )))
+
+  monkeypatch.setattr(chat_mod, "_close_browser_session", close)
 
   scheduled = []
   orig_sched = chat_mod._schedule_continuation
@@ -959,6 +988,20 @@ def test_unsupported_provider_cleanup_clears_marker_and_pending(monkeypatch):
   assert "queued_turn_starting" not in published
   assert scheduled == []
   state = _load("t7")
+  if superseded:
+    expected = [] if superseded == "before_close" else [("t7", True, True, True)]
+    assert closed == expected, "only the current owner may close browsers under the gate"
+    assert state["running"] is True
+    assert len(state["pending_messages"]) == 1
+    assert state["messages"][-1]["role"] == "user"
+    if superseded == "during_close":
+      assert state["messages"][-1]["content"] == "successor"
+      assert _run_outcomes("t7")["rt-t7-successor"] == "running"
+    assert chat_mod.registry.is_alive("t7")
+    return
+  assert closed == [("t7", True, True, True)], (
+    "browser cleanup must hold the lifecycle gate before terminal ownership is released"
+  )
   assert state["running"] is False, "unsupported cleanup must clear marker"
   assert state["pending_messages"] == [], "pending must be cleared durably"
   assert state["messages"][-1]["blocks"] == [{

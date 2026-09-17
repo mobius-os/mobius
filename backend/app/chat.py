@@ -5978,6 +5978,8 @@ async def _run_chat_impl_with_db(
   )
   error_message = f"Provider {provider.name!r} has no supported runtime."
   bc.publish({"type": "error", "message": error_message})
+  # Release browser ownership before terminal cleanup admits a successor.
+  await _close_turn_browser(chat_id, run_gen)
   disposition = await _terminal_setup_error_cleanup(
     chat_id, run_token or "", run_gen, error_message=error_message,
   )
@@ -5986,6 +5988,5 @@ async def _run_chat_impl_with_db(
   bc.mark_completed()
   if disposition is not chat_queue.TerminalDisposition.STALE_NO_ACTION:
     _publish_chat_run_finished(chat_id)
-  await _close_browser_session(chat_id)
   db.close()
   return disposition
