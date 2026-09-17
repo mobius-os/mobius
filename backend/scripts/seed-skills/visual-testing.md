@@ -96,7 +96,7 @@ a CSS state class for a wait. Use a fresh iframe-scoped snapshot; when the app
 has a known bounded animation, one matching bounded wait followed immediately
 by that snapshot is preferable to a 25-second timeout.
 
-Two gotchas every session:
+Session gotchas:
 
 - **With agent-browser 0.38+, surviving elements keep their `@eN` refs across same-document changes.** Replaced elements and navigated documents/frames invalidate refs. Take a fresh snapshot after a transition rather than assuming the old target survived. For repeated targets, use a selector only when its matching DOM attribute or structure is verified in the current DOM or source; otherwise re-snapshot and use a fresh ref. A quoted control name in a snapshot is an accessible name, not evidence that a matching DOM attribute exists. `:has-text()` silently no-ops.
 - **`✓ Done` only confirms dispatch, not state change** — the CLI returns it the instant the command reaches Chromium, not after the UI changed. Verify with `snapshot` or a screenshot after any click meant to transition UI.
@@ -128,7 +128,7 @@ Loading a PNG into your vision (`Read` on Claude, `view_image` on Codex) lets YO
 ## Efficient inspection with agent-browser 0.38+
 
 Use `snapshot --delta` for repeated structural inspection: the first response
-is a baseline and later responses contain changes. Use `--full` when a fresh
+is a baseline and later responses contain changes. Use `snapshot --delta --full` when a fresh
 baseline is needed. This is not a replacement for rendered verification.
 Do not add `screenshot --if-changed` to the authenticated capture helper:
 unchanged captures intentionally omit the output, whereas the helper promises
