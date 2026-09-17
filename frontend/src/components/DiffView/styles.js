@@ -295,7 +295,6 @@ export const DIFF_VIEWER_STYLES = `
   min-width: 0;
   overflow-x: hidden;
   overflow-y: auto;
-  overscroll-behavior: contain;
   border-top: 1px solid var(--border, #2a2a2a);
   background: var(--surface2, #212121);
 }
