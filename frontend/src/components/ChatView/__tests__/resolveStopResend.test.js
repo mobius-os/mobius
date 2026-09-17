@@ -11,7 +11,7 @@
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { resolveStopResend } from '../resolveStopResend.js'
+import { resolveStopResend, ownerQueuedSnapshot } from '../resolveStopResend.js'
 
 function snap(overrides = {}) {
   const ts = overrides.ts ?? 100
@@ -19,6 +19,41 @@ function snap(overrides = {}) {
 }
 
 const combined = (text, attachments = []) => ({ text, attachments })
+
+// -- ownerQueuedSnapshot: machine carriers are never owner speech ----------
+test('ownerQueuedSnapshot drops hidden machine carriers, keeps owner text', () => {
+  const snapshot = [
+    snap({ ts: 11, content: 'owner typed this' }),
+    {
+      role: 'user', ts: 12, cid: 'wait-result-abc', hidden: true,
+      kind: 'wait_result', content: '<wait_result>...</wait_result>',
+    },
+    snap({ ts: 13, content: 'and this' }),
+  ]
+  const got = ownerQueuedSnapshot(snapshot)
+  assert.deepEqual(got.map(m => m.cid), ['c-11', 'c-13'])
+})
+
+test('ownerQueuedSnapshot on a hidden-only queue returns nothing to resend', () => {
+  const snapshot = [
+    {
+      role: 'user', ts: 1, cid: 'wait-result-xyz', hidden: true,
+      kind: 'wait_result', content: '<wait_result>...</wait_result>',
+    },
+  ]
+  const owner = ownerQueuedSnapshot(snapshot)
+  assert.deepEqual(owner, [])
+  // With no owner-typed rows, the collapsed resend text is empty — the
+  // phantom wait result is never re-sent as an owner turn.
+  const got = resolveStopResend(owner, [], combined(''))
+  assert.equal(got.text, '')
+})
+
+test('ownerQueuedSnapshot tolerates null/undefined and malformed rows', () => {
+  assert.deepEqual(ownerQueuedSnapshot(null), [])
+  assert.deepEqual(ownerQueuedSnapshot(undefined), [])
+  assert.deepEqual(ownerQueuedSnapshot([null, undefined]), [])
+})
 
 test('cleared_pending_cids === [] does NOT resend (turn-end drain already consumed it)', () => {
   // This is the exact double-send the timeout branch used to commit.

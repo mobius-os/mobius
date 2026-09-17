@@ -4447,15 +4447,27 @@ class ChatWriterActor:
     return {"updated": updated, "pending": next_pending}
 
   def _clear_pending(self, db, cmd: ClearPending) -> dict:
-    """Empty the pending queue; return the count + the cleared cids.
+    """Clear owner-typed queued messages; preserve machine-owned carriers.
 
-    Commits only when the queue was non-empty — clearing an already-empty
-    queue is a no-op and skips the commit. `cleared_cids` is the stable `cid`
-    of every message actually removed (empty when the queue was already
-    empty), which is how Stop tells apart a message it truly cleared from one
-    the turn-end drain already promoted into a continuation — see
-    stop_chat_for and the natural-finish-races-Stop guard in
-    ChatView.handleStop.
+    Commits only when something was actually removed — clearing an
+    already-empty (or hidden-only) queue is a no-op and skips the commit.
+    `cleared_cids` is the stable `cid` of every message actually removed
+    (empty when nothing owner-typed was queued), which is how Stop tells apart
+    a message it truly cleared from one the turn-end drain already promoted
+    into a continuation — see stop_chat_for and the natural-finish-races-Stop
+    guard in ChatView.handleStop.
+
+    A ``hidden`` queued row is never owner speech: it is a machine-owned
+    carrier (wait/delegation/activation result, a peer-message wake, or a
+    secure-input answer continuation) parked behind the owner-input barrier,
+    each with its own idempotent delivery latch. The Stop "collapse queued
+    text into one fresh follow-up turn" contract — and the terminal
+    setup-error cleanup that shares this command — must leave those carriers
+    queued so they deliver at their legitimate boundary (the owner answering
+    the open card), and must never report their cids for re-send. Re-sending
+    one as owner text was the phantom-queued-message bug: a wait result that
+    fired while a question card was open got re-sent as if the owner typed it
+    the moment they hit Stop.
     """
     from app.models import Chat
 
@@ -4463,10 +4475,17 @@ class ChatWriterActor:
     if chat is None:
       raise _PersistFailed("ClearPending: chat not found")
     pending = list(chat.pending_messages or [])
-    cleared_cids = [cid_of(m) for m in pending if cid_of(m) is not None]
-    cleared = len(pending)
+    preserved = [
+      m for m in pending if isinstance(m, dict) and m.get("hidden")
+    ]
+    removed = [
+      m for m in pending
+      if not (isinstance(m, dict) and m.get("hidden"))
+    ]
+    cleared_cids = [cid_of(m) for m in removed if cid_of(m) is not None]
+    cleared = len(removed)
     if cleared:
-      chat.pending_messages = []
+      chat.pending_messages = preserved
       if not _commit_or_rollback(db):
         raise _PersistFailed("ClearPending did not persist")
     return {"cleared": cleared, "cleared_cids": cleared_cids}

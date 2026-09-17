@@ -1,6 +1,26 @@
 import { cidOf } from './messageIdentity.js'
 
 /**
+ * Owner-typed subset of a pending-queue snapshot for the Stop resend
+ * contract. A `hidden` queued row is never owner speech — it is a
+ * machine-owned carrier (wait/delegation/activation result, a peer-message
+ * wake, or a secure-input answer continuation) parked behind the
+ * owner-input barrier, each with its own idempotent delivery latch. Stop's
+ * "collapse queued text into one fresh follow-up turn" only ever re-sends
+ * what the owner typed; folding a hidden carrier into that turn re-sends it
+ * as if the owner typed it — the phantom-queued-message bug. The backend
+ * ClearPending mirror preserves these carriers and omits their cids from
+ * cleared_pending_cids; filtering here keeps the legacy-null and cid-mismatch
+ * fallback paths honest too.
+ *
+ * @param {Array<{hidden?: boolean}>} snapshot
+ * @returns {Array} the owner-visible entries, order preserved.
+ */
+export function ownerQueuedSnapshot(snapshot) {
+  return (snapshot || []).filter(m => m && !m.hidden)
+}
+
+/**
  * Decide what handleStop should re-send after a Stop, from the queued
  * snapshot it collapsed plus the set of pending cids the backend reports
  * it actually cleared (`cleared_pending_cids` on the /chat/stop response).

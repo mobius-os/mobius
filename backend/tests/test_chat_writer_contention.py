@@ -1770,3 +1770,53 @@ def test_persist_error_writes_error_snapshot_to_row(actor):
     b.get("type") == "error" and b.get("content") == "provider error"
     for b in blocks
   )
+
+
+# -- ClearPending preserves machine-owned hidden carriers -----------------
+def test_clear_pending_preserves_hidden_carrier_clears_owner_text(actor):
+  """Stop's clear removes owner-typed queued text but leaves a hidden
+  machine carrier (e.g. a wait result parked behind an open question card)
+  queued, and never reports its cid for re-send.
+
+  This is the phantom-queued-message fix: a wait result that fired while a
+  question card was open must deliver when the owner answers the card, not
+  get re-sent as if the owner typed it the moment they hit Stop.
+  """
+  _seed_chat(
+    pending=[
+      {
+        "role": "user", "content": "owner typed this", "ts": 1,
+        "cid": "owner-1",
+      },
+      {
+        "role": "user", "content": "<wait_result>...</wait_result>",
+        "ts": 2, "cid": "wait-result-abc", "hidden": True,
+        "kind": "wait_result",
+      },
+    ],
+  )
+  result = _await(actor.submit(ClearPending(chat_id="c1", run_token="")))
+  assert result["cleared"] == 1
+  assert result["cleared_cids"] == ["owner-1"]
+  chat = _load_chat()
+  remaining = chat["pending_messages"]
+  assert [m.get("cid") for m in remaining] == ["wait-result-abc"]
+
+
+def test_clear_pending_hidden_only_queue_is_noop(actor):
+  """A queue holding only hidden carriers is a no-op clear: nothing is
+  cleared, nothing is reported, and the carriers survive untouched."""
+  _seed_chat(
+    pending=[
+      {
+        "role": "user", "content": "<wait_result>...</wait_result>",
+        "ts": 1, "cid": "wait-result-xyz", "hidden": True,
+        "kind": "wait_result",
+      },
+    ],
+  )
+  result = _await(actor.submit(ClearPending(chat_id="c1", run_token="")))
+  assert result["cleared"] == 0
+  assert result["cleared_cids"] == []
+  chat = _load_chat()
+  assert [m.get("cid") for m in chat["pending_messages"]] == ["wait-result-xyz"]

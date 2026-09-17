@@ -124,7 +124,7 @@ import {
 import { clearChatQuestionDrafts } from './questionDraft.js'
 import { captureLayoutSpace, clientLengthToLayout } from '../../lib/layoutSpace.js'
 import { isTouchPrimary } from '../../lib/pointerPrimary.js'
-import { resolveStopResend } from './resolveStopResend.js'
+import { resolveStopResend, ownerQueuedSnapshot } from './resolveStopResend.js'
 import {
   focusComposerElement,
   placeCaretAtTextEnd,
@@ -4159,7 +4159,15 @@ export default function ChatView({
       // (de-duped by name) and passing them through doSend's opts —
       // data loss on Stop was a real bug (user adds files, agent's
       // mid-turn, user hits Stop, files vanish).
-      const queuedSnapshot = pendingQueue.pendingMessagesRef.current
+      // ownerQueuedSnapshot drops machine-owned `hidden` carriers (wait /
+      // delegation / activation results, peer wakes, secure-input answer
+      // continuations) parked behind the owner-input barrier. The Stop
+      // "collapse queued text into one fresh follow-up turn" contract is for
+      // what the owner typed; re-sending a hidden carrier as owner text was
+      // the phantom-queued-message bug. See resolveStopResend.js.
+      const queuedSnapshot = ownerQueuedSnapshot(
+        pendingQueue.pendingMessagesRef.current,
+      )
       const queuedTexts = queuedSnapshot
         .map(m => (m.content || '').trim())
         .filter(Boolean)
