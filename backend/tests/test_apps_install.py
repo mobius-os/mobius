@@ -6002,7 +6002,7 @@ def test_update_check_uses_identity_matched_live_candidate_for_pinned_install(
   assert response.json()["upstream_version"] == "2.0.0"
 
 
-def test_update_check_rejects_candidate_from_different_package(
+def test_update_check_ignores_candidate_from_different_package(
   client, auth, bypass_url_validation,
 ):
   pinned_base = (
@@ -6024,10 +6024,9 @@ def test_update_check_rejects_candidate_from_different_package(
     candidate_manifest_url=other_base + "mobius.json",
   )
 
-  assert response.status_code == 409, response.text
-  assert response.json()["detail"] == (
-    "Requested update source does not match the installed app."
-  )
+  assert response.status_code == 200, response.text
+  assert response.json()["update_available"] is None
+  assert response.json()["upstream_version"] is None
 
 
 def test_update_check_final_fence_preserves_concurrent_pending_conflict(

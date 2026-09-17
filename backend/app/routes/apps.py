@@ -1441,9 +1441,7 @@ async def update_check(
   if manifest_url is not None and not _update_candidate_matches_installed(
     installed_manifest_url, manifest_url, fetched.manifest,
   ):
-    raise HTTPException(
-      409, "Requested update source does not match the installed app.",
-    )
+    return _unknown()
 
   # Build the fetched source tree the way install records it on `upstream`.
   # The shared manifest contract makes index.jsx canonical for synthetic and
