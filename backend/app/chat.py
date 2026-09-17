@@ -8,7 +8,6 @@ clients can subscribe.  Provider env / auth wiring lives in
 """
 
 import asyncio
-import weakref
 import hashlib
 import json
 import math
@@ -16,6 +15,7 @@ import os
 import re
 import time
 import uuid
+import weakref
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -3138,11 +3138,10 @@ _BROWSER_CLOSE_KILL_WAIT_TIMEOUT = 1.0
 async def _close_browser_session(chat_id: str) -> None:
   """Close every agent-browser session created by this chat.
 
-  Best-effort: logs and swallows any error so cleanup never blocks a
-  chat from completing. agent-browser must be on PATH (installed by the
-  Dockerfile); if it's not (e.g. local dev outside the container), the
-  call silently no-ops. Only discovered live sessions are contacted (no empty-session daemon spawn);
-  proc attribution also finds explicit ``--session`` names whose detached
+  Best-effort: logs cleanup failures without preventing turn completion.
+  Only discovered live sessions are contacted; an idle chat launches no CLI.
+  If agent-browser is unavailable, exact process cleanup still runs.
+  Process attribution also finds explicit ``--session`` names whose detached
   Chromium trees would otherwise escape terminal cleanup.
   """
   if not chat_id:
@@ -4370,10 +4369,15 @@ async def run_chat(
             "(reconciliation will repair)", chat_id, exc_info=True,
           )
   finally:
+    browser_cancelled = None
     if chat_id and not runtime_settled:
       # Cancellation or an unexpected provider/setup exception may bypass
-      # _complete_turn. Reuse the generation-fenced, joined cleanup boundary.
-      await _close_turn_browser(chat_id, run_gen)
+      # _complete_turn. Defer cancellation from joined browser cleanup until
+      # this wrapper has also released its registry and Stop-handoff state.
+      try:
+        await _close_turn_browser(chat_id, run_gen)
+      except asyncio.CancelledError as exc:
+        browser_cancelled = exc
     stopped_gen = _clear_after_terminal_generation.get(chat_id)
     clear_stopped_run = run_gen is not None and stopped_gen == run_gen
     terminal_status = _clear_after_terminal_status.get(chat_id, "stopped")
@@ -4527,6 +4531,8 @@ async def run_chat(
         )
     except Exception:
       _get_logger().debug("chat-note guarantee skipped", exc_info=True)
+    if browser_cancelled is not None:
+      raise browser_cancelled
 
 # The durable, settled, non-resuming terminals where a delegation child's
 # result is final and its ChatRun terminal status has committed (FinishRun ran

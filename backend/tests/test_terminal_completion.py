@@ -2589,10 +2589,12 @@ def test_fresh_turn_claim_during_browser_close_skips_stale_finalize(monkeypatch)
   assert chat_mod.registry.is_alive(cid)
 
 
-def test_direct_run_cancellation_joins_browser_cleanup_before_successor(monkeypatch):
+@pytest.mark.parametrize("stopped", [False, True])
+def test_direct_run_cancellation_joins_browser_cleanup_before_successor(monkeypatch, stopped):
   """Cancellation outside provider completion still owns and joins teardown."""
   cid = "browser-cancel-run"
   events = []
+  finished = []
 
   async def scenario():
     started, closing, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
@@ -2611,6 +2613,10 @@ def test_direct_run_cancellation_joins_browser_cleanup_before_successor(monkeypa
 
     monkeypatch.setattr(chat_mod, "_run_chat_impl", impl)
     monkeypatch.setattr(chat_mod, "_close_browser_session", close)
+    async def finish(chat_id, run_token, **kwargs):
+      finished.append((chat_id, run_token, kwargs["terminal_status"]))
+    monkeypatch.setattr(chat_mod, "_finish_run_strict", finish)
+    assert chat_mod.registry.mark_starting(cid)
     gen = chat_mod.current_run_generation(cid)
     owner = asyncio.create_task(chat_mod.run_chat(
       [], chat_id=cid, run_gen=gen, run_token="rt-browser-cancel",
@@ -2618,6 +2624,11 @@ def test_direct_run_cancellation_joins_browser_cleanup_before_successor(monkeypa
     await asyncio.wait_for(started.wait(), 2)
     owner.cancel()
     await asyncio.wait_for(closing.wait(), 2)
+    if stopped:
+      chat_mod._clear_after_terminal_generation[cid] = gen
+      chat_mod._clear_after_terminal_status[cid] = "stopped"
+      chat_mod.bump_run_generation(cid)
+      chat_mod.registry.discard_starting(cid)
 
     async def successor():
       async with chat_mod._browser_lifecycle_lock(cid):
@@ -2636,3 +2647,7 @@ def test_direct_run_cancellation_joins_browser_cleanup_before_successor(monkeypa
 
   asyncio.run(scenario())
   assert events == ["close-start", "close-end", "successor"]
+  assert not chat_mod.registry.is_alive(cid)
+  assert cid not in chat_mod._clear_after_terminal_generation
+  assert cid not in chat_mod._clear_after_terminal_status
+  assert finished == ([(cid, "rt-browser-cancel", "stopped")] if stopped else [])
