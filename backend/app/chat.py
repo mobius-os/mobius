@@ -8,6 +8,7 @@ clients can subscribe.  Provider env / auth wiring lives in
 """
 
 import asyncio
+import weakref
 import hashlib
 import json
 import math
@@ -2930,7 +2931,7 @@ async def _stop_chat_for_locked(
       continue
     registry.unregister(chat_id, handle.kind)
   if escalated:
-    await _close_browser_session(chat_id)
+    await _close_turn_browser(chat_id, stopped_gen)
   # Broadcast and run-status cleanup only when EVERY handle stopped cleanly.
   # A still-draining runner owns both; it will finalize and clear in its own
   # finally block (guarded by _clear_after_terminal_generation). Only the
@@ -3140,7 +3141,7 @@ async def _close_browser_session(chat_id: str) -> None:
   Best-effort: logs and swallows any error so cleanup never blocks a
   chat from completing. agent-browser must be on PATH (installed by the
   Dockerfile); if it's not (e.g. local dev outside the container), the
-  call silently no-ops. The inherited ``chat-<id>`` session is always tried;
+  call silently no-ops. Only discovered live sessions are contacted (no empty-session daemon spawn);
   proc attribution also finds explicit ``--session`` names whose detached
   Chromium trees would otherwise escape terminal cleanup.
   """
@@ -3149,11 +3150,14 @@ async def _close_browser_session(chat_id: str) -> None:
   log = _get_logger()
   from app.browser_profiles import BrowserSessionTarget
 
-  targets = {BrowserSessionTarget(session=f"chat-{chat_id}")}
+  targets: set[BrowserSessionTarget] = set()
+  scan = None
   try:
     from app.browser_profiles import browser_session_targets_for_chat
     scan = await asyncio.to_thread(browser_session_targets_for_chat, chat_id)
     targets.update(scan.targets)
+    if scan.idle:
+      return
     if not scan.complete:
       log.warning(
         "agent-browser session discovery incomplete for chat %s", chat_id,
@@ -3261,7 +3265,7 @@ async def _close_browser_session(chat_id: str) -> None:
       log.warning("agent-browser close failed for chat %s: %s", chat_id, exc)
     return False
 
-  results = await asyncio.gather(*(
+  await asyncio.gather(*(
     close_one(target)
     for target in sorted(
       targets,
@@ -3270,11 +3274,66 @@ async def _close_browser_session(chat_id: str) -> None:
       ),
     )
   ))
-  closed = sum(results)
-  if closed:
-    log.info(
-      "agent-browser sessions closed chat_id=%s count=%d", chat_id, closed,
+  # An RPC exit is not proof of browser exit. Keep pre-close identities so a
+  # helper which loses its parent/environment during shutdown cannot disappear
+  # from our ownership inventory. Never rediscover another chat by name alone.
+  try:
+    from app.browser_processes import terminate_processes, reset_browser_processes
+    if scan is not None and scan.complete:
+      await asyncio.to_thread(terminate_processes, scan.processes)
+    safe = re.sub(r"[^A-Za-z0-9_-]", "_", chat_id)
+    profile = Path(get_settings().data_dir) / "agent-browser-profiles" / f"chat-{safe}"
+    await asyncio.to_thread(
+      reset_browser_processes, chat_id=chat_id, profile=str(profile),
     )
+    final = await asyncio.to_thread(browser_session_targets_for_chat, chat_id)
+    if final.idle:
+      if targets or (scan is not None and scan.processes):
+        log.info("agent-browser ownership released chat_id=%s", chat_id)
+    else:
+      log.warning("agent-browser ownership remains unverified chat_id=%s", chat_id)
+  except Exception as exc:
+    log.warning("agent-browser process cleanup failed chat_id=%s: %s", chat_id, exc)
+
+
+# Browser teardown must not hold the queue lock: that lock has independent
+# bounded persistence/Stop semantics. Weak values avoid retaining one lock per
+# historical chat; active owners/waiters keep their lock strongly referenced.
+_browser_lifecycle_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
+
+
+def _browser_lifecycle_lock(chat_id: str) -> asyncio.Lock:
+  lock = _browser_lifecycle_locks.get(chat_id)
+  if lock is None:
+    lock = asyncio.Lock()
+    _browser_lifecycle_locks[chat_id] = lock
+  return lock
+
+
+async def _close_turn_browser(chat_id: str, run_gen: int | None) -> None:
+  """Close before handing off a chat; incoming runners cross this same gate."""
+  async with _browser_lifecycle_lock(chat_id):
+    owns = run_gen is None or current_run_generation(chat_id) == run_gen
+    stopped = (
+      run_gen is not None
+      and _clear_after_terminal_generation.get(chat_id) == run_gen
+      and current_run_generation(chat_id) == run_gen + 1
+      and not registry.is_alive(chat_id)
+    )
+    if owns or stopped:
+      # Shield and JOIN cleanup on cancellation: releasing the gate while a
+      # worker thread still sends signals would endanger the successor.
+      task = asyncio.create_task(_close_browser_session(chat_id))
+      try:
+        await asyncio.shield(task)
+      except asyncio.CancelledError:
+        while not task.done():
+          try:
+            await asyncio.shield(task)
+          except asyncio.CancelledError:
+            continue
+        task.result()
+        raise
 
 
 async def _terminal_setup_error_cleanup(
@@ -3812,6 +3871,9 @@ async def _complete_turn(
   # landing during finalize falls back to the queue rather than splitting a
   # turn that is already committing its terminal state.
   unregister_active_sink(chat_id, sink)
+  if close_browser:
+    await _close_turn_browser(chat_id, run_gen)
+  # Recheck transcript ownership AFTER the asynchronous browser teardown.
   # GATE (pre-finalize): may this run write its terminal assistant message at
   # all? This is the PRE-finalize ownership snapshot, used ONLY for the
   # finalize/skip decision below. The end-of-turn drain re-decides ownership
@@ -3966,8 +4028,6 @@ async def _complete_turn(
     bc.publish({"type": "done"})
     bc.mark_completed()
     _publish_chat_run_finished(chat_id)
-    if close_browser:
-      await _close_browser_session(chat_id)
     db.close()
     return chat_queue.TerminalDisposition.FAILED_LEAVE_MARKER
 
@@ -4054,15 +4114,11 @@ async def _complete_turn(
       bc.publish({"type": "done"})
       bc.mark_completed()
       _publish_chat_run_finished(chat_id)
-      if close_browser:
-        await _close_browser_session(chat_id)
       db.close()
       return chat_queue.TerminalDisposition.FAILED_LEAVE_MARKER
     bc.publish({"type": "done"})
     bc.mark_completed()
     _publish_chat_run_finished(chat_id)
-    if close_browser:
-      await _close_browser_session(chat_id)
     db.close()
     return chat_queue.TerminalDisposition.LIMIT_PARKED
   # The continuation is a fresh turn — give it its own run_token. The
@@ -4115,8 +4171,6 @@ async def _complete_turn(
     bc.publish({"type": "done"})
     bc.mark_completed()
     _publish_chat_run_finished(chat_id)
-    if close_browser:
-      await _close_browser_session(chat_id)
     db.close()
     return chat_queue.TerminalDisposition.FAILED_LEAVE_MARKER
 
@@ -4145,8 +4199,6 @@ async def _complete_turn(
       next_user=next_user,
       run_token=next_run_token,
     )
-  if close_browser:
-    await _close_browser_session(chat_id)
   db.close()
   if (
     provider_free
@@ -4204,6 +4256,9 @@ async def run_chat(
     await require_agent_turn_admission(
       get_settings().data_dir,
     )
+    # A prior turn may still be releasing this chat's browser resources.
+    async with _browser_lifecycle_lock(chat_id):
+      pass
     disposition = await _run_chat_impl(
       messages, chat_id=chat_id, session_id=session_id,
       provider_id=provider_id, run_gen=run_gen,
@@ -4315,6 +4370,10 @@ async def run_chat(
             "(reconciliation will repair)", chat_id, exc_info=True,
           )
   finally:
+    if chat_id and not runtime_settled:
+      # Cancellation or an unexpected provider/setup exception may bypass
+      # _complete_turn. Reuse the generation-fenced, joined cleanup boundary.
+      await _close_turn_browser(chat_id, run_gen)
     stopped_gen = _clear_after_terminal_generation.get(chat_id)
     clear_stopped_run = run_gen is not None and stopped_gen == run_gen
     terminal_status = _clear_after_terminal_status.get(chat_id, "stopped")
@@ -4418,7 +4477,7 @@ async def run_chat(
         browser_scan = await asyncio.to_thread(
           browser_session_targets_for_chat, chat_id,
         )
-        if browser_scan.complete and not browser_scan.targets:
+        if browser_scan.idle:
           _publish_chat_scratch_releasable(chat_id)
       except Exception:
         _get_logger().debug(

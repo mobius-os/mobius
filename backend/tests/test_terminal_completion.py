@@ -2468,3 +2468,171 @@ def test_mutating_commands_do_not_resurrect_soft_deleted_chat():
   )
   assert len(state["pending_messages"]) == 1, "the queue must not be promoted"
   assert state["running"] is False, "no run marker on a soft-deleted chat"
+
+
+def test_browser_release_precedes_continuation_and_done(monkeypatch):
+  """A successor must never start before predecessor browser teardown."""
+  _seed_owner_and_creds()
+  _seed_chat('browser-order', messages=[{'role': 'user', 'content': 'hi', 'ts': 1}],
+             pending=[{'role': 'user', 'content': 'next', 'ts': 2}], running='running')
+  _patch_claude_runner(monkeypatch)
+  order = []
+
+  async def close(_chat_id):
+    order.append('close-start')
+    await asyncio.sleep(0)
+    order.append('close-end')
+
+  monkeypatch.setattr(chat_mod, '_close_browser_session', close)
+  monkeypatch.setattr(chat_mod, '_schedule_continuation',
+                      lambda **kw: order.append('successor'))
+  chat_mod.mark_starting('browser-order')
+  _run_real_chat('browser-order', run_token='rt-browser-order',
+                 run_gen=chat_mod.current_run_generation('browser-order'))
+  assert order == ['close-start', 'close-end', 'successor']
+
+
+def test_browser_cleanup_cancellation_joins_before_releasing_gate(monkeypatch):
+  async def scenario():
+    entered, release, acquired = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+    async def close(_chat_id):
+      entered.set()
+      await release.wait()
+
+    monkeypatch.setattr(chat_mod, '_close_browser_session', close)
+    owner = asyncio.create_task(chat_mod._close_turn_browser('cancel-browser', None))
+    await entered.wait()
+    owner.cancel()
+
+    async def next_owner():
+      async with chat_mod._browser_lifecycle_lock('cancel-browser'):
+        acquired.set()
+
+    successor = asyncio.create_task(next_owner())
+    await asyncio.sleep(0)
+    assert not acquired.is_set()
+    owner.cancel()  # a second Stop must not cancel the cleanup worker
+    await asyncio.sleep(0)
+    assert not acquired.is_set()
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+      await owner
+    await successor
+    assert acquired.is_set()
+
+  asyncio.run(scenario())
+
+
+def test_browser_gate_rechecks_generation_after_wait(monkeypatch):
+  calls = []
+
+  async def close(chat_id):
+    calls.append(chat_id)
+
+  monkeypatch.setattr(chat_mod, '_close_browser_session', close)
+
+  async def scenario():
+    gen = chat_mod.current_run_generation('browser-stale-gate')
+    async with chat_mod._browser_lifecycle_lock('browser-stale-gate'):
+      task = asyncio.create_task(chat_mod._close_turn_browser('browser-stale-gate', gen))
+      await asyncio.sleep(0)
+      chat_mod.bump_run_generation('browser-stale-gate')
+    await task
+
+  asyncio.run(scenario())
+  assert calls == []
+
+
+def test_fresh_turn_claim_during_browser_close_skips_stale_finalize(monkeypatch):
+  """Shutdown awaits must precede, not invalidate, the finalize ownership gate."""
+  from app.chat_writer import StartTurn, await_ack
+
+  cid = "browser-finalize-race"
+  _seed_owner_and_creds()
+  _seed_chat(cid, messages=[{"role": "user", "content": "hi", "ts": 1}],
+             running="running", run_token="rt-browser-old")
+  _patch_claude_runner(monkeypatch, text="old answer")
+  chat_mod.mark_starting(cid)
+  gen = chat_mod.current_run_generation(cid)
+  closes = []
+
+  async def close(chat_id):
+    closes.append(chat_id)
+    chat_mod._clear_after_terminal_generation[cid] = gen
+    chat_mod.bump_run_generation(cid)
+    chat_mod.discard_starting(cid)
+    assert chat_mod.registry.mark_starting(cid)
+    await await_ack(get_writer().submit(StartTurn(
+      chat_id=cid, run_token="rt-browser-fresh",
+      user_msg={"role": "user", "content": "fresh question", "ts": 9},
+    )))
+
+  monkeypatch.setattr(chat_mod, "_close_browser_session", close)
+  dispositions = []
+  original_complete = chat_mod._complete_turn
+
+  async def complete(**kwargs):
+    result = await original_complete(**kwargs)
+    dispositions.append(result)
+    return result
+
+  monkeypatch.setattr(chat_mod, "_complete_turn", complete)
+  _run_real_chat(cid, run_token="rt-browser-old", run_gen=gen)
+  _drain_actor()
+  assert closes == [cid]
+  assert dispositions == [chat_queue.TerminalDisposition.STALE_NO_ACTION]
+  state = _load(cid)
+  assert state["messages"][-1]["role"] == "user"
+  assert state["messages"][-1]["content"] == "fresh question"
+  assert state["running"]
+  assert chat_mod.registry.is_alive(cid)
+
+
+def test_direct_run_cancellation_joins_browser_cleanup_before_successor(monkeypatch):
+  """Cancellation outside provider completion still owns and joins teardown."""
+  cid = "browser-cancel-run"
+  events = []
+
+  async def scenario():
+    started, closing, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    next_started = asyncio.Event()
+
+    async def impl(*args, **kwargs):
+      started.set()
+      await asyncio.Event().wait()
+
+    async def close(chat_id):
+      assert chat_id == cid
+      events.append("close-start")
+      closing.set()
+      await release.wait()
+      events.append("close-end")
+
+    monkeypatch.setattr(chat_mod, "_run_chat_impl", impl)
+    monkeypatch.setattr(chat_mod, "_close_browser_session", close)
+    gen = chat_mod.current_run_generation(cid)
+    owner = asyncio.create_task(chat_mod.run_chat(
+      [], chat_id=cid, run_gen=gen, run_token="rt-browser-cancel",
+    ))
+    await asyncio.wait_for(started.wait(), 2)
+    owner.cancel()
+    await asyncio.wait_for(closing.wait(), 2)
+
+    async def successor():
+      async with chat_mod._browser_lifecycle_lock(cid):
+        events.append("successor")
+        next_started.set()
+
+    next_task = asyncio.create_task(successor())
+    owner.cancel()
+    await asyncio.sleep(0)
+    assert not next_started.is_set()
+    assert not owner.done()
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+      await asyncio.wait_for(owner, 2)
+    await asyncio.wait_for(next_task, 2)
+
+  asyncio.run(scenario())
+  assert events == ["close-start", "close-end", "successor"]
