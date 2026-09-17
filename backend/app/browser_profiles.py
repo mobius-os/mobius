@@ -134,14 +134,19 @@ def _active_profile_names(root: Path) -> set[str]:
   return active
 
 
+def chat_browser_profile_path(chat_id: str) -> Path:
+  """Use the same persistent profile for launching and releasing a chat."""
+  from app.config import get_settings
+  safe = re.sub(r"[^A-Za-z0-9_-]", "_", chat_id or "default")
+  return Path(get_settings().data_dir) / "agent-browser-profiles" / f"chat-{safe}"
+
+
 def browser_session_targets_for_chat(
   chat_id: str, *, proc_root: Path = Path("/proc"),
 ) -> BrowserSessionScan:
   if not chat_id:
     return BrowserSessionScan(frozenset(), False)
-  from app.config import get_settings
-  safe = re.sub(r"[^A-Za-z0-9_-]", "_", chat_id)
-  profile = Path(get_settings().data_dir) / "agent-browser-profiles" / f"chat-{safe}"
+  profile = chat_browser_profile_path(chat_id)
   return scan_browser_processes(chat_id=chat_id, profile=str(profile), proc_root=proc_root)
 
 

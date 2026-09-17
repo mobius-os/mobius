@@ -219,6 +219,31 @@ def _seed_provider_turn(monkeypatch, provider_id, cid, token):
 
 
 @pytest.mark.parametrize("provider_id", ["claude", "codex"])
+def test_provider_launch_uses_shared_browser_profile(monkeypatch, tmp_path, provider_id):
+  import importlib
+  from app import browser_profiles
+
+  cid, token = "shared-browser-profile", "rt-shared-browser-profile"
+  _seed_provider_turn(monkeypatch, provider_id, cid, token)
+  profile = tmp_path / "alternate-profile"
+  monkeypatch.setattr(browser_profiles, "chat_browser_profile_path", lambda chat_id: profile)
+  profiles = []
+
+  async def runner(**kwargs):
+    profiles.append(kwargs["base_env"]["AGENT_BROWSER_PROFILE"])
+    return {"cost_usd": 0.0}
+
+  monkeypatch.setattr(
+    importlib.import_module(f"app.{provider_id}_sdk_runner"),
+    f"run_{provider_id}_sdk_turn", runner,
+  )
+  chat_mod.mark_starting(cid)
+  _run_real_chat(cid, run_token=token, provider_id=provider_id,
+                 run_gen=chat_mod.current_run_generation(cid))
+  assert profiles == [str(profile)]
+
+
+@pytest.mark.parametrize("provider_id", ["claude", "codex"])
 @pytest.mark.parametrize("ack_failure", [False, True])
 def test_provider_entry_requires_durable_admission_ack(
   monkeypatch, provider_id, ack_failure,
