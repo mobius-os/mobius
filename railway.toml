@@ -9,5 +9,8 @@ healthcheckTimeout = 300
 numReplicas = 1
 requiredMountPath = "/data"
 drainingSeconds = 15
-restartPolicyType = "ON_FAILURE"
-restartPolicyMaxRetries = 3
+# A planned restart drains and the container exits 0; ON_FAILURE would
+# never revive a clean stop, leaving the instance 502ing until manual
+# recovery. ALWAYS restarts every stop; max retries caps crash loops.
+restartPolicyType = "ALWAYS"
+restartPolicyMaxRetries = 10
