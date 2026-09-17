@@ -1435,9 +1435,9 @@ async def update_check(
     # resolver can replay the same durable receipt after a restart.
     return _pending_result(pending, pending_state)
 
-  # Reconstruct the fetchable manifest URL from the stored canonical identity
-  # key (`<base>#manifest-id=<id>`): the raw manifest lives at <base>/mobius.json,
-  # exactly where a store-driven update re-fetches it.
+  # A catalog-aware caller supplies the mutable discovery locator explicitly.
+  # Direct/unlisted installs fall back to the stored canonical identity key,
+  # whose raw manifest lives at <base>/mobius.json.
   fetch_manifest_url = (
     manifest_url
     if manifest_url is not None
