@@ -545,7 +545,15 @@ def _equivalence_source_repo(record: dict) -> tuple[Path, Path] | None:
   review_repo = _safe_repo_path(plan.get("repo_path"))
   raw_source_repo = plan.get("source_repo_path")
   if raw_source_repo:
-    return _safe_equivalence_source_path(raw_source_repo), review_repo
+    # Source provenance is an optional witness for an ordinary reviewed PR.
+    # Do not fail before the caller can apply the reviewed-checkout path just
+    # because this legacy field points at a staging worktree. Callers that
+    # promise a post-merge app connection still invoke the strict preflight,
+    # which rejects the missing witness there.
+    try:
+      return _safe_equivalence_source_path(raw_source_repo), review_repo
+    except ContributionSubmitError:
+      return None
   primary = app_git.primary_worktree_path(review_repo)
   if primary is not None:
     return _safe_equivalence_source_path(str(primary)), review_repo

@@ -3081,7 +3081,9 @@ def test_submit_accepts_reviewed_checkout_without_installed_source(
   _write_token(login="octocat", user_id=42)
   app_id, app_token = _app_token(client, owner_token, github_access=True)
   _repo, record, diff_text = _prepared_real_review(app_id, "send-no-source")
-  record["plan"].pop("source_repo_path")
+  # A legacy record can name its staging worktree as source. It is not an
+  # installed source, so publication must rely on the exact reviewed checkout.
+  record["plan"]["source_repo_path"] = record["plan"]["repo_path"]
   record["plan"].pop("source_sha")
   _write_contribution(app_id, record["id"], record, diff_text)
   monkeypatch.setattr(
