@@ -14,6 +14,7 @@ the test DB, so `get_writer()` is the real path throughout.
 """
 
 import asyncio
+import importlib
 import json
 import os
 import pathlib
@@ -23,7 +24,7 @@ import time
 import pytest
 
 from app import chat as chat_mod
-from app import chat_queue, chat_writer, models
+from app import browser_profiles, chat_queue, chat_writer, models
 from app.broadcast import ChatBroadcast, create_broadcast
 from app.chat_transcript import materialized_messages
 from app.chat_writer import Barrier, get_writer
@@ -220,9 +221,6 @@ def _seed_provider_turn(monkeypatch, provider_id, cid, token):
 
 @pytest.mark.parametrize("provider_id", ["claude", "codex"])
 def test_provider_launch_uses_shared_browser_profile(monkeypatch, tmp_path, provider_id):
-  import importlib
-  from app import browser_profiles
-
   cid, token = "shared-browser-profile", "rt-shared-browser-profile"
   _seed_provider_turn(monkeypatch, provider_id, cid, token)
   profile = tmp_path / "alternate-profile"
@@ -2571,8 +2569,6 @@ def test_browser_gate_rechecks_generation_after_wait(monkeypatch):
 
 def test_fresh_turn_claim_during_browser_close_skips_stale_finalize(monkeypatch):
   """Shutdown awaits must precede, not invalidate, the finalize ownership gate."""
-  from app.chat_writer import StartTurn, await_ack
-
   cid = "browser-finalize-race"
   _seed_owner_and_creds()
   _seed_chat(cid, messages=[{"role": "user", "content": "hi", "ts": 1}],
@@ -2588,7 +2584,7 @@ def test_fresh_turn_claim_during_browser_close_skips_stale_finalize(monkeypatch)
     chat_mod.bump_run_generation(cid)
     chat_mod.discard_starting(cid)
     assert chat_mod.registry.mark_starting(cid)
-    await await_ack(get_writer().submit(StartTurn(
+    await chat_writer.await_ack(get_writer().submit(chat_writer.StartTurn(
       chat_id=cid, run_token="rt-browser-fresh",
       user_msg={"role": "user", "content": "fresh question", "ts": 9},
     )))

@@ -28,6 +28,8 @@ from starlette.concurrency import run_in_threadpool
 from app import (
   activity,
   auth,
+  browser_processes,
+  browser_profiles,
   chat_queue,
   memory,
   models,
@@ -3147,13 +3149,11 @@ async def _close_browser_session(chat_id: str) -> None:
   if not chat_id:
     return
   log = _get_logger()
-  from app.browser_profiles import BrowserSessionTarget, chat_browser_profile_path
 
-  targets: set[BrowserSessionTarget] = set()
+  targets: set[browser_profiles.BrowserSessionTarget] = set()
   scan = None
   try:
-    from app.browser_profiles import browser_session_targets_for_chat
-    scan = await asyncio.to_thread(browser_session_targets_for_chat, chat_id)
+    scan = await asyncio.to_thread(browser_profiles.browser_session_targets_for_chat, chat_id)
     targets.update(scan.targets)
     if scan.idle:
       return
@@ -3207,7 +3207,7 @@ async def _close_browser_session(chat_id: str) -> None:
       pass
     await wait_for_reap(_BROWSER_CLOSE_KILL_WAIT_TIMEOUT, "after SIGKILL")
 
-  async def close_one(target: BrowserSessionTarget) -> bool:
+  async def close_one(target: browser_profiles.BrowserSessionTarget) -> bool:
     proc = None
     try:
       # Session/namespace/socket-dir are daemon-provided opaque routing values.
@@ -3277,14 +3277,13 @@ async def _close_browser_session(chat_id: str) -> None:
   # helper which loses its parent/environment during shutdown cannot disappear
   # from our ownership inventory. Never rediscover another chat by name alone.
   try:
-    from app.browser_processes import terminate_processes, reset_browser_processes
     if scan is not None and scan.complete:
-      await asyncio.to_thread(terminate_processes, scan.processes)
-    profile = chat_browser_profile_path(chat_id)
+      await asyncio.to_thread(browser_processes.terminate_processes, scan.processes)
+    profile = browser_profiles.chat_browser_profile_path(chat_id)
     await asyncio.to_thread(
-      reset_browser_processes, chat_id=chat_id, profile=str(profile),
+      browser_processes.reset_browser_processes, chat_id=chat_id, profile=str(profile),
     )
-    final = await asyncio.to_thread(browser_session_targets_for_chat, chat_id)
+    final = await asyncio.to_thread(browser_profiles.browser_session_targets_for_chat, chat_id)
     if final.idle:
       if targets or (scan is not None and scan.processes):
         log.info("agent-browser ownership released chat_id=%s", chat_id)
@@ -4476,9 +4475,8 @@ async def run_chat(
       # detached Chromium session still inherits this turn's TMPDIR. The
       # scratch owner rechecks both runtime and durable run identity again.
       try:
-        from app.browser_profiles import browser_session_targets_for_chat
         browser_scan = await asyncio.to_thread(
-          browser_session_targets_for_chat, chat_id,
+          browser_profiles.browser_session_targets_for_chat, chat_id,
         )
         if browser_scan.idle:
           _publish_chat_scratch_releasable(chat_id)
@@ -5410,8 +5408,7 @@ async def _run_chat_impl_with_db(
   # parallel agent chats both launching Chrome against a shared dir
   # would race on the profile lock. The dir is created on first
   # agent-browser invocation by the CLI itself; we just point at it.
-  from app.browser_profiles import chat_browser_profile_path
-  base_env["AGENT_BROWSER_PROFILE"] = str(chat_browser_profile_path(chat_id))
+  base_env["AGENT_BROWSER_PROFILE"] = str(browser_profiles.chat_browser_profile_path(chat_id))
   # Persistent profiles are valuable for reproducing the partner's warm-PWA
   # state, but Chromium's default disk/media caches are effectively unbounded
   # across hundreds of chats (4+ GiB was observed on the production volume).

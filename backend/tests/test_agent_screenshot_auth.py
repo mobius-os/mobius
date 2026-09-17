@@ -6,6 +6,7 @@ import os
 import shutil
 import socket
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -1139,8 +1140,6 @@ def test_unmounted_app_never_overwrites_previous_screenshot(tmp_path: Path, prev
 
 def test_command_deadline_kills_a_term_resistant_client(tmp_path: Path):
   """Exercise real GNU timeout, not a fake executable returning exit 124."""
-  import time
-
   browser = tmp_path / "agent-browser"
   browser.write_text(
     "#!/usr/bin/env python3\n"
