@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 from app.browser_processes import (
   BrowserSessionScan, BrowserSessionTarget, scan_browser_processes,
 )
-from app import models
+from app import config, models
 from app.run_state import running_chat_ids
 
 
@@ -136,9 +136,8 @@ def _active_profile_names(root: Path) -> set[str]:
 
 def chat_browser_profile_path(chat_id: str) -> Path:
   """Use the same persistent profile for launching and releasing a chat."""
-  from app.config import get_settings
   safe = re.sub(r"[^A-Za-z0-9_-]", "_", chat_id or "default")
-  return Path(get_settings().data_dir) / "agent-browser-profiles" / f"chat-{safe}"
+  return Path(config.get_settings().data_dir) / "agent-browser-profiles" / f"chat-{safe}"
 
 
 def browser_session_targets_for_chat(

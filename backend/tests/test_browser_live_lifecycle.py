@@ -4,6 +4,7 @@ MOBIUS_BROWSER_LIVE_TESTS=1 scripts/wt-pytest.sh tests/test_browser_live_lifecyc
 """
 import asyncio
 import os
+import re
 from pathlib import Path
 import subprocess
 import time
@@ -89,7 +90,6 @@ def test_real_orphan_browser_is_discovered_and_released(browsers):
 
 
 def test_real_upgrade_snapshot_and_conditional_capture_features(browsers, tmp_path):
-  import re
   owner, profile, env = browsers()
   run(env, 'eval', 'document.body.innerHTML = `<button>Keep</button>`')
   first = run(env, 'snapshot', '-i').stdout

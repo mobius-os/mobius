@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from app import browser_profiles, browser_processes, chat
+from app import browser_profiles, browser_processes, chat, config
 from app.browser_profiles import enforce_browser_profile_quota
 
 
@@ -17,7 +17,6 @@ from app.browser_profiles import enforce_browser_profile_quota
 def test_chat_browser_profile_path_preserves_names_in_configured_root(
   monkeypatch, tmp_path, chat_id, name,
 ):
-  from app import config
   monkeypatch.setattr(config, "get_settings", lambda: SimpleNamespace(data_dir=str(tmp_path)))
   profile = browser_profiles.chat_browser_profile_path(chat_id)
   assert profile == tmp_path / "agent-browser-profiles" / name
