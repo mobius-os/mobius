@@ -584,11 +584,13 @@ class ActiveClaudeClient:
 
     A saved question / approval / secure-input card is the terminal action of
     the turn: the owner's answer resumes the chat in a LATER turn, so the model
-    must not emit any more text or tools after the card. That path returns a
-    receipt to the model (unlike native `AskUserQuestion`, which parks in
-    `can_use_tool`). The event sink calls this only when the SDK emits the
+    is instructed not to emit more text or tools after the card. That path
+    returns a receipt to the model (unlike native `AskUserQuestion`, which parks
+    in `can_use_tool`). The event sink calls this only when the SDK emits the
     matching completed tool result, then this fires the same soft interrupt
-    `steer` uses to stop any trailing generation at its source.
+    `steer` uses to stop further generation at its source. Events Claude already
+    emitted while the interrupt takes effect still drain through the sink and
+    remain visible and durable.
 
     Claim ownership synchronously at the receipt boundary, before returning
     the interrupt awaitable. This ordering is load-bearing: the SDK terminal

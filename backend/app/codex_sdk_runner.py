@@ -751,7 +751,9 @@ class ActiveCodexTurn:
     """End the turn after a continuation owner-input receipt is delivered.
 
     The event sink calls this only after Codex emits the completed card tool
-    result. Interrupt the live turn now so nothing can follow the card.
+    result. Interrupt the live turn now to stop further generation. Events Codex
+    already emitted while that interrupt takes effect still drain through the
+    sink and remain visible and durable.
     Distinct from Stop: it marks only `_owner_card_requested`
     (folded into `stop_requested()` so terminal validation treats the resulting
     TurnStatus.interrupted as a clean, error-free completion) and never runs

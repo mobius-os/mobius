@@ -531,7 +531,8 @@ async def test_delivered_owner_card_receipt_ends_turn_as_clean_completion(
   assert result["error"] is None
   assert result["terminal_status"] == "completed"
   assert "resume_incomplete" not in result
-  # The pre-card text streamed; nothing followed the card.
+  # This controlled provider emitted no raced tail. Separate sink coverage
+  # proves that a tail already emitted while the interrupt drains is preserved.
   assert [e for e in bus.events if e["type"] == "text"] == [
     {"type": "text", "content": "here are your options"},
   ]

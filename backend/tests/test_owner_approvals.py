@@ -689,6 +689,57 @@ def test_prose_a_provider_races_after_a_saved_card_is_never_discarded(
   assert persisted[1]["question_id"] == saved.json()["question_id"]
 
 
+def test_completed_card_receipt_interrupts_then_preserves_the_raced_tail(
+  client, chat, approval_run,
+):
+  """The two owner-card guarantees hold at the same receipt boundary.
+
+  A successful completed receipt synchronously claims the runner interrupt,
+  while provider events already in flight remain live and durable as the
+  asynchronous interrupt drains.
+  """
+  from app.runner_registry import registry
+
+  sink = approval_run[0]
+  handle = _FakeCardHandle(chat.id)
+  registry.register(handle)
+  try:
+    assert sink.publish({
+      "type": "tool_start", "tool": "Bash", "input": "owner helper",
+      "tool_use_id": "owner-helper-race",
+    })
+    saved = _ask(client, chat, approval_run)
+    qid = saved.json()["question_id"]
+
+    async def deliver_receipt_and_raced_tail():
+      assert sink.publish({
+        "type": "tool_output", "content": saved.text,
+        "output_complete": True, "output_exit_code": 0,
+        "tool_use_id": "owner-helper-race",
+      })
+      assert handle.finishes == 1
+
+      log_before = len(sink.bc.event_log)
+      assert sink.publish({"type": "text", "content": "Already emitted tail."})
+      assert sink.publish({
+        "type": "thinking", "content": "Already emitted trace.",
+      })
+      assert len(sink.bc.event_log) == log_before + 2
+      await sink.finalize()
+
+    asyncio.run(deliver_receipt_and_raced_tail())
+
+    persisted = _row(chat.id)[1][-1]["blocks"]
+    assert [block["type"] for block in persisted] == [
+      "tool", "question", "text", "thinking",
+    ]
+    assert persisted[0]["owner_card_question_id"] == qid
+    assert persisted[1]["question_id"] == qid
+    assert persisted[2]["content"] == "Already emitted tail."
+  finally:
+    registry.unregister(chat.id, handle.kind)
+
+
 def test_a_streamed_messages_tail_still_lands_in_its_own_block(
   client, chat, approval_run,
 ):
