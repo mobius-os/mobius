@@ -536,16 +536,6 @@ def _yield_events_from_source(path: Path, source):
     return
 
 
-def _yield_events_from(path: Path):
-  """Path-opening compatibility wrapper for focused tests and tooling."""
-  try:
-    with path.open("r", encoding="utf-8") as source:
-      yield from _yield_events_from_source(path, source)
-  except OSError as exc:
-    log.warning("activity log read failed for %s: %s", path, exc)
-    return
-
-
 def log_skill_load(chat_id: str | None, skill: str, ts: str | None = None) -> None:
   """Records one detected skill load in the activity log.
 

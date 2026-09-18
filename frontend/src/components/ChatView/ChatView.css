@@ -3809,16 +3809,6 @@
   white-space: nowrap;
 }
 
-.chat__wait-chevron {
-  flex: 0 0 auto;
-  color: var(--muted);
-  transition: transform 140ms ease;
-}
-
-.chat__wait-summary[aria-expanded='true'] .chat__wait-chevron {
-  transform: rotate(180deg);
-}
-
 .chat__wait-details {
   display: flex;
   align-items: flex-end;

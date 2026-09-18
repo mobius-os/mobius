@@ -66,7 +66,7 @@ def _detach_if_idle(chat_id: str) -> Path | None:
     if has_running_run(db, chat_id):
       return None
   browser_scan = browser_session_targets_for_chat(chat_id)
-  if not browser_scan.complete or browser_scan.targets:
+  if not browser_scan.idle:
     return None
 
   path = agent_scratch_root() / _dir_name(chat_id)

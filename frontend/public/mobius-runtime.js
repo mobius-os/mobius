@@ -683,7 +683,7 @@ function makeStorage({ appId, appInstanceId = null, getToken, isOnline = null })
 			}
 		}
 		const res = await fetchWithAppToken(getToken, url, init);
-		const version = res.headers && typeof res.headers.get === "function" ? res.headers.get("ETag") || res.headers.get("etag") || void 0 : void 0;
+		const version = canonicalStorageVersion(res.headers && typeof res.headers.get === "function" ? res.headers.get("ETag") || res.headers.get("etag") || void 0 : void 0);
 		if (op.method === "DELETE" && res.status === 404) return { version };
 		if (res.ok) return { version };
 		const err = /* @__PURE__ */ new Error(`HTTP ${res.status}`);
@@ -1032,11 +1032,14 @@ function makeStorage({ appId, appInstanceId = null, getToken, isOnline = null })
 		return [...byName.values()].sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
 	}
 	const sameJson = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+	function canonicalStorageVersion(version) {
+		return typeof version === "string" && /^W\/"[\x21\x23-\x25\x26-\x7e]*"$/.test(version) ? version.slice(2) : version;
+	}
 	async function fetchValueWithVersion(path, kind = "json", wantVersion = false) {
 		const headers = {};
 		if (wantVersion) headers["X-Mobius-Version"] = "1";
 		const res = await fetchWithAppToken(getToken, `/api/storage/apps/${appId}/${path}`, { headers }, fetchBounded);
-		const version = res.headers && typeof res.headers.get === "function" ? res.headers.get("ETag") || res.headers.get("etag") || void 0 : void 0;
+		const version = canonicalStorageVersion(res.headers && typeof res.headers.get === "function" ? res.headers.get("ETag") || res.headers.get("etag") || void 0 : void 0);
 		if (res.status === 404) return {
 			value: null,
 			version: void 0
@@ -1306,7 +1309,7 @@ function makeStorage({ appId, appInstanceId = null, getToken, isOnline = null })
 				if (cached && cached.present !== false) assertReadKind(path, cached.kind, kind);
 				return {
 					value: finalizeRead(await effectiveValue(path, cached ? cached.data : null), kind, cached?.contentType || null, path),
-					version: cached?.serverVersion || null,
+					version: canonicalStorageVersion(cached?.serverVersion) || null,
 					offline: true
 				};
 			}

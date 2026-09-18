@@ -58,7 +58,7 @@ import { measurePopoverMaxHeight } from './composerPopoverHeight.js'
 import { focusComposerElement } from './composerFocusPolicy.js'
 import useModelSelectionPopover from './hooks/useModelSelectionPopover.js'
 import useScrollActivity from './hooks/useScrollActivity.js'
-import { clearProviderSwitch } from './providerSwitch.js'
+import useComposerPopoverClose from './hooks/useComposerPopoverClose.js'
 import { resolvedChatSettings } from './modelSelectionPolicy.js'
 import { compactChangesSummary } from './chatChangesLifecycle.js'
 import {
@@ -229,26 +229,9 @@ export default function ComposerPopover({
       return next
     })
   }, [appArtifacts, appArtifactsReady])
-  // Closing the picker with an unconfirmed cross-provider switch staged is a
-  // no-op: discard it so reopening shows the current model, not a lingering
-  // "confirm?" for a model the owner picked but never confirmed. Only the
-  // staged `confirming` state is dropped — an in-flight `switching` or a
-  // committed `success` is left alone.
-  const prevOpenRef = useRef(open)
-  useEffect(() => {
-    const wasOpen = prevOpenRef.current
-    prevOpenRef.current = open
-    if (wasOpen && !open) {
-      setArtifactsExpanded(false)
-      if (providerSwitchState?.status === 'confirming') {
-        clearProviderSwitch(chatId)
-      }
-    }
-  }, [
-    open,
-    providerSwitchState?.status,
-    chatId,
-  ])
+  useComposerPopoverClose(
+    open, providerSwitchState?.status, chatId, setArtifactsExpanded,
+  )
 
   // Measured cap on the panel's height: the space above the trigger inside both
   // the chat pane (which clips with `overflow: hidden`) and the keyboard-shrunk

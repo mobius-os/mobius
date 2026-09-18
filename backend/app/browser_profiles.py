@@ -6,21 +6,19 @@ import os
 import re
 import shutil
 import time
-from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
 from sqlalchemy.orm import Session
 
-from app import models
+from app.browser_processes import (
+  BrowserSessionScan, BrowserSessionTarget, scan_browser_processes,
+)
+from app import config, models
 from app.run_state import running_chat_ids
 
 
 _CHAT_PROFILE = re.compile(r"^chat-([0-9a-fA-F-]{36})$")
-_AGENT_BROWSER_SERVER_EXECUTABLES = frozenset({
-  "agent-browser-linux-arm64",
-  "agent-browser-linux-x64",
-})
 _CACHE_PATHS = (
   "Default/Cache",
   "Default/Code Cache",
@@ -47,23 +45,6 @@ _status = {
   "cache_dirs_pruned": 0,
   "profiles_pruned": 0,
 }
-
-
-@dataclass(frozen=True)
-class BrowserSessionTarget:
-  """Opaque routing identity retained by one agent-browser daemon."""
-
-  session: str
-  namespace: str | None = None
-  socket_dir: str | None = None
-
-
-@dataclass(frozen=True)
-class BrowserSessionScan:
-  """Exact targets plus whether process discovery was complete."""
-
-  targets: frozenset[BrowserSessionTarget]
-  complete: bool
 
 
 def _env_int(name: str, default: int) -> int:
@@ -153,69 +134,19 @@ def _active_profile_names(root: Path) -> set[str]:
   return active
 
 
+def chat_browser_profile_path(chat_id: str) -> Path:
+  """Use the same persistent profile for launching and releasing a chat."""
+  safe = re.sub(r"[^A-Za-z0-9_-]", "_", chat_id or "default")
+  return Path(config.get_settings().data_dir) / "agent-browser-profiles" / f"chat-{safe}"
+
+
 def browser_session_targets_for_chat(
-  chat_id: str,
-  *,
-  proc_root: Path = Path("/proc"),
+  chat_id: str, *, proc_root: Path = Path("/proc"),
 ) -> BrowserSessionScan:
-  """Return live agent-browser routing targets created by one chat.
-
-  ``AGENT_BROWSER_SESSION=chat-<id>`` gives ordinary invocations a safe
-  inherited name, but an agent can explicitly pass ``--session foo``.  The
-  agent-browser daemon detaches into its own session and preserves the
-  creator's ``CHAT_ID`` plus its resolved session, namespace, and socket-dir
-  routing in ``/proc/<pid>/environ``. Discovering that complete identity lets
-  terminal cleanup reach custom sessions instead of leaking their Chromium
-  trees until a container restart.
-
-  Routing values are opaque. agent-browser accepts values that look like paths
-  or options; cleanup passes them only through a child environment (never a
-  shell, CLI option value, or path operation), matching the daemon exactly.
-  Only the agent-browser server binary is considered. A process disappearing
-  during the scan cannot remain a live target and is safe to ignore; any other
-  unreadable process makes the result incomplete so destructive callers can
-  preserve scratch rather than mistaking uncertainty for an empty inventory.
-  """
-  if not chat_id or not proc_root.is_dir():
+  if not chat_id:
     return BrowserSessionScan(frozenset(), False)
-  try:
-    processes = list(proc_root.iterdir())
-  except OSError:
-    return BrowserSessionScan(frozenset(), False)
-
-  targets: set[BrowserSessionTarget] = set()
-  complete = True
-  for process in processes:
-    if not process.name.isdigit():
-      continue
-    try:
-      argv = (process / "cmdline").read_bytes().split(b"\0")
-      executable = Path(argv[0].decode("utf-8", errors="replace")).name
-      if executable not in _AGENT_BROWSER_SERVER_EXECUTABLES:
-        continue
-      values: dict[bytes, str] = {}
-      for raw in (process / "environ").read_bytes().split(b"\0"):
-        key, separator, value = raw.partition(b"=")
-        if separator and key in (
-          b"CHAT_ID",
-          b"AGENT_BROWSER_SESSION",
-          b"AGENT_BROWSER_NAMESPACE",
-          b"AGENT_BROWSER_SOCKET_DIR",
-        ):
-          values[key] = value.decode("utf-8", errors="surrogateescape")
-    except (FileNotFoundError, ProcessLookupError):
-      continue
-    except OSError:
-      complete = False
-      continue
-    session = values.get(b"AGENT_BROWSER_SESSION")
-    if values.get(b"CHAT_ID") == chat_id and session is not None:
-      targets.add(BrowserSessionTarget(
-        session=session,
-        namespace=values.get(b"AGENT_BROWSER_NAMESPACE"),
-        socket_dir=values.get(b"AGENT_BROWSER_SOCKET_DIR"),
-      ))
-  return BrowserSessionScan(frozenset(targets), complete)
+  profile = chat_browser_profile_path(chat_id)
+  return scan_browser_processes(chat_id=chat_id, profile=str(profile), proc_root=proc_root)
 
 
 def chat_activity_snapshot(db: Session) -> dict[str, dict]:
