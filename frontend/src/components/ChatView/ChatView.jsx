@@ -104,6 +104,7 @@ import ActivityLineHeader from './ActivityLineHeader.jsx'
 import { messageCopyText } from './messageCopy.js'
 import { formatResetTime } from './resetTime.js'
 import { isResourcePause } from './waitingPresentation.js'
+import { limitRecoveryCredit } from './limitRecoveryCredit.js'
 import {
   resetDeadlineDelay,
   resetDeadlineState,
@@ -5218,6 +5219,19 @@ export default function ChatView({
     && !hasPendingQuestion
     && !resourcePause
   const pendingLimitResetAt = pendingResumeBlock?.pause?.resets_at || null
+  // New parks preserve the provider that actually enforced the limit. Older
+  // cards predate that fact, so fall back to the chat's current provider.
+  const pendingLimitProvider = pendingResumeBlock?.pause?.provider
+    || chatInfo?.provider
+    || null
+  const pendingLimitUsageQuery = settingsQueries.providerUsage.useQuery(
+    pendingLimitProvider,
+    { enabled: Boolean(pendingLimitResetAt && pendingLimitProvider) },
+  )
+  const pendingLimitRecoveryCredit = limitRecoveryCredit(
+    pendingLimitProvider,
+    pendingLimitUsageQuery.data,
+  )
   useEffect(() => {
     if (!embedded || !autoResumeEnabled || !pendingLimitResetAt) {
       if (!pendingLimitResetAt) armedEmbeddedResetRef.current = null
@@ -5773,6 +5787,7 @@ export default function ChatView({
                   isLastMsg ? handleAutoResumeChange : undefined
                 }
                 limitResetElapsed={isLastMsg && limitResetElapsed}
+                recoveryCredit={isLastMsg ? pendingLimitRecoveryCredit : null}
                 submissionBlocked={providerSwitching}
                 isLastMsg={isLastMsg}
                 liveQuestionId={answerableQuestionId}

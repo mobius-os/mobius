@@ -121,6 +121,7 @@ function MsgContentInner({
   autoResumeError,
   onAutoResumeChange,
   limitResetElapsed = false,
+  recoveryCredit = null,
   submissionBlocked = false,
   // isLastMsg + liveQuestionId are primitive props so memo can do a stable
   // shallow comparison; an inline isQuestionAnswerable arrow would hand memo a
@@ -448,6 +449,7 @@ function MsgContentInner({
             block={block}
             autoResume={automaticContinuation}
             resetElapsed={!!limitResetElapsed}
+            recoveryCredit={recoveryCredit}
             cardRef={recoveryOwner ? resumeCardRef : undefined}
           >
             {recoveryOwner && parked && autoResumeAvailable && onAutoResumeChange && (
@@ -487,7 +489,7 @@ function MsgContentInner({
                   : undefined}
               >
                 {resumeState?.pending ? 'Resuming…' : resumeState?.unavailable ? 'Reconnecting…' : parked
-                  ? limitResetElapsed ? 'Continue now' : 'Try now'
+                  ? limitResetElapsed ? 'Continue now' : (recoveryCredit?.actionLabel || 'Try now')
                   : 'Resume'}
               </button>
             )}
@@ -621,6 +623,7 @@ export default memo(MsgContentInner, (prev, next) => {
     && prev.autoResumeError === next.autoResumeError
     && prev.onAutoResumeChange === next.onAutoResumeChange
     && prev.limitResetElapsed === next.limitResetElapsed
+    && prev.recoveryCredit === next.recoveryCredit
     && prev.submissionBlocked === next.submissionBlocked
     && prev.isLastMsg === next.isLastMsg
     && prev.liveQuestionId === next.liveQuestionId

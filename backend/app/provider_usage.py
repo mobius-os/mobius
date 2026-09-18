@@ -186,11 +186,27 @@ def normalize_claude_usage(
     )
     if normalized is not None:
       windows.append(normalized)
+  # Extra usage is a separate paid allowance. It is not a plan-window reset:
+  # a subscription can be at its session limit while this budget is enabled.
+  # Keep only the decision-grade facts the recovery UI needs; amounts remain
+  # provider-owned billing data and can be absent for unlimited accounts.
+  raw_extra = source.get("extra_usage")
+  raw_extra = raw_extra if isinstance(raw_extra, dict) else {}
+  extra_enabled = raw_extra.get("is_enabled") is True
+  extra_used = _percent(raw_extra.get("utilization"))
+  extra_usage = {
+    "enabled": extra_enabled,
+    # A missing percentage means Claude has not published a capped balance;
+    # when enabled, it is still a valid explicit paid-continuation option.
+    "available": extra_enabled and (extra_used is None or extra_used < 100),
+    "used_percent": extra_used,
+  }
   return {
     "state": "ready" if windows else "unavailable",
     "plan_label": plan_label(subscription_type),
     "windows": windows,
     "credit_balance": None,
+    "extra_usage": extra_usage,
   }
 
 

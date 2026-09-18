@@ -88,8 +88,8 @@ test('ErrorCard renders a parked card for a block whose pause has a reset time',
     'a parked block must lead with a plain-language reset outcome')
   assert.match(errorCard, /Queued to continue/,
     'enabled automatic continuation is the authoritative state')
-  assert.match(msgContent, /limitResetElapsed \? 'Continue now' : 'Try now'/,
-    'a park distinguishes ordinary continuation from an early retry after credits')
+  assert.match(msgContent, /recoveryCredit\?\.actionLabel \|\| 'Try now'/,
+    'a park names a reported paid continuation while retaining a safe retry fallback')
 })
 
 test('the rendered limit card explains automatic and early recovery states', () => {
@@ -104,14 +104,22 @@ test('the rendered limit card explains automatic and early recovery states', () 
   }))
   assert.match(automatic, /Queued to continue/)
   assert.match(automatic, /continue automatically at the reset/)
-  assert.match(automatic, /Added credits or reset usage\? You can try now\./)
+  assert.doesNotMatch(automatic, /Added credits/)
 
   const manual = renderToStaticMarkup(createElement(ErrorCard, {
     block,
     autoResume: false,
   }))
   assert.match(manual, /Usage resets/)
-  assert.match(manual, /Turn on auto-continue, or try now/)
+  assert.match(manual, /Turn on auto-continue, or try again after usage resets/)
+
+  const withCredits = renderToStaticMarkup(createElement(ErrorCard, {
+    block,
+    autoResume: false,
+    recoveryCredit: { label: 'Paid extra usage is available' },
+  }))
+  assert.match(withCredits, /Paid extra usage is available/)
+  assert.match(withCredits, /Continuing now may use it/)
 
   const elapsed = renderToStaticMarkup(createElement(ErrorCard, {
     block,
@@ -197,8 +205,8 @@ test('the rate-limit card keeps automatic recovery and an explicit early retry',
     'an enabled policy stays reversible without a competing retry')
   assert.match(msgContent, /manualResumeAvailable = recoveryOwner && !resourceWait/,
     'manual continuation remains available when credits restore usage early')
-  assert.match(errorCard, /Added credits or reset usage\? You can try now\./,
-    'the early retry explains when it is useful rather than encouraging blind retries')
+  assert.match(errorCard, /Continuing now may use it/,
+    'paid recovery makes potential provider charges explicit')
   assert.doesNotMatch(msgContent, /<Switch/,
     'the card must not present a switch beside a competing action')
   assert.match(css, /\.chat__recovery-actions\s*\{/,

@@ -205,6 +205,11 @@ def test_normalizers_report_unavailable_without_inventing_limits():
     "plan_label": "Pro plan",
     "windows": [],
     "credit_balance": None,
+    "extra_usage": {
+      "enabled": False,
+      "available": False,
+      "used_percent": None,
+    },
   }
   assert codex == {
     "state": "unavailable",
@@ -583,3 +588,24 @@ async def test_codex_usage_ignores_saturated_default_executor(
     await blocker
     loop.set_default_executor(replacement)
     saturated.shutdown(wait=True)
+
+
+def test_normalize_claude_usage_surfaces_enabled_extra_usage():
+  from app.provider_usage import normalize_claude_usage
+
+  snapshot = normalize_claude_usage({
+    "five_hour": {"utilization": 100, "resets_at": "2026-09-18T10:30:00Z"},
+    "extra_usage": {
+      "is_enabled": True,
+      "monthly_limit": 50000,
+      "used_credits": 12500,
+      "utilization": 25,
+      "currency": "USD",
+    },
+  })
+
+  assert snapshot["extra_usage"] == {
+    "enabled": True,
+    "available": True,
+    "used_percent": 25,
+  }

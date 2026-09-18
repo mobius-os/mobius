@@ -51,6 +51,7 @@ export default function ErrorCard({
   block,
   autoResume = false,
   resetElapsed = false,
+  recoveryCredit = null,
   cardRef,
   children,
 }) {
@@ -64,10 +65,12 @@ export default function ErrorCard({
     : null
   const recoveryCopy = vm.parked
     ? autoResume
-      ? 'Your work is safe. Möbius will continue automatically at the reset. Added credits or reset usage? You can try now.'
+      ? `Your work is safe. ${recoveryCredit?.label ? `${recoveryCredit.label}. ` : ''}Möbius will continue automatically at the reset.`
       : resetElapsed
         ? 'Your work is safe. Continue when you’re ready.'
-        : 'Your work is safe. Turn on auto-continue, or try now after adding credits or resetting usage.'
+        : recoveryCredit?.label
+          ? `Your work is safe. ${recoveryCredit.label}. Continuing now may use it.`
+          : 'Your work is safe. Turn on auto-continue, or try again after usage resets.'
     : null
   return (
     <div className={vm.className} ref={cardRef}>

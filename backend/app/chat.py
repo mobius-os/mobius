@@ -3598,6 +3598,8 @@ def _park_event(
   message: str,
   parked_until: datetime,
   park_reason: str,
+  *,
+  provider_id: str | None = None,
 ) -> dict:
   """The enriched error event a limit kill publishes through the sink.
 
@@ -3614,6 +3616,7 @@ def _park_event(
     message,
     kind=park_reason,
     resets_at=parked_until.replace(tzinfo=UTC).isoformat(),
+    provider=provider_id,
   )
 
 
@@ -3653,6 +3656,7 @@ async def _park_run_strict(
 
 def _park_exit(
   sink, runner_result: dict | None, error_text: str | None,
+  *, provider_id: str | None = None,
 ) -> dict:
   """Classify a turn exit for limit parking and publish its error event.
 
@@ -3730,7 +3734,9 @@ def _park_exit(
     "The provider's rate limit was reached; this turn is paused until the "
     "limit resets."
   )
-  sink.publish(_park_event(message, parked_until, park_reason))
+  sink.publish(_park_event(
+    message, parked_until, park_reason, provider_id=provider_id,
+  ))
   return {
     "parked": True,
     "parked_until": parked_until,
@@ -5769,7 +5775,7 @@ async def _run_chat_impl_with_db(
       # _limit_exit publishes through the sink BEFORE finalize so the error
       # (with park fields on a limit kill) lands in the persisted assistant
       # transcript, not just the live wire.
-      park_kwargs = _park_exit(sink, None, str(exc))
+      park_kwargs = _park_exit(sink, None, str(exc), provider_id=provider_id)
       return await _complete_turn(
         bc=bc, sink=sink, db=db, chat_id=chat_id, run_gen=run_gen,
         provider_id=provider_id, cost_usd=0, close_browser=True,
@@ -5780,7 +5786,7 @@ async def _run_chat_impl_with_db(
     # sink before finalize so the error is persisted alongside any partial
     # response that streamed before the failure (enriched with the park
     # fields when the terminal was a limit kill).
-    park_kwargs = _park_exit(sink, runner_result, err)
+    park_kwargs = _park_exit(sink, runner_result, err, provider_id=provider_id)
     return await _complete_turn(
       bc=bc, sink=sink, db=db, chat_id=chat_id, run_gen=run_gen,
       provider_id=provider_id, cost_usd=runner_result.get("cost_usd") or 0,
@@ -5947,7 +5953,7 @@ async def _run_chat_impl_with_db(
       # _limit_exit publishes through the sink BEFORE finalize so the error
       # (with park fields on a limit kill) lands in the persisted assistant
       # transcript, not just the live wire.
-      park_kwargs = _park_exit(sink, None, str(exc))
+      park_kwargs = _park_exit(sink, None, str(exc), provider_id=provider_id)
       return await _complete_turn(
         bc=bc, sink=sink, db=db, chat_id=chat_id, run_gen=run_gen,
         provider_id=provider_id, cost_usd=0, close_browser=True,
@@ -5956,7 +5962,7 @@ async def _run_chat_impl_with_db(
     # Same save-before-broadcast rationale: _limit_exit persists the error
     # alongside any partial response that streamed before the failure
     # (enriched with the park fields when the terminal was a limit kill).
-    park_kwargs = _park_exit(sink, runner_result, err)
+    park_kwargs = _park_exit(sink, runner_result, err, provider_id=provider_id)
     return await _complete_turn(
       bc=bc, sink=sink, db=db, chat_id=chat_id, run_gen=run_gen,
       provider_id=provider_id, cost_usd=runner_result.get("cost_usd") or 0,
