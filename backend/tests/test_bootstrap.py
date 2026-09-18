@@ -19,6 +19,7 @@ from app.bootstrap import (
   BOOTSTRAP_MEMORY_MANIFEST_URL,
   BOOTSTRAP_REFLECTION_MANIFEST_URL,
   BOOTSTRAP_SKILLS_MANIFEST_URL,
+  BOOTSTRAP_SOCIAL_MANIFEST_URL,
   BOOTSTRAP_STORE_MANIFEST_URL,
   ensure_bootstrap_apps_installed,
 )
@@ -52,6 +53,7 @@ def _bootstrap_urls():
     BOOTSTRAP_REFLECTION_MANIFEST_URL,
     BOOTSTRAP_INTEGRATIONS_MANIFEST_URL,
     BOOTSTRAP_IDENTITY_MANIFEST_URL,
+    BOOTSTRAP_SOCIAL_MANIFEST_URL,
   ]
 
 
@@ -66,6 +68,7 @@ def _installed_default_rows(created_at, *, deleted=()):
     ("reflection", "Reflection", BOOTSTRAP_REFLECTION_MANIFEST_URL),
     ("integrations", "Integrations", BOOTSTRAP_INTEGRATIONS_MANIFEST_URL),
     ("identity", "Möbius · You", BOOTSTRAP_IDENTITY_MANIFEST_URL),
+    ("social", "Social", BOOTSTRAP_SOCIAL_MANIFEST_URL),
   )
   deleted_at = datetime.now(timezone.utc)
   return [
@@ -227,6 +230,17 @@ async def test_bootstrap_applies_per_app_uninstall_policy(db, monkeypatch):
       ),
       deleted_at=deleted_at,
     ),
+    models.App(
+      source_dir="/tmp/mobius-tests/social",
+      name="Social",
+      description="owner uninstalled",
+      jsx_source="export default function App() {}",
+      slug="social",
+      manifest_url=_canonical_identity_key(
+        BOOTSTRAP_SOCIAL_MANIFEST_URL, "social",
+      ),
+      deleted_at=deleted_at,
+    ),
   ])
   db.commit()
 
@@ -306,6 +320,16 @@ async def test_bootstrap_skips_live_apps_by_canonical_manifest(db, monkeypatch):
       slug="identity-custom",
       manifest_url=_canonical_identity_key(
         BOOTSTRAP_IDENTITY_MANIFEST_URL, "identity",
+      ),
+    ),
+    models.App(
+      source_dir="/tmp/mobius-tests/social-custom",
+      name="Social",
+      description="already here",
+      jsx_source="export default function App() {}",
+      slug="social-custom",
+      manifest_url=_canonical_identity_key(
+        BOOTSTRAP_SOCIAL_MANIFEST_URL, "social",
       ),
     ),
   ])

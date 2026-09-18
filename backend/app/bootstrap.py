@@ -61,6 +61,15 @@ BOOTSTRAP_INTEGRATIONS_PREDECESSOR_MANIFEST_URL = (
 BOOTSTRAP_IDENTITY_MANIFEST_URL = (
   "https://raw.githubusercontent.com/mobius-os/app-mobius-you/main/mobius.json"
 )
+# Social (federated community board + direct messages). PINNED to a reviewed
+# commit, never a mutable branch tip: first boot installs the exact audited
+# revision that ships with this release, matching Store/Skills. This is a plain
+# manifest install — the same generic mechanism as every other bootstrap app —
+# not app-specific first-boot policy in the platform.
+BOOTSTRAP_SOCIAL_MANIFEST_URL = (
+  "https://raw.githubusercontent.com/mobius-os/app-social/"
+  "5cb40d86953f689ee376fa45d39bcd07d7bd5f42/mobius.json"
+)
 
 
 @dataclass(frozen=True)
@@ -95,6 +104,12 @@ _CORE_BOOTSTRAP_APPS = (
   # signed in; local owners see the same app with account linking optional.
   _BootstrapApp(
     "identity", BOOTSTRAP_IDENTITY_MANIFEST_URL, False,
+  ),
+  # Social (federated community board + direct messages) ships on every
+  # deployment. Installing it does NOT join the public community: browsing is
+  # open, and the owner explicitly opts in to join before they can post.
+  _BootstrapApp(
+    "social", BOOTSTRAP_SOCIAL_MANIFEST_URL, False,
   ),
 )
 
