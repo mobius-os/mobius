@@ -2073,6 +2073,8 @@ def test_outbound_runner_env_excludes_backend_secrets(monkeypatch, tmp_path):
   monkeypatch.setenv("DATABASE_URL", "postgres://user:pw@host/db")
   monkeypatch.setenv("PATH", "/usr/bin:/bin")
   monkeypatch.setenv("LANG", "en_US.UTF-8")
+  monkeypatch.setenv("SSL_CERT_FILE", "/etc/private-ca.pem")
+  monkeypatch.setenv("SSL_CERT_DIR", "/etc/private-ca.d")
 
   env = connect_outbound._runner_env("o_test")
 
@@ -2082,6 +2084,8 @@ def test_outbound_runner_env_excludes_backend_secrets(monkeypatch, tmp_path):
   assert not any(k.startswith("MOBIUS_") for k in env)
   assert env["PATH"] == "/usr/bin:/bin"
   assert env["LANG"] == "en_US.UTF-8"
+  assert env["SSL_CERT_FILE"] == "/etc/private-ca.pem"
+  assert env["SSL_CERT_DIR"] == "/etc/private-ca.d"
   assert env["HOME"] == str(tmp_path / "o_test" / "home")
   assert env["XDG_CONFIG_HOME"] == str(tmp_path / "o_test" / "home" / ".config")
 

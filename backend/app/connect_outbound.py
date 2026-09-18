@@ -148,7 +148,9 @@ def _download_runner(base_url: str) -> bytes:
 # credentials would otherwise be readable by the far side, letting it mint our
 # tokens and impersonate this instance. Pass only a minimal, non-secret env --
 # the same allowlist convention service_environment uses.
-_RUNNER_ENV_ALLOWLIST = ("PATH", "LANG", "LC_ALL", "TZ")
+_RUNNER_ENV_ALLOWLIST = (
+  "PATH", "LANG", "LC_ALL", "TZ", "SSL_CERT_FILE", "SSL_CERT_DIR",
+)
 
 
 def _runner_env(profile_id: str) -> dict[str, str]:
