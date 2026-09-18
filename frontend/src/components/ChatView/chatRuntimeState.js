@@ -255,6 +255,30 @@ export function shouldRetireRestoredQuestionSnapshot({
 }
 
 /**
+ * A settled runtime verdict retires Shell's drawer streaming marker even when
+ * the terminal chat_run_finished event was missed. Owner-input handoffs and
+ * queued work are NOT settled: the run's marker must survive them, so this
+ * guard excludes any owner-input card or queue. The optimistic send window is
+ * excluded the same way shouldRecoverSettledRuntime excludes it — an in-flight
+ * local start, a Stop, or a still-live stream owns the turn locally.
+ */
+export function shouldRetireSettledRunMarker({
+  runtimeRunning = false,
+  pendingCount = 0,
+  pendingQuestionId = null,
+  streamStillActive = false,
+  stopInFlight = false,
+  localStartInFlight = false,
+} = {}) {
+  return runtimeRunning === false
+    && pendingCount === 0
+    && pendingQuestionId == null
+    && !streamStillActive
+    && !stopInFlight
+    && !localStartInFlight
+}
+
+/**
  * A durable running -> idle transition settles a live transport that missed
  * its terminal event. Requiring the prior server-running observation avoids
  * mistaking the short optimistic send window (before StartTurn is persisted)

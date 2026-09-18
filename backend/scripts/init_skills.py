@@ -232,6 +232,9 @@ _UNMODIFIED_MIGRATIONS = {
     # Owner-curated copy using the retired opaque-frame selector path. The
     # merged seed preserves its media-order and browser-cleanup safeguards.
     "2b14caf13f4cc7c76868f9566f2c0789f6e9b8c0fefac897e1d9ebda11dff8bf",
+    # Pre-agent-browser-0.38 copy: described node refs as ephemeral and the
+    # manual reap. Untouched installs keep that text without this entry.
+    "32e436df532ee4c17b3343b04ead4261d7e46dc48c1dc0a611dcdfdd7b593209",
   },
 }
 

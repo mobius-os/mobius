@@ -1297,7 +1297,10 @@ async def sweep_wedged_runs(db: Session) -> list[str]:
           # owns a different token, so the actor no-ops.
           # Strict variant so a failed ack RAISES and is retried later.
           await _recover_wedged_run_strict(chat_id, run.id)
-      _finalize_broadcast_if_running(chat_id)
+          # Publish inside the queue lock so a fresh run cannot start between
+          # the run close and its terminal signal — a finish event must never
+          # be observable after a newer running turn has already begun.
+          _finalize_broadcast_if_running(chat_id)
       swept.append(chat_id)
     except (Exception, asyncio.TimeoutError):
       log.warning(
@@ -2631,11 +2634,19 @@ async def _clear_pending_strict(chat_id: str) -> None:
 
 
 def _finalize_broadcast_if_running(chat_id: str) -> None:
-  """Publishes a terminal done event when the chat broadcast is live."""
+  """Publishes BOTH terminal signals for a run closed outside the turn body.
+
+  The chat-broadcast done event resolves a live viewer's transport; the system
+  chat_run_finished event retires Shell's drawer streaming marker. A run that
+  ends through this helper (wedged-run sweep, stop with no live runner) has no
+  turn-body finally block to publish the shell signal, so this boundary owns
+  it — otherwise the drawer shows the chat as streaming forever.
+  """
   bc = get_broadcast(chat_id)
   if bc and bc.running:
     bc.publish({"type": "done", "cost_usd": 0})
     bc.mark_completed()
+  _publish_chat_run_finished(chat_id)
 
 
 def _publish_chat_run_finished(chat_id: str) -> None:
@@ -3907,6 +3918,8 @@ async def _complete_turn(
     clear_active_broadcast_if(bc)
     bc.publish({"type": "done"})
     bc.mark_completed()
+    # Deliberately NO shell chat_run_finished here: the successor turn (or the
+    # Stop that took the generation) owns this chat's terminal signaling.
     db.close()
     return chat_queue.TerminalDisposition.STALE_NO_ACTION
 
