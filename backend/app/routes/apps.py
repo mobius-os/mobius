@@ -1438,10 +1438,18 @@ async def update_check(
     # Upstream unreachable / rate-limited / now-invalid — degrade to unknown so
     # a store open never errors on a transient network failure.
     return _unknown()
-  if manifest_url is not None and not _update_candidate_matches_installed(
-    installed_manifest_url, manifest_url, fetched.manifest,
-  ):
-    return _unknown()
+  if manifest_url is not None:
+    try:
+      candidate_matches = _update_candidate_matches_installed(
+        installed_manifest_url, manifest_url, fetched.manifest,
+      )
+    except HTTPException:
+      # Candidate identity is discovery input, not an explicit install/update
+      # request. A malformed or cross-owner predecessor must degrade like any
+      # other unusable catalog candidate instead of breaking a store refresh.
+      return _unknown()
+    if not candidate_matches:
+      return _unknown()
 
   # Build the fetched source tree the way install records it on `upstream`.
   # The shared manifest contract makes index.jsx canonical for synthetic and

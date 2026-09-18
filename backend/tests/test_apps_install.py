@@ -6029,6 +6029,42 @@ def test_update_check_ignores_candidate_from_different_package(
   assert response.json()["upstream_version"] is None
 
 
+def test_update_check_degrades_cross_owner_predecessor_to_unknown(
+  client, auth, bypass_url_validation,
+):
+  pinned_base = (
+    "https://raw.githubusercontent.com/mobius-os/app-pinned/"
+    "1111111111111111111111111111111111111111/"
+  )
+  live_base = "https://raw.githubusercontent.com/mobius-os/app-renamed/main/"
+  manifest = {**MANIFEST_NEWS, "id": "uc-pinned"}
+  installed = _install_v1(client, auth, pinned_base, manifest, JSX)
+  assert installed.status_code == 201, installed.text
+
+  candidate = {
+    **manifest,
+    "id": "uc-renamed",
+    "previous_id": "uc-pinned",
+    "previous_manifest_url": (
+      "https://raw.githubusercontent.com/other-owner/app-pinned/"
+      "main/mobius.json"
+    ),
+  }
+  response = _update_check(
+    client,
+    auth,
+    live_base,
+    installed.json()["id"],
+    candidate,
+    JSX,
+    candidate_manifest_url=live_base + "mobius.json",
+  )
+
+  assert response.status_code == 200, response.text
+  assert response.json()["update_available"] is None
+  assert response.json()["upstream_version"] is None
+
+
 def test_update_check_final_fence_preserves_concurrent_pending_conflict(
   client, auth, bypass_url_validation, monkeypatch,
 ):
