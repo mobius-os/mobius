@@ -2512,8 +2512,14 @@ export default function ChatView({
         // (or a previous mount) published for a run whose finish event was
         // missed. The list must never stay purple behind settled runtime.
         if (shouldRetireSettledRunMarker({
+          runtimeRunning: running,
           pendingCount: (runtime.pending_messages || []).length,
           pendingQuestionId: runtime.pending_question_id,
+          streamStillActive: isStreamingRef.current,
+          stopInFlight: handlingStopRef.current,
+          localStartInFlight: (
+            localStartRequestRef.current?.chatId === String(chatId)
+          ),
         })) onRuntimeSettledIdle?.()
       }
     }
