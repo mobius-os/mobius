@@ -69,18 +69,22 @@ def replaced_seed_copies(
 
 
 def missing_registrations(
-  against: str, registry, *, repo: Path = ROOT, seed_path: str = SEED_PATH,
+  against: str,
+  registry,
+  retired_registry=None,
+  *,
+  repo: Path = ROOT,
+  seed_path: str = SEED_PATH,
 ) -> list[tuple[str, str, str]]:
   """Superseded copies this range replaced without registering them."""
+  retired_registry = retired_registry or {}
   shipped = {path.name for path in (repo / seed_path).glob("*.md")}
   missing = []
   for name, digest, commit in replaced_seed_copies(
     against, repo=repo, seed_path=seed_path,
   ):
-    # Retired skills are owned by _RETIRED_UNMODIFIED_SKILLS instead.
-    if name not in shipped:
-      continue
-    if digest in registry.get(name, frozenset()):
+    owning_registry = registry if name in shipped else retired_registry
+    if digest in owning_registry.get(name, frozenset()):
       continue
     missing.append((name, digest, commit))
   return missing
@@ -129,13 +133,74 @@ def test_registered_superseded_copy_passes(tmp_path):
   assert missing_registrations(base, registry, repo=repo) == []
 
 
+def test_newly_added_seed_supersedes_nothing(tmp_path):
+  repo = tmp_path / "repo"
+  (repo / SEED_PATH).mkdir(parents=True)
+  _git(repo, "init", "-b", "main")
+  (repo / "README.md").write_text("base\n", encoding="utf-8")
+  base = _commit(repo, "base")
+  (repo / SEED_PATH / "fresh.md").write_text(
+    "brand new guidance\n", encoding="utf-8",
+  )
+  _commit(repo, "add seed")
+
+  assert missing_registrations(base, {}, repo=repo) == []
+
+
+def test_generation_superseded_before_the_base_is_not_rechecked(tmp_path):
+  """Only the candidate range is judged; older gaps are not re-litigated."""
+  repo = _seed_repo(tmp_path, "sample.md", "first generation\n")
+  _commit(repo, "add seed")
+  (repo / SEED_PATH / "sample.md").write_text(
+    "second generation\n", encoding="utf-8",
+  )
+  base = _commit(repo, "reword seed")
+
+  assert missing_registrations(base, {}, repo=repo) == []
+
+
+def test_deleted_seed_requires_a_retired_registration(tmp_path):
+  repo = _seed_repo(tmp_path, "retired.md", "last shipped generation\n")
+  base = _commit(repo, "add seed")
+  _git(repo, "rm", f"{SEED_PATH}/retired.md")
+  retired = _commit(repo, "retire seed")
+  digest = hashlib.sha256(b"last shipped generation\n").hexdigest()
+
+  assert missing_registrations(base, {}, {}, repo=repo) == [
+    ("retired.md", digest, retired),
+  ]
+  assert missing_registrations(
+    base, {}, {"retired.md": frozenset({digest})}, repo=repo,
+  ) == []
+
+
+def _base_ref() -> str:
+  named = os.environ.get("SEED_SKILL_MIGRATION_BASE_REF", "").strip()
+  if named:
+    return named
+  resolved = subprocess.run(
+    ["git", "-C", str(ROOT), "rev-parse", "--verify", "--quiet", BASE_REF],
+    capture_output=True,
+  )
+  return BASE_REF if resolved.returncode == 0 else ""
+
+
 def test_checkout_registers_every_superseded_seed_copy():
   """The candidate change must leave every install able to migrate."""
-  against = os.environ.get("SEED_SKILL_MIGRATION_BASE_REF", "").strip() or BASE_REF
-  missing = missing_registrations(against, _init_skills()._UNMODIFIED_MIGRATIONS)
+  against = _base_ref()
+  if not against:
+    pytest.skip("no base ref available; set SEED_SKILL_MIGRATION_BASE_REF")
+  registries = _init_skills()
+  missing = missing_registrations(
+    against,
+    registries._UNMODIFIED_MIGRATIONS,
+    registries._RETIRED_UNMODIFIED_SKILLS,
+  )
   assert not missing, "\n".join(
     f"{SEED_PATH}/{name} replaced a copy installs may still hold ({commit[:8]}); "
-    f'add "{digest}" to _UNMODIFIED_MIGRATIONS["{name}"] in '
+    f'add "{digest}" to '
+    f'{"_UNMODIFIED_MIGRATIONS" if (ROOT / SEED_PATH / name).exists() else "_RETIRED_UNMODIFIED_SKILLS"}'
+    f'["{name}"] in '
     "backend/scripts/init_skills.py and freeze it in "
     "backend/tests/test_memory_boot.py"
     for name, digest, commit in missing
