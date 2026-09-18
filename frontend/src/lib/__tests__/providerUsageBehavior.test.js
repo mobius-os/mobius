@@ -6,6 +6,7 @@ import {
   providerAllowance,
   providerAllowanceSummary,
 } from '../../components/SettingsView/providerUsage.js'
+import { providerExtraUsage } from '../../components/SettingsView/providerUsage.js'
 
 
 test('plan providers follow typed weekly meaning, not display labels or other limits', () => {
@@ -91,4 +92,18 @@ test('banked reset count preserves an explicit zero while rejecting missing data
   })
   assert.deepEqual(bankedResetCredits({}), { availableCount: 0, credits: [] })
   assert.equal(bankedResetCredits(null), null)
+})
+
+
+test('enabled paid extra usage reports its separate percentage', () => {
+  assert.deepEqual(providerExtraUsage({
+    extra_usage: { enabled: true, used_percent: 37.5 },
+  }), {
+    label: 'Extra usage',
+    usedPercent: 37.5,
+    summary: '37.5% extra usage used',
+  })
+  assert.equal(providerExtraUsage({
+    extra_usage: { enabled: false, used_percent: 0 },
+  }), null)
 })

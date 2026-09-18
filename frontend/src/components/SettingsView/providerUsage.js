@@ -98,6 +98,21 @@ export function visibleUsageWindows(snapshot) {
     .slice(0, 4)
 }
 
+export function providerExtraUsage(snapshot) {
+  const extra = snapshot?.extra_usage
+  if (extra?.enabled !== true) return null
+  const used = Number(extra.used_percent)
+  if (!Number.isFinite(used)) {
+    return { label: 'Extra usage', usedPercent: null, summary: 'Extra usage enabled' }
+  }
+  const usedPercent = clampUsagePercent(used)
+  return {
+    label: 'Extra usage',
+    usedPercent,
+    summary: `${formatUsagePercent(usedPercent)}% extra usage used`,
+  }
+}
+
 export function providerAllowance(provider, snapshot) {
   const kind = provider === 'mobius' ? 'api_credits' : 'weekly'
   const label = kind === 'api_credits' ? 'API credits usage' : 'Weekly usage'

@@ -53,6 +53,7 @@
 
 .csp__usage-key-line--provider { background: var(--accent); }
 .csp__usage-key-line--context { background: #d97757; }
+.csp__usage-key-line--extra { background: #2b9e83; }
 
 .csp__automation {
   margin-top: 6px;
