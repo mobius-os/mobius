@@ -888,11 +888,11 @@ class UpdatePending(_Command):
 
 @dataclass
 class ClearPending(_Command):
-  """Empty the pending queue (Stop / terminal-setup-error paths).
+  """Clear owner-typed pending rows (Stop / terminal-setup-error paths).
 
-  Clears `pending_messages` and commits only when the queue was
-  non-empty (an empty queue is a no-op, so we skip the commit).  Returns
-  `{"cleared"}` — the count removed.
+  Hidden machine carriers stay queued behind their owner-input barrier.
+  Commits only when an owner row was removed and returns both its count and
+  stable cids as `{"cleared", "cleared_cids"}`.
   """
 
   chat_id: str = ""
