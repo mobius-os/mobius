@@ -61,6 +61,7 @@ export function makeServer() {
   const signalEvents = []
   let signalStatus = 204
   let online = true
+  let weakResponseEtags = false
   // path -> status to force on the NEXT matching write (poison/transient tests).
   const forcedWriteStatus = new Map()
   const log = []                    // every fetch the runtime made
@@ -175,7 +176,9 @@ export function makeServer() {
       const etag = nextEtag()
       files.set(path, { value, kind, contentType: ct, etag })
       const wantsCas = ifMatch !== undefined || ifNoneMatch !== undefined
-      return res(200, undefined, wantsCas ? { ETag: etag } : {})
+      return res(200, undefined, wantsCas
+        ? { ETag: weakResponseEtags ? `W/${etag}` : etag }
+        : {})
     }
     if (method === 'DELETE' && path != null) {
       const forced = forcedWriteStatus.get(path)
@@ -191,7 +194,9 @@ export function makeServer() {
     if (path != null) {
       if (!files.has(path)) return res(404)
       const rec = files.get(path)
-      const headers = reqHeader(init, 'x-mobius-version') === '1' ? { ETag: rec.etag } : {}
+      const headers = reqHeader(init, 'x-mobius-version') === '1'
+        ? { ETag: weakResponseEtags ? `W/${rec.etag}` : rec.etag }
+        : {}
       return res(200, rec.value, headers)
     }
     return res(404)
@@ -214,6 +219,7 @@ export function makeServer() {
     serverHas(path) { return files.has(path) },
     signalEvents,
     setSignalStatus(status) { signalStatus = status },
+    setWeakResponseEtags(value = true) { weakResponseEtags = value },
     // Force the NEXT write to `path` to return `status` (e.g. 422 poison, 503
     // transient). Consumed once.
     forceWrite(path, status) { forcedWriteStatus.set(path, status) },

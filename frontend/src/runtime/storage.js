@@ -678,9 +678,11 @@ export function makeStorage({ appId, appInstanceId = null, getToken, isOnline = 
       }
     }
     const res = await fetchWithAppToken(getToken, url, init) // network failure throws -> transient
-    const version = res.headers && typeof res.headers.get === 'function'
-      ? (res.headers.get('ETag') || res.headers.get('etag') || undefined)
-      : undefined
+    const version = canonicalStorageVersion(
+      res.headers && typeof res.headers.get === 'function'
+        ? (res.headers.get('ETag') || res.headers.get('etag') || undefined)
+        : undefined,
+    )
     if (op.method === 'DELETE' && res.status === 404) return { version }  // already absent
     if (res.ok) return { version }
     // Classify so one bad op can't wedge the queue (drainInner reads
@@ -1221,6 +1223,18 @@ export function makeStorage({ appId, appInstanceId = null, getToken, isOnline = 
 
   const sameJson = (a, b) => JSON.stringify(a) === JSON.stringify(b)
 
+  // A content-coding intermediary may legally weaken a response ETag (for
+  // example, `"abc"` becomes `W/"abc"` after gzip). The storage API uses its
+  // version marker as a strong compare-and-swap precondition, so retain the
+  // opaque tag but remove that transport-only weak wrapper at this boundary.
+  // Only a valid weak entity-tag is changed; malformed or non-string values
+  // remain untouched and are still rejected by the server if used in If-Match.
+  function canonicalStorageVersion(version) {
+    return typeof version === 'string' && /^W\/"[\x21\x23-\x25\x26-\x7e]*"$/.test(version)
+      ? version.slice(2)
+      : version
+  }
+
   // Fetch the authoritative server value for a path. 404 → null (known-absent);
   // any other non-OK → throw (transient/auth — the caller keeps the mirror).
   // Bounded so a stale-`true` navigator.onLine (Android offline) can't hang it.
@@ -1233,9 +1247,11 @@ export function makeStorage({ appId, appInstanceId = null, getToken, isOnline = 
       { headers },
       fetchBounded,
     )
-    const version = res.headers && typeof res.headers.get === 'function'
-      ? (res.headers.get('ETag') || res.headers.get('etag') || undefined)
-      : undefined
+    const version = canonicalStorageVersion(
+      res.headers && typeof res.headers.get === 'function'
+        ? (res.headers.get('ETag') || res.headers.get('etag') || undefined)
+        : undefined,
+    )
     if (res.status === 404) return { value: null, version: undefined }
     if (!res.ok) throw new Error(`HTTP ${res.status}`)
     let value
@@ -1559,7 +1575,10 @@ export function makeStorage({ appId, appInstanceId = null, getToken, isOnline = 
             cached?.contentType || null,
             path,
           ),
-          version: cached?.serverVersion || null,
+          // serverVersion is runtime-owned, response-derived state. Normalize
+          // old cached proxy markers here without changing an app-supplied
+          // If-Match condition passed to durableWrite().
+          version: canonicalStorageVersion(cached?.serverVersion) || null,
           offline: true,
         }
       }

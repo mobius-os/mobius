@@ -1064,6 +1064,65 @@ test('durableWrite({ifMatch}) sends If-Match and succeeds when the version match
   assert.notEqual(r.version, version)
 })
 
+test('CAS canonicalizes a proxy-weakened ETag without weakening stale-write protection', async () => {
+  const { server } = freshEnv()
+  const s = await newStorage()
+  server.seed('proxied.json', { n: 0 })
+  server.setWeakResponseEtags()
+
+  const first = await s.getWithVersion('proxied.json')
+  assert.equal(first.version, '"1"')
+
+  // An app-supplied weak validator remains weak: only response/cache-derived
+  // storage versions are canonicalized, so the server retains strict CAS.
+  await assert.rejects(
+    () => s.durableWrite('proxied.json', { n: 1 }, { ifMatch: 'W/"1"' }),
+    (error) => error.status === 412,
+  )
+  const rejected = server.log.filter((e) => e.method === 'PUT' && e.url.includes('proxied.json')).pop()
+  assert.equal(rejected.headers['If-Match'], 'W/"1"')
+  assert.deepEqual(server.serverValue('proxied.json'), { n: 0 })
+
+  const write = await s.durableWrite('proxied.json', { n: 1 }, { ifMatch: first.version })
+  assert.equal(write.durability, 'synced')
+  assert.equal(write.version, '"2"')
+  const put = server.log.filter((e) => e.method === 'PUT' && e.url.includes('proxied.json')).pop()
+  assert.equal(put.headers['If-Match'], '"1"')
+
+  // A proxy-weakened ETag returned by a successful write is canonicalized for
+  // the next protected save too.
+  const next = await s.durableWrite('proxied.json', { n: 2 }, { ifMatch: write.version })
+  assert.equal(next.version, '"3"')
+
+  await assert.rejects(
+    () => s.durableWrite('proxied.json', { n: 3 }, { ifMatch: '"1"' }),
+    (error) => error.status === 412,
+  )
+  assert.deepEqual(server.serverValue('proxied.json'), { n: 2 })
+})
+
+test('a canonical version from a proxy response survives an offline CAS round trip', async () => {
+  const { server } = freshEnv()
+  const s = await newStorage()
+  server.seed('offline-proxied.json', { n: 0 })
+  server.setWeakResponseEtags()
+  const online = await s.getWithVersion('offline-proxied.json')
+  assert.equal(online.version, '"1"')
+
+  server.setOnline(false)
+  const cached = await s.getWithVersion('offline-proxied.json')
+  assert.equal(cached.version, '"1"')
+  assert.equal((await s.durableWrite('offline-proxied.json', { n: 1 }, {
+    ifMatch: cached.version,
+  })).durability, 'queued')
+
+  server.setOnline(true)
+  await s._drain()
+  const put = server.log.filter((e) => e.method === 'PUT' && e.url.includes('offline-proxied.json')).pop()
+  assert.equal(put.headers['If-Match'], '"1"')
+  assert.deepEqual(server.serverValue('offline-proxied.json'), { n: 1 })
+})
+
 test('a stale ifMatch surfaces as a retryable conflict; a re-read + retry lands both edits', async () => {
   const { server } = freshEnv()
   const s = await newStorage()
