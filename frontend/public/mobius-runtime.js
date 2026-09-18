@@ -672,7 +672,7 @@ function makeStorage({ appId, appInstanceId = null, getToken, isOnline = null })
 			headers: {}
 		};
 		if (op.method === "PUT") {
-			if (op.ifMatch) init.headers["If-Match"] = op.ifMatch;
+			if (op.ifMatch) init.headers["If-Match"] = canonicalStorageVersion(op.ifMatch);
 			if (op.ifNoneMatch) init.headers["If-None-Match"] = "*";
 			if (op.kind === "blob" || op.kind === "text") {
 				init.headers["Content-Type"] = op.contentType || (op.kind === "blob" ? "application/octet-stream" : "text/plain;charset=utf-8");
@@ -683,7 +683,7 @@ function makeStorage({ appId, appInstanceId = null, getToken, isOnline = null })
 			}
 		}
 		const res = await fetchWithAppToken(getToken, url, init);
-		const version = res.headers && typeof res.headers.get === "function" ? res.headers.get("ETag") || res.headers.get("etag") || void 0 : void 0;
+		const version = canonicalStorageVersion(res.headers && typeof res.headers.get === "function" ? res.headers.get("ETag") || res.headers.get("etag") || void 0 : void 0);
 		if (op.method === "DELETE" && res.status === 404) return { version };
 		if (res.ok) return { version };
 		const err = /* @__PURE__ */ new Error(`HTTP ${res.status}`);
@@ -1032,11 +1032,14 @@ function makeStorage({ appId, appInstanceId = null, getToken, isOnline = null })
 		return [...byName.values()].sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
 	}
 	const sameJson = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+	function canonicalStorageVersion(version) {
+		return typeof version === "string" && /^W\/"[\x21\x23-\x25\x26-\x7e]*"$/.test(version) ? version.slice(2) : version;
+	}
 	async function fetchValueWithVersion(path, kind = "json", wantVersion = false) {
 		const headers = {};
 		if (wantVersion) headers["X-Mobius-Version"] = "1";
 		const res = await fetchWithAppToken(getToken, `/api/storage/apps/${appId}/${path}`, { headers }, fetchBounded);
-		const version = res.headers && typeof res.headers.get === "function" ? res.headers.get("ETag") || res.headers.get("etag") || void 0 : void 0;
+		const version = canonicalStorageVersion(res.headers && typeof res.headers.get === "function" ? res.headers.get("ETag") || res.headers.get("etag") || void 0 : void 0);
 		if (res.status === 404) return {
 			value: null,
 			version: void 0
@@ -1243,16 +1246,17 @@ function makeStorage({ appId, appInstanceId = null, getToken, isOnline = null })
 			if (!(value instanceof Blob)) throw new Error("mobius.storage.durableWrite: blob writes require a Blob or File value");
 			contentType = opts.contentType || value.type || "application/octet-stream";
 		}
+		const ifMatch = canonicalStorageVersion(opts.ifMatch);
 		const op = await withPathLock(path, async () => {
 			if (!await hasIndexedDb()) return {
 				direct: true,
 				sent: await writeDirect(path, value, kind, contentType, {
-					ifMatch: opts.ifMatch,
+					ifMatch,
 					ifNoneMatch: opts.ifNoneMatch
 				})
 			};
 			return writeLocal(path, value, kind, contentType, {
-				ifMatch: opts.ifMatch,
+				ifMatch,
 				ifNoneMatch: opts.ifNoneMatch
 			});
 		});
