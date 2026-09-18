@@ -60,9 +60,7 @@
  * ║   0 when the persisted value isn't in the provider's enum, so    ║
  * ║   a cross-provider effort carryover renders gracefully.          ║
  * ║                                                                  ║
- * ║   The provider logo SVGs are inlined — the apps-sdk-ui icon     ║
- * ║   set ships UI glyphs, not vendor brand marks. Paths come        ║
- * ║   from Simple-Icons + the mobius-design-iter prototype.          ║
+ * ║   Provider metadata and logos live in `providerRegistry.jsx`.    ║
  * ║                                                                  ║
  * ╚══════════════════════════════════════════════════════════════════╝
  */
