@@ -176,7 +176,9 @@ export function makeServer() {
       const etag = nextEtag()
       files.set(path, { value, kind, contentType: ct, etag })
       const wantsCas = ifMatch !== undefined || ifNoneMatch !== undefined
-      return res(200, undefined, wantsCas ? { ETag: etag } : {})
+      return res(200, undefined, wantsCas
+        ? { ETag: weakResponseEtags ? `W/${etag}` : etag }
+        : {})
     }
     if (method === 'DELETE' && path != null) {
       const forced = forcedWriteStatus.get(path)

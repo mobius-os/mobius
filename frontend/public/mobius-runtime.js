@@ -672,7 +672,7 @@ function makeStorage({ appId, appInstanceId = null, getToken, isOnline = null })
 			headers: {}
 		};
 		if (op.method === "PUT") {
-			if (op.ifMatch) init.headers["If-Match"] = canonicalStorageVersion(op.ifMatch);
+			if (op.ifMatch) init.headers["If-Match"] = op.ifMatch;
 			if (op.ifNoneMatch) init.headers["If-None-Match"] = "*";
 			if (op.kind === "blob" || op.kind === "text") {
 				init.headers["Content-Type"] = op.contentType || (op.kind === "blob" ? "application/octet-stream" : "text/plain;charset=utf-8");
@@ -1246,17 +1246,16 @@ function makeStorage({ appId, appInstanceId = null, getToken, isOnline = null })
 			if (!(value instanceof Blob)) throw new Error("mobius.storage.durableWrite: blob writes require a Blob or File value");
 			contentType = opts.contentType || value.type || "application/octet-stream";
 		}
-		const ifMatch = canonicalStorageVersion(opts.ifMatch);
 		const op = await withPathLock(path, async () => {
 			if (!await hasIndexedDb()) return {
 				direct: true,
 				sent: await writeDirect(path, value, kind, contentType, {
-					ifMatch,
+					ifMatch: opts.ifMatch,
 					ifNoneMatch: opts.ifNoneMatch
 				})
 			};
 			return writeLocal(path, value, kind, contentType, {
-				ifMatch,
+				ifMatch: opts.ifMatch,
 				ifNoneMatch: opts.ifNoneMatch
 			});
 		});
@@ -1310,7 +1309,7 @@ function makeStorage({ appId, appInstanceId = null, getToken, isOnline = null })
 				if (cached && cached.present !== false) assertReadKind(path, cached.kind, kind);
 				return {
 					value: finalizeRead(await effectiveValue(path, cached ? cached.data : null), kind, cached?.contentType || null, path),
-					version: cached?.serverVersion || null,
+					version: canonicalStorageVersion(cached?.serverVersion) || null,
 					offline: true
 				};
 			}

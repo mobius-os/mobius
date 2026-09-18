@@ -663,7 +663,7 @@ export function makeStorage({ appId, appInstanceId = null, getToken, isOnline = 
     const url = `/api/storage/apps/${appId}/${op.path}`
     const init = { method: op.method, headers: {} }
     if (op.method === 'PUT') {
-      if (op.ifMatch) init.headers['If-Match'] = canonicalStorageVersion(op.ifMatch)
+      if (op.ifMatch) init.headers['If-Match'] = op.ifMatch
       if (op.ifNoneMatch) init.headers['If-None-Match'] = '*'
       // Branch by kind: blob/text send raw bytes/text with their real
       // Content-Type (the backend stores raw bytes for non-JSON types and raw
@@ -1508,19 +1508,16 @@ export function makeStorage({ appId, appInstanceId = null, getToken, isOnline = 
       if (!(value instanceof Blob)) throw new Error('mobius.storage.durableWrite: blob writes require a Blob or File value')
       contentType = opts.contentType || value.type || 'application/octet-stream'
     }
-    // Normalize here as well as at send() so a pre-existing offline cache or
-    // caller-held weak version is repaired before it enters the outbox.
-    const ifMatch = canonicalStorageVersion(opts.ifMatch)
     const op = await withPathLock(path, async () => {
       if (!await hasIndexedDb()) {
         const sent = await writeDirect(path, value, kind, contentType, {
-          ifMatch,
+          ifMatch: opts.ifMatch,
           ifNoneMatch: opts.ifNoneMatch,
         })
         return { direct: true, sent }
       }
       return writeLocal(path, value, kind, contentType, {
-        ifMatch,
+        ifMatch: opts.ifMatch,
         ifNoneMatch: opts.ifNoneMatch,
       })
     })
@@ -1578,7 +1575,10 @@ export function makeStorage({ appId, appInstanceId = null, getToken, isOnline = 
             cached?.contentType || null,
             path,
           ),
-          version: cached?.serverVersion || null,
+          // serverVersion is runtime-owned, response-derived state. Normalize
+          // old cached proxy markers here without changing an app-supplied
+          // If-Match condition passed to durableWrite().
+          version: canonicalStorageVersion(cached?.serverVersion) || null,
           offline: true,
         }
       }
