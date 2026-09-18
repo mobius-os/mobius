@@ -1041,8 +1041,7 @@ def reconcile_startup_chats(
         msgs.append(new_msg)
       # Preserve chat.pending_messages: closing the run leaves an idle queue
       # that self-heals on the next user POST's stale-pending drain. We do NOT auto-drain at
-      # boot — that is the crash-loop hazard. (Owner-reported bug: a
-      # restart used to discard the queue here.)
+      # boot — that is the crash-loop hazard.
       # Close every still-running row for the chat in the SAME commit as the
       # transcript repair. A healthy writer maintains one current row; closing
       # all also repairs any historical duplicate left by an interrupted deploy.
