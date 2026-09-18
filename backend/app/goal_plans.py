@@ -6,6 +6,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from datetime import UTC, datetime
 import json
+import logging
 import re
 from typing import Any
 
@@ -14,6 +15,8 @@ from sqlalchemy.orm import Session, load_only
 
 from app import models
 
+
+logger = logging.getLogger(__name__)
 
 TASK_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 TASK_STATUSES = frozenset({
@@ -28,10 +31,22 @@ MAX_NOTE = 500
 MAX_RESULT = 1000
 
 
+class GoalPlanCorrupt(Exception):
+  """A stored plan's JSON could not be parsed.
+
+  Callers must fail toward "goal still has unfinished work" rather than
+  silently treating a corrupted plan as complete, which would let the goal
+  terminate with no trace of the failure.
+  """
+
+
 def _goal_plan_tasks(
   db: Session, chat_id: str, goal_id: str,
 ) -> list[dict[str, Any]] | None:
-  """Return one stable Goal's task snapshot, if it owns a plan."""
+  """Return one stable Goal's task snapshot, if it owns a plan.
+
+  Raises ``GoalPlanCorrupt`` if a plan row exists but its JSON is unreadable.
+  """
   owner = (
     db.query(models.ChatRun.goal_plan_json)
     .filter(
@@ -43,26 +58,38 @@ def _goal_plan_tasks(
     .first()
   )
   if owner is None:
-    return False
+    return None
   raw = owner[0]
   try:
     plan = json.loads(raw) if isinstance(raw, str) else raw
   except (TypeError, json.JSONDecodeError):
-    return None
+    logger.warning(
+      "unreadable goal_plan_json for chat=%s goal=%s; treating goal as "
+      "unfinished instead of silently dropping it",
+      chat_id, goal_id,
+    )
+    raise GoalPlanCorrupt(goal_id)
   tasks = (plan or {}).get("tasks") if isinstance(plan, dict) else None
   return tasks if isinstance(tasks, list) and tasks else None
+
+
+def _plan_has_unfinished_tasks(tasks: list[dict[str, Any]] | None) -> bool:
+  return bool(tasks) and any(
+    isinstance(task, dict)
+    and task.get("status") not in SETTLED_TASK_STATUSES
+    for task in tasks
+  )
 
 
 def goal_plan_is_unfinished(
   db: Session, chat_id: str, goal_id: str,
 ) -> bool:
   """Whether one stable Goal owns a plan with unsettled work."""
-  tasks = _goal_plan_tasks(db, chat_id, goal_id)
-  return bool(tasks) and any(
-    isinstance(task, dict)
-    and task.get("status") not in SETTLED_TASK_STATUSES
-    for task in tasks
-  )
+  try:
+    tasks = _goal_plan_tasks(db, chat_id, goal_id)
+  except GoalPlanCorrupt:
+    return True
+  return _plan_has_unfinished_tasks(tasks)
 
 
 class GoalPlanError(ValueError):
@@ -646,14 +673,15 @@ def goal_terminal_handoff(
   ).first()
   if run is None:
     return None
-  tasks = _goal_plan_tasks(db, chat_id, run.goal_id)
+  try:
+    tasks = _goal_plan_tasks(db, chat_id, run.goal_id)
+  except GoalPlanCorrupt:
+    tasks = None
+    plan_unfinished = True
+  else:
+    plan_unfinished = _plan_has_unfinished_tasks(tasks)
   if (
-    not tasks
-    or not any(
-      isinstance(task, dict)
-      and task.get("status") not in SETTLED_TASK_STATUSES
-      for task in tasks
-    )
+    not plan_unfinished
     or goal_handoff_owner_kind(
       db, chat_id, run.goal_id, include_queued_execution=True,
     ) is not None
@@ -666,7 +694,7 @@ def goal_terminal_handoff(
   settled = sum(
     isinstance(task, dict)
     and task.get("status") in SETTLED_TASK_STATUSES
-    for task in tasks
+    for task in (tasks or [])
   )
   prior_frontier = None
   prior_continuation = False
@@ -867,6 +895,19 @@ def terminal_goal_summaries_by_message_index(
       index for index, ts in reversed(assistant_rows)
       if started_ms - 1000 <= ts <= ended_ms + 1000
     ), None)
+    if candidate_index is None and assistant_rows:
+      # Clock skew or a filtered/hidden assistant message can leave no
+      # timestamp inside the expected window. Anchor to the nearest
+      # assistant row instead of dropping the goal's history card entirely.
+      candidate_index = min(
+        assistant_rows, key=lambda pair: abs(pair[1] - ended_ms),
+      )[0]
+      logger.warning(
+        "no assistant message timestamp within window for goal=%s "
+        "chat=%s; anchoring history card to nearest assistant row "
+        "index=%s instead of dropping it",
+        identity, chat_id, candidate_index,
+      )
     if (
       candidate_index is None
       or candidate_index < message_start

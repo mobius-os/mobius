@@ -114,6 +114,52 @@ def test_terminal_goal_history_projects_onto_final_assistant_message(
   }
 
 
+def test_terminal_goal_history_falls_back_to_nearest_assistant_message(
+  client, owner_token, db,
+):
+  # Clock skew (or a hidden/filtered assistant row) can leave no message
+  # timestamp inside the goal's [started-1s, ended+1s] window. The card must
+  # still attach to the nearest assistant row instead of vanishing.
+  auth = {"Authorization": f"Bearer {owner_token}"}
+  base = datetime(2026, 8, 23, 12, 0, tzinfo=UTC)
+  created = client.post(
+    "/api/chats",
+    json={
+      "title": "Skewed goal history",
+      "messages": [
+        {"role": "user", "content": "start", "ts": 1_787_486_400_000},
+        # 60s after the goal's ended_at window closes.
+        {"role": "assistant", "content": "finished", "ts": 1_787_486_461_000},
+      ],
+    },
+    headers=auth,
+  )
+  chat_id = created.json()["id"]
+  db.add(models.ChatRun(
+    id="skew-root", root_run_id="skew-root", chat_id=chat_id,
+    status="completed", provider="codex", goal_objective="Ship safely",
+    goal_id="skew-goal", started_at=base,
+    ended_at=base + timedelta(seconds=5),
+    goal_plan_json={
+      "version": 1,
+      "updated_at": base.isoformat(),
+      "tasks": [{
+        "id": "ship", "title": "Ship safely", "status": "completed",
+        "depends_on": [],
+      }],
+    },
+    goal_plan_revision=1,
+  ))
+  db.commit()
+
+  response = client.get(f"/api/chats/{chat_id}?limit=20", headers=auth)
+  assert response.status_code == 200, response.text
+  messages = response.json()["messages"]
+  summary = messages[1]["goal_summaries"][0]
+  assert summary["id"] == "skew-goal"
+  assert summary["status"] == "completed"
+
+
 def test_terminal_goal_history_respects_message_pagination_and_clear(
   client, owner_token, db,
 ):
