@@ -662,14 +662,12 @@ def test_question_tool_saves_receipt_and_never_returns_a_default_answer(monkeypa
   assert "answers" not in expected
 
 
-def test_prose_a_provider_races_after_a_saved_card_is_never_recorded(
+def test_prose_a_provider_races_after_a_saved_card_is_never_discarded(
   client, chat, approval_run,
 ):
-  """A committed continuation card is the turn's terminal action for EVERY
-  provider. A provider can still race prose out after it — an interrupt cannot
-  retract a message the model already produced — so the sink refuses that prose
-  outright: never accumulated, never broadcast, never persisted. That is what
-  keeps the card the visible tail without presentation having to hide anything.
+  """The runner interrupts after the card receipt, but output already produced
+  by the provider remains part of both session histories. Never hide or discard
+  that raced text while the asynchronous interrupt drains.
   """
   sink = approval_run[0]
   assert sink.publish({"type": "text", "content": "Reading the contract first."})
@@ -679,19 +677,23 @@ def test_prose_a_provider_races_after_a_saved_card_is_never_recorded(
   log_before = len(sink.bc.event_log)
   assert sink.publish({"type": "text", "content": "Card saved — waiting on you."})
   assert sink.publish({"type": "thinking", "content": "Should I say more?"})
-  assert [b["type"] for b in sink.assistant_blocks] == ["text", "question"]
-  assert len(sink.bc.event_log) == log_before
+  assert [b["type"] for b in sink.assistant_blocks] == [
+    "text", "question", "text", "thinking",
+  ]
+  assert len(sink.bc.event_log) == log_before + 2
+  asyncio.run(sink.finalize())
   persisted = _row(chat.id)[1][-1]["blocks"]
-  assert [b["type"] for b in persisted] == ["text", "question"]
-  assert persisted[-1]["question_id"] == saved.json()["question_id"]
+  assert [b["type"] for b in persisted] == [
+    "text", "question", "text", "thinking",
+  ]
+  assert persisted[1]["question_id"] == saved.json()["question_id"]
 
 
 def test_a_streamed_messages_tail_still_lands_in_its_own_block(
   client, chat, approval_run,
 ):
-  """Prose carrying the identity of a text block streamed BEFORE the card is the
-  tail of that same provider message item (see process_event's text_item_id
-  reattachment), not new prose after a terminal action."""
+  """A pre-card message tail reattaches to its original block while a distinct
+  raced message remains visible after the card instead of being discarded."""
   sink = approval_run[0]
   assert sink.publish(
     {"type": "text", "content": "Reading it", "text_item_id": "msg-1"},
@@ -702,11 +704,15 @@ def test_a_streamed_messages_tail_still_lands_in_its_own_block(
   )
   assert [b["type"] for b in sink.assistant_blocks] == ["text", "question"]
   assert sink.assistant_blocks[0]["content"] == "Reading it first."
-  # A different message item is new prose after the terminal card: refused.
+  # A different message item is genuinely later, but must remain visible so
+  # Möbius and the provider session never diverge while the interrupt drains.
   assert sink.publish(
     {"type": "text", "content": " Done.", "text_item_id": "msg-2"},
   )
-  assert [b["type"] for b in sink.assistant_blocks] == ["text", "question"]
+  assert [b["type"] for b in sink.assistant_blocks] == [
+    "text", "question", "text",
+  ]
+  assert sink.assistant_blocks[-1]["content"] == " Done."
 
 
 def test_native_question_keeps_recording_post_card_prose(chat, approval_run):

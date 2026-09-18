@@ -271,16 +271,6 @@ def steer_delivery_failed_event(consume_pending_cids: list[str]) -> dict:
   }
 
 
-# Prose a provider can still emit after a committed continuation owner-input
-# card. The card is that turn's terminal action, so the sink refuses these
-# outright (never accumulated, never broadcast) instead of leaving presentation
-# to hide them later. Tool events are deliberately NOT listed: the card helper's
-# own result arrives AFTER the card and is what ends the turn.
-_POST_CARD_PROSE_TYPES = frozenset(
-  {"text", "text_final", "thinking", "text_boundary"}
-)
-
-
 class ChatEventSink:
   """Bridges SDK-runner events to broadcast + the chat-writer actor.
 
@@ -388,11 +378,6 @@ class ChatEventSink:
     # invisible. When blocks are empty but _last_error is set, finalize()
     # synthesizes a minimal error block so the turn is durable.
     self._last_error: str | None = None
-
-    # Set once this turn commits a continuation owner-input card (see
-    # publish_question). From that point the card is the turn's terminal
-    # action, so publish() refuses provider prose that arrives after it.
-    self._owner_card_tail: str | None = None
 
     # True only for the duration of `split_for_steer`. While set, `publish()`
     # still broadcasts and accumulates the continuation's blocks, but does NOT
@@ -868,20 +853,6 @@ class ChatEventSink:
       "question events must go through publish_question(), not publish()"
     )
 
-    # A committed continuation card is this turn's terminal action: the owner's
-    # saved answer resumes the chat as a NEW turn. A provider can still race
-    # prose out after the card — an interrupt cannot retract a message the model
-    # already produced — and prose appended after a terminal card reads as if
-    # the agent had more to say. Refuse it here, so the card is the turn's tail
-    # in the durable transcript and on the live wire for every provider, rather
-    # than something presentation has to hide afterwards.
-    if (
-      event_type in _POST_CARD_PROSE_TYPES
-      and self._owner_card_tail
-      and not self._streams_into_an_open_text_block(event)
-    ):
-      return True
-
     # Edit diffs have the same inline-vs-full split as large tool output, but
     # their bounded preview is nested on tool_start/tool_input. Strip and stash
     # its private complete-text handoff before the event reaches any durable or
@@ -1321,9 +1292,6 @@ class ChatEventSink:
       # card is NOT broadcast.
       undo_question_scrub(receipt, self.assistant_blocks)
       raise
-    if event.get("response_mode") == "continuation":
-      # Durable and terminal: from here publish() refuses post-card prose.
-      self._owner_card_tail = event.get("question_id")
     # Committed durably — now (and only now) show the card.
     self._publish_activity_frontier()
     self.bc.publish(event)
@@ -1375,22 +1343,6 @@ class ChatEventSink:
           failure_message="finish-after-owner-card failed chat_id=%s",
           warn=True,
         )
-
-  def _streams_into_an_open_text_block(self, event: ChatEvent) -> bool:
-    """Whether an event is the tail of a text block streamed BEFORE the card.
-
-    A provider can deliver the rest of one assistant message item around the
-    card's tool call (see process_event's text_item_id reattachment). That text
-    belongs to a block that already exists above the card, so it is not new
-    prose after a terminal action and still lands in its own block.
-    """
-    item_id = event.get("text_item_id")
-    if not isinstance(item_id, str) or not item_id:
-      return False
-    return any(
-      block.get("type") == "text" and block.get("text_item_id") == item_id
-      for block in self.assistant_blocks
-    )
 
   def _has_continuation_card(self, question_id: str) -> bool:
     return any(

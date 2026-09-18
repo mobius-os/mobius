@@ -576,3 +576,21 @@ def test_saved_card_option_schema_exposes_explicit_quiet_outcome():
   ):
     assert option["properties"]["on_answer"]["enum"] == ["resume", "close"]
     assert "on_answer" not in option["required"]
+
+
+def test_saved_card_tools_instruct_the_agent_to_end_at_the_card():
+  """The first line of defense is the provider-visible tool contract."""
+  control = _control_module()
+  for name in (
+    control.REQUEST_APPROVAL_TOOL,
+    control.REQUEST_QUESTION_TOOL,
+    control.REQUEST_RESTART_TOOL,
+  ):
+    description = control._TOOL_DEFINITIONS[name]["description"].lower()
+    assert "final" in description
+    assert "before" in description
+    assert (
+      "no further text or tools" in description
+      or "without further text or tools" in description
+      or "without more text or tools" in description
+    )
