@@ -30,14 +30,6 @@ DEFAULT_RETENTION_DAYS = {
   "codex": 14,
 }
 MAX_FILES_PER_SWEEP = 10_000
-_status = {
-  "last_run_at": None,
-  "scanned_files": 0,
-  "removed_files": 0,
-  "reclaimed_bytes": 0,
-  "errors": 0,
-  "truncated": False,
-}
 
 
 def sweep_stale_provider_sessions(
@@ -70,7 +62,6 @@ def sweep_stale_provider_sessions(
       "errors": 0,
       "truncated": False,
     }
-    _status.update(result)
     return result
   cutoff = (time.time() if now is None else now) - max(0, max_age_days) * 86400
   scanned = removed = reclaimed = errors = 0
@@ -126,7 +117,6 @@ def sweep_stale_provider_sessions(
     "errors": errors,
     "truncated": truncated,
   }
-  _status.update(result)
   return result
 
 
@@ -166,7 +156,3 @@ def ensure_claude_retention_default(data_dir: str | Path) -> dict:
     "retention_days": retention_days,
     "source": "mobius_default",
   }
-
-
-def provider_session_retention_status() -> dict:
-  return dict(_status)

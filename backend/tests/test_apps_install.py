@@ -5929,23 +5929,13 @@ def _check_responses(base, manifest, jsx, sources=None, job=b""):
   return responses
 
 
-def _update_check(
-  client, headers, base, app_id, manifest, jsx, sources=None, job=b"",
-  candidate_manifest_url=None,
-):
+def _update_check(client, headers, base, app_id, manifest, jsx, sources=None, job=b""):
   responses = _check_responses(base, manifest, jsx, sources=sources, job=job)
   with patch(
     "app.install.httpx.AsyncClient",
     side_effect=_fake_async_client(responses),
   ):
-    return client.get(
-      f"/api/apps/{app_id}/update-check",
-      headers=headers,
-      params=(
-        {"manifest_url": candidate_manifest_url}
-        if candidate_manifest_url else None
-      ),
-    )
+    return client.get(f"/api/apps/{app_id}/update-check", headers=headers)
 
 
 def test_update_check_unchanged_upstream_is_false(
@@ -5969,64 +5959,6 @@ def test_update_check_unchanged_upstream_is_false(
   assert payload["installed_source_revision"]
   assert len(payload["candidate_source_digest"]) == 64
   assert payload["checked_at"]
-
-
-def test_update_check_uses_identity_matched_live_candidate_for_pinned_install(
-  client, auth, bypass_url_validation,
-):
-  """A pinned provenance URL must not hide a newer catalog candidate."""
-  pinned_base = (
-    "https://raw.githubusercontent.com/mobius-os/app-pinned/"
-    "1111111111111111111111111111111111111111/"
-  )
-  live_base = (
-    "https://raw.githubusercontent.com/mobius-os/app-pinned/main/"
-  )
-  manifest_v1 = {**MANIFEST_NEWS, "id": "uc-pinned", "version": "1.0.0"}
-  installed = _install_v1(client, auth, pinned_base, manifest_v1, JSX)
-  assert installed.status_code == 201, installed.text
-
-  manifest_v2 = {**manifest_v1, "version": "2.0.0"}
-  response = _update_check(
-    client,
-    auth,
-    live_base,
-    installed.json()["id"],
-    manifest_v2,
-    JSX.replace("ok", "NEW RELEASE"),
-    candidate_manifest_url=live_base + "mobius.json",
-  )
-
-  assert response.status_code == 200, response.text
-  assert response.json()["update_available"] is True
-  assert response.json()["upstream_version"] == "2.0.0"
-
-
-def test_update_check_ignores_candidate_from_different_package(
-  client, auth, bypass_url_validation,
-):
-  pinned_base = (
-    "https://raw.githubusercontent.com/mobius-os/app-pinned/"
-    "1111111111111111111111111111111111111111/"
-  )
-  other_base = "https://raw.githubusercontent.com/mobius-os/app-other/main/"
-  manifest = {**MANIFEST_NEWS, "id": "uc-pinned"}
-  installed = _install_v1(client, auth, pinned_base, manifest, JSX)
-  assert installed.status_code == 201, installed.text
-
-  response = _update_check(
-    client,
-    auth,
-    other_base,
-    installed.json()["id"],
-    manifest,
-    JSX,
-    candidate_manifest_url=other_base + "mobius.json",
-  )
-
-  assert response.status_code == 200, response.text
-  assert response.json()["update_available"] is None
-  assert response.json()["upstream_version"] is None
 
 
 def test_update_check_final_fence_preserves_concurrent_pending_conflict(

@@ -571,11 +571,6 @@ def _selected_force_steer_pending(
   return selected
 
 
-def _force_steer_matches_pending(chat: models.Chat, body: schemas.SendMessage) -> bool:
-  """Force-steer is only for converting already-queued UI messages."""
-  return _selected_force_steer_pending(chat, body) is not None
-
-
 def _user_messages_from_pending(
   selected_pending: list[dict],
   fallback_user_msg: dict,

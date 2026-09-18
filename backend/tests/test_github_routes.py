@@ -2986,7 +2986,7 @@ def test_review_status_catches_local_drift_before_send(
   assert (repo / "index.jsx").read_text() == "export default 3\n"
 
 
-def test_review_status_accepts_a_reviewed_checkout_without_installed_source(
+def test_review_status_requires_an_installed_source_for_standalone_review(
   client, owner_token,
 ):
   _write_token(login="octocat", user_id=42)
@@ -3002,8 +3002,8 @@ def test_review_status_accepts_a_reviewed_checkout_without_installed_source(
   )
 
   assert response.status_code == 200, response.text
-  assert response.json()["ready"] == 1
-  assert response.json()["records"][0]["code"] == "ready"
+  assert response.json()["ready"] == 0
+  assert response.json()["records"][0]["code"] == "missing_source_provenance"
 
 
 @pytest.mark.parametrize("field", ["base", "head", "quality"])
@@ -3074,22 +3074,20 @@ def test_reviewed_commit_resolution_requires_raw_oid_to_match_resolved_identity(
     )
 
 
-def test_submit_accepts_reviewed_checkout_without_installed_source(
+def test_submit_requires_source_provenance_without_a_prior_status_read(
   client, owner_token, monkeypatch,
 ):
-  """A fresh reviewed checkout is sufficient for an ordinary Send."""
+  """A direct Send cannot bypass the installed-source ownership boundary."""
   _write_token(login="octocat", user_id=42)
   app_id, app_token = _app_token(client, owner_token, github_access=True)
   _repo, record, diff_text = _prepared_real_review(app_id, "send-no-source")
-  # A legacy record can name its staging worktree as source. It is not an
-  # installed source, so publication must rely on the exact reviewed checkout.
-  record["plan"]["source_repo_path"] = record["plan"]["repo_path"]
+  record["plan"].pop("source_repo_path")
   record["plan"].pop("source_sha")
   _write_contribution(app_id, record["id"], record, diff_text)
   monkeypatch.setattr(
     github_routes,
     "_submit_prepared_pr",
-    lambda *_args, **_kwargs: ("https://github.com/mobius-os/app-demo/pull/58", 58, {}),
+    lambda *_args, **_kwargs: pytest.fail("missing provenance must never publish"),
   )
 
   response = client.post(
@@ -3098,8 +3096,8 @@ def test_submit_accepts_reviewed_checkout_without_installed_source(
     json={"publication_stage": "draft"},
   )
 
-  assert response.status_code == 200, response.text
-  assert response.json()["number"] == 58
+  assert response.status_code == 409, response.text
+  assert response.json()["detail"]["code"] == "missing_source_provenance"
 
 
 def test_submit_rechecks_current_source_after_ready_status(

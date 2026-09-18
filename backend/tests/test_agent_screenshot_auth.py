@@ -6,6 +6,7 @@ import os
 import shutil
 import socket
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -44,6 +45,11 @@ def _fixture_script(tmp_path: Path) -> Path:
   script.parent.mkdir(parents=True)
   shutil.copy2(SCRIPT, script)
   shutil.copy2(SESSION_RESET, script.with_name(SESSION_RESET.name))
+  app = root / "backend" / "app"
+  app.mkdir()
+  (app / "__init__.py").touch()
+  process_owner = SCRIPT.parents[1] / "app" / "browser_processes.py"
+  shutil.copy2(process_owner, app / process_owner.name)
   dist = root / "frontend" / "dist"
   dist.mkdir(parents=True)
   (dist / "index.html").write_text(
@@ -128,6 +134,10 @@ def _fake_browser(tmp_path: Path) -> tuple[Path, Path]:
     "    fi\n"
     "    ;;\n"
     "  wait)\n"
+    "    case \"$*\" in\n"
+    "      *iframe\\[data-app-id*)\n"
+    "        if [ \"${FAKE_APP_WAIT_ERROR:-0}\" = 1 ]; then exit 1; fi ;;\n"
+    "    esac\n"
     "    if [ \"${FAKE_WAIT_ERROR:-0}\" = 1 ]; then\n"
     "      printf '%s\\n' 'renderer disconnected' >&2\n"
     "      exit 1\n"
@@ -176,6 +186,9 @@ def _run_helper(
   canonical_target_url: str | None = None,
   screenshot_tiny_once: bool = False,
   wait_error: bool = False,
+  app_wait_error: bool = False,
+  preview_app: bool = False,
+  record_resets: bool = False,
   timeout_eval_mode: str = "",
   bootstrap_intercept_once: bool = False,
   public_app: bool = False,
@@ -189,6 +202,13 @@ def _run_helper(
 ) -> tuple[subprocess.CompletedProcess, Path, Path, Path]:
   _, marker = _fake_browser(tmp_path)
   script = _fixture_script(tmp_path)
+  if record_resets:
+    script.with_name(SESSION_RESET.name).write_text(
+      "import sys\n"
+      "from pathlib import Path\n"
+      "with Path(sys.argv[1]).with_suffix('.resets').open('a') as log:\n"
+      "  log.write(sys.argv[1] + '\\n')\n"
+    )
   output = tmp_path / "shot.png"
   browser_log = tmp_path / "browser.log"
   browser_profile = tmp_path / "browser-profile"
@@ -241,6 +261,7 @@ def _run_helper(
     "FAKE_CANONICAL_TARGET_URL": canonical_target_url or "",
     "FAKE_BROWSER_STDIN_LOG": str(tmp_path / "browser-stdin.log"),
     "FAKE_WAIT_ERROR": "1" if wait_error else "0",
+    "FAKE_APP_WAIT_ERROR": "1" if app_wait_error else "0",
     "FAKE_TIMEOUT_EVAL_MODE": timeout_eval_mode,
     "FAKE_TIMEOUT_EVAL_MARKER": str(tmp_path / "timeout-eval-once"),
     "FAKE_BOOTSTRAP_INTERCEPT_ONCE": "1" if bootstrap_intercept_once else "0",
@@ -255,6 +276,10 @@ def _run_helper(
   if current_page:
     args.append("--current-page")
   args.extend([route, str(output)])
+  if preview_app:
+    preview = script.with_name(PREVIEW_APP.name)
+    shutil.copy2(PREVIEW_APP, preview)
+    args = ["bash", str(preview), "42", str(output)]
   lock_handle = None
   try:
     if profile_locked:
@@ -501,14 +526,20 @@ def test_second_timeout_reports_the_failed_phase_without_an_infinite_restart(
     tmp_path,
     auth_ok=True,
     timeout_eval_mode="always",
+    record_resets=True,
+    existing_output=b"last good capture",
     subprocess_timeout=10,
   )
 
   assert result.returncode != 0
   assert "retained browser-state cleanup timed out again" in result.stderr
   assert "after one isolated browser-session restart" in result.stderr
-  assert not output.exists()
+  assert output.read_bytes() == b"last good capture"
   assert not marker.exists()
+  assert (tmp_path / "browser-profile.resets").read_text().splitlines() == [
+    str(tmp_path / "browser-profile"), str(tmp_path / "browser-profile"),
+  ]
+  assert not list(tmp_path.glob("mobius-agent-browser-*.??????"))
   commands = browser_log.read_text(encoding="utf-8").splitlines()
   assert "close" not in commands
 
@@ -561,9 +592,13 @@ def test_preserve_cache_mode_is_explicit_and_skips_freshness_reset(tmp_path: Pat
   assert not any("src.split" in command for command in commands)
 
 
-def test_app_capture_waits_for_frame_mounted_state(tmp_path: Path):
+@pytest.mark.parametrize("route", [
+  "/app/42", "/app/42/?foo=bar", "/shell/?app=42",
+  "/shell?foo=bar&app=42", "/shell/?app=%34%32", "/shell/?app=0042",
+])
+def test_app_capture_waits_for_frame_mounted_state(tmp_path: Path, route: str):
   result, output, marker, browser_log = _run_helper(
-    tmp_path, auth_ok=True, route="/app/42",
+    tmp_path, auth_ok=True, route=route,
   )
 
   assert result.returncode == 0, result.stderr
@@ -1060,3 +1095,100 @@ def test_standalone_preview_resolves_slug_without_exposing_it_to_caller(
   assert log.read_text(encoding="utf-8").strip() == (
     f"/apps/duplicate-name-2/ {tmp_path / 'standalone.png'}"
   )
+
+
+@pytest.mark.parametrize("route", [
+  "/app", "/app/", "/app/42/other", "/app/42?app=42",
+  "/shell/?app=", "/shell/?app=oops", "/shell/?app=42&app=43",
+  "/shell/?app=42&app=42", "/shell/?app=42%27%5D", "/shell/?app=-42",
+])
+def test_ambiguous_app_intent_fails_before_browser_launch(tmp_path: Path, route: str):
+  result, output, marker, browser_log = _run_helper(
+    tmp_path, auth_ok=True, route=route,
+  )
+  assert result.returncode != 0
+  assert "numeric app id" in result.stderr
+  assert not browser_log.exists()
+  assert not output.exists()
+  assert not marker.exists()
+
+
+def test_default_preview_wrapper_runs_the_app_readiness_gate(tmp_path: Path):
+  result, output, _, browser_log = _run_helper(
+    tmp_path, auth_ok=True, preview_app=True,
+  )
+  assert result.returncode == 0, result.stderr
+  assert output.exists()
+  commands = browser_log.read_text().splitlines()
+  assert any(command.startswith("open http://mobius.test/shell/?app=42&") for command in commands)
+  assert any(command.startswith("wait --fn ") and 'iframe[data-app-id="42"]' in command for command in commands)
+  assert 'sessionStorage.setItem("mobius:visual-content-only", "1")' in (tmp_path / "browser-stdin.log").read_text()
+
+
+@pytest.mark.parametrize("preview_app", [False, True])
+def test_unmounted_app_never_overwrites_previous_screenshot(tmp_path: Path, preview_app: bool):
+  result, output, marker, _ = _run_helper(
+    tmp_path, auth_ok=True, route="/app/42", preview_app=preview_app,
+    app_wait_error=True, existing_output=b"previous good capture",
+  )
+  assert result.returncode != 0
+  assert "app 42 did not reach its mounted frame" in result.stderr
+  assert output.read_bytes() == b"previous good capture"
+  assert not marker.exists()
+  assert not list(tmp_path.glob("mobius-agent-browser-*.??????"))
+
+
+def test_command_deadline_kills_a_term_resistant_client(tmp_path: Path):
+  """Exercise real GNU timeout, not a fake executable returning exit 124."""
+  browser = tmp_path / "agent-browser"
+  browser.write_text(
+    "#!/usr/bin/env python3\n"
+    "import os, signal, time\n"
+    "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+    "open(os.environ['CLIENT_PID'], 'w').write(str(os.getpid()))\n"
+    "while True: time.sleep(1)\n"
+  )
+  browser.chmod(0o755)
+  # Source the production functions without executing capture initialization.
+  functions = SCRIPT.read_text().split('FONT_READINESS_EXPR=', 1)[0]
+  command = functions + '''
+BROWSER_ERROR_FILE="$TEST_ERROR"
+BROWSER_TIMEOUT_FILE="$TEST_TIMEOUT"
+BROWSER_PHASE="resistant client"
+status=0
+browser_command 0.2 eval true || status=$?
+printf '%s' "$status"
+'''
+  started = time.monotonic()
+  result = subprocess.run(
+    ["bash", "-c", command],
+    env={**os.environ, "PATH": f"{tmp_path}:{os.environ['PATH']}",
+         "CLIENT_PID": str(tmp_path / "pid"),
+         "TEST_ERROR": str(tmp_path / "error"),
+         "TEST_TIMEOUT": str(tmp_path / "timeout")},
+    text=True, capture_output=True, timeout=8,
+  )
+  assert result.returncode == 0, result.stderr
+  assert result.stdout == "124"
+  assert time.monotonic() - started < 6
+  assert (tmp_path / "timeout").read_text().strip() == "resistant client"
+  pid = int((tmp_path / "pid").read_text())
+  assert not Path(f"/proc/{pid}/cmdline").exists() or not Path(f"/proc/{pid}/cmdline").read_bytes()
+
+
+def test_current_page_timeout_cleans_up_without_retrying_lost_document(tmp_path: Path):
+  result, output, marker, browser_log = _run_helper(
+    tmp_path, auth_ok=True, current_page=True, timeout_eval_mode="always",
+    record_resets=True, existing_output=b"last good capture", subprocess_timeout=10,
+  )
+  assert result.returncode != 0
+  assert "current-page state was lost" in result.stderr
+  assert output.read_bytes() == b"last good capture"
+  assert not marker.exists()
+  assert (tmp_path / "browser-profile.resets").read_text().splitlines() == [
+    str(tmp_path / "browser-profile"),
+  ]
+  commands = browser_log.read_text().splitlines()
+  assert sum(command.startswith("eval ") for command in commands) == 1
+  assert not any(command.startswith("open ") for command in commands)
+  assert not list(tmp_path.glob("mobius-agent-browser-*.??????"))

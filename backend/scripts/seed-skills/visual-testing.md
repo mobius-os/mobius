@@ -96,9 +96,9 @@ a CSS state class for a wait. Use a fresh iframe-scoped snapshot; when the app
 has a known bounded animation, one matching bounded wait followed immediately
 by that snapshot is preferable to a 25-second timeout.
 
-Two gotchas every session:
+Session gotchas:
 
-- **`@eN` refs are ephemeral** — regenerated on every `snapshot`, invalidated by any DOM change. Re-snapshot before targeting by `@ref` after any mutation. For repeated targets, use a selector only when its matching DOM attribute or structure is verified in the current DOM or source; otherwise re-snapshot and use a fresh ref. A quoted control name in a snapshot is an accessible name, not evidence that a matching DOM attribute exists. `:has-text()` silently no-ops.
+- **With agent-browser 0.38+, surviving elements keep their `@eN` refs across same-document changes.** Replaced elements and navigated documents/frames invalidate refs. Take a fresh snapshot after a transition rather than assuming the old target survived. For repeated targets, use a selector only when its matching DOM attribute or structure is verified in the current DOM or source; otherwise re-snapshot and use a fresh ref. A quoted control name in a snapshot is an accessible name, not evidence that a matching DOM attribute exists. `:has-text()` silently no-ops.
 - **`✓ Done` only confirms dispatch, not state change** — the CLI returns it the instant the command reaches Chromium, not after the UI changed. Verify with `snapshot` or a screenshot after any click meant to transition UI.
 - **Keep screenshots purposeful** — retain the first useful render, a materially changed or error state, and the final evidence. A loader, drawer transition, or near-identical recapture is not a partner-visible milestone.
 
@@ -125,11 +125,23 @@ Loading a PNG into your vision (`Read` on Claude, `view_image` on Codex) lets YO
 
 **When the partner reported the bug, reproduce THEIR exact conditions — a proxy that passes is not "fixed."** A headless screenshot settles the DOM but can't exercise a device/PWA-only failure (mobile keyboard, OS gesture bar, scroll-pin, a stale service-worker bundle across a rebuild); `agent-browser` scrolls programmatically, not like a thumb. A happy-path render also doesn't prove a data-driven app is fine — the defect usually lives on the empty/partial/error path (an all-or-nothing fetch that blanks the view). Most *data*-state failures you CAN reproduce headlessly, by seeding that empty/partial/error state first and then screenshotting; only the genuinely device-only classes need their device. When it is one of those, say what you verified and what still needs their device — and don't write "fixed" (a local "tests green" is not "validated").
 
+## Efficient inspection with agent-browser 0.38+
+
+Use `snapshot --delta` for repeated structural inspection: the first response
+is a baseline and later responses contain changes. Use `snapshot --delta --full` when a fresh
+baseline is needed. This is not a replacement for rendered verification.
+Do not add `screenshot --if-changed` to the authenticated capture helper:
+unchanged captures intentionally omit the output, whereas the helper promises
+a freshly verified, atomic image. Use fewer purposeful captures instead.
+A timed-out `--current-page` capture cleans up its poisoned browser but cannot
+restore injected CSS or unsaved page state; prepare that state again explicitly.
+
 ## Close the browser session when you are done
 
 `agent-browser` leaves a full Chrome tree alive after the turn. Close the
 session in the same turn you finish visual work; do not retain it in case of a
 follow-up. If it cannot close cleanly, name the profile
-(`/data/agent-browser-profiles/chat-<chat-id>`) for the next agent. When reaping
-a leaked tree, target its root browser PID and crashpad handler rather than
-using `pkill -f`, which can match and kill the shell running the cleanup.
+(`/data/agent-browser-profiles/chat-<chat-id>`) for the next agent. When graceful close fails, use
+`python3 "$SCRIPTS_DIR/agent_browser_session_reset.py" "$AGENT_BROWSER_PROFILE"`.
+The shared lifecycle owner verifies exact process identities, includes orphan
+Chrome/helpers, and refuses uncertain ownership. Never use `pkill -f`.

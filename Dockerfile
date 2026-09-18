@@ -48,7 +48,7 @@ RUN useradd -m -s /bin/bash mobius
 # Discard npm's download cache in each layer: installed packages are the
 # runtime artifact; registry tarballs only make the production image larger.
 ARG CODEX_VERSION=0.154.0
-ARG AGENT_BROWSER_VERSION=0.35.1
+ARG AGENT_BROWSER_VERSION=0.38.1
 RUN apt-get update && apt-get install -y --no-install-recommends \
     age ca-certificates cron curl git jq procps ripgrep sqlite3 sudo tini unzip util-linux \
     libnss3 libnspr4 libatk1.0-0 libatk-bridge2.0-0 libcups2 \

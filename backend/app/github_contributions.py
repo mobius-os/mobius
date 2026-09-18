@@ -545,15 +545,7 @@ def _equivalence_source_repo(record: dict) -> tuple[Path, Path] | None:
   review_repo = _safe_repo_path(plan.get("repo_path"))
   raw_source_repo = plan.get("source_repo_path")
   if raw_source_repo:
-    # Source provenance is an optional witness for an ordinary reviewed PR.
-    # Do not fail before the caller can apply the reviewed-checkout path just
-    # because this legacy field points at a staging worktree. Callers that
-    # promise a post-merge app connection still invoke the strict preflight,
-    # which rejects the missing witness there.
-    try:
-      return _safe_equivalence_source_path(raw_source_repo), review_repo
-    except ContributionSubmitError:
-      return None
+    return _safe_equivalence_source_path(raw_source_repo), review_repo
   primary = app_git.primary_worktree_path(review_repo)
   if primary is not None:
     return _safe_equivalence_source_path(str(primary)), review_repo
@@ -744,21 +736,6 @@ def _assert_pending_equivalence_preflight(record: dict) -> str:
   )
 
 
-def _assert_publication_source(record: dict) -> str:
-  """Require installed-source proof only for an approved app connection.
-
-  Ordinary publication validates its exact reviewed checkout through the
-  caller's freshness, diff, review and approval gates. Local equivalence is
-  optional provenance, recorded after publication only when it can be proved.
-  A post-merge app connection additionally promises to connect installed code,
-  so it retains the strict installed-source preflight.
-  """
-  plan = record.get("plan") or {}
-  if plan.get("after_merge"):
-    return _assert_pending_equivalence_preflight(record)
-  return "reviewed_checkout"
-
-
 def _assert_pending_equivalence_before_publication(record: dict) -> str:
   """Prove a first push or recognize an exact public reconciliation.
 
@@ -771,7 +748,7 @@ def _assert_pending_equivalence_before_publication(record: dict) -> str:
   """
   if _authoritative_public_reconciliation(record) is not None:
     return "public_reconciliation"
-  return _assert_publication_source(record)
+  return _assert_pending_equivalence_preflight(record)
 
 
 def _record_pending_equivalence(record: dict) -> str | None:
@@ -3318,7 +3295,7 @@ def _submit_prepared_pr(
       # this function can repush after a post-mutation receipt, prove the
       # currently installed source again while the caller still holds its
       # source lock. A receipt alone never authorizes recreating public state.
-      _assert_publication_source(record)
+      _assert_pending_equivalence_preflight(record)
 
     try:
       merge_patch = _git_ops._assert_merges_with_upstream(repo, upstream_repo, branch)

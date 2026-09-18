@@ -1043,12 +1043,6 @@ def primary_worktree_path(source_dir: str | Path) -> Path | None:
   return primary
 
 
-def primary_worktree_head(source_dir: str | Path) -> str | None:
-  """HEAD of the primary live checkout linked to ``source_dir``, if any."""
-  primary = primary_worktree_path(source_dir)
-  return _resolve_commit(primary, "HEAD") if primary else None
-
-
 def _equivalence_ref(prefix: str, diff_sha256: str) -> str:
   return f"{prefix}/{diff_sha256}"
 

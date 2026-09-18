@@ -12,7 +12,7 @@ from pathlib import Path
 from sqlalchemy import literal, or_, select
 from sqlalchemy.orm import Session
 
-from app import models, questions
+from app import browser_profiles, models, questions
 from app.chat import forget_chat
 from app.config import get_settings
 from app.timeutil import SOFT_DELETE_TTL, now_naive_utc
@@ -23,7 +23,7 @@ def _purge_chat_storage(chat_id: str) -> None:
   data_dir = Path(get_settings().data_dir)
   shutil.rmtree(data_dir / "chats" / chat_id, ignore_errors=True)
   shutil.rmtree(
-    data_dir / "agent-browser-profiles" / f"chat-{chat_id}",
+    browser_profiles.chat_browser_profile_path(chat_id),
     ignore_errors=True,
   )
   shutil.rmtree(

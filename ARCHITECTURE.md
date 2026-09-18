@@ -52,14 +52,19 @@ The image bundles everything the agent needs at runtime (the Claude and Codex CL
 
 ### Frontend serving priority
 
-At startup `backend/app/main.py:1000` picks one static directory **at module load time**, not per request (though a request for a file missing from the chosen `/data/platform/frontend/dist` still falls back per-request to the baked `/app/static`):
+`backend/app/main.py::_resolve_static_dir` selects the complete live build or
+baked fallback **per request**:
 
 ```
 /data/platform/frontend/dist/  ← preferred (the served platform clone's live build; persists across image rebuilds)
 /app/static/                   ← fallback (baked into the image, current with git HEAD)
 ```
 
-The `/data` volume persists across `docker compose build && up -d`, so a new image's `/app/static/` is masked by an old `/data/platform/frontend/dist/`. After a frontend deploy, refresh both source and dist and verify the bundle hash changed in `/data/platform/frontend/dist/assets/index-*.js`. Because the choice is made at module load, an in-container shell rebuild does not take effect until the uvicorn process restarts. Never delete `/app/static/` — it is the immutable frontend fallback and is root-owned.
+The frontend watcher owns atomic build publication; a shell rebuild does not
+require a server restart. Live builds persist across image replacement. Verify
+their freshness through `/api/version`; never delete the root-owned baked
+fallback. Retained content-hashed assets keep already-open tabs usable after a
+build swap.
 
 ### Security updates — who patches what
 
@@ -262,28 +267,6 @@ the normally authenticated restart surface remain. External Recovery may alter
 the database, but the process intentionally keeps its boot verdict until
 restart; promoting only part of the skipped startup plan inside a health probe
 would create a second, race-prone boot mechanism.
-
-The platform-Gauntlet removal has one additional cold-start cutover. Immediately
-after the chat writer starts, and before interrupted-chat, Delegation, park, or
-pending-queue recovery, a writer domain command makes the exact legacy task run
-lineages terminal while retaining their chats, transcripts, tasks, costs, and
-other audit rows. Direct task links seed ownership; descendant Delegations must
-also name the selected parent's logical run, and writer recoveries must carry
-their persisted predecessor/successor identity. Chat identity alone is never a
-lasting execution lease, so later owner work and delegations in a reused child
-survive the first upgrade. Pending input is retained unless its deterministic
-Gauntlet cid and immutable task prompt digest prove it is synthetic.
-
-The retired workflow's singleton table stores a reserved completion row in the
-same transaction as those writer-owned JSON and execution changes. A failed
-cutover therefore leaves no completion marker and degrades the database boot;
-retry repeats the full transaction. After success, later boots perform only the
-marker lookup and cannot reprocess new work introduced in a historical child.
-This is deliberately **not** an online stop: the process-quiescence boundary is
-the normal backend activation restart, which has already stopped the previous
-worker and its provider children before lifespan startup runs. Operators must
-not invoke the cutover against a serving old worker; no database transaction can
-prove or terminate an external live provider process.
 
 ### Misc shared helpers
 
@@ -496,7 +479,7 @@ The chat is large and self-contained; its hooks live beside it, not in `src/hook
 | `frontend/public/app-frame.html` | The opaque mini-app frame: error UI, parent module broker, runtime bootstrap, and postMessage isolation |
 | `frontend/src/sw.js` | Service worker: precache + cache strategy, incl. the offline-capable-app handler |
 | `frontend/src/sw-cache-policy.js` | Authoritative cache-route policy (see *Service worker + offline* below) |
-| `frontend/src/lib/` | Cross-cutting helpers: `appToken.js`, `chatEmbed.js`, `themeService.js`, `onlineStatus.js`, `navHistory.js`, `errorLog.js`, etc. |
+| `frontend/src/lib/` | Cross-cutting helpers: `appToken.js`, `chatEmbed.js`, `themeService.js`, `connectivityStore.js`, `navHistory.js`, `errorLog.js`, etc. |
 
 **Mini-app modules are self-contained.** `app_compile_contract.py` points Rolldown at the pinned production dependencies in `frontend/package.json`, injects React plus `mobius-runtime`, and bundles every used static import into one ESM artifact. Production minification intentionally does not preserve JavaScript function/class names; apps must use explicit labels and stable keys instead of `Function.name`. The opaque frame asks its exact controlled parent to fetch and transfer that artifact, so a cold offline load performs no dependency subrequests. A compiler banner carries both a host ABI and an artifact revision: bump the revision to rebuild installed bundles for additive runtime changes, and bump the ABI only when old and new hosts are incompatible. Public `/vendor/` files remain only for true browser assets that code refers to by URL (currently the pdf.js worker, KaTeX CSS/fonts, and the D3/Pixi classic scripts); they are not a package resolver.
 
@@ -1142,14 +1125,12 @@ receive a bounded corrective continuation.
 
 `goal_plans.goal_handoff_owner_kind` is the shared durable ownership query for
 both Goal presentation and turn settlement. It recognizes an owner question,
-armed Wait, or wake-enabled helper only when that actor belongs to the same
+Wait (including a settled result awaiting delivery), or wake-enabled helper only when that actor belongs to the same
 `goal_id`; an unrelated question or background operation in the chat cannot
-hide an orphaned Goal. A question being composed by the ending turn is the one
-intentional transient exception and is read from that turn's event sink until
-its save-before-broadcast commit makes it durable. Explicit `/goal` starts keep
-their provider-owned continuation contract. Auto-promoted Goals receive one
-baseline correction plus one additional correction per newly settled plan task,
-then become visibly resumable rather than looping without progress.
+hide an orphaned Goal. The writer's terminal promotion checks ownership after
+question persistence. An automatic continuation records its settled-task
+frontier; another requires that frontier to advance. Without progress, the
+terminal path saves an owner question instead of starting another turn.
 
 Workspace `AgentWorkClaim` rows are narrower: they serialize one shared action
 across otherwise independent chats. They do not replace a chat's Goal, a

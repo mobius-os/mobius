@@ -134,7 +134,6 @@ from app.github_contributions import (
   _safe_equivalence_source_path,
   _equivalence_source_repo,
   _assert_pending_equivalence_preflight,
-  _assert_publication_source,
   _assert_pending_equivalence_before_publication,
   _record_prepublication_source_continuity,
   _reviewed_source_identity,
@@ -545,7 +544,7 @@ def _assert_personal_publication_source(
   # App-writable last_submit_* fields and an unrelated pre-existing public
   # branch cannot turn that fresh approval into source provenance. Only a
   # signed post-mutation phase may enter authoritative public recovery.
-  return _assert_publication_source(record)
+  return _assert_pending_equivalence_preflight(record)
 
 
 def _personal_resume_allowed(
@@ -1144,7 +1143,7 @@ def _inspect_prepared_review(
     # Review is a local, read-only projection. Authoritative public recovery
     # belongs only to an owner-approved Send/Update path; never hold source
     # locks across GitHub reads just to render a status card.
-    _assert_publication_source(record)
+    _assert_pending_equivalence_preflight(record)
 
     stack = plan.get("stack") if isinstance(plan.get("stack"), dict) else None
     login = str(github_state.get("login") or "")

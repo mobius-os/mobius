@@ -208,6 +208,18 @@ _CLAUDE_NATIVE_SCHEDULING_TOOLS = (
   "ScheduleWakeup",
   "CronCreate",
 )
+# Möbius-owned surfaces replace these built-ins entirely: Möbius owns
+# scheduling, notifications, and outbound reporting, and zero recorded native
+# uses exist. Disabling them trims the fixed per-turn tool-schema tax.
+_CLAUDE_UNUSED_BUILTINS = (
+  "CronDelete",
+  "CronList",
+  "EnterWorktree",
+  "ExitWorktree",
+  "DesignSync",
+  "ReportFindings",
+  "PushNotification",
+)
 
 
 def _system_prompt_with_register(skill_text: str) -> str:
@@ -1312,7 +1324,9 @@ async def run_claude_sdk_turn(
       "include_partial_messages": True,
       "max_buffer_size": _CLAUDE_SDK_MAX_BUFFER_SIZE,
       "can_use_tool": can_use_tool,
-      "disallowed_tools": list(_CLAUDE_NATIVE_SCHEDULING_TOOLS),
+      "disallowed_tools": [
+        *_CLAUDE_NATIVE_SCHEDULING_TOOLS, *_CLAUDE_UNUSED_BUILTINS,
+      ],
       "cli_path": _claude_cli_path(),
       "stderr": _capture_stderr,
       "hooks": {
