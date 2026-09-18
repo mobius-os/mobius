@@ -579,18 +579,13 @@ def test_saved_card_option_schema_exposes_explicit_quiet_outcome():
 
 
 def test_saved_card_tools_instruct_the_agent_to_end_at_the_card():
-  """The first line of defense is the provider-visible tool contract."""
+  """Every exposed saved-card tool carries the same complete instruction."""
   control = _control_module()
+  instruction = control.SAVED_CARD_TERMINAL_INSTRUCTION.lower()
   for name in (
     control.REQUEST_APPROVAL_TOOL,
     control.REQUEST_QUESTION_TOOL,
     control.REQUEST_RESTART_TOOL,
   ):
     description = control._TOOL_DEFINITIONS[name]["description"].lower()
-    assert "final" in description
-    assert "before" in description
-    assert (
-      "no further text or tools" in description
-      or "without further text or tools" in description
-      or "without more text or tools" in description
-    )
+    assert description.count(instruction) == 1

@@ -325,8 +325,13 @@ def test_saved_secure_input_is_a_terminal_agent_action():
   ).read_text(encoding="utf-8")
   normalized = " ".join(guidance.split())
 
-  assert "The card is the final action of the turn" in normalized
-  assert "end the turn with **no further text or tools**" in normalized
+  assert (
+    "The card is the final action of the turn, exactly like Möbius's saved "
+    "Q&A and approval cards."
+  ) in normalized
+  assert (
+    "On a confirmed receipt, end the turn with **no further text or tools**."
+  ) in normalized
 
 
 def test_owned_app_skill_summaries_expose_complete_initial_read_sets():

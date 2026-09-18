@@ -588,9 +588,9 @@ class ActiveClaudeClient:
     returns a receipt to the model (unlike native `AskUserQuestion`, which parks
     in `can_use_tool`). The event sink calls this only when the SDK emits the
     matching completed tool result, then this fires the same soft interrupt
-    `steer` uses to stop further generation at its source. Events Claude already
-    emitted while the interrupt takes effect still drain through the sink and
-    remain visible and durable.
+    `steer` uses to stop further generation at its source. Events already emitted
+    while the interrupt takes effect still drain through the sink and remain
+    visible and durable.
 
     Claim ownership synchronously at the receipt boundary, before returning
     the interrupt awaitable. This ordering is load-bearing: the SDK terminal
