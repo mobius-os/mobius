@@ -11,6 +11,6 @@ requiredMountPath = "/data"
 drainingSeconds = 15
 # A planned restart drains and the container exits 0; ON_FAILURE would
 # never revive a clean stop, leaving the instance 502ing until manual
-# recovery. ALWAYS restarts every stop; max retries caps crash loops.
+# recovery. ALWAYS restarts every stop; the retained 3-retry cap bounds crash loops.
 restartPolicyType = "ALWAYS"
-restartPolicyMaxRetries = 10
+restartPolicyMaxRetries = 3
