@@ -3144,6 +3144,21 @@ def test_chatgpt_model_rejection_explains_connection_and_recovery():
   )
 
 
+def test_upstream_stream_stall_explains_the_stop_and_keeps_the_detail():
+  error = (
+    "stream disconnected before completion: Upstream error from "
+    "InferenceNet: Inference stream timed out: No next token received for "
+    "60000ms"
+  )
+
+  message = codex_sdk_runner._codex_user_error(error)
+
+  assert message.startswith("The model stream stalled mid-answer")
+  assert "send a message to continue" in message
+  # The provider's exact words stay in the block so the failure is reportable.
+  assert "No next token received for 60000ms" in message
+
+
 def test_unknown_codex_error_stays_verbatim():
   error = "upstream returned 503"
   assert codex_sdk_runner._codex_user_error(error) == error
