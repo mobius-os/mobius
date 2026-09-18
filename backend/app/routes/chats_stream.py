@@ -1048,7 +1048,7 @@ async def send_message(
         # carries the answers, because the persisted answered block is
         # suppressed while a same-id streaming card is still in flight. The
         # event rides the broadcast's event_log, so catch-up replay sees it
-        # too (this closes the navigate-away-and-back blank-card bug).
+        # too.
         from app.chat_event_sink import get_active_sink
 
         event = {

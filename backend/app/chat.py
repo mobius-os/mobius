@@ -713,8 +713,7 @@ def reconcile_startup_chats(
       to "done" (server-side truth, not just the client-side mask in
       ChatView), and a short interrupted-turn error block is appended;
     - PRESERVE any stranded ``pending_messages`` so the user's queue
-      survives a restart (the owner-reported "restarting discards queued
-      messages" bug). The interrupted turn's OWN user message is already
+      survives a restart. The interrupted turn's OWN user message is already
       in ``messages`` (it was committed at turn start); ``pending_messages``
       holds only the SUBSEQUENT sends the user queued while that turn ran,
       so preserving them does NOT re-run the interrupted turn — it just
@@ -4009,7 +4008,7 @@ async def _complete_turn(
     # non-coalescing PersistError: the terminal snapshot's ack timed out,
     # but the writer may still accept this write (or land it once it
     # recovers), leaving a durable error block instead of a transcript
-    # that silently renders as a cleanly completed turn (owner-reported).
+    # that silently renders as a cleanly completed turn.
     # The run marker stays set either way; reconciliation remains the
     # authority for repairing the turn itself.
     # Re-check after the failed await: a fresh turn may now own the chat.

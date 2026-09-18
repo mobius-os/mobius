@@ -34,7 +34,7 @@ def get_theme(
   # AUTHORITATIVE persisted mode, not inferMode(bg). Without it, a stale
   # while-revalidate /api/theme body repaints a mode inferred from the (stale)
   # bg, which diverges from — and sticks against — the toggle knob's separate
-  # theme-mode source (owner-reported "dark toggle on, light UI" bug).
+  # theme-mode source.
   return theme_data(settings.data_dir)
 
 
