@@ -61,6 +61,14 @@ function PaneChatView({
     [appArtifactsQuery.data],
   )
 
+  // A settled runtime verdict retires this view's Shell streaming marker even
+  // when the run's terminal event was missed (for example a mid-stream provider
+  // disconnect while the pane was hidden). markStreamingEnd is idempotent, so
+  // this composes with the ordinary stream-end path.
+  const handleRuntimeSettledIdle = useCallback(() => {
+    markStreamingEnd(chatId)
+  }, [chatId, markStreamingEnd])
+
   const handleStreamEnd = useCallback(({ continues } = {}) => {
     if (!continues) markStreamingEnd(chatId)
     // Every idle chat probes its broadcast once on activation and receives a
@@ -145,6 +153,7 @@ function PaneChatView({
         paneContentHeight={paneContentHeight}
         externalRunSignal={externalRunSignal}
         onStreamEnd={handleStreamEnd}
+        onRuntimeSettledIdle={handleRuntimeSettledIdle}
         onFirstMessage={handleFirstMessage}
         onSystemEvent={onSystemEvent}
         onChatMissing={handleChatMissing}

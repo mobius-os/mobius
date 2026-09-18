@@ -198,6 +198,7 @@ import {
   shouldAttachRunningStream,
   shouldAdoptRuntimeAssistantOwner,
   shouldRecoverSettledRuntime,
+  shouldRetireSettledRunMarker,
   shouldRetryStopAfterConfirm,
   stopConfirmedIdle,
   stopRequestSucceeded,
@@ -353,6 +354,7 @@ export default function ChatView({
   onNewChatSubmit,
   onNewChatRetry,
   onStreamEnd,
+  onRuntimeSettledIdle = null,
   onFirstMessage,
   onSystemEvent,
   onChatMissing,
@@ -1590,6 +1592,11 @@ export default function ChatView({
         // Stream is dead and the server is idle+empty: clear the stale Stop.
         setSending(false)
         sendingRef.current = false
+        // Same retirement rule as activation: a settled runtime with no
+        // queue, owner input, or local turn owner retires the drawer marker.
+        if (shouldRetireSettledRunMarker({
+          pendingQuestionId: runtime.pendingQuestionId,
+        })) onRuntimeSettledIdle?.()
       }
       // Apply local UI state directly, then publish the complete runtime
       // snapshot once. The side-effecting field setters are for independent
@@ -2501,6 +2508,13 @@ export default function ChatView({
       } else {
         setSending(false)
         sendingRef.current = false
+        // A settled activation retires the Shell streaming marker this view
+        // (or a previous mount) published for a run whose finish event was
+        // missed. The list must never stay purple behind settled runtime.
+        if (shouldRetireSettledRunMarker({
+          pendingCount: (runtime.pending_messages || []).length,
+          pendingQuestionId: runtime.pending_question_id,
+        })) onRuntimeSettledIdle?.()
       }
     }
 

@@ -93,6 +93,22 @@ def _sweep():
     db.close()
 
 
+def test_sweep_publishes_shell_run_finished_signal():
+  """The sweep closes runs without a turn-body finally block, so IT owns the
+  shell-level chat_run_finished signal — otherwise the drawer streaming marker
+  never retires even though the run is durably settled."""
+  published = []
+  original = chat_mod._publish_chat_run_finished
+  chat_mod._publish_chat_run_finished = lambda chat_id: published.append(chat_id)
+  try:
+    _seed("wedged-signal", age_secs=200)
+    swept = _sweep()
+    assert "wedged-signal" in swept
+    assert "wedged-signal" in published
+  finally:
+    chat_mod._publish_chat_run_finished = original
+
+
 def test_sweep_recovers_orphaned_turn_and_preserves_queue():
   _seed(
     "wedged-1",

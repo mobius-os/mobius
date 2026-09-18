@@ -19,6 +19,7 @@ import {
   shouldAdoptRuntimeAssistantOwner,
   shouldRetireRestoredQuestionSnapshot,
   shouldRecoverSettledRuntime,
+  shouldRetireSettledRunMarker,
   shouldRetryStopAfterConfirm,
   startedMessagesFromResponse,
   stopConfirmedIdle,
@@ -253,6 +254,36 @@ test('assistant ownership ignores only idle responses captured behind a local tr
     localAuthoritative: true,
     authoritativeRefresh: true,
   }), true, 'a canonical transcript refresh may settle a missed terminal event')
+})
+
+test('a settled runtime retires the drawer streaming marker only when nothing owns the turn', () => {
+  // The reported failure: a run finished while its pane was elsewhere, the
+  // finish event was missed, and the drawer stayed purple even after the
+  // owner reopened the finished chat.
+  assert.equal(shouldRetireSettledRunMarker({ runtimeRunning: false }), true)
+
+  assert.equal(shouldRetireSettledRunMarker({ runtimeRunning: true }), false,
+    'a live turn still owns its streaming marker')
+  assert.equal(shouldRetireSettledRunMarker({
+    runtimeRunning: false,
+    pendingCount: 2,
+  }), false, 'queued work still owns the handoff')
+  assert.equal(shouldRetireSettledRunMarker({
+    runtimeRunning: false,
+    pendingQuestionId: 'q-1',
+  }), false, 'an owner-input handoff is not a settled turn')
+  assert.equal(shouldRetireSettledRunMarker({
+    runtimeRunning: false,
+    streamStillActive: true,
+  }), false, 'a live stream owns the turn locally')
+  assert.equal(shouldRetireSettledRunMarker({
+    runtimeRunning: false,
+    stopInFlight: true,
+  }), false, 'a stop in flight owns the transition')
+  assert.equal(shouldRetireSettledRunMarker({
+    runtimeRunning: false,
+    localStartInFlight: true,
+  }), false, 'the optimistic send window is not mistaken for settled')
 })
 
 test('a known server run settling recovers a live stream that missed its terminal event', () => {
