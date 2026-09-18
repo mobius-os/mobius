@@ -23,6 +23,7 @@ import { isResourcePause } from './waitingPresentation.js'
 // reads as "Waiting" and never offers the auto-continue toggle.
 export function errorCardViewModel(block) {
   const resourceWait = isResourcePause(block)
+  const modelCapacity = block.pause?.kind === 'model_capacity'
   const parked = !!block.pause?.resets_at && !resourceWait
   // Old saved handoff notes lacked the pause descriptor. Recognize only
   // that exact producer's prefix; unrelated resumable errors remain errors.
@@ -34,11 +35,12 @@ export function errorCardViewModel(block) {
   const benign = !!block.pause || goalHandoff
   return {
     parked,
+    modelCapacity,
     resourceWait,
     goalHandoff,
     benign,
     className: `chat__text--error${benign ? ' chat__text--parked' : ''}`,
-    label: goalHandoff ? 'Goal paused' : parked ? 'Rate limit' : (resourceWait ? 'Waiting' : (block.pause ? 'Paused' : 'Error')),
+    label: goalHandoff ? 'Goal paused' : modelCapacity ? 'Model busy' : parked ? 'Rate limit' : (resourceWait ? 'Waiting' : (block.pause ? 'Paused' : 'Error')),
     resetLabel: parked ? formatResetTime(block.pause.resets_at) : null,
   }
 }
@@ -56,14 +58,18 @@ export default function ErrorCard({
   children,
 }) {
   const vm = errorCardViewModel(block)
-  const recoveryTitle = vm.parked
+  const recoveryTitle = vm.modelCapacity
+    ? (vm.resetLabel ? `Trying again ${vm.resetLabel}` : 'Trying again shortly')
+    : vm.parked
     ? autoResume
       ? (vm.resetLabel ? `Queued to continue ${vm.resetLabel}` : 'Queued to continue')
       : resetElapsed
         ? 'Usage is available again'
         : (vm.resetLabel ? `Usage resets ${vm.resetLabel}` : 'Usage limit reached')
     : null
-  const recoveryCopy = vm.parked
+  const recoveryCopy = vm.modelCapacity
+    ? 'Your work is safe. The selected model is temporarily busy, so Möbius will retry after a short pause. You can choose another model if you need to continue sooner.'
+    : vm.parked
     ? autoResume
       ? `Your work is safe. ${recoveryCredit?.label ? `${recoveryCredit.label}. ` : ''}Möbius will continue automatically at the reset.`
       : resetElapsed

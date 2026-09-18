@@ -130,6 +130,26 @@ test('the rendered limit card explains automatic and early recovery states', () 
   assert.match(elapsed, /Continue when you’re ready/)
 })
 
+test('a busy selected-model card explains its short automatic retry', (t) => {
+  const previousWindow = globalThis.window
+  globalThis.window = { location: { href: 'https://mobius.test/' } }
+  t.after(() => {
+    if (previousWindow === undefined) delete globalThis.window
+    else globalThis.window = previousWindow
+  })
+  const html = renderToStaticMarkup(createElement(ErrorCard, {
+    block: {
+      type: 'error',
+      message: 'Selected model is at capacity. Please try a different model.',
+      pause: { kind: 'model_capacity', resets_at: '2099-09-14T12:00:00Z' },
+    },
+  }))
+  assert.match(html, /Trying again/)
+  assert.match(html, /temporarily busy/)
+  assert.match(html, /choose another model/)
+  assert.doesNotMatch(html, /Paid extra usage|Turn on auto-continue/)
+})
+
 test('the one block renderer owns ErrorCard for both active sources', () => {
   // The live/catch-up surface once hardcoded a red "Error" card, so a benign
   // pause flashed red until promotion. StreamingMessage is now only the stable
@@ -197,7 +217,7 @@ test('the parked card has styling distinct from a plain error', () => {
 })
 
 test('the rate-limit card keeps automatic recovery and an explicit early retry', () => {
-  assert.match(msgContent, /recoveryOwner && parked && autoResumeAvailable && onAutoResumeChange/,
+  assert.match(msgContent, /recoveryOwner && parked && !modelCapacity && autoResumeAvailable && onAutoResumeChange/,
     'the action must require the tail resumable rate-limit state')
   assert.match(msgContent, /Auto-continue this chat/,
     'a future reset names the persistent chat policy')

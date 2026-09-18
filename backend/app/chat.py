@@ -1857,7 +1857,7 @@ def _auto_resume_recovery(
   park_reasons = (
     ("restart",) if reason == "restart"
     else ("usage_limit", "rate_limit") if reason == "usage_limit"
-    else (reason,) if reason in RESOURCE_PARK_REASONS
+    else (reason,) if reason in AUTO_RETRY_PARK_REASONS
     else ()
   )
   if not park_reasons:
@@ -1895,7 +1895,7 @@ def _auto_resume_recovery(
   if payload is None:
     return None
 
-  if reason == "restart" or reason in RESOURCE_PARK_REASONS:
+  if reason == "restart" or reason in AUTO_RETRY_PARK_REASONS:
     consumed = source.get("_continuation_consumed_cids")
     expected_app_id = (
       None if isinstance(consumed, list) and consumed
@@ -1903,9 +1903,8 @@ def _auto_resume_recovery(
     )
     if physical.initiated_by_app_id != expected_app_id:
       return None
-    # Resource admission owns its own retry policy: once a storage/memory
-    # pause is due, it always continues. It must not inherit the provider-
-    # quota opt-in merely because both use the same deterministic successor.
+    # Platform-owned retries (resources and a busy selected model) always
+    # continue once due. They must not inherit the provider-quota opt-in.
     if reason == "restart" and not chat.auto_resume_on_restart:
       return None
     return park, payload
@@ -2054,12 +2053,12 @@ async def _auto_resume_chat(
             restart_park = (
               park is not None and park.park_reason == "restart"
             )
-            resource_park = (
+            auto_retry_park = (
               park is not None
-              and park.park_reason in RESOURCE_PARK_REASONS
+              and park.park_reason in AUTO_RETRY_PARK_REASONS
             )
             delegation_resume_app_id = None
-            if park is not None and not restart_park and not resource_park:
+            if park is not None and not restart_park and not auto_retry_park:
               from app.delegations import limit_resume_app_id
               delegation_resume_app_id = limit_resume_app_id(
                 check_db,
@@ -2097,7 +2096,7 @@ async def _auto_resume_chat(
               or (
                 park.initiated_by_app_id is not None
                 and not restart_park
-                and not resource_park
+                and not auto_retry_park
                 and delegation_resume_app_id is None
               )
               or latest_id != park.id
@@ -2112,14 +2111,14 @@ async def _auto_resume_chat(
             resume_reason = (
               "restart" if restart_park
               else park.park_reason
-              if park.park_reason in RESOURCE_PARK_REASONS
+              if park.park_reason in AUTO_RETRY_PARK_REASONS
               else "usage_limit"
             )
             resume_app_id = (
               # Recovery keeps the interrupted turn's authority. Queued
               # follow-ups acquire their own attribution only after it finishes.
               park.initiated_by_app_id
-              if restart_park or resource_park
+              if restart_park or auto_retry_park
               else delegation_resume_app_id
             )
           if not mark_starting(chat_id):
@@ -2341,7 +2340,7 @@ async def sweep_reset_parks(
   notification_requests: list[tuple[str, bool]] = []
 
   def queue_due_notification(chat_id: str, run: models.ChatRun) -> None:
-    if run.park_reason in RESOURCE_PARK_REASONS:
+    if run.park_reason in AUTO_RETRY_PARK_REASONS:
       return
     notification_requests.append((chat_id, run.park_reason == "restart"))
 
@@ -2354,9 +2353,9 @@ async def sweep_reset_parks(
     if chat is None or chat.deleted_at is not None:
       return "chat unavailable"
     restart_park = run.park_reason == "restart"
-    resource_park = run.park_reason in RESOURCE_PARK_REASONS
+    auto_retry_park = run.park_reason in AUTO_RETRY_PARK_REASONS
     delegation_resume_app_id = None
-    if not restart_park and not resource_park:
+    if not restart_park and not auto_retry_park:
       from app.delegations import limit_resume_app_id
       delegation_resume_app_id = limit_resume_app_id(
         db,
@@ -2369,7 +2368,7 @@ async def sweep_reset_parks(
     if (
       run.initiated_by_app_id is not None
       and not restart_park
-      and not resource_park
+      and not auto_retry_park
       and delegation_resume_app_id is None
     ):
       return "app-attributed work"
@@ -3431,6 +3430,16 @@ _LIMIT_ERROR_MARKERS = (
   "429",
 )
 
+# A model-capacity response is not an account quota: it means the selected
+# model is temporarily saturated. Keep this deliberately narrow so an
+# unrelated "capacity" error (for example storage capacity) is never retried
+# as provider work.
+_MODEL_CAPACITY_ERROR_MARKERS = (
+  "selected model is at capacity",
+  "selected model at capacity",
+  "model is at capacity",
+)
+
 
 def _is_limit_error_text(text: str | None) -> bool:
   """Whether an error string names a provider rate/usage-limit exhaustion.
@@ -3454,6 +3463,14 @@ def _is_limit_error_text(text: str | None) -> bool:
   if any(marker in low for marker in _LIMIT_ERROR_MARKERS):
     return True
   return "limit" in low and "resets" in low
+
+
+def _is_model_capacity_error_text(text: str | None) -> bool:
+  """Whether a provider says the specifically selected model is busy."""
+  if not text:
+    return False
+  low = text.lower()
+  return any(marker in low for marker in _MODEL_CAPACITY_ERROR_MARKERS)
 
 
 def _is_limit_terminal(runner_result: dict) -> bool:
@@ -3584,6 +3601,11 @@ def _parse_reset_text(text: str, now: datetime) -> datetime | None:
 # interrupted the turn, not a provider quota, so the paid-retry opt-in for
 # limits does not apply.
 RESOURCE_PARK_REASONS = frozenset({"memory", "storage"})
+# These waits are owned by Möbius rather than the paid-limit preference. They
+# retain the interrupted request and retry with a pause; no extra usage is
+# requested or consumed merely because a model was momentarily busy.
+AUTO_RETRY_PARK_REASONS = RESOURCE_PARK_REASONS | frozenset({"model_capacity"})
+MODEL_CAPACITY_RETRY_DELAY = timedelta(minutes=1)
 
 
 def _park_continues_automatically(chat, park) -> bool:
@@ -3596,7 +3618,7 @@ def _park_continues_automatically(chat, park) -> bool:
   reason = park.park_reason if park is not None else None
   if reason == "restart":
     return bool(chat.auto_resume_on_restart)
-  if reason in RESOURCE_PARK_REASONS:
+  if reason in AUTO_RETRY_PARK_REASONS:
     return True
   return bool(chat.auto_resume_on_limit)
 
@@ -3738,7 +3760,21 @@ def _park_exit(
     limit = _is_limit_terminal(runner_result)
   else:
     limit = _is_limit_error_text(error_text)
+  model_capacity = _is_model_capacity_error_text(error_text)
   failed = bool(error_text) or runner_result is None
+  if model_capacity:
+    parked_until = datetime.now(UTC).replace(tzinfo=None) + MODEL_CAPACITY_RETRY_DELAY
+    sink.publish(_park_event(
+      "The selected model is busy right now. Your work is safe; Möbius will try it again shortly.",
+      parked_until,
+      "model_capacity",
+      provider_id=provider_id,
+    ))
+    return {
+      "parked": True,
+      "parked_until": parked_until,
+      "park_reason": "model_capacity",
+    }
   if not limit and failed and claim_oom_kill():
     parked_until = datetime.now(UTC).replace(tzinfo=None) + _PARK_MIN_DELAY
     park_reason = "memory"

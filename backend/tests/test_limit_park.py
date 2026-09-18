@@ -275,6 +275,26 @@ def test_park_exit_non_limit_error_stays_plain():
   assert sink.events[-1] == {"type": "error", "message": "syntax error"}
 
 
+def test_model_capacity_parks_for_a_short_automatic_retry():
+  sink = _Sink()
+  kwargs = chat_mod._park_exit(
+    sink,
+    {"error": "Selected model is at capacity. Please try a different model."},
+    "Selected model is at capacity. Please try a different model.",
+  )
+  assert kwargs["parked"] is True
+  assert kwargs["park_reason"] == "model_capacity"
+  assert kwargs["parked_until"] > datetime.now(UTC).replace(tzinfo=None)
+  assert sink.events[-1]["pause"]["kind"] == "model_capacity"
+
+
+def test_generic_capacity_error_is_not_misclassified_as_a_busy_model():
+  sink = _Sink()
+  kwargs = chat_mod._park_exit(sink, {"error": "capacity"}, "capacity")
+  assert kwargs == {"parked": False}
+  assert sink.events[-1] == {"type": "error", "message": "capacity"}
+
+
 def test_park_exit_resume_incomplete_publishes_calm_resumable_note():
   """A steer-interrupted turn (error defused to None, resume_incomplete set)
   publishes a calm, resumable "Paused" note — never a red error block."""
