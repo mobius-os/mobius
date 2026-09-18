@@ -2111,6 +2111,51 @@ def test_serve_connection_retries_after_auth_rejection(monkeypatch):
   assert posted and posted[-1]["stdout"] == "Connect daemon removed."
 
 
+def test_serve_connection_stops_before_opening_a_removed_connection(monkeypatch):
+  stop_event = connect_runner.threading.Event()
+  stop_event.set()
+  monkeypatch.setattr(
+    connect_runner,
+    "_open_url",
+    lambda *args, **kwargs: pytest.fail("removed connection opened a stream"),
+  )
+
+  connect_runner._serve_connection({
+    "url": "https://removed.test", "host_id": "h_removed", "token": "token",
+  }, stop_event=stop_event)
+
+
+def test_serve_connection_stops_from_inside_a_live_stream(monkeypatch):
+  stop_event = connect_runner.threading.Event()
+  opened = []
+  sleeps = []
+
+  class HeartbeatStream:
+    def __enter__(self):
+      return self
+
+    def __exit__(self, *exc):
+      return False
+
+    def __iter__(self):
+      stop_event.set()
+      yield b": heartbeat\n\n"
+
+  def fake_open(request, **kwargs):
+    opened.append(request.full_url)
+    return HeartbeatStream()
+
+  monkeypatch.setattr(connect_runner, "_open_url", fake_open)
+  monkeypatch.setattr(connect_runner.time, "sleep", sleeps.append)
+
+  connect_runner._serve_connection({
+    "url": "https://live.test", "host_id": "h_live", "token": "token",
+  }, stop_event=stop_event)
+
+  assert len(opened) == 1
+  assert sleeps == [1]
+
+
 def test_serve_all_respawns_and_stops_removed_connections(monkeypatch):
   """The supervisor must respawn a connection whose thread exits and signal a
   connection removed from config to stop, without respawning it afterwards."""
