@@ -154,8 +154,9 @@ async def get_secret(
   db: Session = Depends(get_db),
   principal: Principal = Depends(get_principal),
 ):
-  """Returns one decrypted secret to the owner or an owner-scoped agent."""
-  if principal.app_id is not None:
+  """Returns one decrypted secret to the owner, an owner-scoped agent, or
+  the app's own server-side service (never the app's browser frame)."""
+  if principal.app_id is not None and not principal.app_is_service:
     raise HTTPException(
       status_code=403,
       detail="Apps may check or replace secrets but cannot read them back.",

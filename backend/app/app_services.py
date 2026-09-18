@@ -98,6 +98,7 @@ def service_environment(app, owner) -> dict[str, str]:
       owner.token_epoch,
       app_nonce=app.token_nonce,
       expires_delta=timedelta(minutes=5),
+      is_service=True,
     ),
   })
   return env

@@ -87,6 +87,12 @@ class Principal:
   so a narrow media token cannot be mistaken for a full owner token. Routes
   that gate on cross-app access (storage, app-attributed chats) read `app_id`
   to decide whether the caller is the app itself, a different app, or the owner.
+
+  `app_is_service` is set only for a token minted by app_services for the
+  app's own server-side service subprocess (the `service` JWT claim) — never
+  for the app's ordinary browser-frame bearer. It lets a route trust that the
+  caller is the app's reviewed backend code, not its untrusted frame, without
+  granting it anything beyond `app_id`'s existing app-scoped authority.
   """
   owner: models.Owner
   app_id: int | None
@@ -99,6 +105,7 @@ class Principal:
   embed_role: str | None = None
   operations: frozenset[str] = frozenset()
   delegation_id: str | None = None
+  app_is_service: bool = False
 
 
 @dataclass(frozen=True)
@@ -713,6 +720,7 @@ def get_principal(
     chat_id=payload.get("agent_chat") or payload.get("delegation_chat"),
     run_id=payload.get("agent_run"),
     delegation_id=payload.get("delegation_id"),
+    app_is_service=app_id is not None and payload.get("service") is True,
   )
 
 

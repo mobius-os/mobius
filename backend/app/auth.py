@@ -140,6 +140,7 @@ def create_app_token(
   expires_delta: timedelta = timedelta(hours=8),
   delegation_id: str | None = None,
   delegation_chat: str | None = None,
+  is_service: bool = False,
 ) -> str:
   """Creates a short-lived JWT scoped to a specific mini-app.
 
@@ -153,10 +154,19 @@ def create_app_token(
   reused by a different app (the new app has a different nonce). Omitted
   only by callers without the row; the resolver then falls back to
   row-existence.
+
+  `is_service` marks a token minted only for the app's own server-side
+  service subprocess (see app_services.service_environment) — never the
+  browser frame. It is the one thing that lets deps.Principal distinguish
+  a request the app's reviewed backend code made from one the untrusted
+  frame made, which is what allows a service to read back its own secrets
+  (routes/secrets.get_secret) without opening that read to the frame.
   """
   claims = {"sub": owner_username, "scope": "app", "app_id": app_id}
   if app_nonce is not None:
     claims["app_nonce"] = app_nonce
+  if is_service:
+    claims["service"] = True
   if (delegation_id is None) != (delegation_chat is None):
     raise ValueError("delegation identity and chat must be supplied together")
   if delegation_id is not None:

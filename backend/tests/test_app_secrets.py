@@ -102,6 +102,29 @@ def test_app_can_store_and_check_but_not_read_its_own_secret(
   ).status_code == 404
 
 
+def test_app_service_token_can_read_its_own_secret(client, auth, db):
+  app = _create_app(db, "Service Backed")
+  owner = db.query(models.Owner).first()
+  assert client.put(
+    f"/api/apps/{app.id}/secrets/key",
+    headers=auth,
+    json={"value": "service-value"},
+  ).status_code == 204
+
+  service_token = create_app_token(
+    app.id, owner.username, owner.token_epoch, app.token_nonce,
+    is_service=True,
+  )
+  service_auth = {"Authorization": f"Bearer {service_token}"}
+  read = client.get(f"/api/apps/{app.id}/secrets/key", headers=service_auth)
+  assert read.status_code == 200
+  assert read.text == "service-value"
+
+  other = _create_app(db, "Not Mine")
+  cross = client.get(f"/api/apps/{other.id}/secrets/key", headers=service_auth)
+  assert cross.status_code == 403
+
+
 def test_delete_app_secret(client, auth, db):
   app = _create_app(db, "Disposable")
   path = f"/api/apps/{app.id}/secrets/key"
