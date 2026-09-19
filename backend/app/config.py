@@ -213,11 +213,12 @@ class Settings(BaseSettings):
     # boots looking healthy while those features are quietly inert.
     if not self.mobius_sso_enabled and not self.mobius_account_client_origin:
       log.warning(
-        "Account & Social features are DISABLED: FRONTEND_ORIGIN=%r is not an "
-        "HTTPS or loopback origin, so mobius.you sign-in cannot be linked and "
-        "Social cannot register. Serve Möbius over HTTPS and set BOTH "
-        "FRONTEND_ORIGIN and DOMAIN to that public HTTPS host (e.g. via a "
-        "reverse proxy with TLS, or a Cloudflare Tunnel).",
+        "Account & Social features are DISABLED: could not derive a usable "
+        "HTTPS or loopback account origin from FRONTEND_ORIGIN=%r, so "
+        "mobius.you sign-in cannot be linked and Social cannot register. Serve "
+        "Möbius over HTTPS and set BOTH FRONTEND_ORIGIN and DOMAIN to that "
+        "public HTTPS host (e.g. via a reverse proxy with TLS, or a Cloudflare "
+        "Tunnel).",
         self.frontend_origin,
       )
     return self
