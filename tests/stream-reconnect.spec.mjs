@@ -654,15 +654,27 @@ test.describe('Stream reconnection', () => {
     await setVisibility(page, 'visible')
 
     await page.waitForFunction(() => window.__streamFetchCount === 2)
-    // useDelayedConnectionNotice.js debounces the note by a fixed
-    // CONNECTION_NOTICE_DELAY_MS (2500ms) before it renders, so a 3000ms
-    // assertion timeout leaves only ~500ms of slack over that constant --
-    // not enough headroom for real scheduling/render latency and
-    // deterministically too tight under a loaded local Docker/WSL2 run.
-    // Give it the same order-of-magnitude margin other assertions in this
-    // file use for a UI-settle window.
+    // KNOWN FAILURE (root-caused, not fixed here -- see task notes): the
+    // note armed by connectToStream's visibility-driven reconnect
+    // (useStreamConnection.js's armReconnectingNote(), called from onVisible)
+    // is reliably wiped a moment later by recoveryReconnectRef.current()'s
+    // unconditional clearReconnectingNote() (useStreamConnection.js around
+    // the recoveryReconnectRef definition). That ref fires whenever
+    // connectivityStore's shared recovery generation bumps -- which it does
+    // on this SAME visibilitychange, because connectivityStore's own
+    // visibility listener sets ready=false on hide and then re-probes
+    // /api/ready on show, and a false->true readiness flip bumps
+    // recoveryGeneration independent of any real stream failure. The
+    // recovery path's own connectRef.current?.(true) call afterward does not
+    // re-arm the note (connectionStaleRef is already false by then), so the
+    // note never renders at all -- this is not a timing-margin issue
+    // (confirmed via temporary console instrumentation: armReconnectingNote
+    // then clearReconnectingNote fire back-to-back). Widening this timeout
+    // does not help and is deliberately NOT done here; fixing the
+    // interaction is a production-code change in useStreamConnection.js
+    // that deserves its own careful pass, not a guess under this task.
     await expect(page.locator('[data-chat-surface="painted"] .connection-status--reattach')).toBeVisible({
-      timeout: 6000,
+      timeout: 3000,
     })
 
     await page.evaluate(() => window.__releaseSlowReattach())
