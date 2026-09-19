@@ -117,6 +117,13 @@ done
 
 if [ -x "$VENV" ]; then
   PYTHON="$VENV"
+elif [ "${GITHUB_ACTIONS:-}" = "true" ] \
+    && python3 -c 'import pytest' >/dev/null 2>&1; then
+  # Hosted CI installs this checkout's locked dependencies before running
+  # pytest. Its primary checkout has no shared worktree venv or image mount,
+  # but it is still the authoritative runtime for entrypoint contract tests.
+  PYTHON="$(command -v python3)"
+  echo "wt-pytest: shared venv absent; using the hosted CI test runtime" >&2
 elif [ -r /app/requirements.lock ] \
     && python3 -c 'import pytest' >/dev/null 2>&1; then
   # The running image already carries the backend dependencies. The disposable
