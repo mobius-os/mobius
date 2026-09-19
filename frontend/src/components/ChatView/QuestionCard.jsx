@@ -8,6 +8,7 @@ import {
   writeQuestionDraft,
 } from './questionDraft.js'
 import { autoGrowTextarea, textareaUsesNativeSizing } from './composerTextareaSizing.js'
+import { overscrollHandoffDelta } from './overscrollHandoff.js'
 import { placeCaretAtTextEnd } from './composerFocusPolicy.js'
 import { isInlineEditorSubmit } from './composerShortcuts.js'
 import { isTouchPrimary } from '../../lib/pointerPrimary.js'
@@ -78,6 +79,57 @@ function CustomAnswerArea({
     })
     observer.observe(textarea)
     return () => observer.disconnect()
+  }, [])
+
+  // Once the answer overflows its cap it becomes a nested scroller. Chromium
+  // chains the leftover wheel/drag to the transcript at the field's edge, but
+  // iOS/WebKit never chains a nested scroller — the box would trap the gesture
+  // at its edge and freeze the conversation. Hand the residual to the chat
+  // scroller ourselves so scrolling continues past the box on every engine.
+  useEffect(() => {
+    const textarea = textareaRef.current
+    if (!textarea) return undefined
+    const outer = () => textarea.closest('.chat__scroll')
+    const handoff = (delta) => overscrollHandoffDelta({
+      delta,
+      scrollTop: textarea.scrollTop,
+      scrollHeight: textarea.scrollHeight,
+      clientHeight: textarea.clientHeight,
+    })
+    const onWheel = (event) => {
+      const carry = handoff(event.deltaY)
+      if (!carry) return
+      const scroller = outer()
+      if (!scroller) return
+      scroller.scrollTop += carry
+      event.preventDefault()
+    }
+    let lastTouchY = null
+    const onTouchStart = (event) => {
+      lastTouchY = event.touches?.[0]?.clientY ?? null
+    }
+    const onTouchMove = (event) => {
+      const y = event.touches?.[0]?.clientY
+      if (lastTouchY == null || !Number.isFinite(y)) return
+      // Finger moving up drags content down: a positive delta scrolls toward
+      // the bottom, matching the wheel sign the predicate expects.
+      const carry = handoff(lastTouchY - y)
+      lastTouchY = y
+      if (!carry) return
+      const scroller = outer()
+      if (!scroller) return
+      scroller.scrollTop += carry
+      event.preventDefault()
+    }
+    // Non-passive so the handoff can cancel the field's own edge rubber-band.
+    textarea.addEventListener('wheel', onWheel, { passive: false })
+    textarea.addEventListener('touchstart', onTouchStart, { passive: true })
+    textarea.addEventListener('touchmove', onTouchMove, { passive: false })
+    return () => {
+      textarea.removeEventListener('wheel', onWheel)
+      textarea.removeEventListener('touchstart', onTouchStart)
+      textarea.removeEventListener('touchmove', onTouchMove)
+    }
   }, [])
 
   return (
