@@ -333,7 +333,7 @@ const configured = (await fetch(`/api/apps/${appId}/secrets/provider-key`, {
 `DELETE` the same path to clear it. An app-token `GET` is deliberately forbidden: a later UI compromise must not recover a credential the user entered months earlier. An app that teaches the agent a workflow can ship a manifest-declared skill and a helper script. The helper runs inside the owner-scoped chat turn, fetches the value with `$AGENT_TOKEN`, calls the provider, saves output under `/data/chats/$CHAT_ID/media/`, and prints only the resulting media path—not the secret:
 
 ```bash
-KEY=$(mapi /api/apps/<app-id>/secrets/provider-key)
+KEY=$(mapi -f /api/apps/<app-id>/secrets/provider-key)
 ```
 
 Keep that variable inside the helper process. Never echo it, pass it on a command line, or persist it in browser storage, React Query, a file, or a log.
