@@ -1,6 +1,7 @@
 """Accepted app services own policy; the platform owns their hard boundary."""
 
 import asyncio
+import logging
 import os
 from pathlib import Path
 import signal
@@ -26,7 +27,7 @@ async def test_one_apps_backlog_does_not_take_other_apps_execution_slots(monkeyp
       return await super().acquire()
 
   busy = BusyApp()
-  monkeypatch.setattr(app_services, "_app_slots", {1: busy})
+  monkeypatch.setattr(app_services, "_app_slots", {(1, "private"): busy})
   monkeypatch.setattr(app_services, "_global_slots", asyncio.Semaphore(1))
   monkeypatch.setattr(app_services, "service_contract", lambda *a, **k: {})
   monkeypatch.setattr(app_services, "hold_runtime", lambda *_: SimpleNamespace(close=lambda: None))
@@ -46,6 +47,43 @@ async def test_one_apps_backlog_does_not_take_other_apps_execution_slots(monkeyp
   finally:
     first.cancel()
     await asyncio.gather(first, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_public_callback_does_not_queue_behind_private_request(monkeypatch):
+  class BusyPrivateLane(asyncio.Semaphore):
+    def __init__(self):
+      super().__init__(0)
+      self.waiting = asyncio.Event()
+
+    async def acquire(self):
+      self.waiting.set()
+      return await super().acquire()
+
+  busy = BusyPrivateLane()
+  monkeypatch.setattr(app_services, "_app_slots", {(1, "private"): busy})
+  monkeypatch.setattr(app_services, "_global_slots", asyncio.Semaphore(2))
+  monkeypatch.setattr(app_services, "service_contract", lambda *a, **k: {})
+  monkeypatch.setattr(app_services, "hold_runtime", lambda *_: SimpleNamespace(close=lambda: None))
+
+  def entered(app, _contract):
+    assert app.id == 1
+    raise HTTPException(418, "public callback admitted")
+
+  monkeypatch.setattr(app_services, "service_entry", entered)
+  private = asyncio.create_task(
+    app_services.invoke_service(SimpleNamespace(id=1), None, {"public": False}),
+  )
+  try:
+    await asyncio.wait_for(busy.waiting.wait(), timeout=1)
+    with pytest.raises(HTTPException, match="public callback admitted"):
+      await asyncio.wait_for(
+        app_services.invoke_service(SimpleNamespace(id=1), None, {"public": True}),
+        timeout=1,
+      )
+  finally:
+    private.cancel()
+    await asyncio.gather(private, return_exceptions=True)
 
 
 @pytest.mark.asyncio
@@ -335,6 +373,26 @@ def test_public_service_failure_does_not_expose_app_diagnostics(client, auth, db
   assert response.status_code == 502, response.text
   assert response.json()["detail"] == "App service failed."
   assert "private app detail" not in response.text
+
+
+def test_handled_service_failure_retains_bounded_diagnostics(
+  client, auth, db, caplog,
+):
+  app = _service_app(db, slug="diagnostic-service")
+  accepted = runtime_parent(app.id) / ("a" * 64)
+  (accepted / "service.py").write_text(
+    "import json,sys\n"
+    "print('private traceback detail', file=sys.stderr)\n"
+    "print(json.dumps({\"status\":500,\"body\":{\"detail\":\"safe\"}}))\n"
+  )
+
+  with caplog.at_level(logging.WARNING, logger="app.app_services"):
+    response = client.get(f"/api/apps/{app.id}/service/status", headers=auth)
+
+  assert response.status_code == 500
+  assert response.json() == {"detail": "safe"}
+  assert "private traceback detail" not in response.text
+  assert "private traceback detail" in caplog.text
 
 
 @pytest.mark.parametrize('route', ['numeric', 'named'])
