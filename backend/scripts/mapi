@@ -156,7 +156,9 @@ fi
 
 # -q must be curl's first argument to disable implicit ~/.curlrc loading. A
 # config file can add arbitrary URLs, which would bypass mapi's target check.
-curl_args=(-q -sS -H "Authorization: Bearer $AGENT_TOKEN")
+# --globoff keeps curl from expanding one validated /api target into additional
+# normalized requests after mapi has finished checking it.
+curl_args=(-q --globoff -sS -H "Authorization: Bearer $AGENT_TOKEN")
 if $has_body && ! $has_content_type; then
   curl_args+=(-H "Content-Type: application/json")
 fi
