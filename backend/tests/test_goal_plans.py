@@ -3,6 +3,7 @@
 from datetime import timedelta
 import importlib.util
 import hashlib
+import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -157,6 +158,73 @@ def test_terminal_goal_history_uses_run_identity_despite_timestamp_skew(
   summary = messages[1]["goal_summaries"][0]
   assert summary["id"] == "skew-goal"
   assert summary["status"] == "completed"
+
+
+@pytest.mark.parametrize(
+  ("case", "assistant_suffixes"),
+  [
+    ("multiple-steers", ["", ":assistant:1", ":assistant:2"]),
+    ("steered-before-output", [":assistant:1"]),
+  ],
+)
+def test_terminal_goal_history_uses_the_final_steered_assistant_segment(
+  client, owner_token, db, case, assistant_suffixes,
+):
+  auth = {"Authorization": f"Bearer {owner_token}"}
+  base = datetime(2026, 8, 23, 12, 15, tzinfo=UTC)
+  run_id = f"{case}-root"
+  messages = [{
+    "role": "user", "content": "start", "ts": 1_787_487_300_000,
+  }]
+  for index, suffix in enumerate(assistant_suffixes):
+    if index:
+      messages.append({
+        "role": "user", "content": f"steer {index}",
+        "ts": 1_787_487_310_000 + index,
+      })
+    messages.append({
+      "role": "assistant",
+      "id": f"{run_id}{suffix}",
+      "content": f"segment {index}",
+      # Keep every segment outside the timestamp fallback window so only the
+      # exact physical-run identity can place the card.
+      "ts": 1_787_487_400_000 + index,
+    })
+  created = client.post(
+    "/api/chats",
+    json={"title": case, "messages": messages},
+    headers=auth,
+  )
+  chat_id = created.json()["id"]
+  db.add(models.ChatRun(
+    id=run_id, root_run_id=run_id, chat_id=chat_id,
+    status="completed", provider="codex", goal_objective="Ship safely",
+    goal_id=f"{case}-goal", started_at=base,
+    ended_at=base + timedelta(seconds=5),
+    goal_plan_json={
+      "version": 1,
+      "updated_at": base.isoformat(),
+      "tasks": [{
+        "id": "ship", "title": "Ship safely", "status": "completed",
+        "depends_on": [],
+      }],
+    },
+    goal_plan_revision=1,
+  ))
+  db.commit()
+
+  response = client.get(f"/api/chats/{chat_id}?limit=20", headers=auth)
+  assert response.status_code == 200, response.text
+  returned = response.json()["messages"]
+  assistant_indexes = [
+    index for index, message in enumerate(returned)
+    if message.get("role") == "assistant"
+  ]
+  assert all(
+    "goal_summaries" not in returned[index]
+    for index in assistant_indexes[:-1]
+  )
+  assert returned[assistant_indexes[-1]]["goal_summaries"][0]["id"] == f"{case}-goal"
 
 
 def test_legacy_goal_history_fallback_ignores_other_goal_ids(
@@ -946,6 +1014,169 @@ def test_parallel_roots_release_dependent_task_only_after_all_complete(
   assert final["summary"]["completed"] == 2
   assert final["summary"]["can_complete"] is False
   assert final["summary"]["completion_blockers"] == ["c"]
+
+
+def test_identical_plan_write_is_a_cas_noop_and_stale_writer_conflicts(
+  client, owner_token, db,
+):
+  """Rewriting the same plan cannot mint a new Goal rollover allowance."""
+  auth, chat_id = _active_goal(client, owner_token, db)
+  tasks = [{"id": "audit", "title": "Run the audit", "status": "running"}]
+  created = client.put(
+    f"/api/chats/{chat_id}/goal-plan",
+    json={"expected_revision": 0, "tasks": tasks}, headers=auth,
+  )
+  assert created.status_code == 200, created.text
+  assert created.json()["plan"]["revision"] == 1
+
+  identical = client.put(
+    f"/api/chats/{chat_id}/goal-plan",
+    json={"expected_revision": 1, "tasks": tasks}, headers=auth,
+  )
+  assert identical.status_code == 200, identical.text
+  assert identical.json()["plan"]["revision"] == 1
+
+  stale_identical = client.put(
+    f"/api/chats/{chat_id}/goal-plan",
+    json={"expected_revision": 0, "tasks": tasks}, headers=auth,
+  )
+  assert stale_identical.status_code == 409, stale_identical.text
+
+
+@pytest.mark.parametrize(
+  "stored",
+  [
+    "{not valid json",
+    "null",
+    {"tasks": "bad"},
+    {"tasks": [{}]},
+    {"tasks": [{"id": "bad", "title": "Bad", "status": {}}]},
+  ],
+)
+def test_full_plan_replace_repairs_corrupt_json_under_the_revision_cas(
+  client, owner_token, db, stored,
+):
+  auth, chat_id = _active_goal(client, owner_token, db)
+  root = db.query(models.ChatRun).filter(
+    models.ChatRun.chat_id == chat_id,
+    models.ChatRun.id == "goal-root",
+  ).one()
+  root.goal_plan_json = stored
+  root.goal_plan_revision = 2
+  db.commit()
+
+  exposed = client.get(
+    f"/api/chats/{chat_id}/goal-plan", headers=auth,
+  )
+  assert exposed.status_code == 200, exposed.text
+  assert exposed.json() == {"plan": None, "repair_revision": 2}
+
+  repaired = client.put(
+    f"/api/chats/{chat_id}/goal-plan",
+    json={
+      "expected_revision": exposed.json()["repair_revision"],
+      "tasks": [{"id": "repair", "title": "Repair the plan"}],
+    },
+    headers=auth,
+  )
+  assert repaired.status_code == 200, repaired.text
+  assert repaired.json()["plan"]["revision"] == 3
+  assert repaired.json()["plan"]["tasks"][0]["id"] == "repair"
+
+  stale = client.put(
+    f"/api/chats/{chat_id}/goal-plan",
+    json={
+      "expected_revision": 2,
+      "tasks": [{"id": "overwrite", "title": "Overwrite the repair"}],
+    },
+    headers=auth,
+  )
+  assert stale.status_code == 409, stale.text
+  db.expire_all()
+  assert db.get(models.ChatRun, "goal-root").goal_plan_json["tasks"][0]["id"] == "repair"
+
+
+def test_full_plan_replace_normalizes_a_json_encoded_plan_document(
+  client, owner_token, db,
+):
+  auth, chat_id = _active_goal(client, owner_token, db)
+  tasks = [{"id": "repair", "title": "Repair the plan"}]
+  root = db.query(models.ChatRun).filter(
+    models.ChatRun.chat_id == chat_id,
+    models.ChatRun.id == "goal-root",
+  ).one()
+  root.goal_plan_json = json.dumps({"version": 1, "tasks": tasks})
+  root.goal_plan_revision = 2
+  db.commit()
+
+  exposed = client.get(
+    f"/api/chats/{chat_id}/goal-plan", headers=auth,
+  )
+  assert exposed.json() == {"plan": None, "repair_revision": 2}
+  repaired = client.put(
+    f"/api/chats/{chat_id}/goal-plan",
+    json={
+      "expected_revision": exposed.json()["repair_revision"],
+      "tasks": tasks,
+    },
+    headers=auth,
+  )
+
+  assert repaired.status_code == 200, repaired.text
+  assert repaired.json()["plan"]["revision"] == 3
+  db.expire_all()
+  assert isinstance(db.get(models.ChatRun, "goal-root").goal_plan_json, dict)
+
+
+def test_goal_plan_helper_uses_repair_revision_only_for_full_replacement(
+  monkeypatch, capsys,
+):
+  script = _goal_plan_script()
+  requests = []
+
+  def request(method, path, body=None):
+    requests.append((method, path, body))
+    if method == "GET":
+      return {"plan": None, "repair_revision": 7}
+    return {
+      "plan": {
+        "revision": 8,
+        "tasks": body["tasks"],
+        "summary": {"completed": 0, "total": 1},
+      },
+    }
+
+  monkeypatch.setattr(script, "_settings", lambda: ("", "", "chat"))
+  monkeypatch.setattr(script, "_request", request)
+  monkeypatch.setattr(
+    "sys.argv",
+    ["goal-plan", "set", "--tasks-json", '[{"id":"repair","title":"Repair"}]'],
+  )
+
+  assert script.main() == 0
+  assert requests[-1] == (
+    "PUT",
+    "/api/chats/chat/goal-plan",
+    {
+      "expected_revision": 7,
+      "tasks": [{"id": "repair", "title": "Repair"}],
+    },
+  )
+  assert "revision 8" in capsys.readouterr().out
+
+
+def test_goal_plan_helper_never_calls_a_corrupt_plan_complete(monkeypatch):
+  script = _goal_plan_script()
+  monkeypatch.setattr(script, "_settings", lambda: ("", "", "chat"))
+  monkeypatch.setattr(
+    script,
+    "_request",
+    lambda *_args, **_kwargs: {"plan": None, "repair_revision": 7},
+  )
+  monkeypatch.setattr("sys.argv", ["goal-plan", "check-complete"])
+
+  with pytest.raises(SystemExit, match="saved todo plan is unreadable"):
+    script.main()
 
 
 def test_repeated_task_needs_full_progress_and_stale_revision_cannot_overwrite(

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from copy import deepcopy
 from dataclasses import dataclass
 from datetime import UTC, datetime
 import json
@@ -60,6 +59,8 @@ def _goal_plan_tasks(
   if owner is None:
     return None
   raw = owner[0]
+  if raw is None:
+    return None
   try:
     plan = json.loads(raw) if isinstance(raw, str) else raw
   except (TypeError, json.JSONDecodeError):
@@ -70,7 +71,15 @@ def _goal_plan_tasks(
     )
     raise GoalPlanCorrupt(goal_id)
   tasks = (plan or {}).get("tasks") if isinstance(plan, dict) else None
-  return tasks if isinstance(tasks, list) and tasks else None
+  try:
+    return normalize_tasks(tasks)
+  except GoalPlanError as exc:
+    logger.warning(
+      "invalid goal_plan_json for chat=%s goal=%s; treating goal as "
+      "unfinished instead of silently dropping it: %s",
+      chat_id, goal_id, exc,
+    )
+    raise GoalPlanCorrupt(goal_id) from exc
 
 
 def _plan_has_unfinished_tasks(tasks: list[dict[str, Any]] | None) -> bool:
@@ -90,6 +99,21 @@ def goal_plan_is_unfinished(
   except GoalPlanCorrupt:
     return True
   return _plan_has_unfinished_tasks(tasks)
+
+
+def goal_plan_revision(db: Session, chat_id: str, goal_id: str) -> int:
+  """Return the exact durable plan revision for one stable Goal."""
+  value = (
+    db.query(models.ChatRun.goal_plan_revision)
+    .filter(
+      models.ChatRun.chat_id == chat_id,
+      models.ChatRun.goal_id == goal_id,
+      models.ChatRun.goal_plan_json.isnot(None),
+    )
+    .order_by(models.ChatRun.started_at.asc(), models.ChatRun.id.asc())
+    .scalar()
+  )
+  return int(value or 0)
 
 
 class GoalPlanError(ValueError):
@@ -142,7 +166,7 @@ def normalize_tasks(raw_tasks: Any) -> list[dict[str, Any]]:
       raise GoalPlanError(f"duplicate task id: {task_id}")
     ids.add(task_id)
     status = raw.get("status", "pending")
-    if status not in TASK_STATUSES:
+    if not isinstance(status, str) or status not in TASK_STATUSES:
       raise GoalPlanError(f"invalid status for {task_id}: {status}")
     depends_on = raw.get("depends_on", [])
     if not isinstance(depends_on, list) or not all(
@@ -469,9 +493,12 @@ def serialize_plan(
   db: Session, physical: models.ChatRun, root: models.ChatRun,
 ) -> dict[str, Any] | None:
   raw = root.goal_plan_json
-  if not isinstance(raw, dict) or not isinstance(raw.get("tasks"), list):
+  if not isinstance(raw, dict):
     return None
-  tasks = deepcopy(raw["tasks"])
+  try:
+    tasks = normalize_tasks(raw.get("tasks"))
+  except GoalPlanError:
+    return None
   by_id = {task["id"]: task for task in tasks}
   children_by_parent: dict[str, list[str]] = {}
   for task in tasks:
@@ -640,11 +667,11 @@ def goal_handoff_owner_kind(
 
 @dataclass(frozen=True)
 class GoalTerminalHandoff:
-  """An ownerless unfinished Goal and its bounded automatic next move."""
+  """An ownerless unfinished Goal and its plan-owned next move."""
 
   goal_id: str
   automatic_allowed: bool
-  settled_count: int
+  plan_revision: int
 
 
 def goal_terminal_handoff(
@@ -657,10 +684,11 @@ def goal_terminal_handoff(
   question, durable monitor/helper, or queued exact continuation may let it
   close without creating the next executor.
 
-  Each generated continuation records the settled-task frontier. Another is
-  allowed only after that frontier advances. Otherwise the terminal path must
-  save an owner question instead of starting an unbounded chain of clean,
-  no-progress turns.
+  A provider turn cannot authorize its own successor merely because the Goal
+  remains unfinished. Another turn is automatic only after the durable plan
+  advances beyond the exact revision captured at admission. Otherwise the
+  terminal path saves an owner question instead of starting an unbounded
+  chain of clean, no-progress turns.
   """
   if not ending_run_token:
     return None
@@ -689,37 +717,16 @@ def goal_terminal_handoff(
     ) is not None
   ):
     return None
-  messages_row = db.query(models.Chat.messages).filter(
-    models.Chat.id == chat_id,
-  ).first()
-  messages = messages_row[0] if messages_row is not None else []
-  settled = sum(
-    isinstance(task, dict)
-    and task.get("status") in SETTLED_TASK_STATUSES
-    for task in (tasks or [])
-  )
-  prior_frontier = None
-  prior_continuation = False
-  for message in reversed(messages or []):
-    if (
-      isinstance(message, dict)
-      and message.get("role") == "user"
-      and message.get("continuation_reason") == "goal_handoff"
-      and message.get("goal_id") == run.goal_id
-    ):
-      prior_continuation = True
-      prior_frontier = message.get("goal_settled_count")
-      break
+  current_revision = goal_plan_revision(db, chat_id, run.goal_id)
+  admitted_revision = run.goal_plan_revision_at_admission
   return GoalTerminalHandoff(
     goal_id=run.goal_id,
     automatic_allowed=(
       not plan_corrupt
-      and (
-        not prior_continuation
-        or isinstance(prior_frontier, int) and settled > prior_frontier
-      )
+      and isinstance(admitted_revision, int)
+      and current_revision > admitted_revision
     ),
-    settled_count=settled,
+    plan_revision=current_revision,
   )
 
 
@@ -900,11 +907,23 @@ def terminal_goal_summaries_by_message_index(
     # Prefer it over timestamps so clock skew can never attach a Goal card to
     # an unrelated answer. An older id-less row still gets the tightly scoped
     # timestamp fallback even if the Goal later acquired identified messages.
+    assistant_id = latest.id
+    segment_prefix = f"{assistant_id}:assistant:"
     candidate_index = next((
-      index for index, message in enumerate(messages)
-      if isinstance(message, dict)
-      and message.get("role") == "assistant"
-      and message.get("id") == latest.id
+      index for index in range(len(messages) - 1, -1, -1)
+      if isinstance(messages[index], dict)
+      and messages[index].get("role") == "assistant"
+      and (
+        messages[index].get("id") == assistant_id
+        or (
+          isinstance(messages[index].get("id"), str)
+          and messages[index]["id"].startswith(segment_prefix)
+          and re.fullmatch(
+            r"[1-9][0-9]*",
+            messages[index]["id"][len(segment_prefix):],
+          ) is not None
+        )
+      )
     ), None)
     if candidate_index is None:
       candidate_index = next((
@@ -943,6 +962,40 @@ def replace_plan(
   tasks: Any,
 ) -> dict[str, Any]:
   normalized = normalize_tasks(tasks)
+  try:
+    current_tasks = _goal_plan_tasks(
+      db, physical.chat_id, physical.goal_id or root.id,
+    )
+  except GoalPlanCorrupt:
+    # A full validated replacement is the repair path for unreadable stored
+    # JSON. Corruption still blocks automatic settlement above; it must not
+    # make the durable plan impossible to repair under the normal CAS.
+    current_tasks = None
+  if (
+    isinstance(root.goal_plan_json, dict)
+    and current_tasks
+    and normalize_tasks(current_tasks) == normalized
+  ):
+    # Identical saves must not manufacture progress and thereby authorize a
+    # fresh provider turn. The no-op UPDATE retains the optimistic CAS: a
+    # stale writer still conflicts even when its payload matches current data.
+    result = db.execute(
+      update(models.ChatRun)
+      .where(
+        models.ChatRun.id == root.id,
+        models.ChatRun.goal_plan_revision == expected_revision,
+      )
+      .values(goal_plan_revision=expected_revision)
+    )
+    if result.rowcount != 1:
+      db.rollback()
+      raise GoalPlanConflict("goal plan changed; fetch it and retry")
+    db.commit()
+    db.refresh(root)
+    plan = serialize_plan(db, physical, root)
+    if plan is None:  # pragma: no cover - current_tasks proves it exists
+      raise RuntimeError("goal plan disappeared during no-op update")
+    return plan
   document = {
     "version": 1,
     "updated_at": datetime.now(UTC).isoformat(),

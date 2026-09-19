@@ -52,7 +52,12 @@ def _request(method: str, path: str, body=None):
 
 def _current(chat_id: str):
   payload = _request("GET", f"/api/chats/{chat_id}/goal-plan")
-  return payload.get("plan") if isinstance(payload, dict) else None
+  if not isinstance(payload, dict):
+    return None, None
+  repair_revision = payload.get("repair_revision")
+  return payload.get("plan"), (
+    int(repair_revision) if isinstance(repair_revision, int) else None
+  )
 
 
 def _parse_task(value: str) -> dict:
@@ -144,11 +149,21 @@ def main() -> int:
   args = parser.parse_args()
 
   _, _, chat_id = _settings()
-  current = _current(chat_id)
+  current, repair_revision = _current(chat_id)
   if args.command == "show":
-    print(json.dumps(current, indent=2, ensure_ascii=False))
+    shown = current if repair_revision is None else {
+      "corrupt": True,
+      "repair_revision": repair_revision,
+      "repair": "Replace the complete plan with goal_plan.py set.",
+    }
+    print(json.dumps(shown, indent=2, ensure_ascii=False))
     return 0
   if args.command == "check-complete":
+    if repair_revision is not None:
+      raise SystemExit(
+        "Goal cannot complete; its saved todo plan is unreadable. "
+        "Repair it with goal_plan.py set."
+      )
     # One-step Goals deliberately have no plan and may complete normally.
     if current is None:
       print("Goal has no todo plan; completion is allowed.")
@@ -161,7 +176,15 @@ def main() -> int:
     print("Goal todo list is complete.")
     return 0
 
-  revision = int((current or {}).get("revision", 0))
+  if repair_revision is not None and args.command != "set":
+    parser.error(
+      "the saved Goal plan is unreadable; replace it with goal_plan.py set"
+    )
+  revision = (
+    repair_revision
+    if repair_revision is not None
+    else int((current or {}).get("revision", 0))
+  )
   if args.command == "set":
     if args.tasks_json and args.task:
       parser.error("use either --tasks-json or --task, not both")

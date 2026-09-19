@@ -117,6 +117,23 @@ def test_drop_platform_restart_executions_is_idempotent(tmp_path):
   assert "platform_restart_executions" not in inspect(eng).get_table_names()
 
 
+def test_goal_plan_admission_revision_upgrade_is_nullable_and_idempotent(tmp_path):
+  eng = create_engine(f"sqlite:///{tmp_path / 'goal-admission-revision.db'}")
+  models.Base.metadata.create_all(eng)
+  with eng.begin() as conn:
+    conn.execute(text(
+      "ALTER TABLE chat_runs DROP COLUMN goal_plan_revision_at_admission"
+    ))
+
+  migrations._add_goal_plan_admission_revision(eng)
+  migrations._add_goal_plan_admission_revision(eng)
+
+  columns = {
+    column["name"]: column for column in inspect(eng).get_columns("chat_runs")
+  }
+  assert columns["goal_plan_revision_at_admission"]["nullable"] is True
+
+
 def test_run_migrations_drops_removed_image_generation_columns(tmp_path):
   db_path = tmp_path / "legacy-image-generation.db"
   eng = create_engine(f"sqlite:///{db_path}")
@@ -1587,6 +1604,7 @@ def test_run_migrations_records_an_inspectable_append_only_history(tmp_path):
     "0058_stable_app_package_identities",
     "0059_app_service_aliases",
     "0060_drop_platform_restart_executions",
+    "0061_goal_plan_admission_revision",
   ]
   assert second == first
 

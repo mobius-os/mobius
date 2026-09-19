@@ -391,6 +391,13 @@ class ChatRun(Base):
   goal_plan_revision = Column(
     Integer, nullable=False, default=0, server_default="0"
   )
+  # Exact plan revision visible when this physical Goal turn was admitted.
+  # Settlement compares this checkpoint with the root's current revision;
+  # unfinished work may schedule another provider turn only after the durable
+  # plan advances. NULL is legacy/ordinary work and never proves progress.
+  goal_plan_revision_at_admission = Column(
+    Integer, nullable=True, default=None
+  )
   # App that initiated this turn under the app-attributed-chat contract
   # (077 §1). NULL = an ordinary owner-driven turn. Reserved now so the
   # attribution lands on the run row, not retrofitted later.

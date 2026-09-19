@@ -62,6 +62,7 @@
     "0057_detach_retired_gauntlet_history": "14b7d90f660c612167f19a9a4941b7bbcb9808f55061f6105778cc941737b7b7",
     "0058_stable_app_package_identities": "29762fead9678ba553dd90665f396fccbe11241ea17a0841fdf557eed651eeac",
     "0059_app_service_aliases": "f75656a90738ded77a97de17049d8a8f7ae475b5c3da77543db5101e92cc7b59",
-    "0060_drop_platform_restart_executions": "a3b5404ab7aae09c7a04cdb5b86f49720b7a8c0e58c9424acd13386c36be8fc9"
+    "0060_drop_platform_restart_executions": "a3b5404ab7aae09c7a04cdb5b86f49720b7a8c0e58c9424acd13386c36be8fc9",
+    "0061_goal_plan_admission_revision": "738ec66d9606a03f410b74f21ab36453d59e4227986865fa0ae3deb886c52189"
   }
 }

@@ -114,7 +114,16 @@ def get_goal_plan(
   require_chat_embed_operation(principal, "chat:read")
   get_active_chat_for_principal(db, chat_id, principal)
   rows = presented_goal_rows(db, chat_id)
-  return {"plan": serialize_plan(db, *rows) if rows is not None else None}
+  if rows is None:
+    return {"plan": None}
+  _physical, root = rows
+  plan = serialize_plan(db, *rows)
+  result: dict[str, Any] = {"plan": plan}
+  if plan is None and root.goal_plan_json is not None:
+    # Keep malformed plan contents opaque, but expose the exact CAS revision
+    # needed for an explicit validated full replacement.
+    result["repair_revision"] = int(root.goal_plan_revision or 0)
+  return result
 
 
 @router.post(
