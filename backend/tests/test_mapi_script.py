@@ -99,6 +99,20 @@ def test_mapi_accepts_a_response_header_capture_path(tmp_path: Path):
   ]
 
 
+def test_mapi_accepts_combined_flags_before_a_header_capture_path(tmp_path: Path):
+  result = _run_mapi(
+    tmp_path,
+    "-sD", "/tmp/response.headers", "-o", "/tmp/response.json", "/api/ready",
+  )
+
+  assert result.returncode == 0, result.stderr
+  assert result.curl_arguments[-5:] == [
+    b"-sD", b"/tmp/response.headers",
+    b"-o", b"/tmp/response.json",
+    b"https://mobius.example/api/ready",
+  ]
+
+
 def test_mapi_streams_literal_json_stdin_without_shell_reencoding(tmp_path: Path):
   payload = '{"text":"$HOME `whoami` \\\"quoted\\\" — line\\nnext"}\n'
   result = _run_mapi(
