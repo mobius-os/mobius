@@ -693,13 +693,15 @@ test('retiring an explicit Builder cover returns the selected tab and preserves 
   const navigation = page.getByRole('navigation', { name: 'Primary navigation' })
   await navigation.getByRole('button', { name: 'New chat', exact: true }).click()
 
+  await expect.poll(() => explicitCreates).toBe(1)
   // [data-new-chat-presentation] was removed by 45955a65 ("Make fresh chats
   // use one canonical composer") -- NewChatLanding's separate presentation
   // wrapper is gone, and the composer now renders directly inside the
-  // canonical painted chat surface for both new and existing chats.
-  const presentation = page.locator('[data-chat-surface="painted"]')
+  // canonical painted chat surface for both new and existing chats. This is
+  // a two-pane Builder layout, so a bare [data-chat-surface="painted"]
+  // matches both tabs; scope to the tab that owns the newly created chat.
+  const presentation = page.locator(`[data-tab-key="chat:${explicitId}"] [data-chat-surface="painted"]`)
   const composer = presentation.getByRole('textbox', { name: 'Message Möbius…' })
-  await expect.poll(() => explicitCreates).toBe(1)
   await expect(composer).toBeFocused()
   await composer.fill('Keep this parked Builder draft')
 
