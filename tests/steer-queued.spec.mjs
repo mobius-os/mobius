@@ -173,11 +173,23 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
 
       // Second send while streaming: the queue path. Return a SERVER ts so
       // confirmQueued clears the in-flight flag — only then is the entry
-      // steer-eligible (canSteer requires a confirmed server ts).
+      // steer-eligible (canSteer requires a confirmed server ts). Echo
+      // pending_message (like the other fixtures in this file): without it,
+      // ChatView treats the ack as an older-backend compatibility case and
+      // calls fetchMessages({force:true}) — a REAL, unmocked GET against the
+      // drawer-created (but message-mock-only) chat, which comes back with
+      // pending_messages:[] and wipes the just-reserved steer row.
       return route.fulfill({
         status: 202,
         contentType: 'application/json',
-        body: JSON.stringify({ status: 'queued', ts: QUEUE_TS, position: 1 }),
+        body: JSON.stringify({
+          status: 'queued',
+          ts: QUEUE_TS,
+          position: 1,
+          pending_message: {
+            role: 'user', content: body.content, ts: QUEUE_TS, cid: body.cid,
+          },
+        }),
       })
     })
 
@@ -417,10 +429,21 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
       const ts = queueCount === 0 ? TS1 : TS2
       const position = queueCount + 1
       queueCount++
+      // Echo pending_message (like the other fixtures in this file): without
+      // it, ChatView treats the ack as an older-backend compatibility case
+      // and calls fetchMessages({force:true}) — a REAL, unmocked GET against
+      // the drawer-created (but message-mock-only) chat.
       return route.fulfill({
         status: 202,
         contentType: 'application/json',
-        body: JSON.stringify({ status: 'queued', ts, position }),
+        body: JSON.stringify({
+          status: 'queued',
+          ts,
+          position,
+          pending_message: {
+            role: 'user', content: body.content, ts, cid: body.cid,
+          },
+        }),
       })
     })
 
