@@ -800,9 +800,34 @@ class PushUnsubscribeRequest(BaseModel):
 
 
 class NotificationAction(BaseModel):
+  model_config = ConfigDict(extra="forbid")
+
   action: str
   title: str
   target: str | None = None
+  resource_type: Literal["chat", "app", "project"] | None = None
+  resource_id: str | None = Field(default=None, min_length=1, max_length=128)
+  completed_at: datetime | None = None
+
+  @model_validator(mode="after")
+  def require_coherent_action(self):
+    recovery_type = {
+      "recover_chat": "chat",
+      "recover_app": "app",
+      "recover_project": "project",
+    }.get(self.action)
+    has_recovery_fields = self.resource_type is not None or self.resource_id is not None
+    if recovery_type is None:
+      if has_recovery_fields or self.completed_at is not None:
+        raise ValueError("recovery fields require a recover_* action")
+      return self
+    if self.resource_type != recovery_type or not self.resource_id:
+      raise ValueError("recovery action must match its resource type and id")
+    if self.target is not None:
+      raise ValueError("recovery actions cannot navigate to a target")
+    if not re.fullmatch(r"[A-Za-z0-9._:-]+", self.resource_id):
+      raise ValueError("invalid recovery resource id")
+    return self
 
   @field_validator("target")
   @classmethod
@@ -839,6 +864,12 @@ class NotificationSendRequest(BaseModel):
     ):
       raise ValueError("use the current /shell/ notification target")
     return value
+
+
+class RecoveryRequest(BaseModel):
+  model_config = ConfigDict(extra="forbid")
+
+  notification_id: str = Field(min_length=1, max_length=64)
 
 
 class BackgroundAgentChoice(BaseModel):
@@ -943,6 +974,8 @@ class NotificationOut(BaseModel):
   body: str | None
   icon: str | None
   target: str | None
+  # History may contain legacy/app-authored action shapes. Keep the read path
+  # tolerant; clients parse executable actions fail-closed.
   actions: list | None
   sent_at: datetime
   clicked_at: datetime | None

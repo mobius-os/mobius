@@ -25,10 +25,16 @@ from sqlalchemy.orm import Session, defer
 from sqlalchemy.orm.attributes import flag_modified
 
 from app import (
-  auth, drawer_pins, fs_locks, github_auth, models, project_builders,
+  auth, drawer_pins, fs_locks, github_auth, models, project_builders, schemas,
   project_drawer, project_git, providers, questions, workspace_files,
 )
 from app.broadcast import get_system_broadcast
+from app.recovery_notifications import (
+  complete_recovery_action,
+  publish_recovery_notification,
+  recovery_action_completed_at,
+  stage_recovery_notification,
+)
 from app.chat import (
   _finish_run,
   bump_run_generation,
@@ -2102,6 +2108,12 @@ async def delete_project(
       for chat in chats:
         stage_cancel_waits_for_chat(db, chat.id)
         chat.deleted_at = deleted_at
+      recovery_notification_id = stage_recovery_notification(
+        db,
+        owner_id=_.id,
+        resource_type="project",
+        resource_id=str(project.id),
+      )
       db.commit()
   for chat in chats:
     questions.cancel(chat.id)
@@ -2121,15 +2133,33 @@ async def delete_project(
     "projectId": str(project.id),
     "chatIds": [str(chat.id) for chat in chats],
   })
+  publish_recovery_notification(recovery_notification_id)
   return Response(status_code=204)
 
 
 @router.post("/{project_id}/recover", dependencies=[Depends(reject_cross_site)])
 def recover_project(
   project_id: str,
+  body: schemas.RecoveryRequest | None = None,
   _: models.Owner = Depends(get_current_owner_for_lifecycle_control),
   db: Session = Depends(get_db),
 ):
+  if body is not None:
+    completed_at = recovery_action_completed_at(
+      db,
+      owner_id=_.id,
+      notification_id=body.notification_id,
+      resource_type="project",
+      resource_id=str(project_id),
+    )
+    if completed_at is not None:
+      project = _live_project(db, project_id)
+      response = _project_response(
+        project, _live_project_chat_rows(db, project.id),
+      )
+      response["completed_at"] = completed_at
+      return response
+  completed_at = None
   with PROJECT_LIFECYCLE_LOCK:
     with drawer_pins.serialized_write():
       project = db.query(models.Project).filter(
@@ -2152,6 +2182,14 @@ def recover_project(
       project.deleted_at = None
       for chat in chats:
         chat.deleted_at = None
+      if body is not None:
+        completed_at = complete_recovery_action(
+          db,
+          owner_id=_.id,
+          notification_id=body.notification_id,
+          resource_type="project",
+          resource_id=str(project.id),
+        )
       db.commit()
   for chat in chats:
     recover_chat_generation(chat.id)
@@ -2163,7 +2201,10 @@ def recover_project(
     "projectId": str(project.id),
     "chatIds": [str(chat.id) for chat in chats],
   })
-  return _project_response(project, chats)
+  response = _project_response(project, chats)
+  if completed_at is not None:
+    response["completed_at"] = completed_at
+  return response
 
 
 @router.get("/{project_id}/files")

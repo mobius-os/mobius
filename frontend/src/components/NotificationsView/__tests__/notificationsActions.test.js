@@ -45,3 +45,13 @@ test('notification preview stays content-sized until its compact scroll cap', ()
   assert.match(contentRule, /overflow-y:\s*auto/)
   assert.doesNotMatch(contentRule, /(?:^|\n)\s*flex:/)
 })
+
+test('durable recovery actions restore in place and preserve their completed receipt', () => {
+  assert.match(component, /notificationRecoveryAction\(n\)/)
+  assert.match(component, /await onRecoveryAction\(notification\.id, action\)/)
+  assert.doesNotMatch(component, /completeAction/)
+  assert.match(component, /Restoring…/)
+  assert.match(component, /Restored/)
+  assert.match(center, /onRecoveryAction=\{onRecoveryAction\}/)
+  assert.match(css, /\.notifications__recovery-action\s*\{[\s\S]*?min-height:\s*32px/)
+})

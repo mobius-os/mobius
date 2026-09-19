@@ -47,6 +47,12 @@ from app.storage_io import (
 )
 from app.app_capabilities import diff_contracts
 from app.broadcast import get_system_broadcast
+from app.recovery_notifications import (
+  complete_recovery_action,
+  publish_recovery_notification,
+  recovery_action_completed_at,
+  stage_recovery_notification,
+)
 from app.compiler import (
   app_bundle_digest,
   app_bundle_uses_current_compile_contract,
@@ -3056,6 +3062,12 @@ async def delete_app(
         app_name = app.name
         app_slug = app.slug
         app_source_dir = app.source_dir
+        recovery_notification_id = stage_recovery_notification(
+          db,
+          owner_id=_.id,
+          resource_type="app",
+          resource_id=str(app_id),
+        )
         db.commit()
     # Publish the durable tombstone before best-effort job/skill/cron cleanup.
     # Cleanup errors must not leave live shells projecting a row the database
@@ -3063,6 +3075,7 @@ async def delete_app(
     get_system_broadcast().publish(
       {"type": "app_deleted", "appId": str(app_id)}
     )
+    publish_recovery_notification(recovery_notification_id)
     # A job wrapper publishes its lease before checking the live row.  Now that
     # the tombstone is durable, terminate every verified group; a wrapper that
     # races in afterward observes the tombstone and exits before spawning work.
@@ -3222,6 +3235,7 @@ async def delete_app_data(
 )
 async def recover_app(
   app_id: int,
+  body: schemas.RecoveryRequest | None = None,
   db: Session = Depends(get_db),
   _: models.Owner = Depends(get_owner_or_app_with_manage_apps),
 ):
@@ -3247,6 +3261,18 @@ async def recover_app(
   consistent state: a purged row → recover 404s; a recovered row → purge's
   under-lock stale re-query no longer matches it.
   """
+  if body is not None:
+    completed_at = recovery_action_completed_at(
+      db,
+      owner_id=_.id,
+      notification_id=body.notification_id,
+      resource_type="app",
+      resource_id=str(app_id),
+    )
+    if completed_at is not None:
+      live_app_or_404(db, app_id)
+      return {"ok": True, "completed_at": completed_at}
+  completed_at = None
   async with (
     fs_locks.install_uninstall_lock(),
     fs_locks.app_storage_lock(app_id),
@@ -3285,6 +3311,14 @@ async def recover_app(
       app.deleted_at = None
       app_name = app.name
       app_source_dir = app.source_dir
+      if body is not None:
+        completed_at = complete_recovery_action(
+          db,
+          owner_id=_.id,
+          notification_id=body.notification_id,
+          resource_type="app",
+          resource_id=str(app_id),
+        )
       db.commit()
     # Recovery is durable at this point. Publish before ancillary cron/skill
     # restoration so a later best-effort failure cannot leave the live drawer
@@ -3338,7 +3372,10 @@ async def recover_app(
         "App %s was recovered but its app skills could not be restored",
         app_id,
       )
-  return {"ok": True}
+  response = {"ok": True}
+  if completed_at is not None:
+    response["completed_at"] = completed_at
+  return response
 
 
 # Compose independently-owned route groups without changing their public paths.

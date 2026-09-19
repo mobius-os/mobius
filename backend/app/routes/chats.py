@@ -48,6 +48,12 @@ from app.chat import (
   usage_limit_waiting_chat_ids,
 )
 from app.broadcast import get_system_broadcast
+from app.recovery_notifications import (
+  complete_recovery_action,
+  publish_recovery_notification,
+  recovery_action_completed_at,
+  stage_recovery_notification,
+)
 from app.chat_retention import purge_expired_chat_tombstones
 from app.chat_titles import (
   apply_generated_title,
@@ -2337,6 +2343,12 @@ async def delete_chat(
           models.AgentWorkInterest.chat_id == chat_id,
         ).delete(synchronize_session=False)
         chat.deleted_at = now_naive_utc()
+        recovery_notification_id = stage_recovery_notification(
+          db,
+          owner_id=_.id,
+          resource_type="chat",
+          resource_id=str(chat_id),
+        )
         db.commit()
       # Publish the committed tombstone before best-effort run cleanup. If that
       # cleanup fails after the commit, every live shell must still project the
@@ -2344,6 +2356,7 @@ async def delete_chat(
       get_system_broadcast().publish(
         {"type": "chat_deleted", "chatId": str(chat_id)}
       )
+      publish_recovery_notification(recovery_notification_id)
   # The tombstone and releases are already durable. Notify/wake followers as a
   # best-effort delivery layer; failure cannot roll back an owner-requested
   # deletion, and the released claim itself remains reclaimable by exact key.
@@ -2427,10 +2440,22 @@ async def delete_chat(
 @router.post("/{chat_id}/recover", dependencies=[Depends(reject_cross_site)])
 def recover_chat(
   chat_id: str,
+  body: schemas.RecoveryRequest | None = None,
   _: models.Owner = Depends(get_current_owner_for_lifecycle_control),
   db: Session = Depends(get_db),
 ):
   """Restores a soft-deleted chat if the TTL window has not expired."""
+  if body is not None:
+    completed_at = recovery_action_completed_at(
+      db,
+      owner_id=_.id,
+      notification_id=body.notification_id,
+      resource_type="chat",
+      resource_id=str(chat_id),
+    )
+    if completed_at is not None:
+      get_active_chat_or_404(db, chat_id)
+      return {"ok": True, "completed_at": completed_at}
   linked_project = db.query(models.Project.id).join(
     models.Chat, models.Chat.project_id == models.Project.id,
   ).filter(
@@ -2454,8 +2479,17 @@ def recover_chat(
     raise HTTPException(status_code=404, detail="Chat not found or not deleted.")
   if (now_naive_utc() - chat.deleted_at) >= SOFT_DELETE_TTL:
     raise HTTPException(status_code=410, detail="Recovery window has expired.")
+  completed_at = None
   with drawer_pins.serialized_write():
     chat.deleted_at = None
+    if body is not None:
+      completed_at = complete_recovery_action(
+        db,
+        owner_id=_.id,
+        notification_id=body.notification_id,
+        resource_type="chat",
+        resource_id=str(chat_id),
+      )
     db.commit()
   # Clear the registry's deleted flag and bump to a generation newer than every
   # pre-delete run, so a resurrected stale run can't reclaim the recovered chat.
@@ -2463,7 +2497,10 @@ def recover_chat(
   get_system_broadcast().publish(
     {"type": "chat_recovered", "chatId": str(chat_id)}
   )
-  return {"ok": True}
+  response = {"ok": True}
+  if completed_at is not None:
+    response["completed_at"] = completed_at
+  return response
 
 
 @router.post(

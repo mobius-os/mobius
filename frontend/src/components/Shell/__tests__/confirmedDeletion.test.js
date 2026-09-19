@@ -79,8 +79,11 @@ test('Shell reconciles both query completion and direct mutation paths', () => {
 
   assert.match(shell, /appsQuery = appQueries\.list\.useQuery\(\{ reconcile: reconcileApps \}\)/)
   assert.match(shell, /mergeChatListWithCreatedGuards[\s\S]*deletedChatIdsRef\.current/)
-  assert.match(shell, /confirmChatDeleted\(id\)[\s\S]*showToast\('Chat deleted'/)
-  assert.match(shell, /confirmAppDeleted\(id\)[\s\S]*showToast\('App deleted'/)
+  assert.match(shell, /confirmChatDeleted\(id\)/)
+  assert.match(shell, /confirmAppDeleted\(id\)/)
+  assert.doesNotMatch(shell, /addRecoveryNotification/)
+  assert.match(shell, /recoverNotificationAction\(notificationId, action\)/)
+  assert.match(shell, /notification_id: notificationId/)
   assert.match(shell, /app_updated[\s\S]*confirmAppIdentityIsLive\(ev\.appId\)/)
   assert.match(
     shell,

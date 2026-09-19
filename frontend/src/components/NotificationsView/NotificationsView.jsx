@@ -1,6 +1,8 @@
 import { Agent, Bell, Chat, Grid, SettingsSlider } from '@openai/apps-sdk-ui/components/Icon'
+import { useQueryClient } from '@tanstack/react-query'
 import { useEffect, useRef, useState } from 'react'
 import { notificationQueries } from '../../hooks/queries.js'
+import { notificationRecoveryAction } from '../../lib/notificationRecovery.js'
 import { parseNotificationTarget } from '../../lib/notificationTarget.js'
 import {
   pointerSelectionChangedWithin,
@@ -24,16 +26,19 @@ export default function NotificationsView({
   active = false,
   onOpenTarget,
   onClearAll,
+  onRecoveryAction,
   updateAvailable = false,
   onUpdateNow,
   onUpdateLater,
 }) {
+  const queryClient = useQueryClient()
   const { data, isLoading, isError } = notificationQueries.list.useQuery({ enabled: active })
   const rows = data ?? []
   const [now, setNow] = useState(() => Date.now())
   const pointerSelectionRef = useRef(null)
   const [isClearing, setIsClearing] = useState(false)
   const [clearError, setClearError] = useState(false)
+  const [recoveryState, setRecoveryState] = useState({})
 
   // Relative labels are live information, not a one-time formatting pass.
   // Refreshing once a minute keeps an open preview from saying "now" forever.
@@ -54,6 +59,34 @@ export default function NotificationsView({
       setClearError(true)
     } finally {
       setIsClearing(false)
+    }
+  }
+
+  const handleRecovery = async (notification, action) => {
+    if (!onRecoveryAction || recoveryState[notification.id] === 'working') return
+    setRecoveryState(current => ({ ...current, [notification.id]: 'working' }))
+    try {
+      const completed = await onRecoveryAction(notification.id, action)
+      const completedAt = completed?.completedAt || new Date().toISOString()
+      queryClient.setQueryData(notificationQueries.list.key, current => (
+        Array.isArray(current)
+          ? current.map(row => (
+              row.id !== notification.id
+                ? row
+                : {
+                    ...row,
+                    actions: (row.actions || []).map(value => (
+                      value?.action === action.action
+                        ? { ...value, completed_at: completedAt }
+                        : value
+                    )),
+                  }
+            ))
+          : current
+      ))
+      setRecoveryState(current => ({ ...current, [notification.id]: 'done' }))
+    } catch {
+      setRecoveryState(current => ({ ...current, [notification.id]: 'error' }))
     }
   }
 
@@ -134,6 +167,9 @@ export default function NotificationsView({
           )}
           {rows.map((n) => {
             const nav = parseNotificationTarget(n.target)
+            const recovery = notificationRecoveryAction(n)
+            const recoveryStatus = recoveryState[n.id]
+            const recoveryComplete = !!recovery?.completedAt || recoveryStatus === 'done'
             const Icon = ICONS[iconKindForSource(n.source_type)] ?? ICONS.default
             const body = (
               <>
@@ -144,6 +180,29 @@ export default function NotificationsView({
                   <span className="notifications__row-title">{n.title}</span>
                   {n.body ? (
                     <span className="notifications__row-body">{n.body}</span>
+                  ) : null}
+                  {recovery ? (
+                    <span className="notifications__recovery">
+                      {recoveryComplete ? (
+                        <span className="notifications__recovery-complete" role="status">
+                          Restored
+                        </span>
+                      ) : (
+                        <button
+                          type="button"
+                          className="notifications__recovery-action"
+                          disabled={recoveryStatus === 'working'}
+                          onClick={() => handleRecovery(n, recovery)}
+                        >
+                          {recoveryStatus === 'working' ? 'Restoring…' : recovery.title}
+                        </button>
+                      )}
+                      {recoveryStatus === 'error' ? (
+                        <span className="notifications__recovery-error" role="alert">
+                          Couldn’t restore this item. Try again.
+                        </span>
+                      ) : null}
+                    </span>
                   ) : null}
                 </span>
                 <time
@@ -156,7 +215,7 @@ export default function NotificationsView({
             )
             return (
               <li key={n.id} className="notifications__row-item">
-                {nav ? (
+                {nav && !recovery ? (
                   <button
                     type="button"
                     className="notifications__row notifications__row--link"

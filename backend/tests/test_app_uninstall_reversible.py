@@ -179,9 +179,21 @@ def test_recover_endpoint_restores_app(client, auth, db, bypass_url_validation):
   data_file = _seed_data(app_id, body="recover-me")
   assert client.delete(f"/api/apps/{app_id}", headers=auth).status_code == 204
 
-  r = client.post(f"/api/apps/{app_id}/recover", headers=auth)
+  receipt = db.query(models.Notification).filter_by(title="App deleted").one()
+  assert receipt.actions[0]["resource_id"] == str(app_id)
+
+  payload = {"notification_id": receipt.id}
+  r = client.post(f"/api/apps/{app_id}/recover", headers=auth, json=payload)
   assert r.status_code == 200, r.text
   assert r.json()["ok"] is True
+  assert r.json()["completed_at"]
+  repeated = client.post(
+    f"/api/apps/{app_id}/recover", headers=auth, json=payload,
+  )
+  assert repeated.status_code == 200, repeated.text
+  assert repeated.json()["completed_at"] == r.json()["completed_at"]
+  db.refresh(receipt)
+  assert receipt.actions[0]["completed_at"] == r.json()["completed_at"]
 
   db.expire_all()
   row = db.query(models.App).filter(models.App.id == app_id).first()

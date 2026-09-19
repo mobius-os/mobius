@@ -80,6 +80,44 @@ def test_notification_action_targets_round_trip(client, auth):
   assert actions["open_chat"] == "/shell/?chat=c-7"
 
 
+def test_recovery_actions_are_owned_by_resource_deletion_endpoints(client, auth):
+  sent = client.post(
+    "/api/notifications/send",
+    headers=auth,
+    json={
+      "title": "Chat deleted",
+      "source_type": "shell",
+      "actions": [{
+        "action": "recover_chat",
+        "title": "Undo",
+        "resource_type": "chat",
+        "resource_id": "chat-123",
+      }],
+    },
+  )
+  assert sent.status_code == 403, sent.text
+  assert sent.json()["detail"] == (
+    "Recovery actions are created by resource deletion endpoints."
+  )
+
+
+@pytest.mark.parametrize(
+  "action",
+  [
+    {"action": "recover_chat", "title": "Undo", "resource_type": "app", "resource_id": "1"},
+    {"action": "recover_app", "title": "Undo", "resource_type": "app", "resource_id": "../1"},
+    {"action": "open_chat", "title": "Open", "resource_type": "chat", "resource_id": "c-1"},
+  ],
+)
+def test_recovery_action_rejects_mismatched_or_unsafe_payload(client, auth, action):
+  response = client.post(
+    "/api/notifications/send",
+    headers=auth,
+    json={"title": "Unsafe", "actions": [action]},
+  )
+  assert response.status_code == 422
+
+
 def test_clear_notifications_deletes_owner_history(client, auth):
   for title in ["One", "Two"]:
     r = client.post(
