@@ -47,8 +47,22 @@ async function setupChat(page) {
   await page.goto(`${BASE}/shell/?chat=${encodeURIComponent(chat.id)}`, {
     waitUntil: 'domcontentloaded',
   })
+  // Wait for the composer to be genuinely idle, not just present. Right
+  // after navigating to a freshly created chat, the composer can briefly
+  // exist in the DOM before the app has settled into its idle state; a
+  // send() during that window lands as a queued message (composer believes
+  // a turn is already active) instead of the direct send these tests
+  // require, producing an intermittent "message never appears" failure
+  // unrelated to whatever the test is actually exercising.
   await page.waitForFunction(
-    () => !!document.querySelector('[data-chat-surface="painted"] .chat__form'),
+    () => {
+      const surface = document.querySelector('[data-chat-surface="painted"]')
+      const composer = surface?.querySelector('[aria-label="Message Möbius…"]')
+      return !!composer
+        && !composer.disabled
+        && !surface.querySelector('.chat__stop')
+        && !surface.querySelector('.queued__row')
+    },
     { timeout: 10000 },
   )
   return chat
