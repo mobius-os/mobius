@@ -207,6 +207,13 @@ test.describe('Stream reconnection', () => {
           ],
           total: 2,
           offset: 0,
+          // chatRuntimeState.js's runtimeSnapshot() returns null (and
+          // fetchMessages bails out before commitMessages) without a
+          // safe-integer runtime_revision -- the same stale-fixture gap
+          // fixed across ~21 other fixtures on this branch. Without it this
+          // refresh silently no-ops and the assertion below times out stuck
+          // on "Thinking".
+          runtime_revision: 1,
         }),
       })
     })
