@@ -80,11 +80,28 @@ async function newChat(page) {
   }, { timeout: 10000 })
 }
 
+// Press a composer submit chord and confirm it actually landed (the
+// textarea clears) instead of assuming the first keypress submitted.
+// Right after a brand-new chat's first send, ChatInputBar's `canSubmit`
+// stays gated by Shell's provisional-chat guard (newChatSession.submitted)
+// for a render or two while newChatSession finishes materializing
+// (Shell.jsx queueDraftFirstNewChat / settleDraftFirstNewChat) — during
+// that narrow window Enter is a legitimate no-op (submissionBlocked), not
+// a lost keystroke: the composer text is left untouched. Retrying the
+// keypress until the composer visibly clears turns that transient block
+// into a bounded, condition-based wait instead of a flaky one-shot press.
+async function submitComposer(page, input, key = 'Enter') {
+  await expect(async () => {
+    await page.keyboard.press(key)
+    await expect(input).toHaveValue('', { timeout: 300 })
+  }).toPass({ timeout: 5000 })
+}
+
 async function sendMessage(page, text) {
   const surface = page.locator('[data-chat-surface="painted"]')
   const input = surface.getByRole('textbox', { name: 'Message Möbius…' })
   await input.fill(text)
-  await page.keyboard.press('Enter')
+  await submitComposer(page, input)
 }
 
 async function tapSend(page, text) {
@@ -326,7 +343,7 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
 
     const input = page.getByRole('textbox', { name: 'Message Möbius…' })
     await input.fill(STEER_TEXT)
-    await page.keyboard.press('Control+Enter')
+    await submitComposer(page, input, 'Control+Enter')
     await expect.poll(() => messagePosts.filter(body => (
       body.direct_steer && body.content === STEER_TEXT
     )).length).toBe(1)
