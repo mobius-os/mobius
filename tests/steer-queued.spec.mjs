@@ -63,10 +63,21 @@ async function newChat(page) {
     () => !document.querySelector('.drawer--open'),
     { timeout: 3000 }
   )
-  await page.waitForFunction(
-    () => !document.querySelector('[data-new-chat-presentation]'),
-    { timeout: 10000 },
-  )
+  // The drawer's own "New Chat" flow has no built-in signal for when the
+  // freshly created chat's composer has actually settled. Sending
+  // immediately after the drawer closes races that settle: the fill+Enter
+  // can land on a composer that's mid-(re)mount, silently dropping the
+  // input or leaving the app believing a turn is already active (the
+  // message shows up queued, or never sent at all, instead of starting a
+  // fresh turn). Wait for a genuinely idle composer before returning.
+  await page.waitForFunction(() => {
+    const surface = document.querySelector('[data-chat-surface="painted"]')
+    const composer = surface?.querySelector('[aria-label="Message Möbius…"]')
+    return !!composer
+      && !composer.disabled
+      && !surface.querySelector('.chat__stop')
+      && !surface.querySelector('.queued__row')
+  }, { timeout: 10000 })
 }
 
 async function sendMessage(page, text) {
