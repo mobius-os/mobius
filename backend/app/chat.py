@@ -2994,7 +2994,8 @@ def _schedule_continuation(
     - Stale-pending drain (chats_stream.py send_message): the route
       explicitly calls mark_starting before _promote_pending_messages.
   Both call-sites reach here only AFTER a successful PromotePending — the
-  queued head is already in the transcript and the next turn's run marker is
+  queued head has been admitted (owner messages are in the transcript;
+  internal Goal controls are provider-only) and the next turn's run marker is
   set. If scheduling then fails, this function releases the _starting claim
   (so the chat isn't stuck 'starting') but LEAVES the durable run marker set:
   the turn is promoted-but-unscheduled, so reconciliation must recover it
@@ -3060,8 +3061,9 @@ def _schedule_continuation(
     # LEAVE the durable run marker SET. Both call-sites (the turn-end
     # drain in _complete_turn, the stale-pending drain in chats_stream)
     # reach here ONLY after a successful PromotePending: the queued head was
-    # already moved into the transcript and the next turn's run marker was
-    # set under `run_token`. The continuation task never spawned, so this is
+    # admitted and removed from the queue, its provider payload was returned,
+    # and the next turn's run marker was set under `run_token`. The
+    # continuation task never spawned, so this is
     # a promoted-but-unscheduled turn — "work remains" under the single
     # marker invariant, so the marker must stay set for
     # reconcile_interrupted_chats to recover on the next boot. Clearing here
@@ -3952,11 +3954,11 @@ async def _complete_turn(
     else "completed"
   )
 
-  # A no-progress automatic Goal continuation must converge instead of
-  # manufacturing another clean turn forever. The first retry stays automatic;
-  # another requires a newly settled plan task. Exhaustion uses the
-  # existing saved-question owner so the Goal remains exact and durable while
-  # the partner decides whether to continue or stop it.
+  # An ending provider turn cannot authorize its own successor merely because
+  # the Goal remains unfinished. The writer captured the plan revision at
+  # provider admission; only a durable plan advance permits automatic rollover.
+  # Otherwise the existing saved-question owner keeps the Goal exact and
+  # durable while the partner decides whether to continue or stop it.
   terminal_handoff = None
   if ending_status == "completed" and not provider_free:
     from app.goal_plans import goal_terminal_handoff
@@ -3977,16 +3979,19 @@ async def _complete_turn(
         "response_mode": "continuation",
         "questions": [{
           "id": "goal_next_step",
-          "header": "Goal",
+          "header": "Goal needs reconciliation",
           "question": (
-            "This Goal is still unfinished, and another turn ended without "
-            "enough plan progress to continue automatically. What should "
-            "happen next?"
+            "The turn ended without updating the saved plan or handing off "
+            "this Goal. Automatic continuation is paused. What should happen "
+            "next?"
           ),
           "options": [
             {
-              "label": "Continue once (Recommended)",
-              "description": "Start another turn on this Goal.",
+              "label": "Review and continue (Recommended)",
+              "description": (
+                "Start a new turn to reconcile verified current state with "
+                "the saved plan."
+              ),
             },
             {
               "label": "Stop this Goal",

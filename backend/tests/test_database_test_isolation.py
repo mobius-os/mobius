@@ -47,3 +47,31 @@ def test_fixtures_reject_engine_imported_before_their_disposable_database(tmp_pa
   assert "fixture-owned database" in result.stderr
   with sqlite3.connect(sentinel) as db:
     assert db.execute("SELECT value FROM keep_me").fetchall() == [("untouched",)]
+
+
+def test_host_runner_drops_managed_identity_before_test_collection(tmp_path):
+  """Exercise the real shell entrypoint, before any backend fixture imports."""
+  probe = tmp_path / "test_managed_environment.py"
+  probe.write_text('''import os
+from pathlib import Path
+from app.config import get_settings
+
+def test_isolated():
+  assert os.environ["MOBIUS_SSO_ISSUER"] == ""
+  assert os.environ["MOBIUS_SSO_INSTANCE_ID"] == ""
+  socket = Path(os.environ["MOBIUS_IDENTITY_BROKER_SOCKET"])
+  assert socket.parent.name.startswith("mobius-wt-pytest.")
+  assert not socket.exists()
+  assert get_settings().api_base_url == "http://127.0.0.1:9"
+  assert get_settings().data_dir.startswith(str(socket.parent))
+''')
+  root = Path(__file__).parents[2]
+  result = subprocess.run(
+    [str(root / "scripts/wt-pytest.sh"), "--noconftest", str(probe), "-q"],
+    cwd=root,
+    env={**os.environ, "MOBIUS_SSO_ISSUER": "https://managed.invalid",
+         "MOBIUS_SSO_INSTANCE_ID": "synthetic-live-instance",
+         "MOBIUS_IDENTITY_BROKER_SOCKET": str(tmp_path / "live-broker.sock")},
+    capture_output=True, text=True, timeout=60,
+  )
+  assert result.returncode == 0, result.stdout + result.stderr
