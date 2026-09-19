@@ -77,7 +77,7 @@ from app.run_state import (
   running_chat_ids,
   running_goal_objective,
 )
-from app.schemas import ChatPatch, ChatProviderSwitch
+from app.schemas import ChatCompactRequest, ChatPatch, ChatProviderSwitch
 from app.timeutil import now_naive_utc, SOFT_DELETE_TTL
 from app.tool_output_storage import (
   TOOL_OUTPUT_STORAGE_PREFIX,
@@ -2696,6 +2696,7 @@ async def _compact_chat_locked(
 )
 async def compact_chat(
   chat_id: str,
+  body: ChatCompactRequest | None = None,
   _: models.Owner = Depends(get_current_owner_for_lifecycle_control),
   db: Session = Depends(get_db),
 ):
@@ -2734,11 +2735,21 @@ async def compact_chat(
     messages = list(chat.messages or [])
     data_dir = get_settings().data_dir
     try:
-      summary = load_cumulative_summary(data_dir, chat_id)
-      if summary is None:
+      source_summary = load_cumulative_summary(data_dir, chat_id)
+      instructions = body.instructions if body is not None else None
+      if source_summary is None or instructions:
+        settings_obj = chat.agent_settings_json or {}
         summary = await summarize_chat(
-          messages, data_dir=data_dir, provider_id=source_provider,
+          messages,
+          data_dir=data_dir,
+          provider_id=source_provider,
+          source_summary=source_summary,
+          model=settings_obj.get("model"),
+          effort=settings_obj.get("effort"),
+          custom_instructions=instructions,
         )
+      else:
+        summary = source_summary
     except CompactionError as exc:
       raise HTTPException(status_code=422, detail=str(exc))
     except Exception as exc:

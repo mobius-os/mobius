@@ -548,6 +548,13 @@ def _build_resumed_context(chat_row) -> str | None:
 # shown anywhere.
 CLI_SLASH_COMMANDS = frozenset({"/goal"})
 
+# Commands the platform itself owns rather than forwarding to the provider CLI.
+# `/compact` rewrites the chat's live context and resets the provider session
+# (routes/chats.py ``/compact``); it must never reach a model as prose. Kept
+# beside CLI_SLASH_COMMANDS so the composer menu and both dispatch sets stay
+# pinned together by test_slash_command_registry_parity.
+MOBIUS_SLASH_COMMANDS = frozenset({"/compact"})
+
 
 def _chat_has_goal_intent(messages: list[schemas.ChatMessage]) -> bool:
   """Whether this durable transcript has ever requested native goal mode."""
