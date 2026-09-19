@@ -56,16 +56,6 @@ def restart_admission_in_progress() -> bool:
     return _RESTART_ADMITTED
 
 
-def _release_unstarted_restart() -> None:
-  """Release only a card rejected before drain or any side effect."""
-  global _RESTART_ADMITTED
-  from app import chat
-
-  with _RESTART_ADMISSION_LOCK:
-    if not chat.draining:
-      _RESTART_ADMITTED = False
-
-
 async def _drain_exact_restart() -> tuple[str, str, list[dict[str, str]]]:
   """Gate admission and bind every live run to one fresh restart nonce."""
   from app import chat, restart_ledger
@@ -111,7 +101,7 @@ async def _drain_exact_restart() -> tuple[str, str, list[dict[str, str]]]:
 
 
 async def restart_this_worker(
-  ready_path: Path | None = None, *, action_id: str | None = None,
+  ready_path: Path | None = None,
 ) -> None:
   """Drain live turns, then restart this uvicorn worker with the current code.
 
@@ -142,23 +132,6 @@ async def restart_this_worker(
   """
   if not _claim_in_process_restart():
     return
-
-  if action_id is not None:
-    from app.platform_restart import admit_execution_if_current
-    try:
-      admitted = admit_execution_if_current(action_id)
-    except BaseException:
-      # No drain, timer, or supervisor side effect has started. A transient DB
-      # or Git failure must not disable every later Settings restart this boot.
-      _release_unstarted_restart()
-      raise
-    if not admitted:
-      log.warning(
-        "typed restart admission refused for changed/settled action %s",
-        action_id,
-      )
-      _release_unstarted_restart()
-      return
 
   from app import chat
 

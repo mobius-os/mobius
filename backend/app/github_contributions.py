@@ -4313,10 +4313,13 @@ def _retarget_pr_base(
   authority. This function deliberately attempts the mutation once.
   """
   base_branch = _git_ops._validate_branch(base_branch)
+  # `gh pr edit` queries unrelated organization/project metadata and can require
+  # read:org. This base-only REST update needs only the existing repo permission.
   try:
     proc = _git_ops._gh(
-      repo, "pr", "edit", str(number), "-R", upstream_repo,
-      "--base", base_branch, check=False,
+      repo, "api", "--method", "PATCH",
+      f"repos/{upstream_repo}/pulls/{number}",
+      "-f", f"base={base_branch}", check=False,
     )
   except (subprocess.TimeoutExpired, OSError) as exc:
     return "ambiguous", str(exc)

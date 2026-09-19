@@ -101,7 +101,7 @@ export function visibleUsageWindows(snapshot) {
 export function providerExtraUsage(snapshot) {
   const extra = snapshot?.extra_usage
   if (extra?.enabled !== true) return null
-  const used = Number(extra.used_percent)
+  const used = extra.used_percent
   if (!Number.isFinite(used)) {
     return { label: 'Extra usage', usedPercent: null, summary: 'Extra usage enabled' }
   }

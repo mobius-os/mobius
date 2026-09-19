@@ -2963,7 +2963,6 @@ async def _prepare_app_row(
   )
   db.add(app)
   db.flush()
-  _sync_service_aliases(db, app=app, manifest=manifest)
   return app
 
 
@@ -3560,7 +3559,7 @@ async def install_from_manifest(
               app_git.fetch_upstream,
               git_source_dir,
               ref,
-              adopt_equal_local_tree=(
+              trusted_origin_adoption=(
                 target.adopting_trusted_origin
                 or target.trusted_catalog_origin
               ),

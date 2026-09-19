@@ -106,14 +106,16 @@ export const persistOptions = {
 // Top-level domains (chats, messages, theme, apps) match on the first
 // key segment. The Settings view's provider/CLI-version/status queries
 // are persisted too so the panel paints from disk on open instead of
-// flashing an empty providers list while the live probe revalidates:
+// flashing empty details while the live probes revalidate:
 //   - ['settings']                          → provider config + CLI versions
 //   - ['auth','providers','status']         → canonical provider state
+//   - ['platform','status']                 → last-known release identity
 // Matched by full key, not by ['auth'] alone, so the short-lived
 // setup-status query (['auth','setup','status']) is NOT persisted.
 const PERSISTED_FULL_KEYS = new Set([
   JSON.stringify(['settings']),
   JSON.stringify(['auth', 'providers', 'status']),
+  JSON.stringify(['platform', 'status']),
 ])
 
 export function shouldPersistQueryKey(queryKey) {

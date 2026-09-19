@@ -609,3 +609,27 @@ def test_normalize_claude_usage_surfaces_enabled_extra_usage():
     "available": True,
     "used_percent": 25,
   }
+
+
+def test_normalize_claude_usage_does_not_invent_extra_usage_availability():
+  from app.provider_usage import normalize_claude_usage
+
+  unknown = normalize_claude_usage({
+    "five_hour": {"utilization": 100},
+    "extra_usage": {"is_enabled": True},
+  })
+  exhausted = normalize_claude_usage({
+    "five_hour": {"utilization": 100},
+    "extra_usage": {"is_enabled": True, "utilization": 100},
+  })
+
+  assert unknown["extra_usage"] == {
+    "enabled": True,
+    "available": None,
+    "used_percent": None,
+  }
+  assert exhausted["extra_usage"] == {
+    "enabled": True,
+    "available": False,
+    "used_percent": 100.0,
+  }

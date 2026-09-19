@@ -281,8 +281,10 @@ async def report_outcome(app_id: int, run_id: str, body: ReviewOutcome,
                 if receipt.get("merged") is not True:
                   raise HTTPException(409, "GitHub did not confirm a merge.")
                 outcome.update(state="merged", merge_sha=receipt.get("sha"))
-            except Exception:
-              outcome.update(state="merge_unknown", summary=
-                "GitHub did not confirm the merge or queue request. Reconcile it before any new action.")
+            except Exception as exc:
+              outcome.update(
+                state="merge_unknown",
+                summary=reviews.merge_failure_summary(exc),
+              )
     reviews.save_outcome(db, row, item_key, outcome)
     return {"run": reviews.view(row)}
