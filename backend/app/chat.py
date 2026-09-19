@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from sqlalchemy import func
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 from starlette.concurrency import run_in_threadpool
 
@@ -1829,7 +1829,10 @@ def _model_capacity_retry_exhausted(db: Session, run: models.ChatRun) -> bool:
   root_id = run.root_run_id or run.id
   return db.query(models.ChatRun.id).filter(
     models.ChatRun.chat_id == run.chat_id,
-    models.ChatRun.root_run_id == root_id,
+    or_(
+      models.ChatRun.root_run_id == root_id,
+      models.ChatRun.id == root_id,
+    ),
     models.ChatRun.park_reason == "model_capacity",
     models.ChatRun.started_at < run.started_at,
   ).first() is not None

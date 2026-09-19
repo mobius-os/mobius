@@ -3093,7 +3093,7 @@ def test_model_capacity_retry_policy_allows_one_automatic_resume(db, chat):
   from datetime import UTC, datetime, timedelta
   base = datetime.now(UTC).replace(tzinfo=None)
   first = chat_mod.models.ChatRun(
-    id="capacity-first", root_run_id="capacity-root", chat_id=chat.id,
+    id="capacity-root", root_run_id=None, chat_id=chat.id,
     status="completed", park_reason="model_capacity", started_at=base,
   )
   second = chat_mod.models.ChatRun(
