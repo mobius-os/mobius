@@ -275,6 +275,26 @@ def test_park_exit_non_limit_error_stays_plain():
   assert sink.events[-1] == {"type": "error", "message": "syntax error"}
 
 
+def test_model_capacity_parks_for_a_short_automatic_retry():
+  sink = _Sink()
+  kwargs = chat_mod._park_exit(
+    sink,
+    {"error": "Selected model is at capacity. Please try a different model."},
+    "Selected model is at capacity. Please try a different model.",
+  )
+  assert kwargs["parked"] is True
+  assert kwargs["park_reason"] == "model_capacity"
+  assert kwargs["parked_until"] > datetime.now(UTC).replace(tzinfo=None)
+  assert sink.events[-1]["pause"]["kind"] == "model_capacity"
+
+
+def test_generic_capacity_error_is_not_misclassified_as_a_busy_model():
+  sink = _Sink()
+  kwargs = chat_mod._park_exit(sink, {"error": "capacity"}, "capacity")
+  assert kwargs == {"parked": False}
+  assert sink.events[-1] == {"type": "error", "message": "capacity"}
+
+
 def test_park_exit_resume_incomplete_publishes_calm_resumable_note():
   """A steer-interrupted turn (error defused to None, resume_incomplete set)
   publishes a calm, resumable "Paused" note — never a red error block."""
@@ -3067,3 +3087,73 @@ def test_admission_deferral_parks_the_run_instead_of_failing_it(owner_token):
   tail = _chat_row(cid)["messages"][-1]
   assert tail["role"] == "assistant"
   assert tail["blocks"][-1]["pause"]["kind"] == "memory"
+
+
+def test_model_capacity_retry_policy_allows_five_automatic_resumes(db, chat):
+  from datetime import UTC, datetime, timedelta
+  base = datetime.now(UTC).replace(tzinfo=None)
+  runs = [
+    chat_mod.models.ChatRun(
+      id=f"capacity-{index}",
+      root_run_id=None if index == 0 else "capacity-0",
+      chat_id=chat.id,
+      status="parked",
+      park_reason="model_capacity",
+      started_at=base + timedelta(seconds=index),
+    )
+    for index in range(6)
+  ]
+  db.add_all(runs)
+  db.commit()
+
+  assert [
+    chat_mod._model_capacity_retry_count(db, run) for run in runs
+  ] == list(range(6))
+  assert all(
+    chat_mod._model_capacity_retry_exhausted(db, run) is False
+    for run in runs[:5]
+  )
+  assert chat_mod._model_capacity_retry_exhausted(db, runs[5]) is True
+
+
+def test_model_capacity_retry_delays_back_off_and_remain_bounded():
+  delays = chat_mod.MODEL_CAPACITY_RETRY_DELAYS
+
+  assert len(delays) == 5
+  assert delays == tuple(sorted(delays))
+  assert delays[0] == timedelta(seconds=30)
+  assert delays[-1] == timedelta(minutes=5)
+
+
+def test_model_capacity_sixth_failure_becomes_manual_resume(db, chat):
+  base = datetime.now(UTC).replace(tzinfo=None)
+  prior = [
+    chat_mod.models.ChatRun(
+      id=f"capacity-prior-{index}",
+      root_run_id=None if index == 0 else "capacity-prior-0",
+      chat_id=chat.id,
+      status="completed",
+      park_reason="model_capacity",
+      started_at=base + timedelta(seconds=index),
+    )
+    for index in range(5)
+  ]
+  current = chat_mod.models.ChatRun(
+    id="capacity-current", root_run_id="capacity-prior-0", chat_id=chat.id,
+    status="running", started_at=base + timedelta(seconds=5),
+  )
+  db.add_all([*prior, current])
+  db.commit()
+  sink = _Sink()
+  sink.run_token = current.id
+
+  kwargs = chat_mod._park_exit(
+    sink,
+    {"error": "Selected model is at capacity. Please try a different model."},
+    "Selected model is at capacity. Please try a different model.",
+    db=db,
+  )
+
+  assert kwargs == {"parked": False}
+  assert sink.events[-1]["pause"]["kind"] == "model_capacity_exhausted"
+  assert "five automatic retries" in sink.events[-1]["message"]

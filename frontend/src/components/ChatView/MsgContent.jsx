@@ -435,14 +435,14 @@ function MsgContentInner({
           canResume: !!onResume,
           questionOwnsTurn,
         })
-        const { parked, resourceWait } = errorCardViewModel(block)
+        const { parked, resourceWait, modelCapacity } = errorCardViewModel(block)
         const automaticContinuation = recoveryOwner && parked && !!autoResumeEnabled
         // A resource wait owns its automatic retry. Offering Resume while the
         // same measured pressure remains only launches a turn admission will
         // re-park, so it is a false action rather than useful recovery.
         // Auto-continue schedules the next attempt; it does not remove the
         // owner's explicit retry after adding credits or changing providers.
-        const manualResumeAvailable = recoveryOwner && !resourceWait
+        const manualResumeAvailable = recoveryOwner && !resourceWait && !modelCapacity
         return (
           <ErrorCard
             key={assistantBlockKey(block, i)}
@@ -452,7 +452,7 @@ function MsgContentInner({
             recoveryCredit={recoveryCredit}
             cardRef={recoveryOwner ? resumeCardRef : undefined}
           >
-            {recoveryOwner && parked && autoResumeAvailable && onAutoResumeChange && (
+            {recoveryOwner && parked && !modelCapacity && autoResumeAvailable && onAutoResumeChange && (
               <div className="chat__recovery-actions">
                 <button
                   type="button"
