@@ -3670,22 +3670,18 @@ async def install_from_manifest(
               divergence = "fast_forward"
               merge_applied = True
             else:
-              # Before routing to the owner, auto-resolve a conflict CONFINED
-              # to the version identifier: a version label is never a semantic
-              # merge, so take-upstream is always right. This kills the most
-              # common update-conflict class — a prior local "agent edit"
-              # bumped the version and the release bumps the same line. Any
-              # conflict beyond the version line returns None and falls through
-              # to the owner-resolver flow. Fail-safe: a genuine local edit is
-              # never dropped (a residual conflict aborts the whole attempt).
-              version_only = await asyncio.to_thread(
-                app_git.resolve_version_only_conflict,
+              # JSON manifests can reconcile serialization drift and disjoint
+              # edits structurally. Other files retain the APP_VERSION-only
+              # rule. Any remaining overlap leaves the whole update untouched
+              # for the owner to resolve.
+              benign = await asyncio.to_thread(
+                app_git.resolve_benign_conflict,
                 git_source_dir, merge.conflict_paths,
               )
               resolved_source = None
-              if version_only is not None:
+              if benign is not None:
                 resolved_source = {
-                  rel: data for rel, data in version_only.tree.items()
+                  rel: data for rel, data in benign.tree.items()
                   if rel not in _MERGED_NON_SOURCE
                 }
               if resolved_source is not None and entry_key in resolved_source:
@@ -3693,8 +3689,8 @@ async def install_from_manifest(
                 divergence = "clean_merge"
                 merge_applied = True
                 warnings.append(
-                  "auto-resolved a version-only update conflict "
-                  "(took the upstream version)"
+                  "auto-resolved a benign update conflict "
+                  "(no semantic overlap between local edits and upstream)"
                 )
                 reconciliation = app_git.ReconciliationReceipt(
                   proven_present=reconciliation.proven_present,
@@ -3707,7 +3703,7 @@ async def install_from_manifest(
                 # built on, mirroring the clean-merge branch above.
                 git_exec_paths = await asyncio.to_thread(
                   app_git.read_tree_exec_paths,
-                  git_source_dir, version_only.tree_oid,
+                  git_source_dir, benign.tree_oid,
                 )
               else:
                 # Never rebase local. The app stays served with its current

@@ -4017,30 +4017,113 @@ def read_blob(source_dir: str | Path, ref: str, rel: str) -> bytes | None:
   return proc.stdout if proc.returncode == 0 else None
 
 
-def _resolve_json_version(base: bytes, ours: bytes, theirs: bytes) -> bytes | None:
-  """Resolve a JSON-manifest conflict IFF the two sides differ ONLY in the
-  top-level `version` key — then take upstream's whole file.
+# Sentinels for the structural JSON merge: a key that is absent on a side, and
+# an irreconcilable overlap. Both are `object()` so they compare only by
+# identity and can never collide with real JSON values (including `null`).
+_JSON_MISSING = object()
+_JSON_CONFLICT = object()
 
-  Structured (not textual), so a nested `dependencies.version`, a non-version
-  local edit, or a minified layout can never be misread: any of those makes the
-  non-version content differ, which returns None → owner resolves it. `base` is
-  unused because the invariant (ours == theirs except `version`) already proves
-  no non-version local edit would be dropped.
+
+def _json_values_equal(left, right) -> bool:
+  """Compare JSON structures without Python's boolean/number equivalence."""
+  if isinstance(left, dict) and isinstance(right, dict):
+    return left.keys() == right.keys() and all(
+      _json_values_equal(left[key], right[key]) for key in left
+    )
+  if isinstance(left, list) and isinstance(right, list):
+    return len(left) == len(right) and all(
+      _json_values_equal(a, b) for a, b in zip(left, right)
+    )
+  if isinstance(left, bool) != isinstance(right, bool):
+    return False
+  return left == right
+
+
+def _merge_json_value(base, ours, theirs):
+  """Recursive three-way merge of one JSON value.
+
+  Returns the merged value, `_JSON_MISSING` when the key should be absent, or
+  `_JSON_CONFLICT` when ours and theirs changed the same value incompatibly.
+  Objects merge per key; arrays and scalars are atomic — a value either matches
+  both sides, matches base on one side (the other side's change wins), or is a
+  genuine clash. A missing side is modelled with `_JSON_MISSING`, so an add/add
+  of different values and a delete-vs-edit both surface as conflicts. This never
+  silently drops a real edit: any true overlap returns `_JSON_CONFLICT` and the
+  caller falls back to the owner resolver.
+  """
+  if _json_values_equal(ours, theirs):
+    return ours
+  if _json_values_equal(base, ours):
+    return theirs
+  if _json_values_equal(base, theirs):
+    return ours
+  # Both sides diverged from base and from each other. Only a per-key object
+  # merge can still reconcile disjoint edits; any other shape is a real clash.
+  if not (
+    isinstance(base, dict) and isinstance(ours, dict) and isinstance(theirs, dict)
+  ):
+    return _JSON_CONFLICT
+  merged: dict = {}
+  for key in dict.fromkeys([*base, *ours, *theirs]):
+    sub = _merge_json_value(
+      base.get(key, _JSON_MISSING),
+      ours.get(key, _JSON_MISSING),
+      theirs.get(key, _JSON_MISSING),
+    )
+    if sub is _JSON_CONFLICT:
+      return _JSON_CONFLICT
+    if sub is not _JSON_MISSING:
+      merged[key] = sub
+  return merged
+
+
+def _resolve_json_manifest(base: bytes, ours: bytes, theirs: bytes) -> bytes | None:
+  """Structurally three-way merge a JSON manifest (mobius.json / package.json).
+
+  A manifest's meaning is its PARSED structure, not its exact bytes, so
+  serialization drift — unicode escaping (`\\u00f6` vs `ö`), whitespace, or key
+  order — is not a real conflict, and a per-key three-way merge also reconciles
+  disjoint semantic edits (an upstream `version` bump alongside a local additive
+  entry, say). Returns the merged manifest bytes, or None when ours and theirs
+  genuinely overlap, in which case the caller routes to the owner resolver.
+  Fail-safe: any irreconcilable value returns None, so a real local edit is
+  never dropped.
+
+  This subsumes the old version-only special case: a pure version bump is just
+  the shape where only `theirs` changed one scalar. Byte reuse minimises churn —
+  when the merged structure equals one side's parse we return that side's
+  original bytes (preferring upstream, which heals accumulated drift); only a
+  genuinely combined result is re-serialised, with one deterministic policy.
   """
   try:
+    b = json.loads(base)
     o = json.loads(ours)
     t = json.loads(theirs)
   except (ValueError, TypeError):
     return None
-  if not isinstance(o, dict) or not isinstance(t, dict):
+  if not (isinstance(b, dict) and isinstance(o, dict) and isinstance(t, dict)):
     return None
-  if "version" not in o or "version" not in t or o["version"] == t["version"]:
+  # Upstream owns the top-level release version, including its presence. Keep
+  # it outside the ordinary merge so a local deletion cannot remove it and an
+  # upstream deletion cannot conflict with a local bump. Nested versions merge
+  # normally; originals remain intact for byte reuse.
+  merged = _merge_json_value(*(
+    {key: value for key, value in side.items() if key != "version"}
+    for side in (b, o, t)
+  ))
+  if merged is _JSON_CONFLICT or not isinstance(merged, dict):
     return None
-  o_rest = {k: v for k, v in o.items() if k != "version"}
-  t_rest = {k: v for k, v in t.items() if k != "version"}
-  if o_rest != t_rest:
-    return None
-  return theirs
+  if "version" in t:
+    merged["version"] = t["version"]
+  # Byte reuse minimises churn and heals drift: reuse a side's ORIGINAL bytes
+  # only when the merged structure matches that side's ORIGINAL parse (so the
+  # reused bytes can't carry a stale version). Prefer upstream. Otherwise the
+  # result genuinely combines both sides — serialise it deterministically.
+  if _json_values_equal(merged, t):
+    return theirs
+  if _json_values_equal(merged, o):
+    return ours
+  return (json.dumps(merged, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
 
 
 def _resolve_source_version(base: bytes, ours: bytes, theirs: bytes) -> bytes | None:
@@ -4070,13 +4153,16 @@ def _resolve_source_version(base: bytes, ours: bytes, theirs: bytes) -> bytes | 
   return _three_way_merge_file(base, b"".join(ours_lines), theirs)
 
 
-def _resolve_version_only_file(
+def _resolve_benign_conflict_file(
   rel: str, base: bytes, ours: bytes, theirs: bytes
 ) -> bytes | None:
-  """One conflicting file resolved to upstream's version, or None when the
-  conflict is not confined to the version identifier."""
+  """One conflicting file auto-resolved, or None when it needs the owner.
+
+  JSON manifests get a full structural three-way merge (serialization drift and
+  disjoint edits reconcile; true overlap does not). Other source files keep the
+  narrow APP_VERSION-only line resolution."""
   if rel.rsplit("/", 1)[-1] in _JSON_MANIFESTS:
-    return _resolve_json_version(base, ours, theirs)
+    return _resolve_json_manifest(base, ours, theirs)
   return _resolve_source_version(base, ours, theirs)
 
 
@@ -4103,11 +4189,12 @@ def _three_way_merge_file(
 
 
 @dataclass
-class VersionOnlyResolution:
-  """Result of auto-resolving a version-only conflict.
+class BenignResolution:
+  """Result of auto-resolving a conflict that carries no genuine overlap.
 
-  `tree` is the full merged source tree (repo-relative path -> bytes) with the
-  version taken from upstream; `tree_oid` is the merge-tree oid it was built
+  `tree` is the full merged source tree (repo-relative path -> bytes) with each
+  benign conflict resolved (a JSON manifest structurally merged, a source file's
+  APP_VERSION taken from upstream); `tree_oid` is the merge-tree oid it was built
   from, so the caller can read exec bits off the same tree the clean-merge path
   uses (`read_tree_exec_paths`) rather than approximating from a branch.
   """
@@ -4115,21 +4202,22 @@ class VersionOnlyResolution:
   tree_oid: str
 
 
-def resolve_version_only_conflict(
+def resolve_benign_conflict(
   source_dir: str | Path, conflict_paths: list[str]
-) -> VersionOnlyResolution | None:
-  """Full merged source tree with a VERSION-ONLY conflict resolved to upstream,
-  or None when the conflict is not confined to the version line.
+) -> BenignResolution | None:
+  """Full merged source tree with every BENIGN conflict auto-resolved, or None
+  when any conflicting file carries a genuine overlap.
 
-  Call only after `merge_upstream` verdicted a conflict. We PROVE the conflict
-  is version-only rather than assume it: for every conflicting file we normalise
-  ours's version line to upstream's and re-run the three-way FILE merge. If they
-  all merge clean, the version label was the sole conflict and we return the
-  whole merged tree (non-conflict files carry their clean three-way merge; the
-  conflicting files carry the version-normalised merge). If any file still
-  conflicts — a real code clash — we return None and the caller falls back to
-  the owner-resolver flow. Fail-safe by construction: a genuine local edit is
-  never silently dropped, because a residual conflict aborts the whole attempt.
+  Call only after `merge_upstream` verdicted a conflict. We PROVE each conflict
+  is benign rather than assume it: JSON manifests get a structural three-way
+  merge (serialization drift and disjoint edits reconcile; true overlap does
+  not), and other source files get the narrow APP_VERSION-only line resolution.
+  If every conflicting file resolves, we return the whole merged tree
+  (non-conflict files carry their clean three-way merge; conflicting files carry
+  the reconciled result). If any file still carries a real clash we return None
+  and the caller falls back to the owner-resolver flow. Fail-safe by
+  construction: a genuine local edit is never silently dropped, because a
+  residual conflict aborts the whole attempt.
   """
   repo = Path(source_dir)
   if not conflict_paths:
@@ -4169,17 +4257,17 @@ def resolve_version_only_conflict(
     ours = read_blob(repo, LOCAL_BRANCH, rel)
     theirs = read_blob(repo, UPSTREAM_BRANCH, rel)
     base_blob = read_blob(repo, base_ref, rel)
-    # An add/add or delete conflict (a side missing the file) is not the
-    # version-bump shape; leave it to the owner.
+    # An add/add or delete conflict (a side missing the file) is not a benign
+    # shape we reconcile here; leave it to the owner.
     if ours is None or theirs is None or base_blob is None:
       return None
-    merged = _resolve_version_only_file(rel, base_blob, ours, theirs)
+    merged = _resolve_benign_conflict_file(rel, base_blob, ours, theirs)
     if merged is None:
       return None
     resolved[rel] = merged
   full = read_merged_tree(repo, tree_oid)
   full.update(resolved)
-  return VersionOnlyResolution(tree=full, tree_oid=tree_oid)
+  return BenignResolution(tree=full, tree_oid=tree_oid)
 
 
 # Smells

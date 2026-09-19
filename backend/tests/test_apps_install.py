@@ -3341,7 +3341,7 @@ def test_version_only_conflict_auto_resolves_to_upstream(
   """A conflict CONFINED to the app's version identifier must NOT spawn a
   resolver: install auto-resolves it to the upstream version and returns
   mode='update'. This exercises the full wiring (install_from_manifest →
-  app_git.resolve_version_only_conflict), not just the git helper."""
+  app_git.resolve_benign_conflict), not just the git helper."""
   base = "https://ver-only.test/repo/"
   m = {**MANIFEST_NEWS, "id": "ver-only"}
   jsx_v1 = (
