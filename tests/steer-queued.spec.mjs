@@ -510,13 +510,26 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
       }
 
       queueCount += 1
+      const ts = 990000 + queueCount
       return route.fulfill({
         status: 202,
         contentType: 'application/json',
         body: JSON.stringify({
           status: 'queued',
-          ts: 990000 + queueCount,
+          ts,
           position: queueCount,
+          // Echo a canonical pending_message like the other queued-response
+          // fixtures in this file: without it, usePendingQueue's confirmQueued
+          // path treats the ack as an "older backend" and ChatView falls back
+          // to fetchMessages({force:true}) — an unmocked GET against the real
+          // backend for this drawer-created (but message-mock-only) chat.
+          // That real fetch returns pending_messages:[] (nothing was actually
+          // persisted server-side) and hydrate() then drops the just-confirmed
+          // local row entirely (no preserveMissing), flapping the tray and
+          // detaching the row-action button mid-click.
+          pending_message: {
+            role: 'user', content: body.content, ts, cid: body.cid,
+          },
         }),
       })
     })
