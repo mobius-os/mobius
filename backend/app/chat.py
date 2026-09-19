@@ -1825,7 +1825,7 @@ def _auto_resume_run_token(park_token: str) -> str:
 
 
 MODEL_CAPACITY_RETRY_DELAYS = tuple(
-  timedelta(seconds=seconds) for seconds in (30, 60, 120, 240, 300)
+  timedelta(seconds=seconds) for seconds in (60,)
 )
 
 
@@ -1844,7 +1844,7 @@ def _model_capacity_retry_count(db: Session, run: models.ChatRun) -> int:
 
 
 def _model_capacity_retry_exhausted(db: Session, run: models.ChatRun) -> bool:
-  """Bound automatic busy-model recovery to five attempts with backoff."""
+  """Allow one automatic busy-model recovery, then return ownership."""
   return _model_capacity_retry_count(db, run) >= len(
     MODEL_CAPACITY_RETRY_DELAYS
   )
@@ -3802,7 +3802,7 @@ def _park_exit(
       retry_count = _model_capacity_retry_count(db, current_run)
     if retry_count >= len(MODEL_CAPACITY_RETRY_DELAYS):
       sink.publish(_pause_note(
-        "The selected model is still busy after five automatic retries. "
+        "The selected model is still busy after one automatic retry. "
         "Choose another model, then tap Resume to continue your saved work.",
         kind="model_capacity_exhausted",
         provider=provider_id,

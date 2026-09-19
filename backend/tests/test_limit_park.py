@@ -3030,6 +3030,51 @@ def test_sweep_continues_a_memory_park_without_the_limit_opt_in(
     chat_mod.discard_starting("sweep-memory")
 
 
+def test_model_capacity_sweep_continues_once_then_returns_ownership(
+  owner_token, monkeypatch,
+):
+  """Exercise the real park sweep, continuation lineage, and exhaustion."""
+  del owner_token
+  notified = []
+  monkeypatch.setattr(
+    "app.push.notify_owner_async",
+    _async_notify(lambda db, owner_id, **kw: notified.append(kw) or "n"),
+  )
+  scheduled = []
+  monkeypatch.setattr(
+    chat_mod, "_schedule_continuation", lambda **kw: scheduled.append(kw),
+  )
+  monkeypatch.setattr(chat_mod, "_limit_auto_resume_now", lambda: 10**9)
+  cid = "sweep-model-capacity"
+  root_token = f"rt-{cid}"
+  _due_park(
+    cid, root_token, auto_resume=False, park_reason="model_capacity",
+  )
+
+  try:
+    assert _run_sweep() == [cid]
+    assert len(scheduled) == 1
+    resumed_token = scheduled[0]["run_token"]
+    assert _run_row(resumed_token)["status"] == "running"
+    assert notified == []
+
+    sink = _Sink()
+    sink.run_token = resumed_token
+    with SessionLocal() as db:
+      result = chat_mod._park_exit(
+        sink,
+        {"error": "Selected model is at capacity. Please try a different model."},
+        "Selected model is at capacity. Please try a different model.",
+        db=db,
+      )
+
+    assert result == {"parked": False}
+    assert sink.events[-1]["pause"]["kind"] == "model_capacity_exhausted"
+    assert "one automatic retry" in sink.events[-1]["message"]
+  finally:
+    chat_mod.discard_starting(cid)
+
+
 def test_app_initiated_resource_park_preserves_attribution(
   owner_token, monkeypatch,
 ):
@@ -3089,7 +3134,7 @@ def test_admission_deferral_parks_the_run_instead_of_failing_it(owner_token):
   assert tail["blocks"][-1]["pause"]["kind"] == "memory"
 
 
-def test_model_capacity_retry_policy_allows_five_automatic_resumes(db, chat):
+def test_model_capacity_retry_policy_allows_one_automatic_resume(db, chat):
   from datetime import UTC, datetime, timedelta
   base = datetime.now(UTC).replace(tzinfo=None)
   runs = [
@@ -3101,48 +3146,35 @@ def test_model_capacity_retry_policy_allows_five_automatic_resumes(db, chat):
       park_reason="model_capacity",
       started_at=base + timedelta(seconds=index),
     )
-    for index in range(6)
+    for index in range(2)
   ]
   db.add_all(runs)
   db.commit()
 
   assert [
     chat_mod._model_capacity_retry_count(db, run) for run in runs
-  ] == list(range(6))
-  assert all(
-    chat_mod._model_capacity_retry_exhausted(db, run) is False
-    for run in runs[:5]
-  )
-  assert chat_mod._model_capacity_retry_exhausted(db, runs[5]) is True
+  ] == [0, 1]
+  assert chat_mod._model_capacity_retry_exhausted(db, runs[0]) is False
+  assert chat_mod._model_capacity_retry_exhausted(db, runs[1]) is True
 
 
-def test_model_capacity_retry_delays_back_off_and_remain_bounded():
+def test_model_capacity_retry_delay_is_one_minute_and_bounded():
   delays = chat_mod.MODEL_CAPACITY_RETRY_DELAYS
 
-  assert len(delays) == 5
-  assert delays == tuple(sorted(delays))
-  assert delays[0] == timedelta(seconds=30)
-  assert delays[-1] == timedelta(minutes=5)
+  assert delays == (timedelta(minutes=1),)
 
 
-def test_model_capacity_sixth_failure_becomes_manual_resume(db, chat):
+def test_model_capacity_second_failure_becomes_manual_resume(db, chat):
   base = datetime.now(UTC).replace(tzinfo=None)
-  prior = [
-    chat_mod.models.ChatRun(
-      id=f"capacity-prior-{index}",
-      root_run_id=None if index == 0 else "capacity-prior-0",
-      chat_id=chat.id,
-      status="completed",
-      park_reason="model_capacity",
-      started_at=base + timedelta(seconds=index),
-    )
-    for index in range(5)
-  ]
+  prior = chat_mod.models.ChatRun(
+    id="capacity-prior-0", chat_id=chat.id, status="completed",
+    park_reason="model_capacity", started_at=base,
+  )
   current = chat_mod.models.ChatRun(
     id="capacity-current", root_run_id="capacity-prior-0", chat_id=chat.id,
-    status="running", started_at=base + timedelta(seconds=5),
+    status="running", started_at=base + timedelta(seconds=1),
   )
-  db.add_all([*prior, current])
+  db.add_all([prior, current])
   db.commit()
   sink = _Sink()
   sink.run_token = current.id
@@ -3156,4 +3188,4 @@ def test_model_capacity_sixth_failure_becomes_manual_resume(db, chat):
 
   assert kwargs == {"parked": False}
   assert sink.events[-1]["pause"]["kind"] == "model_capacity_exhausted"
-  assert "five automatic retries" in sink.events[-1]["message"]
+  assert "one automatic retry" in sink.events[-1]["message"]

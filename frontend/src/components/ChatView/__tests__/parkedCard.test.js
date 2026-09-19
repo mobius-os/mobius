@@ -145,7 +145,7 @@ test('a busy selected-model card explains its short automatic retry', (t) => {
     },
   }))
   assert.match(html, /Trying again/)
-  assert.match(html, /up to five times/)
+  assert.match(html, /once more in about a minute/)
   assert.match(html, /choose another model/)
   assert.doesNotMatch(html, /Paid extra usage|Turn on auto-continue/)
 })
@@ -154,14 +154,14 @@ test('an exhausted busy-model card stops promising retries and offers Resume', (
   const html = renderToStaticMarkup(createElement(MsgContent, {
     msg: { role: 'assistant', content: '', blocks: [{
       type: 'error', resumable: true,
-      message: 'The selected model is still busy after five automatic retries.',
+      message: 'The selected model is still busy after one automatic retry.',
       pause: { kind: 'model_capacity_exhausted' },
     }] },
     isLastMsg: true,
     onResume() {},
   }))
   assert.match(html, /Model still busy/)
-  assert.match(html, /Five automatic retries were used/)
+  assert.match(html, /One automatic retry was used/)
   assert.match(html, />Resume<\/button>/)
   assert.doesNotMatch(html, /Trying again/)
 })
