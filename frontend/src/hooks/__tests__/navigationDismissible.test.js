@@ -164,12 +164,17 @@ function sessionHistory({ wedged = false, navigationApi = true } = {}) {
   }
 }
 
-async function mountNavigation(engine) {
+async function mountNavigation(engine, { tab = { kind: 'chat', id: 'c1' }, frames = null } = {}) {
   globalThis.window = engine.win
   globalThis.location = engine.win.location
   globalThis.localStorage = memoryStorage()
   globalThis.sessionStorage = memoryStorage()
   globalThis.history = engine.history
+  globalThis.requestAnimationFrame = frames?.request || (callback => {
+    callback()
+    return 1
+  })
+  globalThis.cancelAnimationFrame = frames?.cancel || (() => {})
   if (engine.navigation) globalThis.navigation = engine.navigation
   else delete globalThis.navigation
 
@@ -178,7 +183,7 @@ async function mountNavigation(engine) {
     import('../../components/Shell/paneModel.js'),
   ])
 
-  const ws = paneModel.seedFromFlatTabs([{ kind: 'chat', id: 'c1' }])
+  const ws = { ...paneModel.seedFromFlatTabs([tab]), singleScreen: tab }
   const workspaceStateRef = { current: { ws, undo: null } }
   // The wedged engine reports every failed mirror write through the shared
   // client-error logger; keep that console noise out of the test output.
@@ -198,6 +203,35 @@ async function mountNavigation(engine) {
     console.error = consoleError
   }
 }
+
+test('an app-origin drawer waits through one painted frame before history opens', async () => {
+  const engine = sessionHistory()
+  const queued = []
+  const frames = {
+    request(callback) {
+      queued.push(callback)
+      return queued.length
+    },
+    cancel() {},
+  }
+  const { result } = await mountNavigation(engine, {
+    tab: { kind: 'app', id: '119' },
+    frames,
+  })
+  const historyKindBeforeOpen = engine.currentKind
+
+  result.current.openDrawer()
+  assert.equal(result.current.drawerOpen, false)
+  assert.equal(engine.currentKind, historyKindBeforeOpen, 'preparation does not mutate history')
+
+  queued.shift()()
+  assert.equal(result.current.drawerOpen, false, 'the first callback precedes the painted boundary')
+  assert.equal(engine.currentKind, historyKindBeforeOpen)
+
+  queued.shift()()
+  assert.equal(result.current.drawerOpen, true)
+  assert.equal(engine.currentKind, 'drawer', 'the original history sentinel opens afterwards')
+})
 
 test('an explicit close dismisses before the engine answers, and stays closed when it does', async () => {
   const engine = sessionHistory({ wedged: true })

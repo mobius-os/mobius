@@ -186,6 +186,10 @@ export default function useNavigation({
   // An explicit tap/swipe close can start the panel transition immediately
   // while drawerOpenRef remains true until Back consumes the drawer sentinel.
   const [drawerVisible, setDrawerVisible] = useState(false)
+  // Android's embedded-surface hit-test map can lag the input that opens the
+  // drawer. When opening over an app, wait through one painted frame before
+  // exposing the scrim so that input/compositor ownership settles first. The
+  // app stays rendered throughout; this is only a private timing boundary.
 
   // ── Derived legacy triple (the projection, design §1) ────────────────────
   // World-aware (two-worlds design): the single world's slot in single mode, the
@@ -254,6 +258,8 @@ export default function useNavigation({
   // boundary; coupling it back to the visual state made an early close render
   // turn the subsequent drawer-sentinel Back into ordinary navigation.
   const drawerOpenRef = useRef(false)
+  const drawerPreparingRef = useRef(false)
+  const drawerPrepareRafRef = useRef(0)
   // The PAINTED Settings takeover for a given workspace snapshot — the render-time
   // `overlayShowing` above, generalized to any `ws` and read from the ref for the
   // async callbacks below. The takeover only PAINTS where the world is single (or
@@ -599,6 +605,9 @@ export default function useNavigation({
     if (drawerOpenAfterCloseTimerRef.current) {
       clearTimeout(drawerOpenAfterCloseTimerRef.current)
     }
+    if (drawerPrepareRafRef.current) {
+      cancelAnimationFrame(drawerPrepareRafRef.current)
+    }
   }, [])
 
   function openDrawer() {
@@ -607,6 +616,22 @@ export default function useNavigation({
     // left root edge otherwise surfaces the drawer over the drop target instead
     // of splitting a left pane (owner report, live testing).
     if (drawerOpenBlockedByDrag(dragActiveRef?.current)) return
+    if (activeViewRef.current === 'canvas') {
+      if (drawerPreparingRef.current) return
+      drawerPreparingRef.current = true
+      drawerPrepareRafRef.current = requestAnimationFrame(() => {
+        drawerPrepareRafRef.current = requestAnimationFrame(() => {
+          drawerPrepareRafRef.current = 0
+          drawerPreparingRef.current = false
+          commitDrawerOpen()
+        })
+      })
+      return
+    }
+    commitDrawerOpen()
+  }
+
+  function commitDrawerOpen() {
     // A close owns an asynchronous history traversal. Do not "re-adopt" the
     // sentinel while that traversal is unresolved: the cursor may already have
     // left it even though popstate has not run, and treating the boolean flag as
