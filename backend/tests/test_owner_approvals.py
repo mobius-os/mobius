@@ -586,6 +586,32 @@ def test_helper_preserves_bounded_deterministic_rejection_detail(monkeypatch):
   assert "Fix the stated conflict" in str(exc.value)
 
 
+def test_helper_preserves_structured_restart_rejection_detail(monkeypatch):
+  import io
+  from urllib.error import HTTPError
+  from tests.test_platform_tools import _control_module
+
+  helper = _control_module()._APPROVALS
+  for name in ("API_BASE_URL", "AGENT_TOKEN", "CHAT_ID", "MOBIUS_RUN_TOKEN"):
+    monkeypatch.setenv(name, "test-value")
+  monkeypatch.setenv("API_BASE_URL", "http://testserver")
+
+  def reject(request, timeout):
+    raise HTTPError(
+      request.full_url, 409, "Conflict", {}, io.BytesIO(json.dumps({
+        "detail": {
+          "code": "restart_source_must_be_committed",
+          "message": "Möbius could not bind a Restart card to exact committed source.",
+        },
+      }).encode()),
+    )
+
+  monkeypatch.setattr(helper, "urlopen", reject)
+  with pytest.raises(SystemExit, match="restart_source_must_be_committed") as exc:
+    helper.request_restart()
+  assert "exact committed source" in str(exc.value)
+
+
 def test_stop_winning_answer_admission_does_not_queue_a_continuation(
   client, chat, auth, approval_run, monkeypatch,
 ):
