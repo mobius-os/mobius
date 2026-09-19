@@ -90,6 +90,23 @@ async function setupShellBasics(page) {
       body: JSON.stringify({ ok: true }),
     })
   )
+  // With an empty GET /api/chats list (setupAppRoutes below), Shell's
+  // bootstrap effect auto-creates a starter chat via POST /api/chats. The
+  // blanket catch-all above answers that with a 204 + empty body, which
+  // fails response.json() (a 204 has no body) and surfaces as "Couldn't
+  // start a new chat" instead of ever settling into the requested app view.
+  await page.route(/\/api\/chats$/, route => {
+    if (route.request().method() !== 'POST') return route.fallback()
+    return route.fulfill({
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        id: 'bootstrap-chat', title: 'New chat', messages: [],
+        pending_messages: [], total: 0, offset: 0, running: false,
+        pending_question_id: null, runtime_revision: 0,
+      }),
+    })
+  })
   // connectivityStore.js's probeReadiness() fetches /api/ready and requires
   // body.ready === true (plus a boot_id) before treating the app as
   // delivery-ready; the blanket '/api/' catch-all above only returns '{}'
