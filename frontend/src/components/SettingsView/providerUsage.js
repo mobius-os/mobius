@@ -115,17 +115,20 @@ export function providerExtraUsage(snapshot) {
 
 export function providerAllowance(provider, snapshot) {
   const kind = provider === 'mobius' ? 'api_credits' : 'weekly'
-  const label = kind === 'api_credits' ? 'API credits usage' : 'Weekly usage'
+  const fallbackLabel = kind === 'api_credits' ? 'API credits usage' : 'Weekly usage'
   if (snapshot?.state !== 'ready' || !Array.isArray(snapshot.windows)) {
     return {
       kind,
-      label,
+      label: fallbackLabel,
       usedPercent: null,
       expiresAt: null,
     }
   }
   const window = snapshot.windows.find(candidate => candidate?.kind === kind)
   const used = window?.used_percent == null ? Number.NaN : Number(window.used_percent)
+  const label = provider === 'codex' && window?.label === '7-day'
+    ? '7-day usage'
+    : fallbackLabel
   return {
     kind,
     label,
