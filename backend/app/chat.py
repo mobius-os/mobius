@@ -1824,6 +1824,17 @@ def _auto_resume_run_token(park_token: str) -> str:
   return f"{_AUTO_RESUME_RUN_PREFIX}{digest}"
 
 
+def _model_capacity_retry_exhausted(db: Session, run: models.ChatRun) -> bool:
+  """Stop automatic busy-model retries after the first resumed attempt."""
+  root_id = run.root_run_id or run.id
+  return db.query(models.ChatRun.id).filter(
+    models.ChatRun.chat_id == run.chat_id,
+    models.ChatRun.root_run_id == root_id,
+    models.ChatRun.park_reason == "model_capacity",
+    models.ChatRun.started_at < run.started_at,
+  ).first() is not None
+
+
 def _auto_resume_recovery(
   db: Session,
   chat: models.Chat | None,
@@ -1879,6 +1890,8 @@ def _auto_resume_recovery(
     or latest[0] != physical.id
     or (physical.root_run_id or physical.id) != (park.root_run_id or park.id)
   ):
+    return None
+  if reason == "model_capacity" and _model_capacity_retry_exhausted(db, park):
     return None
   payload = recover_start_continuation(
     db,
@@ -2374,6 +2387,8 @@ async def sweep_reset_parks(
       return "app-attributed work"
     if _has_unanswered_question(chat):
       return "waiting for an answer"
+    if run.park_reason == "model_capacity" and _model_capacity_retry_exhausted(db, run):
+      return "busy-model retry exhausted"
     policy_enabled = (
       _park_continues_automatically(chat, run)
       or delegation_resume_app_id is not None

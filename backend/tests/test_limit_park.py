@@ -3087,3 +3087,21 @@ def test_admission_deferral_parks_the_run_instead_of_failing_it(owner_token):
   tail = _chat_row(cid)["messages"][-1]
   assert tail["role"] == "assistant"
   assert tail["blocks"][-1]["pause"]["kind"] == "memory"
+
+
+def test_model_capacity_retry_policy_allows_one_automatic_resume(db, chat):
+  from datetime import UTC, datetime, timedelta
+  base = datetime.now(UTC).replace(tzinfo=None)
+  first = chat_mod.models.ChatRun(
+    id="capacity-first", root_run_id="capacity-root", chat_id=chat.id,
+    status="completed", park_reason="model_capacity", started_at=base,
+  )
+  second = chat_mod.models.ChatRun(
+    id="capacity-second", root_run_id="capacity-root", chat_id=chat.id,
+    status="parked", park_reason="model_capacity", started_at=base + timedelta(seconds=1),
+  )
+  db.add_all([first, second])
+  db.commit()
+
+  assert chat_mod._model_capacity_retry_exhausted(db, first) is False
+  assert chat_mod._model_capacity_retry_exhausted(db, second) is True
