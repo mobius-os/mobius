@@ -10,6 +10,10 @@
  * end-to-end to catch any regression specific to that flow.
  */
 import { test, expect } from '@playwright/test'
+import { attachCleanup } from './_chatTracker.mjs'
+import { createChat, sendMessage as sharedSendMessage, waitForChatShell } from './_chatSession.mjs'
+
+attachCleanup()
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
 const STREAM_ROUTE = /\/api\/chats\/[0-9a-f-]+\/stream$/
@@ -39,41 +43,19 @@ async function setupWithSSE(page, events, viewport = { width: 412, height: 915 }
   await replaceStreamRoute(page, events)
 
   await page.goto(BASE, { waitUntil: 'domcontentloaded' })
-  await page.waitForFunction(
-    () => !!(document.querySelector('[data-chat-surface="painted"] .chat__empty-wrap')
-          || document.querySelector('[data-chat-surface="painted"] .chat__scroll')
-          || document.querySelector('[data-chat-surface="painted"] .chat__form')),
-    { timeout: 10000 }
-  )
+  await waitForChatShell(page)
 }
 
+// Creates the chat via the API rather than clicking through the drawer's
+// New Chat button — see tests/_chatSession.mjs. This file's tests are about
+// the second-send pin behavior, not the drawer's own open/close UI, so the
+// API-created pattern is a strict improvement here.
 async function newChat(page) {
-  await page.evaluate(() => {
-    const btn = document.querySelector('[aria-expanded]')
-    if (btn && btn.getAttribute('aria-expanded') !== 'true') btn.click()
-  })
-  await page.waitForFunction(
-    () => !!document.querySelector('.drawer--open'),
-    { timeout: 3000 }
-  )
-  await page.evaluate(() => {
-    const newChatBtn = document.querySelector('.drawer__item--new')
-    if (newChatBtn) newChatBtn.click()
-  })
-  await page.waitForFunction(
-    () => !document.querySelector('.drawer--open'),
-    { timeout: 3000 }
-  )
+  await createChat(page, 'second-send-pin', { waitFor: 'empty-wrap' })
 }
 
 async function sendMessage(page, text) {
-  const input = page.getByRole('textbox', { name: 'Message Möbius…' })
-  await input.fill(text)
-  await page.keyboard.press('Enter')
-  await expect(page.locator('[data-chat-surface="painted"] .chat__scroll')).toBeVisible({ timeout: 3000 })
-  await page.evaluate(() => new Promise(r =>
-    requestAnimationFrame(() => requestAnimationFrame(r))
-  ))
+  await sharedSendMessage(page, text, { wait: 'scroll', timeout: 3000 })
 }
 
 /** Engage FOLLOW_BOTTOM via a real gesture (pointerdown + scroll to the

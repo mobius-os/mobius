@@ -59,6 +59,7 @@ async function setupGallery(page, viewport) {
         offset: 0,
         running: false,
         pending_messages: [],
+        runtime_revision: 0,
       }),
     })
   })

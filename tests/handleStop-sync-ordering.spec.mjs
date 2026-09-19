@@ -39,10 +39,14 @@ async function setupChat(page) {
 }
 
 async function newChat(page) {
-  await page.evaluate(() => {
-    const btn = document.querySelector('[aria-expanded]')
-    if (btn && btn.getAttribute('aria-expanded') !== 'true') btn.click()
-  })
+  // The real nav toggle is ShellBrand's "Toggle navigation" button — a
+  // specific accessible-name locator instead of the generic
+  // `[aria-expanded]` selector (which would match the first element
+  // anywhere in the DOM with that attribute, not necessarily this button).
+  const navToggle = page.getByRole('button', { name: 'Toggle navigation' })
+  if ((await navToggle.getAttribute('aria-expanded')) !== 'true') {
+    await navToggle.click()
+  }
   await page.waitForFunction(
     () => !!document.querySelector('.drawer--open'),
     { timeout: 3000 }

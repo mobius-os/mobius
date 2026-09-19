@@ -30,6 +30,10 @@
  * Mirrors tests/second-send-pin.spec.mjs's route-mock SSE flow.
  */
 import { test, expect } from '@playwright/test'
+import { attachCleanup } from './_chatTracker.mjs'
+import { createChat, sendMessage as sharedSendMessage, waitForChatShell } from './_chatSession.mjs'
+
+attachCleanup()
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
 
@@ -40,12 +44,7 @@ async function setup(page, viewport = { width: 412, height: 915 }) {
   await page.route('**/api/chat/stop', route =>
     route.fulfill({ status: 200, body: '{}' }))
   await page.goto(BASE, { waitUntil: 'domcontentloaded' })
-  await page.waitForFunction(
-    () => !!(document.querySelector('[data-chat-surface="painted"] .chat__empty-wrap')
-          || document.querySelector('[data-chat-surface="painted"] .chat__scroll')
-          || document.querySelector('[data-chat-surface="painted"] .chat__form')),
-    undefined,
-    { timeout: 10000 })
+  await waitForChatShell(page)
 }
 
 /** Swap in an SSE response body for the next stream the app opens. */
@@ -94,34 +93,21 @@ async function installChunkedStreams(page, streams) {
   }, streams)
 }
 
+// Creates the chat via the API rather than clicking through the drawer's
+// New Chat button — see tests/_chatSession.mjs. This file's tests are about
+// the pin/clamp scroll behavior, not the drawer's own open/close UI, so the
+// API-created pattern is a strict improvement here.
 async function newChat(page) {
-  await page.evaluate(() => {
-    const btn = document.querySelector('[aria-expanded]')
-    if (btn && btn.getAttribute('aria-expanded') !== 'true') btn.click()
-  })
-  await page.waitForFunction(
-    () => !!document.querySelector('.drawer--open'),
-    undefined,
-    { timeout: 3000 },
-  )
-  await page.evaluate(() => document.querySelector('.drawer__item--new')?.click())
-  await page.waitForFunction(
-    () => !document.querySelector('.drawer--open'),
-    undefined,
-    { timeout: 3000 },
-  )
+  await createChat(page, 'pin-clamp-settle', { waitFor: 'empty-wrap' })
 }
 
 async function sendMessage(page, text) {
-  const input = page.getByRole('textbox', { name: 'Message Möbius…' })
   const previousCount = await page.locator('[data-chat-surface="painted"] .chat__msg--user').count()
-  await input.fill(text)
-  await page.keyboard.press('Enter')
-  await expect(page.locator('[data-chat-surface="painted"] .chat__scroll')).toBeVisible({ timeout: 3000 })
   // `.chat__scroll` already exists after the first exchange. Waiting only for
   // that container lets a busy CI worker measure the previous user message
   // before React commits the new pinned row. Synchronize on the state this
   // helper is responsible for creating, then allow the pin's layout pass.
+  await sharedSendMessage(page, text, { wait: 'scroll', timeout: 3000, settle: false })
   await expect(page.locator('[data-chat-surface="painted"] .chat__msg--user')).toHaveCount(previousCount + 1, {
     timeout: 3000,
   })

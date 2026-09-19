@@ -1618,23 +1618,41 @@ test.describe('Workspace view-mode toggle', () => {
     await expect(page.locator('.shell__chat-view.shell__view--active')).toHaveCount(1)
 
     // Wedge sequence: re-enter, then exit -> re-enter -> exit with sub-beat gaps.
-    // At no sampled moment may the two deal classes co-exist (mutual exclusion),
-    // and it must always settle collapsed.
+    // At no moment may the two deal classes co-exist (mutual exclusion), and it
+    // must always settle collapsed. The sub-beat gaps below (90ms/20ms/60ms) are
+    // deliberate gesture timing — they place the re-enter/exit presses inside the
+    // exit beat to reproduce the wedge race — so keep them; what changes is HOW
+    // the mutual-exclusion invariant is checked: a MutationObserver watching
+    // every class-list mutation for the whole sequence (the same continuous-
+    // observation pattern app-apply-lifecycle.spec.mjs uses for its frame-add
+    // watcher) instead of 3 point-in-time snapshots that could straddle the real
+    // overlap window under CI load.
+    await page.evaluate(() => {
+      window.__mobiusBuilderPhaseWitness = { sawBoth: false }
+      const observer = new MutationObserver(() => {
+        if (document.querySelectorAll('.shell--builder-exiting.shell--builder-entering').length > 0) {
+          window.__mobiusBuilderPhaseWitness.sawBoth = true
+        }
+      })
+      observer.observe(document.body, { attributes: true, attributeFilter: ['class'], subtree: true })
+      window.__mobiusBuilderPhaseWitness.observer = observer
+    })
     await brand.focus(); await page.keyboard.press('Shift+Enter') // enter builder
     await waitTiled(page)
-    let sawBothClasses = false
-    const sampleBoth = async () => {
-      if (await page.locator('.shell--builder-exiting.shell--builder-entering').count() > 0) sawBothClasses = true
-    }
     await brand.focus(); await page.keyboard.press('Shift+Enter') // exit1
-    await page.waitForTimeout(90); await sampleBoth()
+    await page.waitForTimeout(90)
     await brand.focus(); await page.keyboard.press('Shift+Enter') // re-enter within the exit beat
-    await page.waitForTimeout(20); await sampleBoth()
-    await page.waitForTimeout(60); await sampleBoth()
+    await page.waitForTimeout(20)
+    await page.waitForTimeout(60)
     await brand.focus(); await page.keyboard.press('Shift+Enter') // exit2
     await expect.poll(async () => (await readWs(page)).viewMode, { timeout: 3000 }).toBe('single')
     await expect(page.locator('.workspace__chrome')).toHaveCount(0)
     await expect(page.locator('.shell__view--paned')).toHaveCount(0)
+    const sawBothClasses = await page.evaluate(() => {
+      const witness = window.__mobiusBuilderPhaseWitness
+      witness?.observer?.disconnect()
+      return witness?.sawBoth ?? false
+    })
     expect(sawBothClasses, 'the exit and enter deal classes are mutually exclusive').toBe(false)
   })
 

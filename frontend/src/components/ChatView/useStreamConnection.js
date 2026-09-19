@@ -55,6 +55,10 @@ import {
   TEXT_REVEAL_MIN_COMMIT_MS,
   textRevealBudget,
 } from './streamCadence.js'
+import {
+  QUICK_WAKE_HIDDEN_MS,
+  BROADCAST_REGISTRATION_WINDOW_MS,
+} from './streamTiming.js'
 
 // Hard cap on the send POST. It normally returns 202 immediately. Keep this
 // above every bounded backend wait: aborting at 20s while a request was still
@@ -81,12 +85,6 @@ export async function retireInteractiveIntent({
   return retired ? false : outboxRetained
 }
 
-// A hidden tab that comes back inside this window is usually a glance at
-// the notification shade or an app switch. If the SSE socket has also read
-// recently, keep it: tearing down a healthy stream is what makes quiet tool
-// turns flash "Reconnecting…" on every foreground.
-const QUICK_WAKE_HIDDEN_MS = 5000
-
 // chats_stream.py sends keepalive SSE comments every 30s. Two missed
 // keepalives plus grace means a socket is no longer demonstrably healthy
 // and the long-standing frozen-tab reconnect defense should take over.
@@ -99,19 +97,6 @@ const FRESH_SSE_READ_MS = 70000
 // reconnecting note: the user did not initiate anything, and a baseline
 // comparison makes still-flowing keepalives a no-op.
 const KEPT_SOCKET_DEADMAN_MS = 40000
-
-// Window during which a 204 from /stream after a send is a race
-// (the SSE GET landed before chats_stream.py:POST /messages finished
-// registering the broadcast) rather than "agent finished." The POST
-// handler returns 202 only AFTER create_broadcast(chat_id) completes,
-// so any 204 outside this window genuinely means there's no active
-// turn left and the right move is a DB refresh. Inside the window,
-// schedule a quick reconnect instead — refreshing here would wipe
-// the optimistic user message before persistence catches up.
-//
-// 1.5s is the empirical headroom: round-trip + create_broadcast +
-// scheduler hop are well under that on local + remote prod traffic.
-const BROADCAST_REGISTRATION_WINDOW_MS = 1500
 
 /**
  * Hook that manages an SSE connection to /api/chats/{chatId}/stream.

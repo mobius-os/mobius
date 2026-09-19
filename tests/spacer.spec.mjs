@@ -9,7 +9,8 @@
  * Debug: scripts/playwright-local.sh --allow-local-e2e tests/spacer.spec.mjs --headed --debug
  */
 import { test, expect } from '@playwright/test'
-import { createTaggedChat, attachCleanup } from './_chatTracker.mjs'
+import { attachCleanup } from './_chatTracker.mjs'
+import { createChat, sendMessage as sharedSendMessage, waitForChatShell } from './_chatSession.mjs'
 import { mockAcceptedMessages } from './_mockAcceptedMessages.mjs'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
@@ -38,43 +39,24 @@ async function setup(page, viewport = { width: 412, height: 915 }) {
 
   // Auth is handled by the global setup (storageState).
   await page.goto(BASE, { waitUntil: 'domcontentloaded' })
-  await page.waitForFunction(
-    () => !!(document.querySelector('[data-chat-surface="painted"] .chat__empty-wrap')
-          || document.querySelector('[data-chat-surface="painted"] .chat__scroll')
-          || document.querySelector('[data-chat-surface="painted"] .chat__form')),
-    { timeout: 10000 }
-  )
+  await waitForChatShell(page)
 }
 
 /** Navigate to a new empty chat. */
 async function newChat(page) {
-  // Create a worker-tagged chat via the API so cleanupWorkerChats
-  // can find and delete it after the spec finishes. Navigate to that exact
-  // chat on the next shell mount. Clicking the drawer's New-chat action here
-  // races its cached chat list: it can reuse an older empty chat or create an
-  // untagged second row, which makes retries stateful and defeats cleanup.
-  const chat = await createTaggedChat(page)
-  if (!chat?.id) throw new Error('failed to create tagged test chat')
-  // The versioned workspace is authoritative over the legacy active-chat
-  // compatibility mirror. Use the supported explicit deep link so this helper
-  // really navigates to the chat even after a previous test engaged a workspace.
-  await page.goto(`${BASE}/shell/?chat=${encodeURIComponent(chat.id)}`, {
-    waitUntil: 'domcontentloaded',
-  })
-  await expect(page.locator('[data-chat-surface="painted"] .chat__empty-wrap')).toBeVisible({ timeout: 8000 })
+  // Create a worker-tagged chat via the API so cleanupWorkerChats can find
+  // and delete it after the spec finishes, then navigate to that exact chat
+  // on the next shell mount — see tests/_chatSession.mjs. Clicking the
+  // drawer's New-chat action here races its cached chat list: it can reuse
+  // an older empty chat or create an untagged second row, which makes
+  // retries stateful and defeats cleanup.
+  await createChat(page)
 }
 
 /** Type a message and press Enter.  Returns after React has rendered. */
 async function sendMessage(page, text) {
-  const input = page.getByRole('textbox', { name: 'Message Möbius…' })
-  await input.fill(text)
-  await page.keyboard.press('Enter')
   // Wait for the scroll container to appear (empty state -> chat state).
-  await expect(page.locator('[data-chat-surface="painted"] .chat__scroll')).toBeVisible({ timeout: 3000 })
-  // Two rAFs for React to flush layout effects.
-  await page.evaluate(() => new Promise(r =>
-    requestAnimationFrame(() => requestAnimationFrame(r))
-  ))
+  await sharedSendMessage(page, text, { wait: 'scroll', timeout: 3000 })
 }
 
 /** Wait for the terminal assistant row, not merely an already-absent Stop. */

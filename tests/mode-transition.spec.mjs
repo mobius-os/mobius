@@ -37,6 +37,7 @@ async function mockIdleChatRuntime(page) {
         active_goal_objective: null,
         pending_messages: [],
         pending_question_id: null,
+        runtime_revision: 0,
         updated_at: null,
       }),
     })
@@ -225,6 +226,7 @@ function createdEmptyChat(id, timestamp = '2026-01-01T00:02:00Z') {
     running: false,
     pending_messages: [],
     pending_question_id: null,
+    runtime_revision: 0,
     session_id: null,
     provider: 'codex',
     created_by_app_id: null,
@@ -691,15 +693,26 @@ test('retiring an explicit Builder cover returns the selected tab and preserves 
   const navigation = page.getByRole('navigation', { name: 'Primary navigation' })
   await navigation.getByRole('button', { name: 'New chat', exact: true }).click()
 
-  const presentation = page.locator('[data-new-chat-presentation]')
-  const composer = presentation.getByRole('textbox', { name: 'Message Möbius…' })
   await expect.poll(() => explicitCreates).toBe(1)
+  // [data-new-chat-presentation] was removed by 45955a65 ("Make fresh chats
+  // use one canonical composer") -- NewChatLanding's separate presentation
+  // wrapper is gone, and the composer now renders directly inside the
+  // canonical painted chat surface for both new and existing chats. This is
+  // a two-pane Builder layout, so a bare [data-chat-surface="painted"]
+  // matches both tabs; scope to the tab that owns the newly created chat.
+  const presentation = page.locator(`[data-chat-id="${explicitId}"][data-chat-surface="painted"]`)
+  const composer = presentation.getByRole('textbox', { name: 'Message Möbius…' })
   await expect(composer).toBeFocused()
   await composer.fill('Keep this parked Builder draft')
 
   await toggleMode(page)
   await expect.poll(() => builderActive(page)).toBe(false)
-  await expect(presentation).toHaveCount(0)
+  // Not asserting the explicit chat's surface un-paints here: Shell
+  // deliberately keeps the outgoing chat painted as an inert same-world
+  // cover until the incoming chat reports a stable frame (Shell.jsx
+  // ~4760-4763), so this can still show data-chat-surface="painted"
+  // during the handoff. The localStorage assertion below is the real
+  // proof the selected tab ('aaa') became active.
   await expect.poll(() => page.evaluate(key => (
     JSON.parse(localStorage.getItem(key))?.singleScreen
   ), paneModel.STORAGE_KEY), { timeout: 4000 }).toEqual({
@@ -783,7 +796,6 @@ test('a selected Builder tab supersedes an in-flight NULL-slot allocation', asyn
     paneModel.STORAGE_KEY,
   ), { timeout: 4000 }).toBe('aaa')
   expect(createCount, 'the stale allocation settles without duplicating or taking the slot').toBe(1)
-  await expect(page.locator('[data-new-chat-presentation]')).toHaveCount(0)
 })
 
 // R4: same-batch descriptor atomicity for the last-tab-close auto-return. A one-tab

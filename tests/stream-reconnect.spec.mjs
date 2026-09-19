@@ -12,6 +12,10 @@
  */
 import { test, expect } from '@playwright/test'
 import { streamSnapshotKey } from '../frontend/src/components/ChatView/streamSnapshotCache.js'
+import {
+  BROADCAST_REGISTRATION_WINDOW_MS,
+  QUICK_WAKE_HIDDEN_MS,
+} from '../frontend/src/components/ChatView/streamTiming.js'
 import { createTaggedChat, attachCleanup } from './_chatTracker.mjs'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
@@ -31,6 +35,22 @@ async function setupChat(page) {
   await page.route('**/api/chat/stop', route =>
     route.fulfill({ status: 200, body: '{}' })
   )
+  // connectivityStore.js's probeReadiness() fetches /api/ready and only
+  // marks delivery ready once the body reports ready:true (plus a boot_id).
+  // ChatView.doSend() queues instead of sending a fresh turn whenever
+  // deliveryDeferred (!getDeliveryReadySnapshot()) is still true, and that
+  // readiness probe is an async fetch racing the composer-idle-wait below --
+  // the composer can be enabled before the real /api/ready round trip
+  // settles, making send() land in the queue instead of starting the turn
+  // these tests expect. Same gap already fixed the same way in
+  // app-canvas.spec.mjs; mock it out so readiness is never in question.
+  await page.route(/\/api\/ready$/, route =>
+    route.fulfill({
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ready: true, boot_id: 'test-boot' }),
+    })
+  )
 
   await page.goto(BASE, { waitUntil: 'domcontentloaded' })
   await page.waitForFunction(
@@ -43,8 +63,22 @@ async function setupChat(page) {
   await page.goto(`${BASE}/shell/?chat=${encodeURIComponent(chat.id)}`, {
     waitUntil: 'domcontentloaded',
   })
+  // Wait for the composer to be genuinely idle, not just present. Right
+  // after navigating to a freshly created chat, the composer can briefly
+  // exist in the DOM before the app has settled into its idle state; a
+  // send() during that window lands as a queued message (composer believes
+  // a turn is already active) instead of the direct send these tests
+  // require, producing an intermittent "message never appears" failure
+  // unrelated to whatever the test is actually exercising.
   await page.waitForFunction(
-    () => !!document.querySelector('[data-chat-surface="painted"] .chat__form'),
+    () => {
+      const surface = document.querySelector('[data-chat-surface="painted"]')
+      const composer = surface?.querySelector('[aria-label="Message Möbius…"]')
+      return !!composer
+        && !composer.disabled
+        && !surface.querySelector('.chat__stop')
+        && !surface.querySelector('.queued__row')
+    },
     { timeout: 10000 },
   )
   return chat
@@ -189,6 +223,13 @@ test.describe('Stream reconnection', () => {
           ],
           total: 2,
           offset: 0,
+          // chatRuntimeState.js's runtimeSnapshot() returns null (and
+          // fetchMessages bails out before commitMessages) without a
+          // safe-integer runtime_revision -- the same stale-fixture gap
+          // fixed across ~21 other fixtures on this branch. Without it this
+          // refresh silently no-ops and the assertion below times out stuck
+          // on "Thinking".
+          runtime_revision: 1,
         }),
       })
     })
@@ -540,7 +581,7 @@ test.describe('Stream reconnection', () => {
     await page.waitForFunction(() => window.__streamFetchCount === 1)
 
     await setVisibility(page, 'hidden')
-    await page.waitForTimeout(5200)
+    await page.waitForTimeout(QUICK_WAKE_HIDDEN_MS + 200)
     await setVisibility(page, 'visible')
 
     await page.waitForFunction(() => window.__streamFetchCount === 2)
@@ -609,10 +650,29 @@ test.describe('Stream reconnection', () => {
     await page.waitForFunction(() => window.__streamFetchCount === 1)
 
     await setVisibility(page, 'hidden')
-    await page.waitForTimeout(5200)
+    await page.waitForTimeout(QUICK_WAKE_HIDDEN_MS + 200)
     await setVisibility(page, 'visible')
 
     await page.waitForFunction(() => window.__streamFetchCount === 2)
+    // KNOWN FAILURE (root-caused, not fixed here -- see task notes): the
+    // note armed by connectToStream's visibility-driven reconnect
+    // (useStreamConnection.js's armReconnectingNote(), called from onVisible)
+    // is reliably wiped a moment later by recoveryReconnectRef.current()'s
+    // unconditional clearReconnectingNote() (useStreamConnection.js around
+    // the recoveryReconnectRef definition). That ref fires whenever
+    // connectivityStore's shared recovery generation bumps -- which it does
+    // on this SAME visibilitychange, because connectivityStore's own
+    // visibility listener sets ready=false on hide and then re-probes
+    // /api/ready on show, and a false->true readiness flip bumps
+    // recoveryGeneration independent of any real stream failure. The
+    // recovery path's own connectRef.current?.(true) call afterward does not
+    // re-arm the note (connectionStaleRef is already false by then), so the
+    // note never renders at all -- this is not a timing-margin issue
+    // (confirmed via temporary console instrumentation: armReconnectingNote
+    // then clearReconnectingNote fire back-to-back). Widening this timeout
+    // does not help and is deliberately NOT done here; fixing the
+    // interaction is a production-code change in useStreamConnection.js
+    // that deserves its own careful pass, not a guess under this task.
     await expect(page.locator('[data-chat-surface="painted"] .connection-status--reattach')).toBeVisible({
       timeout: 3000,
     })
@@ -912,7 +972,7 @@ test.describe('Stream reconnection', () => {
     // the old response. Without the ownership guard, this makes the stale
     // connection take the terminal-204 branch immediately instead of entering
     // the registration-retry branch first.
-    await page.waitForTimeout(1750)
+    await page.waitForTimeout(BROADCAST_REGISTRATION_WINDOW_MS + 250)
 
     // NOW release the parked first stream as a stale 204. With the guard
     // it bails (abortRef no longer === its controller). Without the
@@ -1006,6 +1066,7 @@ test.describe('Stream reconnection', () => {
       active_goal_objective: GOAL,
       pending_messages: [],
       pending_question_id: QUESTION_ID,
+      runtime_revision: 0,
       updated_at: updatedAt,
     }
     const detail = {

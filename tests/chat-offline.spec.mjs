@@ -31,6 +31,7 @@ test('offline Send survives reload and drains into the chat once after reconnect
   const chat = { id: CHAT, title: 'Offline outbox fixture', provider: 'claude',
     ...testChatAgentSettings(), running: false, pending_messages: [],
     pending_question_id: null, recovery_run_id: null,
+    runtime_revision: 0,
     active_assistant_message_id: null, updated_at: '2026-09-12T00:00:00Z' }
   const chatPath = `/api/chats/${chat.id}`
   const messagePath = `${chatPath}/messages`

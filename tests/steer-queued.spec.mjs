@@ -43,10 +43,14 @@ async function setupChat(page) {
 }
 
 async function newChat(page) {
-  await page.evaluate(() => {
-    const btn = document.querySelector('[aria-expanded]')
-    if (btn && btn.getAttribute('aria-expanded') !== 'true') btn.click()
-  })
+  // The real nav toggle is ShellBrand's "Toggle navigation" button — a
+  // specific accessible-name locator instead of the generic
+  // `[aria-expanded]` selector (which would match the first element
+  // anywhere in the DOM with that attribute, not necessarily this button).
+  const navToggle = page.getByRole('button', { name: 'Toggle navigation' })
+  if ((await navToggle.getAttribute('aria-expanded')) !== 'true') {
+    await navToggle.click()
+  }
   await page.waitForFunction(
     () => !!document.querySelector('.drawer--open'),
     { timeout: 3000 }
@@ -59,10 +63,21 @@ async function newChat(page) {
     () => !document.querySelector('.drawer--open'),
     { timeout: 3000 }
   )
-  await page.waitForFunction(
-    () => !document.querySelector('[data-new-chat-presentation]'),
-    { timeout: 10000 },
-  )
+  // The drawer's own "New Chat" flow has no built-in signal for when the
+  // freshly created chat's composer has actually settled. Sending
+  // immediately after the drawer closes races that settle: the fill+Enter
+  // can land on a composer that's mid-(re)mount, silently dropping the
+  // input or leaving the app believing a turn is already active (the
+  // message shows up queued, or never sent at all, instead of starting a
+  // fresh turn). Wait for a genuinely idle composer before returning.
+  await page.waitForFunction(() => {
+    const surface = document.querySelector('[data-chat-surface="painted"]')
+    const composer = surface?.querySelector('[aria-label="Message Möbius…"]')
+    return !!composer
+      && !composer.disabled
+      && !surface.querySelector('.chat__stop')
+      && !surface.querySelector('.queued__row')
+  }, { timeout: 10000 })
 }
 
 async function sendMessage(page, text) {
@@ -96,6 +111,8 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
     const QUEUED_TEXT = 'queued message to steer'
     let releaseSteer
     const steerGate = new Promise(resolve => { releaseSteer = resolve })
+    let releaseStream
+    const streamGate = new Promise(resolve => { releaseStream = resolve })
 
     // Capture every POST /messages so we can assert the steer payload.
     const messagePosts = []
@@ -148,9 +165,10 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
     })
 
     // Hold the stream open so the turn keeps streaming (sending=true) for
-    // the whole test — pattern from handleStop-sync-ordering.spec.mjs.
+    // the whole test, released once the test is done needing that state —
+    // same gated-promise pattern as steerGate above.
     await page.route(/\/api\/chats\/[0-9a-f-]+\/stream$/, async (route) => {
-      await new Promise(r => setTimeout(r, 8000))
+      await streamGate
       await route.fulfill({
         status: 200,
         headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' },
@@ -221,6 +239,7 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
     )
     expect(await page.locator('[data-chat-surface="painted"] .queued__row').count()).toBe(0)
     await expect(pendingSteer).toContainText(QUEUED_TEXT)
+    releaseStream()
   })
 
   test('Ctrl+Enter sends one direct-steer request and renders it inline, never queued', async ({ page }) => {
@@ -228,6 +247,8 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
     const messagePosts = []
     let releaseDirectSteer
     const directSteerGate = new Promise(resolve => { releaseDirectSteer = resolve })
+    let releaseStream
+    const streamGate = new Promise(resolve => { releaseStream = resolve })
 
     await page.route(/\/api\/chats\/[0-9a-f-]+\/messages$/, async (route) => {
       let body = {}
@@ -290,7 +311,7 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
     })
 
     await page.route(/\/api\/chats\/[0-9a-f-]+\/stream$/, async (route) => {
-      await new Promise(resolve => setTimeout(resolve, 8000))
+      await streamGate
       await route.fulfill({
         status: 200,
         headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' },
@@ -321,6 +342,7 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
       body.direct_steer && body.content === STEER_TEXT
     ))).toHaveLength(1)
     releaseDirectSteer()
+    releaseStream()
 
     const directPost = messagePosts.find(body => (
       body.direct_steer && body.content === STEER_TEXT
@@ -347,6 +369,8 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
     const messagePosts = []
     // The queueOnly POSTs land in order, so hand back TS1 then TS2.
     let queueCount = 0
+    let releaseStream
+    const streamGate = new Promise(resolve => { releaseStream = resolve })
 
     await page.route(/\/api\/chats\/[0-9a-f-]+\/messages$/, async (route) => {
       const req = route.request()
@@ -384,7 +408,7 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
     })
 
     await page.route(/\/api\/chats\/[0-9a-f-]+\/stream$/, async (route) => {
-      await new Promise(r => setTimeout(r, 8000))
+      await streamGate
       await route.fulfill({
         status: 200,
         headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' },
@@ -419,6 +443,7 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
     const cid2 = messagePosts.find(b => !b.force_steer && b.content === TEXT2).cid
     expect(steerPost.consume_pending_cids).toEqual([cid1, cid2])
     expect(steerPost.content).toBe(`${TEXT1}\n\n${TEXT2}`)
+    releaseStream()
   })
 
   test('a row action steers only that message and preserves its queued sibling', async ({ page }) => {
@@ -426,6 +451,8 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
     const TEXT2 = 'leave this message queued'
     const messagePosts = []
     let queueCount = 0
+    let releaseStream
+    const streamGate = new Promise(resolve => { releaseStream = resolve })
 
     await page.route(/\/api\/chats\/[0-9a-f-]+\/messages$/, async (route) => {
       let body = {}
@@ -478,7 +505,7 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
     })
 
     await page.route(/\/api\/chats\/[0-9a-f-]+\/stream$/, async (route) => {
-      await new Promise(resolve => setTimeout(resolve, 8000))
+      await streamGate
       await route.fulfill({
         status: 200,
         headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' },
@@ -513,6 +540,7 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
     await expect(page.locator('[data-chat-surface="painted"] .queued__row')).toHaveCount(1, { timeout: 5000 })
     await expect(page.locator('[data-chat-surface="painted"] .queued__row')).toContainText(TEXT2)
     await expect(page.locator('[data-chat-surface="painted"] .queued__row')).not.toContainText(TEXT1)
+    releaseStream()
   })
 
   test('an immediate bottom gesture cannot overwrite a newer fast-forward pin', async ({ page }) => {

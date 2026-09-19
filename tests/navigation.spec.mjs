@@ -47,6 +47,7 @@ function emptyChatDetail() {
     running: false,
     pending_messages: [],
     pending_question_id: null,
+    runtime_revision: 0,
     session_id: null,
     provider: 'codex',
     created_by_app_id: null,
@@ -210,6 +211,7 @@ async function setup(
         active_goal_objective: null,
         pending_messages: [],
         pending_question_id: null,
+        runtime_revision: 0,
         updated_at: null,
       }),
     })
@@ -368,18 +370,37 @@ async function closeDrawerToggle(page) {
 
 /** Trigger browser back via history.back().
  *  Uses evaluate to fire within the SPA rather than Playwright's page.goBack
- *  which triggers a real page navigation. */
+ *  which triggers a real page navigation.
+ *
+ *  history.back()/forward() are SPA-internal (pushState) transitions here, so
+ *  there's no real document navigation to await — 'framenavigated' never
+ *  fires for them. The actual completion signal is the resulting 'popstate'
+ *  event; wait for that (registered before firing back/forward, since it can
+ *  dispatch synchronously-ish) instead of guessing a flat delay is enough for
+ *  the app's history listener + React to settle, then allow one settle frame
+ *  for the render it triggers to commit. */
 async function goBack(page) {
-  await page.evaluate(() => history.back())
-  // Wait from the test runner, not the page's old execution context: the assertion
-  // below should report an accidental document navigation as the product failure,
-  // rather than this helper racing the context swap with a second evaluate().
-  await page.waitForTimeout(500)
+  await page.evaluate(() => {
+    window.__navPopstateSeen = false
+    window.addEventListener('popstate', () => { window.__navPopstateSeen = true }, { once: true })
+    history.back()
+  })
+  await page.waitForFunction(() => window.__navPopstateSeen === true, { timeout: 5000 })
+  await page.evaluate(() => new Promise(r =>
+    requestAnimationFrame(() => requestAnimationFrame(r))
+  ))
 }
 
 async function goForward(page) {
-  await page.evaluate(() => history.forward())
-  await page.waitForTimeout(500)
+  await page.evaluate(() => {
+    window.__navPopstateSeen = false
+    window.addEventListener('popstate', () => { window.__navPopstateSeen = true }, { once: true })
+    history.forward()
+  })
+  await page.waitForFunction(() => window.__navPopstateSeen === true, { timeout: 5000 })
+  await page.evaluate(() => new Promise(r =>
+    requestAnimationFrame(() => requestAnimationFrame(r))
+  ))
 }
 
 // ---------------------------------------------------------------------------
@@ -428,6 +449,7 @@ test.describe('Navigation basics', () => {
           active_goal_objective: null,
           pending_messages: [],
           pending_question_id: null,
+          runtime_revision: 0,
           updated_at: null,
         }),
       })
@@ -498,6 +520,7 @@ test.describe('Navigation basics', () => {
       running: index < 2,
       owner_input_kind: index === 0 ? 'secure_input' : null,
       pending_question_id: null,
+      runtime_revision: 0,
     }))
     await setup(page, { width: 1512, height: 861 }, { chats })
 

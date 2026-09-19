@@ -13,7 +13,8 @@
  * Run: scripts/playwright-local.sh --allow-local-e2e tests/chat-redesign.spec.mjs
  */
 import { test, expect } from '@playwright/test'
-import { createTaggedChat, attachCleanup } from './_chatTracker.mjs'
+import { attachCleanup } from './_chatTracker.mjs'
+import { createChat, sendMessage as sharedSendMessage } from './_chatSession.mjs'
 import { mockPendingQuestionState } from './_mockPendingQuestion.mjs'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
@@ -70,32 +71,20 @@ async function setupWithStreamMock(
 
 /** Navigate to a new empty chat. */
 async function newChat(page) {
-  // Create the chat via API first (so it's tagged with the worker
-  // prefix and can be reaped after the spec finishes), then click
-  // through the UI to actually land on it.
-  const chat = await createTaggedChat(page)
-  await page.goto(`${BASE}/shell/?chat=${encodeURIComponent(chat.id)}`, {
-    waitUntil: 'domcontentloaded',
-  })
-  await expect(page.locator('[data-chat-surface="painted"] .chat__empty-wrap')).toBeVisible({ timeout: 8000 })
+  // Create the chat via the API (so it's tagged with the worker prefix
+  // and can be reaped after the spec finishes) and navigate straight to
+  // it — see tests/_chatSession.mjs.
+  return createChat(page)
 }
 
 
 async function sendMessage(page, text) {
-  const input = page.getByRole('textbox', { name: 'Message Möbius…' })
-  await input.fill(text)
-  await page.keyboard.press('Enter')
-  // Wait for the optimistic user-message LI to render — the
-  // deterministic signal that the send landed. The previous
-  // strategy (waiting on `.chat__scroll` to be visible) raced the
-  // hide-then-reveal safety cap when prior tests left state in the
-  // shared storageState; downstream assertions already do their
-  // own visibility waits, so blocking on container visibility up
-  // front bought nothing.
-  await expect(page.locator('[data-chat-surface="painted"] .chat__msg--user').first()).toBeVisible({ timeout: 8000 })
-  await page.evaluate(() => new Promise(r =>
-    requestAnimationFrame(() => requestAnimationFrame(r))
-  ))
+  // The default 'user-message' wait is the deterministic signal that the
+  // send landed — waiting on `.chat__scroll` visibility instead raced the
+  // hide-then-reveal safety cap when prior tests left state in the shared
+  // storageState, and downstream assertions already do their own
+  // visibility waits.
+  await sharedSendMessage(page, text)
 }
 
 

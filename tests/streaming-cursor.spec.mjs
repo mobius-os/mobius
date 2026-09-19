@@ -80,6 +80,7 @@ test('terminal cursor removal keeps followed geometry unchanged', async ({ page 
         active_goal_objective: null,
         pending_messages: [],
         pending_question_id: null,
+        runtime_revision: 0,
       }),
     })
   })
@@ -96,6 +97,7 @@ test('terminal cursor removal keeps followed geometry unchanged', async ({ page 
         running: true,
         pending_messages: [],
         pending_question_id: null,
+        runtime_revision: 0,
         provider: 'claude',
       }),
     })
