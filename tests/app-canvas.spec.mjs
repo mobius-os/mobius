@@ -90,6 +90,20 @@ async function setupShellBasics(page) {
       body: JSON.stringify({ ok: true }),
     })
   )
+  // connectivityStore.js's probeReadiness() fetches /api/ready and requires
+  // body.ready === true (plus a boot_id) before treating the app as
+  // delivery-ready; the blanket '/api/' catch-all above only returns '{}'
+  // for GETs, which is reachable but never ready. Without this, Shell's
+  // chat bootstrap sees deliveryReady=false and renders NewChatLanding's
+  // offline fallback ("You're offline — a new chat needs the network")
+  // instead of ever reaching the requested app canvas.
+  await page.route(/\/api\/ready$/, route =>
+    route.fulfill({
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ready: true, boot_id: 'test-boot' }),
+    })
+  )
   await page.route(/\/api\/theme$/, route =>
     route.fulfill({
       status: 200,
