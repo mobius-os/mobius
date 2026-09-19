@@ -68,7 +68,7 @@ import useComposerDraftState from './hooks/useComposerDraftState.js'
 import useChatRuntimePolicy from './hooks/useChatRuntimePolicy.js'
 import useOffscreenNudge, { useNudgeTargetRef } from './hooks/useOffscreenNudge.js'
 import ChatInputBar from './ChatInputBar.jsx'
-import { mobiusChatCommand } from './slashCommands.js'
+import { compactFailureInput, mobiusChatCommand } from './slashCommands.js'
 import { hasSendablePayload } from './composerSubmission.js'
 import AgentContextInspector from './AgentContextInspector.jsx'
 import ChatSummaryViewer from './ChatSummaryViewer.jsx'
@@ -3918,7 +3918,7 @@ export default function ChatView({
   // chat's live context with a fresh briefing and reset the provider session;
   // the visible transcript is untouched and the platform renders the stored
   // compaction as its own "Context compacted" card.
-  async function runCompactCommand(instructions = '') {
+  async function runCompactCommand(instructions = '', submittedInput = '/compact') {
     if (!chatId || provisionalNewChat) {
       setSendFailure('There’s no chat context to compact yet.')
       return
@@ -3933,6 +3933,7 @@ export default function ChatView({
       await api.chats.compact(chatId, { instructions })
       await fetchMessages({ force: true })
     } catch (err) {
+      setComposerInput(current => compactFailureInput(current, submittedInput))
       setSendFailure(sendFailureMessage(err, { online: getOnlineSnapshot() }))
     } finally {
       compactingChatRef.current = false
@@ -3943,7 +3944,7 @@ export default function ChatView({
   function dispatchMobiusChatCommand(composed) {
     const command = mobiusChatCommand(composed)
     if (!command) return false
-    void runCompactCommand(command.instructions)
+    void runCompactCommand(command.instructions, composed)
     return true
   }
 

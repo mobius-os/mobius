@@ -5,6 +5,7 @@ import {
   MOBIUS_CHAT_COMMANDS,
   SLASH_COMMANDS,
   applySlashCommand,
+  compactFailureInput,
   mobiusChatCommand,
   fuzzyScore,
   matchSlashCommands,
@@ -148,4 +149,10 @@ test('accepting /compact composes the exact command the dispatcher matches', () 
   assert.deepEqual(mobiusChatCommand(applySlashCommand(compact)), {
     name: '/compact', instructions: '',
   })
+})
+
+test('a failed compact restores its guidance without overwriting new typing', () => {
+  const submitted = '/compact keep the architecture decisions'
+  assert.equal(compactFailureInput('', submitted), submitted)
+  assert.equal(compactFailureInput('new draft', submitted), 'new draft')
 })

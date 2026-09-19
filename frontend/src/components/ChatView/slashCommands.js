@@ -63,6 +63,11 @@ export function mobiusChatCommand(text) {
   return { name: '/compact', instructions: (match[1] || '').trim() }
 }
 
+/** Restore a failed compact command unless the owner has already typed anew. */
+export function compactFailureInput(currentInput, submittedInput) {
+  return currentInput || submittedInput
+}
+
 /**
  * The command fragment being typed, or null when the composer isn't picking one.
  *
