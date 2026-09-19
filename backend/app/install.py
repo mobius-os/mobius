@@ -2963,7 +2963,6 @@ async def _prepare_app_row(
   )
   db.add(app)
   db.flush()
-  _sync_service_aliases(db, app=app, manifest=manifest)
   return app
 
 
