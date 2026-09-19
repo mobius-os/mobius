@@ -700,7 +700,7 @@ test('retiring an explicit Builder cover returns the selected tab and preserves 
   // canonical painted chat surface for both new and existing chats. This is
   // a two-pane Builder layout, so a bare [data-chat-surface="painted"]
   // matches both tabs; scope to the tab that owns the newly created chat.
-  const presentation = page.locator(`[data-tab-key="chat:${explicitId}"] [data-chat-surface="painted"]`)
+  const presentation = page.locator(`[data-chat-id="${explicitId}"][data-chat-surface="painted"]`)
   const composer = presentation.getByRole('textbox', { name: 'Message Möbius…' })
   await expect(composer).toBeFocused()
   await composer.fill('Keep this parked Builder draft')
