@@ -61,12 +61,34 @@ export function formatUsageMenuText(totals) {
   return parts.join(' · ')
 }
 
-export function usageModelName(usage) {
+function modelDisplayName(modelId, registry, provider) {
+  if (typeof modelId !== 'string' || !modelId.trim()) return null
+  const id = modelId.trim()
+  const preferred = Array.isArray(registry?.[provider]) ? registry[provider] : []
+  const providerMatch = preferred.find(candidate => candidate?.id === id)
+  if (typeof providerMatch?.label === 'string' && providerMatch.label.trim()) {
+    return providerMatch.label.trim()
+  }
+  for (const entries of Object.values(registry || {})) {
+    if (!Array.isArray(entries) || entries === preferred) continue
+    const match = entries.find(candidate => candidate?.id === id)
+    if (typeof match?.label === 'string' && match.label.trim()) {
+      return match.label.trim()
+    }
+  }
+  return id
+}
+
+export function usageModelName(usage, registry = null, provider = null) {
   if (typeof usage?.model === 'string' && usage.model.trim()) {
-    return usage.model.trim()
+    return modelDisplayName(usage.model, registry, provider)
   }
   const models = Object.keys(usage?.provider_model_usage || {})
-  return models.length ? models.join(', ') : null
+  if (!models.length) return null
+  return models
+    .map(model => modelDisplayName(model, registry, provider))
+    .filter(Boolean)
+    .join(', ')
 }
 
 export function formatTimestamp(value) {

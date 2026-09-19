@@ -31,6 +31,20 @@ test('plan providers follow typed weekly meaning, not display labels or other li
   })
 })
 
+test('Codex names its 10,080-minute allowance as a 7-day window', () => {
+  assert.deepEqual(providerAllowance('codex', {
+    state: 'ready',
+    windows: [
+      { kind: 'weekly', label: '7-day', used_percent: 12 },
+    ],
+  }), {
+    kind: 'weekly',
+    label: '7-day usage',
+    usedPercent: 12,
+    expiresAt: null,
+  })
+})
+
 test('Möbius follows typed API-credit usage instead of weekly windows', () => {
   assert.deepEqual(providerAllowance('mobius', {
     state: 'ready',

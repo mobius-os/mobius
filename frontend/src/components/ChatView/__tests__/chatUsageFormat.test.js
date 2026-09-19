@@ -51,3 +51,20 @@ test('usage model name is provider-neutral', () => {
   }), 'claude-opus-4-8')
   assert.equal(usageModelName({}), null)
 })
+
+test('usage model names resolve through the provider-owned registry', () => {
+  const registry = {
+    codex: [{ id: 'gpt-5.6-sol', label: 'GPT-5.6-Sol' }],
+    claude: [{ id: 'claude-opus-4-8', label: 'Claude Opus 4.8' }],
+  }
+  assert.equal(
+    usageModelName({ model: 'gpt-5.6-sol' }, registry, 'codex'),
+    'GPT-5.6-Sol',
+  )
+  assert.equal(usageModelName({
+    provider_model_usage: {
+      'claude-opus-4-8': { inputTokens: 1 },
+      'not-yet-catalogued': { inputTokens: 1 },
+    },
+  }, registry, 'claude'), 'Claude Opus 4.8, not-yet-catalogued')
+})
