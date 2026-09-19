@@ -1824,8 +1824,13 @@ def _auto_resume_run_token(park_token: str) -> str:
   return f"{_AUTO_RESUME_RUN_PREFIX}{digest}"
 
 
-def _model_capacity_retry_exhausted(db: Session, run: models.ChatRun) -> bool:
-  """Stop automatic busy-model retries after the first resumed attempt."""
+MODEL_CAPACITY_RETRY_DELAYS = tuple(
+  timedelta(seconds=seconds) for seconds in (30, 60, 120, 240, 300)
+)
+
+
+def _model_capacity_retry_count(db: Session, run: models.ChatRun) -> int:
+  """Count earlier busy-model parks in this exact continuation lineage."""
   root_id = run.root_run_id or run.id
   return db.query(models.ChatRun.id).filter(
     models.ChatRun.chat_id == run.chat_id,
@@ -1835,7 +1840,14 @@ def _model_capacity_retry_exhausted(db: Session, run: models.ChatRun) -> bool:
     ),
     models.ChatRun.park_reason == "model_capacity",
     models.ChatRun.started_at < run.started_at,
-  ).first() is not None
+  ).count()
+
+
+def _model_capacity_retry_exhausted(db: Session, run: models.ChatRun) -> bool:
+  """Bound automatic busy-model recovery to five attempts with backoff."""
+  return _model_capacity_retry_count(db, run) >= len(
+    MODEL_CAPACITY_RETRY_DELAYS
+  )
 
 
 def _auto_resume_recovery(
@@ -3623,7 +3635,6 @@ RESOURCE_PARK_REASONS = frozenset({"memory", "storage"})
 # retain the interrupted request and retry with a pause; no extra usage is
 # requested or consumed merely because a model was momentarily busy.
 AUTO_RETRY_PARK_REASONS = RESOURCE_PARK_REASONS | frozenset({"model_capacity"})
-MODEL_CAPACITY_RETRY_DELAY = timedelta(minutes=1)
 
 
 def _park_continues_automatically(chat, park) -> bool:
@@ -3749,7 +3760,7 @@ async def _park_run_strict(
 
 def _park_exit(
   sink, runner_result: dict | None, error_text: str | None,
-  *, provider_id: str | None = None,
+  *, provider_id: str | None = None, db: Session | None = None,
 ) -> dict:
   """Classify a turn exit for limit parking and publish its error event.
 
@@ -3781,9 +3792,29 @@ def _park_exit(
   model_capacity = _is_model_capacity_error_text(error_text)
   failed = bool(error_text) or runner_result is None
   if model_capacity:
-    parked_until = datetime.now(UTC).replace(tzinfo=None) + MODEL_CAPACITY_RETRY_DELAY
+    retry_count = 0
+    run_token = getattr(sink, "run_token", None)
+    current_run = (
+      db.get(models.ChatRun, run_token)
+      if db is not None and run_token else None
+    )
+    if current_run is not None:
+      retry_count = _model_capacity_retry_count(db, current_run)
+    if retry_count >= len(MODEL_CAPACITY_RETRY_DELAYS):
+      sink.publish(_pause_note(
+        "The selected model is still busy after five automatic retries. "
+        "Choose another model, then tap Resume to continue your saved work.",
+        kind="model_capacity_exhausted",
+        provider=provider_id,
+      ))
+      return {"parked": False}
+    parked_until = (
+      datetime.now(UTC).replace(tzinfo=None)
+      + MODEL_CAPACITY_RETRY_DELAYS[retry_count]
+    )
     sink.publish(_park_event(
-      "The selected model is busy right now. Your work is safe; Möbius will try it again shortly.",
+      "The selected model is busy right now. Your work is safe; "
+      "Möbius will try it again shortly.",
       parked_until,
       "model_capacity",
       provider_id=provider_id,
@@ -5845,7 +5876,9 @@ async def _run_chat_impl_with_db(
       # _limit_exit publishes through the sink BEFORE finalize so the error
       # (with park fields on a limit kill) lands in the persisted assistant
       # transcript, not just the live wire.
-      park_kwargs = _park_exit(sink, None, str(exc), provider_id=provider_id)
+      park_kwargs = _park_exit(
+        sink, None, str(exc), provider_id=provider_id, db=db,
+      )
       return await _complete_turn(
         bc=bc, sink=sink, db=db, chat_id=chat_id, run_gen=run_gen,
         provider_id=provider_id, cost_usd=0, close_browser=True,
@@ -5856,7 +5889,9 @@ async def _run_chat_impl_with_db(
     # sink before finalize so the error is persisted alongside any partial
     # response that streamed before the failure (enriched with the park
     # fields when the terminal was a limit kill).
-    park_kwargs = _park_exit(sink, runner_result, err, provider_id=provider_id)
+    park_kwargs = _park_exit(
+      sink, runner_result, err, provider_id=provider_id, db=db,
+    )
     return await _complete_turn(
       bc=bc, sink=sink, db=db, chat_id=chat_id, run_gen=run_gen,
       provider_id=provider_id, cost_usd=runner_result.get("cost_usd") or 0,
@@ -6023,7 +6058,9 @@ async def _run_chat_impl_with_db(
       # _limit_exit publishes through the sink BEFORE finalize so the error
       # (with park fields on a limit kill) lands in the persisted assistant
       # transcript, not just the live wire.
-      park_kwargs = _park_exit(sink, None, str(exc), provider_id=provider_id)
+      park_kwargs = _park_exit(
+        sink, None, str(exc), provider_id=provider_id, db=db,
+      )
       return await _complete_turn(
         bc=bc, sink=sink, db=db, chat_id=chat_id, run_gen=run_gen,
         provider_id=provider_id, cost_usd=0, close_browser=True,
@@ -6032,7 +6069,9 @@ async def _run_chat_impl_with_db(
     # Same save-before-broadcast rationale: _limit_exit persists the error
     # alongside any partial response that streamed before the failure
     # (enriched with the park fields when the terminal was a limit kill).
-    park_kwargs = _park_exit(sink, runner_result, err, provider_id=provider_id)
+    park_kwargs = _park_exit(
+      sink, runner_result, err, provider_id=provider_id, db=db,
+    )
     return await _complete_turn(
       bc=bc, sink=sink, db=db, chat_id=chat_id, run_gen=run_gen,
       provider_id=provider_id, cost_usd=runner_result.get("cost_usd") or 0,

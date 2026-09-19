@@ -24,6 +24,7 @@ import { isResourcePause } from './waitingPresentation.js'
 export function errorCardViewModel(block) {
   const resourceWait = isResourcePause(block)
   const modelCapacity = block.pause?.kind === 'model_capacity'
+  const modelCapacityExhausted = block.pause?.kind === 'model_capacity_exhausted'
   const parked = !!block.pause?.resets_at && !resourceWait
   // Old saved handoff notes lacked the pause descriptor. Recognize only
   // that exact producer's prefix; unrelated resumable errors remain errors.
@@ -36,11 +37,12 @@ export function errorCardViewModel(block) {
   return {
     parked,
     modelCapacity,
+    modelCapacityExhausted,
     resourceWait,
     goalHandoff,
     benign,
     className: `chat__text--error${benign ? ' chat__text--parked' : ''}`,
-    label: goalHandoff ? 'Goal paused' : modelCapacity ? 'Model busy' : parked ? 'Rate limit' : (resourceWait ? 'Waiting' : (block.pause ? 'Paused' : 'Error')),
+    label: goalHandoff ? 'Goal paused' : modelCapacityExhausted ? 'Model still busy' : modelCapacity ? 'Model busy' : parked ? 'Rate limit' : (resourceWait ? 'Waiting' : (block.pause ? 'Paused' : 'Error')),
     resetLabel: parked ? formatResetTime(block.pause.resets_at) : null,
   }
 }
@@ -68,7 +70,7 @@ export default function ErrorCard({
         : (vm.resetLabel ? `Usage resets ${vm.resetLabel}` : 'Usage limit reached')
     : null
   const recoveryCopy = vm.modelCapacity
-    ? 'Your work is safe. The selected model is temporarily busy, so Möbius will retry after a short pause. You can choose another model if you need to continue sooner.'
+    ? 'Your work is safe. Möbius will retry with increasing pauses, up to five times. If the model stays busy, you can choose another model and Resume.'
     : vm.parked
     ? autoResume
       ? `Your work is safe. ${recoveryCredit?.label ? `${recoveryCredit.label}. ` : ''}Möbius will continue automatically at the reset.`
@@ -118,7 +120,9 @@ export default function ErrorCard({
               {vm.label}
             </div>
             <div className="chat__recovery-copy">
-              {vm.goalHandoff
+              {vm.modelCapacityExhausted
+                ? 'Five automatic retries were used. Choose another model, then Resume to continue your saved work.'
+                : vm.goalHandoff
                 ? 'The agent stopped before arranging the next step. Your progress is saved. Resume to continue this Goal.'
                 : block.pause?.kind === 'restart'
                 ? block.resumable
