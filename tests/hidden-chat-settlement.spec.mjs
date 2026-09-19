@@ -49,12 +49,12 @@ test('returning to a retained hidden chat settles a missed terminal stream event
     return route.fulfill({ json: {
       id: a.id, title: 'Hidden settlement', provider: 'codex',
       messages, total: messages.length, offset: 0, running,
-      pending_messages: [], pending_question_id: null,
+      pending_messages: [], pending_question_id: null, runtime_revision: 0,
     } })
   })
   await page.route(new RegExp(`/api/chats/${a.id}/runtime(?:\\?.*)?$`), route => {
     if (!running && messages.length > 1) idleRuntimeReads += 1
-    return route.fulfill({ json: { running, pending_messages: [], pending_question_id: null } })
+    return route.fulfill({ json: { running, pending_messages: [], pending_question_id: null, runtime_revision: 0 } })
   })
   await page.clock.install()
   await page.goto(`${BASE}/shell/?chat=${a.id}`, { waitUntil: 'domcontentloaded' })

@@ -51,7 +51,14 @@ async function mount(page, { reject = false, acknowledgement = 'response', resta
       total: messages.length, offset: 0, running: false, pending_messages: pendingMessages,
       agent_settings_json: { model: 'gpt-6-astra' }, effective: { model: 'gpt-6-astra' },
       pending_question_id: answered ? null : block.question_id, active_goal_objective: null,
-      recovery_run_id: null, active_assistant_message_id: null, updated_at: '2026-09-09T02:00:00Z' }
+      recovery_run_id: null, active_assistant_message_id: null, updated_at: '2026-09-09T02:00:00Z',
+      // ChatView's runtimeSnapshot() (chatRuntimeState.js) requires this field
+      // to be a safe non-negative integer or it treats the whole snapshot as
+      // unparseable and throws CHAT_RUNTIME_OUT_OF_ORDER. The real backend
+      // always includes it (routes/chats.py _latest_run_snapshot defaults to
+      // 0 for a chat with no ChatRunUpdate row yet) -- this fixture predates
+      // that field and never got updated when it became required.
+      runtime_revision: 0 }
   }
   await page.route('**/api/**', async route => {
     const req = route.request(), url = new URL(req.url())

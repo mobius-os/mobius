@@ -109,6 +109,7 @@ test('keyboard close never paints a sent row below its pin', async ({ page }) =>
         active_goal_objective: null,
         pending_messages: [],
         pending_question_id: null,
+        runtime_revision: 0,
       }),
     })
   ))
@@ -125,6 +126,7 @@ test('keyboard close never paints a sent row below its pin', async ({ page }) =>
         running,
         pending_messages: [],
         pending_question_id: null,
+        runtime_revision: 0,
         provider: 'codex',
       }),
     })
@@ -303,6 +305,7 @@ test('an idle runtime snapshot cannot retire an unacknowledged fresh send', asyn
           active_goal_objective: null,
           pending_messages: [],
           pending_question_id: null,
+          runtime_revision: 0,
         }),
       })
       if (raceArmed) runtimeRaceReturned.resolve()
@@ -322,6 +325,7 @@ test('an idle runtime snapshot cannot retire an unacknowledged fresh send', asyn
         running,
         pending_messages: [],
         pending_question_id: null,
+        runtime_revision: 0,
         provider: 'codex',
       }),
     })

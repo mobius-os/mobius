@@ -47,6 +47,7 @@ function emptyChatDetail() {
     running: false,
     pending_messages: [],
     pending_question_id: null,
+    runtime_revision: 0,
     session_id: null,
     provider: 'codex',
     created_by_app_id: null,
@@ -210,6 +211,7 @@ async function setup(
         active_goal_objective: null,
         pending_messages: [],
         pending_question_id: null,
+        runtime_revision: 0,
         updated_at: null,
       }),
     })
@@ -447,6 +449,7 @@ test.describe('Navigation basics', () => {
           active_goal_objective: null,
           pending_messages: [],
           pending_question_id: null,
+          runtime_revision: 0,
           updated_at: null,
         }),
       })
@@ -517,6 +520,7 @@ test.describe('Navigation basics', () => {
       running: index < 2,
       owner_input_kind: index === 0 ? 'secure_input' : null,
       pending_question_id: null,
+      runtime_revision: 0,
     }))
     await setup(page, { width: 1512, height: 861 }, { chats })
 

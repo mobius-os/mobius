@@ -1024,6 +1024,7 @@ test.describe('Stream reconnection', () => {
       active_goal_objective: GOAL,
       pending_messages: [],
       pending_question_id: QUESTION_ID,
+      runtime_revision: 0,
       updated_at: updatedAt,
     }
     const detail = {

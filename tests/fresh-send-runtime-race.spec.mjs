@@ -54,6 +54,7 @@ test('an idle runtime snapshot cannot retire an unacknowledged fresh send', asyn
         active_goal_objective: null,
         pending_messages: [],
         pending_question_id: null,
+        runtime_revision: 0,
       }),
     })
     if (raceArmed) idleSnapshotReturned.resolve()
@@ -72,6 +73,7 @@ test('an idle runtime snapshot cannot retire an unacknowledged fresh send', asyn
         running: false,
         pending_messages: [],
         pending_question_id: null,
+        runtime_revision: 0,
         provider: 'claude',
         ...testChatAgentSettings(),
       }),
