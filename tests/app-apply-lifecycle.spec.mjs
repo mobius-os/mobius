@@ -155,7 +155,32 @@ test('explicit apply owns draft, publication, iframe refresh, and rollback', asy
         'details.js': "export const untouched = true\n",
       },
     })
-    await page.waitForTimeout(1_500)
+    // Prove the frame does NOT reload for the same ~1.5s window a blind sleep
+    // used to grant it — but poll every animation frame instead of sampling
+    // once at the end, so a regression that reloads at e.g. t=200ms is caught
+    // immediately instead of only (or never, if flaky) at the fixed endpoint.
+    // __explicitApplyFrameAdds is incremented by the MutationObserver wired
+    // up above whenever a new iframe.canvas node is appended.
+    const noReloadOutcome = await page.evaluate(() => new Promise(resolve => {
+      const start = Date.now()
+      const budgetMs = 1_500
+      const check = () => {
+        if (window.__explicitApplyFrameAdds > 0) {
+          resolve({ reloaded: true, elapsedMs: Date.now() - start })
+          return
+        }
+        if (Date.now() - start >= budgetMs) {
+          resolve({ reloaded: false, elapsedMs: Date.now() - start })
+          return
+        }
+        requestAnimationFrame(check)
+      }
+      check()
+    }))
+    expect(
+      noReloadOutcome.reloaded,
+      `frame reloaded ${noReloadOutcome.elapsedMs}ms into the no-reload window`,
+    ).toBe(false)
     frame = await currentFrame(page, app.id)
     await expect(frame.locator('#revision')).toHaveText('revision one ready')
     expect(git(slug, 'rev-parse', 'main')).toBe(firstHead)
