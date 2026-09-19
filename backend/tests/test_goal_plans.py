@@ -1398,3 +1398,44 @@ def test_plan_rejects_cycles_missing_dependencies_and_non_goal_runs(
     headers=auth,
   )
   assert rejected.status_code == 409
+
+
+def test_terminal_goal_history_keeps_fallback_for_mixed_legacy_goal(
+  client, owner_token, db,
+):
+  auth = {"Authorization": f"Bearer {owner_token}"}
+  base = datetime(2026, 8, 23, 12, 0, tzinfo=UTC)
+  created = client.post(
+    "/api/chats",
+    json={
+      "title": "Mixed goal history",
+      "messages": [
+        {"role": "assistant", "id": "mixed-root", "content": "first", "ts": 1_787_486_400_000},
+        {"role": "user", "content": "continue", "ts": 1_787_486_410_000},
+        {"role": "assistant", "content": "legacy finish", "ts": 1_787_486_411_000},
+      ],
+    },
+    headers=auth,
+  )
+  chat_id = created.json()["id"]
+  db.add_all([
+    models.ChatRun(
+      id="mixed-root", root_run_id="mixed-root", chat_id=chat_id,
+      status="completed", provider="codex", goal_objective="Mixed goal",
+      goal_id="mixed-goal", started_at=base,
+      ended_at=base + timedelta(seconds=5),
+    ),
+    models.ChatRun(
+      id="mixed-resume", root_run_id="mixed-root", chat_id=chat_id,
+      status="completed", provider="codex", goal_objective="Mixed goal",
+      goal_id="mixed-goal", started_at=base + timedelta(seconds=10),
+      ended_at=base + timedelta(seconds=15),
+    ),
+  ])
+  db.commit()
+
+  response = client.get(f"/api/chats/{chat_id}?limit=20", headers=auth)
+  assert response.status_code == 200, response.text
+  messages = response.json()["messages"]
+  assert "goal_summaries" not in messages[0]
+  assert messages[2]["goal_summaries"][0]["id"] == "mixed-goal"

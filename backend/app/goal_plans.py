@@ -868,13 +868,13 @@ def terminal_goal_summaries_by_message_index(
     identity = row.goal_id or row.root_run_id or row.id
     grouped.setdefault(identity, []).append(row)
 
-  assistant_rows: list[tuple[int, int]] = []
+  assistant_rows: list[tuple[int, int, object]] = []
   for index, message in enumerate(messages):
     if not isinstance(message, dict) or message.get("role") != "assistant":
       continue
     ts = message.get("ts")
     if isinstance(ts, (int, float)) and not isinstance(ts, bool):
-      assistant_rows.append((index, int(ts)))
+      assistant_rows.append((index, int(ts), message.get("id")))
 
   def epoch_ms(value: datetime | None) -> int | None:
     if value is None:
@@ -898,25 +898,19 @@ def terminal_goal_summaries_by_message_index(
       continue
     # New rows carry the exact physical-run identity on the assistant segment.
     # Prefer it over timestamps so clock skew can never attach a Goal card to
-    # an unrelated answer. Legacy transcripts without any assistant ids retain
-    # only the original tightly-scoped timestamp window fallback.
+    # an unrelated answer. An older id-less row still gets the tightly scoped
+    # timestamp fallback even if the Goal later acquired identified messages.
     candidate_index = next((
       index for index, message in enumerate(messages)
       if isinstance(message, dict)
       and message.get("role") == "assistant"
       and message.get("id") == latest.id
     ), None)
-    goal_run_ids = {row.id for row in rows}
-    has_goal_assistant_identity = any(
-      isinstance(message, dict)
-      and message.get("role") == "assistant"
-      and message.get("id") in goal_run_ids
-      for message in messages
-    )
-    if candidate_index is None and not has_goal_assistant_identity:
+    if candidate_index is None:
       candidate_index = next((
-        index for index, ts in reversed(assistant_rows)
-        if started_ms - 1000 <= ts <= ended_ms + 1000
+        index for index, ts, message_id in reversed(assistant_rows)
+        if message_id is None
+        and started_ms - 1000 <= ts <= ended_ms + 1000
       ), None)
     if (
       candidate_index is None
