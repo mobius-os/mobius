@@ -3560,7 +3560,7 @@ async def install_from_manifest(
               app_git.fetch_upstream,
               git_source_dir,
               ref,
-              adopt_equal_local_tree=(
+              trusted_origin_adoption=(
                 target.adopting_trusted_origin
                 or target.trusted_catalog_origin
               ),
