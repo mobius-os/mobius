@@ -10,7 +10,10 @@
  * end-to-end to catch any regression specific to that flow.
  */
 import { test, expect } from '@playwright/test'
+import { attachCleanup } from './_chatTracker.mjs'
 import { createChat, sendMessage as sharedSendMessage, waitForChatShell } from './_chatSession.mjs'
+
+attachCleanup()
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
 const STREAM_ROUTE = /\/api\/chats\/[0-9a-f-]+\/stream$/

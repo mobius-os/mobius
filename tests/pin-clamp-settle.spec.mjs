@@ -30,7 +30,10 @@
  * Mirrors tests/second-send-pin.spec.mjs's route-mock SSE flow.
  */
 import { test, expect } from '@playwright/test'
+import { attachCleanup } from './_chatTracker.mjs'
 import { createChat, sendMessage as sharedSendMessage, waitForChatShell } from './_chatSession.mjs'
+
+attachCleanup()
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
 

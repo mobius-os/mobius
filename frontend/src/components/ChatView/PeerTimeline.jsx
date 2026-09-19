@@ -21,7 +21,7 @@ export function usePeerTimeline(chatId, messages, enabled, activeTools, activeMi
     enabled, staleTime: CHAT_ACTIVITY_STALE_TIME, retry: false,
   })
   const pages = query.data?.pages
-  const events = useMemo(() => [...new Map((pages || []).flatMap(p => p?.events ?? []).map(event => [event?.id, event])).values()], [pages])
+  const events = useMemo(() => [...new Map((pages || []).flatMap(p => p.events).map(event => [event.id, event])).values()], [pages])
   const oldestLoaded = events.length ? Math.min(...events.map(event => peerTime(event.created_at))) : Infinity
   const windowStart = messages[0]?.ts ?? Infinity
   const { hasNextPage, isFetching, isError, fetchNextPage } = query

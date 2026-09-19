@@ -13,7 +13,10 @@
  * Run: scripts/playwright-local.sh --allow-local-e2e tests/send-rule.spec.mjs
  */
 import { test, expect } from '@playwright/test'
+import { attachCleanup } from './_chatTracker.mjs'
 import { createChat, sendMessage as sharedSendMessage, waitForChatShell } from './_chatSession.mjs'
+
+attachCleanup()
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
 
