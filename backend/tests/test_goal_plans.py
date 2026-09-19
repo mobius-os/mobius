@@ -114,6 +114,88 @@ def test_terminal_goal_history_projects_onto_final_assistant_message(
   }
 
 
+def test_terminal_goal_history_uses_run_identity_despite_timestamp_skew(
+  client, owner_token, db,
+):
+  # Clock skew can leave no message timestamp inside the goal window. The
+  # exact assistant/run identity still anchors the card safely.
+  auth = {"Authorization": f"Bearer {owner_token}"}
+  base = datetime(2026, 8, 23, 12, 0, tzinfo=UTC)
+  created = client.post(
+    "/api/chats",
+    json={
+      "title": "Skewed goal history",
+      "messages": [
+        {"role": "user", "content": "start", "ts": 1_787_486_400_000},
+        # 60s after the goal's ended_at window closes.
+        {"role": "assistant", "id": "skew-root", "content": "finished", "ts": 1_787_486_461_000},
+      ],
+    },
+    headers=auth,
+  )
+  chat_id = created.json()["id"]
+  db.add(models.ChatRun(
+    id="skew-root", root_run_id="skew-root", chat_id=chat_id,
+    status="completed", provider="codex", goal_objective="Ship safely",
+    goal_id="skew-goal", started_at=base,
+    ended_at=base + timedelta(seconds=5),
+    goal_plan_json={
+      "version": 1,
+      "updated_at": base.isoformat(),
+      "tasks": [{
+        "id": "ship", "title": "Ship safely", "status": "completed",
+        "depends_on": [],
+      }],
+    },
+    goal_plan_revision=1,
+  ))
+  db.commit()
+
+  response = client.get(f"/api/chats/{chat_id}?limit=20", headers=auth)
+  assert response.status_code == 200, response.text
+  messages = response.json()["messages"]
+  summary = messages[1]["goal_summaries"][0]
+  assert summary["id"] == "skew-goal"
+  assert summary["status"] == "completed"
+
+
+def test_legacy_goal_history_fallback_ignores_other_goal_ids(
+  client, owner_token, db,
+):
+  auth = {"Authorization": f"Bearer {owner_token}"}
+  base = datetime(2026, 8, 23, 12, 30, tzinfo=UTC)
+  created = client.post(
+    "/api/chats",
+    json={
+      "title": "Mixed legacy history",
+      "messages": [
+        {"role": "user", "content": "start", "ts": 1_787_488_200_000},
+        {"role": "assistant", "content": "legacy finished", "ts": 1_787_488_201_000},
+        {"role": "assistant", "id": "other-run", "content": "later", "ts": 1_787_488_300_000},
+      ],
+    },
+    headers=auth,
+  )
+  chat_id = created.json()["id"]
+  db.add(models.ChatRun(
+    id="legacy-root", root_run_id="legacy-root", chat_id=chat_id,
+    status="completed", provider="codex", goal_objective="Ship safely",
+    goal_id="legacy-goal", started_at=base, ended_at=base + timedelta(seconds=5),
+    goal_plan_json={"version": 1, "updated_at": base.isoformat(), "tasks": [{
+      "id": "ship", "title": "Ship safely", "status": "completed",
+      "depends_on": [],
+    }]},
+    goal_plan_revision=1,
+  ))
+  db.commit()
+
+  response = client.get(f"/api/chats/{chat_id}?limit=20", headers=auth)
+  assert response.status_code == 200, response.text
+  messages = response.json()["messages"]
+  assert messages[1]["goal_summaries"][0]["id"] == "legacy-goal"
+  assert "goal_summaries" not in messages[2]
+
+
 def test_terminal_goal_history_respects_message_pagination_and_clear(
   client, owner_token, db,
 ):
@@ -1316,3 +1398,44 @@ def test_plan_rejects_cycles_missing_dependencies_and_non_goal_runs(
     headers=auth,
   )
   assert rejected.status_code == 409
+
+
+def test_terminal_goal_history_keeps_fallback_for_mixed_legacy_goal(
+  client, owner_token, db,
+):
+  auth = {"Authorization": f"Bearer {owner_token}"}
+  base = datetime(2026, 8, 23, 12, 0, tzinfo=UTC)
+  created = client.post(
+    "/api/chats",
+    json={
+      "title": "Mixed goal history",
+      "messages": [
+        {"role": "assistant", "id": "mixed-root", "content": "first", "ts": 1_787_486_400_000},
+        {"role": "user", "content": "continue", "ts": 1_787_486_410_000},
+        {"role": "assistant", "content": "legacy finish", "ts": 1_787_486_411_000},
+      ],
+    },
+    headers=auth,
+  )
+  chat_id = created.json()["id"]
+  db.add_all([
+    models.ChatRun(
+      id="mixed-root", root_run_id="mixed-root", chat_id=chat_id,
+      status="completed", provider="codex", goal_objective="Mixed goal",
+      goal_id="mixed-goal", started_at=base,
+      ended_at=base + timedelta(seconds=5),
+    ),
+    models.ChatRun(
+      id="mixed-resume", root_run_id="mixed-root", chat_id=chat_id,
+      status="completed", provider="codex", goal_objective="Mixed goal",
+      goal_id="mixed-goal", started_at=base + timedelta(seconds=10),
+      ended_at=base + timedelta(seconds=15),
+    ),
+  ])
+  db.commit()
+
+  response = client.get(f"/api/chats/{chat_id}?limit=20", headers=auth)
+  assert response.status_code == 200, response.text
+  messages = response.json()["messages"]
+  assert "goal_summaries" not in messages[0]
+  assert messages[2]["goal_summaries"][0]["id"] == "mixed-goal"

@@ -6,6 +6,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from datetime import UTC, datetime
 import json
+import logging
 import re
 from typing import Any
 
@@ -14,6 +15,8 @@ from sqlalchemy.orm import Session, load_only
 
 from app import models
 
+
+logger = logging.getLogger(__name__)
 
 TASK_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 TASK_STATUSES = frozenset({
@@ -28,10 +31,22 @@ MAX_NOTE = 500
 MAX_RESULT = 1000
 
 
+class GoalPlanCorrupt(Exception):
+  """A stored plan's JSON could not be parsed.
+
+  Callers must fail toward "goal still has unfinished work" rather than
+  silently treating a corrupted plan as complete, which would let the goal
+  terminate with no trace of the failure.
+  """
+
+
 def _goal_plan_tasks(
   db: Session, chat_id: str, goal_id: str,
 ) -> list[dict[str, Any]] | None:
-  """Return one stable Goal's task snapshot, if it owns a plan."""
+  """Return one stable Goal's task snapshot, if it owns a plan.
+
+  Raises ``GoalPlanCorrupt`` if a plan row exists but its JSON is unreadable.
+  """
   owner = (
     db.query(models.ChatRun.goal_plan_json)
     .filter(
@@ -43,26 +58,38 @@ def _goal_plan_tasks(
     .first()
   )
   if owner is None:
-    return False
+    return None
   raw = owner[0]
   try:
     plan = json.loads(raw) if isinstance(raw, str) else raw
   except (TypeError, json.JSONDecodeError):
-    return None
+    logger.warning(
+      "unreadable goal_plan_json for chat=%s goal=%s; treating goal as "
+      "unfinished instead of silently dropping it",
+      chat_id, goal_id,
+    )
+    raise GoalPlanCorrupt(goal_id)
   tasks = (plan or {}).get("tasks") if isinstance(plan, dict) else None
   return tasks if isinstance(tasks, list) and tasks else None
+
+
+def _plan_has_unfinished_tasks(tasks: list[dict[str, Any]] | None) -> bool:
+  return bool(tasks) and any(
+    isinstance(task, dict)
+    and task.get("status") not in SETTLED_TASK_STATUSES
+    for task in tasks
+  )
 
 
 def goal_plan_is_unfinished(
   db: Session, chat_id: str, goal_id: str,
 ) -> bool:
   """Whether one stable Goal owns a plan with unsettled work."""
-  tasks = _goal_plan_tasks(db, chat_id, goal_id)
-  return bool(tasks) and any(
-    isinstance(task, dict)
-    and task.get("status") not in SETTLED_TASK_STATUSES
-    for task in tasks
-  )
+  try:
+    tasks = _goal_plan_tasks(db, chat_id, goal_id)
+  except GoalPlanCorrupt:
+    return True
+  return _plan_has_unfinished_tasks(tasks)
 
 
 class GoalPlanError(ValueError):
@@ -646,14 +673,17 @@ def goal_terminal_handoff(
   ).first()
   if run is None:
     return None
-  tasks = _goal_plan_tasks(db, chat_id, run.goal_id)
+  plan_corrupt = False
+  try:
+    tasks = _goal_plan_tasks(db, chat_id, run.goal_id)
+  except GoalPlanCorrupt:
+    tasks = None
+    plan_corrupt = True
+    plan_unfinished = True
+  else:
+    plan_unfinished = _plan_has_unfinished_tasks(tasks)
   if (
-    not tasks
-    or not any(
-      isinstance(task, dict)
-      and task.get("status") not in SETTLED_TASK_STATUSES
-      for task in tasks
-    )
+    not plan_unfinished
     or goal_handoff_owner_kind(
       db, chat_id, run.goal_id, include_queued_execution=True,
     ) is not None
@@ -666,7 +696,7 @@ def goal_terminal_handoff(
   settled = sum(
     isinstance(task, dict)
     and task.get("status") in SETTLED_TASK_STATUSES
-    for task in tasks
+    for task in (tasks or [])
   )
   prior_frontier = None
   prior_continuation = False
@@ -683,8 +713,11 @@ def goal_terminal_handoff(
   return GoalTerminalHandoff(
     goal_id=run.goal_id,
     automatic_allowed=(
-      not prior_continuation
-      or isinstance(prior_frontier, int) and settled > prior_frontier
+      not plan_corrupt
+      and (
+        not prior_continuation
+        or isinstance(prior_frontier, int) and settled > prior_frontier
+      )
     ),
     settled_count=settled,
   )
@@ -835,13 +868,13 @@ def terminal_goal_summaries_by_message_index(
     identity = row.goal_id or row.root_run_id or row.id
     grouped.setdefault(identity, []).append(row)
 
-  assistant_rows: list[tuple[int, int]] = []
+  assistant_rows: list[tuple[int, int, object]] = []
   for index, message in enumerate(messages):
     if not isinstance(message, dict) or message.get("role") != "assistant":
       continue
     ts = message.get("ts")
     if isinstance(ts, (int, float)) and not isinstance(ts, bool):
-      assistant_rows.append((index, int(ts)))
+      assistant_rows.append((index, int(ts), message.get("id")))
 
   def epoch_ms(value: datetime | None) -> int | None:
     if value is None:
@@ -863,10 +896,22 @@ def terminal_goal_summaries_by_message_index(
     ended_ms = epoch_ms(latest.ended_at)
     if started_ms is None or ended_ms is None:
       continue
+    # New rows carry the exact physical-run identity on the assistant segment.
+    # Prefer it over timestamps so clock skew can never attach a Goal card to
+    # an unrelated answer. An older id-less row still gets the tightly scoped
+    # timestamp fallback even if the Goal later acquired identified messages.
     candidate_index = next((
-      index for index, ts in reversed(assistant_rows)
-      if started_ms - 1000 <= ts <= ended_ms + 1000
+      index for index, message in enumerate(messages)
+      if isinstance(message, dict)
+      and message.get("role") == "assistant"
+      and message.get("id") == latest.id
     ), None)
+    if candidate_index is None:
+      candidate_index = next((
+        index for index, ts, message_id in reversed(assistant_rows)
+        if message_id is None
+        and started_ms - 1000 <= ts <= ended_ms + 1000
+      ), None)
     if (
       candidate_index is None
       or candidate_index < message_start

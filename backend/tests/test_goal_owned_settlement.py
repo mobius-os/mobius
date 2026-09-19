@@ -102,6 +102,17 @@ def test_terminal_does_not_continue_a_settled_or_failed_goal(db, chat):
   assert db.get(models.ChatRun, "must-not-start") is None
 
 
+def test_terminal_treats_unparsable_plan_json_as_unfinished(db, chat):
+  # A goal_plan_json that fails to parse (e.g. a partial write) must not be
+  # mistaken for "no unfinished work" and let the goal silently terminate.
+  _add_goal_run(db, chat, plan="{not valid json")
+
+  with pytest.raises(Exception, match="exhausted Goal continuation needs an owner card"):
+    _terminal_promote(chat.id, "goal-run")
+  db.expire_all()
+  assert db.get(models.ChatRun, "successor") is None
+
+
 @pytest.mark.parametrize("outcome", ["met", "expired", "failed"])
 def test_finished_wait_keeps_goal_ownership_until_result_admission(db, chat, outcome):
   """A sweep can settle a check just before the declaring turn finishes."""
