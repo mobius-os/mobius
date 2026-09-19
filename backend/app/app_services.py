@@ -41,7 +41,10 @@ _FORBIDDEN_HEADERS = frozenset({
   "proxy-authorization", "set-cookie", "te", "trailer",
   "transfer-encoding", "upgrade",
 })
-_global_slots = asyncio.Semaphore(8)
+_global_slots = {
+  "private": asyncio.Semaphore(8),
+  "public": asyncio.Semaphore(8),
+}
 _app_slots: weakref.WeakValueDictionary[tuple[int, str], asyncio.Semaphore] = (
   weakref.WeakValueDictionary()
 )
@@ -194,7 +197,7 @@ async def invoke_service(
   # pruning or a migration drain cannot overlook a request waiting to run.
   pin = hold_runtime(app.id)
   try:
-    async with slot, _global_slots:
+    async with slot, _global_slots[lane]:
       entry = service_entry(app, service)
       try:
         spawn = asyncio.create_task(asyncio.create_subprocess_exec(

@@ -29,8 +29,13 @@ async def test_queued_service_pins_runtime_until_cancelled(monkeypatch, blocked_
 
   gate = Gate()
   events = []
-  monkeypatch.setattr(app_services, "_app_slots", {1: gate if blocked_at == "app" else asyncio.Semaphore(1)})
-  monkeypatch.setattr(app_services, "_global_slots", gate if blocked_at == "global" else asyncio.Semaphore(1))
+  monkeypatch.setattr(app_services, "_app_slots", {
+    (1, "private"): gate if blocked_at == "app" else asyncio.Semaphore(1),
+  })
+  monkeypatch.setattr(app_services, "_global_slots", {
+    "private": gate if blocked_at == "global" else asyncio.Semaphore(1),
+    "public": asyncio.Semaphore(1),
+  })
   monkeypatch.setattr(app_services, "service_contract", lambda *a, **k: {})
 
   def pin(_app_id):
@@ -61,7 +66,10 @@ async def test_one_apps_backlog_does_not_take_other_apps_execution_slots(monkeyp
 
   busy = BusyApp()
   monkeypatch.setattr(app_services, "_app_slots", {(1, "private"): busy})
-  monkeypatch.setattr(app_services, "_global_slots", asyncio.Semaphore(1))
+  monkeypatch.setattr(app_services, "_global_slots", {
+    "private": asyncio.Semaphore(1),
+    "public": asyncio.Semaphore(1),
+  })
   monkeypatch.setattr(app_services, "service_contract", lambda *a, **k: {})
   monkeypatch.setattr(app_services, "hold_runtime", lambda *_: SimpleNamespace(close=lambda: None))
 
@@ -83,7 +91,8 @@ async def test_one_apps_backlog_does_not_take_other_apps_execution_slots(monkeyp
 
 
 @pytest.mark.asyncio
-async def test_public_callback_does_not_queue_behind_private_request(monkeypatch):
+@pytest.mark.parametrize("blocked_at", ["app", "global"])
+async def test_public_callback_does_not_queue_behind_private_request(monkeypatch, blocked_at):
   class BusyPrivateLane(asyncio.Semaphore):
     def __init__(self):
       super().__init__(0)
@@ -94,8 +103,13 @@ async def test_public_callback_does_not_queue_behind_private_request(monkeypatch
       return await super().acquire()
 
   busy = BusyPrivateLane()
-  monkeypatch.setattr(app_services, "_app_slots", {(1, "private"): busy})
-  monkeypatch.setattr(app_services, "_global_slots", asyncio.Semaphore(2))
+  monkeypatch.setattr(app_services, "_app_slots", {
+    (1, "private"): busy if blocked_at == "app" else asyncio.Semaphore(1),
+  })
+  monkeypatch.setattr(app_services, "_global_slots", {
+    "private": busy if blocked_at == "global" else asyncio.Semaphore(1),
+    "public": asyncio.Semaphore(1),
+  })
   monkeypatch.setattr(app_services, "service_contract", lambda *a, **k: {})
   monkeypatch.setattr(app_services, "hold_runtime", lambda *_: SimpleNamespace(close=lambda: None))
 
