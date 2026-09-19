@@ -212,11 +212,8 @@ jobs:
     # Keep the browser suite available for manual dispatches and any future
     # merge-group runs, but do not block ordinary pull requests while the
     # merge queue is disabled. Backend, frontend-unit, and privacy remain
-    # required. (A baseline run on main showed the suite currently fails
-    # ~7% of tests even with no changes applied — pre-existing debt from
-    # e2e not gating merges for a long time — so it isn't ready to hard-gate
-    # PRs yet; sharding below still makes whichever runs it gets much
-    # cheaper once that debt is paid down.)
+    # required. Sharding reduces elapsed browser-suite time for the runs that
+    # do execute.
     if: github.event_name != 'pull_request'
     # A cold hosted build can spend roughly 20 minutes populating the GHA cache
     # before Playwright starts. Leave enough room for one shard's quarter of the
