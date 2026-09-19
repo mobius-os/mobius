@@ -3151,17 +3151,12 @@ def test_model_capacity_retry_policy_allows_one_automatic_resume(db, chat):
   db.add_all(runs)
   db.commit()
 
-  assert [
-    chat_mod._model_capacity_retry_count(db, run) for run in runs
-  ] == [0, 1]
-  assert chat_mod._model_capacity_retry_exhausted(db, runs[0]) is False
-  assert chat_mod._model_capacity_retry_exhausted(db, runs[1]) is True
+  assert chat_mod._has_prior_model_capacity_park(db, runs[0]) is False
+  assert chat_mod._has_prior_model_capacity_park(db, runs[1]) is True
 
 
 def test_model_capacity_retry_delay_is_one_minute_and_bounded():
-  delays = chat_mod.MODEL_CAPACITY_RETRY_DELAYS
-
-  assert delays == (timedelta(minutes=1),)
+  assert chat_mod.MODEL_CAPACITY_RETRY_DELAY == timedelta(minutes=1)
 
 
 def test_model_capacity_second_failure_becomes_manual_resume(db, chat):
