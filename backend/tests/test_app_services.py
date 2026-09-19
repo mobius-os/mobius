@@ -15,6 +15,39 @@ from app.config import get_settings
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("blocked_at", ["app", "global"])
+async def test_queued_service_pins_runtime_until_cancelled(monkeypatch, blocked_at):
+  class Gate(asyncio.Semaphore):
+    def __init__(self):
+      super().__init__(0)
+      self.waiting = asyncio.Event()
+
+    async def acquire(self):
+      self.waiting.set()
+      return await super().acquire()
+
+  gate = Gate()
+  events = []
+  monkeypatch.setattr(app_services, "_app_slots", {1: gate if blocked_at == "app" else asyncio.Semaphore(1)})
+  monkeypatch.setattr(app_services, "_global_slots", gate if blocked_at == "global" else asyncio.Semaphore(1))
+  monkeypatch.setattr(app_services, "service_contract", lambda *a, **k: {})
+
+  def pin(_app_id):
+    events.append("pinned")
+    return SimpleNamespace(close=lambda: events.append("released"))
+
+  monkeypatch.setattr(app_services, "hold_runtime", pin)
+  task = asyncio.create_task(app_services.invoke_service(SimpleNamespace(id=1), None, {}))
+  try:
+    await asyncio.wait_for(gate.waiting.wait(), timeout=1)
+    assert events == ["pinned"], "queued old-runtime requests must prevent a false drain verdict"
+  finally:
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+  assert events == ["pinned", "released"]
+
+
+@pytest.mark.asyncio
 async def test_one_apps_backlog_does_not_take_other_apps_execution_slots(monkeypatch):
   class BusyApp(asyncio.Semaphore):
     def __init__(self):

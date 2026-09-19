@@ -31,3 +31,11 @@ test('does not infer a paid recovery path from a limit alone', () => {
     state: 'ready', windows: [{ kind: 'api_credits', remaining_percent: 0 }],
   }), null)
 })
+
+
+test('does not offer a paid retry when availability is unknown', () => {
+  assert.equal(limitRecoveryCredit('claude', {
+    state: 'ready',
+    extra_usage: { enabled: true, available: null, used_percent: null },
+  }), null)
+})

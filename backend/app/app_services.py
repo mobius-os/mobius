@@ -183,9 +183,11 @@ async def invoke_service(
   slot = _app_slots.setdefault(app.id, asyncio.Semaphore(1))
   # Backlog for one app must not reserve all platform execution capacity while
   # waiting for that app's serialized request. Count only executable requests.
-  async with slot, _global_slots:
-    pin = hold_runtime(app.id)
-    try:
+  # Queued requests already own an accepted revision. Pin before admission so
+  # pruning or a migration drain cannot overlook a request waiting to run.
+  pin = hold_runtime(app.id)
+  try:
+    async with slot, _global_slots:
       entry = service_entry(app, service)
       try:
         spawn = asyncio.create_task(asyncio.create_subprocess_exec(
@@ -250,8 +252,8 @@ async def invoke_service(
         detail = stderr.decode("utf-8", errors="replace").strip()[-1000:]
         log.warning("App service %s failed: %s", app.slug, detail or "no diagnostics")
         raise HTTPException(502, "App service failed.")
-    finally:
-      pin.close()
+  finally:
+    pin.close()
   try:
     response = json.loads(stdout, parse_constant=_reject_json_constant)
   except (UnicodeDecodeError, json.JSONDecodeError, ValueError, RecursionError) as exc:

@@ -1601,6 +1601,7 @@ def _publish_codex_context_compaction(bc: Any, chat_id: str) -> None:
 
 
 async def _run_codex_sdk_turn(
+  *,
   user_message: str,
   session_id: str | None,
   base_env: dict[str, str],
@@ -2689,23 +2690,70 @@ async def _run_codex_sdk_turn(
       raise deferred_cancel
 
 
-@functools.wraps(_run_codex_sdk_turn)
-async def run_codex_sdk_turn(*args, **kwargs) -> RunnerResult:
-  """Hold cross-process rollout ownership around the complete Codex runner."""
+async def run_codex_sdk_turn(
+  *,
+  user_message: str,
+  session_id: str | None,
+  base_env: dict[str, str],
+  cwd: str,
+  chat_id: str,
+  bc,
+  pending_questions: dict,
+  db,
+  agent_settings: dict | None = None,
+  system_prompt: str | None = None,
+  resumed_context: str | None = None,
+  should_abort: Callable[[], bool] | None = None,
+  goal_objective: str | None = None,
+  clear_dismissed_goal: bool = False,
+  goal_mode: bool = False,
+  goal_continue: bool = False,
+  fallback_goal_objective: str | None = None,
+  run_policy=None,
+  connector_plan=None,
+  provider_id: str = "codex",
+  data_dir: str | None = None,
+  coordination_enabled: bool = True,
+) -> RunnerResult:
+  """Hold cross-process rollout ownership around one strict Codex call.
+
+  Keep the public boundary explicit so provider-only arguments passed to the
+  wrong runner are visible to static tooling. A contract test keeps this
+  wrapper aligned with the inner runner as either evolves.
+  """
   from app.codex_session_lock import acquire_codex_session_activity_async
 
-  data_dir = kwargs.get("data_dir")
   if data_dir is None:
     from app.config import get_settings
 
     data_dir = get_settings().data_dir
-    kwargs["data_dir"] = data_dir
 
-  ownership = await acquire_codex_session_activity_async(
-    data_dir,
-  )
+  ownership = await acquire_codex_session_activity_async(data_dir)
   try:
-    return await _run_codex_sdk_turn(*args, **kwargs)
+    return await _run_codex_sdk_turn(
+      user_message=user_message,
+      session_id=session_id,
+      base_env=base_env,
+      cwd=cwd,
+      chat_id=chat_id,
+      bc=bc,
+      pending_questions=pending_questions,
+      db=db,
+      agent_settings=agent_settings,
+      system_prompt=system_prompt,
+      resumed_context=resumed_context,
+      should_abort=should_abort,
+      goal_objective=goal_objective,
+      clear_dismissed_goal=clear_dismissed_goal,
+      goal_mode=goal_mode,
+      goal_continue=goal_continue,
+      fallback_goal_objective=fallback_goal_objective,
+      run_policy=run_policy,
+      connector_plan=connector_plan,
+      provider_id=provider_id,
+      data_dir=data_dir,
+      coordination_enabled=coordination_enabled,
+    )
   finally:
     ownership.release()
 

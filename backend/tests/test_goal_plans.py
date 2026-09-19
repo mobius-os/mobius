@@ -866,6 +866,33 @@ def test_parallel_roots_release_dependent_task_only_after_all_complete(
   assert final["summary"]["completion_blockers"] == ["c"]
 
 
+def test_identical_plan_write_is_a_cas_noop_and_stale_writer_conflicts(
+  client, owner_token, db,
+):
+  """Rewriting the same plan cannot mint a new Goal rollover allowance."""
+  auth, chat_id = _active_goal(client, owner_token, db)
+  tasks = [{"id": "audit", "title": "Run the audit", "status": "running"}]
+  created = client.put(
+    f"/api/chats/{chat_id}/goal-plan",
+    json={"expected_revision": 0, "tasks": tasks}, headers=auth,
+  )
+  assert created.status_code == 200, created.text
+  assert created.json()["plan"]["revision"] == 1
+
+  identical = client.put(
+    f"/api/chats/{chat_id}/goal-plan",
+    json={"expected_revision": 1, "tasks": tasks}, headers=auth,
+  )
+  assert identical.status_code == 200, identical.text
+  assert identical.json()["plan"]["revision"] == 1
+
+  stale_identical = client.put(
+    f"/api/chats/{chat_id}/goal-plan",
+    json={"expected_revision": 0, "tasks": tasks}, headers=auth,
+  )
+  assert stale_identical.status_code == 409, stale_identical.text
+
+
 def test_repeated_task_needs_full_progress_and_stale_revision_cannot_overwrite(
   client, owner_token, db,
 ):

@@ -2,7 +2,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { api } from '../../api/client.js'
-import { versionQueries } from '../../hooks/queries.js'
+import { platformStatusQueries, versionQueries } from '../../hooks/queries.js'
 import { rebuildIsActive, rebuildRequestOutcome } from '../../lib/containerRebuild.js'
 import { platformStatusFromApply, platformStatusUnavailable } from '../../lib/platformUpdateState.js'
 import { restartCanReload, restartPollDecision } from '../../lib/restartReadiness.js'
@@ -48,6 +48,15 @@ async function reloadShell() {
 export default function usePlatformUpdates({ active, refreshToken, onOpenChat }) {
   const queryClient = useQueryClient()
   const versionQuery = versionQueries.current.useQuery()
+  // Persisted status is display provenance only. Update actions continue to
+  // derive from this mount's live response, so an old cache entry cannot
+  // briefly revive a stale update or activation action.
+  const cachedPlatformQuery = platformStatusQueries.current.useQuery({ enabled: false })
+  const cachedPlatform = cachedPlatformQuery.data || null
+  const cachePlatform = useCallback(
+    body => queryClient.setQueryData(platformStatusQueries.current.key, body),
+    [queryClient],
+  )
   const [platform, setPlatform] = useState(null)
   const [rebuild, setRebuild] = useState(null)
   const [phase, setPhase] = useState('idle')
@@ -65,12 +74,13 @@ export default function usePlatformUpdates({ active, refreshToken, onOpenChat })
       const body = await responseBody(await api.platform.status())
       if (!body || typeof body.state !== 'string') throw new Error('Unreadable update status')
       setPlatform(body)
+      cachePlatform(body)
       return body
     } catch {
       if (!preserveCurrentOnFailure) setPlatform(current => platformStatusUnavailable(current))
       return null
     }
-  }, [])
+  }, [cachePlatform])
 
   const refreshRebuild = useCallback(async () => {
     try {
@@ -192,6 +202,7 @@ export default function usePlatformUpdates({ active, refreshToken, onOpenChat })
       (async () => {
         const body = await responseBody(await api.platform.check())
         setPlatform(body)
+        cachePlatform(body)
         return body
       })(),
       (async () => {
@@ -289,7 +300,7 @@ export default function usePlatformUpdates({ active, refreshToken, onOpenChat })
   const clearError = useCallback(() => { setError(''); setErrorCode('') }, [])
 
   return {
-    platform, rebuild, version: versionQuery.data, phase, busy, error, errorCode, checkResult,
+    platform, cachedPlatform, rebuild, version: versionQuery.data, phase, busy, error, errorCode, checkResult,
     progress, reconnecting: !!reconnect, observingKind: reconnect?.kind, slow, check, execute, restart, resolve,
     clearError,
   }

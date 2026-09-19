@@ -114,46 +114,57 @@ async def request_restart(
   principal: Principal = Depends(get_agent_run_principal),
   db: Session = Depends(get_db),
 ):
-  """Save one platform-owned Restart card for current committed source."""
+  """Save one platform-owned Restart card. Pressing it always restarts."""
+  from app import restart_ledger
   from app.platform_restart import (
-    RestartRequirementError,
-    build_restart_requirement,
+    CONDITION_VERSION,
+    pending_restart_paths,
+    restart_condition_id,
   )
 
-  try:
-    requirement = build_restart_requirement()
-  except RestartRequirementError as exc:
+  source_boot_id = restart_ledger.current_boot_id()
+  if not source_boot_id:
     raise HTTPException(
       status_code=409,
       detail={
-        "code": str(exc),
-        "message": (
-          "Möbius could not bind a Restart card to exact committed, "
-          "restart-loadable platform source."
-        ),
+        "code": "platform_source_is_not_loaded",
+        "message": "Möbius is not running a restart-loadable platform boot.",
       },
-    ) from exc
-  action_id = requirement["action_id"]
+    )
+  action_id = restart_condition_id(source_boot_id, principal.run_id)
+  requirement = {
+    "version": CONDITION_VERSION,
+    "source_boot_id": source_boot_id,
+    "action_id": action_id,
+    "paths": pending_restart_paths(),
+  }
   restart_now_id = str(uuid5(NAMESPACE_URL, f"{action_id}:restart-now"))
   paths = requirement["paths"]
-  path_summary = ", ".join(paths[:3])
-  if len(paths) > 3:
-    path_summary += f", and {len(paths) - 3} more"
+  if paths:
+    path_summary = ", ".join(paths[:3])
+    if len(paths) > 3:
+      path_summary += f", and {len(paths) - 3} more"
+    question = (
+      f"Restart to load the tested platform changes in {path_summary}? "
+      "This interrupts active turns and Möbius may be unavailable for "
+      "tens of seconds."
+    )
+  else:
+    question = (
+      "Restart Möbius now? This interrupts active turns and Möbius may be "
+      "unavailable for tens of seconds."
+    )
   payload = {
     "questions": [{
       "id": "restart",
       "header": "Restart Möbius",
-      "question": (
-        f"Restart to load the tested platform changes in {path_summary}? "
-        "This interrupts active turns and Möbius may be unavailable for "
-        "tens of seconds."
-      ),
+      "question": question,
       "options": [
         {
           "id": restart_now_id,
           "label": "Restart now",
           "on_answer": "close",
-          "description": "Drain active work and restart once to load these exact changes.",
+          "description": "Drain active work and restart once to load the current platform source.",
         },
       ],
     }],
@@ -171,7 +182,7 @@ async def request_restart(
     payload,
     principal,
     db,
-    identity_payload={"type": "request_restart", "requirement": requirement},
+    identity_payload={"type": "request_restart", "source_boot_id": source_boot_id},
     activation_requirement=requirement,
   )
 

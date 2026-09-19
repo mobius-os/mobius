@@ -4,6 +4,7 @@ import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 
 import {
+  isDurableRestartOffer,
   isRestartCardAction,
   restartCardSelectedOptions,
   restartCardStatusDetail,
@@ -57,6 +58,17 @@ test('restart cards separate written feedback from forged action ids', () => {
   }), null)
   assert.equal(isRestartCardAction({ ...action, version: 2 }), true)
   assert.equal(isRestartCardAction({ ...action, version: 3 }), false)
+})
+
+
+test('version 2 restart offers remain actionable after their chat wait retires', () => {
+  assert.equal(isDurableRestartOffer({
+    ...action, version: 2, status: 'awaiting_owner',
+  }), true)
+  assert.equal(isDurableRestartOffer({
+    ...action, version: 2, status: 'restart_requested',
+  }), false)
+  assert.equal(isDurableRestartOffer(action), false)
 })
 
 
