@@ -16,8 +16,7 @@ import {
   BROADCAST_REGISTRATION_WINDOW_MS,
   QUICK_WAKE_HIDDEN_MS,
 } from '../frontend/src/components/ChatView/streamTiming.js'
-import { attachCleanup } from './_chatTracker.mjs'
-import { createChat, sendMessage, waitForChatShell } from './_chatSession.mjs'
+import { createTaggedChat, attachCleanup } from './_chatTracker.mjs'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
 
@@ -38,12 +37,27 @@ async function setupChat(page) {
   )
 
   await page.goto(BASE, { waitUntil: 'domcontentloaded' })
-  await waitForChatShell(page)
-  return createChat(page, 'stream-reconnect', { waitFor: 'form' })
+  await page.waitForFunction(
+    () => !!(document.querySelector('.chat__empty-wrap')
+          || document.querySelector('.chat__scroll')
+          || document.querySelector('.chat__form')),
+    { timeout: 10000 }
+  )
+  const chat = await createTaggedChat(page, 'stream-reconnect')
+  await page.goto(`${BASE}/shell/?chat=${encodeURIComponent(chat.id)}`, {
+    waitUntil: 'domcontentloaded',
+  })
+  await page.waitForFunction(
+    () => !!document.querySelector('[data-chat-surface="painted"] .chat__form'),
+    { timeout: 10000 },
+  )
+  return chat
 }
 
 async function send(page, text) {
-  await sendMessage(page, text, { scope: page, wait: 'none' })
+  const input = page.getByRole('textbox', { name: 'Message Möbius…' })
+  await input.fill(text)
+  await page.keyboard.press('Enter')
 }
 
 async function setVisibility(page, state) {
