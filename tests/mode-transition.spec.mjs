@@ -693,7 +693,11 @@ test('retiring an explicit Builder cover returns the selected tab and preserves 
   const navigation = page.getByRole('navigation', { name: 'Primary navigation' })
   await navigation.getByRole('button', { name: 'New chat', exact: true }).click()
 
-  const presentation = page.locator('[data-new-chat-presentation]')
+  // [data-new-chat-presentation] was removed by 45955a65 ("Make fresh chats
+  // use one canonical composer") -- NewChatLanding's separate presentation
+  // wrapper is gone, and the composer now renders directly inside the
+  // canonical painted chat surface for both new and existing chats.
+  const presentation = page.locator('[data-chat-surface="painted"]')
   const composer = presentation.getByRole('textbox', { name: 'Message Möbius…' })
   await expect.poll(() => explicitCreates).toBe(1)
   await expect(composer).toBeFocused()
@@ -785,7 +789,6 @@ test('a selected Builder tab supersedes an in-flight NULL-slot allocation', asyn
     paneModel.STORAGE_KEY,
   ), { timeout: 4000 }).toBe('aaa')
   expect(createCount, 'the stale allocation settles without duplicating or taking the slot').toBe(1)
-  await expect(page.locator('[data-new-chat-presentation]')).toHaveCount(0)
 })
 
 // R4: same-batch descriptor atomicity for the last-tab-close auto-return. A one-tab
