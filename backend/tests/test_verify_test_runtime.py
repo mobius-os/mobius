@@ -745,7 +745,11 @@ def test_manual_and_pull_request_runs_cover_suites_and_main_image():
   # and isn't ready to hard-gate ordinary PRs on.
   assert "fail-fast: false" in e2e
   assert "shard: [1, 2, 3, 4]" in e2e
-  assert "--shard=${{ matrix.shard }}/${{ env.SHARD_TOTAL }}" in e2e
+  # The shard denominator is derived from strategy.job-total rather than a
+  # second hardcoded count, so resizing the matrix can't silently drop
+  # coverage by leaving a duplicate total out of sync with it.
+  assert "--shard=${{ matrix.shard }}/${{ strategy.job-total }}" in e2e
+  assert "SHARD_TOTAL" not in e2e
   assert "needs: privacy" in e2e
   assert "needs: backend" not in e2e
   assert "cache-from: type=gha" in e2e
