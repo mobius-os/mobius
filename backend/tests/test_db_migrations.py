@@ -103,6 +103,20 @@ def test_provider_admission_upgrade_preserves_legacy_uncertainty(tmp_path):
     assert fresh.provider_execution_admitted is False
 
 
+def test_drop_platform_restart_executions_is_idempotent(tmp_path):
+  eng = create_engine(f"sqlite:///{tmp_path / 'restart-executions.db'}")
+  models.Base.metadata.create_all(eng)
+  with eng.begin() as conn:
+    conn.execute(text(
+      "CREATE TABLE platform_restart_executions (action_id VARCHAR(96) PRIMARY KEY)"
+    ))
+
+  migrations._drop_platform_restart_executions(eng)
+  migrations._drop_platform_restart_executions(eng)
+
+  assert "platform_restart_executions" not in inspect(eng).get_table_names()
+
+
 def test_run_migrations_drops_removed_image_generation_columns(tmp_path):
   db_path = tmp_path / "legacy-image-generation.db"
   eng = create_engine(f"sqlite:///{db_path}")
@@ -1572,6 +1586,7 @@ def test_run_migrations_records_an_inspectable_append_only_history(tmp_path):
     "0057_detach_retired_gauntlet_history",
     "0058_stable_app_package_identities",
     "0059_app_service_aliases",
+    "0060_drop_platform_restart_executions",
   ]
   assert second == first
 

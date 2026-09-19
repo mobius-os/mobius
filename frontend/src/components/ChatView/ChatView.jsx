@@ -198,6 +198,7 @@ import {
   shouldRetireRestoredQuestionSnapshot,
   shouldAttachRunningStream,
   shouldAdoptRuntimeAssistantOwner,
+  shouldRetireStreamForRuntime,
   shouldRecoverSettledRuntime,
   shouldRetireSettledRunMarker,
   shouldRetryStopAfterConfirm,
@@ -1448,12 +1449,14 @@ export default function ChatView({
       onReconciled?.(runtime)
       const localStartInFlight =
         localStartRequestRef.current?.chatId === String(chatId)
-      if (shouldRecoverSettledRuntime({
-        settledRun: runtimeTransition.settled,
-        runtimeRunId: data.run_id || null,
-        runtimeRunning: !!data.running,
-        pendingCount: (data.pending_messages || []).length,
-        streamStillActive: isStreamingRef.current,
+      // This committed detail projection is the owner of whether an SSE
+      // transport is due. A completed run and a parked owner question both
+      // have no stream to attach; retire any failed transport even when its
+      // error path already set isStreaming false. Keep a local Start/Stop
+      // transition authoritative until its own response crosses the boundary.
+      if (shouldRetireStreamForRuntime({
+        runtimeRunning: runtime.running,
+        pendingQuestionId: runtime.pendingQuestionId,
         stopInFlight: handlingStopRef.current,
         localStartInFlight,
       })) {

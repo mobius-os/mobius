@@ -44,17 +44,20 @@ test('resource admission rollback is presented as retryable contention', () => {
   assert.match(reason, /Try again after other work finishes/)
 })
 
-test('a self-hosted source apply that did not queue its rebuild remains recoverable', () => {
+test('an explicit post-apply dispatch failure remains recoverable', () => {
   assert.match(
     platformUpdateRepairReason({ errorCode: 'update_applied_rebuild_pending' }),
     /applied.*finishing the container replacement/,
   )
+})
+
+test('an installed image update with no replacement attempt stays in the reviewed UI flow', () => {
   const platform = {
     available: false,
     contained_upstream_sha: 'installed',
     activation: { level: 'image_rebuild', required_actions: ['image_rebuild'] },
   }
-  assert.match(platformUpdateRepairReason({ platform }), /applied.*finishing the container replacement/)
+  assert.equal(platformUpdateRepairReason({ platform }), null)
   assert.equal(platformUpdateRepairReason({
     platform,
     rebuild: { expected_sha: 'installed', state: 'queued' },

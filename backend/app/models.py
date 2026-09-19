@@ -631,31 +631,6 @@ class PlatformBootSnapshot(Base):
   captured_at = Column(DateTime, nullable=False, default=lambda: now_naive_utc())
 
 
-class PlatformRestartExecution(Base):
-  """At-most-once claim for one exact platform Restart action.
-
-  The claim commits before the process side effect is admitted.  If the
-  process dies in that gap the row is reconciled from boot evidence; it is
-  never replayed merely because an HTTP acknowledgement was lost.
-  """
-
-  __tablename__ = "platform_restart_executions"
-
-  action_id = Column(String(96), primary_key=True)
-  question_id = Column(String(64), nullable=False, unique=True, index=True)
-  chat_id = Column(
-    String(64), ForeignKey("chats.id"), nullable=False, index=True,
-  )
-  wait_id = Column(String(64), nullable=False, unique=True, index=True)
-  source_boot_id = Column(String(160), nullable=False)
-  requirement_json = Column(JSON, nullable=False)
-  status = Column(String(24), nullable=False, default="claimed", index=True)
-  claimed_at = Column(DateTime, nullable=False, default=lambda: now_naive_utc())
-  admitted_at = Column(DateTime, nullable=True, default=None)
-  activated_boot_id = Column(String(160), nullable=True, default=None)
-  settled_at = Column(DateTime, nullable=True, default=None)
-
-
 class ChatSessionLink(Base):
   """Append-only provider-session -> chat identity map (subagent observability).
 

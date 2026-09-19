@@ -5,6 +5,13 @@ export function isRestartCardAction(action) {
 }
 
 
+export function isDurableRestartOffer(action) {
+  return isRestartCardAction(action)
+    && action.version === 2
+    && action.status === 'awaiting_owner'
+}
+
+
 /**
  * Resolve the card's displayed labels back to the server-issued option ids.
  * Free text and unknown ids fail closed; the backend remains authoritative.
@@ -36,7 +43,6 @@ export function restartCardStatusLabel(action) {
     activated: 'Möbius restarted',
     deferred: 'Waiting for a later restart',
     responded: 'Response sent',
-    dismissed: 'Restart wait cancelled',
     expired: 'Restart request closed',
     uncertain: 'Restart outcome needs review',
     activation_uncertain: 'Restart outcome needs review',
@@ -52,7 +58,6 @@ export function restartCardStatusDetail(action) {
     activated: 'A later ready server was observed. The agent will check whether these changes loaded.',
     deferred: 'This work remains linked and the agent will resume after a later restart.',
     responded: 'This card did not restart Möbius. The agent will respond to what you wrote instead.',
-    dismissed: 'This card cannot restart Möbius. The agent can check the current changes and ask again if needed.',
     expired: 'Nothing was restarted from this card. The agent can check whether a restart is still needed and ask again.',
     uncertain: 'Nothing will be replayed automatically. The agent will check the current state before asking again.',
     activation_uncertain: 'Nothing will be replayed automatically. The agent will check the current state before asking again.',

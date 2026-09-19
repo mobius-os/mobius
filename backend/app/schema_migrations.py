@@ -4834,6 +4834,16 @@ def _add_app_service_aliases(eng) -> None:
     ))
 
 
+def _drop_platform_restart_executions(eng) -> None:
+  """Drop the retired restart source-proof and execution-claim table."""
+  from sqlalchemy import inspect as sa_inspect, text
+
+  if "platform_restart_executions" not in sa_inspect(eng).get_table_names():
+    return
+  with eng.begin() as conn:
+    conn.execute(text("DROP TABLE IF EXISTS platform_restart_executions"))
+
+
 _SCHEMA_MIGRATIONS = (
   # Full IDs are permanent identities, not sequence positions. Append new
   # work in execution order; never renumber a shipped ID to reconcile sources.
@@ -4897,6 +4907,7 @@ _SCHEMA_MIGRATIONS = (
   ("0057_detach_retired_gauntlet_history", _detach_retired_gauntlet_history),
   ("0058_stable_app_package_identities", _add_stable_app_package_identities),
   ("0059_app_service_aliases", _add_app_service_aliases),
+  ("0060_drop_platform_restart_executions", _drop_platform_restart_executions),
 )
 
 

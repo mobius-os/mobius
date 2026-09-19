@@ -13,7 +13,7 @@ import './PlatformUpdates.css'
 
 export default function PlatformUpdates({ active, refreshToken, onOpenChat }) {
   const update = usePlatformUpdates({ active, refreshToken, onOpenChat })
-  const { platform, rebuild, version, phase, busy } = update
+  const { platform, cachedPlatform, rebuild, version, phase, busy } = update
   const [review, setReview] = useState(null)
   const [confirmRestart, setConfirmRestart] = useState(false)
   const actionRef = useRef(null)
@@ -25,8 +25,10 @@ export default function PlatformUpdates({ active, refreshToken, onOpenChat }) {
   const available = platform?.available || platform?.newer_updates_available
   const unavailable = !platform || platform.status_unavailable
   const activeRebuild = rebuildIsActive(rebuild)
-  const mobiusVersion = platformVersionIdentity(platform, version)
+  const versionPlatform = platform || cachedPlatform
+  const mobiusVersion = platformVersionIdentity(versionPlatform, version)
   const containerVersion = containerVersionIdentity(version)
+  const missingVersionLabel = versionPlatform ? 'Unavailable' : 'Checking…'
   const repairReason = !conflict && platformUpdateRepairReason({ platform, rebuild, error: update.error, errorCode: update.errorCode })
 
   useEffect(() => {
@@ -103,8 +105,8 @@ export default function PlatformUpdates({ active, refreshToken, onOpenChat }) {
         </div>
       )}
       <dl className="platform-updates__versions">
-        <dt>Installed update</dt><dd>{formatUpstreamCommitDate(platform?.contained_upstream_committed_at) || 'Unknown'} {mobiusVersion.primarySha && <code>{mobiusVersion.primarySha}</code>}</dd>
-        <dt>Current system</dt><dd>{formatUpstreamCommitDate(platform?.current_build_committed_at || version?.build_date) || 'Unknown'} {containerVersion.sha && <code>{containerVersion.sha}</code>}</dd>
+        <dt>Installed update</dt><dd>{formatUpstreamCommitDate(versionPlatform?.contained_upstream_committed_at) || missingVersionLabel} {mobiusVersion.primarySha && <code>{mobiusVersion.primarySha}</code>}</dd>
+        <dt>Current system</dt><dd>{formatUpstreamCommitDate(versionPlatform?.current_build_committed_at || version?.build_date) || missingVersionLabel} {containerVersion.sha && <code>{containerVersion.sha}</code>}</dd>
       </dl>
       {!confirmRestart && (
         <div className="platform-updates__restart-row">
