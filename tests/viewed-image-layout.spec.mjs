@@ -63,6 +63,7 @@ async function verifyColdImageLayout(page, viewport) {
         offset: 0,
         running: false,
         pending_messages: [],
+        runtime_revision: 0,
       }),
     })
   })

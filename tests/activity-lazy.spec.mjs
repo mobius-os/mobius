@@ -149,6 +149,7 @@ test('cold historical activity reveals once at its final height', async ({ page 
         offset: 0,
         running: false,
         pending_messages: [],
+        runtime_revision: 0,
       }),
     })
   })
@@ -287,6 +288,7 @@ test('a lone activity is direct and sources render as safe compact pills', async
         offset: 0,
         running: false,
         pending_messages: [],
+        runtime_revision: 0,
       }),
     })
   })
@@ -424,6 +426,7 @@ test('activity stays nested and lazy, aborts on close, and copies exact tool out
         offset: 0,
         running: false,
         pending_messages: [],
+        runtime_revision: 0,
       }),
     })
   })

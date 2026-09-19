@@ -270,6 +270,7 @@ test('jump-to-latest appears only away from the physical tail and resumes follow
         offset: 0,
         running: false,
         pending_messages: [],
+        runtime_revision: 0,
       }),
     })
   })
