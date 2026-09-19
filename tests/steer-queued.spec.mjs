@@ -24,7 +24,6 @@
  */
 import { test, expect } from '@playwright/test'
 import { attachCleanup, createTaggedChat } from './_chatTracker.mjs'
-import { createChat, sendMessage as sharedSendMessage, waitForChatShell } from './_chatSession.mjs'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
 
@@ -35,20 +34,46 @@ function sseBody(events) {
 async function setupChat(page) {
   await page.setViewportSize({ width: 412, height: 915 })
   await page.goto(BASE, { waitUntil: 'domcontentloaded' })
-  await waitForChatShell(page)
+  await page.waitForFunction(
+    () => !!(document.querySelector('.chat__empty-wrap')
+          || document.querySelector('.chat__scroll')
+          || document.querySelector('.chat__form')),
+    { timeout: 10000 }
+  )
 }
 
-// Creates the chat via the API rather than clicking through the drawer's
-// New Chat button — see tests/_chatSession.mjs. None of this file's tests
-// are about the drawer's own open/close UI, so the API-created pattern
-// (which also sidesteps a brittle `[aria-expanded]` selector match) is a
-// strict improvement here.
 async function newChat(page) {
-  await createChat(page, 'steer-queued', { waitFor: 'empty-wrap' })
+  // The real nav toggle is ShellBrand's "Toggle navigation" button — a
+  // specific accessible-name locator instead of the generic
+  // `[aria-expanded]` selector (which would match the first element
+  // anywhere in the DOM with that attribute, not necessarily this button).
+  const navToggle = page.getByRole('button', { name: 'Toggle navigation' })
+  if ((await navToggle.getAttribute('aria-expanded')) !== 'true') {
+    await navToggle.click()
+  }
+  await page.waitForFunction(
+    () => !!document.querySelector('.drawer--open'),
+    { timeout: 3000 }
+  )
+  await page.evaluate(() => {
+    const newChatBtn = document.querySelector('.drawer__item--new')
+    if (newChatBtn) newChatBtn.click()
+  })
+  await page.waitForFunction(
+    () => !document.querySelector('.drawer--open'),
+    { timeout: 3000 }
+  )
+  await page.waitForFunction(
+    () => !document.querySelector('[data-new-chat-presentation]'),
+    { timeout: 10000 },
+  )
 }
 
 async function sendMessage(page, text) {
-  await sharedSendMessage(page, text, { wait: 'none' })
+  const surface = page.locator('[data-chat-surface="painted"]')
+  const input = surface.getByRole('textbox', { name: 'Message Möbius…' })
+  await input.fill(text)
+  await page.keyboard.press('Enter')
 }
 
 async function tapSend(page, text) {
