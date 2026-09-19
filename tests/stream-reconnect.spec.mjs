@@ -12,7 +12,12 @@
  */
 import { test, expect } from '@playwright/test'
 import { streamSnapshotKey } from '../frontend/src/components/ChatView/streamSnapshotCache.js'
-import { createTaggedChat, attachCleanup } from './_chatTracker.mjs'
+import {
+  BROADCAST_REGISTRATION_WINDOW_MS,
+  QUICK_WAKE_HIDDEN_MS,
+} from '../frontend/src/components/ChatView/useStreamConnection.js'
+import { attachCleanup } from './_chatTracker.mjs'
+import { createChat, sendMessage, waitForChatShell } from './_chatSession.mjs'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
 
@@ -33,27 +38,12 @@ async function setupChat(page) {
   )
 
   await page.goto(BASE, { waitUntil: 'domcontentloaded' })
-  await page.waitForFunction(
-    () => !!(document.querySelector('.chat__empty-wrap')
-          || document.querySelector('.chat__scroll')
-          || document.querySelector('.chat__form')),
-    { timeout: 10000 }
-  )
-  const chat = await createTaggedChat(page, 'stream-reconnect')
-  await page.goto(`${BASE}/shell/?chat=${encodeURIComponent(chat.id)}`, {
-    waitUntil: 'domcontentloaded',
-  })
-  await page.waitForFunction(
-    () => !!document.querySelector('[data-chat-surface="painted"] .chat__form'),
-    { timeout: 10000 },
-  )
-  return chat
+  await waitForChatShell(page)
+  return createChat(page, 'stream-reconnect', { waitFor: 'form' })
 }
 
 async function send(page, text) {
-  const input = page.getByRole('textbox', { name: 'Message Möbius…' })
-  await input.fill(text)
-  await page.keyboard.press('Enter')
+  await sendMessage(page, text, { scope: page, wait: 'none' })
 }
 
 async function setVisibility(page, state) {
@@ -540,7 +530,7 @@ test.describe('Stream reconnection', () => {
     await page.waitForFunction(() => window.__streamFetchCount === 1)
 
     await setVisibility(page, 'hidden')
-    await page.waitForTimeout(5200)
+    await page.waitForTimeout(QUICK_WAKE_HIDDEN_MS + 200)
     await setVisibility(page, 'visible')
 
     await page.waitForFunction(() => window.__streamFetchCount === 2)
@@ -609,7 +599,7 @@ test.describe('Stream reconnection', () => {
     await page.waitForFunction(() => window.__streamFetchCount === 1)
 
     await setVisibility(page, 'hidden')
-    await page.waitForTimeout(5200)
+    await page.waitForTimeout(QUICK_WAKE_HIDDEN_MS + 200)
     await setVisibility(page, 'visible')
 
     await page.waitForFunction(() => window.__streamFetchCount === 2)
@@ -912,7 +902,7 @@ test.describe('Stream reconnection', () => {
     // the old response. Without the ownership guard, this makes the stale
     // connection take the terminal-204 branch immediately instead of entering
     // the registration-retry branch first.
-    await page.waitForTimeout(1750)
+    await page.waitForTimeout(BROADCAST_REGISTRATION_WINDOW_MS + 250)
 
     // NOW release the parked first stream as a stale 204. With the guard
     // it bails (abortRef no longer === its controller). Without the

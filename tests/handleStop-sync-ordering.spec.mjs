@@ -24,55 +24,32 @@
  * Run: scripts/playwright-local.sh --allow-local-e2e tests/handleStop-sync-ordering.spec.mjs
  */
 import { test, expect } from '@playwright/test'
+import { createChat, sendMessage as sharedSendMessage, waitForChatShell } from './_chatSession.mjs'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
 
 async function setupChat(page) {
   await page.setViewportSize({ width: 412, height: 915 })
   await page.goto(BASE, { waitUntil: 'domcontentloaded' })
-  await page.waitForFunction(
-    () => !!(document.querySelector('[data-chat-surface="painted"] .chat__empty-wrap')
-          || document.querySelector('[data-chat-surface="painted"] .chat__scroll')
-          || document.querySelector('[data-chat-surface="painted"] .chat__form')),
-    { timeout: 10000 }
-  )
+  await waitForChatShell(page)
 }
 
+// Creates the chat via the API rather than clicking through the drawer's
+// New Chat button — see tests/_chatSession.mjs. None of this file's tests
+// are about the drawer's own open/close UI, so the API-created pattern is
+// a strict improvement here (it also sidesteps having to re-derive the
+// "composer is ready" check the old drawer flow needed).
 async function newChat(page) {
-  await page.evaluate(() => {
-    const btn = document.querySelector('[aria-expanded]')
-    if (btn && btn.getAttribute('aria-expanded') !== 'true') btn.click()
-  })
-  await page.waitForFunction(
-    () => !!document.querySelector('.drawer--open'),
-    { timeout: 3000 }
-  )
-  await page.evaluate(() => {
-    const newChatBtn = document.querySelector('.drawer__item--new')
-    if (newChatBtn) newChatBtn.click()
-  })
-  await page.waitForFunction(
-    () => !document.querySelector('.drawer--open'),
-    { timeout: 3000 }
-  )
-  // New Chat may correctly reuse the already-visible untouched chat. Wait for
-  // the draft-first cover to hand off to whichever durable composer owns the
-  // destination rather than requiring a newly allocated identity.
+  await createChat(page, 'handleStop-sync-ordering', { waitFor: 'empty-wrap' })
   await page.waitForFunction(() => {
     const surface = document.querySelector('[data-chat-surface="painted"]')
     const composer = surface?.querySelector('[aria-label="Message Möbius…"]')
-    return !!surface?.getAttribute('data-chat-id')
-      && !document.querySelector('[data-new-chat-presentation]')
-      && !!composer
-      && !composer.disabled
+    return !!composer && !composer.disabled
   }, undefined, { timeout: 10000 })
 }
 
 async function sendMessage(page, text) {
-  const input = page.locator('[data-chat-surface="painted"]')
-    .getByRole('textbox', { name: 'Message Möbius…' })
-  await input.fill(text)
-  await input.press('Enter')
+  await sharedSendMessage(page, text, { wait: 'none' })
 }
 
 // These tests mock the network via page.route and assert no service-worker

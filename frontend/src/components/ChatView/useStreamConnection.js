@@ -85,7 +85,7 @@ export async function retireInteractiveIntent({
 // the notification shade or an app switch. If the SSE socket has also read
 // recently, keep it: tearing down a healthy stream is what makes quiet tool
 // turns flash "Reconnecting…" on every foreground.
-const QUICK_WAKE_HIDDEN_MS = 5000
+export const QUICK_WAKE_HIDDEN_MS = 5000
 
 // chats_stream.py sends keepalive SSE comments every 30s. Two missed
 // keepalives plus grace means a socket is no longer demonstrably healthy
@@ -111,7 +111,7 @@ const KEPT_SOCKET_DEADMAN_MS = 40000
 //
 // 1.5s is the empirical headroom: round-trip + create_broadcast +
 // scheduler hop are well under that on local + remote prod traffic.
-const BROADCAST_REGISTRATION_WINDOW_MS = 1500
+export const BROADCAST_REGISTRATION_WINDOW_MS = 1500
 
 /**
  * Hook that manages an SSE connection to /api/chats/{chatId}/stream.

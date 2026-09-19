@@ -7,7 +7,8 @@
  * Run: scripts/playwright-local.sh --allow-local-e2e tests/frontend.spec.mjs
  */
 import { test, expect } from '@playwright/test'
-import { createTaggedChat, attachCleanup } from './_chatTracker.mjs'
+import { attachCleanup } from './_chatTracker.mjs'
+import { createChat, sendMessage as sharedSendMessage } from './_chatSession.mjs'
 import { mockPendingQuestionState } from './_mockPendingQuestion.mjs'
 import { applyApp } from './app-source.mjs'
 
@@ -48,32 +49,14 @@ async function setup(page, viewport = { width: 412, height: 915 }) {
 }
 
 async function newChat(page) {
-  // Worker-tagged title so cleanupWorkerChats can find + delete this
-  // chat at the end of the spec. See tests/_chatTracker.mjs.
-  const chat = await createTaggedChat(page)
-  if (chat?.id) {
-    // A valid persisted workspace wins over the legacy active-chat mirror.
-    // Navigate through the supported in-scope cold deep-link contract.
-    await page.goto(`${BASE}/shell/?chat=${encodeURIComponent(chat.id)}`, {
-      waitUntil: 'domcontentloaded',
-    })
-  } else {
-    await page.evaluate(() => {
-      document.querySelector('.drawer__item--new')?.click()
-    })
-  }
-  await expect(page.locator('[data-chat-surface="painted"] .chat__empty-wrap')).toBeVisible({ timeout: 8000 })
-  return chat
+  // Worker-tagged chat created via the API, then navigated to via the
+  // supported deep link — see tests/_chatSession.mjs. A valid persisted
+  // workspace wins over the legacy active-chat mirror.
+  return createChat(page)
 }
 
 async function sendMessage(page, text) {
-  const input = page.getByRole('textbox', { name: 'Message Möbius…' })
-  await input.fill(text)
-  await page.keyboard.press('Enter')
-  await expect(page.locator('[data-chat-surface="painted"] .chat__msg--user').first()).toBeVisible({ timeout: 8000 })
-  await page.evaluate(() => new Promise(r =>
-    requestAnimationFrame(() => requestAnimationFrame(r))
-  ))
+  await sharedSendMessage(page, text)
 }
 
 async function waitForChatMode(page, chatId, kind, timeout = 3000) {
