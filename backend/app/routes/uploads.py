@@ -22,18 +22,11 @@ from app.deps import (
 from app.image_previews import discard_image_preview, display_image_preview
 from app.path_utils import validate_chat_id, validate_path_within_base
 from app.resource_access import get_active_chat_for_principal
-from app.storage_io import atomic_write, app_dir_usage
+from app.storage_io import atomic_write
 
 router = APIRouter(prefix="/api/chats", tags=["uploads"])
 
-_MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_MB", "20")) * 1024 * 1024
-
-# Per-chat directory total caps. Enforced before each write so a chat
-# that accumulates many uploads can't fill /data and OOM the host.
-# 200 MB is generous for attachment use (10 × 20 MB max files) while
-# still bounding blast radius. Mirror the storage_io.py approach:
-# measure once per request, then gate the write.
-_MAX_CHAT_UPLOADS_BYTES = 200 * 1024 * 1024  # 200 MB per chat uploads dir
+_MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_MB", "100")) * 1024 * 1024
 
 # Images are served inline; everything else is forced to download so the
 # browser never executes uploaded content (harmless for a single-owner app,
@@ -127,18 +120,6 @@ async def upload_files(
           )
         chunks.append(chunk)
       content = b"".join(chunks)
-      # Enforce the per-chat directory total before writing, so a chat
-      # can't accumulate unbounded uploads and fill the host disk.
-      dir_used = app_dir_usage(upload_dir)
-      if dir_used + len(content) > _MAX_CHAT_UPLOADS_BYTES:
-        raise HTTPException(
-          status_code=413,
-          detail=(
-            f"This chat's uploads directory is full "
-            f"({_MAX_CHAT_UPLOADS_BYTES // (1024 * 1024)} MB limit per chat). "
-            f"Delete some existing uploads to free space."
-          ),
-        )
       name = _unique_name(upload_dir, _safe_filename(file.filename or "upload"))
       dest = upload_dir / name
       atomic_write(dest, content)
