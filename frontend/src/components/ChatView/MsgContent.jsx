@@ -5,6 +5,7 @@ import { ProgressiveMarkdown, StandardMarkdown } from './markdown/BlockRenderer.
 import ActivityStretch from './ActivityStretch.jsx'
 import { groupActivityRuns, coalesceThinkingEntries } from './groupBlocks.js'
 import QuestionCard from './QuestionCard.jsx'
+import { isDurableRestartOffer } from './restartCard.js'
 import SecureInputCard from './SecureInputCard.jsx'
 import MessageSources from './MessageSources.jsx'
 import Attachments from './Attachments.jsx'
@@ -30,25 +31,29 @@ import WaitHistoryCard from './WaitHistoryCard.jsx'
 import HelperResultCard from './HelperResultCard.jsx'
 
 
-// Answerability is purely a function of the block + its position + live hint.
+// Answerability is a function of the block + its position + live hint, except
+// for a durable Restart offer: once shown, that exact button stays actionable
+// until it is pressed even if the chat later moves on.
 // Computing it here (rather than passing an arrow from ChatView's render loop)
 // lets React.memo skip re-renders for non-last messages on every streaming
 // tick — the only message that changes during streaming is the streaming <li>
 // itself, not the static history above it.
 function blockAnswerable(block, { msg, isLastMsg, liveQuestionId, onQuestionAnswer }) {
-  // Answerable iff this block IS the chat's durable open question
+  // Ordinary questions are answerable iff this block IS the chat's durable open question
   // (liveQuestionId = pending_question_id) and still unanswered — matched by id,
   // not by block position, so a card trailed by parallel output or a terminal
   // error stays answerable. liveQuestionId clears when the question is answered
   // or the turn ends, so nothing is answerable once it's null.
+  const durableRestart = isDurableRestartOffer(block?.platform_action)
   return !!(
     onQuestionAnswer
     && msg.role === 'assistant'
     && block?.type === 'question'
-    && isLastMsg
     && !block.answers
-    && liveQuestionId
-    && block.question_id === liveQuestionId
+    && (
+      durableRestart
+      || (isLastMsg && liveQuestionId && block.question_id === liveQuestionId)
+    )
   )
 }
 

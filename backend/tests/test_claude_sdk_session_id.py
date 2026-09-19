@@ -146,7 +146,7 @@ def test_phantom_session_id_never_persisted(monkeypatch):
   try:
     result = asyncio.run(
       run_claude_sdk_turn(
-        "hello",
+        user_message="hello",
         session_id=None,
         base_env={},
         cwd="/tmp",

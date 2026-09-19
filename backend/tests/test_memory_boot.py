@@ -3,11 +3,14 @@
 import ast
 import hashlib
 import importlib.util
+import json
 import os
 import re
 import subprocess
 import sys
 from pathlib import Path
+
+import pytest
 
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
@@ -179,6 +182,8 @@ def test_controlled_skills_have_fix_forward_migrations():
     "07ac534c61899fc1154dc4ba99a4eda0f648b2f33c839dc65879d12952e09533",
     "630fe9ca1e8f080e052ed87d9e7d7b8ea92e4e891efcfc952a0bdf80e37afd66",
     "d00214c37ba549f5ea4f043714ca33073176b47f1e3085230791b74dd49e2b49",
+    "c0484a99757296892e042512cdc41371e2e94e88ceab377e80a3b8a71f3a48c2",
+    "9c1665fece62c6eaa20d422f138527952eb8feb3dc56c215be62b04769bd3914",
   }
   assert module._UNMODIFIED_MIGRATIONS["waiting.md"] == {
     "3993e84013d0359a46306b5a3c21f498b4799767aef84b226a7b07997ab538b9",
@@ -260,6 +265,10 @@ def test_controlled_skills_have_fix_forward_migrations():
     "cd4d6f03f6ba87d8b3d1799aa81c3ab5444900362e56edc3e48803fa1f1fee4b",
   }
   assert "recovery.md" not in module._UNMODIFIED_MIGRATIONS
+  assert "live-screen-control.md" not in module._UNMODIFIED_MIGRATIONS
+  assert module._RETIRED_UNMODIFIED_SKILLS["live-screen-control.md"] == {
+    "494da9e09b122b04bcc6bb5f1bbbddf2e71ba75b777af41f5e5aa1b598a621be",
+  }
   assert (
     "59af11e6f1313f1e0df4fc7905cf018786eb648116aaf7e8bcafea7aa7a4c9fe"
     in module._RETIRED_UNMODIFIED_SKILLS["recovery.md"]
@@ -363,6 +372,45 @@ def test_warm_boot_archives_customized_retired_skill_outside_discovery(
   assert not (skills / "recovery.md").exists()
   assert (archive / f"recovery-{digest}.md").read_bytes() == custom
   assert list(archive.glob("*.md")) == [archive / f"recovery-{digest}.md"]
+
+
+@pytest.mark.parametrize("active", [True, False])
+def test_warm_boot_leaves_app_owned_skill_outside_seed_retirement(
+  tmp_path, monkeypatch, active,
+):
+  module = _load("init_skills")
+  seed = tmp_path / "seed"
+  skills = tmp_path / "skills"
+  archive = tmp_path / "retired-skills"
+  seed.mkdir()
+  skills.mkdir()
+  app_skill = b"app-owned skill\n"
+  (skills / "retired.md").write_bytes(app_skill)
+  (skills / ".app-skills.json").write_text(
+    json.dumps({
+      "retired.md": {
+        "app_id": 42,
+        "slug": "skill-owner",
+        "sha256": hashlib.sha256(app_skill).hexdigest(),
+        "active": active,
+      },
+    }),
+    encoding="utf-8",
+  )
+  monkeypatch.setattr(module, "_SEED_CANDIDATES", [seed])
+  monkeypatch.setattr(module, "SKILLS", skills)
+  monkeypatch.setattr(module, "RETIRED_SKILLS", archive)
+  monkeypatch.setattr(module, "_chown_mobius", lambda _path: None)
+  monkeypatch.setattr(module, "_write_index", lambda: None)
+  monkeypatch.setattr(module, "_UNMODIFIED_MIGRATIONS", {})
+  monkeypatch.setattr(module, "_RETIRED_UNMODIFIED_SKILLS", {
+    "retired.md": {hashlib.sha256(app_skill).hexdigest()},
+  })
+
+  module.init()
+
+  assert (skills / "retired.md").read_bytes() == app_skill
+  assert not archive.exists()
 
 
 def test_seeded_cron_jobs_use_only_app_scoped_credentials():

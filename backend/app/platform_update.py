@@ -1343,6 +1343,35 @@ def _activation_paths_between(
   return [line.strip() for line in proc.stdout.splitlines() if line.strip()]
 
 
+def _paths_already_active_in_image(
+  repo: Path, paths: list[str],
+) -> list[str]:
+  """Exclude exact image-owned files whose desired bytes already run in image.
+
+  ``SERVING_SHA_FILE`` identifies the Python checkout, not every image-owned
+  bootstrap input. A local repair can restore a seed template to the running
+  image's exact bytes while still differing from the served checkout's Git
+  commit. That is not pending activation: the image already owns and runs
+  those bytes. Keep the check exact and fail closed when a manifest or source
+  hash is unavailable.
+  """
+  baked = _build_info().get("image_inputs")
+  if not isinstance(baked, dict) or not baked:
+    return paths
+  try:
+    current = platform_activation.image_input_hashes(repo)
+  except OSError:
+    return paths
+  return [
+    path for path in paths
+    if not (
+      platform_activation.path_is_image_owned(path)
+      and isinstance(baked.get(path), str)
+      and baked[path] == current.get(path)
+    )
+  ]
+
+
 def _pending_activation_paths(
   repo: Path = PLATFORM_REPO,
   *,
@@ -1367,7 +1396,7 @@ def _pending_activation_paths(
       except Exception:
         head = None
       served_to_head = _activation_paths_between(repo, served, head)
-  paths.extend(served_to_head or [])
+  paths.extend(_paths_already_active_in_image(repo, served_to_head or []))
   paths.extend(image_input_drift(repo) or [])
   return sorted({str(path) for path in paths if str(path)})
 
@@ -3029,6 +3058,7 @@ async def apply_platform_update(
       def record_current_activation(head: str | None) -> PlatformActivationImpact:
         served = _served_platform_sha()
         changed_paths = _activation_paths_between(repo, served, head)
+        changed_paths = _paths_already_active_in_image(repo, changed_paths)
         incoming_impact = platform_activation.classify_activation(changed_paths)
         if incoming_impact["level"] != platform_activation.ActivationLevel.LIVE.value:
           mark_activation_needed(

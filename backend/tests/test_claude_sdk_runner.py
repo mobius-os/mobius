@@ -130,7 +130,7 @@ async def _run_turn(
   **kwargs,
 ) -> dict:
   return await run_claude_sdk_turn(
-    prompt,
+    user_message=prompt,
     session_id=session_id,
     base_env={},
     cwd=cwd,
@@ -234,7 +234,7 @@ async def test_claude_connection_secret_file_closes_when_connect_fails(
   })
 
   result = await run_claude_sdk_turn(
-    "hello",
+    user_message="hello",
     session_id=None,
     base_env={},
     cwd="/tmp",
@@ -281,7 +281,7 @@ async def test_claude_connection_secret_file_closes_when_connect_is_cancelled(
     },
   })
   turn = asyncio.create_task(run_claude_sdk_turn(
-    "hello",
+    user_message="hello",
     session_id=None,
     base_env={},
     cwd="/tmp",

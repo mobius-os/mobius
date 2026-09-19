@@ -194,11 +194,14 @@ def normalize_claude_usage(
   raw_extra = raw_extra if isinstance(raw_extra, dict) else {}
   extra_enabled = raw_extra.get("is_enabled") is True
   extra_used = _percent(raw_extra.get("utilization"))
+  # Enabled and available are separate facts. Without provider utilization,
+  # the UI may report the setting but must not promise a chargeable retry.
+  extra_available = False
+  if extra_enabled:
+    extra_available = None if extra_used is None else extra_used < 100
   extra_usage = {
     "enabled": extra_enabled,
-    # A missing percentage means Claude has not published a capped balance;
-    # when enabled, it is still a valid explicit paid-continuation option.
-    "available": extra_enabled and (extra_used is None or extra_used < 100),
+    "available": extra_available,
     "used_percent": extra_used,
   }
   return {

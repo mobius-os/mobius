@@ -17,6 +17,7 @@ import {
   serverSnapshotBehindLocal,
   shouldAttachRunningStream,
   shouldAdoptRuntimeAssistantOwner,
+  shouldRetireStreamForRuntime,
   shouldRetireRestoredQuestionSnapshot,
   shouldRecoverSettledRuntime,
   shouldRetireSettledRunMarker,
@@ -205,6 +206,27 @@ test('a parked owner question uses compact history until its answer resumes the 
     running: false,
     pendingQuestionId: null,
   }), false)
+})
+
+test('an accepted runtime releases a failed stream exactly when it has no stream owner', () => {
+  assert.equal(shouldRetireStreamForRuntime({
+    runtimeRunning: false,
+  }), true, 'a completed run has no transport to retain')
+  assert.equal(shouldRetireStreamForRuntime({
+    runtimeRunning: true,
+    pendingQuestionId: 'question-1',
+  }), true, 'an owner question is a compact-history barrier, not a stream')
+  assert.equal(shouldRetireStreamForRuntime({
+    runtimeRunning: true,
+  }), false, 'a running unparked turn owns its stream')
+  assert.equal(shouldRetireStreamForRuntime({
+    runtimeRunning: false,
+    localStartInFlight: true,
+  }), false, 'the optimistic Start boundary remains locally authoritative')
+  assert.equal(shouldRetireStreamForRuntime({
+    runtimeRunning: false,
+    stopInFlight: true,
+  }), false, 'the explicit Stop boundary remains locally authoritative')
 })
 
 test('a fresh running verdict repairs an exhausted visible stream through its retry owner', () => {
