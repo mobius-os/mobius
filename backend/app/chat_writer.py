@@ -2401,6 +2401,11 @@ class ChatWriterActor:
           "AdmitProviderExecution: activity delivery is no longer available"
         )
     run.provider_execution_admitted = True
+    if run.goal_id is not None:
+      from app.goal_plans import goal_plan_revision
+      run.goal_plan_revision_at_admission = goal_plan_revision(
+        db, cmd.chat_id, run.goal_id,
+      )
     run.peer_message_delivery_pending = bool(cmd.has_peer_context_delivery)
     delivery_envelope = (
       {
@@ -3651,7 +3656,7 @@ class ChatWriterActor:
       return GoalPromotionRejected("different_goal_active")
 
     goal_id = run.goal_id or root.goal_id or root_id
-    changed = (
+    identity_changed = (
       run.goal_objective is None
       or root.goal_objective is None
       or run.goal_id is None
@@ -3661,15 +3666,21 @@ class ChatWriterActor:
     root.goal_objective = cmd.objective
     run.goal_id = goal_id
     root.goal_id = goal_id
-    if changed and not _commit_or_rollback(db):
+    checkpoint_changed = run.goal_plan_revision_at_admission is None
+    if checkpoint_changed:
+      from app.goal_plans import goal_plan_revision
+      run.goal_plan_revision_at_admission = goal_plan_revision(
+        db, cmd.chat_id, goal_id,
+      )
+    if (identity_changed or checkpoint_changed) and not _commit_or_rollback(db):
       raise _PersistFailed("PromoteRunToGoal did not persist")
-    if not changed:
+    if not identity_changed and not checkpoint_changed:
       db.rollback()
     return {
       "objective": cmd.objective,
       "root_run_id": root_id,
       "run_id": run.id,
-      "state": "promoted" if changed else "active",
+      "state": "promoted" if identity_changed else "active",
     }
 
   def _clear_presented_goal(
@@ -4173,11 +4184,16 @@ class ChatWriterActor:
       if handoff is not None:
         pending.append({
           "role": "user",
-          "content": "continue",
+          "content": (
+            "Continue the unfinished Goal from its saved plan and current "
+            "state. Reconcile the durable plan against verified current "
+            "state before claiming completion or that no work remains."
+          ),
           "kind": "continuation",
           "continuation_reason": GOAL_HANDOFF_REASON,
           "goal_id": handoff.goal_id,
-          "goal_settled_count": handoff.settled_count,
+          "goal_plan_revision": handoff.plan_revision,
+          "hidden": True,
           "cid": f"goal-handoff-{cmd.ending_run_token}",
           "ts": next_message_ts(list(chat.messages or []) + pending),
         })
@@ -4402,7 +4418,7 @@ class ChatWriterActor:
     into a continuation — see stop_chat_for and the natural-finish-races-Stop
     guard in ChatView.handleStop.
 
-    A ``hidden`` queued row is never owner speech: it is a machine-owned
+    A ``hidden`` queued row is never owner speech: it is usually a machine-owned
     carrier (wait/delegation/activation result, a peer-message wake, or a
     secure-input answer continuation) parked behind the owner-input barrier,
     each with its own idempotent delivery latch. The Stop "collapse queued
@@ -4412,7 +4428,9 @@ class ChatWriterActor:
     the open card), and must never report their cids for re-send. Re-sending
     one as owner text was the phantom-queued-message bug: a wait result that
     fired while a question card was open got re-sent as if the owner typed it
-    the moment they hit Stop.
+    the moment they hit Stop. The one exception is an automatic Goal control:
+    Stop/setup cleanup retires it because it is merely scheduled execution,
+    while still omitting its cid from the owner-resend contract.
     """
     from app.models import Chat
 
@@ -4420,14 +4438,25 @@ class ChatWriterActor:
     if chat is None:
       raise _PersistFailed("ClearPending: chat not found")
     pending = list(chat.pending_messages or [])
-    preserved = [
-      m for m in pending if isinstance(m, dict) and m.get("hidden")
-    ]
-    removed = [
-      m for m in pending
+    from app.continuations import continuation_reason
+    from app.run_state import GOAL_HANDOFF_REASON
+
+    def preserved_carrier(message: object) -> bool:
+      return bool(
+        isinstance(message, dict)
+        and message.get("hidden")
+        and continuation_reason(message) != GOAL_HANDOFF_REASON
+      )
+
+    preserved = [m for m in pending if preserved_carrier(m)]
+    removed = [m for m in pending if not preserved_carrier(m)]
+    # Machine-owned Goal controls retire with Stop/setup cleanup but are never
+    # reported as owner text to re-send. Other hidden result carriers remain.
+    cleared_cids = [
+      cid_of(m) for m in removed
       if not (isinstance(m, dict) and m.get("hidden"))
+      and cid_of(m) is not None
     ]
-    cleared_cids = [cid_of(m) for m in removed if cid_of(m) is not None]
     cleared = len(removed)
     if cleared:
       chat.pending_messages = preserved
@@ -5475,9 +5504,17 @@ def _pending_messages_for_transcript(
   existing: list[dict],
 ) -> list[dict]:
   """Return separate visible transcript rows for promoted pending messages."""
+  from app.continuations import continuation_reason
+  from app.run_state import GOAL_HANDOFF_REASON
+
   stored: list[dict] = []
   used = list(existing)
   for pending_msg in pending:
+    if continuation_reason(pending_msg) == GOAL_HANDOFF_REASON:
+      # This is a scheduler control carried by the one existing FIFO, not
+      # owner speech. Its provider prompt is ephemeral and its identity lives
+      # on the admitted ChatRun; the transcript records only actual messages.
+      continue
     msg = dict(pending_msg)
     msg["role"] = "user"
     msg.pop("queued", None)

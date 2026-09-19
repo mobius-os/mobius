@@ -70,9 +70,11 @@ exactly one owning interaction:
 - Owner action: use the real question tool; its card keeps the Goal marked
   **Waiting for you**.
 
-With no owner, keep working. Terminal settlement continues the exact Goal once;
-a no-progress repeat asks the owner rather than looping; this is a backstop,
-not a planning strategy.
+With no owner, keep working and update the durable plan when its verified state
+changes. Terminal settlement continues the exact Goal only when that saved plan
+advanced during the admitted turn; otherwise it asks the owner rather than
+letting one provider turn authorize another. This is a backstop, not a planning
+strategy, and rewriting an unchanged plan does not count as progress.
 Finish useful work in-turn or create a real handoff. Never end with “tell me when…”,
 a prose status, or a custom status card.
 
