@@ -43,10 +43,7 @@ def test_public_provider_runners_have_strict_explicit_signatures():
 
   for parameters in (codex, claude):
     assert all(
-      parameter.kind not in (
-        inspect.Parameter.VAR_POSITIONAL,
-        inspect.Parameter.VAR_KEYWORD,
-      )
+      parameter.kind is inspect.Parameter.KEYWORD_ONLY
       for parameter in parameters.values()
     )
 
@@ -61,6 +58,10 @@ def test_backend_runner_calls_use_only_declared_provider_arguments():
     calls = list(_runner_calls(runner_name))
     assert calls, f"no backend calls found for {runner_name}"
     for source_path, call in calls:
+      assert not call.args, (
+        f"{source_path}:{call.lineno} passes positional arguments to "
+        f"{runner_name}; keep provider arguments named at the boundary"
+      )
       assert all(keyword.arg is not None for keyword in call.keywords), (
         f"{source_path}:{call.lineno} expands arbitrary kwargs into "
         f"{runner_name}; keep the provider boundary explicit"

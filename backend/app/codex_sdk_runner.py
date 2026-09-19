@@ -1601,6 +1601,7 @@ def _publish_codex_context_compaction(bc: Any, chat_id: str) -> None:
 
 
 async def _run_codex_sdk_turn(
+  *,
   user_message: str,
   session_id: str | None,
   base_env: dict[str, str],
@@ -2690,6 +2691,7 @@ async def _run_codex_sdk_turn(
 
 
 async def run_codex_sdk_turn(
+  *,
   user_message: str,
   session_id: str | None,
   base_env: dict[str, str],

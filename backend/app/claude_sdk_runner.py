@@ -1041,6 +1041,7 @@ def _precompact_log_trigger(hook_input: object) -> str | None:
 
 
 async def run_claude_sdk_turn(
+  *,
   user_message: str,
   session_id: str | None,
   base_env: dict[str, str],
