@@ -135,7 +135,6 @@ from app.github_contributions import (
   _equivalence_source_repo,
   _assert_pending_equivalence_preflight,
   _assert_pending_equivalence_before_publication,
-  _publication_source_preflight,
   _record_prepublication_source_continuity,
   _reviewed_source_identity,
   _personal_publication_input,
@@ -540,12 +539,12 @@ def _assert_personal_publication_source(
     "push_pending", "push_ambiguous", "branch_published", "pr_ambiguous",
     "complete",
   }:
-    return _publication_source_preflight(record)
+    return _assert_pending_equivalence_before_publication(record)
   # An armed receipt proves only that the owner approved these private inputs.
   # App-writable last_submit_* fields and an unrelated pre-existing public
   # branch cannot turn that fresh approval into source provenance. Only a
   # signed post-mutation phase may enter authoritative public recovery.
-  return _publication_source_preflight(record)
+  return _assert_pending_equivalence_preflight(record)
 
 
 def _personal_resume_allowed(
@@ -1141,10 +1140,10 @@ def _inspect_prepared_review(
         "This staged commit is missing its required co-author trailer.",
         code="missing_coauthor",
       )
-    # Review is a local, read-only projection. Live-source equivalence is
-    # useful reconciliation metadata but is not publication authority for an
-    # ordinary candidate. The connect-after-merge handoff remains strict.
-    _publication_source_preflight(record)
+    # Review is a local, read-only projection. Authoritative public recovery
+    # belongs only to an owner-approved Send/Update path; never hold source
+    # locks across GitHub reads just to render a status card.
+    _assert_pending_equivalence_preflight(record)
 
     stack = plan.get("stack") if isinstance(plan.get("stack"), dict) else None
     login = str(github_state.get("login") or "")
@@ -4386,7 +4385,7 @@ async def land_contribution_stack(
         # contains, so repeat the exact proof under the same complete lock set.
         for row in rows:
           await asyncio.to_thread(
-            _publication_source_preflight,
+            _assert_pending_equivalence_preflight,
             row["record"],
           )
         target_branch, landed_sha = await asyncio.to_thread(

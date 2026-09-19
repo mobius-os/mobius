@@ -166,7 +166,7 @@ def _allow_synthetic_source_provenance(monkeypatch, tmp_path):
   )
   monkeypatch.setattr(
     relay_route,
-    "_publication_source_preflight",
+    "_assert_pending_equivalence_preflight",
     lambda _record: "exact_tree",
   )
 
@@ -1154,7 +1154,7 @@ def test_journaled_crash_requires_a_new_two_proof_attempt_before_broker(
     }, 202, {})
 
   monkeypatch.setattr(
-    relay_route, "_publication_source_preflight", prove_source,
+    relay_route, "_assert_pending_equivalence_preflight", prove_source,
   )
   monkeypatch.setattr(relay_route.contribution_broker, "request", accept_once)
   real_advance = relay_route._advance_claim_receipt
@@ -1284,9 +1284,10 @@ def test_terminal_retry_crash_after_claim_resumes_next_exact_revision(
   assert not relay_route._relay_claim_path(app_id, record_id).exists()
 
 
-def test_submit_route_accepts_exact_uninstalled_candidate(
+def test_submit_route_rejects_missing_source_before_snapshot_or_broker(
   client, owner_token, tmp_path, monkeypatch,
 ):
+  """The relay cannot bypass the authoritative installed-source guard."""
   record_id = "relay-missing-source"
   app_id, record_path = _prepared_relay_record(
     client, owner_token, tmp_path, record_id,
@@ -1296,25 +1297,38 @@ def test_submit_route_accepts_exact_uninstalled_candidate(
     relay_route, "_equivalence_source_repo", lambda _record: None,
   )
 
-  _stub_reviewed_snapshot(monkeypatch, tmp_path)
-  async def accept_broker(_method, _path, *, body=None, idempotency_key=None):
-    return ({
-      "id": _RELAY_ID,
-      "status": "queued",
-      "revision": body["revision"],
-    }, 202, {})
-  monkeypatch.setattr(relay_route.contribution_broker, "request", accept_broker)
+  def reject_missing_source(_record):
+    raise relay_route.ContributionSubmitError(
+      "This review is missing its installed source provenance.",
+      code="missing_source_provenance",
+    )
+
+  monkeypatch.setattr(
+    relay_route, "_assert_pending_equivalence_preflight", reject_missing_source,
+  )
+  monkeypatch.setattr(
+    relay_route,
+    "_merged_snapshot",
+    lambda *_args: pytest.fail("missing provenance must stop before snapshot"),
+  )
+
+  async def fail_broker(*_args, **_kwargs):
+    pytest.fail("missing provenance must stop before the broker request")
+
+  monkeypatch.setattr(relay_route.contribution_broker, "request", fail_broker)
   response = client.post(
     f"/api/contribution-relay/{app_id}/{record_id}/submit",
     headers={"Authorization": f"Bearer {owner_token}"},
     json={"confirm_publication": True},
   )
 
-  assert response.status_code == 200, response.text
+  assert response.status_code == 409, response.text
+  assert response.json()["detail"]["code"] == "missing_source_provenance"
   stored = json.loads(record_path.read_text())
-  assert stored["status"] == "submitting"
-  assert stored["submission_mode"] == "mobius-bot"
-  assert stored["relay_contribution_id"] == _RELAY_ID
+  assert stored["status"] == "prepared"
+  assert "submission_mode" not in stored
+  assert not relay_route._relay_claim_path(app_id, record_id).exists()
+  assert not relay_route._relay_request_path(app_id, record_id).exists()
 
 
 def test_prejournal_record_drift_retires_unused_claim_and_restores_review(
@@ -1341,7 +1355,7 @@ def test_prejournal_record_drift_retires_unused_claim_and_restores_review(
 
   monkeypatch.setattr(
     relay_route,
-    "_publication_source_preflight",
+    "_assert_pending_equivalence_preflight",
     drift_during_first_source_proof,
   )
   monkeypatch.setattr(relay_route.contribution_broker, "request", fail_broker)
@@ -1393,7 +1407,7 @@ def test_failing_first_source_proof_restores_concurrent_review_drift(
     pytest.fail("a failed first source proof cannot reach the broker")
 
   monkeypatch.setattr(
-    relay_route, "_publication_source_preflight", drift_then_fail,
+    relay_route, "_assert_pending_equivalence_preflight", drift_then_fail,
   )
   monkeypatch.setattr(relay_route.contribution_broker, "request", fail_broker)
   response = client.post(
@@ -1524,7 +1538,7 @@ def test_submit_route_releases_storage_lock_during_source_proof_and_broker(
     return None
 
   monkeypatch.setattr(
-    relay_route, "_publication_source_preflight", assert_provenance,
+    relay_route, "_assert_pending_equivalence_preflight", assert_provenance,
   )
   monkeypatch.setattr(relay_route.contribution_broker, "request", fake_request)
   monkeypatch.setattr(
@@ -1902,7 +1916,7 @@ def test_submit_route_retries_one_lost_response_with_the_same_request(
 
   monkeypatch.setattr(
     relay_route,
-    "_publication_source_preflight",
+    "_assert_pending_equivalence_preflight",
     assert_first_publication_source,
   )
 
@@ -1951,7 +1965,7 @@ def test_submit_route_retries_one_lost_response_with_the_same_request(
 
   monkeypatch.setattr(
     relay_route,
-    "_publication_source_preflight",
+    "_assert_pending_equivalence_preflight",
     fail_if_rechecked,
   )
 
@@ -2017,7 +2031,7 @@ def test_exact_relay_retry_replays_private_request_after_upstream_moves(
   )
   monkeypatch.setattr(
     relay_route,
-    "_publication_source_preflight",
+    "_assert_pending_equivalence_preflight",
     lambda _record: pytest.fail("exact retry must not recheck current source"),
   )
   retry = client.post(url, headers=headers, json={
@@ -2146,7 +2160,7 @@ def test_submit_revalidates_journaled_source_path_before_second_proof(
 
   monkeypatch.setattr(relay_route, "write_record", mutate_journal_path)
   monkeypatch.setattr(
-    relay_route, "_publication_source_preflight", assert_provenance,
+    relay_route, "_assert_pending_equivalence_preflight", assert_provenance,
   )
   monkeypatch.setattr(relay_route.contribution_broker, "request", fail_broker)
   response = client.post(
