@@ -116,6 +116,7 @@ async function persistMockedMessageOnReload(page, chat, text) {
         offset: 0,
         running: false,
         pending_messages: [],
+        runtime_revision: 0,
       }),
     })
   })

@@ -664,6 +664,7 @@ test.describe('Scroll position', () => {
           offset: 0,
           running: false,
           pending_messages: [],
+          runtime_revision: 0,
         }),
       })
     })
@@ -772,6 +773,7 @@ test.describe('Scroll position', () => {
           offset: 0,
           running: false,
           pending_messages: [],
+          runtime_revision: 0,
         }),
       })
     })
@@ -895,6 +897,7 @@ test.describe('Scroll position', () => {
           offset: start,
           running: false,
           pending_messages: [],
+          runtime_revision: 0,
         }),
       })
     })
@@ -1027,6 +1030,7 @@ test.describe('Scroll position', () => {
           offset: 0,
           running: returning,
           pending_messages: [],
+          runtime_revision: 0,
         }),
       })
     })
