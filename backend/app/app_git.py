@@ -2558,10 +2558,11 @@ def fetch_upstream(
 
   ``trusted_origin_adoption`` is the narrow legacy-adoption exception. The
   caller must first prove that this repo's configured origin is the trusted
-  package identity. Rebinding an old synthetic ``upstream`` is safe when the
-  fetched origin either has the exact same tree as local ``main`` or shares
-  real history with it. The latter keeps all differing bytes on the ordinary
-  three-way merge/conflict path while repairing only the stale synthetic ref.
+  package identity. Rebinding an old synthetic ``upstream`` is safe only when
+  the fetched origin has the exact same complete tree as local ``main``: that
+  proof guarantees moving the ref cannot change any installed byte. Shared
+  history alone is insufficient because it also describes a genuine remote
+  rollback or force-push, which must stay on the conservative fallback path.
 
   Returns:
     The fetched commit and any trusted equal-tree adoption proof.
@@ -2595,12 +2596,6 @@ def fetch_upstream(
     trusted_origin_adoption
     and ref_trees_equal(repo, LOCAL_BRANCH, fetched_ref)
   )
-  related_local_adoption = bool(
-    trusted_origin_adoption
-    and _run(
-      repo, "merge-base", LOCAL_BRANCH, fetched_ref, check=False,
-    ).stdout.strip()
-  )
   if previous_sha and previous_sha != sha:
     related = _run(
       repo, "merge-base", "--is-ancestor", previous_sha, sha, check=False,
@@ -2608,7 +2603,6 @@ def fetch_upstream(
     if (
       related.returncode != 0
       and not equal_local_adoption
-      and not related_local_adoption
     ):
       raise RuntimeError(
         f"origin/{ref} is unrelated to recorded upstream {previous_sha}; "

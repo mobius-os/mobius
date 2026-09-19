@@ -600,14 +600,15 @@ def test_fetch_upstream_pins_fetch_head_across_history_repair(
   assert app_git.head_sha(source_dir, "FETCH_HEAD") == other_head
 
 
-def test_fetch_upstream_repairs_synthetic_ref_for_trusted_related_origin(
+def test_fetch_upstream_rejects_non_fast_forward_trusted_related_origin(
   tmp_path,
 ):
-  """A trusted cloned checkout may retire a stale synthetic upstream ref.
+  """Shared history cannot disguise a real trusted-origin rollback.
 
-  Local ``main`` and the fetched origin still share real history, so their
-  content differences remain governed by the normal three-way merge.  Only
-  the unrelated installer-created provenance ref is replaced here.
+  A local checkout naturally shares history with both the old and new remote
+  tips. That fact does not prove its recorded upstream is synthetic, so a
+  non-fast-forward remote move must retain the conservative fallback instead
+  of silently rebinding the provenance ref backwards.
   """
   fixture = tmp_path / "fixture"
   bare = tmp_path / "fixture.git"
@@ -622,14 +623,8 @@ def test_fetch_upstream_repairs_synthetic_ref_for_trusted_related_origin(
   source_dir = tmp_path / "source"
   source_dir.mkdir()
   app_git.clone_upstream(source_dir, bare.as_uri(), "main")
-  (source_dir / "local.js").write_text("export const local = true\n")
-  app_git.commit_local(source_dir, "local edit")
-  app_git.record_upstream(
-    source_dir,
-    {"index.jsx": b"export default () => 'synthetic'\n"},
-    "https://example.invalid/mobius.json",
-    "legacy",
-  )
+  app_git.align_local_to_upstream(source_dir)
+  old_upstream = app_git.head_sha(source_dir, app_git.UPSTREAM_BRANCH)
 
   (fixture / "index.jsx").write_text("export default () => 'v2'\n")
   new_head = _commit_all(fixture, "v2")
@@ -638,16 +633,28 @@ def test_fetch_upstream_repairs_synthetic_ref_for_trusted_related_origin(
     check=True, env=app_git._git_env(fixture),
   )
 
-  fetched = app_git.fetch_upstream(
-    source_dir, new_head, trusted_origin_adoption=True,
+  # First accept the real fast-forward so the recorded upstream is certainly
+  # remote provenance rather than an installer-created synthetic commit.
+  fetched = app_git.fetch_upstream(source_dir, new_head)
+  assert fetched.sha == new_head
+  app_git.align_local_to_upstream(source_dir)
+  (source_dir / "local.js").write_text("export const local = true\n")
+  app_git.commit_local(source_dir, "local edit")
+
+  subprocess.run(
+    ["git", "-C", str(fixture), "reset", "--hard", old_upstream],
+    check=True, capture_output=True, env=app_git._git_env(fixture),
+  )
+  subprocess.run(
+    ["git", "-C", str(fixture), "push", "-q", "--force", str(bare), "main"],
+    check=True, env=app_git._git_env(fixture),
   )
 
-  assert fetched.sha == new_head
-  assert fetched.allow_unrelated_histories is False
+  with pytest.raises(RuntimeError, match="unrelated to recorded upstream"):
+    app_git.fetch_upstream(
+      source_dir, old_upstream, trusted_origin_adoption=True,
+    )
   assert app_git.head_sha(source_dir, app_git.UPSTREAM_BRANCH) == new_head
-  assert app_git._run(
-    source_dir, "merge-base", app_git.LOCAL_BRANCH, app_git.UPSTREAM_BRANCH,
-  ).stdout.strip()
 
 
 def test_fetch_upstream_rejects_unrelated_origin_without_moving_ref(tmp_path):

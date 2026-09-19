@@ -7,6 +7,7 @@ import pytest
 from fastapi import HTTPException
 
 from app import contribution_review_runs as domain, models
+from app.contribution_errors import ContributionSubmitError
 from app.database import SessionLocal
 from app.deps import Principal
 from app.routes import contribution_reviews as routes
@@ -114,6 +115,30 @@ def test_lost_merge_receipt_is_not_replayed(setup, monkeypatch):
   assert report(setup)["run"]["items"][0]["state"] == "merge_unknown"
   assert report(setup)["run"]["items"][0]["state"] == "merge_unknown"
   assert calls == [1]
+
+
+def test_merge_failure_summary_keeps_safe_github_diagnostic():
+  summary = domain.merge_failure_summary(ContributionSubmitError(
+    "gh: HTTP 422: merge blocked token=should-not-appear"
+  ))
+  assert "HTTP 422" in summary
+  assert "should-not-appear" not in summary
+  assert "[redacted]" in summary
+
+
+def test_merge_failure_summary_keeps_untrusted_exception_generic():
+  assert domain.merge_failure_summary(TimeoutError("internal socket detail")) == (
+    "GitHub did not confirm the merge or queue request. Reconcile it before any new action."
+  )
+
+
+def test_lost_merge_receipt_preserves_safe_diagnostic(setup, monkeypatch):
+  def lose(*args):
+    raise ContributionSubmitError("gh: HTTP 422: merge blocked")
+  monkeypatch.setattr(domain, "perform_merge", lose)
+  item = report(setup)["run"]["items"][0]
+  assert item["state"] == "merge_unknown"
+  assert "HTTP 422" in item["summary"]
 
 
 def test_lost_merge_receipt_reconciles_exact_merged_head(setup, monkeypatch):
