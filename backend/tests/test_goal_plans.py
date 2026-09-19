@@ -114,12 +114,11 @@ def test_terminal_goal_history_projects_onto_final_assistant_message(
   }
 
 
-def test_terminal_goal_history_falls_back_to_nearest_assistant_message(
+def test_terminal_goal_history_uses_run_identity_despite_timestamp_skew(
   client, owner_token, db,
 ):
-  # Clock skew (or a hidden/filtered assistant row) can leave no message
-  # timestamp inside the goal's [started-1s, ended+1s] window. The card must
-  # still attach to the nearest assistant row instead of vanishing.
+  # Clock skew can leave no message timestamp inside the goal window. The
+  # exact assistant/run identity still anchors the card safely.
   auth = {"Authorization": f"Bearer {owner_token}"}
   base = datetime(2026, 8, 23, 12, 0, tzinfo=UTC)
   created = client.post(
@@ -129,7 +128,7 @@ def test_terminal_goal_history_falls_back_to_nearest_assistant_message(
       "messages": [
         {"role": "user", "content": "start", "ts": 1_787_486_400_000},
         # 60s after the goal's ended_at window closes.
-        {"role": "assistant", "content": "finished", "ts": 1_787_486_461_000},
+        {"role": "assistant", "id": "skew-root", "content": "finished", "ts": 1_787_486_461_000},
       ],
     },
     headers=auth,

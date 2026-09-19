@@ -673,10 +673,12 @@ def goal_terminal_handoff(
   ).first()
   if run is None:
     return None
+  plan_corrupt = False
   try:
     tasks = _goal_plan_tasks(db, chat_id, run.goal_id)
   except GoalPlanCorrupt:
     tasks = None
+    plan_corrupt = True
     plan_unfinished = True
   else:
     plan_unfinished = _plan_has_unfinished_tasks(tasks)
@@ -711,8 +713,11 @@ def goal_terminal_handoff(
   return GoalTerminalHandoff(
     goal_id=run.goal_id,
     automatic_allowed=(
-      not prior_continuation
-      or isinstance(prior_frontier, int) and settled > prior_frontier
+      not plan_corrupt
+      and (
+        not prior_continuation
+        or isinstance(prior_frontier, int) and settled > prior_frontier
+      )
     ),
     settled_count=settled,
   )
@@ -891,23 +896,26 @@ def terminal_goal_summaries_by_message_index(
     ended_ms = epoch_ms(latest.ended_at)
     if started_ms is None or ended_ms is None:
       continue
+    # New rows carry the exact physical-run identity on the assistant segment.
+    # Prefer it over timestamps so clock skew can never attach a Goal card to
+    # an unrelated answer. Legacy transcripts without any assistant ids retain
+    # only the original tightly-scoped timestamp window fallback.
     candidate_index = next((
-      index for index, ts in reversed(assistant_rows)
-      if started_ms - 1000 <= ts <= ended_ms + 1000
+      index for index, message in enumerate(messages)
+      if isinstance(message, dict)
+      and message.get("role") == "assistant"
+      and message.get("id") == latest.id
     ), None)
-    if candidate_index is None and assistant_rows:
-      # Clock skew or a filtered/hidden assistant message can leave no
-      # timestamp inside the expected window. Anchor to the nearest
-      # assistant row instead of dropping the goal's history card entirely.
-      candidate_index = min(
-        assistant_rows, key=lambda pair: abs(pair[1] - ended_ms),
-      )[0]
-      logger.warning(
-        "no assistant message timestamp within window for goal=%s "
-        "chat=%s; anchoring history card to nearest assistant row "
-        "index=%s instead of dropping it",
-        identity, chat_id, candidate_index,
-      )
+    if candidate_index is None and not any(
+      isinstance(message, dict)
+      and message.get("role") == "assistant"
+      and message.get("id")
+      for message in messages
+    ):
+      candidate_index = next((
+        index for index, ts in reversed(assistant_rows)
+        if started_ms - 1000 <= ts <= ended_ms + 1000
+      ), None)
     if (
       candidate_index is None
       or candidate_index < message_start

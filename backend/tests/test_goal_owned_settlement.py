@@ -107,10 +107,10 @@ def test_terminal_treats_unparsable_plan_json_as_unfinished(db, chat):
   # mistaken for "no unfinished work" and let the goal silently terminate.
   _add_goal_run(db, chat, plan="{not valid json")
 
-  result = _terminal_promote(chat.id, "goal-run")
-
-  assert result["promoted"] is not None
-  assert result["promoted"]["_goal_id"] == "goal-run"
+  with pytest.raises(Exception, match="exhausted Goal continuation needs an owner card"):
+    _terminal_promote(chat.id, "goal-run")
+  db.expire_all()
+  assert db.get(models.ChatRun, "successor") is None
 
 
 @pytest.mark.parametrize("outcome", ["met", "expired", "failed"])
