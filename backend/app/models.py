@@ -391,6 +391,13 @@ class ChatRun(Base):
   goal_plan_revision = Column(
     Integer, nullable=False, default=0, server_default="0"
   )
+  # Exact plan revision visible when this physical Goal turn was admitted.
+  # Settlement compares this checkpoint with the root's current revision;
+  # unfinished work may schedule another provider turn only after the durable
+  # plan advances. NULL is legacy/ordinary work and never proves progress.
+  goal_plan_revision_at_admission = Column(
+    Integer, nullable=True, default=None
+  )
   # App that initiated this turn under the app-attributed-chat contract
   # (077 §1). NULL = an ordinary owner-driven turn. Reserved now so the
   # attribution lands on the run row, not retrofitted later.
@@ -629,31 +636,6 @@ class PlatformBootSnapshot(Base):
   loaded_files_json = Column(JSON, nullable=False, default=dict)
   service_ready = Column(Boolean, nullable=False, default=False)
   captured_at = Column(DateTime, nullable=False, default=lambda: now_naive_utc())
-
-
-class PlatformRestartExecution(Base):
-  """At-most-once claim for one exact platform Restart action.
-
-  The claim commits before the process side effect is admitted.  If the
-  process dies in that gap the row is reconciled from boot evidence; it is
-  never replayed merely because an HTTP acknowledgement was lost.
-  """
-
-  __tablename__ = "platform_restart_executions"
-
-  action_id = Column(String(96), primary_key=True)
-  question_id = Column(String(64), nullable=False, unique=True, index=True)
-  chat_id = Column(
-    String(64), ForeignKey("chats.id"), nullable=False, index=True,
-  )
-  wait_id = Column(String(64), nullable=False, unique=True, index=True)
-  source_boot_id = Column(String(160), nullable=False)
-  requirement_json = Column(JSON, nullable=False)
-  status = Column(String(24), nullable=False, default="claimed", index=True)
-  claimed_at = Column(DateTime, nullable=False, default=lambda: now_naive_utc())
-  admitted_at = Column(DateTime, nullable=True, default=None)
-  activated_boot_id = Column(String(160), nullable=True, default=None)
-  settled_at = Column(DateTime, nullable=True, default=None)
 
 
 class ChatSessionLink(Base):

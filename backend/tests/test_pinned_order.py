@@ -441,6 +441,7 @@ def test_concurrent_delete_waits_until_reorder_validation_and_commit_finish(
   client, auth, db, monkeypatch,
 ):
   chats, apps, projects = _seed_pinned_rows(db)
+  deleted_chat_id = chats[0].id
   requested = [
     *({"kind": "chat", "id": row.id} for row in chats),
     *({"kind": "app", "id": str(row.id)} for row in apps),
@@ -452,6 +453,7 @@ def test_concurrent_delete_waits_until_reorder_validation_and_commit_finish(
   delete_finished = threading.Event()
   call_count = 0
   call_count_lock = threading.Lock()
+  delete_time = chat_routes.now_naive_utc()
 
   def controlled_now():
     nonlocal call_count
@@ -461,13 +463,13 @@ def test_concurrent_delete_waits_until_reorder_validation_and_commit_finish(
     if call == 1:
       reorder_inside_commit.set()
       assert release_reorder.wait(2), "test did not release reorder commit"
-    return datetime(2026, 9, 12, 12, 0, 0) + timedelta(seconds=call)
+    return delete_time + timedelta(seconds=call)
 
   monkeypatch.setattr(chat_routes, "now_naive_utc", controlled_now)
 
   def delete_chat():
     try:
-      return client.delete(f"/api/chats/{chats[0].id}", headers=auth)
+      return client.delete(f"/api/chats/{deleted_chat_id}", headers=auth)
     finally:
       delete_finished.set()
 
@@ -492,8 +494,8 @@ def test_concurrent_delete_waits_until_reorder_validation_and_commit_finish(
   assert reorder_response.status_code == 200, reorder_response.text
   assert delete_response.status_code == 204, delete_response.text
   assert any(
-    item["kind"] == "chat" and item["id"] == chats[0].id
+    item["kind"] == "chat" and item["id"] == deleted_chat_id
     for item in reorder_response.json()["items"]
   )
   db.expire_all()
-  assert db.get(models.Chat, chats[0].id).deleted_at is not None
+  assert db.get(models.Chat, deleted_chat_id).deleted_at is not None

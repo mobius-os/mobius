@@ -15119,7 +15119,33 @@ def test_retarget_pr_base_attempts_one_mutation_only(tmp_path, monkeypatch):
   assert result == "ambiguous"
   assert "timed out" in error.lower()
   assert len(attempts) == 1
-  assert attempts[0][:5] == ("pr", "edit", "967", "-R", "mobius-os/app-demo")
+  assert attempts[0] == (
+    "api", "--method", "PATCH", "repos/mobius-os/app-demo/pulls/967",
+    "-f", "base=main",
+  )
+
+
+def test_retarget_pr_base_does_not_query_organization_metadata(tmp_path, monkeypatch):
+  """Repo-only GitHub access suffices; no broad `pr edit` metadata fetch."""
+  from app.github_contributions import _retarget_pr_base
+
+  calls = []
+
+  def repo_only_gh(_repo, *args, check=True):
+    calls.append(args)
+    if args != (
+      "api", "--method", "PATCH", "repos/mobius-os/app-demo/pulls/967",
+      "-f", "base=release/next",
+    ):
+      return _cp("", "GraphQL: login requires read:org", 1)
+    assert check is False
+    return _cp('{"base":{"ref":"release/next"}}')
+
+  monkeypatch.setattr("app.github_contribution_git._gh", repo_only_gh)
+  assert _retarget_pr_base(
+    tmp_path, "mobius-os/app-demo", 967, base_branch="release/next",
+  ) == ("accepted", "")
+  assert len(calls) == 1
 
 
 def test_retarget_pr_base_distinguishes_deterministic_rejection(
