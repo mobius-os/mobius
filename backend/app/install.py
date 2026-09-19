@@ -637,11 +637,25 @@ def _assert_service_transition_safe(
 def _sync_service_aliases(
   db: Session, *, app: models.App, manifest: dict,
 ) -> None:
-  """Replace only this app's explicit transition routes in the transaction."""
-  aliases = _manifest_service_aliases(manifest)
+  """Replace only this app's explicit transition routes in the transaction.
+
+  Idempotent within a single uncommitted transaction: the fresh-install path
+  syncs aliases once in ``_prepare_app_row`` and again in
+  ``_apply_manifest_metadata``. A bulk ``DELETE`` clears only persistent rows,
+  not the pending adds from the earlier call, so without expunging those a
+  second sync would flush a duplicate INSERT and trip the ``service_id`` UNIQUE
+  constraint. Dedupe the reviewed alias list for the same reason.
+  """
+  aliases = list(dict.fromkeys(_manifest_service_aliases(manifest)))
   db.query(models.AppServiceAlias).filter(
     models.AppServiceAlias.app_id == app.id,
   ).delete(synchronize_session=False)
+  for pending in list(db.new):
+    if (
+      isinstance(pending, models.AppServiceAlias)
+      and pending.app_id == app.id
+    ):
+      db.expunge(pending)
   for alias in aliases:
     db.add(models.AppServiceAlias(service_id=alias, app_id=app.id))
 

@@ -281,6 +281,56 @@ def test_install_fresh_app_writes_everything(client, auth, tmp_path, bypass_url_
   assert row["display"] == "fullscreen"
 
 
+def test_install_fresh_service_app_with_alias_syncs_once(
+  client, auth, db, bypass_url_validation,
+):
+  """A fresh service-backed app that declares a transition alias installs
+  cleanly. Regression: the fresh-install path syncs service aliases twice
+  (in _prepare_app_row and again in _apply_manifest_metadata); a bulk DELETE
+  cannot clear the first call's pending add, so without expunging it the
+  second sync flushed a duplicate INSERT and tripped the service_id UNIQUE
+  constraint, surfacing as a 500 'unexpected server error'."""
+  base = "https://raw.githubusercontent.com/x/app-svc-alias/main/"
+  manifest = {
+    "id": "svc-alias",
+    "name": "Svc Alias",
+    "version": "1.0.0",
+    "description": "Service app with a transition alias",
+    "entry": "index.jsx",
+    "icon": "icon.png",
+    "permissions": {"cross_app_access": "none", "share_with_apps": "none"},
+    "service": {
+      "id": "svc-alias",
+      "entry": "service.py",
+      "access": "public",
+      "aliases": ["svc-legacy"],
+    },
+    "source_files": ["service.py"],
+    "runtime": {"imports": ["react"], "esm_deps": []},
+  }
+  responses = {
+    base + "mobius.json": (200, json.dumps(manifest).encode()),
+    base + "index.jsx": (200, JSX.encode()),
+    base + "icon.png": (200, _png_bytes()),
+    base + "service.py": (200, b"def handle(req):\n    return {}\n"),
+  }
+  with patch(
+    "app.install.httpx.AsyncClient",
+    side_effect=_fake_async_client(responses),
+  ):
+    r = client.post("/api/apps/install", headers=auth, json={
+      "manifest_url": base + "mobius.json",
+    })
+  assert r.status_code == 201, r.text
+  app_id = r.json()["id"]
+  aliases = (
+    db.query(models.AppServiceAlias)
+    .filter(models.AppServiceAlias.app_id == app_id)
+    .all()
+  )
+  assert [a.service_id for a in aliases] == ["svc-legacy"]
+
+
 def test_install_static_site_assets_route_css_fonts_and_chunks(
   client, auth, bypass_url_validation,
 ):
