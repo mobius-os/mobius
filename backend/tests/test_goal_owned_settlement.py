@@ -3,7 +3,7 @@
 import pytest
 
 from app import models
-from app.chat_writer import PromotePending, get_writer
+from app.chat_writer import PromotePending, _PersistFailed, get_writer
 from app.run_state import GOAL_HANDOFF_REASON
 
 
@@ -107,7 +107,7 @@ def test_terminal_treats_unparsable_plan_json_as_unfinished(db, chat):
   # mistaken for "no unfinished work" and let the goal silently terminate.
   _add_goal_run(db, chat, plan="{not valid json")
 
-  with pytest.raises(Exception, match="exhausted Goal continuation needs an owner card"):
+  with pytest.raises(_PersistFailed, match="exhausted Goal continuation needs an owner card"):
     _terminal_promote(chat.id, "goal-run")
   db.expire_all()
   assert db.get(models.ChatRun, "successor") is None
