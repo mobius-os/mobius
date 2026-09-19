@@ -10,6 +10,7 @@ platform checkout for rollback.
 """
 
 import json
+import logging
 import os
 import re
 from functools import lru_cache
@@ -18,6 +19,8 @@ from urllib.parse import urlparse, urlunsplit
 
 from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+log = logging.getLogger("mobius.config")
 
 
 def _read_build_info() -> dict:
@@ -202,6 +205,22 @@ class Settings(BaseSettings):
           break
         except ValueError:
           continue
+
+    # Loud, plain-language warning for the most common self-hosting dead-end:
+    # a non-HTTPS, non-loopback origin silently disables mobius.you sign-in AND
+    # Social federation, because we refuse to bind an account grant to it and
+    # browsers treat it as a non-secure context. Without this line the shell
+    # boots looking healthy while those features are quietly inert.
+    if not self.mobius_sso_enabled and not self.mobius_account_client_origin:
+      log.warning(
+        "Account & Social features are DISABLED: could not derive a usable "
+        "HTTPS or loopback account origin from FRONTEND_ORIGIN=%r, so "
+        "mobius.you sign-in cannot be linked and Social cannot register. Serve "
+        "Möbius over HTTPS and set BOTH FRONTEND_ORIGIN and DOMAIN to that "
+        "public HTTPS host (e.g. via a reverse proxy with TLS, or a Cloudflare "
+        "Tunnel).",
+        self.frontend_origin,
+      )
     return self
 
   @property
