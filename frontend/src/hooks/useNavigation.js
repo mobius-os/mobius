@@ -631,7 +631,18 @@ export default function useNavigation({
     commitDrawerOpen()
   }
 
+  function cancelDrawerPreparation() {
+    if (!drawerPreparingRef.current) return false
+    if (drawerPrepareRafRef.current) {
+      cancelAnimationFrame(drawerPrepareRafRef.current)
+      drawerPrepareRafRef.current = 0
+    }
+    drawerPreparingRef.current = false
+    return true
+  }
+
   function commitDrawerOpen() {
+    if (drawerOpenBlockedByDrag(dragActiveRef?.current)) return
     // A close owns an asynchronous history traversal. Do not "re-adopt" the
     // sentinel while that traversal is unresolved: the cursor may already have
     // left it even though popstate has not run, and treating the boolean flag as
@@ -706,6 +717,7 @@ export default function useNavigation({
   // false when it is refused. The refusal is what lets a swipe-close snap back
   // instead of parking the panel off-screen under a still-open `open` prop.
   function closeDrawer({ preserveModalUntilTraversal = false } = {}) {
+    if (cancelDrawerPreparation()) return true
     // A modal close owns one serialized traversal. Escape, overlay, toggle, and
     // breakpoint cleanup can arrive in the same frame; a second back() would
     // skip past the drawer's sentinel before the first traversal settles.

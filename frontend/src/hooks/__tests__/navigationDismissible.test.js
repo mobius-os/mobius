@@ -164,7 +164,9 @@ function sessionHistory({ wedged = false, navigationApi = true } = {}) {
   }
 }
 
-async function mountNavigation(engine, { tab = { kind: 'chat', id: 'c1' }, frames = null } = {}) {
+async function mountNavigation(engine, {
+  tab = { kind: 'chat', id: 'c1' }, frames = null, dragActiveRef = { current: false },
+} = {}) {
   globalThis.window = engine.win
   globalThis.location = engine.win.location
   globalThis.localStorage = memoryStorage()
@@ -197,7 +199,7 @@ async function mountNavigation(engine, { tab = { kind: 'chat', id: 'c1' }, frame
       visiblePaneIds: new Set(Object.keys(ws.panes)),
       blobValid: true,
       replaceImplicitBootTab: false,
-      dragActiveRef: { current: false },
+      dragActiveRef,
     })
   } finally {
     console.error = consoleError
@@ -231,6 +233,53 @@ test('an app-origin drawer waits through one painted frame before history opens'
   queued.shift()()
   assert.equal(result.current.drawerOpen, true)
   assert.equal(engine.currentKind, 'drawer', 'the original history sentinel opens afterwards')
+})
+
+test('an explicit close cancels an app-origin drawer before its delayed commit', async () => {
+  const engine = sessionHistory()
+  const queued = []
+  const cancelled = new Set()
+  const frames = {
+    request(callback) {
+      queued.push(callback)
+      return queued.length
+    },
+    cancel(id) { cancelled.add(id) },
+  }
+  const { result } = await mountNavigation(engine, {
+    tab: { kind: 'app', id: '119' },
+    frames,
+  })
+
+  result.current.openDrawer()
+  assert.equal(result.current.closeDrawer(), true)
+  assert.deepEqual([...cancelled], [1])
+  assert.equal(result.current.drawerOpen, false)
+  assert.notEqual(engine.currentKind, 'drawer')
+})
+
+test('a drag started during app-origin preparation prevents the delayed open', async () => {
+  const engine = sessionHistory()
+  const queued = []
+  const dragActiveRef = { current: false }
+  const { result } = await mountNavigation(engine, {
+    tab: { kind: 'app', id: '119' },
+    frames: {
+      request(callback) {
+        queued.push(callback)
+        return queued.length
+      },
+      cancel() {},
+    },
+    dragActiveRef,
+  })
+
+  result.current.openDrawer()
+  queued.shift()()
+  dragActiveRef.current = true
+  queued.shift()()
+  assert.equal(result.current.drawerOpen, false)
+  assert.notEqual(engine.currentKind, 'drawer')
 })
 
 test('an explicit close dismisses before the engine answers, and stays closed when it does', async () => {
