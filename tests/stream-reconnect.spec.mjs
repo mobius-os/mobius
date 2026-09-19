@@ -15,7 +15,7 @@ import { streamSnapshotKey } from '../frontend/src/components/ChatView/streamSna
 import {
   BROADCAST_REGISTRATION_WINDOW_MS,
   QUICK_WAKE_HIDDEN_MS,
-} from '../frontend/src/components/ChatView/useStreamConnection.js'
+} from '../frontend/src/components/ChatView/streamTiming.js'
 import { attachCleanup } from './_chatTracker.mjs'
 import { createChat, sendMessage, waitForChatShell } from './_chatSession.mjs'
 
