@@ -54,6 +54,7 @@ from app.github_contribution_git import (
 from app.github_contributions import (
   ContributionSubmitError,
   _assert_pending_equivalence_preflight,
+  _publication_source_preflight,
   _claim_record,
   _equivalence_source_repo,
   _record_pending_equivalence_locked,
@@ -1938,10 +1939,11 @@ async def submit_through_mobius(
         idempotency_key=prior_idempotency_key,
       )
     else:
-      # First build proves the owner-reviewed source and chooses the durable
-      # request identity. After the short journal write, app -> source lock
-      # acquisition binds the paths from that exact journal while releasing
-      # app storage before either the second proof or the broker request.
+      # First build proves the exact owner-reviewed candidate and chooses the
+      # durable request identity. Any live-source equivalence is optional
+      # reconciliation metadata. After the short journal write, app -> source
+      # lock acquisition binds the paths from that exact journal while
+      # releasing app storage before either the second build or broker request.
       lock_paths = await asyncio.to_thread(
         _relay_source_lock_paths,
         claimed,
@@ -1952,7 +1954,7 @@ async def submit_through_mobius(
           await source_locks.enter_async_context(
             fs_locks.source_dir_lock(lock_path)
           )
-        await asyncio.to_thread(_assert_pending_equivalence_preflight, claimed)
+        await asyncio.to_thread(_publication_source_preflight, claimed)
         _initial_merge, initial_payload = await asyncio.to_thread(
           _relay_snapshot_payload, claimed, diff_path, record_id,
         )
@@ -2039,7 +2041,7 @@ async def submit_through_mobius(
               fs_locks.source_dir_lock(lock_path)
             )
 
-        await asyncio.to_thread(_assert_pending_equivalence_preflight, claimed)
+        await asyncio.to_thread(_publication_source_preflight, claimed)
         merge, payload = await asyncio.to_thread(
           _relay_snapshot_payload, claimed, diff_path, record_id,
         )

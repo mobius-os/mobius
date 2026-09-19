@@ -2545,7 +2545,7 @@ def fetch_upstream(
   source_dir: str | Path,
   ref: str,
   *,
-  adopt_equal_local_tree: bool = False,
+  trusted_origin_adoption: bool = False,
 ) -> FetchUpstreamResult:
   """Fetch `origin/<ref>` and advance local `upstream` to that real commit.
 
@@ -2556,12 +2556,12 @@ def fetch_upstream(
   when that happens, unshallow so Git can prove ancestry and the existing merge
   path can compute a real merge base.
 
-  ``adopt_equal_local_tree`` is the narrow legacy-adoption exception. The
+  ``trusted_origin_adoption`` is the narrow legacy-adoption exception. The
   caller must first prove that this repo's configured origin is the trusted
-  package identity. When the fetched origin commit has the exact same complete
-  tree as local ``main``, moving the old synthetic ``upstream`` ref cannot
-  overwrite a local byte; rebinding it to the real origin repairs provenance
-  without asking the owner to resolve unrelated installer history.
+  package identity. Rebinding an old synthetic ``upstream`` is safe when the
+  fetched origin either has the exact same tree as local ``main`` or shares
+  real history with it. The latter keeps all differing bytes on the ordinary
+  three-way merge/conflict path while repairing only the stale synthetic ref.
 
   Returns:
     The fetched commit and any trusted equal-tree adoption proof.
@@ -2572,26 +2572,49 @@ def fetch_upstream(
   )
   previous_sha = previous.stdout.strip() if previous.returncode == 0 else ""
   _run(repo, "fetch", "--depth", "1", "origin", ref)
-  remote_ref = f"origin/{ref}"
+  # A branch/tag fetch updates ``origin/<ref>``.  Fetching an immutable commit
+  # oid does not create that remote-tracking name; Git records the exact fetched
+  # commit only in FETCH_HEAD.  Store updates are commonly review-bound to a
+  # commit-pinned raw URL, so resolve that shape through FETCH_HEAD rather than
+  # falling back to a synthetic upstream with unrelated history.
+  remote_ref = (
+    "FETCH_HEAD"
+    if re.fullmatch(r"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}", ref)
+    else f"origin/{ref}"
+  )
   sha = _run(repo, "rev-parse", "--verify", remote_ref).stdout.strip()
+  # FETCH_HEAD is transient: the shallow-history repair below may itself fetch
+  # and replace it.  Resolve once, then use the immutable object id for every
+  # later comparison and ref move in this operation.
+  fetched_ref = sha
   # A depth-one fetch can re-graft even an unchanged tip. Repair based on the
   # relationship the installer actually needs (local main ↔ fetched tip), not
   # only on whether the remote SHA string changed.
-  _restore_shallow_history_if_needed(repo, LOCAL_BRANCH, remote_ref)
+  _restore_shallow_history_if_needed(repo, LOCAL_BRANCH, fetched_ref)
   equal_local_adoption = (
-    adopt_equal_local_tree
-    and ref_trees_equal(repo, LOCAL_BRANCH, remote_ref)
+    trusted_origin_adoption
+    and ref_trees_equal(repo, LOCAL_BRANCH, fetched_ref)
+  )
+  related_local_adoption = bool(
+    trusted_origin_adoption
+    and _run(
+      repo, "merge-base", LOCAL_BRANCH, fetched_ref, check=False,
+    ).stdout.strip()
   )
   if previous_sha and previous_sha != sha:
     related = _run(
       repo, "merge-base", "--is-ancestor", previous_sha, sha, check=False,
     )
-    if related.returncode != 0 and not equal_local_adoption:
+    if (
+      related.returncode != 0
+      and not equal_local_adoption
+      and not related_local_adoption
+    ):
       raise RuntimeError(
         f"origin/{ref} is unrelated to recorded upstream {previous_sha}; "
         "falling back to manifest-source update"
       )
-  _run(repo, "branch", "-f", UPSTREAM_BRANCH, remote_ref)
+  _run(repo, "branch", "-f", UPSTREAM_BRANCH, fetched_ref)
   return FetchUpstreamResult(
     sha=sha,
     allow_unrelated_histories=equal_local_adoption,

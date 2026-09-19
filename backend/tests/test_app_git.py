@@ -524,6 +524,132 @@ def test_fetch_upstream_advances_real_origin_and_reads_full_tree(tmp_path):
   assert tree["cards.js"] == b"export const label = 'v2'\n"
 
 
+def test_fetch_upstream_accepts_an_immutable_commit_ref(tmp_path):
+  """A commit-pinned raw manifest fetch resolves through FETCH_HEAD.
+
+  Git does not create ``origin/<sha>`` for this fetch shape.  The installer
+  still needs the real origin commit so an existing cloned app keeps its merge
+  base instead of falling back to an unrelated synthetic upstream.
+  """
+  fixture = tmp_path / "fixture"
+  bare = tmp_path / "fixture.git"
+  subprocess.run(["git", "init", "-q", "-b", "main", str(fixture)], check=True)
+  (fixture / "index.jsx").write_text("export default () => 'v1'\n")
+  _commit_all(fixture, "v1")
+  subprocess.run(
+    ["git", "clone", "-q", "--bare", str(fixture), str(bare)], check=True,
+    env=app_git._git_env(fixture),
+  )
+
+  source_dir = tmp_path / "source"
+  source_dir.mkdir()
+  app_git.clone_upstream(source_dir, bare.as_uri(), "main")
+
+  (fixture / "index.jsx").write_text("export default () => 'v2'\n")
+  new_head = _commit_all(fixture, "v2")
+  subprocess.run(
+    ["git", "-C", str(fixture), "push", "-q", str(bare), "main"],
+    check=True, env=app_git._git_env(fixture),
+  )
+
+  fetched = app_git.fetch_upstream(source_dir, new_head)
+
+  assert fetched.sha == new_head
+  assert app_git.head_sha(source_dir, app_git.UPSTREAM_BRANCH) == new_head
+  assert app_git.read_ref_tree(source_dir, app_git.UPSTREAM_BRANCH)[
+    "index.jsx"
+  ] == b"export default () => 'v2'\n"
+
+
+def test_fetch_upstream_pins_fetch_head_across_history_repair(
+  tmp_path, monkeypatch,
+):
+  """A repair fetch cannot retarget a commit-pinned update via FETCH_HEAD."""
+  fixture = tmp_path / "fixture"
+  bare = tmp_path / "fixture.git"
+  subprocess.run(["git", "init", "-q", "-b", "main", str(fixture)], check=True)
+  (fixture / "index.jsx").write_text("export default () => 'main'\n")
+  main_head = _commit_all(fixture, "main")
+  subprocess.run(
+    ["git", "checkout", "-q", "-b", "other"], cwd=fixture, check=True,
+  )
+  (fixture / "index.jsx").write_text("export default () => 'other'\n")
+  other_head = _commit_all(fixture, "other")
+  subprocess.run(
+    ["git", "clone", "-q", "--bare", str(fixture), str(bare)], check=True,
+    env=app_git._git_env(fixture),
+  )
+
+  source_dir = tmp_path / "source"
+  source_dir.mkdir()
+  app_git.clone_upstream(source_dir, bare.as_uri(), "main")
+  real_restore = app_git._restore_shallow_history_if_needed
+
+  def overwrite_fetch_head(repo, left, right):
+    # Model the additional fetch performed by a real shallow-history repair.
+    app_git._run(repo, "fetch", "origin", "other")
+    return real_restore(repo, left, right)
+
+  monkeypatch.setattr(
+    app_git, "_restore_shallow_history_if_needed", overwrite_fetch_head,
+  )
+  fetched = app_git.fetch_upstream(source_dir, main_head)
+
+  assert fetched.sha == main_head
+  assert app_git.head_sha(source_dir, app_git.UPSTREAM_BRANCH) == main_head
+  assert app_git.head_sha(source_dir, "FETCH_HEAD") == other_head
+
+
+def test_fetch_upstream_repairs_synthetic_ref_for_trusted_related_origin(
+  tmp_path,
+):
+  """A trusted cloned checkout may retire a stale synthetic upstream ref.
+
+  Local ``main`` and the fetched origin still share real history, so their
+  content differences remain governed by the normal three-way merge.  Only
+  the unrelated installer-created provenance ref is replaced here.
+  """
+  fixture = tmp_path / "fixture"
+  bare = tmp_path / "fixture.git"
+  subprocess.run(["git", "init", "-q", "-b", "main", str(fixture)], check=True)
+  (fixture / "index.jsx").write_text("export default () => 'v1'\n")
+  _commit_all(fixture, "v1")
+  subprocess.run(
+    ["git", "clone", "-q", "--bare", str(fixture), str(bare)], check=True,
+    env=app_git._git_env(fixture),
+  )
+
+  source_dir = tmp_path / "source"
+  source_dir.mkdir()
+  app_git.clone_upstream(source_dir, bare.as_uri(), "main")
+  (source_dir / "local.js").write_text("export const local = true\n")
+  app_git.commit_local(source_dir, "local edit")
+  app_git.record_upstream(
+    source_dir,
+    {"index.jsx": b"export default () => 'synthetic'\n"},
+    "https://example.invalid/mobius.json",
+    "legacy",
+  )
+
+  (fixture / "index.jsx").write_text("export default () => 'v2'\n")
+  new_head = _commit_all(fixture, "v2")
+  subprocess.run(
+    ["git", "-C", str(fixture), "push", "-q", str(bare), "main"],
+    check=True, env=app_git._git_env(fixture),
+  )
+
+  fetched = app_git.fetch_upstream(
+    source_dir, new_head, trusted_origin_adoption=True,
+  )
+
+  assert fetched.sha == new_head
+  assert fetched.allow_unrelated_histories is False
+  assert app_git.head_sha(source_dir, app_git.UPSTREAM_BRANCH) == new_head
+  assert app_git._run(
+    source_dir, "merge-base", app_git.LOCAL_BRANCH, app_git.UPSTREAM_BRANCH,
+  ).stdout.strip()
+
+
 def test_fetch_upstream_rejects_unrelated_origin_without_moving_ref(tmp_path):
   """A synthetic app that accidentally has an origin remote must not have its
   installer-owned upstream branch moved onto unrelated real-repo history."""

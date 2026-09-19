@@ -24,7 +24,6 @@ def _activation_command(chat_id, wait_id, root_id, **kw):
 
 
 def test_answer_while_publisher_finishes_keeps_b_behind_activation(monkeypatch):
-  monkeypatch.setattr("app.platform_restart.requirement_matches_current_source", lambda _: True)
   qid, wait_id, run_id, _ = _install("queue-publisher", queued=True)
   with SessionLocal() as db:
     run = db.get(models.ChatRun, run_id)
@@ -68,7 +67,6 @@ def test_approved_restart_holds_b_without_an_open_question(wait_status):
 
 
 def test_not_now_releases_owner_queue_without_abandoning_activation(monkeypatch):
-  monkeypatch.setattr("app.platform_restart.requirement_matches_current_source", lambda _: True)
   qid, wait_id, root, _ = _install("deferred-owner", queued=True)
   result = _submit(chat_writer.ResolvePlatformRestartCard(
     chat_id="deferred-owner", question_id=qid, selected_option_id="cancel-id",
@@ -80,7 +78,6 @@ def test_not_now_releases_owner_queue_without_abandoning_activation(monkeypatch)
     wait = db.get(models.ChatWait, wait_id)
     assert wait.status == "armed"
     assert wait.action_approved_at is None
-    assert db.query(models.PlatformRestartExecution).count() == 0
   promoted = _submit(chat_writer.PromotePending(
     chat_id="deferred-owner", run_token="owner-after-deferral",
   ))
@@ -121,9 +118,16 @@ def test_goal_dismissal_cancels_only_its_activation_owner(status):
     assert db.get(models.ChatWait, f"generic-{status}").status == "armed"
     chat = db.get(models.Chat, f"dismiss-{status}")
     assert chat.pending_question_id is None
-    assert chat.messages[0]["blocks"][0]["platform_action"]["status"] == "dismissed"
+    assert chat.messages[0]["blocks"][0]["platform_action"]["status"] == "awaiting_owner"
     assert "answers" not in chat.messages[0]["blocks"][0]
-    assert [m["content"] for m in db.get(models.Chat, f"dismiss-{status}").pending_messages] == ["B"]
+    assert [m["content"] for m in chat.pending_messages] == ["B"]
+
+  restart = _submit(chat_writer.ResolvePlatformRestartCard(
+    chat_id=f"dismiss-{status}", question_id=qid,
+    selected_option_id="restart-id",
+  ))
+  assert restart["dispatch"] is True
+  assert restart["status"] == "restart_requested"
   assert asyncio.run(chat_waits._deliver_resume(wait_id)) is False
 
 
@@ -147,7 +151,6 @@ def test_same_root_database_orphan_is_not_delivery_ownership(monkeypatch):
 @pytest.mark.parametrize("settled_by", ["answer", "external_activation"])
 @pytest.mark.parametrize("snapshot_kind", ["history", "live"])
 def test_stale_snapshots_preserve_settlement_even_without_forged_yes(monkeypatch, settled_by, snapshot_kind):
-  monkeypatch.setattr("app.platform_restart.requirement_matches_current_source", lambda _: True)
   cid = f"snapshot-{settled_by}-{snapshot_kind}"
   qid, wait_id, root, _ = _install(cid, status="met" if settled_by == "external_activation" else "armed")
   with SessionLocal() as db:
@@ -193,15 +196,19 @@ def test_tokenless_restart_resolution_fences_publisher_snapshots():
 def test_real_stop_cancels_even_met_undelivered_activation(status):
   from app import chat as chat_mod, chat_waits
   cid = f"stop-{status}"
-  _, wait_id, _, _ = _install(cid, status=status)
+  qid, wait_id, _, _ = _install(cid, status=status)
   asyncio.run(chat_mod.stop_chat_for(cid))
   with SessionLocal() as db:
     assert db.get(models.ChatWait, wait_id).status == "cancelled"
     chat = db.get(models.Chat, cid)
     assert chat.pending_question_id is None
     block = chat.messages[0]["blocks"][0]
-    assert block["platform_action"]["status"] == "dismissed"
+    assert block["platform_action"]["status"] == "awaiting_owner"
     assert "answers" not in block
+  restart = _submit(chat_writer.ResolvePlatformRestartCard(
+    chat_id=cid, question_id=qid, selected_option_id="restart-id",
+  ))
+  assert restart["dispatch"] is True
   assert asyncio.run(chat_waits._deliver_resume(wait_id)) is False
 
 
@@ -250,7 +257,6 @@ def test_active_sink_attaches_activation_once_without_a_second_runner(monkeypatc
 
 @pytest.mark.parametrize("settled_by", ["answer", "external_activation"])
 def test_restart_settlement_updates_separated_live_snapshot(monkeypatch, settled_by):
-  monkeypatch.setattr("app.platform_restart.requirement_matches_current_source", lambda _: True)
   cid = f"live-settlement-{settled_by}"
   qid, wait_id, root, _ = _install(cid, status="met" if settled_by == "external_activation" else "armed")
   with SessionLocal() as db:
