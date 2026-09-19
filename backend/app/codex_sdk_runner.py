@@ -109,6 +109,7 @@ from app.codex_events import (
   _file_change_edit_preview,
 )
 from app.process_groups import lower_process_group_priority
+from app.progress_lease import TOOL_TTL, ProgressLease
 from app.providers import get_skill_path
 from app.question_bridge import (
   QuestionOverlapError,
@@ -2263,7 +2264,15 @@ async def _run_codex_sdk_turn(
       rate_limit_resets_at: int | None = None
       rate_limit_reached = False
 
+      # Progress lease: renew on every notification so a stalled Codex stream
+      # lapses and recovery can reclaim it. Codex tool boundaries aren't parsed
+      # here, so use a conservative floor (a real silent tool never exceeds it)
+      # rather than the tight model-idle bound.
+      lease = ProgressLease(chat_id, floor_ttl=TOOL_TTL)
+      lease.start()
+
       async for notification in turn.stream():
+        lease.note_message(notification, is_root=False)
         payload = notification.payload
 
         if isinstance(payload, sdk["AgentMessageDeltaNotification"]):

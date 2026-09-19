@@ -134,6 +134,25 @@ def test_goal_plan_admission_revision_upgrade_is_nullable_and_idempotent(tmp_pat
   assert columns["goal_plan_revision_at_admission"]["nullable"] is True
 
 
+def test_progress_lease_upgrade_adds_nullable_column(tmp_path):
+  eng = create_engine(f"sqlite:///{tmp_path / 'progress-lease.db'}")
+  models.Base.metadata.create_all(eng)
+  with eng.begin() as conn:
+    conn.execute(text("ALTER TABLE chat_runs DROP COLUMN progress_expires_at"))
+    conn.execute(text(
+      "INSERT INTO chat_runs (id, chat_id, status) "
+      "VALUES ('legacy', 'chat', 'running')"
+    ))
+  migrations._add_chat_run_progress_lease(eng)
+  migrations._add_chat_run_progress_lease(eng)
+  cols = {c["name"] for c in inspect(eng).get_columns("chat_runs")}
+  assert "progress_expires_at" in cols
+  with Session(eng) as session:
+    # A pre-migration in-flight run stays NULL, so recovery keeps its legacy
+    # dead-process fallback instead of reaping it on a phantom expiry.
+    assert session.get(models.ChatRun, "legacy").progress_expires_at is None
+
+
 def test_run_migrations_drops_removed_image_generation_columns(tmp_path):
   db_path = tmp_path / "legacy-image-generation.db"
   eng = create_engine(f"sqlite:///{db_path}")
@@ -1605,6 +1624,7 @@ def test_run_migrations_records_an_inspectable_append_only_history(tmp_path):
     "0059_app_service_aliases",
     "0060_drop_platform_restart_executions",
     "0061_goal_plan_admission_revision",
+    "0062_chat_run_progress_lease",
   ]
   assert second == first
 

@@ -4861,6 +4861,26 @@ def _add_goal_plan_admission_revision(eng) -> None:
     ))
 
 
+def _add_chat_run_progress_lease(eng) -> None:
+  """Add the progress-lease expiry column; legacy running rows stay NULL.
+
+  NULL keeps pre-migration in-flight runs on the legacy dead-process recovery
+  path until the next restart reconciles them; every new turn writes a real
+  lease at start.
+  """
+  from sqlalchemy import inspect as sa_inspect, text
+
+  inspector = sa_inspect(eng)
+  if "chat_runs" not in inspector.get_table_names():
+    return
+  columns = {column["name"] for column in inspector.get_columns("chat_runs")}
+  if "progress_expires_at" not in columns:
+    with eng.begin() as conn:
+      conn.execute(text(
+        "ALTER TABLE chat_runs ADD COLUMN progress_expires_at TIMESTAMP NULL"
+      ))
+
+
 _SCHEMA_MIGRATIONS = (
   # Full IDs are permanent identities, not sequence positions. Append new
   # work in execution order; never renumber a shipped ID to reconcile sources.
@@ -4926,6 +4946,7 @@ _SCHEMA_MIGRATIONS = (
   ("0059_app_service_aliases", _add_app_service_aliases),
   ("0060_drop_platform_restart_executions", _drop_platform_restart_executions),
   ("0061_goal_plan_admission_revision", _add_goal_plan_admission_revision),
+  ("0062_chat_run_progress_lease", _add_chat_run_progress_lease),
 )
 
 

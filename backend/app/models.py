@@ -349,6 +349,17 @@ class ChatRun(Base):
   # A successfully drained planned restart reuses that retry path with
   # park_reason="restart"; an unplanned crash remains "interrupted".
   status = Column(String(16), nullable=False, default="running", index=True)
+  # Progress lease: the single durable authority for whether a "running" turn is
+  # still making progress. The runner renews it to ``now + regime TTL`` as it
+  # emits progress (short while awaiting the model, a bounded cap while a
+  # CLI-internal tool runs, suspended while a platform-mediated long tool/wait is
+  # outstanding). A "running" row whose lease has lapsed is a crashed OR hung
+  # turn — recovery reclaims it on expiry alone, without asking whether the
+  # process handle or broadcast is still alive (those in-memory signals stay for
+  # operational routing, not liveness truth). NULL = no active lease (a
+  # non-running row, or a pre-migration/in-flight run at upgrade), for which
+  # recovery falls back to the legacy dead-process conjunction.
+  progress_expires_at = Column(DateTime, nullable=True, default=None)
   # False proves this physical run has not crossed provider entry. The writer
   # commits True before invoking either runner; a crash after that commit is
   # ambiguous even with no transcript output. NULL preserves that ambiguity
