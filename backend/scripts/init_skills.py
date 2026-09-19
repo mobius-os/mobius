@@ -103,6 +103,11 @@ _UNMODIFIED_MIGRATIONS = {
     # Front-loaded execution-loop seed before routing became an explicit serial
     # gate and the repeated guidance was condensed below Claude's read limit.
     "d00214c37ba549f5ea4f043714ca33073176b47f1e3085230791b74dd49e2b49",
+    # Turn-local routing seed before plan-owned continuation and no-op revision
+    # fencing. Only untouched copies receive the new handoff contract.
+    "c0484a99757296892e042512cdc41371e2e94e88ceab377e80a3b8a71f3a48c2",
+    # Initial plan-owned continuation seed before its bounded wording pass.
+    "9c1665fece62c6eaa20d422f138527952eb8feb3dc56c215be62b04769bd3914",
   },
   "waiting.md": {
     # Untouched shared copy before explicit owner/deadline requirements and
