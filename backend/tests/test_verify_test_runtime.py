@@ -740,6 +740,12 @@ def test_manual_and_pull_request_runs_cover_suites_and_main_image():
     assert "refs/heads/integration/" not in job
   assert "github.event_name != 'pull_request'" not in backend
   assert "if: github.event_name != 'pull_request'" in e2e
+  # e2e is split 4-way so whichever runs it gets (merge-group, dispatch) are
+  # cheaper, even though a baseline main run still fails ~7% of tests today
+  # and isn't ready to hard-gate ordinary PRs on.
+  assert "fail-fast: false" in e2e
+  assert "shard: [1, 2, 3, 4]" in e2e
+  assert "--shard=${{ matrix.shard }}/${{ env.SHARD_TOTAL }}" in e2e
   assert "needs: privacy" in e2e
   assert "needs: backend" not in e2e
   assert "cache-from: type=gha" in e2e

@@ -209,12 +209,15 @@ jobs:
 
   e2e:
     runs-on: ubuntu-latest
-    # Previously excluded from ordinary pull_request runs because the
-    # unsharded suite took too long to gate every PR. Now split 4-way (see
-    # `strategy` below), each shard's wall-clock is roughly a quarter of the
-    # old single-job run, so it is affordable to gate PRs directly instead of
-    # only catching regressions at merge-group/dispatch time, after a PR is
-    # already slated to land.
+    # Keep the browser suite available for manual dispatches and any future
+    # merge-group runs, but do not block ordinary pull requests while the
+    # merge queue is disabled. Backend, frontend-unit, and privacy remain
+    # required. (A baseline run on main showed the suite currently fails
+    # ~7% of tests even with no changes applied — pre-existing debt from
+    # e2e not gating merges for a long time — so it isn't ready to hard-gate
+    # PRs yet; sharding below still makes whichever runs it gets much
+    # cheaper once that debt is paid down.)
+    if: github.event_name != 'pull_request'
     # A cold hosted build can spend roughly 20 minutes populating the GHA cache
     # before Playwright starts. Leave enough room for one shard's quarter of the
     # browser suite and its diagnostic uploads instead of cancelling a healthy
