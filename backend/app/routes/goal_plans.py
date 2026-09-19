@@ -89,12 +89,16 @@ def _require_owner(principal: Principal) -> None:
     )
 
 
-def _active_rows_or_409(db: Session, chat_id: str):
+def _active_rows_or_409(db: Session, chat_id: str, principal=None):
   rows = active_goal_rows(db, chat_id)
   if rows is None:
     raise HTTPException(
       status_code=409, detail="This chat has no active Goal to plan."
     )
+  if principal is not None and principal.run_id is not None and (
+    rows[0].id != principal.run_id or rows[0].status != "running"
+  ):
+    raise HTTPException(status_code=409, detail="This execution attempt no longer owns the Goal.")
   return rows
 
 
@@ -108,13 +112,29 @@ def _publish(chat_id: str, plan: dict[str, Any]) -> None:
 @router.get("/{chat_id}/goal-plan")
 def get_goal_plan(
   chat_id: str,
+  goal_id: str | None = None,
   principal: Principal = Depends(get_owner_or_chat_embed_principal),
   db: Session = Depends(get_db),
 ):
   require_chat_embed_operation(principal, "chat:read")
   get_active_chat_for_principal(db, chat_id, principal)
   rows = presented_goal_rows(db, chat_id)
-  return {"plan": serialize_plan(db, *rows) if rows is not None else None}
+  if goal_id is not None:
+    from app import models
+    from app.goal_plans import _goal_rows_for_physical
+    run = db.query(models.ChatRun).filter(
+      models.ChatRun.chat_id == chat_id, models.ChatRun.goal_id == goal_id,
+    ).order_by(models.ChatRun.started_at.desc(), models.ChatRun.id.desc()).first()
+    if run is None:
+      raise HTTPException(status_code=404, detail="Goal not found in this chat.")
+    rows = _goal_rows_for_physical(db, run)
+  return {
+    "plan": serialize_plan(db, *rows) if rows is not None else None,
+    "goal": ({"id": rows[1].id, "revision": rows[1].revision,
+              "status": rows[1].status, "objective": rows[1].objective,
+              "checkpoint": rows[1].checkpoint, "next_action": rows[1].next_action}
+             if rows else None),
+  }
 
 
 @router.post(
@@ -148,6 +168,7 @@ async def promote_current_run_to_goal(
   if isinstance(result, GoalPromotionRejected):
     messages = {
       "run_not_active": "The initiating agent turn is no longer active.",
+      "unfinished_goal_exists": "This chat already has unfinished Goal work. Resume it rather than creating a replacement.",
       "run_not_current": "A newer agent turn now owns this chat.",
       "different_goal_active": "This turn already owns a different Goal.",
       "logical_root_missing": "The running turn has no durable logical root.",
@@ -224,7 +245,7 @@ async def put_goal_plan(
   from app import chat_queue
   async with chat_queue.get_transition_lock(chat_id):
     db.rollback()
-    physical, root = _active_rows_or_409(db, chat_id)
+    physical, root = _active_rows_or_409(db, chat_id, principal)
     try:
       plan = replace_plan(
         db, physical=physical, root=root,
@@ -254,7 +275,7 @@ async def patch_goal_task(
   from app import chat_queue
   async with chat_queue.get_transition_lock(chat_id):
     db.rollback()
-    physical, root = _active_rows_or_409(db, chat_id)
+    physical, root = _active_rows_or_409(db, chat_id, principal)
     try:
       plan = update_task(
         db, physical=physical, root=root,
@@ -273,3 +294,160 @@ async def patch_goal_task(
       raise HTTPException(status_code=409, detail=str(exc)) from exc
   _publish(chat_id, plan)
   return {"plan": plan}
+
+
+class GoalRecordUpdate(BaseModel):
+  model_config = ConfigDict(extra="forbid")
+  goal_id: str
+  expected_revision: int = Field(ge=0)
+  checkpoint: str | None = Field(default=None, max_length=4000)
+  next_action: str | None = Field(default=None, max_length=2000)
+  result: str | None = Field(default=None, min_length=1, max_length=4000)
+
+  @model_validator(mode="after")
+  def require_operation(self):
+    if self.result is not None:
+      if self.checkpoint is not None or self.next_action is not None:
+        raise ValueError("Complete or checkpoint, not both.")
+    elif self.checkpoint is None or self.next_action is None:
+      raise ValueError("A checkpoint needs both progress and the next action.")
+    return self
+
+
+@router.patch("/{chat_id}/goal", dependencies=[Depends(reject_cross_site)])
+async def patch_goal_record(
+  chat_id: str, body: GoalRecordUpdate,
+  principal: Principal = Depends(get_agent_run_principal),
+  db: Session = Depends(get_db),
+):
+  _require_owner(principal)
+  if principal.chat_id != chat_id:
+    raise HTTPException(status_code=403, detail="Agent run belongs to another chat.")
+  get_active_chat_for_principal(db, chat_id, principal)
+  from app import chat_queue
+  from app.goals import update_goal_record
+  async with chat_queue.get_transition_lock(chat_id):
+    db.rollback()
+    run, goal = _active_rows_or_409(db, chat_id, principal)
+    if run.id != principal.run_id or goal.id != body.goal_id:
+      raise HTTPException(status_code=409, detail="The Goal or execution attempt changed.")
+    try:
+      result = update_goal_record(
+        db, run, goal, body.expected_revision, checkpoint=body.checkpoint,
+        next_action=body.next_action, result=body.result,
+      )
+    except GoalPlanError as exc:
+      raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except GoalPlanConflict as exc:
+      raise HTTPException(status_code=409, detail=str(exc)) from exc
+  _publish(chat_id, serialize_plan(db, run, goal))
+  return result
+
+
+class GoalTaskAdd(BaseModel):
+  model_config = ConfigDict(extra="forbid")
+  expected_revision: int = Field(ge=0)
+  task: dict[str, Any]
+
+
+@router.post("/{chat_id}/goal-plan/tasks", dependencies=[Depends(reject_cross_site)])
+async def add_goal_task(
+  chat_id: str, body: GoalTaskAdd,
+  principal: Principal = Depends(get_owner_or_chat_embed_principal),
+  db: Session = Depends(get_db),
+):
+  _require_owner(principal)
+  get_active_chat_for_principal(db, chat_id, principal)
+  from app import chat_queue
+  async with chat_queue.get_transition_lock(chat_id):
+    db.rollback()
+    run, goal = _active_rows_or_409(db, chat_id, principal)
+    tasks = list((goal.plan_json or {}).get("tasks") or [])
+    try:
+      plan = replace_plan(db, physical=run, root=goal,
+                          expected_revision=body.expected_revision,
+                          tasks=[*tasks, body.task])
+    except GoalPlanError as exc:
+      raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except GoalPlanConflict as exc:
+      raise HTTPException(status_code=409, detail=str(exc)) from exc
+  _publish(chat_id, plan)
+  return {"plan":plan}
+
+
+@router.get("/{chat_id}/goals")
+def list_goals(
+  chat_id: str,
+  principal: Principal = Depends(get_owner_or_chat_embed_principal),
+  db: Session = Depends(get_db),
+):
+  require_chat_embed_operation(principal, "chat:read")
+  get_active_chat_for_principal(db, chat_id, principal)
+  from app import models
+  return {"goals": [
+    {"id":goal.id, "objective":goal.objective, "status":goal.status,
+     "revision":goal.revision, "checkpoint":goal.checkpoint,
+     "next_action":goal.next_action}
+    for goal in db.query(models.ChatGoal).filter(
+      models.ChatGoal.chat_id == chat_id,
+    ).order_by(models.ChatGoal.created_at.desc()).all()
+  ]}
+
+
+class GoalResumeRequest(BaseModel):
+  model_config = ConfigDict(extra="forbid")
+  goal_id: str = Field(min_length=1, max_length=64)
+
+
+@router.post("/{chat_id}/goal/resume", dependencies=[Depends(reject_cross_site)])
+async def attach_unfinished_goal(
+  chat_id: str, body: GoalResumeRequest,
+  principal: Principal = Depends(get_agent_run_principal),
+  db: Session = Depends(get_db),
+):
+  """Attach an ordinary owner attempt to named existing work, never replace it."""
+  _require_owner(principal)
+  if principal.chat_id != chat_id:
+    raise HTTPException(status_code=403, detail="Agent run belongs to another chat.")
+  get_active_chat_for_principal(db, chat_id, principal)
+  from app import models, chat_queue
+  from app.chat_writer import PromoteRunToGoal, GoalPromotionRejected, get_writer, await_ack
+  goal = db.get(models.ChatGoal, body.goal_id)
+  if goal is None or goal.chat_id != chat_id:
+    raise HTTPException(status_code=404, detail="Goal not found in this chat.")
+  async with chat_queue.get_transition_lock(chat_id):
+    result = await await_ack(get_writer().submit(PromoteRunToGoal(
+      chat_id=chat_id, run_token=principal.run_id, objective=goal.objective,
+      resume_goal_id=goal.id,
+    )))
+  if isinstance(result, GoalPromotionRejected):
+    raise HTTPException(status_code=409, detail="Goal cannot attach: " + result.reason)
+  broadcast = get_broadcast(chat_id)
+  if broadcast is not None and broadcast.running:
+    broadcast.publish({"type":"goal_activated", **result})
+  return result
+
+
+@router.get("/{chat_id}/goal-context")
+def get_goal_context(
+  chat_id: str, task: str | None = None, goal_id: str | None = None,
+  principal: Principal = Depends(get_owner_or_chat_embed_principal),
+  db: Session = Depends(get_db),
+):
+  require_chat_embed_operation(principal, "chat:read")
+  get_active_chat_for_principal(db, chat_id, principal)
+  from app import models
+  from app.goals import scoped_goal_context
+  if goal_id is not None:
+    goal = db.get(models.ChatGoal, goal_id)
+    if goal is None or goal.chat_id != chat_id:
+      raise HTTPException(status_code=404, detail="Goal not found in this chat.")
+  else:
+    rows = presented_goal_rows(db, chat_id)
+    goal = rows[1] if rows else None
+  if goal is None:
+    return {"context": None}
+  try:
+    return {"context": scoped_goal_context(db, goal, task)}
+  except ValueError as exc:
+    raise HTTPException(status_code=404, detail=str(exc)) from exc

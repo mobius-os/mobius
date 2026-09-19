@@ -55,6 +55,7 @@ from sqlalchemy import select, text, update
 from sqlalchemy.exc import SQLAlchemyError
 
 from app import models, schemas
+from app.goals import admit_goal
 from app.chat_message_identity import assistant_message_index
 from app.chat_titles import first_message_title
 from app.json_safety import json_safe
@@ -741,6 +742,7 @@ class PromoteRunToGoal(_Command):
   chat_id: str = ""
   run_token: str = ""
   objective: str = ""
+  resume_goal_id: str | None = None
 
 
 @dataclass
@@ -3103,6 +3105,7 @@ class ChatWriterActor:
       db, cmd.chat_id, cmd.user_msg,
     )
     self._close_nonterminal_runs(db, cmd.chat_id, "interrupted")
+    admit_goal(db, cmd.chat_id, goal_id, goal_objective, cmd.user_msg)
     db.add(ChatRun(
       id=cmd.run_token, chat_id=cmd.chat_id, status="running",
       root_run_id=(
@@ -3430,6 +3433,7 @@ class ChatWriterActor:
     goal_objective, goal_id = goal_identity_for_run_start(
       db, cmd.chat_id, agent_message,
     )
+    admit_goal(db, cmd.chat_id, goal_id, goal_objective, agent_message)
     if superseded is not None:
       superseded.status = "completed"
       superseded.ended_at = started_at
@@ -3563,6 +3567,12 @@ class ChatWriterActor:
       db.rollback()
       return StartContinuationBlocked("parent_not_waiting")
 
+    if latest.goal_id:
+      from app.run_state import _recoverable_result_goal
+      if _recoverable_result_goal(db, cmd.chat_id, latest)[0] is None:
+        db.rollback()
+        return StartContinuationBlocked("goal_closed")
+
     existing = list(chat.messages or [])
     try:
       history = [
@@ -3587,6 +3597,7 @@ class ChatWriterActor:
     chat.active_assistant_message_id = cmd.run_token
     chat.updated_at = started_at
     provider = chat.provider or "claude"
+    admit_goal(db, cmd.chat_id, latest.goal_id, latest.goal_objective)
     db.add(ChatRun(
       id=cmd.run_token,
       chat_id=cmd.chat_id,
@@ -3614,7 +3625,7 @@ class ChatWriterActor:
   def _promote_run_to_goal(
     self, db, cmd: PromoteRunToGoal,
   ) -> dict | GoalPromotionRejected:
-    """Atomically bind one exact live turn and its logical root to a Goal."""
+    """Atomically bind one exact live attempt to durable intent."""
     run = db.query(models.ChatRun).filter(
       models.ChatRun.id == cmd.run_token,
       models.ChatRun.chat_id == cmd.chat_id,
@@ -3636,6 +3647,13 @@ class ChatWriterActor:
       db.rollback()
       return GoalPromotionRejected("different_goal_active")
 
+    if cmd.resume_goal_id is not None:
+      target = db.get(models.ChatGoal, cmd.resume_goal_id)
+      if (target is None or target.chat_id != cmd.chat_id or target.status != "open"
+          or target.objective != cmd.objective):
+        db.rollback()
+        return GoalPromotionRejected("goal_not_open")
+
     root_id = run.root_run_id or run.id
     root = db.query(models.ChatRun).filter(
       models.ChatRun.id == root_id,
@@ -3644,37 +3662,40 @@ class ChatWriterActor:
     if root is None:
       db.rollback()
       return GoalPromotionRejected("logical_root_missing")
-    if root.goal_objective not in (None, cmd.objective):
+    # Promotion cannot hide a previous unfinished obligation. Resume the
+    # original work rather than minting a narrower replacement after a crash.
+    outstanding = db.query(models.ChatGoal).filter(
+      models.ChatGoal.chat_id == cmd.chat_id,
+      models.ChatGoal.status == "open",
+    ).order_by(models.ChatGoal.created_at.desc(), models.ChatGoal.id.desc()).first()
+    if (cmd.resume_goal_id is None and outstanding is not None
+        and outstanding.id != run.goal_id):
+      db.rollback()
+      return GoalPromotionRejected("unfinished_goal_exists")
+    goal_id = cmd.resume_goal_id or run.goal_id or run.id
+    if run.goal_id is not None and run.goal_id != goal_id:
       db.rollback()
       return GoalPromotionRejected("different_goal_active")
-    if (
-      run.goal_id is not None
-      and root.goal_id is not None
-      and run.goal_id != root.goal_id
-    ):
-      db.rollback()
-      return GoalPromotionRejected("different_goal_active")
-
-    goal_id = run.goal_id or root.goal_id or root_id
+    goal_was_missing = db.get(models.ChatGoal, goal_id) is None
+    admit_goal(db, cmd.chat_id, goal_id, cmd.objective)
     identity_changed = (
       run.goal_objective is None
-      or root.goal_objective is None
       or run.goal_id is None
-      or root.goal_id is None
     )
     run.goal_objective = cmd.objective
-    root.goal_objective = cmd.objective
     run.goal_id = goal_id
-    root.goal_id = goal_id
     checkpoint_changed = run.goal_plan_revision_at_admission is None
     if checkpoint_changed:
       from app.goal_plans import goal_plan_revision
       run.goal_plan_revision_at_admission = goal_plan_revision(
         db, cmd.chat_id, goal_id,
       )
-    if (identity_changed or checkpoint_changed) and not _commit_or_rollback(db):
+    if (
+      (identity_changed or checkpoint_changed or goal_was_missing)
+      and not _commit_or_rollback(db)
+    ):
       raise _PersistFailed("PromoteRunToGoal did not persist")
-    if not identity_changed and not checkpoint_changed:
+    if not identity_changed and not checkpoint_changed and not goal_was_missing:
       db.rollback()
     return {
       "objective": cmd.objective,
@@ -3714,6 +3735,10 @@ class ChatWriterActor:
       db.rollback()
       return {"status": "cleared", "goal_id": goal_id}
     chat.dismissed_goal_id = goal_id
+    goal = db.get(models.ChatGoal, goal_id)
+    if goal is not None and goal.status != "completed":
+      goal.status = "dismissed"
+      goal.revision += 1
     # Exact Goal dismissal does not cancel another Goal or generic wait.
     _cancel_activation_owners(db, chat, goal_id=goal_id)
     if not cmd.preserve_execution:
@@ -4173,14 +4198,6 @@ class ChatWriterActor:
       handoff = goal_terminal_handoff(
         db, cmd.chat_id, cmd.ending_run_token,
       )
-      if handoff is not None and not handoff.automatic_allowed:
-        # The normal terminal path saves a real owner card before reaching
-        # this transaction. Fail closed if a future caller skips that seam:
-        # the current run marker remains the recovery owner instead of either
-        # clearing unfinished work or starting an unbounded retry chain.
-        raise _PersistFailed(
-          "PromotePending: exhausted Goal continuation needs an owner card"
-        )
       if handoff is not None:
         pending.append({
           "role": "user",
@@ -4328,6 +4345,7 @@ class ChatWriterActor:
     self._close_nonterminal_runs(
       db, cmd.chat_id, cmd.ending_status, except_token=durable_run_token
     )
+    admit_goal(db, cmd.chat_id, goal_id, goal_objective, agent_pending)
     db.add(ChatRun(
       id=durable_run_token, chat_id=cmd.chat_id, status="running",
       root_run_id=root_run_id,
@@ -4521,6 +4539,11 @@ class ChatWriterActor:
     failed_run = None
     for run in q.order_by(ChatRun.started_at.asc(), ChatRun.id.asc()).all():
       run.status = status
+      if status == "stopped" and run.goal_id:
+        goal = db.get(models.ChatGoal, run.goal_id)
+        if goal is not None and goal.status == "open":
+          goal.status = "stopped"
+          goal.revision += 1
       run.ended_at = datetime.now(UTC)
       run.restart_nonce = None
       changed = True
@@ -4565,6 +4588,11 @@ class ChatWriterActor:
         run.ended_at = datetime.now(UTC)
         run.restart_nonce = None
         run_changed = True
+        if cmd.terminal_status == "stopped" and run.goal_id:
+          goal = db.get(models.ChatGoal, run.goal_id)
+          if goal is not None and goal.status == "open":
+            goal.status = "stopped"
+            goal.revision += 1
         if cmd.terminal_status == "failed":
           from app.chat_failure_activity import mark_failed
           mark_failed(
@@ -4589,6 +4617,17 @@ class ChatWriterActor:
 
       chat = db.query(Chat).filter(Chat.id == cmd.chat_id).first()
       if cmd.terminal_status == "stopped":
+        if not cmd.run_token:
+          # Stop while already idle still stops the obligation. A failed
+          # attempt need not exist in the nonterminal process query above.
+          goal = db.query(models.ChatGoal).filter(
+            models.ChatGoal.chat_id == cmd.chat_id,
+            models.ChatGoal.status == "open",
+          ).order_by(models.ChatGoal.created_at.desc(), models.ChatGoal.id.desc()).first()
+          if goal is not None:
+            goal.status = "stopped"
+            goal.revision += 1
+            changed = True
         for request in db.query(models.SavedSecureInput).filter(
           models.SavedSecureInput.chat_id == cmd.chat_id,
           models.SavedSecureInput.status.in_(("pending", "consuming")),

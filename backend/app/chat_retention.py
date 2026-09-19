@@ -136,6 +136,7 @@ def purge_expired_chat_tombstones(db: Session) -> list[str]:
     models.AgentLifecycleEvent,
     models.ChatRunUpdate,
     models.ChatRun,
+    models.ChatGoal,
     models.ChatWait,
     models.ToolOutput,
     models.ThinkingTrace,

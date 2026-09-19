@@ -310,6 +310,26 @@ class Chat(Base):
     return value
 
 
+class ChatGoal(Base):
+  """Durable intent. Execution failure never changes its outcome.
+
+  ChatRun owns process lifetime; this row owns the obligation and current plan.
+  Plan and outcome share one revision so completion cannot race a scope edit.
+  """
+  __tablename__ = "chat_goals"
+  id = Column(String(64), primary_key=True)
+  chat_id = Column(String(36), ForeignKey("chats.id", ondelete="CASCADE"), nullable=False, index=True)
+  objective = Column(Text, nullable=False)
+  status = Column(String(16), nullable=False, default="open", server_default="open")
+  plan_json = Column(JSON, nullable=True)
+  revision = Column(Integer, nullable=False, default=0, server_default="0")
+  checkpoint = Column(Text, nullable=True)
+  next_action = Column(Text, nullable=True)
+  result = Column(Text, nullable=True)
+  created_at = Column(DateTime, nullable=False, default=lambda: datetime.now(UTC))
+  completed_at = Column(DateTime, nullable=True)
+
+
 class ChatRun(Base):
   """Durable per-turn run record and persisted run-state authority.
 
@@ -382,22 +402,18 @@ class ChatRun(Base):
   # remains populated after acknowledgement as the restart/idempotency audit.
   activity_delivery_json = Column(JSON, nullable=True, default=None)
   provider = Column(String(32), nullable=True, default=None)
-  # Objective shown by the shell while this exact run owns a native goal.
+  # Objective shown by the shell while this exact run is attached to a Goal.
   # This belongs to the run rather than the transcript tail: mid-turn owner
   # questions are steered into the same run and must not make the goal vanish
   # after a reload. NULL is an ordinary non-goal run.
   goal_objective = Column(Text, nullable=True, default=None)
-  # Stable identity for one native Goal across physical/logical run recovery.
+  # Stable identity for one Goal across physical/logical run recovery.
   # Unlike root_run_id this survives a fresh provider turn after a restart or
   # question checkpoint. Explicit /goal starts mint a new identity; genuine
   # continuations inherit it.
   goal_id = Column(String(64), nullable=True, index=True, default=None)
-  # Optional agent-authored execution plan for the logical goal rooted at this
-  # run. Only the root row stores the snapshot; continuation rows resolve it
-  # through root_run_id. The JSON document is intentionally small and bounded
-  # by the goal-plan domain validator, while revision provides optimistic
-  # concurrency so two helpers cannot silently overwrite one another's
-  # progress.
+  # Frozen pre-0059 snapshots retained for upgrade/backup history only.
+  # Runtime plans and outcomes live solely on ChatGoal.
   goal_plan_json = Column(JSON, nullable=True, default=None)
   goal_plan_revision = Column(
     Integer, nullable=False, default=0, server_default="0"

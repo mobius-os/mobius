@@ -25,6 +25,8 @@ Locks in the contracts of the limit-park feature:
       crashes, unanswered questions, and app-owned work stay manual.
 """
 
+from tests.goal_fixtures import goal_run as make_goal_run, persist_goal_fixture
+
 import asyncio
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -116,7 +118,7 @@ def _seed_run(chat_id: str, token: str, *, status="running",
               initiated_by_app_id=None, restart_nonce=None):
   db = SessionLocal()
   try:
-    db.add(models.ChatRun(
+    db.add(make_goal_run(db,
       id=token,
       chat_id=chat_id,
       status=status,
@@ -741,6 +743,7 @@ def test_manual_try_now_preserves_messages_queued_behind_future_limit_park(
     parked.goal_plan_json = {
       "tasks": [{"id": "finish", "status": "running"}],
     }
+    persist_goal_fixture(setup_db, parked)
     setup_db.commit()
   first = client.post(
     f"/api/chats/{cid}/messages",
@@ -1133,7 +1136,7 @@ def test_sweep_auto_resume_on_starts_one_staggered_continue(
   )
   with SessionLocal() as db:
     parked = db.get(models.ChatRun, "rt-sweep-auto")
-    db.add(models.ChatRun(
+    db.add(make_goal_run(db,
       id="goal-logical-root", root_run_id="goal-logical-root",
       chat_id="sweep-auto", status="completed", provider="claude",
       started_at=parked.started_at - timedelta(seconds=1),
@@ -1249,6 +1252,7 @@ def test_limit_handoff_hidden_result_preserves_goal_root_and_app(monkeypatch):
     root = db.get(models.ChatRun, token)
     root.goal_id = goal_id
     root.goal_objective = "Finish the lifecycle repair"
+    persist_goal_fixture(db, root)
     db.commit()
   scheduled = []
   def schedule(**kwargs):
@@ -2068,6 +2072,7 @@ def test_no_output_successor_requires_non_admission_or_exact_new_restart(
     run.provider_execution_admitted = admitted
     run.goal_objective = "Finish the same Goal"
     run.goal_id = "original-goal"
+    persist_goal_fixture(db, run)
     if new_restart_authorized:
       run.restart_nonce = fresh_nonce
     db.commit()
@@ -2833,11 +2838,11 @@ def test_parked_probe_tiebreak_is_deterministic():
     _seed_chat(cid)
     db = SessionLocal()
     try:
-      db.add(models.ChatRun(
+      db.add(make_goal_run(db,
         id=parked_token, chat_id=cid, status="parked",
         provider="claude", started_at=ts, parked_until=until,
       ))
-      db.add(models.ChatRun(
+      db.add(make_goal_run(db,
         id=running_token, chat_id=cid, status="running",
         provider="claude", started_at=ts,
       ))

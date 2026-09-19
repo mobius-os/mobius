@@ -1,5 +1,7 @@
 """Durable Goal-plan validation, ordering, progress, and route contracts."""
 
+from tests.goal_fixtures import goal_run as make_goal_run
+
 from datetime import timedelta
 import importlib.util
 import hashlib
@@ -26,7 +28,7 @@ def _active_goal(client, owner_token, db):
   response = client.post("/api/chats", json={"title": "Planned goal"}, headers=auth)
   assert response.status_code == 200, response.text
   chat_id = response.json()["id"]
-  db.add(models.ChatRun(
+  db.add(make_goal_run(db,
     id="goal-root",
     root_run_id="goal-root",
     chat_id=chat_id,
@@ -71,7 +73,7 @@ def test_terminal_goal_history_projects_onto_final_assistant_message(
   )
   chat_id = created.json()["id"]
   db.add_all([
-    models.ChatRun(
+    make_goal_run(db,
       id="history-root", root_run_id="history-root", chat_id=chat_id,
       status="completed", provider="codex", goal_objective="Ship safely",
       goal_id="history-goal", started_at=base,
@@ -86,7 +88,7 @@ def test_terminal_goal_history_projects_onto_final_assistant_message(
       },
       goal_plan_revision=1,
     ),
-    models.ChatRun(
+    make_goal_run(db,
       id="history-resume", root_run_id="history-root", chat_id=chat_id,
       status="completed", provider="codex", goal_objective="Ship safely",
       goal_id="history-goal", started_at=base + timedelta(seconds=10),
@@ -134,7 +136,7 @@ def test_terminal_goal_history_respects_message_pagination_and_clear(
   chat_id = created.json()["id"]
   chat = db.query(models.Chat).filter(models.Chat.id == chat_id).one()
   chat.dismissed_goal_id = "old-goal"
-  db.add(models.ChatRun(
+  db.add(make_goal_run(db,
     id="old-goal-run", root_run_id="old-goal-run", chat_id=chat_id,
     status="completed", provider="claude", goal_objective="Old Goal",
     goal_id="old-goal", started_at=base,
@@ -142,6 +144,8 @@ def test_terminal_goal_history_respects_message_pagination_and_clear(
   ))
   db.commit()
 
+  db.get(models.ChatGoal, "old-goal").status = "completed"
+  db.commit()
   latest = client.get(f"/api/chats/{chat_id}?limit=1", headers=auth).json()
   assert latest["offset"] == 2
   assert "goal_summaries" not in latest["messages"][0]
@@ -157,7 +161,7 @@ def test_current_turn_promotes_atomically_without_a_goal_message(
   owner_auth = {"Authorization": f"Bearer {owner_token}"}
   created = client.post("/api/chats", json={"title": "Ordinary"}, headers=owner_auth)
   chat_id = created.json()["id"]
-  db.add(models.ChatRun(
+  db.add(make_goal_run(db,
     id="ordinary-run",
     root_run_id="ordinary-run",
     chat_id=chat_id,
@@ -243,11 +247,11 @@ def test_goal_promotion_rejects_browser_wrong_chat_and_terminal_run_tokens(
   first = client.post("/api/chats", json={"title": "First"}, headers=owner_auth).json()
   second = client.post("/api/chats", json={"title": "Second"}, headers=owner_auth).json()
   db.add_all([
-    models.ChatRun(
+    make_goal_run(db,
       id="live-run", root_run_id="live-run", chat_id=first["id"],
       status="running", provider="claude",
     ),
-    models.ChatRun(
+    make_goal_run(db,
       id="settled-run", root_run_id="settled-run", chat_id=first["id"],
       status="completed", provider="claude",
     ),
@@ -286,7 +290,7 @@ def test_confirmed_goal_clear_is_exact_and_preserves_real_pending_work(
     "role": "user", "content": "keep this follow-up", "ts": 2,
     "cid": "real-follow-up",
   }]
-  db.add(models.ChatRun(
+  db.add(make_goal_run(db,
     id="clear-goal-run", root_run_id="clear-goal-run", chat_id=chat_id,
     status="running", provider="claude", goal_objective="Clear safely",
     goal_id="clear-goal-id",
@@ -341,7 +345,7 @@ def test_completed_plan_clear_dismisses_without_interrupting_final_response(
   chat_id = client.post(
     "/api/chats", json={"title": "Finishing goal"}, headers=auth,
   ).json()["id"]
-  run = models.ChatRun(
+  run = make_goal_run(db,
     id="finishing-goal-run", root_run_id="finishing-goal-run",
     chat_id=chat_id, status="running", provider="codex",
     goal_objective="Finish without interruption", goal_id="finishing-goal-id",
@@ -385,12 +389,12 @@ def test_goal_wait_ownership_excludes_a_later_ordinary_turn(db, chat):
   from app.goal_plans import presented_goal
 
   started_at = datetime.now(UTC)
-  goal_run = models.ChatRun(
+  goal_run = make_goal_run(db,
     id="waiting-goal-run", root_run_id="waiting-goal-run", chat_id=chat.id,
     status="parked", provider="codex", goal_objective="Wait precisely",
     goal_id="waiting-goal-id", started_at=started_at,
   )
-  ordinary_run = models.ChatRun(
+  ordinary_run = make_goal_run(db,
     id="later-ordinary-run", root_run_id="later-ordinary-run",
     chat_id=chat.id, status="running", provider="codex",
     started_at=started_at + timedelta(seconds=1),
@@ -430,7 +434,7 @@ def test_goal_wait_ownership_excludes_a_later_ordinary_turn(db, chat):
 def test_settled_continuation_card_keeps_goal_waiting_for_owner(db, chat):
   from app.goal_plans import presented_goal
 
-  run = models.ChatRun(
+  run = make_goal_run(db,
     id="settled-card-run", root_run_id="settled-card-run", chat_id=chat.id,
     status="completed", provider="codex", goal_objective="Await approval",
     goal_id="settled-card-goal", started_at=datetime.now(UTC),
@@ -455,7 +459,7 @@ def test_goal_wait_ownership_includes_only_its_waking_helpers(
 ):
   from app.goal_plans import presented_goal
 
-  goal_run = models.ChatRun(
+  goal_run = make_goal_run(db,
     id="helper-goal-run", root_run_id="helper-goal-run", chat_id=chat.id,
     status="completed", provider="codex", goal_objective="Wait on helper",
     goal_id="helper-goal-id", started_at=datetime.now(UTC),
@@ -468,8 +472,9 @@ def test_goal_wait_ownership_includes_only_its_waking_helpers(
     lambda _db, _chat_id: {"different-goal"},
   )
   unrelated = presented_goal(db, chat.id)
-  assert unrelated["status"] == "completed"
-  assert unrelated["resumable"] is False
+  assert unrelated["status"] == "paused"
+  assert "wait_kind" not in unrelated
+  assert unrelated["resumable"] is True
   assert "wait_kind" not in unrelated
 
   monkeypatch.setattr(
@@ -512,7 +517,7 @@ def test_goal_promotion_rejects_delegation_and_app_scope_tokens(
   chat_id = client.post(
     "/api/chats", json={"title": "Scoped"}, headers=owner_auth,
   ).json()["id"]
-  db.add(models.ChatRun(
+  db.add(make_goal_run(db,
     id="scoped-run", root_run_id="scoped-run", chat_id=chat_id,
     status="running", provider="codex",
   ))
@@ -602,11 +607,11 @@ def test_delegated_execution_bearer_cannot_mutate_or_clear_any_goal(
     scope="read", cwd="/data/platform",
     prompt_sha256=hashlib.sha256(b"check every goal route").hexdigest(),
   ))
-  db.add(models.ChatRun(
+  db.add(make_goal_run(db,
     id="goal-mutation-run", root_run_id="goal-mutation-run",
     chat_id=child_id, status="running", provider="codex",
   ))
-  db.add(models.ChatRun(
+  db.add(make_goal_run(db,
     id="parent-goal-run", root_run_id="parent-goal-run",
     chat_id=parent_id, status="running", provider="claude",
     goal_objective="Owner Goal", goal_id="owner-goal-id",
@@ -652,7 +657,7 @@ def test_delegated_execution_bearer_cannot_mutate_or_clear_any_goal(
   parent_goal = db.get(models.ChatRun, "parent-goal-run")
   assert parent_goal.status == "running"
   assert parent_goal.goal_id == "owner-goal-id"
-  assert parent_goal.goal_plan_json["revision"] == 4
+  assert db.get(models.ChatGoal, "owner-goal-id").plan_json["revision"] == 4
 
 
 def test_promote_run_to_goal_rejects_a_terminal_run(client, owner_token, db):
@@ -662,7 +667,7 @@ def test_promote_run_to_goal_rejects_a_terminal_run(client, owner_token, db):
   chat_id = client.post(
     "/api/chats", json={"title": "Terminal"}, headers=owner_auth,
   ).json()["id"]
-  db.add(models.ChatRun(
+  db.add(make_goal_run(db,
     id="done-run", root_run_id="done-run", chat_id=chat_id,
     status="completed", provider="codex",
   ))
@@ -687,12 +692,12 @@ def test_promote_run_to_goal_rejects_a_superseded_run(client, owner_token, db):
   ).json()["id"]
   now = datetime.now(UTC).replace(tzinfo=None)
   db.add_all([
-    models.ChatRun(
+    make_goal_run(db,
       id="prior-run", root_run_id="prior-run", chat_id=chat_id,
       status="running", provider="codex",
       started_at=now - timedelta(minutes=1),
     ),
-    models.ChatRun(
+    make_goal_run(db,
       id="newer-run", root_run_id="newer-run", chat_id=chat_id,
       status="running", provider="codex", started_at=now,
     ),
@@ -718,7 +723,7 @@ def test_promote_run_to_goal_rejects_a_missing_logical_root(
   chat_id = client.post(
     "/api/chats", json={"title": "Rootless"}, headers=owner_auth,
   ).json()["id"]
-  db.add(models.ChatRun(
+  db.add(make_goal_run(db,
     id="orphan-run", root_run_id="absent-root", chat_id=chat_id,
     status="running", provider="codex",
   ))
@@ -734,7 +739,7 @@ def test_promote_run_to_goal_rejects_a_missing_logical_root(
   assert result.reason == "logical_root_missing"
 
 
-def test_promotion_of_a_continuation_stamps_its_logical_root(
+def test_promotion_creates_intent_without_rewriting_prior_attempts(
   client, owner_token, db,
 ):
   owner_auth = {"Authorization": f"Bearer {owner_token}"}
@@ -742,11 +747,11 @@ def test_promotion_of_a_continuation_stamps_its_logical_root(
     "/api/chats", json={"title": "Continued"}, headers=owner_auth,
   ).json()["id"]
   db.add_all([
-    models.ChatRun(
+    make_goal_run(db,
       id="logical-root", root_run_id="logical-root", chat_id=chat_id,
       status="interrupted", provider="claude",
     ),
-    models.ChatRun(
+    make_goal_run(db,
       id="physical-resume", root_run_id="logical-root", chat_id=chat_id,
       status="running", provider="claude",
     ),
@@ -767,9 +772,10 @@ def test_promotion_of_a_continuation_stamps_its_logical_root(
     for row in db.query(models.ChatRun).filter(models.ChatRun.chat_id == chat_id)
   }
   assert roots == {
-    "logical-root": "Finish the resumed migration",
+    "logical-root": None,
     "physical-resume": "Finish the resumed migration",
   }
+  assert db.get(models.ChatGoal, "physical-resume").objective == "Finish the resumed migration"
 
 
 def test_goal_promotion_commit_failure_is_loud_and_atomic(
@@ -781,7 +787,7 @@ def test_goal_promotion_commit_failure_is_loud_and_atomic(
   chat_id = client.post(
     "/api/chats", json={"title": "Atomic failure"}, headers=owner_auth,
   ).json()["id"]
-  db.add(models.ChatRun(
+  db.add(make_goal_run(db,
     id="failing-run", root_run_id="failing-run", chat_id=chat_id,
     status="running", provider="codex",
   ))
@@ -1132,7 +1138,7 @@ def test_plan_follows_stable_goal_identity_across_a_new_logical_run(
   db.query(models.ChatRun).filter(models.ChatRun.id == "goal-root").update({
     models.ChatRun.status: "interrupted",
   })
-  db.add(models.ChatRun(
+  db.add(make_goal_run(db,
     id="recovered-root", root_run_id="recovered-root", chat_id=chat_id,
     status="running", provider="codex", goal_objective="Ship the release",
     goal_id="goal-1",
@@ -1186,11 +1192,11 @@ def test_plan_projects_recursive_delegation_ownership_without_transcripts(
       parent_root_run_id="child-b-run", task_key="x", child_chat_id="child-x",
       **common,
     ),
-    models.ChatRun(
+    make_goal_run(db,
       id="child-b-run", root_run_id="child-b-run", chat_id="child-b",
       status="running", provider="codex",
     ),
-    models.ChatRun(
+    make_goal_run(db,
       id="child-x-run", root_run_id="child-x-run", chat_id="child-x",
       status="running", provider="codex",
     ),
@@ -1242,7 +1248,7 @@ def test_resumed_goal_projects_only_latest_delegation_attempt_per_task(
   }
   now = datetime.now(UTC).replace(tzinfo=None)
   db.add_all([
-    models.ChatRun(
+    make_goal_run(db,
       id="resumed-goal-run", root_run_id="resumed-goal-run", chat_id=chat_id,
       status="interrupted", provider="codex", goal_objective="Ship the release",
       goal_id="goal-1",
@@ -1259,11 +1265,11 @@ def test_resumed_goal_projects_only_latest_delegation_attempt_per_task(
       child_chat_id=new_child.id, created_at=now,
       **common,
     ),
-    models.ChatRun(
+    make_goal_run(db,
       id="old-attempt-run", root_run_id="old-attempt-run",
       chat_id=old_child.id, status="completed", provider="codex",
     ),
-    models.ChatRun(
+    make_goal_run(db,
       id="new-attempt-run", root_run_id="new-attempt-run",
       chat_id=new_child.id, status="running", provider="codex",
     ),

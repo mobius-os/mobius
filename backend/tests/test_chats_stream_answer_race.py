@@ -22,6 +22,8 @@ These tests pin five behaviours of that grace period:
      restarts from the durable question while a Stop racing Submit still wins.
 """
 
+from tests.goal_fixtures import goal_run as make_goal_run, persist_goal_fixture
+
 import asyncio
 import time
 from datetime import UTC, datetime
@@ -255,7 +257,7 @@ def test_answer_recovers_durable_question_without_live_pending(
     )
     db = SessionLocal()
     try:
-      db.add(models.ChatRun(
+      db.add(make_goal_run(db,
         id="rt-interrupted-goal",
         chat_id=chat.id,
         status="interrupted",
