@@ -522,6 +522,7 @@ export default function ChatInputBar({
   canRequestSteer = canSteer,
   canSubmitSteer = canRequestSteer,
   sendFailure = null,
+  notice = null,
   submissionBlocked = false,
   questionBlocked = false,
   pendingFiles,
@@ -926,6 +927,16 @@ export default function ChatInputBar({
           onCancel={restoreFocusAfterFilePicker}
           style={{ display: 'none' }}
         />
+      )}
+      {notice && (
+        <div
+          className="chat__offline-note"
+          role="status"
+          aria-live="polite"
+          aria-atomic="true"
+        >
+          {notice}
+        </div>
       )}
       {sendFailure && (
         <div

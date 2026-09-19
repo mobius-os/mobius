@@ -676,6 +676,20 @@ class ChatPatch(BaseModel):
     return value
 
 
+class ChatCompactRequest(BaseModel):
+  """Optional owner guidance for one manual chat compaction."""
+
+  instructions: str | None = Field(default=None, max_length=4000)
+
+  @field_validator("instructions")
+  @classmethod
+  def normalize_instructions(cls, value: str | None) -> str | None:
+    if value is None:
+      return None
+    normalized = value.strip()
+    return normalized or None
+
+
 class ChatProviderSwitch(BaseModel):
   """Atomic cross-provider switch prepared by the incoming provider."""
 

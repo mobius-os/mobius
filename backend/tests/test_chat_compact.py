@@ -151,6 +151,46 @@ def test_legacy_bodyless_compact_then_patch_remains_compatible(
   assert row.session_id is None
 
 
+def test_manual_compact_guidance_uses_current_mobius_model(
+  client, auth, db, monkeypatch,
+):
+  captured = {}
+
+  async def _stub(messages, **kwargs):
+    captured["messages"] = messages
+    captured.update(kwargs)
+    return "UI decisions retained; routine command output omitted."
+
+  monkeypatch.setattr(compaction, "summarize_chat", _stub)
+  chat_id = _make_chat_with_messages(client, auth, [
+    {"role": "user", "content": "Keep the interaction decisions."},
+    {"role": "assistant", "content": "The command stays in the composer."},
+  ])
+  row = db.query(models.Chat).filter(models.Chat.id == chat_id).one()
+  row.provider = "mobius"
+  row.agent_settings_json = {"model": "flow", "effort": "high"}
+  db.commit()
+  _write_summary(chat_id, "Existing detailed summary")
+
+  response = client.post(
+    f"/api/chats/{chat_id}/compact",
+    headers=auth,
+    json={"instructions": "Keep UI decisions; omit routine command output."},
+  )
+
+  assert response.status_code == 200, response.text
+  assert captured["provider_id"] == "mobius"
+  assert captured["model"] == "flow"
+  assert captured["effort"] == "high"
+  assert captured["source_summary"] == "Existing detailed summary"
+  assert captured["custom_instructions"] == (
+    "Keep UI decisions; omit routine command output."
+  )
+  assert response.json()["summary"] == (
+    "UI decisions retained; routine command output omitted."
+  )
+
+
 def test_switch_atomically_supersedes_park_and_stale_auto_resume(
   client, auth, db, monkeypatch,
 ):
@@ -729,6 +769,67 @@ async def test_synthesis_uses_summary_and_current_transcript(
 
 
 @pytest.mark.asyncio
+async def test_custom_guidance_shapes_every_progressive_synthesis_turn(
+  monkeypatch, tmp_path,
+):
+  prompts = []
+
+  class _Provider:
+    def check_auth(self, _data_dir):
+      return None
+
+    async def ensure_auth(self, _data_dir):
+      return None
+
+  async def _turn(prompt, **_kwargs):
+    prompts.append(prompt)
+    return f"briefing {len(prompts)}"
+
+  monkeypatch.setattr("app.providers.get_provider", lambda _pid: _Provider())
+  monkeypatch.setattr(compaction, "_run_provider_summarize_turn", _turn)
+  await compaction.summarize_chat(
+    [{"role": "user", "content": "x" * 90_000}],
+    data_dir=str(tmp_path),
+    provider_id="mobius",
+    custom_instructions="Prioritize unresolved design decisions.",
+  )
+
+  assert len(prompts) > 1
+  assert all(
+    "Prioritize unresolved design decisions." in prompt for prompt in prompts
+  )
+  assert all("not a factual source" in prompt for prompt in prompts)
+
+
+@pytest.mark.asyncio
+async def test_mobius_provider_uses_codex_runtime_for_compaction(monkeypatch):
+  captured = {}
+
+  monkeypatch.setattr(
+    "app.providers.provider_runtime_kind", lambda provider_id: "codex_sdk",
+  )
+
+  async def _codex(prompt, **kwargs):
+    captured["prompt"] = prompt
+    captured.update(kwargs)
+    return "mobius briefing"
+
+  monkeypatch.setattr(compaction, "_run_codex_summarize_turn", _codex)
+  result = await compaction._run_provider_summarize_turn(
+    "compact this",
+    data_dir="/tmp/data",
+    provider_id="mobius",
+    model="flow",
+    effort="high",
+  )
+
+  assert result == "mobius briefing"
+  assert captured["provider_id"] == "mobius"
+  assert captured["model"] == "flow"
+  assert captured["effort"] == "high"
+
+
+@pytest.mark.asyncio
 async def test_large_synthesis_progressively_reads_every_source_interval(
   monkeypatch, tmp_path,
 ):
@@ -932,6 +1033,9 @@ async def test_codex_synthesis_disables_tools_and_isolates_cwd(
   captured = {}
 
   class _Provider:
+    def codex_config_overrides(self):
+      return []
+
     def build_env(self, **_kwargs):
       return {}
 

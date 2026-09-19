@@ -676,6 +676,16 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(payload),
     }),
+    // In-place compaction: optional owner guidance shapes the fresh briefing;
+    // omitting it preserves the bodyless route used by older clients.
+    compact: (chatId, { instructions = '', ...options } = {}) => apiFetch(
+      `/chats/${encodeURIComponent(chatId)}/compact`,
+      {
+        ...options,
+        method: 'POST',
+        ...(instructions ? { body: JSON.stringify({ instructions }) } : {}),
+      },
+    ),
     runtime: (chatId, options = {}) => apiFetch(
       `/chats/${encodeURIComponent(chatId)}/runtime`,
       options,

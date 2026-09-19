@@ -2,8 +2,10 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
+  MOBIUS_CHAT_COMMANDS,
   SLASH_COMMANDS,
   applySlashCommand,
+  mobiusChatCommand,
   fuzzyScore,
   matchSlashCommands,
   resolveSlashMenuKey,
@@ -48,8 +50,8 @@ test('contiguous matches at the start outrank scattered ones', () => {
 
 test('an empty query offers every command regardless of provider', () => {
   assert.deepEqual(
-    matchSlashCommands('/').map((c) => c.name),
-    SLASH_COMMANDS.map((c) => c.name),
+    matchSlashCommands('/').map((c) => c.name).sort(),
+    SLASH_COMMANDS.map((c) => c.name).sort(),
   )
 })
 
@@ -67,7 +69,8 @@ test('goal is selectable on Codex, which exposes the same durable goal controls'
 })
 
 test('provider-specific commands fail closed while provider metadata loads', () => {
-  const [goal] = matchSlashCommands('/')
+  const [goal] = matchSlashCommands('/go')
+  assert.equal(goal.name, 'goal')
   assert.equal(slashCommandIsAvailable(goal, undefined), false)
   assert.equal(
     slashCommandUnavailableReason(goal, undefined),
@@ -76,7 +79,7 @@ test('provider-specific commands fail closed while provider metadata loads', () 
 })
 
 test('matching commands are visible only while the composer owns focus', () => {
-  const commands = matchSlashCommands('/')
+  const commands = matchSlashCommands('/go')
   assert.equal(visibleSlashCommands(commands, { focused: true }).length, 1)
   assert.deepEqual(visibleSlashCommands(commands, { focused: false }), [])
   assert.deepEqual(visibleSlashCommands(commands, {
@@ -117,4 +120,32 @@ test('accepting a command leaves the caret where its arguments start', () => {
   assert.equal(applySlashCommand({ name: 'goal' }), '/goal ')
   // And the completed text is out of slash mode, so the menu closes itself.
   assert.equal(slashQueryFor(applySlashCommand({ name: 'goal' })), null)
+})
+
+test('/compact is offered and recognised as a platform-handled command', () => {
+  const offered = matchSlashCommands('/comp')
+  assert.deepEqual(offered.map((command) => command.name), ['compact'])
+  assert.ok(slashCommandIsAvailable(offered[0], 'mobius'))
+  assert.ok(slashCommandIsAvailable(offered[0], 'codex'))
+
+  assert.deepEqual(mobiusChatCommand('/compact'), {
+    name: '/compact', instructions: '',
+  })
+  assert.deepEqual(mobiusChatCommand('  /compact  '), {
+    name: '/compact', instructions: '',
+  })
+  assert.deepEqual(mobiusChatCommand('/compact focus on the UI decisions'), {
+    name: '/compact', instructions: 'focus on the UI decisions',
+  })
+  assert.equal(mobiusChatCommand('/compacted'), null)
+  assert.equal(mobiusChatCommand('please /compact'), null)
+  assert.equal(mobiusChatCommand(''), null)
+  assert.deepEqual(MOBIUS_CHAT_COMMANDS, ['/compact'])
+})
+
+test('accepting /compact composes the exact command the dispatcher matches', () => {
+  const [compact] = matchSlashCommands('/compact')
+  assert.deepEqual(mobiusChatCommand(applySlashCommand(compact)), {
+    name: '/compact', instructions: '',
+  })
 })
