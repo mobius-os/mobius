@@ -31,6 +31,7 @@ export async function waitForChatShell(page, { timeout = 10000 } = {}) {
     () => !!(document.querySelector('[data-chat-surface="painted"] .chat__empty-wrap')
           || document.querySelector('[data-chat-surface="painted"] .chat__scroll')
           || document.querySelector('[data-chat-surface="painted"] .chat__form')),
+    undefined,
     { timeout },
   )
 }
@@ -61,6 +62,7 @@ export async function createChat(page, label = '', {
   } else if (waitFor === 'form') {
     await page.waitForFunction(
       () => !!document.querySelector('[data-chat-surface="painted"] .chat__form'),
+      undefined,
       { timeout },
     )
   }

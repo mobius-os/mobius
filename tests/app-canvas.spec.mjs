@@ -185,31 +185,33 @@ async function setupAppRoutes(page, appId, frameHTML) {
   })
   await setupShellBasics(page)
 
-  await page.route(/\/api\/chats(\/[^?]*)?(\?.*)?$/, route => {
+  await page.route(/\/api\/chats(?:\?.*)?$/, route => {
     if (route.request().method() !== 'GET') return route.fallback()
-    const pathname = new URL(route.request().url()).pathname
-    // The bare list stays empty ("empty is fine -- we land directly via
-    // /app/:id"), but that assumption predates Shell's bootstrap effect
-    // reaching app routes too: an empty list makes it auto-create a chat
-    // (setupShellBasics' POST /api/chats mock), and this same regex also
-    // matches THAT chat's own detail fetch. Answering a detail fetch with
-    // the list's '[]' produces "Couldn't load this chat" -- return a
-    // matching single-chat object for any sub-path instead.
-    if (pathname !== '/api/chats') {
-      return route.fulfill({
-        status: 200,
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          id: pathname.split('/').pop(), title: 'New chat', messages: [],
-          pending_messages: [], total: 0, offset: 0, running: false,
-          pending_question_id: null, runtime_revision: 0,
-        }),
-      })
-    }
     route.fulfill({
       status: 200,
       headers: { 'Content-Type': 'application/json' },
       body: '[]',
+    })
+  })
+  await page.route(/\/api\/chats\/[^/?]+\/activity(?:\?.*)?$/, route => {
+    if (route.request().method() !== 'GET') return route.fallback()
+    return route.fulfill({
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ events: [], next_before: null }),
+    })
+  })
+  await page.route(/\/api\/chats\/[^/?]+(?:\?.*)?$/, route => {
+    if (route.request().method() !== 'GET') return route.fallback()
+    const pathname = new URL(route.request().url()).pathname
+    return route.fulfill({
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        id: pathname.split('/').pop(), title: 'New chat', messages: [],
+        pending_messages: [], total: 0, offset: 0, running: false,
+        pending_question_id: null, runtime_revision: 0,
+      }),
     })
   })
   await page.route(/\/api\/apps\/$/, route => {
