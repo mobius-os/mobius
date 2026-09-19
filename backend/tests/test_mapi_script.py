@@ -6,6 +6,8 @@ import re
 import subprocess
 from pathlib import Path
 
+import pytest
+
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "mapi"
 
@@ -63,6 +65,7 @@ def test_mapi_resolves_api_paths_and_adds_json_for_data(tmp_path: Path):
 
   assert result.returncode == 0, result.stderr
   assert result.curl_arguments == [
+    b"-q",
     b"-sS",
     b"-H", b"Authorization: Bearer owner-token",
     b"-H", b"Content-Type: application/json",
@@ -97,6 +100,158 @@ def test_mapi_accepts_a_response_header_capture_path(tmp_path: Path):
     b"-o", b"/tmp/response.json",
     b"https://mobius.example/api/ready",
   ]
+
+
+def test_mapi_accepts_combined_flags_before_a_header_capture_path(tmp_path: Path):
+  result = _run_mapi(
+    tmp_path,
+    "-sD", "/tmp/response.headers", "-o", "/tmp/response.json", "/api/ready",
+  )
+
+  assert result.returncode == 0, result.stderr
+  assert result.curl_arguments[-5:] == [
+    b"-sD", b"/tmp/response.headers",
+    b"-o", b"/tmp/response.json",
+    b"https://mobius.example/api/ready",
+  ]
+
+
+def test_mapi_accepts_an_attached_value_in_combined_short_options(tmp_path: Path):
+  result = _run_mapi(
+    tmp_path,
+    "-sD/tmp/response.headers", "-o", "/tmp/response.json", "/api/ready",
+  )
+
+  assert result.returncode == 0, result.stderr
+  assert result.curl_arguments[-4:] == [
+    b"-sD/tmp/response.headers",
+    b"-o", b"/tmp/response.json",
+    b"https://mobius.example/api/ready",
+  ]
+
+
+def test_mapi_combined_data_flag_still_adds_json_content_type(tmp_path: Path):
+  result = _run_mapi(tmp_path, "-sd", '{"ok":true}', "/api/ready")
+
+  assert result.returncode == 0, result.stderr
+  assert b"Content-Type: application/json" in result.curl_arguments
+  assert result.curl_arguments[-3:] == [
+    b"-sd", b'{"ok":true}', b"https://mobius.example/api/ready",
+  ]
+
+
+def test_mapi_allows_url_text_as_a_data_value_without_treating_it_as_a_target(
+  tmp_path: Path,
+):
+  result = _run_mapi(tmp_path, "-sd", "https://example.net/value", "/api/ready")
+
+  assert result.returncode == 0, result.stderr
+  assert result.curl_arguments[-3:] == [
+    b"-sd", b"https://example.net/value", b"https://mobius.example/api/ready",
+  ]
+
+
+@pytest.mark.parametrize("option", ["--data-ascii", "--json"])
+def test_mapi_recognizes_other_curl_body_options(
+  tmp_path: Path,
+  option: str,
+):
+  result = _run_mapi(tmp_path, option, '{"ok":true}', "/api/ready")
+
+  assert result.returncode == 0, result.stderr
+  assert b"Content-Type: application/json" in result.curl_arguments
+  assert result.curl_arguments[-3:] == [
+    option.encode(), b'{"ok":true}', b"https://mobius.example/api/ready",
+  ]
+
+
+def test_mapi_combined_header_flag_preserves_explicit_content_type(tmp_path: Path):
+  result = _run_mapi(
+    tmp_path,
+    "-sH", "Content-Type: text/css", "-d", "body", "/api/ready",
+  )
+
+  assert result.returncode == 0, result.stderr
+  assert result.curl_arguments.count(b"Content-Type: text/css") == 1
+  assert b"Content-Type: application/json" not in result.curl_arguments
+
+
+def test_mapi_preserves_an_ordinary_custom_header(tmp_path: Path):
+  result = _run_mapi(
+    tmp_path,
+    "-H", "x-mobius-version: 1", "/api/ready",
+  )
+
+  assert result.returncode == 0, result.stderr
+  assert result.curl_arguments[-3:] == [
+    b"-H", b"x-mobius-version: 1", b"https://mobius.example/api/ready",
+  ]
+
+
+@pytest.mark.parametrize("option", ["--fail", "-sS"])
+def test_mapi_preserves_boolean_curl_options(tmp_path: Path, option: str):
+  result = _run_mapi(tmp_path, option, "/api/ready")
+
+  assert result.returncode == 0, result.stderr
+  assert result.curl_arguments[-2:] == [
+    option.encode(), b"https://mobius.example/api/ready",
+  ]
+
+
+def test_mapi_supports_safe_short_aliases_already_allowed_by_long_name(
+  tmp_path: Path,
+):
+  result = _run_mapi(
+    tmp_path,
+    "-sm", "3", "-sE", "/tmp/client.pem", "/api/ready",
+  )
+
+  assert result.returncode == 0, result.stderr
+  assert result.curl_arguments[-5:] == [
+    b"-sm", b"3", b"-sE", b"/tmp/client.pem",
+    b"https://mobius.example/api/ready",
+  ]
+
+
+@pytest.mark.parametrize(
+  "arguments",
+  [
+    ("-sK/tmp/curl.conf", "/api/ready"),
+    ("--config=/tmp/curl.conf", "/api/ready"),
+    ("-sL", "/api/ready"),
+    ("--location-trusted", "/api/ready"),
+    ("--connect-to=mobius.example:443:example.net:443", "/api/ready"),
+    ("--resolve=mobius.example:443:192.0.2.1", "/api/ready"),
+    ("--alt-svc=/tmp/alt-svc.cache", "/api/ready"),
+    ("-sxhttp://example.net:8080", "/api/ready"),
+    ("--unix-socket=/tmp/other.sock", "/api/ready"),
+    ("--request-target=/not-api", "/api/ready"),
+  ],
+)
+def test_mapi_rejects_options_that_can_change_the_authenticated_target(
+  tmp_path: Path,
+  arguments: tuple[str, ...],
+):
+  result = _run_mapi(tmp_path, *arguments)
+
+  assert result.returncode == 2
+  assert result.curl_arguments is None
+  assert "can change the authenticated request target" in result.stderr
+
+
+@pytest.mark.parametrize(
+  "header",
+  ["Host: example.net", ":authority: example.net", "@/tmp/headers"],
+)
+def test_mapi_rejects_uninspectable_or_host_replacing_headers(
+  tmp_path: Path,
+  header: str,
+):
+  result = _run_mapi(tmp_path, "-sH", header, "/api/ready")
+
+  assert result.returncode == 2
+  assert result.curl_arguments is None
+  assert "Host-replacing header" in result.stderr
 
 
 def test_mapi_streams_literal_json_stdin_without_shell_reencoding(tmp_path: Path):
@@ -138,6 +293,7 @@ def test_mapi_recognizes_joined_data_and_header_options(tmp_path: Path):
 
   assert result.returncode == 0, result.stderr
   assert result.curl_arguments == [
+    b"-q",
     b"-sS",
     b"-H", b"Authorization: Bearer owner-token",
     b"https://mobius.example/api/chats",
@@ -160,6 +316,27 @@ def test_mapi_rejects_curl_url_indirection(tmp_path: Path):
   assert result.returncode == 2
   assert result.curl_arguments is None
   assert "refusing to forward owner auth" in result.stderr
+
+
+@pytest.mark.parametrize(
+  "target",
+  [
+    "/api/../admin",
+    "/api/%2e%2e/admin",
+    "/api/%2f../admin",
+    "/api/%5c../admin",
+    "/api/\\../admin",
+  ],
+)
+def test_mapi_rejects_api_paths_that_escape_the_api_prefix(
+  tmp_path: Path,
+  target: str,
+):
+  result = _run_mapi(tmp_path, target)
+
+  assert result.returncode == 2
+  assert result.curl_arguments is None
+  assert "API target" in result.stderr or "within /api" in result.stderr
 
 
 def test_mapi_refuses_bare_hosts_even_after_a_valid_api_target(tmp_path: Path):
