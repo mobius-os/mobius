@@ -260,6 +260,10 @@ def test_controlled_skills_have_fix_forward_migrations():
     "cd4d6f03f6ba87d8b3d1799aa81c3ab5444900362e56edc3e48803fa1f1fee4b",
   }
   assert "recovery.md" not in module._UNMODIFIED_MIGRATIONS
+  assert "live-screen-control.md" not in module._UNMODIFIED_MIGRATIONS
+  assert module._RETIRED_UNMODIFIED_SKILLS["live-screen-control.md"] == {
+    "494da9e09b122b04bcc6bb5f1bbbddf2e71ba75b777af41f5e5aa1b598a621be",
+  }
   assert (
     "59af11e6f1313f1e0df4fc7905cf018786eb648116aaf7e8bcafea7aa7a4c9fe"
     in module._RETIRED_UNMODIFIED_SKILLS["recovery.md"]

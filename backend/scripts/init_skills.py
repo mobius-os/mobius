@@ -244,6 +244,13 @@ _UNMODIFIED_MIGRATIONS = {
 # undo-and-restore.md. Current-seed hashes belong here by design: retirement,
 # unlike a fix-forward replacement, must also remove the latest untouched copy.
 _RETIRED_UNMODIFIED_SKILLS = {
+  # Live screen control remains an owner-consented platform capability, but it
+  # no longer needs a standalone procedural skill. Remove the untouched seed
+  # copy from discovery; a customized copy is archived by the generic retire
+  # path below instead of being discarded.
+  "live-screen-control.md": {
+    "494da9e09b122b04bcc6bb5f1bbbddf2e71ba75b777af41f5e5aa1b598a621be",
+  },
   # Agent Coaching subsumes the former on-demand manager ritual with a neutral
   # feedback-first method that Reflection can also use for self-improvement.
   # Preserve customized copies in retired-skills, but keep no parallel active
