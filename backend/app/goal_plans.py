@@ -906,12 +906,14 @@ def terminal_goal_summaries_by_message_index(
       and message.get("role") == "assistant"
       and message.get("id") == latest.id
     ), None)
-    if candidate_index is None and not any(
+    goal_run_ids = {row.id for row in rows}
+    has_goal_assistant_identity = any(
       isinstance(message, dict)
       and message.get("role") == "assistant"
-      and message.get("id")
+      and message.get("id") in goal_run_ids
       for message in messages
-    ):
+    )
+    if candidate_index is None and not has_goal_assistant_identity:
       candidate_index = next((
         index for index, ts in reversed(assistant_rows)
         if started_ms - 1000 <= ts <= ended_ms + 1000
