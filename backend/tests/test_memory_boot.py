@@ -166,6 +166,7 @@ def test_controlled_skills_have_fix_forward_migrations():
     "1730bcf614f0689f2c6459396c342f4090c1374eeb62450e21a81463fe0098bd",
   }
   assert module._UNMODIFIED_MIGRATIONS["platform-maintenance.md"] == {
+    "7cd74918a7d477f87addfdc51dd4559672a9a7face6da109a5af67dd47390efa",
     "bcc617354747c49ddad7fa1f419cf921fd7280909358096323cdbc427ad063c3",
     "b591d15e335c72c0acf394ca7ce4b0daa633e124a487df7a713847cafc13ab6d",
     "668bd365e2edf694c921606c9619fff7b8e58806a9eb48745058b22731c44995",
@@ -189,6 +190,7 @@ def test_controlled_skills_have_fix_forward_migrations():
   }
   assert "reflection.md" not in module._UNMODIFIED_MIGRATIONS
   assert module._UNMODIFIED_MIGRATIONS["cron.md"] == {
+    "2ec4c056ee8691283fbcdeaa1cdcaa1b106ed056600e38cac8b8a979de9dccb3",
     "289336d78ad4268110360f12faac5512d5a53b66aa31c2a6ddd1a44f538f2559",
     "ed100cb496b887a7951adc967e92cda1449c4f8594f7859fbd32762221d24914",
     "76ab03fd128157715b388b16146239217f57bba62c5248b8192a39639d0200b1",
@@ -197,6 +199,7 @@ def test_controlled_skills_have_fix_forward_migrations():
     "16055ea6ba6e4663636f87fde9868aa98d49ab39c5037ff90fa673d96c259cd9",
   }
   assert module._UNMODIFIED_MIGRATIONS["embedded-app-agent.md"] == {
+    "8f74917e0978ae4c1470bed2a9d14c52a8a050875251aec42458a35d16ff6ac2",
     "e58970bb7357030b9ac9c72e3b547d3bc93cdb75a1442dc5bb92db6174beebad",
   }
   # The slug-keyed app lookup that silently found nothing whenever the install
@@ -221,6 +224,7 @@ def test_controlled_skills_have_fix_forward_migrations():
     "db0c1138ffd0890936ccdeba6ced4ccde867ba3044eeef0a5c87cdf2f279eaaa",
   }
   assert module._UNMODIFIED_MIGRATIONS["building-apps.md"] == {
+    "40f42d055ccdb58a21ce1404da9609f5fbb7135a460b768bb8aa7cdc49ad10b1",
     "4126b40d209c422184e0135f611bb9f4197ea280fa27e63cd71c806f8b5ebd79",
     "91b655952d55b37fda0be82e3914c3b09e67ca7c5f5a575d315fb2ca75ef08f1",
     "563dcd7bfa1ff7cbad074d98462eb9755a010a15bf340c7f594fc7f6825a6a86",
@@ -235,6 +239,9 @@ def test_controlled_skills_have_fix_forward_migrations():
     "02fda2ea04f3c0ce808ef0db4b1fe4e893924bd019a5bf102a46749ef9142510",
     "68c84158a9255ab53686968ed4ec8f594c460483bec0e90dcfa472682c1d9b70",
     "c8d1dada4ba2a4ad29da159edf654cf99175a372569f753100398a8a307bc7d6",
+  }
+  assert module._UNMODIFIED_MIGRATIONS["undo-and-restore.md"] == {
+    "84bcbf77edba170f2023824aac46e89e737a873b785c3128943ee8600ca66feb",
   }
   assert module._UNMODIFIED_MIGRATIONS["resolving-app-git.md"] == {
     "6d462f1711891a182c26e212a1ec8fc922eeb02faee45e70ab9b2becfba24f5a",

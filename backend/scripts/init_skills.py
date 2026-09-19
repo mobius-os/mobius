@@ -67,6 +67,9 @@ _UNMODIFIED_MIGRATIONS = {
     "1730bcf614f0689f2c6459396c342f4090c1374eeb62450e21a81463fe0098bd",
   },
   "platform-maintenance.md": {
+    # Untouched release copy before agent-side API examples standardized on
+    # mapi. Owner-edited copies still differ and remain protected.
+    "7cd74918a7d477f87addfdc51dd4559672a9a7face6da109a5af67dd47390efa",
     # Baked copies before the container-boundary guidance. Both hashes are
     # released, untouched generations; owner-edited copies remain protected.
     "bcc617354747c49ddad7fa1f419cf921fd7280909358096323cdbc427ad063c3",
@@ -118,6 +121,9 @@ _UNMODIFIED_MIGRATIONS = {
     "ea58419a5a654c3b6e547426867434c8c25830a5ca3487045728c816352712f9",
   },
   "cron.md": {
+    # Untouched release copy before the agent/app credential boundary named
+    # mapi as agent-only and kept APP_TOKEN jobs on curl.
+    "2ec4c056ee8691283fbcdeaa1cdcaa1b106ed056600e38cac8b8a979de9dccb3",
     "289336d78ad4268110360f12faac5512d5a53b66aa31c2a6ddd1a44f538f2559",
     "ed100cb496b887a7951adc967e92cda1449c4f8594f7859fbd32762221d24914",
     # Every remaining baked generation that still shows the owner service token
@@ -137,6 +143,8 @@ _UNMODIFIED_MIGRATIONS = {
     "16055ea6ba6e4663636f87fde9868aa98d49ab39c5037ff90fa673d96c259cd9",
   },
   "embedded-app-agent.md": {
+    # Untouched release copy before owner-context job triggers used mapi.
+    "8f74917e0978ae4c1470bed2a9d14c52a8a050875251aec42458a35d16ff6ac2",
     # Pre-#612 baked copy: clarify that an accepted overlapping run may skip.
     "e58970bb7357030b9ac9c72e3b547d3bc93cdb75a1442dc5bb92db6174beebad",
   },
@@ -179,6 +187,8 @@ _UNMODIFIED_MIGRATIONS = {
     "db0c1138ffd0890936ccdeba6ced4ccde867ba3044eeef0a5c87cdf2f279eaaa",
   },
   "building-apps.md": {
+    # Untouched release copy before owner-context API examples used mapi.
+    "40f42d055ccdb58a21ce1404da9609f5fbb7135a460b768bb8aa7cdc49ad10b1",
     "4126b40d209c422184e0135f611bb9f4197ea280fa27e63cd71c806f8b5ebd79",
     "91b655952d55b37fda0be82e3914c3b09e67ca7c5f5a575d315fb2ca75ef08f1",
     "563dcd7bfa1ff7cbad074d98462eb9755a010a15bf340c7f594fc7f6825a6a86",
@@ -203,6 +213,10 @@ _UNMODIFIED_MIGRATIONS = {
     # Owner-curated pre-preview-helper copy: valid local prose, but stale
     # capture and apply receipts now bypass readiness and relist app state.
     "c8d1dada4ba2a4ad29da159edf654cf99175a372569f753100398a8a307bc7d6",
+  },
+  "undo-and-restore.md": {
+    # Untouched release copy before recovery examples used mapi.
+    "84bcbf77edba170f2023824aac46e89e737a873b785c3128943ee8600ca66feb",
   },
   "resolving-app-git.md": {
     # v17 baked copy: resolution is an explicit installer replay.

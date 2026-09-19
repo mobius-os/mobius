@@ -64,7 +64,7 @@ Every chat maintains three summaries of itself, each for a different context:
 Session start includes the name, `chats/<id>/index.md` location, and `Digest` from roughly the ten most-recently-touched chats. One shared instruction explains how to read a listed location when more detail is needed; that instruction is not repeated inside every chat entry. No unrelated notes or app data are included. Escalate deliberately when needed:
 
 - **the complete chat summary** — `Read /data/shared/memory/chats/<id>/index.md`;
-- **the transcript** — `curl -s "$API_BASE_URL/api/chats/<id>?limit=500" -H "Authorization: Bearer $AGENT_TOKEN"`.
+- **the transcript** — `mapi /api/chats/<id>?limit=500`.
 
 The platform publishes these summaries after each settled turn and synchronizes
 the generated name without overriding a manual rename. Do **not** create or edit
@@ -304,6 +304,40 @@ Partner-facing messages describe what the app does and how it feels, not how it'
 - `$SCRIPTS_DIR` — helper scripts directory
 - `$VIEWPORT_WIDTH` / `$VIEWPORT_HEIGHT` — the partner's actual app viewport (set when the shell sends it; required for screenshots)
 - **System packages and root work**: full in-container root is available by default, but first run `sudo -n true` and use `sudo` deliberately for system-owned locations. Do not use it for ordinary writes under `/data`, which should remain partner-owned. Install needed apt packages, Python packages into the active interpreter, and Node packages into the active runtime dependency tree when safe; use `sudo` only when that target is root-owned. New processes can use the live install immediately, and it survives a server restart. If shipped behavior depends on it, also declare and lock it so a future container replacement restores it. Rebuild the container now only when the dependency cannot activate live or the partner explicitly asks to validate the image. If `sudo -n true` fails, do not try to bypass it; the deployment operator has disabled root and must recreate the container to re-enable it.
+
+### Calling this instance's backend — use `mapi`
+
+`mapi` is the standard way for an agent to call this instance's backend. It is
+`curl` with `$API_BASE_URL` and the owner `Authorization: Bearer $AGENT_TOKEN`
+already filled in, and it only accepts `/api/...` targets so owner auth can
+never be forwarded to an external URL. `mapi /api/apps/` is exactly:
+
+```bash
+curl -s "$API_BASE_URL/api/apps/" -H "Authorization: Bearer $AGENT_TOKEN"
+```
+
+Everything else passes straight through to curl, so curl recipes translate by
+dropping the base URL and the auth header:
+
+```bash
+mapi /api/apps/ | python3 -m json.tool
+mapi -X PATCH /api/apps/<app-id> -H 'Content-Type: application/json' -d '{...}'
+mapi -X PUT /api/storage/shared/theme.css \
+  -H 'Content-Type: text/css' --data-binary @/data/shared/theme.css
+```
+
+- `mapi` reflects the AGENT's owner token. A background app job only has
+  `$APP_TOKEN`, so app-job scripts keep plain
+  `curl -H "Authorization: Bearer $APP_TOKEN" ...`.
+- A successful write often returns **204 No Content**: `mapi` then prints
+  nothing. That silence is success, not failure — verify with a follow-up
+  `GET`, or show the status with
+  `mapi -o /dev/null -w '%{http_code}' -X PUT /api/... -d '...'`.
+- Use the exact documented path **including its trailing slash** (for example
+  `/api/apps/`). Möbius routes do not redirect slash-less variants: the
+  slash-less form is a plain 404, not a redirect curl could follow.
+- Raw `curl` remains correct for anything that is not this instance's `/api`.
+- Prefer `mapi` everywhere else, including new skills and examples.
 
 ### Chat rendering
 

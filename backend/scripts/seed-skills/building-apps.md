@@ -47,8 +47,7 @@ chat-history grant. After the partner explicitly approves the precise scope,
 accept that one live permission separately:
 
 ```bash
-curl -s -X PATCH "$API_BASE_URL/api/apps/<app-id>" \
-  -H "Authorization: Bearer $AGENT_TOKEN" \
+mapi -X PATCH /api/apps/<app-id> \
   -H "Content-Type: application/json" \
   -d '{"chat_log_access":"summary_with_deleted"}'
 ```
@@ -93,8 +92,7 @@ node /app/scripts/package-static-app.mjs --help
 Install it through the app installer (no public repo or GitHub push), not by hand-copying into `/data`:
 
 ```bash
-curl -s -X POST "$API_BASE_URL/api/apps/install" \
-  -H "Authorization: Bearer $AGENT_TOKEN" \
+mapi -X POST /api/apps/install \
   -H "Content-Type: application/json" \
   -d '{"manifest_url":"<url-to-your-mobius.json>"}'
 ```
@@ -335,9 +333,7 @@ const configured = (await fetch(`/api/apps/${appId}/secrets/provider-key`, {
 `DELETE` the same path to clear it. An app-token `GET` is deliberately forbidden: a later UI compromise must not recover a credential the user entered months earlier. An app that teaches the agent a workflow can ship a manifest-declared skill and a helper script. The helper runs inside the owner-scoped chat turn, fetches the value with `$AGENT_TOKEN`, calls the provider, saves output under `/data/chats/$CHAT_ID/media/`, and prints only the resulting media path—not the secret:
 
 ```bash
-KEY=$(curl -fsS \
-  -H "Authorization: Bearer $AGENT_TOKEN" \
-  "$API_BASE_URL/api/apps/<app-id>/secrets/provider-key")
+KEY=$(mapi /api/apps/<app-id>/secrets/provider-key)
 ```
 
 Keep that variable inside the helper process. Never echo it, pass it on a command line, or persist it in browser storage, React Query, a file, or a log.
