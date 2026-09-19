@@ -35,6 +35,22 @@ async function setupChat(page) {
   await page.route('**/api/chat/stop', route =>
     route.fulfill({ status: 200, body: '{}' })
   )
+  // connectivityStore.js's probeReadiness() fetches /api/ready and only
+  // marks delivery ready once the body reports ready:true (plus a boot_id).
+  // ChatView.doSend() queues instead of sending a fresh turn whenever
+  // deliveryDeferred (!getDeliveryReadySnapshot()) is still true, and that
+  // readiness probe is an async fetch racing the composer-idle-wait below --
+  // the composer can be enabled before the real /api/ready round trip
+  // settles, making send() land in the queue instead of starting the turn
+  // these tests expect. Same gap already fixed the same way in
+  // app-canvas.spec.mjs; mock it out so readiness is never in question.
+  await page.route(/\/api\/ready$/, route =>
+    route.fulfill({
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ready: true, boot_id: 'test-boot' }),
+    })
+  )
 
   await page.goto(BASE, { waitUntil: 'domcontentloaded' })
   await page.waitForFunction(
@@ -638,8 +654,15 @@ test.describe('Stream reconnection', () => {
     await setVisibility(page, 'visible')
 
     await page.waitForFunction(() => window.__streamFetchCount === 2)
+    // useDelayedConnectionNotice.js debounces the note by a fixed
+    // CONNECTION_NOTICE_DELAY_MS (2500ms) before it renders, so a 3000ms
+    // assertion timeout leaves only ~500ms of slack over that constant --
+    // not enough headroom for real scheduling/render latency and
+    // deterministically too tight under a loaded local Docker/WSL2 run.
+    // Give it the same order-of-magnitude margin other assertions in this
+    // file use for a UI-settle window.
     await expect(page.locator('[data-chat-surface="painted"] .connection-status--reattach')).toBeVisible({
-      timeout: 3000,
+      timeout: 6000,
     })
 
     await page.evaluate(() => window.__releaseSlowReattach())
