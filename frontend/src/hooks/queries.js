@@ -41,6 +41,7 @@ const modelRegistryKey = ['models', 'registry']
 const modelPrefsKey = ['owner', 'model-prefs']
 const walkthroughKey = ['owner', 'walkthrough']
 const versionKey = ['version']
+const platformStatusKey = ['platform', 'status']
 
 async function fetchTheme() {
   const res = await api.theme.get()
@@ -430,12 +431,38 @@ function useVersionQuery({ enabled = true } = {}) {
   })
 }
 
+async function fetchPlatformStatus() {
+  const res = await api.platform.status()
+  return jsonOrThrow(res, 'platform status fetch failed:')
+}
+
+function usePlatformStatusQuery({ enabled = true } = {}) {
+  return useQuery({
+    queryKey: platformStatusKey,
+    queryFn: fetchPlatformStatus,
+    enabled,
+    // Settings paints the persisted last-known release immediately. Its owner
+    // then refreshes on every activation so the cache never suppresses a live
+    // update check.
+    staleTime: 0,
+  })
+}
+
 export const versionQueries = {
   current: {
     key: versionKey,
     fetch: fetchVersion,
     useQuery: useVersionQuery,
     invalidate: (queryClient) => queryClient.invalidateQueries({ queryKey: versionKey }),
+  },
+}
+
+export const platformStatusQueries = {
+  current: {
+    key: platformStatusKey,
+    fetch: fetchPlatformStatus,
+    useQuery: usePlatformStatusQuery,
+    invalidate: (queryClient) => queryClient.invalidateQueries({ queryKey: platformStatusKey }),
   },
 }
 

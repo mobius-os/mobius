@@ -80,7 +80,7 @@ test('top-level domains persist by head segment', () => {
   assert.equal(shouldPersistQueryKey(['chat-messages', 'abc123']), true)
 })
 
-test('settings + provider/status queries persist by full key', () => {
+test('settings + owner status queries persist by full key', () => {
   assert.equal(shouldPersistQueryKey(['settings']), true)
   assert.equal(
     shouldPersistQueryKey(['auth', 'provider', 'claude-status']),
@@ -90,6 +90,7 @@ test('settings + provider/status queries persist by full key', () => {
     shouldPersistQueryKey(['auth', 'providers', 'status']),
     true,
   )
+  assert.equal(shouldPersistQueryKey(['platform', 'status']), true)
 })
 
 test('short-lived auth queries do NOT persist despite sharing the head', () => {
