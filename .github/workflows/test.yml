@@ -209,19 +209,31 @@ jobs:
 
   e2e:
     runs-on: ubuntu-latest
-    # Keep the browser suite available for manual dispatches and any future
-    # merge-group runs, but do not block ordinary pull requests while the merge
-    # queue is disabled. Backend, frontend-unit, and privacy remain required.
-    if: github.event_name != 'pull_request'
+    # Previously excluded from ordinary pull_request runs because the
+    # unsharded suite took too long to gate every PR. Now split 4-way (see
+    # `strategy` below), each shard's wall-clock is roughly a quarter of the
+    # old single-job run, so it is affordable to gate PRs directly instead of
+    # only catching regressions at merge-group/dispatch time, after a PR is
+    # already slated to land.
     # A cold hosted build can spend roughly 20 minutes populating the GHA cache
-    # before Playwright starts. Leave enough room for the complete browser suite
-    # and its diagnostic uploads instead of cancelling a healthy run mid-test.
+    # before Playwright starts. Leave enough room for one shard's quarter of the
+    # browser suite and its diagnostic uploads instead of cancelling a healthy
+    # run mid-test.
     timeout-minutes: 40
     # The backend and browser suites are independent and each takes roughly
     # seven minutes. Serializing them doubled every review cycle without adding
     # coverage. Keep the short privacy job fail-closed, then run both expensive
     # gates in parallel so a submission completes in one suite-length.
     needs: privacy
+    strategy:
+      # A shard's own regression must not be hidden by cancelling its siblings,
+      # and each shard runs an independent container — one hanging shard has no
+      # reason to take down the others' results.
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    env:
+      SHARD_TOTAL: 4
 
     steps:
       - uses: actions/checkout@v7
@@ -335,7 +347,8 @@ jobs:
           set +e
           # --kill-after sends SIGKILL 30s after the SIGINT if Playwright
           # ignores the interrupt, so the step can't hang past the cap.
-          timeout --signal=INT --kill-after=30s 12m npx playwright test
+          timeout --signal=INT --kill-after=30s 12m npx playwright test \
+            --shard=${{ matrix.shard }}/${{ env.SHARD_TOTAL }}
           echo "exit=$?" >> "$GITHUB_OUTPUT"
           exit 0
         env:
@@ -359,7 +372,7 @@ jobs:
         if: always() && steps.pw.outcome != 'skipped' && steps.pw.outputs.exit != '0'
         uses: actions/upload-artifact@v7
         with:
-          name: e2e-failure-history
+          name: e2e-failure-history-${{ matrix.shard }}
           path: |
             playwright-results.xml
             e2e-container.log
@@ -372,7 +385,7 @@ jobs:
         if: always() && steps.pw.outcome != 'skipped' && steps.pw.outputs.exit != '0'
         uses: actions/upload-artifact@v7
         with:
-          name: playwright-report
+          name: playwright-report-${{ matrix.shard }}
           path: playwright-report/
           retention-days: 7
           if-no-files-found: ignore
@@ -399,7 +412,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v7
         with:
-          name: playwright-test-results
+          name: playwright-test-results-${{ matrix.shard }}
           path: test-results/
           retention-days: 7
           if-no-files-found: warn
