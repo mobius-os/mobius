@@ -41,6 +41,7 @@ init_chat_summaries.py.
 """
 
 import hashlib
+import json
 import os
 import pwd
 import shutil
@@ -336,9 +337,31 @@ def _write_index() -> None:
 
 def _retire_legacy_skills() -> tuple[int, int]:
   """Remove baked legacy seeds and archive customized flat copies exactly."""
+  sidecar = SKILLS / ".app-skills.json"
+  app_owned: set[str] = set()
+  if sidecar.exists():
+    try:
+      records = json.loads(sidecar.read_text(encoding="utf-8"))
+      if not isinstance(records, dict) or any(
+        not isinstance(name, str) or not isinstance(record, dict)
+        for name, record in records.items()
+      ):
+        raise ValueError("expected an object of ownership records")
+      # The sidecar owns the basename even while a skill is inactive. Restore
+      # moves bytes back before it flips `active`, so filtering on discovery
+      # state would let boot retire an app-owned file after an interruption.
+      app_owned = set(records)
+    except (OSError, ValueError) as exc:
+      # Ownership ambiguity must preserve the live files. The app installer
+      # can repair its own sidecar on a later install/update.
+      print(f"init_skills: app skill ownership unreadable; retirement skipped ({exc})")
+      return 0, 0
+
   removed = 0
   archived = 0
   for name, baked_digests in _RETIRED_UNMODIFIED_SKILLS.items():
+    if name in app_owned:
+      continue
     path = SKILLS / name
     if not path.is_file():
       continue

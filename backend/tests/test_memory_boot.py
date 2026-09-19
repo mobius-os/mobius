@@ -3,11 +3,14 @@
 import ast
 import hashlib
 import importlib.util
+import json
 import os
 import re
 import subprocess
 import sys
 from pathlib import Path
+
+import pytest
 
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
@@ -367,6 +370,45 @@ def test_warm_boot_archives_customized_retired_skill_outside_discovery(
   assert not (skills / "recovery.md").exists()
   assert (archive / f"recovery-{digest}.md").read_bytes() == custom
   assert list(archive.glob("*.md")) == [archive / f"recovery-{digest}.md"]
+
+
+@pytest.mark.parametrize("active", [True, False])
+def test_warm_boot_leaves_app_owned_skill_outside_seed_retirement(
+  tmp_path, monkeypatch, active,
+):
+  module = _load("init_skills")
+  seed = tmp_path / "seed"
+  skills = tmp_path / "skills"
+  archive = tmp_path / "retired-skills"
+  seed.mkdir()
+  skills.mkdir()
+  app_skill = b"app-owned skill\n"
+  (skills / "retired.md").write_bytes(app_skill)
+  (skills / ".app-skills.json").write_text(
+    json.dumps({
+      "retired.md": {
+        "app_id": 42,
+        "slug": "skill-owner",
+        "sha256": hashlib.sha256(app_skill).hexdigest(),
+        "active": active,
+      },
+    }),
+    encoding="utf-8",
+  )
+  monkeypatch.setattr(module, "_SEED_CANDIDATES", [seed])
+  monkeypatch.setattr(module, "SKILLS", skills)
+  monkeypatch.setattr(module, "RETIRED_SKILLS", archive)
+  monkeypatch.setattr(module, "_chown_mobius", lambda _path: None)
+  monkeypatch.setattr(module, "_write_index", lambda: None)
+  monkeypatch.setattr(module, "_UNMODIFIED_MIGRATIONS", {})
+  monkeypatch.setattr(module, "_RETIRED_UNMODIFIED_SKILLS", {
+    "retired.md": {hashlib.sha256(app_skill).hexdigest()},
+  })
+
+  module.init()
+
+  assert (skills / "retired.md").read_bytes() == app_skill
+  assert not archive.exists()
 
 
 def test_seeded_cron_jobs_use_only_app_scoped_credentials():
