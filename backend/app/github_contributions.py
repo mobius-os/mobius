@@ -639,11 +639,11 @@ def _pending_equivalence_spec(record: dict) -> _PendingEquivalenceSpec | None:
   except (OSError, RuntimeError, subprocess.SubprocessError, ValueError):
     current_source = ""
     dirty = True
-  # Send must prove the source that is installed *now*. Its clean committed
-  # HEAD is the only source-of-truth candidate. Falling back to the captured
-  # preparation SHA when HEAD is unreadable would publish against stale source.
-  # Dirty working bytes are equally unprovable: the app serves those bytes, not
-  # merely HEAD, so force them through the normal commit + review path first.
+  # A local equivalence witness can describe only the clean source installed
+  # *now*. Falling back to the captured preparation SHA when HEAD is unreadable
+  # would make later update reconciliation trust stale source. Dirty working
+  # bytes are likewise ineligible for this optional witness. Ordinary
+  # publication still relies on its exact committed review candidate instead.
   candidates = (current_source,) if current_source and not dirty else ()
   return _PendingEquivalenceSpec(
     source_repo=source_repo,
@@ -734,6 +734,31 @@ def _assert_pending_equivalence_preflight(record: dict) -> str:
     "The durable source no longer proves that it contains this reviewed change.",
     code="source_provenance_mismatch",
   )
+
+
+def _publication_source_preflight(record: dict) -> str:
+  """Keep local equivalence optional for an ordinary reviewed publication.
+
+  Publication authority comes from the exact committed review candidate and
+  the owner's current approval, not from installing that candidate in the live
+  source tree. When the live source still proves equivalence, retain the mode
+  so Send can record the usual conflict-avoidance witness. A reviewed app
+  publication that will reconnect one installed app after merge is the narrow
+  exception: that handoff intentionally depends on the live app identity and
+  therefore keeps the strict source proof.
+  """
+  plan = record.get("plan") if isinstance(record.get("plan"), dict) else {}
+  handoff = (
+    plan.get("after_merge")
+    if isinstance(plan.get("after_merge"), dict)
+    else {}
+  )
+  try:
+    return _assert_pending_equivalence_preflight(record)
+  except ContributionSubmitError:
+    if handoff.get("action") == "connect_app":
+      raise
+    return "reviewed_candidate"
 
 
 def _assert_pending_equivalence_before_publication(record: dict) -> str:
@@ -3292,10 +3317,11 @@ def _submit_prepared_pr(
     ):
       # The caller's authoritative read is not a lease: the branch can be
       # reset between that read and this owning publication primitive. Before
-      # this function can repush after a post-mutation receipt, prove the
-      # currently installed source again while the caller still holds its
-      # source lock. A receipt alone never authorizes recreating public state.
-      _assert_pending_equivalence_preflight(record)
+      # this function can repush after a post-mutation receipt, re-evaluate the
+      # optional live-source witness while the caller still holds its source
+      # lock. The exact reviewed candidate and current owner receipt—not local
+      # installation—remain the authority for recreating public state.
+      _publication_source_preflight(record)
 
     try:
       merge_patch = _git_ops._assert_merges_with_upstream(repo, upstream_repo, branch)
@@ -4041,7 +4067,7 @@ def _preflight_prepared_stack(
       (
         source_preflight(record)
         if source_preflight is not None
-        else _assert_pending_equivalence_before_publication(record)
+        else _publication_source_preflight(record)
       )
       _git_ops._assert_head_attribution(
         repo,
@@ -4313,10 +4339,13 @@ def _retarget_pr_base(
   authority. This function deliberately attempts the mutation once.
   """
   base_branch = _git_ops._validate_branch(base_branch)
+  # `gh pr edit` queries unrelated organization/project metadata and can require
+  # read:org. This base-only REST update needs only the existing repo permission.
   try:
     proc = _git_ops._gh(
-      repo, "pr", "edit", str(number), "-R", upstream_repo,
-      "--base", base_branch, check=False,
+      repo, "api", "--method", "PATCH",
+      f"repos/{upstream_repo}/pulls/{number}",
+      "-f", f"base={base_branch}", check=False,
     )
   except (subprocess.TimeoutExpired, OSError) as exc:
     return "ambiguous", str(exc)

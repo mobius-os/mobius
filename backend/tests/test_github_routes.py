@@ -2253,6 +2253,11 @@ def _allow_synthetic_source_provenance(monkeypatch) -> None:
       "_assert_pending_equivalence_before_publication",
       lambda *_args, **_kwargs: None,
     )
+    monkeypatch.setattr(
+      module,
+      "_publication_source_preflight",
+      lambda *_args, **_kwargs: None,
+    )
   # Synthetic GitHub fixtures predate the authoritative branch-lease read and
   # intentionally model an absent unpublished topic branch.
   monkeypatch.setattr(
@@ -2752,6 +2757,7 @@ def _prepared_real_review(app_id, record_id):
       "diff_sha256": hashlib.sha256(diff_text.encode()).hexdigest(),
       "source_repo_path": str(source),
       "source_sha": source_sha,
+      "after_merge": {"action": "connect_app"},
     },
   }
   _write_contribution(app_id, record_id, record, diff_text)
@@ -2986,7 +2992,7 @@ def test_review_status_catches_local_drift_before_send(
   assert (repo / "index.jsx").read_text() == "export default 3\n"
 
 
-def test_review_status_requires_an_installed_source_for_standalone_review(
+def test_review_status_accepts_an_uninstalled_standalone_review(
   client, owner_token,
 ):
   _write_token(login="octocat", user_id=42)
@@ -2994,6 +3000,7 @@ def test_review_status_requires_an_installed_source_for_standalone_review(
   _repo, record, diff_text = _prepared_real_review(app_id, "review-no-source")
   record["plan"].pop("source_repo_path")
   record["plan"].pop("source_sha")
+  record["plan"].pop("after_merge")
   _write_contribution(app_id, record["id"], record, diff_text)
 
   response = client.get(
@@ -3002,8 +3009,8 @@ def test_review_status_requires_an_installed_source_for_standalone_review(
   )
 
   assert response.status_code == 200, response.text
-  assert response.json()["ready"] == 0
-  assert response.json()["records"][0]["code"] == "missing_source_provenance"
+  assert response.json()["ready"] == 1
+  assert response.json()["records"][0]["code"] == "ready"
 
 
 @pytest.mark.parametrize("field", ["base", "head", "quality"])
@@ -3074,30 +3081,35 @@ def test_reviewed_commit_resolution_requires_raw_oid_to_match_resolved_identity(
     )
 
 
-def test_submit_requires_source_provenance_without_a_prior_status_read(
-  client, owner_token, monkeypatch,
+def test_ordinary_publication_does_not_require_installed_source_provenance(
+  client, owner_token,
 ):
-  """A direct Send cannot bypass the installed-source ownership boundary."""
-  _write_token(login="octocat", user_id=42)
-  app_id, app_token = _app_token(client, owner_token, github_access=True)
-  _repo, record, diff_text = _prepared_real_review(app_id, "send-no-source")
+  app_id, _app_token_value = _app_token(
+    client, owner_token, github_access=True,
+  )
+  _repo, record, _diff_text = _prepared_real_review(app_id, "send-no-source")
   record["plan"].pop("source_repo_path")
   record["plan"].pop("source_sha")
-  _write_contribution(app_id, record["id"], record, diff_text)
-  monkeypatch.setattr(
-    github_routes,
-    "_submit_prepared_pr",
-    lambda *_args, **_kwargs: pytest.fail("missing provenance must never publish"),
+  record["plan"].pop("after_merge")
+  assert github_contributions._publication_source_preflight(record) == (
+    "reviewed_candidate"
   )
 
-  response = client.post(
-    f"/api/github/contributions/{app_id}/{record['id']}/submit",
-    headers={"Authorization": f"Bearer {app_token}"},
-    json={"publication_stage": "draft"},
-  )
 
-  assert response.status_code == 409, response.text
-  assert response.json()["detail"]["code"] == "missing_source_provenance"
+def test_connect_after_merge_keeps_strict_installed_source_provenance(
+  client, owner_token,
+):
+  app_id, _app_token_value = _app_token(
+    client, owner_token, github_access=True,
+  )
+  _repo, record, _diff_text = _prepared_real_review(
+    app_id, "connect-after-merge-no-source",
+  )
+  record["plan"].pop("source_repo_path")
+  record["plan"].pop("source_sha")
+  with pytest.raises(ContributionSubmitError) as caught:
+    github_contributions._publication_source_preflight(record)
+  assert caught.value.code == "missing_source_provenance"
 
 
 def test_submit_rechecks_current_source_after_ready_status(
@@ -3770,6 +3782,7 @@ def test_postmutation_receipt_rechecks_reverted_source_when_public_head_is_gone(
     "diff_sha256": "b" * 64,
     "title": "Reviewed",
     "body_draft": "Reviewed body.",
+    "after_merge": {"action": "connect_app"},
   }
   if shape == "stack":
     plan["stack"] = {
@@ -4531,7 +4544,8 @@ def test_submit_route_armed_receipt_does_not_bypass_reverted_source(
     "submitter": "contribute-button", "quality_review": _all_clear_review(head),
     "plan": {"action": "pr", "repo": "mobius-os/app-demo",
              "repo_path": str(repo), "branch": "fix/reverted",
-             "head_sha": head, "title": "Reverted", "body_draft": "Body"},
+             "head_sha": head, "title": "Reverted", "body_draft": "Body",
+             "after_merge": {"action": "connect_app"}},
   }
   record["personal_submit_input_sha256"] = (
     github_contributions._personal_publication_input_sha256(record)
@@ -4549,7 +4563,7 @@ def test_submit_route_armed_receipt_does_not_bypass_reverted_source(
   monkeypatch.setattr(github_routes, "_equivalence_source_repo", lambda _r: None)
   called = []
   monkeypatch.setattr(
-    github_routes, "_assert_pending_equivalence_before_publication",
+    github_contributions, "_assert_pending_equivalence_preflight",
     lambda _r: (_ for _ in ()).throw(
       ContributionSubmitError("installed source reverted", code="source_provenance_mismatch")
     ),
@@ -4817,10 +4831,10 @@ def test_rejected_push_journal_cannot_bypass_source_recheck_on_retry(
   assert calls == [record["id"]]
 
 
-def test_existing_pr_update_rechecks_current_source_before_push(
+def test_existing_pr_update_uses_exact_review_after_live_source_diverges(
   client, owner_token, monkeypatch,
 ):
-  """Update PR cannot bypass provenance after its source has reverted."""
+  """An exact reviewed PR update does not have to remain live-installed."""
   _write_token(login="octocat", user_id=42)
   app_id, app_token = _app_token(client, owner_token, github_access=True)
   _repo, record, diff_text = _prepared_real_review(app_id, "update-source-moved")
@@ -4831,6 +4845,7 @@ def test_existing_pr_update_rechecks_current_source_before_push(
     "submitted_at": "2026-08-30T12:00:00Z",
   })
   record["plan"]["action"] = "pr_update"
+  record["plan"].pop("after_merge")
   record["plan"]["title"] = record["title"]
   record["plan"]["body_draft"] = "Reviewed fix body."
   record["plan"]["pr_metadata"] = {
@@ -4850,11 +4865,17 @@ def test_existing_pr_update_rechecks_current_source_before_push(
       "body": record["plan"]["pr_metadata"]["old_body"],
     },
   )
-  monkeypatch.setattr(
-    github_routes,
-    "_submit_prepared_pr",
-    lambda *_args, **_kwargs: pytest.fail("reverted source must never update"),
-  )
+  submitted = []
+
+  def submit(candidate, _diff_path, **_kwargs):
+    submitted.append(candidate["plan"]["head_sha"])
+    return record["url"], 58, {
+      "url": record["url"],
+      "number": 58,
+      "last_submit_push_sha": candidate["plan"]["head_sha"],
+    }
+
+  monkeypatch.setattr(github_routes, "_submit_prepared_pr", submit)
 
   response = client.post(
     f"/api/github/contributions/{app_id}/{record['id']}/update-existing",
@@ -4862,8 +4883,8 @@ def test_existing_pr_update_rechecks_current_source_before_push(
     json={},
   )
 
-  assert response.status_code == 409, response.text
-  assert response.json()["detail"]["code"] == "source_provenance_mismatch"
+  assert response.status_code == 200, response.text
+  assert submitted == [record["plan"]["head_sha"]]
 
 
 def test_autopilot_update_rechecks_current_source_before_push(
@@ -4970,6 +4991,7 @@ def test_autopilot_update_reconciles_exact_ambiguous_push_after_source_moves(
     "head_repository": "octocat/app-demo",
   })
   record["plan"]["action"] = "pr_update"
+  record["plan"].pop("after_merge")
   record["plan"]["pr_metadata"] = {
     "old_title": record["plan"]["title"],
     "old_body": record["plan"]["body_draft"],
@@ -5080,7 +5102,7 @@ def test_autopilot_update_reconciles_exact_ambiguous_push_after_source_moves(
   assert attempts == [None, record["plan"]["head_sha"]]
 
 
-def test_review_status_rejects_an_ambiguous_conflict_projection(
+def test_review_status_keeps_live_source_conflicts_out_of_candidate_authority(
   client, owner_token,
 ):
   _write_token(login="octocat", user_id=42)
@@ -5173,8 +5195,8 @@ def test_review_status_rejects_an_ambiguous_conflict_projection(
     headers={"Authorization": f"Bearer {app_token}"},
   )
   assert response.status_code == 200, response.text
-  assert response.json()["needs_refresh"] == 1
-  assert response.json()["records"][0]["code"] == "source_provenance_mismatch"
+  assert response.json()["needs_refresh"] == 0
+  assert response.json()["records"][0]["code"] == "ready"
 
 
 def test_review_status_releases_db_before_git_inspection(
@@ -9348,6 +9370,7 @@ def test_postmutation_remote_reset_rechecks_source_inside_publication_owner(
     tmp_path, monkeypatch,
   )
   record["plan"]["action"] = "pr"
+  record["plan"]["after_merge"] = {"action": "connect_app"}
   record.update({
     "last_submit_stage": "pushed",
     "last_submit_push_sha": head,
@@ -15119,7 +15142,33 @@ def test_retarget_pr_base_attempts_one_mutation_only(tmp_path, monkeypatch):
   assert result == "ambiguous"
   assert "timed out" in error.lower()
   assert len(attempts) == 1
-  assert attempts[0][:5] == ("pr", "edit", "967", "-R", "mobius-os/app-demo")
+  assert attempts[0] == (
+    "api", "--method", "PATCH", "repos/mobius-os/app-demo/pulls/967",
+    "-f", "base=main",
+  )
+
+
+def test_retarget_pr_base_does_not_query_organization_metadata(tmp_path, monkeypatch):
+  """Repo-only GitHub access suffices; no broad `pr edit` metadata fetch."""
+  from app.github_contributions import _retarget_pr_base
+
+  calls = []
+
+  def repo_only_gh(_repo, *args, check=True):
+    calls.append(args)
+    if args != (
+      "api", "--method", "PATCH", "repos/mobius-os/app-demo/pulls/967",
+      "-f", "base=release/next",
+    ):
+      return _cp("", "GraphQL: login requires read:org", 1)
+    assert check is False
+    return _cp('{"base":{"ref":"release/next"}}')
+
+  monkeypatch.setattr("app.github_contribution_git._gh", repo_only_gh)
+  assert _retarget_pr_base(
+    tmp_path, "mobius-os/app-demo", 967, base_branch="release/next",
+  ) == ("accepted", "")
+  assert len(calls) == 1
 
 
 def test_retarget_pr_base_distinguishes_deterministic_rejection(
