@@ -66,6 +66,13 @@ async function mount(page, { rejectFirst = false, loseFirstAck = false } = {}) {
     recovery_run_id: resumed ? null : 'interrupted-a',
     active_assistant_message_id: resumed ? 'assistant-resumed-a' : null,
     updated_at: '2026-09-08T17:00:00Z',
+    // ChatView's runtimeSnapshot() (chatRuntimeState.js) requires this field
+    // to be a safe non-negative integer or the whole snapshot is treated as
+    // unparseable and throws CHAT_RUNTIME_OUT_OF_ORDER. The real backend
+    // always includes it (routes/chats.py _latest_run_snapshot defaults to
+    // 0 for a chat with no ChatRunUpdate row yet) -- this fixture predates
+    // that field and never got updated when it became required.
+    runtime_revision: 0,
   })
   // Block mutations globally, not only the expected Resume request. This also
   // keeps read receipts, preference writes, uploads, and accidental sends local.

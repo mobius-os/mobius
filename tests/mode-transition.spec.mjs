@@ -37,6 +37,7 @@ async function mockIdleChatRuntime(page) {
         active_goal_objective: null,
         pending_messages: [],
         pending_question_id: null,
+        runtime_revision: 0,
         updated_at: null,
       }),
     })
@@ -225,6 +226,7 @@ function createdEmptyChat(id, timestamp = '2026-01-01T00:02:00Z') {
     running: false,
     pending_messages: [],
     pending_question_id: null,
+    runtime_revision: 0,
     session_id: null,
     provider: 'codex',
     created_by_app_id: null,

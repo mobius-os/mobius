@@ -116,6 +116,7 @@ async function routeShell(page, {
         offset: 0,
         running: false,
         pending_question_id: null,
+        runtime_revision: 0,
         session_id: null,
         provider: 'claude',
         created_by_app_id: null,
@@ -163,6 +164,7 @@ async function routeShell(page, {
         id, title: 'New chat', messages: [],
         pending_messages: [], total: 0, offset: 0, running: false,
         pending_question_id: null, session_id: null, provider: 'claude',
+        runtime_revision: 0,
         effective_agent_settings: {}, has_assistant_turns: false,
       }),
     })

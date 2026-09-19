@@ -110,6 +110,7 @@ for (const scenario of SCENARIOS) {
           running: true,
           active_goal_objective: goalObjective,
           pending_question_id: pendingQuestionId,
+          runtime_revision: 0,
           pending_messages: [],
         }),
       })
@@ -124,6 +125,7 @@ for (const scenario of SCENARIOS) {
           active_goal_objective: goalObjective,
           pending_messages: [],
           pending_question_id: pendingQuestionId,
+          runtime_revision: 0,
         }),
       })
     })

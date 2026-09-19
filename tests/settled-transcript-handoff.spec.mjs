@@ -121,6 +121,7 @@ async function mountScenario(page) {
         active_goal_objective: null,
         pending_messages: [],
         pending_question_id: null,
+        runtime_revision: 0,
       }),
     })
   ))
@@ -138,6 +139,7 @@ async function mountScenario(page) {
         running,
         pending_messages: [],
         pending_question_id: null,
+        runtime_revision: 0,
         provider: 'codex',
       }),
     })

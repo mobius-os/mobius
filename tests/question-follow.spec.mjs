@@ -197,6 +197,7 @@ for (const scenario of [...questionFollowScenarios, coldQuestionScenario]) test(
       active_goal_objective: null,
       pending_messages: [],
       pending_question_id: pendingQuestionId,
+      runtime_revision: 0,
       updated_at: null,
     })
     await page.route(new RegExp(`/api/chats/${chat.id}/runtime(?:\\?.*)?$`), route => {
