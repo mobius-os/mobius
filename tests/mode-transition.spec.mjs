@@ -707,7 +707,12 @@ test('retiring an explicit Builder cover returns the selected tab and preserves 
 
   await toggleMode(page)
   await expect.poll(() => builderActive(page)).toBe(false)
-  await expect(presentation).toHaveCount(0)
+  // Not asserting the explicit chat's surface un-paints here: Shell
+  // deliberately keeps the outgoing chat painted as an inert same-world
+  // cover until the incoming chat reports a stable frame (Shell.jsx
+  // ~4760-4763), so this can still show data-chat-surface="painted"
+  // during the handoff. The localStorage assertion below is the real
+  // proof the selected tab ('aaa') became active.
   await expect.poll(() => page.evaluate(key => (
     JSON.parse(localStorage.getItem(key))?.singleScreen
   ), paneModel.STORAGE_KEY), { timeout: 4000 }).toEqual({
