@@ -48,7 +48,8 @@ async function mount(page, { reject = false, acknowledgement = 'response', resta
     const answered = restartStatus !== 'awaiting_owner' || (block.answers && !awaitingReplay)
     return { id: CHAT, title: 'Quiet answer fixture', provider: 'codex',
       messages: awaitingReplay ? unansweredMessages : messages,
-      total: messages.length, offset: 0, running: false, pending_messages: pendingMessages,
+      total: messages.length, offset: 0, runtime_revision: awaitingReplay ? 1 : 1 + answerWrites,
+      running: false, pending_messages: pendingMessages,
       agent_settings_json: { model: 'gpt-6-astra' }, effective: { model: 'gpt-6-astra' },
       pending_question_id: answered ? null : block.question_id, active_goal_objective: null,
       recovery_run_id: null, active_assistant_message_id: null, updated_at: '2026-09-09T02:00:00Z' }

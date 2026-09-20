@@ -248,7 +248,7 @@ async function setupOpenAppRoutesWithStaleInitialList(
     route.fulfill({
       status: 200,
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ...chat, messages: [] }),
+      body: JSON.stringify({ ...chat, runtime_revision: 0, messages: [] }),
     })
   })
   await page.route(/\/api\/chats\/[^/]+\/stream$/, route =>
@@ -814,6 +814,7 @@ test.describe('AppCanvas: iframe-mount contract', () => {
         body: JSON.stringify({
           id: 'crash-chat',
           title: 'New chat',
+          runtime_revision: 0,
           messages: [],
           has_messages: false,
           running: false,

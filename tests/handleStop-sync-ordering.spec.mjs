@@ -194,6 +194,7 @@ test.describe('handleStop sync-ordering (Ticket 034 R1)', () => {
           messages: [],
           offset: 0,
           provider: 'claude',
+          runtime_revision: 0,
           pending_messages: [
             { role: 'user', content: 'resurrected-queue-item', ts: 12345 },
           ],

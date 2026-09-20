@@ -103,6 +103,7 @@ async function mountScenario(page) {
 
   let messages = seedHistory()
   let running = false
+  let runtimeRevision = 0
   let sendCount = 0
 
   await installStreamMock(page, liveItems)
@@ -117,6 +118,7 @@ async function mountScenario(page) {
       status: 200,
       contentType: 'application/json',
       body: JSON.stringify({
+        runtime_revision: runtimeRevision,
         running,
         active_goal_objective: null,
         pending_messages: [],
@@ -135,6 +137,7 @@ async function mountScenario(page) {
         messages,
         total: messages.length,
         offset: 0,
+        runtime_revision: runtimeRevision,
         running,
         pending_messages: [],
         pending_question_id: null,
@@ -146,6 +149,7 @@ async function mountScenario(page) {
     const request = route.request().postDataJSON()
     sendCount += 1
     running = true
+    runtimeRevision += 1
     const message = {
       role: 'user',
       content: request.content,
@@ -158,6 +162,7 @@ async function mountScenario(page) {
       setTimeout(() => {
         messages = [...messages, settledAssistant]
         running = false
+        runtimeRevision += 1
       }, 320)
     }
     await new Promise(resolve => setTimeout(resolve, 100))

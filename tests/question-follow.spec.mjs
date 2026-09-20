@@ -151,6 +151,7 @@ for (const scenario of [...questionFollowScenarios, coldQuestionScenario]) test(
     const prefix = await installQuestionStream(page, questionBlock, chat.id, scenario)
 
     let turnStarted = false
+    let runtimeRevision = 0
     let acceptedMessage = null
     let messagePosts = 0
     let pendingQuestionId = null
@@ -161,6 +162,7 @@ for (const scenario of [...questionFollowScenarios, coldQuestionScenario]) test(
         messagePosts += 1
         acceptedMessage = { role: 'user', content: body.content, cid: body.cid, ts: 1700000600000 }
         turnStarted = true
+        runtimeRevision += 1
         pendingQuestionId = questionBlock.question_id
         return route.fulfill({
           status: 202,
@@ -168,6 +170,7 @@ for (const scenario of [...questionFollowScenarios, coldQuestionScenario]) test(
           body: JSON.stringify({ status: 'started' }),
         })
       }
+      runtimeRevision += 1
       pendingQuestionId = null
       questionBlock.answers = body.answers
       await page.evaluate(answers => window.__answerQuestionStream(answers), body.answers)
@@ -193,6 +196,7 @@ for (const scenario of [...questionFollowScenarios, coldQuestionScenario]) test(
       height: scenario.viewport.initialHeight,
     })
     const runtimeState = () => ({
+      runtime_revision: runtimeRevision,
       running: turnStarted,
       active_goal_objective: null,
       pending_messages: [],

@@ -114,6 +114,7 @@ async function routeShell(page, {
         pending_messages: [],
         total: 0,
         offset: 0,
+        runtime_revision: 0,
         running: false,
         pending_question_id: null,
         session_id: null,
@@ -161,7 +162,8 @@ async function routeShell(page, {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(detail || {
         id, title: 'New chat', messages: [],
-        pending_messages: [], total: 0, offset: 0, running: false,
+        pending_messages: [], total: 0, offset: 0, runtime_revision: 0,
+        running: false,
         pending_question_id: null, session_id: null, provider: 'claude',
         effective_agent_settings: {}, has_assistant_turns: false,
       }),

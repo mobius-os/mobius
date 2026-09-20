@@ -33,6 +33,7 @@ async function mockIdleChatRuntime(page) {
       status: 200,
       contentType: 'application/json',
       body: JSON.stringify({
+        runtime_revision: 0,
         running: false,
         active_goal_objective: null,
         pending_messages: [],
@@ -66,7 +67,7 @@ async function bootSeededWorkspace(page, viewport, ws) {
   await page.route('**/api/chat/stop', r => r.fulfill({ status: 200, body: '{}' }))
   await page.route(/\/api\/chats\/[^/?]+(\?.*)?$/, (r) => {
     if (r.request().method() !== 'GET') return r.fallback()
-    return r.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ id: 'x', title: 'Seeded', messages: [] }) })
+    return r.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ id: 'x', title: 'Seeded', runtime_revision: 0, messages: [] }) })
   })
   const blob = paneModel.serializeWorkspace(ws)
   await page.addInitScript(([key, raw]) => {
@@ -222,6 +223,7 @@ function createdEmptyChat(id, timestamp = '2026-01-01T00:02:00Z') {
     messages: [],
     total: 0,
     offset: 0,
+    runtime_revision: 0,
     running: false,
     pending_messages: [],
     pending_question_id: null,

@@ -107,6 +107,7 @@ for (const scenario of SCENARIOS) {
           // The build-phase rail is a live-run surface. Keep the fixture's
           // turn active; a durable question intentionally does not reattach
           // its stream, so its active goal owns the same progress rail.
+          runtime_revision: 1,
           running: true,
           active_goal_objective: goalObjective,
           pending_question_id: pendingQuestionId,
@@ -120,6 +121,7 @@ for (const scenario of SCENARIOS) {
         status: 200,
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
+          runtime_revision: 1,
           running: true,
           active_goal_objective: goalObjective,
           pending_messages: [],
@@ -266,6 +268,7 @@ test('jump-to-latest appears only away from the physical tail and resumes follow
         messages,
         total: messages.length,
         offset: 0,
+        runtime_revision: 0,
         running: false,
         pending_messages: [],
       }),

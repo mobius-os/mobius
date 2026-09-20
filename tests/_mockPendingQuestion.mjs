@@ -11,6 +11,7 @@ import { testChatAgentSettings } from './_chatTestPrerequisites.mjs'
 export async function mockPendingQuestionState(page, questionId) {
   let pendingQuestionId = null
   let turnStarted = false
+  let runtimeRevision = 0
 
   // Register this helper after the test's response mocks. Playwright invokes
   // the newest route first, so fallback preserves the existing POST response
@@ -21,6 +22,7 @@ export async function mockPendingQuestionState(page, questionId) {
       const body = request.postDataJSON()
       if (!body.answers) {
         turnStarted = true
+        runtimeRevision += 1
         pendingQuestionId = questionId
       }
     }
@@ -35,6 +37,7 @@ export async function mockPendingQuestionState(page, questionId) {
 
     const path = new URL(request.url()).pathname
     const runtime = {
+      runtime_revision: runtimeRevision,
       running: false,
       active_goal_objective: null,
       pending_messages: [],
@@ -69,6 +72,7 @@ export async function mockPendingQuestionState(page, questionId) {
 
   return {
     markAnswered() {
+      if (pendingQuestionId !== null) runtimeRevision += 1
       pendingQuestionId = null
     },
   }

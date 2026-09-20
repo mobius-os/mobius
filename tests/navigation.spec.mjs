@@ -34,6 +34,7 @@ function navChatDetail(id, assistantContent = 'Fixture response') {
     ],
     total: 2,
     offset: 0,
+    runtime_revision: 0,
     running: false,
     pending_messages: [],
   }
@@ -44,6 +45,7 @@ function emptyChatDetail() {
     messages: [],
     total: 0,
     offset: 0,
+    runtime_revision: 0,
     running: false,
     pending_messages: [],
     pending_question_id: null,
@@ -206,6 +208,7 @@ async function setup(
       status: 200,
       contentType: 'application/json',
       body: JSON.stringify({
+        runtime_revision: 0,
         running: false,
         active_goal_objective: null,
         pending_messages: [],
@@ -411,6 +414,7 @@ test.describe('Navigation basics', () => {
         ...emptyChatDetail(),
         messages: acceptedMessage ? [acceptedMessage] : [],
         total: acceptedMessage ? 1 : 0,
+        runtime_revision: runtimeRunning ? 1 : 0,
         running: runtimeRunning,
       }),
       chatDetailGate: { id: blank.id, wait },
@@ -424,6 +428,7 @@ test.describe('Navigation basics', () => {
         status: 200,
         contentType: 'application/json',
         body: JSON.stringify({
+          runtime_revision: runtimeRunning ? 1 : 0,
           running: runtimeRunning,
           active_goal_objective: null,
           pending_messages: [],

@@ -50,6 +50,7 @@ test('an idle runtime snapshot cannot retire an unacknowledged fresh send', asyn
       status: 200,
       contentType: 'application/json',
       body: JSON.stringify({
+        runtime_revision: 0,
         running: false,
         active_goal_objective: null,
         pending_messages: [],
@@ -69,6 +70,7 @@ test('an idle runtime snapshot cannot retire an unacknowledged fresh send', asyn
         messages: [],
         total: 0,
         offset: 0,
+        runtime_revision: 0,
         running: false,
         pending_messages: [],
         pending_question_id: null,

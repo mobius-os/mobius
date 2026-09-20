@@ -240,6 +240,16 @@ returning always preserves the exact visible anchor and never restores
 auto-scroll to a newer tail. New send and lifecycle paths must use the shared
 state machine rather than deriving intent from geometry alone.
 
+**Browser runtime fixtures.** Mocked chat-detail, `/runtime`, and
+`/pending_messages` responses must carry an explicit nonnegative integer
+`runtime_revision`. It represents the latest durable run lifecycle update, not
+HTTP request order or wall-clock time. Use one cursor across projections of the
+same snapshot, advance it at the scenario's modeled lifecycle transitions, and
+capture it before delaying a response that intentionally arrives stale. Static
+idle fixtures may use `0`; list rows and POST acknowledgements are not runtime
+snapshots. Prefer explicit scenario state over an automatic route normalizer,
+which would conceal the temporal ordering these tests exercise.
+
 **End-to-end (Playwright).** Comprehensive browser checks run in GitHub for pull
 requests. For broad or risky work, select **Draft** in Contribute and use
 **Send PR** (or **Update PR**). Contribute publishes the exact reviewed branch

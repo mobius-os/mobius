@@ -48,6 +48,7 @@ async function mount(page, { rejectFirst = false, loseFirstAck = false } = {}) {
     height: Number(process.env.MOBIUS_RECOVERY_HEIGHT || 911),
   })
   let resumed = false
+  let runtimeRevision = 1
   const requested = deferred()
   const accepted = deferred()
   const detailRequested = deferred()
@@ -61,7 +62,8 @@ async function mount(page, { rejectFirst = false, loseFirstAck = false } = {}) {
   const messages = [{ role: 'user', content: 'Original question A', cid: 'original-a', ts: 1788800000100 }, partial]
   const detail = () => ({
     id: CHAT, title: 'Recovery fixture', provider: 'codex', messages,
-    total: messages.length, offset: 0, running: resumed, pending_messages: [queued],
+    total: messages.length, offset: 0, runtime_revision: runtimeRevision,
+    running: resumed, pending_messages: [queued],
     pending_question_id: null, active_goal_objective: null,
     recovery_run_id: resumed ? null : 'interrupted-a',
     active_assistant_message_id: resumed ? 'assistant-resumed-a' : null,
@@ -82,6 +84,7 @@ async function mount(page, { rejectFirst = false, loseFirstAck = false } = {}) {
         message: messages.find(message => message.cid === attempts.at(-1).cid),
       } })
       resumed = true
+      runtimeRevision += 1
       const message = { role: 'user', kind: 'continuation', continuation_reason: 'manual',
         content: 'continue', cid: attempts.at(-1).cid, ts: 1788800000600 }
       messages.push(message)
@@ -152,6 +155,7 @@ async function mount(page, { rejectFirst = false, loseFirstAck = false } = {}) {
     parkWithDetail(text, { reject = false } = {}) {
       rejectDetail = reject
       resumed = false
+      runtimeRevision += 1
       holdDetail = true
       messages.push({ id: 'assistant-resumed-a', role: 'assistant', ts: 1788800000700,
         content: text, blocks: [{ type: 'text', content: text },

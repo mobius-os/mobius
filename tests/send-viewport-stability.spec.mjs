@@ -67,6 +67,7 @@ function deferred() {
 
 test('keyboard close never paints a sent row below its pin', async ({ page }) => {
   let running = false
+  let runtimeRevision = 0
   let sendCount = 0
   let serverMessages = []
   await page.setViewportSize({ width: 412, height: 915 })
@@ -75,7 +76,11 @@ test('keyboard close never paints a sent row below its pin', async ({ page }) =>
     const request = route.request().postDataJSON()
     sendCount += 1
     running = true
-    setTimeout(() => { running = false }, sendCount === 1 ? 120 : 2500)
+    runtimeRevision += 1
+    setTimeout(() => {
+      running = false
+      runtimeRevision += 1
+    }, sendCount === 1 ? 120 : 2500)
     const message = {
       role: 'user',
       content: request.content,
@@ -105,6 +110,7 @@ test('keyboard close never paints a sent row below its pin', async ({ page }) =>
       status: 200,
       contentType: 'application/json',
       body: JSON.stringify({
+        runtime_revision: runtimeRevision,
         running,
         active_goal_objective: null,
         pending_messages: [],
@@ -122,6 +128,7 @@ test('keyboard close never paints a sent row below its pin', async ({ page }) =>
         messages: serverMessages,
         total: serverMessages.length,
         offset: 0,
+        runtime_revision: runtimeRevision,
         running,
         pending_messages: [],
         pending_question_id: null,
@@ -266,6 +273,7 @@ test('an idle runtime snapshot cannot retire an unacknowledged fresh send', asyn
   const releaseAcknowledgement = deferred()
   let raceArmed = false
   let running = false
+  let runtimeRevision = 0
   let postSendDetailReads = 0
 
   await page.route(new RegExp(`/api/chats/${chat.id}/messages$`), async route => {
@@ -280,6 +288,7 @@ test('an idle runtime snapshot cannot retire an unacknowledged fresh send', asyn
       cid: request.cid,
     }
     running = true
+    runtimeRevision += 1
     await route.fulfill({
       status: 202,
       contentType: 'application/json',
@@ -289,6 +298,13 @@ test('an idle runtime snapshot cannot retire an unacknowledged fresh send', asyn
   await page.route(
     new RegExp(`/api/chats/${chat.id}/runtime(?:\\?.*)?$`),
     async route => {
+      const snapshot = {
+        runtime_revision: runtimeRevision,
+        running,
+        active_goal_objective: null,
+        pending_messages: [],
+        pending_question_id: null,
+      }
       if (raceArmed) {
         // Capture the exact bad ordering: the poll begins with the previous
         // idle snapshot, then returns only after the local POST has started
@@ -298,12 +314,7 @@ test('an idle runtime snapshot cannot retire an unacknowledged fresh send', asyn
       await route.fulfill({
         status: 200,
         contentType: 'application/json',
-        body: JSON.stringify({
-          running,
-          active_goal_objective: null,
-          pending_messages: [],
-          pending_question_id: null,
-        }),
+        body: JSON.stringify(snapshot),
       })
       if (raceArmed) runtimeRaceReturned.resolve()
     },
@@ -319,6 +330,7 @@ test('an idle runtime snapshot cannot retire an unacknowledged fresh send', asyn
         messages: history,
         total: history.length,
         offset: 0,
+        runtime_revision: runtimeRevision,
         running,
         pending_messages: [],
         pending_question_id: null,

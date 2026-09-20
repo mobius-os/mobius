@@ -91,7 +91,7 @@ async function setup(page, viewport = { width: 412, height: 915 }) {
     if (route.request().method() !== 'GET') return route.fallback()
     return route.fulfill({
       status: 200, contentType: 'application/json',
-      body: JSON.stringify({ messages: [], total: 0, offset: 0, running: false, pending_messages: [] }),
+      body: JSON.stringify({ messages: [], total: 0, offset: 0, runtime_revision: 0, running: false, pending_messages: [] }),
     })
   })
   await page.route(/\/api\/chats\/[0-9a-f-]+\/stream$/, route => route.fulfill({ status: 204, body: '' }))

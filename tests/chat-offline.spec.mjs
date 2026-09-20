@@ -40,7 +40,7 @@ test('offline Send survives reload and drains into the chat once after reconnect
   const attemptedBodies = []
   const acceptedBodies = []
 
-  const detail = () => ({ ...chat, messages: delivered ? [{
+  const detail = () => ({ ...chat, runtime_revision: delivered ? 1 : 0, messages: delivered ? [{
     role: 'user', content: delivered.content, cid: delivered.cid, ts: delivered.ts,
   }] : [], total: delivered ? 1 : 0, offset: 0 })
   await page.route('**/api/**', async route => {

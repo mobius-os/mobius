@@ -893,6 +893,7 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
           messages: durableMessages,
           total: durableMessages.length,
           offset: 0,
+          runtime_revision: durableRunning ? 1 : 0,
           running: durableRunning,
           pending_messages: durablePending,
         }),
