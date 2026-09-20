@@ -75,13 +75,11 @@ test('the shell is the one persistent connection owner while send failures stay 
   assert.match(shell, /showReconnectNotice \? 'Reconnecting…'/)
   assert.match(shell, /useDelayedConnectionNotice\([\s\S]*?!deliveryReady/)
   assert.match(connectionStatus, /useDelayedConnectionNotice\(transient\)/)
-  assert.match(shell, /\{connectionStatusLabel && \([\s\S]*?className="shell__connection-status"[\s\S]*?\{connectionStatusLabel\}/)
-  assert.doesNotMatch(shell, /shell__sr-only">\{connectionStatusLabel\}/,
-    'connection state must be readable without hover or assistive technology')
+  assert.match(shell, /\{connectionStatusLabel && \([\s\S]*?className="shell__connection-status"[\s\S]*?shell__sr-only">\{connectionStatusLabel\}/)
   assert.match(
     shellCss,
-    /\.shell__connection-status\s*\{[\s\S]*?flex:\s*0 1 auto;[\s\S]*?min-width:\s*0;[\s\S]*?max-width:\s*40vw;[\s\S]*?text-overflow:\s*ellipsis;/,
-    'the visible phone status must shrink instead of displacing the header',
+    /\.shell__connection-status\s*\{[\s\S]*?width:\s*28px;[\s\S]*?flex:\s*0 0 28px;[\s\S]*?\}[\s\S]*?\.shell__connection-status::before[\s\S]*?background:\s*var\(--accent/,
+    'connectivity uses the compact purple dot while retaining live text for assistive technology',
   )
   assert.doesNotMatch(chatView, /You're offline — chat needs a connection\./)
   assert.doesNotMatch(chatInputBar, /You're offline — chat needs a connection\./)

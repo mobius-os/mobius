@@ -4469,13 +4469,13 @@ export default function Shell({ onInitialVisualReady }) {
             <SettingsNavIcon aria-hidden="true" />
           </button>
         </nav>
-        {connectionStatusLabel && (
-          <span className="shell__connection-status" role="status" aria-live="polite">
-            {connectionStatusLabel}
-          </span>
-        )}
         <div className="shell__bar-actions">
           <ScreenControlButton chatId={activeChatId} onNotice={showToast} />
+          {connectionStatusLabel && (
+            <span className="shell__connection-status" role="status" aria-live="polite">
+              <span className="shell__sr-only">{connectionStatusLabel}</span>
+            </span>
+          )}
           <NotificationCenter
             ref={notificationCenterActionsRef}
             commands={shellCommands}

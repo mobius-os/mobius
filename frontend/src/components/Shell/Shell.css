@@ -597,37 +597,27 @@
    guidance. The old drawer banner stays retired. Sub-app installation
    lives in the standalone card surfaced from drawer ⋮ on a mini-app. */
 
-/* State is readable without color, animation, or hover; healthy state takes
-   no space. On desktop it stays visible even when the navigation rail folds. */
+/* One compact indicator covers reconnect/restart/offline state. Exact copy is
+   still announced to assistive technology without competing with the header. */
 .shell__connection-status {
   align-self: center;
-  flex: 0 1 auto;
-  min-width: 0;
-  max-width: 40vw;
-  margin-left: 12px;
-  color: var(--text);
-  background: var(--bg);
-  font-size: 12px;
-  line-height: 1.4;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  pointer-events: auto;
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  flex: 0 0 28px;
 }
-@media (min-width: 1024px) {
-  .shell__connection-status {
-    position: fixed;
-    top: 12px;
-    left: var(--desktop-rail-width);
-    max-width: none;
-    margin-left: 12px;
-    padding: 4px 8px;
-    border: 1px solid var(--border);
-    border-radius: 6px;
-  }
-  .shell--drawer-docked .shell__connection-status {
-    left: var(--desktop-sidebar-width);
-  }
+.shell__connection-status::before {
+  content: "";
+  width: 8px;
+  height: 8px;
+  background: var(--accent, #8b6cf7);
+  border-radius: 50%;
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent, #8b6cf7) 14%, transparent);
+  animation: shell-connection-pulse 1.4s ease-in-out infinite;
+}
+@keyframes shell-connection-pulse {
+  50% { opacity: 0.48; scale: 0.78; }
 }
 /* The ONE Settings wrapper is a solid surface in BOTH geometries: full-bleed as
    the takeover overlay (single mode / flag off) and paned as a builder tab. The
@@ -813,6 +803,7 @@
 
 @media (prefers-reduced-motion: reduce) {
   .shell__settings-loading-dot { animation: none; }
+  .shell__connection-status::before { animation: none; }
   /* The mark flip + tint switch INSTANTLY; the completion spring/snap is skipped
      (the JS still fires the haptics — motion is dropped, feedback is not). The
      static shared halo needs no special reduced-motion branch. The hold
