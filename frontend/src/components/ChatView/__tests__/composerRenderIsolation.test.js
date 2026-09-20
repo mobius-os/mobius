@@ -36,3 +36,14 @@ test('draft persistence has one state-boundary owner', () => {
     /useEffect\(\(\) => \{\s*persistComposerDraft\(chatId, input,/,
   )
 })
+
+test('failed compaction restores a literal draft through the persistence owner', () => {
+  assert.match(
+    chatView,
+    /setComposerInput\(compactFailureInput\(inputValueRef\.current, submittedInput\)\)/,
+  )
+  assert.doesNotMatch(
+    chatView,
+    /setComposerInput\(current => compactFailureInput/,
+  )
+})

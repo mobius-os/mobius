@@ -901,12 +901,15 @@ class ClearPending(_Command):
 
 @dataclass
 class PersistCompaction(_Command):
-  """Append a legacy pre-switch briefing without changing providers.
+  """Append a briefing and retire the provider session atomically.
 
   Older frontends perform a bodyless ``POST /compact`` followed by a provider
   ``PATCH``.  Keep that two-step protocol available during rolling upgrades,
   but tag the marker so only the immediately following, same-source provider
-  PATCH can use it to cross an existing assistant transcript.
+  PATCH can use it to cross an existing assistant transcript. Current manual
+  compaction uses the same command without the PATCH; clearing ``session_id``
+  makes the next turn start from this briefing instead of resuming the full
+  provider context.
   """
 
   chat_id: str = ""
@@ -4052,7 +4055,7 @@ class ChatWriterActor:
     }
 
   def _persist_compaction(self, db, cmd: PersistCompaction) -> dict:
-    """Conditionally append one marker for the legacy two-call protocol."""
+    """Append one marker and reset the resumable provider session."""
     from datetime import UTC, datetime
 
     from app.models import ChatRun
@@ -4078,6 +4081,7 @@ class ChatWriterActor:
     }
     messages.append(new_msg)
     chat.messages = messages
+    chat.session_id = None
     chat.updated_at = datetime.now(UTC)
     if not _commit_or_rollback(db):
       raise _PersistFailed("PersistCompaction did not persist")

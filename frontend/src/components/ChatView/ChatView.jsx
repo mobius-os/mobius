@@ -3933,7 +3933,7 @@ export default function ChatView({
       await api.chats.compact(chatId, { instructions })
       await fetchMessages({ force: true })
     } catch (err) {
-      setComposerInput(current => compactFailureInput(current, submittedInput))
+      setComposerInput(compactFailureInput(inputValueRef.current, submittedInput))
       setSendFailure(sendFailureMessage(err, { online: getOnlineSnapshot() }))
     } finally {
       compactingChatRef.current = false

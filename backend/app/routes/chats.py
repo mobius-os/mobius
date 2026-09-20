@@ -2700,11 +2700,12 @@ async def compact_chat(
   _: models.Owner = Depends(get_current_owner_for_lifecycle_control),
   db: Session = Depends(get_db),
 ):
-  """Keep the pre-PM219 bodyless compaction protocol rolling-upgrade safe.
+  """Compact the next turn while keeping the old two-call switch compatible.
 
-  Older clients compact first and then PATCH the provider.  The marker is
-  tagged with its source provider; ``patch_chat`` accepts it exactly once as
-  the handoff proof.  New clients use the atomic ``/provider-switch`` route.
+  Manual compaction stores a briefing and resets the current provider session
+  atomically. Older clients may then PATCH the provider; the marker remains
+  tagged so ``patch_chat`` accepts it exactly once as the handoff proof. New
+  provider switches use the atomic ``/provider-switch`` route.
   """
   from app.chat_queue import get_transition_lock
   from app.chat_writer import (
@@ -2737,19 +2738,21 @@ async def compact_chat(
     try:
       source_summary = load_cumulative_summary(data_dir, chat_id)
       instructions = body.instructions if body is not None else None
-      if source_summary is None or instructions:
-        settings_obj = chat.agent_settings_json or {}
-        summary = await summarize_chat(
-          messages,
-          data_dir=data_dir,
-          provider_id=source_provider,
-          source_summary=source_summary,
-          model=settings_obj.get("model"),
-          effort=settings_obj.get("effort"),
-          custom_instructions=instructions,
-        )
-      else:
-        summary = source_summary
+      # The published cumulative summary is best-effort and can lag the latest
+      # settled turn. Manual compaction retires the provider session, so always
+      # synthesize from the current transcript and use that summary only as an
+      # additional seed; copying it verbatim could drop the newest decisions
+      # from the fresh session that follows.
+      settings_obj = chat.agent_settings_json or {}
+      summary = await summarize_chat(
+        messages,
+        data_dir=data_dir,
+        provider_id=source_provider,
+        source_summary=source_summary,
+        model=settings_obj.get("model"),
+        effort=settings_obj.get("effort"),
+        custom_instructions=instructions,
+      )
     except CompactionError as exc:
       raise HTTPException(status_code=422, detail=str(exc))
     except Exception as exc:

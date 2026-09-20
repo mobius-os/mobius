@@ -119,7 +119,10 @@ def test_legacy_bodyless_compact_then_patch_remains_compatible(
   """A cached pre-PM219 frontend can finish its original two-call flow."""
   _connect_codex(monkeypatch)
 
-  async def _stub(_messages, **_kwargs):
+  captured = {}
+
+  async def _stub(_messages, **kwargs):
+    captured.update(kwargs)
     return "portable legacy handoff"
 
   monkeypatch.setattr(compaction, "summarize_chat", _stub)
@@ -127,6 +130,10 @@ def test_legacy_bodyless_compact_then_patch_remains_compatible(
     {"role": "user", "content": "keep this context"},
     {"role": "assistant", "content": "I will."},
   ])
+  row = db.query(models.Chat).filter(models.Chat.id == chat_id).one()
+  row.session_id = "claude-session"
+  db.commit()
+  _write_summary(chat_id, "Older published summary")
 
   compact = client.post(f"/api/chats/{chat_id}/compact", headers=auth)
   assert compact.status_code == 200, compact.text
@@ -134,6 +141,9 @@ def test_legacy_bodyless_compact_then_patch_remains_compatible(
   db.expire_all()
   row = db.query(models.Chat).filter(models.Chat.id == chat_id).one()
   assert row.provider == "claude"
+  assert row.session_id is None
+  assert chat_mod._latest_compaction_brief(row) == "portable legacy handoff"
+  assert captured["source_summary"] == "Older published summary"
 
   switched = client.patch(
     f"/api/chats/{chat_id}",
@@ -168,6 +178,7 @@ def test_manual_compact_guidance_uses_current_mobius_model(
   ])
   row = db.query(models.Chat).filter(models.Chat.id == chat_id).one()
   row.provider = "mobius"
+  row.session_id = "mobius-session"
   row.agent_settings_json = {"model": "flow", "effort": "high"}
   db.commit()
   _write_summary(chat_id, "Existing detailed summary")
@@ -189,6 +200,10 @@ def test_manual_compact_guidance_uses_current_mobius_model(
   assert response.json()["summary"] == (
     "UI decisions retained; routine command output omitted."
   )
+  db.expire_all()
+  row = db.query(models.Chat).filter(models.Chat.id == chat_id).one()
+  assert row.session_id is None
+  assert chat_mod._latest_compaction_brief(row) == response.json()["summary"]
 
 
 def test_switch_atomically_supersedes_park_and_stale_auto_resume(
