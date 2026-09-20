@@ -307,6 +307,10 @@ test('an app-origin reopen survives its in-flight close traversal', async () => 
 
   assert.equal(result.current.closeDrawer(), true)
   result.current.openDrawer()
+  assert.equal(result.current.drawerOpen, false, 'the close remains visually acknowledged')
+  assert.equal(engine.pendingTraversals, 1, 'reopening cannot issue a second close traversal')
+  assert.equal(engine.currentKind, 'drawer', 'the original sentinel is still owned until close commits')
+  assert.equal(queued.length, 0, 'the reopen is remembered without cancellable frame preparation')
   engine.settle()
   await new Promise(resolve => setTimeout(resolve, 0))
 
@@ -314,6 +318,11 @@ test('an app-origin reopen survives its in-flight close traversal', async () => 
   queued.shift()()
   assert.equal(result.current.drawerOpen, true)
   assert.equal(engine.currentKind, 'drawer')
+  assert.equal(engine.pendingTraversals, 0)
+  assert.equal(result.current.closeDrawer(), true)
+  engine.settle()
+  assert.equal(result.current.drawerOpen, false)
+  assert.notEqual(engine.currentKind, 'drawer', 'one close consumes the sole reopened sentinel')
 })
 
 test('Back cancels an app-origin drawer before its delayed commit', async () => {
