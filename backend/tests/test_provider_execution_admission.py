@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 import pytest
 
 from app import models
+from tests.goal_fixtures import persist_goal_fixture
 from app.chat_writer import (
   AcknowledgePeerContextDelivery,
   AdmitProviderExecution,
@@ -76,6 +77,7 @@ def test_goal_admission_captures_the_current_plan_revision(chat, db):
     }],
   }
   run.goal_plan_revision = 3
+  persist_goal_fixture(db, run)
   db.commit()
 
   get_writer().submit(AdmitProviderExecution(
