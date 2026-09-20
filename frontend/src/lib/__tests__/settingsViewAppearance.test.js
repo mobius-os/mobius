@@ -120,7 +120,7 @@ test('Möbius subscription is app-owned and follows Codex and Claude', () => {
   assert.match(view, /const mobiusAvailable = providerStatusQuery\.data\?\.mobius\?\.available === true/)
   assert.match(
     view,
-    /name="OpenAI Codex"[\s\S]*name="Claude Code"[\s\S]*\{mobiusAvailable && \([\s\S]*name="Möbius subscription"/,
+    /name="OpenAI Codex"[\s\S]*name="Claude Code"[\s\S]*\{mobiusAvailable && \([\s\S]*name="Möbius"/,
   )
   assert.match(view, /Sign in from Möbius · You to activate your trial\./)
   assert.match(view, /actionLabel="Open Möbius · You"/)

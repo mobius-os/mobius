@@ -220,7 +220,7 @@ def test_normalizers_report_unavailable_without_inventing_limits():
   }
   assert normalize_mobius_usage({"balance": {"spendable_units": 500}}) == {
     "state": "unavailable",
-    "plan_label": "Möbius subscription",
+    "plan_label": "Möbius",
     "windows": [],
     "credit_balance": None,
   }

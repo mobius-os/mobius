@@ -357,7 +357,7 @@ def normalize_mobius_usage(payload: Any) -> dict[str, Any]:
   mobius_plan_label = (
     raw_plan_label.strip()
     if isinstance(raw_plan_label, str) and raw_plan_label.strip()
-    else "Möbius subscription"
+    else "Möbius"
   )
 
   used_percent = _percent(
@@ -703,7 +703,7 @@ async def _provider_snapshot(provider_id: str, data_dir: str) -> dict[str, Any]:
   except Exception as exc:  # best-effort read; Settings must still open
     log.warning("%s plan usage unavailable: %s", provider_id, exc)
     if provider_id == "mobius":
-      plan = "Möbius subscription"
+      plan = "Möbius"
     else:
       subscription = (
         providers.claude_subscription_type(data_dir)
