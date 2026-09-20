@@ -1,31 +1,24 @@
-"""Grace-period retry for the AskUserQuestion answer-submit path.
+"""Ownership races for the AskUserQuestion answer-submit path.
 
-The frontend renders the question card the instant the `question`
-SSE event lands, but the bridge handler that inserts into
-`questions._pending` runs in a separate coroutine (the SDK callback
-for Claude, the `run_coroutine_threadsafe`-marshaled `park_question`
-for Codex). A user who taps an answer chip in the tens-of-ms window
-between "event published" and "registry populated" used to hit a
-410. The route now polls with a short grace period before deciding
-the question is stale.
+The shared bridge registers the in-process owner before the durable
+save-before-broadcast barrier can show a card. Answer submission therefore
+chooses immediately between that exact owner, restart recovery from the saved
+question block, and a stale-card rejection. No wall-clock polling participates
+in ownership.
 
-These tests pin five behaviours of that grace period:
+These tests pin four behaviours of that boundary:
 
   1. Happy path — pending registered before POST → 202 immediately.
-  2. Race path — pending registered AFTER POST starts but inside
-     the grace window → 202 after the registration lands.
-  3. Recovery path — no live pending, but a durable open question remains
+  2. Recovery path — no live pending, but a durable open question remains
      after restart → answer is recorded and a hidden continuation starts.
-  4. Stale path — no pending, none arrives, and no durable open question
-     exists → 410 after the grace window elapses.
-  5. Stopped path — once Stop has completed, a later deliberate Submit
+  3. Stale path — no pending and no durable open question exists → 410.
+  4. Stopped path — once Stop has completed, a later deliberate Submit
      restarts from the durable question while a Stop racing Submit still wins.
 """
 
 from tests.goal_fixtures import goal_run as make_goal_run, persist_goal_fixture
 
 import asyncio
-import time
 from datetime import UTC, datetime
 from uuid import uuid4
 
@@ -210,7 +203,7 @@ def test_answer_delivers_immediately_when_pending_registered(
     assert res.status_code == 202, res.text
     assert res.json()["status"] == "answer_delivered"
     assert res.json()["answer_turn"] == "same"
-    # One registry read proves the grace-poll loop was never entered. A
+    # One registry read proves the live owner is selected directly. A
     # wall-clock bound would conflate route behavior with host scheduling.
     assert pending_reads == [chat.id]
     # Future resolved with the submitted answers.
@@ -505,80 +498,20 @@ def test_answer_with_stale_question_id_returns_410_without_resolving_live(
   asyncio.run(go())
 
 
-def test_answer_delivers_after_late_registration_within_grace(
-  client, auth, chat,
+def test_answer_returns_410_when_no_live_or_saved_question(
+  client, auth, chat, monkeypatch,
 ):
-  """Pending question registered ~200ms AFTER the POST starts —
-  the grace loop's sleep yields long enough for the registration
-  task to land and the second claim attempt succeeds."""
-
-  loop_holder: dict[str, asyncio.AbstractEventLoop] = {}
-  future_holder: dict[str, asyncio.Future] = {}
-
-  async def late_register():
-    # Simulate the bridge handler racing the POST: arrives after a
-    # ~200ms delay (well inside the 500ms grace window).
-    await asyncio.sleep(0.2)
-    fut = loop_holder["loop"].create_future()
-    future_holder["future"] = fut
-    pending = _make_pending(fut)
-    # The actor's AnswerQuestion merges into a durable question block;
-    # the runner's QuestionCommit would have persisted it before
-    # publishing the card in production.
-    _seed_question_block(chat.id, pending.question_id)
-    future_holder["question_id"] = pending.question_id
-    questions.register(chat.id, pending)
-
-  async def go():
-    loop_holder["loop"] = asyncio.get_event_loop()
-    register_task = asyncio.create_task(late_register())
-
-    started = time.monotonic()
-    # TestClient.post is sync — run it on the executor so the
-    # late_register task can run concurrently on this loop.
-    res = await loop_holder["loop"].run_in_executor(
-      None,
-      lambda: client.post(
-        f"/api/chats/{chat.id}/messages",
-        json={
-          "content": "answer",
-          "hidden": True,
-          "answers": {"Pick one": "b"},
-        },
-        headers=auth,
-      ),
-    )
-    elapsed = time.monotonic() - started
-
-    await register_task
-
-    assert res.status_code == 202, res.text
-    assert res.json()["status"] == "answer_delivered"
-    assert res.json()["answer_turn"] == "same"
-    # Future resolved with the submitted answers.
-    fut = future_holder["future"]
-    assert fut.done()
-    assert fut.result() == {"Pick one": "b"}
-    # Took at least the registration delay and remains below the retired
-    # one-second bridge wait, with room for hosted xdist scheduling jitter.
-    assert 0.15 <= elapsed < 0.8, (
-      f"race path elapsed out of expected band: {elapsed:.3f}s"
-    )
-    assert questions.get(chat.id) is None
-
-  asyncio.run(go())
-
-
-def test_answer_returns_410_after_grace_when_nothing_registers(
-  client, auth, chat,
-):
-  """No pending question and none arrives — POST returns 410 after
-  exhausting the grace window. Bounded so a genuinely stale UI gets
-  the error promptly rather than holding the request open."""
+  """A card with neither live nor durable ownership is stale immediately."""
   async def go():
     assert questions.get(chat.id) is None
+    pending_reads = []
+    read_pending = questions.get
 
-    started = time.monotonic()
+    def track_pending_read(chat_id):
+      pending_reads.append(chat_id)
+      return read_pending(chat_id)
+
+    monkeypatch.setattr(questions, "get", track_pending_read)
     res = await asyncio.get_event_loop().run_in_executor(
       None,
       lambda: client.post(
@@ -591,18 +524,10 @@ def test_answer_returns_410_after_grace_when_nothing_registers(
         headers=auth,
       ),
     )
-    elapsed = time.monotonic() - started
 
     assert res.status_code == 410, res.text
     assert "no longer accepting answers" in res.json()["detail"]
-    # Grace loop is 10 × 50ms ≈ 500ms; require at least most of that
-    # so we know the retry actually ran, but cap the upper bound so
-    # a regression that hangs forever (or sleeps 5s) is caught.
-    assert 0.4 <= elapsed < 1.5, (
-      f"stale path elapsed out of expected band: {elapsed:.3f}s"
-    )
-    # Registry untouched.
-    assert questions.get(chat.id) is None
+    assert pending_reads == [chat.id]
 
   asyncio.run(go())
 

@@ -3527,11 +3527,11 @@ def test_codex_config_overrides_default_pins_agents_namespace(monkeypatch):
   ov = runner._codex_config_overrides()
   assert "features.multi_agent_v2.enabled=true" in ov
   assert "features.multi_agent_v2.tool_namespace=agents" in ov
+  assert "tools.experimental_request_user_input.enabled=false" in ov
 
 
 def test_codex_config_overrides_kill_switch(monkeypatch):
-  """MOEBIUS_CODEX_MULTI_AGENT=off disables multi-agent at runtime (no rebuild),
-  leaving only request_user_input — the reversible rollback."""
+  """The multi-agent rollback never reintroduces process-bound questions."""
   from app import codex_sdk_runner as runner
   monkeypatch.setenv("MOEBIUS_CODEX_MULTI_AGENT", "off")
   ov = runner._codex_config_overrides()
@@ -3539,7 +3539,7 @@ def test_codex_config_overrides_kill_switch(monkeypatch):
     'instructions=""',
     'developer_instructions=""',
     "project_doc_max_bytes=0",
-    "features.default_mode_request_user_input=true",
+    "tools.experimental_request_user_input.enabled=false",
     "features.goals=false",
   ]
   assert not any("multi_agent_v2" in o for o in ov)
@@ -3554,10 +3554,9 @@ def test_codex_config_overrides_disable_competing_native_goal_runtime(monkeypatc
 
 def test_read_delegation_config_selects_container_safe_landlock():
   ordinary = codex_sdk_runner._codex_config_overrides(
-    allow_questions=False, allow_multi_agent=False,
+    allow_multi_agent=False,
   )
   delegated = codex_sdk_runner._codex_config_overrides(
-    allow_questions=False,
     allow_multi_agent=False,
     delegated_read_sandbox=True,
   )
@@ -3702,6 +3701,7 @@ def test_codex_delegation_policy_reaches_the_provider_boundary(
   ))
 
   overrides = captured["config"].kwargs["config_overrides"]
+  assert "tools.experimental_request_user_input.enabled=false" in overrides
   assert captured["thread"]["sandbox"] == expected_sandbox
   assert captured["thread"]["approval_mode"] == expected_approval
   control = captured["thread"]["config"]["mcp_servers"]["mobius_control"]

@@ -699,11 +699,11 @@ def test_continuation_physical_runs_inherit_one_logical_root(db):
 
 def test_delegated_codex_config_routes_questions_up_but_keeps_native_agents():
   overrides = _codex_config_overrides(
-    allow_questions=False, allow_multi_agent=True,
+    allow_multi_agent=True,
   )
-  assert "features.default_mode_request_user_input=true" not in overrides
+  assert "tools.experimental_request_user_input.enabled=false" in overrides
   assert "features.multi_agent_v2.enabled=true" in overrides
-  assert "features.goals=true" not in overrides
+  assert "features.goals=false" in overrides
 
 
 # --- Parent auto-wake on child completion ------------------------------------

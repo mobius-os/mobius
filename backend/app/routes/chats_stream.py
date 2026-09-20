@@ -840,15 +840,10 @@ async def send_message(
   # session: the actor owns the JSON blob so the answer can't lost-update
   # against a concurrent streaming snapshot.
   #
-  # Registration race: the frontend renders the card the instant the
-  # `question` SSE event lands, but the runner registers the pending
-  # entry in a separate task (Codex via `run_coroutine_threadsafe` from
-  # the SDK worker thread; Claude's `can_use_tool` callback). A user who
-  # answers in the tens-of-ms window before the entry lands used to hit
-  # 410. We PEEK (not pop) with a short grace period; the `await sleep`
-  # yields so the runner can write the entry. 500ms covers the race in
-  # practice; after that, the durable-transcript fallback below decides
-  # whether this is recoverable or genuinely stale.
+  # The shared question bridge registers the live pending owner before its
+  # save-before-broadcast barrier can show the card. A visible question must
+  # therefore have either that exact live owner or a durable saved block after
+  # restart; there is no third, timer-dependent registration state.
   if body.answers:
     # Secure cards share the saved question pause, never its plaintext answer
     # input. Only the sealed consumer may queue their fixed safe outcome.
@@ -954,14 +949,7 @@ async def send_message(
         return JSONResponse(status_code=202, content={
           "status": "queued", "answer_turn": "queued", "message": stored,
         })
-      _GRACE_ATTEMPTS = 10
-      _GRACE_INTERVAL = 0.05  # seconds — total ~500ms
       pending = questions.get(chat_id)
-      for _ in range(_GRACE_ATTEMPTS):
-        if pending is not None or continuation_card is not None:
-          break
-        await asyncio.sleep(_GRACE_INTERVAL)
-        pending = questions.get(chat_id)
       if pending is not None:
         if (
           body.question_id is not None
