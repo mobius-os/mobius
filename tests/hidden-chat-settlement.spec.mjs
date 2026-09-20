@@ -50,11 +50,23 @@ test('returning to a retained hidden chat settles a missed terminal stream event
       id: a.id, title: 'Hidden settlement', provider: 'codex',
       messages, total: messages.length, offset: 0, running,
       pending_messages: [], pending_question_id: null, runtime_revision: 0,
+      run_id: 'settlement-run-1',
     } })
   })
   await page.route(new RegExp(`/api/chats/${a.id}/runtime(?:\\?.*)?$`), route => {
     if (!running && messages.length > 1) idleRuntimeReads += 1
-    return route.fulfill({ json: { running, pending_messages: [], pending_question_id: null, runtime_revision: 0 } })
+    // run_id must be present (matches the real /runtime response,
+    // routes/chats.py _latest_run_snapshot) even once running flips false --
+    // it identifies which run just settled. Without it,
+    // shouldRecoverSettledRuntime never fires (its runtimeRunId check requires
+    // a truthy id), so a hidden chat whose SSE stream never got the terminal
+    // event has no other path to notice the run finished.
+    return route.fulfill({
+      json: {
+        running, pending_messages: [], pending_question_id: null,
+        runtime_revision: 0, run_id: 'settlement-run-1',
+      },
+    })
   })
   await page.clock.install()
   await page.goto(`${BASE}/shell/?chat=${a.id}`, { waitUntil: 'domcontentloaded' })
