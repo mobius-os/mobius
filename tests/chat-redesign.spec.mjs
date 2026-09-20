@@ -201,7 +201,7 @@ test.describe('Bug 1: AskUserQuestion', () => {
   })
 
 
-  test('a failed answer keeps the question and choice retryable', async ({ page }) => {
+  test('a rejected answer keeps the question and choice retryable', async ({ page }) => {
     const questionStream = [
       `data: ${JSON.stringify({
         type: 'question',
@@ -228,9 +228,9 @@ test.describe('Bug 1: AskUserQuestion', () => {
       answerAttempts += 1
       if (answerAttempts === 1) {
         return route.fulfill({
-          status: 503,
+          status: 422,
           headers: { 'Content-Type': 'application/json' },
-          body: '{"detail":"temporary failure"}',
+          body: '{"detail":"That choice is no longer valid"}',
         })
       }
       pendingQuestion.markAnswered()
@@ -251,12 +251,72 @@ test.describe('Bug 1: AskUserQuestion', () => {
     // Prove the failure below comes from the intended answer request, not a
     // competing route mock or a click that never reached the transport.
     await expect.poll(() => answerAttempts).toBe(1)
-    await expect(card.getByText('temporary failure', { exact: true })).toBeVisible()
+    await expect(card.getByText('That choice is no longer valid', { exact: true })).toBeVisible()
     await expect(careful).toHaveAttribute('aria-checked', 'true')
     await expect(careful).toBeEnabled()
     await expect(submit).toBeEnabled()
     await submit.click()
     await expect.poll(() => answerAttempts).toBe(2)
+    await expect(page.getByRole('button', { name: 'Submitted' })).toBeDisabled()
+  })
+
+
+  test('an unavailable answer stays queued and replays the same choice', async ({ page }) => {
+    const questionStream = [
+      `data: ${JSON.stringify({
+        type: 'question',
+        question_id: 'q-queued-answer',
+        questions: [{
+          question: 'Choose a launch lane',
+          header: 'Launch',
+          multiSelect: false,
+          options: [{ label: 'Careful' }, { label: 'Fast' }],
+        }],
+      })}\n\n`,
+      'data: {"type":"done"}\n\n',
+    ].join('')
+    let streamCount = 0
+    const attempts = []
+    let pendingQuestion
+    await setupWithStreamMock(page, () => (
+      streamCount++ === 0 ? questionStream : 'data: {"type":"done"}\n\n'
+    ))
+    await page.route(/\/api\/chats\/[0-9a-f-]+\/messages$/, route => {
+      if (route.request().method() !== 'POST') return route.continue()
+      const body = route.request().postDataJSON()
+      if (!body.answers) return fulfillStartedPost(route)
+      attempts.push(body)
+      if (attempts.length === 1) {
+        return route.fulfill({
+          status: 503,
+          headers: { 'Content-Type': 'application/json' },
+          body: '{"detail":"temporarily unavailable"}',
+        })
+      }
+      pendingQuestion.markAnswered()
+      return fulfillStartedPost(route)
+    })
+    pendingQuestion = await mockPendingQuestionState(page, 'q-queued-answer')
+
+    await newChat(page)
+    await sendMessage(page, 'Ask for a launch lane')
+
+    const card = page.locator('[data-chat-surface="painted"] .qcard')
+    const careful = page.getByRole('radio', { name: 'Careful' })
+    await expect(card).toBeVisible({ timeout: 5000 })
+    await careful.click()
+    await page.getByRole('button', { name: 'Submit' }).click()
+
+    await expect.poll(() => attempts.length).toBe(1)
+    await expect(card.getByText(/saved here and will send when Möbius reconnects/i)).toBeVisible()
+    await expect(careful).toHaveAttribute('aria-checked', 'true')
+    await expect(careful).toBeDisabled()
+    await expect(card.getByRole('button', { name: 'Queued on this device' })).toBeDisabled()
+    await page.evaluate(() => window.dispatchEvent(new Event('online')))
+    await expect.poll(() => attempts.length).toBe(2)
+    expect(attempts[1].cid).toBe(attempts[0].cid)
+    expect(attempts[1].answers).toEqual(attempts[0].answers)
+    expect(attempts[1].selected_options).toEqual(attempts[0].selected_options)
     await expect(page.getByRole('button', { name: 'Submitted' })).toBeDisabled()
   })
 

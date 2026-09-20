@@ -405,7 +405,6 @@ test.describe('Service worker — vite-plugin-pwa contract', () => {
       jsxSource: 'export default function App(){return <main>fixture</main>}',
       files: staticFiles,
       manifest: {
-        source_files: Object.keys(staticFiles),
         static_assets: Object.fromEntries(Object.keys(staticFiles).map(path => [
           path.slice('assets/'.length), path,
         ])),
