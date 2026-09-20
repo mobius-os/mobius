@@ -4088,7 +4088,11 @@ async def _complete_turn(
   # Otherwise the existing saved-question owner keeps the Goal exact and
   # durable while the partner decides whether to continue or stop it.
   terminal_handoff = None
-  if ending_status == "completed" and not provider_free:
+  if (
+    ending_status == "completed"
+    and not provider_free
+    and not sink.has_open_continuation_card()
+  ):
     from app.goal_plans import goal_terminal_handoff
 
     terminal_handoff = goal_terminal_handoff(

@@ -412,6 +412,120 @@ async def test_zero_legacy_allowance_does_not_interrupt_authorized_work(
   assert db.get(models.ChatRun, continuation_run).status == "interrupted"
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("card_saved", [True, False])
+async def test_only_saved_owner_question_prevents_terminal_goal_fallback_question(
+  db, chat, monkeypatch, card_saved,
+):
+  """Only a durable card owns the unfinished Goal; failed saves cannot strand it."""
+  from app import chat as chat_mod, chat_queue
+  from app.broadcast import create_broadcast, remove_broadcast
+  from app.chat_event_sink import ChatEventSink
+  from app.goal_plans import goal_plan_revision
+  from app.memory_recall import EMPTY_RECALL_BINDING
+
+  _add_goal_run(db, chat)
+  root = db.get(models.ChatRun, "goal-run")
+  root.goal_plan_revision_at_admission = goal_plan_revision(db, chat.id, root.goal_id)
+  db.commit()
+  scheduled = []
+  monkeypatch.setattr(
+    chat_mod, "_schedule_continuation", lambda **kwargs: scheduled.append(kwargs),
+  )
+  monkeypatch.setattr(chat_mod, "_publish_chat_run_finished", lambda *_: None)
+
+  broadcast = create_broadcast(chat.id)
+  sink = ChatEventSink(
+    broadcast,
+    chat.id,
+    run_token="goal-run",
+    recall_binding=EMPTY_RECALL_BINDING,
+  )
+  sink.publish({"type": "text", "content": "The reviewed batch is ready."})
+  question = {
+    "type": "question",
+    "question_id": "publish-approval",
+    "response_mode": "continuation",
+    "questions": [{
+      "id": "approval",
+      "header": "Approval",
+      "question": "Publish the reviewed batch?",
+      "options": [{
+        "label": "Publish",
+        "description": "Publish only the reviewed heads.",
+      }],
+    }],
+  }
+  try:
+    if card_saved:
+      await sink.publish_question(question)
+    else:
+      from app import chat_writer
+
+      def fail_question_commit(*_args, **_kwargs):
+        raise RuntimeError("Question save failed")
+
+      with monkeypatch.context() as patch:
+        patch.setattr(
+          chat_writer.ChatWriterActor, "_persist_question_required", fail_question_commit,
+        )
+        with pytest.raises(RuntimeError, match="Question save failed"):
+          await sink.publish_question(question)
+    assert sink.has_open_continuation_card() is card_saved
+    disposition = await chat_mod._complete_turn(
+      bc=broadcast,
+      sink=sink,
+      db=db,
+      chat_id=chat.id,
+      run_gen=None,
+      provider_id="codex",
+      cost_usd=0,
+      close_browser=False,
+    )
+  finally:
+    remove_broadcast(chat.id)
+
+  assert disposition is chat_queue.TerminalDisposition.QUESTION_PARKED
+  assert scheduled == []
+  db.expire_all()
+  saved = db.get(models.Chat, chat.id)
+  expected_question = "publish-approval" if card_saved else "goal-handoff-goal-run"
+  assert saved.pending_question_id == expected_question
+  cards = [
+    block
+    for message in saved.messages
+    for block in message.get("blocks") or []
+    if block.get("type") == "question"
+  ]
+  assert [card.get("question_id") for card in cards] == [expected_question]
+  assert not any(
+    block.get("type") == "error"
+    for message in saved.messages
+    for block in message.get("blocks") or []
+  )
+
+
+@pytest.mark.parametrize(("block", "expected"), [
+  ({"type": "text", "content": "No owner handoff"}, False),
+  ({"type": "question", "question_id": "native"}, False),
+  ({"type": "question", "response_mode": "continuation"}, True),
+  ({"type": "question", "response_mode": "continuation", "answers": {}}, True),
+  ({"type": "question", "response_mode": "continuation",
+    "answers": {"choice": "Continue"}}, False),
+])
+def test_open_continuation_card_requires_an_unanswered_terminal_card(block, expected):
+  from app.broadcast import ChatBroadcast
+  from app.chat_event_sink import ChatEventSink
+  from app.memory_recall import EMPTY_RECALL_BINDING
+
+  sink = ChatEventSink(
+    ChatBroadcast("card-state"), "card-state",
+    recall_binding=EMPTY_RECALL_BINDING,
+  )
+  sink.assistant_blocks.append(block)
+  assert sink.has_open_continuation_card() is expected
+
+
 def test_plan_revision_progress_allows_the_next_goal_rollover(db, chat):
   """A running task may span turns when its durable plan keeps advancing."""
   _add_goal_run(db, chat)
