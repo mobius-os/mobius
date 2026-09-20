@@ -664,6 +664,8 @@ class BaseProvider:
   # Subdirectory under /data/cli-auth/ where credentials are stored.
   auth_dir: str = ""
   runtime_kind: Literal["claude_sdk", "codex_sdk"] | None = None
+  # Provider-wide switch boundary; model catalogs can advertise narrower scales.
+  switch_efforts: frozenset[str] = frozenset()
 
   def check_auth(self, data_dir: str) -> str | None:
     """Returns an error message if not authenticated, None if ok."""
@@ -713,6 +715,9 @@ class ClaudeProvider(BaseProvider):
   cli_cmd = "claude"
   auth_dir = "claude"
   runtime_kind = "claude_sdk"
+  switch_efforts = frozenset({
+    "low", "medium", "high", "xhigh", "max", "ultracode",
+  })
 
   def check_auth(self, data_dir):
     creds = Path(data_dir) / "cli-auth" / "claude" / ".credentials.json"
@@ -835,6 +840,11 @@ class CodexProvider(BaseProvider):
   cli_cmd = "codex"
   auth_dir = "codex"
   runtime_kind = "codex_sdk"
+  # Newer catalogs extend ReasoningEffort with max/ultra. Preserve those
+  # picker-valid levels at the atomic switch boundary too.
+  switch_efforts = frozenset({
+    "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
+  })
 
   def check_auth(self, data_dir):
     creds = Path(data_dir) / "cli-auth" / "codex" / "auth.json"
@@ -881,6 +891,7 @@ class MobiusProvider(BaseProvider):
   cli_cmd = "codex"
   auth_dir = "mobius"
   runtime_kind = "codex_sdk"
+  switch_efforts = frozenset({"minimal", "low", "medium", "high", "max"})
 
   @staticmethod
   def _socket_path() -> str:
@@ -997,7 +1008,6 @@ PROVIDERS: dict[str, BaseProvider] = {
   "codex": CodexProvider(),
 }
 
-ProviderName = Literal["claude", "codex", "mobius"]
 PROVIDER_NAMES: frozenset[str] = frozenset(PROVIDERS)
 
 # The default provider when none is configured.

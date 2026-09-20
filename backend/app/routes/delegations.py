@@ -71,8 +71,8 @@ class DelegationSubmit(BaseModel):
   @field_validator("provider")
   @classmethod
   def _valid_provider(cls, value: str) -> str:
-    if value not in ("claude", "codex", "mobius"):
-      raise ValueError("provider must be claude or codex")
+    if value not in providers.PROVIDERS:
+      raise ValueError("unknown provider")
     return value
 
   @field_validator("scope")
