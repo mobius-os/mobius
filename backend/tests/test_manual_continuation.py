@@ -102,6 +102,12 @@ def test_manual_resume_retry_preserves_queue_and_original_authority(
   second = client.post(f"/api/chats/{cid}/messages", headers=auth, json=request)
   assert second.status_code == 200, second.text
   assert second.json()["status"] == "duplicate"
+  changed_target = client.post(
+    f"/api/chats/{cid}/messages", headers=auth,
+    json={**request, "resume_run_id": "different-interrupted-run"},
+  )
+  assert changed_target.status_code == 409, changed_target.text
+  assert changed_target.json()["detail"]["code"] == "recovery_changed"
   assert len(calls) == 1
   # A late automatic sweep cannot reclaim the park after manual admission.
   import asyncio
@@ -111,7 +117,11 @@ def test_manual_resume_retry_preserves_queue_and_original_authority(
     assert [row["cid"] for row in current.pending_messages] == ["b"]
     assert all(row.get("cid") != "manual-a" for row in current.messages)
     resumed = db.get(models.ChatRun, calls[0]["run_token"])
-    assert resumed.continuation_json["control_id"] == "manual-a"
+    assert resumed.continuation_json == {
+      "reason": "manual",
+      "control_id": "manual-a",
+      "supersedes_run_token": "a-interrupted",
+    }
     assert resumed.root_run_id == "a-interrupted"
     assert resumed.initiated_by_app_id == app_id
   chat_mod.discard_starting(cid)

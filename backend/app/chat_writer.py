@@ -3191,6 +3191,7 @@ class ChatWriterActor:
           reason="manual",
           control_id=incoming_cid or cmd.run_token,
           goal_id=goal_id,
+          supersedes_run_token=prior.id if prior is not None else None,
         )
         if resuming else None
       ),

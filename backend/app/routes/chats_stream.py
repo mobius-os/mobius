@@ -1232,7 +1232,15 @@ async def _send_message_locked(
     ).first()
     if existing_resume is not None:
       control = existing_resume.continuation_json or {}
-      if control.get("control_id") != body.cid:
+      recorded_resume = control.get("supersedes_run_token")
+      if (
+        control.get("control_id") != body.cid
+        or (
+          body.resume_run_id is not None
+          and isinstance(recorded_resume, str)
+          and recorded_resume != body.resume_run_id
+        )
+      ):
         raise HTTPException(409, detail={
           "code": "recovery_changed",
           "message": "This Resume identity belongs to different work.",

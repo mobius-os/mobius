@@ -132,6 +132,7 @@ def continuation_protocol_source(
     "usage_limit": "Resume the interrupted owner work now that provider usage is available.",
     "memory": "Resume the interrupted owner work now that memory pressure has cleared.",
     "storage": "Resume the interrupted owner work now that storage pressure has cleared.",
+    "model_capacity": "Resume the interrupted owner work now that the selected model may be available.",
   }
   source = {
     "role": "user",

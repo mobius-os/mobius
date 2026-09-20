@@ -116,6 +116,113 @@ def test_terminal_goal_history_projects_onto_final_assistant_message(
   }
 
 
+def test_terminal_goal_history_uses_run_identity_despite_timestamp_skew(
+  client, owner_token, db,
+):
+  auth = {"Authorization": f"Bearer {owner_token}"}
+  base = datetime(2026, 8, 23, 12, 0, tzinfo=UTC)
+  created = client.post(
+    "/api/chats",
+    json={"title": "Skewed goal history", "messages": [
+      {"role": "user", "content": "start", "ts": 1_787_486_400_000},
+      {"role": "assistant", "id": "skew-root", "content": "finished",
+       "ts": 1_787_486_461_000},
+    ]}, headers=auth,
+  )
+  chat_id = created.json()["id"]
+  db.add(make_goal_run(db,
+    id="skew-root", root_run_id="skew-root", chat_id=chat_id,
+    status="completed", provider="codex", goal_objective="Ship safely",
+    goal_id="skew-goal", started_at=base, ended_at=base + timedelta(seconds=5),
+    goal_plan_json={"version": 1, "updated_at": base.isoformat(), "tasks": [{
+      "id": "ship", "title": "Ship safely", "status": "completed",
+      "depends_on": [],
+    }]}, goal_plan_revision=1,
+  ))
+  db.commit()
+
+  payload = client.get(
+    f"/api/chats/{chat_id}?limit=20", headers=auth,
+  ).json()
+  messages = payload["messages"]
+  assert messages[1]["goal_summaries"][0]["id"] == "skew-goal"
+
+
+@pytest.mark.parametrize(
+  "assistant_suffixes", [["", ":assistant:1", ":assistant:2"], [":assistant:1"]],
+)
+def test_terminal_goal_history_uses_final_steered_segment(
+  client, owner_token, db, assistant_suffixes,
+):
+  auth = {"Authorization": f"Bearer {owner_token}"}
+  base = datetime(2026, 8, 23, 12, 15, tzinfo=UTC)
+  run_id = "steered-root"
+  messages = [{"role": "user", "content": "start", "ts": 1_787_487_300_000}]
+  for index, suffix in enumerate(assistant_suffixes):
+    if index:
+      messages.append({"role": "user", "content": f"steer {index}",
+                       "ts": 1_787_487_310_000 + index})
+    messages.append({"role": "assistant", "id": f"{run_id}{suffix}",
+                     "content": f"segment {index}",
+                     "ts": 1_787_487_400_000 + index})
+  chat_id = client.post(
+    "/api/chats", json={"title": "Steered", "messages": messages}, headers=auth,
+  ).json()["id"]
+  db.add(make_goal_run(db,
+    id=run_id, root_run_id=run_id, chat_id=chat_id,
+    status="completed", provider="codex", goal_objective="Ship safely",
+    goal_id="steered-goal", started_at=base, ended_at=base + timedelta(seconds=5),
+    goal_plan_json={"version": 1, "updated_at": base.isoformat(), "tasks": [{
+      "id": "ship", "title": "Ship safely", "status": "completed",
+      "depends_on": [],
+    }]}, goal_plan_revision=1,
+  ))
+  db.commit()
+
+  returned = client.get(
+    f"/api/chats/{chat_id}?limit=20", headers=auth,
+  ).json()["messages"]
+  assistant_indexes = [
+    i for i, message in enumerate(returned)
+    if message.get("role") == "assistant"
+  ]
+  assert all("goal_summaries" not in returned[i] for i in assistant_indexes[:-1])
+  assert returned[assistant_indexes[-1]]["goal_summaries"][0]["id"] == "steered-goal"
+
+
+def test_legacy_goal_history_fallback_ignores_other_goal_ids(
+  client, owner_token, db,
+):
+  auth = {"Authorization": f"Bearer {owner_token}"}
+  base = datetime(2026, 8, 23, 12, 30, tzinfo=UTC)
+  chat_id = client.post(
+    "/api/chats", json={"title": "Mixed legacy history", "messages": [
+      {"role": "user", "content": "start", "ts": 1_787_488_200_000},
+      {"role": "assistant", "content": "legacy finished", "ts": 1_787_488_201_000},
+      {
+        "role": "assistant", "id": "other-run", "content": "later",
+        "ts": 1_787_488_300_000,
+      },
+    ]}, headers=auth,
+  ).json()["id"]
+  db.add(make_goal_run(db,
+    id="legacy-root", root_run_id="legacy-root", chat_id=chat_id,
+    status="completed", provider="codex", goal_objective="Ship safely",
+    goal_id="legacy-goal", started_at=base, ended_at=base + timedelta(seconds=5),
+    goal_plan_json={"version": 1, "updated_at": base.isoformat(), "tasks": [{
+      "id": "ship", "title": "Ship safely", "status": "completed",
+      "depends_on": [],
+    }]}, goal_plan_revision=1,
+  ))
+  db.commit()
+
+  payload = client.get(
+    f"/api/chats/{chat_id}?limit=20", headers=auth,
+  ).json()
+  messages = payload["messages"]
+  assert messages[1]["goal_summaries"][0]["id"] == "legacy-goal"
+  assert "goal_summaries" not in messages[2]
+
 def test_terminal_goal_history_respects_message_pagination_and_clear(
   client, owner_token, db,
 ):

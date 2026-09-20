@@ -84,6 +84,10 @@ def update_goal_record(db, run, goal, expected_revision, *, checkpoint=None,
   values = {"revision": expected_revision + 1}
   if result is not None:
     plan = serialize_plan(db, run, goal)
+    if goal.plan_json is not None and plan is None:
+      raise GoalPlanError(
+        "Goal plan is unreadable; replace it with a validated plan before completion"
+      )
     if plan is not None and not plan["summary"]["can_complete"]:
       raise GoalPlanError("Goal has unfinished tasks or active delegations")
     from app.goal_plans import goal_handoff_owner_kind

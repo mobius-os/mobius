@@ -278,6 +278,26 @@ def test_park_exit_non_limit_error_stays_plain():
   assert sink.events[-1] == {"type": "error", "message": "syntax error"}
 
 
+def test_model_capacity_parks_for_a_short_automatic_retry():
+  sink = _Sink()
+  kwargs = chat_mod._park_exit(
+    sink,
+    {"error": "Selected model is at capacity. Please try a different model."},
+    "Selected model is at capacity. Please try a different model.",
+  )
+  assert kwargs["parked"] is True
+  assert kwargs["park_reason"] == "model_capacity"
+  assert kwargs["parked_until"] > datetime.now(UTC).replace(tzinfo=None)
+  assert sink.events[-1]["pause"]["kind"] == "model_capacity"
+
+
+def test_generic_capacity_error_is_not_misclassified_as_a_busy_model():
+  sink = _Sink()
+  kwargs = chat_mod._park_exit(sink, {"error": "capacity"}, "capacity")
+  assert kwargs == {"parked": False}
+  assert sink.events[-1] == {"type": "error", "message": "capacity"}
+
+
 def test_park_exit_resume_incomplete_publishes_calm_resumable_note():
   """A steer-interrupted turn (error defused to None, resume_incomplete set)
   publishes a calm, resumable "Paused" note — never a red error block."""
@@ -3028,6 +3048,61 @@ def test_sweep_continues_a_memory_park_without_the_limit_opt_in(
     chat_mod.discard_starting("sweep-memory")
 
 
+def test_model_capacity_sweep_continues_once_then_returns_ownership(
+  owner_token, monkeypatch,
+):
+  """Exercise the real park sweep, continuation lineage, and exhaustion."""
+  del owner_token
+  notified = []
+  monkeypatch.setattr(
+    "app.push.notify_owner_async",
+    _async_notify(lambda db, owner_id, **kw: notified.append(kw) or "n"),
+  )
+  scheduled = []
+  monkeypatch.setattr(
+    chat_mod, "_schedule_continuation", lambda **kw: scheduled.append(kw),
+  )
+  monkeypatch.setattr(chat_mod, "_limit_auto_resume_now", lambda: 10**9)
+  cid = "sweep-model-capacity"
+  root_token = f"rt-{cid}"
+  _due_park(
+    cid, root_token, auto_resume=False, park_reason="model_capacity",
+  )
+
+  try:
+    assert _run_sweep() == [cid]
+    assert len(scheduled) == 1
+    resumed_token = scheduled[0]["run_token"]
+    resumed = _run_row(resumed_token)
+    assert resumed["status"] == "running"
+    assert resumed["continuation"]["reason"] == "model_capacity"
+    next_user = scheduled[0]["next_user"]
+    assert next_user["continuation_reason"] == "model_capacity"
+    assert "selected model may be available" in next_user["content"]
+    assert next_user["_messages"] == []
+    assert all(
+      row.get("continuation_reason") != "model_capacity"
+      for row in _chat_row(cid)["messages"]
+    )
+    assert notified == []
+
+    sink = _Sink()
+    sink.run_token = resumed_token
+    with SessionLocal() as db:
+      result = chat_mod._park_exit(
+        sink,
+        {"error": "Selected model is at capacity. Please try a different model."},
+        "Selected model is at capacity. Please try a different model.",
+        db=db,
+      )
+
+    assert result == {"parked": False}
+    assert sink.events[-1]["pause"]["kind"] == "model_capacity_exhausted"
+    assert "one automatic retry" in sink.events[-1]["message"]
+  finally:
+    chat_mod.discard_starting(cid)
+
+
 def test_app_initiated_resource_park_preserves_attribution(
   owner_token, monkeypatch,
 ):
@@ -3084,3 +3159,55 @@ def test_admission_deferral_parks_the_run_instead_of_failing_it(owner_token):
   tail = _chat_row(cid)["messages"][-1]
   assert tail["role"] == "assistant"
   assert tail["blocks"][-1]["pause"]["kind"] == "memory"
+
+
+def test_model_capacity_retry_policy_allows_one_automatic_resume(db, chat):
+  from datetime import UTC, datetime, timedelta
+  base = datetime.now(UTC).replace(tzinfo=None)
+  runs = [
+    chat_mod.models.ChatRun(
+      id=f"capacity-{index}",
+      root_run_id=None if index == 0 else "capacity-0",
+      chat_id=chat.id,
+      status="parked",
+      park_reason="model_capacity",
+      started_at=base + timedelta(seconds=index),
+    )
+    for index in range(2)
+  ]
+  db.add_all(runs)
+  db.commit()
+
+  assert chat_mod._has_prior_model_capacity_park(db, runs[0]) is False
+  assert chat_mod._has_prior_model_capacity_park(db, runs[1]) is True
+
+
+def test_model_capacity_retry_delay_is_one_minute_and_bounded():
+  assert chat_mod.MODEL_CAPACITY_RETRY_DELAY == timedelta(minutes=1)
+
+
+def test_model_capacity_second_failure_becomes_manual_resume(db, chat):
+  base = datetime.now(UTC).replace(tzinfo=None)
+  prior = chat_mod.models.ChatRun(
+    id="capacity-prior-0", chat_id=chat.id, status="completed",
+    park_reason="model_capacity", started_at=base,
+  )
+  current = chat_mod.models.ChatRun(
+    id="capacity-current", root_run_id="capacity-prior-0", chat_id=chat.id,
+    status="running", started_at=base + timedelta(seconds=1),
+  )
+  db.add_all([prior, current])
+  db.commit()
+  sink = _Sink()
+  sink.run_token = current.id
+
+  kwargs = chat_mod._park_exit(
+    sink,
+    {"error": "Selected model is at capacity. Please try a different model."},
+    "Selected model is at capacity. Please try a different model.",
+    db=db,
+  )
+
+  assert kwargs == {"parked": False}
+  assert sink.events[-1]["pause"]["kind"] == "model_capacity_exhausted"
+  assert "one automatic retry" in sink.events[-1]["message"]
