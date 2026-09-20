@@ -3411,7 +3411,13 @@ async def install_from_manifest(
   )
   cloned_install = False
   cloned_update = False
-  allow_unrelated_histories = False
+  # A catalog rename may adopt a manifest-less checkout whose canonical Git
+  # origin proves the package identity but whose installer-owned branches were
+  # created independently. Git still owns the merge verdict: compatible bytes
+  # combine, and real differences surface through the ordinary conflict flow.
+  allow_unrelated_histories = bool(
+    target.adopting_previous_id and target.adopting_trusted_origin
+  )
   # Source deletes are computed from old-upstream minus new-upstream. The prune
   # phase consumes this explicit diff so local-only tracked siblings are not
   # mistaken for files the manifest intentionally removed.
@@ -3594,7 +3600,8 @@ async def install_from_manifest(
             )
             app.upstream_commit = fetched_upstream.sha
             allow_unrelated_histories = (
-              fetched_upstream.allow_unrelated_histories
+              allow_unrelated_histories
+              or fetched_upstream.allow_unrelated_histories
             )
             cloned_update = True
           except Exception as exc:

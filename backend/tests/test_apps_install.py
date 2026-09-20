@@ -4930,6 +4930,117 @@ def test_rename_adopts_predecessor_row_and_moves_source_dir(
   assert r3.json()["id"] == gym_id
 
 
+def test_catalog_rename_adopts_trusted_checkout_with_unrelated_git_history(
+  client, auth, bypass_url_validation,
+):
+  """A proven catalog rename must preserve a legacy independently-rooted app.
+
+  Older local apps can have the canonical public origin while their ``main``
+  and installer-owned ``upstream`` branches were recreated independently.
+  The explicit previous-id adoption remains safe: Git combines compatible
+  trees, while actual differences still use the normal conflict outcome.
+  """
+  base = "https://raw.githubusercontent.com/mobius-os/app-social/main/"
+  old_manifest = _simple_manifest("common")
+  old_manifest.update({
+    "source_files": ["service.py"],
+    "service": {"entry": "service.py", "access": "public"},
+  })
+  new_manifest = _simple_manifest(
+    "social", version="2.0.0", previous_id="common",
+  )
+  new_manifest.update({
+    "package_id": "urn:uuid:33fae9ec-b2fb-4351-8a4e-85bcc362b546",
+    "source_files": ["service.py"],
+    "service": {
+      "id": "social", "entry": "service.py", "access": "public",
+      "aliases": ["common"],
+    },
+  })
+  new_index = JSX.replace("Hello", "Social")
+  service_source = b'import json, sys\njson.dump({"status": 200}, sys.stdout)\n'
+  responses = {
+    base + "mobius.json": (200, json.dumps(old_manifest).encode()),
+    base + "index.jsx": (200, JSX.encode()),
+    base + "service.py": (200, service_source),
+  }
+  with patch(
+    "app.install._derive_repo_ref", return_value=None,
+  ), patch(
+    "app.install.httpx.AsyncClient",
+    side_effect=_fake_async_client(responses),
+  ):
+    installed = client.post(
+      "/api/apps/install", headers=auth,
+      json={"manifest_url": base + "mobius.json"},
+    )
+  assert installed.status_code == 201, installed.text
+  app_id = installed.json()["id"]
+
+  src = Path(get_settings().data_dir) / "apps" / "common"
+  app_git._run(
+    src, "remote", "add", "origin",
+    "https://github.com/mobius-os/app-social.git",
+  )
+  (src / "index.jsx").write_text(new_index)
+  app_git._run(src, "add", "--", "index.jsx")
+  tree = app_git._run(src, "write-tree").stdout.strip()
+  unrelated_main = app_git._run(
+    src, "commit-tree", tree, "-m", "independent accepted source",
+  ).stdout.strip()
+  app_git._run(src, "update-ref", "refs/heads/main", unrelated_main)
+  app_git._run(src, "reset", "--hard", unrelated_main)
+
+  from app.database import SessionLocal
+  from app.models import App
+  db = SessionLocal()
+  try:
+    row = db.query(App).filter(App.id == app_id).one()
+    row.manifest_url = None
+    row.upstream_commit = None
+    db.commit()
+  finally:
+    db.close()
+
+  storage = Path(get_settings().data_dir) / "apps" / str(app_id) / "kept.json"
+  storage.parent.mkdir(parents=True, exist_ok=True)
+  storage.write_text('{"kept": true}')
+  updated_responses = {
+    base + "mobius.json": (200, json.dumps(new_manifest).encode()),
+    base + "index.jsx": (200, new_index.encode()),
+    base + "service.py": (200, service_source),
+    "https://api.github.com/repos/mobius-os/app-social": (
+      200,
+      json.dumps({
+        "id": 12345, "full_name": "mobius-os/app-social",
+      }).encode(),
+    ),
+  }
+  with patch(
+    "app.install._derive_repo_ref", return_value=None,
+  ), patch(
+    "app.install.httpx.AsyncClient",
+    side_effect=_fake_async_client(updated_responses),
+  ):
+    updated = client.post(
+      "/api/apps/install", headers=auth,
+      json={"manifest_url": base + "mobius.json"},
+    )
+
+  assert updated.status_code == 201, updated.text
+  assert updated.json()["mode"] == "update"
+  assert updated.json()["id"] == app_id
+  assert updated.json()["slug"] == "social"
+  assert updated.json()["service_id"] == "social"
+  assert not src.exists()
+  assert (
+    Path(get_settings().data_dir) / "apps" / "social" / "index.jsx"
+  ).read_text() == new_index
+  assert storage.read_text() == '{"kept": true}'
+  assert client.get("/api/app-services/social/status").status_code == 200
+  assert client.get("/api/app-services/common/status").status_code == 200
+
+
 def test_rename_restamps_identity_when_source_is_already_at_target(
   client, auth, db, bypass_url_validation,
 ):
