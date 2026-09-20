@@ -1,5 +1,6 @@
 import { test, expect } from '@playwright/test'
 import { createTaggedChat, attachCleanup } from './_chatTracker.mjs'
+import { testChatAgentSettings } from './_chatTestPrerequisites.mjs'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
 // Hold the acknowledgement beyond the keyboard-close transition so the test
@@ -130,6 +131,7 @@ test('keyboard close never paints a sent row below its pin', async ({ page }) =>
         runtime_revision: 0,
         run_id: sendCount > 0 ? `send-run-${sendCount}` : null,
         provider: 'codex',
+        ...testChatAgentSettings(),
       }),
     })
   })
@@ -329,6 +331,7 @@ test('an idle runtime snapshot cannot retire an unacknowledged fresh send', asyn
         pending_question_id: null,
         runtime_revision: 0,
         provider: 'codex',
+        ...testChatAgentSettings(),
       }),
     })
   })

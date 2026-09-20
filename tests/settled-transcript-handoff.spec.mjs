@@ -1,5 +1,6 @@
 import { test, expect } from '@playwright/test'
 import { createTaggedChat, attachCleanup } from './_chatTracker.mjs'
+import { testChatAgentSettings } from './_chatTestPrerequisites.mjs'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8000'
 
@@ -143,6 +144,7 @@ async function mountScenario(page) {
         runtime_revision: 0,
         run_id: sendCount > 0 ? `handoff-run-${sendCount}` : null,
         provider: 'codex',
+        ...testChatAgentSettings(),
       }),
     })
   })
