@@ -160,7 +160,7 @@ test('opaque embedded chat completes authenticated flow and survives remount', a
   })
 
   try {
-    await page.goto(`${BASE}/app/${app.id}`, { waitUntil: 'domcontentloaded' })
+    await page.goto(`${BASE}/shell/?app=${app.id}`, { waitUntil: 'domcontentloaded' })
     const outerFrame = page.locator(`iframe[data-app-id="${app.id}"]`)
     await expect(outerFrame).toBeVisible()
 
