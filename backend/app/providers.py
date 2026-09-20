@@ -875,9 +875,9 @@ class CodexProvider(BaseProvider):
 
 
 class MobiusProvider(BaseProvider):
-  """The Möbius subscription, transported only through the local root broker."""
+  """Möbius, transported only through the local root broker."""
 
-  name = "Möbius subscription"
+  name = "Möbius"
   cli_cmd = "codex"
   auth_dir = "mobius"
   runtime_kind = "codex_sdk"
