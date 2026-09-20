@@ -76,24 +76,6 @@ router = APIRouter(prefix="/api/chats", tags=["chats"])
 log = logging.getLogger(__name__)
 
 
-class ClaimedRestartResponse(JSONResponse):
-  """The response owns the dispatch handoff, including send/cancellation failure."""
-
-  def __init__(self, *, action_id: str, **kwargs):
-    super().__init__(**kwargs)
-    self.action_id = action_id
-
-  async def __call__(self, scope, receive, send):
-    try:
-      await super().__call__(scope, receive, send)
-    finally:
-      from app.platform_restart import settle_undispatched_execution
-      try:
-        await asyncio.to_thread(settle_undispatched_execution, self.action_id)
-      except Exception:
-        log.exception("Could not settle restart response handoff action_id=%s", self.action_id)
-
-
 async def start_queued_owner_continuation(chat_id: str, db: Session) -> dict | None:
   """Start an already-committed owner response through the ordinary queue.
 
@@ -790,51 +772,41 @@ async def send_message(
             status_code=503,
             detail="Möbius could not save that Restart choice. Please try again.",
           ) from exc
-    try:
-      event = {
-        "type": "answers_applied",
-        "question_id": body.question_id,
-        "answers": result["answers"],
-        "selected_options": result["selected_options"],
-        "answer_turn": "none",
-        "platform_action": result["platform_action"],
-      }
-      from app.chat_event_sink import get_active_sink
-      sink = get_active_sink(chat_id)
-      bc = get_broadcast(chat_id)
-      if sink is not None:
-        sink.publish(event)
-      elif bc is not None:
-        bc.publish(event)
-      db.refresh(chat)
-      publish_owner_input_changed(chat_id,
-        "question" if chat.pending_question_id else None, question_id=chat.pending_question_id)
-      background = None
-      if result["dispatch"]:
-        async def execute_claimed_restart() -> None:
-          from app.restart_util import restart_this_worker
-          await restart_this_worker(action_id=result["action_id"])
-        background = BackgroundTask(execute_claimed_restart)
-      response_type = ClaimedRestartResponse if result["dispatch"] else JSONResponse
-      return response_type(**({"action_id": result["action_id"]} if result["dispatch"] else {}),
-        status_code=202, content={
-        "status": result["status"],
-        "answers": result["answers"],
-        "selected_options": result["selected_options"],
-        "platform_action": result["platform_action"],
-        "answer_turn": "none",
-        "running": is_chat_running(chat_id),
-        "question_id": body.question_id,
-        "action_id": result["action_id"],
-      }, background=background)
-    except BaseException:
-      if result["dispatch"]:
-        from app.platform_restart import settle_undispatched_execution
-        try:
-          await asyncio.to_thread(settle_undispatched_execution, result["action_id"])
-        except Exception:
-          log.exception("Could not settle restart construction handoff action_id=%s", result["action_id"])
-      raise
+    event = {
+      "type": "answers_applied",
+      "question_id": body.question_id,
+      "answers": result["answers"],
+      "selected_options": result["selected_options"],
+      "answer_turn": "none",
+      "platform_action": result["platform_action"],
+    }
+    from app.chat_event_sink import get_active_sink
+    sink = get_active_sink(chat_id)
+    bc = get_broadcast(chat_id)
+    if sink is not None:
+      sink.publish(event)
+    elif bc is not None:
+      bc.publish(event)
+    db.refresh(chat)
+    publish_owner_input_changed(chat_id,
+      "question" if chat.pending_question_id else None, question_id=chat.pending_question_id)
+    background = None
+    if result["dispatch"]:
+      async def execute_restart() -> None:
+        from app.restart_util import restart_this_worker
+        await restart_this_worker()
+      background = BackgroundTask(execute_restart)
+    return JSONResponse(
+      status_code=202, content={
+      "status": result["status"],
+      "answers": result["answers"],
+      "selected_options": result["selected_options"],
+      "platform_action": result["platform_action"],
+      "answer_turn": "none",
+      "running": is_chat_running(chat_id),
+      "question_id": body.question_id,
+      "action_id": result["action_id"],
+    }, background=background)
 
   # Supplying typed identities for a missing/foreign card must not fall back
   # to the generic question resolver or manufacture an ordinary continuation.

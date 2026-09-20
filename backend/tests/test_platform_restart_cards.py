@@ -16,6 +16,7 @@ from app.chat_event_sink import (
 from app.chat_writer import (
   AppendRestartFeedback,
   AnswerQuestion,
+  CancelActivationWaits,
   ResolvePlatformRestartCard,
   StartContinuation,
   get_writer,
@@ -111,16 +112,8 @@ def _submit(command):
   return get_writer().submit(command).result(timeout=5)
 
 
-def test_duplicate_and_cross_chat_cards_share_one_durable_dispatch(monkeypatch):
-  monkeypatch.setattr(
-    "app.platform_restart.requirement_matches_current_source", lambda _r: True,
-  )
-  q1, w1, _r1, requirement = _install("restart-one")
-  q2, w2, _r2, second_requirement = _install(
-    "restart-two", action_id=requirement["action_id"], target_sha="c" * 40,
-  )
-  assert second_requirement["target_sha"] != requirement["target_sha"]
-  assert second_requirement["action_id"] == requirement["action_id"]
+def test_restart_press_dispatches_once_and_retry_is_idempotent():
+  q1, w1, _r1, _requirement = _install("restart-one")
 
   first = _submit(ResolvePlatformRestartCard(
     chat_id="restart-one", question_id=q1, selected_option_id="restart-id",
@@ -128,23 +121,18 @@ def test_duplicate_and_cross_chat_cards_share_one_durable_dispatch(monkeypatch):
   retry = _submit(ResolvePlatformRestartCard(
     chat_id="restart-one", question_id=q1, selected_option_id="restart-id",
   ))
-  joined = _submit(ResolvePlatformRestartCard(
-    chat_id="restart-two", question_id=q2, selected_option_id="restart-id",
-  ))
 
+  # Pressing restart always dispatches; an identical retry of the same settled
+  # card does not. The one-actual-restart-per-worker guarantee lives in
+  # restart_util's in-process admission latch, not a durable claim row.
   assert first["dispatch"] is True
+  assert first["status"] == "restart_requested"
   assert retry["dispatch"] is False
-  assert joined["dispatch"] is False
   with SessionLocal() as db:
-    assert db.query(models.PlatformRestartExecution).count() == 1
     assert db.get(models.ChatWait, w1).action_approved_at is not None
-    assert db.get(models.ChatWait, w2).action_approved_at is not None
 
 
-def test_free_text_legacy_and_post_stop_cannot_claim_restart(monkeypatch):
-  monkeypatch.setattr(
-    "app.platform_restart.requirement_matches_current_source", lambda _r: True,
-  )
+def test_free_text_cannot_claim_restart_but_post_stop_button_still_does():
   qid, wait_id, _run, _requirement = _install("restart-guard")
   with pytest.raises(Exception):
     _submit(ResolvePlatformRestartCard(
@@ -156,18 +144,21 @@ def test_free_text_legacy_and_post_stop_cannot_claim_restart(monkeypatch):
       chat_id="restart-guard", question_id=qid,
       answers={"restart": "Restart now"},
     ))
+  assert _submit(CancelActivationWaits(chat_id="restart-guard")) == 1
   with SessionLocal() as db:
-    row = db.get(models.ChatWait, wait_id)
-    row.status = "cancelled"
-    row.cancelled_at = now_naive_utc()
-    db.commit()
-  with pytest.raises(Exception):
-    _submit(ResolvePlatformRestartCard(
-      chat_id="restart-guard", question_id=qid,
-      selected_option_id="restart-id",
-    ))
-  with SessionLocal() as db:
-    assert db.query(models.PlatformRestartExecution).count() == 0
+    chat = db.get(models.Chat, "restart-guard")
+    wait = db.get(models.ChatWait, wait_id)
+    card = chat.messages[0]["blocks"][0]
+    assert wait.status == "cancelled"
+    assert chat.pending_question_id is None
+    assert card["platform_action"]["status"] == "awaiting_owner"
+
+  result = _submit(ResolvePlatformRestartCard(
+    chat_id="restart-guard", question_id=qid,
+    selected_option_id="restart-id",
+  ))
+  assert result["dispatch"] is True
+  assert result["status"] == "restart_requested"
 
 
 def test_written_restart_response_atomically_closes_wait_and_queues_feedback():
@@ -197,7 +188,6 @@ def test_written_restart_response_atomically_closes_wait_and_queues_feedback():
     assert [row["cid"] for row in chat.pending_messages] == [
       "restart-feedback-answer",
     ]
-    assert db.query(models.PlatformRestartExecution).count() == 0
 
 
 def test_written_restart_response_retries_only_the_same_message_identity():
@@ -442,11 +432,8 @@ def test_generic_wait_cancel_cannot_strand_an_open_restart_card(client, auth):
 
 
 def test_generic_wait_cancel_cannot_desynchronize_a_deferred_legacy_card(
-  client, auth, monkeypatch,
+  client, auth,
 ):
-  monkeypatch.setattr(
-    "app.platform_restart.requirement_matches_current_source", lambda _r: True,
-  )
   qid, wait_id, _run, _requirement = _install("restart-deferred-boundary")
   result = _submit(ResolvePlatformRestartCard(
     chat_id="restart-deferred-boundary", question_id=qid,
@@ -459,36 +446,6 @@ def test_generic_wait_cancel_cannot_desynchronize_a_deferred_legacy_card(
   assert response.status_code == 409, response.text
   with SessionLocal() as db:
     assert db.get(models.ChatWait, wait_id).status == "armed"
-
-
-def test_source_change_after_claim_refuses_side_effect_admission(monkeypatch):
-  from app import chat as chat_mod
-  from app import restart_util
-
-  monkeypatch.setattr(
-    "app.platform_restart.requirement_matches_current_source", lambda _r: True,
-  )
-  qid, wait_id, _run, requirement = _install("restart-source-race")
-  claimed = _submit(ResolvePlatformRestartCard(
-    chat_id="restart-source-race", question_id=qid,
-    selected_option_id="restart-id",
-  ))
-  assert claimed["dispatch"] is True
-
-  monkeypatch.setattr(
-    "app.platform_restart.requirement_matches_current_source", lambda _r: False,
-  )
-  restart_util._RESTART_ADMITTED = False
-  chat_mod.draining = False
-  asyncio.run(restart_util.restart_this_worker(
-    action_id=requirement["action_id"],
-  ))
-  with SessionLocal() as db:
-    execution = db.get(models.PlatformRestartExecution, requirement["action_id"])
-    assert execution.status == "source_changed"
-    assert db.get(models.ChatWait, wait_id).status == "failed"
-  assert chat_mod.draining is False
-  assert restart_util._RESTART_ADMITTED is False
 
 
 def test_activation_continuation_precedes_and_preserves_queued_b():
@@ -521,10 +478,7 @@ def test_activation_continuation_precedes_and_preserves_queued_b():
     assert run.goal_id == "goal-restart-order"
 
 
-def test_not_now_defers_execution_without_abandoning_activation(monkeypatch):
-  monkeypatch.setattr(
-    "app.platform_restart.requirement_matches_current_source", lambda _r: True,
-  )
+def test_not_now_defers_execution_without_abandoning_activation():
   qid, wait_id, _run, _requirement = _install("restart-cancel")
   result = _submit(ResolvePlatformRestartCard(
     chat_id="restart-cancel", question_id=qid,
@@ -536,19 +490,12 @@ def test_not_now_defers_execution_without_abandoning_activation(monkeypatch):
     wait = db.get(models.ChatWait, wait_id)
     assert wait.status == "armed"
     assert wait.action_approved_at is None
-    assert db.query(models.PlatformRestartExecution).count() == 0
 
 
 def test_route_dispatches_platform_restart_once_without_an_answer_turn(
   client, chat, auth, db, monkeypatch,
 ):
-  requirement = _requirement("platform-restart:route")
-  monkeypatch.setattr(
-    "app.platform_restart.build_restart_requirement", lambda: requirement,
-  )
-  monkeypatch.setattr(
-    "app.platform_restart.requirement_matches_current_source", lambda _r: True,
-  )
+  monkeypatch.setenv("MOBIUS_BOOT_ID", "boot-route")
   calls = []
 
   async def captured_restart(*_args, **_kwargs):
@@ -611,13 +558,7 @@ def test_route_dispatches_platform_restart_once_without_an_answer_turn(
 def test_route_sends_written_restart_feedback_without_restart_authority(
   client, chat, auth, db, monkeypatch,
 ):
-  requirement = _requirement("platform-restart:feedback-route")
-  monkeypatch.setattr(
-    "app.platform_restart.build_restart_requirement", lambda: requirement,
-  )
-  monkeypatch.setattr(
-    "app.platform_restart.requirement_matches_current_source", lambda _r: True,
-  )
+  monkeypatch.setenv("MOBIUS_BOOT_ID", "boot-feedback-route")
   run_id = f"request-feedback-{chat.id}"
   _submit(chat_writer.StartTurn(
     chat_id=chat.id, run_token=run_id,
@@ -670,7 +611,6 @@ def test_route_sends_written_restart_feedback_without_restart_authority(
     assert [item["cid"] for item in row.pending_messages] == [
       "restart-feedback-route-answer",
     ]
-    assert read.query(models.PlatformRestartExecution).count() == 0
 
 
 def test_stale_restart_route_signals_authoritative_card_refresh(
@@ -802,33 +742,15 @@ def test_written_restart_feedback_keeps_transient_failure_retryable(
   assert "try again" in response.json()["detail"].lower()
 
 
-def test_source_changed_restart_route_keeps_written_agent_handoff_available(
+def test_failed_restart_wait_still_honors_exact_restart_button(
   client, auth, monkeypatch,
 ):
-  qid, _wait_id, _run, _requirement = _install("restart-source-changed")
-  monkeypatch.setattr(
-    "app.platform_restart.requirement_matches_current_source", lambda _r: False,
-  )
+  calls = []
 
-  response = client.post(
-    "/api/chats/restart-source-changed/messages", headers=auth, json={
-      "content": "", "hidden": True, "question_id": qid,
-      "selected_options": {"restart": ["restart-id"]},
-    },
-  )
+  async def captured_restart(*_args, **_kwargs):
+    calls.append("restart")
 
-  assert response.status_code == 409, response.text
-  assert response.json()["detail"]["code"] == "restart_action_conflict"
-  assert "fresh Restart card" in response.json()["detail"]["message"]
-  with SessionLocal() as db:
-    chat = db.get(models.Chat, "restart-source-changed")
-    assert chat.pending_question_id == qid
-    assert not chat.messages[0]["blocks"][0].get("answers")
-
-
-def test_failed_restart_wait_requires_agent_recheck_instead_of_false_retry(
-  client, auth,
-):
+  monkeypatch.setattr("app.restart_util.restart_this_worker", captured_restart)
   qid, _wait_id, _run, _requirement = _install(
     "restart-failed-wait", status="failed",
   )
@@ -840,9 +762,10 @@ def test_failed_restart_wait_requires_agent_recheck_instead_of_false_retry(
     },
   )
 
-  assert response.status_code == 409, response.text
-  assert response.json()["detail"]["code"] == "restart_action_conflict"
-  assert "checked again" in response.json()["detail"]["message"]
+  assert response.status_code == 202, response.text
+  assert response.json()["status"] == "restart_requested"
+  assert response.json()["answer_turn"] == "none"
+  assert calls == ["restart"]
 
 
 def test_idle_written_restart_feedback_starts_exactly_one_continuation(
@@ -884,7 +807,6 @@ def test_idle_written_restart_feedback_starts_exactly_one_continuation(
       assert row.pending_question_id is None
       assert row.pending_messages == []
       assert row.messages[-1]["cid"] == "restart-feedback-idle-answer"
-      assert read.query(models.PlatformRestartExecution).count() == 0
   finally:
     from app.chat import discard_starting
     discard_starting(chat_id)

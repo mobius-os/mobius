@@ -42,7 +42,7 @@ test('last model keeps its normal-weight standard highlight', () => {
 
 test('version details distinguish served Möbius from its container identity', () => {
   assert.match(view, /<PlatformUpdates/)
-  assert.match(updates, /platformVersionIdentity\(platform, version\)/)
+  assert.match(updates, /platformVersionIdentity\(versionPlatform, version\)/)
   assert.match(updates, /containerVersionIdentity\(version\)/)
   assert.match(updates, /contained_upstream_committed_at/)
   assert.match(updates, /<dt>Installed update<\/dt>/)
@@ -50,6 +50,15 @@ test('version details distinguish served Möbius from its container identity', (
   assert.match(updates, /mobiusVersion\.primarySha/)
   assert.match(updates, /containerVersion\.sha/)
   assert.doesNotMatch(updates, /Current with upstream|Last checked|upstream_checked_at/)
+})
+
+test('update versions paint from the persisted status cache without an Unknown flash', () => {
+  assert.match(requests, /platformStatusQueries\.current\.useQuery\(\{ enabled: false \}\)/)
+  assert.match(requests, /setQueryData\(platformStatusQueries\.current\.key/)
+  assert.match(requests, /const \[platform, setPlatform\] = useState\(null\)/)
+  assert.match(updates, /const versionPlatform = platform \|\| cachedPlatform/)
+  assert.doesNotMatch(updates, /'Unknown'/)
+  assert.match(updates, /versionPlatform \? 'Unavailable' : 'Checking…'/)
 })
 
 test('restart explains the interruption and its container boundary before confirmation', () => {

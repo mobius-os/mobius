@@ -1751,7 +1751,9 @@ async def test_apply_marks_restart_when_disk_already_ahead_of_running_backend(
 
 # --- path-aware activation classifier ---------------------------------------
 
-def test_platform_update_uses_explicit_activation_levels():
+@pytest.mark.parametrize("deployment", ["self_hosted", "railway"])
+def test_platform_update_uses_explicit_activation_levels(monkeypatch, deployment):
+  monkeypatch.setattr(platform_activation, "deployment_kind", lambda: deployment)
   classify = platform_activation.classify_activation
   assert classify(["backend/app/main.py"])["level"] == \
     "server_restart"
@@ -1763,7 +1765,9 @@ def test_platform_update_uses_explicit_activation_levels():
     "dependency_sync"
   assert classify(["backend/scripts/entrypoint.sh"])["level"] == \
     "image_rebuild"
-  assert classify(["Caddyfile"])["level"] == "proxy_reload"
+  assert classify(["Caddyfile"])["level"] == (
+    "proxy_reload" if deployment == "self_hosted" else "live"
+  )
   assert classify(["frontend/src/App.jsx"])["level"] == "live"
   assert classify(["backend/tests/test_x.py"])["level"] == "live"
   assert classify(["docs/backend/app/notes.md"])["level"] == "live"
@@ -2313,6 +2317,39 @@ def test_status_no_restart_when_only_tests_changed(clone_env):
   assert status["state"] == pu.PlatformUpdateState.UP_TO_DATE.value
 
 
+def test_status_ignores_seed_repair_already_matching_running_image(
+  clone_env, monkeypatch,
+):
+  """A served-checkout SHA cannot make an already-baked seed stale.
+
+  Seed templates run from the image, unlike the Python checkout. Restoring one
+  to the image's exact bytes must clear a false image-rebuild prompt without
+  modifying the separately owner-curated shared skill.
+  """
+  _, platform = clone_env
+  path = "backend/scripts/seed-skills/goal-planning.md"
+  seed = platform / path
+  seed.parent.mkdir(parents=True)
+  seed.write_text("old seed\n")
+  _git(platform, "add", path)
+  _git(platform, "commit", "-q", "-m", "old seed")
+  served = _served_sha(platform)
+  pu.SERVING_SOURCE_FILE.write_text("platform\n")
+  pu.SERVING_SHA_FILE.write_text(served + "\n")
+
+  baked = "running image seed\n"
+  _local_commit(platform, edits={path: baked})
+  monkeypatch.setattr(pu, "_build_info", lambda: {
+    "image_inputs": {path: hashlib.sha256(baked.encode()).hexdigest()},
+  })
+
+  status = pu.platform_status(platform)
+
+  assert status["needs_restart"] is False
+  assert status["state"] == pu.PlatformUpdateState.UP_TO_DATE.value
+  assert status["activation"]["level"] == "live"
+
+
 def test_status_offers_in_place_restart_for_dependency_changes(
   clone_env,
 ):
@@ -2367,18 +2404,23 @@ def test_manual_deploy_source_does_not_hide_pending_server_restart(clone_env):
   assert status["activation"]["level"] == "server_restart"
 
 
+@pytest.mark.parametrize(
+  "deployment,required_marker",
+  [
+    ("self_hosted", "deployment/self-hosted-helper.required"),
+    ("railway", "deployment/railway-topology.required"),
+  ],
+)
 def test_boot_retires_compatible_host_paths_but_preserves_required_migrations(
-  clone_env,
+  clone_env, monkeypatch, deployment, required_marker,
 ):
+  monkeypatch.setattr(platform_activation, "deployment_kind", lambda: deployment)
   _, platform = clone_env
   target = _served_sha(platform)
   for remainder, expected in (
     ([], None),
     (["scripts/mobius-rebuild-host.py"], None),
-    (
-      ["deployment/self-hosted-helper.required"],
-      ["deployment/self-hosted-helper.required"],
-    ),
+    ([required_marker], [required_marker]),
   ):
     pu._write_activation_marker(
       target, ["scripts/deploy-prod.sh", "backend/app/main.py", *remainder],
@@ -2421,16 +2463,24 @@ def test_boot_rebuild_retires_only_upstream_covered_image_paths(
   }
 
 
+@pytest.mark.parametrize(
+  "deployment,topology_marker",
+  [
+    ("self_hosted", "deployment/self-hosted-topology.required"),
+    ("railway", "deployment/railway-topology.required"),
+  ],
+)
 def test_image_receipt_does_not_claim_required_topology_migration_was_applied(
-  clone_env, monkeypatch,
+  clone_env, monkeypatch, deployment, topology_marker,
 ):
+  monkeypatch.setattr(platform_activation, "deployment_kind", lambda: deployment)
   _, platform = clone_env
   upstream = _served_sha(platform)
   pu._write_activation_marker(
     upstream,
-    ["deployment/self-hosted-topology.required"],
+    [topology_marker],
     upstream_sha=upstream,
-    image_paths=["deployment/self-hosted-topology.required"],
+    image_paths=[topology_marker],
   )
   monkeypatch.setattr(pu, "current_build_sha", lambda: upstream)
 
@@ -2438,14 +2488,24 @@ def test_image_receipt_does_not_claim_required_topology_migration_was_applied(
 
   marker = pu._read_activation_marker()
   assert marker is not None
-  assert marker["paths"] == ["deployment/self-hosted-topology.required"]
+  assert marker["paths"] == [topology_marker]
 
 
-def test_skipped_release_still_carries_required_topology_migration(clone_env):
+@pytest.mark.parametrize(
+  "deployment,topology_marker",
+  [
+    ("self_hosted", "deployment/self-hosted-topology.required"),
+    ("railway", "deployment/railway-topology.required"),
+  ],
+)
+def test_skipped_release_still_carries_required_topology_migration(
+  clone_env, monkeypatch, deployment, topology_marker,
+):
+  monkeypatch.setattr(platform_activation, "deployment_kind", lambda: deployment)
   origin, platform = clone_env
   migration = _advance_origin(
     origin,
-    edits={"deployment/self-hosted-topology.required": "1\n"},
+    edits={topology_marker: "1\n"},
     msg="require topology migration",
   )
   target = _advance_origin(

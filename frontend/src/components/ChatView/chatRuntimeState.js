@@ -186,6 +186,23 @@ export function shouldAttachRunningStream({
 }
 
 /**
+ * An accepted detail projection owns whether this pane has a stream. A
+ * completed run and a parked owner question both release a failed transport;
+ * a local Start or Stop remains authoritative until its own boundary settles.
+ */
+export function shouldRetireStreamForRuntime({
+  runtimeRunning = false,
+  pendingQuestionId = null,
+  stopInFlight = false,
+  localStartInFlight = false,
+} = {}) {
+  return !shouldAttachRunningStream({
+    running: runtimeRunning,
+    pendingQuestionId,
+  }) && !stopInFlight && !localStartInFlight
+}
+
+/**
  * A fresh runtime verdict may repair a mounted pane whose stream exhausted
  * during a server restart. Let the stream hook's bounded retry owner finish
  * first; once it has exhausted, restart that owner rather than bypassing its
