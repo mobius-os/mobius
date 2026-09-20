@@ -201,7 +201,7 @@ test.describe('Bug 1: AskUserQuestion', () => {
   })
 
 
-  test('a failed answer keeps the question and choice retryable', async ({ page }) => {
+  test('a failed answer stays locally queued and retries the same choice on reconnect', async ({ page }) => {
     const questionStream = [
       `data: ${JSON.stringify({
         type: 'question',
@@ -251,11 +251,11 @@ test.describe('Bug 1: AskUserQuestion', () => {
     // Prove the failure below comes from the intended answer request, not a
     // competing route mock or a click that never reached the transport.
     await expect.poll(() => answerAttempts).toBe(1)
-    await expect(card.getByText(/answer didn’t save/i)).toBeVisible()
+    await expect(card.getByText(/saved here and will send when Möbius reconnects/i)).toBeVisible()
     await expect(careful).toHaveAttribute('aria-checked', 'true')
-    await expect(careful).toBeEnabled()
-    await expect(submit).toBeEnabled()
-    await submit.click()
+    await expect(careful).toBeDisabled()
+    await expect(card.getByRole('button', { name: 'Queued on this device' })).toBeDisabled()
+    await page.evaluate(() => window.dispatchEvent(new Event('online')))
     await expect.poll(() => answerAttempts).toBe(2)
     await expect(page.getByRole('button', { name: 'Submitted' })).toBeDisabled()
   })
@@ -388,6 +388,7 @@ test.describe('Bug 1: AskUserQuestion', () => {
       const rect = node => node?.getBoundingClientRect()
       return {
         cardTop: rect(el)?.top,
+        cardBottom: rect(el)?.bottom,
         cardHeight: rect(el)?.height,
         inputHeight: rect(input)?.height,
         chatScrollTop: scroll?.scrollTop,
@@ -410,7 +411,9 @@ test.describe('Bug 1: AskUserQuestion', () => {
     await expect(customAnswer).toHaveValue('First line\nSecond line\nThird line')
     expect(after.cardHeight).toBeGreaterThan(before.cardHeight)
     expect(after.inputHeight).toBeGreaterThan(before.inputHeight)
-    expect(after.cardTop).toBeCloseTo(before.cardTop, 5)
+    // The card grows upward from its stable action edge; moving its top by the
+    // added height avoids pushing the composer below the viewport.
+    expect(after.cardBottom).toBeCloseTo(before.cardBottom, 5)
     expect(after.chatScrollTop).toBeCloseTo(before.chatScrollTop, 5)
 
     // Past the growth cap, the writing field—not the transcript—owns overflow.

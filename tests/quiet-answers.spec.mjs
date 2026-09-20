@@ -157,7 +157,9 @@ for (const restartVersion of [1, 2]) {
     const f = await mount(page, { restart: { version: restartVersion } })
     await f.card.getByRole('radio', { name: /Restart now/ }).click()
     const beforeStreams = f.streams()
-    await f.card.getByRole('button', { name: 'Continue', exact: true }).click()
+    await f.card.getByRole('button', {
+      name: restartVersion === 1 ? 'Submit' : 'Continue', exact: true,
+    }).click()
     await expect(f.card.getByRole('status')).toContainText('Restart requested')
     expect(f.attempts).toHaveLength(1)
     expect(f.attempts[0].selected_options).toEqual({ restart: ['restart-option'] })

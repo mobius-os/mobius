@@ -17,6 +17,9 @@ import { createTaggedChat, attachCleanup } from './_chatTracker.mjs'
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
 
 attachCleanup()
+// These scenarios own the stream transport through page-local fetch seams.
+// A claimed service worker can otherwise bypass those seams mid-test.
+test.use({ serviceWorkers: 'block' })
 
 function sseBody(events) {
   return events.map(e => `data: ${JSON.stringify(e)}\n\n`).join('')

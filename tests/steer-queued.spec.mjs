@@ -65,6 +65,24 @@ async function newChat(page) {
   )
 }
 
+async function keepMockedTurnRuntimeOwned(page) {
+  await page.route(/\/api\/chats\/[0-9a-f-]+\/runtime(?:\?.*)?$/, route => {
+    if (route.request().method() !== 'GET') return route.fallback()
+    return route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      json: {
+        runtime_revision: 1,
+        run_id: 'steer-fixture-run',
+        run_status: 'running',
+        running: true,
+        pending_messages: [],
+        pending_question_id: null,
+      },
+    })
+  })
+}
+
 async function sendMessage(page, text) {
   const surface = page.locator('[data-chat-surface="painted"]')
   const input = surface.getByRole('textbox', { name: 'Message Möbius…' })
@@ -163,6 +181,7 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
 
     await setupChat(page)
     await newChat(page)
+    await keepMockedTurnRuntimeOwned(page)
 
     // First send → starts the (held-open) turn. Stop button = streaming.
     await sendMessage(page, 'first message')
@@ -300,6 +319,7 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
 
     await setupChat(page)
     await newChat(page)
+    await keepMockedTurnRuntimeOwned(page)
     await sendMessage(page, 'first message')
     await expect(page.locator('[data-chat-surface="painted"] .chat__stop')).toBeVisible({ timeout: 5000 })
 
@@ -394,6 +414,7 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
 
     await setupChat(page)
     await newChat(page)
+    await keepMockedTurnRuntimeOwned(page)
     await sendMessage(page, 'first message')
     await expect(page.locator('[data-chat-surface="painted"] .chat__stop')).toBeVisible({ timeout: 5000 })
 
@@ -488,6 +509,7 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
 
     await setupChat(page)
     await newChat(page)
+    await keepMockedTurnRuntimeOwned(page)
     await sendMessage(page, 'first message')
     await expect(page.locator('[data-chat-surface="painted"] .chat__stop')).toBeVisible({ timeout: 5000 })
     await sendMessage(page, TEXT1)
@@ -656,6 +678,7 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
 
     await setupChat(page)
     await newChat(page)
+    await keepMockedTurnRuntimeOwned(page)
     await page.setViewportSize({ width: 1280, height: 900 })
     // This case deliberately advertises a touch-primary device. Plain Enter
     // inserts a newline on that contract, so exercise the same Send control a
@@ -884,6 +907,21 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
     await setupChat(page)
     const chat = await createTaggedChat(page, 'steer-held-position')
     expect(chat?.id).toBeTruthy()
+    await page.route(new RegExp(`/api/chats/${chat.id}/runtime(?:\\?.*)?$`), route => {
+      if (route.request().method() !== 'GET') return route.fallback()
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        json: {
+          runtime_revision: durableRunning ? 1 : 0,
+          run_id: durableRunning ? 'steer-held-run' : null,
+          run_status: durableRunning ? 'running' : null,
+          running: durableRunning,
+          pending_messages: durablePending,
+          pending_question_id: null,
+        },
+      })
+    })
     await page.route(new RegExp(`/api/chats/${chat.id}\\?limit=`), route => {
       if (route.request().method() !== 'GET') return route.fallback()
       return route.fulfill({

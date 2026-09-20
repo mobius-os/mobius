@@ -63,7 +63,12 @@ export default function UpdateReviewModal({
     // HTTP success alone never closes this review.
     else if (result?.ok) onClose()
   }
-  useEffect(() => { if (resultState) resultActionRef.current?.focus({ preventScroll: true }) }, [resultState])
+  // Domain failures can replace Apply with the repair action without setting a
+  // result state (for example, a malformed success payload). Move focus to the
+  // newly owning action in either transition.
+  useEffect(() => {
+    if (resultState || applyError) resultActionRef.current?.focus({ preventScroll: true })
+  }, [resultState, applyError, applyErrorCode])
 
   const summary = summarizePreview(preview)
   const target = shortSha(preview?.target_sha)

@@ -693,9 +693,14 @@ test('retiring an explicit Builder cover returns the selected tab and preserves 
   const navigation = page.getByRole('navigation', { name: 'Primary navigation' })
   await navigation.getByRole('button', { name: 'New chat', exact: true }).click()
 
+  // New Chat now mounts its UUID-backed ChatView directly in the focused
+  // Builder pane; there is deliberately no second presentation/composer
+  // owner layered over the workspace.
   const presentation = page.locator('[data-new-chat-presentation]')
-  const composer = presentation.getByRole('textbox', { name: 'Message Möbius…' })
+  const composer = page.getByRole('tabpanel', { name: 'Chat' })
+    .getByRole('textbox', { name: 'Message Möbius…' })
   await expect.poll(() => explicitCreates).toBe(1)
+  await expect(presentation).toHaveCount(0)
   await expect(composer).toBeFocused()
   await composer.fill('Keep this parked Builder draft')
 

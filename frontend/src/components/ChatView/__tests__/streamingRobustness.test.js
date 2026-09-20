@@ -344,10 +344,16 @@ test('a hidden-pane finish routes stale local activity through runtime settlemen
   const activeBranchEnd = reconciliation.indexOf('\n        }', activeBranchStart)
   const activeBranch = reconciliation.slice(activeBranchStart, activeBranchEnd)
 
-  assert.match(activeBranch, /await reconcileRuntimeState\(\)/,
-    'a retained local stream must reach the authoritative idle recovery path')
-  assert.doesNotMatch(activeBranch, /fetchMessages\(/,
-    'the non-authoritative transcript read intentionally preserves local activity')
+  assert.match(activeBranch, /if \(delta\.finished\)/,
+    'only the durable run-finished edge may overrule a retained local stream')
+  assert.match(activeBranch,
+    /fetchMessages\(\{[\s\S]*terminal204: true,[\s\S]*authoritative: true/,
+    'that finish edge must reconcile the saved transcript authoritatively')
+  assert.match(activeBranch,
+    /snapshot\?\.running === false[\s\S]*retireSettledStreamRef\.current\?\.\(\)/,
+    'the stale transport retires only after detail confirms settlement')
+  assert.match(activeBranch, /else \{[\s\S]*await reconcileRuntimeState\(\)/,
+    'ordinary external activity remains on the conservative runtime path')
   // Runtime recovery now lives in the bounded request owner; the public
   // reconcile callback only coalesces callers onto that same promise.
   const runtimeStart = chatViewSource.indexOf('const refreshRuntimeState = useCallback')
@@ -372,6 +378,25 @@ test('a hidden-pane finish routes stale local activity through runtime settlemen
   )
   assert.doesNotMatch(chatViewSource, /observedRunningRunIdRef/,
     'runtime ordering belongs to the server lifecycle cursor, not a browser latch')
+})
+
+test('retained views share one physical runtime snapshot without sharing view state', () => {
+  const readerStart = chatViewSource.indexOf('function readRuntimeSnapshot(chatId)')
+  const readerEnd = chatViewSource.indexOf('\n}\n', readerStart) + 2
+  const reader = chatViewSource.slice(readerStart, readerEnd)
+  assert.match(reader, /runtimeSnapshotReads\.get\(key\)/)
+  assert.match(reader, /if \(current\) return current/)
+  assert.match(reader, /runtimeSnapshotReads\.set\(key, request\)/)
+  assert.match(reader,
+    /if \(runtimeSnapshotReads\.get\(key\) === request\) runtimeSnapshotReads\.delete\(key\)/,
+    'only the completing owner may release a successor read')
+
+  const refreshStart = chatViewSource.indexOf('const refreshRuntimeState = useCallback')
+  const refreshEnd = chatViewSource.indexOf('\n  // Every runtime reader', refreshStart)
+  const refresh = chatViewSource.slice(refreshStart, refreshEnd)
+  assert.match(refresh, /const data = await readRuntimeSnapshot\(chatId\)/)
+  assert.match(refresh, /fetchGenRef\.current !== gen/,
+    'each retained view still rejects a shared snapshot from its stale lifecycle')
 })
 
 // ---------------------------------------------------------------------------

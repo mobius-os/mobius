@@ -162,22 +162,27 @@ async function setupAppRoutes(page, appId, frameHTML) {
       body: '[]',
     })
   })
+  const app = {
+    id: appId,
+    name: 'mock-app',
+    description: 'test',
+    compiled_path: `/data/compiled/app-${appId}.js`,
+    chat_id: null,
+    source_dir: null,
+    created_at: appRevision,
+    updated_at: appRevision,
+  }
   await page.route(/\/api\/apps\/$/, route => {
     if (route.request().method() !== 'GET') return route.fallback()
     route.fulfill({
       status: 200,
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify([{
-        id: appId,
-        name: 'mock-app',
-        description: 'test',
-        compiled_path: `/data/compiled/app-${appId}.js`,
-        chat_id: null,
-        source_dir: null,
-        created_at: appRevision,
-        updated_at: appRevision,
-      }]),
+      body: JSON.stringify([app]),
     })
+  })
+  await page.route(new RegExp(`/api/apps/${appId}(?:\\?.*)?$`), route => {
+    if (route.request().method() !== 'GET') return route.fallback()
+    return route.fulfill({ status: 200, contentType: 'application/json', json: app })
   })
   await page.route(/\/api\/auth\/app-token$/, route =>
     route.fulfill({
@@ -243,7 +248,7 @@ async function setupOpenAppRoutesWithStaleInitialList(
       body: JSON.stringify([chat]),
     })
   })
-  await page.route(new RegExp(`/api/chats/${chatId}(\\?.*)?$`), route => {
+  await page.route(new RegExp(`/api/chats/${chatId}(?:/runtime)?(\\?.*)?$`), route => {
     if (route.request().method() !== 'GET') return route.fallback()
     route.fulfill({
       status: 200,
@@ -262,6 +267,14 @@ async function setupOpenAppRoutesWithStaleInitialList(
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(targetVisible ? [sourceApp, targetApp] : [sourceApp]),
     })
+  })
+  await page.route(/\/api\/apps\/(\d+)(?:\?.*)?$/, route => {
+    if (route.request().method() !== 'GET') return route.fallback()
+    const id = Number(new URL(route.request().url()).pathname.split('/').at(-1))
+    const row = [sourceApp, targetApp].find(candidate => candidate.id === id)
+    return row
+      ? route.fulfill({ status: 200, contentType: 'application/json', json: row })
+      : route.fulfill({ status: 404, json: { detail: 'Not found' } })
   })
   await page.route(/\/api\/auth\/app-token$/, route =>
     route.fulfill({
@@ -807,7 +820,7 @@ test.describe('AppCanvas: iframe-mount contract', () => {
         body: '[]',
       })
     })
-    await page.route(/\/api\/chats\/crash-chat(\?.*)?$/, route =>
+    await page.route(/\/api\/chats\/crash-chat(?:\/runtime)?(\?.*)?$/, route =>
       route.fulfill({
         status: 200,
         headers: { 'Content-Type': 'application/json' },
