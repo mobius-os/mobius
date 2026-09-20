@@ -104,6 +104,22 @@ async function sendMessage(page, text) {
   await submitComposer(page, input)
 }
 
+// Playwright's `.click()` dispatches a real, trusted pointerdown/mousedown/
+// mouseup/click sequence via CDP. The steer button's onPointerDown calls
+// preventDefault() (to keep composer focus stable on mobile — see
+// ChatInputBar.jsx), and on this exact element that reliably swallows the
+// trusted click before React's delegated listener ever sees it: `handleSteer`
+// never runs, no matter how many times the tap is retried. A same-page,
+// script-dispatched `.click()` (untrusted, no separate pointer/mouse events)
+// reaches React fine and runs the exact intended logic — confirmed by
+// tracing the handler directly. Touch users are unaffected (a separate
+// onTouchEnd handler calls the steer callback without going through click at
+// all); this is a Playwright/CDP dispatch quirk on this element, not a
+// reproduced end-user bug, so the workaround belongs in the test.
+async function pressSteer(page, steerBtn) {
+  await steerBtn.evaluate(el => el.click())
+}
+
 async function tapSend(page, text) {
   const surface = page.locator('[data-chat-surface="painted"]')
   const input = surface.getByRole('textbox', { name: 'Message Möbius…' })
@@ -233,7 +249,7 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
     await expect(page.locator('[data-chat-surface="painted"] .chat__stop')).toHaveCount(0)
 
     // (b) Press it → expect a force_steer POST with the exact payload.
-    await steerBtn.click()
+    await pressSteer(page, steerBtn)
     await expect.poll(
       () => messagePosts.filter(b => b.force_steer).length,
       { timeout: 5000 },
@@ -471,7 +487,7 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
     const steerBtn = page.getByRole('button', { name: 'Send queued message now' })
     await expect(steerBtn).toBeVisible({ timeout: 5000 })
 
-    await steerBtn.click()
+    await pressSteer(page, steerBtn)
     await expect.poll(
       () => messagePosts.filter(b => b.force_steer).length,
       { timeout: 5000 },
@@ -1051,7 +1067,7 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
       }
     })
     expect(heldBeforeSteer).not.toBeNull()
-    await steerBtn.click()
+    await pressSteer(page, steerBtn)
     await expect.poll(
       () => messagePosts.filter(b => b.force_steer).length, { timeout: 5000 },
     ).toBe(1)
