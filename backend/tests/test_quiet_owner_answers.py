@@ -120,6 +120,22 @@ def test_quiet_answer_cannot_orphan_unfinished_goal(client, chat, auth, approval
   assert 'answers' not in _block(chat.id, qid)
 
 
+def test_quiet_answer_cannot_orphan_an_unreadable_goal_plan(
+    client, chat, auth, approval_run):
+  _goal(chat, approval_run)
+  with SessionLocal() as db:
+    run = db.get(models.ChatRun, approval_run[0].run_token)
+    run.goal_plan_json = "{not valid json"
+    db.commit()
+  qid = _ask(client, chat, approval_run, QUIET).json()['question_id']
+
+  response = _quiet(client, chat, auth, qid)
+
+  assert response.status_code == 409, response.text
+  assert 'unfinished Goal' in response.text
+  assert _row(chat.id)[0] == qid
+
+
 def test_completed_plan_can_close_without_changing_goal(client, chat, auth, approval_run):
   _goal(chat, approval_run, 'completed')
   qid = _ask(client, chat, approval_run, QUIET).json()['question_id']

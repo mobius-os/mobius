@@ -345,7 +345,7 @@ def test_natural_owner_follow_up_reactivates_the_unfinished_goal(provider):
       chat_id=chat_id, status="interrupted", provider=provider,
       goal_objective="Finish the review", goal_id=f"goal-{provider}",
       goal_plan_json={
-        "tasks": [{"id": "prepare", "status": "running"}],
+        "tasks": [{"id": "prepare", "title": "Prepare", "status": "running"}],
       },
     ))
     db.commit()

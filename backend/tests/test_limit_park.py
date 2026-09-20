@@ -739,7 +739,7 @@ def test_manual_try_now_preserves_messages_queued_behind_future_limit_park(
     parked.goal_objective = "Finish the durable Goal"
     parked.goal_id = parked.id
     parked.goal_plan_json = {
-      "tasks": [{"id": "finish", "status": "running"}],
+      "tasks": [{"id": "finish", "title": "Finish", "status": "running"}],
     }
     setup_db.commit()
   first = client.post(

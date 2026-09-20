@@ -59,7 +59,7 @@ def test_plain_continue_keeps_a_completed_physical_run_with_unfinished_plan(
     id="planned-goal", root_run_id="planned-goal", chat_id=chat.id,
     status="completed", provider="codex", goal_objective="Ship it",
     goal_id="stable-goal", goal_plan_json={
-      "tasks": [{"id": "verify", "status": "running"}],
+      "tasks": [{"id": "verify", "title": "Verify", "status": "running"}],
     },
   ))
   db.commit()
@@ -77,7 +77,7 @@ def test_natural_owner_follow_up_keeps_a_paused_goal_with_unfinished_plan(
     chat_id=chat.id, status="interrupted", provider="codex",
     goal_objective="Ship it", goal_id="stable-natural-goal",
     goal_plan_json={
-      "tasks": [{"id": "prepare", "status": "running"}],
+      "tasks": [{"id": "prepare", "title": "Prepare", "status": "running"}],
     },
   ))
   db.commit()
@@ -93,7 +93,7 @@ def test_unrelated_owner_follow_up_does_not_revive_an_unfinished_goal(db, chat):
     chat_id=chat.id, status="interrupted", provider="claude",
     goal_objective="Ship it", goal_id="unrelated-natural-id",
     goal_plan_json={
-      "tasks": [{"id": "prepare", "status": "running"}],
+      "tasks": [{"id": "prepare", "title": "Prepare", "status": "running"}],
     },
   ))
   db.commit()
@@ -112,7 +112,7 @@ def test_natural_resume_never_overrides_explicit_stop(db, chat):
     chat_id=chat.id, status="stopped", provider="codex",
     goal_objective="Ship it", goal_id="stopped-natural-id",
     goal_plan_json={
-      "tasks": [{"id": "prepare", "status": "running"}],
+      "tasks": [{"id": "prepare", "title": "Prepare", "status": "running"}],
     },
   ))
   db.commit()
@@ -135,7 +135,7 @@ def test_result_continuations_never_tunnel_through_explicit_stop(db, chat):
     chat_id=chat.id, status="stopped", provider="codex",
     goal_objective="Ship it", goal_id="stopped-result-id",
     goal_plan_json={
-      "tasks": [{"id": "prepare", "status": "running"}],
+      "tasks": [{"id": "prepare", "title": "Prepare", "status": "running"}],
     },
   ))
   db.commit()
@@ -276,7 +276,7 @@ def test_natural_resume_does_not_compete_with_question_or_wait(db, chat):
     chat_id=chat.id, status="interrupted", provider="claude",
     goal_objective="Ship it", goal_id="blocked-natural-id",
     goal_plan_json={
-      "tasks": [{"id": "prepare", "status": "running"}],
+      "tasks": [{"id": "prepare", "title": "Prepare", "status": "running"}],
     },
   )
   db.add(goal)
@@ -307,7 +307,7 @@ def test_natural_owner_follow_up_does_not_revive_a_settled_plan(db, chat):
     chat_id=chat.id, status="completed", provider="codex",
     goal_objective="Done", goal_id="settled-natural-id",
     goal_plan_json={
-      "tasks": [{"id": "verify", "status": "completed"}],
+      "tasks": [{"id": "verify", "title": "Verify", "status": "completed"}],
     },
   ))
   db.commit()
@@ -327,7 +327,7 @@ def test_plain_continue_with_upload_manifest_resumes_the_same_goal(db, chat):
     goal_objective="Ship it",
     goal_id="stable-upload-goal",
     goal_plan_json={
-      "tasks": [{"id": "prepare", "status": "pending"}],
+      "tasks": [{"id": "prepare", "title": "Prepare", "status": "pending"}],
     },
   ))
   db.commit()
@@ -350,7 +350,7 @@ def test_semantic_recovery_skips_intervening_no_goal_run_for_unfinished_plan(
       id="planned-goal", root_run_id="planned-goal", chat_id=chat.id,
       status="completed", provider="codex", goal_objective="Ship it",
       goal_id="stable-goal", goal_plan_json={
-        "tasks": [{"id": "verify", "status": "running"}],
+        "tasks": [{"id": "verify", "title": "Verify", "status": "running"}],
       },
     ),
     models.ChatRun(
@@ -371,7 +371,7 @@ def test_continue_does_not_revive_a_settled_plan(db, chat):
     id="settled-goal", root_run_id="settled-goal", chat_id=chat.id,
     status="completed", provider="codex", goal_objective="Done",
     goal_id="settled-id", goal_plan_json={
-      "tasks": [{"id": "verify", "status": "completed"}],
+      "tasks": [{"id": "verify", "title": "Verify", "status": "completed"}],
     },
   ))
   db.commit()
@@ -494,7 +494,7 @@ def test_manual_recovery_preserves_unfinished_goal_and_plan(db, chat, status):
     id="handoff-goal", root_run_id="handoff-goal", chat_id=chat.id,
     status=status, provider="codex", goal_objective="Finish rollout",
     goal_id="handoff-goal", goal_plan_json={
-      "tasks": [{"id": "verify", "status": "running"}],
+      "tasks": [{"id": "verify", "title": "Verify", "status": "running"}],
     },
   ))
   db.commit()
@@ -513,7 +513,7 @@ def test_manual_recovery_does_not_revive_a_dismissed_failed_goal(db, chat):
     id="dismissed-failure", root_run_id="dismissed-failure", chat_id=chat.id,
     status="failed", provider="codex", goal_objective="Old work",
     goal_id="dismissed-failure", goal_plan_json={
-      "tasks": [{"id": "verify", "status": "running"}],
+      "tasks": [{"id": "verify", "title": "Verify", "status": "running"}],
     },
   ))
   chat.dismissed_goal_id = "dismissed-failure"

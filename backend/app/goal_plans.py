@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime
-import json
 import logging
 import re
 from typing import Any
@@ -61,16 +60,14 @@ def _goal_plan_tasks(
   raw = owner[0]
   if raw is None:
     return None
-  try:
-    plan = json.loads(raw) if isinstance(raw, str) else raw
-  except (TypeError, json.JSONDecodeError):
+  if not isinstance(raw, dict):
     logger.warning(
       "unreadable goal_plan_json for chat=%s goal=%s; treating goal as "
       "unfinished instead of silently dropping it",
       chat_id, goal_id,
     )
     raise GoalPlanCorrupt(goal_id)
-  tasks = (plan or {}).get("tasks") if isinstance(plan, dict) else None
+  tasks = raw.get("tasks")
   try:
     return normalize_tasks(tasks)
   except GoalPlanError as exc:
@@ -748,8 +745,10 @@ def require_quiet_answer_handoff(db: Session, chat, question_id: str) -> None:
   if _recoverable_result_goal(db, chat.id, owner)[0] is None:
     return  # The exact Goal's latest physical run owns Stop, not the author.
   plan = serialize_plan(db, physical, root)
-  if (plan is not None and plan["summary"]["can_complete"]) or (
-      plan is None and physical.status == "completed"):
+  if (
+    not _stored_plan_requires_work(root, plan)
+    and (plan is not None or physical.status == "completed")
+  ):
     return
   if goal_handoff_owner_kind(db, chat.id, goal_id, excluding_question_id=question_id):
     return
@@ -770,6 +769,16 @@ def serialize_goal(
   """Project durable Goal presentation independently of turn liveness."""
   plan = serialize_plan(db, physical, root)
   return _goal_presentation(db, physical, root, plan)
+
+
+def _stored_plan_requires_work(
+  root: models.ChatRun,
+  plan: dict[str, Any] | None,
+) -> bool:
+  """Fail closed when a persisted plan exists but cannot be projected."""
+  if plan is None:
+    return root.goal_plan_json is not None
+  return not plan["summary"]["can_complete"]
 
 
 def _goal_presentation(
@@ -794,10 +803,7 @@ def _goal_presentation(
     physical.status == "completed"
     and (
       wait_kind is not None
-      or (
-        plan is not None
-        and not plan["summary"]["can_complete"]
-      )
+      or _stored_plan_requires_work(root, plan)
     )
   ):
     # A clean physical turn can end while its exact Goal still owns a durable
