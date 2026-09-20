@@ -12,48 +12,15 @@ default auto-approval behavior, and stores the live `ActiveCodexTurn`
 in the shared runner registry, keyed by `(chat_id, RunnerKind.CODEX_SDK)`,
 so Stop and queued-message steering can reach it.
 
-**AskUserQuestion parity is shipped via the `request_user_input`
-tool.** The underlying wire surface is `item/tool/requestUserInput`
-JSON-RPC requests emitted by the app-server when the model calls
-the tool. `CodexClient.approval_handler` is the documented
-constructor argument that receives them (public as of
-openai-codex 0.134.0; was a private attribute on a less-stable
-path before). Only the sync `CodexClient` accepts
-`approval_handler` in its constructor. The async wrappers
-(`AsyncCodex`, `AsyncCodexClient`) don't, so we set the
-attribute on `codex._client._sync` after construction, targeting
-the same callable slot the public constructor argument populates.
-See `_install_request_user_input_handler` below.
-
-Why we don't drop `AsyncCodex` and construct `CodexClient`
-directly to pass `approval_handler` as a kwarg: doing so would
-mean rebuilding everything `AsyncCodex` / `AsyncThread` /
-`AsyncTurnHandle` give us for free. That list includes lazy
-`start()` + `initialize()` + metadata validation, the
-`ApprovalMode` enum translation to `(approval_policy,
-approvals_reviewer)` via private `_approval_mode_settings`
-helpers, `ThreadStartParams` / `TurnStartParams` Pydantic
-construction, `_normalize_run_input` + `_to_wire_input`
-translation, `register_turn_notifications` +
-`next_turn_notification` polling that terminates on
-`turn/completed`, and the `AsyncThread` / `AsyncTurnHandle`
-context. That's ~100 lines of plumbing built on four private SDK
-helpers, replacing one public-attribute set on a wrapper-internal
-chain. The current pattern has the smaller fragility surface.
-Revisit if `AsyncCodex` ever grows `approval_handler` in its
-constructor (forwarded down to `_sync`), at which point
-`_install_request_user_input_handler` collapses to a kwarg.
-
-The tool is gated by the `default_mode_request_user_input`
-feature flag (stage `UnderDevelopment`, default off), enabled via
-`features.default_mode_request_user_input=true` in the
-`CodexConfig.config_overrides` list. Once enabled, the model
-sees `request_user_input` in its tool list and uses it the same
-way Claude uses its `AskUserQuestion` tool — both producers
-publish a `question` event on the Möbius wire and both wait on
-the shared `_pending_questions` future for the user's answer.
-The handler then translates Möbius's text-keyed answer back into
-Codex's id-keyed `{answers: {qid: {answers: [label]}}}` schema.
+Owner questions have one lifecycle: the provider-neutral Möbius
+`request_question` control saves a durable terminal card, ends the
+current turn, and starts exactly one continuation when answered.
+Codex's provider-native `request_user_input` tool is deliberately
+left disabled, because it waits inside the current provider turn and
+cannot safely share that terminal-card contract. The legacy approval
+handler remains installed only as a compatibility guard for a resumed
+provider session that already knows the old tool; new turns never
+advertise it.
 """
 
 from __future__ import annotations
@@ -169,7 +136,6 @@ def _env_flag_on(name: str, *, default: bool) -> bool:
 
 def _codex_config_overrides(
   *,
-  allow_questions: bool = True,
   allow_multi_agent: bool = True,
   allow_goals: bool = True,
   delegated_read_sandbox: bool = False,
@@ -180,9 +146,9 @@ def _codex_config_overrides(
   owns behavior, while config files and project instruction documents must not
   grow a provider-specific second constitution.
 
-  ``request_user_input`` (AskUserQuestion parity) is on for ordinary chats and
-  deliberately absent for delegated children. Multi-agent (collab /
-  spawn_agent — the Codex analog of Claude's Task fleet, whose
+  Owner questions are deliberately absent here: the Möbius control MCP's
+  durable ``request_question`` is the sole owner-facing question capability.
+  Multi-agent (collab / spawn_agent — the Codex analog of Claude's Task fleet, whose
   ``collabAgentToolCall`` items the dispatch surfaces as ordinary background
   activity) is on by DEFAULT but behind a RUNTIME kill switch: set the env var
   ``MOEBIUS_CODEX_MULTI_AGENT`` to off/0/false/no to disable it and restart
@@ -200,8 +166,6 @@ def _codex_config_overrides(
   delegate probe after any @openai/codex bump.
   """
   overrides = list(_CODEX_PROMPT_CONTROL_OVERRIDES)
-  if allow_questions:
-    overrides.append("features.default_mode_request_user_input=true")
   if allow_goals:
     # Codex owns goal durability in its thread store. Enabling the native goal
     # extension lets a new app-server resume the logical operation after
@@ -1743,9 +1707,9 @@ async def _run_codex_sdk_turn(
   if connector_plan is not None:
     env.update(connector_plan.codex_env)
 
-  # config_overrides always isolates the prompt stack, then carries the
-  # request_user_input (AskUserQuestion parity), goal, and multi-agent flags.
-  # Delegated children disable those optional tools at this provider-owned seam.
+  # config_overrides always isolates the prompt stack, then carries native goal
+  # and multi-agent flags. Owner questions belong exclusively to the durable
+  # Möbius control MCP configured above.
   codex_bin = shutil.which("codex")
   delegated = run_policy is not None
   restricted = delegated
@@ -1763,7 +1727,6 @@ async def _run_codex_sdk_turn(
     fallback_goal_objective=fallback_goal_objective,
   )
   config_overrides = _codex_config_overrides(
-    allow_questions=not restricted,
     allow_multi_agent=True,
     allow_goals=not restricted and needs_goal_control,
     delegated_read_sandbox=(
@@ -1895,7 +1858,7 @@ async def _run_codex_sdk_turn(
       # its sole joiner and shields that join before reaping the group.
       if entry_cancel is not None:
         raise entry_cancel
-      # Install AskUserQuestion bridge on the sync CodexClient's
+      # Keep the old request_user_input bridge on the sync CodexClient's
       # approval_handler attribute. `approval_handler` is a public
       # sync-client constructor argument as of openai-codex 0.142.5;
       # neither AsyncCodex nor AsyncCodexClient accept it, so we
@@ -1903,9 +1866,10 @@ async def _run_codex_sdk_turn(
       # on AsyncCodex (instead of dropping to CodexClient to pass
       # the kwarg natively) keeps ~100 lines of SDK glue out of this
       # module. See the module docstring for the full reasoning.
-      # When the model calls the `request_user_input` tool (enabled by
-      # the features.default_mode_request_user_input config_override
-      # above), the app-server sends an `item/tool/requestUserInput`
+      # New turns do not advertise the provider-native tool; durable owner
+      # questions use the Möbius request_question MCP control. If a resumed
+      # provider session already knows the old tool, the app-server sends an
+      # `item/tool/requestUserInput`
       # JSON-RPC request to our handler; we park on the shared
       # `_pending_questions` future (same registry Claude uses), publish
       # a `question` event to the SSE wire (same UI), and translate the

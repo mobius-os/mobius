@@ -1413,6 +1413,9 @@ async def test_run_claude_sdk_turn_requests_summarized_thinking(monkeypatch):
   assert set(claude_sdk_runner._CLAUDE_NATIVE_SCHEDULING_TOOLS) <= set(
     options.disallowed_tools
   )
+  assert set(claude_sdk_runner._CLAUDE_NATIVE_OWNER_INPUT_TOOLS) <= set(
+    options.disallowed_tools
+  )
   assert set(claude_sdk_runner._CLAUDE_UNUSED_BUILTINS) <= set(
     options.disallowed_tools
   )
