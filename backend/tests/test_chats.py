@@ -63,6 +63,11 @@ def test_delete_and_recover_publish_exact_projection_events(
       headers=auth,
       json={"notification_id": receipt.id},
     )
+    assert fake_sb.publish.call_args_list == [
+      (({"type": "chat_deleted", "chatId": str(chat.id)},), {}),
+      (({"type": "chat_recovered", "chatId": str(chat.id)},), {}),
+    ]
+    fake_sb.publish.reset_mock()
     repeated = client.post(
       f"/api/chats/{chat.id}/recover",
       headers=auth,
@@ -75,10 +80,10 @@ def test_delete_and_recover_publish_exact_projection_events(
   assert repeated.json()["completed_at"] == recovered.json()["completed_at"]
   db.refresh(receipt)
   assert receipt.actions[0]["completed_at"] == recovered.json()["completed_at"]
-  assert fake_sb.publish.call_args_list == [
-    (({"type": "chat_deleted", "chatId": str(chat.id)},), {}),
-    (({"type": "chat_recovered", "chatId": str(chat.id)},), {}),
-  ]
+  # Receipt retries replay the projection, not the deletion or its receipt.
+  fake_sb.publish.assert_called_once_with({
+    "type": "chat_recovered", "chatId": str(chat.id),
+  })
 
 
 def test_delete_rolls_back_when_undo_receipt_cannot_be_staged(

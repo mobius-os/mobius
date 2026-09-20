@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from importlib import import_module
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
 import pytest
@@ -168,6 +168,72 @@ def test_retry_reads_completion_after_obtaining_lifecycle_lock(
   else:
     restore_skills = import_module("app.install").restore_app_skills
     assert restore_skills.await_count == 1
+
+
+def test_receipt_retry_repairs_lost_projection_without_replacing_a_live_run(
+  client, auth, db, resource, monkeypatch,
+):
+  from app import chat as chat_mod
+  from app.chat_writer import StartTurn, get_writer
+
+  kind, row, url = resource
+  receipt = _delete(client, auth, db, resource)
+  module = import_module(f"app.routes.{kind}s")
+  broadcast = MagicMock()
+  broadcast.publish.side_effect = RuntimeError("recovery projection unavailable")
+  monkeypatch.setattr(module, "get_system_broadcast", lambda: broadcast)
+  payload = {"notification_id": receipt.id}
+  with pytest.raises(RuntimeError, match="recovery projection unavailable"):
+    client.post(f"{url}/recover", headers=auth, json=payload)
+
+  db.expire_all()
+  assert row.deleted_at is None
+  completed_at = receipt.actions[0]["completed_at"]
+  if kind == "chat":
+    chat_ids = [str(row.id)]
+  elif kind == "project":
+    chat_ids = [chat_id for (chat_id,) in db.query(models.Chat.id).filter(
+      models.Chat.project_id == row.id,
+    )]
+  else:
+    chat_ids = []
+  generations = {}
+  for chat_id in chat_ids:
+    # The owner can begin a successor after the database commit even though
+    # the first request failed to publish every post-commit projection.
+    assert math.isfinite(chat_mod.current_run_generation(chat_id))
+    generations[chat_id] = chat_mod.bump_run_generation(chat_id)
+    assert chat_mod.mark_starting(chat_id)
+    get_writer().submit(StartTurn(
+      chat_id=chat_id, run_token=f"successor-{chat_id}",
+      user_msg={"role": "user", "content": "After recovery", "ts": 1},
+      title_source="After recovery",
+    )).result(timeout=5)
+
+  broadcast.publish.reset_mock()
+  broadcast.publish.side_effect = None
+  recovered = client.post(f"{url}/recover", headers=auth, json=payload)
+  assert recovered.status_code == 200, recovered.text
+  assert recovered.json()["completed_at"] == completed_at
+  db.expire_all()
+  assert row.deleted_at is None
+  assert receipt.actions[0]["completed_at"] == completed_at
+  assert db.query(models.Notification).count() == 1
+  expected = [
+    (({"type": "chat_recovered", "chatId": chat_id},), {})
+    for chat_id in chat_ids
+  ]
+  if kind == "project":
+    expected.append((({
+      "type": "project_recovered", "projectId": str(row.id), "chatIds": chat_ids,
+    },), {}))
+  elif kind == "app":
+    expected.append((({"type": "app_recovered", "appId": str(row.id)},), {}))
+    assert import_module("app.install").restore_app_skills.await_count == 1
+  assert broadcast.publish.call_args_list == expected
+  for chat_id in chat_ids:
+    assert chat_mod.current_run_generation(chat_id) == generations[chat_id]
+    assert db.get(models.ChatRun, f"successor-{chat_id}").status == "running"
 
 
 def test_recovery_remains_reachable_after_more_than_one_history_page(client, auth, db, chat):
