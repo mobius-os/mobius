@@ -275,7 +275,13 @@ test.describe('Bug 1: AskUserQuestion', () => {
       window.dispatchEvent(new Event('online'))
     })
     await expect.poll(() => answerAttempts).toBe(2)
-    await expect(page.getByRole('button', { name: 'Submitted' })).toBeDisabled()
+    // The card settles into its durable answered state once the retried
+    // answer commits: the choice stays recorded and read-only, and the
+    // action row (Submit/Queued/Submitted) retires entirely rather than
+    // showing a terminal "Submitted" label.
+    await expect(careful).toHaveAttribute('aria-checked', 'true')
+    await expect(careful).toBeDisabled()
+    await expect(card.locator('.qcard__submit')).toHaveCount(0)
   })
 
 
