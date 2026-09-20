@@ -78,7 +78,7 @@ test('activation presents a confirmed running transcript while stream catch-up r
   )?.[0] || ''
   assert.match(
     initialLoad,
-    /cacheCoversSavedAnchor && typeof activationCache\?\.updated_at[\s\S]*\/runtime`[\s\S]*const latestCache = queryClient\.getQueryData\(queryKey\)[\s\S]*chatSnapshotMatchesRuntime\(latestCache, runtime\)[\s\S]*detailCache = latestCache[\s\S]*reused = true/,
+    /cacheCoversSavedAnchor && typeof activationCache\?\.updated_at[\s\S]*readRuntimeSnapshot\(\)[\s\S]*const latestCache = queryClient\.getQueryData\(queryKey\)[\s\S]*chatSnapshotMatchesRuntime\(latestCache, runtime\)[\s\S]*detailCache = latestCache[\s\S]*reused = true/,
     'an unchanged row version reuses the newest complete cache, never its captured predecessor',
   )
   assert.match(

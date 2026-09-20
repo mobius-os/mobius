@@ -380,25 +380,6 @@ test('a hidden-pane finish routes stale local activity through runtime settlemen
     'runtime ordering belongs to the server lifecycle cursor, not a browser latch')
 })
 
-test('retained views share one physical runtime snapshot without sharing view state', () => {
-  const readerStart = chatViewSource.indexOf('function readRuntimeSnapshot(chatId)')
-  const readerEnd = chatViewSource.indexOf('\n}\n', readerStart) + 2
-  const reader = chatViewSource.slice(readerStart, readerEnd)
-  assert.match(reader, /runtimeSnapshotReads\.get\(key\)/)
-  assert.match(reader, /if \(current\) return current/)
-  assert.match(reader, /runtimeSnapshotReads\.set\(key, request\)/)
-  assert.match(reader,
-    /if \(runtimeSnapshotReads\.get\(key\) === request\) runtimeSnapshotReads\.delete\(key\)/,
-    'only the completing owner may release a successor read')
-
-  const refreshStart = chatViewSource.indexOf('const refreshRuntimeState = useCallback')
-  const refreshEnd = chatViewSource.indexOf('\n  // Every runtime reader', refreshStart)
-  const refresh = chatViewSource.slice(refreshStart, refreshEnd)
-  assert.match(refresh, /const data = await readRuntimeSnapshot\(chatId\)/)
-  assert.match(refresh, /fetchGenRef\.current !== gen/,
-    'each retained view still rejects a shared snapshot from its stale lifecycle')
-})
-
 // ---------------------------------------------------------------------------
 // Fix 2: doSendSilent re-entrancy guard (sendSilentInFlightRef)
 // ---------------------------------------------------------------------------

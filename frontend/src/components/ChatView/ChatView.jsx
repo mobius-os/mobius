@@ -43,6 +43,10 @@ import useVoiceInput from './useVoiceInput.js'
 import useOnlineStatus, { useDeliveryReady, useReachabilityPhase } from '../../hooks/useOnlineStatus.js'
 import useRestartPending from '../../hooks/useRestartPending.js'
 import {
+  invalidateChatRuntimeSnapshot,
+  readChatRuntimeSnapshot,
+} from '../../lib/chatRuntimeSnapshot.js'
+import {
   getOnlineSnapshot,
   getDeliveryReadySnapshot,
   getRecoverySnapshot,
@@ -254,27 +258,6 @@ import './ChatView.css'
 
 const STOP_RETRY_DELAYS_MS = [0, 250, 700, 1200]
 const CHAT_FETCH_TIMEOUT_MS = 15000
-
-// Shell handoffs can briefly retain two ChatViews for the same chat. A
-// foreground/recovery edge reaches both views, but the compact runtime payload
-// is identical; share that physical read while letting each view apply the
-// snapshot against its own lifecycle generation.
-const runtimeSnapshotReads = new Map()
-
-function readRuntimeSnapshot(chatId) {
-  const key = String(chatId)
-  const current = runtimeSnapshotReads.get(key)
-  if (current) return current
-  const request = apiFetch(
-    `/chats/${chatId}/runtime`,
-    { timeoutMs: CHAT_FETCH_TIMEOUT_MS },
-  ).then(res => jsonOrThrow(res, 'Runtime refresh failed'))
-  runtimeSnapshotReads.set(key, request)
-  request.finally(() => {
-    if (runtimeSnapshotReads.get(key) === request) runtimeSnapshotReads.delete(key)
-  }).catch(() => {})
-  return request
-}
 const MESSAGE_META_VISIBLE_MS = 5000
 // The floating jump-to-latest control is driven by follow-state plus physical
 // tail distance. Reserved reply room remains part of that range, so an upward
@@ -1535,10 +1518,23 @@ export default function ChatView({
   // until some unrelated local event (like focusing the composer) causes a
   // refresh. While a turn or visible queue exists, poll the small chat state
   // payload and hydrate only runtime fields — do not replace the transcript.
+  const readRuntimeSnapshot = useCallback(() => readChatRuntimeSnapshot(
+    outboxPrincipalKey(getToken()),
+    chatId,
+    async () => {
+      const response = await apiFetch(
+        `/chats/${chatId}/runtime`,
+        { timeoutMs: CHAT_FETCH_TIMEOUT_MS },
+      )
+      if (response.status === 404) throw new Error('CHAT_NOT_FOUND')
+      return jsonOrThrow(response, 'Runtime refresh failed')
+    },
+  ), [chatId])
+
   const refreshRuntimeState = useCallback(async () => {
     const gen = fetchGenRef.current
     try {
-      const data = await readRuntimeSnapshot(chatId)
+      const data = await readRuntimeSnapshot()
       if (chatIdStaleRef.current) return null
       if (fetchGenRef.current !== gen) return null
       const runtimeTransition = inspectRuntimeSnapshot(data)
@@ -1690,6 +1686,7 @@ export default function ChatView({
     onRuntimeSettledIdle,
     pendingQueue.hydrate,
     queryClient,
+    readRuntimeSnapshot,
     setActiveAssistantMessageId,
     setGoalPresentationLocalState,
   ])
@@ -2114,22 +2111,7 @@ export default function ChatView({
           // transcript and retires the stale stream. The old non-authoritative
           // detail read deliberately preserved local activity, so the pane
           // could return with its shimmer and Stop control stuck on.
-          if (delta.finished) {
-            // A durable finish event outranks a retained transport that simply
-            // missed its terminal frame. Reconcile the transcript first, then
-            // retire that stale stream only after detail confirms the run is
-            // settled; ordinary focus/runtime polls remain conservative.
-            const snapshot = await fetchMessages({
-              force: true,
-              terminal204: true,
-              authoritative: true,
-            })
-            if (snapshot?.running === false) {
-              retireSettledStreamRef.current?.()
-            }
-          } else {
-            await reconcileRuntimeState()
-          }
+          await reconcileRuntimeState()
           continue
         }
 
@@ -2572,10 +2554,7 @@ export default function ChatView({
       let anchorRetired = false
 
       if (cacheCoversSavedAnchor && typeof activationCache?.updated_at === 'string') {
-        runtime = await requestJson(
-          `/chats/${chatId}/runtime`,
-          'CHAT_RUNTIME_FAILED',
-        )
+        runtime = await readRuntimeSnapshot()
         requireRuntimeTransition(runtime)
         // A terminal background refresh can win while this tiny runtime read is
         // in flight. Re-read the cache before accepting reuse so an older
@@ -2870,6 +2849,7 @@ export default function ChatView({
     inspectRuntimeSnapshot,
     onRuntimeSettledIdle,
     reconcileFailedSendOutbox,
+    readRuntimeSnapshot,
     setActiveAssistantMessageId,
     setGoalPresentationLocalState,
   ])
@@ -3426,6 +3406,7 @@ export default function ChatView({
     // FRESH SEND PATH: no active turn, no queue.
     const localStartRequest = { chatId: String(chatId), cid }
     localStartRequestRef.current = localStartRequest
+    invalidateChatRuntimeSnapshot(outboxPrincipalKey(getToken()), chatId)
     fetchGenRef.current += 1
     onMessageStartRef.current?.()
     promotedRef.current = false
@@ -4269,6 +4250,7 @@ export default function ChatView({
       // also prevents the natural handler from triggering the fetch
       // at all. pendingQueue.clear() updates pendingMessagesRef.current to
       // [] before this line returns (synchronous).
+      invalidateChatRuntimeSnapshot(outboxPrincipalKey(getToken()), chatId)
       fetchGenRef.current += 1
       forgetAllSendIntents()
       pendingQueue.clear()
