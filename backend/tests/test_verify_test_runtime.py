@@ -6,6 +6,9 @@ import shutil
 import subprocess
 import sys
 
+import pytest
+import yaml
+
 from app.platform_activation import dependency_fingerprint_paths
 from scripts.verify_test_runtime import PLATFORM_ROOT, platform_head, validate_runtime
 
@@ -729,7 +732,9 @@ def test_manual_and_pull_request_runs_cover_suites_and_main_image():
   backend = test_workflow.split("\n  backend:\n", 1)[1].split(
     "\n  frontend-unit:\n", 1,
   )[0]
-  e2e = test_workflow.split("\n  e2e:\n", 1)[1]
+  e2e = test_workflow.split("\n  e2e-shards:\n", 1)[1].split(
+    "\n  e2e:\n", 1,
+  )[0]
 
   assert "pull_request:\n" in test_triggers
   assert "workflow_dispatch:\n" in test_triggers
@@ -800,3 +805,34 @@ def test_hosted_concurrency_is_scoped_to_the_pull_request():
   assert "merge_group:" in workflow
   assert "github.event.pull_request.head.ref" not in workflow
   assert "cancel-in-progress: true" in workflow
+
+
+@pytest.mark.parametrize(
+  "event", ["pull_request", "merge_group", "workflow_dispatch", "push"],
+)
+@pytest.mark.parametrize("result", ["success", "failure", "cancelled", "skipped", ""])
+def test_browser_result_gate_accepts_only_execution_success_or_pr_deferral(event, result):
+  workflow = yaml.safe_load(
+    (ROOT / ".github" / "workflows" / "test.yml").read_text(encoding="utf-8")
+  )
+  matrix = workflow["jobs"]["e2e-shards"]
+  assert matrix["strategy"]["fail-fast"] is False
+  assert matrix.get("continue-on-error", False) is False
+  gate = workflow["jobs"]["e2e"]
+  assert gate["needs"] == "e2e-shards"
+  assert gate["if"] == "always()"
+  step = gate["steps"][0]
+  assert step["env"] == {
+    "EVENT_NAME": "${{ github.event_name }}",
+    "E2E_RESULT": "${{ needs['e2e-shards'].result }}",
+  }
+  executed = subprocess.run(
+    ["bash", "-e", "-c", step["run"]],
+    env={**os.environ, "EVENT_NAME": event, "E2E_RESULT": result},
+    capture_output=True, text=True, check=False,
+  )
+  accepted = (
+    (event == "pull_request" and result == "skipped")
+    or (event in {"merge_group", "workflow_dispatch"} and result == "success")
+  )
+  assert executed.returncode == (0 if accepted else 1), executed.stdout

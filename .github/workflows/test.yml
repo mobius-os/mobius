@@ -8,10 +8,10 @@ on:
   pull_request:
     # True PR stacks target the upstream branch directly beneath them. Run the
     # same suite for every layer so the chain is reviewable in parallel; main's
-    # strict required checks still decide when each retargeted layer can merge.
+    # branch rules decide when each retargeted layer can merge.
     branches: [main, 'stack/**']
-  # Run the same required suite on the merge queue's synthetic groups so
-  # 'Require merge queue' has its four checks in the merge_group context.
+  # Verify the combined candidate in the merge queue, including browser tests
+  # deferred on pull requests. Repository rules must require the result checks.
   merge_group:
 
 permissions:
@@ -127,9 +127,8 @@ jobs:
           caddy validate --config /etc/caddy/Caddyfile
       - name: Run pytest
         working-directory: backend
-        # Pull requests are the authoritative pre-merge gate while the merge
-        # queue is disabled, so the required backend check must run the full
-        # suite rather than only the shorter serviceability contracts above.
+        # Run the full backend suite on both review heads and combined queue
+        # candidates, not only the shorter serviceability contracts above.
         # -n auto parallelizes across the runner's CPUs — safe because the suite
         # is already process-isolated (each xdist worker imports conftest and
         # gets its own tempdir DATA_DIR + SQLite engine). pytest-cov combines
@@ -207,13 +206,12 @@ jobs:
       - name: Run browser harness unit tests
         run: npm run test:e2e-harness
 
-  e2e:
+  e2e-shards:
     runs-on: ubuntu-latest
-    # Keep the browser suite available for manual dispatches and any future
-    # merge-group runs, but do not block ordinary pull requests while the
-    # merge queue is disabled. Backend, frontend-unit, and privacy remain
-    # required. Sharding reduces elapsed browser-suite time for the runs that
-    # do execute.
+    # Defer browser execution on pull requests; verify the combined merge-group
+    # candidate once, or the exact branch on manual dispatch. The stable e2e
+    # result below accounts for every shard without coupling branch rules to
+    # matrix-generated check names.
     if: github.event_name != 'pull_request'
     # A cold hosted build can spend roughly 20 minutes populating the GHA cache
     # before Playwright starts. Leave enough room for one shard's quarter of the
@@ -418,3 +416,30 @@ jobs:
       - name: Stop test container
         if: always()
         run: docker compose -p mobius-test -f docker-compose.test.yml down -v
+
+  e2e:
+    # Require this stable check alongside privacy, backend, and frontend-unit
+    # in repository rules. always() reports failed/cancelled dependencies rather
+    # than silently skipping the result that guards the merge queue.
+    runs-on: ubuntu-latest
+    needs: e2e-shards
+    if: always()
+    timeout-minutes: 5
+    steps:
+      - name: Require browser success or explicit PR deferral
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          E2E_RESULT: ${{ needs['e2e-shards'].result }}
+        run: |
+          case "$EVENT_NAME:$E2E_RESULT" in
+            pull_request:skipped)
+              echo "Browser execution is deferred to the merge queue."
+              ;;
+            merge_group:success|workflow_dispatch:success)
+              echo "Every browser shard passed."
+              ;;
+            *)
+              echo "::error::Unexpected browser result: $EVENT_NAME / $E2E_RESULT"
+              exit 1
+              ;;
+          esac

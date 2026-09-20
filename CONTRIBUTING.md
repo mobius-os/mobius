@@ -108,7 +108,18 @@ uses the ordinary update/resolver path, preserving local resolved differences.
 
 ## Tests
 
-The required PR checks live in `.github/workflows/test.yml`; the commands below mirror them.
+The checks live in `.github/workflows/test.yml`; the commands below mirror them.
+Pull requests run privacy, backend, and frontend checks. Browser execution is
+deferred to the combined merge-queue candidate, or run on an exact branch by
+manual dispatch. The stable `e2e` result accepts only that explicit PR deferral
+or a successful browser matrix on merge-group/manual runs.
+
+Repository rules must require `privacy`, `backend`, `frontend-unit`, and `e2e`
+from GitHub Actions; enabling the merge queue alone does not require checks.
+Allow enough queue check-response time for the 40-minute browser job, its privacy
+prerequisite, and the result job. Workflow source does not configure these
+repository settings.
+
 After protected merges, `.github/workflows/main-image.yml` publishes the
 prebuilt `ghcr.io/mobius-os/mobius:main` Railway image without repeating the
 test suite.
@@ -250,13 +261,19 @@ idle fixtures may use `0`; list rows and POST acknowledgements are not runtime
 snapshots. Prefer explicit scenario state over an automatic route normalizer,
 which would conceal the temporal ordering these tests exercise.
 
-**End-to-end (Playwright).** Comprehensive browser checks run in GitHub for pull
-requests. For broad or risky work, select **Draft** in Contribute and use
+**End-to-end (Playwright).** Comprehensive browser checks run in GitHub on merge
+queue candidates and manual dispatches, not ordinary pull-request events.
+For broad or risky work, select **Draft** in Contribute and use
 **Send PR** (or **Update PR**). Contribute publishes the exact reviewed branch
 and opens or updates a draft pull request; it does not merge anything. Let the
-hosted pull-request checks run, then use **Request review** once they are green.
-From another checkout whose branch is already on GitHub, the equivalent manual
-command is:
+hosted pull-request checks run, and manually dispatch Tests on the exact branch
+when browser evidence is needed before review. Use **Request review** once the
+relevant checks are green. From another checkout whose branch is already on
+GitHub, dispatch the complete suite with:
+
+```bash
+gh workflow run test.yml -R <your-login>/mobius --ref <branch>
+```
 
 Forks inherit every workflow file from upstream even though Contribute enables
 only `test.yml`. Therefore `test.yml` is the sole fork-runnable workflow: every
@@ -274,10 +291,6 @@ sync a proven-behind fork when the Tests workflow needs its current default
 branch, then push the exact reviewed commit. Existing partial credentials are
 rejected before any GitHub write so the owner can reconnect once through the
 same path.
-
-```bash
-gh workflow run test.yml -R <your-login>/mobius --ref <branch>
-```
 
 Do not point raw Playwright, an auth setup, or a preview proxy at a live Möbius
 backend. For a rare local reproduction, first commit the exact revision, then
