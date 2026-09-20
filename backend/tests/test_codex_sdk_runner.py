@@ -883,7 +883,7 @@ def test_active_codex_turn_owner_card_finish_defers_to_stop():
   asyncio.run(_scenario())
 
 
-def test_active_codex_turn_clear_uses_goal_control_and_waits_for_finish():
+def test_active_codex_turn_clear_stops_one_attempt_and_waits_for_finish():
   class GoalTurn(_FakeTurnHandle):
     def __init__(self):
       super().__init__()
@@ -899,8 +899,8 @@ def test_active_codex_turn_clear_uses_goal_control_and_waits_for_finish():
     )
     task = asyncio.create_task(active.clear_goal())
     await asyncio.sleep(0)
-    assert turn.clear_calls == 1
-    assert turn.interrupt_calls == 0
+    assert turn.clear_calls == 0
+    assert turn.interrupt_calls == 1
     assert active.interrupt_requested is True
     assert task.done() is False
     active.mark_finished()
@@ -1222,7 +1222,7 @@ def test_explicit_data_dir_keeps_out_of_band_runner_off_server_settings(
   )
 
 
-def test_new_goal_uses_sdk_logical_operation_not_ordinary_turn(monkeypatch):
+def test_new_goal_uses_one_ordinary_provider_attempt(monkeypatch):
   ordinary_turn = _FakeTurnHandle(_goal_completion_notifications())
   thread = _FakeThread("thread-1", ordinary_turn)
 
@@ -1256,18 +1256,14 @@ def test_new_goal_uses_sdk_logical_operation_not_ordinary_turn(monkeypatch):
     bc=_FakeBroadcast(),
     pending_questions={},
     db=None,
-    goal_objective="Repair every failing test",
-    goal_mode=True,
   ))
 
   assert result["error"] is None
-  assert FakeAsyncCodex.last._client.start_calls == [
-    ("thread-1", "Repair every failing test"),
-  ]
-  assert thread.turn_args is None
+  assert FakeAsyncCodex.last._client.start_calls == []
+  assert thread.turn_args[0] == "/goal Repair every failing test"
 
 
-def test_active_goal_route_exists_before_resume_and_auto_continues(monkeypatch):
+def test_legacy_active_goal_is_retired_before_resume(monkeypatch):
   goal = SimpleNamespace(status=_FakeThreadGoalStatus.active)
   ordinary_turn = _FakeTurnHandle(_goal_completion_notifications())
   thread = _FakeThread("thread-1", ordinary_turn)
@@ -1287,10 +1283,8 @@ def test_active_goal_route_exists_before_resume_and_auto_continues(monkeypatch):
       return None
 
     async def thread_resume(self, thread_id, **_kwargs):
-      assert self._client.register_calls == [thread_id]
-      assert self._client.state is not None
-      self._client.state.start()
-      self._client.state.notifications = _goal_completion_notifications()
+      assert self._client.clear_calls == [thread_id]
+      assert self._client.register_calls == []
       return thread
 
   monkeypatch.setattr(
@@ -1306,16 +1300,16 @@ def test_active_goal_route_exists_before_resume_and_auto_continues(monkeypatch):
     bc=_FakeBroadcast(),
     pending_questions={},
     db=None,
-    goal_mode=True,
-    goal_continue=True,
+    retire_native_goal=True,
   ))
 
   client = FakeAsyncCodex.last._client
   assert result["error"] is None
-  assert client.register_calls == ["thread-1"]
+  assert client.register_calls == []
+  assert client.clear_calls == ["thread-1"]
   assert client.set_calls == []
   assert client.steer_calls == []
-  assert thread.turn_args is None
+  assert thread.turn_args is not None
 
 
 def test_missing_goal_thread_keeps_existing_fresh_thread_recovery(monkeypatch):
@@ -1361,9 +1355,7 @@ def test_missing_goal_thread_keeps_existing_fresh_thread_recovery(monkeypatch):
     bc=_FakeBroadcast(),
     pending_questions={},
     db=None,
-    goal_mode=True,
-    goal_continue=True,
-    fallback_goal_objective="legacy objective",
+    retire_native_goal=True,
   ))
 
   client = FakeAsyncCodex.last._client
@@ -1373,7 +1365,7 @@ def test_missing_goal_thread_keeps_existing_fresh_thread_recovery(monkeypatch):
   assert replacement_thread.turn_args is not None
 
 
-def test_paused_goal_reactivates_and_steers_real_owner_message(monkeypatch):
+def test_legacy_paused_goal_yields_to_one_attempt_with_owner_message(monkeypatch):
   goal = SimpleNamespace(status=_FakeThreadGoalStatus.paused)
   ordinary_turn = _FakeTurnHandle(_goal_completion_notifications())
   thread = _FakeThread("thread-1", ordinary_turn)
@@ -1393,7 +1385,8 @@ def test_paused_goal_reactivates_and_steers_real_owner_message(monkeypatch):
       return None
 
     async def thread_resume(self, thread_id, **_kwargs):
-      assert self._client.register_calls == [thread_id]
+      assert self._client.clear_calls == [thread_id]
+      assert self._client.register_calls == []
       return thread
 
   monkeypatch.setattr(
@@ -1409,18 +1402,15 @@ def test_paused_goal_reactivates_and_steers_real_owner_message(monkeypatch):
     bc=_FakeBroadcast(),
     pending_questions={},
     db=None,
-    goal_mode=True,
+    retire_native_goal=True,
   ))
 
   client = FakeAsyncCodex.last._client
   assert result["error"] is None
-  assert client.set_calls == [
-    ("thread-1", _FakeThreadGoalStatus.active),
-  ]
-  assert client.steer_calls == [
-    ("thread-1", "physical-turn", "Use the smaller durable design"),
-  ]
-  assert thread.turn_args is None
+  assert client.set_calls == []
+  assert client.steer_calls == []
+  assert thread.turn_args[0] == "Use the smaller durable design"
+  assert thread.turn_args is not None
 
 
 def test_ordinary_turn_does_not_reactivate_a_historical_paused_goal(
@@ -1461,7 +1451,6 @@ def test_ordinary_turn_does_not_reactivate_a_historical_paused_goal(
     bc=_FakeBroadcast(),
     pending_questions={},
     db=None,
-    goal_mode=False,
   ))
 
   client = FakeAsyncCodex.last._client
@@ -1473,69 +1462,10 @@ def test_ordinary_turn_does_not_reactivate_a_historical_paused_goal(
   assert thread.turn_args[0] == "Can you explain the result?"
 
 
-def test_goal_turn_interrupt_uses_sdk_pause_and_interrupt_operation():
-  async def scenario():
-    client = _FakeGoalClient()
-    state = _FakeGoalState("thread-1", started=True)
-    turn = codex_sdk_runner._CodexGoalTurn(
-      client,
-      state,
-      _FakeAsyncGoalNotificationStream,
-      RuntimeError,
-    )
-    await turn.interrupt()
-    assert client.cancel_calls == [state]
-
-  asyncio.run(scenario())
 
 
-def test_goal_turn_clear_removes_objective_then_interrupts_operation():
-  async def scenario():
-    client = _FakeGoalClient()
-    state = _FakeGoalState("thread-1", started=True)
-    turn = codex_sdk_runner._CodexGoalTurn(
-      client,
-      state,
-      _FakeAsyncGoalNotificationStream,
-      RuntimeError,
-    )
-    await turn.clear_goal()
-    assert client.clear_calls == ["thread-1"]
-    assert client.cancel_calls == [state]
-
-  asyncio.run(scenario())
 
 
-def test_goal_turn_steer_follows_physical_turn_rollover():
-  async def scenario():
-    sdk = _fake_sdk(object)
-    state = _FakeGoalState("thread-1", started=True)
-
-    class RolloverClient(_FakeGoalClient):
-      async def turn_steer(self, thread_id, expected_turn_id, message):
-        self.steer_calls.append((thread_id, expected_turn_id, message))
-        if expected_turn_id == "physical-turn":
-          state._current_turn_id = "physical-turn-2"
-          raise sdk["InvalidRequestError"](
-            -32600,
-            "expected active turn id `physical-turn` but found "
-            "`physical-turn-2`",
-          )
-
-    client = RolloverClient()
-    turn = codex_sdk_runner._CodexGoalTurn(
-      client,
-      state,
-      _FakeAsyncGoalNotificationStream,
-      sdk["InvalidRequestError"],
-    )
-    await turn.steer("keep the owner message")
-    assert client.steer_calls == [
-      ("thread-1", "physical-turn", "keep the owner message"),
-      ("thread-1", "physical-turn-2", "keep the owner message"),
-    ]
-
-  asyncio.run(scenario())
 
 
 def test_dismissed_goal_is_cleared_before_the_next_ordinary_turn(monkeypatch):
@@ -1574,8 +1504,7 @@ def test_dismissed_goal_is_cleared_before_the_next_ordinary_turn(monkeypatch):
     bc=bc,
     pending_questions={},
     db=None,
-    clear_dismissed_goal=True,
-    goal_mode=True,
+    retire_native_goal=True,
   ))
 
   assert result["error"] is None
@@ -3611,41 +3540,24 @@ def test_codex_config_overrides_kill_switch(monkeypatch):
     'developer_instructions=""',
     "project_doc_max_bytes=0",
     "tools.experimental_request_user_input.enabled=false",
-    "features.goals=true",
+    "features.goals=false",
   ]
   assert not any("multi_agent_v2" in o for o in ov)
 
 
-def test_codex_config_overrides_enable_native_goal_runtime(monkeypatch):
+def test_codex_config_overrides_disable_competing_native_goal_runtime(monkeypatch):
   monkeypatch.delenv("MOEBIUS_CODEX_MULTI_AGENT", raising=False)
-  assert "features.goals=true" in codex_sdk_runner._codex_config_overrides()
+  assert "features.goals=false" in codex_sdk_runner._codex_config_overrides()
 
 
-def test_ordinary_codex_turns_do_not_expose_provider_private_goal_tools():
-  assert codex_sdk_runner._needs_native_goal_control(
-    goal_mode=False,
-    goal_objective=None,
-    clear_dismissed_goal=False,
-    fallback_goal_objective=None,
-  ) is False
-  assert "features.goals=true" not in codex_sdk_runner._codex_config_overrides(
-    allow_goals=False,
-  )
-  assert codex_sdk_runner._needs_native_goal_control(
-    goal_mode=True,
-    goal_objective="Ship and verify",
-    clear_dismissed_goal=False,
-    fallback_goal_objective=None,
-  ) is True
 
 
 def test_read_delegation_config_selects_container_safe_landlock():
   ordinary = codex_sdk_runner._codex_config_overrides(
-    allow_multi_agent=False, allow_goals=False,
+    allow_multi_agent=False,
   )
   delegated = codex_sdk_runner._codex_config_overrides(
     allow_multi_agent=False,
-    allow_goals=False,
     delegated_read_sandbox=True,
   )
 

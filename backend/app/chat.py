@@ -69,12 +69,10 @@ from app.chat_context import (
   _chat_settings_dict,
   _custom_system_prompt,
   _goal_objective,
-  _goal_resume_requested,
   _human_elapsed,
   _is_cli_slash_command,
   _last_user_message_elapsed,
   _latest_compaction_brief,
-  _latest_goal_objective,
   _strip_report_html,
 )
 from app.chat_logging import (
@@ -4011,7 +4009,6 @@ async def _complete_turn(
     terminal_handoff = goal_terminal_handoff(
       db, chat_id, sink.run_token or "",
     )
-
   incorporate_activity_delivery = (
     ending_status == "completed" and bool(activity_delegation_ids)
   )
@@ -5060,14 +5057,7 @@ async def _run_chat_impl_with_db(
   settings = get_settings()
   raw_user_message = messages[-1].content
   user_message = raw_user_message
-  goal_objective = _goal_objective(raw_user_message)
   historical_goal_mode = _chat_has_goal_intent(messages)
-  goal_mode = historical_goal_mode
-  clear_dismissed_provider_goal = (
-    run_state.latest_provider_goal_is_dismissed(db, chat_id)
-    if chat_id else False
-  )
-  goal_continue = is_goal_continue(raw_user_message or "")
   question_checkpoint = None
   if settings.ensure_chat_note and chat_id:
     async def question_checkpoint() -> None:
@@ -5104,17 +5094,6 @@ async def _run_chat_impl_with_db(
   if run_token is None:
     run_token = alloc_run_token()
 
-  # The writer commits the exact ChatRun before provider launch.  Its Goal
-  # identity, not a historical `/goal` anywhere in the transcript, decides
-  # whether this physical turn may resume Codex's native Goal operation.
-  # Otherwise an unrelated question after a paused/stopped Goal can be steered
-  # into that old operation even though the platform correctly opened an
-  # ordinary run.
-  if chat_id:
-    goal_mode = _run_owns_active_goal(
-      db, chat_id=chat_id, run_token=run_token,
-    )
-
   app_context_block = ""
   app_context_env: dict[str, str] = {}
   chat_row = None
@@ -5150,29 +5129,9 @@ async def _run_chat_impl_with_db(
   else:
     # Delegation prompts are plain bounded tasks even if their text happens to
     # begin with an owner-only slash command.
-    goal_objective = None
-    clear_dismissed_provider_goal = False
-    goal_mode = False
     historical_goal_mode = False
-    goal_continue = False
     is_slash_command = False
 
-  # Chats created before native Codex goal handling have the /goal objective in
-  # their durable transcript but no provider-side ThreadGoal yet.  Either the
-  # automatic restart handoff or the visible one-tap Resume sends "continue";
-  # carrying the newest objective lets the runner adopt that old chat into the
-  # native goal store.  A native completed goal still wins authoritatively and
-  # is never restarted by this fallback.
-  fallback_goal_objective = (
-    _latest_goal_objective(messages)
-    if (
-      goal_continue
-      and historical_goal_mode
-      and goal_objective is None
-      and _goal_resume_requested(chat_row, raw_user_message)
-    )
-    else None
-  )
   # Durable run identity: the turn's StartTurn (initial send) or
   # PromotePending (continuation / stale-pending drain) writer-actor
   # command ALREADY inserted ChatRun(status="running") atomically with the
@@ -5369,6 +5328,12 @@ async def _run_chat_impl_with_db(
         user_message = f"{user_message}\n\n{waits_context}"
       else:
         user_message = f"{waits_context}\n\n{user_message}"
+
+  if chat_id and run_policy is None:
+    from app.goals import resume_context
+    goal_context = resume_context(db, run_token)
+    if goal_context:
+      user_message = f"{user_message}\n\n{goal_context}"
 
   # Per-turn time context (EVERY turn, not just the first) so the agent has a
   # clock + a sense of recency (how long since the user last wrote). Prepended
@@ -5779,11 +5744,7 @@ async def _run_chat_impl_with_db(
         system_prompt=system_prompt,
         resumed_context=resumed_context_fallback,
         should_abort=lambda: _run_generation_superseded(chat_id, run_gen),
-        goal_objective=goal_objective,
-        clear_dismissed_goal=clear_dismissed_provider_goal,
-        goal_mode=goal_mode,
-        goal_continue=goal_continue,
-        fallback_goal_objective=fallback_goal_objective,
+        retire_native_goal=historical_goal_mode,
         run_policy=run_policy,
         provider_id=provider_id,
         connector_plan=connector_turn_plan,

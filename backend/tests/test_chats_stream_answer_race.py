@@ -16,6 +16,8 @@ These tests pin four behaviours of that boundary:
      restarts from the durable question while a Stop racing Submit still wins.
 """
 
+from tests.goal_fixtures import goal_run as make_goal_run, persist_goal_fixture
+
 import asyncio
 from datetime import UTC, datetime
 from uuid import uuid4
@@ -248,7 +250,7 @@ def test_answer_recovers_durable_question_without_live_pending(
     )
     db = SessionLocal()
     try:
-      db.add(models.ChatRun(
+      db.add(make_goal_run(db,
         id="rt-interrupted-goal",
         chat_id=chat.id,
         status="interrupted",

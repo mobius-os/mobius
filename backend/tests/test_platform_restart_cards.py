@@ -1,6 +1,7 @@
 """Typed Restart actions stay exact, at-most-once, and ahead of queued work."""
 
 from __future__ import annotations
+from tests.goal_fixtures import goal_run as make_goal_run
 
 from datetime import timedelta
 import asyncio
@@ -89,7 +90,7 @@ def _install(
         if queued else []
       ),
     ))
-    db.add(models.ChatRun(
+    db.add(make_goal_run(db,
       id=run_id, chat_id=chat_id, root_run_id=run_id, status="completed",
       provider="claude", started_at=now - timedelta(minutes=1), ended_at=now,
       goal_objective=f"Goal {chat_id}", goal_id=f"goal-{chat_id}",
