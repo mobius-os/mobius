@@ -44,6 +44,9 @@ def resource(request, db, auth, monkeypatch):
       id=project_id, name="Receipt project", project_type="blank",
       root_path=root_path, template_snapshot_json={},
     )
+    db.add(models.Chat(
+      id=str(uuid4()), title="Receipt project chat", project_id=project_id,
+    ))
   db.add(row)
   db.commit()
   return kind, row, f"/api/{kind}s/{row.id}"
@@ -117,6 +120,11 @@ def test_retry_reads_completion_after_obtaining_lifecycle_lock(
     with SessionLocal() as other:
       live = other.get(type(row), row.id)
       live.deleted_at = None
+      if kind == "project":
+        for project_chat in other.query(models.Chat).filter(
+          models.Chat.project_id == row.id,
+        ):
+          project_chat.deleted_at = None
       completed_at = complete_recovery_action(
         other, owner_id=owner_id, notification_id=receipt.id,
         resource_type=kind, resource_id=str(row.id),
@@ -145,6 +153,21 @@ def test_retry_reads_completion_after_obtaining_lifecycle_lock(
   result = client.post(f"{url}/recover", headers=auth, json={"notification_id": receipt.id})
   assert result.status_code == 200, result.text
   assert datetime.fromisoformat(result.json()["completed_at"]) == completed_at
+  if kind == "chat":
+    from app.chat import current_run_generation
+    assert math.isfinite(current_run_generation(str(row.id)))
+  elif kind == "project":
+    from app.chat import current_run_generation
+    child_ids = [
+      chat_id for (chat_id,) in db.query(models.Chat.id).filter(
+        models.Chat.project_id == row.id,
+      )
+    ]
+    assert child_ids
+    assert all(math.isfinite(current_run_generation(chat_id)) for chat_id in child_ids)
+  else:
+    restore_skills = import_module("app.install").restore_app_skills
+    assert restore_skills.await_count == 1
 
 
 def test_recovery_remains_reachable_after_more_than_one_history_page(client, auth, db, chat):

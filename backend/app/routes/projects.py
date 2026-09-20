@@ -2164,6 +2164,7 @@ async def recover_project(
 ):
   async with serialize_project_lifecycle(project_id):
     completed_at = None
+    already_completed = False
     with PROJECT_LIFECYCLE_LOCK:
       with drawer_pins.serialized_write():
         db.rollback()
@@ -2178,37 +2179,38 @@ async def recover_project(
             resource_type="project", resource_id=str(project_id),
             deleted_at=project.deleted_at,
           )
-          if completed_at is not None:
-            response = _project_response(
-              project, _live_project_chat_rows(db, project.id),
+          already_completed = completed_at is not None
+        if already_completed:
+          chats = _live_project_chat_rows(db, project.id)
+        else:
+          if project.deleted_at is None:
+            raise HTTPException(404, "Project not found or not deleted.")
+          if now_naive_utc() - project.deleted_at >= SOFT_DELETE_TTL:
+            raise HTTPException(410, "Recovery window has expired.")
+          if not _project_root(project).is_dir():
+            raise HTTPException(409, "Project files are unavailable.")
+          deleted_at = project.deleted_at
+          from app.shared_app_retention import stage_project_shared_app_recovery
+          stage_project_shared_app_recovery(db, str(project.id), deleted_at)
+          chats = db.query(models.Chat).filter(
+            models.Chat.project_id == project.id,
+            models.Chat.deleted_at == deleted_at,
+          ).all()
+          project.deleted_at = None
+          for chat in chats:
+            chat.deleted_at = None
+          if body is not None:
+            completed_at = complete_recovery_action(
+              db,
+              owner_id=_.id,
+              notification_id=body.notification_id,
+              resource_type="project",
+              resource_id=str(project.id),
             )
-            response["completed_at"] = completed_at
-            return response
-        if project.deleted_at is None:
-          raise HTTPException(404, "Project not found or not deleted.")
-        if now_naive_utc() - project.deleted_at >= SOFT_DELETE_TTL:
-          raise HTTPException(410, "Recovery window has expired.")
-        if not _project_root(project).is_dir():
-          raise HTTPException(409, "Project files are unavailable.")
-        deleted_at = project.deleted_at
-        from app.shared_app_retention import stage_project_shared_app_recovery
-        stage_project_shared_app_recovery(db, str(project.id), deleted_at)
-        chats = db.query(models.Chat).filter(
-          models.Chat.project_id == project.id,
-          models.Chat.deleted_at == deleted_at,
-        ).all()
-        project.deleted_at = None
-        for chat in chats:
-          chat.deleted_at = None
-        if body is not None:
-          completed_at = complete_recovery_action(
-            db,
-            owner_id=_.id,
-            notification_id=body.notification_id,
-            resource_type="project",
-            resource_id=str(project.id),
-          )
-        db.commit()
+          db.commit()
+    # Repeat these idempotent post-commit steps for a completed receipt. The
+    # first request may have committed the database transaction and then lost
+    # its response before the in-memory registry or live shell converged.
     for chat in chats:
       recover_chat_generation(chat.id)
       get_system_broadcast().publish(

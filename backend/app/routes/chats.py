@@ -2458,6 +2458,7 @@ async def recover_chat(
   """Restores a soft-deleted chat if the TTL window has not expired."""
   from app import chat_queue
   completed_at = None
+  already_completed = False
   project_id = db.query(models.Chat.project_id).filter(models.Chat.id == chat_id).scalar()
   db.rollback()
   async with serialize_project_lifecycle(project_id):
@@ -2482,21 +2483,23 @@ async def recover_chat(
             db, owner_id=_.id, notification_id=body.notification_id,
             resource_type="chat", resource_id=str(chat_id), deleted_at=chat.deleted_at,
           )
-          if completed_at is not None:
-            return {"ok": True, "completed_at": completed_at}
-        if chat.deleted_at is None:
-          raise HTTPException(404, "Chat not found or not deleted.")
-        if now_naive_utc() - chat.deleted_at >= SOFT_DELETE_TTL:
-          raise HTTPException(410, "Recovery window has expired.")
-        chat.deleted_at = None
-        if body is not None:
-          completed_at = complete_recovery_action(
-            db, owner_id=_.id, notification_id=body.notification_id,
-            resource_type="chat", resource_id=str(chat_id),
-          )
-        db.commit()
+          already_completed = completed_at is not None
+        if not already_completed:
+          if chat.deleted_at is None:
+            raise HTTPException(404, "Chat not found or not deleted.")
+          if now_naive_utc() - chat.deleted_at >= SOFT_DELETE_TTL:
+            raise HTTPException(410, "Recovery window has expired.")
+          chat.deleted_at = None
+          if body is not None:
+            completed_at = complete_recovery_action(
+              db, owner_id=_.id, notification_id=body.notification_id,
+              resource_type="chat", resource_id=str(chat_id),
+            )
+          db.commit()
       # Clear the registry's deleted flag and bump to a generation newer than every
       # pre-delete run, so a resurrected stale run can't reclaim the recovered chat.
+      # This convergence is idempotent: a receipt retry after the DB commit must
+      # repair a missed post-commit step without bumping a live successor.
       recover_chat_generation(chat_id)
       get_system_broadcast().publish(
         {"type": "chat_recovered", "chatId": str(chat_id)}

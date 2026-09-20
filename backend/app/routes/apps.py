@@ -3268,6 +3268,7 @@ async def recover_app(
   under-lock stale re-query no longer matches it.
   """
   completed_at = None
+  already_completed = False
   async with (
     fs_locks.install_uninstall_lock(),
     fs_locks.app_storage_lock(app_id),
@@ -3281,45 +3282,46 @@ async def recover_app(
         db, owner_id=_.id, notification_id=body.notification_id,
         resource_type="app", resource_id=str(app_id), deleted_at=app.deleted_at,
       )
-      if completed_at is not None:
-        return {"ok": True, "completed_at": completed_at}
-    if app.deleted_at is None:
-      raise HTTPException(404, "App not found or not deleted.")
-    if now_naive_utc() - app.deleted_at >= APP_SOFT_DELETE_TTL:
-      raise HTTPException(410, "Recovery window has expired.")
-    if not app_bundle_uses_current_compile_contract(app):
-      if not app.jsx_source or not app.jsx_source.strip():
-        raise HTTPException(
-          status_code=409,
-          detail="App source is unavailable; reinstall it to recover.",
-        )
-      try:
-        # recompile_app_bundle commits internally, but the row remains
-        # tombstoned until the separate commit below. A crash or compile error
-        # therefore cannot expose a stale or partially rebuilt app.
-        await recompile_app_bundle(db, app, app.jsx_source)
-      except RuntimeError as exc:
-        db.rollback()
-        raise HTTPException(
-          status_code=422,
-          detail=f"Could not rebuild app for recovery: {exc}",
-        )
-    with drawer_pins.serialized_write():
-      app.deleted_at = None
-      app_name = app.name
-      app_source_dir = app.source_dir
-      if body is not None:
-        completed_at = complete_recovery_action(
-          db,
-          owner_id=_.id,
-          notification_id=body.notification_id,
-          resource_type="app",
-          resource_id=str(app_id),
-        )
-      db.commit()
+      already_completed = completed_at is not None
+    if not already_completed:
+      if app.deleted_at is None:
+        raise HTTPException(404, "App not found or not deleted.")
+      if now_naive_utc() - app.deleted_at >= APP_SOFT_DELETE_TTL:
+        raise HTTPException(410, "Recovery window has expired.")
+      if not app_bundle_uses_current_compile_contract(app):
+        if not app.jsx_source or not app.jsx_source.strip():
+          raise HTTPException(
+            status_code=409,
+            detail="App source is unavailable; reinstall it to recover.",
+          )
+        try:
+          # recompile_app_bundle commits internally, but the row remains
+          # tombstoned until the separate commit below. A crash or compile error
+          # therefore cannot expose a stale or partially rebuilt app.
+          await recompile_app_bundle(db, app, app.jsx_source)
+        except RuntimeError as exc:
+          db.rollback()
+          raise HTTPException(
+            status_code=422,
+            detail=f"Could not rebuild app for recovery: {exc}",
+          )
+      with drawer_pins.serialized_write():
+        app.deleted_at = None
+        if body is not None:
+          completed_at = complete_recovery_action(
+            db,
+            owner_id=_.id,
+            notification_id=body.notification_id,
+            resource_type="app",
+            resource_id=str(app_id),
+          )
+        db.commit()
+    app_source_dir = app.source_dir
     # Recovery is durable at this point. Publish before ancillary cron/skill
     # restoration so a later best-effort failure cannot leave the live drawer
-    # hidden behind a stale deletion tombstone.
+    # hidden behind a stale deletion tombstone. A completed-receipt retry repeats
+    # these idempotent convergence steps so a lost response cannot strand a live
+    # row with its cron or skills still disabled.
     get_system_broadcast().publish(
       {"type": "app_recovered", "appId": str(app_id)}
     )
