@@ -12,6 +12,7 @@ from sqlalchemy.orm.attributes import flag_modified
 from app import models
 from app.broadcast import get_system_broadcast
 from app.schemas import NotificationAction
+from app.timeutil import SOFT_DELETE_TTL, now_naive_utc
 
 
 RecoveryResource = Literal["chat", "app", "project"]
@@ -24,6 +25,8 @@ def stage_recovery_notification(
   owner_id: int,
   resource_type: RecoveryResource,
   resource_id: str,
+  deleted_at: datetime,
+  resource_name: str,
 ) -> str:
   """Stage the Undo receipt in the caller's deletion transaction."""
   notification_id = str(uuid.uuid4())
@@ -33,12 +36,14 @@ def stage_recovery_notification(
     source_type="shell",
     source_id=None,
     title=f"{resource_type.capitalize()} deleted",
-    body="Undo is available here for 7 days.",
+    body=resource_name,
     actions=[{
       "action": f"recover_{resource_type}",
       "title": "Undo",
       "resource_type": resource_type,
       "resource_id": resource_id,
+      "deleted_at": deleted_at.replace(tzinfo=UTC).isoformat(),
+      "expires_at": (deleted_at + SOFT_DELETE_TTL).replace(tzinfo=UTC).isoformat(),
     }],
     sent_at=datetime.now(UTC),
   ))
@@ -72,7 +77,7 @@ def _find_recovery_action(
   notification = db.query(models.Notification).filter(
     models.Notification.id == notification_id,
     models.Notification.owner_id == owner_id,
-  ).one_or_none()
+  ).populate_existing().one_or_none()
   if notification is None:
     raise HTTPException(status_code=404, detail="Recovery receipt not found.")
 
@@ -91,15 +96,20 @@ def _find_recovery_action(
   raise HTTPException(status_code=404, detail="Recovery receipt not found.")
 
 
-def recovery_action_completed_at(
+def validate_recovery_action(
   db: Session,
   *,
   owner_id: int,
   notification_id: str,
   resource_type: RecoveryResource,
   resource_id: str,
+  deleted_at: datetime | None,
 ) -> datetime | None:
-  """Read the exact owner-scoped receipt for idempotent recovery retries."""
+  """Validate a receipt against the current tombstone under its lifecycle lock.
+
+  A resource id can be deleted, restored without this receipt, and deleted
+  again. The original tombstone timestamp, not the id alone, owns this Undo.
+  """
   _, _, action = _find_recovery_action(
     db,
     owner_id=owner_id,
@@ -107,7 +117,22 @@ def recovery_action_completed_at(
     resource_type=resource_type,
     resource_id=resource_id,
   )
-  return action.completed_at
+  receipt_deleted_at = action.deleted_at.astimezone(UTC).replace(tzinfo=None)
+  if deleted_at is not None and receipt_deleted_at != deleted_at:
+    raise HTTPException(409, detail={
+      "code": "recovery_superseded",
+      "message": "This Undo belongs to an earlier deletion. Use the latest receipt.",
+    })
+  if action.completed_at is not None:
+    return action.completed_at
+  if now_naive_utc() >= action.expires_at.astimezone(UTC).replace(tzinfo=None):
+    raise HTTPException(410, detail="Recovery window has expired.")
+  if deleted_at is None:
+    raise HTTPException(409, detail={
+      "code": "recovery_already_restored",
+      "message": "This item has already been restored.",
+    })
+  return None
 
 
 def complete_recovery_action(
@@ -129,7 +154,7 @@ def complete_recovery_action(
   completed_at = action.completed_at or datetime.now(UTC)
   actions = list(notification.actions or [])
   actions[index] = {
-    **action.model_dump(exclude_none=True),
+    **action.model_dump(mode="json", exclude_none=True),
     "completed_at": completed_at.isoformat(),
   }
   notification.actions = actions

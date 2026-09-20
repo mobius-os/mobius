@@ -52,6 +52,8 @@ test('durable recovery actions restore in place and preserve their completed rec
   assert.doesNotMatch(component, /completeAction/)
   assert.match(component, /Restoring…/)
   assert.match(component, /Restored/)
+  assert.match(component, /recoveryUnavailableLabel\(recovery, now\)/)
+  assert.match(component, /Load older notifications/)
   assert.match(center, /onRecoveryAction=\{onRecoveryAction\}/)
   assert.match(css, /\.notifications__recovery-action\s*\{[\s\S]*?min-height:\s*32px/)
 })

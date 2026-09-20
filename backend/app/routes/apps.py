@@ -50,7 +50,7 @@ from app.broadcast import get_system_broadcast
 from app.recovery_notifications import (
   complete_recovery_action,
   publish_recovery_notification,
-  recovery_action_completed_at,
+  validate_recovery_action,
   stage_recovery_notification,
 )
 from app.compiler import (
@@ -3067,6 +3067,8 @@ async def delete_app(
           owner_id=_.id,
           resource_type="app",
           resource_id=str(app_id),
+          deleted_at=app.deleted_at,
+          resource_name=app.name or "Untitled app",
         )
         db.commit()
     # Publish the durable tombstone before best-effort job/skill/cron cleanup.
@@ -3119,6 +3121,10 @@ async def delete_app(
         "App %s was deleted but its source cron could not be disabled",
         app_id,
       )
+
+  return Response(status_code=204, headers={
+    "X-Recovery-Notification-Id": recovery_notification_id,
+  })
 
 
 @router.delete(
@@ -3261,35 +3267,26 @@ async def recover_app(
   consistent state: a purged row → recover 404s; a recovered row → purge's
   under-lock stale re-query no longer matches it.
   """
-  if body is not None:
-    completed_at = recovery_action_completed_at(
-      db,
-      owner_id=_.id,
-      notification_id=body.notification_id,
-      resource_type="app",
-      resource_id=str(app_id),
-    )
-    if completed_at is not None:
-      live_app_or_404(db, app_id)
-      return {"ok": True, "completed_at": completed_at}
   completed_at = None
   async with (
     fs_locks.install_uninstall_lock(),
     fs_locks.app_storage_lock(app_id),
   ):
-    app = (
-      db.query(models.App)
-      .filter(models.App.id == app_id, models.App.deleted_at.isnot(None))
-      .first()
-    )
+    db.rollback()
+    app = db.query(models.App).filter(models.App.id == app_id).first()
     if not app:
-      raise HTTPException(
-        status_code=404, detail="App not found or not deleted."
+      raise HTTPException(404, "App not found.")
+    if body is not None:
+      completed_at = validate_recovery_action(
+        db, owner_id=_.id, notification_id=body.notification_id,
+        resource_type="app", resource_id=str(app_id), deleted_at=app.deleted_at,
       )
-    if (
-      now_naive_utc() - app.deleted_at
-    ) >= APP_SOFT_DELETE_TTL:
-      raise HTTPException(status_code=410, detail="Recovery window has expired.")
+      if completed_at is not None:
+        return {"ok": True, "completed_at": completed_at}
+    if app.deleted_at is None:
+      raise HTTPException(404, "App not found or not deleted.")
+    if now_naive_utc() - app.deleted_at >= APP_SOFT_DELETE_TTL:
+      raise HTTPException(410, "Recovery window has expired.")
     if not app_bundle_uses_current_compile_contract(app):
       if not app.jsx_source or not app.jsx_source.strip():
         raise HTTPException(

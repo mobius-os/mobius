@@ -35,6 +35,23 @@
   font-weight: 650;
 }
 
+.notifications__load-more {
+  display: block;
+  width: 100%;
+  min-height: 44px;
+  border: 0;
+  border-top: 1px solid var(--border-light);
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+}
+
+.notifications__load-more:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
 .notifications__clear {
   margin-left: auto;
   padding: 8px 10px;
@@ -258,10 +275,15 @@
   opacity: 0.62;
 }
 
-.notifications__recovery-complete {
-  color: var(--success, #2e8b57);
+.notifications__recovery-status {
+  color: var(--muted);
   font-size: 13px;
   font-weight: 650;
+}
+
+.notifications__recovery-deadline {
+  color: var(--muted);
+  font-size: 12px;
 }
 
 .notifications__recovery-error {

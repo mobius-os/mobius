@@ -808,6 +808,8 @@ class NotificationAction(BaseModel):
   resource_type: Literal["chat", "app", "project"] | None = None
   resource_id: str | None = Field(default=None, min_length=1, max_length=128)
   completed_at: datetime | None = None
+  deleted_at: datetime | None = None
+  expires_at: datetime | None = None
 
   @model_validator(mode="after")
   def require_coherent_action(self):
@@ -818,11 +820,19 @@ class NotificationAction(BaseModel):
     }.get(self.action)
     has_recovery_fields = self.resource_type is not None or self.resource_id is not None
     if recovery_type is None:
-      if has_recovery_fields or self.completed_at is not None:
+      if has_recovery_fields or any(value is not None for value in (
+        self.completed_at, self.deleted_at, self.expires_at,
+      )):
         raise ValueError("recovery fields require a recover_* action")
       return self
     if self.resource_type != recovery_type or not self.resource_id:
       raise ValueError("recovery action must match its resource type and id")
+    if self.deleted_at is None or self.expires_at is None:
+      raise ValueError("recovery actions require the deletion and expiry timestamps")
+    if self.deleted_at.tzinfo is None or self.expires_at.tzinfo is None:
+      raise ValueError("recovery timestamps must include a timezone")
+    if self.expires_at <= self.deleted_at:
+      raise ValueError("recovery expiry must follow deletion")
     if self.target is not None:
       raise ValueError("recovery actions cannot navigate to a target")
     if not re.fullmatch(r"[A-Za-z0-9._:-]+", self.resource_id):

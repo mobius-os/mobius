@@ -32,7 +32,7 @@ from app.broadcast import get_system_broadcast
 from app.recovery_notifications import (
   complete_recovery_action,
   publish_recovery_notification,
-  recovery_action_completed_at,
+  validate_recovery_action,
   stage_recovery_notification,
 )
 from app.chat import (
@@ -2113,6 +2113,8 @@ async def delete_project(
         owner_id=_.id,
         resource_type="project",
         resource_id=str(project.id),
+        deleted_at=project.deleted_at,
+        resource_name=project.name or "Untitled project",
       )
       db.commit()
   for chat in chats:
@@ -2134,7 +2136,9 @@ async def delete_project(
     "chatIds": [str(chat.id) for chat in chats],
   })
   publish_recovery_notification(recovery_notification_id)
-  return Response(status_code=204)
+  return Response(status_code=204, headers={
+    "X-Recovery-Notification-Id": recovery_notification_id,
+  })
 
 
 @router.post("/{project_id}/recover", dependencies=[Depends(reject_cross_site)])
@@ -2144,29 +2148,28 @@ def recover_project(
   _: models.Owner = Depends(get_current_owner_for_lifecycle_control),
   db: Session = Depends(get_db),
 ):
-  if body is not None:
-    completed_at = recovery_action_completed_at(
-      db,
-      owner_id=_.id,
-      notification_id=body.notification_id,
-      resource_type="project",
-      resource_id=str(project_id),
-    )
-    if completed_at is not None:
-      project = _live_project(db, project_id)
-      response = _project_response(
-        project, _live_project_chat_rows(db, project.id),
-      )
-      response["completed_at"] = completed_at
-      return response
   completed_at = None
   with PROJECT_LIFECYCLE_LOCK:
     with drawer_pins.serialized_write():
+      db.rollback()
       project = db.query(models.Project).filter(
         models.Project.id == project_id,
-        models.Project.deleted_at.isnot(None),
       ).first()
       if project is None:
+        raise HTTPException(404, "Project not found.")
+      if body is not None:
+        completed_at = validate_recovery_action(
+          db, owner_id=_.id, notification_id=body.notification_id,
+          resource_type="project", resource_id=str(project_id),
+          deleted_at=project.deleted_at,
+        )
+        if completed_at is not None:
+          response = _project_response(
+            project, _live_project_chat_rows(db, project.id),
+          )
+          response["completed_at"] = completed_at
+          return response
+      if project.deleted_at is None:
         raise HTTPException(404, "Project not found or not deleted.")
       if now_naive_utc() - project.deleted_at >= SOFT_DELETE_TTL:
         raise HTTPException(410, "Recovery window has expired.")

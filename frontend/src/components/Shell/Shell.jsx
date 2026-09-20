@@ -26,6 +26,7 @@ import { placeContextMenu } from '../../lib/contextMenuGeometry.js'
 import { captureLayoutSpace, clientPointToLayout } from '../../lib/layoutSpace.js'
 import { makeAppChatController } from '../../lib/appChatControl.js'
 import { handleAppProjectsRequest } from '../../lib/appProjectControl.js'
+import { recoveryFailure } from '../../lib/notificationRecovery.js'
 import { parseNotificationTarget } from '../../lib/notificationTarget.js'
 import { recordClientError } from '../../lib/errorLog.js'
 import useSystemEventStream from '../../hooks/useSystemEventStream.js'
@@ -41,6 +42,7 @@ import useDelayedConnectionNotice from '../../hooks/useDelayedConnectionNotice.j
 import useOutboxDrain from '../../hooks/useOutboxDrain.js'
 import { ReachabilityPhase, getDeliveryReadySnapshot, setRestartPending, verifyConnectivity } from '../../lib/connectivityStore.js'
 import {
+  notificationQueries,
   appQueries,
   appSourceQueries,
   chatAppArtifactQueries,
@@ -4017,6 +4019,7 @@ export default function Shell({ onInitialVisualReady }) {
       confirmChatRecovered(action.resourceId)
       recoveredChatIdsRef.current.add(action.resourceId)
       await refreshChats()
+      void notificationQueries.list.invalidate(queryClient)
       return { completedAt: recovered?.completed_at }
     }
     if (action.resourceType === 'app') {
@@ -4024,6 +4027,7 @@ export default function Shell({ onInitialVisualReady }) {
       const recovered = await jsonOrThrow(response, 'App recovery failed')
       confirmAppRecovered(action.resourceId)
       await refreshApps()
+      void notificationQueries.list.invalidate(queryClient)
       return { completedAt: recovered?.completed_at }
     }
     if (action.resourceType === 'project') {
@@ -4038,9 +4042,29 @@ export default function Shell({ onInitialVisualReady }) {
         return [recovered, ...rows.filter(row => String(row.id) !== action.resourceId)]
       })
       await refreshChats()
+      void notificationQueries.list.invalidate(queryClient)
       return { completedAt: recovered?.completed_at }
     }
     throw new Error('Unsupported recovery action')
+  }
+
+  function showDeletionUndo(response, resourceType, resourceId) {
+    const notificationId = response.headers.get('X-Recovery-Notification-Id')
+    if (!notificationId) return
+    const name = resourceType[0].toUpperCase() + resourceType.slice(1)
+    showToast(`${name} deleted`, {
+      duration: 5000,
+      action: {
+        label: 'Undo',
+        onAction: async () => {
+          try {
+            await recoverNotificationAction(notificationId, { resourceType, resourceId: String(resourceId) })
+          } catch (error) {
+            showToast(recoveryFailure(error).message, { variant: 'error' })
+          }
+        },
+      },
+    })
   }
 
   async function deleteChat(id) {
@@ -4103,6 +4127,7 @@ export default function Shell({ onInitialVisualReady }) {
     const wsAfterClose = workspaceStateRef.current.ws
     const single = wsAfterClose.viewMode === 'single'
     const focusedAfterClose = wsAfterClose.panes[wsAfterClose.focusedPaneId]
+    showDeletionUndo(res, 'chat', id)
     if (!single && !focusedAfterClose?.activeTabKey) {
       await newChat()
     }
@@ -4167,6 +4192,7 @@ export default function Shell({ onInitialVisualReady }) {
         reason: 'deleted',
       })
     }
+    showDeletionUndo(res, 'project', projectId)
     await Promise.all([
       projectsQuery.refetch(),
       refreshChats(),
@@ -4226,6 +4252,7 @@ export default function Shell({ onInitialVisualReady }) {
       tabKey: tabModel.tabKey(tabModel.makeTab('app', id)),
       reason: 'deleted',
     })
+    showDeletionUndo(res, 'app', id)
     await refreshApps()
   }
 

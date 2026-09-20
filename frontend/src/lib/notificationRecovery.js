@@ -1,3 +1,4 @@
+// Parse and present tombstone-bound recovery receipts without navigation side effects.
 const RECOVERY_TYPES = Object.freeze({
   recover_chat: 'chat',
   recover_app: 'app',
@@ -23,12 +24,20 @@ export function parseNotificationRecoveryAction(value) {
       || Number.isNaN(Date.parse(value.completed_at))
     )
   ) return null
+  if (
+    typeof value.deleted_at !== 'string'
+    || typeof value.expires_at !== 'string'
+    || !Number.isFinite(Date.parse(value.deleted_at))
+    || !Number.isFinite(Date.parse(value.expires_at))
+    || Date.parse(value.expires_at) <= Date.parse(value.deleted_at)
+  ) return null
   return {
     action: value.action,
     title: value.title,
     resourceType,
     resourceId: value.resource_id,
     completedAt: value.completed_at || null,
+    expiresAt: value.expires_at,
   }
 }
 
@@ -39,4 +48,38 @@ export function notificationRecoveryAction(notification) {
     if (action) return action
   }
   return null
+}
+
+export function recoveryUnavailableLabel(action, now = Date.now()) {
+  if (action.completedAt) return 'Restored'
+  return now >= Date.parse(action.expiresAt) ? 'Recovery window expired' : null
+}
+
+export function recoveryFailure(error) {
+  if (error?.status === 410) return { terminal: true, message: 'Recovery window expired' }
+  if (error?.code === 'recovery_superseded') {
+    return { terminal: true, message: 'Earlier deletion — use the latest Undo' }
+  }
+  if (error?.code === 'recovery_already_restored') {
+    return { terminal: true, message: 'Already restored' }
+  }
+  if (error?.status === 404) return { terminal: true, message: 'Recovery no longer available' }
+  return { terminal: false, message: error?.message || 'Couldn’t restore this item. Try again.' }
+}
+
+export function completeNotificationRecovery(history, notificationId, completedAt) {
+  if (!history) return history
+  return {
+    ...history,
+    pages: history.pages.map(page => page.map(row => (
+      row.id !== notificationId ? row : {
+        ...row,
+        actions: (row.actions || []).map(action => (
+          parseNotificationRecoveryAction(action)
+            ? { ...action, completed_at: completedAt }
+            : action
+        )),
+      }
+    ))),
+  }
 }

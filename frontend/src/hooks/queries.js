@@ -1,4 +1,4 @@
-import { useQuery } from '@tanstack/react-query'
+import { useInfiniteQuery, useQuery } from '@tanstack/react-query'
 import { api } from '../api/client.js'
 import { appTokenRefreshInterval } from '../lib/appToken.js'
 import { chatDetailCacheValue } from '../lib/chatDetailCache.js'
@@ -697,22 +697,29 @@ export const ownerQueries = {
 // No polling anywhere: the `notification_created` system-SSE event invalidates
 // the unread count (Shell.handleSystemEvent), and the SSE reconnect hook
 // reconciles anything missed while disconnected — the same posture as apps.
-const notificationsListKey = ['notifications', 'list']
+const notificationsListKey = ['notifications', 'history']
 const notificationsUnreadKey = ['notifications', 'unread-count']
 const NOTIFICATIONS_PREVIEW_SIZE = 8
 
-async function fetchNotificationsPreview() {
-  const res = await api.notifications.list({ limit: NOTIFICATIONS_PREVIEW_SIZE })
+async function fetchNotificationsPage({ pageParam = null } = {}) {
+  const res = await api.notifications.list({
+    limit: NOTIFICATIONS_PREVIEW_SIZE, before: pageParam,
+  })
   const data = await jsonOrThrow(res, 'notifications fetch failed:')
   return Array.isArray(data) ? data : []
 }
 
+const notificationHistoryOptions = {
+  queryKey: notificationsListKey,
+  queryFn: fetchNotificationsPage,
+  initialPageParam: null,
+  getNextPageParam: page => (
+    page.length === NOTIFICATIONS_PREVIEW_SIZE ? page.at(-1).id : undefined
+  ),
+}
+
 function useNotificationsListQuery({ enabled = true } = {}) {
-  return useQuery({
-    queryKey: notificationsListKey,
-    queryFn: fetchNotificationsPreview,
-    enabled,
-  })
+  return useInfiniteQuery({ ...notificationHistoryOptions, enabled })
 }
 
 async function fetchUnreadCount() {
@@ -733,7 +740,8 @@ function useUnreadCountQuery({ enabled = true } = {}) {
 export const notificationQueries = {
   list: {
     key: notificationsListKey,
-    fetch: fetchNotificationsPreview,
+    fetch: fetchNotificationsPage,
+    options: notificationHistoryOptions,
     useQuery: useNotificationsListQuery,
     invalidate: (queryClient) => queryClient.invalidateQueries({ queryKey: notificationsListKey }),
   },

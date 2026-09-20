@@ -49,7 +49,10 @@ def test_delete_and_recover_publish_exact_projection_events(
     receipt = db.query(models.Notification).filter_by(
       title="Chat deleted",
     ).one()
+    db.refresh(chat)
     assert receipt.actions == [{
+      "deleted_at": chat.deleted_at.replace(tzinfo=UTC).isoformat(),
+      "expires_at": (chat.deleted_at + timedelta(days=7)).replace(tzinfo=UTC).isoformat(),
       "action": "recover_chat",
       "title": "Undo",
       "resource_type": "chat",

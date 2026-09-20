@@ -84,6 +84,12 @@ test('Shell reconciles both query completion and direct mutation paths', () => {
   assert.doesNotMatch(shell, /addRecoveryNotification/)
   assert.match(shell, /recoverNotificationAction\(notificationId, action\)/)
   assert.match(shell, /notification_id: notificationId/)
+  assert.match(shell, /response.headers.get\('X-Recovery-Notification-Id'\)/)
+  assert.match(shell, /showDeletionUndo\(res, 'chat', id\)[\s\S]*?await refreshChats\(\)/)
+  assert.match(shell, /showDeletionUndo\(res, 'project', projectId\)/)
+  assert.match(shell, /showDeletionUndo\(res, 'app', id\)[\s\S]*?await refreshApps\(\)/)
+  assert.match(shell, /label: 'Undo'[\s\S]*?recoverNotificationAction\(notificationId/)
+
   assert.match(shell, /app_updated[\s\S]*confirmAppIdentityIsLive\(ev\.appId\)/)
   assert.match(
     shell,
