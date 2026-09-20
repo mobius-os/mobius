@@ -24,7 +24,7 @@ from typing import Any
 from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
 
-from app import models
+from app import models, providers
 from app.chat_log_redaction import scrub_secrets
 from app.timeutil import now_naive_utc
 
@@ -89,7 +89,7 @@ def stable_agent_id(
   and Möbius helper ids are already globally unique and can appear with
   different session-tree identifiers across notification variants.
   """
-  if provider in ("codex", "mobius"):
+  if providers.provider_runtime_kind(provider) == "codex_sdk":
     material = f"{provider}\0{provider_agent_id}"
   else:
     material = f"{provider}\0{provider_session_id or ''}\0{provider_agent_id}"

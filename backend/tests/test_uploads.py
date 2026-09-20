@@ -244,30 +244,28 @@ def test_serve_upload_rejects_non_uuid_chat_id(client, auth):
   assert res.status_code == 400
 
 
-def test_upload_rejects_over_dir_cap(client, db, auth, chat, monkeypatch):
-  """Upload that would exceed the per-chat directory total cap returns 413 (Task 8)."""
-  import io
-  import sys
-  # Patch the dir cap to 1 byte so any upload overflows.
-  for mod in list(sys.modules.values()):
-    if getattr(mod, "__name__", "") == "app.routes.uploads":
-      monkeypatch.setattr(mod, "_MAX_CHAT_UPLOADS_BYTES", 1, raising=False)
-  ep = next(
-    (r.endpoint for r in client.app.routes
-     if getattr(r, "path", None) == "/api/chats/{chat_id}/uploads"
-     and "POST" in getattr(r, "methods", set())),
-    None,
-  )
-  if ep is not None:
-    monkeypatch.setitem(ep.__globals__, "_MAX_CHAT_UPLOADS_BYTES", 1)
+def test_upload_does_not_impose_a_per_chat_directory_quota(
+  client, db, auth, chat,
+):
+  """Existing chat media must not turn a healthy disk into a chat-local 413."""
+  from pathlib import Path
+  from app.config import get_settings
+
+  upload_dir = Path(get_settings().data_dir) / "chats" / chat.id / "uploads"
+  upload_dir.mkdir(parents=True, exist_ok=True)
+  # Sparse allocation proves behavior beyond the retired 200 MB ceiling
+  # without consuming 200 MB in the test runtime.
+  with (upload_dir / "existing-video.mp4").open("wb") as existing:
+    existing.truncate(201 * 1024 * 1024)
 
   res = client.post(
     f"/api/chats/{chat.id}/uploads",
-    files=[("files", ("small.txt", io.BytesIO(b"hello"), "text/plain"))],
+    files=[("files", ("next.txt", io.BytesIO(b"ok"), "text/plain"))],
     headers=auth,
   )
-  assert res.status_code == 413
-  assert "full" in res.json()["detail"].lower() or "limit" in res.json()["detail"].lower()
+
+  assert res.status_code == 200
+  assert res.json()[0]["name"] == "next.txt"
 
 
 def test_upload_multi_file_over_cap_cleans_partial(client, db, auth, chat, monkeypatch):

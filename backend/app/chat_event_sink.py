@@ -1355,6 +1355,21 @@ class ChatEventSink:
       for block in self.assistant_blocks
     )
 
+  def has_open_continuation_card(self) -> bool:
+    """Whether this turn already handed its next move to the owner.
+
+    QuestionCommit saves the card through the writer's session; terminal Goal
+    settlement may still hold an older Chat in its own identity map. Read the
+    same-turn handoff from its owning sink instead of that cached transcript.
+    A failed save scrubs the card before returning to the caller.
+    """
+    return any(
+      block.get("type") == "question"
+      and block.get("response_mode") == "continuation"
+      and not block.get("answers")
+      for block in self.assistant_blocks
+    )
+
 
 async def commit_steer_cut(
   chat_id: str,

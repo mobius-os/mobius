@@ -157,6 +157,11 @@ import {
   subscribeChatSearchReveal,
 } from '../../lib/chatSearchReveal.js'
 import {
+  chatQuestionRevealFor,
+  consumeChatQuestionReveal,
+  subscribeChatQuestionReveal,
+} from '../../lib/chatQuestionReveal.js'
+import {
   highlightSearchTerms,
 } from '../../lib/searchTermHighlight.js'
 import { composerHistoryFromMessages } from './composerHistory.js'
@@ -401,6 +406,7 @@ export default function ChatView({
   onDisplayReady = null,
   artifactsAppId = null,
   onOpenArtifact = null,
+  focusPendingQuestion = false,
 }) {
   const queryClient = useQueryClient()
   const provisionalNewChat = !!newChatSession && !newChatSession.materialized
@@ -430,6 +436,11 @@ export default function ChatView({
   const searchRevealConsumed = searchActivationRef.current.consumedId === searchReveal?.id
   const searchRevealCleanupRef = useRef(() => {})
   useEffect(() => () => searchRevealCleanupRef.current(), [])
+  const [, setQuestionRevealVersion] = useState(0)
+  useEffect(() => subscribeChatQuestionReveal(chatId, () => {
+    setQuestionRevealVersion(version => version + 1)
+  }), [chatId])
+  const questionReveal = chatQuestionRevealFor(chatId)
   const inputRef = useRef(null)
   const handleInternalNav = useCallback((url) => {
     onInternalNav?.(url)
@@ -5246,11 +5257,13 @@ export default function ChatView({
   const resourcePause = isResourcePause(pendingResumeBlock)
     ? pendingResumeBlock
     : null
+  const modelCapacityPause = pendingResumeBlock?.pause?.kind === 'model_capacity'
   // An open question is the single blocker: answering it IS the continuation,
   // so don't surface a competing Resume (which the backend would now refuse).
   const hasPendingResume = !!pendingResumeBlock
     && !hasPendingQuestion
     && !resourcePause
+    && !modelCapacityPause
   const pendingLimitResetAt = pendingResumeBlock?.pause?.resets_at || null
   // New parks preserve the provider that actually enforced the limit. Older
   // cards predate that fact, so fall back to the chat's current provider.
@@ -5370,6 +5383,15 @@ export default function ChatView({
     scrollRef, hasPendingResume, resumeCardEl,
   )
   const questionNudgeShown = hasPendingQuestion && pendingCardOffscreen
+  const questionRevealConsumedRef = useRef(null)
+  useLayoutEffect(() => {
+    const requestId = questionReveal?.id ?? (focusPendingQuestion ? 'deep-link' : null)
+    if (!requestId || questionRevealConsumedRef.current === requestId) return
+    if (!hasPendingQuestion || !pendingQuestionEl) return
+    questionRevealConsumedRef.current = requestId
+    revealPendingQuestion(pendingQuestionEl)
+    if (questionReveal?.id != null) consumeChatQuestionReveal(chatId, questionReveal.id)
+  }, [chatId, focusPendingQuestion, hasPendingQuestion, pendingQuestionEl, questionReveal, revealPendingQuestion])
   const resumeNudgeShown = hasPendingResume && resumeCardOffscreen
   const jumpToLatestVisible = jumpToLatestShown({
     // A send-owned PIN_USER_MSG is the expected latest-turn location, not a
@@ -5442,6 +5464,12 @@ export default function ChatView({
         : 'Waiting for memory to settle. This chat will resume automatically.'
     }
     if (pendingResumeBlock.pause?.resets_at) {
+      if (modelCapacityPause) {
+        const label = formatResetTime(pendingResumeBlock.pause.resets_at)
+        return label
+          ? `Selected model is busy. Retrying ${label}.`
+          : 'Selected model is busy. Retrying automatically shortly.'
+      }
       const label = formatResetTime(pendingResumeBlock.pause.resets_at)
       if (autoResumeEnabled) {
         return label
@@ -5862,6 +5890,7 @@ export default function ChatView({
               }
               onAutoResumeChange={handleAutoResumeChange}
               limitResetElapsed={limitResetElapsed}
+              recoveryCredit={pendingLimitRecoveryCredit}
               submissionBlocked={providerSwitching}
               liveQuestionId={answerableQuestionId}
               // Same publication channel as the durable rows above: while the

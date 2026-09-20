@@ -53,6 +53,15 @@ def save_card(kind: str, body: dict) -> dict:
       candidate = parsed.get("detail") if isinstance(parsed, dict) else None
       if isinstance(candidate, str):
         detail = " ".join(candidate.split())[:1000]
+      elif isinstance(candidate, dict):
+        code = candidate.get("code")
+        message = candidate.get("message")
+        parts = [
+          " ".join(value.split())
+          for value in (code, message)
+          if isinstance(value, str) and value.strip()
+        ]
+        detail = ": ".join(parts)[:1000]
     except (OSError, ValueError, AttributeError):
       pass
     suffix = f": {detail}" if detail else ""

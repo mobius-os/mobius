@@ -35,13 +35,24 @@ test('one open drawer owns at most one physical sentinel', () => {
 test('a pending drawer close consumes its tagged source before direction fallback', () => {
   const open = navigation.slice(
     navigation.indexOf('function openDrawer()'),
-    navigation.indexOf('function closeDrawer('),
+    navigation.indexOf('function cancelDrawerPreparation('),
   )
   const guard = open.indexOf('if (drawerOpenRef.current) return')
   const pending = open.indexOf('if (drawerClosePendingRef.current) {')
   assert.ok(pending >= 0 && guard > pending,
     'an unresolved traversal is resolved or blocks another open before the ordinary open guard')
-  const pendingBlock = open.slice(pending, guard)
+  assert.match(open.slice(pending, guard),
+    /if \(drawerClosePendingRef\.current\) \{\s*commitDrawerOpen\(\)\s*return\s*\}/,
+    'a reopen reaches the traversal owner before frame preparation or the open guard')
+  const commit = navigation.slice(
+    navigation.indexOf('function commitDrawerOpen('),
+    navigation.indexOf('function closeDrawer('),
+  )
+  const commitPending = commit.indexOf('if (drawerClosePendingRef.current) {')
+  const commitGuard = commit.indexOf('if (drawerOpenRef.current) return')
+  assert.ok(commitPending >= 0 && commitGuard > commitPending,
+    'the commit owner resolves the pending close before the ordinary open guard')
+  const pendingBlock = commit.slice(commitPending, commitGuard)
   // Within the grace window serialization still wins, but the activation is
   // retained and replayed instead of being discarded.
   assert.match(
@@ -56,7 +67,7 @@ test('a pending drawer close consumes its tagged source before direction fallbac
     /drawerPushedRef\.current\s*&&\s*isMobiusNavState\(history\.state\) && history\.state\.kind === 'drawer'/,
     're-adoption is gated on the classic store still showing the drawer sentinel',
   )
-  assert.doesNotMatch(open, /if \(drawerPushedRef\.current\) \{\s*drawerOpenRef\.current = true/,
+  assert.doesNotMatch(commit, /if \(drawerPushedRef\.current\) \{\s*drawerOpenRef\.current = true/,
     'a boolean cannot prove that an async history cursor still sits on the sentinel')
   // Both traversal paths consume a pending tagged drawer source. The popstate
   // path reads the classic store directly; the Navigation API path recognizes

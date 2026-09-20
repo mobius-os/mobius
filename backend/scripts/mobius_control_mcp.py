@@ -821,5 +821,49 @@ def serve(input_stream: TextIO, output_stream: TextIO) -> None:
       _write_message(output_stream, response)
 
 
+def _cli_call(argv: list[str]) -> int:
+  """Run one control tool from the command line and print its result.
+
+  Same authority gating and handlers as the stdio server: the environment of
+  the calling agent run decides which tools exist. This is the provider-neutral
+  seam for agents whose model gateway cannot surface dynamic MCP namespaces
+  (the cards, waits, claims, and peer messages stay reachable through exec).
+  """
+  if len(argv) < 2 or argv[0] != "call" or len(argv) > 4:
+    print(
+      "usage: mobius_control_mcp.py call <tool_name> [--args-json JSON]",
+      file=sys.stderr,
+    )
+    return 2
+  tool_name = argv[1]
+  arguments: dict[str, Any] = {}
+  if len(argv) == 4 and argv[2] == "--args-json":
+    try:
+      parsed = json.loads(argv[3])
+    except json.JSONDecodeError as exc:
+      print(f"invalid --args-json: {exc}", file=sys.stderr)
+      return 2
+    if not isinstance(parsed, dict):
+      print("--args-json must be a JSON object", file=sys.stderr)
+      return 2
+    arguments = parsed
+  elif len(argv) > 2:
+    print("usage: mobius_control_mcp.py call <tool_name> [--args-json JSON]",
+          file=sys.stderr)
+    return 2
+  result = _call_tool({"name": tool_name, "arguments": arguments})
+  text = ""
+  for item in result.get("content", []):
+    if isinstance(item, dict) and isinstance(item.get("text"), str):
+      text += item["text"]
+  print(text)
+  return 1 if result.get("isError") else 0
+
+
 if __name__ == "__main__":
+  # Stdio server mode is intentionally argument-free. Any argument means a
+  # human/provider invoked the CLI seam and must receive bounded validation;
+  # a typo must not silently become a server waiting forever on stdin.
+  if len(sys.argv) > 1:
+    raise SystemExit(_cli_call(sys.argv[1:]))
   serve(sys.stdin, sys.stdout)

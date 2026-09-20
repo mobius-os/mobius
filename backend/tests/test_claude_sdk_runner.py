@@ -1387,6 +1387,20 @@ def test_claude_thinking_config_requests_summarized_adaptive_thinking():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("session_id", [None, "sess-1"])
+async def test_claude_new_and_resumed_turns_exclude_native_owner_questions(
+  monkeypatch, session_id,
+):
+  clients = _install_fake_client(monkeypatch)
+  await _run_turn(
+    "chat-owner-question", bc=_Bus(), cwd="/data", session_id=session_id,
+  )
+  assert {"AskUserQuestion", "request_user_input"} <= set(
+    clients[0].options.disallowed_tools
+  )
+
+
+@pytest.mark.asyncio
 async def test_run_claude_sdk_turn_requests_summarized_thinking(monkeypatch):
   clients = _install_fake_client(monkeypatch)
 
@@ -1411,6 +1425,9 @@ async def test_run_claude_sdk_turn_requests_summarized_thinking(monkeypatch):
   assert "confirm its saved receipt" in options.system_prompt
   assert options.max_buffer_size == 10 * 1024 * 1024
   assert set(claude_sdk_runner._CLAUDE_NATIVE_SCHEDULING_TOOLS) <= set(
+    options.disallowed_tools
+  )
+  assert set(claude_sdk_runner._CLAUDE_NATIVE_OWNER_INPUT_TOOLS) <= set(
     options.disallowed_tools
   )
   assert set(claude_sdk_runner._CLAUDE_UNUSED_BUILTINS) <= set(

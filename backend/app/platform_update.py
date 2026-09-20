@@ -2893,6 +2893,38 @@ def _preview_diff(repo: Path, base: str, target: str) -> tuple[str | None, bool]
   return (text or None), False
 
 
+def _preview_overlay_conflict_paths(
+  repo: Path, local: str, target: str,
+) -> list[str]:
+  """Predict the exact linear-overlay conflict Apply would encounter.
+
+  The preview runs the same equivalence filtering and commit-by-commit replay
+  as :func:`_apply_overlay`, but in a disposable detached worktree.  It never
+  moves a served ref, parks a resolver worktree, or writes an update flag.
+  Cleanup is unconditional so repeatedly opening the review cannot accumulate
+  candidate checkouts.
+  """
+  commits = app_git.overlay_commits(repo, target, local)
+  skip = app_git.landed_overlay_commits(repo, commits, target)
+  with tempfile.TemporaryDirectory(prefix="mobius-platform-preview-") as root:
+    worktree = Path(root) / "candidate"
+    try:
+      replay = app_git.replay_overlay(
+        repo, commits=commits, onto=target, worktree=worktree, skip=skip,
+      )
+      if replay.status != "conflict" or replay.conflict is None:
+        return []
+      # Match _park_replay: show both the first replay boundary and any
+      # endpoint conflict a resolver would need to reconcile afterwards.
+      try:
+        net_paths = set(app_git.merge_refs(repo, local, target).conflict_paths)
+      except (OSError, subprocess.SubprocessError, RuntimeError):
+        net_paths = set()
+      return sorted(net_paths | set(replay.conflict.get("paths") or []))
+    finally:
+      app_git.remove_overlay_worktree(repo, worktree)
+
+
 def platform_update_preview(
   repo: Path = PLATFORM_REPO,
   *,
@@ -2906,9 +2938,10 @@ def platform_update_preview(
   it never mutates the served branch or working tree.
 
   Shows the upstream-side changes ``origin/main`` brings since the shared merge
-  base — local edits are excluded, so the owner reviews exactly what a clean Apply
-  would pull. Availability is the same ancestry check :func:`platform_status`
-  uses; an already-applied target can still have actionable activation work.
+  base — local edits are excluded from the public diff, while a disposable
+  replay predicts whether preserving them will conflict before Apply.
+  Availability is the same ancestry check :func:`platform_status` uses; an
+  already-applied target can still have actionable activation work.
   Missing source or target provenance is an explicit error on both deployments;
   "unavailable" must never masquerade as "up to date."""
   # A missing clone has no snapshot to lock. Fail explicitly without requiring
@@ -2990,6 +3023,7 @@ def _platform_update_preview_unlocked(
   commits = _preview_commits(repo, base, target)
   total_commits = _preview_commit_count(repo, base, target)
   conflict = _read_conflict_flag() or {}
+  predicted_conflicts = _preview_overlay_conflict_paths(repo, local, target)
   activation_paths = [*_pending_activation_paths(repo),
                       *_activation_paths_between(repo, base, target)]
   return PlatformUpdatePreview(
@@ -3006,7 +3040,10 @@ def _platform_update_preview_unlocked(
     commits=commits,
     files=_preview_files(repo, base, target),
     diff=diff, diff_truncated=truncated,
-    conflict_paths=conflict.get("paths") or [], blocking_paths=[],
+    conflict_paths=sorted(
+      set(conflict.get("paths") or []) | set(predicted_conflicts)
+    ),
+    blocking_paths=[],
   )
 
 

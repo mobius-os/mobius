@@ -130,7 +130,10 @@ each request. It sends one JSON object on stdin and accepts one JSON response
 on stdout: `{ "status": 200, "body": ..., "headers": {...} }`. The platform
 owns authentication, immutable source selection, the short-lived app token,
 8 MiB request/response ceilings, timeout, concurrency, and response-header
-safety.
+safety. Private and public requests use separate serialized lanes so a private
+request can synchronously receive a public callback without deadlocking. Those
+lanes may run at the same time; when both can touch the same state, the app must
+provide its own file or database locking.
 The app owns its paths, policy, storage format, and domain behavior. This is a
 reviewed trusted process like an app job, not an operating-system sandbox.
 

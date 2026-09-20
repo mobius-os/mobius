@@ -49,7 +49,7 @@ export default function ArtifactPickerSection({
       <div className="composer-popover__artifact-heading">
         <span className="composer-popover__eyebrow">Latest artifacts</span>
         <span
-          className="composer-popover__artifact-count"
+          className="composer-popover__eyebrow composer-popover__artifact-count"
           aria-label={`${totalCount} total ${totalCount === 1 ? 'artifact' : 'artifacts'}`}
         >
           {totalCount}

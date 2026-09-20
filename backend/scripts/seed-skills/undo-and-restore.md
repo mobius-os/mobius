@@ -38,8 +38,7 @@ repository backward to repair one file.
 Deleted chats remain recoverable for **7 days**:
 
 ```bash
-curl -s -X POST "$API_BASE_URL/api/chats/{chat_id}/recover" \
-  -H "Authorization: Bearer $AGENT_TOKEN"
+mapi -X POST /api/chats/{chat_id}/recover
 ```
 
 Tell the partner about the retention window when an accidental deletion is the
@@ -50,8 +49,7 @@ reason for the restore.
 Deleted apps are tombstoned for **7 days** with source and saved data intact:
 
 ```bash
-curl -s -X POST "$API_BASE_URL/api/apps/{app_id}/recover" \
-  -H "Authorization: Bearer $AGENT_TOKEN"
+mapi -X POST /api/apps/{app_id}/recover
 ```
 
 Reinstalling a store app with the same `manifest_url` is equivalent: it

@@ -36,6 +36,9 @@ test('deep links preserve slug, numeric identity, and intent', () => {
   assert.deepEqual(parseShellDeepLink({
     pathname: '/shell/', search: '?app=pages',
   }), { view: 'canvas', app: 'pages', appId: null, intent: null })
+  assert.deepEqual(parseShellDeepLink({
+    pathname: '/shell/', search: '?chat=chat-1&focus=question',
+  }), { view: 'chat', chatId: 'chat-1', intent: null, focusQuestion: true })
   assert.equal(parseShellDeepLink({ pathname: '/app/42', search: '' }), null)
   assert.equal(parseShellDeepLink({ pathname: '/chat/c-1', search: '' }), null)
 })

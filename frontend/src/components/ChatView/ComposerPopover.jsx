@@ -2,14 +2,14 @@
  * ComposerPopover — the brain button in the chat composer and the popover
  * it opens. Four sections in one popover:
  *
- *   1. Attach files + chat changes — calls `onAttachClick` (parent owns the hidden
+ *   1. Attach files — calls `onAttachClick` (parent owns the hidden
  *      <input type="file"> so it can clear .value after each pick).
  *   2. Apps built here and artifacts touched by this chat.
  *   3. Model / effort / summary / automation — renders
  *      <ChatSettingsPanel> when a chatInfo is available; omitted on a fresh
  *      empty chat where chatInfo hasn't loaded yet.
- *   4. Chat usage / summary / agent context — shows a compact usage total and
- *      opens the detailed owner-facing viewers after the picker.
+ *   4. Chat changes / agent network / usage / summary / agent context — keeps
+ *      chat work near the automation controls and detailed viewers at the end.
  *
  * Open/close state, outside-click, and Escape live here. The trigger
  * is positioned as a sibling of the pill in `.chat__form`. The popover
@@ -490,32 +490,6 @@ export default function ComposerPopover({
                 </span>
               </button>
             )}
-            {!embedded && onOpenChanges && (
-              <button
-                type="button"
-                className="composer-popover__row"
-                onClick={handleOpenChanges}
-              >
-                <span className="composer-popover__row-icon" aria-hidden="true">
-                  <Code width={19} height={19} />
-                </span>
-                <span className="composer-popover__row-main">
-                  <span className="composer-popover__row-title-line">
-                    <span className="composer-popover__row-title">Changes</span>
-                    {changesNeedOwner && (
-                      <span className="composer-popover__row-attention">
-                        Needs you
-                      </span>
-                    )}
-                  </span>
-                  <span className="composer-popover__row-sub">
-                    {changesOverview.loading && !changesOverview.hasWork
-                      ? 'Checking this chat’s work…'
-                      : compactChangesSummary(changesOverview)}
-                  </span>
-                </span>
-              </button>
-            )}
           </div>
           {!embedded && artifactsAppId && artifactsQuery.isError && !latestArtifact && (
             <div className="composer-popover__section composer-popover__section--artifacts">
@@ -564,6 +538,34 @@ export default function ComposerPopover({
               />
             </div>
           )}
+          {!embedded && onOpenChanges && (
+            <div className="composer-popover__section">
+              <button
+                type="button"
+                className="composer-popover__row"
+                onClick={handleOpenChanges}
+              >
+                <span className="composer-popover__row-icon" aria-hidden="true">
+                  <Code width={19} height={19} />
+                </span>
+                <span className="composer-popover__row-main">
+                  <span className="composer-popover__row-title-line">
+                    <span className="composer-popover__row-title">Changes</span>
+                    {changesNeedOwner && (
+                      <span className="composer-popover__row-attention">
+                        Needs you
+                      </span>
+                    )}
+                  </span>
+                  <span className="composer-popover__row-sub">
+                    {changesOverview.loading && !changesOverview.hasWork
+                      ? 'Checking this chat’s work…'
+                      : compactChangesSummary(changesOverview)}
+                  </span>
+                </span>
+              </button>
+            </div>
+          )}
           {!embedded && chatReady && chatId && <ChatAgentNetwork chatId={chatId} onOpen={() => { setOpen(false); onOpenNetwork?.() }} />}
           {!embedded && (onOpenUsage || onOpenSummary || onOpenInspector) && (
           <div className="composer-popover__section composer-popover__section--context">
@@ -581,7 +583,7 @@ export default function ComposerPopover({
                   <span className="composer-popover__row-sub">
                     {usageQuery.isLoading
                       ? 'Checking this chat’s usage…'
-                      : (usageSummary || 'Appears after the first completed response')}
+                      : (usageSummary || '0 in · 0 out · 0 cache · $0.00')}
                   </span>
                 </span>
               </button>

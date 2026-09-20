@@ -203,7 +203,9 @@ def test_goal_routing_rechecks_phase_transitions_and_prefers_platform_tool():
   assert "resilience, not an equivalent convenience path" in planning_normalized
   assert "an attempted tool call returns a failure" in planning_normalized
   assert "Terminal settlement continues the exact Goal" in planning_normalized
-  assert "this is a backstop, not a planning strategy" in planning_normalized
+  assert "turns are not a budget" in planning_normalized
+  assert "context --task ID" in planning_normalized
+  assert "Do not end a run merely to refresh context" in planning_normalized
 
 
 def test_goal_waits_always_name_a_durable_owner_interaction():

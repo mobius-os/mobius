@@ -164,12 +164,19 @@ function sessionHistory({ wedged = false, navigationApi = true } = {}) {
   }
 }
 
-async function mountNavigation(engine) {
+async function mountNavigation(engine, {
+  tab = { kind: 'chat', id: 'c1' }, frames = null, dragActiveRef = { current: false },
+} = {}) {
   globalThis.window = engine.win
   globalThis.location = engine.win.location
   globalThis.localStorage = memoryStorage()
   globalThis.sessionStorage = memoryStorage()
   globalThis.history = engine.history
+  globalThis.requestAnimationFrame = frames?.request || (callback => {
+    callback()
+    return 1
+  })
+  globalThis.cancelAnimationFrame = frames?.cancel || (() => {})
   if (engine.navigation) globalThis.navigation = engine.navigation
   else delete globalThis.navigation
 
@@ -178,7 +185,7 @@ async function mountNavigation(engine) {
     import('../../components/Shell/paneModel.js'),
   ])
 
-  const ws = paneModel.seedFromFlatTabs([{ kind: 'chat', id: 'c1' }])
+  const ws = { ...paneModel.seedFromFlatTabs([tab]), singleScreen: tab }
   const workspaceStateRef = { current: { ws, undo: null } }
   // The wedged engine reports every failed mirror write through the shared
   // client-error logger; keep that console noise out of the test output.
@@ -192,12 +199,264 @@ async function mountNavigation(engine) {
       visiblePaneIds: new Set(Object.keys(ws.panes)),
       blobValid: true,
       replaceImplicitBootTab: false,
-      dragActiveRef: { current: false },
+      dragActiveRef,
     })
   } finally {
     console.error = consoleError
   }
 }
+
+// Advance one browser frame at a time: callbacks scheduled by that frame wait
+// for the next, and cancelled callbacks never run.
+function animationFrames() {
+  let nextId = 0
+  const queued = new Map()
+  return {
+    request(callback) {
+      const id = ++nextId
+      queued.set(id, callback)
+      return id
+    },
+    cancel(id) { queued.delete(id) },
+    advance() {
+      for (const id of [...queued.keys()]) {
+        const callback = queued.get(id)
+        if (!callback) continue
+        queued.delete(id)
+        callback()
+      }
+    },
+    get pending() { return queued.size },
+  }
+}
+
+test('an app-origin drawer waits through one painted frame before history opens', async () => {
+  const engine = sessionHistory()
+  const frames = animationFrames()
+  const { result } = await mountNavigation(engine, {
+    tab: { kind: 'app', id: '119' },
+    frames,
+  })
+  const historyKindBeforeOpen = engine.currentKind
+
+  result.current.openDrawer()
+  assert.equal(result.current.drawerOpen, false)
+  assert.equal(engine.currentKind, historyKindBeforeOpen, 'preparation does not mutate history')
+
+  frames.advance()
+  assert.equal(result.current.drawerOpen, false, 'the first callback precedes the painted boundary')
+  assert.equal(engine.currentKind, historyKindBeforeOpen)
+
+  frames.advance()
+  assert.equal(result.current.drawerOpen, true)
+  assert.equal(engine.currentKind, 'drawer', 'the original history sentinel opens afterwards')
+})
+
+test('navTo supersedes an app-origin drawer between its queued frames', async () => {
+  const engine = sessionHistory()
+  const frames = animationFrames()
+  const { result } = await mountNavigation(engine, {
+    tab: { kind: 'app', id: '119' }, frames,
+  })
+
+  result.current.openDrawer()
+  frames.advance()
+  assert.equal(frames.pending, 1, 'the drawer commit is queued for the next frame')
+  assert.equal(result.current.drawerOpen, false)
+
+  result.current.navTo('chat', { chatId: 'c2' })
+  const destination = engine.currentState
+  const depth = engine.depth
+  assert.equal(destination.kind, 'nav')
+  assert.equal(destination.route.view, 'chat')
+  assert.equal(destination.route.chatId, 'c2')
+
+  frames.advance()
+  assert.equal(result.current.drawerOpen, false, 'the old app cannot open a drawer over the chat')
+  assert.deepEqual(engine.currentState, destination, 'navigation retains its entry instead of a drawer sentinel')
+  assert.equal(engine.depth, depth, 'the cancelled commit cannot add a history step')
+  assert.equal(frames.pending, 0)
+})
+
+for (const [path, options] of [
+  ['Navigation API', {}],
+  ['wedged Navigation mirror', { wedged: true }],
+  ['popstate', { navigationApi: false }],
+]) {
+  for (const direction of ['Back', 'Forward']) {
+    test(`${path} ${direction} supersedes an app-origin drawer between its queued frames`, async () => {
+      const engine = sessionHistory(options)
+      const frames = animationFrames()
+      const { result } = await mountNavigation(engine, {
+        tab: { kind: 'app', id: '119' }, frames,
+      })
+      const original = engine.currentState
+      result.current.navTo('canvas', { appId: 120 })
+      const next = engine.currentState
+      assert.notDeepEqual(next.route, original.route)
+      if (direction === 'Forward') engine.userBack()
+
+      result.current.openDrawer()
+      frames.advance()
+      assert.equal(frames.pending, 1, 'the drawer commit is queued for the next frame')
+      assert.equal(result.current.drawerOpen, false)
+
+      if (direction === 'Back') engine.userBack()
+      else engine.userForward()
+      const destination = direction === 'Back' ? original : next
+      assert.deepEqual(engine.currentState, destination, 'the browser traversed to the intended route')
+      const depth = engine.depth
+
+      frames.advance()
+      assert.equal(result.current.drawerOpen, false, 'the restored route stays free of the cancelled drawer')
+      assert.deepEqual(engine.currentState, destination, 'no drawer sentinel replaces the restored entry')
+      assert.equal(engine.depth, depth, 'the cancelled commit cannot add a history step')
+      assert.equal(frames.pending, 0)
+
+      // A late drawer push would also truncate Forward history after Back.
+      if (direction === 'Back') engine.userForward()
+      else engine.userBack()
+      assert.deepEqual(engine.currentState, direction === 'Back' ? next : original,
+        'the cancelled drawer leaves the route history reversible')
+    })
+  }
+}
+
+test('an explicit close cancels an app-origin drawer before its delayed commit', async () => {
+  const engine = sessionHistory()
+  const queued = []
+  const cancelled = new Set()
+  const frames = {
+    request(callback) {
+      queued.push(callback)
+      return queued.length
+    },
+    cancel(id) { cancelled.add(id) },
+  }
+  const { result } = await mountNavigation(engine, {
+    tab: { kind: 'app', id: '119' },
+    frames,
+  })
+
+  result.current.openDrawer()
+  assert.equal(result.current.closeDrawer(), true)
+  assert.deepEqual([...cancelled], [1])
+  assert.equal(result.current.drawerOpen, false)
+  assert.notEqual(engine.currentKind, 'drawer')
+})
+
+test('a redundant app-origin open cannot turn the next close into a no-op', async () => {
+  const engine = sessionHistory()
+  const queued = []
+  const { result } = await mountNavigation(engine, {
+    tab: { kind: 'app', id: '119' },
+    frames: {
+      request(callback) {
+        queued.push(callback)
+        return queued.length
+      },
+      cancel() {},
+    },
+  })
+  const historyKindBeforeOpen = engine.currentKind
+
+  result.current.openDrawer()
+  queued.shift()()
+  queued.shift()()
+  assert.equal(result.current.drawerOpen, true)
+
+  result.current.openDrawer()
+  assert.equal(result.current.closeDrawer(), true)
+  assert.equal(engine.pendingTraversals, 1)
+  engine.settle()
+  assert.equal(result.current.drawerOpen, false)
+  assert.equal(engine.currentKind, historyKindBeforeOpen)
+})
+
+test('an app-origin reopen survives its in-flight close traversal', async () => {
+  const engine = sessionHistory()
+  const queued = []
+  const frames = {
+    request(callback) {
+      queued.push(callback)
+      return queued.length
+    },
+    cancel() {},
+  }
+  const { result } = await mountNavigation(engine, {
+    tab: { kind: 'app', id: '119' }, frames,
+  })
+
+  result.current.openDrawer()
+  queued.shift()()
+  queued.shift()()
+  assert.equal(result.current.drawerOpen, true)
+
+  assert.equal(result.current.closeDrawer(), true)
+  result.current.openDrawer()
+  assert.equal(result.current.drawerOpen, false, 'the close remains visually acknowledged')
+  assert.equal(engine.pendingTraversals, 1, 'reopening cannot issue a second close traversal')
+  assert.equal(engine.currentKind, 'drawer', 'the original sentinel is still owned until close commits')
+  assert.equal(queued.length, 0, 'the reopen is remembered without cancellable frame preparation')
+  engine.settle()
+  await new Promise(resolve => setTimeout(resolve, 0))
+
+  queued.shift()()
+  queued.shift()()
+  assert.equal(result.current.drawerOpen, true)
+  assert.equal(engine.currentKind, 'drawer')
+  assert.equal(engine.pendingTraversals, 0)
+  assert.equal(result.current.closeDrawer(), true)
+  engine.settle()
+  assert.equal(result.current.drawerOpen, false)
+  assert.notEqual(engine.currentKind, 'drawer', 'one close consumes the sole reopened sentinel')
+})
+
+test('Back cancels an app-origin drawer before its delayed commit', async () => {
+  const engine = sessionHistory()
+  const queued = []
+  const cancelled = new Set()
+  const { result } = await mountNavigation(engine, {
+    tab: { kind: 'app', id: '119' },
+    frames: {
+      request(callback) {
+        queued.push(callback)
+        return queued.length
+      },
+      cancel(id) { cancelled.add(id) },
+    },
+  })
+
+  result.current.openDrawer()
+  assert.equal(result.current.navigateBackward(), true)
+  assert.deepEqual([...cancelled], [1])
+  assert.equal(result.current.drawerOpen, false)
+  assert.notEqual(engine.currentKind, 'drawer')
+})
+
+test('a drag started during app-origin preparation prevents the delayed open', async () => {
+  const engine = sessionHistory()
+  const queued = []
+  const dragActiveRef = { current: false }
+  const { result } = await mountNavigation(engine, {
+    tab: { kind: 'app', id: '119' },
+    frames: {
+      request(callback) {
+        queued.push(callback)
+        return queued.length
+      },
+      cancel() {},
+    },
+    dragActiveRef,
+  })
+
+  result.current.openDrawer()
+  queued.shift()()
+  dragActiveRef.current = true
+  queued.shift()()
+  assert.equal(result.current.drawerOpen, false)
+  assert.notEqual(engine.currentKind, 'drawer')
+})
 
 test('an explicit close dismisses before the engine answers, and stays closed when it does', async () => {
   const engine = sessionHistory({ wedged: true })
