@@ -9,9 +9,8 @@ top-level owner promotes.
 1. On resume, inspect the persisted plan instead of creating a replacement.
 2. Promote, then record the smallest useful nested route. A Goal is durable
    intent; parents coordinate and verify, while leaves do the work.
-3. Run ready independent sibling leaves concurrently when isolated contexts
-   avoid repeating input. Give each helper a bounded brief and require a compact
-   result. Parallelism itself is not the saving.
+3. Run ready independent sibling leaves concurrently when isolation saves
+   repeated input. Parallelism itself is not the saving.
 4. Serialize dependencies, shared writes, plan revisions, and final integration.
 5. Grow or revise the plan only when discovery changes the route or the owner
    expands the outcome. Nest new work under its owner; do not append history.
@@ -20,11 +19,10 @@ top-level owner promotes.
 
 ## Route and promote
 
-Promote only for a delegated observable outcome when durability materially
-helps (multiple stages/turns, repetition, discovery, parallel branches, a long
-operation, or restart risk) and work can start without an owner/approval/event
-gate. This is structural judgment, not a keyword trigger. Synthetic/test work
-gets the same decision. Keep bounded one-turn work standard and honor opt-outs.
+Promote only for an observable outcome when durability materially helps across
+stages, turns, discovery, parallel work, long operations, or restart risk, and
+work can start without an owner/approval/event gate. This is judgment, not a
+keyword trigger. Keep bounded one-turn work standard and honor opt-outs.
 
 Use the first-class `promote_goal` tool. The helper is resilience, not an
 equivalent convenience path: use it only when the tool is absent or an
@@ -45,9 +43,8 @@ python3 /data/platform/backend/scripts/goal_plan.py set \
  --task 'inspect|Inspect' --task 'build|Build|inspect' --task 'verify|Verify|build'
 ```
 
-A task is `id|title|dependencies`; independent siblings are ready together.
-After every update, inspect ready leaves. Add discovered work under its owning
-task:
+A task is `id|title|dependencies`. After updates, inspect ready leaves. Add
+discovered work under its owner:
 
 ```bash
 python3 /data/platform/backend/scripts/goal_plan.py add child 'Check edge' --parent inspect
@@ -55,10 +52,9 @@ python3 /data/platform/backend/scripts/goal_plan.py update inspect --status runn
 python3 /data/platform/backend/scripts/goal_plan.py update inspect --status completed
 ```
 
-Work deepest leaves. Children inherit their ancestors' dependencies. Children
-make a parent **Ready to verify**, not complete; verify upward. A cancelled
-prerequisite is settled and must not strand dependants. Plans may change;
-outcomes may not silently change.
+Work deepest leaves. Children inherit ancestor dependencies and make a parent
+**Ready to verify**, not complete. Verify upward. Cancelled prerequisites are
+settled. Plans may change; outcomes may not silently change.
 
 ### Make every unfinished wait explicit
 
@@ -70,11 +66,13 @@ exactly one owning interaction:
 - Owner action: use the real question tool; its card keeps the Goal marked
   **Waiting for you**.
 
-With no owner, keep working. Terminal settlement continues the exact Goal once;
-a no-progress repeat asks the owner rather than looping; this is a backstop,
-not a planning strategy.
-Finish useful work in-turn or create a real handoff. Never end with “tell me when…”,
-a prose status, or a custom status card.
+With no owner, keep working and update the durable plan when its verified state
+changes. Terminal settlement continues the exact Goal only when that saved plan
+advanced during the admitted turn; otherwise it asks the owner rather than
+letting one provider turn authorize another; this is a backstop, not a planning
+strategy. An unchanged plan is not progress. Finish useful work in-turn or
+create a real handoff. Never end with “tell me when…”, prose status, or a custom
+status card.
 
 Before completion run:
 

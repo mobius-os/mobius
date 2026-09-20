@@ -5,16 +5,42 @@ repository policy. Neither a ledger edit nor a changed PR expands this grant.
 An ambiguous merge receipt is never retried: reconcile read-only or ask the owner.
 """
 import json
+import re
 from pathlib import Path
 
 from fastapi import HTTPException
 from sqlalchemy import or_, update
 
 from app import agent_work_claims, models
+from app.contribution_errors import ContributionSubmitError
+from app.terminal_output import readable_output
+
+
+_MERGE_DIAGNOSTIC_SECRET = re.compile(
+  r"(?i)\b(?:authorization|token|password|secret)\b\s*(?:[:=]\s*)?\S+"
+  r"|\bgh[pous]_[A-Za-z0-9_]+\b"
+)
 
 
 def key(item: dict) -> str:
   return f"{item['repo'].lower()}#{item['number']}"
+
+
+def merge_failure_summary(exc: Exception) -> str:
+  """Keep a bounded safe GitHub failure beside an unrepeatable merge receipt."""
+  detail = ""
+  if isinstance(exc, ContributionSubmitError):
+    detail = exc.detail or exc.message
+  elif isinstance(exc, HTTPException):
+    detail = str(exc.detail or "")
+  if detail:
+    detail = _MERGE_DIAGNOSTIC_SECRET.sub("[redacted]", readable_output(detail, limit=600))
+  if detail:
+    return (
+      "GitHub did not confirm the merge or queue request. Reconcile it before "
+      f"any new action. Diagnostic: {detail}"
+    )
+  return "GitHub did not confirm the merge or queue request. Reconcile it before any new action."
 
 
 def read(gh, cwd: Path, endpoint: str):
@@ -111,11 +137,24 @@ def perform_merge(gh, cwd, target, repo):
   ) if repo.get(setting) is True), None)
   if method is None:
     raise HTTPException(409, "GitHub did not provide an allowed merge method.")
-  return json.loads(gh(
+  response = gh(
     cwd, "api", "--method", "PUT",
     f"repos/{target['repo']}/pulls/{target['number']}/merge",
     "-f", f"sha={target['head_sha']}", "-f", f"merge_method={method}",
-  ).stdout)
+  ).stdout
+  try:
+    result = json.loads(response)
+  except json.JSONDecodeError as exc:
+    raise ContributionSubmitError(
+      "GitHub returned an unreadable merge confirmation.",
+      code="merge_response_unreadable",
+    ) from exc
+  if not isinstance(result, dict):
+    raise ContributionSubmitError(
+      "GitHub returned an unexpected merge confirmation shape.",
+      code="merge_response_invalid_shape",
+    )
+  return result
 
 
 def merge_work_key(target):
