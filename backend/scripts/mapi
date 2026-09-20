@@ -7,37 +7,143 @@ set -euo pipefail
 : "${AGENT_TOKEN:?mapi: AGENT_TOKEN is not set in this environment}"
 : "${API_BASE_URL:?mapi: API_BASE_URL is not set in this environment}"
 
-option_takes_value() {
+parse_option() {
+  OPTION_VALUE_KIND=""
+  OPTION_VALUE=""
+  OPTION_TAKES_NEXT=false
+  OPTION_UNSAFE=false
+  OPTION_INVALID=false
+
   case "$1" in
-    -X|--request|-H|--header|-d|--data|--data-raw|--data-binary|--data-urlencode|\
-    -F|--form|-T|--upload-file|-o|--output|-D|--dump-header|-w|--write-out|\
-    --connect-timeout|--max-time|--retry|--retry-delay|--cacert|--cert|--key)
-      return 0
+    -K|--config|--config=*|-L|--location|--location-trusted|\
+    -x|--proxy|--proxy=*|--preproxy|--preproxy=*|--proxy1.0|--proxy1.0=*|\
+    --socks4|--socks4=*|--socks4a|--socks4a=*|--socks5|--socks5=*|\
+    --socks5-hostname|--socks5-hostname=*|--connect-to|--connect-to=*|\
+    --resolve|--resolve=*|--alt-svc|--alt-svc=*|\
+    --unix-socket|--unix-socket=*|\
+    --abstract-unix-socket|--abstract-unix-socket=*|\
+    --request-target|--request-target=*)
+      OPTION_UNSAFE=true
+      return
       ;;
-    *) return 1 ;;
   esac
+
+  case "$1" in
+    -X|--request) OPTION_VALUE_KIND=request; OPTION_TAKES_NEXT=true; return ;;
+    --request=*) OPTION_VALUE_KIND=request; OPTION_VALUE="${1#*=}"; return ;;
+    -H|--header) OPTION_VALUE_KIND=header; OPTION_TAKES_NEXT=true; return ;;
+    --header=*) OPTION_VALUE_KIND=header; OPTION_VALUE="${1#*=}"; return ;;
+    -d|--data|--data-ascii|--data-raw|--data-binary|--data-urlencode|--json)
+      OPTION_VALUE_KIND=data; OPTION_TAKES_NEXT=true; return ;;
+    --data=*|--data-ascii=*|--data-raw=*|--data-binary=*|\
+    --data-urlencode=*|--json=*)
+      OPTION_VALUE_KIND=data; OPTION_VALUE="${1#*=}"; return ;;
+    -F|--form|-T|--upload-file|-o|--output|-D|--dump-header|-w|--write-out|\
+    -m|--max-time|-E|--cert|--connect-timeout|--retry|--retry-delay|\
+    --cacert|--key)
+      OPTION_VALUE_KIND=other; OPTION_TAKES_NEXT=true; return ;;
+    --form=*|--upload-file=*|--output=*|--dump-header=*|--write-out=*|\
+    --max-time=*|--cert=*|--connect-timeout=*|--retry=*|--retry-delay=*|\
+    --cacert=*|--key=*)
+      OPTION_VALUE_KIND=other; OPTION_VALUE="${1#*=}"; return ;;
+    --fail|--fail-with-body|--silent|--show-error|--include|--head|\
+    --no-buffer|--compressed|--globoff)
+      return ;;
+    --*)
+      OPTION_INVALID=true
+      return
+      ;;
+  esac
+
+  [[ "$1" == -?* && "$1" != --* ]] || return 0
+  local options="${1#-}"
+  local index option
+  for ((index = 0; index < ${#options}; index++)); do
+    option="${options:index:1}"
+    case "$option" in
+      K|L|x)
+        OPTION_UNSAFE=true
+        return
+        ;;
+      X) OPTION_VALUE_KIND=request ;;
+      H) OPTION_VALUE_KIND=header ;;
+      d) OPTION_VALUE_KIND=data ;;
+      F|T|o|D|w|m|E) OPTION_VALUE_KIND=other ;;
+      # Boolean short flags used by the documented mapi recipes.  Unknown
+      # flags must fail closed: curl's short-option grammar lets an earlier
+      # value-taking flag consume the remainder, so skipping a character can
+      # make mapi and curl disagree about whether the next argv is a URL.
+      s|S|f|g|i|I|N|v) continue ;;
+      *) OPTION_INVALID=true; return ;;
+    esac
+    OPTION_VALUE="${options:index+1}"
+    if [[ -z "$OPTION_VALUE" ]]; then
+      OPTION_TAKES_NEXT=true
+    fi
+    return 0
+  done
+  return 0
+}
+
+note_option_value() {
+  local kind="$1"
+  local value="$2"
+  case "$kind" in
+    request)
+      if [[ ! "$value" =~ ^[A-Za-z]+$ ]]; then
+        printf '%s\n' \
+          "mapi: request method must contain only HTTP token letters" >&2
+        exit 2
+      fi
+      ;;
+    data)
+      has_body=true
+      ;;
+    header)
+      local lower_value="${value,,}"
+      local header_name="${lower_value%%[:;]*}"
+      if [[ "$value" == @* || "$value" == *$'\r'* || "$value" == *$'\n'* \
+         || "$header_name" == host || "$lower_value" == :authority:* \
+         || "$lower_value" == :authority\;* ]]; then
+        printf '%s\n' \
+          "mapi: refusing an opaque or Host-replacing header with owner auth" >&2
+        exit 2
+      fi
+      [[ "$lower_value" == content-type:* ]] && has_content_type=true
+      ;;
+  esac
+  return 0
 }
 
 resolved=()
 has_body=false
 has_content_type=false
 has_api_target=false
-previous=""
+pending_value_kind=""
 for argument in "$@"; do
-  case "$argument" in
-    -d|--data|--data-raw|--data-binary|--data-urlencode) has_body=true ;;
-    -d?*|--data=*|--data-raw=*|--data-binary=*|--data-urlencode=*)
-      has_body=true
-      ;;
-  esac
-  lower_argument="${argument,,}"
-  if [[ "$previous" == "-H" || "$previous" == "--header" ]]; then
-    [[ "$lower_argument" == content-type:* ]] && has_content_type=true
-  elif [[ "$lower_argument" == -hcontent-type:* \
-       || "$lower_argument" == --header=content-type:* ]]; then
-    has_content_type=true
+  if [[ -n "$pending_value_kind" ]]; then
+    note_option_value "$pending_value_kind" "$argument"
+    resolved+=("$argument")
+    pending_value_kind=""
+    continue
   fi
+
   if [[ "$argument" == /api/* || "$argument" == /api ]]; then
+    api_path="${argument%%\?*}"
+    api_path="${api_path%%\#*}"
+    lower_api_path="${api_path,,}"
+    case "/${api_path#/}/" in
+      */./*|*/../*)
+        printf '%s\n' "mapi: target path must stay within /api" >&2
+        exit 2
+        ;;
+    esac
+    if [[ "$lower_api_path" == *%2e* || "$lower_api_path" == *%2f* \
+       || "$lower_api_path" == *%5c* || "$api_path" == *\\* ]]; then
+      printf '%s\n' \
+        "mapi: encoded separators or dot segments are not valid API targets" >&2
+      exit 2
+    fi
     has_api_target=true
     argument="${API_BASE_URL%/}$argument"
   elif [[ "$argument" == http://* || "$argument" == https://* \
@@ -45,13 +151,29 @@ for argument in "$@"; do
     printf '%s\n' \
       "mapi: targets must be Möbius /api paths; refusing to forward owner auth" >&2
     exit 2
-  elif [[ "$argument" != -* ]] && ! option_takes_value "$previous"; then
+  elif [[ "$argument" != -* ]]; then
     printf '%s\n' \
       "mapi: unexpected target '$argument'; only Möbius /api paths are allowed" >&2
     exit 2
+  else
+    parse_option "$argument"
+    if $OPTION_INVALID; then
+      printf '%s\n' \
+        "mapi: unsupported curl short option in '$argument'" >&2
+      exit 2
+    fi
+    if $OPTION_UNSAFE; then
+      printf '%s\n' \
+        "mapi: curl option '$argument' can change the authenticated request target" >&2
+      exit 2
+    fi
+    if [[ -n "$OPTION_VALUE_KIND" && -n "$OPTION_VALUE" ]]; then
+      note_option_value "$OPTION_VALUE_KIND" "$OPTION_VALUE"
+    elif $OPTION_TAKES_NEXT; then
+      pending_value_kind="$OPTION_VALUE_KIND"
+    fi
   fi
   resolved+=("$argument")
-  previous="$argument"
 done
 
 if ! $has_api_target; then
@@ -59,7 +181,11 @@ if ! $has_api_target; then
   exit 2
 fi
 
-curl_args=(-sS -H "Authorization: Bearer $AGENT_TOKEN")
+# -q must be curl's first argument to disable implicit ~/.curlrc loading. A
+# config file can add arbitrary URLs, which would bypass mapi's target check.
+# --globoff keeps curl from expanding one validated /api target into additional
+# normalized requests after mapi has finished checking it.
+curl_args=(-q --globoff -sS -H "Authorization: Bearer $AGENT_TOKEN")
 if $has_body && ! $has_content_type; then
   curl_args+=(-H "Content-Type: application/json")
 fi
