@@ -6,13 +6,15 @@ import MarkerCard from './MarkerCard.jsx'
 export default function ContinuationCard({ msg }) {
   const manual = msg?.continuation_reason === 'manual'
   const reason = msg?.continuation_reason
-  const title = manual ? 'Resumed manually' : 'Resumed automatically'
+  const title = reason === 'goal_handoff'
+    ? 'Continuing Goal'
+    : manual ? 'Resumed manually' : 'Resumed automatically'
   const subtitle = {
     restart: 'Server restarted — continuing automatically',
     usage_limit: 'Usage available again — continuing automatically',
     memory: 'Memory freed up — continuing automatically',
     storage: 'Storage freed up — continuing automatically',
-    goal_handoff: 'An unfinished Goal had no next step — continuing automatically',
+    goal_handoff: 'The agent turn ended, but the Goal is still unfinished',
   }[reason] || (!manual ? 'Interrupted work recovered — continuing automatically' : null)
 
   return (

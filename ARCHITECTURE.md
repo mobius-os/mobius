@@ -1120,17 +1120,23 @@ resurrect itself when the boot sweep claims restart parks.
 
 A `ChatRun.goal_id` identifies one logical Goal across its physical turns;
 the root run owns the visible plan. Finishing a physical turn is not itself
-Goal completion: an unfinished plan must either have a durable next owner or
-receive a bounded corrective continuation.
+Goal completion, but unfinished intent alone cannot authorize another provider
+invocation either. Every Goal-bound run checkpoints the root plan revision at
+provider admission. At clean settlement, a new exact durable owner gets the
+next move; otherwise automatic rollover requires the plan revision to have
+advanced beyond that checkpoint. A legacy/unknown checkpoint proves nothing.
 
 `goal_plans.goal_handoff_owner_kind` is the shared durable ownership query for
 both Goal presentation and turn settlement. It recognizes an owner question,
 Wait (including a settled result awaiting delivery), or wake-enabled helper only when that actor belongs to the same
 `goal_id`; an unrelated question or background operation in the chat cannot
 hide an orphaned Goal. The writer's terminal promotion checks ownership after
-question persistence. An automatic continuation records its settled-task
-frontier; another requires that frontier to advance. Without progress, the
-terminal path saves an owner question instead of starting another turn.
+question persistence. Identical normalized plan writes are revision no-ops, so
+rewriting unchanged state cannot manufacture permission to continue. Without
+durable plan progress, the terminal path saves an owner reconciliation question
+instead of starting another turn. Automatic Goal controls keep their causal
+place in the existing pending FIFO, but the writer translates them into an
+ephemeral provider prompt and never appends them as owner transcript rows.
 
 Workspace `AgentWorkClaim` rows are narrower: they serialize one shared action
 across otherwise independent chats. They do not replace a chat's Goal, a

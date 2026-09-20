@@ -107,3 +107,14 @@ test('enabled paid extra usage reports its separate percentage', () => {
     extra_usage: { enabled: false, used_percent: 0 },
   }), null)
 })
+
+
+test('enabled extra usage keeps a missing percentage unknown', () => {
+  assert.deepEqual(providerExtraUsage({
+    extra_usage: { enabled: true, available: null, used_percent: null },
+  }), {
+    label: 'Extra usage',
+    usedPercent: null,
+    summary: 'Extra usage enabled',
+  })
+})

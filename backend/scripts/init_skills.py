@@ -41,6 +41,7 @@ init_chat_summaries.py.
 """
 
 import hashlib
+import json
 import os
 import pwd
 import shutil
@@ -105,6 +106,11 @@ _UNMODIFIED_MIGRATIONS = {
     # Front-loaded execution-loop seed before routing became an explicit serial
     # gate and the repeated guidance was condensed below Claude's read limit.
     "d00214c37ba549f5ea4f043714ca33073176b47f1e3085230791b74dd49e2b49",
+    # Turn-local routing seed before plan-owned continuation and no-op revision
+    # fencing. Only untouched copies receive the new handoff contract.
+    "c0484a99757296892e042512cdc41371e2e94e88ceab377e80a3b8a71f3a48c2",
+    # Initial plan-owned continuation seed before its bounded wording pass.
+    "9c1665fece62c6eaa20d422f138527952eb8feb3dc56c215be62b04769bd3914",
   },
   "waiting.md": {
     # Untouched shared copy before explicit owner/deadline requirements and
@@ -260,6 +266,13 @@ _UNMODIFIED_MIGRATIONS = {
 # undo-and-restore.md. Current-seed hashes belong here by design: retirement,
 # unlike a fix-forward replacement, must also remove the latest untouched copy.
 _RETIRED_UNMODIFIED_SKILLS = {
+  # Live screen control remains an owner-consented platform capability, but it
+  # no longer needs a standalone procedural skill. Remove the untouched seed
+  # copy from discovery; a customized copy is archived by the generic retire
+  # path below instead of being discarded.
+  "live-screen-control.md": {
+    "494da9e09b122b04bcc6bb5f1bbbddf2e71ba75b777af41f5e5aa1b598a621be",
+  },
   # Agent Coaching subsumes the former on-demand manager ritual with a neutral
   # feedback-first method that Reflection can also use for self-improvement.
   # Preserve customized copies in retired-skills, but keep no parallel active
@@ -345,9 +358,31 @@ def _write_index() -> None:
 
 def _retire_legacy_skills() -> tuple[int, int]:
   """Remove baked legacy seeds and archive customized flat copies exactly."""
+  sidecar = SKILLS / ".app-skills.json"
+  app_owned: set[str] = set()
+  if sidecar.exists():
+    try:
+      records = json.loads(sidecar.read_text(encoding="utf-8"))
+      if not isinstance(records, dict) or any(
+        not isinstance(name, str) or not isinstance(record, dict)
+        for name, record in records.items()
+      ):
+        raise ValueError("expected an object of ownership records")
+      # The sidecar owns the basename even while a skill is inactive. Restore
+      # moves bytes back before it flips `active`, so filtering on discovery
+      # state would let boot retire an app-owned file after an interruption.
+      app_owned = set(records)
+    except (OSError, ValueError) as exc:
+      # Ownership ambiguity must preserve the live files. The app installer
+      # can repair its own sidecar on a later install/update.
+      print(f"init_skills: app skill ownership unreadable; retirement skipped ({exc})")
+      return 0, 0
+
   removed = 0
   archived = 0
   for name, baked_digests in _RETIRED_UNMODIFIED_SKILLS.items():
+    if name in app_owned:
+      continue
     path = SKILLS / name
     if not path.is_file():
       continue
