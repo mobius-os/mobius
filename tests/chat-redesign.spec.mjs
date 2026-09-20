@@ -445,7 +445,7 @@ test.describe('Bug 1: AskUserQuestion', () => {
     const geometry = () => card.evaluate(el => {
       const scroll = el.closest('.chat__scroll')
       const input = el.querySelector('.qcard__input')
-      const form = el.closest('.chat')?.querySelector('.chat__form')
+      const foot = el.closest('.chat')?.querySelector('.chat__foot')
       const rect = node => node?.getBoundingClientRect()
       const card = rect(el)
       const zoom = Number.parseFloat(getComputedStyle(document.documentElement).zoom) || 1
@@ -454,10 +454,12 @@ test.describe('Bug 1: AskUserQuestion', () => {
         cardBottom: card?.bottom,
         cardHeight: card?.height,
         inputHeight: rect(input)?.height,
+        inputBottom: rect(input)?.bottom,
+        visibleBottom: Math.min(rect(scroll)?.bottom, rect(foot)?.top),
         chatScrollTop: scroll?.scrollTop,
         renderedScrollTop: scroll ? scroll.scrollTop * zoom : null,
+        maxRenderedScrollTop: scroll ? Math.max(0, scroll.scrollHeight - scroll.clientHeight) * zoom : null,
         documentTop: card && scroll ? card.top + scroll.scrollTop * zoom : null,
-        formTop: rect(form)?.top,
       }
     })
 
@@ -480,10 +482,10 @@ test.describe('Bug 1: AskUserQuestion', () => {
     expect(after.cardTop).toBeCloseTo(before.cardTop, 5)
     expect(after.renderedScrollTop).toBeCloseTo(before.renderedScrollTop, 5)
     expect(after.documentTop).toBeCloseTo(before.documentTop, 5)
-    expect(after.cardBottom).toBeLessThanOrEqual(after.formTop + 1)
+    expect(after.inputBottom).toBeLessThanOrEqual(after.visibleBottom - 8 + 1)
 
-    // In a constrained viewport, reveal exactly the newly obscured editor
-    // height rather than pinning the card to a new arbitrary position.
+    // The focused editor, not the whole card and its Submit footer, owns
+    // reveal. A short editor can still fit after this viewport reduction.
     await page.setViewportSize({ width: 426, height: 510 })
     await page.evaluate(() => new Promise(resolve => (
       requestAnimationFrame(() => requestAnimationFrame(resolve))
@@ -497,15 +499,17 @@ test.describe('Bug 1: AskUserQuestion', () => {
     const crampedAfter = await geometry()
     const minimumReveal = Math.max(
       0,
-      crampedBefore.cardBottom
-        + (crampedAfter.cardHeight - crampedBefore.cardHeight)
-        - crampedBefore.formTop,
+      Math.min(
+        crampedBefore.inputBottom
+          + (crampedAfter.inputHeight - crampedBefore.inputHeight)
+          - (crampedBefore.visibleBottom - 8),
+        crampedAfter.maxRenderedScrollTop - crampedBefore.renderedScrollTop,
+      ),
     )
-    expect(minimumReveal).toBeGreaterThan(0)
     expect(crampedAfter.renderedScrollTop - crampedBefore.renderedScrollTop)
       .toBeCloseTo(minimumReveal, 0)
     expect(crampedAfter.documentTop).toBeCloseTo(crampedBefore.documentTop, 5)
-    expect(crampedAfter.cardBottom).toBeLessThanOrEqual(crampedAfter.formTop + 1)
+    expect(crampedAfter.inputBottom).toBeLessThanOrEqual(crampedAfter.visibleBottom - 8 + 1)
 
     // Past the growth cap, the writing field—not the transcript—owns overflow.
     // Drive the real keyboard path so caret reveal, beforeinput, input, and the
@@ -519,8 +523,9 @@ test.describe('Bug 1: AskUserQuestion', () => {
     )))
     const capped = await geometry()
     expect(capped.inputHeight).toBeLessThanOrEqual(181)
+    expect(capped.renderedScrollTop).toBeGreaterThan(crampedBefore.renderedScrollTop)
     expect(capped.documentTop).toBeCloseTo(crampedBefore.documentTop, 5)
-    expect(capped.cardBottom).toBeLessThanOrEqual(capped.formTop + 1)
+    expect(capped.inputBottom).toBeLessThanOrEqual(capped.visibleBottom - 8 + 1)
 
     await page.keyboard.press('Shift+Enter')
     await customAnswer.pressSequentially('Line 15')

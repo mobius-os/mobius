@@ -86,6 +86,14 @@ test.describe('shell update — owner-controlled navigation', () => {
     ], armed))
     const target = await createTaggedChat(page, 'update-target')
     const current = await createTaggedChat(page, 'update-current')
+    // Recents intentionally omits untouched chats. Give the destination real
+    // saved content so this exercises navigation, not an absent drawer row.
+    const token = await page.evaluate(() => localStorage.getItem('token'))
+    const occupied = await page.request.put(`${BASE}/api/chats/${target.id}`, {
+      headers: { Authorization: `Bearer ${token}` },
+      data: { messages: [{ role: 'user', content: 'Shell update navigation fixture' }] },
+    })
+    expect(occupied.ok()).toBe(true)
     await page.goto(`${BASE}/shell/?chat=${current.id}`, { waitUntil: 'domcontentloaded' })
     await expect(page.locator(
       `[data-chat-id="${current.id}"][data-chat-surface="painted"]`,

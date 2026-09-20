@@ -647,7 +647,7 @@ test('leaving Builder replaces an empty Standard slot without allocating a chat'
   expect(createCount, 'the selected Builder tab avoids an unnecessary New Chat row').toBe(0)
 })
 
-test('retiring an allocating Builder chat returns the selected tab and preserves its draft', async ({ page }) => {
+test('an allocating Builder chat remains the selected destination across a mode change', async ({ page }) => {
   let explicitId = null
   let explicitCreates = 0
   let automaticCreates = 0
@@ -706,8 +706,13 @@ test('retiring an allocating Builder chat returns the selected tab and preserves
     JSON.parse(localStorage.getItem(key))?.singleScreen
   ), paneModel.STORAGE_KEY), { timeout: 4000 }).toEqual({
     kind: 'chat',
-    id: 'aaa',
+    id: explicitId,
   })
+  // The UUID-backed composer is already a real selected Builder tab, not a
+  // cover over aaa. Exiting Builder exports that selected destination.
+  await expect(page.locator('[data-chat-surface="painted"]')
+    .getByRole('textbox', { name: 'Message Möbius…' }))
+    .toHaveValue('Keep this parked Builder draft')
   expect(automaticCreates, 'returning the selected tab must not allocate a replacement').toBe(0)
   await expect.poll(() => page.evaluate(id => ({
     intent: JSON.parse(sessionStorage.getItem('new-chat-intent')),
@@ -731,7 +736,7 @@ test('retiring an allocating Builder chat returns the selected tab and preserves
   expect(automaticCreates, 'the late explicit response must not allocate a replacement').toBe(0)
   await expect.poll(() => page.evaluate(key => (
     JSON.parse(localStorage.getItem(key))?.singleScreen
-  ), paneModel.STORAGE_KEY)).toEqual({ kind: 'chat', id: 'aaa' })
+  ), paneModel.STORAGE_KEY)).toEqual({ kind: 'chat', id: explicitId })
   await expect.poll(() => page.evaluate(id => ({
     intent: JSON.parse(sessionStorage.getItem('new-chat-intent')),
     draft: JSON.parse(sessionStorage.getItem(`draft:${id}`))?.input,
