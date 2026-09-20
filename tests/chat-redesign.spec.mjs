@@ -247,14 +247,22 @@ test.describe('Bug 1: AskUserQuestion', () => {
     // dead-end error (useStreamConnection.js marks it outboxRetained once the
     // local intent is recorded, regardless of the specific failure), so
     // QuestionCard shows the queued-status copy and locks the selection
-    // instead of surfacing "answer didn't save" for a manual retry --
-    // useOutboxDrain retries it automatically once the enqueue publishes.
-    // Stale since #978 (Aug 31) landed the outbox path a month after this
-    // test's last edit (721eef94, Aug 6).
+    // instead of surfacing "answer didn't save" for a manual retry. Stale
+    // since #978 (Aug 31) landed the outbox path a month after this test's
+    // last edit (721eef94, Aug 6).
     await expect(card.getByText('Queued on this device')).toBeVisible()
     await expect(careful).toHaveAttribute('aria-checked', 'true')
     await expect(careful).toBeDisabled()
     await expect(submit).toBeDisabled()
+    // useOutboxDrain only retries on a genuine deliveryReady edge (a real
+    // offline->online transition) or a fresh mount's unconditional drain --
+    // publishing the local enqueue itself does not request delivery. This
+    // scenario never actually went offline (a same-session 503), so a reload
+    // is what surfaces the retry, matching quiet-answers.spec.mjs's own
+    // "quiet" case for the identical queued-across-reload contract.
+    await page.reload({ waitUntil: 'domcontentloaded' })
+    await expect(card.getByText('Queued on this device')).toBeVisible()
+    await expect(careful).toHaveAttribute('aria-checked', 'true')
     await expect.poll(() => answerAttempts).toBe(2)
     await expect(page.getByRole('button', { name: 'Submitted' })).toBeDisabled()
   })
