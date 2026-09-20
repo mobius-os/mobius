@@ -21,6 +21,12 @@ def _served_tree(tmp_path, monkeypatch, source: str | None):
   if source is not None:
     (runtime / "identity_broker.py").write_text(source, encoding="utf-8")
   monkeypatch.setattr(launcher, "PLATFORM_DIR", platform)
+  # The container may itself ship a protected broker with a newer epoch.
+  # Happy-path fixtures own both sides of this boundary; epoch-specific tests
+  # replace this missing image directory through _image_tree below.
+  monkeypatch.setenv(
+    "MOBIUS_PROTECTED_RUNTIME_DIR", str(tmp_path / "missing-image-runtime"),
+  )
   return runtime / "identity_broker.py"
 
 

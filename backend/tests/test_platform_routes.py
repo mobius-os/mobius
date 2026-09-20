@@ -15,6 +15,10 @@ def test_update_preview_requires_owner(client):
 
 
 def test_update_preview_failure_is_not_an_empty_success(client, auth, monkeypatch):
+  monkeypatch.setattr(
+    "app.routes.platform.platform_activation.deployment_kind",
+    lambda: "self_hosted",
+  )
   def fail_preview():
     raise RuntimeError("platform clone unavailable")
 
@@ -329,6 +333,10 @@ def test_railway_status_does_not_call_unknown_release_current(
 
 def test_update_check_reports_fetch_failure(client, auth, monkeypatch):
   """Settings must not translate an unreachable origin into "up to date"."""
+  monkeypatch.setattr(
+    "app.routes.platform.platform_activation.deployment_kind",
+    lambda: "self_hosted",
+  )
   def fail_check():
     from app.platform_update import PlatformUpdateError
     raise PlatformUpdateError("platform_fetch_failed")
@@ -346,6 +354,10 @@ def test_update_check_reports_fetch_failure(client, auth, monkeypatch):
 def test_status_failure_does_not_claim_up_to_date(
   client, auth, monkeypatch,
 ):
+  monkeypatch.setattr(
+    "app.routes.platform.platform_activation.deployment_kind",
+    lambda: "self_hosted",
+  )
   def fail_status():
     raise RuntimeError("platform clone unavailable")
 
