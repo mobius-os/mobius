@@ -1023,6 +1023,35 @@ test('getWithVersion returns the value AND its server version (ETag)', async () 
   assert.equal(vget.headers['X-Mobius-Version'], '1')
 })
 
+test('getWithVersion bypasses a plain-read HTTP cache before CAS', async () => {
+  const { server } = freshEnv()
+  const s = await newStorage()
+  server.seed('large-state.json', { pattern: [1, 0, 1] })
+
+  // Beat Machine first performs an ordinary load. For a streamed file,
+  // Chromium can cache that response under a transport ETag which the storage
+  // route will not accept as an If-Match version. The later versioned read must
+  // bypass the HTTP cache and obtain the storage route's CAS token.
+  assert.deepEqual(await s.get('large-state.json'), { pattern: [1, 0, 1] })
+  const loaded = await s.getWithVersion('large-state.json')
+  assert.ok(loaded.version)
+
+  const versionedGet = server.log.filter((request) =>
+    request.method === 'GET' &&
+    request.url.includes('large-state.json') &&
+    request.headers['X-Mobius-Version'] === '1'
+  ).at(-1)
+  assert.equal(versionedGet.cache, 'no-store')
+
+  const saved = await s.durableWrite(
+    'large-state.json',
+    { pattern: [1, 1, 1] },
+    { ifMatch: loaded.version },
+  )
+  assert.equal(saved.durability, 'synced')
+  assert.deepEqual(server.serverValue('large-state.json'), { pattern: [1, 1, 1] })
+})
+
 test('getWithVersion retains its ETag for an offline CAS write and reconnect drain', async () => {
   const { server } = freshEnv()
   const s = await newStorage()
