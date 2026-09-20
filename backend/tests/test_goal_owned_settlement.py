@@ -411,11 +411,12 @@ async def test_only_saved_owner_question_prevents_terminal_goal_fallback_questio
   from app import chat as chat_mod, chat_queue
   from app.broadcast import create_broadcast, remove_broadcast
   from app.chat_event_sink import ChatEventSink
+  from app.goal_plans import goal_plan_revision
   from app.memory_recall import EMPTY_RECALL_BINDING
 
   _add_goal_run(db, chat)
   root = db.get(models.ChatRun, "goal-run")
-  root.goal_plan_revision_at_admission = root.goal_plan_revision
+  root.goal_plan_revision_at_admission = goal_plan_revision(db, chat.id, root.goal_id)
   db.commit()
   scheduled = []
   monkeypatch.setattr(
