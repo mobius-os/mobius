@@ -17,6 +17,7 @@ import {
   QUICK_WAKE_HIDDEN_MS,
 } from '../frontend/src/components/ChatView/streamTiming.js'
 import { createTaggedChat, attachCleanup } from './_chatTracker.mjs'
+import { testChatAgentSettings } from './_chatTestPrerequisites.mjs'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
 
@@ -812,6 +813,53 @@ test.describe('Stream reconnection', () => {
     // real network race or this simulation, because both deliver a resolved
     // 204 Response to the same awaited fetch while abortRef points elsewhere.
     let messagesPostCount = 0
+    // setupChat() creates a REAL chat (createTaggedChat) but never mocks the
+    // chat-detail/runtime GETs, so ChatView's fallback runtime poll
+    // (reconcileRuntimeState, every ~1s while a turn/queue is active) and any
+    // force:true fetchMessages() call fall through to that real, message-less
+    // backend chat. An empty pending_messages there hydrate()s away the
+    // queued row this test is about to click cancel-X on, detaching it from
+    // the DOM mid-click (same class of bug fixed across steer-queued.spec.mjs
+    // on this branch — see the fast-forward test there for the full writeup).
+    let durablePending = []
+    // False until the first POST actually starts a turn — an unconditional
+    // running:true here locks the composer before setupChat's own "genuinely
+    // idle" wait ever sees it settle (this poll fires as soon as ChatView
+    // mounts a turn/queue, not only once one is genuinely active).
+    let turnRunning = false
+    await page.route(/\/api\/chats\/[0-9a-f-]+\/runtime$/, route => {
+      if (route.request().method() !== 'GET') { route.continue(); return }
+      route.fulfill({
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          running: turnRunning,
+          runtime_revision: 0,
+          pending_messages: durablePending,
+        }),
+      })
+    })
+    await page.route(/\/api\/chats\/[0-9a-f-]+\?limit=/, route => {
+      if (route.request().method() !== 'GET') { route.continue(); return }
+      route.fulfill({
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          messages: [],
+          total: 0,
+          offset: 0,
+          running: turnRunning,
+          runtime_revision: 0,
+          pending_messages: durablePending,
+          // createTaggedChat() already persists a model on the real backend
+          // (persistTestChatModel), but this mock overrides that same GET
+          // response wholesale — omitting these fields wipes the selection
+          // and needsModelSelection() blocks every send (see the writeup on
+          // steer-queued.spec.mjs's read-above-tail fix on this branch).
+          ...testChatAgentSettings(),
+        }),
+      })
+    })
 
     // Install the fetch shim before any app code runs. It captures the
     // first explicitly armed /stream fetch and parks it (a held Response).
@@ -878,13 +926,22 @@ test.describe('Stream reconnection', () => {
 
     // Cancel-queued (DELETE /pending/{cid}) → 200 with an empty queue, so the
     // tray-X clear below resolves cleanly without an error-path refetch.
-    await page.route(/\/api\/chats\/[0-9a-f-]+\/pending\/[^/]+$/, route =>
+    await page.route(/\/api\/chats\/[0-9a-f-]+\/pending\/[^/]+$/, route => {
+      durablePending = []
       route.fulfill({
         status: 200,
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ pending_messages: [] }),
       })
-    )
+    })
+
+    // Stop override — registered AFTER setupChat so it wins, same reasoning
+    // as the /messages override below: keeps the runtime-poll mock's
+    // `running` in sync with the actual turn lifecycle this test drives.
+    await page.route('**/api/chat/stop', route => {
+      turnRunning = false
+      route.fulfill({ status: 200, body: '{}' })
+    })
 
     // POST /messages override — registered AFTER setupChat so it wins
     // (Playwright matches most-recently-added first; setupChat's bare-{}
@@ -897,6 +954,9 @@ test.describe('Stream reconnection', () => {
       messagesPostCount++
       if (messagesPostCount === 2) {
         const ts = Date.now()
+        durablePending = [{
+          role: 'user', content: body.content, ts, cid: body.cid,
+        }]
         route.fulfill({
           status: 202,
           headers: { 'Content-Type': 'application/json' },
@@ -914,6 +974,7 @@ test.describe('Stream reconnection', () => {
         })
         return
       }
+      turnRunning = true
       route.fulfill({
         status: 202,
         headers: { 'Content-Type': 'application/json' },
