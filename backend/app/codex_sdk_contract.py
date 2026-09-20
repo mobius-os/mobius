@@ -8,7 +8,6 @@ access throughout the turn lifecycle.
 
 from __future__ import annotations
 
-import time
 from typing import Any, Callable
 
 
@@ -34,31 +33,6 @@ def app_server_pid(codex: Any) -> int | None:
   process = getattr(sync_client, "_proc", None)
   pid = getattr(process, "pid", None)
   return pid if isinstance(pid, int) and pid > 1 else None
-
-
-def wait_for_goal_snapshot(state: Any, timeout: float) -> Any | None:
-  """Wait for the pinned SDK goal route's ordered status snapshot."""
-  condition = getattr(state, "_condition", None)
-  if condition is None:
-    return getattr(state, "status", None)
-  deadline = time.monotonic() + timeout
-  with condition:
-    while getattr(state, "status", None) is None:
-      failure = getattr(state, "_failure", None)
-      if failure is not None:
-        raise failure
-      remaining = deadline - time.monotonic()
-      if remaining <= 0:
-        return None
-      condition.wait(remaining)
-    return state.status
-
-
-def goal_notification_stream_type() -> type:
-  """Return the pinned SDK's private asynchronous goal stream class."""
-  from openai_codex._goal import _AsyncGoalNotificationStream
-
-  return _AsyncGoalNotificationStream
 
 
 def install_approval_handler(

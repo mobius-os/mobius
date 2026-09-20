@@ -17,10 +17,8 @@ from app.chat_context import (
   _chat_has_goal_intent,
   _goal_clear_requested,
   _goal_objective,
-  _goal_resume_requested,
   _human_elapsed,
   _is_cli_slash_command,
-  _latest_goal_objective,
   _last_user_message_elapsed,
 )
 from app.database import SessionLocal
@@ -157,27 +155,6 @@ def test_goal_intent_uses_the_native_command_boundary():
   assert not _chat_has_goal_intent(messages("please run /goal later"))
 
 
-def test_goal_intent_and_latest_objective_scan_durable_history():
-  messages = [
-    schemas.ChatMessage(role="user", content="hello"),
-    schemas.ChatMessage(role="assistant", content="hi"),
-    schemas.ChatMessage(role="user", content="/goal first objective"),
-    schemas.ChatMessage(role="user", content="continue"),
-  ]
-  assert _chat_has_goal_intent(messages)
-  assert _latest_goal_objective(messages) == "first objective"
-
-  cleared = messages + [
-    schemas.ChatMessage(role="user", content="/goal clear"),
-    schemas.ChatMessage(role="user", content="continue"),
-  ]
-  assert _latest_goal_objective(cleared) is None
-
-  changed_subject = messages[:-1] + [
-    schemas.ChatMessage(role="user", content="different request"),
-    schemas.ChatMessage(role="user", content="continue"),
-  ]
-  assert _latest_goal_objective(changed_subject) is None
 
 
 def test_goal_controls_ignore_the_server_upload_manifest():
@@ -190,9 +167,6 @@ def test_goal_controls_ignore_the_server_upload_manifest():
   assert _chat_has_goal_intent([
     schemas.ChatMessage(role="user", content="/goal ship it" + manifest),
   ])
-  assert _goal_resume_requested(SimpleNamespace(messages=[
-    {"role": "user", "content": "continue" + manifest, "kind": "auto_continuation"},
-  ]), "continue" + manifest)
 
   bracketed_name = (
     "\n\n[Files in this session:\n"
@@ -202,18 +176,6 @@ def test_goal_controls_ignore_the_server_upload_manifest():
   assert _goal_objective("/goal ship it" + bracketed_name) == "ship it"
 
 
-def test_legacy_goal_migration_requires_a_durable_resume_intent():
-  assert _goal_resume_requested(SimpleNamespace(messages=[
-    {"role": "assistant", "blocks": [{"type": "error", "resumable": True}]},
-    {"role": "user", "content": "continue"},
-  ]), "continue")
-  assert _goal_resume_requested(SimpleNamespace(messages=[
-    {"role": "user", "content": "continue", "kind": "auto_continuation"},
-  ]), "continue")
-  assert not _goal_resume_requested(SimpleNamespace(messages=[
-    {"role": "assistant", "content": "ordinary reply"},
-    {"role": "user", "content": "continue"},
-  ]), "continue")
 
 
 def test_textless_send_is_not_a_slash_command():

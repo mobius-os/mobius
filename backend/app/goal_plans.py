@@ -5,7 +5,6 @@ from __future__ import annotations
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import UTC, datetime
-import json
 import re
 from typing import Any
 
@@ -28,56 +27,20 @@ MAX_NOTE = 500
 MAX_RESULT = 1000
 
 
-def _goal_plan_tasks(
-  db: Session, chat_id: str, goal_id: str,
-) -> list[dict[str, Any]] | None:
-  """Return one stable Goal's task snapshot, if it owns a plan."""
-  owner = (
-    db.query(models.ChatRun.goal_plan_json)
-    .filter(
-      models.ChatRun.chat_id == chat_id,
-      models.ChatRun.goal_id == goal_id,
-      models.ChatRun.goal_plan_json.isnot(None),
-    )
-    .order_by(models.ChatRun.started_at.asc(), models.ChatRun.id.asc())
-    .first()
-  )
-  if owner is None:
-    return False
-  raw = owner[0]
-  try:
-    plan = json.loads(raw) if isinstance(raw, str) else raw
-  except (TypeError, json.JSONDecodeError):
-    return None
-  tasks = (plan or {}).get("tasks") if isinstance(plan, dict) else None
-  return tasks if isinstance(tasks, list) and tasks else None
-
-
 def goal_plan_is_unfinished(
   db: Session, chat_id: str, goal_id: str,
 ) -> bool:
-  """Whether one stable Goal owns a plan with unsettled work."""
-  tasks = _goal_plan_tasks(db, chat_id, goal_id)
-  return bool(tasks) and any(
-    isinstance(task, dict)
-    and task.get("status") not in SETTLED_TASK_STATUSES
-    for task in tasks
-  )
+  """Whether the durable obligation is still open, even without a plan."""
+  goal = db.get(models.ChatGoal, goal_id)
+  return goal is not None and goal.chat_id == chat_id and goal.status == "open"
 
 
 def goal_plan_revision(db: Session, chat_id: str, goal_id: str) -> int:
   """Return the exact durable plan revision for one stable Goal."""
-  value = (
-    db.query(models.ChatRun.goal_plan_revision)
-    .filter(
-      models.ChatRun.chat_id == chat_id,
-      models.ChatRun.goal_id == goal_id,
-      models.ChatRun.goal_plan_json.isnot(None),
-    )
-    .order_by(models.ChatRun.started_at.asc(), models.ChatRun.id.asc())
-    .scalar()
-  )
-  return int(value or 0)
+  goal = db.get(models.ChatGoal, goal_id)
+  if goal is None or goal.chat_id != chat_id:
+    return 0
+  return int(goal.revision or 0)
 
 
 class GoalPlanError(ValueError):
@@ -130,7 +93,7 @@ def normalize_tasks(raw_tasks: Any) -> list[dict[str, Any]]:
       raise GoalPlanError(f"duplicate task id: {task_id}")
     ids.add(task_id)
     status = raw.get("status", "pending")
-    if status not in TASK_STATUSES:
+    if not isinstance(status, str) or status not in TASK_STATUSES:
       raise GoalPlanError(f"invalid status for {task_id}: {status}")
     depends_on = raw.get("depends_on", [])
     if not isinstance(depends_on, list) or not all(
@@ -283,35 +246,19 @@ def normalize_tasks(raw_tasks: Any) -> list[dict[str, Any]]:
 
 def _goal_rows_for_physical(
   db: Session, physical: models.ChatRun,
-) -> tuple[models.ChatRun, models.ChatRun]:
-  """Resolve one physical Goal row to the row that owns its visible plan."""
-  if physical.goal_id:
-    plan_owner = (
-      db.query(models.ChatRun)
-      .filter(
-        models.ChatRun.chat_id == physical.chat_id,
-        models.ChatRun.goal_id == physical.goal_id,
-        models.ChatRun.goal_plan_json.isnot(None),
-      )
-      .order_by(models.ChatRun.started_at.asc(), models.ChatRun.id.asc())
-      .first()
-    )
-    if plan_owner is not None:
-      return physical, plan_owner
-  root_id = physical.root_run_id or physical.id
-  root = db.query(models.ChatRun).filter(
-    models.ChatRun.id == root_id,
-    models.ChatRun.chat_id == physical.chat_id,
-  ).first()
-  if root is None:
-    raise RuntimeError("Goal refers to a missing logical root run")
-  return physical, root
+) -> tuple[models.ChatRun, models.ChatGoal]:
+  """Resolve attempt to its sole durable plan/outcome owner."""
+  from app.goals import goal_for_run
+  goal = goal_for_run(db, physical)
+  if goal is None:
+    raise RuntimeError("Attempt does not own a Goal")
+  return physical, goal
 
 
 def active_goal_rows(
   db: Session, chat_id: str,
-) -> tuple[models.ChatRun, models.ChatRun] | None:
-  """Return (active physical row, logical root row) for Goal mutations."""
+) -> tuple[models.ChatRun, models.ChatGoal] | None:
+  """Return the active attempt and its durable Goal for mutations."""
   physical = (
     db.query(models.ChatRun)
     .filter(
@@ -336,7 +283,7 @@ def active_goal_rows(
 
 def presented_goal_rows(
   db: Session, chat_id: str,
-) -> tuple[models.ChatRun, models.ChatRun] | None:
+) -> tuple[models.ChatRun, models.ChatGoal] | None:
   """Return the latest Goal that remains visible until an explicit clear.
 
   ``Chat.dismissed_goal_id`` suppresses only the exact Goal the owner cleared;
@@ -367,7 +314,7 @@ def presented_goal_rows(
 
 
 def _delegation_tree(
-  db: Session, physical: models.ChatRun, root: models.ChatRun,
+  db: Session, physical: models.ChatRun, root: models.ChatGoal,
 ) -> list[dict[str, Any]]:
   """Project durable immediate-child ownership without copying transcripts."""
   from app.delegations import derived_status
@@ -454,12 +401,15 @@ def publish_plan_for_delegation(
 
 
 def serialize_plan(
-  db: Session, physical: models.ChatRun, root: models.ChatRun,
+  db: Session, physical: models.ChatRun, root: models.ChatGoal,
 ) -> dict[str, Any] | None:
-  raw = root.goal_plan_json
+  raw = root.plan_json
   if not isinstance(raw, dict) or not isinstance(raw.get("tasks"), list):
     return None
-  tasks = deepcopy(raw["tasks"])
+  try:
+    tasks = normalize_tasks(deepcopy(raw["tasks"]))
+  except GoalPlanError:
+    return None
   by_id = {task["id"]: task for task in tasks}
   children_by_parent: dict[str, list[str]] = {}
   for task in tasks:
@@ -526,9 +476,9 @@ def serialize_plan(
   return {
     "version": 1,
     "goal_id": physical.goal_id,
-    "root_run_id": root.id,
-    "objective": physical.goal_objective,
-    "revision": int(root.goal_plan_revision or 0),
+    "root_run_id": physical.root_run_id or physical.id,
+    "objective": root.objective,
+    "revision": int(root.revision or 0),
     "updated_at": raw.get("updated_at"),
     "tasks": tasks,
     "delegations": delegations,
@@ -662,25 +612,22 @@ def goal_terminal_handoff(
   ).first()
   if run is None:
     return None
-  tasks = _goal_plan_tasks(db, chat_id, run.goal_id)
-  if (
-    not tasks
-    or not any(
-      isinstance(task, dict)
-      and task.get("status") not in SETTLED_TASK_STATUSES
-      for task in tasks
-    )
-    or goal_handoff_owner_kind(
-      db, chat_id, run.goal_id, include_queued_execution=True,
-    ) is not None
-  ):
+  goal = db.get(models.ChatGoal, run.goal_id)
+  if goal is None or goal.status != "open" or goal_handoff_owner_kind(
+    db, chat_id, run.goal_id, include_queued_execution=True,
+  ) is not None:
     return None
   current_revision = goal_plan_revision(db, chat_id, run.goal_id)
   admitted_revision = run.goal_plan_revision_at_admission
+  plan_corrupt = (
+    goal.plan_json is not None
+    and serialize_plan(db, run, goal) is None
+  )
   return GoalTerminalHandoff(
     goal_id=run.goal_id,
     automatic_allowed=(
-      isinstance(admitted_revision, int)
+      not plan_corrupt
+      and isinstance(admitted_revision, int)
       and current_revision > admitted_revision
     ),
     plan_revision=current_revision,
@@ -703,11 +650,7 @@ def require_quiet_answer_handoff(db: Session, chat, question_id: str) -> None:
   physical, root = _goal_rows_for_physical(db, owner)
   goal_id = physical.goal_id or root.id
   if _recoverable_result_goal(db, chat.id, owner)[0] is None:
-    return  # The exact Goal's latest physical run owns Stop, not the author.
-  plan = serialize_plan(db, physical, root)
-  if (plan is not None and plan["summary"]["can_complete"]) or (
-      plan is None and physical.status == "completed"):
-    return
+    return  # The durable obligation owns completion/Stop, not its author attempt.
   if goal_handoff_owner_kind(db, chat.id, goal_id, excluding_question_id=question_id):
     return
   for pending in chat.pending_messages or []:
@@ -722,7 +665,7 @@ def require_quiet_answer_handoff(db: Session, chat, question_id: str) -> None:
 def serialize_goal(
   db: Session,
   physical: models.ChatRun,
-  root: models.ChatRun,
+  root: models.ChatGoal,
 ) -> dict[str, Any]:
   """Project durable Goal presentation independently of turn liveness."""
   plan = serialize_plan(db, physical, root)
@@ -732,40 +675,24 @@ def serialize_goal(
 def _goal_presentation(
   db: Session,
   physical: models.ChatRun,
-  root: models.ChatRun,
+  root: models.ChatGoal,
   plan: dict[str, Any] | None,
 ) -> dict[str, Any]:
   """Use the same plan snapshot for completion and the historical plan card."""
   wait_kind = goal_handoff_owner_kind(
     db, physical.chat_id, physical.goal_id or root.id,
   )
-  if physical.status == "running":
-    status = "active"
-  elif physical.status in {
-    "parked", "resume_pending", "parked_notified", "stopped", "interrupted",
-  }:
-    status = "paused"
-  elif physical.status == "failed":
-    status = "failed"
-  elif (
-    physical.status == "completed"
-    and (
-      wait_kind is not None
-      or (
-        plan is not None
-        and not plan["summary"]["can_complete"]
-      )
-    )
-  ):
-    # A clean physical turn can end while its exact Goal still owns a durable
-    # handoff or before a multi-turn plan is complete. Physical completion is
-    # not Goal completion in either case.
-    status = "paused"
-  else:
+  if root.status == "completed":
     status = "completed"
+  elif root.status in {"stopped", "dismissed"}:
+    status = "paused"
+  elif physical.status == "running":
+    status = "active"
+  else:
+    status = "paused"
   return {
     "id": physical.goal_id or root.id,
-    "objective": physical.goal_objective,
+    "objective": root.objective,
     "status": status,
     "resumable": status == "paused",
     **({"wait_kind": wait_kind} if wait_kind is not None else {}),
@@ -832,13 +759,13 @@ def terminal_goal_summaries_by_message_index(
     identity = row.goal_id or row.root_run_id or row.id
     grouped.setdefault(identity, []).append(row)
 
-  assistant_rows: list[tuple[int, int]] = []
+  assistant_rows: list[tuple[int, int, object]] = []
   for index, message in enumerate(messages):
     if not isinstance(message, dict) or message.get("role") != "assistant":
       continue
     ts = message.get("ts")
     if isinstance(ts, (int, float)) and not isinstance(ts, bool):
-      assistant_rows.append((index, int(ts)))
+      assistant_rows.append((index, int(ts), message.get("id")))
 
   def epoch_ms(value: datetime | None) -> int | None:
     if value is None:
@@ -860,10 +787,33 @@ def terminal_goal_summaries_by_message_index(
     ended_ms = epoch_ms(latest.ended_at)
     if started_ms is None or ended_ms is None:
       continue
+    # Modern assistant segments carry the exact physical-run identity. Prefer
+    # it so clock skew cannot attach a Goal card to an unrelated answer. The
+    # bounded timestamp fallback is reserved for genuinely id-less legacy rows.
+    assistant_id = latest.id
+    segment_prefix = f"{assistant_id}:assistant:"
     candidate_index = next((
-      index for index, ts in reversed(assistant_rows)
-      if started_ms - 1000 <= ts <= ended_ms + 1000
+      index for index in range(len(messages) - 1, -1, -1)
+      if isinstance(messages[index], dict)
+      and messages[index].get("role") == "assistant"
+      and (
+        messages[index].get("id") == assistant_id
+        or (
+          isinstance(messages[index].get("id"), str)
+          and messages[index]["id"].startswith(segment_prefix)
+          and re.fullmatch(
+            r"[1-9][0-9]*",
+            messages[index]["id"][len(segment_prefix):],
+          ) is not None
+        )
+      )
     ), None)
+    if candidate_index is None:
+      candidate_index = next((
+        index for index, ts, message_id in reversed(assistant_rows)
+        if message_id is None
+        and started_ms - 1000 <= ts <= ended_ms + 1000
+      ), None)
     if (
       candidate_index is None
       or candidate_index < message_start
@@ -890,25 +840,35 @@ def replace_plan(
   db: Session,
   *,
   physical: models.ChatRun,
-  root: models.ChatRun,
+  root: models.ChatGoal,
   expected_revision: int,
   tasks: Any,
 ) -> dict[str, Any]:
   normalized = normalize_tasks(tasks)
-  current_tasks = _goal_plan_tasks(
-    db, physical.chat_id, physical.goal_id or root.id,
+  current_tasks = (
+    root.plan_json.get("tasks")
+    if isinstance(root.plan_json, dict)
+    and isinstance(root.plan_json.get("tasks"), list)
+    else None
   )
-  if current_tasks and normalize_tasks(current_tasks) == normalized:
+  try:
+    current_normalized = normalize_tasks(current_tasks)
+  except GoalPlanError:
+    # An invalid saved plan cannot be an identical no-op, but a fully
+    # validated replacement must still be able to repair it.
+    current_normalized = None
+  if current_normalized == normalized:
     # Identical saves must not manufacture progress and thereby authorize a
     # fresh provider turn. The no-op UPDATE retains the optimistic CAS: a
     # stale writer still conflicts even when its payload matches current data.
     result = db.execute(
-      update(models.ChatRun)
+      update(models.ChatGoal)
       .where(
-        models.ChatRun.id == root.id,
-        models.ChatRun.goal_plan_revision == expected_revision,
+        models.ChatGoal.id == root.id,
+        models.ChatGoal.status == "open",
+        models.ChatGoal.revision == expected_revision,
       )
-      .values(goal_plan_revision=expected_revision)
+      .values(revision=expected_revision)
     )
     if result.rowcount != 1:
       db.rollback()
@@ -925,14 +885,15 @@ def replace_plan(
     "tasks": normalized,
   }
   result = db.execute(
-    update(models.ChatRun)
+    update(models.ChatGoal)
     .where(
-      models.ChatRun.id == root.id,
-      models.ChatRun.goal_plan_revision == expected_revision,
+      models.ChatGoal.id == root.id,
+      models.ChatGoal.status == "open",
+      models.ChatGoal.revision == expected_revision,
     )
     .values(
-      goal_plan_json=document,
-      goal_plan_revision=expected_revision + 1,
+      plan_json=document,
+      revision=expected_revision + 1,
     )
   )
   if result.rowcount != 1:
@@ -950,7 +911,7 @@ def update_task(
   db: Session,
   *,
   physical: models.ChatRun,
-  root: models.ChatRun,
+  root: models.ChatGoal,
   expected_revision: int,
   task_id: str,
   changes: dict[str, Any],

@@ -1,5 +1,7 @@
 """Terminal settlement keeps every unfinished Goal under one real owner."""
 
+from tests.goal_fixtures import goal_run as make_goal_run
+
 import pytest
 
 from app import models
@@ -30,7 +32,7 @@ def _add_goal_run(
       "role": "user", "content": "Finish the work", "cid": "owner-request",
       "ts": 1,
     }]
-  db.add(models.ChatRun(
+  db.add(make_goal_run(db,
     id=run_id,
     root_run_id=run_id,
     chat_id=chat.id,
@@ -99,6 +101,12 @@ def test_clean_terminal_continues_unfinished_goal_without_an_owner(db, chat):
 
 def test_terminal_does_not_continue_a_settled_or_failed_goal(db, chat):
   _add_goal_run(db, chat, plan=SETTLED)
+  from app.goals import update_goal_record
+  goal = db.get(models.ChatGoal, "goal-run")
+  update_goal_record(
+    db, db.get(models.ChatRun, "goal-run"), goal, goal.revision,
+    result="Verified",
+  )
   settled = _terminal_promote(chat.id, "goal-run")
   assert settled["promoted"] is None
 
@@ -162,7 +170,7 @@ def test_wait_without_exact_outstanding_delivery_cannot_hold_goal(db, chat, case
 
 
 @pytest.mark.asyncio
-async def test_wait_delivery_after_terminal_gap_starts_only_its_exact_goal_run(db, chat, monkeypatch):
+async def test_wait_delivery_after_terminal_gap_starts_only_its_exact_make_goal_run(db, chat, monkeypatch):
   from app import chat as chat_mod, chat_waits
 
   _add_goal_run(db, chat)
@@ -325,16 +333,17 @@ async def test_complete_turn_schedules_the_terminal_goal_executor(
 
 
 @pytest.mark.asyncio
-async def test_no_progress_across_two_terminals_stops_at_a_saved_owner_question(
+async def test_zero_legacy_allowance_does_not_interrupt_authorized_work(
   db, chat, monkeypatch,
 ):
-  """A clean continuation cannot recursively manufacture provider turns."""
+  """Owner-authorized work continues without a turn-count question."""
   from app import chat as chat_mod, chat_queue
   from app.broadcast import create_broadcast, remove_broadcast
   from app.chat_event_sink import ChatEventSink
   from app.memory_recall import EMPTY_RECALL_BINDING
 
   _add_goal_run(db, chat)
+  db.commit()
   scheduled = []
   monkeypatch.setattr(
     chat_mod, "_schedule_continuation", lambda **kwargs: scheduled.append(kwargs),
@@ -363,6 +372,7 @@ async def test_no_progress_across_two_terminals_stops_at_a_saved_owner_question(
   assert first is chat_queue.TerminalDisposition.CONTINUATION_PROMOTED
   assert len(scheduled) == 1
   assert scheduled[0]["next_user"]["goal_plan_revision"] == 1
+  db.expire_all()
 
   continuation_run = scheduled[0]["run_token"]
   second_broadcast = create_broadcast(chat.id)
@@ -410,9 +420,9 @@ def test_plan_revision_progress_allows_the_next_goal_rollover(db, chat):
 
   successor = db.get(models.ChatRun, "first-successor")
   successor.goal_plan_revision_at_admission = 1
-  root = db.get(models.ChatRun, "goal-run")
-  root.goal_plan_revision = 2
-  root.goal_plan_json = {
+  goal = db.get(models.ChatGoal, "goal-run")
+  goal.revision = 2
+  goal.plan_json = {
     "version": 1,
     "tasks": [{
       "id": "finish", "title": "Finish", "status": "running",
