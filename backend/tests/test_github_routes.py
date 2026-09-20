@@ -4923,13 +4923,16 @@ def test_rejected_push_journal_cannot_bypass_source_recheck_on_retry(
   assert calls == [record["id"]]
 
 
+@pytest.mark.parametrize("successor", [False, True], ids=["app-ordinary", "owner-chat-successor"])
 def test_existing_pr_update_rechecks_current_source_before_push(
-  client, owner_token, monkeypatch,
+  client, owner_token, monkeypatch, successor,
 ):
   """Update PR cannot bypass provenance after its source has reverted."""
   _write_token(login="octocat", user_id=42)
   app_id, app_token = _app_token(client, owner_token, github_access=True)
-  _repo, record, diff_text = _prepared_real_review(app_id, "update-source-moved")
+  _repo, record, diff_text = _prepared_real_review(
+    app_id, f"update-source-moved-{successor}",
+  )
   record.update({
     "number": 58,
     "url": "https://github.com/mobius-os/app-demo/pull/58",
@@ -4943,6 +4946,13 @@ def test_existing_pr_update_rechecks_current_source_before_push(
     "old_title": record["plan"]["title"],
     "old_body": record["plan"]["body_draft"],
   }
+  if successor:
+    record["plan"]["successor"] = {
+      "old_head_sha": record["plan"]["base_sha"],
+      "old_base_branch": "stack/source-review/01-parent",
+      "old_base_sha": record["plan"]["base_sha"],
+      "base_branch": "main",
+    }
   _write_contribution(app_id, record["id"], record, diff_text)
   _remove_reviewed_change_from_source(record)
   monkeypatch.setattr(
@@ -4962,9 +4972,16 @@ def test_existing_pr_update_rechecks_current_source_before_push(
     lambda *_args, **_kwargs: pytest.fail("reverted source must never update"),
   )
 
+  monkeypatch.setattr(
+    github_routes,
+    "_advance_merged_parent_successor",
+    lambda *_args, **_kwargs: pytest.fail("reverted source must never rewrite a successor"),
+  )
+  token = owner_token if successor else app_token
+
   response = client.post(
     f"/api/github/contributions/{app_id}/{record['id']}/update-existing",
-    headers={"Authorization": f"Bearer {app_token}"},
+    headers={"Authorization": f"Bearer {token}"},
     json={"submitter": "chat-review-card"},
   )
 
