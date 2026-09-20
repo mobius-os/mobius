@@ -20,6 +20,7 @@ from app.github_contribution_contract import (
   GITHUB_LOGIN as _GITHUB_LOGIN,
   GITHUB_REPO as _GITHUB_REPO,
   GIT_SHA as _GIT_SHA,
+  PUSH_TIMEOUT_SECONDS as _PUSH_TIMEOUT,
   SUBMIT_TIMEOUT_SECONDS as _SUBMIT_TIMEOUT,
 )
 from app.terminal_output import readable_output
@@ -124,8 +125,18 @@ def _run_cmd(
   return proc
 
 
-def _git(repo: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess:
-  return _run_cmd(["git", "-C", str(repo), *args], cwd=repo, check=check)
+def _git(
+  repo: Path,
+  *args: str,
+  check: bool = True,
+) -> subprocess.CompletedProcess:
+  timeout = _PUSH_TIMEOUT if args[:1] == ("push",) else _SUBMIT_TIMEOUT
+  return _run_cmd(
+    ["git", "-C", str(repo), *args],
+    cwd=repo,
+    check=check,
+    timeout=timeout,
+  )
 
 
 def _gh(repo: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess:

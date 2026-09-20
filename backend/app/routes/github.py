@@ -529,22 +529,46 @@ def _personal_claim_owners(
 
 
 def _assert_personal_publication_source(
-  record: dict, owner: _PersonalAttemptOwner,
+  record: dict,
+  owner: _PersonalAttemptOwner,
+  owner_reviewed_uninstalled: bool = False,
 ) -> str:
   owner.assert_current()
   # A receipt proves the server's request, not GitHub's state. The eventual
   # recovery path may skip this only after an authoritative exact branch/PR
   # read; no receipt phase by itself is source provenance.
-  if owner.replay_phase() in {
-    "push_pending", "push_ambiguous", "branch_published", "pr_ambiguous",
-    "complete",
-  }:
-    return _assert_pending_equivalence_before_publication(record)
+  preflight = (
+    _assert_pending_equivalence_before_publication
+    if owner.replay_phase() in {
+      "push_pending", "push_ambiguous", "branch_published", "pr_ambiguous",
+      "complete",
+    }
+    else _assert_pending_equivalence_preflight
+  )
   # An armed receipt proves only that the owner approved these private inputs.
   # App-writable last_submit_* fields and an unrelated pre-existing public
   # branch cannot turn that fresh approval into source provenance. Only a
   # signed post-mutation phase may enter authoritative public recovery.
-  return _assert_pending_equivalence_preflight(record)
+  try:
+    return preflight(record)
+  except ContributionSubmitError as exc:
+    plan = record.get("plan") if isinstance(record.get("plan"), dict) else {}
+    # ``after_merge`` is a single reviewed handoff object.  Treat even a
+    # malformed value as handoff-bearing here: validation owns its shape, and
+    # publication must never turn bad handoff metadata into permission to
+    # bypass the source proof that protects the eventual local install.
+    has_handoff = plan.get("after_merge") is not None
+    if (
+      owner_reviewed_uninstalled
+      and not has_handoff
+      and exc.code == "source_provenance_mismatch"
+    ):
+      # A live owner can approve an exact reviewed worktree from chat without
+      # first installing it. Keep malformed/missing provenance and app
+      # publication handoffs strict: only ordinary, truthfully linked reviews
+      # may omit the optional local-equivalence witness.
+      return "owner_reviewed_uninstalled"
+    raise
 
 
 def _personal_resume_allowed(
@@ -761,6 +785,14 @@ class ContributionSubmitBody(BaseModel):
   # A ready PR requests review immediately; draft remains the compatibility
   # default for callers that have not yet added that explicit approval copy.
   publication_stage: Literal["draft", "ready"] = "draft"
+
+
+class ContributionUpdateBody(BaseModel):
+  # Existing-PR updates have no draft/autopilot choices, but owner-approved
+  # chat review needs the same narrow provenance as first publication.
+  submitter: Literal["contribute-update-button", "chat-review-card"] = (
+    "contribute-update-button"
+  )
 
 
 class ContributionSourceContinuityBody(BaseModel):
@@ -2912,6 +2944,10 @@ async def submit_contribution(
       ),
       "autopilot": bool(body.autopilot) if body is not None else False,
     }
+    # Keep the legacy/default receipt identity byte-for-byte stable across
+    # upgrade. Only the new owner-chat authority needs an extra signed field.
+    if body is not None and body.submitter == "chat-review-card":
+      action_input["submitter"] = body.submitter
     existing_record_path, _ = _record_paths(app_id, record_id)
     allow_resume = _personal_resume_allowed(
       app_id=app_id, record_id=record_id, record_path=existing_record_path,
@@ -2939,6 +2975,11 @@ async def submit_contribution(
 
   try:
     plan = publication_record.get("plan") or {}
+    owner_reviewed_uninstalled = bool(
+      principal.app_id is None
+      and body is not None
+      and body.submitter == "chat-review-card"
+    )
     repo_path = _safe_repo_path(plan.get("repo_path"))
     lock_paths = {str(repo_path)}
     equivalence_repos = _equivalence_source_repo(publication_record)
@@ -2956,6 +2997,7 @@ async def submit_contribution(
         _assert_personal_publication_source,
         publication_record,
         attempt_owner,
+        owner_reviewed_uninstalled,
       )
       pr_url, number, record_patch = await asyncio.to_thread(
         _submit_prepared_pr,
@@ -2967,6 +3009,11 @@ async def submit_contribution(
         attempt_event=attempt_owner.event,
         prior_attempt_phase=attempt_owner.replay_phase(),
         prior_attempt_receipt=attempt_owner.receipt(),
+        source_preflight=lambda candidate: _assert_personal_publication_source(
+          candidate,
+          attempt_owner,
+          owner_reviewed_uninstalled,
+        ),
       )
       try:
         await _record_pending_equivalence_locked(
@@ -3319,6 +3366,7 @@ async def update_existing_contribution(
   request: Request,
   app_id: int,
   record_id: str,
+  body: ContributionUpdateBody | None = None,
   db: Session = Depends(get_db),
   principal: Principal = Depends(get_principal),
 ):
@@ -3344,6 +3392,8 @@ async def update_existing_contribution(
   db.close()
   async with fs_locks.app_storage_lock(app_id):
     action_input = {"action": "update_existing"}
+    if body is not None and body.submitter == "chat-review-card":
+      action_input["submitter"] = body.submitter
     existing_record_path, _ = _record_paths(app_id, record_id)
     allow_resume = _personal_resume_allowed(
       app_id=app_id, record_id=record_id, record_path=existing_record_path,
@@ -3358,7 +3408,9 @@ async def update_existing_contribution(
       record_id=record_id,
       db=db,
       expected_nonce=expected_nonce,
-      submitter="contribute-update-button",
+      submitter=(
+        body.submitter if body is not None else "contribute-update-button"
+      ),
       expected_action="pr_update",
       allow_personal_resume=allow_resume,
       before_claim_write=own_claim,
@@ -3396,6 +3448,12 @@ async def update_existing_contribution(
     )
 
     plan = publication_record.get("plan") or {}
+    owner_reviewed_uninstalled = bool(
+      principal.app_id is None
+      and body is not None
+      and body.submitter == "chat-review-card"
+      and not isinstance(plan.get("successor"), dict)
+    )
     repo_path = _safe_repo_path(plan.get("repo_path"))
     lock_paths = {str(repo_path)}
     equivalence_repos = _equivalence_source_repo(publication_record)
@@ -3410,6 +3468,7 @@ async def update_existing_contribution(
         _assert_personal_publication_source,
         publication_record,
         attempt_owner,
+        owner_reviewed_uninstalled,
       )
       if isinstance(plan.get("successor"), dict):
         successor_request = {
@@ -3498,6 +3557,11 @@ async def update_existing_contribution(
           attempt_event=attempt_owner.event,
           prior_attempt_phase=attempt_owner.replay_phase(),
           prior_attempt_receipt=attempt_owner.receipt(),
+          source_preflight=lambda candidate: _assert_personal_publication_source(
+            candidate,
+            attempt_owner,
+            owner_reviewed_uninstalled,
+          ),
         )
       if returned_number != number:
         raise ContributionSubmitError(
