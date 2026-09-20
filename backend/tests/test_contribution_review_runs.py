@@ -7,6 +7,7 @@ import pytest
 from fastapi import HTTPException
 
 from app import contribution_review_runs as domain, models
+from app.contribution_errors import ContributionSubmitError
 from app.database import SessionLocal
 from app.deps import Principal
 from app.routes import contribution_reviews as routes
@@ -116,6 +117,30 @@ def test_lost_merge_receipt_is_not_replayed(setup, monkeypatch):
   assert calls == [1]
 
 
+def test_merge_failure_summary_keeps_safe_github_diagnostic():
+  summary = domain.merge_failure_summary(ContributionSubmitError(
+    "gh: HTTP 422: merge blocked token=should-not-appear"
+  ))
+  assert "HTTP 422" in summary
+  assert "should-not-appear" not in summary
+  assert "[redacted]" in summary
+
+
+def test_merge_failure_summary_keeps_untrusted_exception_generic():
+  assert domain.merge_failure_summary(TimeoutError("internal socket detail")) == (
+    "GitHub did not confirm the merge or queue request. Reconcile it before any new action."
+  )
+
+
+def test_lost_merge_receipt_preserves_safe_diagnostic(setup, monkeypatch):
+  def lose(*args):
+    raise ContributionSubmitError("gh: HTTP 422: merge blocked")
+  monkeypatch.setattr(domain, "perform_merge", lose)
+  item = report(setup)["run"]["items"][0]
+  assert item["state"] == "merge_unknown"
+  assert "HTTP 422" in item["summary"]
+
+
 def test_lost_merge_receipt_reconciles_exact_merged_head(setup, monkeypatch):
   db, row, _ = setup
   domain.save_outcome(db, row, domain.key(ITEM), {"state": "merging"})
@@ -183,6 +208,25 @@ def test_merge_call_binds_sha_without_admin_bypass():
   domain.perform_merge(gh, "/tmp", TARGET, REPO)
   assert f"sha={SHA}" in calls[0]
   assert not any("admin" in str(a) for a in calls[0])
+
+
+@pytest.mark.parametrize("payload", ["null", "[]", '"merged"'])
+def test_merge_call_rejects_non_object_confirmation(payload):
+  def gh(*args):
+    return SimpleNamespace(stdout=payload)
+  with pytest.raises(ContributionSubmitError) as error:
+    domain.perform_merge(gh, "/tmp", TARGET, REPO)
+  assert error.value.code == "merge_response_invalid_shape"
+  assert error.value.message == "GitHub returned an unexpected merge confirmation shape."
+
+
+def test_merge_call_rejects_unreadable_confirmation():
+  def gh(*args):
+    return SimpleNamespace(stdout="not json")
+  with pytest.raises(ContributionSubmitError) as error:
+    domain.perform_merge(gh, "/tmp", TARGET, REPO)
+  assert error.value.code == "merge_response_unreadable"
+  assert error.value.message == "GitHub returned an unreadable merge confirmation."
 
 
 def test_queue_call_binds_sha_and_never_jumps():
