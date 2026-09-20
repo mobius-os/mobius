@@ -100,14 +100,22 @@ async function holdLogo(page, brand) {
   // Under a loaded CI runner the 450ms hold can complete between pointerdown
   // returning and the first assertion. Accept either owned boundary: the live
   // hold class or the mode flip it commits, then require the completed flip.
+  //
+  // Reproduced locally (--repeat-each=3): a bare 3000ms budget flakes under the
+  // resource contention of concurrent local Docker e2e runs — the pointerdown's
+  // CDP round trip alone can eat a meaningful slice of that window before the
+  // page-side rAF loop ever starts ticking, leaving too little of the 3s left
+  // for the 450ms hold to land. Widened rather than restructured: the predicate
+  // itself already accepts the earliest-observable boundary; this is purely a
+  // slow-host allowance, not a logic gap.
   await expect.poll(() => brand.evaluate((element, wasBuilder) => (
     element.classList.contains('is-holding')
       || element.classList.contains('shell__brand--builder') !== wasBuilder
-  ), startedInBuilder), { timeout: 3000 }).toBe(true)
+  ), startedInBuilder), { timeout: 8000 }).toBe(true)
   await expect.poll(() => brand.evaluate((element, wasBuilder) => (
     !element.classList.contains('is-holding')
       && element.classList.contains('shell__brand--builder') !== wasBuilder
-  ), startedInBuilder), { timeout: 3000 }).toBe(true)
+  ), startedInBuilder), { timeout: 8000 }).toBe(true)
   await page.mouse.up()
 }
 
