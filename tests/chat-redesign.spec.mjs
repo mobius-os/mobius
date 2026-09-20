@@ -257,12 +257,23 @@ test.describe('Bug 1: AskUserQuestion', () => {
     // useOutboxDrain only retries on a genuine deliveryReady edge (a real
     // offline->online transition) or a fresh mount's unconditional drain --
     // publishing the local enqueue itself does not request delivery. This
-    // scenario never actually went offline (a same-session 503), so a reload
-    // is what surfaces the retry, matching quiet-answers.spec.mjs's own
-    // "quiet" case for the identical queued-across-reload contract.
-    await page.reload({ waitUntil: 'domcontentloaded' })
-    await expect(card.getByText('Queued on this device')).toBeVisible()
-    await expect(careful).toHaveAttribute('aria-checked', 'true')
+    // scenario never actually went offline (a same-session 503), so force
+    // that edge directly, matching quiet-answers.spec.mjs's disconnectDelivery
+    // / reconnect helper (a page.reload() here loses this test's mocked,
+    // non-persisted chat entirely and lands back on the New Chat landing).
+    const blockReadiness = route => route.abort('internetdisconnected')
+    await page.route('**/api/ready', blockReadiness)
+    await page.route('**/api/health', blockReadiness)
+    await page.evaluate(() => {
+      Object.defineProperty(navigator, 'onLine', { configurable: true, get: () => false })
+      window.dispatchEvent(new Event('offline'))
+    })
+    await page.unroute('**/api/ready', blockReadiness)
+    await page.unroute('**/api/health', blockReadiness)
+    await page.evaluate(() => {
+      Object.defineProperty(navigator, 'onLine', { configurable: true, get: () => true })
+      window.dispatchEvent(new Event('online'))
+    })
     await expect.poll(() => answerAttempts).toBe(2)
     await expect(page.getByRole('button', { name: 'Submitted' })).toBeDisabled()
   })
