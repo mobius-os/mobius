@@ -616,6 +616,17 @@ export default function useNavigation({
     // left root edge otherwise surfaces the drawer over the drop target instead
     // of splitting a left pane (owner report, live testing).
     if (drawerOpenBlockedByDrag(dragActiveRef?.current)) return
+    // Preserve a reopen that races the drawer sentinel's asynchronous close.
+    // commitDrawerOpen records that intent against the in-flight traversal;
+    // delaying it first would let the traversal cancel the preparation.
+    if (drawerClosePendingRef.current) {
+      commitDrawerOpen()
+      return
+    }
+    // A redundant activation must not create a preparation that closeDrawer
+    // mistakes for the whole open drawer. A close already in flight is the
+    // exception: commitDrawerOpen owns remembering that reopen intent.
+    if (drawerOpenRef.current) return
     if (activeViewRef.current === 'canvas') {
       if (drawerPreparingRef.current) return
       drawerPreparingRef.current = true
@@ -1089,6 +1100,10 @@ export default function useNavigation({
   }, [])
 
   function navTo(view, opts = {}) {
+    // A route change supersedes a drawer open that has not reached its painted
+    // commit yet. Otherwise its queued callback can install a drawer sentinel
+    // over the newly selected or restored route.
+    cancelDrawerPreparation()
     // App-sentinels from other apps stay in browser history — each is still a
     // valid back-target for its owner, routed by its tag when consumed. An
     // earlier revision cleared sentinels here via history.go(-stale) + a
@@ -1888,6 +1903,7 @@ export default function useNavigation({
     if (typeof navigation !== 'undefined' && navigation.addEventListener) {
       function onNavigate(e) {
         if (e.navigationType !== 'traverse') return
+        cancelDrawerPreparation()
         // The Navigation store is a best-effort MIRROR of the authoritative
         // classic History store (see navHistory.mirrorCurrentEntry) — on the
         // READ side too. A wedged WebKit Navigation API (iOS 18.4+) throws
@@ -2051,6 +2067,7 @@ export default function useNavigation({
 
     // popstate fallback (Safari, older Chrome).
     function onPopState() {
+      cancelDrawerPreparation()
       const destination = history.state
       const source = currentNavStateRef.current
       if (settleRecoveredDrawerClose(destination, source)) return
@@ -2124,6 +2141,7 @@ export default function useNavigation({
   }, [])
 
   const navigateBackward = useCallback(() => {
+    if (cancelDrawerPreparation()) return true
     const current = currentNavStateRef.current
     const hasShellTarget = navStackRef.current.length > 0
       || drawerOpenRef.current

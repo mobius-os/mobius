@@ -258,6 +258,86 @@ test('an explicit close cancels an app-origin drawer before its delayed commit',
   assert.notEqual(engine.currentKind, 'drawer')
 })
 
+test('a redundant app-origin open cannot turn the next close into a no-op', async () => {
+  const engine = sessionHistory()
+  const queued = []
+  const { result } = await mountNavigation(engine, {
+    tab: { kind: 'app', id: '119' },
+    frames: {
+      request(callback) {
+        queued.push(callback)
+        return queued.length
+      },
+      cancel() {},
+    },
+  })
+  const historyKindBeforeOpen = engine.currentKind
+
+  result.current.openDrawer()
+  queued.shift()()
+  queued.shift()()
+  assert.equal(result.current.drawerOpen, true)
+
+  result.current.openDrawer()
+  assert.equal(result.current.closeDrawer(), true)
+  assert.equal(engine.pendingTraversals, 1)
+  engine.settle()
+  assert.equal(result.current.drawerOpen, false)
+  assert.equal(engine.currentKind, historyKindBeforeOpen)
+})
+
+test('an app-origin reopen survives its in-flight close traversal', async () => {
+  const engine = sessionHistory()
+  const queued = []
+  const frames = {
+    request(callback) {
+      queued.push(callback)
+      return queued.length
+    },
+    cancel() {},
+  }
+  const { result } = await mountNavigation(engine, {
+    tab: { kind: 'app', id: '119' }, frames,
+  })
+
+  result.current.openDrawer()
+  queued.shift()()
+  queued.shift()()
+  assert.equal(result.current.drawerOpen, true)
+
+  assert.equal(result.current.closeDrawer(), true)
+  result.current.openDrawer()
+  engine.settle()
+  await new Promise(resolve => setTimeout(resolve, 0))
+
+  queued.shift()()
+  queued.shift()()
+  assert.equal(result.current.drawerOpen, true)
+  assert.equal(engine.currentKind, 'drawer')
+})
+
+test('Back cancels an app-origin drawer before its delayed commit', async () => {
+  const engine = sessionHistory()
+  const queued = []
+  const cancelled = new Set()
+  const { result } = await mountNavigation(engine, {
+    tab: { kind: 'app', id: '119' },
+    frames: {
+      request(callback) {
+        queued.push(callback)
+        return queued.length
+      },
+      cancel(id) { cancelled.add(id) },
+    },
+  })
+
+  result.current.openDrawer()
+  assert.equal(result.current.navigateBackward(), true)
+  assert.deepEqual([...cancelled], [1])
+  assert.equal(result.current.drawerOpen, false)
+  assert.notEqual(engine.currentKind, 'drawer')
+})
+
 test('a drag started during app-origin preparation prevents the delayed open', async () => {
   const engine = sessionHistory()
   const queued = []
