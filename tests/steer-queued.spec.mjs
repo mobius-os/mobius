@@ -853,6 +853,7 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
     let durableMessages = []
     let durablePending = []
     let durableRunning = false
+    let runtimeRevision = 0
 
     await page.route(/\/api\/chats\/[0-9a-f-]+\/messages$/, async (route) => {
       const req = route.request()
@@ -861,6 +862,7 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
       messagePosts.push(body)
       if (body.force_steer) {
         durablePending = []
+        runtimeRevision += 1
         return route.fulfill({
           status: 202,
           contentType: 'application/json',
@@ -875,11 +877,13 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
         }
         durableMessages = [message]
         durableRunning = true
+        runtimeRevision += 1
         return route.fulfill({
           status: 202,
           contentType: 'application/json',
           body: JSON.stringify({
             status: 'started',
+            run_id: 'steer-held-position-run',
             message,
           }),
         })
@@ -888,6 +892,7 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
         role: 'user', content: body.content, ts: QUEUE_TS, cid: body.cid,
       }
       durablePending = [pendingMessage]
+      runtimeRevision += 1
       return route.fulfill({
         status: 202,
         contentType: 'application/json',
@@ -972,7 +977,7 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
           messages: durableMessages,
           total: durableMessages.length,
           offset: 0,
-          runtime_revision: durableRunning ? 1 : 0,
+          runtime_revision: runtimeRevision,
           running: durableRunning,
           run_id: 'steer-held-position-run',
           run_status: durableRunning ? 'running' : 'completed',
@@ -985,7 +990,7 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
         status: 200,
         contentType: 'application/json',
         body: JSON.stringify({
-          runtime_revision: durableRunning ? 1 : 0,
+          runtime_revision: runtimeRevision,
           running: durableRunning,
           run_id: 'steer-held-position-run',
           run_status: durableRunning ? 'running' : 'completed',
