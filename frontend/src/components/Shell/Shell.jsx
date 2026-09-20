@@ -26,6 +26,7 @@ import { placeContextMenu } from '../../lib/contextMenuGeometry.js'
 import { captureLayoutSpace, clientPointToLayout } from '../../lib/layoutSpace.js'
 import { makeAppChatController } from '../../lib/appChatControl.js'
 import { handleAppProjectsRequest } from '../../lib/appProjectControl.js'
+import { recoveryFailure } from '../../lib/notificationRecovery.js'
 import { parseNotificationTarget } from '../../lib/notificationTarget.js'
 import { recordClientError } from '../../lib/errorLog.js'
 import useSystemEventStream from '../../hooks/useSystemEventStream.js'
@@ -41,6 +42,7 @@ import useDelayedConnectionNotice from '../../hooks/useDelayedConnectionNotice.j
 import useOutboxDrain from '../../hooks/useOutboxDrain.js'
 import { ReachabilityPhase, getDeliveryReadySnapshot, setRestartPending, verifyConnectivity } from '../../lib/connectivityStore.js'
 import {
+  notificationQueries,
   appQueries,
   appSourceQueries,
   chatAppArtifactQueries,
@@ -4009,6 +4011,62 @@ export default function Shell({ onInitialVisualReady }) {
     if (focusComposer) focusSelectedChatComposer(id)
   }
 
+  async function recoverNotificationAction(notificationId, action) {
+    const payload = { notification_id: notificationId }
+    if (action.resourceType === 'chat') {
+      const response = await api.chats.recover(action.resourceId, payload)
+      const recovered = await jsonOrThrow(response, 'Chat recovery failed')
+      confirmChatRecovered(action.resourceId)
+      recoveredChatIdsRef.current.add(action.resourceId)
+      await refreshChats()
+      void notificationQueries.list.invalidate(queryClient)
+      return { completedAt: recovered?.completed_at }
+    }
+    if (action.resourceType === 'app') {
+      const response = await api.apps.recover(action.resourceId, payload)
+      const recovered = await jsonOrThrow(response, 'App recovery failed')
+      confirmAppRecovered(action.resourceId)
+      await refreshApps()
+      void notificationQueries.list.invalidate(queryClient)
+      return { completedAt: recovered?.completed_at }
+    }
+    if (action.resourceType === 'project') {
+      const response = await api.projects.recover(action.resourceId, payload)
+      const recovered = await jsonOrThrow(response, 'Project recovery failed')
+      for (const chat of recovered?.chats || []) confirmChatRecovered(String(chat.id))
+      void queryClient.invalidateQueries({
+        queryKey: projectQueries.keys.chats(action.resourceId), exact: true,
+      })
+      queryClient.setQueryData(projectQueries.keys.all, current => {
+        const rows = Array.isArray(current) ? current : []
+        return [recovered, ...rows.filter(row => String(row.id) !== action.resourceId)]
+      })
+      await refreshChats()
+      void notificationQueries.list.invalidate(queryClient)
+      return { completedAt: recovered?.completed_at }
+    }
+    throw new Error('Unsupported recovery action')
+  }
+
+  function showDeletionUndo(response, resourceType, resourceId) {
+    const notificationId = response.headers.get('X-Recovery-Notification-Id')
+    if (!notificationId) return
+    const name = resourceType[0].toUpperCase() + resourceType.slice(1)
+    showToast(`${name} deleted`, {
+      duration: 5000,
+      action: {
+        label: 'Undo',
+        onAction: async () => {
+          try {
+            await recoverNotificationAction(notificationId, { resourceType, resourceId: String(resourceId) })
+          } catch (error) {
+            showToast(recoveryFailure(error).message, { variant: 'error' })
+          }
+        },
+      },
+    })
+  }
+
   async function deleteChat(id) {
     // 409 means the agent is still running and stop_chat_for couldn't
     // interrupt it within the timeout. We MUST NOT clear local state
@@ -4069,34 +4127,11 @@ export default function Shell({ onInitialVisualReady }) {
     const wsAfterClose = workspaceStateRef.current.ws
     const single = wsAfterClose.viewMode === 'single'
     const focusedAfterClose = wsAfterClose.panes[wsAfterClose.focusedPaneId]
+    showDeletionUndo(res, 'chat', id)
     if (!single && !focusedAfterClose?.activeTabKey) {
       await newChat()
     }
     await refreshChats()
-    // 5-second Undo toast: calls POST /api/chats/{id}/recover then
-    // refreshes the chat list so the recovered chat re-appears.
-    showToast('Chat deleted', {
-      duration: 5000,
-      action: {
-        label: 'Undo',
-        onAction: async () => {
-          try {
-            const recoverRes = await api.chats.recover(id)
-            await jsonOrThrow(recoverRes, 'Chat recovery failed')
-            confirmChatRecovered(id)
-            // Guard against reusable-empty checks picking up this recovered
-            // chat before has_messages=true propagates from the server. The
-            // guard is cleared once ChatView fires
-            // onFirstMessage (meaning the server confirmed the chat has
-            // content and has_messages is reliably true).
-            recoveredChatIdsRef.current.add(id)
-            await refreshChats()
-          } catch {
-            showToast("Couldn't undo — chat may be gone.", { variant: 'error' })
-          }
-        },
-      },
-    })
   }
 
   async function deleteProject(project) {
@@ -4157,33 +4192,11 @@ export default function Shell({ onInitialVisualReady }) {
         reason: 'deleted',
       })
     }
+    showDeletionUndo(res, 'project', projectId)
     await Promise.all([
       projectsQuery.refetch(),
       refreshChats(),
     ])
-    showToast('Project deleted', {
-      duration: 5000,
-      action: {
-        label: 'Undo',
-        onAction: async () => {
-          try {
-            const recoverRes = await api.projects.recover(projectId)
-            const recovered = await jsonOrThrow(recoverRes, 'Project recovery failed')
-            for (const chatId of chatIds) confirmChatRecovered(chatId)
-            void queryClient.invalidateQueries({
-              queryKey: projectQueries.keys.chats(projectId), exact: true,
-            })
-            queryClient.setQueryData(projectQueries.keys.all, current => {
-              const rows = Array.isArray(current) ? current : []
-              return [recovered, ...rows.filter(row => String(row.id) !== projectId)]
-            })
-            await refreshChats()
-          } catch {
-            showToast("Couldn't undo — project may be gone.", { variant: 'error' })
-          }
-        },
-      },
-    })
     return true
   }
 
@@ -4239,23 +4252,8 @@ export default function Shell({ onInitialVisualReady }) {
       tabKey: tabModel.tabKey(tabModel.makeTab('app', id)),
       reason: 'deleted',
     })
+    showDeletionUndo(res, 'app', id)
     await refreshApps()
-    showToast('App deleted', {
-      duration: 5000,
-      action: {
-        label: 'Undo',
-        onAction: async () => {
-          try {
-            const recoverRes = await api.apps.recover(id)
-            await jsonOrThrow(recoverRes, 'App recovery failed')
-            confirmAppRecovered(id)
-            await refreshApps()
-          } catch {
-            showToast("Couldn't undo — app may be gone.", { variant: 'error' })
-          }
-        },
-      },
-    })
   }
 
   // Wipes an app's stored data back to empty while KEEPING it installed —
@@ -4480,6 +4478,7 @@ export default function Shell({ onInitialVisualReady }) {
             ref={notificationCenterActionsRef}
             commands={shellCommands}
             onOpenTarget={handleNotificationOpen}
+            onRecoveryAction={recoverNotificationAction}
             updateAvailable={shellUpdateAvailable}
             onUpdateNow={applyShellUpdate}
           />

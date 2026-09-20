@@ -1063,6 +1063,8 @@ def test_project_delete_and_recover_are_atomic_with_its_live_chats(
   assert db.get(models.Chat, second["id"]).deleted_at is not None
   assert db.get(models.ChatWait, first_wait.id).status == "cancelled"
   assert db.get(models.ChatWait, second_wait.id).status == "cancelled"
+  receipt = db.query(models.Notification).filter_by(title="Project deleted").one()
+  assert receipt.actions[0]["resource_id"] == str(project["id"])
 
   direct_chat_recovery = client.post(
     f"/api/chats/{first['id']}/recover", headers=auth,
@@ -1072,8 +1074,18 @@ def test_project_delete_and_recover_are_atomic_with_its_live_chats(
 
   recovered = client.post(
     f"/api/projects/{project['id']}/recover", headers=auth,
+    json={"notification_id": receipt.id},
   )
   assert recovered.status_code == 200
+  assert recovered.json()["completed_at"]
+  repeated = client.post(
+    f"/api/projects/{project['id']}/recover", headers=auth,
+    json={"notification_id": receipt.id},
+  )
+  assert repeated.status_code == 200
+  assert repeated.json()["completed_at"] == recovered.json()["completed_at"]
+  db.refresh(receipt)
+  assert receipt.actions[0]["completed_at"] == recovered.json()["completed_at"]
   db.expire_all()
   assert db.get(models.Project, project["id"]).deleted_at is None
   assert db.get(models.Chat, first["id"]).deleted_at is None

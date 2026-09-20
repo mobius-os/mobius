@@ -79,6 +79,16 @@ JSON
 
 ---
 
+## Durable Undo for recoverable deletion
+
+The chat, app, and project deletion endpoints create their own seven-day Undo
+receipt in notification history in the same transaction as the soft delete.
+Agents should call the owning deletion endpoint only; do not send a second
+recovery notification or construct `recover_*` actions manually. If deletion
+fails, no receipt is created. Irreversible app-data clearing has no Undo.
+
+---
+
 ## Never execute an outbound-channel script live during development
 
 Running a real script that calls `/api/notifications/send` (or any outbound channel — push, email, SMS) fires a real push to the partner's phone — an ugly surprise if you were "just testing." Use one of these instead:

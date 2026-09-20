@@ -738,8 +738,11 @@ export const api = {
     remove: (chatId) => listAffectingMutation(
       'chats', `/chats/${chatId}`, { method: 'DELETE' },
     ),
-    recover: (chatId) => listAffectingMutation(
-      'chats', `/chats/${chatId}/recover`, { method: 'POST' },
+    recover: (chatId, payload) => listAffectingMutation(
+      'chats', `/chats/${chatId}/recover`, {
+        method: 'POST',
+        body: payload ? JSON.stringify(payload) : undefined,
+      },
     ),
   },
   appChats: {
@@ -860,8 +863,11 @@ export const api = {
     remove: (appId) => listAffectingMutation(
       'apps', `/apps/${appId}`, { method: 'DELETE' },
     ),
-    recover: (appId) => listAffectingMutation(
-      'apps', `/apps/${appId}/recover`, { method: 'POST' },
+    recover: (appId, payload) => listAffectingMutation(
+      'apps', `/apps/${appId}/recover`, {
+        method: 'POST',
+        body: payload ? JSON.stringify(payload) : undefined,
+      },
     ),
     // Wipes the app's runtime storage back to empty while KEEPING it
     // installed — distinct from `remove` (which tombstones the whole app).
@@ -950,8 +956,9 @@ export const api = {
     remove: (projectId) => apiFetch(`/projects/${encodeURIComponent(projectId)}`, {
       method: 'DELETE',
     }),
-    recover: (projectId) => apiFetch(`/projects/${encodeURIComponent(projectId)}/recover`, {
+    recover: (projectId, payload) => apiFetch(`/projects/${encodeURIComponent(projectId)}/recover`, {
       method: 'POST',
+      body: payload ? JSON.stringify(payload) : undefined,
     }),
     chats: (projectId) => apiFetch(`/projects/${encodeURIComponent(projectId)}/chats`),
     agents: (projectId) => apiFetch(`/projects/${encodeURIComponent(projectId)}/agents`),

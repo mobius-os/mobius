@@ -183,6 +183,9 @@ _UNMODIFIED_MIGRATIONS = {
     # stdin-delimited JSON guidance.
     "6fa9c177db508ef05dfc73de224cd3f33350c79d8f807ac9909942d761f21103",
     "db0c1138ffd0890936ccdeba6ced4ccde867ba3044eeef0a5c87cdf2f279eaaa",
+    # Pre-durable-Undo seed: recoverable deletion still told agents nothing
+    # about the endpoint-owned notification receipt.
+    "8826cd584ee5fac754d92572e15883293ebbc59d47c83510e72d56d271ed3869",
   },
   "building-apps.md": {
     "4126b40d209c422184e0135f611bb9f4197ea280fa27e63cd71c806f8b5ebd79",
