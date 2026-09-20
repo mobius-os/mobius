@@ -3181,7 +3181,10 @@ class ChatWriterActor:
       from app.run_state import _recoverable_result_goal
       if (
         source.goal_objective is not None
-        and _recoverable_result_goal(db, cmd.chat_id, source)[0] is None
+        and (
+          chat.dismissed_goal_id == source.goal_id
+          or _recoverable_result_goal(db, cmd.chat_id, source)[0] is None
+        )
       ):
         _cancel_activation_owners(db, chat, goal_id=activation_wait.goal_id)
         if not _commit_or_rollback(db):

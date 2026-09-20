@@ -103,6 +103,9 @@ _UNMODIFIED_MIGRATIONS = {
     # Front-loaded execution-loop seed before routing became an explicit serial
     # gate and the repeated guidance was condensed below Claude's read limit.
     "d00214c37ba549f5ea4f043714ca33073176b47f1e3085230791b74dd49e2b49",
+    # Compact serial-gate seed before Goals moved from provider-attempt fields
+    # to first-class durable records.
+    "4f77c36ab0c8d1ef7459911a813e0b742a5819a915601ca127495354a21d7ea7",
     # Turn-local routing seed before plan-owned continuation and no-op revision
     # fencing. Only untouched copies receive the new handoff contract.
     "c0484a99757296892e042512cdc41371e2e94e88ceab377e80a3b8a71f3a48c2",
