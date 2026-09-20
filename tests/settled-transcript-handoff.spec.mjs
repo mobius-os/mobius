@@ -122,6 +122,7 @@ async function mountScenario(page) {
         pending_messages: [],
         pending_question_id: null,
         runtime_revision: 0,
+        run_id: sendCount > 0 ? `handoff-run-${sendCount}` : null,
       }),
     })
   ))
@@ -140,6 +141,7 @@ async function mountScenario(page) {
         pending_messages: [],
         pending_question_id: null,
         runtime_revision: 0,
+        run_id: sendCount > 0 ? `handoff-run-${sendCount}` : null,
         provider: 'codex',
       }),
     })
