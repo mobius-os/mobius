@@ -74,7 +74,7 @@ def test_normalize_codex_usage_reads_primary_secondary_and_credits():
   assert snapshot["state"] == "ready"
   assert snapshot["plan_label"] == "Plus plan"
   assert [window["label"] for window in snapshot["windows"]] == [
-    "5-hour", "Weekly",
+    "5-hour", "7-day",
   ]
   assert [window["kind"] for window in snapshot["windows"]] == [
     "other", "weekly",

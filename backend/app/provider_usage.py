@@ -218,7 +218,7 @@ def _codex_window_label(raw: dict[str, Any], fallback: str) -> str:
   if duration == 300:
     return "5-hour"
   if duration == 10_080:
-    return "Weekly"
+    return "7-day"
   if isinstance(duration, (int, float)) and duration > 0:
     hours = duration / 60
     if hours.is_integer():
