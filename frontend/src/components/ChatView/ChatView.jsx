@@ -2467,11 +2467,15 @@ export default function ChatView({
       setActivationSettled(true)
     }
 
-    const settleRuntime = (runtime, visibleMessages) => {
+    const requireRuntimeTransition = (runtime) => {
       const transition = inspectRuntimeSnapshot(runtime)
       if (!transition.adopt) {
         throw new Error('CHAT_RUNTIME_OUT_OF_ORDER')
       }
+      return transition
+    }
+
+    const settleRuntime = (runtime, visibleMessages, transition) => {
       commitRuntimeSnapshot(transition)
       const running = !!runtime.running
       setRecoveryRunId(runtime.recovery_run_id || null)
@@ -2605,6 +2609,11 @@ export default function ChatView({
       })
       if (cancelled || fetchGenRef.current !== gen) return
 
+      // Validate before publishing any snapshot and outside React's transition
+      // callback: React reports callback exceptions instead of rejecting this
+      // load, which would otherwise leave the activation gate unsettled.
+      const runtimeTransition = requireRuntimeTransition(runtime)
+
       if (reused) {
         // One narrow cache publication updates queue/liveness only. Reconcile
         // the mounted hidden owner from the newest version-matched cache object
@@ -2632,7 +2641,7 @@ export default function ChatView({
           ),
         })
         applyMessagesToView(msgs, detailCache.offset)
-        settleRuntime(runtime, msgs)
+        settleRuntime(runtime, msgs, runtimeTransition)
         return
       }
 
@@ -2664,7 +2673,7 @@ export default function ChatView({
             ...handoffWindow,
           }
         })
-        settleRuntime(runtime, messagesRef.current)
+        settleRuntime(runtime, messagesRef.current, runtimeTransition)
         return
       }
 
@@ -2703,7 +2712,7 @@ export default function ChatView({
       // own real reflow.
       if (refreshed.messages.length === 0) {
         applyMessagesToView([], refreshed.offset)
-        settleRuntime(runtime, [])
+        settleRuntime(runtime, [], runtimeTransition)
         return
       }
 
@@ -2722,7 +2731,7 @@ export default function ChatView({
       if (activationCache && cacheCoversSavedAnchor && !anchorRetired) {
         startTransition(() => {
           applyMessagesToView(refreshed.messages, refreshed.offset)
-          settleRuntime(runtime, refreshed.messages)
+          settleRuntime(runtime, refreshed.messages, runtimeTransition)
         })
         return
       }
@@ -2734,7 +2743,7 @@ export default function ChatView({
         // transcript; cached activations above remain immediate.
         startTransition(() => {
           applyMessagesToView(refreshed.messages, refreshed.offset)
-          settleRuntime(runtime, refreshed.messages)
+          settleRuntime(runtime, refreshed.messages, runtimeTransition)
         })
         return
       }
@@ -2758,7 +2767,9 @@ export default function ChatView({
         // flush is scoped to this cold, off-screen preparation path only.
         flushSync(() => applyMessagesToView(frame, refreshed.offset))
       }
-      settleRuntime(runtime, refreshed.messages)
+      // Rendering yielded above; a newer lifecycle snapshot may now own the
+      // chat. Recheck before settling, still within the load's error boundary.
+      settleRuntime(runtime, refreshed.messages, requireRuntimeTransition(runtime))
     }
 
     loadActivation()
