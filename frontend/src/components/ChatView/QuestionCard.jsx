@@ -288,7 +288,7 @@ export default function QuestionCard({
       setSubmitError(
         !getOnlineSnapshot()
           ? 'You’re offline. Your choice is saved — submit it when you’re back online.'
-          : (error?.detail || 'That answer didn’t save. Your choice is still here — please try again.'),
+          : 'That answer didn’t save. Your choice is still here — please try again.',
       )
     } finally {
       setSubmitting(false)
