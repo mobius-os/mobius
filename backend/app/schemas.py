@@ -773,8 +773,12 @@ class SendMessage(BaseModel):
 
   @model_validator(mode="after")
   def validate_continuation(self):
-    if self.continuation == "manual" and self.content.strip().lower() != "continue":
-      raise ValueError("manual continuation content must be 'continue'")
+    if (
+      self.continuation == "manual"
+      and self.content.strip()
+      and self.content.strip().lower() != "continue"
+    ):
+      raise ValueError("manual continuation does not accept message content")
     return self
 
 

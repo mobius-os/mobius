@@ -1625,6 +1625,7 @@ def test_run_migrations_records_an_inspectable_append_only_history(tmp_path):
     "0060_drop_platform_restart_executions",
     "0061_goal_plan_admission_revision",
     "0062_chat_run_progress_lease",
+    "0063_chat_run_continuation_control",
   ]
   assert second == first
 
@@ -4303,3 +4304,20 @@ def test_legacy_project_cutover_does_not_retire_unreadable_metadata(
   assert "legacy_source_json" in {
     column["name"] for column in inspect(eng).get_columns("projects")
   }
+
+
+def test_recovery_control_migration_is_nullable_idempotent_and_preserves_runs(tmp_path):
+  from app.schema_migrations import _add_chat_run_continuation_control
+
+  eng = create_engine(f"sqlite:///{tmp_path / 'recovery-control.db'}")
+  with eng.begin() as conn:
+    conn.execute(text("CREATE TABLE chat_runs (id TEXT PRIMARY KEY, status TEXT)"))
+    conn.execute(text("INSERT INTO chat_runs VALUES ('old-run', 'running')"))
+  _add_chat_run_continuation_control(eng)
+  _add_chat_run_continuation_control(eng)
+  columns = {column["name"]: column for column in inspect(eng).get_columns("chat_runs")}
+  assert columns["continuation_json"]["nullable"]
+  with eng.connect() as conn:
+    assert conn.execute(text("SELECT id, status, continuation_json FROM chat_runs")).one() == (
+      "old-run", "running", None,
+    )

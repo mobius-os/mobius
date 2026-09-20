@@ -643,8 +643,8 @@ def recover_start_continuation(
 ) -> dict | None:
   """Rebuild one exact committed-but-unscheduled continuation handoff.
 
-  ``StartContinuation`` stores a small causal envelope on its synthetic tail
-  row when it atomically supersedes a parked run. Older committed handoffs
+  ``StartContinuation`` stores a small causal envelope on its ChatRun when
+  it atomically supersedes a parked run. Older committed handoffs
   could also consume pending input; the envelope preserves their exact rows
   rather than reinterpreting an already-accepted prompt after an upgrade.
   That envelope identifies the exact transcript rows that formed the provider
@@ -663,6 +663,48 @@ def recover_start_continuation(
   live = chat.live_assistant or {}
   if live.get("id") != physical.id or (live.get("blocks") or []):
     return None
+  control = physical.continuation_json
+  if isinstance(control, dict):
+    expected_control = bool(
+      control.get("reason") == reason
+      and control.get("control_id") == continuation_id
+      and control.get("supersedes_run_token") == supersedes_run_token
+    )
+    if not expected_control:
+      return None
+    from app.continuations import continuation_protocol_source
+    source = continuation_protocol_source(
+      reason=reason,
+      control_id=continuation_id,
+      run_token=physical.id,
+      source_work_id=control.get("source_work_id"),
+      goal_id=control.get("goal_id"),
+    )
+    messages = list(chat.messages or [])
+    for key in ("viewport", "timezone"):
+      for row in reversed(messages):
+        if row.get("role") == "user" and row.get(key) is not None:
+          source[key] = copy.deepcopy(row[key])
+          break
+    try:
+      history = [
+        schemas.ChatMessage(
+          role=row.get("role", "user"),
+          content=row.get("content", "") or "",
+        )
+        for row in messages
+      ]
+      history.append(schemas.ChatMessage(
+        role="user", content=source["content"],
+      ))
+    except Exception:
+      return None
+    return {
+      "history": history,
+      "promoted": {**source, "_messages": [], "_consumed_cids": []},
+      "session_id": chat.session_id,
+      "provider": chat.provider or "claude",
+    }
   messages = list(chat.messages or [])
   source = messages[-1] if messages else None
   if not isinstance(source, dict):
@@ -3000,9 +3042,28 @@ class ChatWriterActor:
     if chat is None:
       raise _PersistFailed("StartTurn: chat not found or deleted")
     ensure_user_cid(cmd.user_msg)
+    from app.continuations import continuation_reason
+    resuming = continuation_reason(cmd.user_msg) == "manual"
     existing = list(chat.messages or [])
     pending = list(chat.pending_messages or [])
     incoming_cid = cid_of(cmd.user_msg)
+    if resuming:
+      existing_run = db.query(models.ChatRun).filter(
+        models.ChatRun.id == cmd.run_token,
+        models.ChatRun.chat_id == cmd.chat_id,
+      ).first()
+      if existing_run is not None:
+        control = existing_run.continuation_json or {}
+        if control.get("control_id") != incoming_cid:
+          raise _PersistFailed("StartTurn: Resume identity belongs to other work")
+        db.rollback()
+        return {
+          "duplicate": True,
+          "duplicate_location": "control",
+          "message": None,
+          "session_id": chat.session_id,
+          "provider": chat.provider,
+        }
     if incoming_cid is not None:
       # The transition lock normally routes a retry that lands while the
       # original turn is still active through AppendPending, whose cid gate
@@ -3039,9 +3100,7 @@ class ChatWriterActor:
       question_id = chat.pending_question_id
       db.rollback()  # End the actor's read transaction on this non-write path.
       return StartTurnBlockedByPendingQuestion(question_id)
-    from app.continuations import continuation_reason
     from app.run_state import latest_run
-    resuming = continuation_reason(cmd.user_msg) == "manual"
     prior = latest_run(db, cmd.chat_id) if resuming else None
     if cmd.resume_run_id is not None and (
       not resuming or prior is None or prior.id != cmd.resume_run_id
@@ -3063,18 +3122,26 @@ class ChatWriterActor:
       )
       for m in existing
     ]
-    history.append(
-      schemas.ChatMessage(
-        role=cmd.user_msg.get("role", "user"),
-        content=cmd.user_msg.get("content", "") or "",
+    provider_source = cmd.user_msg
+    if resuming:
+      from app.continuations import continuation_protocol_source
+      provider_source = continuation_protocol_source(
+        reason="manual",
+        control_id=incoming_cid or cmd.run_token,
+        run_token=cmd.run_token,
+        goal_id=prior.goal_id if prior is not None else None,
       )
-    )
+    history.append(schemas.ChatMessage(
+      role=provider_source.get("role", "user"),
+      content=provider_source.get("content", "") or "",
+    ))
     # Same monotonic-display-ts guarantee as every other append path: the
     # client's batch insert/dedup still key ORDERING on ts, so a same-ms
     # collision with the last transcript row must bump, never collide
     # (identity is the cid and is untouched by the bump).
-    _ensure_unique_ts(cmd.user_msg, existing)
-    existing.append(cmd.user_msg)
+    if not resuming:
+      _ensure_unique_ts(cmd.user_msg, existing)
+      existing.append(cmd.user_msg)
     chat.messages = existing
     # Allocate the current assistant's stable display id while history and the
     # queue are already in memory. Streaming snapshots can then update only the
@@ -3086,12 +3153,13 @@ class ChatWriterActor:
       "ts": next_message_ts(existing + pending),
     }
     chat.active_assistant_message_id = cmd.run_token
-    if len(existing) == 1:
+    if not resuming and len(existing) == 1:
       _name_chat_from_first_message(chat, cmd.title_source)
     started_at = datetime.now(UTC)
     chat.updated_at = datetime.now(UTC)
     # Owner-send: advance the drawer ordering key (see models.Chat.activity_at).
-    chat.activity_at = datetime.now(UTC)
+    if not resuming:
+      chat.activity_at = datetime.now(UTC)
     # The durable run row is inserted in the SAME commit as the user message.
     # Its id is the one identity the sink and FinishRun also carry.
     # A fresh start claims an idle chat (mark_starting guarantees no live run),
@@ -3100,9 +3168,10 @@ class ChatWriterActor:
     from app.models import ChatRun
     from app.run_state import goal_identity_for_run_start
     goal_objective, goal_id = goal_identity_for_run_start(
-      db, cmd.chat_id, cmd.user_msg,
+      db, cmd.chat_id, provider_source,
     )
     self._close_nonterminal_runs(db, cmd.chat_id, "interrupted")
+    from app.continuations import continuation_control_envelope
     db.add(ChatRun(
       id=cmd.run_token, chat_id=cmd.chat_id, status="running",
       root_run_id=(
@@ -3114,6 +3183,14 @@ class ChatWriterActor:
       ),
       goal_objective=goal_objective,
       goal_id=goal_id,
+      continuation_json=(
+        continuation_control_envelope(
+          reason="manual",
+          control_id=incoming_cid or cmd.run_token,
+          goal_id=goal_id,
+        )
+        if resuming else None
+      ),
     ))
     if not _commit_or_rollback(db):
       raise _PersistFailed("StartTurn did not persist")
@@ -3139,7 +3216,10 @@ class ChatWriterActor:
     """
     from datetime import UTC, datetime
 
-    from app.continuations import continues_logical_root
+    from app.continuations import (
+      continuation_control_envelope,
+      continues_logical_root,
+    )
     from app.models import ChatRun
 
     chat = _active_chat(db, cmd.chat_id)
@@ -3313,27 +3393,42 @@ class ChatWriterActor:
 
     existing = list(chat.messages or [])
     pending = list(chat.pending_messages or [])
-    for row in existing:
-      if row.get("role") == "user" and cid_of(row) == cmd.cid:
-        raise _PersistFailed(
-          "StartContinuation: continuation cid exists without its ChatRun"
-        )
+    control_only = (
+      cmd.message_kind == "continuation"
+      and cmd.supersedes_run_token is not None
+    )
+    if not control_only:
+      for row in existing:
+        if row.get("role") == "user" and cid_of(row) == cmd.cid:
+          raise _PersistFailed(
+            "StartContinuation: continuation cid exists without its ChatRun"
+          )
 
-    source = {
-      "role": "user",
-      "content": cmd.content,
-      "ts": next_message_ts(existing + pending),
-      "cid": cmd.cid,
-      "kind": cmd.message_kind,
-    }
-    if cmd.message_kind == "continuation":
-      source["continuation_reason"] = cmd.reason
-    if cmd.source_work_id is not None:
-      source["source_work_id"] = cmd.source_work_id
-    if cmd.hidden:
-      source["hidden"] = True
-    if cmd.initiated_by_app_id is not None:
-      source["_initiated_by_app_id"] = cmd.initiated_by_app_id
+    if control_only:
+      from app.continuations import continuation_protocol_source
+      source = continuation_protocol_source(
+        reason=cmd.reason,
+        control_id=cmd.cid,
+        run_token=cmd.run_token,
+        source_work_id=cmd.source_work_id,
+      )
+      source["ts"] = next_message_ts(existing + pending)
+    else:
+      source = {
+        "role": "user",
+        "content": cmd.content,
+        "ts": next_message_ts(existing + pending),
+        "cid": cmd.cid,
+        "kind": cmd.message_kind,
+      }
+      if cmd.message_kind == "continuation":
+        source["continuation_reason"] = cmd.reason
+      if cmd.source_work_id is not None:
+        source["source_work_id"] = cmd.source_work_id
+      if cmd.hidden:
+        source["hidden"] = True
+      if cmd.initiated_by_app_id is not None:
+        source["_initiated_by_app_id"] = cmd.initiated_by_app_id
 
     remaining_pending: list[dict] = pending if activation_wait is not None else []
     if cmd.supersedes_run_token is not None:
@@ -3394,7 +3489,7 @@ class ChatWriterActor:
         cid_of(row) for row in provider_sources if cid_of(row) is not None
       ]
     agent_message = _combine_pending_messages(provider_sources)
-    stored_rows = _pending_messages_for_transcript(
+    stored_rows = [] if control_only else _pending_messages_for_transcript(
       [source], existing,
     )
     try:
@@ -3419,7 +3514,7 @@ class ChatWriterActor:
       "id": cmd.run_token,
       "role": "assistant",
       "blocks": [],
-      "ts": next_message_ts(chat.messages),
+      "ts": next_message_ts(chat.messages + remaining_pending),
     }
     chat.active_assistant_message_id = cmd.run_token
     settle_activation_card()
@@ -3448,6 +3543,16 @@ class ChatWriterActor:
       initiated_by_app_id=cmd.initiated_by_app_id,
       goal_objective=goal_objective,
       goal_id=goal_id,
+      continuation_json=(
+        continuation_control_envelope(
+          reason=cmd.reason,
+          control_id=cmd.cid,
+          source_work_id=cmd.source_work_id,
+          goal_id=goal_id,
+          supersedes_run_token=cmd.supersedes_run_token,
+        )
+        if control_only else None
+      ),
     ))
     if not _commit_or_rollback(db):
       raise _PersistFailed("StartContinuation did not persist")

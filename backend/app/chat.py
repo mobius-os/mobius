@@ -1886,10 +1886,13 @@ def _auto_resume_recovery(
   """
   if chat is None or physical is None:
     return None
+  control = physical.continuation_json
   messages = list(chat.messages or [])
   source = messages[-1] if messages else None
   recorded_park = (
-    source.get("_continuation_supersedes_run_token")
+    control.get("supersedes_run_token")
+    if isinstance(control, dict)
+    else source.get("_continuation_supersedes_run_token")
     if isinstance(source, dict) else None
   )
   if not isinstance(recorded_park, str) or not recorded_park:
@@ -1898,7 +1901,11 @@ def _auto_resume_recovery(
     return None
   if physical.id != _auto_resume_run_token(recorded_park):
     return None
-  reason = source.get("continuation_reason")
+  reason = (
+    control.get("reason") if isinstance(control, dict)
+    else source.get("continuation_reason") if isinstance(source, dict)
+    else None
+  )
   park_reasons = (
     ("restart",) if reason == "restart"
     else ("usage_limit", "rate_limit") if reason == "usage_limit"
@@ -1941,7 +1948,11 @@ def _auto_resume_recovery(
     return None
 
   if reason == "restart" or reason in RESOURCE_PARK_REASONS:
-    consumed = source.get("_continuation_consumed_cids")
+    consumed = (
+      source.get("_continuation_consumed_cids")
+      if not isinstance(control, dict) and isinstance(source, dict)
+      else []
+    )
     expected_app_id = (
       None if isinstance(consumed, list) and consumed
       else park.initiated_by_app_id

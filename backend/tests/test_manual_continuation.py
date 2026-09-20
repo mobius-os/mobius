@@ -7,14 +7,14 @@ from app import schemas
 from app.routes.chats_stream import _user_message_from_body
 
 
-def test_manual_resume_builds_a_continuation_marker(chat):
+def test_manual_resume_builds_a_typed_control_without_content(chat):
   message = _user_message_from_body(
     chat,
-    schemas.SendMessage(content="continue", continuation="manual"),
+    schemas.SendMessage(content="", continuation="manual"),
   )
 
   assert message["role"] == "user"
-  assert message["content"] == "continue"
+  assert message["content"] == ""
   assert message["kind"] == "continuation"
   assert message["continuation_reason"] == "manual"
 
@@ -59,7 +59,7 @@ def test_delayed_resume_cannot_restart_an_automatically_superseded_turn(
     )).result(timeout=5)
   monkeypatch.setattr("app.routes.chats_stream.run_chat", lambda *a, **k: pytest.fail("stale Resume started work"))
   response = client.post(f"/api/chats/{cid}/messages", headers=auth, json={
-    "content": "continue", "continuation": "manual", "cid": "late-manual",
+    "content": "", "continuation": "manual", "cid": "late-manual",
     "resume_run_id": "original-a",
   })
   assert response.status_code == 409, response.text
@@ -96,7 +96,7 @@ def test_manual_resume_retry_preserves_queue_and_original_authority(
     calls.append(kwargs)
 
   monkeypatch.setattr("app.routes.chats_stream.run_chat", capture)
-  request = {"content": "continue", "continuation": "manual", "cid": "manual-a", "resume_run_id": "a-interrupted"}
+  request = {"content": "", "continuation": "manual", "cid": "manual-a", "resume_run_id": "a-interrupted"}
   first = client.post(f"/api/chats/{cid}/messages", headers=auth, json=request)
   assert first.status_code == 202, first.text
   second = client.post(f"/api/chats/{cid}/messages", headers=auth, json=request)
@@ -109,8 +109,9 @@ def test_manual_resume_retry_preserves_queue_and_original_authority(
   with SessionLocal() as db:
     current = db.get(models.Chat, cid)
     assert [row["cid"] for row in current.pending_messages] == ["b"]
-    assert sum(row.get("cid") == "manual-a" for row in current.messages) == 1
+    assert all(row.get("cid") != "manual-a" for row in current.messages)
     resumed = db.get(models.ChatRun, calls[0]["run_token"])
+    assert resumed.continuation_json["control_id"] == "manual-a"
     assert resumed.root_run_id == "a-interrupted"
     assert resumed.initiated_by_app_id == app_id
   chat_mod.discard_starting(cid)
@@ -127,7 +128,7 @@ def test_resume_never_becomes_a_queued_control_when_busy(client, auth, chat, mon
   if busy == "admission_closed":
     chat_mod.registry.close_admission()
   response = client.post(f"/api/chats/{chat.id}/messages", headers=auth, json={
-    "content": "continue", "continuation": "manual", "cid": "busy-resume",
+    "content": "", "continuation": "manual", "cid": "busy-resume",
   })
   assert response.status_code == 409, response.text
   with SessionLocal() as db:
@@ -156,3 +157,45 @@ def test_detail_and_runtime_name_the_exact_idle_recovery_attempt(client, auth, c
     assert response.status_code == 200, response.text
     assert response.json()["recovery_run_id"] is None
   chat_mod.discard_starting(chat.id)
+
+
+def test_legacy_resume_without_cid_gets_a_fresh_control_identity(
+  client, auth, chat, monkeypatch,
+):
+  from app.chat_writer import FinishRun, StartTurn, get_writer
+  from app import chat as chat_mod, models
+  from app.database import SessionLocal
+  from app.broadcast import get_broadcast
+
+  get_writer().submit(StartTurn(
+    chat_id=chat.id, run_token="original-owner-run",
+    user_msg={"role": "user", "content": "owner work", "cid": "owner", "ts": 1},
+  )).result(timeout=5)
+  calls = []
+
+  async def capture(*args, **kwargs):
+    calls.append(kwargs)
+
+  monkeypatch.setattr("app.routes.chats_stream.run_chat", capture)
+  prior = "original-owner-run"
+  try:
+    for _ in range(2):
+      get_writer().submit(FinishRun(
+        chat_id=chat.id, run_token=prior, terminal_status="interrupted",
+      )).result(timeout=5)
+      chat_mod.discard_starting(chat.id)
+      broadcast = get_broadcast(chat.id)
+      if broadcast is not None:
+        broadcast.mark_completed()
+      response = client.post(f"/api/chats/{chat.id}/messages", headers=auth, json={
+        "content": "continue", "continuation": "manual", "resume_run_id": prior,
+      })
+      assert response.status_code == 202, response.text
+      assert "message" not in response.json()
+      prior = calls[-1]["run_token"]
+    assert len(calls) == 2
+    assert calls[0]["run_token"] != calls[1]["run_token"]
+    with SessionLocal() as db:
+      assert [row["cid"] for row in db.get(models.Chat, chat.id).messages] == ["owner"]
+  finally:
+    chat_mod.discard_starting(chat.id)

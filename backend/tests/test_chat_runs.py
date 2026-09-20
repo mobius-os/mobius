@@ -787,3 +787,56 @@ def test_orphan_sweep_skips_a_live_chat():
     assert _runs("live")["rt-live"][0] == "running", "live chat untouched"
   finally:
     chat_mod.registry.discard_starting("live")
+
+
+def test_controller_continuation_preserves_exact_content_and_replay_contract():
+  """Coordinator payloads are not physical recovery prompts to replace."""
+  _seed_chat("controller-exact")
+  _seed_run("controller-root", "controller-exact", status="completed")
+  content = "Reconcile the exact controller checkpoint and its supplied evidence."
+  result = get_writer().submit(StartContinuation(
+    chat_id="controller-exact", run_token="controller-next",
+    root_run_id="controller-root", content=content, cid="controller-control",
+    reason="controller_resume", source_work_id="controller-proof",
+  )).result(timeout=5)
+  assert result["history"][-1].content == content
+  with SessionLocal() as db:
+    chat = db.get(models.Chat, "controller-exact")
+    assert chat.messages[-1]["content"] == content
+    assert chat.messages[-1]["source_work_id"] == "controller-proof"
+    run = db.get(models.ChatRun, "controller-next")
+    assert run.continuation_json is None
+    assert run.root_run_id == "controller-root"
+
+
+def test_physical_recovery_replays_device_context_without_synthetic_history():
+  from app.chat_writer import recover_start_continuation
+
+  messages = [{
+    "role": "user", "content": "owner work", "cid": "owner", "ts": 1,
+    "viewport": {"width": 390, "height": 844}, "timezone": "Etc/UTC",
+  }]
+  _seed_chat("recovery-context", messages=messages)
+  _seed_run("recovery-park", "recovery-context", status="resume_pending")
+  result = get_writer().submit(StartContinuation(
+    chat_id="recovery-context", root_run_id="recovery-park",
+    run_token="recovery-next", cid="recovery-control", content="continue",
+    reason="restart", supersedes_run_token="recovery-park",
+  )).result(timeout=5)
+  with SessionLocal() as db:
+    chat = db.get(models.Chat, "recovery-context")
+    run = db.get(models.ChatRun, "recovery-next")
+    replay = recover_start_continuation(
+      db, chat, run, continuation_id="recovery-control", content="continue",
+      reason="restart", supersedes_run_token="recovery-park",
+    )
+    assert chat.messages == messages
+    assert replay is not None
+    assert replay["promoted"]["viewport"] == result["promoted"]["viewport"]
+    assert replay["promoted"]["timezone"] == result["promoted"]["timezone"]
+    assert replay["history"] == result["history"]
+    assert replay["promoted"]["_messages"] == []
+    assert run.continuation_json == {
+      "reason": "restart", "control_id": "recovery-control",
+      "supersedes_run_token": "recovery-park",
+    }

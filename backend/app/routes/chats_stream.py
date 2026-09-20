@@ -1220,8 +1220,27 @@ async def _send_message_locked(
 
   # Resume is a control for the interrupted turn, never a new queued input.
   # Refuse while another physical attempt owns the chat; retrying the same cid
-  # after a lost acknowledgement is handled by the duplicate gate above.
+  # after a lost acknowledgement is recognized by its deterministic ChatRun.
   manual_resume = body.continuation == "manual"
+  if manual_resume:
+    from app.continuations import manual_continuation_run_token
+    body.cid = body.cid or alloc_run_token()
+    manual_run_token = manual_continuation_run_token(chat_id, body.cid)
+    existing_resume = db.query(models.ChatRun).filter(
+      models.ChatRun.id == manual_run_token,
+      models.ChatRun.chat_id == chat_id,
+    ).first()
+    if existing_resume is not None:
+      control = existing_resume.continuation_json or {}
+      if control.get("control_id") != body.cid:
+        raise HTTPException(409, detail={
+          "code": "recovery_changed",
+          "message": "This Resume identity belongs to different work.",
+        })
+      return JSONResponse(status_code=200, content={
+        "status": "duplicate",
+        "running": is_chat_running(chat_id),
+      })
   if manual_resume and (is_draining() or is_chat_running(chat_id)):
     raise HTTPException(409, detail={
       "code": "recovery_changed",
@@ -1484,7 +1503,10 @@ async def _send_message_locked(
     # window; a Stop that lands AFTER the spawn is caught by run_chat's own
     # generation guard.
     start_gen = current_run_generation(chat_id)
-    run_token = alloc_run_token()
+    if manual_resume:
+      run_token = manual_run_token
+    else:
+      run_token = alloc_run_token()
     user_msg = _user_message_from_body(chat, body)
     # An app-owned chat chooses its provider when the app creates the chat.
     # Preserve that explicit contract through the first StartTurn instead of
@@ -1539,7 +1561,10 @@ async def _send_message_locked(
         status_code=200,
         content={
           "status": "duplicate",
-          "message": result.get("message") or user_msg,
+          **(
+            {} if result.get("duplicate_location") == "control"
+            else {"message": result.get("message") or user_msg}
+          ),
           "running": is_chat_running(chat_id),
         },
       )
@@ -1585,7 +1610,10 @@ async def _send_message_locked(
 
   return JSONResponse(
     status_code=202,
-    content={"status": "started", "message": user_msg},
+    content={
+      "status": "started",
+      **({} if manual_resume else {"message": user_msg}),
+    },
   )
 
 

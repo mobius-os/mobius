@@ -148,6 +148,7 @@ def _run_row(token: str):
       "restart_nonce": run.restart_nonce,
       "ended_at": run.ended_at,
       "initiated_by_app_id": run.initiated_by_app_id,
+      "continuation": run.continuation_json,
     }
   finally:
     db.close()
@@ -767,11 +768,13 @@ def test_manual_try_now_preserves_messages_queued_behind_future_limit_park(
   assert response.status_code == 202, response.text
   assert response.json()["status"] == "started"
   assert len(scheduled) == 1
-  assert scheduled[0]["messages"][-1].content == "continue"
+  assert scheduled[0]["messages"][-1].content.startswith("Resume the interrupted")
   assert all("preserve this context" not in row.content for row in scheduled[0]["messages"])
-  marker = _chat_row(cid)["messages"][-1]
-  assert marker["kind"] == "continuation"
-  assert marker["continuation_reason"] == "manual"
+  assert all(
+    row.get("cid") != "manual-early-retry"
+    for row in _chat_row(cid)["messages"]
+  )
+  assert _run_row(scheduled[0]["run_token"])["continuation"]["reason"] == "manual"
   assert _run_row("rt-park-owner-try-now")["status"] == "interrupted"
   assert [row["cid"] for row in _chat_row(cid)["pending"]] == ["queued-context"]
   with SessionLocal() as db:
@@ -1154,9 +1157,8 @@ def test_sweep_auto_resume_on_starts_one_staggered_continue(
     # Recovery continues A without admitting the later queued ask.
     promoted = scheduled[0]["next_user"]
     assert "queued ask" not in promoted["content"]
-    assert "continue" in promoted["content"]
-    assert promoted["_messages"][-1]["kind"] == "continuation"
-    assert promoted["_messages"][-1]["continuation_reason"] == "usage_limit"
+    assert promoted["content"].startswith("Resume the interrupted")
+    assert promoted["_messages"] == []
     assert promoted["kind"] == "continuation"
     assert promoted["continuation_reason"] == "usage_limit"
     state = _chat_row("sweep-auto")
@@ -1170,6 +1172,7 @@ def test_sweep_auto_resume_on_starts_one_staggered_continue(
       assert resumed.root_run_id == "goal-logical-root"
       assert resumed.goal_id == "goal-stable-id"
       assert resumed.goal_objective == "Finish the recovery"
+      assert resumed.continuation_json["reason"] == "usage_limit"
   finally:
     # _schedule_continuation was stubbed, so release the claim it would have
     # handed to the spawned turn.
@@ -1268,12 +1271,10 @@ def test_limit_handoff_hidden_result_preserves_goal_root_and_app(monkeypatch):
     assert asyncio.run(chat_mod._auto_resume_chat(cid, park_token=token))
     assert len(scheduled) == 2
     next_user = scheduled[-1]["next_user"]
-    assert next_user["content"] == "continue"
+    assert next_user["content"].startswith("Resume the interrupted")
     assert next_user["kind"] == "continuation"
     assert _chat_row(cid)["pending"] == [hidden]
-    assert [row["cid"] for row in next_user["_messages"]] == [
-      f"limit-resume-{token}",
-    ]
+    assert next_user["_messages"] == []
     resumed = _run_row(scheduled[-1]["run_token"])
     assert resumed["initiated_by_app_id"] == app_id
     with SessionLocal() as db:
@@ -1571,15 +1572,17 @@ def test_restart_park_auto_continues_with_product_marker(
   try:
     assert _run_sweep() == [cid]
     assert len(scheduled) == 1
-    marker = scheduled[0]["next_user"]["_messages"][-1]
-    assert marker["role"] == "user"
-    assert marker["content"] == "continue"
+    marker = scheduled[0]["next_user"]
     assert marker["kind"] == "continuation"
     assert marker["continuation_reason"] == "restart"
-    assert marker["cid"] == f"restart-resume-{token}"
+    assert marker["_messages"] == []
     state = _chat_row(cid)
     assert state["pending"] == []
-    assert state["messages"][-1]["cid"] == f"restart-resume-{token}"
+    assert all(
+      row.get("cid") != f"restart-resume-{token}"
+      for row in state["messages"]
+    )
+    assert _run_row(scheduled[0]["run_token"])["continuation"]["reason"] == "restart"
     assert _run_row(token)["status"] == "completed"
     assert notifications[0]["title"] == "Möbius restarted"
     assert "limit" not in notifications[0]["body"].lower()
@@ -1623,10 +1626,13 @@ def test_restart_preserves_a_hidden_owner_group_without_queueing_continue(
   try:
     assert _run_sweep() == [cid]
     assert len(scheduled) == 1
-    assert scheduled[0]["next_user"]["content"] == "continue"
+    assert scheduled[0]["next_user"]["content"].startswith("Resume the interrupted")
     state = _chat_row(cid)
     assert [row["cid"] for row in state["pending"]] == ["hidden-recovery"]
-    assert state["messages"][-1]["cid"] == f"restart-resume-{token}"
+    assert all(
+      row.get("cid") != f"restart-resume-{token}"
+      for row in state["messages"]
+    )
   finally:
     chat_mod.discard_starting(cid)
 
@@ -1665,9 +1671,8 @@ def test_app_initiated_restart_preserves_attribution_and_continues(
     assert len(scheduled) == 1
     resumed_run = _run_row(scheduled[0]["run_token"])
     assert resumed_run["initiated_by_app_id"] == app_id
-    marker = scheduled[0]["next_user"]["_messages"][-1]
-    assert marker["kind"] == "continuation"
-    assert marker["continuation_reason"] == "restart"
+    assert scheduled[0]["next_user"]["_messages"] == []
+    assert resumed_run["continuation"]["reason"] == "restart"
   finally:
     chat_mod.discard_starting(cid)
 
@@ -1753,7 +1758,7 @@ def test_owner_message_queued_after_app_restart_does_not_take_over_recovery(
     assert len(scheduled) == 1
     resumed_run = _run_row(scheduled[0]["run_token"])
     assert resumed_run["initiated_by_app_id"] == 42
-    assert scheduled[0]["next_user"]["content"] == "continue"
+    assert scheduled[0]["next_user"]["content"].startswith("Resume the interrupted")
     assert _chat_row(cid)["pending"][0]["content"] == "owner follow-up"
   finally:
     chat_mod.discard_starting(cid)
@@ -2001,7 +2006,11 @@ def test_restart_spawn_failure_reattaches_deterministic_successor(
   state = _chat_row(cid)
   assert state["running_status"] == "running"
   assert state["pending"] == []
-  assert state["messages"][-1]["cid"] == f"restart-resume-{token}"
+  assert all(
+    row.get("cid") != f"restart-resume-{token}"
+    for row in state["messages"]
+  )
+  assert _run_row(resume_token)["continuation"]["reason"] == "restart"
 
   # Both the runtime wedge sweep and cold-start reconciliation preserve the
   # exact no-output successor. The consumed one-shot nonce is not needed to
@@ -2441,7 +2450,11 @@ def test_auto_resume_spawn_failure_reattaches_deterministic_successor_once(
   state = _chat_row(cid)
   assert state["running_status"] == "running"
   assert state["pending"] == [queued]
-  assert state["messages"][-1]["cid"] == f"limit-resume-{park_token}"
+  assert all(
+    row.get("cid") != f"limit-resume-{park_token}"
+    for row in state["messages"]
+  )
+  assert _run_row(resume_token)["continuation"]["reason"] == park_reason
 
   # The cold-start reconciler recognizes this exact no-output writer orphan
   # and leaves the same physical run for the reset sweep to reschedule.
@@ -2463,7 +2476,7 @@ def test_auto_resume_spawn_failure_reattaches_deterministic_successor_once(
     assert _run_sweep() == [cid]
     assert len(scheduled) == 1
     assert len(notifications) == expected_notifications
-    assert scheduled[0]["next_user"]["content"] == "continue"
+    assert scheduled[0]["next_user"]["content"].startswith("Resume the interrupted")
     assert _chat_row(cid)["pending"] == [queued]
     assert scheduled[0]["run_token"] == resume_token
     state = _chat_row(cid)
@@ -2472,7 +2485,7 @@ def test_auto_resume_spawn_failure_reattaches_deterministic_successor_once(
       if m.get("cid") in {
         "queued-before-limit", f"limit-resume-{park_token}",
       }
-    ] == [f"limit-resume-{park_token}"]
+    ] == []
   finally:
     chat_mod.discard_starting(cid)
 
@@ -3033,9 +3046,8 @@ def test_app_initiated_resource_park_preserves_attribution(
     assert len(scheduled) == 1
     resumed = _run_row(scheduled[0]["run_token"])
     assert resumed["initiated_by_app_id"] == app_id
-    assert scheduled[0]["next_user"]["_messages"][-1][
-      "continuation_reason"
-    ] == "storage"
+    assert scheduled[0]["next_user"]["_messages"] == []
+    assert resumed["continuation"]["reason"] == "storage"
   finally:
     chat_mod.discard_starting(cid)
 

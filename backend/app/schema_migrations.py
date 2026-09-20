@@ -4881,6 +4881,24 @@ def _add_chat_run_progress_lease(eng) -> None:
       ))
 
 
+def _add_chat_run_continuation_control(eng) -> None:
+  """Persist recovery control on ChatRun instead of synthetic chat messages."""
+  from sqlalchemy import inspect as sa_inspect, text
+
+  inspector = sa_inspect(eng)
+  if "chat_runs" not in inspector.get_table_names():
+    return
+  columns = {
+    column["name"] for column in inspector.get_columns("chat_runs")
+  }
+  if "continuation_json" in columns:
+    return
+  with eng.begin() as conn:
+    conn.execute(text(
+      "ALTER TABLE chat_runs ADD COLUMN continuation_json JSON NULL"
+    ))
+
+
 _SCHEMA_MIGRATIONS = (
   # Full IDs are permanent identities, not sequence positions. Append new
   # work in execution order; never renumber a shipped ID to reconcile sources.
@@ -4947,6 +4965,7 @@ _SCHEMA_MIGRATIONS = (
   ("0060_drop_platform_restart_executions", _drop_platform_restart_executions),
   ("0061_goal_plan_admission_revision", _add_goal_plan_admission_revision),
   ("0062_chat_run_progress_lease", _add_chat_run_progress_lease),
+  ("0063_chat_run_continuation_control", _add_chat_run_continuation_control),
 )
 
 

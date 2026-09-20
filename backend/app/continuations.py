@@ -114,3 +114,65 @@ def continuation_actor_label(message: Mapping[str, Any] | None) -> str:
   if reason == "manual":
     return "Manual continuation"
   return f"Automatic continuation ({reason})"
+
+
+def continuation_protocol_source(
+  *, reason: str, control_id: str, run_token: str,
+  source_work_id: str | None = None, goal_id: str | None = None,
+) -> dict:
+  """Build provider-only input for a typed continuation control.
+
+  This value may enter one provider request but must never be appended to a
+  chat transcript or owner pending queue. ChatRun.continuation_json is the
+  durable source of the same control identity.
+  """
+  prompts = {
+    "manual": "Resume the interrupted owner work from its saved state.",
+    "restart": "Resume the interrupted owner work after the planned server restart.",
+    "usage_limit": "Resume the interrupted owner work now that provider usage is available.",
+    "memory": "Resume the interrupted owner work now that memory pressure has cleared.",
+    "storage": "Resume the interrupted owner work now that storage pressure has cleared.",
+  }
+  source = {
+    "role": "user",
+    "content": prompts.get(
+      reason, "Resume the interrupted owner work from its saved state."
+    ),
+    "kind": "continuation",
+    "continuation_reason": reason,
+    "hidden": True,
+    "cid": control_id,
+    "_run_token": run_token,
+  }
+  if source_work_id is not None:
+    source["source_work_id"] = source_work_id
+  if goal_id is not None:
+    source["goal_id"] = goal_id
+  return source
+
+
+def continuation_control_envelope(
+  *, reason: str, control_id: str,
+  source_work_id: str | None = None, goal_id: str | None = None,
+  supersedes_run_token: str | None = None,
+) -> dict:
+  """Return the bounded durable half of a provider-only continuation."""
+  envelope = {
+    "reason": reason,
+    "control_id": control_id,
+  }
+  if source_work_id is not None:
+    envelope["source_work_id"] = source_work_id
+  if goal_id is not None:
+    envelope["goal_id"] = goal_id
+  if supersedes_run_token is not None:
+    envelope["supersedes_run_token"] = supersedes_run_token
+  return envelope
+
+
+def manual_continuation_run_token(chat_id: str, control_id: str) -> str:
+  """Stable physical identity for an idempotent Resume control."""
+  digest = hashlib.sha256(
+    f"{chat_id}\0{control_id}".encode("utf-8")
+  ).hexdigest()[:48]
+  return f"manual-resume-{digest}"
