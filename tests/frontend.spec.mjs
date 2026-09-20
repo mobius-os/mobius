@@ -1144,10 +1144,15 @@ test.describe('Scroll position', () => {
       history.back()
     })
 
+    // This fixture deliberately mounts two ~56-paragraph transcripts plus an
+    // image back to back (the decoy chat, then the heavy original on return),
+    // on top of the mocked 220ms detail-fetch delay `returning` adds above. A
+    // bare 3000ms budget leaves too little margin for that render weight under
+    // loaded local Docker runs even though the underlying sync is immediate.
     await page.waitForFunction(
       id => localStorage.getItem('moebius_active_chat') === id,
       chatId,
-      { timeout: 3000 },
+      { timeout: 8000 },
     )
     await page.waitForFunction(id => {
       const painted = document.querySelector(
