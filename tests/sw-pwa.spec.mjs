@@ -381,15 +381,18 @@ test.describe('Service worker — vite-plugin-pwa contract', () => {
     const token = await ownerToken(page)
     const headers = { Authorization: `Bearer ${token}` }
     const stamp = Date.now()
+    // `static/` is accepted output and intentionally excluded from the source
+    // snapshot. Keep package inputs in an author-owned directory, then map
+    // their logical destinations through the manifest.
     const staticFiles = {
-      'static/index.html': `<!doctype html><title>Opaque packaged fixture</title><script src="./child.deadbeef.js"></script><main id="packaged">real packaged document</main>`,
-      'static/child.deadbeef.js': `(async()=>{
+      'assets/index.html': `<!doctype html><title>Opaque packaged fixture</title><script src="./child.deadbeef.js"></script><main id="packaged">real packaged document</main>`,
+      'assets/child.deadbeef.js': `(async()=>{
         let token=null;try{token=localStorage.getItem('token')}catch(_e){}
         let parentToken=null;try{parentToken=parent.localStorage.getItem('token')}catch(_e){}
         let api=-1;try{api=(await fetch('/api/apps/',token?{headers:{Authorization:'Bearer '+token}}:{})).status}catch(_e){}
         parent.postMessage({type:'opaque-static-sw-ready',origin:self.origin,token,parentToken,api},'*')
       })()`,
-      'static/hostile.svg': `<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20"><script><![CDATA[
+      'assets/hostile.svg': `<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20"><script><![CDATA[
         (async()=>{let token=null;try{token=localStorage.getItem('token')}catch(_e){}
         let api=-1;try{api=(await fetch('/api/apps/',token?{headers:{Authorization:'Bearer '+token}}:{})).status}catch(_e){}
         parent.postMessage({type:'opaque-svg-proof',origin:self.origin,token,api},'*')})()
@@ -404,7 +407,7 @@ test.describe('Service worker — vite-plugin-pwa contract', () => {
       manifest: {
         source_files: Object.keys(staticFiles),
         static_assets: Object.fromEntries(Object.keys(staticFiles).map(path => [
-          path.slice('static/'.length), path,
+          path.slice('assets/'.length), path,
         ])),
       },
     })

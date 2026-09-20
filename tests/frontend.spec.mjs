@@ -1042,15 +1042,34 @@ test.describe('Scroll position', () => {
         status: 200,
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
+          id: chatId,
+          title: 'Running chat restoration',
+          provider: 'codex',
           messages: history(returning ? 'entry-image-return.png' : 'entry-image-initial.png'),
           total: 4,
           offset: 0,
           runtime_revision: returning ? 1 : 0,
           running: returning,
+          run_id: 'entry-restoration-run',
+          run_status: returning ? 'running' : 'completed',
           pending_messages: [],
         }),
       })
     })
+    await page.route(new RegExp(`/api/chats/${chatId}/runtime(?:\\?.*)?$`), route => (
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          runtime_revision: returning ? 1 : 0,
+          running: returning,
+          run_id: 'entry-restoration-run',
+          run_status: returning ? 'running' : 'completed',
+          pending_messages: [],
+          pending_question_id: null,
+        }),
+      })
+    ))
     await page.route('**/entry-image-initial.png', route => route.fulfill({
       status: 200,
       headers: { 'Content-Type': 'image/png', 'Cache-Control': 'no-store' },

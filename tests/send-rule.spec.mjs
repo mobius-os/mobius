@@ -100,7 +100,7 @@ async function newChat(page) {
   await page.evaluate(() => document.querySelector('.drawer__item--new')?.click())
   await page.waitForFunction(() => !document.querySelector('.drawer--open'), { timeout: 3000 })
   await page.waitForFunction(
-    () => !document.querySelector('[data-new-chat-presentation]'),
+    () => !!document.querySelector('[data-chat-surface="painted"] .chat__form'),
     { timeout: 10000 },
   )
 }

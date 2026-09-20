@@ -201,7 +201,7 @@ test.describe('Bug 1: AskUserQuestion', () => {
   })
 
 
-  test('a failed answer stays locally queued and retries the same choice on reconnect', async ({ page }) => {
+  test('a failed answer keeps the question and choice retryable', async ({ page }) => {
     const questionStream = [
       `data: ${JSON.stringify({
         type: 'question',
@@ -251,11 +251,11 @@ test.describe('Bug 1: AskUserQuestion', () => {
     // Prove the failure below comes from the intended answer request, not a
     // competing route mock or a click that never reached the transport.
     await expect.poll(() => answerAttempts).toBe(1)
-    await expect(card.getByText(/saved here and will send when Möbius reconnects/i)).toBeVisible()
+    await expect(card.getByText('temporary failure', { exact: true })).toBeVisible()
     await expect(careful).toHaveAttribute('aria-checked', 'true')
-    await expect(careful).toBeDisabled()
-    await expect(card.getByRole('button', { name: 'Queued on this device' })).toBeDisabled()
-    await page.evaluate(() => window.dispatchEvent(new Event('online')))
+    await expect(careful).toBeEnabled()
+    await expect(submit).toBeEnabled()
+    await submit.click()
     await expect.poll(() => answerAttempts).toBe(2)
     await expect(page.getByRole('button', { name: 'Submitted' })).toBeDisabled()
   })
@@ -351,7 +351,7 @@ test.describe('Bug 1: AskUserQuestion', () => {
   })
 
 
-  test('multiline custom answers grow inline without moving the conversation', async ({ page }) => {
+  test('multiline custom answers stay still when roomy and reveal only what a cramped editor needs', async ({ page }) => {
     const streamBody = [
       `data: ${JSON.stringify({
         type: 'question',
@@ -368,7 +368,7 @@ test.describe('Bug 1: AskUserQuestion', () => {
       })}\n\n`,
       'data: {"type":"done"}\n\n',
     ].join('')
-    await setupWithStreamMock(page, streamBody, { width: 426, height: 510 })
+    await setupWithStreamMock(page, streamBody, { width: 426, height: 860 })
     await mockPendingQuestionState(page, 'q-steady-multiline')
     await newChat(page)
     await sendMessage(page, 'Ask for multiline details')
@@ -385,13 +385,19 @@ test.describe('Bug 1: AskUserQuestion', () => {
     const geometry = () => card.evaluate(el => {
       const scroll = el.closest('.chat__scroll')
       const input = el.querySelector('.qcard__input')
+      const form = el.closest('.chat')?.querySelector('.chat__form')
       const rect = node => node?.getBoundingClientRect()
+      const card = rect(el)
+      const zoom = Number.parseFloat(getComputedStyle(document.documentElement).zoom) || 1
       return {
-        cardTop: rect(el)?.top,
-        cardBottom: rect(el)?.bottom,
-        cardHeight: rect(el)?.height,
+        cardTop: card?.top,
+        cardBottom: card?.bottom,
+        cardHeight: card?.height,
         inputHeight: rect(input)?.height,
         chatScrollTop: scroll?.scrollTop,
+        renderedScrollTop: scroll ? scroll.scrollTop * zoom : null,
+        documentTop: card && scroll ? card.top + scroll.scrollTop * zoom : null,
+        formTop: rect(form)?.top,
       }
     })
 
@@ -411,15 +417,40 @@ test.describe('Bug 1: AskUserQuestion', () => {
     await expect(customAnswer).toHaveValue('First line\nSecond line\nThird line')
     expect(after.cardHeight).toBeGreaterThan(before.cardHeight)
     expect(after.inputHeight).toBeGreaterThan(before.inputHeight)
-    // The card grows upward from its stable action edge; moving its top by the
-    // added height avoids pushing the composer below the viewport.
-    expect(after.cardBottom).toBeCloseTo(before.cardBottom, 5)
-    expect(after.chatScrollTop).toBeCloseTo(before.chatScrollTop, 5)
+    expect(after.cardTop).toBeCloseTo(before.cardTop, 5)
+    expect(after.renderedScrollTop).toBeCloseTo(before.renderedScrollTop, 5)
+    expect(after.documentTop).toBeCloseTo(before.documentTop, 5)
+    expect(after.cardBottom).toBeLessThanOrEqual(after.formTop + 1)
+
+    // In a constrained viewport, reveal exactly the newly obscured editor
+    // height rather than pinning the card to a new arbitrary position.
+    await page.setViewportSize({ width: 426, height: 510 })
+    await page.evaluate(() => new Promise(resolve => (
+      requestAnimationFrame(() => requestAnimationFrame(resolve))
+    )))
+    const crampedBefore = await geometry()
+    await page.keyboard.press('Shift+Enter')
+    await customAnswer.pressSequentially('Line 4')
+    await page.evaluate(() => new Promise(resolve => (
+      requestAnimationFrame(() => requestAnimationFrame(resolve))
+    )))
+    const crampedAfter = await geometry()
+    const minimumReveal = Math.max(
+      0,
+      crampedBefore.cardBottom
+        + (crampedAfter.cardHeight - crampedBefore.cardHeight)
+        - crampedBefore.formTop,
+    )
+    expect(minimumReveal).toBeGreaterThan(0)
+    expect(crampedAfter.renderedScrollTop - crampedBefore.renderedScrollTop)
+      .toBeCloseTo(minimumReveal, 0)
+    expect(crampedAfter.documentTop).toBeCloseTo(crampedBefore.documentTop, 5)
+    expect(crampedAfter.cardBottom).toBeLessThanOrEqual(crampedAfter.formTop + 1)
 
     // Past the growth cap, the writing field—not the transcript—owns overflow.
     // Drive the real keyboard path so caret reveal, beforeinput, input, and the
     // chat scroll owner race exactly as they do for an owner writing an answer.
-    for (let line = 4; line <= 14; line += 1) {
+    for (let line = 5; line <= 14; line += 1) {
       await page.keyboard.press('Shift+Enter')
       await customAnswer.pressSequentially(`Line ${line}`)
     }
@@ -427,11 +458,21 @@ test.describe('Bug 1: AskUserQuestion', () => {
       requestAnimationFrame(() => requestAnimationFrame(resolve))
     )))
     const capped = await geometry()
-    const inputScrollTop = await customAnswer.evaluate(el => el.scrollTop)
     expect(capped.inputHeight).toBeLessThanOrEqual(181)
+    expect(capped.documentTop).toBeCloseTo(crampedBefore.documentTop, 5)
+    expect(capped.cardBottom).toBeLessThanOrEqual(capped.formTop + 1)
+
+    await page.keyboard.press('Shift+Enter')
+    await customAnswer.pressSequentially('Line 15')
+    await page.evaluate(() => new Promise(resolve => (
+      requestAnimationFrame(() => requestAnimationFrame(resolve))
+    )))
+    const overflowed = await geometry()
+    const inputScrollTop = await customAnswer.evaluate(el => el.scrollTop)
     expect(inputScrollTop).toBeGreaterThan(0)
-    expect(capped.cardTop).toBeCloseTo(before.cardTop, 5)
-    expect(capped.chatScrollTop).toBeCloseTo(before.chatScrollTop, 5)
+    expect(overflowed.inputHeight).toBeCloseTo(capped.inputHeight, 5)
+    expect(overflowed.renderedScrollTop).toBeCloseTo(capped.renderedScrollTop, 5)
+    expect(overflowed.documentTop).toBeCloseTo(capped.documentTop, 5)
   })
 
 

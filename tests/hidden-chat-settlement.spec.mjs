@@ -39,6 +39,7 @@ test('returning to a retained hidden chat settles a missed terminal stream event
   }, { key: paneModel.STORAGE_KEY, workspace: paneModel.serializeWorkspace(ws), chatId: a.id })
 
   let running = true
+  const runId = 'hidden-settlement-run'
   let messages = [{
     role: 'user', content: 'Run the settlement check', ts: 1700001000000,
     blocks: [{ type: 'text', content: 'Run the settlement check' }],
@@ -49,12 +50,17 @@ test('returning to a retained hidden chat settles a missed terminal stream event
     return route.fulfill({ json: {
       id: a.id, title: 'Hidden settlement', provider: 'codex',
       messages, total: messages.length, offset: 0, runtime_revision: running ? 1 : 2, running,
+      run_id: runId, run_status: running ? 'running' : 'completed',
       pending_messages: [], pending_question_id: null,
     } })
   })
   await page.route(new RegExp(`/api/chats/${a.id}/runtime(?:\\?.*)?$`), route => {
     if (!running && messages.length > 1) idleRuntimeReads += 1
-    return route.fulfill({ json: { runtime_revision: running ? 1 : 2, running, pending_messages: [], pending_question_id: null } })
+    return route.fulfill({ json: {
+      runtime_revision: running ? 1 : 2, running,
+      run_id: runId, run_status: running ? 'running' : 'completed',
+      pending_messages: [], pending_question_id: null,
+    } })
   })
   await page.clock.install()
   await page.goto(`${BASE}/shell/?chat=${a.id}`, { waitUntil: 'domcontentloaded' })

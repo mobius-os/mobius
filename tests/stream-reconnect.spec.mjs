@@ -29,7 +29,11 @@ async function setupChat(page) {
   await page.setViewportSize({ width: 412, height: 915 })
 
   await page.route(/\/api\/chats\/[0-9a-f-]+\/messages$/, route =>
-    route.fulfill({ status: 202, body: '{}' })
+    route.fulfill({
+      status: 202,
+      contentType: 'application/json',
+      body: JSON.stringify({ status: 'started', run_id: 'stream-reconnect-run' }),
+    })
   )
   await page.route('**/api/chat/stop', route =>
     route.fulfill({ status: 200, body: '{}' })
@@ -51,6 +55,34 @@ async function setupChat(page) {
     { timeout: 10000 },
   )
   return chat
+}
+
+async function installRunningRuntime(page, chat) {
+  const runtime = {
+    revision: 0,
+    running: false,
+    runId: 'stream-reconnect-run',
+    pending: [],
+    start() { this.revision += 1; this.running = true },
+    queue(message) { this.revision += 1; this.pending = [...this.pending, message] },
+    clearPending() { this.revision += 1; this.pending = [] },
+    stop() { this.revision += 1; this.running = false; this.pending = [] },
+  }
+  await page.route(new RegExp(`/api/chats/${chat.id}/runtime(?:\\?.*)?$`), route => (
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        runtime_revision: runtime.revision,
+        running: runtime.running,
+        run_id: runtime.runId,
+        run_status: runtime.running ? 'running' : 'completed',
+        pending_messages: runtime.pending,
+        pending_question_id: null,
+      }),
+    })
+  ))
+  return runtime
 }
 
 async function send(page, text) {
@@ -332,7 +364,9 @@ test.describe('Stream reconnection', () => {
       }
     })
 
-    await setupChat(page)
+    const chat = await setupChat(page)
+    const runtime = await installRunningRuntime(page, chat)
+    runtime.start()
     await send(page, 'sleep before first event')
     await expect(page.locator('[data-chat-surface="painted"] button[aria-label="Stop"]')).toHaveCount(1)
     await page.waitForFunction(() => window.__droppedStreamParked === true)
@@ -457,7 +491,9 @@ test.describe('Stream reconnection', () => {
       }
     })
 
-    await setupChat(page)
+    const chat = await setupChat(page)
+    const runtime = await installRunningRuntime(page, chat)
+    runtime.start()
     await send(page, 'quick flip with silently dead socket')
     await expect(page.locator('[data-chat-surface="painted"] button[aria-label="Stop"]')).toHaveCount(1)
     await page.waitForFunction(() => window.__streamFetchCount === 1)
@@ -642,7 +678,9 @@ test.describe('Stream reconnection', () => {
       }
     })
 
-    await setupChat(page)
+    const chat = await setupChat(page)
+    const runtime = await installRunningRuntime(page, chat)
+    runtime.start()
     await send(page, 'retry button layout')
 
     await expect(page.locator('[data-chat-surface="painted"] .connection-status__retry')).toBeVisible({
@@ -815,7 +853,12 @@ test.describe('Stream reconnection', () => {
       }
     })
 
-    await setupChat(page)
+    const chat = await setupChat(page)
+    const runtime = await installRunningRuntime(page, chat)
+    await page.route('**/api/chat/stop', route => {
+      runtime.stop()
+      return route.fulfill({ status: 200, body: '{}' })
+    })
     // Bootstrap and fixture navigation may reconnect the previously active
     // chat. Arm only after the isolated, model-selected chat is painted so
     // that incidental hydration traffic cannot consume the held response.
@@ -823,17 +866,18 @@ test.describe('Stream reconnection', () => {
 
     // Cancel-queued (DELETE /pending/{cid}) → 200 with an empty queue, so the
     // tray-X clear below resolves cleanly without an error-path refetch.
-    await page.route(/\/api\/chats\/[0-9a-f-]+\/pending\/[^/]+$/, route =>
-      route.fulfill({
+    await page.route(/\/api\/chats\/[0-9a-f-]+\/pending\/[^/]+$/, route => {
+      runtime.clearPending()
+      return route.fulfill({
         status: 200,
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ pending_messages: [] }),
       })
-    )
+    })
 
     // POST /messages override — registered AFTER setupChat so it wins
-    // (Playwright matches most-recently-added first; setupChat's bare-{}
-    // mock would otherwise shadow this). First send starts the (stale)
+    // (Playwright matches most-recently-added first; setupChat's generic
+    // started response would otherwise shadow this). First send starts the (stale)
     // turn; the follow-up sent while streaming truly queues; Stop's
     // collapsed resend starts again.
     await page.route(/\/api\/chats\/[0-9a-f-]+\/messages$/, route => {
@@ -842,6 +886,13 @@ test.describe('Stream reconnection', () => {
       messagesPostCount++
       if (messagesPostCount === 2) {
         const ts = Date.now()
+        const pendingMessage = {
+          role: 'user',
+          content: body.content,
+          ts,
+          cid: body.cid,
+        }
+        runtime.queue(pendingMessage)
         route.fulfill({
           status: 202,
           headers: { 'Content-Type': 'application/json' },
@@ -849,20 +900,16 @@ test.describe('Stream reconnection', () => {
             status: 'queued',
             ts,
             position: 1,
-            pending_message: {
-              role: 'user',
-              content: body.content,
-              ts,
-              cid: body.cid,
-            },
+            pending_message: pendingMessage,
           }),
         })
         return
       }
+      runtime.start()
       route.fulfill({
         status: 202,
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ status: 'started' }),
+        body: JSON.stringify({ status: 'started', run_id: runtime.runId }),
       })
     })
 
@@ -1144,7 +1191,7 @@ test.describe('Stream reconnection', () => {
     // browser exhausts its reconnects, the connection warning must not retire
     // the goal while the authoritative runtime still reports `running:true`.
     await expect(goalRail).toContainText(`Goal · ${GOAL}`)
-    await expect(page.getByRole('button', { name: 'Retry' })).toBeVisible({ timeout: 12000 })
+    await expect(page.getByRole('button', { name: 'Try again' })).toBeVisible({ timeout: 12000 })
     await expect(goalRail).toContainText(`Goal · ${GOAL}`)
 
     // Answering MUST POST the answer payload (the turn unfreezes).

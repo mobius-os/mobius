@@ -647,7 +647,7 @@ test('leaving Builder replaces an empty Standard slot without allocating a chat'
   expect(createCount, 'the selected Builder tab avoids an unnecessary New Chat row').toBe(0)
 })
 
-test('retiring an explicit Builder cover returns the selected tab and preserves its draft', async ({ page }) => {
+test('retiring an allocating Builder chat returns the selected tab and preserves its draft', async ({ page }) => {
   let explicitId = null
   let explicitCreates = 0
   let automaticCreates = 0
@@ -693,20 +693,15 @@ test('retiring an explicit Builder cover returns the selected tab and preserves 
   const navigation = page.getByRole('navigation', { name: 'Primary navigation' })
   await navigation.getByRole('button', { name: 'New chat', exact: true }).click()
 
-  // New Chat now mounts its UUID-backed ChatView directly in the focused
-  // Builder pane; there is deliberately no second presentation/composer
-  // owner layered over the workspace.
-  const presentation = page.locator('[data-new-chat-presentation]')
-  const composer = page.getByRole('tabpanel', { name: 'Chat' })
-    .getByRole('textbox', { name: 'Message Möbius…' })
   await expect.poll(() => explicitCreates).toBe(1)
-  await expect(presentation).toHaveCount(0)
+  const allocatingChat = page.locator(`[data-tab-key="chat:${explicitId}"]`)
+  const composer = allocatingChat.getByRole('textbox', { name: 'Message Möbius…' })
   await expect(composer).toBeFocused()
   await composer.fill('Keep this parked Builder draft')
 
   await toggleMode(page)
   await expect.poll(() => builderActive(page)).toBe(false)
-  await expect(presentation).toHaveCount(0)
+  await expect(allocatingChat).toBeHidden()
   await expect.poll(() => page.evaluate(key => (
     JSON.parse(localStorage.getItem(key))?.singleScreen
   ), paneModel.STORAGE_KEY), { timeout: 4000 }).toEqual({
@@ -790,7 +785,6 @@ test('a selected Builder tab supersedes an in-flight NULL-slot allocation', asyn
     paneModel.STORAGE_KEY,
   ), { timeout: 4000 }).toBe('aaa')
   expect(createCount, 'the stale allocation settles without duplicating or taking the slot').toBe(1)
-  await expect(page.locator('[data-new-chat-presentation]')).toHaveCount(0)
 })
 
 // R4: same-batch descriptor atomicity for the last-tab-close auto-return. A one-tab

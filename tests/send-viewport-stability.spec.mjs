@@ -1,6 +1,5 @@
 import { test, expect } from '@playwright/test'
 import { createTaggedChat, attachCleanup } from './_chatTracker.mjs'
-import { testChatAgentSettings } from './_chatTestPrerequisites.mjs'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
 // Hold the acknowledgement beyond the keyboard-close transition so the test
@@ -96,7 +95,7 @@ test('keyboard close never paints a sent row below its pin', async ({ page }) =>
     await route.fulfill({
       status: 202,
       contentType: 'application/json',
-      body: JSON.stringify({ status: 'started', message }),
+      body: JSON.stringify({ status: 'started', message, run_id: 'send-landing-run' }),
     })
   })
   await page.route('**/api/chat/stop', route => (
@@ -113,6 +112,8 @@ test('keyboard close never paints a sent row below its pin', async ({ page }) =>
       body: JSON.stringify({
         runtime_revision: runtimeRevision,
         running,
+        run_id: 'send-landing-run',
+        run_status: running ? 'running' : 'completed',
         active_goal_objective: null,
         pending_messages: [],
         pending_question_id: null,
@@ -131,10 +132,13 @@ test('keyboard close never paints a sent row below its pin', async ({ page }) =>
         offset: 0,
         runtime_revision: runtimeRevision,
         running,
+        run_id: 'send-landing-run',
+        run_status: running ? 'running' : 'completed',
         pending_messages: [],
         pending_question_id: null,
-        provider: 'claude',
-        ...testChatAgentSettings(),
+        provider: 'codex',
+        agent_settings_json: { model: 'gpt-6-astra' },
+        effective: { model: 'gpt-6-astra' },
       }),
     })
   })
@@ -294,7 +298,7 @@ test('an idle runtime snapshot cannot retire an unacknowledged fresh send', asyn
     await route.fulfill({
       status: 202,
       contentType: 'application/json',
-      body: JSON.stringify({ status: 'started', message }),
+      body: JSON.stringify({ status: 'started', message, run_id: 'fresh-send-race-run' }),
     })
   })
   await page.route(
@@ -303,6 +307,8 @@ test('an idle runtime snapshot cannot retire an unacknowledged fresh send', asyn
       const snapshot = {
         runtime_revision: runtimeRevision,
         running,
+        run_id: 'fresh-send-race-run',
+        run_status: running ? 'running' : 'completed',
         active_goal_objective: null,
         pending_messages: [],
         pending_question_id: null,
@@ -334,10 +340,13 @@ test('an idle runtime snapshot cannot retire an unacknowledged fresh send', asyn
         offset: 0,
         runtime_revision: runtimeRevision,
         running,
+        run_id: 'fresh-send-race-run',
+        run_status: running ? 'running' : 'completed',
         pending_messages: [],
         pending_question_id: null,
-        provider: 'claude',
-        ...testChatAgentSettings(),
+        provider: 'codex',
+        agent_settings_json: { model: 'gpt-6-astra' },
+        effective: { model: 'gpt-6-astra' },
       }),
     })
   })

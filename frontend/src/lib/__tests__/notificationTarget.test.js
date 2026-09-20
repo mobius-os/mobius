@@ -23,9 +23,9 @@ test('in-scope shell chat target parses', () => {
     { view: 'chat', chatId: 'abc-123' })
 })
 
-test('retired out-of-scope app and chat routes fail closed', () => {
-  assert.equal(parseNotificationTarget('/app/42'), null)
-  assert.equal(parseNotificationTarget('/chat/abc123'), null)
+test('out-of-scope paths fail closed', () => {
+  assert.equal(parseNotificationTarget('/outside-shell/42'), null)
+  assert.equal(parseNotificationTarget('/shell/unknown'), null)
 })
 
 test('a same-origin absolute URL parses like its path form', () => {
@@ -77,8 +77,8 @@ test('an absolute URL with no known own-origin fails closed', () => {
 test('id charset violations parse to null', () => {
   assert.equal(parseNotificationTarget('/shell/?app=<script>'), null)
   assert.equal(parseNotificationTarget('/shell/?chat=../../etc'), null)
-  assert.equal(parseNotificationTarget('/app/not-a-number'), null)
-  assert.equal(parseNotificationTarget('/chat/a b'), null)
+  assert.equal(parseNotificationTarget('/shell/?app=a b'), null)
+  assert.equal(parseNotificationTarget('/shell/?chat=a b'), null)
 })
 
 test('unknown views, paths, and junk parse to null', () => {

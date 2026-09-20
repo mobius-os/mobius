@@ -98,7 +98,8 @@ test.describe('shell update — owner-controlled navigation', () => {
     await page.getByRole('button', { name: /Notifications/ }).click()
     await expect(page.getByRole('button', { name: 'Reload shell' })).toBeVisible()
     await expect(page.getByRole('button', { name: 'Later' })).toBeVisible()
-    await expect(page.getByText('New shell ready.')).toHaveCount(1)
+    await expect(page.getByText('New shell ready.', { exact: true })).toHaveCount(1)
+    await expect(page.getByText('Reload to use the latest interface changes.', { exact: true })).toHaveCount(1)
     expect(await loadCount(page)).toBe(0)
 
     await page.getByRole('button', { name: 'Close notifications' }).click()

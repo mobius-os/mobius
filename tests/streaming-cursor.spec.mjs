@@ -168,6 +168,7 @@ test('terminal cursor removal keeps followed geometry unchanged', async ({ page 
     return {
       scrollHeight: scroll?.scrollHeight ?? -1,
       scrollTop: scroll?.scrollTop ?? -1,
+      zoom: Number.parseFloat(getComputedStyle(document.documentElement).zoom) || 1,
       paragraphTop: paragraphRect && scrollRect
         ? paragraphRect.top - scrollRect.top
         : null,
@@ -182,9 +183,12 @@ test('terminal cursor removal keeps followed geometry unchanged', async ({ page 
   )))
   const settled = await measure()
 
-  expect(Math.abs(settled.scrollHeight - live.scrollHeight)).toBeLessThanOrEqual(1)
-  // Browser layout can preserve the exact CSS-pixel position while exposing
-  // a fractional device-pixel delta slightly above one CSS pixel.
-  expect(Math.abs(settled.scrollTop - live.scrollTop)).toBeLessThanOrEqual(2)
+  // scrollHeight/scrollTop are layout-space values while bounding rects are
+  // rendered pixels. The desktop shell intentionally uses 90% zoom, where one
+  // rendered pixel is 1.111… layout pixels. Keep one rendered pixel as the
+  // invariant instead of loosening it in the wrong coordinate space.
+  const renderedPixelTolerance = 1.01
+  expect(Math.abs(settled.scrollHeight - live.scrollHeight) * live.zoom).toBeLessThanOrEqual(renderedPixelTolerance)
+  expect(Math.abs(settled.scrollTop - live.scrollTop) * live.zoom).toBeLessThanOrEqual(renderedPixelTolerance)
   expect(Math.abs(settled.paragraphTop - live.paragraphTop)).toBeLessThanOrEqual(1)
 })

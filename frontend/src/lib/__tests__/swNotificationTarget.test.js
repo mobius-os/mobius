@@ -112,6 +112,6 @@ test('out-of-scope targets still fall back to root', () => {
   assert.equal(
     safeTarget('https://evil.test/shell/?app=pages&intent=artifact:x'), '/',
   )
-  assert.equal(safeTarget('/app/5'), '/')
+  assert.equal(safeTarget('/outside-shell/5'), '/')
   assert.equal(safeTarget('javascript:alert(1)'), '/')
 })

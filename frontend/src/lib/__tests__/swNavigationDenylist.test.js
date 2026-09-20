@@ -39,7 +39,7 @@ test('shell app navigation does not intercept top-level app-like routes', () => 
   assert.equal(denied('/klix-filter'), true)
   assert.equal(denied('/cuberunner'), true)
   assert.equal(denied('/shell/'), false)
-  assert.equal(denied('/shell/chat/abc'), false)
+  assert.equal(denied('/shell/offline-placeholder'), false)
   assert.equal(denied('/apps/cuberun/'), true)
 })
 
@@ -54,7 +54,7 @@ test('shell embed navigation reaches the server, not the non-injected precache',
   // The full shell still serves from the precache — only the embed subtree
   // is excluded, NOT every /shell/ route.
   assert.equal(denied('/shell/'), false)
-  assert.equal(denied('/shell/chat/abc'), false)
+  assert.equal(denied('/shell/offline-placeholder'), false)
 })
 
 test('guarded local services bypass the shell at every depth', () => {
@@ -69,7 +69,7 @@ test('guarded local services bypass the shell at every depth', () => {
   // No concrete instance service is compiled into the shell. An old ad-hoc
   // prefix is still an ordinary SPA path unless it moves under /services/.
   assert.equal(denied('/recipes/setup/step/2'), false)
-  assert.equal(denied('/shell/chat/abc'), false)
+  assert.equal(denied('/shell/offline-placeholder'), false)
 })
 
 test('legacy reverse-proxy extension still ships empty', () => {
@@ -100,7 +100,7 @@ test('server-owned and standalone navigations never catch-fallback to shell', ()
   ]) {
     assert.equal(denied(path), true, `${path} stays server/app owned`)
   }
-  for (const path of ['/', '/shell/', '/shell/chat/abc']) {
+  for (const path of ['/', '/shell/', '/shell/offline-placeholder']) {
     assert.equal(denied(path), false, `${path} remains an offline shell route`)
   }
 })

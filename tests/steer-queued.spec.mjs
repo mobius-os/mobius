@@ -31,6 +31,40 @@ function sseBody(events) {
   return events.map(e => `data: ${JSON.stringify(e)}\n\n`).join('')
 }
 
+function runningRuntimeFixture() {
+  return {
+    revision: 0,
+    running: false,
+    runId: 'steer-queued-run',
+    pending: [],
+    start() { this.revision += 1; this.running = true },
+    queue(body, ts) {
+      const message = { role: 'user', content: body.content, ts, cid: body.cid }
+      this.pending = [...this.pending.filter(row => row.cid !== body.cid), message]
+      this.revision += 1
+      return message
+    },
+    replacePending(messages) { this.pending = messages; this.revision += 1 },
+  }
+}
+
+async function installRuntimeFixture(page, runtime) {
+  await page.route(/\/api\/chats\/[0-9a-f-]+\/runtime(?:\?.*)?$/, route => (
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        runtime_revision: runtime.revision,
+        running: runtime.running,
+        run_id: runtime.runId,
+        run_status: runtime.running ? 'running' : 'completed',
+        pending_messages: runtime.pending,
+        pending_question_id: null,
+      }),
+    })
+  ))
+}
+
 async function setupChat(page) {
   await page.setViewportSize({ width: 412, height: 915 })
   await page.goto(BASE, { waitUntil: 'domcontentloaded' })
@@ -60,27 +94,9 @@ async function newChat(page) {
     { timeout: 3000 }
   )
   await page.waitForFunction(
-    () => !document.querySelector('[data-new-chat-presentation]'),
+    () => !!document.querySelector('[data-chat-surface="painted"] .chat__form'),
     { timeout: 10000 },
   )
-}
-
-async function keepMockedTurnRuntimeOwned(page) {
-  await page.route(/\/api\/chats\/[0-9a-f-]+\/runtime(?:\?.*)?$/, route => {
-    if (route.request().method() !== 'GET') return route.fallback()
-    return route.fulfill({
-      status: 200,
-      contentType: 'application/json',
-      json: {
-        runtime_revision: 1,
-        run_id: 'steer-fixture-run',
-        run_status: 'running',
-        running: true,
-        pending_messages: [],
-        pending_question_id: null,
-      },
-    })
-  })
 }
 
 async function sendMessage(page, text) {
@@ -117,6 +133,7 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
 
     // Capture every POST /messages so we can assert the steer payload.
     const messagePosts = []
+    const runtime = runningRuntimeFixture()
 
     await page.route(/\/api\/chats\/[0-9a-f-]+\/messages$/, async (route) => {
       const req = route.request()
@@ -128,6 +145,7 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
       // Respond exactly as the backend does on success — 202 with
       // {status:"steered"} and the remaining (now empty) server queue.
       if (body.force_steer) {
+        runtime.replacePending([])
         await steerGate
         return route.fulfill({
           status: 202,
@@ -143,6 +161,7 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
       // First send (fresh turn): 202 starts the turn; the held-open
       // /stream below keeps sending=true.
       if (body.content === 'first message') {
+        runtime.start()
         return route.fulfill({
           status: 202,
           contentType: 'application/json',
@@ -158,10 +177,11 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
       // Second send while streaming: the queue path. Return a SERVER ts so
       // confirmQueued clears the in-flight flag — only then is the entry
       // steer-eligible (canSteer requires a confirmed server ts).
+      const pendingMessage = runtime.queue(body, QUEUE_TS)
       return route.fulfill({
         status: 202,
         contentType: 'application/json',
-        body: JSON.stringify({ status: 'queued', ts: QUEUE_TS, position: 1 }),
+        body: JSON.stringify({ status: 'queued', ts: QUEUE_TS, position: 1, pending_message: pendingMessage }),
       })
     })
 
@@ -181,7 +201,7 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
 
     await setupChat(page)
     await newChat(page)
-    await keepMockedTurnRuntimeOwned(page)
+    await installRuntimeFixture(page, runtime)
 
     // First send → starts the (held-open) turn. Stop button = streaming.
     await sendMessage(page, 'first message')
@@ -245,6 +265,7 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
   test('Ctrl+Enter sends one direct-steer request and renders it inline, never queued', async ({ page }) => {
     const STEER_TEXT = 'change course immediately'
     const messagePosts = []
+    const runtime = runningRuntimeFixture()
     let releaseDirectSteer
     const directSteerGate = new Promise(resolve => { releaseDirectSteer = resolve })
 
@@ -258,6 +279,7 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
         // never appear in the queued tray while the atomic reserve+steer is
         // settling on the server.
         await directSteerGate
+        runtime.replacePending([])
         return route.fulfill({
           status: 202,
           contentType: 'application/json',
@@ -269,6 +291,7 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
         })
       }
       if (body.force_steer) {
+        runtime.replacePending([])
         return route.fulfill({
           status: 202,
           contentType: 'application/json',
@@ -280,6 +303,7 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
         })
       }
       if (body.content === 'first message') {
+        runtime.start()
         return route.fulfill({
           status: 202,
           contentType: 'application/json',
@@ -291,6 +315,7 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
           }),
         })
       }
+      const pendingMessage = runtime.queue(body, 778001)
       return route.fulfill({
         status: 202,
         contentType: 'application/json',
@@ -298,12 +323,7 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
           status: 'queued',
           ts: 778001,
           position: 1,
-          pending_message: {
-            role: 'user',
-            content: body.content,
-            ts: 778001,
-            cid: body.cid,
-          },
+          pending_message: pendingMessage,
         }),
       })
     })
@@ -319,7 +339,7 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
 
     await setupChat(page)
     await newChat(page)
-    await keepMockedTurnRuntimeOwned(page)
+    await installRuntimeFixture(page, runtime)
     await sendMessage(page, 'first message')
     await expect(page.locator('[data-chat-surface="painted"] .chat__stop')).toBeVisible({ timeout: 5000 })
 
@@ -365,6 +385,7 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
     const TEXT2 = 'second queued'
 
     const messagePosts = []
+    const runtime = runningRuntimeFixture()
     // The queueOnly POSTs land in order, so hand back TS1 then TS2.
     let queueCount = 0
 
@@ -375,6 +396,7 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
       messagePosts.push(body)
 
       if (body.force_steer) {
+        runtime.replacePending([])
         return route.fulfill({
           status: 202,
           contentType: 'application/json',
@@ -382,6 +404,7 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
         })
       }
       if (body.content === 'first message') {
+        runtime.start()
         return route.fulfill({
           status: 202,
           contentType: 'application/json',
@@ -396,10 +419,11 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
       const ts = queueCount === 0 ? TS1 : TS2
       const position = queueCount + 1
       queueCount++
+      const pendingMessage = runtime.queue(body, ts)
       return route.fulfill({
         status: 202,
         contentType: 'application/json',
-        body: JSON.stringify({ status: 'queued', ts, position }),
+        body: JSON.stringify({ status: 'queued', ts, position, pending_message: pendingMessage }),
       })
     })
 
@@ -414,7 +438,7 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
 
     await setupChat(page)
     await newChat(page)
-    await keepMockedTurnRuntimeOwned(page)
+    await installRuntimeFixture(page, runtime)
     await sendMessage(page, 'first message')
     await expect(page.locator('[data-chat-surface="painted"] .chat__stop')).toBeVisible({ timeout: 5000 })
 
@@ -446,6 +470,7 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
     const TEXT1 = 'send this queued message now'
     const TEXT2 = 'leave this message queued'
     const messagePosts = []
+    const runtime = runningRuntimeFixture()
     let queueCount = 0
 
     await page.route(/\/api\/chats\/[0-9a-f-]+\/messages$/, async (route) => {
@@ -457,23 +482,23 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
         const siblingPost = messagePosts.find(post => (
           !post.force_steer && post.content === TEXT2
         ))
+        const sibling = {
+          role: 'user', content: TEXT2, ts: 990002, cid: siblingPost.cid,
+        }
+        runtime.replacePending([sibling])
         return route.fulfill({
           status: 202,
           contentType: 'application/json',
           body: JSON.stringify({
             status: 'steered',
             chat_id: 'mock',
-            pending_messages: [{
-              role: 'user',
-              content: TEXT2,
-              ts: 990002,
-              cid: siblingPost.cid,
-            }],
+            pending_messages: [sibling],
           }),
         })
       }
 
       if (body.content === 'first message') {
+        runtime.start()
         return route.fulfill({
           status: 202,
           contentType: 'application/json',
@@ -487,13 +512,16 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
       }
 
       queueCount += 1
+      const ts = 990000 + queueCount
+      const pendingMessage = runtime.queue(body, ts)
       return route.fulfill({
         status: 202,
         contentType: 'application/json',
         body: JSON.stringify({
           status: 'queued',
-          ts: 990000 + queueCount,
+          ts,
           position: queueCount,
+          pending_message: pendingMessage,
         }),
       })
     })
@@ -509,7 +537,7 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
 
     await setupChat(page)
     await newChat(page)
-    await keepMockedTurnRuntimeOwned(page)
+    await installRuntimeFixture(page, runtime)
     await sendMessage(page, 'first message')
     await expect(page.locator('[data-chat-surface="painted"] .chat__stop')).toBeVisible({ timeout: 5000 })
     await sendMessage(page, TEXT1)
@@ -542,6 +570,7 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
     const QUEUED_TEXT = 'pin this steer without a bounce'
     const PRE_STEER = 'streaming room before fast-forward '.repeat(220)
     const messagePosts = []
+    const runtime = runningRuntimeFixture()
 
     // Exercise ChatView's touch-primary path and record the exact DOM state at
     // every composer blur. A fresh send legitimately blurs before its row is
@@ -594,6 +623,7 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
       try { body = JSON.parse(route.request().postData() || '{}') } catch { /* empty */ }
       messagePosts.push(body)
       if (body.force_steer) {
+        runtime.replacePending([])
         return route.fulfill({
           status: 202,
           contentType: 'application/json',
@@ -603,6 +633,7 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
         })
       }
       if (body.content === 'first message') {
+        runtime.start()
         return route.fulfill({
           status: 202,
           contentType: 'application/json',
@@ -617,6 +648,7 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
       const pendingMessage = {
         role: 'user', content: body.content, ts: QUEUE_TS, cid: body.cid,
       }
+      runtime.queue(body, QUEUE_TS)
       return route.fulfill({
         status: 202,
         contentType: 'application/json',
@@ -678,7 +710,7 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
 
     await setupChat(page)
     await newChat(page)
-    await keepMockedTurnRuntimeOwned(page)
+    await installRuntimeFixture(page, runtime)
     await page.setViewportSize({ width: 1280, height: 900 })
     // This case deliberately advertises a touch-primary device. Plain Enter
     // inserts a newline on that contract, so exercise the same Send control a
@@ -907,36 +939,40 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
     await setupChat(page)
     const chat = await createTaggedChat(page, 'steer-held-position')
     expect(chat?.id).toBeTruthy()
-    await page.route(new RegExp(`/api/chats/${chat.id}/runtime(?:\\?.*)?$`), route => {
-      if (route.request().method() !== 'GET') return route.fallback()
-      return route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        json: {
-          runtime_revision: durableRunning ? 1 : 0,
-          run_id: durableRunning ? 'steer-held-run' : null,
-          run_status: durableRunning ? 'running' : null,
-          running: durableRunning,
-          pending_messages: durablePending,
-          pending_question_id: null,
-        },
-      })
-    })
     await page.route(new RegExp(`/api/chats/${chat.id}\\?limit=`), route => {
       if (route.request().method() !== 'GET') return route.fallback()
       return route.fulfill({
         status: 200,
         contentType: 'application/json',
         body: JSON.stringify({
+          id: chat.id,
+          title: chat.title,
+          provider: 'codex',
           messages: durableMessages,
           total: durableMessages.length,
           offset: 0,
           runtime_revision: durableRunning ? 1 : 0,
           running: durableRunning,
+          run_id: 'steer-held-position-run',
+          run_status: durableRunning ? 'running' : 'completed',
           pending_messages: durablePending,
         }),
       })
     })
+    await page.route(new RegExp(`/api/chats/${chat.id}/runtime(?:\\?.*)?$`), route => (
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          runtime_revision: durableRunning ? 1 : 0,
+          running: durableRunning,
+          run_id: 'steer-held-position-run',
+          run_status: durableRunning ? 'running' : 'completed',
+          pending_messages: durablePending,
+          pending_question_id: null,
+        }),
+      })
+    ))
     await page.route(/\/api\/chats(?:\?.*)?$/, route => {
       if (route.request().method() !== 'GET') return route.fallback()
       return route.fulfill({
@@ -954,7 +990,7 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
         }]),
       })
     })
-    await page.goto(`${BASE}/shell/chat/${chat.id}`, { waitUntil: 'domcontentloaded' })
+    await page.goto(`${BASE}/shell/?chat=${chat.id}`, { waitUntil: 'domcontentloaded' })
     await expect(page.locator('[data-chat-surface="painted"] .chat__empty-wrap')).toBeVisible({ timeout: 8000 })
 
     await sendMessage(page, 'first message')

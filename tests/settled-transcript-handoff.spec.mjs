@@ -1,6 +1,5 @@
 import { test, expect } from '@playwright/test'
 import { createTaggedChat, attachCleanup } from './_chatTracker.mjs'
-import { testChatAgentSettings } from './_chatTestPrerequisites.mjs'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8000'
 
@@ -121,6 +120,8 @@ async function mountScenario(page) {
       body: JSON.stringify({
         runtime_revision: runtimeRevision,
         running,
+        run_id: 'settled-handoff-run',
+        run_status: running ? 'running' : 'completed',
         active_goal_objective: null,
         pending_messages: [],
         pending_question_id: null,
@@ -140,10 +141,13 @@ async function mountScenario(page) {
         offset: 0,
         runtime_revision: runtimeRevision,
         running,
+        run_id: 'settled-handoff-run',
+        run_status: running ? 'running' : 'completed',
         pending_messages: [],
         pending_question_id: null,
-        provider: 'claude',
-        ...testChatAgentSettings(),
+        provider: 'codex',
+        agent_settings_json: { model: 'gpt-6-astra' },
+        effective: { model: 'gpt-6-astra' },
       }),
     })
   })
@@ -171,7 +175,7 @@ async function mountScenario(page) {
     await route.fulfill({
       status: 202,
       contentType: 'application/json',
-      body: JSON.stringify({ status: 'started', message }),
+      body: JSON.stringify({ status: 'started', message, run_id: 'settled-handoff-run' }),
     })
   })
 

@@ -87,7 +87,14 @@ async function setupShellBasics(page) {
     route.fulfill({
       status: 200,
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ok: true }),
+      body: JSON.stringify({ status: 'ok', boot_id: 'app-canvas-fixture' }),
+    })
+  )
+  await page.route(/\/api\/ready$/, route =>
+    route.fulfill({
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ready: true, boot_id: 'app-canvas-fixture' }),
     })
   )
   await page.route(/\/api\/theme$/, route =>
@@ -137,7 +144,7 @@ async function setupShellBasics(page) {
 
 
 /** Set up the routes Shell needs to render an app canvas:
- *   - chats list (empty is fine — we land directly via /app/:id)
+ *   - chats list (empty is fine — we land directly via /shell/?app=:id)
  *   - apps list with our test app
  *   - theme + setup status (idle but must respond)
  *   - app-token POST returns a dummy token
@@ -331,7 +338,7 @@ test.describe('AppCanvas: iframe-mount contract', () => {
     // then reliably hidden after we trigger mount — deterministic.
     await setupAppRoutes(page, appId, mockFrameHTML(appId, { sendMounted: false, mountOnSignal: true }))
 
-    await page.goto(`${BASE}/app/${appId}`, { waitUntil: 'domcontentloaded' })
+    await page.goto(`${BASE}/shell/?app=${appId}`, { waitUntil: 'domcontentloaded' })
 
     // No mount yet → the spinner is visible and STAYS visible (no race).
     // 10s covers CI's cold-container first-app mount; it won't hide on us.
@@ -360,7 +367,7 @@ test.describe('AppCanvas: iframe-mount contract', () => {
   test('drawer playback controls stay bound to the owning live frame', async ({ page }) => {
     const appId = 97
     await setupAppRoutes(page, appId, mockFrameHTML(appId))
-    await page.goto(`${BASE}/app/${appId}`, { waitUntil: 'domcontentloaded' })
+    await page.goto(`${BASE}/shell/?app=${appId}`, { waitUntil: 'domcontentloaded' })
     await expect(page.locator('.canvas-loading')).toBeHidden({ timeout: 10000 })
     const frame = await waitForContentFrame(page, 'iframe.canvas--live')
     await frame.evaluate(() => {
@@ -449,7 +456,7 @@ test.describe('AppCanvas: iframe-mount contract', () => {
       })
     })
 
-    await page.goto(`${BASE}/app/${appId}`, { waitUntil: 'domcontentloaded' })
+    await page.goto(`${BASE}/shell/?app=${appId}`, { waitUntil: 'domcontentloaded' })
 
     await expect(page.getByText('Couldn’t open mock-app')).toBeVisible({ timeout: 10000 })
     const retry = page.getByRole('button', { name: 'Try again' })
@@ -674,7 +681,7 @@ test.describe('AppCanvas: iframe-mount contract', () => {
     const appId = 99
     await setupAppRoutes(page, appId, mockFrameHTML(appId, { sendMounted: false }))
 
-    await page.goto(`${BASE}/app/${appId}`, { waitUntil: 'domcontentloaded' })
+    await page.goto(`${BASE}/shell/?app=${appId}`, { waitUntil: 'domcontentloaded' })
 
     // 10s (was 5s) — this waits for the genuinely slow cold-CI first-app
     // mount to render the spinner, which is a real state, not a race; 5s
@@ -696,7 +703,7 @@ test.describe('AppCanvas: iframe-mount contract', () => {
       targetAppId,
     )
 
-    await page.goto(`${BASE}/app/${sourceAppId}`, { waitUntil: 'domcontentloaded' })
+    await page.goto(`${BASE}/shell/?app=${sourceAppId}`, { waitUntil: 'domcontentloaded' })
     const sourceSelector = `iframe[data-app-id="${sourceAppId}"]`
     await expect(page.locator(sourceSelector)).toBeVisible({ timeout: 8000 })
     await expect(page.locator('.canvas-loading')).toBeHidden({ timeout: 8000 })
@@ -839,7 +846,7 @@ test.describe('AppCanvas: iframe-mount contract', () => {
       route.fulfill({ status: 204, body: '' })
     )
 
-    await page.goto(`${BASE}/app/${appId}`, { waitUntil: 'domcontentloaded' })
+    await page.goto(`${BASE}/shell/?app=${appId}`, { waitUntil: 'domcontentloaded' })
     // The live frame has mounted (spinner gated on frame-mounted).
     await expect(page.locator('.canvas-loading')).toBeHidden({ timeout: 10000 })
     // Confirm the LIVE frame settled at '1000' before arming, so the arm can't
