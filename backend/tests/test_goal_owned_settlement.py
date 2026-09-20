@@ -1,9 +1,11 @@
 """Terminal settlement keeps every unfinished Goal under one real owner."""
 
+from tests.goal_fixtures import goal_run as make_goal_run
+
 import pytest
 
 from app import models
-from app.chat_writer import ClearPending, PromotePending, _PersistFailed, get_writer
+from app.chat_writer import ClearPending, PromotePending, get_writer
 from app.run_state import GOAL_HANDOFF_REASON
 
 
@@ -30,7 +32,7 @@ def _add_goal_run(
       "role": "user", "content": "Finish the work", "cid": "owner-request",
       "ts": 1,
     }]
-  db.add(models.ChatRun(
+  db.add(make_goal_run(db,
     id=run_id,
     root_run_id=run_id,
     chat_id=chat.id,
@@ -99,6 +101,12 @@ def test_clean_terminal_continues_unfinished_goal_without_an_owner(db, chat):
 
 def test_terminal_does_not_continue_a_settled_or_failed_goal(db, chat):
   _add_goal_run(db, chat, plan=SETTLED)
+  from app.goals import update_goal_record
+  goal = db.get(models.ChatGoal, "goal-run")
+  update_goal_record(
+    db, db.get(models.ChatRun, "goal-run"), goal, goal.revision,
+    result="Verified",
+  )
   settled = _terminal_promote(chat.id, "goal-run")
   assert settled["promoted"] is None
 
@@ -113,36 +121,6 @@ def test_terminal_does_not_continue_a_settled_or_failed_goal(db, chat):
   )
   assert failed["promoted"] is None
   assert db.get(models.ChatRun, "must-not-start") is None
-
-
-@pytest.mark.parametrize(
-  "plan",
-  [
-    "{not valid json",
-    "null",
-    {"tasks": "bad"},
-    {"tasks": [{}]},
-    {"tasks": [{"id": "bad", "title": "Bad", "status": {}}]},
-  ],
-)
-def test_terminal_treats_unreadable_plan_as_unfinished(db, chat, plan):
-  # A goal_plan_json that fails to parse (e.g. a partial write) must not be
-  # mistaken for "no unfinished work" and let the goal silently terminate.
-  _add_goal_run(db, chat, plan=plan)
-
-  with pytest.raises(_PersistFailed, match="exhausted Goal continuation needs an owner card"):
-    _terminal_promote(chat.id, "goal-run")
-  db.expire_all()
-  assert db.get(models.ChatRun, "successor") is None
-
-
-def test_json_null_goal_plan_remains_an_absent_optional_plan(db, chat):
-  _add_goal_run(db, chat, plan=None)
-
-  result = _terminal_promote(chat.id, "goal-run")
-
-  assert result["promoted"] is None
-  assert db.get(models.ChatRun, "successor") is None
 
 
 @pytest.mark.parametrize("outcome", ["met", "expired", "failed"])
@@ -192,7 +170,7 @@ def test_wait_without_exact_outstanding_delivery_cannot_hold_goal(db, chat, case
 
 
 @pytest.mark.asyncio
-async def test_wait_delivery_after_terminal_gap_starts_only_its_exact_goal_run(db, chat, monkeypatch):
+async def test_wait_delivery_after_terminal_gap_starts_only_its_exact_make_goal_run(db, chat, monkeypatch):
   from app import chat as chat_mod, chat_waits
 
   _add_goal_run(db, chat)
@@ -355,62 +333,17 @@ async def test_complete_turn_schedules_the_terminal_goal_executor(
 
 
 @pytest.mark.asyncio
-async def test_complete_turn_parks_corrupt_plan_for_owner_reconciliation(
+async def test_zero_legacy_allowance_does_not_interrupt_authorized_work(
   db, chat, monkeypatch,
 ):
-  from app import chat as chat_mod, chat_queue
-  from app.broadcast import create_broadcast, remove_broadcast
-  from app.chat_event_sink import ChatEventSink
-  from app.memory_recall import EMPTY_RECALL_BINDING
-
-  _add_goal_run(db, chat, plan="{not valid json")
-  broadcast = create_broadcast(chat.id)
-  sink = ChatEventSink(
-    broadcast,
-    chat.id,
-    run_token="goal-run",
-    recall_binding=EMPTY_RECALL_BINDING,
-  )
-  sink.publish({"type": "text", "content": "The saved plan needs repair."})
-  scheduled = []
-  monkeypatch.setattr(
-    chat_mod, "_schedule_continuation", lambda **kwargs: scheduled.append(kwargs),
-  )
-  monkeypatch.setattr(chat_mod, "_publish_chat_run_finished", lambda *_: None)
-  try:
-    disposition = await chat_mod._complete_turn(
-      bc=broadcast,
-      sink=sink,
-      db=db,
-      chat_id=chat.id,
-      run_gen=None,
-      provider_id="codex",
-      cost_usd=0,
-      close_browser=False,
-    )
-  finally:
-    remove_broadcast(chat.id)
-
-  assert disposition is chat_queue.TerminalDisposition.QUESTION_PARKED
-  assert scheduled == []
-  db.expire_all()
-  saved = db.get(models.Chat, chat.id)
-  assert saved.pending_question_id == "goal-handoff-goal-run"
-  assert saved.messages[-1]["blocks"][-1]["questions"][0]["header"] == "Goal needs reconciliation"
-  assert db.get(models.ChatRun, "goal-run").status == "interrupted"
-
-
-@pytest.mark.asyncio
-async def test_no_progress_across_two_terminals_stops_at_a_saved_owner_question(
-  db, chat, monkeypatch,
-):
-  """A clean continuation cannot recursively manufacture provider turns."""
+  """Owner-authorized work continues without a turn-count question."""
   from app import chat as chat_mod, chat_queue
   from app.broadcast import create_broadcast, remove_broadcast
   from app.chat_event_sink import ChatEventSink
   from app.memory_recall import EMPTY_RECALL_BINDING
 
   _add_goal_run(db, chat)
+  db.commit()
   scheduled = []
   monkeypatch.setattr(
     chat_mod, "_schedule_continuation", lambda **kwargs: scheduled.append(kwargs),
@@ -439,6 +372,7 @@ async def test_no_progress_across_two_terminals_stops_at_a_saved_owner_question(
   assert first is chat_queue.TerminalDisposition.CONTINUATION_PROMOTED
   assert len(scheduled) == 1
   assert scheduled[0]["next_user"]["goal_plan_revision"] == 1
+  db.expire_all()
 
   continuation_run = scheduled[0]["run_token"]
   second_broadcast = create_broadcast(chat.id)
@@ -486,9 +420,9 @@ def test_plan_revision_progress_allows_the_next_goal_rollover(db, chat):
 
   successor = db.get(models.ChatRun, "first-successor")
   successor.goal_plan_revision_at_admission = 1
-  root = db.get(models.ChatRun, "goal-run")
-  root.goal_plan_revision = 2
-  root.goal_plan_json = {
+  goal = db.get(models.ChatGoal, "goal-run")
+  goal.revision = 2
+  goal.plan_json = {
     "version": 1,
     "tasks": [{
       "id": "finish", "title": "Finish", "status": "running",

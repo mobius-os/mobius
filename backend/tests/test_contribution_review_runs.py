@@ -210,6 +210,25 @@ def test_merge_call_binds_sha_without_admin_bypass():
   assert not any("admin" in str(a) for a in calls[0])
 
 
+@pytest.mark.parametrize("payload", ["null", "[]", '"merged"'])
+def test_merge_call_rejects_non_object_confirmation(payload):
+  def gh(*args):
+    return SimpleNamespace(stdout=payload)
+  with pytest.raises(ContributionSubmitError) as error:
+    domain.perform_merge(gh, "/tmp", TARGET, REPO)
+  assert error.value.code == "merge_response_invalid_shape"
+  assert error.value.message == "GitHub returned an unexpected merge confirmation shape."
+
+
+def test_merge_call_rejects_unreadable_confirmation():
+  def gh(*args):
+    return SimpleNamespace(stdout="not json")
+  with pytest.raises(ContributionSubmitError) as error:
+    domain.perform_merge(gh, "/tmp", TARGET, REPO)
+  assert error.value.code == "merge_response_unreadable"
+  assert error.value.message == "GitHub returned an unreadable merge confirmation."
+
+
 def test_queue_call_binds_sha_and_never_jumps():
   calls = []
   def gh(*args):

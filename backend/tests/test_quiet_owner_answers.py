@@ -1,4 +1,6 @@
 """Explicit card closure is an answer, not a synthetic model turn."""
+
+from tests.goal_fixtures import persist_goal_fixture, goal_run as make_goal_run
 import copy
 
 import pytest
@@ -107,6 +109,7 @@ def _goal(chat, approval_run, status='pending'):
     run.goal_objective = 'Finish the repair'
     run.goal_plan_json = {'version': 1, 'tasks': [
       {'id': 'repair', 'title': 'Repair', 'status': status, 'depends_on': []}]}
+    persist_goal_fixture(db, run, status='completed' if status == 'completed' else 'open')
     db.commit()
 
 
@@ -120,28 +123,12 @@ def test_quiet_answer_cannot_orphan_unfinished_goal(client, chat, auth, approval
   assert 'answers' not in _block(chat.id, qid)
 
 
-def test_quiet_answer_cannot_orphan_an_unreadable_goal_plan(
-    client, chat, auth, approval_run):
-  _goal(chat, approval_run)
-  with SessionLocal() as db:
-    run = db.get(models.ChatRun, approval_run[0].run_token)
-    run.goal_plan_json = "{not valid json"
-    db.commit()
-  qid = _ask(client, chat, approval_run, QUIET).json()['question_id']
-
-  response = _quiet(client, chat, auth, qid)
-
-  assert response.status_code == 409, response.text
-  assert 'unfinished Goal' in response.text
-  assert _row(chat.id)[0] == qid
-
-
 def test_completed_plan_can_close_without_changing_goal(client, chat, auth, approval_run):
   _goal(chat, approval_run, 'completed')
   qid = _ask(client, chat, approval_run, QUIET).json()['question_id']
   assert _quiet(client, chat, auth, qid).status_code == 200
   with SessionLocal() as db:
-    assert db.get(models.ChatRun, approval_run[0].run_token).goal_plan_json['tasks'][0]['status'] == 'completed'
+    assert db.get(models.ChatGoal, approval_run[0].run_token).plan_json['tasks'][0]['status'] == 'completed'
 
 
 @pytest.mark.parametrize('same_goal', [False, True])
@@ -262,7 +249,7 @@ def test_quiet_close_after_stop_does_not_revive_goal_or_release_queued_b(
   assert scheduled == [] and _row(chat.id)[2] == before
   with SessionLocal() as db:
     run = db.get(models.ChatRun, approval_run[0].run_token)
-    assert run.status == 'stopped' and run.goal_plan_json['tasks'][0]['status'] == 'pending'
+    assert run.status == 'stopped' and db.get(models.ChatGoal, run.goal_id).plan_json['tasks'][0]['status'] == 'pending'
 
 
 def test_latest_physical_goal_stop_not_original_author_owns_quiet_closure(
@@ -275,7 +262,7 @@ def test_latest_physical_goal_stop_not_original_author_owns_quiet_closure(
   get_writer().submit(FinishRun(chat_id=chat.id, run_token=root_id,
       terminal_status='completed')).result(timeout=5)
   with SessionLocal() as db:
-    db.add(models.ChatRun(id='later-stopped', chat_id=chat.id, root_run_id=root_id,
+    db.add(make_goal_run(db, id='later-stopped', chat_id=chat.id, root_run_id=root_id,
         goal_id=root_id, goal_objective='Finish the repair', status='stopped',
         provider='codex', started_at=datetime.now(UTC) + timedelta(seconds=1)))
     db.commit()

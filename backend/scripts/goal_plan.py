@@ -52,12 +52,7 @@ def _request(method: str, path: str, body=None):
 
 def _current(chat_id: str):
   payload = _request("GET", f"/api/chats/{chat_id}/goal-plan")
-  if not isinstance(payload, dict):
-    return None, None
-  repair_revision = payload.get("repair_revision")
-  return payload.get("plan"), (
-    int(repair_revision) if isinstance(repair_revision, int) else None
-  )
+  return payload.get("plan") if isinstance(payload, dict) else None
 
 
 def _parse_task(value: str) -> dict:
@@ -118,7 +113,15 @@ def main() -> int:
     description="Manage the visible todo plan for $CHAT_ID's active Goal.",
   )
   sub = parser.add_subparsers(dest="command", required=True)
-  sub.add_parser("show", help="print the current plan")
+  context_parser = sub.add_parser("context", help="inspect current focus or a named branch without the full tree")
+  context_parser.add_argument("--task")
+  context_parser.add_argument("--goal-id")
+  show_parser = sub.add_parser("show", help="print the current or named plan")
+  show_parser.add_argument("--goal-id")
+  sub.add_parser("list", help="list retained Goal obligations in this chat")
+  sub.add_parser("stop", help="honor an explicit owner Stop using the existing chat stop controller")
+  resume_parser = sub.add_parser("resume", help="attach this ordinary attempt to existing unfinished work")
+  resume_parser.add_argument("goal_id")
   sub.add_parser(
     "check-complete",
     help="verify that every required task is completed or cancelled",
@@ -137,6 +140,11 @@ def main() -> int:
   set_parser.add_argument(
     "--tasks-json", help="JSON array alternative to repeated --task",
   )
+  checkpoint_parser = sub.add_parser("checkpoint", help="save progress and next action")
+  checkpoint_parser.add_argument("--summary", required=True)
+  checkpoint_parser.add_argument("--next-action", required=True)
+  complete_parser = sub.add_parser("complete", help="explicitly complete the verified Goal")
+  complete_parser.add_argument("--result", required=True)
   update_parser = sub.add_parser("update", help="advance one task")
   update_parser.add_argument("task_id")
   update_parser.add_argument(
@@ -149,21 +157,41 @@ def main() -> int:
   args = parser.parse_args()
 
   _, _, chat_id = _settings()
-  current, repair_revision = _current(chat_id)
+  if args.command == "context":
+    from urllib.parse import urlencode
+    query = urlencode({k: v for k, v in {"task": args.task, "goal_id": args.goal_id}.items() if v})
+    print(json.dumps(_request("GET", f"/api/chats/{chat_id}/goal-context?{query}"), ensure_ascii=False))
+    return 0
+  if args.command == "stop":
+    print(json.dumps(_request("POST", "/api/chat/stop", {"chat_id":chat_id})))
+    return 0
+  if args.command == "resume":
+    print(json.dumps(_request("POST", f"/api/chats/{chat_id}/goal/resume", {"goal_id":args.goal_id})))
+    return 0
+  if args.command == "list":
+    print(json.dumps(_request("GET", f"/api/chats/{chat_id}/goals"), indent=2))
+    return 0
+  if args.command == "show" and args.goal_id:
+    from urllib.parse import quote
+    print(json.dumps(_request("GET", f"/api/chats/{chat_id}/goal-plan?goal_id={quote(args.goal_id, safe='')}"), indent=2))
+    return 0
+  if args.command in {"checkpoint", "complete"}:
+    payload = _request("GET", f"/api/chats/{chat_id}/goal-plan")
+    goal = (payload or {}).get("goal")
+    if not goal:
+      raise SystemExit("No Goal record; resume the original Goal before updating it.")
+    body = {"goal_id": goal["id"], "expected_revision": goal["revision"]}
+    if args.command == "complete":
+      body["result"] = args.result
+    else:
+      body.update(checkpoint=args.summary, next_action=args.next_action)
+    print(json.dumps(_request("PATCH", f"/api/chats/{chat_id}/goal", body)))
+    return 0
+  current = _current(chat_id)
   if args.command == "show":
-    shown = current if repair_revision is None else {
-      "corrupt": True,
-      "repair_revision": repair_revision,
-      "repair": "Replace the complete plan with goal_plan.py set.",
-    }
-    print(json.dumps(shown, indent=2, ensure_ascii=False))
+    print(json.dumps(current, indent=2, ensure_ascii=False))
     return 0
   if args.command == "check-complete":
-    if repair_revision is not None:
-      raise SystemExit(
-        "Goal cannot complete; its saved todo plan is unreadable. "
-        "Repair it with goal_plan.py set."
-      )
     # One-step Goals deliberately have no plan and may complete normally.
     if current is None:
       print("Goal has no todo plan; completion is allowed.")
@@ -176,15 +204,7 @@ def main() -> int:
     print("Goal todo list is complete.")
     return 0
 
-  if repair_revision is not None and args.command != "set":
-    parser.error(
-      "the saved Goal plan is unreadable; replace it with goal_plan.py set"
-    )
-  revision = (
-    repair_revision
-    if repair_revision is not None
-    else int((current or {}).get("revision", 0))
-  )
+  revision = int((current or {}).get("revision", 0))
   if args.command == "set":
     if args.tasks_json and args.task:
       parser.error("use either --tasks-json or --task, not both")
@@ -202,10 +222,6 @@ def main() -> int:
       {"expected_revision": revision, "tasks": tasks},
     )
   elif args.command == "add":
-    tasks = list((current or {}).get("tasks") or [])
-    for task in tasks:
-      for transient in ("ready", "waiting_on", "children", "ready_to_verify"):
-        task.pop(transient, None)
     added = {
       "id": args.task_id,
       "title": args.title,
@@ -216,10 +232,9 @@ def main() -> int:
       added["parent_id"] = args.parent
     if args.completion_condition:
       added["completion_condition"] = args.completion_condition
-    tasks.append(added)
     result = _request(
-      "PUT", f"/api/chats/{chat_id}/goal-plan",
-      {"expected_revision": revision, "tasks": tasks},
+      "POST", f"/api/chats/{chat_id}/goal-plan/tasks",
+      {"expected_revision": revision, "task": added},
     )
   else:
     changes = {"expected_revision": revision}

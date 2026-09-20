@@ -69,12 +69,10 @@ from app.chat_context import (
   _chat_settings_dict,
   _custom_system_prompt,
   _goal_objective,
-  _goal_resume_requested,
   _human_elapsed,
   _is_cli_slash_command,
   _last_user_message_elapsed,
   _latest_compaction_brief,
-  _latest_goal_objective,
   _strip_report_html,
 )
 from app.chat_logging import (
@@ -1208,21 +1206,24 @@ async def sweep_wedged_runs(db: Session) -> list[str]:
   late-promote scheduling failure — leaves its ChatRun ``running`` forever.
   This periodic sweep closes that gap between boots.
 
-  Reaping requires THREE signals together, because none is safe alone:
+  Reaping keys on the progress LEASE (`ChatRun.progress_expires_at`), the single
+  liveness authority, not on the old registry+broadcast conjunction:
 
-    - `registry.is_alive(chat_id) == False` — no live handle and no `_starting`
-      claim. NOT sufficient alone: the Claude runner unregisters its handle
-      BEFORE `_complete_turn` runs, so is_alive is also False during a
-      legitimate terminal cleanup — acting on is_alive alone would reap a turn
-      that is about to clear its own marker or promote a continuation.
-    - the chat's broadcast is gone or NOT running. `_complete_turn` calls
-      `bc.mark_completed()` on every exit, so a running broadcast means the turn
-      (including its terminal transition) is still in flight. This is what
-      excludes the is_alive-false terminal window above, AND a genuinely-long
-      LIVE turn (a big build, or a workflow held open by
-      `TaskOutput(block=True)`) whose broadcast is still running — we never reap
-      a live turn, only a definitively-finished one whose marker stuck.
-    - `ChatRun.started_at` older than the floor — belt-and-suspenders.
+    - Lease EXPIRED (non-NULL and in the past) → the turn stopped making
+      progress: crashed OR alive-but-hung. Reclaim regardless of whether a live
+      handle or a running broadcast still exists. A still-alive (hung) runner is
+      stopped first (graceful interrupt, then SIGKILL backstop) before recovery.
+      This is the fix for the old blind spot: a live handle or running broadcast
+      used to skip the chat forever, so a stalled model stream span endlessly.
+    - Lease VALID (non-NULL, in the future) → the runner is renewing it, so the
+      turn is making real progress — including a legitimately-long silent tool,
+      which renews with a bounded/suspended TTL. Never reaped.
+    - Lease NULL → a pre-migration/in-flight run or a provider without lease
+      renewal. Fall back to the legacy dead-process conjunction
+      (`registry.is_alive` False AND broadcast not running), so a live turn that
+      predates the lease is never reaped.
+    - `ChatRun.started_at` older than the floor — belt-and-suspenders; a valid
+      lease is always >= MODEL_IDLE_TTL past its last renewal anyway.
 
   Recovery is IDENTITY-KEYED on the wedged run's `ChatRun.id` (never
   tokenless): if a fresh turn raced in, the actor no-ops rather than touching
@@ -1249,7 +1250,11 @@ async def sweep_wedged_runs(db: Session) -> list[str]:
       # multi-megabyte transcript; hydrating it every minute while merely
       # checking registry/broadcast state repeats the same allocator problem
       # the idle-pending projection below avoids.
-      db.query(models.ChatRun.id, models.ChatRun.chat_id)
+      db.query(
+        models.ChatRun.id,
+        models.ChatRun.chat_id,
+        models.ChatRun.progress_expires_at,
+      )
       .join(models.Chat, models.Chat.id == models.ChatRun.chat_id)
       .filter(models.ChatRun.status == "running")
       .filter(models.Chat.deleted_at.is_(None))
@@ -1260,29 +1265,67 @@ async def sweep_wedged_runs(db: Session) -> list[str]:
   except Exception:
     log.exception("sweep_wedged_runs: query failed")
     return swept
+  now = datetime.now(UTC).replace(tzinfo=None)
   for run in stale:
     chat_id = run.chat_id
-    if registry.is_alive(chat_id):
-      continue
-    bc = get_broadcast(chat_id)
-    if bc is not None and bc.running:
-      # Still streaming, in terminal cleanup, or a legitimately-long live turn.
-      continue
+    if run.progress_expires_at is not None:
+      # The lease is the single liveness authority: a still-valid lease means
+      # the turn is making progress (even a legitimately-long silent tool), so
+      # leave it alone. An EXPIRED lease is a crashed OR hung turn — reclaim it
+      # regardless of whether a handle or broadcast still exists. That last part
+      # is the fix: the old conjunction skipped any chat with a live handle or a
+      # running broadcast, so an alive-but-hung turn was invisible forever.
+      if run.progress_expires_at >= now:
+        continue
+    else:
+      # NULL lease: a pre-migration/in-flight run, or a provider that does not
+      # renew leases yet. Fall back to the legacy dead-process conjunction so a
+      # live turn that simply predates the lease is never reaped.
+      if registry.is_alive(chat_id):
+        continue
+      bc = get_broadcast(chat_id)
+      if bc is not None and bc.running:
+        # Still streaming, in terminal cleanup, or a legitimately-long live turn.
+        continue
     try:
       async with asyncio.timeout(chat_queue.TERMINAL_LOCK_TIMEOUT_SECS):
         async with chat_queue.get_lock(chat_id):
-          if registry.is_alive(chat_id):
-            continue
           db.expire_all()
           physical = db.query(models.ChatRun).filter(
             models.ChatRun.id == run.id,
             models.ChatRun.chat_id == chat_id,
           ).first()
+          if physical is None or physical.status != "running":
+            # A fresh turn or a terminal transition raced in under the lock.
+            continue
+          lease = physical.progress_expires_at
+          if lease is not None and lease >= datetime.now(UTC).replace(
+            tzinfo=None
+          ):
+            # The runner renewed the lease between the pre-check and the lock:
+            # healthy progress, never reap.
+            continue
+          # Past here the lease is either expired (non-NULL, in the past) or
+          # NULL (legacy fallback).
+          expired = lease is not None
+          handles = registry.get_handles(chat_id)
+          if handles and not expired:
+            # Only an expired lease authorizes tearing down a live handle; the
+            # legacy NULL-lease path never reaps a running runner.
+            continue
+          if handles:
+            # Alive but hung: stop the process first (graceful interrupt, then
+            # SIGKILL backstop) so a zombie write can't clobber recovery.
+            for handle in handles:
+              await _stop_handle_with_escalation(
+                chat_id, handle, source="sweep_wedged_runs",
+              )
+              registry.unregister(chat_id, handle.kind)
           chat = db.query(models.Chat).filter(
             models.Chat.id == chat_id,
             models.Chat.deleted_at.is_(None),
           ).first()
-          if physical is not None and chat is not None:
+          if chat is not None:
             from app.delegations import safe_parent_wake_startup_writer_orphan
             from app.chat_waits import safe_startup_writer_orphan
             if (
@@ -3966,7 +4009,6 @@ async def _complete_turn(
     terminal_handoff = goal_terminal_handoff(
       db, chat_id, sink.run_token or "",
     )
-
   incorporate_activity_delivery = (
     ending_status == "completed" and bool(activity_delegation_ids)
   )
@@ -5015,14 +5057,7 @@ async def _run_chat_impl_with_db(
   settings = get_settings()
   raw_user_message = messages[-1].content
   user_message = raw_user_message
-  goal_objective = _goal_objective(raw_user_message)
   historical_goal_mode = _chat_has_goal_intent(messages)
-  goal_mode = historical_goal_mode
-  clear_dismissed_provider_goal = (
-    run_state.latest_provider_goal_is_dismissed(db, chat_id)
-    if chat_id else False
-  )
-  goal_continue = is_goal_continue(raw_user_message or "")
   question_checkpoint = None
   if settings.ensure_chat_note and chat_id:
     async def question_checkpoint() -> None:
@@ -5059,17 +5094,6 @@ async def _run_chat_impl_with_db(
   if run_token is None:
     run_token = alloc_run_token()
 
-  # The writer commits the exact ChatRun before provider launch.  Its Goal
-  # identity, not a historical `/goal` anywhere in the transcript, decides
-  # whether this physical turn may resume Codex's native Goal operation.
-  # Otherwise an unrelated question after a paused/stopped Goal can be steered
-  # into that old operation even though the platform correctly opened an
-  # ordinary run.
-  if chat_id:
-    goal_mode = _run_owns_active_goal(
-      db, chat_id=chat_id, run_token=run_token,
-    )
-
   app_context_block = ""
   app_context_env: dict[str, str] = {}
   chat_row = None
@@ -5105,29 +5129,9 @@ async def _run_chat_impl_with_db(
   else:
     # Delegation prompts are plain bounded tasks even if their text happens to
     # begin with an owner-only slash command.
-    goal_objective = None
-    clear_dismissed_provider_goal = False
-    goal_mode = False
     historical_goal_mode = False
-    goal_continue = False
     is_slash_command = False
 
-  # Chats created before native Codex goal handling have the /goal objective in
-  # their durable transcript but no provider-side ThreadGoal yet.  Either the
-  # automatic restart handoff or the visible one-tap Resume sends "continue";
-  # carrying the newest objective lets the runner adopt that old chat into the
-  # native goal store.  A native completed goal still wins authoritatively and
-  # is never restarted by this fallback.
-  fallback_goal_objective = (
-    _latest_goal_objective(messages)
-    if (
-      goal_continue
-      and historical_goal_mode
-      and goal_objective is None
-      and _goal_resume_requested(chat_row, raw_user_message)
-    )
-    else None
-  )
   # Durable run identity: the turn's StartTurn (initial send) or
   # PromotePending (continuation / stale-pending drain) writer-actor
   # command ALREADY inserted ChatRun(status="running") atomically with the
@@ -5324,6 +5328,12 @@ async def _run_chat_impl_with_db(
         user_message = f"{user_message}\n\n{waits_context}"
       else:
         user_message = f"{waits_context}\n\n{user_message}"
+
+  if chat_id and run_policy is None:
+    from app.goals import resume_context
+    goal_context = resume_context(db, run_token)
+    if goal_context:
+      user_message = f"{user_message}\n\n{goal_context}"
 
   # Per-turn time context (EVERY turn, not just the first) so the agent has a
   # clock + a sense of recency (how long since the user last wrote). Prepended
@@ -5734,11 +5744,7 @@ async def _run_chat_impl_with_db(
         system_prompt=system_prompt,
         resumed_context=resumed_context_fallback,
         should_abort=lambda: _run_generation_superseded(chat_id, run_gen),
-        goal_objective=goal_objective,
-        clear_dismissed_goal=clear_dismissed_provider_goal,
-        goal_mode=goal_mode,
-        goal_continue=goal_continue,
-        fallback_goal_objective=fallback_goal_objective,
+        retire_native_goal=historical_goal_mode,
         run_policy=run_policy,
         provider_id=provider_id,
         connector_plan=connector_turn_plan,

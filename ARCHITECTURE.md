@@ -1118,17 +1118,24 @@ resurrect itself when the boot sweep claims restart parks.
 
 ### Goal handoff ownership is exact and singular
 
-A `ChatRun.goal_id` identifies one logical Goal across its physical turns;
-the root run owns the visible plan. Finishing a physical turn is not itself
-Goal completion, but unfinished intent alone cannot authorize another provider
-invocation either. Every Goal-bound run checkpoints the root plan revision at
-provider admission. At clean settlement, a new exact durable owner gets the
-next move; otherwise automatic rollover requires the plan revision to have
-advanced beyond that checkpoint. A legacy/unknown checkpoint proves nothing.
-Unreadable plan JSON likewise blocks automatic rollover, while a validated
-full replacement under the existing revision CAS remains its repair path.
+`ChatGoal` owns the stable objective, revision-checked plan, checkpoint, next
+step, and explicit outcome. `ChatRun.goal_id` attaches each execution attempt
+to that record. A failed, interrupted, or cleanly ended attempt cannot complete
+or fail the obligation. Stop and dismissal are explicit; a deliberate Resume
+can reopen stopped work but stale deliveries cannot. Migration 0063 copies
+historical plans without deleting run snapshots and leaves uncertain work open.
 
-`goal_plans.goal_handoff_owner_kind` is the shared durable ownership query for
+The writer admits Goal identity and the attempt in the same transaction.
+Execution turns are not a budget, but unfinished intent alone cannot authorize
+another provider invocation. Every Goal-bound run checkpoints the `ChatGoal`
+revision at provider admission. At clean settlement, a new exact durable owner
+gets the next move; otherwise automatic rollover requires that revision to have
+advanced beyond the checkpoint. A legacy or unknown checkpoint proves nothing.
+Stop, completion, provider failures and usage-limit handling keep their existing
+boundaries. The legacy `automatic_remaining` column is inert historical schema,
+never read or updated by admission.
+
+`goal_plans.goal_handoff_owner_kind` is the shared exact-identity query for
 both Goal presentation and turn settlement. It recognizes an owner question,
 Wait (including a settled result awaiting delivery), or wake-enabled helper only when that actor belongs to the same
 `goal_id`; an unrelated question or background operation in the chat cannot
@@ -1139,6 +1146,23 @@ durable plan progress, the terminal path saves an owner reconciliation question
 instead of starting another turn. Automatic Goal controls keep their causal
 place in the existing pending FIFO, but the writer translates them into an
 ephemeral provider prompt and never appends them as owner transcript rows.
+
+A result retains ownership until delivery. Provider-native Goal execution is
+disabled: one Möbius attempt starts one ordinary provider turn. Legacy native
+controllers are retired before resuming their conversation, not recreated in
+parallel.
+
+Every Goal attempt receives a deterministic hierarchical view even with no
+provider history: original objective, checkpoint, current task, ancestor
+requirements, direct children, sibling summaries and relevant prerequisites.
+The deepest running work selects focus; concurrent branches select their common
+ancestor. Other descendants remain stored, not injected. `goal_plan.py context
+--task ID` navigates with the same read-only projection during a run; `show`
+retains full-plan access. No model summarizer, delta cache, extra focus record,
+or duplicate copy of the incoming message is involved. Agents continue working
+in their current run rather than ending turns to refresh context. Task additions and updates operate on the existing record. Completion
+is an explicit revision-checked operation with verification evidence and no
+unfinished tasks or outstanding handoff. A green plan alone is not completion.
 
 Workspace `AgentWorkClaim` rows are narrower: they serialize one shared action
 across otherwise independent chats. They do not replace a chat's Goal, a
@@ -1476,8 +1500,8 @@ is bounded by message count; restoring a saved anchor intentionally includes
 one predecessor and the authoritative tail to preserve exact reading position
 and live-reply reconciliation. Historical Goal cards find their final answer
 in the full transcript metadata, then hydrate plans and handoffs only for the
-requested half-open message window. The displayed plan and Goal completion
-use the same serialized plan. Changes checks only chat identity before its
+requested half-open message window. The displayed plan comes from the durable Goal record; its explicit outcome
+is independent of the physical attempt. Changes checks only chat identity before its
 writer barrier, then rechecks active-chat access and reads the transcript once
 after the barrier. `test_chat_entry_read_cost.py` protects these read budgets
 and ownership semantics without flaky wall-clock thresholds.

@@ -1,3 +1,5 @@
+import logging
+
 import pytest
 from pydantic import ValidationError
 
@@ -118,3 +120,37 @@ def test_managed_sign_in_rejects_invalid_instance_id():
 
 def test_unprivileged_settings_do_not_expose_the_managed_credential():
   assert "mobius_sso_client_secret" not in Settings.model_fields
+
+
+def test_unsafe_public_origin_warns_only_about_new_account_linking(caplog):
+  secret_origin = "https://name:password@private-lan:8000/?token=super-secret"
+  with caplog.at_level(logging.WARNING, logger="mobius.config"):
+    config = settings(frontend_origin=secret_origin)
+
+  assert config.mobius_account_client_origin == ""
+  warning = next(
+    record.getMessage() for record in caplog.records
+    if "account linking is unavailable" in record.getMessage()
+  )
+  assert "Existing local sign-in and linked accounts are unaffected" in warning
+  assert "MOBIUS_ACCOUNT_CLIENT_ORIGIN" in warning
+  assert "DOMAIN/FRONTEND_ORIGIN" in warning
+  assert "Account & Social features are DISABLED" not in warning
+  assert secret_origin not in warning
+  assert "password" not in warning
+  assert "super-secret" not in warning
+
+
+@pytest.mark.parametrize(
+  "frontend_origin",
+  ["http://localhost:5173", "https://my.mobius.example"],
+)
+def test_safe_account_client_origin_does_not_warn(caplog, frontend_origin):
+  with caplog.at_level(logging.WARNING, logger="mobius.config"):
+    config = settings(frontend_origin=frontend_origin)
+
+  assert config.mobius_account_client_origin
+  assert not any(
+    "account linking is unavailable" in record.getMessage()
+    for record in caplog.records
+  )

@@ -94,6 +94,7 @@ from app.claude_events import (
   is_root_conversation_message,
 )
 from app.claude_sdk_contract import transport_process_pid
+from app.progress_lease import ProgressLease
 from app.process_groups import (
   isolated_process_group_id,
   lower_process_group_priority,
@@ -1084,6 +1085,9 @@ async def run_claude_sdk_turn(
   """
   current_session_id = session_id
   cost_usd: float | None = None
+  # Progress lease: renewed as this turn emits SDK messages so a stalled model
+  # stream (alive process, no progress) lapses and recovery can reclaim it.
+  lease = ProgressLease(chat_id)
   base_env = dict(base_env)
   base_env["MOBIUS_COORDINATION_ENABLED"] = (
     "1" if coordination_enabled else "0"
@@ -1484,8 +1488,14 @@ async def run_claude_sdk_turn(
       # ResultMessage aggregate. Keep the latest call across retries, steers,
       # and native background follow-ups so context occupancy stays exact.
       usage_state: dict[str, Any] = {}
+      # Arm the model-idle lease before the first token; a first-token stall
+      # then lapses and is reclaimed like any other stall.
+      lease.start()
       while True:
         async for sdk_msg in client.receive_response():
+          lease.note_message(
+            sdk_msg, is_root=is_root_conversation_message(sdk_msg),
+          )
           # Persist the session id ONLY from ROOT conversation messages.
           # SystemMessage and its subclasses — notably HookEventMessage,
           # which the codex plugin's SessionStart hook emits on every
