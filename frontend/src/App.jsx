@@ -304,7 +304,15 @@ function AppRoot() {
       // login screen instead — LoginForm shows a single "Sign in with
       // mobius.you" button (the password form is never shown in mobius mode),
       // and the owner taps it to start the 303 to mobius.you.
-      setStatus(setupStatusQuery.data.configured ? 'login' : 'setup')
+      // Managed owner binding never falls back to the local password wizard.
+      // The broker can be temporarily unable to materialize the owner and
+      // report configured:false; the explicit managed sign-in remains the
+      // only valid recovery path in that mode.
+      setStatus(
+        setupStatusQuery.data.configured || setupStatusQuery.data.auth_mode === 'mobius'
+          ? 'login'
+          : 'setup',
+      )
       removeSplash()
     } else if (setupStatusQuery.isError) {
       setStatus('setup-error')

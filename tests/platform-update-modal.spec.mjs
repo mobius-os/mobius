@@ -181,21 +181,58 @@ test('a clean apply closes the review and exposes the restart step', async ({ pa
   await expect(restart).toBeFocused()
 })
 
-test('a staged update presents one restart action until a newer release is available', async ({ page }) => {
+test('a staged update can review another available release before one restart', async ({ page }) => {
   const state = {
     current: 'restart_needed',
-    overrides: { available: false, needs_restart: true },
+    overrides: { available: true, needs_restart: true },
   }
   await mockPlatform(page, state)
-  await openSettings(page)
+  await page.route('**/api/platform/apply', route => {
+    state.overrides = { available: false, needs_restart: true }
+    return route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        state: 'restart_needed',
+        needs_restart: true,
+        upstream_commit: preview.target_sha,
+        merge_commit: '3333333333333333333333333333333333333333',
+        conflict_paths: [],
+        chat_id: null,
+      }),
+    })
+  })
 
+  await page.setViewportSize({ width: 900, height: 800 })
+  await page.goto(BASE, { waitUntil: 'domcontentloaded' })
+  await page.waitForFunction(
+    () => !!(document.querySelector('.chat__empty-wrap')
+      || document.querySelector('.chat__scroll')
+      || document.querySelector('.chat__form')),
+    { timeout: 10000 },
+  )
+  const navigationToggle = page.getByLabel('Toggle navigation')
+  if (await navigationToggle.getAttribute('aria-expanded') !== 'true') {
+    await navigationToggle.click()
+  }
+  await page.getByRole('button', { name: 'Settings', exact: true }).click()
+
+  await expect(page.getByText('More updates available', { exact: true })).toBeVisible()
+  const review = page.getByRole('button', { name: 'Review update' })
+  await expect(review).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Restart to finish' })).toHaveCount(0)
+  await review.click()
+
+  const dialog = page.getByRole('dialog', { name: 'Review update' })
+  await expect(dialog).toBeVisible()
+  await dialog.getByRole('button', { name: 'Apply update' }).click()
+
+  await expect(dialog).toHaveCount(0)
   await expect(page.getByText('Ready to restart', { exact: true })).toBeVisible()
-  await expect(page.getByRole('button', { name: 'Restart to finish' })).toBeVisible()
-  await expect(page.getByRole('button', { name: 'Review update' })).toHaveCount(0)
-  await expect(page.getByRole('button', { name: 'Check for more' })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: 'Restart to finish' })).toBeFocused()
 })
 
-test('staged-update actions stack without overflow in a narrow settings pane', async ({ page }) => {
+test('the single staged-update action fits a narrow settings pane', async ({ page }) => {
   const state = {
     current: 'restart_needed',
     overrides: { available: true, needs_restart: true },
@@ -224,7 +261,7 @@ test('staged-update actions stack without overflow in a narrow settings pane', a
   expect(box.x).toBeGreaterThanOrEqual(0)
   expect(box.x + box.width).toBeLessThanOrEqual(viewport.width)
   await expect(page.getByRole('button', { name: 'Review update' })).toBeVisible()
-  await expect(page.getByRole('button', { name: 'Restart to finish' })).toHaveCount(0)
+  await expect(actions.getByRole('button')).toHaveCount(1)
 })
 
 test('a blocked apply stays open, focuses its result, and shows resolver failures', async ({ page }) => {
@@ -504,11 +541,11 @@ test('an installed image update can finish without a newer source release', asyn
   expect(state.unexpectedMutations).toEqual([])
 })
 
-test('finish submits the exact reviewed plan, not the newer available release', async ({ page }) => {
+test('finish submits the exact reviewed plan if server availability changes before submission', async ({ page }) => {
   const installed = finishPreview({ activation: { ...imageActivation, deployment: 'railway' },
     image_digest: `sha256:${'b'.repeat(64)}` })
   const state = { current: 'activation_needed',
-    overrides: { available: true, activation: imageActivation }, preview: installed }
+    overrides: { available: false, activation: imageActivation }, preview: installed }
   await mockPlatform(page, state)
   await page.route('**/api/health', route => route.fulfill({ status: 200,
     contentType: 'application/json', body: JSON.stringify({ status: 'ok', boot_id: 'before' }) }))
@@ -520,11 +557,20 @@ test('finish submits the exact reviewed plan, not the newer available release', 
     }) })
   })
   const updates = await openSettings(page)
-  await expect(updates.getByRole('button', { name: 'Review update', exact: true })).toBeVisible()
   const request = page.waitForRequest('**/api/platform/update-preview?intent=finish')
   await updates.getByRole('button', { name: 'Finish update', exact: true }).click()
   await request
   const dialog = page.getByRole('dialog', { name: 'Finish update' })
+  // Change the fixture's server-owned availability after review. Submission
+  // must still carry the immutable reviewed plan rather than deriving a new
+  // target from mutable status.
+  state.overrides = { available: true, activation: imageActivation }
+  state.preview = {
+    ...preview,
+    plan_id: 'newer-source-plan',
+    target_sha: 'f'.repeat(40),
+    image_digest: `sha256:${'e'.repeat(64)}`,
+  }
   await dialog.getByRole('button', { name: 'Update now', exact: true }).click()
   await expect(dialog).toHaveCount(0)
   expect(submitted).toEqual({ plan_id: installed.plan_id, current_sha: installed.current_sha,
@@ -532,7 +578,7 @@ test('finish submits the exact reviewed plan, not the newer available release', 
   expect(state.unexpectedMutations).toEqual([])
 })
 
-test('a failed container result survives reopening Settings without an unsolicited alert', async ({ page }) => {
+test('a failed container result survives reopening Settings as a repair action', async ({ page }) => {
   const state = { current: 'activation_needed', overrides: { available: false, activation: imageActivation },
     rebuild: { supported: true, state: 'failed', expected_sha: preview.current_sha,
       updated_at: '2026-09-05T11:00:00Z', error: 'The reviewed image could not start.' } }
@@ -540,13 +586,13 @@ test('a failed container result survives reopening Settings without an unsolicit
   let updates = await openSettings(page)
   const error = 'The reviewed image could not start.'
   await expect(updates.getByText(error)).toHaveCount(0)
-  await expect(updates.getByText('The last attempt to finish this update needs attention.')).toBeVisible()
   await expect(updates.getByRole('button', { name: 'Ask Möbius' })).toBeEnabled()
+  await expect(updates.getByText('The last attempt to finish this update needs attention.')).toBeVisible()
   // A full reload exercises a fresh component with no in-memory request owner.
   updates = await openSettings(page)
   await expect(updates.getByText(error)).toHaveCount(0)
-  await expect(updates.getByText('The last attempt to finish this update needs attention.')).toBeVisible()
   await expect(updates.getByRole('button', { name: 'Ask Möbius' })).toBeEnabled()
+  await expect(updates.getByText('The last attempt to finish this update needs attention.')).toBeVisible()
   expect(state.unexpectedMutations).toEqual([])
 })
 

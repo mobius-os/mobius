@@ -63,13 +63,6 @@ export default function UpdateReviewModal({
     // HTTP success alone never closes this review.
     else if (result?.ok) onClose()
   }
-  // Domain failures can replace Apply with the repair action without setting a
-  // result state (for example, a malformed success payload). Move focus to the
-  // newly owning action in either transition.
-  useEffect(() => {
-    if (resultState || applyError) resultActionRef.current?.focus({ preventScroll: true })
-  }, [resultState, applyError, applyErrorCode])
-
   const summary = summarizePreview(preview)
   const target = shortSha(preview?.target_sha)
   const commits = preview?.commits || []
@@ -90,6 +83,11 @@ export default function UpdateReviewModal({
   const repairReason = (resultState === 'conflict' || nothingToApply) ? null : platformUpdateRepairReason({
     preview, platform: { ...platform, state: resultState || platform?.state }, error: applyError, errorCode: applyErrorCode,
   })
+  useEffect(() => {
+    if (!busy && !loading && (resultState || repairReason || nothingToApply)) {
+      resultActionRef.current?.focus({ preventScroll: true })
+    }
+  }, [busy, loading, nothingToApply, repairReason, resultState])
 
   return (
     <div className="urm__overlay" role="presentation" onClick={requestClose}>

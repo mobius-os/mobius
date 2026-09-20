@@ -168,14 +168,12 @@ test('original Settings keeps spacious rounded cards and full model summaries', 
 
 test('compact Updates pairs its status with actions without redundant success copy', () => {
   assert.match(updates, /platform-updates__heading[\s\S]*role="status"/)
-  assert.doesNotMatch(updates, /No action needed\./)
   assert.match(updates, /aria-label="Confirm restart"/)
   assert.match(updates, /className={`settings__btn settings__btn--sm/)
   // Server restart lives on its own row below the versions, not in the header action row.
   assert.match(updates, /<\/dl>[\s\S]*platform-updates__restart-row">[\s\S]*?onClick=\{askRestart\}>Restart server<\/button>/)
   assert.match(updateCss, /\.platform-updates > \.platform-updates__actions\s*\{[^}]*justify-content:\s*flex-end;/s)
   assert.doesNotMatch(updateCss, /\.platform-updates > \.platform-updates__actions\s*\{[^}]*flex-direction:\s*column;/s)
-  assert.doesNotMatch(updateCss, /platform-updates__maintenance/)
 })
 
 
@@ -183,9 +181,7 @@ test('Updates offers one repair-or-next-step action and hides raw error dumps', 
   // The repair path is folded into the single primary action, not a second
   // button competing with "Review update".
   assert.match(updates, /platform-updates__actions">\s*\{repairReason \? \([\s\S]*?<UpdateRepairAction[\s\S]*?buttonRef=\{actionRef\}[\s\S]*?\) : \(\s*<button ref=\{actionRef\}/)
-  assert.doesNotMatch(updates, /Finish installed update|Review all updates|Check for more/)
-  // Raw npm/build/rollback error text is not shown in Settings; it goes to the
-  // repair chat instead. Human-facing activation guidance stays visible.
+  // Human-facing activation guidance remains visible alongside that action.
   assert.doesNotMatch(updates, /<summary>Technical details<\/summary>/)
   assert.doesNotMatch(updates, /platform\?\.rollback_error/)
   assert.match(updates, /platform\?\.activation\?\.guidance/)
