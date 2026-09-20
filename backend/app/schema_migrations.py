@@ -4881,6 +4881,81 @@ def _add_chat_run_progress_lease(eng) -> None:
       ))
 
 
+def _durable_goal_records(eng) -> None:
+  """Copy historical intent once. Never infer failure from a failed attempt.
+
+  Idempotent after a crash before the ledger commit. Old run snapshots remain
+  history only; all new plan/outcome writes target chat_goals.
+  """
+  from sqlalchemy import JSON, bindparam, inspect, text
+
+  if not {"chats", "chat_runs"}.issubset(inspect(eng).get_table_names()):
+    return
+  with eng.begin() as conn:
+    conn.execute(text("""
+      CREATE TABLE IF NOT EXISTS chat_goals (
+        id VARCHAR(64) NOT NULL PRIMARY KEY,
+        chat_id VARCHAR(36) NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+        objective TEXT NOT NULL,
+        status VARCHAR(16) NOT NULL DEFAULT 'open',
+        plan_json JSON,
+        revision INTEGER NOT NULL DEFAULT 0,
+        checkpoint TEXT,
+        next_action TEXT,
+        result TEXT,
+        created_at TIMESTAMP NOT NULL,
+        completed_at TIMESTAMP
+      )
+    """))
+    conn.execute(text("CREATE INDEX IF NOT EXISTS ix_chat_goals_chat_id ON chat_goals (chat_id)"))
+    existing = set(conn.execute(text("SELECT id FROM chat_goals")).scalars())
+    dismissed = dict(conn.execute(text("SELECT id, dismissed_goal_id FROM chats")).all())
+    grouped = {}
+    for run in conn.execute(text("""
+      SELECT id, chat_id, goal_id, goal_objective, status, started_at, ended_at,
+             goal_plan_json, goal_plan_revision
+      FROM chat_runs WHERE goal_id IS NOT NULL AND goal_objective IS NOT NULL
+      ORDER BY started_at, id
+    """)).mappings():
+      run = dict(run)
+      if isinstance(run["goal_plan_json"], str):
+        run["goal_plan_json"] = json.loads(run["goal_plan_json"])
+      grouped.setdefault(run["goal_id"], []).append(run)
+    insert = text("""
+      INSERT INTO chat_goals
+        (id, chat_id, objective, status, plan_json, revision,
+         created_at, completed_at, result)
+      VALUES (:id, :chat_id, :objective, :status, :plan_json, :revision,
+              :created_at, :completed_at, :result)
+    """).bindparams(bindparam("plan_json", type_=JSON))
+    for goal_id, runs in grouped.items():
+      if goal_id in existing:
+        continue
+      first, latest = runs[0], runs[-1]
+      owner = next((r for r in runs if r["goal_plan_json"] is not None), first)
+      plan = owner["goal_plan_json"]
+      if isinstance(plan, str):
+        plan = json.loads(plan)
+      tasks = plan.get("tasks") if isinstance(plan, dict) else None
+      # Preserve old positive completion only when the saved plan proves all
+      # obligations settled. Unplanned history stays conservatively open.
+      complete = bool(tasks) and all(
+        t.get("status") in {"completed", "cancelled"} for t in tasks
+      ) and latest["status"] == "completed"
+      status = "completed" if complete else "open"
+      if dismissed.get(first["chat_id"]) == goal_id and not complete:
+        status = "dismissed"
+      elif latest["status"] == "stopped" and not complete:
+        status = "stopped"
+      conn.execute(insert, {
+        "id": goal_id, "chat_id": first["chat_id"], "objective": first["goal_objective"],
+        "status": status, "plan_json": plan, "revision": owner["goal_plan_revision"] or 0,
+        "created_at": first["started_at"] or datetime(1970, 1, 1),
+        "completed_at": latest["ended_at"] if complete else None,
+        "result": "Migrated completed plan" if complete else None,
+      })
+
+
 def _add_chat_run_continuation_control(eng) -> None:
   """Persist recovery control on ChatRun instead of synthetic chat messages."""
   from sqlalchemy import inspect as sa_inspect, text
@@ -4965,6 +5040,7 @@ _SCHEMA_MIGRATIONS = (
   ("0060_drop_platform_restart_executions", _drop_platform_restart_executions),
   ("0061_goal_plan_admission_revision", _add_goal_plan_admission_revision),
   ("0062_chat_run_progress_lease", _add_chat_run_progress_lease),
+  ("0063_durable_goal_records", _durable_goal_records),
   ("0063_chat_run_continuation_control", _add_chat_run_continuation_control),
 )
 

@@ -199,3 +199,45 @@ def test_legacy_resume_without_cid_gets_a_fresh_control_identity(
       assert [row["cid"] for row in db.get(models.Chat, chat.id).messages] == ["owner"]
   finally:
     chat_mod.discard_starting(chat.id)
+
+
+@pytest.mark.parametrize("goal_status", ["open", "stopped"])
+def test_provider_only_resume_preserves_durable_goal_without_transcript_control(
+  client, chat, goal_status,
+):
+  from app import models
+  from app.chat_writer import FinishRun, StartTurn, get_writer
+  from app.database import SessionLocal
+  from app.goals import resume_context
+
+  writer = get_writer()
+  writer.submit(StartTurn(
+    chat_id=chat.id, run_token="goal-original",
+    user_msg={"role": "user", "content": "/goal Verify recovery", "cid": "goal-owner", "ts": 1},
+  )).result(timeout=5)
+  writer.submit(FinishRun(
+    chat_id=chat.id, run_token="goal-original", terminal_status="interrupted",
+  )).result(timeout=5)
+  with SessionLocal() as db:
+    original = db.get(models.ChatRun, "goal-original")
+    goal_id = original.goal_id
+    goal = db.get(models.ChatGoal, goal_id)
+    goal.status = goal_status
+    before = list(db.get(models.Chat, chat.id).messages)
+    db.commit()
+
+  result = writer.submit(StartTurn(
+    chat_id=chat.id, run_token="goal-resumed", resume_run_id="goal-original",
+    user_msg={"role": "user", "content": "", "cid": "goal-resume-control",
+              "kind": "continuation", "continuation_reason": "manual"},
+  )).result(timeout=5)
+
+  with SessionLocal() as db:
+    run = db.get(models.ChatRun, "goal-resumed")
+    assert run.goal_id == goal_id
+    assert run.continuation_json["goal_id"] == goal_id
+    assert db.get(models.ChatGoal, goal_id).status == "open"
+    assert db.query(models.ChatGoal).filter_by(chat_id=chat.id).count() == 1
+    assert db.get(models.Chat, chat.id).messages == before
+    assert "Verify recovery" in resume_context(db, run.id)
+  assert result["history"][-1].content

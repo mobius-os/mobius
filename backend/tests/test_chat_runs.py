@@ -9,6 +9,8 @@ starts one bound to the test DB) and the real `reconcile_interrupted_chats`, so
 they cover the wired lifecycle + reconciliation maintenance, not a mock.
 """
 
+from tests.goal_fixtures import goal_run as make_goal_run
+
 import asyncio
 from concurrent.futures import Future
 from datetime import UTC, datetime, timedelta
@@ -46,7 +48,7 @@ def _seed_run(run_id, chat_id, status="running", root_run_id=None):
 
   db = SessionLocal()
   try:
-    db.add(models.ChatRun(
+    db.add(make_goal_run(db,
       id=run_id, chat_id=chat_id, status=status, provider="claude",
       started_at=datetime.now(UTC), root_run_id=root_run_id,
     ))
@@ -340,7 +342,7 @@ def test_natural_owner_follow_up_reactivates_the_unfinished_goal(provider):
   with SessionLocal() as db:
     chat = db.get(models.Chat, chat_id)
     chat.provider = provider
-    db.add(models.ChatRun(
+    db.add(make_goal_run(db,
       id=f"rt-paused-{provider}", root_run_id=f"rt-paused-{provider}",
       chat_id=chat_id, status="interrupted", provider=provider,
       goal_objective="Finish the review", goal_id=f"goal-{provider}",
@@ -398,7 +400,7 @@ def test_project_agent_completion_advances_recents_and_reconnect_cursor():
       summary="Editing index.html", updated_at=datetime.now(UTC),
       expires_at=datetime.now(UTC) + timedelta(minutes=30),
     ))
-    db.add(models.ChatRun(
+    db.add(make_goal_run(db,
       id="project-run", chat_id="project-agent", status="running",
       provider="claude", started_at=datetime.now(UTC),
     ))

@@ -9,6 +9,7 @@ from sqlalchemy import event
 from sqlalchemy.orm import load_only
 
 from app import goal_plans, models
+from tests.goal_fixtures import persist_goal_fixture
 from app.chat_writer import ReplaceTranscript, get_writer
 from app.database import SessionLocal, engine
 
@@ -58,6 +59,9 @@ def _run(
     }]}
     run.goal_plan_revision = 1
   db.add(run)
+  persist_goal_fixture(db, run, status=(
+    "completed" if status == "completed" and task_status in (None, "completed", "cancelled") else "open"
+  ))
   db.commit()
   return run
 
@@ -146,7 +150,7 @@ def test_resumed_goal_only_hydrates_plan_at_final_anchor(
 
 
 @pytest.mark.parametrize("status,task_status,expected", [
-  ("failed", "pending", "failed"), ("completed", "pending", None),
+  ("failed", "pending", None), ("completed", "pending", None),
   ("completed", "completed", "completed"),
 ])
 def test_history_preserves_failed_and_unfinished_goal_semantics(
@@ -255,6 +259,7 @@ def test_cold_runtime_keeps_settled_continuation_question_owner(
   }])
   _run(db, chat_id)
   db.get(models.Chat, chat_id).pending_question_id = "card"
+  db.get(models.ChatGoal, "goal").status = "open"
   db.commit()
   with _selects() as statements:
     response = client.get(f"/api/chats/{chat_id}/runtime", headers=auth)
