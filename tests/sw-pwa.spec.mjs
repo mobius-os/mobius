@@ -17,7 +17,7 @@
  * Run: scripts/playwright-local.sh --allow-local-e2e tests/sw-pwa.spec.mjs
  */
 import { test, expect } from '@playwright/test'
-import { applyApp } from './app-source.mjs'
+import { applyApp, applySource } from './app-source.mjs'
 // Import the cache names rather than repeating them. They are deliberately
 // bumped whenever a cached response's policy changes, so a literal here turns
 // every future bump into an unrelated e2e failure 5 minutes into the run —
@@ -376,7 +376,7 @@ test.describe('Service worker — vite-plugin-pwa contract', () => {
     const token = await ownerToken(page)
     const headers = { Authorization: `Bearer ${token}` }
     const stamp = Date.now()
-    const { app } = await applyApp(request, token, {
+    const { app, sourceDir } = await applyApp(request, token, {
       slug: `opaque-static-sw-${stamp}`,
       name: `Opaque static SW ${stamp}`,
       description: 'Disposable controlled-service-worker fixture.',
@@ -400,6 +400,17 @@ test.describe('Service worker — vite-plugin-pwa contract', () => {
         let api=-1;try{api=(await fetch('/api/apps/',token?{headers:{Authorization:'Bearer '+token}}:{})).status}catch(_e){}
         parent.postMessage({type:'opaque-svg-proof',origin:self.origin,token,api},'*')})()
       ]]></script><rect width="20" height="20" fill="red"/></svg>`)).ok()).toBeTruthy()
+
+      // The static files above only land in the app's editable source tree
+      // (fs_write is a plain filesystem write, unaware of app runtimes). The
+      // /app-assets and /app-embeds routes serve only the frozen, explicitly
+      // Applied runtime snapshot (applied_app_runtime.runtime_root) — "the
+      // editable source tree is never a runtime fallback" is a deliberate
+      // security boundary, not an oversight. Re-apply so this revision
+      // (including the new static/ files) is committed and published before
+      // anything tries to fetch it.
+      const reapplied = await applySource(request, token, sourceDir)
+      expect(reapplied.response.ok()).toBeTruthy()
 
       await page.evaluate(async () => {
         await navigator.serviceWorker.register('/sw.js')
