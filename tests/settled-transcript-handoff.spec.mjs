@@ -26,43 +26,42 @@ function seedHistory() {
   })
 }
 
-async function installStreamMock(page, firstItems) {
-  await page.addInitScript(({ initialItems }) => {
+async function installStreamMock(page, firstItems, chatId) {
+  await page.addInitScript(({ initialItems, chatId }) => {
     const realFetch = window.fetch.bind(window)
     let streamIndex = 0
     window.fetch = (input, init) => {
       const url = String(input?.url || input)
-      if (!/\/api\/chats\/[^/]+\/stream$/.test(url)) {
+      if (new URL(url, location.href).pathname !== `/api/chats/${chatId}/stream`) {
         return realFetch(input, init)
       }
       const current = streamIndex++
-      const items = current === 0
-        ? initialItems
-        : [{ type: 'thinking', content: 'Checking the follow-up.' }]
-      const delay = current === 0 ? 0 : 300
-      const doneAfter = current === 0 ? 420 : 1800
+      // The next send reaches the exact-chat terminal-204 route below. A
+      // normal `started` acknowledgement or SSE `done` does not itself fetch
+      // detail, so neither can promise the authoritative handoff under test.
+      if (current > 0) return realFetch(input, init)
       const encoder = new TextEncoder()
       return Promise.resolve(new Response(new ReadableStream({
         start(controller) {
           setTimeout(() => controller.enqueue(encoder.encode(
-            `data: ${JSON.stringify({ type: 'stream_snapshot', items })}\n\n`,
-          )), delay + 5)
+            `data: ${JSON.stringify({ type: 'stream_snapshot', items: initialItems })}\n\n`,
+          )), 5)
           setTimeout(() => controller.enqueue(encoder.encode(
             `data: ${JSON.stringify({ type: 'catch_up_done' })}\n\n`,
-          )), delay + 20)
+          )), 20)
           setTimeout(() => {
             controller.enqueue(encoder.encode(
               `data: ${JSON.stringify({ type: 'done' })}\n\n`,
             ))
             controller.close()
-          }, delay + doneAfter)
+          }, 420)
         },
       }), {
         status: 200,
         headers: { 'Content-Type': 'text/event-stream' },
       }))
     }
-  }, { initialItems: firstItems })
+  }, { initialItems: firstItems, chatId })
 }
 
 async function mountScenario(page) {
@@ -105,8 +104,20 @@ async function mountScenario(page) {
   let running = false
   let runtimeRevision = 0
   let sendCount = 0
+  let runId = null
+  let terminalStreams = 0
 
-  await installStreamMock(page, liveItems)
+  await installStreamMock(page, liveItems, chat.id)
+
+  await page.route(new RegExp(`/api/chats/${chat.id}/stream$`), async route => {
+    // The first stream is held by the page-local Response above. This exact
+    // second stream owns the terminal verdict after the registration window.
+    terminalStreams += 1
+    await new Promise(resolve => setTimeout(resolve, 1700))
+    running = false
+    runtimeRevision += 1
+    await route.fulfill({ status: 204, body: '' })
+  })
 
   await page.route(new RegExp(`${mediaPath}$`), route => route.fulfill({
     status: 200,
@@ -120,7 +131,7 @@ async function mountScenario(page) {
       body: JSON.stringify({
         runtime_revision: runtimeRevision,
         running,
-        run_id: 'settled-handoff-run',
+        run_id: runId,
         run_status: running ? 'running' : 'completed',
         active_goal_objective: null,
         pending_messages: [],
@@ -141,7 +152,7 @@ async function mountScenario(page) {
         offset: 0,
         runtime_revision: runtimeRevision,
         running,
-        run_id: 'settled-handoff-run',
+        run_id: runId,
         run_status: running ? 'running' : 'completed',
         pending_messages: [],
         pending_question_id: null,
@@ -154,6 +165,7 @@ async function mountScenario(page) {
   await page.route(new RegExp(`/api/chats/${chat.id}/messages$`), async route => {
     const request = route.request().postDataJSON()
     sendCount += 1
+    runId = `settled-handoff-run-${sendCount}`
     running = true
     runtimeRevision += 1
     const message = {
@@ -175,7 +187,7 @@ async function mountScenario(page) {
     await route.fulfill({
       status: 202,
       contentType: 'application/json',
-      body: JSON.stringify({ status: 'started', message, run_id: 'settled-handoff-run' }),
+      body: JSON.stringify({ status: 'started', message, run_id: runId }),
     })
   })
 
@@ -192,6 +204,7 @@ async function mountScenario(page) {
     surface,
     scroll,
     settledAssistant,
+    terminalStreamCount: () => terminalStreams,
   }
 }
 
@@ -264,8 +277,9 @@ test('an authoritative settled-answer handoff cannot move a pinned send', async 
   await expect(scenario.surface.getByText('Verification result', { exact: false }))
     .toBeVisible({ timeout: 10000 })
   // Finish the first stream while its detailed live row is still mounted. The
-  // server already holds the compact settled projection, but the next send's
-  // authoritative read is what hands the rendered row over to that source.
+  // server already holds the compact settled projection. The next stream's
+  // terminal-204 read will hand the rendered row over to that source while
+  // the newly sent row is pinned; a plain started acknowledgement cannot.
   await expect(scenario.surface.locator('.chat__stop')).toHaveCount(0, {
     timeout: 10000,
   })
@@ -285,6 +299,7 @@ test('an authoritative settled-answer handoff cannot move a pinned send', async 
     'Second message',
     scenario.settledAssistant.ts,
   )
+  expect(scenario.terminalStreamCount()).toBe(1)
   expect(tops.length).toBeGreaterThan(0)
   expect(Math.max(...tops)).toBeLessThanOrEqual(12)
   expect(Math.min(...tops)).toBeGreaterThanOrEqual(-2)
