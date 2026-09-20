@@ -597,27 +597,90 @@
    guidance. The old drawer banner stays retired. Sub-app installation
    lives in the standalone card surfaced from drawer ⋮ on a mini-app. */
 
-/* One compact indicator covers reconnect/restart/offline state. Exact copy is
-   still announced to assistive technology without competing with the header. */
+/* One compact indicator covers reconnect/restart/offline state. Shape keeps
+   the states distinct without color or motion, while hover/focus exposes the
+   exact label without permanently competing with the header. */
 .shell__connection-status {
+  position: relative;
   align-self: center;
   display: grid;
   place-items: center;
   width: 28px;
   height: 28px;
   flex: 0 0 28px;
+  border-radius: 50%;
+  outline: none;
+  pointer-events: auto;
 }
-.shell__connection-status::before {
-  content: "";
+.shell__connection-status-icon {
+  position: relative;
+  display: block;
   width: 8px;
   height: 8px;
   background: var(--accent, #8b6cf7);
   border-radius: 50%;
   box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent, #8b6cf7) 14%, transparent);
+}
+.shell__connection-status[data-state="reconnecting"] .shell__connection-status-icon {
   animation: shell-connection-pulse 1.4s ease-in-out infinite;
+}
+.shell__connection-status[data-state="restarting"] .shell__connection-status-icon {
+  width: 11px;
+  height: 11px;
+  border: 2px solid var(--accent, #8b6cf7);
+  border-right-color: transparent;
+  background: transparent;
+  box-shadow: none;
+  animation: shell-connection-spin 900ms linear infinite;
+}
+.shell__connection-status[data-state="offline"] .shell__connection-status-icon::after {
+  content: "";
+  position: absolute;
+  left: 3px;
+  top: -3px;
+  width: 2px;
+  height: 14px;
+  border-radius: 1px;
+  background: var(--bg);
+  box-shadow: 0 0 0 1px var(--accent, #8b6cf7);
+  rotate: 45deg;
+}
+.shell__connection-status-label {
+  position: absolute;
+  z-index: 12;
+  top: calc(100% + 5px);
+  right: 0;
+  width: max-content;
+  max-width: min(240px, 70vw);
+  padding: 4px 7px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  background: var(--bg);
+  font-size: 12px;
+  line-height: 1.35;
+  white-space: nowrap;
+  opacity: 0;
+  visibility: hidden;
+  translate: 0 -2px;
+  transition: opacity 120ms ease, translate 120ms ease, visibility 0s linear 120ms;
+  pointer-events: none;
+}
+.shell__connection-status:hover .shell__connection-status-label,
+.shell__connection-status:focus .shell__connection-status-label {
+  opacity: 1;
+  visibility: visible;
+  translate: 0 0;
+  transition-delay: 0s;
+}
+.shell__connection-status:focus-visible {
+  box-shadow: 0 0 0 2px var(--bg), 0 0 0 4px var(--focus-ring, var(--accent));
 }
 @keyframes shell-connection-pulse {
   50% { opacity: 0.48; scale: 0.78; }
+}
+@keyframes shell-connection-spin {
+  to { rotate: 360deg; }
 }
 /* The ONE Settings wrapper is a solid surface in BOTH geometries: full-bleed as
    the takeover overlay (single mode / flag off) and paned as a builder tab. The
@@ -803,7 +866,8 @@
 
 @media (prefers-reduced-motion: reduce) {
   .shell__settings-loading-dot { animation: none; }
-  .shell__connection-status::before { animation: none; }
+  .shell__connection-status-icon { animation: none !important; }
+  .shell__connection-status-label { transition: none; }
   /* The mark flip + tint switch INSTANTLY; the completion spring/snap is skipped
      (the JS still fires the haptics — motion is dropped, feedback is not). The
      static shared halo needs no special reduced-motion branch. The hold

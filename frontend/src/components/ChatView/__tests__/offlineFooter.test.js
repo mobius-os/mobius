@@ -70,17 +70,22 @@ test('only transient nudges float above the measured rail → connection → que
 })
 
 test('the shell is the one persistent connection owner while send failures stay contextual', () => {
-  assert.match(shell, /restartPending \? 'Restarting…'/)
-  assert.match(shell, /ReachabilityPhase\.OFFLINE \? 'Offline'/)
-  assert.match(shell, /showReconnectNotice \? 'Reconnecting…'/)
+  assert.match(shell, /connectionStatusState = restartPending \? 'restarting'/)
+  assert.match(shell, /connectionStatusState === 'restarting' \? 'Restarting…'/)
+  assert.match(shell, /ReachabilityPhase\.OFFLINE \? 'offline'/)
+  assert.match(shell, /showReconnectNotice \? 'reconnecting'/)
+  assert.match(shell, /connectionStatusState === 'offline' \? 'Offline'/)
+  assert.match(shell, /connectionStatusState === 'reconnecting' \? 'Reconnecting…'/)
   assert.match(shell, /useDelayedConnectionNotice\([\s\S]*?!deliveryReady/)
   assert.match(connectionStatus, /useDelayedConnectionNotice\(transient\)/)
-  assert.match(shell, /\{connectionStatusLabel && \([\s\S]*?className="shell__connection-status"[\s\S]*?shell__sr-only">\{connectionStatusLabel\}/)
+  assert.match(shell, /\{connectionStatusLabel && \([\s\S]*?className="shell__connection-status"[\s\S]*?data-state=\{connectionStatusState\}[\s\S]*?tabIndex=\{0\}[\s\S]*?shell__sr-only">\{connectionStatusLabel\}/)
   assert.match(
     shellCss,
-    /\.shell__connection-status\s*\{[\s\S]*?width:\s*28px;[\s\S]*?flex:\s*0 0 28px;[\s\S]*?\}[\s\S]*?\.shell__connection-status::before[\s\S]*?background:\s*var\(--accent/,
-    'connectivity uses the compact purple dot while retaining live text for assistive technology',
+    /\.shell__connection-status\s*\{[\s\S]*?width:\s*28px;[\s\S]*?flex:\s*0 0 28px;[\s\S]*?\}[\s\S]*?data-state="restarting"[\s\S]*?border-right-color:\s*transparent;[\s\S]*?data-state="offline"[\s\S]*?rotate:\s*45deg;/,
+    'compact connectivity states remain distinguishable without color or motion',
   )
+  assert.match(shellCss, /\.shell__connection-status:hover \.shell__connection-status-label,[\s\S]*?\.shell__connection-status:focus \.shell__connection-status-label[\s\S]*?visibility:\s*visible;/)
+  assert.match(shellCss, /prefers-reduced-motion:\s*reduce[\s\S]*?\.shell__connection-status-icon\s*\{\s*animation:\s*none !important;/)
   assert.doesNotMatch(chatView, /You're offline — chat needs a connection\./)
   assert.doesNotMatch(chatInputBar, /You're offline — chat needs a connection\./)
   assert.match(
