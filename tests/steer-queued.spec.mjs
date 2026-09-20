@@ -149,6 +149,59 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
 
     // Capture every POST /messages so we can assert the steer payload.
     const messagePosts = []
+    // Mirrors the backend's Chat.pending_messages for the duration of this
+    // test: reconcileRuntimeState() polls GET .../runtime every ~1s while a
+    // turn/queue is active (ChatView.jsx's fallback poll effect), and that
+    // route isn't otherwise mocked here. An unmocked runtime poll returns no
+    // pending_messages, and hydrate() then drops the just-reserved steer row
+    // (it looks server-confirmed-but-gone, indistinguishable from "already
+    // consumed") well before the deferred cut ever arrives — the exact same
+    // "unmocked GET wipes the tray" class already called out below for the
+    // queue-POST ack. Keep this snapshot in sync with what a real backend
+    // would still report: the row stays in pending_messages until the
+    // authoritative cut (steered_into_turn), which this test never sends.
+    let pendingMessagesSnapshot = []
+    // False until the first message's 202 actually starts the turn — an
+    // unconditional `running: true` here would lock the composer before the
+    // real send ever happens (the poll's initial run() fires as soon as
+    // ChatView mounts, not only once a turn is genuinely active).
+    let turnRunning = false
+
+    await page.route(/\/api\/chats\/[0-9a-f-]+\/runtime$/, route => {
+      if (route.request().method() !== 'GET') { route.continue(); return }
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          running: turnRunning,
+          runtime_revision: 0,
+          pending_messages: pendingMessagesSnapshot,
+        }),
+      })
+    })
+
+    // fetchMessages() (the chat-detail GET) has the same unmocked-endpoint
+    // hazard as .../runtime above — any force:true caller (several exist,
+    // e.g. outbox-settlement reconcile) would otherwise get an empty
+    // pending_messages and hydrate() away the reserved row. Only intercept
+    // once a turn is actually running: an early bootstrap GET (chat
+    // creation, newChatSession settling) needs the REAL response shape
+    // (title/provider/etc.) this minimal stub doesn't provide.
+    await page.route(/\/api\/chats\/[0-9a-f-]+\?limit=/, route => {
+      if (route.request().method() !== 'GET' || !turnRunning) { route.continue(); return }
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          messages: [],
+          total: 0,
+          offset: 0,
+          running: turnRunning,
+          runtime_revision: 0,
+          pending_messages: pendingMessagesSnapshot,
+        }),
+      })
+    })
 
     await page.route(/\/api\/chats\/[0-9a-f-]+\/messages$/, async (route) => {
       const req = route.request()
@@ -156,9 +209,15 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
       try { body = JSON.parse(req.postData() || '{}') } catch { /* empty */ }
       messagePosts.push(body)
 
-      // Force-steer POST: convert the queued message into the live turn.
-      // Respond exactly as the backend does on success — 202 with
-      // {status:"steered"} and the remaining (now empty) server queue.
+      // Force-steer POST: admission succeeds but the provider control channel
+      // defers the actual transcript cut (this is the case the test exercises
+      // — "the provider acknowledgement is deliberately still blocked").
+      // cut_deferred:true is required here: without it, ChatView.jsx's
+      // 'steered' handling falls through to its older-immediate-cut-backend
+      // compatibility branch (Array.isArray(result.pending_messages) with no
+      // cut_deferred flag) and calls pendingQueue.hydrate([]), which wipes
+      // the just-reserved row immediately instead of leaving it inline until
+      // a later steered_into_turn event.
       if (body.force_steer) {
         await steerGate
         return route.fulfill({
@@ -167,7 +226,8 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
           body: JSON.stringify({
             status: 'steered',
             chat_id: 'mock',
-            pending_messages: [],
+            cut_deferred: true,
+            pending_messages: pendingMessagesSnapshot,
           }),
         })
       }
@@ -175,6 +235,7 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
       // First send (fresh turn): 202 starts the turn; the held-open
       // /stream below keeps sending=true.
       if (body.content === 'first message') {
+        turnRunning = true
         return route.fulfill({
           status: 202,
           contentType: 'application/json',
@@ -195,6 +256,9 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
       // calls fetchMessages({force:true}) — a REAL, unmocked GET against the
       // drawer-created (but message-mock-only) chat, which comes back with
       // pending_messages:[] and wipes the just-reserved steer row.
+      pendingMessagesSnapshot = [
+        { role: 'user', content: body.content, ts: QUEUE_TS, cid: body.cid },
+      ]
       return route.fulfill({
         status: 202,
         contentType: 'application/json',
