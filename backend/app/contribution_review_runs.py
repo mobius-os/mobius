@@ -137,11 +137,24 @@ def perform_merge(gh, cwd, target, repo):
   ) if repo.get(setting) is True), None)
   if method is None:
     raise HTTPException(409, "GitHub did not provide an allowed merge method.")
-  return json.loads(gh(
+  response = gh(
     cwd, "api", "--method", "PUT",
     f"repos/{target['repo']}/pulls/{target['number']}/merge",
     "-f", f"sha={target['head_sha']}", "-f", f"merge_method={method}",
-  ).stdout)
+  ).stdout
+  try:
+    result = json.loads(response)
+  except json.JSONDecodeError as exc:
+    raise ContributionSubmitError(
+      "GitHub returned an unreadable merge confirmation.",
+      code="merge_response_unreadable",
+    ) from exc
+  if not isinstance(result, dict):
+    raise ContributionSubmitError(
+      "GitHub returned an unexpected merge confirmation shape.",
+      code="merge_response_invalid_shape",
+    )
+  return result
 
 
 def merge_work_key(target):
