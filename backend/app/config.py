@@ -210,9 +210,10 @@ class Settings(BaseSettings):
       log.warning(
         "New mobius.you account linking is unavailable because no safe "
         "client origin could be derived from FRONTEND_ORIGIN. Existing "
-        "local sign-in and linked accounts are unaffected. Set "
-        "MOBIUS_ACCOUNT_CLIENT_ORIGIN to this instance's public HTTPS origin, "
-        "or configure DOMAIN/FRONTEND_ORIGIN with an HTTPS or loopback origin.",
+        "local sign-in and linked accounts are unaffected. Set DOMAIN to the "
+        "bare public hostname, set FRONTEND_ORIGIN to the browser's HTTPS or "
+        "loopback origin, or set MOBIUS_ACCOUNT_CLIENT_ORIGIN explicitly when "
+        "a reverse proxy exposes a different browser origin.",
       )
     return self
 

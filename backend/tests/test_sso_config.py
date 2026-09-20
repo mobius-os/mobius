@@ -133,9 +133,9 @@ def test_unsafe_public_origin_warns_only_about_new_account_linking(caplog):
     if "account linking is unavailable" in record.getMessage()
   )
   assert "Existing local sign-in and linked accounts are unaffected" in warning
+  assert "DOMAIN to the bare public hostname" in warning
+  assert "FRONTEND_ORIGIN to the browser's HTTPS or loopback origin" in warning
   assert "MOBIUS_ACCOUNT_CLIENT_ORIGIN" in warning
-  assert "DOMAIN/FRONTEND_ORIGIN" in warning
-  assert "Account & Social features are DISABLED" not in warning
   assert secret_origin not in warning
   assert "password" not in warning
   assert "super-secret" not in warning
