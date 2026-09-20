@@ -1418,12 +1418,9 @@ async def patch_chat(
     target_provider = body.provider
     new_model = agent_settings_patch.get("model")
     if target_provider is None and new_model:
-      from app.providers import _model_belongs_to_other_provider
       current_provider = chat.provider or "claude"
-      if _model_belongs_to_other_provider(new_model, current_provider):
-        target_provider = (
-          "codex" if current_provider == "claude" else "claude"
-        )
+      if providers._model_belongs_to_other_provider(new_model, current_provider):
+        target_provider = providers.provider_of_model(new_model)
 
     if new_model:
       from app.providers import _model_belongs_to_other_provider
@@ -1470,7 +1467,7 @@ async def patch_chat(
           "handoff so the incoming provider can continue its context."
         ),
       )
-    if target_provider is not None and target_provider in ("claude", "codex", "mobius"):
+    if target_provider is not None and target_provider in providers.PROVIDERS:
       # Reject a switch to a disconnected provider — the picker may
       # have raced ahead of /auth/providers/status, or the user may
       # be on stale state. Without this check the PATCH would succeed
@@ -3136,7 +3133,7 @@ def create_app_chat(
   ) or providers.owner_default_provider(
     data_dir, owner.provider if owner else None,
   )
-  if provider not in ("claude", "codex", "mobius"):
+  if provider not in providers.PROVIDERS:
     raise HTTPException(status_code=422, detail=f"unknown provider: {provider}")
   if body.model and providers._model_belongs_to_other_provider(
     body.model, provider,
@@ -3356,7 +3353,7 @@ async def patch_app_chat(
         detail="The selected model does not belong to that provider.",
       )
     if body.provider is not None:
-      if body.provider not in ("claude", "codex", "mobius"):
+      if body.provider not in providers.PROVIDERS:
         raise HTTPException(
           status_code=422, detail=f"unknown provider: {body.provider}"
         )

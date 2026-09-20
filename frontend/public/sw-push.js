@@ -44,7 +44,7 @@ self.addEventListener('push', (e) => {
     // Android renders `badge` as the tiny monochrome status-bar glyph.
     // Keep it separate from the full-colour notification card icon.
     badge: '/icons/notification-badge.png',
-    data: { target: data.target || '/', actions: data.actions },
+    data: { target: data.target || '/', actions: data.actions, title: data.title || '' },
     actions: (data.actions || []).slice(0, 2).map(a => ({
       action: a.action,
       title: a.title,
@@ -122,6 +122,11 @@ self.addEventListener('notificationclick', (e) => {
     if (match && match.target) target = match.target
   }
   target = _safeTarget(target)
+  // Answer alerts sent before focus links existed still have a durable title.
+  // Preserve their promised destination when the owner taps them later.
+  if (data.title === 'Möbius needs your answer' && /^\/shell\/\?chat=/.test(target)) {
+    target += '&focus=question'
+  }
 
   e.waitUntil((async () => {
     // `includeUncontrolled` is load-bearing here: this worker deliberately

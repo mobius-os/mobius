@@ -3424,9 +3424,11 @@ def test_commit_local_refuses_during_in_progress_cherry_pick(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# resolve_version_only_conflict — a conflict CONFINED to the version identifier
-# auto-resolves to upstream (take-upstream is always right for a version label);
-# any real code conflict falls through to None so the owner resolves it.
+# resolve_benign_conflict — a conflict with no genuine overlap auto-resolves:
+# JSON manifests get a structural three-way merge (serialization drift and
+# disjoint edits reconcile; the release-owned version always takes upstream),
+# and other source files get the narrow APP_VERSION take-upstream. Any real
+# overlap falls through to None so the owner resolves it.
 # ---------------------------------------------------------------------------
 
 _MANIFEST = (
@@ -3448,7 +3450,7 @@ def _diverge(repo, local_files, upstream_files, *, base_files):
 
   Records `base_files` as the shared ancestor, commits `local_files` on main,
   then records `upstream_files` as the new upstream. Returns nothing; the caller
-  runs `merge_upstream` / `resolve_version_only_conflict`.
+  runs `merge_upstream` / `resolve_benign_conflict`.
   """
   app_git.ensure_repo(repo)
   app_git.record_upstream(repo, base_files, "https://x/mobius.json", "1.0.0")
@@ -3473,7 +3475,7 @@ def test_version_only_conflict_resolves_to_upstream(tmp_path):
   assert merge.status == "conflict"
   assert "mobius.json" in merge.conflict_paths
 
-  res = app_git.resolve_version_only_conflict(repo, merge.conflict_paths)
+  res = app_git.resolve_benign_conflict(repo, merge.conflict_paths)
   assert res is not None
   tree = res.tree
   assert b'"version": "2.0.0"' in tree["mobius.json"]  # upstream won
@@ -3497,7 +3499,7 @@ def test_version_only_conflict_preserves_disjoint_local_edit(tmp_path):
   merge = app_git.merge_upstream(repo)
   assert merge.status == "conflict"
 
-  res = app_git.resolve_version_only_conflict(repo, merge.conflict_paths)
+  res = app_git.resolve_benign_conflict(repo, merge.conflict_paths)
   assert res is not None
   tree = res.tree
   assert b'"version": "2.0.0"' in tree["mobius.json"]
@@ -3519,7 +3521,7 @@ def test_in_code_app_version_conflict_resolves(tmp_path):
   merge = app_git.merge_upstream(repo)
   assert merge.status == "conflict"
 
-  res = app_git.resolve_version_only_conflict(repo, merge.conflict_paths)
+  res = app_git.resolve_benign_conflict(repo, merge.conflict_paths)
   assert res is not None
   tree = res.tree
   assert b"APP_VERSION = '2.0.0'" in tree["index.jsx"]
@@ -3545,7 +3547,7 @@ def test_real_code_conflict_is_not_auto_resolved(tmp_path):
   merge = app_git.merge_upstream(repo)
   assert merge.status == "conflict"
   # index.jsx has a real both-edited-same-line conflict → not version-only.
-  assert app_git.resolve_version_only_conflict(repo, merge.conflict_paths) is None
+  assert app_git.resolve_benign_conflict(repo, merge.conflict_paths) is None
 
 
 def test_conflict_touching_a_non_version_line_is_not_resolved(tmp_path):
@@ -3569,7 +3571,7 @@ def test_conflict_touching_a_non_version_line_is_not_resolved(tmp_path):
   )
   merge = app_git.merge_upstream(repo)
   assert merge.status == "conflict"
-  assert app_git.resolve_version_only_conflict(repo, merge.conflict_paths) is None
+  assert app_git.resolve_benign_conflict(repo, merge.conflict_paths) is None
 
 
 # Adversarial regressions (Codex review 2026-07-13) — a version bump that SHARES
@@ -3588,7 +3590,7 @@ def test_same_line_code_edit_is_not_dropped(tmp_path):
   merge = app_git.merge_upstream(repo)
   assert merge.status == "conflict"
   # Local FEATURE=true must NOT be silently dropped to upstream's line.
-  assert app_git.resolve_version_only_conflict(repo, merge.conflict_paths) is None
+  assert app_git.resolve_benign_conflict(repo, merge.conflict_paths) is None
 
 
 def test_nested_dependency_version_is_not_resolved(tmp_path):
@@ -3606,7 +3608,7 @@ def test_nested_dependency_version_is_not_resolved(tmp_path):
   )
   merge = app_git.merge_upstream(repo)
   assert merge.status == "conflict"
-  assert app_git.resolve_version_only_conflict(repo, merge.conflict_paths) is None
+  assert app_git.resolve_benign_conflict(repo, merge.conflict_paths) is None
 
 
 def test_bare_const_version_is_not_matched(tmp_path):
@@ -3621,7 +3623,7 @@ def test_bare_const_version_is_not_matched(tmp_path):
   )
   merge = app_git.merge_upstream(repo)
   assert merge.status == "conflict"
-  assert app_git.resolve_version_only_conflict(repo, merge.conflict_paths) is None
+  assert app_git.resolve_benign_conflict(repo, merge.conflict_paths) is None
 
 
 def test_minified_manifest_version_resolves(tmp_path):
@@ -3639,7 +3641,7 @@ def test_minified_manifest_version_resolves(tmp_path):
   )
   merge = app_git.merge_upstream(repo)
   assert merge.status == "conflict"
-  res = app_git.resolve_version_only_conflict(repo, merge.conflict_paths)
+  res = app_git.resolve_benign_conflict(repo, merge.conflict_paths)
   assert res is not None
   assert b'"version":"2.0.0"' in res.tree["mobius.json"]
 
@@ -3660,7 +3662,7 @@ def test_disjoint_same_file_source_edit_preserved(tmp_path):
   )
   merge = app_git.merge_upstream(repo)
   assert merge.status == "conflict"
-  res = app_git.resolve_version_only_conflict(repo, merge.conflict_paths)
+  res = app_git.resolve_benign_conflict(repo, merge.conflict_paths)
   assert res is not None
   assert b'APP_VERSION = "2.0.0"' in res.tree["index.jsx"]  # upstream version
   assert b'"LOCAL"' in res.tree["index.jsx"]                # local edit kept
@@ -3682,7 +3684,194 @@ def test_adjacent_disjoint_source_edit_bails_safely(tmp_path):
   )
   merge = app_git.merge_upstream(repo)
   assert merge.status == "conflict"
-  assert app_git.resolve_version_only_conflict(repo, merge.conflict_paths) is None
+  assert app_git.resolve_benign_conflict(repo, merge.conflict_paths) is None
+
+
+# Structural JSON-manifest merge (resolve_benign_conflict generalisation) —
+# serialization drift is not a conflict, disjoint edits reconcile, genuine
+# overlap does not. Several cases are hard to force through git's line merge, so
+# they exercise the pure reconciler `_resolve_json_manifest` directly.
+
+def test_manifest_pure_encoding_drift_heals_to_upstream():
+  """ours differs from theirs ONLY by unicode escaping — identical parsed data —
+  so it is not a real conflict; heal to upstream's (raw) bytes."""
+  base = '{"id": "demo", "name": "Möbius"}\n'.encode()
+  ours = '{"id": "demo", "name": "M\\u00f6bius"}\n'.encode()  # escaped, same text
+  theirs = '{"id": "demo", "name": "Möbius"}\n'.encode()
+  out = app_git._resolve_json_manifest(base, ours, theirs)
+  assert out == theirs  # reused upstream bytes → drift healed to raw UTF-8
+
+
+def test_manifest_encoding_drift_with_additive_edit_resolves():
+  """A local additive edit (a new array entry) alongside pure encoding drift.
+  No genuine overlap → auto-resolve (no owner resolver),
+  carrying the addition. The merged structure equals OURS, so ours' bytes are
+  reused verbatim to minimise churn (drift heals only on the upstream-reuse or
+  fresh-serialize paths, exercised elsewhere)."""
+  base = '{"name": "Möbius", "files": ["a.js"]}\n'.encode()
+  ours = '{"name": "M\\u00f6bius", "files": ["a.js", "b.js"]}\n'.encode()
+  theirs = '{"name": "Möbius", "files": ["a.js"]}\n'.encode()
+  out = app_git._resolve_json_manifest(base, ours, theirs)
+  assert out is not None
+  parsed = json.loads(out)
+  assert parsed["files"] == ["a.js", "b.js"]  # local addition carried
+  assert parsed["name"] == "Möbius"           # identical parsed data
+  assert out == ours                          # byte reuse: no needless churn
+
+
+def test_manifest_disjoint_edits_merge_with_upstream_version():
+  """Local adds a top-level key; upstream bumps the release version. Disjoint —
+  reconcile into a combined manifest carrying both."""
+  base = '{"name": "Demo", "version": "1.0.0"}\n'.encode()
+  ours = '{"name": "Demo", "version": "1.0.0", "local": true}\n'.encode()
+  theirs = '{"name": "Demo", "version": "2.0.0"}\n'.encode()
+  out = app_git._resolve_json_manifest(base, ours, theirs)
+  assert out is not None
+  parsed = json.loads(out)
+  assert parsed["version"] == "2.0.0"  # release-owned → upstream wins
+  assert parsed["local"] is True       # disjoint local edit carried
+
+
+def test_manifest_version_always_takes_upstream_even_when_both_bumped():
+  """Both sides bumped the release version to DIFFERENT values — never a real
+  conflict; upstream wins."""
+  base = '{"version": "1.0.0"}\n'.encode()
+  ours = '{"version": "1.0.1"}\n'.encode()
+  theirs = '{"version": "2.0.0"}\n'.encode()
+  out = app_git._resolve_json_manifest(base, ours, theirs)
+  assert out is not None
+  assert json.loads(out)["version"] == "2.0.0"
+
+
+@pytest.mark.parametrize("base,ours,theirs", [
+  ({"version": "1"}, {}, {"version": "2"}),
+  ({"version": "1"}, {}, {"version": "1"}),
+  ({}, {"version": "local"}, {"version": "release"}),
+  ({"version": "1"}, {"version": "local"}, {}),
+  ({}, {"version": "local"}, {}),
+])
+def test_manifest_version_presence_belongs_to_upstream(base, ours, theirs):
+  base["name"] = "Demo"
+  ours.update(name="Demo", local=True)
+  theirs.update(name="Release", upstream=True)
+  out = app_git._resolve_json_manifest(*(
+    json.dumps(side).encode() for side in (base, ours, theirs)
+  ))
+  assert out is not None
+  assert json.loads(out) == {**theirs, "local": True}
+
+
+@pytest.mark.parametrize("base,ours,theirs", [
+  (0, True, 1),
+  (True, 1, 2),
+  (True, 2, 1),
+  (1, False, 0),
+  (False, 0, 2),
+  (False, 2, 0),
+])
+@pytest.mark.parametrize("shape", ["scalar", "array", "object"])
+def test_manifest_boolean_numeric_overlap_is_not_resolved(base, ours, theirs, shape):
+  def manifest(value):
+    if shape == "array":
+      value = [value]
+    elif shape == "object":
+      value = {"nested": [value]}
+    return json.dumps({"value": value}).encode()
+
+  assert app_git._resolve_json_manifest(*(
+    manifest(value) for value in (base, ours, theirs)
+  )) is None
+
+
+@pytest.mark.parametrize("before,after", [(True, 1), (False, 0), (1, True), (0, False)])
+def test_manifest_boolean_numeric_local_edit_is_preserved_during_byte_reuse(before, after):
+  base = json.dumps({"nested": [{"value": before}]}).encode()
+  ours = json.dumps({"nested": [{"value": after}]}).encode()
+  assert app_git._resolve_json_manifest(base, ours, base) == ours
+
+
+def test_manifest_equal_json_numbers_reuse_upstream_bytes():
+  base = b'{"value": 0}'
+  ours = b'{"value": 1.0}'
+  theirs = b'{"value": 1}'
+  assert app_git._resolve_json_manifest(base, ours, theirs) == theirs
+
+
+def test_manifest_nested_disjoint_edits_preserve_deletions_and_null():
+  base = b'{"nested": {"removed": null, "edited": 0}}'
+  ours = b'{"nested": {"edited": 0, "added": null}}'
+  theirs = b'{"nested": {"removed": null, "edited": 1}}'
+  out = app_git._resolve_json_manifest(base, ours, theirs)
+  assert out is not None
+  assert json.loads(out) == {"nested": {"edited": 1, "added": None}}
+
+
+def test_manifest_concurrent_object_additions_are_not_combined():
+  base = b'{}'
+  ours = b'{"added": {"local": true}}'
+  theirs = b'{"added": {"upstream": true}}'
+  assert app_git._resolve_json_manifest(base, ours, theirs) is None
+
+
+def test_manifest_true_key_overlap_is_not_resolved():
+  """Both sides change the SAME non-version key to different values — a genuine
+  overlap the owner must resolve → None."""
+  base = '{"title": "base"}\n'.encode()
+  ours = '{"title": "LOCAL"}\n'.encode()
+  theirs = '{"title": "UPSTREAM"}\n'.encode()
+  assert app_git._resolve_json_manifest(base, ours, theirs) is None
+
+
+def test_manifest_array_both_changed_differently_is_not_resolved():
+  """Arrays are atomic: both sides edit the same array differently → conflict."""
+  base = '{"files": ["a.js"]}\n'.encode()
+  ours = '{"files": ["a.js", "local.js"]}\n'.encode()
+  theirs = '{"files": ["a.js", "upstream.js"]}\n'.encode()
+  assert app_git._resolve_json_manifest(base, ours, theirs) is None
+
+
+def test_manifest_delete_vs_edit_is_not_resolved():
+  """One side deletes a key the other side edits → genuine overlap → None."""
+  base = '{"k": "base", "keep": 1}\n'.encode()
+  ours = '{"keep": 1}\n'.encode()               # deleted k
+  theirs = '{"k": "changed", "keep": 1}\n'.encode()  # edited k
+  assert app_git._resolve_json_manifest(base, ours, theirs) is None
+
+
+def test_manifest_merge_integration_through_conflict(tmp_path):
+  """End-to-end: a git-level conflict (both bumped version) over a manifest that
+  also carries encoding drift and a local array addition auto-resolves via
+  resolve_benign_conflict — upstream version, local addition kept, drift healed."""
+  repo = tmp_path / "app"
+  jsx = b"export default () => null\n"
+  base = (
+    '{\n  "id": "demo",\n  "name": "Möbius",\n'
+    '  "version": "1.0.0",\n  "files": ["a.js"],\n  "entry": "index.jsx"\n}\n'
+  ).encode()
+  ours = (
+    '{\n  "id": "demo",\n  "name": "M\\u00f6bius",\n'
+    '  "version": "1.0.1",\n  "files": ["a.js", "b.js"],\n  "entry": "index.jsx"\n}\n'
+  ).encode()
+  upstream = (
+    '{\n  "id": "demo",\n  "name": "Möbius",\n'
+    '  "version": "2.0.0",\n  "files": ["a.js"],\n  "entry": "index.jsx"\n}\n'
+  ).encode()
+  _diverge(
+    repo,
+    local_files={"index.jsx": jsx, "mobius.json": ours},
+    upstream_files={"index.jsx": jsx, "mobius.json": upstream},
+    base_files={"index.jsx": jsx, "mobius.json": base},
+  )
+  merge = app_git.merge_upstream(repo)
+  assert merge.status == "conflict"
+  assert "mobius.json" in merge.conflict_paths
+  res = app_git.resolve_benign_conflict(repo, merge.conflict_paths)
+  assert res is not None
+  parsed = json.loads(res.tree["mobius.json"])
+  assert parsed["version"] == "2.0.0"           # release-owned → upstream
+  assert parsed["files"] == ["a.js", "b.js"]    # local addition kept
+  assert parsed["name"] == "Möbius"
+  assert b"\\u00f6" not in res.tree["mobius.json"]  # drift healed
 
 
 # ── Linear overlay: trailers, units, and the invariant projection ─────────────

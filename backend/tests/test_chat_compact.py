@@ -1052,7 +1052,11 @@ async def test_codex_synthesis_disables_tools_and_isolates_cwd(
       return []
 
     def build_env(self, **_kwargs):
-      return {}
+      captured["provider_env"] = True
+      return {"SELECTED_PROVIDER": "mobius"}
+
+    def codex_config_overrides(self):
+      return ['model_provider="mobius_trial"']
 
   class _Process:
     returncode = 0
@@ -1068,17 +1072,27 @@ async def test_codex_synthesis_disables_tools_and_isolates_cwd(
   async def _spawn(*cmd, **kwargs):
     captured["cmd"] = cmd
     captured["cwd"] = kwargs["cwd"]
+    captured["env"] = kwargs["env"]
     return _Process()
 
   monkeypatch.setattr(compaction.shutil, "which", lambda _name: "/bin/codex")
-  monkeypatch.setattr("app.providers.get_provider", lambda _pid: _Provider())
+  def get_provider(provider_id):
+    captured["provider_id"] = provider_id
+    return _Provider()
+
+  monkeypatch.setattr("app.providers.get_provider", get_provider)
   monkeypatch.setattr(compaction.asyncio, "create_subprocess_exec", _spawn)
-  result = await compaction._run_codex_summarize_turn(
-    "prompt", data_dir=str(tmp_path), model="gpt-5.4", effort="high",
+  result = await compaction._run_provider_summarize_turn(
+    "prompt", data_dir=str(tmp_path), provider_id="mobius",
+    model="gpt-5.4", effort="high",
   )
   assert result == "brief"
+  assert captured["provider_id"] == "mobius"
+  assert captured["provider_env"] is True
   assert captured["cwd"] != str(tmp_path)
   assert "--ignore-rules" in captured["cmd"]
+  assert 'model_provider="mobius_trial"' in captured["cmd"]
+  assert captured["env"]["SELECTED_PROVIDER"] == "mobius"
   disabled = {
     captured["cmd"][index + 1]
     for index, value in enumerate(captured["cmd"][:-1])

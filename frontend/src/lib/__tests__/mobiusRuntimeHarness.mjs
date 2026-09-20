@@ -96,7 +96,13 @@ export function makeServer() {
 
   async function fetchImpl(url, init = {}) {
     const method = init.method || 'GET'
-    log.push({ url, method, headers: (init && init.headers) || {}, body: init.body })
+    log.push({
+      url,
+      method,
+      headers: (init && init.headers) || {},
+      body: init.body,
+      cache: init.cache,
+    })
     if (!online) {
       // A real offline fetch rejects; the runtime catches it as transient.
       throw new TypeError('Failed to fetch (offline)')

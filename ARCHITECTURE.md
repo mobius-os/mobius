@@ -1093,12 +1093,14 @@ turns to finish; a no-progress pass falls back to the ordinary retry cadence.
 An app-initiated restart continuation carries the same app id into the next
 durable run unless a newer owner send is already queued and becomes the next
 run's actor; provider-limit retries remain owner-only, and app work queued after
-a park is never absorbed. The provider still receives a synthetic user
-`continue`, but the durable row is tagged
-`kind="auto_continuation"` with reason `restart` or `usage_limit`; the UI, copy
-behavior, title selection, time context, compaction, provider-switch handoff,
-chat-note summarization, and redacted chat logs treat it as a product marker
-rather than owner speech.
+a park is never absorbed. Manual Resume and physical restart, usage-limit, and
+resource recovery persist their product control in `ChatRun.continuation_json`,
+not in `Chat.messages` or `Chat.pending_messages`. Providers receive a temporary
+recovery prompt reconstructed from that exact control. A stable client control
+id makes manual retries idempotent without inventing owner speech. Existing
+transcript-backed recoveries remain readable for safe replay across upgrades;
+generic coordinator continuations retain their exact supplied content and
+replay contract. Goal rollover remains owned by its existing plan/FIFO path.
 
 The sweep is cheap: one indexed due-row query immediately at boot, on
 `chat_run_finished`, and on a 60-second fallback. Startup captures the boot
@@ -1118,15 +1120,28 @@ resurrect itself when the boot sweep claims restart parks.
 
 ### Goal handoff ownership is exact and singular
 
-A `ChatRun.goal_id` identifies one logical Goal across its physical turns;
-the root run owns the visible plan. Finishing a physical turn is not itself
-Goal completion, but unfinished intent alone cannot authorize another provider
-invocation either. Every Goal-bound run checkpoints the root plan revision at
-provider admission. At clean settlement, a new exact durable owner gets the
-next move; otherwise automatic rollover requires the plan revision to have
-advanced beyond that checkpoint. A legacy/unknown checkpoint proves nothing.
+`ChatGoal` owns the stable objective, revision-checked plan, checkpoint, next
+step, and explicit outcome. `ChatRun.goal_id` attaches each execution attempt
+to that record. A failed, interrupted, or cleanly ended attempt cannot complete
+or fail the obligation. Stop and dismissal are explicit; a deliberate Resume
+can reopen stopped work but stale deliveries cannot. Migration 0063 copies
+historical plans without deleting run snapshots and leaves uncertain work open.
 
-`goal_plans.goal_handoff_owner_kind` is the shared durable ownership query for
+The writer admits Goal identity and the attempt in the same transaction.
+Execution turns are not a budget, but unfinished intent alone cannot authorize
+another provider invocation. Every Goal-bound run checkpoints the `ChatGoal`
+revision at provider admission. At clean settlement, a new exact durable owner
+gets the next move; otherwise automatic rollover requires that revision to have
+advanced beyond the checkpoint. A legacy or unknown checkpoint proves nothing.
+Stop, completion, provider failures and usage-limit handling keep their existing
+boundaries. The legacy `automatic_remaining` column is inert historical schema,
+never read or updated by admission.
+
+Persisted plans use the same task validation as plan writes. An unreadable
+plan keeps its Goal open, cannot authorize automatic handoff or completion,
+and can be repaired through a fully validated, revision-checked replacement.
+
+`goal_plans.goal_handoff_owner_kind` is the shared exact-identity query for
 both Goal presentation and turn settlement. It recognizes an owner question,
 Wait (including a settled result awaiting delivery), or wake-enabled helper only when that actor belongs to the same
 `goal_id`; an unrelated question or background operation in the chat cannot
@@ -1137,6 +1152,23 @@ durable plan progress, the terminal path saves an owner reconciliation question
 instead of starting another turn. Automatic Goal controls keep their causal
 place in the existing pending FIFO, but the writer translates them into an
 ephemeral provider prompt and never appends them as owner transcript rows.
+
+A result retains ownership until delivery. Provider-native Goal execution is
+disabled: one Möbius attempt starts one ordinary provider turn. Legacy native
+controllers are retired before resuming their conversation, not recreated in
+parallel.
+
+Every Goal attempt receives a deterministic hierarchical view even with no
+provider history: original objective, checkpoint, current task, ancestor
+requirements, direct children, sibling summaries and relevant prerequisites.
+The deepest running work selects focus; concurrent branches select their common
+ancestor. Other descendants remain stored, not injected. `goal_plan.py context
+--task ID` navigates with the same read-only projection during a run; `show`
+retains full-plan access. No model summarizer, delta cache, extra focus record,
+or duplicate copy of the incoming message is involved. Agents continue working
+in their current run rather than ending turns to refresh context. Task additions and updates operate on the existing record. Completion
+is an explicit revision-checked operation with verification evidence and no
+unfinished tasks or outstanding handoff. A green plan alone is not completion.
 
 Workspace `AgentWorkClaim` rows are narrower: they serialize one shared action
 across otherwise independent chats. They do not replace a chat's Goal, a
@@ -1319,11 +1351,27 @@ Stop is a two-layer contract: the backend interrupts and clears, while `frontend
 
 The generation bump is the key invariant. A dying `_run_chat_impl` rechecks ownership in its terminal path; after Stop it must resolve to `STALE_NO_ACTION` (or the Stop-handoff cleanup), never promote pending or schedule a backend continuation behind the frontend's resend. Do not refetch pending from the server after Stop to rebuild the resend — Stop already cleared the durable queue, so the local snapshot is the only source that preserves text + attachments; and do not resend the full snapshot unconditionally on `stopped:false` — the natural turn-end drain may already have consumed some rows, and `cleared_pending_cids` is the only guard against duplicate follow-up work.
 
-## AskUserQuestion interception
+## Owner questions
 
-AskUserQuestion is a shared pending-future lifecycle plus a shared `question` stream event; Claude and Codex differ only at the SDK boundary. `backend/app/pending_questions.py:PendingQuestion` carries `question_id`, `questions`, `future`, and optional `run_token`; `backend/app/questions.py` owns the module-level `_pending` registry (`get`, `claim_if`, `cancel`). Claude registers the pending question in `claude_sdk_runner.py:can_use_tool` for the `AskUserQuestion` tool, persists the card via `_ChatEventSink.publish_question()`, awaits the future, and returns `PermissionResultAllow(updated_input={questions, answers})`. Codex installs `_install_request_user_input_handler()` on `codex._client._sync._approval_handler`, enables `features.default_mode_request_user_input=true`, handles `item/tool/requestUserInput`, marshals from the SDK worker thread into the loop with `run_coroutine_threadsafe` (no user-answer timeout), and translates Möbius's text-keyed answers into Codex's id-keyed `{answers:{qid:{answers:[...]}}}` shape.
+Owner questions have one advertised lifecycle: the provider-neutral
+`mobius_control.request_question` tool saves a durable terminal card, ends the
+current provider turn, and starts exactly one continuation when the owner
+answers. Codex turns set `tools.experimental_request_user_input.enabled=false`
+to exclude the native tool in every collaboration mode; Claude turns disallow
+both `AskUserQuestion` and `request_user_input`. This is a
+capability invariant rather than a prompting preference: agents cannot choose a
+visually identical provider-native card that waits inside a process and then
+settles without the promised continuation. The provider-native bridges remain
+only for compatibility with a provider session that already emitted the old
+tool call; they are not part of a new turn's inventory.
 
-The answer POST is intercepted before normal send handling in `backend/app/routes/chats_stream.py:send_message` whenever `body.answers` is truthy. The route waits ~500ms for a just-broadcast pending entry, checks `question_id` identity when supplied, persists the answer FIRST through the writer actor's `AnswerQuestion`, then `questions.claim_if(chat_id, pending)` before resolving the future. That ordering is load-bearing: a concurrent Stop can cancel and pop the pending entry while the answer write awaits its ack, and resolving a cancelled/superseded future would feed the answer to the wrong SDK call. On success the route publishes `answers_applied` and returns `status:"answer_delivered"` plus `answer_turn:"same"`, which `useStreamConnection.js:sendMessage` treats as terminal for the POST without reconnecting the SSE. Durable-question recovery instead returns `status:"started"` plus `answer_turn:"new"`. The dedicated `answer_turn` field owns frontend row/bridge semantics; the status fallback exists only for rolling compatibility with older backends. A stale/missing pending question returns `410` rather than falling through and sending the answer as a new user turn.
+`backend/app/pending_questions.py:PendingQuestion` and the module-level registry
+in `backend/app/questions.py` (`get`, `claim_if`, `cancel`) therefore serve only
+that legacy in-process bridge. Durable cards instead persist
+`pending_question_id` and `response_mode:"continuation"`; their answer path is
+owned by the saved owner-input route and writer transaction described below.
+
+The answer POST is intercepted before normal send handling in `backend/app/routes/chats_stream.py:send_message` whenever `body.answers` is truthy. The shared bridge registers the pending owner before save-before-broadcast can expose its card, so the route checks that exact owner immediately; after a process restart it instead recovers from the durable question block. For a live provider question, the route checks `question_id` identity when supplied, persists the answer FIRST through the writer actor's `AnswerQuestion`, then `questions.claim_if(chat_id, pending)` before resolving the future. That ordering is load-bearing: a concurrent Stop can cancel and pop the pending entry while the answer write awaits its ack, and resolving a cancelled/superseded future would feed the answer to the wrong SDK call. On success the route publishes `answers_applied` and returns `status:"answer_delivered"` plus `answer_turn:"same"`, which `useStreamConnection.js:sendMessage` treats as terminal for the POST without reconnecting the SSE. Durable-question recovery instead returns `status:"started"` plus `answer_turn:"new"`. The dedicated `answer_turn` field owns frontend row/bridge semantics; the status fallback exists only for rolling compatibility with older backends. A stale/missing pending question returns `410` rather than falling through and sending the answer as a new user turn.
 **Question settlement invariant:** live stream items, a persisted partial, and the settled transcript are alternate sources for one active assistant row. An in-process answer resumes that same row; the live-to-durable handoff preserves the question, its answer, and all pre/post-answer thinking, tool, and text blocks in event order without hiding, duplicating, or reordering them. Only a recovered answer with `answer_turn:"new"` creates a separate hidden continuation. Unknown future modes fail closed to a separate boundary so an existing question row is never overwritten.
 
 Three frontend gates must stay aligned. `StreamingMessage.jsx` renders live question events with `QuestionCard` and NO disabled prop (the runner is paused while `sending`/`isStreaming` can still be true); `QuestionCard.jsx` does accept a `disabled` prop, but only `MsgContent.jsx` passes it, for non-answerable persisted cards. `ChatView.jsx:doSendSilent` allows submissions carrying `resolvedAnswers` through both `sendingRef` and `isStreamingRef`, uses `sendSilentInFlightRef` as the synchronous double-submit guard, optimistically patches message + stream question answers, and sends a hidden message with `answers` + `question_id`. Persistence identity lives in `chat_writer.py`: `apply_answers_to_last_question()` writes by exact `question_id` when present, and both the live-snapshot and final-merge paths carry existing answers forward by `events.question_block_key()` so later streaming snapshots don't wipe them. Do not key answer carry by block position, do not resolve the pending future before the writer ack, and do not make live cards inherit global send/stream disabled state.
@@ -1474,8 +1522,8 @@ is bounded by message count; restoring a saved anchor intentionally includes
 one predecessor and the authoritative tail to preserve exact reading position
 and live-reply reconciliation. Historical Goal cards find their final answer
 in the full transcript metadata, then hydrate plans and handoffs only for the
-requested half-open message window. The displayed plan and Goal completion
-use the same serialized plan. Changes checks only chat identity before its
+requested half-open message window. The displayed plan comes from the durable Goal record; its explicit outcome
+is independent of the physical attempt. Changes checks only chat identity before its
 writer barrier, then rechecks active-chat access and reads the transcript once
 after the barrier. `test_chat_entry_read_cost.py` protects these read budgets
 and ownership semantics without flaky wall-clock thresholds.

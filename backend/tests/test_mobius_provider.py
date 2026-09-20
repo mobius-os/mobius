@@ -37,6 +37,19 @@ def test_trial_provider_config_uses_only_local_broker_marker(tmp_path):
   assert "secret" not in config.lower()
 
 
+def test_subscription_route_reconnects_a_stalled_stream():
+  """The subscription route must reconnect through an upstream stall.
+
+  The gateway enforces a 60s no-token ceiling, so one silence can otherwise
+  lose a healthy long turn. Turning retries off here is what makes that
+  failure terminal.
+  """
+  overrides = providers.MobiusProvider().codex_config_overrides()
+
+  assert "model_providers.mobius_trial.stream_max_retries=2" in overrides
+  assert "model_providers.mobius_trial.request_max_retries=2" in overrides
+
+
 def test_subscription_catalog_preserves_product_names_and_wire_ids():
   payload = json.loads(providers.MobiusProvider._catalog_path().read_text())
   assert [row["slug"] for row in payload["models"]] == [

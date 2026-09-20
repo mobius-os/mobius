@@ -15,6 +15,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Literal
 
+from app.providers import PROVIDERS
 from app.tool_sources import (
   MAX_TOOL_SOURCES,
   enrich_tool_source,
@@ -1172,7 +1173,7 @@ def process_event(event: dict, assistant_blocks: list) -> bool:
     # reads without pretending the provider exposed its private summary.
     block = {"type": "context_compaction"}
     provider = event.get("provider")
-    if provider in ("claude", "codex", "mobius"):
+    if isinstance(provider, str) and provider in PROVIDERS:
       block["provider"] = provider
     trigger = event.get("trigger")
     if trigger in ("auto", "manual"):

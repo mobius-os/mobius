@@ -8,7 +8,7 @@ import {
   X,
 } from '@openai/apps-sdk-ui/components/Icon'
 import useDialogFocus from '../../hooks/useDialogFocus.js'
-import { chatQueries } from '../../hooks/queries.js'
+import { chatQueries, modelQueries } from '../../hooks/queries.js'
 import {
   formatCacheHitRate,
   formatCostUsd,
@@ -85,7 +85,7 @@ function RunSummary({ run, expandable }) {
     : <div className="cui-run__summary cui-run__summary--static">{content}</div>
 }
 
-function RunRow({ run }) {
+function RunRow({ run, registry }) {
   const expandable = hasRecordedUsage(run)
   if (!expandable) {
     return (
@@ -107,7 +107,10 @@ function RunRow({ run }) {
         <RunField label="Output" value={formatTokenCount(run.output_tokens)} />
         <RunField label="Reasoning within output" value={formatTokenCount(run.reasoning_output_tokens)} />
         <RunField label="Turn total" value={formatTokenCount(run.total_tokens)} />
-        <RunField label="Model" value={usageModelName(run.usage)} />
+        <RunField
+          label="Model"
+          value={usageModelName(run.usage, registry, run.provider)}
+        />
         <RunField label="Context limit / call" value={formatTokenCount(run.model_context_window)} />
         <RunField label="Status" value={statusLabel(run.status)} />
       </div>
@@ -115,7 +118,7 @@ function RunRow({ run }) {
   )
 }
 
-function UsageData({ data }) {
+function UsageData({ data, registry }) {
   const totals = data.totals || {}
   const runs = Array.isArray(data.runs) ? [...data.runs].reverse() : []
   const coverage = data.coverage
@@ -155,7 +158,7 @@ function UsageData({ data }) {
         </p>
       )}
       <div className="cui-runs">
-        {runs.map(run => <RunRow key={run.id} run={run} />)}
+        {runs.map(run => <RunRow key={run.id} run={run} registry={registry} />)}
       </div>
     </>
   )
@@ -165,6 +168,7 @@ export default function ChatUsageInspector({ chatId, onClose }) {
   const dialogRef = useRef(null)
   const closeRef = useRef(null)
   const query = chatQueries.usage.useQuery(chatId, { enabled: !!chatId })
+  const registryQuery = modelQueries.registry.useQuery()
 
   useDialogFocus({
     containerRef: dialogRef,
@@ -219,7 +223,7 @@ export default function ChatUsageInspector({ chatId, onClose }) {
               </button>
             </div>
           ) : query.data ? (
-            <UsageData data={query.data} />
+            <UsageData data={query.data} registry={registryQuery.data} />
           ) : null}
         </div>
       </div>

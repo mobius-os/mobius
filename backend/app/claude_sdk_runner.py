@@ -6,12 +6,11 @@ same event shapes the rest of the backend already understands.
 
 Design choices:
 
-- The runner stays in the SDK's default permission mode and registers a
-  dummy PreToolUse keepalive hook so `can_use_tool` still fires.
-  `can_use_tool` auto-approves every tool except `AskUserQuestion`, which
-  becomes an explicit partner choice in the Möbius UI. Using
-  `permission_mode="bypassPermissions"` would skip `can_use_tool` and
-  break that interception.
+- Owner questions use the provider-neutral Möbius `request_question` control:
+  it saves a durable terminal card and starts exactly one continuation when
+  answered. Claude's native `AskUserQuestion` / `request_user_input` tools are
+  excluded from new turn inventories so a visually identical, process-bound
+  wait cannot bypass that lifecycle.
 - `ClaudeSDKClient` is used instead of one-shot `query()` because
   Möbius needs the bidirectional control surface: explicit `connect()`,
   `query()`, streaming `receive_response()`, and external
@@ -94,6 +93,7 @@ from app.claude_events import (
   is_root_conversation_message,
 )
 from app.claude_sdk_contract import transport_process_pid
+from app.progress_lease import ProgressLease
 from app.process_groups import (
   isolated_process_group_id,
   lower_process_group_priority,
@@ -207,6 +207,13 @@ _CLAUDE_NATIVE_SCHEDULING_TOOLS = (
   "Monitor",
   "ScheduleWakeup",
   "CronCreate",
+)
+# Owner input also has one platform-owned lifecycle. These native tools wait
+# inside a provider process, while Möbius's request_question card is durable
+# across turn settlement and restart.
+_CLAUDE_NATIVE_OWNER_INPUT_TOOLS = (
+  "AskUserQuestion",
+  "request_user_input",
 )
 # Möbius-owned surfaces replace these built-ins entirely: Möbius owns
 # scheduling, notifications, and outbound reporting, and zero recorded native
@@ -1084,6 +1091,9 @@ async def run_claude_sdk_turn(
   """
   current_session_id = session_id
   cost_usd: float | None = None
+  # Progress lease: renewed as this turn emits SDK messages so a stalled model
+  # stream (alive process, no progress) lapses and recovery can reclaim it.
+  lease = ProgressLease(chat_id)
   base_env = dict(base_env)
   base_env["MOBIUS_COORDINATION_ENABLED"] = (
     "1" if coordination_enabled else "0"
@@ -1328,7 +1338,9 @@ async def run_claude_sdk_turn(
       "max_buffer_size": _CLAUDE_SDK_MAX_BUFFER_SIZE,
       "can_use_tool": can_use_tool,
       "disallowed_tools": [
-        *_CLAUDE_NATIVE_SCHEDULING_TOOLS, *_CLAUDE_UNUSED_BUILTINS,
+        *_CLAUDE_NATIVE_SCHEDULING_TOOLS,
+        *_CLAUDE_NATIVE_OWNER_INPUT_TOOLS,
+        *_CLAUDE_UNUSED_BUILTINS,
       ],
       "cli_path": _claude_cli_path(),
       "stderr": _capture_stderr,
@@ -1346,8 +1358,7 @@ async def run_claude_sdk_turn(
     }
     if run_policy is not None:
       options_kwargs["disallowed_tools"].extend([
-        "AskUserQuestion", "create_goal", "update_goal", "get_goal",
-        "request_user_input",
+        "create_goal", "update_goal", "get_goal",
       ])
       restricted_options = {}
       if run_policy is not None:
@@ -1484,8 +1495,14 @@ async def run_claude_sdk_turn(
       # ResultMessage aggregate. Keep the latest call across retries, steers,
       # and native background follow-ups so context occupancy stays exact.
       usage_state: dict[str, Any] = {}
+      # Arm the model-idle lease before the first token; a first-token stall
+      # then lapses and is reclaimed like any other stall.
+      lease.start()
       while True:
         async for sdk_msg in client.receive_response():
+          lease.note_message(
+            sdk_msg, is_root=is_root_conversation_message(sdk_msg),
+          )
           # Persist the session id ONLY from ROOT conversation messages.
           # SystemMessage and its subclasses — notably HookEventMessage,
           # which the codex plugin's SessionStart hook emits on every
