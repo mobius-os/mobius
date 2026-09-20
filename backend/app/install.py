@@ -49,6 +49,7 @@ from app import (
   drawer_pins,
   fs_locks,
   icon_assets,
+  managed_paths,
   models,
 )
 from app import app_cron
@@ -195,7 +196,7 @@ _SEEDS_TOTAL_MAX = _CONTRACT_SEEDS_TOTAL_MAX
 _STATIC_ASSET_MAX_BYTES = _CONTRACT_STATIC_ASSET_MAX_BYTES
 _STATIC_ASSETS_COUNT_MAX = _CONTRACT_STATIC_ASSETS_COUNT_MAX
 _STATIC_ASSETS_TOTAL_MAX = _CONTRACT_STATIC_ASSETS_TOTAL_MAX
-_STATIC_ASSETS_MANIFEST = ".mobius-static-assets.json"
+_STATIC_ASSETS_MANIFEST = managed_paths.STATIC_ASSETS_MANIFEST
 _STATIC_ASSETS_BACKUP_ASSET_PREFIX = "assets"
 _STATIC_ASSETS_BACKUP_METADATA_PREFIX = "metadata"
 _PENDING_UPDATE_DIR = "mobius-pending-update"
@@ -228,9 +229,7 @@ _APP_SKILLS_SIDECAR = ".app-skills.json"
 # script. The job script is dropped separately (its name is known only at call
 # time). Excluding these keeps the source-write loop from rewriting an
 # install-managed artifact a clean merge happened to carry on `main`.
-_MERGED_NON_SOURCE = frozenset((
-  ".gitignore", _STATIC_ASSETS_MANIFEST, "init-cron.sh",
-))
+_MERGED_NON_SOURCE = managed_paths.MERGED_NON_SOURCE
 
 # Icon cap matches the icon-upload route's 12 MB ceiling.
 _ICON_MAX_BYTES = _CONTRACT_ICON_MAX_BYTES
