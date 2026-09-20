@@ -3153,6 +3153,112 @@ def test_submit_rechecks_current_source_after_ready_status(
   ).exists()
 
 
+def test_owner_chat_review_can_publish_an_uninstalled_ordinary_review(
+  client, owner_token, monkeypatch,
+):
+  """Exact chat approval need not install a reviewed PR just to publish it."""
+  _write_token(login="octocat", user_id=42)
+  app_id, _app_token_value = _app_token(
+    client, owner_token, github_access=True,
+  )
+  _repo, record, diff_text = _prepared_real_review(
+    app_id, "owner-chat-uninstalled",
+  )
+  _remove_reviewed_change_from_source(record)
+  _write_contribution(app_id, record["id"], record, diff_text)
+  submitted = []
+
+  def submit(candidate, _diff_path, **kwargs):
+    submitted.append((candidate["id"], kwargs["publication_stage"]))
+    return "https://github.com/mobius-os/app-demo/pull/42", 42, {}
+
+  monkeypatch.setattr(github_routes, "_submit_prepared_pr", submit)
+  monkeypatch.setattr(
+    github_routes, "_record_pending_equivalence_locked",
+    lambda *_args, **_kwargs: asyncio.sleep(0),
+  )
+
+  response = client.post(
+    f"/api/github/contributions/{app_id}/{record['id']}/submit",
+    headers={"Authorization": f"Bearer {owner_token}"},
+    json={
+      "submitter": "chat-review-card",
+      "publication_stage": "ready",
+    },
+  )
+
+  assert response.status_code == 200, response.text
+  assert submitted == [(record["id"], "ready")]
+
+
+def test_owner_chat_review_cannot_bypass_source_proof_for_app_handoff(
+  monkeypatch,
+):
+  """A reviewed post-merge install keeps the source provenance boundary."""
+  record = {
+    "plan": {
+      "after_merge": {
+        "action": "connect_app",
+        "app_id": 42,
+        "manifest_url": (
+          "https://raw.githubusercontent.com/mobius-os/"
+          "app-demo/main/mobius.json"
+        ),
+      },
+    },
+  }
+  owner = SimpleNamespace(
+    assert_current=lambda: None,
+    replay_phase=lambda: None,
+  )
+
+  def reject_source(_record):
+    raise ContributionSubmitError(
+      "The installed source moved.", code="source_provenance_mismatch",
+    )
+
+  monkeypatch.setattr(
+    github_routes, "_assert_pending_equivalence_preflight", reject_source,
+  )
+
+  with pytest.raises(ContributionSubmitError) as exc:
+    github_routes._assert_personal_publication_source(
+      record, owner, owner_reviewed_uninstalled=True,
+    )
+
+  assert exc.value.code == "source_provenance_mismatch"
+
+
+def test_app_token_cannot_claim_owner_chat_approval_for_uninstalled_review(
+  client, owner_token, monkeypatch,
+):
+  """The app-writable request cannot manufacture the owner's chat authority."""
+  _write_token(login="octocat", user_id=42)
+  app_id, app_token = _app_token(client, owner_token, github_access=True)
+  _repo, record, diff_text = _prepared_real_review(
+    app_id, "app-forged-chat-approval",
+  )
+  _remove_reviewed_change_from_source(record)
+  _write_contribution(app_id, record["id"], record, diff_text)
+  monkeypatch.setattr(
+    github_routes,
+    "_submit_prepared_pr",
+    lambda *_args, **_kwargs: pytest.fail("app authority must stay strict"),
+  )
+
+  response = client.post(
+    f"/api/github/contributions/{app_id}/{record['id']}/submit",
+    headers={"Authorization": f"Bearer {app_token}"},
+    json={
+      "submitter": "chat-review-card",
+      "publication_stage": "ready",
+    },
+  )
+
+  assert response.status_code == 409, response.text
+  assert response.json()["detail"]["code"] == "source_provenance_mismatch"
+
+
 def test_submit_rejects_dirty_installed_source_before_push(
   client, owner_token, monkeypatch,
 ):
@@ -4817,13 +4923,83 @@ def test_rejected_push_journal_cannot_bypass_source_recheck_on_retry(
   assert calls == [record["id"]]
 
 
+@pytest.mark.parametrize("successor", [False, True], ids=["app-ordinary", "owner-chat-successor"])
 def test_existing_pr_update_rechecks_current_source_before_push(
-  client, owner_token, monkeypatch,
+  client, owner_token, monkeypatch, successor,
 ):
   """Update PR cannot bypass provenance after its source has reverted."""
   _write_token(login="octocat", user_id=42)
   app_id, app_token = _app_token(client, owner_token, github_access=True)
-  _repo, record, diff_text = _prepared_real_review(app_id, "update-source-moved")
+  _repo, record, diff_text = _prepared_real_review(
+    app_id, f"update-source-moved-{successor}",
+  )
+  record.update({
+    "number": 58,
+    "url": "https://github.com/mobius-os/app-demo/pull/58",
+    "head_repository": "octocat/app-demo",
+    "submitted_at": "2026-08-30T12:00:00Z",
+  })
+  record["plan"]["action"] = "pr_update"
+  record["plan"]["title"] = record["title"]
+  record["plan"]["body_draft"] = "Reviewed fix body."
+  record["plan"]["pr_metadata"] = {
+    "old_title": record["plan"]["title"],
+    "old_body": record["plan"]["body_draft"],
+  }
+  if successor:
+    record["plan"]["successor"] = {
+      "old_head_sha": record["plan"]["base_sha"],
+      "old_base_branch": "stack/source-review/01-parent",
+      "old_base_sha": record["plan"]["base_sha"],
+      "base_branch": "main",
+    }
+  _write_contribution(app_id, record["id"], record, diff_text)
+  _remove_reviewed_change_from_source(record)
+  monkeypatch.setattr(
+    github_routes,
+    "_autopilot_live_target",
+    lambda *_args: {
+      "error": None,
+      "head_sha": record["plan"]["base_sha"],
+      "base_branch": "main",
+      "title": record["plan"]["pr_metadata"]["old_title"],
+      "body": record["plan"]["pr_metadata"]["old_body"],
+    },
+  )
+  monkeypatch.setattr(
+    github_routes,
+    "_submit_prepared_pr",
+    lambda *_args, **_kwargs: pytest.fail("reverted source must never update"),
+  )
+
+  monkeypatch.setattr(
+    github_routes,
+    "_advance_merged_parent_successor",
+    lambda *_args, **_kwargs: pytest.fail("reverted source must never rewrite a successor"),
+  )
+  token = owner_token if successor else app_token
+
+  response = client.post(
+    f"/api/github/contributions/{app_id}/{record['id']}/update-existing",
+    headers={"Authorization": f"Bearer {token}"},
+    json={"submitter": "chat-review-card"},
+  )
+
+  assert response.status_code == 409, response.text
+  assert response.json()["detail"]["code"] == "source_provenance_mismatch"
+
+
+def test_owner_chat_review_can_update_an_uninstalled_ordinary_review(
+  client, owner_token, monkeypatch,
+):
+  """Exact chat approval may update its reviewed PR without installing it."""
+  _write_token(login="octocat", user_id=42)
+  app_id, _app_token_value = _app_token(
+    client, owner_token, github_access=True,
+  )
+  _repo, record, diff_text = _prepared_real_review(
+    app_id, "owner-chat-update-uninstalled",
+  )
   record.update({
     "number": 58,
     "url": "https://github.com/mobius-os/app-demo/pull/58",
@@ -4850,20 +5026,29 @@ def test_existing_pr_update_rechecks_current_source_before_push(
       "body": record["plan"]["pr_metadata"]["old_body"],
     },
   )
+  submitted = []
+
+  def submit(candidate, _diff_path, **kwargs):
+    kwargs["source_preflight"](candidate)
+    submitted.append(candidate["id"])
+    return record["url"], 58, {
+      "last_submit_push_sha": record["plan"]["head_sha"],
+    }
+
+  monkeypatch.setattr(github_routes, "_submit_prepared_pr", submit)
   monkeypatch.setattr(
-    github_routes,
-    "_submit_prepared_pr",
-    lambda *_args, **_kwargs: pytest.fail("reverted source must never update"),
+    github_routes, "_record_pending_equivalence_locked",
+    lambda *_args, **_kwargs: asyncio.sleep(0),
   )
 
   response = client.post(
     f"/api/github/contributions/{app_id}/{record['id']}/update-existing",
-    headers={"Authorization": f"Bearer {app_token}"},
-    json={},
+    headers={"Authorization": f"Bearer {owner_token}"},
+    json={"submitter": "chat-review-card"},
   )
 
-  assert response.status_code == 409, response.text
-  assert response.json()["detail"]["code"] == "source_provenance_mismatch"
+  assert response.status_code == 200, response.text
+  assert submitted == [record["id"]]
 
 
 def test_autopilot_update_rechecks_current_source_before_push(
@@ -5965,6 +6150,28 @@ def test_push_topic_branch_uses_the_exact_authoritative_remote_lease(
     "push", f"--force-with-lease=refs/heads/fix/demo:{old}",
     "fork", "HEAD:refs/heads/fix/demo",
   )]
+
+
+def test_git_push_timeout_outlives_the_mandatory_pre_push_gate(
+  tmp_path, monkeypatch,
+):
+  from app import github_contribution_git as contribution_git
+
+  calls = []
+  monkeypatch.setattr(
+    contribution_git,
+    "_run_cmd",
+    lambda argv, **kwargs: calls.append((argv, kwargs)) or _cp(""),
+  )
+
+  contribution_git._git(tmp_path, "status", "--porcelain")
+  contribution_git._git(tmp_path, "push", "origin", "HEAD:refs/heads/demo")
+
+  ordinary = calls[0][1]["timeout"]
+  push = calls[1][1]["timeout"]
+  assert ordinary == contribution_git._SUBMIT_TIMEOUT
+  assert push == contribution_git._PUSH_TIMEOUT
+  assert push > ordinary
 
 
 def test_push_topic_branch_surfaces_transient_result_for_authoritative_recovery(
@@ -12096,6 +12303,7 @@ def test_existing_pr_update_uses_owner_approved_exact_target(
     attempt_event=None,
     prior_attempt_phase=None,
     prior_attempt_receipt=None,
+    source_preflight=None,
   ):
     calls.append((
       "submit",

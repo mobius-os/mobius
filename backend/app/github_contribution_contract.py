@@ -14,3 +14,8 @@ COAUTHOR_TRAILER = (
   "Co-authored-by: Möbius Agent <mobius-agent@users.noreply.github.com>"
 )
 SUBMIT_TIMEOUT_SECONDS = 90
+# A reviewed push runs the repository's mandatory pre-push gate before it can
+# reach GitHub. Keep its deadline distinct from ordinary GitHub reads: the full
+# frontend unit gate currently takes about two minutes on the live platform,
+# while a stalled read should still fail fast enough to remain actionable.
+PUSH_TIMEOUT_SECONDS = 300

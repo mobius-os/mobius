@@ -3031,6 +3031,7 @@ def _submit_prepared_pr(
   attempt_event: Callable[[str, dict, dict | None], None] | None = None,
   prior_attempt_phase: str | None = None,
   prior_attempt_receipt: dict | None = None,
+  source_preflight: Callable[[dict], str] | None = None,
 ) -> tuple[str, int | None, dict]:
   if not shutil.which("git") or not shutil.which("gh"):
     raise ContributionSubmitError(
@@ -3295,7 +3296,11 @@ def _submit_prepared_pr(
       # this function can repush after a post-mutation receipt, prove the
       # currently installed source again while the caller still holds its
       # source lock. A receipt alone never authorizes recreating public state.
-      _assert_pending_equivalence_preflight(record)
+      (
+        source_preflight(record)
+        if source_preflight is not None
+        else _assert_pending_equivalence_preflight(record)
+      )
 
     try:
       merge_patch = _git_ops._assert_merges_with_upstream(repo, upstream_repo, branch)
