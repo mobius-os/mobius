@@ -2104,14 +2104,22 @@ export default function ChatView({
           || localStartRequestRef.current?.chatId === String(chatId)
         ) && !externalClaimedRunRef.current
         if (locallyActive) {
-          // A hidden retained pane can miss the terminal stream event while
-          // Shell still records the run finish. Re-enter the runtime owner
-          // here: it protects an unacknowledged fresh send, but an idle server
-          // verdict after a revisioned run transition refreshes the final
-          // transcript and retires the stale stream. The old non-authoritative
-          // detail read deliberately preserved local activity, so the pane
-          // could return with its shimmer and Stop control stuck on.
-          await reconcileRuntimeState()
+          // A durable finish event outranks a retained transport that simply
+          // missed its terminal frame. Reconcile the transcript first, then
+          // retire that stale stream only after detail confirms the run is
+          // settled; ordinary focus/runtime signals remain conservative.
+          if (delta.finished) {
+            const snapshot = await fetchMessages({
+              force: true,
+              terminal204: true,
+              authoritative: true,
+            })
+            if (snapshot?.running === false) {
+              retireSettledStreamRef.current?.()
+            }
+          } else {
+            await reconcileRuntimeState()
+          }
           continue
         }
 

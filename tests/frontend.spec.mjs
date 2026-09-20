@@ -1008,6 +1008,11 @@ test.describe('Scroll position', () => {
       data: { messages: [{ role: 'user', content: 'Entry restoration fixture' }] },
     })
     expect(occupyResponse.ok()).toBe(true)
+    const runtimeResponse = await page.request.get(`${BASE}/api/chats/${chatId}/runtime`, {
+      headers: { Authorization: `Bearer ${token}` },
+    })
+    expect(runtimeResponse.ok()).toBe(true)
+    const baseRuntimeRevision = Number((await runtimeResponse.json()).runtime_revision || 0)
 
     let returning = false
     let streamCount = 0
@@ -1048,7 +1053,7 @@ test.describe('Scroll position', () => {
           messages: history(returning ? 'entry-image-return.png' : 'entry-image-initial.png'),
           total: 4,
           offset: 0,
-          runtime_revision: returning ? 1 : 0,
+          runtime_revision: baseRuntimeRevision + (returning ? 1 : 0),
           running: returning,
           run_id: 'entry-restoration-run',
           run_status: returning ? 'running' : 'completed',
@@ -1061,7 +1066,7 @@ test.describe('Scroll position', () => {
         status: 200,
         contentType: 'application/json',
         body: JSON.stringify({
-          runtime_revision: returning ? 1 : 0,
+          runtime_revision: baseRuntimeRevision + (returning ? 1 : 0),
           running: returning,
           run_id: 'entry-restoration-run',
           run_status: returning ? 'running' : 'completed',

@@ -58,8 +58,12 @@ async function setupChat(page) {
 }
 
 async function installRunningRuntime(page, chat) {
+  const initialRevision = await page.evaluate(async chatId => {
+    const response = await fetch(`/api/chats/${chatId}/runtime`)
+    return Number((await response.json()).runtime_revision || 0)
+  }, chat.id)
   const runtime = {
-    revision: 0,
+    revision: initialRevision,
     running: false,
     runId: 'stream-reconnect-run',
     pending: [],
@@ -208,6 +212,7 @@ test.describe('Stream reconnection', () => {
   test('2. Terminal 204 exits thinking and refreshes persisted messages', async ({ page }) => {
     let streamRequestCount = 0
     let refreshReady = false
+    let runtime = null
 
     await page.route(/\/api\/chats\/[0-9a-f-]+\?limit=20&compact=1$/, route => {
       if (!refreshReady || route.request().method() !== 'GET') {
@@ -218,8 +223,10 @@ test.describe('Stream reconnection', () => {
         status: 200,
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          runtime_revision: 1,
+          runtime_revision: runtime?.revision ?? 0,
           running: false,
+          run_id: 'stream-reconnect-run',
+          run_status: 'completed',
           messages: [
             { role: 'user', content: 'expired broadcast', ts: Date.now() },
             { role: 'assistant', content: 'final response from db' },
@@ -233,12 +240,15 @@ test.describe('Stream reconnection', () => {
     await page.route(/\/api\/chats\/[0-9a-f-]+\/stream$/, async route => {
       streamRequestCount++
       refreshReady = true
+      runtime?.stop()
       // Wait past useStreamConnection's just-sent 204 retry window.
       await new Promise(resolve => setTimeout(resolve, 1700))
       await route.fulfill({ status: 204, body: '' })
     })
 
-    await setupChat(page)
+    const chat = await setupChat(page)
+    runtime = await installRunningRuntime(page, chat)
+    runtime.start()
     await send(page, 'expired broadcast')
 
     await expect(page.locator('[data-chat-surface="painted"] .chat__scroll')).toContainText('final response from db', {
@@ -392,10 +402,12 @@ test.describe('Stream reconnection', () => {
       const realFetch = window.fetch.bind(window)
       let streamCount = 0
       window.__streamFetchCount = 0
+      window.__streamTargetChatId = null
 
       window.fetch = (input, init) => {
         const url = typeof input === 'string' ? input : (input && input.url) || ''
-        if (!/\/api\/chats\/[0-9a-f-]+\/stream$/.test(url)) {
+        const match = url.match(/\/api\/chats\/([0-9a-f-]+)\/stream$/)
+        if (!match || match[1] !== window.__streamTargetChatId) {
           return realFetch(input, init)
         }
 
@@ -420,7 +432,13 @@ test.describe('Stream reconnection', () => {
       }
     })
 
-    await setupChat(page)
+    const chat = await setupChat(page)
+    const runtime = await installRunningRuntime(page, chat)
+    runtime.start()
+    await page.evaluate(chatId => {
+      window.__streamTargetChatId = chatId
+      window.__streamFetchCount = 0
+    }, chat.id)
     await send(page, 'quick flip with healthy socket')
     await expect(page.locator('[data-chat-surface="painted"] button[aria-label="Stop"]')).toHaveCount(1)
     await page.waitForFunction(() => window.__streamFetchCount === 1)
@@ -667,20 +685,26 @@ test.describe('Stream reconnection', () => {
       const realFetch = window.fetch.bind(window)
       let streamCount = 0
       window.__failedStreamFetches = 0
+      window.__streamTargetChatId = null
       window.fetch = (input, init) => {
         const url = typeof input === 'string' ? input : (input && input.url) || ''
-        if (/\/api\/chats\/[0-9a-f-]+\/stream$/.test(url)) {
-          streamCount++
-          window.__failedStreamFetches = streamCount
-          return Promise.reject(new TypeError('simulated mobile radio drop'))
+        const match = url.match(/\/api\/chats\/([0-9a-f-]+)\/stream$/)
+        if (!match || match[1] !== window.__streamTargetChatId) {
+          return realFetch(input, init)
         }
-        return realFetch(input, init)
+        streamCount++
+        window.__failedStreamFetches = streamCount
+        return Promise.reject(new TypeError('simulated mobile radio drop'))
       }
     })
 
     const chat = await setupChat(page)
     const runtime = await installRunningRuntime(page, chat)
     runtime.start()
+    await page.evaluate(chatId => {
+      window.__streamTargetChatId = chatId
+      window.__failedStreamFetches = 0
+    }, chat.id)
     await send(page, 'retry button layout')
 
     await expect(page.locator('[data-chat-surface="painted"] .connection-status__retry')).toBeVisible({

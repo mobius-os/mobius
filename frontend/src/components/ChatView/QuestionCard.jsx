@@ -39,7 +39,19 @@ const CUSTOM_ANSWER_MAX_HEIGHT = 180
 
 
 function resizeCustomAnswer(textarea) {
+  if (!textarea) return
   autoGrowTextarea(textarea, CUSTOM_ANSWER_MAX_HEIGHT)
+  const card = textarea.closest('.qcard')
+  const scroll = textarea.closest('.chat__scroll')
+  const form = textarea.closest('.chat')?.querySelector('.chat__form')
+  if (!card || !scroll || !form) return
+  const overlap = card.getBoundingClientRect().bottom
+    - form.getBoundingClientRect().top
+  if (overlap <= 0) return
+  const zoom = Number.parseFloat(
+    getComputedStyle(document.documentElement).zoom,
+  ) || 1
+  scroll.scrollTop += overlap / zoom
 }
 
 

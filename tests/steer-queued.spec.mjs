@@ -49,6 +49,15 @@ function runningRuntimeFixture() {
 }
 
 async function installRuntimeFixture(page, runtime) {
+  const chatId = await page.locator('[data-chat-surface="painted"][data-chat-id]')
+    .getAttribute('data-chat-id')
+  if (chatId) {
+    const initialRevision = await page.evaluate(async id => {
+      const response = await fetch(`/api/chats/${id}/runtime`)
+      return Number((await response.json()).runtime_revision || 0)
+    }, chatId)
+    runtime.revision = Math.max(runtime.revision, initialRevision)
+  }
   await page.route(/\/api\/chats\/[0-9a-f-]+\/runtime(?:\?.*)?$/, route => (
     route.fulfill({
       status: 200,
@@ -154,6 +163,7 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
             status: 'steered',
             chat_id: 'mock',
             pending_messages: [],
+            cut_deferred: true,
           }),
         })
       }
@@ -185,18 +195,29 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
       })
     })
 
-    // Hold the stream open so the turn keeps streaming (sending=true) for
-    // the whole test — pattern from handleStop-sync-ordering.spec.mjs.
-    await page.route(/\/api\/chats\/[0-9a-f-]+\/stream$/, async (route) => {
-      await new Promise(r => setTimeout(r, 8000))
-      await route.fulfill({
-        status: 200,
-        headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' },
-        body: sseBody([
-          { type: 'catch_up_done' },
-          { type: 'text', content: 'streaming response...' },
-        ]),
-      }).catch(() => {})
+    // Hold a real readable response open. A delayed route.fulfill does not
+    // establish the live transport before the second send under full-suite load.
+    await page.addInitScript(() => {
+      const realFetch = window.fetch.bind(window)
+      const encoder = new TextEncoder()
+      window.fetch = (input, init) => {
+        const url = typeof input === 'string' ? input : input?.url || ''
+        if (!/\/api\/chats\/[0-9a-f-]+\/stream$/.test(url)) {
+          return realFetch(input, init)
+        }
+        return Promise.resolve(new Response(new ReadableStream({
+          start(controller) {
+            controller.enqueue(encoder.encode(
+              'data: {"type":"catch_up_done"}\n\n'
+              + 'data: {"type":"text","content":"streaming response..."}\n\n',
+            ))
+          },
+          cancel() {},
+        }), {
+          status: 200,
+          headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' },
+        }))
+      }
     })
 
     await setupChat(page)
@@ -833,6 +854,7 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
     let durableMessages = []
     let durablePending = []
     let durableRunning = false
+    let runtimeRevision = 0
 
     await page.route(/\/api\/chats\/[0-9a-f-]+\/messages$/, async (route) => {
       const req = route.request()
@@ -841,6 +863,7 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
       messagePosts.push(body)
       if (body.force_steer) {
         durablePending = []
+        runtimeRevision += 1
         return route.fulfill({
           status: 202,
           contentType: 'application/json',
@@ -855,12 +878,14 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
         }
         durableMessages = [message]
         durableRunning = true
+        runtimeRevision += 1
         return route.fulfill({
           status: 202,
           contentType: 'application/json',
           body: JSON.stringify({
             status: 'started',
             message,
+            run_id: 'steer-held-position-run',
           }),
         })
       }
@@ -868,6 +893,7 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
         role: 'user', content: body.content, ts: QUEUE_TS, cid: body.cid,
       }
       durablePending = [pendingMessage]
+      runtimeRevision += 1
       return route.fulfill({
         status: 202,
         contentType: 'application/json',
@@ -939,6 +965,10 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
     await setupChat(page)
     const chat = await createTaggedChat(page, 'steer-held-position')
     expect(chat?.id).toBeTruthy()
+    runtimeRevision = await page.evaluate(async chatId => {
+      const response = await fetch(`/api/chats/${chatId}/runtime`)
+      return Number((await response.json()).runtime_revision || 0)
+    }, chat.id)
     await page.route(new RegExp(`/api/chats/${chat.id}\\?limit=`), route => {
       if (route.request().method() !== 'GET') return route.fallback()
       return route.fulfill({
@@ -951,7 +981,7 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
           messages: durableMessages,
           total: durableMessages.length,
           offset: 0,
-          runtime_revision: durableRunning ? 1 : 0,
+          runtime_revision: runtimeRevision,
           running: durableRunning,
           run_id: 'steer-held-position-run',
           run_status: durableRunning ? 'running' : 'completed',
@@ -964,7 +994,7 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
         status: 200,
         contentType: 'application/json',
         body: JSON.stringify({
-          runtime_revision: durableRunning ? 1 : 0,
+          runtime_revision: runtimeRevision,
           running: durableRunning,
           run_id: 'steer-held-position-run',
           run_status: durableRunning ? 'running' : 'completed',

@@ -90,6 +90,9 @@ test.describe('shell update — owner-controlled navigation', () => {
     await expect(page.locator(
       `[data-chat-id="${current.id}"][data-chat-surface="painted"]`,
     )).toBeVisible({ timeout: 8000 })
+    await page.getByRole('button', { name: 'Toggle navigation' }).click()
+    await expect(page.locator(`[data-drawer-key="chat:${target.id}"]`)).toBeVisible()
+    await page.getByRole('button', { name: 'Toggle navigation' }).click()
     await resetLoadCount(page)
 
     releaseEvents()

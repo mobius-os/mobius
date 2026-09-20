@@ -103,7 +103,10 @@ async function mountScenario(page) {
 
   let messages = seedHistory()
   let running = false
-  let runtimeRevision = 0
+  let runtimeRevision = await page.evaluate(async chatId => {
+    const response = await fetch(`/api/chats/${chatId}/runtime`)
+    return Number((await response.json()).runtime_revision || 0)
+  }, chat.id)
   let sendCount = 0
 
   await installStreamMock(page, liveItems)

@@ -6,7 +6,9 @@ test('question projections share one lifecycle revision until the modeled transi
   const routes = []
   const question = await mockPendingQuestionState({
     route: async (pattern, handler) => routes.push({ pattern, handler }),
-  }, 'question-a')
+  }, 'question-a', { questionBlock: {
+    type: 'question', questions: [{ question: 'Choose', options: [{ label: 'A' }] }],
+  } })
   const request = async (suffix, method = 'GET', body = {}) => {
     const url = `http://fixture/api/chats/abcdef${suffix}`
     const handler = routes.find(route => route.pattern.test(url)).handler
@@ -27,7 +29,10 @@ test('question projections share one lifecycle revision until the modeled transi
   assert.equal(runtime.runtime_revision, 1)
   assert.equal(runtime.pending_question_id, 'question-a')
   assert.equal((await request('/runtime')).runtime_revision, 1)
-  question.markAnswered()
+  question.markAnswered({ Choose: 'A' })
+  const answeredDetail = await request('')
+  assert.deepEqual(answeredDetail.messages[0].blocks[0].answers, { Choose: 'A' })
+  assert.equal(answeredDetail.total, 1)
   const answered = await request('/runtime')
   assert.equal(answered.runtime_revision, 2)
   assert.equal(answered.pending_question_id, null)

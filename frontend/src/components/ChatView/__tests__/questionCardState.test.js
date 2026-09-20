@@ -209,3 +209,9 @@ test('terminal restart actions show upstream status detail without dead submissi
     assert.doesNotMatch(html, /qcard__submit|qcard__opts/)
   }
 })
+
+test('growing a focused custom answer reveals only the part hidden by the composer', () => {
+  assert.match(component, /const overlap = card\.getBoundingClientRect\(\)\.bottom[\s\S]*- form\.getBoundingClientRect\(\)\.top/)
+  assert.match(component, /if \(overlap <= 0\) return/)
+  assert.match(component, /scroll\.scrollTop \+= overlap \/ zoom/)
+})

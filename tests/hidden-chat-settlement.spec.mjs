@@ -10,6 +10,11 @@ test('returning to a retained hidden chat settles a missed terminal stream event
   await page.goto(BASE, { waitUntil: 'domcontentloaded' })
   const a = await createTaggedChat(page, 'hidden-settlement')
   const b = await createTaggedChat(page, 'visible-sibling')
+  let runtimeRevision = await page.evaluate(async chatId => {
+    const response = await fetch(`/api/chats/${chatId}/runtime`)
+    return Number((await response.json()).runtime_revision || 0)
+  }, a.id)
+  runtimeRevision += 1
   let ws = paneModel.setViewMode(paneModel.seedFromFlatTabs([
     { kind: 'chat', id: a.id }, { kind: 'chat', id: b.id },
   ]), 'panes')
@@ -49,7 +54,7 @@ test('returning to a retained hidden chat settles a missed terminal stream event
     if (route.request().method() !== 'GET') return route.fallback()
     return route.fulfill({ json: {
       id: a.id, title: 'Hidden settlement', provider: 'codex',
-      messages, total: messages.length, offset: 0, runtime_revision: running ? 1 : 2, running,
+      messages, total: messages.length, offset: 0, runtime_revision: runtimeRevision, running,
       run_id: runId, run_status: running ? 'running' : 'completed',
       pending_messages: [], pending_question_id: null,
     } })
@@ -57,7 +62,7 @@ test('returning to a retained hidden chat settles a missed terminal stream event
   await page.route(new RegExp(`/api/chats/${a.id}/runtime(?:\\?.*)?$`), route => {
     if (!running && messages.length > 1) idleRuntimeReads += 1
     return route.fulfill({ json: {
-      runtime_revision: running ? 1 : 2, running,
+      runtime_revision: runtimeRevision, running,
       run_id: runId, run_status: running ? 'running' : 'completed',
       pending_messages: [], pending_question_id: null,
     } })
@@ -84,6 +89,7 @@ test('returning to a retained hidden chat settles a missed terminal stream event
     blocks: [{ type: 'text', content: 'The saved final answer.' }],
   }]
   running = false
+  runtimeRevision += 1
   await page.evaluate(chatId => window.emitSettlementEvent({ type: 'chat_run_finished', chatId }), a.id)
   await page.getByRole('button', { name: 'Show all panes' }).click()
   await expect.poll(() => idleRuntimeReads).toBeGreaterThan(0)

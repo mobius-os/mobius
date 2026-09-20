@@ -8,8 +8,9 @@
  */
 import { testChatAgentSettings } from './_chatTestPrerequisites.mjs'
 
-export async function mockPendingQuestionState(page, questionId) {
+export async function mockPendingQuestionState(page, questionId, { questionBlock = null } = {}) {
   let pendingQuestionId = null
+  let answered = null
   let turnStarted = false
   let runtimeRevision = 0
 
@@ -52,8 +53,11 @@ export async function mockPendingQuestionState(page, questionId) {
         : {
             ...runtime,
             id: path.split('/').at(-1),
-            messages: [],
-            total: 0,
+            messages: answered && questionBlock ? [{
+              role: 'assistant',
+              blocks: [{ ...questionBlock, question_id: questionId, answers: answered }],
+            }] : [],
+            total: answered && questionBlock ? 1 : 0,
             offset: 0,
             provider: 'claude',
             ...testChatAgentSettings(),
@@ -71,9 +75,10 @@ export async function mockPendingQuestionState(page, questionId) {
   )
 
   return {
-    markAnswered() {
+    markAnswered(answers = null) {
       if (pendingQuestionId !== null) runtimeRevision += 1
       pendingQuestionId = null
+      answered = answers
     },
   }
 }

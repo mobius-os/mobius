@@ -233,7 +233,7 @@ test.describe('Bug 1: AskUserQuestion', () => {
           body: '{"detail":"That choice is no longer valid"}',
         })
       }
-      pendingQuestion.markAnswered()
+      pendingQuestion.markAnswered(body.answers)
       return fulfillStartedPost(route)
     })
     pendingQuestion = await mockPendingQuestionState(page, 'q-retry-answer')
@@ -262,17 +262,18 @@ test.describe('Bug 1: AskUserQuestion', () => {
 
 
   test('an unavailable answer stays queued and replays the same choice', async ({ page }) => {
+    const questionBlock = {
+      type: 'question',
+      question_id: 'q-queued-answer',
+      questions: [{
+        question: 'Choose a launch lane',
+        header: 'Launch',
+        multiSelect: false,
+        options: [{ label: 'Careful' }, { label: 'Fast' }],
+      }],
+    }
     const questionStream = [
-      `data: ${JSON.stringify({
-        type: 'question',
-        question_id: 'q-queued-answer',
-        questions: [{
-          question: 'Choose a launch lane',
-          header: 'Launch',
-          multiSelect: false,
-          options: [{ label: 'Careful' }, { label: 'Fast' }],
-        }],
-      })}\n\n`,
+      `data: ${JSON.stringify(questionBlock)}\n\n`,
       'data: {"type":"done"}\n\n',
     ].join('')
     let streamCount = 0
@@ -293,10 +294,10 @@ test.describe('Bug 1: AskUserQuestion', () => {
           body: '{"detail":"temporarily unavailable"}',
         })
       }
-      pendingQuestion.markAnswered()
+      pendingQuestion.markAnswered(body.answers)
       return fulfillStartedPost(route)
     })
-    pendingQuestion = await mockPendingQuestionState(page, 'q-queued-answer')
+    pendingQuestion = await mockPendingQuestionState(page, 'q-queued-answer', { questionBlock })
 
     await newChat(page)
     await sendMessage(page, 'Ask for a launch lane')
