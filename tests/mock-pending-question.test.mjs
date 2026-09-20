@@ -27,10 +27,20 @@ test('question projections share one lifecycle revision until the modeled transi
   assert.equal(runtime.runtime_revision, 1)
   assert.equal(runtime.pending_question_id, 'question-a')
   assert.equal((await request('/runtime')).runtime_revision, 1)
-  question.markAnswered()
+  const answeredMessages = [{
+    id: 'question-message', role: 'assistant', ts: 123,
+    blocks: [{ type: 'question', question_id: 'question-a', answers: { Next: 'Continue' } }],
+  }]
+  question.markAnswered({ messages: answeredMessages })
   const answered = await request('/runtime')
   assert.equal(answered.runtime_revision, 2)
   assert.equal(answered.pending_question_id, null)
+  assert.equal('messages' in answered, false)
+  const answeredDetail = await request('')
+  assert.deepEqual(answeredDetail.messages, answeredMessages)
+  assert.equal(answeredDetail.total, 1)
+  assert.equal(answeredDetail.runtime_revision, answered.runtime_revision)
+  assert.deepEqual(detail.messages, [])
   question.markAnswered()
   assert.equal((await request('')).runtime_revision, 2)
   // A response captured before the answer retains its earlier cursor.

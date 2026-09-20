@@ -142,10 +142,9 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
       messagePosts.push(body)
 
       // Force-steer POST: convert the queued message into the live turn.
-      // Respond exactly as the backend does on success — 202 with
-      // {status:"steered"} and the remaining (now empty) server queue.
+      // Admission does not commit the provider cut: the durable reserve stays
+      // in the runtime queue until steered_into_turn is published.
       if (body.force_steer) {
-        runtime.replacePending([])
         await steerGate
         return route.fulfill({
           status: 202,
@@ -153,7 +152,8 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
           body: JSON.stringify({
             status: 'steered',
             chat_id: 'mock',
-            pending_messages: [],
+            cut_deferred: true,
+            pending_messages: runtime.pending,
           }),
         })
       }
@@ -167,6 +167,7 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
           contentType: 'application/json',
           body: JSON.stringify({
             status: 'started',
+            run_id: runtime.runId,
             message: {
               role: 'user', content: body.content, ts: Date.now(), cid: body.cid,
             },
@@ -185,18 +186,29 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
       })
     })
 
-    // Hold the stream open so the turn keeps streaming (sending=true) for
-    // the whole test — pattern from handleStop-sync-ordering.spec.mjs.
-    await page.route(/\/api\/chats\/[0-9a-f-]+\/stream$/, async (route) => {
-      await new Promise(r => setTimeout(r, 8000))
-      await route.fulfill({
-        status: 200,
-        headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' },
-        body: sseBody([
-          { type: 'catch_up_done' },
-          { type: 'text', content: 'streaming response...' },
-        ]),
-      }).catch(() => {})
+    // A deferred provider cut needs a genuinely live stream, not a response
+    // that silently reaches EOF after a wall-clock delay. Keep this browser-
+    // local body open until the test context closes it.
+    await page.addInitScript(() => {
+      const realFetch = window.fetch.bind(window)
+      window.fetch = (input, init) => {
+        const path = new URL(String(input?.url || input), location.href).pathname
+        if (!/^\/api\/chats\/[0-9a-f-]+\/stream$/.test(path)) {
+          return realFetch(input, init)
+        }
+        const body = new ReadableStream({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode(
+              'data: {"type":"catch_up_done"}\n\n'
+                + 'data: {"type":"text","content":"streaming response..."}\n\n',
+            ))
+          },
+        })
+        return Promise.resolve(new Response(body, {
+          status: 200,
+          headers: { 'Content-Type': 'text/event-stream' },
+        }))
+      }
     })
 
     await setupChat(page)
@@ -253,11 +265,18 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
     // (c) Releasing the route acknowledges admission. The provider cut is
     // still deferred in this fixture, so the same inline provisional row stays
     // visible until a later steered_into_turn event would settle it.
+    const admission = page.waitForResponse(response => (
+      /\/messages$/.test(new URL(response.url()).pathname)
+      && response.request().method() === 'POST'
+      && response.request().postDataJSON()?.force_steer === true
+    ))
     releaseSteer()
-    await page.waitForFunction(
-      () => document.querySelectorAll('[data-chat-surface="painted"] .queued__row').length === 0,
-      { timeout: 5000 },
-    )
+    const admitted = await admission
+    expect((await admitted.json()).cut_deferred).toBe(true)
+    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => (
+      requestAnimationFrame(resolve)
+    ))))
+    expect(runtime.pending.map(row => row.cid)).toEqual([queuePost.cid])
     expect(await page.locator('[data-chat-surface="painted"] .queued__row').count()).toBe(0)
     await expect(pendingSteer).toContainText(QUEUED_TEXT)
   })

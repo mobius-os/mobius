@@ -12,6 +12,7 @@ export async function mockPendingQuestionState(page, questionId) {
   let pendingQuestionId = null
   let turnStarted = false
   let runtimeRevision = 0
+  let messages = []
 
   // Register this helper after the test's response mocks. Playwright invokes
   // the newest route first, so fallback preserves the existing POST response
@@ -52,8 +53,8 @@ export async function mockPendingQuestionState(page, questionId) {
         : {
             ...runtime,
             id: path.split('/').at(-1),
-            messages: [],
-            total: 0,
+            messages,
+            total: messages.length,
             offset: 0,
             provider: 'claude',
             ...testChatAgentSettings(),
@@ -71,7 +72,10 @@ export async function mockPendingQuestionState(page, questionId) {
   )
 
   return {
-    markAnswered() {
+    markAnswered({ messages: answeredMessages } = {}) {
+      // Background delivery has no interactive caller to patch its card. Its
+      // authoritative read must include the committed answered question.
+      if (answeredMessages) messages = structuredClone(answeredMessages)
       if (pendingQuestionId !== null) runtimeRevision += 1
       pendingQuestionId = null
     },

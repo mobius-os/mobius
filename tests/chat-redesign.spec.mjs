@@ -262,17 +262,18 @@ test.describe('Bug 1: AskUserQuestion', () => {
 
 
   test('an unavailable answer stays queued and replays the same choice', async ({ page }) => {
+    const question = {
+      type: 'question',
+      question_id: 'q-queued-answer',
+      questions: [{
+        question: 'Choose a launch lane',
+        header: 'Launch',
+        multiSelect: false,
+        options: [{ label: 'Careful' }, { label: 'Fast' }],
+      }],
+    }
     const questionStream = [
-      `data: ${JSON.stringify({
-        type: 'question',
-        question_id: 'q-queued-answer',
-        questions: [{
-          question: 'Choose a launch lane',
-          header: 'Launch',
-          multiSelect: false,
-          options: [{ label: 'Careful' }, { label: 'Fast' }],
-        }],
-      })}\n\n`,
+      `data: ${JSON.stringify(question)}\n\n`,
       'data: {"type":"done"}\n\n',
     ].join('')
     let streamCount = 0
@@ -293,7 +294,10 @@ test.describe('Bug 1: AskUserQuestion', () => {
           body: '{"detail":"temporarily unavailable"}',
         })
       }
-      pendingQuestion.markAnswered()
+      pendingQuestion.markAnswered({ messages: [{
+        id: 'queued-answer-assistant', role: 'assistant', ts: 1700001000000,
+        blocks: [{ ...question, answers: body.answers }],
+      }] })
       return fulfillStartedPost(route)
     })
     pendingQuestion = await mockPendingQuestionState(page, 'q-queued-answer')
