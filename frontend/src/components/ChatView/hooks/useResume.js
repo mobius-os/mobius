@@ -30,14 +30,14 @@ export default function useResume({ chatId, runId, send, onAccepted, onRefresh, 
     attemptRef.current = attempt
     setState({ pending: true, error: '', unavailable: false })
     try {
-      const result = await send('continue', undefined, {
+      const result = await send('', undefined, {
         cid: attempt.cid,
         continuation: 'manual',
         resumeRunId: attempt.runId || undefined,
       })
       if (scopeRef.current !== scope) return false
       attemptRef.current = null
-      // No optimistic continuation: only the server's accepted durable row
+      // No optimistic continuation: only the server's accepted durable run
       // can supersede the recovery card or mark the turn as resumed.
       onAccepted(result)
       setState({ pending: false, error: '', unavailable: false })

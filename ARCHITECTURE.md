@@ -1093,12 +1093,14 @@ turns to finish; a no-progress pass falls back to the ordinary retry cadence.
 An app-initiated restart continuation carries the same app id into the next
 durable run unless a newer owner send is already queued and becomes the next
 run's actor; provider-limit retries remain owner-only, and app work queued after
-a park is never absorbed. The provider still receives a synthetic user
-`continue`, but the durable row is tagged
-`kind="auto_continuation"` with reason `restart` or `usage_limit`; the UI, copy
-behavior, title selection, time context, compaction, provider-switch handoff,
-chat-note summarization, and redacted chat logs treat it as a product marker
-rather than owner speech.
+a park is never absorbed. Manual Resume and physical restart, usage-limit, and
+resource recovery persist their product control in `ChatRun.continuation_json`,
+not in `Chat.messages` or `Chat.pending_messages`. Providers receive a temporary
+recovery prompt reconstructed from that exact control. A stable client control
+id makes manual retries idempotent without inventing owner speech. Existing
+transcript-backed recoveries remain readable for safe replay across upgrades;
+generic coordinator continuations retain their exact supplied content and
+replay contract. Goal rollover remains owned by its existing plan/FIFO path.
 
 The sweep is cheap: one indexed due-row query immediately at boot, on
 `chat_run_finished`, and on a 60-second fallback. Startup captures the boot

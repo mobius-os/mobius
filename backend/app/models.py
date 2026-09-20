@@ -401,6 +401,11 @@ class ChatRun(Base):
   # results incorporated without adding a synthetic user transcript row. It
   # remains populated after acknowledgement as the restart/idempotency audit.
   activity_delivery_json = Column(JSON, nullable=True, default=None)
+  # Product-owned continuation control for a physical recovery run. The
+  # provider still receives an ephemeral protocol prompt, but this durable
+  # envelope keeps recovery identity out of Chat.messages/pending_messages so
+  # it can never masquerade as owner speech or a queued owner send.
+  continuation_json = Column(JSON, nullable=True, default=None)
   provider = Column(String(32), nullable=True, default=None)
   # Objective shown by the shell while this exact run is attached to a Goal.
   # This belongs to the run rather than the transcript tail: mid-turn owner
