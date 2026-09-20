@@ -1148,15 +1148,27 @@ test.describe('Scroll position', () => {
       history.back()
     })
 
-    // This fixture deliberately mounts two ~56-paragraph transcripts plus an
-    // image back to back (the decoy chat, then the heavy original on return),
-    // on top of the mocked 220ms detail-fetch delay `returning` adds above. A
-    // bare 3000ms budget leaves too little margin for that render weight under
-    // loaded local Docker runs even though the underlying sync is immediate.
+    // KNOWN FAILURE (root-caused, not fully fixed here): this shell keeps an
+    // open SSE stream, which makes Chromium treat the page as bfcache-
+    // ineligible, so this history.back() lands as a hard document reload
+    // instead of a same-document popstate -- confirmed via temporary console
+    // instrumentation (a `framenavigated` to a bare /shell/ URL fired with NO
+    // popstate at all). useNavigation's resolveInitialNav() now restores from
+    // window.history.state for exactly this case (restoredHistoryRoute, see
+    // useNavigation.js) and was confirmed to compute the correct target chat
+    // id from history.state at boot -- but useWorkspaceSession's persisted
+    // workspace blob is consulted FIRST and wins whenever it's valid
+    // (useNavigation.js only falls through to initialNav.chatId when
+    // `!blobValid`), so the restored blob's decoy-chat tab tree still gets
+    // painted regardless. Widening this timeout does not help (confirmed via
+    // --repeat-each=3: fails identically every time, not a race). Closing
+    // this needs the same history.state-vs-storage precedence fix applied to
+    // useWorkspaceSession's blob restoration, which is a separate subsystem
+    // deserving its own careful pass rather than a guess under this task.
     await page.waitForFunction(
       id => localStorage.getItem('moebius_active_chat') === id,
       chatId,
-      { timeout: 8000 },
+      { timeout: 3000 },
     )
     await page.waitForFunction(id => {
       const painted = document.querySelector(
