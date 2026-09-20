@@ -25,6 +25,20 @@ test('routine activation and stale reviews stay with their UI actions', () => {
   }
 })
 
+test('a predicted overlay conflict stops before Apply and carries its paths', () => {
+  const preview = {
+    target_sha: 'target',
+    activation: { level: 'server_restart', required_actions: ['server_restart'] },
+    blocking_paths: [],
+    conflict_paths: ['backend/app/goal_plans.py'],
+  }
+  assert.match(platformUpdateRepairReason({ preview }), /overlaps.*before Apply/)
+  assert.deepEqual(
+    platformUpdateRepairEvidence({ preview }).conflict_paths,
+    ['backend/app/goal_plans.py'],
+  )
+})
+
 test('external deployment work and failed validation earn agent help', () => {
   for (const level of ['proxy_reload', 'container_recreate', 'host_maintenance']) {
     assert.match(platformUpdateRepairReason({ platform: { activation: { level, required_actions: level === 'live' ? [] : [level] } } }), /deployment settings/)
