@@ -1148,15 +1148,31 @@ test.describe('Scroll position', () => {
       history.back()
     })
 
-    // This fixture deliberately mounts two ~56-paragraph transcripts plus an
-    // image back to back (the decoy chat, then the heavy original on return),
-    // on top of the mocked 220ms detail-fetch delay `returning` adds above. A
-    // bare 3000ms budget leaves too little margin for that render weight under
-    // loaded local Docker runs even though the underlying sync is immediate.
+    // KNOWN FAILURE (root-caused, not fixed here): this shell keeps an open
+    // SSE stream, which makes Chromium treat the page as bfcache-ineligible,
+    // so this history.back() lands as a hard document reload instead of a
+    // same-document popstate -- confirmed via temporary console
+    // instrumentation (a `framenavigated` to a bare /shell/ URL fired with NO
+    // popstate at all). On that hard reload, boot falls back to
+    // moebius_active_chat in localStorage -- which is whichever chat this tab
+    // was LEAVING, not the one Back actually landed on -- because neither
+    // resolveInitialNav() (useNavigation.js) nor useWorkspaceSession's
+    // persisted workspace-blob restore ever consult window.history.state,
+    // the one signal the browser still hands the fresh document that
+    // reflects where Back/Forward actually landed. A `history.state`-aware
+    // fix was tried and reverted: it made resolveInitialNav resolve the
+    // correct chat, but useWorkspaceSession's blob restore is consulted
+    // first and wins whenever a blob exists, so the wrong chat still
+    // painted -- and the same change broke several same-document Back cases
+    // in navigation.spec.mjs that rely on the existing popstate-only
+    // contract. Widening this timeout does not help (confirmed via
+    // --repeat-each=3: fails identically every run, not a race). Fixing this
+    // needs a coordinated change across both restore paths, done as its own
+    // careful pass rather than under this task.
     await page.waitForFunction(
       id => localStorage.getItem('moebius_active_chat') === id,
       chatId,
-      { timeout: 8000 },
+      { timeout: 3000 },
     )
     await page.waitForFunction(id => {
       const painted = document.querySelector(
