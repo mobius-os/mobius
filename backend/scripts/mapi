@@ -12,6 +12,7 @@ parse_option() {
   OPTION_VALUE=""
   OPTION_TAKES_NEXT=false
   OPTION_UNSAFE=false
+  OPTION_INVALID=false
 
   case "$1" in
     -K|--config|--config=*|-L|--location|--location-trusted|\
@@ -45,6 +46,13 @@ parse_option() {
     --max-time=*|--cert=*|--connect-timeout=*|--retry=*|--retry-delay=*|\
     --cacert=*|--key=*)
       OPTION_VALUE_KIND=other; OPTION_VALUE="${1#*=}"; return ;;
+    --fail|--fail-with-body|--silent|--show-error|--include|--head|\
+    --no-buffer|--compressed|--globoff)
+      return ;;
+    --*)
+      OPTION_INVALID=true
+      return
+      ;;
   esac
 
   [[ "$1" == -?* && "$1" != --* ]] || return 0
@@ -61,7 +69,12 @@ parse_option() {
       H) OPTION_VALUE_KIND=header ;;
       d) OPTION_VALUE_KIND=data ;;
       F|T|o|D|w|m|E) OPTION_VALUE_KIND=other ;;
-      *) continue ;;
+      # Boolean short flags used by the documented mapi recipes.  Unknown
+      # flags must fail closed: curl's short-option grammar lets an earlier
+      # value-taking flag consume the remainder, so skipping a character can
+      # make mapi and curl disagree about whether the next argv is a URL.
+      s|S|f|g|i|I|N|v) continue ;;
+      *) OPTION_INVALID=true; return ;;
     esac
     OPTION_VALUE="${options:index+1}"
     if [[ -z "$OPTION_VALUE" ]]; then
@@ -76,13 +89,22 @@ note_option_value() {
   local kind="$1"
   local value="$2"
   case "$kind" in
+    request)
+      if [[ ! "$value" =~ ^[A-Za-z]+$ ]]; then
+        printf '%s\n' \
+          "mapi: request method must contain only HTTP token letters" >&2
+        exit 2
+      fi
+      ;;
     data)
       has_body=true
       ;;
     header)
       local lower_value="${value,,}"
-      if [[ "$value" == @* || "$lower_value" == host:* \
-         || "$lower_value" == :authority:* ]]; then
+      local header_name="${lower_value%%[:;]*}"
+      if [[ "$value" == @* || "$value" == *$'\r'* || "$value" == *$'\n'* \
+         || "$header_name" == host || "$lower_value" == :authority:* \
+         || "$lower_value" == :authority\;* ]]; then
         printf '%s\n' \
           "mapi: refusing an opaque or Host-replacing header with owner auth" >&2
         exit 2
@@ -135,6 +157,11 @@ for argument in "$@"; do
     exit 2
   else
     parse_option "$argument"
+    if $OPTION_INVALID; then
+      printf '%s\n' \
+        "mapi: unsupported curl short option in '$argument'" >&2
+      exit 2
+    fi
     if $OPTION_UNSAFE; then
       printf '%s\n' \
         "mapi: curl option '$argument' can change the authenticated request target" >&2

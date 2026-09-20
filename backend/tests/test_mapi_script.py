@@ -187,6 +187,21 @@ def test_mapi_combined_header_flag_preserves_explicit_content_type(tmp_path: Pat
   assert b"Content-Type: application/json" not in result.curl_arguments
 
 
+def test_mapi_rejects_unknown_short_flag_before_curl_can_reparse_a_url(
+  tmp_path: Path,
+):
+  # curl reads `-AH` as `--user-agent H`, leaving the following value as a
+  # second target.  Treating its H as `--header` instead would consume that
+  # target during validation and then leak the injected owner credential.
+  result = _run_mapi(
+    tmp_path, "/api/ready", "-AH", "https://example.net/collect",
+  )
+
+  assert result.returncode == 2
+  assert result.curl_arguments is None
+  assert "unsupported curl short option" in result.stderr
+
+
 def test_mapi_preserves_an_ordinary_custom_header(tmp_path: Path):
   result = _run_mapi(
     tmp_path,
@@ -207,6 +222,18 @@ def test_mapi_preserves_boolean_curl_options(tmp_path: Path, option: str):
   assert result.curl_arguments[-2:] == [
     option.encode(), b"https://mobius.example/api/ready",
   ]
+
+
+def test_mapi_rejects_long_options_that_can_reverse_its_safe_defaults(
+  tmp_path: Path,
+):
+  result = _run_mapi(
+    tmp_path, "--no-globoff", "/api/{../outside,ready}",
+  )
+
+  assert result.returncode == 2
+  assert result.curl_arguments is None
+  assert "unsupported curl" in result.stderr
 
 
 def test_mapi_supports_safe_short_aliases_already_allowed_by_long_name(
@@ -252,7 +279,14 @@ def test_mapi_rejects_options_that_can_change_the_authenticated_target(
 
 @pytest.mark.parametrize(
   "header",
-  ["Host: example.net", ":authority: example.net", "@/tmp/headers"],
+  [
+    "Host: example.net",
+    "Host;",
+    ":authority: example.net",
+    ":authority;example.net",
+    "X-Safe: yes\r\nHost: example.net",
+    "@/tmp/headers",
+  ],
 )
 def test_mapi_rejects_uninspectable_or_host_replacing_headers(
   tmp_path: Path,
@@ -263,6 +297,18 @@ def test_mapi_rejects_uninspectable_or_host_replacing_headers(
   assert result.returncode == 2
   assert result.curl_arguments is None
   assert "Host-replacing header" in result.stderr
+
+
+@pytest.mark.parametrize(
+  "method",
+  ["GET /outside HTTP/1.1\r\nX-Ignore:", "GET POST", "GET\nDELETE"],
+)
+def test_mapi_rejects_request_line_injection(tmp_path: Path, method: str):
+  result = _run_mapi(tmp_path, "-X", method, "/api/ready")
+
+  assert result.returncode == 2
+  assert result.curl_arguments is None
+  assert "request method" in result.stderr
 
 
 def test_mapi_streams_literal_json_stdin_without_shell_reencoding(tmp_path: Path):
