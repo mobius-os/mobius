@@ -110,6 +110,7 @@ test('keyboard close never paints a sent row below its pin', async ({ page }) =>
         pending_messages: [],
         pending_question_id: null,
         runtime_revision: 0,
+        run_id: sendCount > 0 ? `send-run-${sendCount}` : null,
       }),
     })
   ))
@@ -127,6 +128,7 @@ test('keyboard close never paints a sent row below its pin', async ({ page }) =>
         pending_messages: [],
         pending_question_id: null,
         runtime_revision: 0,
+        run_id: sendCount > 0 ? `send-run-${sendCount}` : null,
         provider: 'codex',
       }),
     })
