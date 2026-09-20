@@ -1867,14 +1867,13 @@ def _auto_resume_run_token(park_token: str) -> str:
   return f"{_AUTO_RESUME_RUN_PREFIX}{digest}"
 
 
-MODEL_CAPACITY_RETRY_DELAY = timedelta(minutes=1)
+MODEL_CAPACITY_RETRY_DELAYS = tuple(
+  timedelta(seconds=seconds) for seconds in (30, 60, 120, 240, 300)
+)
 
 
-def _has_prior_model_capacity_park(
-  db: Session,
-  run: models.ChatRun,
-) -> bool:
-  """Whether this continuation lineage already used its one busy-model retry."""
+def _model_capacity_retry_count(db: Session, run: models.ChatRun) -> int:
+  """Count earlier busy-model parks in this exact continuation lineage."""
   root_id = run.root_run_id or run.id
   return db.query(models.ChatRun.id).filter(
     models.ChatRun.chat_id == run.chat_id,
@@ -1884,7 +1883,14 @@ def _has_prior_model_capacity_park(
     ),
     models.ChatRun.park_reason == "model_capacity",
     models.ChatRun.started_at < run.started_at,
-  ).first() is not None
+  ).count()
+
+
+def _model_capacity_retry_exhausted(db: Session, run: models.ChatRun) -> bool:
+  """Bound automatic busy-model recovery to five attempts with backoff."""
+  return _model_capacity_retry_count(db, run) >= len(
+    MODEL_CAPACITY_RETRY_DELAYS
+  )
 
 
 def _auto_resume_recovery(
@@ -1943,7 +1949,7 @@ def _auto_resume_recovery(
     or (physical.root_run_id or physical.id) != (park.root_run_id or park.id)
   ):
     return None
-  if reason == "model_capacity" and _has_prior_model_capacity_park(db, park):
+  if reason == "model_capacity" and _model_capacity_retry_exhausted(db, park):
     return None
   payload = recover_start_continuation(
     db,
@@ -2439,7 +2445,7 @@ async def sweep_reset_parks(
       return "app-attributed work"
     if _has_unanswered_question(chat):
       return "waiting for an answer"
-    if run.park_reason == "model_capacity" and _has_prior_model_capacity_park(db, run):
+    if run.park_reason == "model_capacity" and _model_capacity_retry_exhausted(db, run):
       return "busy-model retry exhausted"
     policy_enabled = (
       _park_continues_automatically(chat, run)
@@ -3831,14 +3837,17 @@ def _park_exit(
   model_capacity = _is_model_capacity_error_text(error_text)
   failed = bool(error_text) or runner_result is None
   if model_capacity:
+    retry_count = 0
     run_token = getattr(sink, "run_token", None)
     current_run = (
       db.get(models.ChatRun, run_token)
       if db is not None and run_token else None
     )
-    if current_run is not None and _has_prior_model_capacity_park(db, current_run):
+    if current_run is not None:
+      retry_count = _model_capacity_retry_count(db, current_run)
+    if retry_count >= len(MODEL_CAPACITY_RETRY_DELAYS):
       sink.publish(_pause_note(
-        "The selected model is still busy after one automatic retry. "
+        "The selected model is still busy after five automatic retries. "
         "Choose another model, then tap Resume to continue your saved work.",
         kind="model_capacity_exhausted",
         provider=provider_id,
@@ -3846,7 +3855,7 @@ def _park_exit(
       return {"parked": False}
     parked_until = (
       datetime.now(UTC).replace(tzinfo=None)
-      + MODEL_CAPACITY_RETRY_DELAY
+      + MODEL_CAPACITY_RETRY_DELAYS[retry_count]
     )
     sink.publish(_park_event(
       "The selected model is busy right now. Your work is safe; "

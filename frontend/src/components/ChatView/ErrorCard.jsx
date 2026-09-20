@@ -70,7 +70,7 @@ export default function ErrorCard({
         : (vm.resetLabel ? `Usage resets ${vm.resetLabel}` : 'Usage limit reached')
     : null
   const recoveryCopy = vm.modelCapacity
-    ? 'Your work is safe. Möbius will try once more in about a minute. If the model stays busy, choose another model and Resume.'
+    ? 'Your work is safe. Möbius will retry with increasing pauses, up to five times. If the model stays busy, you can choose another model and Resume.'
     : vm.parked
     ? autoResume
       ? `Your work is safe. ${recoveryCredit?.label ? `${recoveryCredit.label}. ` : ''}Möbius will continue automatically at the reset.`
@@ -121,7 +121,7 @@ export default function ErrorCard({
             </div>
             <div className="chat__recovery-copy">
               {vm.modelCapacityExhausted
-                ? 'One automatic retry was used. Choose another model, then Resume to continue your saved work.'
+                ? 'Five automatic retries were used. Choose another model, then Resume to continue your saved work.'
                 : vm.goalHandoff
                 ? 'The agent stopped before arranging the next step. Your progress is saved. Resume to continue this Goal.'
                 : block.pause?.kind === 'restart'
