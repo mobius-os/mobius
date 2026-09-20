@@ -15,6 +15,12 @@ from app.applied_app_runtime import runtime_parent
 from app.config import get_settings
 
 
+def test_capabilities_document_cross_lane_concurrency():
+  contract = (Path(__file__).parents[2] / "CAPABILITIES.md").read_text()
+  assert "Private and public requests use separate serialized lanes" in contract
+  assert "the app must\nprovide its own file or database locking" in contract
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("blocked_at", ["app", "global"])
 async def test_queued_service_pins_runtime_until_cancelled(monkeypatch, blocked_at):
