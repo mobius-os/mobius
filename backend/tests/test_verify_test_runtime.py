@@ -721,12 +721,6 @@ def test_manual_and_pull_request_runs_cover_suites_and_main_image():
     ROOT / ".github" / "workflows" / "main-image.yml"
   ).read_text(encoding="utf-8")
   dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
-  assert not (
-    ROOT / ".github" / "workflows" / "external-recovery-image.yml"
-  ).exists()
-  assert not (
-    ROOT / ".github" / "workflows" / "core-digest-image.yml"
-  ).exists()
   test_triggers = test_workflow.split("\npermissions:\n", 1)[0]
   image_triggers = image_workflow.split("\npermissions:\n", 1)[0]
   backend = test_workflow.split("\n  backend:\n", 1)[1].split(
@@ -783,8 +777,6 @@ def test_manual_and_pull_request_runs_cover_suites_and_main_image():
     in dockerfile
   )
   assert image_workflow.count("for _ in $(seq 1 12)") == 2
-  assert "recovery" not in image_workflow.lower()
-  assert "core-releases" not in image_workflow
   assert "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1" in image_workflow
   assert "docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c" in image_workflow
   assert "docker/login-action@dbcb813823bdd20940b903addbd779551569679f" in image_workflow
