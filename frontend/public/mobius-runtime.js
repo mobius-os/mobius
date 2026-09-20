@@ -1038,7 +1038,10 @@ function makeStorage({ appId, appInstanceId = null, getToken, isOnline = null })
 	async function fetchValueWithVersion(path, kind = "json", wantVersion = false) {
 		const headers = {};
 		if (wantVersion) headers["X-Mobius-Version"] = "1";
-		const res = await fetchWithAppToken(getToken, `/api/storage/apps/${appId}/${path}`, { headers }, fetchBounded);
+		const res = await fetchWithAppToken(getToken, `/api/storage/apps/${appId}/${path}`, {
+			headers,
+			...wantVersion ? { cache: "no-store" } : {}
+		}, fetchBounded);
 		const version = canonicalStorageVersion(res.headers && typeof res.headers.get === "function" ? res.headers.get("ETag") || res.headers.get("etag") || void 0 : void 0);
 		if (res.status === 404) return {
 			value: null,
