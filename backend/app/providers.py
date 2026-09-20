@@ -937,8 +937,15 @@ class MobiusProvider(BaseProvider):
       'model_providers.mobius_trial.base_url="http://127.0.0.1:8765/v1"',
       'model_providers.mobius_trial.env_key="MOBIUS_LOCAL_BROKER_KEY"',
       'model_providers.mobius_trial.wire_api="responses"',
-      "model_providers.mobius_trial.request_max_retries=0",
-      "model_providers.mobius_trial.stream_max_retries=0",
+      # A stream that dies mid-answer must not kill the turn: the
+      # subscription gateway enforces a 60s no-token ceiling upstream, so one
+      # silence can otherwise lose a healthy long turn. Codex re-issues the
+      # request when the stream breaks and the runner logs the SDK's
+      # will_retry notice rather than showing it to the owner. Bounded at 2 so
+      # a persistently broken route cannot spend the owner's balance on an
+      # unbounded retry loop.
+      "model_providers.mobius_trial.request_max_retries=2",
+      "model_providers.mobius_trial.stream_max_retries=2",
       "features.enable_request_compression=false",
       "features.remote_compaction_v2=false",
       "features.apps=false",
