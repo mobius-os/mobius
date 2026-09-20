@@ -1394,6 +1394,9 @@ test.describe('Connection recovery', () => {
           ],
           total: 2,
           offset: 0,
+          running: false,
+          pending_messages: [],
+          runtime_revision: 0,
         }),
       })
     })
