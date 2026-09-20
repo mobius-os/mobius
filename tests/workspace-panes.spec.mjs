@@ -136,21 +136,42 @@ async function exposeChatsInDrawer(page, chatIds) {
  *  how (c) proves the wrapper's contentWindow identity survived. */
 async function mockApps(page, apps) {
   const state = { requests: 0 }
+  const appRows = apps.map(a => ({
+    id: a.id, name: a.name, description: '', compiled_path: '',
+    chat_id: a.chatId ?? null, source_dir: null, pinned_at: null,
+    cross_app_access: 'none', share_with_apps: 'none', offline_capable: false,
+    updated_at: '2026-07-12T12:00:00Z',
+  }))
+  // Preview placement and its durable composer CTA read distinct owning
+  // resources. A list row alone is not evidence of a chat's accepted build.
+  await page.route(/\/api\/apps\/chat-artifacts\/[^/?]+$/, route => {
+    if (route.request().method() !== 'GET') return route.fallback()
+    const chatId = decodeURIComponent(new URL(route.request().url()).pathname.split('/').at(-1))
+    return route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      json: appRows.filter(app => String(app.chat_id) === chatId).map(app => ({
+        app, touched_at: app.updated_at, seen_at: null,
+      })),
+    })
+  })
   await page.route(/\/api\/apps\/(\?.*)?$/, route => {
     if (route.request().method() !== 'GET') return route.fallback()
     state.requests += 1
     return route.fulfill({
       status: 200,
       contentType: 'application/json',
-      body: JSON.stringify(apps.map(a => ({
-        id: a.id, name: a.name, description: '', compiled_path: '',
-        chat_id: a.chatId ?? null, source_dir: null, pinned_at: null,
-        cross_app_access: 'none', share_with_apps: 'none', offline_capable: false,
-        updated_at: '2026-07-12T12:00:00Z',
-      }))),
+      json: appRows,
     })
   })
   for (const a of apps) {
+    await page.route(new RegExp(`/api/apps/${a.id}(?:\\?.*)?$`), route => {
+      if (route.request().method() !== 'GET') return route.fallback()
+      return route.fulfill({
+        status: 200, contentType: 'application/json',
+        json: appRows.find(app => app.id === a.id),
+      })
+    })
     await page.route(new RegExp(`/api/apps/${a.id}/frame`), route => route.fulfill({
       status: 200, contentType: 'text/html',
       body: '<!doctype html><html><body style="margin:0;min-height:100vh" '
