@@ -44,6 +44,17 @@ test('an idle runtime snapshot cannot retire an unacknowledged fresh send', asyn
       }),
     })
   })
+  // Without this, the real backend's SSE endpoint gets hit for a chat with
+  // no active run (the /messages POST above is entirely intercepted and
+  // never reaches the server), closes almost immediately, and onStreamEnd's
+  // continues:false branch calls fetchMessages({force:true, authoritative:
+  // true}) on its own -- a completely different source of the exact
+  // detailReadsAfterSend this test measures, independent of the runtime-poll
+  // race it's named for. Hold it open for the same window as the POST.
+  await page.route(new RegExp(`/api/chats/${chat.id}/stream$`), async route => {
+    await releaseAcknowledgement.promise
+    await route.fulfill({ status: 204, body: '' })
+  })
   await page.route(new RegExp(`/api/chats/${chat.id}/runtime(?:\\?.*)?$`), async route => {
     if (raceArmed) await sendStarted.promise
     await route.fulfill({
