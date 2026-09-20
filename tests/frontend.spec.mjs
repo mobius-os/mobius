@@ -1075,10 +1075,14 @@ test.describe('Scroll position', () => {
     // remains outside Chromium's native lazy-load range at the initial tail.
     // Bring it into range before recording the settled reading coordinate.
     await page.locator('[data-chat-surface="painted"] .md-image').scrollIntoViewIfNeeded()
+    // This fixture's two ~56-paragraph transcripts plus image round-trip made
+    // this decode wait marginal under loaded local Docker runs even with no
+    // artificial fetch delay on the initial image — widened alongside the
+    // other checkpoints in this test for the same reason.
     await page.waitForFunction(() => {
       const img = document.querySelector('[data-chat-surface="painted"] .md-image')
       return !!img?.complete && img.naturalWidth > 0
-    }, undefined, { timeout: 10000 })
+    }, undefined, { timeout: 20000 })
     await page.evaluate(() => {
       const el = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
       const target = document.querySelector('[data-key="entry-anchor"]')
