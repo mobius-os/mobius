@@ -6135,7 +6135,7 @@ def test_update_check_final_fence_preserves_concurrent_pending_conflict(
   upstream_v2 = JSX_MULTI.replace("ORIGINAL TITLE", "UPSTREAM TITLE")
   manifest_v2 = {**manifest_v1, "version": "2.0.0"}
 
-  async def advance_during_fetch(_manifest_url):
+  async def advance_during_fetch(_manifest_url, *, strict=True):
     current_upstream = app_git.record_upstream(
       repo,
       {"index.jsx": upstream_v2.encode()},
@@ -6169,6 +6169,135 @@ def test_update_check_final_fence_preserves_concurrent_pending_conflict(
   assert payload["pending_update_state"] == "needs_resolution"
   assert payload["needs_resolution"] is True
   assert payload["upstream_version"] == "2.0.0"
+
+
+def test_update_check_ignores_invalid_preview_metadata_but_install_rejects_it(
+  client, auth, bypass_url_validation,
+):
+  """Unused preview metadata cannot hide source changes or permit installs."""
+  base = "https://uc-nit.test/repo/"
+  m = {**MANIFEST_NEWS, "id": "uc-nit"}
+  r1 = _install_v1(client, auth, base, m, JSX)
+  assert r1.status_code == 201, r1.text
+  app_id = r1.json()["id"]
+
+  # Upstream now carries a project-template preview with no source/builder.
+  # This fails the full manifest contract but is otherwise fetch-shaped.
+  bad_preview_manifest = {
+    **m,
+    "project_templates": [{
+      "id": "doc",
+      "name": "Doc",
+      "previews": [{"id": "p", "name": "Preview"}],
+    }],
+  }
+  # Same-bytes entry → a real False, never a null degrade.
+  same = _update_check(client, auth, base, app_id, bad_preview_manifest, JSX)
+  assert same.status_code == 200, same.text
+  assert same.json()["update_available"] is False
+  assert same.json()["upstream_version"] == "1.0.0"
+
+  # Changed entry → a real True; the comparison ran despite the manifest nit.
+  changed = _update_check(
+    client, auth, base, app_id, bad_preview_manifest, JSX.replace("ok", "NEW"),
+  )
+  assert changed.status_code == 200, changed.text
+  assert changed.json()["update_available"] is True
+
+  responses = _check_responses(base, bad_preview_manifest, JSX)
+  with patch(
+    "app.install.httpx.AsyncClient",
+    side_effect=_fake_async_client(responses),
+  ):
+    preview = client.get(
+      f"/api/apps/{app_id}/update-candidate-preview", headers=auth,
+    )
+    install = client.post("/api/apps/install", headers=auth, json={
+      "manifest_url": base + "mobius.json",
+    })
+  assert preview.status_code == 400, preview.text
+  assert install.status_code == 400, install.text
+  assert "previews[0].source" in preview.json()["detail"]
+  assert "previews[0].source" in install.json()["detail"]
+
+
+@pytest.mark.parametrize("invalid", [
+  None, [], "manifest", 1,
+  {"id": None}, {"id": []}, {"version": {}},
+  {"entry": "other.jsx"}, {"entry": "../index.jsx"},
+  {"source_files": "utils.js"}, {"source_files": [None]},
+  {"source_files": ["https://other.test/utils.js"]},
+  {"source_files": ["../utils.js"]},
+  {"source_files": ["%2e%2e/utils.js"]},
+  {"source_files": ["lib%2futils.js"]},
+  {"source_files": ["index.jsx"]},
+  {"source_files": [".gitignore"]},
+  {"source_files": ["static/private.js"]},
+  {"source_files": ["utils.js"] * 51},
+  {"source_files": ["job.py"], "schedule": {"job": "job.py"}},
+  {"schedule": []}, {"schedule": {"job": []}},
+  {"schedule": {"job": "../job.py"}},
+  {"previous_id": []}, {"previous_manifest_url": []},
+  {"previous_id": "old-id", "previous_manifest_url": "http://other.test/"},
+  {"package_id": {}}, {"moved_to": {}},
+])
+def test_discovery_rejects_malformed_identity_and_source_before_fetch(invalid):
+  from fastapi import HTTPException
+  from app import install
+
+  manifest = {**MANIFEST_NEWS, **invalid} if isinstance(invalid, dict) else invalid
+  manifest_url = "https://invalid.test/mobius.json"
+  fetch = AsyncMock(return_value=json.dumps(manifest).encode())
+  with patch("app.install._http_get", fetch):
+    with pytest.raises(HTTPException) as exc:
+      asyncio.run(install.fetch_upstream_source(manifest_url, strict=False))
+  assert exc.value.status_code == 400
+  assert fetch.await_count == 1
+  assert fetch.await_args.args[1] == manifest_url
+
+
+@pytest.mark.parametrize("invalid", [
+  [], {"id": None}, {"version": {}}, {"source_files": ["../private.js"]},
+  {"previous_id": "old-id", "previous_manifest_url": []},
+])
+def test_update_check_malformed_candidate_degrades_to_unknown(
+  client, auth, bypass_url_validation, invalid,
+):
+  base = "https://invalid-candidate.test/repo/"
+  manifest = {**MANIFEST_NEWS, "id": "uc-malformed"}
+  installed = _install_v1(client, auth, base, manifest, JSX)
+  assert installed.status_code == 201, installed.text
+  candidate = {**manifest, **invalid} if isinstance(invalid, dict) else invalid
+  fetch = AsyncMock(return_value=json.dumps(candidate).encode())
+  with patch("app.install._http_get", fetch):
+    response = client.get(
+      f"/api/apps/{installed.json()['id']}/update-check",
+      headers=auth,
+      params={"manifest_url": base + "mobius.json"},
+    )
+  assert response.status_code == 200, response.text
+  assert response.json()["update_available"] is None
+  assert response.json()["upstream_version"] is None
+  assert fetch.await_count == 1
+
+
+def test_discovery_retains_source_byte_budget(bypass_url_validation, monkeypatch):
+  from fastapi import HTTPException
+  from app import install
+
+  base = "https://source-budget.test/"
+  manifest = {**MANIFEST_NEWS, "source_files": ["one.js", "two.js"]}
+  responses = _check_responses(
+    base, manifest, JSX, sources={"one.js": b"123", "two.js": b"456"},
+  )
+  monkeypatch.setattr(install, "_SOURCE_FILES_TOTAL_MAX", 5)
+  with patch(
+    "app.install.httpx.AsyncClient", side_effect=_fake_async_client(responses),
+  ):
+    with pytest.raises(HTTPException) as exc:
+      asyncio.run(install.fetch_upstream_source(base + "mobius.json", strict=False))
+  assert exc.value.status_code == 400
+  assert "source_files exceed" in exc.value.detail
 
 
 def test_update_check_changed_file_is_true(
@@ -6350,7 +6479,7 @@ def test_update_check_releases_db_connection_before_remote_fetch(
 
   baseline = checked_out_connections()
 
-  async def _slow_remote_fetch(_url):
+  async def _slow_remote_fetch(_url, *, strict=True):
     assert checked_out_connections() <= baseline, (
       "update-check kept its request DB connection checked out while "
       "starting remote work"

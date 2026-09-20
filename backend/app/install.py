@@ -75,6 +75,7 @@ from app.manifest_contract import (
   STATIC_ASSETS_COUNT_MAX as _CONTRACT_STATIC_ASSETS_COUNT_MAX,
   STATIC_ASSETS_TOTAL_MAX as _CONTRACT_STATIC_ASSETS_TOTAL_MAX,
   SYSTEM_PROMPT_MAX_BYTES as _CONTRACT_SYSTEM_PROMPT_MAX_BYTES,
+  REQUIRED_STRING_FIELDS,
   ManifestContractError,
   job_interpreter,
   require_executable_job,
@@ -258,6 +259,24 @@ def _validate_manifest(m: dict) -> None:
   # contract used by both installation and pre-publication validation. Keep the
   # adapter here limited to translating its exception into the HTTP boundary.
   return
+
+
+def _validate_discovery_manifest(manifest: dict) -> None:
+  """Keep shared identity/source guards without gating on unused metadata.
+
+  Discovery compares source bytes, not installation readiness. Project
+  templates, permissions, and other installation-only declarations must not
+  hide that comparison, but identity, response metadata, source paths, and
+  fetch bounds still use the install contract. Keep the original manifest
+  intact for the source review digest; this projection is only validation.
+  """
+  if not isinstance(manifest, dict):
+    raise HTTPException(400, "Manifest must be a JSON object.")
+  fields = (
+    *REQUIRED_STRING_FIELDS, "package_id", "moved_to", "previous_id",
+    "previous_manifest_url", "source_files", "schedule",
+  )
+  _validate_manifest({key: manifest[key] for key in fields if key in manifest})
 
 
 def _derive_raw_base(manifest_url: str) -> str:
@@ -2033,14 +2052,16 @@ class FetchedUpstream:
   job_bytes: bytes | None
 
 
-async def fetch_upstream_source(manifest_url: str) -> FetchedUpstream:
+async def fetch_upstream_source(
+  manifest_url: str, *, strict: bool = True,
+) -> FetchedUpstream:
   """Fetch a manifest and its source files read-only — no install, DB, or git.
 
   The read-only twin of `install_from_manifest`'s fetch phase: GET the manifest
   at `manifest_url`, then the entry JSX, every declared `source_files` sibling,
   and the schedule job script — exactly the files install records on the
   per-app `upstream` branch. Reuses the same `_http_get` (SSRF-validated,
-  size-capped, manual-redirect) and `_validate_manifest` that install uses, so
+  size-capped, manual-redirect) source requests that install uses, so
   the fetched bytes match install's byte-for-byte and a later content compare
   against the recorded upstream tree is apples-to-apples.
 
@@ -2050,7 +2071,11 @@ async def fetch_upstream_source(manifest_url: str) -> FetchedUpstream:
   appear on the `upstream` branch an update-check compares against.
 
   Raises HTTPException on any fetch or validation failure. The caller decides
-  whether that is a hard error or a degrade-to-unknown."""
+  whether that is a hard error or a degrade-to-unknown.
+
+  By default, the full install contract applies. Only passive update detection
+  passes ``strict=False`` to ignore installation-only metadata; identity and
+  source validation remain shared with install."""
   # follow_redirects=False — _http_get walks the chain manually so every hop is
   # re-validated against SSRF, matching install_from_manifest's client setup.
   async with httpx.AsyncClient(
@@ -2061,7 +2086,10 @@ async def fetch_upstream_source(manifest_url: str) -> FetchedUpstream:
       manifest = json.loads(raw)
     except json.JSONDecodeError as exc:
       raise HTTPException(400, f"Manifest is not valid JSON: {exc}")
-    _validate_manifest(manifest)
+    if strict:
+      _validate_manifest(manifest)
+    else:
+      _validate_discovery_manifest(manifest)
     raw_base = _normalize_raw_base(_derive_raw_base(manifest_url))
 
     entry_bytes = await _http_get(
