@@ -561,6 +561,8 @@ test('finish submits the exact reviewed plan if server availability changes befo
   await updates.getByRole('button', { name: 'Finish update', exact: true }).click()
   await request
   const dialog = page.getByRole('dialog', { name: 'Finish update' })
+  await expect(dialog).toBeVisible()
+  await expect(dialog.getByRole('button', { name: 'Update now', exact: true })).toBeEnabled()
   // Change the fixture's server-owned availability after review. Submission
   // must still carry the immutable reviewed plan rather than deriving a new
   // target from mutable status.
