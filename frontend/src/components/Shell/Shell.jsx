@@ -27,6 +27,7 @@ import { captureLayoutSpace, clientPointToLayout } from '../../lib/layoutSpace.j
 import { makeAppChatController } from '../../lib/appChatControl.js'
 import { handleAppProjectsRequest } from '../../lib/appProjectControl.js'
 import { parseNotificationTarget } from '../../lib/notificationTarget.js'
+import { requestChatQuestionReveal } from '../../lib/chatQuestionReveal.js'
 import { recordClientError } from '../../lib/errorLog.js'
 import useSystemEventStream from '../../hooks/useSystemEventStream.js'
 import useTheme from '../../hooks/useTheme.js'
@@ -2518,6 +2519,7 @@ export default function Shell({ onInitialVisualReady }) {
     if (target?.view === 'canvas') {
       void openAppWithIntent(target.app, target.intent)
     } else if (target?.view === 'chat') {
+      if (target.focusQuestion === true) requestChatQuestionReveal(target.chatId)
       navToRef.current('chat', { chatId: target.chatId })
       if (target.focusComposer === true && supportsDesktopPaneComposerFocus()) {
         requestComposer(target.chatId, { focus: true })
@@ -4857,6 +4859,9 @@ export default function Shell({ onInitialVisualReady }) {
               <PaneChatView
                 chatId={chatId}
                 paneId={paneId}
+                focusPendingQuestion={deepLink?.view === 'chat'
+                  && String(deepLink.chatId) === String(chatId)
+                  && deepLink.focusQuestion === true}
                 newChatSession={newChatSession}
                 onNewChatSubmit={queueDraftFirstNewChat}
                 onNewChatRetry={retryDraftFirstNewChat}
