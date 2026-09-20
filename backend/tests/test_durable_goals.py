@@ -289,3 +289,33 @@ def test_corrupt_plan_never_authorizes_automatic_handoff(db, chat):
   handoff = goal_terminal_handoff(db, chat.id, run.id)
   assert handoff is not None
   assert handoff.automatic_allowed is False
+
+
+@pytest.mark.parametrize("status", [[], {}], ids=["list", "object"])
+def test_malformed_task_status_remains_repairable_without_auto_handoff(db, chat, status):
+  goal, run = work(db, chat, task_status=status)
+  goal.revision = 2
+  run.goal_plan_revision_at_admission = 1
+  db.commit()
+
+  assert serialize_plan(db, run, goal) is None
+  assert presented_goal(db, chat.id)["status"] == "active"
+  handoff = goal_terminal_handoff(db, chat.id, run.id)
+  assert handoff is not None
+  assert handoff.automatic_allowed is False
+  with pytest.raises(GoalPlanError, match="unreadable"):
+    update_goal_record(db, run, goal, 2, result="Cannot complete malformed work")
+  assert goal.status == "open"
+
+  with pytest.raises(GoalPlanError, match="invalid status"):
+    replace_plan(db, physical=run, root=goal, expected_revision=2, tasks=[{
+      "id": "deploy", "title": "Deploy", "status": status, "depends_on": [],
+    }])
+  repaired_tasks = [{
+    "id": "deploy", "title": "Deploy", "status": "completed", "depends_on": [],
+  }]
+  with pytest.raises(GoalPlanConflict, match="changed"):
+    replace_plan(db, physical=run, root=goal, expected_revision=1, tasks=repaired_tasks)
+  replace_plan(db, physical=run, root=goal, expected_revision=2, tasks=repaired_tasks)
+  update_goal_record(db, run, goal, 3, result="Verified repaired work")
+  assert goal.status == "completed"

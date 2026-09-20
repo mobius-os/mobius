@@ -93,7 +93,7 @@ def normalize_tasks(raw_tasks: Any) -> list[dict[str, Any]]:
       raise GoalPlanError(f"duplicate task id: {task_id}")
     ids.add(task_id)
     status = raw.get("status", "pending")
-    if status not in TASK_STATUSES:
+    if not isinstance(status, str) or status not in TASK_STATUSES:
       raise GoalPlanError(f"invalid status for {task_id}: {status}")
     depends_on = raw.get("depends_on", [])
     if not isinstance(depends_on, list) or not all(
@@ -851,7 +851,13 @@ def replace_plan(
     and isinstance(root.plan_json.get("tasks"), list)
     else None
   )
-  if current_tasks and normalize_tasks(current_tasks) == normalized:
+  try:
+    current_normalized = normalize_tasks(current_tasks)
+  except GoalPlanError:
+    # An invalid saved plan cannot be an identical no-op, but a fully
+    # validated replacement must still be able to repair it.
+    current_normalized = None
+  if current_normalized == normalized:
     # Identical saves must not manufacture progress and thereby authorize a
     # fresh provider turn. The no-op UPDATE retains the optimistic CAS: a
     # stale writer still conflicts even when its payload matches current data.
