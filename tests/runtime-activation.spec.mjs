@@ -3,9 +3,12 @@ import { installMockAgentProvider, testChatAgentSettings } from './_chatTestPrer
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
 const CHAT = 'eeeeeeee-1111-4111-8111-111111111111'
+const ANCHOR = 'accepted-assistant'
+const DRAFT = 'Keep my unconfirmed message'
+const ATTEMPT_KEY = `mobius:send-attempt:v1:${CHAT}`
 
 for (const revision of [undefined, '3']) {
-  test(`invalid activation revision ${String(revision)} shows retry without caching rejected history`, async ({ page }) => {
+  test(`invalid activation revision ${String(revision)} preserves owner state and retries without caching rejected history`, async ({ page }) => {
     const errors = []
     page.on('pageerror', error => errors.push(error.message))
     let response = 'invalid'
@@ -34,7 +37,9 @@ for (const revision of [undefined, '3']) {
         return route.fulfill({ json: {
           ...chat,
           runtime_revision: response === 'valid' ? 3 : revision,
+          requested_anchor_found: response === 'valid',
           messages: [{
+            id: response === 'valid' ? ANCHOR : 'rejected-assistant',
             role: 'assistant',
             content: response === 'valid' ? 'Accepted history' : 'Rejected history',
             ts: 1700000000000,
@@ -48,12 +53,32 @@ for (const revision of [undefined, '3']) {
     })
     await installMockAgentProvider(page)
     await serveRecoveryBuild(page)
+    await page.addInitScript(({ chat, anchor, draft, attemptKey }) => {
+      localStorage.setItem('chat-reading-position', JSON.stringify({
+        [chat]: { kind: 'ANCHOR_AT', key: anchor, offset: 0, at: Date.now() },
+      }))
+      sessionStorage.setItem(attemptKey, JSON.stringify({
+        version: 1, chatId: chat, cid: 'unconfirmed-send',
+        draftIdentity: 'unconfirmed-draft', text: draft,
+        transportContent: draft, attachments: [],
+      }))
+    }, { chat: CHAT, anchor: ANCHOR, draft: DRAFT, attemptKey: ATTEMPT_KEY })
     await page.goto(`${BASE}/shell/?chat=${CHAT}`, { waitUntil: 'domcontentloaded' })
     const surface = page.locator('[data-chat-surface="painted"]')
     const error = surface.getByText("Couldn't load this chat.")
+    const assertOwnerStatePreserved = async () => {
+      expect(await page.evaluate(chat =>
+        JSON.parse(localStorage.getItem('chat-reading-position') || '{}')[chat]?.key, CHAT,
+      )).toBe(ANCHOR)
+      expect(await page.evaluate(key =>
+        JSON.parse(sessionStorage.getItem(key) || 'null')?.text, ATTEMPT_KEY,
+      )).toBe(DRAFT)
+      await expect(surface.getByRole('textbox', { name: 'Message Möbius…' })).toHaveValue(DRAFT)
+    }
     await expect(error).toBeVisible()
     await expect(surface.getByText('Rejected history', { exact: true })).toHaveCount(0)
     expect(errors).toEqual([])
+    await assertOwnerStatePreserved()
 
     // A failed retry must still show the load error. If the rejected detail
     // polluted the cache, this path would instead present it as offline history.
@@ -63,6 +88,8 @@ for (const revision of [undefined, '3']) {
     await expect.poll(() => reads).toBeGreaterThan(previousReads)
     await expect(error).toBeVisible()
     await expect(surface.getByText('Rejected history', { exact: true })).toHaveCount(0)
+
+    await assertOwnerStatePreserved()
 
     response = 'valid'
     await surface.getByRole('button', { name: 'Retry', exact: true }).click()

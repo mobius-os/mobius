@@ -2544,6 +2544,7 @@ export default function ChatView({
           `/chats/${chatId}/runtime`,
           'CHAT_RUNTIME_FAILED',
         )
+        requireRuntimeTransition(runtime)
         // A terminal background refresh can win while this tiny runtime read is
         // in flight. Re-read the cache before accepting reuse so an older
         // captured object can never overwrite the fresher publication.
@@ -2567,6 +2568,9 @@ export default function ChatView({
           `/chats/${chatId}?limit=20&compact=1${anchorParam}`,
           'CHAT_LOAD_FAILED',
         )
+        // A rejected response cannot retire a reading coordinate or supply
+        // authoritative evidence about a restored failed send.
+        requireRuntimeTransition(runtime)
         const runtimeAnchorMatch = anchorMatchIn(runtime)
         if (activationAnchorKey && runtime.requested_anchor_found === true) {
           if (!runtimeAnchorMatch) {
