@@ -24,6 +24,7 @@
  */
 import { test, expect } from '@playwright/test'
 import { attachCleanup, createTaggedChat } from './_chatTracker.mjs'
+import { testChatAgentSettings } from './_chatTestPrerequisites.mjs'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
 
@@ -966,7 +967,8 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
         body: JSON.stringify({
           id: chat.id,
           title: chat.title,
-          provider: 'codex',
+          provider: 'claude',
+          ...testChatAgentSettings(),
           messages: durableMessages,
           total: durableMessages.length,
           offset: 0,
