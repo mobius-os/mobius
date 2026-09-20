@@ -13,6 +13,7 @@ from types import SimpleNamespace
 from app import models, schemas
 from app.chat_context import (
   CLI_SLASH_COMMANDS,
+  MOBIUS_SLASH_COMMANDS,
   _build_time_context,
   _chat_has_goal_intent,
   _goal_clear_requested,
@@ -200,9 +201,10 @@ def test_slash_command_registry_parity():
   offered = _frontend_slash_command_names(source)
 
   assert offered, f"no commands parsed from {registry} — did its shape change?"
-  assert offered == set(CLI_SLASH_COMMANDS), (
+  dispatched = set(CLI_SLASH_COMMANDS) | set(MOBIUS_SLASH_COMMANDS)
+  assert offered == dispatched, (
     "composer menu and backend dispatch disagree: "
-    f"menu={sorted(offered)} backend={sorted(CLI_SLASH_COMMANDS)}"
+    f"menu={sorted(offered)} backend={sorted(dispatched)}"
   )
 
 

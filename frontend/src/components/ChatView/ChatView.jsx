@@ -68,6 +68,7 @@ import useComposerDraftState from './hooks/useComposerDraftState.js'
 import useChatRuntimePolicy from './hooks/useChatRuntimePolicy.js'
 import useOffscreenNudge, { useNudgeTargetRef } from './hooks/useOffscreenNudge.js'
 import ChatInputBar from './ChatInputBar.jsx'
+import { compactFailureInput, mobiusChatCommand } from './slashCommands.js'
 import { hasSendablePayload } from './composerSubmission.js'
 import AgentContextInspector from './AgentContextInspector.jsx'
 import ChatSummaryViewer from './ChatSummaryViewer.jsx'
@@ -629,6 +630,10 @@ export default function ChatView({
   )
   const [fileDropActive, setFileDropActive] = useState(false)
   const fileDragDepthRef = useRef(0)
+  // A "/compact" submission is a chat action, not a turn: it rewrites the live
+  // context instead of asking the model anything.
+  const [compactingChat, setCompactingChat] = useState(false)
+  const compactingChatRef = useRef(false)
   const [embeddedRunActive, setEmbeddedRunActive] = useState(false)
   // A counter is only a render wake-up; deadline elapsed is derived directly
   // from the current card's reset timestamp below, so a newly loaded card can
@@ -3923,6 +3928,40 @@ export default function ChatView({
     patchQuestionAnswers,
   ])
 
+  // "/compact" never becomes a message. It asks the backend to replace this
+  // chat's live context with a fresh briefing and reset the provider session;
+  // the visible transcript is untouched and the platform renders the stored
+  // compaction as its own "Context compacted" card.
+  async function runCompactCommand(instructions = '', submittedInput = '/compact') {
+    if (!chatId || provisionalNewChat) {
+      setSendFailure('There’s no chat context to compact yet.')
+      return
+    }
+    if (compactingChatRef.current) return
+    if (isProviderSwitchBlocking(chatId)) return
+    compactingChatRef.current = true
+    setCompactingChat(true)
+    setComposerInput('')
+    setSendFailure(null)
+    try {
+      await api.chats.compact(chatId, { instructions })
+      await fetchMessages({ force: true })
+    } catch (err) {
+      setComposerInput(compactFailureInput(inputValueRef.current, submittedInput))
+      setSendFailure(sendFailureMessage(err, { online: getOnlineSnapshot() }))
+    } finally {
+      compactingChatRef.current = false
+      setCompactingChat(false)
+    }
+  }
+
+  function dispatchMobiusChatCommand(composed) {
+    const command = mobiusChatCommand(composed)
+    if (!command) return false
+    void runCompactCommand(command.instructions, composed)
+    return true
+  }
+
   function handleSubmit(e) {
     e.preventDefault()
     if (isProviderSwitchBlocking(chatId)) return
@@ -3930,12 +3969,16 @@ export default function ChatView({
       setModelSelectionRequest(request => request + 1)
       return
     }
-    doSend(input.trim())
+    const composed = input.trim()
+    if (dispatchMobiusChatCommand(composed)) return
+    doSend(composed)
   }
 
   async function handleProvisionalNewChatSubmit(e) {
     e.preventDefault()
-    if (!provisionalNewChat || newChatSession?.submitted || !input.trim()) return
+    const composed = input.trim()
+    if (!provisionalNewChat || newChatSession?.submitted || !composed) return
+    if (dispatchMobiusChatCommand(composed)) return
     await settingsSaveTailRef.current
     onNewChatSubmit?.(input)
   }
@@ -3948,6 +3991,8 @@ export default function ChatView({
       return
     }
     if (submitSteerInFlightRef.current) return
+    const composed = input.trim()
+    if (dispatchMobiusChatCommand(composed)) return
     submitSteerInFlightRef.current = true
     void doSend(input.trim(), { directSteer: true })
       .finally(() => { submitSteerInFlightRef.current = false })
@@ -6114,6 +6159,7 @@ export default function ChatView({
           canRequestSteer={canRequestSteer}
           canSubmitSteer={canSubmitSteer}
           sendFailure={sendFailure}
+          notice={compactingChat ? 'Compacting this chat’s context…' : null}
           submissionBlocked={providerSwitching || !!newChatSession?.submitted}
           questionBlocked={hasPendingQuestion && !localAnswerIntents.some(record => record.body?.question_id === answerableQuestionId)}
           pendingFiles={pendingFiles}

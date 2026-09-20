@@ -34,7 +34,39 @@ export const SLASH_COMMANDS = [
     detail: 'Runs until the goal holds. Clear it from the Goal rail.',
     providers: ['claude', 'codex'],
   },
+  {
+    name: 'compact',
+    summary: 'Compact this chat',
+    detail: 'Refresh live context; add guidance after the command. The transcript stays.',
+  },
 ]
+
+/**
+ * Commands Möbius handles itself instead of handing to the model.
+ *
+ * `/goal` is dispatched by the CLI (the backend keeps the token at position 0
+ * so Claude/Codex see it). `/compact` is not a prompt at all — it is a chat
+ * action: the platform rewrites the chat's live context and resets the provider
+ * session. It is dispatched to the backend's compaction endpoint, never sent as
+ * prose. Both lists are still pinned to the backend by
+ * test_slash_command_registry_parity, so a menu entry can never silently
+ * degrade into a message.
+ */
+export const MOBIUS_CHAT_COMMANDS = ['/compact']
+
+/** The Möbius chat command and its optional guidance, or null. */
+export function mobiusChatCommand(text) {
+  const value = (text ?? '').trim()
+  if (!value) return null
+  const match = value.match(/^\/compact(?:\s+([\s\S]*))?$/)
+  if (!match) return null
+  return { name: '/compact', instructions: (match[1] || '').trim() }
+}
+
+/** Restore a failed compact command unless the owner has already typed anew. */
+export function compactFailureInput(currentInput, submittedInput) {
+  return currentInput || submittedInput
+}
 
 /**
  * The command fragment being typed, or null when the composer isn't picking one.
