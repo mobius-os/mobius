@@ -462,7 +462,7 @@ def _validate_local_identity(
 
 
 def _apply_explicit_package_runtime(
-  db: Session, app: models.App, manifest: dict, *, package_icon: bytes | None,
+  app: models.App, manifest: dict, *, package_icon: bytes | None,
 ) -> None:
   """Persist every live field owned by an explicitly accepted Store package.
 
@@ -507,7 +507,6 @@ def _apply_explicit_package_runtime(
   app.project_templates_json = manifest.get("project_templates") or None
   service = manifest.get("service")
   app.service_id = install._manifest_service_id(manifest, app=app)
-  install._sync_service_aliases(db, app=app, manifest=manifest)
   effective_manifest = dict(manifest)
   # The reviewed Store updater preserves these two live fields when an older
   # manifest omits them. Normalize the accepted local package against the same
@@ -521,7 +520,7 @@ def _apply_explicit_package_runtime(
 
 
 def _apply_local_manifest_runtime(
-  db: Session, app: models.App, manifest: dict, *, package_icon: bytes | None,
+  app: models.App, manifest: dict, *, package_icon: bytes | None,
 ) -> None:
   """Apply owner-authored metadata without granting server permissions.
 
@@ -552,7 +551,6 @@ def _apply_local_manifest_runtime(
   app.project_templates_json = manifest.get("project_templates") or None
   service = manifest.get("service")
   app.service_id = install._manifest_service_id(manifest, app=app)
-  install._sync_service_aliases(db, app=app, manifest=manifest)
   if isinstance(service, dict):
     service = dict(service)
     service.setdefault("id", app.service_id)
@@ -775,11 +773,11 @@ async def apply_source_revision(
         )
         if store_managed and accept_local_package:
           _apply_explicit_package_runtime(
-            db, app, manifest, package_icon=package_icon,
+            app, manifest, package_icon=package_icon,
           )
         else:
           _apply_local_manifest_runtime(
-            db, app, manifest, package_icon=package_icon,
+            app, manifest, package_icon=package_icon,
           )
       if chat_id is not None:
         app.chat_id = chat_id
@@ -852,6 +850,14 @@ async def apply_source_revision(
         # only when the accepted Git tree and compiled bytes are ready.
         db.add(app)
         db.flush()
+      if manifest is not None:
+        # Alias rows belong to the same durable revision as the App row, but
+        # they must not begin SQLite's single-writer transaction before the
+        # accepted Git tree and runtime have finished preparing. Starting the
+        # DELETE during manifest projection held that lock across those slow
+        # operations and made unrelated chat writes exhaust busy_timeout.
+        from app import install
+        install._sync_service_aliases(db, app=app, manifest=manifest)
       applied_app_runtime.publish_runtime(app, runtime_staged)
       runtime_staged = None
       app_staged = _compiled_dir() / f"app-{app.id}.js.staging"

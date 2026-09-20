@@ -138,6 +138,47 @@ def test_new_app_compile_does_not_hold_sqlite_write_lock(
     verify.close()
 
 
+def test_existing_app_acceptance_does_not_hold_sqlite_write_lock(
+  client, auth, monkeypatch,
+):
+  """Slow Git acceptance must not block unrelated durable owner work."""
+  source = _source()
+  created = _apply(client, auth, source)
+  assert created.status_code == 200, created.text
+  (source / "index.jsx").write_text(
+    "export default function App() { return <div>second</div> }\n"
+  )
+  concurrent_chat_id = "chat-created-during-app-acceptance"
+  real_git_operation = app_apply._git_operation
+
+  async def accept_while_chat_is_created(label, fn, *args):
+    if label == "commit":
+      concurrent = SessionLocal()
+      try:
+        concurrent.connection().exec_driver_sql("PRAGMA busy_timeout=50")
+        concurrent.add(models.Chat(
+          id=concurrent_chat_id,
+          title="Concurrent chat",
+          messages=[],
+          pending_messages=[],
+        ))
+        concurrent.commit()
+      finally:
+        concurrent.close()
+    return await real_git_operation(label, fn, *args)
+
+  monkeypatch.setattr(app_apply, "_git_operation", accept_while_chat_is_created)
+
+  updated = _apply(client, auth, source)
+
+  assert updated.status_code == 200, updated.text
+  verify = SessionLocal()
+  try:
+    assert verify.get(models.Chat, concurrent_chat_id) is not None
+  finally:
+    verify.close()
+
+
 def test_apply_updates_multifile_revision_once(client, auth, db):
   source = _source()
   created = _apply(client, auth, source)

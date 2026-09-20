@@ -3778,14 +3778,13 @@ export default function Shell({ onInitialVisualReady }) {
     flushSync(() => {
       newChatPresentationRef.current = presentation
       setNewChatPresentation(presentation)
-      applyModeDestination({
-        view: 'chat',
-        chatId,
-        appId: null,
-        paneId: ws.focusedPaneId,
-      })
+      // This owner action is a real navigation destination, not only a
+      // workspace projection. Let the navigation boundary retag an open
+      // drawer entry or push one ordinary history entry so Back can return to
+      // the chat the owner left, while still mounting the UUID-backed composer
+      // synchronously inside this tap.
+      navTo('chat', { chatId, paneId: ws.focusedPaneId })
     })
-    closeDrawer(modalDrawerOpen ? { preserveModalUntilTraversal: true } : undefined)
     requestComposer(chatId, { focus: true, restoreExistingDraft: true })
     void settleDraftFirstNewChat(presentation)
   }
