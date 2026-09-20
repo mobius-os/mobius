@@ -213,7 +213,7 @@ test('the rate-limit card keeps automatic recovery and an explicit early retry',
     'the in-card action has a dedicated layout')
   assert.doesNotMatch(settingsView, /auto_resume_on_limit|Auto.?resume/i,
     'the removed global automatic option must not reappear in Settings')
-  assert.match(chatSettingsPanel, /Automatically continue after usage limits/,
+  assert.match(chatSettingsPanel, /Automatically continue<br \/>after usage limits/,
     'the paid-usage policy remains manageable in chat settings')
   assert.doesNotMatch(chatSettingsPanel, /Continue after planned restarts/,
     'restart continuation is always on and exposes no toggle')
