@@ -1080,7 +1080,13 @@ def test_restart_continues_a_then_normal_completion_delivers_queued_b(
     assert asyncio.run(resume()) is True
 
   assert len(started) == 1
-  assert started[0]["messages"][-1].content == "continue"
+  expected_recovery_prompt = {
+    "manual": "Resume the interrupted owner work from its saved state.",
+    "automatic": (
+      "Resume the interrupted owner work after the planned server restart."
+    ),
+  }[recovery]
+  assert started[0]["messages"][-1].content == expected_recovery_prompt
   assert all(row.content != "Answer B" for row in started[0]["messages"])
   assert _chat(cid)["pending"] == [queued]
   resumed_token = started[0]["run_token"]
