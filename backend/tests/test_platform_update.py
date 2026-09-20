@@ -2937,6 +2937,29 @@ def test_update_preview_excludes_local_edits(clone_env):
   assert preview["available"] is True
   assert "LINE_C = 333" in preview["diff"]  # upstream change is shown
   assert "LINE_A = 111" not in preview["diff"]  # local edit is excluded
+  assert preview["conflict_paths"] == []
+
+
+def test_update_preview_predicts_overlay_conflict_without_mutating_live_clone(
+  clone_env,
+):
+  origin, platform = clone_env
+  served = _local_commit(platform, edits={
+    "backend/app/main.py": _MAIN_PY.replace("LINE_A = 1", "LINE_A = 111"),
+  })
+  _advance_origin(origin, edits={
+    "backend/app/main.py": _MAIN_PY.replace("LINE_A = 1", "LINE_A = 222"),
+  })
+  pu._fetch(platform)
+  worktrees_before = _git(platform, "worktree", "list", "--porcelain").stdout
+
+  preview = pu.platform_update_preview(platform)
+
+  assert preview["conflict_paths"] == ["backend/app/main.py"]
+  assert _served_sha(platform) == served
+  assert _git(platform, "status", "--porcelain").stdout == ""
+  assert _git(platform, "worktree", "list", "--porcelain").stdout == worktrees_before
+  assert not pu.CONFLICT_FLAG.exists()
 
 
 def test_update_preview_reports_file_status(clone_env):

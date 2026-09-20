@@ -15,6 +15,9 @@ export function platformUpdateRepairReason({ preview, platform, rebuild, error =
   if (preview?.blocking_paths?.length || errorCode === 'local_runtime_changes') {
     return 'This update needs help preserving your local changes.'
   }
+  if (preview?.conflict_paths?.length) {
+    return 'This update overlaps your local changes and needs help before Apply.'
+  }
   const level = (preview || platform)?.activation?.level
   if (requiresAgentActivation((preview || platform)?.activation) || errorCode === 'external_activation_required') {
     return 'Möbius needs to check your deployment settings before this update can finish.'
