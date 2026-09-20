@@ -18,6 +18,7 @@
  */
 import { test, expect } from '@playwright/test'
 import { applyApp } from './app-source.mjs'
+import { FAILURE_GRACE_MS, PROBE_TIMEOUT_MS } from '../frontend/src/lib/connectivityStore.js'
 // Import the cache names rather than repeating them. They are deliberately
 // bumped whenever a cached response's policy changes, so a literal here turns
 // every future bump into an unrelated e2e failure 5 minutes into the run —
@@ -236,7 +237,11 @@ test.describe('Service worker — vite-plugin-pwa contract', () => {
       // The same authoritative response is now the offline fallback.
       await context.setOffline(true)
       await page.reload({ waitUntil: 'domcontentloaded' })
-      await expect(standaloneMarker()).toHaveText(secondMarker)
+      await expect(standaloneMarker()).toHaveText(secondMarker, {
+        // Cold offline boot must first finish the reachability owner's grace
+        // window before selecting the cached app-scoped session.
+        timeout: FAILURE_GRACE_MS + PROBE_TIMEOUT_MS + 5_000,
+      })
     } finally {
       await context.setOffline(false)
       await request.delete(`${BASE}/api/apps/${app.id}`, {
@@ -376,30 +381,34 @@ test.describe('Service worker — vite-plugin-pwa contract', () => {
     const token = await ownerToken(page)
     const headers = { Authorization: `Bearer ${token}` }
     const stamp = Date.now()
+    const staticFiles = {
+      'static/index.html': `<!doctype html><title>Opaque packaged fixture</title><script src="./child.deadbeef.js"></script><main id="packaged">real packaged document</main>`,
+      'static/child.deadbeef.js': `(async()=>{
+        let token=null;try{token=localStorage.getItem('token')}catch(_e){}
+        let parentToken=null;try{parentToken=parent.localStorage.getItem('token')}catch(_e){}
+        let api=-1;try{api=(await fetch('/api/apps/',token?{headers:{Authorization:'Bearer '+token}}:{})).status}catch(_e){}
+        parent.postMessage({type:'opaque-static-sw-ready',origin:self.origin,token,parentToken,api},'*')
+      })()`,
+      'static/hostile.svg': `<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20"><script><![CDATA[
+        (async()=>{let token=null;try{token=localStorage.getItem('token')}catch(_e){}
+        let api=-1;try{api=(await fetch('/api/apps/',token?{headers:{Authorization:'Bearer '+token}}:{})).status}catch(_e){}
+        parent.postMessage({type:'opaque-svg-proof',origin:self.origin,token,api},'*')})()
+      ]]></script><rect width="20" height="20" fill="red"/></svg>`,
+    }
     const { app } = await applyApp(request, token, {
       slug: `opaque-static-sw-${stamp}`,
       name: `Opaque static SW ${stamp}`,
       description: 'Disposable controlled-service-worker fixture.',
       jsxSource: 'export default function App(){return <main>fixture</main>}',
+      files: staticFiles,
+      manifest: {
+        static_assets: Object.fromEntries(Object.keys(staticFiles).map(path => [
+          path.slice('static/'.length), path,
+        ])),
+      },
     })
-    const prefix = `apps/${app.slug}/static`
-    const write = (path, body) => request.put(
-      `${BASE}/api/fs/write?path=${encodeURIComponent(`${prefix}/${path}`)}`,
-      { headers: { ...headers, 'Content-Type': 'text/plain' }, data: body },
-    )
     try {
-      expect((await write('index.html', `<!doctype html><title>Opaque packaged fixture</title><script src="./child.deadbeef.js"></script><main id="packaged">real packaged document</main>`)).ok()).toBeTruthy()
-      expect((await write('child.deadbeef.js', `(async()=>{
-        let token=null;try{token=localStorage.getItem('token')}catch(_e){}
-        let parentToken=null;try{parentToken=parent.localStorage.getItem('token')}catch(_e){}
-        let api=-1;try{api=(await fetch('/api/apps/',token?{headers:{Authorization:'Bearer '+token}}:{})).status}catch(_e){}
-        parent.postMessage({type:'opaque-static-sw-ready',origin:self.origin,token,parentToken,api},'*')
-      })()`)).ok()).toBeTruthy()
-      expect((await write('hostile.svg', `<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20"><script><![CDATA[
-        (async()=>{let token=null;try{token=localStorage.getItem('token')}catch(_e){}
-        let api=-1;try{api=(await fetch('/api/apps/',token?{headers:{Authorization:'Bearer '+token}}:{})).status}catch(_e){}
-        parent.postMessage({type:'opaque-svg-proof',origin:self.origin,token,api},'*')})()
-      ]]></script><rect width="20" height="20" fill="red"/></svg>`)).ok()).toBeTruthy()
+
 
       await page.evaluate(async () => {
         await navigator.serviceWorker.register('/sw.js')
