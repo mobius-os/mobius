@@ -16,6 +16,7 @@ import pytest
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 ENTRYPOINT = SCRIPTS / "entrypoint.sh"
 INSTALL = SCRIPTS.parent / "app" / "install.py"
+CORE = SCRIPTS.parents[1] / "skill" / "core.md"
 
 
 def _load(name: str):
@@ -24,6 +25,13 @@ def _load(name: str):
   assert spec.loader is not None
   spec.loader.exec_module(module)
   return module
+
+
+def test_core_quotes_mapi_targets_with_query_strings():
+  core = CORE.read_text(encoding="utf-8")
+
+  assert 'mapi "/api/chats/<id>?limit=500"' in core
+  assert "mapi /api/chats/<id>?limit=500" not in core
 
 
 def test_chat_summary_boot_does_not_create_graph_scaffolding(tmp_path, monkeypatch):

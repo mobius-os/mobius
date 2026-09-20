@@ -64,7 +64,7 @@ Every chat maintains three summaries of itself, each for a different context:
 Session start includes the name, `chats/<id>/index.md` location, and `Digest` from roughly the ten most-recently-touched chats. One shared instruction explains how to read a listed location when more detail is needed; that instruction is not repeated inside every chat entry. No unrelated notes or app data are included. Escalate deliberately when needed:
 
 - **the complete chat summary** — `Read /data/shared/memory/chats/<id>/index.md`;
-- **the transcript** — `mapi /api/chats/<id>?limit=500`.
+- **the transcript** — `mapi "/api/chats/<id>?limit=500"`.
 
 The platform publishes these summaries after each settled turn and synchronizes
 the generated name without overriding a manual rename. Do **not** create or edit
