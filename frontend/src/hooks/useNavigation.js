@@ -85,6 +85,22 @@ const safeStoredChatId = readStoredChatId
 // inside the manifest scope (`/shell/`).
 export const deepLink = parseShellDeepLink(window.location)
 
+// A hard reload landing on a back/forward-traversed entry (bfcache unavailable
+// — an open SSE stream keeps this shell ineligible in Chromium) gets no
+// popstate at all: the document is torn down and rebuilt from scratch before
+// any script can react. The browser still hands the fresh document that
+// entry's own history.state, though — the one signal here that reflects
+// where Back/Forward actually landed rather than whichever chat this tab
+// last wrote to storage before navigating away. Falling back to storage in
+// this case reopened the chat being left, not the one the owner backed into.
+// NOTE: this alone does not cover a restore where useWorkspaceSession's
+// persisted workspace blob is also valid — that path wins over initialNav.chatId
+// entirely (see the `!blobValid` guards below) and needs its own equivalent fix.
+const restoredHistoryRoute = (() => {
+  const state = window.history.state
+  return isRestorableRoute(state?.route) ? state.route : null
+})()
+
 // Cold-restore of the active view/app (mirror of moebius_active_chat) so a
 // COLD relaunch of the shell PWA lands on the app the user was viewing
 // instead of defaulting to a chat. Only the canvas needs an explicit
@@ -163,6 +179,7 @@ export default function useNavigation({
   const [initialNav] = useState(() => resolveInitialNav({
     shellReload,
     deepLink,
+    restoredHistoryRoute,
     returnView,
     restored,
     storedChatId: safeStoredChatId(),

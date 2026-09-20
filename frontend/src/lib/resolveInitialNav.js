@@ -25,6 +25,10 @@
  * @param {object}  sources
  * @param {?object} sources.shellReload  Parsed `shell-reload` snapshot: {activeView, activeAppId, activeChatId} | null
  * @param {?object} sources.deepLink     Parsed deep-link URL: {view, appId?, chatId?} | null
+ * @param {?object} sources.restoredHistoryRoute A validated route off window.history.state
+ *   for a hard reload that landed directly on a back/forward-traversed entry
+ *   (bfcache unavailable, so no popstate ever fired for this hook to restore
+ *   from): {view, chatId?, appId?} | null
  * @param {?object} sources.returnView   Parsed return-view: {view:'settings'} | null
  * @param {?object} sources.restored     Parsed cold-restore: {view:'canvas', appId} | null
  * @param {?string} sources.storedChatId Last active chat id from localStorage | null
@@ -33,6 +37,7 @@
 export function resolveInitialNav({
   shellReload = null,
   deepLink = null,
+  restoredHistoryRoute = null,
   returnView = null,
   restored = null,
   storedChatId = null,
@@ -51,6 +56,12 @@ export function resolveInitialNav({
     }
   } else if (deepLink?.view) {
     dest = { view: deepLink.view, appId: deepLink.appId ?? null, chatId: deepLink.chatId ?? null }
+  } else if (restoredHistoryRoute?.view) {
+    dest = {
+      view: restoredHistoryRoute.view,
+      appId: restoredHistoryRoute.appId ?? null,
+      chatId: restoredHistoryRoute.chatId ?? null,
+    }
   } else if (returnView?.view) {
     dest = { view: returnView.view, appId: null, chatId: null }
   } else if (restored?.view) {

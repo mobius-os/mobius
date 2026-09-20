@@ -111,6 +111,30 @@ test('precedence: shellReload beats deepLink beats returnView beats restored', (
   assert.equal(resolveInitialNav(onlyRestored).appId, 2) // restored wins
 })
 
+test('restoredHistoryRoute wins a hard-reload back/forward landing over stale storage', () => {
+  const result = resolveInitialNav({
+    restoredHistoryRoute: { view: 'chat', chatId: 'previous-chat' },
+    storedChatId: 'chat-being-left',
+  })
+  assert.equal(result.view, 'chat')
+  assert.equal(result.chatId, 'previous-chat')
+})
+
+test('precedence: deepLink beats restoredHistoryRoute beats returnView', () => {
+  const withDeepLink = resolveInitialNav({
+    deepLink: { view: 'chat', chatId: 'deep-link-chat' },
+    restoredHistoryRoute: { view: 'chat', chatId: 'history-chat' },
+  })
+  assert.equal(withDeepLink.chatId, 'deep-link-chat')
+
+  const withoutDeepLink = resolveInitialNav({
+    restoredHistoryRoute: { view: 'chat', chatId: 'history-chat' },
+    returnView: { view: 'settings' },
+  })
+  assert.equal(withoutDeepLink.view, 'chat')
+  assert.equal(withoutDeepLink.chatId, 'history-chat')
+})
+
 test('canvas chatId falls back to stored home chat when the source carries none', () => {
   const r = resolveInitialNav({ deepLink: { view: 'canvas', appId: 56 }, storedChatId: null })
   assert.equal(r.chatId, null)
