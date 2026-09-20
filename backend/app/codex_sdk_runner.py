@@ -16,8 +16,8 @@ Owner questions have one lifecycle: the provider-neutral Möbius
 `request_question` control saves a durable terminal card, ends the
 current turn, and starts exactly one continuation when answered.
 Codex's provider-native `request_user_input` tool is deliberately
-left disabled, because it waits inside the current provider turn and
-cannot safely share that terminal-card contract. The legacy approval
+disabled at tool registration, because it waits inside the current provider
+turn and cannot safely share that terminal-card contract. The legacy approval
 handler remains installed only as a compatibility guard for a resumed
 provider session that already knows the old tool; new turns never
 advertise it.
@@ -166,6 +166,9 @@ def _codex_config_overrides(
   delegate probe after any @openai/codex bump.
   """
   overrides = list(_CODEX_PROMPT_CONTROL_OVERRIDES)
+  # Disabling only default_mode_request_user_input leaves the native tool
+  # registered for Plan mode. Disable its inventory entry in every mode.
+  overrides.append("tools.experimental_request_user_input.enabled=false")
   if allow_goals:
     # Codex owns goal durability in its thread store. Enabling the native goal
     # extension lets a new app-server resume the logical operation after
@@ -1865,7 +1868,7 @@ async def _run_codex_sdk_turn(
       # set it on `goal_client._sync` after construction. Staying
       # on AsyncCodex (instead of dropping to CodexClient to pass
       # the kwarg natively) keeps ~100 lines of SDK glue out of this
-      # module. See the module docstring for the full reasoning.
+      # module.
       # New turns do not advertise the provider-native tool; durable owner
       # questions use the Möbius request_question MCP control. If a resumed
       # provider session already knows the old tool, the app-server sends an

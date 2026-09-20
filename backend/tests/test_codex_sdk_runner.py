@@ -3598,7 +3598,7 @@ def test_codex_config_overrides_default_pins_agents_namespace(monkeypatch):
   ov = runner._codex_config_overrides()
   assert "features.multi_agent_v2.enabled=true" in ov
   assert "features.multi_agent_v2.tool_namespace=agents" in ov
-  assert "features.default_mode_request_user_input=true" not in ov
+  assert "tools.experimental_request_user_input.enabled=false" in ov
 
 
 def test_codex_config_overrides_kill_switch(monkeypatch):
@@ -3610,6 +3610,7 @@ def test_codex_config_overrides_kill_switch(monkeypatch):
     'instructions=""',
     'developer_instructions=""',
     "project_doc_max_bytes=0",
+    "tools.experimental_request_user_input.enabled=false",
     "features.goals=true",
   ]
   assert not any("multi_agent_v2" in o for o in ov)
@@ -3788,6 +3789,7 @@ def test_codex_delegation_policy_reaches_the_provider_boundary(
   ))
 
   overrides = captured["config"].kwargs["config_overrides"]
+  assert "tools.experimental_request_user_input.enabled=false" in overrides
   assert captured["thread"]["sandbox"] == expected_sandbox
   assert captured["thread"]["approval_mode"] == expected_approval
   control = captured["thread"]["config"]["mcp_servers"]["mobius_control"]

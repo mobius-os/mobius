@@ -1324,8 +1324,9 @@ The generation bump is the key invariant. A dying `_run_chat_impl` rechecks owne
 Owner questions have one advertised lifecycle: the provider-neutral
 `mobius_control.request_question` tool saves a durable terminal card, ends the
 current provider turn, and starts exactly one continuation when the owner
-answers. New Codex turns leave `default_mode_request_user_input` disabled; new
-Claude turns disallow both `AskUserQuestion` and `request_user_input`. This is a
+answers. Codex turns set `tools.experimental_request_user_input.enabled=false`
+to exclude the native tool in every collaboration mode; Claude turns disallow
+both `AskUserQuestion` and `request_user_input`. This is a
 capability invariant rather than a prompting preference: agents cannot choose a
 visually identical provider-native card that waits inside a process and then
 settles without the promised continuation. The provider-native bridges remain
