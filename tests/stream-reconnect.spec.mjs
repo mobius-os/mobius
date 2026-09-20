@@ -183,6 +183,8 @@ test.describe('Stream reconnection', () => {
         status: 200,
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
+          runtime_revision: 1,
+          running: false,
           messages: [
             { role: 'user', content: 'expired broadcast', ts: Date.now() },
             { role: 'assistant', content: 'final response from db' },
@@ -1002,6 +1004,8 @@ test.describe('Stream reconnection', () => {
       },
     ]
     const runtimeState = {
+      runtime_revision: 1,
+      run_id: 'frozen-question-run',
       running: true,
       active_goal_objective: GOAL,
       pending_messages: [],

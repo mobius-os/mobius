@@ -76,6 +76,8 @@ test('terminal cursor removal keeps followed geometry unchanged', async ({ page 
       status: 200,
       contentType: 'application/json',
       body: JSON.stringify({
+        runtime_revision: 1,
+        run_id: 'cursor-run',
         running: true,
         active_goal_objective: null,
         pending_messages: [],
@@ -93,6 +95,8 @@ test('terminal cursor removal keeps followed geometry unchanged', async ({ page 
         messages: [userMessage],
         total: 1,
         offset: 0,
+        runtime_revision: 1,
+        run_id: 'cursor-run',
         running: true,
         pending_messages: [],
         pending_question_id: null,

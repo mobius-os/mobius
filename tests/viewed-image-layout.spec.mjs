@@ -58,6 +58,7 @@ async function verifyColdImageLayout(page, viewport) {
       status: 200,
       contentType: 'application/json',
       body: JSON.stringify({
+        runtime_revision: 1,
         messages,
         total: messages.length,
         offset: 0,
@@ -66,6 +67,12 @@ async function verifyColdImageLayout(page, viewport) {
       }),
     })
   })
+  await page.route(new RegExp(`/api/chats/${CHAT_ID}/runtime$`), route =>
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      json: { runtime_revision: 1, running: false, pending_messages: [] },
+    }))
   await page.route(new RegExp(`/api/chats/${CHAT_ID}/stream$`), route =>
     route.fulfill({ status: 204, body: '' }))
   await page.route(new RegExp(`/api/chats/${CHAT_ID}/media-token$`), route =>
