@@ -86,6 +86,16 @@ test.describe('shell update — owner-controlled navigation', () => {
     ], armed))
     const target = await createTaggedChat(page, 'update-target')
     const current = await createTaggedChat(page, 'update-current')
+    // The drawer's Recents list only shows chats with has_messages=true
+    // (buildDrawerSections filters bare drafts out so untouched "New Chat"
+    // rows don't clutter it) — createTaggedChat's API-only POST leaves target
+    // empty, so it would never render a clickable drawer row. Seed one
+    // message directly so it appears like any real chat the owner navigates to.
+    const token = await page.evaluate(() => localStorage.getItem('token'))
+    await page.request.put(`${BASE}/api/chats/${target.id}`, {
+      headers: { Authorization: `Bearer ${token}` },
+      data: { messages: [{ role: 'user', content: 'Target chat fixture' }] },
+    })
     await page.goto(`${BASE}/shell/?chat=${current.id}`, { waitUntil: 'domcontentloaded' })
     await expect(page.locator(
       `[data-chat-id="${current.id}"][data-chat-surface="painted"]`,
