@@ -232,7 +232,10 @@ test.describe('Bug 1: AskUserQuestion', () => {
 
     const card = page.locator('[data-chat-surface="painted"] .qcard')
     const careful = page.getByRole('radio', { name: 'Careful' })
-    const submit = page.getByRole('button', { name: 'Submit' })
+    // The submit button's accessible name changes with its state ("Submit" ->
+    // "Queued on this device" -> "Submitted"), so target it by class instead
+    // of the transient role name.
+    const submit = card.locator('.qcard__submit')
     await expect(card).toBeVisible({ timeout: 5000 })
     await careful.click()
     await submit.click()
