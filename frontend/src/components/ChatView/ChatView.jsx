@@ -2497,6 +2497,20 @@ export default function ChatView({
         running,
         pendingQuestionId: runtime.pending_question_id,
       })
+      // Activation owns the accepted transcript and transport together. A
+      // retained stream can survive the hidden pane's disconnect; committing
+      // an idle revision without retiring it loses the running -> idle edge
+      // that a later fallback poll would otherwise use to settle that stream.
+      if (shouldRetireStreamForRuntime({
+        runtimeRunning: running,
+        pendingQuestionId: runtime.pending_question_id,
+        stopInFlight: handlingStopRef.current,
+        localStartInFlight: (
+          localStartRequestRef.current?.chatId === String(chatId)
+        ),
+      })) {
+        retireSettledStreamRef.current?.()
+      }
       setServerRunningLocalState(running)
       setActiveAssistantMessageId(
         runtime.active_assistant_message_id || null,

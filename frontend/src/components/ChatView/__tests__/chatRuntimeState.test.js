@@ -12,6 +12,7 @@ import {
   isOwnerUserMessage,
   startsFollowingTurn,
   jumpToLatestShown,
+  runtimeSnapshot,
   runtimeSnapshotTransition,
   shouldRepairRuntimeStream,
   serverSnapshotBehindLocal,
@@ -227,6 +228,21 @@ test('an accepted runtime releases a failed stream exactly when it has no stream
     runtimeRunning: false,
     stopInFlight: true,
   }), false, 'the explicit Stop boundary remains locally authoritative')
+})
+
+test('terminal reactivation retires independently of an already-consumed lifecycle edge', () => {
+  const completed = { runtime_revision: 9, run_id: 'retained-run', running: false, run_status: 'completed' }
+  const transition = runtimeSnapshotTransition(runtimeSnapshot(completed), completed)
+  assert.equal(transition.settled, false)
+  assert.equal(shouldRetireStreamForRuntime({ runtimeRunning: completed.running }), true,
+    'an accepted idle activation does not need a fresh running-to-idle transition')
+  for (const guard of ['localStartInFlight', 'stopInFlight']) {
+    assert.equal(shouldRetireStreamForRuntime({
+      runtimeRunning: true,
+      pendingQuestionId: 'retained-question',
+      [guard]: true,
+    }), false, `${guard} also protects a locally owned transition from an older parked question`)
+  }
 })
 
 test('a fresh running verdict repairs an exhausted visible stream through its retry owner', () => {

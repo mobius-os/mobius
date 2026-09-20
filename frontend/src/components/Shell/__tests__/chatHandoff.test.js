@@ -152,6 +152,21 @@ test('activation presents a confirmed running transcript while stream catch-up r
     'a truthy empty cache must not erase the selected transcript during a cross-owner handoff')
 })
 
+test('accepted activation retires a retained terminal stream before revealing its transcript', () => {
+  const settlement = chatView.slice(
+    chatView.indexOf('const settleRuntime = (runtime, visibleMessages, transition) => {'),
+    chatView.indexOf('const loadActivation = async () => {'),
+  )
+  assert.match(settlement,
+    /shouldRetireStreamForRuntime\(\{[\s\S]*runtimeRunning: running,[\s\S]*pendingQuestionId: runtime\.pending_question_id,[\s\S]*stopInFlight: handlingStopRef\.current,[\s\S]*localStartInFlight: \([\s\S]*localStartRequestRef\.current\?\.chatId === String\(chatId\)/,
+    'activation uses the same accepted-runtime rule and local mutation guards as detail refresh')
+  assert.match(settlement,
+    /retireSettledStreamRef\.current\?\.\(\)[\s\S]*setInitialEntryPhase[\s\S]*setActivationSettled\(true\)/,
+    'stream retirement joins the accepted activation transaction before display readiness')
+  assert.doesNotMatch(settlement, /transition\.settled|isStreamingRef\.current.*&&/,
+    'accepted idle/question activation must retire even if another reader consumed the terminal edge')
+})
+
 test('a staging chat cannot leave the outgoing transcript held on a wedged request', () => {
   assert.match(chatView, /const CHAT_FETCH_TIMEOUT_MS = 15000/)
   assert.match(
