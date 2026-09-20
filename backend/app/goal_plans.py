@@ -93,7 +93,7 @@ def normalize_tasks(raw_tasks: Any) -> list[dict[str, Any]]:
       raise GoalPlanError(f"duplicate task id: {task_id}")
     ids.add(task_id)
     status = raw.get("status", "pending")
-    if status not in TASK_STATUSES:
+    if not isinstance(status, str) or status not in TASK_STATUSES:
       raise GoalPlanError(f"invalid status for {task_id}: {status}")
     depends_on = raw.get("depends_on", [])
     if not isinstance(depends_on, list) or not all(
@@ -406,7 +406,10 @@ def serialize_plan(
   raw = root.plan_json
   if not isinstance(raw, dict) or not isinstance(raw.get("tasks"), list):
     return None
-  tasks = deepcopy(raw["tasks"])
+  try:
+    tasks = normalize_tasks(deepcopy(raw["tasks"]))
+  except GoalPlanError:
+    return None
   by_id = {task["id"]: task for task in tasks}
   children_by_parent: dict[str, list[str]] = {}
   for task in tasks:
@@ -616,10 +619,15 @@ def goal_terminal_handoff(
     return None
   current_revision = goal_plan_revision(db, chat_id, run.goal_id)
   admitted_revision = run.goal_plan_revision_at_admission
+  plan_corrupt = (
+    goal.plan_json is not None
+    and serialize_plan(db, run, goal) is None
+  )
   return GoalTerminalHandoff(
     goal_id=run.goal_id,
     automatic_allowed=(
-      isinstance(admitted_revision, int)
+      not plan_corrupt
+      and isinstance(admitted_revision, int)
       and current_revision > admitted_revision
     ),
     plan_revision=current_revision,
@@ -751,13 +759,13 @@ def terminal_goal_summaries_by_message_index(
     identity = row.goal_id or row.root_run_id or row.id
     grouped.setdefault(identity, []).append(row)
 
-  assistant_rows: list[tuple[int, int]] = []
+  assistant_rows: list[tuple[int, int, object]] = []
   for index, message in enumerate(messages):
     if not isinstance(message, dict) or message.get("role") != "assistant":
       continue
     ts = message.get("ts")
     if isinstance(ts, (int, float)) and not isinstance(ts, bool):
-      assistant_rows.append((index, int(ts)))
+      assistant_rows.append((index, int(ts), message.get("id")))
 
   def epoch_ms(value: datetime | None) -> int | None:
     if value is None:
@@ -779,10 +787,33 @@ def terminal_goal_summaries_by_message_index(
     ended_ms = epoch_ms(latest.ended_at)
     if started_ms is None or ended_ms is None:
       continue
+    # Modern assistant segments carry the exact physical-run identity. Prefer
+    # it so clock skew cannot attach a Goal card to an unrelated answer. The
+    # bounded timestamp fallback is reserved for genuinely id-less legacy rows.
+    assistant_id = latest.id
+    segment_prefix = f"{assistant_id}:assistant:"
     candidate_index = next((
-      index for index, ts in reversed(assistant_rows)
-      if started_ms - 1000 <= ts <= ended_ms + 1000
+      index for index in range(len(messages) - 1, -1, -1)
+      if isinstance(messages[index], dict)
+      and messages[index].get("role") == "assistant"
+      and (
+        messages[index].get("id") == assistant_id
+        or (
+          isinstance(messages[index].get("id"), str)
+          and messages[index]["id"].startswith(segment_prefix)
+          and re.fullmatch(
+            r"[1-9][0-9]*",
+            messages[index]["id"][len(segment_prefix):],
+          ) is not None
+        )
+      )
     ), None)
+    if candidate_index is None:
+      candidate_index = next((
+        index for index, ts, message_id in reversed(assistant_rows)
+        if message_id is None
+        and started_ms - 1000 <= ts <= ended_ms + 1000
+      ), None)
     if (
       candidate_index is None
       or candidate_index < message_start
@@ -820,7 +851,13 @@ def replace_plan(
     and isinstance(root.plan_json.get("tasks"), list)
     else None
   )
-  if current_tasks and normalize_tasks(current_tasks) == normalized:
+  try:
+    current_normalized = normalize_tasks(current_tasks)
+  except GoalPlanError:
+    # An invalid saved plan cannot be an identical no-op, but a fully
+    # validated replacement must still be able to repair it.
+    current_normalized = None
+  if current_normalized == normalized:
     # Identical saves must not manufacture progress and thereby authorize a
     # fresh provider turn. The no-op UPDATE retains the optimistic CAS: a
     # stale writer still conflicts even when its payload matches current data.

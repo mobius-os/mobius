@@ -1135,6 +1135,10 @@ Stop, completion, provider failures and usage-limit handling keep their existing
 boundaries. The legacy `automatic_remaining` column is inert historical schema,
 never read or updated by admission.
 
+Persisted plans use the same task validation as plan writes. An unreadable
+plan keeps its Goal open, cannot authorize automatic handoff or completion,
+and can be repaired through a fully validated, revision-checked replacement.
+
 `goal_plans.goal_handoff_owner_kind` is the shared exact-identity query for
 both Goal presentation and turn settlement. It recognizes an owner question,
 Wait (including a settled result awaiting delivery), or wake-enabled helper only when that actor belongs to the same
