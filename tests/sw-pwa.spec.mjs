@@ -17,7 +17,7 @@
  * Run: scripts/playwright-local.sh --allow-local-e2e tests/sw-pwa.spec.mjs
  */
 import { test, expect } from '@playwright/test'
-import { applyApp, applySource } from './app-source.mjs'
+import { applyApp, applySource, writeStaticAppFiles } from './app-source.mjs'
 // Import the cache names rather than repeating them. They are deliberately
 // bumped whenever a cached response's policy changes, so a literal here turns
 // every future bump into an unrelated e2e failure 5 minutes into the run —
@@ -382,33 +382,30 @@ test.describe('Service worker — vite-plugin-pwa contract', () => {
       description: 'Disposable controlled-service-worker fixture.',
       jsxSource: 'export default function App(){return <main>fixture</main>}',
     })
-    const prefix = `apps/${app.slug}/static`
-    const write = (path, body) => request.put(
-      `${BASE}/api/fs/write?path=${encodeURIComponent(`${prefix}/${path}`)}`,
-      { headers: { ...headers, 'Content-Type': 'text/plain' }, data: body },
-    )
     try {
-      expect((await write('index.html', `<!doctype html><title>Opaque packaged fixture</title><script src="./child.deadbeef.js"></script><main id="packaged">real packaged document</main>`)).ok()).toBeTruthy()
-      expect((await write('child.deadbeef.js', `(async()=>{
+      // static/* is gitignored by design (app_git.py's managed .gitignore:
+      // manifest-installed static assets are install-managed, not edited
+      // source), so an ordinary /api/fs/write is invisible to every normal
+      // apply/commit path -- they all stage via plain `git add -A .`, which
+      // never touches a gitignored path. writeStaticAppFiles force-adds
+      // (`git add -f`, matching the one real precedent for this,
+      // backend/tests/test_app_assets_cache.py's `_write_static`) and
+      // commits directly, then applySource republishes the runtime from
+      // that updated HEAD.
+      writeStaticAppFiles(sourceDir, {
+        'index.html': `<!doctype html><title>Opaque packaged fixture</title><script src="./child.deadbeef.js"></script><main id="packaged">real packaged document</main>`,
+        'child.deadbeef.js': `(async()=>{
         let token=null;try{token=localStorage.getItem('token')}catch(_e){}
         let parentToken=null;try{parentToken=parent.localStorage.getItem('token')}catch(_e){}
         let api=-1;try{api=(await fetch('/api/apps/',token?{headers:{Authorization:'Bearer '+token}}:{})).status}catch(_e){}
         parent.postMessage({type:'opaque-static-sw-ready',origin:self.origin,token,parentToken,api},'*')
-      })()`)).ok()).toBeTruthy()
-      expect((await write('hostile.svg', `<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20"><script><![CDATA[
+      })()`,
+        'hostile.svg': `<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20"><script><![CDATA[
         (async()=>{let token=null;try{token=localStorage.getItem('token')}catch(_e){}
         let api=-1;try{api=(await fetch('/api/apps/',token?{headers:{Authorization:'Bearer '+token}}:{})).status}catch(_e){}
         parent.postMessage({type:'opaque-svg-proof',origin:self.origin,token,api},'*')})()
-      ]]></script><rect width="20" height="20" fill="red"/></svg>`)).ok()).toBeTruthy()
-
-      // The static files above only land in the app's editable source tree
-      // (fs_write is a plain filesystem write, unaware of app runtimes). The
-      // /app-assets and /app-embeds routes serve only the frozen, explicitly
-      // Applied runtime snapshot (applied_app_runtime.runtime_root) — "the
-      // editable source tree is never a runtime fallback" is a deliberate
-      // security boundary, not an oversight. Re-apply so this revision
-      // (including the new static/ files) is committed and published before
-      // anything tries to fetch it.
+      ]]></script><rect width="20" height="20" fill="red"/></svg>`,
+      })
       const reapplied = await applySource(request, token, sourceDir)
       expect(reapplied.response.ok()).toBeTruthy()
 
