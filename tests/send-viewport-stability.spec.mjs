@@ -336,6 +336,19 @@ test('an idle runtime snapshot cannot retire an unacknowledged fresh send', asyn
     })
   })
 
+  // connectivityStore.js's probeReadiness() fetches /api/ready and requires
+  // body.ready === true (plus a boot_id) before treating the app as
+  // delivery-ready. Without it, doSend's queuesBehindActiveTurn gate
+  // observes deliveryReady=false and takes the queued path instead of the
+  // fresh-send path this test depends on (localStartRequestRef never gets
+  // set, so the race "protection" it measures is never engaged) -- see
+  // fresh-send-runtime-race.spec.mjs's identical fix for the full trace.
+  await page.route(/\/api\/ready$/, route => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({ ready: true, boot_id: 'idle-start-race-fixture-boot' }),
+  }))
+  const readinessProbed = page.waitForResponse(/\/api\/ready$/)
   await page.goto(`${BASE}/shell/?chat=${encodeURIComponent(chat.id)}`, {
     waitUntil: 'domcontentloaded',
   })
@@ -343,6 +356,12 @@ test('an idle runtime snapshot cannot retire an unacknowledged fresh send', asyn
   const input = surface.getByRole('textbox', { name: 'Message Möbius…' })
   await expect(surface.locator('.chat__msg--user')).toHaveCount(0)
   await expect(input).toBeVisible()
+  await readinessProbed
+  await page.evaluate(() => new Promise(resolve => {
+    let frames = 8
+    const next = () => (--frames ? requestAnimationFrame(next) : resolve())
+    requestAnimationFrame(next)
+  }))
 
   const prompt = [
     'Fresh message whose acknowledgement remains deliberately pending.',
