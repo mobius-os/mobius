@@ -40,8 +40,8 @@ test('chat display readiness admits only coordinate-complete cached transcripts'
     'the reveal deadline admits only caller-validated or authoritative transcript frames')
   assert.match(
     chatView,
-    /const transcriptPaintable = \([\s\S]*initialEntryPhase === 'cached'[\s\S]*initialEntryPhase === 'stream-catchup'[\s\S]*initialEntryPhase === 'ready'[\s\S]*\) && revealed[\s\S]*const displayReady = activationSettled[\s\S]*&& !loading[\s\S]*&& \(transcriptPaintable \|\| showEmpty \|\| showLoadError\)/,
-    'a coordinate-complete frame, including a running one, publishes only after runtime confirmation',
+    /const transcriptPaintable = \([\s\S]*initialEntryPhase === 'cached'[\s\S]*initialEntryPhase === 'stream-catchup'[\s\S]*initialEntryPhase === 'ready'[\s\S]*\) && revealed[\s\S]*const displayReady = \(\s*activationSettled[\s\S]*&& !loading[\s\S]*&& \(transcriptPaintable \|\| showEmpty \|\| showLoadError\)\s*\) \|\| earlyRevealReady/,
+    'a coordinate-complete frame, including a running one, publishes only after runtime confirmation; only the composer may reveal early',
   )
   assert.match(chatView, /useLayoutEffect\(\(\) => \{[\s\S]*onDisplayReady\?\.\(chatId\)/,
     'ChatView must report layout readiness before its transcript can be promoted')
@@ -140,7 +140,7 @@ test('activation presents a confirmed running transcript while stream catch-up r
   )
   assert.match(
     chatView,
-    /const \[activationSettled, setActivationSettled\] = useState\(provisionalNewChat\)[\s\S]*if \(hidden \|\| provisionalNewChat\) return[\s\S]*setActivationSettled\(false\)[\s\S]*const settleRuntime[\s\S]*setActivationSettled\(true\)[\s\S]*const displayReady = activationSettled/,
+    /const \[activationSettled, setActivationSettled\] = useState\(provisionalNewChat\)[\s\S]*if \(hidden \|\| provisionalNewChat\) return[\s\S]*setActivationSettled\(false\)[\s\S]*const settleRuntime[\s\S]*setActivationSettled\(true\)[\s\S]*const displayReady = \(\s*activationSettled/,
     'a provisional empty chat is ready immediately while persisted chats still wait for runtime truth',
   )
   assert.match(
