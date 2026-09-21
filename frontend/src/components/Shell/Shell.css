@@ -597,9 +597,8 @@
    guidance. The old drawer banner stays retired. Sub-app installation
    lives in the standalone card surfaced from drawer ⋮ on a mini-app. */
 
-/* One compact indicator covers reconnect/restart/offline state. Shape keeps
-   the states distinct without color or motion, while hover/focus exposes the
-   exact label without permanently competing with the header. */
+/* One calm indicator covers reconnect/restart/offline state, while hover/focus
+   exposes the exact label without permanently competing with the header. */
 .shell__connection-status {
   position: relative;
   align-self: center;

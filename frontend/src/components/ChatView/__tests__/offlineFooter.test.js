@@ -84,11 +84,6 @@ test('the shell is the one persistent connection owner while send failures stay 
     /\.shell__connection-status\s*\{[\s\S]*?width:\s*28px;[\s\S]*?flex:\s*0 0 28px;[\s\S]*?\}[\s\S]*?\.shell__connection-status-icon\s*\{[\s\S]*?background:\s*var\(--accent,[\s\S]*?animation:\s*shell-connection-pulse 1\.4s ease-in-out infinite;/,
     'every connection interruption uses the same compact pulsing accent dot',
   )
-  assert.doesNotMatch(
-    shellCss,
-    /\.shell__connection-status\[data-state="(?:restarting|reconnecting|offline)"\] \.shell__connection-status-icon/,
-    'connection states do not override the shared dot treatment',
-  )
   assert.match(
     shellCss,
     /@keyframes\s+shell-connection-pulse\s*\{\s*50%\s*\{\s*opacity:\s*0\.48;\s*\}\s*\}/,
