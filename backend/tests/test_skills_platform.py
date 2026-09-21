@@ -608,6 +608,9 @@ def test_resource_rel_ok_contract():
   assert _resource_rel_ok("scripts/run.py")
   assert _resource_rel_ok("scripts/context.mjs")
   assert _resource_rel_ok("scripts/ui/card.tsx")
+  assert _resource_rel_ok("scripts/impeccable")
+  assert _resource_rel_ok("scripts/VERSION")
+  assert _resource_rel_ok("scripts/impeccable.cmd")
   assert _resource_rel_ok("a/b/c/d/e/f/g/deep.md")  # depth 8 = at the cap
   assert not _resource_rel_ok("a/b/c/d/e/f/g/h/deep.md")  # depth 9
   assert not _resource_rel_ok("../up.md")
@@ -616,7 +619,136 @@ def test_resource_rel_ok_contract():
   assert not _resource_rel_ok("dir//double.md")
   assert not _resource_rel_ok("win\\path.md")
   assert not _resource_rel_ok("binary.png")
+  assert not _resource_rel_ok("VERSION")
+  assert not _resource_rel_ok("reference/README")
   assert not _resource_rel_ok("")
+
+
+def test_update_adopts_agent_skill_atomically_and_preserves_launcher_mode(
+  client, auth, skills_dir, monkeypatch,
+):
+  from app.routes import skills as rs
+
+  target = skills_dir / "demo"
+  target.mkdir()
+  (target / "SKILL.md").write_text("---\nname: demo\nversion: 1\n---\nold\n")
+  old_digest = skills_mod.tree_digest_on_disk(target)
+  raw = f"https://raw.githubusercontent.com/o/r/{PINNED}/skills/demo"
+  new_skill = b"---\nname: demo\nversion: 2\n---\nnew\n"
+  launcher = b"#!/bin/sh\necho demo\n"
+  version = b"2\n"
+  tree = [
+    {"type": "blob", "path": "SKILL.md", "size": len(new_skill)},
+    {"type": "blob", "path": "scripts/demo", "size": len(launcher), "mode": "100755"},
+    {"type": "blob", "path": "scripts/VERSION", "size": len(version)},
+  ]
+  _dir_install_mocks(monkeypatch, rs, tree, {
+    f"{raw}/SKILL.md": new_skill,
+    f"{raw}/scripts/demo": launcher,
+    f"{raw}/scripts/VERSION": version,
+  })
+
+  response = client.put(
+    "/api/skills/demo",
+    headers=auth,
+    json={
+      "expected_tree_digest": old_digest,
+      "repo": "o/r",
+      "path": "skills/demo",
+      "ref": "main",
+      "expected_commit": PINNED,
+      "adopt": True,
+    },
+  )
+
+  assert response.status_code == 200, response.text
+  assert response.json()["changed"] is True
+  assert response.json()["adopted"] is True
+  assert (target / "SKILL.md").read_bytes() == new_skill
+  assert (target / "scripts" / "demo").stat().st_mode & 0o111
+  record = _sidecar(skills_dir)["demo"]
+  assert record.get("status") is None
+  assert record["commit"] == PINNED
+  assert record["ref"] == "main"
+  assert record["executables"] == ["scripts/demo"]
+  assert not list(skills_dir.glob(".staging-*"))
+  assert not list(skills_dir.glob(".backup-*"))
+
+
+def test_update_refuses_locally_modified_managed_skill(
+  client, auth, skills_dir, monkeypatch,
+):
+  from app.routes import skills as rs
+
+  target = skills_dir / "demo"
+  target.mkdir()
+  original = b"# original\n"
+  (target / "SKILL.md").write_bytes(original)
+  installed_digest = skills_mod.tree_digest_on_disk(target)
+  (skills_dir / skills_mod.INSTALLED_SKILLS_SIDECAR).write_text(json.dumps({
+    "demo": {
+      "source": "o/r", "repo": "o/r", "path": "skills/demo",
+      "ref": "main", "commit": PINNED,
+      "tree_digest": installed_digest,
+    },
+  }))
+  (target / "SKILL.md").write_text("# locally edited\n")
+  current_digest = skills_mod.tree_digest_on_disk(target)
+  raw = f"https://raw.githubusercontent.com/o/r/{PINNED}/skills/demo"
+  candidate = b"# upstream\n"
+  _dir_install_mocks(monkeypatch, rs, [
+    {"type": "blob", "path": "SKILL.md", "size": len(candidate)},
+  ], {f"{raw}/SKILL.md": candidate})
+
+  response = client.put(
+    "/api/skills/demo",
+    headers=auth,
+    json={
+      "expected_tree_digest": current_digest,
+      "repo": "o/r",
+      "path": "skills/demo",
+      "ref": "main",
+      "expected_commit": PINNED,
+    },
+  )
+
+  assert response.status_code == 409, response.text
+  assert "local edits" in response.json()["detail"]
+  assert (target / "SKILL.md").read_text() == "# locally edited\n"
+
+
+def test_update_compare_and_swap_keeps_newer_on_disk_edit(
+  client, auth, skills_dir, monkeypatch,
+):
+  from app.routes import skills as rs
+
+  target = skills_dir / "demo"
+  target.mkdir()
+  (target / "SKILL.md").write_text("# before\n")
+  stale_digest = skills_mod.tree_digest_on_disk(target)
+  (target / "SKILL.md").write_text("# changed after opening update\n")
+  raw = f"https://raw.githubusercontent.com/o/r/{PINNED}/skills/demo"
+  candidate = b"# upstream\n"
+  _dir_install_mocks(monkeypatch, rs, [
+    {"type": "blob", "path": "SKILL.md", "size": len(candidate)},
+  ], {f"{raw}/SKILL.md": candidate})
+
+  response = client.put(
+    "/api/skills/demo",
+    headers=auth,
+    json={
+      "expected_tree_digest": stale_digest,
+      "repo": "o/r",
+      "path": "skills/demo",
+      "ref": "main",
+      "expected_commit": PINNED,
+      "adopt": True,
+    },
+  )
+
+  assert response.status_code == 409, response.text
+  assert "changed after" in response.json()["detail"]
+  assert (target / "SKILL.md").read_text() == "# changed after opening update\n"
 
 
 def test_skill_package_bounds_fit_command_routed_toolkits():
