@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Save an owner approval card and return its receipt, never wait for an answer."""
+"""Save an owner approval card and return its receipt, never wait for an answer.
+
+The saved card ends the turn: the response is cut at the card, so say
+everything before running this. See app/questions.py for the card lifecycle.
+"""
 
 from __future__ import annotations
 

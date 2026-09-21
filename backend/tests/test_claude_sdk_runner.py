@@ -11,6 +11,7 @@ silently disappears.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import tempfile
 from collections import deque
@@ -478,33 +479,74 @@ def _tool_boundary_interrupt_result(
   )
 
 
+_OWNER_CARD_RECEIPT = {
+  "state": "waiting_for_owner",
+  "question_id": "card-9",
+  "next_action": "The turn is over.",
+}
+
+
+class _CardBus(_ChatBus):
+  """A bus that owns exactly one continuation card, as the live sink does."""
+
+  question_id = "card-9"
+
+  def has_continuation_card(self, question_id: str) -> bool:
+    return question_id == self.question_id
+
+
+def _post_tool_use_hooks(options) -> list:
+  """The runner's PostToolUse callbacks, in registration order."""
+  return [
+    hook
+    for matcher in options.hooks["PostToolUse"]
+    for hook in matcher.hooks
+  ]
+
+
+async def _fire_card_end_hook(options, **overrides) -> dict:
+  """Invoke the card-end hook exactly as the CLI does after a tool result."""
+  hook_input = {
+    "hook_event_name": "PostToolUse",
+    "tool_name": "mcp__mobius_control__request_approval",
+    "tool_input": {"question": "Deploy?"},
+    "tool_response": [{"type": "text", "text": json.dumps(_OWNER_CARD_RECEIPT)}],
+    "tool_use_id": "toolu_1",
+  }
+  hook_input.update(overrides)
+  # The hook is registered with matcher=None, so it is the last PostToolUse
+  # callback; the WebSearch one never sees a card tool.
+  return await _post_tool_use_hooks(options)[-1](hook_input, "toolu_1", {})
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("session_id", [None, "sess-1"])
-# The real-world card interrupt lands on a TOOL boundary, so its terminal
-# carries stop_reason `tool_use`/null — never `interrupt`. Include the
-# `interrupt` value too so the historic steer/stop shape stays covered.
+# The card end lands on a TOOL boundary, so its terminal carries stop_reason
+# `tool_use`/null — never `interrupt`. Include the `interrupt` value too so the
+# historic steer/stop shape stays covered.
 @pytest.mark.parametrize("stop_reason", ["tool_use", None, "interrupt"])
-async def test_delivered_owner_card_receipt_ends_turn_as_clean_completion(
+async def test_owner_card_hook_cuts_the_turn_before_the_receipt_reaches_the_model(
   monkeypatch, session_id, stop_reason,
 ):
-  """A committed continuation owner-input card ends the turn at its source.
+  """The card-end hook refuses to continue the agent loop, cutting at the card.
 
-  After the event sink observes the completed tool result,
-  `begin_finish_after_owner_card` fires the same soft interrupt `steer` uses, tagged
-  `card`, so the interrupt terminal is classified as a CLEAN completion: no
-  requery (`pending_steer` is empty), no resumable "Paused" note, no leaked
-  "Execution interrupted." error block, and the pre-card text is the last thing
-  in the turn. On a resume turn the `card` owner must NOT masquerade as the
-  synthetic-no-op auto-requery (which keys on an interrupt-free clean end) and
-  re-run the original prompt."""
+  `continue_: False` stops the CLI before it makes the next model request, so
+  there is no post-card generation to race and NO interrupt is issued. The
+  resulting terminal (observed live: stop_reason `tool_use`, terminal_reason
+  `hook_stopped`, is_error False) is classified as a CLEAN completion: no
+  requery, no resumable "Paused" note, no error block. On a resume turn the
+  `card` owner must NOT masquerade as the synthetic-no-op auto-requery (which
+  keys on an interrupt-free clean end) and re-run the original prompt.
+  """
+  decisions: list[dict] = []
+
   class _Client(_FakeClient):
     async def receive_response(self):
       if len(self.queries) == 1:
         yield _stream_delta("text_delta", text="here are your options")
+        decisions.append(await _fire_card_end_hook(self.options))
         handle = registry.get_handle("card-chat", RunnerKind.CLAUDE_SDK)
-        interrupt = handle.begin_finish_after_owner_card()
-        assert handle.owner_card_interrupt is True
-        await interrupt
+        assert handle.owner_card_end is True
         yield _tool_boundary_interrupt_result(
           session_id=session_id or "sess-1", stop_reason=stop_reason,
         )
@@ -512,7 +554,7 @@ async def test_delivered_owner_card_receipt_ends_turn_as_clean_completion(
       raise AssertionError("a card end must never requery")
 
   clients = _install_fake_client(monkeypatch, _Client)
-  bus = _ChatBus()
+  bus = _CardBus()
   bus.assistant_blocks = []
 
   result = await _run_turn(
@@ -520,27 +562,107 @@ async def test_delivered_owner_card_receipt_ends_turn_as_clean_completion(
   )
 
   client = clients[0]
-  # One interrupt (the card end); the original prompt is the ONLY query — the
-  # card end never requeries.
-  assert client.interrupts == 1
+  assert decisions == [
+    {"continue_": False, "stopReason": "Saved owner card ends the turn."},
+  ]
+  # Generation is cut at its source, so nothing is interrupted; the original
+  # prompt is the ONLY query — the card end never requeries.
+  assert client.interrupts == 0
   assert client.disconnected is True
   assert client.queries == ["ask me a question"]
-  # A continuation card is a clean completion, not a resumable pause: the raw
-  # "Execution interrupted." provider error is defused (regardless of the
-  # tool-boundary stop_reason) and no Resume is offered.
+  # A continuation card is a clean completion, not a resumable pause: any raw
+  # provider interruption error is defused (regardless of the tool-boundary
+  # stop_reason) and no Resume is offered.
   assert result["error"] is None
   assert result["terminal_status"] == "completed"
   assert "resume_incomplete" not in result
-  # This controlled provider emitted no raced tail. Separate sink coverage
-  # proves that a tail already emitted while the interrupt drains is preserved.
+  # The `stopReason` string is a CLI control value, never transcript content.
   assert [e for e in bus.events if e["type"] == "text"] == [
     {"type": "text", "content": "here are your options"},
   ]
+  assert not [e for e in bus.events if e["type"] == "error"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+  ("label", "overrides"),
+  [
+    # A tool Möbius never saves a card through — including the Task/Agent
+    # result that merely quotes a child agent's receipt.
+    ("non_card_tool", {"tool_name": "Agent"}),
+    # A receipt-shaped string that is not THIS turn's continuation card.
+    (
+      "foreign_card",
+      {"tool_response": [{"type": "text", "text": json.dumps(
+        {**_OWNER_CARD_RECEIPT, "question_id": "card-from-last-week"},
+      )}]},
+    ),
+    # A child agent's own tool: cutting here would end the CHILD, not the turn.
+    ("subagent_tool", {"agent_id": "agent-7", "agent_type": "general-purpose"}),
+    # Ordinary output with no receipt at all.
+    ("no_receipt", {"tool_response": {"stdout": "all tests passed", "stderr": ""}}),
+  ],
+)
+async def test_owner_card_hook_leaves_the_turn_running_without_a_current_card(
+  monkeypatch, label, overrides,
+):
+  """Only the root agent's own card, saved in THIS turn, may end the turn.
+
+  Everything else keeps `continue_: True` so the agent loop runs on — the hook
+  must never cut on receipt-shaped text alone.
+  """
+  decisions: list[dict] = []
+
+  class _Client(_FakeClient):
+    async def receive_response(self):
+      decisions.append(await _fire_card_end_hook(self.options, **overrides))
+      yield _success_result()
+
+  clients = _install_fake_client(monkeypatch, _Client)
+  bus = _CardBus()
+  bus.assistant_blocks = []
+
+  result = await _run_turn("card-chat-" + label, bc=bus, prompt="work")
+
+  assert decisions == [{"continue_": True}]
+  assert clients[0].interrupts == 0
+  assert result["error"] is None
+  handle_owner = registry.get_handle("card-chat-" + label, RunnerKind.CLAUDE_SDK)
+  assert handle_owner is None
+
+
+@pytest.mark.asyncio
+async def test_owner_card_hook_defers_to_a_stop_that_already_owns_the_cut(
+  monkeypatch,
+):
+  """Stop wins: its teardown semantics must survive a card saved in the race.
+
+  The hook leaves the loop running so Stop's own interrupt and pause note own
+  the ending, exactly as `begin_finish_after_owner_card` has always deferred.
+  """
+  decisions: list[dict] = []
+
+  class _Client(_FakeClient):
+    async def receive_response(self):
+      handle = registry.get_handle("card-stop", RunnerKind.CLAUDE_SDK)
+      handle._interrupt_owner = "stop"
+      decisions.append(await _fire_card_end_hook(self.options))
+      assert handle._interrupt_owner == "stop"
+      assert handle.owner_card_end is False
+      yield _success_result()
+
+  _install_fake_client(monkeypatch, _Client)
+  bus = _CardBus()
+  bus.assistant_blocks = []
+
+  await _run_turn("card-stop", bc=bus, prompt="work")
+
+  assert decisions == [{"continue_": True}]
 
 
 @pytest.mark.asyncio
 async def test_owner_card_finish_defers_to_an_owner_that_already_interrupted():
-  """A Stop or steer that already owns this turn's interrupt keeps its
+  """A Stop or steer that already owns this turn's cut keeps its
   semantics: a later card commit must not override the owner or fire a second
   interrupt."""
   class _Client:
@@ -559,7 +681,33 @@ async def test_owner_card_finish_defers_to_an_owner_that_already_interrupted():
     await interrupt
   assert client.interrupts == 0
   assert handle._interrupt_owner == "stop"
-  assert handle.owner_card_interrupt is False
+  assert handle.owner_card_end is False
+
+
+@pytest.mark.asyncio
+async def test_child_agent_card_receipt_still_interrupts_through_the_sink_path():
+  """A native child agent's card is the one end the card-end hook cannot make.
+
+  Refusing to continue inside a subagent's hook would end the CHILD, so that
+  receipt only reaches Möbius later, echoed through its parent Task result.
+  `begin_finish_after_owner_card` remains the fallback that ends such a turn.
+  """
+  class _Client:
+    def __init__(self):
+      self.interrupts = 0
+
+    async def interrupt(self):
+      self.interrupts += 1
+
+  client = _Client()
+  handle = ActiveClaudeClient(client, chat_id="child-card")
+  interrupt = handle.begin_finish_after_owner_card()
+  assert handle.owner_card_end is True
+  assert interrupt is not None
+  await interrupt
+  assert client.interrupts == 1
+  # The hook arriving afterwards must not fire a second cut.
+  assert handle.claim_owner_card_end() is False
 
 
 def _assistant_text(text: str, session_id: str = "sess-1") -> AssistantMessage:
