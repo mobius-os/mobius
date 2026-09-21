@@ -15,6 +15,19 @@ attachCleanup()
 
 test('an idle runtime snapshot cannot retire an unacknowledged fresh send', async ({ page }) => {
   await page.setViewportSize({ width: 412, height: 915 })
+  // connectivityStore.js's probeReadiness() fetches /api/ready and requires
+  // body.ready === true (plus a boot_id) before treating the app as
+  // delivery-ready. Without this, deliveryReady stayed false through this
+  // whole test (confirmed via a debug log at doSend's branch decision), so
+  // doSend took the QUEUED path instead of the FRESH SEND PATH -- the one
+  // that sets localStartRequestRef, the exact protection this test exists to
+  // exercise. The queued path never sets it, so the race "protection" was
+  // never engaged and every assertion here was accidentally vacuous.
+  await page.route(/\/api\/ready$/, route => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({ ready: true, boot_id: 'fresh-send-race-fixture-boot' }),
+  }))
   await page.goto(BASE, { waitUntil: 'domcontentloaded' })
   const chat = await createTaggedChat(page, 'fresh-send-runtime-race')
   expect(chat?.id).toBeTruthy()
