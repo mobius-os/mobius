@@ -123,6 +123,11 @@ test('update review uses compact Settings controls without stretching mobile but
   assert.doesNotMatch(modalCss, /\.urm__btn|flex: 1(?:;|\s)/)
 })
 
+test('update review is centered inside the active Settings pane', () => {
+  assert.match(modalCss, /\.urm__overlay\s*\{[^}]*position:\s*absolute;[^}]*inset:\s*0;/s)
+  assert.doesNotMatch(modalCss, /\.urm__overlay\s*\{[^}]*position:\s*fixed;/s)
+})
+
 test('a proven-complete review offers a single Done, never a contradictory repair action', () => {
   // Regression: an "already complete" review that still carried a stale
   // rolled_back state showed "There's nothing to apply" alongside a "Not now" +
