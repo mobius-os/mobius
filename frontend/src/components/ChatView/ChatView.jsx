@@ -6044,10 +6044,20 @@ export default function ChatView({
             <div className="chat__floating-transients">
               {offscreenControlsVisible && (
                 <div className="chat__offscreen-nudges">
+                  {/* Keyboard-safe taps (ChatInputBar composer contract #3/#6): these
+                      buttons float just above the composer, so a plain onClick steals
+                      textarea focus → the soft keyboard collapses → the layout shifts
+                      down and the synthetic click lands where the button no longer is
+                      (first tap only dismisses the keyboard; sometimes eaten entirely).
+                      preventDefault on pointerdown keeps focus and the button still;
+                      touchend fires the action immediately without the lost click.
+                      onClick stays for mouse/keyboard. */}
                   {olderHistoryRetryShown(olderHistoryError, offset) && (
                     <button
                       type="button"
                       className="chat__history-retry"
+                      onPointerDown={(e) => e.preventDefault()}
+                      onTouchEnd={(e) => { e.preventDefault(); loadOlderMessages(offset, { readerDriven: true }) }}
                       onClick={() => loadOlderMessages(offset, { readerDriven: true })}
                     >
                       Earlier messages didn’t load — retry
@@ -6057,6 +6067,8 @@ export default function ChatView({
                     <button
                       type="button"
                       className="chat__question-nudge"
+                      onPointerDown={(e) => e.preventDefault()}
+                      onTouchEnd={(e) => { e.preventDefault(); revealPendingQuestion(pendingQuestionEl) }}
                       onClick={() => revealPendingQuestion(pendingQuestionEl)}
                     >
                       Möbius asked you something — tap to answer
@@ -6066,6 +6078,8 @@ export default function ChatView({
                     <button
                       type="button"
                       className="chat__resume-nudge"
+                      onPointerDown={(e) => e.preventDefault()}
+                      onTouchEnd={(e) => { e.preventDefault(); revealConversationTail() }}
                       onClick={revealConversationTail}
                     >
                       {pendingResumeBlock?.pause?.resets_at
@@ -6092,6 +6106,8 @@ export default function ChatView({
                       className="chat__jump-latest"
                       aria-label="Jump to the latest message"
                       title="Jump to latest"
+                      onPointerDown={(e) => e.preventDefault()}
+                      onTouchEnd={(e) => { e.preventDefault(); followLatest() }}
                       onClick={followLatest}
                     >
                       <ArrowDown size={18} strokeWidth={2.25} aria-hidden="true" />
