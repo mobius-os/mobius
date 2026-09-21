@@ -620,30 +620,7 @@
   background: var(--accent, #8b6cf7);
   border-radius: 50%;
   box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent, #8b6cf7) 14%, transparent);
-}
-.shell__connection-status[data-state="reconnecting"] .shell__connection-status-icon {
   animation: shell-connection-pulse 1.4s ease-in-out infinite;
-}
-.shell__connection-status[data-state="restarting"] .shell__connection-status-icon {
-  width: 11px;
-  height: 11px;
-  border: 2px solid var(--accent, #8b6cf7);
-  border-right-color: transparent;
-  background: transparent;
-  box-shadow: none;
-  animation: shell-connection-spin 900ms linear infinite;
-}
-.shell__connection-status[data-state="offline"] .shell__connection-status-icon::after {
-  content: "";
-  position: absolute;
-  left: 3px;
-  top: -3px;
-  width: 2px;
-  height: 14px;
-  border-radius: 1px;
-  background: var(--bg);
-  box-shadow: 0 0 0 1px var(--accent, #8b6cf7);
-  rotate: 45deg;
 }
 .shell__connection-status-label {
   position: absolute;
@@ -677,10 +654,7 @@
   box-shadow: 0 0 0 2px var(--bg), 0 0 0 4px var(--focus-ring, var(--accent));
 }
 @keyframes shell-connection-pulse {
-  50% { opacity: 0.48; scale: 0.78; }
-}
-@keyframes shell-connection-spin {
-  to { rotate: 360deg; }
+  50% { opacity: 0.48; }
 }
 /* The ONE Settings wrapper is a solid surface in BOTH geometries: full-bleed as
    the takeover overlay (single mode / flag off) and paned as a builder tab. The

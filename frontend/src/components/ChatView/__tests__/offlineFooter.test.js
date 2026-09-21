@@ -81,8 +81,18 @@ test('the shell is the one persistent connection owner while send failures stay 
   assert.match(shell, /\{connectionStatusLabel && \([\s\S]*?className="shell__connection-status"[\s\S]*?data-state=\{connectionStatusState\}[\s\S]*?tabIndex=\{0\}[\s\S]*?shell__sr-only">\{connectionStatusLabel\}/)
   assert.match(
     shellCss,
-    /\.shell__connection-status\s*\{[\s\S]*?width:\s*28px;[\s\S]*?flex:\s*0 0 28px;[\s\S]*?\}[\s\S]*?data-state="restarting"[\s\S]*?border-right-color:\s*transparent;[\s\S]*?data-state="offline"[\s\S]*?rotate:\s*45deg;/,
-    'compact connectivity states remain distinguishable without color or motion',
+    /\.shell__connection-status\s*\{[\s\S]*?width:\s*28px;[\s\S]*?flex:\s*0 0 28px;[\s\S]*?\}[\s\S]*?\.shell__connection-status-icon\s*\{[\s\S]*?background:\s*var\(--accent,[\s\S]*?animation:\s*shell-connection-pulse 1\.4s ease-in-out infinite;/,
+    'every connection interruption uses the same compact pulsing accent dot',
+  )
+  assert.doesNotMatch(
+    shellCss,
+    /\.shell__connection-status\[data-state="(?:restarting|reconnecting|offline)"\] \.shell__connection-status-icon/,
+    'connection states do not override the shared dot treatment',
+  )
+  assert.match(
+    shellCss,
+    /@keyframes\s+shell-connection-pulse\s*\{\s*50%\s*\{\s*opacity:\s*0\.48;\s*\}\s*\}/,
+    'the dot pulses without changing its physical size',
   )
   assert.match(shellCss, /\.shell__connection-status:hover \.shell__connection-status-label,[\s\S]*?\.shell__connection-status:focus \.shell__connection-status-label[\s\S]*?visibility:\s*visible;/)
   assert.match(shellCss, /prefers-reduced-motion:\s*reduce[\s\S]*?\.shell__connection-status-icon\s*\{\s*animation:\s*none !important;/)
