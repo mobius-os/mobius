@@ -799,31 +799,6 @@ def test_vite_env_preserves_operator_resource_overrides(fw_dirs, monkeypatch):
   assert env["NODE_OPTIONS"] == "--trace-warnings --max_old_space_size=768"
 
 
-@pytest.mark.asyncio
-async def test_memory_deferral_is_visible_in_health_and_clears():
-  """A build waiting on memory admission must be visible: health once read
-  "running, no error" while a stale pressure reading held builds for hours."""
-  handler = fw._FrontendHandler(asyncio.get_running_loop(),
-                                start_threads=False)
-  try:
-    assert handler.health()["build_deferred"] is None
-
-    handler._note_build_deferred("edit: App.jsx")
-    handler._note_build_deferred("edit: App.jsx")
-    deferred = handler.health()["build_deferred"]
-    assert deferred is not None
-    assert deferred["attempts"] == 2
-    assert deferred["reason"] == "edit: App.jsx"
-    assert deferred["since"] <= time.time()
-
-    handler._clear_build_deferral()
-    assert handler.health()["build_deferred"] is None
-    # Clearing when nothing is deferred stays a no-op.
-    handler._clear_build_deferral()
-  finally:
-    handler.close()
-
-
 def test_served_frontend_freshness_names_why_the_bundle_is_behind(
   fw_dirs, monkeypatch,
 ):

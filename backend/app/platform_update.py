@@ -394,8 +394,7 @@ class ReconcileResult:
   ``status`` is one of ``up_to_date`` (origin already integrated), ``updated``
   (fast-forward or merge applied and the import probe passed), ``conflict``
   (merge conflicted, aborted, serving the pre sha), ``rolled_back`` (text-clean
-  merge failed the import probe, reset to the pre sha), ``deferred`` (frontend
-  resources stayed unsafe, serving the pre sha unchanged), ``offline`` (fetch
+  merge failed the import probe, reset to the pre sha), ``offline`` (fetch
   failed — kept serving unchanged), ``skipped`` (not a reconcilable clone), or
   ``error`` (an unexpected git failure was caught and the served tree reset to
   the pre sha).
