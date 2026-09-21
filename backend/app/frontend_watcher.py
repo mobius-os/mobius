@@ -35,8 +35,6 @@ from watchdog.observers.polling import PollingObserverVFS
 from app.build_admission import (
   BuildLeaseUnavailable,
   build_lease,
-  require_vite_build_admission,
-  vite_build_admitted,
 )
 from app.process_groups import (
   isolated_process_group_id,
@@ -102,15 +100,6 @@ _ACTIVE_LOCK = threading.Lock()
 _START_LOCK = threading.Lock()
 _ACTIVE_WATCHER: "_FrontendHandler | None" = None
 _ACTIVE_SUPERVISOR: "_FrontendSupervisor | None" = None
-
-
-def _memory_is_tight() -> bool:
-  """True when starting another native JS build risks an OOM kill.
-
-  Unmeasurable memory is ``unknown``, which fails open. The shared Vite policy
-  combines ratio/PSI pressure with the absolute reserve small cgroups need.
-  """
-  return not vite_build_admitted()
 
 
 def _source_tree_scandir(
@@ -756,12 +745,10 @@ def _publish_built_dir(source_dir: Path, reason: str) -> bool:
 def _run_vite_build_once(out_dir: Path) -> str:
   """Run one explicit full Vite build into ``out_dir``.
 
-  This path waits for the shared lease. If the cgroup is still unsafe once it
-  owns the lease, owner Apply rolls its source change back and rebuild_shell.sh
-  aborts cleanly; either operation can be retried without risking an OOM kill.
+  This path waits for the shared lease so it cannot overlap another native
+  JavaScript build.
   """
   with build_lease():
-    require_vite_build_admission()
     _ensure_node_modules()
     if out_dir.exists():
       shutil.rmtree(out_dir)
@@ -1067,17 +1054,12 @@ class _FrontendHandler(FileSystemEventHandler):
   def _run_demand_build(self, reason: str) -> None:
     """Run one isolated build and publish it before releasing its heap.
 
-    Both admission failures requeue the ORIGINAL reason after the normal
-    debounce, exactly like the conflict-marker retry below. Deferring is only
-    correct here, where a retry is free: the explicit rebuild path cannot
-    retry, so it waits for the lease instead.
+    A busy shared lease requeues the ORIGINAL reason after the normal debounce,
+    exactly like the conflict-marker retry below. The explicit rebuild path
+    waits for the lease instead.
     """
     try:
       with build_lease(blocking=False):
-        if _memory_is_tight():
-          self._note_build_deferred(reason)
-          self._queue_build(reason)
-          return
         with self._state_lock:
           blocked_signature = self._blocked_conflict_signature
         if blocked_signature is not None:

@@ -11,8 +11,6 @@ from pathlib import Path
 import pytest
 
 import app.frontend_watcher as fw
-from app.build_admission import ViteBuildDeferred
-
 
 def _write_build(root, marker):
   (root / "assets").mkdir(parents=True, exist_ok=True)
@@ -66,8 +64,6 @@ def fw_dirs(tmp_path, monkeypatch):
   monkeypatch.setattr(fw, "_TMP_DIR", dirs["tmp"])
   monkeypatch.setattr(fw, "_REBUILD_CACHE_DIR", dirs["rebuild_cache"])
   monkeypatch.setattr(fw, "_REBUILD_TMP_DIR", dirs["rebuild_tmp"])
-  monkeypatch.setattr(fw, "_memory_is_tight", lambda: False)
-  monkeypatch.setattr(fw, "require_vite_build_admission", lambda: None)
   monkeypatch.setattr(
     fw,
     "_BUILT_GLOBAL_CHECK",
@@ -464,55 +460,7 @@ def test_edit_during_demand_build_requests_one_rerun(fw_dirs, monkeypatch):
   ]
 
 
-def test_memory_pressure_defers_a_demand_build_and_keeps_its_reason(
-  fw_dirs, monkeypatch,
-):
-  """A tight box must not start Vite, and must not forget why it was queued."""
-  src = fw_dirs["frontend"] / "src"
-  src.mkdir()
-  source_file = src / "Shell.jsx"
-  source_file.write_text("export default 1\n", encoding="utf-8")
-  monkeypatch.setattr(fw, "_DEBOUNCE_SECS", 0.01)
-  monkeypatch.setattr(fw, "_ensure_node_modules", lambda: None)
-  tight = threading.Event()
-  tight.set()
-  monkeypatch.setattr(fw, "_memory_is_tight", tight.is_set)
-  vite_calls = []
-  publish_calls = []
-  monkeypatch.setattr(
-    fw.subprocess, "Popen",
-    lambda *args, **kwargs: vite_calls.append(args) or _FakeViteProcess(
-      lambda: _write_build(fw_dirs["staging"], "recovered"),
-    ),
-  )
-  monkeypatch.setattr(
-    fw, "_publish_built_dir",
-    lambda source, reason: publish_calls.append((source, reason)) or True,
-  )
-  monkeypatch.setattr(fw, "_publish_system_event", lambda _event: None)
-  loop = asyncio.new_event_loop()
-  handler = fw._FrontendHandler(loop, start_threads=False)
-  thread = threading.Thread(target=handler._build_loop)
-  try:
-    thread.start()
-    handler._request_build(str(source_file))
-    time.sleep(0.2)
-    assert vite_calls == []
-
-    tight.clear()
-    deadline = time.monotonic() + 2
-    while time.monotonic() < deadline and not publish_calls:
-      time.sleep(0.005)
-  finally:
-    handler.close()
-    thread.join(timeout=2)
-    loop.close()
-
-  assert len(vite_calls) == 1
-  assert publish_calls == [(fw_dirs["staging"], f"build:{source_file}")]
-
-
-def test_explicit_rebuild_builds_after_admission(
+def test_explicit_rebuild_waits_for_the_shared_lease(
   fw_dirs, monkeypatch,
 ):
   monkeypatch.setattr(fw, "_ensure_node_modules", lambda: None)
@@ -552,33 +500,6 @@ def test_vite_environment_prunes_only_stale_node_compile_cache(
 
   assert current.is_dir()
   assert not stale.exists()
-
-
-def test_explicit_rebuild_defers_before_mutating_or_starting_vite(
-  fw_dirs, monkeypatch,
-):
-  """Apply/deploy stay retryable and preserve prior output under pressure."""
-  fw_dirs["rebuild"].mkdir()
-  previous = fw_dirs["rebuild"] / "previous.txt"
-  previous.write_text("keep", encoding="utf-8")
-
-  def defer():
-    raise ViteBuildDeferred("retry after memory pressure falls")
-
-  monkeypatch.setattr(fw, "require_vite_build_admission", defer)
-  monkeypatch.setattr(
-    fw, "_ensure_node_modules",
-    lambda: pytest.fail("admission must run before frontend setup"),
-  )
-  monkeypatch.setattr(
-    fw.subprocess, "run",
-    lambda *args, **kwargs: pytest.fail("deferred build must not start Vite"),
-  )
-
-  with pytest.raises(ViteBuildDeferred, match="retry after memory pressure"):
-    fw._run_vite_build_once(fw_dirs["rebuild"])
-
-  assert previous.read_text(encoding="utf-8") == "keep"
 
 
 def test_conflict_markers_defer_vite_without_touching_generations(
