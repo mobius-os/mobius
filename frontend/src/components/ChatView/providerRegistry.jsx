@@ -64,10 +64,11 @@ function MobiusLogo() {
  *    orchestration. The CLI's `--effort` flag rejects "ultracode"
  *    (it only accepts the five enum values), so the runner maps it
  *    to `--effort xhigh` and arms the orchestration via the CLI's
- *    "ultracode" keyword trigger (see `claude_sdk_runner.py`). It is
- *    model-gated to ultracode-capable (Opus-tier) models and the
- *    keyword trigger no-ops gracefully on older CLIs / lesser models,
- *    leaving plain xhigh effort. Rendered as the rightmost (most
+ *    documented `ultracode` settings flag (see `claude_sdk_runner.py`,
+ *    which deliberately disables the older keyword trigger). It is
+ *    model-gated to ultracode-capable (Opus-tier) models and the flag
+ *    no-ops gracefully on older CLIs / lesser models, leaving plain
+ *    xhigh effort. Rendered as the rightmost (most
  *    capable) stop even though its raw effort is xhigh, not max.
  *
  *  Both are rendered as a horizontal stepper-slider in
@@ -111,7 +112,8 @@ export const PROVIDER_INFO = {
       { value: 'max', label: 'Max' },
       // Möbius tier (not an SDK EffortLevel) — see the PROVIDER_INFO
       // docstring above. The runner maps it to `--effort xhigh` plus the
-      // CLI ultracode keyword trigger (multi-agent Workflow orchestration).
+      // CLI's documented `ultracode` settings flag (multi-agent Workflow
+      // orchestration).
       { value: 'ultracode', label: 'Ultracode' },
     ],
   },

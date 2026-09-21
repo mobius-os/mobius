@@ -515,8 +515,8 @@ export default function Shell({ onInitialVisualReady }) {
   const settingsOverlay = contentVisibility.settingsOverlay
   const workspaceChromeActive = contentVisibility.chromeActive
   // (v2: multiPaneRef / visibleLeavesRef are gone — handleToggleViewMode now builds
-  // the whole latched plan from the live projection via deriveExit/EnterPlan, and the
-  // undo path reads sceneInputsRef, so no stale-closure ref latch is needed here.)
+  // the whole latched plan from the live projection via deriveModeSnapshotPlan, and
+  // the undo path reads sceneInputsRef, so no stale-closure ref latch is needed here.)
   const chatPanesVisible = contentVisibility.chatPanesVisible
   // navTo is a per-render function; stable callbacks (handleAppError, passed to
   // AppCanvas's []-dep message listener) reach the latest one through this ref

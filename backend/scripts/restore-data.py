@@ -96,9 +96,6 @@ SECRET_DIR_MODE = 0o700
 SECRET_FILES = ("service-token.txt", ".secret-key")
 SECRET_DIRS = ("cli-auth", "app-secrets", "push")
 
-# Trees whose presence means "the target already holds data" (the
-# overwrite guard) and whose newest mtime feeds the advisory message.
-DATA_TREES = ("apps", "chats", "shared")
 # Rough gz -> uncompressed expansion for the capacity preflight.
 EXPAND_FACTOR = 4
 DISK_HEADROOM = 64 * 1024 * 1024

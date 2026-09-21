@@ -109,7 +109,8 @@ class MemorySearchSystem:
   the real platform fires for facts living in `notes/`/`mocs/` or in chat notes
   that have aged past the `RECENT_CHAT_NOTES` window. The real arm is the
   installed Memory app reader; that app-owned executable is LIVE-GATED here
-  exactly like `run_live_eval.py`:
+  (unlike `run_live_eval.py`, which shells `claude -p` unconditionally with no
+  such gate):
 
   - Unit tests pass an injectable `search_fn(query) -> str` and drive it with a
     DETERMINISTIC stub — never shelling out, fully offline in `wt-pytest`.
@@ -140,8 +141,8 @@ class MemorySearchSystem:
       timeout: int = 180,
   ) -> "MemorySearchSystem":
     """The REAL memory-search subagent. Refuses to run unless `MEMEVAL_LIVE=1`
-    is set in the env (mirrors `run_live_eval.py`'s gate) so a unit-test run can
-    never accidentally shell `claude`."""
+    is set in the env (unlike `run_live_eval.py`, which has no such gate) so a
+    unit-test run can never accidentally shell `claude`."""
     def _live_search(query: str) -> "SearchResult":
       if os.environ.get("MEMEVAL_LIVE") != "1":
         raise RuntimeError(
