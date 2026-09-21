@@ -922,11 +922,11 @@ def test_install_staging_failure_publishes_nothing_and_retry_succeeds(
   real_write = rs.atomic_write
   calls = {"n": 0}
 
-  def failing_write(path, data):
+  def failing_write(path, data, **kwargs):
     calls["n"] += 1
     if calls["n"] == 2:  # the SECOND staged file fails mid-install
       raise OSError("disk full")
-    return real_write(path, data)
+    return real_write(path, data, **kwargs)
 
   monkeypatch.setattr(rs, "atomic_write", failing_write)
   r = client.post(

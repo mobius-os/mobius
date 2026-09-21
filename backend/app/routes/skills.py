@@ -141,6 +141,11 @@ def _skills_dir() -> Path:
   return Path(get_settings().data_dir) / "shared" / "skills"
 
 
+def _file_mode(rel: str, executable_files: set[str]) -> int:
+  """Base mode for a materialized skill file: launchers are executable."""
+  return 0o755 if rel in executable_files else 0o644
+
+
 def _chown_mobius(path: Path, executable_files: set[str] | None = None) -> None:
   """Best-effort: make an installed skill agent-editable (mirrors init_skills)."""
   try:
@@ -735,7 +740,10 @@ async def install_skill(
         # rel is a validated relative path (SKILL.md at the root, or a vetted
         # resource path — _resource_rel_ok rejects traversal and dot
         # segments); atomic_write creates the intermediate directories.
-        atomic_write(staged / rel, data)
+        # The executable bit belongs to the reviewed package, so set it here
+        # rather than in _chown_mobius, whose group-write pass is skipped
+        # wherever the mobius user is absent (CI, minimal hosts).
+        atomic_write(staged / rel, data, mode=_file_mode(rel, executables))
       _chown_mobius(staged, executables)
     except OSError as exc:
       shutil.rmtree(staged, ignore_errors=True)
@@ -982,7 +990,7 @@ async def update_skill(
       staged = Path(tempfile.mkdtemp(prefix=".staging-", dir=skills_dir))
       try:
         for rel, data in files.items():
-          atomic_write(staged / rel, data)
+          atomic_write(staged / rel, data, mode=_file_mode(rel, executables))
         _chown_mobius(staged, executables)
       except OSError as exc:
         shutil.rmtree(staged, ignore_errors=True)
