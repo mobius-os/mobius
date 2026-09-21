@@ -45,7 +45,12 @@ def owner_card_receipt_id(content: object) -> str | None:
       return question_id
     if value.get("isError") is True:
       continue
-    for key in ("content", "result", "structuredContent", "text", "output"):
+    # `stdout` is the Claude CLI's Bash tool_response shape
+    # ({"stdout": ..., "stderr": ..., "interrupted": ...}), which the
+    # PostToolUse card-end hook inspects for the helper-script card path.
+    for key in (
+      "content", "result", "structuredContent", "text", "output", "stdout",
+    ):
       nested = value.get(key)
       if isinstance(nested, (dict, list, str)):
         pending.append(nested)
