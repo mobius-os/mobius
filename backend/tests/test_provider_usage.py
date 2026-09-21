@@ -74,7 +74,7 @@ def test_normalize_codex_usage_reads_primary_secondary_and_credits():
   assert snapshot["state"] == "ready"
   assert snapshot["plan_label"] == "Plus plan"
   assert [window["label"] for window in snapshot["windows"]] == [
-    "5-hour", "Weekly",
+    "5-hour", "7-day",
   ]
   assert [window["kind"] for window in snapshot["windows"]] == [
     "other", "weekly",
@@ -205,6 +205,11 @@ def test_normalizers_report_unavailable_without_inventing_limits():
     "plan_label": "Pro plan",
     "windows": [],
     "credit_balance": None,
+    "extra_usage": {
+      "enabled": False,
+      "available": False,
+      "used_percent": None,
+    },
   }
   assert codex == {
     "state": "unavailable",
@@ -215,7 +220,7 @@ def test_normalizers_report_unavailable_without_inventing_limits():
   }
   assert normalize_mobius_usage({"balance": {"spendable_units": 500}}) == {
     "state": "unavailable",
-    "plan_label": "Möbius subscription",
+    "plan_label": "Möbius",
     "windows": [],
     "credit_balance": None,
   }
@@ -583,3 +588,48 @@ async def test_codex_usage_ignores_saturated_default_executor(
     await blocker
     loop.set_default_executor(replacement)
     saturated.shutdown(wait=True)
+
+
+def test_normalize_claude_usage_surfaces_enabled_extra_usage():
+  from app.provider_usage import normalize_claude_usage
+
+  snapshot = normalize_claude_usage({
+    "five_hour": {"utilization": 100, "resets_at": "2026-09-18T10:30:00Z"},
+    "extra_usage": {
+      "is_enabled": True,
+      "monthly_limit": 50000,
+      "used_credits": 12500,
+      "utilization": 25,
+      "currency": "USD",
+    },
+  })
+
+  assert snapshot["extra_usage"] == {
+    "enabled": True,
+    "available": True,
+    "used_percent": 25,
+  }
+
+
+def test_normalize_claude_usage_does_not_invent_extra_usage_availability():
+  from app.provider_usage import normalize_claude_usage
+
+  unknown = normalize_claude_usage({
+    "five_hour": {"utilization": 100},
+    "extra_usage": {"is_enabled": True},
+  })
+  exhausted = normalize_claude_usage({
+    "five_hour": {"utilization": 100},
+    "extra_usage": {"is_enabled": True, "utilization": 100},
+  })
+
+  assert unknown["extra_usage"] == {
+    "enabled": True,
+    "available": None,
+    "used_percent": None,
+  }
+  assert exhausted["extra_usage"] == {
+    "enabled": True,
+    "available": False,
+    "used_percent": 100.0,
+  }

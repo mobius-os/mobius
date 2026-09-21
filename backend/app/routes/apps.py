@@ -1263,12 +1263,42 @@ def _pending_update_state(repo: Path, upstream_commit: str) -> Literal[
   return "unknown"
 
 
+def _update_candidate_matches_installed(
+  installed_manifest_url: str,
+  candidate_manifest_url: str,
+  candidate_manifest: dict,
+) -> bool:
+  """Accept the installed package identity or its reviewed predecessor."""
+  from app import install
+
+  predecessor_source, _ = install._reviewed_predecessor_source(
+    candidate_manifest, candidate_manifest_url,
+  )
+  predecessor_matches = bool(
+    candidate_manifest.get("previous_id")
+    and install._catalog_identity_matches(
+      installed_manifest_url,
+      predecessor_source,
+      candidate_manifest["previous_id"],
+    )
+  )
+  return bool(
+    install._catalog_identity_matches(
+      installed_manifest_url,
+      candidate_manifest_url,
+      candidate_manifest["id"],
+    )
+    or predecessor_matches
+  )
+
+
 @router.get(
   "/{app_id}/update-check",
   response_model=schemas.UpdateCheckOut,
 )
 async def update_check(
   app_id: int,
+  manifest_url: str | None = None,
   db: Session = Depends(get_db),
   principal: Principal = Depends(get_principal),
 ):
@@ -1280,6 +1310,11 @@ async def update_check(
   still surfaces as an update. Strictly read-only — no working-tree mutation,
   no `record_upstream`, no DB write — which is what makes it safe to call on
   every store open.
+
+  ``manifest_url`` is an optional live catalog candidate. Installed provenance
+  remains immutable; when a candidate is supplied, its package identity must
+  match the installed package (or its reviewed predecessor) before its bytes
+  can influence availability.
 
   `update_available` is null (unknown) whenever the compare can't run — no
   `manifest_url`, no git repo, no recorded upstream branch, or the upstream
@@ -1313,7 +1348,7 @@ async def update_check(
   checked_at = datetime.now(UTC)
   local_version = app.version
   target_app_id = app.id
-  manifest_url = app.manifest_url
+  installed_manifest_url = app.manifest_url
   source_dir = app.source_dir
   installed_source_revision = app.upstream_commit
 
@@ -1329,7 +1364,7 @@ async def update_check(
       checked_at=checked_at,
     )
 
-  if not manifest_url:
+  if not installed_manifest_url:
     return _unknown()
 
   # Authentication and the target lookup have completed.  Release the request
@@ -1389,17 +1424,36 @@ async def update_check(
     # resolver can replay the same durable receipt after a restart.
     return _pending_result(pending, pending_state)
 
-  # Reconstruct the fetchable manifest URL from the stored canonical identity
-  # key (`<base>#manifest-id=<id>`): the raw manifest lives at <base>/mobius.json,
-  # exactly where a store-driven update re-fetches it.
-  base = install._canonical_base(manifest_url)
-  fetch_manifest_url = base + "/mobius.json"
+  # A catalog-aware caller supplies the mutable discovery locator explicitly.
+  # Direct/unlisted installs fall back to the stored canonical identity key,
+  # whose raw manifest lives at <base>/mobius.json.
+  fetch_manifest_url = (
+    manifest_url
+    if manifest_url is not None
+    else install._canonical_base(installed_manifest_url) + "/mobius.json"
+  )
   try:
-    fetched = await install.fetch_upstream_source(fetch_manifest_url)
+    # Discovery compares source, while preview/install still validate whether
+    # the complete manifest can be applied.
+    fetched = await install.fetch_upstream_source(
+      fetch_manifest_url, strict=False,
+    )
   except HTTPException:
     # Upstream unreachable / rate-limited / now-invalid — degrade to unknown so
     # a store open never errors on a transient network failure.
     return _unknown()
+  if manifest_url is not None:
+    try:
+      candidate_matches = _update_candidate_matches_installed(
+        installed_manifest_url, manifest_url, fetched.manifest,
+      )
+    except HTTPException:
+      # Candidate identity is discovery input, not an explicit install/update
+      # request. A malformed or cross-owner predecessor must degrade like any
+      # other unusable catalog candidate instead of breaking a store refresh.
+      return _unknown()
+    if not candidate_matches:
+      return _unknown()
 
   # Build the fetched source tree the way install records it on `upstream`.
   # The shared manifest contract makes index.jsx canonical for synthetic and
@@ -1566,22 +1620,8 @@ async def update_candidate_preview(
     else install._canonical_base(installed_manifest_url) + "/mobius.json"
   )
   fetched = await install.fetch_upstream_source(fetch_manifest_url)
-  predecessor_source, _ = install._reviewed_predecessor_source(
-    fetched.manifest, manifest_url or fetch_manifest_url,
-  )
-  predecessor_matches = bool(
-    fetched.manifest.get("previous_id")
-    and install._catalog_identity_matches(
-      installed_manifest_url,
-      predecessor_source,
-      fetched.manifest["previous_id"],
-    )
-  )
-  if manifest_url is not None and not (
-    install._catalog_identity_matches(
-      installed_manifest_url, manifest_url, fetched.manifest["id"],
-    )
-    or predecessor_matches
+  if manifest_url is not None and not _update_candidate_matches_installed(
+    installed_manifest_url, manifest_url, fetched.manifest,
   ):
     raise HTTPException(
       409, "Requested update source does not match the installed app.",

@@ -17,13 +17,16 @@ from app.question_bridge import (
 class _Bus:
   run_token = "run-1"
 
-  def __init__(self, *, fail: bool = False):
+  def __init__(self, *, fail: bool = False, on_publish=None):
     self.fail = fail
+    self.on_publish = on_publish
     self.events: list[dict] = []
 
   async def publish_question(self, event: dict) -> None:
     if self.fail:
       raise RuntimeError("write unavailable")
+    if self.on_publish is not None:
+      self.on_publish(event)
     self.events.append(event)
 
 
@@ -32,7 +35,12 @@ def test_park_question_publishes_before_waiting_and_cleans_exact_entry(
 ):
   async def exercise():
     registry: dict[str, PendingQuestion] = {}
-    bus = _Bus()
+    def assert_registered_before_publish(event):
+      pending = registry.get("chat-1")
+      assert pending is not None
+      assert pending.question_id == event["question_id"]
+
+    bus = _Bus(on_publish=assert_registered_before_publish)
     system_events = []
 
     monkeypatch.setattr(

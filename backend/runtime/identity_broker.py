@@ -64,6 +64,7 @@ COMMUNITY_BASE_URL = os.environ.get(
   "MOBIUS_COMMUNITY_REGISTRY_URL", IDENTITY_BASE_URL
 ).rstrip("/")
 MAX_BODY = 2_000_000
+MAX_INFERENCE_BODY = 16_000_000
 MAX_CONTRIBUTION_BODY = 3_000_000
 REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{7,199}$")
 INSTANCE_RE = re.compile(r"^mob_[A-Za-z0-9_-]{3,160}$")
@@ -80,6 +81,13 @@ MANAGED_EXACT_ROUTES = frozenset({
   ("POST", "/api/instance/v1/agent/trial"),
 })
 MANAGED_USER_AGENT = "mobius-managed-deployment/1"
+
+# Monotonic marker read (without importing this module) by the frozen launcher
+# and runtime provenance. Bump it whenever the served app starts depending on
+# broker routes an older broker lacks, so a stale served broker is rejected in
+# favour of the baked copy instead of returning 404 for the new routes.
+# 1 = pre-/managed broker; 2 = /managed upstream-proxy routes present.
+BROKER_ROUTE_EPOCH = 2
 
 # Declarative public forwarding policy. Callers never supply a target URL,
 # audience, or arbitrary upstream path. Contribution and community routes are
@@ -182,6 +190,11 @@ def _community_scope(method: str, route_path: str, query: str) -> str | None:
 
 
 def _request_body_limit(*, is_unix: bool, method: str, path: str) -> int:
+  if method == "POST" and path == "/v1/responses":
+    # Long-context requests are expected to exceed the broker's small control-
+    # plane envelope. This route is still exact, capability-bound, and local;
+    # retain a finite ceiling so one client cannot force unbounded buffering.
+    return MAX_INFERENCE_BODY
   if is_unix and method == "POST" and (
     path == "/v1/contributions"
     or re.fullmatch(r"/v1/contributions/ctr_[0-9a-f]{32}/withdraw", path)

@@ -147,15 +147,53 @@ Review the exact changed paths and use the smallest matching action:
 
 ---
 
+## Calling the Möbius API — use `mapi`
+
+`mapi` is the standard way for an agent to call this instance's backend. It is
+`curl` with `$API_BASE_URL` and the owner `Authorization: Bearer $AGENT_TOKEN`
+already filled in, and it only accepts `/api/...` targets so owner auth can
+never be forwarded to an external URL. `mapi /api/apps/` is exactly:
+
+```bash
+curl -s "$API_BASE_URL/api/apps/" -H "Authorization: Bearer $AGENT_TOKEN"
+```
+
+Everything else passes straight through to curl, so curl recipes translate by
+dropping the base URL and the auth header:
+
+```bash
+mapi /api/apps/ | python3 -m json.tool
+mapi -X PATCH /api/apps/<app-id> -H 'Content-Type: application/json' -d '{...}'
+mapi -X PUT /api/storage/shared/theme.css \
+  -H 'Content-Type: text/css' --data-binary @/data/shared/theme.css
+```
+
+Notes:
+- `mapi` reflects the AGENT's owner token. A background app job only has
+  `$APP_TOKEN`, so app-job scripts keep plain `curl -H "Authorization: Bearer $APP_TOKEN" ...`.
+- A successful write often returns **204 No Content**: `mapi` then prints
+  nothing. That silence is success, not failure — verify with a follow-up
+  `GET`, or show the status with
+  `mapi -o /dev/null -w '%{http_code}' -X PUT /api/... -d '...'`.
+- Use the exact documented path **including its trailing slash** (for example
+  `/api/apps/`). Möbius routes do not redirect slash-less variants: the
+  slash-less form is a plain 404, not a redirect curl could follow.
+- Raw `curl` remains correct for anything that is not this instance's `/api`.
+- Prefer `mapi` everywhere else, including new skills and examples.
+
+---
+
 ### Debugging the platform runtime
 
 Use the existing authenticated diagnostics instead of adding temporary routes:
 
 ```bash
-curl -s -H "Authorization: Bearer $AGENT_TOKEN" "$API_BASE_URL/api/debug/status" | python3 -m json.tool
-curl -s -H "Authorization: Bearer $AGENT_TOKEN" "$API_BASE_URL/api/debug/memory?process_limit=20&allocation_limit=25" | python3 -m json.tool
-curl -s -H "Authorization: Bearer $AGENT_TOKEN" "$API_BASE_URL/api/debug/logs?lines=50&chat_id=$CHAT_ID" | python3 -m json.tool
+mapi /api/debug/status | python3 -m json.tool
+mapi "/api/debug/memory?process_limit=20&allocation_limit=25" | python3 -m json.tool
+mapi "/api/debug/logs?lines=50&chat_id=$CHAT_ID" | python3 -m json.tool
 ```
+
+(`mapi` fills in auth + base URL.)
 
 `status` is the cheap health view and deliberately omits variable-sized runtime
 payload totals; its `runtime_memory.payload_sizing` field points to the detailed

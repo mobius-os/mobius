@@ -68,6 +68,7 @@ import useComposerDraftState from './hooks/useComposerDraftState.js'
 import useChatRuntimePolicy from './hooks/useChatRuntimePolicy.js'
 import useOffscreenNudge, { useNudgeTargetRef } from './hooks/useOffscreenNudge.js'
 import ChatInputBar from './ChatInputBar.jsx'
+import { compactFailureInput, mobiusChatCommand } from './slashCommands.js'
 import { hasSendablePayload } from './composerSubmission.js'
 import AgentContextInspector from './AgentContextInspector.jsx'
 import ChatSummaryViewer from './ChatSummaryViewer.jsx'
@@ -104,6 +105,7 @@ import ActivityLineHeader from './ActivityLineHeader.jsx'
 import { messageCopyText } from './messageCopy.js'
 import { formatResetTime } from './resetTime.js'
 import { isResourcePause } from './waitingPresentation.js'
+import { limitRecoveryCredit } from './limitRecoveryCredit.js'
 import {
   resetDeadlineDelay,
   resetDeadlineState,
@@ -124,7 +126,7 @@ import {
 import { clearChatQuestionDrafts } from './questionDraft.js'
 import { captureLayoutSpace, clientLengthToLayout } from '../../lib/layoutSpace.js'
 import { isTouchPrimary } from '../../lib/pointerPrimary.js'
-import { resolveStopResend } from './resolveStopResend.js'
+import { resolveStopResend, ownerQueuedSnapshot } from './resolveStopResend.js'
 import {
   focusComposerElement,
   placeCaretAtTextEnd,
@@ -155,6 +157,11 @@ import {
   reconcileChatSearchActivation,
   subscribeChatSearchReveal,
 } from '../../lib/chatSearchReveal.js'
+import {
+  chatQuestionRevealFor,
+  consumeChatQuestionReveal,
+  subscribeChatQuestionReveal,
+} from '../../lib/chatQuestionReveal.js'
 import {
   highlightSearchTerms,
 } from '../../lib/searchTermHighlight.js'
@@ -197,7 +204,9 @@ import {
   shouldRetireRestoredQuestionSnapshot,
   shouldAttachRunningStream,
   shouldAdoptRuntimeAssistantOwner,
+  shouldRetireStreamForRuntime,
   shouldRecoverSettledRuntime,
+  shouldRetireSettledRunMarker,
   shouldRetryStopAfterConfirm,
   stopConfirmedIdle,
   stopRequestSucceeded,
@@ -354,6 +363,7 @@ export default function ChatView({
   onNewChatSubmit,
   onNewChatRetry,
   onStreamEnd,
+  onRuntimeSettledIdle = null,
   onFirstMessage,
   onSystemEvent,
   onChatMissing,
@@ -398,6 +408,7 @@ export default function ChatView({
   onDisplayReady = null,
   artifactsAppId = null,
   onOpenArtifact = null,
+  focusPendingQuestion = false,
 }) {
   const queryClient = useQueryClient()
   const provisionalNewChat = !!newChatSession && !newChatSession.materialized
@@ -427,6 +438,11 @@ export default function ChatView({
   const searchRevealConsumed = searchActivationRef.current.consumedId === searchReveal?.id
   const searchRevealCleanupRef = useRef(() => {})
   useEffect(() => () => searchRevealCleanupRef.current(), [])
+  const [, setQuestionRevealVersion] = useState(0)
+  useEffect(() => subscribeChatQuestionReveal(chatId, () => {
+    setQuestionRevealVersion(version => version + 1)
+  }), [chatId])
+  const questionReveal = chatQuestionRevealFor(chatId)
   const inputRef = useRef(null)
   const handleInternalNav = useCallback((url) => {
     onInternalNav?.(url)
@@ -615,6 +631,10 @@ export default function ChatView({
   )
   const [fileDropActive, setFileDropActive] = useState(false)
   const fileDragDepthRef = useRef(0)
+  // A "/compact" submission is a chat action, not a turn: it rewrites the live
+  // context instead of asking the model anything.
+  const [compactingChat, setCompactingChat] = useState(false)
+  const compactingChatRef = useRef(false)
   const [embeddedRunActive, setEmbeddedRunActive] = useState(false)
   // A counter is only a render wake-up; deadline elapsed is derived directly
   // from the current card's reset timestamp below, so a newly loaded card can
@@ -1446,12 +1466,14 @@ export default function ChatView({
       onReconciled?.(runtime)
       const localStartInFlight =
         localStartRequestRef.current?.chatId === String(chatId)
-      if (shouldRecoverSettledRuntime({
-        settledRun: runtimeTransition.settled,
-        runtimeRunId: data.run_id || null,
-        runtimeRunning: !!data.running,
-        pendingCount: (data.pending_messages || []).length,
-        streamStillActive: isStreamingRef.current,
+      // This committed detail projection is the owner of whether an SSE
+      // transport is due. A completed run and a parked owner question both
+      // have no stream to attach; retire any failed transport even when its
+      // error path already set isStreaming false. Keep a local Start/Stop
+      // transition authoritative until its own response crosses the boundary.
+      if (shouldRetireStreamForRuntime({
+        runtimeRunning: runtime.running,
+        pendingQuestionId: runtime.pendingQuestionId,
         stopInFlight: handlingStopRef.current,
         localStartInFlight,
       })) {
@@ -1591,6 +1613,11 @@ export default function ChatView({
         // Stream is dead and the server is idle+empty: clear the stale Stop.
         setSending(false)
         sendingRef.current = false
+        // Same retirement rule as activation: a settled runtime with no
+        // queue, owner input, or local turn owner retires the drawer marker.
+        if (shouldRetireSettledRunMarker({
+          pendingQuestionId: runtime.pendingQuestionId,
+        })) onRuntimeSettledIdle?.()
       }
       // Apply local UI state directly, then publish the complete runtime
       // snapshot once. The side-effecting field setters are for independent
@@ -1660,6 +1687,7 @@ export default function ChatView({
     fetchMessages,
     inspectRuntimeSnapshot,
     messagesRef,
+    onRuntimeSettledIdle,
     pendingQueue.hydrate,
     queryClient,
     setActiveAssistantMessageId,
@@ -2502,6 +2530,19 @@ export default function ChatView({
       } else {
         setSending(false)
         sendingRef.current = false
+        // A settled activation retires the Shell streaming marker this view
+        // (or a previous mount) published for a run whose finish event was
+        // missed. The list must never stay purple behind settled runtime.
+        if (shouldRetireSettledRunMarker({
+          runtimeRunning: running,
+          pendingCount: (runtime.pending_messages || []).length,
+          pendingQuestionId: runtime.pending_question_id,
+          streamStillActive: isStreamingRef.current,
+          stopInFlight: handlingStopRef.current,
+          localStartInFlight: (
+            localStartRequestRef.current?.chatId === String(chatId)
+          ),
+        })) onRuntimeSettledIdle?.()
       }
     }
 
@@ -2797,6 +2838,7 @@ export default function ChatView({
     searchReveal?.id,
     commitRuntimeSnapshot,
     inspectRuntimeSnapshot,
+    onRuntimeSettledIdle,
     reconcileFailedSendOutbox,
     setActiveAssistantMessageId,
     setGoalPresentationLocalState,
@@ -3887,6 +3929,40 @@ export default function ChatView({
     patchQuestionAnswers,
   ])
 
+  // "/compact" never becomes a message. It asks the backend to replace this
+  // chat's live context with a fresh briefing and reset the provider session;
+  // the visible transcript is untouched and the platform renders the stored
+  // compaction as its own "Context compacted" card.
+  async function runCompactCommand(instructions = '', submittedInput = '/compact') {
+    if (!chatId || provisionalNewChat) {
+      setSendFailure('There’s no chat context to compact yet.')
+      return
+    }
+    if (compactingChatRef.current) return
+    if (isProviderSwitchBlocking(chatId)) return
+    compactingChatRef.current = true
+    setCompactingChat(true)
+    setComposerInput('')
+    setSendFailure(null)
+    try {
+      await api.chats.compact(chatId, { instructions })
+      await fetchMessages({ force: true })
+    } catch (err) {
+      setComposerInput(compactFailureInput(inputValueRef.current, submittedInput))
+      setSendFailure(sendFailureMessage(err, { online: getOnlineSnapshot() }))
+    } finally {
+      compactingChatRef.current = false
+      setCompactingChat(false)
+    }
+  }
+
+  function dispatchMobiusChatCommand(composed) {
+    const command = mobiusChatCommand(composed)
+    if (!command) return false
+    void runCompactCommand(command.instructions, composed)
+    return true
+  }
+
   function handleSubmit(e) {
     e.preventDefault()
     if (isProviderSwitchBlocking(chatId)) return
@@ -3894,12 +3970,16 @@ export default function ChatView({
       setModelSelectionRequest(request => request + 1)
       return
     }
-    doSend(input.trim())
+    const composed = input.trim()
+    if (dispatchMobiusChatCommand(composed)) return
+    doSend(composed)
   }
 
   async function handleProvisionalNewChatSubmit(e) {
     e.preventDefault()
-    if (!provisionalNewChat || newChatSession?.submitted || !input.trim()) return
+    const composed = input.trim()
+    if (!provisionalNewChat || newChatSession?.submitted || !composed) return
+    if (dispatchMobiusChatCommand(composed)) return
     await settingsSaveTailRef.current
     onNewChatSubmit?.(input)
   }
@@ -3912,6 +3992,8 @@ export default function ChatView({
       return
     }
     if (submitSteerInFlightRef.current) return
+    const composed = input.trim()
+    if (dispatchMobiusChatCommand(composed)) return
     submitSteerInFlightRef.current = true
     void doSend(input.trim(), { directSteer: true })
       .finally(() => { submitSteerInFlightRef.current = false })
@@ -4160,7 +4242,15 @@ export default function ChatView({
       // (de-duped by name) and passing them through doSend's opts —
       // data loss on Stop was a real bug (user adds files, agent's
       // mid-turn, user hits Stop, files vanish).
-      const queuedSnapshot = pendingQueue.pendingMessagesRef.current
+      // ownerQueuedSnapshot drops machine-owned `hidden` carriers (wait /
+      // delegation / activation results, peer wakes, secure-input answer
+      // continuations) parked behind the owner-input barrier. The Stop
+      // "collapse queued text into one fresh follow-up turn" contract is for
+      // what the owner typed; re-sending a hidden carrier as owner text was
+      // the phantom-queued-message bug. See resolveStopResend.js.
+      const queuedSnapshot = ownerQueuedSnapshot(
+        pendingQueue.pendingMessagesRef.current,
+      )
       const queuedTexts = queuedSnapshot
         .map(m => (m.content || '').trim())
         .filter(Boolean)
@@ -5213,12 +5303,27 @@ export default function ChatView({
   const resourcePause = isResourcePause(pendingResumeBlock)
     ? pendingResumeBlock
     : null
+  const modelCapacityPause = pendingResumeBlock?.pause?.kind === 'model_capacity'
   // An open question is the single blocker: answering it IS the continuation,
   // so don't surface a competing Resume (which the backend would now refuse).
   const hasPendingResume = !!pendingResumeBlock
     && !hasPendingQuestion
     && !resourcePause
+    && !modelCapacityPause
   const pendingLimitResetAt = pendingResumeBlock?.pause?.resets_at || null
+  // New parks preserve the provider that actually enforced the limit. Older
+  // cards predate that fact, so fall back to the chat's current provider.
+  const pendingLimitProvider = pendingResumeBlock?.pause?.provider
+    || chatInfo?.provider
+    || null
+  const pendingLimitUsageQuery = settingsQueries.providerUsage.useQuery(
+    pendingLimitProvider,
+    { enabled: Boolean(pendingLimitResetAt && pendingLimitProvider) },
+  )
+  const pendingLimitRecoveryCredit = limitRecoveryCredit(
+    pendingLimitProvider,
+    pendingLimitUsageQuery.data,
+  )
   useEffect(() => {
     if (!embedded || !autoResumeEnabled || !pendingLimitResetAt) {
       if (!pendingLimitResetAt) armedEmbeddedResetRef.current = null
@@ -5324,6 +5429,15 @@ export default function ChatView({
     scrollRef, hasPendingResume, resumeCardEl,
   )
   const questionNudgeShown = hasPendingQuestion && pendingCardOffscreen
+  const questionRevealConsumedRef = useRef(null)
+  useLayoutEffect(() => {
+    const requestId = questionReveal?.id ?? (focusPendingQuestion ? 'deep-link' : null)
+    if (!requestId || questionRevealConsumedRef.current === requestId) return
+    if (!hasPendingQuestion || !pendingQuestionEl) return
+    questionRevealConsumedRef.current = requestId
+    revealPendingQuestion(pendingQuestionEl)
+    if (questionReveal?.id != null) consumeChatQuestionReveal(chatId, questionReveal.id)
+  }, [chatId, focusPendingQuestion, hasPendingQuestion, pendingQuestionEl, questionReveal, revealPendingQuestion])
   const resumeNudgeShown = hasPendingResume && resumeCardOffscreen
   const jumpToLatestVisible = jumpToLatestShown({
     // A send-owned PIN_USER_MSG is the expected latest-turn location, not a
@@ -5396,6 +5510,12 @@ export default function ChatView({
         : 'Waiting for memory to settle. This chat will resume automatically.'
     }
     if (pendingResumeBlock.pause?.resets_at) {
+      if (modelCapacityPause) {
+        const label = formatResetTime(pendingResumeBlock.pause.resets_at)
+        return label
+          ? `Selected model is busy. Retrying ${label}.`
+          : 'Selected model is busy. Retrying automatically shortly.'
+      }
       const label = formatResetTime(pendingResumeBlock.pause.resets_at)
       if (autoResumeEnabled) {
         return label
@@ -5774,6 +5894,7 @@ export default function ChatView({
                   isLastMsg ? handleAutoResumeChange : undefined
                 }
                 limitResetElapsed={isLastMsg && limitResetElapsed}
+                recoveryCredit={isLastMsg ? pendingLimitRecoveryCredit : null}
                 submissionBlocked={providerSwitching}
                 isLastMsg={isLastMsg}
                 liveQuestionId={answerableQuestionId}
@@ -5815,6 +5936,7 @@ export default function ChatView({
               }
               onAutoResumeChange={handleAutoResumeChange}
               limitResetElapsed={limitResetElapsed}
+              recoveryCredit={pendingLimitRecoveryCredit}
               submissionBlocked={providerSwitching}
               liveQuestionId={answerableQuestionId}
               // Same publication channel as the durable rows above: while the
@@ -6038,6 +6160,7 @@ export default function ChatView({
           canRequestSteer={canRequestSteer}
           canSubmitSteer={canSubmitSteer}
           sendFailure={sendFailure}
+          notice={compactingChat ? 'Compacting this chat’s context…' : null}
           submissionBlocked={providerSwitching || !!newChatSession?.submitted}
           questionBlocked={hasPendingQuestion && !localAnswerIntents.some(record => record.body?.question_id === answerableQuestionId)}
           pendingFiles={pendingFiles}

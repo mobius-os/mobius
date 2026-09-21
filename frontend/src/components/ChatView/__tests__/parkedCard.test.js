@@ -88,8 +88,8 @@ test('ErrorCard renders a parked card for a block whose pause has a reset time',
     'a parked block must lead with a plain-language reset outcome')
   assert.match(errorCard, /Queued to continue/,
     'enabled automatic continuation is the authoritative state')
-  assert.match(msgContent, /limitResetElapsed \? 'Continue now' : 'Try now'/,
-    'a park distinguishes ordinary continuation from an early retry after credits')
+  assert.match(msgContent, /recoveryCredit\?\.actionLabel \|\| 'Try now'/,
+    'a park names a reported paid continuation while retaining a safe retry fallback')
 })
 
 test('the rendered limit card explains automatic and early recovery states', () => {
@@ -104,14 +104,22 @@ test('the rendered limit card explains automatic and early recovery states', () 
   }))
   assert.match(automatic, /Queued to continue/)
   assert.match(automatic, /continue automatically at the reset/)
-  assert.match(automatic, /Added credits or reset usage\? You can try now\./)
+  assert.doesNotMatch(automatic, /Added credits/)
 
   const manual = renderToStaticMarkup(createElement(ErrorCard, {
     block,
     autoResume: false,
   }))
   assert.match(manual, /Usage resets/)
-  assert.match(manual, /Turn on auto-continue, or try now/)
+  assert.match(manual, /Turn on auto-continue, or try again after usage resets/)
+
+  const withCredits = renderToStaticMarkup(createElement(ErrorCard, {
+    block,
+    autoResume: false,
+    recoveryCredit: { label: 'Paid extra usage is available' },
+  }))
+  assert.match(withCredits, /Paid extra usage is available/)
+  assert.match(withCredits, /Continuing now may use it/)
 
   const elapsed = renderToStaticMarkup(createElement(ErrorCard, {
     block,
@@ -120,6 +128,42 @@ test('the rendered limit card explains automatic and early recovery states', () 
   }))
   assert.match(elapsed, /Usage is available again/)
   assert.match(elapsed, /Continue when you’re ready/)
+})
+
+test('a busy selected-model card explains its short automatic retry', (t) => {
+  const previousWindow = globalThis.window
+  globalThis.window = { location: { href: 'https://mobius.test/' } }
+  t.after(() => {
+    if (previousWindow === undefined) delete globalThis.window
+    else globalThis.window = previousWindow
+  })
+  const html = renderToStaticMarkup(createElement(ErrorCard, {
+    block: {
+      type: 'error',
+      message: 'Selected model is at capacity. Please try a different model.',
+      pause: { kind: 'model_capacity', resets_at: '2099-09-14T12:00:00Z' },
+    },
+  }))
+  assert.match(html, /Trying again/)
+  assert.match(html, /up to five times/)
+  assert.match(html, /choose another model/)
+  assert.doesNotMatch(html, /Paid extra usage|Turn on auto-continue/)
+})
+
+test('an exhausted busy-model card stops promising retries and offers Resume', () => {
+  const html = renderToStaticMarkup(createElement(MsgContent, {
+    msg: { role: 'assistant', content: '', blocks: [{
+      type: 'error', resumable: true,
+      message: 'The selected model is still busy after five automatic retries.',
+      pause: { kind: 'model_capacity_exhausted' },
+    }] },
+    isLastMsg: true,
+    onResume() {},
+  }))
+  assert.match(html, /Model still busy/)
+  assert.match(html, /Five automatic retries were used/)
+  assert.match(html, />Resume<\/button>/)
+  assert.doesNotMatch(html, /Trying again/)
 })
 
 test('the one block renderer owns ErrorCard for both active sources', () => {
@@ -189,7 +233,7 @@ test('the parked card has styling distinct from a plain error', () => {
 })
 
 test('the rate-limit card keeps automatic recovery and an explicit early retry', () => {
-  assert.match(msgContent, /recoveryOwner && parked && autoResumeAvailable && onAutoResumeChange/,
+  assert.match(msgContent, /recoveryOwner && parked && !modelCapacity && autoResumeAvailable && onAutoResumeChange/,
     'the action must require the tail resumable rate-limit state')
   assert.match(msgContent, /Auto-continue this chat/,
     'a future reset names the persistent chat policy')
@@ -197,15 +241,15 @@ test('the rate-limit card keeps automatic recovery and an explicit early retry',
     'an enabled policy stays reversible without a competing retry')
   assert.match(msgContent, /manualResumeAvailable = recoveryOwner && !resourceWait/,
     'manual continuation remains available when credits restore usage early')
-  assert.match(errorCard, /Added credits or reset usage\? You can try now\./,
-    'the early retry explains when it is useful rather than encouraging blind retries')
+  assert.match(errorCard, /Continuing now may use it/,
+    'paid recovery makes potential provider charges explicit')
   assert.doesNotMatch(msgContent, /<Switch/,
     'the card must not present a switch beside a competing action')
   assert.match(css, /\.chat__recovery-actions\s*\{/,
     'the in-card action has a dedicated layout')
   assert.doesNotMatch(settingsView, /auto_resume_on_limit|Auto.?resume/i,
     'the removed global automatic option must not reappear in Settings')
-  assert.match(chatSettingsPanel, /Automatically continue after usage limits/,
+  assert.match(chatSettingsPanel, /Automatically continue<br \/>after usage limits/,
     'the paid-usage policy remains manageable in chat settings')
   assert.doesNotMatch(chatSettingsPanel, /Continue after planned restarts/,
     'restart continuation is always on and exposes no toggle')

@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 import pytest
 
 from app import models
+from tests.goal_fixtures import persist_goal_fixture
 from app.chat_writer import (
   AcknowledgePeerContextDelivery,
   AdmitProviderExecution,
@@ -60,6 +61,33 @@ def test_admission_is_a_one_way_commit_before_provider_entry(chat, db):
   assert run.peer_message_through_id is None
   with pytest.raises(_PersistFailed, match="not eligible"):
     get_writer().submit(AdmitProviderExecution(chat_id=chat.id, run_token=token)).result(timeout=5)
+
+
+def test_goal_admission_captures_the_current_plan_revision(chat, db):
+  token = "goal-admission"
+  _start(chat.id, token)
+  run = db.get(models.ChatRun, token)
+  run.goal_id = token
+  run.goal_objective = "Finish the work"
+  run.goal_plan_json = {
+    "version": 1,
+    "tasks": [{
+      "id": "finish", "title": "Finish", "status": "running",
+      "depends_on": [],
+    }],
+  }
+  run.goal_plan_revision = 3
+  persist_goal_fixture(db, run)
+  db.commit()
+
+  get_writer().submit(AdmitProviderExecution(
+    chat_id=chat.id, run_token=token,
+  )).result(timeout=5)
+
+  db.expire_all()
+  assert db.get(
+    models.ChatRun, token,
+  ).goal_plan_revision_at_admission == 3
 
 
 def test_peer_delivery_acknowledges_only_an_admitted_run(chat, db):

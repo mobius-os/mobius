@@ -60,9 +60,7 @@
  * ║   0 when the persisted value isn't in the provider's enum, so    ║
  * ║   a cross-provider effort carryover renders gracefully.          ║
  * ║                                                                  ║
- * ║   The provider logo SVGs are inlined — the apps-sdk-ui icon     ║
- * ║   set ships UI glyphs, not vendor brand marks. Paths come        ║
- * ║   from Simple-Icons + the mobius-design-iter prototype.          ║
+ * ║   Provider metadata and logos live in `providerRegistry.jsx`.    ║
  * ║                                                                  ║
  * ╚══════════════════════════════════════════════════════════════════╝
  */
@@ -536,6 +534,7 @@ export default function ChatSettingsPanel({
   const allowanceUsageLabel = providerUsage?.allowanceSummary
     || providerUsage?.allowanceLabel
     || 'Usage'
+  const extraUsageLabel = providerUsage?.extraUsageSummary || null
   const contextUsageLabel = (
     typeof providerUsage?.contextTokensUsed === 'number'
     && typeof providerUsage?.contextTokensMaximum === 'number'
@@ -554,6 +553,12 @@ export default function ChatSettingsPanel({
             <span className="csp__usage-key-line csp__usage-key-line--provider" aria-hidden="true" />
             <span>{allowanceUsageLabel}</span>
           </span>
+          {extraUsageLabel && (
+            <span className="csp__usage-key-item">
+              <span className="csp__usage-key-line csp__usage-key-line--extra" aria-hidden="true" />
+              <span>{extraUsageLabel}</span>
+            </span>
+          )}
           <span className="csp__usage-key-item">
             <span className="csp__usage-key-line csp__usage-key-line--context" aria-hidden="true" />
             <span>{contextUsageLabel}</span>
@@ -717,7 +722,7 @@ export default function ChatSettingsPanel({
         <div className="csp__automation">
           <div className="csp__automation-row">
             <label className="csp__automation-copy" htmlFor={autoResumeSwitchId}>
-              <span className="csp__automation-title">Automatically continue after usage limits</span>
+              <span className="csp__automation-title">Automatically continue<br />after usage limits</span>
             </label>
             <Switch
               className="chat-policy-switch"

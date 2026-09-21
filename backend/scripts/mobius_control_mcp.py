@@ -35,6 +35,10 @@ CANCEL_WAIT_TOOL = "cancel_wait"
 REQUEST_APPROVAL_TOOL = "request_approval"
 REQUEST_QUESTION_TOOL = "request_question"
 REQUEST_RESTART_TOOL = "request_restart"
+SAVED_CARD_TERMINAL_INSTRUCTION = (
+  "This tool call must be the final action of the turn. After a confirmed "
+  "saved receipt, end immediately with no further text or tools."
+)
 LIST_AGENT_PEERS_TOOL = "list_agent_peers"
 SEND_AGENT_MESSAGE_TOOL = "send_agent_message"
 CLAIM_AGENT_WORK_TOOL = "claim_agent_work"
@@ -471,9 +475,10 @@ _TOOL_DEFINITIONS = {
       "restart (use request_restart for that). This is an application decision, "
       "not a sandbox or tool-permission "
       "escalation. Saves an ordinary answerable question card and returns a "
-      "receipt immediately, NOT an answer or permission. After success, end "
-      "the turn without further text or tools. Put all explanation, preparation and "
-      "closeout BEFORE this final call. The owner's answer resumes "
+      "receipt immediately, NOT an answer or permission. "
+      f"{SAVED_CARD_TERMINAL_INSTRUCTION} "
+      "Put all explanation, preparation, and closeout before this call. "
+      "The owner's answer resumes "
       "the chat; no process needs to wait, and there is no human-answer timeout. "
       "Use this instead of the provider's clarifying-question tool for owner "
       "approvals. Explain the action and its impact in the question and option "
@@ -518,9 +523,9 @@ _TOOL_DEFINITIONS = {
       "and binds the action; this tool accepts no caller-supplied command or "
       "source identity. Use it only after the platform-maintenance activation "
       "preflight. It saves a card with Restart now and a written-response path "
-      "and returns a receipt, NOT approval. Put all explanation and closeout "
-      "before this final call, "
-      "then end the turn without more text or tools. Choosing Restart now is "
+      "and returns a receipt, NOT approval. "
+      f"{SAVED_CARD_TERMINAL_INSTRUCTION} "
+      "Put all explanation and closeout before this call. Choosing Restart now is "
       "handled by the platform without waking an agent to issue the command."
     ),
     "inputSchema": {
@@ -530,11 +535,12 @@ _TOOL_DEFINITIONS = {
   REQUEST_QUESTION_TOOL: {
     "name": REQUEST_QUESTION_TOOL,
     "description": (
-      "Ask 1–3 ordinary clarifying questions as the FINAL action of your turn. "
-      "Finish useful preparation, explanation and closeout BEFORE this call. "
+      "Ask 1–3 ordinary clarifying questions. "
       "The saved card blocks further work until the owner answers or Stops; "
-      "it returns a receipt, NOT an answer. After success end immediately with "
-      "no further text or tools. Do not guess, poll or keep a process waiting. "
+      "it returns a receipt, NOT an answer. "
+      f"{SAVED_CARD_TERMINAL_INSTRUCTION} "
+      "Finish useful preparation, explanation, and closeout before this call. "
+      "Do not guess, poll or keep a process waiting. "
       "Answers normally resume the chat, including after restart; explicit close choices do not. Prefer this "
       "over provider-native questions in live owner chats. Use request_approval "
       "for permission; use the sealed secure-input helper for secrets. "
@@ -815,5 +821,49 @@ def serve(input_stream: TextIO, output_stream: TextIO) -> None:
       _write_message(output_stream, response)
 
 
+def _cli_call(argv: list[str]) -> int:
+  """Run one control tool from the command line and print its result.
+
+  Same authority gating and handlers as the stdio server: the environment of
+  the calling agent run decides which tools exist. This is the provider-neutral
+  seam for agents whose model gateway cannot surface dynamic MCP namespaces
+  (the cards, waits, claims, and peer messages stay reachable through exec).
+  """
+  if len(argv) < 2 or argv[0] != "call" or len(argv) > 4:
+    print(
+      "usage: mobius_control_mcp.py call <tool_name> [--args-json JSON]",
+      file=sys.stderr,
+    )
+    return 2
+  tool_name = argv[1]
+  arguments: dict[str, Any] = {}
+  if len(argv) == 4 and argv[2] == "--args-json":
+    try:
+      parsed = json.loads(argv[3])
+    except json.JSONDecodeError as exc:
+      print(f"invalid --args-json: {exc}", file=sys.stderr)
+      return 2
+    if not isinstance(parsed, dict):
+      print("--args-json must be a JSON object", file=sys.stderr)
+      return 2
+    arguments = parsed
+  elif len(argv) > 2:
+    print("usage: mobius_control_mcp.py call <tool_name> [--args-json JSON]",
+          file=sys.stderr)
+    return 2
+  result = _call_tool({"name": tool_name, "arguments": arguments})
+  text = ""
+  for item in result.get("content", []):
+    if isinstance(item, dict) and isinstance(item.get("text"), str):
+      text += item["text"]
+  print(text)
+  return 1 if result.get("isError") else 0
+
+
 if __name__ == "__main__":
+  # Stdio server mode is intentionally argument-free. Any argument means a
+  # human/provider invoked the CLI seam and must receive bounded validation;
+  # a typo must not silently become a server waiting forever on stdin.
+  if len(sys.argv) > 1:
+    raise SystemExit(_cli_call(sys.argv[1:]))
   serve(sys.stdin, sys.stdout)

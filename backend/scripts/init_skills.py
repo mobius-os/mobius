@@ -41,6 +41,7 @@ init_chat_summaries.py.
 """
 
 import hashlib
+import json
 import os
 import pwd
 import shutil
@@ -67,6 +68,9 @@ _UNMODIFIED_MIGRATIONS = {
     "1730bcf614f0689f2c6459396c342f4090c1374eeb62450e21a81463fe0098bd",
   },
   "platform-maintenance.md": {
+    # Untouched release copy before agent-side API examples standardized on
+    # mapi. Owner-edited copies still differ and remain protected.
+    "7cd74918a7d477f87addfdc51dd4559672a9a7face6da109a5af67dd47390efa",
     # Baked copies before the container-boundary guidance. Both hashes are
     # released, untouched generations; owner-edited copies remain protected.
     "bcc617354747c49ddad7fa1f419cf921fd7280909358096323cdbc427ad063c3",
@@ -102,6 +106,14 @@ _UNMODIFIED_MIGRATIONS = {
     # Front-loaded execution-loop seed before routing became an explicit serial
     # gate and the repeated guidance was condensed below Claude's read limit.
     "d00214c37ba549f5ea4f043714ca33073176b47f1e3085230791b74dd49e2b49",
+    # Compact serial-gate seed before Goals moved from provider-attempt fields
+    # to first-class durable records.
+    "4f77c36ab0c8d1ef7459911a813e0b742a5819a915601ca127495354a21d7ea7",
+    # Turn-local routing seed before plan-owned continuation and no-op revision
+    # fencing. Only untouched copies receive the new handoff contract.
+    "c0484a99757296892e042512cdc41371e2e94e88ceab377e80a3b8a71f3a48c2",
+    # Initial plan-owned continuation seed before its bounded wording pass.
+    "9c1665fece62c6eaa20d422f138527952eb8feb3dc56c215be62b04769bd3914",
   },
   "waiting.md": {
     # Untouched shared copy before explicit owner/deadline requirements and
@@ -118,6 +130,9 @@ _UNMODIFIED_MIGRATIONS = {
     "ea58419a5a654c3b6e547426867434c8c25830a5ca3487045728c816352712f9",
   },
   "cron.md": {
+    # Untouched release copy before the agent/app credential boundary named
+    # mapi as agent-only and kept APP_TOKEN jobs on curl.
+    "2ec4c056ee8691283fbcdeaa1cdcaa1b106ed056600e38cac8b8a979de9dccb3",
     "289336d78ad4268110360f12faac5512d5a53b66aa31c2a6ddd1a44f538f2559",
     "ed100cb496b887a7951adc967e92cda1449c4f8594f7859fbd32762221d24914",
     # Every remaining baked generation that still shows the owner service token
@@ -137,6 +152,8 @@ _UNMODIFIED_MIGRATIONS = {
     "16055ea6ba6e4663636f87fde9868aa98d49ab39c5037ff90fa673d96c259cd9",
   },
   "embedded-app-agent.md": {
+    # Untouched release copy before owner-context job triggers used mapi.
+    "8f74917e0978ae4c1470bed2a9d14c52a8a050875251aec42458a35d16ff6ac2",
     # Pre-#612 baked copy: clarify that an accepted overlapping run may skip.
     "e58970bb7357030b9ac9c72e3b547d3bc93cdb75a1442dc5bb92db6174beebad",
   },
@@ -179,6 +196,10 @@ _UNMODIFIED_MIGRATIONS = {
     "db0c1138ffd0890936ccdeba6ced4ccde867ba3044eeef0a5c87cdf2f279eaaa",
   },
   "building-apps.md": {
+    # Intermediate mapi copy before credential reads preserved HTTP failures.
+    "734a5fd00dcd58e53f6713a2663d0dd18dec92abcbcf767c7f02f894d92ee510",
+    # Untouched release copy before owner-context API examples used mapi.
+    "40f42d055ccdb58a21ce1404da9609f5fbb7135a460b768bb8aa7cdc49ad10b1",
     "4126b40d209c422184e0135f611bb9f4197ea280fa27e63cd71c806f8b5ebd79",
     "91b655952d55b37fda0be82e3914c3b09e67ca7c5f5a575d315fb2ca75ef08f1",
     "563dcd7bfa1ff7cbad074d98462eb9755a010a15bf340c7f594fc7f6825a6a86",
@@ -203,6 +224,10 @@ _UNMODIFIED_MIGRATIONS = {
     # Owner-curated pre-preview-helper copy: valid local prose, but stale
     # capture and apply receipts now bypass readiness and relist app state.
     "c8d1dada4ba2a4ad29da159edf654cf99175a372569f753100398a8a307bc7d6",
+  },
+  "undo-and-restore.md": {
+    # Untouched release copy before recovery examples used mapi.
+    "84bcbf77edba170f2023824aac46e89e737a873b785c3128943ee8600ca66feb",
   },
   "resolving-app-git.md": {
     # v17 baked copy: resolution is an explicit installer replay.
@@ -232,6 +257,9 @@ _UNMODIFIED_MIGRATIONS = {
     # Owner-curated copy using the retired opaque-frame selector path. The
     # merged seed preserves its media-order and browser-cleanup safeguards.
     "2b14caf13f4cc7c76868f9566f2c0789f6e9b8c0fefac897e1d9ebda11dff8bf",
+    # Pre-agent-browser-0.38 copy: described node refs as ephemeral and the
+    # manual reap. Untouched installs keep that text without this entry.
+    "32e436df532ee4c17b3343b04ead4261d7e46dc48c1dc0a611dcdfdd7b593209",
   },
 }
 
@@ -241,6 +269,13 @@ _UNMODIFIED_MIGRATIONS = {
 # undo-and-restore.md. Current-seed hashes belong here by design: retirement,
 # unlike a fix-forward replacement, must also remove the latest untouched copy.
 _RETIRED_UNMODIFIED_SKILLS = {
+  # Live screen control remains an owner-consented platform capability, but it
+  # no longer needs a standalone procedural skill. Remove the untouched seed
+  # copy from discovery; a customized copy is archived by the generic retire
+  # path below instead of being discarded.
+  "live-screen-control.md": {
+    "494da9e09b122b04bcc6bb5f1bbbddf2e71ba75b777af41f5e5aa1b598a621be",
+  },
   # Agent Coaching subsumes the former on-demand manager ritual with a neutral
   # feedback-first method that Reflection can also use for self-improvement.
   # Preserve customized copies in retired-skills, but keep no parallel active
@@ -326,9 +361,31 @@ def _write_index() -> None:
 
 def _retire_legacy_skills() -> tuple[int, int]:
   """Remove baked legacy seeds and archive customized flat copies exactly."""
+  sidecar = SKILLS / ".app-skills.json"
+  app_owned: set[str] = set()
+  if sidecar.exists():
+    try:
+      records = json.loads(sidecar.read_text(encoding="utf-8"))
+      if not isinstance(records, dict) or any(
+        not isinstance(name, str) or not isinstance(record, dict)
+        for name, record in records.items()
+      ):
+        raise ValueError("expected an object of ownership records")
+      # The sidecar owns the basename even while a skill is inactive. Restore
+      # moves bytes back before it flips `active`, so filtering on discovery
+      # state would let boot retire an app-owned file after an interruption.
+      app_owned = set(records)
+    except (OSError, ValueError) as exc:
+      # Ownership ambiguity must preserve the live files. The app installer
+      # can repair its own sidecar on a later install/update.
+      print(f"init_skills: app skill ownership unreadable; retirement skipped ({exc})")
+      return 0, 0
+
   removed = 0
   archived = 0
   for name, baked_digests in _RETIRED_UNMODIFIED_SKILLS.items():
+    if name in app_owned:
+      continue
     path = SKILLS / name
     if not path.is_file():
       continue

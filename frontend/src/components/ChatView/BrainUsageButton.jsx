@@ -3,6 +3,7 @@ import BrainUsageIcon from './BrainUsageIcon.jsx'
 import {
   providerAllowance,
   providerAllowanceSummary,
+  providerExtraUsage,
 } from '../SettingsView/providerUsage.js'
 import {
   contextUsedPercent,
@@ -40,15 +41,25 @@ export default function BrainUsageButton({
     ? providerAllowance(provider, null)
     : providerAllowance(provider, providerUsageQuery.data)
   const allowanceSummary = providerAllowanceSummary(provider, allowance)
+  const extraUsage = providerExtraUsage(providerUsageQuery.data)
   const leftPercent = allowance.usedPercent
   const contextSnapshot = contextUsageQuery.isLoading
     ? null
     : contextUsageQuery.data
+  // A chat with no provider session yet never enables the usage query, so the
+  // snapshot is undefined rather than a null-session record. The registry
+  // fallback still owns the pre-first-turn estimate there.
+  const noSession = (
+    usageEnabled
+    && !providerSessionId
+    && Boolean(provider && model)
+  )
   const contextTokens = resolvedContextTokenCounts(
     contextSnapshot,
     modelRegistryQuery.isLoading ? null : modelRegistryQuery.data,
     provider,
     model,
+    { noSession },
   )
   const rightPercent = contextTokens === null
     ? null
@@ -62,10 +73,11 @@ export default function BrainUsageButton({
     leftPercent === null
       ? `${providerLabel} usage: unknown`
       : (provider === 'mobius' ? allowanceSummary : `${providerLabel} ${allowanceSummary}`),
+    extraUsage?.summary ? `${providerLabel} ${extraUsage.summary}` : null,
     contextTokens === null || rightPercent === null
       ? 'Context used: unknown'
       : `Context used: ${formatRoundedTokenCount(contextTokens.used)} of ${formatRoundedTokenCount(contextTokens.maximum)} tokens (${Math.round(rightPercent)}%); ${Math.round(100 - rightPercent)}% remains before compaction`,
-  ].join(' · ')
+  ].filter(Boolean).join(' · ')
 
   return children({
     icon: <BrainUsageIcon leftPercent={leftPercent} rightPercent={rightPercent} />,
@@ -73,6 +85,9 @@ export default function BrainUsageButton({
     providerUsage: {
       provider,
       providerLabel,
+      extraUsageLabel: extraUsage?.label || null,
+      extraUsageSummary: extraUsage?.summary || null,
+      extraUsagePercent: extraUsage?.usedPercent ?? null,
       allowanceKind: allowance.kind,
       allowanceLabel: allowance.label,
       allowanceUsedPercent: leftPercent,

@@ -52,6 +52,7 @@ function PaneChatView({
   onFirstMessage,
   onDisplayReady,
   onChatBoundaryError,
+  focusPendingQuestion = false,
 }) {
   const appArtifactsQuery = chatAppArtifactQueries.detail.useQuery(chatId, {
     enabled: !newChatSession || newChatSession.materialized,
@@ -60,6 +61,14 @@ function PaneChatView({
     () => projectChatAppArtifacts(appArtifactsQuery.data),
     [appArtifactsQuery.data],
   )
+
+  // A settled runtime verdict retires this view's Shell streaming marker even
+  // when the run's terminal event was missed (for example a mid-stream provider
+  // disconnect while the pane was hidden). markStreamingEnd is idempotent, so
+  // this composes with the ordinary stream-end path.
+  const handleRuntimeSettledIdle = useCallback(() => {
+    markStreamingEnd(chatId)
+  }, [chatId, markStreamingEnd])
 
   const handleStreamEnd = useCallback(({ continues } = {}) => {
     if (!continues) markStreamingEnd(chatId)
@@ -145,6 +154,7 @@ function PaneChatView({
         paneContentHeight={paneContentHeight}
         externalRunSignal={externalRunSignal}
         onStreamEnd={handleStreamEnd}
+        onRuntimeSettledIdle={handleRuntimeSettledIdle}
         onFirstMessage={handleFirstMessage}
         onSystemEvent={onSystemEvent}
         onChatMissing={handleChatMissing}
@@ -159,6 +169,7 @@ function PaneChatView({
         composerRequest={composerRequest}
         onComposerRequestHandled={onComposerRequestHandled}
         onDisplayReady={onDisplayReady ? handleDisplayReady : null}
+        focusPendingQuestion={focusPendingQuestion}
       />
     </ErrorBoundary>
   )

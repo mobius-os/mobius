@@ -190,6 +190,51 @@ def test_completed_receipt_ends_only_the_exact_saved_card_turn(
     registry.unregister(chat.id, handle.kind)
 
 
+def test_streamed_receipt_survives_an_empty_completed_payload(
+  client, chat, approval_run,
+):
+  """The card cut must not depend on which channel carried the receipt.
+
+  A provider that streams command output can omit its re-aggregated copy on
+  completion (Codex's aggregatedOutput is optional). The completed event then
+  arrives empty; it must neither erase the streamed output nor skip the
+  finish-after-owner-card cut.
+  """
+  from app.runner_registry import registry
+  handle = _FakeCardHandle(chat.id)
+  registry.register(handle)
+  try:
+    approval_run[0].publish({
+      "type": "tool_start", "tool": "Bash", "input": "owner helper",
+      "tool_use_id": "owner-helper-1",
+    })
+    saved = _ask(client, chat, approval_run)
+    qid = saved.json()["question_id"]
+    async def deliver(content, *, complete=False, exit_code=None):
+      event = {
+        "type": "tool_output", "content": content,
+        "tool_use_id": "owner-helper-1",
+      }
+      if complete:
+        event["output_complete"] = True
+      if exit_code is not None:
+        event["output_exit_code"] = exit_code
+      approval_run[0].publish(event)
+      await asyncio.sleep(0)
+
+    asyncio.run(deliver(saved.text))
+    asyncio.run(deliver("", complete=True, exit_code=0))
+    assert handle.finishes == 1
+    blk = next(
+      block for block in approval_run[0].assistant_blocks
+      if block.get("type") == "tool"
+    )
+    assert blk["owner_card_question_id"] == qid
+    assert saved.text in blk["output"]
+  finally:
+    registry.unregister(chat.id, handle.kind)
+
+
 def test_native_question_event_does_not_end_the_active_turn(chat, approval_run):
   """The native AskUserQuestion path shares `publish_question` but carries no
   `response_mode`: it parks on an awaited future in question_bridge and must NOT
@@ -541,6 +586,32 @@ def test_helper_preserves_bounded_deterministic_rejection_detail(monkeypatch):
   assert "Fix the stated conflict" in str(exc.value)
 
 
+def test_helper_preserves_structured_restart_rejection_detail(monkeypatch):
+  import io
+  from urllib.error import HTTPError
+  from tests.test_platform_tools import _control_module
+
+  helper = _control_module()._APPROVALS
+  for name in ("API_BASE_URL", "AGENT_TOKEN", "CHAT_ID", "MOBIUS_RUN_TOKEN"):
+    monkeypatch.setenv(name, "test-value")
+  monkeypatch.setenv("API_BASE_URL", "http://testserver")
+
+  def reject(request, timeout):
+    raise HTTPError(
+      request.full_url, 409, "Conflict", {}, io.BytesIO(json.dumps({
+        "detail": {
+          "code": "restart_source_must_be_committed",
+          "message": "Möbius could not bind a Restart card to exact committed source.",
+        },
+      }).encode()),
+    )
+
+  monkeypatch.setattr(helper, "urlopen", reject)
+  with pytest.raises(SystemExit, match="restart_source_must_be_committed") as exc:
+    helper.request_restart()
+  assert "exact committed source" in str(exc.value)
+
+
 def test_stop_winning_answer_admission_does_not_queue_a_continuation(
   client, chat, auth, approval_run, monkeypatch,
 ):
@@ -615,3 +686,130 @@ def test_question_tool_saves_receipt_and_never_returns_a_default_answer(monkeypa
   assert control._call_request_question({"questions": payload}) == expected
   assert captured == [payload]
   assert "answers" not in expected
+
+
+def test_prose_a_provider_races_after_a_saved_card_is_never_discarded(
+  client, chat, approval_run,
+):
+  """The runner interrupts after the card receipt, but output already produced
+  by the provider remains part of both session histories. Never hide or discard
+  that raced text while the asynchronous interrupt drains.
+  """
+  sink = approval_run[0]
+  assert sink.publish({"type": "text", "content": "Reading the contract first."})
+  saved = _ask(client, chat, approval_run)
+  assert sink.assistant_blocks[-1]["type"] == "question"
+
+  log_before = len(sink.bc.event_log)
+  assert sink.publish({"type": "text", "content": "Card saved — waiting on you."})
+  assert sink.publish({"type": "thinking", "content": "Should I say more?"})
+  assert [b["type"] for b in sink.assistant_blocks] == [
+    "text", "question", "text", "thinking",
+  ]
+  assert len(sink.bc.event_log) == log_before + 2
+  asyncio.run(sink.finalize())
+  persisted = _row(chat.id)[1][-1]["blocks"]
+  assert [b["type"] for b in persisted] == [
+    "text", "question", "text", "thinking",
+  ]
+  assert persisted[1]["question_id"] == saved.json()["question_id"]
+
+
+def test_completed_card_receipt_interrupts_then_preserves_the_raced_tail(
+  client, chat, approval_run,
+):
+  """The two owner-card guarantees hold at the same receipt boundary.
+
+  A successful completed receipt synchronously claims the runner interrupt,
+  while provider events already in flight remain live and durable as the
+  asynchronous interrupt drains.
+  """
+  from app.runner_registry import registry
+
+  sink = approval_run[0]
+  handle = _FakeCardHandle(chat.id)
+  registry.register(handle)
+  try:
+    assert sink.publish({
+      "type": "tool_start", "tool": "Bash", "input": "owner helper",
+      "tool_use_id": "owner-helper-race",
+    })
+    saved = _ask(client, chat, approval_run)
+    qid = saved.json()["question_id"]
+
+    async def deliver_receipt_and_raced_tail():
+      assert sink.publish({
+        "type": "tool_output", "content": saved.text,
+        "output_complete": True, "output_exit_code": 0,
+        "tool_use_id": "owner-helper-race",
+      })
+      assert handle.finishes == 1
+
+      log_before = len(sink.bc.event_log)
+      assert sink.publish({"type": "text", "content": "Already emitted tail."})
+      assert sink.publish({
+        "type": "thinking", "content": "Already emitted trace.",
+      })
+      assert len(sink.bc.event_log) == log_before + 2
+      await sink.finalize()
+
+    asyncio.run(deliver_receipt_and_raced_tail())
+
+    persisted = _row(chat.id)[1][-1]["blocks"]
+    assert [block["type"] for block in persisted] == [
+      "tool", "question", "text", "thinking",
+    ]
+    assert persisted[0]["owner_card_question_id"] == qid
+    assert persisted[1]["question_id"] == qid
+    assert persisted[2]["content"] == "Already emitted tail."
+  finally:
+    registry.unregister(chat.id, handle.kind)
+
+
+def test_a_streamed_messages_tail_still_lands_in_its_own_block(
+  client, chat, approval_run,
+):
+  """A pre-card message tail reattaches to its original block while a distinct
+  raced message remains visible after the card instead of being discarded."""
+  sink = approval_run[0]
+  assert sink.publish(
+    {"type": "text", "content": "Reading it", "text_item_id": "msg-1"},
+  )
+  _ask(client, chat, approval_run)
+  assert sink.publish(
+    {"type": "text", "content": " first.", "text_item_id": "msg-1"},
+  )
+  assert [b["type"] for b in sink.assistant_blocks] == ["text", "question"]
+  assert sink.assistant_blocks[0]["content"] == "Reading it first."
+  # A different message item is genuinely later, but must remain visible so
+  # Möbius and the provider session never diverge while the interrupt drains.
+  assert sink.publish(
+    {"type": "text", "content": " Done.", "text_item_id": "msg-2"},
+  )
+  assert [b["type"] for b in sink.assistant_blocks] == [
+    "text", "question", "text",
+  ]
+  assert sink.assistant_blocks[-1]["content"] == " Done."
+
+
+def test_native_question_keeps_recording_post_card_prose(chat, approval_run):
+  """Only a continuation card is terminal. A native AskUserQuestion is
+  mid-turn, so prose after that card stays ordinary transcript."""
+  sink = approval_run[0]
+
+  async def go():
+    await sink.publish_question({
+      "type": "question",
+      "question_id": "native-post-1",
+      "questions": [{
+        "question": "Pick one",
+        "options": [
+          {"label": "A", "description": "a"},
+          {"label": "B", "description": "b"},
+        ],
+      }],
+    })
+
+  asyncio.run(go())
+  assert sink.publish({"type": "text", "content": "While you decide, notes."})
+  assert [b["type"] for b in sink.assistant_blocks] == ["question", "text"]

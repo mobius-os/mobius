@@ -20,7 +20,9 @@ test('a malformed intent is dropped, not rejected with the whole target', () => 
 
 test('in-scope shell chat target parses', () => {
   assert.deepEqual(parseNotificationTarget('/shell/?chat=abc-123'),
-    { view: 'chat', chatId: 'abc-123' })
+    { view: 'chat', chatId: 'abc-123', focusQuestion: false })
+  assert.deepEqual(parseNotificationTarget('/shell/?chat=abc-123&focus=question'),
+    { view: 'chat', chatId: 'abc-123', focusQuestion: true })
 })
 
 test('retired out-of-scope app and chat routes fail closed', () => {
@@ -34,7 +36,7 @@ test('a same-origin absolute URL parses like its path form', () => {
   try {
     assert.deepEqual(
       parseNotificationTarget('https://mobius.example/shell/?chat=c1'),
-      { view: 'chat', chatId: 'c1' },
+      { view: 'chat', chatId: 'c1', focusQuestion: false },
     )
   } finally {
     if (prev === undefined) delete globalThis.location

@@ -7,6 +7,7 @@ import pytest
 from fastapi import HTTPException
 
 from app import contribution_review_runs as domain, models
+from app.contribution_errors import ContributionSubmitError
 from app.database import SessionLocal
 from app.deps import Principal
 from app.routes import contribution_reviews as routes
@@ -21,6 +22,7 @@ REPO = {"id": 1, "full_name": ITEM["repo"], "permissions": {"push": True},
         "allow_squash_merge": True}
 PULL = {"node_id": "PR_7", "state": "open", "head": {"sha": SHA},
         "base": {"ref": "main", "sha": BASE}, "title": "A change", "html_url": TARGET["url"]}
+REF = {"object": {"sha": BASE}}
 CHECKS = {"headRefOid": SHA, "mergeable": "MERGEABLE", "mergeStateStatus": "CLEAN",
           "reviewDecision": "APPROVED", "isMergeQueueEnabled": False,
           "commits": {"nodes": [{"commit": {"statusCheckRollup": {"state": "SUCCESS"}}}]}}
@@ -46,6 +48,7 @@ def setup(fresh_db, monkeypatch):
   monkeypatch.setattr(routes, "_validate_submit_app", lambda *args: "nonce")
   monkeypatch.setattr(domain, "read", lambda *args: {"id": 42})
   monkeypatch.setattr(domain, "current_pull", lambda *args: (REPO, PULL))
+  monkeypatch.setattr(domain, "assert_current_base", lambda *args: None)
   monkeypatch.setattr(domain, "pull_checks", lambda *args: CHECKS)
   yield db, row, principal
   db.close()
@@ -116,6 +119,30 @@ def test_lost_merge_receipt_is_not_replayed(setup, monkeypatch):
   assert calls == [1]
 
 
+def test_merge_failure_summary_keeps_safe_github_diagnostic():
+  summary = domain.merge_failure_summary(ContributionSubmitError(
+    "gh: HTTP 422: merge blocked token=should-not-appear"
+  ))
+  assert "HTTP 422" in summary
+  assert "should-not-appear" not in summary
+  assert "[redacted]" in summary
+
+
+def test_merge_failure_summary_keeps_untrusted_exception_generic():
+  assert domain.merge_failure_summary(TimeoutError("internal socket detail")) == (
+    "GitHub did not confirm the merge or queue request. Reconcile it before any new action."
+  )
+
+
+def test_lost_merge_receipt_preserves_safe_diagnostic(setup, monkeypatch):
+  def lose(*args):
+    raise ContributionSubmitError("gh: HTTP 422: merge blocked")
+  monkeypatch.setattr(domain, "perform_merge", lose)
+  item = report(setup)["run"]["items"][0]
+  assert item["state"] == "merge_unknown"
+  assert "HTTP 422" in item["summary"]
+
+
 def test_lost_merge_receipt_reconciles_exact_merged_head(setup, monkeypatch):
   db, row, _ = setup
   domain.save_outcome(db, row, domain.key(ITEM), {"state": "merging"})
@@ -170,9 +197,30 @@ def test_github_blockers_stop_before_merge(changes):
   assert domain.merge_blocker(TARGET, REPO, PULL, {**CHECKS, **changes})
 
 
-def test_removed_permission_and_changed_base_stop_merge():
+def test_removed_permission_stops_merge():
   assert domain.merge_blocker(TARGET, {**REPO, "permissions": {}}, PULL, CHECKS)
-  assert domain.merge_blocker(TARGET, REPO, {**PULL, "base": {"ref": "main", "sha": "c" * 40}}, CHECKS)
+
+
+def test_live_target_branch_not_pull_comparison_base_binds_selection():
+  pull = {**PULL, "base": {"ref": "main", "sha": "c" * 40}}
+  def gh(cwd, command, endpoint):
+    value = REPO if endpoint == "repos/example/project" else REF if "/git/ref/" in endpoint else pull
+    return SimpleNamespace(stdout=json.dumps(value))
+  target = domain.inspect_target(gh, "/tmp", ITEM, "review_merge")
+  assert target["base_sha"] == BASE
+
+
+@pytest.mark.parametrize("queued", [False, True])
+def test_target_branch_advance_after_preflight_stops_before_public_action(setup, monkeypatch, queued):
+  monkeypatch.setattr(domain, "pull_checks", lambda *args: {**CHECKS, "isMergeQueueEnabled": queued})
+  monkeypatch.setattr(domain, "assert_current_base", lambda *args: (_ for _ in ()).throw(
+    HTTPException(409, "The target branch changed.")))
+  monkeypatch.setattr(domain, "perform_merge", lambda *args: pytest.fail("stale-base merge"))
+  monkeypatch.setattr(domain, "enqueue", lambda *args: pytest.fail("stale-base enqueue"))
+  with pytest.raises(HTTPException) as error:
+    report(setup)
+  assert error.value.status_code == 409
+  assert setup[1].outcomes_json == {}
 
 
 def test_merge_call_binds_sha_without_admin_bypass():
@@ -185,12 +233,31 @@ def test_merge_call_binds_sha_without_admin_bypass():
   assert not any("admin" in str(a) for a in calls[0])
 
 
+@pytest.mark.parametrize("payload", ["null", "[]", '"merged"'])
+def test_merge_call_rejects_non_object_confirmation(payload):
+  def gh(*args):
+    return SimpleNamespace(stdout=payload)
+  with pytest.raises(ContributionSubmitError) as error:
+    domain.perform_merge(gh, "/tmp", TARGET, REPO)
+  assert error.value.code == "merge_response_invalid_shape"
+  assert error.value.message == "GitHub returned an unexpected merge confirmation shape."
+
+
+def test_merge_call_rejects_unreadable_confirmation():
+  def gh(*args):
+    return SimpleNamespace(stdout="not json")
+  with pytest.raises(ContributionSubmitError) as error:
+    domain.perform_merge(gh, "/tmp", TARGET, REPO)
+  assert error.value.code == "merge_response_unreadable"
+  assert error.value.message == "GitHub returned an unreadable merge confirmation."
+
+
 def test_queue_call_binds_sha_and_never_jumps():
   calls = []
   def gh(*args):
     calls.append(args)
     return SimpleNamespace(stdout=json.dumps({"data": {"enqueuePullRequest": {
-      "mergeQueueEntry": {"id": "queue-1", "headCommit": {"oid": SHA}}
+      "mergeQueueEntry": {"id": "queue-1"}
     }}}))
   domain.enqueue(gh, "/tmp", TARGET)
   assert f"head={SHA}" in calls[0]
@@ -533,16 +600,94 @@ def test_bound_run_permission_is_checked_after_remote_preflight(setup, monkeypat
 def test_already_queued_exact_head_is_observed_not_enqueued_again(setup, monkeypatch):
   monkeypatch.setattr(domain, "pull_checks", lambda *args: {
     **CHECKS, "isMergeQueueEnabled": True,
-    "mergeQueueEntry": {"id": "existing", "headCommit": {"oid": SHA}},
+    # GitHub's headCommit is the synthetic merge-group commit, not the PR head.
+    "mergeQueueEntry": {"id": "existing", "headCommit": {"oid": "c" * 40}},
   })
   monkeypatch.setattr(domain, "enqueue", lambda *args: pytest.fail("already queued"))
   assert report(setup)["run"]["items"][0]["queue_entry_id"] == "existing"
 
 
+def test_ambiguous_queue_attempt_reconciles_attached_entry(setup, monkeypatch):
+  db, row, _ = setup
+  domain.save_outcome(db, row, domain.key(ITEM), {
+    "state": "merge_unknown", "head_sha": SHA, "merge_attempted": True,
+  })
+  monkeypatch.setattr(domain, "pull_checks", lambda *args: {
+    **CHECKS, "isMergeQueueEnabled": True,
+    "mergeQueueEntry": {"id": "existing", "headCommit": {"oid": "c" * 40}},
+  })
+  monkeypatch.setattr(domain, "enqueue", lambda *args: pytest.fail("must not retry"))
+  item = report(setup)["run"]["items"][0]
+  assert item["state"] == "queued"
+  assert item["queue_entry_id"] == "existing"
+
+
 @pytest.mark.parametrize("field,value", [("base_ref", "release"), ("base_sha", "c" * 40)])
 def test_same_head_retarget_before_approval_cannot_mint_grant(field, value):
   def gh(cwd, command, endpoint):
-    return SimpleNamespace(stdout=json.dumps(REPO if endpoint.endswith("project") else PULL))
+    result = REPO if endpoint == "repos/example/project" else REF if "/git/ref/" in endpoint else PULL
+    return SimpleNamespace(stdout=json.dumps(result))
   with pytest.raises(HTTPException) as error:
     domain.inspect_target(gh, "/tmp", {**ITEM, field: value}, "review_merge")
   assert error.value.status_code == 409
+
+
+@pytest.mark.parametrize("attempted", [False, True])
+@pytest.mark.parametrize("head", [None, "d" * 40])
+def test_queue_observation_cannot_reconcile_an_unconfirmed_or_new_head(setup, monkeypatch, attempted, head):
+  db, row, _ = setup
+  if attempted:
+    domain.save_outcome(db, row, domain.key(ITEM), {
+      "state": "merge_unknown", "head_sha": SHA, "merge_attempted": True,
+    })
+  monkeypatch.setattr(domain, "pull_checks", lambda *args: {
+    **CHECKS, "headRefOid": head, "isMergeQueueEnabled": True,
+    "mergeQueueEntry": {"id": "new-head-entry"},
+  })
+  monkeypatch.setattr(domain, "enqueue", lambda *args: pytest.fail("must not enqueue"))
+  monkeypatch.setattr(domain, "perform_merge", lambda *args: pytest.fail("must not merge"))
+  item = report(setup)["run"]["items"][0]
+  assert item["state"] == ("merge_unknown" if attempted else "needs_you")
+  assert "queue_entry_id" not in item
+  if attempted:
+    assert item["merge_attempted"] is True
+
+
+def test_live_target_lookup_preserves_slash_containing_branch():
+  endpoints = []
+  def gh(cwd, command, endpoint):
+    endpoints.append(endpoint)
+    return SimpleNamespace(stdout=json.dumps(REF))
+  assert domain.base_head(gh, "/tmp", ITEM["repo"], "release/stable") == BASE
+  assert endpoints == ["repos/example/project/git/ref/heads/release%2Fstable"]
+
+
+@pytest.mark.parametrize("sha", [None, "", "short", 123])
+def test_missing_live_target_head_cannot_confirm_selection(sha):
+  def gh(*args):
+    return SimpleNamespace(stdout=json.dumps({"object": {"sha": sha}}))
+  with pytest.raises(HTTPException) as error:
+    domain.base_head(gh, "/tmp", ITEM["repo"], "main")
+  assert error.value.status_code == 409
+
+
+def test_base_advance_rejects_real_ref_lookup():
+  def gh(*args):
+    return SimpleNamespace(stdout=json.dumps({"object": {"sha": "c" * 40}}))
+  with pytest.raises(HTTPException) as error:
+    domain.assert_current_base(gh, "/tmp", TARGET)
+  assert error.value.status_code == 409
+
+
+@pytest.mark.parametrize("state", ["queued", "merge_unknown"])
+def test_attempted_queue_reconciliation_does_not_require_unchanged_base(setup, monkeypatch, state):
+  db, row, _ = setup
+  domain.save_outcome(db, row, domain.key(ITEM), {
+    "state": state, "head_sha": SHA, "merge_attempted": True,
+  })
+  monkeypatch.setattr(domain, "assert_current_base", lambda *args: pytest.fail("read-only reconciliation"))
+  monkeypatch.setattr(domain, "pull_checks", lambda *args: {
+    **CHECKS, "isMergeQueueEnabled": True, "mergeQueueEntry": {"id": "existing"},
+  })
+  monkeypatch.setattr(domain, "enqueue", lambda *args: pytest.fail("must not retry"))
+  assert report(setup)["run"]["items"][0]["state"] == "queued"

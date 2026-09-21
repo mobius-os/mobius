@@ -25,11 +25,11 @@
     "test:hooks:coverage": "node --experimental-test-coverage --test-coverage-lines=63 --test-coverage-branches=60 --test-coverage-functions=58 --test-coverage-include='src/components/ChatView/hooks/**/*.js' --test-coverage-include='src/components/Shell/**/*.js' --test-coverage-include='src/hooks/**/*.js' --loader=./src/components/ChatView/hooks/__tests__/react-loader.mjs --test $(find src/components/ChatView/hooks -name '*.test.js') $(find src/hooks src/components/Shell/__tests__ -name '*.hooktest.js')"
   },
   "dependencies": {
-    "@codemirror/commands": "6.11.0",
+    "@codemirror/commands": "6.11.1",
     "@codemirror/lang-markdown": "6.5.2",
     "@codemirror/language": "6.12.4",
-    "@codemirror/state": "6.7.4",
-    "@codemirror/view": "6.43.11",
+    "@codemirror/state": "6.7.5",
+    "@codemirror/view": "6.43.12",
     "@lezer/highlight": "1.2.3",
     "@openai/apps-sdk-ui": "0.2.2",
     "@tanstack/query-async-storage-persister": "^5.101.2",

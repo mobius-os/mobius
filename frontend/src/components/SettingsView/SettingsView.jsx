@@ -36,7 +36,7 @@ import '../ui/ModelSheet.css'
 import './SettingsView.css'
 
 const PROVIDER_CHOICES = [
-  { id: 'mobius', label: 'Möbius subscription' },
+  { id: 'mobius', label: 'Möbius' },
   { id: 'claude', label: 'Claude Code' },
   { id: 'codex', label: 'OpenAI Codex' },
 ]
@@ -1019,7 +1019,7 @@ export default function SettingsView({
 
                 {mobiusAvailable && (
                   <ProviderRow
-                    name="Möbius subscription"
+                    name="Möbius"
                     connected={mobiusAuthenticated}
                     subtitle={mobiusTrialSubtitle}
                     statusNode={(

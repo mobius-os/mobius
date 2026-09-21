@@ -186,6 +186,23 @@ export function shouldAttachRunningStream({
 }
 
 /**
+ * An accepted detail projection owns whether this pane has a stream. A
+ * completed run and a parked owner question both release a failed transport;
+ * a local Start or Stop remains authoritative until its own boundary settles.
+ */
+export function shouldRetireStreamForRuntime({
+  runtimeRunning = false,
+  pendingQuestionId = null,
+  stopInFlight = false,
+  localStartInFlight = false,
+} = {}) {
+  return !shouldAttachRunningStream({
+    running: runtimeRunning,
+    pendingQuestionId,
+  }) && !stopInFlight && !localStartInFlight
+}
+
+/**
  * A fresh runtime verdict may repair a mounted pane whose stream exhausted
  * during a server restart. Let the stream hook's bounded retry owner finish
  * first; once it has exhausted, restart that owner rather than bypassing its
@@ -252,6 +269,30 @@ export function shouldRetireRestoredQuestionSnapshot({
     && item.question_id === pendingQuestionId
     && !item.answers
   ))
+}
+
+/**
+ * A settled runtime verdict retires Shell's drawer streaming marker even when
+ * the terminal chat_run_finished event was missed. Owner-input handoffs and
+ * queued work are NOT settled: the run's marker must survive them, so this
+ * guard excludes any owner-input card or queue. The optimistic send window is
+ * excluded the same way shouldRecoverSettledRuntime excludes it — an in-flight
+ * local start, a Stop, or a still-live stream owns the turn locally.
+ */
+export function shouldRetireSettledRunMarker({
+  runtimeRunning = false,
+  pendingCount = 0,
+  pendingQuestionId = null,
+  streamStillActive = false,
+  stopInFlight = false,
+  localStartInFlight = false,
+} = {}) {
+  return runtimeRunning === false
+    && pendingCount === 0
+    && pendingQuestionId == null
+    && !streamStillActive
+    && !stopInFlight
+    && !localStartInFlight
 }
 
 /**

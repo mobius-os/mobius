@@ -1,5 +1,7 @@
 """Provider-neutral global peer discovery, delivery, and confinement."""
 
+from tests.goal_fixtures import goal_run as make_goal_run, persist_goal_fixture
+
 from datetime import timedelta
 from types import SimpleNamespace
 
@@ -79,29 +81,29 @@ def _network_fixture(db):
   db.add_all(chats.values())
   db.flush()
   runs = {
-    "root": models.ChatRun(
+    "root": make_goal_run(db,
       id="root-run", root_run_id="root-run", goal_id="shared-goal",
       chat_id=chats["root"].id, status="running", provider="codex",
       goal_objective="Coordinate the release",
     ),
-    "scout": models.ChatRun(
+    "scout": make_goal_run(db,
       id="scout-run", root_run_id="scout-run",
       chat_id=chats["scout"].id, status="running", provider="claude",
     ),
-    "builder": models.ChatRun(
+    "builder": make_goal_run(db,
       id="builder-run", root_run_id="builder-run",
       chat_id=chats["builder"].id, status="running", provider="codex",
     ),
-    "nested": models.ChatRun(
+    "nested": make_goal_run(db,
       id="nested-run", root_run_id="nested-run",
       chat_id=chats["nested"].id, status="running", provider="claude",
     ),
-    "outsider": models.ChatRun(
+    "outsider": make_goal_run(db,
       id="outside-run", root_run_id="outside-run",
       chat_id=chats["outsider"].id, status="running", provider="codex",
       goal_objective="Unrelated private objective",
     ),
-    "outside_helper": models.ChatRun(
+    "outside_helper": make_goal_run(db,
       id="outside-helper-run", root_run_id="outside-helper-run",
       chat_id=chats["outside_helper"].id, status="running", provider="codex",
     ),
@@ -152,7 +154,7 @@ def _next_turn_context(db, chat, run_id: str) -> str:
     ).all()
     if started is not None
   )
-  run = models.ChatRun(
+  run = make_goal_run(db,
     id=run_id, root_run_id=run_id, chat_id=chat.id,
     status="running", provider=chat.provider,
     started_at=previous_started + timedelta(seconds=10),
@@ -404,7 +406,7 @@ def test_offline_peer_receives_direct_note_on_its_next_run(client, auth, db):
   )
   assert sent.status_code == 200, sent.text
 
-  db.add(models.ChatRun(
+  db.add(make_goal_run(db,
     id="outside-next-run", root_run_id="outside-next-run",
     chat_id=chats["outsider"].id, status="running", provider="codex",
   ))
@@ -1121,7 +1123,7 @@ def test_context_delivers_only_new_inbound_notes_on_the_next_turn(
   previous_started = runs["scout"].started_at
   runs["scout"].provider_execution_admitted = True
   current_started = previous_started + timedelta(seconds=10)
-  current = models.ChatRun(
+  current = make_goal_run(db,
     id="scout-next-run", root_run_id="scout-next-run",
     chat_id=chats["scout"].id, status="running", provider="claude",
     started_at=current_started,
@@ -1180,7 +1182,7 @@ def test_context_delivers_only_new_inbound_notes_on_the_next_turn(
   current.peer_message_through_id = rows[1].id
   db.commit()
 
-  later = models.ChatRun(
+  later = make_goal_run(db,
     id="scout-later-run", root_run_id="scout-later-run",
     chat_id=chats["scout"].id, status="running", provider="claude",
     started_at=current_started + timedelta(seconds=10),
@@ -1199,7 +1201,7 @@ def test_next_turn_context_marks_overflow_and_keeps_oldest_unseen_notes(db):
   chats, runs = _network_fixture(db)
   previous_started = runs["scout"].started_at
   runs["scout"].provider_execution_admitted = True
-  current = models.ChatRun(
+  current = make_goal_run(db,
     id="scout-overflow-run", root_run_id="scout-overflow-run",
     chat_id=chats["scout"].id, status="running", provider="claude",
     started_at=previous_started + timedelta(seconds=100),
@@ -1232,7 +1234,7 @@ def test_next_turn_context_marks_overflow_and_keeps_oldest_unseen_notes(db):
   current.provider_execution_admitted = True
   current.peer_message_through_created_at = messages[MAX_CONTEXT_MESSAGES - 1].created_at
   current.peer_message_through_id = messages[MAX_CONTEXT_MESSAGES - 1].id
-  later = models.ChatRun(
+  later = make_goal_run(db,
     id="scout-overflow-later", root_run_id="scout-overflow-later",
     chat_id=chats["scout"].id, status="running", provider="claude",
     started_at=current.started_at + timedelta(seconds=100),
@@ -1252,7 +1254,7 @@ def test_unadmitted_turn_does_not_consume_peer_context(db):
   chats, runs = _network_fixture(db)
   previous_started = runs["scout"].started_at
   runs["scout"].provider_execution_admitted = True
-  first = models.ChatRun(
+  first = make_goal_run(db,
     id="scout-crash-before-admission",
     root_run_id="scout-crash-before-admission",
     chat_id=chats["scout"].id,
@@ -1275,7 +1277,7 @@ def test_unadmitted_turn_does_not_consume_peer_context(db):
     db, chats["scout"].id, first.id,
   )
   first.status = "interrupted"
-  successor = models.ChatRun(
+  successor = make_goal_run(db,
     id="scout-after-unadmitted-crash",
     root_run_id="scout-after-unadmitted-crash",
     chat_id=chats["scout"].id,
@@ -1295,7 +1297,7 @@ def test_admitted_turn_without_provider_ack_does_not_consume_peer_context(db):
   chats, runs = _network_fixture(db)
   previous_started = runs["scout"].started_at
   runs["scout"].provider_execution_admitted = True
-  failed_launch = models.ChatRun(
+  failed_launch = make_goal_run(db,
     id="scout-provider-launch-failed",
     root_run_id="scout-provider-launch-failed",
     chat_id=chats["scout"].id,
@@ -1325,7 +1327,7 @@ def test_admitted_turn_without_provider_ack_does_not_consume_peer_context(db):
   # Simulate an exception after admission but before the provider runner
   # returns: no AcknowledgePeerContextDelivery command was committed.
   failed_launch.status = "interrupted"
-  successor = models.ChatRun(
+  successor = make_goal_run(db,
     id="scout-after-provider-launch-failure",
     root_run_id="scout-after-provider-launch-failure",
     chat_id=chats["scout"].id,
@@ -1344,7 +1346,7 @@ def test_admitted_turn_without_provider_ack_does_not_consume_peer_context(db):
 def test_context_omits_unrelated_global_agents_when_nothing_arrived(db):
   _network_fixture(db)
   chat = models.Chat(id="quiet-chat", title="Quiet", messages=[])
-  run = models.ChatRun(
+  run = make_goal_run(db,
     id="quiet-run", root_run_id="quiet-run", chat_id=chat.id,
     status="running", provider="codex",
   )
@@ -1417,6 +1419,7 @@ def _park_goal(db, chat, run):
   run.status = "completed"
   run.goal_objective = "Finish the handoff"
   run.goal_id = run.id
+  persist_goal_fixture(db, run)
   registry.forget(chat.id)
   db.commit()
 
@@ -1480,7 +1483,7 @@ def test_interrupt_delivery_wakes_an_idle_unfinished_goal_for_every_kind(
   # is delivered with any peers that arrived during that run in one successor
   # turn instead of being polled from inside the current turn.
   registry.mark_starting(builder.id)
-  live = models.ChatRun(
+  live = make_goal_run(db,
     id="builder-live", root_run_id="builder-live", chat_id=builder.id,
     status="running", provider="codex",
   )
@@ -1499,7 +1502,7 @@ def test_interrupt_delivery_wakes_an_idle_unfinished_goal_for_every_kind(
   message = db.query(models.AgentCoordinationMessage).filter(
     models.AgentCoordinationMessage.body == "Again.",
   ).one()
-  successor = models.ChatRun(
+  successor = make_goal_run(db,
     id="builder-successor", root_run_id="builder-successor",
     chat_id=builder.id, status="running", provider="codex",
     started_at=message.created_at + timedelta(seconds=1),

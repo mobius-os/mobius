@@ -34,9 +34,12 @@ on restart. A saved owner-input card (request_question / request_approval /
 secure-input) is instead a DURABLE wait — the card and `pending_question_id`
 persist, the turn ENDS so the process is released, and the answer route
 resumes a fresh turn (restart-safe). Because the card's receipt returns to the
-model immediately, the runner interrupts the live turn the moment such a card
-commits, so nothing follows the card; see `ChatEventSink.publish_question` and
-each runner's `begin_finish_after_owner_card`.
+model immediately, the runner interrupts the live turn as soon as that completed
+receipt reaches the event sink. This stops further generation at its source;
+events the provider already emitted while the interrupt was taking effect are
+still recorded so the Möbius transcript cannot diverge from the provider
+session. See `ChatEventSink.publish` and each runner's
+`begin_finish_after_owner_card`.
 """
 
 from __future__ import annotations

@@ -14,6 +14,14 @@ root-owned ledger under ``/data/.restart-ledger``:
   chown. If that cannot be proven, authorization is deleted and continuation
   fails closed to manual recovery.
 
+It also implements a parallel container-cutover handshake so an external or
+managed replacement container can prove continuity with the one it is
+replacing without stopping the worker mid-migration: ``open-cutover`` and
+``accept-cutover`` exchange a challenge/receipt pair, ``managed-cutover``
+services a managed (e.g. Railway) replacement end-to-end, ``rearm-cutover``
+resets the handshake after a failed attempt, and ``finalize-cutover``
+commits the switch once the new container is verified.
+
 No ``app.*`` imports are used. The platform can suppress a continuation by
 deleting its own request, but it cannot forge the root-owned acknowledgement.
 """

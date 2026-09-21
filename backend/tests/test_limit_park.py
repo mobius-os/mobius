@@ -25,6 +25,8 @@ Locks in the contracts of the limit-park feature:
       crashes, unanswered questions, and app-owned work stay manual.
 """
 
+from tests.goal_fixtures import goal_run as make_goal_run, persist_goal_fixture
+
 import asyncio
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -116,7 +118,7 @@ def _seed_run(chat_id: str, token: str, *, status="running",
               initiated_by_app_id=None, restart_nonce=None):
   db = SessionLocal()
   try:
-    db.add(models.ChatRun(
+    db.add(make_goal_run(db,
       id=token,
       chat_id=chat_id,
       status=status,
@@ -148,6 +150,7 @@ def _run_row(token: str):
       "restart_nonce": run.restart_nonce,
       "ended_at": run.ended_at,
       "initiated_by_app_id": run.initiated_by_app_id,
+      "continuation": run.continuation_json,
     }
   finally:
     db.close()
@@ -273,6 +276,26 @@ def test_park_exit_non_limit_error_stays_plain():
   kwargs = chat_mod._park_exit(sink, {"error": "syntax error"}, "syntax error")
   assert kwargs == {"parked": False}
   assert sink.events[-1] == {"type": "error", "message": "syntax error"}
+
+
+def test_model_capacity_parks_for_a_short_automatic_retry():
+  sink = _Sink()
+  kwargs = chat_mod._park_exit(
+    sink,
+    {"error": "Selected model is at capacity. Please try a different model."},
+    "Selected model is at capacity. Please try a different model.",
+  )
+  assert kwargs["parked"] is True
+  assert kwargs["park_reason"] == "model_capacity"
+  assert kwargs["parked_until"] > datetime.now(UTC).replace(tzinfo=None)
+  assert sink.events[-1]["pause"]["kind"] == "model_capacity"
+
+
+def test_generic_capacity_error_is_not_misclassified_as_a_busy_model():
+  sink = _Sink()
+  kwargs = chat_mod._park_exit(sink, {"error": "capacity"}, "capacity")
+  assert kwargs == {"parked": False}
+  assert sink.events[-1] == {"type": "error", "message": "capacity"}
 
 
 def test_park_exit_resume_incomplete_publishes_calm_resumable_note():
@@ -741,6 +764,7 @@ def test_manual_try_now_preserves_messages_queued_behind_future_limit_park(
     parked.goal_plan_json = {
       "tasks": [{"id": "finish", "status": "running"}],
     }
+    persist_goal_fixture(setup_db, parked)
     setup_db.commit()
   first = client.post(
     f"/api/chats/{cid}/messages",
@@ -767,11 +791,13 @@ def test_manual_try_now_preserves_messages_queued_behind_future_limit_park(
   assert response.status_code == 202, response.text
   assert response.json()["status"] == "started"
   assert len(scheduled) == 1
-  assert scheduled[0]["messages"][-1].content == "continue"
+  assert scheduled[0]["messages"][-1].content.startswith("Resume the interrupted")
   assert all("preserve this context" not in row.content for row in scheduled[0]["messages"])
-  marker = _chat_row(cid)["messages"][-1]
-  assert marker["kind"] == "continuation"
-  assert marker["continuation_reason"] == "manual"
+  assert all(
+    row.get("cid") != "manual-early-retry"
+    for row in _chat_row(cid)["messages"]
+  )
+  assert _run_row(scheduled[0]["run_token"])["continuation"]["reason"] == "manual"
   assert _run_row("rt-park-owner-try-now")["status"] == "interrupted"
   assert [row["cid"] for row in _chat_row(cid)["pending"]] == ["queued-context"]
   with SessionLocal() as db:
@@ -1133,7 +1159,7 @@ def test_sweep_auto_resume_on_starts_one_staggered_continue(
   )
   with SessionLocal() as db:
     parked = db.get(models.ChatRun, "rt-sweep-auto")
-    db.add(models.ChatRun(
+    db.add(make_goal_run(db,
       id="goal-logical-root", root_run_id="goal-logical-root",
       chat_id="sweep-auto", status="completed", provider="claude",
       started_at=parked.started_at - timedelta(seconds=1),
@@ -1154,9 +1180,8 @@ def test_sweep_auto_resume_on_starts_one_staggered_continue(
     # Recovery continues A without admitting the later queued ask.
     promoted = scheduled[0]["next_user"]
     assert "queued ask" not in promoted["content"]
-    assert "continue" in promoted["content"]
-    assert promoted["_messages"][-1]["kind"] == "continuation"
-    assert promoted["_messages"][-1]["continuation_reason"] == "usage_limit"
+    assert promoted["content"].startswith("Resume the interrupted")
+    assert promoted["_messages"] == []
     assert promoted["kind"] == "continuation"
     assert promoted["continuation_reason"] == "usage_limit"
     state = _chat_row("sweep-auto")
@@ -1170,6 +1195,7 @@ def test_sweep_auto_resume_on_starts_one_staggered_continue(
       assert resumed.root_run_id == "goal-logical-root"
       assert resumed.goal_id == "goal-stable-id"
       assert resumed.goal_objective == "Finish the recovery"
+      assert resumed.continuation_json["reason"] == "usage_limit"
   finally:
     # _schedule_continuation was stubbed, so release the claim it would have
     # handed to the spawned turn.
@@ -1249,6 +1275,7 @@ def test_limit_handoff_hidden_result_preserves_goal_root_and_app(monkeypatch):
     root = db.get(models.ChatRun, token)
     root.goal_id = goal_id
     root.goal_objective = "Finish the lifecycle repair"
+    persist_goal_fixture(db, root)
     db.commit()
   scheduled = []
   def schedule(**kwargs):
@@ -1268,12 +1295,10 @@ def test_limit_handoff_hidden_result_preserves_goal_root_and_app(monkeypatch):
     assert asyncio.run(chat_mod._auto_resume_chat(cid, park_token=token))
     assert len(scheduled) == 2
     next_user = scheduled[-1]["next_user"]
-    assert next_user["content"] == "continue"
+    assert next_user["content"].startswith("Resume the interrupted")
     assert next_user["kind"] == "continuation"
     assert _chat_row(cid)["pending"] == [hidden]
-    assert [row["cid"] for row in next_user["_messages"]] == [
-      f"limit-resume-{token}",
-    ]
+    assert next_user["_messages"] == []
     resumed = _run_row(scheduled[-1]["run_token"])
     assert resumed["initiated_by_app_id"] == app_id
     with SessionLocal() as db:
@@ -1571,15 +1596,17 @@ def test_restart_park_auto_continues_with_product_marker(
   try:
     assert _run_sweep() == [cid]
     assert len(scheduled) == 1
-    marker = scheduled[0]["next_user"]["_messages"][-1]
-    assert marker["role"] == "user"
-    assert marker["content"] == "continue"
+    marker = scheduled[0]["next_user"]
     assert marker["kind"] == "continuation"
     assert marker["continuation_reason"] == "restart"
-    assert marker["cid"] == f"restart-resume-{token}"
+    assert marker["_messages"] == []
     state = _chat_row(cid)
     assert state["pending"] == []
-    assert state["messages"][-1]["cid"] == f"restart-resume-{token}"
+    assert all(
+      row.get("cid") != f"restart-resume-{token}"
+      for row in state["messages"]
+    )
+    assert _run_row(scheduled[0]["run_token"])["continuation"]["reason"] == "restart"
     assert _run_row(token)["status"] == "completed"
     assert notifications[0]["title"] == "Möbius restarted"
     assert "limit" not in notifications[0]["body"].lower()
@@ -1623,10 +1650,13 @@ def test_restart_preserves_a_hidden_owner_group_without_queueing_continue(
   try:
     assert _run_sweep() == [cid]
     assert len(scheduled) == 1
-    assert scheduled[0]["next_user"]["content"] == "continue"
+    assert scheduled[0]["next_user"]["content"].startswith("Resume the interrupted")
     state = _chat_row(cid)
     assert [row["cid"] for row in state["pending"]] == ["hidden-recovery"]
-    assert state["messages"][-1]["cid"] == f"restart-resume-{token}"
+    assert all(
+      row.get("cid") != f"restart-resume-{token}"
+      for row in state["messages"]
+    )
   finally:
     chat_mod.discard_starting(cid)
 
@@ -1665,9 +1695,8 @@ def test_app_initiated_restart_preserves_attribution_and_continues(
     assert len(scheduled) == 1
     resumed_run = _run_row(scheduled[0]["run_token"])
     assert resumed_run["initiated_by_app_id"] == app_id
-    marker = scheduled[0]["next_user"]["_messages"][-1]
-    assert marker["kind"] == "continuation"
-    assert marker["continuation_reason"] == "restart"
+    assert scheduled[0]["next_user"]["_messages"] == []
+    assert resumed_run["continuation"]["reason"] == "restart"
   finally:
     chat_mod.discard_starting(cid)
 
@@ -1753,7 +1782,7 @@ def test_owner_message_queued_after_app_restart_does_not_take_over_recovery(
     assert len(scheduled) == 1
     resumed_run = _run_row(scheduled[0]["run_token"])
     assert resumed_run["initiated_by_app_id"] == 42
-    assert scheduled[0]["next_user"]["content"] == "continue"
+    assert scheduled[0]["next_user"]["content"].startswith("Resume the interrupted")
     assert _chat_row(cid)["pending"][0]["content"] == "owner follow-up"
   finally:
     chat_mod.discard_starting(cid)
@@ -2001,7 +2030,11 @@ def test_restart_spawn_failure_reattaches_deterministic_successor(
   state = _chat_row(cid)
   assert state["running_status"] == "running"
   assert state["pending"] == []
-  assert state["messages"][-1]["cid"] == f"restart-resume-{token}"
+  assert all(
+    row.get("cid") != f"restart-resume-{token}"
+    for row in state["messages"]
+  )
+  assert _run_row(resume_token)["continuation"]["reason"] == "restart"
 
   # Both the runtime wedge sweep and cold-start reconciliation preserve the
   # exact no-output successor. The consumed one-shot nonce is not needed to
@@ -2068,6 +2101,7 @@ def test_no_output_successor_requires_non_admission_or_exact_new_restart(
     run.provider_execution_admitted = admitted
     run.goal_objective = "Finish the same Goal"
     run.goal_id = "original-goal"
+    persist_goal_fixture(db, run)
     if new_restart_authorized:
       run.restart_nonce = fresh_nonce
     db.commit()
@@ -2441,7 +2475,11 @@ def test_auto_resume_spawn_failure_reattaches_deterministic_successor_once(
   state = _chat_row(cid)
   assert state["running_status"] == "running"
   assert state["pending"] == [queued]
-  assert state["messages"][-1]["cid"] == f"limit-resume-{park_token}"
+  assert all(
+    row.get("cid") != f"limit-resume-{park_token}"
+    for row in state["messages"]
+  )
+  assert _run_row(resume_token)["continuation"]["reason"] == park_reason
 
   # The cold-start reconciler recognizes this exact no-output writer orphan
   # and leaves the same physical run for the reset sweep to reschedule.
@@ -2463,7 +2501,7 @@ def test_auto_resume_spawn_failure_reattaches_deterministic_successor_once(
     assert _run_sweep() == [cid]
     assert len(scheduled) == 1
     assert len(notifications) == expected_notifications
-    assert scheduled[0]["next_user"]["content"] == "continue"
+    assert scheduled[0]["next_user"]["content"].startswith("Resume the interrupted")
     assert _chat_row(cid)["pending"] == [queued]
     assert scheduled[0]["run_token"] == resume_token
     state = _chat_row(cid)
@@ -2472,7 +2510,7 @@ def test_auto_resume_spawn_failure_reattaches_deterministic_successor_once(
       if m.get("cid") in {
         "queued-before-limit", f"limit-resume-{park_token}",
       }
-    ] == [f"limit-resume-{park_token}"]
+    ] == []
   finally:
     chat_mod.discard_starting(cid)
 
@@ -2833,11 +2871,11 @@ def test_parked_probe_tiebreak_is_deterministic():
     _seed_chat(cid)
     db = SessionLocal()
     try:
-      db.add(models.ChatRun(
+      db.add(make_goal_run(db,
         id=parked_token, chat_id=cid, status="parked",
         provider="claude", started_at=ts, parked_until=until,
       ))
-      db.add(models.ChatRun(
+      db.add(make_goal_run(db,
         id=running_token, chat_id=cid, status="running",
         provider="claude", started_at=ts,
       ))
@@ -3010,6 +3048,62 @@ def test_sweep_continues_a_memory_park_without_the_limit_opt_in(
     chat_mod.discard_starting("sweep-memory")
 
 
+def test_model_capacity_sweep_continues_and_preserves_retry_lineage(
+  owner_token, monkeypatch,
+):
+  """Exercise the real park sweep and the next bounded retry decision."""
+  del owner_token
+  notified = []
+  monkeypatch.setattr(
+    "app.push.notify_owner_async",
+    _async_notify(lambda db, owner_id, **kw: notified.append(kw) or "n"),
+  )
+  scheduled = []
+  monkeypatch.setattr(
+    chat_mod, "_schedule_continuation", lambda **kw: scheduled.append(kw),
+  )
+  monkeypatch.setattr(chat_mod, "_limit_auto_resume_now", lambda: 10**9)
+  cid = "sweep-model-capacity"
+  root_token = f"rt-{cid}"
+  _due_park(
+    cid, root_token, auto_resume=False, park_reason="model_capacity",
+  )
+
+  try:
+    assert _run_sweep() == [cid]
+    assert len(scheduled) == 1
+    resumed_token = scheduled[0]["run_token"]
+    resumed = _run_row(resumed_token)
+    assert resumed["status"] == "running"
+    assert resumed["continuation"]["reason"] == "model_capacity"
+    next_user = scheduled[0]["next_user"]
+    assert next_user["continuation_reason"] == "model_capacity"
+    assert "selected model may be available" in next_user["content"]
+    assert next_user["_messages"] == []
+    assert all(
+      row.get("continuation_reason") != "model_capacity"
+      for row in _chat_row(cid)["messages"]
+    )
+    assert notified == []
+
+    sink = _Sink()
+    sink.run_token = resumed_token
+    with SessionLocal() as db:
+      result = chat_mod._park_exit(
+        sink,
+        {"error": "Selected model is at capacity. Please try a different model."},
+        "Selected model is at capacity. Please try a different model.",
+        db=db,
+      )
+
+    assert result["parked"] is True
+    assert result["park_reason"] == "model_capacity"
+    assert sink.events[-1]["pause"]["kind"] == "model_capacity"
+    assert "try it again shortly" in sink.events[-1]["message"]
+  finally:
+    chat_mod.discard_starting(cid)
+
+
 def test_app_initiated_resource_park_preserves_attribution(
   owner_token, monkeypatch,
 ):
@@ -3033,9 +3127,8 @@ def test_app_initiated_resource_park_preserves_attribution(
     assert len(scheduled) == 1
     resumed = _run_row(scheduled[0]["run_token"])
     assert resumed["initiated_by_app_id"] == app_id
-    assert scheduled[0]["next_user"]["_messages"][-1][
-      "continuation_reason"
-    ] == "storage"
+    assert scheduled[0]["next_user"]["_messages"] == []
+    assert resumed["continuation"]["reason"] == "storage"
   finally:
     chat_mod.discard_starting(cid)
 
@@ -3067,3 +3160,73 @@ def test_admission_deferral_parks_the_run_instead_of_failing_it(owner_token):
   tail = _chat_row(cid)["messages"][-1]
   assert tail["role"] == "assistant"
   assert tail["blocks"][-1]["pause"]["kind"] == "memory"
+
+
+def test_model_capacity_retry_policy_allows_five_automatic_resumes(db, chat):
+  from datetime import UTC, datetime, timedelta
+  base = datetime.now(UTC).replace(tzinfo=None)
+  runs = [
+    chat_mod.models.ChatRun(
+      id=f"capacity-{index}",
+      root_run_id=None if index == 0 else "capacity-0",
+      chat_id=chat.id,
+      status="parked",
+      park_reason="model_capacity",
+      started_at=base + timedelta(seconds=index),
+    )
+    for index in range(6)
+  ]
+  db.add_all(runs)
+  db.commit()
+
+  assert [
+    chat_mod._model_capacity_retry_count(db, run) for run in runs
+  ] == list(range(6))
+  assert all(
+    chat_mod._model_capacity_retry_exhausted(db, run) is False
+    for run in runs[:5]
+  )
+  assert chat_mod._model_capacity_retry_exhausted(db, runs[5]) is True
+
+
+def test_model_capacity_retry_delays_back_off_and_remain_bounded():
+  delays = chat_mod.MODEL_CAPACITY_RETRY_DELAYS
+
+  assert len(delays) == 5
+  assert delays == tuple(sorted(delays))
+  assert delays[0] == timedelta(seconds=30)
+  assert delays[-1] == timedelta(minutes=5)
+
+
+def test_model_capacity_sixth_failure_becomes_manual_resume(db, chat):
+  base = datetime.now(UTC).replace(tzinfo=None)
+  prior = [
+    chat_mod.models.ChatRun(
+      id=f"capacity-prior-{index}",
+      root_run_id=None if index == 0 else "capacity-prior-0",
+      chat_id=chat.id,
+      status="completed",
+      park_reason="model_capacity",
+      started_at=base + timedelta(seconds=index),
+    )
+    for index in range(5)
+  ]
+  current = chat_mod.models.ChatRun(
+    id="capacity-current", root_run_id="capacity-prior-0", chat_id=chat.id,
+    status="running", started_at=base + timedelta(seconds=5),
+  )
+  db.add_all([*prior, current])
+  db.commit()
+  sink = _Sink()
+  sink.run_token = current.id
+
+  kwargs = chat_mod._park_exit(
+    sink,
+    {"error": "Selected model is at capacity. Please try a different model."},
+    "Selected model is at capacity. Please try a different model.",
+    db=db,
+  )
+
+  assert kwargs == {"parked": False}
+  assert sink.events[-1]["pause"]["kind"] == "model_capacity_exhausted"
+  assert "five automatic retries" in sink.events[-1]["message"]

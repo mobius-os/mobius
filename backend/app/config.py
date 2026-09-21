@@ -10,6 +10,7 @@ platform checkout for rollback.
 """
 
 import json
+import logging
 import os
 import re
 from functools import lru_cache
@@ -18,6 +19,9 @@ from urllib.parse import urlparse, urlunsplit
 
 from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+log = logging.getLogger("mobius.config")
 
 
 def _read_build_info() -> dict:
@@ -202,6 +206,15 @@ class Settings(BaseSettings):
           break
         except ValueError:
           continue
+    if not self.mobius_sso_enabled and not self.mobius_account_client_origin:
+      log.warning(
+        "New mobius.you account linking is unavailable because no safe "
+        "client origin could be derived from FRONTEND_ORIGIN. Existing "
+        "local sign-in and linked accounts are unaffected. Set DOMAIN to the "
+        "bare public hostname, set FRONTEND_ORIGIN to the browser's HTTPS or "
+        "loopback origin, or set MOBIUS_ACCOUNT_CLIENT_ORIGIN explicitly when "
+        "a reverse proxy exposes a different browser origin.",
+      )
     return self
 
   @property

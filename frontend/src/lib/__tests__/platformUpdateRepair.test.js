@@ -25,6 +25,20 @@ test('routine activation and stale reviews stay with their UI actions', () => {
   }
 })
 
+test('a predicted overlay conflict stops before Apply and carries its paths', () => {
+  const preview = {
+    target_sha: 'target',
+    activation: { level: 'server_restart', required_actions: ['server_restart'] },
+    blocking_paths: [],
+    conflict_paths: ['backend/app/goal_plans.py'],
+  }
+  assert.match(platformUpdateRepairReason({ preview }), /overlaps.*before Apply/)
+  assert.deepEqual(
+    platformUpdateRepairEvidence({ preview }).conflict_paths,
+    ['backend/app/goal_plans.py'],
+  )
+})
+
 test('external deployment work and failed validation earn agent help', () => {
   for (const level of ['proxy_reload', 'container_recreate', 'host_maintenance']) {
     assert.match(platformUpdateRepairReason({ platform: { activation: { level, required_actions: level === 'live' ? [] : [level] } } }), /deployment settings/)
@@ -44,17 +58,20 @@ test('resource admission rollback is presented as retryable contention', () => {
   assert.match(reason, /Try again after other work finishes/)
 })
 
-test('a self-hosted source apply that did not queue its rebuild remains recoverable', () => {
+test('an explicit post-apply dispatch failure remains recoverable', () => {
   assert.match(
     platformUpdateRepairReason({ errorCode: 'update_applied_rebuild_pending' }),
     /applied.*finishing the container replacement/,
   )
+})
+
+test('an installed image update with no replacement attempt stays in the reviewed UI flow', () => {
   const platform = {
     available: false,
     contained_upstream_sha: 'installed',
     activation: { level: 'image_rebuild', required_actions: ['image_rebuild'] },
   }
-  assert.match(platformUpdateRepairReason({ platform }), /applied.*finishing the container replacement/)
+  assert.equal(platformUpdateRepairReason({ platform }), null)
   assert.equal(platformUpdateRepairReason({
     platform,
     rebuild: { expected_sha: 'installed', state: 'queued' },

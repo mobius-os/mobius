@@ -1,10 +1,9 @@
 """Shared tool-input summarizer used by SSE event builders.
 
-Both `providers.py` (subprocess path) and `claude_sdk_runner.py` (SDK
-path) emit `tool_input` events whose `input` field is a short human-
-readable summary of the tool call's arguments. Keeping the summary
-logic in one place means a future tool addition or format tweak only
-needs to land here — both runners pick it up automatically.
+`claude_events.py` (used by the Claude SDK path) emits `tool_input`
+events whose `input` field is a short human-readable summary of the
+tool call's arguments. Keeping the summary logic in one place means a
+future tool addition or format tweak only needs to land here.
 """
 
 from typing import Any

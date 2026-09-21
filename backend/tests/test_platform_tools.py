@@ -576,3 +576,74 @@ def test_saved_card_option_schema_exposes_explicit_quiet_outcome():
   ):
     assert option["properties"]["on_answer"]["enum"] == ["resume", "close"]
     assert "on_answer" not in option["required"]
+
+
+def test_saved_card_tools_instruct_the_agent_to_end_at_the_card():
+  """Every exposed saved-card tool carries the same complete instruction."""
+  control = _control_module()
+  instruction = control.SAVED_CARD_TERMINAL_INSTRUCTION.lower()
+  for name in (
+    control.REQUEST_APPROVAL_TOOL,
+    control.REQUEST_QUESTION_TOOL,
+    control.REQUEST_RESTART_TOOL,
+  ):
+    description = control._TOOL_DEFINITIONS[name]["description"].lower()
+    assert description.count(instruction) == 1
+
+
+def test_control_cli_gate_and_unknown_tool(monkeypatch, capsys):
+  """The shell seam reuses the server's authority gating for every primitive.
+
+  Codex model gateways may drop the dynamic MCP namespace, so every control
+  primitive must stay reachable through the CLI without a second implementation.
+  """
+  control = _control_module()
+  monkeypatch.delenv("MOBIUS_RUN_TOKEN", raising=False)
+  result = control._call_tool({"name": "request_restart", "arguments": {}})
+  assert result["isError"] is True
+  assert "unavailable" in result["content"][0]["text"]
+
+  monkeypatch.setenv("MOBIUS_RUN_TOKEN", "run-token")
+  monkeypatch.setenv("MOBIUS_COORDINATION_ENABLED", "0")
+  # Authority gating owns the check order: an unknown name reads as
+  # unavailable rather than leaking which names exist.
+  result = control._call_tool({"name": "unknown_tool", "arguments": {}})
+  assert result["isError"] is True
+  assert "unavailable" in result["content"][0]["text"]
+
+
+def test_control_cli_usage_errors_and_success(monkeypatch, capsys):
+  control = _control_module()
+  monkeypatch.setenv("MOBIUS_RUN_TOKEN", "run-token")
+  assert control._cli_call(["call"]) == 2
+  assert control._cli_call(["call", "request_restart", "--args-json", "{"]) == 2
+  assert control._cli_call(["call", "unknown_tool", "--args-json", "{}"]) == 1
+  monkeypatch.setitem(
+    control._TOOL_HANDLERS,
+    "request_restart",
+    lambda arguments: {"state": "saved", "arguments": arguments},
+  )
+  assert control._cli_call([
+    "call", "request_restart", "--args-json", "{}",
+  ]) == 0
+  assert json.loads(capsys.readouterr().out.splitlines()[-1]) == {
+    "state": "saved", "arguments": {},
+  }
+
+
+@pytest.mark.parametrize("arguments", [["cal", "request_restart"], ["--help"]])
+def test_control_cli_unknown_subcommand_never_enters_stdio_server(arguments):
+  script = (
+    Path(__file__).resolve().parents[1] / "scripts" / "mobius_control_mcp.py"
+  )
+  result = subprocess.run(
+    [sys.executable, str(script), *arguments],
+    input="",
+    capture_output=True,
+    text=True,
+    timeout=5,
+    check=False,
+  )
+
+  assert result.returncode == 2
+  assert "usage: mobius_control_mcp.py call" in result.stderr

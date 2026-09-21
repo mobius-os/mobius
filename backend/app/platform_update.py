@@ -1343,6 +1343,35 @@ def _activation_paths_between(
   return [line.strip() for line in proc.stdout.splitlines() if line.strip()]
 
 
+def _paths_already_active_in_image(
+  repo: Path, paths: list[str],
+) -> list[str]:
+  """Exclude exact image-owned files whose desired bytes already run in image.
+
+  ``SERVING_SHA_FILE`` identifies the Python checkout, not every image-owned
+  bootstrap input. A local repair can restore a seed template to the running
+  image's exact bytes while still differing from the served checkout's Git
+  commit. That is not pending activation: the image already owns and runs
+  those bytes. Keep the check exact and fail closed when a manifest or source
+  hash is unavailable.
+  """
+  baked = _build_info().get("image_inputs")
+  if not isinstance(baked, dict) or not baked:
+    return paths
+  try:
+    current = platform_activation.image_input_hashes(repo)
+  except OSError:
+    return paths
+  return [
+    path for path in paths
+    if not (
+      platform_activation.path_is_image_owned(path)
+      and isinstance(baked.get(path), str)
+      and baked[path] == current.get(path)
+    )
+  ]
+
+
 def _pending_activation_paths(
   repo: Path = PLATFORM_REPO,
   *,
@@ -1367,7 +1396,7 @@ def _pending_activation_paths(
       except Exception:
         head = None
       served_to_head = _activation_paths_between(repo, served, head)
-  paths.extend(served_to_head or [])
+  paths.extend(_paths_already_active_in_image(repo, served_to_head or []))
   paths.extend(image_input_drift(repo) or [])
   return sorted({str(path) for path in paths if str(path)})
 
@@ -2864,6 +2893,38 @@ def _preview_diff(repo: Path, base: str, target: str) -> tuple[str | None, bool]
   return (text or None), False
 
 
+def _preview_overlay_conflict_paths(
+  repo: Path, local: str, target: str,
+) -> list[str]:
+  """Predict the exact linear-overlay conflict Apply would encounter.
+
+  The preview runs the same equivalence filtering and commit-by-commit replay
+  as :func:`_apply_overlay`, but in a disposable detached worktree.  It never
+  moves a served ref, parks a resolver worktree, or writes an update flag.
+  Cleanup is unconditional so repeatedly opening the review cannot accumulate
+  candidate checkouts.
+  """
+  commits = app_git.overlay_commits(repo, target, local)
+  skip = app_git.landed_overlay_commits(repo, commits, target)
+  with tempfile.TemporaryDirectory(prefix="mobius-platform-preview-") as root:
+    worktree = Path(root) / "candidate"
+    try:
+      replay = app_git.replay_overlay(
+        repo, commits=commits, onto=target, worktree=worktree, skip=skip,
+      )
+      if replay.status != "conflict" or replay.conflict is None:
+        return []
+      # Match _park_replay: show both the first replay boundary and any
+      # endpoint conflict a resolver would need to reconcile afterwards.
+      try:
+        net_paths = set(app_git.merge_refs(repo, local, target).conflict_paths)
+      except (OSError, subprocess.SubprocessError, RuntimeError):
+        net_paths = set()
+      return sorted(net_paths | set(replay.conflict.get("paths") or []))
+    finally:
+      app_git.remove_overlay_worktree(repo, worktree)
+
+
 def platform_update_preview(
   repo: Path = PLATFORM_REPO,
   *,
@@ -2877,9 +2938,10 @@ def platform_update_preview(
   it never mutates the served branch or working tree.
 
   Shows the upstream-side changes ``origin/main`` brings since the shared merge
-  base — local edits are excluded, so the owner reviews exactly what a clean Apply
-  would pull. Availability is the same ancestry check :func:`platform_status`
-  uses; an already-applied target can still have actionable activation work.
+  base — local edits are excluded from the public diff, while a disposable
+  replay predicts whether preserving them will conflict before Apply.
+  Availability is the same ancestry check :func:`platform_status` uses; an
+  already-applied target can still have actionable activation work.
   Missing source or target provenance is an explicit error on both deployments;
   "unavailable" must never masquerade as "up to date."""
   # A missing clone has no snapshot to lock. Fail explicitly without requiring
@@ -2961,6 +3023,7 @@ def _platform_update_preview_unlocked(
   commits = _preview_commits(repo, base, target)
   total_commits = _preview_commit_count(repo, base, target)
   conflict = _read_conflict_flag() or {}
+  predicted_conflicts = _preview_overlay_conflict_paths(repo, local, target)
   activation_paths = [*_pending_activation_paths(repo),
                       *_activation_paths_between(repo, base, target)]
   return PlatformUpdatePreview(
@@ -2977,7 +3040,10 @@ def _platform_update_preview_unlocked(
     commits=commits,
     files=_preview_files(repo, base, target),
     diff=diff, diff_truncated=truncated,
-    conflict_paths=conflict.get("paths") or [], blocking_paths=[],
+    conflict_paths=sorted(
+      set(conflict.get("paths") or []) | set(predicted_conflicts)
+    ),
+    blocking_paths=[],
   )
 
 
@@ -3029,6 +3095,7 @@ async def apply_platform_update(
       def record_current_activation(head: str | None) -> PlatformActivationImpact:
         served = _served_platform_sha()
         changed_paths = _activation_paths_between(repo, served, head)
+        changed_paths = _paths_already_active_in_image(repo, changed_paths)
         incoming_impact = platform_activation.classify_activation(changed_paths)
         if incoming_impact["level"] != platform_activation.ActivationLevel.LIVE.value:
           mark_activation_needed(

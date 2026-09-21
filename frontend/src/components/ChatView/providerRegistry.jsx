@@ -77,7 +77,7 @@ function MobiusLogo() {
 export const PROVIDER_INFO = {
   mobius: {
     id: 'mobius',
-    label: 'Möbius subscription',
+    label: 'Möbius',
     Logo: MobiusLogo,
     efforts: [
       { value: 'minimal', label: 'Minimal' },

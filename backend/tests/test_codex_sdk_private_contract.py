@@ -7,7 +7,6 @@ from app.codex_sdk_contract import (
   app_server_pid,
   control_client,
   install_approval_handler,
-  wait_for_goal_snapshot,
 )
 
 
@@ -47,25 +46,3 @@ def test_app_server_pid_owns_the_private_process_chain():
   assert app_server_pid(SimpleNamespace(
     _client=SimpleNamespace(_sync=SimpleNamespace(_proc=SimpleNamespace(pid=1))),
   )) is None
-
-
-class _ImmediateCondition:
-  def __enter__(self):
-    return self
-
-  def __exit__(self, *_args):
-    return None
-
-  def wait(self, _timeout):
-    raise AssertionError("completed snapshot must not wait")
-
-
-def test_goal_snapshot_reads_status_through_the_private_route_contract():
-  status = object()
-  state = SimpleNamespace(
-    status=status,
-    _condition=_ImmediateCondition(),
-    _failure=None,
-  )
-  assert wait_for_goal_snapshot(state, 0.01) is status
-  assert wait_for_goal_snapshot(SimpleNamespace(status=status), 0.01) is status

@@ -12,48 +12,15 @@ default auto-approval behavior, and stores the live `ActiveCodexTurn`
 in the shared runner registry, keyed by `(chat_id, RunnerKind.CODEX_SDK)`,
 so Stop and queued-message steering can reach it.
 
-**AskUserQuestion parity is shipped via the `request_user_input`
-tool.** The underlying wire surface is `item/tool/requestUserInput`
-JSON-RPC requests emitted by the app-server when the model calls
-the tool. `CodexClient.approval_handler` is the documented
-constructor argument that receives them (public as of
-openai-codex 0.134.0; was a private attribute on a less-stable
-path before). Only the sync `CodexClient` accepts
-`approval_handler` in its constructor. The async wrappers
-(`AsyncCodex`, `AsyncCodexClient`) don't, so we set the
-attribute on `codex._client._sync` after construction, targeting
-the same callable slot the public constructor argument populates.
-See `_install_request_user_input_handler` below.
-
-Why we don't drop `AsyncCodex` and construct `CodexClient`
-directly to pass `approval_handler` as a kwarg: doing so would
-mean rebuilding everything `AsyncCodex` / `AsyncThread` /
-`AsyncTurnHandle` give us for free. That list includes lazy
-`start()` + `initialize()` + metadata validation, the
-`ApprovalMode` enum translation to `(approval_policy,
-approvals_reviewer)` via private `_approval_mode_settings`
-helpers, `ThreadStartParams` / `TurnStartParams` Pydantic
-construction, `_normalize_run_input` + `_to_wire_input`
-translation, `register_turn_notifications` +
-`next_turn_notification` polling that terminates on
-`turn/completed`, and the `AsyncThread` / `AsyncTurnHandle`
-context. That's ~100 lines of plumbing built on four private SDK
-helpers, replacing one public-attribute set on a wrapper-internal
-chain. The current pattern has the smaller fragility surface.
-Revisit if `AsyncCodex` ever grows `approval_handler` in its
-constructor (forwarded down to `_sync`), at which point
-`_install_request_user_input_handler` collapses to a kwarg.
-
-The tool is gated by the `default_mode_request_user_input`
-feature flag (stage `UnderDevelopment`, default off), enabled via
-`features.default_mode_request_user_input=true` in the
-`CodexConfig.config_overrides` list. Once enabled, the model
-sees `request_user_input` in its tool list and uses it the same
-way Claude uses its `AskUserQuestion` tool — both producers
-publish a `question` event on the Möbius wire and both wait on
-the shared `_pending_questions` future for the user's answer.
-The handler then translates Möbius's text-keyed answer back into
-Codex's id-keyed `{answers: {qid: {answers: [label]}}}` schema.
+Owner questions have one lifecycle: the provider-neutral Möbius
+`request_question` control saves a durable terminal card, ends the
+current turn, and starts exactly one continuation when answered.
+Codex's provider-native `request_user_input` tool is deliberately
+disabled at tool registration, because it waits inside the current provider
+turn and cannot safely share that terminal-card contract. The legacy approval
+handler remains installed only as a compatibility guard for a resumed
+provider session that already knows the old tool; new turns never
+advertise it.
 """
 
 from __future__ import annotations
@@ -74,9 +41,7 @@ from typing import Any, Callable
 from app.codex_sdk_contract import (
   app_server_pid,
   control_client,
-  goal_notification_stream_type,
   install_approval_handler,
-  wait_for_goal_snapshot,
 )
 
 from app.codex_events import (
@@ -109,6 +74,7 @@ from app.codex_events import (
   _file_change_edit_preview,
 )
 from app.process_groups import lower_process_group_priority
+from app.progress_lease import TOOL_TTL, ProgressLease
 from app.providers import get_skill_path
 from app.question_bridge import (
   QuestionOverlapError,
@@ -168,9 +134,7 @@ def _env_flag_on(name: str, *, default: bool) -> bool:
 
 def _codex_config_overrides(
   *,
-  allow_questions: bool = True,
   allow_multi_agent: bool = True,
-  allow_goals: bool = True,
   delegated_read_sandbox: bool = False,
 ) -> list[str]:
   """Assemble the Codex ``CodexConfig.config_overrides`` for a turn.
@@ -179,9 +143,9 @@ def _codex_config_overrides(
   owns behavior, while config files and project instruction documents must not
   grow a provider-specific second constitution.
 
-  ``request_user_input`` (AskUserQuestion parity) is on for ordinary chats and
-  deliberately absent for delegated children. Multi-agent (collab /
-  spawn_agent — the Codex analog of Claude's Task fleet, whose
+  Owner questions are deliberately absent here: the Möbius control MCP's
+  durable ``request_question`` is the sole owner-facing question capability.
+  Multi-agent (collab / spawn_agent — the Codex analog of Claude's Task fleet, whose
   ``collabAgentToolCall`` items the dispatch surfaces as ordinary background
   activity) is on by DEFAULT but behind a RUNTIME kill switch: set the env var
   ``MOEBIUS_CODEX_MULTI_AGENT`` to off/0/false/no to disable it and restart
@@ -199,13 +163,11 @@ def _codex_config_overrides(
   delegate probe after any @openai/codex bump.
   """
   overrides = list(_CODEX_PROMPT_CONTROL_OVERRIDES)
-  if allow_questions:
-    overrides.append("features.default_mode_request_user_input=true")
-  if allow_goals:
-    # Codex owns goal durability in its thread store. Enabling the native goal
-    # extension lets a new app-server resume the logical operation after
-    # Möbius deliberately tears the previous process down for a restart.
-    overrides.append("features.goals=true")
+  # Disabling only default_mode_request_user_input leaves the native tool
+  # registered for Plan mode. Disable its inventory entry in every mode.
+  overrides.append("tools.experimental_request_user_input.enabled=false")
+  # One provider turn per Möbius admission; never enable a competing loop.
+  overrides.append("features.goals=false")
   if (
     allow_multi_agent
     and _env_flag_on("MOEBIUS_CODEX_MULTI_AGENT", default=True)
@@ -229,20 +191,6 @@ def _codex_config_overrides(
       '"127.0.0.1" = "allow", "::1" = "allow" }',
     ]
   return overrides
-
-
-def _needs_native_goal_control(
-  *,
-  goal_mode: bool,
-  goal_objective: str | None,
-  clear_dismissed_goal: bool,
-  fallback_goal_objective: str | None,
-) -> bool:
-  """Whether this turn already belongs to Codex's explicit Goal lifecycle."""
-  return bool(
-    goal_mode or goal_objective is not None or clear_dismissed_goal
-    or fallback_goal_objective is not None
-  )
 
 
 async def _start_codex_turn(
@@ -751,7 +699,9 @@ class ActiveCodexTurn:
     """End the turn after a continuation owner-input receipt is delivered.
 
     The event sink calls this only after Codex emits the completed card tool
-    result. Interrupt the live turn now so nothing can follow the card.
+    result. Interrupt the live turn now to stop further generation. Events
+    already emitted while that interrupt takes effect still drain through the
+    sink and remain visible and durable.
     Distinct from Stop: it marks only `_owner_card_requested`
     (folded into `stop_requested()` so terminal validation treats the resulting
     TurnStatus.interrupted as a clean, error-free completion) and never runs
@@ -793,25 +743,11 @@ class ActiveCodexTurn:
       return
 
   async def clear_goal(self) -> None:
-    """Clear a native Goal when present, otherwise stop this Goal-owned turn."""
+    """Stop this attempt; the platform writer owns Goal dismissal."""
     self._interrupt_requested = True
     self._reject_pending_steer()
-    clear_goal = getattr(self.turn, "clear_goal", None)
-    try:
-      if callable(clear_goal):
-        await clear_goal()
-      else:
-        await self.turn.interrupt()
-    except Exception as exc:
-      log.warning("codex direct goal clear raised: %s", exc)
-      try:
-        await self.turn.interrupt()
-      except Exception as interrupt_exc:
-        log.warning("codex fallback interrupt raised: %s", interrupt_exc)
-    try:
-      await asyncio.wait_for(asyncio.shield(self._finished), timeout=5.0)
-    except asyncio.TimeoutError:
-      raise RuntimeError("Codex Goal did not stop after direct clear")
+    await self.turn.interrupt()
+    await asyncio.wait_for(asyncio.shield(self._finished), timeout=5.0)
 
   async def stop(self, timeout: float = 2.0) -> bool:
     """Interrupts the active turn and waits up to `timeout` seconds."""
@@ -1028,81 +964,6 @@ class ActiveCodexTurn:
     return True
 
 
-class _CodexGoalTurn:
-  """TurnHandle-shaped adapter for one SDK-native logical goal operation.
-
-  Codex may execute a goal as several physical turns.  The SDK's goal stream
-  coalesces those into one logical stream while the persisted thread goal is
-  active.  This adapter keeps the rest of Möbius on the ordinary TurnHandle
-  interface: Stop pauses then interrupts through the SDK, and steering targets
-  whichever physical turn the goal runtime currently owns.
-  """
-
-  def __init__(
-    self,
-    client: Any,
-    state: Any,
-    stream_type: Any,
-    invalid_request_type: type[Exception],
-  ):
-    self._client = client
-    self._state = state
-    self._invalid_request_type = invalid_request_type
-    self.id = state.logical_turn_id
-    if not self.id:
-      raise RuntimeError("Codex goal operation has no logical turn id")
-    self._stream = stream_type(
-      state,
-      lambda: client.next_goal_notification(state),
-      lambda: client.unregister_goal_operation(state),
-      lambda: client.cancel_goal_operation(state),
-    )
-
-  def stream(self):
-    return self._stream
-
-  async def interrupt(self) -> None:
-    # The SDK operation deliberately pauses the durable goal before signalling
-    # its current physical turn.  A later thread/resume can therefore restore
-    # the same objective and counters rather than starting a replacement chat.
-    await self._client.cancel_goal_operation(self._state)
-
-  async def clear_goal(self) -> None:
-    """Remove the persisted objective, then interrupt its physical turn."""
-    try:
-      await self._client.thread_goal_clear(self._state.thread_id)
-    finally:
-      await self._client.cancel_goal_operation(self._state)
-
-  async def steer(self, message: str) -> None:
-    physical_turn_id = await asyncio.to_thread(self._state.active_turn)
-    while physical_turn_id is not None:
-      try:
-        await self._client.turn_steer(
-          self._state.thread_id,
-          physical_turn_id,
-          message,
-        )
-        return
-      except self._invalid_request_type as exc:
-        error_message = str(getattr(exc, "message", exc))
-        if not (
-          error_message.startswith("expected active turn id")
-          or error_message.startswith("no active turn to steer")
-        ):
-          raise
-        # A logical goal can roll from one physical turn to the next between
-        # reading current_turn and the steer RPC. Rejection is side-effect-free;
-        # wait for the SDK route to observe the successor, then deliver the same
-        # owner message there exactly once. Stop/goal completion wakes this wait
-        # and returns None rather than spinning on a stale id.
-        physical_turn_id = await asyncio.to_thread(
-          self._state.active_turn,
-          after=physical_turn_id,
-        )
-    raise RuntimeError("Codex goal ended before the message could be delivered")
-
-
 async def _codex_thread_goal(client: Any, sdk: dict[str, Any], thread_id: str):
   """Read a persisted goal before thread/resume can auto-start it."""
   response = await client.request(
@@ -1111,18 +972,6 @@ async def _codex_thread_goal(client: Any, sdk: dict[str, Any], thread_id: str):
     response_model=sdk["ThreadGoalGetResponse"],
   )
   return response.goal
-
-
-def _release_goal_route(client: Any, state: Any | None) -> None:
-  """Release a pre-resume goal route when no logical stream will own it."""
-  if state is None:
-    return
-  try:
-    state.finish()
-    state.wake_notification_reader()
-    client.unregister_goal_operation(state)
-  except Exception:
-    log.warning("Codex goal route cleanup failed", exc_info=True)
 
 
 def _sdk_imports() -> dict[str, Any]:
@@ -1201,7 +1050,6 @@ def _sdk_imports() -> dict[str, Any]:
     "AgentMessageThreadItem": AgentMessageThreadItem,
     "ApprovalMode": ApprovalMode,
     "AsyncCodex": AsyncCodex,
-    "AsyncGoalNotificationStream": goal_notification_stream_type(),
     "CodexConfig": CodexConfig,
     "CodexRpcError": CodexRpcError,
     "InvalidRequestError": InvalidRequestError,
@@ -1599,6 +1447,7 @@ def _publish_codex_context_compaction(bc: Any, chat_id: str) -> None:
 
 
 async def _run_codex_sdk_turn(
+  *,
   user_message: str,
   session_id: str | None,
   base_env: dict[str, str],
@@ -1611,11 +1460,7 @@ async def _run_codex_sdk_turn(
   system_prompt: str | None = None,
   resumed_context: str | None = None,
   should_abort: Callable[[], bool] | None = None,
-  goal_objective: str | None = None,
-  clear_dismissed_goal: bool = False,
-  goal_mode: bool = False,
-  goal_continue: bool = False,
-  fallback_goal_objective: str | None = None,
+  retire_native_goal: bool = False,
   run_policy=None,
   connector_plan=None,
   provider_id: str = "codex",
@@ -1739,9 +1584,9 @@ async def _run_codex_sdk_turn(
   if connector_plan is not None:
     env.update(connector_plan.codex_env)
 
-  # config_overrides always isolates the prompt stack, then carries the
-  # request_user_input (AskUserQuestion parity), goal, and multi-agent flags.
-  # Delegated children disable those optional tools at this provider-owned seam.
+  # config_overrides always isolates the prompt stack, then carries native goal
+  # and multi-agent flags. Owner questions belong exclusively to the durable
+  # Möbius control MCP configured above.
   codex_bin = shutil.which("codex")
   delegated = run_policy is not None
   restricted = delegated
@@ -1752,16 +1597,8 @@ async def _run_codex_sdk_turn(
     top_level=not delegated,
     coordination_enabled=coordination_enabled,
   )
-  needs_goal_control = _needs_native_goal_control(
-    goal_mode=goal_mode,
-    goal_objective=goal_objective,
-    clear_dismissed_goal=clear_dismissed_goal,
-    fallback_goal_objective=fallback_goal_objective,
-  )
   config_overrides = _codex_config_overrides(
-    allow_questions=not restricted,
     allow_multi_agent=True,
-    allow_goals=not restricted and needs_goal_control,
     delegated_read_sandbox=(
       delegated and run_policy.scope == "read"
     ),
@@ -1785,8 +1622,6 @@ async def _run_codex_sdk_turn(
 
   thread = None
   turn = None
-  goal_state = None
-  goal_steer_message: str | None = None
   active_turn: ActiveCodexTurn | None = None
   current_session_id = session_id
   completed_turn: Any | None = None
@@ -1872,7 +1707,7 @@ async def _run_codex_sdk_turn(
   try:
     codex, entry_cancel = await _enter_codex_context_owned(codex_context)
     async with _EnteredCodexContext(codex_context, codex) as codex:
-      goal_client = control_client(codex) if needs_goal_control else None
+      goal_client = control_client(codex) if session_id and retire_native_goal else None
       record_memory_checkpoint_once(
         "codex_first_client_connected",
         chat_id=chat_id,
@@ -1891,17 +1726,18 @@ async def _run_codex_sdk_turn(
       # its sole joiner and shields that join before reaping the group.
       if entry_cancel is not None:
         raise entry_cancel
-      # Install AskUserQuestion bridge on the sync CodexClient's
+      # Keep the old request_user_input bridge on the sync CodexClient's
       # approval_handler attribute. `approval_handler` is a public
       # sync-client constructor argument as of openai-codex 0.142.5;
       # neither AsyncCodex nor AsyncCodexClient accept it, so we
-      # set it on `goal_client._sync` after construction. Staying
+      # set it on `codex._client._sync` after construction. Staying
       # on AsyncCodex (instead of dropping to CodexClient to pass
       # the kwarg natively) keeps ~100 lines of SDK glue out of this
-      # module. See the module docstring for the full reasoning.
-      # When the model calls the `request_user_input` tool (enabled by
-      # the features.default_mode_request_user_input config_override
-      # above), the app-server sends an `item/tool/requestUserInput`
+      # module.
+      # New turns do not advertise the provider-native tool; durable owner
+      # questions use the Möbius request_question MCP control. If a resumed
+      # provider session already knows the old tool, the app-server sends an
+      # `item/tool/requestUserInput`
       # JSON-RPC request to our handler; we park on the shared
       # `_pending_questions` future (same registry Claude uses), publish
       # a `question` event to the SSE wire (same UI), and translate the
@@ -1963,39 +1799,17 @@ async def _run_codex_sdk_turn(
         if delegated and run_policy.scope == "read"
         else sdk["Sandbox"].full_access
       )
-      persisted_goal = None
-      goal_store_available = True
-      if session_id is not None and needs_goal_control:
+      # Upgrade existing native goals before resume: Möbius now owns intent
+      # and schedules exactly one provider turn per admitted attempt. Clearing
+      # the obsolete provider controller preserves conversation history.
+      if session_id is not None and retire_native_goal:
         try:
-          persisted_goal = await _codex_thread_goal(
-            goal_client, sdk, session_id,
-          )
-        except sdk["InvalidRequestError"] as exc:
-          error_message = str(getattr(exc, "message", exc))
-          if not error_message.startswith("thread not found:"):
-            raise
-          # Preserve the existing lost-thread recovery path. Goal lookup must
-          # run before resume to register an active goal route in time, but a
-          # stale session id should still be allowed to resume as a new thread.
-          goal_store_available = False
-        if clear_dismissed_goal:
+          persisted_goal = await _codex_thread_goal(goal_client, sdk, session_id)
           if persisted_goal is not None:
             await goal_client.thread_goal_clear(session_id)
-          persisted_goal = None
-        elif goal_objective is not None and persisted_goal is not None:
-          # An explicit new /goal replaces the stored operation.  Clear it
-          # before resume so app-server cannot auto-start the old objective in
-          # the small window between thread/resume and start_goal_operation.
-          await goal_client.thread_goal_clear(session_id)
-          persisted_goal = None
-        elif (
-          persisted_goal is not None
-          and persisted_goal.status != sdk["ThreadGoalStatus"].complete
-        ):
-          # Register before thread/resume: app-server emits the goal snapshot
-          # and may start the next physical turn immediately after its resume
-          # response.  Routing afterward loses those early notifications.
-          goal_state = goal_client.register_goal_operation(session_id)
+        except sdk["InvalidRequestError"] as exc:
+          if not str(getattr(exc, "message", exc)).startswith("thread not found:"):
+            raise
 
       if session_id is None:
         thread = await codex.thread_start(
@@ -2035,17 +1849,9 @@ async def _run_codex_sdk_turn(
 
       current_session_id = thread.id
       if abort_requested():
-        if goal_state is not None:
-          await goal_client.cancel_goal_operation(goal_state)
-          _release_goal_route(goal_client, goal_state)
-          goal_state = None
         log.info("Codex turn aborted before turn setup chat_id=%s", chat_id)
         return aborted_result()
       if session_id is not None and current_session_id != session_id:
-        if goal_state is not None:
-          _release_goal_route(goal_client, goal_state)
-        goal_state = None
-        persisted_goal = None
         # The requested Codex session is gone (rollout cleaned up, or a phantom
         # id) — Codex returned a fresh thread instead of resuming. Rather than
         # dead-end the chat, reseed like the Claude runner: continue on the fresh
@@ -2096,79 +1902,18 @@ async def _run_codex_sdk_turn(
         "session_id": current_session_id,
       })
 
-      native_goal_objective = (
-        (goal_objective or fallback_goal_objective)
-        if goal_store_available
-        else None
+      turn = await _start_codex_turn(
+        thread,
+        user_message,
+        cwd=cwd,
+        model=model,
+        effort=effort,
+        summary=reasoning_summary,
+        delegated_read=(
+          delegated and run_policy.scope == "read"
+        ),
+        approval_mode=approval_mode,
       )
-      if (
-        session_id is not None
-        and current_session_id != session_id
-      ):
-        # Lost-thread reseeding is an ordinary turn: the replacement needs the
-        # transcript block before a new durable goal can safely be created.
-        # The next explicit /goal can then start natively on that thread.
-        native_goal_objective = None
-
-      if native_goal_objective is not None and persisted_goal is None:
-        goal_state, _goal_turn_id = (
-          await goal_client.start_goal_operation(
-            thread.id, native_goal_objective,
-          )
-        )
-        turn = _CodexGoalTurn(
-          goal_client,
-          goal_state,
-          sdk["AsyncGoalNotificationStream"],
-          sdk["InvalidRequestError"],
-        )
-      elif goal_state is not None and persisted_goal is not None:
-        resumed_goal_status = await asyncio.to_thread(
-          wait_for_goal_snapshot, goal_state, 30.0,
-        )
-        if resumed_goal_status is None:
-          raise RuntimeError(
-            "Timed out waiting for the persisted Codex goal snapshot"
-          )
-        if resumed_goal_status != sdk["ThreadGoalStatus"].active:
-          # Paused/blocked/limited goals stay idle across thread/resume.  A new
-          # Möbius turn is the owner's request to continue, so reactivate the
-          # SAME stored goal and wait for the runtime-created physical turn.
-          await goal_client.thread_goal_set(
-            thread.id,
-            status=sdk["ThreadGoalStatus"].active,
-          )
-        logical_turn_id = await asyncio.to_thread(
-          goal_state.wait_for_start, 30.0,
-        )
-        if logical_turn_id is None:
-          raise RuntimeError(
-            "Timed out waiting for the persisted Codex goal to resume"
-          )
-        turn = _CodexGoalTurn(
-          goal_client,
-          goal_state,
-          sdk["AsyncGoalNotificationStream"],
-          sdk["InvalidRequestError"],
-        )
-        if not goal_continue:
-          # thread/resume already started the goal's next physical turn.  A
-          # real owner message belongs inside it; the synthetic restart marker
-          # "continue" carries no extra content and is intentionally omitted.
-          goal_steer_message = user_message
-      else:
-        turn = await _start_codex_turn(
-          thread,
-          user_message,
-          cwd=cwd,
-          model=model,
-          effort=effort,
-          summary=reasoning_summary,
-          delegated_read=(
-            delegated and run_policy.scope == "read"
-          ),
-          approval_mode=approval_mode,
-        )
       if abort_requested():
         try:
           await turn.interrupt()
@@ -2200,18 +1945,6 @@ async def _run_codex_sdk_turn(
       # stale-resume check above so a rejected (mismatched) session is never
       # recorded.
       await _persist_session_id(db, chat_id, current_session_id)
-
-      if goal_steer_message is not None:
-        try:
-          await turn.steer(goal_steer_message)
-        except Exception:
-          if active_turn.interrupt_requested:
-            log.info(
-              "Codex goal steer ended during requested Stop chat_id=%s",
-              chat_id,
-            )
-          else:
-            raise
 
       known_child_ids: set[str] = set()
       active_activation_by_child: dict[str, str] = {}
@@ -2260,7 +1993,15 @@ async def _run_codex_sdk_turn(
       rate_limit_resets_at: int | None = None
       rate_limit_reached = False
 
+      # Progress lease: renew on every notification so a stalled Codex stream
+      # lapses and recovery can reclaim it. Codex tool boundaries aren't parsed
+      # here, so use a conservative floor (a real silent tool never exceeds it)
+      # rather than the tight model-idle bound.
+      lease = ProgressLease(chat_id, floor_ttl=TOOL_TTL)
+      lease.start()
+
       async for notification in turn.stream():
+        lease.note_message(notification, is_root=False)
         payload = notification.payload
 
         if isinstance(payload, sdk["AgentMessageDeltaNotification"]):
@@ -2687,23 +2428,62 @@ async def _run_codex_sdk_turn(
       raise deferred_cancel
 
 
-@functools.wraps(_run_codex_sdk_turn)
-async def run_codex_sdk_turn(*args, **kwargs) -> RunnerResult:
-  """Hold cross-process rollout ownership around the complete Codex runner."""
+async def run_codex_sdk_turn(
+  *,
+  user_message: str,
+  session_id: str | None,
+  base_env: dict[str, str],
+  cwd: str,
+  chat_id: str,
+  bc,
+  pending_questions: dict,
+  db,
+  agent_settings: dict | None = None,
+  system_prompt: str | None = None,
+  resumed_context: str | None = None,
+  should_abort: Callable[[], bool] | None = None,
+  retire_native_goal: bool = False,
+  run_policy=None,
+  connector_plan=None,
+  provider_id: str = "codex",
+  data_dir: str | None = None,
+  coordination_enabled: bool = True,
+) -> RunnerResult:
+  """Hold cross-process rollout ownership around one strict Codex call.
+
+  Keep the public boundary explicit so provider-only arguments passed to the
+  wrong runner are visible to static tooling. A contract test keeps this
+  wrapper aligned with the inner runner as either evolves.
+  """
   from app.codex_session_lock import acquire_codex_session_activity_async
 
-  data_dir = kwargs.get("data_dir")
   if data_dir is None:
     from app.config import get_settings
 
     data_dir = get_settings().data_dir
-    kwargs["data_dir"] = data_dir
 
-  ownership = await acquire_codex_session_activity_async(
-    data_dir,
-  )
+  ownership = await acquire_codex_session_activity_async(data_dir)
   try:
-    return await _run_codex_sdk_turn(*args, **kwargs)
+    return await _run_codex_sdk_turn(
+      user_message=user_message,
+      session_id=session_id,
+      base_env=base_env,
+      cwd=cwd,
+      chat_id=chat_id,
+      bc=bc,
+      pending_questions=pending_questions,
+      db=db,
+      agent_settings=agent_settings,
+      system_prompt=system_prompt,
+      resumed_context=resumed_context,
+      should_abort=should_abort,
+      retire_native_goal=retire_native_goal,
+      run_policy=run_policy,
+      connector_plan=connector_plan,
+      provider_id=provider_id,
+      data_dir=data_dir,
+      coordination_enabled=coordination_enabled,
+    )
   finally:
     ownership.release()
 

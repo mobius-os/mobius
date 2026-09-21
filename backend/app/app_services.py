@@ -41,8 +41,11 @@ _FORBIDDEN_HEADERS = frozenset({
   "proxy-authorization", "set-cookie", "te", "trailer",
   "transfer-encoding", "upgrade",
 })
-_global_slots = asyncio.Semaphore(8)
-_app_slots: weakref.WeakValueDictionary[int, asyncio.Semaphore] = (
+_global_slots = {
+  "private": asyncio.Semaphore(8),
+  "public": asyncio.Semaphore(8),
+}
+_app_slots: weakref.WeakValueDictionary[tuple[int, str], asyncio.Semaphore] = (
   weakref.WeakValueDictionary()
 )
 
@@ -98,6 +101,7 @@ def service_environment(app, owner) -> dict[str, str]:
       owner.token_epoch,
       app_nonce=app.token_nonce,
       expires_delta=timedelta(minutes=5),
+      is_service=True,
     ),
   })
   return env
@@ -177,14 +181,23 @@ async def invoke_service(
   if len(request_bytes) > MAX_REQUEST_BYTES:
     raise HTTPException(413, "App service request is too large.")
 
-  # A service owns its persistence semantics. Serialize one app's requests so
-  # simple file-backed services do not need a platform-specific lock API.
-  slot = _app_slots.setdefault(app.id, asyncio.Semaphore(1))
+  # A service owns its persistence semantics. Serialize one app's private
+  # requests so simple file-backed services do not need a platform-specific
+  # lock API, and serialize its public requests on a separate lane. A private
+  # federation write may synchronously cause the peer to call this instance's
+  # public service (for example, to verify the sender's identity). Sharing one
+  # lane for both directions deadlocks that callback behind the write waiting
+  # for it. Public services still own their own file/SQLite locking where the
+  # two lanes can touch the same state.
+  lane = "public" if request_envelope.get("public") else "private"
+  slot = _app_slots.setdefault((app.id, lane), asyncio.Semaphore(1))
   # Backlog for one app must not reserve all platform execution capacity while
   # waiting for that app's serialized request. Count only executable requests.
-  async with slot, _global_slots:
-    pin = hold_runtime(app.id)
-    try:
+  # Queued requests already own an accepted revision. Pin before admission so
+  # pruning or a migration drain cannot overlook a request waiting to run.
+  pin = hold_runtime(app.id)
+  try:
+    async with slot, _global_slots[lane]:
       entry = service_entry(app, service)
       try:
         spawn = asyncio.create_task(asyncio.create_subprocess_exec(
@@ -249,8 +262,8 @@ async def invoke_service(
         detail = stderr.decode("utf-8", errors="replace").strip()[-1000:]
         log.warning("App service %s failed: %s", app.slug, detail or "no diagnostics")
         raise HTTPException(502, "App service failed.")
-    finally:
-      pin.close()
+  finally:
+    pin.close()
   try:
     response = json.loads(stdout, parse_constant=_reject_json_constant)
   except (UnicodeDecodeError, json.JSONDecodeError, ValueError, RecursionError) as exc:
@@ -262,6 +275,12 @@ async def invoke_service(
   status = response.get("status", 200)
   if isinstance(status, bool) or not isinstance(status, int) or not 200 <= status <= 599:
     raise HTTPException(502, "App service returned an invalid status.")
+  if status >= 500 and stderr:
+    detail = stderr.decode("utf-8", errors="replace").strip()[-1000:]
+    if detail:
+      # A handled app failure still exits its adapter successfully, so preserve
+      # its bounded diagnostics without exposing them in the HTTP response.
+      log.warning("App service %s returned %d: %s", app.slug, status, detail)
   try:
     headers = _response_headers(response.get("headers"))
   except ValueError as exc:

@@ -3,16 +3,20 @@
 import ast
 import hashlib
 import importlib.util
+import json
 import os
 import re
 import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 ENTRYPOINT = SCRIPTS / "entrypoint.sh"
 INSTALL = SCRIPTS.parent / "app" / "install.py"
+CORE = SCRIPTS.parents[1] / "skill" / "core.md"
 
 
 def _load(name: str):
@@ -21,6 +25,13 @@ def _load(name: str):
   assert spec.loader is not None
   spec.loader.exec_module(module)
   return module
+
+
+def test_core_quotes_mapi_targets_with_query_strings():
+  core = CORE.read_text(encoding="utf-8")
+
+  assert 'mapi "/api/chats/<id>?limit=500"' in core
+  assert "mapi /api/chats/<id>?limit=500" not in core
 
 
 def test_chat_summary_boot_does_not_create_graph_scaffolding(tmp_path, monkeypatch):
@@ -166,6 +177,7 @@ def test_controlled_skills_have_fix_forward_migrations():
     "1730bcf614f0689f2c6459396c342f4090c1374eeb62450e21a81463fe0098bd",
   }
   assert module._UNMODIFIED_MIGRATIONS["platform-maintenance.md"] == {
+    "7cd74918a7d477f87addfdc51dd4559672a9a7face6da109a5af67dd47390efa",
     "bcc617354747c49ddad7fa1f419cf921fd7280909358096323cdbc427ad063c3",
     "b591d15e335c72c0acf394ca7ce4b0daa633e124a487df7a713847cafc13ab6d",
     "668bd365e2edf694c921606c9619fff7b8e58806a9eb48745058b22731c44995",
@@ -179,6 +191,9 @@ def test_controlled_skills_have_fix_forward_migrations():
     "07ac534c61899fc1154dc4ba99a4eda0f648b2f33c839dc65879d12952e09533",
     "630fe9ca1e8f080e052ed87d9e7d7b8ea92e4e891efcfc952a0bdf80e37afd66",
     "d00214c37ba549f5ea4f043714ca33073176b47f1e3085230791b74dd49e2b49",
+    "4f77c36ab0c8d1ef7459911a813e0b742a5819a915601ca127495354a21d7ea7",
+    "c0484a99757296892e042512cdc41371e2e94e88ceab377e80a3b8a71f3a48c2",
+    "9c1665fece62c6eaa20d422f138527952eb8feb3dc56c215be62b04769bd3914",
   }
   assert module._UNMODIFIED_MIGRATIONS["waiting.md"] == {
     "3993e84013d0359a46306b5a3c21f498b4799767aef84b226a7b07997ab538b9",
@@ -189,6 +204,7 @@ def test_controlled_skills_have_fix_forward_migrations():
   }
   assert "reflection.md" not in module._UNMODIFIED_MIGRATIONS
   assert module._UNMODIFIED_MIGRATIONS["cron.md"] == {
+    "2ec4c056ee8691283fbcdeaa1cdcaa1b106ed056600e38cac8b8a979de9dccb3",
     "289336d78ad4268110360f12faac5512d5a53b66aa31c2a6ddd1a44f538f2559",
     "ed100cb496b887a7951adc967e92cda1449c4f8594f7859fbd32762221d24914",
     "76ab03fd128157715b388b16146239217f57bba62c5248b8192a39639d0200b1",
@@ -197,6 +213,7 @@ def test_controlled_skills_have_fix_forward_migrations():
     "16055ea6ba6e4663636f87fde9868aa98d49ab39c5037ff90fa673d96c259cd9",
   }
   assert module._UNMODIFIED_MIGRATIONS["embedded-app-agent.md"] == {
+    "8f74917e0978ae4c1470bed2a9d14c52a8a050875251aec42458a35d16ff6ac2",
     "e58970bb7357030b9ac9c72e3b547d3bc93cdb75a1442dc5bb92db6174beebad",
   }
   # The slug-keyed app lookup that silently found nothing whenever the install
@@ -221,6 +238,8 @@ def test_controlled_skills_have_fix_forward_migrations():
     "db0c1138ffd0890936ccdeba6ced4ccde867ba3044eeef0a5c87cdf2f279eaaa",
   }
   assert module._UNMODIFIED_MIGRATIONS["building-apps.md"] == {
+    "734a5fd00dcd58e53f6713a2663d0dd18dec92abcbcf767c7f02f894d92ee510",
+    "40f42d055ccdb58a21ce1404da9609f5fbb7135a460b768bb8aa7cdc49ad10b1",
     "4126b40d209c422184e0135f611bb9f4197ea280fa27e63cd71c806f8b5ebd79",
     "91b655952d55b37fda0be82e3914c3b09e67ca7c5f5a575d315fb2ca75ef08f1",
     "563dcd7bfa1ff7cbad074d98462eb9755a010a15bf340c7f594fc7f6825a6a86",
@@ -235,6 +254,9 @@ def test_controlled_skills_have_fix_forward_migrations():
     "02fda2ea04f3c0ce808ef0db4b1fe4e893924bd019a5bf102a46749ef9142510",
     "68c84158a9255ab53686968ed4ec8f594c460483bec0e90dcfa472682c1d9b70",
     "c8d1dada4ba2a4ad29da159edf654cf99175a372569f753100398a8a307bc7d6",
+  }
+  assert module._UNMODIFIED_MIGRATIONS["undo-and-restore.md"] == {
+    "84bcbf77edba170f2023824aac46e89e737a873b785c3128943ee8600ca66feb",
   }
   assert module._UNMODIFIED_MIGRATIONS["resolving-app-git.md"] == {
     "6d462f1711891a182c26e212a1ec8fc922eeb02faee45e70ab9b2becfba24f5a",
@@ -251,6 +273,7 @@ def test_controlled_skills_have_fix_forward_migrations():
     "5db160b2d796d54ec320119cbdbbb2860a78cfd703cfe37667626d23abc8e4d9",
     "bf58243aeb1779eb0a94d5404a99c2132e55d60542cbb555fc50bc5cf65349fe",
     "2b14caf13f4cc7c76868f9566f2c0789f6e9b8c0fefac897e1d9ebda11dff8bf",
+    "32e436df532ee4c17b3343b04ead4261d7e46dc48c1dc0a611dcdfdd7b593209",
   }
   assert module._UNMODIFIED_MIGRATIONS["theming.md"] == {
     "7fb5ed4c1e29e6822b56394c089984a1a7e5da1bdf552a21ff0cbdc6413bd998",
@@ -259,6 +282,10 @@ def test_controlled_skills_have_fix_forward_migrations():
     "cd4d6f03f6ba87d8b3d1799aa81c3ab5444900362e56edc3e48803fa1f1fee4b",
   }
   assert "recovery.md" not in module._UNMODIFIED_MIGRATIONS
+  assert "live-screen-control.md" not in module._UNMODIFIED_MIGRATIONS
+  assert module._RETIRED_UNMODIFIED_SKILLS["live-screen-control.md"] == {
+    "494da9e09b122b04bcc6bb5f1bbbddf2e71ba75b777af41f5e5aa1b598a621be",
+  }
   assert (
     "59af11e6f1313f1e0df4fc7905cf018786eb648116aaf7e8bcafea7aa7a4c9fe"
     in module._RETIRED_UNMODIFIED_SKILLS["recovery.md"]
@@ -362,6 +389,45 @@ def test_warm_boot_archives_customized_retired_skill_outside_discovery(
   assert not (skills / "recovery.md").exists()
   assert (archive / f"recovery-{digest}.md").read_bytes() == custom
   assert list(archive.glob("*.md")) == [archive / f"recovery-{digest}.md"]
+
+
+@pytest.mark.parametrize("active", [True, False])
+def test_warm_boot_leaves_app_owned_skill_outside_seed_retirement(
+  tmp_path, monkeypatch, active,
+):
+  module = _load("init_skills")
+  seed = tmp_path / "seed"
+  skills = tmp_path / "skills"
+  archive = tmp_path / "retired-skills"
+  seed.mkdir()
+  skills.mkdir()
+  app_skill = b"app-owned skill\n"
+  (skills / "retired.md").write_bytes(app_skill)
+  (skills / ".app-skills.json").write_text(
+    json.dumps({
+      "retired.md": {
+        "app_id": 42,
+        "slug": "skill-owner",
+        "sha256": hashlib.sha256(app_skill).hexdigest(),
+        "active": active,
+      },
+    }),
+    encoding="utf-8",
+  )
+  monkeypatch.setattr(module, "_SEED_CANDIDATES", [seed])
+  monkeypatch.setattr(module, "SKILLS", skills)
+  monkeypatch.setattr(module, "RETIRED_SKILLS", archive)
+  monkeypatch.setattr(module, "_chown_mobius", lambda _path: None)
+  monkeypatch.setattr(module, "_write_index", lambda: None)
+  monkeypatch.setattr(module, "_UNMODIFIED_MIGRATIONS", {})
+  monkeypatch.setattr(module, "_RETIRED_UNMODIFIED_SKILLS", {
+    "retired.md": {hashlib.sha256(app_skill).hexdigest()},
+  })
+
+  module.init()
+
+  assert (skills / "retired.md").read_bytes() == app_skill
+  assert not archive.exists()
 
 
 def test_seeded_cron_jobs_use_only_app_scoped_credentials():

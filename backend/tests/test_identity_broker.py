@@ -959,6 +959,10 @@ def test_community_mutations_are_narrow_and_require_idempotency(
 
 
 def test_large_body_exception_is_only_for_exact_contribution_routes():
+  for is_unix in (False, True):
+    assert broker_module._request_body_limit(
+      is_unix=is_unix, method="POST", path="/v1/responses",
+    ) == broker_module.MAX_INFERENCE_BODY
   assert broker_module._request_body_limit(
     is_unix=True, method="POST", path="/v1/contributions",
   ) == broker_module.MAX_CONTRIBUTION_BODY
@@ -970,7 +974,8 @@ def test_large_body_exception_is_only_for_exact_contribution_routes():
     (False, "POST", "/v1/contributions"),
     (True, "POST", "/v1/community/apps"),
     (True, "POST", "/v1/contributions?x=1"),
-    (True, "POST", "/v1/responses"),
+    (True, "GET", "/v1/responses"),
+    (True, "POST", "/v1/responses?x=1"),
     (True, "GET", "/v1/community/publications"),
   ):
     assert broker_module._request_body_limit(

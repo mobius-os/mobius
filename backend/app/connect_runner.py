@@ -800,7 +800,7 @@ class _CommandRunner:
         return True
 
 
-def _serve_connection(conn, command_gate=None):
+def _serve_connection(conn, command_gate=None, stop_event=None):
     base = _validated_base_url(conn["url"])
     token = conn["token"]
     ctx = ssl.create_default_context()
@@ -809,6 +809,10 @@ def _serve_connection(conn, command_gate=None):
     backoff = 1
     print("Connecting to %s ..." % base)
     while True:
+        # A connection removed from config (or a shutting-down supervisor) sets
+        # this event; stop retrying and let this thread exit.
+        if stop_event is not None and stop_event.is_set():
+            return
         try:
             # Results are ordinary HTTPS requests. Attempt them before the
             # next stream hello so its pending list reflects what still needs
@@ -849,6 +853,8 @@ def _serve_connection(conn, command_gate=None):
                     commands.flush_pending_results()
                     if commands.take_reconcile_request():
                         print("reconnecting to reconcile a rejected result")
+                        break
+                    if stop_event is not None and stop_event.is_set():
                         break
                     line = raw.decode("utf-8", "replace").rstrip("\r\n")
                     if not line.startswith("data:"):
@@ -920,10 +926,10 @@ def _serve_connection(conn, command_gate=None):
         backoff = min(backoff * 2, 30)
 
 
-def _serve_connection_safe(conn, command_gate):
+def _serve_connection_safe(conn, command_gate, stop_event=None):
     """Run one connection's loop so its failure never stops the others."""
     try:
-        _serve_connection(conn, command_gate)
+        _serve_connection(conn, command_gate, stop_event)
     except Exception as exc:  # noqa: BLE001 - one connection must not crash all
         print("connection to %s stopped: %s" % (conn.get("url"), exc))
 
@@ -932,15 +938,15 @@ def _serve_all():
     """Serve every paired connection from this one runner process.
 
     Supervises each connection independently: one live thread per configured
-    connection, respawned if it exits, and dropped when it is removed from
-    config. A single connection dropping can never leave that instance dark
-    while the others keep running; the process exits only when the last
-    connection is gone or on an explicit stop."""
+    connection, respawned if it exits, and signalled to stop and dropped when
+    it is removed from config. A single connection dropping can never leave
+    that instance dark while the others keep running; the process exits only
+    when the last connection is gone or on an explicit stop."""
     if not _connections():
         print("Not paired. Run with --pair CODE --url URL first.")
         sys.exit(2)
     command_gate = threading.Lock()
-    threads = {}
+    workers = {}  # key -> (thread, stop_event)
     try:
         while True:
             conns = _connections()
@@ -950,18 +956,23 @@ def _serve_all():
             for conn in conns:
                 key = conn.get("host_id") or conn.get("url")
                 live_keys.add(key)
-                thread = threads.get(key)
-                if thread is None or not thread.is_alive():
+                worker = workers.get(key)
+                if worker is None or not worker[0].is_alive():
+                    stop_event = threading.Event()
                     thread = threading.Thread(
                         target=_serve_connection_safe,
-                        args=(conn, command_gate), daemon=True,
+                        args=(conn, command_gate, stop_event), daemon=True,
                         name="mobius-connect-%s" % (key or "unknown"),
                     )
                     thread.start()
-                    threads[key] = thread
-            for key in [k for k in threads if k not in live_keys]:
-                if not threads[key].is_alive():
-                    threads.pop(key, None)
+                    workers[key] = (thread, stop_event)
+            for key in [k for k in workers if k not in live_keys]:
+                thread, stop_event = workers[key]
+                # Signal a connection removed from config to stop, then drop it
+                # once its worker has actually exited.
+                stop_event.set()
+                if not thread.is_alive():
+                    workers.pop(key, None)
             time.sleep(2)
     except KeyboardInterrupt:
         print("\nStopped.")

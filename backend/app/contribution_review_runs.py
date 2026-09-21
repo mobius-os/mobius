@@ -5,20 +5,61 @@ repository policy. Neither a ledger edit nor a changed PR expands this grant.
 An ambiguous merge receipt is never retried: reconcile read-only or ask the owner.
 """
 import json
+import re
 from pathlib import Path
+from urllib.parse import quote
 
 from fastapi import HTTPException
 from sqlalchemy import or_, update
 
 from app import agent_work_claims, models
+from app.contribution_errors import ContributionSubmitError
+from app.terminal_output import readable_output
+
+
+_MERGE_DIAGNOSTIC_SECRET = re.compile(
+  r"(?i)\b(?:authorization|token|password|secret)\b\s*(?:[:=]\s*)?\S+"
+  r"|\bgh[pous]_[A-Za-z0-9_]+\b"
+)
 
 
 def key(item: dict) -> str:
   return f"{item['repo'].lower()}#{item['number']}"
 
 
+def merge_failure_summary(exc: Exception) -> str:
+  """Keep a bounded safe GitHub failure beside an unrepeatable merge receipt."""
+  detail = ""
+  if isinstance(exc, ContributionSubmitError):
+    detail = exc.detail or exc.message
+  elif isinstance(exc, HTTPException):
+    detail = str(exc.detail or "")
+  if detail:
+    detail = _MERGE_DIAGNOSTIC_SECRET.sub("[redacted]", readable_output(detail, limit=600))
+  if detail:
+    return (
+      "GitHub did not confirm the merge or queue request. Reconcile it before "
+      f"any new action. Diagnostic: {detail}"
+    )
+  return "GitHub did not confirm the merge or queue request. Reconcile it before any new action."
+
+
 def read(gh, cwd: Path, endpoint: str):
   return json.loads(gh(cwd, "api", endpoint).stdout)
+
+
+def base_head(gh, cwd: Path, repo: str, base_ref: str) -> str:
+  """Read the live target-branch tip rather than the PR's comparison base."""
+  ref = read(gh, cwd, f"repos/{repo}/git/ref/heads/{quote(base_ref, safe='')}")
+  sha = (ref.get("object") or {}).get("sha")
+  if not isinstance(sha, str) or len(sha) != 40:
+    raise HTTPException(409, "GitHub did not confirm the target branch head.")
+  return sha
+
+
+def assert_current_base(gh, cwd: Path, target: dict) -> None:
+  if base_head(gh, cwd, target["repo"], target["base_ref"]) != target["base_sha"]:
+    raise HTTPException(409, "The target branch changed. Review the new combined result first.")
 
 
 def inspect_target(gh, cwd: Path, item: dict, mode: str) -> dict:
@@ -28,14 +69,15 @@ def inspect_target(gh, cwd: Path, item: dict, mode: str) -> dict:
     raise HTTPException(409, "A selected pull request is no longer open.")
   if pull.get("head", {}).get("sha") != item["head_sha"]:
     raise HTTPException(409, "A selected pull request changed. Refresh before reviewing.")
-  if pull.get("base", {}).get("ref") != item["base_ref"] or pull.get("base", {}).get("sha") != item["base_sha"]:
+  base_ref = pull.get("base", {}).get("ref")
+  if base_ref != item["base_ref"] or base_head(gh, cwd, item["repo"], base_ref) != item["base_sha"]:
     raise HTTPException(409, "A selected target branch changed. Refresh before reviewing.")
   if mode == "review_merge" and not merge_permission(repo):
     raise HTTPException(403, "You cannot merge changes in this repository.")
   return {
     **item, "repo": repo["full_name"], "repo_id": repo["id"],
-    "pr_id": pull["node_id"], "base_ref": pull["base"]["ref"],
-    "base_sha": pull["base"]["sha"], "title": pull["title"],
+    "pr_id": pull["node_id"], "base_ref": base_ref,
+    "base_sha": item["base_sha"], "title": pull["title"],
     "url": pull["html_url"],
   }
 
@@ -63,8 +105,6 @@ def merge_blocker(target, repo, pull, pr) -> str | None:
     return "Your repository merge permission is no longer available."
   if pull.get("state") != "open" or pull.get("draft"):
     return "This pull request is closed or still a draft."
-  if pull.get("base", {}).get("sha") != target["base_sha"]:
-    return "The target branch changed. Review the new combined result first."
   if not isinstance(pr.get("isMergeQueueEnabled"), bool):
     return "GitHub did not confirm the merge queue policy."
   if pr.get("headRefOid") != target["head_sha"]:
@@ -84,7 +124,7 @@ def merge_blocker(target, repo, pull, pr) -> str | None:
 
 
 def pull_checks(gh, cwd, target):
-  query = 'query($id:ID!){node(id:$id){... on PullRequest { headRefOid mergeable mergeStateStatus reviewDecision isMergeQueueEnabled mergeQueueEntry{id headCommit{oid}} commits(last:1){nodes{commit{statusCheckRollup{state}}}} }}}'
+  query = 'query($id:ID!){node(id:$id){... on PullRequest { headRefOid mergeable mergeStateStatus reviewDecision isMergeQueueEnabled mergeQueueEntry{id} commits(last:1){nodes{commit{statusCheckRollup{state}}}} }}}'
   result = json.loads(gh(cwd, "api", "graphql", "-f", f"query={query}",
                          "-f", f"id={target['pr_id']}").stdout)
   if result.get("errors") or not (result.get("data") or {}).get("node"):
@@ -92,14 +132,22 @@ def pull_checks(gh, cwd, target):
   return result["data"]["node"]
 
 
+def queue_entry(pr, target):
+  """Return the entry attached to this exact PR, not its synthetic test head."""
+  if pr.get("headRefOid") != target["head_sha"]:
+    return None
+  entry = pr.get("mergeQueueEntry")
+  return entry if isinstance(entry, dict) and entry.get("id") else None
+
+
 def enqueue(gh, cwd, target):
   query = """mutation($id:ID!,$head:GitObjectID!){enqueuePullRequest(input:{
     pullRequestId:$id,expectedHeadOid:$head,jump:false
-  }){mergeQueueEntry{id headCommit{oid}}}}"""
+  }){mergeQueueEntry{id}}}"""
   result = json.loads(gh(cwd, "api", "graphql", "-f", f"query={query}",
     "-f", f"id={target['pr_id']}", "-f", f"head={target['head_sha']}").stdout)
   entry = ((result.get("data") or {}).get("enqueuePullRequest") or {}).get("mergeQueueEntry")
-  if result.get("errors") or not entry or entry.get("headCommit", {}).get("oid") != target["head_sha"]:
+  if result.get("errors") or not isinstance(entry, dict) or not entry.get("id"):
     raise HTTPException(409, "GitHub did not confirm this exact pull request in the merge queue.")
   return entry
 
@@ -111,11 +159,24 @@ def perform_merge(gh, cwd, target, repo):
   ) if repo.get(setting) is True), None)
   if method is None:
     raise HTTPException(409, "GitHub did not provide an allowed merge method.")
-  return json.loads(gh(
+  response = gh(
     cwd, "api", "--method", "PUT",
     f"repos/{target['repo']}/pulls/{target['number']}/merge",
     "-f", f"sha={target['head_sha']}", "-f", f"merge_method={method}",
-  ).stdout)
+  ).stdout
+  try:
+    result = json.loads(response)
+  except json.JSONDecodeError as exc:
+    raise ContributionSubmitError(
+      "GitHub returned an unreadable merge confirmation.",
+      code="merge_response_unreadable",
+    ) from exc
+  if not isinstance(result, dict):
+    raise ContributionSubmitError(
+      "GitHub returned an unexpected merge confirmation shape.",
+      code="merge_response_invalid_shape",
+    )
+  return result
 
 
 def merge_work_key(target):

@@ -51,7 +51,10 @@ from app.frontend_assets import (
   resolve_frontend_dir,
 )
 from app.memory_observability import record_memory_checkpoint
-from app.runtime_provenance import protected_runtime_status
+from app.runtime_provenance import (
+  protected_runtime_status,
+  served_runtime_status,
+)
 from app.response_policy import (
   chat_embed_csp,
   PUBLISHED_SITE_CSP,
@@ -1209,9 +1212,12 @@ def version():
   the local build identity cleanly so the image-pull path is self-verifying.
   """
   settings = get_settings()
-  protected_runtime = protected_runtime_status(
-    Path(settings.data_dir) / "platform" / "backend" / "runtime",
-  )
+  runtime_root = Path(settings.data_dir) / "platform" / "backend" / "runtime"
+  protected_runtime = protected_runtime_status(runtime_root)
+  # Launcher-started modules are excluded from parity above, so surface their
+  # route-epoch state separately: a served broker behind the image is hidden by
+  # a "current" parity result but returns 404 for the routes the app now needs.
+  served_runtime = served_runtime_status(runtime_root)
   return {"sha": settings.build_sha,
           "build_date": settings.build_date,
           # Browser setup verifies this dedicated test-container marker before
@@ -1222,6 +1228,12 @@ def version():
           # can parse one stable scalar without reimplementing JSON traversal.
           "protected_runtime_state": protected_runtime["state"],
           "protected_runtime": protected_runtime,
+          "served_runtime": served_runtime,
+          "served_runtime_behind": [
+            module["module"]
+            for module in served_runtime
+            if module["state"] == "behind"
+          ],
           **_served_platform_identity(settings.data_dir, settings.build_sha),
           **_served_frontend_identity()}
 

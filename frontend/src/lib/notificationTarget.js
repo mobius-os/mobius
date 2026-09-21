@@ -16,7 +16,7 @@
 // Accepted forms (the shapes locked by backend/tests/test_notification_target.py
 // and used by the bounded preview):
 //   /shell/?app=<id-or-slug>[&intent=...]  → { view: 'canvas', app, intent }
-//   /shell/?chat=<id>                      → { view: 'chat', chatId }
+//   /shell/?chat=<id>[&focus=question]      → { view: 'chat', chatId, focusQuestion }
 //
 // `app` is returned as the RAW accepted string (id or slug) because the shell
 // resolves slugs via openAppWithIntent, exactly like the cold deepLink parser.
@@ -65,7 +65,9 @@ export function parseNotificationTarget(target) {
         intent: (intent && INTENT_RE.test(intent)) ? intent : null,
       }
     }
-    if (chat && ID_RE.test(chat)) return { view: 'chat', chatId: chat }
+    if (chat && ID_RE.test(chat)) {
+      return { view: 'chat', chatId: chat, focusQuestion: params.get('focus') === 'question' }
+    }
     return null
   }
 

@@ -66,6 +66,31 @@ test('a new chat starts at zero against the selected model context', () => {
   })
 })
 
+test('a chat before its first session estimates from the registry', () => {
+  const registry = {
+    mobius: [{ id: 'flow', context_window: 943_718 }],
+  }
+  // No session yet means the usage query is disabled and data is undefined.
+  assert.deepEqual(
+    resolvedContextTokenCounts(
+      undefined, registry, 'mobius', 'flow', { noSession: true },
+    ),
+    { used: 0, maximum: 943_718 },
+  )
+  // Without usage enabled (embedded chats), the gauge stays off.
+  assert.equal(
+    resolvedContextTokenCounts(undefined, registry, 'mobius', 'flow'),
+    null,
+  )
+  // A missing model row still stays unknown rather than inventing a window.
+  assert.equal(
+    resolvedContextTokenCounts(
+      undefined, registry, 'mobius', 'missing', { noSession: true },
+    ),
+    null,
+  )
+})
+
 test('missing usage in an established session remains unknown', () => {
   const registry = {
     codex: [{ id: 'gpt-5.6-sol', context_window: 258_400 }],

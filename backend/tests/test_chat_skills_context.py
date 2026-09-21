@@ -203,7 +203,9 @@ def test_goal_routing_rechecks_phase_transitions_and_prefers_platform_tool():
   assert "resilience, not an equivalent convenience path" in planning_normalized
   assert "an attempted tool call returns a failure" in planning_normalized
   assert "Terminal settlement continues the exact Goal" in planning_normalized
-  assert "this is a backstop, not a planning strategy" in planning_normalized
+  assert "turns are not a budget" in planning_normalized
+  assert "context --task ID" in planning_normalized
+  assert "Do not end a run merely to refresh context" in planning_normalized
 
 
 def test_goal_waits_always_name_a_durable_owner_interaction():
@@ -316,6 +318,22 @@ def test_restart_guidance_requires_activation_proof_and_fresh_approval():
   assert "explicitly delegated the restart or the complete backend-fix loop" not in (
     core + maintenance
   )
+
+
+def test_saved_secure_input_is_a_terminal_agent_action():
+  repo = Path(__file__).resolve().parents[2]
+  guidance = (
+    repo / "backend" / "scripts" / "seed-skills" / "secure-input.md"
+  ).read_text(encoding="utf-8")
+  normalized = " ".join(guidance.split())
+
+  assert (
+    "The card is the final action of the turn, exactly like Möbius's saved "
+    "Q&A and approval cards."
+  ) in normalized
+  assert (
+    "On a confirmed receipt, end the turn with **no further text or tools**."
+  ) in normalized
 
 
 def test_owned_app_skill_summaries_expose_complete_initial_read_sets():

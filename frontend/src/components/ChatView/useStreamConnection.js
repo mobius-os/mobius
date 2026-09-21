@@ -1583,7 +1583,9 @@ export default function useStreamConnection(chatId, {
     retryCount.current = 0
     if (!wantsReconnectRef.current) return
     setConnectionError(null)
-    clearReconnectingNote()
+    // Reachability recovery can coincide with the visibility handler that
+    // already owns an in-flight reattach. It is not stream-settlement evidence,
+    // so leave that note to the replacement catch-up/done/error paths.
     setIsStreaming(true)
     // Recovery is reachability evidence, not proof that every socket is stale.
     // The successful GET can itself publish it. Keep that attachment and use

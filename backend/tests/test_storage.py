@@ -1611,7 +1611,9 @@ def test_delete_folder_rejects_traversal(client, auth, owner_token):
 
 
 
-def test_app_storage_version_header_is_gated(client, auth, owner_token):
+def test_app_storage_plain_and_versioned_reads_share_one_cas_etag(
+  client, auth, owner_token,
+):
   app_id = _make_app(client, owner_token)
   assert client.put(
     f"/api/storage/apps/{app_id}/cas.json", json={"v": 1}, headers=auth,
@@ -1619,14 +1621,41 @@ def test_app_storage_version_header_is_gated(client, auth, owner_token):
 
   plain = client.get(f"/api/storage/apps/{app_id}/cas.json", headers=auth)
   assert plain.status_code == 200
-  assert "etag" not in {k.lower() for k in plain.headers.keys()}
+  assert plain.headers.get("etag")
+  assert plain.headers.get("cache-control") == "no-store"
 
   versioned = client.get(
     f"/api/storage/apps/{app_id}/cas.json",
     headers={**auth, "X-Mobius-Version": "1"},
   )
   assert versioned.status_code == 200
-  assert versioned.headers.get("etag")
+  assert versioned.headers.get("etag") == plain.headers.get("etag")
+  assert versioned.headers.get("cache-control") == "no-store"
+
+
+def test_streamed_app_storage_read_cannot_poison_later_cas(
+  client, auth, owner_token,
+):
+  app_id = _make_app(client, owner_token)
+  path = f"/api/storage/apps/{app_id}/large-state.json"
+  document = {"samples": "a" * (storage_routes._INLINE_READ_MAX + 1)}
+  assert client.put(path, json=document, headers=auth).status_code == 204
+
+  # This crosses _INLINE_READ_MAX and therefore uses FileResponse—the exact
+  # branch that gave Beat Machine a second, incompatible transport ETag.
+  plain = client.get(path, headers=auth)
+  versioned = client.get(path, headers={**auth, "X-Mobius-Version": "1"})
+  assert plain.status_code == versioned.status_code == 200
+  assert plain.headers["etag"] == versioned.headers["etag"]
+  assert plain.headers["cache-control"] == "no-store"
+
+  saved = client.put(
+    path,
+    json={"samples": document["samples"], "saved": True},
+    headers={**auth, "If-Match": plain.headers["etag"]},
+  )
+  assert saved.status_code == 204
+  assert client.get(path, headers=auth).json()["saved"] is True
 
 
 def test_app_storage_if_match_conflict_412_and_unconditional_put_unchanged(client, auth, owner_token):

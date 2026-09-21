@@ -32,6 +32,7 @@ from app.chat_writer import (
 from app.events import (
   THINKING_INLINE_THRESHOLD,
   TOOL_OUTPUT_INLINE_THRESHOLD,
+  _tool_block_for_event,
   blocks_have_renderable_content,
   build_assistant_message,
   capture_question_scrub,
@@ -71,6 +72,7 @@ def _pause_note(
   *,
   kind: str | None = None,
   resets_at: str | None = None,
+  provider: str | None = None,
   resumable: bool = True,
 ) -> dict:
   """Build the ONE error-block/event shape every pause producer emits.
@@ -96,6 +98,8 @@ def _pause_note(
     pause: dict = {"kind": kind}
     if resets_at is not None:
       pause["resets_at"] = resets_at
+    if provider is not None:
+      pause["provider"] = provider
     note["pause"] = pause
   return note
 
@@ -882,6 +886,16 @@ class ChatEventSink:
         and event.get("output_exit_code") in (None, 0)
       ):
         owner_card_receipt_id = _owner_card_receipt_id(event.get("content"))
+        if owner_card_receipt_id is None and not (event.get("content") or "").strip():
+          # A provider that streams output deltas may omit its re-aggregated
+          # copy on completion (see events.py's no-clobber rule). The receipt
+          # text still lives in the tool block's streamed output, and the
+          # card-end boundary must not depend on which channel carried it.
+          blk = _tool_block_for_event(
+            self.assistant_blocks, event.get("tool_use_id"),
+          )
+          if blk is not None:
+            owner_card_receipt_id = _owner_card_receipt_id(blk.get("output"))
       output_reduced = self._reduce_tool_output(event)
       if not output_reduced and event.get("output_exit_code") is None:
         exit_code = tool_output_exit_code(event.get("content"))
@@ -1338,6 +1352,21 @@ class ChatEventSink:
       block.get("type") == "question"
       and block.get("question_id") == question_id
       and block.get("response_mode") == "continuation"
+      for block in self.assistant_blocks
+    )
+
+  def has_open_continuation_card(self) -> bool:
+    """Whether this turn already handed its next move to the owner.
+
+    QuestionCommit saves the card through the writer's session; terminal Goal
+    settlement may still hold an older Chat in its own identity map. Read the
+    same-turn handoff from its owning sink instead of that cached transcript.
+    A failed save scrubs the card before returning to the caller.
+    """
+    return any(
+      block.get("type") == "question"
+      and block.get("response_mode") == "continuation"
+      and not block.get("answers")
       for block in self.assistant_blocks
     )
 

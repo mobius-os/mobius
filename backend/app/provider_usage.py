@@ -186,11 +186,30 @@ def normalize_claude_usage(
     )
     if normalized is not None:
       windows.append(normalized)
+  # Extra usage is a separate paid allowance. It is not a plan-window reset:
+  # a subscription can be at its session limit while this budget is enabled.
+  # Keep only the decision-grade facts the recovery UI needs; amounts remain
+  # provider-owned billing data and can be absent for unlimited accounts.
+  raw_extra = source.get("extra_usage")
+  raw_extra = raw_extra if isinstance(raw_extra, dict) else {}
+  extra_enabled = raw_extra.get("is_enabled") is True
+  extra_used = _percent(raw_extra.get("utilization"))
+  # Enabled and available are separate facts. Without provider utilization,
+  # the UI may report the setting but must not promise a chargeable retry.
+  extra_available = False
+  if extra_enabled:
+    extra_available = None if extra_used is None else extra_used < 100
+  extra_usage = {
+    "enabled": extra_enabled,
+    "available": extra_available,
+    "used_percent": extra_used,
+  }
   return {
     "state": "ready" if windows else "unavailable",
     "plan_label": plan_label(subscription_type),
     "windows": windows,
     "credit_balance": None,
+    "extra_usage": extra_usage,
   }
 
 
@@ -199,7 +218,7 @@ def _codex_window_label(raw: dict[str, Any], fallback: str) -> str:
   if duration == 300:
     return "5-hour"
   if duration == 10_080:
-    return "Weekly"
+    return "7-day"
   if isinstance(duration, (int, float)) and duration > 0:
     hours = duration / 60
     if hours.is_integer():
@@ -338,7 +357,7 @@ def normalize_mobius_usage(payload: Any) -> dict[str, Any]:
   mobius_plan_label = (
     raw_plan_label.strip()
     if isinstance(raw_plan_label, str) and raw_plan_label.strip()
-    else "Möbius subscription"
+    else "Möbius"
   )
 
   used_percent = _percent(
@@ -684,7 +703,7 @@ async def _provider_snapshot(provider_id: str, data_dir: str) -> dict[str, Any]:
   except Exception as exc:  # best-effort read; Settings must still open
     log.warning("%s plan usage unavailable: %s", provider_id, exc)
     if provider_id == "mobius":
-      plan = "Möbius subscription"
+      plan = "Möbius"
     else:
       subscription = (
         providers.claude_subscription_type(data_dir)

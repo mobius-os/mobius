@@ -15,6 +15,9 @@ export function platformUpdateRepairReason({ preview, platform, rebuild, error =
   if (preview?.blocking_paths?.length || errorCode === 'local_runtime_changes') {
     return 'This update needs help preserving your local changes.'
   }
+  if (preview?.conflict_paths?.length) {
+    return 'This update overlaps your local changes and needs help before Apply.'
+  }
   const level = (preview || platform)?.activation?.level
   if (requiresAgentActivation((preview || platform)?.activation) || errorCode === 'external_activation_required') {
     return 'Möbius needs to check your deployment settings before this update can finish.'
@@ -23,16 +26,6 @@ export function platformUpdateRepairReason({ preview, platform, rebuild, error =
   if (level === 'image_rebuild' && target && rebuild?.expected_sha === target
     && ['failed', 'rolled_back', 'needs_recovery'].includes(rebuild.state)) {
     return 'The last attempt to finish this update needs attention.'
-  }
-  const matchingReplacement = rebuild?.expected_sha === target ? rebuild : null
-  if (
-    platform
-    && platform.available === false
-    && level === 'image_rebuild'
-    && !['queued', 'preparing', 'replacing', 'verifying', 'succeeded', 'no_change']
-      .includes(matchingReplacement?.state)
-  ) {
-    return 'The update is applied, but Möbius needs help finishing the container replacement.'
   }
   if (platform?.rollback_error?.startsWith('frontend_build_deferred')) {
     return 'The update was safely rolled back because this instance was busy. Try again after other work finishes.'

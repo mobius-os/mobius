@@ -281,6 +281,51 @@ def test_install_fresh_app_writes_everything(client, auth, tmp_path, bypass_url_
   assert row["display"] == "fullscreen"
 
 
+def test_install_fresh_service_app_syncs_aliases_during_activation(
+  client, auth, db, bypass_url_validation,
+):
+  base = "https://raw.githubusercontent.com/x/app-svc-alias/main/"
+  manifest = {
+    "id": "svc-alias",
+    "name": "Svc Alias",
+    "version": "1.0.0",
+    "description": "Service app with a transition alias",
+    "entry": "index.jsx",
+    "icon": "icon.png",
+    "permissions": {"cross_app_access": "none", "share_with_apps": "none"},
+    "service": {
+      "id": "svc-alias",
+      "entry": "service.py",
+      "access": "public",
+      "aliases": ["svc-legacy"],
+    },
+    "source_files": ["service.py"],
+    "runtime": {"imports": ["react"], "esm_deps": []},
+  }
+  responses = {
+    base + "mobius.json": (200, json.dumps(manifest).encode()),
+    base + "index.jsx": (200, JSX.encode()),
+    base + "icon.png": (200, _png_bytes()),
+    base + "service.py": (200, b"def handle(req):\n    return {}\n"),
+  }
+  with patch(
+    "app.install.httpx.AsyncClient",
+    side_effect=_fake_async_client(responses),
+  ):
+    response = client.post("/api/apps/install", headers=auth, json={
+      "manifest_url": base + "mobius.json",
+    })
+
+  assert response.status_code == 201, response.text
+  app_id = response.json()["id"]
+  aliases = (
+    db.query(models.AppServiceAlias)
+    .filter(models.AppServiceAlias.app_id == app_id)
+    .all()
+  )
+  assert [alias.service_id for alias in aliases] == ["svc-legacy"]
+
+
 def test_install_static_site_assets_route_css_fonts_and_chunks(
   client, auth, bypass_url_validation,
 ):
@@ -3296,7 +3341,7 @@ def test_version_only_conflict_auto_resolves_to_upstream(
   """A conflict CONFINED to the app's version identifier must NOT spawn a
   resolver: install auto-resolves it to the upstream version and returns
   mode='update'. This exercises the full wiring (install_from_manifest →
-  app_git.resolve_version_only_conflict), not just the git helper."""
+  app_git.resolve_benign_conflict), not just the git helper."""
   base = "https://ver-only.test/repo/"
   m = {**MANIFEST_NEWS, "id": "ver-only"}
   jsx_v1 = (
@@ -4885,6 +4930,117 @@ def test_rename_adopts_predecessor_row_and_moves_source_dir(
   assert r3.json()["id"] == gym_id
 
 
+def test_catalog_rename_adopts_trusted_checkout_with_unrelated_git_history(
+  client, auth, bypass_url_validation,
+):
+  """A proven catalog rename must preserve a legacy independently-rooted app.
+
+  Older local apps can have the canonical public origin while their ``main``
+  and installer-owned ``upstream`` branches were recreated independently.
+  The explicit previous-id adoption remains safe: Git combines compatible
+  trees, while actual differences still use the normal conflict outcome.
+  """
+  base = "https://raw.githubusercontent.com/mobius-os/app-social/main/"
+  old_manifest = _simple_manifest("common")
+  old_manifest.update({
+    "source_files": ["service.py"],
+    "service": {"entry": "service.py", "access": "public"},
+  })
+  new_manifest = _simple_manifest(
+    "social", version="2.0.0", previous_id="common",
+  )
+  new_manifest.update({
+    "package_id": "urn:uuid:33fae9ec-b2fb-4351-8a4e-85bcc362b546",
+    "source_files": ["service.py"],
+    "service": {
+      "id": "social", "entry": "service.py", "access": "public",
+      "aliases": ["common"],
+    },
+  })
+  new_index = JSX.replace("Hello", "Social")
+  service_source = b'import json, sys\njson.dump({"status": 200}, sys.stdout)\n'
+  responses = {
+    base + "mobius.json": (200, json.dumps(old_manifest).encode()),
+    base + "index.jsx": (200, JSX.encode()),
+    base + "service.py": (200, service_source),
+  }
+  with patch(
+    "app.install._derive_repo_ref", return_value=None,
+  ), patch(
+    "app.install.httpx.AsyncClient",
+    side_effect=_fake_async_client(responses),
+  ):
+    installed = client.post(
+      "/api/apps/install", headers=auth,
+      json={"manifest_url": base + "mobius.json"},
+    )
+  assert installed.status_code == 201, installed.text
+  app_id = installed.json()["id"]
+
+  src = Path(get_settings().data_dir) / "apps" / "common"
+  app_git._run(
+    src, "remote", "add", "origin",
+    "https://github.com/mobius-os/app-social.git",
+  )
+  (src / "index.jsx").write_text(new_index)
+  app_git._run(src, "add", "--", "index.jsx")
+  tree = app_git._run(src, "write-tree").stdout.strip()
+  unrelated_main = app_git._run(
+    src, "commit-tree", tree, "-m", "independent accepted source",
+  ).stdout.strip()
+  app_git._run(src, "update-ref", "refs/heads/main", unrelated_main)
+  app_git._run(src, "reset", "--hard", unrelated_main)
+
+  from app.database import SessionLocal
+  from app.models import App
+  db = SessionLocal()
+  try:
+    row = db.query(App).filter(App.id == app_id).one()
+    row.manifest_url = None
+    row.upstream_commit = None
+    db.commit()
+  finally:
+    db.close()
+
+  storage = Path(get_settings().data_dir) / "apps" / str(app_id) / "kept.json"
+  storage.parent.mkdir(parents=True, exist_ok=True)
+  storage.write_text('{"kept": true}')
+  updated_responses = {
+    base + "mobius.json": (200, json.dumps(new_manifest).encode()),
+    base + "index.jsx": (200, new_index.encode()),
+    base + "service.py": (200, service_source),
+    "https://api.github.com/repos/mobius-os/app-social": (
+      200,
+      json.dumps({
+        "id": 12345, "full_name": "mobius-os/app-social",
+      }).encode(),
+    ),
+  }
+  with patch(
+    "app.install._derive_repo_ref", return_value=None,
+  ), patch(
+    "app.install.httpx.AsyncClient",
+    side_effect=_fake_async_client(updated_responses),
+  ):
+    updated = client.post(
+      "/api/apps/install", headers=auth,
+      json={"manifest_url": base + "mobius.json"},
+    )
+
+  assert updated.status_code == 201, updated.text
+  assert updated.json()["mode"] == "update"
+  assert updated.json()["id"] == app_id
+  assert updated.json()["slug"] == "social"
+  assert updated.json()["service_id"] == "social"
+  assert not src.exists()
+  assert (
+    Path(get_settings().data_dir) / "apps" / "social" / "index.jsx"
+  ).read_text() == new_index
+  assert storage.read_text() == '{"kept": true}'
+  assert client.get("/api/app-services/social/status").status_code == 200
+  assert client.get("/api/app-services/common/status").status_code == 200
+
+
 def test_rename_restamps_identity_when_source_is_already_at_target(
   client, auth, db, bypass_url_validation,
 ):
@@ -5929,13 +6085,23 @@ def _check_responses(base, manifest, jsx, sources=None, job=b""):
   return responses
 
 
-def _update_check(client, headers, base, app_id, manifest, jsx, sources=None, job=b""):
+def _update_check(
+  client, headers, base, app_id, manifest, jsx, sources=None, job=b"",
+  candidate_manifest_url=None,
+):
   responses = _check_responses(base, manifest, jsx, sources=sources, job=job)
   with patch(
     "app.install.httpx.AsyncClient",
     side_effect=_fake_async_client(responses),
   ):
-    return client.get(f"/api/apps/{app_id}/update-check", headers=headers)
+    return client.get(
+      f"/api/apps/{app_id}/update-check",
+      headers=headers,
+      params=(
+        {"manifest_url": candidate_manifest_url}
+        if candidate_manifest_url else None
+      ),
+    )
 
 
 def test_update_check_unchanged_upstream_is_false(
@@ -5959,6 +6125,100 @@ def test_update_check_unchanged_upstream_is_false(
   assert payload["installed_source_revision"]
   assert len(payload["candidate_source_digest"]) == 64
   assert payload["checked_at"]
+
+
+def test_update_check_uses_identity_matched_live_candidate_for_pinned_install(
+  client, auth, bypass_url_validation,
+):
+  """A pinned provenance URL must not hide a newer catalog candidate."""
+  pinned_base = (
+    "https://raw.githubusercontent.com/mobius-os/app-pinned/"
+    "1111111111111111111111111111111111111111/"
+  )
+  live_base = (
+    "https://raw.githubusercontent.com/mobius-os/app-pinned/main/"
+  )
+  manifest_v1 = {**MANIFEST_NEWS, "id": "uc-pinned", "version": "1.0.0"}
+  installed = _install_v1(client, auth, pinned_base, manifest_v1, JSX)
+  assert installed.status_code == 201, installed.text
+
+  manifest_v2 = {**manifest_v1, "version": "2.0.0"}
+  response = _update_check(
+    client,
+    auth,
+    live_base,
+    installed.json()["id"],
+    manifest_v2,
+    JSX.replace("ok", "NEW RELEASE"),
+    candidate_manifest_url=live_base + "mobius.json",
+  )
+
+  assert response.status_code == 200, response.text
+  assert response.json()["update_available"] is True
+  assert response.json()["upstream_version"] == "2.0.0"
+
+
+def test_update_check_ignores_candidate_from_different_package(
+  client, auth, bypass_url_validation,
+):
+  pinned_base = (
+    "https://raw.githubusercontent.com/mobius-os/app-pinned/"
+    "1111111111111111111111111111111111111111/"
+  )
+  other_base = "https://raw.githubusercontent.com/mobius-os/app-other/main/"
+  manifest = {**MANIFEST_NEWS, "id": "uc-pinned"}
+  installed = _install_v1(client, auth, pinned_base, manifest, JSX)
+  assert installed.status_code == 201, installed.text
+
+  response = _update_check(
+    client,
+    auth,
+    other_base,
+    installed.json()["id"],
+    manifest,
+    JSX,
+    candidate_manifest_url=other_base + "mobius.json",
+  )
+
+  assert response.status_code == 200, response.text
+  assert response.json()["update_available"] is None
+  assert response.json()["upstream_version"] is None
+
+
+def test_update_check_degrades_cross_owner_predecessor_to_unknown(
+  client, auth, bypass_url_validation,
+):
+  pinned_base = (
+    "https://raw.githubusercontent.com/mobius-os/app-pinned/"
+    "1111111111111111111111111111111111111111/"
+  )
+  live_base = "https://raw.githubusercontent.com/mobius-os/app-renamed/main/"
+  manifest = {**MANIFEST_NEWS, "id": "uc-pinned"}
+  installed = _install_v1(client, auth, pinned_base, manifest, JSX)
+  assert installed.status_code == 201, installed.text
+
+  candidate = {
+    **manifest,
+    "id": "uc-renamed",
+    "previous_id": "uc-pinned",
+    "previous_manifest_url": (
+      "https://raw.githubusercontent.com/other-owner/app-pinned/"
+      "main/mobius.json"
+    ),
+  }
+  response = _update_check(
+    client,
+    auth,
+    live_base,
+    installed.json()["id"],
+    candidate,
+    JSX,
+    candidate_manifest_url=live_base + "mobius.json",
+  )
+
+  assert response.status_code == 200, response.text
+  assert response.json()["update_available"] is None
+  assert response.json()["upstream_version"] is None
 
 
 def test_update_check_final_fence_preserves_concurrent_pending_conflict(
@@ -5986,7 +6246,7 @@ def test_update_check_final_fence_preserves_concurrent_pending_conflict(
   upstream_v2 = JSX_MULTI.replace("ORIGINAL TITLE", "UPSTREAM TITLE")
   manifest_v2 = {**manifest_v1, "version": "2.0.0"}
 
-  async def advance_during_fetch(_manifest_url):
+  async def advance_during_fetch(_manifest_url, *, strict=True):
     current_upstream = app_git.record_upstream(
       repo,
       {"index.jsx": upstream_v2.encode()},
@@ -6020,6 +6280,135 @@ def test_update_check_final_fence_preserves_concurrent_pending_conflict(
   assert payload["pending_update_state"] == "needs_resolution"
   assert payload["needs_resolution"] is True
   assert payload["upstream_version"] == "2.0.0"
+
+
+def test_update_check_ignores_invalid_preview_metadata_but_install_rejects_it(
+  client, auth, bypass_url_validation,
+):
+  """Unused preview metadata cannot hide source changes or permit installs."""
+  base = "https://uc-nit.test/repo/"
+  m = {**MANIFEST_NEWS, "id": "uc-nit"}
+  r1 = _install_v1(client, auth, base, m, JSX)
+  assert r1.status_code == 201, r1.text
+  app_id = r1.json()["id"]
+
+  # Upstream now carries a project-template preview with no source/builder.
+  # This fails the full manifest contract but is otherwise fetch-shaped.
+  bad_preview_manifest = {
+    **m,
+    "project_templates": [{
+      "id": "doc",
+      "name": "Doc",
+      "previews": [{"id": "p", "name": "Preview"}],
+    }],
+  }
+  # Same-bytes entry → a real False, never a null degrade.
+  same = _update_check(client, auth, base, app_id, bad_preview_manifest, JSX)
+  assert same.status_code == 200, same.text
+  assert same.json()["update_available"] is False
+  assert same.json()["upstream_version"] == "1.0.0"
+
+  # Changed entry → a real True; the comparison ran despite the manifest nit.
+  changed = _update_check(
+    client, auth, base, app_id, bad_preview_manifest, JSX.replace("ok", "NEW"),
+  )
+  assert changed.status_code == 200, changed.text
+  assert changed.json()["update_available"] is True
+
+  responses = _check_responses(base, bad_preview_manifest, JSX)
+  with patch(
+    "app.install.httpx.AsyncClient",
+    side_effect=_fake_async_client(responses),
+  ):
+    preview = client.get(
+      f"/api/apps/{app_id}/update-candidate-preview", headers=auth,
+    )
+    install = client.post("/api/apps/install", headers=auth, json={
+      "manifest_url": base + "mobius.json",
+    })
+  assert preview.status_code == 400, preview.text
+  assert install.status_code == 400, install.text
+  assert "previews[0].source" in preview.json()["detail"]
+  assert "previews[0].source" in install.json()["detail"]
+
+
+@pytest.mark.parametrize("invalid", [
+  None, [], "manifest", 1,
+  {"id": None}, {"id": []}, {"version": {}},
+  {"entry": "other.jsx"}, {"entry": "../index.jsx"},
+  {"source_files": "utils.js"}, {"source_files": [None]},
+  {"source_files": ["https://other.test/utils.js"]},
+  {"source_files": ["../utils.js"]},
+  {"source_files": ["%2e%2e/utils.js"]},
+  {"source_files": ["lib%2futils.js"]},
+  {"source_files": ["index.jsx"]},
+  {"source_files": [".gitignore"]},
+  {"source_files": ["static/private.js"]},
+  {"source_files": ["utils.js"] * 51},
+  {"source_files": ["job.py"], "schedule": {"job": "job.py"}},
+  {"schedule": []}, {"schedule": {"job": []}},
+  {"schedule": {"job": "../job.py"}},
+  {"previous_id": []}, {"previous_manifest_url": []},
+  {"previous_id": "old-id", "previous_manifest_url": "http://other.test/"},
+  {"package_id": {}}, {"moved_to": {}},
+])
+def test_discovery_rejects_malformed_identity_and_source_before_fetch(invalid):
+  from fastapi import HTTPException
+  from app import install
+
+  manifest = {**MANIFEST_NEWS, **invalid} if isinstance(invalid, dict) else invalid
+  manifest_url = "https://invalid.test/mobius.json"
+  fetch = AsyncMock(return_value=json.dumps(manifest).encode())
+  with patch("app.install._http_get", fetch):
+    with pytest.raises(HTTPException) as exc:
+      asyncio.run(install.fetch_upstream_source(manifest_url, strict=False))
+  assert exc.value.status_code == 400
+  assert fetch.await_count == 1
+  assert fetch.await_args.args[1] == manifest_url
+
+
+@pytest.mark.parametrize("invalid", [
+  [], {"id": None}, {"version": {}}, {"source_files": ["../private.js"]},
+  {"previous_id": "old-id", "previous_manifest_url": []},
+])
+def test_update_check_malformed_candidate_degrades_to_unknown(
+  client, auth, bypass_url_validation, invalid,
+):
+  base = "https://invalid-candidate.test/repo/"
+  manifest = {**MANIFEST_NEWS, "id": "uc-malformed"}
+  installed = _install_v1(client, auth, base, manifest, JSX)
+  assert installed.status_code == 201, installed.text
+  candidate = {**manifest, **invalid} if isinstance(invalid, dict) else invalid
+  fetch = AsyncMock(return_value=json.dumps(candidate).encode())
+  with patch("app.install._http_get", fetch):
+    response = client.get(
+      f"/api/apps/{installed.json()['id']}/update-check",
+      headers=auth,
+      params={"manifest_url": base + "mobius.json"},
+    )
+  assert response.status_code == 200, response.text
+  assert response.json()["update_available"] is None
+  assert response.json()["upstream_version"] is None
+  assert fetch.await_count == 1
+
+
+def test_discovery_retains_source_byte_budget(bypass_url_validation, monkeypatch):
+  from fastapi import HTTPException
+  from app import install
+
+  base = "https://source-budget.test/"
+  manifest = {**MANIFEST_NEWS, "source_files": ["one.js", "two.js"]}
+  responses = _check_responses(
+    base, manifest, JSX, sources={"one.js": b"123", "two.js": b"456"},
+  )
+  monkeypatch.setattr(install, "_SOURCE_FILES_TOTAL_MAX", 5)
+  with patch(
+    "app.install.httpx.AsyncClient", side_effect=_fake_async_client(responses),
+  ):
+    with pytest.raises(HTTPException) as exc:
+      asyncio.run(install.fetch_upstream_source(base + "mobius.json", strict=False))
+  assert exc.value.status_code == 400
+  assert "source_files exceed" in exc.value.detail
 
 
 def test_update_check_changed_file_is_true(
@@ -6201,7 +6590,7 @@ def test_update_check_releases_db_connection_before_remote_fetch(
 
   baseline = checked_out_connections()
 
-  async def _slow_remote_fetch(_url):
+  async def _slow_remote_fetch(_url, *, strict=True):
     assert checked_out_connections() <= baseline, (
       "update-check kept its request DB connection checked out while "
       "starting remote work"

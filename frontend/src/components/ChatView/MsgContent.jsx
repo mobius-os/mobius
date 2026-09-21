@@ -5,6 +5,7 @@ import { ProgressiveMarkdown, StandardMarkdown } from './markdown/BlockRenderer.
 import ActivityStretch from './ActivityStretch.jsx'
 import { groupActivityRuns, coalesceThinkingEntries } from './groupBlocks.js'
 import QuestionCard from './QuestionCard.jsx'
+import { isDurableRestartOffer } from './restartCard.js'
 import SecureInputCard from './SecureInputCard.jsx'
 import MessageSources from './MessageSources.jsx'
 import Attachments from './Attachments.jsx'
@@ -30,25 +31,29 @@ import WaitHistoryCard from './WaitHistoryCard.jsx'
 import HelperResultCard from './HelperResultCard.jsx'
 
 
-// Answerability is purely a function of the block + its position + live hint.
+// Answerability is a function of the block + its position + live hint, except
+// for a durable Restart offer: once shown, that exact button stays actionable
+// until it is pressed even if the chat later moves on.
 // Computing it here (rather than passing an arrow from ChatView's render loop)
 // lets React.memo skip re-renders for non-last messages on every streaming
 // tick — the only message that changes during streaming is the streaming <li>
 // itself, not the static history above it.
 function blockAnswerable(block, { msg, isLastMsg, liveQuestionId, onQuestionAnswer }) {
-  // Answerable iff this block IS the chat's durable open question
+  // Ordinary questions are answerable iff this block IS the chat's durable open question
   // (liveQuestionId = pending_question_id) and still unanswered — matched by id,
   // not by block position, so a card trailed by parallel output or a terminal
   // error stays answerable. liveQuestionId clears when the question is answered
   // or the turn ends, so nothing is answerable once it's null.
+  const durableRestart = isDurableRestartOffer(block?.platform_action)
   return !!(
     onQuestionAnswer
     && msg.role === 'assistant'
     && block?.type === 'question'
-    && isLastMsg
     && !block.answers
-    && liveQuestionId
-    && block.question_id === liveQuestionId
+    && (
+      durableRestart
+      || (isLastMsg && liveQuestionId && block.question_id === liveQuestionId)
+    )
   )
 }
 
@@ -121,6 +126,7 @@ function MsgContentInner({
   autoResumeError,
   onAutoResumeChange,
   limitResetElapsed = false,
+  recoveryCredit = null,
   submissionBlocked = false,
   // isLastMsg + liveQuestionId are primitive props so memo can do a stable
   // shallow comparison; an inline isQuestionAnswerable arrow would hand memo a
@@ -434,23 +440,24 @@ function MsgContentInner({
           canResume: !!onResume,
           questionOwnsTurn,
         })
-        const { parked, resourceWait } = errorCardViewModel(block)
+        const { parked, resourceWait, modelCapacity } = errorCardViewModel(block)
         const automaticContinuation = recoveryOwner && parked && !!autoResumeEnabled
         // A resource wait owns its automatic retry. Offering Resume while the
         // same measured pressure remains only launches a turn admission will
         // re-park, so it is a false action rather than useful recovery.
         // Auto-continue schedules the next attempt; it does not remove the
         // owner's explicit retry after adding credits or changing providers.
-        const manualResumeAvailable = recoveryOwner && !resourceWait
+        const manualResumeAvailable = recoveryOwner && !resourceWait && !modelCapacity
         return (
           <ErrorCard
             key={assistantBlockKey(block, i)}
             block={block}
             autoResume={automaticContinuation}
             resetElapsed={!!limitResetElapsed}
+            recoveryCredit={recoveryCredit}
             cardRef={recoveryOwner ? resumeCardRef : undefined}
           >
-            {recoveryOwner && parked && autoResumeAvailable && onAutoResumeChange && (
+            {recoveryOwner && parked && !modelCapacity && autoResumeAvailable && onAutoResumeChange && (
               <div className="chat__recovery-actions">
                 <button
                   type="button"
@@ -487,7 +494,7 @@ function MsgContentInner({
                   : undefined}
               >
                 {resumeState?.pending ? 'Resuming…' : resumeState?.unavailable ? 'Reconnecting…' : parked
-                  ? limitResetElapsed ? 'Continue now' : 'Try now'
+                  ? limitResetElapsed ? 'Continue now' : (recoveryCredit?.actionLabel || 'Try now')
                   : 'Resume'}
               </button>
             )}
@@ -621,6 +628,7 @@ export default memo(MsgContentInner, (prev, next) => {
     && prev.autoResumeError === next.autoResumeError
     && prev.onAutoResumeChange === next.onAutoResumeChange
     && prev.limitResetElapsed === next.limitResetElapsed
+    && prev.recoveryCredit === next.recoveryCredit
     && prev.submissionBlocked === next.submissionBlocked
     && prev.isLastMsg === next.isLastMsg
     && prev.liveQuestionId === next.liveQuestionId

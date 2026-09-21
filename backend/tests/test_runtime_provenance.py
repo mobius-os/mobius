@@ -1,8 +1,24 @@
 """Protected image-runtime parity is explicit and fail closed."""
 
+import importlib.util
 from pathlib import Path
 
 from app import runtime_provenance as provenance
+
+
+LAUNCHER_PATH = (
+  Path(__file__).parents[1] / "runtime" / "served_runtime_launcher.py"
+)
+
+
+def _launcher():
+  spec = importlib.util.spec_from_file_location(
+    "runtime_provenance_launcher_contract", LAUNCHER_PATH,
+  )
+  assert spec and spec.loader
+  module = importlib.util.module_from_spec(spec)
+  spec.loader.exec_module(module)
+  return module
 
 
 def _write(root: Path, relative: str, content: bytes = b"same") -> None:
@@ -96,6 +112,72 @@ def test_served_runtime_module_is_excluded_from_parity(tmp_path):
   assert status["state"] == "current"
   assert status["mismatched_paths"] == []
   assert provenance.activation_paths(status) == []
+
+
+def _broker(epoch: object) -> bytes:
+  return f"BROKER_ROUTE_EPOCH = {epoch}\n".encode("utf-8")
+
+
+def test_served_runtime_diagnostics_match_the_frozen_launcher_contract(tmp_path):
+  """Diagnostics must mirror the standalone launcher's module and epoch rules.
+
+  The frozen launcher deliberately cannot import app code, so this test owns
+  the otherwise duplicated constants and prevents either side drifting alone.
+  """
+  launcher = _launcher()
+  assert provenance.SERVED_RUNTIME_MODULES == tuple(
+    f"{name}.py" for name in launcher.SERVED_MODULES
+  )
+
+  module = tmp_path / "identity_broker.py"
+  for source in (_broker(2), _broker("'two'"), b"VALUE = 'missing'\n"):
+    module.write_bytes(source)
+    assert provenance._module_route_epoch(module) == launcher._route_epoch(source)
+
+
+def test_served_runtime_status_reports_behind_when_served_epoch_is_lower(tmp_path):
+  source = tmp_path / "source"
+  image = tmp_path / "image"
+  _write(source, "identity_broker.py", _broker(1))
+  _write(image, "identity_broker.py", _broker(2))
+
+  status = provenance.served_runtime_status(source, image)
+
+  assert status == [{
+    "module": "identity_broker.py",
+    "state": "behind",
+    "served_epoch": 1,
+    "image_epoch": 2,
+  }]
+
+
+def test_served_runtime_status_is_current_when_served_epoch_is_at_least_image(
+  tmp_path,
+):
+  source = tmp_path / "source"
+  image = tmp_path / "image"
+  _write(source, "identity_broker.py", _broker(2))
+  _write(image, "identity_broker.py", _broker(2))
+  assert provenance.served_runtime_status(source, image)[0]["state"] == "current"
+
+  _write(source, "identity_broker.py", _broker(3))
+  ahead = provenance.served_runtime_status(source, image)[0]
+  assert ahead["state"] == "current"
+  assert ahead["served_epoch"] == 3
+
+
+def test_served_runtime_status_is_unavailable_when_image_epoch_is_unreadable(
+  tmp_path,
+):
+  source = tmp_path / "source"
+  image = tmp_path / "image"
+  _write(source, "identity_broker.py", _broker(2))
+  image.mkdir()
+
+  status = provenance.served_runtime_status(source, image)[0]
+
+  assert status["state"] == "unavailable"
+  assert status["image_epoch"] is None
 
 
 def test_image_owned_runtime_mismatch_still_reports_stale(tmp_path):

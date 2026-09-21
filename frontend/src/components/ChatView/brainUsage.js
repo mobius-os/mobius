@@ -45,7 +45,18 @@ export function modelContextTokenCounts(registry, provider, model) {
   return { used: 0, maximum: Math.round(maximum) }
 }
 
-export function resolvedContextTokenCounts(snapshot, registry, provider, model) {
+export function resolvedContextTokenCounts(
+  snapshot,
+  registry,
+  provider,
+  model,
+  { noSession = false } = {},
+) {
+  // A chat that has never started a provider session has no server snapshot
+  // at all: the usage query stays disabled until a session exists. Before the
+  // first turn the registry is the only honest source for the ceiling, and
+  // the used count is genuinely zero.
+  if (noSession) return modelContextTokenCounts(registry, provider, model)
   if (!snapshot || snapshot.provider !== provider) return null
   const live = contextTokenCounts(snapshot)
   if (live !== null) return live

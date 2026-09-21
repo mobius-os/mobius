@@ -6,6 +6,7 @@ import {
   providerAllowance,
   providerAllowanceSummary,
 } from '../../components/SettingsView/providerUsage.js'
+import { providerExtraUsage } from '../../components/SettingsView/providerUsage.js'
 
 
 test('plan providers follow typed weekly meaning, not display labels or other limits', () => {
@@ -26,6 +27,20 @@ test('plan providers follow typed weekly meaning, not display labels or other li
     kind: 'weekly',
     label: 'Weekly usage',
     usedPercent: null,
+    expiresAt: null,
+  })
+})
+
+test('Codex names its 10,080-minute allowance as a 7-day window', () => {
+  assert.deepEqual(providerAllowance('codex', {
+    state: 'ready',
+    windows: [
+      { kind: 'weekly', label: '7-day', used_percent: 12 },
+    ],
+  }), {
+    kind: 'weekly',
+    label: '7-day usage',
+    usedPercent: 12,
     expiresAt: null,
   })
 })
@@ -91,4 +106,29 @@ test('banked reset count preserves an explicit zero while rejecting missing data
   })
   assert.deepEqual(bankedResetCredits({}), { availableCount: 0, credits: [] })
   assert.equal(bankedResetCredits(null), null)
+})
+
+
+test('enabled paid extra usage reports its separate percentage', () => {
+  assert.deepEqual(providerExtraUsage({
+    extra_usage: { enabled: true, used_percent: 37.5 },
+  }), {
+    label: 'Extra usage',
+    usedPercent: 37.5,
+    summary: '37.5% extra usage used',
+  })
+  assert.equal(providerExtraUsage({
+    extra_usage: { enabled: false, used_percent: 0 },
+  }), null)
+})
+
+
+test('enabled extra usage keeps a missing percentage unknown', () => {
+  assert.deepEqual(providerExtraUsage({
+    extra_usage: { enabled: true, available: null, used_percent: null },
+  }), {
+    label: 'Extra usage',
+    usedPercent: null,
+    summary: 'Extra usage enabled',
+  })
 })

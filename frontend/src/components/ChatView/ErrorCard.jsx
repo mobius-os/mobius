@@ -23,6 +23,8 @@ import { isResourcePause } from './waitingPresentation.js'
 // reads as "Waiting" and never offers the auto-continue toggle.
 export function errorCardViewModel(block) {
   const resourceWait = isResourcePause(block)
+  const modelCapacity = block.pause?.kind === 'model_capacity'
+  const modelCapacityExhausted = block.pause?.kind === 'model_capacity_exhausted'
   const parked = !!block.pause?.resets_at && !resourceWait
   // Old saved handoff notes lacked the pause descriptor. Recognize only
   // that exact producer's prefix; unrelated resumable errors remain errors.
@@ -34,11 +36,13 @@ export function errorCardViewModel(block) {
   const benign = !!block.pause || goalHandoff
   return {
     parked,
+    modelCapacity,
+    modelCapacityExhausted,
     resourceWait,
     goalHandoff,
     benign,
     className: `chat__text--error${benign ? ' chat__text--parked' : ''}`,
-    label: goalHandoff ? 'Goal paused' : parked ? 'Rate limit' : (resourceWait ? 'Waiting' : (block.pause ? 'Paused' : 'Error')),
+    label: goalHandoff ? 'Goal paused' : modelCapacityExhausted ? 'Model still busy' : modelCapacity ? 'Model busy' : parked ? 'Rate limit' : (resourceWait ? 'Waiting' : (block.pause ? 'Paused' : 'Error')),
     resetLabel: parked ? formatResetTime(block.pause.resets_at) : null,
   }
 }
@@ -51,23 +55,30 @@ export default function ErrorCard({
   block,
   autoResume = false,
   resetElapsed = false,
+  recoveryCredit = null,
   cardRef,
   children,
 }) {
   const vm = errorCardViewModel(block)
-  const recoveryTitle = vm.parked
+  const recoveryTitle = vm.modelCapacity
+    ? (vm.resetLabel ? `Trying again ${vm.resetLabel}` : 'Trying again shortly')
+    : vm.parked
     ? autoResume
       ? (vm.resetLabel ? `Queued to continue ${vm.resetLabel}` : 'Queued to continue')
       : resetElapsed
         ? 'Usage is available again'
         : (vm.resetLabel ? `Usage resets ${vm.resetLabel}` : 'Usage limit reached')
     : null
-  const recoveryCopy = vm.parked
+  const recoveryCopy = vm.modelCapacity
+    ? 'Your work is safe. Möbius will retry with increasing pauses, up to five times. If the model stays busy, you can choose another model and Resume.'
+    : vm.parked
     ? autoResume
-      ? 'Your work is safe. Möbius will continue automatically at the reset. Added credits or reset usage? You can try now.'
+      ? `Your work is safe. ${recoveryCredit?.label ? `${recoveryCredit.label}. ` : ''}Möbius will continue automatically at the reset.`
       : resetElapsed
         ? 'Your work is safe. Continue when you’re ready.'
-        : 'Your work is safe. Turn on auto-continue, or try now after adding credits or resetting usage.'
+        : recoveryCredit?.label
+          ? `Your work is safe. ${recoveryCredit.label}. Continuing now may use it.`
+          : 'Your work is safe. Turn on auto-continue, or try again after usage resets.'
     : null
   return (
     <div className={vm.className} ref={cardRef}>
@@ -109,7 +120,9 @@ export default function ErrorCard({
               {vm.label}
             </div>
             <div className="chat__recovery-copy">
-              {vm.goalHandoff
+              {vm.modelCapacityExhausted
+                ? 'Five automatic retries were used. Choose another model, then Resume to continue your saved work.'
+                : vm.goalHandoff
                 ? 'The agent stopped before arranging the next step. Your progress is saved. Resume to continue this Goal.'
                 : block.pause?.kind === 'restart'
                 ? block.resumable
