@@ -1077,6 +1077,23 @@ export default function ChatView({
   // so any in-flight fetchMessages can't resurrect cleared data.
   const fetchGenRef = useRef(0)
 
+  // Every authoritative runtime read owns the same transport decision. This
+  // includes chat activation after hidden work finishes: that path can inherit
+  // a terminal connection error from the retained hidden pane even though the
+  // newly read runtime is already settled.
+  const retireUnownedRuntimeStream = useCallback((runtime) => {
+    const localStartInFlight =
+      localStartRequestRef.current?.chatId === String(chatId)
+    if (shouldRetireStreamForRuntime({
+      runtimeRunning: runtime.running,
+      pendingQuestionId: runtime.pendingQuestionId,
+      stopInFlight: handlingStopRef.current,
+      localStartInFlight,
+    })) {
+      retireSettledStreamRef.current?.()
+    }
+  }, [chatId])
+
   // Pagination flag — one compact page at a time. Scroll authority remains in
   // useScrollMode, including while this network request is in flight.
   const loadingOlder = useRef(false)
@@ -1463,21 +1480,7 @@ export default function ChatView({
       // Stream retirement and the authoritative replacement must be one
       // commit, not two paints separated by the detail request.
       onReconciled?.(runtime)
-      const localStartInFlight =
-        localStartRequestRef.current?.chatId === String(chatId)
-      // This committed detail projection is the owner of whether an SSE
-      // transport is due. A completed run and a parked owner question both
-      // have no stream to attach; retire any failed transport even when its
-      // error path already set isStreaming false. Keep a local Start/Stop
-      // transition authoritative until its own response crosses the boundary.
-      if (shouldRetireStreamForRuntime({
-        runtimeRunning: runtime.running,
-        pendingQuestionId: runtime.pendingQuestionId,
-        stopInFlight: handlingStopRef.current,
-        localStartInFlight,
-      })) {
-        retireSettledStreamRef.current?.()
-      }
+      retireUnownedRuntimeStream(runtime)
       return runtime
     } catch {
       void reconcileFailedSendOutbox({
@@ -1502,6 +1505,7 @@ export default function ChatView({
     reconcileFailedSendOutbox,
     commitRuntimeSnapshot,
     inspectRuntimeSnapshot,
+    retireUnownedRuntimeStream,
     setActiveAssistantMessageId,
     setGoalPresentationLocalState,
   ])
@@ -2521,6 +2525,10 @@ export default function ChatView({
       setLoading(false)
       setActivationSettled(true)
       pendingQueue.hydrate(runtime.pending_messages || [])
+      retireUnownedRuntimeStream({
+        running,
+        pendingQuestionId: runtime.pending_question_id,
+      })
       if (running) {
         setSending(true)
         if (attachesToStream) {
@@ -2839,6 +2847,7 @@ export default function ChatView({
     inspectRuntimeSnapshot,
     onRuntimeSettledIdle,
     reconcileFailedSendOutbox,
+    retireUnownedRuntimeStream,
     setActiveAssistantMessageId,
     setGoalPresentationLocalState,
   ])
