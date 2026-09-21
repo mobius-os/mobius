@@ -131,9 +131,10 @@ function finishEntry(entry) {
   const path = status === 'D'
     ? (entry.oldPath || entry.newPath || '')
     : (entry.newPath || entry.oldPath || '')
-  // insertions/deletions mirror the app-update review's parseUpdateDiff summary
-  // counts (0 for a binary file), so the app surface can adopt this parser
-  // wholesale when the two review UIs converge into shared library code.
+  // insertions/deletions mirror the platform-update review's summarizePreview()
+  // counts (see lib/platformUpdatePreview.js; 0 for a binary file) — the two
+  // review surfaces remain separate implementations for now, but could still
+  // converge into shared library code later.
   let insertions = 0
   let deletions = 0
   for (const hunk of entry.hunks) {

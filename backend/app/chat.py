@@ -316,7 +316,7 @@ def _parked_until_for_chat(
   counts, and only while it still reads ``status`` as ``parked`` or
   ``resume_pending``. A fresh turn
   on a previously-parked chat inserts a newer "running" row (and StartTurn /
-  PromotePending close the stale park via `_close_running_runs`), so an
+  PromotePending close the stale park via `_close_nonterminal_runs`), so an
   orphaned park can never suppress recovery for the NEW live turn. Query
   failures read as not-parked — recovery checks must never crash on this
   probe.

@@ -329,11 +329,12 @@ function findUserIndexByCid(messages, cid) {
   return -1
 }
 
-// Exported so sibling components (Shell, etc.) can clean up drafts when a
-// chat is deleted.  Shell owns the deletion flow; it should call this after
-// the chat row is removed from the list.
-// NOTE: if deletion ever moves inside ChatView's own scope, call this inline
-// instead of leaving the orphaned key behind.
+// Exported for sibling components (Shell, etc.) to clean up drafts when a
+// chat is deleted. Shell's actual deletion flow currently only calls
+// `clearComposerDraft` directly (Shell.jsx) rather than this helper, so the
+// failed-send-attempt and question-draft keys it also clears are not wired
+// into deletion today — call this instead of the narrower clear if that gap
+// is closed.
 export function deleteChatDraft(chatId) {
   clearComposerDraft(chatId)
   clearFailedSendAttempt(chatId)
