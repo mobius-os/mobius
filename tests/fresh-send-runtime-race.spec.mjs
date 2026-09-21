@@ -104,12 +104,21 @@ test('an idle runtime snapshot cannot retire an unacknowledged fresh send', asyn
     })
   })
 
+  const readinessProbed = page.waitForResponse(/\/api\/ready$/)
   await page.goto(`${BASE}/shell/?chat=${encodeURIComponent(chat.id)}`, {
     waitUntil: 'domcontentloaded',
   })
   const surface = page.locator('[data-chat-surface="painted"]')
   const input = surface.getByRole('textbox', { name: 'Message Möbius…' })
   await expect(input).toBeVisible()
+  // Wait for the mocked probe AND let React commit the resulting
+  // deliveryReady=true state before sending -- otherwise doSend can still
+  // observe the pre-ready snapshot and take the queued path instead of the
+  // fresh-send path this test depends on, even with /api/ready mocked above.
+  await readinessProbed
+  await page.evaluate(() => new Promise(resolve => (
+    requestAnimationFrame(() => requestAnimationFrame(resolve))
+  )))
 
   await input.fill('Fresh send held before acknowledgement')
   raceArmed = true
