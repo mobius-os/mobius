@@ -38,6 +38,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
+from app import generated_files
 from app.codex_sdk_contract import (
   app_server_pid,
   control_client,
@@ -1624,6 +1625,14 @@ async def _run_codex_sdk_turn(
   turn = None
   active_turn: ActiveCodexTurn | None = None
   current_session_id = session_id
+  # Baseline for the generated-file directory diff (see generated_files.py
+  # and the ItemCompletedNotification branch below). Captured eagerly here,
+  # before any item of this turn can complete — unlike the Claude runner
+  # (which lazily captures its baseline on PreToolUse, a hook Codex's
+  # notification stream has no equivalent of), there is no cheap
+  # "about to run a tool" moment to hang a lazy capture off here, so this
+  # pays for one directory scan per turn even when nothing gets written.
+  _fs_snapshot: generated_files.Snapshot = generated_files.snapshot(cwd)
   completed_turn: Any | None = None
   completed_message_phases: list[str | None] = []
   # Codex can abandon an in-progress AgentMessage and immediately start a
@@ -2153,6 +2162,29 @@ async def _run_codex_sdk_turn(
             for event in _tool_completed_events(item, sdk):
               _stamp_tool_use_id(event, item)
               bc.publish(event)
+          if isinstance(
+            item,
+            (sdk["CommandExecutionThreadItem"], sdk["FileChangeThreadItem"]),
+          ):
+            # A completed Bash-equivalent or file-patch item is the only place
+            # a new deliverable (most often a PDF, produced by a run script
+            # rather than any file-editing tool) can appear. See
+            # generated_files.py and claude_sdk_runner.py's generated_file_hook
+            # for the identical Claude-side detection this mirrors.
+            try:
+              after = generated_files.snapshot(cwd)
+              tool_use_id = str(getattr(item, "id", None) or "") or None
+              for entry in generated_files.diff_new_or_changed(
+                _fs_snapshot, after,
+              ):
+                bc.publish({
+                  "type": "generated_file",
+                  **({"tool_use_id": tool_use_id} if tool_use_id else {}),
+                  **entry,
+                })
+              _fs_snapshot = after
+            except Exception:
+              log.debug("generated_file detection failed", exc_info=True)
           # Also record child links here (idempotent) in case receiver_thread_ids
           # only populates on completion — a missed link silently loses the
           # attribution this recording exists to provide.

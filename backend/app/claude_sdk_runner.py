@@ -85,7 +85,7 @@ from claude_agent_sdk.types import (
   UserMessage,
 )
 
-from app import activity
+from app import activity, generated_files
 from app.claude_events import (
   NativeContinuationTracker,
   _clip_task_text,
@@ -1091,6 +1091,9 @@ async def run_claude_sdk_turn(
   """
   current_session_id = session_id
   cost_usd: float | None = None
+  # Lazily populated by keepalive_hook before the turn's first tool call (see
+  # below) so a turn with no tool calls never pays for a directory scan.
+  _fs_snapshot: generated_files.Snapshot | None = None
   # Progress lease: renewed as this turn emits SDK messages so a stalled model
   # stream (alive process, no progress) lapses and recovery can reclaim it.
   lease = ProgressLease(chat_id)
@@ -1209,6 +1212,20 @@ async def run_claude_sdk_turn(
     context: dict[str, Any],
   ) -> dict[str, Any]:
     del hook_input, tool_use_id, context
+    # Piggybacks the turn's lazy fs-baseline capture here (before ANY tool
+    # of the turn runs, not just the first mutating one) so
+    # generated_file_hook's later diff has something correct to compare
+    # against — capturing it lazily inside PostToolUse instead would miss
+    # whatever the very first mutating call itself created. Lazy (not
+    # unconditional at turn start) so a turn with no tool calls never pays
+    # for a directory scan. Never blocks the tool on failure.
+    nonlocal _fs_snapshot
+    if _fs_snapshot is None:
+      try:
+        _fs_snapshot = generated_files.snapshot(cwd)
+      except Exception:
+        log.debug("generated_file baseline snapshot failed", exc_info=True)
+        _fs_snapshot = {}
     return {"continue_": True}
 
   # The Claude SDK fires PreCompact before it auto- or manually compacts the
@@ -1266,6 +1283,34 @@ async def run_claude_sdk_turn(
         "updatedToolOutput": new_response,
       },
     }
+
+  # Fires after Write/Edit/MultiEdit/Bash — the tools that can leave a new
+  # deliverable (most often a PDF, produced by a Bash-run script rather than
+  # Write) sitting in cwd. Diffs a lazily-captured cwd snapshot against a
+  # fresh scan and publishes one `generated_file` event per allowlisted
+  # new/changed file (see generated_files.py); chat_event_sink.py persists
+  # these onto Chat.generated_files the same way it persists tool_output.
+  # Detection failures must never block or fail the tool call itself.
+  async def generated_file_hook(
+    hook_input: dict[str, Any],
+    tool_use_id: str | None,
+    context: dict[str, Any],
+  ) -> dict[str, Any]:
+    del hook_input, context
+    nonlocal _fs_snapshot
+    try:
+      before = _fs_snapshot if _fs_snapshot is not None else {}
+      after = generated_files.snapshot(cwd)
+      for entry in generated_files.diff_new_or_changed(before, after):
+        bc.publish({
+          "type": "generated_file",
+          **({"tool_use_id": tool_use_id} if tool_use_id else {}),
+          **entry,
+        })
+      _fs_snapshot = after
+    except Exception:
+      log.debug("generated_file detection failed", exc_info=True)
+    return {"continue_": True}
 
   # Per-chat model/effort overrides flow in via `agent_settings`
   # (merged in chat.py from global defaults + Chat.agent_settings_json).
@@ -1350,6 +1395,10 @@ async def run_claude_sdk_turn(
         ],
         "PostToolUse": [
           HookMatcher(matcher="WebSearch", hooks=[websearch_sources_hook]),
+          HookMatcher(
+            matcher="Write|Edit|MultiEdit|Bash",
+            hooks=[generated_file_hook],
+          ),
         ],
         "PreCompact": [
           HookMatcher(matcher=None, hooks=[precompact_hook]),

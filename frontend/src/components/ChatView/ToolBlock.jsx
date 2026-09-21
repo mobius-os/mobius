@@ -29,6 +29,7 @@ import {
 import { useToolImagePreview } from './useToolImagePreview.js'
 import ToolEditPreview from './ToolEditPreview.jsx'
 import { toolEditPreview } from './toolEditPreview.js'
+import Attachments from './Attachments.jsx'
 
 // Render an already-formatted tool result (see toolResultFormat.js) so shell
 // output reads as a terminal (stdout / stderr / exit code) and a structured
@@ -496,6 +497,15 @@ function GenericToolBlock({ t, chatId, compact = false, disclosureKey }) {
         <div className="chat__tool-header chat__tool-header--static">
           {headerContent}
         </div>
+      )}
+      {Array.isArray(t.generated_files) && t.generated_files.length > 0 && (
+        // Visible without expanding the tool — a real download link the
+        // agent's own file-creation actually earned, not the bare-text
+        // "download it here" claim the model used to make on its own.
+        <Attachments
+          attachments={t.generated_files.map(f => ({ ...f, kind: 'generated' }))}
+          chatId={chatId}
+        />
       )}
       {hasDetail && (
         <div

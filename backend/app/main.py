@@ -92,7 +92,7 @@ from app.routes import (
   public_storage_router,
   secrets_router, self_reminders_router, settings_router, skills_router,
   client_error_router, client_signal_router, standalone_router, storage_router,
-  theme_router, uploads_router, platform_router,
+  theme_router, uploads_router, generated_files_router, platform_router,
   published_router,
   connect_router,
   projects_router,
@@ -916,6 +916,7 @@ app.include_router(contribution_relay_router)
 app.include_router(settings_router)
 app.include_router(platform_router)
 app.include_router(uploads_router)
+app.include_router(generated_files_router)
 app.include_router(media_router)
 app.include_router(secrets_router)
 app.include_router(github_router)

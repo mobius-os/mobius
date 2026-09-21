@@ -23,6 +23,7 @@ from app.chat_writer import (
   PersistTranscript,
   QuestionCommit,
   RecordAgentLifecycle,
+  RecordGeneratedFile,
   StashThinkingTrace,
   StashToolOutput,
   await_ack as _await_ack,
@@ -799,6 +800,33 @@ class ChatEventSink:
       )
     )
 
+  def _record_generated_file(self, event: dict) -> None:
+    """Fire-and-forget insert into `generated_files` for a detected download.
+
+    Submitted unconditionally (not gated on `_steering`, matching
+    `_stash_full_edit_diff`/`_stash_tool_output`) so a file detected during a
+    steer split is still recorded even though its owning tool's transcript
+    block may land in the next snapshot. The event still flows into
+    `process_event` afterwards to render the inline attachment chip; this
+    only handles the download route's separate, race-immune lookup table.
+    """
+    if not self.chat_id:
+      return
+    name = event.get("name")
+    path = event.get("path")
+    if not isinstance(name, str) or not name or not isinstance(path, str) or not path:
+      return
+    self._submit_fire_and_forget(
+      RecordGeneratedFile(
+        chat_id=self.chat_id,
+        tool_use_id=event.get("tool_use_id"),
+        name=name,
+        path=path,
+        size=event.get("size") or 0,
+        mime_type=event.get("mime_type") or "application/octet-stream",
+      )
+    )
+
   def record_lifecycle(self, event: dict) -> None:
     """Queue private lifecycle metadata without broadcasting it.
 
@@ -909,6 +937,8 @@ class ChatEventSink:
       self._stamp_peer_message(event)
     if event_type == "thinking":
       self._prepare_thinking_event(event)
+    if event_type == "generated_file":
+      self._record_generated_file(event)
 
     # The helper that creates a saved owner card is transport, not a second
     # user-visible action.  Mark only a successful, completed receipt whose

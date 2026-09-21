@@ -31,7 +31,9 @@ export default function Attachments({ attachments, chatId }) {
             <AttachImage
               key={i}
               src={tokenParam
-                ? `${BASE}/api/chats/${chatId}/uploads/${encodeURIComponent(img.name)}${tokenParam}`
+                ? `${BASE}/api/chats/${chatId}/${
+                    img.kind === 'generated' ? 'generated-files' : 'uploads'
+                  }/${encodeURIComponent(img.name)}${tokenParam}`
                 : ''}
               alt={img.name}
             />
@@ -42,7 +44,9 @@ export default function Attachments({ attachments, chatId }) {
         <a
           key={i}
           className="chat__attach-file"
-          href={`${BASE}/api/chats/${chatId}/uploads/${encodeURIComponent(f.name)}${tokenParam}`}
+          href={`${BASE}/api/chats/${chatId}/${
+            f.kind === 'generated' ? 'generated-files' : 'uploads'
+          }/${encodeURIComponent(f.name)}${tokenParam}`}
           target="_blank"
           rel="noopener noreferrer"
         >

@@ -351,3 +351,20 @@ def chat(db, owner_token):
   db.commit()
   db.refresh(c)
   return c
+
+
+@pytest.fixture
+def second_chat(db, owner_token):
+  """A second chat distinct from `chat`, for cross-chat isolation tests."""
+  import uuid
+  from app import models
+  c = models.Chat(
+    id=str(uuid.uuid4()),
+    title="Second test chat",
+    messages=[],
+    agent_settings_json={"model": "claude-opus-4-8"},
+  )
+  db.add(c)
+  db.commit()
+  db.refresh(c)
+  return c

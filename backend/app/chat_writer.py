@@ -416,6 +416,27 @@ class StashToolOutput(_Command):
 
 
 @dataclass
+class RecordGeneratedFile(_Command):
+  """Insert one detected agent-written deliverable into `generated_files`.
+
+  Unlike `StashToolOutput`'s upsert-by-tool_use_id, this is a plain insert:
+  one tool call can produce several files, and `name` (not `tool_use_id`) is
+  the row's identity within the chat — see the handler for the collision
+  suffixing that keeps `name` unique so the download route's by-name lookup
+  is unambiguous. Fire-and-forget like `StashToolOutput`: a dropped insert
+  just means that one file never got a download chip; it never fails the
+  turn that produced it.
+  """
+
+  chat_id: str = ""
+  tool_use_id: str | None = None
+  name: str = ""
+  path: str = ""
+  size: int = 0
+  mime_type: str = "application/octet-stream"
+
+
+@dataclass
 class StashThinkingTrace(_Command):
   """Upsert one deferred reasoning run without rewriting transcript JSON."""
 
@@ -1935,6 +1956,8 @@ class ChatWriterActor:
       return record_event(db, cmd.values)
     if isinstance(cmd, StashToolOutput):
       return self._stash_tool_output(db, cmd)
+    if isinstance(cmd, RecordGeneratedFile):
+      return self._record_generated_file(db, cmd)
     if isinstance(cmd, StashThinkingTrace):
       return self._stash_thinking_trace(db, cmd)
     if isinstance(cmd, MigrateChat):
@@ -2655,6 +2678,44 @@ class ChatWriterActor:
       row.output = cmd.output or ""
     if not _commit_or_rollback(db):
       raise _PersistFailed("StashToolOutput did not persist")
+    return True
+
+  def _record_generated_file(self, db, cmd: "RecordGeneratedFile") -> bool:
+    """Insert one detected deliverable, keeping `name` unique within the chat.
+
+    `name` (not path) is what the download route's URL and Attachments.jsx
+    key off, mirroring uploads.py's `_unique_name` — but checked against this
+    chat's existing `generated_files` rows instead of a directory listing,
+    since two different cwd subdirectories can produce the same basename
+    across a long conversation (e.g. `report.pdf` regenerated in a fresh
+    subfolder). Fire-and-forget: a dropped insert just means that one file
+    never became a clickable download; it must never fail the turn."""
+    if not cmd.chat_id or not cmd.name or not cmd.path:
+      return False
+    from app.models import GeneratedFile
+
+    existing_names = {
+      row.name for row in db.query(GeneratedFile.name).filter(
+        GeneratedFile.chat_id == cmd.chat_id,
+      ).all()
+    }
+    name = cmd.name
+    if name in existing_names:
+      stem, dot, suffix = cmd.name.partition(".")
+      i = 1
+      while name in existing_names:
+        name = f"{stem}_{i}{dot}{suffix}"
+        i += 1
+    db.add(GeneratedFile(
+      chat_id=cmd.chat_id,
+      tool_use_id=cmd.tool_use_id,
+      name=name,
+      path=cmd.path,
+      size=cmd.size,
+      mime_type=cmd.mime_type,
+    ))
+    if not _commit_or_rollback(db):
+      raise _PersistFailed("RecordGeneratedFile did not persist")
     return True
 
   def _stash_thinking_trace(self, db, cmd: "StashThinkingTrace") -> bool:
