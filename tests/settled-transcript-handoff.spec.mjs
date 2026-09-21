@@ -235,6 +235,36 @@ async function sampleNextSend(page, surface, text, settledAssistantTs) {
     requestAnimationFrame(sample)
   })
 
+  // KNOWN FAILURE (root-caused, not fixed here): the settled assistant row
+  // never picks up its durable `assistant-${ts}` key here -- confirmed via a
+  // debug log dumping every .chat__msg--assistant data-key at the timeout:
+  // it stays on its transient, index-based key (messageKey() in
+  // chatDetailCache.js falls back to `${role}-${index}` when a message has
+  // neither id/cid nor a ts, which the live-streamed row doesn't have until
+  // an authoritative fetch replaces it).
+  //
+  // The second send's own authoritative fetchMessages({force:true,
+  // authoritative:true}) call is what's supposed to perform that hand-off,
+  // but chatRuntimeState.js's serverSnapshotBehindLocal (called as
+  // ChatView.jsx's `staleSnapshot` gate) sees the second send's own fresh
+  // optimistic user row -- ts=Date.now(), not yet present in the mocked
+  // server's ts set -- and correctly (per its own unit-tested contract:
+  // "equal-length explicit optimistic row can outrank server snapshot" in
+  // serverSnapshotBehindLocal.test.js) treats the ENTIRE server snapshot as
+  // stale, so the whole authoritative merge is skipped -- not just the
+  // fresh row, but also the unrelated, already-settled first-turn history
+  // riding along in the same response.
+  //
+  // This is a genuine gap between two intentional, individually-correct
+  // contracts (protect a fresh unacknowledged send vs. hand off settled
+  // history), not a stale test: mergeRecentMessagesIntoLoadedWindow already
+  // has a preserveLocalSuffix mode for exactly this "sync historical
+  // content, keep the local tail" shape, but it's only ever invoked from the
+  // `preserveLocalTurn` branch, which is gated on `!authoritative` --
+  // authoritative fetches have no path that both trusts server history AND
+  // keeps a fresh local suffix. Fixing this touches fetchMessages' core
+  // merge logic (12+ call sites across ChatView.jsx), which deserves its
+  // own careful pass and full regression run, not a guess under this task.
   await page.keyboard.press('Enter')
   await page.waitForFunction(ts => {
     const rows = document.querySelectorAll(
