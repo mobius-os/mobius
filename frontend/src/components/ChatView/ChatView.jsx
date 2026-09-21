@@ -513,6 +513,13 @@ export default function ChatView({
   // runtime/detail verdict has arrived: otherwise an apparently idle cache can
   // be promoted before the server reports that its turn is still running.
   const [activationSettled, setActivationSettled] = useState(provisionalNewChat)
+  // Present the incoming chat's composer (with its interactive brain) as soon as
+  // a no-cache activation commits its loading frame, instead of holding the
+  // app→chat "Opening chat…" cover — and the surface's `inert` gate — until the
+  // full transcript settles. Safe because the transcript stays hidden until
+  // `revealed` (no stale content) and a no-cache open has no scroll position to
+  // restore. Send remains gated on `activationSettled`. See `displayReady`.
+  const [earlyRevealReady, setEarlyRevealReady] = useState(false)
   const acceptCachedReadingCoordinate = useCallback(() => {
     // The scroll owner has proved the exact nested part against committed DOM.
     setInitialEntryPhase(current => (
@@ -2408,6 +2415,7 @@ export default function ChatView({
     // without losing the pane's DOM identity.
     if (hidden || provisionalNewChat) return
     setActivationSettled(false)
+    setEarlyRevealReady(false)
     let cancelled = false
     const initialLoadController = new AbortController()
     const queryKey = chatMessagesQueryKey(chatId)
@@ -2460,6 +2468,11 @@ export default function ChatView({
         ? current
         : activationEntryPhase
     ))
+    // No cached transcript to restore and not a search jump: nothing stale can
+    // paint (the transcript is hidden until `revealed`) and there is no reader
+    // coordinate to preserve, so present the incoming chat immediately — the
+    // brain becomes interactive without waiting for the runtime handshake.
+    setEarlyRevealReady(activationCacheEntryState === 'missing' && !searchActivation)
 
     const gen = fetchGenRef.current
     const activationFailedAttempt = failedSendAttemptRef.current
@@ -3965,6 +3978,10 @@ export default function ChatView({
   function handleSubmit(e) {
     e.preventDefault()
     if (isProviderSwitchBlocking(chatId)) return
+    // During an early reveal (a no-cache open presented before the runtime
+    // settles) the brain is interactive but the chat is not ready to receive a
+    // turn yet; ignore a send until activation settles a moment later.
+    if (earlyRevealReady && !activationSettled) return
     if (needsModelSelection({ showPicker, chatInfo })) {
       setModelSelectionRequest(request => request + 1)
       return
@@ -5130,9 +5147,11 @@ export default function ChatView({
     || initialEntryPhase === 'stream-catchup'
     || initialEntryPhase === 'ready'
   ) && revealed
-  const displayReady = activationSettled
+  const displayReady = (
+    activationSettled
     && !loading
     && (transcriptPaintable || showEmpty || showLoadError)
+  ) || earlyRevealReady
 
   // The requested server window contains the matching row through the tail.
   // Resolve the result's alias only after validation made the visible transcript

@@ -5354,9 +5354,23 @@ async def autopilot_respond(
   if row.state == "blocked":
     return {"status": "blocked"}
 
-  # Use the owner's existing background-agent choice; no Contribute-specific
-  # resource policy lives here.
-  round_choice = autopilot.resolve_round_choice(db)
+  # Use the owner's background-agent choice, walked to the first provider with
+  # usage quota; no Contribute-specific resource policy lives here. Prefer the
+  # follow-up chat's current provider while it still has quota so a transient
+  # limit elsewhere doesn't fragment the transcript onto a fresh chat.
+  prefer_provider = None
+  if row.followup_chat_id:
+    existing_followup = (
+      db.query(models.Chat)
+      .filter(
+        models.Chat.id == row.followup_chat_id,
+        models.Chat.deleted_at.is_(None),
+      )
+      .first()
+    )
+    if existing_followup is not None:
+      prefer_provider = existing_followup.provider
+  round_choice = autopilot.resolve_round_choice(db, prefer_provider=prefer_provider)
   provider = round_choice["provider"]
 
   verdict = autopilot.claim_for_round(

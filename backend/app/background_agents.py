@@ -148,3 +148,52 @@ def resolve_background_agents(data_dir: str, override: dict | None = None) -> di
   if _same_choice(primary, fallback):
     fallback = None
   return {"primary": primary, "fallback": fallback}
+
+
+def resolve_background_provider(
+  data_dir: str, db, *, override: dict | None = None,
+  prefer_provider: str | None = None,
+) -> dict:
+  """Pick the provider for unattended / app-initiated agent work.
+
+  Walks the owner's ordered background-agents list (``_system_choices``) and
+  returns the first choice whose provider is connected AND currently within
+  quota (``provider_availability.provider_within_quota``). If none qualify, it
+  falls back to the first connected entry, else the first entry — the owner's
+  stated rule: try each in order, and if none have quota use the first anyway
+  (it will hit its limit, which is acceptable).
+
+  ``prefer_provider`` (e.g. the chat's current provider on a reused autopilot
+  chat) leads the walk when it is present in the list and within quota, so a
+  transient quota flip does not needlessly fragment a running conversation onto
+  a different provider. ``override`` lets a caller lead with its own declared
+  ``{"primary": choice}`` without losing the rest of the ordered fallback.
+
+  Returns a full ``{provider, model, effort}`` choice; model/effort may be None
+  (the SDK then uses its own default). This is the single quota-aware resolver
+  every unattended provider selection routes through, replacing the older
+  primary-only pick that never actually failed over on a usage limit.
+  """
+  from app.provider_availability import provider_within_quota
+
+  choices = _system_choices(data_dir)
+  if isinstance(override, dict):
+    declared = _clean_choice(override.get("primary"), label="caller primary")
+    if declared:
+      choices = [declared] + [c for c in choices if not _same_choice(c, declared)]
+  if prefer_provider:
+    for index, choice in enumerate(choices):
+      if choice["provider"] == prefer_provider and index != 0:
+        choices = [choice] + [c for c in choices if c is not choice]
+        break
+
+  def connected(choice: dict) -> bool:
+    return providers.PROVIDERS[choice["provider"]].check_auth(data_dir) is None
+
+  for choice in choices:
+    if connected(choice) and provider_within_quota(db, choice["provider"]):
+      return choice
+  for choice in choices:
+    if connected(choice):
+      return choice
+  return choices[0]

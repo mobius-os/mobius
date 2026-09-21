@@ -3386,12 +3386,16 @@ async def spawn_platform_conflict_chat(
   if owner is None:
     return None
   data_dir = get_settings().data_dir
-  provider = providers.owner_default_provider(
-    data_dir, owner.provider,
-  )
+  # Automatic app-agent work: resolve the provider from the owner's
+  # background-agents list, walked to the first entry with usage quota, instead
+  # of the interactive default. The owner can switch it in-chat afterwards.
+  from app import background_agents
+  _bg_choice = background_agents.resolve_background_provider(data_dir, db)
+  provider = _bg_choice["provider"]
   agent_settings = providers.snapshot_chat_agent_settings(
     data_dir,
     provider,
+    model=_bg_choice.get("model"),
     fallback_model=providers.DEFAULT_MODELS.get(provider),
   )
 

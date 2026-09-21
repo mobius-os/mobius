@@ -1807,14 +1807,19 @@ async def create_conflict_resolver_chat(
         )
 
     title = f"Resolve {app.name} update conflict"
-    # Provider follows the last-selected model (the single source of truth),
-    # matching owner chat creation.
-    provider = providers.owner_default_provider(
-      get_settings().data_dir, owner.provider if owner else None,
+    # Automatic app-agent work: resolve the provider from the owner's
+    # background-agents list, walked to the first entry with usage quota, so a
+    # resolver never starts on a provider the owner has already exhausted. The
+    # owner can switch it in-chat afterwards (this chat is owner-visible).
+    from app import background_agents
+    _bg_choice = background_agents.resolve_background_provider(
+      get_settings().data_dir, db,
     )
+    provider = _bg_choice["provider"]
     agent_settings = providers.snapshot_chat_agent_settings(
       get_settings().data_dir,
       provider,
+      model=_bg_choice.get("model"),
       fallback_model=providers.DEFAULT_MODELS.get(provider),
     )
     chat = models.Chat(

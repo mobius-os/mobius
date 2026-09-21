@@ -2448,6 +2448,11 @@ class ChatWriterActor:
           "AdmitProviderExecution: activity delivery is no longer available"
         )
     run.provider_execution_admitted = True
+    # A provider that just successfully ran is healthy again — clear any stale
+    # usage/rate/credit block so background selection stops skipping it.
+    if run.provider:
+      from app.provider_availability import clear_provider_availability
+      clear_provider_availability(db, run.provider)
     if run.goal_id is not None:
       from app.goal_plans import goal_plan_revision
       run.goal_plan_revision_at_admission = goal_plan_revision(
@@ -4982,6 +4987,16 @@ class ChatWriterActor:
           cmd.restart_nonce if cmd.park_reason == "restart" else None
         )
         parked = True
+        # Record the provider's reset time so background selection skips it
+        # until it recovers (the single serialized quota-signal write point).
+        if run.park_reason in ("usage_limit", "rate_limit"):
+          from app.provider_availability import mark_provider_limited
+          from app.models import Chat as _Chat
+          provider = run.provider
+          if not provider:
+            chat_row = db.get(_Chat, cmd.chat_id)
+            provider = chat_row.provider if chat_row else None
+          mark_provider_limited(db, provider, run.parked_until, run.park_reason)
       else:
         run.status = "completed"
         run.restart_nonce = None

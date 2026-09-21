@@ -717,6 +717,9 @@ def _chat_detail_response(
     "session_id": chat.session_id if expose_session else None,
     "provider": provider,
     "created_by_app_id": chat.created_by_app_id,
+    # Owner-visible chats (shown in Recents) can switch provider; hidden
+    # background/subagent chats stay pinned to their original provider.
+    "provider_switch_locked": not visible_in_owner_drawer(chat),
     "auto_resume_on_limit": bool(chat.auto_resume_on_limit),
     "agent_settings_json": settings_obj,
     "effective_agent_settings": effective_agent_settings(
@@ -2501,10 +2504,13 @@ async def _compact_chat_locked(
   )
 
   chat = get_active_chat_or_404(db, chat_id)
-  if chat.created_by_app_id is not None:
+  if not visible_in_owner_drawer(chat):
     raise HTTPException(
       status_code=409,
-      detail="App chats cannot change provider after they are created.",
+      detail=(
+        "This chat runs in the background and stays on its original "
+        "provider; its provider can't be switched."
+      ),
     )
   source_provider = chat.provider or "claude"
   settings_patch = body.agent_settings_json.model_dump(exclude_unset=True)
@@ -2715,10 +2721,13 @@ async def compact_chat(
 
   async with get_transition_lock(chat_id):
     chat = get_active_chat_or_404(db, chat_id)
-    if chat.created_by_app_id is not None:
+    if not visible_in_owner_drawer(chat):
       raise HTTPException(
         status_code=409,
-        detail="App chats cannot change provider after they are created.",
+        detail=(
+          "This chat runs in the background and stays on its original "
+          "provider; its provider can't be switched."
+        ),
       )
     if (
       is_chat_running(chat_id)
@@ -3128,11 +3137,24 @@ def create_app_chat(
 
   owner = db.query(models.Owner).first()
   data_dir = get_settings().data_dir
-  provider = body.provider or providers.provider_of_model(
-    body.model,
-  ) or providers.owner_default_provider(
-    data_dir, owner.provider if owner else None,
-  )
+  # An app that names neither provider nor model is unattended/automatic work:
+  # resolve the provider from the owner's background-agents list, walked to the
+  # first entry that is connected and within usage quota, instead of the
+  # interactive last-used default (which can be a provider the owner has since
+  # exhausted). An explicit provider or model from the app still wins.
+  background_choice = None
+  if not body.provider and not body.model:
+    from app import background_agents
+    background_choice = background_agents.resolve_background_provider(
+      data_dir, db,
+    )
+    provider = background_choice["provider"]
+  else:
+    provider = body.provider or providers.provider_of_model(
+      body.model,
+    ) or providers.owner_default_provider(
+      data_dir, owner.provider if owner else None,
+    )
   if provider not in providers.PROVIDERS:
     raise HTTPException(status_code=422, detail=f"unknown provider: {provider}")
   if body.model and providers._model_belongs_to_other_provider(
@@ -3147,7 +3169,7 @@ def create_app_chat(
     agent_settings = providers.snapshot_chat_agent_settings(
       data_dir,
       provider,
-      model=body.model,
+      model=body.model or (background_choice or {}).get("model"),
       fallback_model=providers.DEFAULT_MODELS.get(provider),
     )
   except ValueError as exc:
