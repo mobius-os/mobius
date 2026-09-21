@@ -49,6 +49,7 @@ RUN useradd -m -s /bin/bash mobius
 # runtime artifact; registry tarballs only make the production image larger.
 ARG CODEX_VERSION=0.154.0
 ARG AGENT_BROWSER_VERSION=0.38.1
+ARG IMPECCABLE_VERSION=4.1.0
 RUN apt-get update && apt-get install -y --no-install-recommends \
     age ca-certificates cron curl git jq procps ripgrep sqlite3 sudo tini unzip util-linux \
     libnss3 libnspr4 libatk1.0-0 libatk-bridge2.0-0 libcups2 \
@@ -59,6 +60,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       --allow-scripts="@openai/codex@${CODEX_VERSION},agent-browser@${AGENT_BROWSER_VERSION}" \
       "@openai/codex@${CODEX_VERSION}" \
       "agent-browser@${AGENT_BROWSER_VERSION}" \
+      "impeccable@${IMPECCABLE_VERSION}" \
     && agent-browser install \
     && mv /root/.agent-browser /opt/agent-browser \
     && chown -R mobius:mobius /opt/agent-browser \
