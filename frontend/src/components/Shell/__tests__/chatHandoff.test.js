@@ -97,6 +97,11 @@ test('activation presents a confirmed running transcript while stream catch-up r
     'every activation must hydrate the composer wait card from current runtime truth',
   )
   assert.match(
+    chatView,
+    /const settleRuntime = \(runtime, visibleMessages\) => \{[\s\S]*retireUnownedRuntimeStream\(\{[\s\S]*running,[\s\S]*pendingQuestionId: runtime\.pending_question_id/,
+    'opening a completed hidden chat must retire any stale failed stream from its previous run',
+  )
+  assert.match(
     initialLoad,
     /if \(reused\) \{[\s\S]*updateChatRuntimeCache[\s\S]*waits: runtime\.waits \|\| \[\]/,
     'the retained-cache fast path must persist current waits instead of reviving an empty cache',
