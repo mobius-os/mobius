@@ -116,9 +116,11 @@ test('an idle runtime snapshot cannot retire an unacknowledged fresh send', asyn
   // observe the pre-ready snapshot and take the queued path instead of the
   // fresh-send path this test depends on, even with /api/ready mocked above.
   await readinessProbed
-  await page.evaluate(() => new Promise(resolve => (
-    requestAnimationFrame(() => requestAnimationFrame(resolve))
-  )))
+  await page.evaluate(() => new Promise(resolve => {
+    let frames = 8
+    const next = () => (--frames ? requestAnimationFrame(next) : resolve())
+    requestAnimationFrame(next)
+  }))
 
   await input.fill('Fresh send held before acknowledgement')
   raceArmed = true
