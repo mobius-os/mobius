@@ -2,14 +2,15 @@
 
 Written only inside the ``chat_writer`` actor (the single serialized persistence
 owner): a turn that parks on a usage/rate limit records the provider's reset
-time, and a successful provider admission clears it. Read by
+time, and a successful admitted run clears only a limit no newer than that run.
+Read by
 ``background_agents.resolve_background_provider`` to skip a provider that is
 currently out of quota when choosing which background/app agent to run.
 """
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 
 from app.models import ProviderAvailability
 from app.timeutil import now_naive_utc
@@ -49,10 +50,21 @@ def mark_provider_limited(
   row.updated_at = now_naive_utc()
 
 
-def clear_provider_availability(db, provider: str | None) -> None:
-  """Drop any limit block after a successful provider admission."""
-  if not provider:
+def clear_provider_availability_after_success(
+  db, provider: str | None, run_started_at: datetime | None,
+) -> None:
+  """Drop a limit proven stale by one successful admitted provider run.
+
+  The run must have started at or after the limit observation. Otherwise an
+  older overlapping run could finish after a newer run parks and incorrectly
+  erase the newer quota signal.
+  """
+  if not provider or run_started_at is None:
     return
   row = db.get(ProviderAvailability, provider)
-  if row is not None:
+  if row is None:
+    return
+  if run_started_at.tzinfo is not None:
+    run_started_at = run_started_at.astimezone(UTC).replace(tzinfo=None)
+  if row.updated_at is None or run_started_at >= row.updated_at:
     db.delete(row)

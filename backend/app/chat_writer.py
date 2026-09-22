@@ -2448,11 +2448,6 @@ class ChatWriterActor:
           "AdmitProviderExecution: activity delivery is no longer available"
         )
     run.provider_execution_admitted = True
-    # A provider that just successfully ran is healthy again — clear any stale
-    # usage/rate/credit block so background selection stops skipping it.
-    if run.provider:
-      from app.provider_availability import clear_provider_availability
-      clear_provider_availability(db, run.provider)
     if run.goal_id is not None:
       from app.goal_plans import goal_plan_revision
       run.goal_plan_revision_at_admission = goal_plan_revision(
@@ -4702,6 +4697,17 @@ class ChatWriterActor:
         ChatRun.chat_id == cmd.chat_id,
       ).first()
       if run is not None and run.status in models.NONTERMINAL_RUN_STATUSES:
+        if (
+          run.status == "running"
+          and run.provider_execution_admitted is True
+          and cmd.terminal_status == "completed"
+        ):
+          from app.provider_availability import (
+            clear_provider_availability_after_success,
+          )
+          clear_provider_availability_after_success(
+            db, run.provider, run.started_at,
+          )
         run.status = cmd.terminal_status
         run.ended_at = datetime.now(UTC)
         run.restart_nonce = None

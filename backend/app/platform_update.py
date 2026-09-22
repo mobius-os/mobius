@@ -3396,6 +3396,7 @@ async def spawn_platform_conflict_chat(
     data_dir,
     provider,
     model=_bg_choice.get("model"),
+    effort=_bg_choice.get("effort"),
     fallback_model=providers.DEFAULT_MODELS.get(provider),
   )
 

@@ -1820,6 +1820,7 @@ async def create_conflict_resolver_chat(
       get_settings().data_dir,
       provider,
       model=_bg_choice.get("model"),
+      effort=_bg_choice.get("effort"),
       fallback_model=providers.DEFAULT_MODELS.get(provider),
     )
     chat = models.Chat(

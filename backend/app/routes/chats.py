@@ -3170,6 +3170,7 @@ def create_app_chat(
       data_dir,
       provider,
       model=body.model or (background_choice or {}).get("model"),
+      effort=body.effort or (background_choice or {}).get("effort"),
       fallback_model=providers.DEFAULT_MODELS.get(provider),
     )
   except ValueError as exc:
@@ -3186,7 +3187,7 @@ def create_app_chat(
     chat,
     system_prompt=body.system_prompt,
     model=agent_settings["model"],
-    effort=body.effort,
+    effort=agent_settings.get("effort") if agent_settings else body.effort,
     report_date=body.report_date,
     report_kind=body.report_kind,
     project_id=body.project_id,

@@ -6,7 +6,7 @@ reset time, and heals when the window elapses or the provider runs again.
 """
 
 import json
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 
 from app import background_agents as bg
 from app import provider_availability as pa
@@ -48,15 +48,36 @@ def test_within_quota_true_when_no_row(db):
   assert pa.provider_within_quota(db, "claude") is True
 
 
-def test_limit_blocks_until_reset_then_clear_heals(db):
+def test_limit_blocks_until_reset_then_successful_newer_run_heals(db):
   pa.mark_provider_limited(
     db, "claude", now_naive_utc() + timedelta(hours=1), "usage_limit",
   )
   db.commit()
   assert pa.provider_within_quota(db, "claude") is False
-  pa.clear_provider_availability(db, "claude")
+  row = db.get(ProviderAvailability, "claude")
+  pa.clear_provider_availability_after_success(
+    db,
+    "claude",
+    row.updated_at.replace(tzinfo=UTC) + timedelta(seconds=1),
+  )
   db.commit()
   assert pa.provider_within_quota(db, "claude") is True
+
+
+def test_older_overlapping_success_does_not_clear_newer_limit(db):
+  run_started_at = datetime.now(UTC) - timedelta(minutes=5)
+  pa.mark_provider_limited(
+    db, "claude", now_naive_utc() + timedelta(hours=1), "usage_limit",
+  )
+  db.commit()
+
+  pa.clear_provider_availability_after_success(
+    db, "claude", run_started_at,
+  )
+  db.commit()
+
+  assert db.get(ProviderAvailability, "claude") is not None
+  assert pa.provider_within_quota(db, "claude") is False
 
 
 def test_limit_in_the_past_is_within_quota(db):

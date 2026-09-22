@@ -17,6 +17,7 @@ from app.chat_writer import (
   get_writer,
 )
 from app.config import get_settings
+from test_app_fixtures import create_local_app
 
 
 def _make_chat_with_messages(client, auth, messages):
@@ -111,6 +112,79 @@ def test_incoming_provider_synthesizes_and_switches_atomically(
   assert row.messages[-1]["content"] == body["summary"]
   assert row.messages[0]["content"] == "Build me an app"
   assert chat_mod._latest_compaction_brief(row) == body["summary"]
+
+
+def test_switch_visibility_matches_owner_drawer_contract(
+  client, auth, owner_token, db, monkeypatch,
+):
+  _connect_codex(monkeypatch)
+
+  async def _stub(_messages, **_kwargs):
+    return "Portable owner-visible handoff"
+
+  monkeypatch.setattr(compaction, "summarize_chat", _stub)
+  app_id = create_local_app(client, auth, name="switch-visibility")["id"]
+  token = client.post(
+    "/api/auth/app-token", json={"app_id": app_id}, headers=auth,
+  ).json()["token"]
+  app_auth = {"Authorization": f"Bearer {token}"}
+
+  visible_id = client.post(
+    "/api/app-chats",
+    headers=app_auth,
+    json={
+      "title": "Visible app chat",
+      "provider": "claude",
+      "model": "claude-sonnet-4-6",
+      "owner_visible": True,
+    },
+  ).json()["id"]
+  hidden_id = client.post(
+    "/api/app-chats",
+    headers=app_auth,
+    json={
+      "title": "Hidden app chat",
+      "provider": "claude",
+      "model": "claude-sonnet-4-6",
+    },
+  ).json()["id"]
+  hidden_owner_id = _make_chat_with_messages(client, auth, [
+    {"role": "user", "content": "delegated work"},
+  ])
+  for chat_id in (visible_id, hidden_id):
+    row = db.get(models.Chat, chat_id)
+    row.messages = [{"role": "user", "content": "Preserve this context"}]
+  delegated = db.get(models.Chat, hidden_owner_id)
+  delegated.agent_settings_json = {
+    **(delegated.agent_settings_json or {}),
+    "drawer_hidden": True,
+  }
+  db.commit()
+
+  assert client.get(
+    f"/api/chats/{visible_id}", headers=auth,
+  ).json()["provider_switch_locked"] is False
+  assert client.get(
+    f"/api/chats/{hidden_id}", headers=auth,
+  ).json()["provider_switch_locked"] is True
+  assert client.get(
+    f"/api/chats/{hidden_owner_id}", headers=auth,
+  ).json()["provider_switch_locked"] is True
+
+  switched = client.post(
+    f"/api/chats/{visible_id}/provider-switch",
+    headers=auth,
+    json=_payload(switch_id="visible-app-switch"),
+  )
+  assert switched.status_code == 200, switched.text
+  for locked_id in (hidden_id, hidden_owner_id):
+    blocked = client.post(
+      f"/api/chats/{locked_id}/provider-switch",
+      headers=auth,
+      json=_payload(switch_id=f"blocked-{locked_id}"),
+    )
+    assert blocked.status_code == 409, blocked.text
+    assert "background" in blocked.json()["detail"]
 
 
 def test_legacy_bodyless_compact_then_patch_remains_compatible(

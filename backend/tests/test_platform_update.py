@@ -1636,6 +1636,35 @@ async def test_platform_conflict_resolver_chat_is_click_gated(
   assert flag["merge_base"] is None
 
 
+@pytest.mark.asyncio
+async def test_platform_conflict_resolver_preserves_background_choice_effort(
+  monkeypatch, db, owner_token,
+):
+  async def fake_start(**kwargs):
+    return True
+
+  monkeypatch.setattr(
+    "app.background_agents.resolve_background_provider",
+    lambda data_dir, session: {
+      "provider": "codex", "model": "gpt-5.5", "effort": "xhigh",
+    },
+  )
+  monkeypatch.setattr(
+    "app.chat_start.start_programmatic_chat_turn", fake_start,
+  )
+  monkeypatch.setattr("app.push.notify_owner", lambda *args, **kwargs: None)
+
+  result = await pu.spawn_platform_conflict_chat(
+    db, ["backend/app/main.py"], "a" * 40,
+  )
+
+  from app import models
+  chat = db.get(models.Chat, result["chat_id"])
+  assert chat.provider == "codex"
+  assert chat.agent_settings_json["model"] == "gpt-5.5"
+  assert chat.agent_settings_json["effort"] == "xhigh"
+
+
 def test_platform_conflict_resolver_message_pins_reviewed_target():
   target = "a" * 40
 

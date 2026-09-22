@@ -151,8 +151,7 @@ def resolve_background_agents(data_dir: str, override: dict | None = None) -> di
 
 
 def resolve_background_provider(
-  data_dir: str, db, *, override: dict | None = None,
-  prefer_provider: str | None = None,
+  data_dir: str, db, *, prefer_provider: str | None = None,
 ) -> dict:
   """Pick the provider for unattended / app-initiated agent work.
 
@@ -166,8 +165,7 @@ def resolve_background_provider(
   ``prefer_provider`` (e.g. the chat's current provider on a reused autopilot
   chat) leads the walk when it is present in the list and within quota, so a
   transient quota flip does not needlessly fragment a running conversation onto
-  a different provider. ``override`` lets a caller lead with its own declared
-  ``{"primary": choice}`` without losing the rest of the ordered fallback.
+  a different provider.
 
   Returns a full ``{provider, model, effort}`` choice; model/effort may be None
   (the SDK then uses its own default). This is the single quota-aware resolver
@@ -177,10 +175,6 @@ def resolve_background_provider(
   from app.provider_availability import provider_within_quota
 
   choices = _system_choices(data_dir)
-  if isinstance(override, dict):
-    declared = _clean_choice(override.get("primary"), label="caller primary")
-    if declared:
-      choices = [declared] + [c for c in choices if not _same_choice(c, declared)]
   if prefer_provider:
     for index, choice in enumerate(choices):
       if choice["provider"] == prefer_provider and index != 0:
