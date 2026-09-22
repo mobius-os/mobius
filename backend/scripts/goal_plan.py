@@ -256,7 +256,7 @@ def main() -> int:
     if args.progress is not None:
       changes["progress"] = args.progress
     if not changes:
-      parser.error("update needs --status, --note, or --progress")
+      parser.error("update needs --status, --note, --result, or --progress")
 
   payload = _attach_for_write(chat_id)
   current = payload.get("plan") if isinstance(payload, dict) else None
