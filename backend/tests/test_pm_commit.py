@@ -12,6 +12,9 @@ from app.main import _install_pm_commit_launcher
 
 
 SCRIPT = Path(__file__).parents[1] / "scripts" / "pm-commit"
+PREFLIGHT_SCRIPT = (
+  Path(__file__).parents[1] / "scripts" / "preflight-restart-source"
+)
 
 
 def git(repo: Path, *args: str) -> str:
@@ -71,6 +74,45 @@ def test_scoped_commit_stops_when_same_path_changed_since_task_start(tmp_path):
   assert result.returncode == 3
   assert "changed since task start" in result.stderr
   assert git(work, "log", "-1", "--pretty=%s") == "concurrent owner"
+
+
+def test_backend_commit_requires_restart_startup_preflight(tmp_path):
+  work, start = repo(tmp_path)
+  app = work / "backend" / "app"
+  scripts = work / "backend" / "scripts"
+  app.mkdir(parents=True)
+  scripts.mkdir(parents=True)
+  changed = app / "changed.py"
+  changed.write_text("VALUE = 1\n")
+  preflight = scripts / "preflight-restart-source"
+  preflight.write_text("#!/bin/sh\necho broken-source >&2\nexit 17\n")
+  preflight.chmod(0o755)
+
+  refused = run(
+    work, "--from", start, "broken backend", "--", "backend/app/changed.py",
+  )
+
+  assert refused.returncode == 3
+  assert "broken-source" in refused.stderr
+  assert "startup preflight; commit refused" in refused.stderr
+  assert git(work, "rev-parse", "HEAD") == start
+
+  preflight.write_text("#!/bin/sh\nexit 0\n")
+  accepted = run(
+    work, "--from", start, "bootable backend", "--", "backend/app/changed.py",
+  )
+  assert accepted.returncode == 0, accepted.stderr
+  assert git(work, "show", "HEAD:backend/app/changed.py") == "VALUE = 1"
+
+
+def test_restart_preflight_resolves_its_checkout_outside_the_repo(tmp_path):
+  result = subprocess.run(
+    [str(PREFLIGHT_SCRIPT)], cwd=tmp_path,
+    env={**os.environ, "MOBIUS_PLATFORM_DIR": ""},
+    capture_output=True, text=True,
+  )
+
+  assert result.returncode == 0, result.stderr
 
 
 def test_scoped_commit_requires_start_and_paths(tmp_path):
