@@ -1480,6 +1480,45 @@ def test_goal_plan_read_does_not_attach_presented_goal(monkeypatch, capsys):
   assert '"revision": 4' in capsys.readouterr().out
 
 
+def test_goal_plan_write_aborts_when_presented_goal_changes(monkeypatch):
+  helper = _goal_plan_script()
+  calls = []
+
+  def request(method, path, body=None):
+    calls.append((method, path, body))
+    if len(calls) == 1:
+      return {
+        "goal": {"id": "goal-1", "revision": 4, "status": "open"},
+        "plan": {"revision": 4},
+      }
+    if len(calls) == 2:
+      return {"state": "promoted"}
+    return {
+      "goal": {"id": "goal-2", "revision": 1, "status": "open"},
+      "plan": {"revision": 1},
+    }
+
+  monkeypatch.setattr(helper, "_request", request)
+  monkeypatch.setenv("API_BASE_URL", "http://mobius.test")
+  monkeypatch.setenv("AGENT_TOKEN", "agent-token")
+  monkeypatch.setenv("CHAT_ID", "chat-1")
+  monkeypatch.setattr(
+    helper.sys, "argv",
+    ["goal-plan", "update", "review", "--status", "running"],
+  )
+
+  with pytest.raises(
+    SystemExit,
+    match="The presented Goal changed while this attempt attached to it.",
+  ):
+    helper.main()
+  assert calls == [
+    ("GET", "/api/chats/chat-1/goal-plan", None),
+    ("POST", "/api/chats/chat-1/goal/resume", {"goal_id": "goal-1"}),
+    ("GET", "/api/chats/chat-1/goal-plan", None),
+  ]
+
+
 def test_plan_rejects_cycles_missing_dependencies_and_non_goal_runs(
   client, owner_token, db,
 ):
