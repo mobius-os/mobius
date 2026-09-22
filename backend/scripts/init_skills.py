@@ -82,6 +82,10 @@ _UNMODIFIED_MIGRATIONS = {
     # so register this exact known-bad hash deliberately; any further owner edit
     # still differs and remains protected.
     "668bd365e2edf694c921606c9619fff7b8e58806a9eb48745058b22731c44995",
+    # Untouched release copy before the mapi section described the safe
+    # option passthrough and the refused retargeting options instead of
+    # implying everything forwards to curl.
+    "25ccc8dd5ca6a97b4e6016853487967b70aad9119ec38b6a860ee69eb2a885e3",
   },
   "goal-planning.md": {
     # First dependency-aware Goal-plan seed. Replace only the untouched copy
