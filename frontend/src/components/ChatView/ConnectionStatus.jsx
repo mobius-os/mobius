@@ -1,4 +1,5 @@
 import useDelayedConnectionNotice from '../../hooks/useDelayedConnectionNotice.js'
+import { composerAdjacentActionProps } from './composerAdjacentAction.js'
 
 /**
  * Subtle reconnection indicator shown when the SSE connection is lost,
@@ -47,7 +48,7 @@ export default function ConnectionStatus({ error, reconnecting, onRetry }) {
           <button
             type="button"
             className="connection-status__retry"
-            onClick={onRetry}
+            {...composerAdjacentActionProps(onRetry)}
           >
             Retry
           </button>

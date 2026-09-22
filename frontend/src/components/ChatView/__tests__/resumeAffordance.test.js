@@ -51,23 +51,6 @@ function openingTagWithClass(source, className) {
   return tag
 }
 
-function jsxPropExpression(tag, prop) {
-  const match = new RegExp(`\\b${prop}\\s*=\\s*\\{`).exec(tag)
-  assert.ok(match, `expected ${prop} on ${tag.slice(0, 80)}`)
-  const braceAt = match.index + match[0].lastIndexOf('{')
-  for (let i = braceAt + 1, depth = 1; i < tag.length; i++) {
-    const c = tag[i]
-    if (c === '"' || c === "'" || c === '`') {
-      i++
-      while (i < tag.length && tag[i] !== c) i++
-      continue
-    }
-    if (c === '{') depth++
-    if (c === '}' && --depth === 0) return tag.slice(braceAt + 1, i).trim()
-  }
-  assert.fail(`unterminated ${prop} expression`)
-}
-
 function sliceElement(source, openTag) {
   const from = source.indexOf(openTag)
   assert.ok(from >= 0, `expected to find ${openTag}`)
@@ -207,12 +190,12 @@ test('ChatView routes both offscreen attention nudges through the controller', (
   assert.match(chatView, /Usage available — tap to continue/,
     'an elapsed manual park names its now-available action')
   assert.match(
-    jsxPropExpression(openingTagWithClass(chatView, 'chat__question-nudge'), 'onClick'),
+    openingTagWithClass(chatView, 'chat__question-nudge'),
     /revealPendingQuestion\(pendingQuestionEl\)/,
     'the question nudge reveals the card from its top through the scroll controller',
   )
   assert.match(
-    jsxPropExpression(openingTagWithClass(chatView, 'chat__resume-nudge'), 'onClick'),
+    openingTagWithClass(chatView, 'chat__resume-nudge'),
     /revealConversationTail/,
     'the resume nudge routes through the scroll controller',
   )
@@ -222,7 +205,7 @@ test('ChatView routes both offscreen attention nudges through the controller', (
     'the resume nudge reuses the question-nudge visual style')
 })
 
-test('floating composer controls keep keyboard-safe pointer and touch paths', () => {
+test('floating composer controls share the keyboard-safe activation contract', () => {
   const controls = [
     ['chat__history-retry', /loadOlderMessages\(offset, \{ readerDriven: true \}\)/],
     ['chat__question-nudge', /revealPendingQuestion\(pendingQuestionEl\)/],
@@ -231,14 +214,12 @@ test('floating composer controls keep keyboard-safe pointer and touch paths', ()
   ]
   for (const [className, action] of controls) {
     const tag = openingTagWithClass(chatView, className)
-    assert.match(jsxPropExpression(tag, 'onPointerDown'), /preventDefault\(\)/,
-      `${className} must keep composer focus before the tap resolves`)
-    assert.match(jsxPropExpression(tag, 'onTouchEnd'), /preventDefault\(\)/,
-      `${className} must suppress the delayed synthetic click`)
-    assert.match(jsxPropExpression(tag, 'onTouchEnd'), action,
-      `${className} must act immediately at touchend`)
-    assert.match(jsxPropExpression(tag, 'onClick'), action,
-      `${className} must retain its mouse and keyboard path`)
+    assert.match(tag, /\{\.\.\.composerAdjacentActionProps\(/,
+      `${className} must use the shared composer-adjacent interaction policy`)
+    assert.match(tag, /activateOnTouchEnd:\s*true/,
+      `${className} can move before a delayed click, so it must activate at touchend`)
+    assert.match(tag, action,
+      `${className} must keep its existing action`)
   }
 })
 
