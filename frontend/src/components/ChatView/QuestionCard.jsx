@@ -8,7 +8,7 @@ import {
   writeQuestionDraft,
 } from './questionDraft.js'
 import { autoGrowTextarea, textareaUsesNativeSizing } from './composerTextareaSizing.js'
-import { overscrollHandoffDelta } from './overscrollHandoff.js'
+import { overscrollHandoffDelta, wheelDeltaPixels } from './overscrollHandoff.js'
 import { placeCaretAtTextEnd } from './composerFocusPolicy.js'
 import { isInlineEditorSubmit } from './composerShortcuts.js'
 import { isTouchPrimary } from '../../lib/pointerPrimary.js'
@@ -97,7 +97,26 @@ function CustomAnswerArea({
       clientHeight: textarea.clientHeight,
     })
     const onWheel = (event) => {
-      const carry = handoff(event.deltaY)
+      let lineHeight = 16
+      if (event.deltaMode === 1) {
+        const styles = typeof window !== 'undefined'
+          && typeof window.getComputedStyle === 'function'
+          ? window.getComputedStyle(textarea)
+          : null
+        const parsedLineHeight = Number.parseFloat(styles?.lineHeight)
+        const parsedFontSize = Number.parseFloat(styles?.fontSize)
+        lineHeight = Number.isFinite(parsedLineHeight) && parsedLineHeight > 0
+          ? parsedLineHeight
+          : Number.isFinite(parsedFontSize) && parsedFontSize > 0
+            ? parsedFontSize * 1.2
+            : 16
+      }
+      const carry = handoff(wheelDeltaPixels({
+        deltaY: event.deltaY,
+        deltaMode: event.deltaMode,
+        lineHeight,
+        pageHeight: textarea.clientHeight,
+      }))
       if (!carry) return
       const scroller = outer()
       if (!scroller) return

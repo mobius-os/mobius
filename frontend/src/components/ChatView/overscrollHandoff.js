@@ -34,3 +34,34 @@ export function overscrollHandoffDelta({
   if (delta > 0) return scrollTop >= maxScroll - 0.5 ? delta : 0
   return scrollTop <= 0.5 ? delta : 0
 }
+
+/**
+ * Convert a WheelEvent delta into CSS pixels before it reaches the handoff
+ * predicate. Browsers are allowed to report wheel input in lines or pages;
+ * treating those values as pixels makes a mouse wheel crawl on engines that
+ * use the non-pixel modes.
+ *
+ * @param {object} m
+ * @param {number} m.deltaY       signed WheelEvent delta
+ * @param {number} m.deltaMode   0=pixels, 1=lines, 2=pages
+ * @param {number} m.lineHeight  CSS line height for the nested field
+ * @param {number} m.pageHeight  CSS page height for the nested field
+ * @returns {number} signed delta in CSS pixels
+ */
+export function wheelDeltaPixels({
+  deltaY,
+  deltaMode = 0,
+  lineHeight = 16,
+  pageHeight = 0,
+} = {}) {
+  if (!Number.isFinite(deltaY)) return 0
+  if (deltaMode === 1) {
+    const unit = Number.isFinite(lineHeight) && lineHeight > 0 ? lineHeight : 16
+    return deltaY * unit
+  }
+  if (deltaMode === 2) {
+    const unit = Number.isFinite(pageHeight) && pageHeight > 0 ? pageHeight : 0
+    return deltaY * unit
+  }
+  return deltaY
+}
