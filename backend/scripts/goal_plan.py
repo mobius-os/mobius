@@ -55,6 +55,25 @@ def _current(chat_id: str):
   return payload.get("plan") if isinstance(payload, dict) else None
 
 
+def _attach_for_write(chat_id: str) -> dict:
+  """Bind this attempt to the exact presented Goal before changing it."""
+  payload = _request("GET", f"/api/chats/{chat_id}/goal-plan")
+  goal = (payload or {}).get("goal") if isinstance(payload, dict) else None
+  goal_id = goal.get("id") if isinstance(goal, dict) else None
+  if not goal_id:
+    raise SystemExit("No Goal record; resume the original Goal before updating it.")
+  _request(
+    "POST", f"/api/chats/{chat_id}/goal/resume", {"goal_id": goal_id},
+  )
+  refreshed = _request("GET", f"/api/chats/{chat_id}/goal-plan")
+  refreshed_goal = (
+    (refreshed or {}).get("goal") if isinstance(refreshed, dict) else None
+  )
+  if not isinstance(refreshed_goal, dict) or refreshed_goal.get("id") != goal_id:
+    raise SystemExit("The presented Goal changed while this attempt attached to it.")
+  return refreshed
+
+
 def _parse_task(value: str) -> dict:
   parts = value.split("|", 2)
   if len(parts) < 2:
@@ -176,10 +195,8 @@ def main() -> int:
     print(json.dumps(_request("GET", f"/api/chats/{chat_id}/goal-plan?goal_id={quote(args.goal_id, safe='')}"), indent=2))
     return 0
   if args.command in {"checkpoint", "complete"}:
-    payload = _request("GET", f"/api/chats/{chat_id}/goal-plan")
+    payload = _attach_for_write(chat_id)
     goal = (payload or {}).get("goal")
-    if not goal:
-      raise SystemExit("No Goal record; resume the original Goal before updating it.")
     body = {"goal_id": goal["id"], "expected_revision": goal["revision"]}
     if args.command == "complete":
       body["result"] = args.result
@@ -187,11 +204,12 @@ def main() -> int:
       body.update(checkpoint=args.summary, next_action=args.next_action)
     print(json.dumps(_request("PATCH", f"/api/chats/{chat_id}/goal", body)))
     return 0
-  current = _current(chat_id)
   if args.command == "show":
+    current = _current(chat_id)
     print(json.dumps(current, indent=2, ensure_ascii=False))
     return 0
   if args.command == "check-complete":
+    current = _current(chat_id)
     # One-step Goals deliberately have no plan and may complete normally.
     if current is None:
       print("Goal has no todo plan; completion is allowed.")
@@ -204,7 +222,6 @@ def main() -> int:
     print("Goal todo list is complete.")
     return 0
 
-  revision = int((current or {}).get("revision", 0))
   if args.command == "set":
     if args.tasks_json and args.task:
       parser.error("use either --tasks-json or --task, not both")
@@ -217,10 +234,6 @@ def main() -> int:
       tasks = args.task
     if not tasks:
       parser.error("provide at least one --task or --tasks-json")
-    result = _request(
-      "PUT", f"/api/chats/{chat_id}/goal-plan",
-      {"expected_revision": revision, "tasks": tasks},
-    )
   elif args.command == "add":
     added = {
       "id": args.task_id,
@@ -232,12 +245,8 @@ def main() -> int:
       added["parent_id"] = args.parent
     if args.completion_condition:
       added["completion_condition"] = args.completion_condition
-    result = _request(
-      "POST", f"/api/chats/{chat_id}/goal-plan/tasks",
-      {"expected_revision": revision, "task": added},
-    )
   else:
-    changes = {"expected_revision": revision}
+    changes = {}
     if args.status is not None:
       changes["status"] = args.status
     if args.note is not None:
@@ -246,8 +255,24 @@ def main() -> int:
       changes["result"] = args.result
     if args.progress is not None:
       changes["progress"] = args.progress
-    if len(changes) == 1:
+    if not changes:
       parser.error("update needs --status, --note, or --progress")
+
+  payload = _attach_for_write(chat_id)
+  current = payload.get("plan") if isinstance(payload, dict) else None
+  revision = int((current or {}).get("revision", 0))
+  if args.command == "set":
+    result = _request(
+      "PUT", f"/api/chats/{chat_id}/goal-plan",
+      {"expected_revision": revision, "tasks": tasks},
+    )
+  elif args.command == "add":
+    result = _request(
+      "POST", f"/api/chats/{chat_id}/goal-plan/tasks",
+      {"expected_revision": revision, "task": added},
+    )
+  else:
+    changes["expected_revision"] = revision
     result = _request(
       "PATCH", f"/api/chats/{chat_id}/goal-plan/tasks/{args.task_id}",
       changes,
