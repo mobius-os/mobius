@@ -20,7 +20,10 @@ from app.deps import (
   require_chat_embed_operation, resolve_media_or_header_owner,
 )
 from app.image_previews import discard_image_preview, display_image_preview
-from app.path_utils import validate_chat_id, validate_path_within_base
+from app.path_utils import (
+  attachment_disposition, safe_filename, validate_chat_id,
+  validate_path_within_base,
+)
 from app.resource_access import get_active_chat_for_principal
 from app.storage_io import atomic_write
 
@@ -41,15 +44,12 @@ _INLINE_MIME_TYPES = {
 
 
 def _safe_filename(filename: str) -> str:
-  """Strips directory components and rejects dangerous filenames."""
-  # Strip any path component — only the final name segment is kept.
-  name = pathlib.Path(filename).name
-  # Replace anything that isn't alphanumeric, dot, dash, or underscore.
-  name = re.sub(r"[^\w.\-]", "_", name)
-  # Reject empty names after sanitization.
-  if not name or name.startswith("."):
-    name = "upload"
-  return name
+  """Strips directory components and rejects dangerous filenames.
+
+  The rule itself now lives in path_utils so the generated-file download
+  route sanitizes identically; this keeps the upload-specific fallback name.
+  """
+  return safe_filename(filename, fallback="upload")
 
 
 def _resolve_upload_dir(data_dir: str, chat_id: str) -> Path:
@@ -244,7 +244,7 @@ def serve_upload(
 
   headers = {}
   if stored_mime not in _INLINE_MIME_TYPES:
-    headers["Content-Disposition"] = f'attachment; filename="{filename}"'
+    headers["Content-Disposition"] = attachment_disposition(filename)
 
   if preview and stored_mime in _INLINE_MIME_TYPES:
     preview_path = display_image_preview(file_path, upload_dir)

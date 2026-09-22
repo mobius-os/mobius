@@ -48,6 +48,7 @@ import threading
 import time
 import uuid
 from concurrent.futures import Future, InvalidStateError
+from pathlib import Path
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
@@ -413,6 +414,27 @@ class StashToolOutput(_Command):
   chat_id: str = ""
   tool_use_id: str = ""
   output: str = ""
+
+
+@dataclass
+class RecordGeneratedFile(_Command):
+  """Insert one detected agent-written deliverable into `generated_files`.
+
+  Unlike `StashToolOutput`'s upsert-by-tool_use_id, this is a plain insert:
+  one tool call can produce several files, and `name` (not `tool_use_id`) is
+  the row's identity within the chat — see the handler for the collision
+  suffixing that keeps `name` unique so the download route's by-name lookup
+  is unambiguous. Fire-and-forget like `StashToolOutput`: a dropped insert
+  just means that one file never got a download chip; it never fails the
+  turn that produced it.
+  """
+
+  chat_id: str = ""
+  tool_use_id: str | None = None
+  name: str = ""
+  path: str = ""
+  size: int = 0
+  mime_type: str = "application/octet-stream"
 
 
 @dataclass
@@ -1935,6 +1957,8 @@ class ChatWriterActor:
       return record_event(db, cmd.values)
     if isinstance(cmd, StashToolOutput):
       return self._stash_tool_output(db, cmd)
+    if isinstance(cmd, RecordGeneratedFile):
+      return self._record_generated_file(db, cmd)
     if isinstance(cmd, StashThinkingTrace):
       return self._stash_thinking_trace(db, cmd)
     if isinstance(cmd, MigrateChat):
@@ -2656,6 +2680,72 @@ class ChatWriterActor:
     if not _commit_or_rollback(db):
       raise _PersistFailed("StashToolOutput did not persist")
     return True
+
+  def _record_generated_file(self, db, cmd: "RecordGeneratedFile") -> str | None:
+    """Insert one detected deliverable, keeping `name` unique within the chat.
+
+    `name` (not path) is what the download route's URL and Attachments.jsx
+    key off, mirroring uploads.py's `_unique_name` — but checked against this
+    chat's existing `generated_files` rows instead of a directory listing,
+    since two different cwd subdirectories can produce the same basename
+    across a long conversation (e.g. `report.pdf` regenerated in a fresh
+    subfolder). Returns the FINAL name actually persisted (possibly
+    suffixed) — not a bool — because the caller (ChatEventSink.
+    publish_generated_file) awaits this command specifically so it can
+    rewrite the transcript/wire event's `name` to match before either is
+    shown; a suffix decided here but never reported back would let a
+    second colliding file's chip silently link to the first file's row.
+    """
+    if not cmd.chat_id or not cmd.name or not cmd.path:
+      return None
+    from app.generated_files import MAX_RECORDED_ROWS_PER_CHAT
+    from app.models import GeneratedFile
+
+    recorded = db.query(GeneratedFile.name).filter(
+      GeneratedFile.chat_id == cmd.chat_id,
+    ).limit(MAX_RECORDED_ROWS_PER_CHAT).count()
+    if recorded >= MAX_RECORDED_ROWS_PER_CHAT:
+      # Agent-driven, unlike uploads, so the row count has no natural
+      # ceiling. Stop recording rather than let one long chat grow the
+      # table (and this insert's own collision probing) without bound.
+      log.warning(
+        "generated-file cap reached for chat %s; not recording %s",
+        cmd.chat_id, cmd.name,
+      )
+      return None
+
+    def _taken(candidate: str) -> bool:
+      # Indexed lookup on the composite PK, so the usual no-collision case
+      # costs one probe instead of loading every existing name.
+      return db.query(
+        db.query(GeneratedFile).filter(
+          GeneratedFile.chat_id == cmd.chat_id,
+          GeneratedFile.name == candidate,
+        ).exists()
+      ).scalar()
+
+    name = cmd.name
+    if _taken(name):
+      # Same stem/suffix split uploads.py's `_unique_name` uses, so one
+      # basename collision reads the same on both surfaces
+      # (`a.tar.gz` -> `a.tar_1.gz`).
+      stem = Path(cmd.name).stem
+      suffix = Path(cmd.name).suffix
+      index = 1
+      while _taken(f"{stem}_{index}{suffix}"):
+        index += 1
+      name = f"{stem}_{index}{suffix}"
+    db.add(GeneratedFile(
+      chat_id=cmd.chat_id,
+      tool_use_id=cmd.tool_use_id,
+      name=name,
+      path=cmd.path,
+      size=cmd.size,
+      mime_type=cmd.mime_type,
+    ))
+    if not _commit_or_rollback(db):
+      raise _PersistFailed("RecordGeneratedFile did not persist")
+    return name
 
   def _stash_thinking_trace(self, db, cmd: "StashThinkingTrace") -> bool:
     """Monotonic upsert for a deferred reasoning run.

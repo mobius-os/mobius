@@ -85,7 +85,7 @@ from claude_agent_sdk.types import (
   UserMessage,
 )
 
-from app import activity
+from app import activity, fs_locks, generated_files
 from app.claude_events import (
   NativeContinuationTracker,
   _clip_task_text,
@@ -233,6 +233,12 @@ _CLAUDE_UNUSED_BUILTINS = (
   "DesignSync",
   "ReportFindings",
   "PushNotification",
+)
+
+# Tools that may leave a generated deliverable in the shared working directory.
+# Read-only tools are omitted so ordinary turns do not scan the tree per call.
+_FILE_WRITING_TOOL_MATCHER = (
+  "Write|Edit|MultiEdit|NotebookEdit|Bash|mcp__.*"
 )
 # The tools through which a turn can save an owner-input card: the three
 # platform control tools, plus Bash for the `owner_approval.py` / `secure-input`
@@ -1137,6 +1143,10 @@ async def run_claude_sdk_turn(
   # turn scope because the hooks below are built before `_run_once` constructs
   # it, and the card-end hook must reach the live handle to own the turn's end.
   active_client: ActiveClaudeClient | None = None
+  # A baseline is captured only while this turn holds the shared cwd
+  # reservation. That makes the before/after diff safe across concurrent chats.
+  _fs_snapshot: generated_files.Snapshot | None = None
+  _fs_reservation: fs_locks.CwdReservation | None = None
   # Progress lease: renewed as this turn emits SDK messages so a stalled model
   # stream (alive process, no progress) lapses and recovery can reclaim it.
   lease = ProgressLease(chat_id)
@@ -1254,7 +1264,20 @@ async def run_claude_sdk_turn(
     tool_use_id: str | None,
     context: dict[str, Any],
   ) -> dict[str, Any]:
-    del hook_input, tool_use_id, context
+    del tool_use_id, context
+    nonlocal _fs_snapshot, _fs_reservation
+    if generated_files.is_read_only_tool(hook_input.get("tool_name")):
+      return {"continue_": True}
+    try:
+      _fs_reservation = await fs_locks.reserve_cwd_for_mutation(cwd)
+      if _fs_reservation is not None and _fs_reservation.is_held:
+        _fs_snapshot = generated_files.snapshot(cwd, own_chat_id=chat_id)
+      else:
+        _fs_snapshot = generated_files.Snapshot(files={}, complete=False)
+    except Exception:
+      log.debug("generated_file baseline snapshot failed", exc_info=True)
+      _fs_reservation = None
+      _fs_snapshot = generated_files.Snapshot(files={}, complete=False)
     return {"continue_": True}
 
   # The Claude SDK fires PreCompact before it auto- or manually compacts the
@@ -1312,6 +1335,43 @@ async def run_claude_sdk_turn(
         "updatedToolOutput": new_response,
       },
     }
+
+  # Emits a generated_file event for each safe new or changed deliverable after a
+  # mutating tool call. Detection is fail-closed if its reservation expired:
+  # omitting a chip is safer than attributing another chat's file.
+  async def generated_file_hook(
+    hook_input: dict[str, Any],
+    tool_use_id: str | None,
+    context: dict[str, Any],
+  ) -> dict[str, Any]:
+    del context
+    nonlocal _fs_snapshot, _fs_reservation
+    if generated_files.is_read_only_tool(hook_input.get("tool_name")):
+      return {"continue_": True}
+    try:
+      if _fs_reservation is None or not _fs_reservation.is_held:
+        return {"continue_": True}
+      before = (
+        _fs_snapshot if _fs_snapshot is not None
+        else generated_files.Snapshot(files={}, complete=False)
+      )
+      after = generated_files.snapshot(cwd, own_chat_id=chat_id)
+      for entry in generated_files.diff_new_or_changed(
+        before, after, own_chat_id=chat_id,
+      ):
+        await bc.publish_generated_file({
+          "type": "generated_file",
+          **({"tool_use_id": tool_use_id} if tool_use_id else {}),
+          **entry,
+        })
+      _fs_snapshot = after
+    except Exception:
+      log.debug("generated_file detection failed", exc_info=True)
+    finally:
+      if _fs_reservation is not None:
+        _fs_reservation.release()
+        _fs_reservation = None
+    return {"continue_": True}
 
   # Fires after every root-agent tool result and ENDS THE TURN when that result
   # is this turn's saved owner card. `continue_: False` refuses the next model
@@ -1440,6 +1500,10 @@ async def run_claude_sdk_turn(
         ],
         "PostToolUse": [
           HookMatcher(matcher="WebSearch", hooks=[websearch_sources_hook]),
+          HookMatcher(
+            matcher=_FILE_WRITING_TOOL_MATCHER,
+            hooks=[generated_file_hook],
+          ),
           HookMatcher(matcher=None, hooks=[owner_card_end_hook]),
         ],
         "PreCompact": [

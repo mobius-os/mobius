@@ -18,6 +18,7 @@ import {
   appendThinkingChunk,
   anchorReplayedThinking,
   attachToolSources,
+  attachGeneratedFile,
   reconcileStreamItems,
   applyTaskEvent,
   appendTextItem,
@@ -1203,6 +1204,12 @@ export default function useStreamConnection(chatId, {
             applyStreamItems(
               prev => attachToolSources(prev, event.sources, event.tool_use_id),
             )
+          } else if (event.type === 'generated_file') {
+            // Append a download chip to the tool block that produced this file.
+            // Matches by tool_use_id (falls back to last tool block). Idempotent
+            // under catch-up replay. Mirrors the backend events.process_event path
+            // that persists the same entry onto the Chat's stored blocks.
+            applyStreamItems(prev => attachGeneratedFile(prev, event))
           } else if (event.type === 'tool_end') {
             applyStreamItems(
               prev => closeToolLifecycle(prev, event.tool_use_id),

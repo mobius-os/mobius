@@ -1701,6 +1701,38 @@ class ToolOutput(Base):
   created_at = Column(DateTime, default=lambda: datetime.now(UTC))
 
 
+class GeneratedFile(Base):
+  """Metadata for one file an agent turn wrote to its own cwd that the
+  allowlisted directory diff (generated_files.py) recorded as a servable
+  deliverable — most often a PDF a Bash-run script produced.
+
+  The download route (routes/generated_files.py) looks up a requested name
+  HERE FIRST, scoped to chat_id, before ever touching the filesystem — a
+  non-delegated chat's cwd is `/data`, a root shared by every other chat's
+  own uploads and by credential paths, so a route that resolved a
+  client-supplied path against cwd directly would leak across chats. `name`
+  is unique per chat (collisions are suffixed at record time, mirroring
+  uploads.py's `_unique_name`); `path` is the real cwd-relative path used to
+  resolve and stream the file. Written via the single-writer actor's
+  RecordGeneratedFile command as a plain insert (one row per detected file,
+  never updated in place) — a new table needs no ALTER migration (see
+  schema_migrations.run_migrations), matching ToolOutput's rationale for
+  living outside Chat.messages.
+  """
+
+  __tablename__ = "generated_files"
+
+  chat_id = Column(
+    String(64), ForeignKey("chats.id"), primary_key=True, index=True
+  )
+  name = Column(String(255), primary_key=True)
+  path = Column(String(1024), nullable=False)
+  size = Column(Integer, nullable=False)
+  mime_type = Column(String(128), nullable=False)
+  tool_use_id = Column(String(128), nullable=True)
+  created_at = Column(DateTime, default=lambda: datetime.now(UTC))
+
+
 class Connector(Base):
   """Owner-managed remote MCP endpoint shared by both agent providers."""
 

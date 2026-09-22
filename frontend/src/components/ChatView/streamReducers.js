@@ -576,6 +576,32 @@ export function attachToolOutput(prev, content, event = null) {
 }
 
 /**
+ * Applies a `generated_file` event: appends the file entry to the
+ * `generated_files` array on the matching tool block so a real download
+ * chip appears right where the file was produced. Matching is by
+ * `tool_use_id`; falls back to the last tool block when the event carries
+ * no id (mirrors the backend's events.process_event fallback). Idempotent:
+ * a file already present by name is not duplicated (handles catch-up
+ * replay which re-emits the full event stream from turn start).
+ */
+export function attachGeneratedFile(prev, event) {
+  const name = event?.name
+  if (!name) return prev
+  const entry = { name, size: event.size, mime_type: event.mime_type }
+  let i = event?.tool_use_id
+    ? prev.findLastIndex(it => it.type === 'tool' && it.tool_use_id === event.tool_use_id)
+    : -1
+  if (i < 0) i = prev.findLastIndex(it => it.type === 'tool')
+  if (i < 0) return prev
+  const block = prev[i]
+  const existing = Array.isArray(block.generated_files) ? block.generated_files : []
+  if (existing.some(f => f.name === name)) return prev  // idempotent
+  const updated = [...prev]
+  updated[i] = { ...block, generated_files: [...existing, entry] }
+  return updated
+}
+
+/**
  * Applies a `tool_sources` event to the search block that produced it.
  * Sources are small metadata, so they stay inline on the tool item.
  *

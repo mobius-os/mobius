@@ -551,6 +551,21 @@ function MsgContentInner({
           }
           return renderBlock(node.single.item, node.single.idx)
         })}
+        {/* Generated-file download chips: collected from every tool block in
+            this message and shown once, below the agent's final text, so they
+            read as a natural "here's what I made" handoff rather than a detail
+            buried inside a tool row. Shown during streaming too so the chip
+            appears as soon as the file is detected. */}
+        {msg.role === 'assistant' && (() => {
+          const allFiles = (msg.blocks || []).flatMap(b =>
+            b.type === 'tool' && Array.isArray(b.generated_files)
+              ? b.generated_files.map(f => ({ ...f, kind: 'generated' }))
+              : []
+          )
+          return allFiles.length > 0
+            ? <Attachments attachments={allFiles} chatId={chatId} />
+            : null
+        })()}
         {/* Web sources collected from the turn's tool blocks and shown once
             after the answer. Memory keeps its own richer lookup card inline. */}
         {msg.role === 'assistant' && !isStreaming && (

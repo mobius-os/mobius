@@ -12,6 +12,7 @@ prefix-string checks miss.
 
 import re
 from pathlib import Path
+from urllib.parse import quote
 
 from fastapi import HTTPException
 
@@ -50,3 +51,34 @@ def validate_path_within_base(path: Path | str, base: Path) -> Path:
   if not resolved.is_relative_to(base.resolve()):
     raise HTTPException(status_code=400, detail="Invalid path.")
   return resolved
+
+
+def safe_filename(filename: str, *, fallback: str = "download") -> str:
+  """Strips directory components and characters that are unsafe to echo.
+
+  Lifted from the upload route so both file-serving surfaces sanitize the
+  same way (`routes/uploads.py` keeps a thin wrapper for its own default).
+  `\\w` is Unicode-aware, so a non-Latin name survives intact — see
+  `attachment_disposition` for why that still needs encoding on the wire.
+  """
+  name = Path(filename).name
+  name = re.sub(r"[^\w.\-]", "_", name)
+  if not name or name.startswith("."):
+    name = fallback
+  return name
+
+
+def attachment_disposition(filename: str) -> str:
+  """Builds an RFC 6266 `Content-Disposition` for a forced download.
+
+  A bare `filename="…"` is latin-1 on the wire, so a name the agent chose in
+  the owner's own language (`报告.pdf`, an emoji) raises UnicodeEncodeError
+  inside the ASGI layer and 500s the download. Emit an ASCII fallback for old
+  clients plus `filename*=UTF-8''…`, which every current browser prefers.
+  """
+  sanitized = safe_filename(filename)
+  ascii_name = sanitized.encode("ascii", "replace").decode("ascii")
+  # `"` and `\` would otherwise terminate or escape the quoted-string.
+  ascii_name = ascii_name.replace("\\", "_").replace('"', "_")
+  encoded = quote(sanitized, safe="")
+  return f"attachment; filename=\"{ascii_name}\"; filename*=UTF-8''{encoded}"

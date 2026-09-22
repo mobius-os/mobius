@@ -3479,6 +3479,62 @@
   white-space: nowrap;
 }
 
+/* ── Generated-file download card ──────────────────── */
+/* Distinct from the subtle upload chip — this is a prominent, branded
+   call-to-action that makes the file impossible to miss. */
+
+.chat__generated-file-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 16px;
+  margin-top: 16px;
+  border-radius: 12px;
+  background: var(--accent);
+  color: #fff;
+  text-decoration: none;
+  font-size: 14px;
+  font-weight: 500;
+  max-width: 320px;
+  transition: filter 0.15s, transform 0.1s;
+  box-shadow: 0 2px 12px -3px color-mix(in srgb, var(--accent) 55%, transparent);
+}
+
+.chat__generated-file-link:hover {
+  filter: brightness(1.1);
+  transform: translateY(-1px);
+}
+
+.chat__generated-file-link:active {
+  transform: translateY(0);
+  filter: brightness(0.95);
+}
+
+.chat__generated-file-link:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+
+.chat__generated-file-icon {
+  flex-shrink: 0;
+  opacity: 0.9;
+}
+
+.chat__generated-file-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+  min-width: 0;
+}
+
+.chat__generated-file-size {
+  font-size: 12px;
+  opacity: 0.75;
+  white-space: nowrap;
+}
+
+
 /* ── Shared chat-foot entrance ─────────────────────── */
 
 /* Chat-foot entrance: opacity + translateY ONLY. The foot is absolutely

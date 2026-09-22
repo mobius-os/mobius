@@ -38,6 +38,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
+from app import fs_locks, generated_files
 from app.codex_sdk_contract import (
   app_server_pid,
   control_client,
@@ -1446,6 +1447,52 @@ def _publish_codex_context_compaction(bc: Any, chat_id: str) -> None:
     )
 
 
+# Thread-item types whose run can leave a new deliverable in cwd, and so
+# bracket one generated-file diff window (see generated_files.py).
+#
+# This is deliberately EVERY item type that runs caller-supplied logic, not
+# just the classic shell one. Codex surfaces a shell execution as
+# CommandExecutionThreadItem, an apply_patch as FileChangeThreadItem, an MCP
+# server's tool as McpToolCallThreadItem, and a namespaced/dynamic tool — the
+# shape an `exec_command`-style unified exec arrives as — as
+# DynamicToolCallThreadItem. Gating on only the first two is what made this
+# feature silently no-op for agents whose shell runs through the dynamic tool
+# surface: the file was written, but no diff window ever opened around the
+# call that wrote it.
+#
+# Read-only / non-executing items (WebSearch, ImageView, AgentMessage,
+# reasoning, compaction) stay out so an ordinary turn does not pay for a
+# directory scan per message, and collab/sub-agent items stay out because a
+# child's own turn brackets and attributes its own writes.
+_FILE_WRITING_ITEM_KEYS = (
+  "CommandExecutionThreadItem",
+  "FileChangeThreadItem",
+  "McpToolCallThreadItem",
+  "DynamicToolCallThreadItem",
+)
+
+
+def _can_write_files(item: Any, sdk: dict[str, Any]) -> bool:
+  """True when this started/completed item could have written to cwd.
+
+  One predicate shared by BOTH halves of the reservation (ItemStarted takes
+  it, ItemCompleted releases it) so the two can never gate on different sets
+  — a mismatch would either strand a reservation until its watchdog expires
+  or diff against a baseline nobody captured.
+  """
+  types = tuple(
+    cls for cls in (sdk.get(key) for key in _FILE_WRITING_ITEM_KEYS)
+    if cls is not None
+  )
+  if not types or not isinstance(item, types):
+    return False
+  # Cost hint only (see generated_files.is_read_only_tool): an MCP or dynamic
+  # tool that only reads — a web search, a fetch — should not pay for a
+  # reservation and two tree walks. A shell or file-change item carries no
+  # `tool` attribute, so it is never skipped here.
+  return not generated_files.is_read_only_tool(getattr(item, "tool", None))
+
+
 async def _run_codex_sdk_turn(
   *,
   user_message: str,
@@ -1624,6 +1671,24 @@ async def _run_codex_sdk_turn(
   turn = None
   active_turn: ActiveCodexTurn | None = None
   current_session_id = session_id
+  # Codex runs commands concurrently with Python's event loop, so an
+  # ItemStarted snapshot can race a fast PDF command. Take the baseline before
+  # starting the provider turn and hold the reservation for that turn's entire
+  # lifetime. If it cannot be acquired, disable detection for this turn rather
+  # than diffing a shared cwd without exclusive provenance.
+  _fs_reservation: fs_locks.CwdReservation | None = None
+  try:
+    _fs_reservation = await fs_locks.reserve_cwd_for_mutation(cwd)
+    if _fs_reservation is not None and _fs_reservation.is_held:
+      _fs_snapshot: generated_files.Snapshot = generated_files.snapshot(
+        cwd, own_chat_id=chat_id,
+      )
+    else:
+      _fs_snapshot = generated_files.Snapshot(files={}, complete=False)
+  except Exception:
+    log.debug("generated_file turn-start baseline snapshot failed", exc_info=True)
+    _fs_snapshot = generated_files.Snapshot(files={}, complete=False)
+    _fs_reservation = None
   completed_turn: Any | None = None
   completed_message_phases: list[str | None] = []
   # Codex can abandon an in-progress AgentMessage and immediately start a
@@ -2153,6 +2218,33 @@ async def _run_codex_sdk_turn(
             for event in _tool_completed_events(item, sdk):
               _stamp_tool_use_id(event, item)
               bc.publish(event)
+          if _can_write_files(item, sdk) and (
+            _fs_reservation is not None and _fs_reservation.is_held
+          ):
+            # A completed shell / file-patch / MCP / dynamic tool item is
+            # where a new deliverable (most often a PDF, produced by a run
+            # script rather than any file-editing tool) can appear — see
+            # _FILE_WRITING_ITEM_KEYS, and claude_sdk_runner.py's
+            # generated_file_hook for the Claude-side detection this mirrors.
+            try:
+              after = generated_files.snapshot(cwd, own_chat_id=chat_id)
+              tool_use_id = str(getattr(item, "id", None) or "") or None
+              for entry in generated_files.diff_new_or_changed(
+                _fs_snapshot, after, own_chat_id=chat_id,
+              ):
+                # publish_generated_file (not bc.publish) — it awaits the DB
+                # write and rewrites `name` to whatever was actually
+                # persisted, so a same-chat basename collision can't make
+                # the chip link to a different file's row than the one just
+                # recorded.
+                await bc.publish_generated_file({
+                  "type": "generated_file",
+                  **({"tool_use_id": tool_use_id} if tool_use_id else {}),
+                  **entry,
+                })
+              _fs_snapshot = after
+            except Exception:
+              log.debug("generated_file detection failed", exc_info=True)
           # Also record child links here (idempotent) in case receiver_thread_ids
           # only populates on completion — a missed link silently loses the
           # attribution this recording exists to provide.
@@ -2340,6 +2432,8 @@ async def _run_codex_sdk_turn(
       "error": _codex_user_error(str(exc)),
     })
   finally:
+    if _fs_reservation is not None:
+      _fs_reservation.release()
     if task_host_open and task_host_tool_use_id is not None:
       # A provider error/interrupt may skip terminal child notifications.
       # Close every still-live chip honestly before closing its Task host.

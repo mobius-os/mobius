@@ -23,6 +23,7 @@ from app.chat_writer import (
   PersistTranscript,
   QuestionCommit,
   RecordAgentLifecycle,
+  RecordGeneratedFile,
   StashThinkingTrace,
   StashToolOutput,
   await_ack as _await_ack,
@@ -799,6 +800,54 @@ class ChatEventSink:
       )
     )
 
+  async def publish_generated_file(self, event: dict) -> None:
+    """Save-before-broadcast for a detected generated-file download.
+
+    `RecordGeneratedFile` may SUFFIX `name` to keep it unique within the
+    chat (two different cwd subdirectories can produce the same basename
+    across a long conversation — e.g. `report.pdf` regenerated in a fresh
+    subfolder). If that suffix were decided only on the DB side while this
+    event's raw name went straight into `process_event`/the transcript, the
+    second file's chip would display and link to the FIRST file's name —
+    silently serving the wrong file, with the actual second file
+    unreachable from the UI. So — mirroring `publish_question`'s
+    save-before-broadcast barrier for the same class of hazard, display
+    state diverging from persisted state — this AWAITS the write and
+    rewrites the event's `name` to whatever was actually persisted BEFORE
+    `process_event`/the wire see it. A failed commit means no row exists to
+    serve, so it must not show a chip at all: skip broadcasting rather than
+    fall back to the raw name.
+    """
+    name = event.get("name")
+    path = event.get("path")
+    if not isinstance(name, str) or not name or not isinstance(path, str) or not path:
+      return
+    if not self.chat_id:
+      self.publish(event, _internal=True)
+      return
+    ack = get_writer().submit(
+      RecordGeneratedFile(
+        chat_id=self.chat_id,
+        tool_use_id=event.get("tool_use_id"),
+        name=name,
+        path=path,
+        size=event.get("size") or 0,
+        mime_type=event.get("mime_type") or "application/octet-stream",
+      )
+    )
+    try:
+      final_name = await _await_ack(ack)
+    except Exception:
+      _get_logger().warning(
+        "RecordGeneratedFile commit failed chat_id=%s name=%s",
+        self.chat_id, name, exc_info=True,
+      )
+      return
+    if not isinstance(final_name, str) or not final_name:
+      return
+    event["name"] = final_name
+    self.publish(event, _internal=True)
+
   def record_lifecycle(self, event: dict) -> None:
     """Queue private lifecycle metadata without broadcasting it.
 
@@ -837,7 +886,7 @@ class ChatEventSink:
         retry = RecordAgentLifecycle(values=cmd.values)
         await _await_ack(get_writer().submit(retry))
 
-  def publish(self, event: ChatEvent) -> bool:
+  def publish(self, event: ChatEvent, *, _internal: bool = False) -> bool:
     """Publishes an ordinary event and routes any due save to the actor.
 
     Live broadcast is best-effort independent from persistence and
@@ -850,10 +899,21 @@ class ChatEventSink:
     broadcast barrier can't be bypassed. Returns True (the bool is
     vestigial now that no commit runs inline; kept so the runner's
     call-site contract is unchanged).
+
+    `_internal` is set only by `publish_generated_file`, which has already
+    done its own save-before-broadcast write and rewritten `event["name"]`
+    to what was actually persisted — it re-enters this same method for the
+    ordinary process_event/broadcast/save-scheduling tail rather than
+    duplicating it, so the assert below can't fire on that legitimate path.
     """
     event_type = event.get("type")
     assert event_type != "question", (
       "question events must go through publish_question(), not publish()"
+    )
+    assert _internal or event_type != "generated_file", (
+      "generated_file events must go through publish_generated_file(), "
+      "not publish() — see its docstring for the save-before-broadcast "
+      "reason"
     )
 
     # Edit diffs have the same inline-vs-full split as large tool output, but

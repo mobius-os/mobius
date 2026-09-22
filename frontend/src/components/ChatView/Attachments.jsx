@@ -31,26 +31,52 @@ export default function Attachments({ attachments, chatId }) {
             <AttachImage
               key={i}
               src={tokenParam
-                ? `${BASE}/api/chats/${chatId}/uploads/${encodeURIComponent(img.name)}${tokenParam}`
+                ? `${BASE}/api/chats/${chatId}/${
+                    img.kind === 'generated' ? 'generated-files' : 'uploads'
+                  }/${encodeURIComponent(img.name)}${tokenParam}`
                 : ''}
               alt={img.name}
             />
           ))}
         </div>
       )}
-      {files.map((f, i) => (
-        <a
-          key={i}
-          className="chat__attach-file"
-          href={`${BASE}/api/chats/${chatId}/uploads/${encodeURIComponent(f.name)}${tokenParam}`}
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <FileDocument width={12} height={12} aria-hidden="true" />
-          <span className="chat__attach-file-name">{f.name}</span>
-          <span className="chat__attach-file-size">{Math.round(f.size / 1024)}KB</span>
-        </a>
-      ))}
+      {files.map((f, i) => {
+        const isGenerated = f.kind === 'generated'
+        const href = `${BASE}/api/chats/${chatId}/${
+          isGenerated ? 'generated-files' : 'uploads'
+        }/${encodeURIComponent(f.name)}${tokenParam}`
+        if (isGenerated) {
+          return (
+            <a
+              key={i}
+              className="chat__generated-file-link"
+              href={href}
+              download={f.name}
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              <FileDocument width={20} height={20} aria-hidden="true" className="chat__generated-file-icon" />
+              <span className="chat__generated-file-name">{f.name}</span>
+              {f.size != null && (
+                <span className="chat__generated-file-size">{Math.round(f.size / 1024) || '<1'}KB</span>
+              )}
+            </a>
+          )
+        }
+        return (
+          <a
+            key={i}
+            className="chat__attach-file"
+            href={href}
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            <FileDocument width={12} height={12} aria-hidden="true" />
+            <span className="chat__attach-file-name">{f.name}</span>
+            <span className="chat__attach-file-size">{Math.round(f.size / 1024)}KB</span>
+          </a>
+        )
+      })}
     </div>
   )
 }

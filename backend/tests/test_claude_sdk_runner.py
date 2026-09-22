@@ -145,6 +145,41 @@ async def _run_turn(
 
 
 @pytest.mark.asyncio
+async def test_generated_file_baseline_precedes_a_fast_claude_tool(monkeypatch, tmp_path):
+  """Exercise the actual hook ordering: the awaited matcher=None hook must
+  snapshot before a fast Bash call can create its PDF, not in the later
+  writing-tool hook that the SDK runs concurrently with the command."""
+  snapshots = []
+  original_snapshot = claude_sdk_runner.generated_files.snapshot
+
+  def snapshot(cwd, *, own_chat_id):
+    snapshots.append(("snapshot", (tmp_path / "fast.pdf").exists()))
+    return original_snapshot(cwd, own_chat_id=own_chat_id)
+
+  monkeypatch.setattr(claude_sdk_runner.generated_files, "snapshot", snapshot)
+
+  class _GeneratedFileBus(_ChatBus):
+    async def publish_generated_file(self, event):
+      self.events.append(event)
+      return event
+
+  class _FastPdfClient(_FakeClient):
+    async def query(self, message):
+      self.queries.append(message)
+      pre = self.options.hooks["PreToolUse"]
+      await pre[0].hooks[0]({"tool_name": "Bash"}, "fast", {})
+      (tmp_path / "fast.pdf").write_bytes(b"%PDF-1.4")
+      post = self.options.hooks["PostToolUse"]
+      await post[1].hooks[0]({"tool_name": "Bash"}, "fast", {})
+
+  _install_fake_client(monkeypatch, _FastPdfClient)
+  await _run_turn("fast-generated-file", cwd=str(tmp_path), bc=_GeneratedFileBus())
+
+  assert snapshots[0] == ("snapshot", False)
+  assert snapshots[-1] == ("snapshot", True)
+
+
+@pytest.mark.asyncio
 async def test_claude_mcp_set_stays_strict_with_native_skills_and_fd_retirement(
   monkeypatch,
 ):

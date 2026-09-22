@@ -72,6 +72,7 @@ EventType = Literal[
   "tool_sources",
   "tool_end",
   "skill_loaded",
+  "generated_file",
   "task_start",
   "task_progress",
   "task_done",
@@ -759,7 +760,7 @@ def _process_subagent_event(event: dict, assistant_blocks: list) -> bool:
 
 _TOOL_EVENT_TYPES = frozenset({
   "tool_start", "tool_input", "tool_output", "tool_sources", "tool_end",
-  "skill_loaded",
+  "skill_loaded", "generated_file",
 })
 
 
@@ -944,6 +945,50 @@ def _process_tool_event(event: dict, assistant_blocks: list) -> bool:
       "input": "",
       "output": "",
       "status": "done",
+    })
+    return True
+
+  if event_type == "generated_file":
+    # Belongs to the tool call (usually Bash) whose result produced it, so it
+    # renders as a real download attached right where the file was made
+    # rather than floating detached from the turn. The download route
+    # (routes/generated_files.py) is the actual authorization boundary —
+    # `name` here is a display/link key, never a filesystem path a client
+    # controls.
+    name = event.get("name")
+    if not isinstance(name, str) or not name:
+      return False
+    entry = {
+      "name": name,
+      "size": event.get("size"),
+      "mime_type": event.get("mime_type"),
+    }
+    target = _tool_block_for_event(assistant_blocks, event.get("tool_use_id"))
+    if target is None:
+      target = next((
+        blk for blk in reversed(assistant_blocks) if blk.get("type") == "tool"
+      ), None)
+    if target is not None:
+      files = target.get("generated_files")
+      if not isinstance(files, list):
+        files = []
+      if not any(f.get("name") == name for f in files):
+        target["generated_files"] = [*files, entry]
+        return True
+      return False
+    # Defensive fallback for provider/event-order drift: never drop a
+    # detected download just because no owning tool block was found. The
+    # label is deliberately neutral rather than a guess — this path runs
+    # precisely when we do NOT know which tool produced the file, so naming
+    # "Bash" or "Write" would assert something untrue. An unmapped name
+    # renders as itself (see toolActivityLabel.js).
+    assistant_blocks.append({
+      "type": "tool",
+      "tool": "File",
+      "input": "",
+      "output": "",
+      "status": "done",
+      "generated_files": [entry],
     })
     return True
 

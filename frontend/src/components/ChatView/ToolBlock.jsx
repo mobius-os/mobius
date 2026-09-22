@@ -29,6 +29,7 @@ import {
 import { useToolImagePreview } from './useToolImagePreview.js'
 import ToolEditPreview from './ToolEditPreview.jsx'
 import { toolEditPreview } from './toolEditPreview.js'
+import Attachments from './Attachments.jsx'
 
 // Render an already-formatted tool result (see toolResultFormat.js) so shell
 // output reads as a terminal (stdout / stderr / exit code) and a structured
