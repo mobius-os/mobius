@@ -55,6 +55,34 @@ test('busy-parent helper result renders once at the same recorded frontier', () 
   assert.equal(html.split('aria-label="Helper finished · Review"').length, 2)
 })
 
+test('multiple helper completions join one surrounding activity disclosure', () => {
+  const blocks = [
+    { type: 'tool', tool: 'Bash', tool_use_id: 'command', status: 'done' },
+    { type: 'thinking', thinking_id: 'thought', content: 'Reviewing', duration_ms: 1000 },
+    { type: 'tool', tool: 'Edit', tool_use_id: 'edit', status: 'done' },
+  ]
+  const helper = (id, task, blockIndex) => ({
+    id: `delegation:${id}:completed`, activityId: `delegation:${id}:completed`,
+    type: 'helper_result', status: 'completed', task_key: task,
+    body: `${task} outcome`, consumption: 'incorporated', created_at: 2000,
+    display_position: { assistant_message_id: 'activity-answer', block_index: blockIndex },
+  })
+  const results = [helper('first', 'First review', 1), helper('second', 'Second review', 2)]
+  _resetDisclosureStateForTests()
+  persistDisclosureOpen('chat', 'activity-answer:activity:command', true)
+  const html = render(Message, {
+    msg: { id: 'activity-answer', role: 'assistant', blocks },
+    chatId: 'chat', messageKey: 'activity-answer',
+  }, {
+    tools: new Map(), positions: new Map([['activity-answer', results]]),
+  })
+
+  assert.equal((html.match(/class="chat__activity chat__activity--done/g) || []).length, 1)
+  assert.match(html, /Ran a command, exchanged messages, edited code/)
+  assert.match(html, /Helper finished · First review/)
+  assert.match(html, /Helper finished · Second review/)
+})
+
 test('later peer messages share one high-level exchange and list each message inside', () => {
   const notes = [
     { ...note, id: 'one', sender_name: 'Review agent', body: 'First finding', type: 'peer_message' },
@@ -68,7 +96,7 @@ test('later peer messages share one high-level exchange and list each message in
     tools: new Map(), positions: new Map(),
   })
   assert.equal((html.match(/class="chat__activity chat__activity--done/g) || []).length, 1)
-  assert.match(html, /Exchanged agent messages/)
+  assert.match(html, /Exchanged messages/)
   assert.match(html, /Received from Review agent/)
   assert.match(html, /Received from Build agent/)
   assert.match(html, /First finding/)

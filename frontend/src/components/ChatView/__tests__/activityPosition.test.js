@@ -108,6 +108,30 @@ test('adjacent compact fragments become one disclosure with every detail range',
   )
 })
 
+test('helper completions do not split adjacent compact activity fragments', () => {
+  const first = {
+    type: 'activity', activity_id: 'first', message_index: 4, start: 0, end: 4,
+    tool_count: 1,
+    entries: [{ idx: 0, item: { type: 'tool', tool: 'Bash', tool_use_id: 'command' } }],
+  }
+  const helper = {
+    type: 'helper_result', id: 'helper', activityId: 'helper', status: 'completed',
+  }
+  const second = {
+    type: 'activity', activity_id: 'second', message_index: 6, start: 0, end: 3,
+    tool_count: 1,
+    entries: [{ idx: 0, item: { type: 'tool', tool: 'Edit', tool_use_id: 'edit' } }],
+  }
+
+  const output = mergeAdjacentCompactActivityEntries(entries([first, helper, second]))
+  assert.equal(output.length, 1)
+  assert.equal(output[0].item.tool_count, 3)
+  assert.deepEqual(
+    output[0].item.entries.map(entry => entry.item.type),
+    ['tool', 'helper_result', 'tool'],
+  )
+})
+
 test('a nested compact anchor preserves a later recorded boundary', () => {
   const blocks = [
     {

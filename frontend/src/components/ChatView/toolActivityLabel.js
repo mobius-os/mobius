@@ -38,7 +38,7 @@ const ACTIVITY_LABELS = new Map([
   // the `recall` marker the backend stamps from the command — see
   // effectiveToolName. Uncountable, so it has no singular twin.
   ['MemoryRecall', 'Searching Memory'],
-  ['PeerMessage', 'Exchanging agent messages'],
+  ['PeerMessage', 'Exchanging messages'],
 ])
 
 // Past-tense twins for SETTLED lines — "Ran commands", not a "Running
@@ -66,7 +66,7 @@ const PAST_LABELS = new Map([
   ['Skill', 'Used skills'],
   ['ViewImage', 'Viewed images'],
   ['MemoryRecall', 'Recalled from Memory'],
-  ['PeerMessage', 'Exchanged agent messages'],
+  ['PeerMessage', 'Exchanged messages'],
 ])
 
 // Singular twins for a ONE-occurrence activity: a lone Bash reads "Ran a

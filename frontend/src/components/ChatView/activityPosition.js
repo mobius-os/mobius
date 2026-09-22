@@ -2,7 +2,7 @@
 import { marked } from 'marked'
 import { peerRecordTool, peerTime } from './peerTimeline.js'
 import { suppressedQuestionToolIndices } from './streamReducers.js'
-import { isDistinctiveActivityTool } from './toolActivityLabel.js'
+import { isActivityRunEntry } from './activityGrouping.js'
 
 // Keep markdown constructs whole. The captured prefix never grows, so its
 // preceding complete block boundary is stable even while the paragraph or code
@@ -104,8 +104,7 @@ export function mergeAdjacentPeerActivityEntries(entries = []) {
 const isMergeableActivityEntry = entry => {
   const item = entry?.item
   return item?.type === 'activity'
-    || item?.type === 'thinking'
-    || (item?.type === 'tool' && !isDistinctiveActivityTool(item))
+    || isActivityRunEntry(entry)
 }
 
 const namespacedEntries = (entries, namespace) => entries.map(entry => ({
@@ -148,7 +147,7 @@ export function mergeAdjacentCompactActivityEntries(entries = []) {
         return {
           key: namespace,
           entries: namespacedEntries([entry], namespace),
-          tool_count: item.type === 'tool' ? 1 : 0,
+          tool_count: item.type === 'tool' || item.type === 'helper_result' ? 1 : 0,
         }
       }
       const summary = mergePositionedActivityEntries(

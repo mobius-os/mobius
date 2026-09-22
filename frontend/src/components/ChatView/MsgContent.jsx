@@ -8,7 +8,11 @@ import {
 } from './activityPosition.js'
 import { ProgressiveMarkdown, StandardMarkdown } from './markdown/BlockRenderer.jsx'
 import ActivityStretch from './ActivityStretch.jsx'
-import { groupActivityRuns, coalesceThinkingEntries } from './groupBlocks.js'
+import {
+  activitySummaryTools,
+  groupActivityRuns,
+  coalesceThinkingEntries,
+} from './groupBlocks.js'
 import QuestionCard from './QuestionCard.jsx'
 import { isDurableRestartOffer } from './restartCard.js'
 import SecureInputCard from './SecureInputCard.jsx'
@@ -283,8 +287,8 @@ function MsgContentInner({
         )
         if (visibleEntries.length === 0) return null
         const omittedToolCount = (
-          block.entries.filter(({ item }) => item?.type === 'tool').length
-          - baseEntries.filter(({ item }) => item?.type === 'tool').length
+          activitySummaryTools(block.entries).length
+          - activitySummaryTools(baseEntries).length
         )
         const hiddenLegacyRestartCount = ownsLegacyRestart ? 1 : 0
         const summaryToolCount = Number.isFinite(block.tool_count)
@@ -295,9 +299,9 @@ function MsgContentInner({
                 hiddenLegacyRestartCount,
               ),
             )
-          : baseEntries.filter(({ item }) => item?.type === 'tool').length
+          : activitySummaryTools(baseEntries).length
         const visibleToolCount = summaryToolCount
-          + positionedEntries.filter(({ item }) => item?.type === 'tool').length
+          + activitySummaryTools(positionedEntries).length
         return (
           <div
             key={block.activity_id || `activity-${i}`}

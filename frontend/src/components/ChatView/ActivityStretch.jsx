@@ -7,6 +7,7 @@ import {
   activityDisplayState,
   activityMemoSig,
   activityCollapsedLabel,
+  activitySummaryTools,
   thoughtDurationLabel,
 } from './groupBlocks.js'
 import { toolActivityIcon, effectiveToolName } from './toolActivityLabel.js'
@@ -19,6 +20,7 @@ import { useThinkingTrace } from './useThinkingTrace.js'
 import { useDisclosureState } from './disclosureState.js'
 import { mergePositionedActivityEntries } from './activityPosition.js'
 import { restartCardActivityEntries } from './streamReducers.js'
+import HelperResultCard from './HelperResultCard.jsx'
 
 // One collapsible activity line standing in for a MULTI-STEP contiguous stretch
 // of thinking and tool blocks, so a build turn's pre-prose burst reads as one
@@ -141,6 +143,9 @@ function SingleActivity({ entry, chatId, live, surfaceKey, onInternalNav }) {
         live={live}
       />
     )
+  }
+  if (item.type === 'helper_result') {
+    return <HelperResultCard event={item} chatId={chatId} onInternalNav={onInternalNav} />
   }
   return (
     <ToolBlock
@@ -288,9 +293,9 @@ function GroupedActivityStretch({
   // The line's glyph matches its LEADING label word: the currently-running
   // tool's activity while one runs (toolGroupSummary leads with it), else the
   // first-seen activity (the past-tense sentence leads with that).
-  const leadTool = [...entries].reverse()
-    .find(e => e?.item?.type === 'tool' && e.item.status === 'running')?.item
-    || entries.find(e => e?.item?.type === 'tool')?.item
+  const summaryTools = activitySummaryTools(entries)
+  const leadTool = [...summaryTools].reverse().find(tool => tool.status === 'running')
+    || summaryTools[0]
   const leadToolIcon = toolActivityIcon(effectiveToolName(leadTool))
 
   // A delegating turn's Task/Agent tool blocks carry a `.subagent` map of live
@@ -328,9 +333,7 @@ function GroupedActivityStretch({
   const sig = activityMemoSig(entries, { liveThinkingTail })
 
   const meta = useMemo(() => {
-    const tools = entries
-      .filter(e => e?.item?.type === 'tool')
-      .map(e => e.item)
+    const tools = activitySummaryTools(entries)
     const state = activityStreamState(tools, { liveThinkingTail })
     return {
       state,
@@ -468,6 +471,16 @@ function GroupedActivityStretch({
                 thought={item}
                 chatId={chatId}
                 disclosureKey={`${surfaceKey}:thought:${key}`}
+              />
+            )
+          }
+          if (item.type === 'helper_result') {
+            return (
+              <HelperResultCard
+                key={item.activityId || item.id || idx}
+                event={item}
+                chatId={chatId}
+                onInternalNav={onInternalNav}
               />
             )
           }
