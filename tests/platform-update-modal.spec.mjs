@@ -7,10 +7,24 @@
  * Run: scripts/playwright-local.sh --allow-local-e2e tests/platform-update-modal.spec.mjs
  */
 import { test, expect } from '@playwright/test'
+import { createTaggedChat, attachCleanup } from './_chatTracker.mjs'
+import * as paneModel from '../frontend/src/components/Shell/paneModel.js'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
 
 test.use({ serviceWorkers: 'block' })
+attachCleanup()
+
+async function seedTwoPaneWorkspace(page, leftChatId, rightChatId) {
+  let workspace = paneModel.setViewMode(paneModel.seedFromFlatTabs([
+    { kind: 'chat', id: leftChatId }, { kind: 'chat', id: rightChatId },
+  ]), 'panes')
+  workspace = paneModel.moveTab(workspace, `chat:${rightChatId}`, { root: true, edge: 'right' })
+  workspace = paneModel.focusPane(workspace, 'p0')
+  await page.addInitScript(([key, value]) => {
+    localStorage.setItem(key, value)
+  }, [paneModel.STORAGE_KEY, paneModel.serializeWorkspace(workspace)])
+}
 
 function platformStatus(state = 'available', overrides = {}) {
   return {
@@ -130,6 +144,44 @@ async function openUpdateReview(page) {
   await expect(dialog.getByRole('button', { name: 'Apply update' })).toBeEnabled()
   return dialog
 }
+
+test('review backdrop is owned by its tiled Settings pane', async ({ page }) => {
+  const state = { current: 'available' }
+  await mockPlatform(page, state)
+  await page.setViewportSize({ width: 1400, height: 900 })
+  await page.goto(BASE, { waitUntil: 'domcontentloaded' })
+  const left = await createTaggedChat(page, 'updatePaneLeft')
+  const right = await createTaggedChat(page, 'updatePaneRight')
+  await seedTwoPaneWorkspace(page, left.id, right.id)
+  await page.goto(`${BASE}/shell/?chat=${left.id}`, { waitUntil: 'domcontentloaded' })
+  await expect(page.locator('.workspace__chrome')).toBeVisible({ timeout: 8000 })
+
+  const navigationToggle = page.getByLabel('Toggle navigation')
+  if (await navigationToggle.getAttribute('aria-expanded') !== 'true') {
+    await navigationToggle.click()
+  }
+  await page.getByRole('button', { name: 'Settings', exact: true }).click()
+  const settingsPane = page.locator('[data-tab-key="settings:settings"].shell__settings-view')
+  await expect(settingsPane).toBeVisible()
+  const siblingPane = page.locator('.workspace__pane').filter({ hasNot: settingsPane }).first()
+
+  await page.getByRole('button', { name: 'Review update', exact: true }).click()
+  const overlay = settingsPane.locator('.urm__overlay')
+  const dialog = overlay.getByRole('dialog', { name: 'Review update' })
+  await expect(dialog).toBeVisible()
+
+  const [settingsBox, overlayBox, dialogBox, siblingBox] = await Promise.all([
+    settingsPane.boundingBox(), overlay.boundingBox(), dialog.boundingBox(), siblingPane.boundingBox(),
+  ])
+  for (const box of [settingsBox, overlayBox, dialogBox, siblingBox]) expect(box).not.toBeNull()
+  expect(Math.abs(overlayBox.x - settingsBox.x)).toBeLessThanOrEqual(1)
+  expect(Math.abs(overlayBox.y - settingsBox.y)).toBeLessThanOrEqual(1)
+  expect(Math.abs(overlayBox.width - settingsBox.width)).toBeLessThanOrEqual(1)
+  expect(Math.abs(overlayBox.height - settingsBox.height)).toBeLessThanOrEqual(1)
+  expect(Math.abs(dialogBox.x + dialogBox.width / 2 - (settingsBox.x + settingsBox.width / 2))).toBeLessThanOrEqual(1)
+  expect(Math.abs(dialogBox.y + dialogBox.height / 2 - (settingsBox.y + settingsBox.height / 2))).toBeLessThanOrEqual(1)
+  expect(overlayBox.x + overlayBox.width).toBeLessThanOrEqual(siblingBox.x + 1)
+})
 
 test('an incomplete activation preview offers no update action', async ({ page }) => {
   const state = { current: 'available', preview: {
