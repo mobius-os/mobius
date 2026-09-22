@@ -339,6 +339,37 @@ def test_install_repo_dir_rejects_unsupported_entries_without_truncating(
   assert not (skills_dir / skills_mod.INSTALLED_SKILLS_SIDECAR).exists()
 
 
+def test_install_rejects_non_utf8_extensionless_script_resource(
+  client, auth, skills_dir, monkeypatch,
+):
+  """An extensionless scripts/ path is admitted by the resource contract, so the
+  UTF-8 gate is the only control that keeps a binary blob from being installed
+  and marked executable under shared/skills. Exercise that reject branch — the
+  launcher happy path only proves the accept side."""
+  from app.routes import skills as rs
+
+  raw = f"https://raw.githubusercontent.com/o/r/{PINNED}/strict"
+  binary = b"\x7fELF\x02\x01\x01\x00\xff\xfe"  # not decodable as UTF-8
+  tree = [
+    {"type": "blob", "path": "SKILL.md", "size": 20},
+    {"type": "blob", "path": "scripts/tool", "size": len(binary), "mode": "100755"},
+  ]
+  _dir_install_mocks(monkeypatch, rs, tree, {
+    f"{raw}/SKILL.md": b"---\nname: strict\n---\n",
+    f"{raw}/scripts/tool": binary,
+  })
+
+  response = client.post(
+    "/api/skills/install", headers=auth,
+    json={"repo": "o/r", "path": "strict", "ref": "main"},
+  )
+
+  assert response.status_code == 400, response.text
+  assert "not UTF-8" in response.json()["detail"]
+  assert not (skills_dir / "strict").exists()
+  assert not (skills_dir / skills_mod.INSTALLED_SKILLS_SIDECAR).exists()
+
+
 def test_install_repo_dir_rejects_duplicate_case_variants_of_skill_md(
   client, auth, skills_dir, monkeypatch,
 ):
@@ -1240,6 +1271,136 @@ def test_finalize_failure_is_truthful_and_self_heals(
   )
   assert r.status_code == 201, r.text
   assert "status" not in _sidecar(skills_dir)["tips"]
+
+
+def _write_updating_intent(skills_dir, *, old_bytes, new_bytes, previous):
+  """Persist a mid-update `updating` sidecar intent for reconcile_installed.
+
+  Returns the staging/backup dir handles so each state test can stage exactly
+  the on-disk combination its crash point would have left behind."""
+  old_digest = skills_mod.tree_digest_from_files({"SKILL.md": old_bytes})
+  new_digest = skills_mod.tree_digest_from_files({"SKILL.md": new_bytes})
+  staging = skills_dir / ".staging-demo"
+  backup = skills_dir / ".backup-demo"
+  (skills_dir / skills_mod.INSTALLED_SKILLS_SIDECAR).write_text(json.dumps({
+    "demo": {
+      "source": "o/r", "repo": "o/r", "path": "skills/demo",
+      "ref": "main", "commit": PINNED, "tree_digest": new_digest,
+      "status": "updating", "staging": staging.name, "backup": backup.name,
+      "previous_record": previous, "previous_tree_digest": old_digest,
+    },
+  }))
+  return staging, backup
+
+
+def _make_tree(path, content):
+  path.mkdir()
+  (path / "SKILL.md").write_bytes(content)
+
+
+def test_reconcile_update_intent_before_rename_discards_staging_and_restores(
+  skills_dir,
+):
+  """Crash after the intent write but before any rename: the live tree is still
+  the old one, the candidate sits only in staging. Reconcile must drop the
+  staging tree and restore the pre-update record without touching the target."""
+  old = b"---\nname: demo\nversion: 1\n---\nold\n"
+  new = b"---\nname: demo\nversion: 2\n---\nnew\n"
+  previous = {"source": "o/r", "repo": "o/r", "path": "skills/demo",
+              "ref": "main", "commit": "a" * 40,
+              "tree_digest": skills_mod.tree_digest_from_files({"SKILL.md": old})}
+  staging, _backup = _write_updating_intent(
+    skills_dir, old_bytes=old, new_bytes=new, previous=previous,
+  )
+  _make_tree(skills_dir / "demo", old)
+  _make_tree(staging, new)
+
+  repaired = skills_mod.reconcile_installed(skills_dir)
+
+  assert repaired == ["demo"]
+  assert not staging.exists()
+  assert (skills_dir / "demo" / "SKILL.md").read_bytes() == old
+  assert _sidecar(skills_dir)["demo"] == previous
+
+
+def test_reconcile_update_after_backup_rename_rolls_back_to_previous(skills_dir):
+  """Crash after the old tree moved to backup but before the candidate was
+  published: the target is missing. Reconcile must move the backup back into
+  place, discard staging, and restore the pre-update record."""
+  old = b"---\nname: demo\nversion: 1\n---\nold\n"
+  new = b"---\nname: demo\nversion: 2\n---\nnew\n"
+  previous = {"source": "o/r", "repo": "o/r", "path": "skills/demo",
+              "ref": "main", "commit": "a" * 40,
+              "tree_digest": skills_mod.tree_digest_from_files({"SKILL.md": old})}
+  staging, backup = _write_updating_intent(
+    skills_dir, old_bytes=old, new_bytes=new, previous=previous,
+  )
+  _make_tree(staging, new)
+  _make_tree(backup, old)
+
+  repaired = skills_mod.reconcile_installed(skills_dir)
+
+  assert repaired == ["demo"]
+  assert not staging.exists()
+  assert not backup.exists()
+  assert (skills_dir / "demo" / "SKILL.md").read_bytes() == old
+  assert _sidecar(skills_dir)["demo"] == previous
+
+
+def test_reconcile_update_published_finalizes_new_record_and_removes_backup(
+  skills_dir,
+):
+  """Crash after the candidate was published but before cleanup/finalize: the
+  new tree is live and the old tree lingers in backup. Reconcile must finalize
+  the new record and remove the stale backup, never discarding the new tree."""
+  old = b"---\nname: demo\nversion: 1\n---\nold\n"
+  new = b"---\nname: demo\nversion: 2\n---\nnew\n"
+  previous = {"source": "o/r", "repo": "o/r", "path": "skills/demo",
+              "ref": "main", "commit": "a" * 40,
+              "tree_digest": skills_mod.tree_digest_from_files({"SKILL.md": old})}
+  _staging, backup = _write_updating_intent(
+    skills_dir, old_bytes=old, new_bytes=new, previous=previous,
+  )
+  _make_tree(skills_dir / "demo", new)
+  _make_tree(backup, old)
+
+  repaired = skills_mod.reconcile_installed(skills_dir)
+
+  assert repaired == ["demo"]
+  assert not backup.exists()
+  assert (skills_dir / "demo" / "SKILL.md").read_bytes() == new
+  rec = _sidecar(skills_dir)["demo"]
+  for marker in ("status", "staging", "backup", "previous_record",
+                 "previous_tree_digest"):
+    assert marker not in rec
+  assert rec["tree_digest"] == skills_mod.tree_digest_from_files({"SKILL.md": new})
+  assert rec["commit"] == PINNED
+
+
+def test_reconcile_update_ambiguous_state_keeps_intent_and_deletes_nothing(
+  skills_dir,
+):
+  """An unmodeled combination (both target and staging present with digests
+  that match neither transition) is corruption or a squatting dir. Reconcile
+  must keep the intent and every surviving tree for deliberate repair."""
+  old = b"---\nname: demo\nversion: 1\n---\nold\n"
+  new = b"---\nname: demo\nversion: 2\n---\nnew\n"
+  other = b"---\nname: demo\nversion: 9\n---\nunexpected\n"
+  previous = {"source": "o/r", "repo": "o/r", "path": "skills/demo",
+              "ref": "main", "commit": "a" * 40,
+              "tree_digest": skills_mod.tree_digest_from_files({"SKILL.md": old})}
+  staging, _backup = _write_updating_intent(
+    skills_dir, old_bytes=old, new_bytes=new, previous=previous,
+  )
+  _make_tree(skills_dir / "demo", other)  # neither old nor new
+  _make_tree(staging, new)
+
+  repaired = skills_mod.reconcile_installed(skills_dir)
+
+  assert repaired == []
+  assert staging.exists()
+  assert (skills_dir / "demo" / "SKILL.md").read_bytes() == other
+  assert _sidecar(skills_dir)["demo"]["status"] == "updating"
 
 
 # --- truthfulness: usage keying + install identity + API exposure ---
