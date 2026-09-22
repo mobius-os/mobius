@@ -207,12 +207,11 @@ def resolve_background_chat_choice(
     data_dir, db, prefer_provider=prefer_provider,
   )
   provider = str(choice["provider"])
+  # A background choice with no pinned model means the provider's background
+  # default, not the interactive model currently stored in owner settings.
+  model = choice.get("model") or providers.DEFAULT_BACKGROUND_MODELS.get(provider)
   selection = providers.snapshot_chat_agent_settings(
-    data_dir,
-    provider,
-    model=choice.get("model"),
-    effort=choice.get("effort"),
-    fallback_model=providers.DEFAULT_BACKGROUND_MODELS.get(provider),
+    data_dir, provider, model=model, effort=choice.get("effort"),
   )
   if selection is None:
     raise RuntimeError("Background provider resolved no explicit model")

@@ -172,3 +172,27 @@ def test_background_chat_choice_keeps_provider_model_and_effort_together(
       "effort": "xhigh",
     },
   }
+
+
+def test_background_chat_choice_uses_background_default_not_interactive_model(
+  tmp_path, db, monkeypatch,
+):
+  settings_dir = tmp_path / "shared"
+  settings_dir.mkdir(parents=True, exist_ok=True)
+  (settings_dir / "agent-settings.json").write_text(json.dumps({
+    "model": "gpt-5.5",
+    "background_agents": {"providers": [
+      {"provider": "codex", "model": None, "effort": "high", "enabled": True},
+    ]},
+  }))
+  _connect_all(monkeypatch)
+
+  choice = bg.resolve_background_chat_choice(str(tmp_path), db)
+
+  assert choice == {
+    "provider": "codex",
+    "agent_settings": {
+      "model": "gpt-5.6-terra",
+      "effort": "high",
+    },
+  }

@@ -3406,14 +3406,9 @@ async def patch_app_chat(
           status_code=422, detail=f"unknown provider: {body.provider}"
         )
       if chat.provider != body.provider:
-        if not provider_switch_allowed(chat):
-          raise HTTPException(
-            status_code=409,
-            detail=(
-              "This chat runs in the background and stays on its original "
-              "provider; its provider can't be switched."
-            ),
-          )
+        # This app-owned setup endpoint is distinct from the owner picker:
+        # the creating app may still correct an empty chat's provider before
+        # its first turn. Once work starts, the lifecycle gate below pins it.
         if (
           is_chat_running(chat_id)
           or chat.pending_messages
