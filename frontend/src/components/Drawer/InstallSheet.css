@@ -159,9 +159,11 @@
 }
 
 .is__error-action {
-  display: block;
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
   margin-top: 8px;
-  padding: 0;
+  padding: 8px 0;
   border: 0;
   background: transparent;
   color: inherit;
