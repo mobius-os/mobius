@@ -8,7 +8,7 @@ import { assistantAnchorKey, messageKey } from '../../../lib/chatDetailCache.js'
 import {
   assistantStreamBelongsToActiveMessage,
   streamItemsToAssistantPayload,
-  carryQuestionAnswers,
+  carryDurableBlockState,
   promoteAssistantStream,
   promoteAssistantStreamWithFollowingMessages,
   assistantStreamCoversMessage,
@@ -91,7 +91,7 @@ test('active live payload keeps a durable answer while retaining newer replay ou
     { type: 'tool', tool: 'Bash', status: 'running', input: 'verify head' },
     { type: 'text', content: 'The protected queue is still running.' },
   ], { finalize: false })
-  payload.blocks = carryQuestionAnswers(payload.blocks, [
+  payload.blocks = carryDurableBlockState(payload.blocks, [
     { type: 'text', content: 'The remote is unchanged.' },
     { ...question, answers },
   ])
@@ -113,7 +113,7 @@ test('a durable answer overrides conflicting optimistic replay state', () => {
   const savedAnswers = { 'Which direction?': 'Keep the durable choice' }
   const liveAnswers = { 'Which direction?': 'Stale optimistic choice' }
 
-  const [carried] = carryQuestionAnswers(
+  const [carried] = carryDurableBlockState(
     [{ ...question, answers: liveAnswers }],
     [{ ...question, answers: savedAnswers }],
   )
@@ -129,7 +129,7 @@ test('an empty saved answer map cannot erase newer live answer state', () => {
   }
   const liveAnswers = { 'Which direction?': 'Accepted live choice' }
 
-  const [carried] = carryQuestionAnswers(
+  const [carried] = carryDurableBlockState(
     [{ ...question, answers: liveAnswers }],
     [{ ...question, answers: {} }],
   )
@@ -147,7 +147,7 @@ test('a durable restart action survives blank live question replay', () => {
     type: 'restart', version: 1, action_id: 'exact-source', status: 'activated',
   }
 
-  const [carried] = carryQuestionAnswers(
+  const [carried] = carryDurableBlockState(
     [question],
     [{ ...question, platform_action: platformAction }],
   )
@@ -156,6 +156,47 @@ test('a durable restart action survives blank live question replay', () => {
   assert.equal(streamItemToBlock({
     ...question, platform_action: platformAction,
   }).platform_action, platformAction)
+})
+
+test('a durable generated file survives a sparse live tool replay', () => {
+  const durableFile = {
+    name: 'report.pdf', size: 700, mime_type: 'application/pdf',
+  }
+  const [carried] = carryDurableBlockState(
+    [{
+      type: 'tool', tool: 'Bash', tool_use_id: 'tool-pdf', status: 'done',
+    }],
+    [{
+      type: 'tool', tool: 'Bash', tool_use_id: 'tool-pdf', status: 'done',
+      generated_files: [durableFile],
+    }],
+  )
+
+  assert.deepEqual(carried.generated_files, [durableFile])
+})
+
+test('final promotion cannot erase a generated-file card from its durable row', () => {
+  const durableFile = {
+    name: 'report.pdf', size: 700, mime_type: 'application/pdf',
+  }
+  const messages = [{
+    id: 'assistant-pdf',
+    role: 'assistant',
+    content: 'Creating it.',
+    blocks: [{
+      type: 'tool', tool: 'Bash', tool_use_id: 'tool-pdf', status: 'done',
+      generated_files: [durableFile],
+    }],
+  }]
+
+  const [promoted] = promoteAssistantStream(messages, {
+    assistantMessageId: 'assistant-pdf',
+    items: [{
+      type: 'tool', tool: 'Bash', tool_use_id: 'tool-pdf', status: 'done',
+    }, { type: 'text', content: 'Created report.pdf.' }],
+  })
+
+  assert.deepEqual(promoted.blocks[0].generated_files, [durableFile])
 })
 
 test('context compaction survives live promotion as its own block', () => {

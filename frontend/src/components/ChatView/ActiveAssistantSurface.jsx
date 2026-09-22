@@ -3,7 +3,7 @@
 import { memo, useMemo } from 'react'
 import StreamingMessage from './StreamingMessage.jsx'
 import {
-  carryQuestionAnswers,
+  carryDurableBlockState,
   streamItemsToAssistantPayload,
 } from './streamPromotion.js'
 import { projectSteerContinuationMessage } from './steerContinuity.js'
@@ -62,7 +62,7 @@ function ActiveAssistantSurface({
         // replay can be richer overall while still carrying the original blank
         // form of a question whose answer has already committed.
         ...livePayload,
-        blocks: carryQuestionAnswers(
+        blocks: carryDurableBlockState(
           livePayload.blocks,
           activeMirrorMsg?.blocks || [],
         ),
