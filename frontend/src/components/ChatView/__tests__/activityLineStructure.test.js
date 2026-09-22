@@ -86,7 +86,7 @@ test('every thinking entry remains the same collapsed nested disclosure', () => 
 })
 
 test('a single self-contained activity discloses directly without a redundant parent row', () => {
-  assert.match(activityStretch, /if \(entries\.length === 1 && !detailRef && !loneHasHelpers\)/,
+  assert.match(activityStretch, /if \(entries\.length === 1 && !detailRef && !detailSegments && !loneHasHelpers\)/,
     'a lone ordinary entry stays direct while a named delegation earns hierarchy')
   assert.match(activityStretch, /<SingleActivity[\s\S]*entry=\{entries\[0\]\}/)
   assert.match(activityStretch,
