@@ -25,10 +25,18 @@ from sqlalchemy.orm import Session, defer
 from sqlalchemy.orm.attributes import flag_modified
 
 from app import (
-  auth, drawer_pins, fs_locks, github_auth, models, project_builders,
+  auth, chat_queue, drawer_pins, fs_locks, github_auth, models,
+  project_builders, schemas,
   project_drawer, project_git, providers, questions, workspace_files,
 )
 from app.broadcast import get_system_broadcast
+from app.recovery_notifications import (
+  complete_recovery_action,
+  publish_recovery_notification,
+  recovery_resource_generation,
+  validate_recovery_action,
+  stage_recovery_notification,
+)
 from app.chat import (
   _finish_run,
   bump_run_generation,
@@ -47,7 +55,7 @@ from app.path_utils import validate_path_within_base
 from app.project_activity import append_project_change, project_change_view
 from app.project_templates import LINKED_APP_GUIDANCE, linked_app_id
 from app.theme import DEFAULT_THEME, theme_data
-from app.project_retention import PROJECT_LIFECYCLE_LOCK
+from app.project_retention import PROJECT_LIFECYCLE_LOCK, serialize_project_lifecycle
 from app.timeutil import now_naive_utc, SOFT_DELETE_TTL
 
 
@@ -1930,40 +1938,45 @@ def send_project_agent_message(
   "/{project_id}/chats", status_code=201,
   dependencies=[Depends(reject_cross_site)],
 )
-def create_project_chat(
+async def create_project_chat(
   project_id: str,
   body: ProjectChatCreate,
   owner: models.Owner = Depends(get_current_owner),
   db: Session = Depends(get_db),
 ):
-  project = _live_project(db, project_id)
-  chat_id = (
-    str(uuid.uuid5(uuid.UUID(project.id), body.recovery_request_id))
-    if body.recovery_request_id
-    else str(uuid.uuid4())
-  )
-  existing = db.get(models.Chat, chat_id)
-  if existing is not None:
-    if existing.deleted_at is not None:
-      raise HTTPException(409, "Project chat was deleted.")
-    if existing.project_id != project.id:
-      raise HTTPException(409, "Chat identity is already in use.")
-    return _project_chat_response(existing)
-  chat = _new_chat(
-    db, chat_id=chat_id, title=body.title, owner=owner,
-    project_id=project.id,
-  )
-  db.add(chat)
-  project.updated_at = now_naive_utc()
-  try:
-    db.commit()
-  except IntegrityError:
+  async with serialize_project_lifecycle(project_id):
+    project = _live_project(db, project_id)
+    chat_id = (
+      str(uuid.uuid5(uuid.UUID(project.id), body.recovery_request_id))
+      if body.recovery_request_id
+      else str(uuid.uuid4())
+    )
     db.rollback()
-    existing = db.get(models.Chat, chat_id)
-    if existing is None or existing.project_id != project.id:
-      raise
-    return _project_chat_response(existing)
-  db.refresh(chat)
+    async with chat_queue.get_transition_lock(chat_id):
+      with PROJECT_LIFECYCLE_LOCK:
+        project = _live_project(db, project_id)
+        existing = db.get(models.Chat, chat_id)
+        if existing is not None:
+          if existing.deleted_at is not None:
+            raise HTTPException(409, "Project chat was deleted.")
+          if existing.project_id != project.id:
+            raise HTTPException(409, "Chat identity is already in use.")
+          return _project_chat_response(existing)
+        chat = _new_chat(
+          db, chat_id=chat_id, title=body.title, owner=owner,
+          project_id=project.id,
+        )
+        db.add(chat)
+        project.updated_at = now_naive_utc()
+        try:
+          db.commit()
+        except IntegrityError:
+          db.rollback()
+          existing = db.get(models.Chat, chat_id)
+          if existing is None or existing.project_id != project.id:
+            raise
+          return _project_chat_response(existing)
+        db.refresh(chat)
   get_system_broadcast().publish({
     "type": "project_chat_created",
     "projectId": str(project.id),
@@ -2068,102 +2081,167 @@ def patch_project(
 )
 async def delete_project(
   project_id: str,
-  _: models.Owner = Depends(get_current_owner_for_lifecycle_control),
+  owner: models.Owner = Depends(get_current_owner_for_lifecycle_control),
   db: Session = Depends(get_db),
 ):
-  project = _live_project(db, project_id)
-  chats = db.query(models.Chat).filter(
-    models.Chat.project_id == project.id,
-    models.Chat.deleted_at.is_(None),
-  ).all()
-  for chat in chats:
-    if is_chat_running(chat.id):
-      try:
-        stopped, _ = await stop_chat_for(chat.id, db=db)
-      except Exception:
-        log.warning("Failed to stop project chat %s during delete", chat.id)
-        stopped = False
-      if not stopped:
-        raise HTTPException(
-          409, "Could not stop an active project agent; retry."
+  # The receipt is readable as soon as the tombstone commits. Recovery must
+  # wait until tokenless child cleanup can no longer retire a restored run.
+  async with serialize_project_lifecycle(project_id):
+    project = _live_project(db, project_id)
+    chats = db.query(models.Chat).filter(
+      models.Chat.project_id == project.id,
+      models.Chat.deleted_at.is_(None),
+    ).all()
+    chat_ids = [str(chat.id) for chat in chats]
+    db.rollback()
+    for chat_id in chat_ids:
+      if is_chat_running(chat_id):
+        try:
+          stopped, _ = await stop_chat_for(chat_id, db=db)
+        except Exception:
+          log.warning("Failed to stop project chat %s during delete", chat_id)
+          stopped = False
+        if not stopped:
+          raise HTTPException(
+            409, "Could not stop an active project agent; retry."
+          )
+    # One timestamp and one commit make the project and all currently-live chats
+    # a recovery unit. Chats deleted earlier keep their own tombstone and are not
+    # unexpectedly recovered with the project.
+    with PROJECT_LIFECYCLE_LOCK:
+      with drawer_pins.serialized_write():
+        db.rollback()
+        project = _live_project(db, project_id)
+        chats = db.query(models.Chat).filter(
+          models.Chat.project_id == project_id,
+          models.Chat.deleted_at.is_(None),
+        ).all()
+        chat_ids = [str(chat.id) for chat in chats]
+        for chat_id in chat_ids:
+          bump_run_generation(chat_id)
+        deleted_at = now_naive_utc()
+        project.deleted_at = deleted_at
+        from app.shared_app_retention import stage_project_shared_app_delete
+        stage_project_shared_app_delete(db, str(project.id), deleted_at)
+        from app.chat_waits import stage_cancel_waits_for_chat
+        for chat in chats:
+          stage_cancel_waits_for_chat(db, chat.id)
+          chat.deleted_at = deleted_at
+        recovery_notification_id = stage_recovery_notification(
+          db,
+          owner_id=owner.id,
+          resource_type="project",
+          resource_id=str(project.id),
+          resource_generation=recovery_resource_generation(
+            "project", project.created_at,
+          ),
+          deleted_at=project.deleted_at,
+          expires_at=project.deleted_at + SOFT_DELETE_TTL,
+          resource_name=project.name or "Untitled project",
         )
-  # One timestamp and one commit make the project and all currently-live chats
-  # a recovery unit. Chats deleted earlier keep their own tombstone and are not
-  # unexpectedly recovered with the project.
-  for chat in chats:
-    bump_run_generation(chat.id)
-  with PROJECT_LIFECYCLE_LOCK:
-    with drawer_pins.serialized_write():
-      deleted_at = now_naive_utc()
-      project.deleted_at = deleted_at
-      from app.shared_app_retention import stage_project_shared_app_delete
-      stage_project_shared_app_delete(db, str(project.id), deleted_at)
-      from app.chat_waits import stage_cancel_waits_for_chat
-      for chat in chats:
-        stage_cancel_waits_for_chat(db, chat.id)
-        chat.deleted_at = deleted_at
-      db.commit()
-  for chat in chats:
-    questions.cancel(chat.id)
-    mark_chat_deleted(chat.id)
-    try:
-      await _finish_run(chat.id, terminal_status="stopped")
-    except Exception:
-      log.exception(
-        "Project %s was deleted but chat %s run cleanup failed",
-        project.id, chat.id,
+        db.commit()
+    from app import secure_inputs
+    for chat_id in chat_ids:
+      questions.cancel(chat_id)
+      secure_inputs.cancel_chat(chat_id)
+      mark_chat_deleted(chat_id)
+      try:
+        await _finish_run(chat_id, terminal_status="stopped")
+      except Exception:
+        log.exception(
+          "Project %s was deleted but chat %s run cleanup failed",
+          project_id, chat_id,
+        )
+      get_system_broadcast().publish(
+        {"type": "chat_deleted", "chatId": chat_id}
       )
-    get_system_broadcast().publish(
-      {"type": "chat_deleted", "chatId": str(chat.id)}
-    )
-  get_system_broadcast().publish({
-    "type": "project_deleted",
-    "projectId": str(project.id),
-    "chatIds": [str(chat.id) for chat in chats],
-  })
-  return Response(status_code=204)
+    get_system_broadcast().publish({
+      "type": "project_deleted",
+      "projectId": project_id,
+      "chatIds": chat_ids,
+    })
+    publish_recovery_notification(recovery_notification_id)
+    return Response(status_code=204, headers={
+      "X-Recovery-Notification-Id": recovery_notification_id,
+    })
 
 
 @router.post("/{project_id}/recover", dependencies=[Depends(reject_cross_site)])
-def recover_project(
+async def recover_project(
   project_id: str,
-  _: models.Owner = Depends(get_current_owner_for_lifecycle_control),
+  body: schemas.RecoveryRequest | None = None,
+  owner: models.Owner = Depends(get_current_owner_for_lifecycle_control),
   db: Session = Depends(get_db),
 ):
-  with PROJECT_LIFECYCLE_LOCK:
-    with drawer_pins.serialized_write():
-      project = db.query(models.Project).filter(
-        models.Project.id == project_id,
-        models.Project.deleted_at.isnot(None),
-      ).first()
-      if project is None:
-        raise HTTPException(404, "Project not found or not deleted.")
-      if now_naive_utc() - project.deleted_at >= SOFT_DELETE_TTL:
-        raise HTTPException(410, "Recovery window has expired.")
-      if not _project_root(project).is_dir():
-        raise HTTPException(409, "Project files are unavailable.")
-      deleted_at = project.deleted_at
-      from app.shared_app_retention import stage_project_shared_app_recovery
-      stage_project_shared_app_recovery(db, str(project.id), deleted_at)
-      chats = db.query(models.Chat).filter(
-        models.Chat.project_id == project.id,
-        models.Chat.deleted_at == deleted_at,
-      ).all()
-      project.deleted_at = None
-      for chat in chats:
-        chat.deleted_at = None
-      db.commit()
-  for chat in chats:
-    recover_chat_generation(chat.id)
-    get_system_broadcast().publish(
-      {"type": "chat_recovered", "chatId": str(chat.id)}
-    )
-  get_system_broadcast().publish({
-    "type": "project_recovered",
-    "projectId": str(project.id),
-    "chatIds": [str(chat.id) for chat in chats],
-  })
-  return _project_response(project, chats)
+  async with serialize_project_lifecycle(project_id):
+    completed_at = None
+    already_completed = False
+    with PROJECT_LIFECYCLE_LOCK:
+      with drawer_pins.serialized_write():
+        db.rollback()
+        project = db.query(models.Project).filter(
+          models.Project.id == project_id,
+        ).first()
+        if project is None:
+          raise HTTPException(404, "Project not found.")
+        if body is not None:
+          completed_at = validate_recovery_action(
+            db, owner_id=owner.id, notification_id=body.notification_id,
+            resource_type="project", resource_id=str(project_id),
+            resource_generation=recovery_resource_generation(
+              "project", project.created_at,
+            ),
+            deleted_at=project.deleted_at,
+          )
+          already_completed = completed_at is not None
+        if already_completed:
+          chats = _live_project_chat_rows(db, project.id)
+        else:
+          if project.deleted_at is None:
+            raise HTTPException(404, "Project not found or not deleted.")
+          if now_naive_utc() - project.deleted_at >= SOFT_DELETE_TTL:
+            raise HTTPException(410, "Recovery window has expired.")
+          if not _project_root(project).is_dir():
+            raise HTTPException(409, "Project files are unavailable.")
+          deleted_at = project.deleted_at
+          from app.shared_app_retention import stage_project_shared_app_recovery
+          stage_project_shared_app_recovery(db, str(project.id), deleted_at)
+          chats = db.query(models.Chat).filter(
+            models.Chat.project_id == project.id,
+            models.Chat.deleted_at == deleted_at,
+          ).all()
+          project.deleted_at = None
+          for chat in chats:
+            chat.deleted_at = None
+          if body is not None:
+            completed_at = complete_recovery_action(
+              db,
+              owner_id=owner.id,
+              notification_id=body.notification_id,
+              resource_type="project",
+              resource_id=str(project.id),
+              resource_generation=recovery_resource_generation(
+                "project", project.created_at,
+              ),
+            )
+          db.commit()
+    # Repeat these idempotent post-commit steps for a completed receipt. The
+    # first request may have committed the database transaction and then lost
+    # its response before the in-memory registry or live shell converged.
+    for chat in chats:
+      recover_chat_generation(chat.id)
+      get_system_broadcast().publish(
+        {"type": "chat_recovered", "chatId": str(chat.id)}
+      )
+    get_system_broadcast().publish({
+      "type": "project_recovered",
+      "projectId": str(project.id),
+      "chatIds": [str(chat.id) for chat in chats],
+    })
+    response = _project_response(project, chats)
+    if completed_at is not None:
+      response["completed_at"] = completed_at
+    return response
 
 
 @router.get("/{project_id}/files")

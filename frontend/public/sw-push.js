@@ -44,8 +44,15 @@ self.addEventListener('push', (e) => {
     // Android renders `badge` as the tiny monochrome status-bar glyph.
     // Keep it separate from the full-colour notification card icon.
     badge: '/icons/notification-badge.png',
-    data: { target: data.target || '/', actions: data.actions, title: data.title || '' },
-    actions: (data.actions || []).slice(0, 2).map(a => ({
+    data: {
+      target: data.target || '/',
+      actions: data.actions,
+      title: data.title || '',
+    },
+    // In-app recovery actions deliberately have no navigation target and stay
+    // in the durable bell history. OS action buttons can only navigate, so do
+    // not render an inert/misleading Undo button there.
+    actions: (data.actions || []).filter(a => a.target).slice(0, 2).map(a => ({
       action: a.action,
       title: a.title,
     })),

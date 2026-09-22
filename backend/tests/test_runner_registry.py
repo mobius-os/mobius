@@ -186,6 +186,8 @@ def test_recover_generation_resumes_strictly_newer_and_finite():
   assert recovered > 1, "recovery must resume strictly newer than any run"
   assert registry.current_generation("c") == recovered  # finite again
   assert registry.current_generation("c") != float("inf")
+  assert registry.recover_generation("c") == recovered
+  assert registry.current_generation("c") == recovered
 
 
 def test_forget_if_current_forgets_when_generation_still_owned():

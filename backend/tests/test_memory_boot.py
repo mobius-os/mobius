@@ -236,6 +236,7 @@ def test_controlled_skills_have_fix_forward_migrations():
     "309e5969df6f589cc82c17b450e7596a00bae87ef77ab2923a9b0de061ed146e",
     "6fa9c177db508ef05dfc73de224cd3f33350c79d8f807ac9909942d761f21103",
     "db0c1138ffd0890936ccdeba6ced4ccde867ba3044eeef0a5c87cdf2f279eaaa",
+    "8826cd584ee5fac754d92572e15883293ebbc59d47c83510e72d56d271ed3869",
   }
   assert module._UNMODIFIED_MIGRATIONS["building-apps.md"] == {
     "734a5fd00dcd58e53f6713a2663d0dd18dec92abcbcf767c7f02f894d92ee510",

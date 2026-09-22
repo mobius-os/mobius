@@ -48,7 +48,15 @@ from app.chat import (
   usage_limit_waiting_chat_ids,
 )
 from app.broadcast import get_system_broadcast
+from app.recovery_notifications import (
+  complete_recovery_action,
+  publish_recovery_notification,
+  recovery_resource_generation,
+  validate_recovery_action,
+  stage_recovery_notification,
+)
 from app.chat_retention import purge_expired_chat_tombstones
+from app.project_retention import serialize_project_lifecycle
 from app.chat_titles import (
   apply_generated_title,
   first_user_message_title,
@@ -2259,88 +2267,135 @@ def get_current_chat_usage(
 )
 async def delete_chat(
   chat_id: str,
-  _: models.Owner = Depends(get_current_owner_for_lifecycle_control),
+  owner: models.Owner = Depends(get_current_owner_for_lifecycle_control),
   db: Session = Depends(get_db),
 ):
   """Soft-deletes a chat and stops any running agent for it."""
   released_claims = []
-  from app.delegations import (
-    active_delegation_ids_for_chat,
-    cancel_delegation_execution,
-  )
+  recovery_notification_id = None
+  project_id = db.query(models.Chat.project_id).filter(models.Chat.id == chat_id).scalar()
   db.rollback()
-  for delegation_id in active_delegation_ids_for_chat(db, chat_id):
-    if not await cancel_delegation_execution(delegation_id):
-      raise HTTPException(
-        status_code=409,
-        detail=(
-          "Could not stop delegated work yet; retry chat deletion after the "
-          "active provider process exits."
-        ),
-      )
-  db.rollback()
-  db.expire_all()
-  # Only attempt to stop if the chat is actually running. An idle chat
-  # has no proc/SDK client/session to interrupt, so calling
-  # stop_chat_for would be a no-op — but a transient error during the
-  # no-op (DB hiccup, lookup glitch) would falsely 409 and make the
-  # chat un-deleteable. The 409 only fires when the chat WAS running
-  # and we couldn't stop it cleanly — that's the case we actually need
-  # to protect against (orphan runner writing to a soft-deleted row).
-  if is_chat_running(chat_id):
-    try:
-      stopped, _ = await stop_chat_for(chat_id, db=db)
-    except Exception:
-      log.warning("Failed to stop agent for chat %s during delete", chat_id)
-      stopped = False
-    if not stopped:
-      raise HTTPException(
-        status_code=409,
-        detail="Could not stop active agent; retry",
-      )
-  # Create and delete share the controller transition lock. Recheck after all
-  # potentially blocking stop I/O: a delegation that won the gap must prevent
-  # the tombstone, while a tombstone that wins here makes the creator's own
-  # locked active-chat recheck fail.
-  from app import chat_queue
-  async with chat_queue.get_transition_lock(chat_id):
+  async with serialize_project_lifecycle(project_id):
+    from app.delegations import (
+      active_delegation_ids_for_chat,
+      cancel_delegation_execution,
+    )
     db.rollback()
-    if active_delegation_ids_for_chat(db, chat_id):
-      raise HTTPException(
-        status_code=409,
-        detail=(
-          "Delegated work started while deletion was waiting; retry deletion."
-        ),
-      )
-    # Bump generation BEFORE the soft-delete commit so a run that raced the
-    # earlier liveness check bows out instead of writing onto the tombstone.
-    bump_run_generation(chat_id)
-    chat = db.query(models.Chat).filter(models.Chat.id == chat_id).first()
-    if chat:
-      with drawer_pins.serialized_write():
-        # Deleting a chat is owner intent to stop its future work too. Keep the
-        # wait/claim cleanup and tombstone in the same transaction, and begin
-        # that transaction only after the shared pin boundary is owned. A
-        # staged DELETE before this point could hold SQLite's writer lock while
-        # a reorder held this boundary and waited to commit.
-        from app.chat_waits import stage_cancel_waits_for_chat
-        from app.agent_work_claims import stage_release_claims_for_chat
-        stage_cancel_waits_for_chat(db, chat_id)
-        released_claims = stage_release_claims_for_chat(db, chat_id)
-        # A deleted follower no longer owns a Goal that should receive exact-
-        # action notices. Retire its interests with the tombstone so one stale
-        # recipient cannot poison fanout to healthy followers.
-        db.query(models.AgentWorkInterest).filter(
-          models.AgentWorkInterest.chat_id == chat_id,
-        ).delete(synchronize_session=False)
-        chat.deleted_at = now_naive_utc()
-        db.commit()
-      # Publish the committed tombstone before best-effort run cleanup. If that
-      # cleanup fails after the commit, every live shell must still project the
-      # durable deletion rather than retain a stale drawer row.
-      get_system_broadcast().publish(
-        {"type": "chat_deleted", "chatId": str(chat_id)}
-      )
+    for delegation_id in active_delegation_ids_for_chat(db, chat_id):
+      if not await cancel_delegation_execution(delegation_id):
+        raise HTTPException(
+          status_code=409,
+          detail=(
+            "Could not stop delegated work yet; retry chat deletion after the "
+            "active provider process exits."
+          ),
+        )
+    db.rollback()
+    db.expire_all()
+    # Only attempt to stop if the chat is actually running. An idle chat
+    # has no proc/SDK client/session to interrupt, so calling
+    # stop_chat_for would be a no-op — but a transient error during the
+    # no-op (DB hiccup, lookup glitch) would falsely 409 and make the
+    # chat un-deleteable. The 409 only fires when the chat WAS running
+    # and we couldn't stop it cleanly — that's the case we actually need
+    # to protect against (orphan runner writing to a soft-deleted row).
+    if is_chat_running(chat_id):
+      try:
+        stopped, _ = await stop_chat_for(chat_id, db=db)
+      except Exception:
+        log.warning("Failed to stop agent for chat %s during delete", chat_id)
+        stopped = False
+      if not stopped:
+        raise HTTPException(
+          status_code=409,
+          detail="Could not stop active agent; retry",
+        )
+    # Create and delete share the controller transition lock. Recheck after all
+    # potentially blocking stop I/O: a delegation that won the gap must prevent
+    # the tombstone, while a tombstone that wins here makes the creator's own
+    # locked active-chat recheck fail.
+    from app import chat_queue
+    async with chat_queue.get_transition_lock(chat_id):
+      db.rollback()
+      if active_delegation_ids_for_chat(db, chat_id):
+        raise HTTPException(
+          status_code=409,
+          detail=(
+            "Delegated work started while deletion was waiting; retry deletion."
+          ),
+        )
+      # Bump generation BEFORE the soft-delete commit so a run that raced the
+      # earlier liveness check bows out instead of writing onto the tombstone.
+      bump_run_generation(chat_id)
+      chat = db.query(models.Chat).filter(models.Chat.id == chat_id).first()
+      if chat and chat.deleted_at is None:
+        with drawer_pins.serialized_write():
+          # Deleting a chat is owner intent to stop its future work too. Keep the
+          # wait/claim cleanup and tombstone in the same transaction, and begin
+          # that transaction only after the shared pin boundary is owned. A
+          # staged DELETE before this point could hold SQLite's writer lock while
+          # a reorder held this boundary and waited to commit.
+          from app.chat_waits import stage_cancel_waits_for_chat
+          from app.agent_work_claims import stage_release_claims_for_chat
+          stage_cancel_waits_for_chat(db, chat_id)
+          released_claims = stage_release_claims_for_chat(db, chat_id)
+          # A deleted follower no longer owns a Goal that should receive exact-
+          # action notices. Retire its interests with the tombstone so one stale
+          # recipient cannot poison fanout to healthy followers.
+          db.query(models.AgentWorkInterest).filter(
+            models.AgentWorkInterest.chat_id == chat_id,
+          ).delete(synchronize_session=False)
+          chat.deleted_at = now_naive_utc()
+          recovery_notification_id = stage_recovery_notification(
+            db,
+            owner_id=owner.id,
+            resource_type="chat",
+            resource_id=str(chat_id),
+            resource_generation=recovery_resource_generation(
+              "chat", chat.created_at,
+            ),
+            deleted_at=chat.deleted_at,
+            expires_at=chat.deleted_at + SOFT_DELETE_TTL,
+            resource_name=chat.title or "Untitled chat",
+          )
+          db.commit()
+        # Publish the committed tombstone before best-effort run cleanup. If that
+        # cleanup fails after the commit, every live shell must still project the
+        # durable deletion rather than retain a stale drawer row.
+        get_system_broadcast().publish(
+          {"type": "chat_deleted", "chatId": str(chat_id)}
+        )
+        publish_recovery_notification(recovery_notification_id)
+      # Flag the chat soft-deleted in the registry (NOT forget_chat, which resets
+      # the generation counter to a reusable 0). mark_chat_deleted preserves the
+      # finite counter and makes `current_run_generation` return +inf, so a run
+      # holding a pre-delete generation — including run_gen=0 on a brand-new chat,
+      # the delete-ABA case — reads `we_own_gen=False` and skips finalizing onto
+      # the soft-deleted row. recover_chat restores it with a strictly-newer gen.
+      questions.cancel(chat_id)
+      from app import secure_inputs
+      secure_inputs.cancel_chat(chat_id)
+      mark_chat_deleted(chat_id)
+      # Close the chat's durable run state as part of the delete. A delete with a
+      # LIVE handle stops the runner but hands durable closure to run_chat's finally,
+      # and the dying run then bows out STALE_NO_ACTION on the +inf generation — so
+      # without this the soft-deleted chat keeps a running ChatRun until the next
+      # boot sweep. A tokenless FinishRun closes every nonterminal run record and
+      # drops the actor's _run_token_owner entry; it is best-effort
+      # and safe on a soft-deleted row (clear commands don't resurrect), and
+      # idempotent when the run state is already clean (the common idle delete).
+      try:
+        await _finish_run(chat_id, terminal_status="stopped")
+      except Exception:
+        # The tombstone is already committed and published. Returning a 500 now
+        # would make the client treat an authoritative deletion as inconclusive,
+        # recreating the exact stale-row ambiguity this route must eliminate. Boot
+        # reconciliation can repair a residual run marker.
+        log.exception(
+          "Chat %s was deleted but its durable run marker could not be cleared",
+          chat_id,
+        )
+  # Destructive cleanup has settled before releasing transition ownership.
   # The tombstone and releases are already durable. Notify/wake followers as a
   # best-effort delivery layer; failure cannot roll back an owner-requested
   # deletion, and the released claim itself remains reclaimable by exact key.
@@ -2358,7 +2413,7 @@ async def delete_chat(
       try:
         send_work_claim_notice(
           db,
-          owner_id=_.id,
+          owner_id=owner.id,
           claim_id=released.claim_id,
           revision=released.revision,
           sender_chat_id=chat_id,
@@ -2387,80 +2442,81 @@ async def delete_chat(
         delivery=DELIVERY_INTERRUPT, kind="handoff",
         sender_chat_id=chat_id,
       )
-  # Flag the chat soft-deleted in the registry (NOT forget_chat, which resets
-  # the generation counter to a reusable 0). mark_chat_deleted preserves the
-  # finite counter and makes `current_run_generation` return +inf, so a run
-  # holding a pre-delete generation — including run_gen=0 on a brand-new chat,
-  # the delete-ABA case — reads `we_own_gen=False` and skips finalizing onto
-  # the soft-deleted row. recover_chat restores it with a strictly-newer gen.
-  questions.cancel(chat_id)
-  from app import secure_inputs
-  secure_inputs.cancel_chat(chat_id)
-  mark_chat_deleted(chat_id)
-  # Close the chat's durable run state as part of the delete. A delete with a
-  # LIVE handle stops the runner but hands durable closure to run_chat's finally,
-  # and the dying run then bows out STALE_NO_ACTION on the +inf generation — so
-  # without this the soft-deleted chat keeps a running ChatRun until the next
-  # boot sweep. A tokenless FinishRun closes every nonterminal run record and
-  # drops the actor's _run_token_owner entry; it is best-effort
-  # and safe on a soft-deleted row (clear commands don't resurrect), and
-  # idempotent when the run state is already clean (the common idle delete).
-  try:
-    await _finish_run(chat_id, terminal_status="stopped")
-  except Exception:
-    # The tombstone is already committed and published. Returning a 500 now
-    # would make the client treat an authoritative deletion as inconclusive,
-    # recreating the exact stale-row ambiguity this route must eliminate. Boot
-    # reconciliation can repair a residual run marker.
-    log.exception(
-      "Chat %s was deleted but its durable run marker could not be cleared",
-      chat_id,
-    )
   # The current chat has just entered its recovery window and therefore cannot
   # be selected when this existing lifecycle boundary reclaims older tombstones.
   _reclaim_expired_tombstones_after_chat_write(db)
+  return Response(status_code=204, headers={
+    "X-Recovery-Notification-Id": recovery_notification_id,
+  } if recovery_notification_id else {})
 
 
 @router.post("/{chat_id}/recover", dependencies=[Depends(reject_cross_site)])
-def recover_chat(
+async def recover_chat(
   chat_id: str,
-  _: models.Owner = Depends(get_current_owner_for_lifecycle_control),
+  body: schemas.RecoveryRequest | None = None,
+  owner: models.Owner = Depends(get_current_owner_for_lifecycle_control),
   db: Session = Depends(get_db),
 ):
   """Restores a soft-deleted chat if the TTL window has not expired."""
-  linked_project = db.query(models.Project.id).join(
-    models.Chat, models.Chat.project_id == models.Project.id,
-  ).filter(
-    models.Chat.id == chat_id,
-    models.Project.deleted_at.isnot(None),
-  ).first()
-  if linked_project is not None:
-    raise HTTPException(
-      status_code=409,
-      detail={
-        "code": "project_deleted",
-        "message": "Recover this chat through its project.",
-        "project_id": linked_project.id,
-      },
-    )
-  chat = db.query(models.Chat).filter(
-    models.Chat.id == chat_id,
-    models.Chat.deleted_at.isnot(None),
-  ).first()
-  if not chat:
-    raise HTTPException(status_code=404, detail="Chat not found or not deleted.")
-  if (now_naive_utc() - chat.deleted_at) >= SOFT_DELETE_TTL:
-    raise HTTPException(status_code=410, detail="Recovery window has expired.")
-  with drawer_pins.serialized_write():
-    chat.deleted_at = None
-    db.commit()
-  # Clear the registry's deleted flag and bump to a generation newer than every
-  # pre-delete run, so a resurrected stale run can't reclaim the recovered chat.
-  recover_chat_generation(chat_id)
-  get_system_broadcast().publish(
-    {"type": "chat_recovered", "chatId": str(chat_id)}
-  )
-  return {"ok": True}
+  from app import chat_queue
+  completed_at = None
+  already_completed = False
+  project_id = db.query(models.Chat.project_id).filter(models.Chat.id == chat_id).scalar()
+  db.rollback()
+  async with serialize_project_lifecycle(project_id):
+    async with chat_queue.get_transition_lock(chat_id):
+      with drawer_pins.serialized_write():
+        db.rollback()
+        chat = db.query(models.Chat).filter(models.Chat.id == chat_id).first()
+        if chat is None:
+          raise HTTPException(404, "Chat not found.")
+        linked_project = db.query(models.Project.id).filter(
+          models.Project.id == chat.project_id,
+          models.Project.deleted_at.isnot(None),
+        ).first()
+        if linked_project is not None:
+          raise HTTPException(409, detail={
+            "code": "project_deleted",
+            "message": "Recover this chat through its project.",
+            "project_id": linked_project.id,
+          })
+        if body is not None:
+          completed_at = validate_recovery_action(
+            db, owner_id=owner.id, notification_id=body.notification_id,
+            resource_type="chat", resource_id=str(chat_id),
+            resource_generation=recovery_resource_generation(
+              "chat", chat.created_at,
+            ),
+            deleted_at=chat.deleted_at,
+          )
+          already_completed = completed_at is not None
+        if not already_completed:
+          if chat.deleted_at is None:
+            raise HTTPException(404, "Chat not found or not deleted.")
+          if now_naive_utc() - chat.deleted_at >= SOFT_DELETE_TTL:
+            raise HTTPException(410, "Recovery window has expired.")
+          chat.deleted_at = None
+          if body is not None:
+            completed_at = complete_recovery_action(
+              db, owner_id=owner.id, notification_id=body.notification_id,
+              resource_type="chat", resource_id=str(chat_id),
+              resource_generation=recovery_resource_generation(
+                "chat", chat.created_at,
+              ),
+            )
+          db.commit()
+      # Clear the registry's deleted flag and bump to a generation newer than every
+      # pre-delete run, so a resurrected stale run can't reclaim the recovered chat.
+      # This convergence is idempotent: a receipt retry after the DB commit must
+      # repair a missed post-commit step without bumping a live successor.
+      recover_chat_generation(chat_id)
+      get_system_broadcast().publish(
+        {"type": "chat_recovered", "chatId": str(chat_id)}
+      )
+  response = {"ok": True}
+  if completed_at is not None:
+    response["completed_at"] = completed_at
+  return response
 
 
 @router.post(

@@ -533,10 +533,10 @@ def mark_chat_deleted(chat_id: str) -> None:
 
 
 def recover_chat_generation(chat_id: str) -> int:
-  """Clears the deleted flag and bumps to a generation newer than any run.
+  """Converges the registry to a finite generation after recovery.
 
-  Called when a soft-deleted chat is recovered, so its next run starts at a
-  generation that no resurrected pre-delete run can match.
+  The first call after deletion bumps beyond every pre-delete run. Repeated
+  calls are safe after a lost response and preserve any current successor.
   """
   return registry.recover_generation(chat_id)
 

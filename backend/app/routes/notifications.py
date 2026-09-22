@@ -44,8 +44,13 @@ def send_notification(
 ):
   """Send a push notification to all owner subscriptions."""
   actions_list = (
-    [a.model_dump() for a in body.actions] if body.actions else None
+    [a.model_dump(exclude_none=True) for a in body.actions] if body.actions else None
   )
+  if any(a.action.startswith("recover_") for a in (body.actions or [])):
+    raise HTTPException(
+      status_code=403,
+      detail="Recovery actions are created by resource deletion endpoints.",
+    )
   # An app-scoped caller can't spoof the notification's source: force it to be
   # attributed to the app itself, so a mini-app can't masquerade as the system
   # or another app in a push (a phishing vector). Owner tokens keep full control.

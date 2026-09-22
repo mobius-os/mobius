@@ -47,6 +47,13 @@ from app.storage_io import (
 )
 from app.app_capabilities import diff_contracts
 from app.broadcast import get_system_broadcast
+from app.recovery_notifications import (
+  complete_recovery_action,
+  publish_recovery_notification,
+  recovery_resource_generation,
+  validate_recovery_action,
+  stage_recovery_notification,
+)
 from app.compiler import (
   app_bundle_digest,
   app_bundle_uses_current_compile_contract,
@@ -2963,7 +2970,7 @@ async def get_icon(
 async def delete_app(
   app_id: int,
   db: Session = Depends(get_db),
-  _: models.Owner = Depends(get_owner_or_app_with_manage_apps),
+  owner: models.Owner = Depends(get_owner_or_app_with_manage_apps),
 ):
   """Soft-deletes (tombstones) a mini-app — sets deleted_at and drops its cron,
   PRESERVING the source tree and the id-keyed runtime storage tree.
@@ -3060,6 +3067,18 @@ async def delete_app(
         app_name = app.name
         app_slug = app.slug
         app_source_dir = app.source_dir
+        recovery_notification_id = stage_recovery_notification(
+          db,
+          owner_id=owner.id,
+          resource_type="app",
+          resource_id=str(app_id),
+          resource_generation=recovery_resource_generation(
+            "app", app.token_nonce,
+          ),
+          deleted_at=app.deleted_at,
+          expires_at=app.deleted_at + APP_SOFT_DELETE_TTL,
+          resource_name=app.name or "Untitled app",
+        )
         db.commit()
     # Publish the durable tombstone before best-effort job/skill/cron cleanup.
     # Cleanup errors must not leave live shells projecting a row the database
@@ -3067,6 +3086,7 @@ async def delete_app(
     get_system_broadcast().publish(
       {"type": "app_deleted", "appId": str(app_id)}
     )
+    publish_recovery_notification(recovery_notification_id)
     # A job wrapper publishes its lease before checking the live row.  Now that
     # the tombstone is durable, terminate every verified group; a wrapper that
     # races in afterward observes the tombstone and exits before spawning work.
@@ -3110,6 +3130,10 @@ async def delete_app(
         "App %s was deleted but its source cron could not be disabled",
         app_id,
       )
+
+  return Response(status_code=204, headers={
+    "X-Recovery-Notification-Id": recovery_notification_id,
+  })
 
 
 @router.delete(
@@ -3226,8 +3250,9 @@ async def delete_app_data(
 )
 async def recover_app(
   app_id: int,
+  body: schemas.RecoveryRequest | None = None,
   db: Session = Depends(get_db),
-  _: models.Owner = Depends(get_owner_or_app_with_manage_apps),
+  owner: models.Owner = Depends(get_owner_or_app_with_manage_apps),
 ):
   """Restores a soft-deleted app if the TTL window hasn't expired.
 
@@ -3251,48 +3276,68 @@ async def recover_app(
   consistent state: a purged row → recover 404s; a recovered row → purge's
   under-lock stale re-query no longer matches it.
   """
+  completed_at = None
+  already_completed = False
   async with (
     fs_locks.install_uninstall_lock(),
     fs_locks.app_storage_lock(app_id),
   ):
-    app = (
-      db.query(models.App)
-      .filter(models.App.id == app_id, models.App.deleted_at.isnot(None))
-      .first()
-    )
+    db.rollback()
+    app = db.query(models.App).filter(models.App.id == app_id).first()
     if not app:
-      raise HTTPException(
-        status_code=404, detail="App not found or not deleted."
+      raise HTTPException(404, "App not found.")
+    if body is not None:
+      completed_at = validate_recovery_action(
+        db, owner_id=owner.id, notification_id=body.notification_id,
+        resource_type="app", resource_id=str(app_id),
+        resource_generation=recovery_resource_generation(
+          "app", app.token_nonce,
+        ),
+        deleted_at=app.deleted_at,
       )
-    if (
-      now_naive_utc() - app.deleted_at
-    ) >= APP_SOFT_DELETE_TTL:
-      raise HTTPException(status_code=410, detail="Recovery window has expired.")
-    if not app_bundle_uses_current_compile_contract(app):
-      if not app.jsx_source or not app.jsx_source.strip():
-        raise HTTPException(
-          status_code=409,
-          detail="App source is unavailable; reinstall it to recover.",
-        )
-      try:
-        # recompile_app_bundle commits internally, but the row remains
-        # tombstoned until the separate commit below. A crash or compile error
-        # therefore cannot expose a stale or partially rebuilt app.
-        await recompile_app_bundle(db, app, app.jsx_source)
-      except RuntimeError as exc:
-        db.rollback()
-        raise HTTPException(
-          status_code=422,
-          detail=f"Could not rebuild app for recovery: {exc}",
-        )
-    with drawer_pins.serialized_write():
-      app.deleted_at = None
-      app_name = app.name
-      app_source_dir = app.source_dir
-      db.commit()
+      already_completed = completed_at is not None
+    if not already_completed:
+      if app.deleted_at is None:
+        raise HTTPException(404, "App not found or not deleted.")
+      if now_naive_utc() - app.deleted_at >= APP_SOFT_DELETE_TTL:
+        raise HTTPException(410, "Recovery window has expired.")
+      if not app_bundle_uses_current_compile_contract(app):
+        if not app.jsx_source or not app.jsx_source.strip():
+          raise HTTPException(
+            status_code=409,
+            detail="App source is unavailable; reinstall it to recover.",
+          )
+        try:
+          # recompile_app_bundle commits internally, but the row remains
+          # tombstoned until the separate commit below. A crash or compile error
+          # therefore cannot expose a stale or partially rebuilt app.
+          await recompile_app_bundle(db, app, app.jsx_source)
+        except RuntimeError as exc:
+          db.rollback()
+          raise HTTPException(
+            status_code=422,
+            detail=f"Could not rebuild app for recovery: {exc}",
+          )
+      with drawer_pins.serialized_write():
+        app.deleted_at = None
+        if body is not None:
+          completed_at = complete_recovery_action(
+            db,
+            owner_id=owner.id,
+            notification_id=body.notification_id,
+            resource_type="app",
+            resource_id=str(app_id),
+            resource_generation=recovery_resource_generation(
+              "app", app.token_nonce,
+            ),
+          )
+        db.commit()
+    app_source_dir = app.source_dir
     # Recovery is durable at this point. Publish before ancillary cron/skill
     # restoration so a later best-effort failure cannot leave the live drawer
-    # hidden behind a stale deletion tombstone.
+    # hidden behind a stale deletion tombstone. A completed-receipt retry repeats
+    # these idempotent convergence steps so a lost response cannot strand a live
+    # row with its cron or skills still disabled.
     get_system_broadcast().publish(
       {"type": "app_recovered", "appId": str(app_id)}
     )
@@ -3342,7 +3387,10 @@ async def recover_app(
         "App %s was recovered but its app skills could not be restored",
         app_id,
       )
-  return {"ok": True}
+  response = {"ok": True}
+  if completed_at is not None:
+    response["completed_at"] = completed_at
+  return response
 
 
 # Compose independently-owned route groups without changing their public paths.

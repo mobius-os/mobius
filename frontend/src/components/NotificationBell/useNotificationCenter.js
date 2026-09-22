@@ -25,7 +25,7 @@ export default function useNotificationCenter(queryClient) {
 
   const clearAll = useCallback(async () => {
     await api.notifications.clearAll()
-    queryClient.setQueryData(notificationQueries.list.key, [])
+    queryClient.setQueryData(notificationQueries.list.key, { pages: [[]], pageParams: [null] })
     queryClient.setQueryData(notificationQueries.unreadCount.key, 0)
   }, [queryClient])
 
