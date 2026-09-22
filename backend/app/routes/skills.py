@@ -41,6 +41,7 @@ import shutil
 import stat
 import subprocess
 import tempfile
+import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from urllib.parse import quote
@@ -112,22 +113,54 @@ class SkillInstall(BaseModel):
   ref: str = "main"
   url: str | None = None
   name: str | None = None
+  # Optional optimistic pin supplied by a catalog preview. ``ref`` remains the
+  # mutable tracking ref (usually main); the install proceeds only when it
+  # still resolves to these exact reviewed bytes.
+  expected_commit: str | None = None
+
+
+class SkillUpdate(BaseModel):
+  """Replace one existing directory skill from a reviewed source snapshot.
+
+  ``expected_tree_digest`` is the caller's compare-and-swap token from
+  GET /api/skills. ``expected_commit`` binds the replacement to the catalog
+  preview. ``adopt`` is required when the existing skill is owner/agent managed
+  rather than already installer managed.
+  """
+
+  expected_tree_digest: str
+  repo: str | None = None
+  path: str | None = None
+  ref: str = "main"
+  url: str | None = None
+  expected_commit: str | None = None
+  adopt: bool = False
 
 
 def _skills_dir() -> Path:
   return Path(get_settings().data_dir) / "shared" / "skills"
 
 
-def _chown_mobius(path: Path) -> None:
+def _file_mode(rel: str, executable_files: set[str]) -> int:
+  """Base mode for a materialized skill file: launchers are executable."""
+  return 0o755 if rel in executable_files else 0o644
+
+
+def _chown_mobius(path: Path, executable_files: set[str] | None = None) -> None:
   """Best-effort: make an installed skill agent-editable (mirrors init_skills)."""
   try:
     m = pwd.getpwnam("mobius")
   except KeyError:
     return
+  executable_files = executable_files or set()
   for p in [path, *(path.rglob("*") if path.is_dir() else [])]:
     try:
       os.chown(p, m.pw_uid, m.pw_gid)
-      os.chmod(p, 0o775 if p.is_dir() else 0o664)
+      rel = p.relative_to(path).as_posix() if p != path else ""
+      os.chmod(
+        p,
+        0o775 if p.is_dir() or rel in executable_files else 0o664,
+      )
     except OSError:
       pass
 
@@ -294,8 +327,8 @@ def _resource_rel_ok(rel: str) -> bool:
 
 async def _fetch_files(
   client: httpx.AsyncClient, body: SkillInstall,
-) -> tuple[str, dict[str, bytes], str, str | None]:
-  """Resolve the request into (skill_name, {relpath: bytes}, source, commit).
+) -> tuple[str, dict[str, bytes], str, str | None, set[str]]:
+  """Resolve into (name, files, source, commit, executable relpaths).
 
   `relpath` is always relative to the skill directory (SKILL.md at the root;
   resources may live in subdirectories). Exactly one skill is produced; the
@@ -310,7 +343,7 @@ async def _fetch_files(
     name = _derive_name(body.name, segments)
     data = await install._http_get(client, body.url, max_bytes=SKILL_MAX_BYTES)
     files["SKILL.md"] = data
-    return name, files, _source_label(body.url), None
+    return name, files, _source_label(body.url), None, set()
 
   if not (body.repo and body.path):
     raise HTTPException(
@@ -321,6 +354,15 @@ async def _fetch_files(
 
   # Pin the whole install to one immutable revision before any content fetch.
   commit = await _resolve_commit(client, body.repo, body.ref)
+  if body.expected_commit is not None:
+    if _GIT_SHA.fullmatch(body.expected_commit) is None:
+      raise HTTPException(400, "`expected_commit` must be a 40-character git SHA.")
+    if commit != body.expected_commit:
+      raise HTTPException(
+        409,
+        "The source changed after it was reviewed. Refresh the catalog and "
+        "review the new revision before installing it.",
+      )
   listing = await _github_contents(client, body.repo, body.path, commit)
   segments = body.path.strip("/").split("/")
 
@@ -334,7 +376,7 @@ async def _fetch_files(
     files["SKILL.md"] = await install._http_get(
       client, download, max_bytes=SKILL_MAX_BYTES,
     )
-    return name, files, _source_label(body.repo), commit
+    return name, files, _source_label(body.repo), commit, set()
 
   # A directory: enumerate the WHOLE subtree with one scoped git-trees call —
   # the ecosystem keeps scripts/references in subdirectories, which the
@@ -370,6 +412,7 @@ async def _fetch_files(
   skill_rel = str(skill_entries[0]["path"])
 
   resources: list[tuple[str, int]] = []
+  executables: set[str] = set()
   seen_resources: set[str] = set()
   for entry in tree:
     entry_type = entry.get("type")
@@ -416,6 +459,8 @@ async def _fetch_files(
       )
     seen_resources.add(rel)
     resources.append((rel, declared))
+    if mode == "100755":
+      executables.add(rel)
 
   # A skill package is one reviewed instruction tree, not a best-effort bag of
   # files. Reject an unsupported or over-budget tree before fetching any
@@ -480,7 +525,20 @@ async def _fetch_files(
     raise
   files.update(item for item in fetched if item is not None)
 
-  return name, files, _source_label(body.repo), commit
+  # Extensionless launchers are allowed only in scripts/ by the path contract.
+  # Verify they really are text before materializing them; a binary payload does
+  # not become a skill resource merely because it has no suffix.
+  for rel, data in files.items():
+    if rel != "SKILL.md" and not Path(rel).suffix:
+      try:
+        data.decode("utf-8")
+      except UnicodeDecodeError as exc:
+        raise HTTPException(
+          400,
+          f"Skill package resource {rel!r} is not UTF-8 text; nothing was installed.",
+        ) from exc
+
+  return name, files, _source_label(body.repo), commit, executables
 
 
 def _source_label(source: str) -> str:
@@ -490,6 +548,31 @@ def _source_label(source: str) -> str:
   from urllib.parse import urlparse
 
   return urlparse(source).hostname or source
+
+
+def _install_record(
+  body: SkillInstall,
+  files: dict[str, bytes],
+  source: str,
+  commit: str | None,
+  executables: set[str],
+) -> dict:
+  """Canonical provenance record for one fully fetched skill tree."""
+  return {
+    "source": source,
+    "repo": body.repo,
+    "path": body.path,
+    # Keep the tracking ref, not only the immutable revision fetched today, so
+    # a later explicit update can resolve the same source again.
+    "ref": body.ref if body.repo else None,
+    "commit": commit,
+    "url": body.url,
+    "tree_digest": skills.tree_digest_from_files(files),
+    "skill_sha256": hashlib.sha256(files["SKILL.md"]).hexdigest(),
+    "files": sorted(files.keys()),
+    "executables": sorted(executables),
+    "installed_at": datetime.now(UTC).isoformat(),
+  }
 
 
 def _skill_row(
@@ -511,6 +594,15 @@ def _skill_row(
     "is_dir": skill.is_dir,
     "uses_30d": counts.get(disk_name, 0),
   }
+  if skill.is_dir:
+    row["tree_digest"] = skills.tree_digest_on_disk(skill.read_path.parent)
+  else:
+    try:
+      row["tree_digest"] = skills.tree_digest_from_files({
+        "SKILL.md": skill.read_path.read_bytes(),
+      })
+    except OSError:
+      row["tree_digest"] = None
   rec = installed_records.get(disk_name)
   if isinstance(rec, dict):
     commit = rec.get("commit")
@@ -603,7 +695,7 @@ async def install_skill(
   # follow_redirects=False — install._http_get walks the chain itself so every
   # hop is SSRF-revalidated and IP-pinned.
   async with httpx.AsyncClient(follow_redirects=False, timeout=install._HTTP_TIMEOUT) as client:
-    name, files, source, commit = await _fetch_files(client, body)
+    name, files, source, commit, executables = await _fetch_files(client, body)
 
   if "SKILL.md" not in files or not files["SKILL.md"].strip():
     raise HTTPException(400, "Resolved skill has no SKILL.md content.")
@@ -636,24 +728,11 @@ async def install_skill(
     # A failure before 3 publishes nothing; a crash after 3 leaves a visible
     # skill WITH a record that reconciles to owned — never an orphan that
     # blocks retries and refuses uninstall.
-    record = {
-      "source": source,
-      "repo": body.repo,
-      "path": body.path,
-      "ref": body.ref if body.repo else None,
-      "commit": commit,
-      "url": body.url,
-      # Canonical identity of the COMPLETE reviewed tree — every path and byte,
-      # not just SKILL.md. Recovery adopts a published dir only when it hashes to
-      # exactly this, so a tampered resource can never inherit the reviewed
-      # provenance. Computed from the very bytes about to be published.
-      "tree_digest": skills.tree_digest_from_files(files),
-      # The entry-document hash and inventory stay in the record purely as API
-      # surface (GET /api/skills exposes them); recovery keys off tree_digest.
-      "skill_sha256": hashlib.sha256(files["SKILL.md"]).hexdigest(),
-      "files": sorted(files.keys()),
-      "installed_at": datetime.now(UTC).isoformat(),
-    }
+    # Canonical identity of the COMPLETE reviewed tree — every path and byte,
+    # not just SKILL.md. Recovery adopts a published dir only when it hashes to
+    # exactly this, so a tampered resource can never inherit reviewed
+    # provenance.
+    record = _install_record(body, files, source, commit, executables)
 
     staged = Path(tempfile.mkdtemp(prefix=".staging-", dir=skills_dir))
     try:
@@ -661,8 +740,11 @@ async def install_skill(
         # rel is a validated relative path (SKILL.md at the root, or a vetted
         # resource path — _resource_rel_ok rejects traversal and dot
         # segments); atomic_write creates the intermediate directories.
-        atomic_write(staged / rel, data)
-      _chown_mobius(staged)
+        # The executable bit belongs to the reviewed package, so set it here
+        # rather than in _chown_mobius, whose group-write pass is skipped
+        # wherever the mobius user is absent (CI, minimal hosts).
+        atomic_write(staged / rel, data, mode=_file_mode(rel, executables))
+      _chown_mobius(staged, executables)
     except OSError as exc:
       shutil.rmtree(staged, ignore_errors=True)
       raise HTTPException(
@@ -754,6 +836,240 @@ async def install_skill(
     row = _skill_row(installed, records, {}, is_owner=False)
   return {
     "skill": row,
+    "warnings": warnings,
+  }
+
+
+@router.put(
+  "/{name}",
+  dependencies=[
+    Depends(reject_cross_site),
+    Depends(require_nondelegated_owner_or_app_control),
+  ],
+)
+async def update_skill(
+  name: str,
+  body: SkillUpdate,
+  _: models.Owner = Depends(get_owner_or_app_with_manage_skills),
+) -> dict:
+  """Atomically replace one existing directory skill from a reviewed source.
+
+  The candidate is fetched and validated before the shared-skills lock is
+  taken. Inside the lock, the caller's tree digest is compared with the exact
+  current tree, locally modified installer-managed skills are refused, and the
+  old bytes are git-snapshotted before a crash-recoverable rename exchange.
+  """
+  if _SKILL_NAME_OK.fullmatch(name) is None:
+    raise HTTPException(400, "Invalid skill name.")
+  if not body.expected_tree_digest.startswith("sha256-tree-v1:"):
+    raise HTTPException(400, "Invalid `expected_tree_digest`.")
+  if not body.url and not (body.repo and body.path):
+    raise HTTPException(
+      400,
+      "Updates require the reviewed source (`repo` + `path`, or `url`).",
+    )
+
+  source_body = SkillInstall(
+    repo=body.repo,
+    path=body.path,
+    ref=body.ref,
+    url=body.url,
+    name=name,
+    expected_commit=body.expected_commit,
+  )
+  async with httpx.AsyncClient(
+    follow_redirects=False,
+    timeout=install._HTTP_TIMEOUT,
+  ) as client:
+    fetched_name, files, source, commit, executables = await _fetch_files(
+      client, source_body,
+    )
+  if fetched_name != name:  # pragma: no cover - name is forced above
+    raise HTTPException(400, "Fetched skill name did not match the update target.")
+  if "SKILL.md" not in files or not files["SKILL.md"].strip():
+    raise HTTPException(400, "Resolved skill has no SKILL.md content.")
+  new_record = _install_record(source_body, files, source, commit, executables)
+  new_digest = new_record["tree_digest"]
+
+  skills_dir = _skills_dir()
+  data_dir = Path(get_settings().data_dir)
+  warnings: list[str] = []
+  changed = False
+  adopted = False
+
+  async with fs_locks.shared_skills_lock():
+    skills.reconcile_installed(skills_dir)
+    try:
+      records = _load_installed_sidecar(skills_dir)
+    except _CorruptSidecar as exc:
+      raise HTTPException(
+        500,
+        f"Refusing to update {name!r}: the installed-skills ownership record "
+        f"is corrupt ({exc}). Nothing was changed.",
+      )
+
+    target = skills_dir / name
+    if _entry_kind(target) != "dir" or _entry_kind(skills_dir / f"{name}.md") != "absent":
+      raise HTTPException(
+        409,
+        f"{name!r} is not one unambiguous directory skill; nothing was changed.",
+      )
+    current_digest = skills.tree_digest_on_disk(target)
+    if current_digest is None:
+      raise HTTPException(409, f"{name!r} could not be read as a safe skill tree.")
+    if current_digest != body.expected_tree_digest:
+      raise HTTPException(
+        409,
+        f"{name!r} changed after this update was opened. Refresh and review "
+        "the current skill before replacing it.",
+      )
+
+    previous = records.get(name)
+    if previous is not None:
+      if not isinstance(previous, dict) or previous.get("status"):
+        raise HTTPException(
+          409,
+          f"{name!r} has an unfinished install/update record; nothing was changed.",
+        )
+      if current_digest != previous.get("tree_digest"):
+        raise HTTPException(
+          409,
+          f"{name!r} has local edits since it was installed. They were kept; "
+          "review or preserve those edits before replacing the skill.",
+        )
+      # An update may advance the tracking ref, but it may not silently switch
+      # an installed skill to a different repository/path or raw URL.
+      same_repo_source = (
+        previous.get("repo") == source_body.repo
+        and previous.get("path") == source_body.path
+        and previous.get("url") is None
+        and source_body.url is None
+      )
+      same_url_source = (
+        previous.get("url") == source_body.url
+        and previous.get("repo") is None
+        and source_body.repo is None
+      )
+      if not (same_repo_source or same_url_source):
+        raise HTTPException(
+          409,
+          f"{name!r} is managed from a different source. Nothing was changed.",
+        )
+    else:
+      if not body.adopt or _provenance_of(skills_dir, name) != "agent":
+        raise HTTPException(
+          409,
+          f"{name!r} is not managed by Skills. Replacing it requires an "
+          "explicit catalog adoption of an agent-owned skill.",
+        )
+      adopted = True
+
+    if (data_dir / ".git").is_dir():
+      try:
+        ok, detail = await asyncio.to_thread(
+          data_git.snapshot_path,
+          data_dir,
+          f"shared/skills/{name}",
+          f"pre-update snapshot of skill {name}",
+        )
+      except Exception as exc:  # pragma: no cover - defensive
+        ok, detail = False, repr(exc)
+      if not ok:
+        raise HTTPException(
+          500,
+          f"Refusing to update {name!r}: could not snapshot its current bytes "
+          f"into git first ({detail}). Nothing was changed.",
+        )
+
+    # If the reviewed source bytes are already identical, only adopt/refresh
+    # provenance. No filesystem exchange is needed.
+    if current_digest == new_digest:
+      records[name] = new_record
+      _write_installed_sidecar(skills_dir, records)
+    else:
+      staged = Path(tempfile.mkdtemp(prefix=".staging-", dir=skills_dir))
+      try:
+        for rel, data in files.items():
+          atomic_write(staged / rel, data, mode=_file_mode(rel, executables))
+        _chown_mobius(staged, executables)
+      except OSError as exc:
+        shutil.rmtree(staged, ignore_errors=True)
+        raise HTTPException(
+          500,
+          f"Update of {name!r} failed while staging files ({exc}); the current "
+          "skill was kept.",
+        )
+
+      backup = skills_dir / f".backup-{name}-{uuid.uuid4().hex}"
+      intent = {
+        **new_record,
+        "status": "updating",
+        "staging": staged.name,
+        "backup": backup.name,
+        "previous_record": previous,
+        "previous_tree_digest": current_digest,
+      }
+      records[name] = intent
+      try:
+        _write_installed_sidecar(skills_dir, records)
+      except Exception as exc:  # noqa: BLE001
+        shutil.rmtree(staged, ignore_errors=True)
+        raise HTTPException(
+          500,
+          f"Update of {name!r} could not record its intent ({exc}); the "
+          "current skill was kept.",
+        )
+
+      try:
+        os.rename(target, backup)
+        os.rename(staged, target)
+      except OSError as exc:
+        # Reconciliation understands every persisted transition. Run it now to
+        # roll back when possible; if the filesystem itself prevents that, the
+        # intent and both trees remain for a later safe retry.
+        skills.reconcile_installed(skills_dir)
+        raise HTTPException(
+          500,
+          f"Update of {name!r} could not publish ({exc}); its recorded "
+          "transition will reconcile without discarding either tree.",
+        )
+
+      changed = True
+      repaired = skills.reconcile_installed(skills_dir)
+      records = _load_installed_sidecar(skills_dir)
+      final = records.get(name)
+      if not isinstance(final, dict) or final.get("status"):
+        warnings.append(
+          f"{name!r} was updated, but cleanup is still pending and will "
+          "reconcile on the next skills operation.",
+        )
+      elif name not in repaired:
+        warnings.append(
+          f"{name!r} was updated; the recovery sweep reported no cleanup "
+          "work, so its final state was re-read directly.",
+        )
+
+    warnings.extend(_refresh_index_with_warning(skills_dir))
+
+  installed = next(
+    (
+      item for item in skills.enumerate_skills(skills_dir)
+      if item.is_dir and item.read_path.parent.name == name
+    ),
+    None,
+  )
+  if installed is None:  # pragma: no cover - defensive filesystem failure
+    raise HTTPException(500, f"{name!r} was updated but could not be read back.")
+  final_records = _read_installed_sidecar(skills_dir)
+  row = _skill_row(installed, final_records, {}, is_owner=False)
+  log.info(
+    "updated skill %r from %s (%d file(s), changed=%s, adopted=%s)",
+    name, source, len(files), changed, adopted,
+  )
+  return {
+    "skill": row,
+    "changed": changed,
+    "adopted": adopted,
     "warnings": warnings,
   }
 

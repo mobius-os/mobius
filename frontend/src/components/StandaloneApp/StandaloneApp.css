@@ -81,6 +81,7 @@
 }
 
 .standalone-install button,
+.standalone-install__browser-link,
 .standalone-app--message a {
   display: inline-flex;
   align-items: center;
@@ -94,6 +95,18 @@
   font: 600 13px/1 var(--font, system-ui, sans-serif);
   text-decoration: none;
   cursor: pointer;
+}
+
+.standalone-install__browser-link {
+  text-decoration: none;
+}
+
+.standalone-install__feedback {
+  margin: 14px 0 0;
+  color: var(--muted, #a1a1aa);
+  font-size: 13px;
+  line-height: 1.45;
+  text-align: center;
 }
 
 .standalone-install__backdrop {

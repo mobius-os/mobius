@@ -607,6 +607,11 @@ def test_linked_railway_mutations_use_the_scoped_server_bridge(
     },
     headers=granted,
   )
+  renamed = client.patch(
+    "/api/identity/railway/deployments/mob_example",
+    json={"name": "Writing room"},
+    headers=granted,
+  )
   deleted = client.delete(
     "/api/identity/railway/deployments/mob_example", headers=granted,
   )
@@ -624,6 +629,7 @@ def test_linked_railway_mutations_use_the_scoped_server_bridge(
   assert connect.status_code == 200
   assert connect.json()["authorization_url"].startswith("https://www.mobius.you/")
   assert created.status_code == 202
+  assert renamed.status_code == 200
   assert deleted.status_code == 202
   assert storage.status_code == 200
   assert updates.status_code == 202
@@ -641,6 +647,11 @@ def test_linked_railway_mutations_use_the_scoped_server_bridge(
       },
     ),
     (
+      "PATCH",
+      "https://www.mobius.you/api/account/v1/railway/instances/mob_example",
+      {"name": "Writing room"},
+    ),
+    (
       "DELETE",
       "https://www.mobius.you/api/account/v1/railway/instances/mob_example",
       None,
@@ -656,6 +667,44 @@ def test_linked_railway_mutations_use_the_scoped_server_bridge(
       {"update_policy": "manual"},
     ),
   ]
+
+
+@pytest.mark.parametrize("name", ["   ", "x" * 81])
+def test_railway_rename_rejects_invalid_names_before_bridge_call(
+  client, auth, monkeypatch, name,
+):
+  from app.routes.identity import _seal
+
+  granted = _app_auth(
+    client, auth, granted=True, railway_granted=True,
+  )
+  with SessionLocal() as session:
+    owner = session.query(models.Owner).one()
+    session.add(models.IdentityAccountLink(
+      owner_id=owner.id,
+      access_token_encrypted=_seal("railway-token-" + "x" * 40),
+      scopes_json=[
+        "deployments:delete", "deployments:read", "identity:read",
+        "identity:write", "railway:read", "railway:write",
+      ],
+    ))
+    session.commit()
+
+  class Client:
+    def __init__(self, *args, **kwargs):
+      raise AssertionError("invalid names must not reach the Railway bridge")
+
+  monkeypatch.setattr("app.routes.identity.httpx.AsyncClient", Client)
+  response = client.patch(
+    "/api/identity/railway/deployments/mob_example",
+    json={"name": name},
+    headers=granted,
+  )
+
+  assert response.status_code == 422
+  assert response.json()["detail"] == (
+    "Choose a deployment name between 1 and 80 characters."
+  )
 
 
 def test_unrelated_railway_deployments_cannot_be_imported(client, auth):

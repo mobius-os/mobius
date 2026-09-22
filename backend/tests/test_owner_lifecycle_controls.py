@@ -417,6 +417,39 @@ def test_delegated_bearer_cannot_enter_host_or_platform_lifecycle(
   assert db.query(models.Owner).one().token_epoch == 0
 
 
+def test_owner_restart_routes_refuse_source_that_would_boot_to_recovery(
+  client, owner_token, monkeypatch,
+):
+  from app import restart_util
+  from app.routes import admin as admin_routes
+  from app.routes import platform as platform_routes
+
+  calls = []
+
+  async def restart():
+    calls.append("restart")
+
+  def invalid():
+    raise restart_util.RestartSourceInvalid("dangling Settings reference")
+
+  monkeypatch.setattr(admin_routes, "restart_this_worker", restart)
+  monkeypatch.setattr(platform_routes, "restart_this_worker", restart)
+  monkeypatch.setattr(admin_routes, "validate_restart_source", invalid)
+  monkeypatch.setattr(platform_routes, "validate_restart_source", invalid)
+  auth = {"Authorization": f"Bearer {owner_token}"}
+
+  responses = [
+    client.post("/api/admin/restart", headers=auth),
+    client.post("/api/platform/restart", headers=auth),
+  ]
+
+  assert [response.status_code for response in responses] == [409, 409]
+  for response in responses:
+    assert response.json()["detail"]["code"] == "platform_source_invalid"
+    assert "dangling Settings reference" in response.text
+  assert calls == []
+
+
 def test_plain_owner_and_top_level_agent_keep_lifecycle_control(
   client, owner_token, db, monkeypatch,
 ):
