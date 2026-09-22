@@ -63,6 +63,28 @@ fi
 STATUS="$(git status --porcelain=v1 --untracked-files=all -- "${PATHS[@]}")"
 [ -n "$STATUS" ] || exit 0
 
+# Backend commits are the last durable point before an agent can offer a
+# planned restart.  Run the exact restart/boot import verdict here as well as
+# at dispatch, so a dangling route reference is rejected while the change is
+# still being authored instead of becoming a recovery-mode surprise later.
+NEEDS_RESTART_PREFLIGHT=0
+for path in "${PATHS[@]}"; do
+  case "$path" in
+    backend/app|backend/app/*) NEEDS_RESTART_PREFLIGHT=1 ;;
+  esac
+done
+if [ "$NEEDS_RESTART_PREFLIGHT" -eq 1 ]; then
+  PREFLIGHT="${PM_COMMIT_RESTART_PREFLIGHT:-backend/scripts/preflight-restart-source}"
+  if [ ! -x "$PREFLIGHT" ]; then
+    echo "pm-commit: restart preflight is missing or not executable: $PREFLIGHT" >&2
+    exit 3
+  fi
+  if ! "$PREFLIGHT"; then
+    echo "pm-commit: backend source failed the restart startup preflight; commit refused" >&2
+    exit 3
+  fi
+fi
+
 # Intent-to-add lets `git commit --only` include new files while that commit
 # ignores every unrelated staged or unstaged change. On failure, restore only
 # the paths this command introduced to the index.

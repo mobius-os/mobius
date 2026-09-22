@@ -23,7 +23,7 @@ from app.chat_writer import (
   get_writer,
 )
 from app.database import SessionLocal
-from app.platform_restart import activation_notice
+from app.platform_restart import activation_notice, activation_wait_verdict
 from app.memory_recall import EMPTY_RECALL_BINDING
 from app.routes import chats_stream
 from app.timeutil import now_naive_utc
@@ -131,6 +131,39 @@ def test_restart_press_dispatches_once_and_retry_is_idempotent():
   assert retry["dispatch"] is False
   with SessionLocal() as db:
     assert db.get(models.ChatWait, w1).action_approved_at is not None
+
+
+def test_restart_press_keeps_card_open_when_next_boot_would_fall_back(
+  monkeypatch,
+):
+  from app import restart_util
+
+  qid, wait_id, _run, _requirement = _install("restart-invalid-source")
+  monkeypatch.setattr(
+    restart_util,
+    "validate_restart_source",
+    lambda: (_ for _ in ()).throw(
+      restart_util.RestartSourceInvalid("dangling Settings reference")
+    ),
+  )
+
+  with pytest.raises(
+    chat_writer.RestartCardActionConflict,
+    match="dangling Settings reference",
+  ):
+    _submit(ResolvePlatformRestartCard(
+      chat_id="restart-invalid-source", question_id=qid,
+      selected_option_id="restart-id",
+    ))
+
+  with SessionLocal() as db:
+    chat = db.get(models.Chat, "restart-invalid-source")
+    wait = db.get(models.ChatWait, wait_id)
+    card = chat.messages[0]["blocks"][0]
+    assert chat.pending_question_id == qid
+    assert wait.action_approved_at is None
+    assert card["platform_action"]["status"] == "awaiting_owner"
+    assert not card.get("answers")
 
 
 def test_free_text_cannot_claim_restart_but_post_stop_button_still_does():
@@ -403,6 +436,43 @@ def test_restart_activation_wait_does_not_expire_while_owner_is_deciding(monkeyp
     wait = db.get(models.ChatWait, wait_id)
     assert wait.status == "armed"
     assert wait.next_check_at > now_naive_utc()
+
+
+def test_late_manual_boot_cannot_retroactively_confirm_restart():
+  _qid, wait_id, _run, _requirement = _install("restart-late-manual-boot")
+  approved = now_naive_utc() - timedelta(minutes=20)
+  with SessionLocal() as db:
+    wait = db.get(models.ChatWait, wait_id)
+    wait.created_at = approved - timedelta(minutes=1)
+    wait.action_approved_at = approved
+    db.add(models.PlatformBootSnapshot(
+      boot_id="manual-redeploy", source_kind="checkout", source_sha="a" * 40,
+      loaded_files_json={}, service_ready=True,
+      captured_at=approved + timedelta(minutes=19),
+    ))
+    db.commit()
+    outcome, detail = activation_wait_verdict(db, wait)
+
+  assert outcome == "failed"
+  assert "did not confirm" in detail
+
+
+def test_timely_ready_boot_still_confirms_restart_after_later_review():
+  _qid, wait_id, _run, _requirement = _install("restart-timely-boot")
+  approved = now_naive_utc() - timedelta(minutes=20)
+  with SessionLocal() as db:
+    wait = db.get(models.ChatWait, wait_id)
+    wait.created_at = approved - timedelta(minutes=1)
+    wait.action_approved_at = approved
+    db.add(models.PlatformBootSnapshot(
+      boot_id="timely-boot", source_kind="checkout", source_sha="a" * 40,
+      loaded_files_json={}, service_ready=True,
+      captured_at=approved + timedelta(minutes=2),
+    ))
+    db.commit()
+    outcome, _detail = activation_wait_verdict(db, wait)
+
+  assert outcome == "met"
 
 
 def test_restart_wait_hides_storage_deadline_from_owner_and_agent_context():
