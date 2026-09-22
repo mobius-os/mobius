@@ -2419,6 +2419,77 @@ def test_serve_connection_backs_off_across_slow_open_then_early_eof(
   assert sleeps == [1, 2, 4]
 
 
+def test_serve_connection_resets_backoff_after_healthy_stream_timeout(
+  monkeypatch,
+):
+  """A long blocking read after health must retry as a later transport loss."""
+  opened = []
+  sleeps = []
+  clock = {"now": 0}
+
+  def fake_monotonic():
+    return clock["now"]
+
+  class ClosedStream:
+    def __enter__(self):
+      return self
+
+    def __exit__(self, *exc):
+      return False
+
+    def __iter__(self):
+      return iter(())
+
+  class TimedOutStream:
+    def __enter__(self):
+      return self
+
+    def __exit__(self, *exc):
+      return False
+
+    def __iter__(self):
+      # No heartbeat arrived during the bounded read, but the stream had
+      # already been open beyond the health window before it stalled.
+      clock["now"] = 20
+      raise connect_runner.socket.timeout("long read stalled")
+
+  class DisconnectStream:
+    def __enter__(self):
+      return self
+
+    def __exit__(self, *exc):
+      return False
+
+    def __iter__(self):
+      return iter([b'data: {"type":"disconnect","request_id":"z"}\n\n'])
+
+  def fake_open(request, **kwargs):
+    opened.append(request.full_url)
+    if len(opened) == 1:
+      return ClosedStream()
+    if len(opened) == 2:
+      return TimedOutStream()
+    return DisconnectStream()
+
+  monkeypatch.setattr(connect_runner, "_open_url", fake_open)
+  monkeypatch.setattr(connect_runner.time, "monotonic", fake_monotonic)
+  monkeypatch.setattr(connect_runner.time, "sleep", sleeps.append)
+  monkeypatch.setattr(
+    connect_runner, "_uninstall_service", lambda stop_running: None,
+  )
+  monkeypatch.setattr(
+    connect_runner, "_remove_connection", lambda url, host_id: 0,
+  )
+  monkeypatch.setattr(connect_runner, "_post", lambda *args, **kwargs: None)
+
+  connect_runner._serve_connection({
+    "url": "https://live.test", "host_id": "h_live", "token": "token",
+  })
+
+  assert len(opened) == 3
+  assert sleeps == [1, 1]
+
+
 def test_serve_all_respawns_and_stops_removed_connections(monkeypatch):
   """The supervisor must respawn a connection whose thread exits and signal a
   connection removed from config to stop, without respawning it afterwards."""

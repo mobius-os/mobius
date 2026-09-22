@@ -827,6 +827,10 @@ def _serve_connection(conn, command_gate=None, stop_event=None):
     backoff = 1
     print("Connecting to %s ..." % base)
     while True:
+        # Only a stream opened during this attempt can establish health. Do
+        # not let a healthy prior stream make a new handshake failure look
+        # healthy when the transport raises before the next response opens.
+        stream_opened_at = None
         # A connection removed from config (or a shutting-down supervisor) sets
         # this event; stop retrying and let this thread exit.
         if stop_event is not None and stop_event.is_set():
@@ -956,8 +960,22 @@ def _serve_connection(conn, command_gate=None, stop_event=None):
             # permanent exit that abandons one instance while the others stay up.
             print("HTTP %s; retrying in %ss" % (exc.code, backoff))
         except socket.timeout:
+            if (
+                stream_opened_at is not None
+                and time.monotonic() - stream_opened_at
+                >= STREAM_HEALTHY_SECONDS
+            ):
+                # A read timeout after a healthy stream is a later transport
+                # loss, not another failed open. Start its recovery quickly.
+                backoff = 1
             print("connection stalled; retrying in %ss" % backoff)
         except urllib.error.URLError as exc:
+            if (
+                stream_opened_at is not None
+                and time.monotonic() - stream_opened_at
+                >= STREAM_HEALTHY_SECONDS
+            ):
+                backoff = 1
             print("connection lost (%s); retrying in %ss" % (exc.reason, backoff))
         time.sleep(backoff)
         backoff = min(backoff * 2, 30)
