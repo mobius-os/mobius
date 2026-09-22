@@ -80,7 +80,6 @@ from app.chat_logging import (
   get_logger as _get_logger,
   safe_commit as _safe_commit,
 )
-from app.chat_titles import apply_generated_title, renamed_event
 from app.goal_commands import is_goal_continue
 from app.memory_observability import claim_oom_kill
 from app.chat_writer import (
@@ -4670,28 +4669,6 @@ async def run_chat(
         "attached contribution reconcile skipped", exc_info=True,
       )
 
-    # Turn-end chat-note guarantee: when the chat SETTLED (no pending
-    # follow-up), the platform's sole publisher updates its three summary
-    # granularities. Runs AFTER the reply is sent → no user-facing latency;
-    # gated to the settled dispositions so a multi-turn continuation publishes
-    # once, at rest; best-effort (a failure never affects the turn).
-    try:
-      _s = get_settings()
-      if _should_ensure_chat_note(
-        _s, chat_id, disposition, _s.data_dir, 0.0
-      ):
-        await _ensure_chat_note(
-          _s.data_dir,
-          chat_id,
-          deterministic=(
-            disposition in {
-              chat_queue.TerminalDisposition.LIMIT_PARKED,
-              chat_queue.TerminalDisposition.PROVIDER_FREE_COMPLETED,
-            }
-          ),
-        )
-    except Exception:
-      _get_logger().debug("chat-note guarantee skipped", exc_info=True)
     if browser_cancelled is not None:
       raise browser_cancelled
 
@@ -4703,174 +4680,6 @@ _DELEGATION_WAKE_DISPOSITIONS = frozenset({
   chat_queue.TerminalDisposition.EMPTY_TERMINAL_CLEARED,
   chat_queue.TerminalDisposition.PROVIDER_FREE_COMPLETED,
 })
-
-
-def _chat_note_mtime(data_dir: str, chat_id: str) -> float:
-  """Return a chat-note mtime for diagnostics and older callers."""
-  if not chat_id:
-    return 0.0
-  try:
-    return (
-      Path(data_dir) / "shared" / "memory" / "chats" / chat_id / "index.md"
-    ).stat().st_mtime
-  except OSError:
-    return 0.0
-
-
-# The dispositions where a chat is truly at rest, so the note guarantee (and
-# its title-sync sibling) fires. STOP_HANDOFF_CLEARED only results when NO
-# fresh claim raced in — a stopped chat genuinely settled — and a Stop is often
-# the day's last touch on a chat; skipping it left the chat note-less for the
-# night's reflection. LIMIT_PARKED and QUESTION_PARKED are settled too. The
-# former is forced onto the deterministic path so it never retries the provider
-# that just hit a limit; the latter preserves the owner handoff in the ordinary
-# summary without advancing the chat.
-_NOTE_SETTLED_DISPOSITIONS = frozenset({
-  chat_queue.TerminalDisposition.EMPTY_TERMINAL_CLEARED,
-  chat_queue.TerminalDisposition.PROVIDER_FREE_COMPLETED,
-  chat_queue.TerminalDisposition.STOP_HANDOFF_CLEARED,
-  chat_queue.TerminalDisposition.LIMIT_PARKED,
-  chat_queue.TerminalDisposition.QUESTION_PARKED,
-  chat_queue.TerminalDisposition.ACTIVATION_PARKED,
-})
-
-
-def _should_ensure_chat_note(
-  settings,
-  chat_id: str,
-  disposition: "chat_queue.TerminalDisposition",
-  data_dir: str,
-  note_mtime_before: float,
-) -> bool:
-  """Whether the platform's turn-end summary publisher should fire.
-
-  ``data_dir`` and ``note_mtime_before`` remain in the signature for callers
-  from older platform trees; note mtimes are intentionally not a gate anymore.
-  Exactly one platform publisher owns these files, even if legacy instructions
-  caused another writer to touch a note during the turn.
-  """
-  return bool(
-    getattr(settings, "ensure_chat_note", False)
-    and chat_id
-    and disposition in _NOTE_SETTLED_DISPOSITIONS
-  )
-
-
-def _run_owns_active_goal(
-  db: Session, *, chat_id: str, run_token: str | None,
-) -> bool:
-  """Whether the exact physical run currently owns committed Goal state."""
-  if not chat_id or not run_token:
-    return False
-  return db.query(models.ChatRun.id).filter(
-    models.ChatRun.id == run_token,
-    models.ChatRun.chat_id == chat_id,
-    models.ChatRun.status.in_(models.NONTERMINAL_RUN_STATUSES),
-    models.ChatRun.goal_objective.isnot(None),
-  ).first() is not None
-
-
-async def _ensure_chat_note(
-  data_dir: str,
-  chat_id: str,
-  *,
-  deterministic: bool = False,
-  active_goal_checkpoint: bool = False,
-) -> None:
-  """Run the platform-owned turn-end chat-summary publisher.
-
-  Spawns the TOOL-FREE summarizer (scripts/chat_note.py) — it reads the chat's
-  transcript and writes chats/<id>/index.md; the subagent has no tools and the
-  server applies its emitted title under the chat transition lock. Best-effort
-  + bounded: it runs AFTER the reply is sent, so it never adds user-facing
-  latency, and any failure/timeout is swallowed — a missing note must never
-  break the turn — but
-  a nonzero exit leaves one WARN line (with the script's stderr reason) in
-  chat.log, so CLI credits dying no longer silently stops notes. The caller
-  gates this on ``ensure_chat_note`` plus the chat being settled."""
-  log = _get_logger()
-  script = Path(__file__).parent.parent / "scripts" / "chat_note.py"
-  if not script.exists() or not chat_id:
-    return
-  proc = None
-  # Pin the subprocess to the configured data tree so a non-default instance
-  # does not read one tree and write another.
-  env = dict(os.environ)
-  env["DATA_DIR"] = data_dir
-  if deterministic:
-    env["CHAT_NOTE_PROVIDER"] = "deterministic"
-  args = ["python3", str(script), chat_id]
-  if active_goal_checkpoint:
-    args.append("--active-goal-checkpoint")
-  try:
-    proc = await asyncio.create_subprocess_exec(
-      *args,
-      stdout=asyncio.subprocess.PIPE,
-      stderr=asyncio.subprocess.PIPE,
-      env=env,
-    )
-    out, err = await asyncio.wait_for(proc.communicate(), timeout=150)
-    if proc.returncode:
-      tail = " ".join((err or b"").decode("utf-8", "replace").split())[-300:]
-      log.warning(
-        "chat-note summarizer failed for chat %s (rc=%s): %s",
-        chat_id, proc.returncode, tail,
-      )
-    else:
-      try:
-        title = _chat_note_title_result(out)
-        if title is not None:
-          await _sync_generated_chat_title(chat_id, title)
-      except Exception:
-        # The note is already durable. Keep the turn successful, but make a
-        # partial title-sync failure observable instead of silently leaving
-        # the drawer on its first-message fallback.
-        log.warning(
-          "chat-note title sync failed for chat %s", chat_id, exc_info=True,
-        )
-  except asyncio.TimeoutError:
-    log.info("ensure_chat_note timed out for chat %s", chat_id)
-    if proc is not None:
-      try:
-        proc.kill()
-      except ProcessLookupError:
-        pass
-  except Exception:
-    log.debug("ensure_chat_note failed", exc_info=True)
-
-
-def _chat_note_title_result(stdout: bytes | None) -> str | None:
-  """Parse the publisher's single structured title result, when present."""
-  raw = (stdout or b"").decode("utf-8", "replace").strip()
-  if not raw:
-    return None
-  result = json.loads(raw)
-  title = result.get("title") if isinstance(result, dict) else None
-  if not isinstance(title, str) or not title.strip():
-    raise ValueError("chat-note publisher returned an invalid title result")
-  return title.strip()[:200]
-
-
-async def _sync_generated_chat_title(chat_id: str, title: str) -> bool:
-  """Commit one generated title without a revocable self-HTTP credential."""
-  from app.database import SessionLocal
-
-  async with chat_queue.get_transition_lock(chat_id):
-    with SessionLocal() as db:
-      chat = db.query(models.Chat).filter(
-        models.Chat.id == chat_id,
-        models.Chat.deleted_at.is_(None),
-      ).one_or_none()
-      if chat is None or not apply_generated_title(chat, title):
-        return False
-      db.commit()
-      db.refresh(chat)
-      event = renamed_event(chat)
-
-  # Publish only committed truth, after releasing the database connection.
-  get_system_broadcast().publish(event)
-  return True
-
 
 async def _acknowledge_peer_context_delivery(
   *, chat_id: str, run_token: str, delivered_through,
@@ -5158,25 +4967,6 @@ async def _run_chat_impl_with_db(
   raw_user_message = messages[-1].content
   user_message = raw_user_message
   historical_goal_mode = _chat_has_goal_intent(messages)
-  question_checkpoint = None
-  if settings.ensure_chat_note and chat_id:
-    async def question_checkpoint() -> None:
-      # Automatic promotion happens after this runner has started, so
-      # transcript intent captured above is not authoritative here. Read the
-      # exact physical run at checkpoint time and summarize only if it owns a
-      # committed Goal then.
-      from app.database import SessionLocal
-      with SessionLocal() as checkpoint_db:
-        active_goal = _run_owns_active_goal(
-          checkpoint_db, chat_id=chat_id, run_token=run_token,
-        )
-      if not active_goal:
-        return
-      await _ensure_chat_note(
-        settings.data_dir,
-        chat_id,
-        active_goal_checkpoint=True,
-      )
   is_slash_command = _is_cli_slash_command(user_message)
   if is_slash_command:
     # The CLI dispatches a slash command only when it sits at position 0, so the
@@ -5258,18 +5048,19 @@ async def _run_chat_impl_with_db(
   startup_context = ""
   if not session_id and run_policy is None:
     # `build_memory_block` is pure; the activity emit + envelope live here.
-    ordered_chat_ids = [
-      row[0]
-      for row in db.query(models.Chat.id).filter(
+    ordered_chat_ids = [row[0] for row in db.query(models.Chat.id).filter(
         models.Chat.deleted_at.is_(None),
       ).order_by(
         func.coalesce(models.Chat.activity_at, models.Chat.updated_at).desc(),
         models.Chat.id.desc(),
-      ).all()
-    ]
+      ).limit(memory.RECENT_CHAT_NOTES).all()]
+    continuity_by_chat_id = memory.recent_continuity_metadata(
+      db, ordered_chat_ids,
+    )
     block = memory.build_memory_block(
       settings.data_dir,
       ordered_chat_ids=ordered_chat_ids,
+      continuity_by_chat_id=continuity_by_chat_id,
     )
     ctx = block.text
     # Observability only. Chat-summary injection is core continuity, not graph
@@ -5808,7 +5599,6 @@ async def _run_chat_impl_with_db(
       chat_id,
       run_token=run_token,
       recall_binding=recall_binding,
-      on_question_checkpoint=question_checkpoint,
     )
     register_active_sink(chat_id, sink)
     runner_result: dict = {}
@@ -6004,7 +5794,6 @@ async def _run_chat_impl_with_db(
       chat_id,
       run_token=run_token,
       recall_binding=recall_binding,
-      on_question_checkpoint=question_checkpoint,
     )
     register_active_sink(chat_id, sink)
     # As in the Codex path, do not pin a pooled connection while the provider

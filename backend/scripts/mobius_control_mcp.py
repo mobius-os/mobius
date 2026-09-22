@@ -21,7 +21,7 @@ from urllib.request import Request, urlopen
 
 
 SERVER_NAME = "Möbius control"
-SERVER_VERSION = "1.9.0"
+SERVER_VERSION = "2.0.0"
 LATEST_PROTOCOL_VERSION = "2025-11-25"
 SUPPORTED_PROTOCOL_VERSIONS = {
   "2024-11-05",
@@ -35,6 +35,8 @@ CANCEL_WAIT_TOOL = "cancel_wait"
 REQUEST_APPROVAL_TOOL = "request_approval"
 REQUEST_QUESTION_TOOL = "request_question"
 REQUEST_RESTART_TOOL = "request_restart"
+READ_CHAT_CONTINUITY_TOOL = "read_chat_continuity"
+CHECKPOINT_CHAT_TOOL = "checkpoint_chat"
 SAVED_CARD_TERMINAL_INSTRUCTION = (
   "This tool call ends the turn: the response is cut at the card, so nothing "
   "said or done after it can reach the owner until they reply."
@@ -59,8 +61,15 @@ OWNER_TOOLS = (
   REQUEST_QUESTION_TOOL,
   REQUEST_RESTART_TOOL,
   *WORK_OWNERSHIP_TOOLS,
+  READ_CHAT_CONTINUITY_TOOL,
+  CHECKPOINT_CHAT_TOOL,
 )
-DELEGATED_TOOLS = (*PEER_TOOLS, *WORK_OWNERSHIP_TOOLS)
+DELEGATED_TOOLS = (
+  *PEER_TOOLS,
+  *WORK_OWNERSHIP_TOOLS,
+  READ_CHAT_CONTINUITY_TOOL,
+  CHECKPOINT_CHAT_TOOL,
+)
 PROMOTE_GOAL_DESCRIPTION = (
   "Promote the current ordinary top-level owner turn into a durable, "
   "platform-owned Goal after the goal-planning criteria are satisfied. "
@@ -467,7 +476,114 @@ def _call_finish_agent_work(arguments: dict[str, Any]) -> dict:
   return _agent_api_call("POST", "/api/agent-coordination/work-claims/finish", arguments)
 
 
+def _call_read_chat_continuity(arguments: dict[str, Any]) -> dict:
+  allowed = {"after_revision", "limit", "full"}
+  if not set(arguments).issubset(allowed):
+    raise ValueError("read_chat_continuity received unknown arguments")
+  query = []
+  for name in ("after_revision", "limit"):
+    value = arguments.get(name)
+    if value is not None:
+      if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(f"{name} must be a non-negative integer")
+      query.append(f"{name}={value}")
+  full = arguments.get("full", False)
+  if not isinstance(full, bool):
+    raise ValueError("full must be true or false")
+  if full:
+    query.append("full=true")
+  suffix = "?" + "&".join(query) if query else ""
+  return _agent_api_call("GET", f"/api/chat/continuity{suffix}")
+
+
+def _call_checkpoint_chat(arguments: dict[str, Any]) -> dict:
+  required = {"checkpoint_id", "expected_revision", "digest"}
+  allowed = required | {"summary", "title", "source_cursor"}
+  if not required.issubset(arguments) or not set(arguments).issubset(allowed):
+    raise ValueError(
+      "checkpoint_chat needs checkpoint_id, expected_revision, and digest"
+    )
+  checkpoint_id = arguments.get("checkpoint_id")
+  digest = arguments.get("digest")
+  revision = arguments.get("expected_revision")
+  if not isinstance(checkpoint_id, str) or not checkpoint_id.strip():
+    raise ValueError("checkpoint_id must be a non-empty string")
+  if isinstance(revision, bool) or not isinstance(revision, int) or revision < 0:
+    raise ValueError("expected_revision must be a non-negative integer")
+  if not isinstance(digest, str) or not digest.strip():
+    raise ValueError("digest must be a non-empty string")
+  payload = dict(arguments)
+  payload["checkpoint_id"] = checkpoint_id.strip()
+  payload["digest"] = digest.strip()
+  for name in ("summary", "title"):
+    value = payload.get(name)
+    if value is not None:
+      if not isinstance(value, str):
+        raise ValueError(f"{name} must be a string")
+      payload[name] = value.strip()
+  source_cursor = payload.get("source_cursor")
+  if source_cursor is not None:
+    if not isinstance(source_cursor, dict) or set(source_cursor) != {
+      "message_count", "prefix_hash",
+    }:
+      raise ValueError("source_cursor must contain message_count and prefix_hash")
+  return _agent_api_call("POST", "/api/chat/continuity/checkpoints", payload)
+
+
 _TOOL_DEFINITIONS = {
+  READ_CHAT_CONTINUITY_TOOL: {
+    "name": READ_CHAT_CONTINUITY_TOOL,
+    "description": (
+      "Read this chat's platform-owned continuity state and append-only digest "
+      "entries. Use on a cold start, provider handoff, or checkpoint revision "
+      "conflict; ordinary successful checkpoint receipts already return the "
+      "new revision. Reads never create or modify continuity state."
+    ),
+    "inputSchema": {
+      "type": "object", "additionalProperties": False,
+      "properties": {
+        "after_revision": {"type": "integer", "minimum": 0},
+        "limit": {"type": "integer", "minimum": 1, "maximum": 200},
+        "full": {"type": "boolean", "default": False},
+      },
+    },
+  },
+  CHECKPOINT_CHAT_TOOL: {
+    "name": CHECKPOINT_CHAT_TOOL,
+    "description": (
+      "Append one lightweight continuity delta for this exact live chat run. "
+      "Supply the revision last read or returned by a successful checkpoint; "
+      "on conflict, read continuity and retry with a new checkpoint id only "
+      "after reconciling. checkpoint_id is the stable idempotency key for one "
+      "exact payload. digest is the new durable delta; summary optionally "
+      "replaces the short current-state summary; title optionally proposes a "
+      "generated chat name and never overrides an owner rename."
+    ),
+    "inputSchema": {
+      "type": "object", "additionalProperties": False,
+      "required": ["checkpoint_id", "expected_revision", "digest"],
+      "properties": {
+        "checkpoint_id": {"type": "string", "minLength": 1, "maxLength": 128},
+        "expected_revision": {"type": "integer", "minimum": 0},
+        "digest": {"type": "string", "minLength": 1, "maxLength": 8000},
+        "summary": {"type": "string", "maxLength": 12000},
+        "title": {"type": "string", "maxLength": 256},
+        "source_cursor": {
+          "type": "object", "additionalProperties": False,
+          "required": ["message_count", "prefix_hash"],
+          "properties": {
+            "message_count": {"type": "integer", "minimum": 0},
+            "prefix_hash": {"type": ["string", "null"]},
+          },
+          "description": (
+            "Optional exact source_cursor from read_chat_continuity. Supplying "
+            "it attests that this checkpoint plus existing continuity covers "
+            "that completed transcript prefix. Omit to preserve prior coverage."
+          ),
+        },
+      },
+    },
+  },
   REQUEST_APPROVAL_TOOL: {
     "name": REQUEST_APPROVAL_TOOL,
     "description": (
@@ -740,6 +856,8 @@ _TOOL_DEFINITIONS = {
 }
 
 _TOOL_HANDLERS = {
+  READ_CHAT_CONTINUITY_TOOL: _call_read_chat_continuity,
+  CHECKPOINT_CHAT_TOOL: _call_checkpoint_chat,
   REQUEST_APPROVAL_TOOL: _call_request_approval,
   REQUEST_QUESTION_TOOL: _call_request_question,
   REQUEST_RESTART_TOOL: _call_request_restart,

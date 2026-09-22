@@ -153,6 +153,24 @@ def test_core_prompt_requires_truncated_skill_reads_to_continue():
   assert "until every part has been received" in core
 
 
+def test_core_prompt_requires_agent_authored_current_continuity():
+  repo = Path(__file__).resolve().parents[2]
+  core = (repo / "skill" / "core.md").read_text(encoding="utf-8")
+  normalized = " ".join(core.split())
+
+  assert "no separate agent summarizes it afterwards" in normalized
+  assert "Chat continuity also covers discussion-only work" in normalized
+  assert "discover them by name" in normalized
+  assert "If the state survived the handoff, reuse it" in normalized
+  assert "Skip unchanged titles and empty updates" in normalized
+  assert "## Finish each substantive turn with durable continuity" in core
+  assert "a first substantive turn must also perform step 2" in normalized
+  assert "Supply `summary` with every substantive checkpoint" in normalized
+  assert "include the current blocker/next action" in normalized
+  assert "use “proposed” until the owner accepts it" in normalized
+  assert "Confirm the saved receipt, retain its revision" in normalized
+
+
 def test_core_prompt_owns_freshness_and_source_policy():
   repo = Path(__file__).resolve().parents[2]
   core = (repo / "skill" / "core.md").read_text(encoding="utf-8")

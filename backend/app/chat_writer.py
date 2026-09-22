@@ -57,7 +57,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from app import models, schemas
 from app.goals import admit_goal
 from app.chat_message_identity import assistant_message_index
-from app.chat_titles import first_message_title
+from app.chat_titles import apply_generated_title, first_message_title
 from app.json_safety import json_safe
 from app.events import (
   TOOL_OUTPUT_INLINE_THRESHOLD,
@@ -978,6 +978,21 @@ class SwitchProviderWithCompaction(_Command):
   source_summary_hash: str | None = None
   data_dir: str = ""
   request_fingerprint: str = ""
+
+
+@dataclass
+class CheckpointContinuity(_Command):
+  """Append one run-authorized continuity delta and advance its projection."""
+
+  chat_id: str = ""
+  run_token: str = ""
+  checkpoint_id: str = ""
+  expected_revision: int = 0
+  digest: str = ""
+  summary: str | None = None
+  title: str | None = None
+  source_cursor: dict | None = None
+  legacy_markdown: str | None = None
 
 
 @dataclass
@@ -1963,6 +1978,8 @@ class ChatWriterActor:
       return self._persist_compaction(db, cmd)
     if isinstance(cmd, SwitchProviderWithCompaction):
       return self._switch_provider_with_compaction(db, cmd)
+    if isinstance(cmd, CheckpointContinuity):
+      return self._checkpoint_continuity(db, cmd)
     if isinstance(cmd, PromotePending):
       return self._promote_pending(db, cmd)
     if isinstance(cmd, CancelPending):
@@ -4135,13 +4152,10 @@ class ChatWriterActor:
       return {"status": "conflict", "reason": "provider_changed"}
     if messages_fingerprint(messages) != cmd.source_messages_hash:
       return {"status": "conflict", "reason": "chat_changed"}
-    from app.compaction import load_cumulative_summary
+    from app.compaction import continuity_source_hash
 
-    latest_summary = load_cumulative_summary(cmd.data_dir, cmd.chat_id)
-    latest_summary_hash = (
-      hashlib.sha256(latest_summary.encode("utf-8")).hexdigest()
-      if latest_summary is not None
-      else None
+    latest_summary_hash = continuity_source_hash(
+      db, cmd.data_dir, cmd.chat_id, messages,
     )
     if latest_summary_hash != cmd.source_summary_hash:
       return {"status": "conflict", "reason": "summary_changed"}
@@ -4197,6 +4211,133 @@ class ChatWriterActor:
       "stored": new_msg,
       "provider": chat.provider,
       "agent_settings_json": chat.agent_settings_json,
+    }
+
+  def _checkpoint_continuity(
+    self, db, cmd: CheckpointContinuity,
+  ) -> dict:
+    """Commit one idempotent checkpoint under exact live-run authority."""
+    from app.chat_continuity import completed_prefix, legacy_parts, now_naive
+
+    chat = _active_chat(db, cmd.chat_id)
+    run = db.get(models.ChatRun, cmd.run_token)
+    if (
+      chat is None or run is None or run.chat_id != cmd.chat_id
+      or run.status != "running"
+      or self._run_token_owner.get(cmd.chat_id) != cmd.run_token
+      or not self._run_is_latest(db, run)
+    ):
+      return {"status": "stale_run"}
+    if cmd.checkpoint_id == "legacy-baseline-v1":
+      return {"status": "conflict", "reason": "reserved_checkpoint_id"}
+
+    prior = db.query(models.ChatContinuityEntry).filter(
+      models.ChatContinuityEntry.chat_id == cmd.chat_id,
+      models.ChatContinuityEntry.checkpoint_id == cmd.checkpoint_id,
+    ).one_or_none()
+    if prior is not None:
+      same = (
+        prior.run_id == cmd.run_token
+        and prior.digest == cmd.digest
+        and prior.current_summary == cmd.summary
+        and prior.requested_title == cmd.title
+        and prior.source_cursor_json == cmd.source_cursor
+      )
+      if not same:
+        return {"status": "conflict", "reason": "checkpoint_mismatch"}
+      state = db.get(models.ChatContinuity, cmd.chat_id)
+      return {
+        "status": "already_committed",
+        "entry_revision": prior.revision,
+        "revision": state.revision if state is not None else prior.revision,
+        "coverage": {
+          "message_count": state.covered_message_count,
+          "prefix_hash": state.covered_prefix_hash,
+        },
+        "title_applied": bool(
+          cmd.title and not chat.title_locked and chat.title == cmd.title
+        ),
+      }
+
+    state = db.get(models.ChatContinuity, cmd.chat_id)
+    revision = state.revision if state is not None else 0
+    if revision != cmd.expected_revision:
+      return {
+        "status": "conflict", "reason": "revision_changed",
+        "revision": revision,
+      }
+
+    if state is None:
+      state = models.ChatContinuity(
+        chat_id=cmd.chat_id, revision=0,
+        covered_message_count=0, covered_prefix_hash=None,
+      )
+      db.add(state)
+      if cmd.legacy_markdown is not None:
+        legacy_description, legacy_digest, _legacy_summary = legacy_parts(
+          cmd.legacy_markdown
+        )
+        legacy_short = legacy_digest or legacy_description
+        state.revision = 1
+        state.current_summary = legacy_short
+        db.add(models.ChatContinuityEntry(
+          chat_id=cmd.chat_id, revision=1,
+          checkpoint_id="legacy-baseline-v1", run_id=None,
+          digest=(legacy_digest or "Historical continuity baseline.").strip(),
+          current_summary=legacy_short, requested_title=None,
+          source_cursor_json=None,
+          covered_message_count=0, covered_prefix_hash=None,
+          legacy_markdown=cmd.legacy_markdown, created_at=now_naive(),
+        ))
+      revision = state.revision
+      # expected_revision=0 accepts the one-time import the caller could not
+      # observe as a database revision before its first checkpoint.
+
+    if cmd.source_cursor is not None:
+      candidate_count, candidate_hash = completed_prefix(
+        list(chat.messages or []), cmd.run_token,
+      )
+      supplied_count = cmd.source_cursor.get("message_count")
+      supplied_hash = cmd.source_cursor.get("prefix_hash")
+      if supplied_count != candidate_count or supplied_hash != candidate_hash:
+        db.rollback()
+        return {
+          "status": "conflict", "reason": "source_changed",
+          "source_cursor": {
+            "message_count": candidate_count, "prefix_hash": candidate_hash,
+          },
+        }
+      covered_count, covered_hash = candidate_count, candidate_hash
+    else:
+      covered_count = state.covered_message_count
+      covered_hash = state.covered_prefix_hash
+    next_revision = revision + 1
+    created_at = now_naive()
+    db.add(models.ChatContinuityEntry(
+      chat_id=cmd.chat_id, revision=next_revision,
+      checkpoint_id=cmd.checkpoint_id, run_id=cmd.run_token,
+      digest=cmd.digest, current_summary=cmd.summary,
+      requested_title=cmd.title,
+      source_cursor_json=cmd.source_cursor,
+      covered_message_count=covered_count,
+      covered_prefix_hash=covered_hash,
+      legacy_markdown=None, created_at=created_at,
+    ))
+    state.revision = next_revision
+    if cmd.summary is not None:
+      state.current_summary = cmd.summary
+    state.covered_message_count = covered_count
+    state.covered_prefix_hash = covered_hash
+    state.updated_at = created_at
+    title_applied = bool(cmd.title and apply_generated_title(chat, cmd.title))
+    if not _commit_or_rollback(db):
+      raise _PersistFailed("CheckpointContinuity did not persist")
+    return {
+      "status": "committed", "revision": next_revision,
+      "coverage": {
+        "message_count": covered_count, "prefix_hash": covered_hash,
+      },
+      "title_applied": title_applied,
     }
 
   def _persist_compaction(self, db, cmd: PersistCompaction) -> dict:

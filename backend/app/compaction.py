@@ -1,20 +1,15 @@
-"""Incoming-provider synthesis for portable cross-provider chat context.
+"""Portable continuity sources and bounded, explicit provider synthesis.
 
-Native SDK sessions are provider-specific. A Claude session id cannot seed a
-Codex thread, or vice versa, so the provider selected by the owner runs one
-fresh, tool-free synthesis turn over the chat's detailed running ``## Summary``.
-Only that provider-neutral result is stored and replayed into the selected
-provider's first real turn; the disposable synthesis session is never attached
-to the chat.
-
-The visible transcript is always included as a freshness backstop; legacy chats
-without a running note use it as their sole source. The route and writer actor own
-the atomic switch; this module only reads the source and produces compacted text.
+Switches pass the journal and verified uncovered transcript directly when they
+fit; oversized sources and explicit manual compaction use tool-free synthesis.
+Native provider compaction is independent. Routes and the writer own commits;
+this module reads complete source material and prepares a portable briefing.
 """
 
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -24,6 +19,7 @@ import tempfile
 from pathlib import Path
 
 from app.chat_notes import extract_cumulative_summary
+from app.chat_continuity import verified_uncovered_messages
 from app.continuations import (
   continuation_actor_label,
   is_continuation_message,
@@ -106,6 +102,91 @@ def load_cumulative_summary(data_dir: str, chat_id: str) -> str | None:
   except OSError:
     return None
   return extract_cumulative_summary(text)
+
+
+def build_continuity_source(db, chat_id: str, messages: list[dict]) -> str | None:
+  """Render the complete checkpoint journal plus every unacknowledged row."""
+  from app import models
+
+  state = db.get(models.ChatContinuity, chat_id)
+  if state is None:
+    return None
+  rows = db.query(models.ChatContinuityEntry).filter(
+    models.ChatContinuityEntry.chat_id == chat_id,
+  ).order_by(models.ChatContinuityEntry.revision.asc()).all()
+  parts = [
+    "--- CURRENT CONTINUITY SUMMARY ---",
+    (state.current_summary or "(none)"),
+    "--- APPEND-ONLY DIGEST ---",
+  ]
+  for row in rows:
+    parts.append(f"REVISION {row.revision}: {row.digest}")
+    if row.legacy_markdown is not None:
+      parts.extend([
+        "--- LOSSLESS LEGACY BASELINE ---",
+        row.legacy_markdown,
+        "--- END LEGACY BASELINE ---",
+      ])
+  uncovered, verified = verified_uncovered_messages(
+    messages,
+    covered_count=state.covered_message_count,
+    covered_prefix_hash=state.covered_prefix_hash,
+  )
+  transcript = build_transcript_text(uncovered, max_chars=None).strip()
+  if transcript:
+    parts.extend([
+      (
+        "--- UNCOVERED TRANSCRIPT ---"
+        if verified else "--- COMPLETE TRANSCRIPT (COVERAGE PROOF FAILED) ---"
+      ),
+      transcript,
+    ])
+  return "\n\n".join(part for part in parts if part is not None).strip()
+
+
+def build_portable_source(
+  db, data_dir: str, chat_id: str, messages: list[dict],
+) -> str:
+  """Prefer the durable journal; fall back losslessly for legacy chats."""
+  source = build_continuity_source(db, chat_id, messages)
+  parts = [source] if source else []
+  if not source:
+    legacy = load_cumulative_summary(data_dir, chat_id)
+    transcript = build_transcript_text(messages, max_chars=None).strip()
+    if legacy:
+      parts.extend(["--- LEGACY CONTINUITY SUMMARY ---", legacy])
+    if transcript:
+      parts.extend(["--- COMPLETE CHAT TRANSCRIPT ---", transcript])
+  from app import models
+  chat = db.get(models.Chat, chat_id)
+  pending = build_transcript_text(
+    list(chat.pending_messages or []) if chat is not None else [], max_chars=None,
+  ).strip()
+  live_row = db.get(models.ChatLiveAssistant, chat_id)
+  live = build_transcript_text(
+    [live_row.snapshot] if live_row is not None and live_row.snapshot else [],
+    max_chars=None,
+  ).strip()
+  if pending:
+    parts.extend(["--- ACCEPTED PENDING OWNER INPUT ---", pending])
+  if live:
+    parts.extend(["--- LIVE ASSISTANT SNAPSHOT (UNCOVERED) ---", live])
+  return "\n\n".join(parts).strip()
+
+
+def continuity_source_hash(
+  db, data_dir: str, chat_id: str, messages: list[dict],
+) -> str | None:
+  source = build_portable_source(db, data_dir, chat_id, messages)
+  return hashlib.sha256(source.encode("utf-8")).hexdigest() if source else None
+
+
+def portable_source_fits(source: str) -> bool:
+  return (
+    bool(source.strip())
+    and len(source) <= _MAX_HANDOFF_CHARS
+    and len(source.encode("utf-8")) <= _MAX_HANDOFF_BYTES
+  )
 
 
 def build_transcript_text(

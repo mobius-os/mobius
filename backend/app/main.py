@@ -73,7 +73,8 @@ from app.routes import (
   admin_router, agent_coordination_router, apps_router, app_services_router,
   auth_router,
   app_chat_router,
-  chat_embed_router, chat_logs_router, chat_router, chats_router, chats_stream_router,
+  chat_continuity_router, chat_embed_router, chat_logs_router, chat_router,
+  chats_router, chats_stream_router,
   secure_inputs_router,
   connectors_router, connectors_public_router,
   community_router,
@@ -889,6 +890,7 @@ app.include_router(projects_router)
 app.include_router(project_copies_router)
 app.include_router(shared_apps_router)
 app.include_router(chat_router)
+app.include_router(chat_continuity_router)
 app.include_router(chat_embed_router)
 app.include_router(chats_router)
 app.include_router(chats_stream_router)

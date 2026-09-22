@@ -67,6 +67,7 @@ def test_incoming_provider_synthesizes_and_switches_atomically(
   client, auth, db, monkeypatch,
 ):
   _connect_codex(monkeypatch)
+  monkeypatch.setattr(compaction, "_MAX_HANDOFF_BYTES", 1)
   source = "Goal: build X. Decision: use the API. Next: wire persistence."
   captured = {}
 
@@ -97,7 +98,9 @@ def test_incoming_provider_synthesizes_and_switches_atomically(
   assert captured["provider_id"] == "codex"
   assert captured["model"] == "gpt-5.4"
   assert captured["effort"] == "high"
-  assert captured["source_summary"] == source
+  assert source in captured["source_summary"]
+  assert "Build me an app" in captured["source_summary"]
+  assert captured["messages"] == []
   assert body["provider"] == "codex"
   assert body["stored"]["switch_id"] == "switch-1"
   assert body["stored"]["from_provider"] == "claude"
@@ -143,7 +146,8 @@ def test_legacy_bodyless_compact_then_patch_remains_compatible(
   assert row.provider == "claude"
   assert row.session_id is None
   assert chat_mod._latest_compaction_brief(row) == "portable legacy handoff"
-  assert captured["source_summary"] == "Older published summary"
+  assert "Older published summary" in captured["source_summary"]
+  assert "keep this context" in captured["source_summary"]
 
   switched = client.patch(
     f"/api/chats/{chat_id}",
@@ -193,7 +197,9 @@ def test_manual_compact_guidance_uses_current_mobius_model(
   assert captured["provider_id"] == "mobius"
   assert captured["model"] == "flow"
   assert captured["effort"] == "high"
-  assert captured["source_summary"] == "Existing detailed summary"
+  assert "Existing detailed summary" in captured["source_summary"]
+  assert "Keep the interaction decisions" in captured["source_summary"]
+  assert captured["messages"] == []
   assert captured["custom_instructions"] == (
     "Keep UI decisions; omit routine command output."
   )
@@ -266,6 +272,7 @@ def test_next_real_runner_uses_target_fresh_session_and_handoff(
   from app.broadcast import create_broadcast
 
   _connect_codex(monkeypatch)
+  monkeypatch.setattr(compaction, "_MAX_HANDOFF_BYTES", 1)
   monkeypatch.setattr(
     "app.providers.ClaudeProvider.ensure_auth",
     lambda self, _data_dir: asyncio.sleep(0),
@@ -349,6 +356,7 @@ def test_synthesis_failure_leaves_provider_session_settings_and_messages(
   client, auth, db, monkeypatch,
 ):
   _connect_codex(monkeypatch)
+  monkeypatch.setattr(compaction, "_MAX_HANDOFF_BYTES", 1)
 
   async def _stub(_messages, **_kwargs):
     raise compaction.CompactionError("Incoming provider is unavailable.")
@@ -380,6 +388,7 @@ def test_chat_change_during_synthesis_rejects_without_partial_switch(
   client, auth, db, monkeypatch,
 ):
   _connect_codex(monkeypatch)
+  monkeypatch.setattr(compaction, "_MAX_HANDOFF_BYTES", 1)
   chat_id = _make_chat_with_messages(client, auth, [
     {"role": "user", "content": "original"},
     {"role": "assistant", "content": "answer"},
@@ -408,6 +417,7 @@ def test_turn_start_during_synthesis_wins_without_partial_switch(
   client, auth, db, monkeypatch,
 ):
   _connect_codex(monkeypatch)
+  monkeypatch.setattr(compaction, "_MAX_HANDOFF_BYTES", 1)
   chat_id = _make_chat_with_messages(client, auth, [
     {"role": "user", "content": "original"},
     {"role": "assistant", "content": "answer"},
@@ -444,6 +454,7 @@ def test_route_send_waits_for_handoff_then_starts_on_incoming_provider(
 ):
   """The public send route cannot slip into the synthesis/commit window."""
   _connect_codex(monkeypatch)
+  monkeypatch.setattr(compaction, "_MAX_HANDOFF_BYTES", 1)
   chat_id = _make_chat_with_messages(client, auth, [
     {"role": "user", "content": "original"},
     {"role": "assistant", "content": "answer"},
@@ -501,6 +512,7 @@ def test_retry_with_same_switch_id_is_idempotent(
   client, auth, db, monkeypatch,
 ):
   _connect_codex(monkeypatch)
+  monkeypatch.setattr(compaction, "_MAX_HANDOFF_BYTES", 1)
   calls = 0
 
   async def _stub(_messages, **_kwargs):
@@ -544,6 +556,7 @@ def test_summary_created_during_synthesis_forces_retry(
   client, auth, db, monkeypatch,
 ):
   _connect_codex(monkeypatch)
+  monkeypatch.setattr(compaction, "_MAX_HANDOFF_BYTES", 1)
   chat_id = _make_chat_with_messages(client, auth, [
     {"role": "user", "content": "hi"},
     {"role": "assistant", "content": "hello"},

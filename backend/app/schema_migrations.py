@@ -4974,6 +4974,43 @@ def _add_chat_run_continuation_control(eng) -> None:
     ))
 
 
+def _add_chat_continuity_journal(eng) -> None:
+  """Create the current-state row and immutable checkpoint journal."""
+  from sqlalchemy import text
+
+  with eng.begin() as conn:
+    conn.execute(text("""
+      CREATE TABLE IF NOT EXISTS chat_continuity (
+        chat_id VARCHAR(64) NOT NULL PRIMARY KEY
+          REFERENCES chats(id) ON DELETE CASCADE,
+        revision INTEGER NOT NULL DEFAULT 0,
+        current_summary TEXT,
+        covered_message_count INTEGER NOT NULL DEFAULT 0,
+        covered_prefix_hash VARCHAR(64),
+        updated_at TIMESTAMP NOT NULL
+      )
+    """))
+    conn.execute(text("""
+      CREATE TABLE IF NOT EXISTS chat_continuity_entries (
+        chat_id VARCHAR(64) NOT NULL
+          REFERENCES chats(id) ON DELETE CASCADE,
+        revision INTEGER NOT NULL,
+        checkpoint_id VARCHAR(128) NOT NULL,
+        run_id VARCHAR(64),
+        digest TEXT NOT NULL,
+        current_summary TEXT,
+        requested_title VARCHAR(256),
+        source_cursor_json JSON,
+        covered_message_count INTEGER NOT NULL DEFAULT 0,
+        covered_prefix_hash VARCHAR(64),
+        legacy_markdown TEXT,
+        created_at TIMESTAMP NOT NULL,
+        PRIMARY KEY (chat_id, revision),
+        CONSTRAINT uq_continuity_checkpoint UNIQUE (chat_id, checkpoint_id)
+      )
+    """))
+
+
 _SCHEMA_MIGRATIONS = (
   # Full IDs are permanent identities, not sequence positions. Append new
   # work in execution order; never renumber a shipped ID to reconcile sources.
@@ -5042,6 +5079,7 @@ _SCHEMA_MIGRATIONS = (
   ("0062_chat_run_progress_lease", _add_chat_run_progress_lease),
   ("0063_durable_goal_records", _durable_goal_records),
   ("0063_chat_run_continuation_control", _add_chat_run_continuation_control),
+  ("0064_chat_continuity_journal", _add_chat_continuity_journal),
 )
 
 

@@ -647,3 +647,53 @@ def test_control_cli_unknown_subcommand_never_enters_stdio_server(arguments):
 
   assert result.returncode == 2
   assert "usage: mobius_control_mcp.py call" in result.stderr
+
+
+def test_continuity_tools_available_to_owner_and_delegated_runs():
+  control = _control_module()
+  names = {"read_chat_continuity", "checkpoint_chat"}
+  assert names <= set(control.OWNER_TOOLS)
+  assert names <= set(control.DELEGATED_TOOLS)
+  assert names <= set(platform_tools.DELEGATED_CONTROL_TOOL_NAMES)
+  assert names <= set(platform_tools.OWNER_CONTROL_TOOL_NAMES)
+
+
+def test_continuity_read_is_bounded_and_checkpoint_preserves_explicit_coverage(monkeypatch):
+  control = _control_module()
+  calls = []
+
+  def call(method, path, payload=None):
+    calls.append((method, path, payload))
+    return {"revision": 4}
+
+  monkeypatch.setattr(control, "_agent_api_call", call)
+  assert control._call_read_chat_continuity({"after_revision": 3, "limit": 5}) == {
+    "revision": 4,
+  }
+  cursor = {"message_count": 2, "prefix_hash": "a" * 64}
+  payload = {
+    "checkpoint_id": "run-milestone-1", "expected_revision": 3,
+    "digest": "A test failed; repair is not verified.",
+    "summary": "Fixing the reproducible failure.", "source_cursor": cursor,
+  }
+  control._call_checkpoint_chat(payload)
+  assert calls == [
+    ("GET", "/api/chat/continuity?after_revision=3&limit=5", None),
+    ("POST", "/api/chat/continuity/checkpoints", payload),
+  ]
+  payload.pop("source_cursor")
+  control._call_checkpoint_chat(payload)
+  assert "source_cursor" not in calls[-1][2]
+
+
+@pytest.mark.parametrize("arguments", [
+  {"checkpoint_id": "x", "expected_revision": True, "digest": "fact"},
+  {"checkpoint_id": "x", "expected_revision": 0, "digest": " "},
+  {"checkpoint_id": "x", "expected_revision": 0, "digest": "fact", "chat_id": "another-chat"},
+  {"checkpoint_id": "x", "expected_revision": 0, "digest": "fact", "source_cursor": {"message_count": 2}},
+])
+def test_continuity_tool_rejects_malformed_or_cross_chat_payload(arguments, monkeypatch):
+  control = _control_module()
+  monkeypatch.setattr(control, "_agent_api_call", lambda *a, **kw: pytest.fail("unexpected API call"))
+  with pytest.raises(ValueError):
+    control._call_checkpoint_chat(arguments)

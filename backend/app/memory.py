@@ -1,9 +1,10 @@
 """Assemble the always-on recent-chat continuity block.
 
-The platform owns only per-chat summaries under
-``<data_dir>/shared/memory/chats/<id>/index.md``. A new session receives the
-bounded Digest from the most recently touched notes, never their cumulative
-Summary/facts and never knowledge-graph files. Optional installed apps may use
+The platform owns DB-backed continuity with recoverable projections under
+``<data_dir>/shared/memory/chats/<id>/index.md``. A new session receives bounded
+current paragraphs and runtime snapshots, never whole journals or graph files.
+Legacy notes call the paragraph Digest; version-two notes call it Summary.
+Optional installed apps may use
 the sibling directory for richer data, but they activate and retrieve that data
 through their own system-prompt contribution and reader.
 
@@ -38,10 +39,11 @@ DIGEST_MAX_BYTES = 800
 # Keeping retrieval guidance here makes the structured entry contract and its
 # single shared instruction one source of truth.
 RECENT_CHAT_RETRIEVAL_INSTRUCTION = (
-  "Each recent-chat entry gives a Name, Location, and bounded Digest. "
+  "Each recent-chat entry gives a Name, Location, and bounded current paragraph "
+  "(the Digest field), plus runtime status when available. "
   "When more detail would materially help, read "
   "/data/shared/memory/<Location> for that chat's complete cumulative "
-  "summary. The platform alone publishes those files; do not edit them."
+  "history. The platform alone publishes those files; do not edit them."
 )
 
 
@@ -118,8 +120,13 @@ def load_chat_summary_metadata(
   text = _read(path)
   if not text.strip():
     return {"description": None, "digest": None}
-  description = str(parse_frontmatter(text).get("description", "")).strip()
-  digest = _note_section(text, "Digest")
+  metadata = parse_frontmatter(text)
+  description = str(metadata.get("description", "")).strip()
+  digest = (
+    _note_section(text, "Summary")
+    if metadata.get("continuity_version") == 2
+    else _note_section(text, "Digest")
+  )
   return {
     "description": description or None,
     "digest": digest.strip() if digest and digest.strip() else None,
@@ -141,6 +148,55 @@ def _truncate_bytes(text: str, limit: int) -> str:
   return raw[:limit].decode("utf-8", errors="ignore")
 
 
+def recent_continuity_metadata(db, ordered_chat_ids: Collection[str]) -> dict:
+  """Return DB-authoritative sibling summaries and one runtime snapshot."""
+  from datetime import UTC, datetime
+
+  from app import models
+
+  chat_ids = list(ordered_chat_ids)[:RECENT_CHAT_NOTES]
+  if not chat_ids:
+    return {}
+  chats = db.query(
+    models.Chat.id, models.Chat.title, models.Chat.pending_question_id,
+  ).filter(models.Chat.id.in_(chat_ids)).all()
+  states = db.query(models.ChatContinuity).filter(
+    models.ChatContinuity.chat_id.in_(chat_ids),
+  ).all()
+  state_by_id = {state.chat_id: state for state in states}
+  run_statuses = {}
+  for chat_id in chat_ids:
+    latest = db.query(models.ChatRun.status).filter(
+      models.ChatRun.chat_id == chat_id,
+    ).order_by(
+      models.ChatRun.started_at.desc(), models.ChatRun.id.desc(),
+    ).first()
+    if latest is not None:
+      run_statuses[chat_id] = latest[0]
+  snapshot_at = datetime.now(UTC).isoformat()
+  result = {}
+  for chat in chats:
+    state = state_by_id.get(chat.id)
+    run_status = run_statuses.get(chat.id)
+    status = "active" if run_status == "running" else (
+      "waiting" if (
+        chat.pending_question_id
+        or run_status in models.CONTINUATION_RUN_STATUSES
+      ) else "idle"
+    )
+    result[chat.id] = {
+      "name": chat.title,
+      "digest": (
+        state.current_summary if state is not None and state.current_summary
+        else ""
+      ),
+      "status": status,
+      "snapshot_at": snapshot_at,
+      "has_continuity": state is not None,
+    }
+  return result
+
+
 def build_memory_block(
   data_dir: str | Path,
   *,
@@ -148,13 +204,14 @@ def build_memory_block(
   max_notes: int = DEFAULT_MAX_NOTES,
   eligible_chat_ids: Collection[str] | None = None,
   ordered_chat_ids: Collection[str] | None = None,
+  continuity_by_chat_id: dict[str, dict[str, object]] | None = None,
 ) -> MemoryBlock:
   """Assembles the injected memory context.
 
-  Only recent-chat digests are injected, always and without a graph/app gate.
-  Each entry is the note's one-line ``description``, relative path, and bounded
-  ``## Digest`` paragraph. The cumulative ``## Summary``,
-  facts, graph router, MOCs, and atomic notes are never pulled into a new chat.
+  Only recent-chat current paragraphs are injected, without a graph/app gate.
+  Each entry has a name, relative path, bounded paragraph and any supplied
+  runtime snapshot. Detailed journals, legacy cumulative Summary sections,
+  graph routers, MOCs, and atomic notes are never pulled into a new chat.
   An installed system app may teach the agent to request graph recall through
   a separate prompt-scoped reader.
 
@@ -174,21 +231,52 @@ def build_memory_block(
   # Each note is independently capped. Continue past one that does not fit so
   # an unusually long newest note cannot hide every older short digest.
   note_limit = min(RECENT_CHAT_NOTES, max(0, max_notes))
-  for note in _recent_chat_notes(
-    root, note_limit,
-    eligible_chat_ids=eligible_chat_ids,
-    ordered_chat_ids=ordered_chat_ids,
-  ):
-    name, digest = _chat_digest_parts(note)
+  if ordered_chat_ids is not None:
+    eligible = set(eligible_chat_ids) if eligible_chat_ids is not None else None
+    candidates = [
+      (chat_id, root / "chats" / chat_id / "index.md")
+      for chat_id in ordered_chat_ids
+      if eligible is None or chat_id in eligible
+    ][:note_limit]
+  else:
+    candidates = [
+      (note.parent.name, note) for note in _recent_chat_notes(
+        root, note_limit, eligible_chat_ids=eligible_chat_ids,
+      )
+    ]
+  for chat_id, note in candidates:
+    item = (continuity_by_chat_id or {}).get(chat_id)
+    if item is None or not item.get("has_continuity", False):
+      file_name, file_digest = (
+        _chat_digest_parts(note) if note.is_file() else ("", "")
+      )
+      item = item or {}
+    else:
+      file_name, file_digest = "", ""
+    name = item.get("name", "") or file_name
+    digest = (
+      item.get("digest", "")
+      if item.get("has_continuity", False)
+      else file_digest
+    )
+    digest = _truncate_bytes(digest, DIGEST_MAX_BYTES).strip()
     if not name and not digest:
       continue
-    rel = f"chats/{note.parent.name}/index.md"
-    safe_name = html.escape(name or note.parent.name, quote=False)
+    rel = f"chats/{chat_id}/index.md"
+    safe_name = html.escape(name or chat_id, quote=False)
     safe_digest = html.escape(digest, quote=False)
+    status = item.get("status")
+    snapshot_at = item.get("snapshot_at")
+    status_lines = ""
+    if status:
+      status_lines += f"Status: {html.escape(status, quote=False)}\n"
+    if snapshot_at:
+      status_lines += f"Snapshot: {html.escape(snapshot_at, quote=False)}\n"
     chunk = (
       "<recent_chat>\n"
       f"Name: {safe_name}\n"
       f"Location: {rel}\n"
+      f"{status_lines}"
       f"Digest: {safe_digest}\n"
       "</recent_chat>"
     )
@@ -196,11 +284,12 @@ def build_memory_block(
       continue
     parts.append(chunk)
     loaded.append(rel)
-    entries.append({
-      "name": name or note.parent.name,
-      "location": rel,
-      "digest": digest,
-    })
+    entry = {"name": name or chat_id, "location": rel, "digest": digest}
+    if status:
+      entry["status"] = status
+    if snapshot_at:
+      entry["snapshot_at"] = snapshot_at
+    entries.append(entry)
     used += len(chunk.encode("utf-8")) + 2
 
   if not parts:
@@ -288,8 +377,13 @@ def _chat_digest_parts(note: Path) -> tuple[str, str]:
   text = _read(note)
   if not text.strip():
     return "", ""
-  desc = str(parse_frontmatter(text).get("description", "")).strip()
-  digest = _note_section(text, "Digest")
+  metadata = parse_frontmatter(text)
+  desc = str(metadata.get("description", "")).strip()
+  digest = (
+    _note_section(text, "Summary")
+    if metadata.get("continuity_version") == 2
+    else _note_section(text, "Digest")
+  )
   if digest is None:
     digest = _note_section(text, "Summary")
   if digest is None:

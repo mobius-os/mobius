@@ -507,7 +507,7 @@ The chat is large and self-contained; its hooks live beside it, not in `src/hook
 
 ## In-product agent context — three layers
 
-The in-product agent is a first-class reader of this code, and its behavior has three layers. (1) **Base constitution** — the live platform checkout's `skill/core.md`; `chat._read_skill_text()` caches only this tracked platform text for the process lifetime, so edits and platform updates take effect after a server restart. `/app/skill/core.md` is only the image-baked degraded-boot fallback when the live checkout is unavailable. (2) **Installed system-app contributions** — a manifest may declare one root-level `system_prompt` markdown file only with explicit `system_app: true`. When a chat starts its first turn, live (`deleted_at IS NULL`) app fragments are composed in stable id order with its effective base constitution and stored as one content-addressed prompt snapshot. Every later turn, provider switch, and compaction uses those exact bytes. Install, update, and uninstall affect chats started afterwards, while an existing chat keeps the prompt it began with. (3) **On-demand skills** — `/data/shared/skills/*.md`; base skills are seeded create-if-absent, while app-owned skills arrive through manifests and are deactivated/restored with their owner app. Independently of optional apps, every chat maintains its name, a bounded `## Digest`, and an uncapped cumulative `## Summary` under `/data/shared/memory/chats/<id>/index.md`. New sessions receive only recent descriptions + Digests. `chat_note.py` is the tool-free, compare-and-swap turn-end writer; it uses the provider captured with that settled chat only when its auth preflight passes, otherwise publishing the local deterministic fallback without spawning a dead CLI. Compaction prefers the chat's cumulative Summary. The optional Memory app owns graph instructions, its skill, reader, seeds, builder, Git publisher, and retrieval telemetry; no router/fact note is injected. Uninstall changes future chat prompts and removes the skill/jobs while leaving existing prompt snapshots and core chat summaries intact.
+The in-product agent is a first-class reader of this code, and its behavior has three layers. (1) **Base constitution** — the live platform checkout's `skill/core.md`; `chat._read_skill_text()` caches only this tracked platform text for the process lifetime, so edits and platform updates take effect after a server restart. `/app/skill/core.md` is only the image-baked degraded-boot fallback when the live checkout is unavailable. (2) **Installed system-app contributions** — a manifest may declare one root-level `system_prompt` markdown file only with explicit `system_app: true`. When a chat starts its first turn, live (`deleted_at IS NULL`) app fragments are composed in stable id order with its effective base constitution and stored as one content-addressed prompt snapshot. Every later turn, provider switch, and compaction uses those exact bytes. Install, update, and uninstall affect chats started afterwards, while an existing chat keeps the prompt it began with. (3) **On-demand skills** — `/data/shared/skills/*.md`; base skills are seeded create-if-absent, while app-owned skills arrive through manifests and are deactivated/restored with their owner app. Independently of optional apps, the working agent authors its chat name, short current Summary, and append-only Digest through run-bound continuity checkpoint tools. The chat writer commits revisioned state and entries; `/data/shared/memory/chats/<id>/index.md` is a recoverable platform-owned projection. There is no routine turn-end summary agent. New sessions receive only bounded recent names/current summaries and timestamped runtime activity. Old notes are preserved losslessly as historical baselines on first checkpoint; their reversed Summary/Digest terminology is read by format version, not guessed from content. Portable continuation uses the detailed digest and every uncovered transcript message; native provider compaction remains separate. The optional Memory app owns graph instructions, its skill, reader, seeds, builder, Git publisher, and retrieval telemetry; no router/fact note is injected. Uninstall changes future chat prompts and removes the skill/jobs while leaving existing prompt snapshots and core chat summaries intact.
 
 ## Data layout (`/data/` volume)
 
@@ -1270,30 +1270,53 @@ serializer), and the FULL output is fetched only when the block is expanded (`GE
 
 ### Chat summary + continuity contract
 
-Each chat maintains a **growing per-chat note** at
-`/data/shared/memory/chats/<chat-id>/index.md` — a bounded `## Digest`, durable
-facts + the partner's intent, an uncapped cumulative `## Summary`, and a one-line
-**gist that IS the chat title**
-(`backend/scripts/chat_note.py` summarizer subagent: transcript in the prompt, no
-tools). This note is **core continuity** — it exists and is useful even when the
-Memory app is not installed. Its consumers:
+The **working agent authors** three levels: a generated name, a short current
+`## Summary`, and an append-only substantive `## Digest`. It saves at meaningful
+milestones through `checkpoint_chat`, not after every command. A single
+`CheckpointContinuity` writer command binds writes to the current chat/run,
+checks the expected revision, deduplicates checkpoint retry identities, and
+commits the new entry, state, and unlocked generated title together. A manually
+set title always wins. No semantic validator, forced continuation, recurring
+observer, or fallback LLM is involved.
 
-- **Short-term continuity into new chats.** A fresh chat opens with only the gist and
-  bounded Digest from the ~10 most-recently-modified chats
-  (`backend/app/memory.py`); the fenced path lets the agent deliberately open a
-  relevant full note. Facts and cumulative Summaries are not injected.
-- **Knowledge graph (installed Memory system app).** The app requests structurally
-  redacted chat text through its declared API permission, writes a complete graph to
-  a same-filesystem staging tree, and atomically advances a JSON `.ready` pointer to
-  an immutable generation containing `mocs/`, `notes/`, and `graph.json`. Its confined
-  reader pins one generation and returns cited snippets on demand. The graph is not
-  platform code; base boot provisions only the per-chat summary surface
-  (`backend/scripts/init_chat_summaries.py`).
-- **Reflection.** Without the Memory app, the per-chat summaries are what Reflection
-  reads.
-- **Compaction + provider switch.** The cumulative Summary is the source for compacting a
-  long chat and for the provider-switch handoff below — preferred over a from-scratch
-  default compaction.
+Coverage advances only when the agent explicitly supplies the `source_cursor`
+returned by its read after catching up substantive uncovered information. The
+writer verifies that cursor against the completed transcript prefix. An ordinary
+delta without this acknowledgment preserves the prior coverage, so a later
+save cannot silently cover an earlier missed turn. Cursor integrity proves
+the source boundary, not semantic completeness of the agent's words.
+
+The database is authoritative. `chat_continuity.py` provides reads, conservative
+transcript coverage and the platform-owned Markdown projection at
+`/data/shared/memory/chats/<chat-id>/index.md`. Agents never overwrite that file.
+GETs do not migrate state. First checkpoint preserves the entire legacy note as
+a historical baseline; `continuity_version: 2` distinguishes the new short
+Summary / append-only Digest from the old short Digest / cumulative Summary.
+Corrections append explicit supersession rather than deleting history.
+
+`read_chat_continuity` returns short state and bounded entries; full history is
+an explicit read. The lightweight helper `backend/scripts/checkpoint_chat.py`
+uses the same authenticated routes when native tools are unavailable. Writes
+return a small receipt and revision, not the full accumulated journal.
+
+Consumers:
+
+- **New/sibling chats:** bounded names, current summaries, note locations and
+  timestamped activity derived from durable runtime state. A status is a snapshot,
+  never inferred from an agent's paragraph or treated as a lock on future work.
+- **Continuation/provider handoff:** full durable digest plus every message after
+  its verified completed-prefix boundary. Current-turn mutable assistant rows
+  and steered input remain uncovered; an invalid prefix proof replays the whole
+  transcript. Missing checkpoints remain visible as missing/stale coverage,
+  rather than silently spawning another model to fill the gap.
+- **Memory/Reflection:** the detailed note remains readable. Optional Memory owns
+  its knowledge graph, instructions, jobs and retrieval independently; no graph
+  material is automatically injected by this continuity primitive.
+
+Prompt snapshots remain immutable. Constitution changes apply to newly started
+sessions after activation; evaluation must not mistake an old session's prompt
+for the newly coached contract. The reproducible live-test ladder and resource
+accounting limits are in `scripts/CHAT-CONTINUITY-EVAL.md`.
 
 Two agent mechanisms with similar names deliberately remain separate.
 `app.background_agents` resolves the owner’s primary/fallback ordering for
@@ -1317,14 +1340,19 @@ provider, model, effort, and a stable switch id to
 remains as a rolling-upgrade bridge for older clients that compact and then
 PATCH the provider.
 
-The incoming provider runs a disposable, tool-free synthesis turn over the complete
-running `## Summary` plus the complete current transcript. Large sources are folded
-through bounded progressive synthesis turns so no middle interval is silently
-omitted. The writer actor then stores that portable brief, changes
+A provider-switch handoff reads the complete durable digest and all uncovered transcript
+material. When this structured source fits the existing handoff budget it is
+passed directly, without a disposable synthesis agent. Oversized sources retain
+the guarded, bounded incoming-provider synthesis path; no middle interval is
+silently omitted and the full historical digest remains available. This is
+separate from the provider's own in-session native compaction. Explicit manual
+compaction still synthesizes a smaller briefing, honoring any owner guidance;
+it receives the complete source once, not a duplicate transcript. The writer actor
+then stores that portable brief, changes
 provider/settings, clears the outgoing session, and supersedes outgoing
 `parked`/`resume_pending` runs in one conditional transaction; sends, settings
 PATCHes, app-chat PATCHes, and auto-resume share the same per-chat transition lock,
-while a Summary or transcript change invalidates the commit. Provider-switch UI
+while a continuity or transcript change invalidates the commit. Provider-switch UI
 state is keyed by chat outside the keyed `ChatView`, so navigation cannot unlock a
 handoff or lose its idempotent retry id. The brief is replayed into the incoming provider's first
 real turn as a `<compacted_chat>` block, so the new agent continues rather than

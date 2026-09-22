@@ -172,6 +172,49 @@ class ChatLiveAssistant(Base):
   snapshot = Column(JSON, nullable=True)
 
 
+class ChatContinuity(Base):
+  """Current projection of an agent-authored, append-only chat checkpoint log."""
+
+  __tablename__ = "chat_continuity"
+
+  chat_id = Column(
+    String(64), ForeignKey("chats.id", ondelete="CASCADE"), primary_key=True,
+  )
+  revision = Column(Integer, nullable=False, default=0, server_default="0")
+  current_summary = Column(Text, nullable=True)
+  covered_message_count = Column(
+    Integer, nullable=False, default=0, server_default="0",
+  )
+  covered_prefix_hash = Column(String(64), nullable=True)
+  updated_at = Column(DateTime, nullable=False, default=now_naive_utc)
+
+
+class ChatContinuityEntry(Base):
+  """One immutable checkpoint delta, or one lossless legacy baseline."""
+
+  __tablename__ = "chat_continuity_entries"
+  __table_args__ = (
+    UniqueConstraint("chat_id", "checkpoint_id", name="uq_continuity_checkpoint"),
+  )
+
+  chat_id = Column(
+    String(64), ForeignKey("chats.id", ondelete="CASCADE"), primary_key=True,
+  )
+  revision = Column(Integer, primary_key=True)
+  checkpoint_id = Column(String(128), nullable=False)
+  run_id = Column(String(64), nullable=True)
+  digest = Column(Text, nullable=False)
+  current_summary = Column(Text, nullable=True)
+  requested_title = Column(String(256), nullable=True)
+  source_cursor_json = Column(JSON, nullable=True)
+  covered_message_count = Column(
+    Integer, nullable=False, default=0, server_default="0",
+  )
+  covered_prefix_hash = Column(String(64), nullable=True)
+  legacy_markdown = Column(Text, nullable=True)
+  created_at = Column(DateTime, nullable=False, default=now_naive_utc)
+
+
 class Chat(Base):
   """A chat conversation with the agent."""
 
