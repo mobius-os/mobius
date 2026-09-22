@@ -554,9 +554,10 @@ function MsgContentInner({
         {/* Generated-file download chips: collected from every tool block in
             this message and shown once, below the agent's final text, so they
             read as a natural "here's what I made" handoff rather than a detail
-            buried inside a tool row. Shown during streaming too so the chip
-            appears as soon as the file is detected. */}
-        {msg.role === 'assistant' && (() => {
+            buried inside a tool row. Keep them hidden until the response has
+            settled: appearing mid-sentence makes a completed handoff look
+            premature and causes the card to move while the answer grows. */}
+        {msg.role === 'assistant' && !isStreaming && (() => {
           const allFiles = (msg.blocks || []).flatMap(b =>
             b.type === 'tool' && Array.isArray(b.generated_files)
               ? b.generated_files.map(f => ({ ...f, kind: 'generated' }))
