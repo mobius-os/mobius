@@ -782,6 +782,105 @@ def test_update_compare_and_swap_keeps_newer_on_disk_edit(
   assert (target / "SKILL.md").read_text() == "# changed after opening update\n"
 
 
+def test_update_refuses_repointing_managed_skill_to_a_different_source(
+  client, auth, skills_dir, monkeypatch,
+):
+  """A managed skill (record present, on-disk digest matching) may advance its
+  ref, but the update must not silently repoint it to a different repo/path and
+  pull different bytes under the existing skill's provenance. This exercises the
+  source-mismatch 409 that no other update test reaches."""
+  from app.routes import skills as rs
+
+  target = skills_dir / "demo"
+  target.mkdir()
+  installed = b"---\nname: demo\nversion: 1\n---\nold\n"
+  (target / "SKILL.md").write_bytes(installed)
+  installed_digest = skills_mod.tree_digest_from_files({"SKILL.md": installed})
+  (skills_dir / skills_mod.INSTALLED_SKILLS_SIDECAR).write_text(json.dumps({
+    "demo": {
+      "source": "o/r", "repo": "o/r", "path": "skills/demo",
+      "ref": "main", "commit": PINNED, "tree_digest": installed_digest,
+    },
+  }))
+  # The request names a DIFFERENT repository; the fetch (before the lock) still
+  # succeeds so the guard, not a fetch error, is what stops the exchange.
+  raw = f"https://raw.githubusercontent.com/o/other/{PINNED}/skills/demo"
+  _dir_install_mocks(monkeypatch, rs, [
+    {"type": "blob", "path": "SKILL.md", "size": 40},
+  ], {f"{raw}/SKILL.md": b"---\nname: demo\nversion: 2\n---\nimposter\n"})
+
+  response = client.put(
+    "/api/skills/demo",
+    headers=auth,
+    json={
+      "expected_tree_digest": installed_digest,
+      "repo": "o/other",
+      "path": "skills/demo",
+      "ref": "main",
+      "expected_commit": PINNED,
+    },
+  )
+
+  assert response.status_code == 409, response.text
+  assert "different source" in response.json()["detail"]
+  assert (target / "SKILL.md").read_bytes() == installed  # untouched
+  assert _sidecar(skills_dir)["demo"]["repo"] == "o/r"
+
+
+def test_update_same_source_managed_skill_exchanges_and_advances_ref(
+  client, auth, skills_dir, monkeypatch,
+):
+  """The endpoint's primary purpose: a same-source managed update performs the
+  tree exchange and advances the tracked commit/ref, leaving no staging or
+  backup residue. The three prior tests all 409 or take the adopt branch, so
+  none proves the success path end-to-end."""
+  from app.routes import skills as rs
+
+  target = skills_dir / "demo"
+  target.mkdir()
+  installed = b"---\nname: demo\nversion: 1\n---\nold\n"
+  (target / "SKILL.md").write_bytes(installed)
+  installed_digest = skills_mod.tree_digest_from_files({"SKILL.md": installed})
+  old_commit = "1234abcd" * 5
+  (skills_dir / skills_mod.INSTALLED_SKILLS_SIDECAR).write_text(json.dumps({
+    "demo": {
+      "source": "o/r", "repo": "o/r", "path": "skills/demo",
+      "ref": "main", "commit": old_commit, "tree_digest": installed_digest,
+    },
+  }))
+  raw = f"https://raw.githubusercontent.com/o/r/{PINNED}/skills/demo"
+  new_skill = b"---\nname: demo\nversion: 2\n---\nnew\n"
+  _dir_install_mocks(monkeypatch, rs, [
+    {"type": "blob", "path": "SKILL.md", "size": len(new_skill)},
+  ], {f"{raw}/SKILL.md": new_skill})
+
+  response = client.put(
+    "/api/skills/demo",
+    headers=auth,
+    json={
+      "expected_tree_digest": installed_digest,
+      "repo": "o/r",
+      "path": "skills/demo",
+      "ref": "main",
+      "expected_commit": PINNED,
+    },
+  )
+
+  assert response.status_code == 200, response.text
+  assert response.json()["changed"] is True
+  assert response.json()["adopted"] is False
+  assert (target / "SKILL.md").read_bytes() == new_skill
+  record = _sidecar(skills_dir)["demo"]
+  assert record.get("status") is None
+  assert record["commit"] == PINNED  # tracked commit advanced
+  assert record["repo"] == "o/r" and record["path"] == "skills/demo"
+  assert record["tree_digest"] == skills_mod.tree_digest_from_files(
+    {"SKILL.md": new_skill},
+  )
+  assert not list(skills_dir.glob(".staging-*"))
+  assert not list(skills_dir.glob(".backup-*"))
+
+
 def test_skill_package_bounds_fit_command_routed_toolkits():
   from app import skills as skills_mod
 
