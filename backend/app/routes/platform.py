@@ -36,7 +36,11 @@ from app.platform_update import (
   PlatformApplyResult, PlatformConflictResolverChatOut, PlatformStatus,
   PlatformUpdateError, PlatformUpdatePreview, PlatformUpdateProgress,
 )
-from app.restart_util import restart_this_worker
+from app.restart_util import (
+  RestartSourceInvalid,
+  restart_this_worker,
+  validate_restart_source,
+)
 
 log = logging.getLogger("mobius.platform")
 
@@ -290,6 +294,13 @@ def restart_platform(
 ) -> JSONResponse:
   """Owner-confirmed restart to finish an update. Sends the response, then
   restarts this worker (force-exit fallback) so it reboots with the new code."""
+  try:
+    validate_restart_source()
+  except RestartSourceInvalid as exc:
+    raise HTTPException(
+      status_code=409,
+      detail={"code": "platform_source_invalid", "message": str(exc)},
+    ) from exc
   return JSONResponse(
     {"status": "restarting"},
     background=BackgroundTask(restart_this_worker),

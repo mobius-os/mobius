@@ -40,6 +40,7 @@ from app.process_groups import (
   isolated_process_group_id,
   lower_process_group_priority,
 )
+from app.file_cache import frontend_tool_paths, reclaim_file_cache
 
 log = logging.getLogger(__name__)
 
@@ -748,19 +749,22 @@ def _run_vite_build_once(out_dir: Path) -> str:
   This path waits for the shared lease so it cannot overlap another native
   JavaScript build.
   """
-  with build_lease():
-    _ensure_node_modules()
-    if out_dir.exists():
-      shutil.rmtree(out_dir)
-    result = subprocess.run(
-      _vite_build_cmd(out_dir),
-      cwd=str(_FRONTEND_DIR),
-      env=_vite_env(_REBUILD_CACHE_DIR, _REBUILD_TMP_DIR),
-      stdout=subprocess.PIPE,
-      stderr=subprocess.STDOUT,
-      text=True,
-      timeout=180,
-    )
+  try:
+    with build_lease():
+      _ensure_node_modules()
+      if out_dir.exists():
+        shutil.rmtree(out_dir)
+      result = subprocess.run(
+        _vite_build_cmd(out_dir),
+        cwd=str(_FRONTEND_DIR),
+        env=_vite_env(_REBUILD_CACHE_DIR, _REBUILD_TMP_DIR),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        timeout=180,
+      )
+  finally:
+    reclaim_file_cache(frontend_tool_paths(_FRONTEND_DIR))
   if result.returncode != 0:
     if out_dir.exists():
       shutil.rmtree(out_dir)
@@ -1119,6 +1123,7 @@ class _FrontendHandler(FileSystemEventHandler):
           with self._proc_lock:
             if self._watch_proc is proc:
               self._watch_proc = None
+          reclaim_file_cache(frontend_tool_paths(_FRONTEND_DIR))
         if self._closed.is_set():
           return
         if rc != 0:

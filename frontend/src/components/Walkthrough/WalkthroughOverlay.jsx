@@ -72,6 +72,12 @@ export default function WalkthroughOverlay({ onDone, onOpenSettings, onExploreAp
       finish()
       return
     }
+    if (result.outcome === 'fallback-ready') {
+      setInstallFeedback(
+        'The newer installer was unavailable. Tap Install again to use the browser’s regular prompt.',
+      )
+      return
+    }
 
     setShowInstallHelp(true)
     setInstallFeedback(

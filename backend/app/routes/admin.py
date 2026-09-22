@@ -31,7 +31,12 @@ from app.deps import (
   get_current_owner, get_current_owner_for_lifecycle_control,
   reject_cross_site,
 )
-from app.restart_util import prepare_container_cutover, restart_this_worker
+from app.restart_util import (
+  RestartSourceInvalid,
+  prepare_container_cutover,
+  restart_this_worker,
+  validate_restart_source,
+)
 
 # Event names the admin emit endpoint will accept. This is intentionally not
 # the complete activity vocabulary: ``app_signal`` has its own app-scoped,
@@ -234,6 +239,13 @@ def restart_server(
   This owner-auth route is the everyday path for applying backend code/config
   changes. A broken main app is repaired from outside this process.
   """
+  try:
+    validate_restart_source()
+  except RestartSourceInvalid as exc:
+    raise HTTPException(
+      status_code=409,
+      detail={"code": "platform_source_invalid", "message": str(exc)},
+    ) from exc
   return JSONResponse(
     {"status": "restarting"},
     background=BackgroundTask(restart_this_worker),

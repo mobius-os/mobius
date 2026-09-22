@@ -1464,7 +1464,7 @@ def test_runner_uses_standard_urllib_for_protocol_four_stream(monkeypatch):
   )
   assert request.get_header("Authorization") == "Bearer secret"
   assert request.get_header("Accept") == "text/event-stream"
-  assert kwargs["timeout"] is None
+  assert kwargs["timeout"] == connect_runner.STREAM_READ_TIMEOUT_SECONDS
   assert posted == [(
     "https://mobius.test/api/connect/result",
     {
@@ -2133,6 +2133,63 @@ def test_serve_connection_retries_after_auth_rejection(monkeypatch):
 
   # Reconnected after the 401 instead of returning on the first attempt.
   assert len(opened) == 2
+  assert posted and posted[-1]["stdout"] == "Connect daemon removed."
+
+
+def test_serve_connection_retries_when_proxy_stops_forwarding_heartbeats(
+  monkeypatch,
+):
+  """A proxy-held socket must not keep an instance offline forever after its
+  backend restarts. Missing several server heartbeats reopens the stream."""
+  opened = []
+  posted = []
+
+  class StalledStream:
+    def __enter__(self):
+      return self
+
+    def __exit__(self, *exc):
+      return False
+
+    def __iter__(self):
+      raise connect_runner.socket.timeout("proxy retained a dead stream")
+
+  class DisconnectStream:
+    def __enter__(self):
+      return self
+
+    def __exit__(self, *exc):
+      return False
+
+    def __iter__(self):
+      return iter([b'data: {"type":"disconnect","request_id":"z"}\n\n'])
+
+  def fake_urlopen(request, **kwargs):
+    opened.append((request, kwargs))
+    return StalledStream() if len(opened) == 1 else DisconnectStream()
+
+  monkeypatch.setattr(connect_runner, "_open_url", fake_urlopen)
+  monkeypatch.setattr(connect_runner.time, "sleep", lambda *_: None)
+  monkeypatch.setattr(
+    connect_runner, "_uninstall_service", lambda stop_running: None,
+  )
+  monkeypatch.setattr(
+    connect_runner, "_remove_connection", lambda url, host_id: 0,
+  )
+  monkeypatch.setattr(
+    connect_runner, "_post",
+    lambda url, payload, token=None: posted.append(payload),
+  )
+
+  connect_runner._serve_connection(
+    {"url": "https://mobius.test", "host_id": "h_a", "token": "secret"},
+  )
+
+  assert len(opened) == 2
+  assert all(
+    kwargs["timeout"] == connect_runner.STREAM_READ_TIMEOUT_SECONDS
+    for _request, kwargs in opened
+  )
   assert posted and posted[-1]["stdout"] == "Connect daemon removed."
 
 
