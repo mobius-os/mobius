@@ -918,7 +918,7 @@ class ChatEventSink:
     # the card (the clean post-receipt finish boundary above).
     owner_card_receipt_matches = (
       owner_card_receipt_id is not None
-      and self._has_continuation_card(owner_card_receipt_id)
+      and self.has_continuation_card(owner_card_receipt_id)
     )
     if owner_card_receipt_matches:
       event["owner_card_question_id"] = owner_card_receipt_id
@@ -993,7 +993,9 @@ class ChatEventSink:
     if owner_card_receipt_matches:
       # A completed provider event is the first universal boundary at which the
       # result is no longer in flight. It covers MCP and command-backed helpers
-      # alike, without a timer or a second transport callback.
+      # alike, without a timer or a second transport callback. Claude's root
+      # turns have normally already ended themselves at the card (its runner's
+      # PostToolUse hook), in which case this is a no-op claim.
       self._request_finish_turn_after_owner_card(owner_card_receipt_id)
     return True
 
@@ -1299,9 +1301,12 @@ class ChatEventSink:
     self._publish_activity_frontier()
     self.bc.publish(event)
     # A continuation card is terminal, but this save path is still inside the
-    # provider's tool call. Interrupting here rejects that in-flight call before
-    # its successful receipt reaches the provider. `publish()` ends the turn
-    # only when the provider later emits the matching completed tool result.
+    # provider's tool call: ending the turn here would reject that in-flight
+    # call before its successful receipt reaches the tool. The turn ends at the
+    # next boundary instead — for Claude in the PostToolUse hook that sees the
+    # receipt, otherwise in `publish()` on the matching completed tool result.
+    # Committing the card here is what makes `has_continuation_card` true by
+    # the time either boundary asks.
     # The card is persisted: record the save time so a subsequent throttled
     # snapshot in publish() doesn't redundantly re-commit the same state
     # immediately after.
@@ -1315,6 +1320,10 @@ class ChatEventSink:
   def _request_finish_turn_after_owner_card(self, question_id: str) -> None:
     """Claim the clean card end synchronously, then signal it asynchronously.
 
+    The provider-neutral card-end signal. A runner that already ended its own
+    turn at the card (Claude's root agents do, before the receipt ever reaches
+    the model) reports the end already owned and nothing more happens here.
+
     Validate the exact continuation card against this sink's live transcript
     before touching a runner. The provider's ownership marker must be set in
     this same callback: its terminal event can already be queued behind the
@@ -1323,7 +1332,7 @@ class ChatEventSink:
     interrupt runs as a side task. Native provider questions have no
     continuation marker and are never cut here.
     """
-    if not self._has_continuation_card(question_id):
+    if not self.has_continuation_card(question_id):
       raise ValueError("Continuation owner-input card is not current for this turn.")
     from app.runner_registry import registry
     for handle in registry.get_handles(self.chat_id):
@@ -1347,7 +1356,13 @@ class ChatEventSink:
           warn=True,
         )
 
-  def _has_continuation_card(self, question_id: str) -> bool:
+  def has_continuation_card(self, question_id: str) -> bool:
+    """Whether this turn saved exactly this continuation owner-input card.
+
+    Claude's card-end hook asks before it refuses to continue the agent loop,
+    so an arbitrary receipt-shaped tool result — an old card re-printed, a
+    child agent's receipt quoted in a Task summary — can never end a turn.
+    """
     return any(
       block.get("type") == "question"
       and block.get("question_id") == question_id

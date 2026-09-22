@@ -313,13 +313,15 @@ def _receipt(
     "state": state,
     "question_id": question_id,
     "next_action": (
-      "End this turn now without further text or tools. This receipt is not "
+      "The turn is over: the card was saved and the response is cut here, so "
+      "nothing further can be delivered. This receipt is not "
       "approval and not an answer. The platform handles an eventual Restart "
       "now choice and resumes this work after a later ready boot; the agent "
       "then verifies whether its changes loaded. Do not issue or replay a "
       "restart command."
       if platform_restart else
-      "End this turn now without further text or tools. This receipt is not approval and not an answer. The owner's answer "
+      "The turn is over: the card was saved and the response is cut here, so nothing "
+      "further can be delivered. This receipt is not approval and not an answer. The owner's answer "
       "is saved and normally resumes the chat; explicit close choices need no reply. Do not poll or "
       "wait on a process, and do not perform the proposed action yet."
     ),

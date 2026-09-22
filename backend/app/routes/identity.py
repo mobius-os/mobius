@@ -100,6 +100,10 @@ class RailwayCompute(BaseModel):
   memory_mb: int | None = None
 
 
+class RailwayName(BaseModel):
+  name: str
+
+
 class RailwayStorage(BaseModel):
   volume_mb: int
 
@@ -1200,6 +1204,28 @@ async def read_railway_metrics(
     await _railway_proxy(
       db, owner.id, "GET", f"/instances/{_railway_instance_id(instance_id)}/metrics"
     )
+  )
+
+
+@router.patch(
+  "/railway/deployments/{instance_id}",
+  dependencies=[Depends(require_nondelegated_owner_or_app_control)],
+)
+async def rename_railway_deployment(
+  instance_id: str,
+  body: RailwayName,
+  owner: models.Owner = Depends(get_owner_or_app_with_railway_manage),
+  db: Session = Depends(get_db),
+):
+  name = body.name.strip()
+  if not 1 <= len(name) <= 80:
+    raise HTTPException(422, "Choose a deployment name between 1 and 80 characters.")
+  return await _railway_mutation(
+    db,
+    owner.id,
+    "PATCH",
+    f"/instances/{_railway_instance_id(instance_id)}",
+    json={"name": name},
   )
 
 

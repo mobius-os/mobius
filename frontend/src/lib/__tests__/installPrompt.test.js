@@ -8,10 +8,10 @@ async function freshModule() {
   return import(new URL(`../installPrompt.js?t=${Math.random()}`, import.meta.url))
 }
 
-function makeTarget({ standalone = false } = {}) {
+function makeTarget({ standalone = false, webInstall = null } = {}) {
   const handlers = new Map()
   return {
-    navigator: { standalone: false },
+    navigator: { standalone: false, ...(webInstall ? { install: webInstall } : {}) },
     matchMedia: () => ({ matches: standalone }),
     addEventListener(type, handler) {
       handlers.set(type, handler)
@@ -87,6 +87,65 @@ test('subscribers are notified when prompt availability changes', async () => {
   target.dispatch('appinstalled')
 
   assert.equal(changes, 2)
+})
+
+test('uses Web Install for the current document when available', async () => {
+  const installPrompt = await freshModule()
+  let calls = 0
+  const target = makeTarget({
+    webInstall: async () => { calls += 1 },
+  })
+  installPrompt.startInstallPromptCapture(target)
+
+  assert.equal(installPrompt.getInstallPromptSnapshot(), 'ready')
+  assert.deepEqual(await installPrompt.requestInstall(), { outcome: 'accepted' })
+  assert.equal(calls, 1)
+  assert.equal(installPrompt.getInstallPromptSnapshot(), 'installed')
+  assert.equal(installPrompt.getInstallObservedSnapshot(), true)
+})
+
+test('a failed Web Install attempt preserves beforeinstallprompt for a second tap', async () => {
+  const installPrompt = await freshModule()
+  const target = makeTarget({
+    webInstall: async () => {
+      throw Object.assign(new Error('experimental implementation failed'), {
+        name: 'DataError',
+      })
+    },
+  })
+  let legacyCalls = 0
+  installPrompt.startInstallPromptCapture(target)
+  target.dispatch('beforeinstallprompt', {
+    preventDefault() {},
+    async prompt() {
+      legacyCalls += 1
+      return { outcome: 'accepted' }
+    },
+  })
+
+  assert.deepEqual(await installPrompt.requestInstall(), {
+    outcome: 'fallback-ready',
+  })
+  assert.equal(installPrompt.getInstallPromptSnapshot(), 'ready')
+  assert.deepEqual(await installPrompt.requestInstall(), { outcome: 'accepted' })
+  assert.equal(legacyCalls, 1)
+})
+
+test('Web Install cancellation remains retryable', async () => {
+  const installPrompt = await freshModule()
+  let calls = 0
+  const target = makeTarget({
+    webInstall: async () => {
+      calls += 1
+      throw Object.assign(new Error('cancelled'), { name: 'AbortError' })
+    },
+  })
+  installPrompt.startInstallPromptCapture(target)
+
+  assert.deepEqual(await installPrompt.requestInstall(), { outcome: 'dismissed' })
+  assert.equal(installPrompt.getInstallPromptSnapshot(), 'ready')
+  assert.deepEqual(await installPrompt.requestInstall(), { outcome: 'dismissed' })
+  assert.equal(calls, 2)
 })
 
 // iOS reports standalone display mode inside the in-app browser it opens from

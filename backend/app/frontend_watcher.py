@@ -35,13 +35,12 @@ from watchdog.observers.polling import PollingObserverVFS
 from app.build_admission import (
   BuildLeaseUnavailable,
   build_lease,
-  require_vite_build_admission,
-  vite_build_admitted,
 )
 from app.process_groups import (
   isolated_process_group_id,
   lower_process_group_priority,
 )
+from app.file_cache import frontend_tool_paths, reclaim_file_cache
 
 log = logging.getLogger(__name__)
 
@@ -102,15 +101,6 @@ _ACTIVE_LOCK = threading.Lock()
 _START_LOCK = threading.Lock()
 _ACTIVE_WATCHER: "_FrontendHandler | None" = None
 _ACTIVE_SUPERVISOR: "_FrontendSupervisor | None" = None
-
-
-def _memory_is_tight() -> bool:
-  """True when starting another native JS build risks an OOM kill.
-
-  Unmeasurable memory is ``unknown``, which fails open. The shared Vite policy
-  combines ratio/PSI pressure with the absolute reserve small cgroups need.
-  """
-  return not vite_build_admitted()
 
 
 def _source_tree_scandir(
@@ -756,24 +746,25 @@ def _publish_built_dir(source_dir: Path, reason: str) -> bool:
 def _run_vite_build_once(out_dir: Path) -> str:
   """Run one explicit full Vite build into ``out_dir``.
 
-  This path waits for the shared lease. If the cgroup is still unsafe once it
-  owns the lease, owner Apply rolls its source change back and rebuild_shell.sh
-  aborts cleanly; either operation can be retried without risking an OOM kill.
+  This path waits for the shared lease so it cannot overlap another native
+  JavaScript build.
   """
-  with build_lease():
-    require_vite_build_admission()
-    _ensure_node_modules()
-    if out_dir.exists():
-      shutil.rmtree(out_dir)
-    result = subprocess.run(
-      _vite_build_cmd(out_dir),
-      cwd=str(_FRONTEND_DIR),
-      env=_vite_env(_REBUILD_CACHE_DIR, _REBUILD_TMP_DIR),
-      stdout=subprocess.PIPE,
-      stderr=subprocess.STDOUT,
-      text=True,
-      timeout=180,
-    )
+  try:
+    with build_lease():
+      _ensure_node_modules()
+      if out_dir.exists():
+        shutil.rmtree(out_dir)
+      result = subprocess.run(
+        _vite_build_cmd(out_dir),
+        cwd=str(_FRONTEND_DIR),
+        env=_vite_env(_REBUILD_CACHE_DIR, _REBUILD_TMP_DIR),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        timeout=180,
+      )
+  finally:
+    reclaim_file_cache(frontend_tool_paths(_FRONTEND_DIR))
   if result.returncode != 0:
     if out_dir.exists():
       shutil.rmtree(out_dir)
@@ -845,13 +836,6 @@ class _FrontendHandler(FileSystemEventHandler):
     self._last_source_change = 0.0
     self._last_build_reason = "startup"
     self._blocked_conflict_signature: str | None = None
-    # Memory-admission deferrals were once invisible: the watcher requeued
-    # silently while health read "running, no error", and a stale reading
-    # could hold builds for hours on an idle box. Track them so health and
-    # the log say that builds are waiting, on what, and since when.
-    self._deferred_since: float | None = None
-    self._deferral_count = 0
-    self._deferred_reason: str | None = None
     self._staging_dirty = False
     self._incomplete_since: float | None = None
     self._incomplete_notified = False
@@ -937,26 +921,12 @@ class _FrontendHandler(FileSystemEventHandler):
         pass
     with self._state_lock:
       staging_dirty = self._staging_dirty
-      deferred_since = self._deferred_since
-      deferral_count = self._deferral_count
-      deferred_reason = self._deferred_reason
     return {
       "running": not self._closed.is_set(),
       "building": pid is not None,
       "pid": pid,
       "rss_bytes": rss_bytes,
       "staging_dirty": staging_dirty,
-      # Present only while a source change is waiting on memory admission,
-      # so "running, no error" can never again hide a stalled rebuild.
-      "build_deferred": (
-        {
-          "since": deferred_since,
-          "attempts": deferral_count,
-          "reason": deferred_reason,
-        }
-        if deferred_since is not None
-        else None
-      ),
       "lease_path": str(_FRONTEND_DIR / ".watch.lock"),
     }
 
@@ -1067,17 +1037,12 @@ class _FrontendHandler(FileSystemEventHandler):
   def _run_demand_build(self, reason: str) -> None:
     """Run one isolated build and publish it before releasing its heap.
 
-    Both admission failures requeue the ORIGINAL reason after the normal
-    debounce, exactly like the conflict-marker retry below. Deferring is only
-    correct here, where a retry is free: the explicit rebuild path cannot
-    retry, so it waits for the lease instead.
+    A busy shared lease requeues the ORIGINAL reason after the normal debounce,
+    exactly like the conflict-marker retry below. The explicit rebuild path
+    waits for the lease instead.
     """
     try:
       with build_lease(blocking=False):
-        if _memory_is_tight():
-          self._note_build_deferred(reason)
-          self._queue_build(reason)
-          return
         with self._state_lock:
           blocked_signature = self._blocked_conflict_signature
         if blocked_signature is not None:
@@ -1141,7 +1106,6 @@ class _FrontendHandler(FileSystemEventHandler):
           with self._proc_lock:
             self._watch_proc = proc
           log.info("frontend demand build started after %s", reason)
-          self._clear_build_deferral()
           try:
             output, _ = proc.communicate(timeout=180)
           except subprocess.TimeoutExpired as exc:
@@ -1159,6 +1123,7 @@ class _FrontendHandler(FileSystemEventHandler):
           with self._proc_lock:
             if self._watch_proc is proc:
               self._watch_proc = None
+          reclaim_file_cache(frontend_tool_paths(_FRONTEND_DIR))
         if self._closed.is_set():
           return
         if rc != 0:
@@ -1190,39 +1155,6 @@ class _FrontendHandler(FileSystemEventHandler):
     except BuildLeaseUnavailable:
       # Only the acquisition above can raise this; the body takes no lease.
       self._queue_build(reason)
-
-  def _note_build_deferred(self, reason: str) -> None:
-    """Record one memory-admission deferral where health and logs can see it."""
-    with self._state_lock:
-      self._deferral_count += 1
-      self._deferred_reason = reason
-      first = self._deferred_since is None
-      if first:
-        self._deferred_since = time.time()
-      count = self._deferral_count
-    # Warn on the first deferral, then periodically — a persisted deferral is
-    # exactly the state that must not stay quiet, but every debounce tick
-    # would be noise.
-    if first or count % 20 == 0:
-      log.warning(
-        "frontend build deferred by memory admission"
-        " (%d attempt%s, change: %s); the last good dist remains served",
-        count, "" if count == 1 else "s", reason,
-      )
-
-  def _clear_build_deferral(self) -> None:
-    with self._state_lock:
-      if self._deferred_since is None:
-        return
-      since = self._deferred_since
-      count = self._deferral_count
-      self._deferred_since = None
-      self._deferral_count = 0
-      self._deferred_reason = None
-    log.info(
-      "frontend build admitted after %d deferred attempt%s (%.0f s waiting)",
-      count, "" if count == 1 else "s", time.time() - since,
-    )
 
   def _refresh_staging_signature(self) -> bool:
     sig = _tree_signature(_STAGING_DIST_DIR)
