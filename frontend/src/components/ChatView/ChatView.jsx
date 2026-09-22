@@ -6044,14 +6044,9 @@ export default function ChatView({
             <div className="chat__floating-transients">
               {offscreenControlsVisible && (
                 <div className="chat__offscreen-nudges">
-                  {/* Keyboard-safe taps (ChatInputBar composer contract #3/#6): these
-                      buttons float just above the composer, so a plain onClick steals
-                      textarea focus → the soft keyboard collapses → the layout shifts
-                      down and the synthetic click lands where the button no longer is
-                      (first tap only dismisses the keyboard; sometimes eaten entirely).
-                      preventDefault on pointerdown keeps focus and the button still;
-                      touchend fires the action immediately without the lost click.
-                      onClick stays for mouse/keyboard. */}
+                  {/* Keep composer focus on pointerdown so the soft keyboard cannot
+                      move these floating controls before click. Touchend acts at the
+                      stable position; click remains the mouse/keyboard path. */}
                   {olderHistoryRetryShown(olderHistoryError, offset) && (
                     <button
                       type="button"
