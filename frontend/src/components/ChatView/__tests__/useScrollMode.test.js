@@ -188,7 +188,14 @@ test('only scrolling keys claim reader ownership', () => {
   assert.equal(readerInputMayScroll('keydown', 'ArrowUp'), true)
   assert.equal(readerInputMayScroll('keydown', 'Tab'), true)
   assert.equal(readerInputMayScroll('wheel'), true)
+  assert.equal(readerInputMayScroll('wheel', '', true), false,
+    'ctrl-wheel is browser zoom, not transcript scroll intent')
   assert.equal(readerInputMayScroll('touchmove'), true)
+})
+
+test('touch handoff direction matches the outer scroll it will apply', () => {
+  assert.equal(readerInputEscapeDirection('touchmove', { deltaY: 20 }), 'down')
+  assert.equal(readerInputEscapeDirection('touchmove', { deltaY: -20 }), 'up')
 })
 
 test('nested controls keep their own keys and available scroll range', () => {
