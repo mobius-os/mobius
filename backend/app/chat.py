@@ -8,6 +8,7 @@ clients can subscribe.  Provider env / auth wiring lives in
 """
 
 import asyncio
+import gc
 import hashlib
 import json
 import math
@@ -3381,6 +3382,8 @@ async def _close_browser_session(chat_id: str) -> None:
     if final.idle:
       if targets or (scan is not None and scan.processes):
         log.info("agent-browser ownership released chat_id=%s", chat_id)
+      from app.file_cache import browser_tool_paths, reclaim_file_cache
+      await asyncio.to_thread(reclaim_file_cache, browser_tool_paths())
     else:
       log.warning("agent-browser ownership remains unverified chat_id=%s", chat_id)
   except Exception as exc:
@@ -4692,6 +4695,30 @@ async def run_chat(
         )
     except Exception:
       _get_logger().debug("chat-note guarantee skipped", exc_info=True)
+    if runtime_settled and disposition in _NOTE_SETTLED_DISPOSITIONS:
+      # A provider turn can fault hundreds of megabytes of compiler, browser,
+      # CLI, and source-control pages into a metered container. Linux keeps
+      # those clean pages hot after the child exits, and Railway accounts them
+      # in the service's memory total. Reclaim only known tool/source trees;
+      # file_cache skips anything another live process still maps. Databases,
+      # app data, shared files, and credentials are intentionally outside the
+      # sweep. Trim the server allocator after the same settled boundary.
+      try:
+        from app.allocator import trim_glibc
+        from app.file_cache import reclaim_file_cache, settled_turn_paths
+
+        gc.collect()
+        trim_glibc()
+        await asyncio.to_thread(
+          reclaim_file_cache,
+          settled_turn_paths(get_settings().data_dir, chat_id),
+        )
+      except Exception:
+        _get_logger().debug(
+          "settled turn memory reclaim skipped chat_id=%s",
+          chat_id,
+          exc_info=True,
+        )
     if browser_cancelled is not None:
       raise browser_cancelled
 
