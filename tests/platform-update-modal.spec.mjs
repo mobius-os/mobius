@@ -181,6 +181,20 @@ test('review backdrop is owned by its tiled Settings pane', async ({ page }) => 
   expect(Math.abs(dialogBox.x + dialogBox.width / 2 - (settingsBox.x + settingsBox.width / 2))).toBeLessThanOrEqual(1)
   expect(Math.abs(dialogBox.y + dialogBox.height / 2 - (settingsBox.y + settingsBox.height / 2))).toBeLessThanOrEqual(1)
   expect(overlayBox.x + overlayBox.width).toBeLessThanOrEqual(siblingBox.x + 1)
+
+  // The review blocks only its owning Settings surface. The sibling chat is
+  // still exposed to assistive technology and accepts ordinary input while
+  // the local review remains open.
+  expect(await dialog.getAttribute('aria-modal')).toBe('false')
+  expect(await settingsPane.evaluate(node => ({
+    rootInert: node.inert,
+    inertDescendants: node.querySelectorAll('[inert]').length,
+  }))).toEqual({ rootInert: false, inertDescendants: expect.any(Number) })
+  const inertDescendants = await settingsPane.locator('[inert]').count()
+  expect(inertDescendants).toBeGreaterThan(0)
+  const siblingComposer = siblingPane.getByRole('textbox', { name: 'Message Möbius…' })
+  await siblingComposer.fill('The other pane remains interactive')
+  await expect(siblingComposer).toHaveValue('The other pane remains interactive')
 })
 
 test('an incomplete activation preview offers no update action', async ({ page }) => {

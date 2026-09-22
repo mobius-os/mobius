@@ -21,6 +21,7 @@ const UPDATE_PHASE_LABELS = {
 export default function UpdateReviewModal({
   intent = 'update', platform, rebuild, onClose, onApply, onRebuild, onResolve,
   applying, rebuilding, resolving, observing, applyError, applyErrorCode, onRefreshReview, applyProgress,
+  restoreFocusRef, inertBoundaryRef,
 }) {
   const [preview, setPreview] = useState(null)
   const [loading, setLoading] = useState(true)
@@ -51,8 +52,9 @@ export default function UpdateReviewModal({
   useEffect(() => { loadPreview() }, [loadPreview])
 
   const requestClose = useCallback(() => { if (!inFlight) onClose() }, [inFlight, onClose])
-  useDialogFocus({ containerRef: dialogRef, initialFocusRef: closeRef,
-    onClose: requestClose, closeOnEscape: !inFlight })
+  useDialogFocus({ containerRef: dialogRef, initialFocusRef: closeRef, restoreFocusRef,
+    onClose: requestClose, closeOnEscape: !inFlight, modal: false, lockScroll: false,
+    inertBoundaryRef })
 
   async function handleApply() {
     const plan = { plan_id: preview.plan_id, current_sha: preview.current_sha,
@@ -88,7 +90,7 @@ export default function UpdateReviewModal({
 
   return (
     <div className="urm__overlay" role="presentation" onClick={requestClose}>
-      <div ref={dialogRef} className="urm" role="dialog" aria-modal="true" aria-labelledby="urm-title"
+      <div ref={dialogRef} className="urm" role="dialog" aria-modal="false" aria-labelledby="urm-title"
         tabIndex={-1} onClick={event => event.stopPropagation()}>
         <div className="urm__head">
           <h2 id="urm-title" className="urm__title">{hasResult
