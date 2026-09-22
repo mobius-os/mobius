@@ -93,12 +93,112 @@ export function peerRecordTool(note, chatId) {
 
 // Join mail to adjoining tool stretches in the render projection only. Prose,
 // questions, and owner messages remain boundaries; hidden carriers are not UI.
+const assistantFragmentRoot = message => {
+  if (message?.role !== 'assistant' || typeof message.id !== 'string') return null
+  return message.id.replace(/:assistant:\d+$/, '')
+}
+
+const isTransparentActivitySeparator = block => (
+  block?.type === 'text' && typeof block.content === 'string' && !block.content.trim()
+)
+
+const isActivityBlock = block => (
+  block?.type === 'tool'
+  || block?.type === 'thinking'
+  || block?.type === 'activity'
+  || isTransparentActivitySeparator(block)
+)
+
+/** Join the activity-only seam between saved fragments of one assistant turn.
+ * Hidden delivery carriers may sit between the fragments, but prose, cards,
+ * errors, owner messages, or an unplaced timeline row remain hard boundaries. */
+export function foldAssistantActivityFragments(
+  messages,
+  slots,
+  activeMirrorIndex = -1,
+  sourcePositions = new Map(),
+) {
+  const rendered = [...messages]
+  const positions = new Map(sourcePositions)
+  const nextVisible = start => {
+    let index = start
+    while (index < rendered.length && rendered[index]?.hidden) index += 1
+    return index
+  }
+  const hasSlotBetween = (start, end) => {
+    for (let index = start + 1; index <= end; index += 1) {
+      if (slots.has(index)) return true
+    }
+    return false
+  }
+  for (let index = 0; index < rendered.length; index += 1) {
+    if (index === activeMirrorIndex || rendered[index]?.hidden) continue
+    const root = assistantFragmentRoot(rendered[index])
+    if (!root) continue
+    let targetIndex = index
+    let target = rendered[targetIndex]
+    let candidateIndex = nextVisible(targetIndex + 1)
+    while (
+      candidateIndex < rendered.length
+      && candidateIndex !== activeMirrorIndex
+      && assistantFragmentRoot(rendered[candidateIndex]) === root
+      && !hasSlotBetween(targetIndex, candidateIndex)
+    ) {
+      const targetBlocks = target.blocks || []
+      const candidate = rendered[candidateIndex]
+      const candidateBlocks = candidate.blocks || []
+      if (!isActivityBlock(targetBlocks.at(-1)) || !isActivityBlock(candidateBlocks[0])) break
+      let activityEnd = 0
+      while (activityEnd < candidateBlocks.length && isActivityBlock(candidateBlocks[activityEnd])) {
+        activityEnd += 1
+      }
+      const leadingActivity = candidateBlocks
+        .slice(0, activityEnd)
+        .filter(block => !isTransparentActivitySeparator(block))
+      target = { ...target, blocks: [...targetBlocks, ...leadingActivity] }
+      rendered[targetIndex] = target
+      const rawBoundary = leadingActivity.reduce((boundary, block) => (
+        block.type === 'activity' && Number.isInteger(block.end)
+          ? Math.max(boundary, block.end)
+          : boundary + 1
+      ), 0)
+      const candidateNotes = positions.get(candidate.id) || []
+      const movingNotes = candidateNotes.filter(note => (
+        Number.isInteger(note.display_position?.block_index)
+        && note.display_position.block_index < rawBoundary
+      ))
+      if (movingNotes.length) {
+        positions.set(target.id, [
+          ...(positions.get(target.id) || []),
+          ...movingNotes.map(note => ({
+            ...note,
+            display_position: {
+              ...note.display_position,
+              assistant_message_id: target.id,
+            },
+          })),
+        ])
+        const movingIds = new Set(movingNotes.map(note => note.id))
+        const stayingNotes = candidateNotes.filter(note => !movingIds.has(note.id))
+        if (stayingNotes.length) positions.set(candidate.id, stayingNotes)
+        else positions.delete(candidate.id)
+      }
+      const remaining = candidateBlocks.slice(activityEnd)
+      rendered[candidateIndex] = remaining.length
+        ? { ...candidate, blocks: remaining }
+        : { ...candidate, hidden: true, _folded_activity_fragment: true }
+      if (remaining.length) break
+      candidateIndex = nextVisible(candidateIndex + 1)
+    }
+  }
+  return { messages: rendered, positions }
+}
+
 export function foldPeerActivity(messages, projection, chatId, activeMirrorIndex = -1) {
   const rendered = [...messages]
   const slots = new Map(projection.slots)
   const tools = new Map(projection.tools)
   const prepended = new Map()
-  const isActivity = block => block?.type === 'tool' || block?.type === 'thinking'
   for (const [index, notes] of slots) {
     // Helper results own a standalone disclosure. Keep a mixed timestamp slot
     // intact rather than folding only its peer rows across that ordering seam.
@@ -107,8 +207,8 @@ export function foldPeerActivity(messages, projection, chatId, activeMirrorIndex
     while (next < messages.length && messages[next].hidden) next++
     let prev = index - 1
     while (prev >= 0 && messages[prev].hidden) prev--
-    const before = next !== activeMirrorIndex && rendered[next]?.role === 'assistant' && isActivity(rendered[next]?.blocks?.[0])
-    const after = prev !== activeMirrorIndex && rendered[prev]?.role === 'assistant' && isActivity(rendered[prev]?.blocks?.at(-1))
+    const before = rendered[next]?.role === 'assistant' && isActivityBlock(rendered[next]?.blocks?.[0])
+    const after = rendered[prev]?.role === 'assistant' && isActivityBlock(rendered[prev]?.blocks?.at(-1))
     if (!before && !after) continue
     const target = before ? next : prev
     const blocks = notes.map(note => {
@@ -123,5 +223,56 @@ export function foldPeerActivity(messages, projection, chatId, activeMirrorIndex
     if (before) prepended.set(target, prefixLength + blocks.length)
     slots.delete(index)
   }
-  return { messages: rendered, slots, tools, positions: projection.positions }
+  const folded = foldAssistantActivityFragments(
+    rendered,
+    slots,
+    activeMirrorIndex,
+    projection.positions,
+  )
+  return {
+    messages: folded.messages,
+    slots,
+    tools,
+    positions: folded.positions,
+  }
+}
+
+const peerToolId = block => (
+  block?.type === 'tool'
+  && block.tool === 'PeerMessage'
+  && typeof block.tool_use_id === 'string'
+  && block.tool_use_id.startsWith('peer-')
+    ? block.tool_use_id
+    : null
+)
+
+const blockIdentity = block => block?.tool_use_id
+  || block?.thinking_id
+  || block?.question_id
+  || null
+
+const sameBlock = (left, right) => left === right || (
+  blockIdentity(left) && blockIdentity(left) === blockIdentity(right)
+)
+
+/** Carry boundary peer rows from the read-only timeline projection into the
+ * live payload without replacing the stream's newer tool/thinking state.
+ * foldPeerActivity only adds peer tools at a message boundary, so the raw
+ * mirror identifies whether they belong before or after its blocks. */
+export function mergeProjectedPeerActivity(liveBlocks = [], projectedBlocks = [], rawBlocks = []) {
+  if (!projectedBlocks.length || projectedBlocks.length <= rawBlocks.length) return liveBlocks
+  const extra = projectedBlocks.length - rawBlocks.length
+  let peers = []
+  let atStart = false
+  if (rawBlocks.every((block, index) => sameBlock(block, projectedBlocks[index + extra]))) {
+    peers = projectedBlocks.slice(0, extra).filter(peerToolId)
+    atStart = true
+  } else if (rawBlocks.every((block, index) => sameBlock(block, projectedBlocks[index]))) {
+    peers = projectedBlocks.slice(rawBlocks.length).filter(peerToolId)
+  }
+  if (!peers.length) return liveBlocks
+  const existing = new Set(liveBlocks.map(peerToolId).filter(Boolean))
+  const missing = peers.filter(block => !existing.has(peerToolId(block)))
+  if (!missing.length) return liveBlocks
+  return atStart ? [...missing, ...liveBlocks] : [...liveBlocks, ...missing]
 }

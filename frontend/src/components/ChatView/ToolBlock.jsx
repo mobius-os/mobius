@@ -634,6 +634,7 @@ export default function ToolBlock({
         t={t}
         chatId={chatId}
         disclosureKey={disclosureKey}
+        records={t.peer_records}
       />
     )
   }

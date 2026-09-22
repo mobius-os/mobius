@@ -1,7 +1,12 @@
 /* Recorded activity positions survive Q&A continuation and text growth. */
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { insertPositionedActivity } from '../activityPosition.js'
+import {
+  insertPositionedActivity,
+  mergeAdjacentCompactActivityEntries,
+  mergeAdjacentPeerActivityEntries,
+  mergePositionedActivityEntries,
+} from '../activityPosition.js'
 const note = (id, block_index, text_offset) => ({ id, created_at: 1000, body: id, sender_chat_id: 'other', display_position: { assistant_message_id: 'answer', block_index, ...(text_offset === undefined ? {} : { text_offset }) } })
 const entries = blocks => blocks.map((item, idx) => ({ item, idx }))
 test('Q&A continuation keeps the note between answered question and new response', () => {
@@ -61,6 +66,72 @@ test('an anchor nested in compact activity stays before later prose and owner ca
   ])
 })
 
+test('a peer row adjacent to compact activity joins its high-level summary', () => {
+  const activity = {
+    type: 'activity', start: 0, end: 4,
+    entries: [{ idx: 0, item: { type: 'tool', tool: 'Bash', tool_use_id: 'command' } }],
+  }
+  const peer = {
+    item: { type: 'tool', tool: 'PeerMessage', tool_use_id: 'peer-note' },
+    idx: 'peer-note',
+  }
+  const output = mergeAdjacentPeerActivityEntries([
+    { item: activity, idx: 0 }, peer,
+  ])
+  assert.equal(output.length, 1)
+  assert.equal(output[0].item.type, 'activity')
+  assert.equal(output[0].item.positioned_entries[0].item.tool_use_id, 'peer-note')
+  assert.equal(output[0].item.positioned_entries[0].positionIndex, 4)
+})
+
+test('adjacent compact fragments become one disclosure with every detail range', () => {
+  const first = {
+    type: 'activity', activity_id: 'first', message_index: 4, start: 0, end: 8,
+    tool_count: 3,
+    entries: [{ idx: 0, item: { type: 'tool', tool: 'Bash', tool_use_id: 'command' } }],
+  }
+  const peer = {
+    type: 'tool', tool: 'PeerMessage', tool_use_id: 'peer-note', status: 'done',
+  }
+  const second = {
+    type: 'activity', activity_id: 'second', message_index: 6, start: 0, end: 5,
+    tool_count: 2,
+    entries: [{ idx: 0, item: { type: 'tool', tool: 'Edit', tool_use_id: 'edit' } }],
+  }
+  const output = mergeAdjacentCompactActivityEntries(entries([first, peer, second]))
+  assert.equal(output.length, 1)
+  assert.equal(output[0].item.detail_segments.length, 3)
+  assert.equal(output[0].item.tool_count, 6)
+  assert.deepEqual(
+    output[0].item.entries.map(entry => entry.item.tool),
+    ['Bash', 'PeerMessage', 'Edit'],
+  )
+})
+
+test('helper completions do not split adjacent compact activity fragments', () => {
+  const first = {
+    type: 'activity', activity_id: 'first', message_index: 4, start: 0, end: 4,
+    tool_count: 1,
+    entries: [{ idx: 0, item: { type: 'tool', tool: 'Bash', tool_use_id: 'command' } }],
+  }
+  const helper = {
+    type: 'helper_result', id: 'helper', activityId: 'helper', status: 'completed',
+  }
+  const second = {
+    type: 'activity', activity_id: 'second', message_index: 6, start: 0, end: 3,
+    tool_count: 1,
+    entries: [{ idx: 0, item: { type: 'tool', tool: 'Edit', tool_use_id: 'edit' } }],
+  }
+
+  const output = mergeAdjacentCompactActivityEntries(entries([first, helper, second]))
+  assert.equal(output.length, 1)
+  assert.equal(output[0].item.tool_count, 3)
+  assert.deepEqual(
+    output[0].item.entries.map(entry => entry.item.type),
+    ['tool', 'helper_result', 'tool'],
+  )
+})
+
 test('a nested compact anchor preserves a later recorded boundary', () => {
   const blocks = [
     {
@@ -110,4 +181,25 @@ test('a busy-parent helper result keeps its own disclosure at the recorded front
     'Before.\n\n', 'helper_result', 'After.',
   ])
   assert.equal(output.filter(entry => entry.item === event).length, 1)
+})
+
+test('peer notes inside a compact raw range stay inside that activity', () => {
+  const blocks = [{
+    type: 'activity', start: 10, end: 20,
+    entries: [
+      { idx: 10, item: { type: 'tool', tool: 'Bash', tool_use_id: 'a' } },
+      { idx: 19, item: { type: 'tool', tool: 'Edit', tool_use_id: 'b' } },
+    ],
+  }]
+  const output = insertPositionedActivity(entries(blocks), [note('inside', 15)], blocks, 'chat')
+  assert.equal(output.length, 1)
+  assert.equal(output[0].item.type, 'activity')
+  assert.equal(output[0].item.positioned_entries[0].item.tool_use_id, 'peer-inside')
+  assert.deepEqual(
+    mergePositionedActivityEntries(
+      [{ idx: 10, item: { type: 'tool', tool: 'Bash' } }, { idx: 19, item: { type: 'tool', tool: 'Edit' } }],
+      output[0].item.positioned_entries,
+    ).map(entry => entry.idx),
+    [10, 'peer-inside', 19],
+  )
 })

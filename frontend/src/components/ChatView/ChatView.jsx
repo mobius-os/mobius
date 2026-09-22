@@ -5634,7 +5634,19 @@ export default function ChatView({
     ),
     [messages],
   )
-  const peerTimeline = usePeerTimeline(chatId, displayedMessages, !hidden && transcriptPaintable, streamItems, showActiveAssistantSurface ? activeMirrorMsgIdx : -1)
+  const peerTimeline = usePeerTimeline(
+    chatId,
+    displayedMessages,
+    !hidden && transcriptPaintable,
+    streamItems,
+    showActiveAssistantSurface ? activeMirrorMsgIdx : -1,
+  )
+  const projectedActiveMirrorMsg = activeMirrorMsg?.id
+    ? peerTimeline.messages.find(message => message.id === activeMirrorMsg.id)
+      || activeMirrorMsg
+    : activeMirrorMsgIdx >= 0
+      ? peerTimeline.messages[activeMirrorMsgIdx] || activeMirrorMsg
+      : activeMirrorMsg
   let lastVisibleMessageIndex = -1
   for (let i = displayedMessages.length - 1; i >= 0; i -= 1) {
     if (!displayedMessages[i].hidden) {
@@ -5810,7 +5822,8 @@ export default function ChatView({
         <ul className="chat__list" style={{ minHeight: 0 }}>
           {displayedMessages.flatMap((msg, i) => {
             const peerRows = <PeerTimelineRows key={`peer-slot-${msg.cid || msg.id || msg.ts || i}`} notes={peerTimeline.slots.get(i)} chatId={chatId} onInternalNav={internalNav} />
-            if (msg.hidden) return [peerRows]
+            const projectedMsg = peerTimeline.messages[i] || msg
+            if (projectedMsg.hidden) return [peerRows]
             const continuationMarker = isContinuationMessage(msg)
             const isLastMsg = i === lastVisibleMessageIndex
             // The mirrored DB row is rendered below by the SAME active
@@ -5924,7 +5937,7 @@ export default function ChatView({
           {showActiveAssistantSurface && (
             <ActiveAssistantSurface
               key={streamingDataKey}
-              activeMirrorMsg={activeMirrorMsg}
+              activeMirrorMsg={projectedActiveMirrorMsg}
               activityMessageId={activeAssistantMessageId}
               activitySourceBlocks={activeMirrorMsg?.blocks}
               useDbActivePayload={useDbActivePayload}
