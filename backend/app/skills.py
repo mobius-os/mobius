@@ -44,6 +44,7 @@ import stat
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Callable
 
 from app.manifest_contract import SKILL_MAX_BYTES
 from app.storage_io import atomic_write
@@ -256,6 +257,9 @@ RESOURCE_SUFFIXES = frozenset({
   ".cjs", ".ts", ".tsx", ".jsx", ".sh", ".cmd", ".toml", ".html", ".css",
 })
 _EXTENSIONLESS_SCRIPT_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
+_LAUNCHER_SUFFIXES = frozenset({
+  ".py", ".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx", ".sh", ".cmd",
+})
 TREE_FILE_COUNT_MAX = 1 + RESOURCE_COUNT_MAX  # root SKILL.md + resources
 TREE_TOTAL_BYTES_MAX = SKILL_MAX_BYTES + RESOURCE_TOTAL_MAX
 
@@ -343,6 +347,39 @@ def resource_rel_ok(rel: str) -> bool:
     and "." not in segments[-1]
     and _EXTENSIONLESS_SCRIPT_NAME.fullmatch(segments[-1]) is not None
   )
+
+
+def executable_rel_ok(rel: str) -> bool:
+  """Whether the package contract permits preserving execute bits for `rel`.
+
+  Executability is meaningful only for launchers under ``scripts/``. Text and
+  reference files elsewhere remain readable resources even if their upstream
+  Git mode is accidentally executable.
+  """
+  segments = rel.split("/")
+  return (
+    resource_rel_ok(rel)
+    and len(segments) >= 2
+    and segments[0] == "scripts"
+    and (
+      Path(rel).suffix.lower() in _LAUNCHER_SUFFIXES
+      or (
+        "." not in segments[-1]
+        and _EXTENSIONLESS_SCRIPT_NAME.fullmatch(segments[-1]) is not None
+      )
+    )
+  )
+
+
+def tree_file_rel_ok(rel: str) -> bool:
+  """Whether ``rel`` can occur as a regular file in one safe skill tree.
+
+  Newly managed packages apply the narrower :func:`executable_rel_ok` policy
+  to execute bits. Historical agent-owned trees can legitimately carry an
+  execute bit on any otherwise-safe file, and recovery must still be able to
+  identify those old bytes without granting that mode to the new package.
+  """
+  return rel == "SKILL.md" or resource_rel_ok(rel)
 
 
 def _safe_child(root: Path, name: str) -> Path | None:
@@ -507,8 +544,9 @@ def record_tree_identity(
   *,
   digest_key: str = "tree_digest",
   executables_key: str = "executables",
+  executable_path_ok: Callable[[str], bool] = executable_rel_ok,
 ) -> TreeIdentity | None:
-  """Validate an identity persisted by the installer before recovery uses it."""
+  """Validate a persisted identity under the caller's executable-path policy."""
   digest = record.get(digest_key)
   executable_list = record.get(executables_key)
   if (
@@ -520,7 +558,7 @@ def record_tree_identity(
   ):
     return None
   for rel in executable_list:
-    if rel != "SKILL.md" and not resource_rel_ok(rel):
+    if not executable_path_ok(rel):
       return None
   return TreeIdentity(digest, frozenset(executable_list))
 
@@ -609,6 +647,25 @@ def reconcile_installed(skills_dir: Path | None = None) -> list[str]:
   for name, rec in list(records.items()):
     if not isinstance(rec, dict):
       continue
+    if not rec.get("status") and "executables" not in rec:
+      # Records written before executable identity existed represented an
+      # all-non-executable tree: the old installer always materialized files
+      # 0644/0664. Upgrade only that exact state. An executable bit on disk is
+      # therefore a local edit or ambiguous legacy state and stays untouched.
+      target = _safe_child(root, str(name))
+      state = disk_tree(target) if target is not None else DiskTree("unsafe")
+      digest = rec.get("tree_digest")
+      if (
+        state.kind == "tree"
+        and state.identity is not None
+        and isinstance(digest, str)
+        and state.identity.digest == digest
+        and not state.identity.executables
+      ):
+        rec["executables"] = []
+        dirty = True
+        repaired.append(str(name))
+
     if rec.get("status") == "updating":
       target = _safe_child(root, str(name))
       staging = _safe_child(root, str(rec.get("staging") or ""))
@@ -620,6 +677,7 @@ def reconcile_installed(skills_dir: Path | None = None) -> list[str]:
         rec,
         digest_key="previous_tree_digest",
         executables_key="previous_executables",
+        executable_path_ok=tree_file_rel_ok,
       )
       new_identity = record_tree_identity(rec)
       previous = rec.get("previous_record")
@@ -646,6 +704,20 @@ def reconcile_installed(skills_dir: Path | None = None) -> list[str]:
         and backup_state.kind == "absent"
       ):
         shutil.rmtree(staging, ignore_errors=True)
+        if disk_tree(staging).kind != "absent":
+          continue
+        restore_previous_record()
+        continue
+
+      # Rollback filesystem work already completed, but the process crashed
+      # before the restored sidecar was persisted. This is the terminal state
+      # of either rollback path, so persisting the previous record is safe and
+      # makes recovery closed under interruption.
+      if (
+        target_state == DiskTree("tree", old_identity)
+        and staging_state.kind == "absent"
+        and backup_state.kind == "absent"
+      ):
         restore_previous_record()
         continue
 
@@ -663,6 +735,8 @@ def reconcile_installed(skills_dir: Path | None = None) -> list[str]:
         except OSError:
           continue
         shutil.rmtree(staging, ignore_errors=True)
+        if disk_tree(staging).kind != "absent":
+          continue
         restore_previous_record()
         continue
 

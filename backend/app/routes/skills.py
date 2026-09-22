@@ -42,13 +42,15 @@ import stat
 import subprocess
 import tempfile
 import uuid
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Annotated, Literal
 from urllib.parse import quote
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy.orm import Session
 
 from app import activity, catalog_index, data_git, install, models, skills
@@ -96,6 +98,52 @@ _GIT_REF_OK = re.compile(r"[A-Za-z0-9._/-]{1,100}")
 _REPO_OK = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 
 
+@dataclass(frozen=True)
+class _GitHubSourceLocator:
+  repo: str
+  path: str
+  ref: str | None
+
+
+def _canonical_github_locator(
+  repo: object,
+  path: object,
+  ref: object,
+) -> _GitHubSourceLocator | None:
+  """Return the one persisted and API-facing GitHub source shape.
+
+  Older installs accepted leading, trailing, and repeated URL slashes because
+  fetching treated them as separators. Collapse those empty segments so an
+  already-valid source can cross the stricter update boundary. Dot segments,
+  controls, and backslashes remain invalid rather than being reinterpreted.
+  """
+  if (
+    not isinstance(repo, str)
+    or _REPO_OK.fullmatch(repo) is None
+    or not isinstance(path, str)
+    or "\\" in path
+    or any(ord(ch) < 32 for ch in path)
+  ):
+    return None
+  if ref is not None and (
+    not isinstance(ref, str)
+    or _GIT_REF_OK.fullmatch(ref) is None
+    or ".." in ref
+    or ref.startswith("/")
+    or ref.endswith("/")
+  ):
+    return None
+  parts = [part for part in path.split("/") if part]
+  canonical_path = "/".join(parts)
+  if (
+    not parts
+    or any(part in (".", "..") for part in parts)
+    or len(canonical_path) > 1000
+  ):
+    return None
+  return _GitHubSourceLocator(repo=repo, path=canonical_path, ref=ref)
+
+
 class SkillInstall(BaseModel):
   """Body for POST /api/skills/install.
 
@@ -119,21 +167,59 @@ class SkillInstall(BaseModel):
   expected_commit: str | None = None
 
 
+class GitHubSkillUpdateSource(BaseModel):
+  """One reviewed GitHub snapshot and the mutable ref it was reviewed from."""
+
+  model_config = ConfigDict(extra="forbid")
+
+  kind: Literal["github"]
+  repo: str = Field(pattern=r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+  path: str = Field(min_length=1, max_length=1000)
+  ref: str = Field(min_length=1, max_length=100, pattern=r"^[A-Za-z0-9._/-]+$")
+  commit: str = Field(pattern=r"^[0-9a-f]{40}$")
+
+  @model_validator(mode="after")
+  def validate_locator(self) -> "GitHubSkillUpdateSource":
+    locator = _canonical_github_locator(self.repo, self.path, self.ref)
+    if locator != _GitHubSourceLocator(self.repo, self.path, self.ref):
+      raise ValueError(
+        "repo, path, and ref must form a normalized GitHub source locator",
+      )
+    return self
+
+
+class UrlSkillUpdateSource(BaseModel):
+  """One reviewed raw SKILL.md, pinned by its exact content digest."""
+
+  model_config = ConfigDict(extra="forbid")
+
+  kind: Literal["url"]
+  url: str = Field(min_length=1, max_length=4000)
+  sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+SkillUpdateSource = Annotated[
+  GitHubSkillUpdateSource | UrlSkillUpdateSource,
+  Field(discriminator="kind"),
+]
+
+
 class SkillUpdate(BaseModel):
   """Replace one existing directory skill from a reviewed source snapshot.
 
   ``expected_tree_digest`` is the caller's compare-and-swap token from
-  GET /api/skills. ``expected_commit`` binds the replacement to the catalog
-  preview. ``adopt`` is required when the existing skill is owner/agent managed
-  rather than already installer managed.
+  GET /api/skills. The discriminated ``source`` binds GitHub updates to the
+  reviewed repo/path/ref/commit or raw updates to the reviewed content hash.
+  ``adopt`` is required when the existing skill is owner/agent managed rather
+  than already installer managed.
   """
 
-  expected_tree_digest: str
-  repo: str | None = None
-  path: str | None = None
-  ref: str = "main"
-  url: str | None = None
-  expected_commit: str | None = None
+  model_config = ConfigDict(extra="forbid")
+
+  expected_tree_digest: str = Field(
+    pattern=r"^sha256-tree-v1:[0-9a-f]{64}$",
+  )
+  source: SkillUpdateSource
   adopt: bool = False
 
 
@@ -325,6 +411,18 @@ def _resource_rel_ok(rel: str) -> bool:
   return skills.resource_rel_ok(rel)
 
 
+def _validate_text_files(files: dict[str, bytes]) -> None:
+  """Reject any package member that is not UTF-8 text."""
+  for rel, data in files.items():
+    try:
+      data.decode("utf-8")
+    except UnicodeDecodeError as exc:
+      raise HTTPException(
+        400,
+        f"Skill package resource {rel!r} is not UTF-8 text; nothing was installed.",
+      ) from exc
+
+
 async def _fetch_files(
   client: httpx.AsyncClient, body: SkillInstall,
 ) -> tuple[str, dict[str, bytes], str, str | None, set[str]]:
@@ -343,17 +441,22 @@ async def _fetch_files(
     name = _derive_name(body.name, segments)
     data = await install._http_get(client, body.url, max_bytes=SKILL_MAX_BYTES)
     files["SKILL.md"] = data
+    _validate_text_files(files)
     return name, files, _source_label(body.url), None, set()
 
   if not (body.repo and body.path):
     raise HTTPException(
       400, "Provide either `url`, or both `repo` and `path`.",
     )
-  if not _REPO_OK.fullmatch(body.repo):
-    raise HTTPException(400, f"`repo` must be `owner/name`, got {body.repo!r}.")
+  locator = _canonical_github_locator(body.repo, body.path, body.ref)
+  if locator is None or locator.ref is None:
+    raise HTTPException(
+      400,
+      "`repo`, `path`, and `ref` must identify a normalized GitHub source.",
+    )
 
   # Pin the whole install to one immutable revision before any content fetch.
-  commit = await _resolve_commit(client, body.repo, body.ref)
+  commit = await _resolve_commit(client, locator.repo, locator.ref)
   if body.expected_commit is not None:
     if _GIT_SHA.fullmatch(body.expected_commit) is None:
       raise HTTPException(400, "`expected_commit` must be a 40-character git SHA.")
@@ -363,8 +466,8 @@ async def _fetch_files(
         "The source changed after it was reviewed. Refresh the catalog and "
         "review the new revision before installing it.",
       )
-  listing = await _github_contents(client, body.repo, body.path, commit)
-  segments = body.path.strip("/").split("/")
+  listing = await _github_contents(client, locator.repo, locator.path, commit)
+  segments = locator.path.split("/")
 
   if isinstance(listing, dict):
     # A single file path. Treat as this skill's SKILL.md. download_url comes
@@ -376,21 +479,21 @@ async def _fetch_files(
     files["SKILL.md"] = await install._http_get(
       client, download, max_bytes=SKILL_MAX_BYTES,
     )
-    return name, files, _source_label(body.repo), commit, set()
+    _validate_text_files(files)
+    return name, files, _source_label(locator.repo), commit, set()
 
   # A directory: enumerate the WHOLE subtree with one scoped git-trees call —
   # the ecosystem keeps scripts/references in subdirectories, which the
   # top-level contents listing above cannot see — then fetch SKILL.md
   # (case-insensitive, root only) plus bounded resources.
   name = _derive_name(body.name, segments)
-  clean_path = body.path.strip("/")
-  tree = await _github_tree(client, body.repo, clean_path, commit)
+  tree = await _github_tree(client, locator.repo, locator.path, commit)
 
   def _raw_url(rel: str) -> str:
-    prefix = f"{quote(clean_path, safe='/')}/" if clean_path else ""
+    prefix = f"{quote(locator.path, safe='/')}/"
     return (
       "https://raw.githubusercontent.com/"
-      f"{body.repo}/{commit}/{prefix}{quote(rel, safe='/')}"
+      f"{locator.repo}/{commit}/{prefix}{quote(rel, safe='/')}"
     )
 
   skill_entries = [
@@ -445,7 +548,11 @@ async def _fetch_files(
           "Nothing was installed.",
         )
       if mode == "100755":
-        executables.add("SKILL.md")
+        raise HTTPException(
+          400,
+          "SKILL.md is instruction text, not a scripts/ launcher; its "
+          "executable mode cannot be installed.",
+        )
       continue
     if not rel or not _resource_rel_ok(rel):
       raise HTTPException(
@@ -461,6 +568,12 @@ async def _fetch_files(
       )
     seen_resources.add(rel)
     resources.append((rel, declared))
+    if mode == "100755" and not skills.executable_rel_ok(rel):
+      raise HTTPException(
+        400,
+        f"Skill package resource {rel!r} is executable but is not an allowed "
+        "scripts/ launcher; nothing was installed.",
+      )
     if mode == "100755":
       executables.add(rel)
 
@@ -527,20 +640,9 @@ async def _fetch_files(
     raise
   files.update(item for item in fetched if item is not None)
 
-  # Extensionless launchers are allowed only in scripts/ by the path contract.
-  # Verify they really are text before materializing them; a binary payload does
-  # not become a skill resource merely because it has no suffix.
-  for rel, data in files.items():
-    if rel != "SKILL.md" and not Path(rel).suffix:
-      try:
-        data.decode("utf-8")
-      except UnicodeDecodeError as exc:
-        raise HTTPException(
-          400,
-          f"Skill package resource {rel!r} is not UTF-8 text; nothing was installed.",
-        ) from exc
+  _validate_text_files(files)
 
-  return name, files, _source_label(body.repo), commit, executables
+  return name, files, _source_label(locator.repo), commit, executables
 
 
 def _source_label(source: str) -> str:
@@ -560,13 +662,18 @@ def _install_record(
   executables: set[str],
 ) -> dict:
   """Canonical provenance record for one fully fetched skill tree."""
+  locator = (
+    _canonical_github_locator(body.repo, body.path, body.ref)
+    if body.url is None
+    else None
+  )
   return {
     "source": source,
-    "repo": body.repo,
-    "path": body.path,
+    "repo": locator.repo if locator is not None else None,
+    "path": locator.path if locator is not None else None,
     # Keep the tracking ref, not only the immutable revision fetched today, so
     # a later explicit update can resolve the same source again.
-    "ref": body.ref if body.repo else None,
+    "ref": locator.ref if locator is not None else None,
     "commit": commit,
     "url": body.url,
     "tree_digest": skills.tree_digest_from_files(files),
@@ -595,6 +702,8 @@ def _skill_row(
     "provenance": skill.provenance,
     "is_dir": skill.is_dir,
     "uses_30d": counts.get(disk_name, 0),
+    "update_supported": False,
+    "update_unsupported_reason": "not_installer_managed",
   }
   if skill.is_dir:
     row["tree_digest"] = skills.tree_digest_on_disk(skill.read_path.parent)
@@ -610,29 +719,62 @@ def _skill_row(
     commit = rec.get("commit")
     repo = rec.get("repo")
     source_path = rec.get("path")
+    locator = _canonical_github_locator(repo, source_path, rec.get("ref"))
     safe_repo_locator = (
       isinstance(commit, str)
       and _GIT_SHA.fullmatch(commit) is not None
-      and isinstance(repo, str)
-      and _REPO_OK.fullmatch(repo) is not None
-      and isinstance(source_path, str)
-      and 0 < len(source_path) <= 1000
-      and all(ord(ch) >= 32 for ch in source_path)
-      and "\\" not in source_path
-      and ".." not in source_path.strip("/").split("/")
+      and locator is not None
     )
     # Owners can inspect the exact repairable sidecar state. App callers only
     # receive a complete validated immutable GitHub locator, never arbitrary
     # strings an agent or damaged sidecar placed in provenance fields.
-    row["commit"] = commit if is_owner or safe_repo_locator else None
-    row["source_repo"] = repo if is_owner or safe_repo_locator else None
-    row["source_path"] = source_path if is_owner or safe_repo_locator else None
+    app_safe_repo_locator = skill.is_dir and safe_repo_locator
+    row["commit"] = commit if is_owner or app_safe_repo_locator else None
+    row["source_repo"] = (
+      locator.repo
+      if locator is not None and (is_owner or app_safe_repo_locator)
+      else repo if is_owner else None
+    )
+    row["source_path"] = (
+      locator.path
+      if locator is not None and (is_owner or app_safe_repo_locator)
+      else source_path if is_owner else None
+    )
+    row["source_ref"] = (
+      locator.ref
+      if locator is not None and (is_owner or app_safe_repo_locator)
+      else rec.get("ref") if is_owner else None
+    )
     row["skill_sha256"] = rec.get("skill_sha256")
     files = rec.get("files")
     row["files"] = files if isinstance(files, list) else None
     # Raw source URLs are owner-only. Removing query/userinfo is insufficient:
     # signed and private locators may also carry secrets in path segments.
     row["source_url"] = rec.get("url") if is_owner else None
+    settled = not rec.get("status")
+    has_verified_identity = skills.record_tree_identity(rec) is not None
+    source_is_updateable = (
+      safe_repo_locator and locator is not None and locator.ref is not None
+    ) or (
+      is_owner
+      and isinstance(rec.get("url"), str)
+      and isinstance(rec.get("skill_sha256"), str)
+      and re.fullmatch(r"[0-9a-f]{64}", rec["skill_sha256"]) is not None
+    )
+    unsupported_reason = None
+    if not skill.is_dir:
+      unsupported_reason = "directory_required"
+    elif not settled:
+      unsupported_reason = "unfinished_transition"
+    elif not has_verified_identity:
+      unsupported_reason = "unverified_identity"
+    elif not source_is_updateable:
+      unsupported_reason = "source_not_updateable"
+    row["update_supported"] = unsupported_reason is None
+    if unsupported_reason is None:
+      row.pop("update_unsupported_reason", None)
+    else:
+      row["update_unsupported_reason"] = unsupported_reason
   return row
 
 
@@ -825,8 +967,8 @@ async def install_skill(
         "is_dir": True,
         "uses_30d": 0,
         "commit": commit,
-        "source_repo": body.repo,
-        "source_path": body.path,
+        "source_repo": record["repo"],
+        "source_path": record["path"],
         "source_url": None,
         "skill_sha256": record["skill_sha256"],
         "files": record["files"],
@@ -864,20 +1006,16 @@ async def update_skill(
     raise HTTPException(400, "Invalid skill name.")
   if not body.expected_tree_digest.startswith("sha256-tree-v1:"):
     raise HTTPException(400, "Invalid `expected_tree_digest`.")
-  if not body.url and not (body.repo and body.path):
-    raise HTTPException(
-      400,
-      "Updates require the reviewed source (`repo` + `path`, or `url`).",
+  if isinstance(body.source, GitHubSkillUpdateSource):
+    source_body = SkillInstall(
+      repo=body.source.repo,
+      path=body.source.path,
+      ref=body.source.ref,
+      name=name,
+      expected_commit=body.source.commit,
     )
-
-  source_body = SkillInstall(
-    repo=body.repo,
-    path=body.path,
-    ref=body.ref,
-    url=body.url,
-    name=name,
-    expected_commit=body.expected_commit,
-  )
+  else:
+    source_body = SkillInstall(url=body.source.url, name=name)
   async with httpx.AsyncClient(
     follow_redirects=False,
     timeout=install._HTTP_TIMEOUT,
@@ -889,6 +1027,15 @@ async def update_skill(
     raise HTTPException(400, "Fetched skill name did not match the update target.")
   if "SKILL.md" not in files or not files["SKILL.md"].strip():
     raise HTTPException(400, "Resolved skill has no SKILL.md content.")
+  if (
+    isinstance(body.source, UrlSkillUpdateSource)
+    and hashlib.sha256(files["SKILL.md"]).hexdigest() != body.source.sha256
+  ):
+    raise HTTPException(
+      409,
+      "The raw source changed after it was reviewed. Refresh and review the "
+      "new bytes before updating it.",
+    )
   new_record = _install_record(source_body, files, source, commit, executables)
   new_digest = new_record["tree_digest"]
 
@@ -939,24 +1086,34 @@ async def update_skill(
           f"{name!r} has local edits since it was installed. They were kept; "
           "review or preserve those edits before replacing the skill.",
         )
-      previous_executables = previous.get("executables")
-      # Older settled records predate executable inventories; retain their
-      # byte-only compatibility. Once an inventory exists, a local chmod is a
-      # real edit and receives the same protection as changed bytes.
-      if previous_executables is not None:
-        previous_identity = skills.record_tree_identity(previous)
-        if previous_identity is None or previous_identity != current_identity:
-          raise HTTPException(
-            409,
-            f"{name!r} has local permission edits since it was installed. "
-            "They were kept; review or preserve those edits before replacing "
-            "the skill.",
-          )
-      # An update may advance the tracking ref, but it may not silently switch
-      # an installed skill to a different repository/path or raw URL.
+      previous_identity = skills.record_tree_identity(previous)
+      if previous_identity is None:
+        raise HTTPException(
+          409,
+          f"{name!r} has no verified permission identity. Nothing was changed.",
+        )
+      if previous_identity != current_identity:
+        raise HTTPException(
+          409,
+          f"{name!r} has local permission edits since it was installed. "
+          "They were kept; review or preserve those edits before replacing "
+          "the skill.",
+        )
+      # An update may advance the commit on its tracking ref, but it may not
+      # silently switch an installed skill to another repo/path or raw URL.
+      previous_locator = _canonical_github_locator(
+        previous.get("repo"),
+        previous.get("path"),
+        previous.get("ref"),
+      )
+      requested_locator = _canonical_github_locator(
+        source_body.repo,
+        source_body.path,
+        source_body.ref,
+      )
       same_repo_source = (
-        previous.get("repo") == source_body.repo
-        and previous.get("path") == source_body.path
+        previous_locator is not None
+        and previous_locator == requested_locator
         and previous.get("url") is None
         and source_body.url is None
       )
@@ -1227,6 +1384,12 @@ async def uninstall_skill(
         409,
         f"{name!r} is not an installed skill — only skills added via "
         "/api/skills/install can be uninstalled here.",
+      )
+    record = records[name]
+    if not isinstance(record, dict) or record.get("status"):
+      raise HTTPException(
+        409,
+        f"{name!r} has an unfinished install/update record; nothing was deleted.",
       )
     target = skills_dir / name
     flat = skills_dir / f"{name}.md"
