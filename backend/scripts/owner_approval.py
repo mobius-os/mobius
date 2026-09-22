@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Save an owner approval card and return its receipt, never wait for an answer."""
+"""Save an owner approval card and return its receipt, never wait for an answer.
+
+The saved card ends the turn: the response is cut at the card, so say
+everything before running this. See app/questions.py for the card lifecycle.
+"""
 
 from __future__ import annotations
 
@@ -53,6 +57,15 @@ def save_card(kind: str, body: dict) -> dict:
       candidate = parsed.get("detail") if isinstance(parsed, dict) else None
       if isinstance(candidate, str):
         detail = " ".join(candidate.split())[:1000]
+      elif isinstance(candidate, dict):
+        code = candidate.get("code")
+        message = candidate.get("message")
+        parts = [
+          " ".join(value.split())
+          for value in (code, message)
+          if isinstance(value, str) and value.strip()
+        ]
+        detail = ": ".join(parts)[:1000]
     except (OSError, ValueError, AttributeError):
       pass
     suffix = f": {detail}" if detail else ""

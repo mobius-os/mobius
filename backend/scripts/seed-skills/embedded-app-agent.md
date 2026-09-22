@@ -133,8 +133,7 @@ your work before reporting back. The recipe:
 2. Trigger the job:
 
    ```bash
-   curl -s -X POST "$API_BASE_URL/api/apps/$APP_ID/run-job" \
-     -H "Authorization: Bearer $AGENT_TOKEN"
+   mapi -X POST /api/apps/$APP_ID/run-job
    ```
 
    It returns `202` immediately with a `started_at` acceptance timestamp. If

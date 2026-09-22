@@ -50,12 +50,12 @@ function renderModelManager() {
 
 test('chat model surfaces expose the connected providers before Möbius', () => {
   assert.deepEqual(PROVIDER_ORDER, ['codex', 'claude', 'mobius'])
-  assert.equal(PROVIDER_INFO.mobius.label, 'Möbius subscription')
+  assert.equal(PROVIDER_INFO.mobius.label, 'Möbius')
 
   const markup = renderModelManager()
   const codexAt = markup.indexOf('OpenAI Codex')
   const claudeAt = markup.indexOf('Claude Code')
-  const mobiusAt = markup.indexOf('Möbius subscription')
+  const mobiusAt = markup.indexOf('Möbius')
   assert.ok(codexAt >= 0 && claudeAt > codexAt && mobiusAt > claudeAt)
 })
 

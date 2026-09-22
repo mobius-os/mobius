@@ -1,5 +1,7 @@
 """Contracts for durable delegated tasks and restrictive child policy."""
 
+from tests.goal_fixtures import goal_run as make_goal_run, persist_goal_fixture
+
 import asyncio
 from contextlib import asynccontextmanager
 import hashlib
@@ -34,7 +36,7 @@ def _parent_with_run(client, owner_token, db):
   response = client.post("/api/chats", json={"title": "Parent"}, headers=auth)
   assert response.status_code == 200, response.text
   chat_id = response.json()["id"]
-  db.add(models.ChatRun(
+  db.add(make_goal_run(db,
     id="parent-physical",
     root_run_id="parent-root",
     chat_id=chat_id,
@@ -60,7 +62,7 @@ def test_delegation_inherits_owner_tools_with_run_bound_delegation_identity(
     provider="codex", model=None, effort=None, scope="read", cwd="/data/platform",
     prompt_sha256=hashlib.sha256(b"read").hexdigest(),
   ))
-  db.add(models.ChatRun(
+  db.add(make_goal_run(db,
     id="physical-child-run", root_run_id="physical-child-run",
     chat_id="read-child", status="running", provider="codex",
   ))
@@ -111,7 +113,7 @@ def test_limit_resume_identity_requires_the_exact_active_delegation_run(
     model="claude-opus-4-8", effort="low", scope="read", cwd="/data",
     prompt_sha256=hashlib.sha256(b"resume").hexdigest(),
   ))
-  db.add(models.ChatRun(
+  db.add(make_goal_run(db,
     id="resume-park", root_run_id="resume-park", chat_id="resume-child",
     status="parked", provider="claude", initiated_by_app_id=app_id,
   ))
@@ -152,7 +154,7 @@ def test_limit_resume_identity_requires_the_exact_active_delegation_run(
   app.deleted_at = None
   db.commit()
 
-  db.add(models.ChatRun(
+  db.add(make_goal_run(db,
     id="resume-newer", root_run_id="resume-newer", chat_id="resume-child",
     status="running", provider="claude", initiated_by_app_id=app_id,
   ))
@@ -183,7 +185,7 @@ def test_explicit_retry_uses_the_exact_owned_limit_park(
     prompt_sha256=hashlib.sha256(b"retry").hexdigest(),
   )
   db.add(row)
-  db.add(models.ChatRun(
+  db.add(make_goal_run(db,
     id="retry-park", root_run_id="retry-park", chat_id="retry-child",
     status="parked_notified", provider="claude", initiated_by_app_id=app_id,
     park_reason="usage_limit",
@@ -247,7 +249,7 @@ def test_explicit_retry_uses_the_exact_owned_limit_park(
 
   old = db.get(models.ChatRun, "retry-park")
   old.status = "completed"
-  db.add(models.ChatRun(
+  db.add(make_goal_run(db,
     id="retry-new-park", root_run_id="retry-new-park",
     chat_id="retry-child", status="parked", provider="claude",
     initiated_by_app_id=app_id, park_reason="usage_limit",
@@ -377,7 +379,7 @@ def test_submit_is_idempotent_per_parent_root_and_task_key(
 
 
 def test_goal_identity_is_the_delegation_idempotency_parent(db, chat):
-  db.add(models.ChatRun(
+  db.add(make_goal_run(db,
     id="goal-physical", root_run_id="logical-before-restart",
     chat_id=chat.id, status="running", provider="codex",
     goal_objective="Ship", goal_id="stable-goal",
@@ -423,7 +425,7 @@ def test_app_token_can_only_submit_bounded_work_under_its_own_child(
   assert rejected.status_code == 403
 
   child_id = created.json()["child_chat_id"]
-  db.add(models.ChatRun(
+  db.add(make_goal_run(db,
     id="child-parent-run", root_run_id="child-parent-run",
     chat_id=child_id, status="running", provider="claude",
   ))
@@ -471,7 +473,7 @@ def test_app_token_can_only_submit_bounded_work_under_its_own_child(
   # owner still cannot create a write-capable descendant.
   nested_parent = nested.json()["child_chat_id"]
   for depth in (3, 4):
-    db.add(models.ChatRun(
+    db.add(make_goal_run(db,
       id=f"depth-{depth}-parent-run",
       root_run_id=f"depth-{depth}-parent-run",
       chat_id=nested_parent,
@@ -495,7 +497,7 @@ def test_app_token_can_only_submit_bounded_work_under_its_own_child(
     assert deeper.status_code == 201, deeper.text
     nested_parent = deeper.json()["child_chat_id"]
 
-  db.add(models.ChatRun(
+  db.add(make_goal_run(db,
     id="depth-5-parent-run",
     root_run_id="depth-5-parent-run",
     chat_id=nested_parent,
@@ -545,7 +547,7 @@ def test_delegation_listing_exposes_run_usage_without_loading_result(
     "provider": "codex",
     "scope": "read",
   }, headers=owner_auth).json()
-  db.add(models.ChatRun(
+  db.add(make_goal_run(db,
     id="usage-run", root_run_id="usage-run",
     chat_id=created["child_chat_id"], status="completed", provider="codex",
     input_tokens=1200, output_tokens=300, cache_read_input_tokens=800,
@@ -625,7 +627,7 @@ def test_child_policy_is_integrity_checked_and_write_loss_needs_review(db):
       }],
     },
   ]
-  db.add(models.ChatRun(
+  db.add(make_goal_run(db,
     id="child-run", root_run_id="child-run", chat_id=child.id,
     status="failed", provider="claude",
   ))
@@ -697,11 +699,11 @@ def test_continuation_physical_runs_inherit_one_logical_root(db):
 
 def test_delegated_codex_config_routes_questions_up_but_keeps_native_agents():
   overrides = _codex_config_overrides(
-    allow_questions=False, allow_multi_agent=True, allow_goals=False,
+    allow_multi_agent=True,
   )
-  assert "features.default_mode_request_user_input=true" not in overrides
+  assert "tools.experimental_request_user_input.enabled=false" in overrides
   assert "features.multi_agent_v2.enabled=true" in overrides
-  assert "features.goals=true" not in overrides
+  assert "features.goals=false" in overrides
 
 
 # --- Parent auto-wake on child completion ------------------------------------
@@ -776,7 +778,7 @@ def _seed_delegation(
     cancelled_at=now_naive_utc() if cancelled else None,
   ))
   if child_status is not None:
-    db.add(models.ChatRun(
+    db.add(make_goal_run(db,
       id=f"child-run-{suffix}", root_run_id=f"child-run-{suffix}",
       chat_id=child_id, status=child_status, provider="claude",
       started_at=now_naive_utc(),
@@ -900,7 +902,7 @@ def _seed_idle_parent_wake_root(
     f"physical-{row.parent_root_run_id}"
     if goal_objective is not None else row.parent_root_run_id
   )
-  db.add(models.ChatRun(
+  db.add(make_goal_run(db,
     id=physical_id,
     root_run_id=physical_id,
     chat_id=row.parent_chat_id,
@@ -985,7 +987,7 @@ def test_running_parent_retains_result_for_next_context_without_queueing(
     db, suffix="activity-running",
     result_blocks=[{"type": "text", "content": "Finished while busy."}],
   )
-  db.add(models.ChatRun(
+  db.add(make_goal_run(db,
     id="root-activity-running", root_run_id="root-activity-running",
     chat_id=parent_id, status="running", provider="claude",
     started_at=now_naive_utc(),
@@ -1032,7 +1034,7 @@ def test_stopped_parent_fences_delayed_result_until_owner_work(
     db, suffix="activity-stopped",
     result_blocks=[{"type": "text", "content": "Retain after Stop."}],
   )
-  db.add(models.ChatRun(
+  db.add(make_goal_run(db,
     id="root-activity-stopped", root_run_id="root-activity-stopped",
     chat_id=parent_id, status="stopped", provider="claude",
     started_at=now_naive_utc(), ended_at=now_naive_utc(),
@@ -1684,7 +1686,7 @@ def test_pre_atomic_completed_delivery_repair_remains_supported(db):
     suffix="legacy-activity-delivery-repair",
     result_blocks=[{"type": "text", "content": "Historical result."}],
   )
-  db.add(models.ChatRun(
+  db.add(make_goal_run(db,
     id="rt-legacy-activity-delivery-repair",
     root_run_id="rt-legacy-activity-delivery-repair",
     chat_id=parent_id,
@@ -1717,7 +1719,7 @@ def test_atomic_completed_envelope_alone_never_repairs_activity_delivery(db, con
     suffix="atomic-activity-delivery-no-repair",
     result_blocks=[{"type": "text", "content": "Still undelivered."}],
   )
-  db.add(models.ChatRun(
+  db.add(make_goal_run(db,
     id="rt-atomic-activity-delivery-no-repair",
     root_run_id="rt-atomic-activity-delivery-no-repair",
     chat_id=parent_id,
@@ -1847,7 +1849,7 @@ def test_legacy_committed_carrier_keeps_its_exact_restart_recovery(
   parent.live_assistant = {
     "id": run_token, "role": "assistant", "blocks": [], "ts": 2,
   }
-  db.add(models.ChatRun(
+  db.add(make_goal_run(db,
     id=run_token, root_run_id=root_run_id, chat_id=parent_id,
     status="running", provider="claude", provider_execution_admitted=False,
     started_at=now_naive_utc() + timedelta(seconds=1),

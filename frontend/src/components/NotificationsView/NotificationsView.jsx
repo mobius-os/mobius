@@ -164,7 +164,10 @@ export default function NotificationsView({
             </li>
           )}
           {rows.map((n) => {
-            const nav = parseNotificationTarget(n.target)
+            const parsedNav = parseNotificationTarget(n.target)
+            const nav = parsedNav?.view === 'chat' && n.title === 'Möbius needs your answer'
+              ? { ...parsedNav, focusQuestion: true }
+              : parsedNav
             const recovery = notificationRecoveryAction(n)
             const recoveryStatus = recoveryState[n.id]
             const unavailableLabel = recovery && (

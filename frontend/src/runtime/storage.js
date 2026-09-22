@@ -1244,7 +1244,14 @@ export function makeStorage({ appId, appInstanceId = null, getToken, isOnline = 
     const res = await fetchWithAppToken(
       getToken,
       `/api/storage/apps/${appId}/${path}`,
-      { headers },
+      {
+        headers,
+        // A normal read of a large storage file may have populated Chromium's
+        // HTTP cache with FileResponse's transport ETag. That validator is not
+        // the storage version accepted by If-Match. A CAS read must therefore
+        // reach the storage route instead of reusing that representation.
+        ...(wantVersion ? { cache: 'no-store' } : {}),
+      },
       fetchBounded,
     )
     const version = canonicalStorageVersion(

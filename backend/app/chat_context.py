@@ -548,6 +548,13 @@ def _build_resumed_context(chat_row) -> str | None:
 # shown anywhere.
 CLI_SLASH_COMMANDS = frozenset({"/goal"})
 
+# Commands the platform itself owns rather than forwarding to the provider CLI.
+# `/compact` rewrites the chat's live context and resets the provider session
+# (routes/chats.py ``/compact``); it must never reach a model as prose. Kept
+# beside CLI_SLASH_COMMANDS so the composer menu and both dispatch sets stay
+# pinned together by test_slash_command_registry_parity.
+MOBIUS_SLASH_COMMANDS = frozenset({"/compact"})
+
 
 def _chat_has_goal_intent(messages: list[schemas.ChatMessage]) -> bool:
   """Whether this durable transcript has ever requested native goal mode."""
@@ -558,63 +565,12 @@ def _chat_has_goal_intent(messages: list[schemas.ChatMessage]) -> bool:
   )
 
 
-def _latest_goal_objective(
-  messages: list[schemas.ChatMessage],
-) -> str | None:
-  """Find the still-relevant legacy objective before a Resume message."""
-  for message in reversed(messages):
-    if message.role != "user":
-      continue
-    content = message.content or ""
-    if is_goal_continue(content):
-      continue
-    if _goal_clear_requested(content):
-      return None
-    objective = _goal_objective(message.content)
-    if objective is not None:
-      return objective
-    # An intervening owner request changed the subject. Do not resurrect a
-    # historical pre-native goal merely because a later message says continue.
-    return None
-  return None
-
-
-def _goal_resume_requested(chat_row, text: str) -> bool:
-  """Whether this ``continue`` is a recovery action rather than ordinary prose."""
-  if not is_goal_continue(text) or chat_row is None:
-    return False
-  durable = list(chat_row.messages or [])
-  if not durable:
-    return False
-  current = durable[-1] if isinstance(durable[-1], dict) else {}
-  if is_continuation_message(current):
-    return True
-  # The visible Resume button is rendered only for a resumable tail block and
-  # sends the same short text as an automatic continuation. The persisted tail
-  # is the durable intent signal; plain "continue" elsewhere must not revive an
-  # old goal that may already have finished before native goal storage existed.
-  for message in reversed(durable[:-1]):
-    if not isinstance(message, dict):
-      continue
-    if message.get("hidden"):
-      continue
-    if message.get("role") == "user":
-      return False
-    if message.get("role") != "assistant":
-      continue
-    return any(
-      isinstance(block, dict) and block.get("resumable") is True
-      for block in list(message.get("blocks") or [])
-    )
-  return False
-
-
 def _is_cli_slash_command(text: str) -> bool:
   """True when `text` starts with a supported Claude CLI slash command.
 
   The Claude CLI only dispatches slash commands when the message starts
   with the command at position 0. Möbius appends its own hidden context
-  below known commands so `/goal` can activate the native goal loop
+  below known commands so `/goal` keeps its owner-authored command shape
   without turning path-like prose such as `/data/apps/x is broken` into
   a command-shaped prompt.
   """

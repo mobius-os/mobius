@@ -1671,7 +1671,8 @@ def test_cancelling_wait_kills_its_running_check(client, owner_token, db):
 
 def test_wait_resume_reconnects_declaring_runs_goal(client, owner_token, db):
   chat_id = _owner_chat(client, owner_token)
-  db.add(models.ChatRun(
+  from tests.goal_fixtures import goal_run
+  db.add(goal_run(db,
     id="wait-goal-run",
     root_run_id="wait-goal-root",
     chat_id=chat_id,

@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from sqlalchemy import func
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 from starlette.concurrency import run_in_threadpool
 
@@ -69,12 +69,10 @@ from app.chat_context import (
   _chat_settings_dict,
   _custom_system_prompt,
   _goal_objective,
-  _goal_resume_requested,
   _human_elapsed,
   _is_cli_slash_command,
   _last_user_message_elapsed,
   _latest_compaction_brief,
-  _latest_goal_objective,
   _strip_report_html,
 )
 from app.chat_logging import (
@@ -318,7 +316,7 @@ def _parked_until_for_chat(
   counts, and only while it still reads ``status`` as ``parked`` or
   ``resume_pending``. A fresh turn
   on a previously-parked chat inserts a newer "running" row (and StartTurn /
-  PromotePending close the stale park via `_close_running_runs`), so an
+  PromotePending close the stale park via `_close_nonterminal_runs`), so an
   orphaned park can never suppress recovery for the NEW live turn. Query
   failures read as not-parked — recovery checks must never crash on this
   probe.
@@ -1869,6 +1867,32 @@ def _auto_resume_run_token(park_token: str) -> str:
   return f"{_AUTO_RESUME_RUN_PREFIX}{digest}"
 
 
+MODEL_CAPACITY_RETRY_DELAYS = tuple(
+  timedelta(seconds=seconds) for seconds in (30, 60, 120, 240, 300)
+)
+
+
+def _model_capacity_retry_count(db: Session, run: models.ChatRun) -> int:
+  """Count earlier busy-model parks in this exact continuation lineage."""
+  root_id = run.root_run_id or run.id
+  return db.query(models.ChatRun.id).filter(
+    models.ChatRun.chat_id == run.chat_id,
+    or_(
+      models.ChatRun.root_run_id == root_id,
+      models.ChatRun.id == root_id,
+    ),
+    models.ChatRun.park_reason == "model_capacity",
+    models.ChatRun.started_at < run.started_at,
+  ).count()
+
+
+def _model_capacity_retry_exhausted(db: Session, run: models.ChatRun) -> bool:
+  """Bound automatic busy-model recovery to five attempts with backoff."""
+  return _model_capacity_retry_count(db, run) >= len(
+    MODEL_CAPACITY_RETRY_DELAYS
+  )
+
+
 def _auto_resume_recovery(
   db: Session,
   chat: models.Chat | None,
@@ -1886,10 +1910,13 @@ def _auto_resume_recovery(
   """
   if chat is None or physical is None:
     return None
+  control = physical.continuation_json
   messages = list(chat.messages or [])
   source = messages[-1] if messages else None
   recorded_park = (
-    source.get("_continuation_supersedes_run_token")
+    control.get("supersedes_run_token")
+    if isinstance(control, dict)
+    else source.get("_continuation_supersedes_run_token")
     if isinstance(source, dict) else None
   )
   if not isinstance(recorded_park, str) or not recorded_park:
@@ -1898,11 +1925,15 @@ def _auto_resume_recovery(
     return None
   if physical.id != _auto_resume_run_token(recorded_park):
     return None
-  reason = source.get("continuation_reason")
+  reason = (
+    control.get("reason") if isinstance(control, dict)
+    else source.get("continuation_reason") if isinstance(source, dict)
+    else None
+  )
   park_reasons = (
     ("restart",) if reason == "restart"
     else ("usage_limit", "rate_limit") if reason == "usage_limit"
-    else (reason,) if reason in RESOURCE_PARK_REASONS
+    else (reason,) if reason in AUTO_RETRY_PARK_REASONS
     else ()
   )
   if not park_reasons:
@@ -1925,6 +1956,8 @@ def _auto_resume_recovery(
     or (physical.root_run_id or physical.id) != (park.root_run_id or park.id)
   ):
     return None
+  if reason == "model_capacity" and _model_capacity_retry_exhausted(db, park):
+    return None
   payload = recover_start_continuation(
     db,
     chat,
@@ -1940,17 +1973,20 @@ def _auto_resume_recovery(
   if payload is None:
     return None
 
-  if reason == "restart" or reason in RESOURCE_PARK_REASONS:
-    consumed = source.get("_continuation_consumed_cids")
+  if reason == "restart" or reason in AUTO_RETRY_PARK_REASONS:
+    consumed = (
+      source.get("_continuation_consumed_cids")
+      if not isinstance(control, dict) and isinstance(source, dict)
+      else []
+    )
     expected_app_id = (
       None if isinstance(consumed, list) and consumed
       else park.initiated_by_app_id
     )
     if physical.initiated_by_app_id != expected_app_id:
       return None
-    # Resource admission owns its own retry policy: once a storage/memory
-    # pause is due, it always continues. It must not inherit the provider-
-    # quota opt-in merely because both use the same deterministic successor.
+    # Platform-owned retries (resources and a busy selected model) always
+    # continue once due. They must not inherit the provider-quota opt-in.
     if reason == "restart" and not chat.auto_resume_on_restart:
       return None
     return park, payload
@@ -2099,12 +2135,12 @@ async def _auto_resume_chat(
             restart_park = (
               park is not None and park.park_reason == "restart"
             )
-            resource_park = (
+            auto_retry_park = (
               park is not None
-              and park.park_reason in RESOURCE_PARK_REASONS
+              and park.park_reason in AUTO_RETRY_PARK_REASONS
             )
             delegation_resume_app_id = None
-            if park is not None and not restart_park and not resource_park:
+            if park is not None and not restart_park and not auto_retry_park:
               from app.delegations import limit_resume_app_id
               delegation_resume_app_id = limit_resume_app_id(
                 check_db,
@@ -2142,7 +2178,7 @@ async def _auto_resume_chat(
               or (
                 park.initiated_by_app_id is not None
                 and not restart_park
-                and not resource_park
+                and not auto_retry_park
                 and delegation_resume_app_id is None
               )
               or latest_id != park.id
@@ -2157,14 +2193,14 @@ async def _auto_resume_chat(
             resume_reason = (
               "restart" if restart_park
               else park.park_reason
-              if park.park_reason in RESOURCE_PARK_REASONS
+              if park.park_reason in AUTO_RETRY_PARK_REASONS
               else "usage_limit"
             )
             resume_app_id = (
               # Recovery keeps the interrupted turn's authority. Queued
               # follow-ups acquire their own attribution only after it finishes.
               park.initiated_by_app_id
-              if restart_park or resource_park
+              if restart_park or auto_retry_park
               else delegation_resume_app_id
             )
           if not mark_starting(chat_id):
@@ -2386,7 +2422,7 @@ async def sweep_reset_parks(
   notification_requests: list[tuple[str, bool]] = []
 
   def queue_due_notification(chat_id: str, run: models.ChatRun) -> None:
-    if run.park_reason in RESOURCE_PARK_REASONS:
+    if run.park_reason in AUTO_RETRY_PARK_REASONS:
       return
     notification_requests.append((chat_id, run.park_reason == "restart"))
 
@@ -2399,9 +2435,9 @@ async def sweep_reset_parks(
     if chat is None or chat.deleted_at is not None:
       return "chat unavailable"
     restart_park = run.park_reason == "restart"
-    resource_park = run.park_reason in RESOURCE_PARK_REASONS
+    auto_retry_park = run.park_reason in AUTO_RETRY_PARK_REASONS
     delegation_resume_app_id = None
-    if not restart_park and not resource_park:
+    if not restart_park and not auto_retry_park:
       from app.delegations import limit_resume_app_id
       delegation_resume_app_id = limit_resume_app_id(
         db,
@@ -2414,12 +2450,14 @@ async def sweep_reset_parks(
     if (
       run.initiated_by_app_id is not None
       and not restart_park
-      and not resource_park
+      and not auto_retry_park
       and delegation_resume_app_id is None
     ):
       return "app-attributed work"
     if _has_unanswered_question(chat):
       return "waiting for an answer"
+    if run.park_reason == "model_capacity" and _model_capacity_retry_exhausted(db, run):
+      return "busy-model retry exhausted"
     policy_enabled = (
       _park_continues_automatically(chat, run)
       or delegation_resume_app_id is not None
@@ -3478,6 +3516,16 @@ _LIMIT_ERROR_MARKERS = (
   "429",
 )
 
+# A model-capacity response is not an account quota: it means the selected
+# model is temporarily saturated. Keep this deliberately narrow so an
+# unrelated "capacity" error (for example storage capacity) is never retried
+# as provider work.
+_MODEL_CAPACITY_ERROR_MARKERS = (
+  "selected model is at capacity",
+  "selected model at capacity",
+  "model is at capacity",
+)
+
 
 def _is_limit_error_text(text: str | None) -> bool:
   """Whether an error string names a provider rate/usage-limit exhaustion.
@@ -3501,6 +3549,14 @@ def _is_limit_error_text(text: str | None) -> bool:
   if any(marker in low for marker in _LIMIT_ERROR_MARKERS):
     return True
   return "limit" in low and "resets" in low
+
+
+def _is_model_capacity_error_text(text: str | None) -> bool:
+  """Whether a provider says the specifically selected model is busy."""
+  if not text:
+    return False
+  low = text.lower()
+  return any(marker in low for marker in _MODEL_CAPACITY_ERROR_MARKERS)
 
 
 def _is_limit_terminal(runner_result: dict) -> bool:
@@ -3631,6 +3687,10 @@ def _parse_reset_text(text: str, now: datetime) -> datetime | None:
 # interrupted the turn, not a provider quota, so the paid-retry opt-in for
 # limits does not apply.
 RESOURCE_PARK_REASONS = frozenset({"memory", "storage"})
+# These waits are owned by Möbius rather than the paid-limit preference. They
+# retain the interrupted request and retry with a pause; no extra usage is
+# requested or consumed merely because a model was momentarily busy.
+AUTO_RETRY_PARK_REASONS = RESOURCE_PARK_REASONS | frozenset({"model_capacity"})
 
 
 def _park_continues_automatically(chat, park) -> bool:
@@ -3643,7 +3703,7 @@ def _park_continues_automatically(chat, park) -> bool:
   reason = park.park_reason if park is not None else None
   if reason == "restart":
     return bool(chat.auto_resume_on_restart)
-  if reason in RESOURCE_PARK_REASONS:
+  if reason in AUTO_RETRY_PARK_REASONS:
     return True
   return bool(chat.auto_resume_on_limit)
 
@@ -3756,7 +3816,7 @@ async def _park_run_strict(
 
 def _park_exit(
   sink, runner_result: dict | None, error_text: str | None,
-  *, provider_id: str | None = None,
+  *, provider_id: str | None = None, db: Session | None = None,
 ) -> dict:
   """Classify a turn exit for limit parking and publish its error event.
 
@@ -3785,7 +3845,41 @@ def _park_exit(
     limit = _is_limit_terminal(runner_result)
   else:
     limit = _is_limit_error_text(error_text)
+  model_capacity = _is_model_capacity_error_text(error_text)
   failed = bool(error_text) or runner_result is None
+  if model_capacity:
+    retry_count = 0
+    run_token = getattr(sink, "run_token", None)
+    current_run = (
+      db.get(models.ChatRun, run_token)
+      if db is not None and run_token else None
+    )
+    if current_run is not None:
+      retry_count = _model_capacity_retry_count(db, current_run)
+    if retry_count >= len(MODEL_CAPACITY_RETRY_DELAYS):
+      sink.publish(_pause_note(
+        "The selected model is still busy after five automatic retries. "
+        "Choose another model, then tap Resume to continue your saved work.",
+        kind="model_capacity_exhausted",
+        provider=provider_id,
+      ))
+      return {"parked": False}
+    parked_until = (
+      datetime.now(UTC).replace(tzinfo=None)
+      + MODEL_CAPACITY_RETRY_DELAYS[retry_count]
+    )
+    sink.publish(_park_event(
+      "The selected model is busy right now. Your work is safe; "
+      "Möbius will try it again shortly.",
+      parked_until,
+      "model_capacity",
+      provider_id=provider_id,
+    ))
+    return {
+      "parked": True,
+      "parked_until": parked_until,
+      "park_reason": "model_capacity",
+    }
   if not limit and failed and claim_oom_kill():
     parked_until = datetime.now(UTC).replace(tzinfo=None) + _PARK_MIN_DELAY
     park_reason = "memory"
@@ -4005,13 +4099,16 @@ async def _complete_turn(
   # Otherwise the existing saved-question owner keeps the Goal exact and
   # durable while the partner decides whether to continue or stop it.
   terminal_handoff = None
-  if ending_status == "completed" and not provider_free:
+  if (
+    ending_status == "completed"
+    and not provider_free
+    and not sink.has_open_continuation_card()
+  ):
     from app.goal_plans import goal_terminal_handoff
 
     terminal_handoff = goal_terminal_handoff(
       db, chat_id, sink.run_token or "",
     )
-
   incorporate_activity_delivery = (
     ending_status == "completed" and bool(activity_delegation_ids)
   )
@@ -5060,14 +5157,7 @@ async def _run_chat_impl_with_db(
   settings = get_settings()
   raw_user_message = messages[-1].content
   user_message = raw_user_message
-  goal_objective = _goal_objective(raw_user_message)
   historical_goal_mode = _chat_has_goal_intent(messages)
-  goal_mode = historical_goal_mode
-  clear_dismissed_provider_goal = (
-    run_state.latest_provider_goal_is_dismissed(db, chat_id)
-    if chat_id else False
-  )
-  goal_continue = is_goal_continue(raw_user_message or "")
   question_checkpoint = None
   if settings.ensure_chat_note and chat_id:
     async def question_checkpoint() -> None:
@@ -5104,17 +5194,6 @@ async def _run_chat_impl_with_db(
   if run_token is None:
     run_token = alloc_run_token()
 
-  # The writer commits the exact ChatRun before provider launch.  Its Goal
-  # identity, not a historical `/goal` anywhere in the transcript, decides
-  # whether this physical turn may resume Codex's native Goal operation.
-  # Otherwise an unrelated question after a paused/stopped Goal can be steered
-  # into that old operation even though the platform correctly opened an
-  # ordinary run.
-  if chat_id:
-    goal_mode = _run_owns_active_goal(
-      db, chat_id=chat_id, run_token=run_token,
-    )
-
   app_context_block = ""
   app_context_env: dict[str, str] = {}
   chat_row = None
@@ -5150,29 +5229,9 @@ async def _run_chat_impl_with_db(
   else:
     # Delegation prompts are plain bounded tasks even if their text happens to
     # begin with an owner-only slash command.
-    goal_objective = None
-    clear_dismissed_provider_goal = False
-    goal_mode = False
     historical_goal_mode = False
-    goal_continue = False
     is_slash_command = False
 
-  # Chats created before native Codex goal handling have the /goal objective in
-  # their durable transcript but no provider-side ThreadGoal yet.  Either the
-  # automatic restart handoff or the visible one-tap Resume sends "continue";
-  # carrying the newest objective lets the runner adopt that old chat into the
-  # native goal store.  A native completed goal still wins authoritatively and
-  # is never restarted by this fallback.
-  fallback_goal_objective = (
-    _latest_goal_objective(messages)
-    if (
-      goal_continue
-      and historical_goal_mode
-      and goal_objective is None
-      and _goal_resume_requested(chat_row, raw_user_message)
-    )
-    else None
-  )
   # Durable run identity: the turn's StartTurn (initial send) or
   # PromotePending (continuation / stale-pending drain) writer-actor
   # command ALREADY inserted ChatRun(status="running") atomically with the
@@ -5369,6 +5428,12 @@ async def _run_chat_impl_with_db(
         user_message = f"{user_message}\n\n{waits_context}"
       else:
         user_message = f"{waits_context}\n\n{user_message}"
+
+  if chat_id and run_policy is None:
+    from app.goals import resume_context
+    goal_context = resume_context(db, run_token)
+    if goal_context:
+      user_message = f"{user_message}\n\n{goal_context}"
 
   # Per-turn time context (EVERY turn, not just the first) so the agent has a
   # clock + a sense of recency (how long since the user last wrote). Prepended
@@ -5779,11 +5844,7 @@ async def _run_chat_impl_with_db(
         system_prompt=system_prompt,
         resumed_context=resumed_context_fallback,
         should_abort=lambda: _run_generation_superseded(chat_id, run_gen),
-        goal_objective=goal_objective,
-        clear_dismissed_goal=clear_dismissed_provider_goal,
-        goal_mode=goal_mode,
-        goal_continue=goal_continue,
-        fallback_goal_objective=fallback_goal_objective,
+        retire_native_goal=historical_goal_mode,
         run_policy=run_policy,
         provider_id=provider_id,
         connector_plan=connector_turn_plan,
@@ -5841,7 +5902,9 @@ async def _run_chat_impl_with_db(
       # _limit_exit publishes through the sink BEFORE finalize so the error
       # (with park fields on a limit kill) lands in the persisted assistant
       # transcript, not just the live wire.
-      park_kwargs = _park_exit(sink, None, str(exc), provider_id=provider_id)
+      park_kwargs = _park_exit(
+        sink, None, str(exc), provider_id=provider_id, db=db,
+      )
       return await _complete_turn(
         bc=bc, sink=sink, db=db, chat_id=chat_id, run_gen=run_gen,
         provider_id=provider_id, cost_usd=0, close_browser=True,
@@ -5852,7 +5915,9 @@ async def _run_chat_impl_with_db(
     # sink before finalize so the error is persisted alongside any partial
     # response that streamed before the failure (enriched with the park
     # fields when the terminal was a limit kill).
-    park_kwargs = _park_exit(sink, runner_result, err, provider_id=provider_id)
+    park_kwargs = _park_exit(
+      sink, runner_result, err, provider_id=provider_id, db=db,
+    )
     return await _complete_turn(
       bc=bc, sink=sink, db=db, chat_id=chat_id, run_gen=run_gen,
       provider_id=provider_id, cost_usd=runner_result.get("cost_usd") or 0,
@@ -6019,7 +6084,9 @@ async def _run_chat_impl_with_db(
       # _limit_exit publishes through the sink BEFORE finalize so the error
       # (with park fields on a limit kill) lands in the persisted assistant
       # transcript, not just the live wire.
-      park_kwargs = _park_exit(sink, None, str(exc), provider_id=provider_id)
+      park_kwargs = _park_exit(
+        sink, None, str(exc), provider_id=provider_id, db=db,
+      )
       return await _complete_turn(
         bc=bc, sink=sink, db=db, chat_id=chat_id, run_gen=run_gen,
         provider_id=provider_id, cost_usd=0, close_browser=True,
@@ -6028,7 +6095,9 @@ async def _run_chat_impl_with_db(
     # Same save-before-broadcast rationale: _limit_exit persists the error
     # alongside any partial response that streamed before the failure
     # (enriched with the park fields when the terminal was a limit kill).
-    park_kwargs = _park_exit(sink, runner_result, err, provider_id=provider_id)
+    park_kwargs = _park_exit(
+      sink, runner_result, err, provider_id=provider_id, db=db,
+    )
     return await _complete_turn(
       bc=bc, sink=sink, db=db, chat_id=chat_id, run_gen=run_gen,
       provider_id=provider_id, cost_usd=runner_result.get("cost_usd") or 0,

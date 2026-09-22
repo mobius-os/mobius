@@ -36,7 +36,7 @@ import '../ui/ModelSheet.css'
 import './SettingsView.css'
 
 const PROVIDER_CHOICES = [
-  { id: 'mobius', label: 'Möbius subscription' },
+  { id: 'mobius', label: 'Möbius' },
   { id: 'claude', label: 'Claude Code' },
   { id: 'codex', label: 'OpenAI Codex' },
 ]
@@ -842,8 +842,8 @@ export default function SettingsView({
       )
       // Force the mode query to resync with the server. Covers the
       // write-succeeded-but-response-lost case: refetching reads
-      // authoritative state, the mirror effect at line 30 picks it
-      // up, and themeMode stops disagreeing with the visible theme.
+      // authoritative state, the themeModeQuery.data mirror effect above
+      // picks it up, and themeMode stops disagreeing with the visible theme.
       themeQueries.mode.invalidate(queryClient)
       onThemeChange?.()  // reload original theme on error
     } finally {
@@ -1019,7 +1019,7 @@ export default function SettingsView({
 
                 {mobiusAvailable && (
                   <ProviderRow
-                    name="Möbius subscription"
+                    name="Möbius"
                     connected={mobiusAuthenticated}
                     subtitle={mobiusTrialSubtitle}
                     statusNode={(

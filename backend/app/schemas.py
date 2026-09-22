@@ -11,7 +11,7 @@ from pydantic import (
   model_validator,
 )
 
-from app.providers import PROVIDER_NAMES, _model_belongs_to_other_provider
+from app.providers import PROVIDERS, _model_belongs_to_other_provider
 
 
 class SetupRequest(BaseModel):
@@ -671,15 +671,37 @@ class ChatPatch(BaseModel):
   @classmethod
   def validate_provider(cls, value: str | None) -> str | None:
     """Reject unknown provider IDs at request-deserialize time."""
-    if value is not None and value not in PROVIDER_NAMES:
+    if value is not None and value not in PROVIDERS:
       raise ValueError(f"unknown provider: {value}")
     return value
+
+
+class ChatCompactRequest(BaseModel):
+  """Optional owner guidance for one manual chat compaction."""
+
+  instructions: str | None = Field(default=None, max_length=4000)
+
+  @field_validator("instructions")
+  @classmethod
+  def normalize_instructions(cls, value: str | None) -> str | None:
+    if value is None:
+      return None
+    normalized = value.strip()
+    return normalized or None
 
 
 class ChatProviderSwitch(BaseModel):
   """Atomic cross-provider switch prepared by the incoming provider."""
 
-  provider: Literal["claude", "codex", "mobius"]
+  provider: str
+
+  @field_validator("provider")
+  @classmethod
+  def validate_provider(cls, value: str) -> str:
+    if value not in PROVIDERS:
+      raise ValueError(f"unknown provider: {value}")
+    return value
+
   agent_settings_json: AgentSettingsOverride
   # Stable across a network retry so the writer can return the already-stored
   # switch instead of appending a duplicate compaction marker.
@@ -695,18 +717,7 @@ class ChatProviderSwitch(BaseModel):
     if _model_belongs_to_other_provider(model, self.provider):
       raise ValueError("target model does not belong to target provider")
     self.agent_settings_json.model = model
-    allowed_efforts = {
-      # Codex's newer model catalogs extend the original ReasoningEffort
-      # scale with max/ultra. AgentSettingsOverride already accepts both and
-      # the model picker only offers levels advertised by the selected model,
-      # so the atomic provider-switch boundary must accept them too.
-      "codex": {
-        "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
-      },
-      "claude": {"low", "medium", "high", "xhigh", "max", "ultracode"},
-      "mobius": {"minimal", "low", "medium", "high", "max"},
-    }
-    if effort not in allowed_efforts[self.provider]:
+    if effort not in PROVIDERS[self.provider].switch_efforts:
       raise ValueError("target effort does not belong to target provider")
     return self
 
@@ -773,8 +784,12 @@ class SendMessage(BaseModel):
 
   @model_validator(mode="after")
   def validate_continuation(self):
-    if self.continuation == "manual" and self.content.strip().lower() != "continue":
-      raise ValueError("manual continuation content must be 'continue'")
+    if (
+      self.continuation == "manual"
+      and self.content.strip()
+      and self.content.strip().lower() != "continue"
+    ):
+      raise ValueError("manual continuation does not accept message content")
     return self
 
 
@@ -893,7 +908,7 @@ class BackgroundAgentChoice(BaseModel):
   @field_validator("provider")
   @classmethod
   def validate_provider(cls, value: str | None) -> str | None:
-    if value is not None and value not in PROVIDER_NAMES:
+    if value is not None and value not in PROVIDERS:
       raise ValueError(f"unknown provider: {value}")
     return value
 
@@ -928,7 +943,7 @@ class SettingsUpdate(BaseModel):
   @classmethod
   def validate_provider(cls, value: str | None) -> str | None:
     """Reject unknown provider IDs at request-deserialize time."""
-    if value is not None and value not in PROVIDER_NAMES:
+    if value is not None and value not in PROVIDERS:
       raise ValueError(f"unknown provider: {value}")
     return value
 

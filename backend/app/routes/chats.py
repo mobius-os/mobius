@@ -84,7 +84,7 @@ from app.run_state import (
   running_chat_ids,
   running_goal_objective,
 )
-from app.schemas import ChatPatch, ChatProviderSwitch
+from app.schemas import ChatCompactRequest, ChatPatch, ChatProviderSwitch
 from app.timeutil import now_naive_utc, SOFT_DELETE_TTL
 from app.tool_output_storage import (
   TOOL_OUTPUT_STORAGE_PREFIX,
@@ -1425,12 +1425,9 @@ async def patch_chat(
     target_provider = body.provider
     new_model = agent_settings_patch.get("model")
     if target_provider is None and new_model:
-      from app.providers import _model_belongs_to_other_provider
       current_provider = chat.provider or "claude"
-      if _model_belongs_to_other_provider(new_model, current_provider):
-        target_provider = (
-          "codex" if current_provider == "claude" else "claude"
-        )
+      if providers._model_belongs_to_other_provider(new_model, current_provider):
+        target_provider = providers.provider_of_model(new_model)
 
     if new_model:
       from app.providers import _model_belongs_to_other_provider
@@ -1477,7 +1474,7 @@ async def patch_chat(
           "handoff so the incoming provider can continue its context."
         ),
       )
-    if target_provider is not None and target_provider in ("claude", "codex", "mobius"):
+    if target_provider is not None and target_provider in providers.PROVIDERS:
       # Reject a switch to a disconnected provider — the picker may
       # have raced ahead of /auth/providers/status, or the user may
       # be on stale state. Without this check the PATCH would succeed
@@ -2740,14 +2737,16 @@ async def _compact_chat_locked(
 )
 async def compact_chat(
   chat_id: str,
+  body: ChatCompactRequest | None = None,
   _: models.Owner = Depends(get_current_owner_for_lifecycle_control),
   db: Session = Depends(get_db),
 ):
-  """Keep the pre-PM219 bodyless compaction protocol rolling-upgrade safe.
+  """Compact the next turn while keeping the old two-call switch compatible.
 
-  Older clients compact first and then PATCH the provider.  The marker is
-  tagged with its source provider; ``patch_chat`` accepts it exactly once as
-  the handoff proof.  New clients use the atomic ``/provider-switch`` route.
+  Manual compaction stores a briefing and resets the current provider session
+  atomically. Older clients may then PATCH the provider; the marker remains
+  tagged so ``patch_chat`` accepts it exactly once as the handoff proof. New
+  provider switches use the atomic ``/provider-switch`` route.
   """
   from app.chat_queue import get_transition_lock
   from app.chat_writer import (
@@ -2778,11 +2777,23 @@ async def compact_chat(
     messages = list(chat.messages or [])
     data_dir = get_settings().data_dir
     try:
-      summary = load_cumulative_summary(data_dir, chat_id)
-      if summary is None:
-        summary = await summarize_chat(
-          messages, data_dir=data_dir, provider_id=source_provider,
-        )
+      source_summary = load_cumulative_summary(data_dir, chat_id)
+      instructions = body.instructions if body is not None else None
+      # The published cumulative summary is best-effort and can lag the latest
+      # settled turn. Manual compaction retires the provider session, so always
+      # synthesize from the current transcript and use that summary only as an
+      # additional seed; copying it verbatim could drop the newest decisions
+      # from the fresh session that follows.
+      settings_obj = chat.agent_settings_json or {}
+      summary = await summarize_chat(
+        messages,
+        data_dir=data_dir,
+        provider_id=source_provider,
+        source_summary=source_summary,
+        model=settings_obj.get("model"),
+        effort=settings_obj.get("effort"),
+        custom_instructions=instructions,
+      )
     except CompactionError as exc:
       raise HTTPException(status_code=422, detail=str(exc))
     except Exception as exc:
@@ -3166,7 +3177,7 @@ def create_app_chat(
   ) or providers.owner_default_provider(
     data_dir, owner.provider if owner else None,
   )
-  if provider not in ("claude", "codex", "mobius"):
+  if provider not in providers.PROVIDERS:
     raise HTTPException(status_code=422, detail=f"unknown provider: {provider}")
   if body.model and providers._model_belongs_to_other_provider(
     body.model, provider,
@@ -3386,7 +3397,7 @@ async def patch_app_chat(
         detail="The selected model does not belong to that provider.",
       )
     if body.provider is not None:
-      if body.provider not in ("claude", "codex", "mobius"):
+      if body.provider not in providers.PROVIDERS:
         raise HTTPException(
           status_code=422, detail=f"unknown provider: {body.provider}"
         )

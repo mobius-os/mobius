@@ -49,6 +49,7 @@ from app import (
   drawer_pins,
   fs_locks,
   icon_assets,
+  managed_paths,
   models,
 )
 from app import app_cron
@@ -75,6 +76,7 @@ from app.manifest_contract import (
   STATIC_ASSETS_COUNT_MAX as _CONTRACT_STATIC_ASSETS_COUNT_MAX,
   STATIC_ASSETS_TOTAL_MAX as _CONTRACT_STATIC_ASSETS_TOTAL_MAX,
   SYSTEM_PROMPT_MAX_BYTES as _CONTRACT_SYSTEM_PROMPT_MAX_BYTES,
+  REQUIRED_STRING_FIELDS,
   ManifestContractError,
   job_interpreter,
   require_executable_job,
@@ -195,7 +197,7 @@ _SEEDS_TOTAL_MAX = _CONTRACT_SEEDS_TOTAL_MAX
 _STATIC_ASSET_MAX_BYTES = _CONTRACT_STATIC_ASSET_MAX_BYTES
 _STATIC_ASSETS_COUNT_MAX = _CONTRACT_STATIC_ASSETS_COUNT_MAX
 _STATIC_ASSETS_TOTAL_MAX = _CONTRACT_STATIC_ASSETS_TOTAL_MAX
-_STATIC_ASSETS_MANIFEST = ".mobius-static-assets.json"
+_STATIC_ASSETS_MANIFEST = managed_paths.STATIC_ASSETS_MANIFEST
 _STATIC_ASSETS_BACKUP_ASSET_PREFIX = "assets"
 _STATIC_ASSETS_BACKUP_METADATA_PREFIX = "metadata"
 _PENDING_UPDATE_DIR = "mobius-pending-update"
@@ -228,9 +230,7 @@ _APP_SKILLS_SIDECAR = ".app-skills.json"
 # script. The job script is dropped separately (its name is known only at call
 # time). Excluding these keeps the source-write loop from rewriting an
 # install-managed artifact a clean merge happened to carry on `main`.
-_MERGED_NON_SOURCE = frozenset((
-  ".gitignore", _STATIC_ASSETS_MANIFEST, "init-cron.sh",
-))
+_MERGED_NON_SOURCE = managed_paths.MERGED_NON_SOURCE
 
 # Icon cap matches the icon-upload route's 12 MB ceiling.
 _ICON_MAX_BYTES = _CONTRACT_ICON_MAX_BYTES
@@ -258,6 +258,24 @@ def _validate_manifest(m: dict) -> None:
   # contract used by both installation and pre-publication validation. Keep the
   # adapter here limited to translating its exception into the HTTP boundary.
   return
+
+
+def _validate_discovery_manifest(manifest: dict) -> None:
+  """Keep shared identity/source guards without gating on unused metadata.
+
+  Discovery compares source bytes, not installation readiness. Project
+  templates, permissions, and other installation-only declarations must not
+  hide that comparison, but identity, response metadata, source paths, and
+  fetch bounds still use the install contract. Keep the original manifest
+  intact for the source review digest; this projection is only validation.
+  """
+  if not isinstance(manifest, dict):
+    raise HTTPException(400, "Manifest must be a JSON object.")
+  fields = (
+    *REQUIRED_STRING_FIELDS, "package_id", "moved_to", "previous_id",
+    "previous_manifest_url", "source_files", "schedule",
+  )
+  _validate_manifest({key: manifest[key] for key in fields if key in manifest})
 
 
 def _derive_raw_base(manifest_url: str) -> str:
@@ -2033,14 +2051,16 @@ class FetchedUpstream:
   job_bytes: bytes | None
 
 
-async def fetch_upstream_source(manifest_url: str) -> FetchedUpstream:
+async def fetch_upstream_source(
+  manifest_url: str, *, strict: bool = True,
+) -> FetchedUpstream:
   """Fetch a manifest and its source files read-only — no install, DB, or git.
 
   The read-only twin of `install_from_manifest`'s fetch phase: GET the manifest
   at `manifest_url`, then the entry JSX, every declared `source_files` sibling,
   and the schedule job script — exactly the files install records on the
   per-app `upstream` branch. Reuses the same `_http_get` (SSRF-validated,
-  size-capped, manual-redirect) and `_validate_manifest` that install uses, so
+  size-capped, manual-redirect) source requests that install uses, so
   the fetched bytes match install's byte-for-byte and a later content compare
   against the recorded upstream tree is apples-to-apples.
 
@@ -2050,7 +2070,11 @@ async def fetch_upstream_source(manifest_url: str) -> FetchedUpstream:
   appear on the `upstream` branch an update-check compares against.
 
   Raises HTTPException on any fetch or validation failure. The caller decides
-  whether that is a hard error or a degrade-to-unknown."""
+  whether that is a hard error or a degrade-to-unknown.
+
+  By default, the full install contract applies. Only passive update detection
+  passes ``strict=False`` to ignore installation-only metadata; identity and
+  source validation remain shared with install."""
   # follow_redirects=False — _http_get walks the chain manually so every hop is
   # re-validated against SSRF, matching install_from_manifest's client setup.
   async with httpx.AsyncClient(
@@ -2061,7 +2085,10 @@ async def fetch_upstream_source(manifest_url: str) -> FetchedUpstream:
       manifest = json.loads(raw)
     except json.JSONDecodeError as exc:
       raise HTTPException(400, f"Manifest is not valid JSON: {exc}")
-    _validate_manifest(manifest)
+    if strict:
+      _validate_manifest(manifest)
+    else:
+      _validate_discovery_manifest(manifest)
     raw_base = _normalize_raw_base(_derive_raw_base(manifest_url))
 
     entry_bytes = await _http_get(
@@ -3383,7 +3410,13 @@ async def install_from_manifest(
   )
   cloned_install = False
   cloned_update = False
-  allow_unrelated_histories = False
+  # A catalog rename may adopt a manifest-less checkout whose canonical Git
+  # origin proves the package identity but whose installer-owned branches were
+  # created independently. Git still owns the merge verdict: compatible bytes
+  # combine, and real differences surface through the ordinary conflict flow.
+  allow_unrelated_histories = bool(
+    target.adopting_previous_id and target.adopting_trusted_origin
+  )
   # Source deletes are computed from old-upstream minus new-upstream. The prune
   # phase consumes this explicit diff so local-only tracked siblings are not
   # mistaken for files the manifest intentionally removed.
@@ -3566,7 +3599,8 @@ async def install_from_manifest(
             )
             app.upstream_commit = fetched_upstream.sha
             allow_unrelated_histories = (
-              fetched_upstream.allow_unrelated_histories
+              allow_unrelated_histories
+              or fetched_upstream.allow_unrelated_histories
             )
             cloned_update = True
           except Exception as exc:
@@ -3670,22 +3704,18 @@ async def install_from_manifest(
               divergence = "fast_forward"
               merge_applied = True
             else:
-              # Before routing to the owner, auto-resolve a conflict CONFINED
-              # to the version identifier: a version label is never a semantic
-              # merge, so take-upstream is always right. This kills the most
-              # common update-conflict class — a prior local "agent edit"
-              # bumped the version and the release bumps the same line. Any
-              # conflict beyond the version line returns None and falls through
-              # to the owner-resolver flow. Fail-safe: a genuine local edit is
-              # never dropped (a residual conflict aborts the whole attempt).
-              version_only = await asyncio.to_thread(
-                app_git.resolve_version_only_conflict,
+              # JSON manifests can reconcile serialization drift and disjoint
+              # edits structurally. Other files retain the APP_VERSION-only
+              # rule. Any remaining overlap leaves the whole update untouched
+              # for the owner to resolve.
+              benign = await asyncio.to_thread(
+                app_git.resolve_benign_conflict,
                 git_source_dir, merge.conflict_paths,
               )
               resolved_source = None
-              if version_only is not None:
+              if benign is not None:
                 resolved_source = {
-                  rel: data for rel, data in version_only.tree.items()
+                  rel: data for rel, data in benign.tree.items()
                   if rel not in _MERGED_NON_SOURCE
                 }
               if resolved_source is not None and entry_key in resolved_source:
@@ -3693,8 +3723,8 @@ async def install_from_manifest(
                 divergence = "clean_merge"
                 merge_applied = True
                 warnings.append(
-                  "auto-resolved a version-only update conflict "
-                  "(took the upstream version)"
+                  "auto-resolved a benign update conflict "
+                  "(no semantic overlap between local edits and upstream)"
                 )
                 reconciliation = app_git.ReconciliationReceipt(
                   proven_present=reconciliation.proven_present,
@@ -3707,7 +3737,7 @@ async def install_from_manifest(
                 # built on, mirroring the clean-merge branch above.
                 git_exec_paths = await asyncio.to_thread(
                   app_git.read_tree_exec_paths,
-                  git_source_dir, version_only.tree_oid,
+                  git_source_dir, benign.tree_oid,
                 )
               else:
                 # Never rebase local. The app stays served with its current

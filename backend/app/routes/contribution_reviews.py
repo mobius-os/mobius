@@ -229,8 +229,8 @@ async def report_outcome(app_id: int, run_id: str, body: ReviewOutcome,
         outcome = {**previous, "state": "merged", "merge_sha": pull.get("merge_commit_sha")}
       else:
         checks = await asyncio.to_thread(reviews.pull_checks, _gh, cwd, target)
-        entry = checks.get("mergeQueueEntry")
-        if entry and entry.get("headCommit", {}).get("oid") == target["head_sha"]:
+        entry = reviews.queue_entry(checks, target)
+        if entry:
           outcome = {**previous, "state": "queued", "queue_entry_id": entry["id"]}
         else:
           outcome = {**previous, "state": "merge_unknown", "summary":
@@ -245,8 +245,9 @@ async def report_outcome(app_id: int, run_id: str, body: ReviewOutcome,
         reviews.save_outcome(db, row, item_key, outcome)
         return {"run": reviews.view(row)}
       checks = await asyncio.to_thread(reviews.pull_checks, _gh, cwd, target)
-      existing_entry = checks.get("mergeQueueEntry")
-      if existing_entry and existing_entry.get("headCommit", {}).get("oid") == target["head_sha"]:
+      existing_entry = reviews.queue_entry(checks, target)
+      if existing_entry:
+        await asyncio.to_thread(reviews.assert_current_base, _gh, cwd, target)
         outcome.update(state="queued", queue_entry_id=existing_entry["id"])
         reviews.save_outcome(db, row, item_key, outcome)
         return {"run": reviews.view(row)}
@@ -261,6 +262,7 @@ async def report_outcome(app_id: int, run_id: str, body: ReviewOutcome,
           if str(actor.get("id") or "") != row.github_actor_id:
             outcome.update(state="needs_you", summary="The connected GitHub account changed. Approve a new review selection.")
           else:
+            await asyncio.to_thread(reviews.assert_current_base, _gh, cwd, target)
             _assert_execution_live(db, row, principal)
             # Persist before network I/O. A crash or lost response cannot
             # authorize replay. CAS also fences other server processes.

@@ -68,6 +68,7 @@ import useComposerDraftState from './hooks/useComposerDraftState.js'
 import useChatRuntimePolicy from './hooks/useChatRuntimePolicy.js'
 import useOffscreenNudge, { useNudgeTargetRef } from './hooks/useOffscreenNudge.js'
 import ChatInputBar from './ChatInputBar.jsx'
+import { compactFailureInput, mobiusChatCommand } from './slashCommands.js'
 import { hasSendablePayload } from './composerSubmission.js'
 import AgentContextInspector from './AgentContextInspector.jsx'
 import ChatSummaryViewer from './ChatSummaryViewer.jsx'
@@ -156,6 +157,11 @@ import {
   reconcileChatSearchActivation,
   subscribeChatSearchReveal,
 } from '../../lib/chatSearchReveal.js'
+import {
+  chatQuestionRevealFor,
+  consumeChatQuestionReveal,
+  subscribeChatQuestionReveal,
+} from '../../lib/chatQuestionReveal.js'
 import {
   highlightSearchTerms,
 } from '../../lib/searchTermHighlight.js'
@@ -323,11 +329,12 @@ function findUserIndexByCid(messages, cid) {
   return -1
 }
 
-// Exported so sibling components (Shell, etc.) can clean up drafts when a
-// chat is deleted.  Shell owns the deletion flow; it should call this after
-// the chat row is removed from the list.
-// NOTE: if deletion ever moves inside ChatView's own scope, call this inline
-// instead of leaving the orphaned key behind.
+// Exported for sibling components (Shell, etc.) to clean up drafts when a
+// chat is deleted. Shell's actual deletion flow currently only calls
+// `clearComposerDraft` directly (Shell.jsx) rather than this helper, so the
+// failed-send-attempt and question-draft keys it also clears are not wired
+// into deletion today — call this instead of the narrower clear if that gap
+// is closed.
 export function deleteChatDraft(chatId) {
   clearComposerDraft(chatId)
   clearFailedSendAttempt(chatId)
@@ -401,6 +408,7 @@ export default function ChatView({
   onDisplayReady = null,
   artifactsAppId = null,
   onOpenArtifact = null,
+  focusPendingQuestion = false,
 }) {
   const queryClient = useQueryClient()
   const provisionalNewChat = !!newChatSession && !newChatSession.materialized
@@ -430,6 +438,11 @@ export default function ChatView({
   const searchRevealConsumed = searchActivationRef.current.consumedId === searchReveal?.id
   const searchRevealCleanupRef = useRef(() => {})
   useEffect(() => () => searchRevealCleanupRef.current(), [])
+  const [, setQuestionRevealVersion] = useState(0)
+  useEffect(() => subscribeChatQuestionReveal(chatId, () => {
+    setQuestionRevealVersion(version => version + 1)
+  }), [chatId])
+  const questionReveal = chatQuestionRevealFor(chatId)
   const inputRef = useRef(null)
   const handleInternalNav = useCallback((url) => {
     onInternalNav?.(url)
@@ -618,6 +631,10 @@ export default function ChatView({
   )
   const [fileDropActive, setFileDropActive] = useState(false)
   const fileDragDepthRef = useRef(0)
+  // A "/compact" submission is a chat action, not a turn: it rewrites the live
+  // context instead of asking the model anything.
+  const [compactingChat, setCompactingChat] = useState(false)
+  const compactingChatRef = useRef(false)
   const [embeddedRunActive, setEmbeddedRunActive] = useState(false)
   // A counter is only a render wake-up; deadline elapsed is derived directly
   // from the current card's reset timestamp below, so a newly loaded card can
@@ -1061,6 +1078,23 @@ export default function ChatView({
   // so any in-flight fetchMessages can't resurrect cleared data.
   const fetchGenRef = useRef(0)
 
+  // Every authoritative runtime read owns the same transport decision. This
+  // includes chat activation after hidden work finishes: that path can inherit
+  // a terminal connection error from the retained hidden pane even though the
+  // newly read runtime is already settled.
+  const retireUnownedRuntimeStream = useCallback((runtime) => {
+    const localStartInFlight =
+      localStartRequestRef.current?.chatId === String(chatId)
+    if (shouldRetireStreamForRuntime({
+      runtimeRunning: runtime.running,
+      pendingQuestionId: runtime.pendingQuestionId,
+      stopInFlight: handlingStopRef.current,
+      localStartInFlight,
+    })) {
+      retireSettledStreamRef.current?.()
+    }
+  }, [chatId])
+
   // Pagination flag — one compact page at a time. Scroll authority remains in
   // useScrollMode, including while this network request is in flight.
   const loadingOlder = useRef(false)
@@ -1447,21 +1481,7 @@ export default function ChatView({
       // Stream retirement and the authoritative replacement must be one
       // commit, not two paints separated by the detail request.
       onReconciled?.(runtime)
-      const localStartInFlight =
-        localStartRequestRef.current?.chatId === String(chatId)
-      // This committed detail projection is the owner of whether an SSE
-      // transport is due. A completed run and a parked owner question both
-      // have no stream to attach; retire any failed transport even when its
-      // error path already set isStreaming false. Keep a local Start/Stop
-      // transition authoritative until its own response crosses the boundary.
-      if (shouldRetireStreamForRuntime({
-        runtimeRunning: runtime.running,
-        pendingQuestionId: runtime.pendingQuestionId,
-        stopInFlight: handlingStopRef.current,
-        localStartInFlight,
-      })) {
-        retireSettledStreamRef.current?.()
-      }
+      retireUnownedRuntimeStream(runtime)
       return runtime
     } catch {
       void reconcileFailedSendOutbox({
@@ -1486,6 +1506,7 @@ export default function ChatView({
     reconcileFailedSendOutbox,
     commitRuntimeSnapshot,
     inspectRuntimeSnapshot,
+    retireUnownedRuntimeStream,
     setActiveAssistantMessageId,
     setGoalPresentationLocalState,
   ])
@@ -2505,6 +2526,10 @@ export default function ChatView({
       setLoading(false)
       setActivationSettled(true)
       pendingQueue.hydrate(runtime.pending_messages || [])
+      retireUnownedRuntimeStream({
+        running,
+        pendingQuestionId: runtime.pending_question_id,
+      })
       if (running) {
         setSending(true)
         if (attachesToStream) {
@@ -2823,6 +2848,7 @@ export default function ChatView({
     inspectRuntimeSnapshot,
     onRuntimeSettledIdle,
     reconcileFailedSendOutbox,
+    retireUnownedRuntimeStream,
     setActiveAssistantMessageId,
     setGoalPresentationLocalState,
   ])
@@ -3912,6 +3938,40 @@ export default function ChatView({
     patchQuestionAnswers,
   ])
 
+  // "/compact" never becomes a message. It asks the backend to replace this
+  // chat's live context with a fresh briefing and reset the provider session;
+  // the visible transcript is untouched and the platform renders the stored
+  // compaction as its own "Context compacted" card.
+  async function runCompactCommand(instructions = '', submittedInput = '/compact') {
+    if (!chatId || provisionalNewChat) {
+      setSendFailure('There’s no chat context to compact yet.')
+      return
+    }
+    if (compactingChatRef.current) return
+    if (isProviderSwitchBlocking(chatId)) return
+    compactingChatRef.current = true
+    setCompactingChat(true)
+    setComposerInput('')
+    setSendFailure(null)
+    try {
+      await api.chats.compact(chatId, { instructions })
+      await fetchMessages({ force: true })
+    } catch (err) {
+      setComposerInput(compactFailureInput(inputValueRef.current, submittedInput))
+      setSendFailure(sendFailureMessage(err, { online: getOnlineSnapshot() }))
+    } finally {
+      compactingChatRef.current = false
+      setCompactingChat(false)
+    }
+  }
+
+  function dispatchMobiusChatCommand(composed) {
+    const command = mobiusChatCommand(composed)
+    if (!command) return false
+    void runCompactCommand(command.instructions, composed)
+    return true
+  }
+
   function handleSubmit(e) {
     e.preventDefault()
     if (isProviderSwitchBlocking(chatId)) return
@@ -3919,12 +3979,16 @@ export default function ChatView({
       setModelSelectionRequest(request => request + 1)
       return
     }
-    doSend(input.trim())
+    const composed = input.trim()
+    if (dispatchMobiusChatCommand(composed)) return
+    doSend(composed)
   }
 
   async function handleProvisionalNewChatSubmit(e) {
     e.preventDefault()
-    if (!provisionalNewChat || newChatSession?.submitted || !input.trim()) return
+    const composed = input.trim()
+    if (!provisionalNewChat || newChatSession?.submitted || !composed) return
+    if (dispatchMobiusChatCommand(composed)) return
     await settingsSaveTailRef.current
     onNewChatSubmit?.(input)
   }
@@ -3937,6 +4001,8 @@ export default function ChatView({
       return
     }
     if (submitSteerInFlightRef.current) return
+    const composed = input.trim()
+    if (dispatchMobiusChatCommand(composed)) return
     submitSteerInFlightRef.current = true
     void doSend(input.trim(), { directSteer: true })
       .finally(() => { submitSteerInFlightRef.current = false })
@@ -5246,11 +5312,13 @@ export default function ChatView({
   const resourcePause = isResourcePause(pendingResumeBlock)
     ? pendingResumeBlock
     : null
+  const modelCapacityPause = pendingResumeBlock?.pause?.kind === 'model_capacity'
   // An open question is the single blocker: answering it IS the continuation,
   // so don't surface a competing Resume (which the backend would now refuse).
   const hasPendingResume = !!pendingResumeBlock
     && !hasPendingQuestion
     && !resourcePause
+    && !modelCapacityPause
   const pendingLimitResetAt = pendingResumeBlock?.pause?.resets_at || null
   // New parks preserve the provider that actually enforced the limit. Older
   // cards predate that fact, so fall back to the chat's current provider.
@@ -5370,6 +5438,15 @@ export default function ChatView({
     scrollRef, hasPendingResume, resumeCardEl,
   )
   const questionNudgeShown = hasPendingQuestion && pendingCardOffscreen
+  const questionRevealConsumedRef = useRef(null)
+  useLayoutEffect(() => {
+    const requestId = questionReveal?.id ?? (focusPendingQuestion ? 'deep-link' : null)
+    if (!requestId || questionRevealConsumedRef.current === requestId) return
+    if (!hasPendingQuestion || !pendingQuestionEl) return
+    questionRevealConsumedRef.current = requestId
+    revealPendingQuestion(pendingQuestionEl)
+    if (questionReveal?.id != null) consumeChatQuestionReveal(chatId, questionReveal.id)
+  }, [chatId, focusPendingQuestion, hasPendingQuestion, pendingQuestionEl, questionReveal, revealPendingQuestion])
   const resumeNudgeShown = hasPendingResume && resumeCardOffscreen
   const jumpToLatestVisible = jumpToLatestShown({
     // A send-owned PIN_USER_MSG is the expected latest-turn location, not a
@@ -5442,6 +5519,12 @@ export default function ChatView({
         : 'Waiting for memory to settle. This chat will resume automatically.'
     }
     if (pendingResumeBlock.pause?.resets_at) {
+      if (modelCapacityPause) {
+        const label = formatResetTime(pendingResumeBlock.pause.resets_at)
+        return label
+          ? `Selected model is busy. Retrying ${label}.`
+          : 'Selected model is busy. Retrying automatically shortly.'
+      }
       const label = formatResetTime(pendingResumeBlock.pause.resets_at)
       if (autoResumeEnabled) {
         return label
@@ -5862,6 +5945,7 @@ export default function ChatView({
               }
               onAutoResumeChange={handleAutoResumeChange}
               limitResetElapsed={limitResetElapsed}
+              recoveryCredit={pendingLimitRecoveryCredit}
               submissionBlocked={providerSwitching}
               liveQuestionId={answerableQuestionId}
               // Same publication channel as the durable rows above: while the
@@ -6085,6 +6169,7 @@ export default function ChatView({
           canRequestSteer={canRequestSteer}
           canSubmitSteer={canSubmitSteer}
           sendFailure={sendFailure}
+          notice={compactingChat ? 'Compacting this chat’s context…' : null}
           submissionBlocked={providerSwitching || !!newChatSession?.submitted}
           questionBlocked={hasPendingQuestion && !localAnswerIntents.some(record => record.body?.question_id === answerableQuestionId)}
           pendingFiles={pendingFiles}

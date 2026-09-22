@@ -768,6 +768,26 @@ _CHATGPT_MODEL_UNAVAILABLE_RE = re.compile(
 )
 
 
+_STREAM_STALL_RE = re.compile(
+  r"stream (?:disconnected|closed) before completion",
+  re.IGNORECASE,
+)
+
+
+def _stream_stall_message(error_text: str) -> str:
+  """Owner wording for a stream that died before the answer finished.
+
+  The provider's raw text names the route and its timeout guard, which reads
+  like a broken connection with no next step. Lead with what happened and what
+  to do, and keep those exact words below so the failure stays reportable.
+  """
+  return (
+    "The model stream stalled mid-answer and this turn stopped before it "
+    "finished. Your work is saved — send a message to continue.\n\n"
+    f"Technical detail: {error_text}"
+  )
+
+
 def _codex_user_error(error_text: str | None) -> str | None:
   """Turns a known account/model rejection into a useful next action.
 
@@ -779,6 +799,8 @@ def _codex_user_error(error_text: str | None) -> str | None:
   """
   if not error_text:
     return error_text
+  if _STREAM_STALL_RE.search(error_text):
+    return _stream_stall_message(error_text)
   match = _CHATGPT_MODEL_UNAVAILABLE_RE.search(error_text)
   if match is None:
     return error_text

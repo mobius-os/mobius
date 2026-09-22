@@ -104,13 +104,6 @@ export default function ProviderAuth({ authenticated, onDone, compact = false, c
     }
   }
 
-  // The "Checking…" placeholder formerly rendered here while the
-  // local statusQuery was loading. After consolidation, the parent
-  // owns the query and is expected to gate the render itself (see
-  // SettingsView's `providerLoaded` guard). Removing the local
-  // gate avoids a render with `authenticated === undefined` from
-  // showing the "Not connected" state for one frame.
-
   // Active auth flow — always show the code input when authUrl is set.
   if (authUrl) {
     return (

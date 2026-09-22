@@ -29,7 +29,7 @@ test('artifact disclosure keeps its count with the heading and shows every app i
 
   assert.match(
     html,
-    /composer-popover__artifact-heading[^>]*>[\s\S]*?Latest artifacts[\s\S]*?aria-label="2 total artifacts"[^>]*>[\s\S]*?2/,
+    /composer-popover__artifact-heading[^>]*>[\s\S]*?Latest artifacts[\s\S]*?class="composer-popover__eyebrow composer-popover__artifact-count"[^>]*aria-label="2 total artifacts"[^>]*>[\s\S]*?2/,
   )
   assert.match(html, /aria-label="Hide 1 older artifact; 2 total"/)
   assert.match(html, /composer-popover__artifact-featured/)

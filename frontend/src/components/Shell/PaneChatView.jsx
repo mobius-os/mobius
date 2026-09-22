@@ -52,6 +52,7 @@ function PaneChatView({
   onFirstMessage,
   onDisplayReady,
   onChatBoundaryError,
+  focusPendingQuestion = false,
 }) {
   const appArtifactsQuery = chatAppArtifactQueries.detail.useQuery(chatId, {
     enabled: !newChatSession || newChatSession.materialized,
@@ -168,6 +169,7 @@ function PaneChatView({
         composerRequest={composerRequest}
         onComposerRequestHandled={onComposerRequestHandled}
         onDisplayReady={onDisplayReady ? handleDisplayReady : null}
+        focusPendingQuestion={focusPendingQuestion}
       />
     </ErrorBoundary>
   )

@@ -1439,7 +1439,11 @@ async def update_check(
     else install._canonical_base(installed_manifest_url) + "/mobius.json"
   )
   try:
-    fetched = await install.fetch_upstream_source(fetch_manifest_url)
+    # Discovery compares source, while preview/install still validate whether
+    # the complete manifest can be applied.
+    fetched = await install.fetch_upstream_source(
+      fetch_manifest_url, strict=False,
+    )
   except HTTPException:
     # Upstream unreachable / rate-limited / now-invalid — degrade to unknown so
     # a store open never errors on a transient network failure.

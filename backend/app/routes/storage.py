@@ -676,7 +676,6 @@ async def _decode_write_body(
 def read_app_file(
   app_id: int,
   path: str,
-  request: Request,
   db: Session = Depends(get_db),
   principal: Principal = Depends(get_principal),
 ):
@@ -692,8 +691,15 @@ def read_app_file(
     raise HTTPException(status_code=404, detail="File not found.")
   stored = read_content_type(data_dir, Path("apps") / str(app_id), path)
   response = _serve_file(file_path, stored)
-  if request.headers.get("x-mobius-version") == "1":
-    response.headers["ETag"] = file_version_token(file_path)
+  # One URL must have one validator. Large files are streamed by FileResponse,
+  # which otherwise supplies its own transport ETag while small inline reads do
+  # not. A browser may cache that plain-read ETag and later reuse it for a CAS
+  # read of the same URL, producing an If-Match token the storage route can
+  # never accept. Always expose the canonical storage version and keep mutable
+  # private app data out of the browser HTTP cache; the app runtime owns its
+  # explicit offline/read-through cache.
+  response.headers["ETag"] = file_version_token(file_path)
+  response.headers["Cache-Control"] = "no-store"
   return response
 
 

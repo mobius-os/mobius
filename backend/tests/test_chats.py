@@ -1,5 +1,7 @@
 """Chat route regression tests."""
 
+from tests.goal_fixtures import goal_run as make_goal_run, persist_goal_fixture
+
 import asyncio
 from datetime import UTC, datetime, timedelta
 import io
@@ -197,7 +199,7 @@ def test_chat_reads_keep_goal_identity_after_a_mid_turn_question(
       "cid": "goal-steer",
     },
   ]
-  db.add(models.ChatRun(
+  db.add(make_goal_run(db,
     id="active-goal-run",
     chat_id=chat.id,
     status="running",
@@ -228,7 +230,7 @@ def test_usage_limit_waiting_marks_only_latest_usage_park(chat, db):
 
   base = datetime.now(UTC)
   # Latest run is a usage-limit park awaiting resume → chat is "waiting".
-  db.add(models.ChatRun(
+  db.add(make_goal_run(db,
     id="usage-park", chat_id=chat.id, status="parked",
     provider="claude", park_reason="usage_limit", started_at=base,
   ))
@@ -243,7 +245,7 @@ def test_usage_limit_waiting_marks_only_latest_usage_park(chat, db):
   assert usage_limit_waiting_chat_ids(db, [chat.id]) == {chat.id}
 
   # A newer running row supersedes the park (latest-run-wins) → not waiting.
-  db.add(models.ChatRun(
+  db.add(make_goal_run(db,
     id="fresh-run", chat_id=chat.id, status="running",
     provider="claude", started_at=base + timedelta(seconds=1),
   ))
@@ -256,7 +258,7 @@ def test_usage_limit_waiting_ignores_non_usage_parks(chat, db):
 
   # A restart/resource park auto-continues and must not earn the usage-limit
   # waiting mark.
-  db.add(models.ChatRun(
+  db.add(make_goal_run(db,
     id="restart-park", chat_id=chat.id, status="parked",
     provider="claude", park_reason="restart", started_at=datetime.now(UTC),
   ))
@@ -267,12 +269,12 @@ def test_usage_limit_waiting_ignores_non_usage_parks(chat, db):
 def test_chat_reads_retain_completed_and_paused_goals(client, auth, chat, db):
   completed_at = datetime.now(UTC)
   db.add_all([
-    models.ChatRun(
+    make_goal_run(db,
       id="completed-goal", root_run_id="completed-goal", chat_id=chat.id,
       status="completed", provider="codex", goal_objective="Finished work",
       goal_id="completed-id", started_at=completed_at,
     ),
-    models.ChatRun(
+    make_goal_run(db,
       id="paused-goal", root_run_id="paused-goal", chat_id=chat.id,
       status="stopped", provider="codex", goal_objective="Paused work",
       goal_id="paused-id", started_at=completed_at + timedelta(seconds=1),
@@ -297,14 +299,14 @@ def test_chat_usage_reports_totals_and_historic_coverage(
   client, auth, chat, db,
 ):
   db.add_all([
-    models.ChatRun(
+    make_goal_run(db,
       id="historic-run",
       chat_id=chat.id,
       status="completed",
       provider="claude",
       started_at=datetime.now(UTC),
     ),
-    models.ChatRun(
+    make_goal_run(db,
       id="measured-run",
       chat_id=chat.id,
       status="completed",
@@ -355,7 +357,7 @@ def test_current_chat_usage_is_bounded_to_selected_provider_session(
 ):
   now = datetime.now(UTC)
   db.add_all([
-    models.ChatRun(
+    make_goal_run(db,
       id="older-thread",
       chat_id=chat.id,
       status="completed",
@@ -368,7 +370,7 @@ def test_current_chat_usage_is_bounded_to_selected_provider_session(
       },
       started_at=now,
     ),
-    models.ChatRun(
+    make_goal_run(db,
       id="selected-thread",
       chat_id=chat.id,
       status="completed",
@@ -408,7 +410,7 @@ def test_current_chat_usage_is_bounded_to_selected_provider_session(
 def test_current_chat_usage_reads_normalized_claude_call_occupancy(
   client, auth, chat, db,
 ):
-  db.add(models.ChatRun(
+  db.add(make_goal_run(db,
     id="selected-claude-session",
     chat_id=chat.id,
     status="completed",
@@ -444,7 +446,7 @@ def test_current_chat_usage_reads_normalized_claude_call_occupancy(
 def test_current_chat_usage_reads_codex_shaped_app_provider_metrics(
   client, auth, chat, db,
 ):
-  db.add(models.ChatRun(
+  db.add(make_goal_run(db,
     id="mobius-evolve-run",
     chat_id=chat.id,
     status="completed",

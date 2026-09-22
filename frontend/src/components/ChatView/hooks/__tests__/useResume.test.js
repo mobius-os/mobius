@@ -31,11 +31,11 @@ test('Resume stays pending without emitting a row until server acceptance; repea
   assert.deepEqual(h.accepted, [])
   assert.equal(await h.result.current.resume(), false)
   assert.equal(requests.length, 1)
-  assert.equal(requests[0][0], 'continue')
+  assert.equal(requests[0][0], '')
   assert.equal(requests[0][1], undefined, 'no composer attachments can enter the control')
   assert.deepEqual(Object.keys(requests[0][2]).sort(), ['cid', 'continuation', 'resumeRunId'])
   assert.equal(requests[0][2].resumeRunId, 'interrupted-a')
-  const result = { status: 'started', message: { kind: 'continuation', cid: requests[0][2].cid } }
+  const result = { status: 'started' }
   response.resolve(result)
   assert.equal(await first, true)
   assert.deepEqual(h.accepted, [result])

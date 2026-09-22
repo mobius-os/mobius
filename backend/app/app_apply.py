@@ -22,7 +22,7 @@ from urllib.parse import parse_qs, urlsplit
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
-from app import app_git, chat_app_artifacts, icon_assets, models, timeutil
+from app import app_git, chat_app_artifacts, icon_assets, managed_paths, models, timeutil
 from app.app_capabilities import (
   contract_from_app_state,
   contract_from_manifest,
@@ -60,7 +60,7 @@ class AppApplyError(RuntimeError):
 
 log = logging.getLogger("mobius.app_apply")
 
-_STATIC_ASSETS_MANIFEST = ".mobius-static-assets.json"
+_STATIC_ASSETS_MANIFEST = managed_paths.STATIC_ASSETS_MANIFEST
 _STATIC_ASSETS_BACKUP_SUFFIX = ".mobius-static-bak"
 _STATIC_ASSETS_BACKUP_ASSET_PREFIX = "assets"
 _STATIC_ASSETS_BACKUP_METADATA_PREFIX = "metadata"
