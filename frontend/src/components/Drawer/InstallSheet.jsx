@@ -94,10 +94,21 @@ export default function InstallSheet({ app, onClose }) {
   useEffect(() => {
     if (platform.ios || !supportsWebInstall(navigator)) return undefined
     let active = true
-    webInstallPermissionState(navigator).then(state => {
+    async function refreshPermission() {
+      const state = await webInstallPermissionState(navigator)
       if (active) setInstallPermission(state)
-    })
-    return () => { active = false }
+    }
+    function refreshWhenVisible() {
+      if (document.visibilityState === 'visible') refreshPermission()
+    }
+    refreshPermission()
+    window.addEventListener('focus', refreshPermission)
+    document.addEventListener('visibilitychange', refreshWhenVisible)
+    return () => {
+      active = false
+      window.removeEventListener('focus', refreshPermission)
+      document.removeEventListener('visibilitychange', refreshWhenVisible)
+    }
   }, [platform.ios])
 
   useDialogFocus({
@@ -198,7 +209,7 @@ export default function InstallSheet({ app, onClose }) {
     window.location.href = url
   }
 
-  async function onContinue() {
+  async function onContinue({ skipDirect = false } = {}) {
     const name = draftName.trim()
     if (!name || submitting) return
     setSubmitting(true)
@@ -234,7 +245,7 @@ export default function InstallSheet({ app, onClose }) {
       // or does not implement it, move straight to the app-specific fallback.
       // The declarative <install> element cannot be invoked programmatically,
       // so using it after an asynchronous save would require a second button.
-      if (!platform.ios && supportsWebInstall(navigator)) {
+      if (!skipDirect && !platform.ios && supportsWebInstall(navigator)) {
         const result = await requestManifestWebInstall({
           manifestUrl: `/apps/${appSlug}/manifest.json`,
           permissionState: installPermission,
@@ -245,6 +256,11 @@ export default function InstallSheet({ app, onClose }) {
         }
         if (result.outcome === 'dismissed') {
           setError('Installation was cancelled. Continue when you want to try again.')
+          setSubmitting(false)
+          return
+        }
+        if (result.outcome === 'blocked') {
+          setInstallPermission('denied')
           setSubmitting(false)
           return
         }
@@ -393,9 +409,17 @@ export default function InstallSheet({ app, onClose }) {
         </p>
 
         {installPermission === 'denied' && (
-          <div className="is__notice" role="status">
-            Direct installation is blocked for this site. Continue will open
-            {` ${label}’s `}own page so you can install it with your browser.
+          <div className="is__error" role="alert">
+            Direct installation permission is blocked. Allow this site to
+            install apps in your browser’s site settings, then return here.
+            <button
+              type="button"
+              className="is__error-action"
+              onClick={() => onContinue({ skipDirect: true })}
+              disabled={submitting || !draftName.trim()}
+            >
+              Use browser steps instead
+            </button>
           </div>
         )}
 
@@ -414,9 +438,11 @@ export default function InstallSheet({ app, onClose }) {
             type="button"
             className="is__btn is__btn--primary"
             onClick={onContinue}
-            disabled={submitting || !draftName.trim()}
+            disabled={submitting || !draftName.trim() || installPermission === 'denied'}
           >
-            {submitting ? 'Saving…' : 'Continue'}
+            {submitting
+              ? 'Saving…'
+              : installPermission === 'denied' ? 'Permission required' : 'Continue'}
           </button>
         </div>
 

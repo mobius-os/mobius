@@ -158,15 +158,23 @@
   font-size: 13px;
 }
 
-.is__notice {
-  margin-top: 12px;
-  padding: 10px 12px;
-  border: 1px solid color-mix(in srgb, var(--accent, #a78bfa) 55%, transparent);
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--accent, #a78bfa) 10%, transparent);
-  color: var(--text, #d4d4d8);
-  font-size: 13px;
-  line-height: 1.45;
+.is__error-action {
+  display: block;
+  margin-top: 8px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-weight: 600;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+.is__error-action:focus-visible {
+  outline: 2px solid currentColor;
+  outline-offset: 3px;
 }
 
 .is__actions {
