@@ -250,30 +250,31 @@ def test_mapi_supports_get_in_combined_short_options(tmp_path: Path):
 
   assert result.returncode == 0, result.stderr
   assert b"Content-Type: application/json" not in result.curl_arguments
-  assert result.curl_arguments[-3:] == [
+  assert result.curl_arguments[-4:] == [
     b"-sG", b"https://mobius.example/api/store/apps",
-    b"--data-urlencode=managed=true",
+    b"--data-urlencode", b"managed=true",
   ]
 
 
 @pytest.mark.parametrize(
-  "arguments",
+  ("arguments", "forwarded"),
   [
-    ("--url-query", "managed=true"),
-    ("--url-query=managed=true",),
+    (("--url-query", "managed=true"), ("--url-query", "managed=true")),
+    (("--url-query=managed=true",), ("--url-query", "managed=true")),
   ],
 )
 def test_mapi_supports_explicit_url_query_data_without_a_body_header(
   tmp_path: Path,
   arguments: tuple[str, ...],
+  forwarded: tuple[str, ...],
 ):
   result = _run_mapi(tmp_path, "/api/store/apps", *arguments)
 
   assert result.returncode == 0, result.stderr
   assert b"Content-Type: application/json" not in result.curl_arguments
-  assert result.curl_arguments[-(len(arguments) + 1):] == [
+  assert result.curl_arguments[-(len(forwarded) + 1):] == [
     b"https://mobius.example/api/store/apps",
-    *(argument.encode() for argument in arguments),
+    *(argument.encode() for argument in forwarded),
   ]
 
 
@@ -408,7 +409,9 @@ def test_mapi_streams_raw_css_with_its_explicit_content_type(tmp_path: Path):
   assert b"Content-Type: application/json" not in result.curl_arguments
 
 
-def test_mapi_recognizes_joined_data_and_header_options(tmp_path: Path):
+def test_mapi_normalizes_joined_long_options_for_older_curl_versions(
+  tmp_path: Path,
+):
   result = _run_mapi(
     tmp_path,
     "/api/chats",
@@ -423,8 +426,8 @@ def test_mapi_recognizes_joined_data_and_header_options(tmp_path: Path):
     b"-sS",
     b"-H", b"Authorization: Bearer owner-token",
     b"https://mobius.example/api/chats",
-    b'--data={"title":"Notes"}',
-    b"--header=Content-Type: application/merge-patch+json",
+    b"--data", b'{"title":"Notes"}',
+    b"--header", b"Content-Type: application/merge-patch+json",
   ]
 
 

@@ -10,6 +10,7 @@ set -euo pipefail
 parse_option() {
   OPTION_VALUE_KIND=""
   OPTION_VALUE=""
+  OPTION_VALUE_ATTACHED=false
   OPTION_TAKES_NEXT=false
   OPTION_UNSAFE=false
   OPTION_INVALID=false
@@ -30,18 +31,24 @@ parse_option() {
 
   case "$1" in
     -X|--request) OPTION_VALUE_KIND=request; OPTION_TAKES_NEXT=true; return ;;
-    --request=*) OPTION_VALUE_KIND=request; OPTION_VALUE="${1#*=}"; return ;;
+    --request=*)
+      OPTION_VALUE_KIND=request; OPTION_VALUE="${1#*=}"
+      OPTION_VALUE_ATTACHED=true; return ;;
     -H|--header) OPTION_VALUE_KIND=header; OPTION_TAKES_NEXT=true; return ;;
-    --header=*) OPTION_VALUE_KIND=header; OPTION_VALUE="${1#*=}"; return ;;
+    --header=*)
+      OPTION_VALUE_KIND=header; OPTION_VALUE="${1#*=}"
+      OPTION_VALUE_ATTACHED=true; return ;;
     -d|--data|--data-ascii|--data-raw|--data-binary|--data-urlencode|--json)
       OPTION_VALUE_KIND=data; OPTION_TAKES_NEXT=true; return ;;
     --data=*|--data-ascii=*|--data-raw=*|--data-binary=*|\
     --data-urlencode=*|--json=*)
-      OPTION_VALUE_KIND=data; OPTION_VALUE="${1#*=}"; return ;;
+      OPTION_VALUE_KIND=data; OPTION_VALUE="${1#*=}"
+      OPTION_VALUE_ATTACHED=true; return ;;
     --url-query)
       OPTION_VALUE_KIND=query; OPTION_TAKES_NEXT=true; return ;;
     --url-query=*)
-      OPTION_VALUE_KIND=query; OPTION_VALUE="${1#*=}"; return ;;
+      OPTION_VALUE_KIND=query; OPTION_VALUE="${1#*=}"
+      OPTION_VALUE_ATTACHED=true; return ;;
     -F|--form|-T|--upload-file|-o|--output|-D|--dump-header|-w|--write-out|\
     -m|--max-time|-E|--cert|--connect-timeout|--retry|--retry-delay|\
     --cacert|--key)
@@ -49,7 +56,8 @@ parse_option() {
     --form=*|--upload-file=*|--output=*|--dump-header=*|--write-out=*|\
     --max-time=*|--cert=*|--connect-timeout=*|--retry=*|--retry-delay=*|\
     --cacert=*|--key=*)
-      OPTION_VALUE_KIND=other; OPTION_VALUE="${1#*=}"; return ;;
+      OPTION_VALUE_KIND=other; OPTION_VALUE="${1#*=}"
+      OPTION_VALUE_ATTACHED=true; return ;;
     --fail|--fail-with-body|--silent|--show-error|--include|--head|--get|\
     --no-buffer|--compressed|--globoff)
       if [[ "$1" == --get ]]; then
@@ -178,7 +186,14 @@ for argument in "$@"; do
         "mapi: curl option '$argument' can change the authenticated request target" >&2
       exit 2
     fi
-    if [[ -n "$OPTION_VALUE_KIND" && -n "$OPTION_VALUE" ]]; then
+    if $OPTION_VALUE_ATTACHED; then
+      note_option_value "$OPTION_VALUE_KIND" "$OPTION_VALUE"
+      # curl only gained `--long=value` parsing in 8.16, while supported
+      # deployments can still ship older versions. The separated spelling has
+      # the same meaning on every supported curl and keeps mapi's surface stable.
+      resolved+=("${argument%%=*}" "$OPTION_VALUE")
+      continue
+    elif [[ -n "$OPTION_VALUE_KIND" && -n "$OPTION_VALUE" ]]; then
       note_option_value "$OPTION_VALUE_KIND" "$OPTION_VALUE"
     elif $OPTION_TAKES_NEXT; then
       pending_value_kind="$OPTION_VALUE_KIND"
