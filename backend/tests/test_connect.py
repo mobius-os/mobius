@@ -2235,7 +2235,63 @@ def test_serve_connection_stops_from_inside_a_live_stream(monkeypatch):
   }, stop_event=stop_event)
 
   assert len(opened) == 1
-  assert sleeps == [1]
+  assert sleeps == []
+
+
+def test_serve_connection_reconnects_immediately_after_healthy_rotation(
+  monkeypatch,
+):
+  """The server's planned stream rotation must not manufacture an offline
+  interval while the runner is otherwise healthy."""
+  opened = []
+  sleeps = []
+  posted = []
+
+  class RotatedStream:
+    def __enter__(self):
+      return self
+
+    def __exit__(self, *exc):
+      return False
+
+    def __iter__(self):
+      return iter([b": ping\n\n"])
+
+  class DisconnectStream:
+    def __enter__(self):
+      return self
+
+    def __exit__(self, *exc):
+      return False
+
+    def __iter__(self):
+      return iter([b'data: {"type":"disconnect","request_id":"z"}\n\n'])
+
+  def fake_open(request, **kwargs):
+    opened.append(request.full_url)
+    return RotatedStream() if len(opened) == 1 else DisconnectStream()
+
+  monkeypatch.setattr(connect_runner, "_open_url", fake_open)
+  monkeypatch.setattr(connect_runner, "STREAM_HEALTHY_SECONDS", 0)
+  monkeypatch.setattr(connect_runner.time, "sleep", sleeps.append)
+  monkeypatch.setattr(
+    connect_runner, "_uninstall_service", lambda stop_running: None,
+  )
+  monkeypatch.setattr(
+    connect_runner, "_remove_connection", lambda url, host_id: 0,
+  )
+  monkeypatch.setattr(
+    connect_runner, "_post",
+    lambda url, payload, token=None: posted.append(payload),
+  )
+
+  connect_runner._serve_connection({
+    "url": "https://live.test", "host_id": "h_live", "token": "token",
+  })
+
+  assert len(opened) == 2
+  assert sleeps == []
+  assert posted and posted[-1]["stdout"] == "Connect daemon removed."
 
 
 def test_serve_all_respawns_and_stops_removed_connections(monkeypatch):

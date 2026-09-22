@@ -61,6 +61,12 @@ RUNNER_PROTOCOL_VERSION = 4
 # reconnect without making one late heartbeat look like an outage.
 STREAM_HEARTBEAT_SECONDS = 15
 STREAM_READ_TIMEOUT_SECONDS = STREAM_HEARTBEAT_SECONDS * 4
+# A healthy stream is deliberately rotated by the server before common proxy
+# response caps. Reconnect that handoff immediately: sleeping here creates a
+# visible offline flash even though neither endpoint failed. Streams that die
+# before one heartbeat interval still take the ordinary retry backoff so a
+# broken intermediary cannot create a tight reconnect loop.
+STREAM_HEALTHY_SECONDS = STREAM_HEARTBEAT_SECONDS
 RUNNER_USER_AGENT = (
     "mobius-connect/%s (+https://github.com/mobius-os/mobius)"
     % RUNNER_PROTOCOL_VERSION
@@ -846,6 +852,7 @@ def _serve_connection(conn, command_gate=None, stop_event=None):
             req = urllib.request.Request(stream_url)
             req.add_header("Authorization", "Bearer " + token)
             req.add_header("Accept", "text/event-stream")
+            stream_opened_at = time.monotonic()
             with _open_url(
                 req, timeout=STREAM_READ_TIMEOUT_SECONDS, context=ctx,
             ) as stream:
@@ -914,10 +921,14 @@ def _serve_connection(conn, command_gate=None, stop_event=None):
                         continue
                     print("$ " + evt.get("cmd", ""))
                     commands.start(evt)
+            if stop_event is not None and stop_event.is_set():
+                return
             # Protocol v3 streams intentionally end before a hosting proxy's
             # response cap. A command belongs to this runner, not the stream,
             # so clean rotation is the same recovery path as any network loss.
             print("stream rotated; reconnecting")
+            if time.monotonic() - stream_opened_at >= STREAM_HEALTHY_SECONDS:
+                continue
         except KeyboardInterrupt:
             print("\nStopped.")
             return
