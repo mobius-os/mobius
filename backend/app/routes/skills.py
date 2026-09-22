@@ -807,7 +807,9 @@ def list_skills(principal=Depends(get_principal)) -> dict:
   return {
     "skills": out,
     "install_contract": {
-      "version": 1,
+      # v2 guarantees install review pinning (`expected_commit`) and the
+      # discriminated, source-pinned update request used by the Skills app.
+      "version": 2,
       "max_resources": _RESOURCE_COUNT_MAX,
       "max_total_resource_bytes": _RESOURCE_TOTAL_MAX,
       "max_depth": _RESOURCE_MAX_DEPTH,

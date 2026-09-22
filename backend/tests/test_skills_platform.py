@@ -203,7 +203,7 @@ def test_list_skills_route(client, auth, skills_dir):
   assert row["update_unsupported_reason"] == "not_installer_managed"
   # Callers can read the install bounds instead of hard-coding them.
   assert r.json()["install_contract"] == {
-    "version": 1,
+    "version": 2,
     "max_resources": skills_mod.RESOURCE_COUNT_MAX,
     "max_total_resource_bytes": skills_mod.RESOURCE_TOTAL_MAX,
     "max_depth": skills_mod.RESOURCE_MAX_DEPTH,
