@@ -6,6 +6,7 @@ import { appQueries } from '../../hooks/queries.js'
 import useDialogFocus from '../../hooks/useDialogFocus.js'
 import { loginBoundaryPath } from '../../lib/safeReturnPath.js'
 import {
+  observeWebInstallPermission,
   requestManifestWebInstall,
   supportsWebInstall,
   webInstallPermissionState,
@@ -94,6 +95,7 @@ export default function InstallSheet({ app, onClose }) {
   useEffect(() => {
     if (platform.ios || !supportsWebInstall(navigator)) return undefined
     let active = true
+    let stopObserving = () => {}
     async function refreshPermission() {
       const state = await webInstallPermissionState(navigator)
       if (active) setInstallPermission(state)
@@ -101,11 +103,18 @@ export default function InstallSheet({ app, onClose }) {
     function refreshWhenVisible() {
       if (document.visibilityState === 'visible') refreshPermission()
     }
-    refreshPermission()
+    observeWebInstallPermission({
+      navigatorObject: navigator,
+      onChange: state => { if (active) setInstallPermission(state) },
+    }).then(stop => {
+      if (active) stopObserving = stop
+      else stop()
+    })
     window.addEventListener('focus', refreshPermission)
     document.addEventListener('visibilitychange', refreshWhenVisible)
     return () => {
       active = false
+      stopObserving()
       window.removeEventListener('focus', refreshPermission)
       document.removeEventListener('visibilitychange', refreshWhenVisible)
     }

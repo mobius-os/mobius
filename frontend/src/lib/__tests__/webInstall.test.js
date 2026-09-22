@@ -2,6 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
+  observeWebInstallPermission,
   requestManifestWebInstall,
   resolveInstallManifestUrl,
   supportsWebInstall,
@@ -12,6 +13,36 @@ test('detects only callable Web Install implementations', () => {
   assert.equal(supportsWebInstall({ install() {} }), true)
   assert.equal(supportsWebInstall({ install: true }), false)
   assert.equal(supportsWebInstall(null), false)
+})
+
+test('observes permission changes and releases its listener', async () => {
+  let listener = null
+  let removed = null
+  const states = []
+  const status = {
+    state: 'denied',
+    addEventListener(type, callback) {
+      assert.equal(type, 'change')
+      listener = callback
+    },
+    removeEventListener(type, callback) {
+      assert.equal(type, 'change')
+      removed = callback
+    },
+  }
+  const stop = await observeWebInstallPermission({
+    navigatorObject: {
+      permissions: { async query() { return status } },
+    },
+    onChange: state => states.push(state),
+  })
+
+  status.state = 'granted'
+  listener()
+  stop()
+
+  assert.deepEqual(states, ['denied', 'granted'])
+  assert.equal(removed, listener)
 })
 
 test('resolves a mini-app manifest against the current document', () => {

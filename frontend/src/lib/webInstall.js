@@ -12,22 +12,44 @@ export function supportsWebInstall(
   return typeof navigatorObject?.install === 'function'
 }
 
+function normalizedPermissionState(status) {
+  return ['granted', 'prompt', 'denied'].includes(status?.state)
+    ? status.state
+    : 'unknown'
+}
+
+async function queryWebInstallPermission(
+  navigatorObject = typeof navigator !== 'undefined' ? navigator : null,
+) {
+  if (typeof navigatorObject?.permissions?.query !== 'function') return null
+  try {
+    return await navigatorObject.permissions.query({
+      name: 'web-app-installation',
+    })
+  } catch {
+    return null
+  }
+}
+
 export async function webInstallPermissionState(
   navigatorObject = typeof navigator !== 'undefined' ? navigator : null,
 ) {
-  if (typeof navigatorObject?.permissions?.query !== 'function') return 'unknown'
-  try {
-    const status = await navigatorObject.permissions.query({
-      name: 'web-app-installation',
-    })
-    return ['granted', 'prompt', 'denied'].includes(status?.state)
-      ? status.state
-      : 'unknown'
-  } catch {
-    // The API and its permission descriptor are both experimental and may
-    // ship independently. An unrecognised descriptor must not block install.
-    return 'unknown'
-  }
+  return normalizedPermissionState(await queryWebInstallPermission(navigatorObject))
+}
+
+export async function observeWebInstallPermission({
+  navigatorObject = typeof navigator !== 'undefined' ? navigator : null,
+  onChange,
+} = {}) {
+  const status = await queryWebInstallPermission(navigatorObject)
+  const emit = () => onChange?.(normalizedPermissionState(status))
+  emit()
+
+  // PermissionStatus is an EventTarget. Some experimental builds may expose
+  // query() before change events, so callers can retain a focus-time refresh.
+  if (typeof status?.addEventListener !== 'function') return () => {}
+  status.addEventListener('change', emit)
+  return () => status.removeEventListener?.('change', emit)
 }
 
 export function resolveInstallManifestUrl(manifestUrl, baseUrl) {
