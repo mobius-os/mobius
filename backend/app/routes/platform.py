@@ -60,9 +60,6 @@ _PLAN_ERROR_MESSAGES = {
   "image_release_invalid": (
     "The official image returned an invalid release identity. Try again later."
   ),
-  "vite_build_deferred": (
-    platform_update.VITE_BUILD_DEFERRED_MESSAGE
-  ),
 }
 
 

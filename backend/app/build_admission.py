@@ -18,92 +18,14 @@ import sys
 import time
 from pathlib import Path
 
-from app.resource_pressure import MIB, assess_memory_pressure
-
-
-class BuildAdmissionUnavailable(RuntimeError):
-  """A transient resource condition prevented a native JavaScript build."""
-
-
-class BuildLeaseUnavailable(BuildAdmissionUnavailable):
+class BuildLeaseUnavailable(RuntimeError):
   """No lease became free within the wait budget."""
-
-
-class ViteBuildDeferred(BuildAdmissionUnavailable):
-  """Vite lacks enough measured cgroup headroom to start safely."""
 
 
 # One Vite build is capped at 180s, so a wait longer than that means a builder
 # is stuck rather than merely busy. Failing then is better than hanging.
 _LEASE_WAIT_SECS = 240.0
 _LEASE_POLL_SECS = 0.1
-
-# Exact 512 MiB cgroup canaries showed Vite drive memory.current to the hard
-# limit and receive an OOM kill when admitted with less headroom, even while
-# working-set ratio and PSI still read "normal". This is a starting reserve,
-# not a claim that Vite itself retains 512 MiB: it also protects the serving
-# process and concurrent user work while the native bundler peaks.
-VITE_BUILD_MIN_HEADROOM_BYTES = 512 * MIB
-
-
-def vite_build_admitted(memory: dict | None = None) -> bool:
-  """Whether a new Vite process can start without a known cgroup OOM risk.
-
-  Missing or unlimited cgroup telemetry stays fail-open for developer hosts.
-  A finite cgroup must have both a healthy pressure state and the canary-backed
-  absolute reserve; ratios alone hide dangerous low-capacity states.
-  """
-  assessment = assess_memory_pressure(memory)
-  if assessment["state"] in {"constrained", "critical"}:
-    return False
-  headroom = assessment.get("headroom_bytes")
-  return not isinstance(headroom, int) or (
-    headroom >= VITE_BUILD_MIN_HEADROOM_BYTES
-  )
-
-
-def require_vite_build_admission(memory: dict | None = None) -> None:
-  """Raise a retryable error instead of starting a known-unsafe Vite build."""
-  assessment = assess_memory_pressure(memory)
-  state = assessment["state"]
-  headroom = assessment.get("headroom_bytes")
-  too_little_headroom = (
-    isinstance(headroom, int)
-    and headroom < VITE_BUILD_MIN_HEADROOM_BYTES
-  )
-  if state not in {"constrained", "critical"} and not too_little_headroom:
-    return
-  # Say exactly which condition refused the build. A single headroom-shaped
-  # template once produced "5260 MiB headroom; 512 MiB is required" while the
-  # real trigger was a PSI spike — a self-contradiction that misdirects
-  # whoever is debugging a stalled rebuild.
-  causes: list[str] = []
-  if state in {"constrained", "critical"}:
-    signals = (assessment.get("reason") or {}).get("signals") or []
-    named = "; ".join(signals) if signals else f"memory pressure is {state}"
-    causes.append(f"memory pressure is {state} ({named})")
-  if too_little_headroom:
-    causes.append(
-      f"only {headroom // MIB} MiB cgroup headroom;"
-      f" {VITE_BUILD_MIN_HEADROOM_BYTES // MIB} MiB is required to start"
-    )
-  raise ViteBuildDeferred(
-    "Vite build deferred: " + " and ".join(causes) +
-    ". Retry after memory pressure falls."
-  )
-
-
-def wait_for_vite_build_admission(
-  timeout: float, *, poll: float = 1.0,
-) -> None:
-  """Wait briefly for transient pressure, then raise the precise refusal."""
-  deadline = time.monotonic() + max(0.0, timeout)
-  while not vite_build_admitted():
-    remaining = deadline - time.monotonic()
-    if remaining <= 0:
-      require_vite_build_admission()
-      return
-    time.sleep(min(max(0.01, poll), remaining))
 
 
 @contextlib.contextmanager
@@ -127,7 +49,7 @@ def build_lease(
     fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o644)
   except Exception as exc:
     if not fail_open:
-      raise BuildAdmissionUnavailable(
+      raise BuildLeaseUnavailable(
         f"cannot open the shared JavaScript build lease: {exc}"
       ) from exc
     yield  # No reachable runtime directory means no competing Mobius process.
@@ -166,10 +88,6 @@ async def build_lease_async(*, timeout: float = _LEASE_WAIT_SECS):
 def _cli(argv: list[str] | None = None) -> int:
   """Run one frontend-owned command under the authoritative runtime lease."""
   parser = argparse.ArgumentParser()
-  parser.add_argument(
-    "--vite", action="store_true",
-    help="also require the Vite cgroup headroom reserve",
-  )
   parser.add_argument("command", nargs=argparse.REMAINDER)
   args = parser.parse_args(argv)
   command = args.command[1:] if args.command[:1] == ["--"] else args.command
@@ -190,12 +108,10 @@ def _cli(argv: list[str] | None = None) -> int:
         data_dir=os.environ.get("DATA_DIR", "/data"),
         fail_open=False,
       ):
-        if args.vite:
-          require_vite_build_admission()
         result = subprocess.run(command, check=False)
     else:
       result = subprocess.run(command, check=False)
-  except BuildAdmissionUnavailable as exc:
+  except BuildLeaseUnavailable as exc:
     print(str(exc), file=sys.stderr, flush=True)
     return os.EX_TEMPFAIL
   if result.returncode < 0:
