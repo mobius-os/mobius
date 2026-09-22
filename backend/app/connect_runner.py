@@ -26,6 +26,7 @@ import json
 import os
 import platform
 import signal
+import socket
 import ssl
 import subprocess
 import sys
@@ -53,6 +54,13 @@ LAUNCHD_LABEL = "sh.mobius.connect"
 LAUNCHD_PLIST = os.path.expanduser("~/Library/LaunchAgents/%s.plist" % LAUNCHD_LABEL)
 SYSTEMD_UNIT = os.path.expanduser("~/.config/systemd/user/mobius-connect.service")
 RUNNER_PROTOCOL_VERSION = 4
+# A live stream receives a server heartbeat every 15 seconds. Some hosting
+# proxies keep the client TCP socket open after the backend behind it restarts,
+# leaving the runner blocked forever on a stream the new backend no longer
+# owns. Bound each read to several heartbeat intervals so that transport can
+# reconnect without making one late heartbeat look like an outage.
+STREAM_HEARTBEAT_SECONDS = 15
+STREAM_READ_TIMEOUT_SECONDS = STREAM_HEARTBEAT_SECONDS * 4
 RUNNER_USER_AGENT = (
     "mobius-connect/%s (+https://github.com/mobius-os/mobius)"
     % RUNNER_PROTOCOL_VERSION
@@ -839,7 +847,7 @@ def _serve_connection(conn, command_gate=None, stop_event=None):
             req.add_header("Authorization", "Bearer " + token)
             req.add_header("Accept", "text/event-stream")
             with _open_url(
-                req, timeout=None, context=ctx,
+                req, timeout=STREAM_READ_TIMEOUT_SECONDS, context=ctx,
             ) as stream:
                 print("Connected. This machine is now reachable from Mobius.")
                 backoff = 1
@@ -920,6 +928,8 @@ def _serve_connection(conn, command_gate=None, stop_event=None):
             # owner re-pairs or removes this connection -- never a silent
             # permanent exit that abandons one instance while the others stay up.
             print("HTTP %s; retrying in %ss" % (exc.code, backoff))
+        except socket.timeout:
+            print("connection stalled; retrying in %ss" % backoff)
         except urllib.error.URLError as exc:
             print("connection lost (%s); retrying in %ss" % (exc.reason, backoff))
         time.sleep(backoff)
