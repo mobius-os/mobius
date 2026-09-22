@@ -197,9 +197,8 @@ def test_switch_visibility_matches_owner_drawer_contract(
     assert blocked.status_code == 409, blocked.text
     assert "background" in blocked.json()["detail"]
 
-  # Empty hidden chats used to bypass the populated-chat handoff guard through
-  # either the owner PATCH or the app metadata PATCH. Every provider-changing
-  # path must preserve the provider/settings pair together.
+  # Empty hidden chats must not bypass the owner-facing visibility contract.
+  # The creating app's setup endpoint remains a separate pre-turn capability.
   before = db.get(models.Chat, empty_hidden_id)
   before_provider = before.provider
   before_settings = dict(before.agent_settings_json or {})
@@ -218,16 +217,21 @@ def test_switch_visibility_matches_owner_drawer_contract(
     json={"agent_settings_json": {"model": "gpt-5.5"}},
   )
   assert implied.status_code == 409, implied.text
+  db.expire_all()
+  unchanged = db.get(models.Chat, empty_hidden_id)
+  assert unchanged.provider == before_provider
+  assert unchanged.agent_settings_json == before_settings
+
   app_patch = client.patch(
     f"/api/app-chats/{empty_hidden_id}",
     headers=app_auth,
     json={"provider": "codex", "model": "gpt-5.5"},
   )
-  assert app_patch.status_code == 409, app_patch.text
+  assert app_patch.status_code == 200, app_patch.text
   db.expire_all()
-  unchanged = db.get(models.Chat, empty_hidden_id)
-  assert unchanged.provider == before_provider
-  assert unchanged.agent_settings_json == before_settings
+  configured = db.get(models.Chat, empty_hidden_id)
+  assert configured.provider == "codex"
+  assert configured.agent_settings_json["model"] == "gpt-5.5"
 
 
 def test_provider_switch_writer_rechecks_hidden_pin_at_commit(chat, db):
