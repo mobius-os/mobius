@@ -123,6 +123,11 @@ def test_owner_card_receipt_detection_handles_provider_result_shapes():
     "content": [{"type": "text", "text": json.dumps(receipt)}],
     "isError": True,
   }) is None
+  # The Claude CLI's Bash tool_response, which the card-end hook reads when the
+  # turn saved its card through the owner_approval.py / secure-input helper.
+  assert _owner_card_receipt_id({
+    "stdout": json.dumps(receipt), "stderr": "", "interrupted": False,
+  }) == "saved-1"
 
 
 def test_continuation_card_save_does_not_interrupt_its_own_receipt(
@@ -652,7 +657,10 @@ def test_saved_owner_cards_share_blocking_marker_and_terminal_receipt(
                          json=payload, headers=approval_run[1])
   assert response.status_code == 200, response.text
   receipt = response.json()
-  assert "without further text or tools" in receipt["next_action"]
+  # The receipt still states the turn's terminal contract; only the reason
+  # changed — the response is CUT at the card rather than merely asked to end.
+  assert "The turn is over" in receipt["next_action"]
+  assert "nothing further can be delivered" in receipt["next_action"]
   assert questions.get(chat.id) is None
   _finish(chat, approval_run[0])
   assert _row(chat.id)[0] == receipt["question_id"]
@@ -691,9 +699,12 @@ def test_question_tool_saves_receipt_and_never_returns_a_default_answer(monkeypa
 def test_prose_a_provider_races_after_a_saved_card_is_never_discarded(
   client, chat, approval_run,
 ):
-  """The runner interrupts after the card receipt, but output already produced
-  by the provider remains part of both session histories. Never hide or discard
-  that raced text while the asynchronous interrupt drains.
+  """Generation is cut at the card, but anything that still arrives stays.
+
+  Möbius removes the CAUSE of post-card prose (Claude's card-end hook refuses
+  the next model request; other paths interrupt) and never the EVIDENCE: output
+  a provider did produce remains part of both session histories, so a future
+  leak is visible instead of masked.
   """
   sink = approval_run[0]
   assert sink.publish({"type": "text", "content": "Reading the contract first."})
@@ -715,14 +726,14 @@ def test_prose_a_provider_races_after_a_saved_card_is_never_discarded(
   assert persisted[1]["question_id"] == saved.json()["question_id"]
 
 
-def test_completed_card_receipt_interrupts_then_preserves_the_raced_tail(
+def test_completed_card_receipt_ends_the_turn_then_preserves_the_raced_tail(
   client, chat, approval_run,
 ):
   """The two owner-card guarantees hold at the same receipt boundary.
 
-  A successful completed receipt synchronously claims the runner interrupt,
-  while provider events already in flight remain live and durable as the
-  asynchronous interrupt drains.
+  A successful completed receipt synchronously claims the runner's card end
+  (the fallback path, for a runner that did not already end itself at the
+  card), while provider events already in flight remain live and durable.
   """
   from app.runner_registry import registry
 
@@ -762,6 +773,42 @@ def test_completed_card_receipt_interrupts_then_preserves_the_raced_tail(
     assert persisted[0]["owner_card_question_id"] == qid
     assert persisted[1]["question_id"] == qid
     assert persisted[2]["content"] == "Already emitted tail."
+  finally:
+    registry.unregister(chat.id, handle.kind)
+
+
+def test_card_end_is_gated_on_the_exact_card_this_turn_saved(
+  client, chat, approval_run,
+):
+  """A receipt-shaped tool result alone must never end a turn.
+
+  `has_continuation_card` is the single identity gate both card-end paths ask
+  (the sink's fallback signal here, Claude's PostToolUse hook in its runner), so
+  a tool that merely printed an older card's JSON leaves the turn running.
+  """
+  from app.runner_registry import registry
+
+  sink = approval_run[0]
+  handle = _FakeCardHandle(chat.id)
+  registry.register(handle)
+  try:
+    saved = _ask(client, chat, approval_run)
+    qid = saved.json()["question_id"]
+    assert sink.has_continuation_card(qid) is True
+    assert sink.has_continuation_card("card-from-last-week") is False
+
+    stale = json.dumps({
+      "state": "waiting_for_owner", "question_id": "card-from-last-week",
+      "next_action": "End now",
+    })
+    assert sink.publish({
+      "type": "tool_output", "content": stale,
+      "output_complete": True, "output_exit_code": 0,
+      "tool_use_id": "stale-echo",
+    })
+    assert handle.finishes == 0
+    # The stale output is still recorded — no filtering, only no cut.
+    assert sink.assistant_blocks[-1].get("owner_card_question_id") is None
   finally:
     registry.unregister(chat.id, handle.kind)
 

@@ -10,10 +10,10 @@ const admissionModule = path.join(backendDir, 'app', 'build_admission.py')
 const activeBackendEnv = '_MOBIUS_BUILD_ADMISSION_BACKEND'
 
 
-export function enterBuildAdmission({ vite = false } = {}) {
+export function enterBuildAdmission() {
   // The image's frontend-only build stage and standalone frontend checkouts do
   // not contain a sibling backend. Runtime checkouts do, and must use its one
-  // authoritative flock + cgroup policy rather than duplicating either here.
+  // authoritative flock rather than duplicating it here.
   if (!fs.existsSync(admissionModule)) return
 
   const activeBackend = fs.realpathSync(backendDir)
@@ -28,7 +28,6 @@ export function enterBuildAdmission({ vite = false } = {}) {
     PYTHONPATH: [activeBackend, process.env.PYTHONPATH].filter(Boolean).join(path.delimiter),
   }
   const args = ['-m', 'app.build_admission']
-  if (vite) args.push('--vite')
   args.push('--', process.execPath, ...process.execArgv, ...process.argv.slice(1))
   const result = spawnSync('python3', args, {
     cwd: process.cwd(),
