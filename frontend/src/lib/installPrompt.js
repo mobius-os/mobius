@@ -8,9 +8,12 @@
  */
 
 import { isStandaloneDisplay } from '../utils/installPlatform.js'
+import { supportsWebInstall } from './webInstall.js'
 
 let captureStarted = false
 let deferredPrompt = null
+let currentDocumentInstall = null
+let currentDocumentInstallFailed = false
 // Two different questions, deliberately kept apart.
 //
 // `launchedInstalled` — "does this document look like it is running AS an
@@ -38,6 +41,9 @@ export function startInstallPromptCapture(
   if (!target || captureStarted) return
   captureStarted = true
   launchedInstalled = isStandaloneDisplay(target)
+  currentDocumentInstall = supportsWebInstall(target.navigator)
+    ? target.navigator.install.bind(target.navigator)
+    : null
 
   target.addEventListener('beforeinstallprompt', (event) => {
     event.preventDefault?.()
@@ -60,6 +66,7 @@ export function getInstallPromptSnapshot() {
   if (observedInstall) return 'installed'
   if (deferredPrompt) return 'ready'
   if (launchedInstalled) return 'installed'
+  if (currentDocumentInstall && !currentDocumentInstallFailed) return 'ready'
   return 'manual'
 }
 
@@ -79,6 +86,27 @@ export function subscribeInstallPrompt(listener) {
 }
 
 export async function requestInstall() {
+  // Prefer the standards-track Web Install API when the browser exposes it.
+  // If the experimental implementation fails, remember that decision and
+  // leave any captured beforeinstallprompt untouched for a fresh second tap;
+  // both APIs consume transient user activation, so same-click fallback is
+  // not reliable.
+  if (currentDocumentInstall && !currentDocumentInstallFailed) {
+    try {
+      await currentDocumentInstall()
+      deferredPrompt = null
+      observedInstall = true
+      emitChange()
+      return { outcome: 'accepted' }
+    } catch (error) {
+      if (error?.name === 'AbortError') return { outcome: 'dismissed' }
+      currentDocumentInstallFailed = true
+      emitChange()
+      if (deferredPrompt) return { outcome: 'fallback-ready' }
+      return { outcome: 'unavailable' }
+    }
+  }
+
   const promptEvent = deferredPrompt
   if (!promptEvent) return { outcome: 'unavailable' }
 

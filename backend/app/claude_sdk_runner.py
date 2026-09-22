@@ -1860,6 +1860,8 @@ async def run_claude_sdk_turn(
               exc_info=True,
             )
         active_client.mark_finished()
+        from app.file_cache import provider_tool_paths, reclaim_file_cache
+        reclaim_file_cache(provider_tool_paths("claude"), skip_mapped=False)
         if deferred_cancel is not None:
           raise deferred_cancel
 

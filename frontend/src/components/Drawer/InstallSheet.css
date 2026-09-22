@@ -158,6 +158,27 @@
   font-size: 13px;
 }
 
+.is__error-action {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  margin-top: 8px;
+  padding: 8px 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-weight: 600;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+.is__error-action:focus-visible {
+  outline: 2px solid currentColor;
+  outline-offset: 3px;
+}
+
 .is__actions {
   display: flex;
   gap: 10px;
