@@ -109,3 +109,18 @@ test('expanded usage shares aligned columns without tall cards', () => {
     /\.provider-usage__window\s*\{[^}]*display:\s*contents;/s,
   )
 })
+
+test('Claude extra usage is a deliberate reversible account action', () => {
+  assert.match(usageView, /Extra usage \$\{enabled \? 'enabled' : 'disabled'\}/)
+  assert.match(usageView, /Enable' : 'Disable'\} paid extra usage\?/)
+  assert.match(usageView, /onToggle\(next, enabled\)/)
+  assert.match(settingsView, /api\.settings\.setClaudeExtraUsage\(enabled, expectedEnabled\)/)
+})
+
+test('Claude banked resets require a current provider offer and confirmation', () => {
+  assert.match(usageView, /provider === 'claude'/)
+  assert.match(usageView, /!resets\.redeemable/)
+  assert.match(usageView, /onRedeem\(resets\.nextCreditId \|\| null\)/)
+  assert.match(settingsView, /api\.settings\.redeemClaudeReset\(creditId\)/)
+  assert.match(settingsView, /onRedeemClaudeReset=\{handleRedeemClaudeReset\}/)
+})

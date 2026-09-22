@@ -209,7 +209,9 @@ def test_normalizers_report_unavailable_without_inventing_limits():
       "enabled": False,
       "available": False,
       "used_percent": None,
+      "manageable": False,
     },
+    "reset_credits": None,
   }
   assert codex == {
     "state": "unavailable",
@@ -403,6 +405,36 @@ async def test_provider_usage_keeps_recent_success_through_transient_failure(
   assert fallback["state"] == "ready"
   assert fallback["stale"] is True
   assert fallback["windows"][0]["used_percent"] == 24
+
+
+@pytest.mark.asyncio
+async def test_forced_provider_usage_read_never_falls_back_to_stale_success(
+  monkeypatch, tmp_path,
+):
+  from app import provider_usage
+
+  provider_usage._provider_usage_cache.clear()
+  provider_usage._provider_usage_locks.clear()
+  monkeypatch.setattr(provider_usage, "_CLAUDE_COLD_RETRY_DELAYS", ())
+  live = [{
+    "state": "ready",
+    "plan_label": "Max plan",
+    "windows": [],
+    "credit_balance": None,
+  }]
+
+  async def fake_snapshot(_provider_id, _data_dir):
+    return live.pop(0) if live else provider_usage._unavailable("Max plan")
+
+  monkeypatch.setattr(provider_usage, "_provider_snapshot", fake_snapshot)
+  first = await provider_usage.read_provider_usage("claude", str(tmp_path))
+  forced = await provider_usage.read_provider_usage(
+    "claude", str(tmp_path), force_refresh=True,
+  )
+
+  assert first["state"] == "ready"
+  assert forced["state"] == "unavailable"
+  assert forced["stale"] is False
 
 
 @pytest.mark.asyncio
@@ -608,6 +640,7 @@ def test_normalize_claude_usage_surfaces_enabled_extra_usage():
     "enabled": True,
     "available": True,
     "used_percent": 25,
+    "manageable": True,
   }
 
 
@@ -627,9 +660,199 @@ def test_normalize_claude_usage_does_not_invent_extra_usage_availability():
     "enabled": True,
     "available": None,
     "used_percent": None,
+    "manageable": True,
   }
   assert exhausted["extra_usage"] == {
     "enabled": True,
     "available": False,
     "used_percent": 100.0,
+    "manageable": True,
+  }
+
+
+def test_normalize_claude_usage_surfaces_only_provider_selected_reset():
+  from app.provider_usage import normalize_claude_usage
+
+  snapshot = normalize_claude_usage({
+    "five_hour": {"utilization": 100},
+    "cedar_ember": {
+      "eligible": True,
+      "at_limit": True,
+      "next_grant_id": "grant-next",
+      "grants": [
+        {
+          "id": "grant-next",
+          "label": "Weekly reset",
+          "resets_left": 2,
+          "ends_at": "2026-10-01T12:00:00Z",
+          "clears": ["five_hour", "seven_day"],
+          "usable_now": True,
+          "use_requires_limit": True,
+          "paused": False,
+        },
+        {
+          "id": "grant-later",
+          "resets_left": 1,
+          "usable_now": False,
+        },
+      ],
+    },
+  })
+
+  resets = snapshot["reset_credits"]
+  assert resets["available_count"] == 3
+  assert resets["next_credit_id"] == "grant-next"
+  assert resets["redeemable"] is True
+  assert resets["credits"][0]["expires_at"] == "2026-10-01T12:00:00+00:00"
+
+
+def test_normalize_claude_usage_keeps_ineligible_offer_non_redeemable():
+  from app.provider_usage import normalize_claude_usage
+
+  resets = normalize_claude_usage({
+    "five_hour": {"utilization": 10},
+    "cedar_ember": {
+      "eligible": False,
+      "ineligible_reason": "surface",
+      "next_grant_id": None,
+      "grants": [],
+    },
+  })["reset_credits"]
+
+  assert resets == {
+    "available_count": 0,
+    "credits": [],
+    "eligible": False,
+    "ineligible_reason": "surface",
+    "at_limit": False,
+    "next_credit_id": None,
+    "redeemable": False,
+    "weekly_resets_at": None,
+    "cooldown_until": None,
+  }
+
+
+@pytest.mark.asyncio
+async def test_set_claude_extra_usage_uses_bounded_existing_plan_toggle(
+  tmp_path, monkeypatch,
+):
+  from app import provider_usage
+
+  calls = []
+
+  class Response:
+    def raise_for_status(self):
+      return None
+
+  class Client:
+    def __init__(self, **kwargs):
+      calls.append(("client", kwargs))
+
+    async def __aenter__(self):
+      return self
+
+    async def __aexit__(self, *args):
+      return None
+
+    async def put(self, url, *, headers, json):
+      calls.append(("put", url, headers, json))
+      return Response()
+
+  async def token(_data_dir):
+    return "secret-token"
+
+  async def refreshed(provider_id, data_dir):
+    calls.append(("refresh", provider_id, data_dir))
+    return {"extra_usage": {"enabled": True}}
+
+  monkeypatch.setattr(provider_usage.httpx, "AsyncClient", Client)
+  monkeypatch.setattr(provider_usage.providers, "claude_access_token", token)
+  monkeypatch.setattr(
+    provider_usage.providers,
+    "claude_organization_uuid",
+    lambda _data_dir: "00000000-0000-4000-8000-000000000001",
+  )
+  monkeypatch.setattr(provider_usage, "read_provider_usage", refreshed)
+
+  result = await provider_usage.set_claude_extra_usage(
+    str(tmp_path), enabled=True,
+  )
+
+  put = next(call for call in calls if call[0] == "put")
+  assert put[1].endswith(
+    "/api/oauth/organizations/00000000-0000-4000-8000-000000000001/"
+    "overage_spend_limit"
+  )
+  assert put[2]["Authorization"] == "Bearer secret-token"
+  assert put[3] == {"is_enabled": True}
+  assert not any("setup_overage_billing" in str(call) for call in calls)
+  assert result == {"extra_usage": {"enabled": True}}
+
+
+@pytest.mark.asyncio
+async def test_redeem_claude_reset_uses_private_guarded_claim_once(
+  tmp_path, monkeypatch,
+):
+  from app import provider_usage
+
+  calls = []
+
+  class Response:
+    def raise_for_status(self):
+      return None
+
+    def json(self):
+      return {
+        "result": "reset",
+        "resets_left": 1,
+        "cleared": ["five_hour"],
+        "weekly_resets_at": "2026-09-26T03:00:00Z",
+      }
+
+  class Client:
+    def __init__(self, **kwargs):
+      calls.append(("client", kwargs))
+
+    async def __aenter__(self):
+      return self
+
+    async def __aexit__(self, *args):
+      return None
+
+    async def post(self, url, *, headers, json):
+      calls.append(("post", url, headers, json))
+      return Response()
+
+  async def token(_data_dir):
+    return "secret-token"
+
+  monkeypatch.setattr(provider_usage.httpx, "AsyncClient", Client)
+  monkeypatch.setattr(provider_usage.providers, "claude_access_token", token)
+  monkeypatch.setattr(
+    provider_usage.providers,
+    "claude_organization_uuid",
+    lambda _data_dir: "00000000-0000-4000-8000-000000000001",
+  )
+
+  result = await provider_usage.redeem_claude_reset(
+    str(tmp_path), credit_id="grant-next",
+  )
+
+  posts = [call for call in calls if call[0] == "post"]
+  assert len(posts) == 1
+  post = posts[0]
+  assert post[1].endswith(
+    "/api/organizations/00000000-0000-4000-8000-000000000001/"
+    "reset_rate_limits"
+  )
+  assert post[2]["Authorization"] == "Bearer secret-token"
+  assert post[3]["program"] == "cedar_ember"
+  assert post[3]["grant_id"] == "grant-next"
+  assert isinstance(post[3]["request_id"], str)
+  assert result == {
+    "outcome": "reset",
+    "reason": None,
+    "resets_left": 1,
+    "cleared": ["five_hour"],
+    "weekly_resets_at": "2026-09-26T03:00:00+00:00",
   }

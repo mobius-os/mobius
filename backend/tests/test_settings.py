@@ -1178,3 +1178,106 @@ def test_redeem_reset_requires_explicit_confirmation(client, auth, monkeypatch):
   )
   assert r2.status_code == 400
   assert called is False
+
+
+def test_claude_reset_rechecks_exact_offer_before_redeeming(
+  client, auth, monkeypatch,
+):
+  from app.routes import settings as settings_route
+
+  calls = []
+
+  async def current(_provider_id, _data_dir, *, force_refresh=False):
+    calls.append(("read", force_refresh))
+    return {
+      "state": "ready",
+      "reset_credits": {
+        "redeemable": True,
+        "next_credit_id": "grant-next",
+      },
+    }
+
+  async def redeem(_data_dir, *, credit_id):
+    calls.append(("redeem", credit_id))
+    return {"outcome": "reset"}
+
+  monkeypatch.setattr(settings_route.provider_usage, "read_provider_usage", current)
+  monkeypatch.setattr(settings_route.provider_usage, "redeem_claude_reset", redeem)
+
+  unconfirmed = client.post(
+    "/api/settings/provider-usage/claude/redeem-reset",
+    json={"credit_id": "grant-next"},
+    headers=auth,
+  )
+  stale = client.post(
+    "/api/settings/provider-usage/claude/redeem-reset",
+    json={"credit_id": "grant-old", "confirm": True},
+    headers=auth,
+  )
+  accepted = client.post(
+    "/api/settings/provider-usage/claude/redeem-reset",
+    json={"credit_id": "grant-next", "confirm": True},
+    headers=auth,
+  )
+
+  assert unconfirmed.status_code == 400
+  assert stale.status_code == 409
+  assert accepted.status_code == 200
+  assert accepted.json() == {"outcome": "reset"}
+  assert calls == [
+    ("read", True),
+    ("read", True),
+    ("redeem", "grant-next"),
+  ]
+
+def test_claude_extra_usage_requires_confirmation_and_current_state(
+  client, auth, monkeypatch,
+):
+  from app.routes import settings as settings_route
+
+  calls = []
+
+  async def current(_provider_id, _data_dir, *, force_refresh=False):
+    calls.append(("read", force_refresh))
+    return {
+      "state": "ready",
+      "extra_usage": {
+        "enabled": False,
+        "manageable": True,
+      },
+    }
+
+  async def update(_data_dir, *, enabled):
+    calls.append(enabled)
+    return {
+      "state": "ready",
+      "extra_usage": {
+        "enabled": enabled,
+        "manageable": True,
+      },
+    }
+
+  monkeypatch.setattr(settings_route.provider_usage, "read_provider_usage", current)
+  monkeypatch.setattr(settings_route.provider_usage, "set_claude_extra_usage", update)
+
+  unconfirmed = client.post(
+    "/api/settings/provider-usage/claude/extra-usage",
+    json={"enabled": True, "expected_enabled": False},
+    headers=auth,
+  )
+  stale = client.post(
+    "/api/settings/provider-usage/claude/extra-usage",
+    json={"enabled": True, "expected_enabled": True, "confirm": True},
+    headers=auth,
+  )
+  changed = client.post(
+    "/api/settings/provider-usage/claude/extra-usage",
+    json={"enabled": True, "expected_enabled": False, "confirm": True},
+    headers=auth,
+  )
+
+  assert unconfirmed.status_code == 400
+  assert stale.status_code == 409
+  assert changed.status_code == 200
+  assert changed.json()["extra_usage"]["enabled"] is True
+  assert calls == [("read", True), ("read", True), True]
