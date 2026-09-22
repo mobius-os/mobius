@@ -229,7 +229,8 @@ export default function StandaloneInstallCard({ app, forceOpen, onClose }) {
               // Home Screen here produces the app, and the arrow points down
               // at the real Share button in Safari's toolbar.
               <p className="standalone-install__steps" role="status">
-                Tap the <strong>Share</strong> button below, then choose{' '}
+                Tap <strong>Share</strong> (open the browser menu first if
+                Share is hidden), then choose{' '}
                 <strong>Add to Home Screen</strong>.
               </p>
             ) : (

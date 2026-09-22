@@ -220,7 +220,10 @@ export default function InstallSheet({ app, onClose }) {
 
   async function onContinue({ skipDirect = false } = {}) {
     const name = draftName.trim()
-    if (!name || submitting) return
+    // Match the disabled primary button even when the form is submitted with
+    // Enter. The explicit browser-steps action is still available when the
+    // experimental permission has been denied.
+    if (!name || submitting || (installPermission === 'denied' && !skipDirect)) return
     setSubmitting(true)
     setError('')
     try {
@@ -316,7 +319,8 @@ export default function InstallSheet({ app, onClose }) {
               <p className="is__hint is__hint--steps">
                 Only Safari can put an app on your home screen, and you’re in
                 the installed Möbius app right now. Open {label}’s own page,
-                then tap <strong>Share</strong> and choose{' '}
+                then tap <strong>Share</strong> (open Safari’s menu first if
+                Share is hidden) and choose{' '}
                 <strong>Add to Home Screen</strong>.
               </p>
             ) : (

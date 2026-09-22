@@ -47,7 +47,12 @@ export function detectInstallPlatform(ua, maxTouchPoints) {
   const ipad = /iPad/.test(ua) || ipadDesktop
   const ios = (/iPad|iPhone|iPod/.test(ua) || ipadDesktop) &&
     !(hasWindow && window.MSStream)
-  const iosNonSafari = ios && /CriOS|FxiOS|EdgiOS|OPiOS|GSA/.test(ua)
+  // iOS browsers all use WebKit, so the product token is the only useful
+  // distinction for pre-16.4 fallback copy. Keep this aligned with the
+  // browsers pwa-install recognizes, plus Google's embedded browser and
+  // Opera's older token.
+  const iosNonSafari = ios &&
+    /CriOS|FxiOS|EdgiOS|Brave|Ddg|OPT|OPiOS|YaBrowser|GSA/.test(ua)
   const iosSafari = ios && !iosNonSafari
   const android = /Android/.test(ua)
   const samsung = /SamsungBrowser/.test(ua)
@@ -57,7 +62,6 @@ export function detectInstallPlatform(ua, maxTouchPoints) {
   const mac = /Macintosh|Mac OS X/.test(ua) && !ios
   const firefoxVersion = Number(/(?:Firefox|FxiOS)\/(\d+)/.exec(ua)?.[1] || 0)
   const safariVersion = Number(/Version\/(\d+)/.exec(ua)?.[1] || 0)
-  const macVersion = Number(/Mac OS X (\d+)/.exec(ua)?.[1] || 0)
   const iosVersionMatch = /(?:OS|CPU(?: iPhone)? OS) (\d+)_(\d+)/.exec(ua)
   const iosVersion = iosVersionMatch
     ? Number(iosVersionMatch[1]) + Number(iosVersionMatch[2]) / 10
@@ -77,8 +81,11 @@ export function detectInstallPlatform(ua, maxTouchPoints) {
   const desktop = !ios && !android
   const iosThirdPartyInstall = iosNonSafari && iosVersion >= 16.4
   const firefoxWindowsWebApps = firefox && windows && firefoxVersion >= 143
-  const safariDockInstall = desktopSafari && mac &&
-    safariVersion >= 17 && macVersion >= 14
+  // Safari freezes the macOS part of its UA at 10_15_7, including on current
+  // macOS, so it cannot reliably tell Sonoma from an older release. Safari 17
+  // is the useful browser-side signal; the copy below states the OS condition
+  // and remains correct when Add to Dock is absent.
+  const safariDockInstall = desktopSafari && mac && safariVersion >= 17
 
   return {
     ua,
@@ -164,7 +171,7 @@ export function installCopyForPlatform(
     return {
       title: `Add ${productName} to your Home Screen`,
       summary: 'Use Share, then Add to Home Screen.',
-      body: 'Open your browser’s Share menu, choose Add to Home Screen, keep Open as Web App turned on, then tap Add.',
+      body: 'Open Share (use the browser menu first if Share is hidden), choose Add to Home Screen, keep Open as Web App turned on, then tap Add.',
       ctaLabel: 'Show me',
     }
   }
@@ -210,8 +217,8 @@ export function installCopyForPlatform(
   if (p.safariDockInstall) {
     return {
       title: `Add ${productName} to your Dock`,
-      summary: 'Open it like a Mac app.',
-      body: `In Safari, open the File menu and choose Add to Dock.`,
+      summary: 'Open it like a Mac app on macOS Sonoma or later.',
+      body: `In Safari, open the File menu and choose Add to Dock. If that item is absent, update macOS or open ${productName} in Chrome or Edge.`,
       ctaLabel: 'Show me',
     }
   }
