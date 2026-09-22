@@ -4069,7 +4069,6 @@
   overflow-wrap: anywhere;
 }
 
-.chat__goal-task--completed .chat__goal-task-title,
 .chat__goal-task--cancelled .chat__goal-task-title {
   text-decoration: line-through;
   text-decoration-thickness: 1px;
