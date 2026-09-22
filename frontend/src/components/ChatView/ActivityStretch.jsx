@@ -17,6 +17,8 @@ import ActivityLineHeader, { ActivityTypeIcon } from './ActivityLineHeader.jsx'
 import SubagentChips from './SubagentChips.jsx'
 import { useThinkingTrace } from './useThinkingTrace.js'
 import { useDisclosureState } from './disclosureState.js'
+import { mergePositionedActivityEntries } from './activityPosition.js'
+import { restartCardActivityEntries } from './streamReducers.js'
 
 // One collapsible activity line standing in for a MULTI-STEP contiguous stretch
 // of thinking and tool blocks, so a build turn's pre-prose burst reads as one
@@ -166,7 +168,10 @@ function GroupedActivityStretch({
   live = false,
   surfaceKey,
   detailRef = null,
+  detailSegments = null,
+  positionedEntries = [],
   summaryToolCount = null,
+  suppressLatestRestart = false,
   onInternalNav,
 }) {
   const stretchKey = assistantBlockKey(entries[0]?.item, entries[0]?.idx)
@@ -183,12 +188,23 @@ function GroupedActivityStretch({
   const [detailError, setDetailError] = useState(false)
   const [detailAttempt, setDetailAttempt] = useState(0)
   const [detailRequested, setDetailRequested] = useState(userOpen)
+  const compositeSegments = Array.isArray(detailSegments) ? detailSegments : null
   const detailMessageIndex = detailRef?.message_index
   const detailStart = detailRef?.start
   const detailEnd = detailRef?.end
-  const detailKey = detailRef
-    ? `${detailMessageIndex}:${detailStart}:${detailEnd}`
-    : ''
+  const detailKey = compositeSegments
+    ? compositeSegments.map(segment => {
+        const ref = segment.detail_ref
+        return ref
+          ? `${segment.key}:${ref.message_index}:${ref.start}:${ref.end}`
+          : `${segment.key}:inline`
+      }).join('|')
+    : detailRef
+      ? `${detailMessageIndex}:${detailStart}:${detailEnd}`
+      : ''
+  const needsDetail = compositeSegments
+    ? compositeSegments.some(segment => segment.detail_ref)
+    : Boolean(detailRef)
 
   useEffect(() => {
     setDetailEntries(null)
@@ -199,24 +215,48 @@ function GroupedActivityStretch({
   useEffect(() => {
     if (
       !detailRequested
-      || !detailRef
+      || !needsDetail
       || detailEntries
       || detailError
     ) return undefined
     const controller = new AbortController()
     let current = true
-    apiFetch(activityDetailUrl(chatId, {
-      message_index: detailMessageIndex,
-      start: detailStart,
-      end: detailEnd,
-    }), {
-      signal: controller.signal,
-    })
-      .then(res => jsonOrThrow(res, 'Activity detail failed'))
-      .then(data => {
+    const loadSegment = segment => {
+      if (!segment.detail_ref) return Promise.resolve(segment.entries || [])
+      return apiFetch(activityDetailUrl(chatId, segment.detail_ref), {
+        signal: controller.signal,
+      }).then(res => jsonOrThrow(res, 'Activity detail failed'))
+        .then(data => {
+          const merged = mergePositionedActivityEntries(
+            Array.isArray(data.entries) ? data.entries : [],
+            segment.positioned_entries || [],
+          )
+          return merged.map(entry => ({
+            ...entry,
+            idx: `${segment.key}:${entry.idx}`,
+          }))
+        })
+    }
+    const request = compositeSegments
+      ? Promise.all(compositeSegments.map(loadSegment)).then(results => results.flat())
+      : apiFetch(activityDetailUrl(chatId, {
+          message_index: detailMessageIndex,
+          start: detailStart,
+          end: detailEnd,
+        }), {
+          signal: controller.signal,
+        }).then(res => jsonOrThrow(res, 'Activity detail failed'))
+          .then(data => mergePositionedActivityEntries(
+            Array.isArray(data.entries) ? data.entries : [],
+            positionedEntries,
+          ))
+    request.then(entries => restartCardActivityEntries(
+      entries,
+      suppressLatestRestart,
+    )).then(entries => {
         if (!current) return
         revealBeforeReady()
-        setDetailEntries(Array.isArray(data.entries) ? data.entries : [])
+        setDetailEntries(entries)
       })
       .catch(error => {
         if (!current || error?.name === 'AbortError') return
@@ -237,6 +277,10 @@ function GroupedActivityStretch({
     detailMessageIndex,
     detailStart,
     detailRequested,
+    needsDetail,
+    compositeSegments,
+    positionedEntries,
+    suppressLatestRestart,
   ])
 
   const lastItem = entries[entries.length - 1]?.item
@@ -315,7 +359,7 @@ function GroupedActivityStretch({
   // header comment). Historical detail may delay the rendered open state until
   // its first complete timeline is ready, so the disclosure never paints a
   // one-line placeholder and then changes height again.
-  const detailReady = !detailRef || detailEntries !== null || detailError
+  const detailReady = !needsDetail || detailEntries !== null || detailError
   const open = userOpen && detailReady
   const opening = userOpen && !open
   userOpenRef.current = userOpen
@@ -330,7 +374,14 @@ function GroupedActivityStretch({
     : ''
   const stateNote = displayState === 'running' ? ', in progress' : ''
   const iconKind = thinkingOnly ? 'reasoning' : leadToolIcon
-  const timelineEntries = detailRef ? detailEntries : entries
+  const timelineEntries = needsDetail
+    ? detailEntries
+    : compositeSegments
+      ? restartCardActivityEntries(
+          compositeSegments.flatMap(segment => segment.entries || []),
+          suppressLatestRestart,
+        )
+      : entries
 
   function revealBeforeReady() {
     if (!userOpenRef.current || visibleOpenRef.current) return
@@ -443,7 +494,10 @@ export default function ActivityStretch({
   live = false,
   surfaceKey,
   detailRef = null,
+  detailSegments = null,
+  positionedEntries = [],
   summaryToolCount = null,
+  suppressLatestRestart = false,
   onInternalNav,
 }) {
   const loneItem = entries[0]?.item
@@ -453,7 +507,7 @@ export default function ActivityStretch({
     && Object.keys(loneItem.subagent).length > 0
   // A lone ordinary activity needs no redundant parent. A lone delegation does:
   // its broad background-work rollup is context for the named helper rows.
-  if (entries.length === 1 && !detailRef && !loneHasHelpers) {
+  if (entries.length === 1 && !detailRef && !detailSegments && !loneHasHelpers) {
     return (
       <SingleActivity
         entry={entries[0]}
@@ -471,7 +525,10 @@ export default function ActivityStretch({
       live={live}
       surfaceKey={surfaceKey}
       detailRef={detailRef}
+      detailSegments={detailSegments}
+      positionedEntries={positionedEntries}
       summaryToolCount={summaryToolCount}
+      suppressLatestRestart={suppressLatestRestart}
       onInternalNav={onInternalNav}
     />
   )
