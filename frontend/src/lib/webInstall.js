@@ -12,6 +12,24 @@ export function supportsWebInstall(
   return typeof navigatorObject?.install === 'function'
 }
 
+export async function webInstallPermissionState(
+  navigatorObject = typeof navigator !== 'undefined' ? navigator : null,
+) {
+  if (typeof navigatorObject?.permissions?.query !== 'function') return 'unknown'
+  try {
+    const status = await navigatorObject.permissions.query({
+      name: 'web-app-installation',
+    })
+    return ['granted', 'prompt', 'denied'].includes(status?.state)
+      ? status.state
+      : 'unknown'
+  } catch {
+    // The API and its permission descriptor are both experimental and may
+    // ship independently. An unrecognised descriptor must not block install.
+    return 'unknown'
+  }
+}
+
 export function resolveInstallManifestUrl(manifestUrl, baseUrl) {
   const base = baseUrl ||
     (typeof document !== 'undefined' ? document.baseURI : undefined)
@@ -27,6 +45,10 @@ export async function requestManifestWebInstall({
     return { outcome: 'unsupported' }
   }
 
+  if (await webInstallPermissionState(navigatorObject) === 'denied') {
+    return { outcome: 'blocked' }
+  }
+
   try {
     // Möbius manifests always declare a stable `id`, so the still-evolving
     // optional manifestId parameter is intentionally omitted. The browser
@@ -37,7 +59,13 @@ export async function requestManifestWebInstall({
     return { outcome: 'accepted' }
   } catch (error) {
     const errorName = typeof error?.name === 'string' ? error.name : 'Error'
-    if (errorName === 'AbortError') return { outcome: 'dismissed' }
+    if (errorName === 'AbortError') {
+      // Chromium currently uses AbortError for both a one-off cancellation
+      // and a persisted host-permission denial. Re-read the owning permission
+      // so callers can redirect a blocked host instead of offering a dead retry.
+      const permission = await webInstallPermissionState(navigatorObject)
+      return { outcome: permission === 'denied' ? 'blocked' : 'dismissed' }
+    }
     return { outcome: 'failed', errorName }
   }
 }

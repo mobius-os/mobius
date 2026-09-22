@@ -5,6 +5,7 @@ import {
   requestManifestWebInstall,
   resolveInstallManifestUrl,
   supportsWebInstall,
+  webInstallPermissionState,
 } from '../webInstall.js'
 
 test('detects only callable Web Install implementations', () => {
@@ -18,6 +19,16 @@ test('resolves a mini-app manifest against the current document', () => {
     resolveInstallManifestUrl('/apps/notes/manifest.json', 'https://m.example/shell/'),
     'https://m.example/apps/notes/manifest.json',
   )
+})
+
+test('reads the experimental install permission and degrades when unavailable', async () => {
+  assert.equal(await webInstallPermissionState({
+    permissions: { async query() { return { state: 'denied' } } },
+  }), 'denied')
+  assert.equal(await webInstallPermissionState({}), 'unknown')
+  assert.equal(await webInstallPermissionState({
+    permissions: { async query() { throw new TypeError('unknown permission') } },
+  }), 'unknown')
 })
 
 test('requests direct manifest installation and lets the manifest declare its id', async () => {
@@ -60,4 +71,36 @@ test('separates cancellation, technical failure, and unsupported browsers', asyn
   assert.deepEqual(cancelled, { outcome: 'dismissed' })
   assert.deepEqual(failed, { outcome: 'failed', errorName: 'DataError' })
   assert.deepEqual(unsupported, { outcome: 'unsupported' })
+})
+
+test('a blocked host skips install and a newly denied prompt redirects', async () => {
+  let blockedCalls = 0
+  const blocked = await requestManifestWebInstall({
+    manifestUrl: '/manifest.json',
+    baseUrl: 'https://m.example/',
+    navigatorObject: {
+      async install() { blockedCalls += 1 },
+      permissions: { async query() { return { state: 'denied' } } },
+    },
+  })
+  assert.deepEqual(blocked, { outcome: 'blocked' })
+  assert.equal(blockedCalls, 0)
+
+  let permissionReads = 0
+  const newlyDenied = await requestManifestWebInstall({
+    manifestUrl: '/manifest.json',
+    baseUrl: 'https://m.example/',
+    navigatorObject: {
+      async install() {
+        throw Object.assign(new Error('permission declined'), { name: 'AbortError' })
+      },
+      permissions: {
+        async query() {
+          permissionReads += 1
+          return { state: permissionReads === 1 ? 'prompt' : 'denied' }
+        },
+      },
+    },
+  })
+  assert.deepEqual(newlyDenied, { outcome: 'blocked' })
 })
