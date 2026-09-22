@@ -2360,16 +2360,16 @@ def test_serve_connection_reconnects_immediately_after_healthy_rotation(
   assert posted and posted[-1]["stdout"] == "Connect daemon removed."
 
 
-def test_serve_connection_backs_off_after_slow_open_then_early_eof(
+def test_serve_connection_backs_off_across_slow_open_then_early_eof(
   monkeypatch,
 ):
   """Handshake time must not make an immediate EOF look like a healthy stream."""
   opened = []
   sleeps = []
-  monotonic_values = iter([0, 20, 20, 20])
+  clock = {"now": 0}
 
   def fake_monotonic():
-    return next(monotonic_values, 20)
+    return clock["now"]
 
   class ClosedStream:
     def __enter__(self):
@@ -2393,10 +2393,12 @@ def test_serve_connection_backs_off_after_slow_open_then_early_eof(
 
   def fake_open(request, **kwargs):
     opened.append(request.full_url)
-    # Simulate a 20-second handshake before the first response opens.
-    if len(opened) == 1:
-      connect_runner.time.monotonic()
-    return ClosedStream() if len(opened) == 1 else DisconnectStream()
+    if len(opened) <= 3:
+      # Every response takes longer than the health window to open, then ends
+      # immediately. Handshake time must not reset accumulated backoff.
+      clock["now"] += 20
+      return ClosedStream()
+    return DisconnectStream()
 
   monkeypatch.setattr(connect_runner, "_open_url", fake_open)
   monkeypatch.setattr(connect_runner.time, "monotonic", fake_monotonic)
@@ -2413,8 +2415,8 @@ def test_serve_connection_backs_off_after_slow_open_then_early_eof(
     "url": "https://live.test", "host_id": "h_live", "token": "token",
   })
 
-  assert len(opened) == 2
-  assert sleeps == [1]
+  assert len(opened) == 4
+  assert sleeps == [1, 2, 4]
 
 
 def test_serve_all_respawns_and_stops_removed_connections(monkeypatch):

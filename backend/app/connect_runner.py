@@ -865,12 +865,19 @@ def _serve_connection(conn, command_gate=None, stop_event=None):
                 # is still an early failure and must retain retry backoff.
                 stream_opened_at = time.monotonic()
                 print("Connected. This machine is now reachable from Mobius.")
-                backoff = 1
                 commands.flush_pending_results()
                 if commands.take_reconcile_request():
                     print("reconnecting to reconcile a rejected result")
                     continue
                 for raw in stream:
+                    if (
+                        time.monotonic() - stream_opened_at
+                        >= STREAM_HEALTHY_SECONDS
+                    ):
+                        # A heartbeat proves the stream survived its health
+                        # window. Clear any failures accumulated before it so
+                        # a later transport loss starts with the short retry.
+                        backoff = 1
                     # Heartbeat comments make this retry path run even while
                     # the host has no new commands.
                     commands.flush_pending_results()
@@ -936,6 +943,7 @@ def _serve_connection(conn, command_gate=None, stop_event=None):
             # rotation is the same recovery path as any network loss.
             print("stream rotated; reconnecting")
             if time.monotonic() - stream_opened_at >= STREAM_HEALTHY_SECONDS:
+                backoff = 1
                 continue
         except KeyboardInterrupt:
             print("\nStopped.")
