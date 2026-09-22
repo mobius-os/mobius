@@ -886,6 +886,31 @@ def test_stale_runner_record_offers_an_offline_update(client, auth):
   assert "--install" in public["update_command"]
 
 
+@pytest.mark.parametrize(
+  ("runner_release", "update_available"),
+  [
+    pytest.param(None, True, id="legacy-missing-release"),
+    pytest.param(connect_runner.RUNNER_RELEASE, False, id="current-release"),
+    pytest.param(connect_runner.RUNNER_RELEASE - 1, True, id="older-release"),
+  ],
+)
+def test_compatible_runner_release_controls_update_offer(
+  client, auth, runner_release, update_available,
+):
+  pairing, _ = _paired_host(client, auth)
+  host = connect_routes._load_host(pairing["id"])
+  host["runner_protocol"] = connect_runner.RUNNER_PROTOCOL_VERSION
+  host["runner_transport"] = "sse"
+  host["runner_release"] = runner_release
+  connect_routes._save_host(host)
+
+  public = client.get("/api/connect/hosts", headers=auth).json()["hosts"][0]
+
+  assert public["runner_release"] == runner_release
+  assert public["runner_update_available"] is update_available
+  assert (public["update_command"] is not None) is update_available
+
+
 def test_old_transport_is_rejected_but_keeps_the_update_path(client, auth):
   pairing, runner_token = _paired_host(client, auth)
 
@@ -904,6 +929,41 @@ def test_old_transport_is_rejected_but_keeps_the_update_path(client, auth):
   assert "/api/connect/socket" not in {
     route.path for route in connect_routes.router.routes
   }
+
+
+@pytest.mark.asyncio
+async def test_protocol_four_without_a_release_stays_online_and_offers_update(
+  client, auth,
+):
+  pairing, runner_token = _paired_host(client, auth)
+
+  async def receive():
+    return {"type": "http.request", "body": b"", "more_body": False}
+
+  request = Request({
+    "type": "http",
+    "method": "GET",
+    "path": "/api/connect/stream",
+    "query_string": b"protocol=4&platform=LegacyOS",
+    "headers": [
+      (b"authorization", f"Bearer {runner_token}".encode()),
+    ],
+  }, receive)
+
+  response = await connect_routes.stream(request)
+  host = connect_routes._load_host(pairing["id"])
+  public = connect_routes._public_host(host)
+
+  assert public["online"] is True
+  assert public["runner_protocol"] == connect_runner.RUNNER_PROTOCOL_VERSION
+  assert public["runner_release"] is None
+  assert public["runner_update_available"] is True
+  assert "--install" in public["update_command"]
+
+  assert await response.body_iterator.__anext__() == ": connected\n\n"
+  connect_routes._channels[pairing["id"]].closed.set()
+  with pytest.raises(StopAsyncIteration):
+    await response.body_iterator.__anext__()
 
 
 @pytest.mark.asyncio
@@ -935,7 +995,8 @@ async def test_current_stream_rotates_without_losing_running_command(
     "method": "GET",
     "path": "/api/connect/stream",
     "query_string": (
-      f"protocol=4&platform=TestOS%201&active_request_id={request_id}"
+      f"protocol=4&release={connect_runner.RUNNER_RELEASE}"
+      f"&platform=TestOS%201&active_request_id={request_id}"
     ).encode(),
     "headers": [
       (b"authorization", f"Bearer {runner_token}".encode()),
@@ -947,6 +1008,7 @@ async def test_current_stream_rotates_without_losing_running_command(
   assert current.queue.empty()
   host = connect_routes._load_host(pairing["id"])
   assert host["runner_protocol"] == 4
+  assert host["runner_release"] == connect_runner.RUNNER_RELEASE
   assert host["platform"] == "TestOS 1"
   assert connect_routes._public_host(host)["runner_update_available"] is False
 
@@ -1460,7 +1522,9 @@ def test_runner_uses_standard_urllib_for_protocol_four_stream(monkeypatch):
 
   request, kwargs = opened[0]
   assert request.full_url.startswith(
-    "https://mobius.test/api/connect/stream?protocol=4&platform=",
+    "https://mobius.test/api/connect/stream?"
+    f"protocol={connect_runner.RUNNER_PROTOCOL_VERSION}"
+    f"&release={connect_runner.RUNNER_RELEASE}&platform=",
   )
   assert request.get_header("Authorization") == "Bearer secret"
   assert request.get_header("Accept") == "text/event-stream"
@@ -2039,7 +2103,9 @@ def test_connect_runner_identifies_every_urllib_request(monkeypatch):
   generated, generated_timeout = opened[0]
   assert isinstance(generated, connect_runner.urllib.request.Request)
   assert generated.get_header("User-agent") == (
-    "mobius-connect/4 (+https://github.com/mobius-os/mobius)"
+    f"mobius-connect/{connect_runner.RUNNER_RELEASE} "
+    f"(protocol/{connect_runner.RUNNER_PROTOCOL_VERSION}; "
+    "+https://github.com/mobius-os/mobius)"
   )
   assert generated_timeout == 30
   assert opened[1][0].get_header("User-agent") == "connect-test/1"

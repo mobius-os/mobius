@@ -54,6 +54,10 @@ LAUNCHD_LABEL = "sh.mobius.connect"
 LAUNCHD_PLIST = os.path.expanduser("~/Library/LaunchAgents/%s.plist" % LAUNCHD_LABEL)
 SYSTEMD_UNIT = os.path.expanduser("~/.config/systemd/user/mobius-connect.service")
 RUNNER_PROTOCOL_VERSION = 4
+# Increment this for every shipped runner change that an existing installation
+# should receive. Protocol only describes wire compatibility; compatible
+# releases can keep using the same protocol while still offering an update.
+RUNNER_RELEASE = 1
 # A live stream receives a server heartbeat every 15 seconds. Some hosting
 # proxies keep the client TCP socket open after the backend behind it restarts,
 # leaving the runner blocked forever on a stream the new backend no longer
@@ -68,8 +72,8 @@ STREAM_READ_TIMEOUT_SECONDS = STREAM_HEARTBEAT_SECONDS * 4
 # broken intermediary cannot create a tight reconnect loop.
 STREAM_HEALTHY_SECONDS = STREAM_HEARTBEAT_SECONDS
 RUNNER_USER_AGENT = (
-    "mobius-connect/%s (+https://github.com/mobius-os/mobius)"
-    % RUNNER_PROTOCOL_VERSION
+    "mobius-connect/%s (protocol/%s; +https://github.com/mobius-os/mobius)"
+    % (RUNNER_RELEASE, RUNNER_PROTOCOL_VERSION)
 )
 _POWERSHELL_STDIN_BOOTSTRAP = (
     "$encoded=[Console]::In.ReadToEnd();"
@@ -838,6 +842,7 @@ def _serve_connection(conn, command_gate=None, stop_event=None):
             active_id, pending_ids = commands.snapshot()
             query = [
                 ("protocol", str(RUNNER_PROTOCOL_VERSION)),
+                ("release", str(RUNNER_RELEASE)),
                 ("platform", plat),
             ]
             if active_id:
@@ -923,9 +928,9 @@ def _serve_connection(conn, command_gate=None, stop_event=None):
                     commands.start(evt)
             if stop_event is not None and stop_event.is_set():
                 return
-            # Protocol v3 streams intentionally end before a hosting proxy's
-            # response cap. A command belongs to this runner, not the stream,
-            # so clean rotation is the same recovery path as any network loss.
+            # Streams intentionally end before a hosting proxy's response cap.
+            # A command belongs to this runner, not the stream, so clean
+            # rotation is the same recovery path as any network loss.
             print("stream rotated; reconnecting")
             if time.monotonic() - stream_opened_at >= STREAM_HEALTHY_SECONDS:
                 continue
