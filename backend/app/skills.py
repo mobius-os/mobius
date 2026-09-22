@@ -44,6 +44,7 @@ import stat
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Callable
 
 from app.manifest_contract import SKILL_MAX_BYTES
 from app.storage_io import atomic_write
@@ -256,6 +257,9 @@ RESOURCE_SUFFIXES = frozenset({
   ".cjs", ".ts", ".tsx", ".jsx", ".sh", ".cmd", ".toml", ".html", ".css",
 })
 _EXTENSIONLESS_SCRIPT_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
+_LAUNCHER_SUFFIXES = frozenset({
+  ".py", ".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx", ".sh", ".cmd",
+})
 TREE_FILE_COUNT_MAX = 1 + RESOURCE_COUNT_MAX  # root SKILL.md + resources
 TREE_TOTAL_BYTES_MAX = SKILL_MAX_BYTES + RESOURCE_TOTAL_MAX
 
@@ -345,6 +349,39 @@ def resource_rel_ok(rel: str) -> bool:
   )
 
 
+def executable_rel_ok(rel: str) -> bool:
+  """Whether the package contract permits preserving execute bits for `rel`.
+
+  Executability is meaningful only for launchers under ``scripts/``. Text and
+  reference files elsewhere remain readable resources even if their upstream
+  Git mode is accidentally executable.
+  """
+  segments = rel.split("/")
+  return (
+    resource_rel_ok(rel)
+    and len(segments) >= 2
+    and segments[0] == "scripts"
+    and (
+      Path(rel).suffix.lower() in _LAUNCHER_SUFFIXES
+      or (
+        "." not in segments[-1]
+        and _EXTENSIONLESS_SCRIPT_NAME.fullmatch(segments[-1]) is not None
+      )
+    )
+  )
+
+
+def tree_file_rel_ok(rel: str) -> bool:
+  """Whether ``rel`` can occur as a regular file in one safe skill tree.
+
+  Newly managed packages apply the narrower :func:`executable_rel_ok` policy
+  to execute bits. Historical agent-owned trees can legitimately carry an
+  execute bit on any otherwise-safe file, and recovery must still be able to
+  identify those old bytes without granting that mode to the new package.
+  """
+  return rel == "SKILL.md" or resource_rel_ok(rel)
+
+
 def _safe_child(root: Path, name: str) -> Path | None:
   """A single-component child of `root`, or None if `name` would escape it.
 
@@ -362,22 +399,31 @@ def _safe_child(root: Path, name: str) -> Path | None:
   return candidate if candidate.parent == root else None
 
 
-def _is_real_dir(path: Path) -> bool:
-  """True only for a real directory — never a symlink (which we never follow)."""
-  try:
-    return stat.S_ISDIR(path.lstat().st_mode)
-  except OSError:
-    return False
+@dataclass(frozen=True)
+class TreeIdentity:
+  """The reviewed parts of one safe skill tree: bytes and launch permissions."""
+
+  digest: str
+  executables: frozenset[str]
 
 
-def _read_tree_bytes(target: Path) -> dict[str, bytes] | None:
-  """Root-relative path -> bytes for every regular file under `target`.
+@dataclass(frozen=True)
+class DiskTree:
+  """A path classified without conflating absence with an unsafe tree."""
+
+  kind: str  # "absent" | "tree" | "unsafe"
+  identity: TreeIdentity | None = None
+
+
+def _read_tree(target: Path) -> tuple[dict[str, bytes], frozenset[str]] | None:
+  """Root-relative bytes and executable inventory for a safe skill tree.
 
   Returns None on any surprise a clean install never contains — a symlink or
   special file, malformed path, or a tree outside the exact install count/byte
   bounds — so the caller fails closed. Never follows a symlink (lstat-gated).
   """
   out: dict[str, bytes] = {}
+  executables: set[str] = set()
   resource_count = 0
   resource_bytes = 0
   seen_dirs: set[str] = set()
@@ -438,6 +484,8 @@ def _read_tree_bytes(target: Path) -> dict[str, bytes] | None:
           if len(data) != declared_size:
             return None
           out[rel] = data
+          if mode & 0o111:
+            executables.add(rel)
         except (OSError, UnicodeError, ValueError):
           return None
       else:
@@ -454,23 +502,65 @@ def _read_tree_bytes(target: Path) -> dict[str, bytes] | None:
   }
   if seen_dirs != file_dirs:
     return None
-  return out
+  return out, frozenset(executables)
+
+
+def disk_tree(target: Path) -> DiskTree:
+  """Classify `target` as absent, one safe tree, or an unsafe dirent/tree."""
+  try:
+    mode = target.lstat().st_mode
+  except FileNotFoundError:
+    return DiskTree("absent")
+  except OSError:
+    return DiskTree("unsafe")
+  if not stat.S_ISDIR(mode):
+    return DiskTree("unsafe")
+  read = _read_tree(target)
+  if read is None:
+    return DiskTree("unsafe")
+  files, executables = read
+  return DiskTree(
+    "tree",
+    TreeIdentity(tree_digest_from_files(files), executables),
+  )
+
+
+def tree_identity_on_disk(target: Path) -> TreeIdentity | None:
+  """Reviewed identity for a safe published tree; None for absent/unsafe."""
+  state = disk_tree(target)
+  return state.identity if state.kind == "tree" else None
 
 
 def tree_digest_on_disk(target: Path) -> str | None:
   """Canonical tree digest of a published skill dir, or None if the tree can't
-  be read wholly and safely (see `_read_tree_bytes`) — the caller fails closed.
+  be read wholly and safely (see `_read_tree`) — the caller fails closed.
   """
-  files = _read_tree_bytes(target)
-  if files is None:
+  identity = tree_identity_on_disk(target)
+  return identity.digest if identity is not None else None
+
+
+def record_tree_identity(
+  record: dict,
+  *,
+  digest_key: str = "tree_digest",
+  executables_key: str = "executables",
+  executable_path_ok: Callable[[str], bool] = executable_rel_ok,
+) -> TreeIdentity | None:
+  """Validate a persisted identity under the caller's executable-path policy."""
+  digest = record.get(digest_key)
+  executable_list = record.get(executables_key)
+  if (
+    not isinstance(digest, str)
+    or re.fullmatch(r"sha256-tree-v1:[0-9a-f]{64}", digest) is None
+    or not isinstance(executable_list, list)
+    or any(not isinstance(rel, str) for rel in executable_list)
+    or len(set(executable_list)) != len(executable_list)
+  ):
     return None
-  return tree_digest_from_files(files)
-
-
-# Backwards-private alias for the recovery implementation and any older local
-# callers. New route code uses the public name because optimistic update checks
-# are part of the API contract, not a recovery-only detail.
-_tree_digest_on_disk = tree_digest_on_disk
+  for rel in executable_list:
+    if not executable_path_ok(rel):
+      return None
+  return TreeIdentity(digest, frozenset(executable_list))
 
 
 def _gc_orphan_staging(root: Path, referenced: set[str]) -> None:
@@ -507,20 +597,20 @@ def reconcile_installed(skills_dir: Path | None = None) -> list[str]:
 
   The installer persists an ``"status": "installing"`` intent (carrying its
   staging directory name) BEFORE publishing, so a crash leaves a state this
-  sweep repairs against the ONE true post-publish invariant — *target present
-  AND staging absent*:
+  sweep repairs against explicit absent/safe-tree/unsafe states. A safe tree's
+  identity includes every byte and every executable bit; ``None`` never means
+  both "missing" and "unreadable":
 
     target present, staging absent  -> the atomic rename happened; finalize the
                                        record, but only when the COMPLETE
-                                       published tree (every path and byte)
-                                       hashes to the record's canonical
-                                       ``tree_digest``. A missing/unversioned
-                                       digest is corrupt state — leave the
+                                       published tree matches the record's
+                                       canonical digest and executable inventory.
+                                       A missing/unversioned identity is corrupt — leave the
                                        intent untouched, never infer ownership
-    staging present, target absent  -> the crash preceded publish; discard the
-                                       staging tree and the intent
+    staging present, target absent  -> the crash preceded publish; discard only
+                                       an exact, validated candidate tree
     neither present                 -> nothing durable happened; drop the record
-    BOTH present                    -> ambiguous (corrupt/tampered sidecar, or an
+    unsafe tree or BOTH present     -> ambiguous (corrupt/tampered sidecar, or an
                                        unrelated dir squatting the name); finalize
                                        nothing, delete nothing, keep the intent
 
@@ -557,28 +647,45 @@ def reconcile_installed(skills_dir: Path | None = None) -> list[str]:
   for name, rec in list(records.items()):
     if not isinstance(rec, dict):
       continue
+    if not rec.get("status") and "executables" not in rec:
+      # Records written before executable identity existed represented an
+      # all-non-executable tree: the old installer always materialized files
+      # 0644/0664. Upgrade only that exact state. An executable bit on disk is
+      # therefore a local edit or ambiguous legacy state and stays untouched.
+      target = _safe_child(root, str(name))
+      state = disk_tree(target) if target is not None else DiskTree("unsafe")
+      digest = rec.get("tree_digest")
+      if (
+        state.kind == "tree"
+        and state.identity is not None
+        and isinstance(digest, str)
+        and state.identity.digest == digest
+        and not state.identity.executables
+      ):
+        rec["executables"] = []
+        dirty = True
+        repaired.append(str(name))
+
     if rec.get("status") == "updating":
       target = _safe_child(root, str(name))
       staging = _safe_child(root, str(rec.get("staging") or ""))
       backup = _safe_child(root, str(rec.get("backup") or ""))
-      target_digest = (
-        _tree_digest_on_disk(target)
-        if target is not None and _is_real_dir(target)
-        else None
+      target_state = disk_tree(target) if target is not None else DiskTree("unsafe")
+      staging_state = disk_tree(staging) if staging is not None else DiskTree("unsafe")
+      backup_state = disk_tree(backup) if backup is not None else DiskTree("unsafe")
+      old_identity = record_tree_identity(
+        rec,
+        digest_key="previous_tree_digest",
+        executables_key="previous_executables",
+        executable_path_ok=tree_file_rel_ok,
       )
-      staging_digest = (
-        _tree_digest_on_disk(staging)
-        if staging is not None and _is_real_dir(staging)
-        else None
-      )
-      backup_digest = (
-        _tree_digest_on_disk(backup)
-        if backup is not None and _is_real_dir(backup)
-        else None
-      )
-      old_digest = rec.get("previous_tree_digest")
-      new_digest = rec.get("tree_digest")
+      new_identity = record_tree_identity(rec)
       previous = rec.get("previous_record")
+
+      # This protocol always persists two complete identities. Anything else is
+      # legacy/corrupt state; preserve every tree rather than guessing.
+      if old_identity is None or new_identity is None:
+        continue
 
       def restore_previous_record() -> None:
         nonlocal dirty
@@ -592,20 +699,34 @@ def reconcile_installed(skills_dir: Path | None = None) -> list[str]:
       # Intent persisted, but the first rename never happened: discard the
       # complete candidate and restore the pre-update ownership record.
       if (
-        target_digest == old_digest
-        and staging_digest == new_digest
-        and backup_digest is None
+        target_state == DiskTree("tree", old_identity)
+        and staging_state == DiskTree("tree", new_identity)
+        and backup_state.kind == "absent"
       ):
         shutil.rmtree(staging, ignore_errors=True)
+        if disk_tree(staging).kind != "absent":
+          continue
+        restore_previous_record()
+        continue
+
+      # Rollback filesystem work already completed, but the process crashed
+      # before the restored sidecar was persisted. This is the terminal state
+      # of either rollback path, so persisting the previous record is safe and
+      # makes recovery closed under interruption.
+      if (
+        target_state == DiskTree("tree", old_identity)
+        and staging_state.kind == "absent"
+        and backup_state.kind == "absent"
+      ):
         restore_previous_record()
         continue
 
       # Old tree moved aside, candidate not yet published: roll back to the old
       # tree. Both digests must match the persisted intent before either rename.
       if (
-        target_digest is None
-        and staging_digest == new_digest
-        and backup_digest == old_digest
+        target_state.kind == "absent"
+        and staging_state == DiskTree("tree", new_identity)
+        and backup_state == DiskTree("tree", old_identity)
         and target is not None
         and backup is not None
       ):
@@ -614,6 +735,8 @@ def reconcile_installed(skills_dir: Path | None = None) -> list[str]:
         except OSError:
           continue
         shutil.rmtree(staging, ignore_errors=True)
+        if disk_tree(staging).kind != "absent":
+          continue
         restore_previous_record()
         continue
 
@@ -621,17 +744,20 @@ def reconcile_installed(skills_dir: Path | None = None) -> list[str]:
       # process crashed before cleanup; validate it before deleting, then
       # finalize the new record. A missing backup means cleanup already landed.
       if (
-        target_digest == new_digest
-        and staging_digest is None
-        and backup_digest in (None, old_digest)
+        target_state == DiskTree("tree", new_identity)
+        and staging_state.kind == "absent"
+        and (
+          backup_state.kind == "absent"
+          or backup_state == DiskTree("tree", old_identity)
+        )
       ):
-        if backup_digest == old_digest and backup is not None:
+        if backup_state.kind == "tree" and backup is not None:
           shutil.rmtree(backup, ignore_errors=True)
-          if _is_real_dir(backup):
+          if disk_tree(backup).kind != "absent":
             continue
         for marker in (
           "status", "staging", "backup", "previous_record",
-          "previous_tree_digest",
+          "previous_tree_digest", "previous_executables",
         ):
           rec.pop(marker, None)
         dirty = True
@@ -646,39 +772,38 @@ def reconcile_installed(skills_dir: Path | None = None) -> list[str]:
       continue
     target = _safe_child(root, str(name))
     staging = _safe_child(root, str(rec.get("staging") or ""))
-    target_present = target is not None and _is_real_dir(target)
-    staging_present = staging is not None and _is_real_dir(staging)
+    target_state = disk_tree(target) if target is not None else DiskTree("unsafe")
+    staging_state = disk_tree(staging) if staging is not None else DiskTree("unsafe")
+    expected = record_tree_identity(rec)
 
-    if target_present and not staging_present:
+    if target_state.kind == "tree" and staging_state.kind == "absent":
       # Post-rename invariant met. Adopt only when the complete published tree
       # hashes to exactly the digest the record committed before publishing. A
       # missing or unversioned digest is a corrupt/legacy record, not a case to
       # infer around: leave the intent untouched for deliberate repair.
-      expected = rec.get("tree_digest")
-      if (
-        isinstance(expected, str)
-        and expected.startswith(_TREE_DIGEST_PREFIX)
-        and _tree_digest_on_disk(target) == expected
-      ):
+      if expected is not None and target_state.identity == expected:
         rec.pop("status", None)
         rec.pop("staging", None)
         dirty = True
         repaired.append(str(name))
       continue
-    if staging_present and not target_present:
+    if staging_state.kind == "tree" and target_state.kind == "absent":
       # Crash before publish: discard the confined staging tree and the intent.
-      shutil.rmtree(staging, ignore_errors=True)
-      records.pop(name)
-      dirty = True
-      repaired.append(str(name))
+      # Delete it only when it exactly matches a complete intent. A tampered or
+      # legacy staging tree may be the only surviving copy, so keep it.
+      if expected is not None and staging_state.identity == expected:
+        shutil.rmtree(staging, ignore_errors=True)
+        records.pop(name)
+        dirty = True
+        repaired.append(str(name))
       continue
-    if not staging_present and not target_present:
+    if staging_state.kind == "absent" and target_state.kind == "absent":
       # Nothing durable survives (or an unresolvable name): drop the intent.
       records.pop(name)
       dirty = True
       repaired.append(str(name))
       continue
-    # target_present AND staging_present -> ambiguous; fail closed, keep intent.
+    # Unsafe trees and target+staging combinations are ambiguous; fail closed.
 
   # Reclaim crash orphans no record references (age-bounded; see helper).
   _gc_orphan_staging(root, referenced)
