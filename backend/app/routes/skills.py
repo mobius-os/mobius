@@ -444,6 +444,8 @@ async def _fetch_files(
           f"SKILL.md is {declared} bytes; the limit is {SKILL_MAX_BYTES}. "
           "Nothing was installed.",
         )
+      if mode == "100755":
+        executables.add("SKILL.md")
       continue
     if not rel or not _resource_rel_ok(rel):
       raise HTTPException(
@@ -805,35 +807,34 @@ async def install_skill(
       )
 
     warnings = _refresh_index_with_warning(skills_dir)
+    installed = next(
+      (
+        item for item in skills.enumerate_skills(skills_dir)
+        if item.is_dir and item.read_path.parent.name == name
+      ),
+      None,
+    )
+    # The mutation is already durable. A surprising readback failure must never
+    # turn success into a retryable 500/collision; return a truthful minimal row.
+    if installed is None:  # pragma: no cover - defensive filesystem failure
+      row = {
+        "name": name,
+        "id": name,
+        "description": "",
+        "provenance": f"installed:{source}",
+        "is_dir": True,
+        "uses_30d": 0,
+        "commit": commit,
+        "source_repo": body.repo,
+        "source_path": body.path,
+        "source_url": None,
+        "skill_sha256": record["skill_sha256"],
+        "files": record["files"],
+      }
+    else:
+      row = _skill_row(installed, records, {}, is_owner=False)
 
   log.info("installed skill %r from %s (%d file(s))", name, source, len(files))
-  installed = next(
-    (
-      item for item in skills.enumerate_skills(skills_dir)
-      if item.is_dir and item.read_path.parent.name == name
-    ),
-    None,
-  )
-  # The mutation is already durable. A surprising readback failure must never
-  # turn success into a retryable 500/collision; return a truthful minimal row
-  # and let the app's reconciliation refresh enrich it later.
-  if installed is None:  # pragma: no cover - defensive filesystem failure
-    row = {
-      "name": name,
-      "id": name,
-      "description": "",
-      "provenance": f"installed:{source}",
-      "is_dir": True,
-      "uses_30d": 0,
-      "commit": commit,
-      "source_repo": body.repo,
-      "source_path": body.path,
-      "source_url": None,
-      "skill_sha256": record["skill_sha256"],
-      "files": record["files"],
-    }
-  else:
-    row = _skill_row(installed, records, {}, is_owner=False)
   return {
     "skill": row,
     "warnings": warnings,
@@ -914,9 +915,10 @@ async def update_skill(
         409,
         f"{name!r} is not one unambiguous directory skill; nothing was changed.",
       )
-    current_digest = skills.tree_digest_on_disk(target)
-    if current_digest is None:
+    current_identity = skills.tree_identity_on_disk(target)
+    if current_identity is None:
       raise HTTPException(409, f"{name!r} could not be read as a safe skill tree.")
+    current_digest = current_identity.digest
     if current_digest != body.expected_tree_digest:
       raise HTTPException(
         409,
@@ -937,6 +939,19 @@ async def update_skill(
           f"{name!r} has local edits since it was installed. They were kept; "
           "review or preserve those edits before replacing the skill.",
         )
+      previous_executables = previous.get("executables")
+      # Older settled records predate executable inventories; retain their
+      # byte-only compatibility. Once an inventory exists, a local chmod is a
+      # real edit and receives the same protection as changed bytes.
+      if previous_executables is not None:
+        previous_identity = skills.record_tree_identity(previous)
+        if previous_identity is None or previous_identity != current_identity:
+          raise HTTPException(
+            409,
+            f"{name!r} has local permission edits since it was installed. "
+            "They were kept; review or preserve those edits before replacing "
+            "the skill.",
+          )
       # An update may advance the tracking ref, but it may not silently switch
       # an installed skill to a different repository/path or raw URL.
       same_repo_source = (
@@ -981,9 +996,11 @@ async def update_skill(
           f"into git first ({detail}). Nothing was changed.",
         )
 
-    # If the reviewed source bytes are already identical, only adopt/refresh
-    # provenance. No filesystem exchange is needed.
-    if current_digest == new_digest:
+    new_identity = skills.TreeIdentity(new_digest, frozenset(executables))
+    # If reviewed bytes AND launch permissions are identical, only
+    # adopt/refresh provenance. A mode-only change still needs the same
+    # crash-safe exchange as a content change.
+    if current_identity == new_identity:
       records[name] = new_record
       _write_installed_sidecar(skills_dir, records)
     else:
@@ -1000,7 +1017,9 @@ async def update_skill(
           "skill was kept.",
         )
 
-      backup = skills_dir / f".backup-{name}-{uuid.uuid4().hex}"
+      # Keep recovery names independent of the owner-chosen skill-name length;
+      # one path component must remain below common filesystem name limits.
+      backup = skills_dir / f".backup-{uuid.uuid4().hex}"
       intent = {
         **new_record,
         "status": "updating",
@@ -1008,6 +1027,7 @@ async def update_skill(
         "backup": backup.name,
         "previous_record": previous,
         "previous_tree_digest": current_digest,
+        "previous_executables": sorted(current_identity.executables),
       }
       records[name] = intent
       try:
@@ -1018,6 +1038,29 @@ async def update_skill(
           500,
           f"Update of {name!r} could not record its intent ({exc}); the "
           "current skill was kept.",
+        )
+
+      # The git snapshot above and candidate staging can take time while an
+      # agent edits the shared tree outside this process lock. Recheck at the
+      # last possible point before moving owner bytes aside.
+      if skills.tree_identity_on_disk(target) != current_identity:
+        if previous is None:
+          records.pop(name, None)
+        else:
+          records[name] = previous
+        try:
+          _write_installed_sidecar(skills_dir, records)
+        except Exception as exc:  # noqa: BLE001
+          raise HTTPException(
+            500,
+            f"{name!r} changed before publication and the update intent could "
+            f"not be withdrawn ({exc}); no tree was moved.",
+          )
+        shutil.rmtree(staged, ignore_errors=True)
+        raise HTTPException(
+          409,
+          f"{name!r} changed while its safety snapshot was being prepared. "
+          "The newer tree was kept; refresh and review it before updating.",
         )
 
       try:
@@ -1051,17 +1094,20 @@ async def update_skill(
 
     warnings.extend(_refresh_index_with_warning(skills_dir))
 
-  installed = next(
-    (
-      item for item in skills.enumerate_skills(skills_dir)
-      if item.is_dir and item.read_path.parent.name == name
-    ),
-    None,
-  )
-  if installed is None:  # pragma: no cover - defensive filesystem failure
-    raise HTTPException(500, f"{name!r} was updated but could not be read back.")
-  final_records = _read_installed_sidecar(skills_dir)
-  row = _skill_row(installed, final_records, {}, is_owner=False)
+    # Build the response from the same locked final state. Otherwise a second
+    # update/uninstall can win between mutation and readback and make this
+    # successful request report somebody else's result (or a false 500).
+    installed = next(
+      (
+        item for item in skills.enumerate_skills(skills_dir)
+        if item.is_dir and item.read_path.parent.name == name
+      ),
+      None,
+    )
+    if installed is None:  # pragma: no cover - defensive filesystem failure
+      raise HTTPException(500, f"{name!r} was updated but could not be read back.")
+    final_records = _read_installed_sidecar(skills_dir)
+    row = _skill_row(installed, final_records, {}, is_owner=False)
   log.info(
     "updated skill %r from %s (%d file(s), changed=%s, adopted=%s)",
     name, source, len(files), changed, adopted,

@@ -669,7 +669,7 @@ def test_update_adopts_agent_skill_atomically_and_preserves_launcher_mode(
   launcher = b"#!/bin/sh\necho demo\n"
   version = b"2\n"
   tree = [
-    {"type": "blob", "path": "SKILL.md", "size": len(new_skill)},
+    {"type": "blob", "path": "SKILL.md", "size": len(new_skill), "mode": "100755"},
     {"type": "blob", "path": "scripts/demo", "size": len(launcher), "mode": "100755"},
     {"type": "blob", "path": "scripts/VERSION", "size": len(version)},
   ]
@@ -696,12 +696,13 @@ def test_update_adopts_agent_skill_atomically_and_preserves_launcher_mode(
   assert response.json()["changed"] is True
   assert response.json()["adopted"] is True
   assert (target / "SKILL.md").read_bytes() == new_skill
+  assert (target / "SKILL.md").stat().st_mode & 0o111
   assert (target / "scripts" / "demo").stat().st_mode & 0o111
   record = _sidecar(skills_dir)["demo"]
   assert record.get("status") is None
   assert record["commit"] == PINNED
   assert record["ref"] == "main"
-  assert record["executables"] == ["scripts/demo"]
+  assert record["executables"] == ["SKILL.md", "scripts/demo"]
   assert not list(skills_dir.glob(".staging-*"))
   assert not list(skills_dir.glob(".backup-*"))
 
@@ -780,6 +781,121 @@ def test_update_compare_and_swap_keeps_newer_on_disk_edit(
   assert response.status_code == 409, response.text
   assert "changed after" in response.json()["detail"]
   assert (target / "SKILL.md").read_text() == "# changed after opening update\n"
+
+
+def test_update_refuses_local_permission_edit_on_managed_skill(
+  client, auth, skills_dir, monkeypatch,
+):
+  from app.routes import skills as rs
+
+  target = skills_dir / "demo"
+  target.mkdir()
+  current = b"# current\n"
+  (target / "SKILL.md").write_bytes(current)
+  digest = skills_mod.tree_digest_on_disk(target)
+  (skills_dir / skills_mod.INSTALLED_SKILLS_SIDECAR).write_text(json.dumps({
+    "demo": {
+      "source": "o/r", "repo": "o/r", "path": "skills/demo",
+      "ref": "main", "commit": PINNED, "tree_digest": digest,
+      "executables": [],
+    },
+  }))
+  (target / "SKILL.md").chmod(0o755)  # local owner edit, bytes unchanged
+  candidate = b"# upstream\n"
+  raw = f"https://raw.githubusercontent.com/o/r/{PINNED}/skills/demo"
+  _dir_install_mocks(monkeypatch, rs, [
+    {"type": "blob", "path": "SKILL.md", "size": len(candidate)},
+  ], {f"{raw}/SKILL.md": candidate})
+
+  response = client.put("/api/skills/demo", headers=auth, json={
+    "expected_tree_digest": digest, "repo": "o/r", "path": "skills/demo",
+    "ref": "main", "expected_commit": PINNED,
+  })
+
+  assert response.status_code == 409, response.text
+  assert "permission edits" in response.json()["detail"]
+  assert (target / "SKILL.md").stat().st_mode & 0o111
+
+
+def test_update_applies_mode_only_change(
+  client, auth, skills_dir, monkeypatch,
+):
+  from app.routes import skills as rs
+
+  target = skills_dir / "demo"
+  target.mkdir()
+  content = b"# same bytes\n"
+  (target / "SKILL.md").write_bytes(content)
+  digest = skills_mod.tree_digest_on_disk(target)
+  (skills_dir / skills_mod.INSTALLED_SKILLS_SIDECAR).write_text(json.dumps({
+    "demo": {
+      "source": "o/r", "repo": "o/r", "path": "skills/demo",
+      "ref": "main", "commit": "1" * 40, "tree_digest": digest,
+      "executables": [],
+    },
+  }))
+  raw = f"https://raw.githubusercontent.com/o/r/{PINNED}/skills/demo"
+  _dir_install_mocks(monkeypatch, rs, [
+    {"type": "blob", "path": "SKILL.md", "size": len(content), "mode": "100755"},
+  ], {f"{raw}/SKILL.md": content})
+
+  response = client.put("/api/skills/demo", headers=auth, json={
+    "expected_tree_digest": digest, "repo": "o/r", "path": "skills/demo",
+    "ref": "main", "expected_commit": PINNED,
+  })
+
+  assert response.status_code == 200, response.text
+  assert response.json()["changed"] is True
+  assert (target / "SKILL.md").read_bytes() == content
+  assert (target / "SKILL.md").stat().st_mode & 0o111
+  assert _sidecar(skills_dir)["demo"]["executables"] == ["SKILL.md"]
+
+
+def test_update_rechecks_tree_after_snapshot_before_first_rename(
+  client, auth, skills_dir, monkeypatch,
+):
+  from app.routes import skills as rs
+
+  target = skills_dir / "demo"
+  target.mkdir()
+  before = b"# before\n"
+  newer = b"# local edit during snapshot\n"
+  (target / "SKILL.md").write_bytes(before)
+  digest = skills_mod.tree_digest_on_disk(target)
+  previous = {
+    "source": "o/r", "repo": "o/r", "path": "skills/demo",
+    "ref": "main", "commit": "1" * 40, "tree_digest": digest,
+    "executables": [],
+  }
+  (skills_dir / skills_mod.INSTALLED_SKILLS_SIDECAR).write_text(json.dumps({
+    "demo": previous,
+  }))
+  git_dir = Path(get_settings().data_dir) / ".git"
+  git_dir.mkdir(exist_ok=True)
+  candidate = b"# upstream\n"
+  raw = f"https://raw.githubusercontent.com/o/r/{PINNED}/skills/demo"
+  _dir_install_mocks(monkeypatch, rs, [
+    {"type": "blob", "path": "SKILL.md", "size": len(candidate)},
+  ], {f"{raw}/SKILL.md": candidate})
+
+  def edit_during_snapshot(*_args, **_kwargs):
+    (target / "SKILL.md").write_bytes(newer)
+    return True, "saved"
+
+  monkeypatch.setattr(rs.data_git, "snapshot_path", edit_during_snapshot)
+
+  response = client.put("/api/skills/demo", headers=auth, json={
+    "expected_tree_digest": digest, "repo": "o/r", "path": "skills/demo",
+    "ref": "main", "expected_commit": PINNED,
+  })
+  git_dir.rmdir()
+
+  assert response.status_code == 409, response.text
+  assert "safety snapshot" in response.json()["detail"]
+  assert (target / "SKILL.md").read_bytes() == newer
+  assert _sidecar(skills_dir)["demo"] == previous
+  assert not list(skills_dir.glob(".staging-*"))
+  assert not list(skills_dir.glob(".backup-*"))
 
 
 def test_update_refuses_repointing_managed_skill_to_a_different_source(
@@ -1294,7 +1410,7 @@ def test_crash_after_publish_reconciles_to_owned_and_uninstallable(
   (skills_dir / skills_mod.INSTALLED_SKILLS_SIDECAR).write_text(json.dumps({
     "tips": {
       "source": "o/r", "status": "installing", "staging": ".staging-gone",
-      "tree_digest": digest,
+      "tree_digest": digest, "executables": [],
     },
   }))
 
@@ -1316,9 +1432,11 @@ def test_crash_before_publish_discards_staging_and_frees_retry(
   staged = skills_dir / ".staging-abc"
   staged.mkdir()
   (staged / "SKILL.md").write_text("# partial\n")
+  digest = skills_mod.tree_digest_from_files({"SKILL.md": b"# partial\n"})
   (skills_dir / skills_mod.INSTALLED_SKILLS_SIDECAR).write_text(json.dumps({
     "tips": {
       "source": "o/r", "status": "installing", "staging": ".staging-abc",
+      "tree_digest": digest, "executables": [],
     },
   }))
 
@@ -1385,8 +1503,10 @@ def _write_updating_intent(skills_dir, *, old_bytes, new_bytes, previous):
     "demo": {
       "source": "o/r", "repo": "o/r", "path": "skills/demo",
       "ref": "main", "commit": PINNED, "tree_digest": new_digest,
+      "executables": [],
       "status": "updating", "staging": staging.name, "backup": backup.name,
       "previous_record": previous, "previous_tree_digest": old_digest,
+      "previous_executables": [],
     },
   }))
   return staging, backup
@@ -1470,7 +1590,7 @@ def test_reconcile_update_published_finalizes_new_record_and_removes_backup(
   assert (skills_dir / "demo" / "SKILL.md").read_bytes() == new
   rec = _sidecar(skills_dir)["demo"]
   for marker in ("status", "staging", "backup", "previous_record",
-                 "previous_tree_digest"):
+                 "previous_tree_digest", "previous_executables"):
     assert marker not in rec
   assert rec["tree_digest"] == skills_mod.tree_digest_from_files({"SKILL.md": new})
   assert rec["commit"] == PINNED
@@ -1642,6 +1762,43 @@ def test_reconcile_does_not_adopt_unrelated_dir_when_staging_present(skills_dir)
   assert staging.is_dir()  # the intended tree is not stranded/deleted
 
 
+def test_reconcile_keeps_unsafe_staging_tree_instead_of_treating_it_as_absent(
+  skills_dir,
+):
+  staged = skills_dir / ".staging-intended"
+  staged.mkdir()
+  (staged / "SKILL.md").write_text("# reviewed\n")
+  (staged / "escape").symlink_to(skills_dir / "elsewhere")
+  digest = skills_mod.tree_digest_from_files({"SKILL.md": b"# reviewed\n"})
+  (skills_dir / skills_mod.INSTALLED_SKILLS_SIDECAR).write_text(json.dumps({
+    "pdf": {
+      "source": "o/r", "status": "installing", "staging": staged.name,
+      "tree_digest": digest, "executables": [],
+    },
+  }))
+
+  assert skills_mod.reconcile_installed(skills_dir) == []
+  assert staged.is_dir()
+  assert _sidecar(skills_dir)["pdf"]["status"] == "installing"
+
+
+def test_reconcile_rejects_permission_tampering(skills_dir):
+  target = skills_dir / "pdf"
+  target.mkdir()
+  (target / "SKILL.md").write_text("# reviewed\n")
+  (target / "SKILL.md").chmod(0o755)
+  digest = skills_mod.tree_digest_from_files({"SKILL.md": b"# reviewed\n"})
+  (skills_dir / skills_mod.INSTALLED_SKILLS_SIDECAR).write_text(json.dumps({
+    "pdf": {
+      "source": "o/r", "status": "installing", "staging": ".staging-gone",
+      "tree_digest": digest, "executables": [],
+    },
+  }))
+
+  assert skills_mod.reconcile_installed(skills_dir) == []
+  assert _sidecar(skills_dir)["pdf"]["status"] == "installing"
+
+
 def test_reconcile_finalize_requires_matching_tree_digest(skills_dir):
   """R3-1: a published dir whose SKILL.md bytes != the record's canonical
   tree_digest is NOT adopted — the intent is left for deliberate repair."""
@@ -1654,7 +1811,7 @@ def test_reconcile_finalize_requires_matching_tree_digest(skills_dir):
   (skills_dir / skills_mod.INSTALLED_SKILLS_SIDECAR).write_text(json.dumps({
     "pdf": {
       "source": "o/r", "status": "installing", "staging": ".staging-gone",
-      "tree_digest": original_digest,
+      "tree_digest": original_digest, "executables": [],
     },
   }))
 
@@ -1701,7 +1858,7 @@ def test_reconcile_rejects_tampered_resource_bytes(skills_dir):
   (skills_dir / skills_mod.INSTALLED_SKILLS_SIDECAR).write_text(json.dumps({
     "pdf": {
       "source": "o/r", "status": "installing", "staging": ".staging-gone",
-      "tree_digest": digest,
+      "tree_digest": digest, "executables": [],
     },
   }))
 
