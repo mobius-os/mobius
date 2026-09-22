@@ -92,7 +92,7 @@ def test_recovery_actions_are_owned_by_resource_deletion_endpoints(client, auth)
         "title": "Undo",
         "resource_type": "chat",
         "resource_id": "chat-123",
-        "resource_generation": "2025-12-31T00:00:00Z",
+        "resource_generation": "a" * 64,
         "deleted_at": "2026-01-01T00:00:00Z",
         "expires_at": "2026-01-08T00:00:00Z",
       }],

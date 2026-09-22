@@ -16,7 +16,7 @@ import {
 
 const deletedAt = '2026-09-19T20:00:00Z'
 const expiresAt = '2026-09-26T20:00:00Z'
-const resourceGeneration = '2026-09-18T20:00:00Z'
+const resourceGeneration = 'a'.repeat(64)
 const receipt = (overrides = {}) => ({
   action: 'recover_chat', title: 'Undo', resource_type: 'chat', resource_id: 'chat-123',
   resource_generation: resourceGeneration, deleted_at: deletedAt,
@@ -30,7 +30,7 @@ test('recovery notifications require a matching tombstone-bound resource action'
   })
   for (const fields of [
     { resource_type: 'app' }, { resource_id: '../7' }, { target: '/shell/?chat=x' },
-    { resource_generation: null }, { resource_generation: expiresAt },
+    { resource_generation: null }, { resource_generation: 'not-a-generation' },
     { completed_at: 'not-a-date' }, { deleted_at: null }, { expires_at: null },
     { expires_at: deletedAt },
   ]) assert.equal(parseNotificationRecoveryAction(receipt(fields)), null)
@@ -90,7 +90,7 @@ test('notification history follows server cursors beyond the newest eight and re
 test('rendered history disables expired Undo and offers older pages', () => {
   const queryClient = new QueryClient()
   const expired = receipt({
-    resource_generation: '2019-01-01T00:00:00Z',
+    resource_generation: 'b'.repeat(64),
     deleted_at: '2020-01-01T00:00:00Z', expires_at: '2020-01-08T00:00:00Z',
   })
   const rows = Array.from({ length: 8 }, (_, i) => ({

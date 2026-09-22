@@ -822,7 +822,9 @@ class NotificationAction(BaseModel):
   target: str | None = None
   resource_type: Literal["chat", "app", "project"] | None = None
   resource_id: str | None = Field(default=None, min_length=1, max_length=128)
-  resource_generation: datetime | None = None
+  resource_generation: str | None = Field(
+    default=None, min_length=64, max_length=64, pattern=r"^[a-f0-9]{64}$",
+  )
   completed_at: datetime | None = None
   deleted_at: datetime | None = None
   expires_at: datetime | None = None
@@ -852,13 +854,11 @@ class NotificationAction(BaseModel):
     if self.deleted_at is None or self.expires_at is None:
       raise ValueError("recovery actions require the deletion and expiry timestamps")
     if any(value.tzinfo is None for value in (
-      self.resource_generation, self.deleted_at, self.expires_at,
+      self.deleted_at, self.expires_at,
     )):
       raise ValueError("recovery timestamps must include a timezone")
     if self.expires_at <= self.deleted_at:
       raise ValueError("recovery expiry must follow deletion")
-    if self.resource_generation > self.deleted_at:
-      raise ValueError("recovery generation must not follow deletion")
     if self.target is not None:
       raise ValueError("recovery actions cannot navigate to a target")
     if not re.fullmatch(r"[A-Za-z0-9._:-]+", self.resource_id):

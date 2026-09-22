@@ -13,7 +13,10 @@ import pytest
 
 from app import models
 from app.config import get_settings
-from app.recovery_notifications import complete_recovery_action
+from app.recovery_notifications import (
+  complete_recovery_action,
+  recovery_resource_generation,
+)
 from app.timeutil import SOFT_DELETE_TTL, now_naive_utc
 
 
@@ -59,8 +62,9 @@ def _delete(client, auth, db, resource):
   receipt_id = response.headers["X-Recovery-Notification-Id"]
   db.expire_all()
   receipt = db.get(models.Notification, receipt_id)
+  generation_witness = row.token_nonce if kind == "app" else row.created_at
   assert receipt.actions[0]["resource_generation"] == (
-    row.created_at.replace(tzinfo=UTC).isoformat()
+    recovery_resource_generation(kind, generation_witness)
   )
   assert receipt.actions[0]["deleted_at"] == row.deleted_at.replace(tzinfo=UTC).isoformat()
   assert receipt.actions[0]["expires_at"] == (row.deleted_at + SOFT_DELETE_TTL).replace(tzinfo=UTC).isoformat()
@@ -188,7 +192,14 @@ def test_receipt_cannot_touch_a_recreated_same_id_resource(
 
   db.expire_all()
   current = db.get(type(row), row.id)
-  next_created_at = current.created_at + timedelta(seconds=1)
+  # App ids are deliberately reusable. Keep the successor timestamp identical
+  # so this regression proves the app-owned random generation, not timestamp
+  # uniqueness, is what fences the old receipt.
+  next_created_at = (
+    current.created_at
+    if kind == "app"
+    else current.created_at + timedelta(seconds=1)
+  )
   if kind == "project":
     db.query(models.Chat).filter(models.Chat.project_id == row.id).delete(
       synchronize_session=False,
@@ -233,10 +244,14 @@ def test_expired_receipt_does_not_restore_its_tombstone(client, auth, db, resour
   _, row, url = resource
   receipt = _delete(client, auth, db, resource)
   row.deleted_at = now_naive_utc() - timedelta(days=8)
-  row.created_at = row.deleted_at - timedelta(seconds=1)
+  if resource[0] != "app":
+    row.created_at = row.deleted_at - timedelta(seconds=1)
+  generation_witness = row.token_nonce if resource[0] == "app" else row.created_at
   receipt.actions = [{
     **receipt.actions[0],
-    "resource_generation": row.created_at.replace(tzinfo=UTC).isoformat(),
+    "resource_generation": recovery_resource_generation(
+      resource[0], generation_witness,
+    ),
     "deleted_at": row.deleted_at.replace(tzinfo=UTC).isoformat(),
     "expires_at": (row.deleted_at + SOFT_DELETE_TTL).replace(tzinfo=UTC).isoformat(),
   }]
@@ -271,7 +286,9 @@ def test_retry_reads_completion_after_obtaining_lifecycle_lock(
       completed_at = complete_recovery_action(
         other, owner_id=owner_id, notification_id=receipt.id,
         resource_type=kind, resource_id=str(row.id),
-        resource_generation=live.created_at,
+        resource_generation=recovery_resource_generation(
+          kind, live.token_nonce if kind == "app" else live.created_at,
+        ),
       )
       other.commit()
 

@@ -50,6 +50,7 @@ from app.broadcast import get_system_broadcast
 from app.recovery_notifications import (
   complete_recovery_action,
   publish_recovery_notification,
+  recovery_resource_generation,
   validate_recovery_action,
   stage_recovery_notification,
 )
@@ -3071,7 +3072,9 @@ async def delete_app(
           owner_id=owner.id,
           resource_type="app",
           resource_id=str(app_id),
-          resource_generation=app.created_at,
+          resource_generation=recovery_resource_generation(
+            "app", app.token_nonce,
+          ),
           deleted_at=app.deleted_at,
           expires_at=app.deleted_at + APP_SOFT_DELETE_TTL,
           resource_name=app.name or "Untitled app",
@@ -3287,7 +3290,10 @@ async def recover_app(
       completed_at = validate_recovery_action(
         db, owner_id=owner.id, notification_id=body.notification_id,
         resource_type="app", resource_id=str(app_id),
-        resource_generation=app.created_at, deleted_at=app.deleted_at,
+        resource_generation=recovery_resource_generation(
+          "app", app.token_nonce,
+        ),
+        deleted_at=app.deleted_at,
       )
       already_completed = completed_at is not None
     if not already_completed:
@@ -3321,7 +3327,9 @@ async def recover_app(
             notification_id=body.notification_id,
             resource_type="app",
             resource_id=str(app_id),
-            resource_generation=app.created_at,
+            resource_generation=recovery_resource_generation(
+              "app", app.token_nonce,
+            ),
           )
         db.commit()
     app_source_dir = app.source_dir

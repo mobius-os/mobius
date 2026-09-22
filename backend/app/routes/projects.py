@@ -33,6 +33,7 @@ from app.broadcast import get_system_broadcast
 from app.recovery_notifications import (
   complete_recovery_action,
   publish_recovery_notification,
+  recovery_resource_generation,
   validate_recovery_action,
   stage_recovery_notification,
 )
@@ -2131,7 +2132,9 @@ async def delete_project(
           owner_id=owner.id,
           resource_type="project",
           resource_id=str(project.id),
-          resource_generation=project.created_at,
+          resource_generation=recovery_resource_generation(
+            "project", project.created_at,
+          ),
           deleted_at=project.deleted_at,
           expires_at=project.deleted_at + SOFT_DELETE_TTL,
           resource_name=project.name or "Untitled project",
@@ -2185,7 +2188,10 @@ async def recover_project(
           completed_at = validate_recovery_action(
             db, owner_id=owner.id, notification_id=body.notification_id,
             resource_type="project", resource_id=str(project_id),
-            resource_generation=project.created_at, deleted_at=project.deleted_at,
+            resource_generation=recovery_resource_generation(
+              "project", project.created_at,
+            ),
+            deleted_at=project.deleted_at,
           )
           already_completed = completed_at is not None
         if already_completed:
@@ -2214,7 +2220,9 @@ async def recover_project(
               notification_id=body.notification_id,
               resource_type="project",
               resource_id=str(project.id),
-              resource_generation=project.created_at,
+              resource_generation=recovery_resource_generation(
+                "project", project.created_at,
+              ),
             )
           db.commit()
     # Repeat these idempotent post-commit steps for a completed receipt. The

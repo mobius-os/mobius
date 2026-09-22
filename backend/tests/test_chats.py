@@ -11,6 +11,7 @@ from uuid import uuid4
 
 from app import memory, models, questions
 from app.pending_questions import PendingQuestion
+from app.recovery_notifications import recovery_resource_generation
 from sqlalchemy import event
 
 
@@ -53,7 +54,9 @@ def test_delete_and_recover_publish_exact_projection_events(
     ).one()
     db.refresh(chat)
     assert receipt.actions == [{
-      "resource_generation": chat.created_at.replace(tzinfo=UTC).isoformat(),
+      "resource_generation": recovery_resource_generation(
+        "chat", chat.created_at,
+      ),
       "deleted_at": chat.deleted_at.replace(tzinfo=UTC).isoformat(),
       "expires_at": (chat.deleted_at + timedelta(days=7)).replace(tzinfo=UTC).isoformat(),
       "action": "recover_chat",

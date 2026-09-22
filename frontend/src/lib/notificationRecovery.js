@@ -6,6 +6,7 @@ const RECOVERY_TYPES = Object.freeze({
 })
 
 const RESOURCE_ID = /^[A-Za-z0-9._:-]{1,128}$/
+const RESOURCE_GENERATION = /^[a-f0-9]{64}$/
 
 // Notification actions are untrusted app/agent-authored data. Return only the
 // exact recovery shape the owner shell knows how to execute; everything else
@@ -26,12 +27,11 @@ export function parseNotificationRecoveryAction(value) {
   ) return null
   if (
     typeof value.resource_generation !== 'string'
+    || !RESOURCE_GENERATION.test(value.resource_generation)
     || typeof value.deleted_at !== 'string'
     || typeof value.expires_at !== 'string'
-    || !Number.isFinite(Date.parse(value.resource_generation))
     || !Number.isFinite(Date.parse(value.deleted_at))
     || !Number.isFinite(Date.parse(value.expires_at))
-    || Date.parse(value.resource_generation) > Date.parse(value.deleted_at)
     || Date.parse(value.expires_at) <= Date.parse(value.deleted_at)
   ) return null
   return {

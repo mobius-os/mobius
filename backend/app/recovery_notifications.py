@@ -1,5 +1,6 @@
 """Transaction-bound notification receipts for reversible deletion."""
 
+import hashlib
 import logging
 import uuid
 from datetime import UTC, datetime
@@ -27,13 +28,36 @@ def _as_utc(value: datetime) -> datetime:
   )
 
 
+def recovery_resource_generation(
+  resource_type: RecoveryResource,
+  witness: str | datetime,
+) -> str:
+  """Return a non-secret identity for one persisted resource generation.
+
+  The witness stays owned by the resource lifecycle. Apps use their random
+  token nonce so a recycled integer id cannot inherit an old receipt; UUID
+  resources use their immutable creation timestamp. Hashing keeps credentials
+  and incidental persistence details out of notification history.
+  """
+  normalized = (
+    _as_utc(witness).isoformat()
+    if isinstance(witness, datetime)
+    else witness
+  )
+  if not normalized:
+    raise ValueError("Recovery resource generation requires a witness.")
+  return hashlib.sha256(
+    f"mobius-recovery-v1\0{resource_type}\0{normalized}".encode("utf-8")
+  ).hexdigest()
+
+
 def stage_recovery_notification(
   db: Session,
   *,
   owner_id: int,
   resource_type: RecoveryResource,
   resource_id: str,
-  resource_generation: datetime,
+  resource_generation: str,
   deleted_at: datetime,
   expires_at: datetime,
   resource_name: str,
@@ -52,7 +76,7 @@ def stage_recovery_notification(
       "title": "Undo",
       "resource_type": resource_type,
       "resource_id": resource_id,
-      "resource_generation": _as_utc(resource_generation).isoformat(),
+      "resource_generation": resource_generation,
       "deleted_at": _as_utc(deleted_at).isoformat(),
       "expires_at": _as_utc(expires_at).isoformat(),
     }],
@@ -84,7 +108,7 @@ def _find_recovery_action(
   notification_id: str,
   resource_type: RecoveryResource,
   resource_id: str,
-  resource_generation: datetime,
+  resource_generation: str,
 ) -> tuple[models.Notification, int, NotificationAction]:
   notification = db.query(models.Notification).filter(
     models.Notification.id == notification_id,
@@ -104,8 +128,7 @@ def _find_recovery_action(
       and action.resource_type == resource_type
       and action.resource_id == resource_id
     ):
-      expected_generation = _as_utc(resource_generation)
-      if action.resource_generation.astimezone(UTC) != expected_generation:
+      if action.resource_generation != resource_generation:
         raise HTTPException(409, detail={
           "code": "recovery_superseded",
           "message": "This Undo belongs to an earlier item with the same identity.",
@@ -121,7 +144,7 @@ def validate_recovery_action(
   notification_id: str,
   resource_type: RecoveryResource,
   resource_id: str,
-  resource_generation: datetime,
+  resource_generation: str,
   deleted_at: datetime | None,
 ) -> datetime | None:
   """Validate a receipt against the current tombstone under its lifecycle lock.
@@ -163,7 +186,7 @@ def complete_recovery_action(
   notification_id: str,
   resource_type: RecoveryResource,
   resource_id: str,
-  resource_generation: datetime,
+  resource_generation: str,
 ) -> datetime:
   """Stage completion of the exact receipt in the restore transaction."""
   notification, index, action = _find_recovery_action(
