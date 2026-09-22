@@ -1409,6 +1409,77 @@ def test_completion_preflight_names_only_unfinished_required_work():
   ]
 
 
+def test_goal_plan_write_attaches_presented_goal_and_refetches_revision(
+  monkeypatch, capsys,
+):
+  helper = _goal_plan_script()
+  calls = []
+
+  def request(method, path, body=None):
+    calls.append((method, path, body))
+    if len(calls) == 1:
+      return {
+        "goal": {"id": "goal-1", "revision": 4, "status": "open"},
+        "plan": {"revision": 4},
+      }
+    if len(calls) == 2:
+      return {"state": "promoted"}
+    if len(calls) == 3:
+      return {
+        "goal": {"id": "goal-1", "revision": 5, "status": "open"},
+        "plan": {"revision": 5},
+      }
+    return {
+      "plan": {
+        "revision": 6,
+        "summary": {"completed": 0, "total": 1},
+      },
+    }
+
+  monkeypatch.setattr(helper, "_request", request)
+  monkeypatch.setenv("API_BASE_URL", "http://mobius.test")
+  monkeypatch.setenv("AGENT_TOKEN", "agent-token")
+  monkeypatch.setenv("CHAT_ID", "chat-1")
+  monkeypatch.setattr(
+    helper.sys, "argv",
+    ["goal-plan", "update", "review", "--status", "running"],
+  )
+
+  assert helper.main() == 0
+  assert calls == [
+    ("GET", "/api/chats/chat-1/goal-plan", None),
+    ("POST", "/api/chats/chat-1/goal/resume", {"goal_id": "goal-1"}),
+    ("GET", "/api/chats/chat-1/goal-plan", None),
+    (
+      "PATCH", "/api/chats/chat-1/goal-plan/tasks/review",
+      {"status": "running", "expected_revision": 5},
+    ),
+  ]
+  assert "Goal plan revision 6" in capsys.readouterr().out
+
+
+def test_goal_plan_read_does_not_attach_presented_goal(monkeypatch, capsys):
+  helper = _goal_plan_script()
+  calls = []
+
+  def request(method, path, body=None):
+    calls.append((method, path, body))
+    return {
+      "goal": {"id": "goal-1", "revision": 4, "status": "open"},
+      "plan": {"revision": 4, "tasks": []},
+    }
+
+  monkeypatch.setattr(helper, "_request", request)
+  monkeypatch.setenv("API_BASE_URL", "http://mobius.test")
+  monkeypatch.setenv("AGENT_TOKEN", "agent-token")
+  monkeypatch.setenv("CHAT_ID", "chat-1")
+  monkeypatch.setattr(helper.sys, "argv", ["goal-plan", "show"])
+
+  assert helper.main() == 0
+  assert calls == [("GET", "/api/chats/chat-1/goal-plan", None)]
+  assert '"revision": 4' in capsys.readouterr().out
+
+
 def test_plan_rejects_cycles_missing_dependencies_and_non_goal_runs(
   client, owner_token, db,
 ):
