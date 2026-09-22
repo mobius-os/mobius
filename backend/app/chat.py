@@ -4705,13 +4705,12 @@ async def run_chat(
       # sweep. Trim the server allocator after the same settled boundary.
       try:
         from app.allocator import trim_glibc
-        from app.file_cache import reclaim_file_cache, settled_turn_paths
+        from app.file_cache import reclaim_settled_cache
 
         gc.collect()
         trim_glibc()
         await asyncio.to_thread(
-          reclaim_file_cache,
-          settled_turn_paths(get_settings().data_dir, chat_id),
+          reclaim_settled_cache, get_settings().data_dir, chat_id,
         )
       except Exception:
         _get_logger().debug(

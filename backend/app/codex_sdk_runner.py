@@ -2486,8 +2486,8 @@ async def run_codex_sdk_turn(
     )
   finally:
     ownership.release()
-    from app.file_cache import provider_tool_paths, reclaim_file_cache
-    reclaim_file_cache(provider_tool_paths("codex"), skip_mapped=False)
+    from app.file_cache import reclaim_provider_cache
+    await reclaim_provider_cache("codex")
 
 
 async def steer_into_active_turn(
