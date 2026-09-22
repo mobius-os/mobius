@@ -316,8 +316,10 @@ never be forwarded to an external URL. `mapi /api/apps/` is exactly:
 curl -s "$API_BASE_URL/api/apps/" -H "Authorization: Bearer $AGENT_TOKEN"
 ```
 
-Everything else passes straight through to curl, so curl recipes translate by
-dropping the base URL and the auth header:
+Supported safe curl options pass through, so ordinary recipes translate by
+dropping the base URL and the auth header. Options that can retarget the
+authenticated request—such as redirects, proxies, curl config files, alternate
+destinations, or replacement Host headers—are refused:
 
 ```bash
 mapi /api/apps/ | python3 -m json.tool

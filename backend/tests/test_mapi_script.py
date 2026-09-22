@@ -199,7 +199,7 @@ def test_mapi_rejects_unknown_short_flag_before_curl_can_reparse_a_url(
 
   assert result.returncode == 2
   assert result.curl_arguments is None
-  assert "unsupported curl short option" in result.stderr
+  assert "unsupported curl option '-AH'" in result.stderr
 
 
 def test_mapi_preserves_an_ordinary_custom_header(tmp_path: Path):
@@ -222,6 +222,74 @@ def test_mapi_preserves_boolean_curl_options(tmp_path: Path, option: str):
   assert result.curl_arguments[-2:] == [
     option.encode(), b"https://mobius.example/api/ready",
   ]
+
+
+@pytest.mark.parametrize("option", ["-G", "--get"])
+def test_mapi_supports_query_data_without_adding_a_body_content_type(
+  tmp_path: Path,
+  option: str,
+):
+  result = _run_mapi(
+    tmp_path,
+    option, "/api/store/apps", "--data-urlencode", "managed=true",
+  )
+
+  assert result.returncode == 0, result.stderr
+  assert b"Content-Type: application/json" not in result.curl_arguments
+  assert result.curl_arguments[-4:] == [
+    option.encode(), b"https://mobius.example/api/store/apps",
+    b"--data-urlencode", b"managed=true",
+  ]
+
+
+def test_mapi_supports_get_in_combined_short_options(tmp_path: Path):
+  result = _run_mapi(
+    tmp_path,
+    "-sG", "/api/store/apps", "--data-urlencode=managed=true",
+  )
+
+  assert result.returncode == 0, result.stderr
+  assert b"Content-Type: application/json" not in result.curl_arguments
+  assert result.curl_arguments[-3:] == [
+    b"-sG", b"https://mobius.example/api/store/apps",
+    b"--data-urlencode=managed=true",
+  ]
+
+
+@pytest.mark.parametrize(
+  "arguments",
+  [
+    ("--url-query", "managed=true"),
+    ("--url-query=managed=true",),
+  ],
+)
+def test_mapi_supports_explicit_url_query_data_without_a_body_header(
+  tmp_path: Path,
+  arguments: tuple[str, ...],
+):
+  result = _run_mapi(tmp_path, "/api/store/apps", *arguments)
+
+  assert result.returncode == 0, result.stderr
+  assert b"Content-Type: application/json" not in result.curl_arguments
+  assert result.curl_arguments[-(len(arguments) + 1):] == [
+    b"https://mobius.example/api/store/apps",
+    *(argument.encode() for argument in arguments),
+  ]
+
+
+@pytest.mark.parametrize(
+  "option",
+  ["-H", "-sH", "--output", "--url-query"],
+)
+def test_mapi_reports_a_missing_option_value_before_running_curl(
+  tmp_path: Path,
+  option: str,
+):
+  result = _run_mapi(tmp_path, "/api/ready", option)
+
+  assert result.returncode == 2
+  assert result.curl_arguments is None
+  assert f"curl option '{option}' needs a value" in result.stderr
 
 
 def test_mapi_rejects_long_options_that_can_reverse_its_safe_defaults(
@@ -425,3 +493,17 @@ def test_seed_guidance_uses_literal_payload_boundaries():
   assert "--data-binary @- <<'CSS'" in theming
   assert "quotes, newlines, and $ stay literal" in theming
   assert "{\"content\": \"<css here>\"}" not in theming
+
+
+def test_mapi_guidance_describes_the_safe_curl_subset():
+  platform = SCRIPT.parents[2]
+  guidance = [
+    (platform / "skill" / "core.md").read_text(encoding="utf-8"),
+    (SCRIPT.parent / "seed-skills" / "platform-maintenance.md").read_text(
+      encoding="utf-8",
+    ),
+  ]
+
+  for text in guidance:
+    assert "Supported safe curl options pass through" in text
+    assert "Everything else passes straight through to curl" not in text
