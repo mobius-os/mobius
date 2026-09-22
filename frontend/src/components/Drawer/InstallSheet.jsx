@@ -6,6 +6,11 @@ import { appQueries } from '../../hooks/queries.js'
 import useDialogFocus from '../../hooks/useDialogFocus.js'
 import { loginBoundaryPath } from '../../lib/safeReturnPath.js'
 import {
+  preferredDirectInstallMode,
+  requestManifestWebInstall,
+  resolveInstallManifestUrl,
+} from '../../lib/webInstall.js'
+import {
   androidBrowserIntentHref,
   detectInstallPlatform,
   isStandaloneDisplay,
@@ -15,6 +20,26 @@ import './InstallSheet.css'
 // Home-screen names are short; the OS truncates long ones anyway and
 // `short_name` is the first 12 chars. Cap generously but keep it sane.
 const MAX_NAME = 64
+
+function NativeManifestInstall({ manifestUrl, actionRef, onResult, label }) {
+  useEffect(() => {
+    const element = actionRef.current
+    if (!element) return undefined
+    const handleResult = event => onResult(event.result)
+    element.addEventListener('installresult', handleResult)
+    return () => element.removeEventListener('installresult', handleResult)
+  }, [actionRef, onResult])
+
+  return (
+    <install
+      ref={actionRef}
+      className="is__native-install"
+      manifest={manifestUrl}
+    >
+      Install {label}
+    </install>
+  )
+}
 
 // Center-square-crop + downscale to a PNG before upload. The server
 // (PUT /apps/{id}/icon) re-normalizes anyway, but shrinking here keeps
@@ -56,6 +81,7 @@ export default function InstallSheet({ app, onClose }) {
   const [iconPreview, setIconPreview] = useState(null) // object URL or null
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState('')
+  const [directInstall, setDirectInstall] = useState(null)
   // Only Safari's Share menu can add to the iOS Home Screen, so the final
   // step is never ours to automate. What IS ours: which document is on
   // screen when the user opens that menu. THIS document is the shell, whose
@@ -94,8 +120,10 @@ export default function InstallSheet({ app, onClose }) {
   // The hand-off path replaces the form after saving. Move focus into its new
   // primary action instead of leaving focus on an unmounted Continue.
   useEffect(() => {
-    if (handoff) queueMicrotask(() => primaryFocusRef.current?.focus())
-  }, [handoff])
+    if (handoff || directInstall) {
+      queueMicrotask(() => primaryFocusRef.current?.focus())
+    }
+  }, [handoff, directInstall])
 
   // onContinue navigates the whole document away and intentionally leaves
   // `submitting` true (the page is leaving). BFCache can restore this page
@@ -169,6 +197,46 @@ export default function InstallSheet({ app, onClose }) {
     }
   }
 
+  function continueToBrowserInstall(url) {
+    if (standalone && (platform.ios || platform.android)) {
+      // An installed-app context cannot finish these manual paths in-place:
+      // iOS has no Share button and Android opens an install-less Custom Tab.
+      setHandoffUrl(platform.ios ? url : androidBrowserIntentHref(url))
+      setSubmitting(false)
+      setDirectInstall(null)
+      setHandoff(true)
+      return
+    }
+    window.location.href = url
+  }
+
+  async function onDirectInstall() {
+    if (!directInstall || directInstall.mode !== 'api' || submitting) return
+    setSubmitting(true)
+    setError('')
+    const result = await requestManifestWebInstall({
+      manifestUrl: directInstall.manifestUrl,
+    })
+    setSubmitting(false)
+    if (result.outcome === 'accepted') {
+      onClose?.()
+      return
+    }
+    setError(result.outcome === 'dismissed'
+      ? 'Not installed. You can try again or use the browser steps.'
+      : 'The new installer is not available here. Use the browser steps instead.')
+  }
+
+  function onNativeInstallResult(result) {
+    if (result === 'success') {
+      onClose?.()
+      return
+    }
+    setError(result === 'aborted'
+      ? 'Not installed. You can try again or use the browser steps.'
+      : 'The browser could not use this app manifest. Use the browser steps instead.')
+  }
+
   async function onContinue() {
     const name = draftName.trim()
     if (!name || submitting) return
@@ -198,18 +266,29 @@ export default function InstallSheet({ app, onClose }) {
       const url = platform.ios
         ? await buildInstallUrl()
         : new URL(installPath, window.location.origin).href
-      if (standalone && (platform.ios || platform.android)) {
-        // Installed-app context: navigating in place can't complete an
-        // install (no Share button on iOS; an install-less Custom Tab on
-        // Android). Hand the destination over instead.
-        setHandoffUrl(platform.ios ? url : androidBrowserIntentHref(url))
-        setSubmitting(false)
-        setHandoff(true)
-        return
+
+      // The new browser-owned install element is preferred when its current
+      // manifest-URL contract is actually present. navigator.install is the
+      // imperative equivalent. Both receive a fresh user gesture on this
+      // second step; the preceding async name/icon saves would otherwise
+      // consume the activation required by either API.
+      if (!platform.ios) {
+        const manifestUrl = resolveInstallManifestUrl(
+          `/apps/${appSlug}/manifest.json`,
+          window.location.href,
+        )
+        const mode = preferredDirectInstallMode({
+          windowObject: window,
+          navigatorObject: navigator,
+        })
+        if (mode) {
+          setDirectInstall({ mode, manifestUrl, fallbackUrl: url })
+          setSubmitting(false)
+          return
+        }
       }
-      // Same-tab navigation to the install surface. Manifest is already
-      // fresh (saved above + no-cache), so the OS shows the new name.
-      window.location.href = url
+
+      continueToBrowserInstall(url)
     } catch (err) {
       setError(err?.message || 'Something went wrong. Try again.')
       setSubmitting(false)
@@ -295,6 +374,53 @@ export default function InstallSheet({ app, onClose }) {
                 browser: <span className="is__url">{plainHandoffUrl}</span>
               </p>
             )}
+          </>
+        ) : directInstall ? (
+          <>
+            <button
+              type="button"
+              className="is__close"
+              aria-label="Close"
+              onClick={() => onClose?.()}
+            >
+              ×
+            </button>
+            <h2 className="is__title">Install {label}</h2>
+            <p className="is__hint is__hint--steps">
+              Your name and icon are saved. This browser can now install the
+              app directly without leaving Möbius.
+            </p>
+
+            {error && <div className="is__error" role="alert">{error}</div>}
+
+            <div className="is__handoff">
+              {directInstall.mode === 'element' ? (
+                <NativeManifestInstall
+                  manifestUrl={directInstall.manifestUrl}
+                  actionRef={primaryFocusRef}
+                  onResult={onNativeInstallResult}
+                  label={label}
+                />
+              ) : (
+                <button
+                  ref={primaryFocusRef}
+                  type="button"
+                  className="is__btn is__btn--primary"
+                  onClick={onDirectInstall}
+                  disabled={submitting}
+                >
+                  {submitting ? 'Opening…' : 'Install now'}
+                </button>
+              )}
+              <button
+                type="button"
+                className="is__btn is__btn--secondary"
+                onClick={() => continueToBrowserInstall(directInstall.fallbackUrl)}
+                disabled={submitting}
+              >
+                Use browser steps
+              </button>
+            </div>
           </>
         ) : (
         <>

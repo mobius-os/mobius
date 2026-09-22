@@ -227,6 +227,14 @@
   text-decoration: none;
 }
 
+/* The experimental <install> permission element is intentionally styled as
+   little as possible: Chromium owns its label, contrast and trusted-button
+   presentation. The wrapper supplies layout; the browser supplies the UI. */
+.is__native-install {
+  align-self: center;
+  min-height: 44px;
+}
+
 /* Corner dismissal. Sits in the card's padding, with a touch target larger
    than the glyph so a thumb can hit it without crowding the title. */
 .is__close {
