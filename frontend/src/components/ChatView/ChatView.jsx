@@ -67,6 +67,7 @@ import useTranscriptState from './hooks/useTranscriptState.js'
 import useComposerDraftState from './hooks/useComposerDraftState.js'
 import useChatRuntimePolicy from './hooks/useChatRuntimePolicy.js'
 import useOffscreenNudge, { useNudgeTargetRef } from './hooks/useOffscreenNudge.js'
+import { composerAdjacentActionProps } from './composerAdjacentAction.js'
 import ChatInputBar from './ChatInputBar.jsx'
 import { compactFailureInput, mobiusChatCommand } from './slashCommands.js'
 import { hasSendablePayload } from './composerSubmission.js'
@@ -6054,11 +6055,16 @@ export default function ChatView({
             <div className="chat__floating-transients">
               {offscreenControlsVisible && (
                 <div className="chat__offscreen-nudges">
+                  {/* Touches use the keyboard-safe path; mouse and keyboard retain
+                      the native click path. */}
                   {olderHistoryRetryShown(olderHistoryError, offset) && (
                     <button
                       type="button"
                       className="chat__history-retry"
-                      onClick={() => loadOlderMessages(offset, { readerDriven: true })}
+                      {...composerAdjacentActionProps(
+                        () => loadOlderMessages(offset, { readerDriven: true }),
+                        { activateOnTouchEnd: true },
+                      )}
                     >
                       Earlier messages didn’t load — retry
                     </button>
@@ -6067,7 +6073,10 @@ export default function ChatView({
                     <button
                       type="button"
                       className="chat__question-nudge"
-                      onClick={() => revealPendingQuestion(pendingQuestionEl)}
+                      {...composerAdjacentActionProps(
+                        () => revealPendingQuestion(pendingQuestionEl),
+                        { activateOnTouchEnd: true },
+                      )}
                     >
                       Möbius asked you something — tap to answer
                     </button>
@@ -6076,7 +6085,9 @@ export default function ChatView({
                     <button
                       type="button"
                       className="chat__resume-nudge"
-                      onClick={revealConversationTail}
+                      {...composerAdjacentActionProps(revealConversationTail, {
+                        activateOnTouchEnd: true,
+                      })}
                     >
                       {pendingResumeBlock?.pause?.resets_at
                         ? autoResumeEnabled
@@ -6102,7 +6113,9 @@ export default function ChatView({
                       className="chat__jump-latest"
                       aria-label="Jump to the latest message"
                       title="Jump to latest"
-                      onClick={followLatest}
+                      {...composerAdjacentActionProps(followLatest, {
+                        activateOnTouchEnd: true,
+                      })}
                     >
                       <ArrowDown size={18} strokeWidth={2.25} aria-hidden="true" />
                     </button>
