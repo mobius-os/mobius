@@ -85,7 +85,7 @@ from claude_agent_sdk.types import (
   UserMessage,
 )
 
-from app import activity, fs_locks, generated_files
+from app import activity, generated_files
 from app.claude_events import (
   NativeContinuationTracker,
   _clip_task_text,
@@ -235,11 +235,21 @@ _CLAUDE_UNUSED_BUILTINS = (
   "PushNotification",
 )
 
-# Tools that may leave a generated deliverable in the shared working directory.
-# Read-only tools are omitted so ordinary turns do not scan the tree per call.
+# Tools that may leave a generated deliverable behind. The matcher and the
+# hook predicate below intentionally describe the same set.
 _FILE_WRITING_TOOL_MATCHER = (
   "Write|Edit|MultiEdit|NotebookEdit|Bash|mcp__.*"
 )
+
+
+def _can_write_generated_file(tool_name: str | None) -> bool:
+  if not tool_name:
+    return False
+  return tool_name in {
+    "Write", "Edit", "MultiEdit", "NotebookEdit", "Bash",
+  } or tool_name.startswith("mcp__")
+
+
 # The tools through which a turn can save an owner-input card: the three
 # platform control tools, plus Bash for the `owner_approval.py` / `secure-input`
 # helper fallbacks, which print the same receipt. Naming them keeps the card-end
@@ -1143,10 +1153,15 @@ async def run_claude_sdk_turn(
   # turn scope because the hooks below are built before `_run_once` constructs
   # it, and the card-end hook must reach the live handle to own the turn's end.
   active_client: ActiveClaudeClient | None = None
-  # A baseline is captured only while this turn holds the shared cwd
-  # reservation. That makes the before/after diff safe across concurrent chats.
-  _fs_snapshot: generated_files.Snapshot | None = None
-  _fs_reservation: fs_locks.CwdReservation | None = None
+  # Generated deliverables use a chat-private directory, so provenance does
+  # not depend on serializing unrelated chats that share cwd=/data.
+  from app.config import get_settings
+  generated_data_dir = get_settings().data_dir
+  generated_dir = generated_files.output_dir(
+    generated_data_dir, chat_id, create=True,
+  )
+  _generated_tool_lock = asyncio.Lock()
+  _generated_snapshots: dict[str, generated_files.Snapshot] = {}
   # Progress lease: renewed as this turn emits SDK messages so a stalled model
   # stream (alive process, no progress) lapses and recovery can reclaim it.
   lease = ProgressLease(chat_id)
@@ -1154,6 +1169,7 @@ async def run_claude_sdk_turn(
   base_env["MOBIUS_COORDINATION_ENABLED"] = (
     "1" if coordination_enabled else "0"
   )
+  base_env["MOBIUS_GENERATED_DIR"] = str(generated_dir)
 
   # Canonical AskUserQuestion handling via can_use_tool, per
   # https://code.claude.com/docs/en/agent-sdk/user-input
@@ -1264,20 +1280,20 @@ async def run_claude_sdk_turn(
     tool_use_id: str | None,
     context: dict[str, Any],
   ) -> dict[str, Any]:
-    del tool_use_id, context
-    nonlocal _fs_snapshot, _fs_reservation
-    if generated_files.is_read_only_tool(hook_input.get("tool_name")):
+    del context
+    tool_name = hook_input.get("tool_name")
+    if not _can_write_generated_file(tool_name) or not tool_use_id:
       return {"continue_": True}
+    await _generated_tool_lock.acquire()
     try:
-      _fs_reservation = await fs_locks.reserve_cwd_for_mutation(cwd)
-      if _fs_reservation is not None and _fs_reservation.is_held:
-        _fs_snapshot = generated_files.snapshot(cwd, own_chat_id=chat_id)
-      else:
-        _fs_snapshot = generated_files.Snapshot(files={}, complete=False)
+      _generated_snapshots[tool_use_id] = generated_files.snapshot_output_dir(
+        generated_data_dir, chat_id=chat_id,
+      )
     except Exception:
       log.debug("generated_file baseline snapshot failed", exc_info=True)
-      _fs_reservation = None
-      _fs_snapshot = generated_files.Snapshot(files={}, complete=False)
+      _generated_snapshots[tool_use_id] = generated_files.Snapshot(
+        files={}, complete=False,
+      )
     return {"continue_": True}
 
   # The Claude SDK fires PreCompact before it auto- or manually compacts the
@@ -1345,17 +1361,16 @@ async def run_claude_sdk_turn(
     context: dict[str, Any],
   ) -> dict[str, Any]:
     del context
-    nonlocal _fs_snapshot, _fs_reservation
-    if generated_files.is_read_only_tool(hook_input.get("tool_name")):
+    tool_name = hook_input.get("tool_name")
+    if not _can_write_generated_file(tool_name) or not tool_use_id:
       return {"continue_": True}
     try:
-      if _fs_reservation is None or not _fs_reservation.is_held:
+      before = _generated_snapshots.pop(tool_use_id, None)
+      if before is None:
         return {"continue_": True}
-      before = (
-        _fs_snapshot if _fs_snapshot is not None
-        else generated_files.Snapshot(files={}, complete=False)
+      after = generated_files.snapshot_output_dir(
+        generated_data_dir, chat_id=chat_id,
       )
-      after = generated_files.snapshot(cwd, own_chat_id=chat_id)
       for entry in generated_files.diff_new_or_changed(
         before, after, own_chat_id=chat_id,
       ):
@@ -1364,13 +1379,11 @@ async def run_claude_sdk_turn(
           **({"tool_use_id": tool_use_id} if tool_use_id else {}),
           **entry,
         })
-      _fs_snapshot = after
     except Exception:
       log.debug("generated_file detection failed", exc_info=True)
     finally:
-      if _fs_reservation is not None:
-        _fs_reservation.release()
-        _fs_reservation = None
+      if _generated_tool_lock.locked():
+        _generated_tool_lock.release()
     return {"continue_": True}
 
   # Fires after every root-agent tool result and ENDS THE TURN when that result
@@ -1472,7 +1485,10 @@ async def run_claude_sdk_turn(
         stderr_tail.append(line.rstrip("\n")[:500])
 
     options_kwargs = {
-      "system_prompt": _system_prompt_with_register(skill_text),
+      "system_prompt": (
+        _system_prompt_with_register(skill_text).rstrip()
+        + "\n\n" + generated_files.delivery_instruction(generated_dir) + "\n"
+      ),
       "resume": session_id if session_id is not None else None,
       "cwd": cwd,
       "env": base_env,
@@ -1886,6 +1902,11 @@ async def run_claude_sdk_turn(
       # sink is still live. No-op when nothing is buffered (the normal path
       # sealed + cleared it already). Never raises (swallowed inside).
       await _seal_steer_split(bc, active_client, chat_id)
+      # A provider error can omit PostToolUse. Do not strand a concurrent child
+      # writer behind this turn-local serialization gate.
+      _generated_snapshots.clear()
+      if _generated_tool_lock.locked():
+        _generated_tool_lock.release()
       current_handle = registry.get_handle(chat_id, RunnerKind.CLAUDE_SDK)
       if current_handle is active_client:
         registry.unregister(chat_id, RunnerKind.CLAUDE_SDK)

@@ -4400,8 +4400,11 @@ def test_run_codex_sdk_turn_controls_prompt_layers(monkeypatch, session_id):
   ))
 
   assert captured["session_id"] == session_id
-  assert captured["thread_options"]["base_instructions"] == (
+  assert captured["thread_options"]["base_instructions"].startswith(
     "FROZEN CONSTITUTION SNAPSHOT"
+  )
+  assert "$MOBIUS_GENERATED_DIR" in (
+    captured["thread_options"]["base_instructions"]
   )
   assert captured["thread_options"]["developer_instructions"] == ""
   assert captured["thread_options"]["personality"] == "none"

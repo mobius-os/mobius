@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import pathlib
 import tempfile
 from collections import deque
 from types import SimpleNamespace
@@ -153,7 +154,7 @@ async def test_generated_file_baseline_precedes_a_fast_claude_tool(monkeypatch, 
   original_snapshot = claude_sdk_runner.generated_files.snapshot
 
   def snapshot(cwd, *, own_chat_id):
-    snapshots.append(("snapshot", (tmp_path / "fast.pdf").exists()))
+    snapshots.append(("snapshot", (pathlib.Path(cwd) / "fast.pdf").exists()))
     return original_snapshot(cwd, own_chat_id=own_chat_id)
 
   monkeypatch.setattr(claude_sdk_runner.generated_files, "snapshot", snapshot)
@@ -166,17 +167,23 @@ async def test_generated_file_baseline_precedes_a_fast_claude_tool(monkeypatch, 
   class _FastPdfClient(_FakeClient):
     async def query(self, message):
       self.queries.append(message)
+      output_dir = pathlib.Path(self.options.env["MOBIUS_GENERATED_DIR"])
       pre = self.options.hooks["PreToolUse"]
       await pre[0].hooks[0]({"tool_name": "Bash"}, "fast", {})
-      (tmp_path / "fast.pdf").write_bytes(b"%PDF-1.4")
+      (output_dir / "fast.pdf").write_bytes(b"%PDF-1.4")
       post = self.options.hooks["PostToolUse"]
       await post[1].hooks[0]({"tool_name": "Bash"}, "fast", {})
 
   _install_fake_client(monkeypatch, _FastPdfClient)
-  await _run_turn("fast-generated-file", cwd=str(tmp_path), bc=_GeneratedFileBus())
+  bus = _GeneratedFileBus()
+  await _run_turn("fast-generated-file", cwd=str(tmp_path), bc=bus)
 
   assert snapshots[0] == ("snapshot", False)
   assert snapshots[-1] == ("snapshot", True)
+  assert [
+    event["name"] for event in bus.events
+    if event.get("type") == "generated_file"
+  ] == ["fast.pdf"]
 
 
 @pytest.mark.asyncio
@@ -1598,9 +1605,10 @@ async def test_run_claude_sdk_turn_requests_summarized_thinking(monkeypatch):
   # The Claude runner appends its provider-authored concise register on top of
   # the shared base (documented amendment to system_prompts.py's contract): the
   # shared base is preserved verbatim, with the register appended after it.
-  assert options.system_prompt == (
+  assert options.system_prompt.startswith(
     claude_sdk_runner._system_prompt_with_register("system")
   )
+  assert "$MOBIUS_GENERATED_DIR" in options.system_prompt
   assert options.system_prompt.startswith("system")
   assert "# Concise register" in options.system_prompt
   assert "# Execution lifetimes in Möbius" in options.system_prompt

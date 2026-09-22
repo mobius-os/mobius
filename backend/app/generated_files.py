@@ -1,13 +1,13 @@
-"""Detects files an agent turn wrote to its cwd that look like a deliverable
-the user asked for (a PDF, a spreadsheet, a chart image, ...) so they can be
-offered as a real download instead of the model's own bare-text claim.
+"""Detect files an agent wrote to its chat-private output directory.
+
+Files that look like user-facing deliverables (a PDF, spreadsheet, chart image,
+...) are offered as real downloads instead of the model's bare-text claim.
 
 PDFs in particular are almost never produced via a file-editing tool (those
-write text) — they're a side effect of a shell-executed script (reportlab,
-weasyprint, pandoc, ...). Detection is therefore a before/after directory diff
-around the tool calls that can write files, not a parse of any single tool's
-arguments. See claude_sdk_runner.py's generated_file_hook and
-codex_sdk_runner.py's ItemStarted/ItemCompleted branches for the call sites.
+write text) — they're a side effect of a shell-executed script. Each runner
+provides ``MOBIUS_GENERATED_DIR`` and an instruction to place only finished
+deliverables there. Detection is a before/after diff of that directory rather
+than a parse of arbitrary shell commands.
 
 Why this walks the tree itself instead of reusing workspace_files.list_entries:
 that helper bounds ONE API response for display (`LIST_LIMIT = 1000`) and
@@ -20,7 +20,11 @@ semantics a display listing does not owe it, so the walk below is explicit
 about them: it is either complete, or it reports itself incomplete and the
 diff refuses to publish anything (see `Snapshot.complete`).
 
-Security note: this module only ever produces *candidates*. Whether a
+Security note: the observed directory is structurally owned by one chat under
+``data_dir/chats/<chat>/generated``. This replaces the earlier shared-cwd
+reservation scheme: slow or overlapping provider tools cannot make one chat's
+file enter another chat's scan. This module still only produces *candidates*.
+Whether a
 candidate becomes something a browser can fetch is decided entirely by
 routes/generated_files.py, which looks up a requested name in the specific
 chat's OWN recorded rows rather than resolving any client-supplied path
@@ -35,6 +39,7 @@ import mimetypes
 import os
 from pathlib import Path
 from typing import NamedTuple
+from urllib.parse import quote
 
 log = logging.getLogger(__name__)
 
@@ -69,6 +74,33 @@ READ_ONLY_TOOLS = frozenset({
   "read", "glob", "grep", "websearch", "webfetch",
   "web_search", "web_fetch", "list_agent_peers",
 })
+
+
+def output_dir(data_dir: str, chat_id: str, *, create: bool = False) -> Path:
+  """Return this chat's private generated-deliverable directory.
+
+  Generated files deliberately live under a chat-owned namespace rather than
+  the provider cwd, which is commonly the shared data root. This makes file
+  provenance structural: another chat cannot enter this detector's scan even
+  when both providers run tools concurrently.
+  """
+  chat_segment = quote(str(chat_id), safe="._-")
+  if not chat_segment:
+    raise ValueError("empty chat id for generated-file directory")
+  directory = Path(data_dir) / "chats" / chat_segment / "generated"
+  if create:
+    directory.mkdir(parents=True, exist_ok=True)
+  return directory
+
+
+def delivery_instruction(directory: Path) -> str:
+  """Provider instruction for the one directory the detector observes."""
+  return (
+    "When you create a final user-facing deliverable such as a PDF, document, "
+    "spreadsheet, presentation, image, archive, audio, or video file, save the "
+    f"finished file in {directory}. That path is also available as "
+    "$MOBIUS_GENERATED_DIR. Keep temporary and source files outside it."
+  )
 
 
 def is_read_only_tool(tool_name: str | None) -> bool:
@@ -191,6 +223,21 @@ def snapshot(cwd: str, *, own_chat_id: str) -> Snapshot:
       # An unreadable directory does not invalidate the rest of the walk.
       continue
   return Snapshot(files=files, complete=True)
+
+
+def snapshot_output_dir(data_dir: str, *, chat_id: str) -> Snapshot:
+  """Snapshot only one chat's generated directory, keyed from data_dir.
+
+  Persisted paths stay relative to ``data_dir`` so the download route can
+  resolve them without accepting an absolute path from either provider.
+  """
+  directory = output_dir(data_dir, chat_id)
+  snap = snapshot(str(directory), own_chat_id=chat_id)
+  prefix = directory.relative_to(Path(data_dir)).as_posix()
+  return Snapshot(
+    files={f"{prefix}/{path}": value for path, value in snap.files.items()},
+    complete=snap.complete,
+  )
 
 
 def _belongs_to_other_chat(path: str, own_chat_id: str) -> bool:

@@ -33,15 +33,7 @@ view (no ``await`` between the lookup and the insert).
 LOCK ORDERING — every multi-lock holder acquires in this order, and nobody
 acquires in reverse, so there is no cycle:
 
-    cwd_reservation(cwd)  ->  install_uninstall_lock
-                          ->  app_storage_lock(id)  ->  source_dir_lock(dir)
-
-``reserve_cwd_for_mutation`` is OUTERMOST and never acquired by a holder of
-any lock to its right. It is taken by an agent turn around one tool call, and
-that tool call can legitimately reach the install/uninstall path; nothing on
-the lifecycle side runs an agent tool call, so the reverse edge does not
-exist. It is also the only entry here that self-expires rather than relying
-on its holder to release it — see its docstring.
+    install_uninstall_lock  ->  app_storage_lock(id)  ->  source_dir_lock(dir)
 
 ``shared_skills_lock`` is always innermost. Install sync takes lifecycle then
 shared; uninstall/recover release any source-dir lock before taking shared.
@@ -60,7 +52,6 @@ app lock; the install endpoint takes only the lifecycle lock.
 """
 
 import asyncio
-import logging
 from pathlib import Path
 from weakref import WeakValueDictionary
 
@@ -69,12 +60,8 @@ _source_locks: "WeakValueDictionary[str, asyncio.Lock]" = WeakValueDictionary()
 _project_build_locks: "WeakValueDictionary[str, asyncio.Lock]" = (
   WeakValueDictionary()
 )
-_generated_file_cwd_locks: "WeakValueDictionary[str, asyncio.Lock]" = (
-  WeakValueDictionary()
-)
 _lifecycle_lock = asyncio.Lock()
 _shared_skills_lock = asyncio.Lock()
-_log = logging.getLogger(__name__)
 
 
 def install_uninstall_lock() -> asyncio.Lock:
@@ -165,87 +152,3 @@ def source_dir_lock(source_dir: str) -> asyncio.Lock:
     lock = asyncio.Lock()
     _source_locks[key] = lock
   return lock
-
-
-class CwdReservation:
-  """A held generated-file cwd reservation. Call ``release()`` exactly once
-  when the owning tool call's diff has finished; a second call is a no-op.
-  See ``reserve_cwd_for_mutation`` for why this self-expires instead of
-  relying solely on that call happening."""
-
-  __slots__ = ("_lock", "_handle", "_released")
-
-  def __init__(self, lock: asyncio.Lock, handle: asyncio.TimerHandle):
-    self._lock = lock
-    self._handle = handle
-    self._released = False
-
-  def release(self) -> None:
-    if self._released:
-      return
-    self._released = True
-    self._handle.cancel()
-    try:
-      self._lock.release()
-    except RuntimeError:
-      # Already unlocked (the watchdog fired first) — the outcome we want.
-      pass
-
-  @property
-  def is_held(self) -> bool:
-    """Whether this caller still owns the serialization window.
-
-    A watchdog-expired reservation is deliberately not a license to publish
-    from its old baseline: callers must fail closed instead.
-    """
-    return not self._released
-
-
-async def reserve_cwd_for_mutation(
-  cwd: str, *, acquire_timeout: float = 30.0, max_hold: float = 120.0,
-) -> CwdReservation | None:
-  """Best-effort serialization of one mutating tool call's diff window
-  against every other chat's turn sharing the same cwd.
-
-  Ordinary chats all run with cwd == settings.data_dir (a root shared by
-  every other chat), so generated_files' before/after directory diff can
-  observe a file a DIFFERENT, concurrently running chat's own tool call
-  wrote directly at that shared root (not under either chat's own
-  ``chats/<id>/`` namespace, which ``generated_files._belongs_to_other_chat``
-  already excludes) and misattribute it. Holding this reservation for the
-  span of one mutating tool call — acquired in a PreToolUse-equivalent hook,
-  released once that call's diff completes — closes that remaining race for
-  chats sharing the exact same cwd.
-
-  This is deliberately NOT a plain lock the caller must remember to
-  release correctly on every path (interrupts, provider crashes, a hook
-  the SDK skips under some edge case): a permanently un-released lock
-  would wedge every future chat sharing this cwd forever, which is a worse
-  outage than the narrow leak this exists to close. So the reservation
-  self-expires after ``max_hold`` seconds via an event-loop timer even if
-  ``release()`` is never called, and acquiring gives up (returning
-  ``None``, meaning "proceed unprotected") after ``acquire_timeout``
-  seconds rather than blocking a turn indefinitely on another chat's
-  reservation. Returns ``None`` on that timeout — the caller must treat a
-  ``None`` result as "no reservation held" and continue anyway.
-  """
-  key = str(Path(cwd).resolve())
-  lock = _generated_file_cwd_locks.get(key)
-  if lock is None:
-    lock = asyncio.Lock()
-    _generated_file_cwd_locks[key] = lock
-  try:
-    await asyncio.wait_for(lock.acquire(), timeout=acquire_timeout)
-  except TimeoutError:
-    _log.warning(
-      "generated-file cwd reservation timed out after %.0fs for %s; "
-      "proceeding without cross-chat serialization for this tool call",
-      acquire_timeout, key,
-    )
-    return None
-  loop = asyncio.get_running_loop()
-  reservation = CwdReservation.__new__(CwdReservation)
-  reservation._lock = lock
-  reservation._released = False
-  reservation._handle = loop.call_later(max_hold, reservation.release)
-  return reservation

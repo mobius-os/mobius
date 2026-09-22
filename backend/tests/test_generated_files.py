@@ -41,6 +41,26 @@ def test_serve_generated_file_by_recorded_name(client, db, auth, chat):
   assert "filename*=UTF-8''report.pdf" in disposition
 
 
+def test_serve_generated_file_from_private_output_dir(client, db, auth, chat):
+  settings = get_settings()
+  directory = gf.output_dir(settings.data_dir, chat.id, create=True)
+  (directory / "private.pdf").write_bytes(b"%PDF-private")
+  relative = (
+    (directory / "private.pdf").relative_to(settings.data_dir).as_posix()
+  )
+  _write_row(db, chat, name="private.pdf", path=relative)
+
+  token = client.post(
+    f"/api/chats/{chat.id}/media-token", headers=auth,
+  ).json()["token"]
+  res = client.get(
+    f"/api/chats/{chat.id}/generated-files/private.pdf",
+    params={"token": token},
+  )
+  assert res.status_code == 200
+  assert res.content == b"%PDF-private"
+
+
 def test_serve_generated_file_unknown_name_404s(client, auth, chat):
   """A name never recorded for this chat 404s — it is never resolved against
   cwd on the fly, so an unrecorded filename can't be probed for."""
@@ -242,7 +262,24 @@ def test_claude_matcher_covers_mcp_and_notebook_writes():
   matcher = claude_sdk_runner._FILE_WRITING_TOOL_MATCHER
   for tool in ("Write", "Edit", "MultiEdit", "NotebookEdit", "Bash"):
     assert tool in matcher
+    assert claude_sdk_runner._can_write_generated_file(tool) is True
   assert "mcp__" in matcher
+  assert (
+    claude_sdk_runner._can_write_generated_file("mcp__local__render") is True
+  )
+  for tool in ("Agent", "Task", "Workflow", "Read", "WebSearch"):
+    assert claude_sdk_runner._can_write_generated_file(tool) is False
+
+
+def test_output_snapshot_cannot_see_another_chat(tmp_path):
+  mine = gf.output_dir(str(tmp_path), "mine", create=True)
+  theirs = gf.output_dir(str(tmp_path), "theirs", create=True)
+  (mine / "mine.pdf").write_bytes(b"mine")
+  (theirs / "theirs.pdf").write_bytes(b"theirs")
+
+  snap = gf.snapshot_output_dir(str(tmp_path), chat_id="mine")
+
+  assert set(snap.files) == {"chats/mine/generated/mine.pdf"}
 
 
 # --- snapshot completeness: a partial scan must never publish -------------

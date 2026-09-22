@@ -1,14 +1,9 @@
-"""Serve files an agent turn wrote to its own cwd (generated_files.py's
-allowlisted directory diff), most commonly a PDF a Bash-run script produced.
+"""Serve files an agent wrote to its chat-private generated directory, most
+commonly a PDF produced by a shell-run script.
 
-Security note — read this before touching the lookup below: a non-delegated
-chat's cwd is `settings.data_dir` itself (`/data`), a root SHARED by every
-other chat's `uploads/` tree and by credential paths (`cli-auth/`,
-`.secret-key`). Resolving a client-supplied relative path against that shared
-cwd — even with `validate_path_within_base`'s symlink/`..` confinement — would
-let one chat's media token read another chat's files, because that helper
-only prevents escaping OUTSIDE a root; it does nothing to stop legitimate-
-looking traversal INSIDE a root that isn't actually private to this chat.
+Security note — read this before touching the lookup below: new rows point
+inside `data_dir/chats/<chat>/generated`, while historical rows may still point
+inside the chat's old cwd. A client-supplied path is never resolved directly.
 
 So `name` is never resolved against cwd directly. It is looked up in THIS
 chat's own `generated_files` table rows first (populated only by the
@@ -24,7 +19,7 @@ from fastapi import APIRouter, Depends, HTTPException, Path as PathParam
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
-from app import models
+from app import generated_files, models
 from app.auth_helpers import TokenSource, get_auth_token_source
 from app.config import get_settings
 from app.database import get_db
@@ -72,8 +67,21 @@ def serve_generated_file(
   if row is None:
     raise HTTPException(status_code=404, detail="File not found.")
 
-  cwd = _chat_cwd(db, chat_id)
-  file_path = validate_path_within_base(row.path, pathlib.Path(cwd))
+  # New generated files live in a chat-private namespace under data_dir. Keep
+  # resolving historical rows against the original chat cwd so existing
+  # download chips remain valid after the provenance-safe migration.
+  data_dir = get_settings().data_dir
+  generated_prefix = (
+    generated_files.output_dir(data_dir, chat_id)
+    .relative_to(pathlib.Path(data_dir))
+    .as_posix() + "/"
+  )
+  base = (
+    data_dir
+    if row.path.startswith(generated_prefix)
+    else _chat_cwd(db, chat_id)
+  )
+  file_path = validate_path_within_base(row.path, pathlib.Path(base))
   if not file_path.exists() or not file_path.is_file():
     raise HTTPException(status_code=404, detail="File not found.")
 
