@@ -2969,7 +2969,7 @@ async def get_icon(
 async def delete_app(
   app_id: int,
   db: Session = Depends(get_db),
-  _: models.Owner = Depends(get_owner_or_app_with_manage_apps),
+  owner: models.Owner = Depends(get_owner_or_app_with_manage_apps),
 ):
   """Soft-deletes (tombstones) a mini-app — sets deleted_at and drops its cron,
   PRESERVING the source tree and the id-keyed runtime storage tree.
@@ -3068,7 +3068,7 @@ async def delete_app(
         app_source_dir = app.source_dir
         recovery_notification_id = stage_recovery_notification(
           db,
-          owner_id=_.id,
+          owner_id=owner.id,
           resource_type="app",
           resource_id=str(app_id),
           deleted_at=app.deleted_at,
@@ -3247,7 +3247,7 @@ async def recover_app(
   app_id: int,
   body: schemas.RecoveryRequest | None = None,
   db: Session = Depends(get_db),
-  _: models.Owner = Depends(get_owner_or_app_with_manage_apps),
+  owner: models.Owner = Depends(get_owner_or_app_with_manage_apps),
 ):
   """Restores a soft-deleted app if the TTL window hasn't expired.
 
@@ -3283,7 +3283,7 @@ async def recover_app(
       raise HTTPException(404, "App not found.")
     if body is not None:
       completed_at = validate_recovery_action(
-        db, owner_id=_.id, notification_id=body.notification_id,
+        db, owner_id=owner.id, notification_id=body.notification_id,
         resource_type="app", resource_id=str(app_id), deleted_at=app.deleted_at,
       )
       already_completed = completed_at is not None
@@ -3314,7 +3314,7 @@ async def recover_app(
         if body is not None:
           completed_at = complete_recovery_action(
             db,
-            owner_id=_.id,
+            owner_id=owner.id,
             notification_id=body.notification_id,
             resource_type="app",
             resource_id=str(app_id),

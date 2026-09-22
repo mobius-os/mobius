@@ -2074,7 +2074,7 @@ def patch_project(
 )
 async def delete_project(
   project_id: str,
-  _: models.Owner = Depends(get_current_owner_for_lifecycle_control),
+  owner: models.Owner = Depends(get_current_owner_for_lifecycle_control),
   db: Session = Depends(get_db),
 ):
   # The receipt is readable as soon as the tombstone commits. Recovery must
@@ -2122,7 +2122,7 @@ async def delete_project(
           chat.deleted_at = deleted_at
         recovery_notification_id = stage_recovery_notification(
           db,
-          owner_id=_.id,
+          owner_id=owner.id,
           resource_type="project",
           resource_id=str(project.id),
           deleted_at=project.deleted_at,
@@ -2159,7 +2159,7 @@ async def delete_project(
 async def recover_project(
   project_id: str,
   body: schemas.RecoveryRequest | None = None,
-  _: models.Owner = Depends(get_current_owner_for_lifecycle_control),
+  owner: models.Owner = Depends(get_current_owner_for_lifecycle_control),
   db: Session = Depends(get_db),
 ):
   async with serialize_project_lifecycle(project_id):
@@ -2175,7 +2175,7 @@ async def recover_project(
           raise HTTPException(404, "Project not found.")
         if body is not None:
           completed_at = validate_recovery_action(
-            db, owner_id=_.id, notification_id=body.notification_id,
+            db, owner_id=owner.id, notification_id=body.notification_id,
             resource_type="project", resource_id=str(project_id),
             deleted_at=project.deleted_at,
           )
@@ -2202,7 +2202,7 @@ async def recover_project(
           if body is not None:
             completed_at = complete_recovery_action(
               db,
-              owner_id=_.id,
+              owner_id=owner.id,
               notification_id=body.notification_id,
               resource_type="project",
               resource_id=str(project.id),

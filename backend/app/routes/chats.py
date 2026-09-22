@@ -2266,7 +2266,7 @@ def get_current_chat_usage(
 )
 async def delete_chat(
   chat_id: str,
-  _: models.Owner = Depends(get_current_owner_for_lifecycle_control),
+  owner: models.Owner = Depends(get_current_owner_for_lifecycle_control),
   db: Session = Depends(get_db),
 ):
   """Soft-deletes a chat and stops any running agent for it."""
@@ -2347,7 +2347,7 @@ async def delete_chat(
           chat.deleted_at = now_naive_utc()
           recovery_notification_id = stage_recovery_notification(
             db,
-            owner_id=_.id,
+            owner_id=owner.id,
             resource_type="chat",
             resource_id=str(chat_id),
             deleted_at=chat.deleted_at,
@@ -2408,7 +2408,7 @@ async def delete_chat(
       try:
         send_work_claim_notice(
           db,
-          owner_id=_.id,
+          owner_id=owner.id,
           claim_id=released.claim_id,
           revision=released.revision,
           sender_chat_id=chat_id,
@@ -2449,7 +2449,7 @@ async def delete_chat(
 async def recover_chat(
   chat_id: str,
   body: schemas.RecoveryRequest | None = None,
-  _: models.Owner = Depends(get_current_owner_for_lifecycle_control),
+  owner: models.Owner = Depends(get_current_owner_for_lifecycle_control),
   db: Session = Depends(get_db),
 ):
   """Restores a soft-deleted chat if the TTL window has not expired."""
@@ -2477,7 +2477,7 @@ async def recover_chat(
           })
         if body is not None:
           completed_at = validate_recovery_action(
-            db, owner_id=_.id, notification_id=body.notification_id,
+            db, owner_id=owner.id, notification_id=body.notification_id,
             resource_type="chat", resource_id=str(chat_id), deleted_at=chat.deleted_at,
           )
           already_completed = completed_at is not None
@@ -2489,7 +2489,7 @@ async def recover_chat(
           chat.deleted_at = None
           if body is not None:
             completed_at = complete_recovery_action(
-              db, owner_id=_.id, notification_id=body.notification_id,
+              db, owner_id=owner.id, notification_id=body.notification_id,
               resource_type="chat", resource_id=str(chat_id),
             )
           db.commit()

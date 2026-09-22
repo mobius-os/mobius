@@ -65,6 +65,67 @@ def _delete(client, auth, db, resource):
   return receipt
 
 
+@pytest.mark.parametrize("kind", ["chat", "project"])
+def test_running_resource_delete_keeps_receipt_bound_to_owner(
+  client, auth, db, monkeypatch, kind,
+):
+  """Stop-result throwaways must not replace the authenticated owner."""
+  owner = db.query(models.Owner).one()
+  chat = models.Chat(id=str(uuid4()), title="Running recovery chat")
+  if kind == "chat":
+    row = chat
+    url = f"/api/chats/{chat.id}"
+  else:
+    project_id = str(uuid4())
+    root_path = f"projects/{project_id}"
+    (Path(get_settings().data_dir) / root_path).mkdir(parents=True)
+    row = models.Project(
+      id=project_id,
+      name="Running recovery project",
+      project_type="blank",
+      root_path=root_path,
+      template_snapshot_json={},
+    )
+    chat.project_id = project_id
+    url = f"/api/projects/{project_id}"
+    db.add(row)
+  db.add(chat)
+  db.commit()
+
+  route = import_module(f"app.routes.{kind}s")
+  stop = AsyncMock(return_value=(True, ["cleared-pending-cid"]))
+  finish = AsyncMock()
+  running_checks = iter([True, False])
+  monkeypatch.setattr(
+    route, "is_chat_running", lambda _chat_id: next(running_checks, False),
+  )
+  monkeypatch.setattr(route, "stop_chat_for", stop)
+  monkeypatch.setattr(route, "_finish_run", finish)
+
+  response = client.delete(url, headers=auth)
+
+  assert response.status_code == 204, response.text
+  receipt_id = response.headers["X-Recovery-Notification-Id"]
+  stop.assert_awaited_once()
+  finish.assert_awaited_once_with(chat.id, terminal_status="stopped")
+  db.expire_all()
+  deleted_at = db.get(type(row), row.id).deleted_at
+  assert deleted_at is not None
+  receipt = db.get(models.Notification, receipt_id)
+  assert receipt.owner_id == owner.id
+
+  # A lost-response retry may re-enter chat cleanup or discover the project is
+  # already absent, but it must never move the tombstone or mint a new receipt.
+  retry = client.delete(url, headers=auth)
+  assert retry.status_code == (204 if kind == "chat" else 404), retry.text
+  db.expire_all()
+  assert db.get(type(row), row.id).deleted_at == deleted_at
+  assert db.get(models.Notification, receipt_id) is not None
+  assert db.query(models.Notification).filter(
+    models.Notification.title == f"{kind.capitalize()} deleted",
+  ).count() == 1
+
+
 @pytest.mark.parametrize("complete_first_receipt", [False, True])
 def test_old_receipt_cannot_restore_a_later_deletion(
   client, auth, db, resource, complete_first_receipt,
