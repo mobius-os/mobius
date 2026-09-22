@@ -4696,13 +4696,9 @@ async def run_chat(
     except Exception:
       _get_logger().debug("chat-note guarantee skipped", exc_info=True)
     if runtime_settled and disposition in _NOTE_SETTLED_DISPOSITIONS:
-      # A provider turn can fault hundreds of megabytes of compiler, browser,
-      # CLI, and source-control pages into a metered container. Linux keeps
-      # those clean pages hot after the child exits, and Railway accounts them
-      # in the service's memory total. Reclaim only known tool/source trees;
-      # file_cache skips anything another live process still maps. Databases,
-      # app data, shared files, and credentials are intentionally outside the
-      # sweep. Trim the server allocator after the same settled boundary.
+      # Release settled tool/source pages and allocator arenas. Source sweeps
+      # protect live mappings and exclude owner data; tool advice may release
+      # unused pages of shared executables.
       try:
         from app.allocator import trim_glibc
         from app.file_cache import reclaim_settled_cache

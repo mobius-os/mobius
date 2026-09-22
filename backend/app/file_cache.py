@@ -9,10 +9,10 @@ mapped files; exact tool executables may advise unused pages even when shared.
 
 from __future__ import annotations
 
-import os
-import shutil
 import asyncio
 import logging
+import os
+import shutil
 import stat
 import time
 from collections.abc import Iterable
@@ -37,7 +37,7 @@ def _cached_file_bytes() -> int | None:
 def _mapped_file_identities(proc_root: Path = Path("/proc")) -> set[tuple[int, int, int]]:
   mapped: set[tuple[int, int, int]] = set()
   try:
-    processes = proc_root.iterdir()
+    processes = list(proc_root.iterdir())
   except OSError:
     return mapped
   for process in processes:
@@ -72,7 +72,6 @@ def _files(paths: Iterable[Path]):
     except OSError:
       continue
     for base, _dirs, names in os.walk(root):
-      _dirs[:] = [name for name in _dirs if not (Path(base) / name).is_symlink()]
       for name in names:
         yield Path(base) / name
 
@@ -138,7 +137,7 @@ def reclaim_file_cache(
 
 
 def frontend_tool_paths(frontend_dir: str | Path) -> tuple[Path, ...]:
-  roots = [Path(frontend_dir) / "node_modules"]
+  roots = [(Path(frontend_dir) / "node_modules").resolve()]
   node = shutil.which("node")
   if node:
     roots.append(Path(node).resolve())
@@ -193,22 +192,17 @@ def settled_turn_paths(data_dir: str | Path, chat_id: str) -> tuple[Path, ...]:
     data / "platform" / "frontend" / ".assets-attic",
     data / "agent-browser-profiles" / f"chat-{chat_id}",
   ]
-  for parent in (data / "contrib", data / "worktrees", data / "apps"):
-    try:
-      children = list(parent.iterdir())
-    except OSError:
-      continue
-    for child in children:
-      if child.is_symlink():
+  for pattern in ('contrib/*/worktree', 'contrib/*', 'worktrees/*', 'apps/*'):
+    for checkout in data.glob(pattern):
+      if checkout.is_symlink() or checkout.parent.is_symlink():
         continue
-      git = child / ".git"
+      git = checkout / '.git'
       if git.exists():
         roots.append(git)
-        # Mini-app data is not a source cache. Managed development checkouts
-        # have the same explicit source/build layout as the platform itself.
-        if parent != data / 'apps':
-          roots.extend((child / 'backend', child / 'frontend' / 'src',
-                        child / 'frontend' / 'dist'))
+        if checkout.parent != data / 'apps':
+          roots.extend(checkout / path for path in (
+            'backend', 'frontend/src', 'frontend/dist',
+          ))
   return tuple(roots)
 
 

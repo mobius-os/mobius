@@ -149,3 +149,42 @@ def test_provider_cleanup_runs_off_event_loop_and_failure_does_not_escape(monkey
   asyncio.run(file_cache.reclaim_provider_cache('codex'))
   assert len(threads) == 1
   assert threads[0] != loop_thread
+
+
+def test_build_cleanup_follows_owned_dependency_symlink(tmp_path, monkeypatch):
+  frontend = tmp_path / 'frontend'
+  baked = tmp_path / 'baked-dependencies'
+  frontend.mkdir()
+  baked.mkdir()
+  dependency = baked / 'compiler.js'
+  dependency.write_bytes(b'x' * 4096)
+  (frontend / 'node_modules').symlink_to(baked, target_is_directory=True)
+  monkeypatch.setattr(file_cache.shutil, 'which', lambda _: None)
+  advised = []
+  monkeypatch.setattr(os, 'posix_fadvise', lambda fd, *args: advised.append(os.fstat(fd).st_ino))
+  result = file_cache.reclaim_file_cache(file_cache.frontend_tool_paths(frontend))
+  assert advised == [dependency.stat().st_ino]
+  assert result['files'] == 1
+
+
+def test_contribution_checkout_sources_are_covered(tmp_path):
+  checkout = tmp_path / 'contrib' / 'review' / 'worktree'
+  checkout.mkdir(parents=True)
+  (checkout / '.git').write_text('gitdir: elsewhere')
+  paths = file_cache.settled_turn_paths(tmp_path, 'test')
+  assert all(checkout / relative in paths for relative in (
+    '.git', 'backend', 'frontend/src', 'frontend/dist',
+  ))
+
+
+def test_symlinked_directory_is_not_traversed(tmp_path, monkeypatch):
+  source = tmp_path / 'source'
+  outside = tmp_path / 'outside'
+  source.mkdir()
+  outside.mkdir()
+  (outside / 'file').write_bytes(b'x' * 4096)
+  (source / 'linked').symlink_to(outside, target_is_directory=True)
+  calls = []
+  monkeypatch.setattr(os, 'posix_fadvise', lambda *args: calls.append(args))
+  assert file_cache.reclaim_file_cache([source])['files'] == 0
+  assert calls == []
