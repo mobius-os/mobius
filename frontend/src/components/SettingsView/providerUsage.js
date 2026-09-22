@@ -55,6 +55,22 @@ export function bankedResetCredits(snapshot) {
   return { availableCount: count, credits }
 }
 
+export function claudeResetCredits(snapshot) {
+  const summary = snapshot?.reset_credits
+  if (!summary || typeof summary !== 'object') return null
+  const count = Number(summary.available_count)
+  if (!Number.isFinite(count) || count < 0) return null
+  return {
+    availableCount: count,
+    credits: Array.isArray(summary.credits) ? summary.credits : [],
+    eligible: summary.eligible === true,
+    redeemable: summary.redeemable === true,
+    nextCreditId: typeof summary.next_credit_id === 'string'
+      ? summary.next_credit_id
+      : null,
+  }
+}
+
 export function soonestResetExpiry(credits) {
   if (!Array.isArray(credits)) return null
   const times = credits
@@ -88,6 +104,24 @@ export function redeemOutcomeMessage(outcome) {
       return { tone: 'info', text: 'That reset was already redeemed.' }
     default:
       return { tone: 'error', text: 'Couldn’t redeem the reset. Try again shortly.' }
+  }
+}
+
+export function claudeRedeemOutcomeMessage(outcome) {
+  switch (outcome) {
+    case 'reset':
+      return { tone: 'success', text: 'Reset applied — Claude is checking your refreshed limits.' }
+    case 'already_used':
+      return { tone: 'info', text: 'That reset was already used — nothing else was spent.' }
+    case 'not_limited':
+      return { tone: 'info', text: 'Your limits are already clear — no reset was spent.' }
+    case 'cooldown':
+      return { tone: 'info', text: 'A Claude reset is already being applied.' }
+    case 'ineligible':
+    case 'unavailable':
+      return { tone: 'info', text: 'That reset is no longer available.' }
+    default:
+      return { tone: 'error', text: 'Couldn’t redeem the Claude reset. Try again shortly.' }
   }
 }
 

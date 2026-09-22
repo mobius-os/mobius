@@ -3592,6 +3592,10 @@ def test_read_delegation_turn_keeps_files_read_only_and_allows_proxy_network():
   captured = {}
 
   class FakeClient:
+    def _subscribe_turn_notifications(self, turn_id):
+      captured["subscribed_turn_id"] = turn_id
+      return SimpleNamespace()
+
     async def turn_start(self, thread_id, wire_input, *, params):
       captured.update(
         thread_id=thread_id,
@@ -3622,6 +3626,7 @@ def test_read_delegation_turn_keeps_files_read_only_and_allows_proxy_network():
 
   policy = captured["params"].sandbox_policy.root
   assert captured["initialized"] is True
+  assert captured["subscribed_turn_id"] == "turn-read-network"
   assert handle.id == "turn-read-network"
   assert policy.type == "readOnly"
   assert policy.network_access is True

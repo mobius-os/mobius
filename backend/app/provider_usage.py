@@ -1,9 +1,9 @@
 """Provider-plan usage snapshots for Settings and the chat brain.
 
-Reads are the common case. The one mutation here is redeeming a banked Codex
-rate-limit reset, which rides the same official Codex app-server client the
-usage read uses (`account/rateLimitResetCredit/consume`), never a hand-rolled
-HTTP call to an undocumented backend.
+Reads are the common case. Mutations are deliberately narrow: Codex reset
+redemption rides its official app-server client, while Claude's guarded
+extra-usage and limit-reset controls mirror private routes used by Claude Code.
+Every irreversible reset claim is revalidated against a fresh provider offer.
 """
 
 from __future__ import annotations
@@ -30,7 +30,18 @@ from app.runtime_identity import broker_request
 
 log = logging.getLogger(__name__)
 
-_CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
+_CLAUDE_EXTRA_USAGE_URL = (
+  "https://api.anthropic.com/api/oauth/organizations/"
+  "{organization_uuid}/overage_spend_limit"
+)
+_CLAUDE_RESET_USAGE_URL = (
+  "https://api.anthropic.com/api/oauth/usage?cedar_ember=1&skip_spend=1"
+)
+_CLAUDE_RESET_URL = (
+  "https://api.anthropic.com/api/organizations/"
+  "{organization_uuid}/reset_rate_limits"
+)
+_CLAUDE_RESET_PROGRAM = "cedar_ember"
 _PROVIDER_TIMEOUT_SECONDS = 12.0
 _PROVIDER_USAGE_FRESH_SECONDS = 2.0
 _PROVIDER_USAGE_STALE_SECONDS = 10 * 60.0
@@ -203,6 +214,7 @@ def normalize_claude_usage(
     "enabled": extra_enabled,
     "available": extra_available,
     "used_percent": extra_used,
+    "manageable": isinstance(raw_extra.get("is_enabled"), bool),
   }
   return {
     "state": "ready" if windows else "unavailable",
@@ -210,6 +222,72 @@ def normalize_claude_usage(
     "windows": windows,
     "credit_balance": None,
     "extra_usage": extra_usage,
+    "reset_credits": _claude_reset_credits(source.get("cedar_ember")),
+  }
+
+
+def _claude_reset_credits(summary: Any) -> dict[str, Any] | None:
+  """Normalize Claude Code's private ``cedar_ember`` reset offer.
+
+  The provider chooses the next grant and reports whether it is usable now.
+  Möbius never guesses eligibility from the visible usage percentages: only a
+  currently selected, provider-marked usable grant becomes redeemable.
+  """
+  if not isinstance(summary, dict) or not isinstance(summary.get("eligible"), bool):
+    return None
+  raw_grants = summary.get("grants")
+  raw_grants = raw_grants if isinstance(raw_grants, list) else []
+  grants: list[dict[str, Any]] = []
+  total = 0
+  for raw in raw_grants:
+    if not isinstance(raw, dict):
+      continue
+    grant_id = raw.get("id")
+    resets_left = raw.get("resets_left")
+    if (
+      not isinstance(grant_id, str)
+      or not grant_id
+      or isinstance(resets_left, bool)
+      or not isinstance(resets_left, int)
+      or resets_left < 0
+    ):
+      continue
+    total += resets_left
+    grants.append({
+      "id": grant_id,
+      "title": raw.get("label") if isinstance(raw.get("label"), str) else None,
+      "resets_left": resets_left,
+      "expires_at": _reset_iso(raw.get("ends_at")),
+      "usable_now": raw.get("usable_now") is True,
+      "use_requires_limit": raw.get("use_requires_limit") is not False,
+      "paused": raw.get("paused") is True,
+      "clears": [
+        value for value in raw.get("clears", [])
+        if isinstance(value, str)
+      ] if isinstance(raw.get("clears"), list) else [],
+    })
+  next_id = summary.get("next_grant_id")
+  selected = next((grant for grant in grants if grant["id"] == next_id), None)
+  redeemable = bool(
+    summary.get("eligible") is True
+    and selected is not None
+    and selected["resets_left"] > 0
+    and selected["usable_now"] is True
+    and selected["paused"] is False
+  )
+  return {
+    "available_count": total,
+    "credits": grants,
+    "eligible": summary.get("eligible") is True,
+    "ineligible_reason": (
+      summary.get("ineligible_reason")
+      if isinstance(summary.get("ineligible_reason"), str) else None
+    ),
+    "at_limit": summary.get("at_limit") is True,
+    "next_credit_id": selected["id"] if selected is not None else None,
+    "redeemable": redeemable,
+    "weekly_resets_at": _reset_iso(summary.get("weekly_resets_at")),
+    "cooldown_until": _reset_iso(summary.get("cooldown_until")),
   }
 
 
@@ -435,12 +513,97 @@ async def _fetch_claude_usage(data_dir: str) -> dict[str, Any]:
     "Content-Type": "application/json",
   }
   async with httpx.AsyncClient(timeout=5.0) as client:
-    response = await client.get(_CLAUDE_USAGE_URL, headers=headers)
+    response = await client.get(_CLAUDE_RESET_USAGE_URL, headers=headers)
     response.raise_for_status()
     return normalize_claude_usage(
       response.json(),
       subscription_type=subscription_type,
     )
+
+
+async def set_claude_extra_usage(
+  data_dir: str,
+  *,
+  enabled: bool,
+) -> dict[str, Any]:
+  """Toggle an already-provisioned Claude extra-usage allowance.
+
+  Claude Code 2.1.273 uses this exact route for its reversible overage
+  switch. First-time setup is deliberately excluded because it also chooses
+  a spend limit and payment method, which remain provider-owned.
+  """
+  token = await providers.claude_access_token(data_dir)
+  organization_uuid = providers.claude_organization_uuid(data_dir)
+  headers = {
+    "Authorization": f"Bearer {token}",
+    "anthropic-version": "2023-06-01",
+    "anthropic-beta": "oauth-2025-04-20",
+    "Content-Type": "application/json",
+  }
+  async with httpx.AsyncClient(timeout=12.0) as client:
+    response = await client.put(
+      _CLAUDE_EXTRA_USAGE_URL.format(
+        organization_uuid=organization_uuid,
+      ),
+      headers=headers,
+      json={"is_enabled": enabled},
+    )
+    response.raise_for_status()
+  _provider_usage_cache.pop((str(Path(data_dir).resolve()), "claude"), None)
+  return await read_provider_usage("claude", data_dir)
+
+
+async def redeem_claude_reset(
+  data_dir: str,
+  *,
+  credit_id: str,
+) -> dict[str, Any]:
+  """Redeem one provider-selected Claude limit reset without retrying.
+
+  This mirrors Claude Code 2.1.277's private ``cedar_ember`` claim request.
+  The Settings route performs the fresh eligibility/grant check immediately
+  before calling here; the unique request id makes the provider operation
+  distinguishable without risking a client-side replay.
+  """
+  token = await providers.claude_access_token(data_dir)
+  organization_uuid = providers.claude_organization_uuid(data_dir)
+  headers = {
+    "Authorization": f"Bearer {token}",
+    "anthropic-version": "2023-06-01",
+    "anthropic-beta": "oauth-2025-04-20",
+    "Content-Type": "application/json",
+  }
+  async with httpx.AsyncClient(timeout=25.0) as client:
+    response = await client.post(
+      _CLAUDE_RESET_URL.format(organization_uuid=organization_uuid),
+      headers=headers,
+      json={
+        "program": _CLAUDE_RESET_PROGRAM,
+        "grant_id": credit_id,
+        "request_id": str(uuid.uuid4()),
+      },
+    )
+    response.raise_for_status()
+    payload = response.json()
+  source = payload if isinstance(payload, dict) else {}
+  outcome = source.get("result")
+  allowed = {
+    "reset", "already_used", "not_limited", "cooldown", "ineligible",
+    "unavailable",
+  }
+  _provider_usage_cache.pop((str(Path(data_dir).resolve()), "claude"), None)
+  return {
+    "outcome": outcome if outcome in allowed else "unavailable",
+    "reason": source.get("reason") if isinstance(source.get("reason"), str) else None,
+    "resets_left": (
+      source.get("resets_left")
+      if isinstance(source.get("resets_left"), int) else None
+    ),
+    "cleared": [
+      value for value in source.get("cleared", []) if isinstance(value, str)
+    ] if isinstance(source.get("cleared"), list) else [],
+    "weekly_resets_at": _reset_iso(source.get("weekly_resets_at")),
+  }
 
 
 def _codex_plan_type(account_response: Any) -> Any:
@@ -732,6 +895,8 @@ def configured_plan_labels(data_dir: str) -> dict[str, str]:
 async def read_provider_usage(
   provider_id: str,
   data_dir: str,
+  *,
+  force_refresh: bool = False,
 ) -> dict[str, Any]:
   """Return one coalesced provider usage observation with bounded fallback.
 
@@ -741,14 +906,18 @@ async def read_provider_usage(
   past either the stale bound or a provider reset.
   """
   key = _cache_key(provider_id, data_dir)
-  cached = _cached_usage(key, max_age=_PROVIDER_USAGE_FRESH_SECONDS)
+  cached = None if force_refresh else _cached_usage(
+    key, max_age=_PROVIDER_USAGE_FRESH_SECONDS,
+  )
   if cached is not None:
     return cached
 
   lock = _provider_usage_locks.setdefault(key, asyncio.Lock())
   async with lock:
     # Another request may have refreshed while this one waited.
-    cached = _cached_usage(key, max_age=_PROVIDER_USAGE_FRESH_SECONDS)
+    cached = None if force_refresh else _cached_usage(
+      key, max_age=_PROVIDER_USAGE_FRESH_SECONDS,
+    )
     if cached is not None:
       return cached
 
@@ -772,7 +941,8 @@ async def read_provider_usage(
     prior = _provider_usage_cache.get(key)
     now = time.monotonic()
     if (
-      prior is not None
+      not force_refresh
+      and prior is not None
       and prior.snapshot.get("state") == "ready"
       and now - prior.observed_at <= _PROVIDER_USAGE_STALE_SECONDS
       and _snapshot_resets_are_current(prior.snapshot)

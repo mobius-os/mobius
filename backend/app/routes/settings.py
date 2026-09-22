@@ -18,6 +18,7 @@ import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
 from pydantic import BaseModel
@@ -243,6 +244,63 @@ class RedeemResetBody(BaseModel):
   credit_id: str | None = None
 
 
+class ClaudeExtraUsageBody(BaseModel):
+  enabled: bool
+  expected_enabled: bool
+  confirm: bool = False
+
+
+@settings_router.post(
+  "/provider-usage/claude/extra-usage",
+  dependencies=[Depends(reject_cross_site)],
+)
+async def set_claude_extra_usage(
+  body: ClaudeExtraUsageBody,
+  _: models.Owner = Depends(get_current_owner_for_lifecycle_control),
+) -> dict:
+  """Deliberately toggle an existing Claude extra-usage allowance."""
+  if not body.confirm:
+    raise HTTPException(status_code=400, detail="Confirmation is required.")
+  data_dir = get_app_settings().data_dir
+  current = await provider_usage.read_provider_usage(
+    "claude", data_dir, force_refresh=True,
+  )
+  extra = current.get("extra_usage") if isinstance(current, dict) else None
+  if not isinstance(extra, dict) or extra.get("manageable") is not True:
+    raise HTTPException(
+      status_code=409,
+      detail="Set up usage credits in Claude before changing them here.",
+    )
+  if extra.get("enabled") is not body.expected_enabled:
+    raise HTTPException(
+      status_code=409,
+      detail="Claude extra usage changed. Refresh Settings and try again.",
+    )
+  if body.enabled is body.expected_enabled:
+    return current
+  try:
+    updated = await provider_usage.set_claude_extra_usage(
+      data_dir,
+      enabled=body.enabled,
+    )
+  except (OSError, RuntimeError, httpx.HTTPError) as exc:
+    logger.warning("Claude extra usage update failed: %s", exc)
+    raise HTTPException(
+      status_code=502,
+      detail="Claude could not change extra usage. Manage it on claude.ai.",
+    ) from exc
+  updated_extra = updated.get("extra_usage")
+  if (
+    not isinstance(updated_extra, dict)
+    or updated_extra.get("enabled") is not body.enabled
+  ):
+    raise HTTPException(
+      status_code=409,
+      detail="Claude has not confirmed the extra-usage change yet.",
+    )
+  return updated
+
+
 @settings_router.post(
   "/provider-usage/codex/redeem-reset",
   dependencies=[Depends(reject_cross_site)],
@@ -267,6 +325,50 @@ async def redeem_codex_reset(
     raise HTTPException(
       status_code=502,
       detail="Couldn't reach Codex to redeem the reset. Try again shortly.",
+    ) from exc
+
+
+@settings_router.post(
+  "/provider-usage/claude/redeem-reset",
+  dependencies=[Depends(reject_cross_site)],
+)
+async def redeem_claude_reset(
+  body: RedeemResetBody | None = None,
+  _: models.Owner = Depends(get_current_owner_for_lifecycle_control),
+) -> dict:
+  """Redeem the exact Claude limit reset currently offered to this account."""
+  if body is None or not body.confirm:
+    raise HTTPException(
+      status_code=400,
+      detail="Redeeming a banked reset requires explicit confirmation.",
+    )
+  if not isinstance(body.credit_id, str) or not body.credit_id:
+    raise HTTPException(status_code=409, detail="Claude did not offer a reset.")
+
+  data_dir = get_app_settings().data_dir
+  current = await provider_usage.read_provider_usage(
+    "claude", data_dir, force_refresh=True,
+  )
+  resets = current.get("reset_credits") if isinstance(current, dict) else None
+  if (
+    not isinstance(resets, dict)
+    or resets.get("redeemable") is not True
+    or resets.get("next_credit_id") != body.credit_id
+  ):
+    raise HTTPException(
+      status_code=409,
+      detail="Claude's reset offer changed. Refresh Settings and try again.",
+    )
+  try:
+    return await provider_usage.redeem_claude_reset(
+      data_dir,
+      credit_id=body.credit_id,
+    )
+  except (OSError, RuntimeError, httpx.HTTPError) as exc:
+    logger.warning("Claude reset redeem failed: %s", exc)
+    raise HTTPException(
+      status_code=502,
+      detail="Claude could not redeem the reset. Try again shortly.",
     ) from exc
 
 
