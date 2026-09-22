@@ -2360,6 +2360,63 @@ def test_serve_connection_reconnects_immediately_after_healthy_rotation(
   assert posted and posted[-1]["stdout"] == "Connect daemon removed."
 
 
+def test_serve_connection_backs_off_after_slow_open_then_early_eof(
+  monkeypatch,
+):
+  """Handshake time must not make an immediate EOF look like a healthy stream."""
+  opened = []
+  sleeps = []
+  monotonic_values = iter([0, 20, 20, 20])
+
+  def fake_monotonic():
+    return next(monotonic_values, 20)
+
+  class ClosedStream:
+    def __enter__(self):
+      return self
+
+    def __exit__(self, *exc):
+      return False
+
+    def __iter__(self):
+      return iter(())
+
+  class DisconnectStream:
+    def __enter__(self):
+      return self
+
+    def __exit__(self, *exc):
+      return False
+
+    def __iter__(self):
+      return iter([b'data: {"type":"disconnect","request_id":"z"}\n\n'])
+
+  def fake_open(request, **kwargs):
+    opened.append(request.full_url)
+    # Simulate a 20-second handshake before the first response opens.
+    if len(opened) == 1:
+      connect_runner.time.monotonic()
+    return ClosedStream() if len(opened) == 1 else DisconnectStream()
+
+  monkeypatch.setattr(connect_runner, "_open_url", fake_open)
+  monkeypatch.setattr(connect_runner.time, "monotonic", fake_monotonic)
+  monkeypatch.setattr(connect_runner.time, "sleep", sleeps.append)
+  monkeypatch.setattr(
+    connect_runner, "_uninstall_service", lambda stop_running: None,
+  )
+  monkeypatch.setattr(
+    connect_runner, "_remove_connection", lambda url, host_id: 0,
+  )
+  monkeypatch.setattr(connect_runner, "_post", lambda *args, **kwargs: None)
+
+  connect_runner._serve_connection({
+    "url": "https://live.test", "host_id": "h_live", "token": "token",
+  })
+
+  assert len(opened) == 2
+  assert sleeps == [1]
+
+
 def test_serve_all_respawns_and_stops_removed_connections(monkeypatch):
   """The supervisor must respawn a connection whose thread exits and signal a
   connection removed from config to stop, without respawning it afterwards."""

@@ -857,10 +857,13 @@ def _serve_connection(conn, command_gate=None, stop_event=None):
             req = urllib.request.Request(stream_url)
             req.add_header("Authorization", "Bearer " + token)
             req.add_header("Accept", "text/event-stream")
-            stream_opened_at = time.monotonic()
             with _open_url(
                 req, timeout=STREAM_READ_TIMEOUT_SECONDS, context=ctx,
             ) as stream:
+                # Start the health window only after the response is open.
+                # A slow DNS/TLS/HTTP handshake followed by an immediate EOF
+                # is still an early failure and must retain retry backoff.
+                stream_opened_at = time.monotonic()
                 print("Connected. This machine is now reachable from Mobius.")
                 backoff = 1
                 commands.flush_pending_results()
