@@ -275,6 +275,7 @@ export default function SettingsView({
   active = true,
   refreshToken = 0,
 }) {
+  const settingsBoundaryRef = useRef(null)
   const queryClient = useQueryClient()
   const settingsQuery = settingsQueries.owner.useQuery()
   const providerStatusQuery = authQueries.provider.statuses.useQuery()
@@ -937,7 +938,7 @@ export default function SettingsView({
   )
 
   return (
-    <div className="settings">
+    <div ref={settingsBoundaryRef} className="settings">
       <div className="settings__content">
         <h1 className="settings__title">Settings</h1>
 
@@ -1194,7 +1195,7 @@ export default function SettingsView({
           )}
         </section>
 
-        <PlatformUpdates active={active} refreshToken={refreshToken} onOpenChat={onOpenChat} />
+        <PlatformUpdates active={active} refreshToken={refreshToken} onOpenChat={onOpenChat} inertBoundaryRef={settingsBoundaryRef} />
 
         <section className="settings__section settings__section--compact">
           <div className="settings__row">

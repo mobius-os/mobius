@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { dialogFocusableElements } from '../../../../hooks/useDialogFocus.js'
+import { dialogFocusableElements, dialogSiblingElements } from '../../../../hooks/useDialogFocus.js'
 
 function visibleElement(overrides = {}) {
   return {
@@ -32,4 +32,22 @@ test('dialog focus traversal ignores hidden or unrendered controls', () => {
   }
 
   assert.deepEqual(dialogFocusableElements(container), [visible])
+})
+
+test('local dialog inerting stops at its owning surface boundary', () => {
+  const outsideSettings = {}
+  const settings = { parentElement: null }
+  const content = { parentElement: settings }
+  const section = { parentElement: content }
+  const dialog = { parentElement: section }
+  const settingsControl = {}
+  const otherSettingsSection = {}
+  Object.assign(section, { children: [dialog, settingsControl] })
+  Object.assign(content, { children: [section, otherSettingsSection] })
+  Object.assign(settings, { children: [content] })
+  // The outside sibling is intentionally not part of the walk: a pane-local
+  // review must not inert a different workspace pane.
+  settings.parentElement = { children: [settings, outsideSettings] }
+
+  assert.deepEqual(dialogSiblingElements(dialog, settings), [settingsControl, otherSettingsSection])
 })
