@@ -1644,9 +1644,10 @@ async def test_platform_conflict_resolver_preserves_background_choice_effort(
     return True
 
   monkeypatch.setattr(
-    "app.background_agents.resolve_background_provider",
+    "app.background_agents.resolve_background_chat_choice",
     lambda data_dir, session: {
-      "provider": "codex", "model": "gpt-5.5", "effort": "xhigh",
+      "provider": "codex",
+      "agent_settings": {"model": "gpt-5.5", "effort": "xhigh"},
     },
   )
   monkeypatch.setattr(

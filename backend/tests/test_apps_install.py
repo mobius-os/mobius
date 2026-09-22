@@ -3694,9 +3694,10 @@ def test_conflict_resolver_requires_policy_before_materializing_merge(
     fake_start_turn,
   )
   monkeypatch.setattr(
-    "app.background_agents.resolve_background_provider",
+    "app.background_agents.resolve_background_chat_choice",
     lambda data_dir, db: {
-      "provider": "codex", "model": "gpt-5.5", "effort": "xhigh",
+      "provider": "codex",
+      "agent_settings": {"model": "gpt-5.5", "effort": "xhigh"},
     },
   )
   missing_policy = client.post(

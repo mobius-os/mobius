@@ -721,9 +721,9 @@ class ProviderAvailability(Base):
   ``unavailable_reason`` records which limit parked it (``usage_limit`` /
   ``rate_limit``) for observability.
 
-  Written ONLY inside the ``chat_writer`` actor (``_park_run`` sets it; a
-  successful admitted ``_finish_run`` clears an older signal) so the single
-  serialized writer owns it; read by
+  Written ONLY inside the ``chat_writer`` actor (``_park_run`` sets it; an
+  explicit provider-success acknowledgement clears an older signal) so the
+  single serialized writer owns it; read by
   ``background_agents.resolve_background_provider``.
 
   ``create_all`` builds this table on the next boot — a new table needs no ALTER

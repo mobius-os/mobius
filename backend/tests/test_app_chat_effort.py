@@ -57,9 +57,10 @@ def test_automatic_app_chat_preserves_background_choice_effort(
 ):
   _, token = _make_app(client, owner_token, "background-effort")
   monkeypatch.setattr(
-    "app.background_agents.resolve_background_provider",
+    "app.background_agents.resolve_background_chat_choice",
     lambda data_dir, session: {
-      "provider": "codex", "model": "gpt-5.5", "effort": "xhigh",
+      "provider": "codex",
+      "agent_settings": {"model": "gpt-5.5", "effort": "xhigh"},
     },
   )
 

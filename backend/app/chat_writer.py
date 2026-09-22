@@ -351,12 +351,14 @@ class AdmitProviderExecution(_Command):
 
 
 @dataclass
-class AcknowledgePeerContextDelivery(_Command):
-  """Advance the peer inbox only after a provider call returns successfully.
+class AcknowledgeProviderSuccess(_Command):
+  """Commit the exact provider-success boundary for one admitted run.
 
   Provider admission is intentionally earlier: it prevents ambiguous replay
   of an execution attempt. It is not proof that the provider accepted the
-  prompt, so peer delivery has its own later, monotonic acknowledgement.
+  prompt. This later acknowledgement both heals an older provider-limit signal
+  and, when peer context was delivered, advances that delivery cursor in the
+  same writer-owned transaction.
   """
 
   chat_id: str = ""
@@ -1928,8 +1930,8 @@ class ChatWriterActor:
       return self._record_run_metrics(db, cmd)
     if isinstance(cmd, AdmitProviderExecution):
       return self._admit_provider_execution(db, cmd)
-    if isinstance(cmd, AcknowledgePeerContextDelivery):
-      return self._acknowledge_peer_context_delivery(db, cmd)
+    if isinstance(cmd, AcknowledgeProviderSuccess):
+      return self._acknowledge_provider_success(db, cmd)
     if isinstance(cmd, RecordAgentLifecycle):
       from app.agent_lifecycle import record_event
       return record_event(db, cmd.values)
@@ -2481,17 +2483,20 @@ class ChatWriterActor:
     if not _commit_or_rollback(db):
       raise _PersistFailed("AdmitProviderExecution did not persist")
 
-  def _acknowledge_peer_context_delivery(
-    self, db, cmd: AcknowledgePeerContextDelivery,
+  def _acknowledge_provider_success(
+    self, db, cmd: AcknowledgeProviderSuccess,
   ) -> None:
-    """Advance one exact run's peer boundary after provider success."""
+    """Heal availability and optionally advance peer delivery after success."""
     from app.models import ChatRun
 
     delivered_at = cmd.peer_message_through_created_at
     delivered_id = cmd.peer_message_through_id
-    if delivered_at is None or not delivered_id:
+    if (
+      (delivered_at is None) != (delivered_id is None)
+      or (delivered_id is not None and not delivered_id)
+    ):
       raise _PersistFailed(
-        "AcknowledgePeerContextDelivery: peer-message cursor is incomplete"
+        "AcknowledgeProviderSuccess: peer-message cursor is incomplete"
       )
     run = db.query(ChatRun).filter(
       ChatRun.id == cmd.run_token,
@@ -2500,25 +2505,31 @@ class ChatWriterActor:
     ).first()
     if run is None:
       raise _PersistFailed(
-        "AcknowledgePeerContextDelivery: admitted run not found"
+        "AcknowledgeProviderSuccess: admitted run not found"
       )
-    current = None
-    if (
-      run.peer_message_through_created_at is not None
-      and run.peer_message_through_id is not None
-    ):
-      current = (
-        run.peer_message_through_created_at,
-        str(run.peer_message_through_id),
-      )
-    candidate = (delivered_at, delivered_id)
-    if current is not None and candidate <= current:
-      return
-    run.peer_message_through_created_at = delivered_at
-    run.peer_message_through_id = delivered_id
-    run.peer_message_delivery_pending = False
+    if delivered_at is not None and delivered_id:
+      current = None
+      if (
+        run.peer_message_through_created_at is not None
+        and run.peer_message_through_id is not None
+      ):
+        current = (
+          run.peer_message_through_created_at,
+          str(run.peer_message_through_id),
+        )
+      candidate = (delivered_at, delivered_id)
+      if current is None or candidate > current:
+        run.peer_message_through_created_at = delivered_at
+        run.peer_message_through_id = delivered_id
+      run.peer_message_delivery_pending = False
+    from app.provider_availability import (
+      clear_provider_availability_after_success,
+    )
+    clear_provider_availability_after_success(
+      db, run.provider, run.started_at,
+    )
     if not _commit_or_rollback(db):
-      raise _PersistFailed("AcknowledgePeerContextDelivery did not persist")
+      raise _PersistFailed("AcknowledgeProviderSuccess did not persist")
 
   def _stage_activity_delivery_consumption(
     self, db, *, chat_id: str, run_token: str,
@@ -4138,6 +4149,15 @@ class ChatWriterActor:
           "agent_settings_json": chat.agent_settings_json,
         }
 
+    # Visibility can change while the incoming provider synthesizes its
+    # briefing. Recheck at the writer-owned commit boundary so a chat that was
+    # hidden in the meantime never lands a provider mutation. Keep idempotent
+    # retries above this gate: an already-committed switch remains reportable
+    # even if the chat is hidden later.
+    from app.chat_visibility import provider_switch_allowed
+    if not provider_switch_allowed(chat):
+      return {"status": "conflict", "reason": "provider_pinned"}
+
     from app.run_state import has_running_run
     if chat.pending_messages or has_running_run(db, cmd.chat_id):
       return {"status": "conflict", "reason": "busy"}
@@ -4707,17 +4727,6 @@ class ChatWriterActor:
         ChatRun.chat_id == cmd.chat_id,
       ).first()
       if run is not None and run.status in models.NONTERMINAL_RUN_STATUSES:
-        if (
-          run.status == "running"
-          and run.provider_execution_admitted is True
-          and cmd.terminal_status == "completed"
-        ):
-          from app.provider_availability import (
-            clear_provider_availability_after_success,
-          )
-          clear_provider_availability_after_success(
-            db, run.provider, run.started_at,
-          )
         run.status = cmd.terminal_status
         run.ended_at = datetime.now(UTC)
         run.restart_nonce = None

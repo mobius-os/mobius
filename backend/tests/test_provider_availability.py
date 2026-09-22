@@ -152,3 +152,23 @@ def test_prefer_provider_yields_when_that_provider_is_limited(tmp_path, db, monk
     str(tmp_path), db, prefer_provider="codex",
   )
   assert choice["provider"] == "claude"
+
+
+def test_background_chat_choice_keeps_provider_model_and_effort_together(
+  tmp_path, db, monkeypatch,
+):
+  rows = [
+    {"provider": "codex", "model": "gpt-5.5", "effort": "xhigh", "enabled": True},
+  ]
+  _write_bg(tmp_path, rows)
+  _connect_all(monkeypatch)
+
+  choice = bg.resolve_background_chat_choice(str(tmp_path), db)
+
+  assert choice == {
+    "provider": "codex",
+    "agent_settings": {
+      "model": "gpt-5.5",
+      "effort": "xhigh",
+    },
+  }

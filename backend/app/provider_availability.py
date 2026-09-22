@@ -2,7 +2,8 @@
 
 Written only inside the ``chat_writer`` actor (the single serialized persistence
 owner): a turn that parks on a usage/rate limit records the provider's reset
-time, and a successful admitted run clears only a limit no newer than that run.
+time, and an explicit provider-success acknowledgement clears only a limit no
+newer than that run.
 Read by
 ``background_agents.resolve_background_provider`` to skip a provider that is
 currently out of quota when choosing which background/app agent to run.

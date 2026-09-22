@@ -905,23 +905,13 @@ def resolve_round_choice(db: Session, *, prefer_provider: str | None = None) -> 
   quota, so a transient limit blip elsewhere does not fragment the autopilot
   transcript onto a fresh chat.
   """
-  from app.background_agents import resolve_background_provider
+  from app.background_agents import resolve_background_chat_choice
 
   data_dir = get_settings().data_dir
-  choice = resolve_background_provider(
+  choice = resolve_background_chat_choice(
     data_dir, db, prefer_provider=prefer_provider,
   )
-  provider = str(choice["provider"])
-  selection = providers.snapshot_chat_agent_settings(
-    data_dir,
-    provider,
-    model=choice.get("model"),
-    effort=choice.get("effort"),
-    fallback_model=providers.DEFAULT_BACKGROUND_MODELS.get(provider),
-  )
-  if selection is None:
-    raise RuntimeError("Autopilot resolved no explicit background model")
-  return {"provider": provider, **selection}
+  return {"provider": choice["provider"], **choice["agent_settings"]}
 
 
 async def spawn_round_turn(

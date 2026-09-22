@@ -29,7 +29,11 @@ from app import (
   schemas,
   secure_inputs,
 )
-from app.chat_visibility import coerce_agent_settings, visible_in_owner_drawer
+from app.chat_visibility import (
+  coerce_agent_settings,
+  provider_switch_allowed,
+  visible_in_owner_drawer,
+)
 from app.chat_event_sink import active_sink_assistant_message_id
 from app.chat_activity import chat_activity_page
 from app.chat_waits import (
@@ -719,7 +723,7 @@ def _chat_detail_response(
     "created_by_app_id": chat.created_by_app_id,
     # Owner-visible chats (shown in Recents) can switch provider; hidden
     # background/subagent chats stay pinned to their original provider.
-    "provider_switch_locked": not visible_in_owner_drawer(chat),
+    "provider_switch_locked": not provider_switch_allowed(chat),
     "auto_resume_on_limit": bool(chat.auto_resume_on_limit),
     "agent_settings_json": settings_obj,
     "effective_agent_settings": effective_agent_settings(
@@ -1382,6 +1386,29 @@ async def patch_chat(
         detail="A chat must always keep an explicitly selected model.",
       )
 
+    # Resolve provider identity before mutating either the provider column or
+    # its model/settings companion. Hidden chats are pinned at creation even
+    # while empty; all direct and model-implied switch paths must reject under
+    # this transition lock so the row cannot land half-switched.
+    target_provider = body.provider
+    new_model = agent_settings_patch.get("model")
+    if target_provider is None and new_model:
+      current_provider = chat.provider or "claude"
+      if providers._model_belongs_to_other_provider(new_model, current_provider):
+        target_provider = providers.provider_of_model(new_model)
+    provider_changing = (
+      target_provider is not None
+      and target_provider != (chat.provider or "claude")
+    )
+    if provider_changing and not provider_switch_allowed(chat):
+      raise HTTPException(
+        status_code=409,
+        detail=(
+          "This chat runs in the background and stays on its original "
+          "provider; its provider can't be switched."
+        ),
+      )
+
     if body.clear_agent_settings:
       chat.agent_settings_json = providers.snapshot_chat_agent_settings(
         data_dir,
@@ -1418,13 +1445,6 @@ async def patch_chat(
     # turn time, masking the picker bug and running the wrong model.
     # Infer the provider from the model whenever the user didn't
     # state one explicitly so the chat row stays self-consistent.
-    target_provider = body.provider
-    new_model = agent_settings_patch.get("model")
-    if target_provider is None and new_model:
-      current_provider = chat.provider or "claude"
-      if providers._model_belongs_to_other_provider(new_model, current_provider):
-        target_provider = providers.provider_of_model(new_model)
-
     if new_model:
       from app.providers import _model_belongs_to_other_provider
       model_provider = target_provider or chat.provider or "claude"
@@ -1437,10 +1457,6 @@ async def patch_chat(
     # Capture the provider BEFORE any mutation so provider_switch logs the
     # real transition, and only when it actually changes (see after the commit).
     prev_provider = chat.provider
-    provider_changing = (
-      target_provider is not None
-      and target_provider != (chat.provider or "claude")
-    )
     latest_message = (chat.messages or [])[-1] if chat.messages else None
     legacy_handoff_ready = (
       isinstance(latest_message, dict)
@@ -2504,7 +2520,7 @@ async def _compact_chat_locked(
   )
 
   chat = get_active_chat_or_404(db, chat_id)
-  if not visible_in_owner_drawer(chat):
+  if not provider_switch_allowed(chat):
     raise HTTPException(
       status_code=409,
       detail=(
@@ -2656,6 +2672,11 @@ async def _compact_chat_locked(
     reason = result.get("reason")
     if reason == "busy":
       detail = "Chat is busy — finish or stop the turn before switching."
+    elif reason == "provider_pinned":
+      detail = (
+        "This chat runs in the background and stays on its original "
+        "provider; its provider can't be switched."
+      )
     elif reason == "request_mismatch":
       detail = "That provider-switch request id has different settings."
     else:
@@ -2721,7 +2742,7 @@ async def compact_chat(
 
   async with get_transition_lock(chat_id):
     chat = get_active_chat_or_404(db, chat_id)
-    if not visible_in_owner_drawer(chat):
+    if not provider_switch_allowed(chat):
       raise HTTPException(
         status_code=409,
         detail=(
@@ -3145,7 +3166,7 @@ def create_app_chat(
   background_choice = None
   if not body.provider and not body.model:
     from app import background_agents
-    background_choice = background_agents.resolve_background_provider(
+    background_choice = background_agents.resolve_background_chat_choice(
       data_dir, db,
     )
     provider = background_choice["provider"]
@@ -3166,12 +3187,16 @@ def create_app_chat(
     )
 
   try:
-    agent_settings = providers.snapshot_chat_agent_settings(
-      data_dir,
-      provider,
-      model=body.model or (background_choice or {}).get("model"),
-      effort=body.effort or (background_choice or {}).get("effort"),
-      fallback_model=providers.DEFAULT_MODELS.get(provider),
+    agent_settings = (
+      background_choice["agent_settings"]
+      if background_choice is not None
+      else providers.snapshot_chat_agent_settings(
+        data_dir,
+        provider,
+        model=body.model,
+        effort=body.effort,
+        fallback_model=providers.DEFAULT_MODELS.get(provider),
+      )
     )
   except ValueError as exc:
     raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -3381,6 +3406,14 @@ async def patch_app_chat(
           status_code=422, detail=f"unknown provider: {body.provider}"
         )
       if chat.provider != body.provider:
+        if not provider_switch_allowed(chat):
+          raise HTTPException(
+            status_code=409,
+            detail=(
+              "This chat runs in the background and stays on its original "
+              "provider; its provider can't be switched."
+            ),
+          )
         if (
           is_chat_running(chat_id)
           or chat.pending_messages

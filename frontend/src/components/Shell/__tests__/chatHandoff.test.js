@@ -43,6 +43,31 @@ test('chat display readiness admits only coordinate-complete cached transcripts'
     /const transcriptPaintable = \([\s\S]*initialEntryPhase === 'cached'[\s\S]*initialEntryPhase === 'stream-catchup'[\s\S]*initialEntryPhase === 'ready'[\s\S]*\) && revealed[\s\S]*const displayReady = \(\s*activationSettled[\s\S]*&& !loading[\s\S]*&& \(transcriptPaintable \|\| showEmpty \|\| showLoadError\)\s*\) \|\| earlyRevealReady/,
     'a coordinate-complete frame, including a running one, publishes only after runtime confirmation; only the composer may reveal early',
   )
+  assert.match(
+    chatView,
+    /const \[settledActivationChatId, setSettledActivationChatId\][\s\S]*provisionalNewChat \? activationIdentity : null[\s\S]*const activationSettled = provisionalNewChat[\s\S]*settledActivationChatId === activationIdentity/,
+    'runtime settlement must be bound to the exact retained ChatView identity',
+  )
+  assert.match(
+    chatView,
+    /setChatInfo\(detailCache\.chatInfo\)[\s\S]*if \(activationCacheEntryState === 'missing' && !activationAnchorKey\)[\s\S]*setEarlyRevealChatId\(activationIdentity\)/,
+    'early composer reveal waits for authoritative detail and requires no saved/search coordinate',
+  )
+  assert.match(
+    chatView,
+    /const doSend = useCallback[\s\S]*if \(!activationSettledRef\.current\) return false[\s\S]*submissionBlocked=\{[\s\S]*!activationSettled/,
+    'every visible and programmatic send remains blocked until this chat activation settles',
+  )
+  assert.match(
+    chatView,
+    /chatReady=\{activationSettled && !provisionalNewChat\}/,
+    'row-backed composer controls stay unavailable until this exact activation settles',
+  )
+  assert.match(
+    chatView,
+    /const activationCache = queryClient\.getQueryData\(queryKey\)[\s\S]*setChatInfo\(activationCache\?\.chatInfo \?\? null\)/,
+    'a retained view must drop the previous chat policy before any cold error can paint',
+  )
   assert.match(chatView, /useLayoutEffect\(\(\) => \{[\s\S]*onDisplayReady\?\.\(chatId\)/,
     'ChatView must report layout readiness before its transcript can be promoted')
   assert.match(
@@ -145,7 +170,7 @@ test('activation presents a confirmed running transcript while stream catch-up r
   )
   assert.match(
     chatView,
-    /const \[activationSettled, setActivationSettled\] = useState\(provisionalNewChat\)[\s\S]*if \(hidden \|\| provisionalNewChat\) return[\s\S]*setActivationSettled\(false\)[\s\S]*const settleRuntime[\s\S]*setActivationSettled\(true\)[\s\S]*const displayReady = \(\s*activationSettled/,
+    /const \[settledActivationChatId, setSettledActivationChatId\][\s\S]*if \(hidden \|\| provisionalNewChat\) return[\s\S]*setSettledActivationChatId\([\s\S]*const settleRuntime[\s\S]*setSettledActivationChatId\(activationIdentity\)[\s\S]*const displayReady = \(\s*activationSettled/,
     'a provisional empty chat is ready immediately while persisted chats still wait for runtime truth',
   )
   assert.match(

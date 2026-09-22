@@ -513,14 +513,25 @@ export default function ChatView({
   // be stale. Do not publish a chat-to-chat handoff until this activation's
   // runtime/detail verdict has arrived: otherwise an apparently idle cache can
   // be promoted before the server reports that its turn is still running.
-  const [activationSettled, setActivationSettled] = useState(provisionalNewChat)
-  // Present the incoming chat's composer (with its interactive brain) as soon as
-  // a no-cache activation commits its loading frame, instead of holding the
-  // app→chat "Opening chat…" cover — and the surface's `inert` gate — until the
-  // full transcript settles. Safe because the transcript stays hidden until
-  // `revealed` (no stale content) and a no-cache open has no scroll position to
-  // restore. Send remains gated on `activationSettled`. See `displayReady`.
-  const [earlyRevealReady, setEarlyRevealReady] = useState(false)
+  // Bind settlement to the chat identity. This retained component can receive
+  // a new chat before the prior activation effect resets its booleans; a plain
+  // `true` would therefore publish (and accept sends for) the wrong chat for
+  // one commit. Provisional chats are locally authoritative from birth.
+  const activationIdentity = String(chatId)
+  const [settledActivationChatId, setSettledActivationChatId] = useState(
+    () => (provisionalNewChat ? activationIdentity : null),
+  )
+  const activationSettled = provisionalNewChat
+    || settledActivationChatId === activationIdentity
+  const activationSettledRef = useRef(activationSettled)
+  activationSettledRef.current = activationSettled
+  // After a cold activation receives authoritative detail, present its local
+  // draft surface while a long transcript finishes preparing instead of
+  // holding the outgoing chat throughout that work. The transcript stays
+  // hidden until `revealed`; sends and row-backed Brain controls remain gated
+  // on `activationSettled`. See `displayReady`.
+  const [earlyRevealChatId, setEarlyRevealChatId] = useState(null)
+  const earlyRevealReady = earlyRevealChatId === activationIdentity
   const acceptCachedReadingCoordinate = useCallback(() => {
     // The scroll owner has proved the exact nested part against committed DOM.
     setInitialEntryPhase(current => (
@@ -2419,12 +2430,20 @@ export default function ChatView({
     // changes this dependency and re-runs the version + stream handshake
     // without losing the pane's DOM identity.
     if (hidden || provisionalNewChat) return
-    setActivationSettled(false)
-    setEarlyRevealReady(false)
+    setSettledActivationChatId(current => (
+      current === activationIdentity ? null : current
+    ))
+    setEarlyRevealChatId(current => (
+      current === activationIdentity ? null : current
+    ))
     let cancelled = false
     const initialLoadController = new AbortController()
     const queryKey = chatMessagesQueryKey(chatId)
     const activationCache = queryClient.getQueryData(queryKey)
+    // Policy state lives in the retained ChatView. Rebind it synchronously to
+    // this chat's cache (or ordinary absence) before any early surface can
+    // paint, so a failed cold read cannot expose the previous chat's provider.
+    setChatInfo(activationCache?.chatInfo ?? null)
     const savedAnchorKey = savedReadingAnchorKey(chatId)
     const searchAnchorKey = searchReveal?.anchorKey || null
     // A search selection is a deliberate one-shot navigation, so it wins over
@@ -2473,12 +2492,6 @@ export default function ChatView({
         ? current
         : activationEntryPhase
     ))
-    // No cached transcript to restore and not a search jump: nothing stale can
-    // paint (the transcript is hidden until `revealed`) and there is no reader
-    // coordinate to preserve, so present the incoming chat immediately — the
-    // brain becomes interactive without waiting for the runtime handshake.
-    setEarlyRevealReady(activationCacheEntryState === 'missing' && !searchActivation)
-
     const gen = fetchGenRef.current
     const activationFailedAttempt = failedSendAttemptRef.current
     const requestJson = async (path, label) => {
@@ -2498,7 +2511,7 @@ export default function ChatView({
       // Retire that gate so the newer local owner can become paintable.
       setInitialEntryPhase('ready')
       setLoading(false)
-      setActivationSettled(true)
+      setSettledActivationChatId(activationIdentity)
     }
 
     const settleRuntime = (runtime, visibleMessages) => {
@@ -2537,7 +2550,7 @@ export default function ChatView({
       // chat—and its stale reading cues—through the transport catch-up.
       setInitialEntryPhase(attachesToStream ? 'stream-catchup' : 'ready')
       setLoading(false)
-      setActivationSettled(true)
+      setSettledActivationChatId(activationIdentity)
       pendingQueue.hydrate(runtime.pending_messages || [])
       retireUnownedRuntimeStream({
         running,
@@ -2678,6 +2691,14 @@ export default function ChatView({
       // rows. Runtime config belongs to this server response even when the
       // mounted transcript is temporarily ahead of it.
       setChatInfo(detailCache.chatInfo)
+      // A cold transcript can take several paint frames to prepare. Once the
+      // authoritative detail/runtime response has arrived, expose the local
+      // draft surface rather than holding the outgoing chat throughout that
+      // work. Sending and row-backed controls stay gated by
+      // `activationSettled`, so this early surface cannot act on stale data.
+      if (activationCacheEntryState === 'missing' && !activationAnchorKey) {
+        setEarlyRevealChatId(activationIdentity)
+      }
       if (!anchorRetired && serverSnapshotBehindLocal(msgs, messagesRef.current)) {
         const runtimeGoal = goalPresentationFromRuntime(
           runtime,
@@ -2822,7 +2843,7 @@ export default function ChatView({
         setInitialEntryPhase('ready')
         setLoadError(!cacheIsSafeFallback)
         setLoading(false)
-        setActivationSettled(true)
+        setSettledActivationChatId(activationIdentity)
         void reconcileFailedSendOutbox({
           visibleMessages: cacheIsSafeFallback
             ? activationCache.messages
@@ -2852,6 +2873,7 @@ export default function ChatView({
     }
   }, [
     chatId,
+    activationIdentity,
     hidden,
     loadNonce,
     provisionalNewChat,
@@ -2864,6 +2886,7 @@ export default function ChatView({
     retireUnownedRuntimeStream,
     setActiveAssistantMessageId,
     setGoalPresentationLocalState,
+    setChatInfo,
   ])
 
 
@@ -3002,6 +3025,11 @@ export default function ChatView({
 
   const doSend = useCallback(async (text, opts = {}) => {
     if (isProviderSwitchBlocking(chatId)) return false
+    // Every submit path funnels through doSend, including queued resend and
+    // shell-owned composer requests. An early composer reveal is intentionally
+    // editable, but no turn may start until this exact chat's runtime snapshot
+    // has settled.
+    if (!activationSettledRef.current) return false
 
     // Callers can pre-supply attachments (e.g. handleStop collapsing
     // a queue that had files attached to queued items). When provided,
@@ -3727,6 +3755,7 @@ export default function ChatView({
     questionId,
     questionSubmissionContext = null,
   ) => {
+    if (!activationSettledRef.current) return false
     const cancelPreparedQuestion = () => {
       const prepared = questionSubmissionContext?.preparedSubmission
       if (prepared) cancelQuestionSubmission(prepared)
@@ -3956,6 +3985,7 @@ export default function ChatView({
   // the visible transcript is untouched and the platform renders the stored
   // compaction as its own "Context compacted" card.
   async function runCompactCommand(instructions = '', submittedInput = '/compact') {
+    if (!activationSettledRef.current) return
     if (!chatId || provisionalNewChat) {
       setSendFailure('There’s no chat context to compact yet.')
       return
@@ -3991,7 +4021,7 @@ export default function ChatView({
     // During an early reveal (a no-cache open presented before the runtime
     // settles) the brain is interactive but the chat is not ready to receive a
     // turn yet; ignore a send until activation settles a moment later.
-    if (earlyRevealReady && !activationSettled) return
+    if (!activationSettled) return
     if (needsModelSelection({ showPicker, chatInfo })) {
       setModelSelectionRequest(request => request + 1)
       return
@@ -6189,7 +6219,11 @@ export default function ChatView({
           canSubmitSteer={canSubmitSteer}
           sendFailure={sendFailure}
           notice={compactingChat ? 'Compacting this chat’s context…' : null}
-          submissionBlocked={providerSwitching || !!newChatSession?.submitted}
+          submissionBlocked={
+            !activationSettled
+            || providerSwitching
+            || !!newChatSession?.submitted
+          }
           questionBlocked={hasPendingQuestion && !localAnswerIntents.some(record => record.body?.question_id === answerableQuestionId)}
           pendingFiles={pendingFiles}
           onAddFiles={handleComposerAddFiles}
@@ -6213,7 +6247,7 @@ export default function ChatView({
                 triggerAriaLabel={embedded ? 'Attach files' : ariaLabel}
                 chatInfo={showPicker ? chatInfo : null}
                 chatId={chatId}
-                chatReady={!provisionalNewChat}
+                chatReady={activationSettled && !provisionalNewChat}
                 onAttachClick={() => attachTriggerRef.current?.()}
                 /* Derive live — `chatInfo.has_assistant_turns` is set
                    once on mount via the API and never refreshed when

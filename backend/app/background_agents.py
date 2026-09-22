@@ -191,3 +191,29 @@ def resolve_background_provider(
     if connected(choice):
       return choice
   return choices[0]
+
+
+def resolve_background_chat_choice(
+  data_dir: str, db, *, prefer_provider: str | None = None,
+) -> dict:
+  """Return one complete provider + frozen chat-settings choice.
+
+  Background chat creators must persist the provider, model, and effort from
+  the same resolved choice.  Returning those values as one card keeps callers
+  from selecting a fallback provider while accidentally snapshotting the
+  interactive model/effort (or dropping the background effort altogether).
+  """
+  choice = resolve_background_provider(
+    data_dir, db, prefer_provider=prefer_provider,
+  )
+  provider = str(choice["provider"])
+  selection = providers.snapshot_chat_agent_settings(
+    data_dir,
+    provider,
+    model=choice.get("model"),
+    effort=choice.get("effort"),
+    fallback_model=providers.DEFAULT_BACKGROUND_MODELS.get(provider),
+  )
+  if selection is None:
+    raise RuntimeError("Background provider resolved no explicit model")
+  return {"provider": provider, "agent_settings": selection}

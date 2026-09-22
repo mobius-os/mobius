@@ -1812,17 +1812,11 @@ async def create_conflict_resolver_chat(
     # resolver never starts on a provider the owner has already exhausted. The
     # owner can switch it in-chat afterwards (this chat is owner-visible).
     from app import background_agents
-    _bg_choice = background_agents.resolve_background_provider(
+    _bg_choice = background_agents.resolve_background_chat_choice(
       get_settings().data_dir, db,
     )
     provider = _bg_choice["provider"]
-    agent_settings = providers.snapshot_chat_agent_settings(
-      get_settings().data_dir,
-      provider,
-      model=_bg_choice.get("model"),
-      effort=_bg_choice.get("effort"),
-      fallback_model=providers.DEFAULT_MODELS.get(provider),
-    )
+    agent_settings = _bg_choice["agent_settings"]
     chat = models.Chat(
       id=str(uuid.uuid4()),
       title=title,
