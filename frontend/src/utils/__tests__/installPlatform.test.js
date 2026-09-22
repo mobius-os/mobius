@@ -15,6 +15,9 @@ const UA = {
   iosSafari: 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Mobile/15E148 Safari/604.1',
   iosChrome: 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) CriOS/120.0.6099.119 Mobile/15E148 Safari/604.1',
   iosFirefox: 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) FxiOS/121.0 Mobile/15E148 Safari/605.1.15',
+  iosBrave: 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Brave/1 Mobile/15E148 Safari/604.1',
+  iosDuckDuckGo: 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Ddg/17.2 Mobile/15E148 Safari/604.1',
+  iosOpera: 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) OPT/5.0 Mobile/15E148 Safari/604.1',
   ipadDesktop: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15',
   androidChrome: 'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.6099.144 Mobile Safari/537.36',
   androidFirefox: 'Mozilla/5.0 (Android 14; Mobile; rv:121.0) Gecko/121.0 Firefox/121.0',
@@ -24,6 +27,11 @@ const UA = {
   windowsFirefox: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:143.0) Gecko/20100101 Firefox/143.0',
   linuxFirefox: 'Mozilla/5.0 (X11; Linux x86_64; rv:143.0) Gecko/20100101 Firefox/143.0',
   macSafari: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 14_4) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15',
+  frozenMacSafari: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.4 Safari/605.1.15',
+  oldWindowsFirefox: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:142.0) Gecko/20100101 Firefox/142.0',
+  oldMacSafari: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 13_6) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Safari/605.1.15',
+  oldIosChrome: 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_3 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) CriOS/110.0 Mobile/15E148 Safari/604.1',
+  instagramAndroid: 'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Mobile Safari/537.36 Instagram 320.0.0.0',
 }
 
 test('iOS Safari and third-party browsers are all install-capable', () => {
@@ -38,6 +46,16 @@ test('iOS Safari and third-party browsers are all install-capable', () => {
   assert.equal(safari.installPossible, true)
   assert.equal(chrome.installPossible, true)
   assert.equal(firefox.installPossible, true)
+})
+
+test('Brave, DuckDuckGo, and Opera on iOS are not mistaken for Safari', () => {
+  for (const ua of [UA.iosBrave, UA.iosDuckDuckGo, UA.iosOpera]) {
+    const platform = detectInstallPlatform(ua)
+    assert.equal(platform.ios, true)
+    assert.equal(platform.iosSafari, false)
+    assert.equal(platform.iosNonSafari, true)
+    assert.equal(platform.installPossible, true)
+  }
 })
 
 test('iPadOS desktop UA is not mistaken for desktop Safari', () => {
@@ -95,6 +113,16 @@ test('Firefox on Linux offers an honest cross-browser fallback', () => {
   assert.match(copy.body, /Chrome|Edge|Safari/)
 })
 
+test('older Firefox on Windows does not promise a missing web-app button', () => {
+  const platform = detectInstallPlatform(UA.oldWindowsFirefox)
+  const copy = installCopyForPlatform(platform)
+
+  assert.equal(platform.firefoxWindowsWebApps, false)
+  assert.equal(platform.installPossible, false)
+  assert.equal(copy.unsupported, true)
+  assert.match(copy.body, /Chrome|Edge|Safari/)
+})
+
 test('desktop Safari offers Add to Dock', () => {
   const platform = detectInstallPlatform(UA.macSafari)
   const copy = installCopyForPlatform(platform)
@@ -102,6 +130,26 @@ test('desktop Safari offers Add to Dock', () => {
   assert.equal(platform.desktopSafari, true)
   assert.equal(platform.mac, true)
   assert.match(copy.body, /Add to Dock/)
+})
+
+test('current Safari remains useful with its frozen macOS user agent', () => {
+  const platform = detectInstallPlatform(UA.frozenMacSafari)
+  const copy = installCopyForPlatform(platform, false, 'Atlas')
+
+  assert.equal(platform.safariDockInstall, true)
+  assert.equal(platform.installPossible, true)
+  assert.match(copy.body, /Add to Dock/)
+  assert.match(copy.body, /update macOS/)
+})
+
+test('older macOS Safari does not promise Add to Dock', () => {
+  const platform = detectInstallPlatform(UA.oldMacSafari)
+  const copy = installCopyForPlatform(platform)
+
+  assert.equal(platform.safariDockInstall, false)
+  assert.equal(platform.installPossible, false)
+  assert.equal(copy.unsupported, true)
+  assert.match(copy.body, /Safari 17/)
 })
 
 test('empty UA does not crash in non-browser contexts', () => {
@@ -121,12 +169,31 @@ test('iOS instructions use the Share menu in Safari, Chrome, and Firefox', () =>
   }
 })
 
+test('pre-16.4 third-party iOS browsers hand installation to Safari', () => {
+  const platform = detectInstallPlatform(UA.oldIosChrome)
+  const copy = installCopyForPlatform(platform)
+
+  assert.equal(platform.installPossible, false)
+  assert.match(copy.title, /Safari/)
+  assert.match(copy.body, /Open this page in Safari/)
+})
+
 test('Android browsers get their own menu wording', () => {
   const chrome = installCopyForPlatform(detectInstallPlatform(UA.androidChrome))
   const firefox = installCopyForPlatform(detectInstallPlatform(UA.androidFirefox))
 
   assert.match(chrome.body, /browser menu/)
   assert.match(firefox.body, /Firefox menu/)
+})
+
+test('embedded Android browsers skip prompt warming and explain browser handoff', () => {
+  const platform = detectInstallPlatform(UA.instagramAndroid)
+  const copy = installCopyForPlatform(platform, false, 'Atlas')
+
+  assert.equal(platform.inAppBrowser, true)
+  assert.equal(platform.bipCapable, false)
+  assert.match(copy.body, /Open in Browser/)
+  assert.match(copy.body, /Atlas/)
 })
 
 test('desktop Chromium manual fallback names the address bar', () => {

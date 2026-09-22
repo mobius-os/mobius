@@ -6,6 +6,12 @@ import { appQueries } from '../../hooks/queries.js'
 import useDialogFocus from '../../hooks/useDialogFocus.js'
 import { loginBoundaryPath } from '../../lib/safeReturnPath.js'
 import {
+  observeWebInstallPermission,
+  requestManifestWebInstall,
+  supportsWebInstall,
+  webInstallPermissionState,
+} from '../../lib/webInstall.js'
+import {
   androidBrowserIntentHref,
   detectInstallPlatform,
   isStandaloneDisplay,
@@ -56,6 +62,7 @@ export default function InstallSheet({ app, onClose }) {
   const [iconPreview, setIconPreview] = useState(null) // object URL or null
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState('')
+  const [installPermission, setInstallPermission] = useState('unknown')
   // Only Safari's Share menu can add to the iOS Home Screen, so the final
   // step is never ours to automate. What IS ours: which document is on
   // screen when the user opens that menu. THIS document is the shell, whose
@@ -85,6 +92,34 @@ export default function InstallSheet({ app, onClose }) {
     }
   }, [iconPreview])
 
+  useEffect(() => {
+    if (platform.ios || !supportsWebInstall(navigator)) return undefined
+    let active = true
+    let stopObserving = () => {}
+    async function refreshPermission() {
+      const state = await webInstallPermissionState(navigator)
+      if (active) setInstallPermission(state)
+    }
+    function refreshWhenVisible() {
+      if (document.visibilityState === 'visible') refreshPermission()
+    }
+    observeWebInstallPermission({
+      navigatorObject: navigator,
+      onChange: state => { if (active) setInstallPermission(state) },
+    }).then(stop => {
+      if (active) stopObserving = stop
+      else stop()
+    })
+    window.addEventListener('focus', refreshPermission)
+    document.addEventListener('visibilitychange', refreshWhenVisible)
+    return () => {
+      active = false
+      stopObserving()
+      window.removeEventListener('focus', refreshPermission)
+      document.removeEventListener('visibilitychange', refreshWhenVisible)
+    }
+  }, [platform.ios])
+
   useDialogFocus({
     containerRef: cardRef,
     initialFocusRef: primaryFocusRef,
@@ -94,7 +129,9 @@ export default function InstallSheet({ app, onClose }) {
   // The hand-off path replaces the form after saving. Move focus into its new
   // primary action instead of leaving focus on an unmounted Continue.
   useEffect(() => {
-    if (handoff) queueMicrotask(() => primaryFocusRef.current?.focus())
+    if (handoff) {
+      queueMicrotask(() => primaryFocusRef.current?.focus())
+    }
   }, [handoff])
 
   // onContinue navigates the whole document away and intentionally leaves
@@ -169,9 +206,24 @@ export default function InstallSheet({ app, onClose }) {
     }
   }
 
-  async function onContinue() {
+  function continueToBrowserInstall(url) {
+    if (standalone && (platform.ios || platform.android)) {
+      // An installed-app context cannot finish these manual paths in-place:
+      // iOS has no Share button and Android opens an install-less Custom Tab.
+      setHandoffUrl(platform.ios ? url : androidBrowserIntentHref(url))
+      setSubmitting(false)
+      setHandoff(true)
+      return
+    }
+    window.location.href = url
+  }
+
+  async function onContinue({ skipDirect = false } = {}) {
     const name = draftName.trim()
-    if (!name || submitting) return
+    // Match the disabled primary button even when the form is submitted with
+    // Enter. The explicit browser-steps action is still available when the
+    // experimental permission has been denied.
+    if (!name || submitting || (installPermission === 'denied' && !skipDirect)) return
     setSubmitting(true)
     setError('')
     try {
@@ -198,18 +250,35 @@ export default function InstallSheet({ app, onClose }) {
       const url = platform.ios
         ? await buildInstallUrl()
         : new URL(installPath, window.location.origin).href
-      if (standalone && (platform.ios || platform.android)) {
-        // Installed-app context: navigating in place can't complete an
-        // install (no Share button on iOS; an install-less Custom Tab on
-        // Android). Hand the destination over instead.
-        setHandoffUrl(platform.ios ? url : androidBrowserIntentHref(url))
-        setSubmitting(false)
-        setHandoff(true)
-        return
+
+      // Continue is the only install action. Try the imperative browser API
+      // while this click's transient activation is still alive. A quick save
+      // normally preserves it; if the browser expires it, rejects the new API,
+      // or does not implement it, move straight to the app-specific fallback.
+      // The declarative <install> element cannot be invoked programmatically,
+      // so using it after an asynchronous save would require a second button.
+      if (!skipDirect && !platform.ios && supportsWebInstall(navigator)) {
+        const result = await requestManifestWebInstall({
+          manifestUrl: `/apps/${appSlug}/manifest.json`,
+          permissionState: installPermission,
+        })
+        if (result.outcome === 'accepted') {
+          onClose?.()
+          return
+        }
+        if (result.outcome === 'dismissed') {
+          setError('Installation was cancelled. Continue when you want to try again.')
+          setSubmitting(false)
+          return
+        }
+        if (result.outcome === 'blocked') {
+          setInstallPermission('denied')
+          setSubmitting(false)
+          return
+        }
       }
-      // Same-tab navigation to the install surface. Manifest is already
-      // fresh (saved above + no-cache), so the OS shows the new name.
-      window.location.href = url
+
+      continueToBrowserInstall(url)
     } catch (err) {
       setError(err?.message || 'Something went wrong. Try again.')
       setSubmitting(false)
@@ -250,7 +319,8 @@ export default function InstallSheet({ app, onClose }) {
               <p className="is__hint is__hint--steps">
                 Only Safari can put an app on your home screen, and you’re in
                 the installed Möbius app right now. Open {label}’s own page,
-                then tap <strong>Share</strong> and choose{' '}
+                then tap <strong>Share</strong> (open Safari’s menu first if
+                Share is hidden) and choose{' '}
                 <strong>Add to Home Screen</strong>.
               </p>
             ) : (
@@ -351,6 +421,21 @@ export default function InstallSheet({ app, onClose }) {
           add the app to your home screen.
         </p>
 
+        {installPermission === 'denied' && (
+          <div className="is__error" role="alert">
+            Direct installation permission is blocked. Allow this site to
+            install apps in your browser’s site settings, then return here.
+            <button
+              type="button"
+              className="is__error-action"
+              onClick={() => onContinue({ skipDirect: true })}
+              disabled={submitting || !draftName.trim()}
+            >
+              Use browser steps instead
+            </button>
+          </div>
+        )}
+
         {error && <div className="is__error" role="alert">{error}</div>}
 
         <div className="is__actions">
@@ -366,9 +451,11 @@ export default function InstallSheet({ app, onClose }) {
             type="button"
             className="is__btn is__btn--primary"
             onClick={onContinue}
-            disabled={submitting || !draftName.trim()}
+            disabled={submitting || !draftName.trim() || installPermission === 'denied'}
           >
-            {submitting ? 'Saving…' : 'Continue'}
+            {submitting
+              ? 'Saving…'
+              : installPermission === 'denied' ? 'Permission required' : 'Continue'}
           </button>
         </div>
 
