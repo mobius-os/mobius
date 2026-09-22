@@ -78,9 +78,9 @@ test('a blocked host skips install and a newly denied prompt redirects', async (
   const blocked = await requestManifestWebInstall({
     manifestUrl: '/manifest.json',
     baseUrl: 'https://m.example/',
+    permissionState: 'denied',
     navigatorObject: {
       async install() { blockedCalls += 1 },
-      permissions: { async query() { return { state: 'denied' } } },
     },
   })
   assert.deepEqual(blocked, { outcome: 'blocked' })
@@ -97,10 +97,11 @@ test('a blocked host skips install and a newly denied prompt redirects', async (
       permissions: {
         async query() {
           permissionReads += 1
-          return { state: permissionReads === 1 ? 'prompt' : 'denied' }
+          return { state: 'denied' }
         },
       },
     },
   })
   assert.deepEqual(newlyDenied, { outcome: 'blocked' })
+  assert.equal(permissionReads, 1)
 })

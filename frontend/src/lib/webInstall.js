@@ -40,12 +40,16 @@ export async function requestManifestWebInstall({
   manifestUrl,
   navigatorObject = typeof navigator !== 'undefined' ? navigator : null,
   baseUrl,
+  permissionState = 'unknown',
 }) {
   if (!supportsWebInstall(navigatorObject)) {
     return { outcome: 'unsupported' }
   }
 
-  if (await webInstallPermissionState(navigatorObject) === 'denied') {
+  // Accept a state read before the click, rather than querying here: adding an
+  // awaited permission read between the click and install() could itself use
+  // up the short transient-activation window this API requires.
+  if (permissionState === 'denied') {
     return { outcome: 'blocked' }
   }
 

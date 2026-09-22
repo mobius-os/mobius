@@ -8,6 +8,7 @@ import { loginBoundaryPath } from '../../lib/safeReturnPath.js'
 import {
   requestManifestWebInstall,
   supportsWebInstall,
+  webInstallPermissionState,
 } from '../../lib/webInstall.js'
 import {
   androidBrowserIntentHref,
@@ -60,6 +61,7 @@ export default function InstallSheet({ app, onClose }) {
   const [iconPreview, setIconPreview] = useState(null) // object URL or null
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState('')
+  const [installPermission, setInstallPermission] = useState('unknown')
   // Only Safari's Share menu can add to the iOS Home Screen, so the final
   // step is never ours to automate. What IS ours: which document is on
   // screen when the user opens that menu. THIS document is the shell, whose
@@ -88,6 +90,15 @@ export default function InstallSheet({ app, onClose }) {
       if (iconPreview) URL.revokeObjectURL(iconPreview)
     }
   }, [iconPreview])
+
+  useEffect(() => {
+    if (platform.ios || !supportsWebInstall(navigator)) return undefined
+    let active = true
+    webInstallPermissionState(navigator).then(state => {
+      if (active) setInstallPermission(state)
+    })
+    return () => { active = false }
+  }, [platform.ios])
 
   useDialogFocus({
     containerRef: cardRef,
@@ -226,6 +237,7 @@ export default function InstallSheet({ app, onClose }) {
       if (!platform.ios && supportsWebInstall(navigator)) {
         const result = await requestManifestWebInstall({
           manifestUrl: `/apps/${appSlug}/manifest.json`,
+          permissionState: installPermission,
         })
         if (result.outcome === 'accepted') {
           onClose?.()
@@ -379,6 +391,13 @@ export default function InstallSheet({ app, onClose }) {
           Tap the icon to upload a custom image. This name is used when you
           add the app to your home screen.
         </p>
+
+        {installPermission === 'denied' && (
+          <div className="is__notice" role="status">
+            Direct installation is blocked for this site. Continue will open
+            {` ${label}’s `}own page so you can install it with your browser.
+          </div>
+        )}
 
         {error && <div className="is__error" role="alert">{error}</div>}
 

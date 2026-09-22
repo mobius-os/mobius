@@ -158,6 +158,17 @@
   font-size: 13px;
 }
 
+.is__notice {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--accent, #a78bfa) 55%, transparent);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--accent, #a78bfa) 10%, transparent);
+  color: var(--text, #d4d4d8);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
 .is__actions {
   display: flex;
   gap: 10px;
