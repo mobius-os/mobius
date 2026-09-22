@@ -39,6 +39,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import stat
 import time
 from dataclasses import dataclass, field
@@ -252,8 +253,9 @@ RESOURCE_TOTAL_MAX = 8 * 1024 * 1024
 RESOURCE_MAX_DEPTH = 8
 RESOURCE_SUFFIXES = frozenset({
   ".md", ".txt", ".json", ".yaml", ".yml", ".csv", ".py", ".js", ".mjs",
-  ".cjs", ".ts", ".tsx", ".jsx", ".sh", ".toml", ".html", ".css",
+  ".cjs", ".ts", ".tsx", ".jsx", ".sh", ".cmd", ".toml", ".html", ".css",
 })
+_EXTENSIONLESS_SCRIPT_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
 TREE_FILE_COUNT_MAX = 1 + RESOURCE_COUNT_MAX  # root SKILL.md + resources
 TREE_TOTAL_BYTES_MAX = SKILL_MAX_BYTES + RESOURCE_TOTAL_MAX
 
@@ -327,7 +329,20 @@ def resource_rel_ok(rel: str) -> bool:
   for segment in segments:
     if not segment or segment.startswith(".") or "\\" in segment:
       return False
-  return Path(rel).suffix.lower() in RESOURCE_SUFFIXES
+  suffix = Path(rel).suffix.lower()
+  if suffix in RESOURCE_SUFFIXES:
+    return True
+  # Shell launchers and tiny metadata files in ecosystem skill packages are
+  # commonly extensionless (for example ``scripts/tool`` and
+  # ``scripts/VERSION``). Keep that allowance confined to the scripts subtree
+  # and a single portable filename component; arbitrary extensionless payloads
+  # elsewhere remain rejected.
+  return (
+    len(segments) >= 2
+    and segments[0] == "scripts"
+    and "." not in segments[-1]
+    and _EXTENSIONLESS_SCRIPT_NAME.fullmatch(segments[-1]) is not None
+  )
 
 
 def _safe_child(root: Path, name: str) -> Path | None:
@@ -442,7 +457,7 @@ def _read_tree_bytes(target: Path) -> dict[str, bytes] | None:
   return out
 
 
-def _tree_digest_on_disk(target: Path) -> str | None:
+def tree_digest_on_disk(target: Path) -> str | None:
   """Canonical tree digest of a published skill dir, or None if the tree can't
   be read wholly and safely (see `_read_tree_bytes`) — the caller fails closed.
   """
@@ -450,6 +465,12 @@ def _tree_digest_on_disk(target: Path) -> str | None:
   if files is None:
     return None
   return tree_digest_from_files(files)
+
+
+# Backwards-private alias for the recovery implementation and any older local
+# callers. New route code uses the public name because optimistic update checks
+# are part of the API contract, not a recovery-only detail.
+_tree_digest_on_disk = tree_digest_on_disk
 
 
 def _gc_orphan_staging(root: Path, referenced: set[str]) -> None:
@@ -482,7 +503,7 @@ def _gc_orphan_staging(root: Path, referenced: set[str]) -> None:
 
 
 def reconcile_installed(skills_dir: Path | None = None) -> list[str]:
-  """Repair interrupted installs recorded in the installed-skills sidecar.
+  """Repair interrupted installs and updates in the installed-skills sidecar.
 
   The installer persists an ``"status": "installing"`` intent (carrying its
   staging directory name) BEFORE publishing, so a crash leaves a state this
@@ -534,7 +555,94 @@ def reconcile_installed(skills_dir: Path | None = None) -> list[str]:
   repaired: list[str] = []
   dirty = False
   for name, rec in list(records.items()):
-    if not isinstance(rec, dict) or rec.get("status") != "installing":
+    if not isinstance(rec, dict):
+      continue
+    if rec.get("status") == "updating":
+      target = _safe_child(root, str(name))
+      staging = _safe_child(root, str(rec.get("staging") or ""))
+      backup = _safe_child(root, str(rec.get("backup") or ""))
+      target_digest = (
+        _tree_digest_on_disk(target)
+        if target is not None and _is_real_dir(target)
+        else None
+      )
+      staging_digest = (
+        _tree_digest_on_disk(staging)
+        if staging is not None and _is_real_dir(staging)
+        else None
+      )
+      backup_digest = (
+        _tree_digest_on_disk(backup)
+        if backup is not None and _is_real_dir(backup)
+        else None
+      )
+      old_digest = rec.get("previous_tree_digest")
+      new_digest = rec.get("tree_digest")
+      previous = rec.get("previous_record")
+
+      def restore_previous_record() -> None:
+        nonlocal dirty
+        if isinstance(previous, dict):
+          records[name] = previous
+        else:
+          records.pop(name, None)
+        dirty = True
+        repaired.append(str(name))
+
+      # Intent persisted, but the first rename never happened: discard the
+      # complete candidate and restore the pre-update ownership record.
+      if (
+        target_digest == old_digest
+        and staging_digest == new_digest
+        and backup_digest is None
+      ):
+        shutil.rmtree(staging, ignore_errors=True)
+        restore_previous_record()
+        continue
+
+      # Old tree moved aside, candidate not yet published: roll back to the old
+      # tree. Both digests must match the persisted intent before either rename.
+      if (
+        target_digest is None
+        and staging_digest == new_digest
+        and backup_digest == old_digest
+        and target is not None
+        and backup is not None
+      ):
+        try:
+          os.rename(backup, target)
+        except OSError:
+          continue
+        shutil.rmtree(staging, ignore_errors=True)
+        restore_previous_record()
+        continue
+
+      # Candidate published. The old tree may still be present because the
+      # process crashed before cleanup; validate it before deleting, then
+      # finalize the new record. A missing backup means cleanup already landed.
+      if (
+        target_digest == new_digest
+        and staging_digest is None
+        and backup_digest in (None, old_digest)
+      ):
+        if backup_digest == old_digest and backup is not None:
+          shutil.rmtree(backup, ignore_errors=True)
+          if _is_real_dir(backup):
+            continue
+        for marker in (
+          "status", "staging", "backup", "previous_record",
+          "previous_tree_digest",
+        ):
+          rec.pop(marker, None)
+        dirty = True
+        repaired.append(str(name))
+        continue
+
+      # Every other combination is ambiguous or tampered. Keep the intent and
+      # every surviving tree for deliberate repair; delete nothing.
+      continue
+
+    if rec.get("status") != "installing":
       continue
     target = _safe_child(root, str(name))
     staging = _safe_child(root, str(rec.get("staging") or ""))

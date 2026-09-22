@@ -7,6 +7,7 @@ test process (os.kill is mocked)."""
 
 import asyncio
 import os
+from pathlib import Path
 import signal
 
 from app import chat as chat_mod
@@ -26,6 +27,57 @@ class _FakeTimer:
 
   def start(self):
     self.started = True
+
+
+def _write_probe_fixture(root: Path, *, broken: bool) -> None:
+  app = root / "backend" / "app"
+  routes = app / "routes"
+  routes.mkdir(parents=True, exist_ok=True)
+  (app / "__init__.py").write_text("", encoding="utf-8")
+  (app / "main.py").write_text("from app import routes\n", encoding="utf-8")
+  verdict = (
+    "raise RuntimeError('dangling restart contract')"
+    if broken else "return None"
+  )
+  (routes / "__init__.py").write_text(
+    "def require_all_routers_loaded():\n"
+    f"  {verdict}\n",
+    encoding="utf-8",
+  )
+
+
+def test_restart_source_validation_matches_the_boot_router_verdict(
+  monkeypatch, tmp_path,
+):
+  monkeypatch.setenv("MOBIUS_PLATFORM_DIR", str(tmp_path))
+  _write_probe_fixture(tmp_path, broken=True)
+
+  try:
+    ru.validate_restart_source()
+  except ru.RestartSourceInvalid as exc:
+    assert "dangling restart contract" in str(exc)
+  else:
+    raise AssertionError("broken router verdict was accepted")
+
+  _write_probe_fixture(tmp_path, broken=False)
+  ru.validate_restart_source()
+
+
+def test_last_chance_restart_preflight_does_not_drain_invalid_source(
+  monkeypatch,
+):
+  claimed = []
+  monkeypatch.setattr(
+    ru, "validate_restart_source",
+    lambda: (_ for _ in ()).throw(ru.RestartSourceInvalid("broken")),
+  )
+  monkeypatch.setattr(
+    ru, "_claim_in_process_restart", lambda: claimed.append(True) or True,
+  )
+
+  asyncio.run(ru.restart_this_worker())
+
+  assert claimed == []
 
 
 def test_restart_drains_then_requests_supervisor_and_arms_force_kill(monkeypatch):

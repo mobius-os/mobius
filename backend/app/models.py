@@ -1233,7 +1233,7 @@ class Project(Base):
   project_type = Column(String(128), nullable=False, default="blank")
   root_path = Column(String(1024), nullable=False, unique=True)
   # Rolling-upgrade compatibility for projects created by the original
-  # one-primary-chat implementation. Migration 0014 moves that relationship
+  # one-primary-chat implementation. Migration 0021 moves that relationship
   # to Chat.project_id and clears this pointer. New projects leave it NULL.
   chat_id = Column(
     String(64), ForeignKey("chats.id"), nullable=True, unique=True, index=True,

@@ -2319,6 +2319,16 @@ class ChatWriterActor:
         "Restart card: card is no longer accepting actions"
       )
 
+    if selected_restart:
+      # Keep the exact card open when the edited platform would fall back on
+      # the next boot.  The owner gets a retryable error while this healthy
+      # process remains available for repair; no drain or restart is started.
+      from app.restart_util import RestartSourceInvalid, validate_restart_source
+      try:
+        validate_restart_source()
+      except RestartSourceInvalid as exc:
+        raise RestartCardActionConflict(str(exc)) from exc
+
     now = now_naive_utc()
     dispatch = False
     if not selected_restart:

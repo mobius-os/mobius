@@ -248,6 +248,45 @@ async function wipeSwCaches() {
   )
 }
 
+// A 401 from apiFetch does NOT prove the OWNER session is dead. Relay endpoints
+// (/proxy, /github, /community, …) forward an UPSTREAM or provider 401 while the
+// owner's Authorization header is still attached, so `status === 401 && sent a
+// credential` used to sign the owner out mid-session on an unrelated failure
+// (e.g. a link/map preview whose remote returned 401). Before tearing the
+// session down, affirmatively confirm the owner credential itself is rejected by
+// probing a cheap owner-only endpoint with the SAME token. Only a definitive 401
+// from that probe means the session is genuinely invalid; anything else (200, a
+// 5xx, a network error, or a token that changed underneath us) leaves the owner
+// signed in. Genuine expiry is still caught here on the next owner-authenticated
+// request, and independently by the system event stream on /api/events/system.
+const OWNER_SESSION_PROBE_PATH = '/api/notifications/unread-count'
+const OWNER_SESSION_PROBE_TIMEOUT_MS = 8000
+
+async function ownerSessionConfirmedInvalid(ownerToken) {
+  // No token to invalidate, or the stored token already moved on (a newer login
+  // superseded the one that got the 401): never let a stale 401 wipe a fresher
+  // session.
+  if (!ownerToken || getToken() !== ownerToken) return false
+  const ctrl = new AbortController()
+  const timer = setTimeout(() => ctrl.abort(), OWNER_SESSION_PROBE_TIMEOUT_MS)
+  try {
+    const probe = await fetch(`${BASE}${OWNER_SESSION_PROBE_PATH}`, {
+      method: 'GET',
+      headers: { Authorization: `Bearer ${ownerToken}` },
+      signal: ctrl.signal,
+    })
+    reportNetworkReachable()
+    if (probe.status !== 401) return false
+    // Re-check the token did not change while the probe was in flight.
+    return getToken() === ownerToken
+  } catch {
+    // Network error / timeout: invalidity is unproven — fail safe, do not wipe.
+    return false
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
 export async function apiFetch(path, options = {}) {
   const headers = {
     'Content-Type': 'application/json',
@@ -256,6 +295,10 @@ export async function apiFetch(path, options = {}) {
   const sentCredential = Object.entries(headers).some(
     ([name, value]) => name.toLowerCase() === 'authorization' && !!value,
   )
+  // Capture the exact owner token this request rode with, so a later 401 is
+  // confirmed and cleared against THAT credential, not whatever is stored by the
+  // time the response lands.
+  const ownerTokenAtSend = ephemeralAuthEnabled ? null : getToken()
 
   // Opt-in timeout: callers that must not hang forever (e.g. the background
   // reconcile poll and message fetches — see ChatView) pass `timeoutMs`.
@@ -314,6 +357,13 @@ export async function apiFetch(path, options = {}) {
       window.dispatchEvent(new CustomEvent('mobius:ephemeral-auth-expired'))
       window.dispatchEvent(new CustomEvent('mobius:chat-embed-auth-expired'))
       throw new Error('EMBED_AUTH_EXPIRED')
+    }
+    // Not proof the OWNER session failed: an upstream/provider 401 relayed by
+    // /proxy, /github, or /community carries the owner header too. Confirm the
+    // owner credential itself is rejected before wiping; otherwise hand the 401
+    // back to the caller to handle like any other error status.
+    if (!(await ownerSessionConfirmedInvalid(ownerTokenAtSend))) {
+      return res
     }
     // Await the cache wipe before reloading. Without this, the page
     // reload aborts the IndexedDB delete and the next owner could see

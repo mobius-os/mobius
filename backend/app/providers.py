@@ -9,9 +9,9 @@ auth + env surface — there is no polymorphic command/parse shape:
     and then drives the Anthropic Agent SDK directly.
   * `CodexProvider` — identity/auth/env shaper. Live Codex chat turns
     run through the Agent SDK: `chat.py` dispatches to
-    `codex_sdk_runner.run_codex_sdk_turn`. The SDK runner reuses one
-    helper from `codex_appserver.py` (`_extract_bash_command`); the
-    provider itself shapes credentials + env.
+    `codex_sdk_runner.run_codex_sdk_turn`. `codex_events` (not the SDK
+    runner) reuses one helper from `codex_appserver.py`
+    (`_extract_bash_command`); the provider itself shapes credentials + env.
 
 `BaseProvider` carries the whole surface (`check_auth`, `build_env`,
 and the `name`/`cli_cmd`/`auth_dir` identifiers); every provider
@@ -811,16 +811,17 @@ class ClaudeProvider(BaseProvider):
     # block.
     if chat_id:
       env["AGENT_BROWSER_SESSION"] = f"chat-{chat_id}"
-    # The in-product agent reaches Codex for ensemble / "use codex" work via
-    # the Agent tool's `codex:codex-rescue` subagent — the codex plugin's
-    # companion broker shells out to `codex exec`, and that codex process
-    # inherits THIS environment. The codex CLI reads its credentials from
-    # CODEX_HOME, which otherwise only CodexProvider.build_env sets; a Claude
-    # turn left CODEX_HOME unset, so the spawned codex fell back to the empty
-    # default config and died "401 Invalid authentication credentials" —
-    # which is why "leverage codex subagents" failed in-product. Point it at
-    # the shared codex auth dir (only when codex is actually connected) so
-    # cross-provider codex calls authenticate.
+    # The in-product agent reaches Codex for ensemble / delegated work via the
+    # installable Subagents app (slug `codex`/`subagents`; its
+    # `subagents.py run --background` shells out to `codex exec`), and that
+    # codex process inherits THIS environment. The codex CLI reads its
+    # credentials from CODEX_HOME, which otherwise only
+    # CodexProvider.build_env sets; a Claude turn left CODEX_HOME unset, so
+    # the spawned codex fell back to the empty default config and died "401
+    # Invalid authentication credentials" — which is why "leverage codex
+    # subagents" failed in-product. Point it at the shared codex auth dir
+    # (only when codex is actually connected) so cross-provider codex calls
+    # authenticate.
     codex_auth = Path(data_dir) / "cli-auth" / "codex" / "auth.json"
     if codex_auth.exists():
       env["CODEX_HOME"] = str(codex_auth.parent)

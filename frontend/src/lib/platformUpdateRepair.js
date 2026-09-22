@@ -4,7 +4,6 @@ import { requiresAgentActivation } from './platformUpdateState.js'
 
 const REVIEW_AGAIN = new Set([
   'update_plan_stale', 'update_plan_invalid', 'activation_changed',
-  'vite_build_deferred',
 ])
 
 export function platformUpdateRepairReason({ preview, platform, rebuild, error = '', errorCode = '' } = {}) {
@@ -26,9 +25,6 @@ export function platformUpdateRepairReason({ preview, platform, rebuild, error =
   if (level === 'image_rebuild' && target && rebuild?.expected_sha === target
     && ['failed', 'rolled_back', 'needs_recovery'].includes(rebuild.state)) {
     return 'The last attempt to finish this update needs attention.'
-  }
-  if (platform?.rollback_error?.startsWith('frontend_build_deferred')) {
-    return 'The update was safely rolled back because this instance was busy. Try again after other work finishes.'
   }
   if (error || platform?.state === 'rolled_back') {
     return 'The update needs attention before you try again.'
