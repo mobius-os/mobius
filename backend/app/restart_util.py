@@ -21,6 +21,8 @@ import asyncio
 import logging
 import os
 import signal
+import subprocess
+import sys
 import threading
 from pathlib import Path
 
@@ -34,6 +36,83 @@ _FORCE_KILL_AFTER_SECONDS = 5.0
 _CUTOVER_FAILSAFE_SECONDS = 90.0
 _RESTART_ADMISSION_LOCK = threading.Lock()
 _RESTART_ADMITTED = False
+
+
+class RestartSourceInvalid(RuntimeError):
+  """The editable platform would not survive the next startup probe."""
+
+
+def validate_restart_source() -> None:
+  """Run the production boot import verdict before accepting a restart.
+
+  The entrypoint deliberately falls back to the baked platform when an edited
+  backend or router cannot import.  A planned restart must catch that condition
+  while the healthy worker can still explain and repair it, rather than using
+  the fallback as a delayed test result.
+
+  This mirrors ``_platform_import_probe`` in the frozen entrypoint: same
+  backend cwd, scrubbed repository/Python controls, and the explicit router
+  registry verdict.  A missing editable backend is valid for a baked-only
+  installation; first-boot seeding remains owned by the entrypoint.
+  """
+  platform_root = Path(
+    os.environ.get("MOBIUS_PLATFORM_DIR", "/data/platform")
+  )
+  backend = platform_root / "backend"
+  if not (backend / "app").is_dir():
+    return
+
+  env = os.environ.copy()
+  for key in (
+    "PYTHONPATH",
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_COMMON_DIR",
+    "GIT_NAMESPACE",
+    "MOBIUS_SSO_CLIENT_SECRET",
+    "MOBIUS_COMPUTE_INSTANCE_TOKEN",
+    "MOBIUS_IDENTITY_BOOTSTRAP",
+  ):
+    env.pop(key, None)
+  env["PYTHONDONTWRITEBYTECODE"] = "1"
+  command = [
+    sys.executable,
+    "-c",
+    (
+      "import app.main; "
+      "from app.routes import require_all_routers_loaded; "
+      "require_all_routers_loaded()"
+    ),
+  ]
+  try:
+    completed = subprocess.run(
+      command,
+      cwd=backend,
+      env=env,
+      capture_output=True,
+      text=True,
+      timeout=60,
+      check=False,
+    )
+  except subprocess.TimeoutExpired as exc:
+    raise RestartSourceInvalid(
+      "Restart stopped: the current platform source did not finish its "
+      "startup check within 60 seconds. Ask Möbius to repair it before "
+      "restarting."
+    ) from exc
+  if completed.returncode == 0:
+    return
+  detail = (completed.stderr or completed.stdout or "").strip()
+  if len(detail) > 1200:
+    detail = detail[-1200:]
+  suffix = f" Details: {detail}" if detail else ""
+  raise RestartSourceInvalid(
+    "Restart stopped: the current platform source failed the same startup "
+    "check the next boot would run. Ask Möbius to repair it before "
+    f"restarting.{suffix}"
+  )
 
 
 def _claim_in_process_restart() -> bool:
@@ -130,6 +209,16 @@ async def restart_this_worker(
   drain flushes each paused note before SIGTERM, so a hard kill loses nothing a
   graceful drain would have saved.
   """
+  # Last-chance defense for every caller, including future restart surfaces.
+  # The synchronous owner-facing paths run this before acknowledging the
+  # action; repeating it here closes the short source-change window without
+  # draining or interrupting work when the source is invalid.
+  try:
+    validate_restart_source()
+  except RestartSourceInvalid:
+    log.error("planned restart rejected by startup preflight", exc_info=True)
+    return
+
   if not _claim_in_process_restart():
     return
 

@@ -8,7 +8,7 @@ import { enterBuildAdmission } from './build-admission.mjs'
 import { resolveBuildOutput } from './build-output-policy.mjs'
 
 
-enterBuildAdmission({ vite: true })
+enterBuildAdmission()
 
 const frontendDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const watcherLeasePath = path.join(frontendDir, '.watch.lock')

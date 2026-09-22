@@ -36,8 +36,8 @@ REQUEST_APPROVAL_TOOL = "request_approval"
 REQUEST_QUESTION_TOOL = "request_question"
 REQUEST_RESTART_TOOL = "request_restart"
 SAVED_CARD_TERMINAL_INSTRUCTION = (
-  "This tool call must be the final action of the turn. After a confirmed "
-  "saved receipt, end immediately with no further text or tools."
+  "This tool call ends the turn: the response is cut at the card, so nothing "
+  "said or done after it can reach the owner until they reply."
 )
 LIST_AGENT_PEERS_TOOL = "list_agent_peers"
 SEND_AGENT_MESSAGE_TOOL = "send_agent_message"

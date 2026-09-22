@@ -818,10 +818,6 @@ export default function Drawer({
     })
   }
 
-  // deleteApp is handled by Shell (where showToast lives) — the local
-  // implementation silently swallowed 409 and network errors. Calls are
-  // forwarded via the onDeleteApp prop; the local function is removed.
-
   // Focus management: move focus into the drawer on open; restore to
   // the toggle on close. The drawer panel gets tabIndex=-1 so it can
   // receive programmatic focus without appearing in the tab order.
