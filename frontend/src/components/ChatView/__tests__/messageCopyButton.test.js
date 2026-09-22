@@ -1,8 +1,10 @@
 /* One-tap message copy: messageCopyText owns what "copy this message" means,
  * MessageCopyButton is a plain tap target on the shared clipboard helper, and
  * MessageMetaRow keeps copy beside the timestamp behind the row's existing
- * tap-to-reveal interaction. Native long-press selection must stay untouched
- * (chatUiPolish.test locks the no-interception side). */
+ * tap-to-reveal interaction. Both user and assistant messages get it; the
+ * newest message of each role stays pinned visible without a tap. Native
+ * long-press selection must stay untouched (chatUiPolish.test locks the
+ * no-interception side). */
 import { readFileSync } from 'node:fs'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
@@ -51,8 +53,8 @@ test('the copy button is a plain tap target on the shared clipboard helper', () 
     'the copy affordance must never intercept press/hold — native selection stays intact')
 })
 
-test('only owner messages offer copy actions', () => {
-  assert.match(chatView, /const copyText = ownerUserMessage \? messageCopyText\(msg\) : ''/)
+test('every message offers a copy action, not just owner messages', () => {
+  assert.match(chatView, /const copyText = messageCopyText\(msg\)/)
   assert.doesNotMatch(chatView, /speechText=|speechKey=|speechChatId=/)
   assert.doesNotMatch(chatView, /stopChatSpeech/)
 })
@@ -63,13 +65,26 @@ test('copy follows the timestamp inside one tap-revealed metadata row', () => {
       < metaRow.indexOf('<MessageCopyButton text={copyText} />'),
     'copy must render immediately after the timestamp',
   )
-  assert.match(chatView, /visible=\{visibleMessageMetaKey === dataKey\}/)
+  assert.match(chatView, /visible=\{metaAlwaysVisible \|\| visibleMessageMetaKey === dataKey\}/)
 
   const css = readFileSync(new URL('../ChatView.css', import.meta.url), 'utf8')
   assert.match(css, /\.chat__msg-meta \{[\s\S]*visibility: hidden;/)
   assert.match(css, /\.chat__msg-meta--visible \{[\s\S]*visibility: visible;/)
   assert.match(css, /\.chat__msg-meta \{[\s\S]*height: 24px;[\s\S]*margin-bottom: -24px;/,
     'the row must use the message gap instead of centering controls in zero height')
+})
+
+test('the newest message of each role stays pinned visible without a tap', () => {
+  assert.match(chatView, /const lastAssistantIdx = messages\.reduce\(\(acc, m, i\) => \(/)
+  assert.match(chatView, /const metaAlwaysVisible = i === lastUserIdx \|\| i === lastAssistantIdx/)
+})
+
+test("assistant metadata mirrors to the bubble's side", () => {
+  assert.match(metaRow, /role === 'assistant' \? ' chat__msg-meta--assistant' : ''/)
+  assert.match(chatView, /role=\{msg\.role\}/)
+
+  const css = readFileSync(new URL('../ChatView.css', import.meta.url), 'utf8')
+  assert.match(css, /\.chat__msg-meta--assistant \{[\s\S]*align-self: flex-start;/)
 })
 
 test('message metadata stays visible for five seconds', () => {
