@@ -1519,6 +1519,44 @@ def test_goal_plan_write_aborts_when_presented_goal_changes(monkeypatch):
   ]
 
 
+@pytest.mark.parametrize("task_status", ["pending", "completed"])
+def test_cli_completion_validates_and_records_outcome_without_preflight(
+  client, owner_token, db, monkeypatch, capsys, task_status,
+):
+  import sys
+
+  auth, chat_id = _active_goal(client, owner_token, db)
+  saved = client.put(
+    f"/api/chats/{chat_id}/goal-plan", headers=auth,
+    json={"expected_revision": 0, "tasks": [
+      {"id": "verify", "title": "Verify release", "status": task_status},
+    ]},
+  )
+  assert saved.status_code == 200, saved.text
+  agent_auth = _agent_run_auth(db, chat_id, "goal-root")
+  helper = _goal_plan_script()
+
+  def request(method, path, body=None):
+    response = client.request(method, path, json=body, headers=agent_auth)
+    if response.status_code >= 400:
+      raise SystemExit(response.json()["detail"])
+    return response.json()
+
+  monkeypatch.setattr(helper, "_request", request)
+  monkeypatch.setattr(helper, "_settings", lambda: ("unused", "unused", chat_id))
+  monkeypatch.setattr(sys, "argv", ["goal_plan.py", "complete", "--result", "Verified release"])
+  if task_status == "pending":
+    with pytest.raises(SystemExit, match="unfinished tasks"):
+      helper.main()
+  else:
+    assert helper.main() == 0
+    assert '"status": "completed"' in capsys.readouterr().out
+  db.expire_all()
+  goal = db.get(models.ChatGoal, "goal-1")
+  assert goal.status == ("completed" if task_status == "completed" else "open")
+  assert goal.result == ("Verified release" if task_status == "completed" else None)
+
+
 def test_plan_rejects_cycles_missing_dependencies_and_non_goal_runs(
   client, owner_token, db,
 ):

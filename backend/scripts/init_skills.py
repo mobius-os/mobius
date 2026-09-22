@@ -84,6 +84,8 @@ _UNMODIFIED_MIGRATIONS = {
     "668bd365e2edf694c921606c9619fff7b8e58806a9eb48745058b22731c44995",
   },
   "goal-planning.md": {
+    # Explicit-completion seed before the redundant preflight was made optional.
+    "404552d57930a811eae26232c5fb6b1d9bd781abb941c194fea6990920f838c0",
     # First dependency-aware Goal-plan seed. Replace only the untouched copy
     # so existing instances learn the completion preflight without clobbering
     # any owner-authored planning guidance.

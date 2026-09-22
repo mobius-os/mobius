@@ -170,6 +170,36 @@ def test_waiting_predecessor_migrates_but_owner_edits_remain(
   assert live.read_text(encoding="utf-8") == "owner-authored waiting policy"
 
 
+def test_goal_completion_guidance_upgrades_without_overwriting_customizations(
+  tmp_path, monkeypatch,
+):
+  module = _load("init_skills")
+  seed = tmp_path / "seed"
+  skills = tmp_path / "skills"
+  seed.mkdir()
+  skills.mkdir()
+  current = (SCRIPTS / "seed-skills" / "goal-planning.md").read_bytes()
+  predecessor = (
+    Path(__file__).parent / "fixtures" / "goal-planning-pre-single-completion.md"
+  ).read_bytes()
+  assert hashlib.sha256(predecessor).hexdigest() in module._UNMODIFIED_MIGRATIONS["goal-planning.md"]
+  (seed / "goal-planning.md").write_bytes(current)
+  live = skills / "goal-planning.md"
+  live.write_bytes(predecessor)
+  monkeypatch.setattr(module, "_SEED_CANDIDATES", [seed])
+  monkeypatch.setattr(module, "SKILLS", skills)
+  monkeypatch.setattr(module, "_chown_mobius", lambda _path: None)
+  monkeypatch.setattr(module, "_write_index", lambda: None)
+
+  module.init()
+  assert live.read_bytes() == current
+
+  customized = predecessor + b"\nOwner preference: verify the published artifact.\n"
+  live.write_bytes(customized)
+  module.init()
+  assert live.read_bytes() == customized
+
+
 def test_controlled_skills_have_fix_forward_migrations():
   module = _load("init_skills")
 
@@ -183,6 +213,7 @@ def test_controlled_skills_have_fix_forward_migrations():
     "668bd365e2edf694c921606c9619fff7b8e58806a9eb48745058b22731c44995",
   }
   assert module._UNMODIFIED_MIGRATIONS["goal-planning.md"] == {
+    "404552d57930a811eae26232c5fb6b1d9bd781abb941c194fea6990920f838c0",
     "2adb39457e0ec2ee9d9a3596cb96e5a6240bae23d725e6459ba0f6e77d5474c4",
     "a3edc5fcc453a5305102e144c2d58ae16b828612ac93a6a7442be7e267779f59",
     "bca228c745881bfffdad5d7adaab3c62871e6f62801252784fb0522787cfb850",
