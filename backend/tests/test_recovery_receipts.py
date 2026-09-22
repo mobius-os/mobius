@@ -59,10 +59,33 @@ def _delete(client, auth, db, resource):
   receipt_id = response.headers["X-Recovery-Notification-Id"]
   db.expire_all()
   receipt = db.get(models.Notification, receipt_id)
+  assert receipt.actions[0]["resource_generation"] == (
+    row.created_at.replace(tzinfo=UTC).isoformat()
+  )
   assert receipt.actions[0]["deleted_at"] == row.deleted_at.replace(tzinfo=UTC).isoformat()
   assert receipt.actions[0]["expires_at"] == (row.deleted_at + SOFT_DELETE_TTL).replace(tzinfo=UTC).isoformat()
   assert receipt.body == f"Receipt {kind}"
   return receipt
+
+
+@pytest.mark.parametrize("resource", ["app"], indirect=True)
+def test_app_receipt_uses_the_app_lifecycle_expiry(
+  client, auth, db, resource, monkeypatch,
+):
+  _, row, url = resource
+  app_ttl = timedelta(hours=12)
+  monkeypatch.setattr("app.routes.apps.APP_SOFT_DELETE_TTL", app_ttl)
+
+  response = client.delete(url, headers=auth)
+
+  assert response.status_code == 204, response.text
+  db.expire_all()
+  receipt = db.get(
+    models.Notification, response.headers["X-Recovery-Notification-Id"],
+  )
+  assert receipt.actions[0]["expires_at"] == (
+    row.deleted_at + app_ttl
+  ).replace(tzinfo=UTC).isoformat()
 
 
 @pytest.mark.parametrize("kind", ["chat", "project"])
@@ -149,12 +172,71 @@ def test_old_receipt_cannot_restore_a_later_deletion(
   assert result.status_code == 200, result.text
 
 
+@pytest.mark.parametrize("complete_receipt", [False, True])
+def test_receipt_cannot_touch_a_recreated_same_id_resource(
+  client, auth, db, resource, complete_receipt,
+):
+  """Generation, not only id/tombstone time, owns recovery convergence."""
+  kind, row, url = resource
+  receipt = _delete(client, auth, db, resource)
+  original_deleted_at = row.deleted_at
+  if complete_receipt:
+    recovered = client.post(
+      f"{url}/recover", headers=auth, json={"notification_id": receipt.id},
+    )
+    assert recovered.status_code == 200, recovered.text
+
+  db.expire_all()
+  current = db.get(type(row), row.id)
+  next_created_at = current.created_at + timedelta(seconds=1)
+  if kind == "project":
+    db.query(models.Chat).filter(models.Chat.project_id == row.id).delete(
+      synchronize_session=False,
+    )
+  db.delete(current)
+  db.commit()
+
+  if kind == "chat":
+    replacement = models.Chat(
+      id=str(row.id), title="Recreated receipt chat", created_at=next_created_at,
+    )
+  elif kind == "app":
+    replacement = models.App(
+      id=row.id, name="Recreated receipt app", slug="receipt-app",
+      source_dir=str(Path(get_settings().data_dir) / "apps" / "receipt-app"),
+      jsx_source="export default () => null", created_at=next_created_at,
+    )
+  else:
+    replacement = models.Project(
+      id=str(row.id), name="Recreated receipt project", project_type="blank",
+      root_path=f"projects/{row.id}", template_snapshot_json={},
+      created_at=next_created_at,
+    )
+  # Reuse the original tombstone time too: neither part of the old compound
+  # identity may authorize a successor row. Completed retries exercise the
+  # post-commit cleanup path against a live successor.
+  expected_deleted_at = None if complete_receipt else original_deleted_at
+  replacement.deleted_at = expected_deleted_at
+  db.add(replacement)
+  db.commit()
+
+  result = client.post(
+    f"{url}/recover", headers=auth, json={"notification_id": receipt.id},
+  )
+  assert result.status_code == 409, result.text
+  assert result.json()["detail"]["code"] == "recovery_superseded"
+  db.expire_all()
+  assert db.get(type(replacement), replacement.id).deleted_at == expected_deleted_at
+
+
 def test_expired_receipt_does_not_restore_its_tombstone(client, auth, db, resource):
   _, row, url = resource
   receipt = _delete(client, auth, db, resource)
   row.deleted_at = now_naive_utc() - timedelta(days=8)
+  row.created_at = row.deleted_at - timedelta(seconds=1)
   receipt.actions = [{
     **receipt.actions[0],
+    "resource_generation": row.created_at.replace(tzinfo=UTC).isoformat(),
     "deleted_at": row.deleted_at.replace(tzinfo=UTC).isoformat(),
     "expires_at": (row.deleted_at + SOFT_DELETE_TTL).replace(tzinfo=UTC).isoformat(),
   }]
@@ -189,6 +271,7 @@ def test_retry_reads_completion_after_obtaining_lifecycle_lock(
       completed_at = complete_recovery_action(
         other, owner_id=owner_id, notification_id=receipt.id,
         resource_type=kind, resource_id=str(row.id),
+        resource_generation=live.created_at,
       )
       other.commit()
 

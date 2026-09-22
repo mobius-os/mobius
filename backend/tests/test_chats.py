@@ -53,6 +53,7 @@ def test_delete_and_recover_publish_exact_projection_events(
     ).one()
     db.refresh(chat)
     assert receipt.actions == [{
+      "resource_generation": chat.created_at.replace(tzinfo=UTC).isoformat(),
       "deleted_at": chat.deleted_at.replace(tzinfo=UTC).isoformat(),
       "expires_at": (chat.deleted_at + timedelta(days=7)).replace(tzinfo=UTC).isoformat(),
       "action": "recover_chat",

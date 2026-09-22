@@ -12,11 +12,19 @@ from sqlalchemy.orm.attributes import flag_modified
 from app import models
 from app.broadcast import get_system_broadcast
 from app.schemas import NotificationAction
-from app.timeutil import SOFT_DELETE_TTL, now_naive_utc
+from app.timeutil import now_naive_utc
 
 
 RecoveryResource = Literal["chat", "app", "project"]
 logger = logging.getLogger(__name__)
+
+
+def _as_utc(value: datetime) -> datetime:
+  return (
+    value.replace(tzinfo=UTC)
+    if value.tzinfo is None
+    else value.astimezone(UTC)
+  )
 
 
 def stage_recovery_notification(
@@ -25,7 +33,9 @@ def stage_recovery_notification(
   owner_id: int,
   resource_type: RecoveryResource,
   resource_id: str,
+  resource_generation: datetime,
   deleted_at: datetime,
+  expires_at: datetime,
   resource_name: str,
 ) -> str:
   """Stage the Undo receipt in the caller's deletion transaction."""
@@ -42,8 +52,9 @@ def stage_recovery_notification(
       "title": "Undo",
       "resource_type": resource_type,
       "resource_id": resource_id,
-      "deleted_at": deleted_at.replace(tzinfo=UTC).isoformat(),
-      "expires_at": (deleted_at + SOFT_DELETE_TTL).replace(tzinfo=UTC).isoformat(),
+      "resource_generation": _as_utc(resource_generation).isoformat(),
+      "deleted_at": _as_utc(deleted_at).isoformat(),
+      "expires_at": _as_utc(expires_at).isoformat(),
     }],
     sent_at=datetime.now(UTC),
   ))
@@ -73,6 +84,7 @@ def _find_recovery_action(
   notification_id: str,
   resource_type: RecoveryResource,
   resource_id: str,
+  resource_generation: datetime,
 ) -> tuple[models.Notification, int, NotificationAction]:
   notification = db.query(models.Notification).filter(
     models.Notification.id == notification_id,
@@ -92,6 +104,12 @@ def _find_recovery_action(
       and action.resource_type == resource_type
       and action.resource_id == resource_id
     ):
+      expected_generation = _as_utc(resource_generation)
+      if action.resource_generation.astimezone(UTC) != expected_generation:
+        raise HTTPException(409, detail={
+          "code": "recovery_superseded",
+          "message": "This Undo belongs to an earlier item with the same identity.",
+        })
       return notification, index, action
   raise HTTPException(status_code=404, detail="Recovery receipt not found.")
 
@@ -103,12 +121,14 @@ def validate_recovery_action(
   notification_id: str,
   resource_type: RecoveryResource,
   resource_id: str,
+  resource_generation: datetime,
   deleted_at: datetime | None,
 ) -> datetime | None:
   """Validate a receipt against the current tombstone under its lifecycle lock.
 
-  A resource id can be deleted, restored without this receipt, and deleted
-  again. The original tombstone timestamp, not the id alone, owns this Undo.
+  A resource id can be deleted, purged, and reused. The row generation rejects
+  that successor before completion retries can run any post-commit cleanup;
+  the tombstone timestamp then selects one deletion of the matching row.
   """
   _, _, action = _find_recovery_action(
     db,
@@ -116,6 +136,7 @@ def validate_recovery_action(
     notification_id=notification_id,
     resource_type=resource_type,
     resource_id=resource_id,
+    resource_generation=resource_generation,
   )
   receipt_deleted_at = action.deleted_at.astimezone(UTC).replace(tzinfo=None)
   if deleted_at is not None and receipt_deleted_at != deleted_at:
@@ -142,6 +163,7 @@ def complete_recovery_action(
   notification_id: str,
   resource_type: RecoveryResource,
   resource_id: str,
+  resource_generation: datetime,
 ) -> datetime:
   """Stage completion of the exact receipt in the restore transaction."""
   notification, index, action = _find_recovery_action(
@@ -150,6 +172,7 @@ def complete_recovery_action(
     notification_id=notification_id,
     resource_type=resource_type,
     resource_id=resource_id,
+    resource_generation=resource_generation,
   )
   completed_at = action.completed_at or datetime.now(UTC)
   actions = list(notification.actions or [])

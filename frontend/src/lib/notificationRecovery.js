@@ -25,10 +25,13 @@ export function parseNotificationRecoveryAction(value) {
     )
   ) return null
   if (
-    typeof value.deleted_at !== 'string'
+    typeof value.resource_generation !== 'string'
+    || typeof value.deleted_at !== 'string'
     || typeof value.expires_at !== 'string'
+    || !Number.isFinite(Date.parse(value.resource_generation))
     || !Number.isFinite(Date.parse(value.deleted_at))
     || !Number.isFinite(Date.parse(value.expires_at))
+    || Date.parse(value.resource_generation) > Date.parse(value.deleted_at)
     || Date.parse(value.expires_at) <= Date.parse(value.deleted_at)
   ) return null
   return {

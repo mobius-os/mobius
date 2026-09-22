@@ -2350,7 +2350,9 @@ async def delete_chat(
             owner_id=owner.id,
             resource_type="chat",
             resource_id=str(chat_id),
+            resource_generation=chat.created_at,
             deleted_at=chat.deleted_at,
+            expires_at=chat.deleted_at + SOFT_DELETE_TTL,
             resource_name=chat.title or "Untitled chat",
           )
           db.commit()
@@ -2478,7 +2480,8 @@ async def recover_chat(
         if body is not None:
           completed_at = validate_recovery_action(
             db, owner_id=owner.id, notification_id=body.notification_id,
-            resource_type="chat", resource_id=str(chat_id), deleted_at=chat.deleted_at,
+            resource_type="chat", resource_id=str(chat_id),
+            resource_generation=chat.created_at, deleted_at=chat.deleted_at,
           )
           already_completed = completed_at is not None
         if not already_completed:
@@ -2491,6 +2494,7 @@ async def recover_chat(
             completed_at = complete_recovery_action(
               db, owner_id=owner.id, notification_id=body.notification_id,
               resource_type="chat", resource_id=str(chat_id),
+              resource_generation=chat.created_at,
             )
           db.commit()
       # Clear the registry's deleted flag and bump to a generation newer than every

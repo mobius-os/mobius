@@ -25,7 +25,8 @@ from sqlalchemy.orm import Session, defer
 from sqlalchemy.orm.attributes import flag_modified
 
 from app import (
-  auth, drawer_pins, fs_locks, github_auth, models, project_builders, schemas,
+  auth, chat_queue, drawer_pins, fs_locks, github_auth, models,
+  project_builders, schemas,
   project_drawer, project_git, providers, questions, workspace_files,
 )
 from app.broadcast import get_system_broadcast
@@ -1936,40 +1937,45 @@ def send_project_agent_message(
   "/{project_id}/chats", status_code=201,
   dependencies=[Depends(reject_cross_site)],
 )
-def create_project_chat(
+async def create_project_chat(
   project_id: str,
   body: ProjectChatCreate,
   owner: models.Owner = Depends(get_current_owner),
   db: Session = Depends(get_db),
 ):
-  project = _live_project(db, project_id)
-  chat_id = (
-    str(uuid.uuid5(uuid.UUID(project.id), body.recovery_request_id))
-    if body.recovery_request_id
-    else str(uuid.uuid4())
-  )
-  existing = db.get(models.Chat, chat_id)
-  if existing is not None:
-    if existing.deleted_at is not None:
-      raise HTTPException(409, "Project chat was deleted.")
-    if existing.project_id != project.id:
-      raise HTTPException(409, "Chat identity is already in use.")
-    return _project_chat_response(existing)
-  chat = _new_chat(
-    db, chat_id=chat_id, title=body.title, owner=owner,
-    project_id=project.id,
-  )
-  db.add(chat)
-  project.updated_at = now_naive_utc()
-  try:
-    db.commit()
-  except IntegrityError:
+  async with serialize_project_lifecycle(project_id):
+    project = _live_project(db, project_id)
+    chat_id = (
+      str(uuid.uuid5(uuid.UUID(project.id), body.recovery_request_id))
+      if body.recovery_request_id
+      else str(uuid.uuid4())
+    )
     db.rollback()
-    existing = db.get(models.Chat, chat_id)
-    if existing is None or existing.project_id != project.id:
-      raise
-    return _project_chat_response(existing)
-  db.refresh(chat)
+    async with chat_queue.get_transition_lock(chat_id):
+      with PROJECT_LIFECYCLE_LOCK:
+        project = _live_project(db, project_id)
+        existing = db.get(models.Chat, chat_id)
+        if existing is not None:
+          if existing.deleted_at is not None:
+            raise HTTPException(409, "Project chat was deleted.")
+          if existing.project_id != project.id:
+            raise HTTPException(409, "Chat identity is already in use.")
+          return _project_chat_response(existing)
+        chat = _new_chat(
+          db, chat_id=chat_id, title=body.title, owner=owner,
+          project_id=project.id,
+        )
+        db.add(chat)
+        project.updated_at = now_naive_utc()
+        try:
+          db.commit()
+        except IntegrityError:
+          db.rollback()
+          existing = db.get(models.Chat, chat_id)
+          if existing is None or existing.project_id != project.id:
+            raise
+          return _project_chat_response(existing)
+        db.refresh(chat)
   get_system_broadcast().publish({
     "type": "project_chat_created",
     "projectId": str(project.id),
@@ -2125,7 +2131,9 @@ async def delete_project(
           owner_id=owner.id,
           resource_type="project",
           resource_id=str(project.id),
+          resource_generation=project.created_at,
           deleted_at=project.deleted_at,
+          expires_at=project.deleted_at + SOFT_DELETE_TTL,
           resource_name=project.name or "Untitled project",
         )
         db.commit()
@@ -2177,7 +2185,7 @@ async def recover_project(
           completed_at = validate_recovery_action(
             db, owner_id=owner.id, notification_id=body.notification_id,
             resource_type="project", resource_id=str(project_id),
-            deleted_at=project.deleted_at,
+            resource_generation=project.created_at, deleted_at=project.deleted_at,
           )
           already_completed = completed_at is not None
         if already_completed:
@@ -2206,6 +2214,7 @@ async def recover_project(
               notification_id=body.notification_id,
               resource_type="project",
               resource_id=str(project.id),
+              resource_generation=project.created_at,
             )
           db.commit()
     # Repeat these idempotent post-commit steps for a completed receipt. The
