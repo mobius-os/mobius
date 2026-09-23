@@ -52,6 +52,7 @@ from app.memory_recall import (
   recall_from_command,
   settle_recall,
   settle_recall_from_task_output,
+  settle_recall_without_receipt,
 )
 from app.peer_message import (
   peer_message_from_call, settle_peer_message,
@@ -611,9 +612,30 @@ class ChatEventSink:
         # answer. The task_done for this id (or finalize) settles it.
         event["recall"] = defer_recall_to_task(pending, dispatch)
         return
-      event["recall"] = settle_recall(
-        pending, event.get("content"), event.get("output_exit_code"),
-      )
+      content = event.get("content")
+      if (
+        event.get("output_exit_code") in (None, 0)
+        and (not isinstance(content, str) or not content.strip())
+      ):
+        # Codex can deliver a command result to the model while omitting the
+        # terminal aggregate. Prefer any transcript-facing streamed tail:
+        # Memory prints its compact receipt last, so the tail is sufficient
+        # without accumulating unbounded command output in the chat block.
+        blk = _tool_block_for_event(
+          self.assistant_blocks, event.get("tool_use_id"),
+        )
+        streamed = blk.get("output") if isinstance(blk, dict) else None
+        if isinstance(streamed, str) and streamed.strip():
+          content = streamed
+      if (
+        event.get("output_exit_code") in (None, 0)
+        and (not isinstance(content, str) or not content.strip())
+      ):
+        event["recall"] = settle_recall_without_receipt(pending)
+      else:
+        event["recall"] = settle_recall(
+          pending, content, event.get("output_exit_code"),
+        )
 
   def _deferred_recall_blocks(self, task_id: str | None = None) -> list[dict]:
     """Tool blocks whose Memory lookup is still waiting on a background task."""
@@ -868,9 +890,10 @@ class ChatEventSink:
     # and before the broadcast below, so the rewritten event is the single
     # source feeding the persisted block, the live wire, and the catch-up log.
     #
-    # Reduce first so a large JSON envelope is parsed only once. The app prints
-    # its bounded structured Memory result last, so the carved tail still
-    # contains the line that settles a recognized lookup.
+    # Protocol-owned receipts are parsed from the full result before generic
+    # presentation carving. This keeps Memory's bounded V2 page receipt and
+    # peer envelopes independent of a UI excerpt heuristic; only the ordinary
+    # display body is reduced and stashed below.
     output_reduced = False
     owner_card_receipt_id = None
     if event_type == "tool_output":
@@ -878,6 +901,7 @@ class ChatEventSink:
       # but the marked envelope must not enter Möbius's live UI, transcript, or
       # chat-side logs. Normal sealed execution never emits these markers.
       event["content"] = redact_reveal_markers(event.get("content"))
+      self._stamp_memory_recall(event)
       # Settle a peer-network exchange from the FULL result JSON before it can be
       # carved by reduction (the envelope is one object, not a tail-safe line).
       self._stamp_peer_message(event)
@@ -901,7 +925,7 @@ class ChatEventSink:
         exit_code = tool_output_exit_code(event.get("content"))
         if exit_code is not None:
           event["output_exit_code"] = exit_code
-    if event_type in ("tool_start", "tool_input", "tool_output"):
+    if event_type in ("tool_start", "tool_input"):
       self._stamp_memory_recall(event)
     if event_type == "task_done":
       self._stamp_deferred_recall_done(event)

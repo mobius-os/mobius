@@ -31,7 +31,12 @@ log = logging.getLogger(__name__)
 # navigates to them". Only the app with write authority can honestly make it.
 SHARED_MEMORY_PROVIDER_TIER = "write"
 
-RECALL_ENTRY_BASENAME = "memory_search.py"
+# Keep discovery and expansion on the same authority boundary.  The operation
+# name is protocol metadata; the provider still owns the street addresses.
+RECALL_ENTRYPOINTS = (
+  ("memory_search.py", "catalog"),
+  ("memory_read.py", "read"),
+)
 
 
 def shared_memory_level(contract: object) -> str:
@@ -71,7 +76,7 @@ def resolve_recall_binding(
     )
     if not include_uninstalled:
       query = query.filter(models.App.deleted_at.is_(None))
-    pairs: list[tuple[str, str]] = []
+    pairs: list[tuple[str, str, str]] = []
     for app_id, slug, source_dir, contract in query.order_by(
       models.App.id.asc()
     ).all():
@@ -86,13 +91,19 @@ def resolve_recall_binding(
       # tells the agent to substitute the stored source_dir while the system
       # prompt prints the resolved one, so a single symlinked ancestor would
       # otherwise make every real lookup unrecognizable.
-      forms = [base / RECALL_ENTRY_BASENAME]
+      forms = [
+        (base / basename, operation)
+        for basename, operation in RECALL_ENTRYPOINTS
+      ]
       try:
-        forms.append(base.resolve() / RECALL_ENTRY_BASENAME)
+        forms.extend(
+          (base.resolve() / basename, operation)
+          for basename, operation in RECALL_ENTRYPOINTS
+        )
       except OSError:
         pass
-      for form in forms:
-        pairs.append((str(form), label))
+      for form, operation in forms:
+        pairs.append((str(form), label, operation))
     return RecallBinding.of(pairs)
   except Exception:
     log.exception("recall binding unavailable; citations disabled this pass")

@@ -274,6 +274,32 @@ test('failed Memory activity is honest and remains distinctive', () => {
   assert.equal(isDistinctiveActivityTool(failed), true)
 })
 
+test('Memory V2 labels distinguish catalogue reuse from body delivery', () => {
+  assert.equal(memoryRecallLabel({
+    status: 'done',
+    recall: { status: 'hit', phase: 'catalog', reused: true,
+      page: { candidate_count: 19 } },
+  }), 'Reused Memory search — 19 relevant notes')
+  assert.equal(memoryRecallLabel({
+    status: 'done',
+    recall: { status: 'hit', phase: 'read',
+      page: { requested_count: 2, fully_supplied_count: 1,
+        complete: false, next_cursor: 'body:hash:1:0' } },
+  }), 'Read a Memory page')
+  assert.equal(memoryRecallLabel({
+    status: 'done',
+    recall: { status: 'hit', phase: 'read',
+      page: { requested_count: 2, fully_supplied_count: 2, complete: true } },
+  }), 'Finished reading 2 notes from Memory')
+  assert.equal(memoryRecallLabel({
+    status: 'done',
+    recall: { status: 'hit', phase: 'read', receipt_missing: true },
+  }), 'Memory page completed')
+  assert.equal(memoryRecallLabel({
+    status: 'running', recall: { status: 'searching', phase: 'read' },
+  }), 'Reading Memory')
+})
+
 
 const think = (content, duration_ms = 0) => ({ type: 'thinking', content, duration_ms })
 

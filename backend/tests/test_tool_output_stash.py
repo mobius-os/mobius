@@ -23,7 +23,7 @@ from app.events import (
     process_event,
 )
 from app.routes.chats import TOOL_OUTPUT_PREVIEW_CHARS
-from app.memory_recall import EMPTY_RECALL_BINDING
+from app.memory_recall import EMPTY_RECALL_BINDING, RecallBinding
 from app.tool_output_storage import (
     TOOL_OUTPUT_STORAGE_PREFIX,
     decode_tool_output,
@@ -572,11 +572,11 @@ class _FakeBC:
         self.events.append(event)
 
 
-def _sink(chat_id="c-sink"):
+def _sink(chat_id="c-sink", recall_binding=EMPTY_RECALL_BINDING):
     from app.chat import _ChatEventSink
     return _ChatEventSink(
       _FakeBC(), chat_id, run_token="rt",
-      recall_binding=EMPTY_RECALL_BINDING,
+      recall_binding=recall_binding,
     )
 
 
@@ -659,6 +659,48 @@ def test_sink_parses_a_large_json_envelope_once(monkeypatch, db):
 
     assert calls == 1
     assert event["output_exit_code"] == 3
+
+
+def test_memory_receipt_is_settled_before_generic_output_carving(db):
+    binding = RecallBinding.of([
+        ("/apps/brain/memory_search.py", "brain", "catalog"),
+    ])
+    sink = _sink(recall_binding=binding)
+    command = 'python3 /apps/brain/memory_search.py "q" "c-sink"'
+    sink.publish({
+        "type": "tool_start", "tool": "Bash", "input": command,
+        "tool_use_id": "tu-memory-v2",
+    })
+    notes = [
+        {
+            "id": f"note-{index}",
+            "path": f"notes/note-{index}.md",
+            "title": f"Memory catalogue item {index} " + ("x" * 90),
+        }
+        for index in range(100)
+    ]
+    receipt = "MOBIUS_MEMORY_RESULT_V2:" + json.dumps({
+        "status": "hit",
+        "phase": "catalog",
+        "lookup_id": "a" * 64,
+        "notes": notes,
+        "page": {"candidate_count": 100, "complete": True},
+    }, separators=(",", ":"))
+    assert len(receipt) > 8192
+    event = {
+        "type": "tool_output", "content": ("body\n" * 1000) + receipt,
+        "tool_use_id": "tu-memory-v2", "output_complete": True,
+        "output_exit_code": 0,
+    }
+
+    sink.publish(event)
+
+    assert event["output_truncated"] is True
+    recall = sink.assistant_blocks[-1]["recall"]
+    assert recall["status"] == "hit"
+    assert recall["phase"] == "catalog"
+    assert recall["page"]["candidate_count"] == 100
+    assert len(recall["notes"]) == 100
 
 
 def test_sink_passes_through_small_output(db):

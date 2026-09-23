@@ -6,6 +6,7 @@ import { noteHref, noteLabel } from './memoryRecall.js'
 const MAX_QUERY_CHARS = 600
 const MAX_SUMMARY_CHARS = 300
 const RECALL_STATUSES = new Set(['searching', 'hit', 'empty', 'failed'])
+const RECALL_PHASES = new Set(['catalog', 'read'])
 
 function cleanText(value, limit) {
   if (typeof value !== 'string') return ''
@@ -37,10 +38,23 @@ export function memoryRecallCardModel(recall) {
     })
   }
 
+  const phase = RECALL_PHASES.has(recall.phase) ? recall.phase : ''
+  const page = recall?.page && typeof recall.page === 'object'
+    ? recall.page
+    : {}
+  const count = value => Number.isInteger(value) && value >= 0 ? value : null
   return {
     status: recall.status,
+    phase,
     query: cleanText(recall.query, MAX_QUERY_CHARS),
     notes,
     noteCount: notes.length,
+    candidateCount: count(page.candidate_count),
+    hasMore: typeof page.next_cursor === 'string' && page.next_cursor.length > 0,
+    reused: recall.reused === true,
+    discoveryComplete: typeof recall.discovery_complete === 'boolean'
+      ? recall.discovery_complete
+      : null,
+    receiptMissing: recall.receipt_missing === true,
   }
 }

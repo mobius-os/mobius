@@ -99,7 +99,35 @@ export default function MemoryRecallCard({
 
             {model.status === 'hit' && model.notes.length > 0 && (
               <div className="chat__memory-section chat__memory-results">
-                <span className="chat__memory-kicker">Results</span>
+                <span className="chat__memory-kicker">
+                  {model.phase === 'catalog' ? 'Catalogue'
+                    : model.phase === 'read' ? 'Content page' : 'Results'}
+                </span>
+                {model.reused && (
+                  <p className="chat__memory-state">
+                    Reused the result of an identical lookup.
+                  </p>
+                )}
+                {model.phase === 'catalog' && model.candidateCount !== null && (
+                  <p className="chat__memory-state">
+                    Showing {model.noteCount} of {model.candidateCount} relevant
+                    {model.candidateCount === 1 ? ' note' : ' notes'}
+                    {model.hasMore ? '; more catalogue entries are available.' : '.'}
+                  </p>
+                )}
+                {model.phase === 'read' && (
+                  <p className="chat__memory-state">
+                    {model.hasMore
+                      ? 'This content continues on another deterministic page.'
+                      : 'The requested content is complete.'}
+                  </p>
+                )}
+                {model.discoveryComplete === false && (
+                  <p className="chat__memory-state chat__memory-state--failed">
+                    Discovery stopped at a safety boundary; this catalogue may
+                    be incomplete.
+                  </p>
+                )}
                 <ul className="chat__memory-list">
                   {model.notes.map(note => (
                     <li key={note.key}>
@@ -129,6 +157,16 @@ export default function MemoryRecallCard({
                     </li>
                   ))}
                 </ul>
+              </div>
+            )}
+
+            {model.status === 'hit' && model.receiptMissing && (
+              <div className="chat__memory-section">
+                <span className="chat__memory-kicker">Status</span>
+                <p className="chat__memory-state">
+                  Memory completed this page, but its receipt was not available
+                  in the chat history.
+                </p>
               </div>
             )}
 

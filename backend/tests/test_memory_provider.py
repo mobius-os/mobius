@@ -37,14 +37,20 @@ def test_binding_follows_the_install_not_a_slug_pattern(db, tmp_path):
   binding = resolve_recall_binding(db)
   script = str(source_dir / "memory_search.py")
 
-  assert binding.app_slug_for(script) == "second-brain"
+  assert binding.entry_for(script) == ("second-brain", "catalog")
   assert recall_from_command(
     f'python3 {script} "what did we decide" "chat-1"', binding,
   ) == {
     "status": "searching",
     "app_slug": "second-brain",
+    "phase": "catalog",
     "query": "what did we decide",
   }
+  read_script = str(source_dir / "memory_read.py")
+  assert recall_from_command(
+    f'python3 {read_script} "{"a" * 64}" "all" "start" "chat-1"',
+    binding,
+  )["phase"] == "read"
 
 
 def test_an_app_without_memory_authority_cannot_mint_citations(db, tmp_path):
@@ -61,8 +67,8 @@ def test_an_app_without_memory_authority_cannot_mint_citations(db, tmp_path):
   binding = resolve_recall_binding(db)
 
   assert binding.is_empty
-  assert binding.app_slug_for(str(none_dir / "memory_search.py")) is None
-  assert binding.app_slug_for(str(read_dir / "memory_search.py")) is None
+  assert binding.entry_for(str(none_dir / "memory_search.py")) is None
+  assert binding.entry_for(str(read_dir / "memory_search.py")) is None
 
 
 def test_uninstalling_the_provider_does_not_erase_past_citations(db, tmp_path):
@@ -81,10 +87,10 @@ def test_uninstalling_the_provider_does_not_erase_past_citations(db, tmp_path):
   )
   script = str(source_dir / "memory_search.py")
 
-  assert resolve_recall_binding(db).app_slug_for(script) is None
+  assert resolve_recall_binding(db).entry_for(script) is None
   assert resolve_recall_binding(
     db, include_uninstalled=True,
-  ).app_slug_for(script) == "memory"
+  ).entry_for(script) == ("memory", "catalog")
 
 
 def test_a_broken_contract_disables_citations_rather_than_raising(db, tmp_path):
@@ -113,8 +119,8 @@ def test_a_symlinked_app_root_binds_both_path_forms(db, tmp_path):
 
   binding = resolve_recall_binding(db)
 
-  assert binding.app_slug_for(str(link / "memory" / "memory_search.py")) == "memory"
-  assert binding.app_slug_for(str(real / "memory" / "memory_search.py")) == "memory"
+  assert binding.entry_for(str(link / "memory" / "memory_search.py")) == ("memory", "catalog")
+  assert binding.entry_for(str(real / "memory" / "memory_search.py")) == ("memory", "catalog")
 
 
 def test_the_platform_names_no_app_on_the_authorization_path():

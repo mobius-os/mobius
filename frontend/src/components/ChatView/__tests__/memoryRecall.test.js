@@ -73,6 +73,43 @@ test('the card model keeps the question and result summaries together', () => {
     '/shell/?app=memory&intent=note%3Aalpha')
 })
 
+test('the V2 catalogue model exposes honest pagination and reuse', () => {
+  const model = memoryRecallCardModel({
+    status: 'hit',
+    phase: 'catalog',
+    reused: true,
+    discovery_complete: false,
+    page: { candidate_count: 19, complete: false, next_cursor: 'catalog:2' },
+    notes: [note('alpha'), note('beta')],
+  })
+  assert.equal(model.phase, 'catalog')
+  assert.equal(model.candidateCount, 19)
+  assert.equal(model.hasMore, true)
+  assert.equal(model.reused, true)
+  assert.equal(model.discoveryComplete, false)
+})
+
+test('the V2 body model distinguishes partial pages from complete delivery', () => {
+  const model = memoryRecallCardModel({
+    status: 'hit',
+    phase: 'read',
+    page: { requested_count: 2, fully_supplied_count: 1,
+      complete: false, next_cursor: 'body:hash:1:0' },
+    notes: [note('alpha')],
+  })
+  assert.equal(model.phase, 'read')
+  assert.equal(model.hasMore, true)
+})
+
+test('the model exposes a clean completion whose receipt was unavailable', () => {
+  const model = memoryRecallCardModel({
+    status: 'hit', phase: 'read', receipt_missing: true, notes: [],
+  })
+  assert.equal(model.phase, 'read')
+  assert.equal(model.receiptMissing, true)
+  assert.equal(model.noteCount, 0)
+})
+
 test('the expanded card preserves every note in the bounded receipt', () => {
   const notes = Array.from({ length: 12 }, (_, index) => note(`note-${index}`))
   const model = memoryRecallCardModel({ status: 'hit', notes })
