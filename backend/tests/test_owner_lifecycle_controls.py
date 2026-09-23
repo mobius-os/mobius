@@ -40,17 +40,25 @@ def _append_pending(chat_id: str, message: dict) -> None:
 def test_owner_input_gate_keeps_plain_owner_and_exact_chat_embed(
   db, owner_token,
 ):
-  from app.deps import Principal, require_owner_input_principal
+  from app.deps import (
+    Principal,
+    is_owner_input_principal,
+    require_owner_input_principal,
+  )
 
   owner = db.query(models.Owner).one()
-  require_owner_input_principal(Principal(owner=owner, app_id=None))
-  require_owner_input_principal(Principal(
+  owner_principal = Principal(owner=owner, app_id=None)
+  embed_principal = Principal(
     owner=owner,
     app_id=42,
     scope="chat_embed",
     chat_id="exact-chat",
     embed_instance_id="exact-frame",
-  ))
+  )
+  assert is_owner_input_principal(owner_principal) is True
+  assert is_owner_input_principal(embed_principal) is True
+  require_owner_input_principal(owner_principal)
+  require_owner_input_principal(embed_principal)
 
 
 def _delegated_and_top_level_auth(client, owner_token, db):
@@ -310,6 +318,89 @@ def test_delegated_bearer_cannot_send_edit_or_cancel_owner_messages(
     assert len(pending) == 1
     assert pending[0]["content"] == f"queued-{target}"
     assert pending[0]["cid"] == f"pending-{target}"
+
+
+def test_top_level_agent_sends_and_edits_do_not_gain_owner_authority(
+  client, owner_token, db, monkeypatch,
+):
+  from app.routes import chats_stream
+
+  chat_ids, _delegated_auth, top_level_auth = _delegated_and_top_level_auth(
+    client, owner_token, db,
+  )
+  monkeypatch.setattr(chats_stream, "is_draining", lambda: True)
+
+  for target in ("top-level", "foreign"):
+    response = client.post(
+      f"/api/chats/{chat_ids[target]}/messages",
+      json={"content": f"agent-{target}", "cid": f"agent-{target}"},
+      headers=top_level_auth,
+    )
+    assert response.status_code == 202, response.text
+
+  owner_auth = {"Authorization": f"Bearer {owner_token}"}
+  owner_response = client.post(
+    f"/api/chats/{chat_ids['foreign']}/messages",
+    json={"content": "owner", "cid": "owner"},
+    headers=owner_auth,
+  )
+  assert owner_response.status_code == 202, owner_response.text
+  db.expire_all()
+  queued_owner = next(
+    row for row in db.get(models.Chat, chat_ids["foreign"]).pending_messages
+    if row["cid"] == "owner"
+  )
+  assert queued_owner["_owner_authored"] is True
+  edited = client.patch(
+    f"/api/chats/{chat_ids['foreign']}/pending/owner",
+    json={"content": "agent rewrite"},
+    headers=top_level_auth,
+  )
+  assert edited.status_code == 200, edited.text
+  assert edited.json()["updated"] is True
+
+  db.expire_all()
+  for target in ("top-level", "foreign"):
+    pending = db.get(models.Chat, chat_ids[target]).pending_messages
+    agent_row = next(row for row in pending if row["cid"] == f"agent-{target}")
+    assert "_owner_authored" not in agent_row
+  owner_row = next(
+    row for row in db.get(models.Chat, chat_ids["foreign"]).pending_messages
+    if row["cid"] == "owner"
+  )
+  assert owner_row["content"] == "agent rewrite"
+  assert "_owner_authored" not in owner_row
+
+  from app.chat_writer import AppendSteeredUserMessage, get_writer
+  committed = get_writer().submit(AppendSteeredUserMessage(
+    chat_id=chat_ids["foreign"],
+    run_token="",
+    user_msgs=[owner_row],
+    consume_pending_cids=["owner"],
+  )).result(timeout=30)
+  assert committed["owner_steer_committed"] is False
+
+  restored = client.patch(
+    f"/api/chats/{chat_ids['foreign']}/pending/agent-foreign",
+    json={"content": "owner rewrite"},
+    headers=owner_auth,
+  )
+  assert restored.status_code == 200, restored.text
+  assert restored.json()["updated"] is True
+  db.expire_all()
+  owner_rewrite = next(
+    row for row in db.get(models.Chat, chat_ids["foreign"]).pending_messages
+    if row["cid"] == "agent-foreign"
+  )
+  assert owner_rewrite["content"] == "owner rewrite"
+  assert owner_rewrite["_owner_authored"] is True
+  committed = get_writer().submit(AppendSteeredUserMessage(
+    chat_id=chat_ids["foreign"],
+    run_token="",
+    user_msgs=[owner_rewrite],
+    consume_pending_cids=["agent-foreign"],
+  )).result(timeout=30)
+  assert committed["owner_steer_committed"] is True
 
 
 def test_delegated_bearer_cannot_enter_host_or_platform_lifecycle(

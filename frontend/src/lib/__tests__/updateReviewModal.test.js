@@ -77,6 +77,8 @@ test('errors have one alert owner and results focus a live control', () => {
   assert.match(modal, /buttonRef=\{resultActionRef\}/)
   assert.doesNotMatch(modal, /className="urm__error" role="alert"/)
   assert.match(modal, /ref=\{resultActionRef\}/)
+  assert.match(modal, /applyAttemptedRef\.current = true/)
+  assert.match(modal, /applyAttemptedRef\.current && !busy/)
   assert.match(modal, /tabIndex=\{-1\}/)
   assert.match(updates, /ref=\{actionRef\}/)
   assert.match(updates, /restoreFocus\.current = true/)

@@ -316,6 +316,9 @@ export function memoryRecallLabel(tool) {
   if (recall?.status === 'searching' || tool?.status === 'running') {
     return 'Searching Memory'
   }
+  if (typeof recall?.display?.label === 'string' && recall.display.label.trim()) {
+    return recall.display.label.trim().slice(0, 160)
+  }
   if (recall?.status === 'empty') return 'Searched Memory — nothing relevant'
   if (recall?.status === 'failed') return 'Memory lookup failed'
   const count = Array.isArray(recall?.notes) ? recall.notes.length : 0
