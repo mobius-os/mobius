@@ -244,7 +244,7 @@ test.describe('Service worker — vite-plugin-pwa contract', () => {
     } finally {
       await context.setOffline(false)
       await request.delete(`${BASE}/api/apps/${app.id}`, {
-        headers, failOnStatusCode: false,
+        headers: { Authorization: `Bearer ${token}` }, failOnStatusCode: false,
       })
     }
   })
