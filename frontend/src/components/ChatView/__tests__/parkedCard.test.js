@@ -130,6 +130,24 @@ test('the rendered limit card explains automatic and early recovery states', () 
   assert.match(elapsed, /Continue when you’re ready/)
 })
 
+test('restart pause card distinguishes queued recovery and owner cancellation', () => {
+  const block = {
+    type: 'error', message: 'Restarting', resumable: true,
+    pause: { kind: 'restart' },
+  }
+  const waiting = renderToStaticMarkup(createElement(ErrorCard, {
+    block, restartRecoveryState: 'waiting',
+  }))
+  assert.match(waiting, /Waiting to resume/)
+  assert.match(waiting, /resume this chat automatically/)
+
+  const cancelled = renderToStaticMarkup(createElement(ErrorCard, {
+    block: { ...block, restart_resume_cancelled: true },
+  }))
+  assert.match(cancelled, /Automatic resume was cancelled/)
+  assert.match(cancelled, /saved work is still here/)
+})
+
 test('a busy selected-model card explains its short automatic retry', (t) => {
   const previousWindow = globalThis.window
   globalThis.window = { location: { href: 'https://mobius.test/' } }

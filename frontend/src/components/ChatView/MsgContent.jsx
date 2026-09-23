@@ -127,6 +127,10 @@ function MsgContentInner({
   // interrupt note (a resumable error block on the last message) shows the
   // button. Compared in the memo below, so pass a stable reference.
   onResume,
+  onCancelRestartResume,
+  restartResumeCancelPending = false,
+  restartResumeCancelError = '',
+  restartRecoveryState,
   resumeState,
   onInternalNav,
   autoResumeEnabled,
@@ -485,6 +489,7 @@ function MsgContentInner({
             autoResume={automaticContinuation}
             resetElapsed={!!limitResetElapsed}
             recoveryCredit={recoveryCredit}
+            restartRecoveryState={restartRecoveryState}
             cardRef={recoveryOwner ? resumeCardRef : undefined}
           >
             {recoveryOwner && parked && !modelCapacity && autoResumeAvailable && onAutoResumeChange && (
@@ -525,8 +530,26 @@ function MsgContentInner({
               >
                 {resumeState?.pending ? 'Resuming…' : resumeState?.unavailable ? 'Reconnecting…' : parked
                   ? limitResetElapsed ? 'Continue now' : (recoveryCredit?.actionLabel || 'Try now')
-                  : 'Resume'}
+                  : block.pause?.kind === 'restart' ? 'Resume now' : 'Resume'}
               </button>
+            )}
+            {recoveryOwner && block.pause?.kind === 'restart'
+              && ['waiting', 'starting'].includes(restartRecoveryState)
+              && onCancelRestartResume && (
+              <button
+                type="button"
+                className="chat__recovery-action"
+                onClick={onCancelRestartResume}
+                disabled={submissionBlocked || restartResumeCancelPending}
+                aria-busy={restartResumeCancelPending || undefined}
+              >
+                {restartResumeCancelPending ? 'Cancelling…' : 'Cancel resume'}
+              </button>
+            )}
+            {recoveryOwner && restartResumeCancelError && (
+              <span className="chat__recovery-action-error" role="alert">
+                {restartResumeCancelError}
+              </span>
             )}
             {recoveryOwner && resumeState?.error && (
               <span className="chat__recovery-action-error" role="alert">
@@ -650,6 +673,10 @@ export default memo(MsgContentInner, (prev, next) => {
     && prev.onQuestionSubmitIntent === next.onQuestionSubmitIntent
     && prev.onQuestionSubmitCancel === next.onQuestionSubmitCancel
     && prev.onResume === next.onResume
+    && prev.onCancelRestartResume === next.onCancelRestartResume
+    && prev.restartResumeCancelPending === next.restartResumeCancelPending
+    && prev.restartResumeCancelError === next.restartResumeCancelError
+    && prev.restartRecoveryState === next.restartRecoveryState
     && prev.resumeState === next.resumeState
     && prev.onInternalNav === next.onInternalNav
     && prev.autoResumeEnabled === next.autoResumeEnabled

@@ -56,11 +56,16 @@ export default function ErrorCard({
   autoResume = false,
   resetElapsed = false,
   recoveryCredit = null,
+  restartRecoveryState = null,
   cardRef,
   children,
 }) {
   const vm = errorCardViewModel(block)
-  const recoveryTitle = vm.modelCapacity
+  const restartWaiting = block.pause?.kind === 'restart'
+    && ['waiting', 'starting'].includes(restartRecoveryState)
+  const recoveryTitle = restartWaiting
+    ? 'Waiting to resume'
+    : vm.modelCapacity
     ? (vm.resetLabel ? `Trying again ${vm.resetLabel}` : 'Trying again shortly')
     : vm.parked
     ? autoResume
@@ -69,7 +74,11 @@ export default function ErrorCard({
         ? 'Usage is available again'
         : (vm.resetLabel ? `Usage resets ${vm.resetLabel}` : 'Usage limit reached')
     : null
-  const recoveryCopy = vm.modelCapacity
+  const recoveryCopy = restartWaiting
+    ? 'Your work is safe. Möbius will resume this chat automatically when its recovery turn starts.'
+    : block.restart_resume_cancelled
+      ? 'Automatic resume was cancelled. Your saved work is still here; choose Resume now whenever you’re ready.'
+    : vm.modelCapacity
     ? 'Your work is safe. Möbius will retry with increasing pauses, up to five times. If the model stays busy, you can choose another model and Resume.'
     : vm.parked
     ? autoResume
@@ -117,7 +126,7 @@ export default function ErrorCard({
         ) : vm.benign ? (
           <>
             <div className="chat__recovery-title chat__recovery-title--paused">
-              {vm.label}
+              {restartWaiting ? 'Waiting to resume' : vm.label}
             </div>
             <div className="chat__recovery-copy">
               {vm.modelCapacityExhausted
@@ -125,7 +134,11 @@ export default function ErrorCard({
                 : vm.goalHandoff
                 ? 'The agent stopped before arranging the next step. Your progress is saved. Resume to continue this Goal.'
                 : block.pause?.kind === 'restart'
-                ? block.resumable
+                ? block.restart_resume_cancelled
+                  ? 'Automatic resume was cancelled. Your saved work is still here; choose Resume now whenever you’re ready.'
+                  : restartWaiting
+                    ? 'Your work is safe. Möbius will resume this chat automatically when its recovery turn starts.'
+                    : block.resumable
                   ? 'Möbius will continue automatically when the restart is complete.'
                   : (block.message || 'This response is paused.')
                 : vm.resourceWait

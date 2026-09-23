@@ -474,6 +474,11 @@ export default function ChatView({
   // the first authoritative detail read.
   const cached = queryClient.getQueryData(chatMessagesQueryKey(chatId))
   const [recoveryRunId, setRecoveryRunId] = useState(cached?.recoveryRunId || null)
+  const [restartRecoveryState, setRestartRecoveryState] = useState(
+    cached?.restartRecoveryState || cached?.chatInfo?.restart_recovery_state || null,
+  )
+  const [restartResumeCancelPending, setRestartResumeCancelPending] = useState(false)
+  const [restartResumeCancelError, setRestartResumeCancelError] = useState('')
   const transcriptCacheKey = useMemo(() => chatMessagesQueryKey(chatId), [chatId])
   const {
     messages,
@@ -1464,6 +1469,7 @@ export default function ChatView({
       const refreshedChatInfo = chatDetailCacheValue(data).chatInfo
       setGoalPresentationLocalState(runtimeGoal)
       setRecoveryRunId(data.recovery_run_id || null)
+      setRestartRecoveryState(data.restart_recovery_state || null)
       if (embedded) setEmbeddedRunActive(!!data.running)
       const adoptAssistantOwner = shouldAdoptRuntimeAssistantOwner({
         runtimeRunning: !!data.running,
@@ -1634,6 +1640,7 @@ export default function ChatView({
       }
       commitRuntimeSnapshot(runtimeTransition)
       setRecoveryRunId(data.recovery_run_id || null)
+      setRestartRecoveryState(data.restart_recovery_state || null)
       // A finalized reply can advance while this client holds an idle warm
       // cache with no stream left to reconcile it. Foreground runtime reads
       // already carry the durable version; when it disproves the cache, use
@@ -4132,6 +4139,26 @@ export default function ChatView({
   const refreshResume = useCallback(() => {
     void fetchMessages({ force: true, authoritative: true })
   }, [fetchMessages])
+  const handleCancelRestartResume = useCallback(async () => {
+    if (!recoveryRunId || !['waiting', 'starting'].includes(restartRecoveryState)) return
+    setRestartResumeCancelPending(true)
+    setRestartResumeCancelError('')
+    try {
+      const response = await apiFetch(`/chats/${chatId}/restart-resume/cancel`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ run_id: recoveryRunId }),
+      })
+      let data = null
+      try { data = await response.json() } catch { /* status remains authoritative */ }
+      if (!response.ok) throw new Error(data?.detail || 'Could not cancel automatic resume.')
+      await fetchMessages({ force: true, authoritative: true })
+    } catch (err) {
+      setRestartResumeCancelError(err?.message || 'Could not cancel automatic resume.')
+    } finally {
+      setRestartResumeCancelPending(false)
+    }
+  }, [chatId, fetchMessages, recoveryRunId, restartRecoveryState])
   const resumeBlocked = useCallback(() => (
     isProviderSwitchBlocking(chatId) || sendingRef.current || serverRunningRef.current
   ), [chatId])
@@ -5975,6 +6002,10 @@ export default function ChatView({
                 onQuestionSubmitIntent={prepareQuestionSubmission}
                 onQuestionSubmitCancel={cancelQuestionSubmission}
                 onResume={handleResume}
+                onCancelRestartResume={isLastMsg ? handleCancelRestartResume : undefined}
+                restartResumeCancelPending={restartResumeCancelPending}
+                restartResumeCancelError={restartResumeCancelError}
+                restartRecoveryState={restartRecoveryState}
                 resumeState={resumeState}
                 onInternalNav={internalNav}
                 autoResumeEnabled={
@@ -6025,6 +6056,10 @@ export default function ChatView({
               onPrepareAnswer={prepareQuestionSubmission}
               onCancelAnswer={cancelQuestionSubmission}
               onResume={activeAssistantIsStreaming ? undefined : handleResume}
+              onCancelRestartResume={handleCancelRestartResume}
+              restartResumeCancelPending={restartResumeCancelPending}
+              restartResumeCancelError={restartResumeCancelError}
+              restartRecoveryState={restartRecoveryState}
               resumeState={resumeState}
               onInternalNav={internalNav}
               autoResumeEnabled={autoResumeEnabled}
