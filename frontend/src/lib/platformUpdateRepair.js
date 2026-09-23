@@ -15,7 +15,7 @@ export function platformUpdateRepairReason({ preview, platform, rebuild, error =
     return 'This update needs help preserving your local changes.'
   }
   if (preview?.conflict_paths?.length) {
-    return 'This update overlaps your local changes and needs help before Apply.'
+    return 'This update overlaps your local changes and needs help to finish.'
   }
   const incomingActivation = preview?.incoming_activation || preview?.activation
   if (incomingActivation?.reasons?.some(reason => reason?.code === 'python_dependencies')) {

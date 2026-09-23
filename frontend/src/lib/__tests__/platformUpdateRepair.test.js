@@ -47,14 +47,14 @@ test('old Python drift does not block an unrelated reviewed update', () => {
   assert.equal(platformUpdateRepairReason({ preview }), null)
 })
 
-test('a predicted overlay conflict stops before Apply and carries its paths', () => {
+test('an existing update conflict carries its paths into agent help', () => {
   const preview = {
     target_sha: 'target',
     activation: { level: 'server_restart', required_actions: ['server_restart'] },
     blocking_paths: [],
     conflict_paths: ['backend/app/goal_plans.py'],
   }
-  assert.match(platformUpdateRepairReason({ preview }), /overlaps.*before Apply/)
+  assert.match(platformUpdateRepairReason({ preview }), /overlaps.*finish/)
   assert.deepEqual(
     platformUpdateRepairEvidence({ preview }).conflict_paths,
     ['backend/app/goal_plans.py'],

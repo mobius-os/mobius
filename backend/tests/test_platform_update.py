@@ -2987,8 +2987,8 @@ def test_update_preview_excludes_local_edits(clone_env):
   assert preview["conflict_paths"] == []
 
 
-def test_update_preview_predicts_overlay_conflict_without_mutating_live_clone(
-  clone_env,
+def test_update_preview_does_not_replay_local_overlay(
+  clone_env, monkeypatch,
 ):
   origin, platform = clone_env
   served = _local_commit(platform, edits={
@@ -2999,10 +2999,15 @@ def test_update_preview_predicts_overlay_conflict_without_mutating_live_clone(
   })
   pu._fetch(platform)
   worktrees_before = _git(platform, "worktree", "list", "--porcelain").stdout
+  monkeypatch.setattr(
+    pu.app_git,
+    "replay_overlay",
+    lambda *args, **kwargs: pytest.fail("Review must not replay local history"),
+  )
 
   preview = pu.platform_update_preview(platform)
 
-  assert preview["conflict_paths"] == ["backend/app/main.py"]
+  assert preview["conflict_paths"] == []
   assert _served_sha(platform) == served
   assert _git(platform, "status", "--porcelain").stdout == ""
   assert _git(platform, "worktree", "list", "--porcelain").stdout == worktrees_before

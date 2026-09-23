@@ -2899,38 +2899,6 @@ def _read_worktree_path_without_links(repo: Path, relative: str) -> str:
         os.close(descriptor)
 
 
-def _preview_overlay_conflict_paths(
-  repo: Path, local: str, target: str,
-) -> list[str]:
-  """Predict the exact linear-overlay conflict Apply would encounter.
-
-  The preview runs the same equivalence filtering and commit-by-commit replay
-  as :func:`_apply_overlay`, but in a disposable detached worktree.  It never
-  moves a served ref, parks a resolver worktree, or writes an update flag.
-  Cleanup is unconditional so repeatedly opening the review cannot accumulate
-  candidate checkouts.
-  """
-  commits = app_git.overlay_commits(repo, target, local)
-  skip = app_git.landed_overlay_commits(repo, commits, target)
-  with tempfile.TemporaryDirectory(prefix="mobius-platform-preview-") as root:
-    worktree = Path(root) / "candidate"
-    try:
-      replay = app_git.replay_overlay(
-        repo, commits=commits, onto=target, worktree=worktree, skip=skip,
-      )
-      if replay.status != "conflict" or replay.conflict is None:
-        return []
-      # Match _park_replay: show both the first replay boundary and any
-      # endpoint conflict a resolver would need to reconcile afterwards.
-      try:
-        net_paths = set(app_git.merge_refs(repo, local, target).conflict_paths)
-      except (OSError, subprocess.SubprocessError, RuntimeError):
-        net_paths = set()
-      return sorted(net_paths | set(replay.conflict.get("paths") or []))
-    finally:
-      app_git.remove_overlay_worktree(repo, worktree)
-
-
 def platform_update_preview(
   repo: Path = PLATFORM_REPO,
   *,
@@ -2944,8 +2912,9 @@ def platform_update_preview(
   it never mutates the served branch or working tree.
 
   Shows the upstream-side changes ``origin/main`` brings since the shared merge
-  base — local edits are excluded from the public diff, while a disposable
-  replay predicts whether preserving them will conflict before Apply.
+  base; local edits are excluded from the public diff. Review never reconciles
+  local history. Apply owns that work once and reports a real conflict if one
+  exists, rather than making every review replay the full local overlay.
   Availability is the same ancestry check :func:`platform_status` uses; an
   already-applied target can still have actionable activation work.
   Missing source or target provenance is an explicit error on both deployments;
@@ -3037,7 +3006,6 @@ def _platform_update_preview_unlocked(
   commits = _preview_commits(repo, base, target)
   total_commits = _preview_commit_count(repo, base, target)
   conflict = _read_conflict_flag() or {}
-  predicted_conflicts = _preview_overlay_conflict_paths(repo, local, target)
   # Review this incoming release on its own. Existing activation drift remains
   # visible in status after Apply, but must not turn an unrelated source update
   # into an image replacement or agent-only dead end.
@@ -3058,9 +3026,7 @@ def _platform_update_preview_unlocked(
     commits=commits,
     files=_preview_files(repo, base, target),
     diff=diff, diff_truncated=truncated,
-    conflict_paths=sorted(
-      set(conflict.get("paths") or []) | set(predicted_conflicts)
-    ),
+    conflict_paths=sorted(set(conflict.get("paths") or [])),
     blocking_paths=[],
     blocking_diff=None,
     blocking_diff_truncated=False,
