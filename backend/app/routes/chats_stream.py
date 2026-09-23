@@ -64,7 +64,8 @@ from app.deps import (
   Principal, get_chat_view_principal, get_owner_or_chat_embed_principal,
   get_current_owner, reject_cross_site,
   chat_embed_session_is_active, require_chat_embed_operation,
-  require_nondelegated_owner_control, require_owner_input_principal,
+  is_owner_input_principal, require_nondelegated_owner_control,
+  require_owner_input_principal,
 )
 from app.resource_access import (
   get_active_chat_for_principal, get_active_chat_or_404,
@@ -630,7 +631,7 @@ async def send_message(
           try:
             append_result = await _append_restart_feedback_to_pending(
               chat, body, db, initiated_by_app_id=principal.app_id,
-              owner_authored=principal.app_id is None and principal.chat_id is None,
+              owner_authored=is_owner_input_principal(principal),
             )
             stored = append_result["stored"]
             duplicate = append_result.get("duplicate") is True
@@ -935,7 +936,7 @@ async def send_message(
         # wake, so neither a second runner nor a polling task is needed.
         stored = await _append_to_pending(
           chat, body, db, initiated_by_app_id=principal.app_id,
-          owner_authored=principal.app_id is None and principal.chat_id is None,
+          owner_authored=is_owner_input_principal(principal),
           front=True, require_answer_match=True,
         )
         from app.chat_event_sink import get_active_sink
@@ -1069,7 +1070,7 @@ async def send_message(
           body,
           db,
           initiated_by_app_id=principal.app_id,
-          owner_authored=principal.app_id is None and principal.chat_id is None,
+          owner_authored=is_owner_input_principal(principal),
           front=True,
           require_answer_match=True,
         )
@@ -1264,7 +1265,7 @@ async def _send_message_locked(
   if is_draining():
     new_msg = await _append_to_pending(
       chat, body, db, initiated_by_app_id=principal.app_id,
-      owner_authored=principal.app_id is None and principal.chat_id is None,
+      owner_authored=is_owner_input_principal(principal),
     )
     db.expire(chat)
     return _queued_response(new_msg, len(chat.pending_messages or []))
@@ -1276,7 +1277,7 @@ async def _send_message_locked(
   if activation_barrier_wait_id(db, chat_id) is not None:
     new_msg = await _append_to_pending(
       chat, body, db, initiated_by_app_id=principal.app_id,
-      owner_authored=principal.app_id is None and principal.chat_id is None,
+      owner_authored=is_owner_input_principal(principal),
     )
     db.expire(chat)
     return _queued_response(new_msg, len(chat.pending_messages or []))
@@ -1294,7 +1295,7 @@ async def _send_message_locked(
   ):
     new_msg = await _append_to_pending(
       chat, body, db, initiated_by_app_id=principal.app_id,
-      owner_authored=principal.app_id is None and principal.chat_id is None,
+      owner_authored=is_owner_input_principal(principal),
     )
     db.expire(chat)
     return _queued_response(new_msg, len(chat.pending_messages or []))
@@ -1352,7 +1353,7 @@ async def _send_message_locked(
       else:
         reserved = await _append_to_pending(
           chat, body, db, initiated_by_app_id=principal.app_id,
-          owner_authored=principal.app_id is None and principal.chat_id is None,
+          owner_authored=is_owner_input_principal(principal),
         )
         db.expire(chat)
         reserved_cid = cid_of(reserved)
@@ -1403,7 +1404,7 @@ async def _send_message_locked(
 
     new_msg = await _append_to_pending(
       chat, body, db, initiated_by_app_id=principal.app_id,
-      owner_authored=principal.app_id is None and principal.chat_id is None,
+      owner_authored=is_owner_input_principal(principal),
     )
     started_message = None
 
@@ -1484,7 +1485,7 @@ async def _send_message_locked(
       })
     new_msg = await _append_to_pending(
       chat, body, db, initiated_by_app_id=principal.app_id,
-      owner_authored=principal.app_id is None and principal.chat_id is None,
+      owner_authored=is_owner_input_principal(principal),
     )
     return _queued_response(new_msg, len(chat.pending_messages))
 

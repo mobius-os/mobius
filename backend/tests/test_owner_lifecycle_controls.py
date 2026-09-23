@@ -40,17 +40,25 @@ def _append_pending(chat_id: str, message: dict) -> None:
 def test_owner_input_gate_keeps_plain_owner_and_exact_chat_embed(
   db, owner_token,
 ):
-  from app.deps import Principal, require_owner_input_principal
+  from app.deps import (
+    Principal,
+    is_owner_input_principal,
+    require_owner_input_principal,
+  )
 
   owner = db.query(models.Owner).one()
-  require_owner_input_principal(Principal(owner=owner, app_id=None))
-  require_owner_input_principal(Principal(
+  owner_principal = Principal(owner=owner, app_id=None)
+  embed_principal = Principal(
     owner=owner,
     app_id=42,
     scope="chat_embed",
     chat_id="exact-chat",
     embed_instance_id="exact-frame",
-  ))
+  )
+  assert is_owner_input_principal(owner_principal) is True
+  assert is_owner_input_principal(embed_principal) is True
+  require_owner_input_principal(owner_principal)
+  require_owner_input_principal(embed_principal)
 
 
 def _delegated_and_top_level_auth(client, owner_token, db):
