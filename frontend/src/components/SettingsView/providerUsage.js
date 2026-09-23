@@ -1,4 +1,5 @@
 /* Pure display helpers for compact provider-plan usage snapshots. */
+import { formatDateTime } from '../../lib/dateTimeFormat.js'
 
 export function formatPlanStatus(label) {
   const value = typeof label === 'string' ? label.trim() : ''
@@ -26,23 +27,11 @@ export function formatTrialTimeLeft(value, now = new Date()) {
   return `${Math.ceil(remainingMs / 86_400_000)}d left`
 }
 
-export function formatUsageReset(value, now = new Date()) {
+export function formatUsageReset(value) {
   if (!value) return ''
   const reset = new Date(value)
   if (Number.isNaN(reset.getTime())) return ''
-  const sameDay = (
-    reset.getFullYear() === now.getFullYear()
-    && reset.getMonth() === now.getMonth()
-    && reset.getDate() === now.getDate()
-  )
-  const time = new Intl.DateTimeFormat(undefined, {
-    hour: '2-digit',
-    minute: '2-digit',
-    hourCycle: 'h23',
-  }).format(reset)
-  if (sameDay) return `Resets ${time}`
-  const day = new Intl.DateTimeFormat(undefined, { weekday: 'short' }).format(reset)
-  return `Resets ${day} ${time}`
+  return `Resets ${formatDateTime(reset)}`
 }
 
 export function bankedResetCredits(snapshot) {

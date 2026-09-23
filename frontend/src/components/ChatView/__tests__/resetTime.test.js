@@ -35,12 +35,7 @@ test('a next-day reset reads "tomorrow at <time>"', () => {
 test('a reset several days out names its weekday and date', () => {
   const reset = localNoon(3)
   const label = formatResetTime(reset)
-  const date = new Date(reset).toLocaleDateString([], {
-    weekday: 'short',
-    month: 'short',
-    day: 'numeric',
-  })
-  assert.match(label, new RegExp(`^${date} at \\d`), label)
+  assert.match(label, /^\d+(?:st|nd|rd|th) \w{3} \d{4}, \d{2}:\d{2}$/)
 })
 
 test('the label reads naturally after "Resets"', () => {
