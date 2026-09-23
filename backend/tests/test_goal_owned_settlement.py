@@ -413,6 +413,73 @@ async def test_zero_legacy_allowance_does_not_interrupt_authorized_work(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("owner_steer", [True, False])
+async def test_only_visible_owner_steer_reauthorizes_one_goal_rollover(
+  db, chat, monkeypatch, owner_steer,
+):
+  """An in-turn owner question returns to work without weakening loop bounds."""
+  from app import chat as chat_mod, chat_queue
+  from app.broadcast import create_broadcast, remove_broadcast
+  from app.chat_event_sink import ChatEventSink
+  from app.memory_recall import EMPTY_RECALL_BINDING
+
+  _add_goal_run(db, chat)
+  root = db.get(models.ChatRun, "goal-run")
+  root.goal_plan_revision_at_admission = db.get(
+    models.ChatGoal, "goal-run",
+  ).revision
+  db.commit()
+  scheduled = []
+  monkeypatch.setattr(
+    chat_mod, "_schedule_continuation", lambda **kwargs: scheduled.append(kwargs),
+  )
+  monkeypatch.setattr(chat_mod, "_publish_chat_run_finished", lambda *_: None)
+
+  broadcast = create_broadcast(chat.id)
+  sink = ChatEventSink(
+    broadcast,
+    chat.id,
+    run_token="goal-run",
+    recall_binding=EMPTY_RECALL_BINDING,
+  )
+  sink.publish({"type": "text", "content": "Working on the saved plan."})
+  steer = {
+    "role": "user",
+    "content": "Explain this part before continuing.",
+    "cid": "owner-steer" if owner_steer else "hidden-steer",
+    "ts": 2,
+    **({} if owner_steer else {"hidden": True}),
+  }
+  await sink.commit_steer_cut(steer, [])
+  sink.publish({"type": "text", "content": "Here is the explanation."})
+  try:
+    disposition = await chat_mod._complete_turn(
+      bc=broadcast,
+      sink=sink,
+      db=db,
+      chat_id=chat.id,
+      run_gen=None,
+      provider_id="codex",
+      cost_usd=0,
+      close_browser=False,
+    )
+  finally:
+    remove_broadcast(chat.id)
+
+  db.expire_all()
+  saved = db.get(models.Chat, chat.id)
+  if owner_steer:
+    assert disposition is chat_queue.TerminalDisposition.CONTINUATION_PROMOTED
+    assert len(scheduled) == 1
+    assert scheduled[0]["next_user"]["continuation_reason"] == GOAL_HANDOFF_REASON
+    assert saved.pending_question_id is None
+  else:
+    assert disposition is chat_queue.TerminalDisposition.QUESTION_PARKED
+    assert scheduled == []
+    assert saved.pending_question_id == "goal-handoff-goal-run"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("card_saved", [True, False])
 async def test_only_saved_owner_question_prevents_terminal_goal_fallback_question(
   db, chat, monkeypatch, card_saved,

@@ -391,7 +391,17 @@ class ChatEventSink:
     # the next snapshot (or the terminal finalize) appends the continuation as
     # a fresh assistant message.
     self._steering = False
+    # A committed owner steer is fresh authority to return to the unfinished
+    # Goal once after answering the in-turn question.  Keep this on the live
+    # sink rather than inferring it from transcript ordering at settlement:
+    # Codex has no provider-side turn boundary, while split_for_steer already
+    # owns the durable acknowledgement that proves the owner row landed.
+    self._committed_owner_steer = False
     self._lifecycle_writes: list[tuple[RecordAgentLifecycle, object]] = []
+
+  def has_committed_owner_steer(self) -> bool:
+    """Whether this turn durably absorbed a visible owner-authored steer."""
+    return self._committed_owner_steer
 
   def _start_side_task(
     self,
@@ -1198,6 +1208,17 @@ class ChatEventSink:
     )
     if not isinstance(stored_messages, list) or not stored_messages:
       stored_messages = user_msgs
+    if any(
+      isinstance(row, dict)
+      and row.get("role") == "user"
+      and row.get("steered") is True
+      and not row.get("hidden")
+      and row.get("_initiated_by_app_id") is None
+      for row in stored_messages
+    ):
+      # Set only after AppendSteeredUserMessage's commit-before-ack result.
+      # A refused or failed steer must not silently authorize more Goal work.
+      self._committed_owner_steer = True
     try:
       self.bc.publish(steered_into_turn_event(
         stored_messages,
