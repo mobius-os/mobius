@@ -95,7 +95,7 @@ jobs:
       - name: Install pinned Codex Python SDK
         run: >-
           pip install --no-deps
-          'openai-codex @ git+https://github.com/openai/codex.git@3d2ee51ca2d5db578f328aa75e20aa22c0197c9a#subdirectory=sdk/python'
+          'openai-codex @ git+https://github.com/openai/codex.git@fe74a774532af67b5a4a3dec03ce9469e17f89af#subdirectory=sdk/python'
       - name: Run backend static analysis
         working-directory: backend
         run: |

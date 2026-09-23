@@ -30,6 +30,7 @@ import shutil
 import stat
 import threading
 import time
+import uuid
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
@@ -1489,6 +1490,20 @@ def claude_subscription_type(data_dir: str) -> str | None:
     return None
   value = oauth.get("subscriptionType")
   return value if isinstance(value, str) and value.strip() else None
+
+
+def claude_organization_uuid(data_dir: str) -> str:
+  """Return the connected Claude organization identity, never its secrets."""
+  creds_path = Path(data_dir) / "cli-auth" / "claude" / ".credentials.json"
+  try:
+    raw = json.loads(creds_path.read_text())
+    value = raw.get("organizationUuid") if isinstance(raw, dict) else None
+    parsed = uuid.UUID(value) if isinstance(value, str) else None
+  except (OSError, ValueError, AttributeError) as exc:
+    raise RuntimeError("Claude organization identity is unavailable") from exc
+  if parsed is None:
+    raise RuntimeError("Claude organization identity is unavailable")
+  return str(parsed)
 
 
 def codex_subscription_type(data_dir: str) -> str | None:
