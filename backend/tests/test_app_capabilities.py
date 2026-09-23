@@ -9,6 +9,7 @@ from unittest.mock import patch
 from app import models
 from app.app_capabilities import contract_and_digest
 from app.app_capabilities import contract_with_runtime_capabilities
+from app.app_capabilities import diff_contracts
 from app.app_capabilities import normalize_runtime_capabilities
 from app.config import get_settings
 from app.manifest_contract import ManifestContractError, validate_manifest_contract
@@ -44,6 +45,98 @@ def _manifest(**over):
   }
   manifest.update(over)
   return manifest
+
+
+def test_legacy_closed_defaults_do_not_manufacture_capability_changes():
+  candidate, _digest = contract_and_digest(_manifest())
+  legacy = json.loads(json.dumps(candidate))
+  legacy["schema"] = 4
+  legacy.pop("public")
+  for field in (
+    "github_connect",
+    "connections_manage",
+    "connect_manage",
+    "identity_manage",
+    "railway_manage",
+  ):
+    legacy["data"].pop(field)
+
+  assert diff_contracts(legacy, candidate) == {
+    "unknown_previous": False,
+    "added": [],
+    "removed": [],
+    "changed": [],
+  }
+
+
+@pytest.mark.parametrize(
+  "legacy_public",
+  [
+    None,
+    False,
+    {"network": []},
+    {"network": [], "storage": None},
+    {"network": [], "storage": {}},
+    {"network": [], "storage": {"read": False}},
+  ],
+)
+def test_legacy_public_storage_closed_shapes_equal_current_default(legacy_public):
+  candidate, _digest = contract_and_digest(_manifest())
+  installed = json.loads(json.dumps(candidate))
+  if legacy_public is None:
+    installed.pop("public")
+  else:
+    installed["public"] = legacy_public
+
+  assert diff_contracts(installed, candidate) == {
+    "unknown_previous": False,
+    "added": [],
+    "removed": [],
+    "changed": [],
+  }
+
+
+@pytest.mark.parametrize(
+  ("path", "value"),
+  [
+    (("data", "connect_manage"), True),
+    (("data", "identity_manage"), True),
+    (("data", "railway_manage"), True),
+    (("public", "storage", "read"), True),
+    (("public", "storage", "write_prefix"), "public/submissions/"),
+  ],
+)
+def test_legacy_receipt_still_reports_real_new_grants(path, value):
+  installed, _digest = contract_and_digest(_manifest())
+  installed["schema"] = 4
+  installed.pop("public")
+  for field in ("connect_manage", "identity_manage", "railway_manage"):
+    installed["data"].pop(field)
+  candidate = json.loads(json.dumps(installed))
+  candidate["schema"] = 6
+  cursor = candidate
+  for part in path[:-1]:
+    cursor = cursor.setdefault(part, {})
+  cursor[path[-1]] = value
+
+  report = diff_contracts(installed, candidate)
+
+  assert report["unknown_previous"] is False
+  assert ".".join(path) in [*report["added"], *report["changed"]]
+
+
+def test_future_closed_default_does_not_manufacture_a_permission_change():
+  candidate, _digest = contract_and_digest(_manifest())
+  candidate["data"]["future_permission"] = False
+  installed = json.loads(json.dumps(candidate))
+  installed["data"].pop("future_permission")
+
+  assert diff_contracts(installed, candidate) == {
+    "unknown_previous": False,
+    "added": [],
+    "removed": [],
+    "changed": [],
+  }
 
 
 def test_preview_returns_server_derived_contract_and_digest(

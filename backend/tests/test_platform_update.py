@@ -3023,6 +3023,82 @@ def test_update_preview_shows_dependency_change_needs_an_image(clone_env):
   assert "Rebuild and replace" in guidance
 
 
+def test_update_preview_accepts_target_dependencies_already_in_running_image(
+  clone_env, monkeypatch,
+):
+  origin, platform = clone_env
+  base = _advance_origin(origin, edits={
+    "backend/requirements.txt": "package-a==1\n",
+    "backend/requirements.lock": "package-a==1 --hash=sha256:old\n",
+  })
+  _git(platform, "fetch", "origin")
+  _git(platform, "reset", "--hard", base)
+  _git(platform, "branch", "-f", "upstream", base)
+  target = _advance_origin(origin, edits={
+    "backend/requirements.txt": "package-a==2\n",
+    "backend/requirements.lock": "package-a==2 --hash=sha256:new\n",
+  })
+  pu._fetch(platform)
+
+  image_inputs = {
+    path: hashlib.sha256(
+      _git(platform, "show", f"{target}:{path}").stdout.encode(),
+    ).hexdigest()
+    for path in pu._PYTHON_DEPENDENCY_INPUTS
+  }
+  monkeypatch.setattr(pu, "_build_info", lambda: {"image_inputs": image_inputs})
+
+  preview = pu.platform_update_preview(platform, target_sha=target)
+
+  assert pu.target_python_inputs_baked_into_image(platform, target) is True
+  assert preview["activation"]["level"] == "live"
+  assert all(
+    reason["code"] != "python_dependencies"
+    for reason in preview["incoming_activation"]["reasons"]
+  )
+
+
+@pytest.mark.parametrize("provenance", ["missing", "malformed", "mismatch"])
+def test_target_dependency_proof_fails_closed_for_incomplete_provenance(
+  clone_env, monkeypatch, provenance,
+):
+  origin, platform = clone_env
+  base = _advance_origin(origin, edits={
+    "backend/requirements.txt": "package-a==1\n",
+    "backend/requirements.lock": "package-a==1 --hash=sha256:old\n",
+  })
+  _git(platform, "fetch", "origin")
+  _git(platform, "reset", "--hard", base)
+  _git(platform, "branch", "-f", "upstream", base)
+  target = _advance_origin(origin, edits={
+    "backend/requirements.lock": "package-a==2 --hash=sha256:new\n",
+  })
+  pu._fetch(platform)
+  lock_bytes = _git(
+    platform, "show", f"{target}:backend/requirements.lock",
+  ).stdout.encode()
+  image_inputs = {
+    path: hashlib.sha256(
+      _git(platform, "show", f"{target}:{path}").stdout.encode(),
+    ).hexdigest()
+    for path in pu._PYTHON_DEPENDENCY_INPUTS
+  }
+  if provenance == "missing":
+    image_inputs.pop("backend/requirements.txt")
+  elif provenance == "malformed":
+    image_inputs["backend/requirements.txt"] = "not-a-digest"
+  else:
+    image_inputs["backend/requirements.lock"] = hashlib.sha256(
+      lock_bytes + b"different",
+    ).hexdigest()
+  monkeypatch.setattr(pu, "_build_info", lambda: {"image_inputs": image_inputs})
+
+  preview = pu.platform_update_preview(platform, target_sha=target)
+
+  assert pu.target_python_inputs_baked_into_image(platform, target) is False
+  assert preview["activation"]["level"] == "image_rebuild"
+
+
 @pytest.mark.asyncio
 async def test_source_apply_refuses_image_owned_update_before_mutation(clone_env):
   origin, platform = clone_env
@@ -3043,6 +3119,48 @@ async def test_source_apply_refuses_image_owned_update_before_mutation(clone_env
 
   assert _served_sha(platform) == before
   assert preview["activation"]["level"] == "image_rebuild"
+
+
+@pytest.mark.asyncio
+async def test_source_apply_uses_target_dependency_proof_from_running_image(
+  clone_env, monkeypatch,
+):
+  origin, platform = clone_env
+  base = _advance_origin(origin, edits={
+    "backend/requirements.txt": "package-a==1\n",
+    "backend/requirements.lock": "package-a==1 --hash=sha256:old\n",
+  })
+  _git(platform, "fetch", "origin")
+  _git(platform, "reset", "--hard", base)
+  _git(platform, "branch", "-f", "upstream", base)
+  target = _advance_origin(origin, edits={
+    "backend/requirements.txt": "package-a==2\n",
+    "backend/requirements.lock": "package-a==2 --hash=sha256:new\n",
+  })
+  pu._fetch(platform)
+  image_inputs = {
+    path: hashlib.sha256(
+      _git(platform, "show", f"{target}:{path}").stdout.encode(),
+    ).hexdigest()
+    for path in pu._PYTHON_DEPENDENCY_INPUTS
+  }
+  monkeypatch.setattr(pu, "_build_info", lambda: {"image_inputs": image_inputs})
+
+  preview = pu.platform_update_preview(platform, target_sha=target)
+  result = await pu.apply_platform_update(
+    SimpleNamespace(),
+    plan_id=preview["plan_id"],
+    current_sha=base,
+    target_sha=target,
+    repo=platform,
+  )
+
+  assert _served_sha(platform) == target
+  assert result["state"] != "activation_needed"
+  assert all(
+    reason["code"] != "python_dependencies"
+    for reason in result["activation"]["reasons"]
+  )
 
 
 @pytest.mark.asyncio

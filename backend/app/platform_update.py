@@ -1270,7 +1270,7 @@ def reviewed_container_rebuild_plan(
     base = _git(
       "merge-base", current_sha, target_sha, repo=repo, check=False,
     ).stdout.strip() or current_sha
-    incoming_activation = _activation_impact_between(repo, base, target_sha)
+    incoming_activation = _incoming_activation_impact(repo, base, target_sha)
     activation = platform_activation.classify_activation([
       *_pending_activation_paths(repo),
       *_activation_paths_between(repo, base, target_sha),
@@ -1394,12 +1394,57 @@ def _activation_paths_between(
   return [line.strip() for line in proc.stdout.splitlines() if line.strip()]
 
 
-def _activation_impact_between(
-  repo: Path, before: str | None, after: str | None,
+_PYTHON_DEPENDENCY_INPUTS = (
+  "backend/requirements.txt",
+  "backend/requirements.lock",
+)
+
+
+def target_python_inputs_baked_into_image(
+  repo: Path,
+  target_sha: str | None,
+) -> bool:
+  """Whether this process's image contains the target's Python inputs.
+
+  The served checkout can intentionally lag the image during an image-first
+  deployment. Compare immutable target objects with the hashes recorded by
+  that image instead of comparing either side with mutable working-tree bytes.
+  Missing provenance, target objects, or inputs fail closed.
+  """
+  if not target_sha or _rev(repo, target_sha) != target_sha:
+    return False
+  baked = _build_info().get("image_inputs")
+  if not isinstance(baked, dict) or not baked:
+    return False
+  for path in _PYTHON_DEPENDENCY_INPUTS:
+    expected = baked.get(path)
+    if not isinstance(expected, str) or not re.fullmatch(r"[0-9a-f]{64}", expected):
+      return False
+    try:
+      blob = subprocess.run(
+        ["git", "-C", str(repo), "show", f"{target_sha}:{path}"],
+        capture_output=True,
+        check=False,
+        timeout=_GIT_TIMEOUT,
+        env=_scrubbed_git_env(repo),
+      )
+    except (OSError, subprocess.SubprocessError):
+      return False
+    if blob.returncode != 0 or hashlib.sha256(blob.stdout).hexdigest() != expected:
+      return False
+  return True
+
+
+def _incoming_activation_impact(
+  repo: Path,
+  before: str | None,
+  target_sha: str | None,
 ) -> PlatformActivationImpact:
-  return platform_activation.classify_activation(
-    _activation_paths_between(repo, before, after),
-  )
+  """Classify target work that is not already proven active in this image."""
+  paths = _activation_paths_between(repo, before, target_sha)
+  if target_python_inputs_baked_into_image(repo, target_sha):
+    paths = [path for path in paths if path not in _PYTHON_DEPENDENCY_INPUTS]
+  return platform_activation.classify_activation(paths)
 
 
 def activation_changes_python_dependencies(
@@ -1417,7 +1462,7 @@ def _changes_python_dependencies(
   repo: Path, before: str | None, after: str | None,
 ) -> bool:
   return activation_changes_python_dependencies(
-    _activation_impact_between(repo, before, after),
+    _incoming_activation_impact(repo, before, after),
   )
 
 
@@ -2471,7 +2516,7 @@ def _reconcile_under_lock(
         # Existing local image drift is an independent remainder. It must not
         # turn an unrelated source-only update into an agent-only dead end.
         # Refuse only when the reviewed incoming release itself needs an image.
-        impact = _activation_impact_between(repo, base, target_ref)
+        impact = _incoming_activation_impact(repo, base, target_ref)
         if platform_activation.ActivationLevel.IMAGE_REBUILD.value in (
           impact["required_actions"]
         ):
@@ -3062,8 +3107,7 @@ def _platform_update_preview_unlocked(
   # Review this incoming release on its own. Existing activation drift remains
   # visible in status after Apply, but must not turn an unrelated source update
   # into an image replacement or agent-only dead end.
-  activation_paths = _activation_paths_between(repo, base, target)
-  incoming_activation = platform_activation.classify_activation(activation_paths)
+  incoming_activation = _incoming_activation_impact(repo, base, target)
   return PlatformUpdatePreview(
     state=PlatformUpdateState.AVAILABLE.value, available=True,
     actionable=True, operation="update",
