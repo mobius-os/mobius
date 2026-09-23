@@ -1,6 +1,7 @@
 """Manifest-declared agent commands produce bounded generic app activities."""
 
 import json
+from pathlib import Path
 
 from app import models
 from app.agent_activity import (
@@ -55,6 +56,10 @@ def test_command_binding_is_exact_and_rejects_composition_and_line_breaks():
     COMMAND_TEXT + "\necho forged",
     COMMAND_TEXT.replace("quiet interface", "quiet\ninterface"),
     "cat /apps/brain/find.py",
+    (
+      "python3 -W /apps/brain/find.py -c "
+      "\"print('MOBIUS_APP_ACTIVITY_V1:{}')\""
+    ),
   ):
     assert activity_from_command(unsafe, BINDING) is None
 
@@ -151,17 +156,29 @@ def test_background_transport_is_generic_and_confined():
   assert activity_from_task_output(
     pending, _receipt() + "\n[exited with code 0]\n", "completed",
   )["status"] == "succeeded"
+  assert activity_from_task_output(pending, None, None)["status"] == "failed"
+  assert activity_from_task_output(pending, "", "completed")["status"] == "failed"
 
 
 def _app(db, source_dir, slug, name):
-  db.add(models.App(
+  app = models.App(
     name=name, description="test", slug=slug, source_dir=str(source_dir),
     jsx_source="export default function App() { return <div/> }",
-  ))
+  )
+  db.add(app)
   db.commit()
+  db.refresh(app)
+  return app
 
 
-def test_a_second_provider_enters_only_by_declaring_the_contract(db, tmp_path):
+def test_a_second_provider_enters_only_by_applied_contract(
+  db, tmp_path, monkeypatch,
+):
+  accepted_roots = {}
+  monkeypatch.setattr(
+    "app.agent_activity_provider.runtime_root",
+    lambda app: accepted_roots[app.id],
+  )
   declarations = (
     ("memory", "Memory", "recall", "memory_search.py", "Searching Memory"),
     ("brain", "Brain", "retrieve", "brain_lookup.py", "  Consulting Brain  "),
@@ -169,14 +186,25 @@ def test_a_second_provider_enters_only_by_declaring_the_contract(db, tmp_path):
   for slug, name, activity_id, entry, running_label in declarations:
     root = tmp_path / slug
     root.mkdir()
+    # Editable declarations are not runtime authority until Apply publishes
+    # them. Keep a conflicting draft beside the accepted manifest to prove the
+    # binding reads the frozen revision while matching the documented source
+    # command path.
     (root / "mobius.json").write_text(json.dumps({
+      "id": slug, "name": name, "version": "1.0.0",
+      "description": "draft", "entry": "index.jsx", "source_files": [],
+    }))
+    accepted = tmp_path / "accepted" / slug
+    accepted.mkdir(parents=True)
+    (accepted / "mobius.json").write_text(json.dumps({
       "id": slug, "name": name, "version": "1.0.0",
       "description": "test", "entry": "index.jsx", "source_files": [entry],
       "agent_activities": {activity_id: {
         "entry": entry, "arguments": 2, "running_label": running_label,
       }},
     }))
-    _app(db, root, slug, name)
+    app = _app(db, root, slug, name)
+    accepted_roots[app.id] = Path(accepted)
 
   binding = resolve_agent_activity_binding(db)
   memory = activity_from_command(

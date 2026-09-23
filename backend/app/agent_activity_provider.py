@@ -14,6 +14,7 @@ from app.agent_activity import (
   ActivityCommand,
   AgentActivityBinding,
 )
+from app.applied_app_runtime import AppliedRuntimeUnavailable, runtime_root
 from app.manifest_contract import validate_manifest_contract
 
 log = logging.getLogger(__name__)
@@ -27,17 +28,19 @@ def resolve_agent_activity_binding(db: Session) -> AgentActivityBinding:
   """
   try:
     pairs: list[tuple[str, ActivityCommand]] = []
-    rows = db.query(
-      models.App.slug, models.App.name, models.App.source_dir,
-    ).filter(models.App.deleted_at.is_(None)).order_by(models.App.id.asc()).all()
-    for slug, name, source_dir in rows:
-      if not source_dir or not slug:
+    rows = db.query(models.App).filter(
+      models.App.deleted_at.is_(None),
+    ).order_by(models.App.id.asc()).all()
+    for app in rows:
+      if not app.source_dir or not app.slug:
         continue
-      base = Path(source_dir)
+      base = Path(app.source_dir)
       try:
-        manifest = json.loads((base / "mobius.json").read_text("utf-8"))
+        manifest = json.loads(
+          (runtime_root(app) / "mobius.json").read_text("utf-8"),
+        )
         validate_manifest_contract(manifest)
-      except (OSError, UnicodeError, ValueError):
+      except (AppliedRuntimeUnavailable, OSError, UnicodeError, ValueError):
         continue
       declarations = manifest.get("agent_activities")
       if not isinstance(declarations, dict):
@@ -56,8 +59,8 @@ def resolve_agent_activity_binding(db: Session) -> AgentActivityBinding:
         ):
           continue
         command = ActivityCommand(
-          app_slug=str(slug),
-          app_name=str(name or slug),
+          app_slug=str(app.slug),
+          app_name=str(app.name or app.slug),
           activity_id=str(activity_id),
           argument_count=argument_count,
           running_label=running_label.strip(),

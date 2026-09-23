@@ -109,15 +109,18 @@ def _declared_command(
     return declared if len(tokens) == expected else None
   if not _INTERPRETER_RE.match(tokens[index]):
     return None
-  for script_index, token in enumerate(tokens[index + 1:], start=index + 1):
-    if token.startswith("-"):
-      continue
-    declared = binding.by_path.get(token)
-    if declared is None:
-      return None
-    expected = script_index + 1 + declared.argument_count
-    return declared if len(tokens) == expected else None
-  return None
+  # Keep interpreter recognition as narrow as direct script execution. Python
+  # options have different arities (`-W value`, `-X value`, `-c code`, ...), so
+  # skipping option-looking tokens can authenticate a path consumed as an
+  # option value even though that script never runs.
+  script_index = index + 1
+  if script_index >= len(tokens):
+    return None
+  declared = binding.by_path.get(tokens[script_index])
+  if declared is None:
+    return None
+  expected = script_index + 1 + declared.argument_count
+  return declared if len(tokens) == expected else None
 
 
 def activity_from_command(
@@ -283,11 +286,15 @@ def background_output_path(pending: object, scratch_root: object) -> str | None:
 def activity_from_task_output(
   pending: object, text: object, task_status: object = None,
 ) -> dict:
+  # Unlike a provider's optional foreground aggregate, this file is the
+  # authoritative completed background capture. Missing bytes therefore mean
+  # the task never produced a trustworthy receipt, not a receipt-less success.
+  if not isinstance(text, str) or not text.strip():
+    return _failed(pending)
   exit_code: int | None = None
-  if isinstance(text, str):
-    trailer = _EXIT_TRAILER_RE.search(text[-64:])
-    if trailer:
-      exit_code = int(trailer.group("code"))
+  trailer = _EXIT_TRAILER_RE.search(text[-64:])
+  if trailer:
+    exit_code = int(trailer.group("code"))
   if exit_code is None and isinstance(task_status, str):
     if task_status not in ("done", "completed"):
       exit_code = 1

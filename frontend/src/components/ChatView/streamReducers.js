@@ -1013,8 +1013,8 @@ export function applyTaskEvent(items, event, now = Date.now()) {
   if (recall) {
     const recallIdx = idx !== -1 ? idx : items.findIndex(
       it => it.type === 'tool'
-        && it.tool_use_id === toolUseId
         && it.recall && it.recall.task_id === taskId
+        && (toolUseId == null || it.tool_use_id === toolUseId)
     )
     if (recallIdx !== -1 && items[recallIdx].recall !== recall) {
       const updated = [...items]
@@ -1028,8 +1028,8 @@ export function applyTaskEvent(items, event, now = Date.now()) {
   if (appActivity) {
     const activityIdx = idx !== -1 ? idx : items.findIndex(
       it => it.type === 'tool'
-        && it.tool_use_id === toolUseId
         && it.app_activity?.task_id === taskId
+        && (toolUseId == null || it.tool_use_id === toolUseId)
     )
     if (activityIdx !== -1 && items[activityIdx].app_activity !== appActivity) {
       const updated = [...items]
