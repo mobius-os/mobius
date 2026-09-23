@@ -222,6 +222,41 @@ async function waitTiled(page) {
   await expect(page.locator('.workspace__divider').first()).toBeVisible({ timeout: 8000 })
   await page.evaluate(() => new Promise(r =>
     requestAnimationFrame(() => requestAnimationFrame(r))))
+  await waitStripSettled(page)
+}
+
+/** Hold until every tab in every strip has stopped moving.
+ *
+ *  Panes tile before their tabs have titles: each tab is laid out near-empty
+ *  and widens as its chat title resolves, pushing the tabs after it sideways.
+ *  Cases measure DROP TARGETS straight after this gate and only later hand the
+ *  SOURCE to a drag helper, so a gate that returns mid-reflow hands out stale
+ *  target coordinates that no later settle can repair. Settle the whole strip
+ *  once, here, and every measurement taken afterwards is taken on real
+ *  geometry. */
+async function waitStripSettled(page) {
+  await page.evaluate(() => new Promise((resolve) => {
+    const read = () => [...document.querySelectorAll('[data-pane-strip] .shell__tab-open')]
+      .map((tab) => {
+        const rect = tab.getBoundingClientRect()
+        return `${rect.x},${rect.y},${rect.width},${rect.height}`
+      })
+      .join('|')
+    let previous = null
+    let stable = 0
+    let seen = 0
+    const step = () => {
+      const now = read()
+      stable = previous !== null && now === previous ? stable + 1 : 0
+      previous = now
+      seen += 1
+      // Frames, not a sleep: this is a layout settle. The cap keeps a case
+      // that legitimately animates from hanging here.
+      if (stable >= 3 || seen >= 180) resolve()
+      else requestAnimationFrame(step)
+    }
+    requestAnimationFrame(step)
+  }))
 }
 
 /** Sample the first three pre-paint frames after toggling the persistent drawer.
@@ -837,6 +872,44 @@ async function expectCaretAligned(page, caret, target, label) {
   expect(caretBox.height, `${label} has a real fixed-space height`).toBeGreaterThan(0)
 }
 
+/** Measure an element only once its geometry has stopped moving.
+ *
+ *  Tab strips reflow after the panes are up: a tab is laid out at an empty
+ *  ~36px width and grows to its full ~120px once the chat title resolves,
+ *  shifting every tab after it. A box read during that window is stale by the
+ *  time the gesture presses, so the press lands on a neighbouring tab or on
+ *  bare strip background. Neither starts a drag session, and the failure
+ *  surfaces far away as a drag chip that never mounts -- on whichever case
+ *  happened to measure mid-reflow, which is why the victim moved run to run.
+ *
+ *  Frames rather than a sleep: this is a layout settle, not a duration. The
+ *  cap keeps a genuinely animating element from hanging the case; it returns
+ *  the last reading so the caller still fails on its own assertion. */
+async function settledBox(locator, { frames = 3, maxFrames = 180 } = {}) {
+  await locator.scrollIntoViewIfNeeded()
+  const box = await locator.evaluate((element, settings) => (
+    new Promise((resolve) => {
+      let previous = null
+      let stable = 0
+      let seen = 0
+      const read = () => {
+        const rect = element.getBoundingClientRect()
+        const now = { x: rect.x, y: rect.y, width: rect.width, height: rect.height }
+        const same = previous
+          && now.x === previous.x && now.y === previous.y
+          && now.width === previous.width && now.height === previous.height
+        stable = same ? stable + 1 : 0
+        previous = now
+        seen += 1
+        if (stable >= settings.frames || seen >= settings.maxFrames) resolve(now)
+        else requestAnimationFrame(read)
+      }
+      requestAnimationFrame(read)
+    })
+  ), { frames, maxFrames })
+  return box
+}
+
 /** Press on a source element, arm past slop, glide to a target point, release —
  *  the mouse-path drag Chromium delivers as real pointer events. */
 async function mouseDrag(
@@ -846,45 +919,15 @@ async function mouseDrag(
   toY,
   { release = true, resolveTarget = null } = {},
 ) {
-  await sourceLocator.scrollIntoViewIfNeeded()
-  const box = await sourceLocator.boundingBox()
+  const box = await settledBox(sourceLocator)
   const sx = box.x + box.width / 2
   const sy = box.y + box.height / 2
   await page.mouse.move(sx, sy)
   await page.mouse.down()
   await page.mouse.move(sx + 10, sy, { steps: 3 }) // clear the 5px slop → arm
-  // TEMPORARY DIAGNOSTIC (not the fix): this arm step fails intermittently with
-  // the chip absent from the DOM entirely, rotating across different drag tests
-  // run to run. Capture what the press point actually resolved to so the race
-  // is identified from evidence rather than inferred.
-  try {
-    await expect(page.locator('.workspace__drag-chip')).toBeVisible({ timeout: 3000 })
-  } catch (armError) {
-    const diag = await page.evaluate(({ x, y, key }) => {
-      const el = document.elementFromPoint(x, y)
-      const src = el && el.closest ? el.closest('[data-drag-key]') : null
-      const expected = document.querySelector(`[data-drag-key="${key}"]`)
-      const rect = expected ? expected.getBoundingClientRect() : null
-      return {
-        atPoint: el ? `${el.tagName}.${el.getAttribute('class') || ''}` : null,
-        dragKeyAtPoint: src ? src.getAttribute('data-drag-key') : null,
-        expectedStillInDom: !!expected,
-        expectedRectNow: rect ? { x: rect.x, y: rect.y, w: rect.width, h: rect.height } : null,
-        shieldPresent: !!document.querySelector('.workspace__drag-shield'),
-        previewPresent: !!document.querySelector('.workspace__drop-preview'),
-        chipInDom: !!document.querySelector('.workspace__drag-chip'),
-      }
-    }, { x: sx, y: sy, key: await sourceLocator.getAttribute('data-drag-key') })
-    throw new Error(
-      `drag never armed.
-  pressed at: (${sx}, ${sy})
-  measured box: `
-      + `${JSON.stringify({ x: box.x, y: box.y, w: box.width, h: box.height })}
-`
-      + `  diagnostics: ${JSON.stringify(diag, null, 2)}
-${armError.message}`,
-    )
-  }
+  // A press that misses its tab starts no session at all, so this is where a
+  // stale measurement surfaces -- as a chip that never mounts.
+  await expect(page.locator('.workspace__drag-chip')).toBeVisible({ timeout: 3000 })
   if (resolveTarget) ({ x: toX, y: toY } = await resolveTarget())
   await page.mouse.move(toX, toY, { steps: 14 })
   await expect(page.locator('.workspace__drop-preview.is-visible'))
@@ -900,7 +943,7 @@ async function touchDrag(
   toY,
   { firstDx = 0, firstDy = 12, awaitDragHold = false, release = true } = {},
 ) {
-  const box = await sourceLocator.boundingBox()
+  const box = await settledBox(sourceLocator)
   const sx = box.x + box.width / 2
   const sy = box.y + box.height / 2
   const cdp = await page.context().newCDPSession(page)
