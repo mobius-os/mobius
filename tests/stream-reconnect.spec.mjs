@@ -682,6 +682,36 @@ test.describe('Stream reconnection', () => {
     await expect(page.locator('[data-chat-surface="painted"] button[aria-label="Stop"]')).toHaveCount(0)
   })
 
+  // KNOWN FAILURE (cases 9 and 10, root-caused by instrumenting the engine).
+  // Both wait for the terminal Retry affordance, which only exists while
+  // connectionError === 'disconnected'. Reaching and HOLDING that state is no
+  // longer possible for either scenario, for two different reasons.
+  //
+  // Case 10 contradicts a deliberate contract. shouldAttachRunningStream is
+  // `!!running && !pendingQuestionId`, so a PARKED OWNER QUESTION releases the
+  // failed transport exactly like a completed run does -- chatRuntimeState.js
+  // says so outright ("a parked owner question ... releases a failed
+  // transport"). This case parks a question and then expects reconnects to
+  // EXHAUST anyway. They never start, so no Retry is offered. Honouring the
+  // case means changing that contract, not the fixture.
+  //
+  // Case 9 is squeezed from both sides, which no fixture value resolves:
+  //   - runtime/detail reporting settled -> reconcile calls
+  //     retireSettledStream() -> disconnect({ clearStreaming: true }), which
+  //     cancels the pending reconnect and resets retryCount. Traced: one
+  //     connect, one scheduled retry, then clearStreaming disconnects at ~3s,
+  //     so retryCount never reached 3.
+  //   - runtime/detail reporting a live run -> retries DO run to exhaustion
+  //     (traced retryCount 0,1,2,3) and disconnected IS set, but
+  //     shouldRepairRuntimeStream then restarts the owner ('once it has
+  //     exhausted, restart that owner'), retryCount resets to 0 and the cycle
+  //     repeats -- so Retry only ever flickers between exhaustion and repair.
+  // Mocking runtime + every detail read was tried and reverted: it fixed
+  // nothing here and briefly broke cases 1 and 4, which need a settled run.
+  //
+  // A stable Retry now needs a state the app no longer holds, so both cases
+  // need a product decision about who owns a wake-failed transport rather than
+  // a fixture edit. Left failing and explained instead of papered over.
   test('9. ConnectionStatus retry button stays above the composer pill on wake failure', async ({ page }) => {
     await page.addInitScript(() => {
       const realFetch = window.fetch.bind(window)
