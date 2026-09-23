@@ -898,7 +898,7 @@ async function touchDrag(
   sourceLocator,
   toX,
   toY,
-  { firstDx = 0, firstDy = 12, holdMs = 0, release = true } = {},
+  { firstDx = 0, firstDy = 12, awaitDragHold = false, release = true } = {},
 ) {
   const box = await sourceLocator.boundingBox()
   const sx = box.x + box.width / 2
@@ -906,8 +906,37 @@ async function touchDrag(
   const cdp = await page.context().newCDPSession(page)
   await cdp.send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 1 })
   const point = (x, y) => [{ x, y, radiusX: 4, radiusY: 4, force: 1, id: 1 }]
+  // The press-and-hold drag stage is a bare setTimeout(PRESS_DRAG_HOLD_MS)
+  // inside the pointer session, with no DOM marker, so a fixed sleep only
+  // GUESSES that it has fired. Under main-thread load that timer runs late,
+  // the first move lands while `held` is still false, and touchTabMoveIntent
+  // reads the move as a scroll -- the drag never starts and the case fails
+  // with the tab order simply unchanged, which is what made these flaky.
+  // navigator.vibrate(8) is the real side effect production performs at that
+  // exact moment (arm's own cue is vibrate(10), so the two never alias), so
+  // observe it instead of racing it. The stage stays open until
+  // PRESS_MENU_HOLD_MS, leaving a wide window for the move that follows.
+  if (awaitDragHold) {
+    await page.evaluate(() => {
+      window.__dragHoldCues = []
+      const real = navigator.vibrate ? navigator.vibrate.bind(navigator) : null
+      Object.defineProperty(navigator, 'vibrate', {
+        configurable: true,
+        value: (pattern) => {
+          window.__dragHoldCues.push(pattern)
+          return real ? real(pattern) : true
+        },
+      })
+    })
+  }
   await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: point(sx, sy) })
-  if (holdMs > 0) await page.waitForTimeout(holdMs)
+  if (awaitDragHold) {
+    await page.waitForFunction(
+      () => (window.__dragHoldCues || []).includes(8),
+      null,
+      { timeout: 5000 },
+    )
+  }
   await cdp.send('Input.dispatchTouchEvent', {
     type: 'touchMove', touchPoints: point(sx + firstDx, sy + firstDy),
   })
@@ -1051,7 +1080,7 @@ test.describe('Workspace drag (PR3)', () => {
       page, source,
       drawerBox.x + drawerBox.width + 30,
       content.y + content.height / 2,
-      { firstDx: 12, firstDy: 0, holdMs: 250, release: false },
+      { firstDx: 12, firstDy: 0, awaitDragHold: true, release: false },
     )
     await expect(page.locator('.drawer.drawer--open')).toHaveCount(0)
     await expect(page.locator('[data-pane-strip="p0"]')).toBeVisible({ timeout: 3000 })
@@ -1193,10 +1222,11 @@ test.describe('Workspace drag (PR3)', () => {
     const target = await page.locator(`[data-tab-key="chat:${b.id}"]`).boundingBox()
     const src = page.locator(`[data-pane-strip="p0"] .shell__tab-open[data-drag-key="chat:${c.id}"]`)
     await touchDrag(page, src, target.x + target.width / 2, target.y + target.height / 2, {
-      // Move after the shared 180ms drag stage but before the 400ms stationary
-      // menu stage. Waiting through the menu threshold correctly opens actions
-      // and therefore must not be used to model this short-hold drag.
-      holdMs: 250,
+      // Move once the shared drag stage (PRESS_DRAG_HOLD_MS) has actually won
+      // but before the stationary menu stage (PRESS_MENU_HOLD_MS). Waiting
+      // through the menu threshold correctly opens actions and therefore must
+      // not be used to model this short-hold drag.
+      awaitDragHold: true,
     })
     await expect.poll(
       async () => whichPaneHas(await readWs(page), `chat:${c.id}`),
@@ -1215,7 +1245,7 @@ test.describe('Workspace drag (PR3)', () => {
     )
     await expect(page.locator('.shell__tab-drag-handle')).toHaveCount(0)
     await touchDrag(page, src, target.x + 2, target.y + target.height / 2, {
-      firstDx: -12, firstDy: 0, holdMs: 250,
+      firstDx: -12, firstDy: 0, awaitDragHold: true,
     })
     await expect.poll(async () => (await readWs(page)).panes.p0.tabs
       .map(t => `${t.kind}:${t.id}`), {
