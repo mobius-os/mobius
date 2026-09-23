@@ -21,7 +21,7 @@ import time
 import uuid
 from contextlib import suppress
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -45,9 +45,6 @@ _CLAUDE_RESET_URL = (
   "{organization_uuid}/reset_rate_limits"
 )
 _CLAUDE_RESET_PROGRAM = "cedar_ember"
-# Claude Code treats an unsettled claim as minute-scale. Five minutes spans
-# delayed usage snapshots without letting a vanished grant block the account.
-_CLAUDE_RESET_RECONCILE_SECONDS = 5 * 60
 _PROVIDER_TIMEOUT_SECONDS = 12.0
 _PROVIDER_USAGE_FRESH_SECONDS = 2.0
 _PROVIDER_USAGE_STALE_SECONDS = 10 * 60.0
@@ -158,6 +155,11 @@ def _reset_iso(raw: Any) -> str | None:
   if parsed.tzinfo is None:
     parsed = parsed.replace(tzinfo=UTC)
   return parsed.astimezone(UTC).isoformat()
+
+
+def _reset_expired(raw: Any) -> bool:
+  expiry = _reset_iso(raw)
+  return expiry is not None and datetime.fromisoformat(expiry) <= datetime.now(UTC)
 
 
 def _humanize_window_id(window_id: str) -> str:
@@ -285,6 +287,7 @@ def _claude_reset_credits(summary: Any) -> dict[str, Any] | None:
     and selected["resets_left"] > 0
     and selected["usable_now"] is True
     and selected["paused"] is False
+    and not _reset_expired(selected["expires_at"])
   )
   return {
     "available_count": total,
@@ -585,7 +588,6 @@ def _load_claude_reset_intent(path: Path) -> dict[str, Any] | None:
   credit_id = source.get("credit_id")
   resets_left_before = source.get("resets_left_before")
   last_result = source.get("last_result")
-  created_at = _reset_iso(source.get("created_at"))
   if (
     not isinstance(request_id, str)
     or not request_id
@@ -594,7 +596,6 @@ def _load_claude_reset_intent(path: Path) -> dict[str, Any] | None:
     or isinstance(resets_left_before, bool)
     or not isinstance(resets_left_before, int)
     or resets_left_before <= 0
-    or created_at is None
     or (
       last_result is not None
       and (
@@ -610,7 +611,6 @@ def _load_claude_reset_intent(path: Path) -> dict[str, Any] | None:
     "credit_id": credit_id,
     "resets_left_before": resets_left_before,
     "last_result": last_result,
-    "created_at": created_at,
   }
 
 
@@ -621,7 +621,6 @@ def _write_claude_reset_intent(
   credit_id: str,
   resets_left_before: int,
   last_result: dict[str, Any] | None = None,
-  created_at: str | None = None,
 ) -> None:
   atomic_write(
     path,
@@ -631,7 +630,6 @@ def _write_claude_reset_intent(
       "credit_id": credit_id,
       "resets_left_before": resets_left_before,
       "last_result": last_result,
-      "created_at": created_at or datetime.now(UTC).isoformat(),
     }, sort_keys=True) + "\n",
     mode=0o600,
   )
@@ -640,13 +638,6 @@ def _write_claude_reset_intent(
 def _clear_claude_reset_intent(path: Path) -> None:
   with suppress(FileNotFoundError):
     path.unlink()
-
-
-def _claude_reset_intent_expired(intent: dict[str, Any]) -> bool:
-  created_at = datetime.fromisoformat(intent["created_at"])
-  return datetime.now(UTC) >= (
-    created_at + timedelta(seconds=_CLAUDE_RESET_RECONCILE_SECONDS)
-  )
 
 
 def _claude_reset_offer_superseded(snapshot: Any, credit_id: str) -> bool:
@@ -668,10 +659,7 @@ def _claude_reset_offer_superseded(snapshot: Any, credit_id: str) -> bool:
   ), None)
   if credit is None:
     return True
-  expires_at = _reset_iso(credit.get("expires_at"))
-  if expires_at is not None:
-    return datetime.fromisoformat(expires_at) <= datetime.now(UTC)
-  return False
+  return _reset_expired(credit.get("expires_at"))
 
 
 def _claude_reset_offer(
@@ -696,6 +684,8 @@ def _claude_reset_offer(
   for credit in credits:
     if not isinstance(credit, dict) or credit.get("id") != credit_id:
       continue
+    if require_redeemable and _reset_expired(credit.get("expires_at")):
+      return None
     resets_left = credit.get("resets_left")
     if (
       not isinstance(resets_left, bool)
@@ -786,10 +776,7 @@ async def redeem_claude_reset(
           "weekly_resets_at": None,
           "reconciled": True,
         }
-      if (
-        _claude_reset_intent_expired(intent)
-        or _claude_reset_offer_superseded(current, pending_credit_id)
-      ):
+      if _claude_reset_offer_superseded(current, pending_credit_id):
         _clear_claude_reset_intent(intent_path)
         intent = None
         replaying = False
@@ -800,7 +787,6 @@ async def redeem_claude_reset(
       else:
         request_id = intent["request_id"]
         claim_credit_id = pending_credit_id
-        intent_created_at = intent["created_at"]
 
     if intent is None:
       resets_left = _claude_reset_offer(
@@ -813,13 +799,11 @@ async def redeem_claude_reset(
       token = await providers.claude_access_token(data_dir)
       request_id = str(uuid.uuid4())
       claim_credit_id = credit_id
-      intent_created_at = datetime.now(UTC).isoformat()
       _write_claude_reset_intent(
         intent_path,
         request_id=request_id,
         credit_id=claim_credit_id,
         resets_left_before=resets_left,
-        created_at=intent_created_at,
       )
 
     # Token retrieval is side-effect free. Do it after a pending intent has
@@ -849,7 +833,6 @@ async def redeem_claude_reset(
       if exc.response.status_code < 500 and exc.response.status_code != 408:
         if replaying:
           return _unknown_claude_reset()
-        _clear_claude_reset_intent(intent_path)
         raise
       return _unknown_claude_reset()
     except (httpx.RequestError, ValueError):
@@ -857,16 +840,13 @@ async def redeem_claude_reset(
 
     if result is None:
       return _unknown_claude_reset()
-    if (
-      result["outcome"] == "reset"
-      or (
-        replaying
-        and result["outcome"] in {"already_used", "cooldown"}
-      )
+    outcome = result["outcome"]
+    if outcome == "reset" or (
+      replaying and outcome in {"already_used", "cooldown"}
     ):
-      # A claim response can precede Claude's usage snapshot. Retain the
-      # result until the count changes, the offer advances, or the bounded
-      # reconciliation window closes, so a quick retry cannot spend twice.
+      # A confirmed or replay-confirmed claim can precede Claude's usage
+      # snapshot. Keep its receipt until the provider advances the grant or
+      # count; elapsed time alone can never authorize a second spend.
       _write_claude_reset_intent(
         intent_path,
         request_id=request_id,
@@ -875,11 +855,12 @@ async def redeem_claude_reset(
           intent["resets_left_before"] if intent is not None else resets_left
         ),
         last_result=result,
-        created_at=intent_created_at,
       )
-    elif replaying:
+    elif outcome == "unavailable":
       return _unknown_claude_reset()
     else:
+      # These outcomes are definitive no-ops: no reset was spent by this
+      # request, so the same offer may be evaluated again from fresh state.
       _clear_claude_reset_intent(intent_path)
     _provider_usage_cache.pop((str(Path(data_dir).resolve()), "claude"), None)
     return result

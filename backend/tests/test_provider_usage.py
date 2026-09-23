@@ -6,7 +6,7 @@ import json
 import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from types import ModuleType, SimpleNamespace
 
 import httpx
@@ -686,7 +686,7 @@ def test_normalize_claude_usage_surfaces_only_provider_selected_reset():
           "id": "grant-next",
           "label": "Weekly reset",
           "resets_left": 2,
-          "ends_at": "2026-10-01T12:00:00Z",
+          "ends_at": "2099-10-01T12:00:00Z",
           "clears": ["five_hour", "seven_day"],
           "usable_now": True,
           "use_requires_limit": True,
@@ -705,7 +705,30 @@ def test_normalize_claude_usage_surfaces_only_provider_selected_reset():
   assert resets["available_count"] == 3
   assert resets["next_credit_id"] == "grant-next"
   assert resets["redeemable"] is True
-  assert resets["credits"][0]["expires_at"] == "2026-10-01T12:00:00+00:00"
+  assert resets["credits"][0]["expires_at"] == "2099-10-01T12:00:00+00:00"
+
+
+def test_normalize_claude_usage_rejects_expired_selected_reset():
+  from app.provider_usage import normalize_claude_usage
+
+  resets = normalize_claude_usage({
+    "five_hour": {"utilization": 100},
+    "cedar_ember": {
+      "eligible": True,
+      "at_limit": True,
+      "next_grant_id": "grant-expired",
+      "grants": [{
+        "id": "grant-expired",
+        "resets_left": 1,
+        "ends_at": "2000-01-01T00:00:00Z",
+        "usable_now": True,
+        "paused": False,
+      }],
+    },
+  })["reset_credits"]
+
+  assert resets["next_credit_id"] == "grant-expired"
+  assert resets["redeemable"] is False
 
 
 def test_normalize_claude_usage_keeps_ineligible_offer_non_redeemable():
@@ -1265,7 +1288,9 @@ async def test_claude_reset_pending_intent_yields_to_authoritative_successor(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("outcome", ["already_used", "cooldown"])
+@pytest.mark.parametrize(
+  "outcome", ["already_used", "cooldown", "not_limited", "ineligible"],
+)
 async def test_claude_reset_fresh_non_consuming_result_retires_intent(
   tmp_path, monkeypatch, outcome,
 ):
@@ -1309,7 +1334,7 @@ async def test_claude_reset_fresh_non_consuming_result_retires_intent(
 
 
 @pytest.mark.asyncio
-async def test_claude_reset_ambiguous_replay_keeps_request_id_on_unavailable(
+async def test_claude_reset_ambiguous_results_keep_one_request_id(
   tmp_path, monkeypatch,
 ):
   from app import provider_usage
@@ -1329,14 +1354,14 @@ async def test_claude_reset_ambiguous_replay_keeps_request_id_on_unavailable(
 
   async def post(_url, *, headers, json):
     posts.append(json)
-    if len(posts) == 1:
+    if len(posts) == 2:
       raise httpx.ReadTimeout("response lost")
     if len(posts) == 3:
       response = httpx.Response(
         401, request=httpx.Request("POST", "https://api.anthropic.com"),
       )
       response.raise_for_status()
-    outcome = "unavailable" if len(posts) == 2 else "reset"
+    outcome = "unavailable" if len(posts) == 1 else "reset"
     return SimpleNamespace(
       raise_for_status=lambda: None,
       json=lambda: {"result": outcome, "resets_left": 1},
@@ -1360,7 +1385,110 @@ async def test_claude_reset_ambiguous_replay_keeps_request_id_on_unavailable(
 
 
 @pytest.mark.asyncio
-async def test_claude_reset_receipt_expires_without_blocking_same_offer(
+async def test_claude_reset_fresh_http_error_keeps_request_id(
+  tmp_path, monkeypatch,
+):
+  from app import provider_usage
+
+  provider_usage._claude_reset_locks.clear()
+  posts = []
+
+  async def current(_provider_id, _data_dir, *, force_refresh=False):
+    assert force_refresh is True
+    return {
+      "reset_credits": {
+        "redeemable": True,
+        "next_credit_id": "grant-next",
+        "credits": [{"id": "grant-next", "resets_left": 2}],
+      },
+    }
+
+  async def post(_url, *, headers, json):
+    posts.append(json)
+    if len(posts) == 1:
+      response = httpx.Response(
+        401, request=httpx.Request("POST", "https://api.anthropic.com"),
+      )
+      response.raise_for_status()
+    return SimpleNamespace(
+      raise_for_status=lambda: None,
+      json=lambda: {"result": "reset", "resets_left": 1},
+    )
+
+  _install_claude_reset_mocks(
+    monkeypatch, provider_usage, current=current, post=post,
+  )
+
+  with pytest.raises(httpx.HTTPStatusError):
+    await provider_usage.redeem_claude_reset(
+      str(tmp_path), credit_id="grant-next", expected_resets_left=2,
+    )
+  result = await provider_usage.redeem_claude_reset(
+    str(tmp_path), credit_id="grant-next", expected_resets_left=2,
+  )
+
+  assert result["outcome"] == "reset"
+  assert len({post["request_id"] for post in posts}) == 1
+
+
+@pytest.mark.asyncio
+async def test_claude_reset_expired_offer_cannot_be_reclaimed(
+  tmp_path, monkeypatch,
+):
+  from app import provider_usage
+
+  provider_usage._claude_reset_locks.clear()
+  posts = []
+
+  async def current(_provider_id, _data_dir, *, force_refresh=False):
+    assert force_refresh is True
+    return {
+      "reset_credits": {
+        "redeemable": True,
+        "next_credit_id": "grant-next",
+        "credits": [{
+          "id": "grant-next",
+          "resets_left": 2,
+          "expires_at": "2000-01-01T00:00:00Z",
+        }],
+      },
+    }
+
+  async def post(_url, *, headers, json):
+    posts.append(json)
+    raise AssertionError("expired grants must not reach Claude")
+
+  organization_uuid = _install_claude_reset_mocks(
+    monkeypatch, provider_usage, current=current, post=post,
+  )
+  intent_path = provider_usage._claude_reset_intent_path(
+    str(tmp_path), organization_uuid,
+  )
+  provider_usage._write_claude_reset_intent(
+    intent_path,
+    request_id="expired-grant-request",
+    credit_id="grant-next",
+    resets_left_before=2,
+    last_result={
+      "outcome": "reset",
+      "reason": None,
+      "resets_left": 1,
+      "cleared": [],
+      "weekly_resets_at": None,
+    },
+  )
+
+  with pytest.raises(provider_usage.ClaudeResetOfferChanged):
+    await provider_usage.redeem_claude_reset(
+      str(tmp_path), credit_id="grant-next", expected_resets_left=2,
+    )
+
+  assert posts == []
+  assert not intent_path.exists()
+
+
+@pytest.mark.asyncio
+async def test_claude_reset_receipt_never_reclaims_unchanged_offer(
   tmp_path, monkeypatch,
 ):
   from app import provider_usage
@@ -1393,19 +1521,75 @@ async def test_claude_reset_receipt_expires_without_blocking_same_offer(
   )
   provider_usage._write_claude_reset_intent(
     intent_path,
-    request_id="expired-request",
+    request_id="confirmed-request",
     credit_id="grant-next",
     resets_left_before=2,
-    last_result={"outcome": "reset"},
-    created_at=(datetime.now(UTC) - timedelta(minutes=6)).isoformat(),
+    last_result={
+      "outcome": "reset",
+      "reason": None,
+      "resets_left": 1,
+      "cleared": [],
+      "weekly_resets_at": None,
+    },
   )
   result = await provider_usage.redeem_claude_reset(
     str(tmp_path), credit_id="grant-next", expected_resets_left=2,
   )
 
   assert result["outcome"] == "reset"
-  assert len(posts) == 1
-  assert posts[0]["request_id"] != "expired-request"
+  assert posts == []
+  assert provider_usage._load_claude_reset_intent(intent_path)[
+    "request_id"
+  ] == "confirmed-request"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ["not_limited", "ineligible"])
+async def test_claude_reset_replayed_definitive_noop_retires_intent(
+  tmp_path, monkeypatch, outcome,
+):
+  from app import provider_usage
+
+  provider_usage._claude_reset_locks.clear()
+  posts = []
+
+  async def current(_provider_id, _data_dir, *, force_refresh=False):
+    assert force_refresh is True
+    return {
+      "reset_credits": {
+        "redeemable": True,
+        "next_credit_id": "grant-next",
+        "credits": [{"id": "grant-next", "resets_left": 2}],
+      },
+    }
+
+  async def post(_url, *, headers, json):
+    posts.append(json)
+    return SimpleNamespace(
+      raise_for_status=lambda: None,
+      json=lambda: {"result": outcome},
+    )
+
+  organization_uuid = _install_claude_reset_mocks(
+    monkeypatch, provider_usage, current=current, post=post,
+  )
+  intent_path = provider_usage._claude_reset_intent_path(
+    str(tmp_path), organization_uuid,
+  )
+  provider_usage._write_claude_reset_intent(
+    intent_path,
+    request_id="stable-request",
+    credit_id="grant-next",
+    resets_left_before=2,
+  )
+
+  result = await provider_usage.redeem_claude_reset(
+    str(tmp_path), credit_id="grant-next", expected_resets_left=2,
+  )
+
+  assert result["outcome"] == outcome
+  assert posts[0]["request_id"] == "stable-request"
+  assert not intent_path.exists()
 
 
 @pytest.mark.asyncio
