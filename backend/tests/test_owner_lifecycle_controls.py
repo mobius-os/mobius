@@ -320,7 +320,7 @@ def test_delegated_bearer_cannot_send_edit_or_cancel_owner_messages(
     assert pending[0]["cid"] == f"pending-{target}"
 
 
-def test_top_level_agent_sends_do_not_gain_owner_authority(
+def test_top_level_agent_sends_and_edits_do_not_gain_owner_authority(
   client, owner_token, db, monkeypatch,
 ):
   from app.routes import chats_stream
@@ -345,6 +345,19 @@ def test_top_level_agent_sends_do_not_gain_owner_authority(
     headers=owner_auth,
   )
   assert owner_response.status_code == 202, owner_response.text
+  db.expire_all()
+  queued_owner = next(
+    row for row in db.get(models.Chat, chat_ids["foreign"]).pending_messages
+    if row["cid"] == "owner"
+  )
+  assert queued_owner["_owner_authored"] is True
+  edited = client.patch(
+    f"/api/chats/{chat_ids['foreign']}/pending/owner",
+    json={"content": "agent rewrite"},
+    headers=top_level_auth,
+  )
+  assert edited.status_code == 200, edited.text
+  assert edited.json()["updated"] is True
 
   db.expire_all()
   for target in ("top-level", "foreign"):
@@ -355,7 +368,17 @@ def test_top_level_agent_sends_do_not_gain_owner_authority(
     row for row in db.get(models.Chat, chat_ids["foreign"]).pending_messages
     if row["cid"] == "owner"
   )
-  assert owner_row["_owner_authored"] is True
+  assert owner_row["content"] == "agent rewrite"
+  assert "_owner_authored" not in owner_row
+
+  from app.chat_writer import AppendSteeredUserMessage, get_writer
+  committed = get_writer().submit(AppendSteeredUserMessage(
+    chat_id=chat_ids["foreign"],
+    run_token="",
+    user_msgs=[owner_row],
+    consume_pending_cids=["owner"],
+  )).result(timeout=30)
+  assert committed["owner_steer_committed"] is False
 
 
 def test_delegated_bearer_cannot_enter_host_or_platform_lifecycle(

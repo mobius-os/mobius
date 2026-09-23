@@ -919,10 +919,11 @@ class CancelPending(_Command):
 
 @dataclass
 class UpdatePending(_Command):
-  """Replace one still-queued message's text without changing its identity.
+  """Replace one queued message's text without changing its identity.
 
   The stable `cid`, ordering `ts`, attachments, and queue position stay
-  untouched. Returns `{"updated", "pending"}`; `updated` is False when a
+  untouched. A non-owner rewrite drops direct-owner authority. Returns
+  `{"updated", "pending"}`; `updated` is False when a
   racing promotion or cancellation already pulled the row from the queue, so
   the caller can tell a real edit from a no-op instead of assuming success.
   """
@@ -931,6 +932,7 @@ class UpdatePending(_Command):
   run_token: str = ""
   cid: str = ""
   content: str = ""
+  owner_authored: bool = False
 
 
 @dataclass
@@ -4543,14 +4545,15 @@ class ChatWriterActor:
     return {"pending": remaining}
 
   def _update_pending(self, db, cmd: UpdatePending) -> dict:
-    """Replace one still-queued message's text, preserving every other field.
+    """Replace one still-queued message's text and preserve its identity.
 
     Matches on `cid_of` like `_cancel_pending`. `updated` reports whether the
     row is still queued (True even for a no-op edit to identical text); the
     commit and `updated_at` bump happen only when the content actually changed,
     mirroring `_cancel_pending`. `updated` is False only when a racing promote
     or cancel already removed the row, so the caller can distinguish a real
-    edit from a message that has already left the queue.
+    edit from a message that has already left the queue. A non-owner editor
+    cannot carry the original owner's steering authority onto rewritten text.
     """
     from datetime import UTC, datetime
 
@@ -4569,7 +4572,10 @@ class ChatWriterActor:
         if message.get("content") == cmd.content:
           next_pending.append(message)
         else:
-          next_pending.append({**message, "content": cmd.content})
+          replacement = {**message, "content": cmd.content}
+          if not cmd.owner_authored:
+            replacement.pop("_owner_authored", None)
+          next_pending.append(replacement)
           changed = True
       else:
         next_pending.append(message)

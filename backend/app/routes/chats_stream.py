@@ -1681,6 +1681,7 @@ async def update_pending_message(
   """Edits one queued (not-yet-started) user message in place, identified by
   its stable `cid`. Only the visible text changes; the actor's UpdatePending
   preserves the row's identity, ordering, attachments, and queue position.
+  Rewrites by an agent keep those facts but drop direct-owner authority.
 
   The request carries just the owner's text. The hidden session-file manifest
   is re-derived here through the same `_content_with_uploads` the send path
@@ -1705,7 +1706,13 @@ async def update_pending_message(
   # The actor's UpdatePending is the SOLE runtime mutator of pending_messages,
   # so an edit racing a concurrent promote/cancel can't lost-update.
   ack = get_writer().submit(
-    UpdatePending(chat_id=chat_id, run_token="", cid=cid, content=content)
+    UpdatePending(
+      chat_id=chat_id,
+      run_token="",
+      cid=cid,
+      content=content,
+      owner_authored=is_owner_input_principal(principal),
+    )
   )
   result = await await_ack(ack)
   return {"updated": result["updated"], "pending_messages": result["pending"]}
