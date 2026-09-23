@@ -1352,6 +1352,40 @@ test.describe('Workspace view-mode toggle', () => {
     const chat = await createTaggedChat(page, 'phonePreview')
     const appId = 990111
     await mockApps(page, [{ id: appId, name: 'Phone Preview', chatId: chat.id }])
+    // The preview CTA is the composer's icon-drop button, and its source of
+    // truth is this chat's app-artifact rows — not the app list and not the
+    // app_preview_ready event, which only places the app in the workspace.
+    // projectChatAppArtifacts derives has_unseen_chat_update from
+    // `seen_at !== touched_at`, and appArtifactAttentionDecision queues only an
+    // app whose touch ADVANCED since the last poll, so an unseen touch is what
+    // mounts the button. This app exists client-side only, so the real endpoint
+    // answers [] and the CTA could never appear.
+    await page.route(
+      new RegExp(`/api/apps/chat-artifacts/${chat.id}$`),
+      route => (route.request().method() === 'GET'
+        ? route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify([{
+            app: {
+              id: appId,
+              name: 'Phone Preview',
+              description: '',
+              compiled_path: '',
+              chat_id: chat.id,
+              source_dir: null,
+              pinned_at: null,
+              cross_app_access: 'none',
+              share_with_apps: 'none',
+              offline_capable: false,
+              updated_at: '2026-07-12T12:00:00Z',
+            },
+            touched_at: '2026-07-12T12:00:00Z',
+            seen_at: null,
+          }]),
+        })
+        : route.fallback()),
+    )
     const standard = paneModel.setSingleScreen(
       paneModel.setViewMode(
         paneModel.seedFromFlatTabs([{ kind: 'chat', id: chat.id }]),
