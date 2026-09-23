@@ -561,8 +561,10 @@ def _selected_force_steer_pending(
 def _user_messages_from_pending(
   selected_pending: list[dict],
   fallback_user_msg: dict,
+  *,
+  owner_authored: bool,
 ) -> list[dict]:
-  """Build durable transcript rows for a force-steered pending batch."""
+  """Build force-steered rows under the current actor's authority."""
   user_msgs: list[dict] = []
   for pending in selected_pending:
     msg = dict(pending)
@@ -578,6 +580,13 @@ def _user_messages_from_pending(
       derived = cid_of(pending)
       if derived is not None:
         msg["cid"] = derived
+    # Force-steer is a new course-correction decision. Bind its authority to
+    # the actor making that decision rather than stale provenance from when
+    # the selected row first entered the queue.
+    if owner_authored:
+      msg["_owner_authored"] = True
+    else:
+      msg.pop("_owner_authored", None)
     user_msgs.append(msg)
   return user_msgs or [fallback_user_msg]
 
@@ -1345,7 +1354,9 @@ async def _send_message_locked(
       user_msg = _user_message_from_body(chat, body)
       if body.force_steer:
         user_msgs = _user_messages_from_pending(
-          selected_force_pending or [], user_msg,
+          selected_force_pending or [],
+          user_msg,
+          owner_authored=is_owner_input_principal(principal),
         )
         consume_cids = list(body.consume_pending_cids or [])
         steer_content = user_msg["content"]

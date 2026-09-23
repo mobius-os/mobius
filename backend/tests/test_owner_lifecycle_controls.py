@@ -380,6 +380,28 @@ def test_top_level_agent_sends_and_edits_do_not_gain_owner_authority(
   )).result(timeout=30)
   assert committed["owner_steer_committed"] is False
 
+  restored = client.patch(
+    f"/api/chats/{chat_ids['foreign']}/pending/agent-foreign",
+    json={"content": "owner rewrite"},
+    headers=owner_auth,
+  )
+  assert restored.status_code == 200, restored.text
+  assert restored.json()["updated"] is True
+  db.expire_all()
+  owner_rewrite = next(
+    row for row in db.get(models.Chat, chat_ids["foreign"]).pending_messages
+    if row["cid"] == "agent-foreign"
+  )
+  assert owner_rewrite["content"] == "owner rewrite"
+  assert owner_rewrite["_owner_authored"] is True
+  committed = get_writer().submit(AppendSteeredUserMessage(
+    chat_id=chat_ids["foreign"],
+    run_token="",
+    user_msgs=[owner_rewrite],
+    consume_pending_cids=["agent-foreign"],
+  )).result(timeout=30)
+  assert committed["owner_steer_committed"] is True
+
 
 def test_delegated_bearer_cannot_enter_host_or_platform_lifecycle(
   client, owner_token, db, monkeypatch, tmp_path,

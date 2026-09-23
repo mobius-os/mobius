@@ -4573,7 +4573,9 @@ class ChatWriterActor:
           next_pending.append(message)
         else:
           replacement = {**message, "content": cmd.content}
-          if not cmd.owner_authored:
+          if cmd.owner_authored:
+            replacement["_owner_authored"] = True
+          else:
             replacement.pop("_owner_authored", None)
           next_pending.append(replacement)
           changed = True

@@ -35,7 +35,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from app import models, questions
+from app import auth as auth_mod, models, questions
 from app.broadcast import create_broadcast, get_broadcast
 from app.chat_writer import cid_of
 from app.database import SessionLocal
@@ -1232,6 +1232,84 @@ def test_api_send_without_cid_can_be_force_steered(
   assert chat.pending_messages in (None, [])
   assert chat.messages[-1]["cid"] == server_cid
   assert chat.messages[-1]["content"] == "use the queued instruction"
+
+
+@pytest.mark.parametrize(
+  ("queue_actor", "steer_actor", "owner_authorized"),
+  [
+    ("owner", "agent", False),
+    ("agent", "owner", True),
+  ],
+)
+def test_force_steer_authority_comes_from_current_actor(
+  client, auth, monkeypatch, queue_actor, steer_actor, owner_authorized,
+):
+  """Selecting queued text is the current actor's course correction.
+
+  Stale row provenance must neither let an agent borrow owner authority nor
+  prevent the owner from authorizing an agent-originated row they selected.
+  """
+  from app.chat import _ChatEventSink, register_active_sink
+
+  chat_id = f"force-authority-{queue_actor}-{steer_actor}"
+  _make_codex_chat(chat_id, steer_enabled=False)
+  db = SessionLocal()
+  try:
+    owner = db.query(models.Owner).one()
+    run_id = f"{chat_id}-agent-run"
+    db.add(models.ChatRun(
+      id=run_id,
+      root_run_id=run_id,
+      chat_id=chat_id,
+      status="running",
+      provider="codex",
+    ))
+    db.commit()
+    agent_token = auth_mod.create_agent_token(
+      chat_id,
+      owner.username,
+      owner.token_epoch,
+      run_id=run_id,
+    )
+  finally:
+    db.close()
+  agent_auth = {"Authorization": f"Bearer {agent_token}"}
+
+  registry.register(_make_active_codex_turn(chat_id))
+  bc = create_broadcast(chat_id)
+  sink = _ChatEventSink(
+    bc,
+    chat_id,
+    run_token=run_id,
+    recall_binding=EMPTY_RECALL_BINDING,
+  )
+  register_active_sink(chat_id, sink)
+  actors = {"owner": auth, "agent": agent_auth}
+
+  queued = client.post(
+    f"/api/chats/{chat_id}/messages",
+    json={"content": "queued direction", "cid": f"{chat_id}-cid"},
+    headers=actors[queue_actor],
+  )
+  assert queued.status_code == 202, queued.text
+  assert queued.json()["status"] == "queued"
+
+  async def _fake_steer(_cid, _message, *_durable):
+    return True
+
+  _patch_codex_steer(monkeypatch, _fake_steer)
+  steered = client.post(
+    f"/api/chats/{chat_id}/messages",
+    json={
+      "content": "queued direction",
+      "force_steer": True,
+      "consume_pending_cids": [f"{chat_id}-cid"],
+    },
+    headers=actors[steer_actor],
+  )
+  assert steered.status_code == 202, steered.text
+  assert steered.json()["status"] == "steered"
+  assert sink.owner_steer_committed is owner_authorized
 
 
 def test_force_steer_failure_does_not_append_duplicate_queue(
