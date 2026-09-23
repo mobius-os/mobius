@@ -141,6 +141,10 @@ def test_control_protocol_advertises_every_run_bound_tool(monkeypatch):
   assert initialized["result"]["capabilities"] == {
     "tools": {"listChanged": False},
   }
+  instructions = initialized["result"]["instructions"]
+  assert "agents in other Möbius chats" in instructions
+  assert "agents.*" in instructions
+  assert "temporary subagent tree" in instructions
 
   listed = control._dispatch_message({
     "jsonrpc": "2.0", "id": 2, "method": "tools/list",
@@ -205,6 +209,17 @@ def test_control_protocol_advertises_every_run_bound_tool(monkeypatch):
   assert "Use interrupt only when" in send_description
   assert "Broadcasts are always next_turn" in send_description
   assert "instead of checking for replies" in send_description
+
+
+def test_constitution_routes_each_agent_network_to_its_owner():
+  core = (
+    Path(__file__).resolve().parents[2] / "skill" / "core.md"
+  ).read_text(encoding="utf-8")
+
+  assert "provider-native `agents.*` tools" in core
+  assert "other Möbius chats" in core
+  assert core.index("`list_agent_peers`") < core.index("`send_agent_message`")
+  assert "ordinary chat-message API" in core
 
 
 def test_delegated_control_server_advertises_only_peer_and_ownership_tools(monkeypatch):
