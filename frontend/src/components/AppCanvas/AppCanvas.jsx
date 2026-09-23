@@ -6,9 +6,12 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { api } from '../../api/client.js'
 import { appQueries, themeQueries } from '../../hooks/queries.js'
 import { serviceSurfaceFrameUrl } from '../../lib/serviceSurface.js'
-import useOnlineStatus from '../../hooks/useOnlineStatus.js'
-import { getOnlineSnapshot } from '../../lib/connectivityStore.js'
-import { appTokenIdentity, liveAppToken, resolveLatchedToken } from '../../lib/appToken.js'
+import { useReachabilityPhase } from '../../hooks/useOnlineStatus.js'
+import { getOnlineSnapshot, ReachabilityPhase } from '../../lib/connectivityStore.js'
+import {
+  AppTokenStartupState, appTokenIdentity, appTokenStartupState,
+  liveAppToken, resolveLatchedToken,
+} from '../../lib/appToken.js'
 import { createAppStorageHost } from '../../lib/appStorageHost.js'
 import {
   cacheAppToken, readAppFrameStorage, readCachedAppToken,
@@ -361,7 +364,8 @@ const AppCanvas = forwardRef(function AppCanvas({
   // a stale "true" on a COLD offline reopen (close the PWA offline, reopen,
   // open an app from the drawer): the SW serves the shell from cache so the
   // browser never makes a real network attempt to update the flag.
-  const online = useOnlineStatus()
+  const reachabilityPhase = useReachabilityPhase()
+  const online = reachabilityPhase !== ReachabilityPhase.OFFLINE
   // Token choice, gated ONLY on real reachability:
   //   • online  → wait for the app-scoped token; NEVER substitute the owner
   //     JWT (keeps the long-lived owner JWT out of the module URL/history).
@@ -408,6 +412,11 @@ const AppCanvas = forwardRef(function AppCanvas({
   // for two versions in one render, the two live frames can never fight over the
   // latch. See lib/appToken.js.
   const token = resolveLatchedToken(appId, version, liveToken, appToken)
+  const tokenStartupState = appTokenStartupState(
+    token,
+    reachabilityPhase,
+    Boolean(appTokenError),
+  )
   const hostTokenRef = useRef(token)
   hostTokenRef.current = token
 
@@ -492,6 +501,19 @@ const AppCanvas = forwardRef(function AppCanvas({
           }, '*')
         } catch { /* frame disappeared during delivery */ }
       }
+    },
+    onConflict(payload) {
+      for (const frame of framesRef.current.values()) {
+        try {
+          frame?.contentWindow?.postMessage({
+            type: 'moebius:storage-conflict', payload,
+          }, '*')
+        } catch { /* frame disappeared during delivery */ }
+      }
+      // Posting is notification, not durable recovery. The frame runtime
+      // acknowledges through the scoped storage bridge only after an app
+      // listener has completed its recovery work.
+      return false
     },
   }), [appId, queryClient])
   const storageHostRef = useRef(storageHost)
@@ -1456,22 +1478,26 @@ const AppCanvas = forwardRef(function AppCanvas({
     )
   }
 
-  if (!token) {
-    if (!online || appTokenError) {
-      const title = online
+  if (tokenStartupState !== AppTokenStartupState.READY) {
+    if (
+      tokenStartupState === AppTokenStartupState.OFFLINE_MISSING
+      || tokenStartupState === AppTokenStartupState.ONLINE_ERROR
+    ) {
+      const onlineError = tokenStartupState === AppTokenStartupState.ONLINE_ERROR
+      const title = onlineError
         ? `Couldn’t open ${appName || 'this app'}`
         : 'Open this app once you’re online'
-      const detail = online
+      const detail = onlineError
         ? 'Möbius couldn’t create the app’s secure session. Your app data is safe.'
         : 'This app needs a cached, app-specific session before it can open offline.'
       return (
         <div className="canvas-wrap">
           <div className="canvas-loading" aria-live="polite">
             <div className="canvas-loading__offline">
-              {!online && <GlobeOffRealTimeSearch className="canvas-loading__offline-icon" aria-hidden="true" />}
+              {!onlineError && <GlobeOffRealTimeSearch className="canvas-loading__offline-icon" aria-hidden="true" />}
               <div className="canvas-loading__offline-title">{title}</div>
               <div className="canvas-loading__offline-detail">{detail}</div>
-              {online && (
+              {onlineError && (
                 <div className="canvas-loading__offline-actions">
                   <button
                     type="button"

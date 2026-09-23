@@ -16,6 +16,7 @@ function identity(token) {
 
 function fakeStorage(name) {
   const subscriptions = new Map()
+  const conflictListeners = new Set()
   const storage = {
     name,
     destroyed: false,
@@ -26,7 +27,13 @@ function fakeStorage(name) {
       return { durability: 'synced', path, writeId: 'test-write' }
     },
     async _drain() { return name },
+    async _ackConflict(writeId) { return writeId === 'owned-conflict' },
+    async _listConflicts() { return [{ writeId: 'owned-conflict', path: 'note.json' }] },
     onDeadLetter() { return () => {} },
+    onConflict(cb) {
+      conflictListeners.add(cb)
+      return () => conflictListeners.delete(cb)
+    },
     subscribe(path, cb) {
       if (!subscriptions.has(path)) subscriptions.set(path, new Set())
       subscriptions.get(path).add(cb)
@@ -36,6 +43,9 @@ function fakeStorage(name) {
     subscribeBlob(path, cb) { return storage.subscribe(path, cb) },
     emit(path, value) {
       for (const cb of subscriptions.get(path) || []) cb(value)
+    },
+    emitConflict(value) {
+      return [...conflictListeners].map((cb) => cb(value))
     },
     subscriberCount(path) { return subscriptions.get(path)?.size || 0 },
     _destroy() { storage.destroyed = true; subscriptions.clear() },
@@ -167,6 +177,44 @@ test('a write from one buffered frame updates every subscribed sibling frame', a
   assert.equal(changes.length, 2)
   assert.deepEqual(new Set(changes.map(({ source }) => source)), new Set([sourceA, sourceB]))
   assert.equal(changes.every(({ message }) => message.value.body === 'shared'), true)
+})
+
+test('conflict delivery reports whether an active app frame accepted the event', async () => {
+  const delivered = []
+  const h = harness()
+  h.host.destroy()
+
+  let token = '7:install-a'
+  let storage
+  const host = createAppStorageHost({
+    appId: '7',
+    getCurrentToken: () => token,
+    getToken: async () => token,
+    tokenIdentity: identity,
+    createStorage: async (options) => {
+      storage = fakeStorage(options.appInstanceId)
+      return storage
+    },
+    send() { return true },
+    onConflict(payload) {
+      delivered.push(payload)
+      return payload.live === true
+    },
+  })
+  await host.handleRpc({}, 'get', ['note.json'])
+
+  assert.deepEqual(storage.emitConflict({ live: false }), [false])
+  assert.deepEqual(storage.emitConflict({ live: true }), [true])
+  assert.deepEqual(delivered, [{ live: false }, { live: true }])
+})
+
+test('conflict acknowledgment stays scoped to the current app storage runtime', async () => {
+  const h = harness()
+  assert.deepEqual(await h.host.handleRpc({}, 'listConflicts', []), [
+    { writeId: 'owned-conflict', path: 'note.json' },
+  ])
+  assert.equal(await h.host.handleRpc({}, 'ackConflict', ['owned-conflict']), true)
+  assert.equal(await h.host.handleRpc({}, 'ackConflict', ['other-conflict']), false)
 })
 
 test('an unavailable or cross-app token fails closed', async () => {

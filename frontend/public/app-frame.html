@@ -1472,6 +1472,13 @@
         } catch (e) {}
         return;
       }
+      if (msg.type === 'moebius:storage-conflict') {
+        try {
+          window.mobius && window.mobius.storage &&
+            window.mobius.storage._receiveConflict(msg.payload);
+        } catch (e) {}
+        return;
+      }
       if (msg.type === 'moebius:app-intent') {
         acknowledgeAppIntent(msg.nonce);
         // Returning from this runtime listener does not stop the message event:
