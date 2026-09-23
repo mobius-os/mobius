@@ -604,7 +604,8 @@ def test_reconcile_restores_zone_schedule_as_wall_clock_gate(client, auth, db):
                     timezone=None, zone_cron=None):
     calls.append((slug, schedule_expr, timezone, zone_cron))
 
-  with patch("app.app_cron.register_cron", fake_register), \
+  with patch("app.app_cron.read_crontab", return_value=""), \
+       patch("app.app_cron.register_cron", fake_register), \
        patch("app.cron_tz.materialize_zone_cron",
              lambda zone_cron, tz_name: "* * * * *"):
     count, warnings, infrastructure_ready = apps_module.reconcile_app_cron_supervision(db)
@@ -632,7 +633,8 @@ def test_reconcile_fails_closed_on_malformed_zone_declaration(
   )
 
   from app.routes import app_schedules as apps_module
-  with patch("app.app_cron.register_cron") as register:
+  with patch("app.app_cron.read_crontab", return_value=""), \
+       patch("app.app_cron.register_cron") as register:
     count, warnings, infrastructure_ready = apps_module.reconcile_app_cron_supervision(db)
 
   assert count == 0
@@ -969,7 +971,7 @@ def test_boot_never_adopts_an_unsupervised_owner_cron_entry(client, db):
   publish_runtime(app, prepare_runtime(source_dir, app.source_commit))
   db.commit()
   direct = f"15 4 * * * {source_dir}/fetch.sh {app.id}"
-  with patch.object(apps_module, "_read_live_crontab", return_value=direct), \
+  with patch("app.app_cron.read_crontab", return_value=direct), \
        patch("app.app_cron.register_cron") as register:
     count, warnings, infrastructure_ready = apps_module.reconcile_app_cron_supervision(db)
 
@@ -1160,7 +1162,7 @@ def test_draft_schedule_declarations_do_not_change_owner_schedule_after_restart(
   manifest = json.loads((source / "mobius.json").read_text())
   manifest["schedule"] = {"job": "draft.sh", "default": "* * * * *"}
   (source / "mobius.json").write_text(json.dumps(manifest))
-  with patch.object(app_schedules, "_read_live_crontab", return_value=""), \
+  with patch("app.app_cron.read_crontab", return_value=""), \
        patch("app.app_cron.register_cron") as register:
     count, warnings, infrastructure_ready = app_schedules.reconcile_app_cron_supervision(db)
   assert count == 1

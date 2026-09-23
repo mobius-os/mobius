@@ -184,6 +184,9 @@ def test_railway_preview_uses_latest_verified_ghcr_release(
       "activation": classify_activation(
         ["Dockerfile"], deployment="railway",
       ),
+      "incoming_activation": classify_activation(
+        ["Dockerfile"], deployment="railway",
+      ),
       "total_commits": 1, "commits_truncated": False,
       "commits": [], "files": [], "diff": None,
       "diff_truncated": False, "conflict_paths": [], "blocking_paths": [],

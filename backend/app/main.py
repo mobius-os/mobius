@@ -320,6 +320,10 @@ async def lifespan(app):
     await stop_sealed_consumers()
     # Supervisors stop before the persistence actor they monitor.
     await supervisors.stop()
+    # Do not leave a stopped owner published after lifespan exits. Re-entering
+    # the application must install a fresh supervisor set or observe none;
+    # otherwise a stale stopped set makes the healthy readiness probe fail.
+    app.state.runtime_supervisors = None
     # Drain + join the chat-writer actor so any in-flight persistence
     # completes before the process exits. Wrapped: a stop failure must
     # not mask the rest of shutdown.
