@@ -1230,6 +1230,42 @@ def test_claude_reset_rechecks_exact_offer_before_redeeming(
     ("redeem", "grant-next"),
   ]
 
+
+def test_claude_reset_lost_response_does_not_invite_a_second_spend(
+  client, auth, monkeypatch,
+):
+  import httpx
+  from app.routes import settings as settings_route
+
+  calls = []
+
+  async def current(_provider_id, _data_dir, *, force_refresh=False):
+    calls.append(("read", force_refresh))
+    return {"reset_credits": {"redeemable": True, "next_credit_id": "grant-next"}}
+
+  async def lost_response(_data_dir, *, credit_id):
+    calls.append(("redeem", credit_id))
+    raise httpx.ReadTimeout("response lost after provider accepted request")
+
+  monkeypatch.setattr(settings_route.provider_usage, "read_provider_usage", current)
+  monkeypatch.setattr(
+    settings_route.provider_usage, "redeem_claude_reset", lost_response,
+  )
+
+  response = client.post(
+    "/api/settings/provider-usage/claude/redeem-reset",
+    json={"credit_id": "grant-next", "confirm": True},
+    headers=auth,
+  )
+
+  assert response.status_code == 502
+  assert response.json()["detail"] == (
+    "Claude may have applied the reset. Check your limits and remaining "
+    "resets in Claude before deciding whether to use another."
+  )
+  assert calls == [("read", True), ("redeem", "grant-next")]
+
+
 def test_claude_extra_usage_requires_confirmation_and_current_state(
   client, auth, monkeypatch,
 ):

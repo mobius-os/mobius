@@ -1,5 +1,9 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { createElement } from 'react'
+import { renderToStaticMarkup } from 'react-dom/server'
+
+import ProviderUsage from '../../components/SettingsView/ProviderUsage.jsx'
 
 import {
   bankedResetCredits,
@@ -131,6 +135,31 @@ test('Claude reset helper preserves the provider-selected redeemable grant', () 
     tone: 'info',
     text: 'Your limits are already clear — no reset was spent.',
   })
+  assert.deepEqual(claudeRedeemOutcomeMessage(undefined), {
+    tone: 'error',
+    text: 'Claude may have applied this reset. Check your limits and remaining resets in Claude before using another.',
+  })
+})
+
+test('an uncertain Claude reset leaves the warning visible and disables another attempt', () => {
+  const markup = renderToStaticMarkup(createElement(ProviderUsage, {
+    snapshot: {
+      state: 'ready',
+      windows: [{ id: 'five_hour', label: '5-hour', used_percent: 100 }],
+      reset_credits: {
+        available_count: 2,
+        eligible: true,
+        redeemable: true,
+        next_credit_id: 'grant-next',
+        credits: [{ id: 'grant-next', resets_left: 2 }],
+      },
+    },
+    onRedeemClaudeReset: () => {},
+    claudeResetResult: { error: true },
+  }))
+
+  assert.match(markup, /Claude may have applied this reset/)
+  assert.match(markup, /<button[^>]*disabled=""[^>]*>Use a reset<\/button>/)
 })
 
 

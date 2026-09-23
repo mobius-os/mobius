@@ -121,7 +121,10 @@ export function claudeRedeemOutcomeMessage(outcome) {
     case 'unavailable':
       return { tone: 'info', text: 'That reset is no longer available.' }
     default:
-      return { tone: 'error', text: 'Couldn’t redeem the Claude reset. Try again shortly.' }
+      return {
+        tone: 'error',
+        text: 'Claude may have applied this reset. Check your limits and remaining resets in Claude before using another.',
+      }
   }
 }
 

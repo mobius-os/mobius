@@ -368,7 +368,10 @@ async def redeem_claude_reset(
     logger.warning("Claude reset redeem failed: %s", exc)
     raise HTTPException(
       status_code=502,
-      detail="Claude could not redeem the reset. Try again shortly.",
+      detail=(
+        "Claude may have applied the reset. Check your limits and remaining "
+        "resets in Claude before deciding whether to use another."
+      ),
     ) from exc
 
 

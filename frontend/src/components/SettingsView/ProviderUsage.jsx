@@ -46,7 +46,7 @@ function BankedResets({
         result.error ? undefined : result.outcome,
       )
     : null
-  const redeemDisabled = count === 0 || (claude && !resets.redeemable)
+  const redeemDisabled = count === 0 || (claude && (!resets.redeemable || result?.error))
 
   return (
     <span className="provider-usage__resets">
