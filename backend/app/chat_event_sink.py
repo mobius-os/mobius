@@ -1194,14 +1194,8 @@ class ChatEventSink:
       user_msgs, consume_pending_cids,
     )
     stored_messages = stored_result["stored_messages"]
-    self.owner_steer_committed |= any(
-      isinstance(row, dict)
-      and row.get("role") == "user"
-      and row.get("steered") is True
-      and not row.get("hidden")
-      and row.get("_initiated_by_app_id") is None
-      and row.get("_initiated_by_agent_chat_id") is None
-      for row in stored_messages
+    self.owner_steer_committed |= bool(
+      stored_result.get("owner_steer_committed", False)
     )
     try:
       self.bc.publish(steered_into_turn_event(

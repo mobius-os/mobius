@@ -412,39 +412,6 @@ async def test_zero_legacy_allowance_does_not_interrupt_authorized_work(
   assert db.get(models.ChatRun, continuation_run).status == "interrupted"
 
 
-def test_agent_origin_survives_pending_to_steered_commit(db, chat):
-  """The writer must not turn agent input into apparent owner authority."""
-  from app.chat_writer import (
-    AppendPending,
-    AppendSteeredUserMessage,
-    get_writer,
-  )
-
-  pending = get_writer().submit(AppendPending(
-    chat_id=chat.id,
-    run_token="",
-    user_msg={
-      "role": "user", "content": "Agent correction", "cid": "agent-steer",
-    },
-    initiated_by_agent_chat_id="source-agent-chat",
-  )).result(timeout=30)["stored"]
-  assert pending["_initiated_by_agent_chat_id"] == "source-agent-chat"
-
-  result = get_writer().submit(AppendSteeredUserMessage(
-    chat_id=chat.id,
-    run_token="",
-    user_msgs=[pending],
-    consume_pending_cids=["agent-steer"],
-  )).result(timeout=30)
-  stored = result["stored_messages"]
-  assert stored[0]["steered"] is True
-  assert stored[0]["_initiated_by_agent_chat_id"] == "source-agent-chat"
-  db.expire_all()
-  assert db.get(models.Chat, chat.id).messages[-1][
-    "_initiated_by_agent_chat_id"
-  ] == "source-agent-chat"
-
-
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
   ("actor", "expected_rollover"),
@@ -491,10 +458,8 @@ async def test_only_visible_owner_steer_reauthorizes_one_goal_rollover(
     "cid": f"{actor}-steer",
     "ts": 2,
     **(
-      {"_initiated_by_agent_chat_id": chat.id}
-      if actor == "same_chat_agent" else
-      {"_initiated_by_agent_chat_id": "another-chat"}
-      if actor == "cross_chat_agent" else
+      {"_owner_authored": True}
+      if actor == "owner" else
       {"_initiated_by_app_id": 42}
       if actor == "app" else
       {"hidden": True, "kind": "continuation"}

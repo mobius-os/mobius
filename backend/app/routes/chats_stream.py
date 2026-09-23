@@ -278,7 +278,7 @@ def _content_with_uploads(chat: models.Chat, content: str) -> str:
 async def _append_to_pending(
   chat: models.Chat, body: schemas.SendMessage, db: Session,
   *, initiated_by_app_id: int | None = None,
-  initiated_by_agent_chat_id: str | None = None,
+  owner_authored: bool = False,
   front: bool = False,
   require_answer_match: bool = False,
 ) -> dict:
@@ -304,7 +304,7 @@ async def _append_to_pending(
       chat_id=chat.id, run_token="",
       user_msg=_user_message_from_body(chat, body), answers=body.answers,
       question_id=body.question_id, initiated_by_app_id=initiated_by_app_id,
-      initiated_by_agent_chat_id=initiated_by_agent_chat_id,
+      owner_authored=owner_authored,
       front=front, require_answer_match=require_answer_match,
     ),
   )
@@ -314,7 +314,7 @@ async def _append_to_pending(
 async def _append_restart_feedback_to_pending(
   chat: models.Chat, body: schemas.SendMessage, db: Session,
   *, initiated_by_app_id: int | None = None,
-  initiated_by_agent_chat_id: str | None = None,
+  owner_authored: bool = False,
 ) -> dict:
   """Settle a Restart card and queue its written response as one command."""
   return await _submit_pending_message(
@@ -322,7 +322,7 @@ async def _append_restart_feedback_to_pending(
       chat_id=chat.id, run_token="",
       user_msg=_user_message_from_body(chat, body), answers=body.answers,
       question_id=body.question_id, initiated_by_app_id=initiated_by_app_id,
-      initiated_by_agent_chat_id=initiated_by_agent_chat_id,
+      owner_authored=owner_authored,
     ),
   )
 
@@ -630,7 +630,7 @@ async def send_message(
           try:
             append_result = await _append_restart_feedback_to_pending(
               chat, body, db, initiated_by_app_id=principal.app_id,
-              initiated_by_agent_chat_id=principal.chat_id,
+              owner_authored=principal.app_id is None and principal.chat_id is None,
             )
             stored = append_result["stored"]
             duplicate = append_result.get("duplicate") is True
@@ -935,7 +935,7 @@ async def send_message(
         # wake, so neither a second runner nor a polling task is needed.
         stored = await _append_to_pending(
           chat, body, db, initiated_by_app_id=principal.app_id,
-          initiated_by_agent_chat_id=principal.chat_id,
+          owner_authored=principal.app_id is None and principal.chat_id is None,
           front=True, require_answer_match=True,
         )
         from app.chat_event_sink import get_active_sink
@@ -1069,7 +1069,7 @@ async def send_message(
           body,
           db,
           initiated_by_app_id=principal.app_id,
-          initiated_by_agent_chat_id=principal.chat_id,
+          owner_authored=principal.app_id is None and principal.chat_id is None,
           front=True,
           require_answer_match=True,
         )
@@ -1264,7 +1264,7 @@ async def _send_message_locked(
   if is_draining():
     new_msg = await _append_to_pending(
       chat, body, db, initiated_by_app_id=principal.app_id,
-      initiated_by_agent_chat_id=principal.chat_id,
+      owner_authored=principal.app_id is None and principal.chat_id is None,
     )
     db.expire(chat)
     return _queued_response(new_msg, len(chat.pending_messages or []))
@@ -1276,7 +1276,7 @@ async def _send_message_locked(
   if activation_barrier_wait_id(db, chat_id) is not None:
     new_msg = await _append_to_pending(
       chat, body, db, initiated_by_app_id=principal.app_id,
-      initiated_by_agent_chat_id=principal.chat_id,
+      owner_authored=principal.app_id is None and principal.chat_id is None,
     )
     db.expire(chat)
     return _queued_response(new_msg, len(chat.pending_messages or []))
@@ -1294,7 +1294,7 @@ async def _send_message_locked(
   ):
     new_msg = await _append_to_pending(
       chat, body, db, initiated_by_app_id=principal.app_id,
-      initiated_by_agent_chat_id=principal.chat_id,
+      owner_authored=principal.app_id is None and principal.chat_id is None,
     )
     db.expire(chat)
     return _queued_response(new_msg, len(chat.pending_messages or []))
@@ -1352,7 +1352,7 @@ async def _send_message_locked(
       else:
         reserved = await _append_to_pending(
           chat, body, db, initiated_by_app_id=principal.app_id,
-          initiated_by_agent_chat_id=principal.chat_id,
+          owner_authored=principal.app_id is None and principal.chat_id is None,
         )
         db.expire(chat)
         reserved_cid = cid_of(reserved)
@@ -1403,7 +1403,7 @@ async def _send_message_locked(
 
     new_msg = await _append_to_pending(
       chat, body, db, initiated_by_app_id=principal.app_id,
-      initiated_by_agent_chat_id=principal.chat_id,
+      owner_authored=principal.app_id is None and principal.chat_id is None,
     )
     started_message = None
 
@@ -1484,7 +1484,7 @@ async def _send_message_locked(
       })
     new_msg = await _append_to_pending(
       chat, body, db, initiated_by_app_id=principal.app_id,
-      initiated_by_agent_chat_id=principal.chat_id,
+      owner_authored=principal.app_id is None and principal.chat_id is None,
     )
     return _queued_response(new_msg, len(chat.pending_messages))
 

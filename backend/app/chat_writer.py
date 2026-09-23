@@ -822,7 +822,7 @@ class AppendPending(_Command):
   answers: dict | None = None
   question_id: str | None = None
   initiated_by_app_id: int | None = None
-  initiated_by_agent_chat_id: str | None = None
+  owner_authored: bool = False
   front: bool = False
   require_answer_match: bool = False
 
@@ -3970,8 +3970,8 @@ class ChatWriterActor:
       raise _PersistFailed("AppendPending: no matching question block")
     if cmd.initiated_by_app_id is not None:
       new_msg["_initiated_by_app_id"] = cmd.initiated_by_app_id
-    if cmd.initiated_by_agent_chat_id is not None:
-      new_msg["_initiated_by_agent_chat_id"] = cmd.initiated_by_agent_chat_id
+    if cmd.owner_authored:
+      new_msg["_owner_authored"] = True
     # Idempotent append: `cid` is untrusted client input, and a retried POST
     # (flaky network, double-tap) carries the SAME cid. If that cid already
     # names a durable row — queued OR already promoted into the transcript —
@@ -4081,8 +4081,10 @@ class ChatWriterActor:
       cid_of(m) for m in msgs if m.get("role") == "user"
     }
     stored_messages: list[dict] = []
+    owner_steer_committed = False
     for raw_msg in raw_user_msgs:
       new_msg = dict(raw_msg)
+      owner_authored = new_msg.pop("_owner_authored", False) is True
       # This provenance is part of the durable transcript contract, not a UI
       # hint.  A normal Q1/A1/Q2/A2 exchange is indistinguishable from a
       # mid-turn steer after reload unless the committed Q2 row names the
@@ -4102,6 +4104,11 @@ class ChatWriterActor:
       msgs.append(new_msg)
       used_messages.append(new_msg)
       stored_messages.append(new_msg)
+      owner_steer_committed |= (
+        owner_authored
+        and new_msg.get("role") == "user"
+        and not new_msg.get("hidden")
+      )
     chat.messages = msgs
     if cmd.consume_pending_cids:
       consumed = set(cmd.consume_pending_cids)
@@ -4115,6 +4122,7 @@ class ChatWriterActor:
     return {
       "stored": stored_messages[-1] if stored_messages else None,
       "stored_messages": stored_messages,
+      "owner_steer_committed": owner_steer_committed,
       "pending": list(chat.pending_messages or []),
     }
 
@@ -4381,7 +4389,7 @@ class ChatWriterActor:
     agent_pending = _combine_pending_messages(promoted_group)
     consumed_cids = agent_pending.pop("_consumed_cids", [])
     initiated_by_app_id = agent_pending.pop("_initiated_by_app_id", None)
-    agent_pending.pop("_initiated_by_agent_chat_id", None)
+    agent_pending.pop("_owner_authored", None)
     durable_run_token = (
       product_result_run_token(cmd.chat_id, agent_pending) or cmd.run_token
     )
@@ -5717,7 +5725,7 @@ def _pending_messages_for_transcript(
     msg.pop("serverTs", None)
     msg.pop("position", None)
     msg.pop("_initiated_by_app_id", None)
-    msg.pop("_initiated_by_agent_chat_id", None)
+    msg.pop("_owner_authored", None)
     # Preserve an explicit cid, or stamp the legacy fallback before changing
     # ts so queue identity stays byte-identical across promotion.
     msg["cid"] = cid_of(msg)
