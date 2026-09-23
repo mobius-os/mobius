@@ -30,7 +30,7 @@ import {
   providerAllowance,
   providerAllowanceSummary,
 } from './providerUsage.js'
-import { PROVIDER_INFO, PROVIDER_ORDER } from '../ChatView/providerRegistry.jsx'
+import { PROVIDER_INFO, PROVIDER_ORDER, providerInfoFor, providerOrderFor } from '../ChatView/providerRegistry.jsx'
 import '../ui/StatusDot.css'
 import '../ui/ModelSheet.css'
 import './SettingsView.css'
@@ -56,7 +56,7 @@ function defaultBackgroundModel(provider) {
 }
 
 function isKnownProvider(provider) {
-  return PROVIDER_CHOICES.some(p => p.id === provider)
+  return PROVIDER_CHOICES.some(p => p.id === provider) || /^app-\d+$/.test(provider || '')
 }
 
 function PlanUsageToggle({ provider, label, expanded, onToggle }) {
@@ -118,6 +118,7 @@ function normalizeBackgroundAgents(backgroundAgents, defaultProvider = 'claude')
 
 function BackgroundProviderRow({
   row,
+  providerInfo,
   index,
   models,
   dragging,
@@ -131,7 +132,7 @@ function BackgroundProviderRow({
   onReorderStart,
   configuredProviders,
 }) {
-  const info = PROVIDER_INFO[row.provider]
+  const info = providerInfo || providerInfoFor(row.provider)
   const Logo = info?.Logo
   const configured = configuredProviders.has(row.provider)
   const enabled = configured && row.enabled !== false
@@ -275,6 +276,7 @@ export default function SettingsView({
   active = true,
   refreshToken = 0,
 }) {
+  const settingsBoundaryRef = useRef(null)
   const queryClient = useQueryClient()
   const settingsQuery = settingsQueries.owner.useQuery()
   const providerStatusQuery = authQueries.provider.statuses.useQuery()
@@ -372,6 +374,41 @@ export default function SettingsView({
       && expandedUsage.claude
     ),
   })
+  const [claudeExtraUsage, setClaudeExtraUsage] = useState({ busy: false, result: null })
+  const [claudeResetRedeem, setClaudeResetRedeem] = useState({ busy: false, result: null })
+  const handleRedeemClaudeReset = useCallback(async (creditId, expectedResetsLeft) => {
+    setClaudeResetRedeem({ busy: true, result: null })
+    try {
+      const res = await api.settings.redeemClaudeReset(creditId, expectedResetsLeft)
+      if (res.status === 409) {
+        setClaudeResetRedeem({ busy: false, result: { outcome: 'offer_changed' } })
+        settingsQueries.providerUsage.invalidate(queryClient, 'claude')
+        return
+      }
+      if (!res.ok) throw new Error('Claude reset redeem failed')
+      const data = await res.json()
+      setClaudeResetRedeem({ busy: false, result: { outcome: data?.outcome } })
+      settingsQueries.providerUsage.invalidate(queryClient, 'claude')
+    } catch {
+      setClaudeResetRedeem({ busy: false, result: { error: true } })
+    }
+  }, [queryClient])
+  const handleClaudeExtraUsage = useCallback(async (enabled, expectedEnabled) => {
+    setClaudeExtraUsage({ busy: true, result: null })
+    try {
+      const res = await api.settings.setClaudeExtraUsage(enabled, expectedEnabled)
+      if (!res.ok) throw new Error('Claude extra usage update failed')
+      const snapshot = await res.json()
+      queryClient.setQueryData(
+        settingsQueries.providerUsage.keyFor('claude'),
+        snapshot,
+      )
+      setClaudeExtraUsage({ busy: false, result: { enabled } })
+      settingsQueries.providerUsage.invalidate(queryClient, 'claude')
+    } catch {
+      setClaudeExtraUsage({ busy: false, result: { error: true } })
+    }
+  }, [queryClient])
   const mobiusUsageQuery = settingsQueries.providerUsage.useQuery('mobius', {
     enabled: active && providerReady && mobiusAvailable && mobiusAuthenticated,
   })
@@ -390,6 +427,10 @@ export default function SettingsView({
   // Registry and provider/settings probes are independent. Starting them
   // together avoids an unnecessary request waterfall on a first open.
   const modelRegistryQuery = modelQueries.registry.useQuery()
+  const modelProviderOrder = providerOrderFor(modelRegistryQuery.data)
+  const modelProviderInfo = Object.fromEntries(modelProviderOrder.map(id => [
+    id, providerInfoFor(id, providerStatusQuery.data),
+  ]))
   const providerError =
     !providerReady && (settingsQuery.isError || providerStatusQuery.isError)
   const providerErrorMsg =
@@ -937,7 +978,7 @@ export default function SettingsView({
   )
 
   return (
-    <div className="settings">
+    <div ref={settingsBoundaryRef} className="settings">
       <div className="settings__content">
         <h1 className="settings__title">Settings</h1>
 
@@ -1003,6 +1044,12 @@ export default function SettingsView({
                       snapshot={claudeUsageQuery.data}
                       loading={claudeUsageQuery.isPending}
                       failed={claudeUsageQuery.isError}
+                      onRedeemClaudeReset={handleRedeemClaudeReset}
+                      claudeResetRedeeming={claudeResetRedeem.busy}
+                      claudeResetResult={claudeResetRedeem.result}
+                      onToggleExtraUsage={handleClaudeExtraUsage}
+                      extraUsageBusy={claudeExtraUsage.busy}
+                      extraUsageResult={claudeExtraUsage.result}
                     />
                   ) : null}
                   expanded={expandedAuth === 'claude'}
@@ -1083,6 +1130,7 @@ export default function SettingsView({
                     <BackgroundProviderRow
                       key={row.provider}
                       row={row}
+                      providerInfo={modelProviderInfo[row.provider]}
                       index={index}
                       models={modelsForProvider(row.provider)}
                       dragging={backgroundDrag?.fromIndex === index}
@@ -1124,8 +1172,8 @@ export default function SettingsView({
               {manageModelsOpen && (
                 <ManageModelsModal
                   onClose={() => setManageModelsOpen(false)}
-                  providerOrder={PROVIDER_ORDER}
-                  providerInfo={PROVIDER_INFO}
+                  providerOrder={modelProviderOrder}
+                  providerInfo={modelProviderInfo}
                   configuredProviders={configuredProviders}
                 />
               )}
@@ -1194,7 +1242,7 @@ export default function SettingsView({
           )}
         </section>
 
-        <PlatformUpdates active={active} refreshToken={refreshToken} onOpenChat={onOpenChat} />
+        <PlatformUpdates active={active} refreshToken={refreshToken} onOpenChat={onOpenChat} inertBoundaryRef={settingsBoundaryRef} />
 
         <section className="settings__section settings__section--compact">
           <div className="settings__row">

@@ -45,7 +45,6 @@ test('full-screen dialogs share one focus, inerting, and Escape contract', () =>
   const dialogs = [
     read('../../ui/ModelSheet.jsx'),
     read('../ManageModelsModal.jsx'),
-    read('../../SettingsView/UpdateReviewModal.jsx'),
     read('../markdown/ImageLightbox.jsx'),
     read('../AgentContextInspector.jsx'),
     read('../ChatSummaryViewer.jsx'),
@@ -58,10 +57,12 @@ test('full-screen dialogs share one focus, inerting, and Escape contract', () =>
   }
 
   const manageModels = dialogs[1]
-  const updateReview = dialogs[2]
   assert.match(manageModels, /ref=\{keepEditingRef\}/)
+  const updateReview = read('../../SettingsView/UpdateReviewModal.jsx')
   assert.match(updateReview, /const inFlight = applying \|\| rebuilding \|\| resolving/)
   assert.match(updateReview, /closeOnEscape: !inFlight/)
+  assert.match(updateReview, /modal: false, lockScroll: false/)
+  assert.match(updateReview, /aria-modal="false"/)
 })
 
 test('Chat Changes is a modeless panel whose outside press reaches its destination', () => {

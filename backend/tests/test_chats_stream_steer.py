@@ -35,7 +35,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from app import models, questions
+from app import auth as auth_mod, models, questions
 from app.broadcast import create_broadcast, get_broadcast
 from app.chat_writer import cid_of
 from app.database import SessionLocal
@@ -1232,6 +1232,111 @@ def test_api_send_without_cid_can_be_force_steered(
   assert chat.pending_messages in (None, [])
   assert chat.messages[-1]["cid"] == server_cid
   assert chat.messages[-1]["content"] == "use the queued instruction"
+
+
+@pytest.mark.parametrize(
+  ("steer_kind", "queue_actor", "steer_actor", "hidden", "owner_authorized"),
+  [
+    ("force", "owner", "agent", False, False),
+    ("force", "agent", "owner", False, True),
+    ("direct", "owner", "agent", False, False),
+    ("direct", "agent", "owner", False, True),
+    ("direct", "owner", "owner", True, False),
+  ],
+)
+def test_steer_authority_comes_from_current_actor(
+  client, auth, monkeypatch, steer_kind, queue_actor, steer_actor, hidden,
+  owner_authorized,
+):
+  """Steering queued text is the current actor's course correction.
+
+  Stale row provenance must neither let an agent borrow owner authority nor
+  prevent the owner from authorizing an agent-originated row they selected.
+  Hidden rows remain non-owner speech regardless of who steers them.
+  """
+  from app.chat import _ChatEventSink, register_active_sink
+
+  chat_id = (
+    f"{steer_kind}-authority-{queue_actor}-{steer_actor}-{int(hidden)}"
+  )
+  _make_codex_chat(chat_id, steer_enabled=False)
+  db = SessionLocal()
+  try:
+    owner = db.query(models.Owner).one()
+    run_id = f"{chat_id}-agent-run"
+    db.add(models.ChatRun(
+      id=run_id,
+      root_run_id=run_id,
+      chat_id=chat_id,
+      status="running",
+      provider="codex",
+    ))
+    db.commit()
+    agent_token = auth_mod.create_agent_token(
+      chat_id,
+      owner.username,
+      owner.token_epoch,
+      run_id=run_id,
+    )
+  finally:
+    db.close()
+  agent_auth = {"Authorization": f"Bearer {agent_token}"}
+
+  registry.register(_make_active_codex_turn(chat_id))
+  bc = create_broadcast(chat_id)
+  sink = _ChatEventSink(
+    bc,
+    chat_id,
+    run_token=run_id,
+    recall_binding=EMPTY_RECALL_BINDING,
+  )
+  register_active_sink(chat_id, sink)
+  actors = {"owner": auth, "agent": agent_auth}
+
+  queued = client.post(
+    f"/api/chats/{chat_id}/messages",
+    json={
+      "content": "queued direction",
+      "cid": f"{chat_id}-cid",
+      "hidden": hidden,
+    },
+    headers=actors[queue_actor],
+  )
+  assert queued.status_code == 202, queued.text
+  assert queued.json()["status"] == "queued"
+
+  async def _fake_steer(_cid, _message, *_durable):
+    return True
+
+  _patch_codex_steer(monkeypatch, _fake_steer)
+  steer_body = {
+    "content": "queued direction",
+    "hidden": hidden,
+  }
+  if steer_kind == "force":
+    steer_body.update({
+      "force_steer": True,
+      "consume_pending_cids": [f"{chat_id}-cid"],
+    })
+  else:
+    # Simulate the documented cross-process race where the route's preflight
+    # snapshot misses a row that the writer's cid backstop then finds. The
+    # returned durable row may have been authored by a different actor, so
+    # direct steering must still bind authority to this request.
+    from app.routes import chats_stream
+    monkeypatch.setattr(
+      chats_stream, "_duplicate_send_response", lambda *_args: None,
+    )
+    steer_body["cid"] = f"{chat_id}-cid"
+    steer_body["direct_steer"] = True
+  steered = client.post(
+    f"/api/chats/{chat_id}/messages",
+    json=steer_body,
+    headers=actors[steer_actor],
+  )
+  assert steered.status_code == 202, steered.text
+  assert steered.json()["status"] == "steered"
+  assert sink.owner_steer_committed is owner_authorized
 
 
 def test_force_steer_failure_does_not_append_duplicate_queue(

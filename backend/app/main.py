@@ -814,7 +814,7 @@ app.add_middleware(
   ],
   # ETag is not CORS-safelisted. Expose it so getWithVersion() can actually
   # return the version token that the storage route intentionally emits.
-  expose_headers=["ETag"],
+  expose_headers=["ETag", "X-Recovery-Notification-Id"],
 )
 
 

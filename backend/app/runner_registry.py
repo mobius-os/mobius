@@ -176,12 +176,16 @@ class RunnerRegistry:
     self._starting.discard(chat_id)
 
   def recover_generation(self, chat_id: str) -> int:
-    """Clears the deleted flag and bumps to a generation newer than any run.
+    """Converges a recovered chat to one finite post-delete generation.
 
-    Called when a soft-deleted chat is recovered. Bumping the PRESERVED finite
-    counter guarantees the recovered chat's next run_gen exceeds every
-    pre-delete run, so no resurrected stale run can reclaim it.
+    The first call after ``mark_deleted`` bumps the preserved finite counter so
+    no pre-delete run can reclaim the chat. A lost-response retry may call this
+    again after the database transaction committed; that retry must not bump a
+    live successor out of ownership, so an already-recovered registry is a
+    no-op.
     """
+    if chat_id not in self._deleted:
+      return self._generation.get(chat_id, 0)
     self._deleted.discard(chat_id)
     return self.bump_generation(chat_id)
 

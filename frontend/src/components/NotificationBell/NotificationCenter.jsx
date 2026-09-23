@@ -16,7 +16,13 @@ import NotificationBell from './NotificationBell.jsx'
 import useNotificationCenter from './useNotificationCenter.js'
 
 const NotificationCenter = forwardRef(function NotificationCenter(
-  { commands, onOpenTarget, updateAvailable = false, onUpdateNow },
+  {
+    commands,
+    onOpenTarget,
+    onRecoveryAction,
+    updateAvailable = false,
+    onUpdateNow,
+  },
   eventActionsRef,
 ) {
   const queryClient = useQueryClient()
@@ -113,6 +119,7 @@ const NotificationCenter = forwardRef(function NotificationCenter(
           active
           onOpenTarget={openTarget}
           onClearAll={clearAll}
+          onRecoveryAction={onRecoveryAction}
           updateAvailable={updateNoticeActive}
           onUpdateNow={applyUpdate}
           onUpdateLater={deferUpdate}

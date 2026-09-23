@@ -12,11 +12,14 @@ from app import chat as chat_mod, compaction, models
 from app.chat_writer import (
   ReplaceTranscript,
   StartTurn,
+  SwitchProviderWithCompaction,
   alloc_run_token,
   await_ack,
   get_writer,
+  messages_fingerprint,
 )
 from app.config import get_settings
+from test_app_fixtures import create_local_app
 
 
 def _make_chat_with_messages(client, auth, messages):
@@ -114,6 +117,155 @@ def test_incoming_provider_synthesizes_and_switches_atomically(
   assert row.messages[-1]["content"] == body["summary"]
   assert row.messages[0]["content"] == "Build me an app"
   assert chat_mod._latest_compaction_brief(row) == body["summary"]
+
+
+def test_switch_visibility_matches_owner_drawer_contract(
+  client, auth, owner_token, db, monkeypatch,
+):
+  _connect_codex(monkeypatch)
+
+  async def _stub(_messages, **_kwargs):
+    return "Portable owner-visible handoff"
+
+  monkeypatch.setattr(compaction, "summarize_chat", _stub)
+  app_id = create_local_app(client, auth, name="switch-visibility")["id"]
+  token = client.post(
+    "/api/auth/app-token", json={"app_id": app_id}, headers=auth,
+  ).json()["token"]
+  app_auth = {"Authorization": f"Bearer {token}"}
+
+  visible_id = client.post(
+    "/api/app-chats",
+    headers=app_auth,
+    json={
+      "title": "Visible app chat",
+      "provider": "claude",
+      "model": "claude-sonnet-4-6",
+      "owner_visible": True,
+    },
+  ).json()["id"]
+  hidden_id = client.post(
+    "/api/app-chats",
+    headers=app_auth,
+    json={
+      "title": "Hidden app chat",
+      "provider": "claude",
+      "model": "claude-sonnet-4-6",
+    },
+  ).json()["id"]
+  empty_hidden_id = client.post(
+    "/api/app-chats",
+    headers=app_auth,
+    json={
+      "title": "Empty hidden app chat",
+      "provider": "claude",
+      "model": "claude-sonnet-4-6",
+    },
+  ).json()["id"]
+  hidden_owner_id = _make_chat_with_messages(client, auth, [
+    {"role": "user", "content": "delegated work"},
+  ])
+  for chat_id in (visible_id, hidden_id):
+    row = db.get(models.Chat, chat_id)
+    row.messages = [{"role": "user", "content": "Preserve this context"}]
+  delegated = db.get(models.Chat, hidden_owner_id)
+  delegated.agent_settings_json = {
+    **(delegated.agent_settings_json or {}),
+    "drawer_hidden": True,
+  }
+  db.commit()
+
+  assert client.get(
+    f"/api/chats/{visible_id}", headers=auth,
+  ).json()["provider_switch_locked"] is False
+  assert client.get(
+    f"/api/chats/{hidden_id}", headers=auth,
+  ).json()["provider_switch_locked"] is True
+  assert client.get(
+    f"/api/chats/{hidden_owner_id}", headers=auth,
+  ).json()["provider_switch_locked"] is True
+
+  switched = client.post(
+    f"/api/chats/{visible_id}/provider-switch",
+    headers=auth,
+    json=_payload(switch_id="visible-app-switch"),
+  )
+  assert switched.status_code == 200, switched.text
+  for locked_id in (hidden_id, hidden_owner_id):
+    blocked = client.post(
+      f"/api/chats/{locked_id}/provider-switch",
+      headers=auth,
+      json=_payload(switch_id=f"blocked-{locked_id}"),
+    )
+    assert blocked.status_code == 409, blocked.text
+    assert "background" in blocked.json()["detail"]
+
+  # Empty hidden chats must not bypass the owner-facing visibility contract.
+  # The creating app's setup endpoint remains a separate pre-turn capability.
+  before = db.get(models.Chat, empty_hidden_id)
+  before_provider = before.provider
+  before_settings = dict(before.agent_settings_json or {})
+  direct = client.patch(
+    f"/api/chats/{empty_hidden_id}",
+    headers=auth,
+    json={
+      "provider": "codex",
+      "agent_settings_json": {"model": "gpt-5.5", "effort": "high"},
+    },
+  )
+  assert direct.status_code == 409, direct.text
+  implied = client.patch(
+    f"/api/chats/{empty_hidden_id}",
+    headers=auth,
+    json={"agent_settings_json": {"model": "gpt-5.5"}},
+  )
+  assert implied.status_code == 409, implied.text
+  db.expire_all()
+  unchanged = db.get(models.Chat, empty_hidden_id)
+  assert unchanged.provider == before_provider
+  assert unchanged.agent_settings_json == before_settings
+
+  app_patch = client.patch(
+    f"/api/app-chats/{empty_hidden_id}",
+    headers=app_auth,
+    json={"provider": "codex", "model": "gpt-5.5"},
+  )
+  assert app_patch.status_code == 200, app_patch.text
+  db.expire_all()
+  configured = db.get(models.Chat, empty_hidden_id)
+  assert configured.provider == "codex"
+  assert configured.agent_settings_json["model"] == "gpt-5.5"
+
+
+def test_provider_switch_writer_rechecks_hidden_pin_at_commit(chat, db):
+  """A visibility flip during synthesis cannot commit a provider handoff."""
+  chat.provider = "claude"
+  chat.messages = [{"role": "user", "content": "Keep this context", "ts": 1}]
+  chat.agent_settings_json = {
+    "model": "claude-sonnet-4-6",
+    "drawer_hidden": True,
+  }
+  db.commit()
+  source_messages = list(chat.messages)
+
+  result = get_writer().submit(SwitchProviderWithCompaction(
+    chat_id=chat.id,
+    switch_id="hidden-at-commit",
+    expected_provider="claude",
+    provider="codex",
+    settings_patch={"model": "gpt-5.5", "effort": "high"},
+    summary="Incoming handoff",
+    source_messages_hash=messages_fingerprint(source_messages),
+    source_summary_hash=None,
+    data_dir="/tmp",
+    request_fingerprint="pinned",
+  )).result(timeout=5)
+
+  assert result == {"status": "conflict", "reason": "provider_pinned"}
+  db.expire_all()
+  unchanged = db.get(models.Chat, chat.id)
+  assert unchanged.provider == "claude"
+  assert unchanged.messages == source_messages
 
 
 def test_legacy_bodyless_compact_then_patch_remains_compatible(

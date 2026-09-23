@@ -170,6 +170,36 @@ def test_waiting_predecessor_migrates_but_owner_edits_remain(
   assert live.read_text(encoding="utf-8") == "owner-authored waiting policy"
 
 
+def test_goal_completion_guidance_upgrades_without_overwriting_customizations(
+  tmp_path, monkeypatch,
+):
+  module = _load("init_skills")
+  seed = tmp_path / "seed"
+  skills = tmp_path / "skills"
+  seed.mkdir()
+  skills.mkdir()
+  current = (SCRIPTS / "seed-skills" / "goal-planning.md").read_bytes()
+  predecessor = (
+    Path(__file__).parent / "fixtures" / "goal-planning-pre-single-completion.md"
+  ).read_bytes()
+  assert hashlib.sha256(predecessor).hexdigest() in module._UNMODIFIED_MIGRATIONS["goal-planning.md"]
+  (seed / "goal-planning.md").write_bytes(current)
+  live = skills / "goal-planning.md"
+  live.write_bytes(predecessor)
+  monkeypatch.setattr(module, "_SEED_CANDIDATES", [seed])
+  monkeypatch.setattr(module, "SKILLS", skills)
+  monkeypatch.setattr(module, "_chown_mobius", lambda _path: None)
+  monkeypatch.setattr(module, "_write_index", lambda: None)
+
+  module.init()
+  assert live.read_bytes() == current
+
+  customized = predecessor + b"\nOwner preference: verify the published artifact.\n"
+  live.write_bytes(customized)
+  module.init()
+  assert live.read_bytes() == customized
+
+
 def test_controlled_skills_have_fix_forward_migrations():
   module = _load("init_skills")
 
@@ -181,8 +211,10 @@ def test_controlled_skills_have_fix_forward_migrations():
     "bcc617354747c49ddad7fa1f419cf921fd7280909358096323cdbc427ad063c3",
     "b591d15e335c72c0acf394ca7ce4b0daa633e124a487df7a713847cafc13ab6d",
     "668bd365e2edf694c921606c9619fff7b8e58806a9eb48745058b22731c44995",
+    "25ccc8dd5ca6a97b4e6016853487967b70aad9119ec38b6a860ee69eb2a885e3",
   }
   assert module._UNMODIFIED_MIGRATIONS["goal-planning.md"] == {
+    "404552d57930a811eae26232c5fb6b1d9bd781abb941c194fea6990920f838c0",
     "2adb39457e0ec2ee9d9a3596cb96e5a6240bae23d725e6459ba0f6e77d5474c4",
     "a3edc5fcc453a5305102e144c2d58ae16b828612ac93a6a7442be7e267779f59",
     "bca228c745881bfffdad5d7adaab3c62871e6f62801252784fb0522787cfb850",
@@ -236,6 +268,7 @@ def test_controlled_skills_have_fix_forward_migrations():
     "309e5969df6f589cc82c17b450e7596a00bae87ef77ab2923a9b0de061ed146e",
     "6fa9c177db508ef05dfc73de224cd3f33350c79d8f807ac9909942d761f21103",
     "db0c1138ffd0890936ccdeba6ced4ccde867ba3044eeef0a5c87cdf2f279eaaa",
+    "8826cd584ee5fac754d92572e15883293ebbc59d47c83510e72d56d271ed3869",
   }
   assert module._UNMODIFIED_MIGRATIONS["building-apps.md"] == {
     "734a5fd00dcd58e53f6713a2663d0dd18dec92abcbcf767c7f02f894d92ee510",

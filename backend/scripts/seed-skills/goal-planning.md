@@ -13,8 +13,8 @@ record after interruption instead of replacing unfinished scope.
    isolation avoids repeated input. Parallelism itself is not the saving.
 3. Serialize dependencies, shared writes, plan revisions, and final integration.
 4. Add discoveries beneath their owner; preserve unfinished siblings.
-5. Work in-run, verify upward, checkpoint before a handoff, then run
-   `goal_plan.py check-complete` and complete explicitly.
+5. Work in-run; checkpoint before a handoff. After verifying the outcome, run
+   `goal_plan.py complete --result 'Verified evidence'`.
 
 ## Route and promote
 
@@ -44,6 +44,7 @@ Tasks are `id|title|dependencies`. Work deepest leaves. Children inherit ancesto
 dependencies and make a parent **Ready to verify**, not complete. Verify upward;
 cancelled prerequisites are settled. Plans may change; outcomes may not.
 
+`show` includes Goal status and the plan; settled tasks do not close the Goal.
 Before replacing a plan, `show` it and preserve results. Use `goal_plan.py list`,
 `show --goal-id ID`, and `goal_plan.py resume ID` for retained obligations.
 Resume attaches an ordinary attempt; it cannot reopen closed work.
@@ -75,10 +76,10 @@ python3 /data/platform/backend/scripts/goal_plan.py checkpoint \
 After verifying the original outcome:
 
 ```bash
-python3 /data/platform/backend/scripts/goal_plan.py check-complete
 python3 /data/platform/backend/scripts/goal_plan.py complete --result 'Verified evidence'
 ```
 
-Preflight rejects unfinished work. A green plan or ended attempt does not
-complete a Goal; a crash leaves it open. After owner Stop, summarize and run
-`goal_plan.py stop` last.
+`complete` validates and records completion; no separate preflight is required.
+`goal_plan.py check-complete` is an optional read-only task diagnostic, not
+completion. A green plan or ended attempt leaves the Goal open. After owner
+Stop, summarize and run `goal_plan.py stop` last.

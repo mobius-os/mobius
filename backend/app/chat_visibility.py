@@ -36,3 +36,15 @@ def visible_in_owner_drawer(chat: models.Chat) -> bool:
   if chat.created_by_app_id is None:
     return True
   return settings.get("owner_visible") is True
+
+
+def provider_switch_allowed(chat: models.Chat) -> bool:
+  """Whether the owner-facing provider picker may move this chat.
+
+  Hidden chats are autonomous execution records (app work, delegations, or
+  background follow-ups) whose provider is fixed when the record is created.
+  A chat becomes switchable only while the same durable visibility policy puts
+  it in the owner's drawer. Keeping this predicate beside drawer visibility
+  gives every route and the writer's final commit gate one answer.
+  """
+  return visible_in_owner_drawer(chat)

@@ -1,5 +1,15 @@
 import { isDistinctiveActivityTool } from './toolActivityLabel.js'
 
+// One boundary rule for transcript-level agent activity. Helper completions are
+// incoming agent activity just like peer messages are outgoing agent activity;
+// neither should split thinking/tools into repeated top-level disclosures.
+export function isActivityRunEntry(entry) {
+  const item = entry?.item
+  return item?.type === 'thinking'
+    || item?.type === 'helper_result'
+    || (item?.type === 'tool' && !isDistinctiveActivityTool(item))
+}
+
 // Fold adjacent thinking/tool entries into the exact activity stretches shared
 // by rendering and cold-transcript preparation. Distinctive tools stand alone;
 // prose and other entries preserve their original interleave positions.
@@ -24,7 +34,7 @@ export function groupActivityRuns(entries) {
     if (isDistinctiveActivityTool(entry?.item)) {
       flush()
       nodes.push({ group: [entry] })
-    } else if (type === 'tool' || type === 'thinking') {
+    } else if (isActivityRunEntry(entry)) {
       run.push(entry)
     } else {
       flush()

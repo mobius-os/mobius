@@ -3693,6 +3693,13 @@ def test_conflict_resolver_requires_policy_before_materializing_merge(
     "app.routes.apps._start_conflict_resolver_turn",
     fake_start_turn,
   )
+  monkeypatch.setattr(
+    "app.background_agents.resolve_background_chat_choice",
+    lambda data_dir, db: {
+      "provider": "codex",
+      "agent_settings": {"model": "gpt-5.5", "effort": "xhigh"},
+    },
+  )
   missing_policy = client.post(
     f"/api/apps/{app_id}/conflict-resolver-chat",
     headers=auth,
@@ -3709,6 +3716,15 @@ def test_conflict_resolver_requires_policy_before_materializing_merge(
   assert payload["chat_id"]
   assert payload["created"] is True
   assert payload["started"] is True
+  from app.database import SessionLocal
+  db = SessionLocal()
+  try:
+    resolver = db.get(models.Chat, payload["chat_id"])
+    assert resolver.provider == "codex"
+    assert resolver.agent_settings_json["model"] == "gpt-5.5"
+    assert resolver.agent_settings_json["effort"] == "xhigh"
+  finally:
+    db.close()
 
   materialized = jsx_file.read_text()
   assert "<<<<<<<" in materialized and ">>>>>>>" in materialized

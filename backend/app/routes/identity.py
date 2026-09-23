@@ -27,6 +27,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app import models
+from app.broadcast import get_system_broadcast
 from app.config import get_settings
 from app.database import get_db
 from app.deps import (
@@ -76,6 +77,10 @@ class ProfilePatch(BaseModel):
   handle: str
 
 
+class MobiusModelsPatch(BaseModel):
+  enabled: bool
+
+
 class LinkStart(BaseModel):
   provider: str
 
@@ -98,6 +103,10 @@ class RailwayCreate(BaseModel):
 class RailwayCompute(BaseModel):
   cpu: int | None = None
   memory_mb: int | None = None
+
+
+class RailwayName(BaseModel):
+  name: str
 
 
 class RailwayStorage(BaseModel):
@@ -713,6 +722,32 @@ async def read_agent_access(
   return {"agent_access": "available", **remote}
 
 
+@router.get("/agent/models-enabled")
+def read_mobius_models_enabled(
+  _: models.Owner = Depends(get_owner_or_app_with_identity_manage),
+) -> dict[str, bool]:
+  from app.providers import mobius_models_enabled
+  return {"enabled": mobius_models_enabled(get_settings().data_dir)}
+
+
+@router.patch(
+  "/agent/models-enabled",
+  dependencies=[Depends(require_nondelegated_owner_or_app_control)],
+)
+def set_mobius_models_enabled(
+  body: MobiusModelsPatch,
+  _: models.Owner = Depends(get_owner_or_app_with_identity_manage),
+) -> dict[str, bool]:
+  from app.providers import update_agent_settings
+  data_dir = get_settings().data_dir
+  if not update_agent_settings(
+    data_dir, lambda current: {**current, "mobius_models_enabled": body.enabled},
+  ):
+    raise HTTPException(500, "Could not save Möbius model preference.")
+  get_system_broadcast().publish({"type": "model_providers_changed"})
+  return {"enabled": body.enabled}
+
+
 @router.post(
   "/agent/trial",
   dependencies=[Depends(require_nondelegated_owner_or_app_control)],
@@ -1200,6 +1235,28 @@ async def read_railway_metrics(
     await _railway_proxy(
       db, owner.id, "GET", f"/instances/{_railway_instance_id(instance_id)}/metrics"
     )
+  )
+
+
+@router.patch(
+  "/railway/deployments/{instance_id}",
+  dependencies=[Depends(require_nondelegated_owner_or_app_control)],
+)
+async def rename_railway_deployment(
+  instance_id: str,
+  body: RailwayName,
+  owner: models.Owner = Depends(get_owner_or_app_with_railway_manage),
+  db: Session = Depends(get_db),
+):
+  name = body.name.strip()
+  if not 1 <= len(name) <= 80:
+    raise HTTPException(422, "Choose a deployment name between 1 and 80 characters.")
+  return await _railway_mutation(
+    db,
+    owner.id,
+    "PATCH",
+    f"/instances/{_railway_instance_id(instance_id)}",
+    json={"name": name},
   )
 
 

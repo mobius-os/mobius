@@ -638,10 +638,30 @@ def require_quiet_answer_handoff(db: Session, chat, question_id: str) -> None:
   """Closing a card cannot remove the sole next owner of unfinished work.
 
   This checks the card's exact Goal, not the currently presented Goal or an
-  unrelated follow-up. It neither changes the plan nor creates a continuation.
+  unrelated follow-up. It also keeps a typed approval from silently abandoning
+  the exact active work claim it admitted. It neither changes the plan nor
+  creates a continuation.
   """
-  from app.questions import AnswerConflict, saved_question_owner_run_id
+  from app.questions import (
+    AnswerConflict, saved_question, saved_question_owner_run_id,
+  )
   from app.run_state import goal_identity_for_run_start, _recoverable_result_goal
+
+  card = saved_question(chat, question_id)
+  action_key = card.get("action_key") if isinstance(card, dict) else None
+  if isinstance(action_key, str) and action_key:
+    active_claim = db.query(models.AgentWorkClaim).filter(
+      models.AgentWorkClaim.work_key == action_key,
+      models.AgentWorkClaim.owner_chat_id == chat.id,
+      models.AgentWorkClaim.completed_at.is_(None),
+      models.AgentWorkClaim.released_at.is_(None),
+    ).first()
+    if active_claim is not None:
+      raise AnswerConflict(
+        "This question still owns an active work claim. "
+        "Choose a reply option so the agent can release or complete the "
+        "claim before closing it without a reply."
+      )
 
   owner_id = saved_question_owner_run_id(chat, question_id)
   owner = db.get(models.ChatRun, owner_id) if owner_id else None

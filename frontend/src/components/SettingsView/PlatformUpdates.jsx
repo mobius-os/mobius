@@ -11,7 +11,7 @@ import UpdateRepairAction from './UpdateRepairAction.jsx'
 import { platformUpdateRepairReason } from '../../lib/platformUpdateRepair.js'
 import './PlatformUpdates.css'
 
-export default function PlatformUpdates({ active, refreshToken, onOpenChat }) {
+export default function PlatformUpdates({ active, refreshToken, onOpenChat, inertBoundaryRef }) {
   const update = usePlatformUpdates({ active, refreshToken, onOpenChat })
   const { platform, cachedPlatform, rebuild, version, phase, busy } = update
   const [review, setReview] = useState(null)
@@ -128,6 +128,7 @@ export default function PlatformUpdates({ active, refreshToken, onOpenChat }) {
       {!review && !repairReason && update.error && <Alert color="danger" variant="soft" description={update.error} />}
       {review && (
         <UpdateReviewModal intent={review} platform={platform} rebuild={rebuild} onClose={closeReview}
+          restoreFocusRef={actionRef} inertBoundaryRef={inertBoundaryRef}
           onApply={plan => update.execute(plan, 'apply')}
           onRebuild={plan => update.execute(plan, 'rebuild')}
           onResolve={update.resolve} applying={phase === 'applying'} rebuilding={phase === 'rebuilding'}

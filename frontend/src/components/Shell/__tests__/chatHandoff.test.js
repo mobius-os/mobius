@@ -40,8 +40,33 @@ test('chat display readiness admits only coordinate-complete cached transcripts'
     'the reveal deadline admits only caller-validated or authoritative transcript frames')
   assert.match(
     chatView,
-    /const transcriptPaintable = \([\s\S]*initialEntryPhase === 'cached'[\s\S]*initialEntryPhase === 'stream-catchup'[\s\S]*initialEntryPhase === 'ready'[\s\S]*\) && revealed[\s\S]*const displayReady = activationSettled[\s\S]*&& !loading[\s\S]*&& \(transcriptPaintable \|\| showEmpty \|\| showLoadError\)/,
-    'a coordinate-complete frame, including a running one, publishes only after runtime confirmation',
+    /const transcriptPaintable = \([\s\S]*const displayReady = \([\s\S]*activationSettled[\s\S]*coldActivation[\s\S]*activationPhase === 'error'/,
+    'a coordinate-complete frame, including a running one, publishes only after runtime confirmation; only the composer may reveal early',
+  )
+  assert.match(
+    chatView,
+    /const \[activationState, setActivationState\] = useState\(\(\) => \(\{[\s\S]*phase: provisionalNewChat \? 'ready' : 'pending',[\s\S]*const activationPhase = activationState.chatId === activationIdentity[\s\S]*const activationSettled = provisionalNewChat \|\| activationPhase === 'ready'/,
+    'runtime settlement must be bound to the exact retained ChatView identity',
+  )
+  assert.match(
+    chatView,
+    /setChatInfo\(detailCache\.chatInfo\)[\s\S]*if \(activationCacheEntryState === 'missing' && !activationAnchorKey\)[\s\S]*setActivationPhase\('cold'\)/,
+    'early composer reveal waits for authoritative detail and requires no saved/search coordinate',
+  )
+  assert.match(
+    chatView,
+    /const doSend = useCallback[\s\S]*if \(!activationSettledRef\.current\) return false[\s\S]*submissionBlocked=\{[\s\S]*!activationSettled/,
+    'every visible and programmatic send remains blocked until this chat activation settles',
+  )
+  assert.match(
+    chatView,
+    /chatReady=\{activationSettled && !provisionalNewChat\}/,
+    'row-backed composer controls stay unavailable until this exact activation settles',
+  )
+  assert.match(
+    chatView,
+    /const activationCache = queryClient\.getQueryData\(queryKey\)[\s\S]*setChatInfo\(activationCache\?\.chatInfo \?\? null\)/,
+    'a retained view must drop the previous chat policy before any cold error can paint',
   )
   assert.match(chatView, /useLayoutEffect\(\(\) => \{[\s\S]*onDisplayReady\?\.\(chatId\)/,
     'ChatView must report layout readiness before its transcript can be promoted')
@@ -78,7 +103,7 @@ test('activation presents a confirmed running transcript while stream catch-up r
   )?.[0] || ''
   assert.match(
     initialLoad,
-    /cacheCoversSavedAnchor && typeof activationCache\?\.updated_at[\s\S]*\/runtime`[\s\S]*const latestCache = queryClient\.getQueryData\(queryKey\)[\s\S]*chatSnapshotMatchesRuntime\(latestCache, runtime\)[\s\S]*detailCache = latestCache[\s\S]*reused = true/,
+    /activationCacheReusable && typeof activationCache\?\.updated_at[\s\S]*\/runtime`[\s\S]*const latestCache = queryClient\.getQueryData\(queryKey\)[\s\S]*chatSnapshotMatchesRuntime\(latestCache, runtime\)[\s\S]*detailCache = latestCache[\s\S]*reused = true/,
     'an unchanged row version reuses the newest complete cache, never its captured predecessor',
   )
   assert.match(
@@ -127,7 +152,7 @@ test('activation presents a confirmed running transcript while stream catch-up r
     /runtime\.requested_anchor_found === false[\s\S]*if \(runtimeAnchorMatch\)[\s\S]*CHAT_READING_ANCHOR_NOT_FOUND[\s\S]*retireSavedReadingPosition\(chatId\)[\s\S]*anchorRetired = true/,
     'only an authoritative absent row retires the saved coordinate')
   assert.match(initialLoad,
-    /if \(activationCache && cacheCoversSavedAnchor && !anchorRetired\) \{[\s\S]*applyMessagesToView\(refreshed\.messages, refreshed\.offset\)[\s\S]*settleRuntime\(runtime, refreshed\.messages\)[\s\S]*return[\s\S]*const renderFrames = coldTranscriptRenderFrames/,
+    /if \(activationCacheReusable && cacheCoversSavedAnchor && !anchorRetired\) \{[\s\S]*applyMessagesToView\(refreshed\.messages, refreshed\.offset\)[\s\S]*settleRuntime\(runtime, refreshed\.messages\)[\s\S]*return[\s\S]*const renderFrames = coldTranscriptRenderFrames/,
     'a warm version mismatch must settle atomically before the cold prefix scheduler')
   assert.match(chatView,
     /cacheIsSafeFallback[\s\S]*CHAT_READING_ANCHOR_NOT_FOUND[\s\S]*applyMessagesToView\(\[\], 0\)[\s\S]*setLoadError\(!cacheIsSafeFallback\)/,
@@ -145,7 +170,7 @@ test('activation presents a confirmed running transcript while stream catch-up r
   )
   assert.match(
     chatView,
-    /const \[activationSettled, setActivationSettled\] = useState\(provisionalNewChat\)[\s\S]*if \(hidden \|\| provisionalNewChat\) return[\s\S]*setActivationSettled\(false\)[\s\S]*const settleRuntime[\s\S]*setActivationSettled\(true\)[\s\S]*const displayReady = activationSettled/,
+    /const \[activationState, setActivationState\][\s\S]*if \(hidden \|\| provisionalNewChat\) return[\s\S]*setActivationPhase\('pending'\)[\s\S]*const settleRuntime[\s\S]*setActivationPhase\('ready'\)[\s\S]*const displayReady = \(\s*activationSettled/,
     'a provisional empty chat is ready immediately while persisted chats still wait for runtime truth',
   )
   assert.match(
@@ -182,7 +207,7 @@ test('a staging chat cannot leave the outgoing transcript held on a wedged reque
 test('a fresh empty chat settles before interruptible transcript work', () => {
   const emptySettlement = chatView.indexOf('if (refreshed.messages.length === 0)')
   const warmTransition = chatView.indexOf(
-    'if (activationCache && cacheCoversSavedAnchor && !anchorRetired)',
+    'if (activationCacheReusable && cacheCoversSavedAnchor && !anchorRetired)',
     emptySettlement,
   )
 
@@ -434,4 +459,40 @@ test('chat selection swaps atomically without flashing or animating text layers'
   assert.match(drawerCss,
     /@media \(prefers-reduced-motion: reduce\)[\s\S]*?\.drawer__item \{\s*transition:\s*none;/,
     'the drawer background wash should disappear under reduced motion')
+})
+
+test('cold activation keeps one composer visible but refuses sends until runtime truth', () => {
+  assert.doesNotMatch(chatView, /earlyReveal(?:Ready|ChatId)/,
+    'the composer must not have a second early-reveal readiness owner')
+  assert.match(chatView,
+    /const activationPhase = activationState\.chatId === activationIdentity[\s\S]*: 'pending'[\s\S]*const coldActivation = activationPhase === 'cold'/,
+    'a retained destination remains pending until its own detail read, then has an explicit cold phase')
+  assert.match(chatView,
+    /setActivationPhase\('cold'\)/,
+    'authoritative detail may expose the single composer early')
+  assert.match(chatView, /setActivationPhase\('ready'\)/,
+    'only runtime settlement enables the composer')
+  assert.match(chatView,
+    /setActivationPhase\('error'\)[\s\S]*Chat activation needs a retry before sending\./,
+    'a failed activation stays visibly non-sendable instead of treating cached history as runtime proof')
+  assert.match(chatView,
+    /notice=\{[\s\S]*coldActivation[\s\S]*Preparing this chat…[\s\S]*: null/,
+    'the disabled Send affordance explains the cold activation')
+  assert.match(chatView,
+    /const retryActivation = useCallback\([\s\S]*setActivationPhase\('pending'\)[\s\S]*setLoadError\(false\)[\s\S]*setLoading\(true\)[\s\S]*setLoadNonce\(nonce => nonce \+ 1\)/,
+    'the activation owner retries in place without replacing the cached history or draft')
+  assert.equal(
+    (chatView.match(/onClick=\{retryActivation\}/g) || []).length,
+    2,
+    'cached and uncached activation failures share one retry transition',
+  )
+  assert.match(chatView,
+    /showActivationRetry = activationPhase === 'error' && !loadError[\s\S]*chat__activation-retry[\s\S]*role="alert"[\s\S]*onClick=\{retryActivation\}/,
+    'a safe cached fallback exposes and announces its own retry action instead of relying on ConnectionStatus')
+  assert.match(chatView,
+    /const activationCacheReusable = \(\s*activationCacheEntryState === 'paintable'[\s\S]*activationCacheEntryState === 'stream-catchup'/,
+    'only a classifier-approved complete cache may enter runtime reuse or fallback')
+  assert.match(chatView,
+    /cacheIsSafeFallback = activationCacheReusable[\s\S]*err\?\.message !== 'CHAT_NOT_FOUND'/,
+    'an explicit missing resource dominates stale cache history and remains non-sendable')
 })

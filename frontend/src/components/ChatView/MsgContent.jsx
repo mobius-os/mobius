@@ -1,9 +1,18 @@
 import { memo } from 'react'
 import { usePositionedPeerNotes } from './peerTimelineContext.js'
-import { insertPositionedActivity } from './activityPosition.js'
+import {
+  insertPositionedActivity,
+  mergeAdjacentCompactActivityEntries,
+  mergeAdjacentPeerActivityEntries,
+  mergePositionedActivityEntries,
+} from './activityPosition.js'
 import { ProgressiveMarkdown, StandardMarkdown } from './markdown/BlockRenderer.jsx'
 import ActivityStretch from './ActivityStretch.jsx'
-import { groupActivityRuns, coalesceThinkingEntries } from './groupBlocks.js'
+import {
+  activitySummaryTools,
+  groupActivityRuns,
+  coalesceThinkingEntries,
+} from './groupBlocks.js'
 import QuestionCard from './QuestionCard.jsx'
 import { isDurableRestartOffer } from './restartCard.js'
 import SecureInputCard from './SecureInputCard.jsx'
@@ -222,7 +231,17 @@ function MsgContentInner({
     // renders. Fragmented thinking exists only in legacy saved chats, which are
     // never a live surface, so coalescing after renumbering cannot reintroduce
     // a cross-surface position mismatch. See groupBlocks.coalesceThinkingEntries.
-    const finalEntries = coalesceThinkingEntries(insertPositionedActivity(entries, positionedNotes, activitySourceBlocks || displayBlocks, chatId))
+    const positionedEntries = insertPositionedActivity(
+      entries,
+      positionedNotes,
+      activitySourceBlocks || displayBlocks,
+      chatId,
+    )
+    const finalEntries = mergeAdjacentCompactActivityEntries(
+      coalesceThinkingEntries(
+        mergeAdjacentPeerActivityEntries(positionedEntries),
+      ),
+    )
     // The rendered tail's entry idx — the anchor for "is this block the tail"
     // checks below. msg.blocks.length would be wrong here: a skipped twin means
     // the last VISIBLE block's idx is smaller than the raw block count.
@@ -257,13 +276,19 @@ function MsgContentInner({
         // call inside that block too; the Restart card is its complete visible
         // replacement, while unrelated commands remain inspectable.
         const ownsLegacyRestart = restartActivityOwners.has(block)
-        const visibleEntries = restartCardActivityEntries(
+          || block.activity_sources?.some(source => restartActivityOwners.has(source))
+        const baseEntries = restartCardActivityEntries(
           block.entries, ownsLegacyRestart,
+        )
+        const positionedEntries = Array.isArray(block.positioned_entries)
+          ? block.positioned_entries : []
+        const visibleEntries = mergePositionedActivityEntries(
+          baseEntries, positionedEntries,
         )
         if (visibleEntries.length === 0) return null
         const omittedToolCount = (
-          block.entries.filter(({ item }) => item?.type === 'tool').length
-          - visibleEntries.filter(({ item }) => item?.type === 'tool').length
+          activitySummaryTools(block.entries).length
+          - activitySummaryTools(baseEntries).length
         )
         const hiddenLegacyRestartCount = ownsLegacyRestart ? 1 : 0
         const summaryToolCount = Number.isFinite(block.tool_count)
@@ -274,7 +299,9 @@ function MsgContentInner({
                 hiddenLegacyRestartCount,
               ),
             )
-          : visibleEntries.filter(({ item }) => item?.type === 'tool').length
+          : activitySummaryTools(baseEntries).length
+        const visibleToolCount = summaryToolCount
+          + activitySummaryTools(positionedEntries).length
         return (
           <div
             key={block.activity_id || `activity-${i}`}
@@ -285,15 +312,18 @@ function MsgContentInner({
               chatId={chatId}
               live={false}
               surfaceKey={messageKey}
-              detailRef={{
+              detailRef={block.detail_segments ? null : {
                 message_index: block.message_index,
                 start: block.start,
                 end: block.end,
               }}
+              detailSegments={block.detail_segments}
+              positionedEntries={positionedEntries}
               // Current projections already omit redundant card tools. For an
               // older cached projection, subtract only the entries repaired
               // locally while preserving counts for repeated compacted tools.
-              summaryToolCount={summaryToolCount}
+              summaryToolCount={visibleToolCount}
+              suppressLatestRestart={ownsLegacyRestart}
               onInternalNav={onInternalNav}
             />
           </div>
