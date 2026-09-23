@@ -113,6 +113,55 @@ class AnswerConflict(ValueError):
   """A saved answer needs an owner-visible correction, not an automatic retry."""
 
 
+def validate_saved_answer(
+  card: dict, answers: dict, selections: dict | None,
+) -> None:
+  """Bind submitted answer and option identities to one exact saved card."""
+  specs: dict[str, dict] = {}
+  aliases: dict[str, str] = {}
+  for question in card.get("questions", []):
+    key = question.get("id")
+    prompt = question.get("question")
+    if not isinstance(key, str) or not key or not isinstance(prompt, str) or not prompt:
+      raise AnswerConflict("The answer does not match this question card.")
+    if key in specs:
+      raise AnswerConflict("The question card has ambiguous fields.")
+    specs[key] = question
+    for alias in {key, prompt}:
+      if alias in aliases and aliases[alias] != key:
+        raise AnswerConflict("The question card has ambiguous fields.")
+      aliases[alias] = key
+  if not specs or not answers:
+    raise AnswerConflict("The answer does not match this question card.")
+  matched: dict[str, object] = {}
+  for answer_key, answer in answers.items():
+    key = aliases.get(answer_key)
+    if key is None or key in matched:
+      raise AnswerConflict("The answer does not match this question card.")
+    matched[key] = answer
+  if set(matched) != set(specs):
+    raise AnswerConflict("The answer does not match this question card.")
+  if not selections:
+    return
+  if not set(selections).issubset(specs):
+    raise AnswerConflict("The selected options do not belong to this question.")
+  for key, selected in selections.items():
+    spec = specs[key]
+    option_list = spec.get("options", [])
+    option_ids = [option.get("id") for option in option_list]
+    if (any(not isinstance(identity, str) or not identity for identity in option_ids)
+        or any(not isinstance(option.get("label"), str) for option in option_list)
+        or len(set(option_ids)) != len(option_ids)):
+      raise AnswerConflict("The question card has ambiguous options.")
+    options = dict(zip(option_ids, option_list, strict=True))
+    if (not selected or len(set(selected)) != len(selected)
+        or any(identity not in options for identity in selected)):
+      raise AnswerConflict("The selected option is no longer available.")
+    expected = ", ".join(options[identity]["label"] for identity in selected)
+    if matched[key] != expected:
+      raise AnswerConflict("Your answer does not match the selected options.")
+
+
 def closes_without_reply(card: dict, answers: dict, selections: dict | None) -> bool:
   """Resolve explicit selections against immutable card options, not prose.
 
@@ -121,21 +170,13 @@ def closes_without_reply(card: dict, answers: dict, selections: dict | None) -> 
   """
   if card.get("response_mode") != "continuation" or not selections:
     return False
+  validate_saved_answer(card, answers, selections)
   specs = {question["id"]: question for question in card.get("questions", [])}
-  if not set(selections).issubset(specs):
-    raise AnswerConflict("The selected options do not belong to this question.")
   quiet = set(selections) == set(specs)
   for key, selected in selections.items():
     spec = specs[key]
     options = {option.get("id"): option for option in spec.get("options", [])}
-    if (not selected or len(set(selected)) != len(selected)
-        or any(identity not in options for identity in selected)):
-      raise AnswerConflict("The selected option is no longer available.")
-    if answers.get(spec["question"]) != ", ".join(options[identity]["label"] for identity in selected):
-      raise AnswerConflict("Your answer does not match the selected options.")
     quiet = quiet and all(options[identity].get("on_answer") == "close" for identity in selected)
-  if quiet and set(answers) != {spec["question"] for spec in specs.values()}:
-    raise AnswerConflict("The answer does not match this question card.")
   return quiet
 
 

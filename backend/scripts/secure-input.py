@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import sys
 import urllib.error
+from urllib.parse import quote
 import urllib.request
 
 
@@ -54,6 +55,55 @@ def _field(value: str) -> dict:
   if input_type not in {"text", "password"}:
     raise argparse.ArgumentTypeError("field type must be text or password")
   return {"name": name, "type": input_type, "label": label}
+
+
+def _named_source(value: str) -> tuple[str, str]:
+  name, separator, source = value.partition("=")
+  if not separator or not name or not source:
+    raise argparse.ArgumentTypeError("Expected FIELD=SOURCE")
+  return name, source
+
+
+def _submit_saved(args) -> int:
+  """Submit an existing authorized local value without model-visible bytes."""
+  base = os.environ.get("API_BASE_URL", "").rstrip("/")
+  token = os.environ.get("AGENT_TOKEN", "")
+  if not base or not token:
+    print("Secure input submission is unavailable in this agent turn.")
+    return 2
+  values: dict[str, str] = {}
+  try:
+    for name, source in args.field_file:
+      if name in values:
+        raise ValueError("Duplicate field name")
+      value = Path(source).read_text(encoding="utf-8")
+      # Conventional secret files commonly end in one line terminator. Remove
+      # exactly that terminator without broadly stripping meaningful spaces or
+      # additional newlines from the credential.
+      if value.endswith("\r\n"):
+        value = value[:-2]
+      elif value.endswith("\n"):
+        value = value[:-1]
+      values[name] = value
+    for name, source in args.field_env:
+      if name in values or source not in os.environ:
+        raise ValueError("Duplicate field or missing source")
+      values[name] = os.environ[source]
+    status, result = _post(
+      f"{base}/api/secure-inputs/{quote(args.chat_id, safe='')}/"
+      f"{quote(args.request_id, safe='')}/submit",
+      {"fields": values}, token,
+    )
+    if (status != 200 or not isinstance(result, dict)
+        or result.get("status") != "consuming"):
+      raise ValueError("Secure input not accepted")
+    print("Secure input accepted; check the card for its final outcome.")
+    return 0
+  except (OSError, ValueError):
+    print("Secure input submission failed; check the card status.")
+    return 1
+  finally:
+    values.clear()
 
 
 def _request_saved(spec: dict, command: list[str], action: str) -> dict:
@@ -176,7 +226,17 @@ def main() -> int:
   reveal.add_argument("--description", default="")
   reveal.add_argument("--field", action="append", required=True, type=_field)
 
+  submit = sub.add_parser("submit-saved")
+  submit.add_argument("--chat-id", required=True)
+  submit.add_argument("--request-id", required=True)
+  submit.add_argument("--field-file", action="append", type=_named_source, default=[])
+  submit.add_argument("--field-env", action="append", type=_named_source, default=[])
+
   args = parser.parse_args()
+  if args.action == "submit-saved":
+    if not args.field_file and not args.field_env:
+      parser.error("submit-saved needs --field-file or --field-env")
+    return _submit_saved(args)
   if args.action == "run":
     args.mode = "sealed"
     args.fields = args.field

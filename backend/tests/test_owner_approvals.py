@@ -14,7 +14,7 @@ from app.chat_event_sink import (
   register_active_sink,
   unregister_active_sink,
 )
-from app.chat_writer import Barrier, FinishRun, StartTurn, get_writer
+from app.chat_writer import AnswerQuestion, Barrier, FinishRun, StartTurn, get_writer
 from app.database import SessionLocal
 from app.routes import chats_stream
 
@@ -70,6 +70,26 @@ def _answer(client, chat, auth, qid):
     "content": f"- {PROMPT['question']}: Not now", "hidden": True,
     "answers": {PROMPT["question"]: "Not now"}, "question_id": qid,
   })
+
+
+def test_answering_retained_card_does_not_orphan_newer_question(chat, db):
+  chat.messages = [{
+    "role": "assistant",
+    "blocks": [
+      {"type": "question", "question_id": "older", "questions": []},
+      {"type": "question", "question_id": "newer", "questions": []},
+    ],
+  }]
+  chat.pending_question_id = "newer"
+  db.commit()
+
+  get_writer().submit(AnswerQuestion(
+    chat_id=chat.id, question_id="older", answers={"Choice": "Yes"},
+  )).result(timeout=5)
+  db.expire_all()
+  refreshed = db.get(models.Chat, chat.id)
+  assert refreshed.pending_question_id == "newer"
+  assert refreshed.messages[0]["blocks"][0]["answers"] == {"Choice": "Yes"}
 
 
 def _finish(chat, sink):

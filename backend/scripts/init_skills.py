@@ -86,6 +86,14 @@ _UNMODIFIED_MIGRATIONS = {
     # option passthrough and the refused retargeting options instead of
     # implying everything forwards to curl.
     "25ccc8dd5ca6a97b4e6016853487967b70aad9119ec38b6a860ee69eb2a885e3",
+    # Untouched release copy before every authenticated participant with chat
+    # access could answer an existing typed Restart card.
+    "62a8a7e99fef4ca336090cae85f9a9a0eeeda5b8d8c7b8ed8cb0e907abe50b01",
+  },
+  "secure-input.md": {
+    # Untouched release copy before the helper gained model-invisible
+    # submission from a local file or environment value.
+    "9bfab88e98e0514ba7e2509078fe15d2dba832d718c0d2eb89a4ea0ace00bd78",
   },
   "goal-planning.md": {
     # Explicit-completion seed before the redundant preflight was made optional.
