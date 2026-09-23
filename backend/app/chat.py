@@ -4098,10 +4098,8 @@ async def _complete_turn(
 
   # An ending provider turn cannot authorize its own successor merely because
   # the Goal remains unfinished. The writer captured the plan revision at
-  # provider admission; a durable plan advance permits automatic rollover.
-  # A visible owner steer committed during this same turn also grants exactly
-  # one rollover: it is fresh owner authority, and the successor must still
-  # advance the plan (or receive another owner input) to continue again.
+  # provider admission. A plan advance or a committed owner steer permits one
+  # rollover; the successor must earn another before continuing again.
   # Otherwise the saved-question owner keeps the Goal exact and durable while
   # the partner decides whether to continue or stop it.
   terminal_handoff = None
@@ -4122,7 +4120,7 @@ async def _complete_turn(
     if (
       terminal_handoff is not None
       and not terminal_handoff.automatic_allowed
-      and not sink.has_committed_owner_steer()
+      and not sink.owner_steer_committed
     ):
       question_id = f"goal-handoff-{sink.run_token}"
       await sink.publish_question({
