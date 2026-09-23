@@ -120,7 +120,7 @@ test('Claude extra usage is a deliberate reversible account action', () => {
 test('Claude banked resets require a current provider offer and confirmation', () => {
   assert.match(usageView, /provider === 'claude'/)
   assert.match(usageView, /!resets\.redeemable/)
-  assert.match(usageView, /onRedeem\(resets\.nextCreditId \|\| null\)/)
-  assert.match(settingsView, /api\.settings\.redeemClaudeReset\(creditId\)/)
+  assert.match(usageView, /resets\.nextCreditResetsLeft \|\| null/)
+  assert.match(settingsView, /api\.settings\.redeemClaudeReset\(creditId, expectedResetsLeft\)/)
   assert.match(settingsView, /onRedeemClaudeReset=\{handleRedeemClaudeReset\}/)
 })

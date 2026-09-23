@@ -1187,36 +1187,27 @@ def test_claude_reset_rechecks_exact_offer_before_redeeming(
 
   calls = []
 
-  async def current(_provider_id, _data_dir, *, force_refresh=False):
-    calls.append(("read", force_refresh))
-    return {
-      "state": "ready",
-      "reset_credits": {
-        "redeemable": True,
-        "next_credit_id": "grant-next",
-      },
-    }
-
-  async def redeem(_data_dir, *, credit_id):
-    calls.append(("redeem", credit_id))
+  async def redeem(_data_dir, *, credit_id, expected_resets_left):
+    calls.append(("redeem", credit_id, expected_resets_left))
+    if credit_id == "grant-old":
+      raise settings_route.provider_usage.ClaudeResetOfferChanged()
     return {"outcome": "reset"}
 
-  monkeypatch.setattr(settings_route.provider_usage, "read_provider_usage", current)
   monkeypatch.setattr(settings_route.provider_usage, "redeem_claude_reset", redeem)
 
   unconfirmed = client.post(
     "/api/settings/provider-usage/claude/redeem-reset",
-    json={"credit_id": "grant-next"},
+    json={"credit_id": "grant-next", "expected_resets_left": 2},
     headers=auth,
   )
   stale = client.post(
     "/api/settings/provider-usage/claude/redeem-reset",
-    json={"credit_id": "grant-old", "confirm": True},
+    json={"credit_id": "grant-old", "expected_resets_left": 2, "confirm": True},
     headers=auth,
   )
   accepted = client.post(
     "/api/settings/provider-usage/claude/redeem-reset",
-    json={"credit_id": "grant-next", "confirm": True},
+    json={"credit_id": "grant-next", "expected_resets_left": 2, "confirm": True},
     headers=auth,
   )
 
@@ -1225,9 +1216,8 @@ def test_claude_reset_rechecks_exact_offer_before_redeeming(
   assert accepted.status_code == 200
   assert accepted.json() == {"outcome": "reset"}
   assert calls == [
-    ("read", True),
-    ("read", True),
-    ("redeem", "grant-next"),
+    ("redeem", "grant-old", 2),
+    ("redeem", "grant-next", 2),
   ]
 
 def test_claude_extra_usage_requires_confirmation_and_current_state(

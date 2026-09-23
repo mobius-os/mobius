@@ -375,10 +375,15 @@ export default function SettingsView({
   })
   const [claudeExtraUsage, setClaudeExtraUsage] = useState({ busy: false, result: null })
   const [claudeResetRedeem, setClaudeResetRedeem] = useState({ busy: false, result: null })
-  const handleRedeemClaudeReset = useCallback(async (creditId) => {
+  const handleRedeemClaudeReset = useCallback(async (creditId, expectedResetsLeft) => {
     setClaudeResetRedeem({ busy: true, result: null })
     try {
-      const res = await api.settings.redeemClaudeReset(creditId)
+      const res = await api.settings.redeemClaudeReset(creditId, expectedResetsLeft)
+      if (res.status === 409) {
+        setClaudeResetRedeem({ busy: false, result: { outcome: 'offer_changed' } })
+        settingsQueries.providerUsage.invalidate(queryClient, 'claude')
+        return
+      }
       if (!res.ok) throw new Error('Claude reset redeem failed')
       const data = await res.json()
       setClaudeResetRedeem({ busy: false, result: { outcome: data?.outcome } })

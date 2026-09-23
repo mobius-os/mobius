@@ -62,7 +62,10 @@ function BankedResets({
               type="button"
               className="provider-usage__redeem"
               disabled={redeeming}
-              onClick={() => onRedeem(resets.nextCreditId || null)}
+              onClick={() => onRedeem(
+                resets.nextCreditId || null,
+                resets.nextCreditResetsLeft || null,
+              )}
             >
               {redeeming ? 'Redeeming…' : 'Confirm'}
             </button>

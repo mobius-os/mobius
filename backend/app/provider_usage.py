@@ -12,6 +12,8 @@ import asyncio
 import copy
 import concurrent.futures as _cf
 import functools
+import hashlib
+import json
 import logging
 import os
 import shutil
@@ -27,6 +29,7 @@ import httpx
 
 from app import providers
 from app.runtime_identity import broker_request
+from app.storage_io import atomic_write
 
 log = logging.getLogger(__name__)
 
@@ -67,6 +70,11 @@ class _CachedProviderUsage:
 
 _provider_usage_cache: dict[tuple[str, str], _CachedProviderUsage] = {}
 _provider_usage_locks: dict[tuple[str, str], asyncio.Lock] = {}
+_claude_reset_locks: dict[tuple[str, str], asyncio.Lock] = {}
+
+
+class ClaudeResetOfferChanged(RuntimeError):
+  """The confirmed Claude reset no longer matches the provider's offer."""
 
 _CLAUDE_WINDOW_LABELS = {
   "five_hour": "5-hour",
@@ -553,57 +561,234 @@ async def set_claude_extra_usage(
   return await read_provider_usage("claude", data_dir)
 
 
-async def redeem_claude_reset(
-  data_dir: str,
-  *,
-  credit_id: str,
-) -> dict[str, Any]:
-  """Redeem one provider-selected Claude limit reset without retrying.
+def _claude_reset_intent_path(data_dir: str, organization_uuid: str) -> Path:
+  account = hashlib.sha256(organization_uuid.encode("utf-8")).hexdigest()[:32]
+  return (
+    Path(data_dir) / ".provider-usage" / "claude-reset-intents"
+    / f"{account}.json"
+  )
 
-  This mirrors Claude Code 2.1.277's private ``cedar_ember`` claim request.
-  The Settings route performs the fresh eligibility/grant check immediately
-  before calling here; the unique request id makes the provider operation
-  distinguishable without risking a client-side replay.
-  """
-  token = await providers.claude_access_token(data_dir)
-  organization_uuid = providers.claude_organization_uuid(data_dir)
-  headers = {
-    "Authorization": f"Bearer {token}",
-    "anthropic-version": "2023-06-01",
-    "anthropic-beta": "oauth-2025-04-20",
-    "Content-Type": "application/json",
+
+def _load_claude_reset_intent(path: Path) -> dict[str, Any] | None:
+  try:
+    source = json.loads(path.read_text(encoding="utf-8"))
+  except FileNotFoundError:
+    return None
+  except (OSError, ValueError):
+    return {"invalid": True}
+  if not isinstance(source, dict) or source.get("version") != 1:
+    return {"invalid": True}
+  request_id = source.get("request_id")
+  credit_id = source.get("credit_id")
+  resets_left_before = source.get("resets_left_before")
+  if (
+    not isinstance(request_id, str)
+    or not request_id
+    or not isinstance(credit_id, str)
+    or not credit_id
+    or isinstance(resets_left_before, bool)
+    or not isinstance(resets_left_before, int)
+    or resets_left_before <= 0
+  ):
+    return {"invalid": True}
+  return {
+    "version": 1,
+    "request_id": request_id,
+    "credit_id": credit_id,
+    "resets_left_before": resets_left_before,
   }
-  async with httpx.AsyncClient(timeout=25.0) as client:
-    response = await client.post(
-      _CLAUDE_RESET_URL.format(organization_uuid=organization_uuid),
-      headers=headers,
-      json={
-        "program": _CLAUDE_RESET_PROGRAM,
-        "grant_id": credit_id,
-        "request_id": str(uuid.uuid4()),
-      },
-    )
-    response.raise_for_status()
-    payload = response.json()
+
+
+def _write_claude_reset_intent(
+  path: Path,
+  *,
+  request_id: str,
+  credit_id: str,
+  resets_left_before: int,
+) -> None:
+  atomic_write(
+    path,
+    json.dumps({
+      "version": 1,
+      "request_id": request_id,
+      "credit_id": credit_id,
+      "resets_left_before": resets_left_before,
+      "created_at": datetime.now(UTC).isoformat(),
+    }, sort_keys=True) + "\n",
+    mode=0o600,
+  )
+
+
+def _clear_claude_reset_intent(path: Path) -> None:
+  with suppress(FileNotFoundError):
+    path.unlink()
+
+
+def _claude_reset_offer(
+  snapshot: Any,
+  credit_id: str,
+  *,
+  require_redeemable: bool,
+) -> int | None:
+  if not isinstance(snapshot, dict):
+    return None
+  summary = snapshot.get("reset_credits")
+  if not isinstance(summary, dict):
+    return None
+  if require_redeemable and (
+    summary.get("redeemable") is not True
+    or summary.get("next_credit_id") != credit_id
+  ):
+    return None
+  credits = summary.get("credits")
+  if not isinstance(credits, list):
+    return None
+  for credit in credits:
+    if not isinstance(credit, dict) or credit.get("id") != credit_id:
+      continue
+    resets_left = credit.get("resets_left")
+    if (
+      not isinstance(resets_left, bool)
+      and isinstance(resets_left, int)
+      and resets_left >= 0
+    ):
+      return resets_left
+  return None
+
+
+def _unknown_claude_reset() -> dict[str, Any]:
+  return {
+    "outcome": "unknown",
+    "reason": "pending_reconciliation",
+    "resets_left": None,
+    "cleared": [],
+    "weekly_resets_at": None,
+    "pending": True,
+  }
+
+
+def _claude_reset_result(payload: Any) -> dict[str, Any] | None:
   source = payload if isinstance(payload, dict) else {}
   outcome = source.get("result")
   allowed = {
     "reset", "already_used", "not_limited", "cooldown", "ineligible",
     "unavailable",
   }
-  _provider_usage_cache.pop((str(Path(data_dir).resolve()), "claude"), None)
+  if outcome not in allowed:
+    return None
   return {
-    "outcome": outcome if outcome in allowed else "unavailable",
+    "outcome": outcome,
     "reason": source.get("reason") if isinstance(source.get("reason"), str) else None,
     "resets_left": (
       source.get("resets_left")
-      if isinstance(source.get("resets_left"), int) else None
+      if (
+        not isinstance(source.get("resets_left"), bool)
+        and isinstance(source.get("resets_left"), int)
+      ) else None
     ),
     "cleared": [
       value for value in source.get("cleared", []) if isinstance(value, str)
     ] if isinstance(source.get("cleared"), list) else [],
     "weekly_resets_at": _reset_iso(source.get("weekly_resets_at")),
   }
+
+
+async def redeem_claude_reset(
+  data_dir: str,
+  *,
+  credit_id: str,
+  expected_resets_left: int,
+) -> dict[str, Any]:
+  """Validate and redeem one Claude reset as a durable account operation.
+
+  The intent is persisted before the private provider request. An ambiguous
+  response therefore leaves one stable request id to reconcile or replay,
+  rather than allowing a retry to become a second irreversible claim.
+  """
+  organization_uuid = providers.claude_organization_uuid(data_dir)
+  account_key = (str(Path(data_dir).resolve()), organization_uuid)
+  intent_path = _claude_reset_intent_path(data_dir, organization_uuid)
+  lock = _claude_reset_locks.setdefault(account_key, asyncio.Lock())
+  async with lock:
+    intent = _load_claude_reset_intent(intent_path)
+    if intent is not None and intent.get("invalid") is True:
+      return _unknown_claude_reset()
+
+    current = await read_provider_usage("claude", data_dir, force_refresh=True)
+    if intent is not None:
+      pending_credit_id = intent["credit_id"]
+      before = intent["resets_left_before"]
+      now = _claude_reset_offer(
+        current, pending_credit_id, require_redeemable=False,
+      )
+      if now is not None and now < before:
+        _clear_claude_reset_intent(intent_path)
+        return {
+          "outcome": "reset",
+          "reason": "reconciled_after_interruption",
+          "resets_left": now,
+          "cleared": [],
+          "weekly_resets_at": None,
+          "reconciled": True,
+        }
+      if credit_id != pending_credit_id:
+        return _unknown_claude_reset()
+      request_id = intent["request_id"]
+      claim_credit_id = pending_credit_id
+    else:
+      resets_left = _claude_reset_offer(
+        current, credit_id, require_redeemable=True,
+      )
+      if resets_left is None or resets_left != expected_resets_left:
+        raise ClaudeResetOfferChanged(
+          "Claude's reset offer changed before it could be claimed"
+        )
+      token = await providers.claude_access_token(data_dir)
+      request_id = str(uuid.uuid4())
+      claim_credit_id = credit_id
+      _write_claude_reset_intent(
+        intent_path,
+        request_id=request_id,
+        credit_id=claim_credit_id,
+        resets_left_before=resets_left,
+      )
+
+    # Token retrieval is side-effect free. Do it after a pending intent has
+    # been selected so retries can never mint a replacement request id.
+    if intent is not None:
+      token = await providers.claude_access_token(data_dir)
+    headers = {
+      "Authorization": f"Bearer {token}",
+      "anthropic-version": "2023-06-01",
+      "anthropic-beta": "oauth-2025-04-20",
+      "Content-Type": "application/json",
+    }
+    try:
+      async with httpx.AsyncClient(timeout=25.0) as client:
+        response = await client.post(
+          _CLAUDE_RESET_URL.format(organization_uuid=organization_uuid),
+          headers=headers,
+          json={
+            "program": _CLAUDE_RESET_PROGRAM,
+            "grant_id": claim_credit_id,
+            "request_id": request_id,
+          },
+        )
+        response.raise_for_status()
+        result = _claude_reset_result(response.json())
+    except httpx.HTTPStatusError as exc:
+      if exc.response.status_code < 500 and exc.response.status_code != 408:
+        _clear_claude_reset_intent(intent_path)
+        raise
+      return _unknown_claude_reset()
+    except (httpx.RequestError, ValueError):
+      return _unknown_claude_reset()
+
+    if result is None:
+      return _unknown_claude_reset()
+    _clear_claude_reset_intent(intent_path)
+    _provider_usage_cache.pop((str(Path(data_dir).resolve()), "claude"), None)
+    return result
 
 
 def _codex_plan_type(account_response: Any) -> Any:

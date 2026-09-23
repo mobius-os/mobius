@@ -60,13 +60,21 @@ export function claudeResetCredits(snapshot) {
   if (!summary || typeof summary !== 'object') return null
   const count = Number(summary.available_count)
   if (!Number.isFinite(count) || count < 0) return null
+  const credits = Array.isArray(summary.credits) ? summary.credits : []
+  const nextCreditId = typeof summary.next_credit_id === 'string'
+    ? summary.next_credit_id
+    : null
+  const nextCredit = credits.find(credit => credit?.id === nextCreditId)
+  const nextCreditResetsLeft = Number(nextCredit?.resets_left)
   return {
     availableCount: count,
-    credits: Array.isArray(summary.credits) ? summary.credits : [],
+    credits,
     eligible: summary.eligible === true,
     redeemable: summary.redeemable === true,
-    nextCreditId: typeof summary.next_credit_id === 'string'
-      ? summary.next_credit_id
+    nextCreditId,
+    nextCreditResetsLeft: Number.isInteger(nextCreditResetsLeft)
+      && nextCreditResetsLeft > 0
+      ? nextCreditResetsLeft
       : null,
   }
 }
@@ -119,7 +127,13 @@ export function claudeRedeemOutcomeMessage(outcome) {
       return { tone: 'info', text: 'A Claude reset is already being applied.' }
     case 'ineligible':
     case 'unavailable':
+    case 'offer_changed':
       return { tone: 'info', text: 'That reset is no longer available.' }
+    case 'unknown':
+      return {
+        tone: 'info',
+        text: 'Claude may have applied that reset. Möbius will reconcile it before another reset.',
+      }
     default:
       return { tone: 'error', text: 'Couldn’t redeem the Claude reset. Try again shortly.' }
   }

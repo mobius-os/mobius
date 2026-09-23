@@ -1247,13 +1247,17 @@ export const api = {
         body: JSON.stringify({ credit_id: creditId, confirm: true }),
       },
     ),
-    redeemClaudeReset: (creditId) => apiFetch(
+    redeemClaudeReset: (creditId, expectedResetsLeft) => apiFetch(
       '/settings/provider-usage/claude/redeem-reset',
       {
         method: 'POST',
         // Claude chooses the next usable grant. Echoing that exact id lets the
         // backend reject a stale confirmation instead of spending a new offer.
-        body: JSON.stringify({ credit_id: creditId, confirm: true }),
+        body: JSON.stringify({
+          credit_id: creditId,
+          expected_resets_left: expectedResetsLeft,
+          confirm: true,
+        }),
       },
     ),
     save: (payload) => apiFetch('/settings', {

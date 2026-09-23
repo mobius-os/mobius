@@ -21,7 +21,7 @@ from pathlib import Path
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
-from pydantic import BaseModel
+from pydantic import BaseModel, StrictInt
 from sqlalchemy.orm import Session
 
 from app import models, provider_usage, providers
@@ -242,6 +242,7 @@ class RedeemResetBody(BaseModel):
   # (or an agent probing the route) is then a safe no-op, never a spent credit.
   confirm: bool = False
   credit_id: str | None = None
+  expected_resets_left: StrictInt | None = None
 
 
 class ClaudeExtraUsageBody(BaseModel):
@@ -344,26 +345,22 @@ async def redeem_claude_reset(
     )
   if not isinstance(body.credit_id, str) or not body.credit_id:
     raise HTTPException(status_code=409, detail="Claude did not offer a reset.")
-
-  data_dir = get_app_settings().data_dir
-  current = await provider_usage.read_provider_usage(
-    "claude", data_dir, force_refresh=True,
-  )
-  resets = current.get("reset_credits") if isinstance(current, dict) else None
-  if (
-    not isinstance(resets, dict)
-    or resets.get("redeemable") is not True
-    or resets.get("next_credit_id") != body.credit_id
-  ):
+  if body.expected_resets_left is None or body.expected_resets_left <= 0:
     raise HTTPException(
       status_code=409,
       detail="Claude's reset offer changed. Refresh Settings and try again.",
     )
   try:
     return await provider_usage.redeem_claude_reset(
-      data_dir,
+      get_app_settings().data_dir,
       credit_id=body.credit_id,
+      expected_resets_left=body.expected_resets_left,
     )
+  except provider_usage.ClaudeResetOfferChanged as exc:
+    raise HTTPException(
+      status_code=409,
+      detail="Claude's reset offer changed. Refresh Settings and try again.",
+    ) from exc
   except (OSError, RuntimeError, httpx.HTTPError) as exc:
     logger.warning("Claude reset redeem failed: %s", exc)
     raise HTTPException(
