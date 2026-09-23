@@ -178,23 +178,30 @@ def test_core_prompt_requires_approval_before_changing_guarded_invariants():
   assert "preserves the same contract does not require escalation" in normalized
 
 
-def test_core_keeps_only_established_actionable_workstreams_open():
+def test_core_requires_approval_handoffs_for_actionable_plans_and_reviews():
   repo = Path(__file__).resolve().parents[2]
-  core = " ".join((repo / "skill" / "core.md").read_text(
+  core = (repo / "skill" / "core.md").read_text(
     encoding="utf-8",
-  ).split())
+  )
+  normalized = " ".join(core.split())
+  handoff = normalized.split(
+    "**Mandatory final-action decision for owner chats.**", 1,
+  )[1].split("The stable constitution:", 1)[0]
 
-  assert "its established workstream is not" in core
-  assert "specific, in-scope, materially useful continuation" in core
-  assert "decision is genuinely needed to settle that workstream" in core
-  assert "Do not invent adjacent work merely because it is possible" in core
-  assert "Use the action-appropriate saved card" in core
-  assert '`request_question` for an ordinary choice' in core
-  assert '`request_approval` for permission' in core
-  assert '`request_restart` for a restart' in core
-  assert 'terminal **Not now** choice `on_answer: "close"` only when' in core
-  assert "If a Goal is unfinished, let the answer resume" in core
-  assert "unless an exact durable owner is already continuing that Goal" in core
+  assert core.index("**Mandatory final-action decision for owner chats.**") \
+    < core.index("The stable constitution:")
+  assert "plan, review, audit, critique, or recommendations" in handoff
+  assert "specific, materially useful change you could carry out" in handoff
+  assert "in the same requested workstream" in handoff
+  assert "you MUST call `request_approval` as your final action" in handoff
+  assert "**Apply/implement it (Recommended)** and **Not now**" in handoff
+  assert "deliverable being complete or this turn being read-only" in handoff
+  assert "`request_question` only when ordinary clarification" in handoff
+  assert "`request_restart` for a restart" in handoff
+  assert "owner already authorized the follow-on for this turn" in handoff
+  assert "no qualifying same-workstream change exists, finish declaratively" \
+    in handoff
+  assert "Never substitute a prose question or declarative close" in handoff
 
 
 def test_goal_routing_rechecks_phase_transitions_and_prefers_platform_tool():
