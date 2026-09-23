@@ -557,14 +557,14 @@ def test_helper_rejects_unconfirmed_receipt_and_transport_failure(monkeypatch):
     monkeypatch.setenv(name, "test-value")
   monkeypatch.setenv("API_BASE_URL", "http://testserver")
   monkeypatch.setattr(helper, "urlopen", lambda *a, **kw: io.BytesIO(b'{}'))
-  with pytest.raises(SystemExit, match="Invalid approval receipt"):
+  with pytest.raises(SystemExit, match="Invalid owner-input card receipt"):
     helper.request_approval(**PROMPT)
 
   def fail(*args, **kwargs):
     raise URLError("disconnected")
 
   monkeypatch.setattr(helper, "urlopen", fail)
-  with pytest.raises(SystemExit, match="No approval was granted"):
+  with pytest.raises(SystemExit, match="No answer or approval was granted"):
     helper.request_approval(**PROMPT)
 
 
@@ -588,10 +588,11 @@ def test_helper_preserves_bounded_deterministic_rejection_detail(monkeypatch):
   monkeypatch.setattr(helper, "urlopen", reject)
   with pytest.raises(SystemExit, match="Owned by the integration chat") as exc:
     helper.request_approval(**PROMPT)
+  assert "owner-input card" in str(exc.value)
   assert "Fix the stated conflict" in str(exc.value)
 
 
-def test_question_helper_supplies_incidental_card_metadata(monkeypatch):
+def test_question_helper_leaves_canonicalization_to_server(monkeypatch):
   from tests.test_platform_tools import _control_module
 
   helper = _control_module()._APPROVALS
@@ -606,8 +607,6 @@ def test_question_helper_supplies_incidental_card_metadata(monkeypatch):
   }])
 
   assert captured == [("question", {"questions": [{
-    "id": "question-1",
-    "header": "Your choice",
     "question": "Which repair should I prepare?",
     "options": [{"label": "Permanent repair", "description": "Fix the cause."}],
   }]})]
@@ -737,6 +736,59 @@ def test_saved_questions_keep_multiple_choices_and_retry_identity(client, chat, 
   assert first.status_code == 200, first.text
   assert first.json() == again.json()
   assert _row(chat.id)[1][-1]["blocks"][-1]["questions"] == payload["questions"]
+
+
+def test_saved_questions_canonicalize_card_only_metadata_at_route_boundary(
+  client, chat, approval_run,
+):
+  payload = {"questions": [
+    {"question": "Which direction?"},
+    {"question": "When?", "options": []},
+  ]}
+  response = client.post(
+    f"/api/chats/{chat.id}/question", json=payload, headers=approval_run[1],
+  )
+  assert response.status_code == 200, response.text
+  assert _row(chat.id)[1][-1]["blocks"][-1]["questions"] == [
+    {
+      "id": "question-1", "header": "Question 1",
+      "question": "Which direction?", "options": [],
+    },
+    {
+      "id": "question-2", "header": "Question 2",
+      "question": "When?", "options": [],
+    },
+  ]
+
+
+def test_saved_single_question_uses_neutral_default_heading(
+  client, chat, approval_run,
+):
+  response = client.post(
+    f"/api/chats/{chat.id}/question",
+    json={"questions": [{"question": "Which direction?"}]},
+    headers=approval_run[1],
+  )
+  assert response.status_code == 200, response.text
+  assert _row(chat.id)[1][-1]["blocks"][-1]["questions"] == [{
+    "id": "question-1", "header": "Your choice",
+    "question": "Which direction?", "options": [],
+  }]
+
+
+def test_question_defaults_cannot_collide_with_an_explicit_id(
+  client, chat, approval_run,
+):
+  response = client.post(
+    f"/api/chats/{chat.id}/question",
+    json={"questions": [
+      {"id": "question-2", "question": "First?"},
+      {"question": "Second?"},
+    ]},
+    headers=approval_run[1],
+  )
+  assert response.status_code == 422
+  assert "question ids must be distinct" in response.text
 
 
 def test_question_tool_saves_receipt_and_never_returns_a_default_answer(monkeypatch):

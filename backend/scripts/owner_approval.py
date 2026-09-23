@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Save an owner approval card and return its receipt, never wait for an answer.
+"""Save an owner-input card and return its receipt, never wait for an answer.
 
 The saved card ends the turn: the response is cut at the card, so say
 everything before running this. See app/questions.py for the card lifecycle.
@@ -15,24 +15,6 @@ from urllib.parse import quote
 from urllib.request import Request, urlopen
 
 
-def _normalized_questions(questions: list[dict]) -> list[dict]:
-  """Fill card-only metadata so callers can ask in ordinary terms."""
-  if not isinstance(questions, list) or not 1 <= len(questions) <= 3:
-    raise SystemExit("questions must be an array containing 1 to 3 questions")
-  normalized = []
-  for index, question in enumerate(questions, start=1):
-    if not isinstance(question, dict):
-      raise SystemExit(f"question {index} must be an object")
-    item = dict(question)
-    item.setdefault("id", f"question-{index}")
-    item.setdefault(
-      "header", "Your choice" if len(questions) == 1 else f"Question {index}",
-    )
-    item.setdefault("options", [])
-    normalized.append(item)
-  return normalized
-
-
 def request_approval(
   question: str, options: list[dict], work_key: str,
 ) -> dict:
@@ -41,7 +23,7 @@ def request_approval(
 
 
 def request_question(questions: list[dict]) -> dict:
-  return save_card("question", {"questions": _normalized_questions(questions)})
+  return save_card("question", {"questions": questions})
 
 
 def request_restart() -> dict:
@@ -84,7 +66,7 @@ def save_card(kind: str, body: dict) -> dict:
   names = ("API_BASE_URL", "AGENT_TOKEN", "CHAT_ID", "MOBIUS_RUN_TOKEN")
   values = [os.environ.get(name, "") for name in names]
   if not all(values):
-    raise SystemExit("owner approval needs the current agent-run environment")
+    raise SystemExit("owner input needs the current agent-run environment")
   base, token, chat_id, _run_id = values
   request = Request(
     f"{base.rstrip('/')}/api/chats/{quote(chat_id, safe='')}/{kind}",
@@ -112,12 +94,12 @@ def save_card(kind: str, body: dict) -> dict:
       if exc.code >= 500 else " Fix the stated conflict before trying again."
     )
     raise SystemExit(
-      f"Could not save approval ({exc.code}){suffix}. "
-      f"No approval was granted.{retry}"
+      f"Could not save owner-input card ({exc.code}){suffix}. "
+      f"No answer or approval was granted.{retry}"
     ) from exc
   except (URLError, TimeoutError, ValueError) as exc:
     raise SystemExit(
-      "Approval save was not confirmed. No approval was granted; "
+      "Owner-input card save was not confirmed. No answer or approval was granted; "
       "retry the identical request to recover its saved receipt."
     ) from exc
   if (not isinstance(payload, dict)
@@ -125,7 +107,9 @@ def save_card(kind: str, body: dict) -> dict:
       or not isinstance(payload.get("question_id"), str)
       or not payload["question_id"]
       or not isinstance(payload.get("next_action"), str)):
-    raise SystemExit("Invalid approval receipt; no approval was granted.")
+    raise SystemExit(
+      "Invalid owner-input card receipt; no answer or approval was granted."
+    )
   return payload
 
 
