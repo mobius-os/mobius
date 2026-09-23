@@ -243,11 +243,11 @@ does not replace its normal process.
 
 `GET /api/health` is reachability and remains HTTP 200 whenever the process can
 answer; the shell uses that distinction so a server fault never masquerades as
-the device being offline. `GET /api/ready` is serviceability: it requires both
-a successfully initialized database with every mapped table and column, and
-the single-writer persistence actor. Deployment and container probes use
-readiness. `GET /api/health/strict` retains the database-only diagnostic
-contract.
+the device being offline. `GET /api/ready` is serviceability: it requires a
+successfully initialized database with every mapped table and column, the
+single-writer persistence actor, and the small set of boot-critical
+chat/restart supervisors. Deployment and container probes use readiness.
+`GET /api/health/strict` retains the database-only diagnostic contract.
 
 The shell's `connectivityStore.js` owns reachability, service readiness, and
 restart observation together. A response proves reachability even when the
@@ -584,12 +584,12 @@ path introduces an alternate Möbius boot mode. A broken persistent clone falls
 back to the baked backend, so the live container remains reachable to inspect.
 
 Normal platform boot serves `/data/platform/backend` directly after an import
-probe and validation of its served identity broker. It fetches `origin/main`,
-commits stray local edits, and fast-forwards or replays the local overlay onto
-that target; a conflict or failed post-replay probe leaves the exact
-pre-reconcile commit served and records a visible flag. An invalid existing
-clone or broker selects the complete baked platform without overwriting,
-quarantining, or reseeding the broken tree. Owner-data disaster recovery is the separate
+probe and validation of its served identity broker. Startup may finish or undo
+an update interrupted during its own filesystem transaction, but it never
+fetches or selects a newer release. Fetching and replaying local commits happen
+only through the reviewed updater. An invalid existing clone or broker selects
+the complete baked platform without overwriting, quarantining, or reseeding the
+broken tree. Owner-data disaster recovery is the separate
 `backup-data.py` / `restore-data.py` flow and is not automatically armed by
 installing Möbius.
 
@@ -1725,5 +1725,8 @@ cover it deterministically.
 
 ## See also
 
+- **Proposed platform and app update contract:** `UPDATE-ARCHITECTURE.md`.
+  It is explicitly a target design; this file remains the as-built map until
+  that migration ships.
 - **Build / test / run commands and the dev loop:** `CONTRIBUTING.md`. (The #1 deploy gotcha — a stale `/data/platform/frontend/dist` masking a fresh image — is covered under *Frontend serving priority* above.)
 - **Subsystem deep-dives are inlined above** as their own sections: *Stop-chat contract*, *AskUserQuestion interception*, *Chat persistence — single-writer actor*, *Navigation back-stack + drawer model*, *Service worker + offline*, and *Mini-app manifest (mobius.json)*. (The chat-persistence v2 design + staged-rollout notes remain internal/gitignored — the as-built contract is the section above.)

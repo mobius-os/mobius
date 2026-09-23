@@ -9,6 +9,7 @@ import {
   readErrorRecoveryAttempt,
   recoveryPhaseForAttempt,
   repairChatPath,
+  opensDegradedRepairChat,
   runAgentRepair,
   writeErrorRecoveryAttempt,
   writeRefreshedRecoveryAttempt,
@@ -152,7 +153,7 @@ test('repair flow owns persisted transitions and reuses request identity', async
   ])
   assert.deepEqual(result, {
     chatId: 'repair-chat',
-    path: '/mobius/shell/?chat=repair-chat',
+    path: '/mobius/shell/?chat=repair-chat&repair=1',
   })
   assert.deepEqual(snapshots.map(attempt => [attempt.phase, attempt.chatId]), [
     ['agent-starting', null],
@@ -293,7 +294,9 @@ test('repair prompt bounds and indents untrusted diagnostics', () => {
 })
 
 test('repair chat paths encode chat identity', () => {
-  assert.equal(repairChatPath('chat id'), '/shell/?chat=chat%20id')
+  assert.equal(repairChatPath('chat id'), '/shell/?chat=chat%20id&repair=1')
+  assert.equal(opensDegradedRepairChat('?chat=chat%20id&repair=1'), true)
+  assert.equal(opensDegradedRepairChat('?chat=chat%20id'), false)
 })
 
 test('diagnostic redaction removes every authorization scheme without swallowing neighbours', () => {

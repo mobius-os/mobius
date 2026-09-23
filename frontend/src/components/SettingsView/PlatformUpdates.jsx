@@ -76,7 +76,7 @@ export default function PlatformUpdates({ active, refreshToken, onOpenChat, iner
       </div>
       {confirmRestart ? (
         <div className="platform-updates__confirmation" role="group" aria-label="Confirm restart">
-          <p>Restarting briefly interrupts active chats across Möbius. The page will reconnect automatically. This does not replace the container.</p>
+          <p>Restarting briefly pauses active chats. This page will reconnect automatically.</p>
           <div className="platform-updates__actions">
             <button ref={actionRef} className="settings__btn settings__btn--sm" onClick={update.restart} disabled={busy}>
               {busy ? 'Restarting…' : 'Restart now'}
@@ -117,7 +117,7 @@ export default function PlatformUpdates({ active, refreshToken, onOpenChat, iner
         <p className="platform-updates__description">Your changes are ready. You can add more updates before restarting once.</p>
       )}
       {activeRebuild && rebuild.status_unavailable && (
-        <p className="platform-updates__description">Reconnecting to the update controller. Your update continues outside this page.</p>
+        <p className="platform-updates__description">Reconnecting to Möbius. The update is still running.</p>
       )}
       {update.reconnecting && (
         <p className="platform-updates__description" role="status">{update.slow

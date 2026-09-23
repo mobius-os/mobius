@@ -105,6 +105,61 @@ def test_production_startup_plan_has_explicit_unique_order():
   )
 
 
+def test_one_invalid_app_schedule_does_not_disable_cron_infrastructure(
+  monkeypatch, tmp_path,
+):
+  from app.routes import app_schedules
+
+  class EmptySession:
+    def __enter__(self):
+      return object()
+
+    def __exit__(self, *_args):
+      return False
+
+  ctx = context()
+  ctx.settings.data_dir = str(tmp_path)
+  monkeypatch.setattr(startup, "SessionLocal", EmptySession)
+  monkeypatch.setattr(
+    app_schedules,
+    "reconcile_app_cron_supervision",
+    lambda _db: (2, ["bad-app: invalid cadence"], True),
+  )
+
+  startup._reconcile_app_cron(ctx)
+
+  assert (tmp_path / "run" / "app-cron-supervision-ready").read_text() == (
+    "test-boot\n"
+  )
+  assert not (tmp_path / "run" / "app-cron-supervision-status.json").exists()
+
+
+def test_cron_infrastructure_failure_keeps_start_marker_absent(
+  monkeypatch, tmp_path,
+):
+  from app.routes import app_schedules
+
+  class EmptySession:
+    def __enter__(self):
+      return object()
+
+    def __exit__(self, *_args):
+      return False
+
+  ctx = context()
+  ctx.settings.data_dir = str(tmp_path)
+  monkeypatch.setattr(startup, "SessionLocal", EmptySession)
+  monkeypatch.setattr(
+    app_schedules,
+    "reconcile_app_cron_supervision",
+    lambda _db: (0, ["crontab unavailable"], False),
+  )
+
+  startup._reconcile_app_cron(ctx)
+
+  assert not (tmp_path / "run" / "app-cron-supervision-ready").exists()
+
+
 @pytest.mark.asyncio
 async def test_claude_config_failure_cannot_suppress_pre_db_codex_reclaim(
   monkeypatch,

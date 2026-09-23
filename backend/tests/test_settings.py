@@ -52,6 +52,7 @@ def test_boot_removes_stale_global_auto_resume_setting():
   with TestClient(app):
     pass
 
+  assert app.state.runtime_supervisors is None
   assert json.loads(path.read_text()) == {"model": "claude-opus-4-7"}
 
 

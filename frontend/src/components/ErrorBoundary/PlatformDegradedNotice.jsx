@@ -1,5 +1,6 @@
 import useAgentRepair from '../../hooks/useAgentRepair.js'
-import RecoveryPanel from './RecoveryPanel.jsx'
+import { BASE } from '../../api/client.js'
+import { repairChatPath } from '../../lib/errorRecovery.js'
 import './ErrorBoundary.css'
 
 // `/api/version` reports which tree is ACTUALLY serving. Two fallbacks exist,
@@ -13,24 +14,26 @@ import './ErrorBoundary.css'
 //   watcher never published one, or the last publish was rejected).
 //
 // The app still works (it is the built-in copy), so this is not a crash. We
-// surface the SAME refresh -> ask-agent recovery flow the error boundary uses,
-// driven by the shared errorRecovery ledger, rather than a parallel popup. A
-// fixed surface key gives the refresh->agent escalation a stable identity
-// across reloads without a component stack to fingerprint.
+// offer one direct recovery choice rather than making the owner refresh a state
+// that boot has already proven cannot load. A fixed surface key gives retries a
+// stable identity across reloads without a component stack to fingerprint.
 const VARIANTS = {
   backend: {
     surfaceKey: 'platform-degraded',
     title: 'Your latest changes didn’t load',
+    body:
+      'Möbius opened its working built-in version. ' +
+      'An agent can fix the latest changes, or you can keep using this version.',
     diagnostic:
-      'Möbius is serving the built-in version because your latest changes to ' +
-      '/data/platform did not load. Your edits are preserved on disk but are ' +
-      'not running.',
+      'Möbius is serving its protected fallback because the latest platform ' +
+      'changes did not finish loading. The latest source is preserved but ' +
+      'is not running.',
     // Not a UI crash, so buildAgentRepairPrompt (which frames a React failure
     // with a component stack) does not fit. Tell the agent the real situation.
     repairPrompt: [
-      'Möbius is running the built-in fallback because /data/platform failed ' +
-        'to import at boot, so the latest edits are on disk but are not being ' +
-        'served.',
+      'Möbius is running its protected fallback because the latest platform ' +
+        'changes did not finish loading. The latest source is preserved but ' +
+        'is not being served.',
       '',
       'Reproduce the import failure from the served backend, read the relevant ' +
         'boot/container logs, find the root cause in /data/platform, and ' +
@@ -43,7 +46,10 @@ const VARIANTS = {
   },
   frontend: {
     surfaceKey: 'shell-degraded',
-    title: 'You’re seeing the built-in interface',
+    title: 'Your latest interface didn’t load',
+    body:
+      'Möbius opened its working built-in interface. ' +
+      'An agent can fix the latest changes, or you can keep using this interface.',
     diagnostic:
       'Möbius is showing its built-in interface because the edited interface ' +
       'in /data/platform did not build. Your edits are preserved on disk but ' +
@@ -66,39 +72,66 @@ const VARIANTS = {
 
 export default function PlatformDegradedNotice({ onContinue, variant = 'backend' }) {
   const copy = VARIANTS[variant] || VARIANTS.backend
-  const { attempt, repairActive, repair, markRefreshed } = useAgentRepair({
+  const { attempt, repairActive, repair, error } = useAgentRepair({
     surfaceKey: copy.surfaceKey, prompt: copy.repairPrompt,
   })
-
-  const handleRefresh = () => {
-    markRefreshed()
-    window.location.reload()
+  const repairChatId = attempt?.chatId || null
+  const repairDirected = attempt?.phase === 'agent-directed' && repairChatId
+  const repairFailed = attempt?.phase === 'agent-failed'
+  const handleRepair = () => {
+    if (repairDirected) {
+      window.location.assign(repairChatPath(repairChatId, BASE))
+      return
+    }
+    void repair()
   }
 
   return (
     <div className="errbound">
       <div className="platform-degraded">
-        <RecoveryPanel
-          variant="boundary"
-          className="errbound__card"
-          title={copy.title}
-          subject="app"
-          diagnostic={copy.diagnostic}
-          attempt={attempt}
-          repairActive={repairActive}
-          refreshLabel="Refresh"
-          onRefresh={handleRefresh}
-          onAgentRepair={repair}
-        />
-        {onContinue && (
-          <button
-            type="button"
-            className="platform-degraded__continue"
-            onClick={onContinue}
-          >
-            Continue to the built-in version
-          </button>
-        )}
+        <section className="recovery-panel recovery-panel--boundary errbound__card">
+          <h1 className="recovery-panel__title">{copy.title}</h1>
+          <p className="recovery-panel__body">{copy.body}</p>
+          <details className="recovery-panel__details">
+            <summary>Technical details</summary>
+            <pre className="recovery-panel__detail">{copy.diagnostic}</pre>
+          </details>
+          {(repairActive || repairFailed || error) && (
+            <p className="recovery-panel__status" role="status" aria-live="polite">
+              {repairActive
+                ? 'Opening the repair chat…'
+                : error || 'The repair request did not go through. You can try again.'}
+            </p>
+          )}
+          <div className="platform-degraded__actions">
+            <button
+              type="button"
+              className="recovery-panel__button recovery-panel__button--primary platform-degraded__action"
+              onClick={handleRepair}
+              disabled={repairActive}
+            >
+              <span>{repairActive
+                ? 'Opening repair chat…'
+                : repairDirected
+                  ? 'Open repair chat'
+                  : repairFailed
+                    ? 'Try agent fix again'
+                    : 'Fix with an agent'}</span>
+              {!repairActive && !repairDirected && !repairFailed && (
+                <small>Recommended</small>
+              )}
+            </button>
+            {onContinue && (
+              <button
+                type="button"
+                className="recovery-panel__button platform-degraded__action"
+                onClick={onContinue}
+              >
+                Keep using this version
+              </button>
+            )}
+          </div>
+        </section>
       </div>
     </div>
   )

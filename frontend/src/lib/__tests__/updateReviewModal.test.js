@@ -42,7 +42,7 @@ test('immutable review drives both source apply and container replacement', () =
   for (const field of ['plan_id', 'current_sha', 'target_sha', 'image_digest']) {
     assert.match(modal, new RegExp(`${field}: preview\\.${field}`))
   }
-  assert.match(modal, /onRebuild\(plan\) : onApply\(plan\)/)
+  assert.match(modal, /reviewedUpdateUsesContainerRebuild\(preview\) \? onRebuild\(plan\) : onApply\(plan\)/)
   assert.match(requests, /api\.platform\.rebuild\(plan\)/)
   assert.match(requests, /api\.platform\.apply\(plan\)/)
   assert.match(requests, /reviewedUpdate: true/)
@@ -146,7 +146,7 @@ test('update review is locally modal to Settings, not the workspace', () => {
 test('a proven-complete review offers a single Done, never a contradictory repair action', () => {
   // Regression: an "already complete" review that still carried a stale
   // rolled_back state showed "There's nothing to apply" alongside a "Not now" +
-  // "Ask Möbius" repair offer. The no-op case must suppress the repair reason
+  // agent repair offer. The no-op case must suppress the repair reason
   // and collapse to one clear Done button.
   assert.match(modal, /const nothingToApply = !!preview && actionable === false && !hasResult/)
   assert.match(modal, /\(resultState === 'conflict' \|\| nothingToApply\) \? null : platformUpdateRepairReason/)
@@ -160,4 +160,31 @@ test('asking for help names one ordinary chat and explains the restart boundary'
   assert.match(modal, /Open a chat with the update details included/)
   assert.match(modal, /asking before any restart/)
   assert.doesNotMatch(modal + repair, /repair chat|recovery chat|help prepare it/)
+})
+
+test('local container blockers explain lost behavior and stop before mutation', () => {
+  const repair = read('../../components/SettingsView/UpdateRepairAction.jsx')
+  assert.match(modal, /This update would remove changes made to how Möbius runs/)
+  assert.match(modal, /Möbius will keep running as it is/)
+  assert.match(modal, /official or custom update/)
+  assert.match(modal, /Local system changes to keep/)
+  assert.match(modal, /blockingPathLabel\(path\)/)
+  assert.match(modal, /diff=\{preview\.blocking_diff\}/)
+  assert.doesNotMatch(modal, /sourceOnly|Prepare update/)
+  assert.match(modal, /label="Fix with an agent"/)
+  assert.match(repair, /label = 'Ask Möbius'/)
+})
+
+test('primary update guidance avoids deployment jargon', () => {
+  assert.match(modal, /Möbius will briefly go offline while the updated system starts/)
+  assert.match(modal, /earlier source was restored/)
+  assert.doesNotMatch(modal, /This replaces the container/)
+  assert.doesNotMatch(modal, /Prepare source/)
+  assert.doesNotMatch(modal, /Preserve container setup|Keep my setup/)
+})
+
+test('replacement rollback copy distinguishes the image from source and data', () => {
+  assert.match(modal, /tries to restore the previous system image/)
+  assert.match(modal, /newly installed source stay in place/)
+  assert.doesNotMatch(modal, /previous working version/)
 })
