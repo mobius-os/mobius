@@ -584,7 +584,8 @@ def create_app_job_token_endpoint(
 @router.get("/providers")
 def list_providers():
   """Returns which AI providers are available (CLI installed)."""
-  from app.providers import PROVIDERS, detect_available
+  from app.providers import PROVIDERS, detect_available, sync_app_model_providers
+  sync_app_model_providers(get_settings().data_dir)
   available = detect_available()
   return [
     {"id": pid, "name": p.name, "available": pid in available}
@@ -794,6 +795,8 @@ async def providers_status(
   is_owner_caller = principal.app_id is None and principal.scope == "owner"
   from app.providers import PROVIDERS
   data_dir = get_settings().data_dir
+  from app.providers import sync_app_model_providers
+  sync_app_model_providers(data_dir)
   identity_app_installed = db.query(models.App.id).filter(
     models.App.slug == "identity",
     models.App.deleted_at.is_(None),

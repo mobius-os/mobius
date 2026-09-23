@@ -40,7 +40,6 @@ from app import providers
 log = logging.getLogger(__name__)
 
 DEFAULT_PROVIDER = providers.DEFAULT_PROVIDER
-_PROVIDERS = providers.PROVIDER_NAMES
 
 
 def _clean_choice(raw: dict | None, *, default_provider: str | None = None,
@@ -56,9 +55,9 @@ def _clean_choice(raw: dict | None, *, default_provider: str | None = None,
   if raw.get("enabled") is False:
     return None
   provider = raw.get("provider")
-  if provider not in _PROVIDERS:
-    provider = default_provider if default_provider in _PROVIDERS else None
-  if provider not in _PROVIDERS:
+  if provider not in providers.PROVIDERS:
+    provider = default_provider if default_provider in providers.PROVIDERS else None
+  if provider not in providers.PROVIDERS:
     return None
   model = raw.get("model")
   model = model.strip() if isinstance(model, str) and model.strip() else None
@@ -127,6 +126,7 @@ def resolve_background_agents(data_dir: str, override: dict | None = None) -> di
   deliberately knows no app's name or settings format. ``fallback`` is None
   when there is no distinct second agent.
   """
+  providers.sync_app_model_providers(data_dir)
   declared = override if isinstance(override, dict) else {}
 
   choices = _system_choices(data_dir)
