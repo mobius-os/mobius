@@ -61,11 +61,12 @@ test('update versions paint from the persisted status cache without an Unknown f
   assert.match(updates, /versionPlatform \? 'Unavailable' : 'Checking…'/)
 })
 
-test('restart explains the interruption and its container boundary before confirmation', () => {
-  assert.match(updates, /Restart server<\/button>/)
+test('restart explains the brief interruption before confirmation without deployment jargon', () => {
+  assert.match(updates, /onClick=\{askRestart\}>Restart server<\/button>/)
   assert.match(updates, /aria-label="Confirm restart"/)
-  assert.match(updates, /briefly interrupts active chats/)
-  assert.match(updates, /does not replace the container/)
+  assert.match(updates, /briefly pauses active chats/)
+  assert.match(updates, /page will reconnect automatically/)
+  assert.doesNotMatch(updates, /does not replace the container/)
   assert.match(updates, /onClick=\{update\.restart\}/)
   assert.match(updates, /onClick=\{askRestart\}/)
   // An image replacement still belongs to its exact reviewed update, not a

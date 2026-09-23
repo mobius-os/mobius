@@ -383,18 +383,13 @@ RUN --mount=type=bind,from=mobius-local-platform-source,source=/,target=/tmp/mob
 # What this image actually contains, so a running container can compare itself
 # with the source it serves instead of remembering which update touched what:
 # the hash of every image input at the baked checkout (build-info.json
-# `image_inputs`), and the package inventories the layers above installed. A
-# later `pip`/`apt` install made live in a container shows up as a difference
-# from these lists, which is exactly what a replacement would drop.
+# `image_inputs`).
 RUN set -eux; \
     python3 -c 'import json, subprocess, pathlib; \
 info = pathlib.Path("/app/build-info.json"); data = json.loads(info.read_text()); \
 data["image_inputs"] = json.loads(subprocess.run(["python3", "/app/platform-baked/backend/app/platform_activation.py", "--hashes", "/app/platform-baked"], check=True, capture_output=True, text=True).stdout); \
 info.write_text(json.dumps(data, sort_keys=True) + "\n")'; \
-    mkdir -p /app/image-inventory; \
-    pip freeze --disable-pip-version-check 2>/dev/null | sort > /app/image-inventory/pip.txt; \
-    dpkg-query -W -f '${Package}=${Version}\n' | sort > /app/image-inventory/apt.txt; \
-    chmod -R a+rX /app/image-inventory /app/build-info.json
+    chmod a+r /app/build-info.json
 
 # Initialize the runtime volume paths for the non-root agent user.
 RUN mkdir -p /data/db /data/apps /data/compiled /data/shared \

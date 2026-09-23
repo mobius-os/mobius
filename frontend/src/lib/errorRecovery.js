@@ -161,7 +161,15 @@ export function buildAgentRepairPrompt({
 }
 
 export function repairChatPath(chatId, base = '') {
-  return `${base}/shell/?chat=${encodeURIComponent(chatId)}`
+  return `${base}/shell/?chat=${encodeURIComponent(chatId)}&repair=1`
+}
+
+export function opensDegradedRepairChat(search = globalThis.location?.search || '') {
+  try {
+    return new URLSearchParams(search).get('repair') === '1'
+  } catch {
+    return false
+  }
 }
 
 async function startAgentRepair({

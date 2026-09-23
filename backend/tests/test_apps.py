@@ -6,7 +6,9 @@ from dataclasses import replace
 from pathlib import Path
 from unittest.mock import AsyncMock, call, patch
 
+import pytest
 from app import app_git, install, models
+from app.manifest_contract import ManifestContractError, validate_cron_expr
 from app.config import get_settings
 from app.database import engine
 from sqlalchemy import event
@@ -605,7 +607,7 @@ def test_reconcile_restores_zone_schedule_as_wall_clock_gate(client, auth, db):
   with patch("app.app_cron.register_cron", fake_register), \
        patch("app.cron_tz.materialize_zone_cron",
              lambda zone_cron, tz_name: "* * * * *"):
-    count, warnings = apps_module.reconcile_app_cron_supervision(db)
+    count, warnings, infrastructure_ready = apps_module.reconcile_app_cron_supervision(db)
 
   assert warnings == []
   assert count == 1
@@ -631,12 +633,89 @@ def test_reconcile_fails_closed_on_malformed_zone_declaration(
 
   from app.routes import app_schedules as apps_module
   with patch("app.app_cron.register_cron") as register:
-    count, warnings = apps_module.reconcile_app_cron_supervision(db)
+    count, warnings, infrastructure_ready = apps_module.reconcile_app_cron_supervision(db)
 
   assert count == 0
   assert len(warnings) == 1
   assert "Incomplete IANA wall-clock schedule declaration" in warnings[0]
+  assert infrastructure_ready is True
   register.assert_not_called()
+
+
+def test_invalid_app_cadence_does_not_suppress_healthy_app_cron(
+  client, auth, db,
+):
+  for slug, cron in (("broken", "*/0 * * * *"), ("healthy", "0 5 * * *")):
+    source = Path(get_settings().data_dir) / "apps" / slug
+    source.mkdir(parents=True)
+    (source / "fetch.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+    (source / "init-cron.sh").write_text(
+      f'ENTRY="{cron} {source}/fetch.sh 1"\n', encoding="utf-8",
+    )
+    create_local_app(
+      client, auth, name=slug.title(), description="test",
+      source_dir=source,
+    )
+
+  from app.routes import app_schedules as apps_module
+  with patch("app.app_cron.read_crontab", return_value=""), \
+       patch("app.app_cron.register_cron") as register:
+    count, warnings, infrastructure_ready = (
+      apps_module.reconcile_app_cron_supervision(db)
+    )
+
+  assert count == 1
+  assert infrastructure_ready is True
+  assert len(warnings) == 1
+  assert "schedule.default" in warnings[0]
+  assert register.call_args.args[0] == "healthy"
+
+
+def test_invalid_zone_cadence_does_not_suppress_healthy_app_cron(
+  client, auth, db,
+):
+  for slug, source_cron in (("broken", "٠ ٥ * * *"), ("healthy", None)):
+    source = Path(get_settings().data_dir) / "apps" / slug
+    source.mkdir(parents=True)
+    (source / "fetch.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+    declaration = (
+      'SCHEDULE_TZ="UTC"\n'
+      f'SCHEDULE_SOURCE="{source_cron}"\n'
+      if source_cron else ""
+    )
+    (source / "init-cron.sh").write_text(
+      f'ENTRY="0 5 * * * {source}/fetch.sh 1"\n{declaration}',
+      encoding="utf-8",
+    )
+    create_local_app(
+      client, auth, name=slug.title(), description="test", source_dir=source,
+    )
+
+  from app.routes import app_schedules as apps_module
+  with patch("app.app_cron.read_crontab", return_value=""), \
+       patch("app.app_cron.register_cron") as register:
+    count, warnings, infrastructure_ready = (
+      apps_module.reconcile_app_cron_supervision(db)
+    )
+
+  assert count == 1
+  assert infrastructure_ready is True
+  assert len(warnings) == 1
+  assert "Invalid zone-local daily cron" in warnings[0]
+  assert register.call_args.args[0] == "healthy"
+
+
+@pytest.mark.parametrize(
+  "cron",
+  [
+    "99 * * * *", "0 25 * * *", "0 0 0 * *", "0 0 * 13 *",
+    "0 0 * * 8", "*/0 * * * *", "1-0 * * * *", "1,,2 * * * *",
+    f"*/{'9' * 4500} * * * *", "٠ * * * *", "0 * * * *\n",
+  ],
+)
+def test_cron_contract_rejects_values_the_scaffold_cannot_install(cron):
+  with pytest.raises(ManifestContractError):
+    validate_cron_expr(cron)
 
 
 def test_app_schedules_expose_zone_declaration(client, auth):
@@ -698,7 +777,7 @@ def test_renamed_job_debris_does_not_shadow_the_real_schedule(client, auth, db):
 
     with patch("app.app_cron.register_cron") as register, \
          patch("app.app_cron.write_crontab", return_value=True) as write:
-      count, warnings = apps_module.reconcile_app_cron_supervision(db)
+      count, warnings, infrastructure_ready = apps_module.reconcile_app_cron_supervision(db)
 
   assert warnings == []
   assert count == 1
@@ -892,7 +971,7 @@ def test_boot_never_adopts_an_unsupervised_owner_cron_entry(client, db):
   direct = f"15 4 * * * {source_dir}/fetch.sh {app.id}"
   with patch.object(apps_module, "_read_live_crontab", return_value=direct), \
        patch("app.app_cron.register_cron") as register:
-    count, warnings = apps_module.reconcile_app_cron_supervision(db)
+    count, warnings, infrastructure_ready = apps_module.reconcile_app_cron_supervision(db)
 
   assert count == 0
   assert warnings == []
@@ -1083,7 +1162,7 @@ def test_draft_schedule_declarations_do_not_change_owner_schedule_after_restart(
   (source / "mobius.json").write_text(json.dumps(manifest))
   with patch.object(app_schedules, "_read_live_crontab", return_value=""), \
        patch("app.app_cron.register_cron") as register:
-    count, warnings = app_schedules.reconcile_app_cron_supervision(db)
+    count, warnings, infrastructure_ready = app_schedules.reconcile_app_cron_supervision(db)
   assert count == 1
   assert warnings == []
   register.assert_called_once_with("schedule-isolation", "0 10 * * *", source / "fetch.sh", app["id"])

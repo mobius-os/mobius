@@ -1540,7 +1540,9 @@ def _reconcile_cron_after_install_rollback() -> None:
     from app.routes.app_schedules import reconcile_app_cron_supervision
     cron_db = SessionLocal()
     try:
-      _count, warnings = reconcile_app_cron_supervision(cron_db)
+      _count, warnings, _infrastructure_ready = (
+        reconcile_app_cron_supervision(cron_db)
+      )
     finally:
       cron_db.close()
     for warning in warnings:

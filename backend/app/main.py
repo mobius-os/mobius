@@ -286,12 +286,23 @@ async def lifespan(app):
     restart_authorization=startup_context.restart_authorization,
     restart_fallback_chats=startup_context.restart_fallback_chats,
   )
+  app.state.runtime_supervisors = supervisors
   await supervisors.start_process_services()
   record_memory_checkpoint("startup_frontend_watcher_started")
   if database_boot.serviceable:
     await supervisors.start_database_services()
     from app.saved_secure_inputs import recover_interrupted
     await recover_interrupted()
+    from app.startup import _capture_platform_activation_snapshot
+    try:
+      _capture_platform_activation_snapshot(startup_context)
+    except Exception as exc:
+      # A missing restart receipt must keep its wait unresolved, never invent
+      # success. It also must not take down an otherwise repairable server.
+      _log.error(
+        "platform restart receipt could not be recorded: %s", exc,
+        exc_info=True,
+      )
     record_memory_checkpoint("startup_ready")
   try:
     yield
@@ -1020,7 +1031,14 @@ def service_readiness() -> dict:
     return {"ready": False, **degraded}
   from app.chat_writer import writer_readiness
   is_ready, reason = writer_readiness()
-  return {"ready": True} if is_ready else {"ready": False, "reason": reason}
+  if not is_ready:
+    return {"ready": False, "reason": reason}
+  supervisors = getattr(app.state, "runtime_supervisors", None)
+  if supervisors is not None:
+    is_ready, reason = supervisors.database_service_readiness()
+    if not is_ready:
+      return {"ready": False, "reason": reason}
+  return {"ready": True}
 
 
 @app.get("/api/ready")

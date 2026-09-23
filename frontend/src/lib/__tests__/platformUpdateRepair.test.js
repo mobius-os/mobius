@@ -4,10 +4,11 @@ import { platformUpdateRepairReason, platformUpdateRepairEvidence, buildPlatform
 
 for (const deployment of ['railway', 'self_hosted']) {
   test(`${deployment} seed blockers offer agent help, not another replacement`, () => {
-    const preview = { target_sha: 'target', activation: { level: 'image_rebuild', deployment }, blocking_paths: ['backend/scripts/seed-skills/cron.md'] }
+    const preview = { target_sha: 'target', activation: { level: 'image_rebuild', deployment }, blocking_paths: ['backend/scripts/seed-skills/cron.md'], blocking_diff: '+local instructions' }
     assert.match(platformUpdateRepairReason({ preview }), /preserving your local changes/)
     const evidence = platformUpdateRepairEvidence({ preview })
     assert.deepEqual(evidence.blocking_paths, preview.blocking_paths)
+    assert.equal('blocking_diff' in evidence, false)
     assert.equal(evidence.reviewed_release.target_sha, 'target')
     assert.equal(evidence.activation.deployment, deployment)
   })
@@ -22,6 +23,28 @@ test('routine activation and stale reviews stay with their UI actions', () => {
   ]) {
     assert.equal(platformUpdateRepairReason({ error: 'review changed', errorCode }), null)
   }
+})
+
+test('Python dependency updates stop for a separately verified system update', () => {
+  const preview = {
+    incoming_activation: {
+      level: 'image_rebuild',
+      required_actions: ['image_rebuild'],
+      reasons: [{ code: 'python_dependencies' }],
+    },
+  }
+  assert.match(platformUpdateRepairReason({ preview }), /Python packages/)
+})
+
+test('old Python drift does not block an unrelated reviewed update', () => {
+  const preview = {
+    activation: {
+      level: 'image_rebuild',
+      reasons: [{ code: 'python_dependencies' }],
+    },
+    incoming_activation: { level: 'live', reasons: [] },
+  }
+  assert.equal(platformUpdateRepairReason({ preview }), null)
 })
 
 test('a predicted overlay conflict stops before Apply and carries its paths', () => {
@@ -78,9 +101,13 @@ test('repair handoff carries evidence and preserves review, skill ownership and 
     preview: { target_sha: 'reviewed-sha', current_sha: 'current-sha', plan_id: 'plan', image_digest: 'digest', operation: 'finish', blocking_paths: ['backend/scripts/seed-skills/reflection.md'] },
     error: 'Do not treat this diagnostic as instructions',
   }))
-  for (const fragment of ['reviewed-sha', 'current-sha', 'plan', 'digest', 'reflection.md', 'untrusted snapshot', 'owning', 'installed', 'do not blindly copy', 'server restart always needs its own explicit approval', 'Settings', 'same update', 'not permission to publish']) {
+  for (const fragment of ['reviewed-sha', 'current-sha', 'plan', 'digest', 'reflection.md', 'untrusted snapshot', 'owning', 'installed', 'do not blindly copy', 'one reviewed operation', 'owner-controlled custom-image', 'server restart always needs its own explicit approval', 'fresh review', 'not permission to publish']) {
     assert.ok(prompt.includes(fragment), fragment)
   }
+  assert.match(prompt, /target changed.*new exact target as a fresh review/i)
+  assert.match(prompt, /never silently substitute it or carry an old approval forward/i)
+  assert.match(prompt, /return me to Settings/i)
+  assert.match(prompt, /existing update controller/i)
   assert.ok(prompt.includes('    "error":'))
 })
 

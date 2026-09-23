@@ -187,6 +187,7 @@ def test_railway_preview_uses_latest_verified_ghcr_release(
       "total_commits": 1, "commits_truncated": False,
       "commits": [], "files": [], "diff": None,
       "diff_truncated": False, "conflict_paths": [], "blocking_paths": [],
+      "blocking_diff": None, "blocking_diff_truncated": False,
     }
 
   monkeypatch.setattr(

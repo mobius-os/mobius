@@ -17,6 +17,10 @@ export function platformUpdateRepairReason({ preview, platform, rebuild, error =
   if (preview?.conflict_paths?.length) {
     return 'This update overlaps your local changes and needs help before Apply.'
   }
+  const incomingActivation = preview?.incoming_activation || preview?.activation
+  if (incomingActivation?.reasons?.some(reason => reason?.code === 'python_dependencies')) {
+    return 'This update changes Python packages and needs a separately checked system update.'
+  }
   const level = (preview || platform)?.activation?.level
   if (requiresAgentActivation((preview || platform)?.activation) || errorCode === 'external_activation_required') {
     return 'Möbius needs to check your deployment settings before this update can finish.'
@@ -42,6 +46,7 @@ export function platformUpdateRepairEvidence({ preview, platform, rebuild, error
     } : null,
     installed_release: platform?.contained_upstream_sha || null,
     activation: preview?.activation || platform?.activation || null,
+    incoming_activation: preview?.incoming_activation || null,
     blocking_paths: preview?.blocking_paths || [],
     conflict_paths: preview?.conflict_paths || platform?.conflict_paths || [],
     source_state: platform?.state || null,
@@ -61,7 +66,10 @@ export function buildPlatformUpdateRepairPrompt(evidence) {
     '', diagnostic, '',
     'Read the platform-maintenance and relevant owning skills. Compare the reviewed release, current source, working edits, installed dependencies and active runtime as needed. Diagnose at the owning layer; do not bypass preservation checks or automatically discard local changes.',
     'For backend/scripts/seed-skills blockers, distinguish baked templates from the installed, owner-edited or app-owned skills actually consumed. Compare their contents and ownership. Preserve useful customizations in the correct live owner before proposing any template reconciliation; do not blindly copy over an installed skill or exempt the seed directory from the image guard.',
+    'Do not install image-dependent source separately. Keep source and system replacement as one reviewed operation until the replacement executor can prove the new source with the new environment.',
+    'For a genuine local image customization, support one of two preserving outcomes: a freshly reviewed official target that already includes the required behavior, or an explicit owner-controlled custom-image deployment whose exact image is built, scratch-checked and verified after cutover. Do not replace the container with an official image that lacks the local behavior.',
     'Implement a targeted non-destructive repair when supported by the evidence and test it. Ask before destructive migrations, host-authority changes, paid external operations or container replacement. A server restart always needs its own explicit approval. This repair request is not permission to publish, push, apply a newer release, or restart.',
-    'Finish by returning me to Settings to refresh and review the same update again. Use the existing reviewed updater and controller, not a parallel deployment path. If the target changed, explain it and require a fresh review. Do not automatically retry an update with an uncertain outcome; inspect its recorded progress first.',
+    'After the repair, refresh the existing updater status and immutable preview and inspect recorded progress. If the target changed, explain the change and present the new exact target as a fresh review before asking to finish; never silently substitute it or carry an old approval forward. A stale plan or a previous attempt with an uncertain outcome must stop for fresh review and must never be retried automatically.',
+    'When the blocker is resolved, return me to Settings to review the exact update again. Use the existing update controller; do not create a parallel deployment path or carry an old approval forward. If it still cannot be completed safely, explain the concrete remaining step.',
   ].join('\n\n')
 }

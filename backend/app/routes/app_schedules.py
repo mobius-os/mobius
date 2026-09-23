@@ -215,7 +215,9 @@ def _prune_orphaned_supervised_entries(apps_root: Path, runtime_roots: dict[Path
   return dropped
 
 
-def reconcile_app_cron_supervision(db: Session) -> tuple[int, list[str]]:
+def reconcile_app_cron_supervision(
+  db: Session,
+) -> tuple[int, list[str], bool]:
   """Converge every live managed schedule through the common job runner.
 
   Cron is deliberately started only after FastAPI lifespan completes. This
@@ -236,10 +238,13 @@ def reconcile_app_cron_supervision(db: Session) -> tuple[int, list[str]]:
   try:
     resolved_root = apps_root.resolve(strict=True)
   except OSError:
-    return 0, [f"apps root unavailable: {apps_root}"]
-  live_crontab = _read_live_crontab()
+    return 0, [f"apps root unavailable: {apps_root}"], False
+  live_crontab = app_cron.read_crontab()
+  if live_crontab is None:
+    return 0, ["cron infrastructure unavailable: crontab could not be read"], False
   reconciled = 0
   warnings: list[str] = []
+  infrastructure_ready = True
   from app.applied_app_runtime import runtime_root, AppliedRuntimeUnavailable
   runtime_roots = {}
   apps = db.query(models.App).filter(models.App.deleted_at.is_(None)).all()
@@ -264,11 +269,21 @@ def reconcile_app_cron_supervision(db: Session) -> tuple[int, list[str]]:
       warnings.append(f"app {app.id}: {exc}")
       continue
     cron, job_name = schedule
-    job_path = resolved_source / job_name
     try:
-      if not (accepted_root / job_name).is_file():
-        raise ValueError(f"job is missing or a symlink: {job_name}")
+      validate_cron_expr(cron)
+    except ManifestContractError as exc:
+      warnings.append(f"app {app.id}: {exc}")
+      continue
+    job_path = resolved_source / job_name
+    if not (accepted_root / job_name).is_file():
+      warnings.append(f"app {app.id}: job is missing or a symlink: {job_name}")
+      continue
+    try:
       declaration = _app_zone_declaration(app)
+    except (OSError, RuntimeError, ValueError) as exc:
+      warnings.append(f"app {app.id}: {exc}")
+      continue
+    try:
       if declaration is not None:
         timezone, zone_cron = declaration
         app_cron.register_cron(
@@ -281,7 +296,11 @@ def reconcile_app_cron_supervision(db: Session) -> tuple[int, list[str]]:
         app_cron.register_cron(
           resolved_source.name, cron, job_path, app.id,
         )
+    except app_cron.CronDeclarationError as exc:
+      warnings.append(f"app {app.id}: {exc}")
+      continue
     except Exception as exc:
+      infrastructure_ready = False
       warnings.append(f"app {app.id}: {exc}")
       continue
     reconciled += 1
@@ -291,7 +310,7 @@ def reconcile_app_cron_supervision(db: Session) -> tuple[int, list[str]]:
   # for debris.
   for line in _prune_orphaned_supervised_entries(resolved_root, runtime_roots):
     log.info("retired orphaned cron entry (job script gone): %s", line.strip())
-  return reconciled, warnings
+  return reconciled, warnings, infrastructure_ready
 
 
 @router.get("/schedules", response_model=list[schemas.AppScheduleOut])

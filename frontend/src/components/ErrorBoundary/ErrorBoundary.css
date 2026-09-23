@@ -52,9 +52,9 @@
   outline: none;
 }
 
-/* Platform-degraded notice: stack the shared recovery card with a quiet
-   "continue" affordance. The built-in copy still works, so dismissing to keep
-   using it is a legitimate, low-emphasis choice. */
+/* Platform-degraded notice: two honest next steps at the same visual level.
+   The protected working version stays available; agent repair is recommended
+   without hiding the non-agent path under a tertiary link. */
 .platform-degraded {
   margin: auto;
   width: 100%;
@@ -69,22 +69,27 @@
   margin: 0;
 }
 
-.platform-degraded__continue {
-  background: none;
-  border: none;
-  padding: 6px 8px;
-  color: var(--text-muted, rgba(236, 236, 236, 0.72));
-  font: inherit;
-  cursor: pointer;
-  text-decoration: underline;
+.platform-degraded__actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
 }
 
-.platform-degraded__continue:hover {
-  color: var(--text, #ececec);
+.platform-degraded__action {
+  min-height: 58px;
+  flex-direction: column;
+  gap: 2px;
+  text-align: center;
 }
 
-.platform-degraded__continue:focus-visible {
-  outline: 2px solid var(--focus, #4a9eff);
-  outline-offset: 2px;
-  border-radius: 4px;
+.platform-degraded__action small {
+  font-size: 11px;
+  font-weight: 600;
+  opacity: 0.78;
+}
+
+@media (max-width: 30rem) {
+  .platform-degraded__actions {
+    grid-template-columns: 1fr;
+  }
 }

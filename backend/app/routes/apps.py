@@ -3366,7 +3366,7 @@ async def recover_app(
         cron_db.close()
 
     try:
-      _cron_count, _cron_warnings = await asyncio.to_thread(
+      _cron_count, _cron_warnings, _cron_infrastructure_ready = await asyncio.to_thread(
         _reconcile_recovered_cron,
       )
       if _cron_count:

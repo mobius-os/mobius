@@ -1294,6 +1294,82 @@ async def test_mixed_activation_cannot_dispatch_replacement(monkeypatch, deploym
 
 
 @pytest.mark.asyncio
+async def test_python_dependency_replacement_stops_before_source_apply(monkeypatch):
+  monkeypatch.setattr(
+    dc.platform_activation, "deployment_kind", lambda: "self_hosted",
+  )
+  monkeypatch.setattr(
+    dc.platform_update,
+    "reviewed_container_rebuild_plan",
+    lambda **_plan: {
+      "activation": dc.platform_activation.classify_activation(
+        ["backend/requirements.lock"], deployment="self_hosted",
+      ),
+      "blockers": [],
+    },
+  )
+
+  async def forbidden(*_args, **_kwargs):
+    pytest.fail("image-dependent source must not be applied in the old image")
+
+  monkeypatch.setattr(dc.platform_update, "apply_platform_update", forbidden)
+
+  with pytest.raises(dc.DeploymentControlError) as error:
+    await dc.request_reviewed_rebuild(
+      db=None, plan_id="a" * 64, current_sha="1" * 40,
+      target_sha="2" * 40, image_digest=None,
+    )
+
+  assert error.value.code == "external_activation_required"
+  assert "Python packages" in error.value.message
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("incoming_paths", [[], ["Dockerfile"]])
+async def test_existing_python_drift_does_not_block_image_replacement(
+  monkeypatch, incoming_paths,
+):
+  monkeypatch.setattr(
+    dc.platform_activation, "deployment_kind", lambda: "self_hosted",
+  )
+  combined_paths = ["backend/requirements.lock", *incoming_paths]
+  monkeypatch.setattr(
+    dc.platform_update,
+    "reviewed_container_rebuild_plan",
+    lambda **_plan: {
+      "activation": dc.platform_activation.classify_activation(
+        combined_paths, deployment="self_hosted",
+      ),
+      "incoming_activation": dc.platform_activation.classify_activation(
+        incoming_paths, deployment="self_hosted",
+      ),
+      "blockers": [],
+    },
+  )
+
+  async def status():
+    return {"supported": True, "state": "idle"}
+
+  async def apply(_db, **_plan):
+    return {"state": "activation_needed", "merge_commit": "3" * 40}
+
+  async def replace(*, expected_sha, final_check):
+    final_check()
+    return {"state": "queued", "expected_sha": expected_sha}
+
+  monkeypatch.setattr(dc, "read_rebuild_status", status)
+  monkeypatch.setattr(dc.platform_update, "apply_platform_update", apply)
+  monkeypatch.setattr(dc, "_request_self_hosted_rebuild", replace)
+
+  result = await dc.request_reviewed_rebuild(
+    db=None, plan_id="a" * 64, current_sha="1" * 40,
+    target_sha="2" * 40, image_digest=None,
+  )
+
+  assert result["state"] == "queued"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize('deployment,path', [
   ('self_hosted', 'scripts/install-rebuild-helper.sh'),
   ('self_hosted', 'scripts/mobius-rebuild-host.py'),

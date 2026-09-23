@@ -64,6 +64,10 @@ _PLAN_ERROR_MESSAGES = {
   "image_release_invalid": (
     "The official image returned an invalid release identity. Try again later."
   ),
+  "image_rebuild_required": (
+    "This update needs a system replacement. Return to the review and use "
+    "its update action so Möbius can keep the source and running system together."
+  ),
 }
 
 

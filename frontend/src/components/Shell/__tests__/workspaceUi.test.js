@@ -1206,8 +1206,7 @@ test('the Settings surface responds to PANE width via a query container', () => 
   assert.match(settingsCss, /@container settings \(max-width: 620px\)/)
   assert.match(settingsCss, /@container settings \(max-width: 400px\)/)
   assert.doesNotMatch(settingsCss, /@media \(max-width: 620px\)/)
-  // Update review belongs to the Settings surface in both worlds. In Builder,
-  // that surface is one pane, so the backdrop must not cover its siblings.
+  // The update review is modal, but its backdrop belongs to the Settings pane.
   assert.match(urmCss, /\.urm__overlay\s*\{[\s\S]*?position:\s*absolute/)
 })
 
@@ -1239,8 +1238,8 @@ test('shell generations advertise one explicit update without intercepting navig
 
 test('the builder no-full-screen invariant scopes to DESTINATIONS, not transient dialogs (§2)', () => {
   // The invariant governs navigable destinations (Settings, takeover views,
-  // immersive), NOT dismissible dialogs layered over the workspace. Those stay
-  // fixed modals with their own dismiss and are out of the invariant's scope.
+  // immersive), NOT dismissible dialogs layered over the workspace. The update
+  // review remains modal while its backdrop is scoped to the Settings pane.
   const navSrc = readFileSync(new URL('../../../hooks/useNavigation.js', import.meta.url), 'utf8')
   assert.match(navSrc, /DESTINATIONS, NOT DIALOGS/)
   const walkthrough = readFileSync(
@@ -1250,8 +1249,7 @@ test('the builder no-full-screen invariant scopes to DESTINATIONS, not transient
     new URL('../../SettingsView/UpdateReviewModal.css', import.meta.url), 'utf8',
   )
   // First-use guidance is now a non-modal region layered over the live shell,
-  // with an explicit dismiss action. Update review is still a modal, but its
-  // containing Settings surface owns the backdrop geometry.
+  // with an explicit dismiss action; update review remains a pane-scoped modal.
   assert.match(walkthrough, /role="region"/)
   assert.match(walkthrough, /aria-label="Dismiss welcome"/)
   assert.doesNotMatch(walkthrough, /aria-modal="true"/)

@@ -45,7 +45,7 @@ _SOURCE_FILES_MANAGED_PREFIXES = (
 _SOURCE_FILES_MANAGED_EXACT = frozenset((
   "index.jsx", ".gitignore", "init-cron.sh", ".mobius-static-assets.json",
 ))
-_CRON_FIELD_OK = re.compile(r"^[\d\*/,\- ]+$")
+_CRON_FIELD_OK = re.compile(r"[0-9\*/,\- ]+", re.ASCII)
 _SKILL_FILENAME_OK = re.compile(r"^[a-z0-9][a-z0-9._-]*\.md$")
 _PACKAGE_ID_OK = re.compile(r"^[a-z0-9][a-z0-9._:-]{2,127}$")
 
@@ -150,13 +150,47 @@ def validate_cron_expr(expr: str) -> None:
     _fail("schedule.default must be a string.")
   if not expr or expr[0] == "-":
     _fail(f"schedule.default must not be empty or start with '-': {expr!r}")
-  if not _CRON_FIELD_OK.match(expr):
+  if not _CRON_FIELD_OK.fullmatch(expr):
     _fail(
       f"schedule.default contains disallowed characters: {expr!r}. "
       "Allowed: digits, *, /, ,, -, whitespace."
     )
-  if len(expr.split()) != 5:
+  fields = expr.split()
+  if len(fields) != 5:
     _fail(f"schedule.default must have exactly 5 cron fields, got {expr!r}")
+  bounds = (
+    ("minute", 0, 59),
+    ("hour", 0, 23),
+    ("day of month", 1, 31),
+    ("month", 1, 12),
+    ("day of week", 0, 7),
+  )
+  for field, (label, lower, upper) in zip(fields, bounds, strict=True):
+    for item in field.split(","):
+      if not item:
+        _fail(f"schedule.default has an empty {label} item: {expr!r}")
+      base, separator, step_text = item.partition("/")
+      if separator:
+        if "/" in step_text or not step_text.isdigit():
+          _fail(f"schedule.default has an invalid {label} step: {expr!r}")
+        try:
+          step = int(step_text)
+        except ValueError:
+          _fail(f"schedule.default has an invalid {label} step: {expr!r}")
+        if not 1 <= step <= upper - lower + 1:
+          _fail(f"schedule.default has an out-of-range {label} step: {expr!r}")
+      if base == "*":
+        continue
+      start_text, dash, end_text = base.partition("-")
+      if not start_text.isdigit() or (dash and not end_text.isdigit()) or "-" in end_text:
+        _fail(f"schedule.default has an invalid {label} value: {expr!r}")
+      try:
+        start = int(start_text)
+        end = int(end_text) if dash else start
+      except ValueError:
+        _fail(f"schedule.default has an invalid {label} value: {expr!r}")
+      if not lower <= start <= end <= upper:
+        _fail(f"schedule.default has an out-of-range {label} value: {expr!r}")
 
 
 def validate_manifest_offline(offline) -> None:
