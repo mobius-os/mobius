@@ -1260,6 +1260,77 @@ def _install_claude_reset_mocks(
 
 
 @pytest.mark.asyncio
+async def test_claude_reset_replay_409_keeps_intent_while_usage_is_stale(
+  tmp_path, monkeypatch,
+):
+  from app import provider_usage
+
+  provider_usage._claude_reset_locks.clear()
+  posts = []
+
+  async def current(_provider_id, _data_dir, *, force_refresh=False):
+    assert force_refresh is True
+    return {
+      "reset_credits": {
+        "redeemable": True,
+        "next_credit_id": "grant-next",
+        "credits": [{"id": "grant-next", "resets_left": 2}],
+      },
+    }
+
+  class Client:
+    def __init__(self, **_kwargs):
+      pass
+
+    async def __aenter__(self):
+      return self
+
+    async def __aexit__(self, *_args):
+      return None
+
+    async def post(self, url, *, headers, json):
+      posts.append(json)
+      if len(posts) == 1:
+        raise httpx.ReadTimeout("response lost after provider commit")
+      return httpx.Response(409, request=httpx.Request("POST", url))
+
+  async def token(_data_dir):
+    return "secret-token"
+
+  organization_uuid = "00000000-0000-4000-8000-000000000001"
+  monkeypatch.setattr(provider_usage, "read_provider_usage", current)
+  monkeypatch.setattr(provider_usage.httpx, "AsyncClient", Client)
+  monkeypatch.setattr(provider_usage.providers, "claude_access_token", token)
+  monkeypatch.setattr(
+    provider_usage.providers, "claude_organization_uuid",
+    lambda _data_dir: organization_uuid,
+  )
+
+  first = await provider_usage.redeem_claude_reset(
+    str(tmp_path), credit_id="grant-next", expected_resets_left=2,
+  )
+  provider_usage._claude_reset_locks.clear()  # restart before the replay
+  second = await provider_usage.redeem_claude_reset(
+    str(tmp_path), credit_id="grant-next", expected_resets_left=2,
+  )
+  third = await provider_usage.redeem_claude_reset(
+    str(tmp_path), credit_id="grant-next", expected_resets_left=2,
+  )
+
+  assert [first["outcome"], second["outcome"], third["outcome"]] == [
+    "unknown", "unknown", "unknown",
+  ]
+  assert len(posts) == 3
+  assert len({post["request_id"] for post in posts}) == 1
+  intent_path = provider_usage._claude_reset_intent_path(
+    str(tmp_path), organization_uuid,
+  )
+  assert provider_usage._load_claude_reset_intent(intent_path)["request_id"] == (
+    posts[0]["request_id"]
+  )
+
+
+@pytest.mark.asyncio
 async def test_claude_reset_pending_intent_yields_to_authoritative_successor(
   tmp_path, monkeypatch,
 ):
@@ -1443,15 +1514,15 @@ async def test_claude_reset_fresh_http_error_keeps_request_id(
     monkeypatch, provider_usage, current=current, post=post,
   )
 
-  with pytest.raises(httpx.HTTPStatusError):
-    await provider_usage.redeem_claude_reset(
-      str(tmp_path), credit_id="grant-next", expected_resets_left=2,
-    )
-  result = await provider_usage.redeem_claude_reset(
+  first = await provider_usage.redeem_claude_reset(
+    str(tmp_path), credit_id="grant-next", expected_resets_left=2,
+  )
+  second = await provider_usage.redeem_claude_reset(
     str(tmp_path), credit_id="grant-next", expected_resets_left=2,
   )
 
-  assert result["outcome"] == "reset"
+  assert first["outcome"] == "unknown"
+  assert second["outcome"] == "reset"
   assert len({post["request_id"] for post in posts}) == 1
 
 

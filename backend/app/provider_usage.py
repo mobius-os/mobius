@@ -848,11 +848,11 @@ async def redeem_claude_reset(
         )
         response.raise_for_status()
         result = _claude_reset_result(response.json())
-    except httpx.HTTPStatusError as exc:
-      if exc.response.status_code < 500 and exc.response.status_code != 408:
-        if replaying:
-          return _unknown_claude_reset()
-        raise
+    except httpx.HTTPStatusError:
+      # A response status after a submitted claim is not proof that Claude
+      # spent nothing. In particular, a replay of a committed request may be
+      # rejected while the usage snapshot still shows the old count. Keep the
+      # same request id until provider usage proves whether it was consumed.
       return _unknown_claude_reset()
     except (httpx.RequestError, ValueError):
       return _unknown_claude_reset()
