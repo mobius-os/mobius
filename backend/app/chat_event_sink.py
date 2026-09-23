@@ -44,6 +44,7 @@ from app.events import (
 )
 from app.config import agent_scratch_root
 from app.memory_recall import (
+  MAX_RECALL_RESULT_SCAN_CHARS,
   RECALL_SEARCHING,
   RecallBinding,
   background_dispatch_from_result,
@@ -52,7 +53,6 @@ from app.memory_recall import (
   recall_from_command,
   settle_recall,
   settle_recall_from_task_output,
-  settle_recall_without_receipt,
 )
 from app.peer_message import (
   peer_message_from_call, settle_peer_message,
@@ -393,6 +393,10 @@ class ChatEventSink:
     # a fresh assistant message.
     self._steering = False
     self._lifecycle_writes: list[tuple[RecordAgentLifecycle, object]] = []
+    # Some providers stream command output but omit the final aggregate. Keep
+    # only the bounded raw tail needed by protocol receipts; presentation
+    # carving and persisted tool output remain independent.
+    self._memory_output_tails: dict[str, str] = {}
 
   def _start_side_task(
     self,
@@ -581,7 +585,9 @@ class ChatEventSink:
   def _tool_was_memory_recall(self, tool_use_id) -> bool:
     return self._memory_recall_for_tool(tool_use_id) is not None
 
-  def _stamp_memory_recall(self, event: ChatEvent) -> None:
+  def _stamp_memory_recall(
+    self, event: ChatEvent, *, result_content: object = None,
+  ) -> None:
     """Name a Memory-app recall on the event, in two lifecycle phases.
 
     The documented simple command identifies the lookup, so the live turn can
@@ -606,36 +612,20 @@ class ChatEventSink:
       return
     pending = self._memory_recall_for_tool(event.get("tool_use_id"))
     if event.get("output_complete") and pending is not None:
-      dispatch = background_dispatch_from_result(event.get("content"))
+      content = (
+        event.get("content")
+        if result_content is None
+        else result_content
+      )
+      dispatch = background_dispatch_from_result(content)
       if dispatch is not None and event.get("output_exit_code") in (None, 0):
         # A `run_in_background` Bash call: the placeholder is not Memory's
         # answer. The task_done for this id (or finalize) settles it.
         event["recall"] = defer_recall_to_task(pending, dispatch)
         return
-      content = event.get("content")
-      if (
-        event.get("output_exit_code") in (None, 0)
-        and (not isinstance(content, str) or not content.strip())
-      ):
-        # Codex can deliver a command result to the model while omitting the
-        # terminal aggregate. Prefer any transcript-facing streamed tail:
-        # Memory prints its compact receipt last, so the tail is sufficient
-        # without accumulating unbounded command output in the chat block.
-        blk = _tool_block_for_event(
-          self.assistant_blocks, event.get("tool_use_id"),
-        )
-        streamed = blk.get("output") if isinstance(blk, dict) else None
-        if isinstance(streamed, str) and streamed.strip():
-          content = streamed
-      if (
-        event.get("output_exit_code") in (None, 0)
-        and (not isinstance(content, str) or not content.strip())
-      ):
-        event["recall"] = settle_recall_without_receipt(pending)
-      else:
-        event["recall"] = settle_recall(
-          pending, content, event.get("output_exit_code"),
-        )
+      event["recall"] = settle_recall(
+        pending, content, event.get("output_exit_code"),
+      )
 
   def _deferred_recall_blocks(self, task_id: str | None = None) -> list[dict]:
     """Tool blocks whose Memory lookup is still waiting on a background task."""
@@ -890,10 +880,9 @@ class ChatEventSink:
     # and before the broadcast below, so the rewritten event is the single
     # source feeding the persisted block, the live wire, and the catch-up log.
     #
-    # Protocol-owned receipts are parsed from the full result before generic
-    # presentation carving. This keeps Memory's bounded V2 page receipt and
-    # peer envelopes independent of a UI excerpt heuristic; only the ordinary
-    # display body is reduced and stashed below.
+    # Protocol-owned receipts are parsed from the saved full result rather than
+    # the carved presentation. Generic reduction establishes a missing exit
+    # code first, so a failed command cannot mint successful protocol state.
     output_reduced = False
     owner_card_receipt_id = None
     if event_type == "tool_output":
@@ -901,7 +890,23 @@ class ChatEventSink:
       # but the marked envelope must not enter Möbius's live UI, transcript, or
       # chat-side logs. Normal sealed execution never emits these markers.
       event["content"] = redact_reveal_markers(event.get("content"))
-      self._stamp_memory_recall(event)
+      full_tool_output = event.get("content")
+      tool_use_id = event.get("tool_use_id")
+      if (
+        isinstance(tool_use_id, str)
+        and self._tool_was_memory_recall(tool_use_id)
+      ):
+        if event.get("output_complete") is True:
+          streamed_tail = self._memory_output_tails.pop(tool_use_id, "")
+          if streamed_tail:
+            terminal = full_tool_output if isinstance(full_tool_output, str) else ""
+            full_tool_output = (streamed_tail + terminal)[
+              -MAX_RECALL_RESULT_SCAN_CHARS:
+            ]
+        elif isinstance(full_tool_output, str) and full_tool_output:
+          self._memory_output_tails[tool_use_id] = (
+            self._memory_output_tails.get(tool_use_id, "") + full_tool_output
+          )[-MAX_RECALL_RESULT_SCAN_CHARS:]
       # Settle a peer-network exchange from the FULL result JSON before it can be
       # carved by reduction (the envelope is one object, not a tail-safe line).
       self._stamp_peer_message(event)
@@ -922,9 +927,10 @@ class ChatEventSink:
             owner_card_receipt_id = _owner_card_receipt_id(blk.get("output"))
       output_reduced = self._reduce_tool_output(event)
       if not output_reduced and event.get("output_exit_code") is None:
-        exit_code = tool_output_exit_code(event.get("content"))
+        exit_code = tool_output_exit_code(full_tool_output)
         if exit_code is not None:
           event["output_exit_code"] = exit_code
+      self._stamp_memory_recall(event, result_content=full_tool_output)
     if event_type in ("tool_start", "tool_input"):
       self._stamp_memory_recall(event)
     if event_type == "task_done":

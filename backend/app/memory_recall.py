@@ -47,7 +47,6 @@ MAX_RECALL_PATH_CHARS = 256
 # means the database never materializes an old Memory search's complete note
 # bodies merely to read the small structured receipt printed at the end.
 MAX_RECALL_RESULT_SCAN_CHARS = 262_144
-_MAX_SECTION_LINES_SCANNED = 256
 
 RECALL_SEARCHING = "searching"
 RECALL_HIT = "hit"
@@ -76,34 +75,29 @@ class RecallBinding:
   module never learns any app's location.
   """
 
-  by_path: Mapping[str, tuple[str, str]]
+  by_path: Mapping[str, str]
   tool_names: tuple[str, ...]
 
   @property
   def is_empty(self) -> bool:
     return not self.by_path
 
-  def entry_for(self, token: str) -> tuple[str, str] | None:
-    return self.by_path.get(token)
-
   @classmethod
-  def of(cls, pairs: Iterable[tuple[str, str, str]]) -> "RecallBinding":
-    """Build from (path, slug, operation) tuples; first entry wins.
+  def of(cls, pairs: Iterable[tuple[str, str]]) -> "RecallBinding":
+    """Build from (path, slug) tuples; first entry wins.
 
     Pure: ``tool_names`` is derived with ``PurePosixPath`` and never stats the
     filesystem, so the protocol module stays stdlib-only and independently
     testable. Path construction lives in ``memory_provider``.
     """
-    by_path: dict[str, tuple[str, str]] = {}
+    by_path: dict[str, str] = {}
     names: list[str] = []
-    for path, slug, operation in pairs:
+    for path, slug in pairs:
       if not isinstance(path, str) or not path or not isinstance(slug, str):
-        continue
-      if operation not in ("catalog", "read"):
         continue
       if path in by_path:
         continue
-      by_path[path] = (slug, operation)
+      by_path[path] = slug
       name = PurePosixPath(path).name
       if name and name not in names:
         names.append(name)
@@ -126,9 +120,6 @@ _RESULT_RE = re.compile(
 _PATH_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]*\.md$")
 _NOTE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 _MAX_NOTE_ID_CHARS = 128
-_LOOKUP_ID_RE = re.compile(r"^[a-f0-9]{64}$")
-_CURSOR_RE = re.compile(r"^[A-Za-z0-9._~:-]{1,512}$")
-_MAX_COUNT = 1_000_000
 
 
 def _clean(value: str, limit: int) -> str:
@@ -216,45 +207,38 @@ def _unwrap_login_shell(tokens: list[str]) -> list[str] | None:
 
 def _recall_invocation(
   tokens: list[str], binding: RecallBinding,
-) -> tuple[str, str, str] | None:
-  """Return app slug, operation, and query for a documented Memory command.
+) -> tuple[str, str] | None:
+  """Return app slug and optional query for Memory's one public entry point.
 
-  Exact arity is a security boundary, not mere tidiness: ``shlex`` treats a
-  newline as whitespace, so accepting arbitrary trailing tokens would also
-  accept a second shell command whose output could forge the structured result
-  line. Discovery ends after query + chat id. Expansion ends after lookup id +
-  selection + cursor + chat id. Both forms reject every trailing token.
+  Exact arity is a security boundary: discovery uses query + chat id, while
+  the app-owned expansion protocol uses four arguments. Trailing shell tokens
+  are rejected rather than partially parsed.
   """
   index = 0
   while index < len(tokens) and _ENV_ASSIGN_RE.match(tokens[index]):
     index += 1
   if index >= len(tokens):
     return None
-  head = tokens[index]
-  direct = binding.entry_for(head)
-  if direct is not None:
-    slug, operation = direct
-    expected = index + (3 if operation == "catalog" else 5)
-    if len(tokens) != expected:
+
+  def bound(script_index: int) -> tuple[str, str] | None:
+    slug = binding.by_path.get(tokens[script_index])
+    if slug is None:
       return None
-    query = tokens[index + 1] if operation == "catalog" else ""
-    return slug, operation, query
-  if not _INTERPRETER_RE.match(head):
+    if len(tokens) == script_index + 3:
+      return slug, tokens[script_index + 1]
+    if len(tokens) == script_index + 5:
+      return slug, ""
+    return None
+
+  if tokens[index] in binding.by_path:
+    return bound(index)
+  if not _INTERPRETER_RE.match(tokens[index]):
     return None
   for script_index, token in enumerate(tokens[index + 1:], start=index + 1):
     if token.startswith("-"):
       continue
-    entry = binding.entry_for(token)
-    if entry is not None:
-      slug, operation = entry
-      expected = script_index + (3 if operation == "catalog" else 5)
-      if len(tokens) != expected:
-        return None
-      query = tokens[script_index + 1] if operation == "catalog" else ""
-      return slug, operation, query
-    return None
+    return bound(script_index)
   return None
-
 
 def recall_from_command(command: object, binding: RecallBinding) -> dict | None:
   """Return a pending recall marker when this command RUNS a memory lookup.
@@ -265,7 +249,7 @@ def recall_from_command(command: object, binding: RecallBinding) -> dict | None:
   summary, an empty binding — and, deliberately, for any command that merely
   names the script.
   """
-  if not isinstance(command, str) or not command:
+  if not isinstance(command, str) or not command or "\n" in command or "\r" in command:
     return None
   if len(command) > _MAX_COMMAND_SCAN_CHARS:
     return None
@@ -281,22 +265,23 @@ def recall_from_command(command: object, binding: RecallBinding) -> dict | None:
   invocation = _recall_invocation(tokens, binding) if tokens else None
   if not invocation:
     return None
-  app_slug, operation, raw_query = invocation
+  app_slug, raw_query = invocation
   query = _clean(raw_query, MAX_RECALL_QUERY_CHARS)
   return {
     "status": RECALL_SEARCHING,
     "app_slug": app_slug,
-    "phase": operation,
     **({"query": query} if query else {}),
   }
 
 
-def _receipt_notes(raw_notes: object, *, limit: int) -> list[dict[str, str]]:
+def _receipt_notes(
+  raw_notes: object, *, limit: int | None = None,
+) -> list[dict[str, str]]:
   if not isinstance(raw_notes, list):
     return []
   notes: list[dict[str, str]] = []
   seen: set[str] = set()
-  for raw_note in raw_notes[:_MAX_SECTION_LINES_SCANNED]:
+  for raw_note in raw_notes:
     if not isinstance(raw_note, dict):
       continue
     path = _safe_path(raw_note.get("path"))
@@ -313,65 +298,36 @@ def _receipt_notes(raw_notes: object, *, limit: int) -> list[dict[str, str]]:
     if excerpt:
       note["excerpt"] = excerpt
     notes.append(note)
-    if len(notes) >= limit:
+    if limit is not None and len(notes) >= limit:
       break
   return notes
 
 
-def _bounded_count(value: object) -> int | None:
-  if isinstance(value, bool) or not isinstance(value, int):
-    return None
-  return value if 0 <= value <= _MAX_COUNT else None
-
-
 def _v2_result(payload: dict) -> dict:
-  """Validate one bounded V2 page receipt without parsing page body text."""
+  """Validate app-owned display copy and links, not Memory's protocol."""
   status = payload.get("status")
   if status == RECALL_FAILED:
     return {"status": RECALL_FAILED}
-  phase = payload.get("phase")
-  if phase not in ("catalog", "read"):
+  if status not in (RECALL_HIT, RECALL_EMPTY):
     return {"status": RECALL_FAILED}
-  lookup_id = payload.get("lookup_id")
-  if not isinstance(lookup_id, str) or not _LOOKUP_ID_RE.fullmatch(lookup_id):
+  raw_display = payload.get("display")
+  if not isinstance(raw_display, dict):
     return {"status": RECALL_FAILED}
-
-  result: dict = {
-    "status": status,
-    "phase": phase,
+  display = {
+    key: cleaned
+    for key, limit in (("label", 160), ("detail", 300), ("warning", 300))
+    if (cleaned := _clean(raw_display.get(key), limit))
   }
-  if payload.get("reused") is True:
-    result["reused"] = True
-  if isinstance(payload.get("discovery_complete"), bool):
-    result["discovery_complete"] = payload["discovery_complete"]
-
-  page = payload.get("page")
-  if isinstance(page, dict):
-    bounded_page: dict = {}
-    for key in ("candidate_count", "requested_count"):
-      count = _bounded_count(page.get(key))
-      if count is not None:
-        bounded_page[key] = count
-    if isinstance(page.get("complete"), bool):
-      bounded_page["complete"] = page["complete"]
-    cursor = page.get("next_cursor")
-    if isinstance(cursor, str) and _CURSOR_RE.fullmatch(cursor):
-      bounded_page["next_cursor"] = cursor
-    if bounded_page:
-      result["page"] = bounded_page
-
+  if "label" not in display:
+    return {"status": RECALL_FAILED}
+  result = {"status": status, "display": display}
   if status == RECALL_EMPTY:
     return result
-  if status != RECALL_HIT:
-    return {"status": RECALL_FAILED}
-  notes = _receipt_notes(
-    payload.get("notes"), limit=_MAX_SECTION_LINES_SCANNED,
-  )
+  notes = _receipt_notes(payload.get("notes"))
   if not notes:
     return {"status": RECALL_FAILED}
   result["notes"] = notes
   return result
-
 
 def recall_from_result(text: object, exit_code: object = None) -> dict:
   """Validate a known Memory command's final structured result."""
@@ -416,39 +372,14 @@ def _with_pending_context(pending: object, settled: dict) -> dict:
     return settled
   app_slug = pending.get("app_slug")
   query = pending.get("query")
-  phase = pending.get("phase")
   if isinstance(app_slug, str):
     settled["app_slug"] = app_slug
   if isinstance(query, str) and query:
     settled["query"] = query
-  if (
-    settled.get("status") == RECALL_SEARCHING
-    and "phase" not in settled
-    and phase in ("catalog", "read")
-  ):
-    settled["phase"] = phase
   if settled.get("status") == RECALL_HIT and isinstance(app_slug, str):
     settled["notes"] = [
       {**note, "app_slug": app_slug} for note in settled.get("notes", [])
     ]
-  return settled
-
-
-def settle_recall_without_receipt(pending: object) -> dict:
-  """Record a cleanly completed recall whose receipt was not observable.
-
-  Some provider command paths deliver stdout to the model but omit both the
-  terminal aggregate and transcript-facing output deltas. A clean completion
-  is not a lookup failure, but without Memory's receipt we also cannot safely
-  invent note identities or page counts.
-  """
-  settled = _with_pending_context(pending, {
-    "status": RECALL_HIT,
-    "notes": [],
-    "receipt_missing": True,
-  })
-  if isinstance(pending, dict) and pending.get("phase") in ("catalog", "read"):
-    settled["phase"] = pending["phase"]
   return settled
 
 

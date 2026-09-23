@@ -314,33 +314,13 @@ export function peerMessageLabel(tool) {
 export function memoryRecallLabel(tool) {
   const recall = tool?.recall
   if (recall?.status === 'searching' || tool?.status === 'running') {
-    return recall?.phase === 'read' ? 'Reading Memory' : 'Searching Memory'
+    return 'Searching Memory'
+  }
+  if (typeof recall?.display?.label === 'string' && recall.display.label.trim()) {
+    return recall.display.label.trim().slice(0, 160)
   }
   if (recall?.status === 'empty') return 'Searched Memory — nothing relevant'
   if (recall?.status === 'failed') return 'Memory lookup failed'
-  if (recall?.receipt_missing) {
-    return recall?.phase === 'read'
-      ? 'Memory page completed'
-      : 'Memory search completed'
-  }
-  const candidateCount = Number.isInteger(recall?.page?.candidate_count)
-    ? recall.page.candidate_count
-    : null
-  if (recall?.phase === 'catalog' && candidateCount !== null) {
-    const found = `${candidateCount} relevant note${candidateCount === 1 ? '' : 's'}`
-    return recall?.reused
-      ? `Reused Memory search — ${found}`
-      : `Found ${found} in Memory`
-  }
-  if (recall?.phase === 'read') {
-    const requested = Number.isInteger(recall?.page?.requested_count)
-      ? recall.page.requested_count
-      : null
-    if (recall?.page?.complete === true && requested !== null && requested > 0) {
-      return `Finished reading ${requested} note${requested === 1 ? '' : 's'} from Memory`
-    }
-    return 'Read a Memory page'
-  }
   const count = Array.isArray(recall?.notes) ? recall.notes.length : 0
   if (count === 0) return 'Recalled from Memory'
   return `Recalled ${count} note${count === 1 ? '' : 's'} from Memory`

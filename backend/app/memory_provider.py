@@ -1,16 +1,13 @@
 """Which installed app's recall receipts this platform will honor.
 
-``memory_recall`` owns the PROTOCOL — the receipt format, the argv arity, the
-meaning of a non-zero exit. That is legitimately platform-owned, in the same
-family as ``entry`` having to be ``index.jsx``. What the platform must never
-own is the provider's street address, and until this module existed it guessed
-one with a regex over ``/data/apps/memory(-N)?/memory_search.py``: a filesystem
-root, a slug family, and a filename compiled into core.
+The platform binds one installed-app entry point to the app that owns shared
+Memory and recognizes its two documented invocation arities. Memory owns the
+retrieval protocol, paging, cursors, labels, and accounting; the platform only
+authenticates the provider and carries its bounded result envelope.
 
 The basename below is the last Memory-shaped string on the authorization path.
-It lives here, next to the query, rather than in ``memory_recall``, because it
-belongs to FINDING the provider and not to the wire format — and because this
-is the one line a future manifest-declared entry point replaces.
+It lives here, next to installed-app discovery, so a future manifest-declared
+entry point replaces one line rather than a filesystem pattern in core.
 """
 
 from __future__ import annotations
@@ -31,12 +28,7 @@ log = logging.getLogger(__name__)
 # navigates to them". Only the app with write authority can honestly make it.
 SHARED_MEMORY_PROVIDER_TIER = "write"
 
-# Keep discovery and expansion on the same authority boundary.  The operation
-# name is protocol metadata; the provider still owns the street addresses.
-RECALL_ENTRYPOINTS = (
-  ("memory_search.py", "catalog"),
-  ("memory_read.py", "read"),
-)
+RECALL_ENTRY_BASENAME = "memory_search.py"
 
 
 def shared_memory_level(contract: object) -> str:
@@ -76,7 +68,7 @@ def resolve_recall_binding(
     )
     if not include_uninstalled:
       query = query.filter(models.App.deleted_at.is_(None))
-    pairs: list[tuple[str, str, str]] = []
+    pairs: list[tuple[str, str]] = []
     for app_id, slug, source_dir, contract in query.order_by(
       models.App.id.asc()
     ).all():
@@ -91,19 +83,13 @@ def resolve_recall_binding(
       # tells the agent to substitute the stored source_dir while the system
       # prompt prints the resolved one, so a single symlinked ancestor would
       # otherwise make every real lookup unrecognizable.
-      forms = [
-        (base / basename, operation)
-        for basename, operation in RECALL_ENTRYPOINTS
-      ]
+      forms = [base / RECALL_ENTRY_BASENAME]
       try:
-        forms.extend(
-          (base.resolve() / basename, operation)
-          for basename, operation in RECALL_ENTRYPOINTS
-        )
+        forms.append(base.resolve() / RECALL_ENTRY_BASENAME)
       except OSError:
         pass
-      for form, operation in forms:
-        pairs.append((str(form), label, operation))
+      for form in forms:
+        pairs.append((str(form), label))
     return RecallBinding.of(pairs)
   except Exception:
     log.exception("recall binding unavailable; citations disabled this pass")

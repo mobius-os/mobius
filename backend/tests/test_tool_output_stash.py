@@ -663,7 +663,7 @@ def test_sink_parses_a_large_json_envelope_once(monkeypatch, db):
 
 def test_memory_receipt_is_settled_before_generic_output_carving(db):
     binding = RecallBinding.of([
-        ("/apps/brain/memory_search.py", "brain", "catalog"),
+        ("/apps/brain/memory_search.py", "brain"),
     ])
     sink = _sink(recall_binding=binding)
     command = 'python3 /apps/brain/memory_search.py "q" "c-sink"'
@@ -685,6 +685,7 @@ def test_memory_receipt_is_settled_before_generic_output_carving(db):
         "lookup_id": "a" * 64,
         "notes": notes,
         "page": {"candidate_count": 100, "complete": True},
+        "display": {"label": "Found 100 relevant notes in Memory"},
     }, separators=(",", ":"))
     assert len(receipt) > 8192
     event = {
@@ -698,9 +699,75 @@ def test_memory_receipt_is_settled_before_generic_output_carving(db):
     assert event["output_truncated"] is True
     recall = sink.assistant_blocks[-1]["recall"]
     assert recall["status"] == "hit"
-    assert recall["phase"] == "catalog"
-    assert recall["page"]["candidate_count"] == 100
+    assert recall["display"]["label"] == "Found 100 relevant notes in Memory"
     assert len(recall["notes"]) == 100
+
+
+def test_memory_receipt_cannot_override_a_content_derived_nonzero_exit(db):
+    binding = RecallBinding.of([
+        ("/apps/brain/memory_search.py", "brain"),
+    ])
+    sink = _sink(recall_binding=binding)
+    sink.publish({
+        "type": "tool_start", "tool": "Bash",
+        "input": 'python3 /apps/brain/memory_search.py "q" "c-sink"',
+        "tool_use_id": "tu-memory-failed",
+    })
+    receipt = "MOBIUS_MEMORY_RESULT_V2:" + json.dumps({
+        "status": "hit",
+        "phase": "catalog",
+        "lookup_id": "a" * 64,
+        "notes": [{"id": "note", "path": "notes/note.md", "title": "Note"}],
+        "page": {"candidate_count": 1, "complete": True},
+        "display": {"label": "Found 1 relevant note in Memory"},
+    }, separators=(",", ":"))
+    event = {
+        "type": "tool_output",
+        "content": "Exit code 7\n" + receipt,
+        "tool_use_id": "tu-memory-failed",
+        "output_complete": True,
+    }
+
+    sink.publish(event)
+
+    assert event["output_exit_code"] == 7
+    assert sink.assistant_blocks[-1]["recall"]["status"] == "failed"
+
+
+def test_streamed_memory_receipt_survives_blank_or_final_chunk_completion(db):
+    binding = RecallBinding.of([
+        ("/apps/brain/memory_search.py", "brain"),
+    ])
+    receipt = "MOBIUS_MEMORY_RESULT_V2:" + json.dumps({
+        "status": "hit",
+        "notes": [{"id": "note", "path": "notes/note.md", "title": "Note"}],
+        "display": {"label": "Read a Memory page"},
+    }, separators=(",", ":"))
+    split = len(receipt) // 2
+    for terminal_chunk in ("", receipt[split:]):
+        sink = _sink(recall_binding=binding)
+        sink.publish({
+            "type": "tool_start", "tool": "Bash",
+            "input": 'python3 /apps/brain/memory_search.py "lookup" "all" "start" "c-sink"',
+            "tool_use_id": "tu-memory-streamed",
+        })
+        for chunk in (
+            (receipt[:split], receipt[split:]) if not terminal_chunk
+            else (receipt[:split],)
+        ):
+            sink.publish({
+                "type": "tool_output", "content": chunk,
+                "tool_use_id": "tu-memory-streamed",
+            })
+        sink.publish({
+            "type": "tool_output", "content": terminal_chunk,
+            "tool_use_id": "tu-memory-streamed", "output_complete": True,
+            "output_exit_code": 0,
+        })
+
+        recall = sink.assistant_blocks[-1]["recall"]
+        assert recall["status"] == "hit"
+        assert recall["display"]["label"] == "Read a Memory page"
 
 
 def test_sink_passes_through_small_output(db):
