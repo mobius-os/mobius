@@ -46,6 +46,8 @@ def pending_message_group_key(message: Mapping[str, Any]) -> tuple:
   kind = message.get("kind")
   key = (
     bool(message.get("hidden")), kind, message.get("source_work_id"),
+    message.get("_initiated_by_app_id"),
+    message.get("_initiated_by_agent_chat_id"),
   )
   # Each product row already coalesces its own domain batch and owns one
   # independent delivery latch. Never merge two such durable receipts.

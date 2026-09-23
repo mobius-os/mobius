@@ -822,6 +822,7 @@ class AppendPending(_Command):
   answers: dict | None = None
   question_id: str | None = None
   initiated_by_app_id: int | None = None
+  initiated_by_agent_chat_id: str | None = None
   front: bool = False
   require_answer_match: bool = False
 
@@ -3969,6 +3970,8 @@ class ChatWriterActor:
       raise _PersistFailed("AppendPending: no matching question block")
     if cmd.initiated_by_app_id is not None:
       new_msg["_initiated_by_app_id"] = cmd.initiated_by_app_id
+    if cmd.initiated_by_agent_chat_id is not None:
+      new_msg["_initiated_by_agent_chat_id"] = cmd.initiated_by_agent_chat_id
     # Idempotent append: `cid` is untrusted client input, and a retried POST
     # (flaky network, double-tap) carries the SAME cid. If that cid already
     # names a durable row — queued OR already promoted into the transcript —
@@ -4378,6 +4381,7 @@ class ChatWriterActor:
     agent_pending = _combine_pending_messages(promoted_group)
     consumed_cids = agent_pending.pop("_consumed_cids", [])
     initiated_by_app_id = agent_pending.pop("_initiated_by_app_id", None)
+    agent_pending.pop("_initiated_by_agent_chat_id", None)
     durable_run_token = (
       product_result_run_token(cmd.chat_id, agent_pending) or cmd.run_token
     )
@@ -5713,6 +5717,7 @@ def _pending_messages_for_transcript(
     msg.pop("serverTs", None)
     msg.pop("position", None)
     msg.pop("_initiated_by_app_id", None)
+    msg.pop("_initiated_by_agent_chat_id", None)
     # Preserve an explicit cid, or stamp the legacy fallback before changing
     # ts so queue identity stays byte-identical across promotion.
     msg["cid"] = cid_of(msg)

@@ -312,6 +312,44 @@ def test_delegated_bearer_cannot_send_edit_or_cancel_owner_messages(
     assert pending[0]["cid"] == f"pending-{target}"
 
 
+def test_top_level_agent_sends_preserve_exact_actor_origin(
+  client, owner_token, db, monkeypatch,
+):
+  from app.routes import chats_stream
+
+  chat_ids, _delegated_auth, top_level_auth = _delegated_and_top_level_auth(
+    client, owner_token, db,
+  )
+  monkeypatch.setattr(chats_stream, "is_draining", lambda: True)
+
+  for target in ("top-level", "foreign"):
+    response = client.post(
+      f"/api/chats/{chat_ids[target]}/messages",
+      json={"content": f"agent-{target}", "cid": f"agent-{target}"},
+      headers=top_level_auth,
+    )
+    assert response.status_code == 202, response.text
+
+  owner_auth = {"Authorization": f"Bearer {owner_token}"}
+  owner_response = client.post(
+    f"/api/chats/{chat_ids['foreign']}/messages",
+    json={"content": "owner", "cid": "owner"},
+    headers=owner_auth,
+  )
+  assert owner_response.status_code == 202, owner_response.text
+
+  db.expire_all()
+  for target in ("top-level", "foreign"):
+    pending = db.get(models.Chat, chat_ids[target]).pending_messages
+    agent_row = next(row for row in pending if row["cid"] == f"agent-{target}")
+    assert agent_row["_initiated_by_agent_chat_id"] == chat_ids["top-level"]
+  owner_row = next(
+    row for row in db.get(models.Chat, chat_ids["foreign"]).pending_messages
+    if row["cid"] == "owner"
+  )
+  assert "_initiated_by_agent_chat_id" not in owner_row
+
+
 def test_delegated_bearer_cannot_enter_host_or_platform_lifecycle(
   client, owner_token, db, monkeypatch, tmp_path,
 ):

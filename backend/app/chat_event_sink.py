@@ -1200,6 +1200,7 @@ class ChatEventSink:
       and row.get("steered") is True
       and not row.get("hidden")
       and row.get("_initiated_by_app_id") is None
+      and row.get("_initiated_by_agent_chat_id") is None
       for row in stored_messages
     )
     try:
