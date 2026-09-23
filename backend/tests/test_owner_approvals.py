@@ -631,6 +631,8 @@ def test_helper_surfaces_fastapi_validation_paths_without_echoing_input(monkeypa
            "input": "must-not-appear"},
           {"loc": ["body", "questions", 0, "options"],
            "msg": "List should have at most 3 items", "type": "too_long"},
+          {"loc": ["body", "questions", 0, "sk-live-do-not-echo"],
+           "msg": "Extra inputs are not permitted", "type": "extra_forbidden"},
         ],
       }).encode()),
     )
@@ -644,6 +646,8 @@ def test_helper_surfaces_fastapi_validation_paths_without_echoing_input(monkeypa
   message = str(exc.value)
   assert "questions[0].header: Field required" in message
   assert "questions[0].options: List should have at most 3 items" in message
+  assert "questions[0].<field>: Extra inputs are not permitted" in message
+  assert "sk-live-do-not-echo" not in message
   assert "must-not-appear" not in message
 
 

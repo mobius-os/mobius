@@ -15,6 +15,12 @@ from urllib.parse import quote
 from urllib.request import Request, urlopen
 
 
+_SAFE_REJECTION_PATH_PARTS = frozenset({
+  "questions", "id", "header", "question", "options",
+  "label", "description", "on_answer", "work_key",
+})
+
+
 def request_approval(
   question: str, options: list[dict], work_key: str,
 ) -> dict:
@@ -54,7 +60,11 @@ def _format_rejection_detail(candidate: object) -> str:
       for part in loc:
         if part == "body":
           continue
-        path += f"[{part}]" if isinstance(part, int) else ("." if path else "") + str(part)
+        if isinstance(part, int):
+          path += f"[{part}]"
+          continue
+        safe_part = part if part in _SAFE_REJECTION_PATH_PARTS else "<field>"
+        path += ("." if path else "") + safe_part
       clean_message = " ".join(message.split())
       issues.append(f"{path}: {clean_message}" if path else clean_message)
     return "; ".join(issues)[:1000]
