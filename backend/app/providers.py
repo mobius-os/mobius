@@ -1021,6 +1021,7 @@ class MobiusProvider(BaseProvider):
       f'model_providers.mobius_trial.base_url={quote(self.declaration["base_url"] if self.declaration else "http://127.0.0.1:8765/v1")}',
       'model_providers.mobius_trial.env_key="MOBIUS_LOCAL_BROKER_KEY"',
       'model_providers.mobius_trial.wire_api="responses"',
+      "model_providers.mobius_trial.supports_standalone_web_search=true",
       # A stream that dies mid-answer must not kill the turn: the
       # subscription gateway enforces a 60s no-token ceiling upstream, so one
       # silence can otherwise lose a healthy long turn. Codex re-issues the
@@ -1036,9 +1037,13 @@ class MobiusProvider(BaseProvider):
       "features.plugins=false",
       "features.multi_agent=false",
       "features.multi_agent_v2.enabled=false",
+      "features.standalone_web_search=true",
+      # The capability is intentionally enabled for this provider; do not
+      # surface Codex's generic experimental-feature warning as a chat error.
+      "suppress_unstable_features_warning=true",
       "include_apps_instructions=false",
       "include_collaboration_mode_instructions=false",
-      'web_search="disabled"',
+      'web_search="live"',
       'shell_environment_policy.exclude=["MOBIUS_LOCAL_BROKER_KEY"]',
     ]
 

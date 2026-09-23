@@ -63,6 +63,15 @@ def test_subscription_route_reconnects_a_stalled_stream():
   assert "model_providers.mobius_trial.request_max_retries=2" in overrides
 
 
+def test_subscription_search_uses_codex_native_provider_endpoint():
+  overrides = providers.MobiusProvider().codex_config_overrides()
+  assert "model_providers.mobius_trial.supports_standalone_web_search=true" in overrides
+  assert "features.standalone_web_search=true" in overrides
+  assert "suppress_unstable_features_warning=true" in overrides
+  assert 'web_search="live"' in overrides
+  assert 'web_search="disabled"' not in overrides
+
+
 def test_subscription_catalog_comes_from_app_declaration(tmp_path, monkeypatch):
   provider = _provider()
   monkeypatch.setitem(providers.PROVIDERS, "mobius", provider)

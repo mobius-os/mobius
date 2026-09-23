@@ -137,6 +137,8 @@ test('message references are an accessible lazy disclosure with safe links', () 
   const favicon = read('../SourceFavicon.jsx')
 
   assert.match(source, />References<\/span>/)
+  assert.match(source, /Pages found in search order; not every page was used in the answer\./,
+    'retrieved hits must not be presented as if every one were cited')
   assert.match(source, /aria-expanded=\{open\}/)
   assert.match(source, /aria-controls=\{bodyId\}/)
   assert.match(source, /hidden=\{!open\}/)
@@ -154,6 +156,10 @@ test('message references are an accessible lazy disclosure with safe links', () 
   assert.match(msgContent, /sourceRef=\{msg\.source_ref\}/)
   assert.match(source,
     /<li key=\{source\.url\} className="chat__source-item chat__source-item--web">/)
+  assert.match(source, /chat__source-rank">\{index \+ 1\}/,
+    'retrieved pages should show their original order')
+  assert.match(source, /source\.snippet && <p className="chat__source-snippet">/,
+    'result context should be readable without hover')
   assert.match(source, /aria-label=\{`\$\{label\}.*opens in a new tab/)
   assert.match(source, /<SourceFavicon/,
     'expanded references should use the shared safe icon loader')
