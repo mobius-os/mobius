@@ -188,7 +188,9 @@ def test_core_requires_saved_handoffs_for_actionable_plans_and_reviews():
   assert core.index("**Mandatory final-action decision for owner chats.**") \
     < core.index("The stable constitution:")
   assert "plan, review, audit, critique, or recommendations" in normalized
-  assert "you MUST call `request_question` as your final action" in normalized
+  assert "you MUST call the action-appropriate saved-card tool" in normalized
+  assert "normally `request_question`" in normalized
+  assert "require `request_approval` or `request_restart` instead" in normalized
   assert "they do not exempt this handoff" in normalized
   assert "owner already authorized the follow-on, do it without asking" \
     in normalized

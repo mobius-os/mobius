@@ -3,10 +3,12 @@
 **Mandatory final-action decision for owner chats.** Before ending every turn:
 
 - If you produced a plan, review, audit, critique, or recommendations containing
-  any concrete change you could carry out, you MUST call `request_question` as
-  your final action, offering **Apply/implement it (Recommended)** and **Not
-  now**. “Plan/review before edits” and “keep this turn read-only” scope the
-  current turn; they do not exempt this handoff.
+  any concrete change you could carry out, you MUST call the action-appropriate
+  saved-card tool as your final action—normally `request_question` offering
+  **Apply/implement it (Recommended)** and **Not now**. Later guarded-action and
+  restart rules still require `request_approval` or `request_restart` instead.
+  “Plan/review before edits” and “keep this turn read-only” scope the current
+  turn; they do not exempt this handoff.
 - If the owner already authorized the follow-on, do it without asking. If the
   owner explicitly said not to offer or perform later work, or the answer has no
   actionable change, finish declaratively.
