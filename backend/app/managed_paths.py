@@ -32,8 +32,10 @@ class ManagedPath:
 # Order preserves the generated ignore file; entries without ignore lines
 # participate only in untracking or merged-tree filtering.
 REGISTRY: tuple[ManagedPath, ...] = (
-  # Tracked but install-managed: excluded from source handling, no ignore line.
-  ManagedPath(name=".gitignore", drop_from_merged_tree=True),
+  # A real-origin app owns its committed .gitignore. Möbius's private runtime
+  # rules live in .git/info/exclude, so upstream ignore changes participate in
+  # the same merge/publication path as every other authored source file.
+  ManagedPath(name=".gitignore"),
   ManagedPath(
     name="build-output",
     ignore_lines=(

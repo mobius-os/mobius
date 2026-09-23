@@ -275,33 +275,6 @@ def _entry_source_path(app, *, source_root: Path | None = None) -> Path:
   return candidate
 
 
-def _copy_managed_static_assets(source_root: Path, snapshot_root: Path) -> None:
-  """Copy installer-managed static assets without following filesystem links."""
-  source_static = source_root / "static"
-  if not source_static.is_dir() or source_static.is_symlink():
-    return
-  target_static = snapshot_root / "static"
-  for current, dirs, files in os.walk(source_static, followlinks=False):
-    current_path = Path(current)
-    if current_path.is_symlink():
-      raise RuntimeError("Managed static asset directory is a symlink.")
-    safe_dirs = []
-    for name in dirs:
-      child = current_path / name
-      if child.is_symlink():
-        raise RuntimeError("Managed static asset directory contains a symlink.")
-      safe_dirs.append(name)
-    dirs[:] = safe_dirs
-    relative = current_path.relative_to(source_static)
-    destination = target_static / relative
-    destination.mkdir(parents=True, exist_ok=True)
-    for name in files:
-      source = current_path / name
-      if source.is_symlink() or not source.is_file():
-        raise RuntimeError("Managed static asset is not a regular file.")
-      shutil.copy2(source, destination / name)
-
-
 def _remove_unsupported_output(out: Path) -> None:
   """Remove the generated module after its Rolldown report fails contract."""
   out.unlink(missing_ok=True)
@@ -450,12 +423,11 @@ async def recompile_app_bundle(db, app, jsx_source: str) -> None:
   ``compiled_path`` to that immutable file. The previous row keeps pointing at
   its previous bundle until commit. Thus a crash before commit leaves the old
   row/bundle coherent, while a crash after commit cannot expose a row whose
-  bundle was not promoted. When the row has an accepted ``source_commit``, its
-  exact Git tree is materialized away from the editable worktree so relative
-  imports resolve without reading or rewriting an unapplied draft. Legacy rows
-  are only rebuilt from a byte-identical entry. A commit failure removes the
-  newly published orphan and rolls back, so there is no window where an old DB
-  row serves new code.
+  bundle was not promoted. When the row has an accepted ``source_commit``, the
+  complete applied runtime supplies code, manifest, and generated assets from
+  the same immutable revision. Legacy rows are only rebuilt from a
+  byte-identical entry. A commit failure removes the newly published orphan and
+  rolls back, so there is no window where an old DB row serves new code.
 
   ``db.commit()`` here also flushes any other changes the caller staged on
   the session (e.g. a PATCH's name/description), so the whole update lands
@@ -477,39 +449,21 @@ async def recompile_app_bundle(db, app, jsx_source: str) -> None:
   )
   source_path = _entry_source_path(app)
   compile_source_path = source_path
-  snapshot = None
   source_commit = getattr(app, "source_commit", None)
   if source_commit:
-    source_dir = Path(app.source_dir)
-    # Bundle recovery is not a source publication authority. Compile the exact
-    # Git revision selected by SQLite in a temporary tree so an unapplied draft
-    # survives boot/recovery byte-for-byte. Static assets are installer-managed
-    # and deliberately excluded from Git, so copy that validated sidecar
-    # without following links.
-    from app import app_git
-    snapshot = tempfile.TemporaryDirectory(prefix="mobius-app-recompile-")
-    snapshot_root = Path(snapshot.name)
-    try:
-      await asyncio.to_thread(
-        app_git.materialize_tree,
-        source_dir,
-        source_commit,
-        snapshot_root,
+    # The applied runtime is the one complete accepted generation: code,
+    # manifest, and generated static assets. Rebuilding from Git plus static
+    # files copied out of the editable checkout mixed accepted code with draft
+    # assets. Read the published generation directly instead.
+    from app.applied_app_runtime import runtime_root
+
+    snapshot_root = await asyncio.to_thread(runtime_root, app)
+    compile_source_path = _entry_source_path(app, source_root=snapshot_root)
+    accepted_source = compile_source_path.read_text(encoding="utf-8")
+    if accepted_source != jsx_source:
+      raise RuntimeError(
+        "Stored app source does not match its accepted runtime revision."
       )
-      await asyncio.to_thread(
-        _copy_managed_static_assets, source_dir, snapshot_root,
-      )
-      compile_source_path = _entry_source_path(
-        app, source_root=snapshot_root,
-      )
-      accepted_source = compile_source_path.read_text(encoding="utf-8")
-      if accepted_source != jsx_source:
-        raise RuntimeError(
-          "Stored app source does not match its accepted Git revision."
-        )
-    except Exception:
-      snapshot.cleanup()
-      raise
   else:
     # Legacy rows have no durable source commit. Never repair them by writing
     # into the editable tree: that was a hidden source mutation and could
@@ -531,18 +485,11 @@ async def recompile_app_bundle(db, app, jsx_source: str) -> None:
         "before rebuilding its bundle."
       )
   published = None
-  try:
-    await compile_jsx(
-      jsx_source,
-      out_path=staged,
-      source_path=compile_source_path,
-    )
-  except Exception:
-    if snapshot is not None:
-      snapshot.cleanup()
-    raise
-  if snapshot is not None:
-    snapshot.cleanup()
+  await compile_jsx(
+    jsx_source,
+    out_path=staged,
+    source_path=compile_source_path,
+  )
   try:
     published = publish_staged_bundle(app.id, staged)
   except Exception:

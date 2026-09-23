@@ -16,8 +16,10 @@ import stat
 import subprocess
 from pathlib import Path
 from unittest.mock import patch
+from urllib.parse import urlparse
 
 import pytest
+from fastapi import HTTPException
 
 from app import app_git
 from app.config import get_settings
@@ -111,27 +113,25 @@ def data_git_repo():
 # --- validation -----------------------------------------------------------
 
 
-def _expect_400(client, auth, manifest, needle):
-  r = client.post("/api/apps/install", headers=auth, json={
-    "manifest": manifest,
-    "raw_base": "https://raw.githubusercontent.com/x/app/main/",
-  })
-  assert r.status_code == 400, r.text
-  assert needle in r.json()["detail"]
+def _expect_400(manifest, needle):
+  from app.install import _validate_manifest
+
+  with pytest.raises(HTTPException) as error:
+    _validate_manifest(manifest)
+  assert error.value.status_code == 400
+  assert needle in error.value.detail
 
 
-def test_skills_must_be_an_array(client, auth):
+def test_skills_must_be_an_array():
   _expect_400(
-    client, auth,
     _skill_manifest(skills="contributing.md"),
     "must be an array",
   )
 
 
-def test_skills_count_capped(client, auth):
+def test_skills_count_capped():
   names = [f"s{i}.md" for i in range(6)]
   _expect_400(
-    client, auth,
     _skill_manifest(skills=names, source_files=names),
     "too many skills",
   )
@@ -147,25 +147,22 @@ def test_skills_count_capped(client, auth):
   "IMPORTANT do X.md",  # prose/prompt injection
   "<x>.md",             # markup-like prompt injection
 ])
-def test_skills_entry_shape_rejected(client, auth, bad):
+def test_skills_entry_shape_rejected(bad):
   _expect_400(
-    client, auth,
     _skill_manifest(skills=[bad]),
     "skills[0]",
   )
 
 
-def test_skills_must_be_root_source_files(client, auth):
+def test_skills_must_be_root_source_files():
   # Not listed in source_files at all.
   _expect_400(
-    client, auth,
     _skill_manifest(source_files=None),
     "source_files",
   )
   # Listed, but nested — only ROOT basenames qualify (the sync phase reads
   # source_dir/<basename>).
   _expect_400(
-    client, auth,
     _skill_manifest(source_files=["docs/contributing.md"]),
     "source_files",
   )
@@ -208,6 +205,42 @@ def test_update_overwrites_unmodified_skill_silently(
   assert r2.status_code == 201, r2.text
   assert r2.json()["mode"] == "update"
   assert not any("skill" in w for w in r2.json()["warnings"])
+  assert (_skills_dir() / "contributing.md").read_text() == SKILL_V2
+  assert _sidecar()["contributing.md"]["sha256"] == _sha(SKILL_V2)
+
+
+def test_skill_sync_uses_the_accepted_runtime_not_a_later_draft(
+  client, auth, db, bypass_url_validation, monkeypatch,
+):
+  """Post-commit lock waits cannot turn draft instructions into live skills."""
+  from app import install as install_module
+  from app import models
+
+  first = _install(client, auth, _skill_manifest(), {
+    "index.jsx": JSX, "contributing.md": SKILL_V1,
+  })
+  assert first.status_code == 201, first.text
+  app_id = first.json()["id"]
+  original_commit = install_module._commit_prepared_app
+  draft = "# draft skill\nNot reviewed or applied.\n"
+
+  def commit_then_edit(*args, **kwargs):
+    original_commit(*args, **kwargs)
+    row = db.get(models.App, app_id)
+    (Path(row.source_dir) / "contributing.md").write_text(
+      draft, encoding="utf-8",
+    )
+
+  monkeypatch.setattr(
+    install_module, "_commit_prepared_app", commit_then_edit,
+  )
+  update = _install(client, auth, _skill_manifest(version="2.0.0"), {
+    "index.jsx": JSX, "contributing.md": SKILL_V2,
+  })
+
+  assert update.status_code == 201, update.text
+  row = db.query(models.App).populate_existing().filter_by(id=app_id).one()
+  assert (Path(row.source_dir) / "contributing.md").read_text() == draft
   assert (_skills_dir() / "contributing.md").read_text() == SKILL_V2
   assert _sidecar()["contributing.md"]["sha256"] == _sha(SKILL_V2)
 
@@ -462,12 +495,22 @@ def test_oversized_skill_is_skipped_with_warning(
 # --- clone path: skills read from the FINAL on-disk tree --------------------
 
 
-def _make_repo(tmp_path, files: dict[str, str], exec_names=()):
+@pytest.fixture
+def git_url_validation():
+  """Bypass test-host DNS only; Git clone, snapshot and publication stay real."""
+  with patch(
+    "app.install._validate_url_safe",
+    lambda url: (url, urlparse(url).netloc, urlparse(url).hostname),
+  ):
+    yield
+
+
+def _make_repo(tmp_path, manifest, files: dict[str, str], exec_names=()):
   """A work tree + bare remote standing in for a catalog GitHub repo."""
   work = tmp_path / "repo-work"
   bare = tmp_path / "repo.git"
   subprocess.run(["git", "init", "-q", "-b", "main", str(work)], check=True)
-  for rel, text in files.items():
+  for rel, text in {"mobius.json": json.dumps(manifest), **files}.items():
     p = work / rel
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(text, encoding="utf-8")
@@ -511,15 +554,15 @@ def _install_clone(client, auth, base, manifest, responses, bare):
 
 
 def test_clone_install_reads_skill_from_repo_not_http(
-  client, auth, tmp_path, bypass_url_validation,
+  client, auth, tmp_path, git_url_validation,
 ):
   """On the clone path the repo's bytes are canonical: the skill lands from
-  the checked-out tree, not from the (discarded) HTTP source_files fetch."""
+  the committed tree; HTTP asset responses cannot supply skill contents."""
   base = "https://raw.githubusercontent.com/acme/app-skilled/main/"
-  _, bare = _make_repo(tmp_path, {
+  m = _skill_manifest()
+  _, bare = _make_repo(tmp_path, m, {
     "index.jsx": JSX, "contributing.md": "REPO SKILL\n",
   })
-  m = _skill_manifest()
   r = _install_clone(client, auth, base, m, {
     base + "mobius.json": (200, json.dumps(m).encode()),
     base + "index.jsx": (200, JSX.encode()),
@@ -530,37 +573,86 @@ def test_clone_install_reads_skill_from_repo_not_http(
   assert _sidecar()["contributing.md"]["sha256"] == _sha("REPO SKILL\n")
 
 
-def test_clone_install_missing_skill_file_warns(
-  client, auth, tmp_path, bypass_url_validation,
+def test_clone_install_missing_skill_file_is_rejected_without_http_fallback(
+  client, auth, tmp_path, git_url_validation,
 ):
-  """A repo tree that lacks the declared skill warns instead of silently
-  falling back to the HTTP bytes (validation checked the manifest's claim,
-  not the repo's contents)."""
+  """Missing declared Git source must never be supplied by HTTP bytes."""
   base = "https://raw.githubusercontent.com/acme/app-noskill/main/"
-  _, bare = _make_repo(tmp_path, {"index.jsx": JSX})
   m = _skill_manifest(id="noskill", name="No Skill")
+  _, bare = _make_repo(tmp_path, m, {"index.jsx": JSX})
   r = _install_clone(client, auth, base, m, {
     base + "mobius.json": (200, json.dumps(m).encode()),
     base + "index.jsx": (200, JSX.encode()),
     base + "contributing.md": (200, b"HTTP SKILL\n"),
   }, bare)
-  assert r.status_code == 201, r.text
-  assert any(
-    "contributing.md: missing from installed source tree" in w
-    for w in r.json()["warnings"]
-  ), r.json()["warnings"]
+  assert r.status_code == 422, r.text
+  assert r.json()["detail"]["code"] == "git_package_incomplete"
+  assert "contributing.md" in r.json()["detail"]["message"]
   assert not (_skills_dir() / "contributing.md").exists()
+  assert not (Path(get_settings().data_dir) / "apps" / "noskill").exists()
+
+
+def test_clone_update_ignores_tracked_runtime_files(
+  client, auth, db, tmp_path, git_url_validation,
+):
+  """Upstream runtime residue is neither accepted source nor owner data."""
+  from app import models
+  from app.applied_app_runtime import runtime_root
+
+  base = "https://raw.githubusercontent.com/acme/runtime-residue/main/"
+  manifest = {
+    "id": "runtime-residue",
+    "name": "Runtime residue",
+    "version": "1.0.0",
+    "description": "Tracked runtime fixture",
+    "entry": "index.jsx",
+    "permissions": {},
+  }
+  work, bare = _make_repo(tmp_path, manifest, {
+    "index.jsx": JSX,
+    "settings.json": "upstream v1\n",
+    "runs/result.json": "upstream result v1\n",
+  })
+  first = _install_clone(client, auth, base, manifest, {
+    base + "mobius.json": (200, json.dumps(manifest).encode()),
+    base + "index.jsx": (200, JSX.encode()),
+  }, bare)
+  assert first.status_code == 201, first.text
+  row = db.get(models.App, first.json()["id"])
+  source = Path(row.source_dir)
+  (source / "settings.json").write_text("owner settings\n")
+  (source / "runs" / "result.json").write_text("owner result\n")
+
+  jsx_v2 = JSX.replace("ok", "v2")
+  manifest_v2 = {**manifest, "version": "2.0.0"}
+  _push_repo(work, bare, {
+    "mobius.json": json.dumps(manifest_v2),
+    "index.jsx": jsx_v2,
+    "settings.json": "upstream v2\n",
+    "runs/result.json": "upstream result v2\n",
+  })
+  update = _install_clone(client, auth, base, manifest_v2, {
+    base + "mobius.json": (200, json.dumps(manifest_v2).encode()),
+    base + "index.jsx": (200, jsx_v2.encode()),
+  }, bare)
+
+  assert update.status_code == 201, update.text
+  db.refresh(row)
+  assert (source / "settings.json").read_text() == "owner settings\n"
+  assert (source / "runs" / "result.json").read_text() == "owner result\n"
+  accepted = runtime_root(row)
+  assert not (accepted / "settings.json").exists()
+  assert not (accepted / "runs").exists()
 
 
 # --- clone path: canonical entry + the dead-cron warning --------------------
 
 
 def test_clone_install_rejects_non_index_entry(
-  client, auth, tmp_path, bypass_url_validation,
+  client, auth, tmp_path, git_url_validation,
 ):
   """Clone-eligible packages still use the platform's canonical index.jsx."""
   base = "https://raw.githubusercontent.com/acme/app-entry/main/"
-  _, bare = _make_repo(tmp_path, {"app.jsx": JSX})
   m = {
     "id": "custom-entry",
     "name": "Custom Entry",
@@ -569,6 +661,7 @@ def test_clone_install_rejects_non_index_entry(
     "entry": "app.jsx",
     "permissions": {"cross_app_access": "none", "share_with_apps": "none"},
   }
+  _, bare = _make_repo(tmp_path, m, {"app.jsx": JSX})
   r = _install_clone(client, auth, base, m, {
     base + "mobius.json": (200, json.dumps(m).encode()),
     base + "app.jsx": (200, JSX.encode()),
@@ -593,12 +686,12 @@ def _job_manifest(app_id: str):
 
 
 def test_cloned_job_without_exec_bit_is_rejected(
-  client, auth, tmp_path, bypass_url_validation,
+  client, auth, tmp_path, git_url_validation,
 ):
   """A cloned package must commit executable mode for its scheduled job."""
   base = "https://raw.githubusercontent.com/acme/app-cronjob/main/"
-  _, bare = _make_repo(tmp_path, {"index.jsx": JSX, "job.sh": JOB_SH})
   m = _job_manifest("cronjob")
+  _, bare = _make_repo(tmp_path, m, {"index.jsx": JSX, "job.sh": JOB_SH})
   r = _install_clone(client, auth, base, m, {
     base + "mobius.json": (200, json.dumps(m).encode()),
     base + "index.jsx": (200, JSX.encode()),
@@ -609,14 +702,14 @@ def test_cloned_job_without_exec_bit_is_rejected(
 
 
 def test_cloned_job_with_exec_bit_is_executable(
-  client, auth, tmp_path, bypass_url_validation,
+  client, auth, tmp_path, git_url_validation,
 ):
   """The committed +x bit survives the clone — no warning, job runnable."""
   base = "https://raw.githubusercontent.com/acme/app-cronjob-x/main/"
-  _, bare = _make_repo(
-    tmp_path, {"index.jsx": JSX, "job.sh": JOB_SH}, exec_names={"job.sh"},
-  )
   m = _job_manifest("cronjob-x")
+  _, bare = _make_repo(
+    tmp_path, m, {"index.jsx": JSX, "job.sh": JOB_SH}, exec_names={"job.sh"},
+  )
   r = _install_clone(client, auth, base, m, {
     base + "mobius.json": (200, json.dumps(m).encode()),
     base + "index.jsx": (200, JSX.encode()),
@@ -628,6 +721,64 @@ def test_cloned_job_with_exec_bit_is_executable(
   assert not any(
     "not executable" in w for w in r.json()["warnings"]
   ), r.json()["warnings"]
+
+
+def test_core_store_explicit_conflict_resolution_keeps_declared_job_executable(
+  client, auth, tmp_path, git_url_validation,
+):
+  """Store conflicts preserve local work until exact upstream is selected."""
+  base = "https://raw.githubusercontent.com/mobius-os/app-store/main/"
+  manifest = _job_manifest("store")
+  work, bare = _make_repo(
+    tmp_path, manifest, {"index.jsx": JSX, "job.sh": JOB_SH},
+    exec_names={"job.sh"},
+  )
+  first = _install_clone(client, auth, base, manifest, {
+    base + "mobius.json": (200, json.dumps(manifest).encode()),
+    base + "index.jsx": (200, JSX.encode()),
+    base + "job.sh": (200, JOB_SH.encode()),
+  }, bare)
+  assert first.status_code == 201, first.text
+
+  source = Path(get_settings().data_dir) / "apps" / "store"
+  (source / "index.jsx").write_text(
+    JSX.replace("ok", "local"), encoding="utf-8",
+  )
+  jsx_v2 = JSX.replace("ok", "upstream")
+  job_v2 = "#!/bin/sh\necho v2\n"
+  manifest_v2 = {**manifest, "version": "2.0.0"}
+  _push_repo(work, bare, {
+    "mobius.json": json.dumps(manifest_v2),
+    "index.jsx": jsx_v2, "job.sh": job_v2,
+  })
+  update = _install_clone(client, auth, base, manifest_v2, {
+    base + "mobius.json": (200, json.dumps(manifest_v2).encode()),
+    base + "index.jsx": (200, jsx_v2.encode()),
+    base + "job.sh": (200, job_v2.encode()),
+  }, bare)
+
+  assert update.status_code == 201, update.text
+  assert update.json()["mode"] == "conflict"
+  assert (source / "index.jsx").read_text() == JSX.replace("ok", "local")
+  assert (source / "job.sh").read_text() == JOB_SH
+  assert os.access(source / "job.sh", os.X_OK)
+
+  selected = client.post(
+    f"/api/apps/{first.json()['id']}/conflict-resolver-chat",
+    headers=auth,
+    json={"resolution_policy": "accept_reviewed_upstream_exact"},
+  )
+  assert selected.status_code == 200, selected.text
+  finalized = client.post(
+    "/api/apps/resolve-update",
+    headers=auth,
+    json={"source_dir": str(source)},
+  )
+  assert finalized.status_code == 200, finalized.text
+  assert finalized.json()["mode"] == "updated"
+  assert (source / "index.jsx").read_text() == jsx_v2
+  assert (source / "job.sh").read_text() == job_v2
+  assert os.access(source / "job.sh", os.X_OK)
 
 
 # --- exact-head re-review: cross-writer collision + permission revocation ---

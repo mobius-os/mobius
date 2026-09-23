@@ -2,6 +2,7 @@ import asyncio
 import hashlib
 import json
 import sqlite3
+import subprocess
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
@@ -12,7 +13,7 @@ from sqlalchemy import String, create_engine, event, inspect, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app import models
+from app import app_git, models
 import app.schema_migrations as migrations
 from app.config import get_settings
 from app.schema_migrations import (
@@ -82,6 +83,394 @@ def test_previous_release_database_upgrades_to_current_orm(tmp_path):
   assert [row["version"] for row in first_history] == [
     version for version, _migration in migrations._SCHEMA_MIGRATIONS
   ]
+
+
+def test_git_app_source_migration_captures_files_and_attaches_catalog_origin(
+  tmp_path, monkeypatch,
+):
+  data_dir = tmp_path / "data"
+  source_dir = data_dir / "apps" / "legacy-cards"
+  source_dir.mkdir(parents=True)
+  (source_dir / "settings.json").write_text("runtime", encoding="utf-8")
+  monkeypatch.setenv("DATA_DIR", str(data_dir))
+  eng = create_engine(f"sqlite:///{tmp_path / 'git-apps.db'}")
+  models.Base.metadata.create_all(eng)
+  with Session(eng) as session:
+    app = models.App(
+      name="Legacy Cards",
+      description="",
+      jsx_source="export default function App() { return <div>legacy</div> }",
+      compiled_path="",
+      slug="legacy-cards",
+      source_dir=str(source_dir),
+      manifest_url=(
+        "https://raw.githubusercontent.com/acme/app-cards/main"
+        "#manifest-id=legacy-cards"
+      ),
+    )
+    session.add(app)
+    session.commit()
+    app_id = app.id
+
+  migrations._require_git_app_sources(eng)
+  first_head = subprocess.run(
+    ["git", "-C", str(source_dir), "rev-parse", "main"],
+    capture_output=True, text=True, check=True,
+  ).stdout.strip()
+  migrations._require_git_app_sources(eng)
+
+  assert (source_dir / "index.jsx").read_text(encoding="utf-8").endswith(
+    "<div>legacy</div> }"
+  )
+  migration_base = subprocess.run(
+    ["git", "-C", str(source_dir), "rev-parse", "upstream"],
+    capture_output=True, text=True, check=True,
+  ).stdout.strip()
+  assert migration_base != first_head
+  assert subprocess.run(
+    ["git", "-C", str(source_dir), "rev-parse", f"{first_head}^"],
+    capture_output=True, text=True, check=True,
+  ).stdout.strip() == migration_base
+  assert subprocess.run(
+    ["git", "-C", str(source_dir), "ls-tree", "-r", "--name-only", migration_base],
+    capture_output=True, text=True, check=True,
+  ).stdout == ""
+  assert subprocess.run(
+    [
+      "git", "-C", str(source_dir), "rev-parse",
+      "refs/mobius/migration-baseline",
+    ],
+    capture_output=True, text=True, check=True,
+  ).stdout.strip() == migration_base
+  assert subprocess.run(
+    ["git", "-C", str(source_dir), "remote", "get-url", "origin"],
+    capture_output=True, text=True, check=True,
+  ).stdout.strip() == "https://github.com/acme/app-cards.git"
+  tracked = subprocess.run(
+    ["git", "-C", str(source_dir), "ls-tree", "-r", "--name-only", "main"],
+    capture_output=True, text=True, check=True,
+  ).stdout.splitlines()
+  assert "index.jsx" in tracked
+  assert "settings.json" not in tracked
+  with Session(eng) as session:
+    migrated = session.get(models.App, app_id)
+    assert migrated.source_commit == first_head
+    assert migrated.upstream_commit == migration_base
+
+
+def test_git_app_source_migration_resumes_only_from_explicit_baseline_marker(
+  tmp_path, monkeypatch,
+):
+  data_dir = tmp_path / "data"
+  source_dir = data_dir / "apps" / "interrupted-capture"
+  source_dir.mkdir(parents=True)
+  (source_dir / "index.jsx").write_text("export default 'owner'\n")
+  (source_dir / "notes.md").write_text("retained owner file\n")
+  monkeypatch.setenv("DATA_DIR", str(data_dir))
+  eng = create_engine(f"sqlite:///{tmp_path / 'interrupted-capture.db'}")
+  models.Base.metadata.create_all(eng)
+  with Session(eng) as session:
+    app = models.App(
+      name="Interrupted capture",
+      description="",
+      jsx_source="export default 'database fallback'\n",
+      compiled_path="",
+      slug="interrupted-capture",
+      source_dir=str(source_dir),
+    )
+    session.add(app)
+    session.commit()
+    app_id = app.id
+
+  subprocess.run(
+    ["git", "init", "-q", "-b", "main", str(source_dir)], check=True,
+  )
+  subprocess.run(
+    [
+      "git", "-c", "user.name=Mobius", "-c",
+      "user.email=mobius@localhost", "-C", str(source_dir),
+      "commit", "-q", "-m", "Initialize migrated app baseline",
+      "--allow-empty",
+    ], check=True,
+  )
+  baseline = subprocess.run(
+    ["git", "-C", str(source_dir), "rev-parse", "main"],
+    capture_output=True, text=True, check=True,
+  ).stdout.strip()
+  subprocess.run(
+    [
+      "git", "-C", str(source_dir), "update-ref",
+      "refs/mobius/migration-baseline", baseline,
+    ], check=True,
+  )
+
+  migrations._require_git_app_sources(eng)
+  local = subprocess.run(
+    ["git", "-C", str(source_dir), "rev-parse", "main"],
+    capture_output=True, text=True, check=True,
+  ).stdout.strip()
+
+  assert local != baseline
+  assert subprocess.run(
+    ["git", "-C", str(source_dir), "rev-parse", f"{local}^"],
+    capture_output=True, text=True, check=True,
+  ).stdout.strip() == baseline
+  assert subprocess.run(
+    ["git", "-C", str(source_dir), "rev-parse", "upstream"],
+    capture_output=True, text=True, check=True,
+  ).stdout.strip() == baseline
+  assert subprocess.run(
+    ["git", "-C", str(source_dir), "show", f"{local}:notes.md"],
+    capture_output=True, text=True, check=True,
+  ).stdout == "retained owner file\n"
+  with Session(eng) as session:
+    migrated = session.get(models.App, app_id)
+    assert migrated.source_commit == local
+    assert migrated.upstream_commit == baseline
+
+  # A second boot records the same capture; it does not append another commit.
+  migrations._require_git_app_sources(eng)
+  assert subprocess.run(
+    ["git", "-C", str(source_dir), "rev-parse", "main"],
+    capture_output=True, text=True, check=True,
+  ).stdout.strip() == local
+
+
+def test_git_app_source_migration_preserves_owner_gitignore_and_private_files(
+  tmp_path, monkeypatch,
+):
+  data_dir = tmp_path / "data"
+  source_dir = data_dir / "apps" / "legacy-private"
+  source_dir.mkdir(parents=True)
+  owner_ignore = "private-fixture.txt\n!settings.json\n*.jsx\n"
+  (source_dir / ".gitignore").write_text(owner_ignore, encoding="utf-8")
+  (source_dir / "private-fixture.txt").write_text(
+    "owner secret fixture", encoding="utf-8",
+  )
+  (source_dir / "settings.json").write_text("runtime", encoding="utf-8")
+  monkeypatch.setenv("DATA_DIR", str(data_dir))
+  eng = create_engine(f"sqlite:///{tmp_path / 'git-app-private.db'}")
+  models.Base.metadata.create_all(eng)
+  with Session(eng) as session:
+    session.add(models.App(
+      name="Legacy Private",
+      description="",
+      jsx_source="export default function App() { return null }",
+      compiled_path="",
+      slug="legacy-private",
+      source_dir=str(source_dir),
+    ))
+    session.commit()
+
+  migrations._require_git_app_sources(eng)
+  migrations._require_git_app_sources(eng)
+
+  assert (source_dir / ".gitignore").read_text(encoding="utf-8") == owner_ignore
+  tracked = subprocess.run(
+    ["git", "-C", str(source_dir), "ls-tree", "-r", "--name-only", "main"],
+    capture_output=True, text=True, check=True,
+  ).stdout.splitlines()
+  assert ".gitignore" in tracked
+  assert "index.jsx" in tracked
+  assert "private-fixture.txt" not in tracked
+  assert "settings.json" not in tracked
+  assert (source_dir / "private-fixture.txt").read_text() == "owner secret fixture"
+
+  (source_dir / "notes.md").write_text("owner edit\n", encoding="utf-8")
+  from app import app_git
+  assert app_git.commit_local(source_dir, "owner edit after migration")
+  assert (source_dir / ".gitignore").read_text(encoding="utf-8") == owner_ignore
+  tracked = subprocess.run(
+    ["git", "-C", str(source_dir), "ls-files"],
+    capture_output=True, text=True, check=True,
+  ).stdout.splitlines()
+  assert "notes.md" in tracked
+  assert "private-fixture.txt" not in tracked
+  assert "settings.json" not in tracked
+
+
+def test_git_app_source_migration_rejects_nonregular_gitignore(
+  tmp_path, monkeypatch,
+):
+  data_dir = tmp_path / "data"
+  source_dir = data_dir / "apps" / "legacy-unsafe-ignore"
+  source_dir.mkdir(parents=True)
+  outside = tmp_path / "outside-ignore"
+  outside.write_text("private.txt\n", encoding="utf-8")
+  (source_dir / ".gitignore").symlink_to(outside)
+  monkeypatch.setenv("DATA_DIR", str(data_dir))
+  eng = create_engine(f"sqlite:///{tmp_path / 'unsafe-ignore.db'}")
+  models.Base.metadata.create_all(eng)
+  with Session(eng) as session:
+    session.add(models.App(
+      name="Unsafe ignore",
+      description="",
+      jsx_source="export default function App() { return null }",
+      compiled_path="",
+      slug="legacy-unsafe-ignore",
+      source_dir=str(source_dir),
+    ))
+    session.commit()
+
+  with pytest.raises(RuntimeError, match="unsafe .gitignore"):
+    migrations._require_git_app_sources(eng)
+
+  assert (source_dir / ".gitignore").is_symlink()
+  assert outside.read_text(encoding="utf-8") == "private.txt\n"
+
+
+def test_git_app_source_migration_never_writes_through_dangling_entry_symlink(
+  tmp_path, monkeypatch,
+):
+  data_dir = tmp_path / "data"
+  source_dir = data_dir / "apps" / "legacy-linked-entry"
+  source_dir.mkdir(parents=True)
+  outside = tmp_path / "outside" / "created-by-following-link.jsx"
+  (source_dir / "index.jsx").symlink_to(outside)
+  monkeypatch.setenv("DATA_DIR", str(data_dir))
+  eng = create_engine(f"sqlite:///{tmp_path / 'linked-entry.db'}")
+  models.Base.metadata.create_all(eng)
+  with Session(eng) as session:
+    session.add(models.App(
+      name="Linked entry",
+      description="",
+      jsx_source="export default function App() { return null }",
+      compiled_path="",
+      slug="legacy-linked-entry",
+      source_dir=str(source_dir),
+    ))
+    session.commit()
+
+  with pytest.raises(RuntimeError, match="unsafe index.jsx"):
+    migrations._require_git_app_sources(eng)
+
+  assert (source_dir / "index.jsx").is_symlink()
+  assert not outside.exists()
+  assert not (source_dir / ".git").exists()
+
+
+def test_git_app_source_migration_leaves_genuine_repo_upstream_unknown(
+  tmp_path, monkeypatch,
+):
+  data_dir = tmp_path / "data"
+  source_dir = data_dir / "apps" / "owner-repo"
+  source_dir.mkdir(parents=True)
+  (source_dir / "index.jsx").write_text("export default 1\n")
+  subprocess.run(
+    ["git", "init", "-q", "-b", "main", str(source_dir)], check=True,
+  )
+  subprocess.run(
+    ["git", "-C", str(source_dir), "add", "index.jsx"], check=True,
+  )
+  subprocess.run(
+    [
+      "git", "-c", "user.name=Owner", "-c",
+      "user.email=owner@example.invalid", "-C", str(source_dir),
+      "commit", "-q", "-m", "owner history",
+    ], check=True,
+  )
+  owner_head = subprocess.run(
+    ["git", "-C", str(source_dir), "rev-parse", "main"],
+    capture_output=True, text=True, check=True,
+  ).stdout.strip()
+  monkeypatch.setenv("DATA_DIR", str(data_dir))
+  eng = create_engine(f"sqlite:///{tmp_path / 'owner-repo.db'}")
+  models.Base.metadata.create_all(eng)
+  with Session(eng) as session:
+    app = models.App(
+      name="Owner repo",
+      description="",
+      jsx_source="export default 1\n",
+      compiled_path="",
+      slug="owner-repo",
+      source_dir=str(source_dir),
+    )
+    session.add(app)
+    session.commit()
+    app_id = app.id
+
+  migrations._require_git_app_sources(eng)
+
+  for ref in ("upstream", "refs/mobius/migration-baseline"):
+    assert subprocess.run(
+      ["git", "-C", str(source_dir), "rev-parse", "--verify", ref],
+      capture_output=True, text=True,
+    ).returncode != 0
+  with Session(eng) as session:
+    migrated = session.get(models.App, app_id)
+    assert migrated.source_commit == owner_head
+    assert migrated.upstream_commit is None
+
+
+def test_git_app_source_migration_bridges_old_synthetic_store_history(
+  tmp_path, monkeypatch,
+):
+  data_dir = tmp_path / "data"
+  source_dir = data_dir / "apps" / "synthetic-store"
+  source_dir.mkdir(parents=True)
+  monkeypatch.setenv("DATA_DIR", str(data_dir))
+
+  app_git.ensure_repo(source_dir)
+  synthetic = app_git.record_upstream(
+    source_dir,
+    {"index.jsx": b"export default 'v1'\n"},
+    "https://raw.githubusercontent.com/acme/synthetic-store/main/",
+    "1.0.0",
+  )
+  app_git.align_local_to_upstream(source_dir)
+  # Simulate a machine that already ran the earlier migration: it attached the
+  # real catalog origin but did not yet leave the finite adoption witness.
+  app_git._run(
+    source_dir, "remote", "add", "origin",
+    "https://github.com/acme/synthetic-store.git",
+  )
+  (source_dir / "owner.js").write_text("owner commit\n")
+  owner_head = app_git.commit_local(source_dir, "owner change")
+  assert owner_head
+  (source_dir / "draft.js").write_text("uncommitted owner draft\n")
+
+  eng = create_engine(f"sqlite:///{tmp_path / 'synthetic-store.db'}")
+  models.Base.metadata.create_all(eng)
+  with Session(eng) as session:
+    app = models.App(
+      name="Synthetic Store",
+      description="",
+      jsx_source="export default 'v1'\n",
+      compiled_path="",
+      slug="synthetic-store",
+      source_dir=str(source_dir),
+      manifest_url=(
+        "https://raw.githubusercontent.com/acme/synthetic-store/main/"
+        "#manifest-id=synthetic-store"
+      ),
+      source_commit=owner_head,
+      upstream_commit=synthetic,
+    )
+    session.add(app)
+    session.commit()
+    app_id = app.id
+
+  migrations._require_git_app_sources(eng)
+  first_head = app_git.head_sha(source_dir, app_git.LOCAL_BRANCH)
+  migrations._require_git_app_sources(eng)
+
+  assert app_git.head_sha(source_dir, app_git.LOCAL_BRANCH) == first_head
+  assert app_git.migration_baseline(source_dir) == synthetic
+  assert app_git.head_sha(source_dir, app_git.UPSTREAM_BRANCH) == synthetic
+  assert app_git.ref_is_ancestor(source_dir, owner_head, first_head) is True
+  assert app_git.read_blob(source_dir, first_head, "draft.js") == (
+    b"uncommitted owner draft\n"
+  )
+  assert app_git.origin_url(source_dir) == (
+    "https://github.com/acme/synthetic-store.git"
+  )
+  with Session(eng) as session:
+    migrated = session.get(models.App, app_id)
+    # The migration preserves the last served commit. Capturing the draft in
+    # Git must not silently publish it as the app's active source.
+    assert migrated.source_commit == owner_head
+    assert migrated.upstream_commit == synthetic
+
 
 
 def test_provider_admission_upgrade_preserves_legacy_uncertainty(tmp_path):
@@ -1627,6 +2016,7 @@ def test_run_migrations_records_an_inspectable_append_only_history(tmp_path):
     "0062_chat_run_progress_lease",
     "0063_durable_goal_records",
     "0063_chat_run_continuation_control",
+    "0064_require_git_app_sources",
   ]
   assert second == first
 

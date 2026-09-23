@@ -10,6 +10,7 @@ import json
 import os
 import re
 import secrets
+import subprocess
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
@@ -4861,6 +4862,452 @@ def _add_goal_plan_admission_revision(eng) -> None:
     ))
 
 
+def _git_app_migration_run(
+  repo: Path, *args: str, check: bool = True,
+) -> subprocess.CompletedProcess:
+  """Run one migration-owned Git command without inheriting another repo."""
+  env = dict(os.environ)
+  for name in (
+    "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_COMMON_DIR", "GIT_NAMESPACE",
+    "GIT_OPTIONAL_LOCKS",
+  ):
+    env.pop(name, None)
+  env.update({
+    "GIT_CEILING_DIRECTORIES": str(repo.resolve().parent),
+    "GIT_TERMINAL_PROMPT": "0",
+    "GCM_INTERACTIVE": "Never",
+    "GIT_ASKPASS": "/bin/false",
+    "SSH_ASKPASS": "/bin/false",
+  })
+  return subprocess.run(
+    [
+      "git", "-c", "user.name=Mobius", "-c",
+      "user.email=mobius@localhost", "-C", str(repo), *args,
+    ],
+    capture_output=True, text=True, timeout=30, check=check, env=env,
+  )
+
+
+_GIT_APP_MIGRATION_EXCLUDE = """# BEGIN MOBIUS MANAGED IGNORE RULES
+dist/
+.build/
+node_modules/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+*.log
+.DS_Store
+*.swp
+*.swo
+*~
+.env
+.env.local
+.env.*.local
+.build-*/
+static/*
+!static/store/
+!static/store/**
+.mobius-static-assets.json
+*.bak
+*.mobius-bak
+*.mobius-drop-bak
+init-cron.sh
+init-cron.sh.tombstoned
+.cron-pending.json
+inputs/
+runs/
+settings.json
+last-run.json
+reflection-brief-template.html
+fork-chat.sh
+fork-session.sh
+[0-9]*/
+# END MOBIUS MANAGED IGNORE RULES
+"""
+
+_GIT_APP_MIGRATION_UNTRACK = (
+  ":(glob)**/__pycache__/**", ":(glob)**/*.py[cod]",
+  ":(glob)**/.pytest_cache/**", ":(glob)**/.mypy_cache/**",
+  ":(glob)**/.ruff_cache/**", ":(glob)**/.coverage",
+  ":(glob)**/htmlcov/**", ":(glob)**/*.log", ":(glob)**/.DS_Store",
+  ":(glob)**/*.swp", ":(glob)**/*.swo", ":(glob)**/*~",
+  ":(glob)**/.env", ":(glob)**/.env.local", ":(glob)**/.env.*.local",
+  ":(glob)**/.build-*/**", ".mobius-static-assets.json", "*.bak",
+  "*.mobius-bak", "*.mobius-drop-bak", ":(glob)**/*.bak",
+  ":(glob)**/*.mobius-bak", ":(glob)**/*.mobius-drop-bak",
+  "init-cron.sh", "init-cron.sh.tombstoned", ".cron-pending.json",
+  "inputs", "runs", "settings.json", "last-run.json",
+  "reflection-brief-template.html", "fork-chat.sh", "fork-session.sh",
+)
+
+
+def _git_app_migration_write_exclude(path: Path) -> None:
+  """Layer the migration's frozen privacy rules without replacing owner text."""
+  begin = "# BEGIN MOBIUS MANAGED IGNORE RULES"
+  end = "# END MOBIUS MANAGED IGNORE RULES"
+  try:
+    current = path.read_text(encoding="utf-8")
+  except FileNotFoundError:
+    current = ""
+  start = current.find(begin)
+  if start >= 0:
+    stop = current.find(end, start)
+    current = (
+      current[:start]
+      if stop < 0
+      else current[:start] + current[stop + len(end):]
+    )
+  prefix = current.rstrip("\n")
+  path.parent.mkdir(parents=True, exist_ok=True)
+  path.write_text(
+    (prefix + "\n" if prefix else "") + _GIT_APP_MIGRATION_EXCLUDE,
+    encoding="utf-8",
+  )
+
+
+def _git_app_migration_is_synthetic_upstream(
+  source_dir: Path,
+  upstream_sha: str,
+  manifest_url: str,
+) -> bool:
+  """Recognize the complete Git shape written by the retired HTTP installer."""
+  from urllib.parse import unquote, urlparse
+
+  parsed_manifest = urlparse(manifest_url.split("#", 1)[0])
+  manifest_parts = [
+    unquote(part) for part in parsed_manifest.path.split("/") if part
+  ]
+  if (
+    parsed_manifest.scheme != "https"
+    or parsed_manifest.netloc != "raw.githubusercontent.com"
+    or len(manifest_parts) < 3
+  ):
+    return False
+  expected_repo = tuple(manifest_parts[:2])
+  history = _git_app_migration_run(
+    source_dir,
+    "log", "--first-parent", "--reverse",
+    "--format=%an%x00%ae%x00%s", upstream_sha,
+    check=False,
+  )
+  if history.returncode != 0:
+    return False
+  rows = [line.split("\x00") for line in history.stdout.splitlines()]
+  if len(rows) < 2 or any(len(row) != 3 for row in rows):
+    return False
+  if rows[0] != ["Mobius", "mobius@localhost", "Initialize app repo"]:
+    return False
+  for author, email, subject in rows[1:]:
+    if author != "Mobius" or email != "mobius@localhost":
+      return False
+    match = re.fullmatch(r"install v.+ from (.+)", subject)
+    if match is None:
+      return False
+    parsed_source = urlparse(match.group(1))
+    source_parts = [
+      unquote(part) for part in parsed_source.path.split("/") if part
+    ]
+    if (
+      parsed_source.scheme != "https"
+      or parsed_source.netloc != "raw.githubusercontent.com"
+      or len(source_parts) < 3
+      or tuple(source_parts[:2]) != expected_repo
+    ):
+      return False
+  return True
+
+
+def _git_app_migration_open_source(
+  apps_root: Path, stored_source_dir: str,
+) -> tuple[Path, int] | None:
+  """Open one direct app directory without following its final component."""
+  source_dir = Path(os.path.abspath(stored_source_dir))
+  if source_dir.parent != apps_root or source_dir.name.isdigit():
+    return None
+  if not hasattr(os, "O_NOFOLLOW"):
+    raise RuntimeError("Git app migration requires no-follow file support")
+
+  root_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+  if hasattr(os, "O_CLOEXEC"):
+    root_flags |= os.O_CLOEXEC
+  root_fd = os.open(apps_root, root_flags)
+  try:
+    try:
+      source_fd = os.open(source_dir.name, root_flags, dir_fd=root_fd)
+    except FileNotFoundError:
+      os.mkdir(source_dir.name, mode=0o755, dir_fd=root_fd)
+      source_fd = os.open(source_dir.name, root_flags, dir_fd=root_fd)
+    except OSError as exc:
+      raise RuntimeError(
+        f"Cannot capture app source through unsafe directory: {source_dir}"
+      ) from exc
+  finally:
+    os.close(root_fd)
+  return source_dir, source_fd
+
+
+def _git_app_migration_restore_entry(
+  source_dir: Path, source_fd: int, jsx_source: str,
+) -> None:
+  """Create a missing entry beneath an already-open app root, never a link."""
+  import stat
+
+  try:
+    existing = os.stat("index.jsx", dir_fd=source_fd, follow_symlinks=False)
+  except FileNotFoundError:
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+    if hasattr(os, "O_CLOEXEC"):
+      flags |= os.O_CLOEXEC
+    try:
+      entry_fd = os.open("index.jsx", flags, 0o644, dir_fd=source_fd)
+    except OSError as exc:
+      raise RuntimeError(
+        f"Cannot restore app entry through unsafe path: {source_dir}"
+      ) from exc
+    with os.fdopen(entry_fd, "w", encoding="utf-8") as entry:
+      entry.write(jsx_source)
+    return
+  if not stat.S_ISREG(existing.st_mode):
+    raise RuntimeError(
+      f"Cannot capture app source with unsafe index.jsx: {source_dir}"
+    )
+
+
+def _require_git_app_sources(eng) -> None:
+  """Move every retained app onto the one supported local-Git source model.
+
+  Existing files are authoritative. A missing entry is restored only from the
+  durable App row through the opened app directory. A source tree captured by
+  this migration receives an empty finite upstream baseline, then one local
+  child commit containing every retained owner file. Its first real update can
+  therefore replay those files and surface overlaps honestly. A genuine
+  repository keeps its own history; when it has no explicit ``upstream`` ref,
+  that provenance remains unknown instead of treating the owner's workspace as
+  pristine upstream. Catalog provenance is attached as ``origin`` without
+  network I/O.
+  """
+  from sqlalchemy import inspect, text
+  from urllib.parse import unquote, urlparse
+
+  inspector = inspect(eng)
+  if "apps" not in inspector.get_table_names():
+    return
+  columns = {column["name"] for column in inspector.get_columns("apps")}
+  required = {
+    "id", "source_dir", "jsx_source", "manifest_url",
+    "source_commit", "upstream_commit",
+  }
+  if not required.issubset(columns):
+    return
+
+  data_root = Path(os.environ.get("DATA_DIR", "/data")).resolve()
+  apps_root = (data_root / "apps").resolve()
+  apps_root.mkdir(parents=True, exist_ok=True)
+  with eng.connect() as conn:
+    rows = list(conn.execute(text(
+      "SELECT id, source_dir, jsx_source, manifest_url, "
+      "source_commit, upstream_commit FROM apps"
+    )).mappings())
+
+  updates: list[tuple[int, str, str | None]] = []
+  for row in rows:
+    opened = _git_app_migration_open_source(
+      apps_root, str(row["source_dir"]),
+    )
+    if opened is None:
+      # Rows outside the managed app root are not writable app installs. Older
+      # test/support rows and already-invalid records must not make boot write
+      # elsewhere merely to manufacture Git state.
+      continue
+    source_dir, source_fd = opened
+    try:
+      _git_app_migration_restore_entry(
+        source_dir, source_fd, str(row["jsx_source"] or ""),
+      )
+    finally:
+      os.close(source_fd)
+
+    git_dir = source_dir / ".git"
+    if os.path.lexists(git_dir) and (
+      git_dir.is_symlink() or not git_dir.is_dir()
+    ):
+      raise RuntimeError(
+        f"Cannot capture app source with unsafe .git: {source_dir}"
+      )
+    new_repo = not git_dir.is_dir()
+    if new_repo:
+      _git_app_migration_run(source_dir, "init", "-q", "-b", "main")
+      _git_app_migration_run(
+        source_dir, "commit", "-q", "-m", "Initialize migrated app baseline",
+        "--allow-empty",
+      )
+      migration_baseline = _git_app_migration_run(
+        source_dir, "rev-parse", "main",
+      ).stdout.strip()
+      # Establish provenance immediately after the empty commit. If boot stops
+      # later, this ref—not a guessed branch name—authorizes an idempotent
+      # resume. A stop before this write remains deliberately unresolved.
+      _git_app_migration_run(
+        source_dir, "update-ref", "refs/mobius/migration-baseline",
+        migration_baseline,
+      )
+    else:
+      baseline = _git_app_migration_run(
+        source_dir, "rev-parse", "--verify",
+        "refs/mobius/migration-baseline", check=False,
+      )
+      migration_baseline = (
+        baseline.stdout.strip() if baseline.returncode == 0 else None
+      )
+      if migration_baseline is None:
+        # Older Store installs already used Git, but their ``upstream`` commits
+        # were synthesized from fetched files rather than cloned from the real
+        # catalog repository. Recognize only the recorded ref whose complete
+        # first-parent history matches that retired installer, then grant the
+        # same one-time adoption bridge as a newly migrated app.
+        upstream = _git_app_migration_run(
+          source_dir, "rev-parse", "--verify", "upstream", check=False,
+        )
+        recorded_upstream = str(row["upstream_commit"] or "")
+        if (
+          upstream.returncode == 0
+          and upstream.stdout.strip() == recorded_upstream
+          and _git_app_migration_is_synthetic_upstream(
+            source_dir, recorded_upstream, str(row["manifest_url"] or ""),
+          )
+        ):
+          migration_baseline = recorded_upstream
+          _git_app_migration_run(
+            source_dir, "update-ref",
+            "refs/mobius/migration-baseline", migration_baseline,
+          )
+
+    synthetic_capture = migration_baseline is not None
+    if synthetic_capture:
+      upstream = _git_app_migration_run(
+        source_dir, "rev-parse", "--verify", "upstream", check=False,
+      )
+      if upstream.returncode != 0:
+        _git_app_migration_run(
+          source_dir, "branch", "upstream", migration_baseline,
+        )
+      elif upstream.stdout.strip() != migration_baseline:
+        raise RuntimeError(
+          f"Migrated app baseline disagrees with upstream: {source_dir}"
+        )
+      main_before_capture = _git_app_migration_run(
+        source_dir, "rev-parse", "--verify", "main", check=False,
+      )
+      if main_before_capture.returncode != 0:
+        raise RuntimeError(
+          f"Migrated app baseline has no local main branch: {source_dir}"
+        )
+      local_before_capture = main_before_capture.stdout.strip()
+      if local_before_capture != migration_baseline:
+        ancestry = _git_app_migration_run(
+          source_dir, "merge-base", "--is-ancestor",
+          migration_baseline, local_before_capture, check=False,
+        )
+        if ancestry.returncode != 0:
+          raise RuntimeError(
+            f"Migrated app baseline is not an ancestor of main: {source_dir}"
+          )
+
+    if synthetic_capture:
+      gitignore = source_dir / ".gitignore"
+      if os.path.lexists(gitignore) and (
+        gitignore.is_symlink() or not gitignore.is_file()
+      ):
+        raise RuntimeError(
+          f"Cannot capture app source with unsafe .gitignore: {source_dir}"
+        )
+      # The app owns its .gitignore. Layer migration-only runtime exclusions
+      # locally so capturing the baseline neither rewrites owner source nor
+      # exposes files the owner already chose to keep out of Git.
+      exclude = source_dir / ".git" / "info" / "exclude"
+      _git_app_migration_write_exclude(exclude)
+      _git_app_migration_run(source_dir, "add", "-A", ".")
+      _git_app_migration_run(
+        source_dir, "rm", "-r", "--cached", "--ignore-unmatch", "--",
+        *_GIT_APP_MIGRATION_UNTRACK,
+      )
+      force_paths = ["index.jsx"]
+      if gitignore.exists():
+        force_paths.append(".gitignore")
+      _git_app_migration_run(source_dir, "add", "-f", "--", *force_paths)
+      staged = _git_app_migration_run(
+        source_dir, "diff", "--cached", "--quiet", check=False,
+      )
+      if local_before_capture == migration_baseline or staged.returncode != 0:
+        commit_args = [
+          "commit", "-q", "-m", "Capture existing app source",
+        ]
+        if local_before_capture == migration_baseline:
+          commit_args.append("--allow-empty")
+        _git_app_migration_run(source_dir, *commit_args)
+
+    # An existing repository without `main` is not evidence of an interrupted
+    # migration. Leave its history untouched rather than granting an arbitrary
+    # owner repository migration-adoption authority.
+    main = _git_app_migration_run(
+      source_dir, "rev-parse", "--verify", "main", check=False,
+    )
+    if main.returncode != 0:
+      continue
+
+    manifest_url = str(row["manifest_url"] or "").split("#", 1)[0]
+    parsed = urlparse(manifest_url)
+    parts = [unquote(part) for part in parsed.path.split("/") if part]
+    has_origin = _git_app_migration_run(
+      source_dir, "remote", "get-url", "origin", check=False,
+    ).returncode == 0
+    if (
+      not has_origin
+      and parsed.scheme == "https"
+      and parsed.netloc == "raw.githubusercontent.com"
+      and len(parts) == 3
+      and all(
+        part not in {"", ".", ".."}
+        and not part.startswith("-")
+        and "\\" not in part
+        for part in parts
+      )
+    ):
+      owner, repository, _ref = parts
+      _git_app_migration_run(
+        source_dir, "remote", "add", "origin",
+        f"https://github.com/{owner}/{repository}.git",
+      )
+
+    local_commit = main.stdout.strip()
+    upstream = _git_app_migration_run(
+      source_dir, "rev-parse", "upstream", check=False,
+    )
+    upstream_commit = (
+      upstream.stdout.strip() if upstream.returncode == 0 else None
+    )
+    updates.append((int(row["id"]), local_commit, upstream_commit))
+
+  with eng.begin() as conn:
+    for app_id, local_commit, upstream_commit in updates:
+      conn.execute(text(
+        "UPDATE apps SET "
+        "source_commit = COALESCE(source_commit, :source_commit), "
+        "upstream_commit = COALESCE(upstream_commit, :upstream_commit) "
+        "WHERE id = :app_id"
+      ), {
+        "app_id": app_id,
+        "source_commit": local_commit,
+        "upstream_commit": upstream_commit,
+      })
+
+
+
 def _add_chat_run_progress_lease(eng) -> None:
   """Add the progress-lease expiry column; legacy running rows stay NULL.
 
@@ -5042,6 +5489,7 @@ _SCHEMA_MIGRATIONS = (
   ("0062_chat_run_progress_lease", _add_chat_run_progress_lease),
   ("0063_durable_goal_records", _durable_goal_records),
   ("0063_chat_run_continuation_control", _add_chat_run_continuation_control),
+  ("0064_require_git_app_sources", _require_git_app_sources),
 )
 
 

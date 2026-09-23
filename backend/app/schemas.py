@@ -370,15 +370,12 @@ class AppApplyOut(BaseModel):
 
 
 class AppInstall(BaseModel):
-  """Body for POST /api/apps/install — atomic install from a manifest.
+  """Body for one atomic install from a Git-backed ``mobius.json`` URL.
 
-  Exactly one of `manifest_url` or `manifest` must be set:
-    - `manifest_url`: the installer GETs the manifest, derives raw_base
-      from the URL (everything before the trailing filename), and
-      fetches the entry JSX + icon + storage_seed files relative to it.
-    - `manifest`: an inline manifest object. The caller must also pass
-      `raw_base` so the installer knows where to fetch referenced files
-      from. Useful for tests + future "install from local tarball".
+  ``manifest_url`` is the supported public source. Möbius derives and clones
+  its repository, then installs the exact reviewed commit. ``manifest`` and
+  ``raw_base`` remain parseable only so older clients receive the installer's
+  explicit ``git_source_required`` response; they never supply app bytes.
   """
   manifest_url: str | None = None
   manifest: dict | None = None
@@ -507,13 +504,14 @@ class UpdatePreviewOut(BaseModel):
 
 
 class UpdateCandidatePreviewOut(BaseModel):
-  """Incoming published source compared with the last installed upstream."""
+  """One candidate owns both executable-source and capability review."""
 
+  capability_preview: AppPreviewOut
   app_id: int
   upstream_version: str | None = None
-  # The installed upstream base used for the comparison. This is intentionally
-  # not the candidate's remote SHA: synthetic manifest installs have no remote
-  # commit, but both package shapes share the same source-diff contract.
+  # The installed Git commit used as the comparison base. The fetched
+  # candidate's exact commit is bound into source_digest and the install
+  # receipt rather than being substituted with an HTTP-only identity.
   upstream_commit: str | None = None
   upstream_diff: str | None = None
   source_digest: str = Field(
@@ -569,6 +567,15 @@ class AppConflictResolverChatOut(BaseModel):
 class AppConflictResolverChatRequest(BaseModel):
   model_config = ConfigDict(extra="forbid")
 
+  resolution_policy: UpdateResolutionPolicy
+
+
+class AppConflictResolverBatchChatRequest(BaseModel):
+  """One owner-approved resolver turn for a complete Store issue set."""
+
+  model_config = ConfigDict(extra="forbid")
+
+  app_ids: list[int] = Field(min_length=1, max_length=50)
   resolution_policy: UpdateResolutionPolicy
 
 

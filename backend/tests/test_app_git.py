@@ -20,6 +20,16 @@ import pytest
 from app import app_git
 
 
+_LEGACY_GITIGNORE_V1 = """# Compiled bundle is a build artifact, rebuilt from index.jsx.
+*.js
+# Install/rollback snapshots are not source.
+*.bak
+# Defensive: the integer-id storage tree is a sibling dir, but if a
+# numeric data dir ever lands here it is runtime data, not source.
+[0-9]*/
+"""
+
+
 def _write(repo: Path, text: str) -> None:
   (repo / "index.jsx").write_text(text, encoding="utf-8")
 
@@ -154,6 +164,19 @@ def test_commit_worktree_tree_rejects_changed_parent(tmp_path):
     app_git.commit_worktree_tree(repo, snapshot, "stale apply")
 
 
+def test_normalize_source_tree_only_untracks_managed_runtime_paths():
+  normalized = app_git.normalize_source_tree({
+    "index.jsx": b"export default () => null\n",
+    "static/tracked.txt": b"tracked package source\n",
+    "settings.json": b"runtime state\n",
+    "runs/result.json": b"runtime output\n",
+  })
+
+  assert normalized["static/tracked.txt"] == b"tracked package source\n"
+  assert "settings.json" not in normalized
+  assert "runs/result.json" not in normalized
+
+
 def _commit_all(repo: Path, msg: str) -> str:
   subprocess.run(
     [
@@ -258,6 +281,19 @@ def test_clone_upstream_uses_real_origin_and_app_gitignore(tmp_path):
     capture_output=True, text=True, check=True, env=app_git._git_env(fixture),
   ).stdout.strip()
   subprocess.run(
+    [
+      "git", "-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+      "-C", str(fixture), "tag", "-a", "v1.0", "-m", "version 1",
+    ],
+    check=True,
+    env=app_git._git_env(fixture),
+  )
+  hex_branch = "a" * 48
+  subprocess.run(
+    ["git", "-C", str(fixture), "branch", hex_branch],
+    check=True, env=app_git._git_env(fixture),
+  )
+  subprocess.run(
     ["git", "clone", "-q", "--bare", str(fixture), str(bare)],
     check=True,
     env=app_git._git_env(fixture),
@@ -291,6 +327,134 @@ def test_clone_upstream_uses_real_origin_and_app_gitignore(tmp_path):
   assert (source_dir / ".gitignore").read_text(encoding="utf-8") == (
     "# app-owned ignore\ntmp-output/\n"
   )
+
+  # Hex-only branch names between SHA-1 and SHA-256 lengths remain named refs,
+  # not malformed immutable commit ids.
+  hex_branch_source = tmp_path / "hex-branch-source"
+  assert app_git.clone_upstream(
+    hex_branch_source, bare.as_uri(), hex_branch,
+  ) == fixture_head
+
+  tag_source = tmp_path / "tag-source"
+  assert app_git.clone_upstream(
+    tag_source, bare.as_uri(), "v1.0",
+  ) == fixture_head
+  assert app_git.head_sha(tag_source, app_git.UPSTREAM_BRANCH) == fixture_head
+
+  (fixture / "index.jsx").write_text(
+    "export default function App() { return <div>tag update</div>; }\n",
+    encoding="utf-8",
+  )
+  app_git._run(fixture, "commit", "-qam", "tag update")
+  tag_update = app_git.head_sha(fixture, "HEAD")
+  app_git._run(fixture, "tag", "-a", "v2.0", "-m", "version 2")
+  app_git._run(fixture, "push", bare.as_uri(), "v2.0")
+  fetched = app_git.fetch_upstream(tag_source, "v2.0")
+  assert fetched.sha == tag_update
+  assert app_git.head_sha(
+    tag_source, app_git.UPSTREAM_BRANCH,
+  ) == tag_update
+
+
+@pytest.mark.parametrize("object_format", ["sha1", "sha256"])
+def test_clone_upstream_accepts_an_immutable_commit_ref(
+  tmp_path, object_format,
+):
+  """A pinned install keeps real Git ancestry instead of synthesizing it."""
+  fixture = tmp_path / "fixture"
+  bare = tmp_path / "fixture.git"
+  subprocess.run(
+    ["git", "init", "-q", f"--object-format={object_format}",
+     "-b", "main", str(fixture)],
+    check=True,
+  )
+  env = app_git._git_env(fixture)
+  (fixture / "index.jsx").write_text("export default () => 'base'\n")
+  subprocess.run(
+    ["git", "-c", "user.name=Test", "-c", "user.email=t@t.invalid",
+     "-C", str(fixture), "add", "."], check=True, env=env,
+  )
+  subprocess.run(
+    ["git", "-c", "user.name=Test", "-c", "user.email=t@t.invalid",
+     "-C", str(fixture), "commit", "-q", "-m", "base"],
+    check=True, env=env,
+  )
+  (fixture / "index.jsx").write_text("export default () => 'pinned'\n")
+  (fixture / "link").symlink_to("/data/service-token.txt")
+  for args in (["add", "."], ["commit", "-q", "-m", "pinned"]):
+    subprocess.run(
+      ["git", "-c", "user.name=Test", "-c", "user.email=t@t.invalid",
+       "-C", str(fixture), *args], check=True, env=env,
+    )
+  pinned_sha = app_git.head_sha(fixture, "HEAD")
+
+  # Keep a newer default-branch tip in the remote. The install must still use
+  # the reviewed immutable commit rather than whatever main points at today.
+  (fixture / "index.jsx").write_text("export default () => 'newer'\n")
+  subprocess.run(
+    ["git", "-c", "user.name=Test", "-c", "user.email=t@t.invalid",
+     "-C", str(fixture), "commit", "-qam", "newer"],
+    check=True, env=env,
+  )
+  subprocess.run(
+    ["git", "clone", "-q", "--bare", str(fixture), str(bare)],
+    check=True, env=env,
+  )
+
+  source_dir = tmp_path / "source"
+  source_dir.mkdir()
+  returned = app_git.clone_upstream(source_dir, bare.as_uri(), pinned_sha)
+
+  assert returned == pinned_sha
+  assert app_git.head_sha(source_dir, app_git.LOCAL_BRANCH) == pinned_sha
+  assert app_git.head_sha(source_dir, app_git.UPSTREAM_BRANCH) == pinned_sha
+  assert app_git.origin_url(source_dir) == bare.as_uri()
+  assert (source_dir / "index.jsx").read_text() == "export default () => 'pinned'\n"
+  assert not (source_dir / "link").is_symlink()
+  assert (source_dir / "link").read_text().strip() == "/data/service-token.txt"
+  exclude = (source_dir / ".git" / "info" / "exclude").read_text()
+  assert "static/" in exclude and "init-cron.sh" in exclude
+  assert app_git._run(
+    source_dir, "rev-parse", "--is-shallow-repository",
+  ).stdout.strip() == "true"
+  assert app_git._run(
+    source_dir, "cat-file", "-e", f"{pinned_sha}^",
+    check=False,
+  ).returncode != 0
+
+
+def test_clone_upstream_never_merges_into_a_concurrently_created_folder(
+  tmp_path, monkeypatch,
+):
+  fixture = tmp_path / "fixture"
+  bare = tmp_path / "fixture.git"
+  subprocess.run(["git", "init", "-q", "-b", "main", str(fixture)], check=True)
+  (fixture / "index.jsx").write_text("upstream\n", encoding="utf-8")
+  _commit_all(fixture, "fixture")
+  subprocess.run(
+    ["git", "clone", "-q", "--bare", str(fixture), str(bare)],
+    check=True, env=app_git._git_env(fixture),
+  )
+  source_dir = tmp_path / "source"
+  original_replace = app_git.os.replace
+  injected = False
+
+  def create_owner_file_then_publish(src, dst):
+    nonlocal injected
+    if not injected and Path(dst) == source_dir:
+      injected = True
+      source_dir.mkdir()
+      (source_dir / "index.jsx").write_text(
+        "owner draft\n", encoding="utf-8",
+      )
+    return original_replace(src, dst)
+
+  monkeypatch.setattr(app_git.os, "replace", create_owner_file_then_publish)
+  with pytest.raises(RuntimeError, match="changed while cloning"):
+    app_git.clone_upstream(source_dir, bare.as_uri(), "main")
+
+  assert injected is True
+  assert (source_dir / "index.jsx").read_text() == "owner draft\n"
 
 
 def test_clone_upstream_neutralizes_symlinks_and_layers_managed_ignore(tmp_path):
@@ -791,6 +955,85 @@ def test_ensure_repo_preserves_existing_app_files_in_parent_worktree(tmp_path):
   ]
 
 
+def test_ensure_repo_preserves_owner_gitignore_and_private_files(tmp_path):
+  """Adopting repoless source must not replace its privacy boundary."""
+  repo = tmp_path / "legacy-app"
+  repo.mkdir()
+  owner_rules = "private-fixture.txt\n!settings.json\n"
+  (repo / ".gitignore").write_text(owner_rules, encoding="utf-8")
+  (repo / "index.jsx").write_text("export default () => null\n")
+  (repo / "private-fixture.txt").write_text("owner private\n")
+  (repo / "settings.json").write_text("{}\n")
+
+  app_git.ensure_repo(repo)
+  assert (repo / ".gitignore").read_text(encoding="utf-8") == owner_rules
+  assert app_git.commit_local(repo, "capture legacy source")
+
+  tracked = set(
+    app_git._run(repo, "ls-files").stdout.splitlines()
+  )
+  assert tracked == {".gitignore", "index.jsx"}
+  assert (repo / "private-fixture.txt").read_text() == "owner private\n"
+  assert (repo / "settings.json").read_text() == "{}\n"
+
+
+def test_ensure_repo_rejects_unsafe_gitignore(tmp_path):
+  repo = tmp_path / "legacy-app"
+  repo.mkdir()
+  (repo / "rules").write_text("private.txt\n")
+  (repo / ".gitignore").symlink_to("rules")
+
+  with pytest.raises(app_git.SourceTreeChanged, match="regular file"):
+    app_git.ensure_repo(repo)
+
+  assert not (repo / ".git").exists()
+
+
+@pytest.mark.parametrize("interrupt_after_seed", [False, True])
+def test_ensure_repo_resumes_interrupted_bootstrap(
+  tmp_path, interrupt_after_seed,
+):
+  repo = tmp_path / "interrupted-app"
+  repo.mkdir()
+  (repo / ".gitignore").write_text("private.txt\n")
+  subprocess.run(
+    ["git", "init", "-q", "-b", app_git.UPSTREAM_BRANCH, str(repo)],
+    check=True,
+  )
+  if interrupt_after_seed:
+    subprocess.run(
+      ["git", "-C", str(repo), "add", "-f", ".gitignore"], check=True,
+    )
+    app_git._run(repo, "commit", "-q", "-m", "seed")
+
+  app_git.ensure_repo(repo)
+
+  assert app_git.head_sha(repo, app_git.LOCAL_BRANCH)
+  assert app_git.head_sha(repo, app_git.UPSTREAM_BRANCH)
+  assert app_git._run(
+    repo, "symbolic-ref", "--short", "HEAD",
+  ).stdout.strip() == app_git.LOCAL_BRANCH
+  assert (repo / ".gitignore").read_text() == "private.txt\n"
+
+
+def test_ensure_repo_adds_only_missing_upstream_to_existing_main(tmp_path):
+  repo = tmp_path / "main-only"
+  repo.mkdir()
+  app_git._run(repo, "init", "-q", "-b", app_git.LOCAL_BRANCH)
+  (repo / "index.jsx").write_text("export default () => null\n")
+  app_git._run(repo, "add", "index.jsx")
+  app_git._run(repo, "commit", "-q", "-m", "existing source")
+  main = app_git.head_sha(repo, app_git.LOCAL_BRANCH)
+
+  app_git.ensure_repo(repo)
+
+  assert app_git.head_sha(repo, app_git.LOCAL_BRANCH) == main
+  assert app_git.head_sha(repo, app_git.UPSTREAM_BRANCH) == main
+  assert app_git._run(
+    repo, "symbolic-ref", "--short", "HEAD",
+  ).stdout.strip() == app_git.LOCAL_BRANCH
+
+
 def test_run_does_not_leak_to_enclosing_repo(tmp_path):
   """A per-app op must never resolve to an ENCLOSING repo (the /data-is-a-git-
   repo trap). A source dir inside a parent worktree but with no dedicated .git
@@ -1151,6 +1394,78 @@ def test_read_merged_tree_returns_every_file_in_a_multi_file_tree(tmp_path):
   ).stdout.decode().strip()
 
   assert app_git.read_merged_tree(repo, tree_oid) == expected
+
+
+def test_tree_readers_batch_binary_empty_and_newline_bytes(tmp_path, monkeypatch):
+  repo = tmp_path / "app"
+  app_git.ensure_repo(repo)
+  expected = {
+    "binary.bin": bytes(range(256)) * 4096,
+    "empty.txt": b"",
+    "nested/name\nwith-newline.txt": b"first\n\x00last\n",
+  }
+  app_git.record_upstream(repo, expected, "https://x/app", "1.0.0")
+  tree_oid = app_git._run(repo, "rev-parse", "upstream^{tree}").stdout.strip()
+
+  original_popen = app_git.subprocess.Popen
+  batch_commands = []
+
+  def counted_popen(*args, **kwargs):
+    command = args[0]
+    if command[-2:] == ["cat-file", "--batch"]:
+      batch_commands.append(command)
+    return original_popen(*args, **kwargs)
+
+  monkeypatch.setattr(app_git.subprocess, "Popen", counted_popen)
+  tree = app_git.read_merged_tree(repo, tree_oid)
+  assert all(tree[rel] == data for rel, data in expected.items())
+  materialized = tmp_path / "materialized"
+  app_git.materialize_tree(repo, tree_oid, materialized)
+
+  assert len(batch_commands) == 2
+  for rel, data in expected.items():
+    assert (materialized / rel).read_bytes() == data
+
+
+def test_batch_reader_rejects_missing_and_nonblob_objects(tmp_path):
+  repo = tmp_path / "app"
+  app_git.ensure_repo(repo)
+  tree_oid = app_git._run(repo, "rev-parse", "upstream^{tree}").stdout.strip()
+
+  with pytest.raises(RuntimeError, match="Missing Git object"):
+    app_git._cat_file_batch(repo, ["0" * 40])
+  with pytest.raises(RuntimeError, match="Unsupported Git object"):
+    app_git._cat_file_batch(repo, [tree_oid])
+
+
+def test_tree_readers_bound_large_blob_batches(tmp_path, monkeypatch):
+  repo = tmp_path / "app"
+  app_git.ensure_repo(repo)
+  large = bytes(range(256)) * (3 * 1024 * 1024 // 256)
+  expected = {f"large-{index}.bin": large for index in range(3)}
+  app_git.record_upstream(repo, expected, "https://x/app", "1.0.0")
+  tree_oid = app_git._run(repo, "rev-parse", "upstream^{tree}").stdout.strip()
+
+  original_popen = app_git.subprocess.Popen
+  batch_commands = []
+
+  def counted_popen(*args, **kwargs):
+    command = args[0]
+    if command[-2:] == ["cat-file", "--batch"]:
+      batch_commands.append(command)
+    return original_popen(*args, **kwargs)
+
+  monkeypatch.setattr(app_git.subprocess, "Popen", counted_popen)
+  tree = app_git.read_merged_tree(repo, tree_oid)
+  assert all(tree[rel] == data for rel, data in expected.items())
+  assert len(batch_commands) == 2
+
+  batch_commands.clear()
+  materialized = tmp_path / "materialized"
+  app_git.materialize_tree(repo, tree_oid, materialized)
+  assert len(batch_commands) == 2
+  for rel, data in expected.items():
+    assert (materialized / rel).read_bytes() == data
 
 
 def test_merge_conflict_names_paths_and_leaves_worktree_intact(tmp_path):
@@ -2493,98 +2808,6 @@ def test_successful_update_retires_landed_equivalence_refs(tmp_path):
   assert not app_git.ref_exists(repo, landed)
 
 
-def test_pending_source_witness_survives_unrelated_app_replay(tmp_path):
-  """An open contribution remains recognizable across an intervening update."""
-  repo = tmp_path / "app"
-  _install(repo, b"base\n")
-  base = app_git.head_sha(repo, app_git.UPSTREAM_BRANCH)
-  _write(repo, "shared\n")
-  reviewed = app_git.commit_local(repo, "reviewed contribution")
-  assert reviewed
-  digest = _review_digest(repo, base, reviewed)
-  pending = app_git.record_pending_equivalent_change(
-    repo,
-    base_sha=base,
-    head_sha=reviewed,
-    source_sha=reviewed,
-    diff_sha256=digest,
-    contribution_id="open-across-update",
-  )
-  assert pending
-
-  # Upstream v2 is unrelated to the open contribution. The clean app replay
-  # intentionally replaces local ancestry while preserving the accepted tree.
-  v2 = app_git.record_upstream(
-    repo,
-    {"index.jsx": b"base\n", "helper.js": b"v2\n"},
-    "https://x/mobius.json", "2.0.0",
-  )
-  merged_v2 = app_git.merge_upstream(repo)
-  assert merged_v2.status == "clean"
-  tree_v2 = app_git.read_merged_tree(repo, merged_v2.merged_tree_oid)
-  for rel, body in tree_v2.items():
-    target = repo / rel
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_bytes(body)
-  replay = app_git.commit_replay(repo, v2, "install v2")
-  assert replay
-  carried = app_git._read_equivalent_change(repo, pending)
-  assert carried is not None
-  assert carried.source_sha == replay
-
-  # Local evolves the reviewed line after v2; v3 now contains the squash of the
-  # original reviewed predecessor. The carried witness keeps it automatic.
-  _write(repo, "local followup\n")
-  assert app_git.commit_local(repo, "later local edit")
-  v3 = app_git.record_upstream(
-    repo,
-    {"index.jsx": b"shared\n", "helper.js": b"v3\n"},
-    "https://x/mobius.json", "3.0.0",
-  )
-  landed = app_git.mark_equivalent_change_landed(
-    repo, digest, upstream_sha=v3,
-  )
-  assert landed
-  result = app_git.merge_upstream(repo)
-  assert result.status == "clean"
-  tree = app_git.read_merged_tree(repo, result.merged_tree_oid)
-  assert tree["index.jsx"] == b"local followup\n"
-  assert tree["helper.js"] == b"v3\n"
-
-
-def test_take_upstream_replay_does_not_carry_a_dropped_contribution(tmp_path):
-  """An intentional source replacement must retire causal local provenance."""
-  repo = tmp_path / "app"
-  _install(repo, b"base\n")
-  base = app_git.head_sha(repo, app_git.UPSTREAM_BRANCH)
-  _write(repo, "reviewed local\n")
-  reviewed = app_git.commit_local(repo, "reviewed contribution")
-  assert reviewed
-  digest = _review_digest(repo, base, reviewed)
-  pending = app_git.record_pending_equivalent_change(
-    repo,
-    base_sha=base,
-    head_sha=reviewed,
-    source_sha=reviewed,
-    diff_sha256=digest,
-    contribution_id="dropped-by-take-upstream",
-  )
-  assert pending
-
-  replacement = app_git.record_upstream(
-    repo, {"index.jsx": b"upstream replacement\n"},
-    "https://x/mobius.json", "2.0.0",
-  )
-  _write(repo, "upstream replacement\n")
-  replay = app_git.commit_replay(repo, replacement, "take upstream")
-  assert replay
-
-  retained = app_git._read_equivalent_change(repo, pending)
-  assert retained is not None
-  assert retained.source_sha == reviewed
-  assert app_git.ref_is_ancestor(repo, reviewed, replay) is False
-
-
 def test_start_conflict_merge_leaves_real_markers_and_merge_head(tmp_path):
   """start_conflict_merge runs a REAL merge into the working tree, leaving
   conflict markers + MERGE_HEAD for the agent to resolve like a `git pull`
@@ -2798,87 +3021,6 @@ def _has_second_parent(repo: Path) -> bool:
   ).returncode == 0
 
 
-def _apply_clean_update(
-  repo: Path, new_index: bytes, version: str,
-) -> str | None:
-  """Run a full clean-update apply the way install.py does, then replay.
-
-  Records `new_index` as the next upstream version, takes the in-memory
-  clean verdict, materialises the whole merged tree back onto disk, and
-  finalizes with `commit_replay` parented on the NEW upstream tip. Returns
-  the replay sha (None if there was nothing to record). Asserts the verdict
-  was clean so a caller that expected a clean update fails loudly here.
-  """
-  app_git.record_upstream(
-    repo, {"index.jsx": new_index}, "https://x/mobius.json", version,
-  )
-  new_upstream = app_git.head_sha(repo, app_git.UPSTREAM_BRANCH)
-  merge = app_git.merge_upstream(repo)
-  assert merge.status == "clean", merge.conflict_paths
-  for rel, data in app_git.read_merged_tree(repo, merge.merged_tree_oid).items():
-    (repo / rel).write_bytes(data)
-  return app_git.commit_replay(repo, new_upstream, f"update {version}")
-
-
-def test_clean_update_replay_is_linear_and_advances_base(tmp_path):
-  """A clean update via commit_replay keeps history linear (no merge commit)
-  and still makes upstream an ancestor of main, with both the local edit and
-  the disjoint upstream change present in the served source."""
-  repo = tmp_path / "app"
-  base = "line A\nline B\nline C\nline D\nline E\n"
-  _install(repo, base.encode())
-  # Local edits line A; upstream v2 edits the disjoint line E.
-  _write(repo, "line A LOCAL\nline B\nline C\nline D\nline E\n")
-  app_git.commit_local(repo, "local edit A")
-
-  sha = _apply_clean_update(
-    repo, b"line A\nline B\nline C\nline D\nline E UPSTREAM\n", "2.0.0",
-  )
-
-  assert sha is not None
-  # main is linear: its tip has no second parent.
-  assert _has_second_parent(repo) is False
-  # upstream is an exact ancestor of main (the base advanced for the next update).
-  assert app_git._run(
-    repo, "merge-base", "--is-ancestor", app_git.UPSTREAM_BRANCH,
-    app_git.LOCAL_BRANCH, check=False,
-  ).returncode == 0
-  # Both the local edit and the disjoint upstream change landed in the source.
-  merged = (repo / "index.jsx").read_text()
-  assert "line A LOCAL" in merged
-  assert "line E UPSTREAM" in merged
-  assert "<<<<<<<" not in merged
-
-
-def test_clean_update_replay_second_update_does_not_conflict(tmp_path):
-  """A SECOND clean update after the first must merge cleanly on a disjoint
-  change: the first replay advanced the base to v2, so v3's three-way merge
-  diffs only the genuinely-new upstream delta — never re-litigates v1->v2."""
-  repo = tmp_path / "app"
-  base = "line A\nline B\nline C\nline D\nline E\n"
-  _install(repo, base.encode())
-  _write(repo, "line A LOCAL\nline B\nline C\nline D\nline E\n")
-  app_git.commit_local(repo, "local edit A")
-
-  # v2 edits line E (disjoint from the local line-A edit).
-  assert _apply_clean_update(
-    repo, b"line A\nline B\nline C\nline D\nline E UPSTREAM\n", "2.0.0",
-  ) is not None
-  # v3 edits line E AGAIN. With the base advanced to v2 this is still disjoint
-  # from the local line-A edit, so the verdict is clean — not a spurious
-  # conflict against the stale install-point base.
-  sha = _apply_clean_update(
-    repo, b"line A\nline B\nline C\nline D\nline E UPSTREAM v3\n", "3.0.0",
-  )
-
-  assert sha is not None
-  assert _has_second_parent(repo) is False
-  merged = (repo / "index.jsx").read_text()
-  assert "line A LOCAL" in merged       # local edit still preserved
-  assert "line E UPSTREAM v3" in merged  # latest upstream landed
-  assert "<<<<<<<" not in merged
-
-
 def test_resolved_conflict_finalize_single_parent_clears_merge_head(tmp_path):
   """A conflict update resolved on disk and finalized via commit_local lands
   as a single-parent replay: main^2 does not resolve, upstream is an ancestor
@@ -3051,6 +3193,46 @@ def test_has_unresolved_conflicts_false_without_merge(tmp_path):
   assert app_git.has_unresolved_conflicts(repo) is False
 
 
+def test_source_projection_is_not_replayed_as_owner_overlay(tmp_path):
+  """Managed-path cleanup is platform bookkeeping, not owner intent."""
+  repo = tmp_path / "projection"
+  repo.mkdir()
+  app_git.ensure_repo(repo)
+  base = app_git.head_sha(repo, app_git.LOCAL_BRANCH)
+  projected = app_git.commit_source_projection(
+    repo,
+    parent=base,
+    files={"index.jsx": b"export default () => null\n"},
+  )
+
+  assert projected != base
+  assert app_git.overlay_commits(repo, base, projected) == []
+  assert "Mobius-Source-Projection: true" in app_git._run(
+    repo, "show", "-s", "--format=%B", projected,
+  ).stdout
+
+
+def test_legacy_migration_identity_requires_empty_root_tree(tmp_path):
+  """A source-bearing historical root cannot authorize adoption bridging."""
+  repo = tmp_path / "legacy-root"
+  repo.mkdir()
+  app_git._run(repo, "init", "-q", "-b", app_git.LOCAL_BRANCH)
+  (repo / "index.jsx").write_text("export default 1\n")
+  app_git._run(repo, "add", "index.jsx")
+  app_git._run(
+    repo,
+    "-c", "user.name=Mobius",
+    "-c", "user.email=mobius@localhost",
+    "commit", "-q", "-m", "Capture existing app source",
+  )
+  app_git._run(
+    repo, "branch", app_git.UPSTREAM_BRANCH,
+    app_git.head_sha(repo, app_git.LOCAL_BRANCH),
+  )
+
+  assert app_git.migration_baseline(repo) is None
+
+
 def test_has_unresolved_conflicts_false_for_resolved_file_with_separator(tmp_path):
   """A resolution whose content legitimately contains a bare `=======` line
   (a heredoc divider, a setext rule) UNDER a live merge must NOT read as an
@@ -3221,8 +3403,7 @@ def test_commit_local_upgrades_managed_gitignore_and_untracks_runtime_files(tmp_
   repo = tmp_path / "app"
   app_git.ensure_repo(repo)
   (repo / ".gitignore").write_text(
-    "# old managed ignore\n*.js\n*.bak\n[0-9]*/\n",
-    encoding="utf-8",
+    _LEGACY_GITIGNORE_V1, encoding="utf-8",
   )
   _write(repo, "export default function App() { return null }\n")
   app_git._run(repo, "add", ".gitignore", "index.jsx")
@@ -3277,8 +3458,7 @@ def test_record_upstream_upgrades_stale_managed_gitignore(tmp_path):
   repo = tmp_path / "app"
   app_git.ensure_repo(repo)
   (repo / ".gitignore").write_text(
-    "# old managed ignore\n*.js\n*.bak\n[0-9]*/\n",
-    encoding="utf-8",
+    _LEGACY_GITIGNORE_V1, encoding="utf-8",
   )
   _write(repo, "export default function App() { return null }\n")
   app_git._run(repo, "add", ".gitignore", "index.jsx")
@@ -3318,8 +3498,7 @@ def test_align_local_to_upstream_preserves_tracked_runtime_files(tmp_path):
   )
   app_git.align_local_to_upstream(repo)
   (repo / ".gitignore").write_text(
-    "# old managed ignore\n*.js\n*.bak\n[0-9]*/\n",
-    encoding="utf-8",
+    _LEGACY_GITIGNORE_V1, encoding="utf-8",
   )
   (repo / "inputs").mkdir()
   (repo / "inputs" / "activity.jsonl").write_text("keep\n", encoding="utf-8")
@@ -4280,6 +4459,411 @@ def test_overlay_replay_consumes_only_reviewed_source_resolution_continuation(
     repo, "log", "--format=%s", "--reverse", f"{upstream}..{replay.tip}",
   ).stdout.splitlines() == [
     "local adaptation and unrelated feature",
+  ]
+
+
+def test_overlay_candidate_promotion_preserves_each_local_commit(tmp_path):
+  repo = tmp_path / "app"
+  repo.mkdir()
+  app_git.ensure_repo(repo)
+  base = app_git.record_upstream(
+    repo, {"index.jsx": b"base\n"}, "https://x/mobius.json", "1.0.0",
+  )
+  app_git.align_local_to_upstream(repo)
+  (repo / "one.js").write_text("one\n")
+  _commit_all(repo, "local one")
+  (repo / "two.js").write_text("two\n")
+  local_tip = _commit_all(repo, "local two")
+  upstream = app_git.record_upstream(
+    repo,
+    {"index.jsx": b"upstream\n"},
+    "https://x/mobius.json",
+    "2.0.0",
+  )
+
+  commits = app_git.overlay_commits(repo, base, local_tip)
+  worktree = tmp_path / "candidate"
+  replay = app_git.replay_overlay(
+    repo, commits=commits, onto=upstream, worktree=worktree,
+  )
+  assert replay.status == "clean"
+
+  promoted = app_git.activate_overlay_candidate(
+    repo,
+    candidate=replay.tip,
+    expected_local=local_tip,
+    worktree=worktree,
+  )
+
+  assert promoted == replay.tip
+  assert not worktree.exists()
+  assert app_git.ref_is_ancestor(repo, upstream, "main") is True
+  assert app_git._run(
+    repo, "log", "--format=%s", "--reverse", f"{upstream}..main",
+  ).stdout.splitlines() == ["local one", "local two"]
+
+
+def test_overlay_candidate_promotion_carries_pending_contribution_witness(tmp_path):
+  """A clean update replay keeps an open contribution recognizable."""
+  repo = tmp_path / "app"
+  _install(repo, b"base\n")
+  base = app_git.head_sha(repo, app_git.UPSTREAM_BRANCH)
+  _write(repo, "shared\n")
+  reviewed = app_git.commit_local(repo, "reviewed contribution")
+  assert reviewed
+  digest = _review_digest(repo, base, reviewed)
+  pending = app_git.record_pending_equivalent_change(
+    repo,
+    base_sha=base,
+    head_sha=reviewed,
+    source_sha=reviewed,
+    diff_sha256=digest,
+    contribution_id="open-across-update",
+  )
+  assert pending
+
+  upstream_v2 = app_git.record_upstream(
+    repo,
+    {"index.jsx": b"base\n", "helper.js": b"v2\n"},
+    "https://x/mobius.json",
+    "2.0.0",
+  )
+  replay = app_git.replay_overlay(
+    repo,
+    commits=app_git.overlay_commits(repo, base, reviewed),
+    onto=upstream_v2,
+    worktree=tmp_path / "candidate",
+  )
+  assert replay.status == "clean"
+  promoted = app_git.activate_overlay_candidate(
+    repo,
+    candidate=replay.tip,
+    expected_local=reviewed,
+    worktree=tmp_path / "candidate",
+  )
+  carried = app_git._read_equivalent_change(repo, pending)
+  assert carried is not None
+  assert carried.source_sha == promoted
+
+  _write(repo, "local followup\n")
+  assert app_git.commit_local(repo, "later local edit")
+  upstream_v3 = app_git.record_upstream(
+    repo,
+    {"index.jsx": b"shared\n", "helper.js": b"v2\n"},
+    "https://x/mobius.json",
+    "3.0.0",
+  )
+  assert app_git.mark_equivalent_change_landed(
+    repo, digest, upstream_sha=upstream_v3,
+  )
+  result = app_git.merge_upstream(repo)
+  assert result.status == "clean"
+  tree = app_git.read_merged_tree(repo, result.merged_tree_oid)
+  assert tree["index.jsx"] == b"local followup\n"
+
+
+def test_overlay_candidate_rollback_restores_contribution_witness(tmp_path):
+  repo = tmp_path / "app"
+  _install(repo, b"base\n")
+  base = app_git.head_sha(repo, app_git.UPSTREAM_BRANCH)
+  _write(repo, "reviewed\n")
+  reviewed = app_git.commit_local(repo, "reviewed contribution")
+  assert reviewed
+  digest = _review_digest(repo, base, reviewed)
+  pending = app_git.record_pending_equivalent_change(
+    repo,
+    base_sha=base,
+    head_sha=reviewed,
+    source_sha=reviewed,
+    diff_sha256=digest,
+    contribution_id="rollback-replay",
+  )
+  assert pending
+  candidate = app_git._run(
+    repo,
+    "commit-tree", app_git._tree_oid(repo, reviewed), "-p", base,
+    "-m", "replayed contribution",
+  ).stdout.strip()
+
+  promoted = app_git.activate_overlay_candidate(
+    repo, candidate=candidate, expected_local=reviewed,
+  )
+  assert app_git._read_equivalent_change(repo, pending).source_sha == promoted
+  restored = app_git.activate_overlay_candidate(
+    repo, candidate=reviewed, expected_local=promoted,
+  )
+
+  assert restored == reviewed
+  assert app_git._read_equivalent_change(repo, pending).source_sha == reviewed
+
+
+def test_overlay_candidate_promotion_refuses_moved_main(tmp_path):
+  repo = tmp_path / "app"
+  repo.mkdir()
+  app_git.ensure_repo(repo)
+  base = app_git.head_sha(repo, "main")
+  _write(repo, "first\n")
+  candidate = _commit_all(repo, "candidate")
+  _write(repo, "later\n")
+  later = _commit_all(repo, "later")
+
+  with pytest.raises(app_git.SourceTreeChanged, match="history changed"):
+    app_git.activate_overlay_candidate(
+      repo, candidate=candidate, expected_local=base,
+    )
+
+  assert app_git.head_sha(repo, "main") == later
+  assert (repo / "index.jsx").read_text() == "later\n"
+
+
+def test_materialized_overlay_rebase_keeps_commit_boundaries(tmp_path):
+  repo = tmp_path / "app"
+  repo.mkdir()
+  app_git.ensure_repo(repo)
+  base = app_git.record_upstream(
+    repo, {"index.jsx": b"base\n"}, "https://x/mobius.json", "1.0.0",
+  )
+  app_git.align_local_to_upstream(repo)
+  _write(repo, "local\n")
+  _commit_all(repo, "local conflict")
+  (repo / "second.js").write_text("second\n")
+  _commit_all(repo, "local follow-up")
+  upstream = app_git.record_upstream(
+    repo, {"index.jsx": b"upstream\n"}, "https://x/mobius.json", "2.0.0",
+  )
+
+  assert app_git.start_overlay_rebase(repo, base=base, onto=upstream) == [
+    "index.jsx",
+  ]
+  assert app_git.rebase_in_progress(repo)
+  _write(repo, "resolved\n")
+  app_git._run(repo, "add", "index.jsx")
+  env = {**app_git._git_env(repo), "GIT_EDITOR": "true"}
+  continued = subprocess.run(
+    [
+      "git", "-c", "user.name=Mobius", "-c", "user.email=mobius@localhost",
+      "-C", str(repo), "rebase", "--continue",
+    ],
+    capture_output=True, text=True, env=env, check=False,
+  )
+  assert continued.returncode == 0, continued.stderr
+  assert not app_git.rebase_in_progress(repo)
+  assert app_git.ref_is_ancestor(repo, upstream, "main") is True
+  assert app_git._run(
+    repo, "log", "--format=%s", "--reverse", f"{upstream}..main",
+  ).stdout.splitlines() == ["local conflict", "local follow-up"]
+
+
+def test_clean_materialized_overlay_rebase_refuses_later_owner_draft(
+  tmp_path, monkeypatch,
+):
+  """The final Git operation refuses a draft racing the freshness check."""
+  repo = tmp_path / "app"
+  repo.mkdir()
+  app_git.ensure_repo(repo)
+  base = app_git.record_upstream(
+    repo,
+    {"index.jsx": b"base\n", "notes.txt": b"saved notes\n"},
+    "https://x/mobius.json",
+    "1.0.0",
+  )
+  app_git.align_local_to_upstream(repo)
+  (repo / "local.js").write_text("owner feature\n")
+  _commit_all(repo, "owner feature")
+  upstream = app_git.record_upstream(
+    repo,
+    {"index.jsx": b"upstream\n", "notes.txt": b"saved notes\n"},
+    "https://x/mobius.json",
+    "2.0.0",
+  )
+  run = app_git._run
+  local = app_git.head_sha(repo, "main")
+  source_status_reads = 0
+
+  def run_then_edit(source_dir, *args, **kwargs):
+    nonlocal source_status_reads
+    result = run(source_dir, *args, **kwargs)
+    if Path(source_dir) == repo and args[:2] == ("status", "--porcelain"):
+      source_status_reads += 1
+      if source_status_reads == 2:
+        (repo / "notes.txt").write_text("later draft\n")
+    return result
+
+  monkeypatch.setattr(app_git, "_run", run_then_edit)
+
+  with pytest.raises(app_git.SourceTreeChanged, match="source changed"):
+    app_git.start_overlay_rebase(repo, base=base, onto=upstream)
+  assert (repo / "notes.txt").read_text() == "later draft\n"
+  assert (repo / "local.js").read_text() == "owner feature\n"
+  assert app_git.head_sha(repo, "main") == local
+  assert app_git._run(
+    repo, "status", "--porcelain", read_only=True,
+  ).stdout == " M notes.txt\n"
+
+
+def test_conflicting_overlay_rebase_refuses_concurrent_owner_commit(
+  tmp_path, monkeypatch,
+):
+  """The resolver cannot replace history that advanced during isolated replay."""
+  repo = tmp_path / "app"
+  repo.mkdir()
+  app_git.ensure_repo(repo)
+  base = app_git.record_upstream(
+    repo, {"index.jsx": b"base\n"}, "https://x/mobius.json", "1.0.0",
+  )
+  app_git.align_local_to_upstream(repo)
+  _write(repo, "local\n")
+  _commit_all(repo, "local conflict")
+  upstream = app_git.record_upstream(
+    repo, {"index.jsx": b"upstream\n"}, "https://x/mobius.json", "2.0.0",
+  )
+  replay_overlay = app_git.replay_overlay
+
+  def replay_then_commit(*args, **kwargs):
+    result = replay_overlay(*args, **kwargs)
+    (repo / "late.txt").write_text("later owner commit\n")
+    _commit_all(repo, "later owner commit")
+    return result
+
+  monkeypatch.setattr(app_git, "replay_overlay", replay_then_commit)
+
+  with pytest.raises(app_git.SourceTreeChanged, match="source changed"):
+    app_git.start_overlay_rebase(repo, base=base, onto=upstream)
+  assert (repo / "late.txt").read_text() == "later owner commit\n"
+  assert app_git._run(
+    repo, "log", "-1", "--format=%s", read_only=True,
+  ).stdout.strip() == "later owner commit"
+  assert not app_git.rebase_in_progress(repo)
+
+
+def test_materialized_overlay_rebase_omits_source_projection_commit(tmp_path):
+  """The resolver must not revive platform-owned source normalization."""
+  repo = tmp_path / "app"
+  repo.mkdir()
+  app_git.ensure_repo(repo)
+  base = app_git.record_upstream(
+    repo, {"index.jsx": b"base\n"}, "https://x/mobius.json", "1.0.0",
+  )
+  app_git.align_local_to_upstream(repo)
+  _write(repo, "local\n")
+  local = _commit_all(repo, "local conflict")
+  gitignore = (repo / ".gitignore").read_bytes()
+  projected = app_git.commit_source_projection(
+    repo,
+    parent=local,
+    files={
+      ".gitignore": gitignore,
+      "index.jsx": b"local\n",
+      "projection-only.js": b"must not replay\n",
+    },
+  )
+  app_git._run(repo, "update-ref", "refs/heads/main", projected, local)
+  app_git._run(repo, "reset", "--hard", projected)
+  upstream = app_git.record_upstream(
+    repo, {"index.jsx": b"upstream\n"}, "https://x/mobius.json", "2.0.0",
+  )
+
+  assert app_git.start_overlay_rebase(repo, base=base, onto=upstream) == [
+    "index.jsx",
+  ]
+  assert app_git.rebase_in_progress(repo)
+  _write(repo, "resolved\n")
+  app_git._run(repo, "add", "index.jsx")
+  env = {**app_git._git_env(repo), "GIT_EDITOR": "true"}
+  continued = subprocess.run(
+    [
+      "git", "-c", "user.name=Mobius", "-c", "user.email=mobius@localhost",
+      "-C", str(repo), "rebase", "--continue",
+    ],
+    capture_output=True, text=True, env=env, check=False,
+  )
+  assert continued.returncode == 0, continued.stderr
+  assert not (repo / "projection-only.js").exists()
+  assert app_git._run(
+    repo, "log", "--format=%s", "--reverse", f"{upstream}..main",
+  ).stdout.splitlines() == ["local conflict"]
+
+
+def test_materialized_overlay_rebase_uses_semantic_prefix_before_real_conflict(
+  tmp_path,
+):
+  """Reviewed landed work vanishes before the resolver sees a later conflict."""
+  repo, base, head, adapted, digest = _source_resolution_history(tmp_path)
+  (repo / "shared.js").write_text(
+    "reviewed nonconflicting addition\nlocal retained detail\n",
+  )
+  reviewed_through = _commit_all(repo, "complete reviewed adaptation")
+  resolution = app_git.preview_source_resolution(
+    repo,
+    base_sha=base,
+    head_sha=head,
+    source_sha=reviewed_through,
+    diff_sha256=digest,
+  )
+  assert resolution is not None
+  assert app_git.record_prepublication_source_continuity(
+    repo,
+    base_sha=base,
+    head_sha=head,
+    source_sha=adapted,
+    reviewed_through_sha=reviewed_through,
+    diff_sha256=digest,
+    contribution_id="adapted-review",
+    review_identity_sha256="a" * 64,
+    source_resolution_sha256=resolution.diff_sha256,
+  )
+  witness = app_git.prepublication_source_continuity(
+    repo,
+    base_sha=base,
+    head_sha=head,
+    source_sha=adapted,
+    current_source_sha=reviewed_through,
+    diff_sha256=digest,
+    contribution_id="adapted-review",
+    review_identity_sha256="a" * 64,
+  )
+  assert witness is not None
+  assert app_git.record_reviewed_source_equivalence(repo, witness=witness)
+  (repo / "conflict.js").write_text("local\n")
+  _commit_all(repo, "later genuine conflict")
+  upstream = app_git.record_upstream(
+    repo,
+    {
+      "index.jsx": b"mode = 'published form'\n",
+      "shared.js": b"reviewed nonconflicting addition\n",
+      "conflict.js": b"upstream\n",
+    },
+    "https://x/mobius.json",
+    "2.0.0",
+  )
+  assert app_git.mark_equivalent_change_landed(
+    repo, digest, upstream_sha=upstream,
+  )
+
+  assert app_git.start_overlay_rebase(repo, base=base, onto=upstream) == [
+    "conflict.js",
+  ]
+  assert app_git.rebase_in_progress(repo)
+  assert (repo / "index.jsx").read_bytes() == b"mode = 'local adapted form'\n"
+  assert (repo / "shared.js").read_bytes() == (
+    b"reviewed nonconflicting addition\nlocal retained detail\n"
+  )
+  (repo / "conflict.js").write_text("resolved\n")
+  app_git._run(repo, "add", "conflict.js")
+  env = {**app_git._git_env(repo), "GIT_EDITOR": "true"}
+  continued = subprocess.run(
+    [
+      "git", "-c", "user.name=Mobius", "-c", "user.email=mobius@localhost",
+      "-C", str(repo), "rebase", "--continue",
+    ],
+    capture_output=True, text=True, env=env, check=False,
+  )
+  assert continued.returncode == 0, continued.stderr
+  assert app_git._run(
+    repo, "log", "--format=%s", "--reverse", f"{upstream}..main",
+  ).stdout.splitlines() == [
+    "local adaptation and unrelated feature",
+    "later genuine conflict",
   ]
 
 
