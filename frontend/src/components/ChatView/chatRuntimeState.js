@@ -16,7 +16,9 @@ export function isContinuationMessage(message) {
  * times; permanent client errors and missing chats need a different remedy. */
 export function cachedActivationRetryDelay(error, attempt) {
   const message = String(error?.message || '')
-  const transient = error?.name === 'TypeError'
+  const transientNetworkError = error?.name === 'TypeError'
+    && /failed to fetch|networkerror|load failed|fetch failed/i.test(message)
+  const transient = transientNetworkError
     || error?.name === 'TimeoutError'
     || /^(?:CHAT_RUNTIME_FAILED|CHAT_LOAD_FAILED)_(?:408|425|429|5\d\d)$/.test(message)
     || message === 'CHAT_RUNTIME_OUT_OF_ORDER'

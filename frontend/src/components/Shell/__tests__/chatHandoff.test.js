@@ -487,7 +487,7 @@ test('cold activation keeps one composer visible but refuses sends until runtime
     'the manual Retry remains only for an uncached initial-load failure',
   )
   assert.doesNotMatch(chatView, /chat__activation-retry|Chat activation needs a retry before sending\./,
-    'the composer never renders the activation retry strip')
+    'activation failures never add a retry warning above the composer')
   assert.match(chatView,
     /const activationCacheReusable = \(\s*activationCacheEntryState === 'paintable'[\s\S]*activationCacheEntryState === 'stream-catchup'/,
     'only a classifier-approved complete cache may enter runtime reuse or fallback')
