@@ -13,13 +13,16 @@
 import { test, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
 import {
+  AppTokenStartupState,
   liveAppToken,
   latchedAppToken,
   resolveLatchedToken,
+  appTokenStartupState,
   appTokenRefreshInterval,
   appTokenIdentity,
   _resetLatchStore,
 } from '../appToken.js'
+import { ReachabilityPhase } from '../connectivityStore.js'
 
 beforeEach(() => { _resetLatchStore() })
 
@@ -194,4 +197,43 @@ test('genuine online session waits for a fresh app token', () => {
   assert.equal(step(undefined, true, CACHED), undefined)
   // Fresh app token finally resolves and supersedes any persisted token.
   assert.equal(step(APP, true, CACHED), APP)
+})
+
+test('cold offline startup stays neutral while reachability is checking', () => {
+  assert.equal(
+    appTokenStartupState(undefined, ReachabilityPhase.CHECKING, true),
+    AppTokenStartupState.CHECKING,
+    'a failed token request is not an online auth verdict while reachability is undecided',
+  )
+  assert.equal(
+    appTokenStartupState(undefined, ReachabilityPhase.CHECKING, false),
+    AppTokenStartupState.CHECKING,
+  )
+})
+
+test('confirmed reachability keeps secure-session failure states distinct', () => {
+  assert.equal(
+    appTokenStartupState(undefined, ReachabilityPhase.ONLINE, true),
+    AppTokenStartupState.ONLINE_ERROR,
+    'confirmed online token failures remain actionable and never use cached auth',
+  )
+  assert.equal(
+    appTokenStartupState(undefined, ReachabilityPhase.ONLINE, false),
+    AppTokenStartupState.LOADING,
+    'a healthy cold start remains a neutral token-loading state',
+  )
+  assert.equal(
+    appTokenStartupState(undefined, ReachabilityPhase.OFFLINE, true),
+    AppTokenStartupState.OFFLINE_MISSING,
+    'confirmed offline with no usable cache explains the first-online requirement',
+  )
+})
+
+test('a resolved token always wins over stale reachability and error state', () => {
+  for (const phase of Object.values(ReachabilityPhase)) {
+    assert.equal(
+      appTokenStartupState(APP, phase, true),
+      AppTokenStartupState.READY,
+    )
+  }
 })

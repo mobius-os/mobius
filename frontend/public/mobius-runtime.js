@@ -81,13 +81,19 @@ function tokenMatchesRuntime(token, appId, appInstanceId) {
 //#region src/runtime/storage.js
 const DB_NAME = "mobius-outbox";
 const SIGNAL_DB_NAME = "mobius-signals";
+const LIST_DB_NAME = "mobius-listings";
 const STORE = "ops";
 const SIGNAL_STORE = "signals";
 const CACHE_STORE = "cache";
 const OUTCOME_STORE = "write_outcomes";
+const LIST_STORE = "listings";
 const DB_VERSION = 3;
 const SIGNAL_DB_VERSION = 1;
+const LIST_DB_VERSION = 1;
+const LIST_CACHE_WRITE_CONCURRENCY = 8;
 const MAX_WRITE_OUTCOMES = 200;
+const MAX_CONFLICT_CONTEXT_BYTES = 65536;
+const CONFLICT_CONTEXT_BATCH_KIND = "mobius-conflict-context-batch";
 const MAX_PENDING_SIGNALS = 500;
 const MAX_PENDING_SIGNAL_BYTES = 2097152;
 const MAX_GLOBAL_PENDING_SIGNALS = 2e3;
@@ -99,6 +105,22 @@ function overlayPending(ops, path, fallback) {
 	for (const op of ops) if (op.path === path) pending = op;
 	if (pending) return pending.method === "DELETE" ? null : pending.data;
 	return fallback;
+}
+function conflictContextItems(context) {
+	if (context && context.kind === CONFLICT_CONTEXT_BATCH_KIND && context.version === 1 && Array.isArray(context.items)) return context.items.flatMap((item) => conflictContextItems(item));
+	return context == null ? [] : [context];
+}
+function combineConflictContexts(ops, next) {
+	if (next == null) return next;
+	const previous = ops.flatMap((op) => conflictContextItems(op.conflictContext));
+	if (!previous.length) return next;
+	const items = [...previous, ...conflictContextItems(next)];
+	const combined = {
+		kind: CONFLICT_CONTEXT_BATCH_KIND,
+		version: 1,
+		items
+	};
+	return JSON.stringify(combined).length <= MAX_CONFLICT_CONTEXT_BYTES ? combined : null;
 }
 var DurableWriteError = class extends Error {
 	constructor(message, fields = {}) {
@@ -193,12 +215,75 @@ function openSignalDb() {
 		};
 	});
 }
+function openListingDb() {
+	return new Promise((resolve, reject) => {
+		let settled = false;
+		const req = indexedDB.open(LIST_DB_NAME, LIST_DB_VERSION);
+		req.onupgradeneeded = () => {
+			const db = req.result;
+			if (!db.objectStoreNames.contains(LIST_STORE)) db.createObjectStore(LIST_STORE, { keyPath: "key" });
+		};
+		req.onsuccess = () => {
+			const db = req.result;
+			if (settled) {
+				try {
+					db.close();
+				} catch (e) {}
+				return;
+			}
+			settled = true;
+			db.onversionchange = () => {
+				try {
+					db.close();
+				} catch (e) {}
+			};
+			resolve(db);
+		};
+		req.onerror = () => {
+			if (!settled) {
+				settled = true;
+				reject(req.error);
+			}
+		};
+		req.onblocked = () => {
+			if (!settled) {
+				settled = true;
+				reject(/* @__PURE__ */ new Error("mobius-listings open blocked"));
+			}
+		};
+	});
+}
 async function withSignalStore(mode, fn) {
 	const db = await openSignalDb();
 	return new Promise((resolve, reject) => {
 		const tx = db.transaction(SIGNAL_STORE, mode);
 		const box = {};
 		fn(tx.objectStore(SIGNAL_STORE), box);
+		const done = () => {
+			try {
+				db.close();
+			} catch (e) {}
+		};
+		tx.oncomplete = () => {
+			done();
+			resolve(box.value);
+		};
+		tx.onerror = () => {
+			done();
+			reject(tx.error);
+		};
+		tx.onabort = () => {
+			done();
+			reject(tx.error);
+		};
+	});
+}
+async function withListingStore(mode, fn) {
+	const db = await openListingDb();
+	return new Promise((resolve, reject) => {
+		const tx = db.transaction(LIST_STORE, mode);
+		const box = {};
+		fn(tx.objectStore(LIST_STORE), box);
 		const done = () => {
 			try {
 				db.close();
@@ -272,11 +357,15 @@ async function withStores(storeNames, mode, fn) {
 }
 function makeStorage({ appId, appInstanceId = null, getToken, isOnline = null }) {
 	const hostGetToken = getToken;
+	const listingRuntimeId = typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).slice(2);
+	let listingMutationSeq = 0;
 	getToken = async (options) => {
 		const token = await hostGetToken(options);
 		return tokenMatchesRuntime(token, appId, appInstanceId) ? token : null;
 	};
 	const deadLetterListeners = /* @__PURE__ */ new Set();
+	const conflictListeners = /* @__PURE__ */ new Set();
+	const pendingBridgeConflicts = [];
 	const instanceKey = appInstanceId || "legacy";
 	const onlineNow = () => {
 		try {
@@ -321,6 +410,9 @@ function makeStorage({ appId, appInstanceId = null, getToken, isOnline = null })
 			writeId,
 			method: op.method,
 			kind: op.kind || "json",
+			ifMatch: op.ifMatch || null,
+			ifNoneMatch: op.ifNoneMatch === true,
+			conflictContext: op.conflictContext ?? null,
 			status: extra.status,
 			version: extra.version,
 			refusedValue: op.method === "DELETE" ? null : op.data,
@@ -374,13 +466,28 @@ function makeStorage({ appId, appInstanceId = null, getToken, isOnline = null })
 			};
 		});
 	}
+	async function acknowledgeConflict(writeId) {
+		if (typeof writeId !== "string" || !writeId || writeId.length > 256) return false;
+		if (bridgeCall) try {
+			return await bridgeCall("ackConflict", [writeId]) === true;
+		} catch {
+			return false;
+		}
+		const outcome = await getWriteOutcome(writeId);
+		if (!belongsToInstance(outcome) || outcome.state !== "conflict" || outcome.consumed) return false;
+		await markOutcomeConsumed(outcome.key);
+		return true;
+	}
 	function dispatchDeadLetter(rec) {
 		const payload = {
 			path: rec.path,
 			status: rec.status,
 			refusedValue: rec.refusedValue,
 			writeId: rec.writeId,
-			ts: rec.ts
+			ts: rec.ts,
+			ifMatch: rec.ifMatch || null,
+			ifNoneMatch: rec.ifNoneMatch === true,
+			conflictContext: rec.conflictContext ?? null
 		};
 		for (const cb of [...deadLetterListeners]) try {
 			cb(payload);
@@ -418,41 +525,101 @@ function makeStorage({ appId, appInstanceId = null, getToken, isOnline = null })
 			deadLetterListeners.delete(cb);
 		};
 	}
-	function purgePath(path, after) {
+	const conflictsInFlight = /* @__PURE__ */ new Set();
+	async function deliverConflict(rec, listeners) {
+		const payload = {
+			path: rec.path,
+			status: rec.status,
+			refusedValue: rec.refusedValue,
+			writeId: rec.writeId,
+			ts: rec.ts,
+			ifMatch: rec.ifMatch || null,
+			ifNoneMatch: rec.ifNoneMatch === true,
+			conflictContext: rec.conflictContext ?? null
+		};
+		const key = rec.key || outcomeKey(rec.writeId);
+		if (conflictsInFlight.has(key)) return false;
+		if (bridgeCall && listeners.length === 0) {
+			pendingBridgeConflicts.push(payload);
+			if (pendingBridgeConflicts.length > MAX_WRITE_OUTCOMES) pendingBridgeConflicts.shift();
+			return false;
+		}
+		conflictsInFlight.add(key);
+		try {
+			const handled = (await Promise.allSettled(listeners.map((cb) => Promise.resolve().then(() => cb(payload))))).some((result) => result.status === "fulfilled" && result.value !== false);
+			if (handled) await acknowledgeConflict(rec.writeId);
+			return handled;
+		} finally {
+			conflictsInFlight.delete(key);
+		}
+	}
+	function dispatchConflict(rec) {
+		deliverConflict(rec, [...conflictListeners]).catch(() => {});
+	}
+	function replayConflicts(cb) {
+		const pending = bridgeCall ? bridgeCall("listConflicts", []) : listPendingConflicts();
+		Promise.resolve(pending).then((records) => {
+			for (const rec of records || []) deliverConflict(rec, [cb]).catch(() => {});
+		}).catch(() => {});
+	}
+	function listPendingConflicts() {
+		return withStore(OUTCOME_STORE, "readonly", (store, box) => {
+			box.value = [];
+			store.openCursor().onsuccess = (e) => {
+				const cursor = e.target.result;
+				if (!cursor) return;
+				const rec = cursor.value;
+				if (belongsToInstance(rec) && rec.state === "conflict" && !rec.consumed) box.value.push(rec);
+				cursor.continue();
+			};
+		});
+	}
+	function onConflict(cb) {
+		if (typeof cb !== "function") return () => {};
+		conflictListeners.add(cb);
+		while (pendingBridgeConflicts.length) deliverConflict(pendingBridgeConflicts.shift(), [cb]).catch(() => {});
+		replayConflicts(cb);
+		return () => {
+			conflictListeners.delete(cb);
+		};
+	}
+	function replacePath(op) {
 		return withStores([STORE, OUTCOME_STORE], "readwrite", (stores, box) => {
 			const store = stores[STORE];
 			const outcomeStore = stores[OUTCOME_STORE];
+			const existing = [];
 			store.openCursor().onsuccess = (e) => {
 				const cursor = e.target.result;
 				if (!cursor) {
-					if (after) after(store, box);
+					const combined = combineConflictContexts(existing, op.conflictContext);
+					if (!(op.conflictContext != null && existing.some((queued) => queued.conflictContext != null) && combined == null)) for (const queued of existing) {
+						putOutcomeInStore(outcomeStore, outcomeFromOp(queued, "superseded"));
+						store.delete(queued.seq);
+					}
+					const queued = {
+						...op,
+						...combined == null ? {} : { conflictContext: combined },
+						appId,
+						appInstanceId,
+						ts: Date.now()
+					};
+					const r = store.add(queued);
+					r.onsuccess = () => {
+						box.value = {
+							...queued,
+							seq: r.result
+						};
+					};
 					return;
 				}
 				const v = cursor.value;
-				if (belongsToInstance(v) && v.path === path) {
-					putOutcomeInStore(outcomeStore, outcomeFromOp(v, "superseded"));
-					cursor.delete();
-				}
+				if (belongsToInstance(v) && v.path === op.path) existing.push(v);
 				cursor.continue();
 			};
 		});
 	}
 	function enqueue(op) {
-		return purgePath(op.path, (store, box) => {
-			const queued = {
-				...op,
-				appId,
-				appInstanceId,
-				ts: Date.now()
-			};
-			const r = store.add(queued);
-			r.onsuccess = () => {
-				box.value = {
-					...queued,
-					seq: r.result
-				};
-			};
-		});
+		return replacePath(op);
 	}
 	function listOps() {
 		return withStore(STORE, "readonly", (store, box) => {
@@ -472,6 +639,119 @@ function makeStorage({ appId, appInstanceId = null, getToken, isOnline = null })
 	}
 	function cacheKey(path) {
 		return appId + ":" + instanceKey + ":" + path;
+	}
+	function listingKey(prefix) {
+		return appId + ":" + instanceKey + ":" + prefix;
+	}
+	function listingGet(prefix) {
+		return withListingStore("readonly", (store, box) => {
+			const request = store.get(listingKey(prefix));
+			request.onsuccess = () => {
+				box.value = request.result || null;
+			};
+		});
+	}
+	function listingPut(prefix, entries, requestMarker, pendingOps = []) {
+		const snapshot = (entries || []).map((entry) => {
+			const clean = { ...entry };
+			delete clean.content;
+			return clean;
+		});
+		const pendingVers = new Set(pendingOps.map((op) => op.ver).filter(Boolean));
+		return withListingStore("readwrite", (store, box) => {
+			const key = listingKey(prefix);
+			const request = store.get(key);
+			request.onsuccess = () => {
+				const current = request.result;
+				const byName = new Map(snapshot.map((entry) => [entry.name, entry]));
+				const retained = [];
+				if (belongsToInstance(current) && Array.isArray(current.mutations)) for (const mutation of current.mutations) {
+					if (!mutation || typeof mutation.name !== "string") continue;
+					const concurrent = mutation.runtimeId === requestMarker.runtimeId ? Number(mutation.seq) > requestMarker.seq : Number(mutation.at) >= requestMarker.at;
+					const pending = mutation.ver && pendingVers.has(mutation.ver);
+					if (!concurrent && !pending) continue;
+					if (mutation.present) byName.set(mutation.name, mutation.entry);
+					else byName.delete(mutation.name);
+					retained.push(mutation);
+				}
+				const merged = [...byName.values()].sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
+				store.put({
+					key,
+					prefix,
+					appId,
+					appInstanceId,
+					entries: merged,
+					complete: true,
+					mutations: retained,
+					updatedAt: Date.now()
+				});
+				box.value = merged;
+			};
+		});
+	}
+	function listingPatchAncestors(path, present, kind = "json", contentType = null, mutationVer = null) {
+		const parts = String(path || "").split("/").filter(Boolean);
+		if (!parts.length) return Promise.resolve(false);
+		const mutationStamp = mutationVer ? {
+			runtimeId: listingRuntimeId,
+			seq: ++listingMutationSeq,
+			at: Date.now(),
+			ver: mutationVer
+		} : null;
+		const patches = [];
+		for (let depth = parts.length - 1; depth >= 0; depth -= 1) {
+			const prefix = parts.slice(0, depth).join("/");
+			const name = parts[depth];
+			const isFile = depth === parts.length - 1;
+			if (!present && !isFile) continue;
+			patches.push({
+				prefix,
+				name,
+				present,
+				entry: isFile ? {
+					name,
+					path,
+					type: "file",
+					mime_type: contentType || (kind === "json" ? "application/json" : null)
+				} : {
+					name,
+					path: parts.slice(0, depth + 1).join("/"),
+					type: "directory"
+				}
+			});
+		}
+		return withListingStore("readwrite", (store, box) => {
+			box.value = false;
+			for (const patch of patches) {
+				const key = listingKey(patch.prefix);
+				const request = store.get(key);
+				request.onsuccess = () => {
+					const current = request.result;
+					const owned = belongsToInstance(current);
+					const entries = owned && Array.isArray(current.entries) ? [...current.entries] : [];
+					const byName = new Map(entries.map((entry) => [entry.name, entry]));
+					if (patch.present) byName.set(patch.name, patch.entry);
+					else byName.delete(patch.name);
+					const mutations = owned && Array.isArray(current.mutations) ? [...current.mutations] : [];
+					const nextMutations = mutationStamp ? [...mutations.filter((mutation) => mutation.name !== patch.name), {
+						...patch,
+						...mutationStamp
+					}] : mutations;
+					store.put({
+						...owned ? current : {},
+						key,
+						prefix: patch.prefix,
+						appId,
+						appInstanceId,
+						entries: [...byName.values()].sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0),
+						complete: owned ? current.complete !== false : false,
+						mutations: nextMutations,
+						updatedAt: Date.now()
+					});
+					box.value = true;
+				};
+			}
+		});
 	}
 	function cacheGet(path) {
 		return withStore(CACHE_STORE, "readonly", (store, box) => {
@@ -706,8 +986,18 @@ function makeStorage({ appId, appInstanceId = null, getToken, isOnline = null })
 			await deleteOp(op.seq);
 		} catch (e) {
 			if (e && e.conflict) {
-				await recordWriteOutcome(outcomeFromOp(op, "conflict", { status: e.status }));
+				const conflict = outcomeFromOp(op, "conflict", { status: e.status });
+				await recordWriteOutcome(conflict);
 				await deleteOp(op.seq);
+				dispatchConflict(conflict);
+				if (onlineNow()) try {
+					const fresh = await fetchValue(op.path, op.kind || "json");
+					const ct = fresh instanceof Blob ? fresh.type : null;
+					if (op.ver != null ? await cacheCompareSet(op.path, op.ver, fresh, op.kind || "json", ct) : await cacheRepairLegacy(op.path, fresh, op.kind || "json", ct)) {
+						await listingPatchAncestors(op.path, fresh !== null, op.kind || "json", ct).catch(() => {});
+						notify(op.path, fresh);
+					}
+				} catch (re) {}
 				continue;
 			}
 			if (e && e.fatal) {
@@ -720,8 +1010,14 @@ function makeStorage({ appId, appInstanceId = null, getToken, isOnline = null })
 					const fresh = await fetchValue(op.path, op.kind || "json");
 					const ct = fresh instanceof Blob ? fresh.type : null;
 					if (op.ver != null) {
-						if (await cacheCompareSet(op.path, op.ver, fresh, op.kind || "json", ct)) notify(op.path, fresh);
-					} else if (await cacheRepairLegacy(op.path, fresh, op.kind || "json", ct)) notify(op.path, fresh);
+						if (await cacheCompareSet(op.path, op.ver, fresh, op.kind || "json", ct)) {
+							await listingPatchAncestors(op.path, fresh !== null, op.kind || "json", ct).catch(() => {});
+							notify(op.path, fresh);
+						}
+					} else if (await cacheRepairLegacy(op.path, fresh, op.kind || "json", ct)) {
+						await listingPatchAncestors(op.path, fresh !== null, op.kind || "json", ct).catch(() => {});
+						notify(op.path, fresh);
+					}
 				} catch (re) {}
 				continue;
 			}
@@ -970,24 +1266,29 @@ function makeStorage({ appId, appInstanceId = null, getToken, isOnline = null })
 			return null;
 		}
 	}
-	function listCachePresent() {
+	function listCacheRecords() {
 		return withStore(CACHE_STORE, "readonly", (store, box) => {
 			box.value = [];
 			store.openCursor().onsuccess = (e) => {
 				const cursor = e.target.result;
 				if (!cursor) return;
 				const v = cursor.value;
-				if (belongsToInstance(v) && v.present) box.value.push({
+				if (belongsToInstance(v)) box.value.push({
 					path: v.path,
+					present: v.present === true,
 					kind: v.kind,
 					contentType: v.contentType,
-					data: v.data
+					data: v.data,
+					ver: v.ver
 				});
 				cursor.continue();
 			};
 		});
 	}
-	async function listInner(prefix, options = {}) {
+	async function listCachePresent() {
+		return (await listCacheRecords()).filter((record) => record.present);
+	}
+	async function listWithStatusInner(prefix, options = {}) {
 		const norm = (prefix || "").replace(/^\/+|\/+$/g, "");
 		const base = norm ? norm + "/" : "";
 		const restUnder = (path) => {
@@ -995,7 +1296,7 @@ function makeStorage({ appId, appInstanceId = null, getToken, isOnline = null })
 			return path;
 		};
 		const byName = /* @__PURE__ */ new Map();
-		const addDerived = (path, meta) => {
+		const addDerived = (path, meta, allowNew = true) => {
 			const rest = restUnder(path);
 			if (!rest) return;
 			const slash = rest.indexOf("/");
@@ -1004,6 +1305,7 @@ function makeStorage({ appId, appInstanceId = null, getToken, isOnline = null })
 					if (options.includeContent && meta && meta.kind === "json") byName.get(rest).content = meta.data;
 					return;
 				}
+				if (!allowNew) return;
 				const mime = meta && meta.contentType || (meta && meta.kind === "json" ? "application/json" : null);
 				const entry = {
 					name: rest,
@@ -1015,21 +1317,67 @@ function makeStorage({ appId, appInstanceId = null, getToken, isOnline = null })
 				byName.set(rest, entry);
 			} else {
 				const dname = rest.slice(0, slash);
-				if (!byName.has(dname)) byName.set(dname, {
+				if (!byName.has(dname) && allowNew) byName.set(dname, {
 					name: dname,
 					path: base + dname,
 					type: "directory"
 				});
 			}
 		};
+		const requestMarker = {
+			runtimeId: listingRuntimeId,
+			seq: listingMutationSeq,
+			at: Date.now()
+		};
+		const cacheVersionsAtStart = new Map((await listCacheRecords()).map((record) => [record.path, record.ver ?? null]));
 		const server = await listServer(norm, options);
-		if (server) for (const e of server) byName.set(e.name, e);
-		else for (const c of await listCachePresent()) addDerived(c.path, c);
+		let complete = false;
+		let source = "derived";
+		let updatedAt = null;
+		if (server !== null) {
+			for (const e of server) byName.set(e.name, e);
+			complete = true;
+			source = "server";
+			updatedAt = Date.now();
+			const pendingOps = await listOps();
+			const stored = await listingPut(norm, server, requestMarker, pendingOps).catch(() => null);
+			if (stored) {
+				const authoritative = new Map(byName);
+				byName.clear();
+				for (const entry of stored) byName.set(entry.name, authoritative.get(entry.name) || entry);
+			}
+			const pendingPaths = new Set(pendingOps.map((op) => op.path));
+			const contentEntries = server.filter((entry) => Object.prototype.hasOwnProperty.call(entry, "content") && entry.type === "file" && !pendingPaths.has(entry.path));
+			for (let offset = 0; offset < contentEntries.length; offset += LIST_CACHE_WRITE_CONCURRENCY) {
+				const batch = contentEntries.slice(offset, offset + LIST_CACHE_WRITE_CONCURRENCY);
+				await Promise.all(batch.map(async (entry) => {
+					await withPathLock(entry.path, async () => {
+						if (pendingPaths.has(entry.path)) return;
+						if (((await cacheGet(entry.path))?.ver ?? null) !== (cacheVersionsAtStart.get(entry.path) ?? null)) return;
+						await cachePut(entry.path, entry.content, "json", entry.mime_type || "application/json");
+					}).catch(() => {});
+				}));
+			}
+		} else {
+			const snapshot = await listingGet(norm);
+			if (snapshot && Array.isArray(snapshot.entries)) {
+				for (const entry of snapshot.entries) byName.set(entry.name, entry);
+				complete = snapshot.complete !== false;
+				source = complete ? "cache" : "derived";
+				updatedAt = snapshot.updatedAt || null;
+			}
+			for (const c of await listCachePresent()) addDerived(c.path, c, !complete);
+		}
 		for (const op of await listOps()) if (op.method === "DELETE") {
 			const rest = restUnder(op.path);
 			if (rest && rest.indexOf("/") === -1) byName.delete(rest);
 		} else addDerived(op.path, op);
-		return [...byName.values()].sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
+		return {
+			entries: [...byName.values()].sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0),
+			complete,
+			source,
+			updatedAt
+		};
 	}
 	const sameJson = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 	function canonicalStorageVersion(version) {
@@ -1113,7 +1461,8 @@ function makeStorage({ appId, appInstanceId = null, getToken, isOnline = null })
 				kind,
 				contentType,
 				...opts.ifMatch ? { ifMatch: opts.ifMatch } : {},
-				...opts.ifNoneMatch === true ? { ifNoneMatch: true } : {}
+				...opts.ifNoneMatch === true ? { ifNoneMatch: true } : {},
+				...opts.conflictContext === void 0 ? {} : { conflictContext: opts.conflictContext }
 			}
 		]);
 		if (!onlineNow()) throw new Error("mobius.storage: offline saving is unavailable in this sandbox");
@@ -1141,6 +1490,17 @@ function makeStorage({ appId, appInstanceId = null, getToken, isOnline = null })
 		return sent || {};
 	}
 	async function writeLocal(path, data, kind, contentType, opts = {}) {
+		let conflictContext = null;
+		if (opts.conflictContext !== void 0) {
+			let encoded;
+			try {
+				encoded = JSON.stringify(opts.conflictContext);
+			} catch {
+				throw new TypeError("mobius.storage: conflictContext must be JSON-serializable");
+			}
+			if (encoded === void 0 || encoded.length > MAX_CONFLICT_CONTEXT_BYTES) throw new TypeError("mobius.storage: conflictContext exceeds the 64 KiB limit");
+			conflictContext = JSON.parse(encoded);
+		}
 		const prev = await cacheGet(path);
 		const ver = nextVer();
 		await cachePut(path, data, kind, contentType, ver);
@@ -1154,7 +1514,8 @@ function makeStorage({ appId, appInstanceId = null, getToken, isOnline = null })
 				contentType,
 				ver,
 				ifMatch: opts.ifMatch || null,
-				ifNoneMatch: opts.ifNoneMatch === true
+				ifNoneMatch: opts.ifNoneMatch === true,
+				conflictContext
 			});
 		} catch (e) {
 			try {
@@ -1162,6 +1523,7 @@ function makeStorage({ appId, appInstanceId = null, getToken, isOnline = null })
 			} catch (_) {}
 			throw e;
 		}
+		await listingPatchAncestors(path, true, kind, contentType, ver).catch(() => {});
 		notify(path, data);
 		return {
 			path,
@@ -1189,6 +1551,7 @@ function makeStorage({ appId, appInstanceId = null, getToken, isOnline = null })
 			} catch (_) {}
 			throw e;
 		}
+		await listingPatchAncestors(path, false, kind || "json", null, ver).catch(() => {});
 		notify(path, null);
 		return {
 			path,
@@ -1254,12 +1617,14 @@ function makeStorage({ appId, appInstanceId = null, getToken, isOnline = null })
 				direct: true,
 				sent: await writeDirect(path, value, kind, contentType, {
 					ifMatch: opts.ifMatch,
-					ifNoneMatch: opts.ifNoneMatch
+					ifNoneMatch: opts.ifNoneMatch,
+					conflictContext: opts.conflictContext
 				})
 			};
 			return writeLocal(path, value, kind, contentType, {
 				ifMatch: opts.ifMatch,
-				ifNoneMatch: opts.ifNoneMatch
+				ifNoneMatch: opts.ifNoneMatch,
+				conflictContext: opts.conflictContext
 			});
 		});
 		throwIfAborted(opts.signal);
@@ -1369,6 +1734,36 @@ function makeStorage({ appId, appInstanceId = null, getToken, isOnline = null })
 			}
 		};
 	}
+	async function listWithStatus(prefix, options = {}) {
+		if (await hasIndexedDb()) return listWithStatusInner(prefix, options);
+		if (bridgeCall) try {
+			return await bridgeCall("listWithStatus", [prefix, options]);
+		} catch (error) {
+			if (error?.code !== "storage_method_denied" && !String(error?.message || "").includes("unavailable in the shell host")) throw error;
+			return {
+				entries: await bridgeCall("list", [prefix, options]),
+				complete: false,
+				source: "legacy",
+				updatedAt: null
+			};
+		}
+		const server = await listServer((prefix || "").replace(/^\/+|\/+$/g, ""), options);
+		if (server === null) return {
+			entries: [],
+			complete: false,
+			source: "derived",
+			updatedAt: null
+		};
+		return {
+			entries: server,
+			complete: true,
+			source: "server",
+			updatedAt: Date.now()
+		};
+	}
+	async function list(prefix, options = {}) {
+		return (await listWithStatus(prefix, options)).entries;
+	}
 	return {
 		get,
 		getText,
@@ -1378,12 +1773,12 @@ function makeStorage({ appId, appInstanceId = null, getToken, isOnline = null })
 		setBlob,
 		durableWrite,
 		onDeadLetter,
+		onConflict,
+		conflictContextItems,
+		_ackConflict: acknowledgeConflict,
 		remove,
-		async list(prefix, options = {}) {
-			if (await hasIndexedDb()) return listInner(prefix, options);
-			if (bridgeCall) return bridgeCall("list", [prefix, options]);
-			return await listServer((prefix || "").replace(/^\/+|\/+$/g, ""), options) || [];
-		},
+		list,
+		listWithStatus,
 		subscribe(path, cb) {
 			return subscribeWith(path, cb, get, "json");
 		},
@@ -1404,6 +1799,8 @@ function makeStorage({ appId, appInstanceId = null, getToken, isOnline = null })
 		_drain: bridgeCall ? () => bridgeCall("drain", []) : drain,
 		_notify: notify,
 		_receiveDeadLetter: dispatchDeadLetter,
+		_receiveConflict: dispatchConflict,
+		_listConflicts: listPendingConflicts,
 		_destroy() {
 			for (const unsubscribe of [...bridgeUnsubscribers]) unsubscribe();
 			for (const ev of [
@@ -1418,6 +1815,7 @@ function makeStorage({ appId, appInstanceId = null, getToken, isOnline = null })
 			}
 			subscribers.clear();
 			deadLetterListeners.clear();
+			conflictListeners.clear();
 		}
 	};
 }
@@ -1431,17 +1829,23 @@ async function purgeAppRuntimeData(appId) {
 			cursor.continue();
 		};
 	};
-	await Promise.all([withStores([
-		STORE,
-		CACHE_STORE,
-		OUTCOME_STORE
-	], "readwrite", (stores) => {
-		deleteMatching(stores[STORE]);
-		deleteMatching(stores[CACHE_STORE]);
-		deleteMatching(stores[OUTCOME_STORE]);
-	}), withSignalStore("readwrite", (store) => {
-		deleteMatching(store);
-	})]);
+	await Promise.all([
+		withStores([
+			STORE,
+			CACHE_STORE,
+			OUTCOME_STORE
+		], "readwrite", (stores) => {
+			deleteMatching(stores[STORE]);
+			deleteMatching(stores[CACHE_STORE]);
+			deleteMatching(stores[OUTCOME_STORE]);
+		}),
+		withSignalStore("readwrite", (store) => {
+			deleteMatching(store);
+		}),
+		withListingStore("readwrite", (store) => {
+			deleteMatching(store);
+		})
+	]);
 }
 function stableStringify(value) {
 	if (value == null || typeof value !== "object") return JSON.stringify(value);
@@ -1509,6 +1913,7 @@ function createUseDocument(storage, reactProvider = null) {
 		const initialValue = controller.initialValue;
 		const identity = opts.identity || defaultIdentity;
 		const customMerge = opts.merge;
+		const makeConflictContext = opts.conflictContext;
 		const mode = opts.mode || "cas";
 		const maxRetries = opts.maxRetries == null ? 3 : opts.maxRetries;
 		const onError = opts.onError;
@@ -1611,11 +2016,19 @@ function createUseDocument(storage, reactProvider = null) {
 						theirs = await storage.get(path) ?? initialValue;
 					} catch (e) {}
 					const reconciled = reconcileIdentity(mine, customMerge ? customMerge(base, mine, theirs == null ? initialValue : theirs) : defaultDocumentMerge(base, mine, theirs == null ? initialValue : theirs, identity), identity);
+					const conflictContext = typeof makeConflictContext === "function" ? makeConflictContext({
+						base,
+						mine,
+						theirs,
+						merged: reconciled,
+						path
+					}) : makeConflictContext;
 					try {
 						const result = await storage.durableWrite(path, reconciled, {
 							kind: "json",
 							...mode === "cas" && version ? { ifMatch: version } : {},
-							...mode === "cas" && !version ? { ifNoneMatch: true } : {}
+							...mode === "cas" && !version ? { ifNoneMatch: true } : {},
+							...conflictContext === void 0 ? {} : { conflictContext }
 						});
 						controller.base = reconciled;
 						controller.version = result.version || version || null;
@@ -1648,6 +2061,7 @@ function createUseDocument(storage, reactProvider = null) {
 			initialValue,
 			identity,
 			customMerge,
+			makeConflictContext,
 			mode,
 			maxRetries,
 			controller,
@@ -4099,6 +4513,7 @@ function init({ appId, appInstanceId = null, getToken, capabilityContract = null
 		DurableWriteError,
 		durableWrite: storage.durableWrite,
 		onDeadLetter: storage.onDeadLetter,
+		onConflict: storage.onConflict,
 		runtimeFeatures,
 		createUseDocument: (React) => createUseDocument(storage, React),
 		signal,
@@ -4130,4 +4545,4 @@ function init({ appId, appInstanceId = null, getToken, capabilityContract = null
 }
 
 //#endregion
-export { CapabilityError, DurableWriteError, appChatMetadataBody, createUseDocument, init, makeCapabilities, makeChat, makeEmbedAuthorizationHandoff, makeEmbedFrameReveal, makeImmersive, makeNav, makeProjects, makeSignal, makeSplit, makeStorage, overlayPending, purgeAppRuntimeData, runtimeFeatures, sanitizeEmbedGuidance };
+export { CapabilityError, DurableWriteError, appChatMetadataBody, conflictContextItems, createUseDocument, init, makeCapabilities, makeChat, makeEmbedAuthorizationHandoff, makeEmbedFrameReveal, makeImmersive, makeNav, makeProjects, makeSignal, makeSplit, makeStorage, overlayPending, purgeAppRuntimeData, runtimeFeatures, sanitizeEmbedGuidance };

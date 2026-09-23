@@ -162,6 +162,7 @@ function clearOwnerClientState({ preserveChatOutbox }) {
       ? []
       : [clearChatOutbox()]),
     delDatabase('mobius-signals', 'signal queue').catch(() => {}),
+    delDatabase('mobius-listings', 'directory listing cache').catch(() => {}),
     wipeSwCaches().catch(() => {}),
   ])
 }

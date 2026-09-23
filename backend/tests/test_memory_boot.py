@@ -271,6 +271,7 @@ def test_controlled_skills_have_fix_forward_migrations():
     "8826cd584ee5fac754d92572e15883293ebbc59d47c83510e72d56d271ed3869",
   }
   assert module._UNMODIFIED_MIGRATIONS["building-apps.md"] == {
+    "2ea47c610eb2bffaf42c8cbe8e2c69d17943c992bb22ba2aaa2e0c65b6ea1499",
     "734a5fd00dcd58e53f6713a2663d0dd18dec92abcbcf767c7f02f894d92ee510",
     "40f42d055ccdb58a21ce1404da9609f5fbb7135a460b768bb8aa7cdc49ad10b1",
     "4126b40d209c422184e0135f611bb9f4197ea280fa27e63cd71c806f8b5ebd79",
@@ -281,6 +282,7 @@ def test_controlled_skills_have_fix_forward_migrations():
     "294a4a207a2528245b006877ff486aa79fdf401b738afbf43aaf2b67b3e7eead",
   }
   assert module._UNMODIFIED_MIGRATIONS["building-apps-quickstart.md"] == {
+    "61074dbfebf0dc17355eb7e2ce0b4e2ad41d0ce97c7dfa158d530e4f68ac6f35",
     "7d8af2664b37a69b88e48c2a28140c15556202c3c7ce30d77816c203d1959fcb",
     "4c2b080bcc91626f761c5823ea00d324667b9710f6757931823e22e9c8b5c2b1",
     "85a4b5ce5b47c81fa53bec90d530adfe433c0d2f7f31363427b6c792bd332e05",
