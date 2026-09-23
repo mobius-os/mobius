@@ -392,6 +392,8 @@ class ChatEventSink:
     # the next snapshot (or the terminal finalize) appends the continuation as
     # a fresh assistant message.
     self._steering = False
+    # Fresh owner input authorizes one return to unfinished Goal work.
+    self.owner_steer_committed = False
     self._lifecycle_writes: list[tuple[RecordAgentLifecycle, object]] = []
     # Some providers stream command output but omit the final aggregate. Keep
     # only the bounded raw tail needed by protocol receipts; presentation
@@ -1221,13 +1223,10 @@ class ChatEventSink:
     stored_result = await self.split_for_steer(
       user_msgs, consume_pending_cids,
     )
-    stored_messages = (
-      stored_result.get("stored_messages")
-      if isinstance(stored_result, dict)
-      else None
+    stored_messages = stored_result["stored_messages"]
+    self.owner_steer_committed |= bool(
+      stored_result.get("owner_steer_committed", False)
     )
-    if not isinstance(stored_messages, list) or not stored_messages:
-      stored_messages = user_msgs
     try:
       self.bc.publish(steered_into_turn_event(
         stored_messages,

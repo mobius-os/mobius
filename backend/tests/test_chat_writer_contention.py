@@ -1091,15 +1091,23 @@ def test_promote_pending_uses_first_queued_actor_for_run_attribution(actor):
         "cid": "legacy-10",
         "_initiated_by_app_id": app_id,
       },
-      {"role": "user", "content": "also queued", "ts": 11, "cid": "legacy-11"},
+      {
+        "role": "user",
+        "content": "also queued",
+        "ts": 11,
+        "cid": "legacy-11",
+        "_owner_authored": True,
+      },
     ],
   )
   result = _await(actor.submit(PromotePending(chat_id="c1", run_token="rt1")))
   assert result["promoted"]["content"] == "from app\nalso queued"
   assert result["promoted"]["_consumed_cids"] == ["legacy-10", "legacy-11"]
   assert "_initiated_by_app_id" not in result["promoted"]
+  assert "_owner_authored" not in result["promoted"]
   chat = _load_chat()
   assert "_initiated_by_app_id" not in chat["messages"][-1]
+  assert "_owner_authored" not in chat["messages"][-1]
   assert "_consumed_cids" not in chat["messages"][-1]
   run = _load_run("rt1")
   assert run["initiated_by_app_id"] == app_id
