@@ -166,18 +166,55 @@ def test_legacy_summary_fallback_excludes_later_fact_sections(tmp_path):
   assert "prefers grams" not in block.text
 
 
-def test_headingless_legacy_note_falls_back_to_bounded_body(tmp_path):
+def test_headingless_legacy_note_falls_back_to_complete_body(tmp_path):
   root = tmp_path / "shared" / "memory"
   path = _chat_note(root, "legacy", description="legacy chat")
+  body = "loose legacy body " + "x" * 1000
   path.write_text(
-    "---\ntype: chat\ndescription: legacy chat\n---\nloose legacy body",
+    "---\ntype: chat\ndescription: legacy chat\n---\n" + body,
     encoding="utf-8",
   )
 
   block = memory.build_memory_block(tmp_path)
 
-  assert "loose legacy body" in block.text
-  assert len(block.text.encode("utf-8")) < memory.DIGEST_MAX_BYTES + 200
+  assert body in block.text
+
+
+def test_current_paragraph_longer_than_old_limit_is_kept_intact(tmp_path):
+  root = tmp_path / "shared" / "memory"
+  paragraph = "x" * 938
+  _chat_note(root, "long", description="Long note", Digest=paragraph)
+
+  block = memory.build_memory_block(tmp_path)
+
+  assert paragraph in block.text
+  assert len(paragraph.encode("utf-8")) == 938
+  assert block.entries[0]["digest"] == paragraph
+
+
+def test_oversized_paragraph_is_omitted_as_a_whole_with_marker(tmp_path):
+  root = tmp_path / "shared" / "memory"
+  _chat_note(root, "large", description="Large", Digest="é" * 2000)
+
+  block = memory.build_memory_block(tmp_path, budget_bytes=300)
+
+  assert "Name: Large" in block.text
+  assert "Location: chats/large/index.md" in block.text
+  assert "Current summary omitted" in block.text
+  assert "é" not in block.text
+  assert len(block.text.encode("utf-8")) <= 300
+
+
+def test_whole_paragraph_respects_total_budget_and_skips_if_marker_wont_fit(tmp_path):
+  root = tmp_path / "shared" / "memory"
+  _chat_note(root, "first", description="A", Digest="short")
+  _chat_note(root, "second", description="B", Digest="y" * 900)
+
+  block = memory.build_memory_block(tmp_path, ordered_chat_ids=["first", "second"], budget_bytes=180)
+
+  assert "short" in block.text
+  assert "yyyy" not in block.text
+  assert len(block.text.encode("utf-8")) <= 180
 
 
 def test_parse_frontmatter_supports_chat_description():

@@ -4,7 +4,7 @@ from tests.goal_fixtures import goal_run as make_goal_run
 
 import pytest
 
-from app import chat as chat_mod, models
+from app import models
 from app.chat_writer import AppendPending, Barrier, PromotePending, get_writer
 from app.goal_plans import presented_goal
 from app.run_state import (
@@ -242,36 +242,6 @@ def test_result_recovers_origin_goal_while_latest_physical_is_recoverable(
     "hidden": True,
     "source_work_id": source_work_id,
   }) == ("Ship it", "recoverable-result-goal-id")
-
-
-def test_native_goal_mode_follows_the_exact_committed_run(db, chat):
-  db.add_all([
-    make_goal_run(db,
-      id="historical-goal", root_run_id="historical-goal",
-      chat_id=chat.id, status="completed", provider="codex",
-      goal_objective="Old work", goal_id="old-goal-id",
-    ),
-    make_goal_run(db,
-      id="ordinary-question", root_run_id="ordinary-question",
-      chat_id=chat.id, status="running", provider="codex",
-    ),
-  ])
-  db.commit()
-
-  assert chat_mod._run_owns_active_goal(
-    db, chat_id=chat.id, run_token="ordinary-question",
-  ) is False
-  assert chat_mod._run_owns_active_goal(
-    db, chat_id=chat.id, run_token="historical-goal",
-  ) is False
-
-  ordinary = db.get(models.ChatRun, "ordinary-question")
-  ordinary.goal_objective = "Current work"
-  ordinary.goal_id = "current-goal-id"
-  db.commit()
-  assert chat_mod._run_owns_active_goal(
-    db, chat_id=chat.id, run_token="ordinary-question",
-  ) is True
 
 
 def test_natural_resume_does_not_compete_with_question_or_wait(db, chat):

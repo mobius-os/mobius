@@ -4,8 +4,13 @@ import os
 from pathlib import Path
 
 from app import auth as authentication, models
-from app.chat_continuity import completed_prefix
-from app.chat_writer import CheckpointContinuity, StartTurn, get_writer
+from app.chat_continuity import (
+  completed_prefix, delivered_input_prefix, verified_uncovered_messages,
+)
+from app.chat_writer import (
+  AdmitProviderExecution, CheckpointContinuity, RecordDeliveredInput,
+  StartTurn, get_writer,
+)
 from app.routes import chat_continuity as routes
 
 
@@ -48,7 +53,7 @@ def test_legacy_read_does_not_migrate_or_rewrite(client, auth, chat, db):
   assert path.stat().st_mtime_ns == stamp
 
 
-def test_missed_turn_not_covered_without_explicit_ack_and_retry_is_current(
+def test_missing_delivery_preserves_coverage_and_retry_is_current(
   client, chat, db,
 ):
   # Fixture-only source setup; live writes use the actor.
@@ -63,12 +68,24 @@ def test_missed_turn_not_covered_without_explicit_ack_and_retry_is_current(
   assert first.json()["coverage"]["message_count"] == 0
   read = client.get("/api/chat/continuity?after_revision=1", headers=headers).json()
   assert read["entries"] == []
-  assert read["source_cursor"]["message_count"] == 2
-  assert read["has_uncovered_source"] is True
+  assert "source_cursor" not in read
+  assert read["coverage"]["message_count"] == 0
+  db.expire_all()
+  source = list(db.get(models.Chat, chat.id).messages or [])
+  count, proof = delivered_input_prefix(source, "review-run", "New work")
+  assert count == 3 and proof
+  get_writer().submit(AdmitProviderExecution(
+    chat_id=chat.id, run_token="review-run",
+  )).result(timeout=5)
+  assert get_writer().submit(RecordDeliveredInput(
+    chat_id=chat.id, run_token="review-run",
+    message_count=count, prefix_hash=proof,
+  )).result(timeout=5)
   second = _save(client, headers, "catch-up", 1,
     digest="Caught up: preserve the earlier requirement.",
-    source_cursor=read["source_cursor"], summary="Working with the earlier requirement.")
+    summary="Working with the earlier requirement.")
   assert second.status_code == 200, second.text
+  assert second.json()["coverage"]["message_count"] == 3
   retry = _save(client, headers).json()
   assert retry["entry_revision"] == 1
   assert retry["revision"] == 2
@@ -79,17 +96,110 @@ def test_missed_turn_not_covered_without_explicit_ack_and_retry_is_current(
   assert changed.json()["detail"]["reason"] == "checkpoint_mismatch"
 
 
-def test_invalid_source_cursor_leaves_no_partial_first_checkpoint(client, chat, db):
+def test_source_cursor_is_no_longer_a_checkpoint_input(client, chat, db):
   headers = _agent(chat)
   result = _save(client, headers, source_cursor={
     "message_count": 1, "prefix_hash": "0" * 64,
   })
-  assert result.status_code == 409
-  assert result.json()["detail"]["reason"] == "source_changed"
+  assert result.status_code == 422
   db.expire_all()
   assert db.get(models.ChatContinuity, chat.id) is None
   assert db.query(models.ChatContinuityEntry).count() == 0
   assert not _note(chat).exists()
+
+
+def test_sdk_accepted_prefix_excludes_later_steer_and_current_output(
+  client, chat, db,
+):
+  headers = _agent(chat)
+  db.expire_all()
+  accepted = list(db.get(models.Chat, chat.id).messages or [])
+  count, proof = delivered_input_prefix(accepted, "review-run", "New work")
+  assert count == 1 and proof
+  get_writer().submit(AdmitProviderExecution(
+    chat_id=chat.id, run_token="review-run",
+  )).result(timeout=5)
+  assert get_writer().submit(RecordDeliveredInput(
+    chat_id=chat.id, run_token="review-run",
+    message_count=count, prefix_hash=proof,
+  )).result(timeout=5)
+
+  # Fixture simulates an accepted mid-turn steer and a mutable assistant row;
+  # the checkpoint must not infer either from the newest transcript snapshot.
+  db.expire_all()
+  current = db.get(models.Chat, chat.id)
+  current.messages = list(current.messages or []) + [
+    {"role": "assistant", "id": "review-run:assistant:1", "content": "partial"},
+    {"role": "user", "content": "late correction"},
+  ]
+  db.commit()
+  saved = _save(client, headers, summary="Initial task accepted.")
+  assert saved.status_code == 200, saved.text
+  assert saved.json()["coverage"] == {
+    "message_count": count, "prefix_hash": proof,
+  }
+  db.expire_all()
+  suffix, verified = verified_uncovered_messages(
+    db.get(models.Chat, chat.id).messages,
+    covered_count=count, covered_prefix_hash=proof,
+  )
+  assert verified and [row["content"] for row in suffix] == [
+    "partial", "late correction",
+  ]
+
+
+def test_changed_delivered_prefix_does_not_advance_checkpoint(client, chat, db):
+  headers = _agent(chat)
+  db.expire_all()
+  count, proof = delivered_input_prefix(
+    db.get(models.Chat, chat.id).messages, "review-run", "New work",
+  )
+  get_writer().submit(AdmitProviderExecution(
+    chat_id=chat.id, run_token="review-run",
+  )).result(timeout=5)
+  assert get_writer().submit(RecordDeliveredInput(
+    chat_id=chat.id, run_token="review-run",
+    message_count=count, prefix_hash=proof,
+  )).result(timeout=5)
+  db.expire_all()
+  current = db.get(models.Chat, chat.id)
+  changed = list(current.messages)
+  changed[0] = {**changed[0], "content": "edited after delivery"}
+  current.messages = changed
+  db.commit()
+  saved = _save(client, headers)
+  assert saved.status_code == 200, saved.text
+  assert saved.json()["coverage"] == {
+    "message_count": 0, "prefix_hash": None,
+  }
+
+
+def test_delivered_input_requires_admission_and_live_run(chat, db):
+  _agent(chat)
+  db.expire_all()
+  count, proof = delivered_input_prefix(
+    db.get(models.Chat, chat.id).messages, "review-run", "New work",
+  )
+  command = lambda: RecordDeliveredInput(
+    chat_id=chat.id, run_token="review-run",
+    message_count=count, prefix_hash=proof,
+  )
+  assert get_writer().submit(command()).result(timeout=5) is False
+  db.expire_all()
+  assert db.get(models.ChatRun, "review-run").delivered_message_count is None
+  get_writer().submit(AdmitProviderExecution(
+    chat_id=chat.id, run_token="review-run",
+  )).result(timeout=5)
+  assert get_writer().submit(command()).result(timeout=5) is True
+  assert get_writer().submit(command()).result(timeout=5) is True
+
+  # A newer run cannot be overwritten by a late callback from this one.
+  get_writer().submit(StartTurn(
+    chat_id=chat.id, run_token="successor-run",
+    user_msg={"role": "user", "content": "next", "ts": 20},
+    title_source="next",
+  )).result(timeout=5)
+  assert get_writer().submit(command()).result(timeout=5) is False
 
 
 def test_projection_failure_keeps_commit_and_identical_retry_repairs(
@@ -293,3 +403,26 @@ def test_small_provider_handoff_uses_db_journal_without_summary_model(
   assert "Important saved decision." in brief
   assert "Unsummarized new constraint" in brief
   assert "Stale file" not in brief
+
+
+def test_first_post_switch_checkpoint_preserves_idless_marker_and_new_input():
+  messages = [
+    {"role": "user", "content": "earlier requirement"},
+    {"role": "assistant", "id": "prior-run", "content": "settled plan"},
+    {"role": "assistant", "kind": "compaction", "content": "portable handoff"},
+    {"role": "user", "content": "continue on new provider"},
+  ]
+  count, proof = delivered_input_prefix(messages, "switch-run", messages[-1]["content"])
+  assert count == 2
+  suffix, verified = verified_uncovered_messages(
+    messages, covered_count=count, covered_prefix_hash=proof,
+  )
+  assert verified and suffix == messages[2:]
+  # Once an ordinary assistant turn settles, the next input has a proven
+  # predecessor. No marker-specific inference or special-case ack is needed.
+  messages.extend([
+    {"role": "assistant", "id": "switch-run", "content": "continued plan"},
+    {"role": "user", "content": "next refinement"},
+  ])
+  count, _proof = delivered_input_prefix(messages, "next-run", "next refinement")
+  assert count == len(messages)

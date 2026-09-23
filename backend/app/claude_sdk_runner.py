@@ -64,7 +64,7 @@ import signal
 import shutil
 import re
 from collections import deque
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Callable
 from contextlib import ExitStack
 from typing import Any, Literal
 
@@ -1105,6 +1105,7 @@ async def run_claude_sdk_turn(
   run_policy=None,
   connector_plan=None,
   coordination_enabled: bool = True,
+  on_input_delivered: Callable[[], Awaitable[None]] | None = None,
 ) -> RunnerResult:
   """Runs one Claude SDK turn and translates SDK messages to Möbius events.
 
@@ -1572,6 +1573,8 @@ async def run_claude_sdk_turn(
       )
       active_client.set_process_group_id(process_group_id)
       await client.query(turn_message)
+      if on_input_delivered is not None:
+        await on_input_delivered()
 
       # At most one automatic re-query per turn (see the synthetic-resume
       # recovery in the terminal branch below), so a genuinely-empty resume

@@ -368,6 +368,16 @@ class AcknowledgeProviderSuccess(_Command):
 
 
 @dataclass
+class RecordDeliveredInput(_Command):
+  """Record the exact prompt-source prefix after SDK input acceptance."""
+
+  chat_id: str = ""
+  run_token: str = ""
+  message_count: int = 0
+  prefix_hash: str | None = None
+
+
+@dataclass
 class RecordRunMetrics(_Command):
   """Persist provider-neutral usage/cost counters on one ChatRun.
 
@@ -996,7 +1006,6 @@ class CheckpointContinuity(_Command):
   digest: str = ""
   summary: str | None = None
   title: str | None = None
-  source_cursor: dict | None = None
   legacy_markdown: str | None = None
 
 
@@ -1950,6 +1959,8 @@ class ChatWriterActor:
       return self._admit_provider_execution(db, cmd)
     if isinstance(cmd, AcknowledgeProviderSuccess):
       return self._acknowledge_provider_success(db, cmd)
+    if isinstance(cmd, RecordDeliveredInput):
+      return self._record_delivered_input(db, cmd)
     if isinstance(cmd, RecordAgentLifecycle):
       from app.agent_lifecycle import record_event
       return record_event(db, cmd.values)
@@ -4256,11 +4267,54 @@ class ChatWriterActor:
       "agent_settings_json": chat.agent_settings_json,
     }
 
+  def _record_delivered_input(self, db, cmd: RecordDeliveredInput) -> bool:
+    """Persist only a run-owned provider-accepted prefix still byte-identical."""
+    from app.chat_continuity import verified_uncovered_messages
+
+    chat = _active_chat(db, cmd.chat_id)
+    run = db.get(models.ChatRun, cmd.run_token)
+    if (
+      chat is None or run is None or run.chat_id != cmd.chat_id
+      or run.status != "running"
+      or self._run_token_owner.get(cmd.chat_id) != cmd.run_token
+      or not self._run_is_latest(db, run)
+      or not run.provider_execution_admitted
+    ):
+      db.rollback()
+      return False
+    if run.delivered_message_count is not None:
+      same = (
+        run.delivered_message_count == cmd.message_count
+        and run.delivered_prefix_hash == cmd.prefix_hash
+      )
+      db.rollback()
+      return same
+    if cmd.message_count < 0 or (
+      cmd.message_count == 0 and cmd.prefix_hash is not None
+    ) or (
+      cmd.message_count > 0 and (
+        not isinstance(cmd.prefix_hash, str) or len(cmd.prefix_hash) != 64
+      )):
+      db.rollback()
+      return False
+    _tail, verified = verified_uncovered_messages(
+      list(chat.messages or []), covered_count=cmd.message_count,
+      covered_prefix_hash=cmd.prefix_hash,
+    )
+    if not verified:
+      db.rollback()
+      return False
+    run.delivered_message_count = cmd.message_count
+    run.delivered_prefix_hash = cmd.prefix_hash
+    if not _commit_or_rollback(db):
+      raise _PersistFailed("RecordDeliveredInput did not persist")
+    return True
+
   def _checkpoint_continuity(
     self, db, cmd: CheckpointContinuity,
   ) -> dict:
     """Commit one idempotent checkpoint under exact live-run authority."""
-    from app.chat_continuity import completed_prefix, legacy_parts, now_naive
+    from app.chat_continuity import legacy_parts, now_naive, verified_uncovered_messages
 
     chat = _active_chat(db, cmd.chat_id)
     run = db.get(models.ChatRun, cmd.run_token)
@@ -4284,7 +4338,6 @@ class ChatWriterActor:
         and prior.digest == cmd.digest
         and prior.current_summary == cmd.summary
         and prior.requested_title == cmd.title
-        and prior.source_cursor_json == cmd.source_cursor
       )
       if not same:
         return {"status": "conflict", "reason": "checkpoint_mismatch"}
@@ -4328,7 +4381,6 @@ class ChatWriterActor:
           checkpoint_id="legacy-baseline-v1", run_id=None,
           digest=(legacy_digest or "Historical continuity baseline.").strip(),
           current_summary=legacy_short, requested_title=None,
-          source_cursor_json=None,
           covered_message_count=0, covered_prefix_hash=None,
           legacy_markdown=cmd.legacy_markdown, created_at=now_naive(),
         ))
@@ -4336,24 +4388,17 @@ class ChatWriterActor:
       # expected_revision=0 accepts the one-time import the caller could not
       # observe as a database revision before its first checkpoint.
 
-    if cmd.source_cursor is not None:
-      candidate_count, candidate_hash = completed_prefix(
-        list(chat.messages or []), cmd.run_token,
+    covered_count = state.covered_message_count
+    covered_hash = state.covered_prefix_hash
+    delivered_count = run.delivered_message_count
+    delivered_hash = run.delivered_prefix_hash
+    if delivered_count is not None and delivered_count >= covered_count:
+      _tail, verified = verified_uncovered_messages(
+        list(chat.messages or []), covered_count=delivered_count,
+        covered_prefix_hash=delivered_hash,
       )
-      supplied_count = cmd.source_cursor.get("message_count")
-      supplied_hash = cmd.source_cursor.get("prefix_hash")
-      if supplied_count != candidate_count or supplied_hash != candidate_hash:
-        db.rollback()
-        return {
-          "status": "conflict", "reason": "source_changed",
-          "source_cursor": {
-            "message_count": candidate_count, "prefix_hash": candidate_hash,
-          },
-        }
-      covered_count, covered_hash = candidate_count, candidate_hash
-    else:
-      covered_count = state.covered_message_count
-      covered_hash = state.covered_prefix_hash
+      if verified:
+        covered_count, covered_hash = delivered_count, delivered_hash
     next_revision = revision + 1
     created_at = now_naive()
     db.add(models.ChatContinuityEntry(
@@ -4361,7 +4406,6 @@ class ChatWriterActor:
       checkpoint_id=cmd.checkpoint_id, run_id=cmd.run_token,
       digest=cmd.digest, current_summary=cmd.summary,
       requested_title=cmd.title,
-      source_cursor_json=cmd.source_cursor,
       covered_message_count=covered_count,
       covered_prefix_hash=covered_hash,
       legacy_markdown=None, created_at=created_at,

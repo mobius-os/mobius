@@ -206,7 +206,6 @@ class ChatContinuityEntry(Base):
   digest = Column(Text, nullable=False)
   current_summary = Column(Text, nullable=True)
   requested_title = Column(String(256), nullable=True)
-  source_cursor_json = Column(JSON, nullable=True)
   covered_message_count = Column(
     Integer, nullable=False, default=0, server_default="0",
   )
@@ -428,6 +427,10 @@ class ChatRun(Base):
   # ambiguous even with no transcript output. NULL preserves that ambiguity
   # for pre-admission-ledger runs upgraded from an older backend.
   provider_execution_admitted = Column(Boolean, nullable=True, default=False)
+  # Set only after the SDK accepts this run's prepared input. Checkpoints
+  # reverify these exact transcript bytes before adopting the boundary.
+  delivered_message_count = Column(Integer, nullable=True, default=None)
+  delivered_prefix_hash = Column(String(64), nullable=True, default=None)
   # Inclusive boundary of the peer-message page injected into this provider
   # admission. Both fields are NULL when no peer message was delivered. The
   # pair advances only after the provider call returns successfully. Admission

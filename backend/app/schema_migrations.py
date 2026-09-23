@@ -5011,6 +5011,25 @@ def _add_chat_continuity_journal(eng) -> None:
     """))
 
 
+def _add_run_delivered_input_boundary(eng) -> None:
+  """Remember an SDK-accepted transcript prefix for each physical run."""
+  from sqlalchemy import inspect as sa_inspect, text
+
+  inspector = sa_inspect(eng)
+  if "chat_runs" not in inspector.get_table_names():
+    return
+  columns = {column["name"] for column in inspector.get_columns("chat_runs")}
+  with eng.begin() as conn:
+    if "delivered_message_count" not in columns:
+      conn.execute(text(
+        "ALTER TABLE chat_runs ADD COLUMN delivered_message_count INTEGER NULL"
+      ))
+    if "delivered_prefix_hash" not in columns:
+      conn.execute(text(
+        "ALTER TABLE chat_runs ADD COLUMN delivered_prefix_hash VARCHAR(64) NULL"
+      ))
+
+
 _SCHEMA_MIGRATIONS = (
   # Full IDs are permanent identities, not sequence positions. Append new
   # work in execution order; never renumber a shipped ID to reconcile sources.
@@ -5080,6 +5099,7 @@ _SCHEMA_MIGRATIONS = (
   ("0063_durable_goal_records", _durable_goal_records),
   ("0063_chat_run_continuation_control", _add_chat_run_continuation_control),
   ("0064_chat_continuity_journal", _add_chat_continuity_journal),
+  ("0065_run_delivered_input_boundary", _add_run_delivered_input_boundary),
 )
 
 

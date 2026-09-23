@@ -105,8 +105,8 @@ Evaluate warm-context and missing-context behavior separately. A normal save
 must not return the existing name, paragraph, or recent journal entries. An
 agent that still knows the current state/revision should not reread it at every
 milestone. When context is actually missing, verify that it recovers the state
-before changing it rather than guessing. When only a fresh source cursor is
-needed, `after_revision` should avoid replaying already-seen entries. Count
+before changing it rather than guessing. Incremental reads with `after_revision` should avoid replaying already-seen
+entries. A save must not require a read just to advance coverage. Count
 redundant reads and repeated continuity bytes alongside missed updates; shorter
 prompts are an improvement only when continuation quality is preserved.
 
@@ -115,10 +115,13 @@ prompts are an improvement only when continuation quality is preserved.
 - Checkpoint mid-turn, then add more assistant text/steered owner input: handoff
   must contain the unsaved tail. A count of mutable assistant rows is not a
   trustworthy coverage cursor.
-- Omit a checkpoint in one turn, then save an unrelated delta in the next:
-  source coverage must NOT silently jump over the missing interval. Only an
-  explicit agent acknowledgment of the read's `source_cursor`, after catching
-  up substantive uncovered information, may advance the saved boundary.
+- A successful checkpoint is the agent’s assertion that its saved handoff is
+  current. Coverage advances only to the input boundary recorded by the platform
+  for that run, without a separate agent cursor acknowledgment. Confirm that
+  boundary describes delivered input, not later accepted input. A missing or
+  stale proof must retain the source conservatively. Deliberately omit an older
+  fact from the handoff: the transcript must remain retrievable, but automatic
+  prefix replay is no longer the semantic-completeness guarantee.
 - Change an earlier covered message: the verified whole-prefix digest must
   invalidate coverage and include the full source rather than omit it.
 - Interrupt after a checkpoint but before final answer; verify saved facts and
@@ -171,30 +174,24 @@ fixture/session IDs, models, prompt versions, traces and reviewer findings.
 Do not mark the implementation Goal complete until the agreed live matrix,
 continuation tests and coaching/holdout loop have actually been exercised.
 
+## Consumer and final-guide validation
 
-## Codex-first release boundary
+Verify that sibling context includes complete current paragraphs within the
+existing total budget, or marks the summary explicitly omitted while retaining
+a retrieval reference. Exercise a paragraph longer than 800 UTF-8 bytes,
+multibyte text, and a paragraph that exceeds the remaining total budget.
 
-The initial release is qualified by observed Codex behavior, not by universal
-checkpoint compliance. Short planning/correction/blocker holdouts with the
-explicit closeout checklist updated the current paragraph and journal; a real
-portable compaction followed by a fresh Codex session preserved the decisions
-and accepted new work. Longer diagnostic trajectories retained early and late
-constraints but exposed stale short paragraphs, motivating the coached wording.
+The viewer must distinguish the current summary from the append-only journal,
+preserve the raw legacy baseline, and paginate history without duplicating
+entries, losing errors, or applying stale responses after a chat change.
+Activation checks can verify these paths without model calls; they do not prove
+that an agent will use them well.
 
-A shorter, consolidated version of the instructions failed a new three-turn
-Codex holdout (no checkpoints). Keep the evaluated explicit read/save/receipt
-checklist; equivalent prose is not evidence of equivalent model behavior.
-Intermediate checkpoints within a single coding turn remain unreliable even
-with explicit guidance. This is an instruction-following limitation, not an
-atomic-write guarantee. Missing coverage conservatively retains source text.
-
-Claude Opus evaluation is deferred pending provider availability. Native
-provider compaction, live cross-provider switching, and a matched old-runtime
-resource A/B are not established by the portable Codex recovery test. Do not
-claim a total-container RAM target or guaranteed token savings from it.
-
-Existing chats keep immutable pre-change prompt snapshots, even after a server
-restart or compaction. They may not autonomously use the new tools; use a new
-chat for the coached behavior. Legacy notes and uncovered transcript remain
-available, but the retired background publisher does not keep those old notes
-fresh. No silent prompt rewrite or fallback summary model is introduced.
+A final guide needs its own held-out evaluation. Earlier trials of other wording
+are historical evidence, not interchangeable successes. Cover initial context,
+accepted decisions with exact fields, acknowledgements that need no update,
+corrections, and scope changes requiring a broader name. Repeat independent
+scenarios and longer work before making a broad reliability claim. Exercise
+mid-turn milestones, native compaction and both provider-switch directions
+separately. No guaranteed RAM or per-turn token saving follows from a smaller
+prompt or the absence of a separate summarizer.

@@ -1279,12 +1279,18 @@ commits the new entry, state, and unlocked generated title together. A manually
 set title always wins. No semantic validator, forced continuation, recurring
 observer, or fallback LLM is involved.
 
-Coverage advances only when the agent explicitly supplies the `source_cursor`
-returned by its read after catching up substantive uncovered information. The
-writer verifies that cursor against the completed transcript prefix. An ordinary
-delta without this acknowledgment preserves the prior coverage, so a later
-save cannot silently cover an earlier missed turn. Cursor integrity proves
-the source boundary, not semantic completeness of the agent's words.
+A checkpoint declares the agent's intended current handoff. The platform records
+an input-prefix count/hash on the physical run only after the SDK accepts that
+run's prepared input, and the writer re-verifies those bytes before advancing
+coverage. This records the input position, not a claim that every older message
+remains literal model context after native compaction or session recovery.
+No agent-supplied source cursor or read-to-acknowledge step is needed.
+Later steers and mutable assistant output remain in the raw suffix. Missing
+proof retains prior coverage; a mismatched saved prefix replays the full source.
+This verifies input identity, not semantic completeness: an omitted older fact
+may require retrieval from the original transcript rather than automatic replay.
+The transcript and append-only journal are retained. Historical source-cursor
+columns remain as old audit data, not an active compatibility mechanism.
 
 The database is authoritative. `chat_continuity.py` provides reads, conservative
 transcript coverage and the platform-owned Markdown projection at
@@ -1302,10 +1308,12 @@ return a small receipt and revision, not the full accumulated journal.
 Consumers:
 
 - **New/sibling chats:** bounded names, current summaries, note locations and
-  timestamped activity derived from durable runtime state. A status is a snapshot,
+  timestamped activity derived from durable runtime state. Paragraphs are complete
+  within the total context budget, or explicitly omitted with a retrieval reference.
+  A status is a snapshot,
   never inferred from an agent's paragraph or treated as a lock on future work.
 - **Continuation/provider handoff:** full durable digest plus every message after
-  its verified completed-prefix boundary. Current-turn mutable assistant rows
+  its verified SDK-accepted input boundary. Current-turn mutable assistant rows
   and steered input remain uncovered; an invalid prefix proof replays the whole
   transcript. Missing checkpoints remain visible as missing/stale coverage,
   rather than silently spawning another model to fill the gap.

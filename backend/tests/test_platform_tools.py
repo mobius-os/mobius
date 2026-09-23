@@ -658,7 +658,7 @@ def test_continuity_tools_available_to_owner_and_delegated_runs():
   assert names <= set(platform_tools.OWNER_CONTROL_TOOL_NAMES)
 
 
-def test_continuity_read_is_bounded_and_checkpoint_preserves_explicit_coverage(monkeypatch):
+def test_continuity_read_is_bounded_and_checkpoint_has_no_cursor(monkeypatch):
   control = _control_module()
   calls = []
 
@@ -670,18 +670,16 @@ def test_continuity_read_is_bounded_and_checkpoint_preserves_explicit_coverage(m
   assert control._call_read_chat_continuity({"after_revision": 3, "limit": 5}) == {
     "revision": 4,
   }
-  cursor = {"message_count": 2, "prefix_hash": "a" * 64}
   payload = {
     "checkpoint_id": "run-milestone-1", "expected_revision": 3,
     "digest": "A test failed; repair is not verified.",
-    "summary": "Fixing the reproducible failure.", "source_cursor": cursor,
+    "summary": "Fixing the reproducible failure.",
   }
   control._call_checkpoint_chat(payload)
   assert calls == [
     ("GET", "/api/chat/continuity?after_revision=3&limit=5", None),
     ("POST", "/api/chat/continuity/checkpoints", payload),
   ]
-  payload.pop("source_cursor")
   control._call_checkpoint_chat(payload)
   assert "source_cursor" not in calls[-1][2]
 

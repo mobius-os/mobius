@@ -14,7 +14,6 @@ from app import chat_queue, models
 from app.broadcast import get_system_broadcast
 from app.chat_continuity import (
   MAX_ENTRY_LIMIT,
-  completed_prefix,
   continuity_wire,
   project_continuity,
   read_legacy_note,
@@ -30,13 +29,6 @@ router = APIRouter(tags=["chat-continuity"])
 log = logging.getLogger("moebius.chat.continuity")
 
 
-class SourceCursor(BaseModel):
-  model_config = ConfigDict(extra="forbid")
-
-  message_count: int = Field(ge=0)
-  prefix_hash: str | None = Field(default=None, min_length=64, max_length=64)
-
-
 class CheckpointBody(BaseModel):
   model_config = ConfigDict(extra="forbid")
 
@@ -45,7 +37,6 @@ class CheckpointBody(BaseModel):
   digest: str = Field(min_length=1, max_length=8_000)
   summary: str | None = Field(default=None, max_length=12_000)
   title: str | None = Field(default=None, max_length=256)
-  source_cursor: SourceCursor | None = None
 
 
 def _active_chat(db: Session, chat_id: str) -> models.Chat:
@@ -82,16 +73,6 @@ async def read_agent_continuity(
     db, chat, after_revision=after_revision, limit=limit, full=full,
     data_dir=get_settings().data_dir,
   )
-  messages = db.query(models.Chat.messages).filter(
-    models.Chat.id == chat.id,
-  ).scalar() or []
-  count, prefix_hash = completed_prefix(messages, principal.run_id or "")
-  result["source_cursor"] = {
-    "message_count": count, "prefix_hash": prefix_hash,
-  }
-  result["has_uncovered_source"] = (
-    result["coverage"] != result["source_cursor"]
-  )
   return result
 
 
@@ -120,7 +101,6 @@ async def checkpoint_agent_continuity(
       digest=body.digest,
       summary=body.summary,
       title=body.title,
-      source_cursor=(body.source_cursor.model_dump() if body.source_cursor else None),
       legacy_markdown=legacy,
     )))
     if result.get("status") in {"conflict", "stale_run"}:
@@ -149,11 +129,13 @@ async def read_owner_continuity(
   after_revision: int | None = Query(default=None, ge=0),
   limit: int = Query(default=5, ge=1, le=MAX_ENTRY_LIMIT),
   full: bool = False,
+  include_legacy: bool = False,
   _owner: models.Owner = Depends(get_current_owner),
   db: Session = Depends(get_db),
 ):
   chat = _active_chat(db, chat_id)
   return continuity_wire(
     db, chat, after_revision=after_revision, limit=limit, full=full,
+    include_legacy=include_legacy,
     data_dir=get_settings().data_dir,
   )

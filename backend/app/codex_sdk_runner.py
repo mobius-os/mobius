@@ -33,10 +33,10 @@ import os
 import signal
 import shutil
 import time
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from app.codex_sdk_contract import (
   app_server_pid,
@@ -1473,6 +1473,7 @@ async def _run_codex_sdk_turn(
   provider_id: str = "codex",
   data_dir: str | None = None,
   coordination_enabled: bool = True,
+  on_input_delivered: Callable[[], Awaitable[None]] | None = None,
 ) -> RunnerResult:
   """Runs one Codex SDK turn and publishes Möbius-shaped events.
 
@@ -1921,6 +1922,8 @@ async def _run_codex_sdk_turn(
         ),
         approval_mode=approval_mode,
       )
+      if on_input_delivered is not None:
+        await on_input_delivered()
       if abort_requested():
         try:
           await turn.interrupt()
@@ -2455,6 +2458,7 @@ async def run_codex_sdk_turn(
   provider_id: str = "codex",
   data_dir: str | None = None,
   coordination_enabled: bool = True,
+  on_input_delivered: Callable[[], Awaitable[None]] | None = None,
 ) -> RunnerResult:
   """Hold cross-process rollout ownership around one strict Codex call.
 
@@ -2490,6 +2494,7 @@ async def run_codex_sdk_turn(
       provider_id=provider_id,
       data_dir=data_dir,
       coordination_enabled=coordination_enabled,
+      on_input_delivered=on_input_delivered,
     )
   finally:
     ownership.release()

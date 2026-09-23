@@ -1084,6 +1084,12 @@ def test_run_codex_sdk_turn_resume_mismatch_reseeds_without_error(monkeypatch):
   )
 
   bc = _FakeBroadcast()
+  accepted = []
+
+  async def on_input_delivered():
+    assert mismatched_thread.turn_args is not None
+    accepted.append(mismatched_thread.turn_args[0])
+
   result = asyncio.run(
     codex_sdk_runner.run_codex_sdk_turn(
       user_message="hello",
@@ -1094,6 +1100,7 @@ def test_run_codex_sdk_turn_resume_mismatch_reseeds_without_error(monkeypatch):
       bc=bc,
       pending_questions={},
       db=None,
+      on_input_delivered=on_input_delivered,
     )
   )
 
@@ -1101,6 +1108,7 @@ def test_run_codex_sdk_turn_resume_mismatch_reseeds_without_error(monkeypatch):
   assert result["error"] is None
   assert {"type": "session_init", "session_id": "actual-thread"} in bc.events
   assert not any(e.get("type") == "error" for e in bc.events)
+  assert accepted == ["hello"]
 
 
 def test_run_codex_sdk_turn_resume_skips_skill_lookup(monkeypatch):

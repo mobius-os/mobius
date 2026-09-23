@@ -28,19 +28,14 @@ DEFAULT_MAX_NOTES = 12
 # agent's one-paragraph Digest; the most-recently-modified ones open a fresh
 # session with recent conversational context.
 RECENT_CHAT_NOTES = 10
-# Per-note byte cap on the injected chat digest. The daytime agent is
-# instructed to keep each chat's summary bounded and high-level (the full
-# detail lives in the transcript, read on demand), but this is a defensive
-# cap so a note that grew past its intended size still injects a bounded
-# head rather than crowding out the other recent chats or blowing the budget.
-DIGEST_MAX_BYTES = 800
 
 # Injected once per new session, outside the individual recent-chat entries.
 # Keeping retrieval guidance here makes the structured entry contract and its
 # single shared instruction one source of truth.
 RECENT_CHAT_RETRIEVAL_INSTRUCTION = (
-  "Each recent-chat entry gives a Name, Location, and bounded current paragraph "
-  "(the Digest field), plus runtime status when available. "
+  "Each recent-chat entry gives a Name, Location, and the complete current "
+  "paragraph in Digest, or an explicit omission marker if it could not fit, "
+  "plus runtime status when available. "
   "When more detail would materially help, read "
   "/data/shared/memory/<Location> for that chat's complete cumulative "
   "history. The platform alone publishes those files; do not edit them."
@@ -140,14 +135,6 @@ def _read(path: Path) -> str:
     return ""
 
 
-def _truncate_bytes(text: str, limit: int) -> str:
-  """Truncates on a UTF-8 byte budget without splitting a codepoint."""
-  raw = text.encode("utf-8")
-  if len(raw) <= limit:
-    return text
-  return raw[:limit].decode("utf-8", errors="ignore")
-
-
 def recent_continuity_metadata(db, ordered_chat_ids: Collection[str]) -> dict:
   """Return DB-authoritative sibling summaries and one runtime snapshot."""
   from datetime import UTC, datetime
@@ -209,9 +196,9 @@ def build_memory_block(
   """Assembles the injected memory context.
 
   Only recent-chat current paragraphs are injected, without a graph/app gate.
-  Each entry has a name, relative path, bounded paragraph and any supplied
-  runtime snapshot. Detailed journals, legacy cumulative Summary sections,
-  graph routers, MOCs, and atomic notes are never pulled into a new chat.
+  Each entry has a name, relative path, complete current paragraph and any
+  supplied runtime snapshot. Detailed journals, fact sections, graph routers,
+  MOCs, and atomic notes are never pulled into a new chat.
   An installed system app may teach the agent to request graph recall through
   a separate prompt-scoped reader.
 
@@ -228,8 +215,8 @@ def build_memory_block(
   loaded: list[str] = []
   entries: list[dict[str, str]] = []
   used = 0
-  # Each note is independently capped. Continue past one that does not fit so
-  # an unusually long newest note cannot hide every older short digest.
+  # Admit complete entries under the total budget. Continue past one that does
+  # not fit so a long newest paragraph cannot hide every older short one.
   note_limit = min(RECENT_CHAT_NOTES, max(0, max_notes))
   if ordered_chat_ids is not None:
     eligible = set(eligible_chat_ids) if eligible_chat_ids is not None else None
@@ -259,7 +246,7 @@ def build_memory_block(
       if item.get("has_continuity", False)
       else file_digest
     )
-    digest = _truncate_bytes(digest, DIGEST_MAX_BYTES).strip()
+    digest = str(digest or "").strip()
     if not name and not digest:
       continue
     rel = f"chats/{chat_id}/index.md"
@@ -280,7 +267,23 @@ def build_memory_block(
       f"Digest: {safe_digest}\n"
       "</recent_chat>"
     )
-    if used + len(chunk.encode("utf-8")) + 2 > budget_bytes:
+    chunk_bytes = len(chunk.encode("utf-8")) + 2
+    if used + chunk_bytes > budget_bytes and digest:
+      # Never inject a misleading partial paragraph. Keep useful routing
+      # metadata when the complete current paragraph cannot fit.
+      omitted = "[Current summary omitted: it exceeds the available context budget.]"
+      safe_digest = html.escape(omitted, quote=False)
+      chunk = (
+        "<recent_chat>\n"
+        f"Name: {safe_name}\n"
+        f"Location: {rel}\n"
+        f"{status_lines}"
+        f"Digest: {safe_digest}\n"
+        "</recent_chat>"
+      )
+      chunk_bytes = len(chunk.encode("utf-8")) + 2
+      digest = omitted
+    if used + chunk_bytes > budget_bytes:
       continue
     parts.append(chunk)
     loaded.append(rel)
@@ -388,4 +391,4 @@ def _chat_digest_parts(note: Path) -> tuple[str, str]:
     digest = _note_section(text, "Summary")
   if digest is None:
     digest = _strip_frontmatter(text).strip()
-  return desc, _truncate_bytes(digest.strip(), DIGEST_MAX_BYTES).strip()
+  return desc, digest.strip()

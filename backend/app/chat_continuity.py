@@ -24,19 +24,20 @@ DEFAULT_ENTRY_LIMIT = 5
 MAX_ENTRY_LIMIT = 200
 
 
-def _canonical_messages(messages: list[dict]) -> bytes:
-  return json.dumps(
-    messages, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
-  ).encode("utf-8")
+def _prefix_hash(messages: list[dict], count: int) -> str | None:
+  """Hash the historical JSON encoding without copying the whole blob."""
+  if count == 0:
+    return None
+  encoder = json.JSONEncoder(
+    ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+  )
+  digest = hashlib.sha256()
+  for chunk in encoder.iterencode(messages[:count]):
+    digest.update(chunk.encode("utf-8"))
+  return digest.hexdigest()
 
 
-def completed_prefix(messages: list[dict], run_id: str) -> tuple[int, str | None]:
-  """Return a whole-prefix proof ending at the prior completed assistant turn.
-
-  Every row after the last non-current assistant stays uncovered. That excludes
-  the current turn's initial user row, mutable assistant rows, and any accepted
-  steers the model may not yet have consumed.
-  """
+def _completed_prefix_count(messages: list[dict], run_id: str) -> int:
   boundary = 0
   for index, message in enumerate(messages or []):
     if not isinstance(message, dict) or message.get("role") != "assistant":
@@ -51,10 +52,36 @@ def completed_prefix(messages: list[dict], run_id: str) -> tuple[int, str | None
     )
     if not current:
       boundary = index + 1
-  prefix = list(messages[:boundary])
-  if not prefix:
-    return 0, None
-  return boundary, hashlib.sha256(_canonical_messages(prefix)).hexdigest()
+  return boundary
+
+
+def completed_prefix(messages: list[dict], run_id: str) -> tuple[int, str | None]:
+  """Return a whole-prefix proof ending at the prior completed assistant turn.
+
+  Every row after the last non-current assistant stays uncovered. That excludes
+  current-turn output and accepted steers that may not have reached the model.
+  """
+  count = _completed_prefix_count(messages, run_id)
+  return count, _prefix_hash(messages, count)
+
+
+def delivered_input_prefix(
+  messages: list[dict], run_id: str, prompt_source: str,
+) -> tuple[int, str | None]:
+  """Identify the transcript boundary of the initial SDK-accepted input.
+
+  The runner records this after its provider accepts the prepared prompt. The
+  hash proves transcript identity, not that older rows remain literal model
+  context or that an agent's later handoff is semantically complete. A late
+  steer or mutable assistant output is never inferred at checkpoint. Ambiguous
+  control prompts stop at the prior completed prefix.
+  """
+  count = _completed_prefix_count(messages, run_id)
+  if count == len(messages) - 1:
+    row = messages[count]
+    if row.get("role") == "user" and row.get("content") == prompt_source:
+      count += 1
+  return count, _prefix_hash(messages, count)
 
 
 def verified_uncovered_messages(
@@ -65,8 +92,7 @@ def verified_uncovered_messages(
     return list(messages or []), True
   if covered_count < 0 or covered_count > len(messages or []):
     return list(messages or []), False
-  prefix = list((messages or [])[:covered_count])
-  actual = hashlib.sha256(_canonical_messages(prefix)).hexdigest() if prefix else None
+  actual = _prefix_hash(messages or [], covered_count)
   if actual != covered_prefix_hash:
     return list(messages or []), False
   return list((messages or [])[covered_count:]), True
@@ -104,6 +130,7 @@ def continuity_wire(
   after_revision: int | None = None,
   limit: int = DEFAULT_ENTRY_LIMIT,
   full: bool = False,
+  include_legacy: bool = False,
   data_dir: str | Path | None = None,
 ) -> dict[str, Any]:
   state = db.get(models.ChatContinuity, chat.id)
@@ -123,7 +150,7 @@ def continuity_wire(
         "coverage": {"message_count": 0, "prefix_hash": None},
         "legacy_baseline": True,
       }
-      if full:
+      if full or include_legacy:
         entry["legacy_markdown"] = legacy
       entries.append(entry)
     return {
@@ -145,7 +172,7 @@ def continuity_wire(
     models.ChatContinuityEntry.chat_id == chat.id,
   )
   if not full:
-    query = query.options(load_only(
+    columns = [
       models.ChatContinuityEntry.chat_id,
       models.ChatContinuityEntry.revision,
       models.ChatContinuityEntry.checkpoint_id,
@@ -154,7 +181,10 @@ def continuity_wire(
       models.ChatContinuityEntry.covered_message_count,
       models.ChatContinuityEntry.covered_prefix_hash,
       models.ChatContinuityEntry.created_at,
-    ))
+    ]
+    if include_legacy:
+      columns.append(models.ChatContinuityEntry.legacy_markdown)
+    query = query.options(load_only(*columns))
   has_more = False
   has_older = False
   if full:
@@ -185,7 +215,7 @@ def continuity_wire(
       },
       "legacy_baseline": row.checkpoint_id == "legacy-baseline-v1",
     }
-    if full and row.legacy_markdown is not None:
+    if (full or include_legacy) and row.legacy_markdown is not None:
       item["legacy_markdown"] = row.legacy_markdown
     if full:
       item["summary"] = row.current_summary

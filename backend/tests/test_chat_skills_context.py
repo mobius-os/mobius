@@ -158,17 +158,23 @@ def test_core_prompt_requires_agent_authored_current_continuity():
   core = (repo / "skill" / "core.md").read_text(encoding="utf-8")
   normalized = " ".join(core.split())
 
-  assert "no separate agent summarizes it afterwards" in normalized
-  assert "Chat continuity also covers discussion-only work" in normalized
-  assert "discover them by name" in normalized
-  assert "If the state survived the handoff, reuse it" in normalized
-  assert "Skip unchanged titles and empty updates" in normalized
-  assert "## Finish each substantive turn with durable continuity" in core
-  assert "a first substantive turn must also perform step 2" in normalized
-  assert "Supply `summary` with every substantive checkpoint" in normalized
-  assert "include the current blocker/next action" in normalized
-  assert "use “proposed” until the owner accepts it" in normalized
-  assert "Confirm the saved receipt, retain its revision" in normalized
+  assert "No separate agent does it." in normalized
+  assert "**Name:**" in core and "**Summary:**" in core and "**Digest:**" in core
+  assert "Broaden it when needed without erasing earlier work" in normalized
+  assert "one–two paragraphs" in normalized
+  assert "otherwise reuse known state and receipts" in normalized
+  assert "Skip acknowledgements, repetition and incidental suggestions" in normalized
+  assert "may also need a broader name" in normalized
+  assert "proposed versus accepted" in normalized
+  assert "combine related changes and confirm the receipt" in normalized
+  assert "Original transcripts remain available" in normalized
+  assert "Pass `digest`, optional `summary` and optional `title` separately" in normalized
+  assert "Tool descriptions own revision/retry mechanics" in normalized
+  assert "a digest entry does not refresh the summary or name" in normalized
+  # One governing section, not a second closeout recipe or cursor ceremony.
+  assert core.count("## Sessions and chat continuity") == 1
+  assert "## Finish each substantive turn with durable continuity" not in core
+  assert "source_cursor" not in core
 
 
 def test_core_prompt_owns_freshness_and_source_policy():

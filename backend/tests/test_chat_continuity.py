@@ -1,15 +1,20 @@
 """Agent-authored continuity persistence, migration, and handoff contracts."""
 
+import hashlib
+import json
 import os
 from datetime import timedelta
 from pathlib import Path
 
 from app import auth as auth_module, models
-from app.chat_continuity import completed_prefix, verified_uncovered_messages
+from app.chat_continuity import (
+  _prefix_hash, completed_prefix, verified_uncovered_messages,
+)
 from app.chat_writer import StartTurn, get_writer
 from app.compaction import build_portable_source
 from app.chat_retention import purge_expired_chat_tombstones
 from app.timeutil import SOFT_DELETE_TTL, now_naive_utc
+from tests.goal_fixtures import goal_run as make_goal_run
 
 
 def _start(chat, run_id="continuity-run"):
@@ -109,6 +114,31 @@ Related fact C.
   assert baseline["legacy_baseline"] is True
   assert baseline["legacy_markdown"] == legacy
   assert full.json()["summary"] == "Short old state."
+  page = client.get(
+    f"/api/chats/{chat.id}/continuity?after_revision=0&limit=1&include_legacy=true",
+    headers=auth,
+  )
+  assert page.status_code == 200, page.text
+  assert page.json()["entries"][0]["legacy_markdown"] == legacy
+  assert "summary" not in page.json()["entries"][0]
+
+
+def test_legacy_note_without_a_database_baseline_is_read_losslessly(client, auth, chat):
+  legacy = "---\ndescription: Old\n---\n\n## Summary\n\n" + "x" * 1200
+  path = (
+    Path(os.environ["DATA_DIR"]) / "shared" / "memory" / "chats"
+    / chat.id / "index.md"
+  )
+  path.parent.mkdir(parents=True)
+  path.write_text(legacy, encoding="utf-8")
+
+  page = client.get(
+    f"/api/chats/{chat.id}/continuity?after_revision=0&include_legacy=true",
+    headers=auth,
+  )
+
+  assert page.status_code == 200, page.text
+  assert page.json()["entries"][0]["legacy_markdown"] == legacy
 
 
 def test_stale_running_row_cannot_checkpoint(client, chat, db):
@@ -131,7 +161,33 @@ def test_stale_running_row_cannot_checkpoint(client, chat, db):
   assert current
 
 
-def test_source_cursor_is_explicit_and_whole_prefix_edits_replay():
+def test_ordinary_run_checkpoints_despite_historical_goal(client, chat, db):
+  db.add(make_goal_run(db,
+    id="historical-goal", root_run_id="historical-goal",
+    chat_id=chat.id, status="completed", provider="codex",
+    goal_objective="Old work", goal_id="old-goal-id",
+  ))
+  db.commit()
+  agent = _start(chat, "ordinary-question")
+
+  response = client.post(
+    "/api/chat/continuity/checkpoints", headers=agent,
+    json={
+      "checkpoint_id": "ordinary-checkpoint", "expected_revision": 0,
+      "digest": "Discussion-only continuity is durable too.",
+      "summary": "The ordinary turn remains current.",
+    },
+  )
+
+  assert response.status_code == 200, response.text
+  assert response.json()["status"] == "committed"
+  entry = db.query(models.ChatContinuityEntry).filter_by(
+    chat_id=chat.id, checkpoint_id="ordinary-checkpoint",
+  ).one()
+  assert entry.run_id == "ordinary-question"
+
+
+def test_whole_prefix_proof_replays_transcript_after_edit():
   messages = [
     {"role": "user", "content": "old question", "cid": "q1"},
     {"role": "assistant", "content": "old answer", "id": "old-run"},
@@ -151,6 +207,18 @@ def test_source_cursor_is_explicit_and_whole_prefix_edits_replay():
   )
   assert verified is False
   assert replay == messages
+
+
+def test_streamed_prefix_hash_preserves_legacy_canonical_bytes():
+  rows = [
+    {"role": "user", "content": "café \"quoted\"\n😀", "nested": {"z": 1.25, "a": [None, True]}},
+    {"role": "assistant", "id": "old", "content": "backslash \\ and €"},
+  ]
+  old = hashlib.sha256(json.dumps(
+    rows, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+  ).encode("utf-8")).hexdigest()
+  assert _prefix_hash(rows, len(rows)) == old
+  assert _prefix_hash(rows, 0) is None
 
 
 def test_portable_source_uses_complete_journal_and_only_verified_suffix(chat, db):

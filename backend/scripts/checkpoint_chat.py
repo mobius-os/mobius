@@ -58,10 +58,6 @@ def _parser() -> argparse.ArgumentParser:
   save.add_argument("--digest", required=True)
   save.add_argument("--summary")
   save.add_argument("--title")
-  save.add_argument(
-    "--source-cursor",
-    help='Exact JSON object returned by read, e.g. {"message_count":2,"prefix_hash":"..."}',
-  )
   return parser
 
 
@@ -84,8 +80,6 @@ def main() -> int:
       payload["summary"] = args.summary
     if args.title is not None:
       payload["title"] = args.title
-    if args.source_cursor is not None:
-      payload["source_cursor"] = json.loads(args.source_cursor)
     result = _call("POST", "/api/chat/continuity/checkpoints", payload)
   print(json.dumps(result, ensure_ascii=False, indent=2))
   return 0

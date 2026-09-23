@@ -107,6 +107,28 @@ class _FakeClient:
     yield _success_result()
 
 
+@pytest.mark.asyncio
+async def test_delivered_input_callback_follows_successful_query(monkeypatch):
+  clients = _install_fake_client(monkeypatch)
+  observed = []
+
+  async def delivered():
+    assert clients[0].queries == ["hello"]
+    observed.append("accepted")
+
+  await _run_turn("delivery-order", on_input_delivered=delivered)
+  assert observed == ["accepted"]
+
+  class _RejectQuery(_FakeClient):
+    async def query(self, message):
+      raise RuntimeError("not delivered")
+
+  _install_fake_client(monkeypatch, _RejectQuery)
+  observed.clear()
+  await _run_turn("delivery-rejected", on_input_delivered=delivered)
+  assert observed == []
+
+
 def _install_fake_client(monkeypatch, client_cls=_FakeClient) -> list:
   """Patch the runner's client class; returns the list of created clients."""
   clients: list = []

@@ -498,7 +498,7 @@ def _call_read_chat_continuity(arguments: dict[str, Any]) -> dict:
 
 def _call_checkpoint_chat(arguments: dict[str, Any]) -> dict:
   required = {"checkpoint_id", "expected_revision", "digest"}
-  allowed = required | {"summary", "title", "source_cursor"}
+  allowed = required | {"summary", "title"}
   if not required.issubset(arguments) or not set(arguments).issubset(allowed):
     raise ValueError(
       "checkpoint_chat needs checkpoint_id, expected_revision, and digest"
@@ -521,12 +521,6 @@ def _call_checkpoint_chat(arguments: dict[str, Any]) -> dict:
       if not isinstance(value, str):
         raise ValueError(f"{name} must be a string")
       payload[name] = value.strip()
-  source_cursor = payload.get("source_cursor")
-  if source_cursor is not None:
-    if not isinstance(source_cursor, dict) or set(source_cursor) != {
-      "message_count", "prefix_hash",
-    }:
-      raise ValueError("source_cursor must contain message_count and prefix_hash")
   return _agent_api_call("POST", "/api/chat/continuity/checkpoints", payload)
 
 
@@ -553,11 +547,18 @@ _TOOL_DEFINITIONS = {
     "description": (
       "Append one lightweight continuity delta for this exact live chat run. "
       "Supply the revision last read or returned by a successful checkpoint; "
-      "on conflict, read continuity and retry with a new checkpoint id only "
-      "after reconciling. checkpoint_id is the stable idempotency key for one "
-      "exact payload. digest is the new durable delta; summary optionally "
-      "replaces the short current-state summary; title optionally proposes a "
-      "generated chat name and never overrides an owner rename."
+      "on revision conflict, read continuity and reconcile before a new "
+      "checkpoint. Retry an uncertain save with the SAME checkpoint_id and "
+      "identical payload: the ID is an idempotency key, not a sequence. "
+      "digest appends the new durable fact or decision. summary optionally "
+      "replaces the current one–two-paragraph handoff when the picture changes; "
+      "title optionally updates the generated name when scope has changed, "
+      "but never overrides an owner rename. The platform automatically "
+      "adopts the exact transcript boundary of input accepted by this run's "
+      "SDK; its hash verifies transcript identity, not that older rows remain "
+      "literal model context. Your checkpoint declares the handoff adequate, "
+      "not that the platform verified the meaning of its prose. No transcript "
+      "cursor is needed."
     ),
     "inputSchema": {
       "type": "object", "additionalProperties": False,
@@ -568,19 +569,6 @@ _TOOL_DEFINITIONS = {
         "digest": {"type": "string", "minLength": 1, "maxLength": 8000},
         "summary": {"type": "string", "maxLength": 12000},
         "title": {"type": "string", "maxLength": 256},
-        "source_cursor": {
-          "type": "object", "additionalProperties": False,
-          "required": ["message_count", "prefix_hash"],
-          "properties": {
-            "message_count": {"type": "integer", "minimum": 0},
-            "prefix_hash": {"type": ["string", "null"]},
-          },
-          "description": (
-            "Optional exact source_cursor from read_chat_continuity. Supplying "
-            "it attests that this checkpoint plus existing continuity covers "
-            "that completed transcript prefix. Omit to preserve prior coverage."
-          ),
-        },
       },
     },
   },
