@@ -15,6 +15,24 @@ from urllib.parse import quote
 from urllib.request import Request, urlopen
 
 
+def _normalized_questions(questions: list[dict]) -> list[dict]:
+  """Fill card-only metadata so callers can ask in ordinary terms."""
+  if not isinstance(questions, list) or not 1 <= len(questions) <= 3:
+    raise SystemExit("questions must be an array containing 1 to 3 questions")
+  normalized = []
+  for index, question in enumerate(questions, start=1):
+    if not isinstance(question, dict):
+      raise SystemExit(f"question {index} must be an object")
+    item = dict(question)
+    item.setdefault("id", f"question-{index}")
+    item.setdefault(
+      "header", "Your choice" if len(questions) == 1 else f"Question {index}",
+    )
+    item.setdefault("options", [])
+    normalized.append(item)
+  return normalized
+
+
 def request_approval(
   question: str, options: list[dict], work_key: str,
 ) -> dict:
@@ -23,12 +41,42 @@ def request_approval(
 
 
 def request_question(questions: list[dict]) -> dict:
-  return save_card("question", {"questions": questions})
+  return save_card("question", {"questions": _normalized_questions(questions)})
 
 
 def request_restart() -> dict:
   """Ask the platform to derive and save the exact pending restart action."""
   return save_card("restart-request", {})
+
+
+def _format_rejection_detail(candidate: object) -> str:
+  if isinstance(candidate, str):
+    return " ".join(candidate.split())[:1000]
+  if isinstance(candidate, dict):
+    parts = [
+      " ".join(value.split())
+      for value in (candidate.get("code"), candidate.get("message"))
+      if isinstance(value, str) and value.strip()
+    ]
+    return ": ".join(parts)[:1000]
+  if isinstance(candidate, list):
+    issues = []
+    for issue in candidate[:8]:
+      if not isinstance(issue, dict):
+        continue
+      loc = issue.get("loc")
+      message = issue.get("msg")
+      if not isinstance(loc, (list, tuple)) or not isinstance(message, str):
+        continue
+      path = ""
+      for part in loc:
+        if part == "body":
+          continue
+        path += f"[{part}]" if isinstance(part, int) else ("." if path else "") + str(part)
+      clean_message = " ".join(message.split())
+      issues.append(f"{path}: {clean_message}" if path else clean_message)
+    return "; ".join(issues)[:1000]
+  return ""
 
 
 def save_card(kind: str, body: dict) -> dict:
@@ -55,17 +103,7 @@ def save_card(kind: str, body: dict) -> dict:
       raw = exc.read(4096)
       parsed = json.loads(raw.decode("utf-8", errors="replace"))
       candidate = parsed.get("detail") if isinstance(parsed, dict) else None
-      if isinstance(candidate, str):
-        detail = " ".join(candidate.split())[:1000]
-      elif isinstance(candidate, dict):
-        code = candidate.get("code")
-        message = candidate.get("message")
-        parts = [
-          " ".join(value.split())
-          for value in (code, message)
-          if isinstance(value, str) and value.strip()
-        ]
-        detail = ": ".join(parts)[:1000]
+      detail = _format_rejection_detail(candidate)
     except (OSError, ValueError, AttributeError):
       pass
     suffix = f": {detail}" if detail else ""
@@ -94,7 +132,13 @@ def save_card(kind: str, body: dict) -> dict:
 def main() -> None:
   parser = argparse.ArgumentParser(description=__doc__)
   parser.add_argument("question", nargs="?")
-  parser.add_argument("--questions-json", help="JSON array for a saved ordinary question card")
+  parser.add_argument(
+    "--questions-json",
+    help=(
+      "JSON array for a saved ordinary question card; question is required "
+      "and card-only id, header, and options fields have safe defaults"
+    ),
+  )
   parser.add_argument(
     "--restart", action="store_true",
     help="save a platform-owned card for the exact pending server restart",

@@ -591,6 +591,63 @@ def test_helper_preserves_bounded_deterministic_rejection_detail(monkeypatch):
   assert "Fix the stated conflict" in str(exc.value)
 
 
+def test_question_helper_supplies_incidental_card_metadata(monkeypatch):
+  from tests.test_platform_tools import _control_module
+
+  helper = _control_module()._APPROVALS
+  captured = []
+  monkeypatch.setattr(helper, "save_card", lambda kind, body: (
+    captured.append((kind, body)) or {"state": "waiting_for_owner"}
+  ))
+
+  helper.request_question([{
+    "question": "Which repair should I prepare?",
+    "options": [{"label": "Permanent repair", "description": "Fix the cause."}],
+  }])
+
+  assert captured == [("question", {"questions": [{
+    "id": "question-1",
+    "header": "Your choice",
+    "question": "Which repair should I prepare?",
+    "options": [{"label": "Permanent repair", "description": "Fix the cause."}],
+  }]})]
+
+
+def test_helper_surfaces_fastapi_validation_paths_without_echoing_input(monkeypatch):
+  import io
+  from urllib.error import HTTPError
+  from tests.test_platform_tools import _control_module
+
+  helper = _control_module()._APPROVALS
+  for name in ("API_BASE_URL", "AGENT_TOKEN", "CHAT_ID", "MOBIUS_RUN_TOKEN"):
+    monkeypatch.setenv(name, "test-value")
+  monkeypatch.setenv("API_BASE_URL", "http://testserver")
+
+  def reject(request, timeout):
+    raise HTTPError(
+      request.full_url, 422, "Unprocessable Content", {}, io.BytesIO(json.dumps({
+        "detail": [
+          {"loc": ["body", "questions", 0, "header"],
+           "msg": "Field required", "type": "missing",
+           "input": "must-not-appear"},
+          {"loc": ["body", "questions", 0, "options"],
+           "msg": "List should have at most 3 items", "type": "too_long"},
+        ],
+      }).encode()),
+    )
+
+  monkeypatch.setattr(helper, "urlopen", reject)
+  with pytest.raises(SystemExit) as exc:
+    helper.request_question([{
+      "id": "choice", "header": "Direction", "question": "Which?",
+      "options": [],
+    }])
+  message = str(exc.value)
+  assert "questions[0].header: Field required" in message
+  assert "questions[0].options: List should have at most 3 items" in message
+  assert "must-not-appear" not in message
+
+
 def test_helper_preserves_structured_restart_rejection_detail(monkeypatch):
   import io
   from urllib.error import HTTPError

@@ -578,6 +578,16 @@ def test_saved_card_option_schema_exposes_explicit_quiet_outcome():
     assert "on_answer" not in option["required"]
 
 
+def test_question_tool_requires_only_owner_facing_meaning():
+  control = _control_module()
+  definition = control._TOOL_DEFINITIONS[control.REQUEST_QUESTION_TOOL]
+  item = definition["inputSchema"]["properties"]["questions"]["items"]
+
+  assert item["required"] == ["question"]
+  assert item["properties"]["options"]["default"] == []
+  assert "supplied when omitted" in definition["description"]
+
+
 def test_saved_card_tools_instruct_the_agent_to_end_at_the_card():
   """Every exposed saved-card tool carries the same complete instruction."""
   control = _control_module()
