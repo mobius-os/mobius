@@ -55,10 +55,12 @@ changes only after the normal reviewed update/Apply boundary.
   provider map. Möbius already uses the Codex transport with its own broker,
   auth preflight, and model catalog; app providers use that transport with a
   declarative endpoint instead of adding a new chat runner.
-- Möbius · You owns account linking, access, pricing, and setup presentation.
-  The broker and model execution remain in the platform because they enforce
-  the owner session, credential, and per-turn runtime boundary. Moving that
-  privileged path into an optional app would make chats depend on its install.
+- Möbius · You is an optional account/setup app, not a runtime dependency for
+  Claude, Codex, or app-provided providers. Its **Möbius models** switch is on
+  by default and can be changed while signed out. Turning it off removes only
+  Möbius from model pickers and prevents new turns in chats still set to a
+  Möbius model; those chats remain saved. The preference lives in shared agent
+  settings, so uninstalling and reinstalling the app does not silently reset it.
 - App models are currently manifest-declared, not discovered live. An app can
   publish an update when its upstream model list changes. A later version can
   add an app-owned model-discovery service without changing picker consumers.

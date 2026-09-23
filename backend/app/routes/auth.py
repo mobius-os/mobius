@@ -793,7 +793,7 @@ async def providers_status(
   """
   require_chat_embed_operation(principal, "models:read")
   is_owner_caller = principal.app_id is None and principal.scope == "owner"
-  from app.providers import PROVIDERS
+  from app.providers import PROVIDERS, mobius_models_enabled
   data_dir = get_settings().data_dir
   from app.providers import sync_app_model_providers
   sync_app_model_providers(data_dir)
@@ -814,11 +814,16 @@ async def providers_status(
       "error": error,
     }
     if pid == "mobius":
-      out[pid]["available"] = identity_app_installed
-      if not identity_app_installed:
+      enabled = mobius_models_enabled(data_dir)
+      out[pid]["available"] = identity_app_installed and enabled
+      if not identity_app_installed or not enabled:
         out[pid]["configured"] = False
         out[pid]["authenticated"] = False
-        out[pid]["error"] = "Install Möbius · You to use your Möbius subscription."
+        out[pid]["error"] = (
+          "Install Möbius · You to use your Möbius subscription."
+          if not identity_app_installed
+          else "Möbius models are turned off in Möbius · You."
+        )
         continue
     if pid == "mobius" and error is None and is_owner_caller:
       try:

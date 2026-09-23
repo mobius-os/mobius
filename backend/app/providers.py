@@ -298,6 +298,11 @@ def _load_agent_settings(data_dir: str) -> dict:
     return {}
 
 
+def mobius_models_enabled(data_dir: str) -> bool:
+  """The Möbius · You preference defaults on until explicitly disabled."""
+  return _load_agent_settings(data_dir).get("mobius_models_enabled") is not False
+
+
 def hidden_model_ids(model_prefs: Any) -> list[str]:
   """Resolve model-picker visibility for an owner.
 
@@ -970,7 +975,8 @@ class MobiusProvider(BaseProvider):
     return value
 
   def check_auth(self, data_dir: str) -> str | None:
-    del data_dir
+    if not mobius_models_enabled(data_dir):
+      return "Möbius models are turned off in Möbius · You."
     try:
       if self._identity().get("linked") is True:
         return None
@@ -1283,6 +1289,9 @@ def resolve_default_provider(
   provider_id = (
     configured_provider if configured_provider in PROVIDERS else DEFAULT_PROVIDER
   )
+  if provider_id == "mobius" and not mobius_models_enabled(data_dir):
+    connected = authenticated_provider_ids(data_dir)
+    return connected[0] if connected else DEFAULT_PROVIDER
   if (
     provider_id == DEFAULT_PROVIDER
     and PROVIDERS[provider_id].check_auth(data_dir) is not None
@@ -1342,13 +1351,16 @@ def owner_default_provider(
   settings = _load_agent_settings(data_dir)
   model = settings.get("model")
   prov = provider_of_model(model)
-  if prov is not None and prov in PROVIDERS:
+  if prov is not None and prov in PROVIDERS and (
+    prov != "mobius" or mobius_models_enabled(data_dir)
+  ):
     return prov
   mirrored_provider = settings.get("provider")
   if (
     isinstance(model, str)
     and model.strip()
     and mirrored_provider in PROVIDERS
+    and (mirrored_provider != "mobius" or mobius_models_enabled(data_dir))
     and not _model_belongs_to_other_provider(model, mirrored_provider)
   ):
     return mirrored_provider
@@ -1986,6 +1998,8 @@ async def list_models(
   result: dict[str, list[dict[str, Any]]] = {}
   cold: list[str] = []
   for provider_id in PROVIDERS:
+    if provider_id == "mobius" and not mobius_models_enabled(data_dir):
+      continue
     hit = cache_fresh(provider_id)
     if hit is not None:
       result[provider_id] = hit

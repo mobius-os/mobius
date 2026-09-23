@@ -687,6 +687,24 @@ def test_mobius_provider_is_available_only_with_identity_app_installed(
   installed = client.get("/api/auth/providers/status", headers=auth).json()
   assert installed["mobius"]["available"] is True
 
+  disabled = client.patch(
+    "/api/identity/agent/models-enabled",
+    headers=auth,
+    json={"enabled": False},
+  )
+  assert disabled.status_code == 200, disabled.text
+  hidden = client.get("/api/auth/providers/status", headers=auth).json()
+  assert hidden["mobius"]["available"] is False
+  assert hidden["mobius"]["configured"] is False
+  assert hidden["mobius"]["authenticated"] is False
+  assert hidden["claude"] == installed["claude"]
+  assert hidden["codex"] == installed["codex"]
+  assert client.patch(
+    "/api/identity/agent/models-enabled",
+    headers=auth,
+    json={"enabled": True},
+  ).status_code == 200
+
 
 def test_providers_status_hides_mobius_trial_from_app_principals(
   client, auth, monkeypatch,
@@ -866,22 +884,13 @@ def test_providers_status_rejects_non_utf8_claude_credentials(
 
 
 def test_providers_models_returns_known_models_on_missing_creds(
-  client, auth, monkeypatch,
+  client, auth,
 ):
   """Without real Anthropic / Codex credentials the underlying
   `list_models` falls back to KNOWN_MODELS — exercise that path and
   pin the response shape mini-apps depend on (id + name, plus a
   tier on Claude rows)."""
-  from app import providers
   from app.providers import DEFAULT_VISIBLE_MODELS, KNOWN_MODELS, invalidate_model_cache
-  real_fetch = providers._fetch_provider_models
-
-  async def missing_credentials_fetch(provider_id, data_dir):
-    if provider_id == "mobius":
-      raise RuntimeError("Möbius broker unavailable")
-    return await real_fetch(provider_id, data_dir)
-
-  monkeypatch.setattr(providers, "_fetch_provider_models", missing_credentials_fetch)
   invalidate_model_cache()
   r = client.get("/api/auth/providers/models", headers=auth)
   assert r.status_code == 200
