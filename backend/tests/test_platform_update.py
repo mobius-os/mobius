@@ -2844,6 +2844,63 @@ def test_update_progress_is_durable_across_worker_memory(clone_env):
     pu._UPDATE_PROGRESS.update(original)
 
 
+def test_next_reconcile_retires_progress_from_dead_process(clone_env):
+  _, platform = clone_env
+  target = _served_sha(platform)
+  plan_id = "a" * 64
+  original = dict(pu._UPDATE_PROGRESS)
+  try:
+    pu._set_update_progress(
+      pu.PlatformUpdatePhase.BUILDING,
+      plan_id=plan_id,
+      target_sha=target,
+      active=True,
+    )
+
+    with pu._reconcile_flock():
+      pass
+
+    recovered = pu.platform_update_progress()
+    assert recovered["phase"] == pu.PlatformUpdatePhase.FAILED.value
+    assert recovered["active"] is False
+    assert recovered["error"] == (
+      "Möbius restarted before this update finished. Review the update again "
+      "before retrying."
+    )
+    assert recovered["plan_id"] == plan_id
+    assert recovered["target_sha"] == target
+  finally:
+    pu._UPDATE_PROGRESS.update(original)
+
+
+@pytest.mark.asyncio
+async def test_live_apply_progress_survives_its_own_reconcile_lock(clone_env):
+  _, platform = clone_env
+  target = _served_sha(platform)
+  plan_id = "b" * 64
+  original = dict(pu._UPDATE_PROGRESS)
+  try:
+    pu._set_update_progress(
+      pu.PlatformUpdatePhase.RECONCILING,
+      plan_id=plan_id,
+      target_sha=target,
+      active=True,
+    )
+
+    async with pu._APPLY_LOCK:
+      with pu._reconcile_flock():
+        pass
+
+    current = pu.platform_update_progress()
+    assert current["phase"] == pu.PlatformUpdatePhase.RECONCILING.value
+    assert current["active"] is True
+    assert current["error"] is None
+    assert current["plan_id"] == plan_id
+    assert current["target_sha"] == target
+  finally:
+    pu._UPDATE_PROGRESS.update(original)
+
+
 # --- update preview: the read-only "review before Apply" surface ------------
 # platform_update_preview is fetch-free (it reads the origin/main left by the
 # last fetch), so each test fetches first to mirror the real order: Check

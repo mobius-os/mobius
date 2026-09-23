@@ -69,8 +69,7 @@ _PLAN_ERROR_MESSAGES = {
     "its update action so Möbius can keep the source and running system together."
   ),
   "platform_update_in_progress": (
-    "Another update is already being applied. Wait for it to finish, then "
-    "review again."
+    "Möbius is finishing another update task. Wait a moment, then review again."
   ),
 }
 

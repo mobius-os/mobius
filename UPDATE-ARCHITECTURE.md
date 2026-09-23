@@ -500,9 +500,10 @@ share a generic framework merely for symmetry.
   also requires a new shared platform runtime contract, which should be rare and
   explicit.
 
-Apps currently preserve the net local tree through their existing three-way
-merge and single-parent publication flow; conflicts materialize an ordinary
-merge for the resolver. That is intentionally not changed by the platform merge
+Apps currently preserve each local commit by replaying it in order onto the
+reviewed upstream commit. A conflict materializes an ordinary Git rebase for
+the resolver, and final publication retains that reviewed single-parent
+history. That is intentionally not changed by the platform merge
 simplification: managed app origins, resolver receipts, publication handoffs,
 capability review, and Store batching have different constraints. The
 transferable lesson is immutable candidate → compile → re-snapshot → publish

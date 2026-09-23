@@ -496,6 +496,32 @@ def _set_update_progress(
     )
 
 
+def _finish_interrupted_update_progress() -> None:
+  """Retire an active record after its process died.
+
+  The caller has acquired the cross-process reconcile lock, proving that no
+  earlier reconciler still owns the transaction. The in-process Apply lock is
+  the one exception: its worker has just acquired this lock and is still live.
+  """
+  if _APPLY_LOCK.locked():
+    return
+  if not UPDATE_PROGRESS_PATH.exists():
+    return
+  progress = platform_update_progress()
+  if not progress["active"]:
+    return
+  _set_update_progress(
+    PlatformUpdatePhase.FAILED,
+    plan_id=progress["plan_id"],
+    target_sha=progress["target_sha"],
+    active=False,
+    error=(
+      "Möbius restarted before this update finished. Review the update again "
+      "before retrying."
+    ),
+  )
+
+
 def _update_plan_id(
   current_sha: str,
   target_sha: str,
@@ -839,6 +865,7 @@ def _reconcile_flock(*, blocking: bool = True):
       fcntl.flock(fd, flags)
     except BlockingIOError as exc:
       raise PlatformUpdateError("platform_update_in_progress") from exc
+    _finish_interrupted_update_progress()
     yield
   finally:
     try:
