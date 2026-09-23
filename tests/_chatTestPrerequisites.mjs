@@ -11,6 +11,39 @@ export function testChatAgentSettings() {
   }
 }
 
+/**
+ * Return a quota-positive snapshot for mocked provider traffic.
+ *
+ * Browser fixtures must not fall through to the disposable backend's real
+ * provider probe: its disconnected state makes the composer appear unusable
+ * even when the suite has explicitly configured that provider. Keep this
+ * snapshot small and typed around the allowance kind the UI consumes.
+ */
+export function testProviderUsageSnapshot() {
+  return {
+    state: 'ready',
+    plan_label: 'Test plan',
+    windows: [{
+      id: 'weekly',
+      kind: 'weekly',
+      label: 'Weekly',
+      used_percent: 10,
+      resets_at: '2030-01-08T00:00:00+00:00',
+    }],
+    credit_balance: null,
+    extra_usage: { enabled: false, available: false, used_percent: null },
+  }
+}
+
+/** Install the deterministic provider-usage boundary used by chat fixtures. */
+export async function installMockProviderUsage(page) {
+  await page.route('**/api/settings/provider-usage/*', route => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    json: testProviderUsageSnapshot(),
+  }))
+}
+
 /** Simulate the provider boundary paired with the suite's mocked agent traffic. */
 export async function installMockAgentProvider(page) {
   await page.route('**/api/auth/providers/status', route => route.fulfill({
@@ -31,6 +64,7 @@ export async function installMockAgentProvider(page) {
       },
     },
   }))
+  await installMockProviderUsage(page)
 }
 
 /** Persist the explicit first-send choice required by production chat policy. */

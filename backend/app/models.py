@@ -228,9 +228,6 @@ class Chat(Base):
   # hides that it is still open. Every read surface — including the lightweight
   # /runtime poll that never loads the transcript — trusts this column.
   pending_question_id = Column(String(64), nullable=True, default=None)
-  # Explicit opt-in target for one-shot, on-demand agent answers to this
-  # chat's cards. The card itself is the durable delivery queue.
-  card_answerer_chat_id = Column(String(64), nullable=True, default=None)
   pending_messages = Column(JSON, nullable=False, default=list)
   uploads = Column(JSON, nullable=False, default=list)
   deleted_at = Column(DateTime, nullable=True, default=None)

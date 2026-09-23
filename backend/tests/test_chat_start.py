@@ -189,21 +189,6 @@ async def test_programmatic_start_preserves_hidden_product_event_identity(
 
 
 @pytest.mark.asyncio
-async def test_programmatic_start_duplicate_cid_does_not_launch_runner(monkeypatch):
-  state = _install_start_fakes(
-    monkeypatch,
-    ack_result={"duplicate": True, "session_id": "session-1", "provider": "claude"},
-  )
-  assert await chat_start.start_programmatic_chat_turn(
-    chat_id="answerer", title="Assignment", content="Answer card",
-    provider="claude", cid="stable-assignment",
-  ) is False
-  assert state.writer.commands[0].user_msg["cid"] == "stable-assignment"
-  assert state.created_broadcasts == []
-  assert state.scheduled == []
-
-
-@pytest.mark.asyncio
 async def test_programmatic_start_yields_to_pending_owner_question(monkeypatch):
   state = _install_start_fakes(
     monkeypatch,

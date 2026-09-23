@@ -3588,17 +3588,54 @@ def test_read_delegation_config_selects_container_safe_landlock():
 
 def test_read_delegation_turn_keeps_files_read_only_and_allows_proxy_network():
   from openai_codex import ApprovalMode
+  from openai_codex.generated.v2_all import (
+    Turn,
+    TurnCompletedNotification,
+    TurnStatus,
+  )
+  from openai_codex.models import Notification
 
   captured = {}
 
+  class EarlyCompletionSubscription:
+    def __init__(self):
+      self.events = [Notification(
+        method="turn/completed",
+        payload=TurnCompletedNotification(
+          threadId="thread-read-network",
+          turn=Turn(
+            id="turn-read-network",
+            items=[],
+            status=TurnStatus.completed,
+          ),
+        ),
+      )]
+      self.closed = False
+
+    def next(self):
+      return self.events.pop(0)
+
+    def close(self):
+      self.closed = True
+
   class FakeClient:
-    async def turn_start(self, thread_id, wire_input, *, params):
+    async def _start_turn(
+      self, thread_id, wire_input, *, params, for_handle,
+    ):
       captured.update(
         thread_id=thread_id,
         wire_input=wire_input,
         params=params,
+        for_handle=for_handle,
       )
-      return SimpleNamespace(turn=SimpleNamespace(id="turn-read-network"))
+      subscription = EarlyCompletionSubscription()
+      captured["subscription"] = subscription
+      # The completion is already available before _start_turn returns. A
+      # second, late subscription would begin after it and miss the event.
+      return SimpleNamespace(turn=SimpleNamespace(id="turn-read-network")), subscription
+
+    def _subscribe_turn_notifications(self, _turn_id):
+      raise AssertionError("the handle must own the turn/start subscription")
 
   class FakeCodex:
     def __init__(self):
@@ -3622,10 +3659,18 @@ def test_read_delegation_turn_keeps_files_read_only_and_allows_proxy_network():
 
   policy = captured["params"].sandbox_policy.root
   assert captured["initialized"] is True
+  assert captured["for_handle"] is True
   assert handle.id == "turn-read-network"
   assert policy.type == "readOnly"
   assert policy.network_access is True
   assert captured["params"].approval_policy.root.value == "never"
+
+  async def collect_events():
+    return [event async for event in handle.stream()]
+
+  events = asyncio.run(collect_events())
+  assert [event.method for event in events] == ["turn/completed"]
+  assert captured["subscription"].closed is True
 
 
 def test_delegated_codex_approval_guard_fails_closed():

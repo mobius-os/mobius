@@ -1627,7 +1627,6 @@ def test_run_migrations_records_an_inspectable_append_only_history(tmp_path):
     "0062_chat_run_progress_lease",
     "0063_durable_goal_records",
     "0063_chat_run_continuation_control",
-    "0066_card_answerer_chat_id",
   ]
   assert second == first
 

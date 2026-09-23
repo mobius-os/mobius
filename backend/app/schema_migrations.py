@@ -4974,20 +4974,6 @@ def _add_chat_run_continuation_control(eng) -> None:
     ))
 
 
-def _add_card_answerer_chat_id(eng) -> None:
-  from sqlalchemy import inspect as sa_inspect, text
-  if "chats" not in sa_inspect(eng).get_table_names():
-    return
-  if "card_answerer_chat_id" in {
-    column["name"] for column in sa_inspect(eng).get_columns("chats")
-  }:
-    return
-  with eng.begin() as conn:
-    conn.execute(text(
-      "ALTER TABLE chats ADD COLUMN card_answerer_chat_id VARCHAR(64) NULL"
-    ))
-
-
 _SCHEMA_MIGRATIONS = (
   # Full IDs are permanent identities, not sequence positions. Append new
   # work in execution order; never renumber a shipped ID to reconcile sources.
@@ -5056,7 +5042,6 @@ _SCHEMA_MIGRATIONS = (
   ("0062_chat_run_progress_lease", _add_chat_run_progress_lease),
   ("0063_durable_goal_records", _durable_goal_records),
   ("0063_chat_run_continuation_control", _add_chat_run_continuation_control),
-  ("0066_card_answerer_chat_id", _add_card_answerer_chat_id),
 )
 
 

@@ -68,7 +68,6 @@ async def start_programmatic_chat_turn(
   hidden: bool = False,
   message_kind: str | None = None,
   source_work_id: str | None = None,
-  cid: str | None = None,
 ) -> bool:
   """Durably start one system-initiated turn if the chat can be claimed.
 
@@ -94,8 +93,6 @@ async def start_programmatic_chat_turn(
       "content": content,
       "ts": int(time.time() * 1000),
     }
-    if cid is not None:
-      user_msg["cid"] = cid
     if hidden:
       user_msg["hidden"] = True
     if message_kind is not None:
@@ -112,9 +109,6 @@ async def start_programmatic_chat_turn(
     )))
 
     if isinstance(result, StartTurnBlockedByPendingQuestion):
-      discard_starting(chat_id)
-      return False
-    if result.get("duplicate"):
       discard_starting(chat_id)
       return False
 

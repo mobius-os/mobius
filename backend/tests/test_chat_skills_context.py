@@ -178,6 +178,42 @@ def test_core_prompt_requires_approval_before_changing_guarded_invariants():
   assert "preserves the same contract does not require escalation" in normalized
 
 
+def test_core_opens_with_narrow_continuation_handoff_contract():
+  repo = Path(__file__).resolve().parents[2]
+  core = (repo / "skill" / "core.md").read_text(
+    encoding="utf-8",
+  )
+  normalized = " ".join(core.split())
+  handoff = normalized.split(
+    "**Continuation handoff for owner chats.**", 1,
+  )[1].split("The stable constitution:", 1)[0]
+
+  assert core.index("**Continuation handoff for owner chats.**") \
+    < core.index("The stable constitution:")
+  assert "deliverable can be complete while its established workstream is not" in handoff
+  assert "specific, in-scope, materially useful continuation" in handoff
+  assert "same requested workstream" in handoff
+  assert "can start now" in handoff
+  assert "owner's decision is unsettled" in handoff
+  assert "This includes plans and read-only work" in handoff
+  assert "excludes factual answers and invented adjacent work" in handoff
+  assert "one contextual saved card as the final action" in handoff
+  assert "**Apply/implement it (Recommended)** and **Not now**" in handoff
+  assert "The **Not now** answer must resume first" in handoff
+  assert 'not a terminal `on_answer: "close"` choice' in handoff
+  assert "release the approval's work claim" in handoff
+  assert "`finish_agent_work(..., release=true)`" in handoff
+  assert "`request_question` for an ordinary choice" in handoff
+  assert "`request_approval` for permission" in handoff
+  assert "`request_restart` for a restart" in handoff
+  assert "If already authorized, proceed without asking again" in handoff
+  assert "if explicitly declined or no qualifying continuation exists, finish declaratively" \
+    in handoff
+  assert "Never substitute a prose question or declarative close" in handoff
+  assert "**Mandatory final-action decision for owner chats.**" not in handoff
+  assert normalized.count("specific, in-scope, materially useful continuation") == 1
+
+
 def test_goal_routing_rechecks_phase_transitions_and_prefers_platform_tool():
   repo = Path(__file__).resolve().parents[2]
   core = (repo / "skill" / "core.md").read_text(encoding="utf-8")
@@ -267,7 +303,7 @@ def test_core_prompt_distinguishes_durable_delegation_and_owner_led_contribution
   assert "offer once through the clarifying-question tool" not in core
 
 
-def test_restart_guidance_requires_activation_proof_and_fresh_approval():
+def test_owner_policy_and_card_access_stay_simple_and_explicit():
   repo = Path(__file__).resolve().parents[2]
   core = (repo / "skill" / "core.md").read_text(encoding="utf-8")
   maintenance = (
@@ -276,17 +312,15 @@ def test_restart_guidance_requires_activation_proof_and_fresh_approval():
   normalized_core = " ".join(core.split())
   normalized_maintenance = " ".join(maintenance.split())
 
-  assert "**Server restarts**: ALWAYS publish the exact platform-owned" in core
-  assert "If no changed runtime owner requires a restart, do not offer one" in (
-    normalized_core
-  )
-  assert "`request_restart` card after the `platform-maintenance` activation preflight" in (
-    normalized_core
-  )
-  assert "End the turn after its saved receipt" in normalized_core
-  assert "The owner's explicit **Restart now** selection authorizes" in normalized_core
-  assert "one platform dispatch; agents never replay that command" in normalized_core
-  assert "Task approval or delegation is not restart approval" in normalized_core
+  assert "The constitution and skills are owner-editable product policy" in core
+  assert "is not blocked by the rule being changed" in normalized_core
+  assert "without substituting a different one" in normalized_core
+  assert "Card access is deliberately uniform" in core
+  assert "any authenticated participant that can read" in normalized_core
+  assert "do not add a second card-answer role or token hierarchy" in normalized_core
+  assert "An explicit partner request may create the card" in normalized_core
+  assert "platform-owned dispatch" in normalized_core
+  assert "agents never issue or replay the shell command" in normalized_core
   assert "## Choose the smallest activation action" in maintenance
   assert "No shell rebuild or server restart" in maintenance
   assert "No server restart" in maintenance
@@ -310,20 +344,15 @@ def test_restart_guidance_requires_activation_proof_and_fresh_approval():
     normalized_maintenance
   )
   assert "Its receipt confirms only that the card was saved" in normalized_maintenance
-  assert "not approval: end the turn with no further text or tools" in (
+  assert "end the turn with no further text or tools" in (
     normalized_maintenance
   )
-  assert "The owner's **Restart now** click is dispatched by the platform" in (
+  assert "Any authenticated participant that can read the card may answer it" in (
     normalized_maintenance
   )
-  assert "Do not use `request_approval`" in maintenance
-  assert "service may be unavailable for tens of seconds" in normalized_maintenance
-  assert "delegation of the complete backend-fix loop does not approve" in (
-    normalized_maintenance
-  )
-  assert "explicitly delegated the restart or the complete backend-fix loop" not in (
-    core + maintenance
-  )
+  assert "Do not use `request_approval`" in normalized_maintenance
+  assert "unavailable for tens of seconds" in normalized_maintenance
+  assert "separate card-answer role" not in core + maintenance
 
 
 def test_saved_secure_input_is_a_terminal_agent_action():

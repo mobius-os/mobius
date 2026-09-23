@@ -822,6 +822,7 @@ class AppendPending(_Command):
   answers: dict | None = None
   question_id: str | None = None
   initiated_by_app_id: int | None = None
+  owner_authored: bool = False
   front: bool = False
   require_answer_match: bool = False
 
@@ -918,10 +919,11 @@ class CancelPending(_Command):
 
 @dataclass
 class UpdatePending(_Command):
-  """Replace one still-queued message's text without changing its identity.
+  """Replace one queued message's text without changing its identity.
 
   The stable `cid`, ordering `ts`, attachments, and queue position stay
-  untouched. Returns `{"updated", "pending"}`; `updated` is False when a
+  untouched. A non-owner rewrite drops direct-owner authority. Returns
+  `{"updated", "pending"}`; `updated` is False when a
   racing promotion or cancellation already pulled the row from the queue, so
   the caller can tell a real edit from a no-op instead of assuming success.
   """
@@ -930,6 +932,7 @@ class UpdatePending(_Command):
   run_token: str = ""
   cid: str = ""
   content: str = ""
+  owner_authored: bool = False
 
 
 @dataclass
@@ -2231,11 +2234,12 @@ class ChatWriterActor:
       raise _PersistFailed("AnswerQuestion: no matching question block")
     # The question is answered — clear the durable open-question marker in the
     # same commit so every read surface unblocks atomically with the answer.
-    chat.pending_question_id = None
-    # Answering an interactive question is an owner action just like a visible
-    # send. Keep drawer recency separate from generic transcript writes, but do
-    # advance it here so a parked chat returns to the top as soon as the answer
-    # commits (including the same-turn answer-delivery path).
+    # A retained older card can be answered without orphaning a newer one.
+    if cmd.question_id is None or chat.pending_question_id == cmd.question_id:
+      chat.pending_question_id = None
+    # Keep drawer recency separate from generic transcript writes, but advance
+    # it when a participant answers so a parked chat returns to the top as soon
+    # as the answer commits (including the same-turn answer-delivery path).
     from datetime import UTC, datetime
     chat.activity_at = datetime.now(UTC)
     if not _commit_or_rollback(db):
@@ -2369,7 +2373,8 @@ class ChatWriterActor:
             live_action["status"] = action["status"]
           chat.live_assistant = live
           break
-    chat.pending_question_id = None
+    if chat.pending_question_id == cmd.question_id:
+      chat.pending_question_id = None
     chat.activity_at = now
     if not _commit_or_rollback(db):
       raise _PersistFailed("Restart card resolution did not persist")
@@ -3969,6 +3974,8 @@ class ChatWriterActor:
       raise _PersistFailed("AppendPending: no matching question block")
     if cmd.initiated_by_app_id is not None:
       new_msg["_initiated_by_app_id"] = cmd.initiated_by_app_id
+    if cmd.owner_authored:
+      new_msg["_owner_authored"] = True
     # Idempotent append: `cid` is untrusted client input, and a retried POST
     # (flaky network, double-tap) carries the SAME cid. If that cid already
     # names a durable row — queued OR already promoted into the transcript —
@@ -4078,8 +4085,10 @@ class ChatWriterActor:
       cid_of(m) for m in msgs if m.get("role") == "user"
     }
     stored_messages: list[dict] = []
+    owner_steer_committed = False
     for raw_msg in raw_user_msgs:
       new_msg = dict(raw_msg)
+      owner_authored = new_msg.pop("_owner_authored", False) is True
       # This provenance is part of the durable transcript contract, not a UI
       # hint.  A normal Q1/A1/Q2/A2 exchange is indistinguishable from a
       # mid-turn steer after reload unless the committed Q2 row names the
@@ -4099,6 +4108,11 @@ class ChatWriterActor:
       msgs.append(new_msg)
       used_messages.append(new_msg)
       stored_messages.append(new_msg)
+      owner_steer_committed |= (
+        owner_authored
+        and new_msg.get("role") == "user"
+        and not new_msg.get("hidden")
+      )
     chat.messages = msgs
     if cmd.consume_pending_cids:
       consumed = set(cmd.consume_pending_cids)
@@ -4112,6 +4126,7 @@ class ChatWriterActor:
     return {
       "stored": stored_messages[-1] if stored_messages else None,
       "stored_messages": stored_messages,
+      "owner_steer_committed": owner_steer_committed,
       "pending": list(chat.pending_messages or []),
     }
 
@@ -4378,6 +4393,7 @@ class ChatWriterActor:
     agent_pending = _combine_pending_messages(promoted_group)
     consumed_cids = agent_pending.pop("_consumed_cids", [])
     initiated_by_app_id = agent_pending.pop("_initiated_by_app_id", None)
+    agent_pending.pop("_owner_authored", None)
     durable_run_token = (
       product_result_run_token(cmd.chat_id, agent_pending) or cmd.run_token
     )
@@ -4531,14 +4547,15 @@ class ChatWriterActor:
     return {"pending": remaining}
 
   def _update_pending(self, db, cmd: UpdatePending) -> dict:
-    """Replace one still-queued message's text, preserving every other field.
+    """Replace one still-queued message's text and preserve its identity.
 
     Matches on `cid_of` like `_cancel_pending`. `updated` reports whether the
     row is still queued (True even for a no-op edit to identical text); the
     commit and `updated_at` bump happen only when the content actually changed,
     mirroring `_cancel_pending`. `updated` is False only when a racing promote
     or cancel already removed the row, so the caller can distinguish a real
-    edit from a message that has already left the queue.
+    edit from a message that has already left the queue. A non-owner editor
+    cannot carry the original owner's steering authority onto rewritten text.
     """
     from datetime import UTC, datetime
 
@@ -4557,7 +4574,12 @@ class ChatWriterActor:
         if message.get("content") == cmd.content:
           next_pending.append(message)
         else:
-          next_pending.append({**message, "content": cmd.content})
+          replacement = {**message, "content": cmd.content}
+          if cmd.owner_authored:
+            replacement["_owner_authored"] = True
+          else:
+            replacement.pop("_owner_authored", None)
+          next_pending.append(replacement)
           changed = True
       else:
         next_pending.append(message)
@@ -5713,6 +5735,7 @@ def _pending_messages_for_transcript(
     msg.pop("serverTs", None)
     msg.pop("position", None)
     msg.pop("_initiated_by_app_id", None)
+    msg.pop("_owner_authored", None)
     # Preserve an explicit cid, or stamp the legacy fallback before changing
     # ts so queue identity stays byte-identical across promotion.
     msg["cid"] = cid_of(msg)

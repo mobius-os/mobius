@@ -1,16 +1,13 @@
 """Which installed app's recall receipts this platform will honor.
 
-``memory_recall`` owns the PROTOCOL — the receipt format, the argv arity, the
-meaning of a non-zero exit. That is legitimately platform-owned, in the same
-family as ``entry`` having to be ``index.jsx``. What the platform must never
-own is the provider's street address, and until this module existed it guessed
-one with a regex over ``/data/apps/memory(-N)?/memory_search.py``: a filesystem
-root, a slug family, and a filename compiled into core.
+The platform binds one installed-app entry point to the app that owns shared
+Memory and recognizes its two documented invocation arities. Memory owns the
+retrieval protocol, paging, cursors, labels, and accounting; the platform only
+authenticates the provider and carries its bounded result envelope.
 
 The basename below is the last Memory-shaped string on the authorization path.
-It lives here, next to the query, rather than in ``memory_recall``, because it
-belongs to FINDING the provider and not to the wire format — and because this
-is the one line a future manifest-declared entry point replaces.
+It lives here, next to installed-app discovery, so a future manifest-declared
+entry point replaces one line rather than a filesystem pattern in core.
 """
 
 from __future__ import annotations

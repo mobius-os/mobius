@@ -14,7 +14,7 @@ from app.chat_event_sink import (
   register_active_sink,
   unregister_active_sink,
 )
-from app.chat_writer import Barrier, FinishRun, StartTurn, get_writer
+from app.chat_writer import AnswerQuestion, Barrier, FinishRun, StartTurn, get_writer
 from app.database import SessionLocal
 from app.memory_recall import EMPTY_RECALL_BINDING
 from app.routes import chats_stream
@@ -71,6 +71,26 @@ def _answer(client, chat, auth, qid):
     "content": f"- {PROMPT['question']}: Not now", "hidden": True,
     "answers": {PROMPT["question"]: "Not now"}, "question_id": qid,
   })
+
+
+def test_answering_retained_card_does_not_orphan_newer_question(chat, db):
+  chat.messages = [{
+    "role": "assistant",
+    "blocks": [
+      {"type": "question", "question_id": "older", "questions": []},
+      {"type": "question", "question_id": "newer", "questions": []},
+    ],
+  }]
+  chat.pending_question_id = "newer"
+  db.commit()
+
+  get_writer().submit(AnswerQuestion(
+    chat_id=chat.id, question_id="older", answers={"Choice": "Yes"},
+  )).result(timeout=5)
+  db.expire_all()
+  refreshed = db.get(models.Chat, chat.id)
+  assert refreshed.pending_question_id == "newer"
+  assert refreshed.messages[0]["blocks"][0]["answers"] == {"Choice": "Yes"}
 
 
 def _finish(chat, sink):
@@ -860,66 +880,3 @@ def test_native_question_keeps_recording_post_card_prose(chat, approval_run):
   asyncio.run(go())
   assert sink.publish({"type": "text", "content": "While you decide, notes."})
   assert [b["type"] for b in sink.assistant_blocks] == ["question", "text"]
-
-
-def _second_agent_auth(chat_id, owner, run_id=None, db=None):
-  from app import auth as auth_mod
-  run_id = run_id or f"helper-{chat_id}"
-  if db is not None:
-    db.add(models.ChatRun(
-      id=run_id, chat_id=chat_id, status="running",
-      ))
-    db.commit()
-  token = auth_mod.create_agent_token(
-    chat_id=chat_id, owner_username=owner.username,
-    token_epoch=owner.token_epoch,
-    run_id=run_id or f"helper-{chat_id}",
-    expires_delta=timedelta(minutes=5),
-  )
-  return {"Authorization": f"Bearer {token}"}
-
-
-def test_agent_from_another_chat_answers_ordinary_question(
-  client, chat, db, approval_run,
-):
-  """A second agent run in a different chat can answer a Q&A card."""
-  qid = _ask(client, chat, approval_run).json()["question_id"]
-  owner = db.query(models.Owner).first()
-  foreign = client.post("/api/chats", json={"title": "Helper"},
-                        headers=approval_run[1]).json()["id"]
-  helper_auth = _second_agent_auth(foreign, owner, db=db)
-  result = _answer(client, chat, helper_auth, qid)
-  assert result.status_code == 202, result.text
-  assert result.json()["status"] == "queued"
-  _, messages, _ = _row(chat.id)
-  assert messages[-1]["blocks"][-1]["answers"] == {PROMPT["question"]: "Not now"}
-
-
-def test_delegated_agent_cannot_answer_cards(client, chat, db, approval_run):
-  """Delegated children remain blocked from owner-card answers."""
-  qid = _ask(client, chat, approval_run).json()["question_id"]
-  owner = db.query(models.Owner).first()
-  foreign = client.post("/api/chats", json={"title": "Delegated"},
-                        headers=approval_run[1]).json()["id"]
-  db.add(models.ChatRun(
-    id=f"deleg-{foreign}", chat_id=foreign, status="running", ))
-  db.commit()
-  delegated = auth_mod.create_delegation_token(
-    delegation_id="test-delegation", app_id=1, chat_id=foreign,
-    owner_username=owner.username, token_epoch=owner.token_epoch,
-    expires_delta=timedelta(minutes=5),
-  )
-  assert _answer(client, chat,
-                 {"Authorization": f"Bearer {delegated}"}, qid).status_code == 403
-
-
-def test_app_token_cannot_answer_cards(client, chat, db, approval_run):
-  """App-scoped tokens remain blocked from owner-card answers."""
-  qid = _ask(client, chat, approval_run).json()["question_id"]
-  owner = db.query(models.Owner).first()
-  app_token = auth_mod.create_access_token(
-    {"sub": owner.username, "scope": "app", "app_id": 999},
-    token_epoch=owner.token_epoch,
-  )
-  assert _answer(client, chat,
-                 {"Authorization": f"Bearer {app_token}"}, qid).status_code in (401, 403)

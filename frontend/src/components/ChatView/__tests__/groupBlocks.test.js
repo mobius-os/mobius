@@ -274,6 +274,28 @@ test('failed Memory activity is honest and remains distinctive', () => {
   assert.equal(isDistinctiveActivityTool(failed), true)
 })
 
+test('Memory V2 labels use the app-owned display copy', () => {
+  assert.equal(memoryRecallLabel({
+    status: 'done',
+    recall: { status: 'hit', display: {
+      label: 'Reused Memory search — 19 relevant notes',
+    } },
+  }), 'Reused Memory search — 19 relevant notes')
+  assert.equal(memoryRecallLabel({
+    status: 'done',
+    recall: { status: 'hit', display: { label: 'Read a Memory page' } },
+  }), 'Read a Memory page')
+  assert.equal(memoryRecallLabel({
+    status: 'done',
+    recall: { status: 'hit', display: {
+      label: 'Finished reading 2 notes from Memory',
+    } },
+  }), 'Finished reading 2 notes from Memory')
+  assert.equal(memoryRecallLabel({
+    status: 'running', recall: { status: 'searching', phase: 'read' },
+  }), 'Searching Memory')
+})
+
 
 const think = (content, duration_ms = 0) => ({ type: 'thinking', content, duration_ms })
 

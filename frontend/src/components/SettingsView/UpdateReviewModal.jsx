@@ -30,6 +30,7 @@ export default function UpdateReviewModal({
   const dialogRef = useRef(null)
   const closeRef = useRef(null)
   const resultActionRef = useRef(null)
+  const applyAttemptedRef = useRef(false)
   const inFlight = applying || rebuilding || resolving
   const busy = inFlight || observing
 
@@ -57,6 +58,7 @@ export default function UpdateReviewModal({
     inertBoundaryRef })
 
   async function handleApply() {
+    applyAttemptedRef.current = true
     const plan = { plan_id: preview.plan_id, current_sha: preview.current_sha,
       target_sha: preview.target_sha, image_digest: preview.image_digest }
     const result = await (reviewedUpdateUsesContainerRebuild(preview) ? onRebuild(plan) : onApply(plan))
@@ -65,8 +67,6 @@ export default function UpdateReviewModal({
     // HTTP success alone never closes this review.
     else if (result?.ok) onClose()
   }
-  useEffect(() => { if (resultState) resultActionRef.current?.focus({ preventScroll: true }) }, [resultState])
-
   const summary = summarizePreview(preview)
   const target = shortSha(preview?.target_sha)
   const commits = preview?.commits || []
@@ -87,6 +87,15 @@ export default function UpdateReviewModal({
   const repairReason = (resultState === 'conflict' || nothingToApply) ? null : platformUpdateRepairReason({
     preview, platform: { ...platform, state: resultState || platform?.state }, error: applyError, errorCode: applyErrorCode,
   })
+  useEffect(() => {
+    // Result and repair actions can be rendered while the request owner is
+    // still settling its phase. Wait for the action to become enabled before
+    // moving focus; otherwise focusing a disabled button is a no-op and the
+    // pane loses its recovery affordance.
+    if (applyAttemptedRef.current && !busy && (resultState || repairReason)) {
+      resultActionRef.current?.focus({ preventScroll: true })
+    }
+  }, [busy, repairReason, resultState])
 
   return (
     <div className="urm__overlay" role="presentation" onClick={requestClose}>

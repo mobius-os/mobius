@@ -76,7 +76,15 @@ def _submit_saved(args) -> int:
     for name, source in args.field_file:
       if name in values:
         raise ValueError("Duplicate field name")
-      values[name] = Path(source).read_text(encoding="utf-8")
+      value = Path(source).read_text(encoding="utf-8")
+      # Conventional secret files commonly end in one line terminator. Remove
+      # exactly that terminator without broadly stripping meaningful spaces or
+      # additional newlines from the credential.
+      if value.endswith("\r\n"):
+        value = value[:-2]
+      elif value.endswith("\n"):
+        value = value[:-1]
+      values[name] = value
     for name, source in args.field_env:
       if name in values or source not in os.environ:
         raise ValueError("Duplicate field or missing source")
@@ -87,7 +95,7 @@ def _submit_saved(args) -> int:
       {"fields": values}, token,
     )
     if (status != 200 or not isinstance(result, dict)
-        or result.get("status") not in {"consuming", "completed"}):
+        or result.get("status") != "consuming"):
       raise ValueError("Secure input not accepted")
     print("Secure input accepted; check the card for its final outcome.")
     return 0

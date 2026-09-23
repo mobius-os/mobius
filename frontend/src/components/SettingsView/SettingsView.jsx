@@ -373,6 +373,41 @@ export default function SettingsView({
       && expandedUsage.claude
     ),
   })
+  const [claudeExtraUsage, setClaudeExtraUsage] = useState({ busy: false, result: null })
+  const [claudeResetRedeem, setClaudeResetRedeem] = useState({ busy: false, result: null })
+  const handleRedeemClaudeReset = useCallback(async (creditId, expectedResetsLeft) => {
+    setClaudeResetRedeem({ busy: true, result: null })
+    try {
+      const res = await api.settings.redeemClaudeReset(creditId, expectedResetsLeft)
+      if (res.status === 409) {
+        setClaudeResetRedeem({ busy: false, result: { outcome: 'offer_changed' } })
+        settingsQueries.providerUsage.invalidate(queryClient, 'claude')
+        return
+      }
+      if (!res.ok) throw new Error('Claude reset redeem failed')
+      const data = await res.json()
+      setClaudeResetRedeem({ busy: false, result: { outcome: data?.outcome } })
+      settingsQueries.providerUsage.invalidate(queryClient, 'claude')
+    } catch {
+      setClaudeResetRedeem({ busy: false, result: { error: true } })
+    }
+  }, [queryClient])
+  const handleClaudeExtraUsage = useCallback(async (enabled, expectedEnabled) => {
+    setClaudeExtraUsage({ busy: true, result: null })
+    try {
+      const res = await api.settings.setClaudeExtraUsage(enabled, expectedEnabled)
+      if (!res.ok) throw new Error('Claude extra usage update failed')
+      const snapshot = await res.json()
+      queryClient.setQueryData(
+        settingsQueries.providerUsage.keyFor('claude'),
+        snapshot,
+      )
+      setClaudeExtraUsage({ busy: false, result: { enabled } })
+      settingsQueries.providerUsage.invalidate(queryClient, 'claude')
+    } catch {
+      setClaudeExtraUsage({ busy: false, result: { error: true } })
+    }
+  }, [queryClient])
   const mobiusUsageQuery = settingsQueries.providerUsage.useQuery('mobius', {
     enabled: active && providerReady && mobiusAvailable && mobiusAuthenticated,
   })
@@ -1004,6 +1039,12 @@ export default function SettingsView({
                       snapshot={claudeUsageQuery.data}
                       loading={claudeUsageQuery.isPending}
                       failed={claudeUsageQuery.isError}
+                      onRedeemClaudeReset={handleRedeemClaudeReset}
+                      claudeResetRedeeming={claudeResetRedeem.busy}
+                      claudeResetResult={claudeResetRedeem.result}
+                      onToggleExtraUsage={handleClaudeExtraUsage}
+                      extraUsageBusy={claudeExtraUsage.busy}
+                      extraUsageResult={claudeExtraUsage.result}
                     />
                   ) : null}
                   expanded={expandedAuth === 'claude'}

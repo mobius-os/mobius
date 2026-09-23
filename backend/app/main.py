@@ -80,7 +80,6 @@ from app.routes import (
   contribution_relay_router,
   contribution_reviews_router,
   chat_waits_router,
-  card_answer_routing_router,
   debug_router, delegations_router, fs_router, goal_plans_router, github_router,
   github_access_router,
   reviewer_router,
@@ -897,7 +896,6 @@ app.include_router(secure_inputs_router)
 app.include_router(agent_coordination_router)
 app.include_router(delegations_router)
 app.include_router(chat_waits_router)
-app.include_router(card_answer_routing_router)
 app.include_router(goal_plans_router)
 app.include_router(owner_approvals_router)
 app.include_router(chat_logs_router)

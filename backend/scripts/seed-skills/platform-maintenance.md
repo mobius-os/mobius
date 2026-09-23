@@ -102,7 +102,7 @@ Review the exact changed paths and use the smallest matching action:
 | Mini-app source under `/data/apps/<slug>/` | Run `apply_app.py`; the compiled app live-swaps. No shell rebuild or server restart. |
 | `frontend/src/` and other frontend build inputs | The watcher rebuilds the served shell, then `shell_apply_now` applies it. A normal save triggers this automatically; source arriving through Git needs a changed frontend file touched. No server restart. |
 | `backend/app/*.py` | After compile checks, tests, and commit, one server restart loads the settled backend revision. |
-| `skill/core.md` | A server restart refreshes the cached constitution for new agent sessions only; existing sessions keep their immutable prompt snapshot. Unless new sessions need the rule immediately, leave it pending for the next Restart-card choice. |
+| `skill/core.md` | A server restart refreshes the cached constitution for new agent sessions only; existing sessions keep their immutable prompt snapshot. Unless new sessions need the rule immediately, leave it pending for the next separately approved restart. |
 | `backend/scripts/entrypoint.sh`, the exact `/app/scripts/*` bootstrap files it invokes, `backend/scripts/seed-skills/`, or `backend/runtime/` | Image-owned. Batch and test the change, then leave one image replacement pending; never rebuild between iterations. `platform_activation.py` is the source of truth for the exact bootstrap allowlist. |
 | `backend/runtime/identity_broker.py` | Served privileged source. The frozen `/app/runtime/served_runtime_launcher.py` validates it before the served platform starts and launches it from `/data/platform`; validation failure selects the complete baked platform for that boot. One server restart activates a valid broker edit. The other `backend/runtime` files above stay image-owned. |
 | `backend/scripts/pm-commit` | One server restart refreshes the installed launcher from the served checkout; no image rebuild. |
@@ -121,8 +121,8 @@ Review the exact changed paths and use the smallest matching action:
    Node packages in the active runtime dependency tree; a global Node install
    does not satisfy a project's imports. Verify the import, executable, or
    version. New processes can use the install immediately. A long-running
-   backend needs a Restart-card-selected server restart when it must load the
-   new package itself.
+   backend needs one approved server restart only when it must load the new
+   package itself.
 3. If shipped behavior depends on the package, record the same resolution in
    the owning manifest and lockfile, plus the Dockerfile only when image wiring
    is needed. These declarations are durability metadata, not an activation
@@ -134,22 +134,18 @@ Review the exact changed paths and use the smallest matching action:
 
 ### Activation preflight — before any restart question
 
-1. List the exact paths changed for the current task and whether a later
-   activation action has already loaded them.
-2. Map every path through the table above. For routine activation, do not
-   propose a restart when nothing needs one, or substitute it for hot reload,
-   app apply, shell rebuild, live dependency install, or container rebuild.
-   This is advice against unnecessary restarts, not a limit on the Restart
-   card: when the partner explicitly requests a restart or a card-flow test,
-   the card can be created even if there are no pending changed paths. Do not
-   invent a source change to make the card available.
+1. List the exact paths changed for the current task and whether a later owner
+   action has already activated them.
+2. Map every path through the table above. Do not propose an unnecessary
+   restart for routine activation or substitute one for hot reload, app apply,
+   shell rebuild, live dependency install, or container rebuild. An explicit
+   partner request may still create a Restart card without pending changes.
 3. Batch every restart-requiring edit, test it, and commit it before asking.
    Do not restart between iterations or request a speculative restart.
-4. For activation, explain the exact change that remains inactive and why a
-   server restart loads it. For an explicit restart without pending changes,
-   say that no source activation is pending. The platform supplies the card's
-   question text. For a constitution-only change, ordinarily leave it pending
-   unless the partner needs the rule in new sessions now.
+4. For activation, name the exact change that remains inactive and why only a
+   restart can activate it. If no change is pending, say so. For a
+   constitution-only change, default to leaving it pending unless the partner
+   needs the rule in new sessions now.
 
 ---
 
@@ -229,8 +225,8 @@ because `/data/platform` is the persistent served clone. The baked
   push or manage external repository workflow from inside Möbius.
 
 All chat-persistence writes must route through the `chat_writer` actor. Never
-assign `Chat.messages` or `Chat.pending_messages` directly; see
-`backend/app/chat_writer.py` for the write-surface contract.
+assign `Chat.messages` or `Chat.pending_messages` directly; see `core.md` for
+the write-surface contract.
 
 ### Backend-fix loop
 
@@ -238,29 +234,21 @@ assign `Chat.messages` or `Chat.pending_messages` directly; see
    compile every changed Python file, and run focused tests.
 2. Commit only the exact paths you own with `PM_COMMIT_ROOT=/data/platform
    pm-commit --from <starting-sha> '<what and why>' -- <paths>`.
-3. Run the activation preflight. For routine backend activation, ask for a
-   restart only if the settled backend change is not live. An explicit partner
-   request for a restart or Restart-card test may proceed without that change.
-   Explain that the restart interrupts active agent turns, name the current
-   number of running turns when known, warn that service may be unavailable
-   for tens of seconds, then call Möbius's `request_restart` tool as the final
-   action. Approval of a task, a broad “go ahead” or “fix it,” or delegation
-   of the backend-fix loop is not itself a Restart-card selection.
+3. Run the activation preflight. For routine activation, ask only when the
+   settled backend change is not live; an explicit partner request may create
+   the card without a pending change. Explain that the restart interrupts active
+   turns and may make service unavailable for tens of seconds, then call
+   `request_restart` as the final action.
 
-   `request_restart` takes no action arguments. The platform binds the current
-   restartable boot and displays pending changed paths when any exist; it does
-   not require changed paths. It saves its own card with one exact
+   `request_restart` takes no action arguments. The platform derives the exact
+   committed, restart-loadable source and saves its own card with one exact
    **Restart now** action plus a written-response path. Its receipt confirms
-   only that the card was saved, not a restart choice: end the turn with no
-   further text or tools. The owner or a non-delegated top-level agent run may
-   answer an existing Restart card, including from another chat. Routing a
-   card to an agent does not preapprove Restart: the answerer inspects the
-   exact card and selects **Restart now** only when its Goal authorizes the
-   disruption. It may leave the card for the owner. Delegated
-   children and app-scoped tokens cannot. A **Restart now** selection triggers
-   one platform-owned dispatch without an agent issuing or replaying a shell
-   command. A written response continues the conversation without triggering
-   a restart. Do not use `request_approval` or Codex's
+   only that the card was saved: end the turn with no further text or tools.
+   Any authenticated participant that can read the card may answer it, just as
+   with ordinary Q&A. A **Restart now** selection is dispatched by the platform;
+   the answering agent never issues or replays a shell command. A written
+   response continues the conversation without restarting. Do not use
+   `request_approval` or Codex's
    `request_user_input` for platform restart permission.
 
    If the tool is absent, the same saved-card operation is available through:
@@ -280,10 +268,8 @@ assign `Chat.messages` or `Chat.pending_messages` directly; see
    Restart-card chat independently; each resumed agent verifies whether its
    changes loaded. Unrelated waits and queued work keep their existing
    barriers. An uncertain outcome needs fresh,
-   specific approval rather than an automatic retry. A scheduled/background
-   agent cannot open a live Restart card, so it leaves activation pending.
-   An eligible agent may answer an existing card only when its instructions
-   authorize that choice; merely being able to answer is not a restart request.
+   specific selection rather than an automatic retry. A scheduled/background
+   agent cannot open a live card, but may answer an existing one it can access.
 4. If the edited tree fails to import, the baked shell stays available. Refresh
    and repair `/data/platform` there, or use external Recovery if the interface
    itself is unavailable.
@@ -302,7 +288,7 @@ altered the latter.
 If `/api/ready` reports `reason: schema_mismatch` or
 `database_initialization_failed`, the process has deliberately skipped its
 writer, reconciliation, cron, and database supervisors. Recovery repairs the
-database externally, then a normal Restart-card choice lets boot
+database externally, then the partner approves one normal restart so boot can
 verify the database and start those owners coherently. Do not hand-edit the
 in-memory readiness verdict or try to start skipped owners piecemeal.
 
