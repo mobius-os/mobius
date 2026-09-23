@@ -3554,31 +3554,51 @@ async def save_question_answers(
         status_code=409,
         detail="Agent card answers require an exact question_id.",
       )
+    exact_card = questions.saved_question(chat, body.question_id)
+    if exact_card is None:
+      raise HTTPException(
+        status_code=410,
+        detail="The question is no longer accepting answers.",
+      )
+    if questions.is_secure_question(chat, body.question_id):
+      raise HTTPException(409, detail="Use the secure input card to respond.")
+    if "answers" in exact_card:
+      if exact_card["answers"] == body.answers:
+        return {"ok": True}
+      raise HTTPException(
+        status_code=409,
+        detail="This question already has a different answer.",
+      )
     if not questions.accepts_saved_answer(chat, body.question_id):
       raise HTTPException(
         status_code=410,
         detail="The question is no longer accepting answers.",
       )
-  from app.questions import is_secure_question
-  if is_secure_question(chat, body.question_id):
+    try:
+      questions.validate_saved_answer(exact_card, body.answers, None)
+    except questions.AnswerConflict as exc:
+      raise HTTPException(status_code=409, detail=str(exc)) from exc
+  if questions.is_secure_question(chat, body.question_id):
     raise HTTPException(409, detail="Use the secure input card to respond.")
-  from app.questions import AnswerConflict
-  ack = get_writer().submit(
-    AnswerQuestion(
-      chat_id=chat_id,
-      run_token="",  # tokenless → broad-fence by chat
-      question_id=body.question_id,
-      answers=body.answers,
-      legacy_save_only=True,
+  from app import chat_queue
+  async with chat_queue.get_lock(chat_id):
+    ack = get_writer().submit(
+      AnswerQuestion(
+        chat_id=chat_id,
+        run_token="",  # tokenless → broad-fence by chat
+        question_id=body.question_id,
+        answers=body.answers,
+        legacy_save_only=True,
+        require_exact_card=not is_owner_input_principal(principal),
+      )
     )
-  )
-  try:
-    await await_ack(ack)
-  except AnswerConflict as exc:
-    raise HTTPException(409, detail=str(exc)) from exc
-  except Exception:
-    # No matching question block (or the write dropped). Preserve the
-    # route's 404 contract — the client treats it as "the question card
-    # is no longer addressable".
-    raise HTTPException(status_code=404, detail="No question block found.")
+    try:
+      await await_ack(ack)
+    except questions.AnswerConflict as exc:
+      raise HTTPException(409, detail=str(exc)) from exc
+    except Exception:
+      # No matching question block (or the write dropped). Preserve the
+      # route's 404 contract — the client treats it as "the question card
+      # is no longer addressable".
+      raise HTTPException(status_code=404, detail="No question block found.")
   return {"ok": True}
