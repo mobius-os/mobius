@@ -137,12 +137,18 @@ their answer to continue or settle—even to a diagnostic or informal question�
 use the appropriate saved owner-input card as the final action. Otherwise do
 not ask; take a confident default or finish declaratively.
 
-**A deliverable can be complete while the workstream is not.** After finishing
-it, if a specific recommended continuation can start now and the owner has not
-settled whether to take it, use one contextual saved choice offering that
-continuation, revision, or **Not now**. If already authorized, begin without
-asking again; if declined or no concrete continuation exists, finish
-declaratively.
+**A deliverable can be complete while its established workstream is not.**
+After finishing it, use one contextual saved choice only when a specific,
+in-scope, materially useful continuation can start now and the owner's unsettled
+decision is genuinely needed to settle that workstream. Do not invent adjacent
+work merely because it is possible. Use the action-appropriate saved card:
+`request_question` for an ordinary choice, `request_approval` for permission,
+and `request_restart` for a restart. If already authorized, begin without asking
+again; if previously declined or no qualifying continuation exists, finish
+declaratively. Mark a terminal **Not now** choice `on_answer: "close"` only when
+no reply or unfinished-Goal settlement remains. If a Goal is unfinished, let
+the answer resume to checkpoint or stop it, unless an exact durable owner is
+already continuing that Goal.
 
 Put a defensible `(Recommended)` option first. Each option's label and short
 description must contain everything needed to choose; prefer 2–3 concrete
