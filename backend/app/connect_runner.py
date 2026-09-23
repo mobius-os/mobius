@@ -54,6 +54,10 @@ LAUNCHD_LABEL = "sh.mobius.connect"
 LAUNCHD_PLIST = os.path.expanduser("~/Library/LaunchAgents/%s.plist" % LAUNCHD_LABEL)
 SYSTEMD_UNIT = os.path.expanduser("~/.config/systemd/user/mobius-connect.service")
 RUNNER_PROTOCOL_VERSION = 4
+# Increment this for every shipped runner change that an existing installation
+# should receive. Protocol only describes wire compatibility; compatible
+# releases can keep using the same protocol while still offering an update.
+RUNNER_RELEASE = 1
 # A live stream receives a server heartbeat every 15 seconds. Some hosting
 # proxies keep the client TCP socket open after the backend behind it restarts,
 # leaving the runner blocked forever on a stream the new backend no longer
@@ -61,9 +65,15 @@ RUNNER_PROTOCOL_VERSION = 4
 # reconnect without making one late heartbeat look like an outage.
 STREAM_HEARTBEAT_SECONDS = 15
 STREAM_READ_TIMEOUT_SECONDS = STREAM_HEARTBEAT_SECONDS * 4
+# A healthy stream is deliberately rotated by the server before common proxy
+# response caps. Reconnect that handoff immediately: sleeping here creates a
+# visible offline flash even though neither endpoint failed. Streams that die
+# before one heartbeat interval still take the ordinary retry backoff so a
+# broken intermediary cannot create a tight reconnect loop.
+STREAM_HEALTHY_SECONDS = STREAM_HEARTBEAT_SECONDS
 RUNNER_USER_AGENT = (
-    "mobius-connect/%s (+https://github.com/mobius-os/mobius)"
-    % RUNNER_PROTOCOL_VERSION
+    "mobius-connect/%s (protocol/%s; +https://github.com/mobius-os/mobius)"
+    % (RUNNER_RELEASE, RUNNER_PROTOCOL_VERSION)
 )
 _POWERSHELL_STDIN_BOOTSTRAP = (
     "$encoded=[Console]::In.ReadToEnd();"
@@ -817,6 +827,10 @@ def _serve_connection(conn, command_gate=None, stop_event=None):
     backoff = 1
     print("Connecting to %s ..." % base)
     while True:
+        # Only a stream opened during this attempt can establish health. Do
+        # not let a healthy prior stream make a new handshake failure look
+        # healthy when the transport raises before the next response opens.
+        stream_opened_at = None
         # A connection removed from config (or a shutting-down supervisor) sets
         # this event; stop retrying and let this thread exit.
         if stop_event is not None and stop_event.is_set():
@@ -832,6 +846,7 @@ def _serve_connection(conn, command_gate=None, stop_event=None):
             active_id, pending_ids = commands.snapshot()
             query = [
                 ("protocol", str(RUNNER_PROTOCOL_VERSION)),
+                ("release", str(RUNNER_RELEASE)),
                 ("platform", plat),
             ]
             if active_id:
@@ -849,13 +864,24 @@ def _serve_connection(conn, command_gate=None, stop_event=None):
             with _open_url(
                 req, timeout=STREAM_READ_TIMEOUT_SECONDS, context=ctx,
             ) as stream:
+                # Start the health window only after the response is open.
+                # A slow DNS/TLS/HTTP handshake followed by an immediate EOF
+                # is still an early failure and must retain retry backoff.
+                stream_opened_at = time.monotonic()
                 print("Connected. This machine is now reachable from Mobius.")
-                backoff = 1
                 commands.flush_pending_results()
                 if commands.take_reconcile_request():
                     print("reconnecting to reconcile a rejected result")
                     continue
                 for raw in stream:
+                    if (
+                        time.monotonic() - stream_opened_at
+                        >= STREAM_HEALTHY_SECONDS
+                    ):
+                        # A heartbeat proves the stream survived its health
+                        # window. Clear any failures accumulated before it so
+                        # a later transport loss starts with the short retry.
+                        backoff = 1
                     # Heartbeat comments make this retry path run even while
                     # the host has no new commands.
                     commands.flush_pending_results()
@@ -914,10 +940,15 @@ def _serve_connection(conn, command_gate=None, stop_event=None):
                         continue
                     print("$ " + evt.get("cmd", ""))
                     commands.start(evt)
-            # Protocol v3 streams intentionally end before a hosting proxy's
-            # response cap. A command belongs to this runner, not the stream,
-            # so clean rotation is the same recovery path as any network loss.
+            if stop_event is not None and stop_event.is_set():
+                return
+            # Streams intentionally end before a hosting proxy's response cap.
+            # A command belongs to this runner, not the stream, so clean
+            # rotation is the same recovery path as any network loss.
             print("stream rotated; reconnecting")
+            if time.monotonic() - stream_opened_at >= STREAM_HEALTHY_SECONDS:
+                backoff = 1
+                continue
         except KeyboardInterrupt:
             print("\nStopped.")
             return
@@ -929,8 +960,22 @@ def _serve_connection(conn, command_gate=None, stop_event=None):
             # permanent exit that abandons one instance while the others stay up.
             print("HTTP %s; retrying in %ss" % (exc.code, backoff))
         except socket.timeout:
+            if (
+                stream_opened_at is not None
+                and time.monotonic() - stream_opened_at
+                >= STREAM_HEALTHY_SECONDS
+            ):
+                # A read timeout after a healthy stream is a later transport
+                # loss, not another failed open. Start its recovery quickly.
+                backoff = 1
             print("connection stalled; retrying in %ss" % backoff)
         except urllib.error.URLError as exc:
+            if (
+                stream_opened_at is not None
+                and time.monotonic() - stream_opened_at
+                >= STREAM_HEALTHY_SECONDS
+            ):
+                backoff = 1
             print("connection lost (%s); retrying in %ss" % (exc.reason, backoff))
         time.sleep(backoff)
         backoff = min(backoff * 2, 30)
