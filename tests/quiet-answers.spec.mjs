@@ -1,5 +1,6 @@
 /* Saved close answers never manufacture a model turn or disturb owner intent. */
 import { test, expect, serveRecoveryBuild } from './_recoveryBrowser.mjs'
+import { installMockProviderUsage } from './_chatTestPrerequisites.mjs'
 
 const BASE = process.env.MOBIUS_URL || process.env.API_BASE_URL || 'http://localhost:8001'
 const CHAT = process.env.MOBIUS_RECOVERY_CHAT_ID || 'ffffffff-1111-4222-8333-444444444444'
@@ -88,6 +89,10 @@ async function mount(page, { reject = false, acknowledgement = 'response', resta
     if (url.pathname === '/api/chats') return route.fulfill({ json: [detail()] })
     return route.continue()
   })
+  // The generic fixture route is intentionally broad. Register the shared
+  // provider boundary after it so Playwright's LIFO dispatch handles the
+  // configured Codex chat without probing the disconnected backend.
+  await installMockProviderUsage(page)
   await serveRecoveryBuild(page)
   await page.addInitScript(() => sessionStorage.setItem('mobius:visual-content-only', '1'))
   await page.goto(`${BASE}/shell/?chat=${CHAT}`, { waitUntil: 'domcontentloaded' })
