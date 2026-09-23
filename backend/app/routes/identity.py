@@ -27,6 +27,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app import models
+from app.broadcast import get_system_broadcast
 from app.config import get_settings
 from app.database import get_db
 from app.deps import (
@@ -74,6 +75,10 @@ _REMOTE_CLIENT_ERRORS = {
 
 class ProfilePatch(BaseModel):
   handle: str
+
+
+class MobiusModelsPatch(BaseModel):
+  enabled: bool
 
 
 class LinkStart(BaseModel):
@@ -715,6 +720,32 @@ async def read_agent_access(
       "retention": {},
     }
   return {"agent_access": "available", **remote}
+
+
+@router.get("/agent/models-enabled")
+def read_mobius_models_enabled(
+  _: models.Owner = Depends(get_owner_or_app_with_identity_manage),
+) -> dict[str, bool]:
+  from app.providers import mobius_models_enabled
+  return {"enabled": mobius_models_enabled(get_settings().data_dir)}
+
+
+@router.patch(
+  "/agent/models-enabled",
+  dependencies=[Depends(require_nondelegated_owner_or_app_control)],
+)
+def set_mobius_models_enabled(
+  body: MobiusModelsPatch,
+  _: models.Owner = Depends(get_owner_or_app_with_identity_manage),
+) -> dict[str, bool]:
+  from app.providers import update_agent_settings
+  data_dir = get_settings().data_dir
+  if not update_agent_settings(
+    data_dir, lambda current: {**current, "mobius_models_enabled": body.enabled},
+  ):
+    raise HTTPException(500, "Could not save Möbius model preference.")
+  get_system_broadcast().publish({"type": "model_providers_changed"})
+  return {"enabled": body.enabled}
 
 
 @router.post(
