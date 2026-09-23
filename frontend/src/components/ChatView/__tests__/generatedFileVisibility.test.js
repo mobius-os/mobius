@@ -14,6 +14,10 @@ const { default: MsgContent } = await vite.ssrLoadModule(
   '/src/components/ChatView/MsgContent.jsx',
 )
 
+const { default: ActiveAssistantSurface } = await vite.ssrLoadModule(
+  '/src/components/ChatView/ActiveAssistantSurface.jsx',
+)
+
 after(() => vite.close())
 
 const generatedMessage = {
@@ -54,3 +58,25 @@ test('generated-file card appears after the assistant response settles', () => {
   assert.match(html, /chat__generated-file-link/)
   assert.match(html, />report\.pdf</)
 })
+
+for (const isStreaming of [true, false]) {
+  test(`projected peer activity and durable downloads survive the active handoff (${isStreaming})`, () => {
+    const rawBlocks = generatedMessage.blocks
+    const peer = {
+      type: 'tool', tool: 'PeerMessage', tool_use_id: 'peer-review',
+      status: 'done', input: '', output: '',
+    }
+    const html = renderToStaticMarkup(createElement(ActiveAssistantSurface, {
+      activeMirrorMsg: { ...generatedMessage, blocks: [peer, ...rawBlocks] },
+      activitySourceBlocks: rawBlocks,
+      useDbActivePayload: false,
+      hasLivePayload: true,
+      streamItems: [{
+        type: 'tool', tool: 'Bash', tool_use_id: 'tool-pdf', status: 'done',
+      }],
+      chatId: 'chat-generated-file', dataKey: 'assistant-file', isStreaming,
+    }))
+    assert.match(html, isStreaming ? /Exchanging messages/ : /Exchanged messages/i)
+    assert.equal(html.includes('chat__generated-file-link'), !isStreaming)
+  })
+}

@@ -50,6 +50,7 @@ def limit_glibc_arenas(max_arenas: int = 2) -> bool:
       source="environment" if valid else "environment_invalid",
     )
     return False
+
   if isinstance(max_arenas, bool) or not isinstance(max_arenas, int):
     _status.update(arena_cap=None, applied=False, source="invalid")
     return False
@@ -75,4 +76,16 @@ def limit_glibc_arenas(max_arenas: int = 2) -> bool:
     _status.update(
       arena_cap=max_arenas, applied=False, source="unsupported",
     )
+    return False
+
+
+def trim_glibc() -> bool:
+  """Return free glibc heap pages after a settled burst of agent work."""
+  try:
+    libc = ctypes.CDLL(None)
+    malloc_trim = libc.malloc_trim
+    malloc_trim.argtypes = (ctypes.c_size_t,)
+    malloc_trim.restype = ctypes.c_int
+    return malloc_trim(0) == 1
+  except Exception:  # noqa: BLE001 - optional libc optimization
     return False

@@ -1,5 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { createElement } from 'react'
+import { renderToStaticMarkup } from 'react-dom/server'
 
 import {
   noteHref,
@@ -8,6 +10,8 @@ import {
   safeNoteId,
 } from '../memoryRecall.js'
 import { memoryRecallCardModel } from '../memoryRecallCard.js'
+import MemoryRecallCard from '../MemoryRecallCard.jsx'
+import { _resetDisclosureStateForTests } from '../disclosureState.js'
 
 const note = (id, extra = {}) => ({
   id,
@@ -63,7 +67,7 @@ test('the card model keeps the question and result summaries together', () => {
   })
 
   assert.equal(model.query, 'What did we decide about navigation?')
-  assert.equal(model.noteCount, 2)
+  assert.equal(model.notes.length, 2)
   assert.equal(model.notes[0].label, 'Use one navigation seam')
   assert.equal(
     model.notes[0].summary,
@@ -73,12 +77,72 @@ test('the card model keeps the question and result summaries together', () => {
     '/shell/?app=memory&intent=note%3Aalpha')
 })
 
+test('the V2 card renders app-owned bounded display copy', () => {
+  const model = memoryRecallCardModel({
+    status: 'hit',
+    display: {
+      label: 'Reused Memory search — 19 relevant notes',
+      detail: 'Showing 2 of 19 relevant notes; more catalogue entries are available.',
+      warning: 'Discovery stopped at a safety boundary; this catalogue may be incomplete.',
+    },
+    notes: [note('alpha'), note('beta')],
+  })
+  assert.match(model.detail, /Showing 2 of 19/)
+  assert.match(model.warning, /may be incomplete/)
+})
+
+test('the platform does not interpret Memory pagination fields', () => {
+  const model = memoryRecallCardModel({
+    status: 'hit',
+    phase: 'read',
+    page: { requested_count: 2, fully_supplied_count: 1,
+      complete: false, next_cursor: 'body:hash:1:0' },
+    display: { label: 'Read a Memory page' },
+    notes: [note('alpha')],
+  })
+  assert.equal('phase' in model, false)
+  assert.equal('hasMore' in model, false)
+})
+
 test('the expanded card preserves every note in the bounded receipt', () => {
   const notes = Array.from({ length: 12 }, (_, index) => note(`note-${index}`))
   const model = memoryRecallCardModel({ status: 'hit', notes })
   assert.equal(model.notes.length, 12)
-  assert.equal(model.noteCount, 12)
   assert.equal(model.notes.at(-1).label, 'note 11')
+})
+
+test('an empty incomplete lookup renders its warning', { concurrency: false }, () => {
+  const previousStorage = globalThis.sessionStorage
+  globalThis.sessionStorage = {
+    getItem: () => JSON.stringify(['empty-warning']),
+    setItem: () => {},
+  }
+  _resetDisclosureStateForTests()
+  try {
+    const warning = 'Discovery stopped at a safety boundary; this catalogue may be incomplete.'
+    const html = renderToStaticMarkup(createElement(MemoryRecallCard, {
+      t: {
+        tool: 'Bash',
+        status: 'done',
+        recall: {
+          status: 'empty',
+          display: {
+            label: 'Searched Memory — nothing relevant',
+            detail: 'Nothing relevant is recorded yet.',
+            warning,
+          },
+        },
+      },
+      chatId: 'chat-1',
+      disclosureKey: 'empty-warning',
+    }))
+    assert.match(html, /Nothing relevant is recorded yet\./)
+    assert.match(html, /catalogue may be incomplete/)
+  } finally {
+    if (previousStorage === undefined) delete globalThis.sessionStorage
+    else globalThis.sessionStorage = previousStorage
+    _resetDisclosureStateForTests()
+  }
 })
 
 test('malformed notes are skipped without dropping valid siblings', () => {

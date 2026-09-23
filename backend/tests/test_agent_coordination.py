@@ -1325,7 +1325,7 @@ def test_admitted_turn_without_provider_ack_does_not_consume_peer_context(db):
   assert "Replay me" in first_delivery.text
   assert first_delivery.delivered_through is not None
   # Simulate an exception after admission but before the provider runner
-  # returns: no AcknowledgePeerContextDelivery command was committed.
+  # returns: no AcknowledgeProviderSuccess command was committed.
   failed_launch.status = "interrupted"
   successor = make_goal_run(db,
     id="scout-after-provider-launch-failure",

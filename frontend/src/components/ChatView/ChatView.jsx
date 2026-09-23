@@ -67,6 +67,7 @@ import useTranscriptState from './hooks/useTranscriptState.js'
 import useComposerDraftState from './hooks/useComposerDraftState.js'
 import useChatRuntimePolicy from './hooks/useChatRuntimePolicy.js'
 import useOffscreenNudge, { useNudgeTargetRef } from './hooks/useOffscreenNudge.js'
+import { composerAdjacentActionProps } from './composerAdjacentAction.js'
 import ChatInputBar from './ChatInputBar.jsx'
 import { compactFailureInput, mobiusChatCommand } from './slashCommands.js'
 import { hasSendablePayload } from './composerSubmission.js'
@@ -513,7 +514,32 @@ export default function ChatView({
   // be stale. Do not publish a chat-to-chat handoff until this activation's
   // runtime/detail verdict has arrived: otherwise an apparently idle cache can
   // be promoted before the server reports that its turn is still running.
-  const [activationSettled, setActivationSettled] = useState(provisionalNewChat)
+  // One identity-bound phase owns activation. A retained ChatView can receive
+  // another chat before its previous effect runs, so the phase is never read
+  // across identities. Provisional chats are locally authoritative from birth;
+  // persisted chats move from pending to cold (detail is known, transcript may
+  // still be preparing) and finally ready (runtime is known). Error remains a
+  // visible, non-sendable state rather than pretending that a cache fallback
+  // proved the current runtime.
+  const activationIdentity = String(chatId)
+  const [activationState, setActivationState] = useState(() => ({
+    chatId: activationIdentity,
+    phase: provisionalNewChat ? 'ready' : 'pending',
+  }))
+  const activationPhase = activationState.chatId === activationIdentity
+    ? activationState.phase
+    : 'pending'
+  const activationSettled = provisionalNewChat || activationPhase === 'ready'
+  const activationSettledRef = useRef(activationSettled)
+  activationSettledRef.current = activationSettled
+  const setActivationPhase = useCallback((phase) => {
+    setActivationState({ chatId: activationIdentity, phase })
+  }, [activationIdentity])
+  // A cold activation has authoritative chat detail but is still preparing its
+  // transcript. Expose the one real composer now, with Send disabled and a
+  // truthful status; transcript visibility and row-backed controls remain
+  // gated by their existing readiness contracts.
+  const coldActivation = activationPhase === 'cold'
   const acceptCachedReadingCoordinate = useCallback(() => {
     // The scroll owner has proved the exact nested part against committed DOM.
     setInitialEntryPhase(current => (
@@ -531,11 +557,20 @@ export default function ChatView({
   // render the empty-state UI ("What's on your mind?") as if the chat had no
   // history, hiding the real problem.
   const [loadError, setLoadError] = useState(false)
-  // Bumped by the load-error Retry button to re-run the load effect in
+  // Bumped by either activation Retry surface to re-run the load effect in
   // place, instead of a hard window.location.reload (which would nuke the
   // Query cache, scroll positions, drafts, the app-iframe LRU, and the
   // back-stack — and contradicts the project's no-hard-reload principle).
   const [loadNonce, setLoadNonce] = useState(0)
+  const retryActivation = useCallback(() => {
+    // Retry at the activation owner: preserve the complete cached transcript,
+    // draft/files, scroll/cache, and the same ChatView while re-running only
+    // this chat's authoritative activation effect.
+    setActivationPhase('pending')
+    setLoadError(false)
+    setLoading(true)
+    setLoadNonce(nonce => nonce + 1)
+  }, [setActivationPhase])
   const [sending, setSending] = useState(() => !!cached?.running)
   // Authoritative transcript reads can replace a locally promoted live answer
   // with its compact settled projection without changing the row count. Bump
@@ -2412,11 +2447,15 @@ export default function ChatView({
     // changes this dependency and re-runs the version + stream handshake
     // without losing the pane's DOM identity.
     if (hidden || provisionalNewChat) return
-    setActivationSettled(false)
+    setActivationPhase('pending')
     let cancelled = false
     const initialLoadController = new AbortController()
     const queryKey = chatMessagesQueryKey(chatId)
     const activationCache = queryClient.getQueryData(queryKey)
+    // Policy state lives in the retained ChatView. Rebind it synchronously to
+    // this chat's cache (or ordinary absence) before any early surface can
+    // paint, so a failed cold read cannot expose the previous chat's provider.
+    setChatInfo(activationCache?.chatInfo ?? null)
     const savedAnchorKey = savedReadingAnchorKey(chatId)
     const searchAnchorKey = searchReveal?.anchorKey || null
     // A search selection is a deliberate one-shot navigation, so it wins over
@@ -2449,6 +2488,13 @@ export default function ChatView({
       activationAnchorKey,
       !searchActivation && savedReadingAnchorHasNestedPart(chatId),
     )
+    // Only a classifier-approved complete window may satisfy the lightweight
+    // runtime reuse or offline fallback. `validating` still needs the scroll
+    // owner to prove its nested anchor; `missing` is never a transcript.
+    const activationCacheReusable = (
+      activationCacheEntryState === 'paintable'
+      || activationCacheEntryState === 'stream-catchup'
+    )
     remapAnchorMatch(activationAnchorMatch)
     chatIdStaleRef.current = false
     setLoadError(false)
@@ -2465,7 +2511,6 @@ export default function ChatView({
         ? current
         : activationEntryPhase
     ))
-
     const gen = fetchGenRef.current
     const activationFailedAttempt = failedSendAttemptRef.current
     const requestJson = async (path, label) => {
@@ -2485,7 +2530,7 @@ export default function ChatView({
       // Retire that gate so the newer local owner can become paintable.
       setInitialEntryPhase('ready')
       setLoading(false)
-      setActivationSettled(true)
+      setActivationPhase('ready')
     }
 
     const settleRuntime = (runtime, visibleMessages) => {
@@ -2524,7 +2569,7 @@ export default function ChatView({
       // chat—and its stale reading cues—through the transport catch-up.
       setInitialEntryPhase(attachesToStream ? 'stream-catchup' : 'ready')
       setLoading(false)
-      setActivationSettled(true)
+      setActivationPhase('ready')
       pendingQueue.hydrate(runtime.pending_messages || [])
       retireUnownedRuntimeStream({
         running,
@@ -2560,7 +2605,7 @@ export default function ChatView({
       let reused = false
       let anchorRetired = false
 
-      if (cacheCoversSavedAnchor && typeof activationCache?.updated_at === 'string') {
+      if (activationCacheReusable && typeof activationCache?.updated_at === 'string') {
         runtime = await requestJson(
           `/chats/${chatId}/runtime`,
           'CHAT_RUNTIME_FAILED',
@@ -2571,9 +2616,15 @@ export default function ChatView({
         const latestCache = queryClient.getQueryData(queryKey)
         const latestAnchorMatch = anchorMatchIn(latestCache)
         const latestCoversSavedAnchor = !activationAnchorKey || !!latestAnchorMatch
+        const latestCacheEntryState = chatCacheEntryState(
+          latestCache,
+          activationAnchorKey,
+          !searchActivation && savedReadingAnchorHasNestedPart(chatId),
+        )
         remapAnchorMatch(latestAnchorMatch)
         if (
           latestCoversSavedAnchor
+          && latestCacheEntryState === activationCacheEntryState
           && chatSnapshotMatchesRuntime(latestCache, runtime)
         ) {
           detailCache = latestCache
@@ -2665,6 +2716,14 @@ export default function ChatView({
       // rows. Runtime config belongs to this server response even when the
       // mounted transcript is temporarily ahead of it.
       setChatInfo(detailCache.chatInfo)
+      // A cold transcript can take several paint frames to prepare. Once the
+      // authoritative detail/runtime response has arrived, expose the local
+      // draft surface rather than holding the outgoing chat throughout that
+      // work. Sending and row-backed controls stay gated by
+      // `activationSettled`, so this early surface cannot act on stale data.
+      if (activationCacheEntryState === 'missing' && !activationAnchorKey) {
+        setActivationPhase('cold')
+      }
       if (!anchorRetired && serverSnapshotBehindLocal(msgs, messagesRef.current)) {
         const runtimeGoal = goalPresentationFromRuntime(
           runtime,
@@ -2744,7 +2803,7 @@ export default function ChatView({
       // ~90ms on-device reflow). This keeps switching responsive at the layer that
       // owns the transcript, without deferring the shell's nav dispatch — which
       // raced chat bootstrap/materialization and double-created starter chats.
-      if (activationCache && cacheCoversSavedAnchor && !anchorRetired) {
+      if (activationCacheReusable && cacheCoversSavedAnchor && !anchorRetired) {
         startTransition(() => {
           applyMessagesToView(refreshed.messages, refreshed.offset)
           settleRuntime(runtime, refreshed.messages)
@@ -2795,9 +2854,10 @@ export default function ChatView({
         }
         // Offline degradation may use a complete cached restoration window,
         // but never a truncated one that cannot resolve the saved address.
-        const cacheIsSafeFallback = activationCache
+        const cacheIsSafeFallback = activationCacheReusable
           && cacheCoversSavedAnchor
           && err?.message !== 'CHAT_READING_ANCHOR_NOT_FOUND'
+          && err?.message !== 'CHAT_NOT_FOUND'
         if (cacheIsSafeFallback) {
           applyMessagesToView(activationCache.messages, activationCache.offset)
         } else {
@@ -2809,7 +2869,9 @@ export default function ChatView({
         setInitialEntryPhase('ready')
         setLoadError(!cacheIsSafeFallback)
         setLoading(false)
-        setActivationSettled(true)
+        // A cache fallback preserves readable history, but the failed runtime
+        // read did not prove that this chat may accept a new turn.
+        setActivationPhase('error')
         void reconcileFailedSendOutbox({
           visibleMessages: cacheIsSafeFallback
             ? activationCache.messages
@@ -2839,6 +2901,7 @@ export default function ChatView({
     }
   }, [
     chatId,
+    activationIdentity,
     hidden,
     loadNonce,
     provisionalNewChat,
@@ -2851,6 +2914,8 @@ export default function ChatView({
     retireUnownedRuntimeStream,
     setActiveAssistantMessageId,
     setGoalPresentationLocalState,
+    setChatInfo,
+    setActivationPhase,
   ])
 
 
@@ -2989,6 +3054,11 @@ export default function ChatView({
 
   const doSend = useCallback(async (text, opts = {}) => {
     if (isProviderSwitchBlocking(chatId)) return false
+    // Every submit path funnels through doSend, including queued resend and
+    // shell-owned composer requests. An early composer reveal is intentionally
+    // editable, but no turn may start until this exact chat's runtime snapshot
+    // has settled.
+    if (!activationSettledRef.current) return false
 
     // Callers can pre-supply attachments (e.g. handleStop collapsing
     // a queue that had files attached to queued items). When provided,
@@ -3714,6 +3784,7 @@ export default function ChatView({
     questionId,
     questionSubmissionContext = null,
   ) => {
+    if (!activationSettledRef.current) return false
     const cancelPreparedQuestion = () => {
       const prepared = questionSubmissionContext?.preparedSubmission
       if (prepared) cancelQuestionSubmission(prepared)
@@ -3943,6 +4014,7 @@ export default function ChatView({
   // the visible transcript is untouched and the platform renders the stored
   // compaction as its own "Context compacted" card.
   async function runCompactCommand(instructions = '', submittedInput = '/compact') {
+    if (!activationSettledRef.current) return
     if (!chatId || provisionalNewChat) {
       setSendFailure('There’s no chat context to compact yet.')
       return
@@ -3975,6 +4047,10 @@ export default function ChatView({
   function handleSubmit(e) {
     e.preventDefault()
     if (isProviderSwitchBlocking(chatId)) return
+    // During an early reveal (a no-cache open presented before the runtime
+    // settles) the brain is interactive but the chat is not ready to receive a
+    // turn yet; ignore a send until activation settles a moment later.
+    if (!activationSettled) return
     if (needsModelSelection({ showPicker, chatInfo })) {
       setModelSelectionRequest(request => request + 1)
       return
@@ -5129,6 +5205,7 @@ export default function ChatView({
       )
     : null
   const showLoadError = loadError && messages.length === 0 && !loading && !turnActive
+  const showActivationRetry = activationPhase === 'error' && !loadError
 
   // A safe cached window can prepare while its freshness check runs. History
   // and progressive preparation remain hidden; `cached` is granted only after
@@ -5140,9 +5217,15 @@ export default function ChatView({
     || initialEntryPhase === 'stream-catchup'
     || initialEntryPhase === 'ready'
   ) && revealed
-  const displayReady = activationSettled
+  const displayReady = (
+    activationSettled
     && !loading
     && (transcriptPaintable || showEmpty || showLoadError)
+  ) || coldActivation || (
+    activationPhase === 'error'
+    && !loading
+    && (transcriptPaintable || showLoadError)
+  )
 
   // The requested server window contains the matching row through the tail.
   // Resolve the result's alias only after validation made the visible transcript
@@ -5633,7 +5716,19 @@ export default function ChatView({
     ),
     [messages],
   )
-  const peerTimeline = usePeerTimeline(chatId, displayedMessages, !hidden && transcriptPaintable, streamItems, showActiveAssistantSurface ? activeMirrorMsgIdx : -1)
+  const peerTimeline = usePeerTimeline(
+    chatId,
+    displayedMessages,
+    !hidden && transcriptPaintable,
+    streamItems,
+    showActiveAssistantSurface ? activeMirrorMsgIdx : -1,
+  )
+  const projectedActiveMirrorMsg = activeMirrorMsg?.id
+    ? peerTimeline.messages.find(message => message.id === activeMirrorMsg.id)
+      || activeMirrorMsg
+    : activeMirrorMsgIdx >= 0
+      ? peerTimeline.messages[activeMirrorMsgIdx] || activeMirrorMsg
+      : activeMirrorMsg
   let lastVisibleMessageIndex = -1
   for (let i = displayedMessages.length - 1; i >= 0; i -= 1) {
     if (!displayedMessages[i].hidden) {
@@ -5781,13 +5876,7 @@ export default function ChatView({
             <button
               type="button"
               className="chat__empty-action"
-              onClick={() => {
-                setLoadError(false)
-                setLoading(true)
-                // Re-run the load effect in place (bump its nonce dep) —
-                // no hard reload, so cache/scroll/drafts/back-stack survive.
-                setLoadNonce(n => n + 1)
-              }}
+              onClick={retryActivation}
             >
               Retry
             </button>
@@ -5809,7 +5898,8 @@ export default function ChatView({
         <ul className="chat__list" style={{ minHeight: 0 }}>
           {displayedMessages.flatMap((msg, i) => {
             const peerRows = <PeerTimelineRows key={`peer-slot-${msg.cid || msg.id || msg.ts || i}`} notes={peerTimeline.slots.get(i)} chatId={chatId} onInternalNav={internalNav} />
-            if (msg.hidden) return [peerRows]
+            const projectedMsg = peerTimeline.messages[i] || msg
+            if (projectedMsg.hidden) return [peerRows]
             const continuationMarker = isContinuationMessage(msg)
             const isLastMsg = i === lastVisibleMessageIndex
             // The mirrored DB row is rendered below by the SAME active
@@ -5923,7 +6013,7 @@ export default function ChatView({
           {showActiveAssistantSurface && (
             <ActiveAssistantSurface
               key={streamingDataKey}
-              activeMirrorMsg={activeMirrorMsg}
+              activeMirrorMsg={projectedActiveMirrorMsg}
               activityMessageId={activeAssistantMessageId}
               activitySourceBlocks={activeMirrorMsg?.blocks}
               useDbActivePayload={useDbActivePayload}
@@ -6054,11 +6144,16 @@ export default function ChatView({
             <div className="chat__floating-transients">
               {offscreenControlsVisible && (
                 <div className="chat__offscreen-nudges">
+                  {/* Touches use the keyboard-safe path; mouse and keyboard retain
+                      the native click path. */}
                   {olderHistoryRetryShown(olderHistoryError, offset) && (
                     <button
                       type="button"
                       className="chat__history-retry"
-                      onClick={() => loadOlderMessages(offset, { readerDriven: true })}
+                      {...composerAdjacentActionProps(
+                        () => loadOlderMessages(offset, { readerDriven: true }),
+                        { activateOnTouchEnd: true },
+                      )}
                     >
                       Earlier messages didn’t load — retry
                     </button>
@@ -6067,7 +6162,10 @@ export default function ChatView({
                     <button
                       type="button"
                       className="chat__question-nudge"
-                      onClick={() => revealPendingQuestion(pendingQuestionEl)}
+                      {...composerAdjacentActionProps(
+                        () => revealPendingQuestion(pendingQuestionEl),
+                        { activateOnTouchEnd: true },
+                      )}
                     >
                       Möbius asked you something — tap to answer
                     </button>
@@ -6076,7 +6174,9 @@ export default function ChatView({
                     <button
                       type="button"
                       className="chat__resume-nudge"
-                      onClick={revealConversationTail}
+                      {...composerAdjacentActionProps(revealConversationTail, {
+                        activateOnTouchEnd: true,
+                      })}
                     >
                       {pendingResumeBlock?.pause?.resets_at
                         ? autoResumeEnabled
@@ -6102,7 +6202,9 @@ export default function ChatView({
                       className="chat__jump-latest"
                       aria-label="Jump to the latest message"
                       title="Jump to latest"
-                      onClick={followLatest}
+                      {...composerAdjacentActionProps(followLatest, {
+                        activateOnTouchEnd: true,
+                      })}
                     >
                       <ArrowDown size={18} strokeWidth={2.25} aria-hidden="true" />
                     </button>
@@ -6127,6 +6229,24 @@ export default function ChatView({
             resourcePause={resourcePause}
             onCancel={handleCancelWait}
           />
+        )}
+        {showActivationRetry && (
+          <div
+            className="chat__offline-note chat__offline-note--error chat__activation-retry"
+            role="alert"
+            aria-live="assertive"
+            aria-atomic="true"
+          >
+            <span>Chat activation needs a retry before sending.</span>
+            <button
+              type="button"
+              className="chat__empty-action"
+              onPointerDown={event => event.preventDefault()}
+              onClick={retryActivation}
+            >
+              Retry
+            </button>
+          </div>
         )}
         <ConnectionStatus
           error={connectionError}
@@ -6169,8 +6289,18 @@ export default function ChatView({
           canRequestSteer={canRequestSteer}
           canSubmitSteer={canSubmitSteer}
           sendFailure={sendFailure}
-          notice={compactingChat ? 'Compacting this chat’s context…' : null}
-          submissionBlocked={providerSwitching || !!newChatSession?.submitted}
+          notice={
+            compactingChat
+              ? 'Compacting this chat’s context…'
+              : coldActivation
+                ? 'Preparing this chat…'
+                : null
+          }
+          submissionBlocked={
+            !activationSettled
+            || providerSwitching
+            || !!newChatSession?.submitted
+          }
           questionBlocked={hasPendingQuestion && !localAnswerIntents.some(record => record.body?.question_id === answerableQuestionId)}
           pendingFiles={pendingFiles}
           onAddFiles={handleComposerAddFiles}
@@ -6194,7 +6324,7 @@ export default function ChatView({
                 triggerAriaLabel={embedded ? 'Attach files' : ariaLabel}
                 chatInfo={showPicker ? chatInfo : null}
                 chatId={chatId}
-                chatReady={!provisionalNewChat}
+                chatReady={activationSettled && !provisionalNewChat}
                 onAttachClick={() => attachTriggerRef.current?.()}
                 /* Derive live — `chatInfo.has_assistant_turns` is set
                    once on mount via the API and never refreshed when

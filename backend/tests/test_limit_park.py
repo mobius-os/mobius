@@ -668,6 +668,7 @@ def test_owner_message_queues_behind_future_limit_park(
     "content": "also check the weekly limit",
     "ts": response.json()["ts"],
     "cid": "queued-owner",
+    "_owner_authored": True,
   }]
 
 

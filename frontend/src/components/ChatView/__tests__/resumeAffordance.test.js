@@ -38,6 +38,19 @@ function scanOpeningTag(source, start) {
   return { gt: -1, selfClosing: false }
 }
 
+function openingTagWithClass(source, className) {
+  const marker = `className="${className}"`
+  const markerAt = source.indexOf(marker)
+  assert.ok(markerAt >= 0, `expected to find ${marker}`)
+  const start = source.lastIndexOf('<', markerAt)
+  assert.ok(start >= 0, `expected an opening tag before ${marker}`)
+  const opening = scanOpeningTag(source, start)
+  assert.notEqual(opening.gt, -1, `unterminated opening tag for ${className}`)
+  const tag = source.slice(start, opening.gt + 1)
+  assert.ok(tag.includes(marker), `${marker} must belong to the sliced tag`)
+  return tag
+}
+
 function sliceElement(source, openTag) {
   const from = source.indexOf(openTag)
   assert.ok(from >= 0, `expected to find ${openTag}`)
@@ -177,19 +190,37 @@ test('ChatView routes both offscreen attention nudges through the controller', (
   assert.match(chatView, /Usage available — tap to continue/,
     'an elapsed manual park names its now-available action')
   assert.match(
-    chatView,
-    /className="chat__question-nudge"\s+onClick=\{\(\) => revealPendingQuestion\(pendingQuestionEl\)\}/,
+    openingTagWithClass(chatView, 'chat__question-nudge'),
+    /revealPendingQuestion\(pendingQuestionEl\)/,
     'the question nudge reveals the card from its top through the scroll controller',
   )
   assert.match(
-    chatView,
-    /className="chat__resume-nudge"\s+onClick=\{revealConversationTail\}/,
+    openingTagWithClass(chatView, 'chat__resume-nudge'),
+    /revealConversationTail/,
     'the resume nudge routes through the scroll controller',
   )
   assert.doesNotMatch(chatView, /scrollIntoView/,
     'nearest-element scrolling can strand either primary action behind the composer')
   assert.match(css, /\.chat__resume-nudge/,
     'the resume nudge reuses the question-nudge visual style')
+})
+
+test('floating composer controls share the keyboard-safe activation contract', () => {
+  const controls = [
+    ['chat__history-retry', /loadOlderMessages\(offset, \{ readerDriven: true \}\)/],
+    ['chat__question-nudge', /revealPendingQuestion\(pendingQuestionEl\)/],
+    ['chat__resume-nudge', /revealConversationTail/],
+    ['chat__jump-latest', /followLatest/],
+  ]
+  for (const [className, action] of controls) {
+    const tag = openingTagWithClass(chatView, className)
+    assert.match(tag, /\{\.\.\.composerAdjacentActionProps\(/,
+      `${className} must use the shared composer-adjacent interaction policy`)
+    assert.match(tag, /activateOnTouchEnd:\s*true/,
+      `${className} can move before a delayed click, so it must activate at touchend`)
+    assert.match(tag, action,
+      `${className} must keep its existing action`)
+  }
 })
 
 test('viewport-derived nudges never participate in footer geometry', () => {

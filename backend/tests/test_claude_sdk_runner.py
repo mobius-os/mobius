@@ -191,6 +191,16 @@ async def test_claude_mcp_set_stays_strict_with_native_skills_and_fd_retirement(
   monkeypatch,
 ):
   observed = {}
+  from contextlib import contextmanager
+  original_config_handle = connector_core.claude_mcp_config_handle
+
+  @contextmanager
+  def capture_config_handle(*args, **kwargs):
+    with original_config_handle(*args, **kwargs) as handle:
+      observed['handle'] = handle
+      yield handle
+
+  monkeypatch.setattr(connector_core, 'claude_mcp_config_handle', capture_config_handle)
 
   class _Client(_FakeClient):
     def __init__(self, options):
@@ -235,7 +245,8 @@ async def test_claude_mcp_set_stays_strict_with_native_skills_and_fd_retirement(
   )
 
   assert "private-key" in observed["config"]
-  assert not os.path.exists(observed["path"])
+  # Descriptor numbers may be reused after teardown; verify the owned file.
+  assert observed['handle']._file.closed
   assert result["error"] is None
 
 

@@ -77,6 +77,8 @@ test('errors have one alert owner and results focus a live control', () => {
   assert.match(modal, /buttonRef=\{resultActionRef\}/)
   assert.doesNotMatch(modal, /className="urm__error" role="alert"/)
   assert.match(modal, /ref=\{resultActionRef\}/)
+  assert.match(modal, /applyAttemptedRef\.current = true/)
+  assert.match(modal, /applyAttemptedRef\.current && !busy/)
   assert.match(modal, /tabIndex=\{-1\}/)
   assert.match(updates, /ref=\{actionRef\}/)
   assert.match(updates, /restoreFocus\.current = true/)
@@ -121,6 +123,24 @@ test('update review uses compact Settings controls without stretching mobile but
   assert.match(modal, /settings__btn settings__btn--sm settings__btn--outline/)
   assert.match(modal, /className="settings__btn settings__btn--sm"/)
   assert.doesNotMatch(modalCss, /\.urm__btn|flex: 1(?:;|\s)/)
+})
+
+test('update review is centered inside the active Settings pane', () => {
+  assert.match(modalCss, /\.urm__overlay\s*\{[^}]*position:\s*absolute;[^}]*inset:\s*0;/s)
+  assert.doesNotMatch(modalCss, /\.urm__overlay\s*\{[^}]*position:\s*fixed;/s)
+})
+
+test('update review is locally modal to Settings, not the workspace', () => {
+  const focus = read('../../hooks/useDialogFocus.js')
+  assert.match(modal, /restoreFocusRef, inertBoundaryRef/)
+  assert.match(modal, /modal: false, lockScroll: false/)
+  assert.match(modal, /aria-modal="false"/)
+  assert.match(updates, /restoreFocusRef=\{actionRef\}/)
+  assert.match(updates, /inertBoundaryRef=\{inertBoundaryRef\}/)
+  assert.match(settingsView, /ref=\{settingsBoundaryRef\} className="settings"/)
+  assert.match(focus, /dialogSiblingElements\(container, boundary\)/)
+  assert.match(focus, /eventIsInsideDialog/)
+  assert.match(focus, /modal \|\| eventIsInsideDialog/)
 })
 
 test('a proven-complete review offers a single Done, never a contradictory repair action', () => {

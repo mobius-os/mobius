@@ -31,6 +31,17 @@ const goalPlanDetails = readFileSync(
 const msgContent = readFileSync(new URL('../MsgContent.jsx', import.meta.url), 'utf8')
 const chatCss = readFileSync(new URL('../ChatView.css', import.meta.url), 'utf8')
 
+test('completed Goal tasks remain readable while cancelled tasks stay crossed out', () => {
+  assert.doesNotMatch(
+    chatCss,
+    /\.chat__goal-task--completed \.chat__goal-task-title[^{}]*\{[^}]*text-decoration:\s*line-through/,
+  )
+  assert.match(
+    chatCss,
+    /\.chat__goal-task--cancelled \.chat__goal-task-title\s*\{[^}]*text-decoration: line-through;/,
+  )
+})
+
 test('goalObjectiveFromText follows the backend command boundary', () => {
   assert.equal(goalObjectiveFromText('/goal Ship the review'), 'Ship the review')
   assert.equal(

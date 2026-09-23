@@ -34,10 +34,16 @@ from app.memory_recall import (
 # The binding the live provider resolves to on this instance: Memory installed
 # at /data/apps/memory. Tests build it explicitly rather than importing the DB
 # resolver, so the protocol stays testable without a session.
-BINDING = RecallBinding.of([("/data/apps/memory/memory_search.py", "memory")])
+BINDING = RecallBinding.of([
+  ("/data/apps/memory/memory_search.py", "memory"),
+])
 
 
 MEMORY_CMD = 'python3 /data/apps/memory/memory_search.py "what does he prefer" "chat-1"'
+MEMORY_READ_CMD = (
+  'python3 /data/apps/memory/memory_search.py '
+  f'"{"a" * 64}" "all" "start" "chat-1"'
+)
 WRAPPED_MEMORY_CMD = (
   "/bin/bash -lc 'python3 /data/apps/memory/memory_search.py "
   '"what does he prefer" "$CHAT_ID"\''
@@ -54,6 +60,44 @@ EMPTY_OUTPUT = """No relevant memories.
 MOBIUS_MEMORY_RESULT_V1:{"status":"empty"}"""
 FAILED_OUTPUT = """Memory lookup failed.
 MOBIUS_MEMORY_RESULT_V1:{"status":"failed"}"""
+LOOKUP_ID = "a" * 64
+V2_CATALOG_OUTPUT = (
+  "Memory catalogue page\n"
+  "MOBIUS_MEMORY_RESULT_V2:" + json.dumps({
+    "status": "hit",
+    "phase": "catalog",
+    "lookup_id": LOOKUP_ID,
+    "reused": True,
+    "discovery_complete": True,
+    "notes": [
+      {"id": "alpha", "path": "notes/alpha.md", "title": "Alpha",
+       "excerpt": "A concise catalogue description."},
+      {"id": "beta", "path": "notes/beta.md", "title": "Beta"},
+    ],
+    "page": {"candidate_count": 19, "complete": False,
+             "next_cursor": "catalog:2"},
+    "display": {
+      "label": "Reused Memory search — 19 relevant notes",
+      "detail": "Showing 2 of 19 relevant notes; more catalogue entries are available.",
+    },
+  }, separators=(",", ":"))
+)
+V2_READ_OUTPUT = (
+  "--- MEMORY NOTE alpha bytes 0:120/240 ---\ncontent\n"
+  "MOBIUS_MEMORY_RESULT_V2:" + json.dumps({
+    "status": "hit",
+    "phase": "read",
+    "lookup_id": LOOKUP_ID,
+    "notes": [{"id": "alpha", "path": "notes/alpha.md", "title": "Alpha"}],
+    "page": {"requested_count": 1,
+             "fully_supplied_count": 0, "complete": False,
+             "next_cursor": "body:deadbeef:0:120"},
+    "display": {
+      "label": "Read a Memory page",
+      "detail": "This content continues on another page.",
+    },
+  }, separators=(",", ":"))
+)
 
 
 # --- identification -------------------------------------------------------
@@ -124,6 +168,14 @@ def test_codex_login_shell_wrapper_preserves_the_same_lookup_identity():
   }
 
 
+def test_the_documented_expansion_invocation_is_recognized_without_a_query():
+  assert recall_from_command(MEMORY_READ_CMD, BINDING) == {
+    "status": RECALL_SEARCHING,
+    "app_slug": "memory",
+  }
+  assert recall_from_command(MEMORY_READ_CMD + ' "extra"', BINDING) is None
+
+
 def test_shell_composition_and_non_memory_paths_are_rejected_conservatively():
   assert recall_from_command(
     'python3 /data/apps/memory/memory_search.py "q"'
@@ -159,6 +211,44 @@ def test_a_successful_lookup_cites_the_notes_it_opened():
   ]
   assert recall["notes"][0]["title"] == "Apps render in a sandboxed frame"
   assert recall["notes"][0]["excerpt"] == "Each mini-app runs isolated."
+
+
+def test_v2_catalogue_receipt_keeps_app_copy_and_safe_links():
+  recall = recall_from_result(V2_CATALOG_OUTPUT, 0)
+  assert recall == {
+    "status": RECALL_HIT,
+    "display": {
+      "label": "Reused Memory search — 19 relevant notes",
+      "detail": "Showing 2 of 19 relevant notes; more catalogue entries are available.",
+    },
+    "notes": [
+      {"id": "alpha", "path": "notes/alpha.md", "title": "Alpha",
+       "excerpt": "A concise catalogue description."},
+      {"id": "beta", "path": "notes/beta.md", "title": "Beta"},
+    ],
+  }
+
+
+def test_v2_body_receipt_is_parsed_without_reading_the_body_frame():
+  recall = recall_from_result(V2_READ_OUTPUT, 0)
+  assert recall["notes"][0]["id"] == "alpha"
+  assert recall["display"] == {
+    "label": "Read a Memory page",
+    "detail": "This content continues on another page.",
+  }
+
+
+def test_v2_receipt_rejects_missing_app_display_contract():
+  payload = json.loads(V2_CATALOG_OUTPUT.split("MOBIUS_MEMORY_RESULT_V2:", 1)[1])
+  payload.pop("display")
+  assert recall_from_result(
+    "MOBIUS_MEMORY_RESULT_V2:" + json.dumps(payload), 0,
+  ) == {"status": RECALL_FAILED}
+
+
+def test_latest_protocol_receipt_wins_across_versions():
+  assert "display" in recall_from_result(HIT_OUTPUT + "\n" + V2_CATALOG_OUTPUT, 0)
+  assert "display" not in recall_from_result(V2_CATALOG_OUTPUT + "\n" + HIT_OUTPUT, 0)
 
 
 def test_a_citation_keeps_the_graph_node_id_when_it_differs_from_the_file():
@@ -348,6 +438,29 @@ def test_claude_and_codex_lifecycles_settle_to_identical_recall_metadata():
     "apps-render-in-a-sandboxed-frame", "theme-variables-are-shared",
   ]
   assert {note["app_slug"] for note in codex["notes"]} == {"memory"}
+
+
+def test_v2_completion_settles_from_its_app_owned_receipt():
+  recall = _sink_lifecycle([
+    {"type": "tool_start", "tool": "Bash", "input": MEMORY_READ_CMD,
+     "tool_use_id": "t1"},
+    {"type": "tool_output", "tool_use_id": "t1",
+     "content": V2_READ_OUTPUT, "output_complete": True,
+     "output_exit_code": 0},
+  ])
+  assert recall["status"] == RECALL_HIT
+  assert recall["notes"][0]["id"] == "alpha"
+  assert recall["display"]["label"] == "Read a Memory page"
+
+
+def test_blank_clean_completion_is_an_explicit_failure():
+  recall = _sink_lifecycle([
+    {"type": "tool_start", "tool": "Bash", "input": MEMORY_READ_CMD,
+     "tool_use_id": "t1"},
+    {"type": "tool_output", "tool_use_id": "t1", "content": "",
+     "output_complete": True, "output_exit_code": 0},
+  ])
+  assert recall == {"status": RECALL_FAILED, "app_slug": "memory"}
 
 
 def test_an_ordinary_command_gains_no_recall_field():

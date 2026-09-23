@@ -52,6 +52,31 @@ def test_app_chat_effort_create_patch_list_and_isolation(client, owner_token, db
   assert row.agent_settings_json["effort"] == "high"
 
 
+def test_automatic_app_chat_preserves_background_choice_effort(
+  client, owner_token, db, monkeypatch,
+):
+  _, token = _make_app(client, owner_token, "background-effort")
+  monkeypatch.setattr(
+    "app.background_agents.resolve_background_chat_choice",
+    lambda data_dir, session: {
+      "provider": "codex",
+      "agent_settings": {"model": "gpt-5.5", "effort": "xhigh"},
+    },
+  )
+
+  created = client.post(
+    "/api/app-chats",
+    headers={"Authorization": f"Bearer {token}"},
+    json={"title": "Automatic work"},
+  )
+
+  assert created.status_code == 201, created.text
+  row = db.get(models.Chat, created.json()["id"])
+  assert row.provider == "codex"
+  assert row.agent_settings_json["model"] == "gpt-5.5"
+  assert row.agent_settings_json["effort"] == "xhigh"
+
+
 @pytest.mark.parametrize("effort", ["extra high", "bogus", 42, {}])
 def test_app_chat_rejects_unknown_effort(client, owner_token, effort):
   _, token = _make_app(client, owner_token, "invalid-effort")

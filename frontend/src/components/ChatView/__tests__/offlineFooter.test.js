@@ -230,10 +230,20 @@ test('connection status matches the composer column while send failures stay com
   )
 })
 
-test('Retry is a non-submitting button with a visible keyboard focus ring', () => {
+test('Retry is a keyboard-safe non-submitting button with a visible focus ring', () => {
   assert.match(
     connectionStatus,
     /<button[\s\S]*?type="button"[\s\S]*?className="connection-status__retry"/,
+  )
+  assert.match(
+    connectionStatus,
+    /className="connection-status__retry"[\s\S]{0,160}?\{\.\.\.composerAdjacentActionProps\(onRetry\)\}/,
+    'Retry must share the composer-adjacent activation policy',
+  )
+  assert.doesNotMatch(
+    connectionStatus,
+    /activateOnTouchEnd/,
+    'the stable in-flow Retry waits for native click instead of adding a touch-only dispatch',
   )
   assert.match(
     chatCss,

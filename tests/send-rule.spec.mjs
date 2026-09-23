@@ -13,6 +13,7 @@
  * Run: scripts/playwright-local.sh --allow-local-e2e tests/send-rule.spec.mjs
  */
 import { test, expect } from '@playwright/test'
+import { installMockProviderUsage } from './_chatTestPrerequisites.mjs'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
 
@@ -22,6 +23,9 @@ async function setup(page, viewport = { width: 412, height: 915 }) {
     route.fulfill({ status: 202, body: '{}' }))
   await page.route('**/api/chat/stop', route =>
     route.fulfill({ status: 200, body: '{}' }))
+  // The shell chat is provider-backed; pin only the usage boundary so quota
+  // availability cannot disable the send-scroll contract.
+  await installMockProviderUsage(page)
   await page.goto(BASE, { waitUntil: 'domcontentloaded' })
   await page.waitForFunction(
     () => !!(document.querySelector('.chat__empty-wrap')

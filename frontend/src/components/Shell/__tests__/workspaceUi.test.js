@@ -1206,8 +1206,9 @@ test('the Settings surface responds to PANE width via a query container', () => 
   assert.match(settingsCss, /@container settings \(max-width: 620px\)/)
   assert.match(settingsCss, /@container settings \(max-width: 400px\)/)
   assert.doesNotMatch(settingsCss, /@media \(max-width: 620px\)/)
-  // The update-review modal stays a FIXED takeover (design: not reclassified to a pane).
-  assert.match(urmCss, /\.urm__overlay\s*\{[\s\S]*?position:\s*fixed/)
+  // Update review belongs to the Settings surface in both worlds. In Builder,
+  // that surface is one pane, so the backdrop must not cover its siblings.
+  assert.match(urmCss, /\.urm__overlay\s*\{[\s\S]*?position:\s*absolute/)
 })
 
 test('a manual platform reconcile refreshes the persistent Settings surface', () => {
@@ -1249,11 +1250,12 @@ test('the builder no-full-screen invariant scopes to DESTINATIONS, not transient
     new URL('../../SettingsView/UpdateReviewModal.css', import.meta.url), 'utf8',
   )
   // First-use guidance is now a non-modal region layered over the live shell,
-  // with an explicit dismiss action; update review remains a fixed modal.
+  // with an explicit dismiss action. Update review is still a modal, but its
+  // containing Settings surface owns the backdrop geometry.
   assert.match(walkthrough, /role="region"/)
   assert.match(walkthrough, /aria-label="Dismiss welcome"/)
   assert.doesNotMatch(walkthrough, /aria-modal="true"/)
-  assert.match(urmCss, /\.urm__overlay\s*\{[\s\S]*?position:\s*fixed/)
+  assert.match(urmCss, /\.urm__overlay\s*\{[\s\S]*?position:\s*absolute/)
 })
 
 test('Shell threads the (drag-preview) viewMode into the content derivation and the per-pane chat gate', () => {

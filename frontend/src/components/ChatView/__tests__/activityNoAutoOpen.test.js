@@ -22,7 +22,7 @@ test('the stretch restores user intent and reveals only layout-ready detail', ()
     'userOpen restores only the user-authored per-chat state')
   assert.match(
     body,
-    /const detailReady = !detailRef \|\| detailEntries !== null \|\| detailError\s*const open = userOpen && detailReady/,
+    /const detailReady = !needsDetail \|\| detailEntries !== null \|\| detailError\s*const open = userOpen && detailReady/,
     'saved intent may wait for historical detail, but readiness can never open a row by itself',
   )
   // No `open = running || userOpen` / `userOpen || live` style force-open.
@@ -51,7 +51,7 @@ test('interaction prepares detail without deriving or writing user intent', () =
     'historical activity detail is fetched only for the interacted row')
   assert.match(
     body,
-    /!detailRequested\s*\|\| !detailRef\s*\|\| detailEntries\s*\|\| detailError/,
+    /!detailRequested\s*\|\| !needsDetail\s*\|\| detailEntries\s*\|\| detailError/,
     'lazy detail stays network-free until pointer or keyboard activation requests it',
   )
   assert.match(body, /onPrepare=\{\(\) => setDetailRequested\(true\)\}/)

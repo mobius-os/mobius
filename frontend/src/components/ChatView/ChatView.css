@@ -2363,6 +2363,19 @@
   text-align: center;
 }
 
+.chat__activation-retry {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  border-radius: 12px;
+}
+
+.chat__activation-retry .chat__empty-action {
+  flex: 0 0 auto;
+  margin-top: 0;
+  padding-block: 5px;
+}
+
 /* The pill: TRANSLUCENT surface with backdrop-blur — chat content
    visibly softens through the pill background. Hairline border and
    slight surface tint keep it readable as a card. ~48px tall to
@@ -4125,7 +4138,6 @@
   overflow-wrap: anywhere;
 }
 
-.chat__goal-task--completed .chat__goal-task-title,
 .chat__goal-task--cancelled .chat__goal-task-title {
   text-decoration: line-through;
   text-decoration-thickness: 1px;

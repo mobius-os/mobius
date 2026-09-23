@@ -82,8 +82,14 @@ _UNMODIFIED_MIGRATIONS = {
     # so register this exact known-bad hash deliberately; any further owner edit
     # still differs and remains protected.
     "668bd365e2edf694c921606c9619fff7b8e58806a9eb48745058b22731c44995",
+    # Untouched release copy before the mapi section described the safe
+    # option passthrough and the refused retargeting options instead of
+    # implying everything forwards to curl.
+    "25ccc8dd5ca6a97b4e6016853487967b70aad9119ec38b6a860ee69eb2a885e3",
   },
   "goal-planning.md": {
+    # Explicit-completion seed before the redundant preflight was made optional.
+    "404552d57930a811eae26232c5fb6b1d9bd781abb941c194fea6990920f838c0",
     # First dependency-aware Goal-plan seed. Replace only the untouched copy
     # so existing instances learn the completion preflight without clobbering
     # any owner-authored planning guidance.
@@ -194,6 +200,9 @@ _UNMODIFIED_MIGRATIONS = {
     # stdin-delimited JSON guidance.
     "6fa9c177db508ef05dfc73de224cd3f33350c79d8f807ac9909942d761f21103",
     "db0c1138ffd0890936ccdeba6ced4ccde867ba3044eeef0a5c87cdf2f279eaaa",
+    # Pre-durable-Undo seed: recoverable deletion still told agents nothing
+    # about the endpoint-owned notification receipt.
+    "8826cd584ee5fac754d92572e15883293ebbc59d47c83510e72d56d271ed3869",
   },
   "building-apps.md": {
     # Intermediate mapi copy before credential reads preserved HTTP failures.

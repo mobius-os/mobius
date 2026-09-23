@@ -50,3 +50,19 @@ test('context compaction breaks activity stretches instead of joining tools', ()
     { group: [after] },
   ])
 })
+
+test('positioned helper completions stay inside the surrounding activity run', () => {
+  const command = entry('tool', { tool: 'Bash' })
+  const firstHelper = entry('helper_result', { id: 'first' })
+  const thought = entry('thinking')
+  const secondHelper = entry('helper_result', { id: 'second' })
+  const edit = entry('tool', { tool: 'Edit' })
+  const prose = entry('text', { content: 'Finished.' })
+
+  assert.deepEqual(groupActivityRuns([
+    command, firstHelper, thought, secondHelper, edit, prose,
+  ]), [
+    { group: [command, firstHelper, thought, secondHelper, edit] },
+    { single: prose },
+  ])
+})

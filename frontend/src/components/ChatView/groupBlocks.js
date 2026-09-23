@@ -169,9 +169,24 @@ export function activityMemoSig(entries, { liveThinkingTail = false } = {}) {
       if (it?.type === 'tool') {
         return `t:${effectiveToolName(it) || ''}:${it.status || ''}`
       }
+      if (it?.type === 'helper_result') return `h:${it.status || ''}`
       return 'k'
     })
     .join('|') + `|${entries.length}|${liveThinkingTail ? 'T' : ''}`
+}
+
+// Helper results are received agent messages in the high-level activity
+// summary. Keep their richer card shape for the expanded timeline, but feed
+// the existing rollup one tool-shaped category so all messages dedupe there.
+export function activitySummaryTools(entries) {
+  return entries.flatMap(entry => {
+    const item = entry?.item
+    if (item?.type === 'tool') return [item]
+    if (item?.type === 'helper_result') {
+      return [{ type: 'tool', tool: 'PeerMessage', status: 'done' }]
+    }
+    return []
+  })
 }
 
 // The single localization surface for the collapsed line's primary text. One
@@ -188,9 +203,7 @@ export function activityMemoSig(entries, { liveThinkingTail = false } = {}) {
 // Cheap on every call (Map lookups + a duration sum), so it runs each render
 // without a memo.
 export function activityCollapsedLabel(entries, { live = false } = {}) {
-  const tools = entries
-    .filter(e => e?.item?.type === 'tool')
-    .map(e => e.item)
+  const tools = activitySummaryTools(entries)
   const lastItem = entries[entries.length - 1]?.item
   const liveThinkingTail = live && lastItem?.type === 'thinking'
   const toolRunning = tools.some(t => t?.status === 'running')

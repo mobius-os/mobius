@@ -511,7 +511,10 @@ export default function ChatSettingsPanel({
   const autoResumeSwitchId = chatId
     ? `chat-settings-auto-resume-${chatId}`
     : undefined
-  const appProviderLocked = chat?.created_by_app_id != null
+  // Owner-visible chats (shown in Recents) can switch provider like any chat;
+  // only hidden background/subagent chats stay pinned. The backend computes this
+  // from drawer visibility (`visible_in_owner_drawer`) and also enforces it.
+  const appProviderLocked = chat?.provider_switch_locked === true
 
   // Build the per-provider displayed-models list once per render. The backend
   // registry owns both live discovery and its offline fallback; keeping a

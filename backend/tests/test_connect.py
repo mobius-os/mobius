@@ -886,6 +886,31 @@ def test_stale_runner_record_offers_an_offline_update(client, auth):
   assert "--install" in public["update_command"]
 
 
+@pytest.mark.parametrize(
+  ("runner_release", "update_available"),
+  [
+    pytest.param(None, True, id="legacy-missing-release"),
+    pytest.param(connect_runner.RUNNER_RELEASE, False, id="current-release"),
+    pytest.param(connect_runner.RUNNER_RELEASE - 1, True, id="older-release"),
+  ],
+)
+def test_compatible_runner_release_controls_update_offer(
+  client, auth, runner_release, update_available,
+):
+  pairing, _ = _paired_host(client, auth)
+  host = connect_routes._load_host(pairing["id"])
+  host["runner_protocol"] = connect_runner.RUNNER_PROTOCOL_VERSION
+  host["runner_transport"] = "sse"
+  host["runner_release"] = runner_release
+  connect_routes._save_host(host)
+
+  public = client.get("/api/connect/hosts", headers=auth).json()["hosts"][0]
+
+  assert public["runner_release"] == runner_release
+  assert public["runner_update_available"] is update_available
+  assert (public["update_command"] is not None) is update_available
+
+
 def test_old_transport_is_rejected_but_keeps_the_update_path(client, auth):
   pairing, runner_token = _paired_host(client, auth)
 
@@ -904,6 +929,41 @@ def test_old_transport_is_rejected_but_keeps_the_update_path(client, auth):
   assert "/api/connect/socket" not in {
     route.path for route in connect_routes.router.routes
   }
+
+
+@pytest.mark.asyncio
+async def test_protocol_four_without_a_release_stays_online_and_offers_update(
+  client, auth,
+):
+  pairing, runner_token = _paired_host(client, auth)
+
+  async def receive():
+    return {"type": "http.request", "body": b"", "more_body": False}
+
+  request = Request({
+    "type": "http",
+    "method": "GET",
+    "path": "/api/connect/stream",
+    "query_string": b"protocol=4&platform=LegacyOS",
+    "headers": [
+      (b"authorization", f"Bearer {runner_token}".encode()),
+    ],
+  }, receive)
+
+  response = await connect_routes.stream(request)
+  host = connect_routes._load_host(pairing["id"])
+  public = connect_routes._public_host(host)
+
+  assert public["online"] is True
+  assert public["runner_protocol"] == connect_runner.RUNNER_PROTOCOL_VERSION
+  assert public["runner_release"] is None
+  assert public["runner_update_available"] is True
+  assert "--install" in public["update_command"]
+
+  assert await response.body_iterator.__anext__() == ": connected\n\n"
+  connect_routes._channels[pairing["id"]].closed.set()
+  with pytest.raises(StopAsyncIteration):
+    await response.body_iterator.__anext__()
 
 
 @pytest.mark.asyncio
@@ -935,7 +995,8 @@ async def test_current_stream_rotates_without_losing_running_command(
     "method": "GET",
     "path": "/api/connect/stream",
     "query_string": (
-      f"protocol=4&platform=TestOS%201&active_request_id={request_id}"
+      f"protocol=4&release={connect_runner.RUNNER_RELEASE}"
+      f"&platform=TestOS%201&active_request_id={request_id}"
     ).encode(),
     "headers": [
       (b"authorization", f"Bearer {runner_token}".encode()),
@@ -947,6 +1008,7 @@ async def test_current_stream_rotates_without_losing_running_command(
   assert current.queue.empty()
   host = connect_routes._load_host(pairing["id"])
   assert host["runner_protocol"] == 4
+  assert host["runner_release"] == connect_runner.RUNNER_RELEASE
   assert host["platform"] == "TestOS 1"
   assert connect_routes._public_host(host)["runner_update_available"] is False
 
@@ -1460,11 +1522,13 @@ def test_runner_uses_standard_urllib_for_protocol_four_stream(monkeypatch):
 
   request, kwargs = opened[0]
   assert request.full_url.startswith(
-    "https://mobius.test/api/connect/stream?protocol=4&platform=",
+    "https://mobius.test/api/connect/stream?"
+    f"protocol={connect_runner.RUNNER_PROTOCOL_VERSION}"
+    f"&release={connect_runner.RUNNER_RELEASE}&platform=",
   )
   assert request.get_header("Authorization") == "Bearer secret"
   assert request.get_header("Accept") == "text/event-stream"
-  assert kwargs["timeout"] is None
+  assert kwargs["timeout"] == connect_runner.STREAM_READ_TIMEOUT_SECONDS
   assert posted == [(
     "https://mobius.test/api/connect/result",
     {
@@ -2039,7 +2103,9 @@ def test_connect_runner_identifies_every_urllib_request(monkeypatch):
   generated, generated_timeout = opened[0]
   assert isinstance(generated, connect_runner.urllib.request.Request)
   assert generated.get_header("User-agent") == (
-    "mobius-connect/4 (+https://github.com/mobius-os/mobius)"
+    f"mobius-connect/{connect_runner.RUNNER_RELEASE} "
+    f"(protocol/{connect_runner.RUNNER_PROTOCOL_VERSION}; "
+    "+https://github.com/mobius-os/mobius)"
   )
   assert generated_timeout == 30
   assert opened[1][0].get_header("User-agent") == "connect-test/1"
@@ -2136,6 +2202,63 @@ def test_serve_connection_retries_after_auth_rejection(monkeypatch):
   assert posted and posted[-1]["stdout"] == "Connect daemon removed."
 
 
+def test_serve_connection_retries_when_proxy_stops_forwarding_heartbeats(
+  monkeypatch,
+):
+  """A proxy-held socket must not keep an instance offline forever after its
+  backend restarts. Missing several server heartbeats reopens the stream."""
+  opened = []
+  posted = []
+
+  class StalledStream:
+    def __enter__(self):
+      return self
+
+    def __exit__(self, *exc):
+      return False
+
+    def __iter__(self):
+      raise connect_runner.socket.timeout("proxy retained a dead stream")
+
+  class DisconnectStream:
+    def __enter__(self):
+      return self
+
+    def __exit__(self, *exc):
+      return False
+
+    def __iter__(self):
+      return iter([b'data: {"type":"disconnect","request_id":"z"}\n\n'])
+
+  def fake_urlopen(request, **kwargs):
+    opened.append((request, kwargs))
+    return StalledStream() if len(opened) == 1 else DisconnectStream()
+
+  monkeypatch.setattr(connect_runner, "_open_url", fake_urlopen)
+  monkeypatch.setattr(connect_runner.time, "sleep", lambda *_: None)
+  monkeypatch.setattr(
+    connect_runner, "_uninstall_service", lambda stop_running: None,
+  )
+  monkeypatch.setattr(
+    connect_runner, "_remove_connection", lambda url, host_id: 0,
+  )
+  monkeypatch.setattr(
+    connect_runner, "_post",
+    lambda url, payload, token=None: posted.append(payload),
+  )
+
+  connect_runner._serve_connection(
+    {"url": "https://mobius.test", "host_id": "h_a", "token": "secret"},
+  )
+
+  assert len(opened) == 2
+  assert all(
+    kwargs["timeout"] == connect_runner.STREAM_READ_TIMEOUT_SECONDS
+    for _request, kwargs in opened
+  )
+  assert posted and posted[-1]["stdout"] == "Connect daemon removed."
+
+
 def test_serve_connection_stops_before_opening_a_removed_connection(monkeypatch):
   stop_event = connect_runner.threading.Event()
   stop_event.set()
@@ -2178,7 +2301,193 @@ def test_serve_connection_stops_from_inside_a_live_stream(monkeypatch):
   }, stop_event=stop_event)
 
   assert len(opened) == 1
-  assert sleeps == [1]
+  assert sleeps == []
+
+
+def test_serve_connection_reconnects_immediately_after_healthy_rotation(
+  monkeypatch,
+):
+  """The server's planned stream rotation must not manufacture an offline
+  interval while the runner is otherwise healthy."""
+  opened = []
+  sleeps = []
+  posted = []
+
+  class RotatedStream:
+    def __enter__(self):
+      return self
+
+    def __exit__(self, *exc):
+      return False
+
+    def __iter__(self):
+      return iter([b": ping\n\n"])
+
+  class DisconnectStream:
+    def __enter__(self):
+      return self
+
+    def __exit__(self, *exc):
+      return False
+
+    def __iter__(self):
+      return iter([b'data: {"type":"disconnect","request_id":"z"}\n\n'])
+
+  def fake_open(request, **kwargs):
+    opened.append(request.full_url)
+    return RotatedStream() if len(opened) == 1 else DisconnectStream()
+
+  monkeypatch.setattr(connect_runner, "_open_url", fake_open)
+  monkeypatch.setattr(connect_runner, "STREAM_HEALTHY_SECONDS", 0)
+  monkeypatch.setattr(connect_runner.time, "sleep", sleeps.append)
+  monkeypatch.setattr(
+    connect_runner, "_uninstall_service", lambda stop_running: None,
+  )
+  monkeypatch.setattr(
+    connect_runner, "_remove_connection", lambda url, host_id: 0,
+  )
+  monkeypatch.setattr(
+    connect_runner, "_post",
+    lambda url, payload, token=None: posted.append(payload),
+  )
+
+  connect_runner._serve_connection({
+    "url": "https://live.test", "host_id": "h_live", "token": "token",
+  })
+
+  assert len(opened) == 2
+  assert sleeps == []
+  assert posted and posted[-1]["stdout"] == "Connect daemon removed."
+
+
+def test_serve_connection_backs_off_across_slow_open_then_early_eof(
+  monkeypatch,
+):
+  """Handshake time must not make an immediate EOF look like a healthy stream."""
+  opened = []
+  sleeps = []
+  clock = {"now": 0}
+
+  def fake_monotonic():
+    return clock["now"]
+
+  class ClosedStream:
+    def __enter__(self):
+      return self
+
+    def __exit__(self, *exc):
+      return False
+
+    def __iter__(self):
+      return iter(())
+
+  class DisconnectStream:
+    def __enter__(self):
+      return self
+
+    def __exit__(self, *exc):
+      return False
+
+    def __iter__(self):
+      return iter([b'data: {"type":"disconnect","request_id":"z"}\n\n'])
+
+  def fake_open(request, **kwargs):
+    opened.append(request.full_url)
+    if len(opened) <= 3:
+      # Every response takes longer than the health window to open, then ends
+      # immediately. Handshake time must not reset accumulated backoff.
+      clock["now"] += 20
+      return ClosedStream()
+    return DisconnectStream()
+
+  monkeypatch.setattr(connect_runner, "_open_url", fake_open)
+  monkeypatch.setattr(connect_runner.time, "monotonic", fake_monotonic)
+  monkeypatch.setattr(connect_runner.time, "sleep", sleeps.append)
+  monkeypatch.setattr(
+    connect_runner, "_uninstall_service", lambda stop_running: None,
+  )
+  monkeypatch.setattr(
+    connect_runner, "_remove_connection", lambda url, host_id: 0,
+  )
+  monkeypatch.setattr(connect_runner, "_post", lambda *args, **kwargs: None)
+
+  connect_runner._serve_connection({
+    "url": "https://live.test", "host_id": "h_live", "token": "token",
+  })
+
+  assert len(opened) == 4
+  assert sleeps == [1, 2, 4]
+
+
+def test_serve_connection_resets_backoff_after_healthy_stream_timeout(
+  monkeypatch,
+):
+  """A long blocking read after health must retry as a later transport loss."""
+  opened = []
+  sleeps = []
+  clock = {"now": 0}
+
+  def fake_monotonic():
+    return clock["now"]
+
+  class ClosedStream:
+    def __enter__(self):
+      return self
+
+    def __exit__(self, *exc):
+      return False
+
+    def __iter__(self):
+      return iter(())
+
+  class TimedOutStream:
+    def __enter__(self):
+      return self
+
+    def __exit__(self, *exc):
+      return False
+
+    def __iter__(self):
+      # No heartbeat arrived during the bounded read, but the stream had
+      # already been open beyond the health window before it stalled.
+      clock["now"] = 20
+      raise connect_runner.socket.timeout("long read stalled")
+
+  class DisconnectStream:
+    def __enter__(self):
+      return self
+
+    def __exit__(self, *exc):
+      return False
+
+    def __iter__(self):
+      return iter([b'data: {"type":"disconnect","request_id":"z"}\n\n'])
+
+  def fake_open(request, **kwargs):
+    opened.append(request.full_url)
+    if len(opened) == 1:
+      return ClosedStream()
+    if len(opened) == 2:
+      return TimedOutStream()
+    return DisconnectStream()
+
+  monkeypatch.setattr(connect_runner, "_open_url", fake_open)
+  monkeypatch.setattr(connect_runner.time, "monotonic", fake_monotonic)
+  monkeypatch.setattr(connect_runner.time, "sleep", sleeps.append)
+  monkeypatch.setattr(
+    connect_runner, "_uninstall_service", lambda stop_running: None,
+  )
+  monkeypatch.setattr(
+    connect_runner, "_remove_connection", lambda url, host_id: 0,
+  )
+  monkeypatch.setattr(connect_runner, "_post", lambda *args, **kwargs: None)
+
+  connect_runner._serve_connection({
+    "url": "https://live.test", "host_id": "h_live", "token": "token",
+  })
+
+  assert len(opened) == 3
+  assert sleeps == [1, 1]
 
 
 def test_serve_all_respawns_and_stops_removed_connections(monkeypatch):

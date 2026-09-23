@@ -43,6 +43,7 @@ from app.codex_sdk_contract import (
   app_server_pid,
   control_client,
   install_approval_handler,
+  start_turn_for_handle,
 )
 
 from app.codex_events import (
@@ -258,12 +259,18 @@ async def _start_codex_turn(
     )),
     summary=summary,
   )
-  started = await thread._codex._client.turn_start(
+  started, subscription = await start_turn_for_handle(
+    thread._codex,
     thread.id,
     wire_input,
     params=params,
   )
-  return AsyncTurnHandle(thread._codex, thread.id, started.turn.id)
+  return AsyncTurnHandle(
+    thread._codex,
+    thread.id,
+    started.turn.id,
+    _subscription=subscription,
+  )
 
 
 def _codex_app_server_launch_args(
@@ -2579,6 +2586,8 @@ async def run_codex_sdk_turn(
     )
   finally:
     ownership.release()
+    from app.file_cache import reclaim_provider_cache
+    await reclaim_provider_cache("codex")
 
 
 async def steer_into_active_turn(

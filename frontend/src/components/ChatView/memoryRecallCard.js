@@ -37,10 +37,14 @@ export function memoryRecallCardModel(recall) {
     })
   }
 
+  const display = recall?.display && typeof recall.display === 'object'
+    ? recall.display
+    : {}
   return {
     status: recall.status,
     query: cleanText(recall.query, MAX_QUERY_CHARS),
     notes,
-    noteCount: notes.length,
+    detail: cleanText(display.detail, 300),
+    warning: cleanText(display.warning, 300),
   }
 }

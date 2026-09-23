@@ -8,6 +8,7 @@ clients can subscribe.  Provider env / auth wiring lives in
 """
 
 import asyncio
+import gc
 import hashlib
 import json
 import math
@@ -84,7 +85,7 @@ from app.chat_titles import apply_generated_title, renamed_event
 from app.goal_commands import is_goal_continue
 from app.memory_observability import claim_oom_kill
 from app.chat_writer import (
-  AcknowledgePeerContextDelivery,
+  AcknowledgeProviderSuccess,
   AdmitProviderExecution,
   AppendPending,
   Barrier,
@@ -532,10 +533,10 @@ def mark_chat_deleted(chat_id: str) -> None:
 
 
 def recover_chat_generation(chat_id: str) -> int:
-  """Clears the deleted flag and bumps to a generation newer than any run.
+  """Converges the registry to a finite generation after recovery.
 
-  Called when a soft-deleted chat is recovered, so its next run starts at a
-  generation that no resurrected pre-delete run can match.
+  The first call after deletion bumps beyond every pre-delete run. Repeated
+  calls are safe after a lost response and preserve any current successor.
   """
   return registry.recover_generation(chat_id)
 
@@ -3381,6 +3382,8 @@ async def _close_browser_session(chat_id: str) -> None:
     if final.idle:
       if targets or (scan is not None and scan.processes):
         log.info("agent-browser ownership released chat_id=%s", chat_id)
+      from app.file_cache import browser_tool_paths, reclaim_file_cache
+      await asyncio.to_thread(reclaim_file_cache, browser_tool_paths())
     else:
       log.warning("agent-browser ownership remains unverified chat_id=%s", chat_id)
   except Exception as exc:
@@ -4095,9 +4098,10 @@ async def _complete_turn(
 
   # An ending provider turn cannot authorize its own successor merely because
   # the Goal remains unfinished. The writer captured the plan revision at
-  # provider admission; only a durable plan advance permits automatic rollover.
-  # Otherwise the existing saved-question owner keeps the Goal exact and
-  # durable while the partner decides whether to continue or stop it.
+  # provider admission. A plan advance or a committed owner steer permits one
+  # rollover; the successor must earn another before continuing again.
+  # Otherwise the saved-question owner keeps the Goal exact and durable while
+  # the partner decides whether to continue or stop it.
   terminal_handoff = None
   if (
     ending_status == "completed"
@@ -4113,7 +4117,11 @@ async def _complete_turn(
     ending_status == "completed" and bool(activity_delegation_ids)
   )
   try:
-    if terminal_handoff is not None and not terminal_handoff.automatic_allowed:
+    if (
+      terminal_handoff is not None
+      and not terminal_handoff.automatic_allowed
+      and not sink.owner_steer_committed
+    ):
       question_id = f"goal-handoff-{sink.run_token}"
       await sink.publish_question({
         "type": "question",
@@ -4692,6 +4700,25 @@ async def run_chat(
         )
     except Exception:
       _get_logger().debug("chat-note guarantee skipped", exc_info=True)
+    if runtime_settled and disposition in _NOTE_SETTLED_DISPOSITIONS:
+      # Release settled tool/source pages and allocator arenas. Source sweeps
+      # protect live mappings and exclude owner data; tool advice may release
+      # unused pages of shared executables.
+      try:
+        from app.allocator import trim_glibc
+        from app.file_cache import reclaim_settled_cache
+
+        gc.collect()
+        trim_glibc()
+        await asyncio.to_thread(
+          reclaim_settled_cache, get_settings().data_dir, chat_id,
+        )
+      except Exception:
+        _get_logger().debug(
+          "settled turn memory reclaim skipped chat_id=%s",
+          chat_id,
+          exc_info=True,
+        )
     if browser_cancelled is not None:
       raise browser_cancelled
 
@@ -4872,26 +4899,32 @@ async def _sync_generated_chat_title(chat_id: str, title: str) -> bool:
   return True
 
 
-async def _acknowledge_peer_context_delivery(
+async def _acknowledge_provider_success(
   *, chat_id: str, run_token: str, delivered_through,
 ) -> None:
-  """Best-effort at-least-once peer delivery acknowledgement.
+  """Best-effort provider-success and peer-delivery acknowledgement.
 
-  A failed acknowledgement only repeats an already-seen note on a later turn;
-  it never consumes one before the provider call has returned successfully.
+  A failed acknowledgement conservatively leaves provider availability limited
+  and repeats an already-seen peer note on a later turn; it never records either
+  success before the provider call has actually returned successfully.
   """
-  if not chat_id or not run_token or delivered_through is None:
+  if not chat_id or not run_token:
     return
   try:
-    await _await_ack(get_writer().submit(AcknowledgePeerContextDelivery(
+    await _await_ack(get_writer().submit(AcknowledgeProviderSuccess(
       chat_id=chat_id,
       run_token=run_token,
-      peer_message_through_created_at=delivered_through.created_at,
-      peer_message_through_id=delivered_through.message_id,
+      peer_message_through_created_at=(
+        delivered_through.created_at if delivered_through is not None else None
+      ),
+      peer_message_through_id=(
+        delivered_through.message_id if delivered_through is not None else None
+      ),
     )))
   except Exception:
     _get_logger().warning(
-      "peer context acknowledgement failed; delivery will repeat "
+      "provider success acknowledgement failed; availability remains "
+      "conservative and peer delivery may repeat "
       "chat_id=%s run_token=%s",
       chat_id,
       run_token,
@@ -5853,7 +5886,7 @@ async def _run_chat_impl_with_db(
       new_session_id = runner_result.get("session_id")
       err = runner_result.get("error")
       if not err:
-        await _acknowledge_peer_context_delivery(
+        await _acknowledge_provider_success(
           chat_id=chat_id,
           run_token=run_token or "",
           delivered_through=coordination_message_through,
@@ -6043,7 +6076,7 @@ async def _run_chat_impl_with_db(
       new_session_id = runner_result.get("session_id")
       err = runner_result.get("error")
       if not err:
-        await _acknowledge_peer_context_delivery(
+        await _acknowledge_provider_success(
           chat_id=chat_id,
           run_token=run_token or "",
           delivered_through=coordination_message_through,

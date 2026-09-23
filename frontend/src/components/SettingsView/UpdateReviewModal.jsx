@@ -21,6 +21,7 @@ const UPDATE_PHASE_LABELS = {
 export default function UpdateReviewModal({
   intent = 'update', platform, rebuild, onClose, onApply, onRebuild, onResolve,
   applying, rebuilding, resolving, observing, applyError, applyErrorCode, onRefreshReview, applyProgress,
+  restoreFocusRef, inertBoundaryRef,
 }) {
   const [preview, setPreview] = useState(null)
   const [loading, setLoading] = useState(true)
@@ -29,6 +30,7 @@ export default function UpdateReviewModal({
   const dialogRef = useRef(null)
   const closeRef = useRef(null)
   const resultActionRef = useRef(null)
+  const applyAttemptedRef = useRef(false)
   const inFlight = applying || rebuilding || resolving
   const busy = inFlight || observing
 
@@ -51,10 +53,12 @@ export default function UpdateReviewModal({
   useEffect(() => { loadPreview() }, [loadPreview])
 
   const requestClose = useCallback(() => { if (!inFlight) onClose() }, [inFlight, onClose])
-  useDialogFocus({ containerRef: dialogRef, initialFocusRef: closeRef,
-    onClose: requestClose, closeOnEscape: !inFlight })
+  useDialogFocus({ containerRef: dialogRef, initialFocusRef: closeRef, restoreFocusRef,
+    onClose: requestClose, closeOnEscape: !inFlight, modal: false, lockScroll: false,
+    inertBoundaryRef })
 
   async function handleApply() {
+    applyAttemptedRef.current = true
     const plan = { plan_id: preview.plan_id, current_sha: preview.current_sha,
       target_sha: preview.target_sha, image_digest: preview.image_digest }
     const result = await (reviewedUpdateUsesContainerRebuild(preview) ? onRebuild(plan) : onApply(plan))
@@ -63,8 +67,6 @@ export default function UpdateReviewModal({
     // HTTP success alone never closes this review.
     else if (result?.ok) onClose()
   }
-  useEffect(() => { if (resultState) resultActionRef.current?.focus({ preventScroll: true }) }, [resultState])
-
   const summary = summarizePreview(preview)
   const target = shortSha(preview?.target_sha)
   const commits = preview?.commits || []
@@ -85,10 +87,19 @@ export default function UpdateReviewModal({
   const repairReason = (resultState === 'conflict' || nothingToApply) ? null : platformUpdateRepairReason({
     preview, platform: { ...platform, state: resultState || platform?.state }, error: applyError, errorCode: applyErrorCode,
   })
+  useEffect(() => {
+    // Result and repair actions can be rendered while the request owner is
+    // still settling its phase. Wait for the action to become enabled before
+    // moving focus; otherwise focusing a disabled button is a no-op and the
+    // pane loses its recovery affordance.
+    if (applyAttemptedRef.current && !busy && (resultState || repairReason)) {
+      resultActionRef.current?.focus({ preventScroll: true })
+    }
+  }, [busy, repairReason, resultState])
 
   return (
     <div className="urm__overlay" role="presentation" onClick={requestClose}>
-      <div ref={dialogRef} className="urm" role="dialog" aria-modal="true" aria-labelledby="urm-title"
+      <div ref={dialogRef} className="urm" role="dialog" aria-modal="false" aria-labelledby="urm-title"
         tabIndex={-1} onClick={event => event.stopPropagation()}>
         <div className="urm__head">
           <h2 id="urm-title" className="urm__title">{hasResult

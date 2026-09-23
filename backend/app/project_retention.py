@@ -6,6 +6,7 @@ import logging
 import shutil
 import threading
 import uuid
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from sqlalchemy.orm import Session
@@ -22,6 +23,24 @@ log = logging.getLogger(__name__)
 # created root in the narrow interval before its database row commits. Recovery
 # uses the same lock so a project cannot cross the TTL boundary in both paths.
 PROJECT_LIFECYCLE_LOCK = threading.RLock()
+
+
+@asynccontextmanager
+async def serialize_project_lifecycle(project_id: str | None):
+  """Keep a project's and its children's deletion/recovery cleanup ordered.
+
+  Acquisition order is project async gate, then any chat async gate, then
+  PROJECT_LIFECYCLE_LOCK and drawer commit locks. Never await under the latter
+  two. Child lifecycle callers enter here before Stop (which takes its chat
+  gate); independent chats have no project gate. Follower delivery happens
+  only after lifecycle ownership is released.
+  """
+  if project_id is None:
+    yield
+    return
+  from app.chat_queue import get_transition_lock
+  async with get_transition_lock(f"project-lifecycle:{project_id}"):
+    yield
 
 
 def projects_using_app_files(db: Session, app: models.App) -> list[models.Project]:

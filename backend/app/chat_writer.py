@@ -352,12 +352,14 @@ class AdmitProviderExecution(_Command):
 
 
 @dataclass
-class AcknowledgePeerContextDelivery(_Command):
-  """Advance the peer inbox only after a provider call returns successfully.
+class AcknowledgeProviderSuccess(_Command):
+  """Commit the exact provider-success boundary for one admitted run.
 
   Provider admission is intentionally earlier: it prevents ambiguous replay
   of an execution attempt. It is not proof that the provider accepted the
-  prompt, so peer delivery has its own later, monotonic acknowledgement.
+  prompt. This later acknowledgement both heals an older provider-limit signal
+  and, when peer context was delivered, advances that delivery cursor in the
+  same writer-owned transaction.
   """
 
   chat_id: str = ""
@@ -842,6 +844,7 @@ class AppendPending(_Command):
   answers: dict | None = None
   question_id: str | None = None
   initiated_by_app_id: int | None = None
+  owner_authored: bool = False
   front: bool = False
   require_answer_match: bool = False
 
@@ -938,10 +941,11 @@ class CancelPending(_Command):
 
 @dataclass
 class UpdatePending(_Command):
-  """Replace one still-queued message's text without changing its identity.
+  """Replace one queued message's text without changing its identity.
 
   The stable `cid`, ordering `ts`, attachments, and queue position stay
-  untouched. Returns `{"updated", "pending"}`; `updated` is False when a
+  untouched. A non-owner rewrite drops direct-owner authority. Returns
+  `{"updated", "pending"}`; `updated` is False when a
   racing promotion or cancellation already pulled the row from the queue, so
   the caller can tell a real edit from a no-op instead of assuming success.
   """
@@ -950,6 +954,7 @@ class UpdatePending(_Command):
   run_token: str = ""
   cid: str = ""
   content: str = ""
+  owner_authored: bool = False
 
 
 @dataclass
@@ -1950,8 +1955,8 @@ class ChatWriterActor:
       return self._record_run_metrics(db, cmd)
     if isinstance(cmd, AdmitProviderExecution):
       return self._admit_provider_execution(db, cmd)
-    if isinstance(cmd, AcknowledgePeerContextDelivery):
-      return self._acknowledge_peer_context_delivery(db, cmd)
+    if isinstance(cmd, AcknowledgeProviderSuccess):
+      return self._acknowledge_provider_success(db, cmd)
     if isinstance(cmd, RecordAgentLifecycle):
       from app.agent_lifecycle import record_event
       return record_event(db, cmd.values)
@@ -2343,6 +2348,16 @@ class ChatWriterActor:
         "Restart card: card is no longer accepting actions"
       )
 
+    if selected_restart:
+      # Keep the exact card open when the edited platform would fall back on
+      # the next boot.  The owner gets a retryable error while this healthy
+      # process remains available for repair; no drain or restart is started.
+      from app.restart_util import RestartSourceInvalid, validate_restart_source
+      try:
+        validate_restart_source()
+      except RestartSourceInvalid as exc:
+        raise RestartCardActionConflict(str(exc)) from exc
+
     now = now_naive_utc()
     dispatch = False
     if not selected_restart:
@@ -2495,17 +2510,20 @@ class ChatWriterActor:
     if not _commit_or_rollback(db):
       raise _PersistFailed("AdmitProviderExecution did not persist")
 
-  def _acknowledge_peer_context_delivery(
-    self, db, cmd: AcknowledgePeerContextDelivery,
+  def _acknowledge_provider_success(
+    self, db, cmd: AcknowledgeProviderSuccess,
   ) -> None:
-    """Advance one exact run's peer boundary after provider success."""
+    """Heal availability and optionally advance peer delivery after success."""
     from app.models import ChatRun
 
     delivered_at = cmd.peer_message_through_created_at
     delivered_id = cmd.peer_message_through_id
-    if delivered_at is None or not delivered_id:
+    if (
+      (delivered_at is None) != (delivered_id is None)
+      or (delivered_id is not None and not delivered_id)
+    ):
       raise _PersistFailed(
-        "AcknowledgePeerContextDelivery: peer-message cursor is incomplete"
+        "AcknowledgeProviderSuccess: peer-message cursor is incomplete"
       )
     run = db.query(ChatRun).filter(
       ChatRun.id == cmd.run_token,
@@ -2514,25 +2532,31 @@ class ChatWriterActor:
     ).first()
     if run is None:
       raise _PersistFailed(
-        "AcknowledgePeerContextDelivery: admitted run not found"
+        "AcknowledgeProviderSuccess: admitted run not found"
       )
-    current = None
-    if (
-      run.peer_message_through_created_at is not None
-      and run.peer_message_through_id is not None
-    ):
-      current = (
-        run.peer_message_through_created_at,
-        str(run.peer_message_through_id),
-      )
-    candidate = (delivered_at, delivered_id)
-    if current is not None and candidate <= current:
-      return
-    run.peer_message_through_created_at = delivered_at
-    run.peer_message_through_id = delivered_id
-    run.peer_message_delivery_pending = False
+    if delivered_at is not None and delivered_id:
+      current = None
+      if (
+        run.peer_message_through_created_at is not None
+        and run.peer_message_through_id is not None
+      ):
+        current = (
+          run.peer_message_through_created_at,
+          str(run.peer_message_through_id),
+        )
+      candidate = (delivered_at, delivered_id)
+      if current is None or candidate > current:
+        run.peer_message_through_created_at = delivered_at
+        run.peer_message_through_id = delivered_id
+      run.peer_message_delivery_pending = False
+    from app.provider_availability import (
+      clear_provider_availability_after_success,
+    )
+    clear_provider_availability_after_success(
+      db, run.provider, run.started_at,
+    )
     if not _commit_or_rollback(db):
-      raise _PersistFailed("AcknowledgePeerContextDelivery did not persist")
+      raise _PersistFailed("AcknowledgeProviderSuccess did not persist")
 
   def _stage_activity_delivery_consumption(
     self, db, *, chat_id: str, run_token: str,
@@ -4038,6 +4062,8 @@ class ChatWriterActor:
       raise _PersistFailed("AppendPending: no matching question block")
     if cmd.initiated_by_app_id is not None:
       new_msg["_initiated_by_app_id"] = cmd.initiated_by_app_id
+    if cmd.owner_authored:
+      new_msg["_owner_authored"] = True
     # Idempotent append: `cid` is untrusted client input, and a retried POST
     # (flaky network, double-tap) carries the SAME cid. If that cid already
     # names a durable row — queued OR already promoted into the transcript —
@@ -4147,8 +4173,10 @@ class ChatWriterActor:
       cid_of(m) for m in msgs if m.get("role") == "user"
     }
     stored_messages: list[dict] = []
+    owner_steer_committed = False
     for raw_msg in raw_user_msgs:
       new_msg = dict(raw_msg)
+      owner_authored = new_msg.pop("_owner_authored", False) is True
       # This provenance is part of the durable transcript contract, not a UI
       # hint.  A normal Q1/A1/Q2/A2 exchange is indistinguishable from a
       # mid-turn steer after reload unless the committed Q2 row names the
@@ -4168,6 +4196,11 @@ class ChatWriterActor:
       msgs.append(new_msg)
       used_messages.append(new_msg)
       stored_messages.append(new_msg)
+      owner_steer_committed |= (
+        owner_authored
+        and new_msg.get("role") == "user"
+        and not new_msg.get("hidden")
+      )
     chat.messages = msgs
     if cmd.consume_pending_cids:
       consumed = set(cmd.consume_pending_cids)
@@ -4181,6 +4214,7 @@ class ChatWriterActor:
     return {
       "stored": stored_messages[-1] if stored_messages else None,
       "stored_messages": stored_messages,
+      "owner_steer_committed": owner_steer_committed,
       "pending": list(chat.pending_messages or []),
     }
 
@@ -4217,6 +4251,15 @@ class ChatWriterActor:
           "provider": chat.provider,
           "agent_settings_json": chat.agent_settings_json,
         }
+
+    # Visibility can change while the incoming provider synthesizes its
+    # briefing. Recheck at the writer-owned commit boundary so a chat that was
+    # hidden in the meantime never lands a provider mutation. Keep idempotent
+    # retries above this gate: an already-committed switch remains reportable
+    # even if the chat is hidden later.
+    from app.chat_visibility import provider_switch_allowed
+    if not provider_switch_allowed(chat):
+      return {"status": "conflict", "reason": "provider_pinned"}
 
     from app.run_state import has_running_run
     if chat.pending_messages or has_running_run(db, cmd.chat_id):
@@ -4438,6 +4481,7 @@ class ChatWriterActor:
     agent_pending = _combine_pending_messages(promoted_group)
     consumed_cids = agent_pending.pop("_consumed_cids", [])
     initiated_by_app_id = agent_pending.pop("_initiated_by_app_id", None)
+    agent_pending.pop("_owner_authored", None)
     durable_run_token = (
       product_result_run_token(cmd.chat_id, agent_pending) or cmd.run_token
     )
@@ -4591,14 +4635,15 @@ class ChatWriterActor:
     return {"pending": remaining}
 
   def _update_pending(self, db, cmd: UpdatePending) -> dict:
-    """Replace one still-queued message's text, preserving every other field.
+    """Replace one still-queued message's text and preserve its identity.
 
     Matches on `cid_of` like `_cancel_pending`. `updated` reports whether the
     row is still queued (True even for a no-op edit to identical text); the
     commit and `updated_at` bump happen only when the content actually changed,
     mirroring `_cancel_pending`. `updated` is False only when a racing promote
     or cancel already removed the row, so the caller can distinguish a real
-    edit from a message that has already left the queue.
+    edit from a message that has already left the queue. A non-owner editor
+    cannot carry the original owner's steering authority onto rewritten text.
     """
     from datetime import UTC, datetime
 
@@ -4617,7 +4662,12 @@ class ChatWriterActor:
         if message.get("content") == cmd.content:
           next_pending.append(message)
         else:
-          next_pending.append({**message, "content": cmd.content})
+          replacement = {**message, "content": cmd.content}
+          if cmd.owner_authored:
+            replacement["_owner_authored"] = True
+          else:
+            replacement.pop("_owner_authored", None)
+          next_pending.append(replacement)
           changed = True
       else:
         next_pending.append(message)
@@ -5072,6 +5122,16 @@ class ChatWriterActor:
           cmd.restart_nonce if cmd.park_reason == "restart" else None
         )
         parked = True
+        # Record the provider's reset time so background selection skips it
+        # until it recovers (the single serialized quota-signal write point).
+        if run.park_reason in ("usage_limit", "rate_limit"):
+          from app.provider_availability import mark_provider_limited
+          from app.models import Chat as _Chat
+          provider = run.provider
+          if not provider:
+            chat_row = db.get(_Chat, cmd.chat_id)
+            provider = chat_row.provider if chat_row else None
+          mark_provider_limited(db, provider, run.parked_until, run.park_reason)
       else:
         run.status = "completed"
         run.restart_nonce = None
@@ -5763,6 +5823,7 @@ def _pending_messages_for_transcript(
     msg.pop("serverTs", None)
     msg.pop("position", None)
     msg.pop("_initiated_by_app_id", None)
+    msg.pop("_owner_authored", None)
     # Preserve an explicit cid, or stamp the legacy fallback before changing
     # ts so queue identity stays byte-identical across promotion.
     msg["cid"] = cid_of(msg)

@@ -55,6 +55,30 @@ export function bankedResetCredits(snapshot) {
   return { availableCount: count, credits }
 }
 
+export function claudeResetCredits(snapshot) {
+  const summary = snapshot?.reset_credits
+  if (!summary || typeof summary !== 'object') return null
+  const count = Number(summary.available_count)
+  if (!Number.isFinite(count) || count < 0) return null
+  const credits = Array.isArray(summary.credits) ? summary.credits : []
+  const nextCreditId = typeof summary.next_credit_id === 'string'
+    ? summary.next_credit_id
+    : null
+  const nextCredit = credits.find(credit => credit?.id === nextCreditId)
+  const nextCreditResetsLeft = Number(nextCredit?.resets_left)
+  return {
+    availableCount: count,
+    credits,
+    eligible: summary.eligible === true,
+    redeemable: summary.redeemable === true,
+    nextCreditId,
+    nextCreditResetsLeft: Number.isInteger(nextCreditResetsLeft)
+      && nextCreditResetsLeft > 0
+      ? nextCreditResetsLeft
+      : null,
+  }
+}
+
 export function soonestResetExpiry(credits) {
   if (!Array.isArray(credits)) return null
   const times = credits
@@ -88,6 +112,30 @@ export function redeemOutcomeMessage(outcome) {
       return { tone: 'info', text: 'That reset was already redeemed.' }
     default:
       return { tone: 'error', text: 'Couldn’t redeem the reset. Try again shortly.' }
+  }
+}
+
+export function claudeRedeemOutcomeMessage(outcome) {
+  switch (outcome) {
+    case 'reset':
+      return { tone: 'success', text: 'Reset applied — Claude is checking your refreshed limits.' }
+    case 'already_used':
+      return { tone: 'info', text: 'That reset was already used — nothing else was spent.' }
+    case 'not_limited':
+      return { tone: 'info', text: 'Your limits are already clear — no reset was spent.' }
+    case 'cooldown':
+      return { tone: 'info', text: 'A Claude reset is already being applied.' }
+    case 'ineligible':
+    case 'unavailable':
+    case 'offer_changed':
+      return { tone: 'info', text: 'That reset is no longer available.' }
+    case 'unknown':
+      return {
+        tone: 'info',
+        text: 'Claude may have applied that reset. Möbius will reconcile it before another reset.',
+      }
+    default:
+      return { tone: 'error', text: 'Couldn’t redeem the Claude reset. Try again shortly.' }
   }
 }
 
