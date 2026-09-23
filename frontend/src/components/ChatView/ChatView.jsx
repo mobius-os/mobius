@@ -33,6 +33,7 @@ import {
   olderHistoryRetryShown,
   olderHistoryShouldLoad,
 } from './scroll/policy.js'
+import { cachedActivationRetryDelay } from './chatRuntimeState.js'
 import {
   remapSavedReadingAnchor,
   retireSavedReadingPosition,
@@ -557,11 +558,12 @@ export default function ChatView({
   // render the empty-state UI ("What's on your mind?") as if the chat had no
   // history, hiding the real problem.
   const [loadError, setLoadError] = useState(false)
-  // Bumped by either activation Retry surface to re-run the load effect in
+  // Bumped by a manual empty-load retry or quiet cached recovery to re-run the load effect in
   // place, instead of a hard window.location.reload (which would nuke the
   // Query cache, scroll positions, drafts, the app-iframe LRU, and the
   // back-stack — and contradicts the project's no-hard-reload principle).
   const [loadNonce, setLoadNonce] = useState(0)
+  const cachedActivationRecoveryRef = useRef({ chatId: null, attempts: 0, timer: null })
   const retryActivation = useCallback(() => {
     // Retry at the activation owner: preserve the complete cached transcript,
     // draft/files, scroll/cache, and the same ChatView while re-running only
@@ -2447,6 +2449,13 @@ export default function ChatView({
     // changes this dependency and re-runs the version + stream handshake
     // without losing the pane's DOM identity.
     if (hidden || provisionalNewChat) return
+    const recovery = cachedActivationRecoveryRef.current
+    if (recovery.chatId !== String(activationIdentity)) {
+      if (recovery.timer) clearTimeout(recovery.timer)
+      cachedActivationRecoveryRef.current = {
+        chatId: String(activationIdentity), attempts: 0, timer: null,
+      }
+    }
     setActivationPhase('pending')
     let cancelled = false
     const initialLoadController = new AbortController()
@@ -2539,6 +2548,7 @@ export default function ChatView({
         throw new Error('CHAT_RUNTIME_OUT_OF_ORDER')
       }
       commitRuntimeSnapshot(transition)
+      cachedActivationRecoveryRef.current.attempts = 0
       const running = !!runtime.running
       setRecoveryRunId(runtime.recovery_run_id || null)
       const attachesToStream = shouldAttachRunningStream({
@@ -2872,6 +2882,22 @@ export default function ChatView({
         // A cache fallback preserves readable history, but the failed runtime
         // read did not prove that this chat may accept a new turn.
         setActivationPhase('error')
+        if (cacheIsSafeFallback) {
+          const retry = cachedActivationRetryDelay(
+            err,
+            cachedActivationRecoveryRef.current.attempts,
+          )
+          if (retry != null) {
+            const retryState = cachedActivationRecoveryRef.current
+            retryState.attempts += 1
+            retryState.timer = setTimeout(() => {
+              retryState.timer = null
+              setActivationPhase('pending')
+              setLoading(true)
+              setLoadNonce(nonce => nonce + 1)
+            }, retry)
+          }
+        }
         void reconcileFailedSendOutbox({
           visibleMessages: cacheIsSafeFallback
             ? activationCache.messages
@@ -2895,6 +2921,10 @@ export default function ChatView({
         // cleanup, so modeRef is captured for the chat we're leaving.)
       } catch {}
       cancelled = true
+      if (cachedActivationRecoveryRef.current.timer) {
+        clearTimeout(cachedActivationRecoveryRef.current.timer)
+        cachedActivationRecoveryRef.current.timer = null
+      }
       initialLoadController.abort()
       chatIdStaleRef.current = true
       disconnect()

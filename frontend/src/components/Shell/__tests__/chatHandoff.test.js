@@ -479,12 +479,12 @@ test('cold activation keeps one composer visible but refuses sends until runtime
     /notice=\{[\s\S]*coldActivation[\s\S]*Preparing this chat…[\s\S]*: null/,
     'the disabled Send affordance explains the cold activation')
   assert.match(chatView,
-    /const retryActivation = useCallback\([\s\S]*setActivationPhase\('pending'\)[\s\S]*setLoadError\(false\)[\s\S]*setLoading\(true\)[\s\S]*setLoadNonce\(nonce => nonce \+ 1\)/,
-    'the activation owner retries in place without replacing the cached history or draft')
+    /cachedActivationRetryDelay\(\s*err,[\s\S]*retryState\.timer = setTimeout\([\s\S]*setLoadNonce\(nonce => nonce \+ 1\)/,
+    'cached activation failures get bounded quiet retries at the activation owner')
   assert.equal(
     (chatView.match(/onClick=\{retryActivation\}/g) || []).length,
     1,
-    'the existing explicit activation retry remains available independently of the composer notice',
+    'the manual Retry remains only for an uncached initial-load failure',
   )
   assert.doesNotMatch(chatView, /chat__activation-retry|Chat activation needs a retry before sending\./,
     'the composer never renders the activation retry strip')
