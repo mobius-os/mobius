@@ -73,7 +73,7 @@ from app.memory_observability import record_memory_checkpoint_once
 from app.owner_input import OwnerInputKind
 from app.deps import (
   Principal, get_current_owner_for_lifecycle_control,
-  get_current_owner_for_owner_input,
+  get_owner_for_card_answer,
   get_owner_or_chat_embed_principal, get_current_owner, get_principal,
   reject_cross_site, require_nondelegated_owner_control,
   require_chat_embed_operation,
@@ -3529,7 +3529,7 @@ class QuestionAnswers(BaseModel):
 async def save_question_answers(
   chat_id: str,
   body: QuestionAnswers,
-  _: models.Owner = Depends(get_current_owner_for_owner_input),
+  _: models.Owner = Depends(get_owner_for_card_answer),
   db: Session = Depends(get_db),
 ):
   """Saves the user's answers into the question block being answered.

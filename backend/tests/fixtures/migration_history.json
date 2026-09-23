@@ -66,6 +66,7 @@
     "0061_goal_plan_admission_revision": "738ec66d9606a03f410b74f21ab36453d59e4227986865fa0ae3deb886c52189",
     "0062_chat_run_progress_lease": "fbb17fa7ff6d9f9b84b2ebc99d851cdc220b62152d54e8aac41c9fc647967b5d",
     "0063_durable_goal_records": "c174b8f15d4621aec6ba23898b5ad231f678b7b83d16088a481d777a67ddd859",
-    "0063_chat_run_continuation_control": "309bbb9b7b0441d8e0404182de74be40b497bb2acb1e236471ec188e4fbb9a0e"
+    "0063_chat_run_continuation_control": "309bbb9b7b0441d8e0404182de74be40b497bb2acb1e236471ec188e4fbb9a0e",
+    "0066_card_answerer_chat_id": "7ddfcfe026f7da6fcdfc27110be0ace559e95f1f54c45cebdae3fc012d656d26"
   }
 }

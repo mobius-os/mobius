@@ -105,6 +105,40 @@ def test_submit_runs_once_and_only_fixed_result_reaches_transcript(client, chat,
   assert "never-record-this-value" not in json.dumps(state)
 
 
+def test_other_agent_chat_can_submit_saved_sealed_input(
+  client, chat, auth, db, sealed_run, tmp_path, monkeypatch,
+):
+  qid = _create(client, chat, sealed_run, tmp_path)
+  foreign_chat_id = client.post("/api/chats", json={"title": "Input helper"},
+                                headers=auth).json()["id"]
+  foreign_run_id = f"input-helper-{foreign_chat_id}"
+  db.add(models.ChatRun(id=foreign_run_id, chat_id=foreign_chat_id,
+                        status="running"))
+  db.commit()
+  owner = db.query(models.Owner).first()
+  token = auth_mod.create_agent_token(
+    chat_id=foreign_chat_id, owner_username=owner.username,
+    token_epoch=owner.token_epoch, run_id=foreign_run_id,
+    expires_delta=timedelta(minutes=5),
+  )
+  seen = []
+
+  async def consume(_spec, values, _chat_id):
+    seen.append(dict(values))
+    values.clear()
+    return 0
+
+  monkeypatch.setattr(saved_secure_inputs, "_run_consumer", consume)
+  response = client.post(
+    f"/api/secure-inputs/{chat.id}/{qid}/submit",
+    headers={"Authorization": f"Bearer {token}"},
+    json={"fields": {"api_key": "synthetic-test-value"}},
+  )
+  assert response.status_code == 200, response.text
+  assert seen == [{"api_key": "synthetic-test-value"}]
+  assert "synthetic-test-value" not in json.dumps(_state(chat.id, qid))
+
+
 def test_generic_question_answer_cannot_bypass_sealed_execution(client, chat, auth, sealed_run, tmp_path):
   qid = _create(client, chat, sealed_run, tmp_path)
   response = client.post(f"/api/chats/{chat.id}/messages", headers=auth,

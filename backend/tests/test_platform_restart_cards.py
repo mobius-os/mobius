@@ -563,7 +563,7 @@ def test_not_now_defers_execution_without_abandoning_activation():
     assert wait.action_approved_at is None
 
 
-def test_route_dispatches_platform_restart_once_without_an_answer_turn(
+def test_other_agent_chat_dispatches_platform_restart_once_without_an_answer_turn(
   client, chat, auth, db, monkeypatch,
 ):
   monkeypatch.setenv("MOBIUS_BOOT_ID", "boot-route")
@@ -591,6 +591,18 @@ def test_route_dispatches_platform_restart_once_without_an_answer_turn(
     token_epoch=owner.token_epoch, run_id=run_id,
     expires_delta=timedelta(minutes=5),
   )
+  foreign_chat_id = client.post("/api/chats", json={"title": "Restart helper"},
+                                headers=auth).json()["id"]
+  foreign_run_id = f"restart-helper-{foreign_chat_id}"
+  db.add(models.ChatRun(id=foreign_run_id, chat_id=foreign_chat_id,
+                        status="running"))
+  db.commit()
+  foreign_token = auth_mod.create_agent_token(
+    chat_id=foreign_chat_id, owner_username=owner.username,
+    token_epoch=owner.token_epoch, run_id=foreign_run_id,
+    expires_delta=timedelta(minutes=5),
+  )
+  foreign_auth = {"Authorization": f"Bearer {foreign_token}"}
   try:
     saved = client.post(
       f"/api/chats/{chat.id}/restart-request", json={},
@@ -612,7 +624,7 @@ def test_route_dispatches_platform_restart_once_without_an_answer_turn(
       "selected_options": {"restart": [restart_id]},
     }
     first = client.post(
-      f"/api/chats/{chat.id}/messages", json=body, headers=auth,
+      f"/api/chats/{chat.id}/messages", json=body, headers=foreign_auth,
     )
     retry = client.post(
       f"/api/chats/{chat.id}/messages", json=body, headers=auth,

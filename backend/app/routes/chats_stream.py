@@ -64,7 +64,7 @@ from app.deps import (
   Principal, get_chat_view_principal, get_owner_or_chat_embed_principal,
   get_current_owner, reject_cross_site,
   chat_embed_session_is_active, require_chat_embed_operation,
-  require_nondelegated_owner_control, require_owner_input_principal,
+  require_nondelegated_owner_control, require_card_answer_principal,
 )
 from app.resource_access import (
   get_active_chat_for_principal, get_active_chat_or_404,
@@ -601,7 +601,7 @@ async def send_message(
   require_chat_embed_operation(principal, "chat:send")
   require_nondelegated_owner_control(principal)
   if body.answers:
-    require_owner_input_principal(principal)
+    require_card_answer_principal(principal)
   chat = get_active_chat_for_principal(db, chat_id, principal)
 
   # A typed Restart card is a platform action, not a prose continuation. The
@@ -611,7 +611,7 @@ async def send_message(
   from app.platform_restart import restart_action_block
   restart_block = restart_action_block(chat, body.question_id)
   if restart_block is not None:
-    require_owner_input_principal(principal)
+    require_card_answer_principal(principal)
     selections = body.selected_options
     if not selections:
       feedback = list((body.answers or {}).values())

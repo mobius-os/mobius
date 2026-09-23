@@ -13,6 +13,7 @@ from app.database import get_db
 from app.deps import (
   Principal,
   get_agent_run_principal,
+  get_owner_for_card_answer,
   get_current_owner,
   get_current_owner_for_lifecycle_control,
   get_current_owner_for_owner_input,
@@ -166,7 +167,7 @@ async def submit_secure_input(
   chat_id: str,
   request_id: str,
   request: Request,
-  _: models.Owner = Depends(get_current_owner_for_owner_input),
+  _: models.Owner = Depends(get_owner_for_card_answer),
   db: Session = Depends(get_db),
 ):
   """Move submitted fields into process memory without logging or persistence."""

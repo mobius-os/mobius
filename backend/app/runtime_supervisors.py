@@ -277,6 +277,17 @@ class RuntimeSupervisors:
         except Exception as exc:
           self.log.error("chat-wait sweep failed: %s", exc, exc_info=True)
 
+    async def card_answer_route_loop():
+      from app.card_answer_routing import sweep_card_answer_routes
+      while True:
+        try:
+          await sweep_card_answer_routes()
+        except asyncio.CancelledError:
+          raise
+        except Exception as exc:
+          self.log.error("card-answer routing sweep failed: %s", exc, exc_info=True)
+        await asyncio.sleep(10)
+
     async def delegation_startup_recovery_loop():
       # Startup admission and source-attached work have their own repair path;
       # neither can be delayed by a stalled parent wake or SQLite lease sweep.
@@ -511,6 +522,7 @@ class RuntimeSupervisors:
     self._spawn("wedged-marker-sweep", wedged_marker_loop())
     self._spawn("reset-park-sweep", reset_park_loop())
     self._spawn("chat-wait-sweep", chat_wait_loop())
+    self._spawn("card-answer-routing", card_answer_route_loop())
     self._spawn(
       "delegation-startup-recovery", delegation_startup_recovery_loop(),
     )

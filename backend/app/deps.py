@@ -776,6 +776,35 @@ def require_owner_input_principal(principal: Principal) -> None:
     )
 
 
+def require_card_answer_principal(principal: Principal) -> None:
+  """Admit human owner input or a valid non-delegated agent-run principal.
+
+  Delegated children, app-scoped tokens, and unknown scopes remain blocked;
+  screen control keeps the stricter owner-only gate.
+  """
+  if principal.delegation_id is not None:
+    raise HTTPException(
+      status_code=403,
+      detail="Delegated agents cannot answer owner cards.",
+    )
+  if principal.scope == "chat_embed":
+    return
+  if principal.scope == "owner" and principal.app_id is None:
+    return
+  raise HTTPException(
+    status_code=403,
+    detail="Only owner or agent-run tokens can answer cards.",
+  )
+
+
+def get_owner_for_card_answer(
+  principal: Principal = Depends(get_principal),
+) -> models.Owner:
+  """Resolve the answering owner for card answers, human or agent."""
+  require_card_answer_principal(principal)
+  return principal.owner
+
+
 def get_current_owner_for_owner_input(
   principal: Principal = Depends(get_principal),
 ) -> models.Owner:
