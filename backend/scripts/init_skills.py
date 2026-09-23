@@ -219,6 +219,8 @@ _UNMODIFIED_MIGRATIONS = {
     # Pre-slimming seed: duplicated the component catalog's full UI skeleton
     # inside an advanced runtime guide that is always read with quickstart.
     "294a4a207a2528245b006877ff486aa79fdf401b738afbf43aaf2b67b3e7eead",
+    # Pre-agent-activity seed: apps could not declare domain-owned tool cards.
+    "2ea47c610eb2bffaf42c8cbe8e2c69d17943c992bb22ba2aaa2e0c65b6ea1499",
   },
   "building-apps-quickstart.md": {
     "7d8af2664b37a69b88e48c2a28140c15556202c3c7ce30d77816c203d1959fcb",

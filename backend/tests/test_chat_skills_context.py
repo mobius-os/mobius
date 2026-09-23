@@ -278,6 +278,15 @@ def test_goal_waits_always_name_a_durable_owner_interaction():
   assert "A wait declared inside a Goal resumes under the same Goal" in waiting_normalized
 
 
+def test_core_question_fallback_shows_the_minimal_valid_shape():
+  repo = Path(__file__).resolve().parents[2]
+  core = (repo / "skill" / "core.md").read_text(encoding="utf-8")
+
+  assert "owner_approval.py --questions-json" in core
+  assert '[{"question":"...","options":[' in core
+  assert "<question array>" not in core
+
+
 def test_core_requires_one_claim_for_convergent_cross_chat_work():
   repo = Path(__file__).resolve().parents[2]
   core = " ".join((repo / "skill" / "core.md").read_text(

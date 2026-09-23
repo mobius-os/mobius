@@ -90,6 +90,47 @@ def test_history_rejects_an_unknown_cursor(client, auth):
   assert response.json()["detail"] == "Invalid notification cursor."
 
 
+def test_owner_can_dismiss_one_notification(client, auth):
+  """Single-item dismissal removes just the selected row and unread badge entry."""
+  keep_id = _send(client, auth, title="Keep me")
+  dismiss_id = _send(client, auth, title="Dismiss me")
+  assert _count(client, auth) == 2
+
+  response = client.delete(
+    f"/api/notifications/{dismiss_id}", headers=auth,
+  )
+  assert response.status_code == 200, response.text
+  assert response.json() == {"deleted": 1}
+  assert _count(client, auth) == 1
+  listed = client.get("/api/notifications", headers=auth).json()
+  assert [row["id"] for row in listed] == [keep_id]
+
+  missing = client.delete(
+    f"/api/notifications/{dismiss_id}", headers=auth,
+  )
+  assert missing.status_code == 404
+
+
+def test_single_item_dismissal_preserves_recovery_receipts(client, auth, db):
+  """A direct call cannot delete an Undo receipt or erase its recovery path."""
+  owner = db.query(models.Owner).first()
+  receipt_id = "recovery-receipt-not-dismissable"
+  db.add(models.Notification(
+    id=receipt_id,
+    owner_id=owner.id,
+    source_type="shell",
+    title="Chat deleted",
+    actions=[{"action": "recover_chat", "resource_id": "chat-123"}],
+  ))
+  db.commit()
+
+  response = client.delete(
+    f"/api/notifications/{receipt_id}", headers=auth,
+  )
+  assert response.status_code == 409, response.text
+  assert db.query(models.Notification).filter_by(id=receipt_id).one_or_none()
+
+
 def test_notification_created_published_on_system_bus(client, auth):
   """Every notify_owner call nudges the bell badge over the system stream."""
   bus = get_system_broadcast()

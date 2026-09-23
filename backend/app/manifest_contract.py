@@ -35,6 +35,7 @@ PROJECT_TEMPLATES_COUNT_MAX = 12
 PROJECT_TEMPLATE_FILES_COUNT_MAX = 64
 PROJECT_ARTIFACT_TYPES_COUNT_MAX = 12
 PROJECT_ARTIFACT_EXTENSIONS_COUNT_MAX = 16
+AGENT_ACTIVITIES_COUNT_MAX = 16
 SERVICE_REQUEST_MAX_BYTES = 8 * 1024 * 1024
 SERVICE_ALIASES_MAX = 4
 MAX_JOB_SHEBANG_BYTES = 256
@@ -252,6 +253,44 @@ def validate_manifest_contract(manifest) -> None:
 
   mid = manifest["id"]
   validate_slug_field(mid, "id")
+  model_provider = manifest.get("model_provider")
+  if model_provider is not None:
+    if not isinstance(model_provider, Mapping) or set(model_provider) != {
+      "name", "base_url", "secret_name", "models", "default_model"
+    }:
+      _fail("Manifest `model_provider` needs name, base_url, secret_name, models, and default_model only.")
+    if not isinstance(model_provider["name"], str) or not 1 <= len(model_provider["name"].strip()) <= 80:
+      _fail("Manifest `model_provider.name` must be 1–80 characters.")
+    url = urlparse(model_provider["base_url"] if isinstance(model_provider["base_url"], str) else "")
+    if (url.scheme != "https" or not url.hostname or url.username or url.password
+        or url.query or url.fragment or url.params):
+      _fail("Manifest `model_provider.base_url` must be an HTTPS API base URL without credentials or query.")
+    secret_name = model_provider["secret_name"]
+    if not isinstance(secret_name, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", secret_name):
+      _fail("Manifest `model_provider.secret_name` must name one app secret.")
+    entries = model_provider["models"]
+    if not isinstance(entries, list) or not 1 <= len(entries) <= 32:
+      _fail("Manifest `model_provider.models` must contain 1–32 models.")
+    ids = set()
+    for index, entry in enumerate(entries):
+      if not isinstance(entry, Mapping) or set(entry) - {"id", "label", "effort_levels", "context_window"} or not {"id", "label"}.issubset(entry):
+        _fail(f"Manifest `model_provider.models[{index}]` has invalid fields.")
+      model_id = entry["id"]
+      if not isinstance(model_id, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}", model_id) or model_id in ids:
+        _fail("Manifest model ids must be unique, bounded wire IDs.")
+      ids.add(model_id)
+      if not isinstance(entry["label"], str) or not 1 <= len(entry["label"].strip()) <= 100:
+        _fail("Manifest model labels must be 1–100 characters.")
+      efforts = entry.get("effort_levels")
+      if efforts is not None and (not isinstance(efforts, list) or not efforts or len(efforts) > 8
+          or not all(isinstance(value, str) and value in {"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"} for value in efforts)
+          or len(set(efforts)) != len(efforts)):
+        _fail("Manifest model effort_levels contains unsupported or duplicate values.")
+      window = entry.get("context_window")
+      if window is not None and (isinstance(window, bool) or not isinstance(window, int) or not 1024 <= window <= 10_000_000):
+        _fail("Manifest model context_window must be an integer between 1024 and 10000000.")
+    if model_provider["default_model"] not in ids:
+      _fail("Manifest `model_provider.default_model` must name a declared model.")
   package_id = manifest.get("package_id")
   if package_id is not None and (
     not isinstance(package_id, str)
@@ -587,6 +626,50 @@ def validate_manifest_contract(manifest) -> None:
           "node_modules/, the cron/job scripts, .bak snapshots, or the "
           "numeric-id storage tree)."
         )
+
+  agent_activities = manifest.get("agent_activities", {})
+  if not isinstance(agent_activities, Mapping):
+    _fail("Manifest `agent_activities` must be an object.")
+  if len(agent_activities) > AGENT_ACTIVITIES_COUNT_MAX:
+    _fail(
+      "Manifest has too many agent_activities "
+      f"(max {AGENT_ACTIVITIES_COUNT_MAX})."
+    )
+  declared_sources = set(source_files or []) if isinstance(source_files, list) else set()
+  activity_entries: set[str] = set()
+  for activity_id, activity in agent_activities.items():
+    validate_slug_field(activity_id, f"agent_activities.{activity_id}")
+    field = f"agent_activities.{activity_id}"
+    if not isinstance(activity, Mapping) or set(activity) != {
+      "entry", "arguments", "running_label",
+    }:
+      _fail(
+        f"Manifest `{field}` must contain only entry, arguments, and "
+        "running_label."
+      )
+    entry = activity.get("entry")
+    validate_repo_relative_path(entry, f"{field}.entry")
+    if entry not in declared_sources:
+      _fail(
+        f"Manifest `{field}.entry` must also be listed in source_files."
+      )
+    if entry in activity_entries:
+      _fail("Manifest agent_activities must use distinct entry paths.")
+    activity_entries.add(entry)
+    arguments = activity.get("arguments")
+    if (
+      isinstance(arguments, bool)
+      or not isinstance(arguments, int)
+      or not 0 <= arguments <= 16
+    ):
+      _fail(f"Manifest `{field}.arguments` must be an integer from 0 to 16.")
+    running_label = activity.get("running_label")
+    if (
+      not isinstance(running_label, str)
+      or not running_label.strip()
+      or len(running_label) > 160
+    ):
+      _fail(f"Manifest `{field}.running_label` must be 1-160 characters.")
 
   service = manifest.get("service")
   if service is not None:

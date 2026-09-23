@@ -722,10 +722,11 @@ def test_model_registry_returns_known_models_on_discovery_failure(
     lambda _data_dir: "Möbius account is not linked",
   )
 
-  async def discovery_fails(_provider_id, _data_dir):
+  async def discovery_fails(_data_dir):
     raise RuntimeError("offline")
 
-  monkeypatch.setattr(providers, "_fetch_provider_models", discovery_fails)
+  for provider in providers.PROVIDERS.values():
+    monkeypatch.setattr(provider, "fetch_models", discovery_fails)
   invalidate_model_cache()
   res = client.get("/api/models", headers=auth)
   assert res.status_code == 200

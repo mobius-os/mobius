@@ -23,7 +23,12 @@ from app.events import (
     process_event,
 )
 from app.routes.chats import TOOL_OUTPUT_PREVIEW_CHARS
-from app.memory_recall import EMPTY_RECALL_BINDING, RecallBinding
+from app.agent_activity import (
+    EMPTY_AGENT_ACTIVITY_BINDING,
+    RESULT_PREFIX,
+    ActivityCommand,
+    AgentActivityBinding,
+)
 from app.tool_output_storage import (
     TOOL_OUTPUT_STORAGE_PREFIX,
     decode_tool_output,
@@ -97,7 +102,7 @@ def test_sink_stashes_full_edit_diff_and_keeps_private_text_off_wire(db):
     sink = ChatEventSink(
         bus,
         "chat-edit",
-        recall_binding=EMPTY_RECALL_BINDING,
+        agent_activity_binding=EMPTY_AGENT_ACTIVITY_BINDING,
     )
     full = "diff --git a/a b/a\n" + ("+large line\n" * 2500)
     event = {
@@ -572,11 +577,11 @@ class _FakeBC:
         self.events.append(event)
 
 
-def _sink(chat_id="c-sink", recall_binding=EMPTY_RECALL_BINDING):
+def _sink(chat_id="c-sink", agent_activity_binding=EMPTY_AGENT_ACTIVITY_BINDING):
     from app.chat import _ChatEventSink
     return _ChatEventSink(
       _FakeBC(), chat_id, run_token="rt",
-      recall_binding=recall_binding,
+      agent_activity_binding=agent_activity_binding,
     )
 
 
@@ -661,15 +666,18 @@ def test_sink_parses_a_large_json_envelope_once(monkeypatch, db):
     assert event["output_exit_code"] == 3
 
 
-def test_memory_receipt_is_settled_before_generic_output_carving(db):
-    binding = RecallBinding.of([
-        ("/apps/brain/memory_search.py", "brain"),
+def test_app_receipt_is_settled_before_generic_output_carving(db):
+    binding = AgentActivityBinding.of([
+        ("/apps/brain/lookup.py", ActivityCommand(
+            app_slug="brain", app_name="Brain", activity_id="lookup",
+            argument_count=2, running_label="Searching",
+        )),
     ])
-    sink = _sink(recall_binding=binding)
-    command = 'python3 /apps/brain/memory_search.py "q" "c-sink"'
+    sink = _sink(agent_activity_binding=binding)
+    command = 'python3 /apps/brain/lookup.py "q" "c-sink"'
     sink.publish({
         "type": "tool_start", "tool": "Bash", "input": command,
-        "tool_use_id": "tu-memory-v2",
+        "tool_use_id": "tu-app",
     })
     notes = [
         {
@@ -679,77 +687,77 @@ def test_memory_receipt_is_settled_before_generic_output_carving(db):
         }
         for index in range(100)
     ]
-    receipt = "MOBIUS_MEMORY_RESULT_V2:" + json.dumps({
-        "status": "hit",
-        "phase": "catalog",
-        "lookup_id": "a" * 64,
-        "notes": notes,
-        "page": {"candidate_count": 100, "complete": True},
-        "display": {"label": "Found 100 relevant notes in Memory"},
+    receipt = RESULT_PREFIX + json.dumps({
+        "activity_id": "lookup",
+        "status": "succeeded",
+        "label": "Found 100 relevant notes",
+        "resources": [
+            {"label": note["title"], "intent": f'note:{note["id"]}'}
+            for note in notes
+        ],
     }, separators=(",", ":"))
     assert len(receipt) > 8192
     event = {
         "type": "tool_output", "content": ("body\n" * 1000) + receipt,
-        "tool_use_id": "tu-memory-v2", "output_complete": True,
+        "tool_use_id": "tu-app", "output_complete": True,
         "output_exit_code": 0,
     }
 
     sink.publish(event)
 
     assert event["output_truncated"] is True
-    recall = sink.assistant_blocks[-1]["recall"]
-    assert recall["status"] == "hit"
-    assert recall["display"]["label"] == "Found 100 relevant notes in Memory"
-    assert len(recall["notes"]) == 100
+    activity = sink.assistant_blocks[-1]["app_activity"]
+    assert activity["status"] == "succeeded"
+    assert activity["label"] == "Found 100 relevant notes"
+    assert len(activity["resources"]) == 100
 
 
-def test_memory_receipt_cannot_override_a_content_derived_nonzero_exit(db):
-    binding = RecallBinding.of([
-        ("/apps/brain/memory_search.py", "brain"),
+def test_app_receipt_cannot_override_a_content_derived_nonzero_exit(db):
+    binding = AgentActivityBinding.of([
+        ("/apps/brain/lookup.py", ActivityCommand(
+            app_slug="brain", app_name="Brain", activity_id="lookup",
+            argument_count=2, running_label="Searching",
+        )),
     ])
-    sink = _sink(recall_binding=binding)
+    sink = _sink(agent_activity_binding=binding)
     sink.publish({
         "type": "tool_start", "tool": "Bash",
-        "input": 'python3 /apps/brain/memory_search.py "q" "c-sink"',
-        "tool_use_id": "tu-memory-failed",
+        "input": 'python3 /apps/brain/lookup.py "q" "c-sink"',
+        "tool_use_id": "tu-app-failed",
     })
-    receipt = "MOBIUS_MEMORY_RESULT_V2:" + json.dumps({
-        "status": "hit",
-        "phase": "catalog",
-        "lookup_id": "a" * 64,
-        "notes": [{"id": "note", "path": "notes/note.md", "title": "Note"}],
-        "page": {"candidate_count": 1, "complete": True},
-        "display": {"label": "Found 1 relevant note in Memory"},
+    receipt = RESULT_PREFIX + json.dumps({
+        "activity_id": "lookup", "status": "succeeded", "label": "Found one",
     }, separators=(",", ":"))
     event = {
         "type": "tool_output",
         "content": "Exit code 7\n" + receipt,
-        "tool_use_id": "tu-memory-failed",
+        "tool_use_id": "tu-app-failed",
         "output_complete": True,
     }
 
     sink.publish(event)
 
     assert event["output_exit_code"] == 7
-    assert sink.assistant_blocks[-1]["recall"]["status"] == "failed"
+    assert sink.assistant_blocks[-1]["app_activity"]["status"] == "failed"
 
 
-def test_streamed_memory_receipt_survives_blank_or_final_chunk_completion(db):
-    binding = RecallBinding.of([
-        ("/apps/brain/memory_search.py", "brain"),
+def test_streamed_app_receipt_survives_blank_or_final_chunk_completion(db):
+    binding = AgentActivityBinding.of([
+        ("/apps/brain/lookup.py", ActivityCommand(
+            app_slug="brain", app_name="Brain", activity_id="lookup",
+            argument_count=2, running_label="Searching",
+        )),
     ])
-    receipt = "MOBIUS_MEMORY_RESULT_V2:" + json.dumps({
-        "status": "hit",
-        "notes": [{"id": "note", "path": "notes/note.md", "title": "Note"}],
-        "display": {"label": "Read a Memory page"},
+    receipt = RESULT_PREFIX + json.dumps({
+        "activity_id": "lookup", "status": "succeeded", "label": "Read a page",
     }, separators=(",", ":"))
     split = len(receipt) // 2
     for terminal_chunk in ("", receipt[split:]):
-        sink = _sink(recall_binding=binding)
+        sink = _sink(agent_activity_binding=binding)
         sink.publish({
             "type": "tool_start", "tool": "Bash",
-            "input": 'python3 /apps/brain/memory_search.py "lookup" "all" "start" "c-sink"',
-            "tool_use_id": "tu-memory-streamed",
+            "input": 'python3 /apps/brain/lookup.py "q" "c-sink"',
+            "tool_use_id": "tu-app-streamed",
         })
         for chunk in (
             (receipt[:split], receipt[split:]) if not terminal_chunk
@@ -757,17 +765,17 @@ def test_streamed_memory_receipt_survives_blank_or_final_chunk_completion(db):
         ):
             sink.publish({
                 "type": "tool_output", "content": chunk,
-                "tool_use_id": "tu-memory-streamed",
+                "tool_use_id": "tu-app-streamed",
             })
         sink.publish({
             "type": "tool_output", "content": terminal_chunk,
-            "tool_use_id": "tu-memory-streamed", "output_complete": True,
+            "tool_use_id": "tu-app-streamed", "output_complete": True,
             "output_exit_code": 0,
         })
 
-        recall = sink.assistant_blocks[-1]["recall"]
-        assert recall["status"] == "hit"
-        assert recall["display"]["label"] == "Read a Memory page"
+        activity = sink.assistant_blocks[-1]["app_activity"]
+        assert activity["status"] == "succeeded"
+        assert activity["label"] == "Read a page"
 
 
 def test_sink_passes_through_small_output(db):

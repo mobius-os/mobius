@@ -1,9 +1,11 @@
-import { Agent, Bell, Chat, Grid, SettingsSlider } from '@openai/apps-sdk-ui/components/Icon'
+import { Agent, Bell, Chat, Grid, SettingsSlider, X } from '@openai/apps-sdk-ui/components/Icon'
 import { useQueryClient } from '@tanstack/react-query'
 import { useEffect, useRef, useState } from 'react'
 import { notificationQueries } from '../../hooks/queries.js'
+import { formatDateTime } from '../../lib/dateTimeFormat.js'
 import {
   completeNotificationRecovery,
+  hasRecoveryReceipt,
   notificationRecoveryAction,
   recoveryFailure,
   recoveryUnavailableLabel,
@@ -31,6 +33,7 @@ export default function NotificationsView({
   active = false,
   onOpenTarget,
   onClearAll,
+  onDismiss,
   onRecoveryAction,
   updateAvailable = false,
   onUpdateNow,
@@ -44,8 +47,11 @@ export default function NotificationsView({
   const rows = data?.pages.flat() ?? []
   const [now, setNow] = useState(() => Date.now())
   const pointerSelectionRef = useRef(null)
+  const contentRef = useRef(null)
+  const paginationRef = useRef(null)
   const [isClearing, setIsClearing] = useState(false)
   const [clearError, setClearError] = useState(false)
+  const [dismissState, setDismissState] = useState({})
   const [recoveryState, setRecoveryState] = useState({})
 
   // Relative labels are live information, not a one-time formatting pass.
@@ -56,6 +62,19 @@ export default function NotificationsView({
     const timer = window.setInterval(() => setNow(Date.now()), 60_000)
     return () => window.clearInterval(timer)
   }, [active])
+
+  useEffect(() => {
+    if (
+      !active || !hasNextPage || isFetchingNextPage || isFetchNextPageError
+      || !contentRef.current || !paginationRef.current
+      || typeof IntersectionObserver === 'undefined'
+    ) return undefined
+    const observer = new IntersectionObserver((entries) => {
+      if (entries.some(entry => entry.isIntersecting)) void fetchNextPage()
+    }, { root: contentRef.current, rootMargin: '120px 0px', threshold: 0 })
+    observer.observe(paginationRef.current)
+    return () => observer.disconnect()
+  }, [active, fetchNextPage, hasNextPage, isFetchNextPageError, isFetchingNextPage])
 
   const handleClearAll = async () => {
     if (!rows.length || isClearing) return
@@ -88,6 +107,16 @@ export default function NotificationsView({
     }
   }
 
+  const handleDismiss = async (notificationId) => {
+    if (!onDismiss || dismissState[notificationId] === 'working') return
+    setDismissState(current => ({ ...current, [notificationId]: 'working' }))
+    try {
+      await onDismiss(notificationId)
+    } catch {
+      setDismissState(current => ({ ...current, [notificationId]: 'error' }))
+    }
+  }
+
   return (
     <section
       id="notification-preview"
@@ -109,7 +138,7 @@ export default function NotificationsView({
           </button>
         )}
       </div>
-      <div className="notifications__content">
+      <div className="notifications__content" ref={contentRef}>
         {isLoading && (
           <p className="notifications__hint" role="status">Loading…</p>
         )}
@@ -169,6 +198,7 @@ export default function NotificationsView({
               ? { ...parsedNav, focusQuestion: true }
               : parsedNav
             const recovery = notificationRecoveryAction(n)
+            const protectsDismissal = hasRecoveryReceipt(n)
             const recoveryStatus = recoveryState[n.id]
             const unavailableLabel = recovery && (
               recoveryStatus === 'done' ? 'Restored' : (
@@ -205,7 +235,7 @@ export default function NotificationsView({
                       )}
                       {!unavailableLabel && (
                         <span className="notifications__recovery-deadline">
-                          Undo until {new Date(recovery.expiresAt).toLocaleString()}
+                          Expires: {formatDateTime(recovery.expiresAt)}
                         </span>
                       )}
                       {recoveryStatus?.message && !recoveryStatus.terminal && !unavailableLabel ? (
@@ -226,49 +256,72 @@ export default function NotificationsView({
             )
             return (
               <li key={n.id} className="notifications__row-item">
-                {nav && !recovery ? (
-                  <button
-                    type="button"
-                    className="notifications__row notifications__row--link"
-                    onPointerDown={() => {
-                      pointerSelectionRef.current = textSelectionSnapshot()
-                    }}
-                    onClick={(event) => {
-                      const selectionBeforePointer = pointerSelectionRef.current
-                      pointerSelectionRef.current = null
-                      if (
-                        event.detail !== 0
-                        && pointerSelectionChangedWithin(
-                          selectionBeforePointer,
-                          event.currentTarget,
-                        )
-                      ) return
-                      onOpenTarget?.(nav)
-                    }}
-                  >
-                    {body}
-                  </button>
-                ) : (
-                  <div className="notifications__row">{body}</div>
+                <div className="notifications__row-shell">
+                  {nav && !recovery ? (
+                    <button
+                      type="button"
+                      className="notifications__row notifications__row--link"
+                      onPointerDown={() => {
+                        pointerSelectionRef.current = textSelectionSnapshot()
+                      }}
+                      onClick={(event) => {
+                        const selectionBeforePointer = pointerSelectionRef.current
+                        pointerSelectionRef.current = null
+                        if (
+                          event.detail !== 0
+                          && pointerSelectionChangedWithin(
+                            selectionBeforePointer,
+                            event.currentTarget,
+                          )
+                        ) return
+                        onOpenTarget?.(nav)
+                      }}
+                    >
+                      {body}
+                    </button>
+                  ) : (
+                    <div className="notifications__row">{body}</div>
+                  )}
+                  {!protectsDismissal && (
+                    <button
+                      type="button"
+                      className="notifications__dismiss"
+                      aria-label={`Dismiss ${n.title}`}
+                      title="Dismiss notification"
+                      disabled={!onDismiss || dismissState[n.id] === 'working'}
+                      onClick={() => handleDismiss(n.id)}
+                    >
+                      <X width={16} height={16} aria-hidden="true" />
+                    </button>
+                  )}
+                </div>
+                {dismissState[n.id] === 'error' && (
+                  <p className="notifications__dismiss-error" role="alert">
+                    Couldn’t dismiss this notification. Try again.
+                    <button type="button" onClick={() => handleDismiss(n.id)}>Try again</button>
+                  </p>
                 )}
               </li>
             )
           })}
         </ul>
-        {isFetchNextPageError && (
-          <p className="notifications__hint notifications__hint--error" role="alert">
-            Couldn’t load older notifications. Try again.
-          </p>
-        )}
         {hasNextPage && (
-          <button
-            type="button"
-            className="notifications__load-more"
-            disabled={isFetchingNextPage}
-            onClick={() => fetchNextPage()}
-          >
-            {isFetchingNextPage ? 'Loading…' : 'Load older notifications'}
-          </button>
+          <div className="notifications__pagination" ref={paginationRef}>
+            {isFetchingNextPage && (
+              <p className="notifications__hint" role="status">Loading older notifications…</p>
+            )}
+            {isFetchNextPageError && (
+              <div className="notifications__pagination-error" role="alert">
+                <span>Couldn’t load older notifications.</span>
+                <button type="button" onClick={() => fetchNextPage()}>Try again</button>
+              </div>
+            )}
+            {typeof IntersectionObserver === 'undefined' && !isFetchNextPageError && (
+              <button type="button" className="notifications__load-more" onClick={() => fetchNextPage()}>
+                Load older notifications
+              </button>
+            )}
+          </div>
         )}
       </div>
     </section>

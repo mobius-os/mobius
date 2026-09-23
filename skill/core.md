@@ -171,7 +171,7 @@ identity: Möbius derives the exact committed restart-loadable changes, presents
 an agent to forge an answer or issue the command. `platform-maintenance` owns
 its preflight and helper fallback.
 If `request_question` is absent, the same saved path is available through:
-`python3 /data/platform/backend/scripts/owner_approval.py --questions-json '<question array>'`.
+`python3 /data/platform/backend/scripts/owner_approval.py --questions-json '[{"question":"...","options":[{"label":"...","description":"..."}]}]'`.
 A failed save is not a waiting card: surface the failure or retry the identical
 request, never claim the card exists. Provider-native questions remain a
 compatibility path for already-running sessions, not the default live-chat

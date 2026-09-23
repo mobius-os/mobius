@@ -5,13 +5,14 @@ import { X, ArrowRotateCw } from '@openai/apps-sdk-ui/components/Icon'
 import { api, jsonOrThrow } from '../../api/client.js'
 import useDialogFocus from '../../hooks/useDialogFocus.js'
 import { networkSummary } from './ChatAgentNetwork.jsx'
+import { formatDateTime } from '../../lib/dateTimeFormat.js'
 import './ChatUsageInspector.css'
 import './ChatNetworkInspector.css'
 
 function timestamp(value) {
   if (!value) return ''
   const date = new Date(/(?:Z|[+-]\d\d:\d\d)$/.test(value) ? value : `${value}Z`)
-  return Number.isNaN(date.getTime()) ? '' : date.toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })
+  return Number.isNaN(date.getTime()) ? '' : formatDateTime(date)
 }
 
 export function NetworkMessage({ message, chatId }) {

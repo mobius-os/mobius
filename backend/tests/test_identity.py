@@ -238,6 +238,38 @@ def test_identity_app_requires_reviewed_capability(client, auth):
     assert body["member_since"] == owner.created_at.date().isoformat()
 
 
+def test_mobius_model_switch_defaults_on_and_can_be_changed_without_account(
+  client, auth,
+):
+  from app.config import get_settings
+  from app.providers import mobius_models_enabled
+
+  granted = _app_auth(client, auth, granted=True)
+  denied = _app_auth(client, auth, granted=False)
+  assert client.get("/api/identity/agent/models-enabled", headers=denied).status_code == 403
+  assert client.get("/api/identity/agent/models-enabled", headers=granted).json() == {
+    "enabled": True,
+  }
+  changed = client.patch(
+    "/api/identity/agent/models-enabled",
+    headers=granted,
+    json={"enabled": False},
+  )
+  assert changed.status_code == 200, changed.text
+  assert changed.json() == {"enabled": False}
+  assert not mobius_models_enabled(get_settings().data_dir)
+  assert client.get("/api/identity/agent/models-enabled", headers=granted).json() == {
+    "enabled": False,
+  }
+  restored = client.patch(
+    "/api/identity/agent/models-enabled",
+    headers=granted,
+    json={"enabled": True},
+  )
+  assert restored.status_code == 200, restored.text
+  assert restored.json() == {"enabled": True}
+
+
 def test_identity_member_since_preserves_the_owners_original_calendar_date(
   client, auth,
 ):
