@@ -148,6 +148,11 @@ truth: apply validates and materializes that exact accepted file, so do not
 upload a second copy after applying. The apply helper also applies the offline
 flag and versioned `capabilities` object; do not patch the app row separately.
 
+Möbius supplies generic offline storage, queues, connectivity, and conflict
+delivery; the app owns caching policy, reconciliation, and UI. Collection apps
+must use `storage.listWithStatus()` and treat `complete:false` as unavailable,
+not empty.
+
 ### 3. Apply once early, then after each coherent revision
 
 As soon as the first slice compiles and contains one real feature:

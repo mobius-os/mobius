@@ -25,7 +25,7 @@
 //   window.mobius.storage.getBlob(path)           -> Blob | null        (offline, cache-first)
 //   window.mobius.storage.setBlob(path, blob, opts?)-> {synced} | {queued}  opts.contentType; <=25 MiB
 //   window.mobius.storage.remove(path)            -> {synced} | {queued}
-//   window.mobius.storage.list(prefix, opts?)     -> entries[]  (offline-capable: cache+outbox overlay)
+//   window.mobius.storage.list(prefix, opts?)     -> entries[]  (best-known compatibility view)
 //     opts.includeContent adds `content` to small JSON file entries in the
 //     server's bounded listing response; exceptional entries remain metadata-only.
 //   window.mobius.storage.listWithStatus(prefix, opts?)
@@ -280,9 +280,7 @@ export function init({ appId, appInstanceId = null, getToken, capabilityContract
 //   writes on read), and write-time eviction would drop hot entries — so the
 //   eviction policy is deliberately deferred (filed under .pm/083). Fine at
 //   personal-app scale; revisit if a blob-heavy app pressures the origin quota.
-// - list() is offline-capable (078): when the server is unreachable it derives
-//   direct children from the per-path read-through cache (present=false
-//   tombstones excluded, so a synced delete does NOT resurrect — the hazard a
-//   cached listing blob would have had), then overlays the outbox. Same
-//   online/offline contract get() has. Offline entries omit size/modified_at,
-//   which only the server stat provides.
+// - listWithStatus() persists complete server membership snapshots and overlays
+//   queued writes. Without a complete snapshot it returns useful derived paths
+//   with complete:false, so apps cannot mistake a partial cache for an empty
+//   collection. list() is the entries-only compatibility view.
