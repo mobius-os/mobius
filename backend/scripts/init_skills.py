@@ -210,6 +210,7 @@ _UNMODIFIED_MIGRATIONS = {
     "2ea47c610eb2bffaf42c8cbe8e2c69d17943c992bb22ba2aaa2e0c65b6ea1499",
     "6d5b89f49ade7d3fd8be5e29de851f52927a0617ebb804367ae804533fc615b0",
     "200656c730edbb17c7dabfb901ac45dd6942ed00c7aa78b1ab96316d3410a089",
+    "b5085a5288ca55fc1b9f5604a4e5655905d830501d6c4595a0ecbd4358407226",
     # Intermediate mapi copy before credential reads preserved HTTP failures.
     "734a5fd00dcd58e53f6713a2663d0dd18dec92abcbcf767c7f02f894d92ee510",
     # Untouched release copy before owner-context API examples used mapi.
