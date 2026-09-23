@@ -25,6 +25,7 @@ import asyncio
 import hashlib
 import json
 import os
+import signal
 import subprocess
 import stat
 import textwrap
@@ -3228,6 +3229,94 @@ async def test_cancelled_apply_finishes_its_admitted_transaction(
   assert progress["phase"] == pu.PlatformUpdatePhase.COMPLETE.value
 
 
+@pytest.mark.asyncio
+async def test_cancelled_apply_reports_cancellation_after_transaction_failure(
+  monkeypatch, clone_env,
+):
+  origin, platform = clone_env
+  target = _advance_origin(
+    origin,
+    edits={"backend/app/main.py":
+      _MAIN_PY.replace("LINE_C = 3", "LINE_C = 401")},
+  )
+  pu._fetch(platform)
+  preview = pu.platform_update_preview(platform, target_sha=target)
+  worker_started = threading.Event()
+  release_worker = threading.Event()
+
+  def fail_reconcile(*args, **kwargs):
+    worker_started.set()
+    assert release_worker.wait(timeout=5)
+    raise RuntimeError("reconcile failed after disconnect")
+
+  monkeypatch.setattr(pu, "_reconcile_under_lock", fail_reconcile)
+  applying = asyncio.create_task(pu.apply_platform_update(
+    SimpleNamespace(),
+    plan_id=preview["plan_id"],
+    current_sha=preview["current_sha"],
+    target_sha=preview["target_sha"],
+    repo=platform,
+  ))
+  assert await asyncio.to_thread(worker_started.wait, 2)
+
+  applying.cancel()
+  release_worker.set()
+  with pytest.raises(asyncio.CancelledError):
+    await applying
+
+  progress = pu.platform_update_progress()
+  assert progress["active"] is False
+  assert progress["phase"] == pu.PlatformUpdatePhase.FAILED.value
+  assert progress["error"] == "reconcile failed after disconnect"
+
+
+@pytest.mark.asyncio
+async def test_apply_keeps_cross_process_lock_through_final_progress(
+  monkeypatch, clone_env,
+):
+  origin, platform = clone_env
+  target = _advance_origin(
+    origin,
+    edits={"backend/app/main.py":
+      _MAIN_PY.replace("LINE_C = 3", "LINE_C = 402")},
+  )
+  pu._fetch(platform)
+  preview = pu.platform_update_preview(platform, target_sha=target)
+  finalizing = threading.Event()
+  release_finalizing = threading.Event()
+
+  def delayed_hook_refresh(*_args, **_kwargs):
+    finalizing.set()
+    assert release_finalizing.wait(timeout=5)
+    return None
+
+  monkeypatch.setattr(pu, "_refresh_git_hooks", delayed_hook_refresh)
+  applying = asyncio.create_task(pu.apply_platform_update(
+    SimpleNamespace(),
+    plan_id=preview["plan_id"],
+    current_sha=preview["current_sha"],
+    target_sha=preview["target_sha"],
+    repo=platform,
+  ))
+  assert await asyncio.to_thread(finalizing.wait, 2)
+
+  with pytest.raises(pu.PlatformUpdateError, match="platform_update_in_progress"):
+    with pu._reconcile_flock(blocking=False):
+      pass
+  progress = pu.platform_update_progress()
+  assert progress["active"] is True
+  assert progress["phase"] == pu.PlatformUpdatePhase.FINALIZING.value
+
+  release_finalizing.set()
+  result = await applying
+  assert result["state"] in {
+    pu.PlatformUpdateState.UP_TO_DATE.value,
+    pu.PlatformUpdateState.RESTART_NEEDED.value,
+    pu.PlatformUpdateState.ACTIVATION_NEEDED.value,
+  }
+  assert pu.platform_update_progress()["active"] is False
+
+
 def test_preview_reports_an_active_update_instead_of_waiting(clone_env):
   _origin, platform = clone_env
 
@@ -3779,6 +3868,33 @@ def test_review_does_not_follow_uncommitted_image_input_symlink(clone_env):
   assert preview["blocking_paths"] == ["Dockerfile"]
   assert str(secret) in preview["blocking_diff"]
   assert "do-not-expose" not in preview["blocking_diff"]
+
+
+def test_review_does_not_block_on_uncommitted_image_input_fifo(clone_env):
+  origin, platform = clone_env
+  _local_commit(platform, edits={"Dockerfile": "FROM local-owner-image\n"})
+  dockerfile = platform / "Dockerfile"
+  dockerfile.unlink()
+  os.mkfifo(dockerfile)
+  target = _advance_origin(
+    origin,
+    edits={"Dockerfile": "FROM reviewed-official-image\n"},
+  )
+  pu._fetch(platform)
+
+  def stalled(_signum, _frame):
+    raise AssertionError("Review blocked while opening a local named pipe")
+
+  previous = signal.signal(signal.SIGALRM, stalled)
+  signal.alarm(5)
+  try:
+    preview = pu.platform_update_preview(platform, target_sha=target)
+  finally:
+    signal.alarm(0)
+    signal.signal(signal.SIGALRM, previous)
+
+  assert preview["blocking_paths"] == ["Dockerfile"]
+  assert "reviewed-official-image" in preview["blocking_diff"]
 
 
 def test_review_describes_a_locally_deleted_image_input(clone_env):

@@ -2437,6 +2437,7 @@ def _reconcile_under_lock(
   image_digest: str | None = None,
   allow_image_activation: bool = False,
   progress: Callable[[PlatformUpdatePhase], None] | None = None,
+  lock_already_held: bool = False,
 ) -> ReconcileResult:
   """Serialize source updates with startup recovery using RECONCILE_LOCK.
 
@@ -2444,7 +2445,8 @@ def _reconcile_under_lock(
   lock. The lock covers source, dependency installation, the frontend build
   and rollback; browser progress reads use the durable phase record.
   """
-  with _reconcile_flock():
+  guard = contextlib.nullcontext() if lock_already_held else _reconcile_flock()
+  with guard:
     if plan_id is not None:
       if current_sha is None:
         raise PlatformUpdateError("update_plan_invalid")
@@ -2896,7 +2898,11 @@ def _read_worktree_path_without_links(repo: Path, relative: str) -> str:
       )
       opened.append(current)
     try:
-      leaf = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW, dir_fd=current)
+      leaf = os.open(
+        parts[-1],
+        os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+        dir_fd=current,
+      )
     except FileNotFoundError:
       return f"(local path is not present: {relative})\n"
     except OSError:
@@ -3098,8 +3104,12 @@ async def apply_platform_update(
     if not started.is_set():
       task.cancel()
     while not task.done():
-      with contextlib.suppress(asyncio.CancelledError):
+      try:
         await asyncio.shield(task)
+      except asyncio.CancelledError:
+        continue
+      except Exception:
+        break
     if started.is_set():
       try:
         task.result()
@@ -3128,6 +3138,28 @@ async def _apply_platform_update_guarded(
   """
   async with _APPLY_LOCK:
     started.set()
+    return await asyncio.to_thread(
+      _apply_platform_update_sync,
+      plan_id=plan_id,
+      current_sha=current_sha,
+      target_sha=target_sha,
+      image_digest=image_digest,
+      repo=repo,
+      allow_image_activation=allow_image_activation,
+    )
+
+
+def _apply_platform_update_sync(
+  *,
+  plan_id: str,
+  current_sha: str,
+  target_sha: str,
+  image_digest: str | None,
+  repo: Path,
+  allow_image_activation: bool,
+) -> PlatformApplyResult:
+  """Own reconcile through terminal progress under one cross-process lock."""
+  with _reconcile_flock():
     _set_update_progress(
       PlatformUpdatePhase.PREPARING,
       plan_id=plan_id,
@@ -3144,9 +3176,8 @@ async def _apply_platform_update_guarded(
       )
 
     try:
-      existing_conflict = await asyncio.to_thread(_read_conflict_flag) or {}
-      res = await asyncio.to_thread(
-        _reconcile_under_lock,
+      existing_conflict = _read_conflict_flag() or {}
+      res = _reconcile_under_lock(
         repo,
         target_ref=target_sha,
         plan_id=plan_id,
@@ -3154,6 +3185,7 @@ async def _apply_platform_update_guarded(
         image_digest=image_digest,
         allow_image_activation=allow_image_activation,
         progress=publish_progress,
+        lock_already_held=True,
       )
       chat_id: str | None = None
 
@@ -3173,9 +3205,7 @@ async def _apply_platform_update_guarded(
 
       if res.status == "updated":
         publish_progress(PlatformUpdatePhase.FINALIZING)
-        hook_refresh = await asyncio.to_thread(
-          _refresh_git_hooks, repo, res.hook_source_sha,
-        )
+        hook_refresh = _refresh_git_hooks(repo, res.hook_source_sha)
         if hook_refresh:
           log.warning("git hook refresh failed after platform update: %s", hook_refresh)
         # Compare what this process imported to the new head, not only the
