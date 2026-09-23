@@ -1,4 +1,5 @@
 /* Presentation shared by active handoffs and settled wait history. */
+import { formatDateTime, formatTime } from '../../lib/dateTimeFormat.js'
 
 export function waitConditionLabel(description) {
   // Sentence-case the instruction, not case-sensitive project names or refs.
@@ -13,18 +14,11 @@ function apiDate(value) {
 }
 
 function clockLabel(value) {
-  return apiDate(value)?.toLocaleTimeString([], {
-    hour: '2-digit',
-    minute: '2-digit',
-  }) || null
+  return formatTime(apiDate(value)) || null
 }
 
 function dateTimeLabel(value) {
-  return apiDate(value)?.toLocaleString([], {
-    weekday: 'short',
-    hour: '2-digit',
-    minute: '2-digit',
-  }) || 'not set'
+  return formatDateTime(apiDate(value)) || 'not set'
 }
 
 function cadenceLabel(wait) {

@@ -10,6 +10,7 @@ import { api } from '../../api/client.js'
 import { appQueries, chatQueries, projectQueries } from '../../hooks/queries.js'
 import useDialogFocus from '../../hooks/useDialogFocus.js'
 import { requestChatSearchReveal } from '../../lib/chatSearchReveal.js'
+import { formatDateTime } from '../../lib/dateTimeFormat.js'
 import AppIcon from '../AppIcon.jsx'
 import ProjectIdentityIcon from '../Projects/ProjectIdentityIcon.jsx'
 import {
@@ -171,7 +172,7 @@ function GlobalSearchResult({
           <time
             className="global-search__result-time"
             dateTime={lastActiveValue}
-            title={`Last active ${new Date(lastActiveValue).toLocaleString()}`}
+            title={`Last active ${formatDateTime(lastActiveValue)}`}
           >
             {lastActive}
           </time>

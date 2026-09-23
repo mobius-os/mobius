@@ -55,12 +55,11 @@ test('trial time remaining stays compact and is derived from the exact expiry', 
 })
 
 test('reset formatting distinguishes today from another day', () => {
-  const now = new Date(2026, 6, 30, 12, 0)
-  const today = formatUsageReset(new Date(2026, 6, 30, 17, 5), now)
-  const later = formatUsageReset(new Date(2026, 7, 3, 7, 0), now)
+  const today = formatUsageReset(new Date(2026, 6, 30, 17, 5))
+  const later = formatUsageReset(new Date(2026, 7, 3, 7, 0))
 
-  assert.equal(today, 'Resets 17:05')
-  assert.equal(later, 'Resets Mon 07:00')
+  assert.equal(today, 'Resets 30th Jul 2026, 17:05')
+  assert.equal(later, 'Resets 3rd Aug 2026, 07:00')
 })
 
 test('only four valid allowance windows are rendered', () => {
