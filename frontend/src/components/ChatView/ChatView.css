@@ -419,7 +419,7 @@
 
 /* Metadata (timestamp + copy) for both user and assistant messages.
    Older rows reveal it on tap; the newest message of each role (see
-   metaAlwaysVisible in ChatView.jsx) keeps it visible without a tap.
+   useMessageMetadata) keeps it visible without a tap.
    The row sits on the same side as its bubble: flush right by default
    (user), flush left for --assistant. */
 .chat__msg-meta {
