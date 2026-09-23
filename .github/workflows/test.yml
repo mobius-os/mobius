@@ -95,7 +95,7 @@ jobs:
       - name: Install pinned Codex Python SDK
         run: >-
           pip install --no-deps
-          'openai-codex==0.156.1'
+          "openai-codex==$(sed -n 's/^ARG CODEX_SDK_VERSION=//p' Dockerfile)"
       - name: Run backend static analysis
         working-directory: backend
         run: |

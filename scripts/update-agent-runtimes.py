@@ -41,6 +41,8 @@ def propose(root, fetch=read_url):
                 if requirement.startswith("openai-codex-cli-bin==")]
     if sdk_bins != [codex_sdk]:
         raise ValueError("Codex SDK release does not declare its matching CLI runtime")
+    if codex != codex_sdk:
+        raise ValueError("Codex npm CLI and Python SDK releases differ; wait for matching versions")
     claude = json.loads(fetch("https://pypi.org/pypi/claude-agent-sdk/json"))["info"]["version"]
     changes = []
     for name, text, pattern, latest in [

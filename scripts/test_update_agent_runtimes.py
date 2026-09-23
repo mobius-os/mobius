@@ -44,7 +44,7 @@ class RuntimeUpdateTests(unittest.TestCase):
     def propose(self):
         return UPDATER["propose"](self.root, self.fetch)
 
-    def test_matches_independent_codex_cli_and_sdk_releases_without_writing(self):
+    def test_matches_codex_cli_and_sdk_releases_without_writing(self):
         files, changes = self.propose()
         self.assertIn("ARG CODEX_VERSION=1.2.4", files["Dockerfile"])
         self.assertIn("ARG CODEX_SDK_VERSION=1.2.4", files["Dockerfile"])
@@ -81,6 +81,15 @@ class RuntimeUpdateTests(unittest.TestCase):
         self.codex_sdk = "1.2.2"
         with self.assertRaises(ValueError):
             self.propose()
+
+    def test_newer_cli_and_sdk_releases_must_match_before_writing(self):
+        before = (self.root / "Dockerfile").read_bytes()
+        for cli, sdk in (("1.2.4", "1.2.5"), ("1.2.5", "1.2.4")):
+            with self.subTest(cli=cli, sdk=sdk):
+                self.codex, self.codex_sdk = cli, sdk
+                with self.assertRaisesRegex(ValueError, "releases differ"):
+                    self.propose()
+                self.assertEqual(before, (self.root / "Dockerfile").read_bytes())
 
     def test_missing_release_or_network_error_writes_nothing(self):
         def unavailable(url):
