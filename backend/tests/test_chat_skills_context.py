@@ -178,23 +178,23 @@ def test_core_prompt_requires_approval_before_changing_guarded_invariants():
   assert "preserves the same contract does not require escalation" in normalized
 
 
-def test_core_keeps_only_established_actionable_workstreams_open():
+def test_core_requires_saved_handoffs_for_actionable_plans_and_reviews():
   repo = Path(__file__).resolve().parents[2]
-  core = " ".join((repo / "skill" / "core.md").read_text(
+  core = (repo / "skill" / "core.md").read_text(
     encoding="utf-8",
-  ).split())
+  )
+  normalized = " ".join(core.split())
 
-  assert "its established workstream is not" in core
-  assert "specific, in-scope, materially useful continuation" in core
-  assert "decision is genuinely needed to settle that workstream" in core
-  assert "Do not invent adjacent work merely because it is possible" in core
-  assert "Use the action-appropriate saved card" in core
-  assert '`request_question` for an ordinary choice' in core
-  assert '`request_approval` for permission' in core
-  assert '`request_restart` for a restart' in core
-  assert 'terminal **Not now** choice `on_answer: "close"` only when' in core
-  assert "If a Goal is unfinished, let the answer resume" in core
-  assert "unless an exact durable owner is already continuing that Goal" in core
+  assert core.index("**Mandatory final-action decision for owner chats.**") \
+    < core.index("The stable constitution:")
+  assert "plan, review, audit, critique, or recommendations" in normalized
+  assert "you MUST call `request_question` as your final action" in normalized
+  assert "they do not exempt this handoff" in normalized
+  assert "owner already authorized the follow-on, do it without asking" \
+    in normalized
+  assert "owner explicitly said not to offer or perform later work" in normalized
+  assert "answer has no actionable change, finish declaratively" in normalized
+  assert "Never substitute a prose question or declarative close" in normalized
 
 
 def test_goal_routing_rechecks_phase_transitions_and_prefers_platform_tool():
