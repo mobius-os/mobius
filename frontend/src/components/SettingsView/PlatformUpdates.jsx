@@ -15,7 +15,7 @@ export default function PlatformUpdates({ active, refreshToken, onOpenChat, iner
   const update = usePlatformUpdates({ active, refreshToken, onOpenChat })
   const { platform, cachedPlatform, rebuild, version, phase, busy } = update
   const [review, setReview] = useState(null)
-  const [confirmRestart, setConfirmRestart] = useState(false)
+  const [confirmRestart, setConfirmRestart] = useState(null)
   const actionRef = useRef(null)
   const restoreFocus = useRef(false)
   const level = platformActivationLevel(platform)
@@ -32,6 +32,12 @@ export default function PlatformUpdates({ active, refreshToken, onOpenChat, iner
   const repairReason = !conflict && platformUpdateRepairReason({ platform, rebuild, error: update.error, errorCode: update.errorCode })
 
   useEffect(() => {
+    if (!confirmRestart || busy) return
+    const timeout = setTimeout(() => setConfirmRestart(null), 4000)
+    return () => clearTimeout(timeout)
+  }, [confirmRestart, busy])
+
+  useEffect(() => {
     if (review || busy || !restoreFocus.current) return
     const frame = requestAnimationFrame(() => {
       if (!actionRef.current || actionRef.current.disabled) return
@@ -43,7 +49,7 @@ export default function PlatformUpdates({ active, refreshToken, onOpenChat, iner
 
   function openReview(intent = 'update') {
     update.clearError()
-    setConfirmRestart(false)
+    setConfirmRestart(null)
     setReview(intent)
   }
   function closeReview() { restoreFocus.current = true; setReview(null) }
@@ -53,7 +59,8 @@ export default function PlatformUpdates({ active, refreshToken, onOpenChat, iner
     // State from the check and focus restoration settle in the same render.
     actionRef.current?.focus({ preventScroll: true })
   }
-  function askRestart() { update.clearError(); setConfirmRestart(true) }
+  function askRestart(source) { update.clearError(); setConfirmRestart(source) }
+  function restart() { setConfirmRestart(null); update.restart() }
 
   const primary = conflict
     ? { label: platform?.conflict_chat_id ? 'Open chat' : 'Resolve in chat', act: update.resolve }
@@ -62,7 +69,7 @@ export default function PlatformUpdates({ active, refreshToken, onOpenChat, iner
       : imageNeeded
         ? { label: 'Finish update', act: () => openReview('finish') }
         : restartNeeded
-          ? { label: 'Restart to finish', act: askRestart }
+          ? { label: 'Restart to finish', act: () => askRestart('primary') }
           : { label: phase === 'checking' ? 'Checking…' : 'Check for updates', act: check }
   const status = activeRebuild ? rebuildProgressMessage(rebuild)
     : update.reconnecting ? (update.observingKind === 'apply' ? 'Checking the update…' : 'Restarting Möbius…')
@@ -74,45 +81,32 @@ export default function PlatformUpdates({ active, refreshToken, onOpenChat, iner
         <h2 id="platform-updates-title" className="platform-updates__title">Updates</h2>
         <p className="platform-updates__status" role="status">{status}</p>
       </div>
-      {confirmRestart ? (
-        <div className="platform-updates__confirmation" role="group" aria-label="Confirm restart">
-          <p>Restarting briefly interrupts active chats across Möbius. The page will reconnect automatically. This does not replace the container.</p>
-          <div className="platform-updates__actions">
-            <button ref={actionRef} className="settings__btn settings__btn--sm" onClick={update.restart} disabled={busy}>
-              {busy ? 'Restarting…' : 'Restart now'}
-            </button>
-            <button className="settings__btn settings__btn--outline settings__btn--sm" disabled={busy} onClick={() => {
-              setConfirmRestart(false); restoreFocus.current = true
-            }}>Not now</button>
-          </div>
-        </div>
-      ) : (
-        <div className="platform-updates__actions">
-          {repairReason ? (
-            <UpdateRepairAction platform={platform} rebuild={rebuild} error={update.error} errorCode={update.errorCode}
-              disabled={busy} buttonRef={actionRef} className="settings__btn settings__btn--sm" />
-          ) : (
-            <button ref={actionRef} className={`settings__btn settings__btn--sm${!conflict && !available && !imageNeeded && !restartNeeded ? ' settings__btn--outline' : ''}`} disabled={busy || (conflict && !onOpenChat)} onClick={primary.act}>
-              {busy ? (phase === 'checking' ? 'Checking…' : 'Updating…') : primary.label}
-            </button>
-          )}
-        </div>
-      )}
+      <div className="platform-updates__actions">
+        {repairReason ? (
+          <UpdateRepairAction platform={platform} rebuild={rebuild} error={update.error} errorCode={update.errorCode}
+            disabled={busy} buttonRef={actionRef} className="settings__btn settings__btn--sm" />
+        ) : (
+          <button ref={actionRef} className={`settings__btn settings__btn--sm${!conflict && !available && !imageNeeded && !restartNeeded ? ' settings__btn--outline' : ''}`} disabled={busy || (conflict && !onOpenChat)} onClick={confirmRestart === 'primary' ? restart : primary.act}>
+            {busy ? (phase === 'checking' ? 'Checking…' : phase === 'restarting' ? 'Restarting…' : 'Updating…') : confirmRestart === 'primary' ? 'Confirm restart' : primary.label}
+          </button>
+        )}
+      </div>
       {repairReason && !review && !update.reconnecting && (
         <div className="platform-updates__description">
           <p>{repairReason}</p>
           {(platform?.activation?.guidance || []).map(line => <p key={line}>{line}</p>)}
         </div>
       )}
-      <dl className="platform-updates__versions">
-        <dt>Installed update</dt><dd>{formatUpstreamCommitDate(versionPlatform?.contained_upstream_committed_at) || missingVersionLabel} {mobiusVersion.primarySha && <code>{mobiusVersion.primarySha}</code>}</dd>
-        <dt>Current system</dt><dd>{formatUpstreamCommitDate(versionPlatform?.current_build_committed_at || version?.build_date) || missingVersionLabel} {containerVersion.sha && <code>{containerVersion.sha}</code>}</dd>
-      </dl>
-      {!confirmRestart && (
-        <div className="platform-updates__restart-row">
-          <button className="settings__btn settings__btn--outline settings__btn--sm" disabled={busy} onClick={askRestart}>Restart server</button>
-        </div>
-      )}
+      <div className="platform-updates__version-row">
+        <dl className="platform-updates__versions">
+          <dt>Code</dt><dd>{formatUpstreamCommitDate(versionPlatform?.contained_upstream_committed_at) || missingVersionLabel} {mobiusVersion.primarySha && <code>{mobiusVersion.primarySha}</code>}</dd>
+          <dt>Container</dt><dd>{formatUpstreamCommitDate(versionPlatform?.current_build_committed_at || version?.build_date) || missingVersionLabel} {containerVersion.sha && <code>{containerVersion.sha}</code>}</dd>
+        </dl>
+        <button className="settings__btn settings__btn--outline settings__btn--sm" disabled={busy} onClick={confirmRestart === 'dedicated' ? restart : () => askRestart('dedicated')}>
+          {phase === 'restarting' ? 'Restarting…' : confirmRestart === 'dedicated' ? 'Confirm restart' : 'Restart'}
+        </button>
+      </div>
+      {confirmRestart && <p className="platform-updates__description" role="status">Restarting briefly interrupts active chats. The page will reconnect automatically. This does not replace the container. Confirm within 4 seconds, or let this prompt expire.</p>}
       {!busy && !unavailable && !conflict && restartNeeded && (
         <p className="platform-updates__description">Your changes are ready. You can add more updates before restarting once.</p>
       )}

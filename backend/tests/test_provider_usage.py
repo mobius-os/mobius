@@ -672,6 +672,67 @@ def test_normalize_claude_usage_does_not_invent_extra_usage_availability():
   }
 
 
+@pytest.mark.asyncio
+async def test_claude_usage_keeps_paid_setting_when_reset_read_skips_spend(monkeypatch):
+  from app import provider_usage
+
+  requests = []
+
+  class Response:
+    def __init__(self, payload):
+      self.payload = payload
+
+    def raise_for_status(self):
+      return None
+
+    def json(self):
+      return self.payload
+
+  class Client:
+    def __init__(self, **_kwargs):
+      pass
+
+    async def __aenter__(self):
+      return self
+
+    async def __aexit__(self, *_args):
+      return None
+
+    async def get(self, url, *, headers):
+      requests.append(url)
+      assert headers["Authorization"] == "Bearer test-token"
+      if "skip_spend=1" in url:
+        return Response({
+          "five_hour": {"utilization": 30},
+          "cedar_ember": {"eligible": False, "grants": []},
+        })
+      return Response({
+        "five_hour": {"utilization": 30},
+        "extra_usage": {"is_enabled": True, "utilization": 25},
+      })
+
+  async def token(_data_dir):
+    return "test-token"
+
+  monkeypatch.setattr(provider_usage.httpx, "AsyncClient", Client)
+  monkeypatch.setattr(provider_usage.providers, "claude_access_token", token)
+  monkeypatch.setattr(provider_usage.providers, "claude_subscription_type", lambda _data_dir: "max")
+
+  snapshot = await provider_usage._fetch_claude_usage("/unused")
+
+  assert requests == [
+    provider_usage._CLAUDE_USAGE_URL,
+    provider_usage._CLAUDE_RESET_USAGE_URL,
+  ]
+  assert snapshot["extra_usage"] == {
+    "enabled": True,
+    "available": True,
+    "used_percent": 25.0,
+    "manageable": True,
+  }
+  assert snapshot["reset_credits"]["eligible"] is False
+
+
 def test_normalize_claude_usage_surfaces_only_provider_selected_reset():
   from app.provider_usage import normalize_claude_usage
 

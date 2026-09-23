@@ -45,8 +45,8 @@ test('version details distinguish served Möbius from its container identity', (
   assert.match(updates, /platformVersionIdentity\(versionPlatform, version\)/)
   assert.match(updates, /containerVersionIdentity\(version\)/)
   assert.match(updates, /contained_upstream_committed_at/)
-  assert.match(updates, /<dt>Installed update<\/dt>/)
-  assert.match(updates, /<dt>Current system<\/dt>/)
+  assert.match(updates, /<dt>Code<\/dt>/)
+  assert.match(updates, /<dt>Container<\/dt>/)
   assert.match(updates, /mobiusVersion\.primarySha/)
   assert.match(updates, /containerVersion\.sha/)
   assert.doesNotMatch(updates, /Current with upstream|Last checked|upstream_checked_at/)
@@ -61,13 +61,14 @@ test('update versions paint from the persisted status cache without an Unknown f
   assert.match(updates, /versionPlatform \? 'Unavailable' : 'Checking…'/)
 })
 
-test('restart explains the interruption and its container boundary before confirmation', () => {
-  assert.match(updates, /Restart server<\/button>/)
-  assert.match(updates, /aria-label="Confirm restart"/)
+test('restart confirms on the same button for four seconds without a cancel button', () => {
+  assert.match(updates, /setTimeout\(\(\) => setConfirmRestart\(null\), 4000\)/)
+  assert.match(updates, /function restart\(\) \{ setConfirmRestart\(null\); update\.restart\(\) \}/)
+  assert.match(updates, /confirmRestart === 'primary' \? restart : primary\.act/)
+  assert.match(updates, /confirmRestart === 'dedicated' \? restart : \(\) => askRestart\('dedicated'\)/)
+  assert.doesNotMatch(updates, /Not now|Restart server/)
   assert.match(updates, /briefly interrupts active chats/)
   assert.match(updates, /does not replace the container/)
-  assert.match(updates, /onClick=\{update\.restart\}/)
-  assert.match(updates, /onClick=\{askRestart\}/)
   // An image replacement still belongs to its exact reviewed update, not a
   // second unreviewed maintenance action beside the server restart.
   assert.doesNotMatch(updates, /Rebuild now|Rebuild container|Replace now/)
@@ -169,10 +170,11 @@ test('original Settings keeps spacious rounded cards and full model summaries', 
 test('compact Updates pairs its status with actions without redundant success copy', () => {
   assert.match(updates, /platform-updates__heading[\s\S]*role="status"/)
   assert.doesNotMatch(updates, /No action needed\./)
-  assert.match(updates, /aria-label="Confirm restart"/)
+  assert.match(updates, /Confirm restart/)
   assert.match(updates, /className={`settings__btn settings__btn--sm/)
-  // Server restart lives on its own row below the versions, not in the header action row.
-  assert.match(updates, /<\/dl>[\s\S]*platform-updates__restart-row">[\s\S]*?onClick=\{askRestart\}>Restart server<\/button>/)
+  // Dedicated restart is vertically centered to the right of both versions.
+  assert.match(updates, /platform-updates__version-row">[\s\S]*<dl className="platform-updates__versions">[\s\S]*<\/dl>[\s\S]*: 'Restart'/)
+  assert.match(updateCss, /\.platform-updates__version-row\s*\{[^}]*grid-template-columns:\s*minmax\(0, 1fr\) auto;[^}]*align-items:\s*center;/s)
   assert.match(updateCss, /\.platform-updates > \.platform-updates__actions\s*\{[^}]*justify-content:\s*flex-end;/s)
   assert.doesNotMatch(updateCss, /\.platform-updates > \.platform-updates__actions\s*\{[^}]*flex-direction:\s*column;/s)
   assert.doesNotMatch(updateCss, /platform-updates__maintenance/)
@@ -197,13 +199,13 @@ test('provider actions keep their full labels on one line without a width cap', 
 })
 
 
-test('simple Updates keeps versions and server restart visible outside optional details', () => {
+test('simple Updates keeps versions and dedicated restart visible outside optional details', () => {
   const visible = updates.slice(0, updates.indexOf('{review && ('))
   assert.match(visible, />Updates<\/h2>/)
-  assert.match(visible, /<dt>Installed update<\/dt>/)
-  assert.match(visible, /<dt>Current system<\/dt>/)
-  assert.match(visible, /onClick=\{askRestart\}>Restart server<\/button>/)
-  assert.match(updates, /aria-label="Confirm restart"/)
+  assert.match(visible, /<dt>Code<\/dt>/)
+  assert.match(visible, /<dt>Container<\/dt>/)
+  assert.match(visible, /onClick=\{confirmRestart === 'dedicated' \? restart/)
+  assert.match(updates, /Confirm restart/)
 })
 
 test('external update instructions come from the activation owner, not a second UI policy', () => {
