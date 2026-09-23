@@ -94,3 +94,5 @@ A background or scheduled agent must not open a live card. Leave a declarative
 request for the next interactive chat instead. The explicitly approved reveal
 path is exceptional: it remains a live, transient handoff to the current model;
 never convert it into a persisted secret or use it to bypass sealed execution.
+Only an authenticated human-owner browser submission may supply either sealed
+or revealed values; an agent bearer is never credential-entry authority.

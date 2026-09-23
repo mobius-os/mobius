@@ -611,6 +611,12 @@ def test_route_dispatches_platform_restart_once_without_an_answer_turn(
       "content": "", "hidden": True, "question_id": qid,
       "selected_options": {"restart": [restart_id]},
     }
+    denied = client.post(
+      f"/api/chats/{chat.id}/messages", json=body,
+      headers={"Authorization": f"Bearer {token}"},
+    )
+    assert denied.status_code == 403, denied.text
+    assert calls == []
     first = client.post(
       f"/api/chats/{chat.id}/messages", json=body, headers=auth,
     )

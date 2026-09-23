@@ -212,6 +212,12 @@ def test_controlled_skills_have_fix_forward_migrations():
     "b591d15e335c72c0acf394ca7ce4b0daa633e124a487df7a713847cafc13ab6d",
     "668bd365e2edf694c921606c9619fff7b8e58806a9eb48745058b22731c44995",
     "25ccc8dd5ca6a97b4e6016853487967b70aad9119ec38b6a860ee69eb2a885e3",
+    "62a8a7e99fef4ca336090cae85f9a9a0eeeda5b8d8c7b8ed8cb0e907abe50b01",
+    "83365161e7da906d85a06d5291c62561091c9c31ed4175b9a10b00b527eb2662",
+  }
+  assert module._UNMODIFIED_MIGRATIONS["secure-input.md"] == {
+    "9bfab88e98e0514ba7e2509078fe15d2dba832d718c0d2eb89a4ea0ace00bd78",
+    "72d2ca2e878b26ec24a9934eb0301d146bbb73639bde43469844d4be27c0024a",
   }
   assert module._UNMODIFIED_MIGRATIONS["goal-planning.md"] == {
     "404552d57930a811eae26232c5fb6b1d9bd781abb941c194fea6990920f838c0",

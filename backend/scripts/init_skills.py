@@ -86,6 +86,17 @@ _UNMODIFIED_MIGRATIONS = {
     # option passthrough and the refused retargeting options instead of
     # implying everything forwards to curl.
     "25ccc8dd5ca6a97b4e6016853487967b70aad9119ec38b6a860ee69eb2a885e3",
+    # Transient agent-card-answering guidance and its owner-only replacement.
+    # Both were committed release candidates, so untouched installs at either
+    # exact byte generation must migrate without treating owner edits as stock.
+    "62a8a7e99fef4ca336090cae85f9a9a0eeeda5b8d8c7b8ed8cb0e907abe50b01",
+    "83365161e7da906d85a06d5291c62561091c9c31ed4175b9a10b00b527eb2662",
+  },
+  "secure-input.md": {
+    # Transient agent-supplied secret guidance and the restored owner-only
+    # contract. Preserve customized copies while advancing either stock form.
+    "9bfab88e98e0514ba7e2509078fe15d2dba832d718c0d2eb89a4ea0ace00bd78",
+    "72d2ca2e878b26ec24a9934eb0301d146bbb73639bde43469844d4be27c0024a",
   },
   "goal-planning.md": {
     # Explicit-completion seed before the redundant preflight was made optional.

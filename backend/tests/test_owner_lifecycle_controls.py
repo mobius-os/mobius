@@ -188,12 +188,12 @@ def test_delegated_bearer_cannot_enter_chat_lifecycle_controls(
   assert recovered.status_code == 200, recovered.text
 
 
-def test_delegated_bearer_cannot_impersonate_owner_input(
+def test_agent_bearers_cannot_impersonate_owner_input(
   client, owner_token, db,
 ):
   from app import secure_inputs
 
-  chat_ids, delegated_auth, _top_level_auth = _delegated_and_top_level_auth(
+  chat_ids, delegated_auth, top_level_auth = _delegated_and_top_level_auth(
     client, owner_token, db,
   )
   parent_id = chat_ids["parent"]
@@ -206,23 +206,24 @@ def test_delegated_bearer_cannot_impersonate_owner_input(
     }],
   }])
 
-  answered = client.post(
-    f"/api/chats/{parent_id}/question-answers",
-    json={"question_id": "owner-choice", "answers": {"confirm": "yes"}},
-    headers=delegated_auth,
-  )
-  assert answered.status_code == 403, answered.text
-  answered_through_send = client.post(
-    f"/api/chats/{parent_id}/messages",
-    json={
-      "content": "Proceed",
-      "hidden": True,
-      "question_id": "owner-choice",
-      "answers": {"confirm": "yes"},
-    },
-    headers=delegated_auth,
-  )
-  assert answered_through_send.status_code == 403, answered_through_send.text
+  for agent_auth in (delegated_auth, top_level_auth):
+    answered = client.post(
+      f"/api/chats/{parent_id}/question-answers",
+      json={"question_id": "owner-choice", "answers": {"confirm": "yes"}},
+      headers=agent_auth,
+    )
+    assert answered.status_code == 403, answered.text
+    answered_through_send = client.post(
+      f"/api/chats/{parent_id}/messages",
+      json={
+        "content": "Proceed",
+        "hidden": True,
+        "question_id": "owner-choice",
+        "answers": {"confirm": "yes"},
+      },
+      headers=agent_auth,
+    )
+    assert answered_through_send.status_code == 403, answered_through_send.text
 
   created_card = client.post(
     f"/api/secure-inputs/{parent_id}",
@@ -245,12 +246,13 @@ def test_delegated_bearer_cannot_impersonate_owner_input(
       "autocomplete": "off",
     }],
   )
-  supplied = client.post(
-    f"/api/secure-inputs/{parent_id}/{pending.request_id}/submit",
-    json={"fields": {"value": "child-authored"}},
-    headers=delegated_auth,
-  )
-  assert supplied.status_code == 403, supplied.text
+  for agent_auth in (delegated_auth, top_level_auth):
+    supplied = client.post(
+      f"/api/secure-inputs/{parent_id}/{pending.request_id}/submit",
+      json={"fields": {"value": "agent-authored"}},
+      headers=agent_auth,
+    )
+    assert supplied.status_code == 403, supplied.text
   assert pending.status == "pending"
   assert pending.values is None
 
