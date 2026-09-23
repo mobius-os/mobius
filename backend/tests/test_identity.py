@@ -242,27 +242,37 @@ def test_mobius_model_switch_defaults_on_and_can_be_changed_without_account(
   client, auth,
 ):
   from app.config import get_settings
-  from app.providers import mobius_models_enabled
+  from app import providers
 
   granted = _app_auth(client, auth, granted=True)
   denied = _app_auth(client, auth, granted=False)
-  assert client.get("/api/identity/agent/models-enabled", headers=denied).status_code == 403
-  assert client.get("/api/identity/agent/models-enabled", headers=granted).json() == {
+  with SessionLocal() as session:
+    row = next(app for app in session.query(models.App).all()
+               if (app.capability_contract or {}).get("data", {}).get("identity_manage") is True)
+    row.capability_contract = {**row.capability_contract, "model_provider": {
+      "name": "Möbius", "transport": "identity_broker",
+      "base_url": "http://127.0.0.1:8765/v1", "default_model": "inkling",
+      "models": [{"id": "inkling", "label": "Evolve"}],
+    }}
+    session.commit()
+  providers.sync_app_model_providers(get_settings().data_dir, force=True)
+  assert client.get("/api/auth/providers/mobius/enabled", headers=denied).status_code == 403
+  assert client.get("/api/auth/providers/mobius/enabled", headers=granted).json() == {
     "enabled": True,
   }
   changed = client.patch(
-    "/api/identity/agent/models-enabled",
+    "/api/auth/providers/mobius/enabled",
     headers=granted,
     json={"enabled": False},
   )
   assert changed.status_code == 200, changed.text
   assert changed.json() == {"enabled": False}
-  assert not mobius_models_enabled(get_settings().data_dir)
-  assert client.get("/api/identity/agent/models-enabled", headers=granted).json() == {
+  assert not providers.provider_enabled(get_settings().data_dir, "mobius")
+  assert client.get("/api/auth/providers/mobius/enabled", headers=granted).json() == {
     "enabled": False,
   }
   restored = client.patch(
-    "/api/identity/agent/models-enabled",
+    "/api/auth/providers/mobius/enabled",
     headers=granted,
     json={"enabled": True},
   )

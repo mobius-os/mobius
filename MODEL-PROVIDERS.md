@@ -9,7 +9,7 @@ retain their saved provider/model selection but
 cannot run it while the provider app is absent; Möbius does not silently send
 those chats to a different company.
 
-The first transport is **OpenAI Responses-compatible HTTPS**, driven by the
+The shared transport is **OpenAI Responses-compatible HTTPS**, driven by the
 existing Codex agent runtime. A compatible endpoint must support streamed
 Responses with tool calls; merely offering Chat Completions is insufficient.
 The app owns its setup UI, connection instructions, and one encrypted app
@@ -49,12 +49,23 @@ installed providers. The provider identity is the stable local app row ID
 change labels, efforts, context limits, and models, but the accepted declaration
 changes only after the normal reviewed update/Apply boundary.
 
+Möbius · You uses an accepted declaration for its model names, effort levels,
+context ceilings, and endpoint too. Its `identity_broker` transport has a
+fixed `http://127.0.0.1:8765/v1` endpoint and no app secret; only the
+`identity` app with the reviewed `identity_manage` grant may declare it. The
+image-owned broker keeps account credentials and signs inference requests.
+Other connector apps use HTTPS and their own encrypted keys. Any app model
+connection can use the default-on
+`GET/PATCH /api/auth/providers/{provider_id}/enabled` switch; only its declaring app or
+the owner may change it. Turning one off removes it from pickers and blocks
+new turns without deleting saved chats.
+
 ## Boundaries and next steps
 
-- Built-in Claude, Codex, and Möbius providers stay registered in the same
-  provider map. Möbius already uses the Codex transport with its own broker,
-  auth preflight, and model catalog; app providers use that transport with a
-  declarative endpoint instead of adding a new chat runner.
+- Claude and Codex remain built in. The image-owned Möbius broker adapter
+  keeps the stable `mobius` provider identity for existing chats but offers no
+  models until Möbius · You supplies its declaration. Both broker and external
+  app connections use the Responses harness and one picker/agent registry.
 - Möbius · You is an optional account/setup app, not a runtime dependency for
   Claude, Codex, or app-provided providers. Its **Möbius models** switch is on
   by default and can be changed while signed out. Turning it off removes only
