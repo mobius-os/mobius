@@ -53,8 +53,12 @@ def test_host_installs_preflighted_image_source_before_cutover_without_moving_fe
   assert 'rev-parse --is-shallow-repository)" != "false"' in source[install:cutover]
   assert '--target "$INSTALLED_SOURCE_SHA"' in source[install:cutover]
   assert 'install_platform_release.py' in source[install:cutover]
+  verifier_start = source.index("verify_reviewed_source_selection()")
+  verifier_end = source.index("# The HTTP status", verifier_start)
+  verifier = source[verifier_start:verifier_end]
+  assert 'merge-base --is-ancestor "$installed_source_sha" HEAD' in verifier
   verification = source[source.index('# Verify the frozen source release'):]
-  assert 'merge-base --is-ancestor "$INSTALLED_SOURCE_SHA" HEAD' in verification
+  assert 'verify_reviewed_source_selection "$INSTALLED_SOURCE_SHA"' in verification
   assert 'git fetch' not in verification
   # Skip-build reuses installed source; rollback never invokes the installer.
   assert source.index('if [ "$BUILT_THIS_RUN" = "1" ] && [ -n "$IMAGE_TAG" ]; then') < install

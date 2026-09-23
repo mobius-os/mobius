@@ -6,9 +6,13 @@ backstop and drains first. These tests pin those boundaries without killing the
 test process (os.kill is mocked)."""
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 import os
 from pathlib import Path
 import signal
+from types import SimpleNamespace
+
+import pytest
 
 from app import chat as chat_mod
 from app import restart_ledger
@@ -46,10 +50,69 @@ def _write_probe_fixture(root: Path, *, broken: bool) -> None:
   )
 
 
+def test_restart_source_validation_rejects_intervening_edits(monkeypatch, tmp_path):
+  backend = tmp_path / "backend" / "app"
+  backend.mkdir(parents=True)
+  monkeypatch.setenv("MOBIUS_PLATFORM_DIR", str(tmp_path))
+  monkeypatch.setattr(
+    "app.platform_generation.checkout_generation",
+    lambda *_args, **_kwargs: {"generation_id": "b" * 64},
+  )
+  monkeypatch.setattr(
+    ru.subprocess, "run",
+    lambda *_args, **_kwargs: pytest.fail("invalid generation reached import probe"),
+  )
+
+  with pytest.raises(ru.RestartSourceInvalid, match="source changed"):
+    ru.validate_restart_source(
+      expected_generation_id="a" * 64,
+      required_actions=["server_restart"],
+    )
+
+
+def test_restart_source_validation_caches_only_the_exact_generation(
+  monkeypatch, tmp_path,
+):
+  backend = tmp_path / "backend" / "app"
+  backend.mkdir(parents=True)
+  monkeypatch.setenv("MOBIUS_PLATFORM_DIR", str(tmp_path))
+  current = {"generation_id": "c" * 64}
+  monkeypatch.setattr(
+    "app.platform_generation.checkout_generation",
+    lambda *_args, **_kwargs: dict(current),
+  )
+  calls = []
+  monkeypatch.setattr(
+    ru.subprocess, "run",
+    lambda *_args, **_kwargs: (
+      calls.append(current["generation_id"])
+      or SimpleNamespace(returncode=0, stdout="", stderr="")
+    ),
+  )
+  monkeypatch.setattr(ru, "_VALIDATED_SOURCE_ID", None)
+
+  ru.validate_restart_source(expected_generation_id="c" * 64)
+  ru.validate_restart_source(expected_generation_id="c" * 64)
+  current["generation_id"] = "d" * 64
+  ru.validate_restart_source(expected_generation_id="d" * 64)
+
+  assert calls == ["c" * 64, "d" * 64]
+
+
+def test_restart_admission_has_exactly_one_concurrent_winner():
+  with ThreadPoolExecutor(max_workers=8) as pool:
+    admitted = list(pool.map(lambda _index: ru._claim_in_process_restart(), range(32)))
+
+
 def test_restart_source_validation_matches_the_boot_router_verdict(
   monkeypatch, tmp_path,
 ):
   monkeypatch.setenv("MOBIUS_PLATFORM_DIR", str(tmp_path))
+  monkeypatch.setattr(
+    "app.platform_generation.checkout_generation",
+    lambda *_args, **_kwargs: {"generation_id": "a" * 64},
+  )
+  monkeypatch.setattr(ru, "_VALIDATED_SOURCE_ID", None)
   _write_probe_fixture(tmp_path, broken=True)
 
   try:
@@ -69,7 +132,7 @@ def test_last_chance_restart_preflight_does_not_drain_invalid_source(
   claimed = []
   monkeypatch.setattr(
     ru, "validate_restart_source",
-    lambda: (_ for _ in ()).throw(ru.RestartSourceInvalid("broken")),
+    lambda **_kwargs: (_ for _ in ()).throw(ru.RestartSourceInvalid("broken")),
   )
   monkeypatch.setattr(
     ru, "_claim_in_process_restart", lambda: claimed.append(True) or True,

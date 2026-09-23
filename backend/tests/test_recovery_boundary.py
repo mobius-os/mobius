@@ -87,6 +87,29 @@ def test_boot_fallback_never_moves_or_prunes_owner_platform_source():
   assert "app.data_volume" not in entrypoint
 
 
+def test_generation_bootstrap_selects_one_frozen_platform_unit():
+  entrypoint = (ROOT / "backend/scripts/entrypoint.sh").read_text(
+    encoding="utf-8",
+  )
+
+  selection = entrypoint.index("platform_artifacts.py --select")
+  mutable_selection = entrypoint.index('elif [ ! -d "$_platform_app" ]')
+  assert selection < mutable_selection
+  assert '_served_platform_root=$(dirname "$_generation_backend")' in entrypoint
+  assert 'dirname "$(dirname "$_generation_backend")"' not in entrypoint
+  assert entrypoint.count('MOBIUS_PLATFORM_DIR="$_served_platform_root"') == 2
+  assert '[ "$_use_generation" -eq 0 ]' in entrypoint
+
+  failed_pending = entrypoint.split(
+    "selected generation failed its import probe", 1,
+  )[1].split('elif [ ! -d "$_platform_app" ]', 1)[0]
+  assert "--skip-pending" in failed_pending
+  assert "--fail-boot" in failed_pending
+  assert '--boot-id "$MOBIUS_BOOT_ID"' in failed_pending
+  assert "_platform_use_baked" in failed_pending
+  assert "_platform_use_direct" not in failed_pending
+
+
 def test_service_token_refresh_uses_selected_backend_and_retries_db_lookup():
   entrypoint = (ROOT / "backend/scripts/entrypoint.sh").read_text(
     encoding="utf-8",

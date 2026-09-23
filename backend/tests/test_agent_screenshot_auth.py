@@ -122,6 +122,7 @@ def _fake_browser(tmp_path: Path) -> tuple[Path, Path]:
     "    if [ \"$2\" = \"--stdin\" ]; then cat > \"$FAKE_BROWSER_STDIN_LOG\"; exit 0; fi\n"
     "    case \"$2\" in\n"
     "      *body\\ \\>\\ iframe#app*) printf '%s\\n' \"${FAKE_PUBLIC_APP:-false}\" ;;\n"
+    "      *agent-screenshot-fresh*) printf '%s\\n' \"${FAKE_SERVER_ASSET:-none}\" ;;\n"
     "      *src.split*) printf '%s\\n' \"${FAKE_LOADED_ASSET:-none}\" ;;\n"
     "      *serviceWorker*) printf '%s\\n' true ;;\n"
     "      *) printf '%s\\n' \"${FAKE_AUTH_OK:-false}\" ;;\n"
@@ -239,6 +240,7 @@ def _run_helper(
     "AGENT_BROWSER_DEFAULT_TIMEOUT": "",
     "FAKE_AUTH_OK": "true" if auth_ok else "false",
     "FAKE_LOADED_ASSET": loaded_asset or SHELL_ENTRY,
+    "FAKE_SERVER_ASSET": SHELL_ENTRY,
     "FAKE_BROWSER_LOG": str(browser_log),
     "FAKE_BROWSER_IDENTITY_LOG": str(tmp_path / "browser-identity.log"),
     "FAKE_CAPTURE_LOCK_INHERITED": str(tmp_path / "capture-lock-inherited"),
@@ -960,6 +962,7 @@ def test_shell_capture_waits_for_visual_ownership_and_rendered_fonts(tmp_path: P
   )
   settle_command = commands[settle_index]
   assert "data-mobius-visual-state" in settle_command
+  assert ".platform-degraded .recovery-panel" in settle_command
   assert "shell__chat-view--staging" not in settle_command
   assert "shell__chat-view--held" not in settle_command
   assert "data-mode-motion" not in settle_command

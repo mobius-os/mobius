@@ -42,7 +42,7 @@ test('immutable review drives both source apply and container replacement', () =
   for (const field of ['plan_id', 'current_sha', 'target_sha', 'image_digest']) {
     assert.match(modal, new RegExp(`${field}: preview\\.${field}`))
   }
-  assert.match(modal, /onRebuild\(plan\) : onApply\(plan\)/)
+  assert.match(modal, /!sourceOnly && reviewedUpdateUsesContainerRebuild\(preview\) \? onRebuild\(plan\) : onApply\(plan\)/)
   assert.match(requests, /api\.platform\.rebuild\(plan\)/)
   assert.match(requests, /api\.platform\.apply\(plan\)/)
   assert.match(requests, /reviewedUpdate: true/)
@@ -158,4 +158,26 @@ test('asking for help names one ordinary chat and explains the restart boundary'
   assert.match(modal, /Open a chat with the update details included/)
   assert.match(modal, /asking before any restart/)
   assert.doesNotMatch(modal + repair, /repair chat|recovery chat|help prepare it/)
+})
+
+test('local container blockers explain lost behavior and keep source preparation separate', () => {
+  const repair = read('../../components/SettingsView/UpdateRepairAction.jsx')
+  assert.match(modal, /This update would remove changes made to how Möbius runs/)
+  assert.match(modal, /prepare the update now and resolve any overlaps while Möbius keeps running/)
+  assert.match(modal, /official update or a custom version you control/)
+  assert.match(modal, /Local system changes to keep/)
+  assert.match(modal, /blockingPathLabel\(path\)/)
+  assert.match(modal, /diff=\{preview\.blocking_diff\}/)
+  assert.match(modal, /handleApply\(\{ sourceOnly: true \}\)/)
+  assert.match(modal, /'Prepare update'/)
+  assert.match(modal, /label=\{containerBlockers \? 'Fix with an agent' : 'Ask Möbius'\}/)
+  assert.match(repair, /label = 'Ask Möbius'/)
+})
+
+test('primary update guidance avoids deployment jargon', () => {
+  assert.match(modal, /Möbius will briefly go offline while the updated system starts/)
+  assert.match(modal, /previous working version/)
+  assert.doesNotMatch(modal, /This replaces the container/)
+  assert.doesNotMatch(modal, /Prepare source/)
+  assert.doesNotMatch(modal, /Preserve container setup|Keep my setup/)
 })

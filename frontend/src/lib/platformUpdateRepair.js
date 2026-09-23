@@ -43,6 +43,11 @@ export function platformUpdateRepairEvidence({ preview, platform, rebuild, error
     installed_release: platform?.contained_upstream_sha || null,
     activation: preview?.activation || platform?.activation || null,
     blocking_paths: preview?.blocking_paths || [],
+    // Enough exact context to make the handoff actionable without turning a
+    // large Docker/runtime diff into an unbounded chat prompt. The agent can
+    // inspect the reviewed commits directly from the pinned identities.
+    blocking_diff: preview?.blocking_diff?.slice(0, 12000) || null,
+    blocking_diff_truncated: !!preview?.blocking_diff_truncated || (preview?.blocking_diff?.length || 0) > 12000,
     conflict_paths: preview?.conflict_paths || platform?.conflict_paths || [],
     source_state: platform?.state || null,
     source_rollback_error: platform?.rollback_error || null,
@@ -61,7 +66,11 @@ export function buildPlatformUpdateRepairPrompt(evidence) {
     '', diagnostic, '',
     'Read the platform-maintenance and relevant owning skills. Compare the reviewed release, current source, working edits, installed dependencies and active runtime as needed. Diagnose at the owning layer; do not bypass preservation checks or automatically discard local changes.',
     'For backend/scripts/seed-skills blockers, distinguish baked templates from the installed, owner-edited or app-owned skills actually consumed. Compare their contents and ownership. Preserve useful customizations in the correct live owner before proposing any template reconciliation; do not blindly copy over an installed skill or exempt the seed directory from the image guard.',
+    'Treat source preparation and container activation as separate phases. Applying or resolving the reviewed source may proceed while the existing container keeps running; that never proves the image-level work complete and must not clear its blocker.',
+    'For a genuine local image customization, support one of two preserving outcomes: a freshly reviewed official target that already includes the required behavior, or an explicit owner-controlled custom-image deployment whose exact image is built, scratch-checked and verified after cutover. Do not replace the container with an official image that lacks the local behavior.',
     'Implement a targeted non-destructive repair when supported by the evidence and test it. Ask before destructive migrations, host-authority changes, paid external operations or container replacement. A server restart always needs its own explicit approval. This repair request is not permission to publish, push, apply a newer release, or restart.',
-    'Finish by returning me to Settings to refresh and review the same update again. Use the existing reviewed updater and controller, not a parallel deployment path. If the target changed, explain it and require a fresh review. Do not automatically retry an update with an uncertain outcome; inspect its recorded progress first.',
+    'After the repair, refresh the existing updater status and immutable preview and inspect recorded progress. If the target changed, explain the change and present the new exact target as a fresh review before asking to finish; never silently substitute it or carry an old approval forward. A stale plan or a previous attempt with an uncertain outcome must stop for fresh review and must never be retried automatically.',
+    'If the freshly reviewed target is actionable, its preservation blockers are cleared, and no update attempt is active or uncertain, offer me a saved approval card to finish that exact reviewed update from this chat. Claim the stable work key `platform-update:<plan_id>:finish`, then call `request_approval` as the final action with **Finish update** and **Not now**. The Finish option must name the exact target and whether the existing reviewed controller will apply source or replace the container, including the expected interruption. It authorizes one dispatch of that exact fresh plan only—never an unreviewed release, a parallel deployment path, or a replay after an ambiguous response.',
+    'When I choose Finish update, re-read updater status, recorded progress, and the immutable preview before dispatch. Continue only if the target and plan still match and no operation has started; otherwise stop for a fresh review. Route the exact plan through the existing `/api/platform/apply` or `/api/platform/rebuild` controller selected by its activation requirements, then observe recorded progress without sending a second request. A later server restart still requires its own `request_restart` approval. If the update cannot be offered safely, return me to Settings with the concrete reason.',
   ].join('\n\n')
 }

@@ -142,7 +142,7 @@ def test_restart_press_keeps_card_open_when_next_boot_would_fall_back(
   monkeypatch.setattr(
     restart_util,
     "validate_restart_source",
-    lambda: (_ for _ in ()).throw(
+    lambda **_kwargs: (_ for _ in ()).throw(
       restart_util.RestartSourceInvalid("dangling Settings reference")
     ),
   )
@@ -455,6 +455,147 @@ def test_late_manual_boot_cannot_retroactively_confirm_restart():
 
   assert outcome == "failed"
   assert "did not confirm" in detail
+
+
+def test_current_activation_wait_requires_the_reviewed_generation():
+  from sqlalchemy.orm.attributes import flag_modified
+  from app.platform_restart import activation_wait_verdict
+
+  _qid, wait_id, _run, legacy = _install("restart-exact-generation")
+  expected = "a" * 64
+  requirement = {
+    **legacy,
+    "version": 2,
+    "generation_id": expected,
+    "required_actions": ["server_restart"],
+  }
+  with SessionLocal() as db:
+    wait = db.get(models.ChatWait, wait_id)
+    chat = db.get(models.Chat, "restart-exact-generation")
+    wait.condition_json = requirement
+    card = chat.messages[0]["blocks"][0]
+    card["platform_action"]["requirement"] = requirement
+    flag_modified(chat, "messages")
+    later = wait.created_at + timedelta(seconds=1)
+    db.add_all([
+      models.PlatformBootSnapshot(
+        boot_id="boot-wrong-generation", source_kind="platform",
+        service_ready=True, captured_at=later,
+        loaded_files_json={"generation_id": "b" * 64},
+      ),
+      models.PlatformBootSnapshot(
+        boot_id="boot-exact-generation", source_kind="platform",
+        service_ready=True, captured_at=later + timedelta(seconds=1),
+        loaded_files_json={"generation_id": expected},
+      ),
+    ])
+    db.commit()
+
+    wrong = db.query(models.PlatformBootSnapshot).filter_by(
+      boot_id="boot-exact-generation",
+    ).one()
+    wrong.service_ready = False
+    db.commit()
+    assert activation_wait_verdict(db, wait) == (
+      "failed",
+      "A different platform generation reached readiness after this card was "
+      "created. Resuming to verify whether the requested changes were carried "
+      "forward.",
+    )
+
+    wrong.service_ready = True
+    db.commit()
+    assert activation_wait_verdict(db, wait) == (
+      "met", "The reviewed platform generation reached readiness.",
+    )
+
+
+def test_ready_snapshot_reconstructs_pending_generation_actions(
+  monkeypatch, tmp_path,
+):
+  from app import main, platform_generation, platform_update
+  from app.platform_restart import capture_ready_boot_snapshot
+
+  source = tmp_path / "serving-source"
+  sha = tmp_path / "serving-sha"
+  source.write_text("platform\n")
+  sha.write_text("1" * 40 + "\n")
+  monkeypatch.setattr(platform_update, "SERVING_SOURCE_FILE", source)
+  monkeypatch.setattr(platform_update, "SERVING_SHA_FILE", sha)
+  monkeypatch.setattr(main, "service_readiness", lambda: {"ready": True})
+  monkeypatch.setattr(
+    platform_generation,
+    "generation_state",
+    lambda: {"pending": {"required_actions": ["server_restart"]}},
+  )
+  expected = {
+    "version": 1,
+    "generation_id": "a" * 64,
+    "required_actions": ["server_restart"],
+  }
+  monkeypatch.setattr(
+    platform_generation,
+    "checkout_generation",
+    lambda *, required_actions: (
+      expected if required_actions == ["server_restart"]
+      else pytest.fail("pending activation actions were not retained")
+    ),
+  )
+  recorded = []
+  monkeypatch.setattr(
+    platform_generation,
+    "record_ready_generation",
+    lambda value, *, boot_id: recorded.append((value, boot_id)),
+  )
+
+  with SessionLocal() as db:
+    snapshot = capture_ready_boot_snapshot(db, boot_id="boot-exact-actions")
+
+  assert snapshot.loaded_files_json["generation_id"] == "a" * 64
+  assert recorded == [(expected, "boot-exact-actions")]
+
+
+def test_changed_generation_keeps_restart_card_open(monkeypatch):
+  from app.restart_util import RestartSourceInvalid
+
+  qid, wait_id, _run, _requirement = _install("restart-source-changed")
+  monkeypatch.setattr(
+    "app.restart_util.validate_restart_source",
+    lambda **_kwargs: (_ for _ in ()).throw(
+      RestartSourceInvalid("Restart stopped: source changed.")
+    ),
+  )
+
+  with pytest.raises(chat_writer.RestartCardActionConflict, match="source changed"):
+    _submit(ResolvePlatformRestartCard(
+      chat_id="restart-source-changed", question_id=qid,
+      selected_option_id="restart-id",
+    ))
+
+  with SessionLocal() as db:
+    chat = db.get(models.Chat, "restart-source-changed")
+    wait = db.get(models.ChatWait, wait_id)
+    assert chat.pending_question_id == qid
+    assert wait.action_approved_at is None
+    assert chat.messages[0]["blocks"][0].get("answers") is None
+
+
+def test_approved_restart_self_heals_when_no_ready_boot_arrives():
+  from app.platform_restart import (
+    ACTIVATION_CONFIRM_DEADLINE_SECONDS,
+    activation_wait_verdict,
+  )
+
+  _qid, wait_id, _run, _requirement = _install("restart-confirmation-timeout")
+  with SessionLocal() as db:
+    wait = db.get(models.ChatWait, wait_id)
+    wait.action_approved_at = now_naive_utc() - timedelta(
+      seconds=ACTIVATION_CONFIRM_DEADLINE_SECONDS + 1,
+    )
+    db.commit()
+    verdict, detail = activation_wait_verdict(db, wait)
+    assert verdict == "failed"
+    assert "did not confirm a ready boot" in detail
 
 
 def test_timely_ready_boot_still_confirms_restart_after_later_review():

@@ -66,6 +66,12 @@ their freshness through `/api/version`; never delete the root-owned baked
 fallback. Retained content-hashed assets keep already-open tabs usable after a
 build swap.
 
+When a reviewed backend activation is pending, the image-owned bootstrap
+instead supplies the matching frozen frontend from
+`/data/platform-generations/<generation-id>/frontend/dist`. That pairing stays
+in force until the new backend has reached readiness. The ordinary live build
+then resumes, preserving frontend-only publication without another restart.
+
 ### Security updates — who patches what
 
 Möbius is meant to be self-hosted on a user-provisioned host — a managed platform (Railway/Render/Fly/PikaPods) or a raw VPS — so "apply a security update" splits into three tiers by who can even act:
@@ -107,28 +113,63 @@ Caddy, Railway, or host package/kernel tools. In-container sudo cannot make
 those changes durable, and mounting a Docker socket would weaken the container
 boundary rather than solve the ownership problem.
 
+For a restart-bearing update, Apply materializes the exact authored source and
+complete frontend build under `/data/platform-generations/<generation-id>`.
+The manifest records and rechecks every byte, source mode, and internal
+symlink before the durable generation state points at it. The image-owned
+entrypoint verifies that manifest and image compatibility before importing the
+frozen backend. A pending generation that fails its import probe may fall back
+only to a verified active/last-ready generation and then the complete baked
+platform; it never silently serves the mutable workspace after that candidate
+has been selected. Generated artifacts are bounded while pending, active, and
+last-ready generations are retained.
+
+The frozen selector marks a pending generation as booting before its first
+import. A failed import, a 90-second health timeout, or a later boot finding
+that attempt unfinished durably spends the activation's single rollback and
+selects the exact last-ready artifact. That rollback keeps its matching frozen
+frontend. If the rollback itself fails before readiness, the state becomes
+`rollback_failed` and the selector does not try it again; boot uses the baked
+floor and preserves both failure records for repair.
+
 **lodash is pinned to 4.18.1 via `overrides`.** `@openai/apps-sdk-ui` pulls lodash transitively — only through its `Slider` component, which the shell does not import. The 4.17.x line sat unfixed against several advisories for a long stretch; 4.18.x restored maintenance and patched them, so `frontend/package.json` `overrides` forces the transitive lodash to 4.18.1 (`npm audit` is clean). As defense-in-depth, `frontend/src/lib/__tests__/appsSdkLodash.test.js` also fails if the shell ever imports `Slider`, which keeps lodash tree-shaken out of the shipped bundle regardless of the pin.
 
 ## Self-update model — `upstream` / `main`, preserve local changes on update
 
 Möbius is the rare app whose own agent edits its live code: the in-product agent customizes its mini-apps (`/data/apps/<slug>`) and the whole platform repo (`/data/platform`, a real clone of `mobius-os/mobius`, including the frontend) while the platform runs. A deploy then ships a *new pristine version* of that same code. One small model keeps every such surface up to date without clobbering the owner's customizations and without a deploy ever silently dropping them.
 
-**Mini-app updates are rebase-shaped.** Each updatable mini-app is a git repo with:
+**Managed mini-app updates are commit-preserving replay-shaped.** Each updatable
+mini-app is a git repo with:
 
 - **`upstream`** — pristine history (`A → B → …`). The exact bytes of each *released* version, committed only by the installer / image, never the agent.
 - **`main`** — the owner/agent's edits (`X`), and what the surface actually serves. It sits on top of the `upstream` version it was last updated to.
 
-So the repo is `A → X` (release `A`, then local edits `X`). An update fetches the new release and does exactly what a developer would:
+So the repo is `A → X1 → X2` (release `A`, then local edits). An update fetches
+the new release and builds the equivalent of a rebase in an isolated worktree:
 
 ```
-record the new release as a new upstream commit:   A → B   (and  A → X  locally)
-rebase the local edits onto it:                    A → B → X
+fetch the exact new package commit:               A → B
+replay each local commit onto it:                  A → B → X1' → X2'
 ```
 
-The owner's customizations end up *on top of* the current release, as if they'd just been made against it. Mechanically: commit any stray working-tree changes onto `main` first (`app_git.commit_local`, so the merge has a committed base), advance `upstream` to `B`, then compute the three-way verdict with `git merge-tree --write-tree` (`app_git.merge_upstream`) and, when clean, write the merged tree back and replay it as a single-parent commit on the new `upstream` tip — rebase-shaped linear history (`A → B → X`) without ever running `git rebase`.
+The owner's customizations end up *on top of* the current release while their
+commit boundaries remain visible. Mechanically, the installer commits any stray
+working-tree edits, fetches the immutable origin commit, replays the local
+commits in an isolated candidate worktree, validates and compiles that candidate,
+then compare-and-swap promotes it. Legacy installs with only a synthetic local
+baseline use that baseline once to adopt a trusted Git origin; it is not a
+second steady-state package model.
 
-- **Clean merge** → the merged tree is replayed as a single-parent commit on the new `upstream` tip and the app recompiles onto the new code.
-- **Conflict** (the release and the local edits touched the same lines) → an **owner-clicked agent chat** resolves it. The update attempt records the new upstream plus a durable receipt bound to every fetched source/static/icon/seed byte, and leaves live files untouched. When the owner chooses "Resolve in chat", apps materialize standard conflict markers (`start_conflict_merge`, a `git merge --no-commit --no-ff upstream`) for the agent to edit; the platform updater leaves the live tree untouched and the resolver chat runs the merge itself. Saving marker-free source records a *single-parent replay* — `--no-ff` points `MERGE_HEAD` at the upstream tip and the commit takes only that one parent, so even a resolved conflict stays linear (`A → B → X`), never the 2-parent commit a plain `git merge` would leave. The canonical installer then verifies the receipt and promotes source, bundle, static files, DB metadata, icon, seeds, cron, and skills through its normal lifecycle. If fetch/materialization fails after the source commit, the previous app remains served and the receipt survives for startup/user retry. Both app and platform conflicts are click-gated: the update surfaces `mode=conflict` / conflict paths or a Settings conflict state, and the owner chooses "Resolve in chat" before an agent turn starts. The owner never hand-merges; back out with `git merge --abort`.
+- **Clean replay** → the complete candidate is compiled and accepted before its
+  history and matching runtime are promoted.
+- **Conflict** (the release and local commits overlap textually) → an
+  **owner-clicked agent chat** resolves it. The update records a durable receipt
+  bound to every fetched source/static/icon/seed byte and leaves the served app
+  untouched. Choosing **Resolve in chat** materializes the same replay as normal
+  Git rebase state for the agent to edit and continue. The installer then
+  re-verifies the reviewed tree and receipt before the normal publication
+  lifecycle. Both app and platform conflicts remain click-gated; abort an app
+  resolution with `git rebase --abort`.
 
 The platform clone uses the same fix-forward shape at repository scale. It
 fetches the selected target, fast-forwards when local `main` is fully contained
@@ -157,10 +198,15 @@ and any newly added runtime module stay image-owned.
 
 | Surface | Repo | On the model | Engine |
 |---------|------|------------------|--------|
-| **Mini-apps** (`/data/apps/<slug>`) | `.git` per app (installed apps; agent-built bespoke apps have no upstream to track) | yes — whole source tree on `upstream`, single-parent replay, so **multi-file apps update cleanly** | `backend/app/app_git.py` + `install.py` |
+| **Mini-apps** (`/data/apps/<slug>`) | `.git` per app (installed apps; agent-built bespoke apps have no upstream to track) | yes — fetched Git package commit plus commit-preserving local replay, so **multi-file apps update cleanly** | `backend/app/app_git.py` + `install.py` |
 | **Platform** (`/data/platform` — backend *and* frontend) | `.git` | yes — clone-native `git fetch origin`, then fast-forward or replay the local overlay onto the selected target (commit-stray-edits-first, off-tree conflict handling, post-replay import probe with rollback); ancestry availability (`origin/main` not yet an ancestor of local `main`) | `backend/app/platform_update.py` |
 
-Mini-apps use **one** small tree-aware engine (`app_git.py`): `record_upstream` commits the *whole source tree* on `upstream`, `merge_upstream` verdicts a clean-vs-conflict via `git merge-tree`, and a clean apply replays the merged tree as a **single-parent** commit on top of `upstream` (linear `A→B→X`). Mini-apps are thin callers of that primitive — they pass their own source tree. The platform (backend + frontend, one served clone) is clone-native instead: it uses `git fetch origin`, a provably lossless fast-forward when possible, and otherwise a linear replay of the still-local overlay onto the selected target. Mini-app update discovery is different: the store compares the catalog manifest version against the installed `App.version` (the new release lives in the remote catalog, so a local ancestry check can't see it). There is no per-surface protected-file scaffolding.
+Managed mini-apps fetch the package's immutable Git commit, compare ancestry and
+capability changes, then use `app_git.replay_overlay` to preserve local commits
+in an isolated candidate. The platform (backend + frontend, one served clone)
+is currently clone-native too, but still uses its separate linear-overlay
+replay machinery. App discovery is ancestry/capability-based rather than a
+display-version comparison. There is no per-surface protected-file scaffolding.
 
 ## Backend (`backend/app/`)
 
@@ -1439,22 +1485,24 @@ continues to own turn ordering, and each question card owns its answer draft.
 
 Platform restarts use the narrower `mobius_control.request_restart` and
 `POST /api/chats/{id}/restart-request`. The caller supplies no command, commit,
-or option identity. The server derives an immutable action from the relevant
-committed restart-loadable source and adds server-generated option ids to a
-typed card with one **Restart now** action and an ordinary written-response
-path. A selected **Restart now** is an owner action dispatched by the platform,
-not a synthetic Yes message or a new agent turn. Written feedback atomically
-cancels that card's activation wait and queues a normal continuation without
-granting restart authority. The durable execution claim precedes the side
-effect and is at-most-once: a lost acknowledgement or ambiguous death is
-reconciled against boot evidence, never blindly replayed.
+or option identity. The server binds a typed card to the requesting run and
+originating boot plus a complete generation identity for the current authored
+checkout, dependency inputs, built frontend signature and image. It adds one
+server-generated **Restart now** option and keeps an ordinary written-response
+path. Before settling the card, the writer proves that those bytes have not
+changed and runs the same import/router check as the next boot. A selected
+**Restart now** is an owner action dispatched by the platform, not a synthetic
+Yes message or a new agent turn.
+Written feedback atomically cancels that card's activation wait and queues a
+normal continuation without granting restart authority. Card settlement is
+idempotent, and the worker's admission latch collapses simultaneous restart
+requests into one drain and supervisor handoff.
 
 Each restart card links to a typed activation wait naming its physical run,
-Goal root and originating boot. Startup captures one immutable ready-boot
-receipt after database and writer readiness; any later receipt wakes every
-linked chat independently, including when the restart originated in Settings
-or another chat. The resumed agent verifies whether its changes loaded rather
-than duplicating that judgment in the wait with file-version checks. A linked
+Goal root, originating boot and reviewed generation. Startup captures one
+immutable receipt only after database, writer and boot-critical runtime
+supervisors are ready. A later receipt wakes a linked chat only when it proves
+that exact generation; legacy cards retain boot-only matching. A linked
 activation barrier keeps an **approved** restart's interrupted work ahead of
 later queued messages until its writer-authenticated continuation owns recovery.
 Legacy version-1 cards that choose **Not now** leave the activation monitor
@@ -1709,5 +1757,8 @@ cover it deterministically.
 
 ## See also
 
+- **Proposed platform and app update contract:** `UPDATE-ARCHITECTURE.md`.
+  It is explicitly a target design; this file remains the as-built map until
+  that migration ships.
 - **Build / test / run commands and the dev loop:** `CONTRIBUTING.md`. (The #1 deploy gotcha — a stale `/data/platform/frontend/dist` masking a fresh image — is covered under *Frontend serving priority* above.)
 - **Subsystem deep-dives are inlined above** as their own sections: *Stop-chat contract*, *AskUserQuestion interception*, *Chat persistence — single-writer actor*, *Navigation back-stack + drawer model*, *Service worker + offline*, and *Mini-app manifest (mobius.json)*. (The chat-persistence v2 design + staged-rollout notes remain internal/gitignored — the as-built contract is the section above.)

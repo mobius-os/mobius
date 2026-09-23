@@ -51,6 +51,7 @@ def test_dependency_and_baked_runtime_never_degrade_to_restart_only():
     "backend/requirements.txt": "dependency_sync",
     "backend/requirements.lock": "dependency_sync",
     "backend/scripts/entrypoint.sh": "image_rebuild",
+    "backend/app/platform_artifacts.py": "image_rebuild",
     "backend/scripts/init_skills.py": "image_rebuild",
     "backend/scripts/seed-skills/platform-maintenance.md": "image_rebuild",
     "backend/runtime": "image_rebuild",

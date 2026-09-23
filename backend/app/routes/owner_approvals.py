@@ -116,6 +116,7 @@ async def request_restart(
 ):
   """Save one platform-owned Restart card. Pressing it always restarts."""
   from app import restart_ledger
+  from app import platform_activation, platform_generation
   from app.platform_restart import (
     CONDITION_VERSION,
     pending_restart_paths,
@@ -131,15 +132,36 @@ async def request_restart(
         "message": "Möbius is not running a restart-loadable platform boot.",
       },
     )
-  action_id = restart_condition_id(source_boot_id, principal.run_id)
+  paths = pending_restart_paths()
+  impact = platform_activation.classify_activation(paths)
+  required_actions = impact["required_actions"] or [
+    platform_activation.ActivationLevel.SERVER_RESTART.value,
+  ]
+  try:
+    generation = platform_generation.checkout_generation(
+      required_actions=required_actions,
+    )
+  except platform_generation.GenerationUnavailable as exc:
+    raise HTTPException(
+      status_code=409,
+      detail={
+        "code": "platform_generation_unavailable",
+        "message": str(exc),
+      },
+    ) from exc
+  action_id = restart_condition_id(
+    source_boot_id, principal.run_id, generation["generation_id"],
+  )
+  platform_generation.prepare_generation(generation, operation_id=action_id)
   requirement = {
     "version": CONDITION_VERSION,
     "source_boot_id": source_boot_id,
     "action_id": action_id,
-    "paths": pending_restart_paths(),
+    "generation_id": generation["generation_id"],
+    "required_actions": required_actions,
+    "paths": paths,
   }
   restart_now_id = str(uuid5(NAMESPACE_URL, f"{action_id}:restart-now"))
-  paths = requirement["paths"]
   if paths:
     path_summary = ", ".join(paths[:3])
     if len(paths) > 3:
@@ -182,7 +204,11 @@ async def request_restart(
     payload,
     principal,
     db,
-    identity_payload={"type": "request_restart", "source_boot_id": source_boot_id},
+    identity_payload={
+      "type": "request_restart",
+      "source_boot_id": source_boot_id,
+      "generation_id": generation["generation_id"],
+    },
     activation_requirement=requirement,
   )
 

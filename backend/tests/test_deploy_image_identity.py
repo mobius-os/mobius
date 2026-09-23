@@ -206,6 +206,82 @@ def test_final_verification_fails_closed_on_protected_runtime_drift():
   assert "Do not report this deployment complete" in source
 
 
+def _reviewed_source_harness(
+  assertions: str,
+  *,
+  serving_source: str,
+  served_source_sha: str,
+  persistent_contains_source: bool = True,
+) -> str:
+  function = _function_source(
+    "verify_reviewed_source_selection", "# The HTTP status",
+  )
+  docker_result = "return 0" if persistent_contains_source else "return 1"
+  return textwrap.dedent(f"""\
+    CONTAINER=mobius
+    docker() {{ {docker_result}; }}
+    served_version_field() {{
+      case "$1" in
+        serving_source) printf '%s\\n' {serving_source!r} ;;
+        served_sha) printf '%s\\n' {served_source_sha!r} ;;
+      esac
+    }}
+    ok() {{ printf 'ok: %s\\n' "$1"; }}
+    warn() {{ printf 'warn: %s\\n' "$1"; }}
+    fail() {{ printf 'fail: %s\\n' "$1" >&2; }}
+  """) + function + assertions
+
+
+def test_reviewed_baked_boot_is_a_successful_image_bootstrap():
+  sha = "a" * 40
+  result = subprocess.run(
+    ["bash", "-c", _reviewed_source_harness(
+      f"verify_reviewed_source_selection {sha!r}\n",
+      serving_source="baked",
+      served_source_sha=sha,
+    )],
+    capture_output=True,
+    text=True,
+  )
+
+  assert result.returncode == 0, result.stderr
+  assert "exact reviewed image source" in result.stdout
+  assert "one generation-bound restart remains" in result.stdout
+
+
+def test_reviewed_baked_boot_rejects_an_unexpected_source():
+  reviewed_sha = "a" * 40
+  result = subprocess.run(
+    ["bash", "-c", _reviewed_source_harness(
+      f"verify_reviewed_source_selection {reviewed_sha!r}\n",
+      serving_source="baked",
+      served_source_sha="b" * 40,
+    )],
+    capture_output=True,
+    text=True,
+  )
+
+  assert result.returncode == 1
+  assert "unexpected baked source" in result.stderr
+
+
+def test_reviewed_source_must_exist_in_the_persistent_checkout():
+  sha = "a" * 40
+  result = subprocess.run(
+    ["bash", "-c", _reviewed_source_harness(
+      f"verify_reviewed_source_selection {sha!r}\n",
+      serving_source="platform",
+      served_source_sha=sha,
+      persistent_contains_source=False,
+    )],
+    capture_output=True,
+    text=True,
+  )
+
+  assert result.returncode == 1
+  assert "persistent platform does not contain" in result.stderr
+
+
 def _recreation_harness(assertions: str, *, desired_hash: str | None) -> str:
   function = _function_source(
     "compose_recreation_needed", "prepare_chat_cutover()",

@@ -88,6 +88,13 @@ image is healthy.
 
 ## Install
 
+This controller is the general self-hosted update path; **Connect is not a
+prerequisite and is not part of the replacement protocol**. Connect, SSH, a
+hosting control panel, or an operator's local terminal may be used once to run
+the installer below, but normal reviewed updates then travel only through
+Settings → the persistent request inbox → the root-owned systemd worker. The
+app never receives a Docker socket or host credentials.
+
 From the trusted host checkout that owns the running app:
 
 ```sh
@@ -112,6 +119,12 @@ checkout. Other out-of-checkout Compose labels still fail closed.
 The host must use systemd and Docker on amd64. Official Möbius images are not
 currently published as a multi-architecture manifest, so other architectures
 fail during installation rather than during a rebuild.
+
+For an owner-controlled image built from a trusted local checkout, run
+`scripts/deploy-prod.sh` on that Docker host through whatever operator access is
+already available. Connect is one optional way to reach the host, not a product
+dependency. That path scratch-boots the exact locally built image before
+cutover and uses the same authenticated chat handoff and rollback contract.
 
 ## Boundary and lifecycle
 

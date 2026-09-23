@@ -73,7 +73,7 @@ from typing import Callable, Literal, TypedDict
 
 from sqlalchemy.orm import Session
 
-from app import app_git, platform_activation, runtime_provenance
+from app import app_git, platform_activation, platform_generation, runtime_provenance
 from app.platform_activation import PlatformActivationImpact
 
 
@@ -385,6 +385,12 @@ class PlatformUpdatePreview(TypedDict):
   # The same preservation check used immediately before replacement. A preview
   # explains these blockers early; it never replaces the mutation's recheck.
   blocking_paths: list[str]
+  # Net content difference for only the image-owned paths above, rendered as
+  # reviewed-target -> current-local. This explains the exact runtime behavior
+  # an official image would replace without treating file names as enough
+  # evidence or weakening the mutation-time preservation check.
+  blocking_diff: str | None
+  blocking_diff_truncated: bool
 
 
 @dataclass(frozen=True)
@@ -424,6 +430,10 @@ class ReconcileResult:
   # How the overlay moved: replayed/dropped unit ids for an ``updated`` pass,
   # or the parked conflict (worktree, commit, unit, remaining) for ``conflict``.
   overlay: dict | None = None
+  # Complete authored/runtime identity captured under RECONCILE_LOCK after the
+  # working tree is restored. Activation cards and the next boot use this exact
+  # identity rather than reinterpreting a ref after publication.
+  generation: platform_generation.PlatformGeneration | None = None
 
   @classmethod
   def unchanged(
@@ -2494,6 +2504,21 @@ def _reconcile_under_lock(
       fetch_remote=plan_id is None,
       progress=progress,
     )
+    if result.status in {"updated", "up_to_date"} and (repo / ".git").exists():
+      head = result.new_sha or result.pre_sha or _rev(repo, _local_branch(repo))
+      served = _served_platform_sha()
+      changed_paths = _paths_already_active_in_image(
+        repo, _activation_paths_between(repo, served, head),
+      )
+      impact = _platform_activation_impact(repo, served_to_head=changed_paths)
+      if impact["required_actions"]:
+        generation = platform_generation.checkout_generation(
+          repo, required_actions=impact["required_actions"],
+        )
+        platform_generation.prepare_generation(
+          generation, operation_id=plan_id, repo=repo,
+        )
+        result = replace(result, generation=generation)
     # `upstream` is moved only by a successful/contained reconcile to the
     # fetched release target. Capture its immutable oid before releasing the
     # cross-process lock; local commits on main are intentionally not a
@@ -2769,7 +2794,8 @@ def empty_platform_update_preview(
     image_digest=image_digest,
     activation=platform_activation.classify_activation([]),
     total_commits=0, commits_truncated=False,
-    commits=[], files=[], diff=None, diff_truncated=False, conflict_paths=[], blocking_paths=[],
+    commits=[], files=[], diff=None, diff_truncated=False, conflict_paths=[],
+    blocking_paths=[], blocking_diff=None, blocking_diff_truncated=False,
   )
 
 
@@ -2861,6 +2887,30 @@ def _preview_diff(repo: Path, base: str, target: str) -> tuple[str | None, bool]
   return (text or None), False
 
 
+def _preview_blocking_diff(
+  repo: Path, target: str, current: str, paths: list[str],
+) -> tuple[str | None, bool]:
+  """Show the exact local image content an official target would replace.
+
+  ``paths`` comes from :func:`container_replacement_blockers`, so this is only
+  an explanation of the already-proven blockers. The target-to-current
+  direction makes additions represent local behavior missing from the reviewed
+  image. As with the main review diff, output is bounded for the API and UI.
+  """
+  if not paths:
+    return None, False
+  proc = _git(
+    "diff", "--no-ext-diff", f"{target}..{current}", "--", *paths,
+    repo=repo, check=False,
+  )
+  if proc.returncode != 0:
+    return None, False
+  text = proc.stdout
+  if len(text) > MAX_PREVIEW_DIFF_CHARS:
+    return text[:MAX_PREVIEW_DIFF_CHARS], True
+  return (text or None), False
+
+
 def _preview_overlay_conflict_paths(
   repo: Path, local: str, target: str,
 ) -> list[str]:
@@ -2930,6 +2980,11 @@ def platform_update_preview(
       preview["blocking_paths"] = container_replacement_blockers(
         target, repo, local_change_base=base,
       )
+      preview["blocking_diff"], preview["blocking_diff_truncated"] = (
+        _preview_blocking_diff(
+          repo, target, current, preview["blocking_paths"],
+        )
+      )
     return preview
 
 
@@ -2986,6 +3041,7 @@ def _platform_update_preview_unlocked(
       activation=platform_activation.classify_activation(["backend/app"]),
       total_commits=0, commits_truncated=False, commits=[], files=[],
       diff=None, diff_truncated=False, conflict_paths=[], blocking_paths=[],
+      blocking_diff=None, blocking_diff_truncated=False,
     )
   diff, truncated = _preview_diff(repo, base, target)
   commits = _preview_commits(repo, base, target)
@@ -3012,6 +3068,8 @@ def _platform_update_preview_unlocked(
       set(conflict.get("paths") or []) | set(predicted_conflicts)
     ),
     blocking_paths=[],
+    blocking_diff=None,
+    blocking_diff_truncated=False,
   )
 
 

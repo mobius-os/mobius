@@ -37,6 +37,12 @@ PROVIDER_SESSION_RETENTION_INTERVAL_SECS = 6 * 60 * 60
 OOM_WATCHDOG_FAST_INTERVAL_SECS = 2.0
 OOM_WATCHDOG_SLOW_INTERVAL_SECS = 20.0
 OOM_WATCHDOG_FAST_WINDOW_SECS = 180.0
+REQUIRED_DATABASE_SUPERVISORS = frozenset({
+  "wedged-marker-sweep",
+  "reset-park-sweep",
+  "chat-wait-sweep",
+  "writer-supervisor",
+})
 
 
 class RuntimeSettings(Protocol):
@@ -84,6 +90,9 @@ class RuntimeSupervisors:
     self._tasks: dict[str, asyncio.Task] = {}
     self._frontend_observer = None
     self._frontend_handler = None
+    self._database_services_started = False
+    self._database_services_error: str | None = None
+    self._database_task_names: set[str] = set()
 
   def _spawn(self, name: str, coroutine) -> None:
     self._tasks[name] = asyncio.create_task(
@@ -162,13 +171,40 @@ class RuntimeSupervisors:
       await asyncio.sleep(interval)
 
   async def start_database_services(self) -> None:
-    """Start long-lived database work; individual wiring failures fail open."""
+    """Start required database owners and retain an explicit readiness verdict."""
+    before = set(self._tasks)
     try:
       await self._start_chat_supervisors()
+      await asyncio.sleep(0)
+      started = set(self._tasks) - before
+      missing = REQUIRED_DATABASE_SUPERVISORS - started
+      if missing:
+        raise RuntimeError(
+          "required runtime supervisors were not started: "
+          + ", ".join(sorted(missing))
+        )
+      self._database_task_names = set(REQUIRED_DATABASE_SUPERVISORS)
+      self._database_services_started = True
+      self._database_services_error = None
     except Exception as exc:
+      self._database_services_error = str(exc)
       self.log.error(
         "chat supervisor wiring failed: %s", exc, exc_info=True,
       )
+
+  def database_service_readiness(self) -> tuple[bool, str]:
+    """Report whether every required database supervisor still has an owner."""
+    if self._database_services_error:
+      return False, "runtime_supervisor_start_failed"
+    if not self._database_services_started:
+      return False, "runtime_supervisors_not_started"
+    stopped = sorted(
+      name for name in self._database_task_names
+      if name not in self._tasks or self._tasks[name].done()
+    )
+    if stopped:
+      return False, "runtime_supervisor_stopped"
+    return True, ""
 
   async def _start_frontend_watcher(self) -> None:
     try:

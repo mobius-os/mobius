@@ -292,8 +292,8 @@ async def create_platform_conflict_resolver_chat(
 def restart_platform(
   _: models.Owner = Depends(get_current_owner_for_lifecycle_control),
 ) -> JSONResponse:
-  """Owner-confirmed restart to finish an update. Sends the response, then
-  restarts this worker (force-exit fallback) so it reboots with the new code."""
+  """Owner-confirmed worker restart. Sends the response, then performs the
+  shared drain-and-restart handoff with its force-exit fallback."""
   try:
     validate_restart_source()
   except RestartSourceInvalid as exc:

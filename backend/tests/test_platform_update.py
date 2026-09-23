@@ -73,6 +73,15 @@ def _write_backend(root: Path, main_py: str = _MAIN_PY, foo_py: str | None = _FO
     (app_dir / "foo.py").write_text(foo_py)
 
 
+def _write_frontend_build(root: Path) -> None:
+  dist = root / "frontend" / "dist"
+  (dist / "assets").mkdir(parents=True, exist_ok=True)
+  (dist / "assets" / "app.js").write_text("console.log('test')\n")
+  (dist / "index.html").write_text("<main>test</main>\n")
+  (dist / "sw.js").write_text("// test\n")
+  (dist / "manifest.webmanifest").write_text("{}\n")
+
+
 def _make_origin(tmp: Path) -> Path:
   """A bare ``origin`` repo with an initial commit carrying an importable
   backend, plus a working checkout used to push new commits ('deploys')."""
@@ -80,7 +89,7 @@ def _make_origin(tmp: Path) -> Path:
   _git(tmp, "init", "--bare", "-b", "main", str(origin))
   work = tmp / "origin-work"
   _git(tmp, "clone", str(origin), str(work))
-  (work / ".gitignore").write_text("__pycache__/\n*.pyc\n")
+  (work / ".gitignore").write_text("__pycache__/\n*.pyc\nfrontend/dist/\n")
   _write_backend(work)
   _git(work, "add", "-A")
   _git(work, "commit", "-q", "-m", "init")
@@ -183,6 +192,7 @@ def clone_env(tmp_path, monkeypatch):
   monkeypatch.setenv("BUILD_SHA", "test-sha")
   origin = _make_origin(tmp_path)
   platform = _clone_platform(tmp_path, origin)
+  _write_frontend_build(platform)
   return origin, platform
 
 
@@ -1310,6 +1320,67 @@ def test_reconcile_pins_upstream_hook_source_before_unlock(monkeypatch, tmp_path
 
   assert events == ["locked", "unlocked"]
   assert result.hook_source_sha == "trusted-upstream-oid"
+
+
+def test_reconcile_prepares_complete_generation_before_unlock(monkeypatch, tmp_path):
+  repo = tmp_path / "platform"
+  (repo / ".git").mkdir(parents=True)
+  events = []
+
+  @contextmanager
+  def fake_lock():
+    events.append("locked")
+    yield
+    events.append("unlocked")
+
+  generation = {
+    "version": 1,
+    "generation_id": "a" * 64,
+    "required_actions": ["server_restart"],
+  }
+  monkeypatch.setattr(pu, "_reconcile_flock", fake_lock)
+  monkeypatch.setattr(pu, "_validate_update_plan", lambda *_args, **_kwargs: None)
+  monkeypatch.setattr(
+    pu, "reconcile_clone",
+    lambda *_args, **_kwargs: pu.ReconcileResult(
+      "updated", "old", "new", "target",
+    ),
+  )
+  monkeypatch.setattr(pu, "_served_platform_sha", lambda: "old")
+  monkeypatch.setattr(
+    pu, "_activation_paths_between",
+    lambda *_args, **_kwargs: ["backend/app/main.py"],
+  )
+  monkeypatch.setattr(
+    pu, "_paths_already_active_in_image", lambda _repo, paths: paths,
+  )
+  monkeypatch.setattr(
+    pu, "_platform_activation_impact",
+    lambda *_args, **_kwargs: {"required_actions": ["server_restart"]},
+  )
+  monkeypatch.setattr(
+    pu.platform_generation, "checkout_generation",
+    lambda *_args, **_kwargs: generation,
+  )
+  monkeypatch.setattr(
+    pu.platform_generation, "prepare_generation",
+    lambda prepared, **kwargs: events.append(
+      ("prepared", prepared["generation_id"], kwargs["operation_id"])
+    ),
+  )
+  monkeypatch.setattr(
+    pu, "_rev",
+    lambda _repo, ref: "upstream" if ref == pu.UPSTREAM_BRANCH else None,
+  )
+
+  result = pu._reconcile_under_lock(
+    repo, plan_id="reviewed-plan", current_sha="old",
+  )
+
+  assert result.generation == generation
+  assert events == [
+    "locked", ("prepared", "a" * 64, "reviewed-plan"), "unlocked",
+  ]
 
 
 def _make_hook_repo(tmp_path: Path, *, complete: bool = True) -> Path:
@@ -3673,6 +3744,10 @@ def test_review_exposes_seed_customization_before_replacement_without_mutation(
 
   assert preview["blocking_paths"] == paths
   assert reviewed["blockers"] == preview["blocking_paths"]
+  assert preview["blocking_diff"] is not None
+  assert "backend/scripts/seed-skills/cron.md" in preview["blocking_diff"]
+  assert "local instructions" in preview["blocking_diff"]
+  assert preview["blocking_diff_truncated"] is False
   assert preview["activation"]["deployment"] == deployment
   assert _served_sha(platform) == before
   assert _git(platform, "status", "--porcelain").stdout == before_status
@@ -3691,6 +3766,8 @@ def test_review_does_not_block_seed_changes_already_in_the_official_release(clon
 
   assert preview["activation"]["level"] == "image_rebuild"
   assert preview["blocking_paths"] == []
+  assert preview["blocking_diff"] is None
+  assert preview["blocking_diff_truncated"] is False
 
 
 def test_finish_review_exposes_local_image_blockers_too(clone_env):
@@ -3704,3 +3781,4 @@ def test_finish_review_exposes_local_image_blockers_too(clone_env):
 
   assert preview["operation"] == "finish"
   assert preview["blocking_paths"] == [path]
+  assert "preserve me" in preview["blocking_diff"]

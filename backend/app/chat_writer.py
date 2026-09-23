@@ -2322,12 +2322,15 @@ class ChatWriterActor:
       )
 
     if selected_restart:
-      # Keep the exact card open when the edited platform would fall back on
-      # the next boot.  The owner gets a retryable error while this healthy
-      # process remains available for repair; no drain or restart is started.
+      # Validate before mutating the card so an edited or unbootable generation
+      # remains open and retryable in the still-healthy process.
       from app.restart_util import RestartSourceInvalid, validate_restart_source
+      requirement = action.get("requirement") or {}
       try:
-        validate_restart_source()
+        validate_restart_source(
+          expected_generation_id=requirement.get("generation_id"),
+          required_actions=requirement.get("required_actions"),
+        )
       except RestartSourceInvalid as exc:
         raise RestartCardActionConflict(str(exc)) from exc
 

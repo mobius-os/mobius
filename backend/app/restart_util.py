@@ -36,31 +36,45 @@ _FORCE_KILL_AFTER_SECONDS = 5.0
 _CUTOVER_FAILSAFE_SECONDS = 90.0
 _RESTART_ADMISSION_LOCK = threading.Lock()
 _RESTART_ADMITTED = False
+_SOURCE_VALIDATION_LOCK = threading.Lock()
+_VALIDATED_SOURCE_ID: str | None = None
 
 
 class RestartSourceInvalid(RuntimeError):
-  """The editable platform would not survive the next startup probe."""
+  """The exact platform generation would not survive the next boot."""
 
 
-def validate_restart_source() -> None:
-  """Run the production boot import verdict before accepting a restart.
-
-  The entrypoint deliberately falls back to the baked platform when an edited
-  backend or router cannot import.  A planned restart must catch that condition
-  while the healthy worker can still explain and repair it, rather than using
-  the fallback as a delayed test result.
-
-  This mirrors ``_platform_import_probe`` in the frozen entrypoint: same
-  backend cwd, scrubbed repository/Python controls, and the explicit router
-  registry verdict.  A missing editable backend is valid for a baked-only
-  installation; first-boot seeding remains owned by the entrypoint.
-  """
-  platform_root = Path(
-    os.environ.get("MOBIUS_PLATFORM_DIR", "/data/platform")
-  )
+def validate_restart_source(
+  *,
+  expected_generation_id: str | None = None,
+  required_actions: list[str] | None = None,
+) -> None:
+  """Prove the reviewed bytes and run the production boot import verdict."""
+  global _VALIDATED_SOURCE_ID
+  platform_root = Path(os.environ.get("MOBIUS_PLATFORM_DIR", "/data/platform"))
   backend = platform_root / "backend"
   if not (backend / "app").is_dir():
     return
+
+  from app import platform_generation
+  try:
+    current = platform_generation.checkout_generation(
+      platform_root, required_actions=required_actions,
+    )
+  except platform_generation.GenerationUnavailable as exc:
+    raise RestartSourceInvalid(str(exc)) from exc
+  if (
+    expected_generation_id
+    and current["generation_id"] != expected_generation_id
+  ):
+    raise RestartSourceInvalid(
+      "Restart stopped: platform source changed after this Restart card was "
+      "prepared. Review the current changes and request a new restart."
+    )
+  source_id = current["generation_id"]
+  with _SOURCE_VALIDATION_LOCK:
+    if _VALIDATED_SOURCE_ID == source_id:
+      return
 
   env = os.environ.copy()
   for key in (
@@ -103,6 +117,8 @@ def validate_restart_source() -> None:
       "restarting."
     ) from exc
   if completed.returncode == 0:
+    with _SOURCE_VALIDATION_LOCK:
+      _VALIDATED_SOURCE_ID = source_id
     return
   detail = (completed.stderr or completed.stdout or "").strip()
   if len(detail) > 1200:
@@ -181,6 +197,9 @@ async def _drain_exact_restart() -> tuple[str, str, list[dict[str, str]]]:
 
 async def restart_this_worker(
   ready_path: Path | None = None,
+  *,
+  expected_generation_id: str | None = None,
+  required_actions: list[str] | None = None,
 ) -> None:
   """Drain live turns, then restart this uvicorn worker with the current code.
 
@@ -209,14 +228,13 @@ async def restart_this_worker(
   drain flushes each paused note before SIGTERM, so a hard kill loses nothing a
   graceful drain would have saved.
   """
-  # Last-chance defense for every caller, including future restart surfaces.
-  # The synchronous owner-facing paths run this before acknowledging the
-  # action; repeating it here closes the short source-change window without
-  # draining or interrupting work when the source is invalid.
   try:
-    validate_restart_source()
+    validate_restart_source(
+      expected_generation_id=expected_generation_id,
+      required_actions=required_actions,
+    )
   except RestartSourceInvalid:
-    log.error("planned restart rejected by startup preflight", exc_info=True)
+    log.error("restart source changed or failed validation", exc_info=True)
     return
 
   if not _claim_in_process_restart():

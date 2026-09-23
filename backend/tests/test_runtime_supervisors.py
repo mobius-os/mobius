@@ -128,8 +128,84 @@ async def test_start_fails_open_when_chat_supervisor_wiring_breaks(monkeypatch):
   assert frontend_started is True
   assert "connect-outbound" in supervisors._tasks
   assert set(supervisors._tasks) == before
+  assert supervisors.database_service_readiness() == (
+    False, "runtime_supervisor_start_failed",
+  )
   await supervisors.stop()
   assert supervisors._tasks == {}
+
+
+@pytest.mark.asyncio
+async def test_database_readiness_requires_live_supervisor_tasks(monkeypatch):
+  supervisors = _supervisors()
+
+  async def resident():
+    await asyncio.Event().wait()
+
+  async def start_one():
+    supervisors._spawn("writer-supervisor", resident())
+
+  monkeypatch.setattr(supervisors, "_start_chat_supervisors", start_one)
+  await supervisors.start_database_services()
+
+  assert supervisors.database_service_readiness() == (
+    False, "runtime_supervisor_start_failed",
+  )
+  await supervisors.stop()
+
+
+@pytest.mark.asyncio
+async def test_optional_supervisor_exit_does_not_fail_core_readiness(monkeypatch):
+  supervisors = _supervisors()
+
+  async def resident():
+    await asyncio.Event().wait()
+
+  async def short_lived():
+    return None
+
+  async def start_required_and_optional():
+    for name in (
+      "wedged-marker-sweep", "reset-park-sweep", "chat-wait-sweep",
+      "writer-supervisor",
+    ):
+      supervisors._spawn(name, resident())
+    supervisors._spawn("optional-retention", short_lived())
+
+  monkeypatch.setattr(
+    supervisors, "_start_chat_supervisors", start_required_and_optional,
+  )
+  await supervisors.start_database_services()
+
+  assert supervisors.database_service_readiness() == (True, "")
+  await supervisors.stop()
+
+
+@pytest.mark.asyncio
+async def test_required_supervisor_exit_fails_core_readiness(monkeypatch):
+  supervisors = _supervisors()
+
+  async def resident():
+    await asyncio.Event().wait()
+
+  async def start_required():
+    for name in (
+      "wedged-marker-sweep", "reset-park-sweep", "chat-wait-sweep",
+      "writer-supervisor",
+    ):
+      supervisors._spawn(name, resident())
+
+  monkeypatch.setattr(supervisors, "_start_chat_supervisors", start_required)
+  await supervisors.start_database_services()
+  supervisors._tasks["writer-supervisor"].cancel()
+  await asyncio.gather(
+    supervisors._tasks["writer-supervisor"], return_exceptions=True,
+  )
+
+  assert supervisors.database_service_readiness() == (
+    False, "runtime_supervisor_stopped",
+  )
+  await supervisors.stop()
 
 
 @pytest.mark.asyncio

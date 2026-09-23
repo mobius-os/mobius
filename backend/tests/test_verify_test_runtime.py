@@ -450,11 +450,11 @@ def test_test_runtime_seed_precedes_selection_and_skips_reconcile():
     ROOT / "backend" / "scripts" / "entrypoint.sh"
   ).read_text(encoding="utf-8")
   seed_call = '_platform_seed_test_checkout || exit 1'
-  selection = 'if [ ! -d "$_platform_app" ]; then'
+  selection = '_generation_selection=""'
   assert entrypoint.index(seed_call) < entrypoint.index(selection)
   assert (
-    'if [ "$_use_platform" -eq 1 ] && '
-    '[ "${MOBIUS_TEST_RUNTIME:-0}" != "1" ]; then'
+    'if [ "$_use_platform" -eq 1 ] && [ "$_use_generation" -eq 0 ] &&\n'
+    '   [ "${MOBIUS_TEST_RUNTIME:-0}" != "1" ]; then'
   ) in entrypoint
 
 

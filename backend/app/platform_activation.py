@@ -185,7 +185,11 @@ _RULES = (
     "baked_runtime",
     ActivationLevel.IMAGE_REBUILD,
     "Baked scripts, supervisors, or protected-file rules changed.",
-    exact=("protected-files.txt", "backend/runtime", *IMAGE_BOOTSTRAP_SCRIPTS),
+    exact=(
+      "protected-files.txt", "backend/runtime",
+      "backend/app/platform_artifacts.py",
+      *IMAGE_BOOTSTRAP_SCRIPTS,
+    ),
     prefixes=(
       "backend/scripts/seed-skills/",
       "backend/runtime/",

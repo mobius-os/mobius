@@ -653,11 +653,12 @@ class ChatWait(Base):
 
 
 class PlatformBootSnapshot(Base):
-  """Immutable ready-boot receipt captured after DB/writer readiness.
+  """Immutable receipt captured after all boot-critical owners are ready.
 
-  Source identity remains useful audit context, but Restart waits care only
-  that a different boot became ready. The resumed agent verifies its work.
-  ``loaded_files_json`` remains for backward-compatible historical rows.
+  Current rows carry the complete platform generation in
+  ``loaded_files_json`` so a Restart wait can prove the exact reviewed bytes,
+  not merely that some later process answered. Historical rows remain valid
+  for legacy boot-only waits.
   """
 
   __tablename__ = "platform_boot_snapshots"

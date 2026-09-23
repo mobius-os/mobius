@@ -15,6 +15,7 @@ import { safeReturnPath } from './lib/safeReturnPath.js'
 import { rememberProjectCopyRequest } from './lib/projectCopies.js'
 import { readStandaloneBoot } from './lib/standaloneBoot.js'
 import { shellReloadNavigationTransitionIsActive } from './lib/shellReloadNavigationTransition.js'
+import { opensDegradedRepairChat } from './lib/errorRecovery.js'
 
 // These flows are mutually exclusive. Keep setup, login, the full shell, and
 // the opaque embed out of one another's startup path; first boot should not
@@ -192,10 +193,12 @@ function AppRoot() {
   const markShellVisualReady = useCallback(() => {
     setShellVisualReady(true)
   }, [])
-  // "Continue to the built-in version" hides the notice for THIS mount so the
-  // owner can use the working fallback. Deliberately not persisted: any reload
-  // re-surfaces it while the platform is still degraded, so it never hides.
-  const [degradedDismissed, setDegradedDismissed] = useState(false)
+  // "Use previous version" hides the notice for THIS mount so the owner can
+  // use the working fallback. Deliberately not persisted: any reload
+  // re-surfaces it while the platform is still degraded.
+  const [degradedDismissed, setDegradedDismissed] = useState(() => {
+    return opensDegradedRepairChat(window.location.search)
+  })
   const setupStatusQuery = setupQueries.status.useQuery({
     enabled: !hasToken && !mobiusLoginSignal && status !== 'install-pass',
   })

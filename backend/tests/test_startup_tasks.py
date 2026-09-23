@@ -105,6 +105,45 @@ def test_production_startup_plan_has_explicit_unique_order():
   )
 
 
+def test_one_invalid_app_schedule_does_not_disable_cron_infrastructure(
+  monkeypatch, tmp_path,
+):
+  import json
+  from app.routes import app_schedules
+
+  class EmptySession:
+    def __enter__(self):
+      return object()
+
+    def __exit__(self, *_args):
+      return False
+
+  ctx = context()
+  ctx.settings.data_dir = str(tmp_path)
+  monkeypatch.setattr(startup, "SessionLocal", EmptySession)
+  monkeypatch.setattr(
+    app_schedules,
+    "reconcile_app_cron_supervision",
+    lambda _db: (2, ["bad-app: invalid cadence"]),
+  )
+
+  startup._reconcile_app_cron(ctx)
+
+  assert (tmp_path / "run" / "app-cron-supervision-ready").read_text() == (
+    "test-boot\n"
+  )
+  status = json.loads(
+    (tmp_path / "run" / "app-cron-supervision-status.json").read_text()
+  )
+  assert status == {
+    "version": 1,
+    "boot_id": "test-boot",
+    "infrastructure_ready": True,
+    "supervised_count": 2,
+    "warnings": ["bad-app: invalid cadence"],
+  }
+
+
 @pytest.mark.asyncio
 async def test_claude_config_failure_cannot_suppress_pre_db_codex_reclaim(
   monkeypatch,

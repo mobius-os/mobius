@@ -9,6 +9,7 @@ therefore serve bounded diagnostics without executing partial maintenance.
 from __future__ import annotations
 
 import inspect
+import json
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -16,6 +17,7 @@ from typing import Awaitable, Callable, Protocol
 
 from app.database import SessionLocal
 from app.memory_observability import record_memory_checkpoint
+from app.storage_io import atomic_write
 
 
 class StartupState(Protocol):
@@ -502,11 +504,20 @@ def _reconcile_app_cron(context: StartupContext) -> None:
     context.logger.info("supervised %d app cron schedule(s)", count)
   for warning in warnings:
     context.logger.warning("app cron supervision skipped: %s", warning)
-  if warnings:
-    return
-  ready = Path(context.settings.data_dir) / "run" / "app-cron-supervision-ready"
+  run_dir = Path(context.settings.data_dir) / "run"
+  ready = run_dir / "app-cron-supervision-ready"
   ready.parent.mkdir(parents=True, exist_ok=True)
-  ready.write_text(f"{context.boot_id}\n", encoding="utf-8")
+  atomic_write(ready, f"{context.boot_id}\n")
+  atomic_write(
+    run_dir / "app-cron-supervision-status.json",
+    json.dumps({
+      "version": 1,
+      "boot_id": context.boot_id,
+      "infrastructure_ready": True,
+      "supervised_count": count,
+      "warnings": warnings,
+    }, sort_keys=True) + "\n",
+  )
 
 
 def _route_diagnostics_to_chat_log(_context: StartupContext) -> None:
@@ -625,9 +636,5 @@ DATABASE_STARTUP_TASKS = (
     "route diagnostics to chat log",
     _route_diagnostics_to_chat_log,
     checkpoint="startup_app_source_ready",
-  ),
-  StartupTask(
-    "capture platform activation snapshot",
-    _capture_platform_activation_snapshot,
   ),
 )

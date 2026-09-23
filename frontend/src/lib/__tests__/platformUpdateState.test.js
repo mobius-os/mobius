@@ -104,7 +104,7 @@ test('an image-required apply projects the external activation contract', () => 
   assert.equal(projected.needs_restart, false)
   assert.equal(projected.activation, activation)
   assert.equal(platformActivationLabel(projected.activation), 'Image rebuild')
-  assert.equal(platformUpdateStatusLabel(projected), 'Image rebuild required')
+  assert.equal(platformUpdateStatusLabel(projected), 'Ready to finish update')
 })
 
 test('a dependency apply projects an in-place restart, not a rebuild', () => {
@@ -210,7 +210,7 @@ test('update-row copy represents restart and availability independently', () => 
       activation: { level: 'proxy_reload' },
       available: false,
     }),
-    'Proxy reload required',
+    'Update needs help',
   )
 })
 

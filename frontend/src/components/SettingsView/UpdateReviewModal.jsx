@@ -14,8 +14,17 @@ import './UpdateReviewModal.css'
 const UPDATE_PHASE_LABELS = {
   preparing: 'Preparing the update…', fetching: 'Getting the reviewed version…',
   reconciling: 'Combining the update with your local changes…',
-  validating: 'Checking the updated source…', building: 'Preparing dependencies and the interface…',
+  validating: 'Checking the update…', building: 'Getting everything ready…',
   finalizing: 'Finishing the update…',
+}
+
+function blockingPathLabel(path) {
+  if (path === 'Dockerfile') return 'Tools and versions included with Möbius'
+  if (path.startsWith('backend/scripts/seed-skills/')) return 'Built-in skill template — not the installed skill'
+  if (path === 'backend/requirements.txt') return 'Python packages included with Möbius'
+  if (path.startsWith('backend/runtime/')) return 'Protected startup files'
+  if (path.includes('entrypoint')) return 'Startup behavior'
+  return 'System setup'
 }
 
 export default function UpdateReviewModal({
@@ -56,10 +65,10 @@ export default function UpdateReviewModal({
     onClose: requestClose, closeOnEscape: !inFlight, modal: false, lockScroll: false,
     inertBoundaryRef })
 
-  async function handleApply() {
+  async function handleApply({ sourceOnly = false } = {}) {
     const plan = { plan_id: preview.plan_id, current_sha: preview.current_sha,
       target_sha: preview.target_sha, image_digest: preview.image_digest }
-    const result = await (reviewedUpdateUsesContainerRebuild(preview) ? onRebuild(plan) : onApply(plan))
+    const result = await (!sourceOnly && reviewedUpdateUsesContainerRebuild(preview) ? onRebuild(plan) : onApply(plan))
     if (result?.state === 'conflict' || result?.state === 'rolled_back') setResultState(result.state)
     // The request owner returns ok only for an explicit accepted domain outcome.
     // HTTP success alone never closes this review.
@@ -77,11 +86,13 @@ export default function UpdateReviewModal({
   const hasResult = ['conflict', 'rolled_back'].includes(resultState)
   const hasPlan = !!(preview?.plan_id && preview?.current_sha && preview?.target_sha)
   const actionable = preview?.actionable
+  const containerBlockers = preview?.blocking_paths?.length > 0
+  const canPrepareSource = containerBlockers && preview?.operation === 'update' && preview?.available && hasPlan
   // The review proved there is nothing to apply. A leftover rolled_back flag
   // must not turn this into a "needs repair" offer — that is the contradictory
   // "already complete + Ask Möbius" state. Show a single Done instead.
   const nothingToApply = !!preview && actionable === false && !hasResult
-  const progressLabel = observing ? 'Confirming the request. No second update will be sent…' : rebuilding ? 'Starting the reviewed container update…'
+  const progressLabel = observing ? 'Confirming the request. No second update will be sent…' : rebuilding ? 'Starting the reviewed system update…'
     : (applyProgress?.plan_id === preview?.plan_id && UPDATE_PHASE_LABELS[applyProgress?.phase]) || 'Preparing the update…'
   const needsRestart = ['server_restart', 'dependency_sync'].includes(activation?.level)
   const repairReason = (resultState === 'conflict' || nothingToApply) ? null : platformUpdateRepairReason({
@@ -103,10 +114,10 @@ export default function UpdateReviewModal({
         <div className="urm__body">
           {hasResult ? (
             <div className="urm__notice" role="status">
-              <strong>{resultState === 'conflict' ? 'Your current version is still running.' : 'Your previous source was restored.'}</strong>
+              <strong>{resultState === 'conflict' ? 'Your current version is still running.' : 'Your previous working version is running.'}</strong>
               <p>{resultState === 'conflict'
                 ? 'Your local changes overlap this update. Resolve the overlap in chat when you’re ready.'
-                : 'The update did not pass its checks. Review the failure details before trying again; restoring source is not a full environment rollback.'}</p>
+                : 'The update did not pass its checks. Your chats, apps, and saved changes are still there. Review the details before trying again.'}</p>
             </div>
           ) : loading ? <p className="urm__notice" role="status">Checking this update…</p>
             : loadError ? <p className="urm__notice" role="status">{loadError}</p>
@@ -114,23 +125,39 @@ export default function UpdateReviewModal({
                 : <>
                   <section className="urm__overview">
                     <h3>{repairReason ? 'This update needs help' : finish ? 'Make the installed update active' : 'Update Möbius'}</h3>
-                    <p>{repairReason || (finish ? 'Finish activating the installed release.'
-                      : 'Apply this reviewed version while keeping your local changes. If they overlap, the update stops for you to resolve them.')}</p>
+                    <p>{containerBlockers
+                      ? 'This update would remove changes made to how Möbius runs.'
+                      : repairReason || (finish ? 'Finish setting up the installed update.'
+                      : 'Install this reviewed update while keeping your changes. If anything overlaps, Möbius pauses and asks you to resolve it.')}</p>
                     <h3>What to expect</h3>
-                    <p>{repairReason
+                    <p>{containerBlockers
+                      ? (canPrepareSource
+                        ? 'You can prepare the update now and resolve any overlaps while Möbius keeps running. The final system update stays paused until those local changes are included in an official update or a custom version you control.'
+                        : 'The update is prepared. The final system update stays paused until those local changes are included in an official update or a custom version you control.')
+                      : repairReason
                       ? 'Open a chat with the update details included. Möbius will check what’s needed and help finish the update, asking before any restart.'
                       : rebuildUpdate
-                      ? 'This replaces the container and briefly takes Möbius offline. Active chats are paused; eligible chats resume after the update. The page reconnects automatically.'
+                      ? 'Möbius will briefly go offline while the updated system starts. Active chats pause and resume when ready, and this page reconnects automatically.'
                       : needsRestart
                         ? 'The update is prepared now. A separate restart makes it active, so you can keep working and combine more updates first.'
                         : 'The interface is rebuilt or changes take effect when next used. No server restart is needed.'}</p>
-                    {rebuildUpdate && !repairReason && <p>If the new container fails its checks, the controller attempts to restore the previous container. Your saved chats, apps and local source stay on the persistent volume. Startup keeps the installed source and your local changes. Newer releases wait for another explicit update.</p>}
+                    {rebuildUpdate && !repairReason && <p>If the updated system does not pass its checks, Möbius tries to bring back the previous working version. Your chats, apps, and saved changes stay in place.</p>}
                   </section>
                   <details className="urm__technical">
                     <summary>Technical details{summary.fileCount ? ` · ${summary.fileCount} files` : ''}</summary>
                     <p>Reviewed version <code className="urm__sha">{target}</code> · {activation && deploymentKindLabel(activation)}</p>
                     {activation && <p>{platformActivationLabel(activation)}</p>}
-                    {preview?.blocking_paths?.length > 0 && <><h3>Local changes to preserve</h3><ul>{preview.blocking_paths.map(path => <li key={path}><code>{path}</code></li>)}</ul></>}
+                    {containerBlockers && <>
+                      <h3>Local system changes to keep</h3>
+                      <p>These files differ from the reviewed update. Replacing the running system now would remove what they do.</p>
+                      <ul>{preview.blocking_paths.map(path => <li key={path}><strong>{blockingPathLabel(path)}</strong><br /><code>{path}</code></li>)}</ul>
+                      {preview?.blocking_diff && <section>
+                        <h3>Exact local difference</h3>
+                        <UnifiedDiff diff={preview.blocking_diff}
+                          summaryOverrides={preview.blocking_paths.map(path => ({ path, status: 'M', insertions: null, deletions: null }))}
+                          diffTruncated={!!preview.blocking_diff_truncated} />
+                      </section>}
+                    </>}
                     {(activation?.guidance || []).map(line => <p key={line}>{line}</p>)}
                     {(activation?.reasons || []).length > 0 && <ul>{activation.reasons.map(reason => <li key={reason.code}>{reason.summary}</li>)}</ul>}
                     {commits.length > 0 && <section>
@@ -151,12 +178,18 @@ export default function UpdateReviewModal({
         <div className="urm__foot">
           {!nothingToApply && <button type="button" className="settings__btn settings__btn--sm settings__btn--outline" onClick={requestClose} disabled={inFlight}>{observing ? 'Keep working' : 'Not now'}</button>}
           {nothingToApply ? <button ref={resultActionRef} type="button" className="settings__btn settings__btn--sm" onClick={requestClose} disabled={busy}>Done</button>
-          : repairReason ? <UpdateRepairAction preview={preview} platform={{ ...platform, state: resultState || platform?.state }} rebuild={rebuild} error={applyError} errorCode={applyErrorCode} disabled={busy || loading} buttonRef={resultActionRef} className="settings__btn settings__btn--sm" />
+          : repairReason ? <>
+            {canPrepareSource && <button type="button" className="settings__btn settings__btn--sm settings__btn--outline"
+              onClick={() => handleApply({ sourceOnly: true })} disabled={busy || loading}>
+              {busy ? 'Preparing…' : 'Prepare update'}
+            </button>}
+            <UpdateRepairAction preview={preview} platform={{ ...platform, state: resultState || platform?.state }} rebuild={rebuild} error={applyError} errorCode={applyErrorCode} disabled={busy || loading} buttonRef={resultActionRef} className="settings__btn settings__btn--sm" label={containerBlockers ? 'Fix with an agent' : 'Ask Möbius'} />
+          </>
           : hasResult ? <button ref={resultActionRef} type="button" className="settings__btn settings__btn--sm"
             onClick={resultState === 'conflict' ? onResolve : requestClose} disabled={busy}>
             {resultState === 'conflict' ? (resolving ? 'Opening…' : 'Resolve in chat') : 'Done'}
           </button> : (loadError || ['update_plan_stale', 'update_plan_invalid', 'activation_changed'].includes(applyErrorCode)) ? <button type="button" className="settings__btn settings__btn--sm" onClick={loadPreview} disabled={busy}>{loadError ? 'Try again' : 'Refresh review'}</button>
-            : <button type="button" className="settings__btn settings__btn--sm" onClick={handleApply} disabled={busy || loading || !actionable || !hasPlan}>
+            : <button type="button" className="settings__btn settings__btn--sm" onClick={() => handleApply()} disabled={busy || loading || !actionable || !hasPlan}>
               {busy ? 'Updating…' : rebuildUpdate ? 'Update now' : 'Apply update'}
             </button>}
         </div>

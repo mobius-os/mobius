@@ -53,18 +53,18 @@ test('container rebuild polling survives transient status failures', () => {
 test('container rebuild progress copy stays factual', () => {
   assert.equal(
     rebuildProgressMessage({ state: 'succeeded' }),
-    'Container rebuilt successfully.',
+    'The updated system is ready.',
   )
   assert.equal(
     rebuildProgressMessage({ state: 'needs_recovery' }),
-    'The container could not be restored. Use your deployment’s Recovery action.',
+    'Möbius could not return to the previous version. Use Recovery in your deployment.',
   )
   assert.equal(
     rebuildProgressMessage({ state: 'no_change', release_source: 'applied' }),
-    'This container already matches the applied Möbius version.',
+    'Möbius already uses the installed update.',
   )
   assert.equal(
     rebuildProgressMessage({ state: 'no_change', release_source: 'latest_ghcr' }),
-    'This container already matches the latest official image.',
+    'Möbius already uses the latest official version.',
   )
 })

@@ -1,22 +1,17 @@
-"""Typed, platform-owned Restart cards and post-restart continuation.
+"""Typed Restart cards and exact post-restart activation proof.
 
-Pressing **Restart now** drains active work and restarts once after the current
-editable backend passes the same import verdict the next boot will run. This is
-not a per-file source identity gate: it only prevents a planned restart from
-knowingly entering the baked recovery fallback. Once admitted, a restart
-reloads whatever valid backend source is currently present.
-
-What remains here is the *continuation*: after a restart, the interrupted chat
-resumes once a later boot becomes ready, so the agent can verify whether its
-change loaded. That resume is driven by an ``platform_activation`` ChatWait plus
-immutable ready-boot receipts (``PlatformBootSnapshot``), with a bounded
-self-heal so the agent is never pinned forever.
+A current card names one complete platform generation. Pressing **Restart
+now** first proves those reviewed bytes still exist, then drains and restarts
+once. The interrupted chat resumes only when a later boot records that same
+generation as service-ready. Legacy cards retain their earlier boot-only
+semantics, and every wait still has a bounded self-heal.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import os
 import subprocess
 from datetime import timedelta
 from typing import Literal
@@ -29,7 +24,7 @@ from app.timeutil import now_naive_utc
 
 
 ACTIVATION_WAIT_KIND = "platform_activation"
-CONDITION_VERSION = 1
+CONDITION_VERSION = 2
 # After the owner approves a restart, give a later boot this long to record a
 # service-ready receipt. If none appears — the boot came up degraded, a failing
 # update rolled the source back, or the restart never dispatched — resume the
@@ -38,11 +33,13 @@ CONDITION_VERSION = 1
 ACTIVATION_CONFIRM_DEADLINE_SECONDS = 900
 
 
-def restart_condition_id(source_boot_id: str, run_id: str) -> str:
-  """A stable card/wait identity for the restart offered by one run+boot."""
+def restart_condition_id(
+  source_boot_id: str, run_id: str, generation_id: str | None = None,
+) -> str:
+  """A stable card/wait identity for one run, boot, and reviewed generation."""
   digest = hashlib.sha256(
     json.dumps(
-      [CONDITION_VERSION, source_boot_id, run_id],
+      [CONDITION_VERSION, source_boot_id, run_id, generation_id],
       sort_keys=True, separators=(",", ":"), ensure_ascii=True,
     ).encode("utf-8")
   ).hexdigest()
@@ -50,11 +47,7 @@ def restart_condition_id(source_boot_id: str, run_id: str) -> str:
 
 
 def pending_restart_paths() -> list[str]:
-  """Best-effort list of committed paths a restart would load, for card text.
-
-  This is display-only: it never blocks or refuses a restart. Any error (dirty
-  tree, missing HEAD, baked process) yields an empty list and a generic card.
-  """
+  """Best-effort committed restart paths used only to explain the card."""
   try:
     from app import platform_activation, platform_update
 
@@ -73,13 +66,17 @@ def pending_restart_paths() -> list[str]:
     pending = platform_update._pending_activation_paths(
       repo, served_to_head=changed,
     )
-    restart_level = platform_activation.ActivationLevel.SERVER_RESTART.value
-    result = {
-      path for path in pending
-      if platform_activation.classify_activation([path])["level"]
-      == restart_level
+    restart_actions = {
+      platform_activation.ActivationLevel.SERVER_RESTART.value,
+      platform_activation.ActivationLevel.DEPENDENCY_SYNC.value,
     }
-    return sorted(result)
+    return sorted({
+      path for path in pending
+      if any(
+        action in restart_actions
+        for action in platform_activation.classify_activation([path])["required_actions"]
+      )
+    })
   except Exception:
     return []
 
@@ -91,7 +88,7 @@ def activation_wait_verdict(
   requirement = row.condition_json
   if (
     not isinstance(requirement, dict)
-    or requirement.get("version") != CONDITION_VERSION
+    or requirement.get("version") not in (1, CONDITION_VERSION)
     or not requirement.get("source_boot_id")
     or not isinstance(requirement.get("action_id"), str)
     or not requirement["action_id"].startswith("platform-restart:")
@@ -111,18 +108,41 @@ def activation_wait_verdict(
     )
     .filter(models.PlatformBootSnapshot.service_ready.is_(True))
   )
-  # A manual redeploy long after the bounded restart window is recovery, not
-  # evidence that the requested restart worked. Only a timely ready boot may
-  # satisfy this activation wait.
   if confirmation_deadline is not None:
     ready_boot_query = ready_boot_query.filter(
       models.PlatformBootSnapshot.captured_at <= confirmation_deadline,
     )
-  ready_boot = ready_boot_query.order_by(
+  generation_id = requirement.get("generation_id")
+  candidates = ready_boot_query.order_by(
     models.PlatformBootSnapshot.captured_at.desc(),
-  ).first()
+  ).all()
+  ready_boot = next((snapshot for snapshot in candidates if (
+    not generation_id
+    or (
+      isinstance(snapshot.loaded_files_json, dict)
+      and snapshot.loaded_files_json.get("generation_id") == generation_id
+    )
+  )), None)
   if ready_boot is not None:
+    if generation_id:
+      return "met", "The reviewed platform generation reached readiness."
     return "met", "A later ready Möbius boot was observed."
+
+  # A different complete generation becoming ready is still a conclusive
+  # restart outcome.  Do not call the reviewed activation successful, but do
+  # wake its declaring agent immediately so it can prove whether the required
+  # change was carried into the newer generation or request a fresh restart.
+  #
+  # This also covers a card the owner did not click when another chat owned the
+  # physical restart.  Waiting for ``action_approved_at`` in that case leaves
+  # the card armed forever even though the event it was observing has already
+  # happened.
+  if generation_id and candidates:
+    return "failed", (
+      "A different platform generation reached readiness after this card was "
+      "created. Resuming to verify whether the requested changes were carried "
+      "forward."
+    )
 
   # Bounded self-heal. Once the owner approved a restart, if no ready boot has
   # confirmed within the window, resume the agent to verify manually — a
@@ -147,6 +167,8 @@ def capture_ready_boot_snapshot(
   from app import platform_update
   from app.main import service_readiness
 
+  from app import platform_generation
+
   source_kind = "unknown"
   source_sha = None
   try:
@@ -163,21 +185,61 @@ def capture_ready_boot_snapshot(
   # this same transaction so the receipt never infers readiness from ordering.
   database_ready = db.execute(text("SELECT 1")).scalar() == 1
   service_ready = bool(database_ready and ready)
+  generation = None
+  if service_ready:
+    try:
+      state = platform_generation.generation_state()
+      pending = state.get("pending")
+      required_actions = (
+        list(pending.get("required_actions") or [])
+        if isinstance(pending, dict) else []
+      )
+      served_generation_id = os.environ.get("MOBIUS_SERVED_GENERATION_ID")
+      served = next((item for item in (
+        state.get("pending"), state.get("active"), state.get("last_ready"),
+      ) if (
+        served_generation_id
+        and isinstance(item, dict)
+        and item.get("generation_id") == served_generation_id
+      )), None)
+      generation = served or (
+        platform_generation.checkout_generation(required_actions=required_actions)
+        if source_kind == "platform" else platform_generation.baked_generation(
+          source_sha, required_actions=required_actions,
+        )
+      )
+    except platform_generation.GenerationUnavailable:
+      service_ready = False
 
   snapshot = db.get(models.PlatformBootSnapshot, boot_id)
   if snapshot is not None:
+    loaded = snapshot.loaded_files_json
+    stored_generation = (
+      loaded.get("generation") if isinstance(loaded, dict) else None
+    )
+    if snapshot.service_ready and isinstance(stored_generation, dict):
+      platform_generation.record_ready_generation(
+        stored_generation, boot_id=boot_id,
+      )
     return snapshot
   snapshot = models.PlatformBootSnapshot(boot_id=boot_id)
   db.add(snapshot)
   snapshot.source_kind = source_kind
   snapshot.source_sha = source_sha
-  # Kept for the existing durable schema and historical audit rows. Restart
-  # continuation deliberately does not compare a per-wait file manifest.
-  snapshot.loaded_files_json = {}
+  snapshot.loaded_files_json = (
+    {
+      "generation_id": generation["generation_id"],
+      "generation": generation,
+    }
+    if generation is not None else {}
+  )
   snapshot.service_ready = service_ready
   snapshot.captured_at = now_naive_utc()
   db.commit()
   db.refresh(snapshot)
+
+  if generation is not None and service_ready:
+    platform_generation.record_ready_generation(generation, boot_id=boot_id)
 
   # Boot evidence is tiny, but it is process-lifetime data. Keep a bounded
   # recent audit window; active waits only evaluate later snapshots and never

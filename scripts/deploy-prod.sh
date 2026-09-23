@@ -825,6 +825,46 @@ served_version_field() {  # $1 = json key
   container_version_field "$CONTAINER" "$1"
 }
 
+# Prove that the reviewed source copied into /data/platform is both present and
+# the source the replacement is intentionally serving.  A freshly replaced
+# image may serve its exact baked tree for one healthy bootstrap boot; that is
+# the handoff which lets the next generation-bound restart freeze and select
+# the complete persistent source/frontend generation.  Do not confuse that
+# expected transition with an unrelated baked fallback or a missing install.
+verify_reviewed_source_selection() {  # $1 = reviewed source SHA
+  local installed_source_sha="$1"
+  local serving_source served_source_sha
+
+  if ! docker exec -u mobius "$CONTAINER" \
+    git -C /data/platform merge-base --is-ancestor "$installed_source_sha" HEAD; then
+    fail "the persistent platform does not contain the source selected from the reviewed image"
+    fail "do not report this deployment complete; inspect source installation"
+    return 1
+  fi
+
+  serving_source=$(served_version_field serving_source)
+  case "$serving_source" in
+    platform)
+      ok "served platform contains reviewed source ${installed_source_sha:0:18}… plus local changes"
+      ;;
+    baked)
+      served_source_sha=$(served_version_field served_sha)
+      if [ "$served_source_sha" != "$installed_source_sha" ]; then
+        fail "the replacement booted an unexpected baked source (${served_source_sha:-unknown})"
+        fail "do not report this deployment complete; inspect source recovery and fallback"
+        return 1
+      fi
+      ok "replacement booted the exact reviewed image source ${installed_source_sha:0:18}…"
+      warn "one generation-bound restart remains before the persistent frozen generation serves"
+      ;;
+    *)
+      fail "the replacement reports an unknown serving source (${serving_source:-unavailable})"
+      fail "do not report this deployment complete; inspect source recovery and fallback"
+      return 1
+      ;;
+  esac
+}
+
 # The HTTP status of the complete serviceability probe. /api/health is
 # reachability only; /api/ready also requires successful database initialization,
 # every mapped table/column, and a usable single-writer persistence actor.
@@ -1723,14 +1763,7 @@ fi
 # Verify the frozen source release without a network lookup or a freshness
 # exemption. Local overlay commits are allowed; selecting another release is not.
 if [ "$TARGET" = "prod" ] && [ -n "$INSTALLED_SOURCE_SHA" ]; then
-  serving_source=$(served_version_field serving_source)
-  if [ "$serving_source" != "platform" ] || ! docker exec -u mobius "$CONTAINER" \
-    git -C /data/platform merge-base --is-ancestor "$INSTALLED_SOURCE_SHA" HEAD; then
-    fail "the running platform does not contain the source selected from the reviewed image"
-    fail "do not report this deployment complete; inspect source recovery and fallback"
-    exit 1
-  fi
-  ok "served platform contains reviewed source ${INSTALLED_SOURCE_SHA:0:18}… plus local changes"
+  verify_reviewed_source_selection "$INSTALLED_SOURCE_SHA"
 fi
 
 # Internal /api/health (we already checked this twice during waits, but

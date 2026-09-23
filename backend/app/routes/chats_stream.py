@@ -792,9 +792,13 @@ async def send_message(
       "question" if chat.pending_question_id else None, question_id=chat.pending_question_id)
     background = None
     if result["dispatch"]:
+      requirement = result["platform_action"].get("requirement") or {}
       async def execute_restart() -> None:
         from app.restart_util import restart_this_worker
-        await restart_this_worker()
+        await restart_this_worker(
+          expected_generation_id=requirement.get("generation_id"),
+          required_actions=requirement.get("required_actions"),
+        )
       background = BackgroundTask(execute_restart)
     return JSONResponse(
       status_code=202, content={

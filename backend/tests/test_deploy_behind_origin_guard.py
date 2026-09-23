@@ -133,7 +133,8 @@ def test_host_discovery_uses_main_but_cutover_verifies_frozen_image_source():
   assert "PLATFORM_RELEASE_TRACKING_REF=refs/remotes/origin/main" in text
   assert '"+refs/heads/main:$PLATFORM_RELEASE_TRACKING_REF"' in text
   assert '--no-tags origin -q' in text
-  assert 'merge-base --is-ancestor "$INSTALLED_SOURCE_SHA" HEAD' in text
+  assert 'merge-base --is-ancestor "$installed_source_sha" HEAD' in text
+  assert 'verify_reviewed_source_selection "$INSTALLED_SOURCE_SHA"' in text
   assert "ref=refs/heads/main" not in text
 
 

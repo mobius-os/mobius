@@ -29,21 +29,21 @@ export function rebuildProgressMessage(status) {
   switch (status?.state) {
     case 'queued':
     case 'preparing':
-      return 'Preparing the new container…'
+      return 'Preparing the system update…'
     case 'replacing':
-      return 'Rebuilding the container…'
+      return 'Installing the system update…'
     case 'verifying':
       return 'Checking that Möbius came back…'
     case 'succeeded':
-      return 'Container rebuilt successfully.'
+      return 'The updated system is ready.'
     case 'no_change':
       return status?.release_source === 'latest_ghcr'
-        ? 'This container already matches the latest official image.'
-        : 'This container already matches the applied Möbius version.'
+        ? 'Möbius already uses the latest official version.'
+        : 'Möbius already uses the installed update.'
     case 'rolled_back':
-      return 'The rebuild failed, so the previous container was restored.'
+      return 'The update did not work, so Möbius returned to the previous working version.'
     case 'needs_recovery':
-      return 'The container could not be restored. Use your deployment’s Recovery action.'
+      return 'Möbius could not return to the previous version. Use Recovery in your deployment.'
     default:
       return ''
   }

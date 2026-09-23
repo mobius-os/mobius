@@ -677,25 +677,23 @@ case "$ROUTE" in
     # solid canvas, so this evidence check is shell-only.
     CAPTURE_MIN_BYTES=8192
     if [ "$PRESERVE_CACHE" -eq 0 ]; then
-      DIST_INDEX="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../frontend" && pwd)/dist/index.html"
-      if [ ! -f "$DIST_INDEX" ]; then
-        die "current frontend build not found at $DIST_INDEX"
-      fi
+      # Ask the live server which shell entry it serves. This script may run
+      # from a frozen backend generation while the frontend watcher has
+      # legitimately hot-published a newer /data/platform bundle; resolving
+      # relative to the script would compare against the old generation.
+      CURRENT_SHELL_ENTRY_RAW="$(
+        browser_eval_retry \
+          "(async () => { try { const res = await fetch('/shell/?agent-screenshot-fresh=' + Date.now(), { cache: 'no-store', credentials: 'same-origin' }); if (!res.ok) return ''; const html = await res.text(); const doc = new DOMParser().parseFromString(html, 'text/html'); const src = doc.querySelector('script[type=\"module\"][src*=\"/assets/index-\"]')?.src || ''; return src.split('/').pop(); } catch { return ''; } })()" \
+          || true
+      )"
       CURRENT_SHELL_ENTRY="$(
-        python3 - "$DIST_INDEX" <<'PY'
-import re
-import sys
-from pathlib import Path
-
-html = Path(sys.argv[1]).read_text(encoding="utf-8")
-match = re.search(r'<script[^>]+src="([^"]*/assets/index-[^"]+\.js)"', html)
-if not match:
-  raise SystemExit(1)
-print(match.group(1).rsplit("/", 1)[-1])
-PY
-      )" || {
+        printf '%s' "$CURRENT_SHELL_ENTRY_RAW" | python3 -c \
+          'import json,sys; raw=sys.stdin.read().strip(); value=json.loads(raw) if raw else ""; print(value if isinstance(value, str) else "")' \
+          2>/dev/null || printf '%s' "$CURRENT_SHELL_ENTRY_RAW"
+      )"
+      if [ -z "$CURRENT_SHELL_ENTRY" ]; then
         die "current shell entry asset could not be resolved"
-      }
+      fi
       BROWSER_PHASE="shell freshness verification"
       LOADED_SHELL_ENTRY_RAW="$(
         browser_eval_retry \
@@ -717,7 +715,10 @@ PY
     # publishes one stable visual-readiness contract; automation must not learn
     # its private handoff classes or compositor attributes. Once the owner says
     # settled, give style/layout two frames to commit.
-    SHELL_SETTLED_EXPR="(document.querySelector('.shell[data-workspace-visual-state=\"settled\"]') !== null || document.querySelector('[data-mobius-visual-state=\"settled\"]') !== null) && performance.getEntriesByName('first-contentful-paint').length > 0"
+    # The degraded platform card deliberately renders before Shell mounts. It
+    # owns the whole viewport and is therefore a settled shell state too; do
+    # not make repair screenshots time out while the fallback is doing its job.
+    SHELL_SETTLED_EXPR="(document.querySelector('.shell[data-workspace-visual-state=\"settled\"]') !== null || document.querySelector('[data-mobius-visual-state=\"settled\"]') !== null || document.querySelector('.platform-degraded .recovery-panel') !== null) && performance.getEntriesByName('first-contentful-paint').length > 0"
     BROWSER_PHASE="shell visual readiness"
     if ! browser_wait --fn "$SHELL_SETTLED_EXPR" >/dev/null; then
       die "shell did not reach a settled visual state before capture"

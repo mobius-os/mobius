@@ -210,9 +210,11 @@ _platform_app=${_platform_backend}/app
 _baked_app=/app/platform-baked/backend/app
 _baked_scripts=/app/platform-baked/backend/scripts
 _use_platform=0
+_use_generation=0
 _serve_workdir=/app
 _serve_source=baked
 _served_sha="${BUILD_SHA:-unknown}"
+_served_platform_root=/data/platform
 
 # Env scrub shared by the import probe and the uvicorn exec so probe and serve
 # stay identical. Drops inherited repository controls and root-owned managed
@@ -465,11 +467,38 @@ _platform_use_direct() {
     'git -C /data/platform rev-parse HEAD' 2>/dev/null || echo unknown)
 }
 
+_platform_use_generation() {
+  _selection="$1"
+  _generation_backend=$(printf '%s' "$_selection" | jq -r '.backend')
+  _generation_frontend=$(printf '%s' "$_selection" | jq -r '.frontend')
+  _generation_id=$(printf '%s' "$_selection" | jq -r '.generation_id')
+  _generation_role=$(printf '%s' "$_selection" | jq -r '.role')
+  _generation_sha=$(printf '%s' "$_selection" | jq -r '.source_sha // "unknown"')
+  [ -d "$_generation_backend/app" ] || return 1
+  _platform_import_probe_dir "$_generation_backend" || return 1
+  _use_platform=1
+  _use_generation=1
+  _serve_source=platform
+  _serve_workdir=$_generation_backend
+  # `_generation_backend` is <artifact>/backend.  The served runtime lives at
+  # <artifact>/backend/runtime, so its platform root is exactly one level up.
+  # Passing the artifact store's parent makes a valid broker look missing and
+  # incorrectly sends an otherwise healthy generation to the baked fallback.
+  _served_platform_root=$(dirname "$_generation_backend")
+  _served_sha=$_generation_sha
+  export MOBIUS_SERVED_FRONTEND_DIR=$_generation_frontend
+  export MOBIUS_SERVED_GENERATION_ID=$_generation_id
+  echo "Platform layer: serving verified generation $_generation_id."
+}
+
 _platform_use_baked() {
   _use_platform=0
+  _use_generation=0
   _serve_source=baked
   _serve_workdir=/app
+  _served_platform_root=/data/platform
   _served_sha="${BUILD_SHA:-unknown}"
+  unset MOBIUS_SERVED_FRONTEND_DIR MOBIUS_SERVED_GENERATION_ID
   export PYTHONDONTWRITEBYTECODE=1
   echo "PLATFORM LAYER WARNING: serving baked floor from $_baked_app." >&2
   echo "  /data/platform is preserved untouched and is NOT served." >&2
@@ -491,7 +520,44 @@ fi
 
 chown -R mobius:mobius /data/platform 2>/dev/null || true
 
-if [ ! -d "$_platform_app" ]; then
+_generation_selection=""
+_generation_selection_status=0
+if [ "${MOBIUS_TEST_RUNTIME:-0}" != "1" ]; then
+  _generation_selection=$(python3 -P /app/app/platform_artifacts.py --select \
+    --boot-id "$MOBIUS_BOOT_ID" --image-sha "${BUILD_SHA:-}" 2>/dev/null) || \
+    _generation_selection_status=$?
+fi
+
+if [ -n "$_generation_selection" ]; then
+  if _platform_use_generation "$_generation_selection"; then
+    :
+  else
+    echo "PLATFORM LAYER WARNING: selected generation failed its import probe." >&2
+    if DATA_DIR=/data python3 -P /app/app/platform_artifacts.py --fail-boot \
+      --generation-id "$_generation_id" --boot-id "$MOBIUS_BOOT_ID" \
+      --stage import_probe \
+      --message "The selected generation failed its production import probe."; then
+      _generation_fallback=$(python3 -P /app/app/platform_artifacts.py --select \
+        --boot-id "$MOBIUS_BOOT_ID" --image-sha "${BUILD_SHA:-}" \
+        2>/dev/null || true)
+    else
+      _generation_fallback=$(python3 -P /app/app/platform_artifacts.py --select \
+        --skip-pending --image-sha "${BUILD_SHA:-}" 2>/dev/null || true)
+    fi
+    if [ -n "$_generation_fallback" ] &&
+       _platform_use_generation "$_generation_fallback"; then
+      echo "Platform layer: selected the last ready generation instead." >&2
+    else
+      _platform_use_baked
+    fi
+  fi
+elif [ "$_generation_selection_status" -eq 3 ]; then
+  echo "Platform layer: replacement image is readying the reviewed source before frozen activation." >&2
+  _platform_use_baked
+elif [ "$_generation_selection_status" -eq 2 ]; then
+  echo "PLATFORM LAYER WARNING: pending generation and rollback artifact are unusable." >&2
+  _platform_use_baked
+elif [ ! -d "$_platform_app" ]; then
   if _platform_bootstrap && _platform_git_valid && _platform_import_probe; then
     _platform_use_direct
   else
@@ -513,7 +579,8 @@ else
   fi
 fi
 
-if [ "$_use_platform" -eq 1 ] && [ "${MOBIUS_TEST_RUNTIME:-0}" != "1" ]; then
+if [ "$_use_platform" -eq 1 ] && [ "$_use_generation" -eq 0 ] &&
+   [ "${MOBIUS_TEST_RUNTIME:-0}" != "1" ]; then
   _platform_reconciler_backend=/data/platform/backend
   # Startup runs installed source only. Recover an interrupted explicit update,
   # retire completed activation, and refresh trusted local hooks; never fetch
@@ -547,7 +614,7 @@ fi
 # makes this boot use the complete baked platform instead of quietly combining
 # served backend code with an older frozen broker.
 if [ "$_use_platform" -eq 1 ] &&
-   ! DATA_DIR=/data MOBIUS_PLATFORM_DIR=/data/platform \
+   ! DATA_DIR=/data MOBIUS_PLATFORM_DIR="$_served_platform_root" \
      python3 -P /app/runtime/served_runtime_launcher.py \
        --check identity_broker; then
   echo "PLATFORM LAYER WARNING: served identity broker failed validation." >&2
@@ -1004,7 +1071,8 @@ mkdir -p /data/identity-broker
 chown root:root /data/identity-broker
 chmod 700 /data/identity-broker
 if [ "$_use_platform" -eq 1 ]; then
-  DATA_DIR=/data MOBIUS_PLATFORM_DIR=/data/platform \
+  DATA_DIR=/data MOBIUS_PLATFORM_DIR="$_served_platform_root" \
+    PYTHONDONTWRITEBYTECODE=1 \
     python3 -P /app/runtime/served_runtime_launcher.py identity_broker &
 else
   DATA_DIR=/data python3 -P /app/runtime/identity_broker.py &
@@ -1064,6 +1132,15 @@ _health_url="http://127.0.0.1:${_public_port}/api/health"
   done
   # 90 seconds elapsed without a 200 — uvicorn failed to start.
   echo "Platform health probe: /api/health did not return 200 within 90s — boot failure." >&2
+  if [ "$_use_generation" -eq 1 ]; then
+    if DATA_DIR=/data python3 -P /app/app/platform_artifacts.py --fail-boot \
+      --generation-id "$_generation_id" --boot-id "$MOBIUS_BOOT_ID" \
+      --stage health_timeout \
+      --message "The candidate did not answer health within 90 seconds."; then
+      echo "Platform health probe: rollback armed; restarting once." >&2
+      kill -TERM 1
+    fi
+  fi
   exit 1
 ) &
 
@@ -1097,6 +1174,9 @@ _uvicorn_flags="--host 0.0.0.0 --port $_public_port --timeout-graceful-shutdown 
 # shadow app.main. It wraps uvicorn on both the platform and baked serve paths.
 if [ "$_use_platform" -eq 1 ]; then
   _start_cmd="umask 022 && cd $_serve_workdir"
+  if [ "$_use_generation" -eq 1 ]; then
+    _start_cmd="$_start_cmd && export PYTHONDONTWRITEBYTECODE=1"
+  fi
   _start_cmd="$_start_cmd && exec $_env_scrub uvicorn app.main:app $_uvicorn_flags"
 else
   _start_cmd="umask 022 && export PYTHONDONTWRITEBYTECODE=1"

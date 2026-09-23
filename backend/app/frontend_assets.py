@@ -9,6 +9,25 @@ _memo: dict[tuple[str, str], tuple[Path, float]] = {}
 
 
 def live_frontend_dir(data_dir: str) -> Path:
+  selected = os.environ.get("MOBIUS_SERVED_FRONTEND_DIR")
+  if selected:
+    # While a backend activation is pending, serve its frozen matching shell.
+    # Once readiness retires pending, ordinary workspace frontend publications
+    # resume live without another server restart.
+    try:
+      from app.platform_generation import generation_state
+      state = generation_state()
+      activation = state.get("activation") or {}
+      if (
+        state.get("pending") is not None
+        or activation.get("status") in {
+          "rolling_back", "rollback_booting", "rolled_back_ready",
+          "rollback_failed", "rollback_exhausted",
+        }
+      ):
+        return Path(selected)
+    except Exception:
+      return Path(selected)
   return Path(data_dir) / "platform" / "frontend" / "dist"
 
 
