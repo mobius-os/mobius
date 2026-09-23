@@ -9,6 +9,7 @@ const center = readFileSync(
   new URL('../../NotificationBell/NotificationCenter.jsx', import.meta.url),
   'utf8',
 )
+const client = readFileSync(new URL('../../../api/client.js', import.meta.url), 'utf8')
 
 test('notification header clears immediately and closes through the bell boundary', () => {
   assert.match(component, /onClick=\{handleClearAll\}/)
@@ -30,6 +31,10 @@ test('ordinary notifications can be dismissed individually without nesting contr
   assert.match(component, /aria-label=\{`Dismiss \$\{n\.title\}`\}/)
   assert.match(component, /await onDismiss\(notificationId\)/)
   assert.match(center, /onDismiss=\{dismiss\}/)
+  assert.match(
+    client,
+    /dismiss: async \(notificationId\) => jsonOrThrow\([\s\S]*Could not dismiss notification:/,
+  )
   assert.match(
     css,
     /@media \(hover: hover\) and \(pointer: fine\)[\s\S]*?\.notifications__row-shell:hover \.notifications__dismiss/,

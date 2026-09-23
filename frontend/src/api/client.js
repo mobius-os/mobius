@@ -1352,9 +1352,12 @@ export const api = {
     // Owner action from the preview: remove all stored notifications.
     clearAll: () => apiFetch('/notifications', { method: 'DELETE' }),
     // Per-item dismissal is limited by the server to ordinary notifications.
-    dismiss: (notificationId) => apiFetch(
-      `/notifications/${encodeURIComponent(notificationId)}`,
-      { method: 'DELETE' },
+    dismiss: async (notificationId) => jsonOrThrow(
+      await apiFetch(
+        `/notifications/${encodeURIComponent(notificationId)}`,
+        { method: 'DELETE' },
+      ),
+      'Could not dismiss notification:',
     ),
   },
   admin: {
