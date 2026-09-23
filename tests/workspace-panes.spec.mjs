@@ -853,7 +853,38 @@ async function mouseDrag(
   await page.mouse.move(sx, sy)
   await page.mouse.down()
   await page.mouse.move(sx + 10, sy, { steps: 3 }) // clear the 5px slop → arm
-  await expect(page.locator('.workspace__drag-chip')).toBeVisible({ timeout: 3000 })
+  // TEMPORARY DIAGNOSTIC (not the fix): this arm step fails intermittently with
+  // the chip absent from the DOM entirely, rotating across different drag tests
+  // run to run. Capture what the press point actually resolved to so the race
+  // is identified from evidence rather than inferred.
+  try {
+    await expect(page.locator('.workspace__drag-chip')).toBeVisible({ timeout: 3000 })
+  } catch (armError) {
+    const diag = await page.evaluate(({ x, y, key }) => {
+      const el = document.elementFromPoint(x, y)
+      const src = el && el.closest ? el.closest('[data-drag-key]') : null
+      const expected = document.querySelector(`[data-drag-key="${key}"]`)
+      const rect = expected ? expected.getBoundingClientRect() : null
+      return {
+        atPoint: el ? `${el.tagName}.${el.getAttribute('class') || ''}` : null,
+        dragKeyAtPoint: src ? src.getAttribute('data-drag-key') : null,
+        expectedStillInDom: !!expected,
+        expectedRectNow: rect ? { x: rect.x, y: rect.y, w: rect.width, h: rect.height } : null,
+        shieldPresent: !!document.querySelector('.workspace__drag-shield'),
+        previewPresent: !!document.querySelector('.workspace__drop-preview'),
+        chipInDom: !!document.querySelector('.workspace__drag-chip'),
+      }
+    }, { x: sx, y: sy, key: await sourceLocator.getAttribute('data-drag-key') })
+    throw new Error(
+      `drag never armed.
+  pressed at: (${sx}, ${sy})
+  measured box: `
+      + `${JSON.stringify({ x: box.x, y: box.y, w: box.width, h: box.height })}
+`
+      + `  diagnostics: ${JSON.stringify(diag, null, 2)}
+${armError.message}`,
+    )
+  }
   if (resolveTarget) ({ x: toX, y: toY } = await resolveTarget())
   await page.mouse.move(toX, toY, { steps: 14 })
   await expect(page.locator('.workspace__drop-preview.is-visible'))
