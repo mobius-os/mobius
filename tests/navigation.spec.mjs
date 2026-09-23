@@ -26,6 +26,15 @@ const NAV_CHATS = [
   running: false,
 }))
 
+// Carries the same chat-detail contract as emptyChatDetail below. The two had
+// drifted: this one still answered with only the five fields the surface needed
+// when it was written, so a chat opened through it never reached display-ready.
+// Shell only marks its initial visual ready through that callback once a
+// concrete chat is active, and App holds #splash up until it fires -- so the
+// launch cover stayed over the whole viewport and swallowed every click, which
+// is why these cases died on `<div id="splash"> intercepts pointer events`
+// rather than on anything to do with navigation. The New Chat cases passed
+// throughout because they use emptyChatDetail, which was kept current.
 function navChatDetail(id, assistantContent = 'Fixture response') {
   return {
     messages: [
@@ -36,6 +45,17 @@ function navChatDetail(id, assistantContent = 'Fixture response') {
     offset: 0,
     running: false,
     pending_messages: [],
+    pending_question_id: null,
+    runtime_revision: 0,
+    session_id: null,
+    provider: 'codex',
+    created_by_app_id: null,
+    agent_settings_json: { model: 'gpt-5.6-sol' },
+    effective_agent_settings: { model: 'gpt-5.6-sol', effort: 'medium' },
+    has_assistant_turns: true,
+    auto_resume_on_limit: false,
+    auto_resume_on_restart: true,
+    updated_at: '2026-01-01T00:02:00Z',
   }
 }
 
