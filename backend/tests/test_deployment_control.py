@@ -349,6 +349,59 @@ async def test_self_hosted_reviewed_rebuild_applies_then_queues_host_rebuild(
   assert calls[0][1]["target_sha"] == target
 
 
+@pytest.mark.asyncio
+async def test_cancelled_reviewed_rebuild_finishes_after_source_apply_starts(
+  monkeypatch,
+):
+  target = "b" * 40
+  _install_reviewed_image_plan(monkeypatch)
+  monkeypatch.setattr(
+    dc.platform_activation, "deployment_kind", lambda: "self_hosted",
+  )
+
+  async def ready_status():
+    return {"supported": True, "state": "idle"}
+
+  monkeypatch.setattr(dc, "read_rebuild_status", ready_status)
+  apply_started = asyncio.Event()
+  release_apply = asyncio.Event()
+  calls = []
+
+  async def fake_apply(db, **plan):
+    apply_started.set()
+    await release_apply.wait()
+    calls.append("apply")
+    return {
+      "state": dc.platform_update.PlatformUpdateState.ACTIVATION_NEEDED.value,
+      "merge_commit": target,
+    }
+
+  async def fake_request_rebuild(*, expected_sha, final_check):
+    final_check()
+    calls.append("rebuild")
+    return {"state": "queued", "expected_sha": expected_sha}
+
+  monkeypatch.setattr(dc.platform_update, "apply_platform_update", fake_apply)
+  monkeypatch.setattr(dc, "_request_self_hosted_rebuild", fake_request_rebuild)
+  request = asyncio.create_task(dc.request_reviewed_rebuild(
+    db=None,
+    plan_id="a" * 64,
+    current_sha="1" * 40,
+    target_sha=target,
+    image_digest=None,
+  ))
+  await asyncio.wait_for(apply_started.wait(), timeout=2)
+
+  request.cancel()
+  await asyncio.sleep(0)
+  request.cancel()
+  release_apply.set()
+  with pytest.raises(asyncio.CancelledError):
+    await request
+
+  assert calls == ["apply", "rebuild"]
+
+
 _IDLE_HOST = {"supported": True, "state": "idle"}
 _UNCONFIGURED_HOST = {
   "supported": False,

@@ -11,6 +11,7 @@ either cutover.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import re
@@ -559,6 +560,44 @@ async def request_reviewed_rebuild(
   target_sha: str,
   image_digest: str | None,
 ) -> RebuildStatus | platform_update.PlatformApplyResult:
+  """Keep an admitted source-and-container update one coherent operation."""
+  started = asyncio.Event()
+  task = asyncio.create_task(_request_reviewed_rebuild_transaction(
+    db=db,
+    plan_id=plan_id,
+    current_sha=current_sha,
+    target_sha=target_sha,
+    image_digest=image_digest,
+    started=started,
+  ))
+  try:
+    return await asyncio.shield(task)
+  except asyncio.CancelledError:
+    if not started.is_set():
+      task.cancel()
+      while not task.done():
+        with contextlib.suppress(asyncio.CancelledError):
+          await asyncio.shield(task)
+    else:
+      while not task.done():
+        with contextlib.suppress(asyncio.CancelledError):
+          await asyncio.shield(task)
+      try:
+        task.result()
+      except Exception:
+        log.exception("reviewed replacement failed after its client disconnected")
+    raise
+
+
+async def _request_reviewed_rebuild_transaction(
+  *,
+  db: Any,
+  plan_id: str,
+  current_sha: str,
+  target_sha: str,
+  image_digest: str | None,
+  started: asyncio.Event,
+) -> RebuildStatus | platform_update.PlatformApplyResult:
   """Drive the container rebuild bound to an owner-reviewed update target.
 
   Railway cuts over to the exact digest-pinned GHCR image. Self-hosted applies
@@ -645,6 +684,7 @@ async def request_reviewed_rebuild(
   # Both deployment types prepare persistent source explicitly. A replacement
   # image no longer asks startup to fetch or choose the source release for it.
   _ensure_can_rebuild(await read_rebuild_status())
+  started.set()
   apply_result = await platform_update.apply_platform_update(
     db, plan_id=plan_id, current_sha=current_sha,
     target_sha=target_sha, image_digest=image_digest,

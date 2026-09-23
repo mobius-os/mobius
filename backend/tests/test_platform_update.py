@@ -21,12 +21,14 @@ reconcile is cleaned up on the next pass; and a merge-shaped legacy history is
 left untouched with an explicit normalization error.
 """
 
+import asyncio
 import hashlib
 import json
 import os
 import subprocess
 import stat
 import textwrap
+import threading
 from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from types import SimpleNamespace
@@ -2871,8 +2873,8 @@ def test_update_preview_holds_reconcile_lock_for_consistent_snapshot(
   events = []
 
   @contextmanager
-  def observed_lock():
-    events.append("entered")
+  def observed_lock(*, blocking=True):
+    events.append(("entered", blocking))
     try:
       yield
     finally:
@@ -2882,7 +2884,7 @@ def test_update_preview_holds_reconcile_lock_for_consistent_snapshot(
 
   pu.platform_update_preview(platform)
 
-  assert events == ["entered", "exited"]
+  assert events == [("entered", False), "exited"]
 
 
 def test_update_preview_clean_fast_forward(clone_env):
@@ -3123,6 +3125,60 @@ async def test_apply_installs_exact_preview_target_without_refetching_moving_ori
   # object without moving this clone's tracking ref or incurring another fetch.
   assert newer != reviewed
   assert pu._rev(platform, pu.DEFAULT_TARGET_REF) == reviewed
+
+
+@pytest.mark.asyncio
+async def test_cancelled_apply_finishes_its_admitted_transaction(
+  monkeypatch, clone_env,
+):
+  origin, platform = clone_env
+  reviewed = _advance_origin(
+    origin,
+    edits={"backend/app/main.py":
+      _MAIN_PY.replace("LINE_C = 3", "LINE_C = 399")},
+  )
+  pu._fetch(platform)
+  preview = pu.platform_update_preview(platform)
+  worker_started = threading.Event()
+  release_worker = threading.Event()
+  reconcile = pu._reconcile_under_lock
+
+  def delayed_reconcile(*args, **kwargs):
+    worker_started.set()
+    assert release_worker.wait(timeout=5)
+    return reconcile(*args, **kwargs)
+
+  monkeypatch.setattr(pu, "_reconcile_under_lock", delayed_reconcile)
+  applying = asyncio.create_task(pu.apply_platform_update(
+    SimpleNamespace(),
+    plan_id=preview["plan_id"],
+    current_sha=preview["current_sha"],
+    target_sha=preview["target_sha"],
+    repo=platform,
+  ))
+  assert await asyncio.to_thread(worker_started.wait, 2)
+
+  applying.cancel()
+  await asyncio.sleep(0)
+  applying.cancel()
+  release_worker.set()
+  with pytest.raises(asyncio.CancelledError):
+    await applying
+
+  assert _served_sha(platform) == reviewed
+  progress = pu.platform_update_progress()
+  assert progress["active"] is False
+  assert progress["phase"] == pu.PlatformUpdatePhase.COMPLETE.value
+
+
+def test_preview_reports_an_active_update_instead_of_waiting(clone_env):
+  _origin, platform = clone_env
+
+  with pu._reconcile_flock():
+    with pytest.raises(pu.PlatformUpdateError) as caught:
+      pu.platform_update_preview(platform)
+
+  assert str(caught.value) == "platform_update_in_progress"
 
 
 @pytest.mark.asyncio

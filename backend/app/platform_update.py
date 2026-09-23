@@ -827,14 +827,18 @@ def _import_probe(repo: Path = PLATFORM_REPO, timeout: int = _PROBE_TIMEOUT):
 
 
 @contextlib.contextmanager
-def _reconcile_flock():
+def _reconcile_flock(*, blocking: bool = True):
   """Hold the cross-process reconcile lock (see :data:`RECONCILE_LOCK`). Released
   on context exit AND on process death (the fd closes), so a killed boot
   reconcile never leaves the lock held."""
   RECONCILE_LOCK.parent.mkdir(parents=True, exist_ok=True)
   fd = os.open(str(RECONCILE_LOCK), os.O_CREAT | os.O_RDWR, 0o644)
   try:
-    fcntl.flock(fd, fcntl.LOCK_EX)
+    flags = fcntl.LOCK_EX if blocking else fcntl.LOCK_EX | fcntl.LOCK_NB
+    try:
+      fcntl.flock(fd, flags)
+    except BlockingIOError as exc:
+      raise PlatformUpdateError("platform_update_in_progress") from exc
     yield
   finally:
     try:
@@ -2923,7 +2927,7 @@ def platform_update_preview(
   # a writable /data recovery surface; existing clones are checked under lock.
   if not (repo / ".git").exists():
     raise PlatformUpdateError("platform_repo_missing")
-  with _reconcile_flock():
+  with _reconcile_flock(blocking=False):
     preview = _platform_update_preview_unlocked(
       repo,
       target_sha=target_sha,
@@ -3043,6 +3047,54 @@ async def apply_platform_update(
   repo: Path = PLATFORM_REPO,
   allow_image_activation: bool = False,
 ) -> PlatformApplyResult:
+  """Complete an admitted Apply transaction even if its HTTP client leaves.
+
+  Cancellation before this request acquires the update lock cancels it without
+  mutation. Once admitted, the reconcile and its durable terminal status are
+  one operation: a disconnected client may stop waiting, but cannot leave
+  source published with progress still marked active.
+  """
+  started = asyncio.Event()
+  task = asyncio.create_task(_apply_platform_update_guarded(
+    db,
+    plan_id=plan_id,
+    current_sha=current_sha,
+    target_sha=target_sha,
+    image_digest=image_digest,
+    repo=repo,
+    allow_image_activation=allow_image_activation,
+    started=started,
+  ))
+  try:
+    return await asyncio.shield(task)
+  except asyncio.CancelledError:
+    if not started.is_set():
+      task.cancel()
+      while not task.done():
+        with contextlib.suppress(asyncio.CancelledError):
+          await asyncio.shield(task)
+    else:
+      while not task.done():
+        with contextlib.suppress(asyncio.CancelledError):
+          await asyncio.shield(task)
+      try:
+        task.result()
+      except Exception:
+        log.exception("platform Apply failed after its client disconnected")
+    raise
+
+
+async def _apply_platform_update_guarded(
+  db: Session,
+  *,
+  plan_id: str,
+  current_sha: str,
+  target_sha: str,
+  image_digest: str | None = None,
+  repo: Path = PLATFORM_REPO,
+  allow_image_activation: bool = False,
+  started: asyncio.Event,
+) -> PlatformApplyResult:
   """Owner-triggered reconcile with an explicit activation remainder.
 
   Clean source can be live, restartable, or require an external deployment
@@ -3051,6 +3103,7 @@ async def apply_platform_update(
   plane.
   """
   async with _APPLY_LOCK:
+    started.set()
     _set_update_progress(
       PlatformUpdatePhase.PREPARING,
       plan_id=plan_id,

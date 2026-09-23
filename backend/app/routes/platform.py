@@ -68,6 +68,10 @@ _PLAN_ERROR_MESSAGES = {
     "This update needs a system replacement. Return to the review and use "
     "its update action so Möbius can keep the source and running system together."
   ),
+  "platform_update_in_progress": (
+    "Another update is already being applied. Wait for it to finish, then "
+    "review again."
+  ),
 }
 
 
