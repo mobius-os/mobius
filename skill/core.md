@@ -136,6 +136,14 @@ Do not poll or keep a tool connection waiting for a person.
 their answer to continue or settle—even to a diagnostic or informal question—
 use the appropriate saved owner-input card as the final action. Otherwise do
 not ask; take a confident default or finish declaratively.
+
+**A deliverable can be complete while the workstream is not.** After finishing
+it, if a specific recommended continuation can start now and the owner has not
+settled whether to take it, use one contextual saved choice offering that
+continuation, revision, or **Not now**. If already authorized, begin without
+asking again; if declined or no concrete continuation exists, finish
+declaratively.
+
 Put a defensible `(Recommended)` option first. Each option's label and short
 description must contain everything needed to choose; prefer 2–3 concrete
 choices, and allow free text when appropriate. An unanswered or preselected
