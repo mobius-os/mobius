@@ -90,11 +90,16 @@ async function ensureNavigationOpen(page) {
  *  real pointer path (not the deterministic Shift+Enter). The completed hold
  *  suppresses the trailing click, so it never also toggles the drawer. */
 async function holdLogo(page, brand) {
-  await brand.scrollIntoViewIfNeeded()
   const startedInBuilder = await brand.evaluate(element => (
     element.classList.contains('shell__brand--builder')
   ))
-  const box = await brand.boundingBox()
+  // Settled, for the same reason the drag helpers measure that way: the brand
+  // sits in the shell header beside the connectivity status, which resizes as
+  // connectivity resolves and slides the logo sideways. A press aimed at a
+  // stale centre misses the logo, so no hold ever starts and this reads as the
+  // hold class never appearing -- indistinguishable from a slow host, which is
+  // why widening the budget alone never settled it.
+  const box = await settledBox(brand)
   await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2)
   await page.mouse.down()
   // Under a loaded CI runner the 450ms hold can complete between pointerdown
