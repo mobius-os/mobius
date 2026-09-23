@@ -255,6 +255,7 @@ def _claude_reset_credits(summary: Any) -> dict[str, Any] | None:
   total = 0
   for raw in raw_grants:
     if not isinstance(raw, dict):
+      credits_complete = False
       continue
     grant_id = raw.get("id")
     resets_left = raw.get("resets_left")
@@ -265,6 +266,7 @@ def _claude_reset_credits(summary: Any) -> dict[str, Any] | None:
       or not isinstance(resets_left, int)
       or resets_left < 0
     ):
+      credits_complete = False
       continue
     total += resets_left
     grants.append({

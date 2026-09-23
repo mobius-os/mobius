@@ -758,7 +758,13 @@ def test_normalize_claude_usage_keeps_ineligible_offer_non_redeemable():
   }
 
 
-def test_normalize_claude_usage_marks_malformed_grant_catalogue_incomplete():
+@pytest.mark.parametrize(
+  "grants",
+  [None, ["invalid-row"], [{"id": "grant-next", "resets_left": "2"}]],
+)
+def test_normalize_claude_usage_marks_malformed_grant_catalogue_incomplete(
+  grants,
+):
   from app.provider_usage import normalize_claude_usage
 
   resets = normalize_claude_usage({
@@ -766,7 +772,7 @@ def test_normalize_claude_usage_marks_malformed_grant_catalogue_incomplete():
     "cedar_ember": {
       "eligible": True,
       "next_grant_id": "grant-next",
-      "grants": None,
+      "grants": grants,
     },
   })["reset_credits"]
 
@@ -1630,7 +1636,11 @@ async def test_claude_reset_incomplete_snapshot_keeps_request_id_across_restart(
         "cedar_ember": {
           "eligible": True,
           "next_grant_id": "grant-next",
-          "grants": None,
+          "grants": [{
+            "id": "grant-next",
+            "resets_left": "2",
+            "usable_now": True,
+          }],
         },
       })
     return provider_usage.normalize_claude_usage({
