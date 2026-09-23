@@ -575,13 +575,10 @@ async def request_reviewed_rebuild(
   except asyncio.CancelledError:
     if not started.is_set():
       task.cancel()
-      while not task.done():
-        with contextlib.suppress(asyncio.CancelledError):
-          await asyncio.shield(task)
-    else:
-      while not task.done():
-        with contextlib.suppress(asyncio.CancelledError):
-          await asyncio.shield(task)
+    while not task.done():
+      with contextlib.suppress(asyncio.CancelledError):
+        await asyncio.shield(task)
+    if started.is_set():
       try:
         task.result()
       except Exception:
