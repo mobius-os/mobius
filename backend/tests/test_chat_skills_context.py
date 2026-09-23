@@ -312,9 +312,20 @@ def test_owner_policy_and_card_access_stay_simple_and_explicit():
   normalized_core = " ".join(core.split())
   normalized_maintenance = " ".join(maintenance.split())
 
-  assert "The constitution and skills are owner-editable product policy" in core
-  assert "is not blocked by the rule being changed" in normalized_core
-  assert "without substituting a different one" in normalized_core
+  assert "Möbius policy and local safeguards are owner-controlled" in core
+  assert "not permanent limits on the owner" in normalized_core
+  assert "the rule being changed or crossed cannot veto that choice" in (
+    normalized_core
+  )
+  assert "exact non-destructive action counts as approval" in normalized_core
+  assert "obtain one exact saved approval" in normalized_core
+  assert "unless the same exact action is already approved" in normalized_core
+  assert "never ask twice" in normalized_core
+  assert "least-exposing method" in normalized_core
+  assert "do not reveal secret bytes incidentally" in normalized_core
+  assert "do not expand an external provider's or host's capabilities" in (
+    normalized_core
+  )
   assert "Card access is deliberately uniform" in core
   assert "any authenticated participant that can read" in normalized_core
   assert "do not add a second card-answer role or token hierarchy" in normalized_core
@@ -353,6 +364,23 @@ def test_owner_policy_and_card_access_stay_simple_and_explicit():
   assert "Do not use `request_approval`" in normalized_maintenance
   assert "unavailable for tens of seconds" in normalized_maintenance
   assert "separate card-answer role" not in core + maintenance
+
+
+def test_owner_can_approve_scoped_access_to_protected_local_state():
+  repo = Path(__file__).resolve().parents[2]
+  core = " ".join((repo / "skill" / "core.md").read_text(
+    encoding="utf-8",
+  ).split())
+
+  assert "protected by default, not inaccessible to the owner" in core
+  assert "exact owner request may authorize read-only or metadata-only" in core
+  assert "ensure that exact action has one saved approval" in core
+  assert "if it already does, do not ask again" in core
+  assert "perform only that approved operation" in core
+  assert "minimize the paths and bytes inspected" in core
+  assert "avoid displaying secret bytes" in core
+  assert "does not by itself authorize disclosing the stored values" in core
+  assert "Never read or write `/data/cli-auth/`" not in core
 
 
 def test_saved_secure_input_is_a_terminal_agent_action():

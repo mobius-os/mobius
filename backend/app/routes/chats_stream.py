@@ -623,9 +623,28 @@ async def send_message(
   require_chat_embed_operation(principal, "chat:send")
   # A card response uses the same authenticated chat access as rendering the
   # card. Ordinary sends retain their existing owner/delegation boundary.
-  if not (body.answers or body.selected_options):
+  is_card_answer = bool(body.answers or body.selected_options)
+  if not is_card_answer:
     require_nondelegated_owner_control(principal)
   chat = get_active_chat_for_principal(db, chat_id, principal)
+  if is_card_answer and not is_owner_input_principal(principal):
+    if not body.question_id:
+      raise HTTPException(
+        status_code=409,
+        detail="Agent card answers require an exact question_id.",
+      )
+    exact_card = questions.saved_question(chat, body.question_id)
+    exact_retry = bool(
+      exact_card
+      and ("answers" in exact_card or "selected_options" in exact_card)
+    )
+    if not exact_retry and not questions.accepts_saved_answer(
+      chat, body.question_id,
+    ):
+      raise HTTPException(
+        status_code=410,
+        detail="The question is no longer accepting answers.",
+      )
 
   # A typed Restart card is a platform action, not a prose continuation. The
   # writer re-matches the exact card and option identity inside its mutation;

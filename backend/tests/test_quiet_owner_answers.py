@@ -5,6 +5,7 @@ import copy
 
 import pytest
 
+from app import auth as auth_mod
 from app import chat as chat_mod, models, questions
 from app.chat_writer import AppendPending, PersistTranscript, get_writer
 from app.database import SessionLocal
@@ -75,6 +76,24 @@ def test_quiet_typed_approval_keeps_active_work_claim_open(
   assert 'reply option' in response.text.lower()
   assert _row(chat.id)[0] == qid and _row(chat.id)[2] == []
   assert 'answers' not in _block(chat.id, qid)
+
+
+def test_authenticated_agent_quiet_retry_is_idempotent(
+    client, chat, approval_run, db):
+  qid = _ask_quiet(client, chat, approval_run).json()['question_id']
+  owner = db.query(models.Owner).one()
+  agent_token = auth_mod.create_agent_token(
+    chat_id='answerer-chat', owner_username=owner.username,
+    token_epoch=owner.token_epoch,
+  )
+  agent_auth = {'Authorization': f'Bearer {agent_token}'}
+
+  first = _quiet(client, chat, agent_auth, qid)
+  retry = _quiet(client, chat, agent_auth, qid)
+
+  assert first.status_code == 200, first.text
+  assert retry.status_code == 200, retry.text
+  assert _block(chat.id, qid)['answer_turn'] == 'none'
 
 
 def test_quiet_retry_cannot_clear_newer_card(client, chat, auth, approval_run):

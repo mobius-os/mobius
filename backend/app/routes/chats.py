@@ -76,7 +76,7 @@ from app.deps import (
   get_chat_view_principal, get_owner_or_chat_embed_principal,
   get_current_owner, get_principal,
   reject_cross_site, require_nondelegated_owner_control,
-  require_chat_embed_operation,
+  require_chat_embed_operation, is_owner_input_principal,
 )
 from app.resource_access import (
   get_active_chat_for_principal,
@@ -3548,6 +3548,17 @@ async def save_question_answers(
 
   require_chat_embed_operation(principal, "chat:send")
   chat = get_active_chat_for_principal(db, chat_id, principal)
+  if not is_owner_input_principal(principal):
+    if not body.question_id:
+      raise HTTPException(
+        status_code=409,
+        detail="Agent card answers require an exact question_id.",
+      )
+    if not questions.accepts_saved_answer(chat, body.question_id):
+      raise HTTPException(
+        status_code=410,
+        detail="The question is no longer accepting answers.",
+      )
   from app.questions import is_secure_question
   if is_secure_question(chat, body.question_id):
     raise HTTPException(409, detail="Use the secure input card to respond.")

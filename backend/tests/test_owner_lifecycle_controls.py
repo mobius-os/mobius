@@ -598,6 +598,61 @@ def test_plain_owner_and_top_level_agent_keep_lifecycle_control(
   )
   assert stale_answer.status_code == 410, stale_answer.text
 
+  identity_chat_id = _create_chat(client, owner_auth, "Exact agent card")
+  _replace_transcript(identity_chat_id, [{
+    "role": "assistant", "ts": 1,
+    "blocks": [
+      {
+        "type": "question", "question_id": "older-question",
+        "questions": [{"id": "old", "question": "Old?", "options": []}],
+      },
+      {
+        "type": "question", "question_id": "newer-question",
+        "questions": [{"id": "new", "question": "New?", "options": []}],
+      },
+    ],
+  }])
+  identity_chat = db.get(models.Chat, identity_chat_id)
+  identity_chat.pending_question_id = "newer-question"
+  db.commit()
+
+  missing_id_responses = [
+    client.post(
+      f"/api/chats/{identity_chat_id}/question-answers",
+      json={"answers": {"New?": "Yes"}}, headers=top_level_auth,
+    ),
+    client.post(
+      f"/api/chats/{identity_chat_id}/messages",
+      json={"content": "yes", "hidden": True, "answers": {"New?": "Yes"}},
+      headers=top_level_auth,
+    ),
+  ]
+  assert [response.status_code for response in missing_id_responses] == [409, 409]
+
+  stale_id_responses = [
+    client.post(
+      f"/api/chats/{identity_chat_id}/question-answers",
+      json={
+        "question_id": "older-question", "answers": {"Old?": "Yes"},
+      },
+      headers=top_level_auth,
+    ),
+    client.post(
+      f"/api/chats/{identity_chat_id}/messages",
+      json={
+        "content": "yes", "hidden": True, "question_id": "older-question",
+        "answers": {"Old?": "Yes"},
+      },
+      headers=top_level_auth,
+    ),
+  ]
+  assert [response.status_code for response in stale_id_responses] == [410, 410]
+  db.refresh(identity_chat)
+  assert all(
+    "answers" not in block
+    for block in identity_chat.messages[-1]["blocks"]
+  )
+
   question_chat_id = _create_chat(client, owner_auth, "Visible card")
   question_id = "visible-question"
   _replace_transcript(question_chat_id, [{

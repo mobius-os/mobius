@@ -47,6 +47,31 @@ def _parent_with_run(client, owner_token, db):
   return chat_id
 
 
+@pytest.mark.parametrize("scope", ["read", "write"])
+def test_child_policy_allows_only_explicit_owner_approved_protected_access(
+  scope,
+):
+  policy = RunPolicy(
+    delegation_id="protected-access",
+    app_id=1,
+    provider="codex",
+    model=None,
+    effort=None,
+    scope=scope,
+    cwd="/data/cli-auth",
+  ).system_prompt
+
+  assert "/data/cli-auth and /data/.secret-key as protected by default" in policy
+  assert "exact owner-approved operation" in policy
+  assert "return the missing approval or scope to the parent" in policy
+  assert "minimize the paths and bytes inspected" in policy
+  assert "Never read or write /data/cli-auth" not in policy
+  if scope == "read":
+    assert "This task is READ-ONLY" in policy
+  else:
+    assert "You may edit only within the requested working tree" in policy
+
+
 def test_delegation_inherits_owner_tools_with_run_bound_delegation_identity(
   client, owner_token, db,
 ):
@@ -614,6 +639,14 @@ def test_child_policy_is_integrity_checked_and_write_loss_needs_review(db):
   assert "$MOBIUS_SUBAGENT_HELPER" in policy.system_prompt
   assert "provider-native helper tools" in policy.system_prompt
   assert "top-level parent owns any durable Möbius Wait" in policy.system_prompt
+  assert "/data/cli-auth and /data/.secret-key as protected by default" in (
+    policy.system_prompt
+  )
+  assert "exact owner-approved operation" in policy.system_prompt
+  assert "return the missing approval or scope to the parent" in (
+    policy.system_prompt
+  )
+  assert "Never read or write /data/cli-auth" not in policy.system_prompt
 
   child.messages = [
     {"role": "user", "content": "Make the bounded edit."},
