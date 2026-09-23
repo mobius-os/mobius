@@ -1227,6 +1227,17 @@ export const api = {
     providerUsage: (provider) => apiFetch(
       `/settings/provider-usage/${encodeURIComponent(provider)}`,
     ),
+    setClaudeExtraUsage: (enabled, expectedEnabled) => apiFetch(
+      '/settings/provider-usage/claude/extra-usage',
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          enabled: !!enabled,
+          expected_enabled: !!expectedEnabled,
+          confirm: true,
+        }),
+      },
+    ),
     redeemCodexReset: (creditId = null) => apiFetch(
       '/settings/provider-usage/codex/redeem-reset',
       {
@@ -1234,6 +1245,19 @@ export const api = {
         // The server refuses to spend a reset without this explicit flag; it is
         // sent only from the UI's Confirm step, never on a bare/accidental call.
         body: JSON.stringify({ credit_id: creditId, confirm: true }),
+      },
+    ),
+    redeemClaudeReset: (creditId, expectedResetsLeft) => apiFetch(
+      '/settings/provider-usage/claude/redeem-reset',
+      {
+        method: 'POST',
+        // Claude chooses the next usable grant. Echoing that exact id lets the
+        // backend reject a stale confirmation instead of spending a new offer.
+        body: JSON.stringify({
+          credit_id: creditId,
+          expected_resets_left: expectedResetsLeft,
+          confirm: true,
+        }),
       },
     ),
     save: (payload) => apiFetch('/settings', {
