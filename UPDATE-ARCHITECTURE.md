@@ -456,8 +456,9 @@ container so it survives the replacement it initiates.
 An image build succeeding proves only that layers assembled. The executor that
 built it must start the exact image in an isolated scratch container, answer
 health and readiness, report the expected source/protected runtime, and pass its
-self-test before production cutover. Release CI does this for official GHCR
-images; the self-hosted helper does it for local builds. Railway's production
+self-test before production cutover. The self-hosted helper does this for local
+builds. Official GHCR release CI does not yet scratch-boot the exact published
+digest, so adding that evidence remains required. Railway's production
 build/health gate does **not** substitute for isolated scratch validation.
 Without an executor providing that evidence for the exact image, including an
 unlinked source-connected Railway service, the candidate remains **awaiting

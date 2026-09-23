@@ -402,6 +402,45 @@ async def test_cancelled_reviewed_rebuild_finishes_after_source_apply_starts(
   assert calls == ["apply", "rebuild"]
 
 
+@pytest.mark.asyncio
+async def test_cancelled_reviewed_rebuild_keeps_cancellation_when_apply_fails(
+  monkeypatch,
+):
+  _install_reviewed_image_plan(monkeypatch)
+  monkeypatch.setattr(
+    dc.platform_activation, "deployment_kind", lambda: "self_hosted",
+  )
+
+  async def ready_status():
+    return {"supported": True, "state": "idle"}
+
+  monkeypatch.setattr(dc, "read_rebuild_status", ready_status)
+  apply_started = asyncio.Event()
+  release_apply = asyncio.Event()
+
+  async def failing_apply(_db, **_plan):
+    apply_started.set()
+    await release_apply.wait()
+    raise RuntimeError("apply failed after disconnect")
+
+  monkeypatch.setattr(dc.platform_update, "apply_platform_update", failing_apply)
+  request = asyncio.create_task(dc.request_reviewed_rebuild(
+    db=None,
+    plan_id="a" * 64,
+    current_sha="1" * 40,
+    target_sha="b" * 40,
+    image_digest=None,
+  ))
+  await asyncio.wait_for(apply_started.wait(), timeout=2)
+
+  request.cancel()
+  await asyncio.sleep(0)
+  request.cancel()
+  release_apply.set()
+  with pytest.raises(asyncio.CancelledError):
+    await request
+
+
 _IDLE_HOST = {"supported": True, "state": "idle"}
 _UNCONFIGURED_HOST = {
   "supported": False,

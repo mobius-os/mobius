@@ -149,7 +149,7 @@ export default function UpdateReviewModal({
                       : needsRestart
                         ? 'The update is prepared now. A separate restart makes it active, so you can keep working and combine more updates first.'
                         : 'The interface is rebuilt or changes take effect when next used. No server restart is needed.'}</p>
-                    {rebuildUpdate && !repairReason && <p>If the updated system does not pass its checks, Möbius restores the previous system image. Your chats, apps, data, and newly installed source stay in place, so that combination may still need attention.</p>}
+                    {rebuildUpdate && !repairReason && <p>If the updated system does not pass its checks, Möbius tries to restore the previous system image. Your chats, apps, data, and newly installed source stay in place, so that combination may still need attention.</p>}
                   </section>
                   <details className="urm__technical">
                     <summary>Technical details{summary.fileCount ? ` · ${summary.fileCount} files` : ''}</summary>

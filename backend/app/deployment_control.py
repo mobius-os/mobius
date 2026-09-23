@@ -11,8 +11,8 @@ either cutover.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import json
+import logging
 import os
 import re
 import secrets
@@ -26,6 +26,9 @@ import httpx
 from app import platform_activation, platform_update
 from app.config import get_settings
 from app.runtime_identity import broker_client
+
+
+log = logging.getLogger(__name__)
 
 
 RebuildState = Literal[
@@ -576,8 +579,12 @@ async def request_reviewed_rebuild(
     if not started.is_set():
       task.cancel()
     while not task.done():
-      with contextlib.suppress(asyncio.CancelledError):
+      try:
         await asyncio.shield(task)
+      except asyncio.CancelledError:
+        continue
+      except Exception:
+        break
     if started.is_set():
       try:
         task.result()

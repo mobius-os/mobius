@@ -1148,6 +1148,7 @@ def test_status_up_to_date_on_fresh_clone(clone_env):
 def test_check_for_updates_fetches_then_reports_available(clone_env):
   origin, platform = clone_env
   before = _served_sha(platform)
+  installed = pu.recorded_upstream_sha(platform)
   # A deploy advances origin AFTER the clone's last fetch. platform_status is
   # fetch-free, so it still reads the stale remote-tracking ref: "up to date".
   _advance_origin(origin, edits={"backend/app/main.py":
@@ -1159,8 +1160,45 @@ def test_check_for_updates_fetches_then_reports_available(clone_env):
   status = pu.check_for_updates(platform)
   assert status["available"] is True
   assert status["state"] == pu.PlatformUpdateState.AVAILABLE.value
+  assert status["checked_target_sha"] == _git(
+    origin.parent / "origin-work", "rev-parse", "main",
+  ).stdout.strip()
+  assert status["installed_release_sha"] == installed
+  assert status["recorded_upstream_sha"] == installed
+  # This field is deliberately about releases stacked behind a conflict, not
+  # ordinary update availability. ``available`` is the ordinary signal.
+  assert status["newer_updates_available"] is False
   # A check only advances remote-tracking refs — the served tree is NOT mutated.
   assert _served_sha(platform) == before
+
+
+def test_check_route_distinguishes_fetched_target_from_installed_release(
+  clone_env, client, auth, monkeypatch,
+):
+  origin, platform = clone_env
+  installed = pu.recorded_upstream_sha(platform)
+  target = _advance_origin(origin, edits={"backend/app/main.py":
+    _MAIN_PY.replace("LINE_C = 3", "LINE_C = 78")})
+  original_check = pu.check_for_updates
+  monkeypatch.setattr(
+    "app.routes.platform.platform_activation.deployment_kind",
+    lambda: "self_hosted",
+  )
+  monkeypatch.setattr(
+    "app.routes.platform.platform_update.check_for_updates",
+    lambda: original_check(platform),
+  )
+
+  response = client.post("/api/platform/check", headers=auth)
+
+  assert response.status_code == 200
+  status = response.json()
+  assert status["available"] is True
+  assert status["checked_target_sha"] == target
+  assert status["installed_release_sha"] == installed
+  assert status["recorded_upstream_sha"] == installed
+  assert status["newer_updates_available"] is False
+  assert _served_sha(platform) == installed
 
 
 def test_check_for_updates_offline_is_explicit_error(clone_env):
@@ -2069,6 +2107,7 @@ def test_explicit_ghcr_target_is_available_before_source_object_is_fetched(
 
   assert status["state"] == pu.PlatformUpdateState.AVAILABLE.value
   assert status["available"] is True
+  assert status["checked_target_sha"] == missing_release
   assert _served_sha(platform) != missing_release
 
 

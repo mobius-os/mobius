@@ -233,7 +233,9 @@ def test_railway_status_and_check_use_latest_verified_ghcr_target(
       "needs_restart": False,
       "activation": classify_activation([]),
       "current_build_sha": None,
-      "recorded_upstream_sha": None,
+      "checked_target_sha": target,
+      "installed_release_sha": "1" * 40,
+      "recorded_upstream_sha": "1" * 40,
       "contained_upstream_sha": None,
       "contained_upstream_committed_at": None,
       "current_build_committed_at": None,
@@ -271,6 +273,10 @@ def test_railway_status_and_check_use_latest_verified_ghcr_target(
 
   assert status_response.status_code == 200
   assert check_response.status_code == 200
+  assert check_response.json()["available"] is True
+  assert check_response.json()["checked_target_sha"] == target
+  assert check_response.json()["installed_release_sha"] == "1" * 40
+  assert check_response.json()["newer_updates_available"] is False
   assert calls == [
     ("status", target),
     ("check", target),

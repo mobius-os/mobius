@@ -250,6 +250,13 @@ class PlatformStatus(TypedDict):
   needs_restart: bool
   activation: PlatformActivationImpact
   current_build_sha: str | None
+  # Exact release this response compared with the served source. For a
+  # self-hosted check this is the freshly fetched origin/main; for a managed
+  # deployment it is the verified image release selected by the controller.
+  checked_target_sha: str | None
+  # Plain-language alias for the historical ``recorded_upstream_sha`` field.
+  # This is the last successfully reconciled release, not the latest fetch.
+  installed_release_sha: str | None
   recorded_upstream_sha: str | None
   # Latest fetched origin/main commit that is already contained in local main.
   # Unlike recorded_upstream_sha, this remains correct after a manual/agent
@@ -270,11 +277,11 @@ class PlatformStatus(TypedDict):
   # the owner straight to it. None unless ``state == "conflict"`` AND the id was
   # recorded.
   conflict_chat_id: str | None
-  # True only while ``state == "conflict"`` and origin/main has advanced past the
-  # version this conflict is pinned to — i.e. more updates stacked up behind the
-  # one being resolved. Lets Settings offer "review all & resolve together" so a
-  # backlog is reviewed once and resolved once, instead of one resolve per
-  # release. Fetch-free like the rest of status: reflects the last fetch.
+  # Conflict-only backlog signal. This remains false outside ``state ==
+  # "conflict"`` even when ``available`` is true. While resolving a conflict it
+  # becomes true when origin/main advances past the pinned release, letting
+  # Settings offer one combined review+resolve instead of one per release.
+  # Fetch-free like the rest of status: reflects the last fetch.
   newer_updates_available: bool
   rollback_target_sha: str | None
   rollback_error: str | None
@@ -2612,6 +2619,10 @@ def platform_status(
   target = _rev(repo, target_sha or DEFAULT_TARGET_REF)
   if not target and not target_sha:
     raise PlatformUpdateError("platform_target_unavailable")
+  # Managed deployments may select a verified image release whose Git object
+  # is not present in the persistent checkout yet. Preserve that exact selected
+  # identity; self-hosted refs use the locally resolved commit.
+  checked_target_sha = target_sha or target
   target_contained = bool(target) and _is_ancestor(repo, target, local)
   contained_upstream_sha = target if target_contained else (
     upstream_sha if upstream_sha and _is_ancestor(repo, upstream_sha, local) else None
@@ -2637,6 +2648,8 @@ def platform_status(
       state=PlatformUpdateState.CONFLICT.value, available=False,
       needs_restart=restart_needed, activation=activation,
       current_build_sha=image_sha,
+      checked_target_sha=checked_target_sha,
+      installed_release_sha=upstream_sha,
       recorded_upstream_sha=upstream_sha,
       contained_upstream_sha=contained_upstream_sha,
       contained_upstream_committed_at=contained_upstream_committed_at,
@@ -2670,7 +2683,10 @@ def platform_status(
   return PlatformStatus(
     state=state.value, available=available, needs_restart=restart_needed,
     activation=activation,
-    current_build_sha=image_sha, recorded_upstream_sha=upstream_sha,
+    current_build_sha=image_sha,
+    checked_target_sha=checked_target_sha,
+    installed_release_sha=upstream_sha,
+    recorded_upstream_sha=upstream_sha,
     contained_upstream_sha=contained_upstream_sha,
     contained_upstream_committed_at=contained_upstream_committed_at,
     current_build_committed_at=current_build_committed_at,

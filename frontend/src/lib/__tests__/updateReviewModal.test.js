@@ -184,7 +184,7 @@ test('primary update guidance avoids deployment jargon', () => {
 })
 
 test('replacement rollback copy distinguishes the image from source and data', () => {
-  assert.match(modal, /restores the previous system image/)
+  assert.match(modal, /tries to restore the previous system image/)
   assert.match(modal, /newly installed source stay in place/)
   assert.doesNotMatch(modal, /previous working version/)
 })
