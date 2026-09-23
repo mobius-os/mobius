@@ -747,6 +747,7 @@ def test_normalize_claude_usage_keeps_ineligible_offer_non_redeemable():
   assert resets == {
     "available_count": 0,
     "credits": [],
+    "credits_complete": True,
     "eligible": False,
     "ineligible_reason": "surface",
     "at_limit": False,
@@ -755,6 +756,23 @@ def test_normalize_claude_usage_keeps_ineligible_offer_non_redeemable():
     "weekly_resets_at": None,
     "cooldown_until": None,
   }
+
+
+def test_normalize_claude_usage_marks_malformed_grant_catalogue_incomplete():
+  from app.provider_usage import normalize_claude_usage
+
+  resets = normalize_claude_usage({
+    "five_hour": {"utilization": 100},
+    "cedar_ember": {
+      "eligible": True,
+      "next_grant_id": "grant-next",
+      "grants": None,
+    },
+  })["reset_credits"]
+
+  assert resets["credits"] == []
+  assert resets["credits_complete"] is False
+  assert resets["redeemable"] is False
 
 
 @pytest.mark.asyncio
@@ -1590,6 +1608,76 @@ async def test_claude_reset_replayed_definitive_noop_retires_intent(
   assert result["outcome"] == outcome
   assert posts[0]["request_id"] == "stable-request"
   assert not intent_path.exists()
+
+
+@pytest.mark.asyncio
+async def test_claude_reset_incomplete_snapshot_keeps_request_id_across_restart(
+  tmp_path, monkeypatch,
+):
+  from app import provider_usage
+
+  provider_usage._claude_reset_locks.clear()
+  reads = 0
+  posts = []
+
+  async def current(_provider_id, _data_dir, *, force_refresh=False):
+    nonlocal reads
+    assert force_refresh is True
+    reads += 1
+    if reads == 1:
+      return provider_usage.normalize_claude_usage({
+        "five_hour": {"utilization": 100},
+        "cedar_ember": {
+          "eligible": True,
+          "next_grant_id": "grant-next",
+          "grants": None,
+        },
+      })
+    return provider_usage.normalize_claude_usage({
+      "five_hour": {"utilization": 100},
+      "cedar_ember": {
+        "eligible": True,
+        "next_grant_id": "grant-next",
+        "grants": [{
+          "id": "grant-next",
+          "resets_left": 2,
+          "usable_now": True,
+          "paused": False,
+        }],
+      },
+    })
+
+  async def post(_url, *, headers, json):
+    posts.append(json)
+    return SimpleNamespace(
+      raise_for_status=lambda: None,
+      json=lambda: {"result": "reset", "resets_left": 1},
+    )
+
+  organization_uuid = _install_claude_reset_mocks(
+    monkeypatch, provider_usage, current=current, post=post,
+  )
+  intent_path = provider_usage._claude_reset_intent_path(
+    str(tmp_path), organization_uuid,
+  )
+  provider_usage._write_claude_reset_intent(
+    intent_path,
+    request_id="stable-across-restart",
+    credit_id="grant-next",
+    resets_left_before=2,
+  )
+
+  first = await provider_usage.redeem_claude_reset(
+    str(tmp_path), credit_id="grant-next", expected_resets_left=2,
+  )
+  provider_usage._claude_reset_locks.clear()
+  second = await provider_usage.redeem_claude_reset(
+    str(tmp_path), credit_id="grant-next", expected_resets_left=2,
+  )
+
+  assert first["outcome"] == "unknown"
+  assert second["outcome"] == "reset"
+  assert [post["request_id"] for post in posts] == ["stable-across-restart"]
 
 
 @pytest.mark.asyncio

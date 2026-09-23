@@ -249,7 +249,8 @@ def _claude_reset_credits(summary: Any) -> dict[str, Any] | None:
   if not isinstance(summary, dict) or not isinstance(summary.get("eligible"), bool):
     return None
   raw_grants = summary.get("grants")
-  raw_grants = raw_grants if isinstance(raw_grants, list) else []
+  credits_complete = isinstance(raw_grants, list)
+  raw_grants = raw_grants if credits_complete else []
   grants: list[dict[str, Any]] = []
   total = 0
   for raw in raw_grants:
@@ -292,6 +293,7 @@ def _claude_reset_credits(summary: Any) -> dict[str, Any] | None:
   return {
     "available_count": total,
     "credits": grants,
+    "credits_complete": credits_complete,
     "eligible": summary.get("eligible") is True,
     "ineligible_reason": (
       summary.get("ineligible_reason")
@@ -642,14 +644,10 @@ def _clear_claude_reset_intent(path: Path) -> None:
 
 def _claude_reset_offer_superseded(snapshot: Any, credit_id: str) -> bool:
   """Return whether a fresh provider snapshot retired the pending offer."""
-  if not isinstance(snapshot, dict):
+  if not _claude_reset_offers_complete(snapshot):
     return False
-  summary = snapshot.get("reset_credits")
-  if not isinstance(summary, dict):
-    return False
-  credits = summary.get("credits")
-  if not isinstance(credits, list):
-    return False
+  summary = snapshot["reset_credits"]
+  credits = summary["credits"]
   next_credit_id = summary.get("next_credit_id")
   if isinstance(next_credit_id, str) and next_credit_id != credit_id:
     return True
@@ -660,6 +658,23 @@ def _claude_reset_offer_superseded(snapshot: Any, credit_id: str) -> bool:
   if credit is None:
     return True
   return _reset_expired(credit.get("expires_at"))
+
+
+def _claude_reset_offers_complete(snapshot: Any) -> bool:
+  """Return whether absence from this snapshot is provider evidence."""
+  if not isinstance(snapshot, dict):
+    return False
+  summary = snapshot.get("reset_credits")
+  if not isinstance(summary, dict):
+    return False
+  credits = summary.get("credits")
+  if not isinstance(credits, list):
+    return False
+  # Hand-built internal snapshots predate this marker; a concrete list was
+  # already their completeness witness. Normalized provider data marks a
+  # malformed or missing grants field explicitly instead of coercing it into
+  # an authoritative empty catalogue.
+  return summary.get("credits_complete", True) is True
 
 
 def _claude_reset_offer(
@@ -757,6 +772,8 @@ async def redeem_claude_reset(
     current = await read_provider_usage("claude", data_dir, force_refresh=True)
     replaying = intent is not None
     if intent is not None:
+      if not _claude_reset_offers_complete(current):
+        return intent["last_result"] or _unknown_claude_reset()
       pending_credit_id = intent["credit_id"]
       before = intent["resets_left_before"]
       now = _claude_reset_offer(
