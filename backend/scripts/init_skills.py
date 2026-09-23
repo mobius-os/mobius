@@ -205,6 +205,11 @@ _UNMODIFIED_MIGRATIONS = {
     "8826cd584ee5fac754d92572e15883293ebbc59d47c83510e72d56d271ed3869",
   },
   "building-apps.md": {
+    # Untouched main and earlier offline-contract copies: adopt the clarified
+    # platform/app responsibility boundary without replacing custom skills.
+    "2ea47c610eb2bffaf42c8cbe8e2c69d17943c992bb22ba2aaa2e0c65b6ea1499",
+    "6d5b89f49ade7d3fd8be5e29de851f52927a0617ebb804367ae804533fc615b0",
+    "200656c730edbb17c7dabfb901ac45dd6942ed00c7aa78b1ab96316d3410a089",
     # Intermediate mapi copy before credential reads preserved HTTP failures.
     "734a5fd00dcd58e53f6713a2663d0dd18dec92abcbcf767c7f02f894d92ee510",
     # Untouched release copy before owner-context API examples used mapi.
@@ -221,6 +226,11 @@ _UNMODIFIED_MIGRATIONS = {
     "294a4a207a2528245b006877ff486aa79fdf401b738afbf43aaf2b67b3e7eead",
   },
   "building-apps-quickstart.md": {
+    # Untouched main and earlier offline-contract copies: adopt the clarified
+    # product-choice wording without replacing custom skills.
+    "61074dbfebf0dc17355eb7e2ce0b4e2ad41d0ce97c7dfa158d530e4f68ac6f35",
+    "ef5b8afb494b3f1fb096d9c248a4dcb5cc0f60e7860af1817129eeb100541ff8",
+    "ca2e390c9431e2f11fe7f9f40d93dc72eb7aa5935ce381fa0b1ca4e2a19fae16",
     "7d8af2664b37a69b88e48c2a28140c15556202c3c7ce30d77816c203d1959fcb",
     # v16 baked copy: replace the unreliable CSS iframe selector.
     "4c2b080bcc91626f761c5823ea00d324667b9710f6757931823e22e9c8b5c2b1",

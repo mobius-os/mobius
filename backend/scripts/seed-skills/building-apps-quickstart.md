@@ -148,11 +148,13 @@ truth: apply validates and materializes that exact accepted file, so do not
 upload a second copy after applying. The apply helper also applies the offline
 flag and versioned `capabilities` object; do not patch the app row separately.
 
-Offline support remains optional. Möbius supplies generic storage, queues,
-connectivity, and conflict delivery; an app that opts in owns its caching,
-reconciliation, and UI. If offline logic depends on complete collection
-membership, use `storage.listWithStatus()` and treat `complete:false` as
-unavailable, not empty.
+Offline support is a product choice, not a default requirement. Choose it when
+it materially benefits the app's use case or preserves an existing product
+promise. Möbius supplies generic cached storage, durable queues, connectivity,
+and conflict delivery; the app chooses what data to warm and owns completeness
+decisions, reconciliation, and UI. If offline logic depends on complete
+collection membership, use `storage.listWithStatus()` and treat
+`complete:false` as unavailable, not empty.
 
 ### 3. Apply once early, then after each coherent revision
 
