@@ -295,7 +295,6 @@ async def test_complete_turn_schedules_the_terminal_goal_executor(
   from app import chat as chat_mod, chat_queue
   from app.broadcast import create_broadcast, remove_broadcast
   from app.chat_event_sink import ChatEventSink
-  from app.memory_recall import EMPTY_RECALL_BINDING
 
   _add_goal_run(db, chat)
   broadcast = create_broadcast(chat.id)
@@ -303,7 +302,6 @@ async def test_complete_turn_schedules_the_terminal_goal_executor(
     broadcast,
     chat.id,
     run_token="goal-run",
-    recall_binding=EMPTY_RECALL_BINDING,
   )
   sink.publish({"type": "text", "content": "Progress is saved."})
   scheduled = []
@@ -340,7 +338,6 @@ async def test_zero_legacy_allowance_does_not_interrupt_authorized_work(
   from app import chat as chat_mod, chat_queue
   from app.broadcast import create_broadcast, remove_broadcast
   from app.chat_event_sink import ChatEventSink
-  from app.memory_recall import EMPTY_RECALL_BINDING
 
   _add_goal_run(db, chat)
   db.commit()
@@ -355,7 +352,6 @@ async def test_zero_legacy_allowance_does_not_interrupt_authorized_work(
     first_broadcast,
     chat.id,
     run_token="goal-run",
-    recall_binding=EMPTY_RECALL_BINDING,
   )
   first_sink.publish({"type": "text", "content": "Work remains."})
   first = await chat_mod._complete_turn(
@@ -380,7 +376,6 @@ async def test_zero_legacy_allowance_does_not_interrupt_authorized_work(
     second_broadcast,
     chat.id,
     run_token=continuation_run,
-    recall_binding=EMPTY_RECALL_BINDING,
   )
   second_sink.publish({
     "type": "text", "content": "No plan task changed status.",
@@ -430,7 +425,6 @@ async def test_only_visible_owner_steer_reauthorizes_one_goal_rollover(
   from app import chat as chat_mod, chat_queue
   from app.broadcast import create_broadcast, remove_broadcast
   from app.chat_event_sink import ChatEventSink
-  from app.memory_recall import EMPTY_RECALL_BINDING
 
   _add_goal_run(db, chat)
   root = db.get(models.ChatRun, "goal-run")
@@ -449,7 +443,6 @@ async def test_only_visible_owner_steer_reauthorizes_one_goal_rollover(
     broadcast,
     chat.id,
     run_token="goal-run",
-    recall_binding=EMPTY_RECALL_BINDING,
   )
   sink.publish({"type": "text", "content": "Working on the saved plan."})
   steer = {
@@ -505,7 +498,6 @@ async def test_only_saved_owner_question_prevents_terminal_goal_fallback_questio
   from app.broadcast import create_broadcast, remove_broadcast
   from app.chat_event_sink import ChatEventSink
   from app.goal_plans import goal_plan_revision
-  from app.memory_recall import EMPTY_RECALL_BINDING
 
   _add_goal_run(db, chat)
   root = db.get(models.ChatRun, "goal-run")
@@ -522,7 +514,6 @@ async def test_only_saved_owner_question_prevents_terminal_goal_fallback_questio
     broadcast,
     chat.id,
     run_token="goal-run",
-    recall_binding=EMPTY_RECALL_BINDING,
   )
   sink.publish({"type": "text", "content": "The reviewed batch is ready."})
   question = {
@@ -599,11 +590,9 @@ async def test_only_saved_owner_question_prevents_terminal_goal_fallback_questio
 def test_open_continuation_card_requires_an_unanswered_terminal_card(block, expected):
   from app.broadcast import ChatBroadcast
   from app.chat_event_sink import ChatEventSink
-  from app.memory_recall import EMPTY_RECALL_BINDING
 
   sink = ChatEventSink(
     ChatBroadcast("card-state"), "card-state",
-    recall_binding=EMPTY_RECALL_BINDING,
   )
   sink.assistant_blocks.append(block)
   assert sink.has_open_continuation_card() is expected
@@ -644,7 +633,6 @@ async def test_provider_free_terminal_does_not_loop_an_unfinished_goal(
   from app import chat as chat_mod, chat_queue
   from app.broadcast import create_broadcast, remove_broadcast
   from app.chat_event_sink import ChatEventSink
-  from app.memory_recall import EMPTY_RECALL_BINDING
 
   _add_goal_run(db, chat)
   broadcast = create_broadcast(chat.id)
@@ -652,7 +640,6 @@ async def test_provider_free_terminal_does_not_loop_an_unfinished_goal(
     broadcast,
     chat.id,
     run_token="goal-run",
-    recall_binding=EMPTY_RECALL_BINDING,
   )
   sink.publish({"type": "text", "content": "Connect an agent to continue."})
   scheduled = []

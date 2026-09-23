@@ -49,7 +49,6 @@ from app.chat_event_sink import (
 )
 from app.deps import Principal
 from app.routes.notify import NotifyBody
-from app.memory_recall import EMPTY_RECALL_BINDING
 
 
 # --- Bug 3 / Candidate B: question save-before-broadcast --------------
@@ -116,7 +115,6 @@ def test_active_sink_snapshot_is_frozen_and_broadcast_identity_keyed():
   sink = ChatEventSink(
     bc,
     bc.chat_id,
-    recall_binding=EMPTY_RECALL_BINDING,
   )
   sink.assistant_blocks = [{"type": "text", "content": "hello"}]
   register_active_sink(bc.chat_id, sink)
@@ -228,7 +226,7 @@ def test_question_event_is_saved_before_broadcast(db, chat):
   chat.messages = [{"role": "user", "content": "hi", "ts": 1}]
   db.commit()
   bc = _OrderedBroadcast(chat.id)
-  sink = chat_mod._ChatEventSink(bc, chat.id, run_token="rt-q", recall_binding=EMPTY_RECALL_BINDING)
+  sink = chat_mod._ChatEventSink(bc, chat.id, run_token="rt-q")
 
   questions = [{
     "id": "q1",
@@ -296,7 +294,6 @@ def test_question_checkpoint_runs_after_broadcast_without_blocking_card(db, chat
       bc,
       chat.id,
       run_token="rt-goal-q",
-      recall_binding=EMPTY_RECALL_BINDING,
       on_question_checkpoint=checkpoint,
     )
     await sink.publish_question({
@@ -321,7 +318,7 @@ def test_publish_rejects_question_events(db, chat):
   chat.messages = [{"role": "user", "content": "hi", "ts": 1}]
   db.commit()
   bc = _OrderedBroadcast(chat.id)
-  sink = chat_mod._ChatEventSink(bc, chat.id, run_token="rt-q", recall_binding=EMPTY_RECALL_BINDING)
+  sink = chat_mod._ChatEventSink(bc, chat.id, run_token="rt-q")
   with pytest.raises(AssertionError):
     sink.publish({"type": "question", "questions": [{"id": "q1"}]})
 
@@ -334,7 +331,7 @@ def test_non_question_save_routes_to_actor_off_loop(db, chat):
   chat.messages = [{"role": "user", "content": "hi", "ts": 1}]
   db.commit()
   bc = _OrderedBroadcast(chat.id)
-  sink = chat_mod._ChatEventSink(bc, chat.id, run_token="rt-t", recall_binding=EMPTY_RECALL_BINDING)
+  sink = chat_mod._ChatEventSink(bc, chat.id, run_token="rt-t")
 
   sink._last_save = 0.0
   ok = sink.publish({"type": "tool_start", "tool": "Bash", "input": "ls"})
@@ -361,7 +358,7 @@ def test_streaming_commit_runs_off_the_event_loop_thread(db, chat):
   chat.messages = [{"role": "user", "content": "hi", "ts": 1}]
   db.commit()
   bc = _OrderedBroadcast(chat.id)
-  sink = chat_mod._ChatEventSink(bc, chat.id, run_token="rt-t", recall_binding=EMPTY_RECALL_BINDING)
+  sink = chat_mod._ChatEventSink(bc, chat.id, run_token="rt-t")
 
   seen: dict = {}
   from app import chat_writer as chat_writer_mod
@@ -393,7 +390,7 @@ def test_finalize_awaits_actor_and_persists(db, chat):
   chat.messages = [{"role": "user", "content": "hi", "ts": 1}]
   db.commit()
   bc = _OrderedBroadcast(chat.id)
-  sink = chat_mod._ChatEventSink(bc, chat.id, run_token="rt-f", recall_binding=EMPTY_RECALL_BINDING)
+  sink = chat_mod._ChatEventSink(bc, chat.id, run_token="rt-f")
   sink.assistant_blocks = [{"type": "text", "content": "done"}]
 
   asyncio.run(sink.finalize())
@@ -414,7 +411,7 @@ def test_error_event_routes_to_persist_error(db, chat):
   ]
   db.commit()
   bc = _OrderedBroadcast(chat.id)
-  sink = chat_mod._ChatEventSink(bc, chat.id, run_token="rt-e", recall_binding=EMPTY_RECALL_BINDING)
+  sink = chat_mod._ChatEventSink(bc, chat.id, run_token="rt-e")
   sink.assistant_blocks = [{"type": "text", "content": "partial"}]
 
   sink._last_save = 0.0

@@ -25,6 +25,7 @@ const ACTIVITY_ICONS = {
   plan: Tasks,
   image: ImageSquare,
   skill: Sparkle,
+  sparkle: Sparkle,
   agents: Agent,
 }
 

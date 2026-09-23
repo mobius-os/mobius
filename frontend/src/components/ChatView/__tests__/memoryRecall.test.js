@@ -12,6 +12,10 @@ import {
 import { memoryRecallCardModel } from '../memoryRecallCard.js'
 import MemoryRecallCard from '../MemoryRecallCard.jsx'
 import { _resetDisclosureStateForTests } from '../disclosureState.js'
+import {
+  appActivityCardModel,
+  appActivityLabel,
+} from '../appActivityCard.js'
 
 const note = (id, extra = {}) => ({
   id,
@@ -159,4 +163,38 @@ test('searching, empty, and failed recalls remain honest card states', () => {
   }
   assert.equal(memoryRecallCardModel({ status: 'unknown' }), null)
   assert.equal(memoryRecallCardModel(null), null)
+})
+
+test('generic app activity keeps app identity, copy, and own-app intents', () => {
+  const activity = {
+    status: 'succeeded',
+    app_slug: 'brain-2',
+    app_name: 'Brain',
+    label: 'Found 2 relevant notes',
+    detail: 'Showing the complete catalogue.',
+    resources: [
+      { label: 'Quiet interfaces', summary: 'Prefer calm UI.',
+        intent: 'note:quiet-interfaces' },
+      { label: 'Exact app route', intent: 'search:quiet  interface' },
+      { label: 'Unsafe destination', intent: '\u0000javascript:alert(1)' },
+    ],
+  }
+  const model = appActivityCardModel(activity)
+  assert.equal(appActivityLabel({ app_activity: activity }),
+    'Brain: Found 2 relevant notes')
+  assert.equal(model.resources[0].href,
+    '/shell/?app=brain-2&intent=note%3Aquiet-interfaces')
+  assert.equal(model.resources[1].href,
+    '/shell/?app=brain-2&intent=search%3Aquiet%20%20interface')
+  assert.equal(model.resources[2].href, '')
+  assert.equal(model.detail, 'Showing the complete catalogue.')
+})
+
+test('generic app activity rejects malformed states and app slugs', () => {
+  assert.equal(appActivityCardModel({ status: 'unknown' }), null)
+  const model = appActivityCardModel({
+    status: 'empty', app_slug: '../brain', app_name: 'Brain', label: 'No match',
+    resources: [{ label: 'Static result', intent: 'note:one' }],
+  })
+  assert.equal(model.resources[0].href, '')
 })

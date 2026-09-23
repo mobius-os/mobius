@@ -1687,7 +1687,23 @@ Every mini-app ships a `mobius.json`; the dependency-free source of truth is `ba
 
 Published apps should generate one random UUID once and declare it as `package_id` (for example `urn:uuid:550e8400-e29b-41d4-a716-446655440000`). It remains unchanged across product, manifest-id, repository-path, and owner renames. GitHub-backed packages are additionally bound to GitHub's immutable numeric repository identity, so a repository rename or transfer only changes the fetch locator. Moving code into a different repository is an explicit trust transfer: the old trusted manifest declares the same `package_id` plus `moved_to: {"manifest_url": "https://.../mobius.json"}`. Existing installs accept the new repository only after fetching and verifying that declaration from their current source; a separate fork generates a new package id. A reviewed service uses its own stable `service.id`, independent of both the package's current `id` and installed slug. Manifests that declare both `package_id` and `service` must declare `service.id` explicitly.
 
-Optional fields the parser recognizes include `package_id`, `moved_to`, `previous_id`, `icon`, colors/display, `offline_capable`, `embeds_agent`, `offline`, `permissions`, `storage_seeds`, `static_assets`, `source_files`, `skills`, `system_prompt`, and `schedule`. `previous_id` and `previous_manifest_url` remain bounded migration aids for installs that predate permanent package identities; they are not the steady-state identity model. Decorative-only fields such as `author`, `license`, and `homepage` are not validated or stored. Three gotchas: (1) **`runtime` (`imports`/`esm_deps`) is informational**; dependency resolution is governed by the pinned self-contained compiler in `app_compile_contract.py`. (2) **`storage_seeds` value type is a switch**: a string is a repo-relative file the installer fetches; a non-string is stored inline as JSON. (3) **`schedule.job` has dual semantics** — with an exactly five-field `schedule.default` it installs recurring cron; without it the script is an on-demand build hook. In either mode the script declares its interpreter with an absolute shebang; the platform never guesses from its filename or executable bit. `static_assets` caps at 256 files / 16 MB each / 64 MB total and logical destination `x` is materialized at source path `static/x`.
+Optional fields the parser recognizes include `package_id`, `moved_to`, `previous_id`, `icon`, colors/display, `offline_capable`, `embeds_agent`, `offline`, `permissions`, `storage_seeds`, `static_assets`, `source_files`, `skills`, `system_prompt`, `schedule`, and `agent_activities`. `previous_id` and `previous_manifest_url` remain bounded migration aids for installs that predate permanent package identities; they are not the steady-state identity model. Decorative-only fields such as `author`, `license`, and `homepage` are not validated or stored. Three gotchas: (1) **`runtime` (`imports`/`esm_deps`) is informational**; dependency resolution is governed by the pinned self-contained compiler in `app_compile_contract.py`. (2) **`storage_seeds` value type is a switch**: a string is a repo-relative file the installer fetches; a non-string is stored inline as JSON. (3) **`schedule.job` has dual semantics** — with an exactly five-field `schedule.default` it installs recurring cron; without it the script is an on-demand build hook. In either mode the script declares its interpreter with an absolute shebang; the platform never guesses from its filename or executable bit. `static_assets` caps at 256 files / 16 MB each / 64 MB total and logical destination `x` is materialized at source path `static/x`.
+
+`agent_activities` is the app-neutral presentation contract for scripts an app
+asks the chat agent to run. Each activity declares an id, a repo-relative
+`entry` also present in `source_files`, its exact positional `arguments` count,
+and a short `running_label`. The platform binds the command path to the
+installed app identity, accepts only one simple direct/Python/`bash -lc`
+invocation, and persists a bounded lifecycle marker on that ordinary tool
+block. A completed script prints a final
+`MOBIUS_APP_ACTIVITY_V1:{...}` JSON line with the same `activity_id`, a
+`succeeded|empty|failed` status, required `label`, and optional `detail`,
+`warning`, and resources (`label`, optional `summary` and own-app `intent`).
+The shell owns identity, bounds, persistence, safe own-app navigation, and the
+generic card; every domain concept and all additional protocol fields stay in
+the app. The declaration is not included in the capability contract and grants
+no data, network, or execution permission. Old Memory V1/V2 receipts remain a
+read-only transcript compatibility path, never a live provider interface.
 
 ## Testing — determinism principle
 

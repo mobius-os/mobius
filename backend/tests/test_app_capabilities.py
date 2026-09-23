@@ -118,6 +118,48 @@ def test_service_is_an_explicit_reviewed_runtime_not_an_implicit_import_hook(ser
       ))
 
 
+def test_agent_activities_bind_only_declared_source_commands():
+  manifest = _manifest(
+    source_files=["memory-core.md", "lookup.py"],
+    agent_activities={
+      "lookup": {
+        "entry": "lookup.py", "arguments": 2, "running_label": "Searching",
+      },
+    },
+  )
+  validate_manifest_contract(manifest)
+  contract, _digest = contract_and_digest(manifest)
+  assert "agent_activities" not in contract, (
+    "presentation metadata must not become a data/network permission"
+  )
+  with pytest.raises(ManifestContractError):
+    validate_manifest_contract(_manifest(
+      source_files=["lookup.py"],
+      agent_activities={
+        "search": {
+          "entry": "lookup.py", "arguments": 2, "running_label": "Searching",
+        },
+        "read": {
+          "entry": "lookup.py", "arguments": 4, "running_label": "Reading",
+        },
+      },
+    ))
+
+  for activity in (
+    {"entry": "missing.py", "arguments": 2, "running_label": "Searching"},
+    {"entry": "../lookup.py", "arguments": 2, "running_label": "Searching"},
+    {"entry": "lookup.py", "arguments": -1, "running_label": "Searching"},
+    {"entry": "lookup.py", "arguments": 2, "running_label": ""},
+    {"entry": "lookup.py", "arguments": 2, "running_label": "Searching",
+     "domain": "memory"},
+  ):
+    with pytest.raises(ManifestContractError):
+      validate_manifest_contract(_manifest(
+        source_files=["memory-core.md", "lookup.py"],
+        agent_activities={"lookup": activity},
+      ))
+
+
 def test_service_transition_aliases_are_explicit_bounded_contract_data():
   manifest = _manifest(
     source_files=["memory-core.md", "service.py"],

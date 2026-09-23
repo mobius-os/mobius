@@ -16,7 +16,6 @@ from app.chat_event_sink import (
 )
 from app.chat_writer import Barrier, FinishRun, StartTurn, get_writer
 from app.database import SessionLocal
-from app.memory_recall import EMPTY_RECALL_BINDING
 from app.routes import chats_stream
 
 
@@ -42,7 +41,7 @@ def approval_run(chat, db):
   )).result(timeout=5)
   bc = create_broadcast(chat.id)
   sink = ChatEventSink(bc, chat.id, run_token=run_id,
-                       recall_binding=EMPTY_RECALL_BINDING)
+                       )
   register_active_sink(chat.id, sink)
   owner = db.query(models.Owner).first()
   token = auth_mod.create_agent_token(
@@ -328,7 +327,6 @@ def test_shared_work_key_allows_only_the_first_chat_to_create_an_approval(
   )
   other_sink = ChatEventSink(
     create_broadcast(other.id), other.id, run_token=other_run.id,
-    recall_binding=EMPTY_RECALL_BINDING,
   )
   register_active_sink(other.id, other_sink)
   try:

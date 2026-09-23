@@ -14,6 +14,14 @@ const bashTool = () => ({
   recall: { status: 'searching', task_id: 'bb6q', query: 'q' },
 })
 
+const appActivityTool = () => ({
+  type: 'tool', tool: 'Bash', tool_use_id: 'tu-app', status: 'done',
+  app_activity: {
+    status: 'running', task_id: 'task-app', app_slug: 'brain',
+    app_name: 'Brain', activity_id: 'lookup', label: 'Searching',
+  },
+})
+
 test('a task_done carrying a recall settles the deferring Bash block', () => {
   const settled = { status: 'hit', query: 'q', notes: [{ id: 'a', path: 'notes/a.md', title: 'A' }] }
   const items = applyTaskEvent([bashTool()], {
@@ -39,4 +47,17 @@ test('a task_done without a recall leaves the deferring block untouched', () => 
     type: 'task_done', task_id: 'bb6q', tool_use_id: 'tu-1', status: 'completed',
   }, 1000)
   assert.equal(items, start)
+})
+
+test('an app activity settles by task id when Claude omits the tool id', () => {
+  const settled = {
+    status: 'succeeded', app_slug: 'brain', app_name: 'Brain',
+    activity_id: 'lookup', label: 'Found a note',
+  }
+  const items = applyTaskEvent([appActivityTool()], {
+    type: 'task_done', task_id: 'task-app', tool_use_id: null,
+    status: 'completed', app_activity: settled,
+  }, 1000)
+  assert.equal(items[0].app_activity, settled)
+  assert.equal(items[0].subagent, undefined)
 })
