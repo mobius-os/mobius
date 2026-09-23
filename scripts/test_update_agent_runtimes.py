@@ -18,51 +18,52 @@ class RuntimeUpdateTests(unittest.TestCase):
         (self.root / "backend").mkdir()
         (self.root / "Dockerfile").write_text(
             "ARG CODEX_VERSION=1.2.3\n"
-            "'openai-codex @ git+https://github.com/openai/codex.git@"
-            + "a" * 40 + "#subdirectory=sdk/python'\n"
-            "pip install 'openai-codex-cli-bin==1.0.0'\n"
+            "ARG CODEX_SDK_VERSION=1.2.3\n"
+            "pip install --no-deps \"openai-codex==${CODEX_SDK_VERSION}\"\n"
+            "pip install \"openai-codex-cli-bin==${CODEX_SDK_VERSION}\"\n"
         )
         (self.root / "backend/requirements.txt").write_text("claude-agent-sdk==1.2.3\n")
         self.codex = "1.2.4"
+        self.codex_sdk = "1.2.4"
         self.claude = "1.2.4"
-        self.sha = "b" * 40
-        self.dependency = "openai-codex-cli-bin==1.1.0"
         self.urls = []
 
     def fetch(self, url):
         self.urls.append(url)
         if "registry.npmjs.org" in url:
             return json.dumps({"version": self.codex})
-        if "pypi.org" in url:
+        if "pypi.org/pypi/openai-codex/" in url:
+            return json.dumps({"info": {
+                "version": self.codex_sdk,
+                "requires_dist": [f"openai-codex-cli-bin=={self.codex_sdk}"],
+            }})
+        if "pypi.org/pypi/claude-agent-sdk/" in url:
             return json.dumps({"info": {"version": self.claude}})
-        if "api.github.com" in url:
-            self.assertTrue(url.endswith("rust-v" + self.codex))
-            return json.dumps({"sha": self.sha})
-        self.assertIn("/" + self.sha + "/sdk/python/pyproject.toml", url)
-        return '[project]\ndependencies = ["' + self.dependency + '"]\n'
+        self.fail(f"Unexpected registry URL: {url}")
 
     def propose(self):
         return UPDATER["propose"](self.root, self.fetch)
 
-    def test_matches_codex_cli_sdk_commit_and_declared_bin_without_writing(self):
+    def test_matches_independent_codex_cli_and_sdk_releases_without_writing(self):
         files, changes = self.propose()
         self.assertIn("ARG CODEX_VERSION=1.2.4", files["Dockerfile"])
-        self.assertIn("@" + self.sha, files["Dockerfile"])
-        self.assertIn("openai-codex-cli-bin==1.1.0", files["Dockerfile"])
+        self.assertIn("ARG CODEX_SDK_VERSION=1.2.4", files["Dockerfile"])
+        self.assertIn('openai-codex==${CODEX_SDK_VERSION}', files["Dockerfile"])
+        self.assertIn('openai-codex-cli-bin==${CODEX_SDK_VERSION}', files["Dockerfile"])
         self.assertEqual(files["backend/requirements.txt"], "claude-agent-sdk==1.2.4\n")
-        self.assertEqual(len(changes), 2)
+        self.assertEqual(len(changes), 3)
         self.assertIn("ARG CODEX_VERSION=1.2.3", (self.root / "Dockerfile").read_text())
 
     def test_no_new_release_does_not_resolve_tags_or_create_churn(self):
-        self.codex = self.claude = "1.2.3"
+        self.codex = self.codex_sdk = self.claude = "1.2.3"
         self.assertEqual(self.propose(), ({}, []))
-        self.assertEqual(len(self.urls), 2)
+        self.assertEqual(len(self.urls), 3)
 
     def test_claude_only_leaves_codex_untouched(self):
-        self.codex = "1.2.3"
+        self.codex = self.codex_sdk = "1.2.3"
         files, _ = self.propose()
         self.assertEqual(set(files), {"backend/requirements.txt"})
-        self.assertEqual(len(self.urls), 2)
+        self.assertEqual(len(self.urls), 3)
 
     def test_codex_only_leaves_python_lock_input_untouched(self):
         self.claude = "1.2.3"
@@ -75,6 +76,11 @@ class RuntimeUpdateTests(unittest.TestCase):
                 self.codex = version
                 with self.assertRaises(ValueError):
                     self.propose()
+
+        self.codex = "1.2.4"
+        self.codex_sdk = "1.2.2"
+        with self.assertRaises(ValueError):
+            self.propose()
 
     def test_missing_release_or_network_error_writes_nothing(self):
         def unavailable(url):
@@ -89,15 +95,14 @@ class RuntimeUpdateTests(unittest.TestCase):
             with self.subTest(text=text), self.assertRaises(ValueError):
                 UPDATER["replace_pin"](text, pattern, "new")
 
-    def test_sdk_contract_change_requires_review(self):
-        self.dependency = "different-cli-package==1.0.0"
+    def test_sdk_runtime_mismatch_requires_review(self):
+        self.codex_sdk = "1.2.4"
         with self.assertRaises(ValueError):
-            self.propose()
-
-    def test_invalid_release_commit_is_rejected(self):
-        self.sha = "main"
-        with self.assertRaises(ValueError):
-            self.propose()
+            UPDATER["propose"](self.root, lambda url: json.dumps(
+                {"version": self.codex} if "registry.npmjs.org" in url else
+                {"info": {"version": self.codex_sdk, "requires_dist": ["openai-codex-cli-bin==1.1.0"]}}
+                if "openai-codex/" in url else {"info": {"version": self.claude}}
+            ))
 
     def test_workflow_is_upstream_only_review_gated_and_dispatches_real_suite(self):
         workflow = (ROOT / ".github/workflows/agent-runtime-updates.yml").read_text()
