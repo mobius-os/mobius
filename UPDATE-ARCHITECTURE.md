@@ -21,6 +21,11 @@ actionable image-preservation blockers, and a self-hosted replacement path that
 does not require Connect. Frozen publication and automatic rollback land only
 when one production-style journey proves all of these together:
 
+In that foundation, Review pins and explains the incoming release but does not
+prepare the merged candidate described in Phase A below. Apply owns the one
+reconciliation pass. This keeps Review fast and read-only while the frozen
+candidate boundary remains future work.
+
 - the same artifact survives two consecutive real imports and boots without
   changing a byte;
 - every restart surface prepares through the same owner;
