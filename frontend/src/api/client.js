@@ -1351,6 +1351,11 @@ export const api = {
     readAll: () => apiFetch('/notifications/read-all', { method: 'POST' }),
     // Owner action from the preview: remove all stored notifications.
     clearAll: () => apiFetch('/notifications', { method: 'DELETE' }),
+    // Per-item dismissal is limited by the server to ordinary notifications.
+    dismiss: (notificationId) => apiFetch(
+      `/notifications/${encodeURIComponent(notificationId)}`,
+      { method: 'DELETE' },
+    ),
   },
   admin: {
     restart: () => apiFetch('/admin/restart', { method: 'POST' }),

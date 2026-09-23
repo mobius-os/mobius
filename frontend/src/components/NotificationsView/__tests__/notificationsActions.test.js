@@ -24,6 +24,29 @@ test('notification header clears immediately and closes through the bell boundar
   assert.match(clearRule, /color:\s*var\(--text\)/)
 })
 
+test('ordinary notifications can be dismissed individually without nesting controls', () => {
+  assert.match(component, /onDismiss/)
+  assert.match(component, /!protectsDismissal && \(/)
+  assert.match(component, /aria-label=\{`Dismiss \$\{n\.title\}`\}/)
+  assert.match(component, /await onDismiss\(notificationId\)/)
+  assert.match(center, /onDismiss=\{dismiss\}/)
+  assert.match(
+    css,
+    /@media \(hover: hover\) and \(pointer: fine\)[\s\S]*?\.notifications__row-shell:hover \.notifications__dismiss/,
+  )
+  assert.match(css, /\.notifications__dismiss:focus-visible/)
+})
+
+test('hover highlights the full notification row while X hover stays local', () => {
+  assert.match(css, /\.notifications__row-shell:hover\s*\{\s*background:\s*var\(--surface\)/)
+  assert.match(
+    css,
+    /\.notifications__row-shell:has\(\.notifications__dismiss:hover:not\(:disabled\)\)\s*\{\s*background:\s*transparent/,
+  )
+  assert.match(css, /\.notifications__row--link:hover\s*\{\s*background:\s*transparent/)
+  assert.match(css, /\.notifications__dismiss:hover:not\(:disabled\)\s*\{[^}]*background:\s*var\(--surface\)/)
+})
+
 test('a ready shell update is an actionable bell notification, not a banner', () => {
   assert.match(component, /New shell ready\./)
   assert.match(component, /Reload to use the latest interface changes\./)
@@ -53,7 +76,9 @@ test('durable recovery actions restore in place and preserve their completed rec
   assert.match(component, /Restoring…/)
   assert.match(component, /Restored/)
   assert.match(component, /recoveryUnavailableLabel\(recovery, now\)/)
-  assert.match(component, /Load older notifications/)
+  assert.match(component, /new IntersectionObserver/)
+  assert.match(component, /root: contentRef\.current/)
+  assert.match(component, /Expires: \{formatDateTime\(recovery\.expiresAt\)\}/)
   assert.match(center, /onRecoveryAction=\{onRecoveryAction\}/)
   assert.match(css, /\.notifications__recovery-action\s*\{[\s\S]*?min-height:\s*44px/)
 })
