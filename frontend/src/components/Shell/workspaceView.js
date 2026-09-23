@@ -187,7 +187,9 @@ export function deriveContentVisibility({
   // the New Chat landing key for an empty single slot; the focused/holder key
   // otherwise. Distinct from focusedActiveKey (which stays null for the empty slot)
   // so the render paints the landing while nav/AppCanvas see no active tab.
-  const fullBleedKey = focusedPaneView && builder
+  const fullBleedKey = immersive
+    ? focusedActiveKey
+    : focusedPaneView && builder
     ? null
     : emptySingleSlot
     ? EMPTY_SINGLE_SURFACE_KEY
