@@ -219,6 +219,12 @@ def test_goal_routing_rechecks_phase_transitions_and_prefers_platform_tool():
   assert "Parallelism itself is not the saving" in planning_normalized
   assert "Serialize dependencies, shared writes, plan revisions" in planning_normalized
   assert "goal_plan.py check-complete" in planning_normalized
+  assert "complete --result 'Verified evidence'" in planning_normalized
+  assert "no separate preflight is required" in planning_normalized
+  assert "optional read-only task diagnostic" in planning_normalized
+  completion_example = planning.split("After verifying the original outcome:", 1)[1].split("```", 2)[1]
+  assert "complete --result" in completion_example
+  assert "check-complete" not in completion_example
   assert "not a keyword trigger" in planning_normalized
   assert "first-class `promote_goal` tool" in planning_normalized
   assert "resilience, not an equivalent convenience path" in planning_normalized
