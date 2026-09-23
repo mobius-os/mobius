@@ -5205,7 +5205,6 @@ export default function ChatView({
       )
     : null
   const showLoadError = loadError && messages.length === 0 && !loading && !turnActive
-  const showActivationRetry = activationPhase === 'error' && !loadError
 
   // A safe cached window can prepare while its freshness check runs. History
   // and progressive preparation remain hidden; `cached` is granted only after
@@ -6229,24 +6228,6 @@ export default function ChatView({
             resourcePause={resourcePause}
             onCancel={handleCancelWait}
           />
-        )}
-        {showActivationRetry && (
-          <div
-            className="chat__offline-note chat__offline-note--error chat__activation-retry"
-            role="alert"
-            aria-live="assertive"
-            aria-atomic="true"
-          >
-            <span>Chat activation needs a retry before sending.</span>
-            <button
-              type="button"
-              className="chat__empty-action"
-              onPointerDown={event => event.preventDefault()}
-              onClick={retryActivation}
-            >
-              Retry
-            </button>
-          </div>
         )}
         <ConnectionStatus
           error={connectionError}

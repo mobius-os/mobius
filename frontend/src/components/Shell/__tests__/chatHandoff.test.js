@@ -473,8 +473,8 @@ test('cold activation keeps one composer visible but refuses sends until runtime
   assert.match(chatView, /setActivationPhase\('ready'\)/,
     'only runtime settlement enables the composer')
   assert.match(chatView,
-    /setActivationPhase\('error'\)[\s\S]*Chat activation needs a retry before sending\./,
-    'a failed activation stays visibly non-sendable instead of treating cached history as runtime proof')
+    /setActivationPhase\('error'\)/,
+    'a failed activation stays non-sendable instead of treating cached history as runtime proof')
   assert.match(chatView,
     /notice=\{[\s\S]*coldActivation[\s\S]*Preparing this chat…[\s\S]*: null/,
     'the disabled Send affordance explains the cold activation')
@@ -483,12 +483,11 @@ test('cold activation keeps one composer visible but refuses sends until runtime
     'the activation owner retries in place without replacing the cached history or draft')
   assert.equal(
     (chatView.match(/onClick=\{retryActivation\}/g) || []).length,
-    2,
-    'cached and uncached activation failures share one retry transition',
+    1,
+    'the existing explicit activation retry remains available independently of the composer notice',
   )
-  assert.match(chatView,
-    /showActivationRetry = activationPhase === 'error' && !loadError[\s\S]*chat__activation-retry[\s\S]*role="alert"[\s\S]*onClick=\{retryActivation\}/,
-    'a safe cached fallback exposes and announces its own retry action instead of relying on ConnectionStatus')
+  assert.doesNotMatch(chatView, /chat__activation-retry|Chat activation needs a retry before sending\./,
+    'the composer never renders the activation retry strip')
   assert.match(chatView,
     /const activationCacheReusable = \(\s*activationCacheEntryState === 'paintable'[\s\S]*activationCacheEntryState === 'stream-catchup'/,
     'only a classifier-approved complete cache may enter runtime reuse or fallback')
