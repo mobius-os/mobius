@@ -75,6 +75,8 @@ async def test_identity_app_declaration_owns_native_models_and_background_choice
   try:
     providers.sync_app_model_providers(data_dir, force=True)
     assert providers.PROVIDERS["mobius"].app_id == app.id
+    assert providers.DEFAULT_MODELS["mobius"] == "deepseek-flash"
+    assert providers.DEFAULT_BACKGROUND_MODELS["mobius"] == "deepseek-flash"
     assert providers.provider_of_model("deepseek-flash") == "mobius"
     listed = await providers.list_models(data_dir)
     assert [row["id"] for row in listed["mobius"]] == ["deepseek-flash", "deepseek-v4-pro"]
@@ -85,12 +87,20 @@ async def test_identity_app_declaration_owns_native_models_and_background_choice
     })
     assert "mobius" not in await providers.list_models(data_dir)
     assert all(row["provider"] != "mobius" for row in providers.background_agent_settings(data_dir)["providers"])
+    assert providers.update_agent_settings(data_dir, lambda current: {
+      **current, "model_providers_enabled": {"mobius": True},
+      "provider": "mobius", "model": "deepseek-flash",
+    })
+    assert providers.owner_default_provider(data_dir, "mobius") == "mobius"
 
     app.deleted_at = datetime.now(UTC)
     db.commit()
     providers.sync_app_model_providers(data_dir, force=True)
     assert providers.PROVIDERS["mobius"].declaration is None
+    assert "mobius" not in providers.DEFAULT_MODELS
+    assert "mobius" not in providers.DEFAULT_BACKGROUND_MODELS
     assert providers.provider_of_model("deepseek-flash") is None
+    assert providers.owner_default_provider(data_dir, "mobius") != "mobius"
     assert all(row["provider"] != "mobius" for row in providers.background_agent_settings(data_dir)["providers"])
   finally:
     providers.PROVIDERS["mobius"].set_declaration(None, None)

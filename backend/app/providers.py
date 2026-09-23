@@ -123,7 +123,6 @@ MODEL_CONTEXT_WINDOWS: dict[str, int] = {
 DEFAULT_MODELS = {
   "claude": "claude-opus-4-8",
   "codex": "gpt-5.6-sol",
-  "mobius": "inkling",
 }
 
 # Curated first-run model visibility. The registry remains broader so an
@@ -155,7 +154,6 @@ DEFAULT_VISIBLE_MODELS: dict[str, frozenset[str]] = {
 DEFAULT_BACKGROUND_MODELS = {
   "claude": "claude-opus-4-8",
   "codex": "gpt-5.6-terra",
-  "mobius": "inkling",
 }
 
 # Initial effort when no global default exists. Aligns with the
@@ -557,12 +555,7 @@ def background_agent_settings(data_dir: str, default_provider: str | None = None
   providers in.
   """
   sync_app_model_providers(data_dir)
-  def selectable(provider_id: str) -> bool:
-    if provider_id not in PROVIDERS or not provider_enabled(data_dir, provider_id):
-      return False
-    return provider_id != "mobius" or bool(PROVIDERS["mobius"].declaration)
-
-  provider = default_provider if default_provider and selectable(default_provider) else DEFAULT_PROVIDER
+  provider = default_provider if default_provider and provider_selectable(data_dir, default_provider) else DEFAULT_PROVIDER
   file_layer = _load_agent_settings(data_dir)
   raw = file_layer.get("background_agents")
   bg = raw if isinstance(raw, dict) else {}
@@ -573,7 +566,7 @@ def background_agent_settings(data_dir: str, default_provider: str | None = None
     if choice is None:
       return
     provider_id = choice["provider"]
-    if provider_id in seen or not selectable(provider_id):
+    if provider_id in seen or not provider_selectable(data_dir, provider_id):
       return
     row = dict(choice)
     row["model"] = row.get("model")
@@ -604,7 +597,7 @@ def background_agent_settings(data_dir: str, default_provider: str | None = None
     )
 
   for provider_id in PROVIDERS:
-    if provider_id not in seen and selectable(provider_id):
+    if provider_id not in seen and provider_selectable(data_dir, provider_id):
       rows.append(
         _background_default_choice(
           provider_id,
@@ -1208,6 +1201,12 @@ def sync_app_model_providers(data_dir: str, *, force: bool = False) -> None:
   if isinstance(mobius, MobiusProvider) and (mobius.app_id != native_id or mobius.declaration != native):
     mobius.set_declaration(native_id, native)
     _model_registry_cache.pop("mobius", None)
+  if native:
+    DEFAULT_MODELS["mobius"] = native["default_model"]
+    DEFAULT_BACKGROUND_MODELS["mobius"] = native["default_model"]
+  else:
+    DEFAULT_MODELS.pop("mobius", None)
+    DEFAULT_BACKGROUND_MODELS.pop("mobius", None)
   claimed_models = {mid for key, ids in KNOWN_MODELS.items() if key != "mobius" for mid in ids}
   if native:
     claimed_models.update(model["id"] for model in native["models"])
@@ -1239,6 +1238,13 @@ def sync_app_model_providers(data_dir: str, *, force: bool = False) -> None:
     _model_registry_locks.pop(provider_id, None)
   _app_provider_ids.clear()
   _app_provider_ids.update(next_ids)
+
+
+def provider_selectable(data_dir: str, provider_id: str) -> bool:
+  """Whether a registered provider has an active, declared model connection."""
+  provider = PROVIDERS.get(provider_id)
+  return (provider is not None and provider_enabled(data_dir, provider_id)
+          and (not isinstance(provider, MobiusProvider) or provider.declaration is not None))
 
 # The default provider when none is configured.
 DEFAULT_PROVIDER = "claude"
@@ -1312,10 +1318,7 @@ def resolve_default_provider(
   provider_id = (
     configured_provider if configured_provider in PROVIDERS else DEFAULT_PROVIDER
   )
-  if provider_id in _app_provider_ids | {"mobius"} and (
-    not provider_enabled(data_dir, provider_id)
-    or (provider_id == "mobius" and not PROVIDERS["mobius"].declaration)
-  ):
+  if not provider_selectable(data_dir, provider_id):
     connected = authenticated_provider_ids(data_dir)
     return connected[0] if connected else DEFAULT_PROVIDER
   if (
@@ -1377,14 +1380,13 @@ def owner_default_provider(
   settings = _load_agent_settings(data_dir)
   model = settings.get("model")
   prov = provider_of_model(model)
-  if prov is not None and prov in PROVIDERS and provider_enabled(data_dir, prov):
+  if prov is not None and provider_selectable(data_dir, prov):
     return prov
   mirrored_provider = settings.get("provider")
   if (
     isinstance(model, str)
     and model.strip()
-    and mirrored_provider in PROVIDERS
-    and provider_enabled(data_dir, mirrored_provider)
+    and provider_selectable(data_dir, mirrored_provider)
     and not _model_belongs_to_other_provider(model, mirrored_provider)
   ):
     return mirrored_provider
@@ -2014,7 +2016,7 @@ async def list_models(
   result: dict[str, list[dict[str, Any]]] = {}
   cold: list[str] = []
   for provider_id in PROVIDERS:
-    if (provider_id == "mobius" and not PROVIDERS["mobius"].declaration) or not provider_enabled(data_dir, provider_id):
+    if not provider_selectable(data_dir, provider_id):
       continue
     hit = cache_fresh(provider_id)
     if hit is not None:

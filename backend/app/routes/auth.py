@@ -849,14 +849,13 @@ async def providers_status(
   """
   require_chat_embed_operation(principal, "models:read")
   is_owner_caller = principal.app_id is None and principal.scope == "owner"
-  from app.providers import PROVIDERS, MobiusProvider, provider_enabled
+  from app.providers import PROVIDERS, provider_selectable
   data_dir = get_settings().data_dir
   from app.providers import sync_app_model_providers
   sync_app_model_providers(data_dir)
   out = {}
   for pid, provider in PROVIDERS.items():
-    declared = not isinstance(provider, MobiusProvider) or provider.declaration is not None
-    enabled = declared and provider_enabled(data_dir, pid)
+    enabled = provider_selectable(data_dir, pid)
     error = await run_in_threadpool(provider.check_auth, data_dir)
     out[pid] = {
       "name": provider.name,
