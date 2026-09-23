@@ -220,25 +220,34 @@ def validate_manifest_contract(manifest) -> None:
   validate_slug_field(mid, "id")
   model_provider = manifest.get("model_provider")
   if model_provider is not None:
-    if not isinstance(model_provider, Mapping) or set(model_provider) != {
-      "name", "base_url", "secret_name", "models", "default_model"
-    }:
-      _fail("Manifest `model_provider` needs name, base_url, secret_name, models, and default_model only.")
+    if not isinstance(model_provider, Mapping):
+      _fail("Manifest `model_provider` must be an object.")
+    broker = model_provider.get("transport") == "identity_broker"
+    expected = {"name", "base_url", "models", "default_model"}
+    expected |= {"transport"} if broker else {"secret_name"}
+    if set(model_provider) != expected:
+      _fail("Manifest `model_provider` has invalid fields for its transport.")
     if not isinstance(model_provider["name"], str) or not 1 <= len(model_provider["name"].strip()) <= 80:
       _fail("Manifest `model_provider.name` must be 1–80 characters.")
     url = urlparse(model_provider["base_url"] if isinstance(model_provider["base_url"], str) else "")
-    if (url.scheme != "https" or not url.hostname or url.username or url.password
-        or url.query or url.fragment or url.params):
-      _fail("Manifest `model_provider.base_url` must be an HTTPS API base URL without credentials or query.")
-    secret_name = model_provider["secret_name"]
-    if not isinstance(secret_name, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", secret_name):
-      _fail("Manifest `model_provider.secret_name` must name one app secret.")
+    if broker:
+      if (manifest.get("id") != "identity"
+          or (manifest.get("permissions") or {}).get("identity_manage") is not True
+          or model_provider["base_url"] != "http://127.0.0.1:8765/v1"):
+        _fail("The protected identity broker is only available to the Möbius · You integration.")
+    else:
+      if (url.scheme != "https" or not url.hostname or url.username or url.password
+          or url.query or url.fragment or url.params):
+        _fail("Manifest `model_provider.base_url` must be an HTTPS API base URL without credentials or query.")
+      secret_name = model_provider["secret_name"]
+      if not isinstance(secret_name, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", secret_name):
+        _fail("Manifest `model_provider.secret_name` must name one app secret.")
     entries = model_provider["models"]
     if not isinstance(entries, list) or not 1 <= len(entries) <= 32:
       _fail("Manifest `model_provider.models` must contain 1–32 models.")
     ids = set()
     for index, entry in enumerate(entries):
-      if not isinstance(entry, Mapping) or set(entry) - {"id", "label", "effort_levels", "context_window"} or not {"id", "label"}.issubset(entry):
+      if not isinstance(entry, Mapping) or set(entry) - {"id", "label", "effort_levels", "context_window", "input_modalities", "auto_compact_token_limit"} or not {"id", "label"}.issubset(entry):
         _fail(f"Manifest `model_provider.models[{index}]` has invalid fields.")
       model_id = entry["id"]
       if not isinstance(model_id, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}", model_id) or model_id in ids:
@@ -254,6 +263,14 @@ def validate_manifest_contract(manifest) -> None:
       window = entry.get("context_window")
       if window is not None and (isinstance(window, bool) or not isinstance(window, int) or not 1024 <= window <= 10_000_000):
         _fail("Manifest model context_window must be an integer between 1024 and 10000000.")
+      modalities = entry.get("input_modalities")
+      if modalities is not None and (not isinstance(modalities, list)
+          or modalities not in (["text"], ["text", "image"])):
+        _fail("Manifest model input_modalities must be text or text and image.")
+      compact = entry.get("auto_compact_token_limit")
+      if compact is not None and (isinstance(compact, bool) or not isinstance(compact, int)
+          or not 1024 <= compact <= (window or 10_000_000)):
+        _fail("Manifest model auto_compact_token_limit must fit its context window.")
     if model_provider["default_model"] not in ids:
       _fail("Manifest `model_provider.default_model` must name a declared model.")
   package_id = manifest.get("package_id")
