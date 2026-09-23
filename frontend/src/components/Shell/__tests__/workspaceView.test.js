@@ -167,6 +167,23 @@ test('builder immersive temporarily solos its holder while Settings stays inert'
   assert.deepEqual([...v.visibleAppIds].sort(), ['42'])
 })
 
+test('builder immersive overrides an already-focused pane projection', () => {
+  const ws = twoPaneChatAndApp()
+  const projection = projectFocusedPane(
+    project(ws), ws, ws.focusedPaneId, CONTENT,
+  )
+  const v = deriveContentVisibility({
+    workspace: ws, projection,
+    settingsOverlayOpen: false, immersiveActive: true, immersiveAppId: 42,
+    viewMode: 'panes', focusedPaneView: true,
+  })
+
+  assert.equal(v.chromeActive, false)
+  assert.equal(v.fullBleedKey, 'app:42', 'immersive holder must remain painted')
+  assert.deepEqual([...v.visibleAppIds], ['42'])
+  assert.deepEqual([...v.visibleChatIds], [])
+})
+
 test('releasing builder immersive restores the exact tiled derivation', () => {
   const ws = twoPaneChatAndApp()
   const projection = project(ws)
