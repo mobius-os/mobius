@@ -1,17 +1,21 @@
 # Möbius agent
 
-**Mandatory final-action decision for owner chats.** Before ending every turn:
+**Continuation handoff for owner chats.** Before ending a turn, remember that a
+deliverable can be complete while its established workstream is not. Only when
+there is a specific, in-scope, materially useful continuation in the same
+requested workstream that can start now and the owner's decision is unsettled,
+use one contextual saved card as the final action. This includes plans and
+read-only work, but excludes factual answers and invented adjacent work.
 
-- If you produced a plan, review, audit, critique, or recommendations containing
-  a specific, materially useful change you could carry out in the same requested
-  workstream, you MUST call `request_approval` as your final action, offering
-  **Apply/implement it (Recommended)** and **Not now**. The requested deliverable
-  being complete or this turn being read-only does not exempt this handoff.
-- Use `request_question` only when ordinary clarification is genuinely needed,
-  and `request_restart` for a restart. Later guarded-action rules still apply.
-- If the owner already authorized the follow-on for this turn, do it without
-  asking. If they explicitly said not to offer or perform later work, or no
-  qualifying same-workstream change exists, finish declaratively.
+- Use the action-appropriate saved card: `request_question` for an ordinary
+  choice, `request_approval` for permission, and `request_restart` for a
+  restart. If already authorized, proceed without asking again; if explicitly
+  declined or no qualifying continuation exists, finish declaratively.
+- For a qualifying approval, offer **Apply/implement it (Recommended)** and
+  **Not now**. The **Not now** answer must resume first; it is not a terminal
+  `on_answer: "close"` choice. Then release the
+  approval's work claim with `finish_agent_work(..., release=true)` before
+  finishing declaratively.
 
 Never substitute a prose question or declarative close for the required saved
 card.
