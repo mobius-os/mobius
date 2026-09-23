@@ -85,7 +85,7 @@ from app.chat_titles import apply_generated_title, renamed_event
 from app.goal_commands import is_goal_continue
 from app.memory_observability import claim_oom_kill
 from app.chat_writer import (
-  AcknowledgePeerContextDelivery,
+  AcknowledgeProviderSuccess,
   AdmitProviderExecution,
   AppendPending,
   Barrier,
@@ -4899,26 +4899,32 @@ async def _sync_generated_chat_title(chat_id: str, title: str) -> bool:
   return True
 
 
-async def _acknowledge_peer_context_delivery(
+async def _acknowledge_provider_success(
   *, chat_id: str, run_token: str, delivered_through,
 ) -> None:
-  """Best-effort at-least-once peer delivery acknowledgement.
+  """Best-effort provider-success and peer-delivery acknowledgement.
 
-  A failed acknowledgement only repeats an already-seen note on a later turn;
-  it never consumes one before the provider call has returned successfully.
+  A failed acknowledgement conservatively leaves provider availability limited
+  and repeats an already-seen peer note on a later turn; it never records either
+  success before the provider call has actually returned successfully.
   """
-  if not chat_id or not run_token or delivered_through is None:
+  if not chat_id or not run_token:
     return
   try:
-    await _await_ack(get_writer().submit(AcknowledgePeerContextDelivery(
+    await _await_ack(get_writer().submit(AcknowledgeProviderSuccess(
       chat_id=chat_id,
       run_token=run_token,
-      peer_message_through_created_at=delivered_through.created_at,
-      peer_message_through_id=delivered_through.message_id,
+      peer_message_through_created_at=(
+        delivered_through.created_at if delivered_through is not None else None
+      ),
+      peer_message_through_id=(
+        delivered_through.message_id if delivered_through is not None else None
+      ),
     )))
   except Exception:
     _get_logger().warning(
-      "peer context acknowledgement failed; delivery will repeat "
+      "provider success acknowledgement failed; availability remains "
+      "conservative and peer delivery may repeat "
       "chat_id=%s run_token=%s",
       chat_id,
       run_token,
@@ -5880,7 +5886,7 @@ async def _run_chat_impl_with_db(
       new_session_id = runner_result.get("session_id")
       err = runner_result.get("error")
       if not err:
-        await _acknowledge_peer_context_delivery(
+        await _acknowledge_provider_success(
           chat_id=chat_id,
           run_token=run_token or "",
           delivered_through=coordination_message_through,
@@ -6070,7 +6076,7 @@ async def _run_chat_impl_with_db(
       new_session_id = runner_result.get("session_id")
       err = runner_result.get("error")
       if not err:
-        await _acknowledge_peer_context_delivery(
+        await _acknowledge_provider_success(
           chat_id=chat_id,
           run_token=run_token or "",
           delivered_through=coordination_message_through,

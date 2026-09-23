@@ -895,36 +895,23 @@ def ensure_followup_chat(
   return chat.id
 
 
-def resolve_round_choice(db: Session) -> dict:
-  """Concrete provider/model/effort for unattended follow-up rounds."""
-  from app.background_agents import resolve_background_agents
+def resolve_round_choice(db: Session, *, prefer_provider: str | None = None) -> dict:
+  """Concrete provider/model/effort for unattended follow-up rounds.
+
+  Walks the owner's background-agents list to the first provider with usage
+  quota (``resolve_background_provider``), so a limited primary actually fails
+  over instead of parking every round. ``prefer_provider`` keeps a reused
+  follow-up chat on its current provider while that provider is still within
+  quota, so a transient limit blip elsewhere does not fragment the autopilot
+  transcript onto a fresh chat.
+  """
+  from app.background_agents import resolve_background_chat_choice
 
   data_dir = get_settings().data_dir
-  choices = resolve_background_agents(data_dir)
-  primary = choices.get("primary") if isinstance(choices, dict) else None
-  if isinstance(primary, dict) and primary.get("provider"):
-    provider = str(primary["provider"])
-    selection = providers.snapshot_chat_agent_settings(
-      data_dir,
-      provider,
-      model=primary.get("model"),
-      effort=primary.get("effort"),
-      fallback_model=providers.DEFAULT_BACKGROUND_MODELS.get(provider),
-    )
-    if selection is not None:
-      return {"provider": provider, **selection}
-  owner = db.query(models.Owner).first()
-  provider = providers.owner_default_provider(
-    data_dir, owner.provider if owner else None,
+  choice = resolve_background_chat_choice(
+    data_dir, db, prefer_provider=prefer_provider,
   )
-  selection = providers.snapshot_chat_agent_settings(
-    data_dir,
-    provider,
-    fallback_model=providers.DEFAULT_BACKGROUND_MODELS.get(provider),
-  )
-  if selection is None:
-    raise RuntimeError("Autopilot resolved no explicit background model")
-  return {"provider": provider, **selection}
+  return {"provider": choice["provider"], **choice["agent_settings"]}
 
 
 async def spawn_round_turn(
