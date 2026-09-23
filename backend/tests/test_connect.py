@@ -122,6 +122,33 @@ def test_outbound_command_is_parsed_as_data_not_shell():
     )
 
 
+def test_runner_update_command_pins_the_selected_mobius_instance():
+  base = "https://railway.example"
+  assert connect_routes._update_command(base) == (
+    'curl -fsSL "https://railway.example/api/connect/runner" '
+    '| python3 - --url "https://railway.example" --install'
+  )
+
+
+def test_runner_install_honors_explicit_instance_when_multiple_are_saved(
+  monkeypatch,
+):
+  installed_from = []
+  monkeypatch.setattr(
+    connect_runner, "_connections",
+    lambda: [{"url": "https://main.example", "token": "not-used"}],
+  )
+  monkeypatch.setattr(connect_runner, "_install_service", installed_from.append)
+  monkeypatch.setattr(
+    sys, "argv",
+    ["runner.py", "--url", "https://railway.example", "--install"],
+  )
+
+  connect_runner.main()
+
+  assert installed_from == ["https://railway.example"]
+
+
 def test_outbound_json_replaces_an_existing_public_mode_with_private_storage(
   tmp_path,
 ):
