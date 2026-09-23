@@ -36,12 +36,13 @@ class _RetentionRegistry:
     self.reopened = False
     self.lease = None
 
-  def acquire_idle_admission_lease(self):
-    if not self.idle:
-      return None
+  def acquire_quiescing_admission_lease(self):
     self.closed = True
     self.lease = object()
     return self.lease
+
+  def is_idle(self):
+    return self.idle
 
   def release_admission_lease(self, lease):
     assert lease is self.lease
@@ -50,7 +51,7 @@ class _RetentionRegistry:
 
 
 @pytest.mark.asyncio
-async def test_provider_retention_skips_while_a_runner_is_active():
+async def test_provider_retention_defers_after_a_bounded_active_runner_wait():
   called = False
 
   def sweep(_data_dir):
@@ -60,9 +61,11 @@ async def test_provider_retention_skips_while_a_runner_is_active():
 
   result = await sweep_provider_sessions_if_idle(
     "/data", sweep=sweep, runner_registry=_RetentionRegistry(idle=False),
+    quiesce_timeout_secs=0,
   )
 
-  assert result == {"status": "skipped_active"}
+  assert result["status"] == "deferred_active"
+  assert result["waited_seconds"] >= 0
   assert called is False
 
 
