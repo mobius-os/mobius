@@ -282,7 +282,7 @@ installed apps extend the prompt in the Skills app.
 
 Persist app data through `window.mobius.storage` — injected into EVERY mini-app before your module loads, so make it your DEFAULT (not raw `fetch`). It's a read-through wrapper over the storage API: reads are instant (local cache, revalidated in the background) and keep working offline (last-known value overlaid with pending writes — read-your-writes); writes made offline queue and auto-sync on reconnect. Raw `fetch('/api/storage/...')` inside an app has no offline queue/cache and silently drops offline writes.
 
-**Boundary:** Möbius owns isolated storage, durable queues, connectivity, listing completeness, conditional writes, and conflict delivery. The app owns its data model, what to warm, whether partial data is safe, how conflicts reconcile, and every loading/cache-miss/retry UI. Keep domain merge logic out of the platform.
+**Boundary:** Offline support is optional, and every app owns its data model. Möbius supplies isolated storage, durable queues, connectivity, listing completeness, conditional writes, and conflict delivery. An app that opts into offline behavior owns what to warm, whether partial data is safe, how conflicts reconcile, and its offline UI. Keep domain merge logic out of the platform.
 
 ```jsx
 // read: your data, or null if the path is absent (never written/removed/404).
@@ -298,8 +298,9 @@ const img = await window.mobius.storage.getBlob('photo.png')  // Blob | null (ca
 // subscribeText / subscribeBlob mirror subscribe() for those kinds.
 // reactive read: cb fires with the current value, then on every change/sync. Prefer this over re-reading.
 const unsub = window.mobius.storage.subscribe('notes.json', v => setNotes(v || []))
-// Authoritative collection membership: complete=false means this device knows
-// only a partial set, so keep the previous view and never seed, erase, or clean up.
+// When logic depends on complete membership, complete=false means this device
+// knows only a partial set; keep prior authoritative state and do not seed,
+// erase, or clean up from that result.
 const { entries, complete, source } = await window.mobius.storage.listWithStatus('items/')
 // list() remains a best-known entries-only compatibility view; collection logic
 // that depends on empty vs unavailable must use listWithStatus().
@@ -374,7 +375,7 @@ For `.json` storage paths the body IS the document. The envelope form `{content:
 
 ### Enumerate, don't probe
 
-There is no `HEAD` on storage (it 405s). GET-probing guessed paths (e.g. `reports/<date>.html` for the last 30 days) is the anti-pattern that shipped an app showing empty in prod — you can't know what an app stored by guessing; you enumerate. Inside an app, use `storage.listWithStatus('prefix/')`: `complete:true` is a server or last-known complete membership snapshot with queued writes overlaid; `complete:false` is useful partial knowledge, never proof that the directory is empty. `storage.list()` returns only that best-known entries array for compatibility. Outside an app, use `GET /api/storage/apps-list/{appId}/{prefix}` / `GET /api/storage/shared-list/{prefix}` (immediate children, `?limit=` ≤500, opaque `?cursor=`). For JSON record collections, `includeContent:true` adds parsed small-file content within strict byte bounds; a complete listing does not guarantee every body is cached, so destructive work must also stop if any required `get()` is unavailable.
+There is no `HEAD` on storage (it 405s). GET-probing guessed paths (e.g. `reports/<date>.html` for the last 30 days) is the anti-pattern that shipped an app showing empty in prod — you can't know what an app stored by guessing; you enumerate. Inside an app, use `storage.listWithStatus('prefix/')` when logic depends on knowing membership is complete: `complete:true` is a server or last-known complete membership snapshot with queued writes overlaid; `complete:false` is useful partial knowledge, never proof that the directory is empty. `storage.list()` returns the best-known entries array and is sufficient for non-authoritative display. Outside an app, use `GET /api/storage/apps-list/{appId}/{prefix}` / `GET /api/storage/shared-list/{prefix}` (immediate children, `?limit=` ≤500, opaque `?cursor=`). For JSON record collections, `includeContent:true` adds parsed small-file content within strict byte bounds; a complete listing does not guarantee every body is cached, so destructive work must also stop if any required `get()` is unavailable.
 
 ### Raw storage API (cron, agent, cross-app `shared/`, non-`.json` blobs)
 
