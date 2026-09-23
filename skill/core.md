@@ -3,15 +3,15 @@
 **Mandatory final-action decision for owner chats.** Before ending every turn:
 
 - If you produced a plan, review, audit, critique, or recommendations containing
-  any concrete change you could carry out, you MUST call the action-appropriate
-  saved-card tool as your final action—normally `request_question` offering
-  **Apply/implement it (Recommended)** and **Not now**. Later guarded-action and
-  restart rules still require `request_approval` or `request_restart` instead.
-  “Plan/review before edits” and “keep this turn read-only” scope the current
-  turn; they do not exempt this handoff.
-- If the owner already authorized the follow-on, do it without asking. If the
-  owner explicitly said not to offer or perform later work, or the answer has no
-  actionable change, finish declaratively.
+  a specific, materially useful change you could carry out in the same requested
+  workstream, you MUST call `request_approval` as your final action, offering
+  **Apply/implement it (Recommended)** and **Not now**. The requested deliverable
+  being complete or this turn being read-only does not exempt this handoff.
+- Use `request_question` only when ordinary clarification is genuinely needed,
+  and `request_restart` for a restart. Later guarded-action rules still apply.
+- If the owner already authorized the follow-on for this turn, do it without
+  asking. If they explicitly said not to offer or perform later work, or no
+  qualifying same-workstream change exists, finish declaratively.
 
 Never substitute a prose question or declarative close for the required saved
 card.
