@@ -275,6 +275,7 @@ class AnswerQuestion(_Command):
   answers: dict = field(default_factory=dict)
   close_without_reply: bool = False
   legacy_save_only: bool = False
+  require_exact_card: bool = False
   selected_options: dict | None = None
 
 
@@ -820,6 +821,7 @@ class AppendPending(_Command):
   run_token: str = ""
   user_msg: dict = field(default_factory=dict)
   answers: dict | None = None
+  selected_options: dict | None = None
   question_id: str | None = None
   initiated_by_app_id: int | None = None
   owner_authored: bool = False
@@ -2198,7 +2200,12 @@ class ChatWriterActor:
     if chat is None:
       raise _PersistFailed("AnswerQuestion: chat not found or deleted")
     if cmd.legacy_save_only:
-      from app.questions import AnswerConflict, has_quiet_options
+      from app.questions import (
+        AnswerConflict,
+        accepts_saved_answer,
+        has_quiet_options,
+        validate_saved_answer,
+      )
       # Check the actual write target inside the actor: an unkeyed legacy
       # request must not bypass a card published after the route's read.
       candidates = list(chat.messages or [])
@@ -2211,7 +2218,20 @@ class ChatWriterActor:
                    and (not cmd.question_id or block.get("question_id") == cmd.question_id)), None)
       if card and (has_quiet_options(card) or card.get("secure_input")):
         raise AnswerConflict("Use the question card to submit this answer.")
-    metadata = None
+      if cmd.require_exact_card:
+        if card is None:
+          raise AnswerConflict("This question is no longer open.")
+        if "answers" in card:
+          if card["answers"] == cmd.answers:
+            return True
+          raise AnswerConflict("This question already has a different answer.")
+        if not accepts_saved_answer(chat, cmd.question_id):
+          raise AnswerConflict("This question is no longer open.")
+        validate_saved_answer(card, cmd.answers, None)
+    metadata = (
+      {"selected_options": cmd.selected_options}
+      if cmd.selected_options is not None else None
+    )
     if cmd.close_without_reply:
       from app.questions import AnswerConflict, accepts_saved_answer, closes_without_reply, saved_question
       from app.goal_plans import require_quiet_answer_handoff
@@ -2234,11 +2254,12 @@ class ChatWriterActor:
       raise _PersistFailed("AnswerQuestion: no matching question block")
     # The question is answered — clear the durable open-question marker in the
     # same commit so every read surface unblocks atomically with the answer.
-    chat.pending_question_id = None
-    # Answering an interactive question is an owner action just like a visible
-    # send. Keep drawer recency separate from generic transcript writes, but do
-    # advance it here so a parked chat returns to the top as soon as the answer
-    # commits (including the same-turn answer-delivery path).
+    # A retained older card can be answered without orphaning a newer one.
+    if cmd.question_id is None or chat.pending_question_id == cmd.question_id:
+      chat.pending_question_id = None
+    # Keep drawer recency separate from generic transcript writes, but advance
+    # it when a participant answers so a parked chat returns to the top as soon
+    # as the answer commits (including the same-turn answer-delivery path).
     from datetime import UTC, datetime
     chat.activity_at = datetime.now(UTC)
     if not _commit_or_rollback(db):
@@ -2372,7 +2393,8 @@ class ChatWriterActor:
             live_action["status"] = action["status"]
           chat.live_assistant = live
           break
-    chat.pending_question_id = None
+    if chat.pending_question_id == cmd.question_id:
+      chat.pending_question_id = None
     chat.activity_at = now
     if not _commit_or_rollback(db):
       raise _PersistFailed("Restart card resolution did not persist")
@@ -3967,7 +3989,13 @@ class ChatWriterActor:
       )
       applied = True
     else:
-      applied = apply_answers_to_last_question(chat, cmd.answers, cmd.question_id)
+      metadata = (
+        {"selected_options": cmd.selected_options}
+        if cmd.selected_options is not None else None
+      )
+      applied = apply_answers_to_last_question(
+        chat, cmd.answers, cmd.question_id, metadata=metadata,
+      )
     if cmd.require_answer_match and not applied:
       raise _PersistFailed("AppendPending: no matching question block")
     if cmd.initiated_by_app_id is not None:

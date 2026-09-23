@@ -215,7 +215,47 @@ def _prune_orphaned_supervised_entries(apps_root: Path, runtime_roots: dict[Path
   return dropped
 
 
-def reconcile_app_cron_supervision(db: Session) -> tuple[int, list[str]]:
+def _disable_rejected_supervised_entries(
+  apps_root: Path, rejected_sources: set[Path],
+) -> tuple[list[str], bool]:
+  """Disable managed live entries for declarations rejected this boot.
+
+  Per-app validation failures must not suppress healthy schedules, but cron may
+  start only after the rejected app's old supervised entry is gone. Read the
+  current spool after healthy registrations so rewriting it cannot erase work
+  completed earlier in this reconciliation pass.
+  """
+  if not rejected_sources:
+    return [], True
+  current = app_cron.read_crontab()
+  if current is None:
+    return [], False
+  kept: list[str] = []
+  dropped: list[str] = []
+  for line in current.splitlines():
+    command_path = (
+      app_cron.crontab_command_path(line)
+      if app_cron.is_supervised_crontab_entry(line)
+      else ""
+    )
+    job = Path(command_path) if command_path else None
+    if (
+      job is not None
+      and job.parent in rejected_sources
+      and job.parent.parent == apps_root
+    ):
+      dropped.append(line)
+    else:
+      kept.append(line)
+  if not dropped:
+    return [], True
+  replacement = ("\n".join(kept) + "\n") if kept else ""
+  return (dropped, True) if app_cron.write_crontab(replacement) else ([], False)
+
+
+def reconcile_app_cron_supervision(
+  db: Session,
+) -> tuple[int, list[str], bool]:
   """Converge every live managed schedule through the common job runner.
 
   Cron is deliberately started only after FastAPI lifespan completes. This
@@ -236,10 +276,14 @@ def reconcile_app_cron_supervision(db: Session) -> tuple[int, list[str]]:
   try:
     resolved_root = apps_root.resolve(strict=True)
   except OSError:
-    return 0, [f"apps root unavailable: {apps_root}"]
-  live_crontab = _read_live_crontab()
+    return 0, [f"apps root unavailable: {apps_root}"], False
+  live_crontab = app_cron.read_crontab()
+  if live_crontab is None:
+    return 0, ["cron infrastructure unavailable: crontab could not be read"], False
   reconciled = 0
   warnings: list[str] = []
+  infrastructure_ready = True
+  rejected_sources: set[Path] = set()
   from app.applied_app_runtime import runtime_root, AppliedRuntimeUnavailable
   runtime_roots = {}
   apps = db.query(models.App).filter(models.App.deleted_at.is_(None)).all()
@@ -264,11 +308,24 @@ def reconcile_app_cron_supervision(db: Session) -> tuple[int, list[str]]:
       warnings.append(f"app {app.id}: {exc}")
       continue
     cron, job_name = schedule
-    job_path = resolved_source / job_name
     try:
-      if not (accepted_root / job_name).is_file():
-        raise ValueError(f"job is missing or a symlink: {job_name}")
+      validate_cron_expr(cron)
+    except ManifestContractError as exc:
+      warnings.append(f"app {app.id}: {exc}")
+      rejected_sources.add(resolved_source)
+      continue
+    job_path = resolved_source / job_name
+    if not (accepted_root / job_name).is_file():
+      warnings.append(f"app {app.id}: job is missing or a symlink: {job_name}")
+      rejected_sources.add(resolved_source)
+      continue
+    try:
       declaration = _app_zone_declaration(app)
+    except (OSError, RuntimeError, ValueError) as exc:
+      warnings.append(f"app {app.id}: {exc}")
+      rejected_sources.add(resolved_source)
+      continue
+    try:
       if declaration is not None:
         timezone, zone_cron = declaration
         app_cron.register_cron(
@@ -281,17 +338,32 @@ def reconcile_app_cron_supervision(db: Session) -> tuple[int, list[str]]:
         app_cron.register_cron(
           resolved_source.name, cron, job_path, app.id,
         )
+    except app_cron.CronDeclarationError as exc:
+      warnings.append(f"app {app.id}: {exc}")
+      rejected_sources.add(resolved_source)
+      continue
     except Exception as exc:
+      infrastructure_ready = False
       warnings.append(f"app {app.id}: {exc}")
       continue
     reconciled += 1
+  disabled, disabled_cleanly = _disable_rejected_supervised_entries(
+    resolved_root, rejected_sources,
+  )
+  for line in disabled:
+    log.info("disabled rejected app cron entry: %s", line.strip())
+  if not disabled_cleanly:
+    infrastructure_ready = False
+    warnings.append(
+      "cron infrastructure unavailable: rejected schedules could not be disabled"
+    )
   # After every live declaration has been converged, retire the entries no
   # declaration claims any more. Pruning last means a job path this pass just
   # registered is present in the crontab we read, so it can never be mistaken
   # for debris.
   for line in _prune_orphaned_supervised_entries(resolved_root, runtime_roots):
     log.info("retired orphaned cron entry (job script gone): %s", line.strip())
-  return reconciled, warnings
+  return reconciled, warnings, infrastructure_ready
 
 
 @router.get("/schedules", response_model=list[schemas.AppScheduleOut])

@@ -243,11 +243,11 @@ does not replace its normal process.
 
 `GET /api/health` is reachability and remains HTTP 200 whenever the process can
 answer; the shell uses that distinction so a server fault never masquerades as
-the device being offline. `GET /api/ready` is serviceability: it requires both
-a successfully initialized database with every mapped table and column, and
-the single-writer persistence actor. Deployment and container probes use
-readiness. `GET /api/health/strict` retains the database-only diagnostic
-contract.
+the device being offline. `GET /api/ready` is serviceability: it requires a
+successfully initialized database with every mapped table and column, the
+single-writer persistence actor, and the small set of boot-critical
+chat/restart supervisors. Deployment and container probes use readiness.
+`GET /api/health/strict` retains the database-only diagnostic contract.
 
 The shell's `connectivityStore.js` owns reachability, service readiness, and
 restart observation together. A response proves reachability even when the
@@ -584,12 +584,12 @@ path introduces an alternate Möbius boot mode. A broken persistent clone falls
 back to the baked backend, so the live container remains reachable to inspect.
 
 Normal platform boot serves `/data/platform/backend` directly after an import
-probe and validation of its served identity broker. It fetches `origin/main`,
-commits stray local edits, and fast-forwards or replays the local overlay onto
-that target; a conflict or failed post-replay probe leaves the exact
-pre-reconcile commit served and records a visible flag. An invalid existing
-clone or broker selects the complete baked platform without overwriting,
-quarantining, or reseeding the broken tree. Owner-data disaster recovery is the separate
+probe and validation of its served identity broker. Startup may finish or undo
+an update interrupted during its own filesystem transaction, but it never
+fetches or selects a newer release. Fetching and replaying local commits happen
+only through the reviewed updater. An invalid existing clone or broker selects
+the complete baked platform without overwriting, quarantining, or reseeding the
+broken tree. Owner-data disaster recovery is the separate
 `backup-data.py` / `restore-data.py` flow and is not automatically armed by
 installing Möbius.
 
@@ -1687,7 +1687,23 @@ Every mini-app ships a `mobius.json`; the dependency-free source of truth is `ba
 
 Published apps should generate one random UUID once and declare it as `package_id` (for example `urn:uuid:550e8400-e29b-41d4-a716-446655440000`). It remains unchanged across product, manifest-id, repository-path, and owner renames. GitHub-backed packages are additionally bound to GitHub's immutable numeric repository identity, so a repository rename or transfer only changes the fetch locator. Moving code into a different repository is an explicit trust transfer: the old trusted manifest declares the same `package_id` plus `moved_to: {"manifest_url": "https://.../mobius.json"}`. Existing installs accept the new repository only after fetching and verifying that declaration from their current source; a separate fork generates a new package id. A reviewed service uses its own stable `service.id`, independent of both the package's current `id` and installed slug. Manifests that declare both `package_id` and `service` must declare `service.id` explicitly.
 
-Optional fields the parser recognizes include `package_id`, `moved_to`, `previous_id`, `icon`, colors/display, `offline_capable`, `embeds_agent`, `offline`, `permissions`, `storage_seeds`, `static_assets`, `source_files`, `skills`, `system_prompt`, and `schedule`. `previous_id` and `previous_manifest_url` remain bounded migration aids for installs that predate permanent package identities; they are not the steady-state identity model. Decorative-only fields such as `author`, `license`, and `homepage` are not validated or stored. Three gotchas: (1) **`runtime` (`imports`/`esm_deps`) is informational**; dependency resolution is governed by the pinned self-contained compiler in `app_compile_contract.py`. (2) **`storage_seeds` value type is a switch**: a string is a repo-relative file the installer fetches; a non-string is stored inline as JSON. (3) **`schedule.job` has dual semantics** — with an exactly five-field `schedule.default` it installs recurring cron; without it the script is an on-demand build hook. In either mode the script declares its interpreter with an absolute shebang; the platform never guesses from its filename or executable bit. `static_assets` caps at 256 files / 16 MB each / 64 MB total and logical destination `x` is materialized at source path `static/x`.
+Optional fields the parser recognizes include `package_id`, `moved_to`, `previous_id`, `icon`, colors/display, `offline_capable`, `embeds_agent`, `offline`, `permissions`, `storage_seeds`, `static_assets`, `source_files`, `skills`, `system_prompt`, `schedule`, and `agent_activities`. `previous_id` and `previous_manifest_url` remain bounded migration aids for installs that predate permanent package identities; they are not the steady-state identity model. Decorative-only fields such as `author`, `license`, and `homepage` are not validated or stored. Three gotchas: (1) **`runtime` (`imports`/`esm_deps`) is informational**; dependency resolution is governed by the pinned self-contained compiler in `app_compile_contract.py`. (2) **`storage_seeds` value type is a switch**: a string is a repo-relative file the installer fetches; a non-string is stored inline as JSON. (3) **`schedule.job` has dual semantics** — with an exactly five-field `schedule.default` it installs recurring cron; without it the script is an on-demand build hook. In either mode the script declares its interpreter with an absolute shebang; the platform never guesses from its filename or executable bit. `static_assets` caps at 256 files / 16 MB each / 64 MB total and logical destination `x` is materialized at source path `static/x`.
+
+`agent_activities` is the app-neutral presentation contract for scripts an app
+asks the chat agent to run. Each activity declares an id, a repo-relative
+`entry` also present in `source_files`, its exact positional `arguments` count,
+and a short `running_label`. The platform binds the command path to the
+installed app identity, accepts only one simple direct/Python/`bash -lc`
+invocation, and persists a bounded lifecycle marker on that ordinary tool
+block. A completed script prints a final
+`MOBIUS_APP_ACTIVITY_V1:{...}` JSON line with the same `activity_id`, a
+`succeeded|empty|failed` status, required `label`, and optional `detail`,
+`warning`, and resources (`label`, optional `summary` and own-app `intent`).
+The shell owns identity, bounds, persistence, safe own-app navigation, and the
+generic card; every domain concept and all additional protocol fields stay in
+the app. The declaration is not included in the capability contract and grants
+no data, network, or execution permission. Old Memory V1/V2 receipts remain a
+read-only transcript compatibility path, never a live provider interface.
 
 ## Testing — determinism principle
 
@@ -1709,5 +1725,8 @@ cover it deterministically.
 
 ## See also
 
+- **Proposed platform and app update contract:** `UPDATE-ARCHITECTURE.md`.
+  It is explicitly a target design; this file remains the as-built map until
+  that migration ships.
 - **Build / test / run commands and the dev loop:** `CONTRIBUTING.md`. (The #1 deploy gotcha — a stale `/data/platform/frontend/dist` masking a fresh image — is covered under *Frontend serving priority* above.)
 - **Subsystem deep-dives are inlined above** as their own sections: *Stop-chat contract*, *AskUserQuestion interception*, *Chat persistence — single-writer actor*, *Navigation back-stack + drawer model*, *Service worker + offline*, and *Mini-app manifest (mobius.json)*. (The chat-persistence v2 design + staged-rollout notes remain internal/gitignored — the as-built contract is the section above.)

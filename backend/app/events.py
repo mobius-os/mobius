@@ -725,11 +725,12 @@ def _process_subagent_event(event: dict, assistant_blocks: list) -> bool:
           break
     if target is None:
       return False
-    # A background Memory lookup settles on its task's terminal event: the
-    # sink stamps the recall onto the task_done, and it lands on the same tool
-    # block the placeholder result deferred from.
+    # A manifest-declared app command may run as a background task. The sink
+    # stamps its bounded receipt on task_done and it lands on the parent tool.
     if event_type == "task_done" and isinstance(event.get("recall"), dict):
       target["recall"] = event["recall"]
+    if event_type == "task_done" and isinstance(event.get("app_activity"), dict):
+      target["app_activity"] = event["app_activity"]
     subagent = target.setdefault("subagent", {})
     entry = subagent.setdefault(task_key, {
       "description": "",
@@ -783,6 +784,8 @@ def _process_tool_event(event: dict, assistant_blocks: list) -> bool:
       block["tool_use_id"] = tool_use_id
     if isinstance(event.get("recall"), dict):
       block["recall"] = event["recall"]
+    if isinstance(event.get("app_activity"), dict):
+      block["app_activity"] = event["app_activity"]
     if isinstance(event.get("peer_message"), dict):
       block["peer_message"] = event["peer_message"]
     if isinstance(event.get("edit_preview"), dict):
@@ -802,6 +805,8 @@ def _process_tool_event(event: dict, assistant_blocks: list) -> bool:
       # that authorizes the later output phase to cite notes.
       if isinstance(event.get("recall"), dict):
         blk["recall"] = event["recall"]
+      if isinstance(event.get("app_activity"), dict):
+        blk["app_activity"] = event["app_activity"]
       if isinstance(event.get("peer_message"), dict):
         blk["peer_message"] = event["peer_message"]
       if isinstance(event.get("edit_preview"), dict):
@@ -857,6 +862,8 @@ def _process_tool_event(event: dict, assistant_blocks: list) -> bool:
       # carving the sink performed before parsing.
       if isinstance(event.get("recall"), dict):
         blk["recall"] = event["recall"]
+      if isinstance(event.get("app_activity"), dict):
+        blk["app_activity"] = event["app_activity"]
       # Settle a peer-network exchange from "sending"/"reading" to what was
       # actually said/received (see chat_event_sink._stamp_peer_message).
       if isinstance(event.get("peer_message"), dict):

@@ -212,13 +212,12 @@ def test_sink_builds_a_persistable_prompt_only_receipt(client, auth, chat):
     ChatEventSink, register_active_sink, unregister_active_sink,
   )
   from app.events import build_assistant_message
-  from app.memory_recall import EMPTY_RECALL_BINDING
 
   username = "receipt-private-owner@example.test"
   password = "receipt-private-password-8831"
   bc = create_broadcast(chat.id)
   sink = ChatEventSink(
-    bc, chat.id, recall_binding=EMPTY_RECALL_BINDING,
+    bc, chat.id,
   )
   register_active_sink(chat.id, sink)
   try:
@@ -393,7 +392,6 @@ def test_reveal_requires_card_confirmation_and_redacts_mobius_copy(
 
 def test_reveal_marker_is_scrubbed_before_sink_broadcast_and_reduction():
   from app.chat_event_sink import ChatEventSink
-  from app.memory_recall import EMPTY_RECALL_BINDING
   from app.secure_inputs import REVEAL_REDACTION, build_reveal_envelope
 
   class Bus:
@@ -406,7 +404,7 @@ def test_reveal_marker_is_scrubbed_before_sink_broadcast_and_reduction():
   secret = "provider-only-debug-value"
   bus = Bus()
   sink = ChatEventSink(
-    bus, "", recall_binding=EMPTY_RECALL_BINDING,
+    bus, "",
   )
   sink.publish({
     "type": "tool_start",

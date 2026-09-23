@@ -230,7 +230,6 @@ def test_active_sink_attaches_activation_once_without_a_second_runner(monkeypatc
   from app import chat as chat_mod, chat_waits
   from app.broadcast import create_broadcast
   from app.chat_event_sink import ChatEventSink, register_active_sink, unregister_active_sink
-  from app.memory_recall import EMPTY_RECALL_BINDING
   cid = "live-attachment"
   _, wait_id, root, _ = _install(cid, status="met", queued=True)
   with SessionLocal() as db:
@@ -238,7 +237,7 @@ def test_active_sink_attaches_activation_once_without_a_second_runner(monkeypatc
     run.status = "running"
     run.ended_at = None
     db.commit()
-  sink = ChatEventSink(create_broadcast(cid), cid, run_token=root, recall_binding=EMPTY_RECALL_BINDING)
+  sink = ChatEventSink(create_broadcast(cid), cid, run_token=root)
   register_active_sink(cid, sink)
   monkeypatch.setattr(chat_mod, "is_chat_running", lambda _: True)
   def never_schedule(**_):

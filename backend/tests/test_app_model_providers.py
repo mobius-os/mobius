@@ -40,6 +40,73 @@ def test_manifest_freezes_reviewed_model_connection():
   assert accepted["model_provider"]["base_url"] == "https://api.deepseek.com"
 
 
+def test_broker_transport_requires_the_identity_app_grant():
+  manifest = _manifest()
+  manifest["model_provider"].pop("secret_name")
+  manifest["model_provider"].update({
+    "transport": "identity_broker", "base_url": "http://127.0.0.1:8765/v1",
+  })
+  with pytest.raises(ManifestContractError):
+    validate_manifest_contract(manifest)
+  manifest["id"] = "identity"
+  manifest["permissions"] = {"identity_manage": True}
+  validate_manifest_contract(manifest)
+  manifest["model_provider"]["base_url"] = "http://127.0.0.1:9999/v1"
+  with pytest.raises(ManifestContractError):
+    validate_manifest_contract(manifest)
+
+
+@pytest.mark.asyncio
+async def test_identity_app_declaration_owns_native_models_and_background_choice(db, tmp_path):
+  manifest = _manifest()
+  manifest["id"] = "identity"
+  manifest["permissions"] = {"identity_manage": True}
+  manifest["model_provider"].pop("secret_name")
+  manifest["model_provider"].update({
+    "transport": "identity_broker", "base_url": "http://127.0.0.1:8765/v1",
+  })
+  app = models.App(
+    name="Möbius · You", slug="identity", description="",
+    source_dir=str(tmp_path), capability_contract=contract_from_manifest(manifest),
+  )
+  db.add(app)
+  db.commit()
+  data_dir = get_settings().data_dir
+  try:
+    providers.sync_app_model_providers(data_dir, force=True)
+    assert providers.PROVIDERS["mobius"].app_id == app.id
+    assert providers.DEFAULT_MODELS["mobius"] == "deepseek-flash"
+    assert providers.DEFAULT_BACKGROUND_MODELS["mobius"] == "deepseek-flash"
+    assert providers.provider_of_model("deepseek-flash") == "mobius"
+    listed = await providers.list_models(data_dir)
+    assert [row["id"] for row in listed["mobius"]] == ["deepseek-flash", "deepseek-v4-pro"]
+    assert any(row["provider"] == "mobius" for row in providers.background_agent_settings(data_dir)["providers"])
+
+    assert providers.update_agent_settings(data_dir, lambda current: {
+      **current, "model_providers_enabled": {"mobius": False},
+    })
+    assert "mobius" not in await providers.list_models(data_dir)
+    assert all(row["provider"] != "mobius" for row in providers.background_agent_settings(data_dir)["providers"])
+    assert providers.update_agent_settings(data_dir, lambda current: {
+      **current, "model_providers_enabled": {"mobius": True},
+      "provider": "mobius", "model": "deepseek-flash",
+    })
+    assert providers.owner_default_provider(data_dir, "mobius") == "mobius"
+
+    app.deleted_at = datetime.now(UTC)
+    db.commit()
+    providers.sync_app_model_providers(data_dir, force=True)
+    assert providers.PROVIDERS["mobius"].declaration is None
+    assert "mobius" not in providers.DEFAULT_MODELS
+    assert "mobius" not in providers.DEFAULT_BACKGROUND_MODELS
+    assert providers.provider_of_model("deepseek-flash") is None
+    assert providers.owner_default_provider(data_dir, "mobius") != "mobius"
+    assert all(row["provider"] != "mobius" for row in providers.background_agent_settings(data_dir)["providers"])
+  finally:
+    providers.PROVIDERS["mobius"].set_declaration(None, None)
+    providers.invalidate_model_cache()
+
+
 @pytest.mark.parametrize("change", [
   {"base_url": "http://api.deepseek.com"},
   {"base_url": "https://someone:password@api.deepseek.com"},
@@ -89,6 +156,14 @@ async def test_installed_app_models_join_chat_and_background_then_revoke(db, tmp
   adapter = providers.PROVIDERS[provider_id]
   assert providers.provider_runtime_kind(provider_id) == "codex_sdk"
   assert adapter.check_auth(data_dir) is None
+  assert providers.update_agent_settings(data_dir, lambda current: {
+    **current, "model_providers_enabled": {provider_id: False},
+  })
+  assert adapter.check_auth(data_dir) == "DeepSeek is turned off in its app."
+  assert provider_id not in await providers.list_models(data_dir)
+  assert providers.update_agent_settings(data_dir, lambda current: {
+    **current, "model_providers_enabled": {provider_id: True},
+  })
   env = adapter.build_env({}, data_dir, "chat-test")
   assert env[f"MOBIUS_APP_MODEL_KEY_{app_id}"] == "test-only-placeholder-key"
   assert "test-only-placeholder-key" not in "\n".join(adapter.codex_config_overrides())

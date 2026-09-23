@@ -721,6 +721,23 @@ def test_register_cron_refuses_real_subprocess_in_test_runtime(
   mock_run.assert_not_called()
 
 
+def test_register_cron_timeout_is_infrastructure_failure(tmp_path):
+  from app import app_cron
+
+  scaffold = tmp_path / "init-cron-scaffold.sh"
+  scaffold.write_text("#!/bin/sh\n")
+  with patch.dict(os.environ, {"MOBIUS_ALLOW_TEST_CRON": "1"}), \
+       patch(
+         "app.app_cron.subprocess.run",
+         side_effect=subprocess.TimeoutExpired([str(scaffold)], 30),
+       ), \
+       pytest.raises(app_cron.CronInfrastructureError):
+    app_cron.register_cron(
+      "memory", "0 5 * * *", tmp_path / "fetch.sh", 3,
+      scaffold=scaffold,
+    )
+
+
 def test_unregister_cron_refuses_real_subprocess_in_test_runtime(
   tmp_path, monkeypatch,
 ):

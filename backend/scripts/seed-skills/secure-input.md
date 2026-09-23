@@ -17,10 +17,10 @@ python3 /data/platform/backend/scripts/secure-input.py owner-credentials
 
 This requests the current password, new username, new password and confirmation.
 The helper saves the safe request and returns a receipt immediately. It does
-**not** wait for the owner or receive values. On a confirmed receipt, end the
+**not** wait for an answer or receive values. On a confirmed receipt, end the
 turn with **no further text or tools**. Do not append “I'll wait,” poll, or run
 a background consumer. No answer and no permission may be inferred from the
-receipt. The saved card blocks further work until the owner submits or cancels.
+receipt. The saved card blocks further work until it is submitted or cancelled.
 
 For another local consumer:
 
@@ -39,7 +39,21 @@ restarts with no human deadline. Only one owner-input card may be open per chat.
 A lost save response is recovered by retrying the **identical** request; a
 failed save is not a waiting card and never means credentials were provided.
 
-When the owner submits, the backend runs the consumer once with one JSON object
+Any authenticated participant that can read the card may submit or cancel it;
+there is no separate card-answer role. For a value already held in an
+authorized local file or environment variable, an agent can keep the bytes out
+of model-visible arguments with:
+
+```bash
+python3 /data/platform/backend/scripts/secure-input.py submit-saved \
+  --chat-id <chat-id> --request-id <card-id> \
+  --field-file field=/path/to/value
+```
+
+Use `--field-env field=ENV_NAME` for an environment value. This preserves the
+submission path; it cannot undo earlier disclosure to a model.
+
+When submitted, the backend runs the consumer once with one JSON object
 on stdin. Values exist only transiently in memory. The consumer must never log,
 persist, cache, shell-expand or copy them into arguments or environment. Write
 only the intended hashed/encrypted destination. Its command source may be
@@ -58,8 +72,8 @@ outcome explicitly unknown and **never automatically repeats** the operation:
 side effects may already have happened. Submitted values have no recovery copy.
 A fresh request requires checking the operation's outcome first.
 
-Never call secret-bearing create/consume endpoints with curl or a general HTTP
-tool. Use the trusted helper; values must not enter tool output or model context.
+Prefer the helper when an agent submits an existing local value so credential
+bytes do not enter tool output or model context.
 
 ## Explicit reveal for debugging
 
@@ -90,7 +104,7 @@ unreachable after submission/consumption and are never intentionally written
 to disk. A process crash lets the OS reclaim that memory; it does not create a
 recovery copy.
 
-A background or scheduled agent must not open a live card. Leave a declarative
-request for the next interactive chat instead. The explicitly approved reveal
+A background or scheduled agent must not open a live card, but may answer an
+existing card it can access. The explicitly approved reveal
 path is exceptional: it remains a live, transient handoff to the current model;
 never convert it into a persisted secret or use it to bypass sealed execution.

@@ -29,10 +29,25 @@ def main() -> int:
   with platform_update._reconcile_flock():
     platform_update._git("fetch", "--no-tags", args.bundle, args.target, repo=repo)
   preview = platform_update.platform_update_preview(repo, target_sha=args.target)
+  incoming_activation = preview.get(
+    "incoming_activation", preview.get("activation", {}),
+  )
+  if platform_update.activation_changes_python_dependencies(
+    incoming_activation,
+  ):
+    print(json.dumps({
+      "state": "blocked",
+      "error": (
+        "This image changes Python packages. Its source must be activated by "
+        "a replacement flow that validates the new image and source together."
+      ),
+    }, ensure_ascii=False))
+    return 2
   with SessionLocal() as db:
     result = asyncio.run(platform_update.apply_platform_update(
       db, repo=repo, plan_id=preview["plan_id"],
       current_sha=preview["current_sha"], target_sha=args.target,
+      allow_image_activation=True,
     ))
   print(json.dumps(result, ensure_ascii=False))
   return 0 if result["state"] in {"up_to_date", "restart_needed", "activation_needed"} else 1
