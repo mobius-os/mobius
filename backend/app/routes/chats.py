@@ -15,7 +15,7 @@ from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import Text, case, cast, func
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, load_only
 
 from app import (
   activity,
@@ -43,6 +43,7 @@ from app.chat_waits import (
 )
 from app.config import get_settings
 from app.chat import (
+  _auto_resume_rejection,
   _finish_run,
   bump_run_generation,
   is_chat_running,
@@ -525,6 +526,7 @@ def _restart_recovery_states(db: Session, chats) -> dict[str, str]:
     models.ChatRun.parked_until,
     models.ChatRun.park_reason,
     models.ChatRun.restart_nonce,
+    models.ChatRun.initiated_by_app_id,
     models.ChatRun.continuation_json,
   ).filter(
     models.ChatRun.chat_id.in_(chat_ids),
@@ -558,24 +560,6 @@ def _restart_recovery_states(db: Session, chats) -> dict[str, str]:
 
   if not parked_candidates:
     return states
-  chat_flags = {
-    str(chat_id): (auto_resume_on_restart, pending_question_id)
-    for chat_id, auto_resume_on_restart, pending_question_id in db.query(
-      models.Chat.id,
-      models.Chat.auto_resume_on_restart,
-      models.Chat.pending_question_id,
-    ).filter(
-      models.Chat.id.in_([chat_id for chat_id, _run in parked_candidates]),
-    ).all()
-  }
-  parked_candidates = [
-    (chat_id, run)
-    for chat_id, run in parked_candidates
-    if chat_flags.get(chat_id, (False, None))[0]
-    and not chat_flags.get(chat_id, (False, None))[1]
-  ]
-  if not parked_candidates:
-    return states
   from app.restart_ledger import authorized_restart_nonce
 
   try:
@@ -599,19 +583,22 @@ def _restart_recovery_states(db: Session, chats) -> dict[str, str]:
   if not eligible:
     return states
 
-  # Match the continuation sweep's fail-closed rule for app-attributed queued
-  # work, without loading every chat's potentially large pending-message JSON
-  # into the ordinary drawer-list query.
+  # Use the sweep's eligibility rule on only the columns it needs; never load
+  # the transcript as part of the ordinary drawer-list query.
   eligible_ids = [chat_id for chat_id, _run in eligible]
-  pending_by_chat = dict(db.query(
-    models.Chat.id, models.Chat.pending_messages,
-  ).filter(models.Chat.id.in_(eligible_ids)).all())
+  chats_by_id = {
+    str(chat.id): chat
+    for chat in db.query(models.Chat).options(load_only(
+      models.Chat.id,
+      models.Chat.deleted_at,
+      models.Chat.pending_messages,
+      models.Chat.pending_question_id,
+      models.Chat.auto_resume_on_restart,
+    )).filter(models.Chat.id.in_(eligible_ids)).all()
+  }
   for chat_id, run in eligible:
-    pending = pending_by_chat.get(chat_id) or []
-    if any(
-      isinstance(message, dict)
-      and message.get("_initiated_by_app_id") is not None
-      for message in pending
+    if _auto_resume_rejection(
+      db, chats_by_id.get(chat_id), run, accepted_nonce,
     ):
       continue
     states[chat_id] = (
