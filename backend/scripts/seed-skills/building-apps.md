@@ -276,6 +276,40 @@ always-on default) and/or its `skills` file (the how-to) — never in `core.md`.
 A not-installed app then contributes nothing, and the owner can see which
 installed apps extend the prompt in the Skills app.
 
+### App-owned agent activity cards
+
+An app whose skill asks the agent to run one of its scripts can declare that
+command as an activity. This is presentation only: it grants no storage,
+network, or execution authority. The shell authenticates the app and command;
+the app owns all domain language and result links.
+
+```json
+"agent_activities": {
+  "lookup": {
+    "entry": "lookup.py",
+    "arguments": 2,
+    "running_label": "Searching"
+  }
+}
+```
+
+The entry must also appear in `source_files`. The agent must invoke it as one
+simple direct command (optionally through Python or `bash -lc`) with exactly the
+declared number of arguments. Shell composition is intentionally not
+recognized. On completion, print one compact JSON receipt as the final line:
+
+```text
+MOBIUS_APP_ACTIVITY_V1:{"activity_id":"lookup","status":"succeeded","label":"Found 2 notes","detail":"Complete catalogue.","resources":[{"label":"Quiet interfaces","summary":"Prefer calm UI.","intent":"note:quiet-interfaces"}]}
+```
+
+`status` is `succeeded`, `empty`, or `failed`; `label` is required. `detail`,
+`warning`, and up to 128 `resources` are optional. A resource needs `label` and
+may add `summary` plus an app-owned `intent`; the shell opens that intent only
+inside the authenticated declaring app. Extra receipt fields remain ordinary
+command output for the agent and are ignored by the shell, so a retrieval app
+can carry its own cursors, page metadata, and protocol without teaching the
+platform any of those concepts. Keep the receipt bounded and print it last.
+
 ---
 
 ## Storage — `window.mobius.storage` is the default

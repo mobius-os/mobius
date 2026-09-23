@@ -5672,14 +5672,14 @@ async def _run_chat_impl_with_db(
     db.close()
     return disposition
 
-  # Bind the recall recognizer while `db` is still live. This MUST happen
+  # Bind manifest-declared app activities while `db` is still live. This MUST happen
   # before the db.close() below: resolving it lazily at a sink site would check
   # out a fresh connection during the turn, which is precisely the pool
   # exhaustion that close is there to prevent. It is also the semantically
   # right moment — the recognizer is bound at the instant the agent is told
   # the provider's path.
-  from app.memory_provider import resolve_recall_binding
-  recall_binding = resolve_recall_binding(db)
+  from app.agent_activity_provider import resolve_agent_activity_binding
+  agent_activity_binding = resolve_agent_activity_binding(db)
 
   # Snapshot owner-managed MCP connections while this request session is still
   # live. Provider turns can wait for hours, so neither runner may query the
@@ -5788,7 +5788,8 @@ async def _run_chat_impl_with_db(
         db.close()
         return chat_queue.TerminalDisposition.STALE_NO_ACTION
       sink = _ChatEventSink(
-        bc, chat_id, run_token=run_token, recall_binding=recall_binding,
+        bc, chat_id, run_token=run_token,
+        agent_activity_binding=agent_activity_binding,
       )
       register_active_sink(chat_id, sink)
       sink.publish({"type": "text", "content": NO_AGENT_CONNECTED_MESSAGE})
@@ -5840,7 +5841,7 @@ async def _run_chat_impl_with_db(
       bc,
       chat_id,
       run_token=run_token,
-      recall_binding=recall_binding,
+      agent_activity_binding=agent_activity_binding,
       on_question_checkpoint=question_checkpoint,
     )
     register_active_sink(chat_id, sink)
@@ -6000,7 +6001,8 @@ async def _run_chat_impl_with_db(
       if run_policy is not None and not run_policy.allow_session_reseed:
         from app.delegations import REVIEW_REQUIRED_MARKER
         sink = _ChatEventSink(
-          bc, chat_id, run_token=run_token, recall_binding=recall_binding,
+          bc, chat_id, run_token=run_token,
+          agent_activity_binding=agent_activity_binding,
         )
         register_active_sink(chat_id, sink)
         sink.publish({
@@ -6036,7 +6038,7 @@ async def _run_chat_impl_with_db(
       bc,
       chat_id,
       run_token=run_token,
-      recall_binding=recall_binding,
+      agent_activity_binding=agent_activity_binding,
       on_question_checkpoint=question_checkpoint,
     )
     register_active_sink(chat_id, sink)

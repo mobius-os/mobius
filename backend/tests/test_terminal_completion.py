@@ -30,7 +30,6 @@ from app.chat_transcript import materialized_messages
 from app.chat_writer import Barrier, get_writer
 from app.database import SessionLocal
 from app.deps import Principal
-from app.memory_recall import EMPTY_RECALL_BINDING
 
 
 # -- shared harness ------------------------------------------------------
@@ -737,7 +736,7 @@ def test_failed_question_commit_appended_scrub_by_identity(monkeypatch):
   identity-based scrub guards against."""
   _seed_chat("t5a", messages=[{"role": "user", "content": "hi", "ts": 1}])
   bc = ChatBroadcast("t5a")
-  sink = chat_mod._ChatEventSink(bc, "t5a", run_token="rt-5a", recall_binding=EMPTY_RECALL_BINDING)
+  sink = chat_mod._ChatEventSink(bc, "t5a", run_token="rt-5a")
   sink.publish({"type": "text", "content": "thinking"})
 
   # Latch the actor's QuestionCommit handler so it blocks INSIDE the commit
@@ -807,7 +806,7 @@ def test_failed_question_commit_coalesced_scrub_restores_fields(monkeypatch):
   deleted."""
   _seed_chat("t5b", messages=[{"role": "user", "content": "hi", "ts": 1}])
   bc = ChatBroadcast("t5b")
-  sink = chat_mod._ChatEventSink(bc, "t5b", run_token="rt-5b", recall_binding=EMPTY_RECALL_BINDING)
+  sink = chat_mod._ChatEventSink(bc, "t5b", run_token="rt-5b")
 
   # First, a SUCCESSFUL question commit so a question block with identity
   # "q1" already exists in assistant_blocks with its original payload.
@@ -2233,7 +2232,7 @@ def test_stale_reclaim_bow_out_preserves_fresh_owners_broadcast_and_browser(
   published = []
   orig = bc.publish
   bc.publish = lambda e: (published.append(e.get("type")), orig(e))[1]
-  sink = chat_mod._ChatEventSink(bc, "t18a", run_token="rt-18a", recall_binding=EMPTY_RECALL_BINDING)
+  sink = chat_mod._ChatEventSink(bc, "t18a", run_token="rt-18a")
 
   # The FRESH owner already holds the active-broadcast pointer with its OWN
   # broadcast (a different object than this dying run's `bc`).
@@ -2297,7 +2296,7 @@ def test_stale_reclaim_bow_out_clears_pointer_but_leaves_browser_when_no_success
   published = []
   orig = bc.publish
   bc.publish = lambda e: (published.append(e.get("type")), orig(e))[1]
-  sink = chat_mod._ChatEventSink(bc, "t18b", run_token="rt-18b", recall_binding=EMPTY_RECALL_BINDING)
+  sink = chat_mod._ChatEventSink(bc, "t18b", run_token="rt-18b")
 
   # NO fresh owner took over: the active-broadcast pointer is still THIS run's.
   bc_mod.set_active_broadcast(bc)
