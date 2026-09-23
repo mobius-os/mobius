@@ -98,6 +98,37 @@ def test_default_model_visibility_is_curated_until_owner_saves_preferences():
   assert providers.hidden_model_ids({"hidden_ids": []}) == []
 
 
+@pytest.mark.asyncio
+async def test_mobius_switch_filters_picker_and_default_without_hiding_other_models(
+  tmp_path, monkeypatch,
+):
+  data_dir = str(tmp_path)
+  assert providers.mobius_models_enabled(data_dir)
+  monkeypatch.setattr(providers, "sync_app_model_providers", lambda *_a, **_kw: None)
+  providers.invalidate_model_cache()
+  try:
+    for provider_id in providers.PROVIDERS:
+      providers._model_registry_cache[provider_id] = (
+        time.monotonic(), providers._fallback_models(provider_id),
+      )
+    before = await providers.list_models(data_dir)
+    assert "mobius" in before
+    assert "claude" in before and "codex" in before
+    assert providers.update_agent_settings(
+      data_dir, lambda settings: {**settings, "mobius_models_enabled": False},
+    )
+    assert not providers.mobius_models_enabled(data_dir)
+    after = await providers.list_models(data_dir)
+    assert "mobius" not in after
+    assert "claude" in after and "codex" in after
+    assert providers.MobiusProvider().check_auth(data_dir) == (
+      "Möbius models are turned off in Möbius · You."
+    )
+    assert providers.resolve_default_provider(data_dir, "mobius") != "mobius"
+  finally:
+    providers.invalidate_model_cache()
+
+
 def test_fallback_models_shape_matches_registry_entries():
   """`_fallback_models` returns the same {id,label,provider,available}
   shape the live path produces, so the picker renders identically whether
@@ -170,7 +201,7 @@ async def test_unlinked_mobius_registry_skips_protected_broker_request(
 
   monkeypatch.setattr(httpx, "AsyncClient", ForbiddenClient)
 
-  rows = await providers._fetch_provider_models("mobius", str(tmp_path))
+  rows = await providers.MobiusProvider().fetch_models(str(tmp_path))
   assert [row["id"] for row in rows] == providers.KNOWN_MODELS["mobius"]
   assert [row["label"] for row in rows] == [
     "Spark (Qwen3.8 27B)", "Evolve",

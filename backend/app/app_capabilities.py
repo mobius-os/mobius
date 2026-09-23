@@ -573,6 +573,10 @@ def contract_from_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
     "public": normalize_public_access(manifest),
   }
   service = manifest.get("service")
+  if isinstance(manifest.get("model_provider"), dict):
+    # Freeze the reviewed declaration; editable source is never consulted by
+    # the model picker or a running agent.
+    contract["model_provider"] = deepcopy(manifest["model_provider"])
   if isinstance(service, dict):
     accepted_service = {
       "id": service.get("id", manifest.get("id")),

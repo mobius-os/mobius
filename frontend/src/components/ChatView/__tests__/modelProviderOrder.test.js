@@ -15,6 +15,8 @@ const vite = await createServer({
 const {
   PROVIDER_INFO,
   PROVIDER_ORDER,
+  providerInfoFor,
+  providerOrderFor,
 } = await vite.ssrLoadModule('/src/components/ChatView/providerRegistry.jsx')
 const { default: ManageModelsModal } = await vite.ssrLoadModule(
   '/src/components/ChatView/ManageModelsModal.jsx',
@@ -57,6 +59,15 @@ test('chat model surfaces expose the connected providers before Möbius', () => 
   const claudeAt = markup.indexOf('Claude Code')
   const mobiusAt = markup.indexOf('Möbius')
   assert.ok(codexAt >= 0 && claudeAt > codexAt && mobiusAt > claudeAt)
+})
+
+test('accepted app providers extend the same model order and metadata', () => {
+  const order = providerOrderFor({codex: [], claude: [], mobius: [], 'app-12': []})
+  assert.deepEqual(order, ['codex', 'claude', 'mobius', 'app-12'])
+  const info = providerInfoFor('app-12', {'app-12': {name: 'DeepSeek'}})
+  assert.equal(info.label, 'DeepSeek')
+  assert.match(renderToStaticMarkup(React.createElement(info.Logo)), />D</)
+  assert.deepEqual(info.efforts.map(item => item.value), ['low', 'medium', 'high'])
 })
 
 test('Möbius exposes the provider mark through its rendered metadata', () => {

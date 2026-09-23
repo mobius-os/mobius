@@ -43,6 +43,7 @@ import useDelayedConnectionNotice from '../../hooks/useDelayedConnectionNotice.j
 import useOutboxDrain from '../../hooks/useOutboxDrain.js'
 import { ReachabilityPhase, getDeliveryReadySnapshot, setRestartPending, verifyConnectivity } from '../../lib/connectivityStore.js'
 import {
+  authQueries,
   notificationQueries,
   appQueries,
   appSourceQueries,
@@ -2859,6 +2860,9 @@ export default function Shell({ onInitialVisualReady }) {
       // to bump appVersions / cycle iframe keys — that would tear
       // down running apps for a CSS swap and lose their state.
       loadTheme()
+    } else if (ev.type === 'model_providers_changed') {
+      void modelQueries.registry.invalidate(queryClient)
+      void authQueries.provider.statuses.invalidate(queryClient)
     } else if (ev.type === 'app_activity') {
       // The durable marker was committed with an app-attributed notification.
       // A refetch surfaces the dot; if the app is already visible, the effect
@@ -3208,6 +3212,8 @@ export default function Shell({ onInitialVisualReady }) {
     // App/project refreshes own different state. They must not hold the chat
     // catch-up barrier open when an editor request or offline cache is stalled.
     void Promise.allSettled([
+      modelQueries.registry.invalidate(queryClient),
+      authQueries.provider.statuses.invalidate(queryClient),
       appSourceQueries.invalidate(queryClient),
       chatAppArtifactQueries.invalidateAll(queryClient),
       invalidateAllChatActivity(queryClient),
