@@ -178,6 +178,42 @@ def test_core_prompt_requires_approval_before_changing_guarded_invariants():
   assert "preserves the same contract does not require escalation" in normalized
 
 
+def test_core_opens_with_narrow_continuation_handoff_contract():
+  repo = Path(__file__).resolve().parents[2]
+  core = (repo / "skill" / "core.md").read_text(
+    encoding="utf-8",
+  )
+  normalized = " ".join(core.split())
+  handoff = normalized.split(
+    "**Continuation handoff for owner chats.**", 1,
+  )[1].split("The stable constitution:", 1)[0]
+
+  assert core.index("**Continuation handoff for owner chats.**") \
+    < core.index("The stable constitution:")
+  assert "deliverable can be complete while its established workstream is not" in handoff
+  assert "specific, in-scope, materially useful continuation" in handoff
+  assert "same requested workstream" in handoff
+  assert "can start now" in handoff
+  assert "owner's decision is unsettled" in handoff
+  assert "This includes plans and read-only work" in handoff
+  assert "excludes factual answers and invented adjacent work" in handoff
+  assert "one contextual saved card as the final action" in handoff
+  assert "**Apply/implement it (Recommended)** and **Not now**" in handoff
+  assert "The **Not now** answer must resume first" in handoff
+  assert 'not a terminal `on_answer: "close"` choice' in handoff
+  assert "release the approval's work claim" in handoff
+  assert "`finish_agent_work(..., release=true)`" in handoff
+  assert "`request_question` for an ordinary choice" in handoff
+  assert "`request_approval` for permission" in handoff
+  assert "`request_restart` for a restart" in handoff
+  assert "If already authorized, proceed without asking again" in handoff
+  assert "if explicitly declined or no qualifying continuation exists, finish declaratively" \
+    in handoff
+  assert "Never substitute a prose question or declarative close" in handoff
+  assert "**Mandatory final-action decision for owner chats.**" not in handoff
+  assert normalized.count("specific, in-scope, materially useful continuation") == 1
+
+
 def test_goal_routing_rechecks_phase_transitions_and_prefers_platform_tool():
   repo = Path(__file__).resolve().parents[2]
   core = (repo / "skill" / "core.md").read_text(encoding="utf-8")

@@ -11,6 +11,7 @@ import {
   installMockAgentProvider,
   persistTestChatModel,
   testChatAgentSettings,
+  testProviderUsageSnapshot,
   TEST_CHAT_MODEL,
 } from './_chatTestPrerequisites.mjs'
 
@@ -118,8 +119,14 @@ test('chat fixtures persist a model and simulate its provider boundary', async (
   })
 
   assert.equal(selected.ok(), true)
-  assert.equal(routes.length, 1)
+  assert.equal(routes.length, 2)
   assert.equal(routes[0].pattern, '**/api/auth/providers/status')
+  assert.equal(routes[1].pattern, '**/api/settings/provider-usage/*')
+  let usageResponse
+  await routes[1].handler({
+    fulfill: options => { usageResponse = options },
+  })
+  assert.deepEqual(usageResponse.json, testProviderUsageSnapshot())
   assert.deepEqual(calls.map(call => call.method), ['PATCH'])
   assert.deepEqual(calls[0].options.data, {
     agent_settings_json: { model: TEST_CHAT_MODEL },

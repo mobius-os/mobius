@@ -8,6 +8,7 @@
  */
 import { test, expect } from '@playwright/test'
 import * as paneModel from '../frontend/src/components/Shell/paneModel.js'
+import { installMockProviderUsage } from './_chatTestPrerequisites.mjs'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
 const NAV_CHATS = [
@@ -152,6 +153,8 @@ async function setup(
       codex: { name: 'Codex', configured: true, authenticated: true, error: null },
     },
   }))
+
+  await installMockProviderUsage(page)
 
   // Navigation is a client-side contract. Seed an explicit active chat and
   // mock the complete chat surface so the suite neither reads nor borrows

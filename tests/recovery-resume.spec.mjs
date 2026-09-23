@@ -1,5 +1,6 @@
 /* Rendered recovery contracts: Resume is acknowledged control, never a queued owner message. */
 import { test as base, expect, chromium } from '@playwright/test'
+import { installMockProviderUsage } from './_chatTestPrerequisites.mjs'
 
 // An authenticated screenshot-helper browser may run these fully intercepted
 // fixtures against a live build. No fixture request may mutate the real chat.
@@ -110,6 +111,9 @@ async function mount(page, { rejectFirst = false, loseFirstAck = false } = {}) {
     if (url.pathname === '/api/chats') return route.fulfill({ json: [detail()] })
     return route.continue()
   })
+  // Resume keeps the provider-backed composer visible. Register after the
+  // generic mutation guard because Playwright dispatches routes in LIFO order.
+  await installMockProviderUsage(page)
   await page.addInitScript(({chatPath}) => {
     sessionStorage.setItem('mobius:visual-content-only', '1')
     const realFetch = window.fetch.bind(window)

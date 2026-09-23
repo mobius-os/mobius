@@ -931,10 +931,20 @@ def test_update_applies_mode_only_change(
 
 
 def test_update_rechecks_tree_after_snapshot_before_first_rename(
-  client, auth, skills_dir, monkeypatch,
+  client, auth, tmp_path, monkeypatch,
 ):
+  from types import SimpleNamespace
+
   from app.routes import skills as rs
 
+  # Keep this ordering regression independent of the worker's shared DATA_DIR:
+  # another test or background lifecycle task may legitimately own its safety
+  # repository while this request is in flight.
+  monkeypatch.setattr(
+    rs, "get_settings", lambda: SimpleNamespace(data_dir=str(tmp_path)),
+  )
+  skills_dir = tmp_path / "shared" / "skills"
+  skills_dir.mkdir(parents=True)
   target = skills_dir / "demo"
   target.mkdir()
   before = b"# before\n"
@@ -949,8 +959,8 @@ def test_update_rechecks_tree_after_snapshot_before_first_rename(
   (skills_dir / skills_mod.INSTALLED_SKILLS_SIDECAR).write_text(json.dumps({
     "demo": previous,
   }))
-  git_dir = Path(get_settings().data_dir) / ".git"
-  git_dir.mkdir(exist_ok=True)
+  git_dir = tmp_path / ".git"
+  git_dir.mkdir()
   candidate = b"# upstream\n"
   raw = f"https://raw.githubusercontent.com/o/r/{PINNED}/skills/demo"
   _dir_install_mocks(monkeypatch, rs, [
@@ -966,6 +976,7 @@ def test_update_rechecks_tree_after_snapshot_before_first_rename(
   response = client.put(
     "/api/skills/demo", headers=auth, json=_github_update(digest),
   )
+  assert not list(git_dir.iterdir()), "snapshot wrote into the test marker"
   git_dir.rmdir()
 
   assert response.status_code == 409, response.text
