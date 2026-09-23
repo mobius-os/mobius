@@ -580,15 +580,24 @@ def _user_messages_from_pending(
       derived = cid_of(pending)
       if derived is not None:
         msg["cid"] = derived
-    # Force-steer is a new course-correction decision. Bind its authority to
-    # the actor making that decision rather than stale provenance from when
-    # the selected row first entered the queue.
-    if owner_authored:
-      msg["_owner_authored"] = True
-    else:
-      msg.pop("_owner_authored", None)
-    user_msgs.append(msg)
+    user_msgs.append(_message_for_steer_actor(
+      msg, owner_authored=owner_authored,
+    ))
   return user_msgs or [fallback_user_msg]
+
+
+def _message_for_steer_actor(
+  message: dict,
+  *,
+  owner_authored: bool,
+) -> dict:
+  """Copy a steer row and bind authority to the actor choosing it now."""
+  result = dict(message)
+  if owner_authored:
+    result["_owner_authored"] = True
+  else:
+    result.pop("_owner_authored", None)
+  return result
 
 
 @router.post(
@@ -1368,7 +1377,10 @@ async def _send_message_locked(
         )
         db.expire(chat)
         reserved_cid = cid_of(reserved)
-        user_msgs = [reserved]
+        user_msgs = [_message_for_steer_actor(
+          reserved,
+          owner_authored=is_owner_input_principal(principal),
+        )]
         consume_cids = [reserved_cid] if reserved_cid is not None else []
         steer_content = reserved.get("content", "")
       if questions.is_waiting(chat_id):
