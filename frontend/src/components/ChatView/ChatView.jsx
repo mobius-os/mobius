@@ -1,6 +1,6 @@
 import { LocalAnswersContext } from './localAnswersContext.js'
 import { questionAnswerPatch } from './questionSubmission.js'
-import { usePeerTimeline, PeerTimelineLoadError, PeerTimelineRows } from './PeerTimeline.jsx'
+import { usePeerTimeline, PeerTimelineRows } from './PeerTimeline.jsx'
 import { PeerTimelineContext } from './peerTimelineContext.js'
 import { consumeChatChanges, subscribeChatChanges } from '../../lib/chatChangesNavigation.js'
 import {
@@ -6075,15 +6075,6 @@ export default function ChatView({
           )}
 
           <PeerTimelineRows notes={peerTimeline.slots.get(displayedMessages.length)} chatId={chatId} onInternalNav={internalNav} />
-          <PeerTimelineLoadError
-            error={peerTimeline.error}
-            recoveryActive={
-              peerTimeline.recoveryActive
-              || restartPending
-              || reachabilityPhase !== ReachabilityPhase.ONLINE
-            }
-            onRetry={peerTimeline.retry}
-          />
 
           {/* Steering is accepted locally before the provider control channel
               acknowledges it. Keep the durable rows out of the actionable
