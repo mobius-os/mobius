@@ -672,6 +672,52 @@ def test_plain_owner_and_top_level_agent_keep_lifecycle_control(
   )
   assert delegated_answer.status_code == 200, delegated_answer.text
 
+  from app.routes import chats_stream
+
+  async def keep_answer_queued(*_args, **_kwargs):
+    return None
+
+  monkeypatch.setattr(
+    chats_stream, "start_queued_owner_continuation", keep_answer_queued,
+  )
+  confined_chat_id = _create_chat(client, owner_auth, "Confined agent answer")
+  _replace_transcript(confined_chat_id, [{
+    "role": "assistant", "ts": 1,
+    "blocks": [{
+      "type": "question", "question_id": "confined-question",
+      "response_mode": "continuation",
+      "questions": [{"id": "choice", "question": "Continue?", "options": []}],
+    }],
+  }])
+  confined_chat = db.get(models.Chat, confined_chat_id)
+  confined_chat.pending_question_id = "confined-question"
+  confined_chat.provider = "codex"
+  confined_chat.agent_settings_json = {"model": "gpt-5.6-sol"}
+  db.commit()
+  confined = client.post(
+    f"/api/chats/{confined_chat_id}/messages",
+    json={
+      "content": "Unrelated hidden instruction",
+      "hidden": False,
+      "question_id": "confined-question",
+      "answers": {"Continue?": "Yes"},
+      "attachments": [{"name": "unrelated.txt"}],
+      "timezone": "Pacific/Honolulu",
+      "viewport": {"width": 1, "height": 1},
+      "force_steer": True,
+      "direct_steer": True,
+    },
+    headers=top_level_auth,
+  )
+  assert confined.status_code == 202, confined.text
+  db.refresh(confined_chat)
+  queued_answer = confined_chat.pending_messages[0]
+  assert queued_answer["content"] == "- Continue?: Yes"
+  assert queued_answer["hidden"] is True
+  assert "attachments" not in queued_answer
+  assert "timezone" not in queued_answer
+  assert "viewport" not in queued_answer
+
   create_broadcast(chat_ids["top-level"])
   secure_card = client.post(
     f"/api/secure-inputs/{chat_ids['top-level']}",

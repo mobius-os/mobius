@@ -461,6 +461,31 @@ def _user_message_from_body(
   return user_msg
 
 
+def _confine_agent_card_answer(body: schemas.SendMessage) -> schemas.SendMessage:
+  """Keep an agent card response from becoming an unrelated chat send.
+
+  A non-owner participant may answer the exact visible card, not attach an
+  arbitrary hidden message or upload to that authority. Rebuild any provider
+  continuation from the structured answers while retaining only the cid used
+  to make a lost acknowledgement idempotent.
+  """
+  lines = []
+  for question, answer in (body.answers or {}).items():
+    rendered = (
+      answer if isinstance(answer, str)
+      else json.dumps(answer, ensure_ascii=False, sort_keys=True)
+    )
+    lines.append(f"- {question}: {rendered}")
+  return schemas.SendMessage(
+    content="\n".join(lines),
+    hidden=True,
+    cid=body.cid,
+    answers=body.answers,
+    selected_options=body.selected_options,
+    question_id=body.question_id,
+  )
+
+
 # The answer-merge logic lives in `chat_writer.apply_answers_to_last_
 # question` and is no longer called from this route directly: C2 routes
 # every answer write through the writer actor's `AnswerQuestion` command
@@ -645,6 +670,7 @@ async def send_message(
         status_code=410,
         detail="The question is no longer accepting answers.",
       )
+    body = _confine_agent_card_answer(body)
 
   # A typed Restart card is a platform action, not a prose continuation. The
   # writer re-matches the exact card and option identity inside its mutation;

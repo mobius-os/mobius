@@ -90,10 +90,17 @@ def test_authenticated_agent_quiet_retry_is_idempotent(
 
   first = _quiet(client, chat, agent_auth, qid)
   retry = _quiet(client, chat, agent_auth, qid)
+  changed = _quiet(
+    client, chat, agent_auth, qid,
+    answers={QUIET['question']: 'Different answer'},
+    selected_options={'approval': ['different']},
+  )
 
   assert first.status_code == 200, first.text
   assert retry.status_code == 200, retry.text
+  assert changed.status_code in (409, 410), changed.text
   assert _block(chat.id, qid)['answer_turn'] == 'none'
+  assert _block(chat.id, qid)['answers'] == {QUIET['question']: 'Not now'}
 
 
 def test_quiet_retry_cannot_clear_newer_card(client, chat, auth, approval_run):
