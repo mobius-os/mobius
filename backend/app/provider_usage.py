@@ -581,6 +581,7 @@ def _load_claude_reset_intent(path: Path) -> dict[str, Any] | None:
   request_id = source.get("request_id")
   credit_id = source.get("credit_id")
   resets_left_before = source.get("resets_left_before")
+  last_result = source.get("last_result")
   if (
     not isinstance(request_id, str)
     or not request_id
@@ -589,6 +590,13 @@ def _load_claude_reset_intent(path: Path) -> dict[str, Any] | None:
     or isinstance(resets_left_before, bool)
     or not isinstance(resets_left_before, int)
     or resets_left_before <= 0
+    or (
+      last_result is not None
+      and (
+        not isinstance(last_result, dict)
+        or last_result.get("outcome") not in {"reset", "already_used", "cooldown"}
+      )
+    )
   ):
     return {"invalid": True}
   return {
@@ -596,6 +604,7 @@ def _load_claude_reset_intent(path: Path) -> dict[str, Any] | None:
     "request_id": request_id,
     "credit_id": credit_id,
     "resets_left_before": resets_left_before,
+    "last_result": last_result,
   }
 
 
@@ -605,6 +614,7 @@ def _write_claude_reset_intent(
   request_id: str,
   credit_id: str,
   resets_left_before: int,
+  last_result: dict[str, Any] | None = None,
 ) -> None:
   atomic_write(
     path,
@@ -613,6 +623,7 @@ def _write_claude_reset_intent(
       "request_id": request_id,
       "credit_id": credit_id,
       "resets_left_before": resets_left_before,
+      "last_result": last_result,
       "created_at": datetime.now(UTC).isoformat(),
     }, sort_keys=True) + "\n",
     mode=0o600,
@@ -733,6 +744,8 @@ async def redeem_claude_reset(
         }
       if credit_id != pending_credit_id:
         return _unknown_claude_reset()
+      if intent["last_result"] is not None:
+        return intent["last_result"]
       request_id = intent["request_id"]
       claim_credit_id = pending_credit_id
     else:
@@ -786,7 +799,21 @@ async def redeem_claude_reset(
 
     if result is None:
       return _unknown_claude_reset()
-    _clear_claude_reset_intent(intent_path)
+    if result["outcome"] in {"reset", "already_used", "cooldown"}:
+      # A claim response can precede Claude's usage snapshot. Retain the
+      # result until the provider count falls, so a second confirmed request
+      # cannot mint a new request id against a temporarily stale count.
+      _write_claude_reset_intent(
+        intent_path,
+        request_id=request_id,
+        credit_id=claim_credit_id,
+        resets_left_before=(
+          intent["resets_left_before"] if intent is not None else resets_left
+        ),
+        last_result=result,
+      )
+    else:
+      _clear_claude_reset_intent(intent_path)
     _provider_usage_cache.pop((str(Path(data_dir).resolve()), "claude"), None)
     return result
 

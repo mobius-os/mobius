@@ -870,9 +870,10 @@ async def test_redeem_claude_reset_uses_private_guarded_claim_once(
     "cleared": ["five_hour"],
     "weekly_resets_at": "2026-09-26T03:00:00+00:00",
   }
-  assert not provider_usage._claude_reset_intent_path(
+  intent_path = provider_usage._claude_reset_intent_path(
     str(tmp_path), "00000000-0000-4000-8000-000000000001",
-  ).exists()
+  )
+  assert provider_usage._load_claude_reset_intent(intent_path)["last_result"] == result
 
 
 @pytest.mark.asyncio
@@ -943,8 +944,96 @@ async def test_claude_reset_serializes_concurrent_double_submit(
   )
 
   assert len(posts) == 1
-  assert sum(isinstance(item, provider_usage.ClaudeResetOfferChanged) for item in outcomes) == 1
-  assert [item["outcome"] for item in outcomes if isinstance(item, dict)] == ["reset"]
+  assert [item["outcome"] for item in outcomes] == ["reset", "reset"]
+
+
+@pytest.mark.asyncio
+async def test_claude_reset_success_keeps_receipt_until_usage_catches_up(
+  tmp_path, monkeypatch,
+):
+  from app import provider_usage
+
+  provider_usage._claude_reset_locks.clear()
+  resets_left = 2
+  posts = []
+
+  async def current(_provider_id, _data_dir, *, force_refresh=False):
+    assert force_refresh is True
+    return {
+      "reset_credits": {
+        "redeemable": True,
+        "next_credit_id": "grant-next",
+        "credits": [{"id": "grant-next", "resets_left": resets_left}],
+      },
+    }
+
+  class Response:
+    def raise_for_status(self):
+      return None
+
+    def json(self):
+      return {"result": "reset", "resets_left": 1}
+
+  class Client:
+    def __init__(self, **_kwargs):
+      pass
+
+    async def __aenter__(self):
+      return self
+
+    async def __aexit__(self, *_args):
+      return None
+
+    async def post(self, _url, *, headers, json):
+      posts.append(json)
+      return Response()
+
+  async def token(_data_dir):
+    return "secret-token"
+
+  organization_uuid = "00000000-0000-4000-8000-000000000001"
+  monkeypatch.setattr(provider_usage, "read_provider_usage", current)
+  monkeypatch.setattr(provider_usage.httpx, "AsyncClient", Client)
+  monkeypatch.setattr(provider_usage.providers, "claude_access_token", token)
+  monkeypatch.setattr(
+    provider_usage.providers, "claude_organization_uuid",
+    lambda _data_dir: organization_uuid,
+  )
+
+  first = await provider_usage.redeem_claude_reset(
+    str(tmp_path), credit_id="grant-next", expected_resets_left=2,
+  )
+  provider_usage._claude_reset_locks.clear()  # the receipt survives a server restart
+  repeated = await provider_usage.redeem_claude_reset(
+    str(tmp_path), credit_id="grant-next", expected_resets_left=2,
+  )
+  intent_path = provider_usage._claude_reset_intent_path(
+    str(tmp_path), organization_uuid,
+  )
+  assert first == repeated
+  assert first["outcome"] == "reset"
+  assert len(posts) == 1
+  assert provider_usage._load_claude_reset_intent(intent_path)["last_result"] == first
+
+  resets_left = 1
+  reconciled = await provider_usage.redeem_claude_reset(
+    str(tmp_path), credit_id="grant-next", expected_resets_left=2,
+  )
+  assert reconciled["outcome"] == "reset"
+  assert reconciled["reconciled"] is True
+  assert not intent_path.exists()
+
+  with pytest.raises(provider_usage.ClaudeResetOfferChanged):
+    await provider_usage.redeem_claude_reset(
+      str(tmp_path), credit_id="grant-next", expected_resets_left=2,
+    )
+  assert len(posts) == 1
+
+  await provider_usage.redeem_claude_reset(
+    str(tmp_path), credit_id="grant-next", expected_resets_left=1,
+  )
+  assert len(posts) == 2
+  assert posts[0]["request_id"] != posts[1]["request_id"]
 
 
 @pytest.mark.asyncio
