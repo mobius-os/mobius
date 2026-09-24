@@ -132,10 +132,7 @@ def _env_flag_on(name: str, *, default: bool) -> bool:
   return raw.strip().lower() not in ("off", "0", "false", "no", "")
 
 
-def _codex_config_overrides(
-  *,
-  allow_multi_agent: bool = True,
-) -> list[str]:
+def _codex_config_overrides() -> list[str]:
   """Assemble the Codex ``CodexConfig.config_overrides`` for a turn.
 
   Prompt-control overrides are unconditional: per-chat ``base_instructions``
@@ -167,10 +164,7 @@ def _codex_config_overrides(
   overrides.append("tools.experimental_request_user_input.enabled=false")
   # One provider turn per Möbius admission; never enable a competing loop.
   overrides.append("features.goals=false")
-  if (
-    allow_multi_agent
-    and _env_flag_on("MOEBIUS_CODEX_MULTI_AGENT", default=True)
-  ):
+  if _env_flag_on("MOEBIUS_CODEX_MULTI_AGENT", default=True):
     overrides += [
       "features.multi_agent_v2.enabled=true",
       "features.multi_agent_v2.tool_namespace=agents",
@@ -1520,7 +1514,7 @@ async def _run_codex_sdk_turn(
     top_level=not delegated,
     coordination_enabled=coordination_enabled,
   )
-  config_overrides = _codex_config_overrides(allow_multi_agent=True)
+  config_overrides = _codex_config_overrides()
   config_overrides.extend(get_provider(provider_id).codex_config_overrides())
   launch_args = _codex_app_server_launch_args(codex_bin, config_overrides)
   config_kwargs: dict[str, Any] = dict(
@@ -1685,35 +1679,21 @@ async def _run_codex_sdk_turn(
 
       # Ordinary owner turns use the SDK's `ApprovalMode.auto_review`, which
       # maps to `approvalPolicy=on_request` with an automatic reviewer.
-      # Delegations deny provider-side escalation. Every Codex run, including
-      # a read Delegation, uses the container boundary below: Codex 0.156+
-      # requires bubblewrap for any filesystem-restricted policy
-      # (openai/codex#45984 retired Landlock for those, because it cannot hide
-      # app-server sockets), and bubblewrap cannot start under the normal
-      # container seccomp policy. A read Delegation's scope is therefore held
-      # by its brief, not a filesystem sandbox. Revisit if the deployment ever
-      # permits user namespaces.
+      # Delegations deny provider-side escalation.
       approval_mode = (
         sdk["ApprovalMode"].deny_all
         if delegated
         else sdk["ApprovalMode"].auto_review
       )
 
-      # Sandbox.full_access maps to wire SandboxMode.danger_full_access
-      # and disables bwrap. Möbius runs
-      # inside a Docker container where the default bwrap-based
-      # workspace_write sandbox fails with `bwrap: No permissions to
-      # create a new namespace, likely because the kernel does not
-      # allow non-privileged user namespaces` (the docker default
-      # seccomp profile blocks CLONE_NEWUSER even when the host
-      # allows it). That blocked every tool that spawned a
-      # sub-process — including the Read tool reading PNGs, which
-      # silently broke the agent's ability to verify its own
-      # screenshots. Full access here follows the same reasoning, and
-      # Möbius's design philosophy
-      # ("trust the agent; container is the sandbox") is consistent. The
-      # delegated prompt and tool policy still carry the exact project scope;
-      # this only avoids a second sandbox that cannot function in-container.
+      # Every Codex run, including a read Delegation, uses the container as
+      # its sandbox. Any filesystem-restricted policy needs bubblewrap, whose
+      # user namespace the Docker default seccomp profile blocks, so each
+      # command would fail before launch. Codex 0.156+ also refuses the old
+      # Landlock fallback because it cannot hide app-server sockets
+      # (openai/codex#45984). A read Delegation's scope is therefore held by
+      # its brief and deny_all approvals. Revisit if the deployment ever
+      # permits user namespaces.
       _sandbox = sdk["Sandbox"].full_access
       # Upgrade existing native goals before resume: Möbius now owns intent
       # and schedules exactly one provider turn per admitted attempt. Clearing
