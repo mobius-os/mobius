@@ -1198,6 +1198,15 @@ def notify_after_reconcile(db: Session, reconciled: list[str]) -> str | None:
 _WEDGED_RUN_MIN_AGE = timedelta(seconds=120)
 
 
+def _runner_alive(chat_id: str) -> bool:
+  """Whether a turn's runner still exists: a registered handle, or a broadcast
+  still streaming or finalizing."""
+  if registry.is_alive(chat_id):
+    return True
+  bc = get_broadcast(chat_id)
+  return bc is not None and bc.running
+
+
 async def sweep_wedged_runs(db: Session) -> list[str]:
   """Recover durable runs orphaned by a completed-but-unclosed turn.
 
@@ -1207,24 +1216,10 @@ async def sweep_wedged_runs(db: Session) -> list[str]:
   late-promote scheduling failure — leaves its ChatRun ``running`` forever.
   This periodic sweep closes that gap between boots.
 
-  Reaping keys on the progress LEASE (`ChatRun.progress_expires_at`), the single
-  liveness authority, not on the old registry+broadcast conjunction:
-
-    - Lease EXPIRED (non-NULL and in the past) → the turn stopped making
-      progress: crashed OR alive-but-hung. Reclaim regardless of whether a live
-      handle or a running broadcast still exists. A still-alive (hung) runner is
-      stopped first (graceful interrupt, then SIGKILL backstop) before recovery.
-      This is the fix for the old blind spot: a live handle or running broadcast
-      used to skip the chat forever, so a stalled model stream span endlessly.
-    - Lease VALID (non-NULL, in the future) → the runner is renewing it, so the
-      turn is making real progress — including a legitimately-long silent tool,
-      which renews with a bounded/suspended TTL. Never reaped.
-    - Lease NULL → a pre-migration/in-flight run or a provider without lease
-      renewal. Fall back to the legacy dead-process conjunction
-      (`registry.is_alive` False AND broadcast not running), so a live turn that
-      predates the lease is never reaped.
-    - `ChatRun.started_at` older than the floor — belt-and-suspenders; a valid
-      lease is always >= MODEL_IDLE_TTL past its last renewal anyway.
+  A run is a candidate only when its runner is gone: no registered handle and
+  no running broadcast. A live runner is never reaped, however quiet; a hung
+  provider stream is ended by the provider's own stall watchdog or the owner's
+  Stop.
 
   Recovery is IDENTITY-KEYED on the wedged run's `ChatRun.id` (never
   tokenless): if a fresh turn raced in, the actor no-ops rather than touching
@@ -1254,7 +1249,6 @@ async def sweep_wedged_runs(db: Session) -> list[str]:
       db.query(
         models.ChatRun.id,
         models.ChatRun.chat_id,
-        models.ChatRun.progress_expires_at,
       )
       .join(models.Chat, models.Chat.id == models.ChatRun.chat_id)
       .filter(models.ChatRun.status == "running")
@@ -1266,28 +1260,10 @@ async def sweep_wedged_runs(db: Session) -> list[str]:
   except Exception:
     log.exception("sweep_wedged_runs: query failed")
     return swept
-  now = datetime.now(UTC).replace(tzinfo=None)
   for run in stale:
     chat_id = run.chat_id
-    if run.progress_expires_at is not None:
-      # The lease is the single liveness authority: a still-valid lease means
-      # the turn is making progress (even a legitimately-long silent tool), so
-      # leave it alone. An EXPIRED lease is a crashed OR hung turn — reclaim it
-      # regardless of whether a handle or broadcast still exists. That last part
-      # is the fix: the old conjunction skipped any chat with a live handle or a
-      # running broadcast, so an alive-but-hung turn was invisible forever.
-      if run.progress_expires_at >= now:
-        continue
-    else:
-      # NULL lease: a pre-migration/in-flight run, or a provider that does not
-      # renew leases yet. Fall back to the legacy dead-process conjunction so a
-      # live turn that simply predates the lease is never reaped.
-      if registry.is_alive(chat_id):
-        continue
-      bc = get_broadcast(chat_id)
-      if bc is not None and bc.running:
-        # Still streaming, in terminal cleanup, or a legitimately-long live turn.
-        continue
+    if _runner_alive(chat_id):
+      continue
     try:
       async with asyncio.timeout(chat_queue.TERMINAL_LOCK_TIMEOUT_SECS):
         async with chat_queue.get_lock(chat_id):
@@ -1299,29 +1275,9 @@ async def sweep_wedged_runs(db: Session) -> list[str]:
           if physical is None or physical.status != "running":
             # A fresh turn or a terminal transition raced in under the lock.
             continue
-          lease = physical.progress_expires_at
-          if lease is not None and lease >= datetime.now(UTC).replace(
-            tzinfo=None
-          ):
-            # The runner renewed the lease between the pre-check and the lock:
-            # healthy progress, never reap.
+          if _runner_alive(chat_id):
+            # A runner started between the pre-check and the lock.
             continue
-          # Past here the lease is either expired (non-NULL, in the past) or
-          # NULL (legacy fallback).
-          expired = lease is not None
-          handles = registry.get_handles(chat_id)
-          if handles and not expired:
-            # Only an expired lease authorizes tearing down a live handle; the
-            # legacy NULL-lease path never reaps a running runner.
-            continue
-          if handles:
-            # Alive but hung: stop the process first (graceful interrupt, then
-            # SIGKILL backstop) so a zombie write can't clobber recovery.
-            for handle in handles:
-              await _stop_handle_with_escalation(
-                chat_id, handle, source="sweep_wedged_runs",
-              )
-              registry.unregister(chat_id, handle.kind)
           chat = db.query(models.Chat).filter(
             models.Chat.id == chat_id,
             models.Chat.deleted_at.is_(None),

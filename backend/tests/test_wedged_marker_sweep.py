@@ -11,6 +11,8 @@ window is distinguished by a still-running broadcast).
 import asyncio
 from datetime import UTC, datetime, timedelta
 
+import pytest
+
 from app import chat as chat_mod
 from app import models
 from app.broadcast import create_broadcast
@@ -25,11 +27,8 @@ def _drain_writer():
 
 
 def _seed(chat_id, *, age_secs=200, pending=None,
-          messages=None, live_assistant=None, with_run=True,
-          lease_secs=None):
-  """Seed a chat + running run. ``lease_secs`` sets ``progress_expires_at`` to
-  ``now + lease_secs`` (negative = already expired); ``None`` leaves it NULL to
-  exercise the legacy dead-process fallback."""
+          messages=None, live_assistant=None, with_run=True):
+  """Seed a chat + a running run started ``age_secs`` ago."""
   db = SessionLocal()
   try:
     started = datetime.now(UTC).replace(tzinfo=None) - timedelta(
@@ -42,19 +41,12 @@ def _seed(chat_id, *, age_secs=200, pending=None,
     )
     db.add(c)
     if with_run:
-      lease = (
-        None if lease_secs is None
-        else datetime.now(UTC).replace(tzinfo=None) + timedelta(
-          seconds=lease_secs
-        )
-      )
       db.add(models.ChatRun(
         id=f"rt-{chat_id}", chat_id=chat_id, status="running",
         provider="claude",
         started_at=datetime.now(UTC).replace(tzinfo=None) - timedelta(
           seconds=age_secs
         ),
-        progress_expires_at=lease,
       ))
     db.commit()
   finally:
@@ -233,18 +225,6 @@ def test_wedged_candidate_query_does_not_load_transcripts():
   assert "chats.messages" not in projection
 
 
-def test_sweep_skips_live_turn():
-  _seed("live-1", age_secs=200)
-  registry.mark_starting("live-1")  # is_alive() -> True
-  try:
-    swept = _sweep()
-  finally:
-    registry.reset_for_tests()
-  _drain_writer()
-  assert "live-1" not in swept
-  assert _state("live-1")[0] == "running"
-
-
 def test_sweep_skips_turn_with_running_broadcast():
   # The is_alive-false-but-still-finalizing terminal window: _complete_turn has
   # not yet called bc.mark_completed(), so the broadcast is still running.
@@ -280,8 +260,8 @@ def test_sweep_skips_when_no_run_record():
   assert _state("norun-1")[0] is None
 
 
-class _HungHandle:
-  """A live handle whose process is hung: stop() times out, force_stop kills."""
+class _LiveHandle:
+  """A registered runner handle; records any attempt to stop it."""
 
   def __init__(self, chat_id):
     self.chat_id = chat_id
@@ -291,68 +271,31 @@ class _HungHandle:
 
   async def stop(self, timeout: float = 2.0) -> bool:
     self.stop_calls += 1
-    return False  # hung: graceful interrupt does not complete
+    return True
 
   async def force_stop(self, timeout: float = 5.0) -> bool:
     self.force_calls += 1
     return True
 
 
-def test_sweep_reaps_expired_lease_despite_running_broadcast():
-  # THE FIX: an expired lease reclaims even while the broadcast is still
-  # "running" — the exact blind spot that let a stalled model stream spin
-  # forever. The old conjunction skipped any chat with a running broadcast.
-  _seed("hung-bc", age_secs=200, lease_secs=-10)
-  bc = create_broadcast("hung-bc")
-  assert bc.running
-  swept = _sweep()
-  _drain_writer()
-  assert "hung-bc" in swept
-  assert _state("hung-bc")[0] is None
-  assert _run_outcome("hung-bc") == "interrupted"
-
-
-def test_sweep_keeps_valid_lease_even_without_broadcast():
-  # A legitimately-long silent tool renews a FUTURE lease. No broadcast, no
-  # handle, old started_at — yet a valid lease means healthy: never reaped.
-  _seed("busy-tool", age_secs=200, lease_secs=600)
-  swept = _sweep()
-  _drain_writer()
-  assert "busy-tool" not in swept
-  assert _state("busy-tool")[0] == "running"
-
-
-def test_sweep_reaps_expired_lease_and_stops_live_hung_handle():
-  # Alive-but-hung: expired lease + a live registered handle. The sweep must
-  # tear the handle down (graceful then force) and then reclaim the run.
-  _seed("hung-alive", age_secs=200, lease_secs=-10)
-  handle = _HungHandle("hung-alive")
-  registry.register(handle)
+@pytest.mark.parametrize("runner", ["starting", "registered"])
+def test_sweep_never_tears_down_a_live_runner_however_quiet(runner):
+  # Silence is not a hang: a native helper can keep a turn quiet for many
+  # minutes. While a runner exists the sweep leaves the run alone.
+  _seed("quiet-live", age_secs=3600)
+  handle = _LiveHandle("quiet-live")
+  if runner == "starting":
+    registry.mark_starting("quiet-live")
+  else:
+    registry.register(handle)
   try:
     swept = _sweep()
   finally:
     registry.reset_for_tests()
   _drain_writer()
-  assert "hung-alive" in swept
-  assert handle.stop_calls == 1
-  assert handle.force_calls == 1
-  assert _state("hung-alive")[0] is None
-  assert _run_outcome("hung-alive") == "interrupted"
-
-
-def test_sweep_keeps_valid_lease_even_with_live_handle():
-  # A healthy long turn: valid lease + live handle -> never touched.
-  _seed("healthy-live", age_secs=200, lease_secs=600)
-  handle = _HungHandle("healthy-live")
-  registry.register(handle)
-  try:
-    swept = _sweep()
-  finally:
-    registry.reset_for_tests()
-  _drain_writer()
-  assert "healthy-live" not in swept
-  assert handle.stop_calls == 0
-  assert _state("healthy-live")[0] == "running"
+  assert "quiet-live" not in swept
+  assert (handle.stop_calls, handle.force_calls) == (0, 0)
+  assert _state("quiet-live")[0] == "running"
 
 
 def test_limit_error_text_classifier():
